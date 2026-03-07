@@ -1,4 +1,4 @@
-# Ferrocrypt
+# FerroCrypt
 
 ![](https://github.com/alexylon/Ferrocrypt/actions/workflows/rust.yml/badge.svg)
 &nbsp; 

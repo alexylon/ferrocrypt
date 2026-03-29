@@ -16,7 +16,7 @@ use crate::common::{
 use crate::reed_solomon::{rs_decode, rs_encode, rs_encoded_size};
 use crate::{CryptoError, archiver};
 
-const BUFFER_SIZE: usize = 500;
+const BUFFER_SIZE: usize = 65536;
 const SALT_SIZE: usize = 32;
 const NONCE_24_SIZE: usize = 24;
 const NONCE_19_SIZE: usize = 19;
@@ -326,8 +326,8 @@ fn argon2_config() -> argon2::Config<'static> {
         variant: Variant::Argon2id,
         hash_length: KEY_SIZE as u32,
         lanes: 8,
-        mem_cost: 1024,
-        time_cost: 8,
+        mem_cost: 65536,
+        time_cost: 2,
         ..Default::default()
     }
 }

@@ -193,7 +193,7 @@ fn get_public_key_size_from_private_key(
 fn encrypt_key(symmetric_key: Vec<u8>, rsa_public_pem: &str) -> Result<Vec<u8>, CryptoError> {
     let rsa = Rsa::public_key_from_pem(rsa_public_pem.as_bytes())?;
     let mut buf: Vec<u8> = vec![0; rsa.size() as usize];
-    rsa.public_encrypt(&symmetric_key, &mut buf, Padding::PKCS1)?;
+    rsa.public_encrypt(&symmetric_key, &mut buf, Padding::PKCS1_OAEP)?;
 
     Ok(buf)
 }
@@ -206,7 +206,7 @@ fn decrypt_key(
     let rsa =
         Rsa::private_key_from_pem_passphrase(rsa_private_pem.as_bytes(), passphrase.as_bytes())?;
     let mut buf: Vec<u8> = vec![0; rsa.size() as usize];
-    rsa.private_decrypt(symmetric_key, &mut buf, Padding::PKCS1)?;
+    rsa.private_decrypt(symmetric_key, &mut buf, Padding::PKCS1_OAEP)?;
 
     let mut result: [u8; KEY_SIZE] = Default::default();
     result.copy_from_slice(&buf[0..KEY_SIZE]);

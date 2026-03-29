@@ -1498,6 +1498,7 @@ dependencies = [
  "bincode",
  "chacha20poly1305",
  "constant_time_eq",
+ "hmac",
  "openssl",
  "reed-solomon-simd",
  "rust-argon2",

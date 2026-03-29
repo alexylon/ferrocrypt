@@ -4,11 +4,15 @@ All notable changes to FerroCrypt are documented in this file.
 
 ## [Unreleased]
 
+### Added
+- HMAC-SHA3-256 header authentication: detects tampering with file headers (salt, nonce, flags) before decryption
+
 ### Changed
-- **Breaking:** Increased Argon2id memory cost from 1 MiB to 64 MiB (OWASP compliance)
-- **Breaking:** Switched RSA padding from PKCS#1 v1.5 to OAEP (NIST SP 800-131Ar2)
-- **Breaking:** Increased stream encryption buffer from 500 bytes to 64 KiB
-- Reduced Argon2id time cost from 8 to 2 (compensated by higher memory)
+- **Breaking:** New file format — existing `.fcs` and `.fch` files from older versions cannot be decrypted
+- Argon2id memory cost raised from 1 MiB to 64 MiB for stronger brute-force resistance
+- RSA padding switched from PKCS#1 v1.5 to OAEP (current NIST standard)
+- Stream encryption buffer increased from 500 bytes to 64 KiB for better performance
+- Argon2id time cost lowered from 8 to 2 (offset by the much higher memory)
 
 ### Fixed
 - Crash (panic) when decrypting truncated or corrupted `.fcs` and `.fch` files

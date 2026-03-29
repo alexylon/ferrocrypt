@@ -1,9 +1,12 @@
 use std::path::Path;
 
 use constant_time_eq::constant_time_eq_32;
+use hmac::{Hmac, Mac};
 use sha3::{Digest, Sha3_256};
 
 use crate::CryptoError;
+
+type HmacSha3_256 = Hmac<Sha3_256>;
 
 pub fn normalize_paths(src_file_path: &str, dest_dir_path: &str) -> (String, String) {
     let src_file_path_norm = src_file_path.replace('\\', "/");
@@ -39,6 +42,27 @@ pub fn sha3_32_hash(byte_string: &[u8]) -> Result<[u8; 32], CryptoError> {
 /// Compares two 256-bit byte strings in constant time.
 pub fn constant_time_compare_256_bit(byte_string1: &[u8; 32], byte_string2: &[u8; 32]) -> bool {
     constant_time_eq_32(byte_string1, byte_string2)
+}
+
+pub fn hmac_sha3_256(key: &[u8], data: &[u8]) -> Result<[u8; 32], CryptoError> {
+    let mut mac = HmacSha3_256::new_from_slice(key)
+        .map_err(|e| CryptoError::Message(format!("HMAC key error: {}", e)))?;
+    mac.update(data);
+    let result = mac.finalize();
+    let bytes: [u8; 32] = result.into_bytes().into();
+    Ok(bytes)
+}
+
+/// Verifies HMAC-SHA3-256 in constant time. Returns error if mismatch.
+pub fn hmac_sha3_256_verify(key: &[u8], data: &[u8], tag: &[u8]) -> Result<(), CryptoError> {
+    let mut mac = HmacSha3_256::new_from_slice(key)
+        .map_err(|e| CryptoError::Message(format!("HMAC key error: {}", e)))?;
+    mac.update(data);
+    mac.verify_slice(tag).map_err(|_| {
+        CryptoError::EncryptionDecryptionError(
+            "Header authentication failed: file may be corrupted or tampered with".to_string(),
+        )
+    })
 }
 
 pub fn get_duration(seconds: f64) -> String {

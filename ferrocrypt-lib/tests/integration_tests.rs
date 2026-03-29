@@ -963,6 +963,102 @@ fn test_truncated_fch_file() -> Result<(), CryptoError> {
     Ok(())
 }
 
+#[test]
+fn test_symmetric_header_tamper_detection() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("symmetric_tamper");
+    let input_file = test_dir.join("secret.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    create_test_file(&input_file, "Tamper detection test");
+
+    let passphrase = SecretString::from("tamper_pass".to_string());
+
+    symmetric_encryption(
+        input_file.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        &passphrase,
+        false,
+    )?;
+
+    // Tamper with a byte in the encoded salt region (offset 10, within the header)
+    let encrypted_path = encrypt_dir.join("secret.fcs");
+    let mut data = fs::read(&encrypted_path)?;
+    data[10] ^= 0xFF;
+    fs::write(&encrypted_path, &data)?;
+
+    let result = symmetric_encryption(
+        encrypted_path.to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &passphrase,
+        false,
+    );
+
+    assert!(result.is_err());
+
+    Ok(())
+}
+
+#[test]
+fn test_hybrid_header_tamper_detection() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("hybrid_tamper");
+    let keys_dir = test_dir.join("keys");
+    let input_file = test_dir.join("secret.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+
+    fs::create_dir_all(&keys_dir)?;
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    create_test_file(&input_file, "Hybrid tamper test");
+
+    let key_passphrase = SecretString::from("tamper_key_pass".to_string());
+    generate_asymmetric_key_pair(2048, &key_passphrase, keys_dir.to_str().unwrap())?;
+
+    let mut pub_key_path = keys_dir
+        .join("rsa-2048-pub-key.pem")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let empty_pass = SecretString::from("".to_string());
+
+    hybrid_encryption(
+        input_file.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        &mut pub_key_path,
+        &empty_pass,
+    )?;
+
+    // Tamper with the encoded nonce region (after flags + encoded_encrypted_key)
+    let encrypted_path = encrypt_dir.join("secret.fch");
+    let mut data = fs::read(&encrypted_path)?;
+    // Flip a byte well into the header but before the HMAC tag
+    let tamper_offset = data.len() / 3;
+    data[tamper_offset] ^= 0xFF;
+    fs::write(&encrypted_path, &data)?;
+
+    let mut priv_key_path = keys_dir
+        .join("rsa-2048-priv-key.pem")
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let result = hybrid_encryption(
+        encrypted_path.to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &mut priv_key_path,
+        &key_passphrase,
+    );
+
+    assert!(result.is_err());
+
+    Ok(())
+}
+
 #[ctor::dtor]
 fn cleanup() {
     cleanup_test_workspace();

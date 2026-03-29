@@ -137,32 +137,113 @@ fn unpad_pkcs7(data: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{pad_pkcs7, rs_decode, rs_encode, unpad_pkcs7};
+    use super::*;
 
     #[test]
-    fn encode_reconstruct_test() {
-        let arr_32_orig = [
+    fn encode_decode_even_length_data() {
+        let original = [
             1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
             0, 1, 2,
         ];
 
-        let mut arr_32_enc = rs_encode(&arr_32_orig).unwrap();
-        println!("encoded_salt_32.len(): {}", &arr_32_enc.len());
-        println!("encoded_salt_32: {:?}", &arr_32_enc);
+        let encoded = rs_encode(&original).unwrap();
+        assert_eq!(encoded.len(), rs_encoded_size(original.len()));
 
-        // Corrupt some data
-        arr_32_enc[0] = 0;
-        arr_32_enc[35] = 0;
-        arr_32_enc[40] = 0;
-        arr_32_enc[65] = 0;
-        arr_32_enc[90] = 0;
+        let decoded = rs_decode(&encoded).unwrap();
+        assert_eq!(original.to_vec(), decoded);
+    }
 
-        let arr_32_dec = rs_decode(&arr_32_enc).unwrap();
+    #[test]
+    fn encode_decode_odd_length_data() {
+        let original = [10, 20, 30, 40, 50];
 
-        println!("{:?}", &arr_32_orig);
-        println!("{:?}", &arr_32_dec);
+        let encoded = rs_encode(&original).unwrap();
+        // Odd length (5) gets padded to 6, so encoded = 1 + 6*3 = 19
+        assert_eq!(encoded.len(), rs_encoded_size(original.len()));
+        assert_eq!(encoded[0], 1); // padding byte should be 1
 
-        assert_eq!(&arr_32_orig.to_vec(), &arr_32_dec);
+        let decoded = rs_decode(&encoded).unwrap();
+        assert_eq!(original.to_vec(), decoded);
+    }
+
+    #[test]
+    fn encode_decode_single_byte() {
+        let original = [42u8];
+        let encoded = rs_encode(&original).unwrap();
+        let decoded = rs_decode(&encoded).unwrap();
+        assert_eq!(original.to_vec(), decoded);
+    }
+
+    #[test]
+    fn encode_decode_two_bytes() {
+        let original = [0xFF, 0x00];
+        let encoded = rs_encode(&original).unwrap();
+        let decoded = rs_decode(&encoded).unwrap();
+        assert_eq!(original.to_vec(), decoded);
+    }
+
+    #[test]
+    fn reconstruct_with_corrupted_original_shard() {
+        let original: [u8; 32] = [
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+            0, 1, 2,
+        ];
+
+        let mut encoded = rs_encode(&original).unwrap();
+
+        // Corrupt bytes in the original shard (indices 1..33)
+        encoded[1] = 0xFF;
+        encoded[10] = 0xFF;
+        encoded[20] = 0xFF;
+        encoded[30] = 0xFF;
+
+        // Recovery shards should outvote the corrupted original
+        let decoded = rs_decode(&encoded).unwrap();
+        assert_eq!(original.to_vec(), decoded);
+    }
+
+    #[test]
+    fn reconstruct_with_corrupted_recovery_shard() {
+        let original: [u8; 32] = [
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+            0, 1, 2,
+        ];
+
+        let mut encoded = rs_encode(&original).unwrap();
+
+        // Corrupt bytes in the first recovery shard (indices 33..65)
+        encoded[33] = 0xFF;
+        encoded[40] = 0xFF;
+        encoded[50] = 0xFF;
+
+        // Original + second recovery should outvote the corrupted first recovery
+        let decoded = rs_decode(&encoded).unwrap();
+        assert_eq!(original.to_vec(), decoded);
+    }
+
+    #[test]
+    fn decode_empty_data_returns_error() {
+        let result = rs_decode(&[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn decode_invalid_length_returns_error() {
+        // After removing the padding byte, remaining length must be divisible by 3
+        let result = rs_decode(&[0, 1, 2, 3, 4]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn encoded_size_calculation() {
+        // Even: 32 -> 1 + 32*3 = 97
+        assert_eq!(rs_encoded_size(32), 97);
+        // Odd: 5 -> padded to 6 -> 1 + 6*3 = 19
+        assert_eq!(rs_encoded_size(5), 19);
+        // Even: 24 -> 1 + 24*3 = 73
+        assert_eq!(rs_encoded_size(24), 73);
+        // Odd: 19 -> padded to 20 -> 1 + 20*3 = 61
+        assert_eq!(rs_encoded_size(19), 61);
     }
 
     #[test]
@@ -173,18 +254,7 @@ mod tests {
         let arr_12_padded = pad_pkcs7(&arr_12_orig, 16);
         let arr_16_padded = pad_pkcs7(&arr_16_orig, 16);
 
-        let arr_12_unpadded = unpad_pkcs7(&arr_12_padded);
-        let arr_16_unpadded = unpad_pkcs7(&arr_16_padded);
-
-        println!("{:?}", &arr_12_padded);
-        println!("{:?}", &arr_12_orig);
-        println!("{:?}", &arr_12_unpadded);
-        println!();
-        println!("{:?}", &arr_16_padded);
-        println!("{:?}", &arr_16_orig);
-        println!("{:?}", &arr_16_unpadded);
-
-        assert_eq!(&arr_12_orig, &arr_12_unpadded.as_slice());
-        assert_eq!(&arr_16_orig, &arr_16_unpadded.as_slice());
+        assert_eq!(&arr_12_orig, &unpad_pkcs7(&arr_12_padded).as_slice());
+        assert_eq!(&arr_16_orig, &unpad_pkcs7(&arr_16_padded).as_slice());
     }
 }

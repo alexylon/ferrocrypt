@@ -539,6 +539,353 @@ fn test_special_characters_in_filename() -> Result<(), CryptoError> {
     Ok(())
 }
 
+#[test]
+fn test_nonexistent_output_dir() {
+    let passphrase = SecretString::from("test".to_string());
+
+    let result = symmetric_encryption("Cargo.toml", "/nonexistent/path/output", &passphrase, false);
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_decrypt_nonexistent_fcs_file() {
+    let test_dir = setup_test_dir("decrypt_nonexistent");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&decrypt_dir).unwrap();
+
+    let passphrase = SecretString::from("test".to_string());
+
+    let result = symmetric_encryption(
+        "/nonexistent/missing.fcs",
+        decrypt_dir.to_str().unwrap(),
+        &passphrase,
+        false,
+    );
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_binary_file_content() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("binary_content");
+    let input_file = test_dir.join("data.bin");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    // Binary data with null bytes and all byte values
+    let binary_content: Vec<u8> = (0..=255).cycle().take(1024).collect();
+    fs::write(&input_file, &binary_content)?;
+
+    let passphrase = SecretString::from("binary_pass".to_string());
+
+    symmetric_encryption(
+        input_file.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        &passphrase,
+        false,
+    )?;
+
+    symmetric_encryption(
+        encrypt_dir.join("data.fcs").to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &passphrase,
+        false,
+    )?;
+
+    let decrypted = fs::read(decrypt_dir.join("data.bin"))?;
+    assert_eq!(binary_content, decrypted);
+
+    Ok(())
+}
+
+#[test]
+fn test_symmetric_large_mode_wrong_password() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("large_wrong_password");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    let content = "Large mode wrong password test. ".repeat(100);
+    create_test_file(&input_file, &content);
+
+    let correct_pass = SecretString::from("correct".to_string());
+    let wrong_pass = SecretString::from("wrong".to_string());
+
+    // Encrypt in large mode
+    symmetric_encryption(
+        input_file.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        &correct_pass,
+        true,
+    )?;
+
+    // Decrypt with wrong password
+    let result = symmetric_encryption(
+        encrypt_dir.join("data.fcs").to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &wrong_pass,
+        false,
+    );
+
+    assert!(result.is_err());
+    match result {
+        Err(CryptoError::EncryptionDecryptionError(msg)) => {
+            assert!(msg.contains("incorrect"));
+        }
+        _ => panic!("Expected EncryptionDecryptionError"),
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_symmetric_large_mode_directory() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("large_directory");
+    let input_dir = create_test_directory(&test_dir);
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    let passphrase = SecretString::from("large_dir_pass".to_string());
+
+    symmetric_encryption(
+        input_dir.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        &passphrase,
+        true,
+    )?;
+
+    assert!(encrypt_dir.join("test_folder.fcs").exists());
+
+    symmetric_encryption(
+        encrypt_dir.join("test_folder.fcs").to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &passphrase,
+        false,
+    )?;
+
+    let decrypted_dir = decrypt_dir.join("test_folder");
+    assert!(decrypted_dir.exists());
+    assert_eq!(
+        fs::read_to_string(decrypted_dir.join("file1.txt"))?,
+        "Content of file 1"
+    );
+    assert_eq!(
+        fs::read_to_string(decrypted_dir.join("subdir/file3.txt"))?,
+        "Content of file 3"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_symmetric_empty_password() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("empty_password");
+    let input_file = test_dir.join("secret.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    let content = "Protected with empty password";
+    create_test_file(&input_file, content);
+
+    let empty_pass = SecretString::from("".to_string());
+
+    symmetric_encryption(
+        input_file.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        &empty_pass,
+        false,
+    )?;
+
+    symmetric_encryption(
+        encrypt_dir.join("secret.fcs").to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &empty_pass,
+        false,
+    )?;
+
+    let decrypted = fs::read_to_string(decrypt_dir.join("secret.txt"))?;
+    assert_eq!(content, decrypted);
+
+    Ok(())
+}
+
+#[test]
+fn test_hybrid_wrong_key_pair() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("hybrid_wrong_keypair");
+    let keys_a = test_dir.join("keys_a");
+    let keys_b = test_dir.join("keys_b");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+
+    fs::create_dir_all(&keys_a)?;
+    fs::create_dir_all(&keys_b)?;
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    create_test_file(&input_file, "Sensitive data");
+
+    let pass_a = SecretString::from("pass_a".to_string());
+    let pass_b = SecretString::from("pass_b".to_string());
+
+    // Generate two different key pairs
+    generate_asymmetric_key_pair(2048, &pass_a, keys_a.to_str().unwrap())?;
+    generate_asymmetric_key_pair(2048, &pass_b, keys_b.to_str().unwrap())?;
+
+    // Encrypt with key pair A's public key
+    let mut pub_key_a = keys_a
+        .join("rsa-2048-pub-key.pem")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let empty_pass = SecretString::from("".to_string());
+
+    hybrid_encryption(
+        input_file.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        &mut pub_key_a,
+        &empty_pass,
+    )?;
+
+    // Try to decrypt with key pair B's private key — should fail
+    let mut priv_key_b = keys_b
+        .join("rsa-2048-priv-key.pem")
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let result = hybrid_encryption(
+        encrypt_dir.join("data.fch").to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &mut priv_key_b,
+        &pass_b,
+    );
+
+    assert!(result.is_err());
+
+    Ok(())
+}
+
+#[test]
+fn test_hybrid_4096_key_round_trip() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("hybrid_4096_round_trip");
+    let keys_dir = test_dir.join("keys");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+
+    fs::create_dir_all(&keys_dir)?;
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    let original_content = "RSA-4096 round-trip test";
+    create_test_file(&input_file, original_content);
+
+    let key_passphrase = SecretString::from("rsa4096pass".to_string());
+
+    generate_asymmetric_key_pair(4096, &key_passphrase, keys_dir.to_str().unwrap())?;
+
+    // Encrypt
+    let mut pub_key_path = keys_dir
+        .join("rsa-4096-pub-key.pem")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let empty_pass = SecretString::from("".to_string());
+
+    hybrid_encryption(
+        input_file.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        &mut pub_key_path,
+        &empty_pass,
+    )?;
+
+    assert!(encrypt_dir.join("data.fch").exists());
+
+    // Decrypt
+    let mut priv_key_path = keys_dir
+        .join("rsa-4096-priv-key.pem")
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    hybrid_encryption(
+        encrypt_dir.join("data.fch").to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &mut priv_key_path,
+        &key_passphrase,
+    )?;
+
+    let decrypted_content = fs::read_to_string(decrypt_dir.join("data.txt"))?;
+    assert_eq!(original_content, decrypted_content);
+
+    Ok(())
+}
+
+#[test]
+fn test_hybrid_binary_file() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("hybrid_binary");
+    let keys_dir = test_dir.join("keys");
+    let input_file = test_dir.join("data.bin");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+
+    fs::create_dir_all(&keys_dir)?;
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    let binary_content: Vec<u8> = (0..=255).cycle().take(2048).collect();
+    fs::write(&input_file, &binary_content)?;
+
+    let key_passphrase = SecretString::from("hybrid_bin_pass".to_string());
+    generate_asymmetric_key_pair(2048, &key_passphrase, keys_dir.to_str().unwrap())?;
+
+    let mut pub_key_path = keys_dir
+        .join("rsa-2048-pub-key.pem")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let empty_pass = SecretString::from("".to_string());
+
+    hybrid_encryption(
+        input_file.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        &mut pub_key_path,
+        &empty_pass,
+    )?;
+
+    let mut priv_key_path = keys_dir
+        .join("rsa-2048-priv-key.pem")
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    hybrid_encryption(
+        encrypt_dir.join("data.fch").to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &mut priv_key_path,
+        &key_passphrase,
+    )?;
+
+    let decrypted = fs::read(decrypt_dir.join("data.bin"))?;
+    assert_eq!(binary_content, decrypted);
+
+    Ok(())
+}
+
 #[ctor::dtor]
 fn cleanup() {
     cleanup_test_workspace();

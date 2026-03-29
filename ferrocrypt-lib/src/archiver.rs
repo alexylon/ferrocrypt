@@ -12,44 +12,106 @@ use crate::common::{get_file_stem_to_string, normalize_paths};
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
     use crate::archiver::{archive, unarchive};
 
-    const SRC_FILEPATH: &str = "src/test_files/test-file.txt";
-    const SRC_DIRPATH: &str = "src/test_files/test-folder";
-    const DEST_DIRPATH: &str = "src/dest/";
-    const SRC_FILEPATH_ZIPPED: &str = "src/dest/test-file.zip";
-    const SRC_DIRPATH_ZIPPED: &str = "src/dest/test-folder.zip";
-
-    #[test]
-    fn archive_file_test() {
-        match archive(SRC_FILEPATH, DEST_DIRPATH) {
-            Ok(_) => println!("Zipped {}", SRC_FILEPATH),
-            Err(e) => println!("Error: {:?}", e),
-        }
+    /// The unarchive function concatenates output_dir with the zip entry path
+    /// without inserting a separator, so a trailing slash is required (matching
+    /// how the public API normalizes paths before calling archiver functions).
+    fn dir_with_slash(dir: &std::path::Path) -> String {
+        format!("{}/", dir.display())
     }
 
     #[test]
-    fn unarchive_file_test() {
-        match unarchive(SRC_FILEPATH_ZIPPED, DEST_DIRPATH) {
-            Ok(_) => println!("Unzipped: {}", SRC_FILEPATH_ZIPPED),
-            Err(e) => println!("Error: {:?}", e),
-        }
+    fn archive_and_unarchive_file() {
+        let tmp = TempDir::new().unwrap();
+        let input_file = tmp.path().join("hello.txt");
+        let archive_dir = tmp.path().join("zipped");
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&archive_dir).unwrap();
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        fs::write(&input_file, "file content here").unwrap();
+
+        let stem = archive(&input_file, &archive_dir).unwrap();
+        assert_eq!(stem, "hello");
+        assert!(archive_dir.join("hello.zip").exists());
+
+        let output =
+            unarchive(archive_dir.join("hello.zip"), &dir_with_slash(&extract_dir)).unwrap();
+        assert!(!output.is_empty());
+
+        let restored = fs::read_to_string(extract_dir.join("hello.txt")).unwrap();
+        assert_eq!(restored, "file content here");
     }
 
     #[test]
-    fn archive_dir_test() {
-        match archive(SRC_DIRPATH, DEST_DIRPATH) {
-            Ok(_) => println!("Zipped {}", SRC_DIRPATH),
-            Err(e) => println!("Error: {:?}", e),
-        }
+    fn archive_and_unarchive_directory() {
+        let tmp = TempDir::new().unwrap();
+        let input_dir = tmp.path().join("mydir");
+        let sub_dir = input_dir.join("sub");
+        let archive_dir = tmp.path().join("zipped");
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&sub_dir).unwrap();
+        fs::create_dir_all(&archive_dir).unwrap();
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        fs::write(input_dir.join("a.txt"), "file a").unwrap();
+        fs::write(sub_dir.join("b.txt"), "file b").unwrap();
+
+        let stem = archive(&input_dir, &archive_dir).unwrap();
+        assert_eq!(stem, "mydir");
+        assert!(archive_dir.join("mydir.zip").exists());
+
+        let output =
+            unarchive(archive_dir.join("mydir.zip"), &dir_with_slash(&extract_dir)).unwrap();
+        assert!(!output.is_empty());
+
+        let restored_a = fs::read_to_string(extract_dir.join("mydir/a.txt")).unwrap();
+        assert_eq!(restored_a, "file a");
+        let restored_b = fs::read_to_string(extract_dir.join("mydir/sub/b.txt")).unwrap();
+        assert_eq!(restored_b, "file b");
     }
 
     #[test]
-    fn unarchive_dir_test() {
-        match unarchive(SRC_DIRPATH_ZIPPED, DEST_DIRPATH) {
-            Ok(_) => println!("Unzipped: {}", SRC_DIRPATH_ZIPPED),
-            Err(e) => println!("Error: {:?}", e),
-        }
+    fn archive_empty_file() {
+        let tmp = TempDir::new().unwrap();
+        let input_file = tmp.path().join("empty.txt");
+        let archive_dir = tmp.path().join("zipped");
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&archive_dir).unwrap();
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        fs::write(&input_file, "").unwrap();
+
+        let stem = archive(&input_file, &archive_dir).unwrap();
+        assert_eq!(stem, "empty");
+
+        unarchive(archive_dir.join("empty.zip"), &dir_with_slash(&extract_dir)).unwrap();
+        let restored = fs::read_to_string(extract_dir.join("empty.txt")).unwrap();
+        assert_eq!(restored, "");
+    }
+
+    #[test]
+    fn archive_binary_content() {
+        let tmp = TempDir::new().unwrap();
+        let input_file = tmp.path().join("data.bin");
+        let archive_dir = tmp.path().join("zipped");
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&archive_dir).unwrap();
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        let binary_data: Vec<u8> = (0..=255).collect();
+        fs::write(&input_file, &binary_data).unwrap();
+
+        archive(&input_file, &archive_dir).unwrap();
+        unarchive(archive_dir.join("data.zip"), &dir_with_slash(&extract_dir)).unwrap();
+
+        let restored = fs::read(extract_dir.join("data.bin")).unwrap();
+        assert_eq!(restored, binary_data);
     }
 }
 

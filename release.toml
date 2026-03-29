@@ -1,0 +1,30 @@
+# Cargo-release configuration
+# Automates versioning, tagging, and publishing for both ferrocrypt and ferrocrypt-cli
+# Reference: https://rust-lang.github.io/cargo-release/
+
+# Both crates share the same version
+shared-version = true
+
+# Pre-release commit message
+pre-release-commit-message = "Release {{version}}"
+
+# Tag configuration
+tag-name = "v{{version}}"
+tag-message = "Release {{version}}"
+
+# Publish configuration
+publish = true
+
+# Automatically update dependency versions between workspace crates
+dependent-version = "upgrade"
+
+# Push configuration
+push = true
+push-remote = "origin"
+
+# Consolidate commits before release
+consolidate-commits = false
+
+# Run tests before release
+verify = true
+

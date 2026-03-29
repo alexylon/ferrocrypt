@@ -1,0 +1,11 @@
+# Package-specific release config for ferrocrypt (lib)
+# CHANGELOG lives at workspace root, so path is relative to this package dir
+
+[[pre-release-replacements]]
+file = "../CHANGELOG.md"
+search = "(?m)^## \\[Unreleased\\]\\n\\n"
+replace = """## [Unreleased]
+
+## [{{version}}] - {{date}}
+
+"""

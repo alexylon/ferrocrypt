@@ -7,8 +7,8 @@ use walkdir::WalkDir;
 use zip::result::ZipError;
 use zip::write::FileOptions;
 
-use crate::common::{get_file_stem_to_string, normalize_paths};
 use crate::CryptoError;
+use crate::common::{get_file_stem_to_string, normalize_paths};
 
 #[cfg(test)]
 mod tests {

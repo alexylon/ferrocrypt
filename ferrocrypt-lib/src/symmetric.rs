@@ -1,11 +1,11 @@
-use std::fs::{self, read, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, read};
 use std::io::{Read, Write};
 use std::path::Path;
 
 use argon2::Variant;
 use chacha20poly1305::{
-    aead::{rand_core::RngCore, stream, Aead, KeyInit, OsRng},
     XChaCha20Poly1305,
+    aead::{Aead, KeyInit, OsRng, rand_core::RngCore, stream},
 };
 use secrecy::{ExposeSecret, SecretString};
 use zeroize::Zeroize;
@@ -14,7 +14,7 @@ use crate::common::{
     constant_time_compare_256_bit, get_duration, get_file_stem_to_string, sha3_32_hash,
 };
 use crate::reed_solomon::{rs_decode, rs_encode, rs_encoded_size};
-use crate::{archiver, CryptoError};
+use crate::{CryptoError, archiver};
 
 const BUFFER_SIZE: usize = 500;
 const SALT_SIZE: usize = 32;

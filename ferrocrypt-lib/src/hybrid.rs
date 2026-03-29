@@ -1,14 +1,14 @@
-use std::fs::{self, read, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, read};
 use std::io::Write;
 use std::path::Path;
 
 use chacha20poly1305::{
-    aead::{
-        generic_array::{typenum, GenericArray},
-        rand_core::RngCore,
-        Aead, KeyInit, OsRng,
-    },
     XChaCha20Poly1305,
+    aead::{
+        Aead, KeyInit, OsRng,
+        generic_array::{GenericArray, typenum},
+        rand_core::RngCore,
+    },
 };
 use openssl::pkey::Private;
 use openssl::rsa::{Padding, Rsa};
@@ -18,7 +18,7 @@ use zeroize::Zeroize;
 
 use crate::common::{get_duration, get_file_stem_to_string};
 use crate::reed_solomon::{rs_decode, rs_encode, rs_encoded_size};
-use crate::{archiver, CryptoError};
+use crate::{CryptoError, archiver};
 
 const NONCE_24_SIZE: usize = 24;
 const KEY_SIZE: usize = 32;
@@ -52,7 +52,7 @@ pub fn encrypt_file(
         Err(_) => {
             return Err(CryptoError::EncryptionDecryptionError(
                 "The provided public key is not valid".to_string(),
-            ))
+            ));
         }
     };
 
@@ -111,7 +111,7 @@ pub fn decrypt_file(
             Err(_) => {
                 return Err(CryptoError::EncryptionDecryptionError(
                     "Incorrect password or wrong private key provided".to_string(),
-                ))
+                ));
             }
         };
 

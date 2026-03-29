@@ -1,8 +1,8 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use ferrocrypt::{generate_asymmetric_key_pair, hybrid_encryption, symmetric_encryption};
 use ferrocrypt::secrecy::SecretString;
+use ferrocrypt::{generate_asymmetric_key_pair, hybrid_encryption, symmetric_encryption};
 
 #[tauri::command]
 fn start(

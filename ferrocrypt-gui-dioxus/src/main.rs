@@ -1,7 +1,7 @@
-use dioxus::prelude::*;
 use dioxus::desktop::{Config, WindowBuilder};
-use ferrocrypt::{generate_asymmetric_key_pair, hybrid_encryption, symmetric_encryption};
+use dioxus::prelude::*;
 use ferrocrypt::secrecy::SecretString;
+use ferrocrypt::{generate_asymmetric_key_pair, hybrid_encryption, symmetric_encryption};
 use manganis::Asset;
 use rfd::FileDialog;
 
@@ -19,9 +19,7 @@ fn main() {
             .with_inner_size(dioxus::desktop::tao::dpi::LogicalSize::new(450.0, 720.0)),
     );
 
-    LaunchBuilder::desktop()
-        .with_cfg(config)
-        .launch(App);
+    LaunchBuilder::desktop().with_cfg(config).launch(App);
 }
 
 #[derive(Clone, PartialEq)]
@@ -59,36 +57,36 @@ fn App() -> Element {
     let mut status_err = use_signal(|| String::new());
 
     // Computed properties
-    let require_password = move || matches!(
-        mode(),
-        Mode::SymmetricEncrypt | Mode::SymmetricDecrypt | Mode::HybridDecrypt | Mode::GenerateKeyPair
-    );
-
-    let require_password_repeated = move || {
-        matches!(mode(), Mode::SymmetricEncrypt | Mode::GenerateKeyPair) && hide_password()
+    let require_password = move || {
+        matches!(
+            mode(),
+            Mode::SymmetricEncrypt
+                | Mode::SymmetricDecrypt
+                | Mode::HybridDecrypt
+                | Mode::GenerateKeyPair
+        )
     };
+
+    let require_password_repeated =
+        move || matches!(mode(), Mode::SymmetricEncrypt | Mode::GenerateKeyPair) && hide_password();
 
     let require_key = move || matches!(mode(), Mode::HybridEncrypt | Mode::HybridDecrypt);
 
     let password_match = move || password() == password_repeated();
 
-    let disable_start = move || {
-        match mode() {
-            Mode::SymmetricEncrypt => {
-                inpath().is_empty()
-                    || password().is_empty()
-                    || (require_password_repeated() && !password_match())
-            }
-            Mode::SymmetricDecrypt => inpath().is_empty() || password().is_empty(),
-            Mode::HybridEncrypt => inpath().is_empty() || keypath().is_empty(),
-            Mode::HybridDecrypt => {
-                inpath().is_empty() || password().is_empty() || keypath().is_empty()
-            }
-            Mode::GenerateKeyPair => {
-                outpath().is_empty()
-                    || password().is_empty()
-                    || (require_password_repeated() && !password_match())
-            }
+    let disable_start = move || match mode() {
+        Mode::SymmetricEncrypt => {
+            inpath().is_empty()
+                || password().is_empty()
+                || (require_password_repeated() && !password_match())
+        }
+        Mode::SymmetricDecrypt => inpath().is_empty() || password().is_empty(),
+        Mode::HybridEncrypt => inpath().is_empty() || keypath().is_empty(),
+        Mode::HybridDecrypt => inpath().is_empty() || password().is_empty() || keypath().is_empty(),
+        Mode::GenerateKeyPair => {
+            outpath().is_empty()
+                || password().is_empty()
+                || (require_password_repeated() && !password_match())
         }
     };
 
@@ -150,7 +148,6 @@ fn App() -> Element {
         status_err.set(String::new());
     };
 
-
     let handle_start = move |_| {
         spawn(async move {
             status_ok.set(String::from("Working..."));
@@ -159,22 +156,12 @@ fn App() -> Element {
             let result = match mode() {
                 Mode::SymmetricEncrypt | Mode::SymmetricDecrypt => {
                     let pwd = SecretString::from(password());
-                    symmetric_encryption(
-                        &inpath(),
-                        &outpath(),
-                        &pwd,
-                        is_large_file(),
-                    )
+                    symmetric_encryption(&inpath(), &outpath(), &pwd, is_large_file())
                 }
                 Mode::HybridEncrypt | Mode::HybridDecrypt => {
                     let mut key = keypath();
                     let pwd = SecretString::from(password());
-                    hybrid_encryption(
-                        &inpath(),
-                        &outpath(),
-                        key.as_mut_str(),
-                        &pwd,
-                    )
+                    hybrid_encryption(&inpath(), &outpath(), key.as_mut_str(), &pwd)
                 }
                 Mode::GenerateKeyPair => {
                     let pwd = SecretString::from(password());

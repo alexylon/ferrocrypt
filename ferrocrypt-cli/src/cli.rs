@@ -1,11 +1,11 @@
 use clap::{Parser, Subcommand};
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
-    generate_asymmetric_key_pair, hybrid_encryption, symmetric_encryption, CryptoError,
+    CryptoError, generate_asymmetric_key_pair, hybrid_encryption, symmetric_encryption,
 };
 
-use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
+use rustyline::error::ReadlineError;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]

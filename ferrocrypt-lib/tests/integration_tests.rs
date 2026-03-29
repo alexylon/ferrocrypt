@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
-    generate_asymmetric_key_pair, hybrid_encryption, symmetric_encryption, CryptoError,
+    CryptoError, generate_asymmetric_key_pair, hybrid_encryption, symmetric_encryption,
 };
 
 const TEST_WORKSPACE: &str = "tests/workspace";

@@ -67,33 +67,33 @@ pub fn encrypt_file(
             }
         };
 
-        let mut encrypted_file_path = OpenOptions::new()
+        let mut output_file = OpenOptions::new()
             .write(true)
             .append(true)
             .create_new(true)
             .open(output_dir.join(format!("{}.fch", file_stem)))?;
 
         let encoded_encrypted_combined_key: Vec<u8> = rs_encode(&encrypted_combined_key)?;
-        let encoded_nonce_24: Vec<u8> = rs_encode(&nonce_24)?;
+        let encoded_nonce: Vec<u8> = rs_encode(&nonce_24)?;
 
         let header_len = (HEADER_PREFIX_SIZE
             + encoded_encrypted_combined_key.len()
-            + encoded_nonce_24.len()
+            + encoded_nonce.len()
             + rs_encoded_size(HMAC_KEY_SIZE)) as u16;
         let prefix = format::build_header_prefix(format::TYPE_HYBRID, 0, header_len);
 
         let mut header_bytes = Vec::new();
         header_bytes.extend_from_slice(&prefix);
         header_bytes.extend_from_slice(&encoded_encrypted_combined_key);
-        header_bytes.extend_from_slice(&encoded_nonce_24);
+        header_bytes.extend_from_slice(&encoded_nonce);
         let hmac_tag = hmac_sha3_256(&hmac_key, &header_bytes)?;
         let encoded_hmac_tag: Vec<u8> = rs_encode(&hmac_tag)?;
 
-        encrypted_file_path.write_all(&prefix)?;
-        encrypted_file_path.write_all(&encoded_encrypted_combined_key)?;
-        encrypted_file_path.write_all(&encoded_nonce_24)?;
-        encrypted_file_path.write_all(&encoded_hmac_tag)?;
-        encrypted_file_path.write_all(&ciphertext)?;
+        output_file.write_all(&prefix)?;
+        output_file.write_all(&encoded_encrypted_combined_key)?;
+        output_file.write_all(&encoded_nonce)?;
+        output_file.write_all(&encoded_hmac_tag)?;
+        output_file.write_all(&ciphertext)?;
 
         nonce_24.zeroize();
 
@@ -131,9 +131,9 @@ pub fn decrypt_file(
 
     let encrypted_file: Vec<u8> = read(input_path)?;
 
-    let rsa_pub_pem_size =
+    let rsa_key_size =
         match get_public_key_size_from_private_key(&priv_key_str, passphrase.expose_secret()) {
-            Ok(rsa_pub_pem_size) => rsa_pub_pem_size,
+            Ok(rsa_key_size) => rsa_key_size,
             Err(_) => {
                 rsa_private_pem.zeroize();
                 return Err(CryptoError::EncryptionDecryptionError(
@@ -144,7 +144,7 @@ pub fn decrypt_file(
 
     let header = format::read_header(&encrypted_file, format::TYPE_HYBRID)?;
     let min_header_size = HEADER_PREFIX_SIZE
-        + rs_encoded_size(rsa_pub_pem_size as usize)
+        + rs_encoded_size(rsa_key_size as usize)
         + rs_encoded_size(NONCE_24_SIZE)
         + rs_encoded_size(HMAC_KEY_SIZE);
     if (header.header_len as usize) < min_header_size
@@ -159,13 +159,13 @@ pub fn decrypt_file(
     let (header_data, ciphertext) = encrypted_file.split_at(header.header_len as usize);
     let rem = &header_data[HEADER_PREFIX_SIZE..];
     let (encoded_encrypted_combined_key, rem) =
-        rem.split_at(rs_encoded_size(rsa_pub_pem_size as usize));
-    let (encoded_nonce_24, rem) = rem.split_at(rs_encoded_size(NONCE_24_SIZE));
+        rem.split_at(rs_encoded_size(rsa_key_size as usize));
+    let (encoded_nonce, rem) = rem.split_at(rs_encoded_size(NONCE_24_SIZE));
     let (encoded_hmac_tag, _) = rem.split_at(rs_encoded_size(HMAC_KEY_SIZE));
 
     let encrypted_combined_key =
-        rs_decode_exact(encoded_encrypted_combined_key, rsa_pub_pem_size as usize)?;
-    let nonce = rs_decode_exact(encoded_nonce_24, NONCE_24_SIZE)?;
+        rs_decode_exact(encoded_encrypted_combined_key, rsa_key_size as usize)?;
+    let nonce = rs_decode_exact(encoded_nonce, NONCE_24_SIZE)?;
     let hmac_tag = rs_decode_exact(encoded_hmac_tag, HMAC_KEY_SIZE)?;
 
     let mut decrypted_combined_key = decrypt_key(

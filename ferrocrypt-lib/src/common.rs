@@ -31,17 +31,17 @@ pub fn get_file_stem_to_string(filename: impl AsRef<Path>) -> Result<String, Cry
     Ok(file_stem_string)
 }
 
-pub fn sha3_32_hash(byte_string: &[u8]) -> Result<[u8; 32], CryptoError> {
+pub fn sha3_32_hash(data: &[u8]) -> Result<[u8; 32], CryptoError> {
     let mut hasher = Sha3_256::new();
-    hasher.update(byte_string);
+    hasher.update(data);
     let digest: [u8; 32] = hasher.finalize().as_slice().try_into()?;
 
     Ok(digest)
 }
 
 /// Compares two 256-bit byte strings in constant time.
-pub fn constant_time_compare_256_bit(byte_string1: &[u8; 32], byte_string2: &[u8; 32]) -> bool {
-    constant_time_eq_32(byte_string1, byte_string2)
+pub fn constant_time_compare_256_bit(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    constant_time_eq_32(a, b)
 }
 
 pub fn hmac_sha3_256(key: &[u8], data: &[u8]) -> Result<[u8; 32], CryptoError> {

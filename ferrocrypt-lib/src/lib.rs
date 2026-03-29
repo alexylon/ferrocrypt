@@ -217,7 +217,7 @@ pub fn hybrid_encryption(
 
 /// Generate and store an RSA key pair for hybrid encryption (default: RSA-4096).
 ///
-/// - `byte_size` is the RSA modulus size in **bits** (e.g., 4096),
+/// - `bit_size` is the RSA modulus size in **bits** (e.g., 4096),
 ///   aligned with the CLI flag `--bit-size`.
 /// - Keys are written into `output_dir` as `rsa-<bits>-priv-key.pem` and
 ///   `rsa-<bits>-pub-key.pem`.
@@ -240,10 +240,10 @@ pub fn hybrid_encryption(
 /// # Ok::<(), ferrocrypt::CryptoError>(())
 /// ```
 pub fn generate_asymmetric_key_pair(
-    byte_size: u32,
+    bit_size: u32,
     passphrase: &SecretString,
     output_dir: &str,
 ) -> Result<String, CryptoError> {
     let normalized_output_dir = normalize_paths("", output_dir).1;
-    hybrid::generate_asymmetric_key_pair(byte_size, passphrase, &normalized_output_dir)
+    hybrid::generate_asymmetric_key_pair(bit_size, passphrase, &normalized_output_dir)
 }

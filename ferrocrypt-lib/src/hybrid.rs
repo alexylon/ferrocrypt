@@ -38,54 +38,60 @@ pub fn encrypt_file(
 
     let mut symmetric_key = XChaCha20Poly1305::generate_key(&mut OsRng);
 
-    let cipher = XChaCha20Poly1305::new(&symmetric_key);
+    let result = (|| -> Result<String, CryptoError> {
+        let cipher = XChaCha20Poly1305::new(&symmetric_key);
 
-    let mut nonce_24 = [0u8; NONCE_24_SIZE];
-    OsRng.fill_bytes(&mut nonce_24);
+        let mut nonce_24 = [0u8; NONCE_24_SIZE];
+        OsRng.fill_bytes(&mut nonce_24);
 
-    let zipped_file = read(&zipped_file_name)?;
-    let ciphertext = cipher.encrypt(nonce_24.as_ref().into(), &*zipped_file)?;
+        let zipped_file = read(&zipped_file_name)?;
+        let ciphertext = cipher.encrypt(nonce_24.as_ref().into(), &*zipped_file)?;
 
-    let pub_key_str = fs::read_to_string(rsa_public_pem)?;
-    let encrypted_symmetric_key: Vec<u8> = match encrypt_key(symmetric_key.to_vec(), &pub_key_str) {
-        Ok(encrypted_symmetric_key) => encrypted_symmetric_key,
-        Err(_) => {
-            return Err(CryptoError::EncryptionDecryptionError(
-                "The provided public key is not valid".to_string(),
-            ));
-        }
-    };
+        let pub_key_str = fs::read_to_string(rsa_public_pem)?;
+        let encrypted_symmetric_key: Vec<u8> =
+            match encrypt_key(symmetric_key.to_vec(), &pub_key_str) {
+                Ok(encrypted_symmetric_key) => encrypted_symmetric_key,
+                Err(_) => {
+                    return Err(CryptoError::EncryptionDecryptionError(
+                        "The provided public key is not valid".to_string(),
+                    ));
+                }
+            };
 
-    let mut encrypted_file_path = OpenOptions::new()
-        .write(true)
-        .append(true)
-        .create_new(true)
-        .open(output_dir.join(format!("{}.fch", file_stem)))?;
+        let mut encrypted_file_path = OpenOptions::new()
+            .write(true)
+            .append(true)
+            .create_new(true)
+            .open(output_dir.join(format!("{}.fch", file_stem)))?;
 
-    // Reserve header information for decryption
-    let flags: [bool; 4] = [false, false, false, false];
-    let serialized_flags: Vec<u8> = bincode::encode_to_vec(&flags, bincode::config::standard())?;
+        // Reserve header information for decryption
+        let flags: [bool; 4] = [false, false, false, false];
+        let serialized_flags: Vec<u8> =
+            bincode::encode_to_vec(&flags, bincode::config::standard())?;
 
-    let encoded_encrypted_symmetric_key: Vec<u8> = rs_encode(&encrypted_symmetric_key)?;
-    let encoded_nonce_24: Vec<u8> = rs_encode(&nonce_24)?;
+        let encoded_encrypted_symmetric_key: Vec<u8> = rs_encode(&encrypted_symmetric_key)?;
+        let encoded_nonce_24: Vec<u8> = rs_encode(&nonce_24)?;
 
-    encrypted_file_path.write_all(&serialized_flags)?;
-    encrypted_file_path.write_all(&encoded_encrypted_symmetric_key)?;
-    encrypted_file_path.write_all(&encoded_nonce_24)?;
-    encrypted_file_path.write_all(&ciphertext)?;
+        encrypted_file_path.write_all(&serialized_flags)?;
+        encrypted_file_path.write_all(&encoded_encrypted_symmetric_key)?;
+        encrypted_file_path.write_all(&encoded_nonce_24)?;
+        encrypted_file_path.write_all(&ciphertext)?;
 
-    let encrypted_file_name = output_dir.join(format!("{}.fch", file_stem));
-    let result = format!(
-        "Encrypted to {} for {}",
-        encrypted_file_name.display(),
-        get_duration(start_time.elapsed().as_secs_f64())
-    );
-    println!("\n{}", result);
+        nonce_24.zeroize();
 
-    nonce_24.zeroize();
+        let encrypted_file_name = output_dir.join(format!("{}.fch", file_stem));
+        let msg = format!(
+            "Encrypted to {} for {}",
+            encrypted_file_name.display(),
+            get_duration(start_time.elapsed().as_secs_f64())
+        );
+        println!("\n{}", msg);
+
+        Ok(msg)
+    })();
+
     symmetric_key.zeroize();
-
-    Ok(result)
+    result
 }
 
 pub fn decrypt_file(
@@ -109,11 +115,21 @@ pub fn decrypt_file(
         match get_public_key_size_from_private_key(&priv_key_str, passphrase.expose_secret()) {
             Ok(rsa_pub_pem_size) => rsa_pub_pem_size,
             Err(_) => {
+                rsa_private_pem.zeroize();
                 return Err(CryptoError::EncryptionDecryptionError(
                     "Incorrect password or wrong private key provided".to_string(),
                 ));
             }
         };
+
+    let min_header_size =
+        4 + rs_encoded_size(rsa_pub_pem_size as usize) + rs_encoded_size(NONCE_24_SIZE);
+    if encrypted_file.len() < min_header_size {
+        rsa_private_pem.zeroize();
+        return Err(CryptoError::EncryptionDecryptionError(
+            "File is too short or corrupted".to_string(),
+        ));
+    }
 
     let (serialized_flags, rem_data) = encrypted_file.split_at(4);
     let (_flags, _): ([bool; 4], usize) =
@@ -133,29 +149,33 @@ pub fn decrypt_file(
 
     let mut symmetric_key: GenericArray<u8, typenum::U32> =
         GenericArray::from(decrypted_symmetric_key);
-    let cipher = XChaCha20Poly1305::new(&symmetric_key);
-    let file_decrypted = cipher.decrypt(
-        nonce_24[0..NONCE_24_SIZE].as_ref().into(),
-        ciphertext.as_ref(),
-    )?;
-    let file_stem_decrypted = &get_file_stem_to_string(input_path)?;
-    let decrypted_file_path = tmp_dir_path.join(format!("{}.zip", file_stem_decrypted));
 
-    File::create(&decrypted_file_path)?;
-    fs::write(&decrypted_file_path, file_decrypted)?;
-    let output_path = archiver::unarchive(&decrypted_file_path, output_dir)?;
+    let result = (|| -> Result<String, CryptoError> {
+        let cipher = XChaCha20Poly1305::new(&symmetric_key);
+        let file_decrypted = cipher.decrypt(
+            nonce_24[0..NONCE_24_SIZE].as_ref().into(),
+            ciphertext.as_ref(),
+        )?;
+        let file_stem_decrypted = &get_file_stem_to_string(input_path)?;
+        let decrypted_file_path = tmp_dir_path.join(format!("{}.zip", file_stem_decrypted));
+
+        File::create(&decrypted_file_path)?;
+        fs::write(&decrypted_file_path, file_decrypted)?;
+        let output_path = archiver::unarchive(&decrypted_file_path, output_dir)?;
+
+        let msg = format!(
+            "Decrypted to {} for {}",
+            output_path,
+            get_duration(start_time.elapsed().as_secs_f64())
+        );
+        println!("\n{}", msg);
+
+        Ok(msg)
+    })();
 
     symmetric_key.zeroize();
     rsa_private_pem.zeroize();
-
-    let result = format!(
-        "Decrypted to {} for {}",
-        output_path,
-        get_duration(start_time.elapsed().as_secs_f64())
-    );
-    println!("\n{}", result);
-
-    Ok(result)
+    result
 }
 
 fn get_public_key_size_from_private_key(

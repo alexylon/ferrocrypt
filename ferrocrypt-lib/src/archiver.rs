@@ -195,43 +195,41 @@ fn archive_dir(
         .large_file(true)
         .unix_permissions(0o755);
     let walkdir = WalkDir::new(input_path);
-    let iterator = walkdir.into_iter().filter_map(|e| e.ok());
     let mut buffer = Vec::new();
 
-    for entry in iterator {
+    for entry in walkdir {
+        let entry = entry?;
         let path = entry.path();
-        match path.strip_prefix(input_path) {
-            Ok(name) => {
-                let path_str = path.to_str().ok_or_else(|| {
-                    ZipError::InvalidArchive(Cow::from("Cannot convert path to &str"))
-                })?;
-                let normalized_path_str = &normalize_paths(path_str, "").0;
-                let name_str = name.to_str().ok_or_else(|| {
-                    ZipError::InvalidArchive(Cow::from("Cannot convert name to &str"))
-                })?;
-                let output_path_str = format!("{}/{}", dir_name, name_str);
-                let normalized_output_path_str = &normalize_paths(&output_path_str, "").0;
+        let name = path
+            .strip_prefix(input_path)
+            .map_err(|err| CryptoError::Message(format!("StripPrefixError: {:?}", err)))?;
+        let path_str = path
+            .to_str()
+            .ok_or_else(|| ZipError::InvalidArchive(Cow::from("Cannot convert path to &str")))?;
+        let normalized_path_str = &normalize_paths(path_str, "").0;
+        let name_str = name
+            .to_str()
+            .ok_or_else(|| ZipError::InvalidArchive(Cow::from("Cannot convert name to &str")))?;
+        let output_path_str = format!("{}/{}", dir_name, name_str);
+        let normalized_output_path_str = &normalize_paths(&output_path_str, "").0;
 
-                if path.is_file() {
-                    println!(
-                        "Adding file {} as {} ...",
-                        normalized_path_str, normalized_output_path_str
-                    );
-                    zip.start_file(&output_path_str, options)?;
-                    let mut f = File::open(path)?;
+        if path.is_file() {
+            println!(
+                "Adding file {} as {} ...",
+                normalized_path_str, normalized_output_path_str
+            );
+            zip.start_file(&output_path_str, options)?;
+            let mut f = File::open(path)?;
 
-                    f.read_to_end(&mut buffer)?;
-                    zip.write_all(&buffer)?;
-                    buffer.clear();
-                } else if !output_path_str.is_empty() {
-                    println!(
-                        "Adding dir {} as {} ...",
-                        normalized_path_str, normalized_output_path_str
-                    );
-                    zip.add_directory(&output_path_str, options)?;
-                }
-            }
-            Err(err) => println!("StripPrefixError: {:?}", err),
+            f.read_to_end(&mut buffer)?;
+            zip.write_all(&buffer)?;
+            buffer.clear();
+        } else if !output_path_str.is_empty() {
+            println!(
+                "Adding dir {} as {} ...",
+                normalized_path_str, normalized_output_path_str
+            );
+            zip.add_directory(&output_path_str, options)?;
         }
     }
 

@@ -886,6 +886,83 @@ fn test_hybrid_binary_file() -> Result<(), CryptoError> {
     Ok(())
 }
 
+#[test]
+fn test_nonexistent_input_path_encrypt() {
+    let test_dir = setup_test_dir("nonexistent_input_encrypt");
+    let encrypt_dir = test_dir.join("encrypted");
+    fs::create_dir_all(&encrypt_dir).unwrap();
+
+    let passphrase = SecretString::from("test".to_string());
+
+    let result = symmetric_encryption(
+        "/nonexistent/path/file.txt",
+        encrypt_dir.to_str().unwrap(),
+        &passphrase,
+        false,
+    );
+
+    assert!(result.is_err());
+    match result {
+        Err(CryptoError::InputPath(_)) => {}
+        other => panic!("Expected InputPath error, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_truncated_fcs_file() {
+    let test_dir = setup_test_dir("truncated_fcs");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&decrypt_dir).unwrap();
+
+    // Write a tiny file that's too short to be a valid .fcs
+    let truncated_file = test_dir.join("truncated.fcs");
+    fs::write(&truncated_file, b"short").unwrap();
+
+    let passphrase = SecretString::from("test".to_string());
+
+    let result = symmetric_encryption(
+        truncated_file.to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &passphrase,
+        false,
+    );
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_truncated_fch_file() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("truncated_fch");
+    let keys_dir = test_dir.join("keys");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&keys_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    let key_passphrase = SecretString::from("pass".to_string());
+    generate_asymmetric_key_pair(2048, &key_passphrase, keys_dir.to_str().unwrap())?;
+
+    // Write a tiny file that's too short to be a valid .fch
+    let truncated_file = test_dir.join("truncated.fch");
+    fs::write(&truncated_file, b"short").unwrap();
+
+    let mut priv_key_path = keys_dir
+        .join("rsa-2048-priv-key.pem")
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let result = hybrid_encryption(
+        truncated_file.to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &mut priv_key_path,
+        &key_passphrase,
+    );
+
+    assert!(result.is_err());
+
+    Ok(())
+}
+
 #[ctor::dtor]
 fn cleanup() {
     cleanup_test_workspace();

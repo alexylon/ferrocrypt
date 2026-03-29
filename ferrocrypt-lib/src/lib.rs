@@ -78,6 +78,7 @@
 //! Licensed under GPL-3.0-only. See the LICENSE file in the repository.
 
 use std::fs;
+use std::path::Path;
 
 use secrecy::SecretString;
 
@@ -92,6 +93,39 @@ mod error;
 mod hybrid;
 mod reed_solomon;
 mod symmetric;
+
+fn with_tmp_workspace<F>(
+    input_path: &str,
+    output_dir: &str,
+    operation: F,
+) -> Result<String, CryptoError>
+where
+    F: FnOnce(&str, &str, &str) -> Result<String, CryptoError>,
+{
+    let (normalized_input_path, normalized_output_dir) = normalize_paths(input_path, output_dir);
+
+    if !Path::new(&normalized_input_path).exists() {
+        return Err(CryptoError::InputPath(normalized_input_path));
+    }
+
+    let tmp_dir_path = format!("{}.tmp_zip/", normalized_output_dir);
+    fs::create_dir_all(&tmp_dir_path)?;
+
+    let result = operation(
+        &normalized_input_path,
+        &normalized_output_dir,
+        &tmp_dir_path,
+    );
+
+    let cleanup = fs::remove_dir_all(&tmp_dir_path);
+    match result {
+        Ok(msg) => {
+            cleanup?;
+            Ok(msg)
+        }
+        err => err,
+    }
+}
 
 /// Encrypt or decrypt files/directories using password-based symmetric crypto.
 ///
@@ -124,30 +158,13 @@ pub fn symmetric_encryption(
     password: &SecretString,
     large: bool,
 ) -> Result<String, CryptoError> {
-    let (normalized_input_path, normalized_output_dir) = normalize_paths(input_path, output_dir);
-
-    let tmp_dir_path = &format!("{}.tmp_zip/", normalized_output_dir);
-    fs::create_dir_all(tmp_dir_path)?;
-
-    let result = if input_path.ends_with(".fcs") {
-        symmetric::decrypt_file(
-            &normalized_input_path,
-            &normalized_output_dir,
-            password,
-            tmp_dir_path,
-        )
-    } else {
-        symmetric::encrypt_file(
-            &normalized_input_path,
-            &normalized_output_dir,
-            password,
-            large,
-            tmp_dir_path,
-        )
-    };
-
-    fs::remove_dir_all(tmp_dir_path)?;
-    result
+    with_tmp_workspace(input_path, output_dir, |input, output, tmp| {
+        if input_path.ends_with(".fcs") {
+            symmetric::decrypt_file(input, output, password, tmp)
+        } else {
+            symmetric::encrypt_file(input, output, password, large, tmp)
+        }
+    })
 }
 
 /// Encrypt or decrypt using hybrid (RSA + XChaCha20-Poly1305) envelope encryption.
@@ -188,30 +205,13 @@ pub fn hybrid_encryption(
     rsa_key_pem: &mut str,
     passphrase: &SecretString,
 ) -> Result<String, CryptoError> {
-    let (normalized_input_path, normalized_output_dir) = normalize_paths(input_path, output_dir);
-
-    let tmp_dir_path = &format!("{}.tmp_zip/", normalized_output_dir);
-    fs::create_dir_all(tmp_dir_path)?;
-
-    let result = if input_path.ends_with(".fch") {
-        hybrid::decrypt_file(
-            &normalized_input_path,
-            &normalized_output_dir,
-            rsa_key_pem,
-            passphrase,
-            tmp_dir_path,
-        )
-    } else {
-        hybrid::encrypt_file(
-            &normalized_input_path,
-            &normalized_output_dir,
-            rsa_key_pem,
-            tmp_dir_path,
-        )
-    };
-
-    fs::remove_dir_all(tmp_dir_path)?;
-    result
+    with_tmp_workspace(input_path, output_dir, |input, output, tmp| {
+        if input_path.ends_with(".fch") {
+            hybrid::decrypt_file(input, output, rsa_key_pem, passphrase, tmp)
+        } else {
+            hybrid::encrypt_file(input, output, rsa_key_pem, tmp)
+        }
+    })
 }
 
 /// Generate and store an RSA key pair for hybrid encryption (default: RSA-4096).

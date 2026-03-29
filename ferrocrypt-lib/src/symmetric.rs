@@ -8,7 +8,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit, OsRng, rand_core::RngCore, stream},
 };
 use secrecy::{ExposeSecret, SecretString};
-use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 use crate::common::{
     constant_time_compare_256_bit, get_duration, get_file_stem_to_string, sha3_32_hash,
@@ -44,11 +44,11 @@ pub fn encrypt_file(
     let mut salt_32 = [0u8; SALT_SIZE];
     OsRng.fill_bytes(&mut salt_32);
 
-    let mut key = argon2::hash_raw(
+    let key = Zeroizing::new(argon2::hash_raw(
         passphrase.expose_secret().as_bytes(),
         &salt_32,
         &argon2_config,
-    )?;
+    )?);
     let cipher = XChaCha20Poly1305::new(key[..KEY_SIZE].as_ref().into());
 
     // Hash the encryption key for comparison when decrypting
@@ -123,8 +123,6 @@ pub fn encrypt_file(
     );
     println!("\n{}", result);
 
-    key.zeroize();
-
     Ok(result)
 }
 
@@ -169,6 +167,14 @@ fn decrypt_normal_file(
     println!("Decrypting {} ...\n", input_path.display());
     let encrypted_file: Vec<u8> = read(input_path)?;
 
+    let min_header_size =
+        4 + rs_encoded_size(SALT_SIZE) + rs_encoded_size(NONCE_24_SIZE) + rs_encoded_size(KEY_SIZE);
+    if encrypted_file.len() < min_header_size {
+        return Err(CryptoError::EncryptionDecryptionError(
+            "File is too short or corrupted".to_string(),
+        ));
+    }
+
     // Split salt, nonce, key hash and the encrypted file, and reconstruct with reed-solomon
     let (serialized_flags, rem_data) = encrypted_file.split_at(4);
     let (_flags, _): ([bool; 4], usize) =
@@ -182,36 +188,34 @@ fn decrypt_normal_file(
     let key_hash_ref = rs_decode(encoded_key_hash_ref)?;
 
     let argon2_config = argon2_config();
-    let mut key = argon2::hash_raw(
+    let key = Zeroizing::new(argon2::hash_raw(
         passphrase.expose_secret().as_bytes(),
         &salt_32[0..32],
         &argon2_config,
-    )?;
+    )?);
 
     // Hash the encryption key for comparison and compare it in constant time with the ref key hash
     let key_hash: [u8; 32] = sha3_32_hash(&key)?;
     let key_correct = constant_time_compare_256_bit(&key_hash, key_hash_ref[0..32].try_into()?);
 
-    let output_path = if key_correct {
-        let cipher = XChaCha20Poly1305::new(key[..KEY_SIZE].as_ref().into());
-        let plaintext: Vec<u8> = cipher.decrypt(
-            nonce_24[0..NONCE_24_SIZE].as_ref().into(),
-            ciphertext.as_ref(),
-        )?;
-        let decrypted_file_stem = &get_file_stem_to_string(input_path)?;
-        let decrypted_file_path = tmp_dir_path.join(format!("{}.zip", decrypted_file_stem));
-
-        File::create(&decrypted_file_path)?;
-        fs::write(&decrypted_file_path, plaintext)?;
-
-        archiver::unarchive(&decrypted_file_path, output_dir)?
-    } else {
+    if !key_correct {
         return Err(CryptoError::EncryptionDecryptionError(
             "The provided password is incorrect".to_string(),
         ));
-    };
+    }
 
-    key.zeroize();
+    let cipher = XChaCha20Poly1305::new(key[..KEY_SIZE].as_ref().into());
+    let plaintext: Vec<u8> = cipher.decrypt(
+        nonce_24[0..NONCE_24_SIZE].as_ref().into(),
+        ciphertext.as_ref(),
+    )?;
+    let decrypted_file_stem = &get_file_stem_to_string(input_path)?;
+    let decrypted_file_path = tmp_dir_path.join(format!("{}.zip", decrypted_file_stem));
+
+    File::create(&decrypted_file_path)?;
+    fs::write(&decrypted_file_path, plaintext)?;
+
+    let output_path = archiver::unarchive(&decrypted_file_path, output_dir)?;
 
     Ok(output_path)
 }
@@ -262,59 +266,57 @@ fn decrypt_large_file(
     let key_hash_ref = rs_decode(&encoded_key_hash_ref)?;
 
     let argon2_config = argon2_config();
-    let mut key = argon2::hash_raw(
+    let key = Zeroizing::new(argon2::hash_raw(
         passphrase.expose_secret().as_bytes(),
         &salt_32,
         &argon2_config,
-    )?;
+    )?);
 
     let key_hash: [u8; KEY_SIZE] = sha3_32_hash(&key)?;
     let key_correct =
         constant_time_compare_256_bit(&key_hash, key_hash_ref[..KEY_SIZE].try_into()?);
 
-    let output_path = if key_correct {
-        let cipher = XChaCha20Poly1305::new(key[..KEY_SIZE].as_ref().into());
-        let mut stream_decryptor =
-            stream::DecryptorBE32::from_aead(cipher, nonce_19[..NONCE_19_SIZE].as_ref().into());
-        let decrypted_file_stem = &get_file_stem_to_string(input_path)?;
-        let decrypted_file_path = tmp_dir_path.join(format!("{}.zip", decrypted_file_stem));
-        let mut decrypted_file = OpenOptions::new()
-            .write(true)
-            .append(true)
-            .create_new(true)
-            .open(&decrypted_file_path)?;
-
-        // Streaming decryption: BUFFER_SIZE + 16 bytes for the Poly1305 authentication tag
-        const ENCRYPTED_BUFFER_SIZE: usize = BUFFER_SIZE + 16;
-        let mut buffer = [0u8; ENCRYPTED_BUFFER_SIZE];
-
-        loop {
-            let read_count = encrypted_file.read(&mut buffer)?;
-
-            if read_count == ENCRYPTED_BUFFER_SIZE {
-                let plaintext = stream_decryptor
-                    .decrypt_next(buffer.as_slice())
-                    .map_err(CryptoError::ChaCha20Poly1305Error)?;
-                decrypted_file.write_all(&plaintext)?;
-            } else if read_count == 0 {
-                break;
-            } else {
-                let plaintext = stream_decryptor
-                    .decrypt_last(&buffer[..read_count])
-                    .map_err(CryptoError::ChaCha20Poly1305Error)?;
-                decrypted_file.write_all(&plaintext)?;
-                break;
-            }
-        }
-
-        archiver::unarchive(&decrypted_file_path, output_dir)?
-    } else {
+    if !key_correct {
         return Err(CryptoError::EncryptionDecryptionError(
             "The provided password is incorrect".to_string(),
         ));
-    };
+    }
 
-    key.zeroize();
+    let cipher = XChaCha20Poly1305::new(key[..KEY_SIZE].as_ref().into());
+    let mut stream_decryptor =
+        stream::DecryptorBE32::from_aead(cipher, nonce_19[..NONCE_19_SIZE].as_ref().into());
+    let decrypted_file_stem = &get_file_stem_to_string(input_path)?;
+    let decrypted_file_path = tmp_dir_path.join(format!("{}.zip", decrypted_file_stem));
+    let mut decrypted_file = OpenOptions::new()
+        .write(true)
+        .append(true)
+        .create_new(true)
+        .open(&decrypted_file_path)?;
+
+    // Streaming decryption: BUFFER_SIZE + 16 bytes for the Poly1305 authentication tag
+    const ENCRYPTED_BUFFER_SIZE: usize = BUFFER_SIZE + 16;
+    let mut buffer = [0u8; ENCRYPTED_BUFFER_SIZE];
+
+    loop {
+        let read_count = encrypted_file.read(&mut buffer)?;
+
+        if read_count == ENCRYPTED_BUFFER_SIZE {
+            let plaintext = stream_decryptor
+                .decrypt_next(buffer.as_slice())
+                .map_err(CryptoError::ChaCha20Poly1305Error)?;
+            decrypted_file.write_all(&plaintext)?;
+        } else if read_count == 0 {
+            break;
+        } else {
+            let plaintext = stream_decryptor
+                .decrypt_last(&buffer[..read_count])
+                .map_err(CryptoError::ChaCha20Poly1305Error)?;
+            decrypted_file.write_all(&plaintext)?;
+            break;
+        }
+    }
+
+    let output_path = archiver::unarchive(&decrypted_file_path, output_dir)?;
 
     Ok(output_path)
 }

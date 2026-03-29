@@ -17,16 +17,18 @@ All notable changes to FerroCrypt are documented in this file.
 - Replaced bincode header serialization with raw byte layout for long-term format stability
 
 ### Fixed
-- Crash (panic) when decrypting truncated or corrupted `.fcs` and `.fch` files
+- Crash (panic) when decrypting truncated, corrupted, or maliciously crafted `.fcs`/`.fch` files
+- Crash when Reed-Solomon decoding produces unexpected output length (validated before indexing)
 - Nonexistent input paths silently producing empty encrypted files
-- Key material not zeroized on error paths in symmetric and hybrid encryption
+- Key material not zeroized on all error paths: RSA-decrypted keys, combined key buffer, private key PEM content, and HMAC failure early returns now all zeroize correctly
 - Temporary directory cleanup masking the original crypto error on failure
+- Temporary directory race condition when multiple processes encrypt to the same output directory
 - Directory archiver silently skipping inaccessible files and path errors
+- Removed bincode dependency for header serialization (bincode wire format is not stable across major versions)
 
 ### Improved
+- Reed-Solomon decoding uses direct 3-value majority vote instead of HashMap allocation per byte
 - Rewrote archiver unit tests to be self-contained (replaced fixture-dependent stubs)
-- Expanded Reed-Solomon tests: odd-length data, shard corruption, error paths
-- Added integration tests: binary content, truncated files, wrong key pair, large mode edge cases, empty password, RSA-4096 round-trip
 
 ## [0.2.5] - 2025-12-18
 

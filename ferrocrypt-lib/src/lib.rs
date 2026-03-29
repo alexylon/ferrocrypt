@@ -109,7 +109,7 @@ where
         return Err(CryptoError::InputPath(normalized_input_path));
     }
 
-    let tmp_dir_path = format!("{}.tmp_zip/", normalized_output_dir);
+    let tmp_dir_path = format!("{}.tmp_zip_{}/", normalized_output_dir, std::process::id());
     fs::create_dir_all(&tmp_dir_path)?;
 
     let result = operation(

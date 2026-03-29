@@ -61,11 +61,9 @@ pub fn rs_decode(data: &[u8]) -> Result<Vec<u8>, CryptoError> {
         return Err(CryptoError::Message("Empty data for decoding".to_string()));
     }
 
-    // Extract padding byte
     let padding_byte = data[0];
     let remaining = &data[1..];
 
-    // Check that remaining data is divisible by 3
     if remaining.len() % 3 != 0 {
         return Err(CryptoError::Message(
             "Incorrect encoded bytes length".to_string(),
@@ -73,39 +71,17 @@ pub fn rs_decode(data: &[u8]) -> Result<Vec<u8>, CryptoError> {
     }
 
     let shard_bytes = remaining.len() / 3;
+    let original = &remaining[0..shard_bytes];
+    let recovery_0 = &remaining[shard_bytes..2 * shard_bytes];
+    let recovery_1 = &remaining[2 * shard_bytes..3 * shard_bytes];
 
-    // Split into 3 shards: original, recovery_0, recovery_1
-    let original_shard = &remaining[0..shard_bytes];
-    let recovery_shard_0 = &remaining[shard_bytes..2 * shard_bytes];
-    let recovery_shard_1 = &remaining[2 * shard_bytes..3 * shard_bytes];
-
-    // Apply byte-by-byte voting across all 3 shards for error correction
-    // The Reed-Solomon encoding ensures proper redundancy, and voting handles byte-level corruption
-    let shards = vec![original_shard, recovery_shard_0, recovery_shard_1];
-    let mut result = vec![];
-
+    // Majority vote across 3 shards per byte position
+    let mut result = Vec::with_capacity(shard_bytes);
     for i in 0..shard_bytes {
-        let mut freq = std::collections::HashMap::new();
-
-        // Count frequency of each byte value at position i across all shards
-        for shard in &shards {
-            let byte = shard[i];
-            *freq.entry(byte).or_insert(0) += 1;
-        }
-
-        // Find the byte with highest frequency (at least 2 occurrences for majority)
-        // If no majority, use the byte from the original shard as fallback
-        let most_frequent = freq
-            .iter()
-            .filter(|(_, &count)| count >= 2)
-            .max_by_key(|(_, &count)| count)
-            .map(|(&byte, _)| byte)
-            .unwrap_or(original_shard[i]);
-
-        result.push(most_frequent);
+        let (a, b, c) = (original[i], recovery_0[i], recovery_1[i]);
+        result.push(if a == b || a == c { a } else { b });
     }
 
-    // Remove padding if it was added during encoding
     if padding_byte == 1 && !result.is_empty() {
         result.pop();
     }
@@ -113,26 +89,16 @@ pub fn rs_decode(data: &[u8]) -> Result<Vec<u8>, CryptoError> {
     Ok(result)
 }
 
-#[allow(dead_code)]
-fn pad_pkcs7(data: &[u8], block_size: usize) -> Vec<u8> {
-    let mut byte_vec = data.to_vec();
-    let padding_size = block_size - byte_vec.len() % block_size;
-    let padding_char = padding_size as u8;
-    let padding: Vec<u8> = vec![padding_char; padding_size];
-    byte_vec.extend_from_slice(&padding);
-
-    byte_vec
-}
-
-#[allow(dead_code)]
-fn unpad_pkcs7(data: &[u8]) -> Vec<u8> {
-    let mut byte_vec = data.to_vec();
-    let padding_size = byte_vec.last().copied().unwrap() as usize;
-    // Use `saturating_sub` to handle the case where there aren't N elements in the vector
-    let final_length = byte_vec.len().saturating_sub(padding_size);
-    byte_vec.truncate(final_length);
-
-    byte_vec
+/// Decodes and validates the output is exactly `expected_len` bytes.
+/// Prevents panics from indexing rs_decode output before HMAC verification.
+pub fn rs_decode_exact(data: &[u8], expected_len: usize) -> Result<Vec<u8>, CryptoError> {
+    let decoded = rs_decode(data)?;
+    if decoded.len() != expected_len {
+        return Err(CryptoError::EncryptionDecryptionError(
+            "File is corrupted (invalid field length after Reed-Solomon decoding)".to_string(),
+        ));
+    }
+    Ok(decoded)
 }
 
 #[cfg(test)]
@@ -247,14 +213,21 @@ mod tests {
     }
 
     #[test]
-    fn pkcs_padding_unpadding() {
-        let arr_12_orig = [1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2];
-        let arr_16_orig = [1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6];
+    fn decode_exact_wrong_length_returns_error() {
+        let original = [1u8; 32];
+        let mut encoded = rs_encode(&original).unwrap();
+        // Corrupt the padding byte to make rs_decode return 31 instead of 32
+        encoded[0] = 1;
+        let result = rs_decode_exact(&encoded, 32);
+        assert!(result.is_err());
+    }
 
-        let arr_12_padded = pad_pkcs7(&arr_12_orig, 16);
-        let arr_16_padded = pad_pkcs7(&arr_16_orig, 16);
-
-        assert_eq!(&arr_12_orig, &unpad_pkcs7(&arr_12_padded).as_slice());
-        assert_eq!(&arr_16_orig, &unpad_pkcs7(&arr_16_padded).as_slice());
+    #[test]
+    fn decode_exact_correct_length() {
+        let original = [1u8; 32];
+        let encoded = rs_encode(&original).unwrap();
+        let decoded = rs_decode_exact(&encoded, 32).unwrap();
+        assert_eq!(decoded.len(), 32);
+        assert_eq!(decoded, original.to_vec());
     }
 }

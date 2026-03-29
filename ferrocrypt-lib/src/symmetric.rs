@@ -15,7 +15,7 @@ use crate::common::{
     hmac_sha3_256_verify, sha3_32_hash,
 };
 use crate::format::{self, HEADER_PREFIX_SIZE};
-use crate::reed_solomon::{rs_decode, rs_encode, rs_encoded_size};
+use crate::reed_solomon::{rs_decode_exact, rs_encode, rs_encoded_size};
 use crate::{CryptoError, archiver};
 
 const BUFFER_SIZE: usize = 65536;
@@ -225,20 +225,20 @@ fn decrypt_normal_file(
     let (encoded_key_hash_ref, rem) = rem.split_at(rs_encoded_size(KEY_SIZE));
     let (encoded_hmac_tag, _) = rem.split_at(rs_encoded_size(HMAC_KEY_SIZE));
 
-    let salt_32 = rs_decode(encoded_salt_32)?;
-    let nonce_24 = rs_decode(encoded_nonce_24)?;
-    let key_hash_ref = rs_decode(encoded_key_hash_ref)?;
-    let hmac_tag = rs_decode(encoded_hmac_tag)?;
+    let salt = rs_decode_exact(encoded_salt_32, SALT_SIZE)?;
+    let nonce = rs_decode_exact(encoded_nonce_24, NONCE_24_SIZE)?;
+    let key_hash_ref = rs_decode_exact(encoded_key_hash_ref, KEY_SIZE)?;
+    let hmac_tag = rs_decode_exact(encoded_hmac_tag, HMAC_KEY_SIZE)?;
 
     let argon2_config = argon2_config();
     let key_material = Zeroizing::new(argon2::hash_raw(
         passphrase.expose_secret().as_bytes(),
-        &salt_32[0..32],
+        &salt,
         &argon2_config,
     )?);
 
-    let key_hash: [u8; 32] = sha3_32_hash(&key_material[..KEY_SIZE])?;
-    let key_correct = constant_time_compare_256_bit(&key_hash, key_hash_ref[0..32].try_into()?);
+    let key_hash: [u8; KEY_SIZE] = sha3_32_hash(&key_material[..KEY_SIZE])?;
+    let key_correct = constant_time_compare_256_bit(&key_hash, key_hash_ref.as_slice().try_into()?);
 
     if !key_correct {
         return Err(CryptoError::EncryptionDecryptionError(
@@ -254,14 +254,10 @@ fn decrypt_normal_file(
     )?;
 
     let cipher = XChaCha20Poly1305::new(key_material[..KEY_SIZE].as_ref().into());
-    let plaintext: Vec<u8> = cipher.decrypt(
-        nonce_24[0..NONCE_24_SIZE].as_ref().into(),
-        ciphertext.as_ref(),
-    )?;
+    let plaintext: Vec<u8> = cipher.decrypt(nonce.as_slice().into(), ciphertext.as_ref())?;
     let decrypted_file_stem = &get_file_stem_to_string(input_path)?;
     let decrypted_file_path = tmp_dir_path.join(format!("{}.zip", decrypted_file_stem));
 
-    File::create(&decrypted_file_path)?;
     fs::write(&decrypted_file_path, plaintext)?;
 
     let output_path = archiver::unarchive(&decrypted_file_path, output_dir)?;
@@ -311,21 +307,20 @@ fn decrypt_large_file(
             CryptoError::EncryptionDecryptionError("File is too short or corrupted".to_string())
         })?;
 
-    let salt_32 = rs_decode(&encoded_salt_32)?;
-    let nonce_19: Vec<u8> = rs_decode(&encoded_nonce_19)?;
-    let key_hash_ref = rs_decode(&encoded_key_hash_ref)?;
-    let hmac_tag = rs_decode(&encoded_hmac_tag)?;
+    let salt = rs_decode_exact(&encoded_salt_32, SALT_SIZE)?;
+    let nonce = rs_decode_exact(&encoded_nonce_19, NONCE_19_SIZE)?;
+    let key_hash_ref = rs_decode_exact(&encoded_key_hash_ref, KEY_SIZE)?;
+    let hmac_tag = rs_decode_exact(&encoded_hmac_tag, HMAC_KEY_SIZE)?;
 
     let argon2_config = argon2_config();
     let key_material = Zeroizing::new(argon2::hash_raw(
         passphrase.expose_secret().as_bytes(),
-        &salt_32,
+        &salt,
         &argon2_config,
     )?);
 
     let key_hash: [u8; KEY_SIZE] = sha3_32_hash(&key_material[..KEY_SIZE])?;
-    let key_correct =
-        constant_time_compare_256_bit(&key_hash, key_hash_ref[..KEY_SIZE].try_into()?);
+    let key_correct = constant_time_compare_256_bit(&key_hash, key_hash_ref.as_slice().try_into()?);
 
     if !key_correct {
         return Err(CryptoError::EncryptionDecryptionError(
@@ -345,8 +340,7 @@ fn decrypt_large_file(
     )?;
 
     let cipher = XChaCha20Poly1305::new(key_material[..KEY_SIZE].as_ref().into());
-    let mut stream_decryptor =
-        stream::DecryptorBE32::from_aead(cipher, nonce_19[..NONCE_19_SIZE].as_ref().into());
+    let mut stream_decryptor = stream::DecryptorBE32::from_aead(cipher, nonce.as_slice().into());
     let decrypted_file_stem = &get_file_stem_to_string(input_path)?;
     let decrypted_file_path = tmp_dir_path.join(format!("{}.zip", decrypted_file_stem));
     let mut decrypted_file = OpenOptions::new()

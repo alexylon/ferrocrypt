@@ -1185,6 +1185,124 @@ fn test_wrong_format_type_fch_as_fcs() -> Result<(), CryptoError> {
     Ok(())
 }
 
+#[test]
+fn test_symmetric_empty_file_large_mode() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("empty_file_large");
+    let input_file = test_dir.join("empty.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    create_test_file(&input_file, "");
+    let passphrase = SecretString::from("empty_large".to_string());
+
+    symmetric_encryption(
+        input_file.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        &passphrase,
+        true,
+    )?;
+
+    symmetric_encryption(
+        encrypt_dir.join("empty.fcs").to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &passphrase,
+        false,
+    )?;
+
+    let decrypted = fs::read_to_string(decrypt_dir.join("empty.txt"))?;
+    assert_eq!("", decrypted);
+
+    Ok(())
+}
+
+#[test]
+fn test_hybrid_empty_file() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("hybrid_empty_file");
+    let keys_dir = test_dir.join("keys");
+    let input_file = test_dir.join("empty.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+
+    fs::create_dir_all(&keys_dir)?;
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    create_test_file(&input_file, "");
+    let key_passphrase = SecretString::from("hybrid_empty".to_string());
+    generate_asymmetric_key_pair(2048, &key_passphrase, keys_dir.to_str().unwrap())?;
+
+    let mut pub_key = keys_dir
+        .join("rsa-2048-pub-key.pem")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let empty_pass = SecretString::from("".to_string());
+
+    hybrid_encryption(
+        input_file.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        &mut pub_key,
+        &empty_pass,
+    )?;
+
+    let mut priv_key = keys_dir
+        .join("rsa-2048-priv-key.pem")
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    hybrid_encryption(
+        encrypt_dir.join("empty.fch").to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &mut priv_key,
+        &key_passphrase,
+    )?;
+
+    let decrypted = fs::read_to_string(decrypt_dir.join("empty.txt"))?;
+    assert_eq!("", decrypted);
+
+    Ok(())
+}
+
+#[test]
+fn test_two_encryptions_produce_different_output() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("nonce_uniqueness");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir_a = test_dir.join("encrypted_a");
+    let encrypt_dir_b = test_dir.join("encrypted_b");
+
+    fs::create_dir_all(&encrypt_dir_a)?;
+    fs::create_dir_all(&encrypt_dir_b)?;
+
+    create_test_file(&input_file, "Same content encrypted twice");
+    let passphrase = SecretString::from("same_pass".to_string());
+
+    symmetric_encryption(
+        input_file.to_str().unwrap(),
+        encrypt_dir_a.to_str().unwrap(),
+        &passphrase,
+        false,
+    )?;
+
+    symmetric_encryption(
+        input_file.to_str().unwrap(),
+        encrypt_dir_b.to_str().unwrap(),
+        &passphrase,
+        false,
+    )?;
+
+    let file_a = fs::read(encrypt_dir_a.join("data.fcs"))?;
+    let file_b = fs::read(encrypt_dir_b.join("data.fcs"))?;
+
+    // Same plaintext + same password must produce different ciphertext (unique salt + nonce)
+    assert_ne!(file_a, file_b);
+
+    Ok(())
+}
+
 #[ctor::dtor]
 fn cleanup() {
     cleanup_test_workspace();

@@ -1059,6 +1059,132 @@ fn test_hybrid_header_tamper_detection() -> Result<(), CryptoError> {
     Ok(())
 }
 
+#[test]
+fn test_not_a_ferrocrypt_file() {
+    let test_dir = setup_test_dir("not_ferrocrypt");
+    let fake_file = test_dir.join("photo.fcs");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&decrypt_dir).unwrap();
+
+    // A JPEG header renamed to .fcs
+    fs::write(&fake_file, b"\xFF\xD8\xFF\xE0fake jpeg data").unwrap();
+
+    let passphrase = SecretString::from("test".to_string());
+    let result = symmetric_encryption(
+        fake_file.to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &passphrase,
+        false,
+    );
+
+    assert!(result.is_err());
+    match result {
+        Err(CryptoError::EncryptionDecryptionError(msg)) => {
+            assert!(msg.contains("Not a valid FerroCrypt file"));
+        }
+        other => panic!("Expected 'Not a valid FerroCrypt file', got {:?}", other),
+    }
+}
+
+#[test]
+fn test_future_major_version_rejected() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("future_version");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    create_test_file(&input_file, "version test");
+    let passphrase = SecretString::from("pass".to_string());
+
+    symmetric_encryption(
+        input_file.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        &passphrase,
+        false,
+    )?;
+
+    // Patch the major version byte (offset 2) to a future version
+    let encrypted_path = encrypt_dir.join("data.fcs");
+    let mut data = fs::read(&encrypted_path)?;
+    data[2] = 99;
+    fs::write(&encrypted_path, &data)?;
+
+    let result = symmetric_encryption(
+        encrypted_path.to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &passphrase,
+        false,
+    );
+
+    assert!(result.is_err());
+    match result {
+        Err(CryptoError::EncryptionDecryptionError(msg)) => {
+            assert!(msg.contains("not supported"));
+            assert!(msg.contains("upgrade"));
+        }
+        other => panic!("Expected version error, got {:?}", other),
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_wrong_format_type_fch_as_fcs() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("wrong_format_type");
+    let keys_dir = test_dir.join("keys");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+
+    fs::create_dir_all(&keys_dir)?;
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    create_test_file(&input_file, "format type test");
+    let key_passphrase = SecretString::from("pass".to_string());
+    generate_asymmetric_key_pair(2048, &key_passphrase, keys_dir.to_str().unwrap())?;
+
+    // Encrypt as hybrid (.fch)
+    let mut pub_key_path = keys_dir
+        .join("rsa-2048-pub-key.pem")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let empty_pass = SecretString::from("".to_string());
+
+    hybrid_encryption(
+        input_file.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        &mut pub_key_path,
+        &empty_pass,
+    )?;
+
+    // Rename .fch to .fcs and try to decrypt as symmetric
+    let fch_path = encrypt_dir.join("data.fch");
+    let fcs_path = encrypt_dir.join("data.fcs");
+    fs::rename(&fch_path, &fcs_path)?;
+
+    let passphrase = SecretString::from("pass".to_string());
+    let result = symmetric_encryption(
+        fcs_path.to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &passphrase,
+        false,
+    );
+
+    assert!(result.is_err());
+    match result {
+        Err(CryptoError::EncryptionDecryptionError(msg)) => {
+            assert!(msg.contains("different format type"));
+        }
+        other => panic!("Expected format type error, got {:?}", other),
+    }
+
+    Ok(())
+}
+
 #[ctor::dtor]
 fn cleanup() {
     cleanup_test_workspace();

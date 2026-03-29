@@ -90,6 +90,7 @@ pub use secrecy;
 mod archiver;
 mod common;
 mod error;
+mod format;
 mod hybrid;
 mod reed_solomon;
 mod symmetric;

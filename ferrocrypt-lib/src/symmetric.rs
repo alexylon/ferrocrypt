@@ -14,6 +14,7 @@ use crate::common::{
     constant_time_compare_256_bit, get_duration, get_file_stem_to_string, hmac_sha3_256,
     hmac_sha3_256_verify, sha3_32_hash,
 };
+use crate::format::{self, HEADER_PREFIX_SIZE};
 use crate::reed_solomon::{rs_decode, rs_encode, rs_encoded_size};
 use crate::{CryptoError, archiver};
 
@@ -23,6 +24,7 @@ const NONCE_24_SIZE: usize = 24;
 const NONCE_19_SIZE: usize = 19;
 const KEY_SIZE: usize = 32;
 const HMAC_KEY_SIZE: usize = 32;
+// Argon2 derives 64 bytes: first 32 for encryption, second 32 for header HMAC
 const KEY_MATERIAL_SIZE: usize = KEY_SIZE + HMAC_KEY_SIZE;
 
 /// Encrypts a file with XChaCha20Poly1305 algorithm.
@@ -37,11 +39,7 @@ pub fn encrypt_file(
     let output_dir = output_dir.as_ref();
     let tmp_dir_path = tmp_dir_path.as_ref();
 
-    let mut flags: [bool; 4] = [false; 4];
-    if large {
-        flags[0] = true;
-    }
-    let serialized_flags: Vec<u8> = bincode::encode_to_vec(&flags, bincode::config::standard())?;
+    let flags: u16 = if large { format::FLAG_LARGE_FILE } else { 0 };
 
     let argon2_config = argon2_config();
     let mut salt_32 = [0u8; SALT_SIZE];
@@ -55,7 +53,6 @@ pub fn encrypt_file(
     let cipher = XChaCha20Poly1305::new(key_material[..KEY_SIZE].as_ref().into());
     let hmac_key = &key_material[KEY_SIZE..KEY_MATERIAL_SIZE];
 
-    // Hash the encryption key for comparison when decrypting
     let key_hash_ref: [u8; KEY_SIZE] = sha3_32_hash(&key_material[..KEY_SIZE])?;
 
     let encrypted_extension = "fcs";
@@ -78,19 +75,26 @@ pub fn encrypt_file(
         OsRng.fill_bytes(&mut nonce_24);
 
         let encoded_nonce_24: Vec<u8> = rs_encode(&nonce_24)?;
+
+        let header_len = (HEADER_PREFIX_SIZE
+            + encoded_salt_32.len()
+            + encoded_nonce_24.len()
+            + encoded_key_hash_ref.len()
+            + rs_encoded_size(HMAC_KEY_SIZE)) as u16;
+        let prefix = format::build_header_prefix(format::TYPE_SYMMETRIC, flags, header_len);
+
         let zipped_file = read(&zipped_file_name)?;
         let ciphertext = cipher.encrypt(nonce_24.as_ref().into(), &*zipped_file)?;
 
-        // Compute HMAC over the header
         let mut header_bytes = Vec::new();
-        header_bytes.extend_from_slice(&serialized_flags);
+        header_bytes.extend_from_slice(&prefix);
         header_bytes.extend_from_slice(&encoded_salt_32);
         header_bytes.extend_from_slice(&encoded_nonce_24);
         header_bytes.extend_from_slice(&encoded_key_hash_ref);
         let hmac_tag = hmac_sha3_256(hmac_key, &header_bytes)?;
         let encoded_hmac_tag: Vec<u8> = rs_encode(&hmac_tag)?;
 
-        encrypted_file_path.write_all(&serialized_flags)?;
+        encrypted_file_path.write_all(&prefix)?;
         encrypted_file_path.write_all(&encoded_salt_32)?;
         encrypted_file_path.write_all(&encoded_nonce_24)?;
         encrypted_file_path.write_all(&encoded_key_hash_ref)?;
@@ -100,12 +104,19 @@ pub fn encrypt_file(
         let mut nonce_19 = [0u8; NONCE_19_SIZE];
         OsRng.fill_bytes(&mut nonce_19);
         let encoded_nonce_19: Vec<u8> = rs_encode(&nonce_19)?;
+
+        let header_len = (HEADER_PREFIX_SIZE
+            + encoded_salt_32.len()
+            + encoded_nonce_19.len()
+            + encoded_key_hash_ref.len()
+            + rs_encoded_size(HMAC_KEY_SIZE)) as u16;
+        let prefix = format::build_header_prefix(format::TYPE_SYMMETRIC, flags, header_len);
+
         let mut stream_encryptor =
             stream::EncryptorBE32::from_aead(cipher, nonce_19.as_ref().into());
 
-        // Compute HMAC over the header
         let mut header_bytes = Vec::new();
-        header_bytes.extend_from_slice(&serialized_flags);
+        header_bytes.extend_from_slice(&prefix);
         header_bytes.extend_from_slice(&encoded_salt_32);
         header_bytes.extend_from_slice(&encoded_nonce_19);
         header_bytes.extend_from_slice(&encoded_key_hash_ref);
@@ -114,7 +125,7 @@ pub fn encrypt_file(
 
         let mut buffer = [0u8; BUFFER_SIZE];
 
-        encrypted_file_path.write_all(&serialized_flags)?;
+        encrypted_file_path.write_all(&prefix)?;
         encrypted_file_path.write_all(&encoded_salt_32)?;
         encrypted_file_path.write_all(&encoded_nonce_19)?;
         encrypted_file_path.write_all(&encoded_key_hash_ref)?;
@@ -159,11 +170,13 @@ pub fn decrypt_file(
 ) -> Result<String, CryptoError> {
     let start_time = std::time::Instant::now();
     let input_path = input_path.as_ref();
-    let file_bytes = read(input_path)?;
-    let (flags, _): ([bool; 4], usize) =
-        bincode::decode_from_slice(&file_bytes[..4], bincode::config::standard())?;
 
-    let output_path = if flags[0] {
+    // Only read the prefix, not the whole file — the file may not fit in RAM (large mode)
+    let mut file = File::open(input_path)?;
+    let (_, header) = format::read_header_from_reader(&mut file, format::TYPE_SYMMETRIC)?;
+    drop(file);
+
+    let output_path = if header.flags & format::FLAG_LARGE_FILE != 0 {
         decrypt_large_file(input_path, output_dir, passphrase, tmp_dir_path)?
     } else {
         decrypt_normal_file(input_path, output_dir, passphrase, tmp_dir_path)?
@@ -191,25 +204,26 @@ fn decrypt_normal_file(
     println!("Decrypting {} ...\n", input_path.display());
     let encrypted_file: Vec<u8> = read(input_path)?;
 
-    let min_header_size = 4
+    let header = format::read_header(&encrypted_file, format::TYPE_SYMMETRIC)?;
+    let min_header_size = HEADER_PREFIX_SIZE
         + rs_encoded_size(SALT_SIZE)
         + rs_encoded_size(NONCE_24_SIZE)
         + rs_encoded_size(KEY_SIZE)
         + rs_encoded_size(HMAC_KEY_SIZE);
-    if encrypted_file.len() < min_header_size {
+    if (header.header_len as usize) < min_header_size
+        || encrypted_file.len() < header.header_len as usize
+    {
         return Err(CryptoError::EncryptionDecryptionError(
             "File is too short or corrupted".to_string(),
         ));
     }
 
-    // Split salt, nonce, key hash, HMAC and the encrypted file, and reconstruct with reed-solomon
-    let (serialized_flags, rem_data) = encrypted_file.split_at(4);
-    let (_flags, _): ([bool; 4], usize) =
-        bincode::decode_from_slice(serialized_flags, bincode::config::standard())?;
-    let (encoded_salt_32, rem_data) = rem_data.split_at(rs_encoded_size(SALT_SIZE));
-    let (encoded_nonce_24, rem_data) = rem_data.split_at(rs_encoded_size(NONCE_24_SIZE));
-    let (encoded_key_hash_ref, rem_data) = rem_data.split_at(rs_encoded_size(KEY_SIZE));
-    let (encoded_hmac_tag, ciphertext) = rem_data.split_at(rs_encoded_size(HMAC_KEY_SIZE));
+    let (header_data, ciphertext) = encrypted_file.split_at(header.header_len as usize);
+    let rem = &header_data[HEADER_PREFIX_SIZE..];
+    let (encoded_salt_32, rem) = rem.split_at(rs_encoded_size(SALT_SIZE));
+    let (encoded_nonce_24, rem) = rem.split_at(rs_encoded_size(NONCE_24_SIZE));
+    let (encoded_key_hash_ref, rem) = rem.split_at(rs_encoded_size(KEY_SIZE));
+    let (encoded_hmac_tag, _) = rem.split_at(rs_encoded_size(HMAC_KEY_SIZE));
 
     let salt_32 = rs_decode(encoded_salt_32)?;
     let nonce_24 = rs_decode(encoded_nonce_24)?;
@@ -223,7 +237,6 @@ fn decrypt_normal_file(
         &argon2_config,
     )?);
 
-    // Hash the encryption key for comparison and compare it in constant time with the ref key hash
     let key_hash: [u8; 32] = sha3_32_hash(&key_material[..KEY_SIZE])?;
     let key_correct = constant_time_compare_256_bit(&key_hash, key_hash_ref[0..32].try_into()?);
 
@@ -233,17 +246,10 @@ fn decrypt_normal_file(
         ));
     }
 
-    // Verify HMAC over the header before decrypting
-    let header_bytes = [
-        serialized_flags,
-        encoded_salt_32,
-        encoded_nonce_24,
-        encoded_key_hash_ref,
-    ]
-    .concat();
+    let hmac_input = &header_data[..header_data.len() - rs_encoded_size(HMAC_KEY_SIZE)];
     hmac_sha3_256_verify(
         &key_material[KEY_SIZE..KEY_MATERIAL_SIZE],
-        &header_bytes,
+        hmac_input,
         &hmac_tag,
     )?;
 
@@ -274,41 +280,36 @@ fn decrypt_large_file(
     let tmp_dir_path = tmp_dir_path.as_ref();
     println!("Decrypting {} ...\n", input_path.display());
 
-    let mut serialized_flags = [0u8; 4];
+    let mut encrypted_file = File::open(input_path)?;
+
+    let (prefix_bytes, _header) =
+        format::read_header_from_reader(&mut encrypted_file, format::TYPE_SYMMETRIC)?;
+
     let mut encoded_salt_32 = vec![0u8; rs_encoded_size(SALT_SIZE)];
     let mut encoded_nonce_19 = vec![0u8; rs_encoded_size(NONCE_19_SIZE)];
     let mut encoded_key_hash_ref = vec![0u8; rs_encoded_size(KEY_SIZE)];
     let mut encoded_hmac_tag = vec![0u8; rs_encoded_size(HMAC_KEY_SIZE)];
-    let mut encrypted_file = File::open(input_path)?;
 
-    let mut read_count = encrypted_file.read(&mut serialized_flags)?;
-    if read_count != serialized_flags.len() {
-        return Err(CryptoError::Message("Error reading flags".to_string()));
-    }
-    let (_flags, _): ([bool; 4], usize) =
-        bincode::decode_from_slice(&serialized_flags, bincode::config::standard())?;
-
-    read_count = encrypted_file.read(&mut encoded_salt_32)?;
-    if read_count != encoded_salt_32.len() {
-        return Err(CryptoError::Message("Error reading salt".to_string()));
-    }
-
-    read_count = encrypted_file.read(&mut encoded_nonce_19)?;
-    if read_count != encoded_nonce_19.len() {
-        return Err(CryptoError::Message("Error reading nonce".to_string()));
-    }
-
-    read_count = encrypted_file.read(&mut encoded_key_hash_ref)?;
-    if read_count != encoded_key_hash_ref.len() {
-        return Err(CryptoError::Message(
-            "Error reading key_hash_ref".to_string(),
-        ));
-    }
-
-    read_count = encrypted_file.read(&mut encoded_hmac_tag)?;
-    if read_count != encoded_hmac_tag.len() {
-        return Err(CryptoError::Message("Error reading HMAC tag".to_string()));
-    }
+    encrypted_file
+        .read_exact(&mut encoded_salt_32)
+        .map_err(|_| {
+            CryptoError::EncryptionDecryptionError("File is too short or corrupted".to_string())
+        })?;
+    encrypted_file
+        .read_exact(&mut encoded_nonce_19)
+        .map_err(|_| {
+            CryptoError::EncryptionDecryptionError("File is too short or corrupted".to_string())
+        })?;
+    encrypted_file
+        .read_exact(&mut encoded_key_hash_ref)
+        .map_err(|_| {
+            CryptoError::EncryptionDecryptionError("File is too short or corrupted".to_string())
+        })?;
+    encrypted_file
+        .read_exact(&mut encoded_hmac_tag)
+        .map_err(|_| {
+            CryptoError::EncryptionDecryptionError("File is too short or corrupted".to_string())
+        })?;
 
     let salt_32 = rs_decode(&encoded_salt_32)?;
     let nonce_19: Vec<u8> = rs_decode(&encoded_nonce_19)?;
@@ -332,9 +333,8 @@ fn decrypt_large_file(
         ));
     }
 
-    // Verify HMAC over the header before decrypting
     let mut header_bytes = Vec::new();
-    header_bytes.extend_from_slice(&serialized_flags);
+    header_bytes.extend_from_slice(&prefix_bytes);
     header_bytes.extend_from_slice(&encoded_salt_32);
     header_bytes.extend_from_slice(&encoded_nonce_19);
     header_bytes.extend_from_slice(&encoded_key_hash_ref);

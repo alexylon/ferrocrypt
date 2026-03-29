@@ -70,8 +70,10 @@ The name comes from Latin: "ferrum" (iron) and "ferrugo" (rust).
 **Security Features:**
 
 - **Audited encryption**: Uses the `chacha20poly1305` crate, which has undergone successful security audits
+- **Tamper detection**: HMAC-SHA3-256 authenticates every file header — any modification to the salt, nonce, or flags is detected before decryption begins
 - **Secure secret handling**: Passphrases are protected using the `secrecy` crate, preventing accidental exposure through Debug/Display traits and ensuring automatic memory zeroization when dropped
 - **Error correction**: Reed-Solomon parity bytes protect cryptographic headers from corruption due to bit rot or data transfer errors, enabling reliable data recovery
+- **Versioned file format**: Files start with a magic-byte header that identifies the format, version, and structure. Corrupted, misnamed, or incompatible files produce clear error messages instead of misleading crypto failures
 
 The code is separated in multiple projects - the library `ferrocrypt-lib`, a CLI client `ferrocrypt-cli`,
 a [**TAURI**](https://tauri.app/) based GUI app `ferrocrypt-gui-tauri`, and a [**Dioxus**](https://dioxuslabs.com/) based GUI app `ferrocrypt-gui-dioxus`.

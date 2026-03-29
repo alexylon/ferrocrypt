@@ -17,12 +17,14 @@ use secrecy::{ExposeSecret, SecretString};
 use zeroize::Zeroize;
 
 use crate::common::{get_duration, get_file_stem_to_string, hmac_sha3_256, hmac_sha3_256_verify};
+use crate::format::{self, HEADER_PREFIX_SIZE};
 use crate::reed_solomon::{rs_decode, rs_encode, rs_encoded_size};
 use crate::{CryptoError, archiver};
 
 const NONCE_24_SIZE: usize = 24;
 const KEY_SIZE: usize = 32;
 const HMAC_KEY_SIZE: usize = 32;
+// Both keys are packed into a single RSA envelope: [enc_key | hmac_key]
 const COMBINED_KEY_SIZE: usize = KEY_SIZE + HMAC_KEY_SIZE;
 
 pub fn encrypt_file(
@@ -51,7 +53,6 @@ pub fn encrypt_file(
         let zipped_file = read(&zipped_file_name)?;
         let ciphertext = cipher.encrypt(nonce_24.as_ref().into(), &*zipped_file)?;
 
-        // RSA-encrypt both the symmetric key and HMAC key together
         let mut combined_key = Vec::with_capacity(COMBINED_KEY_SIZE);
         combined_key.extend_from_slice(&symmetric_key);
         combined_key.extend_from_slice(&hmac_key);
@@ -72,23 +73,23 @@ pub fn encrypt_file(
             .create_new(true)
             .open(output_dir.join(format!("{}.fch", file_stem)))?;
 
-        // Reserve header information for decryption
-        let flags: [bool; 4] = [false, false, false, false];
-        let serialized_flags: Vec<u8> =
-            bincode::encode_to_vec(&flags, bincode::config::standard())?;
-
         let encoded_encrypted_combined_key: Vec<u8> = rs_encode(&encrypted_combined_key)?;
         let encoded_nonce_24: Vec<u8> = rs_encode(&nonce_24)?;
 
-        // Compute HMAC over the header
+        let header_len = (HEADER_PREFIX_SIZE
+            + encoded_encrypted_combined_key.len()
+            + encoded_nonce_24.len()
+            + rs_encoded_size(HMAC_KEY_SIZE)) as u16;
+        let prefix = format::build_header_prefix(format::TYPE_HYBRID, 0, header_len);
+
         let mut header_bytes = Vec::new();
-        header_bytes.extend_from_slice(&serialized_flags);
+        header_bytes.extend_from_slice(&prefix);
         header_bytes.extend_from_slice(&encoded_encrypted_combined_key);
         header_bytes.extend_from_slice(&encoded_nonce_24);
         let hmac_tag = hmac_sha3_256(&hmac_key, &header_bytes)?;
         let encoded_hmac_tag: Vec<u8> = rs_encode(&hmac_tag)?;
 
-        encrypted_file_path.write_all(&serialized_flags)?;
+        encrypted_file_path.write_all(&prefix)?;
         encrypted_file_path.write_all(&encoded_encrypted_combined_key)?;
         encrypted_file_path.write_all(&encoded_nonce_24)?;
         encrypted_file_path.write_all(&encoded_hmac_tag)?;
@@ -140,24 +141,26 @@ pub fn decrypt_file(
             }
         };
 
-    let min_header_size = 4
+    let header = format::read_header(&encrypted_file, format::TYPE_HYBRID)?;
+    let min_header_size = HEADER_PREFIX_SIZE
         + rs_encoded_size(rsa_pub_pem_size as usize)
         + rs_encoded_size(NONCE_24_SIZE)
         + rs_encoded_size(HMAC_KEY_SIZE);
-    if encrypted_file.len() < min_header_size {
+    if (header.header_len as usize) < min_header_size
+        || encrypted_file.len() < header.header_len as usize
+    {
         rsa_private_pem.zeroize();
         return Err(CryptoError::EncryptionDecryptionError(
             "File is too short or corrupted".to_string(),
         ));
     }
 
-    let (serialized_flags, rem_data) = encrypted_file.split_at(4);
-    let (_flags, _): ([bool; 4], usize) =
-        bincode::decode_from_slice(serialized_flags, bincode::config::standard())?;
-    let (encoded_encrypted_combined_key, rem_data) =
-        rem_data.split_at(rs_encoded_size(rsa_pub_pem_size as usize));
-    let (encoded_nonce_24, rem_data) = rem_data.split_at(rs_encoded_size(NONCE_24_SIZE));
-    let (encoded_hmac_tag, ciphertext) = rem_data.split_at(rs_encoded_size(HMAC_KEY_SIZE));
+    let (header_data, ciphertext) = encrypted_file.split_at(header.header_len as usize);
+    let rem = &header_data[HEADER_PREFIX_SIZE..];
+    let (encoded_encrypted_combined_key, rem) =
+        rem.split_at(rs_encoded_size(rsa_pub_pem_size as usize));
+    let (encoded_nonce_24, rem) = rem.split_at(rs_encoded_size(NONCE_24_SIZE));
+    let (encoded_hmac_tag, _) = rem.split_at(rs_encoded_size(HMAC_KEY_SIZE));
 
     let encrypted_combined_key = rs_decode(encoded_encrypted_combined_key)?;
     let nonce_24 = rs_decode(encoded_nonce_24)?;
@@ -173,14 +176,8 @@ pub fn decrypt_file(
         *GenericArray::from_slice(&decrypted_combined_key[..KEY_SIZE]);
     let hmac_key = &decrypted_combined_key[KEY_SIZE..COMBINED_KEY_SIZE];
 
-    // Verify HMAC over the header before decrypting
-    let header_bytes = [
-        serialized_flags,
-        encoded_encrypted_combined_key,
-        encoded_nonce_24,
-    ]
-    .concat();
-    hmac_sha3_256_verify(hmac_key, &header_bytes, &hmac_tag)?;
+    let hmac_input = &header_data[..header_data.len() - rs_encoded_size(HMAC_KEY_SIZE)];
+    hmac_sha3_256_verify(hmac_key, hmac_input, &hmac_tag)?;
 
     let result = (|| -> Result<String, CryptoError> {
         let cipher = XChaCha20Poly1305::new(&symmetric_key);

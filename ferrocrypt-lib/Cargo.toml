@@ -30,7 +30,6 @@ hmac = "0.12"
 constant_time_eq = "0"
 reed-solomon-simd = "3"
 serde = { version = "1", features = ["derive"] }
-bincode = "2"
 
 [dev-dependencies]
 ctor = "0.2"

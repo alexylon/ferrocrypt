@@ -6,6 +6,7 @@ All notable changes to FerroCrypt are documented in this file.
 
 ### Added
 - HMAC-SHA3-256 header authentication: detects tampering with file headers (salt, nonce, flags) before decryption
+- Versioned file format with magic bytes (`0xFC` + type), major/minor version, and header length field (see `format.rs` for the full specification). Files from older versions and non-FerroCrypt files are now detected with clear error messages instead of misleading crypto errors. The header length field enables forward compatibility — future minor versions can add fields without breaking older parsers.
 
 ### Changed
 - **Breaking:** New file format — existing `.fcs` and `.fch` files from older versions cannot be decrypted
@@ -13,6 +14,7 @@ All notable changes to FerroCrypt are documented in this file.
 - RSA padding switched from PKCS#1 v1.5 to OAEP (current NIST standard)
 - Stream encryption buffer increased from 500 bytes to 64 KiB for better performance
 - Argon2id time cost lowered from 8 to 2 (offset by the much higher memory)
+- Replaced bincode header serialization with raw byte layout for long-term format stability
 
 ### Fixed
 - Crash (panic) when decrypting truncated or corrupted `.fcs` and `.fch` files

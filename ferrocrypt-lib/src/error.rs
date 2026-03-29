@@ -11,7 +11,6 @@ use thiserror::Error;
 /// | `WalkDirError` | Directory traversal failed | Check directory existence and permissions |
 /// | `ZipError` | Zipping/unzipping archive failed | Inspect archive; ensure disk space |
 /// | `ReedSolomonError` | Error-correction coding failed | Check shard completeness/integrity |
-/// | `BinCodeEncodeError` / `BinCodeDecodeError` | Serialization/deserialization failed | Ensure input format matches expectation |
 /// | `TryFromSliceError` | Byte slice could not be converted | Confirm buffer sizes |
 /// | `EncryptionDecryptionError` | High-level guard for crypto failures | Recheck keys/passwords and inputs |
 /// | `InputPath` | Missing input file or folder | Provide an existing path |
@@ -50,10 +49,6 @@ pub enum CryptoError {
     ZipError(#[from] zip::result::ZipError),
     #[error(transparent)]
     ReedSolomonError(#[from] reed_solomon_simd::Error),
-    #[error(transparent)]
-    BinCodeEncodeError(#[from] bincode::error::EncodeError),
-    #[error(transparent)]
-    BinCodeDecodeError(#[from] bincode::error::DecodeError),
     #[error(transparent)]
     TryFromSliceError(#[from] std::array::TryFromSliceError),
     #[error("{0}")]

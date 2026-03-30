@@ -246,7 +246,23 @@ pub fn unarchive(
     let output_dir = output_dir.as_ref();
     let file = File::open(input_path.as_ref())?;
     let mut archive = zip::ZipArchive::new(file)?;
-    let mut output_path = String::new();
+
+    let first_entry = archive.by_index(0)?;
+    let first_name = first_entry
+        .enclosed_name()
+        .ok_or_else(|| CryptoError::Message("Invalid archive entry".to_string()))?;
+    let first_name_str = first_name
+        .to_str()
+        .ok_or_else(|| ZipError::InvalidArchive(Cow::from("Cannot convert path to &str")))?;
+    let output_path = normalize_paths(&format!("{}{}", output_dir.display(), first_name_str), "").0;
+    let output_path_check = Path::new(&output_path);
+    if output_path_check.exists() {
+        return Err(CryptoError::Message(format!(
+            "Output already exists: {}",
+            output_path
+        )));
+    }
+    drop(first_entry);
 
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
@@ -259,9 +275,6 @@ pub fn unarchive(
             .ok_or_else(|| ZipError::InvalidArchive(Cow::from("Cannot convert path to &str")))?;
         let outpath_full_str =
             normalize_paths(&format!("{}{}", output_dir.display(), outpath_str), "").0;
-        if i == 0 {
-            output_path = outpath_full_str.clone();
-        }
         let outpath_full = Path::new(&outpath_full_str);
 
         {

@@ -67,11 +67,18 @@ pub fn encrypt_file(
             }
         };
 
+        let output_path = output_dir.join(format!("{}.fcr", file_stem));
+        if output_path.exists() {
+            return Err(CryptoError::EncryptionDecryptionError(format!(
+                "Output file already exists: {}",
+                output_path.display()
+            )));
+        }
         let mut output_file = OpenOptions::new()
             .write(true)
             .append(true)
             .create_new(true)
-            .open(output_dir.join(format!("{}.fcr", file_stem)))?;
+            .open(&output_path)?;
 
         let encoded_encrypted_combined_key: Vec<u8> = rs_encode(&encrypted_combined_key)?;
         let encoded_nonce: Vec<u8> = rs_encode(&nonce_24)?;

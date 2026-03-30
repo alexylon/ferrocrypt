@@ -60,11 +60,18 @@ pub fn encrypt_file(
     let zipped_file_name = tmp_dir_path.join(format!("{}.zip", file_stem));
     println!("\nEncrypting {} ...", zipped_file_name.display());
 
+    let output_path = output_dir.join(format!("{}.{}", file_stem, encrypted_extension));
+    if output_path.exists() {
+        return Err(CryptoError::Message(format!(
+            "Output file already exists: {}",
+            output_path.display()
+        )));
+    }
     let mut output_file = OpenOptions::new()
         .write(true)
         .append(true)
         .create_new(true)
-        .open(output_dir.join(format!("{}.{}", file_stem, encrypted_extension)))?;
+        .open(&output_path)?;
 
     // Encode with reed-solomon. The resulting size is three times that of the original
     let encoded_salt: Vec<u8> = rs_encode(&salt)?;

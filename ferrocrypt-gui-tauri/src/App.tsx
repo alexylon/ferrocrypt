@@ -70,12 +70,12 @@ function App() {
         // Modes:
         // se == symmetric encryption, sd == symmetric decryption, he == hybrid encryption, hd == hybrid decryption, gk == generate a key pair
 
-        const fileExtension = inpath.slice(inpath.lastIndexOf("."));
-
-        if (fileExtension === ".fcs") {
-            updateState({mode: "sd"})
-        } else if (fileExtension === ".fch") {
-            updateState({mode: "hd"})
+        if (inpath.endsWith(".fcr")) {
+            invoke<string>("detect_mode", {inpath}).then((detected) => {
+                if (detected) {
+                    updateState({mode: detected})
+                }
+            });
         }
 
         switch (mode) {

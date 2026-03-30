@@ -2,7 +2,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use ferrocrypt::secrecy::SecretString;
-use ferrocrypt::{generate_asymmetric_key_pair, hybrid_encryption, symmetric_encryption};
+use ferrocrypt::{
+    EncryptionMode, detect_encryption_mode, generate_asymmetric_key_pair, hybrid_encryption,
+    symmetric_encryption,
+};
 
 #[tauri::command]
 fn start(
@@ -33,12 +36,22 @@ fn start(
     }
 }
 
+/// Returns "sd" for symmetric, "hd" for hybrid, or "" if not a valid .fcr file.
+#[tauri::command]
+fn detect_mode(inpath: &str) -> String {
+    match detect_encryption_mode(inpath) {
+        Some(EncryptionMode::Symmetric) => "sd".to_string(),
+        Some(EncryptionMode::Hybrid) => "hd".to_string(),
+        None => String::new(),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![start])
+        .invoke_handler(tauri::generate_handler![start, detect_mode])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

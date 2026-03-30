@@ -17,13 +17,13 @@
 //! use ferrocrypt::{symmetric_encryption, CryptoError, secrecy::SecretString};
 //!
 //! # fn run() -> Result<(), CryptoError> {
-//! // Encrypt a folder to out/secrets.fcs
+//! // Encrypt a folder to out/secrets.fcr
 //! let passphrase = SecretString::from("correct horse battery staple".to_string());
 //! let produced = symmetric_encryption("./secrets", "./out", &passphrase, false)?;
 //! println!("wrote {produced}");
 //!
 //! // Decrypt the archive back
-//! let recovered = symmetric_encryption("./out/secrets.fcs", "./restored", &passphrase, false)?;
+//! let recovered = symmetric_encryption("./out/secrets.fcr", "./restored", &passphrase, false)?;
 //! println!("restored to {recovered}");
 //! # Ok(()) }
 //! # fn main() { run().unwrap(); }
@@ -39,15 +39,15 @@
 //! let passphrase = SecretString::from("my-key-pass".to_string());
 //! let _msg = generate_asymmetric_key_pair(4096, &passphrase, "./keys")?;
 //!
-//! // 2) Encrypt to out/payload.fch using the public key (no passphrase needed)
+//! // 2) Encrypt to out/payload.fcr using the public key (no passphrase needed)
 //! let mut pub_key_path = "./keys/rsa-4096-pub-key.pem".to_string();
 //! let empty_passphrase = SecretString::from("".to_string());
 //! let produced = hybrid_encryption("./payload", "./out", &mut pub_key_path, &empty_passphrase)?;
 //! println!("wrote {produced}");
 //!
-//! // 3) Decrypt out/payload.fch using the private key + passphrase to unlock it
+//! // 3) Decrypt out/payload.fcr using the private key + passphrase to unlock it
 //! let mut priv_key_path = "./keys/rsa-4096-priv-key.pem".to_string();
-//! let restored = hybrid_encryption("./out/payload.fch", "./restored", &mut priv_key_path, &passphrase)?;
+//! let restored = hybrid_encryption("./out/payload.fcr", "./restored", &mut priv_key_path, &passphrase)?;
 //! println!("restored to {restored}");
 //! # Ok(()) }
 //! # fn main() { run().unwrap(); }
@@ -56,11 +56,11 @@
 //! ## When to choose which mode
 //! - **Symmetric**: Fastest; same password encrypts and decrypts. Great for
 //!   personal backups or team secrets when you can share the password securely.
-//!   Produces `.fcs` files.
+//!   Produces `.fcr` files.
 //! - **Hybrid**: Safer for distribution—encrypt with a recipient's public key
 //!   (no password needed for encryption); only their passphrase-protected
 //!   private key can decrypt. Each file gets a unique random key. Produces
-//!   `.fch` files.
+//!   `.fcr` files.
 //!
 //! ## Security notes
 //! - All cryptographic operations depend on a secure OS RNG; ensure the target
@@ -86,6 +86,30 @@ use crate::common::normalize_paths;
 pub use crate::error::CryptoError;
 
 pub use secrecy;
+
+/// The encryption mode used to create an `.fcr` file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncryptionMode {
+    Symmetric,
+    Hybrid,
+}
+
+/// Reads the first bytes of an `.fcr` file and returns the encryption mode.
+/// Returns `None` if the file is not a valid FerroCrypt file.
+pub fn detect_encryption_mode(file_path: &str) -> Option<EncryptionMode> {
+    use std::io::Read;
+    let mut buf = [0u8; 2];
+    let mut file = std::fs::File::open(file_path).ok()?;
+    file.read_exact(&mut buf).ok()?;
+    if buf[0] != format::MAGIC_BYTE {
+        return None;
+    }
+    match buf[1] {
+        format::TYPE_SYMMETRIC => Some(EncryptionMode::Symmetric),
+        format::TYPE_HYBRID => Some(EncryptionMode::Hybrid),
+        _ => None,
+    }
+}
 
 mod archiver;
 mod common;
@@ -130,9 +154,9 @@ where
 
 /// Encrypt or decrypt files/directories using password-based symmetric crypto.
 ///
-/// - **Encrypt**: if `input_path` is not already an `.fcs` archive, it is
-///   packaged and encrypted to `output_dir` (writing `<name>.fcs`).
-/// - **Decrypt**: if `input_path` ends with `.fcs`, it is decrypted and
+/// - **Encrypt**: if `input_path` is not already an `.fcr` archive, it is
+///   packaged and encrypted to `output_dir` (writing `<name>.fcr`).
+/// - **Decrypt**: if `input_path` ends with `.fcr`, it is decrypted and
 ///   extracted into `output_dir`.
 /// - `large = true` mirrors the CLI `--large` flag for streaming large inputs.
 ///
@@ -146,10 +170,10 @@ where
 /// // Encrypt a file
 /// let passphrase = SecretString::from("my-secret-password".to_string());
 /// let result = symmetric_encryption("./document.txt", "./encrypted", &passphrase, false)?;
-/// println!("{}", result); // "Encrypted to ./encrypted/document.fcs for X.XXs"
+/// println!("{}", result); // "Encrypted to ./encrypted/document.fcr for X.XXs"
 ///
 /// // Decrypt it back
-/// let result = symmetric_encryption("./encrypted/document.fcs", "./decrypted", &passphrase, false)?;
+/// let result = symmetric_encryption("./encrypted/document.fcr", "./decrypted", &passphrase, false)?;
 /// println!("{}", result); // "Decrypted to ./decrypted/document.txt for X.XXs"
 /// # Ok::<(), ferrocrypt::CryptoError>(())
 /// ```
@@ -160,7 +184,7 @@ pub fn symmetric_encryption(
     large: bool,
 ) -> Result<String, CryptoError> {
     with_tmp_workspace(input_path, output_dir, |input, output, tmp| {
-        if input_path.ends_with(".fcs") {
+        if input_path.ends_with(".fcr") {
             symmetric::decrypt_file(input, output, password, tmp)
         } else {
             symmetric::encrypt_file(input, output, password, large, tmp)
@@ -172,11 +196,11 @@ pub fn symmetric_encryption(
 ///
 /// - `rsa_key_pem` is a **mutable string containing a file path** (not PEM
 ///   contents); it is zeroized after decryption for security.
-/// - **Encrypt** when `input_path` is not `.fch`: uses the public key file
-///   at `rsa_key_pem` to seal a random symmetric key, producing `<name>.fch`.
+/// - **Encrypt** when `input_path` is not `.fcr`: uses the public key file
+///   at `rsa_key_pem` to seal a random symmetric key, producing `<name>.fcr`.
 ///   The `passphrase` parameter is **ignored during encryption** (pass empty
 ///   string).
-/// - **Decrypt** when `input_path` ends with `.fch`: uses the private key file
+/// - **Decrypt** when `input_path` ends with `.fcr`: uses the private key file
 ///   at `rsa_key_pem`. The `passphrase` is **required** to decrypt the private
 ///   key file (must match the passphrase used when generating the keypair).
 ///
@@ -191,12 +215,12 @@ pub fn symmetric_encryption(
 /// let mut pub_key = "./keys/rsa-4096-pub-key.pem".to_string();
 /// let empty = SecretString::from("".to_string());
 /// let result = hybrid_encryption("./secrets", "./encrypted", &mut pub_key, &empty)?;
-/// println!("{}", result); // "Encrypted to ./encrypted/secrets.fch for X.XXs"
+/// println!("{}", result); // "Encrypted to ./encrypted/secrets.fcr for X.XXs"
 ///
 /// // Decrypt with private key (passphrase required)
 /// let mut priv_key = "./keys/rsa-4096-priv-key.pem".to_string();
 /// let passphrase = SecretString::from("my-key-passphrase".to_string());
-/// let result = hybrid_encryption("./encrypted/secrets.fch", "./decrypted", &mut priv_key, &passphrase)?;
+/// let result = hybrid_encryption("./encrypted/secrets.fcr", "./decrypted", &mut priv_key, &passphrase)?;
 /// println!("{}", result); // "Decrypted to ./decrypted/secrets for X.XXs"
 /// # Ok::<(), ferrocrypt::CryptoError>(())
 /// ```
@@ -207,7 +231,7 @@ pub fn hybrid_encryption(
     passphrase: &SecretString,
 ) -> Result<String, CryptoError> {
     with_tmp_workspace(input_path, output_dir, |input, output, tmp| {
-        if input_path.ends_with(".fch") {
+        if input_path.ends_with(".fcr") {
             hybrid::decrypt_file(input, output, rsa_key_pem, passphrase, tmp)
         } else {
             hybrid::encrypt_file(input, output, rsa_key_pem, tmp)

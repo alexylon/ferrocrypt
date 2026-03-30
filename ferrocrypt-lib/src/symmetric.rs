@@ -55,7 +55,7 @@ pub fn encrypt_file(
 
     let stored_key_hash: [u8; KEY_SIZE] = sha3_32_hash(&key_material[..KEY_SIZE])?;
 
-    let encrypted_extension = "fcs";
+    let encrypted_extension = "fcr";
     let file_stem = &archiver::archive(input_path, tmp_dir_path)?;
     let zipped_file_name = tmp_dir_path.join(format!("{}.zip", file_stem));
     println!("\nEncrypting {} ...", zipped_file_name.display());

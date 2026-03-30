@@ -71,7 +71,7 @@ pub fn encrypt_file(
             .write(true)
             .append(true)
             .create_new(true)
-            .open(output_dir.join(format!("{}.fch", file_stem)))?;
+            .open(output_dir.join(format!("{}.fcr", file_stem)))?;
 
         let encoded_encrypted_combined_key: Vec<u8> = rs_encode(&encrypted_combined_key)?;
         let encoded_nonce: Vec<u8> = rs_encode(&nonce_24)?;
@@ -97,7 +97,7 @@ pub fn encrypt_file(
 
         nonce_24.zeroize();
 
-        let encrypted_file_name = output_dir.join(format!("{}.fch", file_stem));
+        let encrypted_file_name = output_dir.join(format!("{}.fcr", file_stem));
         let msg = format!(
             "Encrypted to {} for {}",
             encrypted_file_name.display(),

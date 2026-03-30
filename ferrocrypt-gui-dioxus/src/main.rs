@@ -32,13 +32,11 @@ enum Mode {
 }
 
 impl Mode {
-    fn from_file_extension(path: &str) -> Option<Self> {
-        if path.ends_with(".fcs") {
-            Some(Mode::SymmetricDecrypt)
-        } else if path.ends_with(".fch") {
-            Some(Mode::HybridDecrypt)
-        } else {
-            None
+    fn from_file(path: &str) -> Option<Self> {
+        match ferrocrypt::detect_encryption_mode(path) {
+            Some(ferrocrypt::EncryptionMode::Symmetric) => Some(Mode::SymmetricDecrypt),
+            Some(ferrocrypt::EncryptionMode::Hybrid) => Some(Mode::HybridDecrypt),
+            None => None,
         }
     }
 }
@@ -109,7 +107,7 @@ fn App() -> Element {
                 outpath.set(dir_path);
 
                 // Auto-detect mode from file extension
-                if let Some(detected_mode) = Mode::from_file_extension(&path) {
+                if let Some(detected_mode) = Mode::from_file(&path) {
                     mode.set(detected_mode);
                 }
 

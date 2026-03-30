@@ -7,17 +7,19 @@ All notable changes to FerroCrypt are documented in this file.
 ### Added
 - HMAC-SHA3-256 header authentication: detects tampering with file headers (salt, nonce, flags) before decryption
 - Versioned file format with magic bytes (`0xFC` + type), major/minor version, and header length field (see `format.rs` for the full specification). Files from older versions and non-FerroCrypt files are now detected with clear error messages instead of misleading crypto errors. The header length field enables forward compatibility — future minor versions can add fields without breaking older parsers.
+- `detect_encryption_mode()` public API for determining whether an `.fcr` file uses symmetric or hybrid encryption
 
 ### Changed
-- **Breaking:** New file format — existing `.fcs` and `.fch` files from older versions cannot be decrypted
-- Argon2id memory cost raised from 1 MiB to 64 MiB for stronger brute-force resistance
+- **Breaking:** New file format — existing encrypted files from older versions cannot be decrypted. Unified file extension from `.fcs`/`.fch` to single `.fcr`.
+- **Breaking (library API):** Removed `BinCodeEncodeError`/`BinCodeDecodeError` from `CryptoError` enum
+- Argon2id memory cost raised from 1 MiB to 64 MiB for stronger brute-force resistance (time cost lowered from 8 to 2)
 - RSA padding switched from PKCS#1 v1.5 to OAEP (current NIST standard)
-- Stream encryption buffer increased from 500 bytes to 64 KiB for better performance
-- Argon2id time cost lowered from 8 to 2 (offset by the much higher memory)
+- Stream encryption buffer increased from 500 bytes to 64 KiB
 - Replaced bincode header serialization with raw byte layout for long-term format stability
+- Renamed `byte_size` parameter to `bit_size` in `generate_asymmetric_key_pair`
 
 ### Fixed
-- Crash (panic) when decrypting truncated, corrupted, or maliciously crafted `.fcs`/`.fch` files
+- Crash (panic) when decrypting truncated, corrupted, or maliciously crafted `.fcr` files
 - Crash when Reed-Solomon decoding produces unexpected output length (validated before indexing)
 - Nonexistent input paths silently producing empty encrypted files
 - Key material not zeroized on all error paths: RSA-decrypted keys, combined key buffer, private key PEM content, and HMAC failure early returns now all zeroize correctly
@@ -83,8 +85,7 @@ All notable changes to FerroCrypt are documented in this file.
 - Key zeroization after use
 - CLI with subcommands: `keygen`, `hybrid`, `symmetric`
 - Tauri desktop GUI application
-- `.fcs` file format for symmetric encryption
-- `.fch` file format for hybrid encryption
+- `.fcr` file format for both symmetric and hybrid encryption
 - GitHub Actions CI workflow
 
 ---

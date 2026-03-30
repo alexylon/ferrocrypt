@@ -72,13 +72,13 @@ fn test_cli_symmetric_encrypt_decrypt_file() {
         String::from_utf8_lossy(&encrypt_output.stderr)
     );
 
-    assert!(encrypt_dir.join("test.fcs").exists());
+    assert!(encrypt_dir.join("test.fcr").exists());
 
     // Decrypt
     let decrypt_output = Command::new(&binary)
         .arg("symmetric")
         .arg("-i")
-        .arg(encrypt_dir.join("test.fcs").to_str().unwrap())
+        .arg(encrypt_dir.join("test.fcr").to_str().unwrap())
         .arg("-o")
         .arg(decrypt_dir.to_str().unwrap())
         .arg("-p")
@@ -127,13 +127,13 @@ fn test_cli_symmetric_large_flag() {
         .expect("Failed to execute encrypt command");
 
     assert!(encrypt_output.status.success());
-    assert!(encrypt_dir.join("large.fcs").exists());
+    assert!(encrypt_dir.join("large.fcr").exists());
 
     // Decrypt
     let decrypt_output = Command::new(&binary)
         .arg("symmetric")
         .arg("-i")
-        .arg(encrypt_dir.join("large.fcs").to_str().unwrap())
+        .arg(encrypt_dir.join("large.fcr").to_str().unwrap())
         .arg("-o")
         .arg(decrypt_dir.to_str().unwrap())
         .arg("-p")
@@ -181,7 +181,7 @@ fn test_cli_symmetric_wrong_password() {
     let decrypt_output = Command::new(&binary)
         .arg("symmetric")
         .arg("-i")
-        .arg(encrypt_dir.join("secret.fcs").to_str().unwrap())
+        .arg(encrypt_dir.join("secret.fcr").to_str().unwrap())
         .arg("-o")
         .arg(decrypt_dir.to_str().unwrap())
         .arg("-p")
@@ -285,13 +285,13 @@ fn test_cli_hybrid_encrypt_decrypt_file() {
         String::from_utf8_lossy(&encrypt_output.stderr)
     );
 
-    assert!(encrypt_dir.join("data.fch").exists());
+    assert!(encrypt_dir.join("data.fcr").exists());
 
     // Decrypt with private key
     let decrypt_output = Command::new(&binary)
         .arg("hybrid")
         .arg("-i")
-        .arg(encrypt_dir.join("data.fch").to_str().unwrap())
+        .arg(encrypt_dir.join("data.fcr").to_str().unwrap())
         .arg("-o")
         .arg(decrypt_dir.to_str().unwrap())
         .arg("-k")
@@ -357,7 +357,7 @@ fn test_cli_hybrid_wrong_key_passphrase() {
     let decrypt_output = Command::new(&binary)
         .arg("hybrid")
         .arg("-i")
-        .arg(encrypt_dir.join("data.fch").to_str().unwrap())
+        .arg(encrypt_dir.join("data.fcr").to_str().unwrap())
         .arg("-o")
         .arg(decrypt_dir.to_str().unwrap())
         .arg("-k")
@@ -405,13 +405,13 @@ fn test_cli_directory_encryption() {
         .expect("Failed to execute encrypt command");
 
     assert!(encrypt_output.status.success());
-    assert!(encrypt_dir.join("input_folder.fcs").exists());
+    assert!(encrypt_dir.join("input_folder.fcr").exists());
 
     // Decrypt directory
     let decrypt_output = Command::new(&binary)
         .arg("symmetric")
         .arg("-i")
-        .arg(encrypt_dir.join("input_folder.fcs").to_str().unwrap())
+        .arg(encrypt_dir.join("input_folder.fcr").to_str().unwrap())
         .arg("-o")
         .arg(decrypt_dir.to_str().unwrap())
         .arg("-p")

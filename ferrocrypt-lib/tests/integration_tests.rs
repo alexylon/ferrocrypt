@@ -67,11 +67,11 @@ fn test_symmetric_encrypt_decrypt_single_file() -> Result<(), CryptoError> {
     )?;
 
     assert!(encrypt_result.contains("Encrypted to"));
-    assert!(encrypt_dir.join("input.fcs").exists());
+    assert!(encrypt_dir.join("input.fcr").exists());
 
     // Decrypt
     let decrypt_result = symmetric_encryption(
-        encrypt_dir.join("input.fcs").to_str().unwrap(),
+        encrypt_dir.join("input.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
         false,
@@ -107,11 +107,11 @@ fn test_symmetric_encrypt_decrypt_directory() -> Result<(), CryptoError> {
     )?;
 
     assert!(encrypt_result.contains("Encrypted to"));
-    assert!(encrypt_dir.join("test_folder.fcs").exists());
+    assert!(encrypt_dir.join("test_folder.fcr").exists());
 
     // Decrypt directory
     let decrypt_result = symmetric_encryption(
-        encrypt_dir.join("test_folder.fcs").to_str().unwrap(),
+        encrypt_dir.join("test_folder.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
         false,
@@ -160,7 +160,7 @@ fn test_symmetric_wrong_password() -> Result<(), CryptoError> {
 
     // Try to decrypt with wrong password - should fail
     let result = symmetric_encryption(
-        encrypt_dir.join("secret.fcs").to_str().unwrap(),
+        encrypt_dir.join("secret.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &wrong_pass,
         false,
@@ -201,11 +201,11 @@ fn test_symmetric_large_file_mode() -> Result<(), CryptoError> {
         true, // large mode
     )?;
 
-    assert!(encrypt_dir.join("large.fcs").exists());
+    assert!(encrypt_dir.join("large.fcr").exists());
 
     // Decrypt
     symmetric_encryption(
-        encrypt_dir.join("large.fcs").to_str().unwrap(),
+        encrypt_dir.join("large.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
         false,
@@ -262,7 +262,7 @@ fn test_hybrid_keygen_encrypt_decrypt_file() -> Result<(), CryptoError> {
     )?;
 
     assert!(encrypt_result.contains("Encrypted to"));
-    assert!(encrypt_dir.join("data.fch").exists());
+    assert!(encrypt_dir.join("data.fcr").exists());
 
     // Decrypt with private key
     let mut priv_key_path = keys_dir
@@ -272,7 +272,7 @@ fn test_hybrid_keygen_encrypt_decrypt_file() -> Result<(), CryptoError> {
         .to_string();
 
     let decrypt_result = hybrid_encryption(
-        encrypt_dir.join("data.fch").to_str().unwrap(),
+        encrypt_dir.join("data.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &mut priv_key_path,
         &key_passphrase,
@@ -319,7 +319,7 @@ fn test_hybrid_encrypt_decrypt_directory() -> Result<(), CryptoError> {
         &empty_pass,
     )?;
 
-    assert!(encrypt_dir.join("test_folder.fch").exists());
+    assert!(encrypt_dir.join("test_folder.fcr").exists());
 
     // Decrypt directory
     let mut priv_key_path = keys_dir
@@ -329,7 +329,7 @@ fn test_hybrid_encrypt_decrypt_directory() -> Result<(), CryptoError> {
         .to_string();
 
     hybrid_encryption(
-        encrypt_dir.join("test_folder.fch").to_str().unwrap(),
+        encrypt_dir.join("test_folder.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &mut priv_key_path,
         &key_passphrase,
@@ -387,7 +387,7 @@ fn test_hybrid_wrong_key_passphrase() -> Result<(), CryptoError> {
         .to_string();
 
     let result = hybrid_encryption(
-        encrypt_dir.join("data.fch").to_str().unwrap(),
+        encrypt_dir.join("data.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &mut priv_key_path,
         &wrong_pass,
@@ -452,7 +452,7 @@ fn test_empty_file_encryption() -> Result<(), CryptoError> {
 
     // Decrypt
     symmetric_encryption(
-        encrypt_dir.join("empty.fcs").to_str().unwrap(),
+        encrypt_dir.join("empty.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
         false,
@@ -490,7 +490,7 @@ fn test_unicode_content() -> Result<(), CryptoError> {
 
     // Decrypt
     symmetric_encryption(
-        encrypt_dir.join("unicode.fcs").to_str().unwrap(),
+        encrypt_dir.join("unicode.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
         false,
@@ -526,7 +526,7 @@ fn test_special_characters_in_filename() -> Result<(), CryptoError> {
 
     symmetric_encryption(
         encrypt_dir
-            .join("file-with_special.chars.fcs")
+            .join("file-with_special.chars.fcr")
             .to_str()
             .unwrap(),
         decrypt_dir.to_str().unwrap(),
@@ -549,7 +549,7 @@ fn test_nonexistent_output_dir() {
 }
 
 #[test]
-fn test_decrypt_nonexistent_fcs_file() {
+fn test_decrypt_nonexistent_fcr_file() {
     let test_dir = setup_test_dir("decrypt_nonexistent");
     let decrypt_dir = test_dir.join("decrypted");
     fs::create_dir_all(&decrypt_dir).unwrap();
@@ -557,7 +557,7 @@ fn test_decrypt_nonexistent_fcs_file() {
     let passphrase = SecretString::from("test".to_string());
 
     let result = symmetric_encryption(
-        "/nonexistent/missing.fcs",
+        "/nonexistent/missing.fcr",
         decrypt_dir.to_str().unwrap(),
         &passphrase,
         false,
@@ -590,7 +590,7 @@ fn test_binary_file_content() -> Result<(), CryptoError> {
     )?;
 
     symmetric_encryption(
-        encrypt_dir.join("data.fcs").to_str().unwrap(),
+        encrypt_dir.join("data.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
         false,
@@ -628,7 +628,7 @@ fn test_symmetric_large_mode_wrong_password() -> Result<(), CryptoError> {
 
     // Decrypt with wrong password
     let result = symmetric_encryption(
-        encrypt_dir.join("data.fcs").to_str().unwrap(),
+        encrypt_dir.join("data.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &wrong_pass,
         false,
@@ -664,10 +664,10 @@ fn test_symmetric_large_mode_directory() -> Result<(), CryptoError> {
         true,
     )?;
 
-    assert!(encrypt_dir.join("test_folder.fcs").exists());
+    assert!(encrypt_dir.join("test_folder.fcr").exists());
 
     symmetric_encryption(
-        encrypt_dir.join("test_folder.fcs").to_str().unwrap(),
+        encrypt_dir.join("test_folder.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
         false,
@@ -710,7 +710,7 @@ fn test_symmetric_empty_password() -> Result<(), CryptoError> {
     )?;
 
     symmetric_encryption(
-        encrypt_dir.join("secret.fcs").to_str().unwrap(),
+        encrypt_dir.join("secret.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &empty_pass,
         false,
@@ -768,7 +768,7 @@ fn test_hybrid_wrong_key_pair() -> Result<(), CryptoError> {
         .to_string();
 
     let result = hybrid_encryption(
-        encrypt_dir.join("data.fch").to_str().unwrap(),
+        encrypt_dir.join("data.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &mut priv_key_b,
         &pass_b,
@@ -813,7 +813,7 @@ fn test_hybrid_4096_key_round_trip() -> Result<(), CryptoError> {
         &empty_pass,
     )?;
 
-    assert!(encrypt_dir.join("data.fch").exists());
+    assert!(encrypt_dir.join("data.fcr").exists());
 
     // Decrypt
     let mut priv_key_path = keys_dir
@@ -823,7 +823,7 @@ fn test_hybrid_4096_key_round_trip() -> Result<(), CryptoError> {
         .to_string();
 
     hybrid_encryption(
-        encrypt_dir.join("data.fch").to_str().unwrap(),
+        encrypt_dir.join("data.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &mut priv_key_path,
         &key_passphrase,
@@ -874,7 +874,7 @@ fn test_hybrid_binary_file() -> Result<(), CryptoError> {
         .to_string();
 
     hybrid_encryption(
-        encrypt_dir.join("data.fch").to_str().unwrap(),
+        encrypt_dir.join("data.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &mut priv_key_path,
         &key_passphrase,
@@ -909,13 +909,13 @@ fn test_nonexistent_input_path_encrypt() {
 }
 
 #[test]
-fn test_truncated_fcs_file() {
-    let test_dir = setup_test_dir("truncated_fcs");
+fn test_truncated_symmetric_file() {
+    let test_dir = setup_test_dir("truncated_symmetric");
     let decrypt_dir = test_dir.join("decrypted");
     fs::create_dir_all(&decrypt_dir).unwrap();
 
-    // Write a tiny file that's too short to be a valid .fcs
-    let truncated_file = test_dir.join("truncated.fcs");
+    // Write a tiny file that's too short to be a valid .fcr
+    let truncated_file = test_dir.join("truncated.fcr");
     fs::write(&truncated_file, b"short").unwrap();
 
     let passphrase = SecretString::from("test".to_string());
@@ -931,8 +931,8 @@ fn test_truncated_fcs_file() {
 }
 
 #[test]
-fn test_truncated_fch_file() -> Result<(), CryptoError> {
-    let test_dir = setup_test_dir("truncated_fch");
+fn test_truncated_hybrid_file() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("truncated_hybrid");
     let keys_dir = test_dir.join("keys");
     let decrypt_dir = test_dir.join("decrypted");
     fs::create_dir_all(&keys_dir)?;
@@ -941,8 +941,8 @@ fn test_truncated_fch_file() -> Result<(), CryptoError> {
     let key_passphrase = SecretString::from("pass".to_string());
     generate_asymmetric_key_pair(2048, &key_passphrase, keys_dir.to_str().unwrap())?;
 
-    // Write a tiny file that's too short to be a valid .fch
-    let truncated_file = test_dir.join("truncated.fch");
+    // Write a tiny file that's too short to be a valid .fcr
+    let truncated_file = test_dir.join("truncated.fcr");
     fs::write(&truncated_file, b"short").unwrap();
 
     let mut priv_key_path = keys_dir
@@ -985,7 +985,7 @@ fn test_symmetric_header_tamper_detection() -> Result<(), CryptoError> {
     )?;
 
     // Tamper with a byte in the encoded salt region (offset 10, within the header)
-    let encrypted_path = encrypt_dir.join("secret.fcs");
+    let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
     data[10] ^= 0xFF;
     fs::write(&encrypted_path, &data)?;
@@ -1034,7 +1034,7 @@ fn test_hybrid_header_tamper_detection() -> Result<(), CryptoError> {
     )?;
 
     // Tamper with the encoded nonce region (after flags + encoded_encrypted_key)
-    let encrypted_path = encrypt_dir.join("secret.fch");
+    let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
     // Flip a byte well into the header but before the HMAC tag
     let tamper_offset = data.len() / 3;
@@ -1062,11 +1062,11 @@ fn test_hybrid_header_tamper_detection() -> Result<(), CryptoError> {
 #[test]
 fn test_not_a_ferrocrypt_file() {
     let test_dir = setup_test_dir("not_ferrocrypt");
-    let fake_file = test_dir.join("photo.fcs");
+    let fake_file = test_dir.join("photo.fcr");
     let decrypt_dir = test_dir.join("decrypted");
     fs::create_dir_all(&decrypt_dir).unwrap();
 
-    // A JPEG header renamed to .fcs
+    // A JPEG header renamed to .fcr
     fs::write(&fake_file, b"\xFF\xD8\xFF\xE0fake jpeg data").unwrap();
 
     let passphrase = SecretString::from("test".to_string());
@@ -1106,7 +1106,7 @@ fn test_future_major_version_rejected() -> Result<(), CryptoError> {
     )?;
 
     // Patch the major version byte (offset 2) to a future version
-    let encrypted_path = encrypt_dir.join("data.fcs");
+    let encrypted_path = encrypt_dir.join("data.fcr");
     let mut data = fs::read(&encrypted_path)?;
     data[2] = 99;
     fs::write(&encrypted_path, &data)?;
@@ -1131,7 +1131,7 @@ fn test_future_major_version_rejected() -> Result<(), CryptoError> {
 }
 
 #[test]
-fn test_wrong_format_type_fch_as_fcs() -> Result<(), CryptoError> {
+fn test_wrong_format_type_hybrid_as_symmetric() -> Result<(), CryptoError> {
     let test_dir = setup_test_dir("wrong_format_type");
     let keys_dir = test_dir.join("keys");
     let input_file = test_dir.join("data.txt");
@@ -1146,7 +1146,7 @@ fn test_wrong_format_type_fch_as_fcs() -> Result<(), CryptoError> {
     let key_passphrase = SecretString::from("pass".to_string());
     generate_asymmetric_key_pair(2048, &key_passphrase, keys_dir.to_str().unwrap())?;
 
-    // Encrypt as hybrid (.fch)
+    // Encrypt as hybrid
     let mut pub_key_path = keys_dir
         .join("rsa-2048-pub-key.pem")
         .to_str()
@@ -1161,14 +1161,11 @@ fn test_wrong_format_type_fch_as_fcs() -> Result<(), CryptoError> {
         &empty_pass,
     )?;
 
-    // Rename .fch to .fcs and try to decrypt as symmetric
-    let fch_path = encrypt_dir.join("data.fch");
-    let fcs_path = encrypt_dir.join("data.fcs");
-    fs::rename(&fch_path, &fcs_path)?;
-
+    // Try to decrypt a hybrid .fcr file with symmetric_encryption — format type mismatch
+    let encrypted_path = encrypt_dir.join("data.fcr");
     let passphrase = SecretString::from("pass".to_string());
     let result = symmetric_encryption(
-        fcs_path.to_str().unwrap(),
+        encrypted_path.to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
         false,
@@ -1206,7 +1203,7 @@ fn test_symmetric_empty_file_large_mode() -> Result<(), CryptoError> {
     )?;
 
     symmetric_encryption(
-        encrypt_dir.join("empty.fcs").to_str().unwrap(),
+        encrypt_dir.join("empty.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
         false,
@@ -1255,7 +1252,7 @@ fn test_hybrid_empty_file() -> Result<(), CryptoError> {
         .to_string();
 
     hybrid_encryption(
-        encrypt_dir.join("empty.fch").to_str().unwrap(),
+        encrypt_dir.join("empty.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &mut priv_key,
         &key_passphrase,
@@ -1294,8 +1291,8 @@ fn test_two_encryptions_produce_different_output() -> Result<(), CryptoError> {
         false,
     )?;
 
-    let file_a = fs::read(encrypt_dir_a.join("data.fcs"))?;
-    let file_b = fs::read(encrypt_dir_b.join("data.fcs"))?;
+    let file_a = fs::read(encrypt_dir_a.join("data.fcr"))?;
+    let file_b = fs::read(encrypt_dir_b.join("data.fcr"))?;
 
     // Same plaintext + same password must produce different ciphertext (unique salt + nonce)
     assert_ne!(file_a, file_b);

@@ -63,9 +63,11 @@ The name comes from Latin: "ferrum" (iron) and "ferrugo" (rust).
 
 **Encryption Modes:**
 
-1. **Symmetric** - Uses XChaCha20-Poly1305 encryption with Argon2id password-based key derivation. Ideal for personal use where the same password encrypts and decrypts data. Produces `.fcs` vault files.
+1. **Symmetric** - Uses XChaCha20-Poly1305 encryption with Argon2id password-based key derivation. Ideal for personal use where the same password encrypts and decrypts data.
 
-2. **Hybrid** - Combines XChaCha20-Poly1305 (data encryption) with RSA-4096 (key encryption). Each file/folder gets a unique random key, encrypted with your public key. Requires both the private key AND password for decryption, providing dual-layer security. Produces `.fch` vault files.
+2. **Hybrid** - Combines XChaCha20-Poly1305 (data encryption) with RSA-4096 (key encryption). Each file/folder gets a unique random key, encrypted with your public key. Requires both the private key AND password for decryption, providing dual-layer security.
+
+Both modes produce `.fcr` vault files. The format is self-identifying — the file header distinguishes symmetric from hybrid internally.
 
 **Security Features:**
 

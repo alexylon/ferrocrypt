@@ -115,8 +115,8 @@ fn validate_header_bytes(
 
     if prefix[1] != expected_type {
         let expected = match expected_type {
-            TYPE_SYMMETRIC => "symmetric (.fcs)",
-            TYPE_HYBRID => "hybrid (.fch)",
+            TYPE_SYMMETRIC => "symmetric",
+            TYPE_HYBRID => "hybrid",
             _ => "unknown",
         };
         return Err(CryptoError::EncryptionDecryptionError(format!(

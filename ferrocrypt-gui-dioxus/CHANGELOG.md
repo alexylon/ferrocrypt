@@ -9,7 +9,7 @@
 - Hybrid encryption/decryption with RSA keys
 - RSA key pair generation (4096-bit)
 - Large file support option (low RAM usage)
-- Auto-detection of file types (.fcs, .fch)
+- Auto-detection of encrypted files (.fcr)
 - Password visibility toggle with proper icons
 - Password match indicator with visual feedback
 - File and folder selection via native dialogs

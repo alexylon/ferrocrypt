@@ -10,7 +10,7 @@ This application provides the same functionality as ferrocrypt-gui-tauri (Tauri 
 - **Hybrid Encryption/Decryption**: RSA + ChaCha20 encryption
 - **Key Generation**: Generate RSA key pairs (4096-bit)
 - **Large File Support**: Low RAM usage mode for large files
-- **Auto-detection**: Automatically detects encryption type from file extension (.fcs, .fch)
+- **Auto-detection**: Automatically detects encrypted files from the `.fcr` extension
 
 ## Building
 

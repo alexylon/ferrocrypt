@@ -5,12 +5,13 @@ All notable changes to FerroCrypt are documented in this file.
 ## [Unreleased]
 
 ### Added
+- HKDF-SHA3-256 subkey derivation: Argon2id now produces 32 bytes of input keying material, expanded via HKDF into separate encryption and HMAC subkeys with domain separation (`ferrocrypt-enc`, `ferrocrypt-hmac`). A separate 32-byte HKDF salt is stored in the header.
 - HMAC-SHA3-256 header authentication: detects tampering with file headers (salt, nonce, flags) before decryption
 - Versioned file format with magic bytes (`0xFC` + type), major/minor version, and header length field (see `format.rs` for the full specification). Files from older versions and non-FerroCrypt files are now detected with clear error messages instead of misleading crypto errors. The header length field enables forward compatibility — future minor versions can add fields without breaking older parsers.
 - `detect_encryption_mode()` public API for determining whether an `.fcr` file uses symmetric or hybrid encryption
 
 ### Changed
-- **Breaking:** New file format — existing encrypted files from older versions cannot be decrypted. Unified file extension from `.fcs`/`.fch` to single `.fcr`. Both symmetric and hybrid modes now use the STREAM construction (EncryptorBE32/DecryptorBE32) for streaming encrypt/decrypt, eliminating the need to load entire files into memory. Hybrid nonce changed from 24 to 19 bytes to match the STREAM format.
+- **Breaking:** New file format — existing encrypted files from older versions cannot be decrypted. Unified file extension from `.fcs`/`.fch` to single `.fcr`. Both symmetric and hybrid modes now use the STREAM construction (EncryptorBE32/DecryptorBE32) for streaming encrypt/decrypt, eliminating the need to load entire files into memory. Hybrid nonce changed from 24 to 19 bytes to match the STREAM format. Symmetric header now includes an HKDF salt field.
 - **Breaking (library API):** Removed `BinCodeEncodeError`/`BinCodeDecodeError` and `ReedSolomonError` from `CryptoError` enum
 - **Breaking (CLI):** Removed `--large` flag — all encryption now uses streaming mode unconditionally
 - **Breaking:** Argon2id parameters raised to 1 GiB memory / t=4 / p=4 for stronger brute-force resistance

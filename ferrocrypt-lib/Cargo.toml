@@ -27,6 +27,7 @@ chacha20poly1305 = { version = "0.10", features = ["std", "stream"] }
 rust-argon2 = "3"
 sha3 = "0.10"
 hmac = "0.12"
+hkdf = "0.12"
 constant_time_eq = "0"
 serde = { version = "1", features = ["derive"] }
 

@@ -70,21 +70,6 @@ pub fn build_header_prefix(
     ]
 }
 
-/// Reads and validates the header prefix from a byte slice.
-pub fn read_header(data: &[u8], expected_type: u8) -> Result<FileHeader, CryptoError> {
-    if data.len() < HEADER_PREFIX_SIZE {
-        return Err(CryptoError::EncryptionDecryptionError(
-            "File is too short or corrupted".to_string(),
-        ));
-    }
-
-    let prefix: &[u8; HEADER_PREFIX_SIZE] =
-        data[..HEADER_PREFIX_SIZE].try_into().map_err(|_| {
-            CryptoError::EncryptionDecryptionError("File is too short or corrupted".to_string())
-        })?;
-    validate_header_bytes(prefix, expected_type)
-}
-
 /// Reads and validates the header prefix from a reader (for streaming reads).
 /// Returns both the raw prefix bytes (needed for HMAC) and the parsed header.
 pub fn read_header_from_reader(

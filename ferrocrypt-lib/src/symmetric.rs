@@ -11,16 +11,14 @@ use secrecy::{ExposeSecret, SecretString};
 use zeroize::Zeroizing;
 
 use crate::common::{
-    constant_time_compare_256_bit, get_duration, get_file_stem_to_string, hmac_sha3_256,
-    hmac_sha3_256_verify, sha3_32_hash,
+    NONCE_SIZE, constant_time_compare_256_bit, get_duration, get_file_stem_to_string,
+    hmac_sha3_256, hmac_sha3_256_verify, sha3_32_hash, stream_decrypt, stream_encrypt,
 };
 use crate::format::{self, HEADER_PREFIX_SIZE};
 use crate::reed_solomon::{rs_decode_exact, rs_encode, rs_encoded_size};
 use crate::{CryptoError, archiver};
 
-const BUFFER_SIZE: usize = 65536;
 const SALT_SIZE: usize = 32;
-const NONCE_SIZE: usize = 19;
 const KEY_SIZE: usize = 32;
 const HMAC_KEY_SIZE: usize = 32;
 // Argon2 derives 64 bytes: first 32 for encryption, second 32 for header HMAC
@@ -85,7 +83,7 @@ pub fn encrypt_file(
         + rs_encoded_size(HMAC_KEY_SIZE)) as u16;
     let prefix = format::build_header_prefix(format::TYPE_SYMMETRIC, 0, header_len);
 
-    let mut stream_encryptor = stream::EncryptorBE32::from_aead(cipher, nonce.as_ref().into());
+    let stream_encryptor = stream::EncryptorBE32::from_aead(cipher, nonce.as_ref().into());
 
     let mut header_bytes = Vec::with_capacity(
         prefix.len() + encoded_salt.len() + encoded_nonce.len() + encoded_key_hash.len(),
@@ -97,8 +95,6 @@ pub fn encrypt_file(
     let hmac_tag = hmac_sha3_256(hmac_key, &header_bytes)?;
     let encoded_hmac_tag: Vec<u8> = rs_encode(&hmac_tag)?;
 
-    let mut buffer = [0u8; BUFFER_SIZE];
-
     output_file.write_all(&prefix)?;
     output_file.write_all(&encoded_salt)?;
     output_file.write_all(&encoded_nonce)?;
@@ -106,30 +102,7 @@ pub fn encrypt_file(
     output_file.write_all(&encoded_hmac_tag)?;
 
     let mut source_file = File::open(&zipped_file_name)?;
-    loop {
-        let mut filled = 0;
-        while filled < BUFFER_SIZE {
-            let n = source_file.read(&mut buffer[filled..])?;
-            if n == 0 {
-                break;
-            }
-            filled += n;
-        }
-
-        if filled == BUFFER_SIZE {
-            let ciphertext = stream_encryptor
-                .encrypt_next(buffer.as_slice())
-                .map_err(CryptoError::ChaCha20Poly1305Error)?;
-            output_file.write_all(&ciphertext)?;
-        } else {
-            // filled < BUFFER_SIZE means EOF; finalize the stream (even if filled == 0)
-            let ciphertext = stream_encryptor
-                .encrypt_last(&buffer[..filled])
-                .map_err(CryptoError::ChaCha20Poly1305Error)?;
-            output_file.write_all(&ciphertext)?;
-            break;
-        }
-    }
+    stream_encrypt(stream_encryptor, &mut source_file, &mut output_file)?;
 
     let result = format!(
         "Encrypted to {} in {}\n",
@@ -216,7 +189,7 @@ pub fn decrypt_file(
 
     println!("Decrypting ...");
     let cipher = XChaCha20Poly1305::new((&key_material[..KEY_SIZE]).into());
-    let mut stream_decryptor = stream::DecryptorBE32::from_aead(cipher, nonce.as_slice().into());
+    let stream_decryptor = stream::DecryptorBE32::from_aead(cipher, nonce.as_slice().into());
     let decrypted_file_stem = &get_file_stem_to_string(input_path)?;
     let decrypted_file_path = tmp_dir_path.join(format!("{}.zip", decrypted_file_stem));
     let mut decrypted_file = OpenOptions::new()
@@ -225,35 +198,7 @@ pub fn decrypt_file(
         .create_new(true)
         .open(&decrypted_file_path)?;
 
-    // Streaming decryption: BUFFER_SIZE + 16 bytes for the Poly1305 authentication tag
-    const ENCRYPTED_BUFFER_SIZE: usize = BUFFER_SIZE + 16;
-    let mut buffer = [0u8; ENCRYPTED_BUFFER_SIZE];
-
-    loop {
-        let mut filled = 0;
-        while filled < ENCRYPTED_BUFFER_SIZE {
-            let n = encrypted_file.read(&mut buffer[filled..])?;
-            if n == 0 {
-                break;
-            }
-            filled += n;
-        }
-
-        if filled == ENCRYPTED_BUFFER_SIZE {
-            let plaintext = stream_decryptor
-                .decrypt_next(buffer.as_slice())
-                .map_err(CryptoError::ChaCha20Poly1305Error)?;
-            decrypted_file.write_all(&plaintext)?;
-        } else {
-            // filled < ENCRYPTED_BUFFER_SIZE (including 0) means final chunk.
-            // decrypt_last verifies the STREAM terminator, catching truncation.
-            let plaintext = stream_decryptor
-                .decrypt_last(&buffer[..filled])
-                .map_err(CryptoError::ChaCha20Poly1305Error)?;
-            decrypted_file.write_all(&plaintext)?;
-            break;
-        }
-    }
+    stream_decrypt(stream_decryptor, &mut encrypted_file, &mut decrypted_file)?;
 
     let output_path = archiver::unarchive(&decrypted_file_path, output_dir)?;
 

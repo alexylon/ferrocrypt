@@ -1,14 +1,10 @@
-use std::fs::{self, OpenOptions, read};
-use std::io::Write;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::Path;
 
 use chacha20poly1305::{
     XChaCha20Poly1305,
-    aead::{
-        Aead, KeyInit, OsRng,
-        generic_array::{GenericArray, typenum},
-        rand_core::RngCore,
-    },
+    aead::{KeyInit, OsRng, rand_core::RngCore, stream},
 };
 use openssl::pkey::Private;
 use openssl::rsa::{Padding, Rsa};
@@ -16,12 +12,14 @@ use openssl::symm::Cipher;
 use secrecy::{ExposeSecret, SecretString};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::common::{get_duration, get_file_stem_to_string, hmac_sha3_256, hmac_sha3_256_verify};
+use crate::common::{
+    NONCE_SIZE, get_duration, get_file_stem_to_string, hmac_sha3_256, hmac_sha3_256_verify,
+    stream_decrypt, stream_encrypt,
+};
 use crate::format::{self, HEADER_PREFIX_SIZE};
 use crate::reed_solomon::{rs_decode_exact, rs_encode, rs_encoded_size};
 use crate::{CryptoError, archiver};
 
-const NONCE_24_SIZE: usize = 24;
 const KEY_SIZE: usize = 32;
 const HMAC_KEY_SIZE: usize = 32;
 // Both keys are packed into a single RSA envelope: [enc_key | hmac_key]
@@ -47,11 +45,8 @@ pub fn encrypt_file(
     let result = (|| -> Result<String, CryptoError> {
         let cipher = XChaCha20Poly1305::new(&symmetric_key);
 
-        let mut nonce_24 = [0u8; NONCE_24_SIZE];
-        OsRng.fill_bytes(&mut nonce_24);
-
-        let zipped_file = Zeroizing::new(read(&zipped_file_name)?);
-        let ciphertext = cipher.encrypt(nonce_24.as_ref().into(), &**zipped_file)?;
+        let mut nonce = [0u8; NONCE_SIZE];
+        OsRng.fill_bytes(&mut nonce);
 
         let mut combined_key = Zeroizing::new(vec![0u8; COMBINED_KEY_SIZE]);
         combined_key[..KEY_SIZE].copy_from_slice(&symmetric_key);
@@ -81,13 +76,15 @@ pub fn encrypt_file(
             .open(&output_path)?;
 
         let encoded_encrypted_combined_key: Vec<u8> = rs_encode(&encrypted_combined_key)?;
-        let encoded_nonce: Vec<u8> = rs_encode(&nonce_24)?;
+        let encoded_nonce: Vec<u8> = rs_encode(&nonce)?;
 
         let header_len = (HEADER_PREFIX_SIZE
             + encoded_encrypted_combined_key.len()
             + encoded_nonce.len()
             + rs_encoded_size(HMAC_KEY_SIZE)) as u16;
         let prefix = format::build_header_prefix(format::TYPE_HYBRID, 0, header_len);
+
+        let stream_encryptor = stream::EncryptorBE32::from_aead(cipher, nonce.as_ref().into());
 
         let mut header_bytes = Vec::with_capacity(
             prefix.len() + encoded_encrypted_combined_key.len() + encoded_nonce.len(),
@@ -102,9 +99,11 @@ pub fn encrypt_file(
         output_file.write_all(&encoded_encrypted_combined_key)?;
         output_file.write_all(&encoded_nonce)?;
         output_file.write_all(&encoded_hmac_tag)?;
-        output_file.write_all(&ciphertext)?;
 
-        nonce_24.zeroize();
+        let mut source_file = File::open(&zipped_file_name)?;
+        stream_encrypt(stream_encryptor, &mut source_file, &mut output_file)?;
+
+        nonce.zeroize();
 
         let msg = format!(
             "Encrypted to {} in {}\n",
@@ -137,8 +136,6 @@ pub fn decrypt_file(
 
     println!("\nDecrypting ...");
 
-    let encrypted_file: Vec<u8> = read(input_path)?;
-
     let rsa_key_size =
         match get_public_key_size_from_private_key(&priv_key_str, passphrase.expose_secret()) {
             Ok(rsa_key_size) => rsa_key_size,
@@ -150,31 +147,44 @@ pub fn decrypt_file(
             }
         };
 
-    let header = format::read_header(&encrypted_file, format::TYPE_HYBRID)?;
+    let mut encrypted_file = File::open(input_path)?;
+
+    let (prefix_bytes, header) =
+        format::read_header_from_reader(&mut encrypted_file, format::TYPE_HYBRID)?;
+
     let min_header_size = HEADER_PREFIX_SIZE
         + rs_encoded_size(rsa_key_size as usize)
-        + rs_encoded_size(NONCE_24_SIZE)
+        + rs_encoded_size(NONCE_SIZE)
         + rs_encoded_size(HMAC_KEY_SIZE);
-    if (header.header_len as usize) < min_header_size
-        || encrypted_file.len() < header.header_len as usize
-    {
+    if (header.header_len as usize) < min_header_size {
         rsa_private_pem.zeroize();
         return Err(CryptoError::EncryptionDecryptionError(
             "File is too short or corrupted".to_string(),
         ));
     }
 
-    let (header_data, ciphertext) = encrypted_file.split_at(header.header_len as usize);
-    let rem = &header_data[HEADER_PREFIX_SIZE..];
-    let (encoded_encrypted_combined_key, rem) =
-        rem.split_at(rs_encoded_size(rsa_key_size as usize));
-    let (encoded_nonce, rem) = rem.split_at(rs_encoded_size(NONCE_24_SIZE));
-    let (encoded_hmac_tag, _) = rem.split_at(rs_encoded_size(HMAC_KEY_SIZE));
+    let mut encoded_encrypted_combined_key = vec![0u8; rs_encoded_size(rsa_key_size as usize)];
+    let mut encoded_nonce = vec![0u8; rs_encoded_size(NONCE_SIZE)];
+    let mut encoded_hmac_tag = vec![0u8; rs_encoded_size(HMAC_KEY_SIZE)];
+
+    encrypted_file
+        .read_exact(&mut encoded_encrypted_combined_key)
+        .map_err(|_| {
+            CryptoError::EncryptionDecryptionError("File is too short or corrupted".to_string())
+        })?;
+    encrypted_file.read_exact(&mut encoded_nonce).map_err(|_| {
+        CryptoError::EncryptionDecryptionError("File is too short or corrupted".to_string())
+    })?;
+    encrypted_file
+        .read_exact(&mut encoded_hmac_tag)
+        .map_err(|_| {
+            CryptoError::EncryptionDecryptionError("File is too short or corrupted".to_string())
+        })?;
 
     let encrypted_combined_key =
-        rs_decode_exact(encoded_encrypted_combined_key, rsa_key_size as usize)?;
-    let nonce = rs_decode_exact(encoded_nonce, NONCE_24_SIZE)?;
-    let hmac_tag = rs_decode_exact(encoded_hmac_tag, HMAC_KEY_SIZE)?;
+        rs_decode_exact(&encoded_encrypted_combined_key, rsa_key_size as usize)?;
+    let nonce = rs_decode_exact(&encoded_nonce, NONCE_SIZE)?;
+    let hmac_tag = rs_decode_exact(&encoded_hmac_tag, HMAC_KEY_SIZE)?;
 
     let mut decrypted_combined_key = decrypt_key(
         &encrypted_combined_key,
@@ -182,22 +192,31 @@ pub fn decrypt_file(
         passphrase.expose_secret(),
     )?;
 
-    let mut symmetric_key: GenericArray<u8, typenum::U32> =
-        *GenericArray::from_slice(&decrypted_combined_key[..KEY_SIZE]);
-
     // Closure captures the result so zeroization always runs after it
     let result = (|| -> Result<String, CryptoError> {
         let hmac_key = &decrypted_combined_key[KEY_SIZE..COMBINED_KEY_SIZE];
-        let hmac_input = &header_data[..header_data.len() - rs_encoded_size(HMAC_KEY_SIZE)];
-        hmac_sha3_256_verify(hmac_key, hmac_input, &hmac_tag)?;
 
-        let cipher = XChaCha20Poly1305::new(&symmetric_key);
-        let file_decrypted =
-            Zeroizing::new(cipher.decrypt(nonce.as_slice().into(), ciphertext.as_ref())?);
-        let file_stem_decrypted = &get_file_stem_to_string(input_path)?;
-        let decrypted_file_path = tmp_dir_path.join(format!("{}.zip", file_stem_decrypted));
+        let mut header_bytes = Vec::with_capacity(
+            prefix_bytes.len() + encoded_encrypted_combined_key.len() + encoded_nonce.len(),
+        );
+        header_bytes.extend_from_slice(&prefix_bytes);
+        header_bytes.extend_from_slice(&encoded_encrypted_combined_key);
+        header_bytes.extend_from_slice(&encoded_nonce);
+        hmac_sha3_256_verify(hmac_key, &header_bytes, &hmac_tag)?;
 
-        fs::write(&decrypted_file_path, &*file_decrypted)?;
+        let cipher = XChaCha20Poly1305::new((&decrypted_combined_key[..KEY_SIZE]).into());
+        let stream_decryptor = stream::DecryptorBE32::from_aead(cipher, nonce.as_slice().into());
+
+        let decrypted_file_stem = &get_file_stem_to_string(input_path)?;
+        let decrypted_file_path = tmp_dir_path.join(format!("{}.zip", decrypted_file_stem));
+        let mut decrypted_file = OpenOptions::new()
+            .write(true)
+            .append(true)
+            .create_new(true)
+            .open(&decrypted_file_path)?;
+
+        stream_decrypt(stream_decryptor, &mut encrypted_file, &mut decrypted_file)?;
+
         let output_path = archiver::unarchive(&decrypted_file_path, output_dir)?;
 
         let msg = format!(
@@ -210,7 +229,6 @@ pub fn decrypt_file(
         Ok(msg)
     })();
 
-    symmetric_key.zeroize();
     decrypted_combined_key.zeroize();
     rsa_private_pem.zeroize();
     result

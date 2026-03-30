@@ -1,5 +1,7 @@
+use std::io::{Read, Write};
 use std::path::Path;
 
+use chacha20poly1305::{XChaCha20Poly1305, aead::stream};
 use constant_time_eq::constant_time_eq_32;
 use hmac::{Hmac, Mac};
 use sha3::{Digest, Sha3_256};
@@ -7,6 +9,13 @@ use sha3::{Digest, Sha3_256};
 use crate::CryptoError;
 
 type HmacSha3_256 = Hmac<Sha3_256>;
+
+/// Streaming I/O buffer size.
+pub const BUFFER_SIZE: usize = 65536;
+/// Poly1305 authentication tag size in bytes.
+pub const TAG_SIZE: usize = 16;
+/// STREAM nonce size: XChaCha20's 24-byte nonce minus 5 bytes for counter and last-block flag.
+pub const NONCE_SIZE: usize = 19;
 
 pub fn normalize_paths(src_file_path: &str, dest_dir_path: &str) -> (String, String) {
     let src_file_path_norm = src_file_path.replace('\\', "/");
@@ -71,6 +80,77 @@ pub fn get_duration(seconds: f64) -> String {
     } else {
         format!("{} min, {:.2} sec", seconds as u32 / 60, seconds % 60_f64)
     }
+}
+
+/// Streaming encryption: reads plaintext from `source` in chunks, encrypts with the
+/// STREAM construction, and writes ciphertext to `output`.
+pub fn stream_encrypt(
+    mut encryptor: stream::EncryptorBE32<XChaCha20Poly1305>,
+    source: &mut impl Read,
+    output: &mut impl Write,
+) -> Result<(), CryptoError> {
+    let mut buffer = [0u8; BUFFER_SIZE];
+    loop {
+        let mut filled = 0;
+        while filled < BUFFER_SIZE {
+            let n = source.read(&mut buffer[filled..])?;
+            if n == 0 {
+                break;
+            }
+            filled += n;
+        }
+
+        if filled == BUFFER_SIZE {
+            let ciphertext = encryptor
+                .encrypt_next(buffer.as_slice())
+                .map_err(CryptoError::ChaCha20Poly1305Error)?;
+            output.write_all(&ciphertext)?;
+        } else {
+            let ciphertext = encryptor
+                .encrypt_last(&buffer[..filled])
+                .map_err(CryptoError::ChaCha20Poly1305Error)?;
+            output.write_all(&ciphertext)?;
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Streaming decryption: reads ciphertext from `source` in chunks, decrypts with the
+/// STREAM construction, and writes plaintext to `output`.
+/// `decrypt_last` is always called on the final chunk, verifying the STREAM terminator
+/// and catching any truncation.
+pub fn stream_decrypt(
+    mut decryptor: stream::DecryptorBE32<XChaCha20Poly1305>,
+    source: &mut impl Read,
+    output: &mut impl Write,
+) -> Result<(), CryptoError> {
+    const ENCRYPTED_BUFFER_SIZE: usize = BUFFER_SIZE + TAG_SIZE;
+    let mut buffer = [0u8; ENCRYPTED_BUFFER_SIZE];
+    loop {
+        let mut filled = 0;
+        while filled < ENCRYPTED_BUFFER_SIZE {
+            let n = source.read(&mut buffer[filled..])?;
+            if n == 0 {
+                break;
+            }
+            filled += n;
+        }
+
+        if filled == ENCRYPTED_BUFFER_SIZE {
+            let plaintext = decryptor
+                .decrypt_next(buffer.as_slice())
+                .map_err(CryptoError::ChaCha20Poly1305Error)?;
+            output.write_all(&plaintext)?;
+        } else {
+            let plaintext = decryptor
+                .decrypt_last(&buffer[..filled])
+                .map_err(CryptoError::ChaCha20Poly1305Error)?;
+            output.write_all(&plaintext)?;
+            break;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

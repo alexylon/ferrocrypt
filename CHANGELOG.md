@@ -10,17 +10,23 @@ All notable changes to FerroCrypt are documented in this file.
 - `detect_encryption_mode()` public API for determining whether an `.fcr` file uses symmetric or hybrid encryption
 
 ### Changed
-- **Breaking:** New file format — existing encrypted files from older versions cannot be decrypted. Unified file extension from `.fcs`/`.fch` to single `.fcr`.
-- **Breaking (library API):** Removed `BinCodeEncodeError`/`BinCodeDecodeError` from `CryptoError` enum
-- Argon2id memory cost raised from 1 MiB to 64 MiB for stronger brute-force resistance (time cost lowered from 8 to 2)
-- RSA padding switched from PKCS#1 v1.5 to OAEP (current NIST standard)
+- **Breaking:** New file format — existing encrypted files from older versions cannot be decrypted. Unified file extension from `.fcs`/`.fch` to single `.fcr`. Both symmetric and hybrid modes now use the STREAM construction (EncryptorBE32/DecryptorBE32) for streaming encrypt/decrypt, eliminating the need to load entire files into memory. Hybrid nonce changed from 24 to 19 bytes to match the STREAM format.
+- **Breaking (library API):** Removed `BinCodeEncodeError`/`BinCodeDecodeError` and `ReedSolomonError` from `CryptoError` enum
+- **Breaking (CLI):** Removed `--large` flag — all encryption now uses streaming mode unconditionally
+- Argon2id parameters raised to 1 GiB memory / t=4 / p=4 for stronger brute-force resistance
+- RSA OAEP hash upgraded from SHA-1 to SHA-256 (both OAEP hash and MGF1 hash), using the high-level OpenSSL Encrypter/Decrypter API
+- Replaced `reed-solomon-simd` dependency with simple triple replication — the RS encoder with 1 original shard was producing identical copies, so the dependency provided no benefit over direct replication. Header integrity is guaranteed by HMAC.
+- Extracted shared `stream_encrypt`/`stream_decrypt` helpers and `BUFFER_SIZE`/`TAG_SIZE`/`NONCE_SIZE` constants to `common.rs`, used by both symmetric and hybrid
 - Stream encryption buffer increased from 500 bytes to 64 KiB
 - Replaced bincode header serialization with raw byte layout for long-term format stability
 - Renamed `byte_size` parameter to `bit_size` in `generate_asymmetric_key_pair`
 
 ### Fixed
+- **Stream truncation vulnerability:** symmetric decryption had a code path that skipped the required `decrypt_last()` call, allowing an attacker to truncate ciphertext at chunk boundaries without detection. Now all final chunks go through `decrypt_last`, which verifies the STREAM terminator.
+- Hybrid plaintext buffers (both pre-encryption and post-decryption) are now zeroized on drop
+- Added length validation on RSA-decrypted key material to prevent silent corruption
 - Crash (panic) when decrypting truncated, corrupted, or maliciously crafted `.fcr` files
-- Crash when Reed-Solomon decoding produces unexpected output length (validated before indexing)
+- Crash when replicated decoding produces unexpected output length (validated before indexing)
 - Nonexistent input paths silently producing empty encrypted files
 - Key material not zeroized on all error paths: RSA-decrypted keys, combined key buffer, private key PEM content, and HMAC failure early returns now all zeroize correctly
 - Temporary directory cleanup masking the original crypto error on failure
@@ -28,8 +34,12 @@ All notable changes to FerroCrypt are documented in this file.
 - Directory archiver silently skipping inaccessible files and path errors
 - Removed bincode dependency for header serialization (bincode wire format is not stable across major versions)
 
+### Removed
+- `reed-solomon-simd` dependency
+- `--large` / `-l` CLI flag (streaming is now the only mode)
+- `format::read_header` byte-slice variant (both paths now use `read_header_from_reader`)
+
 ### Improved
-- Reed-Solomon decoding uses direct 3-value majority vote instead of HashMap allocation per byte
 - Rewrote archiver unit tests to be self-contained (replaced fixture-dependent stubs)
 
 ## [0.2.5] - 2025-12-18

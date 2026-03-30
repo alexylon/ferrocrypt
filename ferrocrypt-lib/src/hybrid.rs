@@ -19,7 +19,7 @@ use crate::common::{
     stream_decrypt, stream_encrypt,
 };
 use crate::format::{self, HEADER_PREFIX_SIZE};
-use crate::reed_solomon::{rs_decode_exact, rs_encode, rs_encoded_size};
+use crate::replication::{rep_decode_exact, rep_encode, rep_encoded_size};
 use crate::{CryptoError, archiver};
 
 const KEY_SIZE: usize = 32;
@@ -77,13 +77,13 @@ pub fn encrypt_file(
             .create_new(true)
             .open(&output_path)?;
 
-        let encoded_encrypted_combined_key: Vec<u8> = rs_encode(&encrypted_combined_key)?;
-        let encoded_nonce: Vec<u8> = rs_encode(&nonce)?;
+        let encoded_encrypted_combined_key = rep_encode(&encrypted_combined_key);
+        let encoded_nonce = rep_encode(&nonce);
 
         let header_len = (HEADER_PREFIX_SIZE
             + encoded_encrypted_combined_key.len()
             + encoded_nonce.len()
-            + rs_encoded_size(HMAC_KEY_SIZE)) as u16;
+            + rep_encoded_size(HMAC_KEY_SIZE)) as u16;
         let prefix = format::build_header_prefix(format::TYPE_HYBRID, 0, header_len);
 
         let stream_encryptor = stream::EncryptorBE32::from_aead(cipher, nonce.as_ref().into());
@@ -95,7 +95,7 @@ pub fn encrypt_file(
         header_bytes.extend_from_slice(&encoded_encrypted_combined_key);
         header_bytes.extend_from_slice(&encoded_nonce);
         let hmac_tag = hmac_sha3_256(&hmac_key, &header_bytes)?;
-        let encoded_hmac_tag: Vec<u8> = rs_encode(&hmac_tag)?;
+        let encoded_hmac_tag = rep_encode(&hmac_tag);
 
         output_file.write_all(&prefix)?;
         output_file.write_all(&encoded_encrypted_combined_key)?;
@@ -155,9 +155,9 @@ pub fn decrypt_file(
         format::read_header_from_reader(&mut encrypted_file, format::TYPE_HYBRID)?;
 
     let min_header_size = HEADER_PREFIX_SIZE
-        + rs_encoded_size(rsa_key_size as usize)
-        + rs_encoded_size(NONCE_SIZE)
-        + rs_encoded_size(HMAC_KEY_SIZE);
+        + rep_encoded_size(rsa_key_size as usize)
+        + rep_encoded_size(NONCE_SIZE)
+        + rep_encoded_size(HMAC_KEY_SIZE);
     if (header.header_len as usize) < min_header_size {
         rsa_private_pem.zeroize();
         return Err(CryptoError::EncryptionDecryptionError(
@@ -165,9 +165,9 @@ pub fn decrypt_file(
         ));
     }
 
-    let mut encoded_encrypted_combined_key = vec![0u8; rs_encoded_size(rsa_key_size as usize)];
-    let mut encoded_nonce = vec![0u8; rs_encoded_size(NONCE_SIZE)];
-    let mut encoded_hmac_tag = vec![0u8; rs_encoded_size(HMAC_KEY_SIZE)];
+    let mut encoded_encrypted_combined_key = vec![0u8; rep_encoded_size(rsa_key_size as usize)];
+    let mut encoded_nonce = vec![0u8; rep_encoded_size(NONCE_SIZE)];
+    let mut encoded_hmac_tag = vec![0u8; rep_encoded_size(HMAC_KEY_SIZE)];
 
     encrypted_file
         .read_exact(&mut encoded_encrypted_combined_key)
@@ -184,9 +184,9 @@ pub fn decrypt_file(
         })?;
 
     let encrypted_combined_key =
-        rs_decode_exact(&encoded_encrypted_combined_key, rsa_key_size as usize)?;
-    let nonce = rs_decode_exact(&encoded_nonce, NONCE_SIZE)?;
-    let hmac_tag = rs_decode_exact(&encoded_hmac_tag, HMAC_KEY_SIZE)?;
+        rep_decode_exact(&encoded_encrypted_combined_key, rsa_key_size as usize)?;
+    let nonce = rep_decode_exact(&encoded_nonce, NONCE_SIZE)?;
+    let hmac_tag = rep_decode_exact(&encoded_hmac_tag, HMAC_KEY_SIZE)?;
 
     let mut decrypted_combined_key = decrypt_key(
         &encrypted_combined_key,

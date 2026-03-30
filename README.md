@@ -74,7 +74,7 @@ Both modes produce `.fcr` vault files. The format is self-identifying — the fi
 - **Audited encryption**: Uses the `chacha20poly1305` crate, which has undergone successful security audits
 - **Tamper detection**: HMAC-SHA3-256 authenticates every file header — any modification to the salt, nonce, or flags is detected before decryption begins
 - **Secure secret handling**: Passphrases are protected using the `secrecy` crate, preventing accidental exposure through Debug/Display traits and ensuring automatic memory zeroization when dropped
-- **Error correction**: Reed-Solomon parity bytes protect cryptographic headers from corruption due to bit rot or data transfer errors, enabling reliable data recovery
+- **Error correction**: Triple-replicated cryptographic headers with majority-vote decoding protect against bit rot and data transfer errors
 - **Versioned file format**: Files start with a magic-byte header that identifies the format, version, and structure. Corrupted, misnamed, or incompatible files produce clear error messages instead of misleading crypto failures
 
 The code is separated in multiple projects - the library `ferrocrypt-lib`, a CLI client `ferrocrypt-cli`,
@@ -219,10 +219,7 @@ Under the hood, it uses the same subcommands and flags as the direct CLI.
 | `-i, --inpath <SRC_PATH>`        | File or directory path that needs to be encrypted, or the file path that needs to be decrypted              |
 | `-o, --outpath <DEST_DIR>`       | Destination directory path                                                                                   |
 | `-p, --passphrase <PASSWORD>`    | Password to derive the symmetric key for encryption and decryption                                          |
-| `-l, --large`                    | For large input file(s) that cannot fit into the available RAM.*                                            |
 ```
-
-\* Use `-l, --large` when encrypting files larger than available RAM or to minimize memory usage. Omitting it provides faster encryption for smaller files. The decryption process automatically uses the same method as encryption.
 
 <br/>
 
@@ -334,7 +331,7 @@ Drag and drop a file or folder into the app window, then select the encryption m
 
 ### Symmetric Encryption Mode
 
-Encrypt/decrypt using the same password. Choose a password, destination folder, and click "Encrypt". For large files, enable "Large files (low RAM usage)" to reduce memory consumption.
+Encrypt/decrypt using the same password. Choose a password, destination folder, and click "Encrypt".
 
 ### Hybrid Encryption Mode
 

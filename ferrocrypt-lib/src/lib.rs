@@ -116,7 +116,7 @@ mod common;
 mod error;
 mod format;
 mod hybrid;
-mod reed_solomon;
+mod replication;
 mod symmetric;
 
 fn with_tmp_workspace<F>(

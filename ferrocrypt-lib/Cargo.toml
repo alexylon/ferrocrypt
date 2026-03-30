@@ -28,7 +28,6 @@ rust-argon2 = "3"
 sha3 = "0.10"
 hmac = "0.12"
 constant_time_eq = "0"
-reed-solomon-simd = "3"
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]

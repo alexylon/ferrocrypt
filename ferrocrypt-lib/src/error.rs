@@ -10,7 +10,6 @@ use thiserror::Error;
 /// | `OpensslError` | Asymmetric operations failed | Validate PEM/keys; confirm OpenSSL availability |
 /// | `WalkDirError` | Directory traversal failed | Check directory existence and permissions |
 /// | `ZipError` | Zipping/unzipping archive failed | Inspect archive; ensure disk space |
-/// | `ReedSolomonError` | Error-correction coding failed | Check shard completeness/integrity |
 /// | `TryFromSliceError` | Byte slice could not be converted | Confirm buffer sizes |
 /// | `EncryptionDecryptionError` | High-level guard for crypto failures | Recheck keys/passwords and inputs |
 /// | `InputPath` | Missing input file or folder | Provide an existing path |
@@ -47,8 +46,6 @@ pub enum CryptoError {
     WalkDirError(#[from] walkdir::Error),
     #[error(transparent)]
     ZipError(#[from] zip::result::ZipError),
-    #[error(transparent)]
-    ReedSolomonError(#[from] reed_solomon_simd::Error),
     #[error(transparent)]
     TryFromSliceError(#[from] std::array::TryFromSliceError),
     #[error("{0}")]

@@ -15,7 +15,7 @@ use crate::common::{
     hmac_sha3_256, hmac_sha3_256_verify, sha3_32_hash, stream_decrypt, stream_encrypt,
 };
 use crate::format::{self, HEADER_PREFIX_SIZE};
-use crate::reed_solomon::{rs_decode_exact, rs_encode, rs_encoded_size};
+use crate::replication::{rep_decode_exact, rep_encode, rep_encoded_size};
 use crate::{CryptoError, archiver};
 
 const SALT_SIZE: usize = 32;
@@ -68,19 +68,18 @@ pub fn encrypt_file(
         .create_new(true)
         .open(&output_path)?;
 
-    // Encode with reed-solomon. The resulting size is three times that of the original
-    let encoded_salt: Vec<u8> = rs_encode(&salt)?;
-    let encoded_key_hash: Vec<u8> = rs_encode(&stored_key_hash)?;
+    let encoded_salt = rep_encode(&salt);
+    let encoded_key_hash = rep_encode(&stored_key_hash);
 
     let mut nonce = [0u8; NONCE_SIZE];
     OsRng.fill_bytes(&mut nonce);
-    let encoded_nonce: Vec<u8> = rs_encode(&nonce)?;
+    let encoded_nonce = rep_encode(&nonce);
 
     let header_len = (HEADER_PREFIX_SIZE
         + encoded_salt.len()
         + encoded_nonce.len()
         + encoded_key_hash.len()
-        + rs_encoded_size(HMAC_KEY_SIZE)) as u16;
+        + rep_encoded_size(HMAC_KEY_SIZE)) as u16;
     let prefix = format::build_header_prefix(format::TYPE_SYMMETRIC, 0, header_len);
 
     let stream_encryptor = stream::EncryptorBE32::from_aead(cipher, nonce.as_ref().into());
@@ -93,7 +92,7 @@ pub fn encrypt_file(
     header_bytes.extend_from_slice(&encoded_nonce);
     header_bytes.extend_from_slice(&encoded_key_hash);
     let hmac_tag = hmac_sha3_256(hmac_key, &header_bytes)?;
-    let encoded_hmac_tag: Vec<u8> = rs_encode(&hmac_tag)?;
+    let encoded_hmac_tag = rep_encode(&hmac_tag);
 
     output_file.write_all(&prefix)?;
     output_file.write_all(&encoded_salt)?;
@@ -129,10 +128,10 @@ pub fn decrypt_file(
     let (prefix_bytes, _header) =
         format::read_header_from_reader(&mut encrypted_file, format::TYPE_SYMMETRIC)?;
 
-    let mut encoded_salt = vec![0u8; rs_encoded_size(SALT_SIZE)];
-    let mut encoded_nonce = vec![0u8; rs_encoded_size(NONCE_SIZE)];
-    let mut encoded_key_hash = vec![0u8; rs_encoded_size(KEY_SIZE)];
-    let mut encoded_hmac_tag = vec![0u8; rs_encoded_size(HMAC_KEY_SIZE)];
+    let mut encoded_salt = vec![0u8; rep_encoded_size(SALT_SIZE)];
+    let mut encoded_nonce = vec![0u8; rep_encoded_size(NONCE_SIZE)];
+    let mut encoded_key_hash = vec![0u8; rep_encoded_size(KEY_SIZE)];
+    let mut encoded_hmac_tag = vec![0u8; rep_encoded_size(HMAC_KEY_SIZE)];
 
     encrypted_file.read_exact(&mut encoded_salt).map_err(|_| {
         CryptoError::EncryptionDecryptionError("File is too short or corrupted".to_string())
@@ -151,10 +150,10 @@ pub fn decrypt_file(
             CryptoError::EncryptionDecryptionError("File is too short or corrupted".to_string())
         })?;
 
-    let salt = rs_decode_exact(&encoded_salt, SALT_SIZE)?;
-    let nonce = rs_decode_exact(&encoded_nonce, NONCE_SIZE)?;
-    let stored_key_hash = rs_decode_exact(&encoded_key_hash, KEY_SIZE)?;
-    let hmac_tag = rs_decode_exact(&encoded_hmac_tag, HMAC_KEY_SIZE)?;
+    let salt = rep_decode_exact(&encoded_salt, SALT_SIZE)?;
+    let nonce = rep_decode_exact(&encoded_nonce, NONCE_SIZE)?;
+    let stored_key_hash = rep_decode_exact(&encoded_key_hash, KEY_SIZE)?;
+    let hmac_tag = rep_decode_exact(&encoded_hmac_tag, HMAC_KEY_SIZE)?;
 
     println!("\nDeriving key ...");
     let argon2_config = argon2_config();

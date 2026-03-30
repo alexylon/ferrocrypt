@@ -22,9 +22,9 @@ zeroize = "1"
 secrecy = { version = "0.10", features = ["serde"] }
 thiserror = "2"
 walkdir = "2"
-zip = "3"
+zip = "8"
 chacha20poly1305 = { version = "0.10", features = ["std", "stream"] }
-rust-argon2 = "2"
+rust-argon2 = "3"
 sha3 = "0.10"
 hmac = "0.12"
 constant_time_eq = "0"
@@ -32,5 +32,5 @@ reed-solomon-simd = "3"
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
-ctor = "0.2"
+ctor = "0.8"
 tempfile = "3"

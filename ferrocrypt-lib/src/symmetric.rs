@@ -50,7 +50,7 @@ pub fn encrypt_file(
         &salt,
         &argon2_config,
     )?);
-    let cipher = XChaCha20Poly1305::new(key_material[..KEY_SIZE].as_ref().into());
+    let cipher = XChaCha20Poly1305::new((&key_material[..KEY_SIZE]).into());
     let hmac_key = &key_material[KEY_SIZE..KEY_MATERIAL_SIZE];
 
     let stored_key_hash: [u8; KEY_SIZE] = sha3_32_hash(&key_material[..KEY_SIZE])?;
@@ -261,7 +261,7 @@ fn decrypt_normal_file(
         &hmac_tag,
     )?;
 
-    let cipher = XChaCha20Poly1305::new(key_material[..KEY_SIZE].as_ref().into());
+    let cipher = XChaCha20Poly1305::new((&key_material[..KEY_SIZE]).into());
     let plaintext: Vec<u8> = cipher.decrypt(nonce.as_slice().into(), ciphertext.as_ref())?;
     let decrypted_file_stem = &get_file_stem_to_string(input_path)?;
     let decrypted_file_path = tmp_dir_path.join(format!("{}.zip", decrypted_file_stem));
@@ -344,7 +344,7 @@ fn decrypt_large_file(
         &hmac_tag,
     )?;
 
-    let cipher = XChaCha20Poly1305::new(key_material[..KEY_SIZE].as_ref().into());
+    let cipher = XChaCha20Poly1305::new((&key_material[..KEY_SIZE]).into());
     let mut stream_decryptor = stream::DecryptorBE32::from_aead(cipher, nonce.as_slice().into());
     let decrypted_file_stem = &get_file_stem_to_string(input_path)?;
     let decrypted_file_path = tmp_dir_path.join(format!("{}.zip", decrypted_file_stem));

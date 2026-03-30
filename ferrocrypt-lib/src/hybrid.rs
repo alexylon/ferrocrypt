@@ -38,7 +38,7 @@ pub fn encrypt_file(
     let tmp_dir_path = tmp_dir_path.as_ref();
     let file_stem = &archiver::archive(input_path, tmp_dir_path)?;
     let zipped_file_name = tmp_dir_path.join(format!("{}.zip", file_stem));
-    println!("\nEncrypting {} ...", zipped_file_name.display());
+    println!("\nEncrypting ...");
 
     let mut symmetric_key = XChaCha20Poly1305::generate_key(&mut OsRng);
     let mut hmac_key = [0u8; HMAC_KEY_SIZE];
@@ -70,7 +70,7 @@ pub fn encrypt_file(
         let output_path = output_dir.join(format!("{}.fcr", file_stem));
         if output_path.exists() {
             return Err(CryptoError::EncryptionDecryptionError(format!(
-                "Output file already exists: {}",
+                "Output file already exists: {}\n",
                 output_path.display()
             )));
         }
@@ -89,8 +89,9 @@ pub fn encrypt_file(
             + rs_encoded_size(HMAC_KEY_SIZE)) as u16;
         let prefix = format::build_header_prefix(format::TYPE_HYBRID, 0, header_len);
 
-        let mut header_bytes =
-            Vec::with_capacity(prefix.len() + encoded_encrypted_combined_key.len() + encoded_nonce.len());
+        let mut header_bytes = Vec::with_capacity(
+            prefix.len() + encoded_encrypted_combined_key.len() + encoded_nonce.len(),
+        );
         header_bytes.extend_from_slice(&prefix);
         header_bytes.extend_from_slice(&encoded_encrypted_combined_key);
         header_bytes.extend_from_slice(&encoded_nonce);
@@ -105,13 +106,12 @@ pub fn encrypt_file(
 
         nonce_24.zeroize();
 
-        let encrypted_file_name = output_dir.join(format!("{}.fcr", file_stem));
         let msg = format!(
-            "Encrypted to {} for {}",
-            encrypted_file_name.display(),
+            "Encrypted to {} in {}\n",
+            output_path.display(),
             get_duration(start_time.elapsed().as_secs_f64())
         );
-        println!("\n{}", msg);
+        println!("{}", msg);
 
         Ok(msg)
     })();
@@ -135,7 +135,7 @@ pub fn decrypt_file(
     // Zeroizing wraps the PEM content so it's cleared on all exit paths
     let priv_key_str = Zeroizing::new(fs::read_to_string(&rsa_private_pem)?);
 
-    println!("Decrypting {} ...\n", input_path.display());
+    println!("\nDecrypting ...");
 
     let encrypted_file: Vec<u8> = read(input_path)?;
 
@@ -200,11 +200,11 @@ pub fn decrypt_file(
         let output_path = archiver::unarchive(&decrypted_file_path, output_dir)?;
 
         let msg = format!(
-            "Decrypted to {} for {}",
+            "Decrypted to {} in {}\n",
             output_path,
             get_duration(start_time.elapsed().as_secs_f64())
         );
-        println!("\n{}", msg);
+        println!("{}", msg);
 
         Ok(msg)
     })();
@@ -268,21 +268,19 @@ pub fn generate_asymmetric_key_pair(
     let private_key_path = output_dir.join(format!("rsa-{}-priv-key.pem", bit_size));
     let public_key_path = output_dir.join(format!("rsa-{}-pub-key.pem", bit_size));
 
-    println!("Writing private key to {} ...", private_key_path.display());
     let mut private_key_file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&private_key_path)?;
     private_key_file.write_all(&private_key)?;
 
-    println!("Writing public key to {} ...", public_key_path.display());
     let mut public_key_file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&public_key_path)?;
     public_key_file.write_all(&public_key)?;
 
-    let result = format!("Generated key pair to {}", output_dir.display());
+    let result = format!("Generated key pair in {}", output_dir.display());
     println!("\n{}", result);
 
     Ok(result)

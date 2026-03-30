@@ -142,13 +142,6 @@ fn archive_file(
 
     let file_stem = &get_file_stem_to_string(input_path)?;
 
-    println!(
-        "Adding file {:?} as {:?}/{} ...",
-        input_path,
-        output_dir.join(file_stem),
-        file_name_extension
-    );
-
     let output_file = File::create(output_dir.join(format!("{}.zip", file_stem)))?;
     let mut zip = zip::ZipWriter::new(output_file);
 
@@ -203,21 +196,12 @@ fn archive_dir(
         let name = path
             .strip_prefix(input_path)
             .map_err(|err| CryptoError::Message(format!("StripPrefixError: {:?}", err)))?;
-        let path_str = path
-            .to_str()
-            .ok_or_else(|| ZipError::InvalidArchive(Cow::from("Cannot convert path to &str")))?;
-        let normalized_path_str = &normalize_paths(path_str, "").0;
         let name_str = name
             .to_str()
             .ok_or_else(|| ZipError::InvalidArchive(Cow::from("Cannot convert name to &str")))?;
         let output_path_str = format!("{}/{}", dir_name, name_str);
-        let normalized_output_path_str = &normalize_paths(&output_path_str, "").0;
 
         if path.is_file() {
-            println!(
-                "Adding file {} as {} ...",
-                normalized_path_str, normalized_output_path_str
-            );
             zip.start_file(&output_path_str, options)?;
             let mut f = File::open(path)?;
 
@@ -225,10 +209,6 @@ fn archive_dir(
             zip.write_all(&buffer)?;
             buffer.clear();
         } else if !output_path_str.is_empty() {
-            println!(
-                "Adding dir {} as {} ...",
-                normalized_path_str, normalized_output_path_str
-            );
             zip.add_directory(&output_path_str, options)?;
         }
     }
@@ -258,7 +238,7 @@ pub fn unarchive(
     let output_path_check = Path::new(&output_path);
     if output_path_check.exists() {
         return Err(CryptoError::Message(format!(
-            "Output already exists: {}",
+            "Output already exists: {}\n",
             output_path
         )));
     }
@@ -277,22 +257,9 @@ pub fn unarchive(
             normalize_paths(&format!("{}{}", output_dir.display(), outpath_str), "").0;
         let outpath_full = Path::new(&outpath_full_str);
 
-        {
-            let comment = file.comment();
-            if !comment.is_empty() {
-                println!("File {} comment: {}", i, comment);
-            }
-        }
-
         if (*file.name()).ends_with('/') {
-            println!("Extracting dir to \"{}\" ...", &outpath_full_str);
             fs::create_dir_all(outpath_full)?;
         } else {
-            println!(
-                "Extracting file to \"{}\" ({} bytes) ...",
-                &outpath_full_str,
-                file.size()
-            );
             if let Some(p) = outpath_full.parent() {
                 if !p.exists() {
                     fs::create_dir_all(p)?;

@@ -37,6 +37,7 @@ pub fn encrypt_file(
     let output_dir = output_dir.as_ref();
     let tmp_dir_path = tmp_dir_path.as_ref();
 
+    println!("\nDeriving key ...");
     let argon2_config = argon2_config();
     let mut salt = [0u8; SALT_SIZE];
     OsRng.fill_bytes(&mut salt);
@@ -54,12 +55,12 @@ pub fn encrypt_file(
     let encrypted_extension = "fcr";
     let file_stem = &archiver::archive(input_path, tmp_dir_path)?;
     let zipped_file_name = tmp_dir_path.join(format!("{}.zip", file_stem));
-    println!("\nEncrypting {} ...", zipped_file_name.display());
+    println!("Encrypting ...");
 
     let output_path = output_dir.join(format!("{}.{}", file_stem, encrypted_extension));
     if output_path.exists() {
         return Err(CryptoError::Message(format!(
-            "Output file already exists: {}",
+            "Output file already exists: {}\n",
             output_path.display()
         )));
     }
@@ -86,8 +87,9 @@ pub fn encrypt_file(
 
     let mut stream_encryptor = stream::EncryptorBE32::from_aead(cipher, nonce.as_ref().into());
 
-    let mut header_bytes =
-        Vec::with_capacity(prefix.len() + encoded_salt.len() + encoded_nonce.len() + encoded_key_hash.len());
+    let mut header_bytes = Vec::with_capacity(
+        prefix.len() + encoded_salt.len() + encoded_nonce.len() + encoded_key_hash.len(),
+    );
     header_bytes.extend_from_slice(&prefix);
     header_bytes.extend_from_slice(&encoded_salt);
     header_bytes.extend_from_slice(&encoded_nonce);
@@ -129,13 +131,12 @@ pub fn encrypt_file(
         }
     }
 
-    let encrypted_file_name = output_dir.join(format!("{}.{}", file_stem, encrypted_extension));
     let result = format!(
-        "Encrypted to {} for {}",
-        encrypted_file_name.display(),
+        "Encrypted to {} in {}\n",
+        output_path.display(),
         get_duration(start_time.elapsed().as_secs_f64())
     );
-    println!("\n{}", result);
+    println!("{}", result);
 
     Ok(result)
 }
@@ -150,8 +151,6 @@ pub fn decrypt_file(
     let start_time = std::time::Instant::now();
     let input_path = input_path.as_ref();
     let tmp_dir_path = tmp_dir_path.as_ref();
-    println!("Decrypting {} ...\n", input_path.display());
-
     let mut encrypted_file = File::open(input_path)?;
 
     let (prefix_bytes, _header) =
@@ -184,6 +183,7 @@ pub fn decrypt_file(
     let stored_key_hash = rs_decode_exact(&encoded_key_hash, KEY_SIZE)?;
     let hmac_tag = rs_decode_exact(&encoded_hmac_tag, HMAC_KEY_SIZE)?;
 
+    println!("\nDeriving key ...");
     let argon2_config = argon2_config();
     let key_material = Zeroizing::new(argon2::hash_raw(
         passphrase.expose_secret().as_bytes(),
@@ -201,8 +201,9 @@ pub fn decrypt_file(
         ));
     }
 
-    let mut header_bytes =
-        Vec::with_capacity(prefix_bytes.len() + encoded_salt.len() + encoded_nonce.len() + encoded_key_hash.len());
+    let mut header_bytes = Vec::with_capacity(
+        prefix_bytes.len() + encoded_salt.len() + encoded_nonce.len() + encoded_key_hash.len(),
+    );
     header_bytes.extend_from_slice(&prefix_bytes);
     header_bytes.extend_from_slice(&encoded_salt);
     header_bytes.extend_from_slice(&encoded_nonce);
@@ -213,6 +214,7 @@ pub fn decrypt_file(
         &hmac_tag,
     )?;
 
+    println!("Decrypting ...");
     let cipher = XChaCha20Poly1305::new((&key_material[..KEY_SIZE]).into());
     let mut stream_decryptor = stream::DecryptorBE32::from_aead(cipher, nonce.as_slice().into());
     let decrypted_file_stem = &get_file_stem_to_string(input_path)?;
@@ -256,11 +258,11 @@ pub fn decrypt_file(
     let output_path = archiver::unarchive(&decrypted_file_path, output_dir)?;
 
     let result = format!(
-        "Decrypted to {} for {}",
+        "Decrypted to {} in {}\n",
         output_path,
         get_duration(start_time.elapsed().as_secs_f64())
     );
-    println!("\n{}", result);
+    println!("{}", result);
 
     Ok(result)
 }

@@ -53,7 +53,7 @@ pub enum CryptoError {
     TryFromSliceError(#[from] std::array::TryFromSliceError),
     #[error("{0}")]
     EncryptionDecryptionError(String),
-    #[error("Input file or folder missing: {0}")]
+    #[error("Input file or folder missing: {0}\n")]
     InputPath(String),
     #[error("{0}")]
     Message(String),

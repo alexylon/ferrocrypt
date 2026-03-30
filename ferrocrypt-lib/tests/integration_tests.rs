@@ -1146,7 +1146,6 @@ fn test_wrong_format_type_hybrid_as_symmetric() -> Result<(), CryptoError> {
     Ok(())
 }
 
-
 #[test]
 fn test_hybrid_empty_file() -> Result<(), CryptoError> {
     let test_dir = setup_test_dir("hybrid_empty_file");

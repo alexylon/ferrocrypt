@@ -140,8 +140,8 @@ fn test_cli_symmetric_multi_chunk_file() {
 
     assert!(decrypt_output.status.success());
 
-    let decrypted_content =
-        fs::read_to_string(decrypt_dir.join("multi_chunk.txt")).expect("Failed to read decrypted file");
+    let decrypted_content = fs::read_to_string(decrypt_dir.join("multi_chunk.txt"))
+        .expect("Failed to read decrypted file");
     assert_eq!(content, decrypted_content);
 }
 

@@ -80,11 +80,11 @@ fn run_command(cmd: Command) -> Result<(), CryptoError> {
         Command::Hybrid {
             inpath,
             outpath,
-            mut key,
+            key,
             passphrase,
         } => {
             let passphrase = SecretString::from(passphrase);
-            hybrid_encryption(&inpath, &outpath, &mut key, &passphrase)?;
+            hybrid_encryption(&inpath, &outpath, &key, &passphrase)?;
         }
 
         Command::Symmetric {

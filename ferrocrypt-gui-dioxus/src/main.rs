@@ -155,9 +155,8 @@ fn App() -> Element {
                     symmetric_encryption(&inpath(), &outpath(), &pwd)
                 }
                 Mode::HybridEncrypt | Mode::HybridDecrypt => {
-                    let mut key = keypath();
                     let pwd = SecretString::from(password());
-                    hybrid_encryption(&inpath(), &outpath(), key.as_mut_str(), &pwd)
+                    hybrid_encryption(&inpath(), &outpath(), &keypath(), &pwd)
                 }
                 Mode::GenerateKeyPair => {
                     let pwd = SecretString::from(password());

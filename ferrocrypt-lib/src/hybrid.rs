@@ -125,7 +125,7 @@ pub fn encrypt_file(
 pub fn decrypt_file(
     input_path: impl AsRef<Path>,
     output_dir: impl AsRef<Path>,
-    rsa_private_pem: &mut str,
+    rsa_private_pem: &str,
     passphrase: &SecretString,
     tmp_dir_path: impl AsRef<Path>,
 ) -> Result<String, CryptoError> {
@@ -142,7 +142,6 @@ pub fn decrypt_file(
         match get_public_key_size_from_private_key(&priv_key_str, passphrase.expose_secret()) {
             Ok(rsa_key_size) => rsa_key_size,
             Err(_) => {
-                rsa_private_pem.zeroize();
                 return Err(CryptoError::EncryptionDecryptionError(
                     "Incorrect password or wrong private key provided".to_string(),
                 ));
@@ -159,7 +158,6 @@ pub fn decrypt_file(
         + rep_encoded_size(NONCE_SIZE)
         + rep_encoded_size(HMAC_KEY_SIZE);
     if (header.header_len as usize) < min_header_size {
-        rsa_private_pem.zeroize();
         return Err(CryptoError::EncryptionDecryptionError(
             "File is too short or corrupted".to_string(),
         ));
@@ -232,7 +230,6 @@ pub fn decrypt_file(
     })();
 
     decrypted_combined_key.zeroize();
-    rsa_private_pem.zeroize();
     result
 }
 

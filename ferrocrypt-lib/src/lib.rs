@@ -40,14 +40,12 @@
 //! let _msg = generate_asymmetric_key_pair(4096, &passphrase, "./keys")?;
 //!
 //! // 2) Encrypt to out/payload.fcr using the public key (no passphrase needed)
-//! let mut pub_key_path = "./keys/rsa-4096-pub-key.pem".to_string();
 //! let empty_passphrase = SecretString::from("".to_string());
-//! let produced = hybrid_encryption("./payload", "./out", &mut pub_key_path, &empty_passphrase)?;
+//! let produced = hybrid_encryption("./payload", "./out", "./keys/rsa-4096-pub-key.pem", &empty_passphrase)?;
 //! println!("wrote {produced}");
 //!
 //! // 3) Decrypt out/payload.fcr using the private key + passphrase to unlock it
-//! let mut priv_key_path = "./keys/rsa-4096-priv-key.pem".to_string();
-//! let restored = hybrid_encryption("./out/payload.fcr", "./restored", &mut priv_key_path, &passphrase)?;
+//! let restored = hybrid_encryption("./out/payload.fcr", "./restored", "./keys/rsa-4096-priv-key.pem", &passphrase)?;
 //! println!("restored to {restored}");
 //! # Ok(()) }
 //! # fn main() { run().unwrap(); }
@@ -80,7 +78,7 @@
 use std::fs;
 use std::path::Path;
 
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 
 use crate::common::normalize_paths;
 pub use crate::error::CryptoError;
@@ -154,10 +152,10 @@ where
 
 /// Encrypt or decrypt files/directories using password-based symmetric crypto.
 ///
-/// - **Encrypt**: if `input_path` is not already an `.fcr` archive, it is
+/// - **Encrypt**: if `input_path` is not a FerroCrypt symmetric file, it is
 ///   packaged and encrypted to `output_dir` (writing `<name>.fcr`).
-/// - **Decrypt**: if `input_path` ends with `.fcr`, it is decrypted and
-///   extracted into `output_dir`.
+/// - **Decrypt**: if `input_path` is a FerroCrypt symmetric file (detected by
+///   magic bytes), it is decrypted and extracted into `output_dir`.
 ///
 /// Returns the path to the produced file or directory.
 ///
@@ -181,8 +179,13 @@ pub fn symmetric_encryption(
     output_dir: &str,
     password: &SecretString,
 ) -> Result<String, CryptoError> {
+    if password.expose_secret().is_empty() {
+        return Err(CryptoError::Message(
+            "Passphrase must not be empty for symmetric encryption".to_string(),
+        ));
+    }
     with_tmp_workspace(input_path, output_dir, |input, output, tmp| {
-        if input_path.ends_with(".fcr") {
+        if detect_encryption_mode(input).is_some() || input.ends_with(".fcr") {
             symmetric::decrypt_file(input, output, password, tmp)
         } else {
             symmetric::encrypt_file(input, output, password, tmp)
@@ -192,15 +195,15 @@ pub fn symmetric_encryption(
 
 /// Encrypt or decrypt using hybrid (RSA + XChaCha20-Poly1305) envelope encryption.
 ///
-/// - `rsa_key_pem` is a **mutable string containing a file path** (not PEM
-///   contents); it is zeroized after decryption for security.
-/// - **Encrypt** when `input_path` is not `.fcr`: uses the public key file
-///   at `rsa_key_pem` to seal a random symmetric key, producing `<name>.fcr`.
-///   The `passphrase` parameter is **ignored during encryption** (pass empty
-///   string).
-/// - **Decrypt** when `input_path` ends with `.fcr`: uses the private key file
-///   at `rsa_key_pem`. The `passphrase` is **required** to decrypt the private
-///   key file (must match the passphrase used when generating the keypair).
+/// - `rsa_key_pem` is a **file path** to the PEM key (not the PEM contents).
+/// - **Encrypt** when `input_path` is not a FerroCrypt file: uses the public
+///   key file at `rsa_key_pem` to seal a random symmetric key, producing
+///   `<name>.fcr`. The `passphrase` parameter is **ignored during encryption**
+///   (pass empty string).
+/// - **Decrypt** when `input_path` is a FerroCrypt hybrid file: uses the
+///   private key file at `rsa_key_pem`. The `passphrase` is **required** to
+///   decrypt the private key file (must match the passphrase used when
+///   generating the keypair).
 ///
 /// Returns a human-readable message describing the output path.
 ///
@@ -210,26 +213,24 @@ pub fn symmetric_encryption(
 /// use ferrocrypt::{hybrid_encryption, secrecy::SecretString};
 ///
 /// // Encrypt with public key (no passphrase needed)
-/// let mut pub_key = "./keys/rsa-4096-pub-key.pem".to_string();
 /// let empty = SecretString::from("".to_string());
-/// let result = hybrid_encryption("./secrets", "./encrypted", &mut pub_key, &empty)?;
+/// let result = hybrid_encryption("./secrets", "./encrypted", "./keys/rsa-4096-pub-key.pem", &empty)?;
 /// println!("{}", result); // "Encrypted to ./encrypted/secrets.fcr for X.XXs"
 ///
 /// // Decrypt with private key (passphrase required)
-/// let mut priv_key = "./keys/rsa-4096-priv-key.pem".to_string();
 /// let passphrase = SecretString::from("my-key-passphrase".to_string());
-/// let result = hybrid_encryption("./encrypted/secrets.fcr", "./decrypted", &mut priv_key, &passphrase)?;
+/// let result = hybrid_encryption("./encrypted/secrets.fcr", "./decrypted", "./keys/rsa-4096-priv-key.pem", &passphrase)?;
 /// println!("{}", result); // "Decrypted to ./decrypted/secrets for X.XXs"
 /// # Ok::<(), ferrocrypt::CryptoError>(())
 /// ```
 pub fn hybrid_encryption(
     input_path: &str,
     output_dir: &str,
-    rsa_key_pem: &mut str,
+    rsa_key_pem: &str,
     passphrase: &SecretString,
 ) -> Result<String, CryptoError> {
     with_tmp_workspace(input_path, output_dir, |input, output, tmp| {
-        if input_path.ends_with(".fcr") {
+        if detect_encryption_mode(input).is_some() || input.ends_with(".fcr") {
             hybrid::decrypt_file(input, output, rsa_key_pem, passphrase, tmp)
         } else {
             hybrid::encrypt_file(input, output, rsa_key_pem, tmp)

@@ -12,7 +12,7 @@ fn start(
     inpath: &str,
     outpath: &str,
     password: String,
-    mut keypath: String,
+    keypath: String,
     mode: String,
 ) -> Result<String, String> {
     let password = SecretString::from(password);
@@ -23,7 +23,7 @@ fn start(
             Err(error) => Err(error.to_string()),
         }
     } else if mode == "he" || mode == "hd" {
-        match hybrid_encryption(inpath, outpath, keypath.as_mut_str(), &password) {
+        match hybrid_encryption(inpath, outpath, &keypath, &password) {
             Ok(result) => Ok(result),
             Err(error) => Err(error.to_string()),
         }

@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io;
 use std::path::Path;
 
 use walkdir::WalkDir;
@@ -150,15 +150,10 @@ fn archive_file(
         .large_file(true)
         .unix_permissions(0o755); // sets options for the zip file
 
-    let mut buffer = Vec::new();
-
     zip.start_file(file_name_extension, options)?;
 
     let mut f = File::open(input_path)?;
-
-    f.read_to_end(&mut buffer)?;
-    zip.write_all(&buffer)?;
-    buffer.clear();
+    io::copy(&mut f, &mut zip)?;
 
     zip.finish()?;
 
@@ -188,7 +183,6 @@ fn archive_dir(
         .large_file(true)
         .unix_permissions(0o755);
     let walkdir = WalkDir::new(input_path);
-    let mut buffer = Vec::new();
 
     for entry in walkdir {
         let entry = entry?;
@@ -204,10 +198,7 @@ fn archive_dir(
         if path.is_file() {
             zip.start_file(&output_path_str, options)?;
             let mut f = File::open(path)?;
-
-            f.read_to_end(&mut buffer)?;
-            zip.write_all(&buffer)?;
-            buffer.clear();
+            io::copy(&mut f, &mut zip)?;
         } else if !output_path_str.is_empty() {
             zip.add_directory(&output_path_str, options)?;
         }

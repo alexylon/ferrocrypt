@@ -244,9 +244,9 @@ pub fn decrypt_file(
                 .decrypt_next(buffer.as_slice())
                 .map_err(CryptoError::ChaCha20Poly1305Error)?;
             decrypted_file.write_all(&plaintext)?;
-        } else if filled == 0 {
-            break;
         } else {
+            // filled < ENCRYPTED_BUFFER_SIZE (including 0) means final chunk.
+            // decrypt_last verifies the STREAM terminator, catching truncation.
             let plaintext = stream_decryptor
                 .decrypt_last(&buffer[..filled])
                 .map_err(CryptoError::ChaCha20Poly1305Error)?;

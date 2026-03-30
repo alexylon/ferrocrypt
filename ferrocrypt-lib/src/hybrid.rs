@@ -50,8 +50,8 @@ pub fn encrypt_file(
         let mut nonce_24 = [0u8; NONCE_24_SIZE];
         OsRng.fill_bytes(&mut nonce_24);
 
-        let zipped_file = read(&zipped_file_name)?;
-        let ciphertext = cipher.encrypt(nonce_24.as_ref().into(), &*zipped_file)?;
+        let zipped_file = Zeroizing::new(read(&zipped_file_name)?);
+        let ciphertext = cipher.encrypt(nonce_24.as_ref().into(), &**zipped_file)?;
 
         let mut combined_key = Zeroizing::new(vec![0u8; COMBINED_KEY_SIZE]);
         combined_key[..KEY_SIZE].copy_from_slice(&symmetric_key);
@@ -192,11 +192,12 @@ pub fn decrypt_file(
         hmac_sha3_256_verify(hmac_key, hmac_input, &hmac_tag)?;
 
         let cipher = XChaCha20Poly1305::new(&symmetric_key);
-        let file_decrypted = cipher.decrypt(nonce.as_slice().into(), ciphertext.as_ref())?;
+        let file_decrypted =
+            Zeroizing::new(cipher.decrypt(nonce.as_slice().into(), ciphertext.as_ref())?);
         let file_stem_decrypted = &get_file_stem_to_string(input_path)?;
         let decrypted_file_path = tmp_dir_path.join(format!("{}.zip", file_stem_decrypted));
 
-        fs::write(&decrypted_file_path, file_decrypted)?;
+        fs::write(&decrypted_file_path, &*file_decrypted)?;
         let output_path = archiver::unarchive(&decrypted_file_path, output_dir)?;
 
         let msg = format!(

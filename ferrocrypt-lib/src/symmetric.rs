@@ -386,9 +386,9 @@ fn argon2_config() -> argon2::Config<'static> {
     argon2::Config {
         variant: Variant::Argon2id,
         hash_length: KEY_MATERIAL_SIZE as u32,
-        lanes: 8,
-        mem_cost: 65536,
-        time_cost: 2,
+        lanes: 4,
+        mem_cost: 1048576,
+        time_cost: 4,
         ..Default::default()
     }
 }

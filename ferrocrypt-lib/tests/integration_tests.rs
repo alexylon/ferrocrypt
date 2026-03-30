@@ -63,7 +63,6 @@ fn test_symmetric_encrypt_decrypt_single_file() -> Result<(), CryptoError> {
         input_file.to_str().unwrap(),
         encrypt_dir.to_str().unwrap(),
         &passphrase,
-        false,
     )?;
 
     assert!(encrypt_result.contains("Encrypted to"));
@@ -74,7 +73,6 @@ fn test_symmetric_encrypt_decrypt_single_file() -> Result<(), CryptoError> {
         encrypt_dir.join("input.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
-        false,
     )?;
 
     assert!(decrypt_result.contains("Decrypted to"));
@@ -103,7 +101,6 @@ fn test_symmetric_encrypt_decrypt_directory() -> Result<(), CryptoError> {
         input_dir.to_str().unwrap(),
         encrypt_dir.to_str().unwrap(),
         &passphrase,
-        false,
     )?;
 
     assert!(encrypt_result.contains("Encrypted to"));
@@ -114,7 +111,6 @@ fn test_symmetric_encrypt_decrypt_directory() -> Result<(), CryptoError> {
         encrypt_dir.join("test_folder.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
-        false,
     )?;
 
     assert!(decrypt_result.contains("Decrypted to"));
@@ -155,7 +151,6 @@ fn test_symmetric_wrong_password() -> Result<(), CryptoError> {
         input_file.to_str().unwrap(),
         encrypt_dir.to_str().unwrap(),
         &correct_pass,
-        false,
     )?;
 
     // Try to decrypt with wrong password - should fail
@@ -163,7 +158,6 @@ fn test_symmetric_wrong_password() -> Result<(), CryptoError> {
         encrypt_dir.join("secret.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &wrong_pass,
-        false,
     );
 
     assert!(result.is_err());
@@ -178,41 +172,35 @@ fn test_symmetric_wrong_password() -> Result<(), CryptoError> {
 }
 
 #[test]
-fn test_symmetric_large_file_mode() -> Result<(), CryptoError> {
-    let test_dir = setup_test_dir("symmetric_large_file");
-    let input_file = test_dir.join("large.txt");
+fn test_symmetric_encrypt_decrypt_multi_chunk_file() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("symmetric_multi_chunk");
+    let input_file = test_dir.join("multi_chunk.txt");
     let encrypt_dir = test_dir.join("encrypted");
     let decrypt_dir = test_dir.join("decrypted");
 
     fs::create_dir_all(&encrypt_dir)?;
     fs::create_dir_all(&decrypt_dir)?;
 
-    // Create a larger file (10KB of repeated content)
-    let content = "Large file content. ".repeat(500);
+    let content = "Multi chunk content. ".repeat(500);
     create_test_file(&input_file, &content);
 
-    let passphrase = SecretString::from("large_file_password".to_string());
+    let passphrase = SecretString::from("multi_chunk_password".to_string());
 
-    // Encrypt with large flag
     symmetric_encryption(
         input_file.to_str().unwrap(),
         encrypt_dir.to_str().unwrap(),
         &passphrase,
-        true, // large mode
     )?;
 
-    assert!(encrypt_dir.join("large.fcr").exists());
+    assert!(encrypt_dir.join("multi_chunk.fcr").exists());
 
-    // Decrypt
     symmetric_encryption(
-        encrypt_dir.join("large.fcr").to_str().unwrap(),
+        encrypt_dir.join("multi_chunk.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
-        false,
     )?;
 
-    // Verify content
-    let decrypted_content = fs::read_to_string(decrypt_dir.join("large.txt"))?;
+    let decrypted_content = fs::read_to_string(decrypt_dir.join("multi_chunk.txt"))?;
     assert_eq!(content, decrypted_content);
 
     Ok(())
@@ -447,7 +435,6 @@ fn test_empty_file_encryption() -> Result<(), CryptoError> {
         input_file.to_str().unwrap(),
         encrypt_dir.to_str().unwrap(),
         &passphrase,
-        false,
     )?;
 
     // Decrypt
@@ -455,7 +442,6 @@ fn test_empty_file_encryption() -> Result<(), CryptoError> {
         encrypt_dir.join("empty.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
-        false,
     )?;
 
     // Verify empty file was preserved
@@ -485,7 +471,6 @@ fn test_unicode_content() -> Result<(), CryptoError> {
         input_file.to_str().unwrap(),
         encrypt_dir.to_str().unwrap(),
         &passphrase,
-        false,
     )?;
 
     // Decrypt
@@ -493,7 +478,6 @@ fn test_unicode_content() -> Result<(), CryptoError> {
         encrypt_dir.join("unicode.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
-        false,
     )?;
 
     // Verify unicode content
@@ -521,7 +505,6 @@ fn test_special_characters_in_filename() -> Result<(), CryptoError> {
         input_file.to_str().unwrap(),
         encrypt_dir.to_str().unwrap(),
         &passphrase,
-        false,
     )?;
 
     symmetric_encryption(
@@ -531,7 +514,6 @@ fn test_special_characters_in_filename() -> Result<(), CryptoError> {
             .unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
-        false,
     )?;
 
     assert!(decrypt_dir.join("file-with_special.chars.txt").exists());
@@ -543,7 +525,7 @@ fn test_special_characters_in_filename() -> Result<(), CryptoError> {
 fn test_nonexistent_output_dir() {
     let passphrase = SecretString::from("test".to_string());
 
-    let result = symmetric_encryption("Cargo.toml", "/nonexistent/path/output", &passphrase, false);
+    let result = symmetric_encryption("Cargo.toml", "/nonexistent/path/output", &passphrase);
 
     assert!(result.is_err());
 }
@@ -560,7 +542,6 @@ fn test_decrypt_nonexistent_fcr_file() {
         "/nonexistent/missing.fcr",
         decrypt_dir.to_str().unwrap(),
         &passphrase,
-        false,
     );
 
     assert!(result.is_err());
@@ -586,14 +567,12 @@ fn test_binary_file_content() -> Result<(), CryptoError> {
         input_file.to_str().unwrap(),
         encrypt_dir.to_str().unwrap(),
         &passphrase,
-        false,
     )?;
 
     symmetric_encryption(
         encrypt_dir.join("data.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
-        false,
     )?;
 
     let decrypted = fs::read(decrypt_dir.join("data.bin"))?;
@@ -603,8 +582,8 @@ fn test_binary_file_content() -> Result<(), CryptoError> {
 }
 
 #[test]
-fn test_symmetric_large_mode_wrong_password() -> Result<(), CryptoError> {
-    let test_dir = setup_test_dir("large_wrong_password");
+fn test_symmetric_streaming_wrong_password() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("streaming_wrong_password");
     let input_file = test_dir.join("data.txt");
     let encrypt_dir = test_dir.join("encrypted");
     let decrypt_dir = test_dir.join("decrypted");
@@ -618,12 +597,10 @@ fn test_symmetric_large_mode_wrong_password() -> Result<(), CryptoError> {
     let correct_pass = SecretString::from("correct".to_string());
     let wrong_pass = SecretString::from("wrong".to_string());
 
-    // Encrypt in large mode
     symmetric_encryption(
         input_file.to_str().unwrap(),
         encrypt_dir.to_str().unwrap(),
         &correct_pass,
-        true,
     )?;
 
     // Decrypt with wrong password
@@ -631,7 +608,6 @@ fn test_symmetric_large_mode_wrong_password() -> Result<(), CryptoError> {
         encrypt_dir.join("data.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &wrong_pass,
-        false,
     );
 
     assert!(result.is_err());
@@ -646,8 +622,8 @@ fn test_symmetric_large_mode_wrong_password() -> Result<(), CryptoError> {
 }
 
 #[test]
-fn test_symmetric_large_mode_directory() -> Result<(), CryptoError> {
-    let test_dir = setup_test_dir("large_directory");
+fn test_symmetric_encrypt_decrypt_directory_streaming() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("directory_streaming");
     let input_dir = create_test_directory(&test_dir);
     let encrypt_dir = test_dir.join("encrypted");
     let decrypt_dir = test_dir.join("decrypted");
@@ -655,13 +631,12 @@ fn test_symmetric_large_mode_directory() -> Result<(), CryptoError> {
     fs::create_dir_all(&encrypt_dir)?;
     fs::create_dir_all(&decrypt_dir)?;
 
-    let passphrase = SecretString::from("large_dir_pass".to_string());
+    let passphrase = SecretString::from("dir_streaming_pass".to_string());
 
     symmetric_encryption(
         input_dir.to_str().unwrap(),
         encrypt_dir.to_str().unwrap(),
         &passphrase,
-        true,
     )?;
 
     assert!(encrypt_dir.join("test_folder.fcr").exists());
@@ -670,7 +645,6 @@ fn test_symmetric_large_mode_directory() -> Result<(), CryptoError> {
         encrypt_dir.join("test_folder.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
-        false,
     )?;
 
     let decrypted_dir = decrypt_dir.join("test_folder");
@@ -706,14 +680,12 @@ fn test_symmetric_empty_password() -> Result<(), CryptoError> {
         input_file.to_str().unwrap(),
         encrypt_dir.to_str().unwrap(),
         &empty_pass,
-        false,
     )?;
 
     symmetric_encryption(
         encrypt_dir.join("secret.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &empty_pass,
-        false,
     )?;
 
     let decrypted = fs::read_to_string(decrypt_dir.join("secret.txt"))?;
@@ -898,7 +870,6 @@ fn test_nonexistent_input_path_encrypt() {
         "/nonexistent/path/file.txt",
         encrypt_dir.to_str().unwrap(),
         &passphrase,
-        false,
     );
 
     assert!(result.is_err());
@@ -924,7 +895,6 @@ fn test_truncated_symmetric_file() {
         truncated_file.to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
-        false,
     );
 
     assert!(result.is_err());
@@ -981,7 +951,6 @@ fn test_symmetric_header_tamper_detection() -> Result<(), CryptoError> {
         input_file.to_str().unwrap(),
         encrypt_dir.to_str().unwrap(),
         &passphrase,
-        false,
     )?;
 
     // Tamper with a byte in the encoded salt region (offset 10, within the header)
@@ -994,7 +963,6 @@ fn test_symmetric_header_tamper_detection() -> Result<(), CryptoError> {
         encrypted_path.to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
-        false,
     );
 
     assert!(result.is_err());
@@ -1074,7 +1042,6 @@ fn test_not_a_ferrocrypt_file() {
         fake_file.to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
-        false,
     );
 
     assert!(result.is_err());
@@ -1102,7 +1069,6 @@ fn test_future_major_version_rejected() -> Result<(), CryptoError> {
         input_file.to_str().unwrap(),
         encrypt_dir.to_str().unwrap(),
         &passphrase,
-        false,
     )?;
 
     // Patch the major version byte (offset 2) to a future version
@@ -1115,7 +1081,6 @@ fn test_future_major_version_rejected() -> Result<(), CryptoError> {
         encrypted_path.to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
-        false,
     );
 
     assert!(result.is_err());
@@ -1168,7 +1133,6 @@ fn test_wrong_format_type_hybrid_as_symmetric() -> Result<(), CryptoError> {
         encrypted_path.to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
-        false,
     );
 
     assert!(result.is_err());
@@ -1182,38 +1146,6 @@ fn test_wrong_format_type_hybrid_as_symmetric() -> Result<(), CryptoError> {
     Ok(())
 }
 
-#[test]
-fn test_symmetric_empty_file_large_mode() -> Result<(), CryptoError> {
-    let test_dir = setup_test_dir("empty_file_large");
-    let input_file = test_dir.join("empty.txt");
-    let encrypt_dir = test_dir.join("encrypted");
-    let decrypt_dir = test_dir.join("decrypted");
-
-    fs::create_dir_all(&encrypt_dir)?;
-    fs::create_dir_all(&decrypt_dir)?;
-
-    create_test_file(&input_file, "");
-    let passphrase = SecretString::from("empty_large".to_string());
-
-    symmetric_encryption(
-        input_file.to_str().unwrap(),
-        encrypt_dir.to_str().unwrap(),
-        &passphrase,
-        true,
-    )?;
-
-    symmetric_encryption(
-        encrypt_dir.join("empty.fcr").to_str().unwrap(),
-        decrypt_dir.to_str().unwrap(),
-        &passphrase,
-        false,
-    )?;
-
-    let decrypted = fs::read_to_string(decrypt_dir.join("empty.txt"))?;
-    assert_eq!("", decrypted);
-
-    Ok(())
-}
 
 #[test]
 fn test_hybrid_empty_file() -> Result<(), CryptoError> {
@@ -1281,14 +1213,12 @@ fn test_two_encryptions_produce_different_output() -> Result<(), CryptoError> {
         input_file.to_str().unwrap(),
         encrypt_dir_a.to_str().unwrap(),
         &passphrase,
-        false,
     )?;
 
     symmetric_encryption(
         input_file.to_str().unwrap(),
         encrypt_dir_b.to_str().unwrap(),
         &passphrase,
-        false,
     )?;
 
     let file_a = fs::read(encrypt_dir_a.join("data.fcr"))?;

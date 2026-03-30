@@ -99,21 +99,20 @@ fn test_cli_symmetric_encrypt_decrypt_file() {
 }
 
 #[test]
-fn test_cli_symmetric_large_flag() {
-    let test_dir = setup_test_dir("cli_symmetric_large");
-    let input_file = test_dir.join("large.txt");
+fn test_cli_symmetric_multi_chunk_file() {
+    let test_dir = setup_test_dir("cli_symmetric_multi_chunk");
+    let input_file = test_dir.join("multi_chunk.txt");
     let encrypt_dir = test_dir.join("encrypted");
     let decrypt_dir = test_dir.join("decrypted");
 
     fs::create_dir_all(&encrypt_dir).unwrap();
     fs::create_dir_all(&decrypt_dir).unwrap();
 
-    let content = "Large file content\n".repeat(1000);
+    let content = "Multi chunk file content\n".repeat(1000);
     create_test_file(&input_file, &content);
 
     let binary = get_binary_path();
 
-    // Encrypt with --large flag
     let encrypt_output = Command::new(&binary)
         .arg("symmetric")
         .arg("-i")
@@ -121,31 +120,28 @@ fn test_cli_symmetric_large_flag() {
         .arg("-o")
         .arg(encrypt_dir.to_str().unwrap())
         .arg("-p")
-        .arg("large_password")
-        .arg("--large")
+        .arg("multi_chunk_password")
         .output()
         .expect("Failed to execute encrypt command");
 
     assert!(encrypt_output.status.success());
-    assert!(encrypt_dir.join("large.fcr").exists());
+    assert!(encrypt_dir.join("multi_chunk.fcr").exists());
 
-    // Decrypt
     let decrypt_output = Command::new(&binary)
         .arg("symmetric")
         .arg("-i")
-        .arg(encrypt_dir.join("large.fcr").to_str().unwrap())
+        .arg(encrypt_dir.join("multi_chunk.fcr").to_str().unwrap())
         .arg("-o")
         .arg(decrypt_dir.to_str().unwrap())
         .arg("-p")
-        .arg("large_password")
+        .arg("multi_chunk_password")
         .output()
         .expect("Failed to execute decrypt command");
 
     assert!(decrypt_output.status.success());
 
-    // Verify content
     let decrypted_content =
-        fs::read_to_string(decrypt_dir.join("large.txt")).expect("Failed to read decrypted file");
+        fs::read_to_string(decrypt_dir.join("multi_chunk.txt")).expect("Failed to read decrypted file");
     assert_eq!(content, decrypted_content);
 }
 

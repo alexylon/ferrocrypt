@@ -49,7 +49,6 @@ fn App() -> Element {
     let mut password_repeated = use_signal(|| String::new());
     let mut keypath = use_signal(|| String::new());
     let mut mode = use_signal(|| Mode::SymmetricEncrypt);
-    let mut is_large_file = use_signal(|| false);
     let mut hide_password = use_signal(|| true);
     let mut status_ok = use_signal(|| String::from("Ready"));
     let mut status_err = use_signal(|| String::new());
@@ -140,7 +139,6 @@ fn App() -> Element {
         password_repeated.set(String::new());
         keypath.set(String::new());
         mode.set(Mode::SymmetricEncrypt);
-        is_large_file.set(false);
         hide_password.set(true);
         status_ok.set(String::from("Ready"));
         status_err.set(String::new());
@@ -154,7 +152,7 @@ fn App() -> Element {
             let result = match mode() {
                 Mode::SymmetricEncrypt | Mode::SymmetricDecrypt => {
                     let pwd = SecretString::from(password());
-                    symmetric_encryption(&inpath(), &outpath(), &pwd, is_large_file())
+                    symmetric_encryption(&inpath(), &outpath(), &pwd)
                 }
                 Mode::HybridEncrypt | Mode::HybridDecrypt => {
                     let mut key = keypath();
@@ -176,7 +174,6 @@ fn App() -> Element {
                     password_repeated.set(String::new());
                     keypath.set(String::new());
                     mode.set(Mode::SymmetricEncrypt);
-                    is_large_file.set(false);
                     hide_password.set(true);
 
                     status_ok.set(message);
@@ -358,32 +355,6 @@ fn App() -> Element {
                 }
             }
 
-            // Large file checkbox
-            div {
-                class: "cbx-form",
-                label {
-                    r#for: "checkbox1",
-                    input {
-                        r#type: "checkbox",
-                        id: "checkbox1",
-                        checked: is_large_file(),
-                        disabled: !matches!(mode(), Mode::SymmetricEncrypt),
-                        onchange: move |_| is_large_file.set(!is_large_file())
-                    }
-                    span {
-                        class: "cbx",
-                        svg {
-                            width: "12px",
-                            height: "11px",
-                            view_box: "0 0 12 11",
-                            if is_large_file() && matches!(mode(), Mode::SymmetricEncrypt) {
-                                polyline { points: "1 6.29411765 4.5 10 11 1" }
-                            }
-                        }
-                    }
-                    span { class: "cbx-label", "Large files (low RAM usage)" }
-                }
-            }
 
             // Output directory
             div {

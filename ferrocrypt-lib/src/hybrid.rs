@@ -89,7 +89,8 @@ pub fn encrypt_file(
             + rs_encoded_size(HMAC_KEY_SIZE)) as u16;
         let prefix = format::build_header_prefix(format::TYPE_HYBRID, 0, header_len);
 
-        let mut header_bytes = Vec::new();
+        let mut header_bytes =
+            Vec::with_capacity(prefix.len() + encoded_encrypted_combined_key.len() + encoded_nonce.len());
         header_bytes.extend_from_slice(&prefix);
         header_bytes.extend_from_slice(&encoded_encrypted_combined_key);
         header_bytes.extend_from_slice(&encoded_nonce);

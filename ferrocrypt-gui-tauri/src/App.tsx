@@ -9,7 +9,6 @@ interface AppState {
     disableStart: boolean;
     hidePassword: boolean;
     inpath: string;
-    isLargeFile: boolean;
     keypath: string;
     mode: string;
     outpath: string;
@@ -28,7 +27,6 @@ const initialState: AppState = {
     disableStart: true,
     hidePassword: true,
     inpath: "",
-    isLargeFile: false,
     keypath: "",
     mode: "se",
     outpath: "",
@@ -175,12 +173,6 @@ function App() {
         });
     }
 
-    const handleLargeFileSupport = () => {
-        updateState({
-            isLargeFile: !state.isLargeFile
-        });
-    }
-
     const handleSymmetricEncryptionMode = () => {
         updateState({
             mode: "se"
@@ -211,13 +203,12 @@ function App() {
             statusErr: "",
         });
 
-        const {inpath, outpath, password, isLargeFile, keypath, mode} = state;
+        const {inpath, outpath, password, keypath, mode} = state;
 
         await invoke("start", {
             inpath,
             outpath,
             password,
-            isLargeFile,
             keypath,
             mode
         })
@@ -250,7 +241,6 @@ function App() {
         disableStart,
         hidePassword,
         inpath,
-        isLargeFile,
         keypath,
         mode,
         outpath,
@@ -383,24 +373,6 @@ function App() {
                         style={{width: "90px"}}
                     >Select
                     </button>
-                </div>
-                <div className="cbx-form">
-                    <label htmlFor="checkbox1">
-                        <input type="checkbox"
-                               id="checkbox1"
-                               checked={isLargeFile}
-                               onChange={handleLargeFileSupport}
-                               disabled={mode === "sd" || mode === "he" || mode === "hd" || mode === "gk"}
-                        />
-                        <span className="cbx">
-                            <svg width="12px" height="11px" viewBox="0 0 12 11">
-                                {mode === "sd" || mode === "he" || mode === "hd" || mode === "gk"
-                                    ? ""
-                                    : <polyline points="1 6.29411765 4.5 10 11 1"/>}
-                            </svg>
-                        </span>
-                        <span className="cbx-label">Large files (low RAM usage)</span>
-                    </label>
                 </div>
                 <div className="helper">Save output to this folder:</div>
                 <div className="row">

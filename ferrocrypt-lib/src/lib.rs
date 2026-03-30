@@ -19,11 +19,11 @@
 //! # fn run() -> Result<(), CryptoError> {
 //! // Encrypt a folder to out/secrets.fcr
 //! let passphrase = SecretString::from("correct horse battery staple".to_string());
-//! let produced = symmetric_encryption("./secrets", "./out", &passphrase, false)?;
+//! let produced = symmetric_encryption("./secrets", "./out", &passphrase)?;
 //! println!("wrote {produced}");
 //!
 //! // Decrypt the archive back
-//! let recovered = symmetric_encryption("./out/secrets.fcr", "./restored", &passphrase, false)?;
+//! let recovered = symmetric_encryption("./out/secrets.fcr", "./restored", &passphrase)?;
 //! println!("restored to {recovered}");
 //! # Ok(()) }
 //! # fn main() { run().unwrap(); }
@@ -158,7 +158,6 @@ where
 ///   packaged and encrypted to `output_dir` (writing `<name>.fcr`).
 /// - **Decrypt**: if `input_path` ends with `.fcr`, it is decrypted and
 ///   extracted into `output_dir`.
-/// - `large = true` mirrors the CLI `--large` flag for streaming large inputs.
 ///
 /// Returns the path to the produced file or directory.
 ///
@@ -169,11 +168,11 @@ where
 ///
 /// // Encrypt a file
 /// let passphrase = SecretString::from("my-secret-password".to_string());
-/// let result = symmetric_encryption("./document.txt", "./encrypted", &passphrase, false)?;
+/// let result = symmetric_encryption("./document.txt", "./encrypted", &passphrase)?;
 /// println!("{}", result); // "Encrypted to ./encrypted/document.fcr for X.XXs"
 ///
 /// // Decrypt it back
-/// let result = symmetric_encryption("./encrypted/document.fcr", "./decrypted", &passphrase, false)?;
+/// let result = symmetric_encryption("./encrypted/document.fcr", "./decrypted", &passphrase)?;
 /// println!("{}", result); // "Decrypted to ./decrypted/document.txt for X.XXs"
 /// # Ok::<(), ferrocrypt::CryptoError>(())
 /// ```
@@ -181,13 +180,12 @@ pub fn symmetric_encryption(
     input_path: &str,
     output_dir: &str,
     password: &SecretString,
-    large: bool,
 ) -> Result<String, CryptoError> {
     with_tmp_workspace(input_path, output_dir, |input, output, tmp| {
         if input_path.ends_with(".fcr") {
             symmetric::decrypt_file(input, output, password, tmp)
         } else {
-            symmetric::encrypt_file(input, output, password, large, tmp)
+            symmetric::encrypt_file(input, output, password, tmp)
         }
     })
 }

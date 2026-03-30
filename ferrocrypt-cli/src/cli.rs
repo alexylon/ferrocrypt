@@ -51,9 +51,6 @@ pub enum Command {
 
         #[arg(short, long)]
         passphrase: String,
-
-        #[arg(short, long)]
-        large: bool,
     },
 }
 
@@ -94,10 +91,9 @@ fn run_command(cmd: Command) -> Result<(), CryptoError> {
             inpath,
             outpath,
             passphrase,
-            large,
         } => {
             let passphrase = SecretString::from(passphrase);
-            symmetric_encryption(&inpath, &outpath, &passphrase, large)?;
+            symmetric_encryption(&inpath, &outpath, &passphrase)?;
         }
     }
 

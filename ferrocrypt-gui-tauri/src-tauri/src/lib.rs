@@ -12,14 +12,13 @@ fn start(
     inpath: &str,
     outpath: &str,
     password: String,
-    is_large_file: bool,
     mut keypath: String,
     mode: String,
 ) -> Result<String, String> {
     let password = SecretString::from(password);
 
     if mode == "se" || mode == "sd" {
-        match symmetric_encryption(inpath, outpath, &password, is_large_file) {
+        match symmetric_encryption(inpath, outpath, &password) {
             Ok(result) => Ok(result),
             Err(error) => Err(error.to_string()),
         }

@@ -12,7 +12,7 @@
 /// | 2      | 1    | Major version | Breaking format changes increment this            |
 /// | 3      | 1    | Minor version | Backward-compatible additions increment this      |
 /// | 4-5    | 2    | Header length | Big-endian u16: bytes from offset 0 to ciphertext |
-/// | 6-7    | 2    | Flags         | Big-endian u16: bit 0 = large file mode           |
+/// | 6-7    | 2    | Flags         | Big-endian u16: reserved for future use            |
 ///
 /// ## Version handling
 ///
@@ -42,7 +42,6 @@ pub const TYPE_HYBRID: u8 = 0x48; // 'H'
 pub const FORMAT_MAJOR: u8 = 1;
 pub const FORMAT_MINOR: u8 = 0;
 pub const HEADER_PREFIX_SIZE: usize = 8;
-pub const FLAG_LARGE_FILE: u16 = 1 << 0;
 
 #[allow(dead_code)]
 pub struct FileHeader {

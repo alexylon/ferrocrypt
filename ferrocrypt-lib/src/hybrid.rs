@@ -6,7 +6,9 @@ use chacha20poly1305::{
     XChaCha20Poly1305,
     aead::{KeyInit, OsRng, rand_core::RngCore, stream},
 };
-use openssl::pkey::Private;
+use openssl::encrypt::{Decrypter, Encrypter};
+use openssl::hash::MessageDigest;
+use openssl::pkey::{PKey, Private};
 use openssl::rsa::{Padding, Rsa};
 use openssl::symm::Cipher;
 use secrecy::{ExposeSecret, SecretString};
@@ -248,8 +250,15 @@ fn get_public_key_size_from_private_key(
 
 fn encrypt_key(key_data: &[u8], rsa_public_pem: &str) -> Result<Vec<u8>, CryptoError> {
     let rsa = Rsa::public_key_from_pem(rsa_public_pem.as_bytes())?;
-    let mut buf: Vec<u8> = vec![0; rsa.size() as usize];
-    rsa.public_encrypt(key_data, &mut buf, Padding::PKCS1_OAEP)?;
+    let pkey = PKey::from_rsa(rsa)?;
+    let mut encrypter = Encrypter::new(&pkey)?;
+    encrypter.set_rsa_padding(Padding::PKCS1_OAEP)?;
+    encrypter.set_rsa_oaep_md(MessageDigest::sha256())?;
+    encrypter.set_rsa_mgf1_md(MessageDigest::sha256())?;
+    let buf_len = encrypter.encrypt_len(key_data)?;
+    let mut buf = vec![0u8; buf_len];
+    let len = encrypter.encrypt(key_data, &mut buf)?;
+    buf.truncate(len);
 
     Ok(buf)
 }
@@ -261,11 +270,23 @@ fn decrypt_key(
 ) -> Result<[u8; COMBINED_KEY_SIZE], CryptoError> {
     let rsa =
         Rsa::private_key_from_pem_passphrase(rsa_private_pem.as_bytes(), passphrase.as_bytes())?;
-    let mut buf: Vec<u8> = vec![0; rsa.size() as usize];
-    rsa.private_decrypt(encrypted_key, &mut buf, Padding::PKCS1_OAEP)?;
+    let pkey = PKey::from_rsa(rsa)?;
+    let mut decrypter = Decrypter::new(&pkey)?;
+    decrypter.set_rsa_padding(Padding::PKCS1_OAEP)?;
+    decrypter.set_rsa_oaep_md(MessageDigest::sha256())?;
+    decrypter.set_rsa_mgf1_md(MessageDigest::sha256())?;
+    let buf_len = decrypter.decrypt_len(encrypted_key)?;
+    let mut buf = vec![0u8; buf_len];
+    let len = decrypter.decrypt(encrypted_key, &mut buf)?;
+    if len != COMBINED_KEY_SIZE {
+        buf.zeroize();
+        return Err(CryptoError::EncryptionDecryptionError(
+            "RSA-decrypted key has unexpected length".to_string(),
+        ));
+    }
 
-    let mut result: [u8; COMBINED_KEY_SIZE] = [0u8; COMBINED_KEY_SIZE];
-    result.copy_from_slice(&buf[0..COMBINED_KEY_SIZE]);
+    let mut result = [0u8; COMBINED_KEY_SIZE];
+    result.copy_from_slice(&buf[..COMBINED_KEY_SIZE]);
     buf.zeroize();
 
     Ok(result)

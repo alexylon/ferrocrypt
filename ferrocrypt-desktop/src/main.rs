@@ -10,8 +10,7 @@ use ferrocrypt::{
 };
 use std::path::{Path, PathBuf};
 
-const ELIDE_INPUT: usize = 42;
-const ELIDE_OUTPUT: usize = ELIDE_INPUT - 1;
+const ELIDE: usize = 42;
 const RSA_KEY_BITS: u32 = 4096;
 
 // ---------------------------------------------------------------------------
@@ -95,7 +94,7 @@ fn main() {
             };
             let Some(app) = weak.upgrade() else { return };
             let key_path = path_to_string(&path);
-            app.set_keypath_display(elide_left(&key_path, ELIDE_INPUT).into());
+            app.set_keypath_display(elide_left(&key_path, ELIDE).into());
             app.set_keypath(key_path.into());
             check_conflicts(&app);
         }
@@ -243,7 +242,7 @@ fn apply_input_path(weak: &slint::Weak<AppWindow>, path: PathBuf) {
     let is_decrypt = matches!(detected_mode, Some(1) | Some(3));
 
     let Some(app) = weak.upgrade() else { return };
-    app.set_inpath_display(elide_left(&selected, ELIDE_INPUT).into());
+    app.set_inpath_display(elide_left(&selected, ELIDE).into());
     app.set_inpath(selected.clone().into());
     if let Some(m) = detected_mode {
         app.set_mode(m);
@@ -261,7 +260,7 @@ fn apply_input_path(weak: &slint::Weak<AppWindow>, path: PathBuf) {
 }
 
 fn set_outpath(app: &AppWindow, path: &str) {
-    app.set_outpath_display(elide_left(path, ELIDE_OUTPUT).into());
+    app.set_outpath_display(elide_left(path, ELIDE).into());
     app.set_outpath(path.into());
     check_conflicts(app);
 }
@@ -272,7 +271,7 @@ fn check_conflicts(app: &AppWindow) {
 
     let warning = match mode {
         0 | 2 if !outpath.is_empty() && Path::new(&outpath).exists() => {
-            format!("Already exists: {}", elide_left(&outpath, ELIDE_OUTPUT))
+            format!("Already exists: {}", elide_left(&outpath, ELIDE))
         }
         4 if !outpath.is_empty() => {
             let dir = Path::new(&outpath);
@@ -338,8 +337,13 @@ fn elide_result_path(msg: &str) -> String {
     for prefix in ["Encrypted to ", "Decrypted to "] {
         if let Some(rest) = msg.strip_prefix(prefix) {
             if let Some((path, duration)) = rest.rsplit_once(" in ") {
-                return format!("{prefix}{} in {duration}", elide_left(path, ELIDE_OUTPUT));
+                return format!("{prefix}{} in {duration}", elide_left(path, ELIDE - 5));
             }
+        }
+    }
+    for prefix in ["Output file already exists: ", "Output already exists: "] {
+        if let Some(path) = msg.strip_prefix(prefix) {
+            return format!("{prefix}{}", elide_left(path, ELIDE - 5));
         }
     }
     msg.to_string()

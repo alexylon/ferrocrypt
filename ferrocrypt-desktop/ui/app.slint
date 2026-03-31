@@ -613,7 +613,7 @@ export component AppWindow inherits Window {
 
                 SmallButton {
                     width: 64px;
-                    label: is-encrypt-mode ? "Save As" : "Select";
+                    label: "Change";
                     enabled: !is-working && !(is-encrypt-mode && inpath == "");
                     clicked => {
                         if (is-encrypt-mode) {

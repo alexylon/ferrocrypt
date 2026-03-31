@@ -1,294 +1,174 @@
 # FerroCrypt
 
 ![](https://github.com/alexylon/Ferrocrypt/actions/workflows/rust.yml/badge.svg)
-&nbsp; 
+&nbsp;
 [![crate: ferrocrypt](https://img.shields.io/crates/v/ferrocrypt.svg?label=crate%3A%20ferrocrypt&color=blue)](https://crates.io/crates/ferrocrypt)
 &nbsp;
 [![docs.rs](https://img.shields.io/docsrs/ferrocrypt/latest?color=2e7d32)](https://docs.rs/ferrocrypt/latest)
 &nbsp;
 [![crate: ferrocrypt-cli](https://img.shields.io/crates/v/ferrocrypt-cli.svg?label=crate%3A%20ferrocrypt-cli&color=blue)](https://crates.io/crates/ferrocrypt-cli)
 
-Tiny, easy-to-use, and highly secure multiplatform encryption tool with CLI and GUI interfaces.
-Written entirely in Rust.
+Multiplatform file encryption tool with CLI and desktop interfaces. Written in Rust.
 
-<br/>
+<div align="center"><img src="/assets/screenshot.png" width="400" alt="Ferrocrypt"></div>
 
-<div align="center"><img align="center" src="/assets/ferrocrypt_screenshot.png" width="400" alt="Ferrocrypt"></div>
+## About
 
-<br/>
+FerroCrypt encrypts and decrypts files and directories. It supports two modes:
 
-## Table of Contents
+- **Symmetric** — Password-based. Uses XChaCha20-Poly1305 with Argon2id key derivation and HKDF-SHA3-256 subkey expansion. Same password encrypts and decrypts.
+- **Hybrid** — Public/private key based. Combines RSA-4096 (key encryption) with XChaCha20-Poly1305 (data encryption). Each file gets a unique random key sealed with the recipient's public key. Decryption requires the private key and its passphrase.
 
-- [Ferrocrypt](#ferrocrypt)
-    - [ABOUT](#about)
-    - [INSTALLATION](#installation)
-    - [USING the CLI app](#using-the-cli-app)
-        - [1. Direct subcommand usage](#1-direct-subcommand-usage)
-            - [Symmetric encryption (password-based key derivation)](#symmetric-encryption-password-based-key-derivation)
-            - [Hybrid encryption](#hybrid-encryption)
-                - [Generate a private/public key pair and set a passphrase for encrypting the private key](#generate-a-privatepublic-key-pair-and-set-a-passphrase-for-encrypting-the-private-key)
-                - [Encrypt file or directory (using a public key)](#encrypt-file-or-directory-using-a-public-key)
-                - [Decrypt file (using a private key)](#decrypt-file-using-a-private-key)
-        - [2. Interactive command mode (REPL)](#2-interactive-command-mode-repl)
-    - [SUBCOMMANDS AND OPTIONS](#subcommands-and-options)
-        - [Global options](#global-options)
-        - [`symmetric` subcommand](#symmetric-subcommand)
-        - [`hybrid` subcommand](#hybrid-subcommand)
-        - [`keygen` subcommand](#keygen-subcommand)
-    - [BUILD the desktop app](#build-the-desktop-app)
-        - [Run a dev build:](#run-a-dev-build)
-        - [Build a release binary:](#build-a-release-binary)
-    - [USING the GUI App](#using-the-gui-app)
-        - [Symmetric Encryption Mode](#symmetric-encryption-mode)
-        - [Hybrid Encryption Mode](#hybrid-encryption-mode)
-        - [Key Pair Creation](#key-pair-creation)
+Both modes produce `.fcr` files. The file header identifies the mode automatically — no need to remember which mode was used.
 
-## ABOUT
+### Security
 
-Ferrocrypt is a simple encryption tool leveraging Rust's memory safety guarantees and performance benefits.
-The name comes from Latin: "ferrum" (iron) and "ferrugo" (rust).
+- XChaCha20-Poly1305 via the audited `chacha20poly1305` crate
+- HMAC-SHA3-256 header authentication — tampering is detected before decryption begins
+- Passphrases handled via the `secrecy` crate (zeroized on drop, hidden from Debug/Display)
+- Triple-replicated headers with majority-vote decoding for error correction
+- Versioned file format with magic bytes — corrupted or incompatible files produce clear errors
 
-**Encryption Modes:**
+### Project Structure
 
-1. **Symmetric** - Uses XChaCha20-Poly1305 encryption with Argon2id password-based key derivation and HKDF-SHA3-256 subkey expansion for domain-separated encryption and HMAC keys. Ideal for personal use where the same password encrypts and decrypts data.
+| Crate | Description |
+|---|---|
+| `ferrocrypt-lib` | Core encryption library ([crates.io](https://crates.io/crates/ferrocrypt)) |
+| `ferrocrypt-cli` | CLI binary ([crates.io](https://crates.io/crates/ferrocrypt-cli)) |
+| `ferrocrypt-desktop` | Desktop app built with [Slint](https://slint.dev/) |
 
-2. **Hybrid** - Combines XChaCha20-Poly1305 (data encryption) with RSA-4096 (key encryption). Each file/folder gets a unique random key, encrypted with your public key. Requires both the private key AND password for decryption, providing dual-layer security.
+## Installation
 
-Both modes produce `.fcr` vault files. The format is self-identifying — the file header distinguishes symmetric from hybrid internally.
-
-**Security Features:**
-
-- **Audited encryption**: Uses the `chacha20poly1305` crate, which has undergone successful security audits
-- **Tamper detection**: HMAC-SHA3-256 authenticates every file header — any modification to the salt, nonce, or flags is detected before decryption begins
-- **Secure secret handling**: Passphrases are protected using the `secrecy` crate, preventing accidental exposure through Debug/Display traits and ensuring automatic memory zeroization when dropped
-- **Error correction**: Triple-replicated cryptographic headers with majority-vote decoding protect against bit rot and data transfer errors
-- **Versioned file format**: Files start with a magic-byte header that identifies the format, version, and structure. Corrupted, misnamed, or incompatible files produce clear error messages instead of misleading crypto failures
-
-The code is separated into the library `ferrocrypt-lib`, a CLI client `ferrocrypt-cli`, and a [**Slint**](https://slint.dev/) desktop app `ferrocrypt-desktop`.
-
-<br/>
-
-## INSTALLATION
-
-### CLI Installation
-
-**Install from crates.io:**
+### CLI
 
 ```bash
-# Installs the 'ferrocrypt' binary
 cargo install ferrocrypt-cli
 ```
 
-**Or build from source:**
+Or build from source:
 
 ```bash
 cargo build --release
 ```
 
-The binary executable file will be generated in `target/release/ferrocrypt` (macOS and Linux)
-or `target\release\ferrocrypt.exe` (Windows).
+Binary output: `target/release/ferrocrypt` (macOS/Linux) or `target\release\ferrocrypt.exe` (Windows).
 
-### Library Installation
+### Library
 
 ```bash
 cargo add ferrocrypt
 ```
 
-Or add to your `Cargo.toml`:
+## CLI Usage
 
-```toml
-ferrocrypt = "0.2"
+### Subcommands
+
+| Subcommand | Purpose |
+|---|---|
+| `symmetric` | Encrypt/decrypt with a password |
+| `hybrid` | Encrypt/decrypt with RSA keys |
+| `keygen` | Generate an RSA key pair |
+
+Run without arguments to start an interactive REPL.
+
+### Symmetric
+
+```bash
+# Encrypt
+ferrocrypt symmetric -i secret.txt -o ./encrypted -p "my password"
+
+# Decrypt
+ferrocrypt symmetric -i ./encrypted/secret.fcr -o ./decrypted -p "my password"
+
+# Encrypt with custom output filename
+ferrocrypt symmetric -i secret.txt -o ./encrypted -p "my password" -s ./encrypted/backup.fcr
 ```
 
-<br/>
+### Hybrid
 
-## USING the CLI app
+```bash
+# Generate keys
+ferrocrypt keygen -o ./keys -p "key password"
 
-The CLI supports two usage modes:
+# Encrypt with public key (no passphrase needed)
+ferrocrypt hybrid -i secret.txt -o ./encrypted -k ./keys/rsa-4096-pub-key.pem
 
-1. **Direct subcommands** (recommended for scripts and automation)
-2. **Interactive command mode** (REPL), entered when you run `./ferrocrypt` with no arguments
+# Decrypt with private key
+ferrocrypt hybrid -i ./encrypted/secret.fcr -o ./decrypted -k ./keys/rsa-4096-priv-key.pem -p "key password"
+```
 
-Commands shown are for macOS/Linux (use `ferrocrypt` instead of `./ferrocrypt` on Windows).  
-Flags can be used in any order.
-
-Available subcommands:
-
-- `keygen`    – Generate a hybrid (asymmetric) key pair
-- `hybrid`    – Hybrid encryption/decryption using public/private keys
-- `symmetric` – Symmetric encryption/decryption using a passphrase
-
----
-
-## 1. Direct subcommand usage
-
-### Symmetric encryption (password-based key derivation)
-
-- Encrypt file or directory | decrypt file
-
-`./ferrocrypt symmetric --inpath <SRC_PATH> --outpath <DEST_DIR_PATH> --passphrase <PASSPHRASE>`
-
-or
-
-`./ferrocrypt symmetric -i <SRC_PATH> -o <DEST_DIR_PATH> -p <PASSPHRASE>`
-
-<br/>
-
-### Hybrid encryption
-
-#### Generate a private/public key pair and set a passphrase for encrypting the private key
-
-`./ferrocrypt keygen --bit-size <BIT_SIZE> --passphrase <PASSPHRASE> --outpath <DEST_DIR_PATH>`
-
-or
-
-`./ferrocrypt keygen -b <BIT_SIZE> -p <PASSPHRASE> -o <DEST_DIR_PATH>`
-
-If `--bit-size` is omitted, the default is `4096`.
-
-#### Encrypt file or directory (using a public key)
-
-`./ferrocrypt hybrid --inpath <SRC_PATH> --outpath <DEST_DIR_PATH> --key <PUBLIC_PEM_KEY>`
-
-or
-
-`./ferrocrypt hybrid -i <SRC_PATH> -o <DEST_DIR_PATH> -k <PUBLIC_PEM_KEY>`
-
-#### Decrypt file (using a private key)
-
-`./ferrocrypt hybrid --inpath <SRC_FILE_PATH> --outpath <DEST_DIR_PATH> --key <PRIVATE_PEM_KEY> --passphrase <PASSPHRASE>`
-
-or
-
-`./ferrocrypt hybrid -i <SRC_FILE_PATH> -o <DEST_DIR_PATH> -k <PRIVATE_PEM_KEY> -p <PASSPHRASE>`
-
----
-
-## 2. Interactive command mode (REPL)
-
-Running `./ferrocrypt` **without any arguments** starts an interactive shell:
+### Interactive Mode
 
 ```text
-$ ./ferrocrypt
+$ ferrocrypt
 Ferrocrypt interactive mode
 Type `keygen`, `hybrid`, or `symmetric` with flags, or `quit` to exit.
 
-ferrocrypt> keygen -o keys -p "my secret"
-ferrocrypt> hybrid -i secret.txt -o out -k public.pem
-ferrocrypt> symmetric -i secret.txt -o out -p "my secret"
+ferrocrypt> symmetric -i secret.txt -o out -p "my password"
 ferrocrypt> quit
 ```
 
-This mode is convenient for exploratory or repeated use.  
-Under the hood, it uses the same subcommands and flags as the direct CLI.
+### Flag Reference
 
----
+#### `symmetric`
 
-## SUBCOMMANDS AND OPTIONS
+| Flag | Description |
+|---|---|
+| `-i, --inpath` | Input file or directory |
+| `-o, --outpath` | Output directory |
+| `-p, --passphrase` | Password for encryption/decryption |
+| `-s, --save-as` | Custom output file path (encrypt only, optional) |
 
-### Global options
+#### `hybrid`
 
-```markdown
-| Flag             | Description    |
-|------------------|----------------|
-| `-h, --help`     | Print help     |
-| `-V, --version`  | Print version  |
-```
+| Flag | Description |
+|---|---|
+| `-i, --inpath` | Input file or directory |
+| `-o, --outpath` | Output directory |
+| `-k, --key` | Public key (encrypt) or private key (decrypt) |
+| `-p, --passphrase` | Private key passphrase (decrypt only) |
+| `-s, --save-as` | Custom output file path (encrypt only, optional) |
 
-<br/>
+#### `keygen`
 
-### `symmetric` subcommand
+| Flag | Description |
+|---|---|
+| `-o, --outpath` | Output directory for the key pair |
+| `-p, --passphrase` | Passphrase to encrypt the private key |
+| `-b, --bit-size` | RSA key size in bits (default: `4096`) |
 
-```markdown
-| Flag                             | Description                                                                                                  |
-|----------------------------------|--------------------------------------------------------------------------------------------------------------|
-| `-i, --inpath <SRC_PATH>`        | File or directory path that needs to be encrypted, or the file path that needs to be decrypted              |
-| `-o, --outpath <DEST_DIR>`       | Destination directory path                                                                                   |
-| `-p, --passphrase <PASSWORD>`    | Password to derive the symmetric key for encryption and decryption                                          |
-| `-s, --save-as <FILE_PATH>`      | Save encrypted output to this file path instead of the default name (encrypt only, optional)                |
-```
+## Desktop App
 
-<br/>
+### Build
 
-### `hybrid` subcommand
+Requires [Rust](https://www.rust-lang.org/tools/install). Navigate to the `ferrocrypt-desktop` directory.
 
-```markdown
-| Flag                             | Description                                                                                                  |
-|----------------------------------|--------------------------------------------------------------------------------------------------------------|
-| `-i, --inpath <SRC_PATH>`        | File or directory path that needs to be encrypted, or the file path that needs to be decrypted              |
-| `-o, --outpath <DEST_DIR>`       | Destination directory path                                                                                   |
-| `-k, --key <KEY_PATH>`           | Path to the public key for encryption, or the path to the private key for decryption                        |
-| `-p, --passphrase <PASSWORD>`    | Password to decrypt the private key (only required when using a private key)                                |
-| `-s, --save-as <FILE_PATH>`      | Save encrypted output to this file path instead of the default name (encrypt only, optional)                |
-```
-
-<br/>
-
-### `keygen` subcommand
-
-```markdown
-| Flag                             | Description                                                                                                  |
-|----------------------------------|--------------------------------------------------------------------------------------------------------------|
-| `-o, --outpath <DEST_DIR>`       | Destination directory path where the generated key pair will be written                                     |
-| `-p, --passphrase <PASSWORD>`    | Passphrase to encrypt the generated private key                                                              |
-| `-b, --bit-size <BIT_SIZE>`      | Length of the key in bits for the key pair generation (default: `4096`)                                     |
-```
-
-<br/>
-
-## BUILD the desktop app
-
-After [installing Rust](https://www.rust-lang.org/tools/install), navigate to the `ferrocrypt-desktop` directory.
-
-**Prerequisites (Linux only):** Slint requires a few system libraries for rendering. On Debian/Ubuntu:
+**Linux only** — install rendering dependencies:
 
 ```bash
+# Debian/Ubuntu
 sudo apt install libfontconfig1-dev libfreetype-dev
-```
 
-On Fedora:
-
-```bash
+# Fedora
 sudo dnf install fontconfig-devel freetype-devel
 ```
 
 macOS and Windows need no extra dependencies.
 
-### Run a dev build:
-
 ```bash
-cargo run
+cargo run              # dev build
+cargo build --release  # release build
 ```
 
-### Build a release binary:
+Binary output: `target/release/ferrocrypt-desktop` (macOS/Linux) or `target\release\ferrocrypt-desktop.exe` (Windows).
 
-```bash
-cargo build --release
-```
+### Usage
 
-The binary will be generated in `target/release/ferrocrypt-desktop` (macOS/Linux) or `target\release\ferrocrypt-desktop.exe` (Windows).
+Select a file or folder, then choose the encryption mode. The app auto-detects the mode when opening `.fcr` files.
 
-<br/>
-
-## USING the GUI App
-
-Select a file or folder, then choose the encryption mode. When decrypting, the app auto-detects the mode from the file header.
-
-### Symmetric Encryption Mode
-
-Encrypt/decrypt using the same password. Choose a password and click "Encrypt". When encrypting, the output file path is auto-filled (e.g. `secrets.fcr`) and can be changed via the "Save As" button. When decrypting, select a destination folder.
-
-### Hybrid Encryption Mode
-
-Ideal for secure data exchange. Encrypt using a _public_ RSA key (PEM format), decrypt using the corresponding _private_ key and password. Like symmetric mode, the "Save As" dialog lets you choose the encrypted file name and location.
-
-### Key Pair Creation
-
-Select "Create key pair", enter a password to protect the private key, choose output folder, and generate RSA-4096 keys.
-
-
-<br/>
-
+- **Symmetric** — Enter a password. The output path is auto-filled as `{name}.fcr` and can be changed with "Save As". Decryption uses a directory picker.
+- **Hybrid** — Select a public key to encrypt, or a private key + passphrase to decrypt. Same "Save As" option for custom output names.
+- **Key Gen** — Enter a passphrase, choose an output folder, and generate RSA-4096 keys.
 
 ## Acknowledgments
 

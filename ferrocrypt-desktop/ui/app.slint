@@ -366,7 +366,7 @@ export component AppWindow inherits Window {
                     single-line: true;
                     enabled: !is-working;
                     accepted => {
-                        if !root.disable-start { root.start-operation(); }
+                        if (!root.disable-start) { root.start-operation(); }
                     }
                 }
 
@@ -408,7 +408,7 @@ export component AppWindow inherits Window {
                     }
 
                     // Strike-through (when password is visible)
-                    if !root.hide-password : Rectangle {
+                    if (!root.hide-password) : Rectangle {
                         width: 22px;
                         height: 1.5px;
                         y: (parent.height - self.height) / 2;
@@ -468,7 +468,7 @@ export component AppWindow inherits Window {
                     single-line: true;
                     enabled: parent.field-enabled;
                     accepted => {
-                        if !root.disable-start { root.start-operation(); }
+                        if (!root.disable-start) { root.start-operation(); }
                     }
                 }
 

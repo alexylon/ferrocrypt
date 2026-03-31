@@ -5,10 +5,10 @@ All notable changes to FerroCrypt are documented in this file.
 ## [Unreleased]
 
 ### Added
-- **Library:** `output_file` parameter on `symmetric_encryption_with_progress` and `hybrid_encryption_with_progress` — when `Some`, writes the encrypted output to the exact path instead of deriving `<stem>.fcr` inside the output directory
+- **Library:** `save_as` parameter on `symmetric_encryption` and `hybrid_encryption` — when `Some`, writes the encrypted output to the exact path instead of deriving `<stem>.fcr` inside the output directory. `on_progress` callback parameter for stage descriptions.
 - **Library:** `default_encrypted_filename()` helper and `ENCRYPTED_EXTENSION` constant for callers that need to predict or filter the output filename
-- **Slint GUI:** "Save As" dialog for encryption — the output field shows the full file path and lets the user rename the encrypted file before saving. Decryption and key generation keep the directory picker.
-- **CLI:** `--save-as` / `-s` flag on `symmetric` and `hybrid` subcommands — optional output file path override for encryption, matching the GUI's Save As behavior
+- **Desktop app:** Slint-based desktop GUI (`ferrocrypt-desktop`) with symmetric, hybrid, and key generation modes. Includes "Save As" dialog for custom output filenames, auto-detection of encryption mode from file headers, and conflict warnings.
+- **CLI:** `--save-as` / `-s` flag on `symmetric` and `hybrid` subcommands — optional output file path override for encryption
 
 - HKDF-SHA3-256 subkey derivation: Argon2id now produces 32 bytes of input keying material, expanded via HKDF into separate encryption and HMAC subkeys with domain separation (`ferrocrypt-enc`, `ferrocrypt-hmac`). A separate 32-byte HKDF salt is stored in the header.
 - HMAC-SHA3-256 header authentication: detects tampering with file headers (salt, nonce, flags) before decryption
@@ -16,6 +16,8 @@ All notable changes to FerroCrypt are documented in this file.
 - `detect_encryption_mode()` public API for determining whether an `.fcr` file uses symmetric or hybrid encryption
 
 ### Changed
+- **Breaking (library API):** Collapsed `_with_progress` variants into base functions. `symmetric_encryption`, `hybrid_encryption`, and `generate_asymmetric_key_pair` now accept `save_as` and `on_progress` directly.
+- Moved Tauri and Dioxus GUIs to `experiments/`
 - **Breaking:** New file format — existing encrypted files from older versions cannot be decrypted. Unified file extension from `.fcs`/`.fch` to single `.fcr`. Both symmetric and hybrid modes now use the STREAM construction (EncryptorBE32/DecryptorBE32) for streaming encrypt/decrypt, eliminating the need to load entire files into memory. Hybrid nonce changed from 24 to 19 bytes to match the STREAM format. Symmetric header now includes an HKDF salt field.
 - **Breaking (library API):** Removed `BinCodeEncodeError`/`BinCodeDecodeError` and `ReedSolomonError` from `CryptoError` enum
 - **Breaking (CLI):** Removed `--large` flag — all encryption now uses streaming mode unconditionally

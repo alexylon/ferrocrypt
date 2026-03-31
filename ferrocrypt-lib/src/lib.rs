@@ -82,6 +82,7 @@ use secrecy::{ExposeSecret, SecretString};
 
 use crate::common::normalize_paths;
 pub use crate::error::CryptoError;
+pub use crate::format::ENCRYPTED_EXTENSION;
 
 pub use secrecy;
 
@@ -116,6 +117,12 @@ mod format;
 mod hybrid;
 mod replication;
 mod symmetric;
+
+/// Returns the default encrypted filename for a given input path (e.g. `"secrets.fcr"`).
+pub fn default_encrypted_filename(input_path: &str) -> Result<String, CryptoError> {
+    let stem = common::get_file_stem_to_string(input_path)?;
+    Ok(format!("{}.{}", stem, ENCRYPTED_EXTENSION))
+}
 
 fn with_tmp_workspace<F>(
     input_path: &str,
@@ -179,15 +186,20 @@ pub fn symmetric_encryption(
     output_dir: &str,
     password: &SecretString,
 ) -> Result<String, CryptoError> {
-    symmetric_encryption_with_progress(input_path, output_dir, password, |_| {})
+    symmetric_encryption_with_progress(input_path, output_dir, password, None, |_| {})
 }
 
 /// Like [`symmetric_encryption`], but calls `on_progress` with a stage
 /// description (e.g. "Deriving key…", "Encrypting…") at each major step.
+///
+/// When `output_file` is `Some`, the encrypted output is written to that exact
+/// path instead of the default `<stem>.fcr` inside `output_dir`. Ignored during
+/// decryption.
 pub fn symmetric_encryption_with_progress(
     input_path: &str,
     output_dir: &str,
     password: &SecretString,
+    output_file: Option<&str>,
     on_progress: impl Fn(&str),
 ) -> Result<String, CryptoError> {
     if password.expose_secret().is_empty() {
@@ -195,11 +207,14 @@ pub fn symmetric_encryption_with_progress(
             "Passphrase must not be empty for symmetric encryption".to_string(),
         ));
     }
+    let output_file_path = output_file.map(Path::new);
     with_tmp_workspace(input_path, output_dir, |input, output, tmp| {
-        if detect_encryption_mode(input).is_some() || input.ends_with(".fcr") {
+        if detect_encryption_mode(input).is_some()
+            || input.ends_with(format::ENCRYPTED_DOT_EXTENSION)
+        {
             symmetric::decrypt_file(input, output, password, tmp, &on_progress)
         } else {
-            symmetric::encrypt_file(input, output, password, tmp, &on_progress)
+            symmetric::encrypt_file(input, output, password, tmp, output_file_path, &on_progress)
         }
     })
 }
@@ -240,23 +255,45 @@ pub fn hybrid_encryption(
     rsa_key_pem: &str,
     passphrase: &SecretString,
 ) -> Result<String, CryptoError> {
-    hybrid_encryption_with_progress(input_path, output_dir, rsa_key_pem, passphrase, |_| {})
+    hybrid_encryption_with_progress(
+        input_path,
+        output_dir,
+        rsa_key_pem,
+        passphrase,
+        None,
+        |_| {},
+    )
 }
 
 /// Like [`hybrid_encryption`], but calls `on_progress` with a stage
 /// description at each major step.
+///
+/// When `output_file` is `Some`, the encrypted output is written to that exact
+/// path instead of the default `<stem>.fcr` inside `output_dir`. Ignored during
+/// decryption.
 pub fn hybrid_encryption_with_progress(
     input_path: &str,
     output_dir: &str,
     rsa_key_pem: &str,
     passphrase: &SecretString,
+    output_file: Option<&str>,
     on_progress: impl Fn(&str),
 ) -> Result<String, CryptoError> {
+    let output_file_path = output_file.map(Path::new);
     with_tmp_workspace(input_path, output_dir, |input, output, tmp| {
-        if detect_encryption_mode(input).is_some() || input.ends_with(".fcr") {
+        if detect_encryption_mode(input).is_some()
+            || input.ends_with(format::ENCRYPTED_DOT_EXTENSION)
+        {
             hybrid::decrypt_file(input, output, rsa_key_pem, passphrase, tmp, &on_progress)
         } else {
-            hybrid::encrypt_file(input, output, rsa_key_pem, tmp, &on_progress)
+            hybrid::encrypt_file(
+                input,
+                output,
+                rsa_key_pem,
+                tmp,
+                output_file_path,
+                &on_progress,
+            )
         }
     })
 }

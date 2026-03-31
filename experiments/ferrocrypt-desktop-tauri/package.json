@@ -1,5 +1,5 @@
 {
-  "name": "ferrocrypt-gui-tauri",
+  "name": "ferrocrypt-desktop-tauri",
   "private": true,
   "version": "0.1.0",
   "type": "module",

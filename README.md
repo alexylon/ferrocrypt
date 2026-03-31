@@ -35,21 +35,9 @@ Written entirely in Rust.
         - [`symmetric` subcommand](#symmetric-subcommand)
         - [`hybrid` subcommand](#hybrid-subcommand)
         - [`keygen` subcommand](#keygen-subcommand)
-    - [BUILD the GUI apps (tested on macOS)](#build-the-gui-apps-tested-on-macos)
-        - [Tauri GUI](#tauri-gui)
-            - [Install the `create-tauri-app` utility:](#install-the-create-tauri-app-utility)
-            - [Install the Tauri CLI:](#install-the-tauri-cli)
-            - [Install node modules:](#install-node-modules)
-            - [Build the app to a binary executable file:](#build-the-app-to-a-binary-executable-file)
-            - [Build a DMG installer for macOS:](#build-a-dmg-installer-for-macos)
-            - [You can start a live dev session with:](#you-can-start-a-live-dev-session-with)
-        - [Dioxus GUI](#dioxus-gui)
-            - [Build release binary:](#build-release-binary)
-            - [Start a live dev session:](#start-a-live-dev-session)
-            - [Bundle the desktop app:](#bundle-the-desktop-app)
-        - [Slint GUI](#slint-gui)
-            - [Run a dev build:](#run-a-dev-build)
-            - [Build a release binary:](#build-a-release-binary)
+    - [BUILD the desktop app](#build-the-desktop-app)
+        - [Run a dev build:](#run-a-dev-build)
+        - [Build a release binary:](#build-a-release-binary)
     - [USING the GUI App](#using-the-gui-app)
         - [Symmetric Encryption Mode](#symmetric-encryption-mode)
         - [Hybrid Encryption Mode](#hybrid-encryption-mode)
@@ -59,11 +47,6 @@ Written entirely in Rust.
 
 Ferrocrypt is a simple encryption tool leveraging Rust's memory safety guarantees and performance benefits.
 The name comes from Latin: "ferrum" (iron) and "ferrugo" (rust).
-
-**GUI Options:**
-- Tauri app (Rust + React frontend)
-- Dioxus desktop app (pure Rust)
-- Slint desktop app (pure Rust)
 
 **Encryption Modes:**
 
@@ -81,8 +64,7 @@ Both modes produce `.fcr` vault files. The format is self-identifying — the fi
 - **Error correction**: Triple-replicated cryptographic headers with majority-vote decoding protect against bit rot and data transfer errors
 - **Versioned file format**: Files start with a magic-byte header that identifies the format, version, and structure. Corrupted, misnamed, or incompatible files produce clear error messages instead of misleading crypto failures
 
-The code is separated in multiple projects - the library `ferrocrypt-lib`, a CLI client `ferrocrypt-cli`,
-a [**TAURI**](https://tauri.app/) based GUI app `ferrocrypt-gui-tauri`, a [**Dioxus**](https://dioxuslabs.com/) based GUI app `ferrocrypt-gui-dioxus`, and a [**Slint**](https://slint.dev/) based GUI app `ferrocrypt-gui-slint`.
+The code is separated into the library `ferrocrypt-lib`, a CLI client `ferrocrypt-cli`, and a [**Slint**](https://slint.dev/) desktop app `ferrocrypt-desktop`.
 
 <br/>
 
@@ -252,86 +234,9 @@ Under the hood, it uses the same subcommands and flags as the direct CLI.
 
 <br/>
 
-## BUILD the GUI apps (tested on macOS)
+## BUILD the desktop app
 
-### Tauri GUI
-
-After installing [Rust](https://www.rust-lang.org/learn/get-started) and [Node.js](https://nodejs.org/) (at least v.18),
-navigate to the `ferrocrypt-gui-tauri` directory and run the following commands:
-
-### Install the `create-tauri-app` utility:
-
-```cargo install create-tauri-app```
-
-### Install the Tauri CLI:
-
-```cargo install tauri-cli```
-
-### Install node modules:
-
-```npm install```
-
-### Build the app to a binary executable file:
-
-```cargo tauri build```
-
-The binary executable file of the GUI app will be generated in `ferrocrypt-gui-tauri/src-tauri/target/release/`
-
-### Build a DMG installer for macOS:
-
-```cargo tauri build --bundles dmg```
-
-The DMG image file of the GUI app will be generated in `ferrocrypt-gui-tauri/src-tauri/target/release/bundle/dmg/`
-
-### You can start a live dev session with:
-
-```cargo tauri dev```
-
-<br/>
-
-### Dioxus GUI
-
-After [installing Rust](https://www.rust-lang.org/tools/install), install the Dioxus CLI:
-
-- Install `cargo-binstall`:
-
-```bash
-curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
-```
-
-- Install Dioxus CLI:
-
-```bash
-cargo binstall dioxus-cli
-```
-
-Navigate to the `ferrocrypt-gui-dioxus` directory and run:
-
-### Build release binary:
-
-```bash
-cargo build --release
-```
-
-The binary will be generated in `target/release/ferrocrypt-gui-dioxus`
-
-### Start a live dev session:
-
-```bash
-dx serve
-```
-
-### Bundle the desktop app:
-
-```bash
-dx bundle
-```
-
-<br/>
-
-### Slint GUI
-
-After [installing Rust](https://www.rust-lang.org/tools/install), navigate to the `ferrocrypt-gui-slint` directory.
+After [installing Rust](https://www.rust-lang.org/tools/install), navigate to the `ferrocrypt-desktop` directory.
 
 **Prerequisites (Linux only):** Slint requires a few system libraries for rendering. On Debian/Ubuntu:
 
@@ -359,21 +264,21 @@ cargo run
 cargo build --release
 ```
 
-The binary will be generated in `target/release/ferrocrypt-gui-slint` (macOS/Linux) or `target\release\ferrocrypt-gui-slint.exe` (Windows).
+The binary will be generated in `target/release/ferrocrypt-desktop` (macOS/Linux) or `target\release\ferrocrypt-desktop.exe` (Windows).
 
 <br/>
 
 ## USING the GUI App
 
-Select a file or folder (or drag and drop in the Tauri app), then choose the encryption mode. When decrypting, the app auto-detects the mode from `.fcr` files.
+Select a file or folder, then choose the encryption mode. When decrypting, the app auto-detects the mode from the file header.
 
 ### Symmetric Encryption Mode
 
-Encrypt/decrypt using the same password. Choose a password, destination folder, and click "Encrypt".
+Encrypt/decrypt using the same password. Choose a password and click "Encrypt". When encrypting, the output file path is auto-filled (e.g. `secrets.fcr`) and can be changed via the "Save As" button. When decrypting, select a destination folder.
 
 ### Hybrid Encryption Mode
 
-Ideal for secure data exchange. Encrypt using a _public_ RSA key (PEM format), decrypt using the corresponding _private_ key and password.
+Ideal for secure data exchange. Encrypt using a _public_ RSA key (PEM format), decrypt using the corresponding _private_ key and password. Like symmetric mode, the "Save As" dialog lets you choose the encrypted file name and location.
 
 ### Key Pair Creation
 
@@ -382,5 +287,9 @@ Select "Create key pair", enter a password to protect the private key, choose ou
 
 <br/>
 
+
+## Acknowledgments
+
+The desktop app is built with [Slint](https://slint.dev/).
 
 [![forthebadge](https://forthebadge.com/images/badges/made-with-rust.svg)](https://forthebadge.com)

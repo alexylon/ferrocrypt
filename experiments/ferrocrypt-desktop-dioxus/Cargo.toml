@@ -1,5 +1,5 @@
 [package]
-name = "ferrocrypt-gui-dioxus"
+name = "ferrocrypt-desktop-dioxus"
 version = "0.1.0"
 description = "Ferrocrypt Dioxus Desktop App"
 authors = ["Alexander Alexandrov"]
@@ -11,7 +11,7 @@ publish = false
 [dependencies]
 dioxus = { version = "0.7", features = ["desktop"] }
 manganis = "0.7"
-ferrocrypt = { path = "../ferrocrypt-lib" }
+ferrocrypt = { path = "../../ferrocrypt-lib" }
 rfd = "0.15"
 
 [features]

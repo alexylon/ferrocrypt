@@ -4,7 +4,7 @@ A desktop GUI for Ferrocrypt built with Dioxus 0.7.
 
 ## Features
 
-This application provides the same functionality as ferrocrypt-gui-tauri (Tauri version):
+This application provides the same functionality as ferrocrypt-desktop-tauri (Tauri version):
 
 - **Symmetric Encryption/Decryption**: Password-based encryption using ChaCha20-Poly1305
 - **Hybrid Encryption/Decryption**: RSA + ChaCha20 encryption
@@ -24,7 +24,7 @@ cargo build
 cargo build --release
 ```
 
-The binary will be located at `target/release/ferrocrypt-gui-dioxus`.
+The binary will be located at `target/release/ferrocrypt-desktop-dioxus`.
 
 ## Running
 
@@ -35,7 +35,7 @@ cargo run
 
 ### Release Mode
 ```bash
-./target/release/ferrocrypt-gui-dioxus
+./target/release/ferrocrypt-desktop-dioxus
 ```
 
 ## Usage

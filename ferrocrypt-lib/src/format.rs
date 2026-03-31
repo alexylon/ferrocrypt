@@ -42,6 +42,8 @@ pub const TYPE_HYBRID: u8 = 0x48; // 'H'
 pub const FORMAT_MAJOR: u8 = 1;
 pub const FORMAT_MINOR: u8 = 0;
 pub const HEADER_PREFIX_SIZE: usize = 8;
+pub const ENCRYPTED_EXTENSION: &str = "fcr";
+pub const ENCRYPTED_DOT_EXTENSION: &str = ".fcr";
 
 #[allow(dead_code)]
 pub struct FileHeader {

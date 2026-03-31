@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
-    CryptoError, generate_asymmetric_key_pair, hybrid_encryption, symmetric_encryption,
+    CryptoError, ENCRYPTED_EXTENSION, generate_asymmetric_key_pair, hybrid_encryption,
+    hybrid_encryption_with_progress, symmetric_encryption, symmetric_encryption_with_progress,
 };
 
 const TEST_WORKSPACE: &str = "tests/workspace";
@@ -1221,6 +1222,122 @@ fn test_two_encryptions_produce_different_output() -> Result<(), CryptoError> {
 
     // Same plaintext + same password must produce different ciphertext (unique salt + nonce)
     assert_ne!(file_a, file_b);
+
+    Ok(())
+}
+
+#[test]
+fn test_symmetric_output_file_override() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("symmetric_output_file_override");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    create_test_file(&input_file, "custom output path test");
+    let passphrase = SecretString::from("test_password_123".to_string());
+
+    let custom_output = encrypt_dir.join("custom_name.fcr");
+    let result = symmetric_encryption_with_progress(
+        input_file.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        &passphrase,
+        Some(custom_output.to_str().unwrap()),
+        |_| {},
+    )?;
+
+    assert!(result.contains("custom_name.fcr"));
+    assert!(custom_output.exists());
+    // Default name should not exist
+    assert!(!encrypt_dir.join("data.fcr").exists());
+
+    // Decrypt the custom-named file
+    let decrypt_result = symmetric_encryption(
+        custom_output.to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &passphrase,
+    )?;
+
+    assert!(decrypt_result.contains("Decrypted to"));
+    let content = fs::read_to_string(decrypt_dir.join("data.txt"))?;
+    assert_eq!("custom output path test", content);
+
+    Ok(())
+}
+
+#[test]
+fn test_hybrid_output_file_override() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("hybrid_output_file_override");
+    let input_file = test_dir.join("data.txt");
+    let key_dir = test_dir.join("keys");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+
+    fs::create_dir_all(&key_dir)?;
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    create_test_file(&input_file, "hybrid custom output test");
+    let passphrase = SecretString::from("key_pass_123".to_string());
+
+    generate_asymmetric_key_pair(4096, &passphrase, key_dir.to_str().unwrap())?;
+
+    let pub_key = key_dir.join("rsa-4096-pub-key.pem");
+    let priv_key = key_dir.join("rsa-4096-priv-key.pem");
+    let custom_output = encrypt_dir.join("my_vault.fcr");
+    let empty = SecretString::from("".to_string());
+
+    let result = hybrid_encryption_with_progress(
+        input_file.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        pub_key.to_str().unwrap(),
+        &empty,
+        Some(custom_output.to_str().unwrap()),
+        |_| {},
+    )?;
+
+    assert!(result.contains("my_vault.fcr"));
+    assert!(custom_output.exists());
+    assert!(!encrypt_dir.join("data.fcr").exists());
+
+    // Decrypt the custom-named file
+    let decrypt_result = hybrid_encryption(
+        custom_output.to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        priv_key.to_str().unwrap(),
+        &passphrase,
+    )?;
+
+    assert!(decrypt_result.contains("Decrypted to"));
+    let content = fs::read_to_string(decrypt_dir.join("data.txt"))?;
+    assert_eq!("hybrid custom output test", content);
+
+    Ok(())
+}
+
+#[test]
+fn test_output_file_none_uses_default_name() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("output_file_none_default");
+    let input_file = test_dir.join("report.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+
+    fs::create_dir_all(&encrypt_dir)?;
+
+    create_test_file(&input_file, "default naming test");
+    let passphrase = SecretString::from("test_password_123".to_string());
+
+    symmetric_encryption_with_progress(
+        input_file.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        &passphrase,
+        None,
+        |_| {},
+    )?;
+
+    let expected = encrypt_dir.join(format!("report.{}", ENCRYPTED_EXTENSION));
+    assert!(expected.exists());
 
     Ok(())
 }

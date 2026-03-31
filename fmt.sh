@@ -4,6 +4,6 @@ set -e
 cd "$(dirname "$0")"
 
 cargo fmt --all
-(cd ferrocrypt-gui-slint && cargo fmt)
-(cd ferrocrypt-gui-dioxus && cargo fmt)
-(cd ferrocrypt-gui-tauri/src-tauri && cargo fmt)
+(cd ferrocrypt-desktop && cargo fmt)
+(cd experiments/ferrocrypt-desktop-dioxus && cargo fmt)
+(cd experiments/ferrocrypt-desktop-tauri/src-tauri && cargo fmt)

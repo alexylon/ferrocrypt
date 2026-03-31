@@ -32,6 +32,7 @@ pub fn encrypt_file(
     output_dir: impl AsRef<Path>,
     rsa_public_pem: impl AsRef<Path>,
     tmp_dir_path: impl AsRef<Path>,
+    output_file: Option<&Path>,
     on_progress: &dyn Fn(&str),
 ) -> Result<String, CryptoError> {
     let start_time = std::time::Instant::now();
@@ -66,7 +67,14 @@ pub fn encrypt_file(
             }
         };
 
-        let output_path = output_dir.join(format!("{}.fcr", file_stem));
+        let output_path = match output_file {
+            Some(path) => path.to_path_buf(),
+            None => output_dir.join(format!(
+                "{}.{}",
+                file_stem,
+                crate::format::ENCRYPTED_EXTENSION
+            )),
+        };
         if output_path.exists() {
             return Err(CryptoError::EncryptionDecryptionError(format!(
                 "Output file already exists: {}\n",

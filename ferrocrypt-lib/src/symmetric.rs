@@ -60,6 +60,7 @@ pub fn encrypt_file(
     output_dir: impl AsRef<Path>,
     passphrase: &SecretString,
     tmp_dir_path: impl AsRef<Path>,
+    output_file: Option<&Path>,
     on_progress: &dyn Fn(&str),
 ) -> Result<String, CryptoError> {
     let start_time = std::time::Instant::now();
@@ -78,13 +79,15 @@ pub fn encrypt_file(
     let cipher = XChaCha20Poly1305::new(enc_key.as_ref().into());
     let stored_key_hash: [u8; KEY_SIZE] = sha3_32_hash(enc_key.as_ref())?;
 
-    let encrypted_extension = "fcr";
     let file_stem = &archiver::archive(input_path, tmp_dir_path)?;
     let zipped_file_name = tmp_dir_path.join(format!("{}.zip", file_stem));
     println!("Encrypting ...");
     on_progress("Encrypting\u{2026}");
 
-    let output_path = output_dir.join(format!("{}.{}", file_stem, encrypted_extension));
+    let output_path = match output_file {
+        Some(path) => path.to_path_buf(),
+        None => output_dir.join(format!("{}.{}", file_stem, format::ENCRYPTED_EXTENSION)),
+    };
     if output_path.exists() {
         return Err(CryptoError::Message(format!(
             "Output file already exists: {}\n",

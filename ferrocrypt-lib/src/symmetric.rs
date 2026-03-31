@@ -60,12 +60,14 @@ pub fn encrypt_file(
     output_dir: impl AsRef<Path>,
     passphrase: &SecretString,
     tmp_dir_path: impl AsRef<Path>,
+    on_progress: &dyn Fn(&str),
 ) -> Result<String, CryptoError> {
     let start_time = std::time::Instant::now();
     let output_dir = output_dir.as_ref();
     let tmp_dir_path = tmp_dir_path.as_ref();
 
     println!("\nDeriving key ...");
+    on_progress("Deriving key\u{2026}");
     let mut salt = [0u8; SALT_SIZE];
     OsRng.fill_bytes(&mut salt);
     let mut hkdf_salt = [0u8; HKDF_SALT_SIZE];
@@ -80,6 +82,7 @@ pub fn encrypt_file(
     let file_stem = &archiver::archive(input_path, tmp_dir_path)?;
     let zipped_file_name = tmp_dir_path.join(format!("{}.zip", file_stem));
     println!("Encrypting ...");
+    on_progress("Encrypting\u{2026}");
 
     let output_path = output_dir.join(format!("{}.{}", file_stem, encrypted_extension));
     if output_path.exists() {
@@ -153,6 +156,7 @@ pub fn decrypt_file(
     output_dir: impl AsRef<Path>,
     passphrase: &SecretString,
     tmp_dir_path: impl AsRef<Path>,
+    on_progress: &dyn Fn(&str),
 ) -> Result<String, CryptoError> {
     let start_time = std::time::Instant::now();
     let input_path = input_path.as_ref();
@@ -197,6 +201,7 @@ pub fn decrypt_file(
     let hmac_tag = rep_decode_exact(&encoded_hmac_tag, HMAC_KEY_SIZE)?;
 
     println!("\nDeriving key ...");
+    on_progress("Deriving key\u{2026}");
     let (enc_key, hmac_key) = derive_keys(passphrase, &salt, &hkdf_salt)?;
 
     let key_hash: [u8; KEY_SIZE] = sha3_32_hash(enc_key.as_ref())?;
@@ -224,6 +229,7 @@ pub fn decrypt_file(
     hmac_sha3_256_verify(hmac_key.as_ref(), &header_bytes, &hmac_tag)?;
 
     println!("Decrypting ...");
+    on_progress("Decrypting\u{2026}");
     let cipher = XChaCha20Poly1305::new(enc_key.as_ref().into());
     let stream_decryptor = stream::DecryptorBE32::from_aead(cipher, nonce.as_slice().into());
     let decrypted_file_stem = &get_file_stem_to_string(input_path)?;

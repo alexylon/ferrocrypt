@@ -10,4 +10,5 @@ exclude = [
     "experiments",
     "ferrocrypt-gui-tauri/src-tauri",
     "ferrocrypt-gui-dioxus",
+    "ferrocrypt-gui-slint",
 ]

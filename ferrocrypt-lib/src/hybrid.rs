@@ -32,6 +32,7 @@ pub fn encrypt_file(
     output_dir: impl AsRef<Path>,
     rsa_public_pem: impl AsRef<Path>,
     tmp_dir_path: impl AsRef<Path>,
+    on_progress: &dyn Fn(&str),
 ) -> Result<String, CryptoError> {
     let start_time = std::time::Instant::now();
     let output_dir = output_dir.as_ref();
@@ -39,6 +40,7 @@ pub fn encrypt_file(
     let file_stem = &archiver::archive(input_path, tmp_dir_path)?;
     let zipped_file_name = tmp_dir_path.join(format!("{}.zip", file_stem));
     println!("\nEncrypting ...");
+    on_progress("Encrypting\u{2026}");
 
     let mut symmetric_key = XChaCha20Poly1305::generate_key(&mut OsRng);
     let mut hmac_key = [0u8; HMAC_KEY_SIZE];
@@ -128,6 +130,7 @@ pub fn decrypt_file(
     rsa_private_pem: &str,
     passphrase: &SecretString,
     tmp_dir_path: impl AsRef<Path>,
+    on_progress: &dyn Fn(&str),
 ) -> Result<String, CryptoError> {
     let start_time = std::time::Instant::now();
     let input_path = input_path.as_ref();
@@ -137,6 +140,7 @@ pub fn decrypt_file(
     let priv_key_str = Zeroizing::new(fs::read_to_string(&rsa_private_pem)?);
 
     println!("\nDecrypting ...");
+    on_progress("Decrypting\u{2026}");
 
     let rsa_key_size =
         match get_public_key_size_from_private_key(&priv_key_str, passphrase.expose_secret()) {
@@ -293,8 +297,10 @@ pub fn generate_asymmetric_key_pair(
     bit_size: u32,
     passphrase: &SecretString,
     output_dir: impl AsRef<Path>,
+    on_progress: &dyn Fn(&str),
 ) -> Result<String, CryptoError> {
     let output_dir = output_dir.as_ref();
+    on_progress("Generating key pair\u{2026}");
     let rsa: Rsa<Private> = Rsa::generate(bit_size)?;
 
     let private_key: Vec<u8> = rsa.private_key_to_pem_passphrase(

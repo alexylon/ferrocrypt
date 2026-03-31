@@ -179,6 +179,17 @@ pub fn symmetric_encryption(
     output_dir: &str,
     password: &SecretString,
 ) -> Result<String, CryptoError> {
+    symmetric_encryption_with_progress(input_path, output_dir, password, |_| {})
+}
+
+/// Like [`symmetric_encryption`], but calls `on_progress` with a stage
+/// description (e.g. "Deriving key…", "Encrypting…") at each major step.
+pub fn symmetric_encryption_with_progress(
+    input_path: &str,
+    output_dir: &str,
+    password: &SecretString,
+    on_progress: impl Fn(&str),
+) -> Result<String, CryptoError> {
     if password.expose_secret().is_empty() {
         return Err(CryptoError::Message(
             "Passphrase must not be empty for symmetric encryption".to_string(),
@@ -186,9 +197,9 @@ pub fn symmetric_encryption(
     }
     with_tmp_workspace(input_path, output_dir, |input, output, tmp| {
         if detect_encryption_mode(input).is_some() || input.ends_with(".fcr") {
-            symmetric::decrypt_file(input, output, password, tmp)
+            symmetric::decrypt_file(input, output, password, tmp, &on_progress)
         } else {
-            symmetric::encrypt_file(input, output, password, tmp)
+            symmetric::encrypt_file(input, output, password, tmp, &on_progress)
         }
     })
 }
@@ -229,11 +240,23 @@ pub fn hybrid_encryption(
     rsa_key_pem: &str,
     passphrase: &SecretString,
 ) -> Result<String, CryptoError> {
+    hybrid_encryption_with_progress(input_path, output_dir, rsa_key_pem, passphrase, |_| {})
+}
+
+/// Like [`hybrid_encryption`], but calls `on_progress` with a stage
+/// description at each major step.
+pub fn hybrid_encryption_with_progress(
+    input_path: &str,
+    output_dir: &str,
+    rsa_key_pem: &str,
+    passphrase: &SecretString,
+    on_progress: impl Fn(&str),
+) -> Result<String, CryptoError> {
     with_tmp_workspace(input_path, output_dir, |input, output, tmp| {
         if detect_encryption_mode(input).is_some() || input.ends_with(".fcr") {
-            hybrid::decrypt_file(input, output, rsa_key_pem, passphrase, tmp)
+            hybrid::decrypt_file(input, output, rsa_key_pem, passphrase, tmp, &on_progress)
         } else {
-            hybrid::encrypt_file(input, output, rsa_key_pem, tmp)
+            hybrid::encrypt_file(input, output, rsa_key_pem, tmp, &on_progress)
         }
     })
 }
@@ -267,6 +290,17 @@ pub fn generate_asymmetric_key_pair(
     passphrase: &SecretString,
     output_dir: &str,
 ) -> Result<String, CryptoError> {
+    generate_asymmetric_key_pair_with_progress(bit_size, passphrase, output_dir, |_| {})
+}
+
+/// Like [`generate_asymmetric_key_pair`], but calls `on_progress` with a
+/// stage description at each major step.
+pub fn generate_asymmetric_key_pair_with_progress(
+    bit_size: u32,
+    passphrase: &SecretString,
+    output_dir: &str,
+    on_progress: impl Fn(&str),
+) -> Result<String, CryptoError> {
     let normalized_output_dir = normalize_paths("", output_dir).1;
-    hybrid::generate_asymmetric_key_pair(bit_size, passphrase, &normalized_output_dir)
+    hybrid::generate_asymmetric_key_pair(bit_size, passphrase, &normalized_output_dir, &on_progress)
 }

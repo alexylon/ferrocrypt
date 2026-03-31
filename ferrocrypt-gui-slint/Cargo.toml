@@ -1,0 +1,16 @@
+[package]
+name = "ferrocrypt-gui-slint"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+slint = "1.15"
+ferrocrypt = { path = "../ferrocrypt-lib" }
+rfd = "0.17"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+
+[build-dependencies]
+slint-build = "1.15"

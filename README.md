@@ -47,6 +47,9 @@ Written entirely in Rust.
             - [Build release binary:](#build-release-binary)
             - [Start a live dev session:](#start-a-live-dev-session)
             - [Bundle the desktop app:](#bundle-the-desktop-app)
+        - [Slint GUI](#slint-gui)
+            - [Run a dev build:](#run-a-dev-build)
+            - [Build a release binary:](#build-a-release-binary)
     - [USING the GUI App](#using-the-gui-app)
         - [Symmetric Encryption Mode](#symmetric-encryption-mode)
         - [Hybrid Encryption Mode](#hybrid-encryption-mode)
@@ -60,6 +63,7 @@ The name comes from Latin: "ferrum" (iron) and "ferrugo" (rust).
 **GUI Options:**
 - Tauri app (Rust + React frontend)
 - Dioxus desktop app (pure Rust)
+- Slint desktop app (pure Rust)
 
 **Encryption Modes:**
 
@@ -78,7 +82,7 @@ Both modes produce `.fcr` vault files. The format is self-identifying — the fi
 - **Versioned file format**: Files start with a magic-byte header that identifies the format, version, and structure. Corrupted, misnamed, or incompatible files produce clear error messages instead of misleading crypto failures
 
 The code is separated in multiple projects - the library `ferrocrypt-lib`, a CLI client `ferrocrypt-cli`,
-a [**TAURI**](https://tauri.app/) based GUI app `ferrocrypt-gui-tauri`, and a [**Dioxus**](https://dioxuslabs.com/) based GUI app `ferrocrypt-gui-dioxus`.
+a [**TAURI**](https://tauri.app/) based GUI app `ferrocrypt-gui-tauri`, a [**Dioxus**](https://dioxuslabs.com/) based GUI app `ferrocrypt-gui-dioxus`, and a [**Slint**](https://slint.dev/) based GUI app `ferrocrypt-gui-slint`.
 
 <br/>
 
@@ -325,9 +329,43 @@ dx bundle
 
 <br/>
 
+### Slint GUI
+
+After [installing Rust](https://www.rust-lang.org/tools/install), navigate to the `ferrocrypt-gui-slint` directory.
+
+**Prerequisites (Linux only):** Slint requires a few system libraries for rendering. On Debian/Ubuntu:
+
+```bash
+sudo apt install libfontconfig1-dev libfreetype-dev
+```
+
+On Fedora:
+
+```bash
+sudo dnf install fontconfig-devel freetype-devel
+```
+
+macOS and Windows need no extra dependencies.
+
+### Run a dev build:
+
+```bash
+cargo run
+```
+
+### Build a release binary:
+
+```bash
+cargo build --release
+```
+
+The binary will be generated in `target/release/ferrocrypt-gui-slint` (macOS/Linux) or `target\release\ferrocrypt-gui-slint.exe` (Windows).
+
+<br/>
+
 ## USING the GUI App
 
-Drag and drop a file or folder into the app window, then select the encryption mode. When decrypting, the app auto-detects the mode.
+Select a file or folder (or drag and drop in the Tauri app), then choose the encryption mode. When decrypting, the app auto-detects the mode from `.fcr` files.
 
 ### Symmetric Encryption Mode
 

@@ -40,6 +40,13 @@ pub enum Command {
 
         #[arg(short, long, default_value = "")]
         passphrase: String,
+
+        #[arg(
+            short,
+            long,
+            help = "Save encrypted output to this file path (encrypt only)"
+        )]
+        save_as: Option<String>,
     },
 
     Symmetric {
@@ -51,6 +58,13 @@ pub enum Command {
 
         #[arg(short, long)]
         passphrase: String,
+
+        #[arg(
+            short,
+            long,
+            help = "Save encrypted output to this file path (encrypt only)"
+        )]
+        save_as: Option<String>,
     },
 }
 
@@ -74,7 +88,7 @@ fn run_command(cmd: Command) -> Result<(), CryptoError> {
             bit_size,
         } => {
             let passphrase = SecretString::from(passphrase);
-            generate_asymmetric_key_pair(bit_size, &passphrase, &outpath)?;
+            generate_asymmetric_key_pair(bit_size, &passphrase, &outpath, |_| {})?;
         }
 
         Command::Hybrid {
@@ -82,18 +96,27 @@ fn run_command(cmd: Command) -> Result<(), CryptoError> {
             outpath,
             key,
             passphrase,
+            save_as,
         } => {
             let passphrase = SecretString::from(passphrase);
-            hybrid_encryption(&inpath, &outpath, &key, &passphrase)?;
+            hybrid_encryption(
+                &inpath,
+                &outpath,
+                &key,
+                &passphrase,
+                save_as.as_deref(),
+                |_| {},
+            )?;
         }
 
         Command::Symmetric {
             inpath,
             outpath,
             passphrase,
+            save_as,
         } => {
             let passphrase = SecretString::from(passphrase);
-            symmetric_encryption(&inpath, &outpath, &passphrase)?;
+            symmetric_encryption(&inpath, &outpath, &passphrase, save_as.as_deref(), |_| {})?;
         }
     }
 

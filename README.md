@@ -205,6 +205,7 @@ Under the hood, it uses the same subcommands and flags as the direct CLI.
 | `-i, --inpath <SRC_PATH>`        | File or directory path that needs to be encrypted, or the file path that needs to be decrypted              |
 | `-o, --outpath <DEST_DIR>`       | Destination directory path                                                                                   |
 | `-p, --passphrase <PASSWORD>`    | Password to derive the symmetric key for encryption and decryption                                          |
+| `-s, --save-as <FILE_PATH>`      | Save encrypted output to this file path instead of the default name (encrypt only, optional)                |
 ```
 
 <br/>
@@ -218,6 +219,7 @@ Under the hood, it uses the same subcommands and flags as the direct CLI.
 | `-o, --outpath <DEST_DIR>`       | Destination directory path                                                                                   |
 | `-k, --key <KEY_PATH>`           | Path to the public key for encryption, or the path to the private key for decryption                        |
 | `-p, --passphrase <PASSWORD>`    | Password to decrypt the private key (only required when using a private key)                                |
+| `-s, --save-as <FILE_PATH>`      | Save encrypted output to this file path instead of the default name (encrypt only, optional)                |
 ```
 
 <br/>

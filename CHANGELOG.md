@@ -8,6 +8,7 @@ All notable changes to FerroCrypt are documented in this file.
 - **Library:** `output_file` parameter on `symmetric_encryption_with_progress` and `hybrid_encryption_with_progress` — when `Some`, writes the encrypted output to the exact path instead of deriving `<stem>.fcr` inside the output directory
 - **Library:** `default_encrypted_filename()` helper and `ENCRYPTED_EXTENSION` constant for callers that need to predict or filter the output filename
 - **Slint GUI:** "Save As" dialog for encryption — the output field shows the full file path and lets the user rename the encrypted file before saving. Decryption and key generation keep the directory picker.
+- **CLI:** `--save-as` / `-s` flag on `symmetric` and `hybrid` subcommands — optional output file path override for encryption, matching the GUI's Save As behavior
 
 - HKDF-SHA3-256 subkey derivation: Argon2id now produces 32 bytes of input keying material, expanded via HKDF into separate encryption and HMAC subkeys with domain separation (`ferrocrypt-enc`, `ferrocrypt-hmac`). A separate 32-byte HKDF salt is stored in the header.
 - HMAC-SHA3-256 header authentication: detects tampering with file headers (salt, nonce, flags) before decryption

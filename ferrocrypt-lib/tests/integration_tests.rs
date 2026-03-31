@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
     CryptoError, ENCRYPTED_EXTENSION, generate_asymmetric_key_pair, hybrid_encryption,
-    hybrid_encryption_with_progress, symmetric_encryption, symmetric_encryption_with_progress,
+    symmetric_encryption,
 };
 
 const TEST_WORKSPACE: &str = "tests/workspace";
@@ -64,6 +64,8 @@ fn test_symmetric_encrypt_decrypt_single_file() -> Result<(), CryptoError> {
         input_file.to_str().unwrap(),
         encrypt_dir.to_str().unwrap(),
         &passphrase,
+        None,
+        |_| {},
     )?;
 
     assert!(encrypt_result.contains("Encrypted to"));
@@ -74,6 +76,8 @@ fn test_symmetric_encrypt_decrypt_single_file() -> Result<(), CryptoError> {
         encrypt_dir.join("input.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
+        None,
+        |_| {},
     )?;
 
     assert!(decrypt_result.contains("Decrypted to"));
@@ -102,6 +106,8 @@ fn test_symmetric_encrypt_decrypt_directory() -> Result<(), CryptoError> {
         input_dir.to_str().unwrap(),
         encrypt_dir.to_str().unwrap(),
         &passphrase,
+        None,
+        |_| {},
     )?;
 
     assert!(encrypt_result.contains("Encrypted to"));
@@ -112,6 +118,8 @@ fn test_symmetric_encrypt_decrypt_directory() -> Result<(), CryptoError> {
         encrypt_dir.join("test_folder.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
+        None,
+        |_| {},
     )?;
 
     assert!(decrypt_result.contains("Decrypted to"));
@@ -152,6 +160,8 @@ fn test_symmetric_wrong_password() -> Result<(), CryptoError> {
         input_file.to_str().unwrap(),
         encrypt_dir.to_str().unwrap(),
         &correct_pass,
+        None,
+        |_| {},
     )?;
 
     // Try to decrypt with wrong password - should fail
@@ -159,6 +169,8 @@ fn test_symmetric_wrong_password() -> Result<(), CryptoError> {
         encrypt_dir.join("secret.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &wrong_pass,
+        None,
+        |_| {},
     );
 
     assert!(result.is_err());
@@ -191,6 +203,8 @@ fn test_symmetric_encrypt_decrypt_multi_chunk_file() -> Result<(), CryptoError> 
         input_file.to_str().unwrap(),
         encrypt_dir.to_str().unwrap(),
         &passphrase,
+        None,
+        |_| {},
     )?;
 
     assert!(encrypt_dir.join("multi_chunk.fcr").exists());
@@ -199,6 +213,8 @@ fn test_symmetric_encrypt_decrypt_multi_chunk_file() -> Result<(), CryptoError> 
         encrypt_dir.join("multi_chunk.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
+        None,
+        |_| {},
     )?;
 
     let decrypted_content = fs::read_to_string(decrypt_dir.join("multi_chunk.txt"))?;
@@ -225,11 +241,8 @@ fn test_hybrid_keygen_encrypt_decrypt_file() -> Result<(), CryptoError> {
     let key_passphrase = SecretString::from("key_protection_password".to_string());
 
     // Generate key pair
-    let keygen_result = generate_asymmetric_key_pair(
-        2048, // Smaller key for faster tests
-        &key_passphrase,
-        keys_dir.to_str().unwrap(),
-    )?;
+    let keygen_result =
+        generate_asymmetric_key_pair(2048, &key_passphrase, keys_dir.to_str().unwrap(), |_| {})?;
 
     assert!(keygen_result.contains("Generated key pair"));
     assert!(keys_dir.join("rsa-2048-priv-key.pem").exists());
@@ -248,6 +261,8 @@ fn test_hybrid_keygen_encrypt_decrypt_file() -> Result<(), CryptoError> {
         encrypt_dir.to_str().unwrap(),
         &pub_key_path,
         &empty_pass,
+        None,
+        |_| {},
     )?;
 
     assert!(encrypt_result.contains("Encrypted to"));
@@ -265,6 +280,8 @@ fn test_hybrid_keygen_encrypt_decrypt_file() -> Result<(), CryptoError> {
         decrypt_dir.to_str().unwrap(),
         &priv_key_path,
         &key_passphrase,
+        None,
+        |_| {},
     )?;
 
     assert!(decrypt_result.contains("Decrypted to"));
@@ -291,7 +308,7 @@ fn test_hybrid_encrypt_decrypt_directory() -> Result<(), CryptoError> {
     let key_passphrase = SecretString::from("hybrid_dir_key_pass".to_string());
 
     // Generate keys
-    generate_asymmetric_key_pair(2048, &key_passphrase, keys_dir.to_str().unwrap())?;
+    generate_asymmetric_key_pair(2048, &key_passphrase, keys_dir.to_str().unwrap(), |_| {})?;
 
     // Encrypt directory
     let pub_key_path = keys_dir
@@ -306,6 +323,8 @@ fn test_hybrid_encrypt_decrypt_directory() -> Result<(), CryptoError> {
         encrypt_dir.to_str().unwrap(),
         &pub_key_path,
         &empty_pass,
+        None,
+        |_| {},
     )?;
 
     assert!(encrypt_dir.join("test_folder.fcr").exists());
@@ -322,6 +341,8 @@ fn test_hybrid_encrypt_decrypt_directory() -> Result<(), CryptoError> {
         decrypt_dir.to_str().unwrap(),
         &priv_key_path,
         &key_passphrase,
+        None,
+        |_| {},
     )?;
 
     // Verify directory structure
@@ -351,7 +372,7 @@ fn test_hybrid_wrong_key_passphrase() -> Result<(), CryptoError> {
     let wrong_pass = SecretString::from("wrong_key_pass".to_string());
 
     // Generate keys with correct passphrase
-    generate_asymmetric_key_pair(2048, &correct_pass, keys_dir.to_str().unwrap())?;
+    generate_asymmetric_key_pair(2048, &correct_pass, keys_dir.to_str().unwrap(), |_| {})?;
 
     // Encrypt
     let pub_key_path = keys_dir
@@ -366,6 +387,8 @@ fn test_hybrid_wrong_key_passphrase() -> Result<(), CryptoError> {
         encrypt_dir.to_str().unwrap(),
         &pub_key_path,
         &empty_pass,
+        None,
+        |_| {},
     )?;
 
     // Try to decrypt with wrong passphrase
@@ -380,6 +403,8 @@ fn test_hybrid_wrong_key_passphrase() -> Result<(), CryptoError> {
         decrypt_dir.to_str().unwrap(),
         &priv_key_path,
         &wrong_pass,
+        None,
+        |_| {},
     );
 
     assert!(result.is_err());
@@ -402,14 +427,14 @@ fn test_hybrid_key_sizes() -> Result<(), CryptoError> {
     // Test RSA-2048
     let keys_2048 = test_dir.join("keys_2048");
     fs::create_dir_all(&keys_2048)?;
-    generate_asymmetric_key_pair(2048, &passphrase, keys_2048.to_str().unwrap())?;
+    generate_asymmetric_key_pair(2048, &passphrase, keys_2048.to_str().unwrap(), |_| {})?;
     assert!(keys_2048.join("rsa-2048-priv-key.pem").exists());
     assert!(keys_2048.join("rsa-2048-pub-key.pem").exists());
 
     // Test RSA-4096
     let keys_4096 = test_dir.join("keys_4096");
     fs::create_dir_all(&keys_4096)?;
-    generate_asymmetric_key_pair(4096, &passphrase, keys_4096.to_str().unwrap())?;
+    generate_asymmetric_key_pair(4096, &passphrase, keys_4096.to_str().unwrap(), |_| {})?;
     assert!(keys_4096.join("rsa-4096-priv-key.pem").exists());
     assert!(keys_4096.join("rsa-4096-pub-key.pem").exists());
 
@@ -436,6 +461,8 @@ fn test_empty_file_encryption() -> Result<(), CryptoError> {
         input_file.to_str().unwrap(),
         encrypt_dir.to_str().unwrap(),
         &passphrase,
+        None,
+        |_| {},
     )?;
 
     // Decrypt
@@ -443,6 +470,8 @@ fn test_empty_file_encryption() -> Result<(), CryptoError> {
         encrypt_dir.join("empty.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
+        None,
+        |_| {},
     )?;
 
     // Verify empty file was preserved
@@ -472,6 +501,8 @@ fn test_unicode_content() -> Result<(), CryptoError> {
         input_file.to_str().unwrap(),
         encrypt_dir.to_str().unwrap(),
         &passphrase,
+        None,
+        |_| {},
     )?;
 
     // Decrypt
@@ -479,6 +510,8 @@ fn test_unicode_content() -> Result<(), CryptoError> {
         encrypt_dir.join("unicode.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
+        None,
+        |_| {},
     )?;
 
     // Verify unicode content
@@ -506,6 +539,8 @@ fn test_special_characters_in_filename() -> Result<(), CryptoError> {
         input_file.to_str().unwrap(),
         encrypt_dir.to_str().unwrap(),
         &passphrase,
+        None,
+        |_| {},
     )?;
 
     symmetric_encryption(
@@ -515,6 +550,8 @@ fn test_special_characters_in_filename() -> Result<(), CryptoError> {
             .unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
+        None,
+        |_| {},
     )?;
 
     assert!(decrypt_dir.join("file-with_special.chars.txt").exists());
@@ -526,7 +563,13 @@ fn test_special_characters_in_filename() -> Result<(), CryptoError> {
 fn test_nonexistent_output_dir() {
     let passphrase = SecretString::from("test".to_string());
 
-    let result = symmetric_encryption("Cargo.toml", "/nonexistent/path/output", &passphrase);
+    let result = symmetric_encryption(
+        "Cargo.toml",
+        "/nonexistent/path/output",
+        &passphrase,
+        None,
+        |_| {},
+    );
 
     assert!(result.is_err());
 }
@@ -543,6 +586,8 @@ fn test_decrypt_nonexistent_fcr_file() {
         "/nonexistent/missing.fcr",
         decrypt_dir.to_str().unwrap(),
         &passphrase,
+        None,
+        |_| {},
     );
 
     assert!(result.is_err());
@@ -568,12 +613,16 @@ fn test_binary_file_content() -> Result<(), CryptoError> {
         input_file.to_str().unwrap(),
         encrypt_dir.to_str().unwrap(),
         &passphrase,
+        None,
+        |_| {},
     )?;
 
     symmetric_encryption(
         encrypt_dir.join("data.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
+        None,
+        |_| {},
     )?;
 
     let decrypted = fs::read(decrypt_dir.join("data.bin"))?;
@@ -602,6 +651,8 @@ fn test_symmetric_streaming_wrong_password() -> Result<(), CryptoError> {
         input_file.to_str().unwrap(),
         encrypt_dir.to_str().unwrap(),
         &correct_pass,
+        None,
+        |_| {},
     )?;
 
     // Decrypt with wrong password
@@ -609,6 +660,8 @@ fn test_symmetric_streaming_wrong_password() -> Result<(), CryptoError> {
         encrypt_dir.join("data.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &wrong_pass,
+        None,
+        |_| {},
     );
 
     assert!(result.is_err());
@@ -638,6 +691,8 @@ fn test_symmetric_encrypt_decrypt_directory_streaming() -> Result<(), CryptoErro
         input_dir.to_str().unwrap(),
         encrypt_dir.to_str().unwrap(),
         &passphrase,
+        None,
+        |_| {},
     )?;
 
     assert!(encrypt_dir.join("test_folder.fcr").exists());
@@ -646,6 +701,8 @@ fn test_symmetric_encrypt_decrypt_directory_streaming() -> Result<(), CryptoErro
         encrypt_dir.join("test_folder.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
+        None,
+        |_| {},
     )?;
 
     let decrypted_dir = decrypt_dir.join("test_folder");
@@ -677,6 +734,8 @@ fn test_symmetric_empty_password_rejected() {
         input_file.to_str().unwrap(),
         encrypt_dir.to_str().unwrap(),
         &empty_pass,
+        None,
+        |_| {},
     );
 
     assert!(result.is_err());
@@ -711,8 +770,8 @@ fn test_hybrid_wrong_key_pair() -> Result<(), CryptoError> {
     let pass_b = SecretString::from("pass_b".to_string());
 
     // Generate two different key pairs
-    generate_asymmetric_key_pair(2048, &pass_a, keys_a.to_str().unwrap())?;
-    generate_asymmetric_key_pair(2048, &pass_b, keys_b.to_str().unwrap())?;
+    generate_asymmetric_key_pair(2048, &pass_a, keys_a.to_str().unwrap(), |_| {})?;
+    generate_asymmetric_key_pair(2048, &pass_b, keys_b.to_str().unwrap(), |_| {})?;
 
     // Encrypt with key pair A's public key
     let pub_key_a = keys_a
@@ -727,6 +786,8 @@ fn test_hybrid_wrong_key_pair() -> Result<(), CryptoError> {
         encrypt_dir.to_str().unwrap(),
         &pub_key_a,
         &empty_pass,
+        None,
+        |_| {},
     )?;
 
     // Try to decrypt with key pair B's private key — should fail
@@ -741,6 +802,8 @@ fn test_hybrid_wrong_key_pair() -> Result<(), CryptoError> {
         decrypt_dir.to_str().unwrap(),
         &priv_key_b,
         &pass_b,
+        None,
+        |_| {},
     );
 
     assert!(result.is_err());
@@ -765,7 +828,7 @@ fn test_hybrid_4096_key_round_trip() -> Result<(), CryptoError> {
 
     let key_passphrase = SecretString::from("rsa4096pass".to_string());
 
-    generate_asymmetric_key_pair(4096, &key_passphrase, keys_dir.to_str().unwrap())?;
+    generate_asymmetric_key_pair(4096, &key_passphrase, keys_dir.to_str().unwrap(), |_| {})?;
 
     // Encrypt
     let pub_key_path = keys_dir
@@ -780,6 +843,8 @@ fn test_hybrid_4096_key_round_trip() -> Result<(), CryptoError> {
         encrypt_dir.to_str().unwrap(),
         &pub_key_path,
         &empty_pass,
+        None,
+        |_| {},
     )?;
 
     assert!(encrypt_dir.join("data.fcr").exists());
@@ -796,6 +861,8 @@ fn test_hybrid_4096_key_round_trip() -> Result<(), CryptoError> {
         decrypt_dir.to_str().unwrap(),
         &priv_key_path,
         &key_passphrase,
+        None,
+        |_| {},
     )?;
 
     let decrypted_content = fs::read_to_string(decrypt_dir.join("data.txt"))?;
@@ -820,7 +887,7 @@ fn test_hybrid_binary_file() -> Result<(), CryptoError> {
     fs::write(&input_file, &binary_content)?;
 
     let key_passphrase = SecretString::from("hybrid_bin_pass".to_string());
-    generate_asymmetric_key_pair(2048, &key_passphrase, keys_dir.to_str().unwrap())?;
+    generate_asymmetric_key_pair(2048, &key_passphrase, keys_dir.to_str().unwrap(), |_| {})?;
 
     let pub_key_path = keys_dir
         .join("rsa-2048-pub-key.pem")
@@ -834,6 +901,8 @@ fn test_hybrid_binary_file() -> Result<(), CryptoError> {
         encrypt_dir.to_str().unwrap(),
         &pub_key_path,
         &empty_pass,
+        None,
+        |_| {},
     )?;
 
     let priv_key_path = keys_dir
@@ -847,6 +916,8 @@ fn test_hybrid_binary_file() -> Result<(), CryptoError> {
         decrypt_dir.to_str().unwrap(),
         &priv_key_path,
         &key_passphrase,
+        None,
+        |_| {},
     )?;
 
     let decrypted = fs::read(decrypt_dir.join("data.bin"))?;
@@ -867,6 +938,8 @@ fn test_nonexistent_input_path_encrypt() {
         "/nonexistent/path/file.txt",
         encrypt_dir.to_str().unwrap(),
         &passphrase,
+        None,
+        |_| {},
     );
 
     assert!(result.is_err());
@@ -892,6 +965,8 @@ fn test_truncated_symmetric_file() {
         truncated_file.to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
+        None,
+        |_| {},
     );
 
     assert!(result.is_err());
@@ -906,7 +981,7 @@ fn test_truncated_hybrid_file() -> Result<(), CryptoError> {
     fs::create_dir_all(&decrypt_dir)?;
 
     let key_passphrase = SecretString::from("pass".to_string());
-    generate_asymmetric_key_pair(2048, &key_passphrase, keys_dir.to_str().unwrap())?;
+    generate_asymmetric_key_pair(2048, &key_passphrase, keys_dir.to_str().unwrap(), |_| {})?;
 
     // Write a tiny file that's too short to be a valid .fcr
     let truncated_file = test_dir.join("truncated.fcr");
@@ -923,6 +998,8 @@ fn test_truncated_hybrid_file() -> Result<(), CryptoError> {
         decrypt_dir.to_str().unwrap(),
         &priv_key_path,
         &key_passphrase,
+        None,
+        |_| {},
     );
 
     assert!(result.is_err());
@@ -948,6 +1025,8 @@ fn test_symmetric_header_tamper_detection() -> Result<(), CryptoError> {
         input_file.to_str().unwrap(),
         encrypt_dir.to_str().unwrap(),
         &passphrase,
+        None,
+        |_| {},
     )?;
 
     // Tamper with a byte in the encoded salt region (offset 10, within the header)
@@ -960,6 +1039,8 @@ fn test_symmetric_header_tamper_detection() -> Result<(), CryptoError> {
         encrypted_path.to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
+        None,
+        |_| {},
     );
 
     assert!(result.is_err());
@@ -982,7 +1063,7 @@ fn test_hybrid_header_tamper_detection() -> Result<(), CryptoError> {
     create_test_file(&input_file, "Hybrid tamper test");
 
     let key_passphrase = SecretString::from("tamper_key_pass".to_string());
-    generate_asymmetric_key_pair(2048, &key_passphrase, keys_dir.to_str().unwrap())?;
+    generate_asymmetric_key_pair(2048, &key_passphrase, keys_dir.to_str().unwrap(), |_| {})?;
 
     let pub_key_path = keys_dir
         .join("rsa-2048-pub-key.pem")
@@ -996,6 +1077,8 @@ fn test_hybrid_header_tamper_detection() -> Result<(), CryptoError> {
         encrypt_dir.to_str().unwrap(),
         &pub_key_path,
         &empty_pass,
+        None,
+        |_| {},
     )?;
 
     // Tamper with the encoded nonce region (after flags + encoded_encrypted_key)
@@ -1017,6 +1100,8 @@ fn test_hybrid_header_tamper_detection() -> Result<(), CryptoError> {
         decrypt_dir.to_str().unwrap(),
         &priv_key_path,
         &key_passphrase,
+        None,
+        |_| {},
     );
 
     assert!(result.is_err());
@@ -1039,6 +1124,8 @@ fn test_not_a_ferrocrypt_file() {
         fake_file.to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
+        None,
+        |_| {},
     );
 
     assert!(result.is_err());
@@ -1066,6 +1153,8 @@ fn test_future_major_version_rejected() -> Result<(), CryptoError> {
         input_file.to_str().unwrap(),
         encrypt_dir.to_str().unwrap(),
         &passphrase,
+        None,
+        |_| {},
     )?;
 
     // Patch the major version byte (offset 2) to a future version
@@ -1078,6 +1167,8 @@ fn test_future_major_version_rejected() -> Result<(), CryptoError> {
         encrypted_path.to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
+        None,
+        |_| {},
     );
 
     assert!(result.is_err());
@@ -1106,7 +1197,7 @@ fn test_wrong_format_type_hybrid_as_symmetric() -> Result<(), CryptoError> {
 
     create_test_file(&input_file, "format type test");
     let key_passphrase = SecretString::from("pass".to_string());
-    generate_asymmetric_key_pair(2048, &key_passphrase, keys_dir.to_str().unwrap())?;
+    generate_asymmetric_key_pair(2048, &key_passphrase, keys_dir.to_str().unwrap(), |_| {})?;
 
     // Encrypt as hybrid
     let pub_key_path = keys_dir
@@ -1121,6 +1212,8 @@ fn test_wrong_format_type_hybrid_as_symmetric() -> Result<(), CryptoError> {
         encrypt_dir.to_str().unwrap(),
         &pub_key_path,
         &empty_pass,
+        None,
+        |_| {},
     )?;
 
     // Try to decrypt a hybrid .fcr file with symmetric_encryption — format type mismatch
@@ -1130,6 +1223,8 @@ fn test_wrong_format_type_hybrid_as_symmetric() -> Result<(), CryptoError> {
         encrypted_path.to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
+        None,
+        |_| {},
     );
 
     assert!(result.is_err());
@@ -1157,7 +1252,7 @@ fn test_hybrid_empty_file() -> Result<(), CryptoError> {
 
     create_test_file(&input_file, "");
     let key_passphrase = SecretString::from("hybrid_empty".to_string());
-    generate_asymmetric_key_pair(2048, &key_passphrase, keys_dir.to_str().unwrap())?;
+    generate_asymmetric_key_pair(2048, &key_passphrase, keys_dir.to_str().unwrap(), |_| {})?;
 
     let pub_key = keys_dir
         .join("rsa-2048-pub-key.pem")
@@ -1171,6 +1266,8 @@ fn test_hybrid_empty_file() -> Result<(), CryptoError> {
         encrypt_dir.to_str().unwrap(),
         &pub_key,
         &empty_pass,
+        None,
+        |_| {},
     )?;
 
     let priv_key = keys_dir
@@ -1184,6 +1281,8 @@ fn test_hybrid_empty_file() -> Result<(), CryptoError> {
         decrypt_dir.to_str().unwrap(),
         &priv_key,
         &key_passphrase,
+        None,
+        |_| {},
     )?;
 
     let decrypted = fs::read_to_string(decrypt_dir.join("empty.txt"))?;
@@ -1209,12 +1308,16 @@ fn test_two_encryptions_produce_different_output() -> Result<(), CryptoError> {
         input_file.to_str().unwrap(),
         encrypt_dir_a.to_str().unwrap(),
         &passphrase,
+        None,
+        |_| {},
     )?;
 
     symmetric_encryption(
         input_file.to_str().unwrap(),
         encrypt_dir_b.to_str().unwrap(),
         &passphrase,
+        None,
+        |_| {},
     )?;
 
     let file_a = fs::read(encrypt_dir_a.join("data.fcr"))?;
@@ -1240,7 +1343,7 @@ fn test_symmetric_output_file_override() -> Result<(), CryptoError> {
     let passphrase = SecretString::from("test_password_123".to_string());
 
     let custom_output = encrypt_dir.join("custom_name.fcr");
-    let result = symmetric_encryption_with_progress(
+    let result = symmetric_encryption(
         input_file.to_str().unwrap(),
         encrypt_dir.to_str().unwrap(),
         &passphrase,
@@ -1258,6 +1361,8 @@ fn test_symmetric_output_file_override() -> Result<(), CryptoError> {
         custom_output.to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
         &passphrase,
+        None,
+        |_| {},
     )?;
 
     assert!(decrypt_result.contains("Decrypted to"));
@@ -1282,14 +1387,14 @@ fn test_hybrid_output_file_override() -> Result<(), CryptoError> {
     create_test_file(&input_file, "hybrid custom output test");
     let passphrase = SecretString::from("key_pass_123".to_string());
 
-    generate_asymmetric_key_pair(4096, &passphrase, key_dir.to_str().unwrap())?;
+    generate_asymmetric_key_pair(4096, &passphrase, key_dir.to_str().unwrap(), |_| {})?;
 
     let pub_key = key_dir.join("rsa-4096-pub-key.pem");
     let priv_key = key_dir.join("rsa-4096-priv-key.pem");
     let custom_output = encrypt_dir.join("my_vault.fcr");
     let empty = SecretString::from("".to_string());
 
-    let result = hybrid_encryption_with_progress(
+    let result = hybrid_encryption(
         input_file.to_str().unwrap(),
         encrypt_dir.to_str().unwrap(),
         pub_key.to_str().unwrap(),
@@ -1308,6 +1413,8 @@ fn test_hybrid_output_file_override() -> Result<(), CryptoError> {
         decrypt_dir.to_str().unwrap(),
         priv_key.to_str().unwrap(),
         &passphrase,
+        None,
+        |_| {},
     )?;
 
     assert!(decrypt_result.contains("Decrypted to"));
@@ -1328,7 +1435,7 @@ fn test_output_file_none_uses_default_name() -> Result<(), CryptoError> {
     create_test_file(&input_file, "default naming test");
     let passphrase = SecretString::from("test_password_123".to_string());
 
-    symmetric_encryption_with_progress(
+    symmetric_encryption(
         input_file.to_str().unwrap(),
         encrypt_dir.to_str().unwrap(),
         &passphrase,

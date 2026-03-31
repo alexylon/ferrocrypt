@@ -23,7 +23,7 @@ use thiserror::Error;
 /// fn example() -> Result<(), CryptoError> {
 ///     let passphrase = SecretString::from("test".to_string());
 ///     // This will fail with CryptoError::InputPath if file doesn't exist
-///     match symmetric_encryption("./missing.txt", "./out", &passphrase) {
+///     match symmetric_encryption("./missing.txt", "./out", &passphrase, None, |_| {}) {
 ///         Ok(result) => println!("{}", result),
 ///         Err(CryptoError::Io(e)) => eprintln!("I/O error: {}", e),
 ///         Err(CryptoError::InputPath(msg)) => eprintln!("Missing input: {}", msg),

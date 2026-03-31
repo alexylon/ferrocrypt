@@ -19,11 +19,11 @@
 //! # fn run() -> Result<(), CryptoError> {
 //! // Encrypt a folder to out/secrets.fcr
 //! let passphrase = SecretString::from("correct horse battery staple".to_string());
-//! let produced = symmetric_encryption("./secrets", "./out", &passphrase)?;
+//! let produced = symmetric_encryption("./secrets", "./out", &passphrase, None, |_| {})?;
 //! println!("wrote {produced}");
 //!
 //! // Decrypt the archive back
-//! let recovered = symmetric_encryption("./out/secrets.fcr", "./restored", &passphrase)?;
+//! let recovered = symmetric_encryption("./out/secrets.fcr", "./restored", &passphrase, None, |_| {})?;
 //! println!("restored to {recovered}");
 //! # Ok(()) }
 //! # fn main() { run().unwrap(); }
@@ -37,15 +37,15 @@
 //! // 1) Generate RSA keypair files under ./keys
 //! //    The passphrase encrypts the private key file itself
 //! let passphrase = SecretString::from("my-key-pass".to_string());
-//! let _msg = generate_asymmetric_key_pair(4096, &passphrase, "./keys")?;
+//! let _msg = generate_asymmetric_key_pair(4096, &passphrase, "./keys", |_| {})?;
 //!
 //! // 2) Encrypt to out/payload.fcr using the public key (no passphrase needed)
 //! let empty_passphrase = SecretString::from("".to_string());
-//! let produced = hybrid_encryption("./payload", "./out", "./keys/rsa-4096-pub-key.pem", &empty_passphrase)?;
+//! let produced = hybrid_encryption("./payload", "./out", "./keys/rsa-4096-pub-key.pem", &empty_passphrase, None, |_| {})?;
 //! println!("wrote {produced}");
 //!
 //! // 3) Decrypt out/payload.fcr using the private key + passphrase to unlock it
-//! let restored = hybrid_encryption("./out/payload.fcr", "./restored", "./keys/rsa-4096-priv-key.pem", &passphrase)?;
+//! let restored = hybrid_encryption("./out/payload.fcr", "./restored", "./keys/rsa-4096-priv-key.pem", &passphrase, None, |_| {})?;
 //! println!("restored to {restored}");
 //! # Ok(()) }
 //! # fn main() { run().unwrap(); }
@@ -164,42 +164,26 @@ where
 /// - **Decrypt**: if `input_path` is a FerroCrypt symmetric file (detected by
 ///   magic bytes), it is decrypted and extracted into `output_dir`.
 ///
-/// Returns the path to the produced file or directory.
+/// `save_as` overrides the output file path during encryption (ignored for
+/// decryption). `on_progress` receives stage descriptions like "Deriving key…".
 ///
 /// # Examples
 ///
 /// ```no_run
 /// use ferrocrypt::{symmetric_encryption, secrecy::SecretString};
 ///
-/// // Encrypt a file
 /// let passphrase = SecretString::from("my-secret-password".to_string());
-/// let result = symmetric_encryption("./document.txt", "./encrypted", &passphrase)?;
-/// println!("{}", result); // "Encrypted to ./encrypted/document.fcr for X.XXs"
-///
-/// // Decrypt it back
-/// let result = symmetric_encryption("./encrypted/document.fcr", "./decrypted", &passphrase)?;
-/// println!("{}", result); // "Decrypted to ./decrypted/document.txt for X.XXs"
+/// // Encrypt
+/// let result = symmetric_encryption("./document.txt", "./encrypted", &passphrase, None, |_| {})?;
+/// // Decrypt
+/// let result = symmetric_encryption("./encrypted/document.fcr", "./decrypted", &passphrase, None, |_| {})?;
 /// # Ok::<(), ferrocrypt::CryptoError>(())
 /// ```
 pub fn symmetric_encryption(
     input_path: &str,
     output_dir: &str,
     password: &SecretString,
-) -> Result<String, CryptoError> {
-    symmetric_encryption_with_progress(input_path, output_dir, password, None, |_| {})
-}
-
-/// Like [`symmetric_encryption`], but calls `on_progress` with a stage
-/// description (e.g. "Deriving key…", "Encrypting…") at each major step.
-///
-/// When `output_file` is `Some`, the encrypted output is written to that exact
-/// path instead of the default `<stem>.fcr` inside `output_dir`. Ignored during
-/// decryption.
-pub fn symmetric_encryption_with_progress(
-    input_path: &str,
-    output_dir: &str,
-    password: &SecretString,
-    output_file: Option<&str>,
+    save_as: Option<&str>,
     on_progress: impl Fn(&str),
 ) -> Result<String, CryptoError> {
     if password.expose_secret().is_empty() {
@@ -207,14 +191,14 @@ pub fn symmetric_encryption_with_progress(
             "Passphrase must not be empty for symmetric encryption".to_string(),
         ));
     }
-    let output_file_path = output_file.map(Path::new);
+    let save_as_path = save_as.map(Path::new);
     with_tmp_workspace(input_path, output_dir, |input, output, tmp| {
         if detect_encryption_mode(input).is_some()
             || input.ends_with(format::ENCRYPTED_DOT_EXTENSION)
         {
             symmetric::decrypt_file(input, output, password, tmp, &on_progress)
         } else {
-            symmetric::encrypt_file(input, output, password, tmp, output_file_path, &on_progress)
+            symmetric::encrypt_file(input, output, password, tmp, save_as_path, &on_progress)
         }
     })
 }
@@ -231,22 +215,20 @@ pub fn symmetric_encryption_with_progress(
 ///   decrypt the private key file (must match the passphrase used when
 ///   generating the keypair).
 ///
-/// Returns a human-readable message describing the output path.
+/// `save_as` overrides the output file path during encryption (ignored for
+/// decryption). `on_progress` receives stage descriptions at each major step.
 ///
 /// # Examples
 ///
 /// ```no_run
 /// use ferrocrypt::{hybrid_encryption, secrecy::SecretString};
 ///
-/// // Encrypt with public key (no passphrase needed)
 /// let empty = SecretString::from("".to_string());
-/// let result = hybrid_encryption("./secrets", "./encrypted", "./keys/rsa-4096-pub-key.pem", &empty)?;
-/// println!("{}", result); // "Encrypted to ./encrypted/secrets.fcr for X.XXs"
-///
-/// // Decrypt with private key (passphrase required)
+/// // Encrypt
+/// let result = hybrid_encryption("./secrets", "./encrypted", "./keys/rsa-4096-pub-key.pem", &empty, None, |_| {})?;
+/// // Decrypt
 /// let passphrase = SecretString::from("my-key-passphrase".to_string());
-/// let result = hybrid_encryption("./encrypted/secrets.fcr", "./decrypted", "./keys/rsa-4096-priv-key.pem", &passphrase)?;
-/// println!("{}", result); // "Decrypted to ./decrypted/secrets for X.XXs"
+/// let result = hybrid_encryption("./encrypted/secrets.fcr", "./decrypted", "./keys/rsa-4096-priv-key.pem", &passphrase, None, |_| {})?;
 /// # Ok::<(), ferrocrypt::CryptoError>(())
 /// ```
 pub fn hybrid_encryption(
@@ -254,46 +236,17 @@ pub fn hybrid_encryption(
     output_dir: &str,
     rsa_key_pem: &str,
     passphrase: &SecretString,
-) -> Result<String, CryptoError> {
-    hybrid_encryption_with_progress(
-        input_path,
-        output_dir,
-        rsa_key_pem,
-        passphrase,
-        None,
-        |_| {},
-    )
-}
-
-/// Like [`hybrid_encryption`], but calls `on_progress` with a stage
-/// description at each major step.
-///
-/// When `output_file` is `Some`, the encrypted output is written to that exact
-/// path instead of the default `<stem>.fcr` inside `output_dir`. Ignored during
-/// decryption.
-pub fn hybrid_encryption_with_progress(
-    input_path: &str,
-    output_dir: &str,
-    rsa_key_pem: &str,
-    passphrase: &SecretString,
-    output_file: Option<&str>,
+    save_as: Option<&str>,
     on_progress: impl Fn(&str),
 ) -> Result<String, CryptoError> {
-    let output_file_path = output_file.map(Path::new);
+    let save_as_path = save_as.map(Path::new);
     with_tmp_workspace(input_path, output_dir, |input, output, tmp| {
         if detect_encryption_mode(input).is_some()
             || input.ends_with(format::ENCRYPTED_DOT_EXTENSION)
         {
             hybrid::decrypt_file(input, output, rsa_key_pem, passphrase, tmp, &on_progress)
         } else {
-            hybrid::encrypt_file(
-                input,
-                output,
-                rsa_key_pem,
-                tmp,
-                output_file_path,
-                &on_progress,
-            )
+            hybrid::encrypt_file(input, output, rsa_key_pem, tmp, save_as_path, &on_progress)
         }
     })
 }
@@ -308,7 +261,7 @@ pub fn hybrid_encryption_with_progress(
 ///   the same passphrase is needed later when decrypting. The public key file
 ///   is unencrypted.
 ///
-/// Returns a human-readable message pointing to the output directory.
+/// `on_progress` receives stage descriptions at each major step.
 ///
 /// # Examples
 ///
@@ -316,23 +269,10 @@ pub fn hybrid_encryption_with_progress(
 /// use ferrocrypt::{generate_asymmetric_key_pair, secrecy::SecretString};
 ///
 /// let passphrase = SecretString::from("protect-my-private-key".to_string());
-/// let result = generate_asymmetric_key_pair(4096, &passphrase, "./my_keys")?;
-/// println!("{}", result); // "Generated key pair to ./my_keys"
-/// // Creates: ./my_keys/rsa-4096-priv-key.pem (encrypted)
-/// //          ./my_keys/rsa-4096-pub-key.pem (plain)
+/// let result = generate_asymmetric_key_pair(4096, &passphrase, "./my_keys", |_| {})?;
 /// # Ok::<(), ferrocrypt::CryptoError>(())
 /// ```
 pub fn generate_asymmetric_key_pair(
-    bit_size: u32,
-    passphrase: &SecretString,
-    output_dir: &str,
-) -> Result<String, CryptoError> {
-    generate_asymmetric_key_pair_with_progress(bit_size, passphrase, output_dir, |_| {})
-}
-
-/// Like [`generate_asymmetric_key_pair`], but calls `on_progress` with a
-/// stage description at each major step.
-pub fn generate_asymmetric_key_pair_with_progress(
     bit_size: u32,
     passphrase: &SecretString,
     output_dir: &str,

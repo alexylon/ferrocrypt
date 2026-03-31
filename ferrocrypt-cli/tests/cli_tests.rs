@@ -429,6 +429,170 @@ fn test_cli_directory_encryption() {
     assert_eq!("Content 1", content1);
 }
 
+#[test]
+fn test_cli_symmetric_save_as() {
+    let test_dir = setup_test_dir("cli_symmetric_save_as");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    fs::create_dir_all(&decrypt_dir).unwrap();
+
+    let content = "Save-as test content";
+    create_test_file(&input_file, content);
+
+    let custom_output = encrypt_dir.join("my_vault.fcr");
+    let binary = get_binary_path();
+
+    let encrypt_output = Command::new(&binary)
+        .arg("symmetric")
+        .arg("-i")
+        .arg(input_file.to_str().unwrap())
+        .arg("-o")
+        .arg(encrypt_dir.to_str().unwrap())
+        .arg("-p")
+        .arg("test_password")
+        .arg("-s")
+        .arg(custom_output.to_str().unwrap())
+        .output()
+        .expect("Failed to execute encrypt command");
+
+    assert!(
+        encrypt_output.status.success(),
+        "Encryption failed: {}",
+        String::from_utf8_lossy(&encrypt_output.stderr)
+    );
+
+    assert!(custom_output.exists());
+    assert!(!encrypt_dir.join("data.fcr").exists());
+
+    // Decrypt the custom-named file
+    let decrypt_output = Command::new(&binary)
+        .arg("symmetric")
+        .arg("-i")
+        .arg(custom_output.to_str().unwrap())
+        .arg("-o")
+        .arg(decrypt_dir.to_str().unwrap())
+        .arg("-p")
+        .arg("test_password")
+        .output()
+        .expect("Failed to execute decrypt command");
+
+    assert!(
+        decrypt_output.status.success(),
+        "Decryption failed: {}",
+        String::from_utf8_lossy(&decrypt_output.stderr)
+    );
+
+    let decrypted_content =
+        fs::read_to_string(decrypt_dir.join("data.txt")).expect("Failed to read decrypted file");
+    assert_eq!(content, decrypted_content);
+}
+
+#[test]
+fn test_cli_hybrid_save_as() {
+    let test_dir = setup_test_dir("cli_hybrid_save_as");
+    let keys_dir = test_dir.join("keys");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+
+    fs::create_dir_all(&keys_dir).unwrap();
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    fs::create_dir_all(&decrypt_dir).unwrap();
+
+    let content = "Hybrid save-as test";
+    create_test_file(&input_file, content);
+
+    let binary = get_binary_path();
+
+    Command::new(&binary)
+        .arg("keygen")
+        .arg("-o")
+        .arg(keys_dir.to_str().unwrap())
+        .arg("-p")
+        .arg("key_pass")
+        .arg("-b")
+        .arg("2048")
+        .output()
+        .expect("Failed to execute keygen");
+
+    let custom_output = encrypt_dir.join("backup.enc");
+
+    let encrypt_output = Command::new(&binary)
+        .arg("hybrid")
+        .arg("-i")
+        .arg(input_file.to_str().unwrap())
+        .arg("-o")
+        .arg(encrypt_dir.to_str().unwrap())
+        .arg("-k")
+        .arg(keys_dir.join("rsa-2048-pub-key.pem").to_str().unwrap())
+        .arg("-s")
+        .arg(custom_output.to_str().unwrap())
+        .output()
+        .expect("Failed to execute encrypt");
+
+    assert!(
+        encrypt_output.status.success(),
+        "Encryption failed: {}",
+        String::from_utf8_lossy(&encrypt_output.stderr)
+    );
+
+    assert!(custom_output.exists());
+    assert!(!encrypt_dir.join("data.fcr").exists());
+
+    let decrypt_output = Command::new(&binary)
+        .arg("hybrid")
+        .arg("-i")
+        .arg(custom_output.to_str().unwrap())
+        .arg("-o")
+        .arg(decrypt_dir.to_str().unwrap())
+        .arg("-k")
+        .arg(keys_dir.join("rsa-2048-priv-key.pem").to_str().unwrap())
+        .arg("-p")
+        .arg("key_pass")
+        .output()
+        .expect("Failed to execute decrypt");
+
+    assert!(
+        decrypt_output.status.success(),
+        "Decryption failed: {}",
+        String::from_utf8_lossy(&decrypt_output.stderr)
+    );
+
+    let decrypted_content =
+        fs::read_to_string(decrypt_dir.join("data.txt")).expect("Failed to read decrypted file");
+    assert_eq!(content, decrypted_content);
+}
+
+#[test]
+fn test_cli_symmetric_without_save_as_uses_default() {
+    let test_dir = setup_test_dir("cli_symmetric_no_save_as");
+    let input_file = test_dir.join("report.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+
+    fs::create_dir_all(&encrypt_dir).unwrap();
+
+    create_test_file(&input_file, "default naming test");
+
+    let binary = get_binary_path();
+
+    let output = Command::new(&binary)
+        .arg("symmetric")
+        .arg("-i")
+        .arg(input_file.to_str().unwrap())
+        .arg("-o")
+        .arg(encrypt_dir.to_str().unwrap())
+        .arg("-p")
+        .arg("test_password")
+        .output()
+        .expect("Failed to execute encrypt command");
+
+    assert!(output.status.success());
+    assert!(encrypt_dir.join("report.fcr").exists());
+}
+
 #[ctor::dtor]
 fn cleanup() {
     cleanup_test_workspace();

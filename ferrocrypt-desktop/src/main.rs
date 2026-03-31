@@ -6,8 +6,7 @@ slint::include_modules!();
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
     EncryptionMode, default_encrypted_filename, detect_encryption_mode,
-    generate_asymmetric_key_pair_with_progress, hybrid_encryption_with_progress,
-    symmetric_encryption_with_progress,
+    generate_asymmetric_key_pair, hybrid_encryption, symmetric_encryption,
 };
 use std::path::{Path, PathBuf};
 
@@ -175,14 +174,14 @@ fn main() {
                 };
 
                 let result = match mode {
-                    0 | 1 => symmetric_encryption_with_progress(
+                    0 | 1 => symmetric_encryption(
                         &inpath,
                         &output_dir,
                         &pwd,
                         output_file.as_deref(),
                         &on_progress,
                     ),
-                    2 | 3 => hybrid_encryption_with_progress(
+                    2 | 3 => hybrid_encryption(
                         &inpath,
                         &output_dir,
                         &keypath,
@@ -190,12 +189,9 @@ fn main() {
                         output_file.as_deref(),
                         &on_progress,
                     ),
-                    4 => generate_asymmetric_key_pair_with_progress(
-                        RSA_KEY_BITS,
-                        &pwd,
-                        &output_dir,
-                        &on_progress,
-                    ),
+                    4 => {
+                        generate_asymmetric_key_pair(RSA_KEY_BITS, &pwd, &output_dir, &on_progress)
+                    }
                     _ => unreachable!(),
                 };
 

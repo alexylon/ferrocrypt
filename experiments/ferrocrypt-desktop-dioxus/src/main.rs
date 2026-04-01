@@ -152,15 +152,15 @@ fn App() -> Element {
             let result = match mode() {
                 Mode::SymmetricEncrypt | Mode::SymmetricDecrypt => {
                     let pwd = SecretString::from(password());
-                    symmetric_encryption(&inpath(), &outpath(), &pwd)
+                    symmetric_encryption(&inpath(), &outpath(), &pwd, None, |_| {})
                 }
                 Mode::HybridEncrypt | Mode::HybridDecrypt => {
                     let pwd = SecretString::from(password());
-                    hybrid_encryption(&inpath(), &outpath(), &keypath(), &pwd)
+                    hybrid_encryption(&inpath(), &outpath(), &keypath(), &pwd, None, |_| {})
                 }
                 Mode::GenerateKeyPair => {
                     let pwd = SecretString::from(password());
-                    generate_asymmetric_key_pair(4096, &pwd, &outpath())
+                    generate_asymmetric_key_pair(4096, &pwd, &outpath(), |_| {})
                 }
             };
 

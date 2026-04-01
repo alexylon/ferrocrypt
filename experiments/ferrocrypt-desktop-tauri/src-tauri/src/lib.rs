@@ -18,17 +18,17 @@ fn start(
     let password = SecretString::from(password);
 
     if mode == "se" || mode == "sd" {
-        match symmetric_encryption(inpath, outpath, &password) {
+        match symmetric_encryption(inpath, outpath, &password, None, |_| {}) {
             Ok(result) => Ok(result),
             Err(error) => Err(error.to_string()),
         }
     } else if mode == "he" || mode == "hd" {
-        match hybrid_encryption(inpath, outpath, &keypath, &password) {
+        match hybrid_encryption(inpath, outpath, &keypath, &password, None, |_| {}) {
             Ok(result) => Ok(result),
             Err(error) => Err(error.to_string()),
         }
     } else {
-        match generate_asymmetric_key_pair(4096, &password, outpath) {
+        match generate_asymmetric_key_pair(4096, &password, outpath, |_| {}) {
             Ok(result) => Ok(result),
             Err(error) => Err(error.to_string()),
         }

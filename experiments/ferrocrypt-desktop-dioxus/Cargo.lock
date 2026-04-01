@@ -1446,7 +1446,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ferrocrypt-gui-dioxus"
+name = "ferrocrypt-desktop-dioxus"
 version = "0.1.0"
 dependencies = [
  "dioxus",

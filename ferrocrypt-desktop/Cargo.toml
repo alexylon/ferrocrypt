@@ -9,8 +9,16 @@ slint = "1.15"
 ferrocrypt = { path = "../ferrocrypt-lib" }
 rfd = "0.17"
 
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.5"
-
 [build-dependencies]
 slint-build = "1.15"
+
+[package.metadata.bundle]
+name = "Ferrocrypt"
+identifier = "com.ferrocrypt"
+icon = ["assets/app_icon.png"]
+resources = ["assets"]
+category = "Developer Tool"
+short_description = "Ferrocrypt desktop app"
+
+# macOS-specific
+osx_minimum_system_version = "12.0"

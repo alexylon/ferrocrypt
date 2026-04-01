@@ -13,37 +13,9 @@ use std::path::{Path, PathBuf};
 const ELIDE: usize = 42;
 const RSA_KEY_BITS: u32 = 4096;
 
-// ---------------------------------------------------------------------------
-// macOS: native NSOpenPanel with canChooseFiles + canChooseDirectories.
-// Single-click a folder selects it; double-click opens it.
-// ---------------------------------------------------------------------------
 #[cfg(target_os = "macos")]
 fn pick_file_or_folder() -> Option<PathBuf> {
-    use objc2::rc::Retained;
-    use objc2::runtime::{AnyClass, AnyObject};
-    use objc2::{msg_send, msg_send_id};
-
-    unsafe {
-        let cls = AnyClass::get("NSOpenPanel")?;
-        let panel: Retained<AnyObject> = msg_send_id![cls, openPanel];
-
-        let _: () = msg_send![&panel, setCanChooseFiles: true];
-        let _: () = msg_send![&panel, setCanChooseDirectories: true];
-        let _: () = msg_send![&panel, setAllowsMultipleSelection: false];
-
-        let response: isize = msg_send![&panel, runModal];
-        if response != 1 {
-            return None;
-        }
-
-        let url: Option<Retained<AnyObject>> = msg_send_id![&panel, URL];
-        let path: Option<Retained<AnyObject>> = msg_send_id![&url?, path];
-        let utf8: *const std::ffi::c_char = msg_send![&path?, UTF8String];
-        if utf8.is_null() {
-            return None;
-        }
-        Some(PathBuf::from(std::ffi::CStr::from_ptr(utf8).to_str().ok()?))
-    }
+    rfd::FileDialog::new().pick_file_or_folder()
 }
 
 #[cfg(not(target_os = "macos"))]

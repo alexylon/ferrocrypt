@@ -1510,7 +1510,6 @@ name = "ferrocrypt-desktop"
 version = "0.1.0"
 dependencies = [
  "ferrocrypt",
- "objc2 0.5.2",
  "rfd",
  "slint",
  "slint-build",

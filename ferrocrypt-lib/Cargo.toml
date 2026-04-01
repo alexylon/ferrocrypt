@@ -3,12 +3,12 @@ name = "ferrocrypt"
 version = "0.2.5"
 edition = "2021"
 
-description = "Core Ferrocrypt library: symmetric (XChaCha20-Poly1305 + Argon2id) and hybrid (RSA-4096) encryption utilities."
+description = "Core FerroCrypt library: symmetric (XChaCha20-Poly1305 + Argon2id) and hybrid (RSA-4096) encryption utilities."
 authors = ["Alexander Alexandrov"]
 license = "GPL-3.0-only"
 readme = "../README.md"
-repository = "https://github.com/alexylon/Ferrocrypt"
-homepage = "https://github.com/alexylon/Ferrocrypt"
+repository = "https://github.com/alexylon/ferrocrypt"
+homepage = "https://github.com/alexylon/ferrocrypt"
 documentation = "https://docs.rs/ferrocrypt"
 keywords = ["cryptography", "encryption", "chacha20poly1305", "argon2", "RSA-4096"]
 categories = ["cryptography"]

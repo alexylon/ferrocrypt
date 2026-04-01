@@ -124,7 +124,7 @@ fn run_command(cmd: Command) -> Result<(), CryptoError> {
 }
 
 fn interactive_mode() -> Result<(), CryptoError> {
-    println!("\nFerrocrypt interactive mode\n");
+    println!("\nFerroCrypt interactive mode\n");
     println!("Type `keygen`, `hybrid`, or `symmetric` with flags, or `quit` to exit.\n");
 
     let mut rl = match DefaultEditor::new() {

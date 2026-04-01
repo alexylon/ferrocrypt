@@ -3,12 +3,12 @@ name = "ferrocrypt-cli"
 version = "0.2.5"
 edition = "2021"
 
-description = "Command-line interface for Ferrocrypt (installs the 'ferrocrypt' binary)."
+description = "Command-line interface for FerroCrypt (installs the 'ferrocrypt' binary)."
 authors = ["Alexander Alexandrov"]
 license = "GPL-3.0-only"
 readme = "../README.md"
-repository = "https://github.com/alexylon/Ferrocrypt"
-homepage = "https://github.com/alexylon/Ferrocrypt"
+repository = "https://github.com/alexylon/ferrocrypt"
+homepage = "https://github.com/alexylon/ferrocrypt"
 documentation = "https://docs.rs/ferrocrypt-cli"
 keywords = ["cryptography", "encryption", "cli"]
 categories = ["command-line-utilities", "cryptography"]

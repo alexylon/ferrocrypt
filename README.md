@@ -1,6 +1,8 @@
-# FerroCrypt
+<div align="center"><img src="ferrocrypt-desktop/assets/app_icon.png" style="width: 85px;" alt="clavirio"></div>
 
-![](https://github.com/alexylon/Ferrocrypt/actions/workflows/rust.yml/badge.svg)
+<h1 align="center"><code>FerroCrypt</code></h1>
+
+![](https://github.com/alexylon/ferrocrypt/actions/workflows/rust.yml/badge.svg)
 &nbsp;
 [![crate: ferrocrypt](https://img.shields.io/crates/v/ferrocrypt.svg?label=crate%3A%20ferrocrypt&color=blue)](https://crates.io/crates/ferrocrypt)
 &nbsp;
@@ -10,7 +12,7 @@
 
 Multiplatform file encryption tool with CLI and desktop interfaces. Written in Rust.
 
-<div align="center"><img src="/assets/screenshot.png" width="400" alt="Ferrocrypt"></div>
+<div align="center"><img src="/assets/screenshot.png" width="400" alt="FerroCrypt"></div>
 
 ## About
 
@@ -101,7 +103,7 @@ ferrocrypt hybrid -i ./encrypted/secret.fcr -o ./decrypted -k ./keys/rsa-4096-pr
 
 ```text
 $ ferrocrypt
-Ferrocrypt interactive mode
+FerroCrypt interactive mode
 Type `keygen`, `hybrid`, or `symmetric` with flags, or `quit` to exit.
 
 ferrocrypt> symmetric -i secret.txt -o out -p "my password"

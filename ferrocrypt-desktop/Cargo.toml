@@ -13,12 +13,12 @@ rfd = "0.17"
 slint-build = "1.15"
 
 [package.metadata.bundle]
-name = "Ferrocrypt"
+name = "FerroCrypt"
 identifier = "com.ferrocrypt"
 icon = ["assets/app_icon.png"]
 resources = ["assets"]
 category = "Developer Tool"
-short_description = "Ferrocrypt desktop app"
+short_description = "FerroCrypt desktop app"
 
 # macOS-specific
 osx_minimum_system_version = "12.0"

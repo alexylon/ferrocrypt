@@ -378,6 +378,8 @@ export component AppWindow inherits Window {
                     y: (parent.height - self.preferred-height) / 2;
                     color: Theme.text;
                     font-size: 13px;
+                    text-cursor-width: 2px;
+                    selection-background-color: Theme.accent;
                     input-type: hide-password ? InputType.password : InputType.text;
                     text <=> root.password;
                     single-line: true;
@@ -534,6 +536,8 @@ export component AppWindow inherits Window {
                     y: (parent.height - self.preferred-height) / 2;
                     color: Theme.text;
                     font-size: 13px;
+                    text-cursor-width: 2px;
+                    selection-background-color: Theme.accent;
                     input-type: InputType.password;
                     text <=> root.password-repeated;
                     single-line: true;

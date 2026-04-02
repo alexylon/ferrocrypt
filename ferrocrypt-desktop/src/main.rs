@@ -34,6 +34,10 @@ fn main() {
         let weak = app.as_weak();
         move || {
             if let Some(app) = weak.upgrade() {
+                app.set_password(Default::default());
+                app.set_password_repeated(Default::default());
+                app.set_hide_password(true);
+                app.set_password_strength(0);
                 check_conflicts(&app);
             }
         }

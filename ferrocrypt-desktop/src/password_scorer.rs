@@ -228,8 +228,7 @@ fn password_without_common(password: &str) -> (String, bool) {
     let password_as_lowercase = password.to_lowercase();
     for common_password in COMMON_PASSWORDS {
         if password_as_lowercase.contains(common_password) {
-            let pattern = match Regex::new(&format!("(?i){common_password}"))
-            {
+            let pattern = match Regex::new(&format!("(?i){common_password}")) {
                 Ok(r) => r,
                 Err(_) => continue,
             };

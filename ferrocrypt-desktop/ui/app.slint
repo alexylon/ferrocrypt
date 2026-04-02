@@ -196,7 +196,10 @@ export component AppWindow inherits Window {
                     sym-ta := TouchArea {
                         enabled: mode != 3 && !is-working;
                         mouse-cursor: self.enabled ? pointer : default;
-                        clicked => { root.mode = 0; root.mode-changed(); }
+                        clicked => {
+                            root.password-strength = 0;
+                            root.mode = 0; root.mode-changed();
+                        }
                     }
                     Text {
                         text: "Symmetric";
@@ -223,7 +226,10 @@ export component AppWindow inherits Window {
                     hyb-ta := TouchArea {
                         enabled: mode != 1 && !is-working;
                         mouse-cursor: self.enabled ? pointer : default;
-                        clicked => { root.mode = 2; root.mode-changed(); }
+                        clicked => {
+                            root.password-strength = 0;
+                            root.mode = 2; root.mode-changed();
+                        }
                     }
                     Text {
                         text: "Hybrid";
@@ -252,7 +258,10 @@ export component AppWindow inherits Window {
                                  && (mode == 4 || inpath == "")
                                  && !is-working;
                         mouse-cursor: self.enabled ? pointer : default;
-                        clicked => { root.mode = 4; root.mode-changed(); }
+                        clicked => {
+                            root.password-strength = 0;
+                            root.mode = 4; root.mode-changed();
+                        }
                     }
                     Text {
                         text: "Key Gen";
@@ -464,21 +473,18 @@ export component AppWindow inherits Window {
                         height: 2px;
                         border-radius: 1px;
                         background: active && password-strength >= 1 ? strength-color : Theme.surface;
-                        animate background { duration: 200ms; }
                     }
                     Rectangle {
                         horizontal-stretch: 1;
                         height: 2px;
                         border-radius: 1px;
                         background: active && password-strength >= 2 ? strength-color : Theme.surface;
-                        animate background { duration: 200ms; }
                     }
                     Rectangle {
                         horizontal-stretch: 1;
                         height: 2px;
                         border-radius: 1px;
                         background: active && password-strength >= 3 ? strength-color : Theme.surface;
-                        animate background { duration: 200ms; }
                     }
                     Rectangle {
                         horizontal-stretch: 1;

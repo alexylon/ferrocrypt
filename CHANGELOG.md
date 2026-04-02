@@ -5,6 +5,7 @@ All notable changes to FerroCrypt are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Desktop app:** Password strength indicator below the password field (visible in Symmetric Encrypt and Key Gen modes). Scoring adapted from Proton Pass — uses length-based scoring with character-class penalties, consecutive/progressive sequence detection, common password stripping, and passphrase detection.
 - **Library:** `save_as` parameter on `symmetric_encryption` and `hybrid_encryption` — when `Some`, writes the encrypted output to the exact path instead of deriving `<stem>.fcr` inside the output directory. `on_progress` callback parameter for stage descriptions.
 - **Library:** `default_encrypted_filename()` helper and `ENCRYPTED_EXTENSION` constant for callers that need to predict or filter the output filename
 - **Desktop app:** Slint-based desktop GUI (`ferrocrypt-desktop`) with symmetric, hybrid, and key generation modes. Includes "Save As" dialog for custom output filenames, auto-detection of encryption mode from file headers, and conflict warnings.

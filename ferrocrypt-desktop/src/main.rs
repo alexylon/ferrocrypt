@@ -10,6 +10,8 @@ use ferrocrypt::{
 };
 use std::path::{Path, PathBuf};
 
+mod password_scorer;
+
 const ELIDE: usize = 42;
 const RSA_KEY_BITS: u32 = 4096;
 
@@ -101,6 +103,16 @@ fn main() {
 
             if let Some(path) = dialog.save_file() {
                 set_outpath(&app, &path_to_string(&path));
+            }
+        }
+    });
+
+    app.on_password_edited({
+        let weak = app.as_weak();
+        move || {
+            if let Some(app) = weak.upgrade() {
+                let pwd = app.get_password().to_string();
+                app.set_password_strength(password_scorer::password_strength(&pwd));
             }
         }
     });
@@ -279,6 +291,7 @@ fn clear_form(app: &AppWindow) {
     app.set_status_err(empty);
     app.set_mode(0);
     app.set_hide_password(true);
+    app.set_password_strength(0);
 }
 
 fn path_to_string(path: &Path) -> String {

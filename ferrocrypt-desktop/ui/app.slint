@@ -91,6 +91,7 @@ export component AppWindow inherits Window {
     in-out property <bool> is-working: false;
     in-out property <bool> combined-picker: false;
     in-out property <string> conflict-warning;
+    in-out property <int> password-strength: 0;
 
     // ── Derived ─────────────────────────────────────────────────────────
     property <bool> require-password:
@@ -116,6 +117,10 @@ export component AppWindow inherits Window {
     property <string> button-text:
         mode == 0 || mode == 2 ? "Encrypt" :
         mode == 1 || mode == 3 ? "Decrypt" : "Generate Key Pair";
+    property <color> strength-color:
+        password-strength <= 1 ? #f87171 :
+        password-strength == 2 ? #d4a053 :
+        password-strength == 3 ? #60a5fa : #34d399;
 
     // ── Callbacks ───────────────────────────────────────────────────────
     callback mode-changed();
@@ -125,6 +130,7 @@ export component AppWindow inherits Window {
     callback select-output-dir();
     callback select-output-file();
     callback start-operation();
+    callback password-edited();
     callback clear-form();
 
     // ── Accent stripe ───────────────────────────────────────────────────
@@ -379,6 +385,7 @@ export component AppWindow inherits Window {
                     accepted => {
                         if (!root.disable-start) { root.start-operation(); }
                     }
+                    edited => { root.password-edited(); }
                 }
 
                 if password == "" && !pwd-ti.has-focus : Text {
@@ -434,6 +441,59 @@ export component AppWindow inherits Window {
                     height: parent.height;
                     mouse-cursor: pointer;
                     clicked => { root.hide-password = !root.hide-password; }
+                }
+            }
+
+            // Password strength indicator (encrypt/keygen only)
+            // Always present to avoid layout shift; content hidden when inactive.
+            HorizontalLayout {
+                spacing: 4px;
+                height: 14px;
+
+                property <bool> active: (mode == 0 || mode == 4) && password != "";
+
+                HorizontalLayout {
+                    spacing: 2px;
+                    horizontal-stretch: 1;
+                    padding-top: 5px;
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 2px;
+                        border-radius: 1px;
+                        background: active && password-strength >= 1 ? strength-color : Theme.surface;
+                        animate background { duration: 200ms; }
+                    }
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 2px;
+                        border-radius: 1px;
+                        background: active && password-strength >= 2 ? strength-color : Theme.surface;
+                        animate background { duration: 200ms; }
+                    }
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 2px;
+                        border-radius: 1px;
+                        background: active && password-strength >= 3 ? strength-color : Theme.surface;
+                        animate background { duration: 200ms; }
+                    }
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 2px;
+                        border-radius: 1px;
+                        background: active && password-strength >= 4 ? strength-color : Theme.surface;
+                        animate background { duration: 200ms; }
+                    }
+                }
+
+                Text {
+                    text: active ? (password-strength == 1 ? "Weak" :
+                          password-strength == 2 ? "Fair" :
+                          password-strength == 3 ? "Good" : "Strong") : "";
+                    color: strength-color;
+                    font-size: 10px;
+                    vertical-alignment: center;
                 }
             }
         }

@@ -8,6 +8,8 @@ publish = false
 slint = "1.15"
 ferrocrypt = { path = "../ferrocrypt-lib" }
 rfd = "0.17"
+regex-lite = "0.1"
+lazy_static = "1"
 
 [build-dependencies]
 slint-build = "1.15"

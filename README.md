@@ -172,8 +172,12 @@ Select a file or folder, then choose the encryption mode. The app auto-detects t
 - **Hybrid** — Select a public key to encrypt, or a private key + passphrase to decrypt. Same "Save As" option for custom output names.
 - **Key Gen** — Enter a passphrase, choose an output folder, and generate RSA-4096 keys.
 
+A password strength indicator (based on [Proton Pass](https://github.com/protonpass/proton-pass-common) implementation) is shown during encryption and key generation.
+
 ## Acknowledgments
 
 The desktop app is built with [Slint](https://slint.dev/).
+
+Password strength scoring is adapted from [Proton Pass](https://github.com/protonpass/proton-pass-common) (GPLv3).
 
 [![forthebadge](https://forthebadge.com/images/badges/made-with-rust.svg)](https://forthebadge.com)

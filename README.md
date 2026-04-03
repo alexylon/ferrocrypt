@@ -12,7 +12,9 @@
 
 Multiplatform file encryption tool with CLI and desktop interfaces. Written in Rust.
 
-<div align="center"><img src="/assets/screenshot.png" width="400" alt="FerroCrypt"></div>
+<div align="center"><img src="/assets/screenshot-1.png" width="400" alt="FerroCrypt"></div>
+
+<div align="center"><img src="/assets/screenshot-2.png" width="400" alt="FerroCrypt"></div>
 
 ## About
 

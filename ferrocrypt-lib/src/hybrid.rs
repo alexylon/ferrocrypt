@@ -308,6 +308,7 @@ pub fn generate_asymmetric_key_pair(
     on_progress: &dyn Fn(&str),
 ) -> Result<String, CryptoError> {
     let output_dir = output_dir.as_ref();
+    fs::create_dir_all(output_dir)?;
     on_progress("Generating key pair\u{2026}");
     let rsa: Rsa<Private> = Rsa::generate(bit_size)?;
 

@@ -10,6 +10,7 @@ All notable changes to FerroCrypt are documented in this file.
 - **Library:** `default_encrypted_filename()` helper and `ENCRYPTED_EXTENSION` constant for callers that need to predict or filter the output filename
 - **Desktop app:** Slint-based desktop GUI (`ferrocrypt-desktop`) with symmetric, hybrid, and key generation modes. Includes "Save As" dialog for custom output filenames, auto-detection of encryption mode from file headers, and conflict warnings.
 - **CLI:** `--save-as` / `-s` flag on `symmetric` and `hybrid` subcommands — optional output file path override for encryption
+- **CLI:** Interactive mode aliases: `sym` for `symmetric`, `hyb` for `hybrid`, `gen` for `keygen`
 
 - HKDF-SHA3-256 subkey derivation: Argon2id now produces 32 bytes of input keying material, expanded via HKDF into separate encryption and HMAC subkeys with domain separation (`ferrocrypt-enc`, `ferrocrypt-hmac`). A separate 32-byte HKDF salt is stored in the header.
 - HMAC-SHA3-256 header authentication: detects tampering with file headers (salt, nonce, flags) before decryption
@@ -31,6 +32,7 @@ All notable changes to FerroCrypt are documented in this file.
 - Replaced bincode header serialization with raw byte layout for long-term format stability
 
 ### Fixed
+- `keygen` now creates missing output directories instead of failing silently
 - **Stream truncation vulnerability:** symmetric decryption had a code path that skipped the required `decrypt_last()` call, allowing an attacker to truncate ciphertext at chunk boundaries without detection. Now all final chunks go through `decrypt_last`, which verifies the STREAM terminator.
 - Hybrid plaintext buffers (both pre-encryption and post-decryption) are now zeroized on drop
 - Added length validation on RSA-decrypted key material to prevent silent corruption

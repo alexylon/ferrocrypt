@@ -21,7 +21,7 @@ FerroCrypt encrypts and decrypts files and directories. It supports two modes:
 - **Symmetric** — Password-based. Uses XChaCha20-Poly1305 with Argon2id key derivation and HKDF-SHA3-256 subkey expansion. Same password encrypts and decrypts.
 - **Hybrid** — Public/private key based. Combines RSA-4096 (key encryption) with XChaCha20-Poly1305 (data encryption). Each file gets a unique random key sealed with the recipient's public key. Decryption requires the private key and its passphrase.
 
-Both modes produce `.fcr` files. The file header identifies the mode automatically — no need to remember which mode was used.
+Both modes produce `.fcr` files. Decryption is based on magic bytes in the file header, not the file extension — renaming a file won't break anything.
 
 ### Security
 
@@ -65,13 +65,13 @@ cargo add ferrocrypt
 
 ### Subcommands
 
-| Subcommand | Purpose |
-|---|---|
-| `symmetric` | Encrypt/decrypt with a password |
-| `hybrid` | Encrypt/decrypt with RSA keys |
-| `keygen` | Generate an RSA key pair |
+| Subcommand | Alias | Purpose |
+|---|---|---|
+| `symmetric` | `sym` | Encrypt/decrypt with a password |
+| `hybrid` | `hyb` | Encrypt/decrypt with RSA keys |
+| `keygen` | `gen` | Generate an RSA key pair |
 
-Run without arguments to start an interactive REPL.
+Run without arguments to start an interactive REPL. Aliases are available in interactive mode.
 
 ### Symmetric
 
@@ -104,9 +104,9 @@ ferrocrypt hybrid -i ./encrypted/secret.fcr -o ./decrypted -k ./keys/rsa-4096-pr
 ```text
 $ ferrocrypt
 FerroCrypt interactive mode
-Type `keygen`, `hybrid`, or `symmetric` with flags, or `quit` to exit.
+Commands: symmetric (sym), hybrid (hyb), keygen (gen), quit
 
-ferrocrypt> symmetric -i secret.txt -o out -p "my password"
+ferrocrypt> sym -i secret.txt -o out -p "my password"
 ferrocrypt> quit
 ```
 
@@ -166,7 +166,7 @@ Binary output: `target/release/ferrocrypt-desktop` (macOS/Linux) or `target\rele
 
 ### Usage
 
-Select a file or folder, then choose the encryption mode. The app auto-detects the mode when opening `.fcr` files.
+Select a file or folder, then choose the encryption mode. The app auto-detects encrypted files by reading the file header, regardless of extension.
 
 - **Symmetric** — Enter a password. The output path is auto-filled as `{name}.fcr` and can be changed with "Save As". Decryption uses a directory picker.
 - **Hybrid** — Select a public key to encrypt, or a private key + passphrase to decrypt. Same "Save As" option for custom output names.

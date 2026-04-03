@@ -17,6 +17,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    #[command(alias = "gen")]
     Keygen {
         #[arg(short, long)]
         outpath: String,
@@ -28,6 +29,7 @@ pub enum Command {
         bit_size: u32,
     },
 
+    #[command(alias = "hyb")]
     Hybrid {
         #[arg(short, long)]
         inpath: String,
@@ -49,6 +51,7 @@ pub enum Command {
         save_as: Option<String>,
     },
 
+    #[command(alias = "sym")]
     Symmetric {
         #[arg(short, long)]
         inpath: String,
@@ -125,7 +128,7 @@ fn run_command(cmd: Command) -> Result<(), CryptoError> {
 
 fn interactive_mode() -> Result<(), CryptoError> {
     println!("\nFerroCrypt interactive mode\n");
-    println!("Type `keygen`, `hybrid`, or `symmetric` with flags, or `quit` to exit.\n");
+    println!("Commands: symmetric (sym), hybrid (hyb), keygen (gen), quit\n");
 
     let mut rl = match DefaultEditor::new() {
         Ok(editor) => editor,
@@ -168,7 +171,9 @@ fn interactive_mode() -> Result<(), CryptoError> {
                                 eprintln!("Error: {e}");
                             }
                         } else {
-                            eprintln!("No command given. Try: keygen, hybrid, symmetric");
+                            eprintln!(
+                                "No command given. Try: symmetric (sym), hybrid (hyb), keygen (gen)"
+                            );
                         }
                     }
                     Err(e) => {

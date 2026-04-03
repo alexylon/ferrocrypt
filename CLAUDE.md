@@ -56,7 +56,7 @@ Decryption reverses: read header → verify HMAC → derive/decrypt keys → str
 
 ### Desktop App Structure
 
-- `ui/app.slint` — UI layout and state in Slint DSL. Defines `AppWindow` with 5 modes (SE=0, SD=1, HE=2, HD=3, GK=4).
+- `ui/app.slint` — UI layout and state in Slint DSL. Defines `AppWindow` with 2 top-level tabs (Symmetric, Hybrid) and 5 internal modes (SE=0, SD=1, HE=2, HD=3, GK=4). Key generation (GK=4) is inline within the Hybrid tab via a sub-selector.
 - `src/main.rs` — Rust backend: file dialog callbacks, mode auto-detection via magic bytes, threaded crypto operations with progress updates via `slint::invoke_from_event_loop`.
 - macOS uses native `NSOpenPanel` (via objc2) for combined file+folder picker; other platforms use `rfd`.
 

@@ -111,6 +111,20 @@ fn main() {
         }
     });
 
+    app.on_select_keygen_outdir({
+        let weak = app.as_weak();
+        move || {
+            let Some(path) = rfd::FileDialog::new().pick_folder() else {
+                return;
+            };
+            let Some(app) = weak.upgrade() else { return };
+            let dir = path_to_string(&path);
+            app.set_keygen_outdir_display(elide_left(&dir, ELIDE).into());
+            app.set_keygen_outdir(dir.into());
+            check_conflicts(&app);
+        }
+    });
+
     app.on_password_edited({
         let weak = app.as_weak();
         move || {
@@ -131,9 +145,12 @@ fn main() {
             let outpath = app.get_outpath().to_string();
             let password = app.get_password().to_string();
             let keypath = app.get_keypath().to_string();
+            let keygen_outdir = app.get_keygen_outdir().to_string();
 
             let is_encrypt = mode == 0 || mode == 2;
-            let (output_dir, output_file) = if is_encrypt {
+            let (output_dir, output_file) = if mode == 4 {
+                (keygen_outdir, None)
+            } else if is_encrypt {
                 (parent_dir(&outpath).unwrap_or_default(), Some(outpath))
             } else {
                 (outpath, None)
@@ -146,6 +163,11 @@ fn main() {
             let weak = weak.clone();
             std::thread::spawn(move || {
                 let pwd = SecretString::from(password);
+                let keygen_dir = if mode == 4 {
+                    Some(output_dir.clone())
+                } else {
+                    None
+                };
 
                 let on_progress = {
                     let weak = weak.clone();
@@ -188,8 +210,26 @@ fn main() {
 
                     match result {
                         Ok(msg) => {
-                            clear_form(&app);
-                            app.set_status_ok(elide_result_path(&msg).into());
+                            if let Some(dir) = keygen_dir {
+                                let pub_key = pub_key_path(&dir);
+                                app.set_password(Default::default());
+                                app.set_password_repeated(Default::default());
+                                app.set_hide_password(true);
+                                app.set_password_strength(0);
+                                app.set_keygen_outdir(Default::default());
+                                app.set_keygen_outdir_display(Default::default());
+                                app.set_conflict_warning(Default::default());
+                                app.set_status_err(Default::default());
+                                app.set_mode(2);
+                                app.set_keypath_display(elide_left(&pub_key, ELIDE).into());
+                                app.set_keypath(pub_key.into());
+                                app.set_status_ok(
+                                    "Key pair generated \u{2014} public key selected".into(),
+                                );
+                            } else {
+                                clear_fields(&app);
+                                app.set_status_ok(elide_result_path(&msg).into());
+                            }
                         }
                         Err(e) => {
                             app.set_status_ok("".into());
@@ -205,7 +245,7 @@ fn main() {
         let weak = app.as_weak();
         move || {
             if let Some(app) = weak.upgrade() {
-                clear_form(&app);
+                clear_fields(&app);
             }
         }
     });
@@ -232,11 +272,16 @@ fn apply_input_path(weak: &slint::Weak<AppWindow>, path: PathBuf) {
     let Some(app) = weak.upgrade() else { return };
     app.set_inpath_display(elide_left(&selected, ELIDE).into());
     app.set_inpath(selected.clone().into());
-    if let Some(m) = detected_mode {
-        app.set_mode(m);
+    match detected_mode {
+        Some(m) => app.set_mode(m),
+        None => match app.get_mode() {
+            1 => app.set_mode(0),
+            3 => app.set_mode(2),
+            _ => {}
+        },
     }
 
-    if is_decrypt || app.get_mode() == 4 {
+    if is_decrypt {
         set_outpath(&app, &dir);
     } else if let Ok(filename) = default_encrypted_filename(&selected) {
         set_outpath(&app, &path_to_string(&Path::new(&dir).join(filename)));
@@ -257,30 +302,30 @@ fn check_conflicts(app: &AppWindow) {
     let mode = app.get_mode();
     let outpath = app.get_outpath().to_string();
 
-    let warning = match mode {
-        0 | 2 if !outpath.is_empty() && Path::new(&outpath).exists() => {
-            format!("Already exists: {}", elide_left(&outpath, ELIDE))
-        }
-        4 if !outpath.is_empty() => {
-            let dir = Path::new(&outpath);
-            let priv_exists = dir
-                .join(format!("rsa-{RSA_KEY_BITS}-priv-key.pem"))
-                .exists();
-            let pub_exists = dir.join(format!("rsa-{RSA_KEY_BITS}-pub-key.pem")).exists();
-            match (priv_exists, pub_exists) {
+    let mut warning = String::new();
+
+    if matches!(mode, 0 | 2 | 4) && !outpath.is_empty() && Path::new(&outpath).exists() {
+        warning = format!("Already exists: {}", elide_left(&outpath, ELIDE));
+    }
+
+    if mode == 4 && warning.is_empty() {
+        let kg_dir = app.get_keygen_outdir().to_string();
+        if !kg_dir.is_empty() {
+            let priv_exists = Path::new(&priv_key_path(&kg_dir)).exists();
+            let pub_exists = Path::new(&pub_key_path(&kg_dir)).exists();
+            warning = match (priv_exists, pub_exists) {
                 (true, true) => "Key pair already exists in output directory".into(),
                 (true, false) => "Private key already exists in output directory".into(),
                 (false, true) => "Public key already exists in output directory".into(),
                 _ => String::new(),
-            }
+            };
         }
-        _ => String::new(),
-    };
+    }
 
     app.set_conflict_warning(warning.into());
 }
 
-fn clear_form(app: &AppWindow) {
+fn clear_fields(app: &AppWindow) {
     let empty = slint::SharedString::default();
     app.set_inpath(empty.clone());
     app.set_inpath_display(empty.clone());
@@ -290,12 +335,27 @@ fn clear_form(app: &AppWindow) {
     app.set_password_repeated(empty.clone());
     app.set_keypath(empty.clone());
     app.set_keypath_display(empty.clone());
+    app.set_keygen_outdir(empty.clone());
+    app.set_keygen_outdir_display(empty.clone());
     app.set_conflict_warning(empty.clone());
     app.set_status_ok(empty.clone());
     app.set_status_err(empty);
-    app.set_mode(0);
     app.set_hide_password(true);
     app.set_password_strength(0);
+    // Snap back to the encrypt mode of the current tab
+    match app.get_mode() {
+        1 => app.set_mode(0),
+        3 | 4 => app.set_mode(2),
+        _ => {}
+    }
+}
+
+fn pub_key_path(dir: &str) -> String {
+    format!("{dir}/rsa-{RSA_KEY_BITS}-pub-key.pem")
+}
+
+fn priv_key_path(dir: &str) -> String {
+    format!("{dir}/rsa-{RSA_KEY_BITS}-priv-key.pem")
 }
 
 fn path_to_string(path: &Path) -> String {

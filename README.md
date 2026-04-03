@@ -169,8 +169,7 @@ Binary output: `target/release/ferrocrypt-desktop` (macOS/Linux) or `target\rele
 Select a file or folder, then choose the encryption mode. The app auto-detects encrypted files by reading the file header, regardless of extension.
 
 - **Symmetric** — Enter a password. The output path is auto-filled as `{name}.fcr` and can be changed with "Save As". Decryption uses a directory picker.
-- **Hybrid** — Select a public key to encrypt, or a private key + passphrase to decrypt. Same "Save As" option for custom output names.
-- **Key Gen** — Enter a passphrase, choose an output folder, and generate RSA-4096 keys.
+- **Hybrid** — Use an existing public key to encrypt, or create a new RSA-4096 key pair inline. After key generation, the app switches to encryption with the new public key pre-filled. Decryption requires a private key + passphrase.
 
 A password strength indicator (based on [Proton Pass](https://github.com/protonpass/proton-pass-common) implementation) is shown during encryption and key generation.
 

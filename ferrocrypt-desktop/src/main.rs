@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 mod password_scorer;
 
-const ELIDE: usize = 50;
+const ELIDE: usize = 52;
 const RSA_KEY_BITS: u32 = 4096;
 
 #[cfg(target_os = "macos")]

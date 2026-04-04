@@ -159,6 +159,7 @@ fn main() {
             app.set_is_working(true);
             app.set_status_ok("".into());
             app.set_status_err("".into());
+            app.set_conflict_warning("".into());
 
             let weak = weak.clone();
             std::thread::spawn(move || {

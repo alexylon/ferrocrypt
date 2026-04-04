@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 mod password_scorer;
 
-const ELIDE: usize = 42;
+const ELIDE: usize = 50;
 const RSA_KEY_BITS: u32 = 4096;
 
 #[cfg(target_os = "macos")]
@@ -270,7 +270,12 @@ fn apply_input_path(weak: &slint::Weak<AppWindow>, path: PathBuf) {
     let is_decrypt = matches!(detected_mode, Some(1) | Some(3));
 
     let Some(app) = weak.upgrade() else { return };
-    app.set_inpath_display(elide_left(&selected, ELIDE).into());
+    let inpath_elide = if app.get_combined_picker() {
+        ELIDE
+    } else {
+        ELIDE - 12
+    };
+    app.set_inpath_display(elide_left(&selected, inpath_elide).into());
     app.set_inpath(selected.clone().into());
     match detected_mode {
         Some(m) => app.set_mode(m),

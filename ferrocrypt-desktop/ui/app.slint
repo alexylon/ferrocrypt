@@ -42,7 +42,7 @@ global Theme {
     out property <length> field-text-size: 12.5px;
     out property <length> input-text-size: 13px;
     out property <length> field-pad: 10px;
-    out property <length> btn-width: 62px;
+    out property <length> btn-width: 56px;
     out property <length> row-spacing: 6px;
 }
 
@@ -324,13 +324,13 @@ export component AppWindow inherits Window {
                     clicked => { root.select-input-file(); }
                 }
                 if !combined-picker : SmallButton {
-                    width: 42px;
+                    width: Theme.btn-width;
                     label: "File";
                     enabled: !is-working;
                     clicked => { root.select-input-file(); }
                 }
                 if !combined-picker : SmallButton {
-                    width: 52px;
+                    width: Theme.btn-width;
                     label: "Folder";
                     enabled: !is-working;
                     clicked => { root.select-input-folder(); }

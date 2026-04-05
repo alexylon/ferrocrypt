@@ -402,6 +402,7 @@ dependencies = [
  "constant_time_eq 0.4.2",
  "crypto_box",
  "ctor 0.8.0",
+ "ferrocrypt",
  "hkdf",
  "hmac",
  "rust-argon2",

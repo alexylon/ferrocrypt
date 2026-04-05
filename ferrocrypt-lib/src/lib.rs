@@ -75,6 +75,9 @@
 //! ## License
 //! Licensed under GPL-3.0-only. See the LICENSE file in the repository.
 
+#[cfg(all(feature = "fast-kdf", not(debug_assertions)))]
+compile_error!("fast-kdf feature must not be used in release builds");
+
 use std::path::Path;
 
 use secrecy::{ExposeSecret, SecretString};

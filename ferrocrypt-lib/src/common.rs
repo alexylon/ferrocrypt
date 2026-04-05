@@ -12,7 +12,10 @@ use crate::CryptoError;
 type HmacSha3_256 = Hmac<Sha3_256>;
 
 pub fn argon2_config() -> argon2::Config<'static> {
-    let (mem_cost, time_cost) = if cfg!(debug_assertions) {
+    // "fast-kdf" uses minimal Argon2 params so tests finish quickly.
+    // The feature is auto-enabled via [dev-dependencies] and blocked
+    // in release builds by a compile_error! guard in lib.rs.
+    let (mem_cost, time_cost) = if cfg!(feature = "fast-kdf") {
         (8192, 1)
     } else {
         (1048576, 4)

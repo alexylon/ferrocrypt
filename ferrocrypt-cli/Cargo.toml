@@ -27,4 +27,5 @@ shell-words = "1"
 ferrocrypt = { path = "../ferrocrypt-lib", version = "0.2" }
 
 [dev-dependencies]
+ferrocrypt = { path = "../ferrocrypt-lib", features = ["fast-kdf"] }
 ctor = "0.2"

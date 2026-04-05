@@ -1,4 +1,5 @@
-use std::io::{Read, Write};
+use std::cmp;
+use std::io::{self, Read, Write};
 use std::path::Path;
 
 use chacha20poly1305::{XChaCha20Poly1305, aead::stream};
@@ -82,75 +83,156 @@ pub fn get_duration(seconds: f64) -> String {
     }
 }
 
-/// Streaming encryption: reads plaintext from `source` in chunks, encrypts with the
-/// STREAM construction, and writes ciphertext to `output`.
-pub fn stream_encrypt(
-    mut encryptor: stream::EncryptorBE32<XChaCha20Poly1305>,
-    source: &mut impl Read,
-    output: &mut impl Write,
-) -> Result<(), CryptoError> {
-    let mut buffer = [0u8; BUFFER_SIZE];
-    loop {
-        let mut filled = 0;
-        while filled < BUFFER_SIZE {
-            let n = source.read(&mut buffer[filled..])?;
-            if n == 0 {
-                break;
-            }
-            filled += n;
-        }
-
-        if filled == BUFFER_SIZE {
-            let ciphertext = encryptor
-                .encrypt_next(buffer.as_slice())
-                .map_err(CryptoError::ChaCha20Poly1305Error)?;
-            output.write_all(&ciphertext)?;
-        } else {
-            let ciphertext = encryptor
-                .encrypt_last(&buffer[..filled])
-                .map_err(CryptoError::ChaCha20Poly1305Error)?;
-            output.write_all(&ciphertext)?;
-            break;
-        }
-    }
-    Ok(())
+/// Streaming encryption writer: buffers plaintext writes into `BUFFER_SIZE`
+/// chunks, encrypts each chunk with `encrypt_next`, and writes ciphertext to
+/// the inner writer. Call `finish()` after all data is written to encrypt the
+/// final (possibly partial) chunk with `encrypt_last`.
+///
+/// Full `BUFFER_SIZE` chunks use `encrypt_next`; the final chunk (0..BUFFER_SIZE
+/// bytes) uses `encrypt_last`.
+pub struct EncryptWriter<W: Write> {
+    encryptor: Option<stream::EncryptorBE32<XChaCha20Poly1305>>,
+    buffer: Vec<u8>,
+    output: W,
 }
 
-/// Streaming decryption: reads ciphertext from `source` in chunks, decrypts with the
-/// STREAM construction, and writes plaintext to `output`.
-/// `decrypt_last` is always called on the final chunk, verifying the STREAM terminator
-/// and catching any truncation.
-pub fn stream_decrypt(
-    mut decryptor: stream::DecryptorBE32<XChaCha20Poly1305>,
-    source: &mut impl Read,
-    output: &mut impl Write,
-) -> Result<(), CryptoError> {
-    const ENCRYPTED_BUFFER_SIZE: usize = BUFFER_SIZE + TAG_SIZE;
-    let mut buffer = [0u8; ENCRYPTED_BUFFER_SIZE];
-    loop {
+impl<W: Write> EncryptWriter<W> {
+    pub fn new(encryptor: stream::EncryptorBE32<XChaCha20Poly1305>, output: W) -> Self {
+        Self {
+            encryptor: Some(encryptor),
+            buffer: Vec::with_capacity(BUFFER_SIZE),
+            output,
+        }
+    }
+
+    /// Encrypts the remaining buffer as the final AEAD chunk and flushes.
+    /// Must be called exactly once after all plaintext has been written.
+    pub fn finish(mut self) -> Result<(), CryptoError> {
+        let encryptor = self
+            .encryptor
+            .take()
+            .ok_or_else(|| CryptoError::Message("EncryptWriter already finished".to_string()))?;
+        let ciphertext = encryptor
+            .encrypt_last(self.buffer.as_slice())
+            .map_err(CryptoError::ChaCha20Poly1305Error)?;
+        self.output.write_all(&ciphertext)?;
+        self.output.flush()?;
+        Ok(())
+    }
+}
+
+impl<W: Write> Write for EncryptWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let encryptor = self.encryptor.as_mut().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "EncryptWriter already finished")
+        })?;
+
+        self.buffer.extend_from_slice(buf);
+
+        while self.buffer.len() >= BUFFER_SIZE {
+            let remaining = self.buffer.split_off(BUFFER_SIZE);
+            let chunk = std::mem::replace(&mut self.buffer, remaining);
+            let ciphertext = encryptor
+                .encrypt_next(chunk.as_slice())
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            self.output.write_all(&ciphertext)?;
+        }
+
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.output.flush()
+    }
+}
+
+/// Streaming decryption reader: reads ciphertext chunks of `BUFFER_SIZE + TAG_SIZE`
+/// from the inner reader, decrypts each with `decrypt_next` / `decrypt_last`,
+/// and serves plaintext through the `Read` interface.
+///
+/// A full-size ciphertext chunk (`BUFFER_SIZE + TAG_SIZE` bytes) is a non-final
+/// chunk; a shorter read indicates the final chunk.
+pub struct DecryptReader<R: Read> {
+    decryptor: Option<stream::DecryptorBE32<XChaCha20Poly1305>>,
+    input: R,
+    plaintext: Vec<u8>,
+    pos: usize,
+    done: bool,
+}
+
+impl<R: Read> DecryptReader<R> {
+    pub fn new(decryptor: stream::DecryptorBE32<XChaCha20Poly1305>, input: R) -> Self {
+        Self {
+            decryptor: Some(decryptor),
+            input,
+            plaintext: Vec::new(),
+            pos: 0,
+            done: false,
+        }
+    }
+
+    fn fill_buffer(&mut self) -> io::Result<()> {
+        const ENCRYPTED_CHUNK_SIZE: usize = BUFFER_SIZE + TAG_SIZE;
+        let mut encrypted = vec![0u8; ENCRYPTED_CHUNK_SIZE];
         let mut filled = 0;
-        while filled < ENCRYPTED_BUFFER_SIZE {
-            let n = source.read(&mut buffer[filled..])?;
+        while filled < ENCRYPTED_CHUNK_SIZE {
+            let n = self.input.read(&mut encrypted[filled..])?;
             if n == 0 {
                 break;
             }
             filled += n;
         }
 
-        if filled == ENCRYPTED_BUFFER_SIZE {
-            let plaintext = decryptor
-                .decrypt_next(buffer.as_slice())
-                .map_err(CryptoError::ChaCha20Poly1305Error)?;
-            output.write_all(&plaintext)?;
-        } else {
-            let plaintext = decryptor
-                .decrypt_last(&buffer[..filled])
-                .map_err(CryptoError::ChaCha20Poly1305Error)?;
-            output.write_all(&plaintext)?;
-            break;
+        if filled == 0 {
+            // A valid stream always ends with an encrypt_last chunk (>= TAG_SIZE
+            // bytes). Reading 0 bytes means the final chunk is missing — the
+            // ciphertext was truncated at a chunk boundary.
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "encrypted stream truncated: missing final chunk",
+            ));
         }
+
+        if filled == ENCRYPTED_CHUNK_SIZE {
+            let decryptor = self.decryptor.as_mut().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::Other, "decryptor already consumed")
+            })?;
+            self.plaintext = decryptor
+                .decrypt_next(encrypted.as_slice())
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        } else {
+            let decryptor = self.decryptor.take().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::Other, "decryptor already consumed")
+            })?;
+            self.plaintext = decryptor
+                .decrypt_last(&encrypted[..filled])
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            self.done = true;
+        }
+
+        self.pos = 0;
+        Ok(())
     }
-    Ok(())
+}
+
+impl<R: Read> Read for DecryptReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.pos >= self.plaintext.len() {
+            if self.done {
+                return Ok(0);
+            }
+            self.fill_buffer()?;
+            if self.done && self.plaintext.is_empty() {
+                return Ok(0);
+            }
+        }
+
+        let available = self.plaintext.len() - self.pos;
+        let n = cmp::min(buf.len(), available);
+        buf[..n].copy_from_slice(&self.plaintext[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
 }
 
 #[cfg(test)]

@@ -1,47 +1,147 @@
-use std::borrow::Cow;
 use std::fs::{self, File};
-use std::io;
-use std::path::Path;
-
-use walkdir::WalkDir;
-use zip::result::ZipError;
-use zip::write::FileOptions;
+use std::io::{self, Read, Write};
+use std::path::{Component, Path};
 
 use crate::CryptoError;
-use crate::common::{get_file_stem_to_string, normalize_paths};
+use crate::common::normalize_paths;
+
+/// Rejects paths that could escape the output directory (path traversal).
+pub(crate) fn validate_archive_path(path: &Path) -> Result<(), CryptoError> {
+    for component in path.components() {
+        match component {
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(CryptoError::Message(format!(
+                    "Unsafe path in archive: {}",
+                    path.display()
+                )));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Archives a file or directory into a TAR stream written to `writer`.
+/// Returns a tuple of the file stem (base name without extension for files,
+/// directory name for directories) and the writer, so the caller can finalize it.
+pub fn archive<W: Write>(
+    input_path: impl AsRef<Path>,
+    writer: W,
+) -> Result<(String, W), CryptoError> {
+    let input_path = input_path.as_ref();
+    let mut builder = tar::Builder::new(writer);
+
+    let stem = if input_path.is_file() {
+        let file_name = input_path
+            .file_name()
+            .ok_or_else(|| CryptoError::Message("Cannot get file name".to_string()))?;
+        let file_name_str = file_name
+            .to_str()
+            .ok_or_else(|| CryptoError::Message("Cannot convert file name to &str".to_string()))?;
+
+        let metadata = fs::metadata(input_path)?;
+        let mut header = tar::Header::new_gnu();
+        header.set_size(metadata.len());
+        header.set_mode(0o755);
+        header.set_cksum();
+        let mut file = File::open(input_path)?;
+        builder.append_data(&mut header, file_name_str, &mut file)?;
+
+        input_path
+            .file_stem()
+            .ok_or_else(|| CryptoError::Message("Cannot get file stem".to_string()))?
+            .to_str()
+            .ok_or_else(|| CryptoError::Message("Cannot convert file stem to &str".to_string()))?
+            .to_string()
+    } else {
+        let dir_name = input_path
+            .file_name()
+            .ok_or_else(|| CryptoError::InputPath("Input file or folder missing".to_string()))?
+            .to_str()
+            .ok_or_else(|| {
+                CryptoError::Message("Cannot convert directory name to &str".to_string())
+            })?;
+
+        builder.append_dir_all(dir_name, input_path)?;
+        dir_name.to_string()
+    };
+
+    let writer = builder.into_inner()?;
+    Ok((stem, writer))
+}
+
+/// Extracts a TAR archive from `reader` into the specified directory.
+/// Checks that the output path does not already exist before extracting.
+/// Returns the output path as a string.
+pub fn unarchive<R: Read>(reader: R, output_dir: &str) -> Result<String, CryptoError> {
+    let mut archive = tar::Archive::new(reader);
+    let mut first_entry_root: Option<String> = None;
+
+    for entry_result in archive.entries()? {
+        let mut entry = entry_result?;
+        let path = entry.path()?.to_path_buf();
+        validate_archive_path(&path)?;
+
+        if first_entry_root.is_none() {
+            let first_component = path
+                .components()
+                .next()
+                .ok_or_else(|| CryptoError::Message("Empty archive entry".to_string()))?;
+            let root_name = first_component
+                .as_os_str()
+                .to_str()
+                .ok_or_else(|| CryptoError::Message("Invalid path in archive".to_string()))?;
+
+            let full_path = normalize_paths(&format!("{}{}", output_dir, root_name), "").0;
+            if Path::new(&full_path).exists() {
+                return Err(CryptoError::Message(format!(
+                    "Output already exists: {}\n",
+                    full_path
+                )));
+            }
+            first_entry_root = Some(full_path);
+        }
+
+        let full_path = Path::new(output_dir).join(&path);
+        let entry_type = entry.header().entry_type();
+
+        if entry_type.is_dir() {
+            fs::create_dir_all(&full_path)?;
+        } else if entry_type.is_file() {
+            if let Some(parent) = full_path.parent() {
+                if !parent.exists() {
+                    fs::create_dir_all(parent)?;
+                }
+            }
+            let mut outfile = File::create(&full_path)?;
+            io::copy(&mut entry, &mut outfile)?;
+        }
+    }
+
+    first_entry_root.ok_or_else(|| CryptoError::Message("Empty archive".to_string()))
+}
 
 #[cfg(test)]
 mod tests {
     use std::fs;
-
-    use tempfile::TempDir;
+    use std::io::Cursor;
 
     use crate::archiver::{archive, unarchive};
 
-    /// The unarchive function concatenates output_dir with the zip entry path
-    /// without inserting a separator, so a trailing slash is required (matching
-    /// how the public API normalizes paths before calling archiver functions).
-    fn dir_with_slash(dir: &std::path::Path) -> String {
-        format!("{}/", dir.display())
-    }
-
     #[test]
     fn archive_and_unarchive_file() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
         let input_file = tmp.path().join("hello.txt");
-        let archive_dir = tmp.path().join("zipped");
         let extract_dir = tmp.path().join("extracted");
-        fs::create_dir_all(&archive_dir).unwrap();
         fs::create_dir_all(&extract_dir).unwrap();
-
         fs::write(&input_file, "file content here").unwrap();
 
-        let stem = archive(&input_file, &archive_dir).unwrap();
+        let mut buf = Vec::new();
+        let (stem, _) = archive(&input_file, &mut buf).unwrap();
         assert_eq!(stem, "hello");
-        assert!(archive_dir.join("hello.zip").exists());
 
-        let output =
-            unarchive(archive_dir.join("hello.zip"), &dir_with_slash(&extract_dir)).unwrap();
+        let output_dir = format!("{}/", extract_dir.display());
+        let output = unarchive(Cursor::new(buf), &output_dir).unwrap();
         assert!(!output.is_empty());
 
         let restored = fs::read_to_string(extract_dir.join("hello.txt")).unwrap();
@@ -50,24 +150,22 @@ mod tests {
 
     #[test]
     fn archive_and_unarchive_directory() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
         let input_dir = tmp.path().join("mydir");
         let sub_dir = input_dir.join("sub");
-        let archive_dir = tmp.path().join("zipped");
         let extract_dir = tmp.path().join("extracted");
         fs::create_dir_all(&sub_dir).unwrap();
-        fs::create_dir_all(&archive_dir).unwrap();
         fs::create_dir_all(&extract_dir).unwrap();
 
         fs::write(input_dir.join("a.txt"), "file a").unwrap();
         fs::write(sub_dir.join("b.txt"), "file b").unwrap();
 
-        let stem = archive(&input_dir, &archive_dir).unwrap();
+        let mut buf = Vec::new();
+        let (stem, _) = archive(&input_dir, &mut buf).unwrap();
         assert_eq!(stem, "mydir");
-        assert!(archive_dir.join("mydir.zip").exists());
 
-        let output =
-            unarchive(archive_dir.join("mydir.zip"), &dir_with_slash(&extract_dir)).unwrap();
+        let output_dir = format!("{}/", extract_dir.display());
+        let output = unarchive(Cursor::new(buf), &output_dir).unwrap();
         assert!(!output.is_empty());
 
         let restored_a = fs::read_to_string(extract_dir.join("mydir/a.txt")).unwrap();
@@ -78,188 +176,51 @@ mod tests {
 
     #[test]
     fn archive_empty_file() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
         let input_file = tmp.path().join("empty.txt");
-        let archive_dir = tmp.path().join("zipped");
         let extract_dir = tmp.path().join("extracted");
-        fs::create_dir_all(&archive_dir).unwrap();
         fs::create_dir_all(&extract_dir).unwrap();
-
         fs::write(&input_file, "").unwrap();
 
-        let stem = archive(&input_file, &archive_dir).unwrap();
+        let mut buf = Vec::new();
+        let (stem, _) = archive(&input_file, &mut buf).unwrap();
         assert_eq!(stem, "empty");
 
-        unarchive(archive_dir.join("empty.zip"), &dir_with_slash(&extract_dir)).unwrap();
+        let output_dir = format!("{}/", extract_dir.display());
+        unarchive(Cursor::new(buf), &output_dir).unwrap();
         let restored = fs::read_to_string(extract_dir.join("empty.txt")).unwrap();
         assert_eq!(restored, "");
     }
 
     #[test]
+    fn validate_rejects_path_traversal() {
+        use crate::archiver::validate_archive_path;
+        use std::path::Path;
+
+        assert!(validate_archive_path(Path::new("safe.txt")).is_ok());
+        assert!(validate_archive_path(Path::new("dir/file.txt")).is_ok());
+        assert!(validate_archive_path(Path::new("../escape.txt")).is_err());
+        assert!(validate_archive_path(Path::new("dir/../../escape.txt")).is_err());
+        assert!(validate_archive_path(Path::new("/etc/passwd")).is_err());
+    }
+
+    #[test]
     fn archive_binary_content() {
-        let tmp = TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
         let input_file = tmp.path().join("data.bin");
-        let archive_dir = tmp.path().join("zipped");
         let extract_dir = tmp.path().join("extracted");
-        fs::create_dir_all(&archive_dir).unwrap();
         fs::create_dir_all(&extract_dir).unwrap();
 
         let binary_data: Vec<u8> = (0..=255).collect();
         fs::write(&input_file, &binary_data).unwrap();
 
-        archive(&input_file, &archive_dir).unwrap();
-        unarchive(archive_dir.join("data.zip"), &dir_with_slash(&extract_dir)).unwrap();
+        let mut buf = Vec::new();
+        let (_, _) = archive(&input_file, &mut buf).unwrap();
+
+        let output_dir = format!("{}/", extract_dir.display());
+        unarchive(Cursor::new(buf), &output_dir).unwrap();
 
         let restored = fs::read(extract_dir.join("data.bin")).unwrap();
         assert_eq!(restored, binary_data);
     }
-}
-
-/// Archives a file or directory into a ZIP archive.
-pub fn archive(
-    input_path: impl AsRef<Path>,
-    output_dir: impl AsRef<Path>,
-) -> Result<String, CryptoError> {
-    if input_path.as_ref().is_file() {
-        archive_file(input_path, output_dir)
-    } else {
-        archive_dir(input_path, output_dir)
-    }
-}
-
-fn archive_file(
-    input_path: impl AsRef<Path>,
-    output_dir: impl AsRef<Path>,
-) -> Result<String, CryptoError> {
-    let input_path = input_path.as_ref();
-    let output_dir = output_dir.as_ref();
-
-    let file_name_extension = input_path
-        .file_name()
-        .ok_or_else(|| ZipError::InvalidArchive(Cow::from("Cannot get file name")))?
-        .to_str()
-        .ok_or_else(|| ZipError::InvalidArchive(Cow::from("Cannot convert file name to &str")))?;
-
-    let file_stem = &get_file_stem_to_string(input_path)?;
-
-    let output_file = File::create(output_dir.join(format!("{}.zip", file_stem)))?;
-    let mut zip = zip::ZipWriter::new(output_file);
-
-    let options: FileOptions<()> = FileOptions::default()
-        .compression_method(zip::CompressionMethod::Stored)
-        .large_file(true)
-        .unix_permissions(0o755); // sets options for the zip file
-
-    zip.start_file(file_name_extension, options)?;
-
-    let mut f = File::open(input_path)?;
-    io::copy(&mut f, &mut zip)?;
-
-    zip.finish()?;
-
-    Ok(file_stem.to_string())
-}
-
-fn archive_dir(
-    input_path: impl AsRef<Path>,
-    output_dir: impl AsRef<Path>,
-) -> Result<String, CryptoError> {
-    let input_path = input_path.as_ref();
-    let output_dir = output_dir.as_ref();
-
-    let dir_name = input_path
-        .file_name()
-        .ok_or_else(|| CryptoError::InputPath("Input file or folder missing".to_string()))?
-        .to_str()
-        .ok_or_else(|| {
-            ZipError::InvalidArchive(Cow::from("Cannot convert directory name to &str"))
-        })?;
-
-    let output_zip_path = output_dir.join(format!("{}.zip", dir_name));
-    let file = File::create(output_zip_path)?;
-    let mut zip = zip::ZipWriter::new(file);
-    let options: FileOptions<()> = FileOptions::default()
-        .compression_method(zip::CompressionMethod::Stored)
-        .large_file(true)
-        .unix_permissions(0o755);
-    let walkdir = WalkDir::new(input_path);
-
-    for entry in walkdir {
-        let entry = entry?;
-        let path = entry.path();
-        let name = path
-            .strip_prefix(input_path)
-            .map_err(|err| CryptoError::Message(format!("StripPrefixError: {:?}", err)))?;
-        let name_str = name
-            .to_str()
-            .ok_or_else(|| ZipError::InvalidArchive(Cow::from("Cannot convert name to &str")))?;
-        let output_path_str = format!("{}/{}", dir_name, name_str);
-
-        if path.is_file() {
-            zip.start_file(&output_path_str, options)?;
-            let mut f = File::open(path)?;
-            io::copy(&mut f, &mut zip)?;
-        } else if !output_path_str.is_empty() {
-            zip.add_directory(&output_path_str, options)?;
-        }
-    }
-
-    zip.finish()?;
-
-    Ok(dir_name.to_string())
-}
-
-/// Extracts a ZIP archive to a specified directory.
-pub fn unarchive(
-    input_path: impl AsRef<Path>,
-    output_dir: impl AsRef<Path>,
-) -> Result<String, CryptoError> {
-    let output_dir = output_dir.as_ref();
-    let file = File::open(input_path.as_ref())?;
-    let mut archive = zip::ZipArchive::new(file)?;
-
-    let first_entry = archive.by_index(0)?;
-    let first_name = first_entry
-        .enclosed_name()
-        .ok_or_else(|| CryptoError::Message("Invalid archive entry".to_string()))?;
-    let first_name_str = first_name
-        .to_str()
-        .ok_or_else(|| ZipError::InvalidArchive(Cow::from("Cannot convert path to &str")))?;
-    let output_path = normalize_paths(&format!("{}{}", output_dir.display(), first_name_str), "").0;
-    let output_path_check = Path::new(&output_path);
-    if output_path_check.exists() {
-        return Err(CryptoError::Message(format!(
-            "Output already exists: {}\n",
-            output_path
-        )));
-    }
-    drop(first_entry);
-
-    for i in 0..archive.len() {
-        let mut file = archive.by_index(i)?;
-        let outpath = match file.enclosed_name() {
-            Some(path) => path,
-            None => continue,
-        };
-        let outpath_str = outpath
-            .to_str()
-            .ok_or_else(|| ZipError::InvalidArchive(Cow::from("Cannot convert path to &str")))?;
-        let outpath_full_str =
-            normalize_paths(&format!("{}{}", output_dir.display(), outpath_str), "").0;
-        let outpath_full = Path::new(&outpath_full_str);
-
-        if (*file.name()).ends_with('/') {
-            fs::create_dir_all(outpath_full)?;
-        } else {
-            if let Some(p) = outpath_full.parent() {
-                if !p.exists() {
-                    fs::create_dir_all(p)?;
-                }
-            }
-            let mut outfile = File::create(outpath_full)?;
-            io::copy(&mut file, &mut outfile)?;
-        }
-    }
-
-    Ok(output_path)
 }

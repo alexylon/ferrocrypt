@@ -18,6 +18,9 @@ All notable changes to FerroCrypt are documented in this file.
 - `detect_encryption_mode()` public API for determining whether an `.fcr` file uses symmetric or hybrid encryption
 
 ### Changed
+- **Breaking:** Streaming TAR encryption pipeline — input files are archived into a TAR stream and encrypted directly to the output file in a single pass. No plaintext intermediate files are written to disk during encryption or decryption. Replaces the previous ZIP-based approach that wrote plaintext archives to a temporary directory.
+- **Breaking:** Format version bumped to 2.0 — files created by older versions cannot be decrypted
+- **Breaking (library API):** Removed `WalkDirError` and `ZipError` variants from `CryptoError` enum
 - **Breaking (library API):** Collapsed `_with_progress` variants into base functions. `symmetric_encryption`, `hybrid_encryption`, and `generate_asymmetric_key_pair` now accept `save_as` and `on_progress` directly.
 - Moved Tauri and Dioxus GUIs to `experiments/`
 - **Breaking:** New file format — existing encrypted files from older versions cannot be decrypted. Unified file extension from `.fcs`/`.fch` to single `.fcr`. Both symmetric and hybrid modes now use the STREAM construction (EncryptorBE32/DecryptorBE32) for streaming encrypt/decrypt, eliminating the need to load entire files into memory. Hybrid nonce changed from 24 to 19 bytes to match the STREAM format. Symmetric header now includes an HKDF salt field.

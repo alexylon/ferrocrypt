@@ -1,4 +1,4 @@
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::Path;
 
@@ -15,8 +15,8 @@ use secrecy::{ExposeSecret, SecretString};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::common::{
-    NONCE_SIZE, get_duration, get_file_stem_to_string, hmac_sha3_256, hmac_sha3_256_verify,
-    stream_decrypt, stream_encrypt,
+    DecryptReader, EncryptWriter, NONCE_SIZE, get_duration, get_file_stem_to_string, hmac_sha3_256,
+    hmac_sha3_256_verify,
 };
 use crate::format::{self, HEADER_PREFIX_SIZE};
 use crate::replication::{rep_decode_exact, rep_encode, rep_encoded_size};
@@ -28,18 +28,15 @@ const HMAC_KEY_SIZE: usize = 32;
 const COMBINED_KEY_SIZE: usize = KEY_SIZE + HMAC_KEY_SIZE;
 
 pub fn encrypt_file(
-    input_path: impl AsRef<Path>,
-    output_dir: impl AsRef<Path>,
+    input_path: &str,
+    output_dir: &str,
     rsa_public_pem: impl AsRef<Path>,
-    tmp_dir_path: impl AsRef<Path>,
     output_file: Option<&Path>,
     on_progress: &dyn Fn(&str),
 ) -> Result<String, CryptoError> {
     let start_time = std::time::Instant::now();
-    let output_dir = output_dir.as_ref();
-    let tmp_dir_path = tmp_dir_path.as_ref();
-    let file_stem = &archiver::archive(input_path, tmp_dir_path)?;
-    let zipped_file_name = tmp_dir_path.join(format!("{}.zip", file_stem));
+
+    let file_stem = &get_file_stem_to_string(input_path)?;
     println!("\nEncrypting ...");
     on_progress("Encrypting\u{2026}");
 
@@ -69,7 +66,7 @@ pub fn encrypt_file(
 
         let output_path = match output_file {
             Some(path) => path.to_path_buf(),
-            None => output_dir.join(format!(
+            None => Path::new(output_dir).join(format!(
                 "{}.{}",
                 file_stem,
                 crate::format::ENCRYPTED_EXTENSION
@@ -81,7 +78,7 @@ pub fn encrypt_file(
                 output_path.display()
             )));
         }
-        let mut output_file = OpenOptions::new()
+        let mut dest = OpenOptions::new()
             .write(true)
             .append(true)
             .create_new(true)
@@ -107,13 +104,14 @@ pub fn encrypt_file(
         let hmac_tag = hmac_sha3_256(&hmac_key, &header_bytes)?;
         let encoded_hmac_tag = rep_encode(&hmac_tag);
 
-        output_file.write_all(&prefix)?;
-        output_file.write_all(&encoded_encrypted_combined_key)?;
-        output_file.write_all(&encoded_nonce)?;
-        output_file.write_all(&encoded_hmac_tag)?;
+        dest.write_all(&prefix)?;
+        dest.write_all(&encoded_encrypted_combined_key)?;
+        dest.write_all(&encoded_nonce)?;
+        dest.write_all(&encoded_hmac_tag)?;
 
-        let mut source_file = File::open(&zipped_file_name)?;
-        stream_encrypt(stream_encryptor, &mut source_file, &mut output_file)?;
+        let encrypt_writer = EncryptWriter::new(stream_encryptor, dest);
+        let (_, encrypt_writer) = archiver::archive(input_path, encrypt_writer)?;
+        encrypt_writer.finish()?;
 
         nonce.zeroize();
 
@@ -133,16 +131,13 @@ pub fn encrypt_file(
 }
 
 pub fn decrypt_file(
-    input_path: impl AsRef<Path>,
-    output_dir: impl AsRef<Path>,
+    input_path: &str,
+    output_dir: &str,
     rsa_private_pem: &str,
     passphrase: &SecretString,
-    tmp_dir_path: impl AsRef<Path>,
     on_progress: &dyn Fn(&str),
 ) -> Result<String, CryptoError> {
     let start_time = std::time::Instant::now();
-    let input_path = input_path.as_ref();
-    let tmp_dir_path = tmp_dir_path.as_ref();
 
     // Zeroizing wraps the PEM content so it's cleared on all exit paths
     let priv_key_str = Zeroizing::new(fs::read_to_string(&rsa_private_pem)?);
@@ -160,7 +155,7 @@ pub fn decrypt_file(
             }
         };
 
-    let mut encrypted_file = File::open(input_path)?;
+    let mut encrypted_file = std::fs::File::open(input_path)?;
 
     let (prefix_bytes, header) =
         format::read_header_from_reader(&mut encrypted_file, format::TYPE_HYBRID)?;
@@ -223,17 +218,8 @@ pub fn decrypt_file(
         let cipher = XChaCha20Poly1305::new((&decrypted_combined_key[..KEY_SIZE]).into());
         let stream_decryptor = stream::DecryptorBE32::from_aead(cipher, nonce.as_slice().into());
 
-        let decrypted_file_stem = &get_file_stem_to_string(input_path)?;
-        let decrypted_file_path = tmp_dir_path.join(format!("{}.zip", decrypted_file_stem));
-        let mut decrypted_file = OpenOptions::new()
-            .write(true)
-            .append(true)
-            .create_new(true)
-            .open(&decrypted_file_path)?;
-
-        stream_decrypt(stream_decryptor, &mut encrypted_file, &mut decrypted_file)?;
-
-        let output_path = archiver::unarchive(&decrypted_file_path, output_dir)?;
+        let decrypt_reader = DecryptReader::new(stream_decryptor, encrypted_file);
+        let output_path = archiver::unarchive(decrypt_reader, output_dir)?;
 
         let msg = format!(
             "Decrypted to {} in {}\n",

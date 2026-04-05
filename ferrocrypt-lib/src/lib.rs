@@ -9,7 +9,7 @@
 //! - **Confidentiality + integrity** for small-to-medium file trees.
 //! - **Simple ergonomics**: pick symmetric (password) or hybrid (public/private
 //!   key + optional passphrase) based on your distribution needs.
-//! - **Batteries included**: temporary workspace management, path normalization,
+//! - **Batteries included**: streaming encryption pipeline, path normalization,
 //!   and output file naming are handled for you.
 //!
 //! ## Quick start (symmetric path, mirrors `ferrocrypt symmetric` CLI)
@@ -75,7 +75,6 @@
 //! ## License
 //! Licensed under GPL-3.0-only. See the LICENSE file in the repository.
 
-use std::fs;
 use std::path::Path;
 
 use secrecy::{ExposeSecret, SecretString};
@@ -124,37 +123,12 @@ pub fn default_encrypted_filename(input_path: &str) -> Result<String, CryptoErro
     Ok(format!("{}.{}", stem, ENCRYPTED_EXTENSION))
 }
 
-fn with_tmp_workspace<F>(
-    input_path: &str,
-    output_dir: &str,
-    operation: F,
-) -> Result<String, CryptoError>
-where
-    F: FnOnce(&str, &str, &str) -> Result<String, CryptoError>,
-{
-    let (normalized_input_path, normalized_output_dir) = normalize_paths(input_path, output_dir);
-
-    if !Path::new(&normalized_input_path).exists() {
-        return Err(CryptoError::InputPath(normalized_input_path));
+fn validate_paths(input_path: &str, output_dir: &str) -> Result<(String, String), CryptoError> {
+    let (normalized_input, normalized_output) = normalize_paths(input_path, output_dir);
+    if !Path::new(&normalized_input).exists() {
+        return Err(CryptoError::InputPath(normalized_input));
     }
-
-    let tmp_dir_path = format!("{}.tmp_zip_{}/", normalized_output_dir, std::process::id());
-    fs::create_dir_all(&tmp_dir_path)?;
-
-    let result = operation(
-        &normalized_input_path,
-        &normalized_output_dir,
-        &tmp_dir_path,
-    );
-
-    let cleanup = fs::remove_dir_all(&tmp_dir_path);
-    match result {
-        Ok(msg) => {
-            cleanup?;
-            Ok(msg)
-        }
-        err => err,
-    }
+    Ok((normalized_input, normalized_output))
 }
 
 /// Encrypt or decrypt files/directories using password-based symmetric crypto.
@@ -192,15 +166,13 @@ pub fn symmetric_encryption(
         ));
     }
     let save_as_path = save_as.map(Path::new);
-    with_tmp_workspace(input_path, output_dir, |input, output, tmp| {
-        if detect_encryption_mode(input).is_some()
-            || input.ends_with(format::ENCRYPTED_DOT_EXTENSION)
-        {
-            symmetric::decrypt_file(input, output, password, tmp, &on_progress)
-        } else {
-            symmetric::encrypt_file(input, output, password, tmp, save_as_path, &on_progress)
-        }
-    })
+    let (input, output) = validate_paths(input_path, output_dir)?;
+    if detect_encryption_mode(&input).is_some() || input.ends_with(format::ENCRYPTED_DOT_EXTENSION)
+    {
+        symmetric::decrypt_file(&input, &output, password, &on_progress)
+    } else {
+        symmetric::encrypt_file(&input, &output, password, save_as_path, &on_progress)
+    }
 }
 
 /// Encrypt or decrypt using hybrid (RSA + XChaCha20-Poly1305) envelope encryption.
@@ -240,15 +212,13 @@ pub fn hybrid_encryption(
     on_progress: impl Fn(&str),
 ) -> Result<String, CryptoError> {
     let save_as_path = save_as.map(Path::new);
-    with_tmp_workspace(input_path, output_dir, |input, output, tmp| {
-        if detect_encryption_mode(input).is_some()
-            || input.ends_with(format::ENCRYPTED_DOT_EXTENSION)
-        {
-            hybrid::decrypt_file(input, output, rsa_key_pem, passphrase, tmp, &on_progress)
-        } else {
-            hybrid::encrypt_file(input, output, rsa_key_pem, tmp, save_as_path, &on_progress)
-        }
-    })
+    let (input, output) = validate_paths(input_path, output_dir)?;
+    if detect_encryption_mode(&input).is_some() || input.ends_with(format::ENCRYPTED_DOT_EXTENSION)
+    {
+        hybrid::decrypt_file(&input, &output, rsa_key_pem, passphrase, &on_progress)
+    } else {
+        hybrid::encrypt_file(&input, &output, rsa_key_pem, save_as_path, &on_progress)
+    }
 }
 
 /// Generate and store an RSA key pair for hybrid encryption (default: RSA-4096).

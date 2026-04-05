@@ -1,4 +1,4 @@
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::Path;
 
@@ -13,8 +13,8 @@ use sha3::Sha3_256;
 use zeroize::Zeroizing;
 
 use crate::common::{
-    NONCE_SIZE, constant_time_compare_256_bit, get_duration, get_file_stem_to_string,
-    hmac_sha3_256, hmac_sha3_256_verify, sha3_32_hash, stream_decrypt, stream_encrypt,
+    DecryptReader, EncryptWriter, NONCE_SIZE, constant_time_compare_256_bit, get_duration,
+    get_file_stem_to_string, hmac_sha3_256, hmac_sha3_256_verify, sha3_32_hash,
 };
 use crate::format::{self, HEADER_PREFIX_SIZE};
 use crate::replication::{rep_decode_exact, rep_encode, rep_encoded_size};
@@ -54,18 +54,17 @@ fn derive_keys(
     Ok((enc_key, hmac_key))
 }
 
-/// Encrypts a file with XChaCha20Poly1305 streaming algorithm.
+/// Encrypts a file or directory with XChaCha20-Poly1305 streaming encryption.
+/// Input is archived into a TAR stream and encrypted directly to the output
+/// file — no plaintext intermediate files touch disk.
 pub fn encrypt_file(
-    input_path: impl AsRef<Path>,
-    output_dir: impl AsRef<Path>,
+    input_path: &str,
+    output_dir: &str,
     passphrase: &SecretString,
-    tmp_dir_path: impl AsRef<Path>,
     output_file: Option<&Path>,
     on_progress: &dyn Fn(&str),
 ) -> Result<String, CryptoError> {
     let start_time = std::time::Instant::now();
-    let output_dir = output_dir.as_ref();
-    let tmp_dir_path = tmp_dir_path.as_ref();
 
     println!("\nDeriving key ...");
     on_progress("Deriving key\u{2026}");
@@ -79,14 +78,15 @@ pub fn encrypt_file(
     let cipher = XChaCha20Poly1305::new(enc_key.as_ref().into());
     let stored_key_hash: [u8; KEY_SIZE] = sha3_32_hash(enc_key.as_ref())?;
 
-    let file_stem = &archiver::archive(input_path, tmp_dir_path)?;
-    let zipped_file_name = tmp_dir_path.join(format!("{}.zip", file_stem));
+    let file_stem = &get_file_stem_to_string(input_path)?;
     println!("Encrypting ...");
     on_progress("Encrypting\u{2026}");
 
     let output_path = match output_file {
         Some(path) => path.to_path_buf(),
-        None => output_dir.join(format!("{}.{}", file_stem, format::ENCRYPTED_EXTENSION)),
+        None => {
+            Path::new(output_dir).join(format!("{}.{}", file_stem, format::ENCRYPTED_EXTENSION))
+        }
     };
     if output_path.exists() {
         return Err(CryptoError::Message(format!(
@@ -94,7 +94,7 @@ pub fn encrypt_file(
             output_path.display()
         )));
     }
-    let mut output_file = OpenOptions::new()
+    let mut dest = OpenOptions::new()
         .write(true)
         .append(true)
         .create_new(true)
@@ -133,15 +133,16 @@ pub fn encrypt_file(
     let hmac_tag = hmac_sha3_256(hmac_key.as_ref(), &header_bytes)?;
     let encoded_hmac_tag = rep_encode(&hmac_tag);
 
-    output_file.write_all(&prefix)?;
-    output_file.write_all(&encoded_salt)?;
-    output_file.write_all(&encoded_hkdf_salt)?;
-    output_file.write_all(&encoded_nonce)?;
-    output_file.write_all(&encoded_key_hash)?;
-    output_file.write_all(&encoded_hmac_tag)?;
+    dest.write_all(&prefix)?;
+    dest.write_all(&encoded_salt)?;
+    dest.write_all(&encoded_hkdf_salt)?;
+    dest.write_all(&encoded_nonce)?;
+    dest.write_all(&encoded_key_hash)?;
+    dest.write_all(&encoded_hmac_tag)?;
 
-    let mut source_file = File::open(&zipped_file_name)?;
-    stream_encrypt(stream_encryptor, &mut source_file, &mut output_file)?;
+    let encrypt_writer = EncryptWriter::new(stream_encryptor, dest);
+    let (_, encrypt_writer) = archiver::archive(input_path, encrypt_writer)?;
+    encrypt_writer.finish()?;
 
     let result = format!(
         "Encrypted to {} in {}\n",
@@ -153,18 +154,17 @@ pub fn encrypt_file(
     Ok(result)
 }
 
-/// Decrypts a file with XChaCha20Poly1305 streaming algorithm.
+/// Decrypts a file with XChaCha20-Poly1305 streaming decryption.
+/// Ciphertext is decrypted into a TAR stream and unpacked directly to the
+/// output directory — no plaintext intermediate files touch disk.
 pub fn decrypt_file(
-    input_path: impl AsRef<Path>,
-    output_dir: impl AsRef<Path>,
+    input_path: &str,
+    output_dir: &str,
     passphrase: &SecretString,
-    tmp_dir_path: impl AsRef<Path>,
     on_progress: &dyn Fn(&str),
 ) -> Result<String, CryptoError> {
     let start_time = std::time::Instant::now();
-    let input_path = input_path.as_ref();
-    let tmp_dir_path = tmp_dir_path.as_ref();
-    let mut encrypted_file = File::open(input_path)?;
+    let mut encrypted_file = std::fs::File::open(input_path)?;
 
     let (prefix_bytes, header) =
         format::read_header_from_reader(&mut encrypted_file, format::TYPE_SYMMETRIC)?;
@@ -242,17 +242,9 @@ pub fn decrypt_file(
     on_progress("Decrypting\u{2026}");
     let cipher = XChaCha20Poly1305::new(enc_key.as_ref().into());
     let stream_decryptor = stream::DecryptorBE32::from_aead(cipher, nonce.as_slice().into());
-    let decrypted_file_stem = &get_file_stem_to_string(input_path)?;
-    let decrypted_file_path = tmp_dir_path.join(format!("{}.zip", decrypted_file_stem));
-    let mut decrypted_file = OpenOptions::new()
-        .write(true)
-        .append(true)
-        .create_new(true)
-        .open(&decrypted_file_path)?;
 
-    stream_decrypt(stream_decryptor, &mut encrypted_file, &mut decrypted_file)?;
-
-    let output_path = archiver::unarchive(&decrypted_file_path, output_dir)?;
+    let decrypt_reader = DecryptReader::new(stream_decryptor, encrypted_file);
+    let output_path = archiver::unarchive(decrypt_reader, output_dir)?;
 
     let result = format!(
         "Decrypted to {} in {}\n",

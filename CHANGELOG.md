@@ -35,6 +35,7 @@ All notable changes to FerroCrypt are documented in this file.
 - Replaced bincode header serialization with raw byte layout for long-term format stability
 
 ### Fixed
+- HMAC header authentication now covers decoded (canonical) field values instead of raw triple-replicated bytes, so single-copy corruption recovered by majority vote no longer causes HMAC verification failure
 - `keygen` now creates missing output directories instead of failing silently
 - **Stream truncation vulnerability:** symmetric decryption had a code path that skipped the required `decrypt_last()` call, allowing an attacker to truncate ciphertext at chunk boundaries without detection. Now all final chunks go through `decrypt_last`, which verifies the STREAM terminator.
 - Hybrid plaintext buffers (both pre-encryption and post-decryption) are now zeroized on drop

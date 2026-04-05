@@ -95,13 +95,12 @@ pub fn encrypt_file(
 
         let stream_encryptor = stream::EncryptorBE32::from_aead(cipher, nonce.as_ref().into());
 
-        let mut header_bytes = Vec::with_capacity(
-            prefix.len() + encoded_encrypted_combined_key.len() + encoded_nonce.len(),
-        );
-        header_bytes.extend_from_slice(&prefix);
-        header_bytes.extend_from_slice(&encoded_encrypted_combined_key);
-        header_bytes.extend_from_slice(&encoded_nonce);
-        let hmac_tag = hmac_sha3_256(&hmac_key, &header_bytes)?;
+        let mut hmac_message =
+            Vec::with_capacity(prefix.len() + encrypted_combined_key.len() + nonce.len());
+        hmac_message.extend_from_slice(&prefix);
+        hmac_message.extend_from_slice(&encrypted_combined_key);
+        hmac_message.extend_from_slice(&nonce);
+        let hmac_tag = hmac_sha3_256(&hmac_key, &hmac_message)?;
         let encoded_hmac_tag = rep_encode(&hmac_tag);
 
         dest.write_all(&prefix)?;
@@ -207,13 +206,12 @@ pub fn decrypt_file(
     let result = (|| -> Result<String, CryptoError> {
         let hmac_key = &decrypted_combined_key[KEY_SIZE..COMBINED_KEY_SIZE];
 
-        let mut header_bytes = Vec::with_capacity(
-            prefix_bytes.len() + encoded_encrypted_combined_key.len() + encoded_nonce.len(),
-        );
-        header_bytes.extend_from_slice(&prefix_bytes);
-        header_bytes.extend_from_slice(&encoded_encrypted_combined_key);
-        header_bytes.extend_from_slice(&encoded_nonce);
-        hmac_sha3_256_verify(hmac_key, &header_bytes, &hmac_tag)?;
+        let mut hmac_message =
+            Vec::with_capacity(prefix_bytes.len() + encrypted_combined_key.len() + nonce.len());
+        hmac_message.extend_from_slice(&prefix_bytes);
+        hmac_message.extend_from_slice(&encrypted_combined_key);
+        hmac_message.extend_from_slice(&nonce);
+        hmac_sha3_256_verify(hmac_key, &hmac_message, &hmac_tag)?;
 
         let cipher = XChaCha20Poly1305::new((&decrypted_combined_key[..KEY_SIZE]).into());
         let stream_decryptor = stream::DecryptorBE32::from_aead(cipher, nonce.as_slice().into());

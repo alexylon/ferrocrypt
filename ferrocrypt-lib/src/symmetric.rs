@@ -118,19 +118,14 @@ pub fn encrypt_file(
 
     let stream_encryptor = stream::EncryptorBE32::from_aead(cipher, nonce.as_ref().into());
 
-    let mut header_bytes = Vec::with_capacity(
-        prefix.len()
-            + encoded_salt.len()
-            + encoded_hkdf_salt.len()
-            + encoded_nonce.len()
-            + encoded_key_hash.len(),
-    );
-    header_bytes.extend_from_slice(&prefix);
-    header_bytes.extend_from_slice(&encoded_salt);
-    header_bytes.extend_from_slice(&encoded_hkdf_salt);
-    header_bytes.extend_from_slice(&encoded_nonce);
-    header_bytes.extend_from_slice(&encoded_key_hash);
-    let hmac_tag = hmac_sha3_256(hmac_key.as_ref(), &header_bytes)?;
+    let mut hmac_message =
+        Vec::with_capacity(prefix.len() + SALT_SIZE + HKDF_SALT_SIZE + NONCE_SIZE + KEY_SIZE);
+    hmac_message.extend_from_slice(&prefix);
+    hmac_message.extend_from_slice(&salt);
+    hmac_message.extend_from_slice(&hkdf_salt);
+    hmac_message.extend_from_slice(&nonce);
+    hmac_message.extend_from_slice(&stored_key_hash);
+    let hmac_tag = hmac_sha3_256(hmac_key.as_ref(), &hmac_message)?;
     let encoded_hmac_tag = rep_encode(&hmac_tag);
 
     dest.write_all(&prefix)?;
@@ -224,19 +219,15 @@ pub fn decrypt_file(
         ));
     }
 
-    let mut header_bytes = Vec::with_capacity(
-        prefix_bytes.len()
-            + encoded_salt.len()
-            + encoded_hkdf_salt.len()
-            + encoded_nonce.len()
-            + encoded_key_hash.len(),
+    let mut hmac_message = Vec::with_capacity(
+        prefix_bytes.len() + salt.len() + hkdf_salt.len() + nonce.len() + stored_key_hash.len(),
     );
-    header_bytes.extend_from_slice(&prefix_bytes);
-    header_bytes.extend_from_slice(&encoded_salt);
-    header_bytes.extend_from_slice(&encoded_hkdf_salt);
-    header_bytes.extend_from_slice(&encoded_nonce);
-    header_bytes.extend_from_slice(&encoded_key_hash);
-    hmac_sha3_256_verify(hmac_key.as_ref(), &header_bytes, &hmac_tag)?;
+    hmac_message.extend_from_slice(&prefix_bytes);
+    hmac_message.extend_from_slice(&salt);
+    hmac_message.extend_from_slice(&hkdf_salt);
+    hmac_message.extend_from_slice(&nonce);
+    hmac_message.extend_from_slice(&stored_key_hash);
+    hmac_sha3_256_verify(hmac_key.as_ref(), &hmac_message, &hmac_tag)?;
 
     println!("Decrypting ...");
     on_progress("Decrypting\u{2026}");

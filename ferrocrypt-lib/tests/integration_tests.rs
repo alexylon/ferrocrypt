@@ -1029,10 +1029,17 @@ fn test_symmetric_header_tamper_detection() -> Result<(), CryptoError> {
         |_| {},
     )?;
 
-    // Tamper with a byte in the encoded salt region (offset 10, within the header)
+    // Tamper with the same salt byte in all three replicated copies so majority
+    // vote cannot recover the original value and the decoded salt changes.
+    // Encoded salt layout: [prefix(8)] [padding(1)] [copy0(32)] [copy1(32)] [copy2(32)]
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
-    data[10] ^= 0xFF;
+    const PREFIX: usize = 8; // HEADER_PREFIX_SIZE
+    const SALT_LEN: usize = 32;
+    const SALT_BYTE: usize = 1; // which byte within each copy to corrupt
+    data[PREFIX + 1 + SALT_BYTE] ^= 0xFF;
+    data[PREFIX + 1 + SALT_LEN + SALT_BYTE] ^= 0xFF;
+    data[PREFIX + 1 + 2 * SALT_LEN + SALT_BYTE] ^= 0xFF;
     fs::write(&encrypted_path, &data)?;
 
     let result = symmetric_encryption(
@@ -1081,12 +1088,23 @@ fn test_hybrid_header_tamper_detection() -> Result<(), CryptoError> {
         |_| {},
     )?;
 
-    // Tamper with the encoded nonce region (after flags + encoded_encrypted_key)
+    // Tamper with the same nonce byte in all three replicated copies so majority
+    // vote cannot recover the original value and the decoded nonce changes.
+    // Hybrid header: [prefix(8)] [encoded_key(769)] [encoded_nonce(61)] [encoded_hmac(97)]
+    // encoded_key = rep_encode(256-byte RSA ciphertext) = 1 + 256*3 = 769
+    // encoded_nonce layout: [padding(1)] [copy0(20)] [copy1(20)] [copy2(20)]
+    // (NONCE_SIZE=19, padded to 20)
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
-    // Flip a byte well into the header but before the HMAC tag
-    let tamper_offset = data.len() / 3;
-    data[tamper_offset] ^= 0xFF;
+    const PREFIX: usize = 8;
+    const RSA_2048_OUTPUT: usize = 256;
+    const ENCODED_KEY_LEN: usize = 1 + RSA_2048_OUTPUT * 3;
+    const PADDED_NONCE: usize = 20; // 19 rounded up to even
+    const NONCE_REGION: usize = PREFIX + ENCODED_KEY_LEN; // start of encoded_nonce
+    const NONCE_BYTE: usize = 5;
+    data[NONCE_REGION + 1 + NONCE_BYTE] ^= 0xFF;
+    data[NONCE_REGION + 1 + PADDED_NONCE + NONCE_BYTE] ^= 0xFF;
+    data[NONCE_REGION + 1 + 2 * PADDED_NONCE + NONCE_BYTE] ^= 0xFF;
     fs::write(&encrypted_path, &data)?;
 
     let priv_key_path = keys_dir
@@ -1105,6 +1123,208 @@ fn test_hybrid_header_tamper_detection() -> Result<(), CryptoError> {
     );
 
     assert!(result.is_err());
+
+    Ok(())
+}
+
+#[test]
+fn test_symmetric_single_copy_corruption_recovery() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("symmetric_single_copy_recovery");
+    let input_file = test_dir.join("secret.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    let content = "Recovery test content";
+    create_test_file(&input_file, content);
+
+    let passphrase = SecretString::from("recovery_pass".to_string());
+
+    symmetric_encryption(
+        input_file.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        &passphrase,
+        None,
+        |_| {},
+    )?;
+
+    // Corrupt one byte in copy 0 only — majority vote with copies 1 and 2 recovers it.
+    // Encoded salt layout: [prefix(8)] [padding(1)] [copy0(32)] [copy1(32)] [copy2(32)]
+    let encrypted_path = encrypt_dir.join("secret.fcr");
+    let mut data = fs::read(&encrypted_path)?;
+    const PREFIX: usize = 8;
+    const SALT_BYTE: usize = 5;
+    data[PREFIX + 1 + SALT_BYTE] ^= 0xFF;
+    fs::write(&encrypted_path, &data)?;
+
+    symmetric_encryption(
+        encrypted_path.to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &passphrase,
+        None,
+        |_| {},
+    )?;
+
+    let decrypted = fs::read_to_string(decrypt_dir.join("secret.txt"))?;
+    assert_eq!(decrypted, content);
+
+    Ok(())
+}
+
+#[test]
+fn test_symmetric_two_copy_corruption_detected() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("symmetric_two_copy_corrupt");
+    let input_file = test_dir.join("secret.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    create_test_file(&input_file, "Two copy corruption test");
+
+    let passphrase = SecretString::from("two_copy_pass".to_string());
+
+    symmetric_encryption(
+        input_file.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        &passphrase,
+        None,
+        |_| {},
+    )?;
+
+    // Corrupt the same byte in 2 of 3 copies — majority vote picks the corrupted value,
+    // changing the decoded salt and causing HMAC or key derivation failure.
+    let encrypted_path = encrypt_dir.join("secret.fcr");
+    let mut data = fs::read(&encrypted_path)?;
+    const PREFIX: usize = 8;
+    const SALT_LEN: usize = 32;
+    const SALT_BYTE: usize = 5;
+    data[PREFIX + 1 + SALT_BYTE] ^= 0xFF;
+    data[PREFIX + 1 + SALT_LEN + SALT_BYTE] ^= 0xFF;
+    fs::write(&encrypted_path, &data)?;
+
+    let result = symmetric_encryption(
+        encrypted_path.to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &passphrase,
+        None,
+        |_| {},
+    );
+
+    assert!(result.is_err());
+
+    Ok(())
+}
+
+#[test]
+fn test_symmetric_prefix_flags_tamper_detected() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("symmetric_prefix_flags_tamper");
+    let input_file = test_dir.join("secret.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    create_test_file(&input_file, "Prefix flags tamper test");
+
+    let passphrase = SecretString::from("prefix_flags_pass".to_string());
+
+    symmetric_encryption(
+        input_file.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        &passphrase,
+        None,
+        |_| {},
+    )?;
+
+    // Flip a bit in the flags field (prefix byte 6). Flags are not validated by
+    // format parsing — only the HMAC protects them from tampering.
+    let encrypted_path = encrypt_dir.join("secret.fcr");
+    let mut data = fs::read(&encrypted_path)?;
+    const FLAGS_OFFSET: usize = 6;
+    data[FLAGS_OFFSET] ^= 0x01;
+    fs::write(&encrypted_path, &data)?;
+
+    let result = symmetric_encryption(
+        encrypted_path.to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &passphrase,
+        None,
+        |_| {},
+    );
+
+    assert!(result.is_err());
+
+    Ok(())
+}
+
+#[test]
+fn test_hybrid_single_copy_corruption_recovery() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("hybrid_single_copy_recovery");
+    let keys_dir = test_dir.join("keys");
+    let input_file = test_dir.join("secret.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+
+    fs::create_dir_all(&keys_dir)?;
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    let content = "Hybrid recovery test";
+    create_test_file(&input_file, content);
+
+    let key_passphrase = SecretString::from("hybrid_recovery_pass".to_string());
+    generate_asymmetric_key_pair(2048, &key_passphrase, keys_dir.to_str().unwrap(), |_| {})?;
+
+    let pub_key_path = keys_dir
+        .join("rsa-2048-pub-key.pem")
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    hybrid_encryption(
+        input_file.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        &pub_key_path,
+        &SecretString::from("".to_string()),
+        None,
+        |_| {},
+    )?;
+
+    // Corrupt one byte in copy 0 of the encoded nonce — majority vote recovers it.
+    // Hybrid header: [prefix(8)] [encoded_key(769)] [encoded_nonce(61)] ...
+    // encoded_nonce: [padding(1)] [copy0(20)] [copy1(20)] [copy2(20)]
+    let encrypted_path = encrypt_dir.join("secret.fcr");
+    let mut data = fs::read(&encrypted_path)?;
+    const PREFIX: usize = 8;
+    const RSA_2048_OUTPUT: usize = 256;
+    const ENCODED_KEY_LEN: usize = 1 + RSA_2048_OUTPUT * 3;
+    const NONCE_REGION: usize = PREFIX + ENCODED_KEY_LEN;
+    const NONCE_BYTE: usize = 5;
+    data[NONCE_REGION + 1 + NONCE_BYTE] ^= 0xFF;
+    fs::write(&encrypted_path, &data)?;
+
+    let priv_key_path = keys_dir
+        .join("rsa-2048-priv-key.pem")
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    hybrid_encryption(
+        encrypted_path.to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &priv_key_path,
+        &key_passphrase,
+        None,
+        |_| {},
+    )?;
+
+    let decrypted = fs::read_to_string(decrypt_dir.join("secret.txt"))?;
+    assert_eq!(decrypted, content);
 
     Ok(())
 }

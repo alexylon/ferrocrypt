@@ -236,6 +236,19 @@ fn test_hybrid_keygen_rejects_small_key_size() {
     );
 }
 
+#[test]
+fn test_hybrid_keygen_rejects_empty_passphrase() {
+    let test_dir = setup_test_dir("keygen_empty_pass");
+    let empty = SecretString::from("".to_string());
+
+    let err =
+        generate_asymmetric_key_pair(4096, &empty, test_dir.to_str().unwrap(), |_| {}).unwrap_err();
+    assert!(
+        err.to_string().contains("empty"),
+        "expected empty-passphrase error, got: {err}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn test_hybrid_keygen_private_key_permissions() -> Result<(), CryptoError> {

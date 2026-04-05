@@ -312,6 +312,11 @@ pub fn generate_asymmetric_key_pair(
             "RSA key size {bit_size} bits is too small (minimum is {MIN_RSA_BITS} bits)"
         )));
     }
+    if passphrase.expose_secret().is_empty() {
+        return Err(CryptoError::Message(
+            "Passphrase must not be empty for private key encryption".to_string(),
+        ));
+    }
     let output_dir = output_dir.as_ref();
     fs::create_dir_all(output_dir)?;
     on_progress("Generating key pair\u{2026}");

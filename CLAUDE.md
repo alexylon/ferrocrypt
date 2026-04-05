@@ -37,7 +37,7 @@ Three crates, one shared library:
 | `symmetric.rs` | Argon2id → HKDF-SHA3-256 → XChaCha20-Poly1305 streaming encrypt/decrypt |
 | `hybrid.rs` | RSA-4096 OAEP envelope + XChaCha20-Poly1305 streaming encrypt/decrypt |
 | `archiver.rs` | ZIP archive/unarchive (lossless store, preserves directory structure) |
-| `format.rs` | File format constants: magic byte (0xFC), type bytes, version, header layout |
+| `format.rs` | File format constants, header parsing, forward-compatibility skip for minor versions |
 | `replication.rs` | Triple replication with majority-vote decoding for header error correction |
 | `common.rs` | Shared: streaming I/O (64KB chunks), HMAC-SHA3-256, path normalization |
 | `error.rs` | `CryptoError` enum |
@@ -52,12 +52,13 @@ Input file/dir → archiver::archive → ZIP in temp dir
   → cleanup temp dir
 ```
 
-Decryption reverses: read header → verify HMAC → derive/decrypt keys → stream decrypt → unarchive.
+Decryption reverses: read header → derive/decrypt keys → verify HMAC → stream decrypt → unarchive. (Keys are derived first because the HMAC key comes from Argon2id+HKDF in symmetric, or from the RSA-decrypted envelope in hybrid.)
 
 ### Desktop App Structure
 
 - `ui/app.slint` — UI layout and state in Slint DSL. Defines `AppWindow` with 2 top-level tabs (Symmetric, Hybrid) and 5 internal modes (SE=0, SD=1, HE=2, HD=3, GK=4). Key generation (GK=4) is inline within the Hybrid tab via a sub-selector.
 - `src/main.rs` — Rust backend: file dialog callbacks, mode auto-detection via magic bytes, threaded crypto operations with progress updates via `slint::invoke_from_event_loop`.
+- `src/password_scorer.rs` — Password strength scoring (0–4 scale) with character-class analysis, sequence/repetition penalties, and common-password detection.
 - macOS uses native `NSOpenPanel` (via objc2) for combined file+folder picker; other platforms use `rfd`.
 
 ### File Format (v1.0)
@@ -65,7 +66,8 @@ Decryption reverses: read header → verify HMAC → derive/decrypt keys → str
 8-byte prefix: `[0xFC, type, major, minor, header_len_be16, flags_be16]`
 - Type `0x53` ('S') = symmetric, `0x48` ('H') = hybrid
 - All header fields triple-replicated for error correction
-- HMAC-SHA3-256 authenticates the entire header before decryption begins
+- HMAC-SHA3-256 authenticates the header (prefix + all fields except the HMAC tag itself)
+- Forward compatibility: a minor-version bump may append fields **after** the HMAC tag; older readers use `header_len` to skip them (`skip_unknown_header_bytes`)
 
 ## Key Conventions
 

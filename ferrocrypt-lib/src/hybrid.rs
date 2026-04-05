@@ -193,6 +193,10 @@ pub fn decrypt_file(
             CryptoError::EncryptionDecryptionError("File is too short or corrupted".to_string())
         })?;
 
+    let bytes_after_prefix =
+        encoded_encrypted_combined_key.len() + encoded_nonce.len() + encoded_hmac_tag.len();
+    format::skip_unknown_header_bytes(&mut encrypted_file, header.header_len, bytes_after_prefix)?;
+
     let encrypted_combined_key =
         rep_decode_exact(&encoded_encrypted_combined_key, rsa_key_size as usize)?;
     let nonce = rep_decode_exact(&encoded_nonce, NONCE_SIZE)?;

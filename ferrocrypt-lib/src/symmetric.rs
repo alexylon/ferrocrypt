@@ -166,7 +166,7 @@ pub fn decrypt_file(
     let tmp_dir_path = tmp_dir_path.as_ref();
     let mut encrypted_file = File::open(input_path)?;
 
-    let (prefix_bytes, _header) =
+    let (prefix_bytes, header) =
         format::read_header_from_reader(&mut encrypted_file, format::TYPE_SYMMETRIC)?;
 
     let mut encoded_salt = vec![0u8; rep_encoded_size(SALT_SIZE)];
@@ -196,6 +196,13 @@ pub fn decrypt_file(
         .map_err(|_| {
             CryptoError::EncryptionDecryptionError("File is too short or corrupted".to_string())
         })?;
+
+    let bytes_after_prefix = encoded_salt.len()
+        + encoded_hkdf_salt.len()
+        + encoded_nonce.len()
+        + encoded_key_hash.len()
+        + encoded_hmac_tag.len();
+    format::skip_unknown_header_bytes(&mut encrypted_file, header.header_len, bytes_after_prefix)?;
 
     let salt = rep_decode_exact(&encoded_salt, SALT_SIZE)?;
     let hkdf_salt = rep_decode_exact(&encoded_hkdf_salt, HKDF_SALT_SIZE)?;

@@ -76,22 +76,24 @@ pub fn archive<W: Write>(
 pub fn unarchive<R: Read>(reader: R, output_dir: &str) -> Result<String, CryptoError> {
     let mut archive = tar::Archive::new(reader);
     let mut first_entry_root: Option<String> = None;
+    let mut checked_roots: Vec<String> = Vec::new();
 
     for entry_result in archive.entries()? {
         let mut entry = entry_result?;
         let path = entry.path()?.to_path_buf();
         validate_archive_path(&path)?;
 
-        if first_entry_root.is_none() {
-            let first_component = path
-                .components()
-                .next()
-                .ok_or_else(|| CryptoError::Message("Empty archive entry".to_string()))?;
-            let root_name = first_component
-                .as_os_str()
-                .to_str()
-                .ok_or_else(|| CryptoError::Message("Invalid path in archive".to_string()))?;
+        let first_component = path
+            .components()
+            .next()
+            .ok_or_else(|| CryptoError::Message("Empty archive entry".to_string()))?;
+        let root_name = first_component
+            .as_os_str()
+            .to_str()
+            .ok_or_else(|| CryptoError::Message("Invalid path in archive".to_string()))?
+            .to_string();
 
+        if !checked_roots.contains(&root_name) {
             let full_path = normalize_paths(&format!("{}{}", output_dir, root_name), "").0;
             if Path::new(&full_path).exists() {
                 return Err(CryptoError::Message(format!(
@@ -99,7 +101,10 @@ pub fn unarchive<R: Read>(reader: R, output_dir: &str) -> Result<String, CryptoE
                     full_path
                 )));
             }
-            first_entry_root = Some(full_path);
+            if first_entry_root.is_none() {
+                first_entry_root = Some(full_path);
+            }
+            checked_roots.push(root_name);
         }
 
         let full_path = Path::new(output_dir).join(&path);
@@ -202,6 +207,53 @@ mod tests {
         assert!(validate_archive_path(Path::new("../escape.txt")).is_err());
         assert!(validate_archive_path(Path::new("dir/../../escape.txt")).is_err());
         assert!(validate_archive_path(Path::new("/etc/passwd")).is_err());
+    }
+
+    #[test]
+    fn unarchive_rejects_second_root_that_conflicts() {
+        // Craft a TAR with two top-level roots: "innocent/" and "victim.txt".
+        // Pre-create "victim.txt" in the extract dir to prove the second root
+        // is checked and the extraction is refused.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&extract_dir).unwrap();
+        fs::write(extract_dir.join("victim.txt"), "original").unwrap();
+
+        let mut buf = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut buf);
+
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_size(0);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "innocent/", &[] as &[u8])
+                .unwrap();
+
+            let data = b"malicious payload";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "victim.txt", &data[..])
+                .unwrap();
+
+            builder.finish().unwrap();
+        }
+
+        let output_dir = format!("{}/", extract_dir.display());
+        let err = unarchive(Cursor::new(buf), &output_dir).unwrap_err();
+        assert!(
+            err.to_string().contains("Output already exists"),
+            "expected conflict error, got: {err}"
+        );
+
+        // Verify the original file was NOT overwritten
+        let content = fs::read_to_string(extract_dir.join("victim.txt")).unwrap();
+        assert_eq!(content, "original");
     }
 
     #[test]

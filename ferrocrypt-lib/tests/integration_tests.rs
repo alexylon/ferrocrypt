@@ -236,6 +236,27 @@ fn test_hybrid_keygen_rejects_small_key_size() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn test_hybrid_keygen_private_key_permissions() -> Result<(), CryptoError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let test_dir = setup_test_dir("keygen_permissions");
+    let passphrase = SecretString::from("pass".to_string());
+
+    generate_asymmetric_key_pair(2048, &passphrase, test_dir.to_str().unwrap(), |_| {})?;
+
+    let priv_key = test_dir.join("rsa-2048-priv-key.pem");
+    let pub_key = test_dir.join("rsa-2048-pub-key.pem");
+    let priv_mode = fs::metadata(&priv_key)?.permissions().mode() & 0o777;
+    let pub_mode = fs::metadata(&pub_key)?.permissions().mode() & 0o777;
+
+    assert_eq!(priv_mode, 0o600, "private key should be owner-only");
+    assert_ne!(pub_mode, 0o600, "public key should not be restricted");
+
+    Ok(())
+}
+
 #[test]
 fn test_hybrid_keygen_encrypt_decrypt_file() -> Result<(), CryptoError> {
     let test_dir = setup_test_dir("hybrid_full_workflow");

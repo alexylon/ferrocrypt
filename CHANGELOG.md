@@ -36,6 +36,7 @@ All notable changes to FerroCrypt are documented in this file.
 
 ### Fixed
 - RSA key size is now validated against the minimum required for OAEP-SHA256 encryption of the 64-byte envelope. `generate_asymmetric_key_pair` rejects key sizes below 2048 bits upfront, and `encrypt_file` rejects undersized public keys with a clear error instead of a generic "not valid" message.
+- Private key files are now written with `0o600` (owner-only) permissions on POSIX systems instead of inheriting the umask default
 - HMAC header authentication now covers decoded (canonical) field values instead of raw triple-replicated bytes, so single-copy corruption recovered by majority vote no longer causes HMAC verification failure
 - `keygen` now creates missing output directories instead of failing silently
 - **Stream truncation vulnerability:** symmetric decryption had a code path that skipped the required `decrypt_last()` call, allowing an attacker to truncate ciphertext at chunk boundaries without detection. Now all final chunks go through `decrypt_last`, which verifies the STREAM terminator.

@@ -325,10 +325,14 @@ pub fn generate_asymmetric_key_pair(
     let private_key_path = output_dir.join(format!("rsa-{}-priv-key.pem", bit_size));
     let public_key_path = output_dir.join(format!("rsa-{}-pub-key.pem", bit_size));
 
-    let mut private_key_file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&private_key_path)?;
+    let mut private_key_opts = OpenOptions::new();
+    private_key_opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        private_key_opts.mode(0o600);
+    }
+    let mut private_key_file = private_key_opts.open(&private_key_path)?;
     private_key_file.write_all(&private_key)?;
 
     let mut public_key_file = OpenOptions::new()

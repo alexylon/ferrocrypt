@@ -119,8 +119,7 @@ export component AppWindow inherits Window {
         || (mode == 1 && (inpath == "" || password == ""))
         || (mode == 2 && (inpath == "" || keypath == ""))
         || (mode == 3 && (inpath == "" || password == "" || keypath == ""))
-        || (mode == 4 && (inpath == "" || outpath == ""
-            || keygen-outdir == "" || password == ""
+        || (mode == 4 && (keygen-outdir == "" || password == ""
             || (require-password-repeated && !password-match)));
     property <bool> is-encrypt-mode: mode == 0 || mode == 2 || mode == 4;
     property <bool> form-is-clean:

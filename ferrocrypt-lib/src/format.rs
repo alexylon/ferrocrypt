@@ -169,6 +169,12 @@ fn validate_header_bytes(
         ));
     }
     let flags = u16::from_be_bytes([prefix[6], prefix[7]]);
+    if flags != 0 {
+        return Err(CryptoError::EncryptionDecryptionError(format!(
+            "Unknown header flags (0x{:04X}). Upgrade FerroCrypt.",
+            flags
+        )));
+    }
 
     Ok(FileHeader {
         format_type: prefix[1],
@@ -257,10 +263,18 @@ pub fn validate_key_file_header(
         )));
     }
     let data_len = u16::from_be_bytes([data[4], data[5]]) as usize;
-    if data_len < expected_data_size {
-        return Err(CryptoError::EncryptionDecryptionError(
-            "Key file is corrupted (data length too small)".to_string(),
-        ));
+    if data_len != expected_data_size {
+        return Err(CryptoError::EncryptionDecryptionError(format!(
+            "Key file has unexpected data length ({}, expected {})",
+            data_len, expected_data_size
+        )));
+    }
+    let flags = u16::from_be_bytes([data[6], data[7]]);
+    if flags != 0 {
+        return Err(CryptoError::EncryptionDecryptionError(format!(
+            "Unknown key file flags (0x{:04X}). Upgrade FerroCrypt.",
+            flags
+        )));
     }
     if data.len() < KEY_FILE_HEADER_SIZE + data_len {
         return Err(CryptoError::EncryptionDecryptionError(

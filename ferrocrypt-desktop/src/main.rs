@@ -5,15 +5,14 @@ slint::include_modules!();
 
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
-    EncryptionMode, default_encrypted_filename, detect_encryption_mode,
-    generate_asymmetric_key_pair, hybrid_encryption, symmetric_encryption,
+    EncryptionMode, default_encrypted_filename, detect_encryption_mode, generate_key_pair,
+    hybrid_encryption, symmetric_encryption,
 };
 use std::path::{Path, PathBuf};
 
 mod password_scorer;
 
 const ELIDE: usize = 52;
-const RSA_KEY_BITS: u32 = 4096;
 
 #[cfg(target_os = "macos")]
 fn pick_file_or_folder() -> Option<PathBuf> {
@@ -65,7 +64,7 @@ fn main() {
         let weak = app.as_weak();
         move || {
             let Some(path) = rfd::FileDialog::new()
-                .add_filter("PEM files", &["pem"])
+                .add_filter("Key files", &["key"])
                 .pick_file()
             else {
                 return;
@@ -199,9 +198,7 @@ fn main() {
                         output_file.as_deref(),
                         &on_progress,
                     ),
-                    4 => {
-                        generate_asymmetric_key_pair(RSA_KEY_BITS, &pwd, &output_dir, &on_progress)
-                    }
+                    4 => generate_key_pair(&pwd, &output_dir, &on_progress),
                     _ => unreachable!(),
                 };
 
@@ -317,11 +314,11 @@ fn check_conflicts(app: &AppWindow) {
     if mode == 4 && warning.is_empty() {
         let kg_dir = app.get_keygen_outdir().to_string();
         if !kg_dir.is_empty() {
-            let priv_exists = Path::new(&priv_key_path(&kg_dir)).exists();
+            let secret_exists = Path::new(&priv_key_path(&kg_dir)).exists();
             let pub_exists = Path::new(&pub_key_path(&kg_dir)).exists();
-            warning = match (priv_exists, pub_exists) {
+            warning = match (secret_exists, pub_exists) {
                 (true, true) => "Key pair already exists in output directory".into(),
-                (true, false) => "Private key already exists in output directory".into(),
+                (true, false) => "Secret key already exists in output directory".into(),
                 (false, true) => "Public key already exists in output directory".into(),
                 _ => String::new(),
             };
@@ -357,11 +354,11 @@ fn clear_fields(app: &AppWindow) {
 }
 
 fn pub_key_path(dir: &str) -> String {
-    format!("{dir}/rsa-{RSA_KEY_BITS}-pub-key.pem")
+    format!("{dir}/public.key")
 }
 
 fn priv_key_path(dir: &str) -> String {
-    format!("{dir}/rsa-{RSA_KEY_BITS}-priv-key.pem")
+    format!("{dir}/secret.key")
 }
 
 fn path_to_string(path: &Path) -> String {

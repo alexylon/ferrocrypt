@@ -264,8 +264,8 @@ export component AppWindow inherits Window {
         Rectangle { height: 6px; }
         Text {
             text: mode == 0 || mode == 1 ? "Password-based encryption" :
-                  mode == 4 ? "Generate RSA-4096 key pair" :
-                  "Public/private key encryption";
+                  mode == 4 ? "Generate key pair" :
+                  "Public/secret key encryption";
             color: Theme.text-dim;
             font-size: 11.5px;
             horizontal-alignment: center;
@@ -495,7 +495,7 @@ export component AppWindow inherits Window {
             Rectangle { height: Theme.field-gap; }
 
             Text {
-                text: mode == 3 || mode == 4 ? "Private key password" : "Password";
+                text: mode == 3 || mode == 4 ? "Secret key password" : "Password";
                 color: Theme.text-secondary;
                 font-size: Theme.label-size;
             }
@@ -648,7 +648,7 @@ export component AppWindow inherits Window {
             Rectangle { height: 8px; }
 
             Text {
-                text: mode == 4 ? "Confirm private key password" : "Confirm password";
+                text: mode == 4 ? "Confirm secret key password" : "Confirm password";
                 color: Theme.text-secondary;
                 font-size: Theme.label-size;
             }
@@ -710,13 +710,13 @@ export component AppWindow inherits Window {
             }
         }
 
-        // ═══════════ RSA KEY (HE, HD) ═══════════
+        // ═══════════ KEY FILE (HE, HD) ═══════════
         if require-key : VerticalLayout {
             spacing: 0px;
             Rectangle { height: Theme.field-gap; }
 
             Text {
-                text: mode == 2 ? "Public key (PEM)" : "Private key (PEM)";
+                text: mode == 2 ? "Public key" : "Secret key";
                 color: Theme.text-secondary;
                 font-size: Theme.label-size;
             }
@@ -749,7 +749,7 @@ export component AppWindow inherits Window {
                         vertical-alignment: center;
                         text: keypath != "" ? keypath-display :
                               (mode == 2 ? "Select public key\u{2026}" :
-                               "Select private key\u{2026}");
+                               "Select secret key\u{2026}");
                         color: keypath != "" ? Theme.text : Theme.text-disabled;
                         font-size: Theme.field-text-size;
                         overflow: elide;

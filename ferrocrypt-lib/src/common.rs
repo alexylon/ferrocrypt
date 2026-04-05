@@ -11,6 +11,22 @@ use crate::CryptoError;
 
 type HmacSha3_256 = Hmac<Sha3_256>;
 
+pub fn argon2_config() -> argon2::Config<'static> {
+    let (mem_cost, time_cost) = if cfg!(debug_assertions) {
+        (8192, 1)
+    } else {
+        (1048576, 4)
+    };
+    argon2::Config {
+        variant: argon2::Variant::Argon2id,
+        hash_length: 32,
+        lanes: 4,
+        mem_cost,
+        time_cost,
+        ..Default::default()
+    }
+}
+
 /// Streaming I/O buffer size.
 pub const BUFFER_SIZE: usize = 65536;
 /// Poly1305 authentication tag size in bytes.

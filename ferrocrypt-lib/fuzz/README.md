@@ -15,7 +15,7 @@ cargo install cargo-fuzz
 | Target | What it exercises |
 |---|---|
 | `fuzz_symmetric_decrypt` | Feeds arbitrary bytes as a `.fcr` file into `symmetric_encryption` (decrypt path) |
-| `fuzz_hybrid_decrypt` | Same for `hybrid_encryption`, with a one-time 2048-bit RSA keypair |
+| `fuzz_hybrid_decrypt` | Same for `hybrid_encryption`, with a one-time X25519 keypair |
 
 ## Running
 

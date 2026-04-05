@@ -2,7 +2,6 @@ use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::Path;
 
-use argon2::Variant;
 use chacha20poly1305::{
     XChaCha20Poly1305,
     aead::{KeyInit, OsRng, rand_core::RngCore, stream},
@@ -24,7 +23,6 @@ const SALT_SIZE: usize = 32;
 const HKDF_SALT_SIZE: usize = 32;
 const KEY_SIZE: usize = 32;
 const HMAC_KEY_SIZE: usize = 32;
-const ARGON2_OUTPUT_SIZE: usize = 32;
 const HKDF_INFO_ENC: &[u8] = b"ferrocrypt-enc";
 const HKDF_INFO_HMAC: &[u8] = b"ferrocrypt-hmac";
 
@@ -36,7 +34,7 @@ fn derive_keys(
     salt: &[u8],
     hkdf_salt: &[u8],
 ) -> Result<(Zeroizing<[u8; KEY_SIZE]>, Zeroizing<[u8; HMAC_KEY_SIZE]>), CryptoError> {
-    let argon2_config = argon2_config();
+    let argon2_config = crate::common::argon2_config();
     let ikm = Zeroizing::new(argon2::hash_raw(
         passphrase.expose_secret().as_bytes(),
         salt,
@@ -246,20 +244,4 @@ pub fn decrypt_file(
     println!("{}", result);
 
     Ok(result)
-}
-
-fn argon2_config() -> argon2::Config<'static> {
-    let (mem_cost, time_cost) = if cfg!(debug_assertions) {
-        (8192, 1)
-    } else {
-        (1048576, 4)
-    };
-    argon2::Config {
-        variant: Variant::Argon2id,
-        hash_length: ARGON2_OUTPUT_SIZE as u32,
-        lanes: 4,
-        mem_cost,
-        time_cost,
-        ..Default::default()
-    }
 }

@@ -31,21 +31,21 @@
 //!
 //! ## Quick start (hybrid path, mirrors `ferrocrypt hybrid` CLI)
 //! ```rust,no_run
-//! use ferrocrypt::{generate_asymmetric_key_pair, hybrid_encryption, CryptoError, secrecy::SecretString};
+//! use ferrocrypt::{generate_key_pair, hybrid_encryption, CryptoError, secrecy::SecretString};
 //!
 //! # fn run() -> Result<(), CryptoError> {
-//! // 1) Generate RSA keypair files under ./keys
-//! //    The passphrase encrypts the private key file itself
+//! // 1) Generate X25519 keypair files under ./keys
+//! //    The passphrase encrypts the secret key file at rest
 //! let passphrase = SecretString::from("my-key-pass".to_string());
-//! let _msg = generate_asymmetric_key_pair(4096, &passphrase, "./keys", |_| {})?;
+//! let _msg = generate_key_pair(&passphrase, "./keys", |_| {})?;
 //!
 //! // 2) Encrypt to out/payload.fcr using the public key (no passphrase needed)
 //! let empty_passphrase = SecretString::from("".to_string());
-//! let produced = hybrid_encryption("./payload", "./out", "./keys/rsa-4096-pub-key.pem", &empty_passphrase, None, |_| {})?;
+//! let produced = hybrid_encryption("./payload", "./out", "./keys/public.key", &empty_passphrase, None, |_| {})?;
 //! println!("wrote {produced}");
 //!
-//! // 3) Decrypt out/payload.fcr using the private key + passphrase to unlock it
-//! let restored = hybrid_encryption("./out/payload.fcr", "./restored", "./keys/rsa-4096-priv-key.pem", &passphrase, None, |_| {})?;
+//! // 3) Decrypt out/payload.fcr using the secret key + passphrase to unlock it
+//! let restored = hybrid_encryption("./out/payload.fcr", "./restored", "./keys/secret.key", &passphrase, None, |_| {})?;
 //! println!("restored to {restored}");
 //! # Ok(()) }
 //! # fn main() { run().unwrap(); }
@@ -57,7 +57,7 @@
 //!   Produces `.fcr` files.
 //! - **Hybrid**: Safer for distribution—encrypt with a recipient's public key
 //!   (no password needed for encryption); only their passphrase-protected
-//!   private key can decrypt. Each file gets a unique random key. Produces
+//!   secret key can decrypt. Each file gets a unique random key. Produces
 //!   `.fcr` files.
 //!
 //! ## Security notes
@@ -175,16 +175,16 @@ pub fn symmetric_encryption(
     }
 }
 
-/// Encrypt or decrypt using hybrid (RSA + XChaCha20-Poly1305) envelope encryption.
+/// Encrypt or decrypt using hybrid (X25519 + XChaCha20-Poly1305) envelope encryption.
 ///
-/// - `rsa_key_pem` is a **file path** to the PEM key (not the PEM contents).
+/// - `key_file` is a **file path** to the key (not the key contents).
 /// - **Encrypt** when `input_path` is not a FerroCrypt file: uses the public
-///   key file at `rsa_key_pem` to seal a random symmetric key, producing
+///   key file at `key_file` to seal a random symmetric key, producing
 ///   `<name>.fcr`. The `passphrase` parameter is **ignored during encryption**
 ///   (pass empty string).
 /// - **Decrypt** when `input_path` is a FerroCrypt hybrid file: uses the
-///   private key file at `rsa_key_pem`. The `passphrase` is **required** to
-///   decrypt the private key file (must match the passphrase used when
+///   secret key file at `key_file`. The `passphrase` is **required** to
+///   decrypt the secret key file (must match the passphrase used when
 ///   generating the keypair).
 ///
 /// `save_as` overrides the output file path during encryption (ignored for
@@ -197,16 +197,16 @@ pub fn symmetric_encryption(
 ///
 /// let empty = SecretString::from("".to_string());
 /// // Encrypt
-/// let result = hybrid_encryption("./secrets", "./encrypted", "./keys/rsa-4096-pub-key.pem", &empty, None, |_| {})?;
+/// let result = hybrid_encryption("./secrets", "./encrypted", "./keys/public.key", &empty, None, |_| {})?;
 /// // Decrypt
 /// let passphrase = SecretString::from("my-key-passphrase".to_string());
-/// let result = hybrid_encryption("./encrypted/secrets.fcr", "./decrypted", "./keys/rsa-4096-priv-key.pem", &passphrase, None, |_| {})?;
+/// let result = hybrid_encryption("./encrypted/secrets.fcr", "./decrypted", "./keys/secret.key", &passphrase, None, |_| {})?;
 /// # Ok::<(), ferrocrypt::CryptoError>(())
 /// ```
 pub fn hybrid_encryption(
     input_path: &str,
     output_dir: &str,
-    rsa_key_pem: &str,
+    key_file: &str,
     passphrase: &SecretString,
     save_as: Option<&str>,
     on_progress: impl Fn(&str),
@@ -215,39 +215,35 @@ pub fn hybrid_encryption(
     let (input, output) = validate_paths(input_path, output_dir)?;
     if detect_encryption_mode(&input).is_some() || input.ends_with(format::ENCRYPTED_DOT_EXTENSION)
     {
-        hybrid::decrypt_file(&input, &output, rsa_key_pem, passphrase, &on_progress)
+        hybrid::decrypt_file(&input, &output, key_file, passphrase, &on_progress)
     } else {
-        hybrid::encrypt_file(&input, &output, rsa_key_pem, save_as_path, &on_progress)
+        hybrid::encrypt_file(&input, &output, key_file, save_as_path, &on_progress)
     }
 }
 
-/// Generate and store an RSA key pair for hybrid encryption (default: RSA-4096).
+/// Generate and store an X25519 key pair for hybrid encryption.
 ///
-/// - `bit_size` is the RSA modulus size in **bits** (e.g., 4096),
-///   aligned with the CLI flag `--bit-size`.
-/// - Keys are written into `output_dir` as `rsa-<bits>-priv-key.pem` and
-///   `rsa-<bits>-pub-key.pem`.
-/// - The `passphrase` **encrypts the private key file** for protection at rest;
-///   the same passphrase is needed later when decrypting. The public key file
-///   is unencrypted.
+/// - Keys are written into `output_dir` as `secret.key` and `public.key`.
+/// - The `passphrase` **encrypts the secret key file** for protection at rest
+///   (via Argon2id + XChaCha20-Poly1305); the same passphrase is needed later
+///   when decrypting. The public key file is unencrypted.
 ///
 /// `on_progress` receives stage descriptions at each major step.
 ///
 /// # Examples
 ///
 /// ```no_run
-/// use ferrocrypt::{generate_asymmetric_key_pair, secrecy::SecretString};
+/// use ferrocrypt::{generate_key_pair, secrecy::SecretString};
 ///
-/// let passphrase = SecretString::from("protect-my-private-key".to_string());
-/// let result = generate_asymmetric_key_pair(4096, &passphrase, "./my_keys", |_| {})?;
+/// let passphrase = SecretString::from("protect-my-secret-key".to_string());
+/// let result = generate_key_pair(&passphrase, "./my_keys", |_| {})?;
 /// # Ok::<(), ferrocrypt::CryptoError>(())
 /// ```
-pub fn generate_asymmetric_key_pair(
-    bit_size: u32,
+pub fn generate_key_pair(
     passphrase: &SecretString,
     output_dir: &str,
     on_progress: impl Fn(&str),
 ) -> Result<String, CryptoError> {
     let normalized_output_dir = normalize_paths("", output_dir).1;
-    hybrid::generate_asymmetric_key_pair(bit_size, passphrase, &normalized_output_dir, &on_progress)
+    hybrid::generate_key_pair(passphrase, &normalized_output_dir, &on_progress)
 }

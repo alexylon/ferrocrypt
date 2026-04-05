@@ -4,19 +4,15 @@ use std::path::Path;
 
 use chacha20poly1305::{
     XChaCha20Poly1305,
-    aead::{KeyInit, OsRng, rand_core::RngCore, stream},
+    aead::{Aead, KeyInit, OsRng, rand_core::RngCore, stream},
 };
-use openssl::encrypt::{Decrypter, Encrypter};
-use openssl::hash::MessageDigest;
-use openssl::pkey::{PKey, Private};
-use openssl::rsa::{Padding, Rsa};
-use openssl::symm::Cipher;
+use crypto_box::{ChaChaBox, PublicKey, SecretKey, aead::AeadCore};
 use secrecy::{ExposeSecret, SecretString};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::common::{
-    DecryptReader, EncryptWriter, NONCE_SIZE, get_duration, get_file_stem_to_string, hmac_sha3_256,
-    hmac_sha3_256_verify,
+    DecryptReader, EncryptWriter, NONCE_SIZE, argon2_config, get_duration, get_file_stem_to_string,
+    hmac_sha3_256, hmac_sha3_256_verify,
 };
 use crate::format::{self, HEADER_PREFIX_SIZE};
 use crate::replication::{rep_decode_exact, rep_encode, rep_encoded_size};
@@ -24,17 +20,30 @@ use crate::{CryptoError, archiver};
 
 const KEY_SIZE: usize = 32;
 const HMAC_KEY_SIZE: usize = 32;
-// Both keys are packed into a single RSA envelope: [enc_key | hmac_key]
+// Both keys are packed into a single envelope: [enc_key | hmac_key]
 const COMBINED_KEY_SIZE: usize = KEY_SIZE + HMAC_KEY_SIZE;
-// OAEP-SHA256 requires modulus_bytes >= payload + 2*hash_len + 2.
-// For COMBINED_KEY_SIZE=64: 64 + 64 + 2 = 130 bytes = 1040 bits.
-// We enforce 2048 bits as the security-practical minimum.
-const MIN_RSA_BITS: u32 = 2048;
+
+const EPHEMERAL_PUB_SIZE: usize = 32;
+const ENVELOPE_NONCE_SIZE: usize = 24;
+const ENVELOPE_TAG_SIZE: usize = 16;
+const ENVELOPE_CIPHERTEXT_SIZE: usize = COMBINED_KEY_SIZE + ENVELOPE_TAG_SIZE;
+const ENVELOPE_SIZE: usize = EPHEMERAL_PUB_SIZE + ENVELOPE_NONCE_SIZE + ENVELOPE_CIPHERTEXT_SIZE;
+
+const PUBLIC_KEY_FILE_SIZE: usize = 32;
+const ARGON2_SALT_SIZE: usize = 32;
+const SECRET_KEY_NONCE_SIZE: usize = 24;
+const SECRET_KEY_TAG_SIZE: usize = 16;
+const SECRET_KEY_SIZE: usize = 32;
+const SECRET_KEY_FILE_SIZE: usize =
+    ARGON2_SALT_SIZE + SECRET_KEY_NONCE_SIZE + SECRET_KEY_SIZE + SECRET_KEY_TAG_SIZE;
+
+const PUBLIC_KEY_FILENAME: &str = "public.key";
+const SECRET_KEY_FILENAME: &str = "secret.key";
 
 pub fn encrypt_file(
     input_path: &str,
     output_dir: &str,
-    rsa_public_pem: impl AsRef<Path>,
+    public_key_path: impl AsRef<Path>,
     output_file: Option<&Path>,
     on_progress: &dyn Fn(&str),
 ) -> Result<String, CryptoError> {
@@ -58,16 +67,8 @@ pub fn encrypt_file(
         combined_key[..KEY_SIZE].copy_from_slice(&symmetric_key);
         combined_key[KEY_SIZE..].copy_from_slice(&hmac_key);
 
-        let pub_key_str = fs::read_to_string(rsa_public_pem)?;
-        let encrypted_combined_key: Vec<u8> = match encrypt_key(&combined_key, &pub_key_str) {
-            Ok(encrypted_combined_key) => encrypted_combined_key,
-            Err(e @ CryptoError::EncryptionDecryptionError(_)) => return Err(e),
-            Err(_) => {
-                return Err(CryptoError::EncryptionDecryptionError(
-                    "The provided public key is not valid".to_string(),
-                ));
-            }
-        };
+        let recipient_public = read_public_key(&public_key_path)?;
+        let envelope = seal_envelope(&combined_key, &recipient_public)?;
 
         let output_path = match output_file {
             Some(path) => path.to_path_buf(),
@@ -89,27 +90,26 @@ pub fn encrypt_file(
             .create_new(true)
             .open(&output_path)?;
 
-        let encoded_encrypted_combined_key = rep_encode(&encrypted_combined_key);
+        let encoded_envelope = rep_encode(&envelope);
         let encoded_nonce = rep_encode(&nonce);
 
         let header_len = (HEADER_PREFIX_SIZE
-            + encoded_encrypted_combined_key.len()
+            + encoded_envelope.len()
             + encoded_nonce.len()
             + rep_encoded_size(HMAC_KEY_SIZE)) as u16;
         let prefix = format::build_header_prefix(format::TYPE_HYBRID, 0, header_len);
 
         let stream_encryptor = stream::EncryptorBE32::from_aead(cipher, nonce.as_ref().into());
 
-        let mut hmac_message =
-            Vec::with_capacity(prefix.len() + encrypted_combined_key.len() + nonce.len());
+        let mut hmac_message = Vec::with_capacity(prefix.len() + envelope.len() + nonce.len());
         hmac_message.extend_from_slice(&prefix);
-        hmac_message.extend_from_slice(&encrypted_combined_key);
+        hmac_message.extend_from_slice(&envelope);
         hmac_message.extend_from_slice(&nonce);
         let hmac_tag = hmac_sha3_256(&hmac_key, &hmac_message)?;
         let encoded_hmac_tag = rep_encode(&hmac_tag);
 
         dest.write_all(&prefix)?;
-        dest.write_all(&encoded_encrypted_combined_key)?;
+        dest.write_all(&encoded_envelope)?;
         dest.write_all(&encoded_nonce)?;
         dest.write_all(&encoded_hmac_tag)?;
 
@@ -137,27 +137,16 @@ pub fn encrypt_file(
 pub fn decrypt_file(
     input_path: &str,
     output_dir: &str,
-    rsa_private_pem: &str,
+    secret_key_path: &str,
     passphrase: &SecretString,
     on_progress: &dyn Fn(&str),
 ) -> Result<String, CryptoError> {
     let start_time = std::time::Instant::now();
 
-    // Zeroizing wraps the PEM content so it's cleared on all exit paths
-    let priv_key_str = Zeroizing::new(fs::read_to_string(&rsa_private_pem)?);
-
     println!("\nDecrypting ...");
     on_progress("Decrypting\u{2026}");
 
-    let rsa_key_size =
-        match get_public_key_size_from_private_key(&priv_key_str, passphrase.expose_secret()) {
-            Ok(rsa_key_size) => rsa_key_size,
-            Err(_) => {
-                return Err(CryptoError::EncryptionDecryptionError(
-                    "Incorrect password or wrong private key provided".to_string(),
-                ));
-            }
-        };
+    let recipient_secret = read_secret_key(secret_key_path, passphrase)?;
 
     let mut encrypted_file = std::fs::File::open(input_path)?;
 
@@ -165,7 +154,7 @@ pub fn decrypt_file(
         format::read_header_from_reader(&mut encrypted_file, format::TYPE_HYBRID)?;
 
     let min_header_size = HEADER_PREFIX_SIZE
-        + rep_encoded_size(rsa_key_size as usize)
+        + rep_encoded_size(ENVELOPE_SIZE)
         + rep_encoded_size(NONCE_SIZE)
         + rep_encoded_size(HMAC_KEY_SIZE);
     if (header.header_len as usize) < min_header_size {
@@ -174,12 +163,12 @@ pub fn decrypt_file(
         ));
     }
 
-    let mut encoded_encrypted_combined_key = vec![0u8; rep_encoded_size(rsa_key_size as usize)];
+    let mut encoded_envelope = vec![0u8; rep_encoded_size(ENVELOPE_SIZE)];
     let mut encoded_nonce = vec![0u8; rep_encoded_size(NONCE_SIZE)];
     let mut encoded_hmac_tag = vec![0u8; rep_encoded_size(HMAC_KEY_SIZE)];
 
     encrypted_file
-        .read_exact(&mut encoded_encrypted_combined_key)
+        .read_exact(&mut encoded_envelope)
         .map_err(|_| {
             CryptoError::EncryptionDecryptionError("File is too short or corrupted".to_string())
         })?;
@@ -192,29 +181,26 @@ pub fn decrypt_file(
             CryptoError::EncryptionDecryptionError("File is too short or corrupted".to_string())
         })?;
 
-    let bytes_after_prefix =
-        encoded_encrypted_combined_key.len() + encoded_nonce.len() + encoded_hmac_tag.len();
+    let bytes_after_prefix = encoded_envelope.len() + encoded_nonce.len() + encoded_hmac_tag.len();
     format::skip_unknown_header_bytes(&mut encrypted_file, header.header_len, bytes_after_prefix)?;
 
-    let encrypted_combined_key =
-        rep_decode_exact(&encoded_encrypted_combined_key, rsa_key_size as usize)?;
+    let envelope_vec = rep_decode_exact(&encoded_envelope, ENVELOPE_SIZE)?;
     let nonce = rep_decode_exact(&encoded_nonce, NONCE_SIZE)?;
     let hmac_tag = rep_decode_exact(&encoded_hmac_tag, HMAC_KEY_SIZE)?;
 
-    let mut decrypted_combined_key = decrypt_key(
-        &encrypted_combined_key,
-        &priv_key_str,
-        passphrase.expose_secret(),
-    )?;
+    let envelope: [u8; ENVELOPE_SIZE] = envelope_vec.as_slice().try_into().map_err(|_| {
+        CryptoError::EncryptionDecryptionError("Envelope has unexpected length".to_string())
+    })?;
 
-    // Closure captures the result so zeroization always runs after it
+    let mut decrypted_combined_key = open_envelope(&envelope, &recipient_secret)?;
+
     let result = (|| -> Result<String, CryptoError> {
         let hmac_key = &decrypted_combined_key[KEY_SIZE..COMBINED_KEY_SIZE];
 
         let mut hmac_message =
-            Vec::with_capacity(prefix_bytes.len() + encrypted_combined_key.len() + nonce.len());
+            Vec::with_capacity(prefix_bytes.len() + envelope.len() + nonce.len());
         hmac_message.extend_from_slice(&prefix_bytes);
-        hmac_message.extend_from_slice(&encrypted_combined_key);
+        hmac_message.extend_from_slice(&envelope);
         hmac_message.extend_from_slice(&nonce);
         hmac_sha3_256_verify(hmac_key, &hmac_message, &hmac_tag)?;
 
@@ -238,113 +224,195 @@ pub fn decrypt_file(
     result
 }
 
-fn get_public_key_size_from_private_key(
-    rsa_private_pem: &str,
-    passphrase: &str,
-) -> Result<u32, CryptoError> {
-    let rsa_private =
-        Rsa::private_key_from_pem_passphrase(rsa_private_pem.as_bytes(), passphrase.as_bytes())?;
-    let rsa_public_pem: Vec<u8> = rsa_private.public_key_to_pem()?;
-    let rsa_public = Rsa::public_key_from_pem(&rsa_public_pem)?;
-
-    Ok(rsa_public.size())
-}
-
-fn encrypt_key(key_data: &[u8], rsa_public_pem: &str) -> Result<Vec<u8>, CryptoError> {
-    let rsa = Rsa::public_key_from_pem(rsa_public_pem.as_bytes())?;
-    let key_bits = rsa.size() * 8;
-    if key_bits < MIN_RSA_BITS {
+fn read_public_key(path: impl AsRef<Path>) -> Result<PublicKey, CryptoError> {
+    let data = fs::read(path.as_ref())?;
+    if data.len() == SECRET_KEY_FILE_SIZE {
+        return Err(CryptoError::EncryptionDecryptionError(
+            "Expected a public key file but got a secret key file. \
+             Use the public.key file for encryption."
+                .to_string(),
+        ));
+    }
+    if data.len() != PUBLIC_KEY_FILE_SIZE {
         return Err(CryptoError::EncryptionDecryptionError(format!(
-            "RSA public key is {key_bits} bits, which is too small for OAEP encryption \
-             of the {COMBINED_KEY_SIZE}-byte envelope (minimum is {MIN_RSA_BITS} bits)"
+            "Invalid public key file: expected {} bytes, got {}",
+            PUBLIC_KEY_FILE_SIZE,
+            data.len()
         )));
     }
-    let pkey = PKey::from_rsa(rsa)?;
-    let mut encrypter = Encrypter::new(&pkey)?;
-    encrypter.set_rsa_padding(Padding::PKCS1_OAEP)?;
-    encrypter.set_rsa_oaep_md(MessageDigest::sha256())?;
-    encrypter.set_rsa_mgf1_md(MessageDigest::sha256())?;
-    let buf_len = encrypter.encrypt_len(key_data)?;
-    let mut buf = vec![0u8; buf_len];
-    let len = encrypter.encrypt(key_data, &mut buf)?;
-    buf.truncate(len);
-
-    Ok(buf)
+    let bytes: [u8; PUBLIC_KEY_FILE_SIZE] = data.as_slice().try_into().map_err(|_| {
+        CryptoError::EncryptionDecryptionError("Invalid public key file".to_string())
+    })?;
+    Ok(PublicKey::from(bytes))
 }
 
-fn decrypt_key(
-    encrypted_key: &[u8],
-    rsa_private_pem: &str,
-    passphrase: &str,
-) -> Result<[u8; COMBINED_KEY_SIZE], CryptoError> {
-    let rsa =
-        Rsa::private_key_from_pem_passphrase(rsa_private_pem.as_bytes(), passphrase.as_bytes())?;
-    let pkey = PKey::from_rsa(rsa)?;
-    let mut decrypter = Decrypter::new(&pkey)?;
-    decrypter.set_rsa_padding(Padding::PKCS1_OAEP)?;
-    decrypter.set_rsa_oaep_md(MessageDigest::sha256())?;
-    decrypter.set_rsa_mgf1_md(MessageDigest::sha256())?;
-    let buf_len = decrypter.decrypt_len(encrypted_key)?;
-    let mut buf = vec![0u8; buf_len];
-    let len = decrypter.decrypt(encrypted_key, &mut buf)?;
-    if len != COMBINED_KEY_SIZE {
-        buf.zeroize();
+fn read_secret_key(
+    path: impl AsRef<Path>,
+    passphrase: &SecretString,
+) -> Result<SecretKey, CryptoError> {
+    let data = fs::read(path.as_ref())?;
+    if data.len() == PUBLIC_KEY_FILE_SIZE {
         return Err(CryptoError::EncryptionDecryptionError(
-            "RSA-decrypted key has unexpected length".to_string(),
+            "Expected a secret key file but got a public key file. \
+             Use the secret.key file for decryption."
+                .to_string(),
+        ));
+    }
+    if data.len() != SECRET_KEY_FILE_SIZE {
+        return Err(CryptoError::EncryptionDecryptionError(format!(
+            "Invalid secret key file: expected {} bytes, got {}",
+            SECRET_KEY_FILE_SIZE,
+            data.len()
+        )));
+    }
+
+    let salt = &data[..ARGON2_SALT_SIZE];
+    let nonce = chacha20poly1305::XNonce::from_slice(
+        &data[ARGON2_SALT_SIZE..ARGON2_SALT_SIZE + SECRET_KEY_NONCE_SIZE],
+    );
+    let ciphertext = &data[ARGON2_SALT_SIZE + SECRET_KEY_NONCE_SIZE..];
+
+    let config = argon2_config();
+    let mut derived_key = Zeroizing::new(
+        argon2::hash_raw(passphrase.expose_secret().as_bytes(), salt, &config)
+            .map_err(CryptoError::Argon2Error)?,
+    );
+
+    let cipher = XChaCha20Poly1305::new(derived_key.as_slice().into());
+    let plaintext = cipher.decrypt(nonce, ciphertext).map_err(|_| {
+        CryptoError::EncryptionDecryptionError(
+            "Incorrect password or wrong secret key provided".to_string(),
+        )
+    })?;
+
+    derived_key.zeroize();
+
+    let mut secret_bytes: [u8; SECRET_KEY_SIZE] =
+        plaintext.as_slice().try_into().map_err(|_| {
+            CryptoError::EncryptionDecryptionError(
+                "Decrypted key has unexpected length".to_string(),
+            )
+        })?;
+    let mut plaintext = plaintext;
+    plaintext.zeroize();
+
+    let key = SecretKey::from(secret_bytes);
+    secret_bytes.zeroize();
+    Ok(key)
+}
+
+fn seal_envelope(
+    combined_key: &[u8],
+    recipient_public: &PublicKey,
+) -> Result<[u8; ENVELOPE_SIZE], CryptoError> {
+    let ephemeral_secret = SecretKey::generate(&mut OsRng);
+    let ephemeral_public = ephemeral_secret.public_key();
+    let chacha_box = ChaChaBox::new(recipient_public, &ephemeral_secret);
+    let nonce = ChaChaBox::generate_nonce(&mut OsRng);
+    let ciphertext = chacha_box.encrypt(&nonce, combined_key).map_err(|_| {
+        CryptoError::EncryptionDecryptionError("Envelope encryption failed".to_string())
+    })?;
+
+    let mut envelope = [0u8; ENVELOPE_SIZE];
+    envelope[..EPHEMERAL_PUB_SIZE].copy_from_slice(ephemeral_public.as_bytes());
+    envelope[EPHEMERAL_PUB_SIZE..EPHEMERAL_PUB_SIZE + ENVELOPE_NONCE_SIZE].copy_from_slice(&nonce);
+    envelope[EPHEMERAL_PUB_SIZE + ENVELOPE_NONCE_SIZE..].copy_from_slice(&ciphertext);
+    Ok(envelope)
+}
+
+fn open_envelope(
+    envelope: &[u8; ENVELOPE_SIZE],
+    recipient_secret: &SecretKey,
+) -> Result<[u8; COMBINED_KEY_SIZE], CryptoError> {
+    let ephemeral_public =
+        PublicKey::from_slice(&envelope[..EPHEMERAL_PUB_SIZE]).map_err(|_| {
+            CryptoError::EncryptionDecryptionError(
+                "Invalid ephemeral public key in envelope".to_string(),
+            )
+        })?;
+    let nonce = chacha20poly1305::XNonce::from_slice(
+        &envelope[EPHEMERAL_PUB_SIZE..EPHEMERAL_PUB_SIZE + ENVELOPE_NONCE_SIZE],
+    );
+    let ciphertext = &envelope[EPHEMERAL_PUB_SIZE + ENVELOPE_NONCE_SIZE..];
+
+    let chacha_box = ChaChaBox::new(&ephemeral_public, recipient_secret);
+    let mut plaintext = chacha_box.decrypt(nonce, ciphertext).map_err(|_| {
+        CryptoError::EncryptionDecryptionError(
+            "Envelope decryption failed: wrong key or corrupted data".to_string(),
+        )
+    })?;
+
+    if plaintext.len() != COMBINED_KEY_SIZE {
+        plaintext.zeroize();
+        return Err(CryptoError::EncryptionDecryptionError(
+            "Decrypted envelope has unexpected length".to_string(),
         ));
     }
 
     let mut result = [0u8; COMBINED_KEY_SIZE];
-    result.copy_from_slice(&buf[..COMBINED_KEY_SIZE]);
-    buf.zeroize();
-
+    result.copy_from_slice(&plaintext);
+    plaintext.zeroize();
     Ok(result)
 }
 
-pub fn generate_asymmetric_key_pair(
-    bit_size: u32,
+pub fn generate_key_pair(
     passphrase: &SecretString,
     output_dir: impl AsRef<Path>,
     on_progress: &dyn Fn(&str),
 ) -> Result<String, CryptoError> {
-    if bit_size < MIN_RSA_BITS {
-        return Err(CryptoError::EncryptionDecryptionError(format!(
-            "RSA key size {bit_size} bits is too small (minimum is {MIN_RSA_BITS} bits)"
-        )));
-    }
     if passphrase.expose_secret().is_empty() {
         return Err(CryptoError::Message(
-            "Passphrase must not be empty for private key encryption".to_string(),
+            "Passphrase must not be empty for secret key encryption".to_string(),
         ));
     }
     let output_dir = output_dir.as_ref();
     fs::create_dir_all(output_dir)?;
     on_progress("Generating key pair\u{2026}");
-    let rsa: Rsa<Private> = Rsa::generate(bit_size)?;
 
-    let private_key: Vec<u8> = rsa.private_key_to_pem_passphrase(
-        Cipher::chacha20_poly1305(),
-        passphrase.expose_secret().as_bytes(),
-    )?;
-    let public_key: Vec<u8> = rsa.public_key_to_pem()?;
-    let private_key_path = output_dir.join(format!("rsa-{}-priv-key.pem", bit_size));
-    let public_key_path = output_dir.join(format!("rsa-{}-pub-key.pem", bit_size));
+    let secret_key = SecretKey::generate(&mut OsRng);
+    let public_key = secret_key.public_key();
 
-    let mut private_key_opts = OpenOptions::new();
-    private_key_opts.write(true).create_new(true);
+    // Encrypt secret key at rest with passphrase via Argon2id + XChaCha20-Poly1305
+    let mut salt = [0u8; ARGON2_SALT_SIZE];
+    OsRng.fill_bytes(&mut salt);
+
+    let config = argon2_config();
+    let mut derived_key = Zeroizing::new(
+        argon2::hash_raw(passphrase.expose_secret().as_bytes(), &salt, &config)
+            .map_err(CryptoError::Argon2Error)?,
+    );
+
+    let cipher = XChaCha20Poly1305::new(derived_key.as_slice().into());
+    let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let raw_secret = Zeroizing::new(secret_key.to_bytes());
+    let encrypted_secret = cipher.encrypt(&nonce, raw_secret.as_slice()).map_err(|_| {
+        CryptoError::EncryptionDecryptionError("Failed to encrypt secret key".to_string())
+    })?;
+    drop(raw_secret);
+
+    derived_key.zeroize();
+
+    // Write secret key file: [salt | nonce | encrypted_secret_key]
+    let secret_key_path = output_dir.join(SECRET_KEY_FILENAME);
+    let mut secret_key_opts = OpenOptions::new();
+    secret_key_opts.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        private_key_opts.mode(0o600);
+        secret_key_opts.mode(0o600);
     }
-    let mut private_key_file = private_key_opts.open(&private_key_path)?;
-    private_key_file.write_all(&private_key)?;
+    let mut secret_key_file = secret_key_opts.open(&secret_key_path)?;
+    secret_key_file.write_all(&salt)?;
+    secret_key_file.write_all(&nonce)?;
+    secret_key_file.write_all(&encrypted_secret)?;
 
+    // Write public key file: raw 32 bytes
+    let public_key_path = output_dir.join(PUBLIC_KEY_FILENAME);
     let mut public_key_file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&public_key_path)?;
-    public_key_file.write_all(&public_key)?;
+    public_key_file.write_all(public_key.as_bytes())?;
 
     let result = format!("Generated key pair in {}", output_dir.display());
     println!("\n{}", result);

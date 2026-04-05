@@ -1,8 +1,6 @@
 use clap::{Parser, Subcommand};
 use ferrocrypt::secrecy::SecretString;
-use ferrocrypt::{
-    CryptoError, generate_asymmetric_key_pair, hybrid_encryption, symmetric_encryption,
-};
+use ferrocrypt::{CryptoError, generate_key_pair, hybrid_encryption, symmetric_encryption};
 
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
@@ -24,9 +22,6 @@ pub enum Command {
 
         #[arg(short, long)]
         passphrase: String,
-
-        #[arg(short = 'b', long, default_value_t = 4096)]
-        bit_size: u32,
     },
 
     #[command(alias = "hyb")]
@@ -88,10 +83,9 @@ fn run_command(cmd: Command) -> Result<(), CryptoError> {
         Command::Keygen {
             outpath,
             passphrase,
-            bit_size,
         } => {
             let passphrase = SecretString::from(passphrase);
-            generate_asymmetric_key_pair(bit_size, &passphrase, &outpath, |_| {})?;
+            generate_key_pair(&passphrase, &outpath, |_| {})?;
         }
 
         Command::Hybrid {

@@ -4,7 +4,7 @@ use std::fs;
 use std::io::Write;
 
 use ferrocrypt::secrecy::SecretString;
-use ferrocrypt::{generate_asymmetric_key_pair, hybrid_encryption};
+use ferrocrypt::{generate_key_pair, hybrid_encryption};
 use libfuzzer_sys::fuzz_target;
 
 /// Generates a keypair once per process into a persistent temp directory.
@@ -14,7 +14,7 @@ fn key_dir() -> &'static std::path::Path {
     DIR.get_or_init(|| {
         let dir = tempfile::tempdir().unwrap();
         let pass = SecretString::from("fuzz_key".to_string());
-        generate_asymmetric_key_pair(2048, &pass, dir.path().to_str().unwrap(), |_| {}).unwrap();
+        generate_key_pair(&pass, dir.path().to_str().unwrap(), |_| {}).unwrap();
         dir
     })
     .path()
@@ -22,7 +22,7 @@ fn key_dir() -> &'static std::path::Path {
 
 fuzz_target!(|data: &[u8]| {
     let keys = key_dir();
-    let priv_key = keys.join("rsa-2048-priv-key.pem");
+    let priv_key = keys.join("secret.key");
 
     let tmp_dir = tempfile::tempdir().unwrap();
     let input_path = tmp_dir.path().join("input.fcr");

@@ -205,8 +205,6 @@ fn test_cli_keygen() {
         .arg(keys_dir.to_str().unwrap())
         .arg("-p")
         .arg("key_password")
-        .arg("--bit-size")
-        .arg("2048")
         .output()
         .expect("Failed to execute keygen command");
 
@@ -217,19 +215,15 @@ fn test_cli_keygen() {
     );
 
     // Check that keys were generated
-    assert!(keys_dir.join("rsa-2048-priv-key.pem").exists());
-    assert!(keys_dir.join("rsa-2048-pub-key.pem").exists());
+    assert!(keys_dir.join("secret.key").exists());
+    assert!(keys_dir.join("public.key").exists());
 
-    // Verify keys have content
-    let priv_key_size = fs::metadata(keys_dir.join("rsa-2048-priv-key.pem"))
-        .unwrap()
-        .len();
-    let pub_key_size = fs::metadata(keys_dir.join("rsa-2048-pub-key.pem"))
-        .unwrap()
-        .len();
+    // Verify keys have expected sizes (secret: 104 bytes, public: 32 bytes)
+    let secret_key_size = fs::metadata(keys_dir.join("secret.key")).unwrap().len();
+    let pub_key_size = fs::metadata(keys_dir.join("public.key")).unwrap().len();
 
-    assert!(priv_key_size > 100);
-    assert!(pub_key_size > 100);
+    assert_eq!(secret_key_size, 104);
+    assert_eq!(pub_key_size, 32);
 }
 
 #[test]
@@ -256,8 +250,6 @@ fn test_cli_hybrid_encrypt_decrypt_file() {
         .arg(keys_dir.to_str().unwrap())
         .arg("-p")
         .arg("key_pass")
-        .arg("-b")
-        .arg("2048")
         .output()
         .expect("Failed to execute keygen");
 
@@ -271,7 +263,7 @@ fn test_cli_hybrid_encrypt_decrypt_file() {
         .arg("-o")
         .arg(encrypt_dir.to_str().unwrap())
         .arg("-k")
-        .arg(keys_dir.join("rsa-2048-pub-key.pem").to_str().unwrap())
+        .arg(keys_dir.join("public.key").to_str().unwrap())
         .output()
         .expect("Failed to execute encrypt");
 
@@ -283,7 +275,7 @@ fn test_cli_hybrid_encrypt_decrypt_file() {
 
     assert!(encrypt_dir.join("data.fcr").exists());
 
-    // Decrypt with private key
+    // Decrypt with secret key
     let decrypt_output = Command::new(&binary)
         .arg("hybrid")
         .arg("-i")
@@ -291,7 +283,7 @@ fn test_cli_hybrid_encrypt_decrypt_file() {
         .arg("-o")
         .arg(decrypt_dir.to_str().unwrap())
         .arg("-k")
-        .arg(keys_dir.join("rsa-2048-priv-key.pem").to_str().unwrap())
+        .arg(keys_dir.join("secret.key").to_str().unwrap())
         .arg("-p")
         .arg("key_pass")
         .output()
@@ -332,8 +324,6 @@ fn test_cli_hybrid_wrong_key_passphrase() {
         .arg(keys_dir.to_str().unwrap())
         .arg("-p")
         .arg("correct_key_pass")
-        .arg("-b")
-        .arg("2048")
         .output()
         .expect("Failed to execute keygen");
 
@@ -345,7 +335,7 @@ fn test_cli_hybrid_wrong_key_passphrase() {
         .arg("-o")
         .arg(encrypt_dir.to_str().unwrap())
         .arg("-k")
-        .arg(keys_dir.join("rsa-2048-pub-key.pem").to_str().unwrap())
+        .arg(keys_dir.join("public.key").to_str().unwrap())
         .output()
         .expect("Failed to execute encrypt");
 
@@ -357,7 +347,7 @@ fn test_cli_hybrid_wrong_key_passphrase() {
         .arg("-o")
         .arg(decrypt_dir.to_str().unwrap())
         .arg("-k")
-        .arg(keys_dir.join("rsa-2048-priv-key.pem").to_str().unwrap())
+        .arg(keys_dir.join("secret.key").to_str().unwrap())
         .arg("-p")
         .arg("wrong_key_pass")
         .output()
@@ -513,8 +503,6 @@ fn test_cli_hybrid_save_as() {
         .arg(keys_dir.to_str().unwrap())
         .arg("-p")
         .arg("key_pass")
-        .arg("-b")
-        .arg("2048")
         .output()
         .expect("Failed to execute keygen");
 
@@ -527,7 +515,7 @@ fn test_cli_hybrid_save_as() {
         .arg("-o")
         .arg(encrypt_dir.to_str().unwrap())
         .arg("-k")
-        .arg(keys_dir.join("rsa-2048-pub-key.pem").to_str().unwrap())
+        .arg(keys_dir.join("public.key").to_str().unwrap())
         .arg("-s")
         .arg(custom_output.to_str().unwrap())
         .output()
@@ -549,7 +537,7 @@ fn test_cli_hybrid_save_as() {
         .arg("-o")
         .arg(decrypt_dir.to_str().unwrap())
         .arg("-k")
-        .arg(keys_dir.join("rsa-2048-priv-key.pem").to_str().unwrap())
+        .arg(keys_dir.join("secret.key").to_str().unwrap())
         .arg("-p")
         .arg("key_pass")
         .output()

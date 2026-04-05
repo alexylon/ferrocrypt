@@ -40,7 +40,7 @@ use crate::CryptoError;
 pub const MAGIC_BYTE: u8 = 0xFC;
 pub const TYPE_SYMMETRIC: u8 = 0x53; // 'S'
 pub const TYPE_HYBRID: u8 = 0x48; // 'H'
-pub const FORMAT_MAJOR: u8 = 2;
+pub const FORMAT_MAJOR: u8 = 3;
 pub const FORMAT_MINOR: u8 = 0;
 pub const HEADER_PREFIX_SIZE: usize = 8;
 pub const ENCRYPTED_EXTENSION: &str = "fcr";
@@ -141,15 +141,13 @@ fn validate_header_bytes(
 
     if major > FORMAT_MAJOR {
         return Err(CryptoError::EncryptionDecryptionError(format!(
-            "This file uses format version {}.{} which is not supported. \
-             Please upgrade FerroCrypt (max supported: {}.{}).",
+            "Format version {}.{} not supported (max: {}.{}). Upgrade FerroCrypt.",
             major, minor, FORMAT_MAJOR, FORMAT_MINOR
         )));
     }
     if major < FORMAT_MAJOR {
         return Err(CryptoError::EncryptionDecryptionError(format!(
-            "This file uses format version {}.{} which is no longer supported. \
-             Current format version: {}.{}.",
+            "Format version {}.{} no longer supported (current: {}.{})",
             major, minor, FORMAT_MAJOR, FORMAT_MINOR
         )));
     }

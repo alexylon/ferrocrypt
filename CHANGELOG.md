@@ -5,63 +5,60 @@ All notable changes to FerroCrypt are documented in this file.
 ## [Unreleased]
 
 ### Added
-- **Testing:** Cargo-fuzz harnesses for symmetric and hybrid decryption (`fuzz_symmetric_decrypt`, `fuzz_hybrid_decrypt`)
-- **Testing:** Malformed-header tests (empty files, mid-header truncation, oversized/undersized `header_len`, all-zero header body) for both symmetric and hybrid
-- **Testing:** Ciphertext mutation tests (bit flips, mid-stream truncation, appended bytes) confirming AEAD rejects tampered ciphertext
-- **Desktop app:** Slint-based desktop GUI (`ferrocrypt-desktop`) with two tabs: Symmetric and Hybrid. Key generation is inline within the Hybrid tab via a "Use existing key" / "Create new key pair" sub-selector. After generating a key pair, the app auto-transitions to Hybrid Encrypt with the public key pre-filled. Includes "Save As" dialog for custom output filenames, auto-detection of encryption mode from file headers, and conflict warnings.
-- **Desktop app:** Password strength indicator below the password field (visible in Symmetric Encrypt and Key Gen modes). Scoring adapted from Proton Pass — uses length-based scoring with character-class penalties, consecutive/progressive sequence detection, common password stripping, and passphrase detection.
-- **Library:** `save_as` parameter on `symmetric_encryption` and `hybrid_encryption` — when `Some`, writes the encrypted output to the exact path instead of deriving `<stem>.fcr` inside the output directory. `on_progress` callback parameter for stage descriptions.
-- **Library:** `default_encrypted_filename()` helper and `ENCRYPTED_EXTENSION` constant for callers that need to predict or filter the output filename
-- **CLI:** `--save-as` / `-s` flag on `symmetric` and `hybrid` subcommands — optional output file path override for encryption
+- **Desktop app:** Slint-based desktop GUI (`ferrocrypt-desktop`) with two tabs: Symmetric and Hybrid. Key generation is inline within the Hybrid tab. After generating a key pair, the app auto-transitions to Hybrid Encrypt with the public key pre-filled. Includes "Save As" dialog, auto-detection of encryption mode from file headers, and conflict warnings.
+- **Desktop app:** Password strength indicator (visible in Symmetric Encrypt and Key Gen modes). Scoring adapted from Proton Pass.
+- **Library:** `save_as` parameter on `symmetric_encryption` and `hybrid_encryption`, `on_progress` callback for stage descriptions
+- **Library:** `default_encrypted_filename()` helper and `ENCRYPTED_EXTENSION` constant
+- **Library:** `detect_encryption_mode()` for determining whether an `.fcr` file uses symmetric or hybrid encryption
+- **CLI:** `--save-as` / `-s` flag on `symmetric` and `hybrid` subcommands
 - **CLI:** Interactive mode aliases: `sym` for `symmetric`, `hyb` for `hybrid`, `gen` for `keygen`
-
-- HKDF-SHA3-256 subkey derivation: Argon2id now produces 32 bytes of input keying material, expanded via HKDF into separate encryption and HMAC subkeys with domain separation (`ferrocrypt-enc`, `ferrocrypt-hmac`). A separate 32-byte HKDF salt is stored in the header.
-- HMAC-SHA3-256 header authentication: detects tampering with file headers (salt, nonce, flags) before decryption
-- Versioned file format with magic bytes (`0xFC` + type), major/minor version, and header length field (see `format.rs` for the full specification). Files from older versions and non-FerroCrypt files are now detected with clear error messages instead of misleading crypto errors. The header length field enables forward compatibility — future minor versions can add fields without breaking older parsers.
-- `detect_encryption_mode()` public API for determining whether an `.fcr` file uses symmetric or hybrid encryption
+- HKDF-SHA3-256 subkey derivation with domain separation (`ferrocrypt-enc`, `ferrocrypt-hmac`)
+- HMAC-SHA3-256 header authentication — tampering is detected before decryption begins
+- Versioned file format with magic bytes (`0xFC` + type), major/minor version, and header length field. Forward-compatible: future minor versions can append fields without breaking older parsers.
+- Cargo-fuzz harnesses for symmetric and hybrid decryption
+- Malformed-header tests (empty files, truncation, oversized/undersized `header_len`, all-zero body)
+- Ciphertext mutation tests (bit flips, truncation, appended bytes) confirming AEAD rejects tampered data
 
 ### Changed
-- **Breaking:** Streaming TAR encryption pipeline — input files are archived into a TAR stream and encrypted directly to the output file in a single pass. No plaintext intermediate files are written to disk during encryption or decryption. Replaces the previous ZIP-based approach that wrote plaintext archives to a temporary directory.
-- **Breaking:** Format version bumped to 2.0 — files created by older versions cannot be decrypted
-- **Breaking (library API):** Removed `WalkDirError` and `ZipError` variants from `CryptoError` enum
-- **Breaking (library API):** Collapsed `_with_progress` variants into base functions. `symmetric_encryption`, `hybrid_encryption`, and `generate_asymmetric_key_pair` now accept `save_as` and `on_progress` directly.
-- Moved Tauri and Dioxus GUIs to `experiments/`
-- **Breaking:** New file format — existing encrypted files from older versions cannot be decrypted. Unified file extension from `.fcs`/`.fch` to single `.fcr`. Both symmetric and hybrid modes now use the STREAM construction (EncryptorBE32/DecryptorBE32) for streaming encrypt/decrypt, eliminating the need to load entire files into memory. Hybrid nonce changed from 24 to 19 bytes to match the STREAM format. Symmetric header now includes an HKDF salt field.
-- **Breaking (library API):** Removed `BinCodeEncodeError`/`BinCodeDecodeError` and `ReedSolomonError` from `CryptoError` enum
-- **Breaking (CLI):** Removed `--large` flag — all encryption now uses streaming mode unconditionally
+- **Breaking:** Replaced RSA-4096 OAEP (OpenSSL) with X25519 + XChaCha20-Poly1305 (`crypto_box` crate, `ChaChaBox`) for hybrid envelope encryption. Removes the OpenSSL C dependency — the project is now pure Rust.
+- **Breaking:** Streaming TAR encryption pipeline — input is archived and encrypted directly to the output file in a single pass. No plaintext intermediate files touch disk. Replaces the previous ZIP-based approach.
+- **Breaking:** Format version bumped to 3.0 — files from older versions cannot be decrypted. Unified file extension from `.fcs`/`.fch` to single `.fcr`.
 - **Breaking:** Argon2id parameters raised to 1 GiB memory / t=4 / p=4 for stronger brute-force resistance
-- **Breaking:** RSA OAEP hash upgraded from SHA-1 to SHA-256 (both OAEP hash and MGF1 hash)
-- Empty passphrases are now rejected for symmetric encryption
-- Encrypt vs decrypt is now determined by reading the file header (magic bytes) instead of relying solely on the `.fcr` extension, so FerroCrypt files are recognized regardless of their filename
-- Replaced `reed-solomon-simd` dependency with simple triple replication — the RS encoder with 1 original shard was producing identical copies, so the dependency provided no benefit over direct replication. Header integrity is guaranteed by HMAC.
-- Stream encryption buffer increased from 500 bytes to 64 KiB
+- **Breaking (library API):** Renamed `generate_asymmetric_key_pair` to `generate_key_pair`, removed `bit_size` parameter. Renamed `rsa_key_pem` to `key_file` in `hybrid_encryption`.
+- **Breaking (library API):** Removed `OpensslError`, `WalkDirError`, `ZipError`, `BinCodeEncodeError`, `BinCodeDecodeError`, and `ReedSolomonError` variants from `CryptoError` enum
+- **Breaking (library API):** Collapsed `_with_progress` variants into base functions — `symmetric_encryption`, `hybrid_encryption`, and `generate_key_pair` now accept `save_as` and `on_progress` directly
+- **Breaking (CLI):** Removed `--bit-size` / `-b` flag from `keygen` and `--large` / `-l` flag from encryption
+- Key files use `secret.key` (passphrase-protected via Argon2id + XChaCha20-Poly1305) and `public.key` (raw 32 bytes)
+- Encrypt vs decrypt determined by reading file header magic bytes, not file extension
+- Replaced `reed-solomon-simd` with simple triple replication (RS with 1 original shard was producing identical copies)
 - Replaced bincode header serialization with raw byte layout for long-term format stability
+- Stream encryption buffer increased from 500 bytes to 64 KiB
+- Empty passphrases rejected for symmetric encryption
+- Moved Tauri and Dioxus GUIs to `experiments/`
 
 ### Fixed
-- Symmetric decryption now verifies the header HMAC before the key-hash check, so header tampering is reported as an authentication failure rather than "wrong password"
-- RSA key size is now validated against the minimum required for OAEP-SHA256 encryption of the 64-byte envelope. `generate_asymmetric_key_pair` rejects key sizes below 2048 bits upfront, and `encrypt_file` rejects undersized public keys with a clear error instead of a generic "not valid" message.
-- Private key files are now written with `0o600` (owner-only) permissions on POSIX systems instead of inheriting the umask default
-- HMAC header authentication now covers decoded (canonical) field values instead of raw triple-replicated bytes, so single-copy corruption recovered by majority vote no longer causes HMAC verification failure
-- `keygen` now creates missing output directories instead of failing silently
-- **Stream truncation vulnerability:** symmetric decryption had a code path that skipped the required `decrypt_last()` call, allowing an attacker to truncate ciphertext at chunk boundaries without detection. Now all final chunks go through `decrypt_last`, which verifies the STREAM terminator.
-- Hybrid plaintext buffers (both pre-encryption and post-decryption) are now zeroized on drop
-- Added length validation on RSA-decrypted key material to prevent silent corruption
-- Crash (panic) when decrypting truncated, corrupted, or maliciously crafted `.fcr` files
-- Crash when replicated decoding produces unexpected output length (validated before indexing)
+- **Stream truncation vulnerability:** symmetric decryption had a code path that skipped `decrypt_last()`, allowing truncation at chunk boundaries without detection
+- Symmetric decryption now verifies the HMAC before the key-hash check, so header tampering is reported as an authentication failure rather than "wrong password"
+- HMAC covers decoded (canonical) field values — single-copy replication corruption recovered by majority vote no longer causes HMAC verification failure
+- Secret key files written with `0o600` (owner-only) on POSIX systems
+- Key material zeroized on all error paths (decrypted envelope keys, combined key buffer, HMAC failure early returns)
+- Hybrid plaintext buffers zeroized on drop
+- Length validation on decrypted envelope key material
+- Crash on truncated, corrupted, or maliciously crafted `.fcr` files
+- Crash on unexpected replicated decoding output length
 - Nonexistent input paths silently producing empty encrypted files
-- Key material not zeroized on all error paths: RSA-decrypted keys, combined key buffer, private key PEM content, and HMAC failure early returns now all zeroize correctly
-- Temporary directory cleanup masking the original crypto error on failure
-- Temporary directory race condition when multiple processes encrypt to the same output directory
+- `keygen` now creates missing output directories
+- Temporary directory cleanup masking the original crypto error
+- Temporary directory race condition with concurrent encryptions to the same output directory
 - Directory archiver silently skipping inaccessible files and path errors
-- Removed bincode dependency for header serialization (bincode wire format is not stable across major versions)
 
 ### Removed
-- `reed-solomon-simd` dependency
+- `openssl`, `reed-solomon-simd`, and `bincode` dependencies
 - `--large` / `-l` CLI flag (streaming is now the only mode)
 
 ### Improved
-- File archiver now streams file content instead of loading entire files into memory
-- Rewrote archiver unit tests to be self-contained (replaced fixture-dependent stubs)
+- File archiver streams content instead of loading entire files into memory
+- Self-contained archiver unit tests (replaced fixture-dependent stubs)
 
 ## [0.2.5] - 2025-12-18
 

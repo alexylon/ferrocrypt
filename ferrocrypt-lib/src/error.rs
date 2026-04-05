@@ -5,9 +5,8 @@ use thiserror::Error;
 /// | Variant | When it happens | Typical fix |
 /// | --- | --- | --- |
 /// | `Io` | Filesystem or I/O failure | Check paths/permissions and retry |
-/// | `ChaCha20Poly1305Error` | Symmetric encryption/decryption failed (bad tag, nonce issues) | Verify key, input integrity, and nonce uniqueness |
 /// | `Argon2Error` | Password hashing/KDF failed | Ensure parameters are valid and memory is sufficient |
-/// | `OpensslError` | Asymmetric operations failed | Validate PEM/keys; confirm OpenSSL availability |
+/// | `ChaCha20Poly1305Error` | Symmetric or asymmetric encryption/decryption failed (bad tag, nonce issues) | Verify key, input integrity, and nonce uniqueness |
 /// | `TryFromSliceError` | Byte slice could not be converted | Confirm buffer sizes |
 /// | `EncryptionDecryptionError` | High-level guard for crypto failures | Recheck keys/passwords and inputs |
 /// | `InputPath` | Missing input file or folder | Provide an existing path |
@@ -38,8 +37,6 @@ pub enum CryptoError {
     ChaCha20Poly1305Error(#[from] chacha20poly1305::Error),
     #[error(transparent)]
     Argon2Error(#[from] argon2::Error),
-    #[error(transparent)]
-    OpensslError(#[from] openssl::error::ErrorStack),
     #[error(transparent)]
     TryFromSliceError(#[from] std::array::TryFromSliceError),
     #[error("{0}")]

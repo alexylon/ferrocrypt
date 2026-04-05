@@ -35,7 +35,7 @@ Three crates, one shared library:
 |---|---|
 | `lib.rs` | Public API, encrypt/decrypt routing (magic-byte detection), path validation |
 | `symmetric.rs` | Argon2id → HKDF-SHA3-256 → XChaCha20-Poly1305 streaming encrypt/decrypt |
-| `hybrid.rs` | RSA-4096 OAEP envelope + XChaCha20-Poly1305 streaming encrypt/decrypt |
+| `hybrid.rs` | X25519 + XChaCha20-Poly1305 envelope + XChaCha20-Poly1305 streaming encrypt/decrypt |
 | `archiver.rs` | TAR archive/unarchive (streaming, preserves directory structure) |
 | `format.rs` | File format constants, header parsing, forward-compatibility skip for minor versions |
 | `replication.rs` | Triple replication with majority-vote decoding for header error correction |
@@ -46,7 +46,7 @@ Three crates, one shared library:
 
 ```
 Input file/dir
-  → derive keys (Argon2id+HKDF for symmetric, random+RSA for hybrid)
+  → derive keys (Argon2id+HKDF for symmetric, random+X25519/ChaChaBox for hybrid)
   → build header (magic bytes + triple-replicated fields + HMAC)
   → write header to output .fcr file
   → tar::Builder<EncryptWriter<File>> streams TAR data through XChaCha20-Poly1305 directly to disk
@@ -54,7 +54,7 @@ Input file/dir
 
 No plaintext intermediate files touch disk. The TAR archive is never materialized — it streams directly through the encryption layer.
 
-Decryption reverses: read header → derive/decrypt keys → verify HMAC → DecryptReader streams ciphertext through XChaCha20-Poly1305 → tar::Archive unpacks directly. (Keys are derived first because the HMAC key comes from Argon2id+HKDF in symmetric, or from the RSA-decrypted envelope in hybrid.)
+Decryption reverses: read header → derive/decrypt keys → verify HMAC → DecryptReader streams ciphertext through XChaCha20-Poly1305 → tar::Archive unpacks directly. (Keys are derived first because the HMAC key comes from Argon2id+HKDF in symmetric, or from the X25519-decrypted envelope in hybrid.)
 
 ### Desktop App Structure
 
@@ -63,7 +63,7 @@ Decryption reverses: read header → derive/decrypt keys → verify HMAC → Dec
 - `src/password_scorer.rs` — Password strength scoring (0–4 scale) with character-class analysis, sequence/repetition penalties, and common-password detection.
 - macOS uses native `NSOpenPanel` (via objc2) for combined file+folder picker; other platforms use `rfd`.
 
-### File Format (v2.0)
+### File Format (v3.0)
 
 8-byte prefix: `[0xFC, type, major, minor, header_len_be16, flags_be16]`
 - Type `0x53` ('S') = symmetric, `0x48` ('H') = hybrid

@@ -4,8 +4,7 @@ use std::path::{Path, PathBuf};
 
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
-    CryptoError, ENCRYPTED_EXTENSION, generate_asymmetric_key_pair, hybrid_encryption,
-    symmetric_encryption,
+    CryptoError, ENCRYPTED_EXTENSION, generate_key_pair, hybrid_encryption, symmetric_encryption,
 };
 
 const TEST_WORKSPACE: &str = "tests/workspace";
@@ -224,25 +223,11 @@ fn test_symmetric_encrypt_decrypt_multi_chunk_file() -> Result<(), CryptoError> 
 }
 
 #[test]
-fn test_hybrid_keygen_rejects_small_key_size() {
-    let test_dir = setup_test_dir("keygen_small_key");
-    let passphrase = SecretString::from("pass".to_string());
-
-    let err = generate_asymmetric_key_pair(1024, &passphrase, test_dir.to_str().unwrap(), |_| {})
-        .unwrap_err();
-    assert!(
-        err.to_string().contains("too small"),
-        "expected 'too small' error, got: {err}"
-    );
-}
-
-#[test]
 fn test_hybrid_keygen_rejects_empty_passphrase() {
     let test_dir = setup_test_dir("keygen_empty_pass");
     let empty = SecretString::from("".to_string());
 
-    let err =
-        generate_asymmetric_key_pair(4096, &empty, test_dir.to_str().unwrap(), |_| {}).unwrap_err();
+    let err = generate_key_pair(&empty, test_dir.to_str().unwrap(), |_| {}).unwrap_err();
     assert!(
         err.to_string().contains("empty"),
         "expected empty-passphrase error, got: {err}"
@@ -257,14 +242,14 @@ fn test_hybrid_keygen_private_key_permissions() -> Result<(), CryptoError> {
     let test_dir = setup_test_dir("keygen_permissions");
     let passphrase = SecretString::from("pass".to_string());
 
-    generate_asymmetric_key_pair(2048, &passphrase, test_dir.to_str().unwrap(), |_| {})?;
+    generate_key_pair(&passphrase, test_dir.to_str().unwrap(), |_| {})?;
 
-    let priv_key = test_dir.join("rsa-2048-priv-key.pem");
-    let pub_key = test_dir.join("rsa-2048-pub-key.pem");
-    let priv_mode = fs::metadata(&priv_key)?.permissions().mode() & 0o777;
+    let secret_key = test_dir.join("secret.key");
+    let pub_key = test_dir.join("public.key");
+    let priv_mode = fs::metadata(&secret_key)?.permissions().mode() & 0o777;
     let pub_mode = fs::metadata(&pub_key)?.permissions().mode() & 0o777;
 
-    assert_eq!(priv_mode, 0o600, "private key should be owner-only");
+    assert_eq!(priv_mode, 0o600, "secret key should be owner-only");
     assert_ne!(pub_mode, 0o600, "public key should not be restricted");
 
     Ok(())
@@ -288,19 +273,14 @@ fn test_hybrid_keygen_encrypt_decrypt_file() -> Result<(), CryptoError> {
     let key_passphrase = SecretString::from("key_protection_password".to_string());
 
     // Generate key pair
-    let keygen_result =
-        generate_asymmetric_key_pair(2048, &key_passphrase, keys_dir.to_str().unwrap(), |_| {})?;
+    let keygen_result = generate_key_pair(&key_passphrase, keys_dir.to_str().unwrap(), |_| {})?;
 
     assert!(keygen_result.contains("Generated key pair"));
-    assert!(keys_dir.join("rsa-2048-priv-key.pem").exists());
-    assert!(keys_dir.join("rsa-2048-pub-key.pem").exists());
+    assert!(keys_dir.join("secret.key").exists());
+    assert!(keys_dir.join("public.key").exists());
 
     // Encrypt with public key
-    let pub_key_path = keys_dir
-        .join("rsa-2048-pub-key.pem")
-        .to_str()
-        .unwrap()
-        .to_string();
+    let pub_key_path = keys_dir.join("public.key").to_str().unwrap().to_string();
     let empty_pass = SecretString::from("".to_string());
 
     let encrypt_result = hybrid_encryption(
@@ -315,17 +295,13 @@ fn test_hybrid_keygen_encrypt_decrypt_file() -> Result<(), CryptoError> {
     assert!(encrypt_result.contains("Encrypted to"));
     assert!(encrypt_dir.join("data.fcr").exists());
 
-    // Decrypt with private key
-    let priv_key_path = keys_dir
-        .join("rsa-2048-priv-key.pem")
-        .to_str()
-        .unwrap()
-        .to_string();
+    // Decrypt with secret key
+    let secret_key_path = keys_dir.join("secret.key").to_str().unwrap().to_string();
 
     let decrypt_result = hybrid_encryption(
         encrypt_dir.join("data.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
-        &priv_key_path,
+        &secret_key_path,
         &key_passphrase,
         None,
         |_| {},
@@ -355,14 +331,10 @@ fn test_hybrid_encrypt_decrypt_directory() -> Result<(), CryptoError> {
     let key_passphrase = SecretString::from("hybrid_dir_key_pass".to_string());
 
     // Generate keys
-    generate_asymmetric_key_pair(2048, &key_passphrase, keys_dir.to_str().unwrap(), |_| {})?;
+    generate_key_pair(&key_passphrase, keys_dir.to_str().unwrap(), |_| {})?;
 
     // Encrypt directory
-    let pub_key_path = keys_dir
-        .join("rsa-2048-pub-key.pem")
-        .to_str()
-        .unwrap()
-        .to_string();
+    let pub_key_path = keys_dir.join("public.key").to_str().unwrap().to_string();
     let empty_pass = SecretString::from("".to_string());
 
     hybrid_encryption(
@@ -377,16 +349,12 @@ fn test_hybrid_encrypt_decrypt_directory() -> Result<(), CryptoError> {
     assert!(encrypt_dir.join("test_folder.fcr").exists());
 
     // Decrypt directory
-    let priv_key_path = keys_dir
-        .join("rsa-2048-priv-key.pem")
-        .to_str()
-        .unwrap()
-        .to_string();
+    let secret_key_path = keys_dir.join("secret.key").to_str().unwrap().to_string();
 
     hybrid_encryption(
         encrypt_dir.join("test_folder.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
-        &priv_key_path,
+        &secret_key_path,
         &key_passphrase,
         None,
         |_| {},
@@ -419,14 +387,10 @@ fn test_hybrid_wrong_key_passphrase() -> Result<(), CryptoError> {
     let wrong_pass = SecretString::from("wrong_key_pass".to_string());
 
     // Generate keys with correct passphrase
-    generate_asymmetric_key_pair(2048, &correct_pass, keys_dir.to_str().unwrap(), |_| {})?;
+    generate_key_pair(&correct_pass, keys_dir.to_str().unwrap(), |_| {})?;
 
     // Encrypt
-    let pub_key_path = keys_dir
-        .join("rsa-2048-pub-key.pem")
-        .to_str()
-        .unwrap()
-        .to_string();
+    let pub_key_path = keys_dir.join("public.key").to_str().unwrap().to_string();
     let empty_pass = SecretString::from("".to_string());
 
     hybrid_encryption(
@@ -439,16 +403,12 @@ fn test_hybrid_wrong_key_passphrase() -> Result<(), CryptoError> {
     )?;
 
     // Try to decrypt with wrong passphrase
-    let priv_key_path = keys_dir
-        .join("rsa-2048-priv-key.pem")
-        .to_str()
-        .unwrap()
-        .to_string();
+    let secret_key_path = keys_dir.join("secret.key").to_str().unwrap().to_string();
 
     let result = hybrid_encryption(
         encrypt_dir.join("data.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
-        &priv_key_path,
+        &secret_key_path,
         &wrong_pass,
         None,
         |_| {},
@@ -457,33 +417,10 @@ fn test_hybrid_wrong_key_passphrase() -> Result<(), CryptoError> {
     assert!(result.is_err());
     match result {
         Err(CryptoError::EncryptionDecryptionError(msg)) => {
-            assert!(msg.contains("Incorrect password") || msg.contains("wrong private key"));
+            assert!(msg.contains("Incorrect password") || msg.contains("wrong secret key"));
         }
         _ => panic!("Expected EncryptionDecryptionError"),
     }
-
-    Ok(())
-}
-
-#[test]
-fn test_hybrid_key_sizes() -> Result<(), CryptoError> {
-    let test_dir = setup_test_dir("hybrid_key_sizes");
-
-    let passphrase = SecretString::from("test_pass".to_string());
-
-    // Test RSA-2048
-    let keys_2048 = test_dir.join("keys_2048");
-    fs::create_dir_all(&keys_2048)?;
-    generate_asymmetric_key_pair(2048, &passphrase, keys_2048.to_str().unwrap(), |_| {})?;
-    assert!(keys_2048.join("rsa-2048-priv-key.pem").exists());
-    assert!(keys_2048.join("rsa-2048-pub-key.pem").exists());
-
-    // Test RSA-4096
-    let keys_4096 = test_dir.join("keys_4096");
-    fs::create_dir_all(&keys_4096)?;
-    generate_asymmetric_key_pair(4096, &passphrase, keys_4096.to_str().unwrap(), |_| {})?;
-    assert!(keys_4096.join("rsa-4096-priv-key.pem").exists());
-    assert!(keys_4096.join("rsa-4096-pub-key.pem").exists());
 
     Ok(())
 }
@@ -817,15 +754,11 @@ fn test_hybrid_wrong_key_pair() -> Result<(), CryptoError> {
     let pass_b = SecretString::from("pass_b".to_string());
 
     // Generate two different key pairs
-    generate_asymmetric_key_pair(2048, &pass_a, keys_a.to_str().unwrap(), |_| {})?;
-    generate_asymmetric_key_pair(2048, &pass_b, keys_b.to_str().unwrap(), |_| {})?;
+    generate_key_pair(&pass_a, keys_a.to_str().unwrap(), |_| {})?;
+    generate_key_pair(&pass_b, keys_b.to_str().unwrap(), |_| {})?;
 
     // Encrypt with key pair A's public key
-    let pub_key_a = keys_a
-        .join("rsa-2048-pub-key.pem")
-        .to_str()
-        .unwrap()
-        .to_string();
+    let pub_key_a = keys_a.join("public.key").to_str().unwrap().to_string();
     let empty_pass = SecretString::from("".to_string());
 
     hybrid_encryption(
@@ -837,17 +770,13 @@ fn test_hybrid_wrong_key_pair() -> Result<(), CryptoError> {
         |_| {},
     )?;
 
-    // Try to decrypt with key pair B's private key — should fail
-    let priv_key_b = keys_b
-        .join("rsa-2048-priv-key.pem")
-        .to_str()
-        .unwrap()
-        .to_string();
+    // Try to decrypt with key pair B's secret key — should fail
+    let secret_key_b = keys_b.join("secret.key").to_str().unwrap().to_string();
 
     let result = hybrid_encryption(
         encrypt_dir.join("data.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
-        &priv_key_b,
+        &secret_key_b,
         &pass_b,
         None,
         |_| {},
@@ -859,8 +788,8 @@ fn test_hybrid_wrong_key_pair() -> Result<(), CryptoError> {
 }
 
 #[test]
-fn test_hybrid_4096_key_round_trip() -> Result<(), CryptoError> {
-    let test_dir = setup_test_dir("hybrid_4096_round_trip");
+fn test_hybrid_key_round_trip() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("hybrid_key_round_trip");
     let keys_dir = test_dir.join("keys");
     let input_file = test_dir.join("data.txt");
     let encrypt_dir = test_dir.join("encrypted");
@@ -870,19 +799,15 @@ fn test_hybrid_4096_key_round_trip() -> Result<(), CryptoError> {
     fs::create_dir_all(&encrypt_dir)?;
     fs::create_dir_all(&decrypt_dir)?;
 
-    let original_content = "RSA-4096 round-trip test";
+    let original_content = "X25519 round-trip test";
     create_test_file(&input_file, original_content);
 
-    let key_passphrase = SecretString::from("rsa4096pass".to_string());
+    let key_passphrase = SecretString::from("keypass".to_string());
 
-    generate_asymmetric_key_pair(4096, &key_passphrase, keys_dir.to_str().unwrap(), |_| {})?;
+    generate_key_pair(&key_passphrase, keys_dir.to_str().unwrap(), |_| {})?;
 
     // Encrypt
-    let pub_key_path = keys_dir
-        .join("rsa-4096-pub-key.pem")
-        .to_str()
-        .unwrap()
-        .to_string();
+    let pub_key_path = keys_dir.join("public.key").to_str().unwrap().to_string();
     let empty_pass = SecretString::from("".to_string());
 
     hybrid_encryption(
@@ -897,16 +822,12 @@ fn test_hybrid_4096_key_round_trip() -> Result<(), CryptoError> {
     assert!(encrypt_dir.join("data.fcr").exists());
 
     // Decrypt
-    let priv_key_path = keys_dir
-        .join("rsa-4096-priv-key.pem")
-        .to_str()
-        .unwrap()
-        .to_string();
+    let secret_key_path = keys_dir.join("secret.key").to_str().unwrap().to_string();
 
     hybrid_encryption(
         encrypt_dir.join("data.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
-        &priv_key_path,
+        &secret_key_path,
         &key_passphrase,
         None,
         |_| {},
@@ -934,13 +855,9 @@ fn test_hybrid_binary_file() -> Result<(), CryptoError> {
     fs::write(&input_file, &binary_content)?;
 
     let key_passphrase = SecretString::from("hybrid_bin_pass".to_string());
-    generate_asymmetric_key_pair(2048, &key_passphrase, keys_dir.to_str().unwrap(), |_| {})?;
+    generate_key_pair(&key_passphrase, keys_dir.to_str().unwrap(), |_| {})?;
 
-    let pub_key_path = keys_dir
-        .join("rsa-2048-pub-key.pem")
-        .to_str()
-        .unwrap()
-        .to_string();
+    let pub_key_path = keys_dir.join("public.key").to_str().unwrap().to_string();
     let empty_pass = SecretString::from("".to_string());
 
     hybrid_encryption(
@@ -952,16 +869,12 @@ fn test_hybrid_binary_file() -> Result<(), CryptoError> {
         |_| {},
     )?;
 
-    let priv_key_path = keys_dir
-        .join("rsa-2048-priv-key.pem")
-        .to_str()
-        .unwrap()
-        .to_string();
+    let secret_key_path = keys_dir.join("secret.key").to_str().unwrap().to_string();
 
     hybrid_encryption(
         encrypt_dir.join("data.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
-        &priv_key_path,
+        &secret_key_path,
         &key_passphrase,
         None,
         |_| {},
@@ -1028,22 +941,18 @@ fn test_truncated_hybrid_file() -> Result<(), CryptoError> {
     fs::create_dir_all(&decrypt_dir)?;
 
     let key_passphrase = SecretString::from("pass".to_string());
-    generate_asymmetric_key_pair(2048, &key_passphrase, keys_dir.to_str().unwrap(), |_| {})?;
+    generate_key_pair(&key_passphrase, keys_dir.to_str().unwrap(), |_| {})?;
 
     // Write a tiny file that's too short to be a valid .fcr
     let truncated_file = test_dir.join("truncated.fcr");
     fs::write(&truncated_file, b"short").unwrap();
 
-    let priv_key_path = keys_dir
-        .join("rsa-2048-priv-key.pem")
-        .to_str()
-        .unwrap()
-        .to_string();
+    let secret_key_path = keys_dir.join("secret.key").to_str().unwrap().to_string();
 
     let result = hybrid_encryption(
         truncated_file.to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
-        &priv_key_path,
+        &secret_key_path,
         &key_passphrase,
         None,
         |_| {},
@@ -1117,13 +1026,9 @@ fn test_hybrid_header_tamper_detection() -> Result<(), CryptoError> {
     create_test_file(&input_file, "Hybrid tamper test");
 
     let key_passphrase = SecretString::from("tamper_key_pass".to_string());
-    generate_asymmetric_key_pair(2048, &key_passphrase, keys_dir.to_str().unwrap(), |_| {})?;
+    generate_key_pair(&key_passphrase, keys_dir.to_str().unwrap(), |_| {})?;
 
-    let pub_key_path = keys_dir
-        .join("rsa-2048-pub-key.pem")
-        .to_str()
-        .unwrap()
-        .to_string();
+    let pub_key_path = keys_dir.join("public.key").to_str().unwrap().to_string();
     let empty_pass = SecretString::from("".to_string());
 
     hybrid_encryption(
@@ -1137,33 +1042,29 @@ fn test_hybrid_header_tamper_detection() -> Result<(), CryptoError> {
 
     // Tamper with the same nonce byte in all three replicated copies so majority
     // vote cannot recover the original value and the decoded nonce changes.
-    // Hybrid header: [prefix(8)] [encoded_key(769)] [encoded_nonce(61)] [encoded_hmac(97)]
-    // encoded_key = rep_encode(256-byte RSA ciphertext) = 1 + 256*3 = 769
+    // Hybrid header: [prefix(8)] [encoded_envelope(409)] [encoded_nonce(61)] [encoded_hmac(97)]
+    // encoded_envelope = rep_encode(136-byte envelope) = 1 + 136*3 = 409
     // encoded_nonce layout: [padding(1)] [copy0(20)] [copy1(20)] [copy2(20)]
     // (NONCE_SIZE=19, padded to 20)
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
     const PREFIX: usize = 8;
-    const RSA_2048_OUTPUT: usize = 256;
-    const ENCODED_KEY_LEN: usize = 1 + RSA_2048_OUTPUT * 3;
+    const ENVELOPE_SIZE: usize = 136;
+    const ENCODED_ENVELOPE_LEN: usize = 1 + ENVELOPE_SIZE * 3;
     const PADDED_NONCE: usize = 20; // 19 rounded up to even
-    const NONCE_REGION: usize = PREFIX + ENCODED_KEY_LEN; // start of encoded_nonce
+    const NONCE_REGION: usize = PREFIX + ENCODED_ENVELOPE_LEN; // start of encoded_nonce
     const NONCE_BYTE: usize = 5;
     data[NONCE_REGION + 1 + NONCE_BYTE] ^= 0xFF;
     data[NONCE_REGION + 1 + PADDED_NONCE + NONCE_BYTE] ^= 0xFF;
     data[NONCE_REGION + 1 + 2 * PADDED_NONCE + NONCE_BYTE] ^= 0xFF;
     fs::write(&encrypted_path, &data)?;
 
-    let priv_key_path = keys_dir
-        .join("rsa-2048-priv-key.pem")
-        .to_str()
-        .unwrap()
-        .to_string();
+    let secret_key_path = keys_dir.join("secret.key").to_str().unwrap().to_string();
 
     let result = hybrid_encryption(
         encrypted_path.to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
-        &priv_key_path,
+        &secret_key_path,
         &key_passphrase,
         None,
         |_| {},
@@ -1325,13 +1226,9 @@ fn test_hybrid_single_copy_corruption_recovery() -> Result<(), CryptoError> {
     create_test_file(&input_file, content);
 
     let key_passphrase = SecretString::from("hybrid_recovery_pass".to_string());
-    generate_asymmetric_key_pair(2048, &key_passphrase, keys_dir.to_str().unwrap(), |_| {})?;
+    generate_key_pair(&key_passphrase, keys_dir.to_str().unwrap(), |_| {})?;
 
-    let pub_key_path = keys_dir
-        .join("rsa-2048-pub-key.pem")
-        .to_str()
-        .unwrap()
-        .to_string();
+    let pub_key_path = keys_dir.join("public.key").to_str().unwrap().to_string();
 
     hybrid_encryption(
         input_file.to_str().unwrap(),
@@ -1343,28 +1240,24 @@ fn test_hybrid_single_copy_corruption_recovery() -> Result<(), CryptoError> {
     )?;
 
     // Corrupt one byte in copy 0 of the encoded nonce — majority vote recovers it.
-    // Hybrid header: [prefix(8)] [encoded_key(769)] [encoded_nonce(61)] ...
+    // Hybrid header: [prefix(8)] [encoded_envelope(409)] [encoded_nonce(61)] ...
     // encoded_nonce: [padding(1)] [copy0(20)] [copy1(20)] [copy2(20)]
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
     const PREFIX: usize = 8;
-    const RSA_2048_OUTPUT: usize = 256;
-    const ENCODED_KEY_LEN: usize = 1 + RSA_2048_OUTPUT * 3;
-    const NONCE_REGION: usize = PREFIX + ENCODED_KEY_LEN;
+    const ENVELOPE_SIZE: usize = 136;
+    const ENCODED_ENVELOPE_LEN: usize = 1 + ENVELOPE_SIZE * 3;
+    const NONCE_REGION: usize = PREFIX + ENCODED_ENVELOPE_LEN;
     const NONCE_BYTE: usize = 5;
     data[NONCE_REGION + 1 + NONCE_BYTE] ^= 0xFF;
     fs::write(&encrypted_path, &data)?;
 
-    let priv_key_path = keys_dir
-        .join("rsa-2048-priv-key.pem")
-        .to_str()
-        .unwrap()
-        .to_string();
+    let secret_key_path = keys_dir.join("secret.key").to_str().unwrap().to_string();
 
     hybrid_encryption(
         encrypted_path.to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
-        &priv_key_path,
+        &secret_key_path,
         &key_passphrase,
         None,
         |_| {},
@@ -1442,7 +1335,7 @@ fn test_future_major_version_rejected() -> Result<(), CryptoError> {
     match result {
         Err(CryptoError::EncryptionDecryptionError(msg)) => {
             assert!(msg.contains("not supported"));
-            assert!(msg.contains("upgrade"));
+            assert!(msg.contains("Upgrade"));
         }
         other => panic!("Expected version error, got {:?}", other),
     }
@@ -1464,14 +1357,10 @@ fn test_wrong_format_type_hybrid_as_symmetric() -> Result<(), CryptoError> {
 
     create_test_file(&input_file, "format type test");
     let key_passphrase = SecretString::from("pass".to_string());
-    generate_asymmetric_key_pair(2048, &key_passphrase, keys_dir.to_str().unwrap(), |_| {})?;
+    generate_key_pair(&key_passphrase, keys_dir.to_str().unwrap(), |_| {})?;
 
     // Encrypt as hybrid
-    let pub_key_path = keys_dir
-        .join("rsa-2048-pub-key.pem")
-        .to_str()
-        .unwrap()
-        .to_string();
+    let pub_key_path = keys_dir.join("public.key").to_str().unwrap().to_string();
     let empty_pass = SecretString::from("".to_string());
 
     hybrid_encryption(
@@ -1519,13 +1408,9 @@ fn test_hybrid_empty_file() -> Result<(), CryptoError> {
 
     create_test_file(&input_file, "");
     let key_passphrase = SecretString::from("hybrid_empty".to_string());
-    generate_asymmetric_key_pair(2048, &key_passphrase, keys_dir.to_str().unwrap(), |_| {})?;
+    generate_key_pair(&key_passphrase, keys_dir.to_str().unwrap(), |_| {})?;
 
-    let pub_key = keys_dir
-        .join("rsa-2048-pub-key.pem")
-        .to_str()
-        .unwrap()
-        .to_string();
+    let pub_key = keys_dir.join("public.key").to_str().unwrap().to_string();
     let empty_pass = SecretString::from("".to_string());
 
     hybrid_encryption(
@@ -1537,16 +1422,12 @@ fn test_hybrid_empty_file() -> Result<(), CryptoError> {
         |_| {},
     )?;
 
-    let priv_key = keys_dir
-        .join("rsa-2048-priv-key.pem")
-        .to_str()
-        .unwrap()
-        .to_string();
+    let secret_key = keys_dir.join("secret.key").to_str().unwrap().to_string();
 
     hybrid_encryption(
         encrypt_dir.join("empty.fcr").to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
-        &priv_key,
+        &secret_key,
         &key_passphrase,
         None,
         |_| {},
@@ -1654,10 +1535,10 @@ fn test_hybrid_output_file_override() -> Result<(), CryptoError> {
     create_test_file(&input_file, "hybrid custom output test");
     let passphrase = SecretString::from("key_pass_123".to_string());
 
-    generate_asymmetric_key_pair(4096, &passphrase, key_dir.to_str().unwrap(), |_| {})?;
+    generate_key_pair(&passphrase, key_dir.to_str().unwrap(), |_| {})?;
 
-    let pub_key = key_dir.join("rsa-4096-pub-key.pem");
-    let priv_key = key_dir.join("rsa-4096-priv-key.pem");
+    let pub_key = key_dir.join("public.key");
+    let secret_key = key_dir.join("secret.key");
     let custom_output = encrypt_dir.join("my_vault.fcr");
     let empty = SecretString::from("".to_string());
 
@@ -1678,7 +1559,7 @@ fn test_hybrid_output_file_override() -> Result<(), CryptoError> {
     let decrypt_result = hybrid_encryption(
         custom_output.to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
-        priv_key.to_str().unwrap(),
+        secret_key.to_str().unwrap(),
         &passphrase,
         None,
         |_| {},
@@ -1749,16 +1630,16 @@ fn test_hybrid_empty_file_rejected() -> Result<(), CryptoError> {
     fs::create_dir_all(&decrypt_dir)?;
 
     let key_pass = SecretString::from("kp".to_string());
-    generate_asymmetric_key_pair(2048, &key_pass, keys_dir.to_str().unwrap(), |_| {})?;
+    generate_key_pair(&key_pass, keys_dir.to_str().unwrap(), |_| {})?;
 
-    let priv_key = keys_dir.join("rsa-2048-priv-key.pem");
+    let secret_key = keys_dir.join("secret.key");
     let empty_file = test_dir.join("empty.fcr");
     fs::write(&empty_file, b"").unwrap();
 
     let result = hybrid_encryption(
         empty_file.to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
-        priv_key.to_str().unwrap(),
+        secret_key.to_str().unwrap(),
         &key_pass,
         None,
         |_| {},
@@ -1913,10 +1794,10 @@ fn test_hybrid_truncated_mid_header() -> Result<(), CryptoError> {
     fs::create_dir_all(&decrypt_dir)?;
 
     let key_pass = SecretString::from("kp".to_string());
-    generate_asymmetric_key_pair(2048, &key_pass, keys_dir.to_str().unwrap(), |_| {})?;
+    generate_key_pair(&key_pass, keys_dir.to_str().unwrap(), |_| {})?;
 
-    let pub_key = keys_dir.join("rsa-2048-pub-key.pem");
-    let priv_key = keys_dir.join("rsa-2048-priv-key.pem");
+    let pub_key = keys_dir.join("public.key");
+    let secret_key = keys_dir.join("secret.key");
     let empty_pass = SecretString::from("".to_string());
 
     create_test_file(&input_file, "Hybrid truncation mid-header");
@@ -1933,14 +1814,14 @@ fn test_hybrid_truncated_mid_header() -> Result<(), CryptoError> {
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let data = fs::read(&encrypted_path)?;
 
-    // Truncate in the middle of the RSA-encrypted key field
+    // Truncate in the middle of the encrypted envelope field
     let truncated = &data[..20];
     fs::write(&encrypted_path, truncated)?;
 
     let result = hybrid_encryption(
         encrypted_path.to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
-        priv_key.to_str().unwrap(),
+        secret_key.to_str().unwrap(),
         &key_pass,
         None,
         |_| {},
@@ -1961,10 +1842,10 @@ fn test_hybrid_oversized_header_len() -> Result<(), CryptoError> {
     fs::create_dir_all(&decrypt_dir)?;
 
     let key_pass = SecretString::from("kp".to_string());
-    generate_asymmetric_key_pair(2048, &key_pass, keys_dir.to_str().unwrap(), |_| {})?;
+    generate_key_pair(&key_pass, keys_dir.to_str().unwrap(), |_| {})?;
 
-    let pub_key = keys_dir.join("rsa-2048-pub-key.pem");
-    let priv_key = keys_dir.join("rsa-2048-priv-key.pem");
+    let pub_key = keys_dir.join("public.key");
+    let secret_key = keys_dir.join("secret.key");
     let empty_pass = SecretString::from("".to_string());
 
     create_test_file(&input_file, "Hybrid oversized header_len");
@@ -1987,7 +1868,7 @@ fn test_hybrid_oversized_header_len() -> Result<(), CryptoError> {
     let result = hybrid_encryption(
         encrypted_path.to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
-        priv_key.to_str().unwrap(),
+        secret_key.to_str().unwrap(),
         &key_pass,
         None,
         |_| {},
@@ -2051,10 +1932,10 @@ fn test_hybrid_ciphertext_bit_flip_detected() -> Result<(), CryptoError> {
     fs::create_dir_all(&decrypt_dir)?;
 
     let key_pass = SecretString::from("ct_flip_key".to_string());
-    generate_asymmetric_key_pair(2048, &key_pass, keys_dir.to_str().unwrap(), |_| {})?;
+    generate_key_pair(&key_pass, keys_dir.to_str().unwrap(), |_| {})?;
 
-    let pub_key = keys_dir.join("rsa-2048-pub-key.pem");
-    let priv_key = keys_dir.join("rsa-2048-priv-key.pem");
+    let pub_key = keys_dir.join("public.key");
+    let secret_key = keys_dir.join("secret.key");
     let empty_pass = SecretString::from("".to_string());
 
     create_test_file(&input_file, "Hybrid AEAD ciphertext integrity test");
@@ -2079,7 +1960,7 @@ fn test_hybrid_ciphertext_bit_flip_detected() -> Result<(), CryptoError> {
     let result = hybrid_encryption(
         encrypted_path.to_str().unwrap(),
         decrypt_dir.to_str().unwrap(),
-        priv_key.to_str().unwrap(),
+        secret_key.to_str().unwrap(),
         &key_pass,
         None,
         |_| {},

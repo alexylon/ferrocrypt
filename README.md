@@ -21,13 +21,14 @@ Multiplatform file encryption tool with CLI and desktop interfaces. Written in R
 FerroCrypt encrypts and decrypts files and directories. It supports two modes:
 
 - **Symmetric** — Password-based. Uses XChaCha20-Poly1305 with Argon2id key derivation and HKDF-SHA3-256 subkey expansion. Same password encrypts and decrypts.
-- **Hybrid** — Public/private key based. Combines RSA-4096 (key encryption) with XChaCha20-Poly1305 (data encryption). Each file gets a unique random key sealed with the recipient's public key. Decryption requires the private key and its passphrase.
+- **Hybrid** — Public/secret key based. Combines X25519 key agreement with XChaCha20-Poly1305 (data encryption). Each file gets a unique random key sealed with the recipient's public key. Decryption requires the secret key and its passphrase.
 
 Both modes produce `.fcr` files. Decryption is based on magic bytes in the file header, not the file extension — renaming a file won't break anything.
 
 ### Security
 
-- XChaCha20-Poly1305 via the audited `chacha20poly1305` crate
+- **Symmetric encryption:** XChaCha20-Poly1305 via the [`chacha20poly1305`](https://crates.io/crates/chacha20poly1305) crate ([audited by NCC Group](https://research.nccgroup.com/2020/02/26/public-report-rustcrypto-aes-gcm-and-chacha20poly1305-implementation-review/)), with Argon2id key derivation and HKDF-SHA3-256 subkey expansion
+- **Hybrid encryption:** X25519 key agreement + XChaCha20-Poly1305 envelope via the [`crypto_box`](https://crates.io/crates/crypto_box) crate ([audited by Cure53](https://cure53.de/pentest-report_rust-libs.pdf))
 - HMAC-SHA3-256 header authentication — tampering is detected before decryption begins
 - Passphrases handled via the `secrecy` crate (zeroized on drop, hidden from Debug/Display)
 - Triple-replicated headers with majority-vote decoding for error correction
@@ -70,8 +71,8 @@ cargo add ferrocrypt
 | Subcommand | Alias | Purpose |
 |---|---|---|
 | `symmetric` | `sym` | Encrypt/decrypt with a password |
-| `hybrid` | `hyb` | Encrypt/decrypt with RSA keys |
-| `keygen` | `gen` | Generate an RSA key pair |
+| `hybrid` | `hyb` | Encrypt/decrypt with public/secret keys |
+| `keygen` | `gen` | Generate a key pair |
 
 Run without arguments to start an interactive REPL. Aliases are available in interactive mode.
 
@@ -95,10 +96,10 @@ ferrocrypt symmetric -i secret.txt -o ./encrypted -p "my password" -s ./encrypte
 ferrocrypt keygen -o ./keys -p "key password"
 
 # Encrypt with public key (no passphrase needed)
-ferrocrypt hybrid -i secret.txt -o ./encrypted -k ./keys/rsa-4096-pub-key.pem
+ferrocrypt hybrid -i secret.txt -o ./encrypted -k ./keys/public.key
 
-# Decrypt with private key
-ferrocrypt hybrid -i ./encrypted/secret.fcr -o ./decrypted -k ./keys/rsa-4096-priv-key.pem -p "key password"
+# Decrypt with secret key
+ferrocrypt hybrid -i ./encrypted/secret.fcr -o ./decrypted -k ./keys/secret.key -p "key password"
 ```
 
 ### Interactive Mode
@@ -129,8 +130,8 @@ ferrocrypt> quit
 |---|---|
 | `-i, --inpath` | Input file or directory |
 | `-o, --outpath` | Output directory |
-| `-k, --key` | Public key (encrypt) or private key (decrypt) |
-| `-p, --passphrase` | Private key passphrase (decrypt only) |
+| `-k, --key` | Public key (encrypt) or secret key (decrypt) |
+| `-p, --passphrase` | Secret key passphrase (decrypt only) |
 | `-s, --save-as` | Custom output file path (encrypt only, optional) |
 
 #### `keygen`
@@ -138,8 +139,7 @@ ferrocrypt> quit
 | Flag | Description |
 |---|---|
 | `-o, --outpath` | Output directory for the key pair |
-| `-p, --passphrase` | Passphrase to encrypt the private key |
-| `-b, --bit-size` | RSA key size in bits (minimum: `2048`, default: `4096`) |
+| `-p, --passphrase` | Passphrase to encrypt the secret key |
 
 ## Desktop App
 
@@ -171,7 +171,7 @@ Binary output: `target/release/ferrocrypt-desktop` (macOS/Linux) or `target\rele
 Select a file or folder, then choose the encryption mode. The app auto-detects encrypted files by reading the file header, regardless of extension.
 
 - **Symmetric** — Enter a password. The output path is auto-filled as `{name}.fcr` and can be changed with "Save As". Decryption uses a directory picker.
-- **Hybrid** — Use an existing public key to encrypt, or create a new RSA-4096 key pair inline. After key generation, the app switches to encryption with the new public key pre-filled. Decryption requires a private key + passphrase.
+- **Hybrid** — Use an existing public key to encrypt, or create a new key pair inline. After key generation, the app switches to encryption with the new public key pre-filled. Decryption requires a secret key + passphrase.
 
 A password strength indicator (based on [Proton Pass](https://github.com/protonpass/proton-pass-common) implementation) is shown during encryption and key generation.
 

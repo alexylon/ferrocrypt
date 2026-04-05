@@ -82,23 +82,27 @@ echo "--- Phase 1: Key Generation ---"
 KEYS="$WORKDIR/keys"
 mkdir -p "$KEYS"
 
-run_test "keygen: RSA-4096 default" \
+run_test "keygen: generate key pair" \
     $FC keygen -o "$KEYS" -p "$PASS"
 
-run_test "keygen: RSA-2048" \
-    $FC keygen -o "$KEYS/2048" -p "$PASS" -b 2048
+# Generate a second key pair for wrong-key tests
+KEYS2="$WORKDIR/keys2"
+mkdir -p "$KEYS2"
+run_test "keygen: generate second key pair" \
+    $FC keygen -o "$KEYS2" -p "$PASS2"
 
 # Verify key files exist
-run_test "keygen: verify 4096 keys exist" \
-    test -f "$KEYS/rsa-4096-pub-key.pem" -a -f "$KEYS/rsa-4096-priv-key.pem"
+run_test "keygen: verify keys exist" \
+    test -f "$KEYS/public.key" -a -f "$KEYS/secret.key"
 
-run_test "keygen: verify 2048 keys exist" \
-    test -f "$KEYS/2048/rsa-2048-pub-key.pem" -a -f "$KEYS/2048/rsa-2048-priv-key.pem"
+run_test "keygen: verify key file sizes" \
+    test "$(stat -f%z "$KEYS/secret.key" 2>/dev/null || stat -c%s "$KEYS/secret.key" 2>/dev/null)" -eq 104 -a \
+         "$(stat -f%z "$KEYS/public.key" 2>/dev/null || stat -c%s "$KEYS/public.key" 2>/dev/null)" -eq 32
 
-PUB4096="$KEYS/rsa-4096-pub-key.pem"
-PRIV4096="$KEYS/rsa-4096-priv-key.pem"
-PUB2048="$KEYS/2048/rsa-2048-pub-key.pem"
-PRIV2048="$KEYS/2048/rsa-2048-priv-key.pem"
+PUB="$KEYS/public.key"
+SECRET_KEY="$KEYS/secret.key"
+PUB2="$KEYS2/public.key"
+SECRET_KEY2="$KEYS2/secret.key"
 
 echo ""
 
@@ -213,12 +217,12 @@ hyb_roundtrip_file() {
     local src="$1"
     local label="$2"
     local pubkey="$3"
-    local privkey="$4"
+    local secretkey="$4"
     local enc_dir="$WORKDIR/enc_hyb_${label}"
     local dec_dir="$WORKDIR/dec_hyb_${label}"
     mkdir -p "$enc_dir" "$dec_dir"
     $FC hybrid -i "$src" -o "$enc_dir" -k "$pubkey" && \
-    $FC hybrid -i "$enc_dir"/*.fcr -o "$dec_dir" -k "$privkey" -p "$PASS" && \
+    $FC hybrid -i "$enc_dir"/*.fcr -o "$dec_dir" -k "$secretkey" -p "$PASS" && \
     assert_identical "$src" "$dec_dir/$(basename "$src")"
 }
 
@@ -226,36 +230,33 @@ hyb_roundtrip_dir() {
     local src="$1"
     local label="$2"
     local pubkey="$3"
-    local privkey="$4"
+    local secretkey="$4"
     local enc_dir="$WORKDIR/enc_hyb_${label}"
     local dec_dir="$WORKDIR/dec_hyb_${label}"
     mkdir -p "$enc_dir" "$dec_dir"
     $FC hybrid -i "$src" -o "$enc_dir" -k "$pubkey" && \
-    $FC hybrid -i "$enc_dir"/*.fcr -o "$dec_dir" -k "$privkey" -p "$PASS" && \
+    $FC hybrid -i "$enc_dir"/*.fcr -o "$dec_dir" -k "$secretkey" -p "$PASS" && \
     assert_dirs_identical "$src" "$dec_dir/$(basename "$src")"
 }
 
 # Re-use small test files
-run_test "hyb4096: empty file roundtrip" hyb_roundtrip_file "$WORKDIR/empty.txt" "empty4096" "$PUB4096" "$PRIV4096"
-run_test "hyb4096: 1-byte file roundtrip" hyb_roundtrip_file "$WORKDIR/onebyte.bin" "onebyte4096" "$PUB4096" "$PRIV4096"
-run_test "hyb4096: small text file roundtrip" hyb_roundtrip_file "$WORKDIR/small.txt" "small4096" "$PUB4096" "$PRIV4096"
-run_test "hyb4096: 64KB chunk boundary" hyb_roundtrip_file "$WORKDIR/one_chunk.bin" "chunk4096" "$PUB4096" "$PRIV4096"
-run_test "hyb4096: 10MB random data" hyb_roundtrip_file "$WORKDIR/10mb.bin" "10mb4096" "$PUB4096" "$PRIV4096"
-run_test "hyb4096: unicode content" hyb_roundtrip_file "$WORKDIR/unicode.txt" "unicode4096" "$PUB4096" "$PRIV4096"
-
-# RSA-2048 tests
-run_test "hyb2048: 1MB random data" hyb_roundtrip_file "$WORKDIR/1mb.bin" "1mb2048" "$PUB2048" "$PRIV2048"
-run_test "hyb2048: 10MB random data" hyb_roundtrip_file "$WORKDIR/10mb.bin" "10mb2048" "$PUB2048" "$PRIV2048"
+run_test "hyb: empty file roundtrip" hyb_roundtrip_file "$WORKDIR/empty.txt" "empty" "$PUB" "$SECRET_KEY"
+run_test "hyb: 1-byte file roundtrip" hyb_roundtrip_file "$WORKDIR/onebyte.bin" "onebyte" "$PUB" "$SECRET_KEY"
+run_test "hyb: small text file roundtrip" hyb_roundtrip_file "$WORKDIR/small.txt" "small" "$PUB" "$SECRET_KEY"
+run_test "hyb: 64KB chunk boundary" hyb_roundtrip_file "$WORKDIR/one_chunk.bin" "chunk" "$PUB" "$SECRET_KEY"
+run_test "hyb: 1MB random data" hyb_roundtrip_file "$WORKDIR/1mb.bin" "1mb" "$PUB" "$SECRET_KEY"
+run_test "hyb: 10MB random data" hyb_roundtrip_file "$WORKDIR/10mb.bin" "10mb" "$PUB" "$SECRET_KEY"
+run_test "hyb: unicode content" hyb_roundtrip_file "$WORKDIR/unicode.txt" "unicode" "$PUB" "$SECRET_KEY"
 
 # 100MB hybrid
-echo -n "[next] hyb4096: 100MB random data roundtrip ... "
+echo -n "[next] hyb: 100MB random data roundtrip ... "
 TOTAL=$((TOTAL + 1))
 dd if=/dev/urandom of="$WORKDIR/100mb_hyb.bin" bs=1048576 count=100 2>/dev/null
 enc100h="$WORKDIR/enc_hyb_100mb"
 dec100h="$WORKDIR/dec_hyb_100mb"
 mkdir -p "$enc100h" "$dec100h"
-if $FC hybrid -i "$WORKDIR/100mb_hyb.bin" -o "$enc100h" -k "$PUB4096" 2>/dev/null && \
-   $FC hybrid -i "$enc100h"/*.fcr -o "$dec100h" -k "$PRIV4096" -p "$PASS" 2>/dev/null && \
+if $FC hybrid -i "$WORKDIR/100mb_hyb.bin" -o "$enc100h" -k "$PUB" 2>/dev/null && \
+   $FC hybrid -i "$enc100h"/*.fcr -o "$dec100h" -k "$SECRET_KEY" -p "$PASS" 2>/dev/null && \
    assert_identical "$WORKDIR/100mb_hyb.bin" "$dec100h/100mb_hyb.bin"; then
     echo "PASS"
     PASSED=$((PASSED + 1))
@@ -279,7 +280,7 @@ for i in $(seq 1 20); do
     dd if=/dev/urandom of="$FLATDIR/file_$i.bin" bs=4096 count=$((RANDOM % 50 + 1)) 2>/dev/null
 done
 run_test "sym: flat dir with 20 files" sym_roundtrip_dir "$FLATDIR" "flatdir"
-run_test "hyb: flat dir with 20 files" hyb_roundtrip_dir "$FLATDIR" "flatdir_hyb" "$PUB4096" "$PRIV4096"
+run_test "hyb: flat dir with 20 files" hyb_roundtrip_dir "$FLATDIR" "flatdir_hyb" "$PUB" "$SECRET_KEY"
 
 # Deep nested directory
 DEEPDIR="$WORKDIR/deepdir"
@@ -291,7 +292,7 @@ for i in $(seq 1 15); do
     dd if=/dev/urandom of="$NESTED/random.bin" bs=1024 count=$((i * 2)) 2>/dev/null
 done
 run_test "sym: 15-level deep nested dir" sym_roundtrip_dir "$DEEPDIR" "deepdir"
-run_test "hyb: 15-level deep nested dir" hyb_roundtrip_dir "$DEEPDIR" "deepdir_hyb" "$PUB4096" "$PRIV4096"
+run_test "hyb: 15-level deep nested dir" hyb_roundtrip_dir "$DEEPDIR" "deepdir_hyb" "$PUB" "$SECRET_KEY"
 
 # Directory with many small files
 MANYDIR="$WORKDIR/manyfiles"
@@ -300,7 +301,7 @@ for i in $(seq 1 200); do
     printf "file content %04d" "$i" > "$MANYDIR/f_$i.txt"
 done
 run_test "sym: dir with 200 small files" sym_roundtrip_dir "$MANYDIR" "manyfiles"
-run_test "hyb: dir with 200 small files" hyb_roundtrip_dir "$MANYDIR" "manyfiles_hyb" "$PUB4096" "$PRIV4096"
+run_test "hyb: dir with 200 small files" hyb_roundtrip_dir "$MANYDIR" "manyfiles_hyb" "$PUB" "$SECRET_KEY"
 
 # Directory with mixed content types
 MIXDIR="$WORKDIR/mixdir"
@@ -312,7 +313,7 @@ printf 'こんにちは' > "$MIXDIR/subA/japanese.txt"
 touch "$MIXDIR/subB/empty"
 dd if=/dev/urandom of="$MIXDIR/subB/nested/deep.bin" bs=8192 count=5 2>/dev/null
 run_test "sym: mixed content directory" sym_roundtrip_dir "$MIXDIR" "mixdir"
-run_test "hyb: mixed content directory" hyb_roundtrip_dir "$MIXDIR" "mixdir_hyb" "$PUB4096" "$PRIV4096"
+run_test "hyb: mixed content directory" hyb_roundtrip_dir "$MIXDIR" "mixdir_hyb" "$PUB" "$SECRET_KEY"
 
 # Directory with empty subdirectories
 EMPTYSUBDIR="$WORKDIR/emptysubs"
@@ -343,9 +344,9 @@ hyb_saveas_roundtrip() {
     local saveas2_dir="$WORKDIR/saveas2"
     local saveas2_dec="$WORKDIR/saveas2_dec"
     mkdir -p "$saveas2_dir" "$saveas2_dec"
-    $FC hybrid -i "$WORKDIR/small.txt" -o "$saveas2_dir" -k "$PUB4096" -s "$saveas2_dir/renamed.fcr" && \
+    $FC hybrid -i "$WORKDIR/small.txt" -o "$saveas2_dir" -k "$PUB" -s "$saveas2_dir/renamed.fcr" && \
     test -f "$saveas2_dir/renamed.fcr" && \
-    $FC hybrid -i "$saveas2_dir/renamed.fcr" -o "$saveas2_dec" -k "$PRIV4096" -p "$PASS" && \
+    $FC hybrid -i "$saveas2_dir/renamed.fcr" -o "$saveas2_dec" -k "$SECRET_KEY" -p "$PASS" && \
     assert_identical "$WORKDIR/small.txt" "$saveas2_dec/small.txt"
 }
 run_test "hyb: custom output name" hyb_saveas_roundtrip
@@ -369,22 +370,22 @@ run_test_expect_fail "sym: wrong password rejects" \
 err2_enc="$WORKDIR/err2_enc"
 err2_dec="$WORKDIR/err2_dec"
 mkdir -p "$err2_enc" "$err2_dec"
-$FC hybrid -i "$WORKDIR/small.txt" -o "$err2_enc" -k "$PUB4096" 2>/dev/null
+$FC hybrid -i "$WORKDIR/small.txt" -o "$err2_enc" -k "$PUB" 2>/dev/null
 run_test_expect_fail "hyb: wrong passphrase rejects" \
-    $FC hybrid -i "$err2_enc"/*.fcr -o "$err2_dec" -k "$PRIV4096" -p "$PASS2"
+    $FC hybrid -i "$err2_enc"/*.fcr -o "$err2_dec" -k "$SECRET_KEY" -p "$PASS2"
 
-# Wrong key entirely (2048 key for 4096-encrypted file)
+# Wrong key entirely (different keypair)
 err3_dec="$WORKDIR/err3_dec"
 mkdir -p "$err3_dec"
-run_test_expect_fail "hyb: wrong key size rejects" \
-    $FC hybrid -i "$err2_enc"/*.fcr -o "$err3_dec" -k "$PRIV2048" -p "$PASS"
+run_test_expect_fail "hyb: wrong key rejects" \
+    $FC hybrid -i "$err2_enc"/*.fcr -o "$err3_dec" -k "$SECRET_KEY2" -p "$PASS2"
 
 # Non-existent input file
 run_test_expect_fail "sym: non-existent input rejects" \
     $FC symmetric -i "$WORKDIR/does_not_exist.txt" -o "$WORKDIR" -p "$PASS"
 
 run_test_expect_fail "hyb: non-existent input rejects" \
-    $FC hybrid -i "$WORKDIR/does_not_exist.txt" -o "$WORKDIR" -k "$PUB4096"
+    $FC hybrid -i "$WORKDIR/does_not_exist.txt" -o "$WORKDIR" -k "$PUB"
 
 # Empty password for symmetric
 run_test_expect_fail "sym: empty password rejects" \
@@ -439,7 +440,7 @@ run_test_expect_fail "sym: truncated file rejects" \
 corr3_enc="$WORKDIR/corr3_enc"
 corr3_dec="$WORKDIR/corr3_dec"
 mkdir -p "$corr3_enc" "$corr3_dec"
-$FC hybrid -i "$WORKDIR/1mb.bin" -o "$corr3_enc" -k "$PUB4096" 2>/dev/null
+$FC hybrid -i "$WORKDIR/1mb.bin" -o "$corr3_enc" -k "$PUB" 2>/dev/null
 CORR3_FILE=$(ls "$corr3_enc"/*.fcr)
 python3 -c "
 data = bytearray(open('$CORR3_FILE', 'rb').read())
@@ -449,7 +450,7 @@ for i in range(200):
 open('$CORR3_FILE', 'wb').write(data)
 "
 run_test_expect_fail "hyb: corrupted ciphertext rejects" \
-    $FC hybrid -i "$CORR3_FILE" -o "$corr3_dec" -k "$PRIV4096" -p "$PASS"
+    $FC hybrid -i "$CORR3_FILE" -o "$corr3_dec" -k "$SECRET_KEY" -p "$PASS"
 
 echo ""
 
@@ -465,13 +466,13 @@ mkdir -p "$cross_enc" "$cross_dec"
 # Encrypt with symmetric, try to decrypt with hybrid
 $FC symmetric -i "$WORKDIR/small.txt" -o "$cross_enc" -p "$PASS" 2>/dev/null
 run_test_expect_fail "cross: sym-encrypted file via hybrid rejects" \
-    $FC hybrid -i "$cross_enc"/small.fcr -o "$cross_dec" -k "$PRIV4096" -p "$PASS"
+    $FC hybrid -i "$cross_enc"/small.fcr -o "$cross_dec" -k "$SECRET_KEY" -p "$PASS"
 
 # Encrypt with hybrid, try to decrypt with symmetric
 cross2_enc="$WORKDIR/cross2_enc"
 cross2_dec="$WORKDIR/cross2_dec"
 mkdir -p "$cross2_enc" "$cross2_dec"
-$FC hybrid -i "$WORKDIR/small.txt" -o "$cross2_enc" -k "$PUB4096" 2>/dev/null
+$FC hybrid -i "$WORKDIR/small.txt" -o "$cross2_enc" -k "$PUB" 2>/dev/null
 run_test_expect_fail "cross: hyb-encrypted file via symmetric rejects" \
     $FC symmetric -i "$cross2_enc"/small.fcr -o "$cross2_dec" -p "$PASS"
 
@@ -482,17 +483,17 @@ echo ""
 # ──────────────────────────────────────────────
 echo "--- Phase 8: Additional Robustness ---"
 
-# Malformed PEM key
-malformed_key="$WORKDIR/malformed.pem"
-printf 'this is not a valid PEM key file at all' > "$malformed_key"
+# Malformed key file
+malformed_key="$WORKDIR/malformed.key"
+printf 'this is not a valid key file at all' > "$malformed_key"
 mal_enc="$WORKDIR/mal_enc"
 mal_dec="$WORKDIR/mal_dec"
 mkdir -p "$mal_enc" "$mal_dec"
-run_test_expect_fail "hyb: malformed PEM key rejects (encrypt)" \
+run_test_expect_fail "hyb: malformed key file rejects (encrypt)" \
     $FC hybrid -i "$WORKDIR/small.txt" -o "$mal_enc" -k "$malformed_key"
 # Also try malformed key for decryption
-$FC hybrid -i "$WORKDIR/small.txt" -o "$mal_enc" -k "$PUB4096" 2>/dev/null
-run_test_expect_fail "hyb: malformed PEM key rejects (decrypt)" \
+$FC hybrid -i "$WORKDIR/small.txt" -o "$mal_enc" -k "$PUB" 2>/dev/null
+run_test_expect_fail "hyb: malformed key file rejects (decrypt)" \
     $FC hybrid -i "$mal_enc"/small.fcr -o "$mal_dec" -k "$malformed_key" -p "$PASS"
 
 # Key overwrite (keygen into directory with existing keys)
@@ -537,14 +538,18 @@ open('$WORKDIR/corrupt_hdrlen.fcr', 'wb').write(data)
 run_test_expect_fail "sym: corrupted header length rejects" \
     $FC symmetric -i "$WORKDIR/corrupt_hdrlen.fcr" -o "$hdr_dec" -p "$PASS"
 
-# Flip HMAC tag (last 32 bytes of header — flip near end of file header area)
+# Corrupt the same salt byte in all three replicated copies so majority vote
+# cannot recover the original, causing HMAC mismatch.
+# Symmetric header: [prefix(8)] [encoded_salt(97)] ...
+# encoded_salt layout: [padding(1)] [copy0(32)] [copy1(32)] [copy2(32)]
 cp "$HDR_FILE" "$WORKDIR/corrupt_hmac.fcr"
 python3 -c "
 data = bytearray(open('$WORKDIR/corrupt_hmac.fcr', 'rb').read())
-# HMAC tag is authenticated; flip bytes just after the 8-byte prefix
-# in the replicated header area to trigger HMAC mismatch
-for i in range(32):
-    data[8 + i] ^= 0xFF
+base = 8  # start of encoded_salt
+byte_pos = 5  # which salt byte to corrupt
+data[base + 1 + byte_pos] ^= 0xFF           # copy 0
+data[base + 1 + 32 + byte_pos] ^= 0xFF      # copy 1
+data[base + 1 + 64 + byte_pos] ^= 0xFF      # copy 2
 open('$WORKDIR/corrupt_hmac.fcr', 'wb').write(data)
 "
 run_test_expect_fail "sym: corrupted header data (HMAC mismatch) rejects" \
@@ -632,7 +637,7 @@ for i in $(seq 1 4); do
     mkdir -p "$CONC_DIR/mix_sym_enc_$i" "$CONC_DIR/mix_hyb_enc_$i"
     $FC symmetric -i "$CONC_DIR/src_$i.bin" -o "$CONC_DIR/mix_sym_enc_$i" -p "$PASS" 2>/dev/null &
     pids+=($!)
-    $FC hybrid -i "$CONC_DIR/src_$((i+4)).bin" -o "$CONC_DIR/mix_hyb_enc_$i" -k "$PUB4096" 2>/dev/null &
+    $FC hybrid -i "$CONC_DIR/src_$((i+4)).bin" -o "$CONC_DIR/mix_hyb_enc_$i" -k "$PUB" 2>/dev/null &
     pids+=($!)
 done
 for pid in "${pids[@]}"; do
@@ -784,8 +789,8 @@ fi
 det_enc3="$WORKDIR/det_enc3"
 det_enc4="$WORKDIR/det_enc4"
 mkdir -p "$det_enc3" "$det_enc4"
-$FC hybrid -i "$WORKDIR/small.txt" -o "$det_enc3" -k "$PUB4096" 2>/dev/null
-$FC hybrid -i "$WORKDIR/small.txt" -o "$det_enc4" -k "$PUB4096" 2>/dev/null
+$FC hybrid -i "$WORKDIR/small.txt" -o "$det_enc3" -k "$PUB" 2>/dev/null
+$FC hybrid -i "$WORKDIR/small.txt" -o "$det_enc4" -k "$PUB" 2>/dev/null
 
 echo -n "[$((TOTAL + 1))] hyb: encryptions produce different ciphertexts (non-deterministic) ... "
 TOTAL=$((TOTAL + 1))

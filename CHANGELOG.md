@@ -5,6 +5,9 @@ All notable changes to FerroCrypt are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Testing:** Cargo-fuzz harnesses for symmetric and hybrid decryption (`fuzz_symmetric_decrypt`, `fuzz_hybrid_decrypt`)
+- **Testing:** Malformed-header tests (empty files, mid-header truncation, oversized/undersized `header_len`, all-zero header body) for both symmetric and hybrid
+- **Testing:** Ciphertext mutation tests (bit flips, mid-stream truncation, appended bytes) confirming AEAD rejects tampered ciphertext
 - **Desktop app:** Slint-based desktop GUI (`ferrocrypt-desktop`) with two tabs: Symmetric and Hybrid. Key generation is inline within the Hybrid tab via a "Use existing key" / "Create new key pair" sub-selector. After generating a key pair, the app auto-transitions to Hybrid Encrypt with the public key pre-filled. Includes "Save As" dialog for custom output filenames, auto-detection of encryption mode from file headers, and conflict warnings.
 - **Desktop app:** Password strength indicator below the password field (visible in Symmetric Encrypt and Key Gen modes). Scoring adapted from Proton Pass — uses length-based scoring with character-class penalties, consecutive/progressive sequence detection, common password stripping, and passphrase detection.
 - **Library:** `save_as` parameter on `symmetric_encryption` and `hybrid_encryption` — when `Some`, writes the encrypted output to the exact path instead of deriving `<stem>.fcr` inside the output directory. `on_progress` callback parameter for stage descriptions.

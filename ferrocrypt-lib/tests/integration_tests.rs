@@ -1703,6 +1703,456 @@ fn test_output_file_none_uses_default_name() -> Result<(), CryptoError> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Malformed-header tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_symmetric_empty_file_rejected() {
+    let test_dir = setup_test_dir("sym_empty_file");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&decrypt_dir).unwrap();
+
+    let empty_file = test_dir.join("empty.fcr");
+    fs::write(&empty_file, b"").unwrap();
+
+    let passphrase = SecretString::from("test".to_string());
+    let result = symmetric_encryption(
+        empty_file.to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &passphrase,
+        None,
+        |_| {},
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_hybrid_empty_file_rejected() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("hyb_empty_file");
+    let keys_dir = test_dir.join("keys");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&keys_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    let key_pass = SecretString::from("kp".to_string());
+    generate_asymmetric_key_pair(2048, &key_pass, keys_dir.to_str().unwrap(), |_| {})?;
+
+    let priv_key = keys_dir.join("rsa-2048-priv-key.pem");
+    let empty_file = test_dir.join("empty.fcr");
+    fs::write(&empty_file, b"").unwrap();
+
+    let result = hybrid_encryption(
+        empty_file.to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        priv_key.to_str().unwrap(),
+        &key_pass,
+        None,
+        |_| {},
+    );
+    assert!(result.is_err());
+    Ok(())
+}
+
+#[test]
+fn test_symmetric_truncated_mid_header() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("sym_truncated_mid_header");
+    let input_file = test_dir.join("secret.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    create_test_file(&input_file, "Truncation mid-header test");
+    let passphrase = SecretString::from("pass".to_string());
+
+    symmetric_encryption(
+        input_file.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        &passphrase,
+        None,
+        |_| {},
+    )?;
+
+    let encrypted_path = encrypt_dir.join("secret.fcr");
+    let data = fs::read(&encrypted_path)?;
+
+    // Truncate in the middle of the salt field (after prefix but before header ends)
+    let truncated = &data[..12];
+    fs::write(&encrypted_path, truncated)?;
+
+    let result = symmetric_encryption(
+        encrypted_path.to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &passphrase,
+        None,
+        |_| {},
+    );
+    assert!(result.is_err());
+    Ok(())
+}
+
+#[test]
+fn test_symmetric_oversized_header_len() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("sym_oversized_header_len");
+    let input_file = test_dir.join("secret.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    create_test_file(&input_file, "Oversized header_len test");
+    let passphrase = SecretString::from("pass".to_string());
+
+    symmetric_encryption(
+        input_file.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        &passphrase,
+        None,
+        |_| {},
+    )?;
+
+    // Set header_len to 0xFFFF — far beyond the actual file size
+    let encrypted_path = encrypt_dir.join("secret.fcr");
+    let mut data = fs::read(&encrypted_path)?;
+    data[4] = 0xFF;
+    data[5] = 0xFF;
+    fs::write(&encrypted_path, &data)?;
+
+    let result = symmetric_encryption(
+        encrypted_path.to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &passphrase,
+        None,
+        |_| {},
+    );
+    assert!(result.is_err());
+    Ok(())
+}
+
+#[test]
+fn test_symmetric_header_len_too_small() {
+    let test_dir = setup_test_dir("sym_header_len_too_small");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&decrypt_dir).unwrap();
+
+    // Build a prefix with header_len = 4, which is less than HEADER_PREFIX_SIZE (8)
+    let mut data = vec![0xFC, 0x53, 2, 0, 0, 4, 0, 0];
+    data.extend_from_slice(&[0u8; 64]); // trailing junk
+
+    let file = test_dir.join("bad_hlen.fcr");
+    fs::write(&file, &data).unwrap();
+
+    let passphrase = SecretString::from("test".to_string());
+    let result = symmetric_encryption(
+        file.to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &passphrase,
+        None,
+        |_| {},
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_symmetric_all_zero_header_body() {
+    let test_dir = setup_test_dir("sym_zero_header_body");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&decrypt_dir).unwrap();
+
+    // Valid prefix magic/type/version, plausible header_len, but zero-filled fields
+    let header_len: u16 = 600;
+    let mut data = vec![
+        0xFC,
+        0x53,
+        2,
+        0,
+        (header_len >> 8) as u8,
+        (header_len & 0xFF) as u8,
+        0,
+        0,
+    ];
+    data.extend_from_slice(&[0u8; 600]);
+
+    let file = test_dir.join("zeroed.fcr");
+    fs::write(&file, &data).unwrap();
+
+    let passphrase = SecretString::from("test".to_string());
+    let result = symmetric_encryption(
+        file.to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &passphrase,
+        None,
+        |_| {},
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_hybrid_truncated_mid_header() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("hyb_truncated_mid_header");
+    let keys_dir = test_dir.join("keys");
+    let input_file = test_dir.join("secret.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&keys_dir)?;
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    let key_pass = SecretString::from("kp".to_string());
+    generate_asymmetric_key_pair(2048, &key_pass, keys_dir.to_str().unwrap(), |_| {})?;
+
+    let pub_key = keys_dir.join("rsa-2048-pub-key.pem");
+    let priv_key = keys_dir.join("rsa-2048-priv-key.pem");
+    let empty_pass = SecretString::from("".to_string());
+
+    create_test_file(&input_file, "Hybrid truncation mid-header");
+
+    hybrid_encryption(
+        input_file.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        pub_key.to_str().unwrap(),
+        &empty_pass,
+        None,
+        |_| {},
+    )?;
+
+    let encrypted_path = encrypt_dir.join("secret.fcr");
+    let data = fs::read(&encrypted_path)?;
+
+    // Truncate in the middle of the RSA-encrypted key field
+    let truncated = &data[..20];
+    fs::write(&encrypted_path, truncated)?;
+
+    let result = hybrid_encryption(
+        encrypted_path.to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        priv_key.to_str().unwrap(),
+        &key_pass,
+        None,
+        |_| {},
+    );
+    assert!(result.is_err());
+    Ok(())
+}
+
+#[test]
+fn test_hybrid_oversized_header_len() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("hyb_oversized_header_len");
+    let keys_dir = test_dir.join("keys");
+    let input_file = test_dir.join("secret.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&keys_dir)?;
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    let key_pass = SecretString::from("kp".to_string());
+    generate_asymmetric_key_pair(2048, &key_pass, keys_dir.to_str().unwrap(), |_| {})?;
+
+    let pub_key = keys_dir.join("rsa-2048-pub-key.pem");
+    let priv_key = keys_dir.join("rsa-2048-priv-key.pem");
+    let empty_pass = SecretString::from("".to_string());
+
+    create_test_file(&input_file, "Hybrid oversized header_len");
+
+    hybrid_encryption(
+        input_file.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        pub_key.to_str().unwrap(),
+        &empty_pass,
+        None,
+        |_| {},
+    )?;
+
+    let encrypted_path = encrypt_dir.join("secret.fcr");
+    let mut data = fs::read(&encrypted_path)?;
+    data[4] = 0xFF;
+    data[5] = 0xFF;
+    fs::write(&encrypted_path, &data)?;
+
+    let result = hybrid_encryption(
+        encrypted_path.to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        priv_key.to_str().unwrap(),
+        &key_pass,
+        None,
+        |_| {},
+    );
+    assert!(result.is_err());
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Ciphertext mutation tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_symmetric_ciphertext_bit_flip_detected() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("sym_ciphertext_flip");
+    let input_file = test_dir.join("secret.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    create_test_file(&input_file, "AEAD ciphertext integrity test");
+    let passphrase = SecretString::from("ct_flip_pass".to_string());
+
+    symmetric_encryption(
+        input_file.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        &passphrase,
+        None,
+        |_| {},
+    )?;
+
+    let encrypted_path = encrypt_dir.join("secret.fcr");
+    let mut data = fs::read(&encrypted_path)?;
+
+    // Flip a byte well past the header, in the ciphertext body
+    let flip_offset = data.len() - 10;
+    data[flip_offset] ^= 0xFF;
+    fs::write(&encrypted_path, &data)?;
+
+    let result = symmetric_encryption(
+        encrypted_path.to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &passphrase,
+        None,
+        |_| {},
+    );
+    assert!(result.is_err());
+    Ok(())
+}
+
+#[test]
+fn test_hybrid_ciphertext_bit_flip_detected() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("hyb_ciphertext_flip");
+    let keys_dir = test_dir.join("keys");
+    let input_file = test_dir.join("secret.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&keys_dir)?;
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    let key_pass = SecretString::from("ct_flip_key".to_string());
+    generate_asymmetric_key_pair(2048, &key_pass, keys_dir.to_str().unwrap(), |_| {})?;
+
+    let pub_key = keys_dir.join("rsa-2048-pub-key.pem");
+    let priv_key = keys_dir.join("rsa-2048-priv-key.pem");
+    let empty_pass = SecretString::from("".to_string());
+
+    create_test_file(&input_file, "Hybrid AEAD ciphertext integrity test");
+
+    hybrid_encryption(
+        input_file.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        pub_key.to_str().unwrap(),
+        &empty_pass,
+        None,
+        |_| {},
+    )?;
+
+    let encrypted_path = encrypt_dir.join("secret.fcr");
+    let mut data = fs::read(&encrypted_path)?;
+
+    // Flip a byte in the ciphertext body (well past the header)
+    let flip_offset = data.len() - 10;
+    data[flip_offset] ^= 0xFF;
+    fs::write(&encrypted_path, &data)?;
+
+    let result = hybrid_encryption(
+        encrypted_path.to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        priv_key.to_str().unwrap(),
+        &key_pass,
+        None,
+        |_| {},
+    );
+    assert!(result.is_err());
+    Ok(())
+}
+
+#[test]
+fn test_symmetric_ciphertext_truncation_detected() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("sym_ciphertext_trunc");
+    let input_file = test_dir.join("secret.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    // Use enough data to span multiple 64 KiB chunks
+    let content = "A".repeat(128 * 1024);
+    create_test_file(&input_file, &content);
+    let passphrase = SecretString::from("trunc_pass".to_string());
+
+    symmetric_encryption(
+        input_file.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        &passphrase,
+        None,
+        |_| {},
+    )?;
+
+    let encrypted_path = encrypt_dir.join("secret.fcr");
+    let data = fs::read(&encrypted_path)?;
+
+    // Truncate after the first ciphertext chunk but before the final chunk
+    let half = data.len() / 2;
+    fs::write(&encrypted_path, &data[..half])?;
+
+    let result = symmetric_encryption(
+        encrypted_path.to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &passphrase,
+        None,
+        |_| {},
+    );
+    assert!(result.is_err());
+    Ok(())
+}
+
+#[test]
+fn test_symmetric_ciphertext_appended_bytes_detected() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("sym_ciphertext_append");
+    let input_file = test_dir.join("secret.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    create_test_file(&input_file, "Append detection test");
+    let passphrase = SecretString::from("append_pass".to_string());
+
+    symmetric_encryption(
+        input_file.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        &passphrase,
+        None,
+        |_| {},
+    )?;
+
+    let encrypted_path = encrypt_dir.join("secret.fcr");
+    let mut data = fs::read(&encrypted_path)?;
+
+    // Append extra bytes after the ciphertext
+    data.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+    fs::write(&encrypted_path, &data)?;
+
+    let result = symmetric_encryption(
+        encrypted_path.to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &passphrase,
+        None,
+        |_| {},
+    );
+    assert!(result.is_err());
+    Ok(())
+}
+
 #[ctor::dtor]
 fn cleanup() {
     cleanup_test_workspace();

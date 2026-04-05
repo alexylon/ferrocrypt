@@ -9,4 +9,5 @@ members = [
 exclude = [
     "experiments",
     "ferrocrypt-desktop",
+    "ferrocrypt-lib/fuzz",
 ]

@@ -7,3 +7,4 @@ cargo fmt --all
 (cd ferrocrypt-desktop && cargo fmt)
 (cd experiments/ferrocrypt-desktop-dioxus && cargo fmt)
 (cd experiments/ferrocrypt-desktop-tauri/src-tauri && cargo fmt)
+(cd ferrocrypt-lib/fuzz && cargo fmt)

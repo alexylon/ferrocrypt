@@ -276,10 +276,12 @@ pub fn validate_key_file_header(
             flags
         )));
     }
-    if data.len() < KEY_FILE_HEADER_SIZE + data_len {
-        return Err(CryptoError::EncryptionDecryptionError(
-            "Key file is truncated".to_string(),
-        ));
+    if data.len() != KEY_FILE_HEADER_SIZE + data_len {
+        return Err(CryptoError::EncryptionDecryptionError(format!(
+            "Key file has unexpected size ({}, expected {})",
+            data.len(),
+            KEY_FILE_HEADER_SIZE + data_len
+        )));
     }
     Ok(())
 }

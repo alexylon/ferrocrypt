@@ -139,7 +139,7 @@ ferrocrypt> quit
 |---|---|
 | `-o, --outpath` | Output directory for the key pair |
 | `-p, --passphrase` | Passphrase to encrypt the private key |
-| `-b, --bit-size` | RSA key size in bits (default: `4096`) |
+| `-b, --bit-size` | RSA key size in bits (minimum: `2048`, default: `4096`) |
 
 ## Desktop App
 

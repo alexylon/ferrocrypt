@@ -26,6 +26,10 @@ const KEY_SIZE: usize = 32;
 const HMAC_KEY_SIZE: usize = 32;
 // Both keys are packed into a single RSA envelope: [enc_key | hmac_key]
 const COMBINED_KEY_SIZE: usize = KEY_SIZE + HMAC_KEY_SIZE;
+// OAEP-SHA256 requires modulus_bytes >= payload + 2*hash_len + 2.
+// For COMBINED_KEY_SIZE=64: 64 + 64 + 2 = 130 bytes = 1040 bits.
+// We enforce 2048 bits as the security-practical minimum.
+const MIN_RSA_BITS: u32 = 2048;
 
 pub fn encrypt_file(
     input_path: &str,
@@ -57,6 +61,7 @@ pub fn encrypt_file(
         let pub_key_str = fs::read_to_string(rsa_public_pem)?;
         let encrypted_combined_key: Vec<u8> = match encrypt_key(&combined_key, &pub_key_str) {
             Ok(encrypted_combined_key) => encrypted_combined_key,
+            Err(e @ CryptoError::EncryptionDecryptionError(_)) => return Err(e),
             Err(_) => {
                 return Err(CryptoError::EncryptionDecryptionError(
                     "The provided public key is not valid".to_string(),
@@ -247,6 +252,13 @@ fn get_public_key_size_from_private_key(
 
 fn encrypt_key(key_data: &[u8], rsa_public_pem: &str) -> Result<Vec<u8>, CryptoError> {
     let rsa = Rsa::public_key_from_pem(rsa_public_pem.as_bytes())?;
+    let key_bits = rsa.size() * 8;
+    if key_bits < MIN_RSA_BITS {
+        return Err(CryptoError::EncryptionDecryptionError(format!(
+            "RSA public key is {key_bits} bits, which is too small for OAEP encryption \
+             of the {COMBINED_KEY_SIZE}-byte envelope (minimum is {MIN_RSA_BITS} bits)"
+        )));
+    }
     let pkey = PKey::from_rsa(rsa)?;
     let mut encrypter = Encrypter::new(&pkey)?;
     encrypter.set_rsa_padding(Padding::PKCS1_OAEP)?;
@@ -295,6 +307,11 @@ pub fn generate_asymmetric_key_pair(
     output_dir: impl AsRef<Path>,
     on_progress: &dyn Fn(&str),
 ) -> Result<String, CryptoError> {
+    if bit_size < MIN_RSA_BITS {
+        return Err(CryptoError::EncryptionDecryptionError(format!(
+            "RSA key size {bit_size} bits is too small (minimum is {MIN_RSA_BITS} bits)"
+        )));
+    }
     let output_dir = output_dir.as_ref();
     fs::create_dir_all(output_dir)?;
     on_progress("Generating key pair\u{2026}");

@@ -224,6 +224,19 @@ fn test_symmetric_encrypt_decrypt_multi_chunk_file() -> Result<(), CryptoError> 
 }
 
 #[test]
+fn test_hybrid_keygen_rejects_small_key_size() {
+    let test_dir = setup_test_dir("keygen_small_key");
+    let passphrase = SecretString::from("pass".to_string());
+
+    let err = generate_asymmetric_key_pair(1024, &passphrase, test_dir.to_str().unwrap(), |_| {})
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("too small"),
+        "expected 'too small' error, got: {err}"
+    );
+}
+
+#[test]
 fn test_hybrid_keygen_encrypt_decrypt_file() -> Result<(), CryptoError> {
     let test_dir = setup_test_dir("hybrid_full_workflow");
     let keys_dir = test_dir.join("keys");

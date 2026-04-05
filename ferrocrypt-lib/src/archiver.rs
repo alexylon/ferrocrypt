@@ -110,6 +110,8 @@ pub fn unarchive<R: Read>(reader: R, output_dir: &str) -> Result<String, CryptoE
         let full_path = Path::new(output_dir).join(&path);
         let entry_type = entry.header().entry_type();
 
+        // Only extract dirs and regular files; symlinks, hardlinks, and
+        // special entries are intentionally skipped to prevent symlink attacks.
         if entry_type.is_dir() {
             fs::create_dir_all(&full_path)?;
         } else if entry_type.is_file() {

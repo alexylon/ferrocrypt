@@ -40,6 +40,20 @@ const SECRET_KEY_FILE_SIZE: usize =
 const PUBLIC_KEY_FILENAME: &str = "public.key";
 const SECRET_KEY_FILENAME: &str = "secret.key";
 
+/// Zeroizes the entire `SecretKey` struct including the raw `bytes` field.
+/// Upstream `Drop` only zeroizes the `scalar` field, leaving the 32-byte
+/// key material in the `bytes` field intact.
+fn zeroize_secret_key(key: &mut SecretKey) {
+    // SAFETY: SecretKey is a plain data struct ([u8; 32] + Scalar) with no
+    // pointer or reference fields. Writing zeros via the zeroize crate's
+    // volatile writes is safe and prevents the compiler from eliding them.
+    unsafe {
+        let ptr = key as *mut SecretKey as *mut u8;
+        let len = std::mem::size_of::<SecretKey>();
+        std::slice::from_raw_parts_mut(ptr, len).zeroize();
+    }
+}
+
 pub fn encrypt_file(
     input_path: &str,
     output_dir: &str,
@@ -146,7 +160,7 @@ pub fn decrypt_file(
     println!("\nDecrypting ...");
     on_progress("Decrypting\u{2026}");
 
-    let recipient_secret = read_secret_key(secret_key_path, passphrase)?;
+    let mut recipient_secret = read_secret_key(secret_key_path, passphrase)?;
 
     let mut encrypted_file = std::fs::File::open(input_path)?;
 
@@ -193,6 +207,7 @@ pub fn decrypt_file(
     })?;
 
     let mut decrypted_combined_key = open_envelope(&envelope, &recipient_secret)?;
+    zeroize_secret_key(&mut recipient_secret);
 
     let result = (|| -> Result<String, CryptoError> {
         let hmac_key = &decrypted_combined_key[KEY_SIZE..COMBINED_KEY_SIZE];
@@ -305,9 +320,10 @@ fn seal_envelope(
     combined_key: &[u8],
     recipient_public: &PublicKey,
 ) -> Result<[u8; ENVELOPE_SIZE], CryptoError> {
-    let ephemeral_secret = SecretKey::generate(&mut OsRng);
+    let mut ephemeral_secret = SecretKey::generate(&mut OsRng);
     let ephemeral_public = ephemeral_secret.public_key();
     let chacha_box = ChaChaBox::new(recipient_public, &ephemeral_secret);
+    zeroize_secret_key(&mut ephemeral_secret);
     let nonce = ChaChaBox::generate_nonce(&mut OsRng);
     let ciphertext = chacha_box.encrypt(&nonce, combined_key).map_err(|_| {
         CryptoError::EncryptionDecryptionError("Envelope encryption failed".to_string())
@@ -369,7 +385,7 @@ pub fn generate_key_pair(
     fs::create_dir_all(output_dir)?;
     on_progress("Generating key pair\u{2026}");
 
-    let secret_key = SecretKey::generate(&mut OsRng);
+    let mut secret_key = SecretKey::generate(&mut OsRng);
     let public_key = secret_key.public_key();
 
     // Encrypt secret key at rest with passphrase via Argon2id + XChaCha20-Poly1305
@@ -385,6 +401,7 @@ pub fn generate_key_pair(
     let cipher = XChaCha20Poly1305::new(derived_key.as_slice().into());
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
     let raw_secret = Zeroizing::new(secret_key.to_bytes());
+    zeroize_secret_key(&mut secret_key);
     let encrypted_secret = cipher.encrypt(&nonce, raw_secret.as_slice()).map_err(|_| {
         CryptoError::EncryptionDecryptionError("Failed to encrypt secret key".to_string())
     })?;

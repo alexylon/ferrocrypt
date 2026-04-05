@@ -102,7 +102,12 @@ pub fn skip_unknown_header_bytes(
     bytes_read_after_prefix: usize,
 ) -> Result<(), CryptoError> {
     let expected_after_prefix = (header_len as usize).saturating_sub(HEADER_PREFIX_SIZE);
-    let to_skip = expected_after_prefix.saturating_sub(bytes_read_after_prefix);
+    if bytes_read_after_prefix > expected_after_prefix {
+        return Err(CryptoError::EncryptionDecryptionError(
+            "Header is corrupted (read more bytes than header declares)".to_string(),
+        ));
+    }
+    let to_skip = expected_after_prefix - bytes_read_after_prefix;
     if to_skip > 0 {
         let skipped =
             io::copy(&mut reader.take(to_skip as u64), &mut io::sink()).map_err(|_| {

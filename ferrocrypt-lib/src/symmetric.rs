@@ -209,16 +209,6 @@ pub fn decrypt_file(
     on_progress("Deriving key\u{2026}");
     let (enc_key, hmac_key) = derive_keys(passphrase, &salt, &hkdf_salt)?;
 
-    let key_hash: [u8; KEY_SIZE] = sha3_32_hash(enc_key.as_ref())?;
-    let key_correct =
-        constant_time_compare_256_bit(&key_hash, stored_key_hash.as_slice().try_into()?);
-
-    if !key_correct {
-        return Err(CryptoError::EncryptionDecryptionError(
-            "The provided password is incorrect".to_string(),
-        ));
-    }
-
     let mut hmac_message = Vec::with_capacity(
         prefix_bytes.len() + salt.len() + hkdf_salt.len() + nonce.len() + stored_key_hash.len(),
     );
@@ -227,7 +217,18 @@ pub fn decrypt_file(
     hmac_message.extend_from_slice(&hkdf_salt);
     hmac_message.extend_from_slice(&nonce);
     hmac_message.extend_from_slice(&stored_key_hash);
-    hmac_sha3_256_verify(hmac_key.as_ref(), &hmac_message, &hmac_tag)?;
+
+    if let Err(hmac_err) = hmac_sha3_256_verify(hmac_key.as_ref(), &hmac_message, &hmac_tag) {
+        let key_hash: [u8; KEY_SIZE] = sha3_32_hash(enc_key.as_ref())?;
+        let key_correct =
+            constant_time_compare_256_bit(&key_hash, stored_key_hash.as_slice().try_into()?);
+        if !key_correct {
+            return Err(CryptoError::EncryptionDecryptionError(
+                "The provided password is incorrect".to_string(),
+            ));
+        }
+        return Err(hmac_err);
+    }
 
     println!("Decrypting ...");
     on_progress("Decrypting\u{2026}");

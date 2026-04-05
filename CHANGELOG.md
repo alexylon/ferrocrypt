@@ -35,6 +35,7 @@ All notable changes to FerroCrypt are documented in this file.
 - Replaced bincode header serialization with raw byte layout for long-term format stability
 
 ### Fixed
+- Symmetric decryption now verifies the header HMAC before the key-hash check, so header tampering is reported as an authentication failure rather than "wrong password"
 - RSA key size is now validated against the minimum required for OAEP-SHA256 encryption of the 64-byte envelope. `generate_asymmetric_key_pair` rejects key sizes below 2048 bits upfront, and `encrypt_file` rejects undersized public keys with a clear error instead of a generic "not valid" message.
 - Private key files are now written with `0o600` (owner-only) permissions on POSIX systems instead of inheriting the umask default
 - HMAC header authentication now covers decoded (canonical) field values instead of raw triple-replicated bytes, so single-copy corruption recovered by majority vote no longer causes HMAC verification failure

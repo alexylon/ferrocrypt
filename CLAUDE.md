@@ -84,7 +84,8 @@ Decryption reverses: read header → derive/decrypt keys → verify HMAC → Dec
 - Avoid magic strings and numbers — use named constants
 - Keep code DRY — extract shared logic into helpers
 - Handle unwraps — prefer returning errors or using safe alternatives
-- Double-check the newly implemented logic using adversarial thinking.
+- Double-check the newly implemented logic using adversarial thinking
+- Double-check if the newly implemented changes are future-proof
 - Tests should be self-contained and only cover important behavior
 - After each new feature, update README.md and CHANGELOG.md (under `[Unreleased]`)
 - After each session, double-check all changes against these guidelines before finishing

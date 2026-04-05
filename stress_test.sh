@@ -96,8 +96,8 @@ run_test "keygen: verify keys exist" \
     test -f "$KEYS/public.key" -a -f "$KEYS/secret.key"
 
 run_test "keygen: verify key file sizes" \
-    test "$(stat -f%z "$KEYS/secret.key" 2>/dev/null || stat -c%s "$KEYS/secret.key" 2>/dev/null)" -eq 104 -a \
-         "$(stat -f%z "$KEYS/public.key" 2>/dev/null || stat -c%s "$KEYS/public.key" 2>/dev/null)" -eq 32
+    test "$(stat -f%z "$KEYS/secret.key" 2>/dev/null || stat -c%s "$KEYS/secret.key" 2>/dev/null)" -eq 112 -a \
+         "$(stat -f%z "$KEYS/public.key" 2>/dev/null || stat -c%s "$KEYS/public.key" 2>/dev/null)" -eq 40
 
 PUB="$KEYS/public.key"
 SECRET_KEY="$KEYS/secret.key"

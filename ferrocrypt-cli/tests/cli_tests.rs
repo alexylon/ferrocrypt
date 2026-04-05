@@ -222,8 +222,8 @@ fn test_cli_keygen() {
     let secret_key_size = fs::metadata(keys_dir.join("secret.key")).unwrap().len();
     let pub_key_size = fs::metadata(keys_dir.join("public.key")).unwrap().len();
 
-    assert_eq!(secret_key_size, 104);
-    assert_eq!(pub_key_size, 32);
+    assert_eq!(secret_key_size, 112);
+    assert_eq!(pub_key_size, 40);
 }
 
 #[test]

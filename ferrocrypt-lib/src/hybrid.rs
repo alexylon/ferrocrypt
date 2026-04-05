@@ -29,12 +29,12 @@ const ENVELOPE_TAG_SIZE: usize = 16;
 const ENVELOPE_CIPHERTEXT_SIZE: usize = COMBINED_KEY_SIZE + ENVELOPE_TAG_SIZE;
 const ENVELOPE_SIZE: usize = EPHEMERAL_PUB_SIZE + ENVELOPE_NONCE_SIZE + ENVELOPE_CIPHERTEXT_SIZE;
 
-const PUBLIC_KEY_FILE_SIZE: usize = 32;
+const PUBLIC_KEY_DATA_SIZE: usize = 32;
 const ARGON2_SALT_SIZE: usize = 32;
 const SECRET_KEY_NONCE_SIZE: usize = 24;
 const SECRET_KEY_TAG_SIZE: usize = 16;
 const SECRET_KEY_SIZE: usize = 32;
-const SECRET_KEY_FILE_SIZE: usize =
+const SECRET_KEY_DATA_SIZE: usize =
     ARGON2_SALT_SIZE + SECRET_KEY_NONCE_SIZE + SECRET_KEY_SIZE + SECRET_KEY_TAG_SIZE;
 
 const PUBLIC_KEY_FILENAME: &str = "public.key";
@@ -160,8 +160,8 @@ pub fn decrypt_file(
     println!("\nDecrypting ...");
     on_progress("Decrypting\u{2026}");
 
-    let mut recipient_secret = read_secret_key(secret_key_path, passphrase)?;
-
+    // Parse and validate the file header before loading the secret key —
+    // no point running Argon2id if the file is invalid.
     let mut encrypted_file = std::fs::File::open(input_path)?;
 
     let (prefix_bytes, header) =
@@ -206,8 +206,10 @@ pub fn decrypt_file(
         CryptoError::EncryptionDecryptionError("Envelope has unexpected length".to_string())
     })?;
 
-    let mut decrypted_combined_key = open_envelope(&envelope, &recipient_secret)?;
+    let mut recipient_secret = read_secret_key(secret_key_path, passphrase)?;
+    let envelope_result = open_envelope(&envelope, &recipient_secret);
     zeroize_secret_key(&mut recipient_secret);
+    let mut decrypted_combined_key = envelope_result?;
 
     let result = (|| -> Result<String, CryptoError> {
         let hmac_key = &decrypted_combined_key[KEY_SIZE..COMBINED_KEY_SIZE];
@@ -241,24 +243,11 @@ pub fn decrypt_file(
 
 fn read_public_key(path: impl AsRef<Path>) -> Result<PublicKey, CryptoError> {
     let data = fs::read(path.as_ref())?;
-    if data.len() == SECRET_KEY_FILE_SIZE {
-        return Err(CryptoError::EncryptionDecryptionError(
-            "Expected a public key file but got a secret key file. \
-             Use the public.key file for encryption."
-                .to_string(),
-        ));
-    }
-    if data.len() != PUBLIC_KEY_FILE_SIZE {
-        return Err(CryptoError::EncryptionDecryptionError(format!(
-            "Invalid public key file: expected {} bytes, got {}",
-            PUBLIC_KEY_FILE_SIZE,
-            data.len()
-        )));
-    }
-    let bytes: [u8; PUBLIC_KEY_FILE_SIZE] = data.as_slice().try_into().map_err(|_| {
-        CryptoError::EncryptionDecryptionError("Invalid public key file".to_string())
-    })?;
-    Ok(PublicKey::from(bytes))
+    format::validate_key_file_header(&data, format::KEY_FILE_TYPE_PUBLIC, PUBLIC_KEY_DATA_SIZE)?;
+    let body_start = format::KEY_FILE_HEADER_SIZE;
+    let mut key_bytes = [0u8; PUBLIC_KEY_DATA_SIZE];
+    key_bytes.copy_from_slice(&data[body_start..body_start + PUBLIC_KEY_DATA_SIZE]);
+    Ok(PublicKey::from(key_bytes))
 }
 
 fn read_secret_key(
@@ -266,26 +255,15 @@ fn read_secret_key(
     passphrase: &SecretString,
 ) -> Result<SecretKey, CryptoError> {
     let data = fs::read(path.as_ref())?;
-    if data.len() == PUBLIC_KEY_FILE_SIZE {
-        return Err(CryptoError::EncryptionDecryptionError(
-            "Expected a secret key file but got a public key file. \
-             Use the secret.key file for decryption."
-                .to_string(),
-        ));
-    }
-    if data.len() != SECRET_KEY_FILE_SIZE {
-        return Err(CryptoError::EncryptionDecryptionError(format!(
-            "Invalid secret key file: expected {} bytes, got {}",
-            SECRET_KEY_FILE_SIZE,
-            data.len()
-        )));
-    }
+    format::validate_key_file_header(&data, format::KEY_FILE_TYPE_SECRET, SECRET_KEY_DATA_SIZE)?;
 
-    let salt = &data[..ARGON2_SALT_SIZE];
+    let body_start = format::KEY_FILE_HEADER_SIZE;
+    let body = &data[body_start..body_start + SECRET_KEY_DATA_SIZE];
+    let salt = &body[..ARGON2_SALT_SIZE];
     let nonce = chacha20poly1305::XNonce::from_slice(
-        &data[ARGON2_SALT_SIZE..ARGON2_SALT_SIZE + SECRET_KEY_NONCE_SIZE],
+        &body[ARGON2_SALT_SIZE..ARGON2_SALT_SIZE + SECRET_KEY_NONCE_SIZE],
     );
-    let ciphertext = &data[ARGON2_SALT_SIZE + SECRET_KEY_NONCE_SIZE..];
+    let ciphertext = &body[ARGON2_SALT_SIZE + SECRET_KEY_NONCE_SIZE..];
 
     let config = argon2_config();
     let mut derived_key = Zeroizing::new(
@@ -409,7 +387,10 @@ pub fn generate_key_pair(
 
     derived_key.zeroize();
 
-    // Write secret key file: [salt | nonce | encrypted_secret_key]
+    let secret_header =
+        format::build_key_file_header(format::KEY_FILE_TYPE_SECRET, SECRET_KEY_DATA_SIZE as u16);
+
+    // Write secret key file: [header(8) | salt | nonce | encrypted_secret_key]
     let secret_key_path = output_dir.join(SECRET_KEY_FILENAME);
     let mut secret_key_opts = OpenOptions::new();
     secret_key_opts.write(true).create_new(true);
@@ -419,16 +400,20 @@ pub fn generate_key_pair(
         secret_key_opts.mode(0o600);
     }
     let mut secret_key_file = secret_key_opts.open(&secret_key_path)?;
+    secret_key_file.write_all(&secret_header)?;
     secret_key_file.write_all(&salt)?;
     secret_key_file.write_all(&nonce)?;
     secret_key_file.write_all(&encrypted_secret)?;
 
-    // Write public key file: raw 32 bytes
+    // Write public key file: [header(8) | raw 32 bytes]
+    let pub_header =
+        format::build_key_file_header(format::KEY_FILE_TYPE_PUBLIC, PUBLIC_KEY_DATA_SIZE as u16);
     let public_key_path = output_dir.join(PUBLIC_KEY_FILENAME);
     let mut public_key_file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&public_key_path)?;
+    public_key_file.write_all(&pub_header)?;
     public_key_file.write_all(public_key.as_bytes())?;
 
     let result = format!("Generated key pair in {}", output_dir.display());

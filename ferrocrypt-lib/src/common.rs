@@ -4,7 +4,7 @@ use std::path::Path;
 
 use chacha20poly1305::{XChaCha20Poly1305, aead::stream};
 use constant_time_eq::constant_time_eq_32;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha3::{Digest, Sha3_256};
 
 use crate::CryptoError;

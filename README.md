@@ -1,4 +1,4 @@
-<div align="center"><img src="ferrocrypt-desktop/assets/app_icon.png" style="width: 85px;" alt="clavirio"></div>
+<div align="center"><img src="ferrocrypt-desktop/assets/app_icon.png" style="width: 85px;" alt="FerroCrypt"></div>
 
 <h1 align="center"><code>FerroCrypt</code></h1>
 
@@ -181,7 +181,7 @@ Binary output: `target/release/ferrocrypt-desktop` (macOS/Linux) or `target\rele
 Select a file or folder, then choose the encryption mode. The app auto-detects encrypted files by reading the file header, regardless of extension.
 
 - **Symmetric** — Enter a password. The output path is auto-filled as `{name}.fcr` and can be changed with "Save As". Decryption uses a directory picker.
-- **Hybrid** — Use an existing public key to encrypt, or create a new key pair inline. After key generation, the app switches to encryption with the new public key pre-filled. Decryption requires a secret key + passphrase.
+- **Hybrid** — Use an existing public key to encrypt, or create a new key pair inline. After key generation, the app switches to encryption with the new public key pre-filled. The recipient's public key fingerprint is shown for out-of-band verification. Key files are validated on selection — invalid files show an error and disable the action button. Decryption requires a secret key + passphrase.
 
 A password strength indicator (based on [Proton Pass](https://github.com/protonpass/proton-pass-common) implementation) is shown during encryption and key generation.
 

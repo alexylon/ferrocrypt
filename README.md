@@ -12,16 +12,18 @@
 
 Multiplatform file encryption tool with CLI and desktop interfaces. Written in Rust.
 
-<div align="center"><img src="/assets/screenshot-1.png" width="400" alt="FerroCrypt"></div>
-
-<div align="center"><img src="/assets/screenshot-2.png" width="400" alt="FerroCrypt"></div>
+<div align="center">
+  <img src="/assets/screenshot-1.png" width="270" alt="FerroCrypt">&nbsp;&nbsp;
+  <img src="/assets/screenshot-2.png" width="270" alt="FerroCrypt">&nbsp;&nbsp;
+  <img src="/assets/screenshot-3.png" width="270" alt="FerroCrypt">
+</div>
 
 ## About
 
 FerroCrypt encrypts and decrypts files and directories. It supports two modes:
 
 - **Symmetric** — Password-based. Uses XChaCha20-Poly1305 with Argon2id key derivation and HKDF-SHA3-256 subkey expansion. Same password encrypts and decrypts.
-- **Hybrid** — Public/secret key based. Combines X25519 key agreement with XChaCha20-Poly1305 (data encryption). Each file gets a unique random key sealed with the recipient's public key. Decryption requires the secret key and its passphrase.
+- **Hybrid** — Public/private key based. Combines X25519 key agreement with XChaCha20-Poly1305 (data encryption). Each file gets a unique random key sealed with the recipient's public key. Decryption requires the private key and its passphrase.
 
 Both modes produce `.fcr` files. Decryption is based on magic bytes in the file header, not the file extension — renaming a file won't break anything.
 
@@ -71,7 +73,7 @@ cargo add ferrocrypt
 | Subcommand | Alias | Purpose |
 |---|---|---|
 | `symmetric` | `sym` | Encrypt/decrypt with a password |
-| `hybrid` | `hyb` | Encrypt/decrypt with public/secret keys |
+| `hybrid` | `hyb` | Encrypt/decrypt with public/private keys |
 | `keygen` | `gen` | Generate a key pair |
 | `fingerprint` | `fp` | Print a public key's SHA3-256 fingerprint |
 
@@ -102,8 +104,8 @@ ferrocrypt fingerprint ./keys/public.key
 # Encrypt with public key (prints recipient fingerprint)
 ferrocrypt hybrid -i secret.txt -o ./encrypted -k ./keys/public.key
 
-# Decrypt with secret key
-ferrocrypt hybrid -i ./encrypted/secret.fcr -o ./decrypted -k ./keys/secret.key -p "key password"
+# Decrypt with private key
+ferrocrypt hybrid -i ./encrypted/secret.fcr -o ./decrypted -k ./keys/private.key -p "key password"
 ```
 
 ### Interactive Mode
@@ -134,8 +136,8 @@ ferrocrypt> quit
 |---|---|
 | `-i, --inpath` | Input file or directory |
 | `-o, --outpath` | Output directory |
-| `-k, --key` | Public key (encrypt) or secret key (decrypt) |
-| `-p, --passphrase` | Secret key passphrase (decrypt only) |
+| `-k, --key` | Public key (encrypt) or private key (decrypt) |
+| `-p, --passphrase` | Private key passphrase (decrypt only) |
 | `-s, --save-as` | Custom output file path (encrypt only, optional) |
 
 #### `keygen`
@@ -143,7 +145,7 @@ ferrocrypt> quit
 | Flag | Description |
 |---|---|
 | `-o, --outpath` | Output directory for the key pair |
-| `-p, --passphrase` | Passphrase to encrypt the secret key |
+| `-p, --passphrase` | Passphrase to encrypt the private key |
 
 #### `fingerprint`
 
@@ -181,7 +183,7 @@ Binary output: `target/release/ferrocrypt-desktop` (macOS/Linux) or `target\rele
 Select a file or folder, then choose the encryption mode. The app auto-detects encrypted files by reading the file header, regardless of extension.
 
 - **Symmetric** — Enter a password. The output path is auto-filled as `{name}.fcr` and can be changed with "Save As". Decryption uses a directory picker.
-- **Hybrid** — Use an existing public key to encrypt, or create a new key pair inline. After key generation, the app switches to encryption with the new public key pre-filled. The recipient's public key fingerprint is shown for out-of-band verification. Key files are validated on selection — invalid files show an error and disable the action button. Decryption requires a secret key + passphrase.
+- **Hybrid** — Use an existing public key to encrypt, or create a new key pair inline. After key generation, the app switches to encryption with the new public key pre-filled. The recipient's public key fingerprint is shown for out-of-band verification. Key files are validated on selection — invalid files show an error and disable the action button. Decryption requires a private key + passphrase.
 
 A password strength indicator (based on [Proton Pass](https://github.com/protonpass/proton-pass-common) implementation) is shown during encryption and key generation.
 

@@ -31,7 +31,7 @@ const SECRET_KEY_NONCE_SIZE: usize = 24;
 const SECRET_KEY_SIZE: usize = 32;
 
 const PUBLIC_KEY_FILENAME: &str = "public.key";
-const SECRET_KEY_FILENAME: &str = "secret.key";
+const SECRET_KEY_FILENAME: &str = "private.key";
 
 /// Zeroizes the entire `SecretKey` struct including the raw `bytes` field.
 /// Upstream `Drop` only zeroizes the `scalar` field, leaving the 32-byte
@@ -150,7 +150,7 @@ pub fn decrypt_file(
 
     on_progress("Decrypting\u{2026}");
 
-    // Parse and validate the file header before loading the secret key —
+    // Parse and validate the file header before loading the private key —
     // no point running Argon2id if the file is invalid.
     let mut encrypted_file = std::fs::File::open(input_path)?;
 
@@ -258,7 +258,7 @@ fn read_secret_key(
 
     let cipher = XChaCha20Poly1305::new(derived_key.as_slice().into());
     let plaintext = cipher.decrypt(nonce, ciphertext).map_err(|_| {
-        CryptoError::CryptoOperation("Incorrect password or wrong secret key provided".to_string())
+        CryptoError::CryptoOperation("Incorrect password or wrong private key provided".to_string())
     })?;
 
     derived_key.zeroize();
@@ -335,7 +335,7 @@ pub fn generate_key_pair(
 ) -> Result<String, CryptoError> {
     if passphrase.expose_secret().is_empty() {
         return Err(CryptoError::InvalidInput(
-            "Passphrase must not be empty for secret key encryption".to_string(),
+            "Passphrase must not be empty for private key encryption".to_string(),
         ));
     }
     let output_dir = output_dir.as_ref();
@@ -345,7 +345,7 @@ pub fn generate_key_pair(
     let mut secret_key = SecretKey::generate(&mut OsRng);
     let public_key = secret_key.public_key();
 
-    // Encrypt secret key at rest with passphrase via Argon2id + XChaCha20-Poly1305
+    // Encrypt private key at rest with passphrase via Argon2id + XChaCha20-Poly1305
     let mut salt = [0u8; ARGON2_SALT_SIZE];
     OsRng.fill_bytes(&mut salt);
 
@@ -361,7 +361,7 @@ pub fn generate_key_pair(
     zeroize_secret_key(&mut secret_key);
     let encrypted_secret = cipher
         .encrypt(&nonce, raw_secret.as_slice())
-        .map_err(|_| CryptoError::CryptoOperation("Failed to encrypt secret key".to_string()))?;
+        .map_err(|_| CryptoError::CryptoOperation("Failed to encrypt private key".to_string()))?;
     drop(raw_secret);
 
     derived_key.zeroize();
@@ -369,7 +369,7 @@ pub fn generate_key_pair(
     let secret_header =
         format::build_key_file_header(format::KEY_FILE_TYPE_SECRET, SECRET_KEY_DATA_SIZE as u16);
 
-    // Write secret key file: [header(8) | salt | nonce | encrypted_secret_key]
+    // Write private key file: [header(8) | salt | nonce | encrypted_secret_key]
     let secret_key_path = output_dir.join(SECRET_KEY_FILENAME);
     let mut secret_key_opts = OpenOptions::new();
     secret_key_opts.write(true).create_new(true);

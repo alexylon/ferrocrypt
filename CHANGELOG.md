@@ -9,7 +9,7 @@ All notable changes to FerroCrypt are documented in this file.
 - **CLI:** `keygen` now prints the public key fingerprint after generation
 - **CLI:** `hybrid` encrypt now prints the recipient's key fingerprint before encryption
 - **CLI:** Progress messages (`Deriving key…`, `Encrypting…`, etc.) now printed to stderr
-- **CLI:** Secret key file validated before hybrid decryption
+- **CLI:** Private key file validated before hybrid decryption
 - **CLI:** `--save-as` / `-s` flag on `symmetric` and `hybrid` subcommands
 - **CLI:** Interactive mode aliases: `sym` for `symmetric`, `hyb` for `hybrid`, `gen` for `keygen`
 - **Desktop app:** Slint-based desktop GUI (`ferrocrypt-desktop`) with two tabs: Symmetric and Hybrid. Key generation is inline within the Hybrid tab. After generating a key pair, the app auto-transitions to Hybrid Encrypt with the public key pre-filled. Includes "Save As" dialog, auto-detection of encryption mode from file headers, and conflict warnings.
@@ -31,7 +31,7 @@ All notable changes to FerroCrypt are documented in this file.
 - **Breaking (library API):** Collapsed `_with_progress` variants into base functions — `symmetric_encryption`, `hybrid_encryption`, and `generate_key_pair` now accept `save_as` and `on_progress` directly
 - **Breaking (library API):** Removed `serde::Serialize` implementation from `CryptoError`
 - **Breaking (CLI):** Removed `--bit-size` / `-b` flag from `keygen` and `--large` / `-l` flag from encryption
-- Key files use `secret.key` (passphrase-protected via Argon2id + XChaCha20-Poly1305) and `public.key` (raw 32 bytes)
+- Key files use `private.key` (passphrase-protected via Argon2id + XChaCha20-Poly1305) and `public.key` (raw 32 bytes)
 - Encrypt vs decrypt determined by reading file header magic bytes, not file extension
 - Replaced `reed-solomon-simd` with simple triple replication (RS with 1 original shard was producing identical copies)
 - Replaced bincode header serialization with raw byte layout for long-term format stability
@@ -43,7 +43,7 @@ All notable changes to FerroCrypt are documented in this file.
 - **Stream truncation vulnerability:** symmetric decryption had a code path that skipped `decrypt_last()`, allowing truncation at chunk boundaries without detection
 - Symmetric decryption now verifies the HMAC before the key-hash check, so header tampering is reported as an authentication failure rather than "wrong password"
 - HMAC covers decoded (canonical) field values — single-copy replication corruption recovered by majority vote no longer causes HMAC verification failure
-- Secret key files written with `0o600` (owner-only) on POSIX systems
+- Private key files written with `0o600` (owner-only) on POSIX systems
 - Key material zeroized on all error paths (decrypted envelope keys, combined key buffer, HMAC failure early returns)
 - Hybrid plaintext buffers zeroized on drop
 - Length validation on decrypted envelope key material

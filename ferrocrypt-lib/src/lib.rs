@@ -35,7 +35,7 @@
 //!
 //! # fn run() -> Result<(), CryptoError> {
 //! // 1) Generate X25519 keypair files under ./keys
-//! //    The passphrase encrypts the secret key file at rest
+//! //    The passphrase encrypts the private key file at rest
 //! let passphrase = SecretString::from("my-key-pass".to_string());
 //! let _msg = generate_key_pair(&passphrase, "./keys", |_| {})?;
 //!
@@ -44,8 +44,8 @@
 //! let produced = hybrid_encryption("./payload", "./out", "./keys/public.key", &empty_passphrase, None, |_| {})?;
 //! println!("wrote {produced}");
 //!
-//! // 3) Decrypt out/payload.fcr using the secret key + passphrase to unlock it
-//! let restored = hybrid_encryption("./out/payload.fcr", "./restored", "./keys/secret.key", &passphrase, None, |_| {})?;
+//! // 3) Decrypt out/payload.fcr using the private key + passphrase to unlock it
+//! let restored = hybrid_encryption("./out/payload.fcr", "./restored", "./keys/private.key", &passphrase, None, |_| {})?;
 //! println!("restored to {restored}");
 //! # Ok(()) }
 //! # fn main() { run().unwrap(); }
@@ -57,7 +57,7 @@
 //!   Produces `.fcr` files.
 //! - **Hybrid**: Safer for distribution—encrypt with a recipient's public key
 //!   (no password needed for encryption); only their passphrase-protected
-//!   secret key can decrypt. Each file gets a unique random key. Produces
+//!   private key can decrypt. Each file gets a unique random key. Produces
 //!   `.fcr` files.
 //!
 //! ## Security notes
@@ -146,7 +146,7 @@ pub fn public_key_fingerprint(key_file: &str) -> Result<String, CryptoError> {
     Ok(bytes_to_hex(&hash))
 }
 
-/// Validates that a file is a well-formed FerroCrypt secret key file.
+/// Validates that a file is a well-formed FerroCrypt private key file.
 ///
 /// Checks magic byte, key type, version, algorithm, and exact file size.
 /// Does **not** attempt to decrypt the key (no passphrase needed).
@@ -225,8 +225,8 @@ pub fn symmetric_encryption(
 ///   `<name>.fcr`. The `passphrase` parameter is **ignored during encryption**
 ///   (pass empty string).
 /// - **Decrypt** when `input_path` is a FerroCrypt hybrid file: uses the
-///   secret key file at `key_file`. The `passphrase` is **required** to
-///   decrypt the secret key file (must match the passphrase used when
+///   private key file at `key_file`. The `passphrase` is **required** to
+///   decrypt the private key file (must match the passphrase used when
 ///   generating the keypair).
 ///
 /// `save_as` overrides the output file path during encryption (ignored for
@@ -242,7 +242,7 @@ pub fn symmetric_encryption(
 /// let result = hybrid_encryption("./secrets", "./encrypted", "./keys/public.key", &empty, None, |_| {})?;
 /// // Decrypt
 /// let passphrase = SecretString::from("my-key-passphrase".to_string());
-/// let result = hybrid_encryption("./encrypted/secrets.fcr", "./decrypted", "./keys/secret.key", &passphrase, None, |_| {})?;
+/// let result = hybrid_encryption("./encrypted/secrets.fcr", "./decrypted", "./keys/private.key", &passphrase, None, |_| {})?;
 /// # Ok::<(), ferrocrypt::CryptoError>(())
 /// ```
 pub fn hybrid_encryption(
@@ -265,8 +265,8 @@ pub fn hybrid_encryption(
 
 /// Generate and store an X25519 key pair for hybrid encryption.
 ///
-/// - Keys are written into `output_dir` as `secret.key` and `public.key`.
-/// - The `passphrase` **encrypts the secret key file** for protection at rest
+/// - Keys are written into `output_dir` as `private.key` and `public.key`.
+/// - The `passphrase` **encrypts the private key file** for protection at rest
 ///   (via Argon2id + XChaCha20-Poly1305); the same passphrase is needed later
 ///   when decrypting. The public key file is unencrypted.
 ///

@@ -144,7 +144,7 @@ export component AppWindow inherits Window {
         && conflict-warning == "" && status-ok == "" && status-err == "";
     property <string> button-text:
         mode == 0 || mode == 2 ? "Encrypt" :
-        mode == 1 || mode == 3 ? "Decrypt" : "Generate Key Pair";
+        mode == 1 || mode == 3 ? "Decrypt" : "Generate key pair";
     property <color> strength-color:
         password-strength <= 1 ? Theme.error :
         password-strength == 2 ? Theme.warning :
@@ -280,8 +280,8 @@ export component AppWindow inherits Window {
         Rectangle { height: 6px; }
         Text {
             text: mode == 0 || mode == 1 ? "Password-based encryption" :
-                  mode == 4 ? "Generate key pair" :
-                  "Public/secret key encryption";
+                  mode == 4 ? "Generate a new public/private key pair" :
+                  "Public/private key encryption";
             color: Theme.text-dim;
             font-size: 11.5px;
             horizontal-alignment: center;
@@ -294,7 +294,7 @@ export component AppWindow inherits Window {
             Rectangle { height: Theme.field-gap; }
 
             Text {
-                text: "Select file or folder";
+                text: "Source file or folder";
                 color: Theme.text-secondary;
                 font-size: Theme.label-size;
             }
@@ -325,7 +325,7 @@ export component AppWindow inherits Window {
                         x: Theme.field-pad;
                         width: parent.width - 2 * Theme.field-pad;
                         vertical-alignment: center;
-                        text: inpath != "" ? inpath-display : "No file selected";
+                        text: inpath != "" ? inpath-display : "No file or folder selected";
                         color: inpath != "" ? Theme.text : Theme.text-disabled;
                         font-size: Theme.field-text-size;
                         overflow: elide;
@@ -334,7 +334,7 @@ export component AppWindow inherits Window {
 
                 if combined-picker : SmallButton {
                     width: Theme.btn-width;
-                    label: "Select";
+                    label: "Choose";
                     enabled: !is-working;
                     clicked => { root.select-input-file(); }
                 }
@@ -359,7 +359,7 @@ export component AppWindow inherits Window {
             Rectangle { height: Theme.field-gap; }
 
             Text {
-                text: is-encrypt-mode ? "Save encrypted file as" : "Save to";
+                text: is-encrypt-mode ? "Encrypted file" : "Output location";
                 color: Theme.text-secondary;
                 font-size: Theme.label-size;
             }
@@ -397,8 +397,7 @@ export component AppWindow inherits Window {
                         x: Theme.field-pad;
                         width: parent.width - 2 * Theme.field-pad;
                         vertical-alignment: center;
-                        text: outpath != "" ? outpath-display :
-                              (is-encrypt-mode ? "No file selected" : "No directory selected");
+                        text: outpath != "" ? outpath-display : "No destination selected";
                         color: outpath != "" ? Theme.text : Theme.text-disabled;
                         font-size: Theme.field-text-size;
                         overflow: elide;
@@ -407,7 +406,7 @@ export component AppWindow inherits Window {
 
                 SmallButton {
                     width: Theme.btn-width;
-                    label: "Change";
+                    label: "Choose";
                     enabled: !is-working && !(is-encrypt-mode && inpath == "");
                     clicked => {
                         if (is-encrypt-mode) {
@@ -467,7 +466,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         Text {
-                            text: "Use existing key";
+                            text: "Use existing public key";
                             color: mode == 2 ? Theme.text : Theme.text-secondary;
                             font-size: 11px;
                             horizontal-alignment: center;
@@ -494,7 +493,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         Text {
-                            text: "Create new key pair";
+                            text: "Create key pair";
                             color: mode == 4 ? Theme.text : Theme.text-secondary;
                             font-size: 11px;
                             horizontal-alignment: center;
@@ -511,7 +510,7 @@ export component AppWindow inherits Window {
             Rectangle { height: Theme.field-gap; }
 
             Text {
-                text: mode == 3 || mode == 4 ? "Secret key password" : "Password";
+                text: mode == 3 || mode == 4 ? "Private key password" : "Password";
                 color: Theme.text-secondary;
                 font-size: Theme.label-size;
             }
@@ -555,7 +554,7 @@ export component AppWindow inherits Window {
                 if password == "" && !pwd-ti.has-focus : Text {
                     x: Theme.field-pad;
                     y: (parent.height - self.preferred-height) / 2;
-                    text: "Enter password\u{2026}";
+                    text: mode == 3 || mode == 4 ? "Enter private key password" : "Enter password";
                     color: Theme.text-disabled;
                     font-size: Theme.input-text-size;
                 }
@@ -664,7 +663,7 @@ export component AppWindow inherits Window {
             Rectangle { height: 8px; }
 
             Text {
-                text: mode == 4 ? "Confirm secret key password" : "Confirm password";
+                text: mode == 4 ? "Confirm private key password" : "Confirm password";
                 color: Theme.text-secondary;
                 font-size: Theme.label-size;
             }
@@ -708,7 +707,7 @@ export component AppWindow inherits Window {
                 if password-repeated == "" && !rpwd-ti.has-focus : Text {
                     x: Theme.field-pad;
                     y: (parent.height - self.preferred-height) / 2;
-                    text: "Repeat password\u{2026}";
+                    text: mode == 4 ? "Re-enter private key password" : "Re-enter password";
                     color: Theme.text-disabled;
                     font-size: Theme.input-text-size;
                 }
@@ -732,7 +731,7 @@ export component AppWindow inherits Window {
             Rectangle { height: Theme.field-gap; }
 
             Text {
-                text: mode == 2 ? "Public key" : "Secret key";
+                text: mode == 2 ? "Public key" : "Private key";
                 color: Theme.text-secondary;
                 font-size: Theme.label-size;
             }
@@ -764,8 +763,8 @@ export component AppWindow inherits Window {
                         width: parent.width - 2 * Theme.field-pad;
                         vertical-alignment: center;
                         text: keypath != "" ? keypath-display :
-                              (mode == 2 ? "Select public key\u{2026}" :
-                               "Select secret key\u{2026}");
+                              (mode == 2 ? "No public key selected" :
+                               "No private key selected");
                         color: keypath != "" ? Theme.text : Theme.text-disabled;
                         font-size: Theme.field-text-size;
                         overflow: elide;
@@ -774,7 +773,7 @@ export component AppWindow inherits Window {
 
                 SmallButton {
                     width: Theme.btn-width;
-                    label: "Select";
+                    label: "Choose";
                     enabled: !is-working;
                     clicked => { root.select-key-file(); }
                 }
@@ -859,7 +858,7 @@ export component AppWindow inherits Window {
             Rectangle { height: require-password-repeated ? 18px : 8px; }
 
             Text {
-                text: "Save key pair to";
+                text: "Key pair folder";
                 color: Theme.text-secondary;
                 font-size: Theme.label-size;
             }
@@ -891,7 +890,7 @@ export component AppWindow inherits Window {
                         width: parent.width - 2 * Theme.field-pad;
                         vertical-alignment: center;
                         text: keygen-outdir != "" ? keygen-outdir-display
-                              : "No directory selected";
+                              : "No folder selected";
                         color: keygen-outdir != "" ? Theme.text : Theme.text-disabled;
                         font-size: Theme.field-text-size;
                         overflow: elide;
@@ -900,7 +899,7 @@ export component AppWindow inherits Window {
 
                 SmallButton {
                     width: Theme.btn-width;
-                    label: "Change";
+                    label: "Choose";
                     enabled: !is-working;
                     clicked => { root.select-keygen-outdir(); }
                 }
@@ -915,17 +914,18 @@ export component AppWindow inherits Window {
         // ── Bottom section: always at the same position ──
 
         // ═══════════ NOTIFICATION BAR ═══════════
-        // Priority: error > warning > success/progress. Only one shown at a time.
+        // Priority: error > warning > success/progress > "Ready". Only one shown at a time.
         Rectangle {
+            property <bool> show-ready: !is-working && status-err == "" && conflict-warning == "" && status-ok == "";
             height: 30px;
             border-radius: 6px;
             background: status-err != "" ? Theme.notify-error-bg :
                         conflict-warning != "" ? Theme.notify-warning-bg :
-                        status-ok != "" ? Theme.notify-success-bg : transparent;
-            border-width: (status-err != "" || conflict-warning != "" || status-ok != "") ? 1px : 0px;
+                        (status-ok != "" || show-ready) ? Theme.notify-success-bg : transparent;
+            border-width: (status-err != "" || conflict-warning != "" || status-ok != "" || show-ready) ? 1px : 0px;
             border-color: status-err != "" ? Theme.notify-error-border :
                           conflict-warning != "" ? Theme.notify-warning-border :
-                          status-ok != "" ? Theme.notify-success-border : transparent;
+                          (status-ok != "" || show-ready) ? Theme.notify-success-border : transparent;
             animate background { duration: 200ms; }
             animate border-color { duration: 200ms; }
 
@@ -935,7 +935,8 @@ export component AppWindow inherits Window {
                 vertical-alignment: center;
                 text: status-err != "" ? status-err :
                       conflict-warning != "" ? conflict-warning :
-                      status-ok;
+                      status-ok != "" ? status-ok :
+                      show-ready ? "Ready" : "";
                 color: status-err != "" ? Theme.error :
                        conflict-warning != "" ? Theme.warning :
                        Theme.success;

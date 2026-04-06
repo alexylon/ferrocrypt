@@ -22,7 +22,7 @@ fn key_dir() -> &'static std::path::Path {
 
 fuzz_target!(|data: &[u8]| {
     let keys = key_dir();
-    let priv_key = keys.join("secret.key");
+    let priv_key = keys.join("private.key");
 
     let tmp_dir = tempfile::tempdir().unwrap();
     let input_path = tmp_dir.path().join("input.fcr");

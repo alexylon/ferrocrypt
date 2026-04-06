@@ -327,7 +327,7 @@ fn apply_input_path(weak: &slint::Weak<AppWindow>, path: PathBuf) {
     }
 
     if !app.get_key_invalid() {
-        app.set_status_ok("Ready".into());
+        app.set_status_ok("".into());
         app.set_status_err("".into());
     }
     check_conflicts(&app);
@@ -355,9 +355,9 @@ fn check_conflicts(app: &AppWindow) {
             let secret_exists = Path::new(&priv_key_path(&kg_dir)).exists();
             let pub_exists = Path::new(&pub_key_path(&kg_dir)).exists();
             warning = match (secret_exists, pub_exists) {
-                (true, true) => "Key pair already exists in output directory".into(),
-                (true, false) => "Secret key already exists in output directory".into(),
-                (false, true) => "Public key already exists in output directory".into(),
+                (true, true) => "Key pair already exists in output folder".into(),
+                (true, false) => "Private key already exists in output folder".into(),
+                (false, true) => "Public key already exists in output folder".into(),
                 _ => String::new(),
             };
         }
@@ -398,7 +398,7 @@ fn pub_key_path(dir: &str) -> String {
 }
 
 fn priv_key_path(dir: &str) -> String {
-    format!("{dir}/secret.key")
+    format!("{dir}/private.key")
 }
 
 fn path_to_string(path: &Path) -> String {

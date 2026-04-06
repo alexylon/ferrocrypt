@@ -184,7 +184,7 @@ fn validate_header_bytes(
 
 // ─── Key file format ───────────────────────────────────────────────────────
 //
-// Both `public.key` and `secret.key` share the same 8-byte header prefix:
+// Both `public.key` and `private.key` share the same 8-byte header prefix:
 //
 // | Offset | Size | Field     | Description                                  |
 // |--------|------|-----------|----------------------------------------------|
@@ -237,12 +237,12 @@ pub fn validate_key_file_header(
         let expected = if expected_type == KEY_FILE_TYPE_PUBLIC {
             "public"
         } else {
-            "secret"
+            "private"
         };
         let actual = if actual_type == KEY_FILE_TYPE_PUBLIC {
             "public"
         } else if actual_type == KEY_FILE_TYPE_SECRET {
-            "secret"
+            "private"
         } else {
             "unknown"
         };

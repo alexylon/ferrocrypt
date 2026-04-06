@@ -215,11 +215,11 @@ fn test_cli_keygen() {
     );
 
     // Check that keys were generated
-    assert!(keys_dir.join("secret.key").exists());
+    assert!(keys_dir.join("private.key").exists());
     assert!(keys_dir.join("public.key").exists());
 
     // Verify keys have expected sizes (secret: 104 bytes, public: 32 bytes)
-    let secret_key_size = fs::metadata(keys_dir.join("secret.key")).unwrap().len();
+    let secret_key_size = fs::metadata(keys_dir.join("private.key")).unwrap().len();
     let pub_key_size = fs::metadata(keys_dir.join("public.key")).unwrap().len();
 
     assert_eq!(secret_key_size, 112);
@@ -275,7 +275,7 @@ fn test_cli_hybrid_encrypt_decrypt_file() {
 
     assert!(encrypt_dir.join("data.fcr").exists());
 
-    // Decrypt with secret key
+    // Decrypt with private key
     let decrypt_output = Command::new(&binary)
         .arg("hybrid")
         .arg("-i")
@@ -283,7 +283,7 @@ fn test_cli_hybrid_encrypt_decrypt_file() {
         .arg("-o")
         .arg(decrypt_dir.to_str().unwrap())
         .arg("-k")
-        .arg(keys_dir.join("secret.key").to_str().unwrap())
+        .arg(keys_dir.join("private.key").to_str().unwrap())
         .arg("-p")
         .arg("key_pass")
         .output()
@@ -347,7 +347,7 @@ fn test_cli_hybrid_wrong_key_passphrase() {
         .arg("-o")
         .arg(decrypt_dir.to_str().unwrap())
         .arg("-k")
-        .arg(keys_dir.join("secret.key").to_str().unwrap())
+        .arg(keys_dir.join("private.key").to_str().unwrap())
         .arg("-p")
         .arg("wrong_key_pass")
         .output()
@@ -537,7 +537,7 @@ fn test_cli_hybrid_save_as() {
         .arg("-o")
         .arg(decrypt_dir.to_str().unwrap())
         .arg("-k")
-        .arg(keys_dir.join("secret.key").to_str().unwrap())
+        .arg(keys_dir.join("private.key").to_str().unwrap())
         .arg("-p")
         .arg("key_pass")
         .output()

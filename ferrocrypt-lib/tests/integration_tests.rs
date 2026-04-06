@@ -245,12 +245,12 @@ fn test_hybrid_keygen_private_key_permissions() -> Result<(), CryptoError> {
 
     generate_key_pair(&passphrase, test_dir.to_str().unwrap(), |_| {})?;
 
-    let secret_key = test_dir.join("secret.key");
+    let secret_key = test_dir.join("private.key");
     let pub_key = test_dir.join("public.key");
     let priv_mode = fs::metadata(&secret_key)?.permissions().mode() & 0o777;
     let pub_mode = fs::metadata(&pub_key)?.permissions().mode() & 0o777;
 
-    assert_eq!(priv_mode, 0o600, "secret key should be owner-only");
+    assert_eq!(priv_mode, 0o600, "private key should be owner-only");
     assert_ne!(pub_mode, 0o600, "public key should not be restricted");
 
     Ok(())
@@ -277,7 +277,7 @@ fn test_hybrid_keygen_encrypt_decrypt_file() -> Result<(), CryptoError> {
     let keygen_result = generate_key_pair(&key_passphrase, keys_dir.to_str().unwrap(), |_| {})?;
 
     assert!(keygen_result.contains("Generated key pair"));
-    assert!(keys_dir.join("secret.key").exists());
+    assert!(keys_dir.join("private.key").exists());
     assert!(keys_dir.join("public.key").exists());
 
     // Encrypt with public key
@@ -296,8 +296,8 @@ fn test_hybrid_keygen_encrypt_decrypt_file() -> Result<(), CryptoError> {
     assert!(encrypt_result.contains("Encrypted to"));
     assert!(encrypt_dir.join("data.fcr").exists());
 
-    // Decrypt with secret key
-    let secret_key_path = keys_dir.join("secret.key").to_str().unwrap().to_string();
+    // Decrypt with private key
+    let secret_key_path = keys_dir.join("private.key").to_str().unwrap().to_string();
 
     let decrypt_result = hybrid_encryption(
         encrypt_dir.join("data.fcr").to_str().unwrap(),
@@ -350,7 +350,7 @@ fn test_hybrid_encrypt_decrypt_directory() -> Result<(), CryptoError> {
     assert!(encrypt_dir.join("test_folder.fcr").exists());
 
     // Decrypt directory
-    let secret_key_path = keys_dir.join("secret.key").to_str().unwrap().to_string();
+    let secret_key_path = keys_dir.join("private.key").to_str().unwrap().to_string();
 
     hybrid_encryption(
         encrypt_dir.join("test_folder.fcr").to_str().unwrap(),
@@ -404,7 +404,7 @@ fn test_hybrid_wrong_key_passphrase() -> Result<(), CryptoError> {
     )?;
 
     // Try to decrypt with wrong passphrase
-    let secret_key_path = keys_dir.join("secret.key").to_str().unwrap().to_string();
+    let secret_key_path = keys_dir.join("private.key").to_str().unwrap().to_string();
 
     let result = hybrid_encryption(
         encrypt_dir.join("data.fcr").to_str().unwrap(),
@@ -418,7 +418,7 @@ fn test_hybrid_wrong_key_passphrase() -> Result<(), CryptoError> {
     assert!(result.is_err());
     match result {
         Err(CryptoError::CryptoOperation(msg)) => {
-            assert!(msg.contains("Incorrect password") || msg.contains("wrong secret key"));
+            assert!(msg.contains("Incorrect password") || msg.contains("wrong private key"));
         }
         _ => panic!("Expected CryptoOperation"),
     }
@@ -771,8 +771,8 @@ fn test_hybrid_wrong_key_pair() -> Result<(), CryptoError> {
         |_| {},
     )?;
 
-    // Try to decrypt with key pair B's secret key — should fail
-    let secret_key_b = keys_b.join("secret.key").to_str().unwrap().to_string();
+    // Try to decrypt with key pair B's private key — should fail
+    let secret_key_b = keys_b.join("private.key").to_str().unwrap().to_string();
 
     let result = hybrid_encryption(
         encrypt_dir.join("data.fcr").to_str().unwrap(),
@@ -823,7 +823,7 @@ fn test_hybrid_key_round_trip() -> Result<(), CryptoError> {
     assert!(encrypt_dir.join("data.fcr").exists());
 
     // Decrypt
-    let secret_key_path = keys_dir.join("secret.key").to_str().unwrap().to_string();
+    let secret_key_path = keys_dir.join("private.key").to_str().unwrap().to_string();
 
     hybrid_encryption(
         encrypt_dir.join("data.fcr").to_str().unwrap(),
@@ -870,7 +870,7 @@ fn test_hybrid_binary_file() -> Result<(), CryptoError> {
         |_| {},
     )?;
 
-    let secret_key_path = keys_dir.join("secret.key").to_str().unwrap().to_string();
+    let secret_key_path = keys_dir.join("private.key").to_str().unwrap().to_string();
 
     hybrid_encryption(
         encrypt_dir.join("data.fcr").to_str().unwrap(),
@@ -948,7 +948,7 @@ fn test_truncated_hybrid_file() -> Result<(), CryptoError> {
     let truncated_file = test_dir.join("truncated.fcr");
     fs::write(&truncated_file, b"short").unwrap();
 
-    let secret_key_path = keys_dir.join("secret.key").to_str().unwrap().to_string();
+    let secret_key_path = keys_dir.join("private.key").to_str().unwrap().to_string();
 
     let result = hybrid_encryption(
         truncated_file.to_str().unwrap(),
@@ -1060,7 +1060,7 @@ fn test_hybrid_header_tamper_detection() -> Result<(), CryptoError> {
     data[NONCE_REGION + 1 + 2 * PADDED_NONCE + NONCE_BYTE] ^= 0xFF;
     fs::write(&encrypted_path, &data)?;
 
-    let secret_key_path = keys_dir.join("secret.key").to_str().unwrap().to_string();
+    let secret_key_path = keys_dir.join("private.key").to_str().unwrap().to_string();
 
     let result = hybrid_encryption(
         encrypted_path.to_str().unwrap(),
@@ -1253,7 +1253,7 @@ fn test_hybrid_single_copy_corruption_recovery() -> Result<(), CryptoError> {
     data[NONCE_REGION + 1 + NONCE_BYTE] ^= 0xFF;
     fs::write(&encrypted_path, &data)?;
 
-    let secret_key_path = keys_dir.join("secret.key").to_str().unwrap().to_string();
+    let secret_key_path = keys_dir.join("private.key").to_str().unwrap().to_string();
 
     hybrid_encryption(
         encrypted_path.to_str().unwrap(),
@@ -1423,7 +1423,7 @@ fn test_hybrid_empty_file() -> Result<(), CryptoError> {
         |_| {},
     )?;
 
-    let secret_key = keys_dir.join("secret.key").to_str().unwrap().to_string();
+    let secret_key = keys_dir.join("private.key").to_str().unwrap().to_string();
 
     hybrid_encryption(
         encrypt_dir.join("empty.fcr").to_str().unwrap(),
@@ -1539,7 +1539,7 @@ fn test_hybrid_output_file_override() -> Result<(), CryptoError> {
     generate_key_pair(&passphrase, key_dir.to_str().unwrap(), |_| {})?;
 
     let pub_key = key_dir.join("public.key");
-    let secret_key = key_dir.join("secret.key");
+    let secret_key = key_dir.join("private.key");
     let custom_output = encrypt_dir.join("my_vault.fcr");
     let empty = SecretString::from("".to_string());
 
@@ -1633,7 +1633,7 @@ fn test_hybrid_empty_file_rejected() -> Result<(), CryptoError> {
     let key_pass = SecretString::from("kp".to_string());
     generate_key_pair(&key_pass, keys_dir.to_str().unwrap(), |_| {})?;
 
-    let secret_key = keys_dir.join("secret.key");
+    let secret_key = keys_dir.join("private.key");
     let empty_file = test_dir.join("empty.fcr");
     fs::write(&empty_file, b"").unwrap();
 
@@ -1798,7 +1798,7 @@ fn test_hybrid_truncated_mid_header() -> Result<(), CryptoError> {
     generate_key_pair(&key_pass, keys_dir.to_str().unwrap(), |_| {})?;
 
     let pub_key = keys_dir.join("public.key");
-    let secret_key = keys_dir.join("secret.key");
+    let secret_key = keys_dir.join("private.key");
     let empty_pass = SecretString::from("".to_string());
 
     create_test_file(&input_file, "Hybrid truncation mid-header");
@@ -1846,7 +1846,7 @@ fn test_hybrid_oversized_header_len() -> Result<(), CryptoError> {
     generate_key_pair(&key_pass, keys_dir.to_str().unwrap(), |_| {})?;
 
     let pub_key = keys_dir.join("public.key");
-    let secret_key = keys_dir.join("secret.key");
+    let secret_key = keys_dir.join("private.key");
     let empty_pass = SecretString::from("".to_string());
 
     create_test_file(&input_file, "Hybrid oversized header_len");
@@ -1936,7 +1936,7 @@ fn test_hybrid_ciphertext_bit_flip_detected() -> Result<(), CryptoError> {
     generate_key_pair(&key_pass, keys_dir.to_str().unwrap(), |_| {})?;
 
     let pub_key = keys_dir.join("public.key");
-    let secret_key = keys_dir.join("secret.key");
+    let secret_key = keys_dir.join("private.key");
     let empty_pass = SecretString::from("".to_string());
 
     create_test_file(&input_file, "Hybrid AEAD ciphertext integrity test");
@@ -2067,8 +2067,8 @@ fn test_public_key_fingerprint() -> Result<(), CryptoError> {
     let fp2 = public_key_fingerprint(pub_key.to_str().unwrap())?;
     assert_eq!(fp, fp2);
 
-    // Rejects secret key files
-    let secret_key = keys_dir.join("secret.key");
+    // Rejects private key files
+    let secret_key = keys_dir.join("private.key");
     assert!(public_key_fingerprint(secret_key.to_str().unwrap()).is_err());
 
     Ok(())

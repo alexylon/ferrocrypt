@@ -175,10 +175,10 @@ fn test_symmetric_wrong_password() -> Result<(), CryptoError> {
 
     assert!(result.is_err());
     match result {
-        Err(CryptoError::EncryptionDecryptionError(msg)) => {
+        Err(CryptoError::CryptoOperation(msg)) => {
             assert!(msg.contains("incorrect"));
         }
-        _ => panic!("Expected EncryptionDecryptionError"),
+        _ => panic!("Expected CryptoOperation"),
     }
 
     Ok(())
@@ -417,10 +417,10 @@ fn test_hybrid_wrong_key_passphrase() -> Result<(), CryptoError> {
 
     assert!(result.is_err());
     match result {
-        Err(CryptoError::EncryptionDecryptionError(msg)) => {
+        Err(CryptoError::CryptoOperation(msg)) => {
             assert!(msg.contains("Incorrect password") || msg.contains("wrong secret key"));
         }
-        _ => panic!("Expected EncryptionDecryptionError"),
+        _ => panic!("Expected CryptoOperation"),
     }
 
     Ok(())
@@ -651,10 +651,10 @@ fn test_symmetric_streaming_wrong_password() -> Result<(), CryptoError> {
 
     assert!(result.is_err());
     match result {
-        Err(CryptoError::EncryptionDecryptionError(msg)) => {
+        Err(CryptoError::CryptoOperation(msg)) => {
             assert!(msg.contains("incorrect"));
         }
-        _ => panic!("Expected EncryptionDecryptionError"),
+        _ => panic!("Expected CryptoOperation"),
     }
 
     Ok(())
@@ -725,7 +725,7 @@ fn test_symmetric_empty_password_rejected() {
 
     assert!(result.is_err());
     match result {
-        Err(CryptoError::Message(msg)) => {
+        Err(CryptoError::InvalidInput(msg)) => {
             assert!(msg.contains("empty"));
         }
         other => panic!(
@@ -1291,7 +1291,7 @@ fn test_not_a_ferrocrypt_file() {
 
     assert!(result.is_err());
     match result {
-        Err(CryptoError::EncryptionDecryptionError(msg)) => {
+        Err(CryptoError::CryptoOperation(msg)) => {
             assert!(msg.contains("Not a valid FerroCrypt file"));
         }
         other => panic!("Expected 'Not a valid FerroCrypt file', got {:?}", other),
@@ -1334,7 +1334,7 @@ fn test_future_major_version_rejected() -> Result<(), CryptoError> {
 
     assert!(result.is_err());
     match result {
-        Err(CryptoError::EncryptionDecryptionError(msg)) => {
+        Err(CryptoError::CryptoOperation(msg)) => {
             assert!(msg.contains("not supported"));
             assert!(msg.contains("Upgrade"));
         }
@@ -1386,7 +1386,7 @@ fn test_wrong_format_type_hybrid_as_symmetric() -> Result<(), CryptoError> {
 
     assert!(result.is_err());
     match result {
-        Err(CryptoError::EncryptionDecryptionError(msg)) => {
+        Err(CryptoError::CryptoOperation(msg)) => {
             assert!(msg.contains("different format type"));
         }
         other => panic!("Expected format type error, got {:?}", other),

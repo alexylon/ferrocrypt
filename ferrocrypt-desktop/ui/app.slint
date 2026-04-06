@@ -28,10 +28,23 @@ global Theme {
     out property <color> accent-btn: #0e7490;
     out property <color> accent-btn-hover: #0891b2;
 
-    // Status — muted to sit well on the dark navy background
-    out property <color> success: #34d399;   // emerald-400, teal-tinted
-    out property <color> error: #f87171;     // red-400, soft rose
-    out property <color> warning: #d4a053;   // desaturated warm amber
+    // Status
+    out property <color> success: #34d399;
+    out property <color> error: #f87171;
+    out property <color> warning: #d4a053;
+    out property <color> info: #60a5fa;
+
+    // Notification bar
+    out property <color> notify-error-bg: #1c1012;
+    out property <color> notify-error-border: #3b1520;
+    out property <color> notify-warning-bg: #1a1708;
+    out property <color> notify-warning-border: #3b3015;
+    out property <color> notify-success-bg: #0a1a14;
+    out property <color> notify-success-border: #153b2a;
+
+    // Info panel (fingerprint)
+    out property <color> info-bg: #0a1420;
+    out property <color> info-border: #152a3b;
 
     // Layout
     out property <length> field-height: 34px;
@@ -133,9 +146,9 @@ export component AppWindow inherits Window {
         mode == 0 || mode == 2 ? "Encrypt" :
         mode == 1 || mode == 3 ? "Decrypt" : "Generate Key Pair";
     property <color> strength-color:
-        password-strength <= 1 ? #f87171 :
-        password-strength == 2 ? #d4a053 :
-        password-strength == 3 ? #60a5fa : #34d399;
+        password-strength <= 1 ? Theme.error :
+        password-strength == 2 ? Theme.warning :
+        password-strength == 3 ? Theme.info : Theme.success;
 
     // ── Callbacks ───────────────────────────────────────────────────────
     callback mode-changed();
@@ -155,7 +168,7 @@ export component AppWindow inherits Window {
         y: 0;
         width: 100%;
         height: 2px;
-        background: @linear-gradient(90deg, #0a0f1a, #06b6d4 50%, #0a0f1a);
+        background: @linear-gradient(90deg, Theme.bg, Theme.accent 50%, Theme.bg);
     }
 
     // ── Main layout ─────────────────────────────────────────────────────
@@ -782,9 +795,9 @@ export component AppWindow inherits Window {
                 Rectangle {
                     height: 30px;
                     border-radius: 6px;
-                    background: #0a1420;
+                    background: Theme.info-bg;
                     border-width: 1px;
-                    border-color: #152a3b;
+                    border-color: Theme.info-border;
 
                     HorizontalLayout {
                         padding-left: Theme.field-pad;
@@ -906,13 +919,13 @@ export component AppWindow inherits Window {
         Rectangle {
             height: 30px;
             border-radius: 6px;
-            background: status-err != "" ? #1c1012 :
-                        conflict-warning != "" ? #1a1708 :
-                        status-ok != "" ? #0a1a14 : transparent;
+            background: status-err != "" ? Theme.notify-error-bg :
+                        conflict-warning != "" ? Theme.notify-warning-bg :
+                        status-ok != "" ? Theme.notify-success-bg : transparent;
             border-width: (status-err != "" || conflict-warning != "" || status-ok != "") ? 1px : 0px;
-            border-color: status-err != "" ? #3b1520 :
-                          conflict-warning != "" ? #3b3015 :
-                          status-ok != "" ? #153b2a : transparent;
+            border-color: status-err != "" ? Theme.notify-error-border :
+                          conflict-warning != "" ? Theme.notify-warning-border :
+                          status-ok != "" ? Theme.notify-success-border : transparent;
             animate background { duration: 200ms; }
             animate border-color { duration: 200ms; }
 

@@ -10,7 +10,7 @@ pub(crate) fn validate_archive_path(path: &Path) -> Result<(), CryptoError> {
     for component in path.components() {
         match component {
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(CryptoError::Message(format!(
+                return Err(CryptoError::InvalidInput(format!(
                     "Unsafe path in archive: {}",
                     path.display()
                 )));
@@ -34,10 +34,10 @@ pub fn archive<W: Write>(
     let stem = if input_path.is_file() {
         let file_name = input_path
             .file_name()
-            .ok_or_else(|| CryptoError::Message("Cannot get file name".to_string()))?;
-        let file_name_str = file_name
-            .to_str()
-            .ok_or_else(|| CryptoError::Message("Cannot convert file name to &str".to_string()))?;
+            .ok_or_else(|| CryptoError::InvalidInput("Cannot get file name".to_string()))?;
+        let file_name_str = file_name.to_str().ok_or_else(|| {
+            CryptoError::InvalidInput("Cannot convert file name to &str".to_string())
+        })?;
 
         let metadata = fs::metadata(input_path)?;
         let mut header = tar::Header::new_gnu();
@@ -49,9 +49,11 @@ pub fn archive<W: Write>(
 
         input_path
             .file_stem()
-            .ok_or_else(|| CryptoError::Message("Cannot get file stem".to_string()))?
+            .ok_or_else(|| CryptoError::InvalidInput("Cannot get file stem".to_string()))?
             .to_str()
-            .ok_or_else(|| CryptoError::Message("Cannot convert file stem to &str".to_string()))?
+            .ok_or_else(|| {
+                CryptoError::InvalidInput("Cannot convert file stem to &str".to_string())
+            })?
             .to_string()
     } else {
         let dir_name = input_path
@@ -59,7 +61,7 @@ pub fn archive<W: Write>(
             .ok_or_else(|| CryptoError::InputPath("Input file or folder missing".to_string()))?
             .to_str()
             .ok_or_else(|| {
-                CryptoError::Message("Cannot convert directory name to &str".to_string())
+                CryptoError::InvalidInput("Cannot convert directory name to &str".to_string())
             })?;
 
         builder.append_dir_all(dir_name, input_path)?;
@@ -86,17 +88,17 @@ pub fn unarchive<R: Read>(reader: R, output_dir: &str) -> Result<String, CryptoE
         let first_component = path
             .components()
             .next()
-            .ok_or_else(|| CryptoError::Message("Empty archive entry".to_string()))?;
+            .ok_or_else(|| CryptoError::InvalidInput("Empty archive entry".to_string()))?;
         let root_name = first_component
             .as_os_str()
             .to_str()
-            .ok_or_else(|| CryptoError::Message("Invalid path in archive".to_string()))?
+            .ok_or_else(|| CryptoError::InvalidInput("Invalid path in archive".to_string()))?
             .to_string();
 
         if !checked_roots.contains(&root_name) {
             let full_path = normalize_paths(&format!("{}{}", output_dir, root_name), "").0;
             if Path::new(&full_path).exists() {
-                return Err(CryptoError::Message(format!(
+                return Err(CryptoError::InvalidInput(format!(
                     "Output already exists: {}",
                     full_path
                 )));
@@ -125,7 +127,7 @@ pub fn unarchive<R: Read>(reader: R, output_dir: &str) -> Result<String, CryptoE
         }
     }
 
-    first_entry_root.ok_or_else(|| CryptoError::Message("Empty archive".to_string()))
+    first_entry_root.ok_or_else(|| CryptoError::InvalidInput("Empty archive".to_string()))
 }
 
 #[cfg(test)]

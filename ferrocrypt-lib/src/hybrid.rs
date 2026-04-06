@@ -11,29 +11,24 @@ use secrecy::{ExposeSecret, SecretString};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::common::{
-    DecryptReader, EncryptWriter, NONCE_SIZE, argon2_config, get_duration, get_file_stem_to_string,
+    ARGON2_SALT_SIZE, DecryptReader, ENCRYPTION_KEY_SIZE, ERR_FILE_TOO_SHORT, EncryptWriter,
+    HMAC_KEY_SIZE, NONCE_SIZE, TAG_SIZE, argon2_config, get_duration, get_file_stem_to_string,
     hmac_sha3_256, hmac_sha3_256_verify,
 };
-use crate::format::{self, HEADER_PREFIX_SIZE};
+use crate::format::{self, HEADER_PREFIX_SIZE, PUBLIC_KEY_DATA_SIZE, SECRET_KEY_DATA_SIZE};
 use crate::replication::{rep_decode_exact, rep_encode, rep_encoded_size};
 use crate::{CryptoError, archiver};
 
-const KEY_SIZE: usize = 32;
-const HMAC_KEY_SIZE: usize = 32;
-// Both keys are packed into a single envelope: [enc_key | hmac_key]
-const COMBINED_KEY_SIZE: usize = KEY_SIZE + HMAC_KEY_SIZE;
+// Both keys are packed into a single envelope: [encryption_key | hmac_key]
+const COMBINED_KEY_SIZE: usize = ENCRYPTION_KEY_SIZE + HMAC_KEY_SIZE;
 
 const EPHEMERAL_PUB_SIZE: usize = 32;
 const ENVELOPE_NONCE_SIZE: usize = 24;
-const ENVELOPE_TAG_SIZE: usize = 16;
-const ENVELOPE_CIPHERTEXT_SIZE: usize = COMBINED_KEY_SIZE + ENVELOPE_TAG_SIZE;
+const ENVELOPE_CIPHERTEXT_SIZE: usize = COMBINED_KEY_SIZE + TAG_SIZE;
 const ENVELOPE_SIZE: usize = EPHEMERAL_PUB_SIZE + ENVELOPE_NONCE_SIZE + ENVELOPE_CIPHERTEXT_SIZE;
 
-use crate::format::PUBLIC_KEY_DATA_SIZE;
-const ARGON2_SALT_SIZE: usize = 32;
 const SECRET_KEY_NONCE_SIZE: usize = 24;
 const SECRET_KEY_SIZE: usize = 32;
-use crate::format::SECRET_KEY_DATA_SIZE;
 
 const PUBLIC_KEY_FILENAME: &str = "public.key";
 const SECRET_KEY_FILENAME: &str = "secret.key";
@@ -64,19 +59,19 @@ pub fn encrypt_file(
     let file_stem = &get_file_stem_to_string(input_path)?;
     on_progress("Encrypting\u{2026}");
 
-    let mut symmetric_key = XChaCha20Poly1305::generate_key(&mut OsRng);
+    let mut encryption_key = XChaCha20Poly1305::generate_key(&mut OsRng);
     let mut hmac_key = [0u8; HMAC_KEY_SIZE];
     OsRng.fill_bytes(&mut hmac_key);
 
     let result = (|| -> Result<String, CryptoError> {
-        let cipher = XChaCha20Poly1305::new(&symmetric_key);
+        let cipher = XChaCha20Poly1305::new(&encryption_key);
 
         let mut nonce = [0u8; NONCE_SIZE];
         OsRng.fill_bytes(&mut nonce);
 
         let mut combined_key = Zeroizing::new(vec![0u8; COMBINED_KEY_SIZE]);
-        combined_key[..KEY_SIZE].copy_from_slice(&symmetric_key);
-        combined_key[KEY_SIZE..].copy_from_slice(&hmac_key);
+        combined_key[..ENCRYPTION_KEY_SIZE].copy_from_slice(&encryption_key);
+        combined_key[ENCRYPTION_KEY_SIZE..].copy_from_slice(&hmac_key);
 
         let recipient_public = read_public_key(&public_key_path)?;
         let envelope = seal_envelope(&combined_key, &recipient_public)?;
@@ -90,7 +85,7 @@ pub fn encrypt_file(
             )),
         };
         if output_path.exists() {
-            return Err(CryptoError::Message(format!(
+            return Err(CryptoError::InvalidInput(format!(
                 "Output file already exists: {}",
                 output_path.display()
             )));
@@ -139,7 +134,7 @@ pub fn encrypt_file(
         Ok(msg)
     })();
 
-    symmetric_key.zeroize();
+    encryption_key.zeroize();
     hmac_key.zeroize();
     result
 }
@@ -167,9 +162,7 @@ pub fn decrypt_file(
         + rep_encoded_size(NONCE_SIZE)
         + rep_encoded_size(HMAC_KEY_SIZE);
     if (header.header_len as usize) < min_header_size {
-        return Err(CryptoError::EncryptionDecryptionError(
-            "File is too short or corrupted".to_string(),
-        ));
+        return Err(CryptoError::CryptoOperation(ERR_FILE_TOO_SHORT.to_string()));
     }
 
     let mut encoded_envelope = vec![0u8; rep_encoded_size(ENVELOPE_SIZE)];
@@ -178,17 +171,13 @@ pub fn decrypt_file(
 
     encrypted_file
         .read_exact(&mut encoded_envelope)
-        .map_err(|_| {
-            CryptoError::EncryptionDecryptionError("File is too short or corrupted".to_string())
-        })?;
-    encrypted_file.read_exact(&mut encoded_nonce).map_err(|_| {
-        CryptoError::EncryptionDecryptionError("File is too short or corrupted".to_string())
-    })?;
+        .map_err(|_| CryptoError::CryptoOperation(ERR_FILE_TOO_SHORT.to_string()))?;
+    encrypted_file
+        .read_exact(&mut encoded_nonce)
+        .map_err(|_| CryptoError::CryptoOperation(ERR_FILE_TOO_SHORT.to_string()))?;
     encrypted_file
         .read_exact(&mut encoded_hmac_tag)
-        .map_err(|_| {
-            CryptoError::EncryptionDecryptionError("File is too short or corrupted".to_string())
-        })?;
+        .map_err(|_| CryptoError::CryptoOperation(ERR_FILE_TOO_SHORT.to_string()))?;
 
     let bytes_after_prefix = encoded_envelope.len() + encoded_nonce.len() + encoded_hmac_tag.len();
     format::skip_unknown_header_bytes(&mut encrypted_file, header.header_len, bytes_after_prefix)?;
@@ -197,9 +186,10 @@ pub fn decrypt_file(
     let nonce = rep_decode_exact(&encoded_nonce, NONCE_SIZE)?;
     let hmac_tag = rep_decode_exact(&encoded_hmac_tag, HMAC_KEY_SIZE)?;
 
-    let envelope: [u8; ENVELOPE_SIZE] = envelope_vec.as_slice().try_into().map_err(|_| {
-        CryptoError::EncryptionDecryptionError("Envelope has unexpected length".to_string())
-    })?;
+    let envelope: [u8; ENVELOPE_SIZE] = envelope_vec
+        .as_slice()
+        .try_into()
+        .map_err(|_| CryptoError::CryptoOperation("Envelope has unexpected length".to_string()))?;
 
     let mut recipient_secret = read_secret_key(secret_key_path, passphrase)?;
     let envelope_result = open_envelope(&envelope, &recipient_secret);
@@ -207,7 +197,7 @@ pub fn decrypt_file(
     let mut decrypted_combined_key = envelope_result?;
 
     let result = (|| -> Result<String, CryptoError> {
-        let hmac_key = &decrypted_combined_key[KEY_SIZE..COMBINED_KEY_SIZE];
+        let hmac_key = &decrypted_combined_key[ENCRYPTION_KEY_SIZE..COMBINED_KEY_SIZE];
 
         let mut hmac_message =
             Vec::with_capacity(prefix_bytes.len() + envelope.len() + nonce.len());
@@ -216,7 +206,8 @@ pub fn decrypt_file(
         hmac_message.extend_from_slice(&nonce);
         hmac_sha3_256_verify(hmac_key, &hmac_message, &hmac_tag)?;
 
-        let cipher = XChaCha20Poly1305::new((&decrypted_combined_key[..KEY_SIZE]).into());
+        let cipher =
+            XChaCha20Poly1305::new((&decrypted_combined_key[..ENCRYPTION_KEY_SIZE]).into());
         let stream_decryptor = stream::DecryptorBE32::from_aead(cipher, nonce.as_slice().into());
 
         let decrypt_reader = DecryptReader::new(stream_decryptor, encrypted_file);
@@ -262,23 +253,19 @@ fn read_secret_key(
     let config = argon2_config();
     let mut derived_key = Zeroizing::new(
         argon2::hash_raw(passphrase.expose_secret().as_bytes(), salt, &config)
-            .map_err(CryptoError::Argon2Error)?,
+            .map_err(CryptoError::KeyDerivation)?,
     );
 
     let cipher = XChaCha20Poly1305::new(derived_key.as_slice().into());
     let plaintext = cipher.decrypt(nonce, ciphertext).map_err(|_| {
-        CryptoError::EncryptionDecryptionError(
-            "Incorrect password or wrong secret key provided".to_string(),
-        )
+        CryptoError::CryptoOperation("Incorrect password or wrong secret key provided".to_string())
     })?;
 
     derived_key.zeroize();
 
     let mut secret_bytes: [u8; SECRET_KEY_SIZE] =
         plaintext.as_slice().try_into().map_err(|_| {
-            CryptoError::EncryptionDecryptionError(
-                "Decrypted key has unexpected length".to_string(),
-            )
+            CryptoError::CryptoOperation("Decrypted key has unexpected length".to_string())
         })?;
     let mut plaintext = plaintext;
     plaintext.zeroize();
@@ -297,9 +284,9 @@ fn seal_envelope(
     let chacha_box = ChaChaBox::new(recipient_public, &ephemeral_secret);
     zeroize_secret_key(&mut ephemeral_secret);
     let nonce = ChaChaBox::generate_nonce(&mut OsRng);
-    let ciphertext = chacha_box.encrypt(&nonce, combined_key).map_err(|_| {
-        CryptoError::EncryptionDecryptionError("Envelope encryption failed".to_string())
-    })?;
+    let ciphertext = chacha_box
+        .encrypt(&nonce, combined_key)
+        .map_err(|_| CryptoError::CryptoOperation("Envelope encryption failed".to_string()))?;
 
     let mut envelope = [0u8; ENVELOPE_SIZE];
     envelope[..EPHEMERAL_PUB_SIZE].copy_from_slice(ephemeral_public.as_bytes());
@@ -314,9 +301,7 @@ fn open_envelope(
 ) -> Result<[u8; COMBINED_KEY_SIZE], CryptoError> {
     let ephemeral_public =
         PublicKey::from_slice(&envelope[..EPHEMERAL_PUB_SIZE]).map_err(|_| {
-            CryptoError::EncryptionDecryptionError(
-                "Invalid ephemeral public key in envelope".to_string(),
-            )
+            CryptoError::CryptoOperation("Invalid ephemeral public key in envelope".to_string())
         })?;
     let nonce = chacha20poly1305::XNonce::from_slice(
         &envelope[EPHEMERAL_PUB_SIZE..EPHEMERAL_PUB_SIZE + ENVELOPE_NONCE_SIZE],
@@ -325,14 +310,14 @@ fn open_envelope(
 
     let chacha_box = ChaChaBox::new(&ephemeral_public, recipient_secret);
     let mut plaintext = chacha_box.decrypt(nonce, ciphertext).map_err(|_| {
-        CryptoError::EncryptionDecryptionError(
+        CryptoError::CryptoOperation(
             "Envelope decryption failed: wrong key or corrupted data".to_string(),
         )
     })?;
 
     if plaintext.len() != COMBINED_KEY_SIZE {
         plaintext.zeroize();
-        return Err(CryptoError::EncryptionDecryptionError(
+        return Err(CryptoError::CryptoOperation(
             "Decrypted envelope has unexpected length".to_string(),
         ));
     }
@@ -349,7 +334,7 @@ pub fn generate_key_pair(
     on_progress: &dyn Fn(&str),
 ) -> Result<String, CryptoError> {
     if passphrase.expose_secret().is_empty() {
-        return Err(CryptoError::Message(
+        return Err(CryptoError::InvalidInput(
             "Passphrase must not be empty for secret key encryption".to_string(),
         ));
     }
@@ -367,16 +352,16 @@ pub fn generate_key_pair(
     let config = argon2_config();
     let mut derived_key = Zeroizing::new(
         argon2::hash_raw(passphrase.expose_secret().as_bytes(), &salt, &config)
-            .map_err(CryptoError::Argon2Error)?,
+            .map_err(CryptoError::KeyDerivation)?,
     );
 
     let cipher = XChaCha20Poly1305::new(derived_key.as_slice().into());
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
     let raw_secret = Zeroizing::new(secret_key.to_bytes());
     zeroize_secret_key(&mut secret_key);
-    let encrypted_secret = cipher.encrypt(&nonce, raw_secret.as_slice()).map_err(|_| {
-        CryptoError::EncryptionDecryptionError("Failed to encrypt secret key".to_string())
-    })?;
+    let encrypted_secret = cipher
+        .encrypt(&nonce, raw_secret.as_slice())
+        .map_err(|_| CryptoError::CryptoOperation("Failed to encrypt secret key".to_string()))?;
     drop(raw_secret);
 
     derived_key.zeroize();
@@ -400,14 +385,14 @@ pub fn generate_key_pair(
     secret_key_file.write_all(&encrypted_secret)?;
 
     // Write public key file: [header(8) | raw 32 bytes]
-    let pub_header =
+    let public_header =
         format::build_key_file_header(format::KEY_FILE_TYPE_PUBLIC, PUBLIC_KEY_DATA_SIZE as u16);
     let public_key_path = output_dir.join(PUBLIC_KEY_FILENAME);
     let mut public_key_file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&public_key_path)?;
-    public_key_file.write_all(&pub_header)?;
+    public_key_file.write_all(&public_header)?;
     public_key_file.write_all(public_key.as_bytes())?;
 
     let result = format!("Generated key pair in {}", output_dir.display());

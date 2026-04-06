@@ -36,14 +36,16 @@ pub fn rep_encode(data: &[u8]) -> Vec<u8> {
 /// Corrects any single-copy corruption at each byte.
 pub fn rep_decode(data: &[u8]) -> Result<Vec<u8>, CryptoError> {
     if data.is_empty() {
-        return Err(CryptoError::Message("Empty data for decoding".to_string()));
+        return Err(CryptoError::InvalidInput(
+            "Empty data for decoding".to_string(),
+        ));
     }
 
     let padding_byte = data[0];
     let remaining = &data[1..];
 
     if remaining.len() % 3 != 0 {
-        return Err(CryptoError::Message(
+        return Err(CryptoError::InvalidInput(
             "Incorrect encoded bytes length".to_string(),
         ));
     }
@@ -72,7 +74,7 @@ pub fn rep_decode(data: &[u8]) -> Result<Vec<u8>, CryptoError> {
 pub fn rep_decode_exact(data: &[u8], expected_len: usize) -> Result<Vec<u8>, CryptoError> {
     let decoded = rep_decode(data)?;
     if decoded.len() != expected_len {
-        return Err(CryptoError::EncryptionDecryptionError(
+        return Err(CryptoError::CryptoOperation(
             "File is corrupted (invalid field length after decoding)".to_string(),
         ));
     }

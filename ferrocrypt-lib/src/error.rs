@@ -5,12 +5,12 @@ use thiserror::Error;
 /// | Variant | When it happens | Typical fix |
 /// | --- | --- | --- |
 /// | `Io` | Filesystem or I/O failure | Check paths/permissions and retry |
-/// | `Argon2Error` | Password hashing/KDF failed | Ensure parameters are valid and memory is sufficient |
-/// | `ChaCha20Poly1305Error` | Symmetric or asymmetric encryption/decryption failed (bad tag, nonce issues) | Verify key, input integrity, and nonce uniqueness |
-/// | `TryFromSliceError` | Byte slice could not be converted | Confirm buffer sizes |
-/// | `EncryptionDecryptionError` | High-level guard for crypto failures | Recheck keys/passwords and inputs |
+/// | `KeyDerivation` | Password hashing/KDF failed | Ensure parameters are valid and memory is sufficient |
+/// | `Cipher` | Symmetric or asymmetric encryption/decryption failed (bad tag, nonce issues) | Verify key, input integrity, and nonce uniqueness |
+/// | `SliceConversion` | Byte slice could not be converted | Confirm buffer sizes |
+/// | `CryptoOperation` | High-level guard for crypto failures | Recheck keys/passwords and inputs |
 /// | `InputPath` | Missing input file or folder | Provide an existing path |
-/// | `Message` | Catch-all with human-readable context | Inspect message for details |
+/// | `InvalidInput` | Validation failure with human-readable context | Inspect message for details |
 ///
 /// # Examples
 ///
@@ -34,17 +34,17 @@ pub enum CryptoError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
-    ChaCha20Poly1305Error(#[from] chacha20poly1305::Error),
+    Cipher(#[from] chacha20poly1305::Error),
     #[error(transparent)]
-    Argon2Error(#[from] argon2::Error),
+    KeyDerivation(#[from] argon2::Error),
     #[error(transparent)]
-    TryFromSliceError(#[from] std::array::TryFromSliceError),
+    SliceConversion(#[from] std::array::TryFromSliceError),
     #[error("{0}")]
-    EncryptionDecryptionError(String),
+    CryptoOperation(String),
     #[error("Input file or folder missing: {0}")]
     InputPath(String),
     #[error("{0}")]
-    Message(String),
+    InvalidInput(String),
 }
 
 // We must manually implement serde::Serialize for `tauri`

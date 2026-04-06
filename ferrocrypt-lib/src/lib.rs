@@ -203,7 +203,7 @@ pub fn symmetric_encryption(
     on_progress: impl Fn(&str),
 ) -> Result<String, CryptoError> {
     if password.expose_secret().is_empty() {
-        return Err(CryptoError::Message(
+        return Err(CryptoError::InvalidInput(
             "Passphrase must not be empty for symmetric encryption".to_string(),
         ));
     }

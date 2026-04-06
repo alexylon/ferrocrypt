@@ -12,28 +12,32 @@ use sha3::Sha3_256;
 use zeroize::Zeroizing;
 
 use crate::common::{
-    DecryptReader, EncryptWriter, NONCE_SIZE, constant_time_compare_256_bit, get_duration,
+    ARGON2_SALT_SIZE, DecryptReader, ENCRYPTION_KEY_SIZE, ERR_FILE_TOO_SHORT, EncryptWriter,
+    HMAC_KEY_SIZE, NONCE_SIZE, constant_time_compare_256_bit, get_duration,
     get_file_stem_to_string, hmac_sha3_256, hmac_sha3_256_verify, sha3_32_hash,
 };
 use crate::format::{self, HEADER_PREFIX_SIZE};
 use crate::replication::{rep_decode_exact, rep_encode, rep_encoded_size};
 use crate::{CryptoError, archiver};
 
-const SALT_SIZE: usize = 32;
 const HKDF_SALT_SIZE: usize = 32;
-const KEY_SIZE: usize = 32;
-const HMAC_KEY_SIZE: usize = 32;
 const HKDF_INFO_ENC: &[u8] = b"ferrocrypt-enc";
 const HKDF_INFO_HMAC: &[u8] = b"ferrocrypt-hmac";
 
 /// Derives domain-separated encryption and HMAC subkeys from a passphrase.
 ///
-/// Pipeline: passphrase + salt → Argon2id (32 bytes IKM) → HKDF-SHA3-256 → (enc_key, hmac_key)
+/// Pipeline: passphrase + salt → Argon2id (32 bytes IKM) → HKDF-SHA3-256 → (encryption_key, hmac_key)
 fn derive_keys(
     passphrase: &SecretString,
     salt: &[u8],
     hkdf_salt: &[u8],
-) -> Result<(Zeroizing<[u8; KEY_SIZE]>, Zeroizing<[u8; HMAC_KEY_SIZE]>), CryptoError> {
+) -> Result<
+    (
+        Zeroizing<[u8; ENCRYPTION_KEY_SIZE]>,
+        Zeroizing<[u8; HMAC_KEY_SIZE]>,
+    ),
+    CryptoError,
+> {
     let argon2_config = crate::common::argon2_config();
     let ikm = Zeroizing::new(argon2::hash_raw(
         passphrase.expose_secret().as_bytes(),
@@ -42,14 +46,16 @@ fn derive_keys(
     )?);
 
     let hkdf = Hkdf::<Sha3_256>::new(Some(hkdf_salt), &ikm);
-    let mut enc_key = Zeroizing::new([0u8; KEY_SIZE]);
+    let mut encryption_key = Zeroizing::new([0u8; ENCRYPTION_KEY_SIZE]);
     let mut hmac_key = Zeroizing::new([0u8; HMAC_KEY_SIZE]);
-    hkdf.expand(HKDF_INFO_ENC, enc_key.as_mut())
-        .map_err(|_| CryptoError::Message("HKDF expand failed for encryption key".to_string()))?;
+    hkdf.expand(HKDF_INFO_ENC, encryption_key.as_mut())
+        .map_err(|_| {
+            CryptoError::InvalidInput("HKDF expand failed for encryption key".to_string())
+        })?;
     hkdf.expand(HKDF_INFO_HMAC, hmac_key.as_mut())
-        .map_err(|_| CryptoError::Message("HKDF expand failed for HMAC key".to_string()))?;
+        .map_err(|_| CryptoError::InvalidInput("HKDF expand failed for HMAC key".to_string()))?;
 
-    Ok((enc_key, hmac_key))
+    Ok((encryption_key, hmac_key))
 }
 
 /// Encrypts a file or directory with XChaCha20-Poly1305 streaming encryption.
@@ -65,15 +71,15 @@ pub fn encrypt_file(
     let start_time = std::time::Instant::now();
 
     on_progress("Deriving key\u{2026}");
-    let mut salt = [0u8; SALT_SIZE];
+    let mut salt = [0u8; ARGON2_SALT_SIZE];
     OsRng.fill_bytes(&mut salt);
     let mut hkdf_salt = [0u8; HKDF_SALT_SIZE];
     OsRng.fill_bytes(&mut hkdf_salt);
 
-    let (enc_key, hmac_key) = derive_keys(passphrase, &salt, &hkdf_salt)?;
+    let (encryption_key, hmac_key) = derive_keys(passphrase, &salt, &hkdf_salt)?;
 
-    let cipher = XChaCha20Poly1305::new(enc_key.as_ref().into());
-    let stored_key_hash: [u8; KEY_SIZE] = sha3_32_hash(enc_key.as_ref())?;
+    let cipher = XChaCha20Poly1305::new(encryption_key.as_ref().into());
+    let verification_hash: [u8; ENCRYPTION_KEY_SIZE] = sha3_32_hash(encryption_key.as_ref())?;
 
     let file_stem = &get_file_stem_to_string(input_path)?;
     on_progress("Encrypting\u{2026}");
@@ -85,7 +91,7 @@ pub fn encrypt_file(
         }
     };
     if output_path.exists() {
-        return Err(CryptoError::Message(format!(
+        return Err(CryptoError::InvalidInput(format!(
             "Output file already exists: {}",
             output_path.display()
         )));
@@ -98,7 +104,7 @@ pub fn encrypt_file(
 
     let encoded_salt = rep_encode(&salt);
     let encoded_hkdf_salt = rep_encode(&hkdf_salt);
-    let encoded_key_hash = rep_encode(&stored_key_hash);
+    let encoded_key_hash = rep_encode(&verification_hash);
 
     let mut nonce = [0u8; NONCE_SIZE];
     OsRng.fill_bytes(&mut nonce);
@@ -114,13 +120,14 @@ pub fn encrypt_file(
 
     let stream_encryptor = stream::EncryptorBE32::from_aead(cipher, nonce.as_ref().into());
 
-    let mut hmac_message =
-        Vec::with_capacity(prefix.len() + SALT_SIZE + HKDF_SALT_SIZE + NONCE_SIZE + KEY_SIZE);
+    let mut hmac_message = Vec::with_capacity(
+        prefix.len() + ARGON2_SALT_SIZE + HKDF_SALT_SIZE + NONCE_SIZE + ENCRYPTION_KEY_SIZE,
+    );
     hmac_message.extend_from_slice(&prefix);
     hmac_message.extend_from_slice(&salt);
     hmac_message.extend_from_slice(&hkdf_salt);
     hmac_message.extend_from_slice(&nonce);
-    hmac_message.extend_from_slice(&stored_key_hash);
+    hmac_message.extend_from_slice(&verification_hash);
     let hmac_tag = hmac_sha3_256(hmac_key.as_ref(), &hmac_message)?;
     let encoded_hmac_tag = rep_encode(&hmac_tag);
 
@@ -159,33 +166,27 @@ pub fn decrypt_file(
     let (prefix_bytes, header) =
         format::read_header_from_reader(&mut encrypted_file, format::TYPE_SYMMETRIC)?;
 
-    let mut encoded_salt = vec![0u8; rep_encoded_size(SALT_SIZE)];
+    let mut encoded_salt = vec![0u8; rep_encoded_size(ARGON2_SALT_SIZE)];
     let mut encoded_hkdf_salt = vec![0u8; rep_encoded_size(HKDF_SALT_SIZE)];
     let mut encoded_nonce = vec![0u8; rep_encoded_size(NONCE_SIZE)];
-    let mut encoded_key_hash = vec![0u8; rep_encoded_size(KEY_SIZE)];
+    let mut encoded_key_hash = vec![0u8; rep_encoded_size(ENCRYPTION_KEY_SIZE)];
     let mut encoded_hmac_tag = vec![0u8; rep_encoded_size(HMAC_KEY_SIZE)];
 
-    encrypted_file.read_exact(&mut encoded_salt).map_err(|_| {
-        CryptoError::EncryptionDecryptionError("File is too short or corrupted".to_string())
-    })?;
+    encrypted_file
+        .read_exact(&mut encoded_salt)
+        .map_err(|_| CryptoError::CryptoOperation(ERR_FILE_TOO_SHORT.to_string()))?;
     encrypted_file
         .read_exact(&mut encoded_hkdf_salt)
-        .map_err(|_| {
-            CryptoError::EncryptionDecryptionError("File is too short or corrupted".to_string())
-        })?;
-    encrypted_file.read_exact(&mut encoded_nonce).map_err(|_| {
-        CryptoError::EncryptionDecryptionError("File is too short or corrupted".to_string())
-    })?;
+        .map_err(|_| CryptoError::CryptoOperation(ERR_FILE_TOO_SHORT.to_string()))?;
+    encrypted_file
+        .read_exact(&mut encoded_nonce)
+        .map_err(|_| CryptoError::CryptoOperation(ERR_FILE_TOO_SHORT.to_string()))?;
     encrypted_file
         .read_exact(&mut encoded_key_hash)
-        .map_err(|_| {
-            CryptoError::EncryptionDecryptionError("File is too short or corrupted".to_string())
-        })?;
+        .map_err(|_| CryptoError::CryptoOperation(ERR_FILE_TOO_SHORT.to_string()))?;
     encrypted_file
         .read_exact(&mut encoded_hmac_tag)
-        .map_err(|_| {
-            CryptoError::EncryptionDecryptionError("File is too short or corrupted".to_string())
-        })?;
+        .map_err(|_| CryptoError::CryptoOperation(ERR_FILE_TOO_SHORT.to_string()))?;
 
     let bytes_after_prefix = encoded_salt.len()
         + encoded_hkdf_salt.len()
@@ -194,30 +195,30 @@ pub fn decrypt_file(
         + encoded_hmac_tag.len();
     format::skip_unknown_header_bytes(&mut encrypted_file, header.header_len, bytes_after_prefix)?;
 
-    let salt = rep_decode_exact(&encoded_salt, SALT_SIZE)?;
+    let salt = rep_decode_exact(&encoded_salt, ARGON2_SALT_SIZE)?;
     let hkdf_salt = rep_decode_exact(&encoded_hkdf_salt, HKDF_SALT_SIZE)?;
     let nonce = rep_decode_exact(&encoded_nonce, NONCE_SIZE)?;
-    let stored_key_hash = rep_decode_exact(&encoded_key_hash, KEY_SIZE)?;
+    let verification_hash = rep_decode_exact(&encoded_key_hash, ENCRYPTION_KEY_SIZE)?;
     let hmac_tag = rep_decode_exact(&encoded_hmac_tag, HMAC_KEY_SIZE)?;
 
     on_progress("Deriving key\u{2026}");
-    let (enc_key, hmac_key) = derive_keys(passphrase, &salt, &hkdf_salt)?;
+    let (encryption_key, hmac_key) = derive_keys(passphrase, &salt, &hkdf_salt)?;
 
     let mut hmac_message = Vec::with_capacity(
-        prefix_bytes.len() + salt.len() + hkdf_salt.len() + nonce.len() + stored_key_hash.len(),
+        prefix_bytes.len() + salt.len() + hkdf_salt.len() + nonce.len() + verification_hash.len(),
     );
     hmac_message.extend_from_slice(&prefix_bytes);
     hmac_message.extend_from_slice(&salt);
     hmac_message.extend_from_slice(&hkdf_salt);
     hmac_message.extend_from_slice(&nonce);
-    hmac_message.extend_from_slice(&stored_key_hash);
+    hmac_message.extend_from_slice(&verification_hash);
 
     if let Err(hmac_err) = hmac_sha3_256_verify(hmac_key.as_ref(), &hmac_message, &hmac_tag) {
-        let key_hash: [u8; KEY_SIZE] = sha3_32_hash(enc_key.as_ref())?;
+        let key_hash: [u8; ENCRYPTION_KEY_SIZE] = sha3_32_hash(encryption_key.as_ref())?;
         let key_correct =
-            constant_time_compare_256_bit(&key_hash, stored_key_hash.as_slice().try_into()?);
+            constant_time_compare_256_bit(&key_hash, verification_hash.as_slice().try_into()?);
         if !key_correct {
-            return Err(CryptoError::EncryptionDecryptionError(
+            return Err(CryptoError::CryptoOperation(
                 "The provided password is incorrect".to_string(),
             ));
         }
@@ -225,7 +226,7 @@ pub fn decrypt_file(
     }
 
     on_progress("Decrypting\u{2026}");
-    let cipher = XChaCha20Poly1305::new(enc_key.as_ref().into());
+    let cipher = XChaCha20Poly1305::new(encryption_key.as_ref().into());
     let stream_decryptor = stream::DecryptorBE32::from_aead(cipher, nonce.as_slice().into());
 
     let decrypt_reader = DecryptReader::new(stream_decryptor, encrypted_file);

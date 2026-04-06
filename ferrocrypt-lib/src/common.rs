@@ -30,12 +30,21 @@ pub fn argon2_config() -> argon2::Config<'static> {
     }
 }
 
+// ─── Shared crypto sizes ──────────────────────────────────────────────────
+pub const ENCRYPTION_KEY_SIZE: usize = 32;
+pub const HMAC_KEY_SIZE: usize = 32;
+pub const ARGON2_SALT_SIZE: usize = 32;
+
+// ─── Streaming encryption sizes ───────────────────────────────────────────
 /// Streaming I/O buffer size.
 pub const BUFFER_SIZE: usize = 65536;
 /// Poly1305 authentication tag size in bytes.
 pub const TAG_SIZE: usize = 16;
 /// STREAM nonce size: XChaCha20's 24-byte nonce minus 5 bytes for counter and last-block flag.
 pub const NONCE_SIZE: usize = 19;
+
+// ─── Error messages ───────────────────────────────────────────────────────
+pub const ERR_FILE_TOO_SHORT: &str = "File is too short or corrupted";
 
 pub fn normalize_paths(src_file_path: &str, dest_dir_path: &str) -> (String, String) {
     let src_file_path_norm = src_file_path.replace('\\', "/");
@@ -52,9 +61,9 @@ pub fn get_file_stem_to_string(filename: impl AsRef<Path>) -> Result<String, Cry
     let file_stem_string = filename
         .as_ref()
         .file_stem()
-        .ok_or_else(|| CryptoError::Message("Cannot get file stem".to_string()))?
+        .ok_or_else(|| CryptoError::InvalidInput("Cannot get file stem".to_string()))?
         .to_str()
-        .ok_or_else(|| CryptoError::Message("Cannot convert file stem to &str".to_string()))?
+        .ok_or_else(|| CryptoError::InvalidInput("Cannot convert file stem to &str".to_string()))?
         .to_string();
 
     Ok(file_stem_string)
@@ -79,7 +88,7 @@ pub fn constant_time_compare_256_bit(a: &[u8; 32], b: &[u8; 32]) -> bool {
 
 pub fn hmac_sha3_256(key: &[u8], data: &[u8]) -> Result<[u8; 32], CryptoError> {
     let mut mac = HmacSha3_256::new_from_slice(key)
-        .map_err(|e| CryptoError::Message(format!("HMAC key error: {}", e)))?;
+        .map_err(|e| CryptoError::InvalidInput(format!("HMAC key error: {}", e)))?;
     mac.update(data);
     let result = mac.finalize();
     let bytes: [u8; 32] = result.into_bytes().into();
@@ -89,10 +98,10 @@ pub fn hmac_sha3_256(key: &[u8], data: &[u8]) -> Result<[u8; 32], CryptoError> {
 /// Verifies HMAC-SHA3-256 in constant time. Returns error if mismatch.
 pub fn hmac_sha3_256_verify(key: &[u8], data: &[u8], tag: &[u8]) -> Result<(), CryptoError> {
     let mut mac = HmacSha3_256::new_from_slice(key)
-        .map_err(|e| CryptoError::Message(format!("HMAC key error: {}", e)))?;
+        .map_err(|e| CryptoError::InvalidInput(format!("HMAC key error: {}", e)))?;
     mac.update(data);
     mac.verify_slice(tag).map_err(|_| {
-        CryptoError::EncryptionDecryptionError(
+        CryptoError::CryptoOperation(
             "Header authentication failed: file may be corrupted or tampered with".to_string(),
         )
     })
@@ -131,13 +140,12 @@ impl<W: Write> EncryptWriter<W> {
     /// Encrypts the remaining buffer as the final AEAD chunk and flushes.
     /// Must be called exactly once after all plaintext has been written.
     pub fn finish(mut self) -> Result<(), CryptoError> {
-        let encryptor = self
-            .encryptor
-            .take()
-            .ok_or_else(|| CryptoError::Message("EncryptWriter already finished".to_string()))?;
+        let encryptor = self.encryptor.take().ok_or_else(|| {
+            CryptoError::InvalidInput("EncryptWriter already finished".to_string())
+        })?;
         let ciphertext = encryptor
             .encrypt_last(self.buffer.as_slice())
-            .map_err(CryptoError::ChaCha20Poly1305Error)?;
+            .map_err(CryptoError::Cipher)?;
         self.output.write_all(&ciphertext)?;
         self.output.flush()?;
         Ok(())

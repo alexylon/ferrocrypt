@@ -36,6 +36,7 @@
 use std::io::{self, Read};
 
 use crate::CryptoError;
+use crate::common::ERR_FILE_TOO_SHORT;
 
 // ─── Shared ────────────────────────────────────────────────────────────────
 
@@ -85,9 +86,9 @@ pub fn read_header_from_reader(
     expected_type: u8,
 ) -> Result<([u8; HEADER_PREFIX_SIZE], FileHeader), CryptoError> {
     let mut prefix = [0u8; HEADER_PREFIX_SIZE];
-    reader.read_exact(&mut prefix).map_err(|_| {
-        CryptoError::EncryptionDecryptionError("File is too short or corrupted".to_string())
-    })?;
+    reader
+        .read_exact(&mut prefix)
+        .map_err(|_| CryptoError::CryptoOperation(ERR_FILE_TOO_SHORT.to_string()))?;
 
     let header = validate_header_bytes(&prefix, expected_type)?;
     Ok((prefix, header))
@@ -103,20 +104,16 @@ pub fn skip_unknown_header_bytes(
 ) -> Result<(), CryptoError> {
     let expected_after_prefix = (header_len as usize).saturating_sub(HEADER_PREFIX_SIZE);
     if bytes_read_after_prefix > expected_after_prefix {
-        return Err(CryptoError::EncryptionDecryptionError(
+        return Err(CryptoError::CryptoOperation(
             "Header is corrupted (read more bytes than header declares)".to_string(),
         ));
     }
     let to_skip = expected_after_prefix - bytes_read_after_prefix;
     if to_skip > 0 {
-        let skipped =
-            io::copy(&mut reader.take(to_skip as u64), &mut io::sink()).map_err(|_| {
-                CryptoError::EncryptionDecryptionError("File is too short or corrupted".to_string())
-            })?;
+        let skipped = io::copy(&mut reader.take(to_skip as u64), &mut io::sink())
+            .map_err(|_| CryptoError::CryptoOperation(ERR_FILE_TOO_SHORT.to_string()))?;
         if (skipped as usize) < to_skip {
-            return Err(CryptoError::EncryptionDecryptionError(
-                "File is too short or corrupted".to_string(),
-            ));
+            return Err(CryptoError::CryptoOperation(ERR_FILE_TOO_SHORT.to_string()));
         }
     }
     Ok(())
@@ -127,7 +124,7 @@ fn validate_header_bytes(
     expected_type: u8,
 ) -> Result<FileHeader, CryptoError> {
     if prefix[0] != MAGIC_BYTE {
-        return Err(CryptoError::EncryptionDecryptionError(
+        return Err(CryptoError::CryptoOperation(
             "Not a valid FerroCrypt file. If this file was created with an older version, \
              it cannot be decrypted by this version."
                 .to_string(),
@@ -140,7 +137,7 @@ fn validate_header_bytes(
             TYPE_HYBRID => "hybrid",
             _ => "unknown",
         };
-        return Err(CryptoError::EncryptionDecryptionError(format!(
+        return Err(CryptoError::CryptoOperation(format!(
             "Expected {} format, but file has a different format type",
             expected
         )));
@@ -150,13 +147,13 @@ fn validate_header_bytes(
     let minor = prefix[3];
 
     if major > FORMAT_MAJOR {
-        return Err(CryptoError::EncryptionDecryptionError(format!(
+        return Err(CryptoError::CryptoOperation(format!(
             "Format version {}.{} not supported (max: {}.{}). Upgrade FerroCrypt.",
             major, minor, FORMAT_MAJOR, FORMAT_MINOR
         )));
     }
     if major < FORMAT_MAJOR {
-        return Err(CryptoError::EncryptionDecryptionError(format!(
+        return Err(CryptoError::CryptoOperation(format!(
             "Format version {}.{} no longer supported (current: {}.{})",
             major, minor, FORMAT_MAJOR, FORMAT_MINOR
         )));
@@ -164,13 +161,13 @@ fn validate_header_bytes(
 
     let header_len = u16::from_be_bytes([prefix[4], prefix[5]]);
     if (header_len as usize) < HEADER_PREFIX_SIZE {
-        return Err(CryptoError::EncryptionDecryptionError(
+        return Err(CryptoError::CryptoOperation(
             "File header is corrupted (invalid header length)".to_string(),
         ));
     }
     let flags = u16::from_be_bytes([prefix[6], prefix[7]]);
     if flags != 0 {
-        return Err(CryptoError::EncryptionDecryptionError(format!(
+        return Err(CryptoError::CryptoOperation(format!(
             "Unknown header flags (0x{:04X}). Upgrade FerroCrypt.",
             flags
         )));
@@ -226,12 +223,12 @@ pub fn validate_key_file_header(
     expected_data_size: usize,
 ) -> Result<(), CryptoError> {
     if data.len() < KEY_FILE_HEADER_SIZE {
-        return Err(CryptoError::EncryptionDecryptionError(
+        return Err(CryptoError::CryptoOperation(
             "Key file is too short or corrupted".to_string(),
         ));
     }
     if data[0] != MAGIC_BYTE {
-        return Err(CryptoError::EncryptionDecryptionError(
+        return Err(CryptoError::CryptoOperation(
             "Not a FerroCrypt key file".to_string(),
         ));
     }
@@ -249,38 +246,38 @@ pub fn validate_key_file_header(
         } else {
             "unknown"
         };
-        return Err(CryptoError::EncryptionDecryptionError(format!(
+        return Err(CryptoError::CryptoOperation(format!(
             "Expected a {expected} key file but got a {actual} key file"
         )));
     }
     if data[2] != KEY_FILE_VERSION {
-        return Err(CryptoError::EncryptionDecryptionError(format!(
+        return Err(CryptoError::CryptoOperation(format!(
             "Key file version {} not supported (expected {})",
             data[2], KEY_FILE_VERSION
         )));
     }
     if data[3] != KEY_FILE_ALG_X25519 {
-        return Err(CryptoError::EncryptionDecryptionError(format!(
+        return Err(CryptoError::CryptoOperation(format!(
             "Key file algorithm {} not supported",
             data[3]
         )));
     }
     let data_len = u16::from_be_bytes([data[4], data[5]]) as usize;
     if data_len != expected_data_size {
-        return Err(CryptoError::EncryptionDecryptionError(format!(
+        return Err(CryptoError::CryptoOperation(format!(
             "Key file has unexpected data length ({}, expected {})",
             data_len, expected_data_size
         )));
     }
     let flags = u16::from_be_bytes([data[6], data[7]]);
     if flags != 0 {
-        return Err(CryptoError::EncryptionDecryptionError(format!(
+        return Err(CryptoError::CryptoOperation(format!(
             "Unknown key file flags (0x{:04X}). Upgrade FerroCrypt.",
             flags
         )));
     }
     if data.len() != KEY_FILE_HEADER_SIZE + data_len {
-        return Err(CryptoError::EncryptionDecryptionError(format!(
+        return Err(CryptoError::CryptoOperation(format!(
             "Key file has unexpected size ({}, expected {})",
             data.len(),
             KEY_FILE_HEADER_SIZE + data_len

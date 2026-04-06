@@ -106,6 +106,8 @@ export component AppWindow inherits Window {
     in-out property <bool> combined-picker: false;
     in-out property <string> conflict-warning;
     in-out property <int> password-strength: 0;
+    in-out property <string> key-fingerprint;
+    in-out property <bool> key-invalid: false;
 
     // ── Derived ─────────────────────────────────────────────────────────
     property <bool> require-password: mode != 2;
@@ -117,8 +119,8 @@ export component AppWindow inherits Window {
         || (mode == 0 && (inpath == "" || password == ""
             || (require-password-repeated && !password-match)))
         || (mode == 1 && (inpath == "" || password == ""))
-        || (mode == 2 && (inpath == "" || keypath == ""))
-        || (mode == 3 && (inpath == "" || password == "" || keypath == ""))
+        || (mode == 2 && (inpath == "" || keypath == "" || key-invalid))
+        || (mode == 3 && (inpath == "" || password == "" || keypath == "" || key-invalid))
         || (mode == 4 && (keygen-outdir == "" || password == ""
             || (require-password-repeated && !password-match)));
     property <bool> is-encrypt-mode: mode == 0 || mode == 2 || mode == 4;
@@ -146,6 +148,7 @@ export component AppWindow inherits Window {
     callback start-operation();
     callback password-edited();
     callback clear-form();
+    callback copy-fingerprint();
 
     // ── Accent stripe ───────────────────────────────────────────────────
     Rectangle {
@@ -761,6 +764,78 @@ export component AppWindow inherits Window {
                     label: "Select";
                     enabled: !is-working;
                     clicked => { root.select-key-file(); }
+                }
+            }
+
+            if mode == 2 && key-fingerprint != "" : VerticalLayout {
+                property <bool> fp-copied: false;
+                spacing: 0px;
+                Rectangle { height: Theme.field-gap; }
+
+                Text {
+                    text: "Fingerprint";
+                    color: Theme.text-secondary;
+                    font-size: Theme.label-size;
+                }
+                Rectangle { height: Theme.label-gap; }
+
+                Rectangle {
+                    height: 30px;
+                    border-radius: 6px;
+                    background: #0a1420;
+                    border-width: 1px;
+                    border-color: #152a3b;
+
+                    HorizontalLayout {
+                        padding-left: Theme.field-pad;
+                        padding-right: 4px;
+                        spacing: 4px;
+
+                        Text {
+                            text: key-fingerprint;
+                            color: Theme.text-dim;
+                            font-size: 10.5px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+
+                        Rectangle {
+                            width: 22px;
+                            height: 22px;
+                            y: (parent.height - self.height) / 2;
+                            border-radius: 4px;
+                            background: fp-copy-ta.has-hover ? Theme.surface-hover : transparent;
+                            animate background { duration: 120ms; }
+
+                            fp-copy-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.copy-fingerprint();
+                                    fp-copied = true;
+                                    fp-copied-timer.running = true;
+                                }
+                            }
+
+                            fp-copied-timer := Timer {
+                                interval: 2s;
+                                running: false;
+                                triggered => {
+                                    fp-copied = false;
+                                    self.running = false;
+                                }
+                            }
+
+                            Text {
+                                text: fp-copied ? "\u{2713}" : "\u{2398}";
+                                color: fp-copied ? Theme.success : Theme.text-dim;
+                                font-size: 12px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                animate color { duration: 200ms; }
+                            }
+                        }
+                    }
                 }
             }
         }

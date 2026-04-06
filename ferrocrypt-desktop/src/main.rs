@@ -6,7 +6,7 @@ slint::include_modules!();
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
     EncryptionMode, default_encrypted_filename, detect_encryption_mode, generate_key_pair,
-    hybrid_encryption, symmetric_encryption,
+    hybrid_encryption, public_key_fingerprint, symmetric_encryption, validate_secret_key_file,
 };
 use std::path::{Path, PathBuf};
 
@@ -37,6 +37,15 @@ fn main() {
                 app.set_password_repeated(Default::default());
                 app.set_hide_password(true);
                 app.set_password_strength(0);
+                app.set_status_ok(Default::default());
+                app.set_status_err(Default::default());
+                let keypath = app.get_keypath().to_string();
+                if !keypath.is_empty() {
+                    validate_selected_key(&app, &keypath);
+                } else {
+                    app.set_key_fingerprint(Default::default());
+                    app.set_key_invalid(false);
+                }
                 check_conflicts(&app);
             }
         }
@@ -72,7 +81,8 @@ fn main() {
             let Some(app) = weak.upgrade() else { return };
             let key_path = path_to_string(&path);
             app.set_keypath_display(elide_left(&key_path, ELIDE).into());
-            app.set_keypath(key_path.into());
+            app.set_keypath(key_path.clone().into());
+            validate_selected_key(&app, &key_path);
             check_conflicts(&app);
         }
     });
@@ -220,7 +230,8 @@ fn main() {
                                 app.set_status_err(Default::default());
                                 app.set_mode(2);
                                 app.set_keypath_display(elide_left(&pub_key, ELIDE).into());
-                                app.set_keypath(pub_key.into());
+                                app.set_keypath(pub_key.clone().into());
+                                validate_selected_key(&app, &pub_key);
                                 app.set_status_ok(
                                     "Key pair generated \u{2014} public key selected".into(),
                                 );
@@ -236,6 +247,19 @@ fn main() {
                     }
                 });
             });
+        }
+    });
+
+    app.on_copy_fingerprint({
+        let weak = app.as_weak();
+        move || {
+            let Some(app) = weak.upgrade() else { return };
+            let fp = app.get_key_fingerprint().to_string();
+            if !fp.is_empty() {
+                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                    let _ = clipboard.set_text(fp);
+                }
+            }
         }
     });
 
@@ -275,13 +299,25 @@ fn apply_input_path(weak: &slint::Weak<AppWindow>, path: PathBuf) {
     };
     app.set_inpath_display(elide_left(&selected, inpath_elide).into());
     app.set_inpath(selected.clone().into());
+    let old_mode = app.get_mode();
     match detected_mode {
         Some(m) => app.set_mode(m),
-        None => match app.get_mode() {
+        None => match old_mode {
             1 => app.set_mode(0),
             3 => app.set_mode(2),
             _ => {}
         },
+    }
+    if app.get_mode() != old_mode {
+        app.set_password(Default::default());
+        app.set_password_repeated(Default::default());
+        app.set_hide_password(true);
+        app.set_password_strength(0);
+    }
+
+    let keypath = app.get_keypath().to_string();
+    if !keypath.is_empty() {
+        validate_selected_key(&app, &keypath);
     }
 
     if is_decrypt {
@@ -290,8 +326,10 @@ fn apply_input_path(weak: &slint::Weak<AppWindow>, path: PathBuf) {
         set_outpath(&app, &path_to_string(&Path::new(&dir).join(filename)));
     }
 
-    app.set_status_ok("Ready".into());
-    app.set_status_err("".into());
+    if !app.get_key_invalid() {
+        app.set_status_ok("Ready".into());
+        app.set_status_err("".into());
+    }
     check_conflicts(&app);
 }
 
@@ -345,6 +383,8 @@ fn clear_fields(app: &AppWindow) {
     app.set_status_err(empty);
     app.set_hide_password(true);
     app.set_password_strength(0);
+    app.set_key_fingerprint(Default::default());
+    app.set_key_invalid(false);
     // Snap back to the encrypt mode of the current tab
     match app.get_mode() {
         1 => app.set_mode(0),
@@ -399,6 +439,37 @@ fn elide_result_path(msg: &str) -> String {
         }
     }
     msg.to_string()
+}
+
+fn validate_selected_key(app: &AppWindow, key_path: &str) {
+    match app.get_mode() {
+        2 => match public_key_fingerprint(key_path) {
+            Ok(fp) => {
+                app.set_key_fingerprint(fp.into());
+                app.set_key_invalid(false);
+                app.set_status_err(Default::default());
+            }
+            Err(e) => {
+                app.set_key_fingerprint(Default::default());
+                app.set_key_invalid(true);
+                app.set_status_err(e.to_string().into());
+            }
+        },
+        3 => {
+            app.set_key_fingerprint(Default::default());
+            if let Err(e) = validate_secret_key_file(key_path) {
+                app.set_key_invalid(true);
+                app.set_status_err(e.to_string().into());
+            } else {
+                app.set_key_invalid(false);
+                app.set_status_err(Default::default());
+            }
+        }
+        _ => {
+            app.set_key_fingerprint(Default::default());
+            app.set_key_invalid(false);
+        }
+    }
 }
 
 fn detect_mode_from_path(path: &str) -> Option<i32> {

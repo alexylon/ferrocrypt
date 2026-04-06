@@ -10,13 +10,14 @@ ferrocrypt = { path = "../ferrocrypt-lib" }
 rfd = "0.17"
 regex-lite = "0.1"
 lazy_static = "1"
+arboard = "3"
 
 [build-dependencies]
 slint-build = "1"
 
 [package.metadata.bundle]
 name = "FerroCrypt"
-identifier = "com.ferrocrypt"
+identifier = "app.ferrocrypt"
 icon = ["assets/app_icon.png"]
 resources = ["assets"]
 category = "Developer Tool"

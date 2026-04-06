@@ -73,6 +73,7 @@ cargo add ferrocrypt
 | `symmetric` | `sym` | Encrypt/decrypt with a password |
 | `hybrid` | `hyb` | Encrypt/decrypt with public/secret keys |
 | `keygen` | `gen` | Generate a key pair |
+| `fingerprint` | `fp` | Print a public key's SHA3-256 fingerprint |
 
 Run without arguments to start an interactive REPL. Aliases are available in interactive mode.
 
@@ -92,10 +93,13 @@ ferrocrypt symmetric -i secret.txt -o ./encrypted -p "my password" -s ./encrypte
 ### Hybrid
 
 ```bash
-# Generate keys
+# Generate keys (prints fingerprint)
 ferrocrypt keygen -o ./keys -p "key password"
 
-# Encrypt with public key (no passphrase needed)
+# Verify a public key's fingerprint
+ferrocrypt fingerprint ./keys/public.key
+
+# Encrypt with public key (prints recipient fingerprint)
 ferrocrypt hybrid -i secret.txt -o ./encrypted -k ./keys/public.key
 
 # Decrypt with secret key
@@ -107,7 +111,7 @@ ferrocrypt hybrid -i ./encrypted/secret.fcr -o ./decrypted -k ./keys/secret.key 
 ```text
 $ ferrocrypt
 FerroCrypt interactive mode
-Commands: symmetric (sym), hybrid (hyb), keygen (gen), quit
+Commands: symmetric (sym), hybrid (hyb), keygen (gen), fingerprint (fp), quit
 
 ferrocrypt> sym -i secret.txt -o out -p "my password"
 ferrocrypt> quit
@@ -140,6 +144,12 @@ ferrocrypt> quit
 |---|---|
 | `-o, --outpath` | Output directory for the key pair |
 | `-p, --passphrase` | Passphrase to encrypt the secret key |
+
+#### `fingerprint`
+
+| Argument | Description |
+|---|---|
+| `<key_file>` | Path to a public key file |
 
 ## Desktop App
 

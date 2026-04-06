@@ -581,6 +581,67 @@ fn test_cli_symmetric_without_save_as_uses_default() {
     assert!(encrypt_dir.join("report.fcr").exists());
 }
 
+#[test]
+fn test_cli_fingerprint() {
+    let test_dir = setup_test_dir("cli_fingerprint");
+    let keys_dir = test_dir.join("keys");
+    fs::create_dir_all(&keys_dir).unwrap();
+
+    let binary = get_binary_path();
+
+    Command::new(&binary)
+        .arg("keygen")
+        .arg("-o")
+        .arg(keys_dir.to_str().unwrap())
+        .arg("-p")
+        .arg("fp_pass")
+        .output()
+        .expect("Failed to execute keygen");
+
+    let fp_output = Command::new(&binary)
+        .arg("fingerprint")
+        .arg(keys_dir.join("public.key").to_str().unwrap())
+        .output()
+        .expect("Failed to execute fingerprint command");
+
+    assert!(fp_output.status.success());
+    let stdout = String::from_utf8_lossy(&fp_output.stdout);
+    let fp_line = stdout
+        .lines()
+        .find(|l| l.len() == 64 && l.chars().all(|c| c.is_ascii_hexdigit()));
+    assert!(
+        fp_line.is_some(),
+        "expected 64-char hex fingerprint in output: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_cli_keygen_prints_fingerprint() {
+    let test_dir = setup_test_dir("cli_keygen_fp");
+    let keys_dir = test_dir.join("keys");
+    fs::create_dir_all(&keys_dir).unwrap();
+
+    let binary = get_binary_path();
+
+    let output = Command::new(&binary)
+        .arg("keygen")
+        .arg("-o")
+        .arg(keys_dir.to_str().unwrap())
+        .arg("-p")
+        .arg("keygen_fp_pass")
+        .output()
+        .expect("Failed to execute keygen");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Public key fingerprint:"),
+        "keygen output should include fingerprint, got: {}",
+        stdout
+    );
+}
+
 #[ctor::dtor]
 fn cleanup() {
     cleanup_test_workspace();

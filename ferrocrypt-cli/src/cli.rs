@@ -1,6 +1,9 @@
 use clap::{Parser, Subcommand};
 use ferrocrypt::secrecy::SecretString;
-use ferrocrypt::{CryptoError, generate_key_pair, hybrid_encryption, symmetric_encryption};
+use ferrocrypt::{
+    CryptoError, detect_encryption_mode, generate_key_pair, hybrid_encryption,
+    public_key_fingerprint, symmetric_encryption,
+};
 
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
@@ -46,6 +49,12 @@ pub enum Command {
         save_as: Option<String>,
     },
 
+    #[command(alias = "fp")]
+    Fingerprint {
+        #[arg(help = "Path to a public key file")]
+        key_file: String,
+    },
+
     #[command(alias = "sym")]
     Symmetric {
         #[arg(short, long)]
@@ -86,6 +95,19 @@ fn run_command(cmd: Command) -> Result<(), CryptoError> {
         } => {
             let passphrase = SecretString::from(passphrase);
             generate_key_pair(&passphrase, &outpath, |_| {})?;
+            let pub_key = std::path::Path::new(&outpath)
+                .join("public.key")
+                .to_string_lossy()
+                .to_string();
+            match public_key_fingerprint(&pub_key) {
+                Ok(fp) => println!("Public key fingerprint: {}", fp),
+                Err(e) => eprintln!("Warning: could not compute fingerprint: {}", e),
+            }
+        }
+
+        Command::Fingerprint { key_file } => {
+            let fp = public_key_fingerprint(&key_file)?;
+            println!("{}", fp);
         }
 
         Command::Hybrid {
@@ -95,6 +117,12 @@ fn run_command(cmd: Command) -> Result<(), CryptoError> {
             passphrase,
             save_as,
         } => {
+            // Only print fingerprint when encrypting (input is not an .fcr file)
+            if detect_encryption_mode(&inpath).is_none() {
+                if let Ok(fp) = public_key_fingerprint(&key) {
+                    println!("Encrypting to: {}", fp);
+                }
+            }
             let passphrase = SecretString::from(passphrase);
             hybrid_encryption(
                 &inpath,
@@ -122,7 +150,7 @@ fn run_command(cmd: Command) -> Result<(), CryptoError> {
 
 fn interactive_mode() -> Result<(), CryptoError> {
     println!("\nFerroCrypt interactive mode\n");
-    println!("Commands: symmetric (sym), hybrid (hyb), keygen (gen), quit\n");
+    println!("Commands: symmetric (sym), hybrid (hyb), keygen (gen), fingerprint (fp), quit\n");
 
     let mut rl = match DefaultEditor::new() {
         Ok(editor) => editor,

@@ -82,7 +82,7 @@ use std::path::Path;
 
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::common::normalize_paths;
+use crate::common::{bytes_to_hex, normalize_paths, sha3_32_hash};
 pub use crate::error::CryptoError;
 pub use crate::format::ENCRYPTED_EXTENSION;
 
@@ -119,6 +119,45 @@ mod format;
 mod hybrid;
 mod replication;
 mod symmetric;
+
+/// Computes the SHA3-256 fingerprint of a public key file.
+///
+/// Returns the hash as a 64-character lowercase hex string.
+///
+/// # Examples
+///
+/// ```no_run
+/// use ferrocrypt::public_key_fingerprint;
+///
+/// let fp = public_key_fingerprint("./keys/public.key")?;
+/// println!("{}", fp);  // a1b2c3d4...
+/// # Ok::<(), ferrocrypt::CryptoError>(())
+/// ```
+pub fn public_key_fingerprint(key_file: &str) -> Result<String, CryptoError> {
+    let data = std::fs::read(key_file)?;
+    format::validate_key_file_header(
+        &data,
+        format::KEY_FILE_TYPE_PUBLIC,
+        format::PUBLIC_KEY_DATA_SIZE,
+    )?;
+    let key_bytes = &data
+        [format::KEY_FILE_HEADER_SIZE..format::KEY_FILE_HEADER_SIZE + format::PUBLIC_KEY_DATA_SIZE];
+    let hash = sha3_32_hash(key_bytes)?;
+    Ok(bytes_to_hex(&hash))
+}
+
+/// Validates that a file is a well-formed FerroCrypt secret key file.
+///
+/// Checks magic byte, key type, version, algorithm, and exact file size.
+/// Does **not** attempt to decrypt the key (no passphrase needed).
+pub fn validate_secret_key_file(key_file: &str) -> Result<(), CryptoError> {
+    let data = std::fs::read(key_file)?;
+    format::validate_key_file_header(
+        &data,
+        format::KEY_FILE_TYPE_SECRET,
+        format::SECRET_KEY_DATA_SIZE,
+    )
+}
 
 /// Returns the default encrypted filename for a given input path (e.g. `"secrets.fcr"`).
 pub fn default_encrypted_filename(input_path: &str) -> Result<String, CryptoError> {

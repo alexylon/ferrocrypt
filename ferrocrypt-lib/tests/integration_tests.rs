@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
-    CryptoError, ENCRYPTED_EXTENSION, generate_key_pair, hybrid_encryption, symmetric_encryption,
+    CryptoError, ENCRYPTED_EXTENSION, generate_key_pair, hybrid_encryption, public_key_fingerprint,
+    symmetric_encryption,
 };
 
 const TEST_WORKSPACE: &str = "tests/workspace";
@@ -2044,6 +2045,52 @@ fn test_symmetric_ciphertext_appended_bytes_detected() -> Result<(), CryptoError
         |_| {},
     );
     assert!(result.is_err());
+    Ok(())
+}
+
+#[test]
+fn test_public_key_fingerprint() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("fingerprint");
+    let keys_dir = test_dir.join("keys");
+    fs::create_dir_all(&keys_dir)?;
+
+    let passphrase = SecretString::from("fp_test_pass".to_string());
+    generate_key_pair(&passphrase, keys_dir.to_str().unwrap(), |_| {})?;
+
+    let pub_key = keys_dir.join("public.key");
+    let fp = public_key_fingerprint(pub_key.to_str().unwrap())?;
+
+    assert_eq!(fp.len(), 64);
+    assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
+
+    // Deterministic: same key always produces the same fingerprint
+    let fp2 = public_key_fingerprint(pub_key.to_str().unwrap())?;
+    assert_eq!(fp, fp2);
+
+    // Rejects secret key files
+    let secret_key = keys_dir.join("secret.key");
+    assert!(public_key_fingerprint(secret_key.to_str().unwrap()).is_err());
+
+    Ok(())
+}
+
+#[test]
+fn test_different_keys_different_fingerprints() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("fingerprint_diff");
+    let keys_a = test_dir.join("keys_a");
+    let keys_b = test_dir.join("keys_b");
+    fs::create_dir_all(&keys_a)?;
+    fs::create_dir_all(&keys_b)?;
+
+    let passphrase = SecretString::from("fp_diff_pass".to_string());
+    generate_key_pair(&passphrase, keys_a.to_str().unwrap(), |_| {})?;
+    generate_key_pair(&passphrase, keys_b.to_str().unwrap(), |_| {})?;
+
+    let fp_a = public_key_fingerprint(keys_a.join("public.key").to_str().unwrap())?;
+    let fp_b = public_key_fingerprint(keys_b.join("public.key").to_str().unwrap())?;
+
+    assert_ne!(fp_a, fp_b);
+
     Ok(())
 }
 

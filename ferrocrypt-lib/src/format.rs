@@ -201,6 +201,9 @@ fn validate_header_bytes(
 pub const KEY_FILE_HEADER_SIZE: usize = 8;
 pub const KEY_FILE_TYPE_PUBLIC: u8 = 0x50; // 'P'
 pub const KEY_FILE_TYPE_SECRET: u8 = 0x53; // 'S'
+pub const PUBLIC_KEY_DATA_SIZE: usize = 32;
+// salt(32) + nonce(24) + encrypted_key(32) + tag(16)
+pub const SECRET_KEY_DATA_SIZE: usize = 104;
 pub const KEY_FILE_VERSION: u8 = 1;
 pub const KEY_FILE_ALG_X25519: u8 = 1;
 

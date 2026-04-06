@@ -68,6 +68,10 @@ pub fn sha3_32_hash(data: &[u8]) -> Result<[u8; 32], CryptoError> {
     Ok(digest)
 }
 
+pub fn bytes_to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
 /// Compares two 256-bit byte strings in constant time.
 pub fn constant_time_compare_256_bit(a: &[u8; 32], b: &[u8; 32]) -> bool {
     constant_time_eq_32(a, b)

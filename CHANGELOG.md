@@ -5,6 +5,11 @@ All notable changes to FerroCrypt are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Library:** `public_key_fingerprint()` — computes SHA3-256 fingerprint of a public key file for out-of-band verification
+- **CLI:** `fingerprint` subcommand (alias `fp`) to print a public key's fingerprint
+- **CLI:** `keygen` now prints the public key fingerprint after generation
+- **CLI:** `hybrid` encrypt now prints the recipient's key fingerprint before encryption
+- **Desktop app:** Public key fingerprint display with copy-to-clipboard button in hybrid encrypt mode
 - **Desktop app:** Slint-based desktop GUI (`ferrocrypt-desktop`) with two tabs: Symmetric and Hybrid. Key generation is inline within the Hybrid tab. After generating a key pair, the app auto-transitions to Hybrid Encrypt with the public key pre-filled. Includes "Save As" dialog, auto-detection of encryption mode from file headers, and conflict warnings.
 - **Desktop app:** Password strength indicator (visible in Symmetric Encrypt and Key Gen modes). Scoring adapted from Proton Pass.
 - **Library:** `save_as` parameter on `symmetric_encryption` and `hybrid_encryption`, `on_progress` callback for stage descriptions

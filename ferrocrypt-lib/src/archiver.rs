@@ -58,7 +58,7 @@ pub fn archive<W: Write>(
     } else {
         let dir_name = input_path
             .file_name()
-            .ok_or_else(|| CryptoError::InputPath("Input file or folder missing".to_string()))?
+            .ok_or_else(|| CryptoError::InvalidInput("Cannot get directory name".to_string()))?
             .to_str()
             .ok_or_else(|| {
                 CryptoError::InvalidInput("Cannot convert directory name to &str".to_string())

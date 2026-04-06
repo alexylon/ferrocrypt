@@ -88,7 +88,7 @@ pub fn constant_time_compare_256_bit(a: &[u8; 32], b: &[u8; 32]) -> bool {
 
 pub fn hmac_sha3_256(key: &[u8], data: &[u8]) -> Result<[u8; 32], CryptoError> {
     let mut mac = HmacSha3_256::new_from_slice(key)
-        .map_err(|e| CryptoError::InvalidInput(format!("HMAC key error: {}", e)))?;
+        .map_err(|e| CryptoError::CryptoOperation(format!("HMAC key error: {}", e)))?;
     mac.update(data);
     let result = mac.finalize();
     let bytes: [u8; 32] = result.into_bytes().into();
@@ -98,7 +98,7 @@ pub fn hmac_sha3_256(key: &[u8], data: &[u8]) -> Result<[u8; 32], CryptoError> {
 /// Verifies HMAC-SHA3-256 in constant time. Returns error if mismatch.
 pub fn hmac_sha3_256_verify(key: &[u8], data: &[u8], tag: &[u8]) -> Result<(), CryptoError> {
     let mut mac = HmacSha3_256::new_from_slice(key)
-        .map_err(|e| CryptoError::InvalidInput(format!("HMAC key error: {}", e)))?;
+        .map_err(|e| CryptoError::CryptoOperation(format!("HMAC key error: {}", e)))?;
     mac.update(data);
     mac.verify_slice(tag).map_err(|_| {
         CryptoError::CryptoOperation(

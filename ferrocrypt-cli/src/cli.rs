@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
     CryptoError, detect_encryption_mode, generate_key_pair, hybrid_encryption,
-    public_key_fingerprint, symmetric_encryption,
+    public_key_fingerprint, symmetric_encryption, validate_secret_key_file,
 };
 
 use rustyline::DefaultEditor;
@@ -94,7 +94,8 @@ fn run_command(cmd: Command) -> Result<(), CryptoError> {
             passphrase,
         } => {
             let passphrase = SecretString::from(passphrase);
-            generate_key_pair(&passphrase, &outpath, |_| {})?;
+            let msg = generate_key_pair(&passphrase, &outpath, |msg| eprintln!("{msg}"))?;
+            println!("\n{msg}\n");
             let pub_key = std::path::Path::new(&outpath)
                 .join("public.key")
                 .to_string_lossy()
@@ -117,21 +118,24 @@ fn run_command(cmd: Command) -> Result<(), CryptoError> {
             passphrase,
             save_as,
         } => {
-            // Only print fingerprint when encrypting (input is not an .fcr file)
-            if detect_encryption_mode(&inpath).is_none() {
+            let is_encrypt = detect_encryption_mode(&inpath).is_none();
+            if is_encrypt {
                 if let Ok(fp) = public_key_fingerprint(&key) {
                     println!("Encrypting to: {}", fp);
                 }
+            } else {
+                validate_secret_key_file(&key)?;
             }
             let passphrase = SecretString::from(passphrase);
-            hybrid_encryption(
+            let msg = hybrid_encryption(
                 &inpath,
                 &outpath,
                 &key,
                 &passphrase,
                 save_as.as_deref(),
-                |_| {},
+                |msg| eprintln!("{msg}"),
             )?;
+            println!("\n{msg}\n");
         }
 
         Command::Symmetric {
@@ -141,7 +145,11 @@ fn run_command(cmd: Command) -> Result<(), CryptoError> {
             save_as,
         } => {
             let passphrase = SecretString::from(passphrase);
-            symmetric_encryption(&inpath, &outpath, &passphrase, save_as.as_deref(), |_| {})?;
+            let msg =
+                symmetric_encryption(&inpath, &outpath, &passphrase, save_as.as_deref(), |msg| {
+                    eprintln!("{msg}")
+                })?;
+            println!("\n{msg}\n");
         }
     }
 

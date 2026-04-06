@@ -64,7 +64,6 @@ pub fn encrypt_file(
 ) -> Result<String, CryptoError> {
     let start_time = std::time::Instant::now();
 
-    println!("\nDeriving key ...");
     on_progress("Deriving key\u{2026}");
     let mut salt = [0u8; SALT_SIZE];
     OsRng.fill_bytes(&mut salt);
@@ -77,7 +76,6 @@ pub fn encrypt_file(
     let stored_key_hash: [u8; KEY_SIZE] = sha3_32_hash(enc_key.as_ref())?;
 
     let file_stem = &get_file_stem_to_string(input_path)?;
-    println!("Encrypting ...");
     on_progress("Encrypting\u{2026}");
 
     let output_path = match output_file {
@@ -88,7 +86,7 @@ pub fn encrypt_file(
     };
     if output_path.exists() {
         return Err(CryptoError::Message(format!(
-            "Output file already exists: {}\n",
+            "Output file already exists: {}",
             output_path.display()
         )));
     }
@@ -138,11 +136,10 @@ pub fn encrypt_file(
     encrypt_writer.finish()?;
 
     let result = format!(
-        "Encrypted to {} in {}\n",
+        "Encrypted to {} in {}",
         output_path.display(),
         get_duration(start_time.elapsed().as_secs_f64())
     );
-    println!("{}", result);
 
     Ok(result)
 }
@@ -203,7 +200,6 @@ pub fn decrypt_file(
     let stored_key_hash = rep_decode_exact(&encoded_key_hash, KEY_SIZE)?;
     let hmac_tag = rep_decode_exact(&encoded_hmac_tag, HMAC_KEY_SIZE)?;
 
-    println!("\nDeriving key ...");
     on_progress("Deriving key\u{2026}");
     let (enc_key, hmac_key) = derive_keys(passphrase, &salt, &hkdf_salt)?;
 
@@ -228,7 +224,6 @@ pub fn decrypt_file(
         return Err(hmac_err);
     }
 
-    println!("Decrypting ...");
     on_progress("Decrypting\u{2026}");
     let cipher = XChaCha20Poly1305::new(enc_key.as_ref().into());
     let stream_decryptor = stream::DecryptorBE32::from_aead(cipher, nonce.as_slice().into());
@@ -237,11 +232,10 @@ pub fn decrypt_file(
     let output_path = archiver::unarchive(decrypt_reader, output_dir)?;
 
     let result = format!(
-        "Decrypted to {} in {}\n",
+        "Decrypted to {} in {}",
         output_path,
         get_duration(start_time.elapsed().as_secs_f64())
     );
-    println!("{}", result);
 
     Ok(result)
 }

@@ -9,7 +9,11 @@ All notable changes to FerroCrypt are documented in this file.
 - **CLI:** `fingerprint` subcommand (alias `fp`) to print a public key's fingerprint
 - **CLI:** `keygen` now prints the public key fingerprint after generation
 - **CLI:** `hybrid` encrypt now prints the recipient's key fingerprint before encryption
+- **Library:** `validate_secret_key_file()` — validates a secret key file without requiring a passphrase
 - **Desktop app:** Public key fingerprint display with copy-to-clipboard button in hybrid encrypt mode
+- **Desktop app:** Key file validation on selection — invalid key files show an error and disable the action button
+- **CLI:** Progress messages (`Deriving key…`, `Encrypting…`, etc.) now printed to stderr
+- **CLI:** Secret key file validated before hybrid decryption
 - **Desktop app:** Slint-based desktop GUI (`ferrocrypt-desktop`) with two tabs: Symmetric and Hybrid. Key generation is inline within the Hybrid tab. After generating a key pair, the app auto-transitions to Hybrid Encrypt with the public key pre-filled. Includes "Save As" dialog, auto-detection of encryption mode from file headers, and conflict warnings.
 - **Desktop app:** Password strength indicator (visible in Symmetric Encrypt and Key Gen modes). Scoring adapted from Proton Pass.
 - **Library:** `save_as` parameter on `symmetric_encryption` and `hybrid_encryption`, `on_progress` callback for stage descriptions
@@ -25,6 +29,9 @@ All notable changes to FerroCrypt are documented in this file.
 - Ciphertext mutation tests (bit flips, truncation, appended bytes) confirming AEAD rejects tampered data
 
 ### Changed
+- **Library:** Removed direct `println!` calls — all output now flows through `on_progress` callback and return values. Callers (CLI, desktop) control presentation.
+- **Library:** Removed trailing `\n` from result strings and error messages — formatting is now the caller's responsibility
+- **Library:** Standardized "Output file already exists" error to use `CryptoError::Message` in both symmetric and hybrid
 - **Breaking:** Replaced RSA-4096 OAEP (OpenSSL) with X25519 + XChaCha20-Poly1305 (`crypto_box` crate, `ChaChaBox`) for hybrid envelope encryption. Removes the OpenSSL C dependency — the project is now pure Rust.
 - **Breaking:** Streaming TAR encryption pipeline — input is archived and encrypted directly to the output file in a single pass. No plaintext intermediate files touch disk. Replaces the previous ZIP-based approach.
 - **Breaking:** Format version bumped to 3.0 — files from older versions cannot be decrypted. Unified file extension from `.fcs`/`.fch` to single `.fcr`.

@@ -97,7 +97,7 @@ pub fn unarchive<R: Read>(reader: R, output_dir: &str) -> Result<String, CryptoE
             let full_path = normalize_paths(&format!("{}{}", output_dir, root_name), "").0;
             if Path::new(&full_path).exists() {
                 return Err(CryptoError::Message(format!(
-                    "Output already exists: {}\n",
+                    "Output already exists: {}",
                     full_path
                 )));
             }

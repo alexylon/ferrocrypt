@@ -62,7 +62,6 @@ pub fn encrypt_file(
     let start_time = std::time::Instant::now();
 
     let file_stem = &get_file_stem_to_string(input_path)?;
-    println!("\nEncrypting ...");
     on_progress("Encrypting\u{2026}");
 
     let mut symmetric_key = XChaCha20Poly1305::generate_key(&mut OsRng);
@@ -91,8 +90,8 @@ pub fn encrypt_file(
             )),
         };
         if output_path.exists() {
-            return Err(CryptoError::EncryptionDecryptionError(format!(
-                "Output file already exists: {}\n",
+            return Err(CryptoError::Message(format!(
+                "Output file already exists: {}",
                 output_path.display()
             )));
         }
@@ -132,11 +131,10 @@ pub fn encrypt_file(
         nonce.zeroize();
 
         let msg = format!(
-            "Encrypted to {} in {}\n",
+            "Encrypted to {} in {}",
             output_path.display(),
             get_duration(start_time.elapsed().as_secs_f64())
         );
-        println!("{}", msg);
 
         Ok(msg)
     })();
@@ -155,7 +153,6 @@ pub fn decrypt_file(
 ) -> Result<String, CryptoError> {
     let start_time = std::time::Instant::now();
 
-    println!("\nDecrypting ...");
     on_progress("Decrypting\u{2026}");
 
     // Parse and validate the file header before loading the secret key —
@@ -226,11 +223,10 @@ pub fn decrypt_file(
         let output_path = archiver::unarchive(decrypt_reader, output_dir)?;
 
         let msg = format!(
-            "Decrypted to {} in {}\n",
+            "Decrypted to {} in {}",
             output_path,
             get_duration(start_time.elapsed().as_secs_f64())
         );
-        println!("{}", msg);
 
         Ok(msg)
     })();
@@ -415,7 +411,6 @@ pub fn generate_key_pair(
     public_key_file.write_all(public_key.as_bytes())?;
 
     let result = format!("Generated key pair in {}", output_dir.display());
-    println!("\n{}", result);
 
     Ok(result)
 }

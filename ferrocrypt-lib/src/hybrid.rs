@@ -56,9 +56,9 @@ fn zeroize_secret_key(key: &mut SecretKey) {
 }
 
 pub fn encrypt_file(
-    input_path: &str,
-    output_dir: &str,
-    public_key_path: impl AsRef<Path>,
+    input_path: &Path,
+    output_dir: &Path,
+    public_key_path: &Path,
     output_file: Option<&Path>,
     on_progress: &dyn Fn(&str),
 ) -> Result<String, CryptoError> {
@@ -73,11 +73,7 @@ pub fn encrypt_file(
 
     let output_path = match output_file {
         Some(path) => path.to_path_buf(),
-        None => Path::new(output_dir).join(format!(
-            "{}.{}",
-            file_stem,
-            format::ENCRYPTED_EXTENSION
-        )),
+        None => output_dir.join(format!("{}.{}", file_stem, format::ENCRYPTED_EXTENSION)),
     };
 
     let mut file_created = false;
@@ -158,9 +154,9 @@ pub fn encrypt_file(
 }
 
 pub fn decrypt_file(
-    input_path: &str,
-    output_dir: &str,
-    secret_key_path: &str,
+    input_path: &Path,
+    output_dir: &Path,
+    secret_key_path: &Path,
     passphrase: &SecretString,
     on_progress: &dyn Fn(&str),
 ) -> Result<String, CryptoError> {
@@ -244,8 +240,8 @@ pub fn decrypt_file(
     result
 }
 
-fn read_public_key(path: impl AsRef<Path>) -> Result<PublicKey, CryptoError> {
-    let data = fs::read(path.as_ref())?;
+fn read_public_key(path: &Path) -> Result<PublicKey, CryptoError> {
+    let data = fs::read(path)?;
     format::validate_key_file_header(&data, format::KEY_FILE_TYPE_PUBLIC, PUBLIC_KEY_DATA_SIZE)?;
     let body_start = format::KEY_FILE_HEADER_SIZE;
     let mut key_bytes = [0u8; PUBLIC_KEY_DATA_SIZE];
@@ -253,11 +249,8 @@ fn read_public_key(path: impl AsRef<Path>) -> Result<PublicKey, CryptoError> {
     Ok(PublicKey::from(key_bytes))
 }
 
-fn read_secret_key(
-    path: impl AsRef<Path>,
-    passphrase: &SecretString,
-) -> Result<SecretKey, CryptoError> {
-    let data = fs::read(path.as_ref())?;
+fn read_secret_key(path: &Path, passphrase: &SecretString) -> Result<SecretKey, CryptoError> {
+    let data = fs::read(path)?;
     format::validate_key_file_header(&data, format::KEY_FILE_TYPE_SECRET, SECRET_KEY_DATA_SIZE)?;
 
     let body_start = format::KEY_FILE_HEADER_SIZE;
@@ -348,7 +341,7 @@ fn open_envelope(
 
 pub fn generate_key_pair(
     passphrase: &SecretString,
-    output_dir: impl AsRef<Path>,
+    output_dir: &Path,
     on_progress: &dyn Fn(&str),
 ) -> Result<String, CryptoError> {
     if passphrase.expose_secret().is_empty() {
@@ -356,7 +349,6 @@ pub fn generate_key_pair(
             "Passphrase must not be empty for private key encryption".to_string(),
         ));
     }
-    let output_dir = output_dir.as_ref();
     fs::create_dir_all(output_dir)?;
     on_progress("Generating key pair\u{2026}");
 

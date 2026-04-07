@@ -55,7 +55,6 @@ pub const FORMAT_MINOR: u8 = 0;
 pub const HEADER_PREFIX_SIZE: usize = 8;
 pub const HEADER_PREFIX_ENCODED_SIZE: usize = rep_encoded_size(HEADER_PREFIX_SIZE);
 pub const ENCRYPTED_EXTENSION: &str = "fcr";
-pub const ENCRYPTED_DOT_EXTENSION: &str = ".fcr";
 
 #[allow(dead_code)]
 pub struct FileHeader {

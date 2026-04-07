@@ -3,7 +3,6 @@ use std::io::{self, Read, Write};
 use std::path::{Component, Path};
 
 use crate::CryptoError;
-use crate::common::normalize_paths;
 
 /// Rejects paths that could escape the output directory (path traversal).
 pub(crate) fn validate_archive_path(path: &Path) -> Result<(), CryptoError> {
@@ -84,8 +83,7 @@ pub fn archive<W: Write>(
 /// On failure, any partially extracted roots are renamed with an `.incomplete`
 /// suffix so the user can identify them.
 /// Returns the output path as a string.
-pub fn unarchive<R: Read>(reader: R, output_dir: &str) -> Result<String, CryptoError> {
-    let output_dir_path = Path::new(output_dir);
+pub fn unarchive<R: Read>(reader: R, output_dir: &Path) -> Result<String, CryptoError> {
     let mut archive = tar::Archive::new(reader);
     let mut first_entry_root: Option<String> = None;
     let mut checked_roots: Vec<String> = Vec::new();
@@ -99,11 +97,11 @@ pub fn unarchive<R: Read>(reader: R, output_dir: &str) -> Result<String, CryptoE
 
     if let Err(e) = extract_result {
         for root_name in &checked_roots {
-            let current = output_dir_path.join(root_name);
+            let current = output_dir.join(root_name);
             if current.exists() {
                 let _ = fs::rename(
                     &current,
-                    output_dir_path.join(format!("{}.incomplete", root_name)),
+                    output_dir.join(format!("{}.incomplete", root_name)),
                 );
             }
         }
@@ -115,7 +113,7 @@ pub fn unarchive<R: Read>(reader: R, output_dir: &str) -> Result<String, CryptoE
 
 fn extract_entries<R: Read>(
     archive: &mut tar::Archive<R>,
-    output_dir: &str,
+    output_dir: &Path,
     first_entry_root: &mut Option<String>,
     checked_roots: &mut Vec<String>,
 ) -> Result<(), CryptoError> {
@@ -135,20 +133,20 @@ fn extract_entries<R: Read>(
             .to_string();
 
         if !checked_roots.contains(&root_name) {
-            let full_path = normalize_paths(&format!("{}{}", output_dir, root_name), "").0;
-            if Path::new(&full_path).exists() {
+            let full_path = output_dir.join(&root_name);
+            if full_path.exists() {
                 return Err(CryptoError::InvalidInput(format!(
                     "Output already exists: {}",
-                    full_path
+                    full_path.display()
                 )));
             }
             if first_entry_root.is_none() {
-                *first_entry_root = Some(full_path);
+                *first_entry_root = Some(full_path.display().to_string());
             }
             checked_roots.push(root_name);
         }
 
-        let full_path = Path::new(output_dir).join(&path);
+        let full_path = output_dir.join(&path);
         let entry_type = entry.header().entry_type();
 
         // Only extract dirs and regular files; symlinks, hardlinks, and
@@ -187,8 +185,7 @@ mod tests {
         let (stem, _) = archive(&input_file, &mut buf).unwrap();
         assert_eq!(stem, "hello");
 
-        let output_dir = format!("{}/", extract_dir.display());
-        let output = unarchive(Cursor::new(buf), &output_dir).unwrap();
+        let output = unarchive(Cursor::new(buf), &extract_dir).unwrap();
         assert!(!output.is_empty());
 
         let restored = fs::read_to_string(extract_dir.join("hello.txt")).unwrap();
@@ -211,8 +208,7 @@ mod tests {
         let (stem, _) = archive(&input_dir, &mut buf).unwrap();
         assert_eq!(stem, "mydir");
 
-        let output_dir = format!("{}/", extract_dir.display());
-        let output = unarchive(Cursor::new(buf), &output_dir).unwrap();
+        let output = unarchive(Cursor::new(buf), &extract_dir).unwrap();
         assert!(!output.is_empty());
 
         let restored_a = fs::read_to_string(extract_dir.join("mydir/a.txt")).unwrap();
@@ -233,8 +229,7 @@ mod tests {
         let (stem, _) = archive(&input_file, &mut buf).unwrap();
         assert_eq!(stem, "empty");
 
-        let output_dir = format!("{}/", extract_dir.display());
-        unarchive(Cursor::new(buf), &output_dir).unwrap();
+        unarchive(Cursor::new(buf), &extract_dir).unwrap();
         let restored = fs::read_to_string(extract_dir.join("empty.txt")).unwrap();
         assert_eq!(restored, "");
     }
@@ -286,8 +281,7 @@ mod tests {
             builder.finish().unwrap();
         }
 
-        let output_dir = format!("{}/", extract_dir.display());
-        let err = unarchive(Cursor::new(buf), &output_dir).unwrap_err();
+        let err = unarchive(Cursor::new(buf), &extract_dir).unwrap_err();
         assert!(
             err.to_string().contains("Output already exists"),
             "expected conflict error, got: {err}"
@@ -311,8 +305,7 @@ mod tests {
         let mut buf = Vec::new();
         let (_, _) = archive(&input_file, &mut buf).unwrap();
 
-        let output_dir = format!("{}/", extract_dir.display());
-        unarchive(Cursor::new(buf), &output_dir).unwrap();
+        unarchive(Cursor::new(buf), &extract_dir).unwrap();
 
         let restored = fs::read(extract_dir.join("data.bin")).unwrap();
         assert_eq!(restored, binary_data);

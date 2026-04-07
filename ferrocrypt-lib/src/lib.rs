@@ -9,21 +9,22 @@
 //! - **Confidentiality + integrity** for small-to-medium file trees.
 //! - **Simple ergonomics**: pick symmetric (password) or hybrid (public/private
 //!   key + optional passphrase) based on your distribution needs.
-//! - **Batteries included**: streaming encryption pipeline, path normalization,
+//! - **Batteries included**: streaming encryption pipeline, path handling,
 //!   and output file naming are handled for you.
 //!
 //! ## Quick start (symmetric path, mirrors `ferrocrypt symmetric` CLI)
 //! ```rust,no_run
+//! use std::path::Path;
 //! use ferrocrypt::{symmetric_encryption, CryptoError, secrecy::SecretString};
 //!
 //! # fn run() -> Result<(), CryptoError> {
 //! // Encrypt a folder to out/secrets.fcr
 //! let passphrase = SecretString::from("correct horse battery staple".to_string());
-//! let produced = symmetric_encryption("./secrets", "./out", &passphrase, None, |_| {})?;
+//! let produced = symmetric_encryption(Path::new("./secrets"), Path::new("./out"), &passphrase, None, |_| {})?;
 //! println!("wrote {produced}");
 //!
 //! // Decrypt the archive back
-//! let recovered = symmetric_encryption("./out/secrets.fcr", "./restored", &passphrase, None, |_| {})?;
+//! let recovered = symmetric_encryption(Path::new("./out/secrets.fcr"), Path::new("./restored"), &passphrase, None, |_| {})?;
 //! println!("restored to {recovered}");
 //! # Ok(()) }
 //! # fn main() { run().unwrap(); }
@@ -31,21 +32,28 @@
 //!
 //! ## Quick start (hybrid path, mirrors `ferrocrypt hybrid` CLI)
 //! ```rust,no_run
+//! use std::path::Path;
 //! use ferrocrypt::{generate_key_pair, hybrid_encryption, CryptoError, secrecy::SecretString};
 //!
 //! # fn run() -> Result<(), CryptoError> {
 //! // 1) Generate X25519 keypair files under ./keys
 //! //    The passphrase encrypts the private key file at rest
 //! let passphrase = SecretString::from("my-key-pass".to_string());
-//! let _msg = generate_key_pair(&passphrase, "./keys", |_| {})?;
+//! let _msg = generate_key_pair(&passphrase, Path::new("./keys"), |_| {})?;
 //!
 //! // 2) Encrypt to out/payload.fcr using the public key (no passphrase needed)
 //! let empty_passphrase = SecretString::from("".to_string());
-//! let produced = hybrid_encryption("./payload", "./out", "./keys/public.key", &empty_passphrase, None, |_| {})?;
+//! let produced = hybrid_encryption(
+//!     Path::new("./payload"), Path::new("./out"), Path::new("./keys/public.key"),
+//!     &empty_passphrase, None, |_| {},
+//! )?;
 //! println!("wrote {produced}");
 //!
 //! // 3) Decrypt out/payload.fcr using the private key + passphrase to unlock it
-//! let restored = hybrid_encryption("./out/payload.fcr", "./restored", "./keys/private.key", &passphrase, None, |_| {})?;
+//! let restored = hybrid_encryption(
+//!     Path::new("./out/payload.fcr"), Path::new("./restored"), Path::new("./keys/private.key"),
+//!     &passphrase, None, |_| {},
+//! )?;
 //! println!("restored to {restored}");
 //! # Ok(()) }
 //! # fn main() { run().unwrap(); }
@@ -82,7 +90,7 @@ use std::path::Path;
 
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::common::{bytes_to_hex, normalize_paths, sha3_32_hash};
+use crate::common::{bytes_to_hex, sha3_32_hash};
 pub use crate::error::CryptoError;
 pub use crate::format::ENCRYPTED_EXTENSION;
 
@@ -97,10 +105,10 @@ pub enum EncryptionMode {
 
 /// Reads the triple-replicated header prefix of an `.fcr` file and returns the encryption mode.
 /// Returns `None` if the file is not a valid FerroCrypt file.
-pub fn detect_encryption_mode(file_path: &str) -> Option<EncryptionMode> {
+pub fn detect_encryption_mode(file_path: impl AsRef<Path>) -> Option<EncryptionMode> {
     use std::io::Read;
     let mut buf = [0u8; format::HEADER_PREFIX_ENCODED_SIZE];
-    let mut file = std::fs::File::open(file_path).ok()?;
+    let mut file = std::fs::File::open(file_path.as_ref()).ok()?;
     file.read_exact(&mut buf).ok()?;
     let prefix = replication::rep_decode(&buf).ok()?;
     if prefix.len() < 2 || prefix[0] != format::MAGIC_BYTE {
@@ -128,14 +136,15 @@ mod symmetric;
 /// # Examples
 ///
 /// ```no_run
+/// use std::path::Path;
 /// use ferrocrypt::public_key_fingerprint;
 ///
-/// let fp = public_key_fingerprint("./keys/public.key")?;
+/// let fp = public_key_fingerprint(Path::new("./keys/public.key"))?;
 /// println!("{}", fp);  // a1b2c3d4...
 /// # Ok::<(), ferrocrypt::CryptoError>(())
 /// ```
-pub fn public_key_fingerprint(key_file: &str) -> Result<String, CryptoError> {
-    let data = std::fs::read(key_file)?;
+pub fn public_key_fingerprint(key_file: impl AsRef<Path>) -> Result<String, CryptoError> {
+    let data = std::fs::read(key_file.as_ref())?;
     format::validate_key_file_header(
         &data,
         format::KEY_FILE_TYPE_PUBLIC,
@@ -151,8 +160,8 @@ pub fn public_key_fingerprint(key_file: &str) -> Result<String, CryptoError> {
 ///
 /// Checks magic byte, key type, version, algorithm, and exact file size.
 /// Does **not** attempt to decrypt the key (no passphrase needed).
-pub fn validate_secret_key_file(key_file: &str) -> Result<(), CryptoError> {
-    let data = std::fs::read(key_file)?;
+pub fn validate_secret_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError> {
+    let data = std::fs::read(key_file.as_ref())?;
     format::validate_key_file_header(
         &data,
         format::KEY_FILE_TYPE_SECRET,
@@ -161,17 +170,16 @@ pub fn validate_secret_key_file(key_file: &str) -> Result<(), CryptoError> {
 }
 
 /// Returns the default encrypted filename for a given input path (e.g. `"secrets.fcr"`).
-pub fn default_encrypted_filename(input_path: &str) -> Result<String, CryptoError> {
+pub fn default_encrypted_filename(input_path: impl AsRef<Path>) -> Result<String, CryptoError> {
     let stem = common::get_file_stem_to_string(input_path)?;
     Ok(format!("{}.{}", stem, ENCRYPTED_EXTENSION))
 }
 
-fn validate_paths(input_path: &str, output_dir: &str) -> Result<(String, String), CryptoError> {
-    let (normalized_input, normalized_output) = normalize_paths(input_path, output_dir);
-    if !Path::new(&normalized_input).exists() {
-        return Err(CryptoError::InputPath(normalized_input));
+fn validate_input_path(input_path: &Path) -> Result<(), CryptoError> {
+    if !input_path.exists() {
+        return Err(CryptoError::InputPath(input_path.display().to_string()));
     }
-    Ok((normalized_input, normalized_output))
+    Ok(())
 }
 
 /// Encrypt or decrypt files/directories using password-based symmetric crypto.
@@ -187,20 +195,21 @@ fn validate_paths(input_path: &str, output_dir: &str) -> Result<(String, String)
 /// # Examples
 ///
 /// ```no_run
+/// use std::path::Path;
 /// use ferrocrypt::{symmetric_encryption, secrecy::SecretString};
 ///
 /// let passphrase = SecretString::from("my-secret-password".to_string());
 /// // Encrypt
-/// let result = symmetric_encryption("./document.txt", "./encrypted", &passphrase, None, |_| {})?;
+/// let result = symmetric_encryption(Path::new("./document.txt"), Path::new("./encrypted"), &passphrase, None, |_| {})?;
 /// // Decrypt
-/// let result = symmetric_encryption("./encrypted/document.fcr", "./decrypted", &passphrase, None, |_| {})?;
+/// let result = symmetric_encryption(Path::new("./encrypted/document.fcr"), Path::new("./decrypted"), &passphrase, None, |_| {})?;
 /// # Ok::<(), ferrocrypt::CryptoError>(())
 /// ```
 pub fn symmetric_encryption(
-    input_path: &str,
-    output_dir: &str,
+    input_path: impl AsRef<Path>,
+    output_dir: impl AsRef<Path>,
     password: &SecretString,
-    save_as: Option<&str>,
+    save_as: Option<&Path>,
     on_progress: impl Fn(&str),
 ) -> Result<String, CryptoError> {
     if password.expose_secret().is_empty() {
@@ -208,13 +217,17 @@ pub fn symmetric_encryption(
             "Passphrase must not be empty for symmetric encryption".to_string(),
         ));
     }
-    let save_as_path = save_as.map(Path::new);
-    let (input, output) = validate_paths(input_path, output_dir)?;
-    if detect_encryption_mode(&input).is_some() || input.ends_with(format::ENCRYPTED_DOT_EXTENSION)
+    let input = input_path.as_ref();
+    let output = output_dir.as_ref();
+    validate_input_path(input)?;
+    if detect_encryption_mode(input).is_some()
+        || input
+            .extension()
+            .is_some_and(|ext| ext == format::ENCRYPTED_EXTENSION)
     {
-        symmetric::decrypt_file(&input, &output, password, &on_progress)
+        symmetric::decrypt_file(input, output, password, &on_progress)
     } else {
-        symmetric::encrypt_file(&input, &output, password, save_as_path, &on_progress)
+        symmetric::encrypt_file(input, output, password, save_as, &on_progress)
     }
 }
 
@@ -236,31 +249,43 @@ pub fn symmetric_encryption(
 /// # Examples
 ///
 /// ```no_run
+/// use std::path::Path;
 /// use ferrocrypt::{hybrid_encryption, secrecy::SecretString};
 ///
 /// let empty = SecretString::from("".to_string());
 /// // Encrypt
-/// let result = hybrid_encryption("./secrets", "./encrypted", "./keys/public.key", &empty, None, |_| {})?;
+/// let result = hybrid_encryption(
+///     Path::new("./secrets"), Path::new("./encrypted"), Path::new("./keys/public.key"),
+///     &empty, None, |_| {},
+/// )?;
 /// // Decrypt
 /// let passphrase = SecretString::from("my-key-passphrase".to_string());
-/// let result = hybrid_encryption("./encrypted/secrets.fcr", "./decrypted", "./keys/private.key", &passphrase, None, |_| {})?;
+/// let result = hybrid_encryption(
+///     Path::new("./encrypted/secrets.fcr"), Path::new("./decrypted"), Path::new("./keys/private.key"),
+///     &passphrase, None, |_| {},
+/// )?;
 /// # Ok::<(), ferrocrypt::CryptoError>(())
 /// ```
 pub fn hybrid_encryption(
-    input_path: &str,
-    output_dir: &str,
-    key_file: &str,
+    input_path: impl AsRef<Path>,
+    output_dir: impl AsRef<Path>,
+    key_file: impl AsRef<Path>,
     passphrase: &SecretString,
-    save_as: Option<&str>,
+    save_as: Option<&Path>,
     on_progress: impl Fn(&str),
 ) -> Result<String, CryptoError> {
-    let save_as_path = save_as.map(Path::new);
-    let (input, output) = validate_paths(input_path, output_dir)?;
-    if detect_encryption_mode(&input).is_some() || input.ends_with(format::ENCRYPTED_DOT_EXTENSION)
+    let input = input_path.as_ref();
+    let output = output_dir.as_ref();
+    let key = key_file.as_ref();
+    validate_input_path(input)?;
+    if detect_encryption_mode(input).is_some()
+        || input
+            .extension()
+            .is_some_and(|ext| ext == format::ENCRYPTED_EXTENSION)
     {
-        hybrid::decrypt_file(&input, &output, key_file, passphrase, &on_progress)
+        hybrid::decrypt_file(input, output, key, passphrase, &on_progress)
     } else {
-        hybrid::encrypt_file(&input, &output, key_file, save_as_path, &on_progress)
+        hybrid::encrypt_file(input, output, key, save_as, &on_progress)
     }
 }
 
@@ -276,17 +301,17 @@ pub fn hybrid_encryption(
 /// # Examples
 ///
 /// ```no_run
+/// use std::path::Path;
 /// use ferrocrypt::{generate_key_pair, secrecy::SecretString};
 ///
 /// let passphrase = SecretString::from("protect-my-secret-key".to_string());
-/// let result = generate_key_pair(&passphrase, "./my_keys", |_| {})?;
+/// let result = generate_key_pair(&passphrase, Path::new("./my_keys"), |_| {})?;
 /// # Ok::<(), ferrocrypt::CryptoError>(())
 /// ```
 pub fn generate_key_pair(
     passphrase: &SecretString,
-    output_dir: &str,
+    output_dir: impl AsRef<Path>,
     on_progress: impl Fn(&str),
 ) -> Result<String, CryptoError> {
-    let normalized_output_dir = normalize_paths("", output_dir).1;
-    hybrid::generate_key_pair(passphrase, &normalized_output_dir, &on_progress)
+    hybrid::generate_key_pair(passphrase, output_dir.as_ref(), &on_progress)
 }

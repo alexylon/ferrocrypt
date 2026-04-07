@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use clap::{Parser, Subcommand};
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
@@ -93,13 +95,11 @@ fn run_command(cmd: Command) -> Result<(), CryptoError> {
             outpath,
             passphrase,
         } => {
+            let outpath = Path::new(&outpath);
             let passphrase = SecretString::from(passphrase);
-            let msg = generate_key_pair(&passphrase, &outpath, |msg| eprintln!("{msg}"))?;
+            let msg = generate_key_pair(&passphrase, outpath, |msg| eprintln!("{msg}"))?;
             println!("\n{msg}\n");
-            let pub_key = std::path::Path::new(&outpath)
-                .join("public.key")
-                .to_string_lossy()
-                .to_string();
+            let pub_key = outpath.join("public.key");
             match public_key_fingerprint(&pub_key) {
                 Ok(fp) => println!("Public key fingerprint: {}", fp),
                 Err(e) => eprintln!("Warning: could not compute fingerprint: {}", e),
@@ -107,7 +107,7 @@ fn run_command(cmd: Command) -> Result<(), CryptoError> {
         }
 
         Command::Fingerprint { key_file } => {
-            let fp = public_key_fingerprint(&key_file)?;
+            let fp = public_key_fingerprint(Path::new(&key_file))?;
             println!("{}", fp);
         }
 
@@ -118,21 +118,24 @@ fn run_command(cmd: Command) -> Result<(), CryptoError> {
             passphrase,
             save_as,
         } => {
-            let is_encrypt = detect_encryption_mode(&inpath).is_none();
+            let inpath = Path::new(&inpath);
+            let outpath = Path::new(&outpath);
+            let key = Path::new(&key);
+            let is_encrypt = detect_encryption_mode(inpath).is_none();
             if is_encrypt {
-                if let Ok(fp) = public_key_fingerprint(&key) {
+                if let Ok(fp) = public_key_fingerprint(key) {
                     println!("Encrypting to: {}", fp);
                 }
             } else {
-                validate_secret_key_file(&key)?;
+                validate_secret_key_file(key)?;
             }
             let passphrase = SecretString::from(passphrase);
             let msg = hybrid_encryption(
-                &inpath,
-                &outpath,
-                &key,
+                inpath,
+                outpath,
+                key,
                 &passphrase,
-                save_as.as_deref(),
+                save_as.as_deref().map(Path::new),
                 |msg| eprintln!("{msg}"),
             )?;
             println!("\n{msg}\n");
@@ -144,11 +147,16 @@ fn run_command(cmd: Command) -> Result<(), CryptoError> {
             passphrase,
             save_as,
         } => {
+            let inpath = Path::new(&inpath);
+            let outpath = Path::new(&outpath);
             let passphrase = SecretString::from(passphrase);
-            let msg =
-                symmetric_encryption(&inpath, &outpath, &passphrase, save_as.as_deref(), |msg| {
-                    eprintln!("{msg}")
-                })?;
+            let msg = symmetric_encryption(
+                inpath,
+                outpath,
+                &passphrase,
+                save_as.as_deref().map(Path::new),
+                |msg| eprintln!("{msg}"),
+            )?;
             println!("\n{msg}\n");
         }
     }

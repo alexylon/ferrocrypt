@@ -48,17 +48,6 @@ pub const NONCE_SIZE: usize = 19;
 // ─── Error messages ───────────────────────────────────────────────────────
 pub const ERR_FILE_TOO_SHORT: &str = "File is too short or corrupted";
 
-pub fn normalize_paths(src_file_path: &str, dest_dir_path: &str) -> (String, String) {
-    let src_file_path_norm = src_file_path.replace('\\', "/");
-    let mut dest_dir_path_norm = dest_dir_path.replace('\\', "/");
-
-    if !dest_dir_path_norm.ends_with('/') && !dest_dir_path_norm.is_empty() {
-        dest_dir_path_norm = format!("{}/", dest_dir_path_norm);
-    }
-
-    (src_file_path_norm, dest_dir_path_norm)
-}
-
 pub fn get_file_stem_to_string(filename: impl AsRef<Path>) -> Result<String, CryptoError> {
     let file_stem_string = filename
         .as_ref()
@@ -272,34 +261,6 @@ impl<R: Read> Read for DecryptReader<R> {
 mod tests {
     use super::*;
     use secrecy::SecretString;
-
-    #[test]
-    fn test_normalize_paths_unix_style() {
-        let (src, dest) = normalize_paths("path/to/file", "path/to/dest");
-        assert_eq!(src, "path/to/file");
-        assert_eq!(dest, "path/to/dest/");
-    }
-
-    #[test]
-    fn test_normalize_paths_windows_style() {
-        let (src, dest) = normalize_paths("path\\to\\file", "path\\to\\dest");
-        assert_eq!(src, "path/to/file");
-        assert_eq!(dest, "path/to/dest/");
-    }
-
-    #[test]
-    fn test_normalize_paths_empty_dest() {
-        let (src, dest) = normalize_paths("file.txt", "");
-        assert_eq!(src, "file.txt");
-        assert_eq!(dest, "");
-    }
-
-    #[test]
-    fn test_normalize_paths_trailing_slash() {
-        let (src, dest) = normalize_paths("file.txt", "dest/");
-        assert_eq!(src, "file.txt");
-        assert_eq!(dest, "dest/");
-    }
 
     #[test]
     fn test_get_file_stem() {

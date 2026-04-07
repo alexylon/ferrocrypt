@@ -62,8 +62,8 @@ fn derive_keys(
 /// Input is archived into a TAR stream and encrypted directly to the output
 /// file — no plaintext intermediate files touch disk.
 pub fn encrypt_file(
-    input_path: &str,
-    output_dir: &str,
+    input_path: &Path,
+    output_dir: &Path,
     passphrase: &SecretString,
     output_file: Option<&Path>,
     on_progress: &dyn Fn(&str),
@@ -86,9 +86,7 @@ pub fn encrypt_file(
 
     let output_path = match output_file {
         Some(path) => path.to_path_buf(),
-        None => {
-            Path::new(output_dir).join(format!("{}.{}", file_stem, format::ENCRYPTED_EXTENSION))
-        }
+        None => output_dir.join(format!("{}.{}", file_stem, format::ENCRYPTED_EXTENSION)),
     };
     if output_path.exists() {
         return Err(CryptoError::InvalidInput(format!(
@@ -165,13 +163,13 @@ pub fn encrypt_file(
 /// Ciphertext is decrypted into a TAR stream and unpacked directly to the
 /// output directory — no plaintext intermediate files touch disk.
 pub fn decrypt_file(
-    input_path: &str,
-    output_dir: &str,
+    input_path: &Path,
+    output_dir: &Path,
     passphrase: &SecretString,
     on_progress: &dyn Fn(&str),
 ) -> Result<String, CryptoError> {
     let start_time = std::time::Instant::now();
-    let mut encrypted_file = std::fs::File::open(input_path)?;
+    let mut encrypted_file = fs::File::open(input_path)?;
 
     let (prefix_bytes, header) =
         format::read_header_from_reader(&mut encrypted_file, format::TYPE_SYMMETRIC)?;

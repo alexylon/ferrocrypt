@@ -192,23 +192,24 @@ fn main() {
                     }
                 };
 
+                let inpath = Path::new(&inpath);
+                let output_dir_path = Path::new(&output_dir);
+                let keypath = Path::new(&keypath);
+                let save_as = output_file.as_deref().map(Path::new);
+
                 let result = match mode {
-                    0 | 1 => symmetric_encryption(
-                        &inpath,
-                        &output_dir,
-                        &pwd,
-                        output_file.as_deref(),
-                        &on_progress,
-                    ),
+                    0 | 1 => {
+                        symmetric_encryption(inpath, output_dir_path, &pwd, save_as, &on_progress)
+                    }
                     2 | 3 => hybrid_encryption(
-                        &inpath,
-                        &output_dir,
-                        &keypath,
+                        inpath,
+                        output_dir_path,
+                        keypath,
                         &pwd,
-                        output_file.as_deref(),
+                        save_as,
                         &on_progress,
                     ),
-                    4 => generate_key_pair(&pwd, &output_dir, &on_progress),
+                    4 => generate_key_pair(&pwd, output_dir_path, &on_progress),
                     _ => unreachable!(),
                 };
 
@@ -442,6 +443,7 @@ fn elide_result_path(msg: &str) -> String {
 }
 
 fn validate_selected_key(app: &AppWindow, key_path: &str) {
+    let key_path = Path::new(key_path);
     match app.get_mode() {
         2 => match public_key_fingerprint(key_path) {
             Ok(fp) => {
@@ -473,7 +475,7 @@ fn validate_selected_key(app: &AppWindow, key_path: &str) {
 }
 
 fn detect_mode_from_path(path: &str) -> Option<i32> {
-    match detect_encryption_mode(path) {
+    match detect_encryption_mode(Path::new(path)) {
         Some(EncryptionMode::Symmetric) => Some(1),
         Some(EncryptionMode::Hybrid) => Some(3),
         None => None,

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
     CryptoError, ENCRYPTED_EXTENSION, generate_key_pair, hybrid_encryption, public_key_fingerprint,
-    symmetric_encryption,
+    symmetric_encryption, validate_secret_key_file,
 };
 
 const TEST_WORKSPACE: &str = "tests/workspace";
@@ -2052,6 +2052,135 @@ fn test_keygen_cleans_up_temp_files_on_failure() -> Result<(), CryptoError> {
     assert!(!test_dir.join("public.key").exists());
     // Private key temp file should have been cleaned up
     assert!(!test_dir.join(".private.key.tmp").exists());
+
+    Ok(())
+}
+
+#[test]
+fn test_older_major_version_rejected() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("older_version");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    create_test_file(&input_file, "version test");
+    let passphrase = SecretString::from("pass".to_string());
+    symmetric_encryption(&input_file, &encrypt_dir, &passphrase, None, |_| {})?;
+
+    // Patch the major version to an older value in all 3 replicated copies
+    let encrypted_path = encrypt_dir.join("data.fcr");
+    let mut data = fs::read(&encrypted_path)?;
+    const MAJOR_OFFSET: usize = 2;
+    data[3 + MAJOR_OFFSET] = 1; // copy 0
+    data[11 + MAJOR_OFFSET] = 1; // copy 1
+    data[19 + MAJOR_OFFSET] = 1; // copy 2
+    fs::write(&encrypted_path, &data)?;
+
+    let result = symmetric_encryption(&encrypted_path, &decrypt_dir, &passphrase, None, |_| {});
+    assert!(result.is_err());
+    match result {
+        Err(CryptoError::CryptoOperation(msg)) => {
+            assert!(msg.contains("no longer supported"), "got: {msg}");
+        }
+        other => panic!("Expected version error, got {:?}", other),
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_older_key_version_rejected() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("older_key_version");
+    let keys_dir = test_dir.join("keys");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&keys_dir)?;
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    let passphrase = SecretString::from("key_ver_pass".to_string());
+    generate_key_pair(&passphrase, &keys_dir, |_| {})?;
+
+    // Encrypt a file so we have something to try decrypting
+    let empty = SecretString::from("".to_string());
+    create_test_file(&input_file, "key version test");
+    hybrid_encryption(
+        &input_file,
+        &encrypt_dir,
+        &keys_dir.join("public.key"),
+        &empty,
+        None,
+        |_| {},
+    )?;
+
+    // Patch private key version to an older value (byte offset 2)
+    let secret_key_path = keys_dir.join("private.key");
+    let mut key_data = fs::read(&secret_key_path)?;
+    key_data[2] = 1; // older version
+    fs::write(&secret_key_path, &key_data)?;
+
+    let result = hybrid_encryption(
+        &encrypt_dir.join("data.fcr"),
+        &decrypt_dir,
+        &secret_key_path,
+        &passphrase,
+        None,
+        |_| {},
+    );
+    assert!(result.is_err());
+    match result {
+        Err(CryptoError::CryptoOperation(msg)) => {
+            assert!(msg.contains("no longer supported"), "got: {msg}");
+        }
+        other => panic!("Expected key version error, got {:?}", other),
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_future_key_version_rejected() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("future_key_version");
+    let keys_dir = test_dir.join("keys");
+    fs::create_dir_all(&keys_dir)?;
+
+    let passphrase = SecretString::from("key_ver_pass".to_string());
+    generate_key_pair(&passphrase, &keys_dir, |_| {})?;
+
+    // Patch private key version to a future value
+    let secret_key_path = keys_dir.join("private.key");
+    let mut key_data = fs::read(&secret_key_path)?;
+    key_data[2] = 99; // future version
+    fs::write(&secret_key_path, &key_data)?;
+
+    let result = validate_secret_key_file(&secret_key_path);
+    assert!(result.is_err());
+    match result {
+        Err(CryptoError::CryptoOperation(msg)) => {
+            assert!(msg.contains("not supported"), "got: {msg}");
+            assert!(msg.contains("Upgrade"), "got: {msg}");
+        }
+        other => panic!("Expected key version error, got {:?}", other),
+    }
+
+    // Same for public key
+    let public_key_path = keys_dir.join("public.key");
+    let mut pub_data = fs::read(&public_key_path)?;
+    pub_data[2] = 99;
+    fs::write(&public_key_path, &pub_data)?;
+
+    let result = public_key_fingerprint(&public_key_path);
+    assert!(result.is_err());
+    match result {
+        Err(CryptoError::CryptoOperation(msg)) => {
+            assert!(msg.contains("not supported"), "got: {msg}");
+            assert!(msg.contains("Upgrade"), "got: {msg}");
+        }
+        other => panic!("Expected key version error, got {:?}", other),
+    }
 
     Ok(())
 }

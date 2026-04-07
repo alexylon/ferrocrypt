@@ -50,8 +50,8 @@ pub const MAGIC_BYTE: u8 = 0xFC;
 
 pub const TYPE_SYMMETRIC: u8 = 0x53; // 'S'
 pub const TYPE_HYBRID: u8 = 0x48; // 'H'
-pub const FORMAT_MAJOR: u8 = 3;
-pub const FORMAT_MINOR: u8 = 0;
+pub const ENCRYPTED_FILE_VERSION_MAJOR: u8 = 3;
+pub const ENCRYPTED_FILE_VERSION_MINOR: u8 = 0;
 pub const HEADER_PREFIX_SIZE: usize = 8;
 pub const HEADER_PREFIX_ENCODED_SIZE: usize = rep_encoded_size(HEADER_PREFIX_SIZE);
 pub const ENCRYPTED_EXTENSION: &str = "fcr";
@@ -74,8 +74,8 @@ pub fn build_header_prefix(
     [
         MAGIC_BYTE,
         format_type,
-        FORMAT_MAJOR,
-        FORMAT_MINOR,
+        ENCRYPTED_FILE_VERSION_MAJOR,
+        ENCRYPTED_FILE_VERSION_MINOR,
         (header_len >> 8) as u8,
         (header_len & 0xFF) as u8,
         (flags >> 8) as u8,
@@ -154,16 +154,16 @@ fn validate_header_bytes(
     let major = prefix[2];
     let minor = prefix[3];
 
-    if major > FORMAT_MAJOR {
+    if major > ENCRYPTED_FILE_VERSION_MAJOR {
         return Err(CryptoError::CryptoOperation(format!(
-            "Format version {}.{} not supported (max: {}.{}). Upgrade FerroCrypt.",
-            major, minor, FORMAT_MAJOR, FORMAT_MINOR
+            "Format version {}.{} not supported (current: {}). Upgrade FerroCrypt.",
+            major, minor, ENCRYPTED_FILE_VERSION_MAJOR
         )));
     }
-    if major < FORMAT_MAJOR {
+    if major < ENCRYPTED_FILE_VERSION_MAJOR {
         return Err(CryptoError::CryptoOperation(format!(
-            "Format version {}.{} no longer supported (current: {}.{})",
-            major, minor, FORMAT_MAJOR, FORMAT_MINOR
+            "Format version {}.{} no longer supported (current: {})",
+            major, minor, ENCRYPTED_FILE_VERSION_MAJOR
         )));
     }
 
@@ -198,7 +198,7 @@ fn validate_header_bytes(
 // |--------|------|-----------|----------------------------------------------|
 // | 0      | 1    | Magic     | `0xFC` — identifies this as a FerroCrypt file|
 // | 1      | 1    | Type      | `0x50` ('P') public, `0x53` ('S') secret     |
-// | 2      | 1    | Version   | Key file format version (currently 1)        |
+// | 2      | 1    | Version   | Key file format version (currently 2)        |
 // | 3      | 1    | Algorithm | `0x01` = X25519                              |
 // | 4-5    | 2    | Data len  | Big-endian u16: bytes after this header       |
 // | 6-7    | 2    | Flags     | Big-endian u16: reserved for future use       |

@@ -2015,6 +2015,50 @@ fn test_symmetric_decrypt_marks_incomplete_directory() -> Result<(), CryptoError
     Ok(())
 }
 
+#[test]
+fn test_keygen_no_partial_state_on_existing_key() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("keygen_no_partial");
+    let passphrase = SecretString::from("atomic_pass".to_string());
+
+    // First keygen succeeds
+    generate_key_pair(&passphrase, &test_dir, |_| {})?;
+    assert!(test_dir.join("private.key").exists());
+    assert!(test_dir.join("public.key").exists());
+
+    // Second keygen to the same dir fails — keys already exist
+    let result = generate_key_pair(&passphrase, &test_dir, |_| {});
+    assert!(result.is_err());
+
+    // No temp files should be left behind
+    assert!(!test_dir.join(".private.key.tmp").exists());
+    assert!(!test_dir.join(".public.key.tmp").exists());
+
+    Ok(())
+}
+
+#[test]
+fn test_keygen_cleans_up_temp_files_on_failure() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("keygen_cleanup");
+
+    // Place a directory where the public key temp file would go —
+    // create_new can't open it as a file, and remove_file can't
+    // delete it, so it survives stale cleanup and forces a failure
+    // after the private key temp has been written.
+    fs::create_dir_all(test_dir.join(".public.key.tmp"))?;
+
+    let passphrase = SecretString::from("cleanup_pass".to_string());
+    let result = generate_key_pair(&passphrase, &test_dir, |_| {});
+    assert!(result.is_err());
+
+    // Neither final key file should exist
+    assert!(!test_dir.join("private.key").exists());
+    assert!(!test_dir.join("public.key").exists());
+    // Private key temp file should have been cleaned up
+    assert!(!test_dir.join(".private.key.tmp").exists());
+
+    Ok(())
+}
+
 #[ctor::dtor]
 fn cleanup() {
     cleanup_test_workspace();

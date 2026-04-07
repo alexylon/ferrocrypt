@@ -382,33 +382,68 @@ pub fn generate_key_pair(
 
     let secret_header =
         format::build_key_file_header(format::KEY_FILE_TYPE_SECRET, SECRET_KEY_DATA_SIZE as u16);
-
-    // Write private key file: [header(8) | kdf_params | salt | nonce | encrypted_secret_key]
-    let secret_key_path = output_dir.join(SECRET_KEY_FILENAME);
-    let mut secret_key_opts = OpenOptions::new();
-    secret_key_opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        secret_key_opts.mode(0o600);
-    }
-    let mut secret_key_file = secret_key_opts.open(&secret_key_path)?;
-    secret_key_file.write_all(&secret_header)?;
-    secret_key_file.write_all(&kdf_bytes)?;
-    secret_key_file.write_all(&salt)?;
-    secret_key_file.write_all(&nonce)?;
-    secret_key_file.write_all(&encrypted_secret)?;
-
-    // Write public key file: [header(8) | raw 32 bytes]
     let public_header =
         format::build_key_file_header(format::KEY_FILE_TYPE_PUBLIC, PUBLIC_KEY_DATA_SIZE as u16);
+
+    let secret_key_path = output_dir.join(SECRET_KEY_FILENAME);
     let public_key_path = output_dir.join(PUBLIC_KEY_FILENAME);
-    let mut public_key_file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&public_key_path)?;
-    public_key_file.write_all(&public_header)?;
-    public_key_file.write_all(public_key.as_bytes())?;
+    let tmp_secret = output_dir.join(".private.key.tmp");
+    let tmp_public = output_dir.join(".public.key.tmp");
+
+    if secret_key_path.exists() {
+        return Err(CryptoError::InvalidInput(format!(
+            "Key file already exists: {}",
+            secret_key_path.display()
+        )));
+    }
+    if public_key_path.exists() {
+        return Err(CryptoError::InvalidInput(format!(
+            "Key file already exists: {}",
+            public_key_path.display()
+        )));
+    }
+
+    // Clean up stale temp files from a previous crashed run
+    let _ = fs::remove_file(&tmp_secret);
+    let _ = fs::remove_file(&tmp_public);
+
+    // Write both key files to temp names first, then rename atomically.
+    // If anything fails, clean up temp files so no partial state remains.
+    let write_result: Result<(), CryptoError> = (|| {
+        let mut secret_key_opts = OpenOptions::new();
+        secret_key_opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            secret_key_opts.mode(0o600);
+        }
+        let mut secret_key_file = secret_key_opts.open(&tmp_secret)?;
+        secret_key_file.write_all(&secret_header)?;
+        secret_key_file.write_all(&kdf_bytes)?;
+        secret_key_file.write_all(&salt)?;
+        secret_key_file.write_all(&nonce)?;
+        secret_key_file.write_all(&encrypted_secret)?;
+
+        let mut public_key_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_public)?;
+        public_key_file.write_all(&public_header)?;
+        public_key_file.write_all(public_key.as_bytes())?;
+
+        fs::rename(&tmp_secret, &secret_key_path)?;
+        if let Err(e) = fs::rename(&tmp_public, &public_key_path) {
+            let _ = fs::remove_file(&secret_key_path);
+            return Err(e.into());
+        }
+        Ok(())
+    })();
+
+    if let Err(e) = write_result {
+        let _ = fs::remove_file(&tmp_secret);
+        let _ = fs::remove_file(&tmp_public);
+        return Err(e);
+    }
 
     let result = format!("Generated key pair in {}", output_dir.display());
 

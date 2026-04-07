@@ -29,7 +29,14 @@ pub fn archive<W: Write>(
     writer: W,
 ) -> Result<(String, W), CryptoError> {
     let input_path = input_path.as_ref();
+    if input_path.is_symlink() {
+        return Err(CryptoError::InvalidInput(format!(
+            "Refusing to archive symlink: {}",
+            input_path.display()
+        )));
+    }
     let mut builder = tar::Builder::new(writer);
+    builder.follow_symlinks(false);
 
     let stem = if input_path.is_file() {
         let file_name = input_path

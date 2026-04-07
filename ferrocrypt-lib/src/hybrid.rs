@@ -33,16 +33,24 @@ const SECRET_KEY_SIZE: usize = 32;
 const PUBLIC_KEY_FILENAME: &str = "public.key";
 const SECRET_KEY_FILENAME: &str = "private.key";
 
+// Compile-time guard: if crypto_box changes SecretKey's layout (fields added,
+// removed, or reordered), this assertion fails and forces a review of the
+// unsafe zeroization below. Verified against crypto_box 0.9.1 where SecretKey
+// is [u8; 32] (bytes) + Scalar (32 bytes) = 64 bytes.
+const _: () = assert!(size_of::<SecretKey>() == 64);
+
 /// Zeroizes the entire `SecretKey` struct including the raw `bytes` field.
-/// Upstream `Drop` only zeroizes the `scalar` field, leaving the 32-byte
-/// key material in the `bytes` field intact.
+/// Upstream `Drop` (crypto_box 0.9.1) only zeroizes the `scalar` field,
+/// leaving the 32-byte key material in `bytes` intact. This function
+/// compensates by wiping all bytes of the struct via volatile writes.
 fn zeroize_secret_key(key: &mut SecretKey) {
     // SAFETY: SecretKey is a plain data struct ([u8; 32] + Scalar) with no
-    // pointer or reference fields. Writing zeros via the zeroize crate's
+    // pointer or reference fields. The size assertion above guarantees the
+    // layout matches our expectation. Writing zeros via the zeroize crate's
     // volatile writes is safe and prevents the compiler from eliding them.
     unsafe {
         let ptr = key as *mut SecretKey as *mut u8;
-        let len = std::mem::size_of::<SecretKey>();
+        let len = size_of::<SecretKey>();
         std::slice::from_raw_parts_mut(ptr, len).zeroize();
     }
 }
@@ -68,7 +76,7 @@ pub fn encrypt_file(
         None => Path::new(output_dir).join(format!(
             "{}.{}",
             file_stem,
-            crate::format::ENCRYPTED_EXTENSION
+            format::ENCRYPTED_EXTENSION
         )),
     };
 
@@ -162,7 +170,7 @@ pub fn decrypt_file(
 
     // Parse and validate the file header before loading the private key —
     // no point running Argon2id if the file is invalid.
-    let mut encrypted_file = std::fs::File::open(input_path)?;
+    let mut encrypted_file = fs::File::open(input_path)?;
 
     let (prefix_bytes, header) =
         format::read_header_from_reader(&mut encrypted_file, format::TYPE_HYBRID)?;

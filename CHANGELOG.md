@@ -21,6 +21,8 @@ All notable changes to FerroCrypt are documented in this file.
 - Versioned file format with magic bytes (`0xFC` + type), major/minor version, and header length field. Forward-compatible: future minor versions can append fields without breaking older parsers.
 
 ### Changed
+- **Breaking:** Header prefix is now triple-replicated — the entire header has error-correction coverage, not just the fields after the prefix
+- **Breaking:** Replication padding indicator is now triple-replicated — a single-byte corruption of the padding byte no longer makes an otherwise-intact field unrecoverable
 - **Breaking:** Replaced RSA-4096 OAEP (OpenSSL) with X25519 + XChaCha20-Poly1305 (`crypto_box` crate, `ChaChaBox`) for hybrid envelope encryption. Removes the OpenSSL C dependency — the project is now pure Rust.
 - **Breaking:** Streaming TAR encryption pipeline — input is archived and encrypted directly to the output file in a single pass. No plaintext intermediate files touch disk. Replaces the previous ZIP-based approach.
 - **Breaking:** Format version bumped to 3.0 — files from older versions cannot be decrypted. Unified file extension from `.fcs`/`.fch` to single `.fcr`.

@@ -93,16 +93,16 @@ run_test "keygen: generate second key pair" \
 
 # Verify key files exist
 run_test "keygen: verify keys exist" \
-    test -f "$KEYS/public.key" -a -f "$KEYS/secret.key"
+    test -f "$KEYS/public.key" -a -f "$KEYS/private.key"
 
 run_test "keygen: verify key file sizes" \
-    test "$(stat -f%z "$KEYS/secret.key" 2>/dev/null || stat -c%s "$KEYS/secret.key" 2>/dev/null)" -eq 112 -a \
+    test "$(stat -f%z "$KEYS/private.key" 2>/dev/null || stat -c%s "$KEYS/private.key" 2>/dev/null)" -eq 112 -a \
          "$(stat -f%z "$KEYS/public.key" 2>/dev/null || stat -c%s "$KEYS/public.key" 2>/dev/null)" -eq 40
 
 PUB="$KEYS/public.key"
-SECRET_KEY="$KEYS/secret.key"
+SECRET_KEY="$KEYS/private.key"
 PUB2="$KEYS2/public.key"
-SECRET_KEY2="$KEYS2/secret.key"
+SECRET_KEY2="$KEYS2/private.key"
 
 echo ""
 
@@ -419,7 +419,10 @@ $FC symmetric -i "$WORKDIR/small.txt" -o "$corr2_enc" -p "$PASS" 2>/dev/null
 CORR2_FILE="$corr2_enc/small.fcr"
 python3 -c "
 data = bytearray(open('$CORR2_FILE', 'rb').read())
-data[0] ^= 0xFF  # flip magic byte
+# Magic byte is at logical prefix offset 0; corrupt 2 of 3 replicated copies.
+# Encoded prefix: [pad(3)] [copy0(8)] [copy1(8)] [copy2(8)]
+data[3] ^= 0xFF   # copy 0
+data[11] ^= 0xFF  # copy 1
 open('$CORR2_FILE', 'wb').write(data)
 "
 run_test_expect_fail "sym: corrupted magic byte rejects" \
@@ -517,22 +520,26 @@ $FC symmetric -i "$WORKDIR/1mb.bin" -o "$hdr_src" -p "$PASS" 2>/dev/null
 HDR_FILE="$hdr_src/1mb.fcr"
 HDR_SIZE=$(stat -f%z "$HDR_FILE" 2>/dev/null || stat -c%s "$HDR_FILE" 2>/dev/null)
 
-# Flip version bytes (offsets 2-3: major, minor)
+# Flip major version (logical prefix byte 2) in 2 of 3 replicated copies
+# Encoded prefix: [pad(3)] [copy0(8)] [copy1(8)] [copy2(8)]
 cp "$HDR_FILE" "$WORKDIR/corrupt_version.fcr"
 python3 -c "
 data = bytearray(open('$WORKDIR/corrupt_version.fcr', 'rb').read())
-data[2] ^= 0xFF
+data[3 + 2] ^= 0xFF   # copy 0, major version
+data[11 + 2] ^= 0xFF  # copy 1, major version
 open('$WORKDIR/corrupt_version.fcr', 'wb').write(data)
 "
 run_test_expect_fail "sym: corrupted version byte rejects" \
     $FC symmetric -i "$WORKDIR/corrupt_version.fcr" -o "$hdr_dec" -p "$PASS"
 
-# Flip header length bytes (offsets 4-5)
+# Flip header length bytes (logical prefix bytes 4-5) in all 3 replicated copies
+# Encoded prefix: [pad(3)] [copy0(8)] [copy1(8)] [copy2(8)]
 cp "$HDR_FILE" "$WORKDIR/corrupt_hdrlen.fcr"
 python3 -c "
 data = bytearray(open('$WORKDIR/corrupt_hdrlen.fcr', 'rb').read())
-data[4] ^= 0xFF
-data[5] ^= 0xFF
+for copy_start in [3, 11, 19]:
+    data[copy_start + 4] ^= 0xFF
+    data[copy_start + 5] ^= 0xFF
 open('$WORKDIR/corrupt_hdrlen.fcr', 'wb').write(data)
 "
 run_test_expect_fail "sym: corrupted header length rejects" \
@@ -540,16 +547,16 @@ run_test_expect_fail "sym: corrupted header length rejects" \
 
 # Corrupt the same salt byte in all three replicated copies so majority vote
 # cannot recover the original, causing HMAC mismatch.
-# Symmetric header: [prefix(8)] [encoded_salt(97)] ...
-# encoded_salt layout: [padding(1)] [copy0(32)] [copy1(32)] [copy2(32)]
+# Symmetric header: [prefix(27)] [encoded_salt(99)] ...
+# encoded_salt layout: [padding(3)] [copy0(32)] [copy1(32)] [copy2(32)]
 cp "$HDR_FILE" "$WORKDIR/corrupt_hmac.fcr"
 python3 -c "
 data = bytearray(open('$WORKDIR/corrupt_hmac.fcr', 'rb').read())
-base = 8  # start of encoded_salt
+base = 27  # start of encoded_salt (after 27-byte encoded prefix)
 byte_pos = 5  # which salt byte to corrupt
-data[base + 1 + byte_pos] ^= 0xFF           # copy 0
-data[base + 1 + 32 + byte_pos] ^= 0xFF      # copy 1
-data[base + 1 + 64 + byte_pos] ^= 0xFF      # copy 2
+data[base + 3 + byte_pos] ^= 0xFF           # copy 0
+data[base + 3 + 32 + byte_pos] ^= 0xFF      # copy 1
+data[base + 3 + 64 + byte_pos] ^= 0xFF      # copy 2
 open('$WORKDIR/corrupt_hmac.fcr', 'wb').write(data)
 "
 run_test_expect_fail "sym: corrupted header data (HMAC mismatch) rejects" \

@@ -33,6 +33,8 @@ pub fn argon2_config() -> argon2::Config<'static> {
 // ─── Shared crypto sizes ──────────────────────────────────────────────────
 pub const ENCRYPTION_KEY_SIZE: usize = 32;
 pub const HMAC_KEY_SIZE: usize = 32;
+/// HMAC-SHA3-256 output size in bytes (distinct from `HMAC_KEY_SIZE`).
+pub const HMAC_TAG_SIZE: usize = 32;
 pub const ARGON2_SALT_SIZE: usize = 32;
 
 // ─── Streaming encryption sizes ───────────────────────────────────────────

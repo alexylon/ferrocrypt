@@ -1,9 +1,11 @@
 /// FerroCrypt file format header.
 ///
-/// Every encrypted file starts with an 8-byte prefix that identifies the format,
-/// version, and structure before any cryptographic parsing begins.
+/// Every encrypted file starts with a triple-replicated 8-byte prefix that
+/// identifies the format, version, and structure. The prefix is stored on disk
+/// as 27 bytes (3 padding bytes + 3 × 8-byte copies) and decoded via majority vote,
+/// giving the same error-correction coverage as all other header fields.
 ///
-/// ## Header layout
+/// ## Logical prefix layout (8 bytes, after decoding)
 ///
 /// | Offset | Size | Field         | Description                                      |
 /// |--------|------|---------------|--------------------------------------------------|
@@ -30,13 +32,15 @@
 ///
 /// ## Detection of old files
 ///
-/// Files created before this header existed start with bincode-serialized flags,
-/// which never begin with `0xFC`. The first byte alone distinguishes old from new
-/// files, producing a clear error instead of a misleading "wrong password."
+/// Files created before this header existed start with bincode-serialized flags.
+/// After reading and decoding the replicated prefix, the magic byte check
+/// (`0xFC`) rejects them with a clear error instead of a misleading "wrong
+/// password."
 use std::io::{self, Read};
 
 use crate::CryptoError;
 use crate::common::ERR_FILE_TOO_SHORT;
+use crate::replication::{rep_decode_exact, rep_encoded_size};
 
 // ─── Shared ────────────────────────────────────────────────────────────────
 
@@ -49,6 +53,7 @@ pub const TYPE_HYBRID: u8 = 0x48; // 'H'
 pub const FORMAT_MAJOR: u8 = 3;
 pub const FORMAT_MINOR: u8 = 0;
 pub const HEADER_PREFIX_SIZE: usize = 8;
+pub const HEADER_PREFIX_ENCODED_SIZE: usize = rep_encoded_size(HEADER_PREFIX_SIZE);
 pub const ENCRYPTED_EXTENSION: &str = "fcr";
 pub const ENCRYPTED_DOT_EXTENSION: &str = ".fcr";
 
@@ -79,16 +84,20 @@ pub fn build_header_prefix(
     ]
 }
 
-/// Reads and validates the header prefix from a reader (for streaming reads).
-/// Returns both the raw prefix bytes (needed for HMAC) and the parsed header.
+/// Reads and validates the triple-replicated header prefix from a reader.
+/// Returns both the decoded prefix bytes (needed for HMAC) and the parsed header.
 pub fn read_header_from_reader(
     reader: &mut impl Read,
     expected_type: u8,
 ) -> Result<([u8; HEADER_PREFIX_SIZE], FileHeader), CryptoError> {
-    let mut prefix = [0u8; HEADER_PREFIX_SIZE];
+    let mut encoded = [0u8; HEADER_PREFIX_ENCODED_SIZE];
     reader
-        .read_exact(&mut prefix)
+        .read_exact(&mut encoded)
         .map_err(|_| CryptoError::CryptoOperation(ERR_FILE_TOO_SHORT.to_string()))?;
+
+    let decoded = rep_decode_exact(&encoded, HEADER_PREFIX_SIZE)?;
+    let mut prefix = [0u8; HEADER_PREFIX_SIZE];
+    prefix.copy_from_slice(&decoded);
 
     let header = validate_header_bytes(&prefix, expected_type)?;
     Ok((prefix, header))
@@ -102,7 +111,7 @@ pub fn skip_unknown_header_bytes(
     header_len: u16,
     bytes_read_after_prefix: usize,
 ) -> Result<(), CryptoError> {
-    let expected_after_prefix = (header_len as usize).saturating_sub(HEADER_PREFIX_SIZE);
+    let expected_after_prefix = (header_len as usize).saturating_sub(HEADER_PREFIX_ENCODED_SIZE);
     if bytes_read_after_prefix > expected_after_prefix {
         return Err(CryptoError::CryptoOperation(
             "Header is corrupted (read more bytes than header declares)".to_string(),
@@ -160,7 +169,7 @@ fn validate_header_bytes(
     }
 
     let header_len = u16::from_be_bytes([prefix[4], prefix[5]]);
-    if (header_len as usize) < HEADER_PREFIX_SIZE {
+    if (header_len as usize) < HEADER_PREFIX_ENCODED_SIZE {
         return Err(CryptoError::CryptoOperation(
             "File header is corrupted (invalid header length)".to_string(),
         ));
@@ -295,18 +304,18 @@ mod tests {
     fn skip_is_noop_when_all_bytes_consumed() {
         let data = vec![0xAA; 10];
         let mut cursor = Cursor::new(data);
-        let header_len = (HEADER_PREFIX_SIZE + 5) as u16;
+        let header_len = (HEADER_PREFIX_ENCODED_SIZE + 5) as u16;
         skip_unknown_header_bytes(&mut cursor, header_len, 5).unwrap();
         assert_eq!(cursor.position(), 0);
     }
 
     #[test]
     fn skip_advances_past_unknown_fields() {
-        let data = vec![0xBB; 20];
+        let data = vec![0xBB; 40];
         let mut cursor = Cursor::new(data);
-        // header_len = 18 total, prefix = 8, so 10 bytes after prefix.
+        // header_len = 37 total, encoded prefix = 27, so 10 bytes after prefix.
         // 6 already consumed → skip 4.
-        skip_unknown_header_bytes(&mut cursor, 18, 6).unwrap();
+        skip_unknown_header_bytes(&mut cursor, 37, 6).unwrap();
         assert_eq!(cursor.position(), 4);
     }
 
@@ -314,7 +323,7 @@ mod tests {
     fn skip_fails_when_file_too_short() {
         let data = vec![0xCC; 2];
         let mut cursor = Cursor::new(data);
-        let header_len = (HEADER_PREFIX_SIZE + 15) as u16;
+        let header_len = (HEADER_PREFIX_ENCODED_SIZE + 15) as u16;
         assert!(skip_unknown_header_bytes(&mut cursor, header_len, 5).is_err());
     }
 }

@@ -95,17 +95,18 @@ pub enum EncryptionMode {
     Hybrid,
 }
 
-/// Reads the first bytes of an `.fcr` file and returns the encryption mode.
+/// Reads the triple-replicated header prefix of an `.fcr` file and returns the encryption mode.
 /// Returns `None` if the file is not a valid FerroCrypt file.
 pub fn detect_encryption_mode(file_path: &str) -> Option<EncryptionMode> {
     use std::io::Read;
-    let mut buf = [0u8; 2];
+    let mut buf = [0u8; format::HEADER_PREFIX_ENCODED_SIZE];
     let mut file = std::fs::File::open(file_path).ok()?;
     file.read_exact(&mut buf).ok()?;
-    if buf[0] != format::MAGIC_BYTE {
+    let prefix = replication::rep_decode(&buf).ok()?;
+    if prefix.len() < 2 || prefix[0] != format::MAGIC_BYTE {
         return None;
     }
-    match buf[1] {
+    match prefix[1] {
         format::TYPE_SYMMETRIC => Some(EncryptionMode::Symmetric),
         format::TYPE_HYBRID => Some(EncryptionMode::Hybrid),
         _ => None,

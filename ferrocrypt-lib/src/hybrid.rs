@@ -12,10 +12,10 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::common::{
     ARGON2_SALT_SIZE, DecryptReader, ENCRYPTION_KEY_SIZE, ERR_FILE_TOO_SHORT, EncryptWriter,
-    HMAC_KEY_SIZE, NONCE_SIZE, TAG_SIZE, argon2_config, get_duration, get_file_stem_to_string,
-    hmac_sha3_256, hmac_sha3_256_verify,
+    HMAC_KEY_SIZE, HMAC_TAG_SIZE, NONCE_SIZE, TAG_SIZE, argon2_config, get_duration,
+    get_file_stem_to_string, hmac_sha3_256, hmac_sha3_256_verify,
 };
-use crate::format::{self, HEADER_PREFIX_SIZE, PUBLIC_KEY_DATA_SIZE, SECRET_KEY_DATA_SIZE};
+use crate::format::{self, HEADER_PREFIX_ENCODED_SIZE, PUBLIC_KEY_DATA_SIZE, SECRET_KEY_DATA_SIZE};
 use crate::replication::{rep_decode_exact, rep_encode, rep_encoded_size};
 use crate::{CryptoError, archiver};
 
@@ -99,11 +99,12 @@ pub fn encrypt_file(
         let encoded_envelope = rep_encode(&envelope);
         let encoded_nonce = rep_encode(&nonce);
 
-        let header_len = (HEADER_PREFIX_SIZE
+        let header_len = (HEADER_PREFIX_ENCODED_SIZE
             + encoded_envelope.len()
             + encoded_nonce.len()
-            + rep_encoded_size(HMAC_KEY_SIZE)) as u16;
+            + rep_encoded_size(HMAC_TAG_SIZE)) as u16;
         let prefix = format::build_header_prefix(format::TYPE_HYBRID, 0, header_len);
+        let encoded_prefix = rep_encode(&prefix);
 
         let stream_encryptor = stream::EncryptorBE32::from_aead(cipher, nonce.as_ref().into());
 
@@ -114,7 +115,7 @@ pub fn encrypt_file(
         let hmac_tag = hmac_sha3_256(&hmac_key, &hmac_message)?;
         let encoded_hmac_tag = rep_encode(&hmac_tag);
 
-        dest.write_all(&prefix)?;
+        dest.write_all(&encoded_prefix)?;
         dest.write_all(&encoded_envelope)?;
         dest.write_all(&encoded_nonce)?;
         dest.write_all(&encoded_hmac_tag)?;
@@ -157,17 +158,17 @@ pub fn decrypt_file(
     let (prefix_bytes, header) =
         format::read_header_from_reader(&mut encrypted_file, format::TYPE_HYBRID)?;
 
-    let min_header_size = HEADER_PREFIX_SIZE
+    let min_header_size = HEADER_PREFIX_ENCODED_SIZE
         + rep_encoded_size(ENVELOPE_SIZE)
         + rep_encoded_size(NONCE_SIZE)
-        + rep_encoded_size(HMAC_KEY_SIZE);
+        + rep_encoded_size(HMAC_TAG_SIZE);
     if (header.header_len as usize) < min_header_size {
         return Err(CryptoError::CryptoOperation(ERR_FILE_TOO_SHORT.to_string()));
     }
 
     let mut encoded_envelope = vec![0u8; rep_encoded_size(ENVELOPE_SIZE)];
     let mut encoded_nonce = vec![0u8; rep_encoded_size(NONCE_SIZE)];
-    let mut encoded_hmac_tag = vec![0u8; rep_encoded_size(HMAC_KEY_SIZE)];
+    let mut encoded_hmac_tag = vec![0u8; rep_encoded_size(HMAC_TAG_SIZE)];
 
     encrypted_file
         .read_exact(&mut encoded_envelope)
@@ -184,7 +185,7 @@ pub fn decrypt_file(
 
     let envelope_vec = rep_decode_exact(&encoded_envelope, ENVELOPE_SIZE)?;
     let nonce = rep_decode_exact(&encoded_nonce, NONCE_SIZE)?;
-    let hmac_tag = rep_decode_exact(&encoded_hmac_tag, HMAC_KEY_SIZE)?;
+    let hmac_tag = rep_decode_exact(&encoded_hmac_tag, HMAC_TAG_SIZE)?;
 
     let envelope: [u8; ENVELOPE_SIZE] = envelope_vec
         .as_slice()

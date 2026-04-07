@@ -1,20 +1,21 @@
 use crate::CryptoError;
 
 /// Calculates the size of triple-replicated data for a given original data size.
-/// The encoded format is: [padding_byte, copy_0, copy_1, copy_2]
-/// where each copy is even-length (zero-padded if input is odd-length).
-pub fn rep_encoded_size(original_size: usize) -> usize {
+/// The encoded format is: [pad, pad, pad, copy_0, copy_1, copy_2]
+/// where each copy is even-length (zero-padded if input is odd-length)
+/// and the padding indicator is itself triple-replicated.
+pub const fn rep_encoded_size(original_size: usize) -> usize {
     let padded_size = if original_size % 2 != 0 {
         original_size + 1
     } else {
         original_size
     };
 
-    1 + (padded_size * 3)
+    3 + (padded_size * 3)
 }
 
 /// Encodes data using triple replication for error correction.
-/// Wire format: [padding_byte, copy_0, copy_1, copy_2]
+/// Wire format: [pad, pad, pad, copy_0, copy_1, copy_2]
 pub fn rep_encode(data: &[u8]) -> Vec<u8> {
     let mut padded = data.to_vec();
     let padding_byte = if data.len() % 2 != 0 {
@@ -24,7 +25,9 @@ pub fn rep_encode(data: &[u8]) -> Vec<u8> {
         0u8
     };
 
-    let mut output = Vec::with_capacity(1 + padded.len() * 3);
+    let mut output = Vec::with_capacity(3 + padded.len() * 3);
+    output.push(padding_byte);
+    output.push(padding_byte);
     output.push(padding_byte);
     output.extend_from_slice(&padded);
     output.extend_from_slice(&padded);
@@ -33,16 +36,18 @@ pub fn rep_encode(data: &[u8]) -> Vec<u8> {
 }
 
 /// Decodes triple-replicated data using majority vote per byte position.
-/// Corrects any single-copy corruption at each byte.
+/// Corrects any single-copy corruption at each byte, including the
+/// padding indicator.
 pub fn rep_decode(data: &[u8]) -> Result<Vec<u8>, CryptoError> {
-    if data.is_empty() {
+    if data.len() < 3 {
         return Err(CryptoError::InvalidInput(
-            "Empty data for decoding".to_string(),
+            "Data too short for decoding".to_string(),
         ));
     }
 
-    let padding_byte = data[0];
-    let remaining = &data[1..];
+    let (p0, p1, p2) = (data[0], data[1], data[2]);
+    let padding_byte = if p0 == p1 || p0 == p2 { p0 } else { p1 };
+    let remaining = &data[3..];
 
     if remaining.len() % 3 != 0 {
         return Err(CryptoError::InvalidInput(
@@ -104,9 +109,11 @@ mod tests {
         let original = [10, 20, 30, 40, 50];
 
         let encoded = rep_encode(&original);
-        // Odd length (5) gets padded to 6, so encoded = 1 + 6*3 = 19
+        // Odd length (5) gets padded to 6, so encoded = 3 + 6*3 = 21
         assert_eq!(encoded.len(), rep_encoded_size(original.len()));
-        assert_eq!(encoded[0], 1); // padding byte should be 1
+        assert_eq!(encoded[0], 1); // padding bytes should be 1
+        assert_eq!(encoded[1], 1);
+        assert_eq!(encoded[2], 1);
 
         let decoded = rep_decode(&encoded).unwrap();
         assert_eq!(original.to_vec(), decoded);
@@ -137,11 +144,11 @@ mod tests {
 
         let mut encoded = rep_encode(&original);
 
-        // Corrupt bytes in the first copy (indices 1..33)
-        encoded[1] = 0xFF;
-        encoded[10] = 0xFF;
-        encoded[20] = 0xFF;
-        encoded[30] = 0xFF;
+        // Corrupt bytes in the first copy (indices 3..35)
+        encoded[3] = 0xFF;
+        encoded[12] = 0xFF;
+        encoded[22] = 0xFF;
+        encoded[32] = 0xFF;
 
         // Other two copies should outvote the corrupted one
         let decoded = rep_decode(&encoded).unwrap();
@@ -157,10 +164,10 @@ mod tests {
 
         let mut encoded = rep_encode(&original);
 
-        // Corrupt bytes in the second copy (indices 33..65)
-        encoded[33] = 0xFF;
-        encoded[40] = 0xFF;
-        encoded[50] = 0xFF;
+        // Corrupt bytes in the second copy (indices 35..67)
+        encoded[35] = 0xFF;
+        encoded[42] = 0xFF;
+        encoded[52] = 0xFF;
 
         // First + third copies should outvote the corrupted second
         let decoded = rep_decode(&encoded).unwrap();
@@ -174,32 +181,52 @@ mod tests {
     }
 
     #[test]
+    fn decode_too_short_returns_error() {
+        let result = rep_decode(&[0, 0]);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn decode_invalid_length_returns_error() {
-        // After removing the padding byte, remaining length must be divisible by 3
-        let result = rep_decode(&[0, 1, 2, 3, 4]);
+        // After removing the 3 padding bytes, remaining length must be divisible by 3
+        let result = rep_decode(&[0, 0, 0, 1, 2, 3, 4]);
         assert!(result.is_err());
     }
 
     #[test]
     fn encoded_size_calculation() {
-        // Even: 32 -> 1 + 32*3 = 97
-        assert_eq!(rep_encoded_size(32), 97);
-        // Odd: 5 -> padded to 6 -> 1 + 6*3 = 19
-        assert_eq!(rep_encoded_size(5), 19);
-        // Even: 24 -> 1 + 24*3 = 73
-        assert_eq!(rep_encoded_size(24), 73);
-        // Odd: 19 -> padded to 20 -> 1 + 20*3 = 61
-        assert_eq!(rep_encoded_size(19), 61);
+        // Even: 32 -> 3 + 32*3 = 99
+        assert_eq!(rep_encoded_size(32), 99);
+        // Odd: 5 -> padded to 6 -> 3 + 6*3 = 21
+        assert_eq!(rep_encoded_size(5), 21);
+        // Even: 24 -> 3 + 24*3 = 75
+        assert_eq!(rep_encoded_size(24), 75);
+        // Odd: 19 -> padded to 20 -> 3 + 20*3 = 63
+        assert_eq!(rep_encoded_size(19), 63);
     }
 
     #[test]
     fn decode_exact_wrong_length_returns_error() {
         let original = [1u8; 32];
         let mut encoded = rep_encode(&original);
-        // Corrupt the padding byte to make rep_decode return 31 instead of 32
+        // Corrupt 2 of 3 padding bytes to make majority vote pick 1,
+        // causing rep_decode to pop a byte and return 31 instead of 32
         encoded[0] = 1;
+        encoded[1] = 1;
         let result = rep_decode_exact(&encoded, 32);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn reconstruct_with_corrupted_padding_byte() {
+        let original = [10, 20, 30, 40, 50]; // odd-length, padding byte = 1
+        let mut encoded = rep_encode(&original);
+        assert_eq!(encoded[0], 1);
+
+        // Corrupt one of the 3 padding bytes — majority vote recovers
+        encoded[0] = 0;
+        let decoded = rep_decode_exact(&encoded, original.len()).unwrap();
+        assert_eq!(decoded, original.to_vec());
     }
 
     #[test]

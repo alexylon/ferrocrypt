@@ -10,6 +10,18 @@ use ferrocrypt::{
 
 const TEST_WORKSPACE: &str = "tests/workspace";
 
+/// Triple-replicates an 8-byte prefix for constructing test headers.
+fn encode_test_prefix(prefix: &[u8; 8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(27);
+    out.push(0); // padding bytes (8 is even)
+    out.push(0);
+    out.push(0);
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(prefix);
+    out
+}
+
 fn setup_test_dir(test_name: &str) -> PathBuf {
     let test_dir = PathBuf::from(TEST_WORKSPACE).join(test_name);
     if test_dir.exists() {
@@ -988,15 +1000,15 @@ fn test_symmetric_header_tamper_detection() -> Result<(), CryptoError> {
 
     // Tamper with the same salt byte in all three replicated copies so majority
     // vote cannot recover the original value and the decoded salt changes.
-    // Encoded salt layout: [prefix(8)] [padding(1)] [copy0(32)] [copy1(32)] [copy2(32)]
+    // Encoded salt layout: [prefix(27)] [padding(3)] [copy0(32)] [copy1(32)] [copy2(32)]
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
-    const PREFIX: usize = 8; // HEADER_PREFIX_SIZE
+    const PREFIX: usize = 27; // HEADER_PREFIX_ENCODED_SIZE
     const SALT_LEN: usize = 32;
     const SALT_BYTE: usize = 1; // which byte within each copy to corrupt
-    data[PREFIX + 1 + SALT_BYTE] ^= 0xFF;
-    data[PREFIX + 1 + SALT_LEN + SALT_BYTE] ^= 0xFF;
-    data[PREFIX + 1 + 2 * SALT_LEN + SALT_BYTE] ^= 0xFF;
+    data[PREFIX + 3 + SALT_BYTE] ^= 0xFF;
+    data[PREFIX + 3 + SALT_LEN + SALT_BYTE] ^= 0xFF;
+    data[PREFIX + 3 + 2 * SALT_LEN + SALT_BYTE] ^= 0xFF;
     fs::write(&encrypted_path, &data)?;
 
     let result = symmetric_encryption(
@@ -1043,21 +1055,21 @@ fn test_hybrid_header_tamper_detection() -> Result<(), CryptoError> {
 
     // Tamper with the same nonce byte in all three replicated copies so majority
     // vote cannot recover the original value and the decoded nonce changes.
-    // Hybrid header: [prefix(8)] [encoded_envelope(409)] [encoded_nonce(61)] [encoded_hmac(97)]
-    // encoded_envelope = rep_encode(136-byte envelope) = 1 + 136*3 = 409
-    // encoded_nonce layout: [padding(1)] [copy0(20)] [copy1(20)] [copy2(20)]
+    // Hybrid header: [prefix(27)] [encoded_envelope(411)] [encoded_nonce(63)] [encoded_hmac(99)]
+    // encoded_envelope = rep_encode(136-byte envelope) = 3 + 136*3 = 411
+    // encoded_nonce layout: [padding(3)] [copy0(20)] [copy1(20)] [copy2(20)]
     // (NONCE_SIZE=19, padded to 20)
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
-    const PREFIX: usize = 8;
+    const PREFIX: usize = 27;
     const ENVELOPE_SIZE: usize = 136;
-    const ENCODED_ENVELOPE_LEN: usize = 1 + ENVELOPE_SIZE * 3;
+    const ENCODED_ENVELOPE_LEN: usize = 3 + ENVELOPE_SIZE * 3;
     const PADDED_NONCE: usize = 20; // 19 rounded up to even
     const NONCE_REGION: usize = PREFIX + ENCODED_ENVELOPE_LEN; // start of encoded_nonce
     const NONCE_BYTE: usize = 5;
-    data[NONCE_REGION + 1 + NONCE_BYTE] ^= 0xFF;
-    data[NONCE_REGION + 1 + PADDED_NONCE + NONCE_BYTE] ^= 0xFF;
-    data[NONCE_REGION + 1 + 2 * PADDED_NONCE + NONCE_BYTE] ^= 0xFF;
+    data[NONCE_REGION + 3 + NONCE_BYTE] ^= 0xFF;
+    data[NONCE_REGION + 3 + PADDED_NONCE + NONCE_BYTE] ^= 0xFF;
+    data[NONCE_REGION + 3 + 2 * PADDED_NONCE + NONCE_BYTE] ^= 0xFF;
     fs::write(&encrypted_path, &data)?;
 
     let secret_key_path = keys_dir.join("private.key").to_str().unwrap().to_string();
@@ -1100,12 +1112,12 @@ fn test_symmetric_single_copy_corruption_recovery() -> Result<(), CryptoError> {
     )?;
 
     // Corrupt one byte in copy 0 only — majority vote with copies 1 and 2 recovers it.
-    // Encoded salt layout: [prefix(8)] [padding(1)] [copy0(32)] [copy1(32)] [copy2(32)]
+    // Encoded salt layout: [prefix(27)] [padding(3)] [copy0(32)] [copy1(32)] [copy2(32)]
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
-    const PREFIX: usize = 8;
+    const PREFIX: usize = 27;
     const SALT_BYTE: usize = 5;
-    data[PREFIX + 1 + SALT_BYTE] ^= 0xFF;
+    data[PREFIX + 3 + SALT_BYTE] ^= 0xFF;
     fs::write(&encrypted_path, &data)?;
 
     symmetric_encryption(
@@ -1148,11 +1160,11 @@ fn test_symmetric_two_copy_corruption_detected() -> Result<(), CryptoError> {
     // changing the decoded salt and causing HMAC or key derivation failure.
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
-    const PREFIX: usize = 8;
+    const PREFIX: usize = 27;
     const SALT_LEN: usize = 32;
     const SALT_BYTE: usize = 5;
-    data[PREFIX + 1 + SALT_BYTE] ^= 0xFF;
-    data[PREFIX + 1 + SALT_LEN + SALT_BYTE] ^= 0xFF;
+    data[PREFIX + 3 + SALT_BYTE] ^= 0xFF;
+    data[PREFIX + 3 + SALT_LEN + SALT_BYTE] ^= 0xFF;
     fs::write(&encrypted_path, &data)?;
 
     let result = symmetric_encryption(
@@ -1190,12 +1202,14 @@ fn test_symmetric_prefix_flags_tamper_detected() -> Result<(), CryptoError> {
         |_| {},
     )?;
 
-    // Flip a bit in the flags field (prefix byte 6). Flags are not validated by
-    // format parsing — only the HMAC protects them from tampering.
+    // Flip a bit in the flags field (logical prefix byte 6) across 2 of 3
+    // replicated copies so majority vote picks the corrupted value.
+    // Encoded prefix: [pad(3)] [copy0(8)] [copy1(8)] [copy2(8)]
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
-    const FLAGS_OFFSET: usize = 6;
-    data[FLAGS_OFFSET] ^= 0x01;
+    const FLAGS_LOGICAL: usize = 6;
+    data[3 + FLAGS_LOGICAL] ^= 0x01; // copy 0
+    data[11 + FLAGS_LOGICAL] ^= 0x01; // copy 1
     fs::write(&encrypted_path, &data)?;
 
     let result = symmetric_encryption(
@@ -1241,16 +1255,16 @@ fn test_hybrid_single_copy_corruption_recovery() -> Result<(), CryptoError> {
     )?;
 
     // Corrupt one byte in copy 0 of the encoded nonce — majority vote recovers it.
-    // Hybrid header: [prefix(8)] [encoded_envelope(409)] [encoded_nonce(61)] ...
-    // encoded_nonce: [padding(1)] [copy0(20)] [copy1(20)] [copy2(20)]
+    // Hybrid header: [prefix(27)] [encoded_envelope(411)] [encoded_nonce(63)] ...
+    // encoded_nonce: [padding(3)] [copy0(20)] [copy1(20)] [copy2(20)]
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
-    const PREFIX: usize = 8;
+    const PREFIX: usize = 27;
     const ENVELOPE_SIZE: usize = 136;
-    const ENCODED_ENVELOPE_LEN: usize = 1 + ENVELOPE_SIZE * 3;
+    const ENCODED_ENVELOPE_LEN: usize = 3 + ENVELOPE_SIZE * 3;
     const NONCE_REGION: usize = PREFIX + ENCODED_ENVELOPE_LEN;
     const NONCE_BYTE: usize = 5;
-    data[NONCE_REGION + 1 + NONCE_BYTE] ^= 0xFF;
+    data[NONCE_REGION + 3 + NONCE_BYTE] ^= 0xFF;
     fs::write(&encrypted_path, &data)?;
 
     let secret_key_path = keys_dir.join("private.key").to_str().unwrap().to_string();
@@ -1277,8 +1291,8 @@ fn test_not_a_ferrocrypt_file() {
     let decrypt_dir = test_dir.join("decrypted");
     fs::create_dir_all(&decrypt_dir).unwrap();
 
-    // A JPEG header renamed to .fcr
-    fs::write(&fake_file, b"\xFF\xD8\xFF\xE0fake jpeg data").unwrap();
+    // A JPEG header renamed to .fcr (padded to exceed the replicated prefix size)
+    fs::write(&fake_file, b"\xFF\xD8\xFF\xE0fake jpeg data padding!!").unwrap();
 
     let passphrase = SecretString::from("test".to_string());
     let result = symmetric_encryption(
@@ -1318,10 +1332,14 @@ fn test_future_major_version_rejected() -> Result<(), CryptoError> {
         |_| {},
     )?;
 
-    // Patch the major version byte (offset 2) to a future version
+    // Patch the major version (logical prefix byte 2) in all 3 replicated copies
+    // Encoded prefix: [pad(3)] [copy0(8)] [copy1(8)] [copy2(8)]
     let encrypted_path = encrypt_dir.join("data.fcr");
     let mut data = fs::read(&encrypted_path)?;
-    data[2] = 99;
+    const MAJOR_LOGICAL: usize = 2;
+    data[3 + MAJOR_LOGICAL] = 99; // copy 0
+    data[11 + MAJOR_LOGICAL] = 99; // copy 1
+    data[19 + MAJOR_LOGICAL] = 99; // copy 2
     fs::write(&encrypted_path, &data)?;
 
     let result = symmetric_encryption(
@@ -1707,11 +1725,16 @@ fn test_symmetric_oversized_header_len() -> Result<(), CryptoError> {
         |_| {},
     )?;
 
-    // Set header_len to 0xFFFF — far beyond the actual file size
+    // Set header_len to 0xFFFF in all 3 replicated copies
+    // Encoded prefix: [pad(3)] [copy0(8)] [copy1(8)] [copy2(8)]
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
-    data[4] = 0xFF;
-    data[5] = 0xFF;
+    const HLEN_HI: usize = 4;
+    const HLEN_LO: usize = 5;
+    for copy_start in [3, 11, 19] {
+        data[copy_start + HLEN_HI] = 0xFF;
+        data[copy_start + HLEN_LO] = 0xFF;
+    }
     fs::write(&encrypted_path, &data)?;
 
     let result = symmetric_encryption(
@@ -1731,9 +1754,10 @@ fn test_symmetric_header_len_too_small() {
     let decrypt_dir = test_dir.join("decrypted");
     fs::create_dir_all(&decrypt_dir).unwrap();
 
-    // Build a prefix with header_len = 4, which is less than HEADER_PREFIX_SIZE (8)
-    let mut data = vec![0xFC, 0x53, 2, 0, 0, 4, 0, 0];
-    data.extend_from_slice(&[0u8; 64]); // trailing junk
+    // Build a replicated prefix with header_len = 4, which is invalid
+    let prefix: [u8; 8] = [0xFC, 0x53, 3, 0, 0, 4, 0, 0];
+    let mut data = encode_test_prefix(&prefix);
+    data.extend_from_slice(&[0u8; 64]);
 
     let file = test_dir.join("bad_hlen.fcr");
     fs::write(&file, &data).unwrap();
@@ -1757,16 +1781,17 @@ fn test_symmetric_all_zero_header_body() {
 
     // Valid prefix magic/type/version, plausible header_len, but zero-filled fields
     let header_len: u16 = 600;
-    let mut data = vec![
+    let prefix: [u8; 8] = [
         0xFC,
         0x53,
-        2,
+        3,
         0,
         (header_len >> 8) as u8,
         (header_len & 0xFF) as u8,
         0,
         0,
     ];
+    let mut data = encode_test_prefix(&prefix);
     data.extend_from_slice(&[0u8; 600]);
 
     let file = test_dir.join("zeroed.fcr");
@@ -1860,10 +1885,16 @@ fn test_hybrid_oversized_header_len() -> Result<(), CryptoError> {
         |_| {},
     )?;
 
+    // Set header_len to 0xFFFF in all 3 replicated copies
+    // Encoded prefix: [pad(3)] [copy0(8)] [copy1(8)] [copy2(8)]
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
-    data[4] = 0xFF;
-    data[5] = 0xFF;
+    const HLEN_HI: usize = 4;
+    const HLEN_LO: usize = 5;
+    for copy_start in [3, 11, 19] {
+        data[copy_start + HLEN_HI] = 0xFF;
+        data[copy_start + HLEN_LO] = 0xFF;
+    }
     fs::write(&encrypted_path, &data)?;
 
     let result = hybrid_encryption(

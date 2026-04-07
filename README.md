@@ -33,7 +33,7 @@ Both modes produce `.fcr` files. Decryption is based on magic bytes in the file 
 - **Hybrid encryption:** X25519 key agreement + XChaCha20-Poly1305 envelope via the [`crypto_box`](https://crates.io/crates/crypto_box) crate ([audited by Cure53](https://cure53.de/pentest-report_rust-libs.pdf))
 - HMAC-SHA3-256 header authentication — tampering is detected before decryption begins
 - Passphrases handled via the `secrecy` crate (zeroized on drop, hidden from Debug/Display)
-- Triple-replicated headers with majority-vote decoding for error correction
+- Triple-replicated headers with majority-vote decoding for error correction. The header is the most critical part of an encrypted file — it holds the salts, nonces, and key material needed to begin decryption. Unlike the ciphertext, which is protected per-chunk by Poly1305 tags, a single corrupted header byte would make the entire file unrecoverable. Triple replication ensures that up to 33% of the stored header bytes can be corrupted and still be automatically corrected without data loss. Triple replication was chosen over Reed-Solomon because each header field must be decoded independently, making RS degenerate to identical copies (k=1) with added Galois field overhead and no correction advantage.
 - Versioned file format with magic bytes — corrupted or incompatible files produce clear errors
 
 ### Project Structure

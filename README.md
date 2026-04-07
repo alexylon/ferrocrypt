@@ -10,7 +10,7 @@
 &nbsp;
 [![crate: ferrocrypt-cli](https://img.shields.io/crates/v/ferrocrypt-cli.svg?label=crate%3A%20ferrocrypt-cli&color=blue)](https://crates.io/crates/ferrocrypt-cli)
 
-Multiplatform file encryption tool with CLI and desktop interfaces. Written in Rust.
+Cross-platform file encryption tool with CLI and desktop interfaces. Written in Rust.
 
 <div align="center">
   <img src="/assets/screenshot-1.png" width="295" alt="FerroCrypt">&nbsp;&nbsp;
@@ -27,13 +27,27 @@ FerroCrypt encrypts and decrypts files and directories. It supports two modes:
 
 Both modes produce `.fcr` files. Decryption is based on magic bytes in the file header, not the file extension — renaming a file won't break anything.
 
+### What's stored in an encrypted file
+
+Every `.fcr` file starts with a header followed by the encrypted payload. The header contains only the metadata needed to begin decryption — no filenames, timestamps, or plaintext content is exposed. All header fields are triple-replicated for error correction.
+
+| File | Contents |
+|---|---|
+| **Symmetric `.fcr`** | Format identifier, version, Argon2id salt, HKDF salt, KDF parameters (memory cost, iterations, parallelism), stream nonce, key verification hash, HMAC authentication tag |
+| **Hybrid `.fcr`** | Format identifier, version, sealed key envelope (ephemeral public key + encrypted random key), stream nonce, HMAC authentication tag |
+| **`private.key`** | KDF parameters, Argon2id salt, nonce, passphrase-encrypted secret key (the raw key is never stored unencrypted) |
+| **`public.key`** | Raw 32-byte X25519 public key (not secret) |
+
 ### Security
 
 - **Symmetric encryption:** XChaCha20-Poly1305 via the [`chacha20poly1305`](https://crates.io/crates/chacha20poly1305) crate ([audited by NCC Group](https://research.nccgroup.com/2020/02/26/public-report-rustcrypto-aes-gcm-and-chacha20poly1305-implementation-review/)), with Argon2id key derivation and HKDF-SHA3-256 subkey expansion
 - **Hybrid encryption:** X25519 key agreement + XChaCha20-Poly1305 envelope via the [`crypto_box`](https://crates.io/crates/crypto_box) crate ([audited by Cure53](https://cure53.de/pentest-report_rust-libs.pdf))
 - HMAC-SHA3-256 header authentication — tampering is detected before decryption begins
+- Streaming encryption — plaintext never touches disk as an intermediate file
 - Passphrases handled via the `secrecy` crate (zeroized on drop, hidden from Debug/Display)
 - Triple-replicated headers with majority-vote decoding for error correction. The header is the most critical part of an encrypted file — it holds the salts, nonces, and key material needed to begin decryption. Unlike the ciphertext, which is protected per-chunk by Poly1305 tags, a single corrupted header byte would make the entire file unrecoverable. Triple replication ensures that up to 33% of the stored header bytes can be corrupted and still be automatically corrected without data loss. Triple replication was chosen over Reed-Solomon because each header field must be decoded independently, making RS degenerate to identical copies (k=1) with added Galois field overhead and no correction advantage.
+- Symlink inputs are rejected; directory encryption does not follow symlinks — prevents unintended inclusion of files outside the selected tree
+- Failed encryptions clean up partial `.fcr` output files; failed decryptions rename partial output with `.incomplete` suffix
 - Versioned file format with magic bytes — corrupted or incompatible files produce clear errors
 
 ### Project Structure

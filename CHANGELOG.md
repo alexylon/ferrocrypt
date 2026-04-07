@@ -18,21 +18,17 @@ All notable changes to FerroCrypt are documented in this file.
 - **Desktop app:** Password strength indicator (visible in Symmetric Encrypt and Key Gen modes). Scoring adapted from Proton Pass.
 - HKDF-SHA3-256 subkey derivation with domain separation (`ferrocrypt-enc`, `ferrocrypt-hmac`)
 - HMAC-SHA3-256 header authentication — tampering is detected before decryption begins
+- **CI:** `cargo-audit` dependency vulnerability scanning in GitHub Actions
 - Versioned file format with magic bytes (`0xFC` + type), major/minor version, and header length field. Forward-compatible: future minor versions can append fields without breaking older parsers.
 
 ### Changed
-- **Breaking:** Header prefix is now triple-replicated — the entire header has error-correction coverage, not just the fields after the prefix
-- **Breaking:** Replication padding indicator is now triple-replicated — a single-byte corruption of the padding byte no longer makes an otherwise-intact field unrecoverable
+- **Breaking:** Format version bumped to 3.0 — files from older versions cannot be decrypted. Unified file extension from `.fcs`/`.fch` to single `.fcr`.
 - **Breaking:** Replaced RSA-4096 OAEP (OpenSSL) with X25519 + XChaCha20-Poly1305 (`crypto_box` crate, `ChaChaBox`) for hybrid envelope encryption. Removes the OpenSSL C dependency — the project is now pure Rust.
 - **Breaking:** Streaming TAR encryption pipeline — input is archived and encrypted directly to the output file in a single pass. No plaintext intermediate files touch disk. Replaces the previous ZIP-based approach.
-- **Breaking:** Format version bumped to 3.0 — files from older versions cannot be decrypted. Unified file extension from `.fcs`/`.fch` to single `.fcr`.
-- **Breaking:** Argon2id parameters raised to 1 GiB memory / t=4 / p=4 for stronger brute-force resistance
-- **Breaking (library API):** Renamed `generate_asymmetric_key_pair` to `generate_key_pair`, removed `bit_size` parameter. Renamed `rsa_key_pem` to `key_file` in `hybrid_encryption`.
-- **Breaking (library API):** Renamed `CryptoError` variants: `EncryptionDecryptionError` → `CryptoOperation`, `Message` → `InvalidInput`, `ChaCha20Poly1305Error` → `Cipher`, `Argon2Error` → `KeyDerivation`, `TryFromSliceError` → `SliceConversion`
-- **Breaking (library API):** Removed `OpensslError`, `WalkDirError`, `ZipError`, `BinCodeEncodeError`, `BinCodeDecodeError`, and `ReedSolomonError` variants from `CryptoError` enum
-- **Breaking (library API):** Collapsed `_with_progress` variants into base functions — `symmetric_encryption`, `hybrid_encryption`, and `generate_key_pair` now accept `save_as` and `on_progress` directly
-- **Breaking (library API):** Removed `serde::Serialize` implementation from `CryptoError`
-- **Breaking (CLI):** Removed `--bit-size` / `-b` flag from `keygen` and `--large` / `-l` flag from encryption
+- **Breaking:** Entire header (including prefix and padding indicator) is now triple-replicated for uniform error correction
+- **Breaking:** Argon2id parameters raised to 1 GiB memory / t=4 / p=4 for stronger brute-force resistance. KDF parameters are now stored in the symmetric file header and private key file, so decryption always uses the exact parameters that were used during encryption.
+- **Breaking (library API):** Renamed functions (`generate_asymmetric_key_pair` → `generate_key_pair`), parameters (`rsa_key_pem` → `key_file`), and `CryptoError` variants. Removed `bit_size` parameter, `_with_progress` function variants, `serde::Serialize` on `CryptoError`, and error variants tied to removed dependencies. All public path parameters now use `impl AsRef<Path>` instead of `&str`; `save_as` changed from `Option<&str>` to `Option<&Path>`.
+- **Breaking (CLI):** Removed `--bit-size` / `-b` and `--large` / `-l` flags
 - Key files use `private.key` (passphrase-protected via Argon2id + XChaCha20-Poly1305) and `public.key` (raw 32 bytes)
 - Encrypt vs decrypt determined by reading file header magic bytes, not file extension
 - Replaced `reed-solomon-simd` with simple triple replication (RS with 1 original shard was producing identical copies)
@@ -43,23 +39,24 @@ All notable changes to FerroCrypt are documented in this file.
 
 ### Fixed
 - **Stream truncation vulnerability:** symmetric decryption had a code path that skipped `decrypt_last()`, allowing truncation at chunk boundaries without detection
+- **Security:** Directory encryption no longer follows symlinks — prevents unintended inclusion of files outside the selected directory tree. Symlink inputs are now explicitly rejected.
 - Symmetric decryption now verifies the HMAC before the key-hash check, so header tampering is reported as an authentication failure rather than "wrong password"
 - HMAC covers decoded (canonical) field values — single-copy replication corruption recovered by majority vote no longer causes HMAC verification failure
 - Private key files written with `0o600` (owner-only) on POSIX systems
-- Key material zeroized on all error paths (decrypted envelope keys, combined key buffer, HMAC failure early returns)
-- Hybrid plaintext buffers zeroized on drop
+- Key material zeroized on all error paths (decrypted envelope keys, combined key buffer, hybrid plaintext buffers, HMAC failure early returns)
+- Compile-time size assertion on `crypto_box::SecretKey` to guard unsafe zeroization against upstream layout changes
 - Length validation on decrypted envelope key material
-- Crash on truncated, corrupted, or maliciously crafted `.fcr` files
-- Crash on unexpected replicated decoding output length
+- Crash on truncated, corrupted, maliciously crafted `.fcr` files, or unexpected replicated decoding output length
 - Nonexistent input paths silently producing empty encrypted files
 - `keygen` now creates missing output directories
-- Temporary directory cleanup masking the original crypto error
-- Temporary directory race condition with concurrent encryptions to the same output directory
+- Temporary directory cleanup masking the original crypto error and race condition with concurrent encryptions
 - Directory archiver silently skipping inaccessible files and path errors
+- Failed encryptions clean up partial `.fcr` output files; failed decryptions rename partial output with `.incomplete` suffix
+- Key pair generation is now atomic — both files are written to temp names and renamed into place; partial state is cleaned up on failure
 
 ### Removed
 - `openssl`, `reed-solomon-simd`, `bincode`, and `serde` dependencies
-- `--large` / `-l` CLI flag (streaming is now the only mode)
+- `normalize_paths` helper and `ENCRYPTED_DOT_EXTENSION` constant (replaced by `Path` operations)
 
 ## [0.2.5] - 2025-12-18
 

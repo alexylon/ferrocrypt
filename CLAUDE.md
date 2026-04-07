@@ -36,10 +36,10 @@ Three crates, one shared library:
 | `lib.rs` | Public API, encrypt/decrypt routing (magic-byte detection), path validation, key fingerprint |
 | `symmetric.rs` | Argon2id → HKDF-SHA3-256 → XChaCha20-Poly1305 streaming encrypt/decrypt |
 | `hybrid.rs` | X25519 + XChaCha20-Poly1305 envelope + XChaCha20-Poly1305 streaming encrypt/decrypt |
-| `archiver.rs` | TAR archive/unarchive (streaming, preserves directory structure) |
+| `archiver.rs` | TAR archive/unarchive (streaming, preserves directory structure). Rejects symlink inputs, disables symlink following in directories. Failed extractions rename partial output with `.incomplete` suffix. |
 | `format.rs` | File format constants, header parsing, forward-compatibility skip for minor versions |
 | `replication.rs` | Triple replication with majority-vote decoding for header error correction |
-| `common.rs` | Shared: `EncryptWriter`/`DecryptReader` streaming adapters (64KB chunks), HMAC-SHA3-256, path normalization, shared crypto constants |
+| `common.rs` | Shared: `EncryptWriter`/`DecryptReader` streaming adapters (64KB chunks), HMAC-SHA3-256, `KdfParams` (serialized to headers/key files), shared crypto constants |
 | `error.rs` | `CryptoError` enum: `Io`, `Cipher`, `KeyDerivation`, `SliceConversion`, `CryptoOperation`, `InputPath`, `InvalidInput` |
 
 ### Encryption Pipeline
@@ -73,10 +73,10 @@ Decryption reverses: read header → derive/decrypt keys → verify HMAC → Dec
 
 ## Key Conventions
 
-- `symmetric_encryption` and `hybrid_encryption` accept `save_as: Option<&str>` to override the default `{stem}.fcr` output path (ignored during decryption).
+- `symmetric_encryption` and `hybrid_encryption` accept `save_as: Option<&Path>` to override the default `{stem}.fcr` output path (ignored during decryption).
 - Encrypt vs decrypt is routed by reading magic bytes, not file extension.
 - Integration tests use `tests/workspace/` as a temp directory, cleaned up by a `#[ctor::dtor]` hook.
-- `ENCRYPTED_EXTENSION` ("fcr") and `ENCRYPTED_DOT_EXTENSION` (".fcr") constants live in `format.rs`.
+- `ENCRYPTED_EXTENSION` ("fcr") constant lives in `format.rs`.
 
 ## Code Guidelines
 

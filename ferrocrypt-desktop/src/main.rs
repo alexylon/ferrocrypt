@@ -346,7 +346,7 @@ fn check_conflicts(app: &AppWindow) {
 
     let mut warning = String::new();
 
-    if matches!(mode, 0 | 2 | 4) && !outpath.is_empty() && Path::new(&outpath).exists() {
+    if matches!(mode, 0 | 2) && !outpath.is_empty() && Path::new(&outpath).exists() {
         warning = format!("Already exists: {}", elide_left(&outpath, ELIDE));
     }
 

@@ -209,7 +209,7 @@ pub const KEY_FILE_TYPE_SECRET: u8 = 0x53; // 'S'
 pub const PUBLIC_KEY_DATA_SIZE: usize = 32;
 // kdf_params(12) + salt(32) + nonce(24) + encrypted_key(32) + tag(16)
 pub const SECRET_KEY_DATA_SIZE: usize = 116;
-pub const KEY_FILE_VERSION: u8 = 1;
+pub const KEY_FILE_VERSION: u8 = 2;
 pub const KEY_FILE_ALG_X25519: u8 = 1;
 
 pub fn build_key_file_header(key_type: u8, data_len: u16) -> [u8; KEY_FILE_HEADER_SIZE] {
@@ -258,10 +258,17 @@ pub fn validate_key_file_header(
             "Expected a {expected} key file but got a {actual} key file"
         )));
     }
-    if data[2] != KEY_FILE_VERSION {
+    let key_version = data[2];
+    if key_version > KEY_FILE_VERSION {
         return Err(CryptoError::CryptoOperation(format!(
-            "Key file version {} not supported (expected {})",
-            data[2], KEY_FILE_VERSION
+            "Key file version {} not supported (current: {}). Upgrade FerroCrypt.",
+            key_version, KEY_FILE_VERSION
+        )));
+    }
+    if key_version < KEY_FILE_VERSION {
+        return Err(CryptoError::CryptoOperation(format!(
+            "Key file version {} no longer supported (current: {})",
+            key_version, KEY_FILE_VERSION
         )));
     }
     if data[3] != KEY_FILE_ALG_X25519 {

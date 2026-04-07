@@ -218,11 +218,11 @@ fn test_cli_keygen() {
     assert!(keys_dir.join("private.key").exists());
     assert!(keys_dir.join("public.key").exists());
 
-    // Verify keys have expected sizes (secret: 104 bytes, public: 32 bytes)
+    // Verify keys have expected sizes (secret: 116 bytes + header, public: 32 bytes + header)
     let secret_key_size = fs::metadata(keys_dir.join("private.key")).unwrap().len();
     let pub_key_size = fs::metadata(keys_dir.join("public.key")).unwrap().len();
 
-    assert_eq!(secret_key_size, 112);
+    assert_eq!(secret_key_size, 124);
     assert_eq!(pub_key_size, 40);
 }
 

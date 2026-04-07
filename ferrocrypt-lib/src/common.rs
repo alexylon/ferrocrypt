@@ -11,22 +11,66 @@ use crate::CryptoError;
 
 type HmacSha3_256 = Hmac<Sha3_256>;
 
-pub fn argon2_config() -> argon2::Config<'static> {
-    // "fast-kdf" uses minimal Argon2 params so tests finish quickly.
-    // The feature is auto-enabled via [dev-dependencies] and blocked
-    // in release builds by a compile_error! guard in lib.rs.
-    let (mem_cost, time_cost) = if cfg!(feature = "fast-kdf") {
-        (8192, 1)
-    } else {
-        (1048576, 4)
-    };
-    argon2::Config {
-        variant: argon2::Variant::Argon2id,
-        hash_length: 32,
-        lanes: 4,
-        mem_cost,
-        time_cost,
-        ..Default::default()
+/// KDF parameters stored in file headers and key files so that decryption
+/// uses the same cost parameters that were used during encryption.
+pub struct KdfParams {
+    pub mem_cost: u32,
+    pub time_cost: u32,
+    pub lanes: u32,
+}
+
+pub const KDF_PARAMS_SIZE: usize = 12; // 3 × u32 big-endian
+
+impl KdfParams {
+    pub fn default_params() -> Self {
+        // "fast-kdf" uses minimal Argon2 params so tests finish quickly.
+        // The feature is auto-enabled via [dev-dependencies] and blocked
+        // in release builds by a compile_error! guard in lib.rs.
+        let (mem_cost, time_cost) = if cfg!(feature = "fast-kdf") {
+            (8192, 1)
+        } else {
+            (1048576, 4)
+        };
+        Self {
+            mem_cost,
+            time_cost,
+            lanes: 4,
+        }
+    }
+
+    pub fn to_bytes(&self) -> [u8; KDF_PARAMS_SIZE] {
+        let mut buf = [0u8; KDF_PARAMS_SIZE];
+        buf[0..4].copy_from_slice(&self.mem_cost.to_be_bytes());
+        buf[4..8].copy_from_slice(&self.time_cost.to_be_bytes());
+        buf[8..12].copy_from_slice(&self.lanes.to_be_bytes());
+        buf
+    }
+
+    pub fn from_bytes(bytes: &[u8; KDF_PARAMS_SIZE]) -> Result<Self, CryptoError> {
+        let params = Self {
+            mem_cost: u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            time_cost: u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            lanes: u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
+        };
+        // Cap at 8 GiB to prevent malicious files from triggering OOM
+        if params.mem_cost > 8 * 1024 * 1024 {
+            return Err(CryptoError::CryptoOperation(format!(
+                "KDF memory cost {} KiB exceeds maximum (8 GiB)",
+                params.mem_cost
+            )));
+        }
+        Ok(params)
+    }
+
+    pub fn to_argon2_config(&self) -> argon2::Config<'static> {
+        argon2::Config {
+            variant: argon2::Variant::Argon2id,
+            hash_length: 32,
+            lanes: self.lanes,
+            mem_cost: self.mem_cost,
+            time_cost: self.time_cost,
+            ..Default::default()
+        }
     }
 }
 

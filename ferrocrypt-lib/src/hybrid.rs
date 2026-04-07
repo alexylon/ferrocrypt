@@ -12,7 +12,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::common::{
     ARGON2_SALT_SIZE, DecryptReader, ENCRYPTION_KEY_SIZE, ERR_FILE_TOO_SHORT, EncryptWriter,
-    HMAC_KEY_SIZE, HMAC_TAG_SIZE, NONCE_SIZE, TAG_SIZE, argon2_config, get_duration,
+    HMAC_KEY_SIZE, HMAC_TAG_SIZE, KDF_PARAMS_SIZE, KdfParams, NONCE_SIZE, TAG_SIZE, get_duration,
     get_file_stem_to_string, hmac_sha3_256, hmac_sha3_256_verify,
 };
 use crate::format::{self, HEADER_PREFIX_ENCODED_SIZE, PUBLIC_KEY_DATA_SIZE, SECRET_KEY_DATA_SIZE};
@@ -255,13 +255,15 @@ fn read_secret_key(path: &Path, passphrase: &SecretString) -> Result<SecretKey, 
 
     let body_start = format::KEY_FILE_HEADER_SIZE;
     let body = &data[body_start..body_start + SECRET_KEY_DATA_SIZE];
-    let salt = &body[..ARGON2_SALT_SIZE];
+    let kdf_params = KdfParams::from_bytes(body[..KDF_PARAMS_SIZE].try_into()?)?;
+    let salt = &body[KDF_PARAMS_SIZE..KDF_PARAMS_SIZE + ARGON2_SALT_SIZE];
     let nonce = chacha20poly1305::XNonce::from_slice(
-        &body[ARGON2_SALT_SIZE..ARGON2_SALT_SIZE + SECRET_KEY_NONCE_SIZE],
+        &body[KDF_PARAMS_SIZE + ARGON2_SALT_SIZE
+            ..KDF_PARAMS_SIZE + ARGON2_SALT_SIZE + SECRET_KEY_NONCE_SIZE],
     );
-    let ciphertext = &body[ARGON2_SALT_SIZE + SECRET_KEY_NONCE_SIZE..];
+    let ciphertext = &body[KDF_PARAMS_SIZE + ARGON2_SALT_SIZE + SECRET_KEY_NONCE_SIZE..];
 
-    let config = argon2_config();
+    let config = kdf_params.to_argon2_config();
     let mut derived_key = Zeroizing::new(
         argon2::hash_raw(passphrase.expose_secret().as_bytes(), salt, &config)
             .map_err(CryptoError::KeyDerivation)?,
@@ -356,10 +358,12 @@ pub fn generate_key_pair(
     let public_key = secret_key.public_key();
 
     // Encrypt private key at rest with passphrase via Argon2id + XChaCha20-Poly1305
+    let kdf_params = KdfParams::default_params();
+    let kdf_bytes = kdf_params.to_bytes();
     let mut salt = [0u8; ARGON2_SALT_SIZE];
     OsRng.fill_bytes(&mut salt);
 
-    let config = argon2_config();
+    let config = kdf_params.to_argon2_config();
     let mut derived_key = Zeroizing::new(
         argon2::hash_raw(passphrase.expose_secret().as_bytes(), &salt, &config)
             .map_err(CryptoError::KeyDerivation)?,
@@ -379,7 +383,7 @@ pub fn generate_key_pair(
     let secret_header =
         format::build_key_file_header(format::KEY_FILE_TYPE_SECRET, SECRET_KEY_DATA_SIZE as u16);
 
-    // Write private key file: [header(8) | salt | nonce | encrypted_secret_key]
+    // Write private key file: [header(8) | kdf_params | salt | nonce | encrypted_secret_key]
     let secret_key_path = output_dir.join(SECRET_KEY_FILENAME);
     let mut secret_key_opts = OpenOptions::new();
     secret_key_opts.write(true).create_new(true);
@@ -390,6 +394,7 @@ pub fn generate_key_pair(
     }
     let mut secret_key_file = secret_key_opts.open(&secret_key_path)?;
     secret_key_file.write_all(&secret_header)?;
+    secret_key_file.write_all(&kdf_bytes)?;
     secret_key_file.write_all(&salt)?;
     secret_key_file.write_all(&nonce)?;
     secret_key_file.write_all(&encrypted_secret)?;

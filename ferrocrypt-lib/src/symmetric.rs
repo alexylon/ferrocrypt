@@ -13,8 +13,9 @@ use zeroize::Zeroizing;
 
 use crate::common::{
     ARGON2_SALT_SIZE, DecryptReader, ENCRYPTION_KEY_SIZE, ERR_FILE_TOO_SHORT, EncryptWriter,
-    HMAC_KEY_SIZE, HMAC_TAG_SIZE, NONCE_SIZE, constant_time_compare_256_bit, get_duration,
-    get_file_stem_to_string, hmac_sha3_256, hmac_sha3_256_verify, sha3_32_hash,
+    HMAC_KEY_SIZE, HMAC_TAG_SIZE, KDF_PARAMS_SIZE, KdfParams, NONCE_SIZE,
+    constant_time_compare_256_bit, get_duration, get_file_stem_to_string, hmac_sha3_256,
+    hmac_sha3_256_verify, sha3_32_hash,
 };
 use crate::format::{self, HEADER_PREFIX_ENCODED_SIZE};
 use crate::replication::{rep_decode_exact, rep_encode, rep_encoded_size};
@@ -31,6 +32,7 @@ fn derive_keys(
     passphrase: &SecretString,
     salt: &[u8],
     hkdf_salt: &[u8],
+    kdf_params: &KdfParams,
 ) -> Result<
     (
         Zeroizing<[u8; ENCRYPTION_KEY_SIZE]>,
@@ -38,7 +40,7 @@ fn derive_keys(
     ),
     CryptoError,
 > {
-    let argon2_config = crate::common::argon2_config();
+    let argon2_config = kdf_params.to_argon2_config();
     let ikm = Zeroizing::new(argon2::hash_raw(
         passphrase.expose_secret().as_bytes(),
         salt,
@@ -71,12 +73,13 @@ pub fn encrypt_file(
     let start_time = std::time::Instant::now();
 
     on_progress("Deriving key\u{2026}");
+    let kdf_params = KdfParams::default_params();
     let mut salt = [0u8; ARGON2_SALT_SIZE];
     OsRng.fill_bytes(&mut salt);
     let mut hkdf_salt = [0u8; HKDF_SALT_SIZE];
     OsRng.fill_bytes(&mut hkdf_salt);
 
-    let (encryption_key, hmac_key) = derive_keys(passphrase, &salt, &hkdf_salt)?;
+    let (encryption_key, hmac_key) = derive_keys(passphrase, &salt, &hkdf_salt, &kdf_params)?;
 
     let cipher = XChaCha20Poly1305::new(encryption_key.as_ref().into());
     let verification_hash: [u8; ENCRYPTION_KEY_SIZE] = sha3_32_hash(encryption_key.as_ref())?;
@@ -104,6 +107,8 @@ pub fn encrypt_file(
 
         let encoded_salt = rep_encode(&salt);
         let encoded_hkdf_salt = rep_encode(&hkdf_salt);
+        let kdf_bytes = kdf_params.to_bytes();
+        let encoded_kdf = rep_encode(&kdf_bytes);
         let encoded_key_hash = rep_encode(&verification_hash);
 
         let mut nonce = [0u8; NONCE_SIZE];
@@ -113,6 +118,7 @@ pub fn encrypt_file(
         let header_len = (HEADER_PREFIX_ENCODED_SIZE
             + encoded_salt.len()
             + encoded_hkdf_salt.len()
+            + encoded_kdf.len()
             + encoded_nonce.len()
             + encoded_key_hash.len()
             + rep_encoded_size(HMAC_TAG_SIZE)) as u16;
@@ -122,11 +128,17 @@ pub fn encrypt_file(
         let stream_encryptor = stream::EncryptorBE32::from_aead(cipher, nonce.as_ref().into());
 
         let mut hmac_message = Vec::with_capacity(
-            prefix.len() + ARGON2_SALT_SIZE + HKDF_SALT_SIZE + NONCE_SIZE + ENCRYPTION_KEY_SIZE,
+            prefix.len()
+                + ARGON2_SALT_SIZE
+                + HKDF_SALT_SIZE
+                + KDF_PARAMS_SIZE
+                + NONCE_SIZE
+                + ENCRYPTION_KEY_SIZE,
         );
         hmac_message.extend_from_slice(&prefix);
         hmac_message.extend_from_slice(&salt);
         hmac_message.extend_from_slice(&hkdf_salt);
+        hmac_message.extend_from_slice(&kdf_bytes);
         hmac_message.extend_from_slice(&nonce);
         hmac_message.extend_from_slice(&verification_hash);
         let hmac_tag = hmac_sha3_256(hmac_key.as_ref(), &hmac_message)?;
@@ -135,6 +147,7 @@ pub fn encrypt_file(
         dest.write_all(&encoded_prefix)?;
         dest.write_all(&encoded_salt)?;
         dest.write_all(&encoded_hkdf_salt)?;
+        dest.write_all(&encoded_kdf)?;
         dest.write_all(&encoded_nonce)?;
         dest.write_all(&encoded_key_hash)?;
         dest.write_all(&encoded_hmac_tag)?;
@@ -177,6 +190,7 @@ pub fn decrypt_file(
     let min_header_size = HEADER_PREFIX_ENCODED_SIZE
         + rep_encoded_size(ARGON2_SALT_SIZE)
         + rep_encoded_size(HKDF_SALT_SIZE)
+        + rep_encoded_size(KDF_PARAMS_SIZE)
         + rep_encoded_size(NONCE_SIZE)
         + rep_encoded_size(ENCRYPTION_KEY_SIZE)
         + rep_encoded_size(HMAC_TAG_SIZE);
@@ -186,6 +200,7 @@ pub fn decrypt_file(
 
     let mut encoded_salt = vec![0u8; rep_encoded_size(ARGON2_SALT_SIZE)];
     let mut encoded_hkdf_salt = vec![0u8; rep_encoded_size(HKDF_SALT_SIZE)];
+    let mut encoded_kdf = vec![0u8; rep_encoded_size(KDF_PARAMS_SIZE)];
     let mut encoded_nonce = vec![0u8; rep_encoded_size(NONCE_SIZE)];
     let mut encoded_key_hash = vec![0u8; rep_encoded_size(ENCRYPTION_KEY_SIZE)];
     let mut encoded_hmac_tag = vec![0u8; rep_encoded_size(HMAC_TAG_SIZE)];
@@ -195,6 +210,9 @@ pub fn decrypt_file(
         .map_err(|_| CryptoError::CryptoOperation(ERR_FILE_TOO_SHORT.to_string()))?;
     encrypted_file
         .read_exact(&mut encoded_hkdf_salt)
+        .map_err(|_| CryptoError::CryptoOperation(ERR_FILE_TOO_SHORT.to_string()))?;
+    encrypted_file
+        .read_exact(&mut encoded_kdf)
         .map_err(|_| CryptoError::CryptoOperation(ERR_FILE_TOO_SHORT.to_string()))?;
     encrypted_file
         .read_exact(&mut encoded_nonce)
@@ -208,6 +226,7 @@ pub fn decrypt_file(
 
     let bytes_after_prefix = encoded_salt.len()
         + encoded_hkdf_salt.len()
+        + encoded_kdf.len()
         + encoded_nonce.len()
         + encoded_key_hash.len()
         + encoded_hmac_tag.len();
@@ -215,19 +234,27 @@ pub fn decrypt_file(
 
     let salt = rep_decode_exact(&encoded_salt, ARGON2_SALT_SIZE)?;
     let hkdf_salt = rep_decode_exact(&encoded_hkdf_salt, HKDF_SALT_SIZE)?;
+    let kdf_bytes = rep_decode_exact(&encoded_kdf, KDF_PARAMS_SIZE)?;
+    let kdf_params = KdfParams::from_bytes(kdf_bytes.as_slice().try_into()?)?;
     let nonce = rep_decode_exact(&encoded_nonce, NONCE_SIZE)?;
     let verification_hash = rep_decode_exact(&encoded_key_hash, ENCRYPTION_KEY_SIZE)?;
     let hmac_tag = rep_decode_exact(&encoded_hmac_tag, HMAC_TAG_SIZE)?;
 
     on_progress("Deriving key\u{2026}");
-    let (encryption_key, hmac_key) = derive_keys(passphrase, &salt, &hkdf_salt)?;
+    let (encryption_key, hmac_key) = derive_keys(passphrase, &salt, &hkdf_salt, &kdf_params)?;
 
     let mut hmac_message = Vec::with_capacity(
-        prefix_bytes.len() + salt.len() + hkdf_salt.len() + nonce.len() + verification_hash.len(),
+        prefix_bytes.len()
+            + salt.len()
+            + hkdf_salt.len()
+            + KDF_PARAMS_SIZE
+            + nonce.len()
+            + verification_hash.len(),
     );
     hmac_message.extend_from_slice(&prefix_bytes);
     hmac_message.extend_from_slice(&salt);
     hmac_message.extend_from_slice(&hkdf_salt);
+    hmac_message.extend_from_slice(&kdf_bytes);
     hmac_message.extend_from_slice(&nonce);
     hmac_message.extend_from_slice(&verification_hash);
 

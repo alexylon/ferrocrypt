@@ -1,0 +1,114 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig-dev libfreetype-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev rpm
+
+      - name: Install cargo-bundle
+        run: cargo install cargo-bundle
+
+      # ── CLI (workspace member) ──────────────────────────────────────────
+
+      - name: Build CLI
+        run: cargo build --release --target ${{ matrix.target }} -p ferrocrypt-cli
+
+      # ── Desktop app (excluded from workspace) ──────────────────────────
+
+      - name: Bundle Desktop
+        working-directory: ferrocrypt-desktop
+        run: cargo bundle --release --target ${{ matrix.target }}
+
+      - name: Bundle Desktop (rpm)
+        if: runner.os == 'Linux'
+        working-directory: ferrocrypt-desktop
+        run: cargo bundle --release --target ${{ matrix.target }} --format rpm
+
+      # ── Package ─────────────────────────────────────────────────────────
+
+      - name: Package CLI (unix)
+        if: runner.os != 'Windows'
+        run: |
+          tar czf ferrocrypt-cli-${{ matrix.target }}.tar.gz \
+            -C target/${{ matrix.target }}/release ferrocrypt
+
+      - name: Package CLI (windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          7z a ferrocrypt-cli-${{ matrix.target }}.zip \
+            ./target/${{ matrix.target }}/release/ferrocrypt.exe
+
+      - name: Package Desktop (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cd target/${{ matrix.target }}/release/bundle/osx
+          zip -r ../../../../../FerroCrypt-${{ matrix.target }}.zip FerroCrypt.app
+
+      - name: Package Desktop (linux)
+        if: runner.os == 'Linux'
+        run: |
+          cp target/${{ matrix.target }}/release/bundle/deb/*.deb FerroCrypt-${{ matrix.target }}.deb
+          cp target/${{ matrix.target }}/release/bundle/rpm/*.rpm FerroCrypt-${{ matrix.target }}.rpm
+
+      - name: Package Desktop (windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: cp target/${{ matrix.target }}/release/bundle/msi/*.msi FerroCrypt-${{ matrix.target }}.msi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ferrocrypt-${{ matrix.target }}
+          path: |
+            ferrocrypt-cli-${{ matrix.target }}.*
+            FerroCrypt-${{ matrix.target }}.*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            ferrocrypt-cli-*
+            FerroCrypt-*

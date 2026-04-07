@@ -1,4 +1,5 @@
 use std::cmp;
+use std::ffi::OsStr;
 use std::io::{self, Read, Write};
 use std::path::Path;
 
@@ -92,16 +93,16 @@ pub const NONCE_SIZE: usize = 19;
 // ─── Error messages ───────────────────────────────────────────────────────
 pub const ERR_FILE_TOO_SHORT: &str = "File is too short or corrupted";
 
-pub fn get_file_stem_to_string(filename: impl AsRef<Path>) -> Result<String, CryptoError> {
-    let file_stem_string = filename
-        .as_ref()
+pub fn get_file_stem(filename: &Path) -> Result<&OsStr, CryptoError> {
+    filename
         .file_stem()
-        .ok_or_else(|| CryptoError::InvalidInput("Cannot get file stem".to_string()))?
-        .to_str()
-        .ok_or_else(|| CryptoError::InvalidInput("Cannot convert file stem to &str".to_string()))?
-        .to_string();
+        .ok_or_else(|| CryptoError::InvalidInput("Cannot get file stem".to_string()))
+}
 
-    Ok(file_stem_string)
+pub fn get_file_stem_to_string(filename: impl AsRef<Path>) -> Result<String, CryptoError> {
+    Ok(get_file_stem(filename.as_ref())?
+        .to_string_lossy()
+        .into_owned())
 }
 
 pub fn sha3_32_hash(data: &[u8]) -> Result<[u8; 32], CryptoError> {

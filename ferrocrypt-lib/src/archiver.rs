@@ -1,6 +1,7 @@
+use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use crate::CryptoError;
 
@@ -41,9 +42,6 @@ pub fn archive<W: Write>(
         let file_name = input_path
             .file_name()
             .ok_or_else(|| CryptoError::InvalidInput("Cannot get file name".to_string()))?;
-        let file_name_str = file_name.to_str().ok_or_else(|| {
-            CryptoError::InvalidInput("Cannot convert file name to &str".to_string())
-        })?;
 
         let metadata = fs::metadata(input_path)?;
         let mut header = tar::Header::new_gnu();
@@ -51,27 +49,18 @@ pub fn archive<W: Write>(
         header.set_mode(0o755);
         header.set_cksum();
         let mut file = File::open(input_path)?;
-        builder.append_data(&mut header, file_name_str, &mut file)?;
+        builder.append_data(&mut header, Path::new(file_name), &mut file)?;
 
-        input_path
-            .file_stem()
-            .ok_or_else(|| CryptoError::InvalidInput("Cannot get file stem".to_string()))?
-            .to_str()
-            .ok_or_else(|| {
-                CryptoError::InvalidInput("Cannot convert file stem to &str".to_string())
-            })?
-            .to_string()
+        crate::common::get_file_stem(input_path)?
+            .to_string_lossy()
+            .into_owned()
     } else {
         let dir_name = input_path
             .file_name()
-            .ok_or_else(|| CryptoError::InvalidInput("Cannot get directory name".to_string()))?
-            .to_str()
-            .ok_or_else(|| {
-                CryptoError::InvalidInput("Cannot convert directory name to &str".to_string())
-            })?;
+            .ok_or_else(|| CryptoError::InvalidInput("Cannot get directory name".to_string()))?;
 
-        builder.append_dir_all(dir_name, input_path)?;
-        dir_name.to_string()
+        builder.append_dir_all(Path::new(dir_name), input_path)?;
+        dir_name.to_string_lossy().into_owned()
     };
 
     let writer = builder.into_inner()?;
@@ -85,8 +74,8 @@ pub fn archive<W: Write>(
 /// Returns the output path as a string.
 pub fn unarchive<R: Read>(reader: R, output_dir: &Path) -> Result<String, CryptoError> {
     let mut archive = tar::Archive::new(reader);
-    let mut first_entry_root: Option<String> = None;
-    let mut checked_roots: Vec<String> = Vec::new();
+    let mut first_entry_root: Option<PathBuf> = None;
+    let mut checked_roots: Vec<OsString> = Vec::new();
 
     let extract_result = extract_entries(
         &mut archive,
@@ -99,23 +88,24 @@ pub fn unarchive<R: Read>(reader: R, output_dir: &Path) -> Result<String, Crypto
         for root_name in &checked_roots {
             let current = output_dir.join(root_name);
             if current.exists() {
-                let _ = fs::rename(
-                    &current,
-                    output_dir.join(format!("{}.incomplete", root_name)),
-                );
+                let mut incomplete_name = root_name.clone();
+                incomplete_name.push(".incomplete");
+                let _ = fs::rename(&current, output_dir.join(incomplete_name));
             }
         }
         return Err(e);
     }
 
-    first_entry_root.ok_or_else(|| CryptoError::InvalidInput("Empty archive".to_string()))
+    first_entry_root
+        .map(|path| path.display().to_string())
+        .ok_or_else(|| CryptoError::InvalidInput("Empty archive".to_string()))
 }
 
 fn extract_entries<R: Read>(
     archive: &mut tar::Archive<R>,
     output_dir: &Path,
-    first_entry_root: &mut Option<String>,
-    checked_roots: &mut Vec<String>,
+    first_entry_root: &mut Option<PathBuf>,
+    checked_roots: &mut Vec<OsString>,
 ) -> Result<(), CryptoError> {
     for entry_result in archive.entries()? {
         let mut entry = entry_result?;
@@ -126,11 +116,7 @@ fn extract_entries<R: Read>(
             .components()
             .next()
             .ok_or_else(|| CryptoError::InvalidInput("Empty archive entry".to_string()))?;
-        let root_name = first_component
-            .as_os_str()
-            .to_str()
-            .ok_or_else(|| CryptoError::InvalidInput("Invalid path in archive".to_string()))?
-            .to_string();
+        let root_name = first_component.as_os_str().to_os_string();
 
         if !checked_roots.contains(&root_name) {
             let full_path = output_dir.join(&root_name);
@@ -141,7 +127,7 @@ fn extract_entries<R: Read>(
                 )));
             }
             if first_entry_root.is_none() {
-                *first_entry_root = Some(full_path.display().to_string());
+                *first_entry_root = Some(full_path.clone());
             }
             checked_roots.push(root_name);
         }

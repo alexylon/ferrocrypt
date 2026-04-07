@@ -46,7 +46,7 @@ Every `.fcr` file starts with a header followed by the encrypted payload. The he
 - Streaming encryption — plaintext never touches disk as an intermediate file
 - Passphrases handled via the `secrecy` crate (zeroized on drop, hidden from Debug/Display)
 - Triple-replicated headers with majority-vote decoding for error correction. The header is the most critical part of an encrypted file — it holds the salts, nonces, and key material needed to begin decryption. Unlike the ciphertext, which is protected per-chunk by Poly1305 tags, a single corrupted header byte would make the entire file unrecoverable. Triple replication ensures that up to 33% of the stored header bytes can be corrupted and still be automatically corrected without data loss. Triple replication was chosen over Reed-Solomon because each header field must be decoded independently, making RS degenerate to identical copies (k=1) with added Galois field overhead and no correction advantage.
-- Symlink inputs are rejected; directory encryption does not follow symlinks — prevents unintended inclusion of files outside the selected tree
+- Symlink inputs are rejected; directory encryption does not follow symlinks — prevents unintended inclusion of files outside the selected tree. Symlinks inside directories are not preserved through encrypt/decrypt.
 - Failed encryptions clean up partial `.fcr` output files; failed decryptions rename partial output with `.incomplete` suffix
 - Versioned file format with magic bytes — corrupted or incompatible files produce clear errors
 

@@ -500,10 +500,7 @@ fn test_special_characters_in_filename() -> Result<(), CryptoError> {
     symmetric_encryption(&input_file, &encrypt_dir, &passphrase, None, |_| {})?;
 
     symmetric_encryption(
-        encrypt_dir
-            .join("file-with_special.chars.fcr")
-            .to_str()
-            .unwrap(),
+        &encrypt_dir.join("file-with_special.chars.fcr"),
         &decrypt_dir,
         &passphrase,
         None,

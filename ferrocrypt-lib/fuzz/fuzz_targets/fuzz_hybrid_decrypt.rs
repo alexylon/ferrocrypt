@@ -14,7 +14,7 @@ fn key_dir() -> &'static std::path::Path {
     DIR.get_or_init(|| {
         let dir = tempfile::tempdir().unwrap();
         let pass = SecretString::from("fuzz_key".to_string());
-        generate_key_pair(&pass, dir.path().to_str().unwrap(), |_| {}).unwrap();
+        generate_key_pair(&pass, dir.path(), |_| {}).unwrap();
         dir
     })
     .path()
@@ -35,9 +35,9 @@ fuzz_target!(|data: &[u8]| {
 
     let passphrase = SecretString::from("fuzz_key".to_string());
     let _ = hybrid_encryption(
-        input_path.to_str().unwrap(),
-        output_dir.to_str().unwrap(),
-        priv_key.to_str().unwrap(),
+        &input_path,
+        &output_dir,
+        &priv_key,
         &passphrase,
         None,
         |_| {},

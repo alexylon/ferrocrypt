@@ -18,11 +18,5 @@ fuzz_target!(|data: &[u8]| {
     drop(f);
 
     let passphrase = SecretString::from("fuzz".to_string());
-    let _ = symmetric_encryption(
-        input_path.to_str().unwrap(),
-        output_dir.to_str().unwrap(),
-        &passphrase,
-        None,
-        |_| {},
-    );
+    let _ = symmetric_encryption(&input_path, &output_dir, &passphrase, None, |_| {});
 });

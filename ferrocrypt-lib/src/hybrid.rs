@@ -63,6 +63,17 @@ pub fn encrypt_file(
     let mut hmac_key = [0u8; HMAC_KEY_SIZE];
     OsRng.fill_bytes(&mut hmac_key);
 
+    let output_path = match output_file {
+        Some(path) => path.to_path_buf(),
+        None => Path::new(output_dir).join(format!(
+            "{}.{}",
+            file_stem,
+            crate::format::ENCRYPTED_EXTENSION
+        )),
+    };
+
+    let mut file_created = false;
+
     let result = (|| -> Result<String, CryptoError> {
         let cipher = XChaCha20Poly1305::new(&encryption_key);
 
@@ -76,25 +87,12 @@ pub fn encrypt_file(
         let recipient_public = read_public_key(&public_key_path)?;
         let envelope = seal_envelope(&combined_key, &recipient_public)?;
 
-        let output_path = match output_file {
-            Some(path) => path.to_path_buf(),
-            None => Path::new(output_dir).join(format!(
-                "{}.{}",
-                file_stem,
-                crate::format::ENCRYPTED_EXTENSION
-            )),
-        };
         if output_path.exists() {
             return Err(CryptoError::InvalidInput(format!(
                 "Output file already exists: {}",
                 output_path.display()
             )));
         }
-        let mut dest = OpenOptions::new()
-            .write(true)
-            .append(true)
-            .create_new(true)
-            .open(&output_path)?;
 
         let encoded_envelope = rep_encode(&envelope);
         let encoded_nonce = rep_encode(&nonce);
@@ -115,6 +113,13 @@ pub fn encrypt_file(
         let hmac_tag = hmac_sha3_256(&hmac_key, &hmac_message)?;
         let encoded_hmac_tag = rep_encode(&hmac_tag);
 
+        let mut dest = OpenOptions::new()
+            .write(true)
+            .append(true)
+            .create_new(true)
+            .open(&output_path)?;
+        file_created = true;
+
         dest.write_all(&encoded_prefix)?;
         dest.write_all(&encoded_envelope)?;
         dest.write_all(&encoded_nonce)?;
@@ -134,6 +139,10 @@ pub fn encrypt_file(
 
         Ok(msg)
     })();
+
+    if result.is_err() && file_created {
+        let _ = fs::remove_file(&output_path);
+    }
 
     encryption_key.zeroize();
     hmac_key.zeroize();

@@ -2125,6 +2125,170 @@ fn test_different_keys_different_fingerprints() -> Result<(), CryptoError> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn test_symmetric_encrypt_cleans_up_on_failure() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("sym_encrypt_cleanup");
+    let real_file = test_dir.join("real.txt");
+    let symlink_path = test_dir.join("link.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    fs::create_dir_all(&encrypt_dir)?;
+    create_test_file(&real_file, "target content");
+    std::os::unix::fs::symlink(&real_file, &symlink_path).unwrap();
+
+    let passphrase = SecretString::from("cleanup_pass".to_string());
+    let result = symmetric_encryption(
+        symlink_path.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        &passphrase,
+        None,
+        |_| {},
+    );
+    assert!(result.is_err());
+
+    let would_be_output = encrypt_dir.join(format!("link.{}", ENCRYPTED_EXTENSION));
+    assert!(
+        !would_be_output.exists(),
+        "partial .fcr file should have been cleaned up"
+    );
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn test_hybrid_encrypt_cleans_up_on_failure() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("hyb_encrypt_cleanup");
+    let keys_dir = test_dir.join("keys");
+    let real_file = test_dir.join("real.txt");
+    let symlink_path = test_dir.join("link.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    fs::create_dir_all(&keys_dir)?;
+    fs::create_dir_all(&encrypt_dir)?;
+    create_test_file(&real_file, "target content");
+    std::os::unix::fs::symlink(&real_file, &symlink_path).unwrap();
+
+    let key_pass = SecretString::from("cleanup_key".to_string());
+    generate_key_pair(&key_pass, keys_dir.to_str().unwrap(), |_| {})?;
+
+    let result = hybrid_encryption(
+        symlink_path.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        keys_dir.join("public.key").to_str().unwrap(),
+        &key_pass,
+        None,
+        |_| {},
+    );
+    assert!(result.is_err());
+
+    let would_be_output = encrypt_dir.join(format!("link.{}", ENCRYPTED_EXTENSION));
+    assert!(
+        !would_be_output.exists(),
+        "partial .fcr file should have been cleaned up"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_symmetric_decrypt_marks_incomplete_file() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("sym_decrypt_incomplete_file");
+    let input_file = test_dir.join("bigfile.bin");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    // 200 KB file — spans multiple 64 KB encryption chunks
+    let big_data: Vec<u8> = (0..204_800u32).map(|i| (i % 256) as u8).collect();
+    fs::write(&input_file, &big_data)?;
+
+    let passphrase = SecretString::from("incomplete_pass".to_string());
+    symmetric_encryption(
+        input_file.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        &passphrase,
+        None,
+        |_| {},
+    )?;
+
+    let encrypted_path = encrypt_dir.join("bigfile.fcr");
+    let mut data = fs::read(&encrypted_path)?;
+    // Corrupt a byte in a late chunk (well past the first 64 KB)
+    let flip_offset = data.len() - 50;
+    data[flip_offset] ^= 0xFF;
+    fs::write(&encrypted_path, &data)?;
+
+    let result = symmetric_encryption(
+        encrypted_path.to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &passphrase,
+        None,
+        |_| {},
+    );
+    assert!(result.is_err());
+
+    let incomplete_path = decrypt_dir.join("bigfile.bin.incomplete");
+    assert!(
+        incomplete_path.exists(),
+        "partial output should have been renamed to .incomplete"
+    );
+    // Original name should not exist
+    assert!(!decrypt_dir.join("bigfile.bin").exists());
+
+    Ok(())
+}
+
+#[test]
+fn test_symmetric_decrypt_marks_incomplete_directory() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("sym_decrypt_incomplete_dir");
+    let input_dir = test_dir.join("mydir");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&input_dir)?;
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    create_test_file(&input_dir.join("small.txt"), "small file content");
+    // Large file to span multiple chunks
+    let big_data: Vec<u8> = (0..204_800u32).map(|i| (i % 256) as u8).collect();
+    fs::write(input_dir.join("bigfile.bin"), &big_data)?;
+
+    let passphrase = SecretString::from("incomplete_dir_pass".to_string());
+    symmetric_encryption(
+        input_dir.to_str().unwrap(),
+        encrypt_dir.to_str().unwrap(),
+        &passphrase,
+        None,
+        |_| {},
+    )?;
+
+    let encrypted_path = encrypt_dir.join("mydir.fcr");
+    let mut data = fs::read(&encrypted_path)?;
+    let flip_offset = data.len() - 50;
+    data[flip_offset] ^= 0xFF;
+    fs::write(&encrypted_path, &data)?;
+
+    let result = symmetric_encryption(
+        encrypted_path.to_str().unwrap(),
+        decrypt_dir.to_str().unwrap(),
+        &passphrase,
+        None,
+        |_| {},
+    );
+    assert!(result.is_err());
+
+    let incomplete_path = decrypt_dir.join("mydir.incomplete");
+    assert!(
+        incomplete_path.exists(),
+        "partial directory should have been renamed to .incomplete"
+    );
+    assert!(incomplete_path.is_dir());
+    assert!(!decrypt_dir.join("mydir").exists());
+
+    Ok(())
+}
+
 #[ctor::dtor]
 fn cleanup() {
     cleanup_test_workspace();

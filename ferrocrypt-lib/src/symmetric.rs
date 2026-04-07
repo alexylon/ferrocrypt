@@ -1,4 +1,4 @@
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::Path;
 
@@ -96,52 +96,61 @@ pub fn encrypt_file(
             output_path.display()
         )));
     }
-    let mut dest = OpenOptions::new()
-        .write(true)
-        .append(true)
-        .create_new(true)
-        .open(&output_path)?;
 
-    let encoded_salt = rep_encode(&salt);
-    let encoded_hkdf_salt = rep_encode(&hkdf_salt);
-    let encoded_key_hash = rep_encode(&verification_hash);
+    let encrypt_result: Result<(), CryptoError> = (|| {
+        let mut dest = OpenOptions::new()
+            .write(true)
+            .append(true)
+            .create_new(true)
+            .open(&output_path)?;
 
-    let mut nonce = [0u8; NONCE_SIZE];
-    OsRng.fill_bytes(&mut nonce);
-    let encoded_nonce = rep_encode(&nonce);
+        let encoded_salt = rep_encode(&salt);
+        let encoded_hkdf_salt = rep_encode(&hkdf_salt);
+        let encoded_key_hash = rep_encode(&verification_hash);
 
-    let header_len = (HEADER_PREFIX_ENCODED_SIZE
-        + encoded_salt.len()
-        + encoded_hkdf_salt.len()
-        + encoded_nonce.len()
-        + encoded_key_hash.len()
-        + rep_encoded_size(HMAC_TAG_SIZE)) as u16;
-    let prefix = format::build_header_prefix(format::TYPE_SYMMETRIC, 0, header_len);
-    let encoded_prefix = rep_encode(&prefix);
+        let mut nonce = [0u8; NONCE_SIZE];
+        OsRng.fill_bytes(&mut nonce);
+        let encoded_nonce = rep_encode(&nonce);
 
-    let stream_encryptor = stream::EncryptorBE32::from_aead(cipher, nonce.as_ref().into());
+        let header_len = (HEADER_PREFIX_ENCODED_SIZE
+            + encoded_salt.len()
+            + encoded_hkdf_salt.len()
+            + encoded_nonce.len()
+            + encoded_key_hash.len()
+            + rep_encoded_size(HMAC_TAG_SIZE)) as u16;
+        let prefix = format::build_header_prefix(format::TYPE_SYMMETRIC, 0, header_len);
+        let encoded_prefix = rep_encode(&prefix);
 
-    let mut hmac_message = Vec::with_capacity(
-        prefix.len() + ARGON2_SALT_SIZE + HKDF_SALT_SIZE + NONCE_SIZE + ENCRYPTION_KEY_SIZE,
-    );
-    hmac_message.extend_from_slice(&prefix);
-    hmac_message.extend_from_slice(&salt);
-    hmac_message.extend_from_slice(&hkdf_salt);
-    hmac_message.extend_from_slice(&nonce);
-    hmac_message.extend_from_slice(&verification_hash);
-    let hmac_tag = hmac_sha3_256(hmac_key.as_ref(), &hmac_message)?;
-    let encoded_hmac_tag = rep_encode(&hmac_tag);
+        let stream_encryptor = stream::EncryptorBE32::from_aead(cipher, nonce.as_ref().into());
 
-    dest.write_all(&encoded_prefix)?;
-    dest.write_all(&encoded_salt)?;
-    dest.write_all(&encoded_hkdf_salt)?;
-    dest.write_all(&encoded_nonce)?;
-    dest.write_all(&encoded_key_hash)?;
-    dest.write_all(&encoded_hmac_tag)?;
+        let mut hmac_message = Vec::with_capacity(
+            prefix.len() + ARGON2_SALT_SIZE + HKDF_SALT_SIZE + NONCE_SIZE + ENCRYPTION_KEY_SIZE,
+        );
+        hmac_message.extend_from_slice(&prefix);
+        hmac_message.extend_from_slice(&salt);
+        hmac_message.extend_from_slice(&hkdf_salt);
+        hmac_message.extend_from_slice(&nonce);
+        hmac_message.extend_from_slice(&verification_hash);
+        let hmac_tag = hmac_sha3_256(hmac_key.as_ref(), &hmac_message)?;
+        let encoded_hmac_tag = rep_encode(&hmac_tag);
 
-    let encrypt_writer = EncryptWriter::new(stream_encryptor, dest);
-    let (_, encrypt_writer) = archiver::archive(input_path, encrypt_writer)?;
-    encrypt_writer.finish()?;
+        dest.write_all(&encoded_prefix)?;
+        dest.write_all(&encoded_salt)?;
+        dest.write_all(&encoded_hkdf_salt)?;
+        dest.write_all(&encoded_nonce)?;
+        dest.write_all(&encoded_key_hash)?;
+        dest.write_all(&encoded_hmac_tag)?;
+
+        let encrypt_writer = EncryptWriter::new(stream_encryptor, dest);
+        let (_, encrypt_writer) = archiver::archive(input_path, encrypt_writer)?;
+        encrypt_writer.finish()?;
+        Ok(())
+    })();
+
+    if let Err(e) = encrypt_result {
+        let _ = fs::remove_file(&output_path);
+        return Err(e);
+    }
 
     let result = format!(
         "Encrypted to {} in {}",

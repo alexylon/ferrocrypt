@@ -81,12 +81,44 @@ pub fn archive<W: Write>(
 
 /// Extracts a TAR archive from `reader` into the specified directory.
 /// Checks that the output path does not already exist before extracting.
+/// On failure, any partially extracted roots are renamed with an `.incomplete`
+/// suffix so the user can identify them.
 /// Returns the output path as a string.
 pub fn unarchive<R: Read>(reader: R, output_dir: &str) -> Result<String, CryptoError> {
+    let output_dir_path = Path::new(output_dir);
     let mut archive = tar::Archive::new(reader);
     let mut first_entry_root: Option<String> = None;
     let mut checked_roots: Vec<String> = Vec::new();
 
+    let extract_result = extract_entries(
+        &mut archive,
+        output_dir,
+        &mut first_entry_root,
+        &mut checked_roots,
+    );
+
+    if let Err(e) = extract_result {
+        for root_name in &checked_roots {
+            let current = output_dir_path.join(root_name);
+            if current.exists() {
+                let _ = fs::rename(
+                    &current,
+                    output_dir_path.join(format!("{}.incomplete", root_name)),
+                );
+            }
+        }
+        return Err(e);
+    }
+
+    first_entry_root.ok_or_else(|| CryptoError::InvalidInput("Empty archive".to_string()))
+}
+
+fn extract_entries<R: Read>(
+    archive: &mut tar::Archive<R>,
+    output_dir: &str,
+    first_entry_root: &mut Option<String>,
+    checked_roots: &mut Vec<String>,
+) -> Result<(), CryptoError> {
     for entry_result in archive.entries()? {
         let mut entry = entry_result?;
         let path = entry.path()?.to_path_buf();
@@ -111,7 +143,7 @@ pub fn unarchive<R: Read>(reader: R, output_dir: &str) -> Result<String, CryptoE
                 )));
             }
             if first_entry_root.is_none() {
-                first_entry_root = Some(full_path);
+                *first_entry_root = Some(full_path);
             }
             checked_roots.push(root_name);
         }
@@ -133,8 +165,7 @@ pub fn unarchive<R: Read>(reader: R, output_dir: &str) -> Result<String, CryptoE
             io::copy(&mut entry, &mut outfile)?;
         }
     }
-
-    first_entry_root.ok_or_else(|| CryptoError::InvalidInput("Empty archive".to_string()))
+    Ok(())
 }
 
 #[cfg(test)]

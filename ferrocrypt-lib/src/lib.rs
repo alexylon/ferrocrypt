@@ -170,9 +170,10 @@ pub fn validate_secret_key_file(key_file: impl AsRef<Path>) -> Result<(), Crypto
 }
 
 /// Returns the default encrypted filename for a given input path (e.g. `"secrets.fcr"`).
+/// For files, uses the stem (without extension). For directories, uses the full name.
 pub fn default_encrypted_filename(input_path: impl AsRef<Path>) -> Result<String, CryptoError> {
-    let stem = common::get_file_stem_to_string(input_path)?;
-    Ok(format!("{}.{}", stem, ENCRYPTED_EXTENSION))
+    let base_name = common::get_encryption_base_name(input_path)?;
+    Ok(format!("{}.{}", base_name, ENCRYPTED_EXTENSION))
 }
 
 fn validate_input_path(input_path: &Path) -> Result<(), CryptoError> {
@@ -220,11 +221,7 @@ pub fn symmetric_encryption(
     let input = input_path.as_ref();
     let output = output_dir.as_ref();
     validate_input_path(input)?;
-    if detect_encryption_mode(input).is_some()
-        || input
-            .extension()
-            .is_some_and(|ext| ext == format::ENCRYPTED_EXTENSION)
-    {
+    if detect_encryption_mode(input).is_some() {
         symmetric::decrypt_file(input, output, password, &on_progress)
     } else {
         symmetric::encrypt_file(input, output, password, save_as, &on_progress)
@@ -278,11 +275,7 @@ pub fn hybrid_encryption(
     let output = output_dir.as_ref();
     let key = key_file.as_ref();
     validate_input_path(input)?;
-    if detect_encryption_mode(input).is_some()
-        || input
-            .extension()
-            .is_some_and(|ext| ext == format::ENCRYPTED_EXTENSION)
-    {
+    if detect_encryption_mode(input).is_some() {
         hybrid::decrypt_file(input, output, key, passphrase, &on_progress)
     } else {
         hybrid::encrypt_file(input, output, key, save_as, &on_progress)

@@ -99,10 +99,20 @@ pub fn get_file_stem(filename: &Path) -> Result<&OsStr, CryptoError> {
         .ok_or_else(|| CryptoError::InvalidInput("Cannot get file stem".to_string()))
 }
 
-pub fn get_file_stem_to_string(filename: impl AsRef<Path>) -> Result<String, CryptoError> {
-    Ok(get_file_stem(filename.as_ref())?
-        .to_string_lossy()
-        .into_owned())
+/// Returns the base name for building the default encrypted output filename.
+/// For regular files, returns the file stem (without extension).
+/// For directories, returns the full directory name (preserving dots like `photos.v1`).
+pub fn get_encryption_base_name(path: impl AsRef<Path>) -> Result<String, CryptoError> {
+    let path = path.as_ref();
+    if path.is_dir() {
+        Ok(path
+            .file_name()
+            .ok_or_else(|| CryptoError::InvalidInput("Cannot get directory name".to_string()))?
+            .to_string_lossy()
+            .into_owned())
+    } else {
+        Ok(get_file_stem(path)?.to_string_lossy().into_owned())
+    }
 }
 
 pub fn sha3_32_hash(data: &[u8]) -> Result<[u8; 32], CryptoError> {
@@ -311,15 +321,24 @@ mod tests {
     use secrecy::SecretString;
 
     #[test]
-    fn test_get_file_stem() {
-        let stem = get_file_stem_to_string("path/to/file.txt").unwrap();
+    fn test_get_encryption_base_name_file() {
+        let stem = get_encryption_base_name("path/to/file.txt").unwrap();
         assert_eq!(stem, "file");
     }
 
     #[test]
-    fn test_get_file_stem_no_extension() {
-        let stem = get_file_stem_to_string("path/to/file").unwrap();
+    fn test_get_encryption_base_name_no_extension() {
+        let stem = get_encryption_base_name("path/to/file").unwrap();
         assert_eq!(stem, "file");
+    }
+
+    #[test]
+    fn test_get_encryption_base_name_dotted_directory() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dotted_dir = tmp.path().join("photos.v1");
+        std::fs::create_dir(&dotted_dir).unwrap();
+        let name = get_encryption_base_name(&dotted_dir).unwrap();
+        assert_eq!(name, "photos.v1");
     }
 
     #[test]

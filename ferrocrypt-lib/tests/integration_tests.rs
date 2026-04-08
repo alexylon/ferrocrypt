@@ -855,43 +855,66 @@ fn test_nonexistent_input_path_encrypt() {
 }
 
 #[test]
-fn test_truncated_symmetric_file() {
+fn test_truncated_symmetric_file() -> Result<(), CryptoError> {
     let test_dir = setup_test_dir("truncated_symmetric");
+    let encrypt_dir = test_dir.join("encrypted");
     let decrypt_dir = test_dir.join("decrypted");
-    fs::create_dir_all(&decrypt_dir).unwrap();
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
 
-    // Write a tiny file that's too short to be a valid .fcr
-    let truncated_file = test_dir.join("truncated.fcr");
-    fs::write(&truncated_file, b"short").unwrap();
-
+    // Encrypt a real file, then truncate so the header prefix is intact
+    // (magic bytes detected) but the rest of the header is missing.
+    let input_file = test_dir.join("data.txt");
+    create_test_file(&input_file, "truncation test data");
     let passphrase = SecretString::from("test".to_string());
 
-    let result = symmetric_encryption(&truncated_file, &decrypt_dir, &passphrase, None, |_| {});
+    symmetric_encryption(&input_file, &encrypt_dir, &passphrase, None, |_| {})?;
 
+    let encrypted_path = encrypt_dir.join("data.fcr");
+    let data = fs::read(&encrypted_path)?;
+
+    // Keep only 30 bytes: enough for the 27-byte encoded prefix but not a full header
+    let truncated = &data[..30];
+    fs::write(&encrypted_path, truncated)?;
+
+    let result = symmetric_encryption(&encrypted_path, &decrypt_dir, &passphrase, None, |_| {});
     assert!(result.is_err());
+
+    Ok(())
 }
 
 #[test]
 fn test_truncated_hybrid_file() -> Result<(), CryptoError> {
     let test_dir = setup_test_dir("truncated_hybrid");
     let keys_dir = test_dir.join("keys");
+    let encrypt_dir = test_dir.join("encrypted");
     let decrypt_dir = test_dir.join("decrypted");
     fs::create_dir_all(&keys_dir)?;
+    fs::create_dir_all(&encrypt_dir)?;
     fs::create_dir_all(&decrypt_dir)?;
 
     let key_passphrase = SecretString::from("pass".to_string());
     generate_key_pair(&key_passphrase, &keys_dir, |_| {})?;
 
-    // Write a tiny file that's too short to be a valid .fcr
-    let truncated_file = test_dir.join("truncated.fcr");
-    fs::write(&truncated_file, b"short").unwrap();
+    let public_key = keys_dir.join("public.key");
+    let secret_key = keys_dir.join("private.key");
 
-    let secret_key_path = keys_dir.join("private.key");
+    // Encrypt a real file, then truncate so the header prefix is intact
+    // (magic bytes detected) but the rest of the header is missing.
+    let input_file = test_dir.join("data.txt");
+    create_test_file(&input_file, "truncation test");
+    let empty_pass = SecretString::from("".to_string());
+    hybrid_encryption(&input_file, &encrypt_dir, &public_key, &empty_pass, None, |_| {})?;
+
+    let encrypted_path = encrypt_dir.join("data.fcr");
+    let data = fs::read(&encrypted_path)?;
+    let truncated = &data[..30];
+    fs::write(&encrypted_path, truncated)?;
 
     let result = hybrid_encryption(
-        &truncated_file,
+        &encrypted_path,
         &decrypt_dir,
-        &secret_key_path,
+        &secret_key,
         &key_passphrase,
         None,
         |_| {},
@@ -1163,25 +1186,36 @@ fn test_hybrid_single_copy_corruption_recovery() -> Result<(), CryptoError> {
 }
 
 #[test]
-fn test_not_a_ferrocrypt_file() {
+fn test_non_ferrocrypt_fcr_file_can_be_encrypted() {
     let test_dir = setup_test_dir("not_ferrocrypt");
     let fake_file = test_dir.join("photo.fcr");
+    let encrypt_dir = test_dir.join("encrypted");
     let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&encrypt_dir).unwrap();
     fs::create_dir_all(&decrypt_dir).unwrap();
 
-    // A JPEG header renamed to .fcr (padded to exceed the replicated prefix size)
-    fs::write(&fake_file, b"\xFF\xD8\xFF\xE0fake jpeg data padding!!").unwrap();
+    // A JPEG header renamed to .fcr — routing by magic bytes only means
+    // this is treated as a normal file and can be encrypted.
+    let content = b"\xFF\xD8\xFF\xE0fake jpeg data padding!!";
+    fs::write(&fake_file, content).unwrap();
 
     let passphrase = SecretString::from("test".to_string());
-    let result = symmetric_encryption(&fake_file, &decrypt_dir, &passphrase, None, |_| {});
+    let result = symmetric_encryption(&fake_file, &encrypt_dir, &passphrase, None, |_| {});
+    assert!(
+        result.is_ok(),
+        "Expected encryption to succeed, got: {:?}",
+        result
+    );
 
-    assert!(result.is_err());
-    match result {
-        Err(CryptoError::CryptoOperation(msg)) => {
-            assert!(msg.contains("Not a valid FerroCrypt file"));
-        }
-        other => panic!("Expected 'Not a valid FerroCrypt file', got {:?}", other),
-    }
+    // Verify round-trip: decrypt the encrypted file and compare
+    let encrypted_path = encrypt_dir.join("photo.fcr");
+    assert!(encrypted_path.exists());
+
+    let result = symmetric_encryption(&encrypted_path, &decrypt_dir, &passphrase, None, |_| {});
+    assert!(result.is_ok());
+
+    let decrypted = fs::read(decrypt_dir.join("photo.fcr")).unwrap();
+    assert_eq!(decrypted, content);
 }
 
 #[test]
@@ -1452,36 +1486,64 @@ fn test_output_file_none_uses_default_name() -> Result<(), CryptoError> {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_symmetric_empty_file_rejected() {
+fn test_symmetric_empty_file_rejected() -> Result<(), CryptoError> {
     let test_dir = setup_test_dir("sym_empty_file");
+    let encrypt_dir = test_dir.join("encrypted");
     let decrypt_dir = test_dir.join("decrypted");
-    fs::create_dir_all(&decrypt_dir).unwrap();
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
 
-    let empty_file = test_dir.join("empty.fcr");
-    fs::write(&empty_file, b"").unwrap();
-
+    // Encrypt a real file, then replace its content with just the prefix
+    // (enough for magic-byte detection) but no actual header payload.
+    let input_file = test_dir.join("data.txt");
+    create_test_file(&input_file, "payload");
     let passphrase = SecretString::from("test".to_string());
-    let result = symmetric_encryption(&empty_file, &decrypt_dir, &passphrase, None, |_| {});
+
+    symmetric_encryption(&input_file, &encrypt_dir, &passphrase, None, |_| {})?;
+
+    let encrypted_path = encrypt_dir.join("data.fcr");
+    let data = fs::read(&encrypted_path)?;
+
+    // Keep only the 27-byte encoded prefix — enough for detection, no payload
+    let prefix_only = &data[..27];
+    fs::write(&encrypted_path, prefix_only)?;
+
+    let result = symmetric_encryption(&encrypted_path, &decrypt_dir, &passphrase, None, |_| {});
     assert!(result.is_err());
+
+    Ok(())
 }
 
 #[test]
 fn test_hybrid_empty_file_rejected() -> Result<(), CryptoError> {
     let test_dir = setup_test_dir("hyb_empty_file");
     let keys_dir = test_dir.join("keys");
+    let encrypt_dir = test_dir.join("encrypted");
     let decrypt_dir = test_dir.join("decrypted");
     fs::create_dir_all(&keys_dir)?;
+    fs::create_dir_all(&encrypt_dir)?;
     fs::create_dir_all(&decrypt_dir)?;
 
     let key_pass = SecretString::from("kp".to_string());
     generate_key_pair(&key_pass, &keys_dir, |_| {})?;
 
+    let public_key = keys_dir.join("public.key");
     let secret_key = keys_dir.join("private.key");
-    let empty_file = test_dir.join("empty.fcr");
-    fs::write(&empty_file, b"").unwrap();
+
+    // Encrypt a real file, then truncate to prefix-only so magic-byte
+    // detection routes to decrypt, which then fails on the empty payload.
+    let input_file = test_dir.join("data.txt");
+    create_test_file(&input_file, "payload");
+    let empty_pass = SecretString::from("".to_string());
+    hybrid_encryption(&input_file, &encrypt_dir, &public_key, &empty_pass, None, |_| {})?;
+
+    let encrypted_path = encrypt_dir.join("data.fcr");
+    let data = fs::read(&encrypted_path)?;
+    let prefix_only = &data[..27];
+    fs::write(&encrypted_path, prefix_only)?;
 
     let result = hybrid_encryption(
-        &empty_file,
+        &encrypted_path,
         &decrypt_dir,
         &secret_key,
         &key_pass,
@@ -1509,8 +1571,9 @@ fn test_symmetric_truncated_mid_header() -> Result<(), CryptoError> {
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let data = fs::read(&encrypted_path)?;
 
-    // Truncate in the middle of the salt field (after prefix but before header ends)
-    let truncated = &data[..12];
+    // Truncate after the 27-byte encoded prefix (enough for magic-byte detection)
+    // but before the header ends — in the middle of the salt field
+    let truncated = &data[..30];
     fs::write(&encrypted_path, truncated)?;
 
     let result = symmetric_encryption(&encrypted_path, &decrypt_dir, &passphrase, None, |_| {});
@@ -1629,8 +1692,9 @@ fn test_hybrid_truncated_mid_header() -> Result<(), CryptoError> {
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let data = fs::read(&encrypted_path)?;
 
-    // Truncate in the middle of the encrypted envelope field
-    let truncated = &data[..20];
+    // Truncate after the 27-byte encoded prefix (enough for magic-byte detection)
+    // but before the header ends — in the middle of the envelope field
+    let truncated = &data[..30];
     fs::write(&encrypted_path, truncated)?;
 
     let result = hybrid_encryption(

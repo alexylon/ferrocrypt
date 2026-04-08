@@ -14,7 +14,7 @@ use zeroize::Zeroizing;
 use crate::common::{
     ARGON2_SALT_SIZE, DecryptReader, ENCRYPTION_KEY_SIZE, ERR_FILE_TOO_SHORT, EncryptWriter,
     HMAC_KEY_SIZE, HMAC_TAG_SIZE, KDF_PARAMS_SIZE, KdfParams, NONCE_SIZE,
-    constant_time_compare_256_bit, get_duration, get_file_stem_to_string, hmac_sha3_256,
+    constant_time_compare_256_bit, get_duration, get_encryption_base_name, hmac_sha3_256,
     hmac_sha3_256_verify, sha3_32_hash,
 };
 use crate::format::{self, HEADER_PREFIX_ENCODED_SIZE};
@@ -83,12 +83,12 @@ pub fn encrypt_file(
     let cipher = XChaCha20Poly1305::new(encryption_key.as_ref().into());
     let verification_hash: [u8; ENCRYPTION_KEY_SIZE] = sha3_32_hash(encryption_key.as_ref())?;
 
-    let file_stem = &get_file_stem_to_string(input_path)?;
+    let base_name = &get_encryption_base_name(input_path)?;
     on_progress("Encrypting\u{2026}");
 
     let output_path = match output_file {
         Some(path) => path.to_path_buf(),
-        None => output_dir.join(format!("{}.{}", file_stem, format::ENCRYPTED_EXTENSION)),
+        None => output_dir.join(format!("{}.{}", base_name, format::ENCRYPTED_EXTENSION)),
     };
     if output_path.exists() {
         return Err(CryptoError::InvalidInput(format!(
@@ -262,7 +262,7 @@ pub fn decrypt_file(
             constant_time_compare_256_bit(&key_hash, verification_hash.as_slice().try_into()?);
         if !key_correct {
             return Err(CryptoError::CryptoOperation(
-                "The provided password is incorrect".to_string(),
+                "Password incorrect or file header corrupted".to_string(),
             ));
         }
         return Err(hmac_err);

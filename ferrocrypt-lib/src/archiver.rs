@@ -135,8 +135,6 @@ fn extract_entries<R: Read>(
         let full_path = output_dir.join(&path);
         let entry_type = entry.header().entry_type();
 
-        // Only extract dirs and regular files; symlinks, hardlinks, and
-        // special entries are intentionally skipped to prevent symlink attacks.
         if entry_type.is_dir() {
             fs::create_dir_all(&full_path)?;
         } else if entry_type.is_file() {
@@ -147,6 +145,12 @@ fn extract_entries<R: Read>(
             }
             let mut outfile = File::create(&full_path)?;
             io::copy(&mut entry, &mut outfile)?;
+        } else {
+            return Err(CryptoError::InvalidInput(format!(
+                "Unsupported archive entry type {:?} for path: {}",
+                entry_type,
+                path.display()
+            )));
         }
     }
     Ok(())
@@ -276,6 +280,35 @@ mod tests {
         // Verify the original file was NOT overwritten
         let content = fs::read_to_string(extract_dir.join("victim.txt")).unwrap();
         assert_eq!(content, "original");
+    }
+
+    #[test]
+    fn unarchive_rejects_symlink_entry() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        let mut buf = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut buf);
+
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_size(0);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_link(&mut header, "link.txt", "target.txt")
+                .unwrap();
+
+            builder.finish().unwrap();
+        }
+
+        let err = unarchive(Cursor::new(buf), &extract_dir).unwrap_err();
+        assert!(
+            err.to_string().contains("Unsupported archive entry type"),
+            "expected unsupported entry error, got: {err}"
+        );
     }
 
     #[test]

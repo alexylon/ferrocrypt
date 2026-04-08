@@ -215,15 +215,13 @@ pub fn validate_file_flags(header: &FileHeader) -> Result<(), CryptoError> {
 pub fn unsupported_file_version_error(major: u8, minor: u8) -> CryptoError {
     if major < ENCRYPTED_FILE_VERSION_MAJOR {
         CryptoError::CryptoOperation(format!(
-            "Format version {}.{} is not supported. \
-             Files created with older versions must be decrypted \
-             using those versions, available on crates.io.",
+            "Older file format (v{}.{}). Use a previous release.",
             major, minor
         ))
     } else {
         CryptoError::CryptoOperation(format!(
-            "Format version {}.{} not supported (current: {}). Upgrade FerroCrypt.",
-            major, minor, ENCRYPTED_FILE_VERSION_MAJOR
+            "Newer file format (v{}.{}). Upgrade FerroCrypt.",
+            major, minor
         ))
     }
 }
@@ -231,15 +229,13 @@ pub fn unsupported_file_version_error(major: u8, minor: u8) -> CryptoError {
 pub fn unsupported_key_version_error(version: u8) -> CryptoError {
     if version < KEY_FILE_VERSION {
         CryptoError::CryptoOperation(format!(
-            "Key file version {} is not supported. \
-             Keys created with older versions must be used \
-             with those versions, available on crates.io.",
+            "Older key format (v{}). Use a previous release.",
             version
         ))
     } else {
         CryptoError::CryptoOperation(format!(
-            "Key file version {} not supported (current: {}). Upgrade FerroCrypt.",
-            version, KEY_FILE_VERSION
+            "Newer key format (v{}). Upgrade FerroCrypt.",
+            version
         ))
     }
 }

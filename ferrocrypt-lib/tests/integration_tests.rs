@@ -1254,8 +1254,8 @@ fn test_future_major_version_rejected() -> Result<(), CryptoError> {
     assert!(result.is_err());
     match result {
         Err(CryptoError::CryptoOperation(msg)) => {
-            assert!(msg.contains("not supported"));
-            assert!(msg.contains("Upgrade"));
+            assert!(msg.contains("Newer file format"), "got: {msg}");
+            assert!(msg.contains("Upgrade"), "got: {msg}");
         }
         other => panic!("Expected version error, got {:?}", other),
     }
@@ -2160,8 +2160,7 @@ fn test_older_major_version_rejected() -> Result<(), CryptoError> {
     assert!(result.is_err());
     match result {
         Err(CryptoError::CryptoOperation(msg)) => {
-            assert!(msg.contains("not supported"), "got: {msg}");
-            assert!(msg.contains("crates.io"), "got: {msg}");
+            assert!(msg.contains("Use a previous release"), "got: {msg}");
         }
         other => panic!("Expected version error, got {:?}", other),
     }
@@ -2212,8 +2211,7 @@ fn test_older_key_version_rejected() -> Result<(), CryptoError> {
     assert!(result.is_err());
     match result {
         Err(CryptoError::CryptoOperation(msg)) => {
-            assert!(msg.contains("not supported"), "got: {msg}");
-            assert!(msg.contains("crates.io"), "got: {msg}");
+            assert!(msg.contains("Use a previous release"), "got: {msg}");
         }
         other => panic!("Expected key version error, got {:?}", other),
     }
@@ -2240,7 +2238,7 @@ fn test_future_key_version_rejected() -> Result<(), CryptoError> {
     assert!(result.is_err());
     match result {
         Err(CryptoError::CryptoOperation(msg)) => {
-            assert!(msg.contains("not supported"), "got: {msg}");
+            assert!(msg.contains("Newer key format"), "got: {msg}");
             assert!(msg.contains("Upgrade"), "got: {msg}");
         }
         other => panic!("Expected key version error, got {:?}", other),
@@ -2256,7 +2254,7 @@ fn test_future_key_version_rejected() -> Result<(), CryptoError> {
     assert!(result.is_err());
     match result {
         Err(CryptoError::CryptoOperation(msg)) => {
-            assert!(msg.contains("not supported"), "got: {msg}");
+            assert!(msg.contains("Newer key format"), "got: {msg}");
             assert!(msg.contains("Upgrade"), "got: {msg}");
         }
         other => panic!("Expected key version error, got {:?}", other),

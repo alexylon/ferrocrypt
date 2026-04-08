@@ -2,6 +2,7 @@
 name = "ferrocrypt"
 version = "0.2.5"
 edition = "2021"
+rust-version = "1.87"
 
 description = "Core FerroCrypt library: symmetric (XChaCha20-Poly1305 + Argon2id) and hybrid (X25519 + XChaCha20-Poly1305) encryption utilities."
 authors = ["Alexander Alexandrov"]

@@ -26,3 +26,13 @@ doc = false
 name = "fuzz_hybrid_decrypt"
 path = "fuzz_targets/fuzz_hybrid_decrypt.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_symmetric_encrypt"
+path = "fuzz_targets/fuzz_symmetric_encrypt.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_hybrid_encrypt"
+path = "fuzz_targets/fuzz_hybrid_encrypt.rs"
+doc = false

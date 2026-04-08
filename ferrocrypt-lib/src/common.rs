@@ -180,14 +180,6 @@ pub fn hmac_sha3_256_verify(key: &[u8], data: &[u8], tag: &[u8]) -> Result<(), C
     })
 }
 
-pub fn get_duration(seconds: f64) -> String {
-    if seconds < 60_f64 {
-        format!("{:.2} sec", seconds)
-    } else {
-        format!("{} min, {:.2} sec", seconds as u32 / 60, seconds % 60_f64)
-    }
-}
-
 /// Streaming encryption writer: buffers plaintext writes into `BUFFER_SIZE`
 /// chunks, encrypts each chunk with `encrypt_next`, and writes ciphertext to
 /// the inner writer. Call `finish()` after all data is written to encrypt the
@@ -408,31 +400,6 @@ mod tests {
         let data1 = [0u8; 32];
         let data2 = [0u8; 32];
         assert!(constant_time_compare_256_bit(&data1, &data2));
-    }
-
-    #[test]
-    fn test_get_duration_seconds() {
-        let duration_str = get_duration(45.67);
-        assert!(duration_str.contains("45.67 sec"));
-    }
-
-    #[test]
-    fn test_get_duration_minutes() {
-        let duration_str = get_duration(125.5);
-        assert!(duration_str.contains("2 min"));
-        assert!(duration_str.contains("5.50 sec"));
-    }
-
-    #[test]
-    fn test_get_duration_zero() {
-        let duration_str = get_duration(0.0);
-        assert!(duration_str.contains("0.00 sec"));
-    }
-
-    #[test]
-    fn test_get_duration_less_than_second() {
-        let duration_str = get_duration(0.123);
-        assert!(duration_str.contains("0.12 sec"));
     }
 
     #[test]

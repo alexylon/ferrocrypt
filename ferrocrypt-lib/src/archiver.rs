@@ -164,7 +164,7 @@ fn archive_directory<W: Write>(
 /// On failure, any partially extracted roots are renamed with an `.incomplete`
 /// suffix so the user can identify them.
 /// Returns the output path as a string.
-pub fn unarchive<R: Read>(reader: R, output_dir: &Path) -> Result<String, CryptoError> {
+pub fn unarchive<R: Read>(reader: R, output_dir: &Path) -> Result<PathBuf, CryptoError> {
     let mut archive = tar::Archive::new(reader);
     let mut first_entry_root: Option<PathBuf> = None;
     let mut checked_roots: Vec<OsString> = Vec::new();
@@ -188,9 +188,7 @@ pub fn unarchive<R: Read>(reader: R, output_dir: &Path) -> Result<String, Crypto
         return Err(e);
     }
 
-    first_entry_root
-        .map(|path| path.display().to_string())
-        .ok_or_else(|| CryptoError::InvalidInput("Empty archive".to_string()))
+    first_entry_root.ok_or_else(|| CryptoError::InvalidInput("Empty archive".to_string()))
 }
 
 fn extract_entries<R: Read>(
@@ -268,7 +266,7 @@ mod tests {
         assert_eq!(stem, "hello");
 
         let output = unarchive(Cursor::new(buf), &extract_dir).unwrap();
-        assert!(!output.is_empty());
+        assert!(output.exists());
 
         let restored = fs::read_to_string(extract_dir.join("hello.txt")).unwrap();
         assert_eq!(restored, "file content here");
@@ -291,7 +289,7 @@ mod tests {
         assert_eq!(stem, "mydir");
 
         let output = unarchive(Cursor::new(buf), &extract_dir).unwrap();
-        assert!(!output.is_empty());
+        assert!(output.exists());
 
         let restored_a = fs::read_to_string(extract_dir.join("mydir/a.txt")).unwrap();
         assert_eq!(restored_a, "file a");

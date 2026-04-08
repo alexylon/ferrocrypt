@@ -2,30 +2,76 @@ name: Rust
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-      - name: Build
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build workspace
         run: cargo build --verbose
-      - name: Run tests
+
+      - name: Run workspace tests
         run: cargo test --verbose
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.87.0
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.87.0
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build ferrocrypt-lib on MSRV
+        run: cargo build -p ferrocrypt --verbose
+
+      - name: Test ferrocrypt-lib on MSRV
+        run: cargo test -p ferrocrypt --verbose
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain with clippy
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run clippy
+        run: cargo clippy -p ferrocrypt --all-targets --all-features -- -D warnings
 
   audit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Install cargo-audit
         run: cargo install cargo-audit
+
       - name: Run dependency audit
         run: cargo audit

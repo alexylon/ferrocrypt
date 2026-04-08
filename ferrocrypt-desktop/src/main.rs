@@ -6,7 +6,7 @@ slint::include_modules!();
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
     EncryptionMode, default_encrypted_filename, detect_encryption_mode, generate_key_pair,
-    hybrid_encryption, public_key_fingerprint, symmetric_encryption, validate_secret_key_file,
+    hybrid_auto, public_key_fingerprint, symmetric_auto, validate_secret_key_file,
 };
 use std::path::{Path, PathBuf};
 
@@ -197,11 +197,11 @@ fn main() {
                 let keypath = Path::new(&keypath);
                 let save_as = output_file.as_deref().map(Path::new);
 
-                let result = match mode {
-                    0 | 1 => {
-                        symmetric_encryption(inpath, output_dir_path, &pwd, save_as, &on_progress)
-                    }
-                    2 | 3 => hybrid_encryption(
+                let is_decrypt = matches!(mode, 1 | 3);
+                let start = std::time::Instant::now();
+                let result: Result<PathBuf, _> = match mode {
+                    0 | 1 => symmetric_auto(inpath, output_dir_path, &pwd, save_as, &on_progress),
+                    2 | 3 => hybrid_auto(
                         inpath,
                         output_dir_path,
                         keypath,
@@ -209,16 +209,18 @@ fn main() {
                         save_as,
                         &on_progress,
                     ),
-                    4 => generate_key_pair(&pwd, output_dir_path, &on_progress),
+                    4 => generate_key_pair(&pwd, output_dir_path, &on_progress)
+                        .map(|info| info.public_key_path),
                     _ => unreachable!(),
                 };
+                let elapsed = start.elapsed().as_secs_f64();
 
                 let _ = slint::invoke_from_event_loop(move || {
                     let Some(app) = weak.upgrade() else { return };
                     app.set_is_working(false);
 
                     match result {
-                        Ok(msg) => {
+                        Ok(output) => {
                             if let Some(dir) = keygen_dir {
                                 let pub_key = pub_key_path(&dir);
                                 app.set_password(Default::default());
@@ -238,7 +240,13 @@ fn main() {
                                 );
                             } else {
                                 clear_fields(&app);
-                                app.set_status_ok(elide_result_path(&msg).into());
+                                let action = if is_decrypt {
+                                    "Decrypted to"
+                                } else {
+                                    "Encrypted to"
+                                };
+                                let status = format_duration(action, &output, elapsed);
+                                app.set_status_ok(elide_result_path(&status).into());
                             }
                         }
                         Err(e) => {
@@ -412,6 +420,20 @@ fn parent_dir(path: &str) -> Option<String> {
         .map(|p| p.to_string_lossy().to_string())
 }
 
+fn format_duration(action: &str, path: &Path, seconds: f64) -> String {
+    if seconds < 60.0 {
+        format!("{} {} in {:.2} sec", action, path.display(), seconds)
+    } else {
+        format!(
+            "{} {} in {} min, {:.2} sec",
+            action,
+            path.display(),
+            seconds as u32 / 60,
+            seconds % 60.0
+        )
+    }
+}
+
 /// Left-elides a path, keeping the rightmost `max` characters visible.
 /// Uses char boundaries to avoid panicking on non-ASCII paths.
 fn elide_left(path: &str, max: usize) -> String {
@@ -476,8 +498,8 @@ fn validate_selected_key(app: &AppWindow, key_path: &str) {
 
 fn detect_mode_from_path(path: &str) -> Option<i32> {
     match detect_encryption_mode(Path::new(path)) {
-        Some(EncryptionMode::Symmetric) => Some(1),
-        Some(EncryptionMode::Hybrid) => Some(3),
-        None => None,
+        Ok(Some(EncryptionMode::Symmetric)) => Some(1),
+        Ok(Some(EncryptionMode::Hybrid)) => Some(3),
+        _ => None,
     }
 }

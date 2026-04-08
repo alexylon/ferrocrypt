@@ -8,6 +8,8 @@
 &nbsp;
 [![docs.rs](https://img.shields.io/docsrs/ferrocrypt/latest?color=2e7d32)](https://docs.rs/ferrocrypt/latest)
 &nbsp;
+![MSRV](https://img.shields.io/badge/MSRV-1.87-blue)
+&nbsp;
 [![crate: ferrocrypt-cli](https://img.shields.io/crates/v/ferrocrypt-cli.svg?label=crate%3A%20ferrocrypt-cli&color=blue)](https://crates.io/crates/ferrocrypt-cli)
 
 Cross-platform file encryption tool with CLI and desktop interfaces. Written in Rust.
@@ -32,6 +34,8 @@ FerroCrypt encrypts and decrypts files and directories. It supports two modes:
 - **Hybrid** — Public/private key based. Combines X25519 key agreement with XChaCha20-Poly1305 (data encryption). Each file gets a unique random key sealed with the recipient's public key. Decryption requires the private key and its passphrase. Hybrid mode provides confidentiality and integrity for the recipient, but does not authenticate the sender — it is not a substitute for digital signatures.
 
 Both modes produce `.fcr` files. Decryption is based on magic bytes in the file header, not the file extension — renaming a file won't break anything.
+
+A standalone format specification is available at [`ferrocrypt-lib/FORMAT.md`](ferrocrypt-lib/FORMAT.md).
 
 ### What's stored in an encrypted file
 
@@ -114,6 +118,13 @@ sudo dnf install fontconfig-devel freetype-devel libxcb-devel libxkbcommon-devel
 ```bash
 cargo add ferrocrypt
 ```
+
+## Rust version support
+
+The `ferrocrypt` library crate currently targets **MSRV 1.87**.
+
+This minimum supported Rust version is checked in CI for `ferrocrypt-lib`.
+It may be increased in future releases if required by dependencies or language improvements.
 
 ## CLI Usage
 

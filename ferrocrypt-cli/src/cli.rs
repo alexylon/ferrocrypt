@@ -3,8 +3,8 @@ use std::path::Path;
 use clap::{Parser, Subcommand};
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
-    CryptoError, detect_encryption_mode, generate_key_pair, hybrid_encryption,
-    public_key_fingerprint, symmetric_encryption, validate_secret_key_file,
+    CryptoError, detect_encryption_mode, generate_key_pair, hybrid_auto, public_key_fingerprint,
+    symmetric_auto, validate_secret_key_file,
 };
 
 use rustyline::DefaultEditor;
@@ -77,6 +77,15 @@ pub enum Command {
     },
 }
 
+fn fmt_duration(d: std::time::Duration) -> String {
+    let secs = d.as_secs_f64();
+    if secs < 60.0 {
+        format!("{secs:.2} sec")
+    } else {
+        format!("{} min, {:.2} sec", secs as u32 / 60, secs % 60.0)
+    }
+}
+
 pub fn run() -> Result<(), CryptoError> {
     let cli = Cli::parse();
 
@@ -97,13 +106,9 @@ fn run_command(cmd: Command) -> Result<(), CryptoError> {
         } => {
             let outpath = Path::new(&outpath);
             let passphrase = SecretString::from(passphrase);
-            let msg = generate_key_pair(&passphrase, outpath, |msg| eprintln!("{msg}"))?;
-            println!("\n{msg}\n");
-            let pub_key = outpath.join("public.key");
-            match public_key_fingerprint(&pub_key) {
-                Ok(fp) => println!("Public key fingerprint: {}", fp),
-                Err(e) => eprintln!("Warning: could not compute fingerprint: {}", e),
-            }
+            let info = generate_key_pair(&passphrase, outpath, |msg| eprintln!("{msg}"))?;
+            println!("\nGenerated key pair in {}\n", outpath.display());
+            println!("Public key fingerprint: {}", info.fingerprint);
         }
 
         Command::Fingerprint { key_file } => {
@@ -121,7 +126,7 @@ fn run_command(cmd: Command) -> Result<(), CryptoError> {
             let inpath = Path::new(&inpath);
             let outpath = Path::new(&outpath);
             let key = Path::new(&key);
-            let is_encrypt = detect_encryption_mode(inpath).is_none();
+            let is_encrypt = detect_encryption_mode(inpath)?.is_none();
             if is_encrypt {
                 if let Ok(fp) = public_key_fingerprint(key) {
                     println!("Encrypting to: {}", fp);
@@ -130,7 +135,8 @@ fn run_command(cmd: Command) -> Result<(), CryptoError> {
                 validate_secret_key_file(key)?;
             }
             let passphrase = SecretString::from(passphrase);
-            let msg = hybrid_encryption(
+            let start = std::time::Instant::now();
+            let output = hybrid_auto(
                 inpath,
                 outpath,
                 key,
@@ -138,7 +144,17 @@ fn run_command(cmd: Command) -> Result<(), CryptoError> {
                 save_as.as_deref().map(Path::new),
                 |msg| eprintln!("{msg}"),
             )?;
-            println!("\n{msg}\n");
+            let action = if is_encrypt {
+                "Encrypted to"
+            } else {
+                "Decrypted to"
+            };
+            println!(
+                "\n{} {} in {}\n",
+                action,
+                output.display(),
+                fmt_duration(start.elapsed())
+            );
         }
 
         Command::Symmetric {
@@ -149,15 +165,27 @@ fn run_command(cmd: Command) -> Result<(), CryptoError> {
         } => {
             let inpath = Path::new(&inpath);
             let outpath = Path::new(&outpath);
+            let is_encrypt = detect_encryption_mode(inpath)?.is_none();
             let passphrase = SecretString::from(passphrase);
-            let msg = symmetric_encryption(
+            let start = std::time::Instant::now();
+            let output = symmetric_auto(
                 inpath,
                 outpath,
                 &passphrase,
                 save_as.as_deref().map(Path::new),
                 |msg| eprintln!("{msg}"),
             )?;
-            println!("\n{msg}\n");
+            let action = if is_encrypt {
+                "Encrypted to"
+            } else {
+                "Decrypted to"
+            };
+            println!(
+                "\n{} {} in {}\n",
+                action,
+                output.display(),
+                fmt_duration(start.elapsed())
+            );
         }
     }
 
@@ -200,7 +228,7 @@ fn interactive_mode() -> Result<(), CryptoError> {
                     }
                 };
 
-                let args = std::iter::once("ferrocrypt".to_string()).chain(parts.into_iter());
+                let args = std::iter::once("ferrocrypt".to_string()).chain(parts);
 
                 match Cli::try_parse_from(args) {
                     Ok(cli) => {

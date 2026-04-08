@@ -33,7 +33,7 @@ Three crates, one shared library:
 
 | Module | Role |
 |---|---|
-| `lib.rs` | Public API, encrypt/decrypt routing (magic-byte detection), path validation, key fingerprint |
+| `lib.rs` | Public API: explicit `symmetric_encrypt`/`decrypt`, `hybrid_encrypt`/`decrypt`, auto-routing wrappers (`symmetric_auto`/`hybrid_auto`), `KeyPairInfo`, `detect_encryption_mode`, path validation, key fingerprint |
 | `symmetric.rs` | Argon2id → HKDF-SHA3-256 → XChaCha20-Poly1305 streaming encrypt/decrypt |
 | `hybrid.rs` | X25519 + XChaCha20-Poly1305 envelope + XChaCha20-Poly1305 streaming encrypt/decrypt |
 | `archiver.rs` | TAR archive/unarchive (streaming, preserves directory structure). Manual recursive walk rejects symlinks and special entries at archive time; hardlinks archived as regular files. Failed extractions rename partial output with `.incomplete` suffix. |
@@ -73,8 +73,10 @@ Decryption reverses: read header → derive/decrypt keys → verify HMAC → Dec
 
 ## Key Conventions
 
-- `symmetric_encryption` and `hybrid_encryption` accept `save_as: Option<&Path>` to override the default `{stem}.fcr` output path (ignored during decryption).
-- Encrypt vs decrypt is routed by reading magic bytes, not file extension.
+- Primary API: `symmetric_encrypt`/`symmetric_decrypt`, `hybrid_encrypt`/`hybrid_decrypt` — explicit, return `PathBuf`.
+- Auto-routing: `symmetric_auto`/`hybrid_auto` — detect encrypt vs decrypt by magic bytes, used by CLI/desktop.
+- `generate_key_pair` returns `KeyPairInfo` with paths and fingerprint.
+- Encrypt functions accept `save_as: Option<&Path>` to override the default `{stem}.fcr` output path.
 - Integration tests use `tests/workspace/` as a temp directory, cleaned up by a `#[ctor::dtor]` hook.
 - `ENCRYPTED_EXTENSION` ("fcr") constant lives in `format.rs`.
 
@@ -87,6 +89,6 @@ Decryption reverses: read header → derive/decrypt keys → verify HMAC → Dec
 - Double-check the newly implemented logic using adversarial thinking
 - Double-check if the newly implemented changes are future-proof
 - Tests should be self-contained and only cover important behavior
-- Run `cargo clippy -p ferrocrypt --all-targets -- -D warnings`
+- Run `cargo clippy --all-targets -- -D warnings`
 - After each new feature, update README.md and CHANGELOG.md (under `[Unreleased]`)
 - After each session, double-check all changes against these guidelines before finishing

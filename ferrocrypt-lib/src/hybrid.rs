@@ -1,6 +1,6 @@
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chacha20poly1305::{
     XChaCha20Poly1305,
@@ -12,7 +12,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::common::{
     ARGON2_SALT_SIZE, DecryptReader, ENCRYPTION_KEY_SIZE, ERR_FILE_TOO_SHORT, EncryptWriter,
-    HMAC_KEY_SIZE, HMAC_TAG_SIZE, KDF_PARAMS_SIZE, KdfParams, NONCE_SIZE, TAG_SIZE, get_duration,
+    HMAC_KEY_SIZE, HMAC_TAG_SIZE, KDF_PARAMS_SIZE, KdfParams, NONCE_SIZE, TAG_SIZE,
     get_encryption_base_name, hmac_sha3_256, hmac_sha3_256_verify,
 };
 use crate::format::{self, HEADER_PREFIX_ENCODED_SIZE, PUBLIC_KEY_DATA_SIZE, SECRET_KEY_DATA_SIZE};
@@ -93,9 +93,7 @@ pub fn encrypt_file(
     public_key_path: &Path,
     output_file: Option<&Path>,
     on_progress: &dyn Fn(&str),
-) -> Result<String, CryptoError> {
-    let start_time = std::time::Instant::now();
-
+) -> Result<PathBuf, CryptoError> {
     let base_name = &get_encryption_base_name(input_path)?;
     on_progress("Encrypting\u{2026}");
 
@@ -110,7 +108,7 @@ pub fn encrypt_file(
 
     let mut file_created = false;
 
-    let result = (|| -> Result<String, CryptoError> {
+    let result = (|| -> Result<PathBuf, CryptoError> {
         let cipher = XChaCha20Poly1305::new(&encryption_key);
 
         let mut nonce = [0u8; NONCE_SIZE];
@@ -166,13 +164,7 @@ pub fn encrypt_file(
 
         nonce.zeroize();
 
-        let msg = format!(
-            "Encrypted to {} in {}",
-            output_path.display(),
-            get_duration(start_time.elapsed().as_secs_f64())
-        );
-
-        Ok(msg)
+        Ok(output_path.clone())
     })();
 
     if result.is_err() && file_created {
@@ -190,7 +182,7 @@ pub fn decrypt_file(
     secret_key_path: &Path,
     passphrase: &SecretString,
     on_progress: &dyn Fn(&str),
-) -> Result<String, CryptoError> {
+) -> Result<PathBuf, CryptoError> {
     on_progress("Decrypting\u{2026}");
 
     // Parse and validate the file header before loading the private key —
@@ -228,8 +220,7 @@ fn decrypt_file_v3(
     secret_key_path: &Path,
     passphrase: &SecretString,
     _on_progress: &dyn Fn(&str),
-) -> Result<String, CryptoError> {
-    let start_time = std::time::Instant::now();
+) -> Result<PathBuf, CryptoError> {
     format::validate_file_flags(&header)?;
 
     let min_header_size = HEADER_PREFIX_ENCODED_SIZE
@@ -271,7 +262,7 @@ fn decrypt_file_v3(
     drop(recipient_secret);
     let mut decrypted_combined_key = envelope_result?;
 
-    let result = (|| -> Result<String, CryptoError> {
+    let result = (|| -> Result<PathBuf, CryptoError> {
         let hmac_key = &decrypted_combined_key[ENCRYPTION_KEY_SIZE..COMBINED_KEY_SIZE];
 
         let mut hmac_message =
@@ -286,15 +277,7 @@ fn decrypt_file_v3(
         let stream_decryptor = stream::DecryptorBE32::from_aead(cipher, nonce.as_slice().into());
 
         let decrypt_reader = DecryptReader::new(stream_decryptor, encrypted_file);
-        let output_path = archiver::unarchive(decrypt_reader, output_dir)?;
-
-        let msg = format!(
-            "Decrypted to {} in {}",
-            output_path,
-            get_duration(start_time.elapsed().as_secs_f64())
-        );
-
-        Ok(msg)
+        archiver::unarchive(decrypt_reader, output_dir)
     })();
 
     decrypted_combined_key.zeroize();
@@ -428,11 +411,12 @@ fn open_envelope(
     Ok(result)
 }
 
+/// Returns (private_key_path, public_key_path) on success.
 pub fn generate_key_pair(
     passphrase: &SecretString,
     output_dir: &Path,
     on_progress: &dyn Fn(&str),
-) -> Result<String, CryptoError> {
+) -> Result<(PathBuf, PathBuf), CryptoError> {
     if passphrase.expose_secret().is_empty() {
         return Err(CryptoError::InvalidInput(
             "Passphrase must not be empty for private key encryption".to_string(),
@@ -532,9 +516,7 @@ pub fn generate_key_pair(
         return Err(e);
     }
 
-    let result = format!("Generated key pair in {}", output_dir.display());
-
-    Ok(result)
+    Ok((secret_key_path, public_key_path))
 }
 
 #[cfg(test)]
@@ -629,14 +611,14 @@ mod tests {
         fs::write(&encrypted_path, &output)?;
 
         // --- Decrypt with the current v3 reader ---
-        let result = decrypt_file(
+        let output = decrypt_file(
             &encrypted_path,
             &decrypt_dir,
             &keys_dir.join(SECRET_KEY_FILENAME),
             &key_pass,
             &|_| {},
         )?;
-        assert!(result.contains("Decrypted to"));
+        assert!(output.exists());
 
         let decrypted_content = fs::read_to_string(decrypt_dir.join("data.txt"))?;
         assert_eq!(decrypted_content, "hybrid forward compat test");

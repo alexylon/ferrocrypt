@@ -17,8 +17,7 @@ use std::path::Path;
 
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
-    CryptoError, hybrid_encryption, public_key_fingerprint, symmetric_encryption,
-    validate_secret_key_file,
+    CryptoError, hybrid_auto, public_key_fingerprint, symmetric_auto, validate_secret_key_file,
 };
 
 const FIXTURE_DIR: &str = "tests/fixtures";
@@ -31,8 +30,8 @@ fn test_v3_symmetric_fixture_decrypts() -> Result<(), CryptoError> {
     let passphrase = SecretString::from(SYM_PASSWORD.to_string());
     let encrypted = Path::new(FIXTURE_DIR).join("v3/symmetric/hello.fcr");
 
-    let result = symmetric_encryption(&encrypted, decrypt_dir.path(), &passphrase, None, |_| {})?;
-    assert!(result.contains("Decrypted to"));
+    let result = symmetric_auto(&encrypted, decrypt_dir.path(), &passphrase, None, |_| {})?;
+    assert!(result.exists());
 
     let expected = fs::read_to_string(Path::new(FIXTURE_DIR).join("v3/symmetric/hello.txt"))?;
     let actual = fs::read_to_string(decrypt_dir.path().join("hello.txt"))?;
@@ -47,7 +46,7 @@ fn test_v3_hybrid_fixture_decrypts() -> Result<(), CryptoError> {
     let encrypted = Path::new(FIXTURE_DIR).join("v3/hybrid/hello.fcr");
     let private_key = Path::new(FIXTURE_DIR).join("v3/hybrid/private.key");
 
-    let result = hybrid_encryption(
+    let result = hybrid_auto(
         &encrypted,
         decrypt_dir.path(),
         &private_key,
@@ -55,7 +54,7 @@ fn test_v3_hybrid_fixture_decrypts() -> Result<(), CryptoError> {
         None,
         |_| {},
     )?;
-    assert!(result.contains("Decrypted to"));
+    assert!(result.exists());
 
     let expected = fs::read_to_string(Path::new(FIXTURE_DIR).join("v3/hybrid/hello.txt"))?;
     let actual = fs::read_to_string(decrypt_dir.path().join("hello.txt"))?;
@@ -75,7 +74,7 @@ fn test_v3_symmetric_binary_fixture_decrypts() -> Result<(), CryptoError> {
     let passphrase = SecretString::from(SYM_PASSWORD.to_string());
     let encrypted = Path::new(FIXTURE_DIR).join("v3/symmetric/data.fcr");
 
-    symmetric_encryption(&encrypted, decrypt_dir.path(), &passphrase, None, |_| {})?;
+    symmetric_auto(&encrypted, decrypt_dir.path(), &passphrase, None, |_| {})?;
 
     let expected: Vec<u8> = (0..=255).cycle().take(1024).collect();
     let actual = fs::read(decrypt_dir.path().join("data.bin"))?;
@@ -89,7 +88,7 @@ fn test_v3_symmetric_directory_fixture_decrypts() -> Result<(), CryptoError> {
     let passphrase = SecretString::from(SYM_PASSWORD.to_string());
     let encrypted = Path::new(FIXTURE_DIR).join("v3/symmetric/testdir.fcr");
 
-    symmetric_encryption(&encrypted, decrypt_dir.path(), &passphrase, None, |_| {})?;
+    symmetric_auto(&encrypted, decrypt_dir.path(), &passphrase, None, |_| {})?;
 
     let a = fs::read_to_string(decrypt_dir.path().join("testdir/a.txt"))?;
     let b = fs::read_to_string(decrypt_dir.path().join("testdir/sub/b.txt"))?;
@@ -105,7 +104,7 @@ fn test_v3_hybrid_binary_fixture_decrypts() -> Result<(), CryptoError> {
     let encrypted = Path::new(FIXTURE_DIR).join("v3/hybrid/data.fcr");
     let private_key = Path::new(FIXTURE_DIR).join("v3/hybrid/private.key");
 
-    hybrid_encryption(
+    hybrid_auto(
         &encrypted,
         decrypt_dir.path(),
         &private_key,
@@ -127,7 +126,7 @@ fn test_v3_hybrid_directory_fixture_decrypts() -> Result<(), CryptoError> {
     let encrypted = Path::new(FIXTURE_DIR).join("v3/hybrid/testdir.fcr");
     let private_key = Path::new(FIXTURE_DIR).join("v3/hybrid/private.key");
 
-    hybrid_encryption(
+    hybrid_auto(
         &encrypted,
         decrypt_dir.path(),
         &private_key,
@@ -171,14 +170,14 @@ fn generate_v3_fixtures() -> Result<(), CryptoError> {
     let plaintext = "Hello from FerroCrypt v3 symmetric fixture.\n";
     let hello_txt = sym_dir.join("hello.txt");
     fs::write(&hello_txt, plaintext)?;
-    symmetric_encryption(&hello_txt, &sym_dir, &passphrase, None, |_| {})?;
+    symmetric_auto(&hello_txt, &sym_dir, &passphrase, None, |_| {})?;
     assert!(sym_dir.join("hello.fcr").exists());
 
     // Binary file
     let binary_data: Vec<u8> = (0..=255).cycle().take(1024).collect();
     let bin_file = sym_dir.join("data.bin");
     fs::write(&bin_file, &binary_data)?;
-    symmetric_encryption(&bin_file, &sym_dir, &passphrase, None, |_| {})?;
+    symmetric_auto(&bin_file, &sym_dir, &passphrase, None, |_| {})?;
     assert!(sym_dir.join("data.fcr").exists());
 
     // Directory
@@ -187,7 +186,7 @@ fn generate_v3_fixtures() -> Result<(), CryptoError> {
     fs::create_dir_all(&sub_dir)?;
     fs::write(dir_fixture.join("a.txt"), "file a")?;
     fs::write(sub_dir.join("b.txt"), "file b")?;
-    symmetric_encryption(&dir_fixture, &sym_dir, &passphrase, None, |_| {})?;
+    symmetric_auto(&dir_fixture, &sym_dir, &passphrase, None, |_| {})?;
     assert!(sym_dir.join("testdir.fcr").exists());
 
     // --- Hybrid fixtures ---
@@ -204,7 +203,7 @@ fn generate_v3_fixtures() -> Result<(), CryptoError> {
     // Text file
     let hello_txt = hyb_dir.join("hello.txt");
     fs::write(&hello_txt, plaintext)?;
-    hybrid_encryption(
+    hybrid_auto(
         &hello_txt,
         &hyb_dir,
         hyb_dir.join("public.key"),
@@ -217,7 +216,7 @@ fn generate_v3_fixtures() -> Result<(), CryptoError> {
     // Binary file
     let bin_file = hyb_dir.join("data.bin");
     fs::write(&bin_file, &binary_data)?;
-    hybrid_encryption(
+    hybrid_auto(
         &bin_file,
         &hyb_dir,
         hyb_dir.join("public.key"),
@@ -233,7 +232,7 @@ fn generate_v3_fixtures() -> Result<(), CryptoError> {
     fs::create_dir_all(&sub_dir)?;
     fs::write(dir_fixture.join("a.txt"), "file a")?;
     fs::write(sub_dir.join("b.txt"), "file b")?;
-    hybrid_encryption(
+    hybrid_auto(
         &dir_fixture,
         &hyb_dir,
         hyb_dir.join("public.key"),

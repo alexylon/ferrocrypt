@@ -1,6 +1,6 @@
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chacha20poly1305::{
     XChaCha20Poly1305,
@@ -14,8 +14,8 @@ use zeroize::Zeroizing;
 use crate::common::{
     ARGON2_SALT_SIZE, DecryptReader, ENCRYPTION_KEY_SIZE, ERR_FILE_TOO_SHORT, EncryptWriter,
     HMAC_KEY_SIZE, HMAC_TAG_SIZE, KDF_PARAMS_SIZE, KdfParams, NONCE_SIZE,
-    constant_time_compare_256_bit, get_duration, get_encryption_base_name, hmac_sha3_256,
-    hmac_sha3_256_verify, sha3_32_hash,
+    constant_time_compare_256_bit, get_encryption_base_name, hmac_sha3_256, hmac_sha3_256_verify,
+    sha3_32_hash,
 };
 use crate::format::{self, HEADER_PREFIX_ENCODED_SIZE};
 use crate::replication::{rep_decode_exact, rep_encode, rep_encoded_size};
@@ -68,9 +68,7 @@ pub fn encrypt_file(
     passphrase: &SecretString,
     output_file: Option<&Path>,
     on_progress: &dyn Fn(&str),
-) -> Result<String, CryptoError> {
-    let start_time = std::time::Instant::now();
-
+) -> Result<PathBuf, CryptoError> {
     on_progress("Deriving key\u{2026}");
     let kdf_params = KdfParams::default_params();
     let mut salt = [0u8; ARGON2_SALT_SIZE];
@@ -161,13 +159,7 @@ pub fn encrypt_file(
         return Err(e);
     }
 
-    let result = format!(
-        "Encrypted to {} in {}",
-        output_path.display(),
-        get_duration(start_time.elapsed().as_secs_f64())
-    );
-
-    Ok(result)
+    Ok(output_path)
 }
 
 /// Decrypts a file with XChaCha20-Poly1305 streaming decryption.
@@ -178,7 +170,7 @@ pub fn decrypt_file(
     output_dir: &Path,
     passphrase: &SecretString,
     on_progress: &dyn Fn(&str),
-) -> Result<String, CryptoError> {
+) -> Result<PathBuf, CryptoError> {
     let mut encrypted_file = fs::File::open(input_path)?;
 
     let (prefix_bytes, header) =
@@ -210,8 +202,7 @@ fn decrypt_file_v3(
     output_dir: &Path,
     passphrase: &SecretString,
     on_progress: &dyn Fn(&str),
-) -> Result<String, CryptoError> {
-    let start_time = std::time::Instant::now();
+) -> Result<PathBuf, CryptoError> {
     format::validate_file_flags(&header)?;
 
     let min_header_size = HEADER_PREFIX_ENCODED_SIZE
@@ -302,15 +293,7 @@ fn decrypt_file_v3(
     let stream_decryptor = stream::DecryptorBE32::from_aead(cipher, nonce.as_slice().into());
 
     let decrypt_reader = DecryptReader::new(stream_decryptor, encrypted_file);
-    let output_path = archiver::unarchive(decrypt_reader, output_dir)?;
-
-    let result = format!(
-        "Decrypted to {} in {}",
-        output_path,
-        get_duration(start_time.elapsed().as_secs_f64())
-    );
-
-    Ok(result)
+    archiver::unarchive(decrypt_reader, output_dir)
 }
 
 #[cfg(test)]
@@ -405,8 +388,8 @@ mod tests {
         fs::write(&encrypted_path, &output)?;
 
         // --- Decrypt with the current v3 reader ---
-        let result = decrypt_file(&encrypted_path, &decrypt_dir, &passphrase, &|_| {})?;
-        assert!(result.contains("Decrypted to"));
+        let output = decrypt_file(&encrypted_path, &decrypt_dir, &passphrase, &|_| {})?;
+        assert!(output.exists());
 
         let decrypted = fs::read_to_string(decrypt_dir.join("data.txt"))?;
         assert_eq!(decrypted, "forward compat test");

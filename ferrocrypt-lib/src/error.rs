@@ -16,13 +16,13 @@ use thiserror::Error;
 ///
 /// ```rust
 /// use std::path::Path;
-/// use ferrocrypt::{symmetric_encryption, CryptoError, secrecy::SecretString};
+/// use ferrocrypt::{symmetric_encrypt, CryptoError, secrecy::SecretString};
 ///
 /// fn example() -> Result<(), CryptoError> {
 ///     let passphrase = SecretString::from("test".to_string());
 ///     // This will fail with CryptoError::InputPath if file doesn't exist
-///     match symmetric_encryption(Path::new("./missing.txt"), Path::new("./out"), &passphrase, None, |_| {}) {
-///         Ok(result) => println!("{}", result),
+///     match symmetric_encrypt(Path::new("./missing.txt"), Path::new("./out"), &passphrase, None, |_| {}) {
+///         Ok(path) => println!("Output: {}", path.display()),
 ///         Err(CryptoError::Io(e)) => eprintln!("I/O error: {}", e),
 ///         Err(CryptoError::InputPath(msg)) => eprintln!("Missing input: {}", msg),
 ///         Err(e) => eprintln!("Other error: {}", e),

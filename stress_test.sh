@@ -96,7 +96,7 @@ run_test "keygen: verify keys exist" \
     test -f "$KEYS/public.key" -a -f "$KEYS/private.key"
 
 run_test "keygen: verify key file sizes" \
-    test "$(stat -f%z "$KEYS/private.key" 2>/dev/null || stat -c%s "$KEYS/private.key" 2>/dev/null)" -eq 112 -a \
+    test "$(stat -f%z "$KEYS/private.key" 2>/dev/null || stat -c%s "$KEYS/private.key" 2>/dev/null)" -eq 124 -a \
          "$(stat -f%z "$KEYS/public.key" 2>/dev/null || stat -c%s "$KEYS/public.key" 2>/dev/null)" -eq 40
 
 PUB="$KEYS/public.key"
@@ -425,7 +425,10 @@ data[3] ^= 0xFF   # copy 0
 data[11] ^= 0xFF  # copy 1
 open('$CORR2_FILE', 'wb').write(data)
 "
-run_test_expect_fail "sym: corrupted magic byte rejects" \
+# With 2 of 3 magic byte copies corrupted, majority vote yields the corrupted
+# value → file is not detected as FerroCrypt → routes to encrypt (not decrypt).
+# The file is treated as a normal input and encrypted successfully.
+run_test "sym: corrupted magic byte encrypts (not detected as FerroCrypt)" \
     $FC symmetric -i "$CORR2_FILE" -o "$corr2_dec" -p "$PASS"
 
 # Truncated file (cut at half)
@@ -503,13 +506,15 @@ run_test_expect_fail "hyb: malformed key file rejects (decrypt)" \
 run_test_expect_fail "keygen: refuses to overwrite existing keys" \
     $FC keygen -o "$KEYS" -p "$PASS"
 
-# Tiny truncated files pretending to be .fcr
+# Tiny random files with .fcr extension are not detected as FerroCrypt files
+# (magic-byte routing), so the CLI encrypts them. Verify roundtrip works.
+tiny_enc="$WORKDIR/tiny_enc"
 tiny_dec="$WORKDIR/tiny_dec"
-mkdir -p "$tiny_dec"
+mkdir -p "$tiny_enc" "$tiny_dec"
 for sz in 1 3 5 7; do
     dd if=/dev/urandom of="$WORKDIR/tiny_${sz}.fcr" bs="$sz" count=1 2>/dev/null
-    run_test_expect_fail "sym: ${sz}-byte file as .fcr rejects" \
-        $FC symmetric -i "$WORKDIR/tiny_${sz}.fcr" -o "$tiny_dec" -p "$PASS"
+    run_test "sym: ${sz}-byte .fcr file encrypts (not detected as FerroCrypt)" \
+        $FC symmetric -i "$WORKDIR/tiny_${sz}.fcr" -o "$tiny_enc" -p "$PASS"
 done
 
 # Corrupted header fields (version, header length, HMAC tag)

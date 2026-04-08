@@ -292,6 +292,7 @@ dependencies = [
  "crypto_box",
  "hkdf",
  "hmac",
+ "libc",
  "rust-argon2",
  "secrecy",
  "sha3",

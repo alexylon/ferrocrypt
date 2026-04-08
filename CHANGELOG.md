@@ -19,10 +19,12 @@ All notable changes to FerroCrypt are documented in this file.
 - HKDF-SHA3-256 subkey derivation with domain separation (`ferrocrypt-enc`, `ferrocrypt-hmac`)
 - HMAC-SHA3-256 header authentication — tampering is detected before decryption begins
 - **CI:** `cargo-audit` dependency vulnerability scanning in GitHub Actions
-- Versioned file format with magic bytes (`0xFC` + type), major/minor version, and header length field. Forward-compatible: future minor versions can append fields without breaking older parsers.
+- Versioned file format with magic bytes (`0xFC` + type), major/minor version, and header length field. Forward-compatible within a major version: future minor versions may append optional trailing fields that older readers can skip via the header length. Minor versions must not change required decryption or authentication semantics.
 
 ### Changed
-- **Breaking:** Format version bumped to 3.0 — files from older versions cannot be decrypted. Unified file extension from `.fcs`/`.fch` to single `.fcr`.
+- Version-dispatch architecture: decrypt and key-reading paths now dispatch by file/key format version, enabling future reader compatibility for the current format line (encrypted files v3+, key files v2+). Golden fixture tests guard against regressions.
+- **Breaking:** Encrypted-file format bumped to 3.0 — files from older versions cannot be decrypted. Unified file extension from `.fcs`/`.fch` to single `.fcr`.
+- **Breaking:** Key-file format bumped to 2.0 — public/private key files from the older RSA/OpenSSL line are not supported by the current release.
 - **Breaking:** Replaced RSA-4096 OAEP (OpenSSL) with X25519 + XChaCha20-Poly1305 (`crypto_box` crate, `ChaChaBox`) for hybrid envelope encryption. Removes the OpenSSL C dependency — the project is now pure Rust.
 - **Breaking:** Streaming TAR encryption pipeline — input is archived and encrypted directly to the output file in a single pass. No plaintext intermediate files touch disk. Replaces the previous ZIP-based approach.
 - **Breaking:** Entire header (including prefix and padding indicator) is now triple-replicated for uniform error correction
@@ -38,6 +40,10 @@ All notable changes to FerroCrypt are documented in this file.
 - Moved Tauri and Dioxus GUIs to `experiments/`
 
 ### Fixed
+- Encrypt/decrypt routing now uses magic-byte detection only — `.fcr` extension no longer forces the decrypt path, so non-FerroCrypt files named `.fcr` can be encrypted
+- Default encrypted output naming for directories with dots (e.g. `photos.v1/`) now preserves the full directory name (`photos.v1.fcr` instead of `photos.fcr`)
+- Directory archiver replaced with a manual recursive walk: symlinks and special entries (sockets, FIFOs, devices) are rejected at encryption time; hardlinks are archived as regular file contents. File opens use `O_NOFOLLOW` on Unix, with post-open regular-file validation, to harden against symlink and special-file TOCTOU races during archiving. Extraction also rejects unsupported entry types instead of silently dropping them.
+- Symmetric decryption error message for wrong password is now "Password incorrect or file header corrupted" to account for ambiguous corruption cases
 - **Stream truncation vulnerability:** symmetric decryption had a code path that skipped `decrypt_last()`, allowing truncation at chunk boundaries without detection
 - **Security:** Directory encryption no longer follows symlinks — prevents unintended inclusion of files outside the selected directory tree. Symlink inputs are now explicitly rejected.
 - Symmetric decryption now verifies the HMAC before the key-hash check, so header tampering is reported as an authentication failure rather than "wrong password"

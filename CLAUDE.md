@@ -36,8 +36,8 @@ Three crates, one shared library:
 | `lib.rs` | Public API, encrypt/decrypt routing (magic-byte detection), path validation, key fingerprint |
 | `symmetric.rs` | Argon2id → HKDF-SHA3-256 → XChaCha20-Poly1305 streaming encrypt/decrypt |
 | `hybrid.rs` | X25519 + XChaCha20-Poly1305 envelope + XChaCha20-Poly1305 streaming encrypt/decrypt |
-| `archiver.rs` | TAR archive/unarchive (streaming, preserves directory structure). Rejects symlink inputs, disables symlink following in directories. Failed extractions rename partial output with `.incomplete` suffix. |
-| `format.rs` | File format constants, header parsing, forward-compatibility skip for minor versions |
+| `archiver.rs` | TAR archive/unarchive (streaming, preserves directory structure). Manual recursive walk rejects symlinks and special entries at archive time; hardlinks archived as regular files. Failed extractions rename partial output with `.incomplete` suffix. |
+| `format.rs` | File format constants, header/key-file parsing, version-dispatch helpers, forward-compatibility skip for minor versions |
 | `replication.rs` | Triple replication with majority-vote decoding for header error correction |
 | `common.rs` | Shared: `EncryptWriter`/`DecryptReader` streaming adapters (64KB chunks), HMAC-SHA3-256, `KdfParams` (serialized to headers/key files), shared crypto constants |
 | `error.rs` | `CryptoError` enum: `Io`, `Cipher`, `KeyDerivation`, `SliceConversion`, `CryptoOperation`, `InputPath`, `InvalidInput` |

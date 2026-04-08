@@ -32,6 +32,9 @@ hmac = "0.13"
 hkdf = "0.13"
 constant_time_eq = "0"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 ferrocrypt = { path = ".", features = ["fast-kdf"] }
 ctor = "0.8"

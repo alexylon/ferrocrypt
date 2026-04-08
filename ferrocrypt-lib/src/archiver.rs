@@ -21,37 +21,14 @@ pub(crate) fn validate_archive_path(path: &Path) -> Result<(), CryptoError> {
     Ok(())
 }
 
-/// Walks a directory tree and rejects symlinks and other non-regular entries.
-/// Hardlinks pass through as regular files (their contents are archived normally).
-/// Must be called before `append_dir_all` to catch unsupported entries at archive time
-/// rather than letting them silently enter the archive and fail during extraction.
-fn reject_unsupported_entries(dir: &Path) -> Result<(), CryptoError> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let ft = entry.file_type()?;
-        if ft.is_symlink() {
-            return Err(CryptoError::InvalidInput(format!(
-                "Directory contains a symlink: {}",
-                path.display()
-            )));
-        }
-        if !ft.is_file() && !ft.is_dir() {
-            return Err(CryptoError::InvalidInput(format!(
-                "Directory contains an unsupported entry: {}",
-                path.display()
-            )));
-        }
-        if ft.is_dir() {
-            reject_unsupported_entries(&path)?;
-        }
-    }
-    Ok(())
-}
-
 /// Archives a file or directory into a TAR stream written to `writer`.
 /// Returns a tuple of the file stem (base name without extension for files,
 /// directory name for directories) and the writer, so the caller can finalize it.
+///
+/// For directories, uses a manual recursive walk instead of `append_dir_all`
+/// to give per-entry control: symlinks and special entries (sockets, FIFOs,
+/// devices) are rejected with a clear error. Hardlinks are archived as regular
+/// file contents without preserving link identity.
 pub fn archive<W: Write>(
     input_path: impl AsRef<Path>,
     writer: W,
@@ -59,25 +36,24 @@ pub fn archive<W: Write>(
     let input_path = input_path.as_ref();
     if input_path.is_symlink() {
         return Err(CryptoError::InvalidInput(format!(
-            "Refusing to archive symlink: {}",
+            "Input is a symlink: {}",
+            input_path.display()
+        )));
+    }
+    if !input_path.is_file() && !input_path.is_dir() {
+        return Err(CryptoError::InvalidInput(format!(
+            "Unsupported file type: {}",
             input_path.display()
         )));
     }
     let mut builder = tar::Builder::new(writer);
-    builder.follow_symlinks(false);
 
     let stem = if input_path.is_file() {
         let file_name = input_path
             .file_name()
             .ok_or_else(|| CryptoError::InvalidInput("Cannot get file name".to_string()))?;
 
-        let metadata = fs::metadata(input_path)?;
-        let mut header = tar::Header::new_gnu();
-        header.set_size(metadata.len());
-        header.set_mode(0o755);
-        header.set_cksum();
-        let mut file = File::open(input_path)?;
-        builder.append_data(&mut header, Path::new(file_name), &mut file)?;
+        append_file(&mut builder, input_path, Path::new(file_name))?;
 
         crate::common::get_file_stem(input_path)?
             .to_string_lossy()
@@ -87,13 +63,100 @@ pub fn archive<W: Write>(
             .file_name()
             .ok_or_else(|| CryptoError::InvalidInput("Cannot get directory name".to_string()))?;
 
-        reject_unsupported_entries(input_path)?;
-        builder.append_dir_all(Path::new(dir_name), input_path)?;
+        let archive_root = PathBuf::from(dir_name);
+        archive_directory(&mut builder, input_path, &archive_root)?;
         dir_name.to_string_lossy().into_owned()
     };
 
     let writer = builder.into_inner()?;
     Ok((stem, writer))
+}
+
+fn append_file<W: Write>(
+    builder: &mut tar::Builder<W>,
+    src_path: &Path,
+    archive_path: &Path,
+) -> Result<(), CryptoError> {
+    let mut file = open_no_follow(src_path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(CryptoError::InvalidInput(format!(
+            "Path is no longer a regular file: {}",
+            src_path.display()
+        )));
+    }
+    let mut header = tar::Header::new_gnu();
+    header.set_size(metadata.len());
+    header.set_mode(0o755);
+    header.set_cksum();
+    builder.append_data(&mut header, archive_path, &mut file)?;
+    Ok(())
+}
+
+/// Opens a file refusing to follow symlinks.
+/// On Unix, uses `O_NOFOLLOW` so the open itself is atomic.
+/// On other platforms, falls back to a symlink_metadata check before opening.
+#[cfg(unix)]
+fn open_no_follow(path: &Path) -> Result<File, CryptoError> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|e| {
+            if e.raw_os_error() == Some(libc::ELOOP) {
+                CryptoError::InvalidInput(format!("Path is a symlink: {}", path.display()))
+            } else {
+                CryptoError::Io(e)
+            }
+        })
+}
+
+#[cfg(not(unix))]
+fn open_no_follow(path: &Path) -> Result<File, CryptoError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() {
+        return Err(CryptoError::InvalidInput(format!(
+            "Path is not a regular file: {}",
+            path.display()
+        )));
+    }
+    Ok(File::open(path)?)
+}
+
+/// Recursively archives a directory. Uses `entry.file_type()` (lstat-based)
+/// to classify entries without following symlinks.
+fn archive_directory<W: Write>(
+    builder: &mut tar::Builder<W>,
+    dir_path: &Path,
+    archive_prefix: &Path,
+) -> Result<(), CryptoError> {
+    builder.append_dir(archive_prefix, dir_path)?;
+
+    for entry in fs::read_dir(dir_path)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let ft = entry.file_type()?;
+        let entry_archive_path = archive_prefix.join(entry.file_name());
+
+        if ft.is_symlink() {
+            return Err(CryptoError::InvalidInput(format!(
+                "Directory contains a symlink: {}",
+                src_path.display()
+            )));
+        } else if ft.is_dir() {
+            archive_directory(builder, &src_path, &entry_archive_path)?;
+        } else if ft.is_file() {
+            append_file(builder, &src_path, &entry_archive_path)?;
+        } else {
+            return Err(CryptoError::InvalidInput(format!(
+                "Unsupported file type in directory: {}",
+                src_path.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Extracts a TAR archive from `reader` into the specified directory.

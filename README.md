@@ -52,9 +52,15 @@ Every `.fcr` file starts with a header followed by the encrypted payload. The he
 - Streaming encryption — plaintext never touches disk as an intermediate file
 - Passphrases handled via the `secrecy` crate (zeroized on drop, hidden from Debug/Display)
 - Triple-replicated headers with majority-vote decoding for error correction. The header is the most critical part of an encrypted file — it holds the salts, nonces, and key material needed to begin decryption. Unlike the ciphertext, which is protected per-chunk by Poly1305 tags, a single corrupted header byte would make the entire file unrecoverable. Triple replication ensures that up to 33% of the stored header bytes can be corrupted and still be automatically corrected without data loss. Triple replication was chosen over Reed-Solomon because each header field must be decoded independently, making RS degenerate to identical copies (k=1) with added Galois field overhead and no correction advantage.
-- Symlink inputs are rejected; directory encryption does not follow symlinks — prevents unintended inclusion of files outside the selected tree. Symlinks inside directories are not preserved through encrypt/decrypt.
+- Symlink inputs are rejected; directory encryption does not follow symlinks — prevents unintended inclusion of files outside the selected tree. Directories containing symlinks or other special entries (sockets, FIFOs, devices) are rejected at encryption time with a clear error. Hardlinks are archived as regular file contents; hardlink relationships are not preserved.
 - Failed encryptions clean up partial `.fcr` output files; failed decryptions rename partial output with `.incomplete` suffix
 - Versioned file format with magic bytes — corrupted or incompatible files produce clear errors
+
+### Limitations
+
+- **Decryption is non-transactional.** If a decryption fails mid-stream (e.g. due to payload corruption detected late in the ciphertext), some plaintext may already be extracted to disk. Partially extracted output is renamed with an `.incomplete` suffix so the user can identify and inspect it. This is intentional — the partial output may be the only recoverable data when the original ciphertext is damaged.
+- **File metadata is not fully preserved.** FerroCrypt preserves file contents and directory structure. It does not preserve permissions, timestamps, or ownership. Hardlink relationships are not preserved (hardlinked files are archived as independent copies). Symlinks and special entries cause an error at encryption time. If you need faithful filesystem backup/restore semantics, use a dedicated backup tool and encrypt its output with FerroCrypt.
+- **No backward compatibility with pre-v3 format versions.** The current release uses encrypted-file format v3.0 and key-file format v2.0. Files and keys produced by earlier versions (v0.1.x / v0.2.x) cannot be decrypted or used — those versions relied on a different crypto stack (RSA/OpenSSL). If you have data encrypted with an older version, decrypt it with that version first (available on crates.io), then re-encrypt with the current release. Future FerroCrypt releases are intended to continue decrypting previously released v3+ encrypted-file formats and reading previously released v2+ key-file formats whenever practical.
 
 ### Project Structure
 

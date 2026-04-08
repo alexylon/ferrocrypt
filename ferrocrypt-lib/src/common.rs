@@ -23,19 +23,29 @@ pub struct KdfParams {
 pub const KDF_PARAMS_SIZE: usize = 12; // 3 × u32 big-endian
 
 impl KdfParams {
+    const DEFAULT_MEM_COST: u32 = 1_048_576; // 1 GiB
+    const DEFAULT_TIME_COST: u32 = 4;
+    const DEFAULT_LANES: u32 = 4;
+
+    // Minimal params for fast test execution.
+    // Auto-enabled via [dev-dependencies]; blocked in release builds
+    // by a compile_error! guard in lib.rs.
+    const FAST_KDF_MEM_COST: u32 = 8192;
+    const FAST_KDF_TIME_COST: u32 = 1;
+
     pub fn default_params() -> Self {
-        // "fast-kdf" uses minimal Argon2 params so tests finish quickly.
-        // The feature is auto-enabled via [dev-dependencies] and blocked
-        // in release builds by a compile_error! guard in lib.rs.
-        let (mem_cost, time_cost) = if cfg!(feature = "fast-kdf") {
-            (8192, 1)
+        if cfg!(feature = "fast-kdf") {
+            Self {
+                mem_cost: Self::FAST_KDF_MEM_COST,
+                time_cost: Self::FAST_KDF_TIME_COST,
+                lanes: Self::DEFAULT_LANES,
+            }
         } else {
-            (1048576, 4)
-        };
-        Self {
-            mem_cost,
-            time_cost,
-            lanes: 4,
+            Self {
+                mem_cost: Self::DEFAULT_MEM_COST,
+                time_cost: Self::DEFAULT_TIME_COST,
+                lanes: Self::DEFAULT_LANES,
+            }
         }
     }
 
@@ -47,17 +57,34 @@ impl KdfParams {
         buf
     }
 
+    // Upper bounds for KDF parameters from untrusted headers.
+    // These prevent malicious files from causing excessive CPU/memory usage.
+    const MAX_MEM_COST: u32 = 2 * 1024 * 1024; // 2 GiB
+    const MAX_TIME_COST: u32 = 12;
+    const MAX_LANES: u32 = 8;
+
     pub fn from_bytes(bytes: &[u8; KDF_PARAMS_SIZE]) -> Result<Self, CryptoError> {
         let params = Self {
             mem_cost: u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
             time_cost: u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
             lanes: u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
         };
-        // Cap at 8 GiB to prevent malicious files from triggering OOM
-        if params.mem_cost > 8 * 1024 * 1024 {
+        if params.mem_cost == 0 || params.mem_cost > Self::MAX_MEM_COST {
             return Err(CryptoError::CryptoOperation(format!(
-                "KDF memory cost {} KiB exceeds maximum (8 GiB)",
+                "Invalid KDF memory cost: {} KiB",
                 params.mem_cost
+            )));
+        }
+        if params.time_cost == 0 || params.time_cost > Self::MAX_TIME_COST {
+            return Err(CryptoError::CryptoOperation(format!(
+                "Invalid KDF time cost: {}",
+                params.time_cost
+            )));
+        }
+        if params.lanes == 0 || params.lanes > Self::MAX_LANES {
+            return Err(CryptoError::CryptoOperation(format!(
+                "Invalid KDF parallelism: {}",
+                params.lanes
             )));
         }
         Ok(params)
@@ -413,5 +440,58 @@ mod tests {
         let secret = SecretString::from("my_secret_password".to_string());
         let debug_str = format!("{:?}", secret);
         assert!(debug_str.contains("Secret"));
+    }
+
+    #[test]
+    fn test_kdf_params_valid_defaults() {
+        let params = KdfParams::default_params();
+        let bytes = params.to_bytes();
+        assert!(KdfParams::from_bytes(&bytes).is_ok());
+    }
+
+    #[test]
+    fn test_kdf_params_rejects_zero_mem_cost() {
+        let mut bytes = KdfParams::default_params().to_bytes();
+        bytes[0..4].copy_from_slice(&0u32.to_be_bytes());
+        assert!(KdfParams::from_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn test_kdf_params_rejects_zero_time_cost() {
+        let mut bytes = KdfParams::default_params().to_bytes();
+        bytes[4..8].copy_from_slice(&0u32.to_be_bytes());
+        assert!(KdfParams::from_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn test_kdf_params_rejects_zero_lanes() {
+        let mut bytes = KdfParams::default_params().to_bytes();
+        bytes[8..12].copy_from_slice(&0u32.to_be_bytes());
+        assert!(KdfParams::from_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn test_kdf_params_rejects_excessive_time_cost() {
+        let mut bytes = KdfParams::default_params().to_bytes();
+        bytes[4..8].copy_from_slice(&13u32.to_be_bytes());
+        assert!(KdfParams::from_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn test_kdf_params_rejects_excessive_lanes() {
+        let mut bytes = KdfParams::default_params().to_bytes();
+        bytes[8..12].copy_from_slice(&9u32.to_be_bytes());
+        assert!(KdfParams::from_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn test_kdf_params_accepts_max_bounds() {
+        let bytes = KdfParams {
+            mem_cost: 2 * 1024 * 1024,
+            time_cost: 12,
+            lanes: 8,
+        }
+        .to_bytes();
+        assert!(KdfParams::from_bytes(&bytes).is_ok());
     }
 }

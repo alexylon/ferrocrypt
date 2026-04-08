@@ -88,7 +88,7 @@ pub fn encrypt_file(
         combined_key[..ENCRYPTION_KEY_SIZE].copy_from_slice(&encryption_key);
         combined_key[ENCRYPTION_KEY_SIZE..].copy_from_slice(&hmac_key);
 
-        let recipient_public = read_public_key(&public_key_path)?;
+        let recipient_public = read_public_key(public_key_path)?;
         let envelope = seal_envelope(&combined_key, &recipient_public)?;
 
         if output_path.exists() {
@@ -118,7 +118,6 @@ pub fn encrypt_file(
         let encoded_hmac_tag = rep_encode(&hmac_tag);
 
         let mut dest = OpenOptions::new()
-            .write(true)
             .append(true)
             .create_new(true)
             .open(&output_path)?;

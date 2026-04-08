@@ -190,9 +190,10 @@ impl<W: Write> EncryptWriter<W> {
 
 impl<W: Write> Write for EncryptWriter<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let encryptor = self.encryptor.as_mut().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, "EncryptWriter already finished")
-        })?;
+        let encryptor = self
+            .encryptor
+            .as_mut()
+            .ok_or_else(|| io::Error::other("EncryptWriter already finished"))?;
 
         self.buffer.extend_from_slice(buf);
 
@@ -201,7 +202,7 @@ impl<W: Write> Write for EncryptWriter<W> {
             let chunk = std::mem::replace(&mut self.buffer, remaining);
             let ciphertext = encryptor
                 .encrypt_next(chunk.as_slice())
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                .map_err(|e| io::Error::other(e.to_string()))?;
             self.output.write_all(&ciphertext)?;
         }
 
@@ -261,19 +262,21 @@ impl<R: Read> DecryptReader<R> {
         }
 
         if filled == ENCRYPTED_CHUNK_SIZE {
-            let decryptor = self.decryptor.as_mut().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::Other, "decryptor already consumed")
-            })?;
+            let decryptor = self
+                .decryptor
+                .as_mut()
+                .ok_or_else(|| io::Error::other("decryptor already consumed"))?;
             self.plaintext = decryptor
                 .decrypt_next(encrypted.as_slice())
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                .map_err(|e| io::Error::other(e.to_string()))?;
         } else {
-            let decryptor = self.decryptor.take().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::Other, "decryptor already consumed")
-            })?;
+            let decryptor = self
+                .decryptor
+                .take()
+                .ok_or_else(|| io::Error::other("decryptor already consumed"))?;
             self.plaintext = decryptor
                 .decrypt_last(&encrypted[..filled])
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                .map_err(|e| io::Error::other(e.to_string()))?;
             self.done = true;
         }
 

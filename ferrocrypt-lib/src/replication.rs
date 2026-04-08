@@ -5,7 +5,7 @@ use crate::CryptoError;
 /// where each copy is even-length (zero-padded if input is odd-length)
 /// and the padding indicator is itself triple-replicated.
 pub const fn rep_encoded_size(original_size: usize) -> usize {
-    let padded_size = if original_size % 2 != 0 {
+    let padded_size = if !original_size.is_multiple_of(2) {
         original_size + 1
     } else {
         original_size
@@ -18,7 +18,7 @@ pub const fn rep_encoded_size(original_size: usize) -> usize {
 /// Wire format: [pad, pad, pad, copy_0, copy_1, copy_2]
 pub fn rep_encode(data: &[u8]) -> Vec<u8> {
     let mut padded = data.to_vec();
-    let padding_byte = if data.len() % 2 != 0 {
+    let padding_byte = if !data.len().is_multiple_of(2) {
         padded.push(0);
         1u8
     } else {
@@ -49,7 +49,7 @@ pub fn rep_decode(data: &[u8]) -> Result<Vec<u8>, CryptoError> {
     let padding_byte = if p0 == p1 || p0 == p2 { p0 } else { p1 };
     let remaining = &data[3..];
 
-    if remaining.len() % 3 != 0 {
+    if !remaining.len().is_multiple_of(3) {
         return Err(CryptoError::InvalidInput(
             "Incorrect encoded bytes length".to_string(),
         ));

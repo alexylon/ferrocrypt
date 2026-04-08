@@ -25,6 +25,11 @@ const HKDF_SALT_SIZE: usize = 32;
 const HKDF_INFO_ENC: &[u8] = b"ferrocrypt-enc";
 const HKDF_INFO_HMAC: &[u8] = b"ferrocrypt-hmac";
 
+type DerivedKeys = (
+    Zeroizing<[u8; ENCRYPTION_KEY_SIZE]>,
+    Zeroizing<[u8; HMAC_KEY_SIZE]>,
+);
+
 /// Derives domain-separated encryption and HMAC subkeys from a passphrase.
 ///
 /// Pipeline: passphrase + salt → Argon2id (32 bytes IKM) → HKDF-SHA3-256 → (encryption_key, hmac_key)
@@ -33,13 +38,7 @@ fn derive_keys(
     salt: &[u8],
     hkdf_salt: &[u8],
     kdf_params: &KdfParams,
-) -> Result<
-    (
-        Zeroizing<[u8; ENCRYPTION_KEY_SIZE]>,
-        Zeroizing<[u8; HMAC_KEY_SIZE]>,
-    ),
-    CryptoError,
-> {
+) -> Result<DerivedKeys, CryptoError> {
     let argon2_config = kdf_params.to_argon2_config();
     let ikm = Zeroizing::new(argon2::hash_raw(
         passphrase.expose_secret().as_bytes(),
@@ -100,7 +99,6 @@ pub fn encrypt_file(
 
     let encrypt_result: Result<(), CryptoError> = (|| {
         let mut dest = OpenOptions::new()
-            .write(true)
             .append(true)
             .create_new(true)
             .open(&output_path)?;

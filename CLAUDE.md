@@ -87,5 +87,6 @@ Decryption reverses: read header → derive/decrypt keys → verify HMAC → Dec
 - Double-check the newly implemented logic using adversarial thinking
 - Double-check if the newly implemented changes are future-proof
 - Tests should be self-contained and only cover important behavior
+- Run `cargo clippy -p ferrocrypt --all-targets -- -D warnings`
 - After each new feature, update README.md and CHANGELOG.md (under `[Unreleased]`)
 - After each session, double-check all changes against these guidelines before finishing

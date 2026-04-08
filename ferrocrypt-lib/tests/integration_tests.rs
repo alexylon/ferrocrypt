@@ -80,7 +80,7 @@ fn test_symmetric_encrypt_decrypt_single_file() -> Result<(), CryptoError> {
 
     // Decrypt
     let decrypt_result = symmetric_encryption(
-        &encrypt_dir.join("input.fcr"),
+        encrypt_dir.join("input.fcr"),
         &decrypt_dir,
         &passphrase,
         None,
@@ -116,7 +116,7 @@ fn test_symmetric_encrypt_decrypt_directory() -> Result<(), CryptoError> {
 
     // Decrypt directory
     let decrypt_result = symmetric_encryption(
-        &encrypt_dir.join("test_folder.fcr"),
+        encrypt_dir.join("test_folder.fcr"),
         &decrypt_dir,
         &passphrase,
         None,
@@ -161,7 +161,7 @@ fn test_symmetric_wrong_password() -> Result<(), CryptoError> {
 
     // Try to decrypt with wrong password - should fail
     let result = symmetric_encryption(
-        &encrypt_dir.join("secret.fcr"),
+        encrypt_dir.join("secret.fcr"),
         &decrypt_dir,
         &wrong_pass,
         None,
@@ -199,7 +199,7 @@ fn test_symmetric_encrypt_decrypt_multi_chunk_file() -> Result<(), CryptoError> 
     assert!(encrypt_dir.join("multi_chunk.fcr").exists());
 
     symmetric_encryption(
-        &encrypt_dir.join("multi_chunk.fcr"),
+        encrypt_dir.join("multi_chunk.fcr"),
         &decrypt_dir,
         &passphrase,
         None,
@@ -289,7 +289,7 @@ fn test_hybrid_keygen_encrypt_decrypt_file() -> Result<(), CryptoError> {
     let secret_key_path = keys_dir.join("private.key");
 
     let decrypt_result = hybrid_encryption(
-        &encrypt_dir.join("data.fcr"),
+        encrypt_dir.join("data.fcr"),
         &decrypt_dir,
         &secret_key_path,
         &key_passphrase,
@@ -342,7 +342,7 @@ fn test_hybrid_encrypt_decrypt_directory() -> Result<(), CryptoError> {
     let secret_key_path = keys_dir.join("private.key");
 
     hybrid_encryption(
-        &encrypt_dir.join("test_folder.fcr"),
+        encrypt_dir.join("test_folder.fcr"),
         &decrypt_dir,
         &secret_key_path,
         &key_passphrase,
@@ -396,7 +396,7 @@ fn test_hybrid_wrong_key_passphrase() -> Result<(), CryptoError> {
     let secret_key_path = keys_dir.join("private.key");
 
     let result = hybrid_encryption(
-        &encrypt_dir.join("data.fcr"),
+        encrypt_dir.join("data.fcr"),
         &decrypt_dir,
         &secret_key_path,
         &wrong_pass,
@@ -435,7 +435,7 @@ fn test_empty_file_encryption() -> Result<(), CryptoError> {
 
     // Decrypt
     symmetric_encryption(
-        &encrypt_dir.join("empty.fcr"),
+        encrypt_dir.join("empty.fcr"),
         &decrypt_dir,
         &passphrase,
         None,
@@ -469,7 +469,7 @@ fn test_unicode_content() -> Result<(), CryptoError> {
 
     // Decrypt
     symmetric_encryption(
-        &encrypt_dir.join("unicode.fcr"),
+        encrypt_dir.join("unicode.fcr"),
         &decrypt_dir,
         &passphrase,
         None,
@@ -500,7 +500,7 @@ fn test_special_characters_in_filename() -> Result<(), CryptoError> {
     symmetric_encryption(&input_file, &encrypt_dir, &passphrase, None, |_| {})?;
 
     symmetric_encryption(
-        &encrypt_dir.join("file-with_special.chars.fcr"),
+        encrypt_dir.join("file-with_special.chars.fcr"),
         &decrypt_dir,
         &passphrase,
         None,
@@ -565,7 +565,7 @@ fn test_binary_file_content() -> Result<(), CryptoError> {
     symmetric_encryption(&input_file, &encrypt_dir, &passphrase, None, |_| {})?;
 
     symmetric_encryption(
-        &encrypt_dir.join("data.fcr"),
+        encrypt_dir.join("data.fcr"),
         &decrypt_dir,
         &passphrase,
         None,
@@ -598,7 +598,7 @@ fn test_symmetric_streaming_wrong_password() -> Result<(), CryptoError> {
 
     // Decrypt with wrong password
     let result = symmetric_encryption(
-        &encrypt_dir.join("data.fcr"),
+        encrypt_dir.join("data.fcr"),
         &decrypt_dir,
         &wrong_pass,
         None,
@@ -633,7 +633,7 @@ fn test_symmetric_encrypt_decrypt_directory_streaming() -> Result<(), CryptoErro
     assert!(encrypt_dir.join("test_folder.fcr").exists());
 
     symmetric_encryption(
-        &encrypt_dir.join("test_folder.fcr"),
+        encrypt_dir.join("test_folder.fcr"),
         &decrypt_dir,
         &passphrase,
         None,
@@ -719,7 +719,7 @@ fn test_hybrid_wrong_key_pair() -> Result<(), CryptoError> {
     let secret_key_b = keys_b.join("private.key");
 
     let result = hybrid_encryption(
-        &encrypt_dir.join("data.fcr"),
+        encrypt_dir.join("data.fcr"),
         &decrypt_dir,
         &secret_key_b,
         &pass_b,
@@ -770,7 +770,7 @@ fn test_hybrid_key_round_trip() -> Result<(), CryptoError> {
     let secret_key_path = keys_dir.join("private.key");
 
     hybrid_encryption(
-        &encrypt_dir.join("data.fcr"),
+        encrypt_dir.join("data.fcr"),
         &decrypt_dir,
         &secret_key_path,
         &key_passphrase,
@@ -817,7 +817,7 @@ fn test_hybrid_binary_file() -> Result<(), CryptoError> {
     let secret_key_path = keys_dir.join("private.key");
 
     hybrid_encryption(
-        &encrypt_dir.join("data.fcr"),
+        encrypt_dir.join("data.fcr"),
         &decrypt_dir,
         &secret_key_path,
         &key_passphrase,
@@ -1298,7 +1298,7 @@ fn test_hybrid_empty_file() -> Result<(), CryptoError> {
     let secret_key = keys_dir.join("private.key");
 
     hybrid_encryption(
-        &encrypt_dir.join("empty.fcr"),
+        encrypt_dir.join("empty.fcr"),
         &decrypt_dir,
         &secret_key,
         &key_passphrase,
@@ -1870,8 +1870,8 @@ fn test_different_keys_different_fingerprints() -> Result<(), CryptoError> {
     generate_key_pair(&passphrase, &keys_a, |_| {})?;
     generate_key_pair(&passphrase, &keys_b, |_| {})?;
 
-    let fp_a = public_key_fingerprint(&keys_a.join("public.key"))?;
-    let fp_b = public_key_fingerprint(&keys_b.join("public.key"))?;
+    let fp_a = public_key_fingerprint(keys_a.join("public.key"))?;
+    let fp_b = public_key_fingerprint(keys_b.join("public.key"))?;
 
     assert_ne!(fp_a, fp_b);
 
@@ -1921,7 +1921,7 @@ fn test_hybrid_encrypt_cleans_up_on_failure() -> Result<(), CryptoError> {
     let result = hybrid_encryption(
         &symlink_path,
         &encrypt_dir,
-        &keys_dir.join("public.key"),
+        keys_dir.join("public.key"),
         &key_pass,
         None,
         |_| {},
@@ -2110,7 +2110,7 @@ fn test_older_key_version_rejected() -> Result<(), CryptoError> {
     hybrid_encryption(
         &input_file,
         &encrypt_dir,
-        &keys_dir.join("public.key"),
+        keys_dir.join("public.key"),
         &empty,
         None,
         |_| {},
@@ -2123,7 +2123,7 @@ fn test_older_key_version_rejected() -> Result<(), CryptoError> {
     fs::write(&secret_key_path, &key_data)?;
 
     let result = hybrid_encryption(
-        &encrypt_dir.join("data.fcr"),
+        encrypt_dir.join("data.fcr"),
         &decrypt_dir,
         &secret_key_path,
         &passphrase,

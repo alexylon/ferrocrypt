@@ -55,6 +55,38 @@ fn zeroize_secret_key(key: &mut SecretKey) {
     }
 }
 
+/// Internal RAII wrapper that guarantees full key zeroization on drop.
+///
+/// This keeps the `unsafe` wipe centralized and prevents call sites from
+/// needing to remember explicit zeroization.
+struct ManagedSecretKey(SecretKey);
+
+impl ManagedSecretKey {
+    fn new(key: SecretKey) -> Self {
+        Self(key)
+    }
+}
+
+impl std::ops::Deref for ManagedSecretKey {
+    type Target = SecretKey;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for ManagedSecretKey {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for ManagedSecretKey {
+    fn drop(&mut self) {
+        zeroize_secret_key(&mut self.0);
+    }
+}
+
 pub fn encrypt_file(
     input_path: &Path,
     output_dir: &Path,
@@ -234,9 +266,9 @@ fn decrypt_file_v3(
         .try_into()
         .map_err(|_| CryptoError::CryptoOperation("Envelope has unexpected length".to_string()))?;
 
-    let mut recipient_secret = read_secret_key(secret_key_path, passphrase)?;
+    let recipient_secret = read_secret_key(secret_key_path, passphrase)?;
     let envelope_result = open_envelope(&envelope, &recipient_secret);
-    zeroize_secret_key(&mut recipient_secret);
+    drop(recipient_secret);
     let mut decrypted_combined_key = envelope_result?;
 
     let result = (|| -> Result<String, CryptoError> {
@@ -289,7 +321,10 @@ fn read_public_key_v2(
     Ok(PublicKey::from(key_bytes))
 }
 
-fn read_secret_key(path: &Path, passphrase: &SecretString) -> Result<SecretKey, CryptoError> {
+fn read_secret_key(
+    path: &Path,
+    passphrase: &SecretString,
+) -> Result<ManagedSecretKey, CryptoError> {
     let data = fs::read(path)?;
     let header = format::parse_key_file_header(&data, format::KEY_FILE_TYPE_SECRET)?;
     match header.version {
@@ -302,7 +337,7 @@ fn read_secret_key_v2(
     data: &[u8],
     header: &format::ParsedKeyHeader,
     passphrase: &SecretString,
-) -> Result<SecretKey, CryptoError> {
+) -> Result<ManagedSecretKey, CryptoError> {
     format::validate_key_v2_layout(data, header, SECRET_KEY_DATA_SIZE)?;
 
     let body_start = format::KEY_FILE_HEADER_SIZE;
@@ -335,7 +370,7 @@ fn read_secret_key_v2(
     let mut plaintext = plaintext;
     plaintext.zeroize();
 
-    let key = SecretKey::from(secret_bytes);
+    let key = ManagedSecretKey::new(SecretKey::from(secret_bytes));
     secret_bytes.zeroize();
     Ok(key)
 }
@@ -344,10 +379,10 @@ fn seal_envelope(
     combined_key: &[u8],
     recipient_public: &PublicKey,
 ) -> Result<[u8; ENVELOPE_SIZE], CryptoError> {
-    let mut ephemeral_secret = SecretKey::generate(&mut OsRng);
+    let ephemeral_secret = ManagedSecretKey::new(SecretKey::generate(&mut OsRng));
     let ephemeral_public = ephemeral_secret.public_key();
     let chacha_box = ChaChaBox::new(recipient_public, &ephemeral_secret);
-    zeroize_secret_key(&mut ephemeral_secret);
+    drop(ephemeral_secret);
     let nonce = ChaChaBox::generate_nonce(&mut OsRng);
     let ciphertext = chacha_box
         .encrypt(&nonce, combined_key)
@@ -404,9 +439,9 @@ pub fn generate_key_pair(
         ));
     }
     fs::create_dir_all(output_dir)?;
-    on_progress("Generating key pair\u{2026}");
+    on_progress("Generating key pair…");
 
-    let mut secret_key = SecretKey::generate(&mut OsRng);
+    let secret_key = ManagedSecretKey::new(SecretKey::generate(&mut OsRng));
     let public_key = secret_key.public_key();
 
     // Encrypt private key at rest with passphrase via Argon2id + XChaCha20-Poly1305
@@ -424,7 +459,7 @@ pub fn generate_key_pair(
     let cipher = XChaCha20Poly1305::new(derived_key.as_slice().into());
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
     let raw_secret = Zeroizing::new(secret_key.to_bytes());
-    zeroize_secret_key(&mut secret_key);
+    drop(secret_key);
     let encrypted_secret = cipher
         .encrypt(&nonce, raw_secret.as_slice())
         .map_err(|_| CryptoError::CryptoOperation("Failed to encrypt private key".to_string()))?;
@@ -555,9 +590,9 @@ mod tests {
         let envelope: [u8; ENVELOPE_SIZE] = envelope_vec.as_slice().try_into().unwrap();
 
         // Open envelope to get the HMAC key
-        let mut secret = read_secret_key(&keys_dir.join(SECRET_KEY_FILENAME), &key_pass)?;
+        let secret = read_secret_key(&keys_dir.join(SECRET_KEY_FILENAME), &key_pass)?;
         let decrypted = open_envelope(&envelope, &secret)?;
-        zeroize_secret_key(&mut secret);
+        drop(secret);
         let hmac_key = &decrypted[ENCRYPTION_KEY_SIZE..COMBINED_KEY_SIZE];
 
         // --- Build a synthetic v3.1 prefix with larger header_len ---

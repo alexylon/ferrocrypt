@@ -29,7 +29,7 @@ Cross-platform file encryption tool with CLI and desktop interfaces. Written in 
 FerroCrypt encrypts and decrypts files and directories. It supports two modes:
 
 - **Symmetric** — Password-based. Uses XChaCha20-Poly1305 with Argon2id key derivation and HKDF-SHA3-256 subkey expansion. Same password encrypts and decrypts.
-- **Hybrid** — Public/private key based. Combines X25519 key agreement with XChaCha20-Poly1305 (data encryption). Each file gets a unique random key sealed with the recipient's public key. Decryption requires the private key and its passphrase.
+- **Hybrid** — Public/private key based. Combines X25519 key agreement with XChaCha20-Poly1305 (data encryption). Each file gets a unique random key sealed with the recipient's public key. Decryption requires the private key and its passphrase. Hybrid mode provides confidentiality and integrity for the recipient, but does not authenticate the sender — it is not a substitute for digital signatures.
 
 Both modes produce `.fcr` files. Decryption is based on magic bytes in the file header, not the file extension — renaming a file won't break anything.
 
@@ -127,6 +127,8 @@ cargo add ferrocrypt
 | `fingerprint` | `fp` | Print a public key's SHA3-256 fingerprint |
 
 Run without arguments to start an interactive REPL. Aliases are available in interactive mode.
+
+**Note:** The `-p` flag passes the passphrase on the command line, which may be recorded in shell history. Consider clearing your history after use, or wrapping the call in a script that reads the passphrase from a secure source.
 
 ### Symmetric
 

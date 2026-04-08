@@ -30,6 +30,29 @@
 ///
 /// Most crate releases do not change the format version at all.
 ///
+/// ## Minor-version contract
+///
+/// A minor bump is only valid for changes that older readers of the same major
+/// can safely ignore. Minor versions **must not** introduce:
+/// - required crypto or AEAD changes
+/// - required KDF behavior changes
+/// - required authentication semantics
+/// - any field that older readers must understand to decrypt correctly
+///
+/// If a change requires the reader to understand the new field to decrypt
+/// safely, it **must** be a major bump.
+///
+/// ## HMAC trust boundary for trailing fields
+///
+/// The current HMAC authenticates the decoded prefix and all known header fields
+/// **before** the stored HMAC tag. Any trailing bytes appended
+/// by a future minor version (skipped via `header_len`) are **outside** the
+/// HMAC coverage as understood by older readers. This means skipped trailing
+/// fields are not authenticated by older readers and must therefore be:
+/// - optional (not required for decryption)
+/// - non-security-critical (not trusted for access control or key derivation)
+/// - ignorable (older readers produce correct output without them)
+///
 /// ## Detection of old files
 ///
 /// Files created before this header existed start with bincode-serialized flags.
@@ -62,6 +85,15 @@ pub struct FileHeader {
     pub major: u8,
     pub minor: u8,
     pub header_len: u16,
+    pub flags: u16,
+}
+
+#[allow(dead_code)]
+pub struct ParsedKeyHeader {
+    pub key_type: u8,
+    pub version: u8,
+    pub algorithm: u8,
+    pub data_len: u16,
     pub flags: u16,
 }
 
@@ -98,7 +130,7 @@ pub fn read_header_from_reader(
     let mut prefix = [0u8; HEADER_PREFIX_SIZE];
     prefix.copy_from_slice(&decoded);
 
-    let header = validate_header_bytes(&prefix, expected_type)?;
+    let header = parse_header_bytes(&prefix, expected_type)?;
     Ok((prefix, header))
 }
 
@@ -127,7 +159,10 @@ pub fn skip_unknown_header_bytes(
     Ok(())
 }
 
-fn validate_header_bytes(
+/// Parses the decoded 8-byte prefix into a `FileHeader`.
+/// Validates magic byte, type, and minimum header length.
+/// Does NOT enforce version or flags policy — callers dispatch on `header.major`.
+fn parse_header_bytes(
     prefix: &[u8; HEADER_PREFIX_SIZE],
     expected_type: u8,
 ) -> Result<FileHeader, CryptoError> {
@@ -151,43 +186,62 @@ fn validate_header_bytes(
         )));
     }
 
-    let major = prefix[2];
-    let minor = prefix[3];
-
-    if major > ENCRYPTED_FILE_VERSION_MAJOR {
-        return Err(CryptoError::CryptoOperation(format!(
-            "Format version {}.{} not supported (current: {}). Upgrade FerroCrypt.",
-            major, minor, ENCRYPTED_FILE_VERSION_MAJOR
-        )));
-    }
-    if major < ENCRYPTED_FILE_VERSION_MAJOR {
-        return Err(CryptoError::CryptoOperation(format!(
-            "Format version {}.{} no longer supported (current: {})",
-            major, minor, ENCRYPTED_FILE_VERSION_MAJOR
-        )));
-    }
-
     let header_len = u16::from_be_bytes([prefix[4], prefix[5]]);
     if (header_len as usize) < HEADER_PREFIX_ENCODED_SIZE {
         return Err(CryptoError::CryptoOperation(
             "File header is corrupted (invalid header length)".to_string(),
         ));
     }
-    let flags = u16::from_be_bytes([prefix[6], prefix[7]]);
-    if flags != 0 {
-        return Err(CryptoError::CryptoOperation(format!(
-            "Unknown header flags (0x{:04X}). Upgrade FerroCrypt.",
-            flags
-        )));
-    }
 
     Ok(FileHeader {
         format_type: prefix[1],
-        major,
-        minor,
+        major: prefix[2],
+        minor: prefix[3],
         header_len,
-        flags,
+        flags: u16::from_be_bytes([prefix[6], prefix[7]]),
     })
+}
+
+pub fn validate_file_flags(header: &FileHeader) -> Result<(), CryptoError> {
+    if header.flags != 0 {
+        return Err(CryptoError::CryptoOperation(format!(
+            "Unknown header flags (0x{:04X}). Upgrade FerroCrypt.",
+            header.flags
+        )));
+    }
+    Ok(())
+}
+
+pub fn unsupported_file_version_error(major: u8, minor: u8) -> CryptoError {
+    if major < ENCRYPTED_FILE_VERSION_MAJOR {
+        CryptoError::CryptoOperation(format!(
+            "Format version {}.{} is not supported. \
+             Files created with older versions must be decrypted \
+             using those versions, available on crates.io.",
+            major, minor
+        ))
+    } else {
+        CryptoError::CryptoOperation(format!(
+            "Format version {}.{} not supported (current: {}). Upgrade FerroCrypt.",
+            major, minor, ENCRYPTED_FILE_VERSION_MAJOR
+        ))
+    }
+}
+
+pub fn unsupported_key_version_error(version: u8) -> CryptoError {
+    if version < KEY_FILE_VERSION {
+        CryptoError::CryptoOperation(format!(
+            "Key file version {} is not supported. \
+             Keys created with older versions must be used \
+             with those versions, available on crates.io.",
+            version
+        ))
+    } else {
+        CryptoError::CryptoOperation(format!(
+            "Key file version {} not supported (current: {}). Upgrade FerroCrypt.",
+            version, KEY_FILE_VERSION
+        ))
+    }
 }
 
 // ─── Key file format ───────────────────────────────────────────────────────
@@ -225,11 +279,12 @@ pub fn build_key_file_header(key_type: u8, data_len: u16) -> [u8; KEY_FILE_HEADE
     ]
 }
 
-pub fn validate_key_file_header(
+/// Parses the 8-byte key file header without enforcing version policy.
+/// Validates magic byte and key type only. Callers dispatch on `header.version`.
+pub fn parse_key_file_header(
     data: &[u8],
     expected_type: u8,
-    expected_data_size: usize,
-) -> Result<(), CryptoError> {
+) -> Result<ParsedKeyHeader, CryptoError> {
     if data.len() < KEY_FILE_HEADER_SIZE {
         return Err(CryptoError::CryptoOperation(
             "Key file is too short or corrupted".to_string(),
@@ -258,44 +313,44 @@ pub fn validate_key_file_header(
             "Expected a {expected} key file but got a {actual} key file"
         )));
     }
-    let key_version = data[2];
-    if key_version > KEY_FILE_VERSION {
-        return Err(CryptoError::CryptoOperation(format!(
-            "Key file version {} not supported (current: {}). Upgrade FerroCrypt.",
-            key_version, KEY_FILE_VERSION
-        )));
-    }
-    if key_version < KEY_FILE_VERSION {
-        return Err(CryptoError::CryptoOperation(format!(
-            "Key file version {} no longer supported (current: {})",
-            key_version, KEY_FILE_VERSION
-        )));
-    }
-    if data[3] != KEY_FILE_ALG_X25519 {
+    Ok(ParsedKeyHeader {
+        key_type: actual_type,
+        version: data[2],
+        algorithm: data[3],
+        data_len: u16::from_be_bytes([data[4], data[5]]),
+        flags: u16::from_be_bytes([data[6], data[7]]),
+    })
+}
+
+/// Validates key file v2 layout: algorithm, data length, flags, and total file size.
+pub fn validate_key_v2_layout(
+    data: &[u8],
+    header: &ParsedKeyHeader,
+    expected_data_size: usize,
+) -> Result<(), CryptoError> {
+    if header.algorithm != KEY_FILE_ALG_X25519 {
         return Err(CryptoError::CryptoOperation(format!(
             "Key file algorithm {} not supported",
-            data[3]
+            header.algorithm
         )));
     }
-    let data_len = u16::from_be_bytes([data[4], data[5]]) as usize;
-    if data_len != expected_data_size {
+    if header.data_len as usize != expected_data_size {
         return Err(CryptoError::CryptoOperation(format!(
             "Key file has unexpected data length ({}, expected {})",
-            data_len, expected_data_size
+            header.data_len, expected_data_size
         )));
     }
-    let flags = u16::from_be_bytes([data[6], data[7]]);
-    if flags != 0 {
+    if header.flags != 0 {
         return Err(CryptoError::CryptoOperation(format!(
             "Unknown key file flags (0x{:04X}). Upgrade FerroCrypt.",
-            flags
+            header.flags
         )));
     }
-    if data.len() != KEY_FILE_HEADER_SIZE + data_len {
+    if data.len() != KEY_FILE_HEADER_SIZE + expected_data_size {
         return Err(CryptoError::CryptoOperation(format!(
             "Key file has unexpected size ({}, expected {})",
             data.len(),
-            KEY_FILE_HEADER_SIZE + data_len
+            KEY_FILE_HEADER_SIZE + expected_data_size
         )));
     }
     Ok(())

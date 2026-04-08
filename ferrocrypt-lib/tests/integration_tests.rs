@@ -904,7 +904,14 @@ fn test_truncated_hybrid_file() -> Result<(), CryptoError> {
     let input_file = test_dir.join("data.txt");
     create_test_file(&input_file, "truncation test");
     let empty_pass = SecretString::from("".to_string());
-    hybrid_encryption(&input_file, &encrypt_dir, &public_key, &empty_pass, None, |_| {})?;
+    hybrid_encryption(
+        &input_file,
+        &encrypt_dir,
+        &public_key,
+        &empty_pass,
+        None,
+        |_| {},
+    )?;
 
     let encrypted_path = encrypt_dir.join("data.fcr");
     let data = fs::read(&encrypted_path)?;
@@ -1535,7 +1542,14 @@ fn test_hybrid_empty_file_rejected() -> Result<(), CryptoError> {
     let input_file = test_dir.join("data.txt");
     create_test_file(&input_file, "payload");
     let empty_pass = SecretString::from("".to_string());
-    hybrid_encryption(&input_file, &encrypt_dir, &public_key, &empty_pass, None, |_| {})?;
+    hybrid_encryption(
+        &input_file,
+        &encrypt_dir,
+        &public_key,
+        &empty_pass,
+        None,
+        |_| {},
+    )?;
 
     let encrypted_path = encrypt_dir.join("data.fcr");
     let data = fs::read(&encrypted_path)?;
@@ -2146,7 +2160,8 @@ fn test_older_major_version_rejected() -> Result<(), CryptoError> {
     assert!(result.is_err());
     match result {
         Err(CryptoError::CryptoOperation(msg)) => {
-            assert!(msg.contains("no longer supported"), "got: {msg}");
+            assert!(msg.contains("not supported"), "got: {msg}");
+            assert!(msg.contains("crates.io"), "got: {msg}");
         }
         other => panic!("Expected version error, got {:?}", other),
     }
@@ -2197,7 +2212,8 @@ fn test_older_key_version_rejected() -> Result<(), CryptoError> {
     assert!(result.is_err());
     match result {
         Err(CryptoError::CryptoOperation(msg)) => {
-            assert!(msg.contains("no longer supported"), "got: {msg}");
+            assert!(msg.contains("not supported"), "got: {msg}");
+            assert!(msg.contains("crates.io"), "got: {msg}");
         }
         other => panic!("Expected key version error, got {:?}", other),
     }

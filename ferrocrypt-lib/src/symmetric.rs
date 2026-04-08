@@ -179,11 +179,40 @@ pub fn decrypt_file(
     passphrase: &SecretString,
     on_progress: &dyn Fn(&str),
 ) -> Result<String, CryptoError> {
-    let start_time = std::time::Instant::now();
     let mut encrypted_file = fs::File::open(input_path)?;
 
     let (prefix_bytes, header) =
         format::read_header_from_reader(&mut encrypted_file, format::TYPE_SYMMETRIC)?;
+
+    match header.major {
+        3 => decrypt_file_v3(
+            encrypted_file,
+            prefix_bytes,
+            header,
+            output_dir,
+            passphrase,
+            on_progress,
+        ),
+        _ => Err(format::unsupported_file_version_error(
+            header.major,
+            header.minor,
+        )),
+    }
+}
+
+// If a future 3.x minor introduces non-trivial behavior, add explicit gating here:
+//   match header.minor { 0 => ..., 1 => ..., _ => unsupported }
+// instead of relying solely on skip_unknown_header_bytes.
+fn decrypt_file_v3(
+    mut encrypted_file: fs::File,
+    prefix_bytes: [u8; format::HEADER_PREFIX_SIZE],
+    header: format::FileHeader,
+    output_dir: &Path,
+    passphrase: &SecretString,
+    on_progress: &dyn Fn(&str),
+) -> Result<String, CryptoError> {
+    let start_time = std::time::Instant::now();
+    format::validate_file_flags(&header)?;
 
     let min_header_size = HEADER_PREFIX_ENCODED_SIZE
         + rep_encoded_size(ARGON2_SALT_SIZE)
@@ -282,4 +311,106 @@ pub fn decrypt_file(
     );
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    /// Proves the forward-compatibility mechanism: a synthetic v3.1 file with
+    /// extra trailing header bytes (and correctly recomputed HMAC) is decrypted
+    /// successfully by the current v3 reader via `skip_unknown_header_bytes`.
+    #[test]
+    fn future_minor_version_forward_compatible() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let input_file = tmp.path().join("data.txt");
+        let encrypt_dir = tmp.path().join("encrypted");
+        let decrypt_dir = tmp.path().join("decrypted");
+        fs::create_dir_all(&encrypt_dir)?;
+        fs::create_dir_all(&decrypt_dir)?;
+        fs::write(&input_file, "forward compat test")?;
+
+        let passphrase = SecretString::from("pass".to_string());
+        encrypt_file(&input_file, &encrypt_dir, &passphrase, None, &|_| {})?;
+
+        let encrypted_path = encrypt_dir.join("data.fcr");
+        let original = fs::read(&encrypted_path)?;
+
+        // --- Decode the v3.0 header to extract fields and derive keys ---
+        let encoded_prefix = &original[..HEADER_PREFIX_ENCODED_SIZE];
+        let prefix_bytes = rep_decode_exact(encoded_prefix, format::HEADER_PREFIX_SIZE)?;
+        let old_header_len = u16::from_be_bytes([prefix_bytes[4], prefix_bytes[5]]) as usize;
+
+        let mut cursor = Cursor::new(&original[HEADER_PREFIX_ENCODED_SIZE..]);
+        let mut enc_salt = vec![0u8; rep_encoded_size(ARGON2_SALT_SIZE)];
+        let mut enc_hkdf = vec![0u8; rep_encoded_size(HKDF_SALT_SIZE)];
+        let mut enc_kdf = vec![0u8; rep_encoded_size(KDF_PARAMS_SIZE)];
+        let mut enc_nonce = vec![0u8; rep_encoded_size(NONCE_SIZE)];
+        let mut enc_keyhash = vec![0u8; rep_encoded_size(ENCRYPTION_KEY_SIZE)];
+        let mut enc_hmac = vec![0u8; rep_encoded_size(HMAC_TAG_SIZE)];
+        cursor.read_exact(&mut enc_salt)?;
+        cursor.read_exact(&mut enc_hkdf)?;
+        cursor.read_exact(&mut enc_kdf)?;
+        cursor.read_exact(&mut enc_nonce)?;
+        cursor.read_exact(&mut enc_keyhash)?;
+        cursor.read_exact(&mut enc_hmac)?;
+
+        let salt = rep_decode_exact(&enc_salt, ARGON2_SALT_SIZE)?;
+        let hkdf_salt = rep_decode_exact(&enc_hkdf, HKDF_SALT_SIZE)?;
+        let kdf_bytes = rep_decode_exact(&enc_kdf, KDF_PARAMS_SIZE)?;
+        let kdf_params = KdfParams::from_bytes(kdf_bytes.as_slice().try_into()?)?;
+        let nonce = rep_decode_exact(&enc_nonce, NONCE_SIZE)?;
+        let verification_hash = rep_decode_exact(&enc_keyhash, ENCRYPTION_KEY_SIZE)?;
+
+        let (_encryption_key, hmac_key) = derive_keys(&passphrase, &salt, &hkdf_salt, &kdf_params)?;
+
+        // --- Build a synthetic v3.1 prefix with larger header_len ---
+        let extra_bytes = 16usize;
+        let new_header_len = (old_header_len + extra_bytes) as u16;
+        let new_prefix = [
+            format::MAGIC_BYTE,
+            format::TYPE_SYMMETRIC,
+            format::ENCRYPTED_FILE_VERSION_MAJOR,
+            1, // minor = 1
+            (new_header_len >> 8) as u8,
+            (new_header_len & 0xFF) as u8,
+            0,
+            0,
+        ];
+
+        // --- Recompute HMAC over the new prefix + same decoded fields ---
+        let mut hmac_message = Vec::new();
+        hmac_message.extend_from_slice(&new_prefix);
+        hmac_message.extend_from_slice(&salt);
+        hmac_message.extend_from_slice(&hkdf_salt);
+        hmac_message.extend_from_slice(&kdf_bytes);
+        hmac_message.extend_from_slice(&nonce);
+        hmac_message.extend_from_slice(&verification_hash);
+        let new_hmac_tag = hmac_sha3_256(hmac_key.as_ref(), &hmac_message)?;
+
+        // --- Reassemble: new prefix + same fields + new HMAC + trailing + ciphertext ---
+        let ciphertext = &original[old_header_len..];
+        let mut output = Vec::new();
+        output.extend_from_slice(&rep_encode(&new_prefix));
+        output.extend_from_slice(&enc_salt);
+        output.extend_from_slice(&enc_hkdf);
+        output.extend_from_slice(&enc_kdf);
+        output.extend_from_slice(&enc_nonce);
+        output.extend_from_slice(&enc_keyhash);
+        output.extend_from_slice(&rep_encode(&new_hmac_tag));
+        output.extend_from_slice(&vec![0xAA; extra_bytes]); // synthetic trailing field
+        output.extend_from_slice(ciphertext);
+
+        fs::write(&encrypted_path, &output)?;
+
+        // --- Decrypt with the current v3 reader ---
+        let result = decrypt_file(&encrypted_path, &decrypt_dir, &passphrase, &|_| {})?;
+        assert!(result.contains("Decrypted to"));
+
+        let decrypted = fs::read_to_string(decrypt_dir.join("data.txt"))?;
+        assert_eq!(decrypted, "forward compat test");
+
+        Ok(())
+    }
 }

@@ -21,6 +21,34 @@ pub(crate) fn validate_archive_path(path: &Path) -> Result<(), CryptoError> {
     Ok(())
 }
 
+/// Walks a directory tree and rejects symlinks and other non-regular entries.
+/// Hardlinks pass through as regular files (their contents are archived normally).
+/// Must be called before `append_dir_all` to catch unsupported entries at archive time
+/// rather than letting them silently enter the archive and fail during extraction.
+fn reject_unsupported_entries(dir: &Path) -> Result<(), CryptoError> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            return Err(CryptoError::InvalidInput(format!(
+                "Directory contains a symlink: {}",
+                path.display()
+            )));
+        }
+        if !ft.is_file() && !ft.is_dir() {
+            return Err(CryptoError::InvalidInput(format!(
+                "Directory contains an unsupported entry: {}",
+                path.display()
+            )));
+        }
+        if ft.is_dir() {
+            reject_unsupported_entries(&path)?;
+        }
+    }
+    Ok(())
+}
+
 /// Archives a file or directory into a TAR stream written to `writer`.
 /// Returns a tuple of the file stem (base name without extension for files,
 /// directory name for directories) and the writer, so the caller can finalize it.
@@ -59,6 +87,7 @@ pub fn archive<W: Write>(
             .file_name()
             .ok_or_else(|| CryptoError::InvalidInput("Cannot get directory name".to_string()))?;
 
+        reject_unsupported_entries(input_path)?;
         builder.append_dir_all(Path::new(dir_name), input_path)?;
         dir_name.to_string_lossy().into_owned()
     };
@@ -205,6 +234,23 @@ mod tests {
         assert_eq!(restored_a, "file a");
         let restored_b = fs::read_to_string(extract_dir.join("mydir/sub/b.txt")).unwrap();
         assert_eq!(restored_b, "file b");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_rejects_directory_with_symlink() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let input_dir = tmp.path().join("mydir");
+        fs::create_dir_all(&input_dir).unwrap();
+        fs::write(input_dir.join("real.txt"), "content").unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", input_dir.join("link.txt")).unwrap();
+
+        let mut buf = Vec::new();
+        let err = archive(&input_dir, &mut buf).unwrap_err();
+        assert!(
+            err.to_string().contains("symlink"),
+            "expected symlink error, got: {err}"
+        );
     }
 
     #[test]

@@ -159,8 +159,6 @@ pub fn decrypt_file(
     passphrase: &SecretString,
     on_progress: &dyn Fn(&str),
 ) -> Result<String, CryptoError> {
-    let start_time = std::time::Instant::now();
-
     on_progress("Decrypting\u{2026}");
 
     // Parse and validate the file header before loading the private key —
@@ -169,6 +167,38 @@ pub fn decrypt_file(
 
     let (prefix_bytes, header) =
         format::read_header_from_reader(&mut encrypted_file, format::TYPE_HYBRID)?;
+
+    match header.major {
+        3 => decrypt_file_v3(
+            encrypted_file,
+            prefix_bytes,
+            header,
+            output_dir,
+            secret_key_path,
+            passphrase,
+            on_progress,
+        ),
+        _ => Err(format::unsupported_file_version_error(
+            header.major,
+            header.minor,
+        )),
+    }
+}
+
+// If a future 3.x minor introduces non-trivial behavior, add explicit gating here:
+//   match header.minor { 0 => ..., 1 => ..., _ => unsupported }
+// instead of relying solely on skip_unknown_header_bytes.
+fn decrypt_file_v3(
+    mut encrypted_file: fs::File,
+    prefix_bytes: [u8; format::HEADER_PREFIX_SIZE],
+    header: format::FileHeader,
+    output_dir: &Path,
+    secret_key_path: &Path,
+    passphrase: &SecretString,
+    _on_progress: &dyn Fn(&str),
+) -> Result<String, CryptoError> {
+    let start_time = std::time::Instant::now();
+    format::validate_file_flags(&header)?;
 
     let min_header_size = HEADER_PREFIX_ENCODED_SIZE
         + rep_encoded_size(ENVELOPE_SIZE)
@@ -241,7 +271,18 @@ pub fn decrypt_file(
 
 fn read_public_key(path: &Path) -> Result<PublicKey, CryptoError> {
     let data = fs::read(path)?;
-    format::validate_key_file_header(&data, format::KEY_FILE_TYPE_PUBLIC, PUBLIC_KEY_DATA_SIZE)?;
+    let header = format::parse_key_file_header(&data, format::KEY_FILE_TYPE_PUBLIC)?;
+    match header.version {
+        2 => read_public_key_v2(&data, &header),
+        _ => Err(format::unsupported_key_version_error(header.version)),
+    }
+}
+
+fn read_public_key_v2(
+    data: &[u8],
+    header: &format::ParsedKeyHeader,
+) -> Result<PublicKey, CryptoError> {
+    format::validate_key_v2_layout(data, header, PUBLIC_KEY_DATA_SIZE)?;
     let body_start = format::KEY_FILE_HEADER_SIZE;
     let mut key_bytes = [0u8; PUBLIC_KEY_DATA_SIZE];
     key_bytes.copy_from_slice(&data[body_start..body_start + PUBLIC_KEY_DATA_SIZE]);
@@ -250,7 +291,19 @@ fn read_public_key(path: &Path) -> Result<PublicKey, CryptoError> {
 
 fn read_secret_key(path: &Path, passphrase: &SecretString) -> Result<SecretKey, CryptoError> {
     let data = fs::read(path)?;
-    format::validate_key_file_header(&data, format::KEY_FILE_TYPE_SECRET, SECRET_KEY_DATA_SIZE)?;
+    let header = format::parse_key_file_header(&data, format::KEY_FILE_TYPE_SECRET)?;
+    match header.version {
+        2 => read_secret_key_v2(&data, &header, passphrase),
+        _ => Err(format::unsupported_key_version_error(header.version)),
+    }
+}
+
+fn read_secret_key_v2(
+    data: &[u8],
+    header: &format::ParsedKeyHeader,
+    passphrase: &SecretString,
+) -> Result<SecretKey, CryptoError> {
+    format::validate_key_v2_layout(data, header, SECRET_KEY_DATA_SIZE)?;
 
     let body_start = format::KEY_FILE_HEADER_SIZE;
     let body = &data[body_start..body_start + SECRET_KEY_DATA_SIZE];
@@ -447,4 +500,112 @@ pub fn generate_key_pair(
     let result = format!("Generated key pair in {}", output_dir.display());
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    /// Proves the forward-compatibility mechanism for hybrid files: a synthetic
+    /// v3.1 file with extra trailing header bytes (and correctly recomputed HMAC)
+    /// is decrypted successfully by the current v3 reader.
+    #[test]
+    fn future_minor_version_forward_compatible_hybrid() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let keys_dir = tmp.path().join("keys");
+        let encrypt_dir = tmp.path().join("encrypted");
+        let decrypt_dir = tmp.path().join("decrypted");
+        fs::create_dir_all(&keys_dir)?;
+        fs::create_dir_all(&encrypt_dir)?;
+        fs::create_dir_all(&decrypt_dir)?;
+
+        let key_pass = SecretString::from("kp".to_string());
+        generate_key_pair(&key_pass, &keys_dir, &|_| {})?;
+
+        let input_file = tmp.path().join("data.txt");
+        fs::write(&input_file, "hybrid forward compat test")?;
+
+        encrypt_file(
+            &input_file,
+            &encrypt_dir,
+            &keys_dir.join(PUBLIC_KEY_FILENAME),
+            None,
+            &|_| {},
+        )?;
+
+        let encrypted_path = encrypt_dir.join("data.fcr");
+        let original = fs::read(&encrypted_path)?;
+
+        // --- Decode the v3.0 header ---
+        let encoded_prefix = &original[..HEADER_PREFIX_ENCODED_SIZE];
+        let prefix_bytes = rep_decode_exact(encoded_prefix, format::HEADER_PREFIX_SIZE)?;
+        let old_header_len = u16::from_be_bytes([prefix_bytes[4], prefix_bytes[5]]) as usize;
+
+        let mut cursor = Cursor::new(&original[HEADER_PREFIX_ENCODED_SIZE..]);
+        let mut enc_envelope = vec![0u8; rep_encoded_size(ENVELOPE_SIZE)];
+        let mut enc_nonce = vec![0u8; rep_encoded_size(NONCE_SIZE)];
+        let mut enc_hmac = vec![0u8; rep_encoded_size(HMAC_TAG_SIZE)];
+        cursor.read_exact(&mut enc_envelope)?;
+        cursor.read_exact(&mut enc_nonce)?;
+        cursor.read_exact(&mut enc_hmac)?;
+
+        let envelope_vec = rep_decode_exact(&enc_envelope, ENVELOPE_SIZE)?;
+        let nonce = rep_decode_exact(&enc_nonce, NONCE_SIZE)?;
+        let envelope: [u8; ENVELOPE_SIZE] = envelope_vec.as_slice().try_into().unwrap();
+
+        // Open envelope to get the HMAC key
+        let mut secret = read_secret_key(&keys_dir.join(SECRET_KEY_FILENAME), &key_pass)?;
+        let decrypted = open_envelope(&envelope, &secret)?;
+        zeroize_secret_key(&mut secret);
+        let hmac_key = &decrypted[ENCRYPTION_KEY_SIZE..COMBINED_KEY_SIZE];
+
+        // --- Build a synthetic v3.1 prefix with larger header_len ---
+        let extra_bytes = 16usize;
+        let new_header_len = (old_header_len + extra_bytes) as u16;
+        let new_prefix = [
+            format::MAGIC_BYTE,
+            format::TYPE_HYBRID,
+            format::ENCRYPTED_FILE_VERSION_MAJOR,
+            1, // minor = 1
+            (new_header_len >> 8) as u8,
+            (new_header_len & 0xFF) as u8,
+            0,
+            0,
+        ];
+
+        // --- Recompute HMAC over the new prefix + same decoded fields ---
+        let mut hmac_message = Vec::new();
+        hmac_message.extend_from_slice(&new_prefix);
+        hmac_message.extend_from_slice(&envelope);
+        hmac_message.extend_from_slice(&nonce);
+        let new_hmac_tag = hmac_sha3_256(hmac_key, &hmac_message)?;
+
+        // --- Reassemble: new prefix + same fields + new HMAC + trailing + ciphertext ---
+        let ciphertext = &original[old_header_len..];
+        let mut output = Vec::new();
+        output.extend_from_slice(&rep_encode(&new_prefix));
+        output.extend_from_slice(&enc_envelope);
+        output.extend_from_slice(&enc_nonce);
+        output.extend_from_slice(&rep_encode(&new_hmac_tag));
+        output.extend_from_slice(&vec![0xBB; extra_bytes]);
+        output.extend_from_slice(ciphertext);
+
+        fs::write(&encrypted_path, &output)?;
+
+        // --- Decrypt with the current v3 reader ---
+        let result = decrypt_file(
+            &encrypted_path,
+            &decrypt_dir,
+            &keys_dir.join(SECRET_KEY_FILENAME),
+            &key_pass,
+            &|_| {},
+        )?;
+        assert!(result.contains("Decrypted to"));
+
+        let decrypted_content = fs::read_to_string(decrypt_dir.join("data.txt"))?;
+        assert_eq!(decrypted_content, "hybrid forward compat test");
+
+        Ok(())
+    }
 }

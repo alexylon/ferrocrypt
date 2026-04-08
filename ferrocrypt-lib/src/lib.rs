@@ -145,15 +145,17 @@ mod symmetric;
 /// ```
 pub fn public_key_fingerprint(key_file: impl AsRef<Path>) -> Result<String, CryptoError> {
     let data = std::fs::read(key_file.as_ref())?;
-    format::validate_key_file_header(
-        &data,
-        format::KEY_FILE_TYPE_PUBLIC,
-        format::PUBLIC_KEY_DATA_SIZE,
-    )?;
-    let key_bytes = &data
-        [format::KEY_FILE_HEADER_SIZE..format::KEY_FILE_HEADER_SIZE + format::PUBLIC_KEY_DATA_SIZE];
-    let hash = sha3_32_hash(key_bytes)?;
-    Ok(bytes_to_hex(&hash))
+    let header = format::parse_key_file_header(&data, format::KEY_FILE_TYPE_PUBLIC)?;
+    match header.version {
+        2 => {
+            format::validate_key_v2_layout(&data, &header, format::PUBLIC_KEY_DATA_SIZE)?;
+            let key_bytes = &data[format::KEY_FILE_HEADER_SIZE
+                ..format::KEY_FILE_HEADER_SIZE + format::PUBLIC_KEY_DATA_SIZE];
+            let hash = sha3_32_hash(key_bytes)?;
+            Ok(bytes_to_hex(&hash))
+        }
+        _ => Err(format::unsupported_key_version_error(header.version)),
+    }
 }
 
 /// Validates that a file is a well-formed FerroCrypt private key file.
@@ -162,11 +164,11 @@ pub fn public_key_fingerprint(key_file: impl AsRef<Path>) -> Result<String, Cryp
 /// Does **not** attempt to decrypt the key (no passphrase needed).
 pub fn validate_secret_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError> {
     let data = std::fs::read(key_file.as_ref())?;
-    format::validate_key_file_header(
-        &data,
-        format::KEY_FILE_TYPE_SECRET,
-        format::SECRET_KEY_DATA_SIZE,
-    )
+    let header = format::parse_key_file_header(&data, format::KEY_FILE_TYPE_SECRET)?;
+    match header.version {
+        2 => format::validate_key_v2_layout(&data, &header, format::SECRET_KEY_DATA_SIZE),
+        _ => Err(format::unsupported_key_version_error(header.version)),
+    }
 }
 
 /// Returns the default encrypted filename for a given input path (e.g. `"secrets.fcr"`).

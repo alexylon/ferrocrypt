@@ -11,8 +11,8 @@ use secrecy::{ExposeSecret, SecretString};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::common::{
-    ARGON2_SALT_SIZE, DecryptReader, ENCRYPTION_KEY_SIZE, ERR_FILE_TOO_SHORT, EncryptWriter,
-    HMAC_KEY_SIZE, HMAC_TAG_SIZE, KDF_PARAMS_SIZE, KdfParams, NONCE_SIZE, TAG_SIZE,
+    ARGON2_SALT_SIZE, DecryptReader, ENCRYPTION_KEY_SIZE, EncryptWriter, FILE_TOO_SHORT,
+    HMAC_KEY_SIZE, HMAC_TAG_SIZE, KDF_PARAMS_SIZE, KdfParams, STREAM_NONCE_SIZE, TAG_SIZE,
     encryption_base_name, hmac_sha3_256, hmac_sha3_256_verify,
 };
 use crate::format::{self, HEADER_PREFIX_ENCODED_SIZE, PUBLIC_KEY_DATA_SIZE, SECRET_KEY_DATA_SIZE};
@@ -59,15 +59,15 @@ fn zeroize_secret_key(key: &mut SecretKey) {
 ///
 /// This keeps the `unsafe` wipe centralized and prevents call sites from
 /// needing to remember explicit zeroization.
-struct ManagedSecretKey(SecretKey);
+struct ZeroizingSecretKey(SecretKey);
 
-impl ManagedSecretKey {
+impl ZeroizingSecretKey {
     fn new(key: SecretKey) -> Self {
         Self(key)
     }
 }
 
-impl std::ops::Deref for ManagedSecretKey {
+impl std::ops::Deref for ZeroizingSecretKey {
     type Target = SecretKey;
 
     fn deref(&self) -> &Self::Target {
@@ -75,13 +75,13 @@ impl std::ops::Deref for ManagedSecretKey {
     }
 }
 
-impl std::ops::DerefMut for ManagedSecretKey {
+impl std::ops::DerefMut for ZeroizingSecretKey {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
 
-impl Drop for ManagedSecretKey {
+impl Drop for ZeroizingSecretKey {
     fn drop(&mut self) {
         zeroize_secret_key(&mut self.0);
     }
@@ -111,7 +111,7 @@ pub fn encrypt_file(
     let result = (|| -> Result<PathBuf, CryptoError> {
         let cipher = XChaCha20Poly1305::new(&encryption_key);
 
-        let mut nonce = [0u8; NONCE_SIZE];
+        let mut nonce = [0u8; STREAM_NONCE_SIZE];
         OsRng.fill_bytes(&mut nonce);
 
         let mut combined_key = Zeroizing::new(vec![0u8; COMBINED_KEY_SIZE]);
@@ -226,31 +226,31 @@ fn decrypt_file_v3(
 
     let min_header_size = HEADER_PREFIX_ENCODED_SIZE
         + encoded_size(ENVELOPE_SIZE)
-        + encoded_size(NONCE_SIZE)
+        + encoded_size(STREAM_NONCE_SIZE)
         + encoded_size(HMAC_TAG_SIZE);
     if (header.header_len as usize) < min_header_size {
-        return Err(CryptoError::CryptoOperation(ERR_FILE_TOO_SHORT.to_string()));
+        return Err(CryptoError::CryptoOperation(FILE_TOO_SHORT.to_string()));
     }
 
     let mut encoded_envelope = vec![0u8; encoded_size(ENVELOPE_SIZE)];
-    let mut encoded_nonce = vec![0u8; encoded_size(NONCE_SIZE)];
+    let mut encoded_nonce = vec![0u8; encoded_size(STREAM_NONCE_SIZE)];
     let mut encoded_hmac_tag = vec![0u8; encoded_size(HMAC_TAG_SIZE)];
 
     encrypted_file
         .read_exact(&mut encoded_envelope)
-        .map_err(|_| CryptoError::CryptoOperation(ERR_FILE_TOO_SHORT.to_string()))?;
+        .map_err(|_| CryptoError::CryptoOperation(FILE_TOO_SHORT.to_string()))?;
     encrypted_file
         .read_exact(&mut encoded_nonce)
-        .map_err(|_| CryptoError::CryptoOperation(ERR_FILE_TOO_SHORT.to_string()))?;
+        .map_err(|_| CryptoError::CryptoOperation(FILE_TOO_SHORT.to_string()))?;
     encrypted_file
         .read_exact(&mut encoded_hmac_tag)
-        .map_err(|_| CryptoError::CryptoOperation(ERR_FILE_TOO_SHORT.to_string()))?;
+        .map_err(|_| CryptoError::CryptoOperation(FILE_TOO_SHORT.to_string()))?;
 
     let bytes_after_prefix = encoded_envelope.len() + encoded_nonce.len() + encoded_hmac_tag.len();
     format::skip_unknown_header_bytes(&mut encrypted_file, header.header_len, bytes_after_prefix)?;
 
     let envelope_vec = decode_exact(&encoded_envelope, ENVELOPE_SIZE)?;
-    let nonce = decode_exact(&encoded_nonce, NONCE_SIZE)?;
+    let nonce = decode_exact(&encoded_nonce, STREAM_NONCE_SIZE)?;
     let hmac_tag = decode_exact(&encoded_hmac_tag, HMAC_TAG_SIZE)?;
 
     let envelope: [u8; ENVELOPE_SIZE] = envelope_vec
@@ -308,7 +308,7 @@ fn read_public_key_v2(
 fn read_secret_key(
     path: &Path,
     passphrase: &SecretString,
-) -> Result<ManagedSecretKey, CryptoError> {
+) -> Result<ZeroizingSecretKey, CryptoError> {
     let data = fs::read(path)?;
     let header = format::parse_key_file_header(&data, format::KEY_FILE_TYPE_SECRET)?;
     match header.version {
@@ -321,7 +321,7 @@ fn read_secret_key_v2(
     data: &[u8],
     header: &format::KeyFileHeader,
     passphrase: &SecretString,
-) -> Result<ManagedSecretKey, CryptoError> {
+) -> Result<ZeroizingSecretKey, CryptoError> {
     format::validate_key_v2_layout(data, header, SECRET_KEY_DATA_SIZE)?;
 
     let body_start = format::KEY_FILE_HEADER_SIZE;
@@ -350,7 +350,7 @@ fn read_secret_key_v2(
     let mut plaintext = plaintext;
     plaintext.zeroize();
 
-    let key = ManagedSecretKey::new(SecretKey::from(secret_bytes));
+    let key = ZeroizingSecretKey::new(SecretKey::from(secret_bytes));
     secret_bytes.zeroize();
     Ok(key)
 }
@@ -359,7 +359,7 @@ fn seal_envelope(
     combined_key: &[u8],
     recipient_public: &PublicKey,
 ) -> Result<[u8; ENVELOPE_SIZE], CryptoError> {
-    let ephemeral_secret = ManagedSecretKey::new(SecretKey::generate(&mut OsRng));
+    let ephemeral_secret = ZeroizingSecretKey::new(SecretKey::generate(&mut OsRng));
     let ephemeral_public = ephemeral_secret.public_key();
     let chacha_box = ChaChaBox::new(recipient_public, &ephemeral_secret);
     drop(ephemeral_secret);
@@ -422,7 +422,7 @@ pub fn generate_key_pair(
     fs::create_dir_all(output_dir)?;
     on_progress("Generating key pair…");
 
-    let secret_key = ManagedSecretKey::new(SecretKey::generate(&mut OsRng));
+    let secret_key = ZeroizingSecretKey::new(SecretKey::generate(&mut OsRng));
     let public_key = secret_key.public_key();
 
     // Encrypt private key at rest with passphrase via Argon2id + XChaCha20-Poly1305
@@ -553,14 +553,14 @@ mod tests {
 
         let mut cursor = Cursor::new(&original[HEADER_PREFIX_ENCODED_SIZE..]);
         let mut enc_envelope = vec![0u8; encoded_size(ENVELOPE_SIZE)];
-        let mut enc_nonce = vec![0u8; encoded_size(NONCE_SIZE)];
+        let mut enc_nonce = vec![0u8; encoded_size(STREAM_NONCE_SIZE)];
         let mut enc_hmac = vec![0u8; encoded_size(HMAC_TAG_SIZE)];
         cursor.read_exact(&mut enc_envelope)?;
         cursor.read_exact(&mut enc_nonce)?;
         cursor.read_exact(&mut enc_hmac)?;
 
         let envelope_vec = decode_exact(&enc_envelope, ENVELOPE_SIZE)?;
-        let nonce = decode_exact(&enc_nonce, NONCE_SIZE)?;
+        let nonce = decode_exact(&enc_nonce, STREAM_NONCE_SIZE)?;
         let envelope: [u8; ENVELOPE_SIZE] = envelope_vec.as_slice().try_into().unwrap();
 
         // Open envelope to get the HMAC key

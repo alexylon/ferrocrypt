@@ -222,7 +222,7 @@ fn main() {
                     match result {
                         Ok(output) => {
                             if let Some(dir) = keygen_dir {
-                                let pub_key = public_key_path(&dir);
+                                let pub_key = path_to_string(&public_key_path(&dir));
                                 app.set_password(Default::default());
                                 app.set_password_repeated(Default::default());
                                 app.set_hide_password(true);
@@ -361,8 +361,8 @@ fn check_conflicts(app: &AppWindow) {
     if mode == 4 && warning.is_empty() {
         let kg_dir = app.get_keygen_outdir().to_string();
         if !kg_dir.is_empty() {
-            let secret_exists = Path::new(&private_key_path(&kg_dir)).exists();
-            let pub_exists = Path::new(&public_key_path(&kg_dir)).exists();
+            let secret_exists = private_key_path(&kg_dir).exists();
+            let pub_exists = public_key_path(&kg_dir).exists();
             warning = match (secret_exists, pub_exists) {
                 (true, true) => "Key pair already exists in output folder".into(),
                 (true, false) => "Private key already exists in output folder".into(),
@@ -402,12 +402,12 @@ fn clear_fields(app: &AppWindow) {
     }
 }
 
-fn public_key_path(dir: &str) -> String {
-    format!("{dir}/public.key")
+fn public_key_path(dir: &str) -> PathBuf {
+    Path::new(dir).join("public.key")
 }
 
-fn private_key_path(dir: &str) -> String {
-    format!("{dir}/private.key")
+fn private_key_path(dir: &str) -> PathBuf {
+    Path::new(dir).join("private.key")
 }
 
 fn path_to_string(path: &Path) -> String {

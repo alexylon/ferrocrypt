@@ -62,7 +62,7 @@
 use std::io::{self, Read};
 
 use crate::CryptoError;
-use crate::common::ERR_FILE_TOO_SHORT;
+use crate::common::FILE_TOO_SHORT;
 use crate::replication::{decode_exact, encoded_size};
 
 // ─── Shared ────────────────────────────────────────────────────────────────
@@ -124,7 +124,7 @@ pub fn read_header_from_reader(
     let mut encoded = [0u8; HEADER_PREFIX_ENCODED_SIZE];
     reader
         .read_exact(&mut encoded)
-        .map_err(|_| CryptoError::CryptoOperation(ERR_FILE_TOO_SHORT.to_string()))?;
+        .map_err(|_| CryptoError::CryptoOperation(FILE_TOO_SHORT.to_string()))?;
 
     let decoded = decode_exact(&encoded, HEADER_PREFIX_SIZE)?;
     let mut prefix = [0u8; HEADER_PREFIX_SIZE];
@@ -151,9 +151,9 @@ pub fn skip_unknown_header_bytes(
     let to_skip = expected_after_prefix - bytes_read_after_prefix;
     if to_skip > 0 {
         let skipped = io::copy(&mut reader.take(to_skip as u64), &mut io::sink())
-            .map_err(|_| CryptoError::CryptoOperation(ERR_FILE_TOO_SHORT.to_string()))?;
+            .map_err(|_| CryptoError::CryptoOperation(FILE_TOO_SHORT.to_string()))?;
         if (skipped as usize) < to_skip {
-            return Err(CryptoError::CryptoOperation(ERR_FILE_TOO_SHORT.to_string()));
+            return Err(CryptoError::CryptoOperation(FILE_TOO_SHORT.to_string()));
         }
     }
     Ok(())

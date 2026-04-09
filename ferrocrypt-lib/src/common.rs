@@ -127,10 +127,10 @@ pub const BUFFER_SIZE: usize = 65536;
 /// Poly1305 authentication tag size in bytes.
 pub const TAG_SIZE: usize = 16;
 /// STREAM nonce size: XChaCha20's 24-byte nonce minus 5 bytes for counter and last-block flag.
-pub const NONCE_SIZE: usize = 19;
+pub const STREAM_NONCE_SIZE: usize = 19;
 
 // ─── Error messages ───────────────────────────────────────────────────────
-pub const ERR_FILE_TOO_SHORT: &str = "File is too short or corrupted";
+pub const FILE_TOO_SHORT: &str = "File is too short or corrupted";
 
 pub fn file_stem(filename: &Path) -> Result<&OsStr, CryptoError> {
     filename

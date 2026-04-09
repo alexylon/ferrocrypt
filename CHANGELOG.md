@@ -43,6 +43,9 @@ All notable changes to FerroCrypt are documented in this file.
 - Moved Tauri and Dioxus GUIs to `experiments/`
 
 ### Fixed
+- **Security:** `EncryptWriter` and `DecryptReader` now zeroize plaintext buffers on drop, preventing cleartext from lingering on the heap after errors or normal completion
+- Archived files now use `0o644` permissions instead of `0o755` — decrypted files are no longer marked executable
+- Encrypted output files are now `fsync`'d to disk before reporting success, preventing data loss if the system crashes before the OS flushes write buffers
 - Encrypt/decrypt routing now uses magic-byte detection only — `.fcr` extension no longer forces the decrypt path, so non-FerroCrypt files named `.fcr` can be encrypted
 - Default encrypted output naming for directories with dots (e.g. `photos.v1/`) now preserves the full directory name (`photos.v1.fcr` instead of `photos.fcr`)
 - Directory archiver replaced with a manual recursive walk: symlinks and special entries (sockets, FIFOs, devices) are rejected at encryption time; hardlinks are archived as regular file contents. File opens use `O_NOFOLLOW` on Unix, with post-open regular-file validation, to harden against symlink and special-file TOCTOU races during archiving. Extraction also rejects unsupported entry types instead of silently dropping them.

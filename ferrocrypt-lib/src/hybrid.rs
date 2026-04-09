@@ -160,7 +160,8 @@ pub fn encrypt_file(
 
         let encrypt_writer = EncryptWriter::new(stream_encryptor, dest);
         let (_, encrypt_writer) = archiver::archive(input_path, encrypt_writer)?;
-        encrypt_writer.finish()?;
+        let dest = encrypt_writer.finish()?;
+        dest.sync_all()?;
 
         nonce.zeroize();
 

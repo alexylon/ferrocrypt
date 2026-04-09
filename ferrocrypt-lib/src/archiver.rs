@@ -87,7 +87,7 @@ fn append_file<W: Write>(
     }
     let mut header = tar::Header::new_gnu();
     header.set_size(metadata.len());
-    header.set_mode(0o755);
+    header.set_mode(0o644);
     header.set_cksum();
     builder.append_data(&mut header, archive_path, &mut file)?;
     Ok(())

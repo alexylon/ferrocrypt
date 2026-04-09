@@ -8,7 +8,7 @@ use constant_time_eq::constant_time_eq_32;
 use hmac::{Hmac, KeyInit, Mac};
 use sha3::{Digest, Sha3_256};
 
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::CryptoError;
 
@@ -200,7 +200,7 @@ pub fn hmac_sha3_256_verify(key: &[u8], data: &[u8], tag: &[u8]) -> Result<(), C
 pub struct EncryptWriter<W: Write> {
     encryptor: Option<stream::EncryptorBE32<XChaCha20Poly1305>>,
     buffer: Vec<u8>,
-    output: W,
+    output: Option<W>,
 }
 
 impl<W: Write> EncryptWriter<W> {
@@ -208,22 +208,26 @@ impl<W: Write> EncryptWriter<W> {
         Self {
             encryptor: Some(encryptor),
             buffer: Vec::with_capacity(BUFFER_SIZE),
-            output,
+            output: Some(output),
         }
     }
 
     /// Encrypts the remaining buffer as the final AEAD chunk and flushes.
     /// Must be called exactly once after all plaintext has been written.
-    pub fn finish(mut self) -> Result<(), CryptoError> {
+    /// Returns the inner writer so the caller can finalize it (e.g. `sync_all`).
+    pub fn finish(mut self) -> Result<W, CryptoError> {
         let encryptor = self.encryptor.take().ok_or_else(|| {
+            CryptoError::InvalidInput("EncryptWriter already finished".to_string())
+        })?;
+        let mut output = self.output.take().ok_or_else(|| {
             CryptoError::InvalidInput("EncryptWriter already finished".to_string())
         })?;
         let ciphertext = encryptor
             .encrypt_last(self.buffer.as_slice())
             .map_err(CryptoError::Cipher)?;
-        self.output.write_all(&ciphertext)?;
-        self.output.flush()?;
-        Ok(())
+        output.write_all(&ciphertext)?;
+        output.flush()?;
+        Ok(output)
     }
 }
 
@@ -242,14 +246,26 @@ impl<W: Write> Write for EncryptWriter<W> {
             let ciphertext = encryptor
                 .encrypt_next(chunk.as_slice())
                 .map_err(|e| io::Error::other(e.to_string()))?;
-            self.output.write_all(&ciphertext)?;
+            self.output
+                .as_mut()
+                .ok_or_else(|| io::Error::other("EncryptWriter already finished"))?
+                .write_all(&ciphertext)?;
         }
 
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.output.flush()
+        match self.output.as_mut() {
+            Some(output) => output.flush(),
+            None => Ok(()),
+        }
+    }
+}
+
+impl<W: Write> Drop for EncryptWriter<W> {
+    fn drop(&mut self) {
+        self.buffer.zeroize();
     }
 }
 
@@ -341,6 +357,12 @@ impl<R: Read> Read for DecryptReader<R> {
         buf[..n].copy_from_slice(&self.plaintext[self.pos..self.pos + n]);
         self.pos += n;
         Ok(n)
+    }
+}
+
+impl<R: Read> Drop for DecryptReader<R> {
+    fn drop(&mut self) {
+        self.plaintext.zeroize();
     }
 }
 

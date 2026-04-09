@@ -79,7 +79,7 @@ pub fn decode(data: &[u8]) -> Result<Vec<u8>, CryptoError> {
 pub fn decode_exact(data: &[u8], expected_len: usize) -> Result<Vec<u8>, CryptoError> {
     let decoded = decode(data)?;
     if decoded.len() != expected_len {
-        return Err(CryptoError::CryptoOperation(
+        return Err(CryptoError::InvalidFormat(
             "File is corrupted (invalid field length after decoding)".to_string(),
         ));
     }

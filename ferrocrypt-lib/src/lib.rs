@@ -106,7 +106,7 @@ pub enum EncryptionMode {
 
 /// Result of a successful key pair generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KeyPairInfo {
+pub struct GeneratedKeyPair {
     /// Path to the generated private key file.
     pub private_key_path: PathBuf,
     /// Path to the generated public key file.
@@ -380,11 +380,11 @@ pub fn generate_key_pair(
     passphrase: &SecretString,
     output_dir: impl AsRef<Path>,
     on_progress: impl Fn(&str),
-) -> Result<KeyPairInfo, CryptoError> {
+) -> Result<GeneratedKeyPair, CryptoError> {
     let (private_key_path, public_key_path) =
         hybrid::generate_key_pair(passphrase, output_dir.as_ref(), &on_progress)?;
     let fingerprint = public_key_fingerprint(&public_key_path)?;
-    Ok(KeyPairInfo {
+    Ok(GeneratedKeyPair {
         private_key_path,
         public_key_path,
         fingerprint,

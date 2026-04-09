@@ -56,20 +56,20 @@ impl KdfParams {
             lanes: u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
         };
         if params.lanes == 0 || params.lanes > Self::MAX_LANES {
-            return Err(CryptoError::CryptoOperation(format!(
+            return Err(CryptoError::InvalidKdfParams(format!(
                 "Invalid KDF parallelism: {}",
                 params.lanes
             )));
         }
         let min_mem_cost = 8 * params.lanes;
         if params.mem_cost < min_mem_cost || params.mem_cost > Self::MAX_MEM_COST {
-            return Err(CryptoError::CryptoOperation(format!(
+            return Err(CryptoError::InvalidKdfParams(format!(
                 "Invalid KDF memory cost: {} KiB",
                 params.mem_cost
             )));
         }
         if params.time_cost == 0 || params.time_cost > Self::MAX_TIME_COST {
-            return Err(CryptoError::CryptoOperation(format!(
+            return Err(CryptoError::InvalidKdfParams(format!(
                 "Invalid KDF time cost: {}",
                 params.time_cost
             )));
@@ -173,7 +173,7 @@ pub fn ct_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
 
 pub fn hmac_sha3_256(key: &[u8], data: &[u8]) -> Result<[u8; 32], CryptoError> {
     let mut mac = HmacSha3_256::new_from_slice(key)
-        .map_err(|e| CryptoError::CryptoOperation(format!("HMAC key error: {}", e)))?;
+        .map_err(|e| CryptoError::InternalError(format!("HMAC key error: {}", e)))?;
     mac.update(data);
     let result = mac.finalize();
     let bytes: [u8; 32] = result.into_bytes().into();
@@ -183,13 +183,10 @@ pub fn hmac_sha3_256(key: &[u8], data: &[u8]) -> Result<[u8; 32], CryptoError> {
 /// Verifies HMAC-SHA3-256 in constant time. Returns error if mismatch.
 pub fn hmac_sha3_256_verify(key: &[u8], data: &[u8], tag: &[u8]) -> Result<(), CryptoError> {
     let mut mac = HmacSha3_256::new_from_slice(key)
-        .map_err(|e| CryptoError::CryptoOperation(format!("HMAC key error: {}", e)))?;
+        .map_err(|e| CryptoError::InternalError(format!("HMAC key error: {}", e)))?;
     mac.update(data);
-    mac.verify_slice(tag).map_err(|_| {
-        CryptoError::CryptoOperation(
-            "Header authentication failed: file may be corrupted or tampered with".to_string(),
-        )
-    })
+    mac.verify_slice(tag)
+        .map_err(|_| CryptoError::AuthenticationFailed)
 }
 
 /// Streaming encryption writer: buffers plaintext writes into `BUFFER_SIZE`

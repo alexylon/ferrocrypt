@@ -229,7 +229,7 @@ fn decrypt_file_v3(
         + encoded_size(STREAM_NONCE_SIZE)
         + encoded_size(HMAC_TAG_SIZE);
     if (header.header_len as usize) < min_header_size {
-        return Err(CryptoError::CryptoOperation(FILE_TOO_SHORT.to_string()));
+        return Err(CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()));
     }
 
     let mut encoded_envelope = vec![0u8; encoded_size(ENVELOPE_SIZE)];
@@ -238,13 +238,13 @@ fn decrypt_file_v3(
 
     encrypted_file
         .read_exact(&mut encoded_envelope)
-        .map_err(|_| CryptoError::CryptoOperation(FILE_TOO_SHORT.to_string()))?;
+        .map_err(|_| CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()))?;
     encrypted_file
         .read_exact(&mut encoded_nonce)
-        .map_err(|_| CryptoError::CryptoOperation(FILE_TOO_SHORT.to_string()))?;
+        .map_err(|_| CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()))?;
     encrypted_file
         .read_exact(&mut encoded_hmac_tag)
-        .map_err(|_| CryptoError::CryptoOperation(FILE_TOO_SHORT.to_string()))?;
+        .map_err(|_| CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()))?;
 
     let bytes_after_prefix = encoded_envelope.len() + encoded_nonce.len() + encoded_hmac_tag.len();
     format::skip_unknown_header_bytes(&mut encrypted_file, header.header_len, bytes_after_prefix)?;
@@ -256,7 +256,7 @@ fn decrypt_file_v3(
     let envelope: [u8; ENVELOPE_SIZE] = envelope_vec
         .as_slice()
         .try_into()
-        .map_err(|_| CryptoError::CryptoOperation("Envelope has unexpected length".to_string()))?;
+        .map_err(|_| CryptoError::InvalidFormat("Envelope has unexpected length".to_string()))?;
 
     let recipient_secret = read_secret_key(secret_key_path, passphrase)?;
     let envelope_result = open_envelope(&envelope, &recipient_secret);
@@ -337,15 +337,15 @@ fn read_secret_key_v2(
     let derived_key = kdf_params.hash_passphrase(passphrase.expose_secret().as_bytes(), salt)?;
 
     let cipher = XChaCha20Poly1305::new(derived_key.as_ref().into());
-    let plaintext = cipher.decrypt(nonce, ciphertext).map_err(|_| {
-        CryptoError::CryptoOperation("Incorrect password or wrong private key provided".to_string())
-    })?;
+    let plaintext = cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|_| CryptoError::AuthenticationFailed)?;
 
     drop(derived_key);
 
     let mut secret_bytes: [u8; SECRET_KEY_SIZE] =
         plaintext.as_slice().try_into().map_err(|_| {
-            CryptoError::CryptoOperation("Decrypted key has unexpected length".to_string())
+            CryptoError::InvalidFormat("Decrypted key has unexpected length".to_string())
         })?;
     let mut plaintext = plaintext;
     plaintext.zeroize();
@@ -366,7 +366,7 @@ fn seal_envelope(
     let nonce = ChaChaBox::generate_nonce(&mut OsRng);
     let ciphertext = chacha_box
         .encrypt(&nonce, combined_key)
-        .map_err(|_| CryptoError::CryptoOperation("Envelope encryption failed".to_string()))?;
+        .map_err(|_| CryptoError::InternalError("Envelope encryption failed".to_string()))?;
 
     let mut envelope = [0u8; ENVELOPE_SIZE];
     envelope[..EPHEMERAL_PUB_SIZE].copy_from_slice(ephemeral_public.as_bytes());
@@ -381,7 +381,7 @@ fn open_envelope(
 ) -> Result<[u8; COMBINED_KEY_SIZE], CryptoError> {
     let ephemeral_public =
         PublicKey::from_slice(&envelope[..EPHEMERAL_PUB_SIZE]).map_err(|_| {
-            CryptoError::CryptoOperation("Invalid ephemeral public key in envelope".to_string())
+            CryptoError::InvalidFormat("Invalid ephemeral public key in envelope".to_string())
         })?;
     let nonce = chacha20poly1305::XNonce::from_slice(
         &envelope[EPHEMERAL_PUB_SIZE..EPHEMERAL_PUB_SIZE + ENVELOPE_NONCE_SIZE],
@@ -389,15 +389,13 @@ fn open_envelope(
     let ciphertext = &envelope[EPHEMERAL_PUB_SIZE + ENVELOPE_NONCE_SIZE..];
 
     let chacha_box = ChaChaBox::new(&ephemeral_public, recipient_secret);
-    let mut plaintext = chacha_box.decrypt(nonce, ciphertext).map_err(|_| {
-        CryptoError::CryptoOperation(
-            "Envelope decryption failed: wrong key or corrupted data".to_string(),
-        )
-    })?;
+    let mut plaintext = chacha_box
+        .decrypt(nonce, ciphertext)
+        .map_err(|_| CryptoError::AuthenticationFailed)?;
 
     if plaintext.len() != COMBINED_KEY_SIZE {
         plaintext.zeroize();
-        return Err(CryptoError::CryptoOperation(
+        return Err(CryptoError::InvalidFormat(
             "Decrypted envelope has unexpected length".to_string(),
         ));
     }
@@ -439,7 +437,7 @@ pub fn generate_key_pair(
     drop(secret_key);
     let encrypted_secret = cipher
         .encrypt(&nonce, raw_secret.as_slice())
-        .map_err(|_| CryptoError::CryptoOperation("Failed to encrypt private key".to_string()))?;
+        .map_err(|_| CryptoError::InternalError("Failed to encrypt private key".to_string()))?;
     drop(raw_secret);
     drop(derived_key);
 

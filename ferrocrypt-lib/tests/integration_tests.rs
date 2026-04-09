@@ -169,10 +169,8 @@ fn test_symmetric_wrong_password() -> Result<(), CryptoError> {
 
     assert!(result.is_err());
     match result {
-        Err(CryptoError::CryptoOperation(msg)) => {
-            assert!(msg.contains("incorrect"));
-        }
-        _ => panic!("Expected CryptoOperation"),
+        Err(CryptoError::AuthenticationFailed) => {}
+        other => panic!("Expected AuthenticationFailed, got {:?}", other),
     }
 
     Ok(())
@@ -405,10 +403,8 @@ fn test_hybrid_wrong_key_passphrase() -> Result<(), CryptoError> {
 
     assert!(result.is_err());
     match result {
-        Err(CryptoError::CryptoOperation(msg)) => {
-            assert!(msg.contains("Incorrect password") || msg.contains("wrong private key"));
-        }
-        _ => panic!("Expected CryptoOperation"),
+        Err(CryptoError::AuthenticationFailed) => {}
+        other => panic!("Expected AuthenticationFailed, got {:?}", other),
     }
 
     Ok(())
@@ -606,10 +602,8 @@ fn test_symmetric_streaming_wrong_password() -> Result<(), CryptoError> {
 
     assert!(result.is_err());
     match result {
-        Err(CryptoError::CryptoOperation(msg)) => {
-            assert!(msg.contains("incorrect"));
-        }
-        _ => panic!("Expected CryptoOperation"),
+        Err(CryptoError::AuthenticationFailed) => {}
+        other => panic!("Expected AuthenticationFailed, got {:?}", other),
     }
 
     Ok(())
@@ -1252,7 +1246,7 @@ fn test_future_major_version_rejected() -> Result<(), CryptoError> {
 
     assert!(result.is_err());
     match result {
-        Err(CryptoError::CryptoOperation(msg)) => {
+        Err(CryptoError::UnsupportedVersion(msg)) => {
             assert!(msg.contains("Newer file format"), "got: {msg}");
             assert!(msg.contains("Upgrade"), "got: {msg}");
         }
@@ -1298,7 +1292,7 @@ fn test_wrong_format_type_hybrid_as_symmetric() -> Result<(), CryptoError> {
 
     assert!(result.is_err());
     match result {
-        Err(CryptoError::CryptoOperation(msg)) => {
+        Err(CryptoError::InvalidFormat(msg)) => {
             assert!(msg.contains("different format type"));
         }
         other => panic!("Expected format type error, got {:?}", other),
@@ -2157,7 +2151,7 @@ fn test_older_major_version_rejected() -> Result<(), CryptoError> {
     let result = symmetric_auto(&encrypted_path, &decrypt_dir, &passphrase, None, |_| {});
     assert!(result.is_err());
     match result {
-        Err(CryptoError::CryptoOperation(msg)) => {
+        Err(CryptoError::UnsupportedVersion(msg)) => {
             assert!(msg.contains("Use a previous release"), "got: {msg}");
         }
         other => panic!("Expected version error, got {:?}", other),
@@ -2208,7 +2202,7 @@ fn test_older_key_version_rejected() -> Result<(), CryptoError> {
     );
     assert!(result.is_err());
     match result {
-        Err(CryptoError::CryptoOperation(msg)) => {
+        Err(CryptoError::UnsupportedVersion(msg)) => {
             assert!(msg.contains("Use a previous release"), "got: {msg}");
         }
         other => panic!("Expected key version error, got {:?}", other),
@@ -2235,7 +2229,7 @@ fn test_future_key_version_rejected() -> Result<(), CryptoError> {
     let result = validate_secret_key_file(&secret_key_path);
     assert!(result.is_err());
     match result {
-        Err(CryptoError::CryptoOperation(msg)) => {
+        Err(CryptoError::UnsupportedVersion(msg)) => {
             assert!(msg.contains("Newer key format"), "got: {msg}");
             assert!(msg.contains("Upgrade"), "got: {msg}");
         }
@@ -2251,7 +2245,7 @@ fn test_future_key_version_rejected() -> Result<(), CryptoError> {
     let result = public_key_fingerprint(&public_key_path);
     assert!(result.is_err());
     match result {
-        Err(CryptoError::CryptoOperation(msg)) => {
+        Err(CryptoError::UnsupportedVersion(msg)) => {
             assert!(msg.contains("Newer key format"), "got: {msg}");
             assert!(msg.contains("Upgrade"), "got: {msg}");
         }

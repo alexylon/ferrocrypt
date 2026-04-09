@@ -45,10 +45,10 @@ fn derive_keys(
     let mut hmac_key = Zeroizing::new([0u8; HMAC_KEY_SIZE]);
     hkdf.expand(HKDF_INFO_ENC, encryption_key.as_mut())
         .map_err(|_| {
-            CryptoError::CryptoOperation("HKDF expand failed for encryption key".to_string())
+            CryptoError::InternalError("HKDF expand failed for encryption key".to_string())
         })?;
     hkdf.expand(HKDF_INFO_HMAC, hmac_key.as_mut())
-        .map_err(|_| CryptoError::CryptoOperation("HKDF expand failed for HMAC key".to_string()))?;
+        .map_err(|_| CryptoError::InternalError("HKDF expand failed for HMAC key".to_string()))?;
 
     Ok((encryption_key, hmac_key))
 }
@@ -208,7 +208,7 @@ fn decrypt_file_v3(
         + encoded_size(ENCRYPTION_KEY_SIZE)
         + encoded_size(HMAC_TAG_SIZE);
     if (header.header_len as usize) < min_header_size {
-        return Err(CryptoError::CryptoOperation(FILE_TOO_SHORT.to_string()));
+        return Err(CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()));
     }
 
     let mut encoded_salt = vec![0u8; encoded_size(ARGON2_SALT_SIZE)];
@@ -220,22 +220,22 @@ fn decrypt_file_v3(
 
     encrypted_file
         .read_exact(&mut encoded_salt)
-        .map_err(|_| CryptoError::CryptoOperation(FILE_TOO_SHORT.to_string()))?;
+        .map_err(|_| CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()))?;
     encrypted_file
         .read_exact(&mut encoded_hkdf_salt)
-        .map_err(|_| CryptoError::CryptoOperation(FILE_TOO_SHORT.to_string()))?;
+        .map_err(|_| CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()))?;
     encrypted_file
         .read_exact(&mut encoded_kdf)
-        .map_err(|_| CryptoError::CryptoOperation(FILE_TOO_SHORT.to_string()))?;
+        .map_err(|_| CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()))?;
     encrypted_file
         .read_exact(&mut encoded_nonce)
-        .map_err(|_| CryptoError::CryptoOperation(FILE_TOO_SHORT.to_string()))?;
+        .map_err(|_| CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()))?;
     encrypted_file
         .read_exact(&mut encoded_key_hash)
-        .map_err(|_| CryptoError::CryptoOperation(FILE_TOO_SHORT.to_string()))?;
+        .map_err(|_| CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()))?;
     encrypted_file
         .read_exact(&mut encoded_hmac_tag)
-        .map_err(|_| CryptoError::CryptoOperation(FILE_TOO_SHORT.to_string()))?;
+        .map_err(|_| CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()))?;
 
     let bytes_after_prefix = encoded_salt.len()
         + encoded_hkdf_salt.len()
@@ -275,9 +275,7 @@ fn decrypt_file_v3(
         let key_hash: [u8; ENCRYPTION_KEY_SIZE] = sha3_256_hash(encryption_key.as_ref())?;
         let key_correct = ct_eq_32(&key_hash, verification_hash.as_slice().try_into()?);
         if !key_correct {
-            return Err(CryptoError::CryptoOperation(
-                "Password incorrect or file header corrupted".to_string(),
-            ));
+            return Err(CryptoError::AuthenticationFailed);
         }
         return Err(hmac_err);
     }

@@ -8,7 +8,11 @@ use thiserror::Error;
 /// | `KeyDerivation` | Password hashing/KDF failed | Ensure parameters are valid and memory is sufficient |
 /// | `Cipher` | Symmetric or asymmetric encryption/decryption failed (bad tag, nonce issues) | Verify key, input integrity, and nonce uniqueness |
 /// | `SliceConversion` | Byte slice could not be converted | Confirm buffer sizes |
-/// | `CryptoOperation` | High-level guard for crypto failures | Recheck keys/passwords and inputs |
+/// | `AuthenticationFailed` | Password, key, or HMAC verification failed | Verify correct password/key |
+/// | `InvalidFormat` | File or key-file structure is invalid or corrupted | Check file integrity |
+/// | `UnsupportedVersion` | File or key format version not supported | Upgrade/downgrade FerroCrypt |
+/// | `InvalidKdfParams` | KDF parameters out of safe bounds | Re-encrypt with valid parameters |
+/// | `InternalError` | Unexpected internal crypto failure | Report as a bug |
 /// | `InputPath` | Missing input file or folder | Provide an existing path |
 /// | `InvalidInput` | Validation failure with human-readable context | Inspect message for details |
 ///
@@ -40,8 +44,16 @@ pub enum CryptoError {
     KeyDerivation(#[from] argon2::Error),
     #[error(transparent)]
     SliceConversion(#[from] std::array::TryFromSliceError),
+    #[error("Authentication failed: wrong password, wrong key, or tampered data")]
+    AuthenticationFailed,
     #[error("{0}")]
-    CryptoOperation(String),
+    InvalidFormat(String),
+    #[error("{0}")]
+    UnsupportedVersion(String),
+    #[error("{0}")]
+    InvalidKdfParams(String),
+    #[error("{0}")]
+    InternalError(String),
     #[error("Input file or folder missing: {0}")]
     InputPath(String),
     #[error("{0}")]

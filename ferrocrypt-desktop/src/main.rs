@@ -14,6 +14,21 @@ mod password_scorer;
 
 const ELIDE: usize = 52;
 
+// Slint app modes — must match the `mode` property values in app.slint
+const MODE_SYMMETRIC_ENCRYPT: i32 = 0;
+const MODE_SYMMETRIC_DECRYPT: i32 = 1;
+const MODE_HYBRID_ENCRYPT: i32 = 2;
+const MODE_HYBRID_DECRYPT: i32 = 3;
+const MODE_KEYGEN: i32 = 4;
+
+fn is_encrypt_mode(mode: i32) -> bool {
+    matches!(mode, MODE_SYMMETRIC_ENCRYPT | MODE_HYBRID_ENCRYPT)
+}
+
+fn is_decrypt_mode(mode: i32) -> bool {
+    matches!(mode, MODE_SYMMETRIC_DECRYPT | MODE_HYBRID_DECRYPT)
+}
+
 #[cfg(target_os = "macos")]
 fn pick_file_or_folder() -> Option<PathBuf> {
     rfd::FileDialog::new().pick_file_or_folder()
@@ -36,7 +51,7 @@ fn main() {
                 app.set_password(Default::default());
                 app.set_password_repeated(Default::default());
                 app.set_hide_password(true);
-                app.set_password_strength(0);
+                app.set_password_strength(password_scorer::PW_EMPTY);
                 app.set_status_ok(Default::default());
                 app.set_status_err(Default::default());
                 let keypath = app.get_keypath().to_string();
@@ -156,8 +171,8 @@ fn main() {
             let keypath = app.get_keypath().to_string();
             let keygen_outdir = app.get_keygen_outdir().to_string();
 
-            let is_encrypt = mode == 0 || mode == 2;
-            let (output_dir, output_file) = if mode == 4 {
+            let is_encrypt = is_encrypt_mode(mode);
+            let (output_dir, output_file) = if mode == MODE_KEYGEN {
                 (keygen_outdir, None)
             } else if is_encrypt {
                 (parent_dir(&outpath).unwrap_or_default(), Some(outpath))
@@ -173,7 +188,7 @@ fn main() {
             let weak = weak.clone();
             std::thread::spawn(move || {
                 let pwd = SecretString::from(password);
-                let keygen_dir = if mode == 4 {
+                let keygen_dir = if mode == MODE_KEYGEN {
                     Some(output_dir.clone())
                 } else {
                     None
@@ -197,11 +212,13 @@ fn main() {
                 let keypath = Path::new(&keypath);
                 let save_as = output_file.as_deref().map(Path::new);
 
-                let is_decrypt = matches!(mode, 1 | 3);
+                let is_decrypt = is_decrypt_mode(mode);
                 let start = std::time::Instant::now();
                 let result: Result<PathBuf, _> = match mode {
-                    0 | 1 => symmetric_auto(inpath, output_dir_path, &pwd, save_as, &on_progress),
-                    2 | 3 => hybrid_auto(
+                    MODE_SYMMETRIC_ENCRYPT | MODE_SYMMETRIC_DECRYPT => {
+                        symmetric_auto(inpath, output_dir_path, &pwd, save_as, &on_progress)
+                    }
+                    MODE_HYBRID_ENCRYPT | MODE_HYBRID_DECRYPT => hybrid_auto(
                         inpath,
                         output_dir_path,
                         keypath,
@@ -209,7 +226,7 @@ fn main() {
                         save_as,
                         &on_progress,
                     ),
-                    4 => generate_key_pair(&pwd, output_dir_path, &on_progress)
+                    MODE_KEYGEN => generate_key_pair(&pwd, output_dir_path, &on_progress)
                         .map(|info| info.public_key_path),
                     _ => unreachable!(),
                 };
@@ -226,12 +243,12 @@ fn main() {
                                 app.set_password(Default::default());
                                 app.set_password_repeated(Default::default());
                                 app.set_hide_password(true);
-                                app.set_password_strength(0);
+                                app.set_password_strength(password_scorer::PW_EMPTY);
                                 app.set_keygen_outdir(Default::default());
                                 app.set_keygen_outdir_display(Default::default());
                                 app.set_conflict_warning(Default::default());
                                 app.set_status_err(Default::default());
-                                app.set_mode(2);
+                                app.set_mode(MODE_HYBRID_ENCRYPT);
                                 app.set_keypath_display(elide_left(&pub_key, ELIDE).into());
                                 app.set_keypath(pub_key.clone().into());
                                 validate_selected_key(&app, &pub_key);
@@ -298,7 +315,7 @@ fn apply_input_path(weak: &slint::Weak<AppWindow>, path: PathBuf) {
         });
 
     let detected_mode = detect_mode_from_path(&selected);
-    let is_decrypt = matches!(detected_mode, Some(1) | Some(3));
+    let is_decrypt = detected_mode.is_some_and(is_decrypt_mode);
 
     let Some(app) = weak.upgrade() else { return };
     let inpath_elide = if app.get_combined_picker() {
@@ -312,8 +329,8 @@ fn apply_input_path(weak: &slint::Weak<AppWindow>, path: PathBuf) {
     match detected_mode {
         Some(m) => app.set_mode(m),
         None => match old_mode {
-            1 => app.set_mode(0),
-            3 => app.set_mode(2),
+            MODE_SYMMETRIC_DECRYPT => app.set_mode(MODE_SYMMETRIC_ENCRYPT),
+            MODE_HYBRID_DECRYPT => app.set_mode(MODE_HYBRID_ENCRYPT),
             _ => {}
         },
     }
@@ -321,7 +338,7 @@ fn apply_input_path(weak: &slint::Weak<AppWindow>, path: PathBuf) {
         app.set_password(Default::default());
         app.set_password_repeated(Default::default());
         app.set_hide_password(true);
-        app.set_password_strength(0);
+        app.set_password_strength(password_scorer::PW_EMPTY);
     }
 
     let keypath = app.get_keypath().to_string();
@@ -354,11 +371,11 @@ fn check_conflicts(app: &AppWindow) {
 
     let mut warning = String::new();
 
-    if matches!(mode, 0 | 2) && !outpath.is_empty() && Path::new(&outpath).exists() {
+    if is_encrypt_mode(mode) && !outpath.is_empty() && Path::new(&outpath).exists() {
         warning = format!("Already exists: {}", elide_left(&outpath, ELIDE));
     }
 
-    if mode == 4 && warning.is_empty() {
+    if mode == MODE_KEYGEN && warning.is_empty() {
         let kg_dir = app.get_keygen_outdir().to_string();
         if !kg_dir.is_empty() {
             let secret_exists = private_key_path(&kg_dir).exists();
@@ -391,13 +408,13 @@ fn clear_fields(app: &AppWindow) {
     app.set_status_ok(empty.clone());
     app.set_status_err(empty);
     app.set_hide_password(true);
-    app.set_password_strength(0);
+    app.set_password_strength(password_scorer::PW_EMPTY);
     app.set_key_fingerprint(Default::default());
     app.set_key_invalid(false);
     // Snap back to the encrypt mode of the current tab
     match app.get_mode() {
-        1 => app.set_mode(0),
-        3 | 4 => app.set_mode(2),
+        MODE_SYMMETRIC_DECRYPT => app.set_mode(MODE_SYMMETRIC_ENCRYPT),
+        MODE_HYBRID_DECRYPT | MODE_KEYGEN => app.set_mode(MODE_HYBRID_ENCRYPT),
         _ => {}
     }
 }
@@ -467,7 +484,7 @@ fn elide_result_path(msg: &str) -> String {
 fn validate_selected_key(app: &AppWindow, key_path: &str) {
     let key_path = Path::new(key_path);
     match app.get_mode() {
-        2 => match public_key_fingerprint(key_path) {
+        MODE_HYBRID_ENCRYPT => match public_key_fingerprint(key_path) {
             Ok(fp) => {
                 app.set_key_fingerprint(fp.into());
                 app.set_key_invalid(false);
@@ -479,7 +496,7 @@ fn validate_selected_key(app: &AppWindow, key_path: &str) {
                 app.set_status_err(e.to_string().into());
             }
         },
-        3 => {
+        MODE_HYBRID_DECRYPT => {
             app.set_key_fingerprint(Default::default());
             if let Err(e) = validate_secret_key_file(key_path) {
                 app.set_key_invalid(true);
@@ -498,8 +515,8 @@ fn validate_selected_key(app: &AppWindow, key_path: &str) {
 
 fn detect_mode_from_path(path: &str) -> Option<i32> {
     match detect_encryption_mode(Path::new(path)) {
-        Ok(Some(EncryptionMode::Symmetric)) => Some(1),
-        Ok(Some(EncryptionMode::Hybrid)) => Some(3),
+        Ok(Some(EncryptionMode::Symmetric)) => Some(MODE_SYMMETRIC_DECRYPT),
+        Ok(Some(EncryptionMode::Hybrid)) => Some(MODE_HYBRID_DECRYPT),
         _ => None,
     }
 }

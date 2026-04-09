@@ -35,19 +35,25 @@ const WEAK_MAX_SCORE: f64 = 90.;
 
 // ── Public API ──────────────────────────────────────────────────────────
 
-/// Returns password strength on a 0–4 scale.
-/// 0 = empty, 1 = Weak, 2 = Fair, 3 = Good, 4 = Strong.
+// Password strength levels — must match the Slint password_strength property
+pub const PW_EMPTY: i32 = 0;
+pub const PW_WEAK: i32 = 1;
+pub const PW_FAIR: i32 = 2;
+pub const PW_GOOD: i32 = 3;
+pub const PW_STRONG: i32 = 4;
+
+/// Returns password strength as a named constant (`PW_EMPTY` .. `PW_STRONG`).
 pub fn password_strength(password: &str) -> i32 {
     if password.is_empty() {
-        return 0;
+        return PW_EMPTY;
     }
     let result = inner_score_password(password);
     let score = result.numeric_score;
     match score {
-        s if s <= VULNERABLE_MAX_SCORE => 1, // Weak
-        s if s < (VULNERABLE_MAX_SCORE + WEAK_MAX_SCORE) / 2.0 => 2, // Fair
-        s if s < WEAK_MAX_SCORE => 3,        // Good
-        _ => 4,                              // Strong
+        s if s <= VULNERABLE_MAX_SCORE => PW_WEAK,
+        s if s < (VULNERABLE_MAX_SCORE + WEAK_MAX_SCORE) / 2.0 => PW_FAIR,
+        s if s < WEAK_MAX_SCORE => PW_GOOD,
+        _ => PW_STRONG,
     }
 }
 
@@ -431,7 +437,7 @@ mod tests {
     fn test_common_passwords_are_weak() {
         for pw in ["password", "abc123", "qwerty", "letmein", "123456"] {
             let s = password_strength(pw);
-            assert_eq!(s, 1, "{pw} should be Weak, got {}", strength_label(s));
+            assert_eq!(s, PW_WEAK, "{pw} should be Weak, got {}", strength_label(s));
         }
     }
 
@@ -443,7 +449,12 @@ mod tests {
             "correct horse battery staple",
         ] {
             let s = password_strength(pw);
-            assert_eq!(s, 4, "{pw} should be Strong, got {}", strength_label(s));
+            assert_eq!(
+                s,
+                PW_STRONG,
+                "{pw} should be Strong, got {}",
+                strength_label(s)
+            );
         }
     }
 

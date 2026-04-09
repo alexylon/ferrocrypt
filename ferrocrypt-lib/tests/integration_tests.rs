@@ -999,7 +999,7 @@ fn test_hybrid_header_tamper_detection() -> Result<(), CryptoError> {
     // Tamper with the same nonce byte in all three replicated copies so majority
     // vote cannot recover the original value and the decoded nonce changes.
     // Hybrid header: [prefix(27)] [encoded_envelope(411)] [encoded_nonce(63)] [encoded_hmac(99)]
-    // encoded_envelope = rep_encode(136-byte envelope) = 3 + 136*3 = 411
+    // encoded_envelope = replication::encode(136-byte envelope) = 3 + 136*3 = 411
     // encoded_nonce layout: [padding(3)] [copy0(20)] [copy1(20)] [copy2(20)]
     // (NONCE_SIZE=19, padded to 20)
     let encrypted_path = encrypt_dir.join("secret.fcr");

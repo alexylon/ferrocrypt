@@ -89,7 +89,7 @@ use std::path::{Path, PathBuf};
 
 use secrecy::{ExposeSecret as _, SecretString};
 
-use crate::common::{bytes_to_hex, sha3_32_hash};
+use crate::common::{hex_encode, sha3_256_hash};
 pub use crate::error::CryptoError;
 pub use crate::format::ENCRYPTED_EXTENSION;
 
@@ -129,7 +129,7 @@ pub fn detect_encryption_mode(
     if file.read_exact(&mut buf).is_err() {
         return Ok(None);
     }
-    let Ok(prefix) = replication::rep_decode(&buf) else {
+    let Ok(prefix) = replication::decode(&buf) else {
         return Ok(None);
     };
     if prefix.len() < 2 || prefix[0] != format::MAGIC_BYTE {
@@ -172,8 +172,8 @@ pub fn public_key_fingerprint(key_file: impl AsRef<Path>) -> Result<String, Cryp
             format::validate_key_v2_layout(&data, &header, format::PUBLIC_KEY_DATA_SIZE)?;
             let key_bytes = &data[format::KEY_FILE_HEADER_SIZE
                 ..format::KEY_FILE_HEADER_SIZE + format::PUBLIC_KEY_DATA_SIZE];
-            let hash = sha3_32_hash(key_bytes)?;
-            Ok(bytes_to_hex(&hash))
+            let hash = sha3_256_hash(key_bytes)?;
+            Ok(hex_encode(&hash))
         }
         _ => Err(format::unsupported_key_version_error(header.version)),
     }
@@ -195,7 +195,7 @@ pub fn validate_secret_key_file(key_file: impl AsRef<Path>) -> Result<(), Crypto
 /// Returns the default encrypted filename for a given input path (e.g. `"secrets.fcr"`).
 /// For files, uses the stem (without extension). For directories, uses the full name.
 pub fn default_encrypted_filename(input_path: impl AsRef<Path>) -> Result<String, CryptoError> {
-    let base_name = common::get_encryption_base_name(input_path)?;
+    let base_name = common::encryption_base_name(input_path)?;
     Ok(format!("{}.{}", base_name, ENCRYPTED_EXTENSION))
 }
 

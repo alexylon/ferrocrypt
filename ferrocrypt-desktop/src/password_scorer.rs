@@ -190,7 +190,7 @@ fn score_password(password: &str) -> f64 {
     }
 }
 
-fn penalties_password(password: &str) -> Vec<PasswordPenalty> {
+fn password_penalties(password: &str) -> Vec<PasswordPenalty> {
     let analyzed_password = analyze(password);
     let mut penalties = vec![];
 
@@ -224,7 +224,7 @@ fn penalties_password(password: &str) -> Vec<PasswordPenalty> {
     penalties
 }
 
-fn password_without_common(password: &str) -> (String, bool) {
+fn strip_common_passwords(password: &str) -> (String, bool) {
     let password_as_lowercase = password.to_lowercase();
     for common_password in COMMON_PASSWORDS {
         if password_as_lowercase.contains(common_password) {
@@ -242,15 +242,15 @@ fn password_without_common(password: &str) -> (String, bool) {
 }
 
 fn inner_score_password(password: &str) -> PasswordScoreResult {
-    let (password_without_common, has_replaced) = password_without_common(password);
+    let (strip_common_passwords, has_replaced) = strip_common_passwords(password);
 
     let mut penalties = vec![];
     if has_replaced {
         penalties.push(PasswordPenalty::ContainsCommonPassword);
     }
 
-    let score = score_password(&password_without_common);
-    let scoring_penalties = penalties_password(password);
+    let score = score_password(&strip_common_passwords);
+    let scoring_penalties = password_penalties(password);
     penalties.extend(scoring_penalties);
 
     let final_score = if WORDLIST_PASSPHRASE_REGEX.is_match(password) {

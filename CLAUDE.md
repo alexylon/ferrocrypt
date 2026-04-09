@@ -80,15 +80,29 @@ Decryption reverses: read header → derive/decrypt keys → verify HMAC → Dec
 - Integration tests use `tests/workspace/` as a temp directory, cleaned up by a `#[ctor::dtor]` hook.
 - `ENCRYPTED_EXTENSION` ("fcr") constant lives in `format.rs`.
 
-## Code Guidelines
+## Non-Negotiable Rules
 
-- Do not add self-explanatory comments; only add comments where the logic is non-obvious
-- Avoid magic strings and numbers — use named constants
-- Keep code DRY — extract shared logic into helpers
-- Handle unwraps — prefer returning errors or using safe alternatives
-- Double-check the newly implemented logic using adversarial thinking
-- Double-check if the newly implemented changes are future-proof
-- Tests should be self-contained and only cover important behavior
-- Run `cargo clippy --all-targets -- -D warnings`
-- After each new feature, update README.md and CHANGELOG.md (under `[Unreleased]`)
-- After each session, double-check all changes against these guidelines before finishing
+- Use idiomatic Rust and repository naming conventions.
+- Keep code DRY and focused.
+- Avoid magic strings and numbers.
+- Do not add self-explanatory comments.
+- Do not leave `unwrap()` or `expect()` in normal code paths.
+- Never invent cryptography.
+- Use standard, reviewed crypto crates and constructions only.
+- Treat all external input as adversarial.
+- Never leak secrets through logs, errors, debug output, or UI.
+- Prefer authenticated encryption.
+- Fail closed on malformed, truncated, ambiguous, or unsupported input.
+- Use strong types where possible.
+- Keep parsing, validation, crypto, and I/O separated.
+- Add or update important tests and keep them self-contained.
+- Add regression tests for security-sensitive and format bugs.
+- After each important change, update:
+    - `README.md`
+    - `CHANGELOG.md` under `[Unreleased]`
+    - `ferrocrypt-lib/FORMAT.md`
+- Run:
+    - `cargo fmt --all`
+    - `cargo clippy --all-targets -- -D warnings`
+    - `cargo test --all`
+- Before finishing, review the change with adversarial thinking and future-proofing in mind.

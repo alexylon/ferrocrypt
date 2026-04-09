@@ -35,22 +35,6 @@ impl KdfParams {
     const FAST_KDF_MEM_COST: u32 = 8192;
     const FAST_KDF_TIME_COST: u32 = 1;
 
-    pub fn default_params() -> Self {
-        if cfg!(feature = "fast-kdf") {
-            Self {
-                mem_cost: Self::FAST_KDF_MEM_COST,
-                time_cost: Self::FAST_KDF_TIME_COST,
-                lanes: Self::DEFAULT_LANES,
-            }
-        } else {
-            Self {
-                mem_cost: Self::DEFAULT_MEM_COST,
-                time_cost: Self::DEFAULT_TIME_COST,
-                lanes: Self::DEFAULT_LANES,
-            }
-        }
-    }
-
     pub fn to_bytes(&self) -> [u8; KDF_PARAMS_SIZE] {
         let mut buf = [0u8; KDF_PARAMS_SIZE];
         buf[0..4].copy_from_slice(&self.mem_cost.to_be_bytes());
@@ -112,6 +96,24 @@ impl KdfParams {
     }
 }
 
+impl Default for KdfParams {
+    fn default() -> Self {
+        if cfg!(feature = "fast-kdf") {
+            Self {
+                mem_cost: Self::FAST_KDF_MEM_COST,
+                time_cost: Self::FAST_KDF_TIME_COST,
+                lanes: Self::DEFAULT_LANES,
+            }
+        } else {
+            Self {
+                mem_cost: Self::DEFAULT_MEM_COST,
+                time_cost: Self::DEFAULT_TIME_COST,
+                lanes: Self::DEFAULT_LANES,
+            }
+        }
+    }
+}
+
 // ─── Shared crypto sizes ──────────────────────────────────────────────────
 pub const ENCRYPTION_KEY_SIZE: usize = 32;
 pub const HMAC_KEY_SIZE: usize = 32;
@@ -130,7 +132,7 @@ pub const NONCE_SIZE: usize = 19;
 // ─── Error messages ───────────────────────────────────────────────────────
 pub const ERR_FILE_TOO_SHORT: &str = "File is too short or corrupted";
 
-pub fn get_file_stem(filename: &Path) -> Result<&OsStr, CryptoError> {
+pub fn file_stem(filename: &Path) -> Result<&OsStr, CryptoError> {
     filename
         .file_stem()
         .ok_or_else(|| CryptoError::InvalidInput("Cannot get file stem".to_string()))
@@ -139,7 +141,7 @@ pub fn get_file_stem(filename: &Path) -> Result<&OsStr, CryptoError> {
 /// Returns the base name for building the default encrypted output filename.
 /// For regular files, returns the file stem (without extension).
 /// For directories, returns the full directory name (preserving dots like `photos.v1`).
-pub fn get_encryption_base_name(path: impl AsRef<Path>) -> Result<String, CryptoError> {
+pub fn encryption_base_name(path: impl AsRef<Path>) -> Result<String, CryptoError> {
     let path = path.as_ref();
     if path.is_dir() {
         Ok(path
@@ -148,11 +150,11 @@ pub fn get_encryption_base_name(path: impl AsRef<Path>) -> Result<String, Crypto
             .to_string_lossy()
             .into_owned())
     } else {
-        Ok(get_file_stem(path)?.to_string_lossy().into_owned())
+        Ok(file_stem(path)?.to_string_lossy().into_owned())
     }
 }
 
-pub fn sha3_32_hash(data: &[u8]) -> Result<[u8; 32], CryptoError> {
+pub fn sha3_256_hash(data: &[u8]) -> Result<[u8; 32], CryptoError> {
     let mut hasher = Sha3_256::new();
     hasher.update(data);
     let digest: [u8; 32] = hasher.finalize().as_slice().try_into()?;
@@ -160,12 +162,12 @@ pub fn sha3_32_hash(data: &[u8]) -> Result<[u8; 32], CryptoError> {
     Ok(digest)
 }
 
-pub fn bytes_to_hex(bytes: &[u8]) -> String {
+pub fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 /// Compares two 256-bit byte strings in constant time.
-pub fn constant_time_compare_256_bit(a: &[u8; 32], b: &[u8; 32]) -> bool {
+pub fn ct_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
     constant_time_eq_32(a, b)
 }
 
@@ -372,51 +374,51 @@ mod tests {
     use secrecy::SecretString;
 
     #[test]
-    fn test_get_encryption_base_name_file() {
-        let stem = get_encryption_base_name("path/to/file.txt").unwrap();
+    fn test_encryption_base_name_file() {
+        let stem = encryption_base_name("path/to/file.txt").unwrap();
         assert_eq!(stem, "file");
     }
 
     #[test]
-    fn test_get_encryption_base_name_no_extension() {
-        let stem = get_encryption_base_name("path/to/file").unwrap();
+    fn test_encryption_base_name_no_extension() {
+        let stem = encryption_base_name("path/to/file").unwrap();
         assert_eq!(stem, "file");
     }
 
     #[test]
-    fn test_get_encryption_base_name_dotted_directory() {
+    fn test_encryption_base_name_dotted_directory() {
         let tmp = tempfile::TempDir::new().unwrap();
         let dotted_dir = tmp.path().join("photos.v1");
         std::fs::create_dir(&dotted_dir).unwrap();
-        let name = get_encryption_base_name(&dotted_dir).unwrap();
+        let name = encryption_base_name(&dotted_dir).unwrap();
         assert_eq!(name, "photos.v1");
     }
 
     #[test]
     fn test_sha3_hash_consistency() {
         let data = b"test data for hashing";
-        let hash1 = sha3_32_hash(data).unwrap();
-        let hash2 = sha3_32_hash(data).unwrap();
+        let hash1 = sha3_256_hash(data).unwrap();
+        let hash2 = sha3_256_hash(data).unwrap();
         assert_eq!(hash1, hash2);
     }
 
     #[test]
     fn test_sha3_hash_different_inputs() {
-        let hash1 = sha3_32_hash(b"data1").unwrap();
-        let hash2 = sha3_32_hash(b"data2").unwrap();
+        let hash1 = sha3_256_hash(b"data1").unwrap();
+        let hash2 = sha3_256_hash(b"data2").unwrap();
         assert_ne!(hash1, hash2);
     }
 
     #[test]
     fn test_sha3_hash_empty_input() {
-        let hash = sha3_32_hash(b"").unwrap();
+        let hash = sha3_256_hash(b"").unwrap();
         assert_eq!(hash.len(), 32);
     }
 
     #[test]
     fn test_constant_time_compare_equal() {
         let data = [42u8; 32];
-        assert!(constant_time_compare_256_bit(&data, &data));
+        assert!(ct_eq_32(&data, &data));
     }
 
     #[test]
@@ -424,14 +426,14 @@ mod tests {
         let data1 = [42u8; 32];
         let mut data2 = [42u8; 32];
         data2[0] = 43;
-        assert!(!constant_time_compare_256_bit(&data1, &data2));
+        assert!(!ct_eq_32(&data1, &data2));
     }
 
     #[test]
     fn test_constant_time_compare_all_zeros() {
         let data1 = [0u8; 32];
         let data2 = [0u8; 32];
-        assert!(constant_time_compare_256_bit(&data1, &data2));
+        assert!(ct_eq_32(&data1, &data2));
     }
 
     #[test]
@@ -443,42 +445,42 @@ mod tests {
 
     #[test]
     fn test_kdf_params_valid_defaults() {
-        let params = KdfParams::default_params();
+        let params = KdfParams::default();
         let bytes = params.to_bytes();
         assert!(KdfParams::from_bytes(&bytes).is_ok());
     }
 
     #[test]
     fn test_kdf_params_rejects_zero_mem_cost() {
-        let mut bytes = KdfParams::default_params().to_bytes();
+        let mut bytes = KdfParams::default().to_bytes();
         bytes[0..4].copy_from_slice(&0u32.to_be_bytes());
         assert!(KdfParams::from_bytes(&bytes).is_err());
     }
 
     #[test]
     fn test_kdf_params_rejects_zero_time_cost() {
-        let mut bytes = KdfParams::default_params().to_bytes();
+        let mut bytes = KdfParams::default().to_bytes();
         bytes[4..8].copy_from_slice(&0u32.to_be_bytes());
         assert!(KdfParams::from_bytes(&bytes).is_err());
     }
 
     #[test]
     fn test_kdf_params_rejects_zero_lanes() {
-        let mut bytes = KdfParams::default_params().to_bytes();
+        let mut bytes = KdfParams::default().to_bytes();
         bytes[8..12].copy_from_slice(&0u32.to_be_bytes());
         assert!(KdfParams::from_bytes(&bytes).is_err());
     }
 
     #[test]
     fn test_kdf_params_rejects_excessive_time_cost() {
-        let mut bytes = KdfParams::default_params().to_bytes();
+        let mut bytes = KdfParams::default().to_bytes();
         bytes[4..8].copy_from_slice(&13u32.to_be_bytes());
         assert!(KdfParams::from_bytes(&bytes).is_err());
     }
 
     #[test]
     fn test_kdf_params_rejects_excessive_lanes() {
-        let mut bytes = KdfParams::default_params().to_bytes();
+        let mut bytes = KdfParams::default().to_bytes();
         bytes[8..12].copy_from_slice(&9u32.to_be_bytes());
         assert!(KdfParams::from_bytes(&bytes).is_err());
     }

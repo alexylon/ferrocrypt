@@ -94,7 +94,7 @@ fn main() {
                 return;
             };
             let Some(app) = weak.upgrade() else { return };
-            set_outpath(&app, &path_to_string(&path));
+            set_output_path(&app, &path_to_string(&path));
         }
     });
 
@@ -115,7 +115,7 @@ fn main() {
             }
 
             if let Some(path) = dialog.save_file() {
-                set_outpath(&app, &path_to_string(&path));
+                set_output_path(&app, &path_to_string(&path));
             }
         }
     });
@@ -222,7 +222,7 @@ fn main() {
                     match result {
                         Ok(output) => {
                             if let Some(dir) = keygen_dir {
-                                let pub_key = pub_key_path(&dir);
+                                let pub_key = public_key_path(&dir);
                                 app.set_password(Default::default());
                                 app.set_password_repeated(Default::default());
                                 app.set_hide_password(true);
@@ -330,9 +330,9 @@ fn apply_input_path(weak: &slint::Weak<AppWindow>, path: PathBuf) {
     }
 
     if is_decrypt {
-        set_outpath(&app, &dir);
+        set_output_path(&app, &dir);
     } else if let Ok(filename) = default_encrypted_filename(&selected) {
-        set_outpath(&app, &path_to_string(&Path::new(&dir).join(filename)));
+        set_output_path(&app, &path_to_string(&Path::new(&dir).join(filename)));
     }
 
     if !app.get_key_invalid() {
@@ -342,7 +342,7 @@ fn apply_input_path(weak: &slint::Weak<AppWindow>, path: PathBuf) {
     check_conflicts(&app);
 }
 
-fn set_outpath(app: &AppWindow, path: &str) {
+fn set_output_path(app: &AppWindow, path: &str) {
     app.set_outpath_display(elide_left(path, ELIDE).into());
     app.set_outpath(path.into());
     check_conflicts(app);
@@ -361,8 +361,8 @@ fn check_conflicts(app: &AppWindow) {
     if mode == 4 && warning.is_empty() {
         let kg_dir = app.get_keygen_outdir().to_string();
         if !kg_dir.is_empty() {
-            let secret_exists = Path::new(&priv_key_path(&kg_dir)).exists();
-            let pub_exists = Path::new(&pub_key_path(&kg_dir)).exists();
+            let secret_exists = Path::new(&private_key_path(&kg_dir)).exists();
+            let pub_exists = Path::new(&public_key_path(&kg_dir)).exists();
             warning = match (secret_exists, pub_exists) {
                 (true, true) => "Key pair already exists in output folder".into(),
                 (true, false) => "Private key already exists in output folder".into(),
@@ -402,11 +402,11 @@ fn clear_fields(app: &AppWindow) {
     }
 }
 
-fn pub_key_path(dir: &str) -> String {
+fn public_key_path(dir: &str) -> String {
     format!("{dir}/public.key")
 }
 
-fn priv_key_path(dir: &str) -> String {
+fn private_key_path(dir: &str) -> String {
     format!("{dir}/private.key")
 }
 

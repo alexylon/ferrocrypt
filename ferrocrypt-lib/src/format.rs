@@ -63,7 +63,7 @@ use std::io::{self, Read};
 
 use crate::CryptoError;
 use crate::common::ERR_FILE_TOO_SHORT;
-use crate::replication::{rep_decode_exact, rep_encoded_size};
+use crate::replication::{decode_exact, encoded_size};
 
 // ─── Shared ────────────────────────────────────────────────────────────────
 
@@ -73,10 +73,10 @@ pub const MAGIC_BYTE: u8 = 0xFC;
 
 pub const TYPE_SYMMETRIC: u8 = 0x53; // 'S'
 pub const TYPE_HYBRID: u8 = 0x48; // 'H'
-pub const ENCRYPTED_FILE_VERSION_MAJOR: u8 = 3;
-pub const ENCRYPTED_FILE_VERSION_MINOR: u8 = 0;
+pub const VERSION_MAJOR: u8 = 3;
+pub const VERSION_MINOR: u8 = 0;
 pub const HEADER_PREFIX_SIZE: usize = 8;
-pub const HEADER_PREFIX_ENCODED_SIZE: usize = rep_encoded_size(HEADER_PREFIX_SIZE);
+pub const HEADER_PREFIX_ENCODED_SIZE: usize = encoded_size(HEADER_PREFIX_SIZE);
 pub const ENCRYPTED_EXTENSION: &str = "fcr";
 
 #[allow(dead_code)]
@@ -89,7 +89,7 @@ pub struct FileHeader {
 }
 
 #[allow(dead_code)]
-pub struct ParsedKeyHeader {
+pub struct KeyFileHeader {
     pub key_type: u8,
     pub version: u8,
     pub algorithm: u8,
@@ -106,8 +106,8 @@ pub fn build_header_prefix(
     [
         MAGIC_BYTE,
         format_type,
-        ENCRYPTED_FILE_VERSION_MAJOR,
-        ENCRYPTED_FILE_VERSION_MINOR,
+        VERSION_MAJOR,
+        VERSION_MINOR,
         (header_len >> 8) as u8,
         (header_len & 0xFF) as u8,
         (flags >> 8) as u8,
@@ -126,7 +126,7 @@ pub fn read_header_from_reader(
         .read_exact(&mut encoded)
         .map_err(|_| CryptoError::CryptoOperation(ERR_FILE_TOO_SHORT.to_string()))?;
 
-    let decoded = rep_decode_exact(&encoded, HEADER_PREFIX_SIZE)?;
+    let decoded = decode_exact(&encoded, HEADER_PREFIX_SIZE)?;
     let mut prefix = [0u8; HEADER_PREFIX_SIZE];
     prefix.copy_from_slice(&decoded);
 
@@ -213,7 +213,7 @@ pub fn validate_file_flags(header: &FileHeader) -> Result<(), CryptoError> {
 }
 
 pub fn unsupported_file_version_error(major: u8, minor: u8) -> CryptoError {
-    if major < ENCRYPTED_FILE_VERSION_MAJOR {
+    if major < VERSION_MAJOR {
         CryptoError::CryptoOperation(format!(
             "Older file format (v{}.{}). Use a previous release.",
             major, minor
@@ -277,10 +277,7 @@ pub fn build_key_file_header(key_type: u8, data_len: u16) -> [u8; KEY_FILE_HEADE
 
 /// Parses the 8-byte key file header without enforcing version policy.
 /// Validates magic byte and key type only. Callers dispatch on `header.version`.
-pub fn parse_key_file_header(
-    data: &[u8],
-    expected_type: u8,
-) -> Result<ParsedKeyHeader, CryptoError> {
+pub fn parse_key_file_header(data: &[u8], expected_type: u8) -> Result<KeyFileHeader, CryptoError> {
     if data.len() < KEY_FILE_HEADER_SIZE {
         return Err(CryptoError::CryptoOperation(
             "Key file is too short or corrupted".to_string(),
@@ -309,7 +306,7 @@ pub fn parse_key_file_header(
             "Expected a {expected} key file but got a {actual} key file"
         )));
     }
-    Ok(ParsedKeyHeader {
+    Ok(KeyFileHeader {
         key_type: actual_type,
         version: data[2],
         algorithm: data[3],
@@ -321,7 +318,7 @@ pub fn parse_key_file_header(
 /// Validates key file v2 layout: algorithm, data length, flags, and total file size.
 pub fn validate_key_v2_layout(
     data: &[u8],
-    header: &ParsedKeyHeader,
+    header: &KeyFileHeader,
     expected_data_size: usize,
 ) -> Result<(), CryptoError> {
     if header.algorithm != KEY_FILE_ALG_X25519 {

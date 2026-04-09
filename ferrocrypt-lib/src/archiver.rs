@@ -55,7 +55,7 @@ pub fn archive<W: Write>(
 
         append_file(&mut builder, input_path, Path::new(file_name))?;
 
-        crate::common::get_file_stem(input_path)?
+        crate::common::file_stem(input_path)?
             .to_string_lossy()
             .into_owned()
     } else {

@@ -77,7 +77,7 @@ pub enum Command {
     },
 }
 
-fn fmt_duration(d: std::time::Duration) -> String {
+fn format_duration(d: std::time::Duration) -> String {
     let secs = d.as_secs_f64();
     if secs < 60.0 {
         format!("{secs:.2} sec")
@@ -153,7 +153,7 @@ fn run_command(cmd: Command) -> Result<(), CryptoError> {
                 "\n{} {} in {}\n",
                 action,
                 output.display(),
-                fmt_duration(start.elapsed())
+                format_duration(start.elapsed())
             );
         }
 
@@ -184,7 +184,7 @@ fn run_command(cmd: Command) -> Result<(), CryptoError> {
                 "\n{} {} in {}\n",
                 action,
                 output.display(),
-                fmt_duration(start.elapsed())
+                format_duration(start.elapsed())
             );
         }
     }

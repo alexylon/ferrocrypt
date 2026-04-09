@@ -161,9 +161,11 @@ Current default values used for newly encrypted files are:
 
 Current readers additionally enforce safety bounds on header-supplied KDF params:
 
-- `1 <= mem_cost <= 2 * 1024 * 1024` KiB (2 GiB)
+- `8 * lanes <= mem_cost <= 2 * 1024 * 1024` KiB (2 GiB)
 - `1 <= time_cost <= 12`
 - `1 <= lanes <= 8`
+
+The `mem_cost` lower bound of `8 * lanes` is an Argon2 requirement (memory must be at least 8 × parallelism).
 
 Files outside those bounds are rejected by current readers.
 

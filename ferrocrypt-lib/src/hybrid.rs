@@ -13,10 +13,10 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::common::{
     ARGON2_SALT_SIZE, DecryptReader, ENCRYPTION_KEY_SIZE, ERR_FILE_TOO_SHORT, EncryptWriter,
     HMAC_KEY_SIZE, HMAC_TAG_SIZE, KDF_PARAMS_SIZE, KdfParams, NONCE_SIZE, TAG_SIZE,
-    get_encryption_base_name, hmac_sha3_256, hmac_sha3_256_verify,
+    encryption_base_name, hmac_sha3_256, hmac_sha3_256_verify,
 };
 use crate::format::{self, HEADER_PREFIX_ENCODED_SIZE, PUBLIC_KEY_DATA_SIZE, SECRET_KEY_DATA_SIZE};
-use crate::replication::{rep_decode_exact, rep_encode, rep_encoded_size};
+use crate::replication::{decode_exact, encode, encoded_size};
 use crate::{CryptoError, archiver};
 
 // Both keys are packed into a single envelope: [encryption_key | hmac_key]
@@ -31,7 +31,7 @@ const SECRET_KEY_NONCE_SIZE: usize = 24;
 const SECRET_KEY_SIZE: usize = 32;
 
 const PUBLIC_KEY_FILENAME: &str = "public.key";
-const SECRET_KEY_FILENAME: &str = "private.key";
+const PRIVATE_KEY_FILENAME: &str = "private.key";
 
 // Compile-time guard: if crypto_box changes SecretKey's layout (fields added,
 // removed, or reordered), this assertion fails and forces a review of the
@@ -94,7 +94,7 @@ pub fn encrypt_file(
     output_file: Option<&Path>,
     on_progress: &dyn Fn(&str),
 ) -> Result<PathBuf, CryptoError> {
-    let base_name = &get_encryption_base_name(input_path)?;
+    let base_name = &encryption_base_name(input_path)?;
     on_progress("Encrypting\u{2026}");
 
     let mut encryption_key = XChaCha20Poly1305::generate_key(&mut OsRng);
@@ -128,15 +128,15 @@ pub fn encrypt_file(
             )));
         }
 
-        let encoded_envelope = rep_encode(&envelope);
-        let encoded_nonce = rep_encode(&nonce);
+        let encoded_envelope = encode(&envelope);
+        let encoded_nonce = encode(&nonce);
 
         let header_len = (HEADER_PREFIX_ENCODED_SIZE
             + encoded_envelope.len()
             + encoded_nonce.len()
-            + rep_encoded_size(HMAC_TAG_SIZE)) as u16;
+            + encoded_size(HMAC_TAG_SIZE)) as u16;
         let prefix = format::build_header_prefix(format::TYPE_HYBRID, 0, header_len);
-        let encoded_prefix = rep_encode(&prefix);
+        let encoded_prefix = encode(&prefix);
 
         let stream_encryptor = stream::EncryptorBE32::from_aead(cipher, nonce.as_ref().into());
 
@@ -145,7 +145,7 @@ pub fn encrypt_file(
         hmac_message.extend_from_slice(&envelope);
         hmac_message.extend_from_slice(&nonce);
         let hmac_tag = hmac_sha3_256(&hmac_key, &hmac_message)?;
-        let encoded_hmac_tag = rep_encode(&hmac_tag);
+        let encoded_hmac_tag = encode(&hmac_tag);
 
         let mut dest = OpenOptions::new()
             .append(true)
@@ -225,16 +225,16 @@ fn decrypt_file_v3(
     format::validate_file_flags(&header)?;
 
     let min_header_size = HEADER_PREFIX_ENCODED_SIZE
-        + rep_encoded_size(ENVELOPE_SIZE)
-        + rep_encoded_size(NONCE_SIZE)
-        + rep_encoded_size(HMAC_TAG_SIZE);
+        + encoded_size(ENVELOPE_SIZE)
+        + encoded_size(NONCE_SIZE)
+        + encoded_size(HMAC_TAG_SIZE);
     if (header.header_len as usize) < min_header_size {
         return Err(CryptoError::CryptoOperation(ERR_FILE_TOO_SHORT.to_string()));
     }
 
-    let mut encoded_envelope = vec![0u8; rep_encoded_size(ENVELOPE_SIZE)];
-    let mut encoded_nonce = vec![0u8; rep_encoded_size(NONCE_SIZE)];
-    let mut encoded_hmac_tag = vec![0u8; rep_encoded_size(HMAC_TAG_SIZE)];
+    let mut encoded_envelope = vec![0u8; encoded_size(ENVELOPE_SIZE)];
+    let mut encoded_nonce = vec![0u8; encoded_size(NONCE_SIZE)];
+    let mut encoded_hmac_tag = vec![0u8; encoded_size(HMAC_TAG_SIZE)];
 
     encrypted_file
         .read_exact(&mut encoded_envelope)
@@ -249,9 +249,9 @@ fn decrypt_file_v3(
     let bytes_after_prefix = encoded_envelope.len() + encoded_nonce.len() + encoded_hmac_tag.len();
     format::skip_unknown_header_bytes(&mut encrypted_file, header.header_len, bytes_after_prefix)?;
 
-    let envelope_vec = rep_decode_exact(&encoded_envelope, ENVELOPE_SIZE)?;
-    let nonce = rep_decode_exact(&encoded_nonce, NONCE_SIZE)?;
-    let hmac_tag = rep_decode_exact(&encoded_hmac_tag, HMAC_TAG_SIZE)?;
+    let envelope_vec = decode_exact(&encoded_envelope, ENVELOPE_SIZE)?;
+    let nonce = decode_exact(&encoded_nonce, NONCE_SIZE)?;
+    let hmac_tag = decode_exact(&encoded_hmac_tag, HMAC_TAG_SIZE)?;
 
     let envelope: [u8; ENVELOPE_SIZE] = envelope_vec
         .as_slice()
@@ -296,7 +296,7 @@ fn read_public_key(path: &Path) -> Result<PublicKey, CryptoError> {
 
 fn read_public_key_v2(
     data: &[u8],
-    header: &format::ParsedKeyHeader,
+    header: &format::KeyFileHeader,
 ) -> Result<PublicKey, CryptoError> {
     format::validate_key_v2_layout(data, header, PUBLIC_KEY_DATA_SIZE)?;
     let body_start = format::KEY_FILE_HEADER_SIZE;
@@ -319,7 +319,7 @@ fn read_secret_key(
 
 fn read_secret_key_v2(
     data: &[u8],
-    header: &format::ParsedKeyHeader,
+    header: &format::KeyFileHeader,
     passphrase: &SecretString,
 ) -> Result<ManagedSecretKey, CryptoError> {
     format::validate_key_v2_layout(data, header, SECRET_KEY_DATA_SIZE)?;
@@ -426,7 +426,7 @@ pub fn generate_key_pair(
     let public_key = secret_key.public_key();
 
     // Encrypt private key at rest with passphrase via Argon2id + XChaCha20-Poly1305
-    let kdf_params = KdfParams::default_params();
+    let kdf_params = KdfParams::default();
     let kdf_bytes = kdf_params.to_bytes();
     let mut salt = [0u8; ARGON2_SALT_SIZE];
     OsRng.fill_bytes(&mut salt);
@@ -448,7 +448,7 @@ pub fn generate_key_pair(
     let public_header =
         format::build_key_file_header(format::KEY_FILE_TYPE_PUBLIC, PUBLIC_KEY_DATA_SIZE as u16);
 
-    let secret_key_path = output_dir.join(SECRET_KEY_FILENAME);
+    let secret_key_path = output_dir.join(PRIVATE_KEY_FILENAME);
     let public_key_path = output_dir.join(PUBLIC_KEY_FILENAME);
     let tmp_secret = output_dir.join(".private.key.tmp");
     let tmp_public = output_dir.join(".public.key.tmp");
@@ -548,23 +548,23 @@ mod tests {
 
         // --- Decode the v3.0 header ---
         let encoded_prefix = &original[..HEADER_PREFIX_ENCODED_SIZE];
-        let prefix_bytes = rep_decode_exact(encoded_prefix, format::HEADER_PREFIX_SIZE)?;
+        let prefix_bytes = decode_exact(encoded_prefix, format::HEADER_PREFIX_SIZE)?;
         let old_header_len = u16::from_be_bytes([prefix_bytes[4], prefix_bytes[5]]) as usize;
 
         let mut cursor = Cursor::new(&original[HEADER_PREFIX_ENCODED_SIZE..]);
-        let mut enc_envelope = vec![0u8; rep_encoded_size(ENVELOPE_SIZE)];
-        let mut enc_nonce = vec![0u8; rep_encoded_size(NONCE_SIZE)];
-        let mut enc_hmac = vec![0u8; rep_encoded_size(HMAC_TAG_SIZE)];
+        let mut enc_envelope = vec![0u8; encoded_size(ENVELOPE_SIZE)];
+        let mut enc_nonce = vec![0u8; encoded_size(NONCE_SIZE)];
+        let mut enc_hmac = vec![0u8; encoded_size(HMAC_TAG_SIZE)];
         cursor.read_exact(&mut enc_envelope)?;
         cursor.read_exact(&mut enc_nonce)?;
         cursor.read_exact(&mut enc_hmac)?;
 
-        let envelope_vec = rep_decode_exact(&enc_envelope, ENVELOPE_SIZE)?;
-        let nonce = rep_decode_exact(&enc_nonce, NONCE_SIZE)?;
+        let envelope_vec = decode_exact(&enc_envelope, ENVELOPE_SIZE)?;
+        let nonce = decode_exact(&enc_nonce, NONCE_SIZE)?;
         let envelope: [u8; ENVELOPE_SIZE] = envelope_vec.as_slice().try_into().unwrap();
 
         // Open envelope to get the HMAC key
-        let secret = read_secret_key(&keys_dir.join(SECRET_KEY_FILENAME), &key_pass)?;
+        let secret = read_secret_key(&keys_dir.join(PRIVATE_KEY_FILENAME), &key_pass)?;
         let decrypted = open_envelope(&envelope, &secret)?;
         drop(secret);
         let hmac_key = &decrypted[ENCRYPTION_KEY_SIZE..COMBINED_KEY_SIZE];
@@ -575,7 +575,7 @@ mod tests {
         let new_prefix = [
             format::MAGIC_BYTE,
             format::TYPE_HYBRID,
-            format::ENCRYPTED_FILE_VERSION_MAJOR,
+            format::VERSION_MAJOR,
             1, // minor = 1
             (new_header_len >> 8) as u8,
             (new_header_len & 0xFF) as u8,
@@ -593,10 +593,10 @@ mod tests {
         // --- Reassemble: new prefix + same fields + new HMAC + trailing + ciphertext ---
         let ciphertext = &original[old_header_len..];
         let mut output = Vec::new();
-        output.extend_from_slice(&rep_encode(&new_prefix));
+        output.extend_from_slice(&encode(&new_prefix));
         output.extend_from_slice(&enc_envelope);
         output.extend_from_slice(&enc_nonce);
-        output.extend_from_slice(&rep_encode(&new_hmac_tag));
+        output.extend_from_slice(&encode(&new_hmac_tag));
         output.extend_from_slice(&vec![0xBB; extra_bytes]);
         output.extend_from_slice(ciphertext);
 
@@ -606,7 +606,7 @@ mod tests {
         let output = decrypt_file(
             &encrypted_path,
             &decrypt_dir,
-            &keys_dir.join(SECRET_KEY_FILENAME),
+            &keys_dir.join(PRIVATE_KEY_FILENAME),
             &key_pass,
             &|_| {},
         )?;

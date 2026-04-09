@@ -22,6 +22,7 @@ All notable changes to FerroCrypt are documented in this file.
 - Versioned file format with magic bytes (`0xFC` + type), major/minor version, and header length field. Forward-compatible within a major version: future minor versions may append optional trailing fields that older readers can skip via the header length. Minor versions must not change required decryption or authentication semantics.
 
 ### Changed
+- Migrated Argon2id implementation from `rust-argon2` to RustCrypto `argon2` crate for better maintenance and ecosystem alignment. KDF output is now stack-allocated (`[u8; 32]`) instead of heap-allocated (`Vec<u8>`), improving zeroization guarantees. No format change — existing encrypted files and key files remain fully compatible.
 - Version-dispatch architecture: decrypt and key-reading paths now dispatch by file/key format version, enabling future reader compatibility for the current format line (encrypted files v3+, key files v2+). Golden fixture tests guard against regressions.
 - **Breaking:** Encrypted-file format bumped to 3.0 — files from older versions cannot be decrypted. Unified file extension from `.fcs`/`.fch` to single `.fcr`.
 - **Breaking:** Key-file format bumped to 2.0 — public/private key files from the older RSA/OpenSSL line are not supported by the current release.

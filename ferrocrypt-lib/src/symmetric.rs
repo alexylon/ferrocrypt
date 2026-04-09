@@ -39,14 +39,9 @@ fn derive_keys(
     hkdf_salt: &[u8],
     kdf_params: &KdfParams,
 ) -> Result<DerivedKeys, CryptoError> {
-    let argon2_config = kdf_params.to_argon2_config();
-    let ikm = Zeroizing::new(argon2::hash_raw(
-        passphrase.expose_secret().as_bytes(),
-        salt,
-        &argon2_config,
-    )?);
+    let ikm = kdf_params.hash_passphrase(passphrase.expose_secret().as_bytes(), salt)?;
 
-    let hkdf = Hkdf::<Sha3_256>::new(Some(hkdf_salt), &ikm);
+    let hkdf = Hkdf::<Sha3_256>::new(Some(hkdf_salt), ikm.as_ref());
     let mut encryption_key = Zeroizing::new([0u8; ENCRYPTION_KEY_SIZE]);
     let mut hmac_key = Zeroizing::new([0u8; HMAC_KEY_SIZE]);
     hkdf.expand(HKDF_INFO_ENC, encryption_key.as_mut())

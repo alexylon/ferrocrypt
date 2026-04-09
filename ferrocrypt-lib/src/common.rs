@@ -8,6 +8,8 @@ use constant_time_eq::constant_time_eq_32;
 use hmac::{Hmac, KeyInit, Mac};
 use sha3::{Digest, Sha3_256};
 
+use zeroize::Zeroizing;
+
 use crate::CryptoError;
 
 type HmacSha3_256 = Hmac<Sha3_256>;
@@ -90,15 +92,22 @@ impl KdfParams {
         Ok(params)
     }
 
-    pub fn to_argon2_config(&self) -> argon2::Config<'static> {
-        argon2::Config {
-            variant: argon2::Variant::Argon2id,
-            hash_length: 32,
-            lanes: self.lanes,
-            mem_cost: self.mem_cost,
-            time_cost: self.time_cost,
-            ..Default::default()
-        }
+    pub fn hash_passphrase(
+        &self,
+        passphrase: &[u8],
+        salt: &[u8],
+    ) -> Result<Zeroizing<[u8; ENCRYPTION_KEY_SIZE]>, CryptoError> {
+        let params = argon2::Params::new(
+            self.mem_cost,
+            self.time_cost,
+            self.lanes,
+            Some(ENCRYPTION_KEY_SIZE),
+        )?;
+        let hasher =
+            argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+        let mut output = Zeroizing::new([0u8; ENCRYPTION_KEY_SIZE]);
+        hasher.hash_password_into(passphrase, salt, output.as_mut())?;
+        Ok(output)
     }
 }
 

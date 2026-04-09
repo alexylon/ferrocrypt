@@ -333,18 +333,14 @@ fn read_secret_key_v2(
     );
     let ciphertext = &body[KDF_PARAMS_SIZE + ARGON2_SALT_SIZE + SECRET_KEY_NONCE_SIZE..];
 
-    let config = kdf_params.to_argon2_config();
-    let mut derived_key = Zeroizing::new(
-        argon2::hash_raw(passphrase.expose_secret().as_bytes(), salt, &config)
-            .map_err(CryptoError::KeyDerivation)?,
-    );
+    let derived_key = kdf_params.hash_passphrase(passphrase.expose_secret().as_bytes(), salt)?;
 
-    let cipher = XChaCha20Poly1305::new(derived_key.as_slice().into());
+    let cipher = XChaCha20Poly1305::new(derived_key.as_ref().into());
     let plaintext = cipher.decrypt(nonce, ciphertext).map_err(|_| {
         CryptoError::CryptoOperation("Incorrect password or wrong private key provided".to_string())
     })?;
 
-    derived_key.zeroize();
+    drop(derived_key);
 
     let mut secret_bytes: [u8; SECRET_KEY_SIZE] =
         plaintext.as_slice().try_into().map_err(|_| {
@@ -434,13 +430,9 @@ pub fn generate_key_pair(
     let mut salt = [0u8; ARGON2_SALT_SIZE];
     OsRng.fill_bytes(&mut salt);
 
-    let config = kdf_params.to_argon2_config();
-    let mut derived_key = Zeroizing::new(
-        argon2::hash_raw(passphrase.expose_secret().as_bytes(), &salt, &config)
-            .map_err(CryptoError::KeyDerivation)?,
-    );
+    let derived_key = kdf_params.hash_passphrase(passphrase.expose_secret().as_bytes(), &salt)?;
 
-    let cipher = XChaCha20Poly1305::new(derived_key.as_slice().into());
+    let cipher = XChaCha20Poly1305::new(derived_key.as_ref().into());
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
     let raw_secret = Zeroizing::new(secret_key.to_bytes());
     drop(secret_key);
@@ -448,8 +440,7 @@ pub fn generate_key_pair(
         .encrypt(&nonce, raw_secret.as_slice())
         .map_err(|_| CryptoError::CryptoOperation("Failed to encrypt private key".to_string()))?;
     drop(raw_secret);
-
-    derived_key.zeroize();
+    drop(derived_key);
 
     let secret_header =
         format::build_key_file_header(format::KEY_FILE_TYPE_SECRET, SECRET_KEY_DATA_SIZE as u16);

@@ -5,18 +5,19 @@
 //
 // Analyzer originally adapted from https://github.com/magiclen/passwords (MIT, Ron Li).
 
-use regex_lite::Regex;
 use std::collections::HashMap;
+use std::sync::LazyLock;
+
+use regex_lite::Regex;
 
 // Generated at build time from passwords.txt
 include!(concat!(env!("OUT_DIR"), "/common_passwords.rs"));
 
 const SEPARATOR_SYMBOLS: &str = "[-,._@ ]";
 
-lazy_static::lazy_static! {
-    static ref WORDLIST_PASSPHRASE_REGEX: Regex = build_passphrase_regex();
-    static ref WORDLIST_PASSPHRASE_SEPARATOR_REGEX: Regex = build_passphrase_separator_regex();
-}
+static WORDLIST_PASSPHRASE_REGEX: LazyLock<Regex> = LazyLock::new(build_passphrase_regex);
+static WORDLIST_PASSPHRASE_SEPARATOR_REGEX: LazyLock<Regex> =
+    LazyLock::new(build_passphrase_separator_regex);
 
 fn build_passphrase_regex() -> Regex {
     let separator = format!("(?:\\d|{SEPARATOR_SYMBOLS}|\\d{SEPARATOR_SYMBOLS})");

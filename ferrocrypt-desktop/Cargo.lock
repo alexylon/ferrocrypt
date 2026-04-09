@@ -1625,7 +1625,6 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "ferrocrypt",
- "lazy_static",
  "regex-lite",
  "rfd",
  "slint",

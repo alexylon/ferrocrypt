@@ -9,7 +9,6 @@ slint = "1"
 ferrocrypt = { path = "../ferrocrypt-lib" }
 rfd = "0.17"
 regex-lite = "0.1"
-lazy_static = "1"
 arboard = "3"
 
 [build-dependencies]

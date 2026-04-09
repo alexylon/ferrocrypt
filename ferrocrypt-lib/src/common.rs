@@ -71,7 +71,14 @@ impl KdfParams {
             time_cost: u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
             lanes: u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
         };
-        if params.mem_cost == 0 || params.mem_cost > Self::MAX_MEM_COST {
+        if params.lanes == 0 || params.lanes > Self::MAX_LANES {
+            return Err(CryptoError::CryptoOperation(format!(
+                "Invalid KDF parallelism: {}",
+                params.lanes
+            )));
+        }
+        let min_mem_cost = 8 * params.lanes;
+        if params.mem_cost < min_mem_cost || params.mem_cost > Self::MAX_MEM_COST {
             return Err(CryptoError::CryptoOperation(format!(
                 "Invalid KDF memory cost: {} KiB",
                 params.mem_cost
@@ -81,12 +88,6 @@ impl KdfParams {
             return Err(CryptoError::CryptoOperation(format!(
                 "Invalid KDF time cost: {}",
                 params.time_cost
-            )));
-        }
-        if params.lanes == 0 || params.lanes > Self::MAX_LANES {
-            return Err(CryptoError::CryptoOperation(format!(
-                "Invalid KDF parallelism: {}",
-                params.lanes
             )));
         }
         Ok(params)
@@ -457,6 +458,18 @@ mod tests {
     fn test_kdf_params_rejects_excessive_lanes() {
         let mut bytes = KdfParams::default_params().to_bytes();
         bytes[8..12].copy_from_slice(&9u32.to_be_bytes());
+        assert!(KdfParams::from_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn test_kdf_params_rejects_mem_cost_below_argon2_minimum() {
+        // Argon2 requires mem_cost >= 8 * lanes
+        let bytes = KdfParams {
+            mem_cost: 31,
+            time_cost: 4,
+            lanes: 4,
+        }
+        .to_bytes();
         assert!(KdfParams::from_bytes(&bytes).is_err());
     }
 

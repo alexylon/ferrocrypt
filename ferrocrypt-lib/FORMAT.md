@@ -495,6 +495,8 @@ Current reader behavior is:
 
 Files produced before the current magic-byte-based format family are not supported by current readers.
 
+Future major versions are intended to retain readers for previously released major versions (e.g. a v4 reader would still accept v3 encrypted files), so that upgrading FerroCrypt does not orphan existing encrypted data.
+
 ## 9.2 Key files
 
 Current reader behavior is:
@@ -505,6 +507,8 @@ Current reader behavior is:
 - reject unknown key algorithms
 
 So current key-file compatibility is **exact-version**, not major/minor compatible.
+
+Future key-file versions are intended to retain readers for previously released versions.
 
 ## 9.3 KDF parameter compatibility
 

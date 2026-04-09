@@ -15,15 +15,15 @@ use rustyline::error::ReadlineError;
 pub struct Cli {
     /// Subcommand to run. If omitted, the CLI starts in interactive mode.
     #[command(subcommand)]
-    pub command: Option<Command>,
+    pub command: Option<CliCommand>,
 }
 
 #[derive(Subcommand, Debug)]
-pub enum Command {
+pub enum CliCommand {
     #[command(alias = "gen")]
     Keygen {
         #[arg(short, long)]
-        outpath: String,
+        output_path: String,
 
         #[arg(short, long)]
         passphrase: String,
@@ -32,10 +32,10 @@ pub enum Command {
     #[command(alias = "hyb")]
     Hybrid {
         #[arg(short, long)]
-        inpath: String,
+        input_path: String,
 
         #[arg(short, long)]
-        outpath: String,
+        output_path: String,
 
         #[arg(short, long)]
         key: String,
@@ -60,10 +60,10 @@ pub enum Command {
     #[command(alias = "sym")]
     Symmetric {
         #[arg(short, long)]
-        inpath: String,
+        input_path: String,
 
         #[arg(short, long)]
-        outpath: String,
+        output_path: String,
 
         #[arg(short, long)]
         passphrase: String,
@@ -98,35 +98,35 @@ pub fn run() -> Result<(), CryptoError> {
     Ok(())
 }
 
-fn run_command(cmd: Command) -> Result<(), CryptoError> {
+fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
     match cmd {
-        Command::Keygen {
-            outpath,
+        CliCommand::Keygen {
+            output_path,
             passphrase,
         } => {
-            let outpath = Path::new(&outpath);
+            let output_path = Path::new(&output_path);
             let passphrase = SecretString::from(passphrase);
-            let info = generate_key_pair(&passphrase, outpath, |msg| eprintln!("{msg}"))?;
-            println!("\nGenerated key pair in {}\n", outpath.display());
+            let info = generate_key_pair(&passphrase, output_path, |msg| eprintln!("{msg}"))?;
+            println!("\nGenerated key pair in {}\n", output_path.display());
             println!("Public key fingerprint: {}", info.fingerprint);
         }
 
-        Command::Fingerprint { key_file } => {
+        CliCommand::Fingerprint { key_file } => {
             let fp = public_key_fingerprint(Path::new(&key_file))?;
             println!("{}", fp);
         }
 
-        Command::Hybrid {
-            inpath,
-            outpath,
+        CliCommand::Hybrid {
+            input_path,
+            output_path,
             key,
             passphrase,
             save_as,
         } => {
-            let inpath = Path::new(&inpath);
-            let outpath = Path::new(&outpath);
+            let input_path = Path::new(&input_path);
+            let output_path = Path::new(&output_path);
             let key = Path::new(&key);
-            let is_encrypt = detect_encryption_mode(inpath)?.is_none();
+            let is_encrypt = detect_encryption_mode(input_path)?.is_none();
             if is_encrypt {
                 if let Ok(fp) = public_key_fingerprint(key) {
                     println!("Encrypting to: {}", fp);
@@ -137,8 +137,8 @@ fn run_command(cmd: Command) -> Result<(), CryptoError> {
             let passphrase = SecretString::from(passphrase);
             let start = std::time::Instant::now();
             let output = hybrid_auto(
-                inpath,
-                outpath,
+                input_path,
+                output_path,
                 key,
                 &passphrase,
                 save_as.as_deref().map(Path::new),
@@ -157,20 +157,20 @@ fn run_command(cmd: Command) -> Result<(), CryptoError> {
             );
         }
 
-        Command::Symmetric {
-            inpath,
-            outpath,
+        CliCommand::Symmetric {
+            input_path,
+            output_path,
             passphrase,
             save_as,
         } => {
-            let inpath = Path::new(&inpath);
-            let outpath = Path::new(&outpath);
-            let is_encrypt = detect_encryption_mode(inpath)?.is_none();
+            let input_path = Path::new(&input_path);
+            let output_path = Path::new(&output_path);
+            let is_encrypt = detect_encryption_mode(input_path)?.is_none();
             let passphrase = SecretString::from(passphrase);
             let start = std::time::Instant::now();
             let output = symmetric_auto(
-                inpath,
-                outpath,
+                input_path,
+                output_path,
                 &passphrase,
                 save_as.as_deref().map(Path::new),
                 |msg| eprintln!("{msg}"),

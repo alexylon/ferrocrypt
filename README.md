@@ -187,8 +187,8 @@ ferrocrypt> quit
 
 | Flag | Description |
 |---|---|
-| `-i, --inpath` | Input file or directory |
-| `-o, --outpath` | Output directory |
+| `-i, --input-path` | Input file or directory |
+| `-o, --output-path` | Output directory |
 | `-p, --passphrase` | Password for encryption/decryption |
 | `-s, --save-as` | Custom output file path (encrypt only, optional) |
 
@@ -196,8 +196,8 @@ ferrocrypt> quit
 
 | Flag | Description |
 |---|---|
-| `-i, --inpath` | Input file or directory |
-| `-o, --outpath` | Output directory |
+| `-i, --input-path` | Input file or directory |
+| `-o, --output-path` | Output directory |
 | `-k, --key` | Public key (encrypt) or private key (decrypt) |
 | `-p, --passphrase` | Private key passphrase (decrypt only) |
 | `-s, --save-as` | Custom output file path (encrypt only, optional) |
@@ -206,7 +206,7 @@ ferrocrypt> quit
 
 | Flag | Description |
 |---|---|
-| `-o, --outpath` | Output directory for the key pair |
+| `-o, --output-path` | Output directory for the key pair |
 | `-p, --passphrase` | Passphrase to encrypt the private key |
 
 #### `fingerprint`

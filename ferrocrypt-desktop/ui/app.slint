@@ -102,16 +102,16 @@ export component AppWindow inherits Window {
     // ── State ───────────────────────────────────────────────────────────
     // Mode: 0=SE  1=SD  2=HE  3=HD  4=GK
     in-out property <int> mode: 0;
-    in-out property <string> inpath;
-    in-out property <string> inpath-display;
-    in-out property <string> outpath;
-    in-out property <string> outpath-display;
+    in-out property <string> input-path;
+    in-out property <string> input-path-display;
+    in-out property <string> output-path;
+    in-out property <string> output-path-display;
     in-out property <string> password;
     in-out property <string> password-repeated;
-    in-out property <string> keypath;
-    in-out property <string> keypath-display;
-    in-out property <string> keygen-outdir;
-    in-out property <string> keygen-outdir-display;
+    in-out property <string> key-path;
+    in-out property <string> key-path-display;
+    in-out property <string> keygen-output-dir;
+    in-out property <string> keygen-output-dir-display;
     in-out property <string> status-ok;
     in-out property <string> status-err;
     in-out property <bool> hide-password: true;
@@ -129,18 +129,18 @@ export component AppWindow inherits Window {
     property <bool> require-key: mode == 2 || mode == 3;
     property <bool> password-match: password == password-repeated;
     property <bool> disable-start: is-working
-        || (mode == 0 && (inpath == "" || password == ""
+        || (mode == 0 && (input-path == "" || password == ""
             || (require-password-repeated && !password-match)))
-        || (mode == 1 && (inpath == "" || password == ""))
-        || (mode == 2 && (inpath == "" || keypath == "" || key-invalid))
-        || (mode == 3 && (inpath == "" || password == "" || keypath == "" || key-invalid))
-        || (mode == 4 && (keygen-outdir == "" || password == ""
+        || (mode == 1 && (input-path == "" || password == ""))
+        || (mode == 2 && (input-path == "" || key-path == "" || key-invalid))
+        || (mode == 3 && (input-path == "" || password == "" || key-path == "" || key-invalid))
+        || (mode == 4 && (keygen-output-dir == "" || password == ""
             || (require-password-repeated && !password-match)));
     property <bool> is-encrypt-mode: mode == 0 || mode == 2 || mode == 4;
     property <bool> form-is-clean:
         (mode == 0 || mode == 2) && hide-password
-        && inpath == "" && outpath == "" && password == ""
-        && password-repeated == "" && keypath == "" && keygen-outdir == ""
+        && input-path == "" && output-path == "" && password == ""
+        && password-repeated == "" && key-path == "" && keygen-output-dir == ""
         && conflict-warning == "" && status-ok == "" && status-err == "";
     property <string> button-text:
         mode == 0 || mode == 2 ? "Encrypt" :
@@ -157,7 +157,7 @@ export component AppWindow inherits Window {
     callback select-key-file();
     callback select-output-dir();
     callback select-output-file();
-    callback select-keygen-outdir();
+    callback select-keygen-output-dir();
     callback start-operation();
     callback password-edited();
     callback clear-form();
@@ -309,13 +309,13 @@ export component AppWindow inherits Window {
                     border-radius: Theme.field-radius;
                     background: is-working ? Theme.input-bg-disabled : Theme.input-bg;
                     border-width: 1px;
-                    border-color: !is-working && inpath-ta.has-hover
+                    border-color: !is-working && input-path-ta.has-hover
                                   ? Theme.border-hover : Theme.border;
                     clip: true;
                     animate background { duration: 150ms; }
                     animate border-color { duration: 150ms; }
 
-                    inpath-ta := TouchArea {
+                    input-path-ta := TouchArea {
                         enabled: !is-working;
                         mouse-cursor: self.enabled ? pointer : default;
                         clicked => { root.select-input-file(); }
@@ -325,8 +325,8 @@ export component AppWindow inherits Window {
                         x: Theme.field-pad;
                         width: parent.width - 2 * Theme.field-pad;
                         vertical-alignment: center;
-                        text: inpath != "" ? inpath-display : "No file or folder selected";
-                        color: inpath != "" ? Theme.text : Theme.text-disabled;
+                        text: input-path != "" ? input-path-display : "No file or folder selected";
+                        color: input-path != "" ? Theme.text : Theme.text-disabled;
                         font-size: Theme.field-text-size;
                         overflow: elide;
                     }
@@ -369,7 +369,7 @@ export component AppWindow inherits Window {
                 spacing: Theme.row-spacing;
 
                 Rectangle {
-                    property <bool> field-enabled: !is-working && !(is-encrypt-mode && inpath == "");
+                    property <bool> field-enabled: !is-working && !(is-encrypt-mode && input-path == "");
                     horizontal-stretch: 1;
                     height: Theme.field-height;
                     border-radius: Theme.field-radius;
@@ -397,8 +397,8 @@ export component AppWindow inherits Window {
                         x: Theme.field-pad;
                         width: parent.width - 2 * Theme.field-pad;
                         vertical-alignment: center;
-                        text: outpath != "" ? outpath-display : "No destination selected";
-                        color: outpath != "" ? Theme.text : Theme.text-disabled;
+                        text: output-path != "" ? output-path-display : "No destination selected";
+                        color: output-path != "" ? Theme.text : Theme.text-disabled;
                         font-size: Theme.field-text-size;
                         overflow: elide;
                     }
@@ -407,7 +407,7 @@ export component AppWindow inherits Window {
                 SmallButton {
                     width: Theme.btn-width;
                     label: "Choose";
-                    enabled: !is-working && !(is-encrypt-mode && inpath == "");
+                    enabled: !is-working && !(is-encrypt-mode && input-path == "");
                     clicked => {
                         if (is-encrypt-mode) {
                             root.select-output-file();
@@ -762,10 +762,10 @@ export component AppWindow inherits Window {
                         x: Theme.field-pad;
                         width: parent.width - 2 * Theme.field-pad;
                         vertical-alignment: center;
-                        text: keypath != "" ? keypath-display :
+                        text: key-path != "" ? key-path-display :
                               (mode == 2 ? "No public key selected" :
                                "No private key selected");
-                        color: keypath != "" ? Theme.text : Theme.text-disabled;
+                        color: key-path != "" ? Theme.text : Theme.text-disabled;
                         font-size: Theme.field-text-size;
                         overflow: elide;
                     }
@@ -882,16 +882,16 @@ export component AppWindow inherits Window {
                     kgout-ta := TouchArea {
                         enabled: !is-working;
                         mouse-cursor: self.enabled ? pointer : default;
-                        clicked => { root.select-keygen-outdir(); }
+                        clicked => { root.select-keygen-output-dir(); }
                     }
 
                     Text {
                         x: Theme.field-pad;
                         width: parent.width - 2 * Theme.field-pad;
                         vertical-alignment: center;
-                        text: keygen-outdir != "" ? keygen-outdir-display
+                        text: keygen-output-dir != "" ? keygen-output-dir-display
                               : "No folder selected";
-                        color: keygen-outdir != "" ? Theme.text : Theme.text-disabled;
+                        color: keygen-output-dir != "" ? Theme.text : Theme.text-disabled;
                         font-size: Theme.field-text-size;
                         overflow: elide;
                     }
@@ -901,7 +901,7 @@ export component AppWindow inherits Window {
                     width: Theme.btn-width;
                     label: "Choose";
                     enabled: !is-working;
-                    clicked => { root.select-keygen-outdir(); }
+                    clicked => { root.select-keygen-output-dir(); }
                 }
             }
         }

@@ -54,7 +54,7 @@ fn main() {
                 app.set_password_strength(password_scorer::PW_EMPTY);
                 app.set_status_ok(Default::default());
                 app.set_status_err(Default::default());
-                let keypath = app.get_keypath().to_string();
+                let keypath = app.get_key_path().to_string();
                 if !keypath.is_empty() {
                     validate_selected_key(&app, &keypath);
                 } else {
@@ -95,8 +95,8 @@ fn main() {
             };
             let Some(app) = weak.upgrade() else { return };
             let key_path = path_to_string(&path);
-            app.set_keypath_display(elide_left(&key_path, ELIDE).into());
-            app.set_keypath(key_path.clone().into());
+            app.set_key_path_display(elide_left(&key_path, ELIDE).into());
+            app.set_key_path(key_path.clone().into());
             validate_selected_key(&app, &key_path);
             check_conflicts(&app);
         }
@@ -109,7 +109,7 @@ fn main() {
                 return;
             };
             let Some(app) = weak.upgrade() else { return };
-            set_output_path(&app, &path_to_string(&path));
+            update_output_path(&app, &path_to_string(&path));
         }
     });
 
@@ -119,23 +119,23 @@ fn main() {
             let Some(app) = weak.upgrade() else { return };
             let mut dialog = rfd::FileDialog::new();
 
-            let inpath = app.get_inpath().to_string();
+            let inpath = app.get_input_path().to_string();
             if let Ok(name) = default_encrypted_filename(&inpath) {
                 dialog = dialog.set_file_name(&name);
             }
 
-            let outpath = app.get_outpath().to_string();
+            let outpath = app.get_output_path().to_string();
             if let Some(parent) = parent_dir(&outpath) {
                 dialog = dialog.set_directory(parent);
             }
 
             if let Some(path) = dialog.save_file() {
-                set_output_path(&app, &path_to_string(&path));
+                update_output_path(&app, &path_to_string(&path));
             }
         }
     });
 
-    app.on_select_keygen_outdir({
+    app.on_select_keygen_output_dir({
         let weak = app.as_weak();
         move || {
             let Some(path) = rfd::FileDialog::new().pick_folder() else {
@@ -143,8 +143,8 @@ fn main() {
             };
             let Some(app) = weak.upgrade() else { return };
             let dir = path_to_string(&path);
-            app.set_keygen_outdir_display(elide_left(&dir, ELIDE).into());
-            app.set_keygen_outdir(dir.into());
+            app.set_keygen_output_dir_display(elide_left(&dir, ELIDE).into());
+            app.set_keygen_output_dir(dir.into());
             check_conflicts(&app);
         }
     });
@@ -165,11 +165,11 @@ fn main() {
             let Some(app) = weak.upgrade() else { return };
 
             let mode = app.get_mode();
-            let inpath = app.get_inpath().to_string();
-            let outpath = app.get_outpath().to_string();
+            let inpath = app.get_input_path().to_string();
+            let outpath = app.get_output_path().to_string();
             let password = app.get_password().to_string();
-            let keypath = app.get_keypath().to_string();
-            let keygen_outdir = app.get_keygen_outdir().to_string();
+            let keypath = app.get_key_path().to_string();
+            let keygen_outdir = app.get_keygen_output_dir().to_string();
 
             let is_encrypt = is_encrypt_mode(mode);
             let (output_dir, output_file) = if mode == MODE_KEYGEN {
@@ -244,13 +244,13 @@ fn main() {
                                 app.set_password_repeated(Default::default());
                                 app.set_hide_password(true);
                                 app.set_password_strength(password_scorer::PW_EMPTY);
-                                app.set_keygen_outdir(Default::default());
-                                app.set_keygen_outdir_display(Default::default());
+                                app.set_keygen_output_dir(Default::default());
+                                app.set_keygen_output_dir_display(Default::default());
                                 app.set_conflict_warning(Default::default());
                                 app.set_status_err(Default::default());
                                 app.set_mode(MODE_HYBRID_ENCRYPT);
-                                app.set_keypath_display(elide_left(&pub_key, ELIDE).into());
-                                app.set_keypath(pub_key.clone().into());
+                                app.set_key_path_display(elide_left(&pub_key, ELIDE).into());
+                                app.set_key_path(pub_key.clone().into());
                                 validate_selected_key(&app, &pub_key);
                                 app.set_status_ok(
                                     "Key pair generated \u{2014} public key selected".into(),
@@ -323,8 +323,8 @@ fn apply_input_path(weak: &slint::Weak<AppWindow>, path: PathBuf) {
     } else {
         ELIDE - 12
     };
-    app.set_inpath_display(elide_left(&selected, inpath_elide).into());
-    app.set_inpath(selected.clone().into());
+    app.set_input_path_display(elide_left(&selected, inpath_elide).into());
+    app.set_input_path(selected.clone().into());
     let old_mode = app.get_mode();
     match detected_mode {
         Some(m) => app.set_mode(m),
@@ -341,15 +341,15 @@ fn apply_input_path(weak: &slint::Weak<AppWindow>, path: PathBuf) {
         app.set_password_strength(password_scorer::PW_EMPTY);
     }
 
-    let keypath = app.get_keypath().to_string();
+    let keypath = app.get_key_path().to_string();
     if !keypath.is_empty() {
         validate_selected_key(&app, &keypath);
     }
 
     if is_decrypt {
-        set_output_path(&app, &dir);
+        update_output_path(&app, &dir);
     } else if let Ok(filename) = default_encrypted_filename(&selected) {
-        set_output_path(&app, &path_to_string(&Path::new(&dir).join(filename)));
+        update_output_path(&app, &path_to_string(&Path::new(&dir).join(filename)));
     }
 
     if !app.get_key_invalid() {
@@ -359,15 +359,15 @@ fn apply_input_path(weak: &slint::Weak<AppWindow>, path: PathBuf) {
     check_conflicts(&app);
 }
 
-fn set_output_path(app: &AppWindow, path: &str) {
-    app.set_outpath_display(elide_left(path, ELIDE).into());
-    app.set_outpath(path.into());
+fn update_output_path(app: &AppWindow, path: &str) {
+    app.set_output_path_display(elide_left(path, ELIDE).into());
+    app.set_output_path(path.into());
     check_conflicts(app);
 }
 
 fn check_conflicts(app: &AppWindow) {
     let mode = app.get_mode();
-    let outpath = app.get_outpath().to_string();
+    let outpath = app.get_output_path().to_string();
 
     let mut warning = String::new();
 
@@ -376,7 +376,7 @@ fn check_conflicts(app: &AppWindow) {
     }
 
     if mode == MODE_KEYGEN && warning.is_empty() {
-        let kg_dir = app.get_keygen_outdir().to_string();
+        let kg_dir = app.get_keygen_output_dir().to_string();
         if !kg_dir.is_empty() {
             let secret_exists = private_key_path(&kg_dir).exists();
             let pub_exists = public_key_path(&kg_dir).exists();
@@ -394,16 +394,16 @@ fn check_conflicts(app: &AppWindow) {
 
 fn clear_fields(app: &AppWindow) {
     let empty = slint::SharedString::default();
-    app.set_inpath(empty.clone());
-    app.set_inpath_display(empty.clone());
-    app.set_outpath(empty.clone());
-    app.set_outpath_display(empty.clone());
+    app.set_input_path(empty.clone());
+    app.set_input_path_display(empty.clone());
+    app.set_output_path(empty.clone());
+    app.set_output_path_display(empty.clone());
     app.set_password(empty.clone());
     app.set_password_repeated(empty.clone());
-    app.set_keypath(empty.clone());
-    app.set_keypath_display(empty.clone());
-    app.set_keygen_outdir(empty.clone());
-    app.set_keygen_outdir_display(empty.clone());
+    app.set_key_path(empty.clone());
+    app.set_key_path_display(empty.clone());
+    app.set_keygen_output_dir(empty.clone());
+    app.set_keygen_output_dir_display(empty.clone());
     app.set_conflict_warning(empty.clone());
     app.set_status_ok(empty.clone());
     app.set_status_err(empty);

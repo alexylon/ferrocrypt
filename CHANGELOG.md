@@ -5,6 +5,8 @@ All notable changes to FerroCrypt are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Library API:** `KdfLimit` struct for caller-controlled KDF memory cost ceiling on decrypt. Decrypt functions (`symmetric_decrypt`, `hybrid_decrypt`, `symmetric_auto`, `hybrid_auto`) accept an optional `KdfLimit` parameter. When a file's KDF memory cost exceeds the limit, decryption fails with `CryptoError::ExcessiveWork` instead of a generic error.
+- **CLI:** `--max-kdf-memory <MiB>` flag on `symmetric` and `hybrid` subcommands to cap accepted KDF memory cost during decryption
 - **CLI:** `fingerprint` subcommand (alias `fp`) to print a public key's SHA3-256 fingerprint for out-of-band verification
 - **CLI:** `keygen` now prints the public key fingerprint after generation
 - **CLI:** `hybrid` encrypt now prints the recipient's key fingerprint before encryption
@@ -22,6 +24,7 @@ All notable changes to FerroCrypt are documented in this file.
 - Versioned file format with magic bytes (`0xFC` + type), major/minor version, and header length field. Forward-compatible within a major version: future minor versions may append optional trailing fields that older readers can skip via the header length. Minor versions must not change required decryption or authentication semantics.
 
 ### Changed
+- `detect_encryption_mode` now fails closed on malformed headers: files that start with the FerroCrypt magic byte pattern but have a corrupted, truncated, or unrecognized header return `Err(InvalidFormat)` instead of `Ok(None)`. This prevents corrupted `.fcr` files from being silently re-encrypted by the auto-routing helpers.
 - **Library API:** Renamed public functions and types for idiomatic Rust naming (see API docs for updated names)
 - Migrated Argon2id implementation from `rust-argon2` to RustCrypto `argon2` crate for better maintenance and ecosystem alignment. KDF output is now stack-allocated (`[u8; 32]`) instead of heap-allocated (`Vec<u8>`), improving zeroization guarantees. No format change — existing encrypted files and key files remain fully compatible.
 - Tightened KDF parameter validation: `mem_cost` minimum now enforces Argon2's requirement (`>= 8 × lanes`) instead of allowing any nonzero value. Rejects maliciously crafted headers with clearer errors.

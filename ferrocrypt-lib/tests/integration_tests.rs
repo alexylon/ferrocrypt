@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
-    CryptoError, ENCRYPTED_EXTENSION, generate_key_pair, hybrid_auto, public_key_fingerprint,
-    symmetric_auto, validate_secret_key_file,
+    CryptoError, ENCRYPTED_EXTENSION, detect_encryption_mode, generate_key_pair, hybrid_auto,
+    public_key_fingerprint, symmetric_auto, validate_secret_key_file,
 };
 
 const TEST_WORKSPACE: &str = "tests/workspace";
@@ -2428,6 +2428,139 @@ fn test_future_key_version_rejected() -> Result<(), CryptoError> {
     }
 
     Ok(())
+}
+
+// ─── detect_encryption_mode: fail-closed on malformed headers ────────────
+
+#[test]
+fn test_detect_plaintext_file_returns_none() -> Result<(), CryptoError> {
+    let dir = setup_test_dir("detect_plaintext");
+    let path = dir.join("hello.txt");
+    fs::write(&path, "just plain text")?;
+    assert!(detect_encryption_mode(&path)?.is_none());
+    Ok(())
+}
+
+#[test]
+fn test_detect_empty_file_returns_none() -> Result<(), CryptoError> {
+    let dir = setup_test_dir("detect_empty");
+    let path = dir.join("empty.bin");
+    fs::write(&path, b"")?;
+    assert!(detect_encryption_mode(&path)?.is_none());
+    Ok(())
+}
+
+#[test]
+fn test_detect_valid_symmetric_file() -> Result<(), CryptoError> {
+    let dir = setup_test_dir("detect_sym");
+    let input = dir.join("data.txt");
+    fs::write(&input, "payload")?;
+    let pass = SecretString::from("pw".to_string());
+    let encrypted = symmetric_auto(&input, &dir, &pass, None, None, |_| {})?;
+    let mode = detect_encryption_mode(&encrypted)?;
+    assert_eq!(mode, Some(ferrocrypt::EncryptionMode::Symmetric));
+    Ok(())
+}
+
+#[test]
+fn test_detect_truncated_fcr_file_returns_error() {
+    let dir = setup_test_dir("detect_truncated");
+    let path = dir.join("truncated.fcr");
+    // Write a partial encoded prefix with magic byte in at least two copy positions.
+    // Copy 0 starts at byte 3, copy 1 at byte 11 — both need 0xFC for majority vote.
+    let mut data = vec![0u8; 15];
+    data[3] = 0xFC; // magic byte in copy 0
+    data[11] = 0xFC; // magic byte in copy 1
+    fs::write(&path, &data).unwrap();
+    let result = detect_encryption_mode(&path);
+    assert!(
+        result.is_err(),
+        "expected error for truncated .fcr, got: {result:?}"
+    );
+    match result {
+        Err(CryptoError::InvalidFormat(msg)) => {
+            assert!(msg.contains("truncated"), "got: {msg}");
+        }
+        other => panic!("expected InvalidFormat, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_detect_short_file_with_single_magic_byte_returns_none() {
+    let dir = setup_test_dir("detect_single_magic");
+    let path = dir.join("coincidence.bin");
+    // A short file with 0xFC at position 3 by coincidence — only one copy
+    // position matches, so majority vote says "not ferrocrypt."
+    let mut data = vec![0u8; 10];
+    data[3] = 0xFC;
+    fs::write(&path, &data).unwrap();
+    let result = detect_encryption_mode(&path);
+    assert!(
+        result.unwrap().is_none(),
+        "single magic byte should not trigger false positive"
+    );
+}
+
+#[test]
+fn test_detect_corrupted_header_returns_error() {
+    let dir = setup_test_dir("detect_corrupted");
+    let path = dir.join("corrupted.fcr");
+    // Build a full-length encoded prefix (27 bytes) where the magic byte is
+    // present in all three copy positions but the rest is garbage, so
+    // replication decode produces an invalid type byte.
+    let mut data = vec![0u8; 27];
+    // padding bytes (positions 0-2): 0
+    // Copy 0 starts at 3, copy 1 at 11, copy 2 at 19
+    data[3] = 0xFC; // magic byte in copy 0
+    data[11] = 0xFC; // magic byte in copy 1
+    data[19] = 0xFC; // magic byte in copy 2
+    // Type byte (position 1 of each copy) is 0xFF — unknown type
+    data[4] = 0xFF;
+    data[12] = 0xFF;
+    data[20] = 0xFF;
+    fs::write(&path, &data).unwrap();
+    let result = detect_encryption_mode(&path);
+    assert!(
+        result.is_err(),
+        "expected error for corrupted header, got: {result:?}"
+    );
+}
+
+#[test]
+fn test_detect_unknown_type_byte_returns_error() {
+    let dir = setup_test_dir("detect_unknown_type");
+    let path = dir.join("unknown_type.fcr");
+    // Encode a valid-looking prefix with magic byte but invalid type 0x41 ('A')
+    let prefix: [u8; 8] = [0xFC, 0x41, 3, 0, 0, 30, 0, 0];
+    let encoded = encode_test_prefix(&prefix);
+    fs::write(&path, &encoded).unwrap();
+    let result = detect_encryption_mode(&path);
+    assert!(
+        result.is_err(),
+        "expected error for unknown type, got: {result:?}"
+    );
+    match result {
+        Err(CryptoError::InvalidFormat(msg)) => {
+            assert!(msg.contains("0x41"), "got: {msg}");
+        }
+        other => panic!("expected InvalidFormat with type byte, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_detect_corrupted_fcr_not_silently_encrypted() {
+    let dir = setup_test_dir("detect_no_reencrypt");
+    let input = dir.join("corrupted.fcr");
+    // A file with magic bytes but corrupted — should not be re-encrypted
+    let prefix: [u8; 8] = [0xFC, 0x41, 3, 0, 0, 30, 0, 0];
+    let encoded = encode_test_prefix(&prefix);
+    fs::write(&input, &encoded).unwrap();
+    let pass = SecretString::from("pw".to_string());
+    let result = symmetric_auto(&input, &dir, &pass, None, None, |_| {});
+    assert!(
+        result.is_err(),
+        "corrupted .fcr should not be silently re-encrypted"
+    );
 }
 
 #[ctor::dtor]

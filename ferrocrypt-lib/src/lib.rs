@@ -118,19 +118,51 @@ pub struct GeneratedKeyPair {
 
 /// Reads the header prefix of an `.fcr` file and returns the encryption mode.
 ///
-/// Returns `Ok(None)` if the file is not a valid FerroCrypt file, is too short,
-/// or the header prefix cannot be fully read.
-/// Returns `Err` if the file cannot be opened.
+/// Returns `Ok(None)` if the file is clearly not a FerroCrypt file.
+/// Returns `Err(InvalidFormat)` if the file appears to be a FerroCrypt file
+/// (starts with the magic byte pattern) but the header is malformed or
+/// truncated — this prevents corrupted `.fcr` files from being silently
+/// re-encrypted.
+/// Returns `Err(Io)` if the file cannot be opened or read.
 pub fn detect_encryption_mode(
     file_path: impl AsRef<Path>,
 ) -> Result<Option<EncryptionMode>, CryptoError> {
     use std::io::Read;
     let mut buf = [0u8; format::HEADER_PREFIX_ENCODED_SIZE];
     let mut file = std::fs::File::open(file_path.as_ref())?;
-    if file.read_exact(&mut buf).is_err() {
+
+    // Read up to HEADER_PREFIX_ENCODED_SIZE bytes, tracking how many we got.
+    // We avoid read_exact because its API does not guarantee buffer contents
+    // on partial read, and we need to inspect whatever bytes were available.
+    let mut filled = 0;
+    while filled < buf.len() {
+        match file.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            // Directories can be opened on macOS but not read.
+            Err(e) if e.kind() == std::io::ErrorKind::IsADirectory => return Ok(None),
+            Err(e) => return Err(CryptoError::Io(e)),
+        }
+    }
+
+    if filled < buf.len() {
+        // File is shorter than the encoded prefix. Check if at least two of
+        // the three replication copy positions contain the magic byte —
+        // positions beyond `filled` are still 0x00 from initialization.
+        if has_encoded_magic_byte(&buf) {
+            return Err(CryptoError::InvalidFormat(
+                "File appears to be a truncated FerroCrypt file".to_string(),
+            ));
+        }
         return Ok(None);
     }
     let Ok(prefix) = replication::decode(&buf) else {
+        if has_encoded_magic_byte(&buf) {
+            return Err(CryptoError::InvalidFormat(
+                "FerroCrypt header is corrupted".to_string(),
+            ));
+        }
         return Ok(None);
     };
     if prefix.len() < 2 || prefix[0] != format::MAGIC_BYTE {
@@ -139,8 +171,19 @@ pub fn detect_encryption_mode(
     match prefix[1] {
         format::TYPE_SYMMETRIC => Ok(Some(EncryptionMode::Symmetric)),
         format::TYPE_HYBRID => Ok(Some(EncryptionMode::Hybrid)),
-        _ => Ok(None),
+        _ => Err(CryptoError::InvalidFormat(format!(
+            "Unrecognized FerroCrypt encryption type: 0x{:02X}",
+            prefix[1]
+        ))),
     }
+}
+
+/// Checks whether a raw encoded buffer contains the magic byte in at least
+/// two of the three replication copy positions (majority vote on byte 0).
+fn has_encoded_magic_byte(buf: &[u8; format::HEADER_PREFIX_ENCODED_SIZE]) -> bool {
+    let s = format::HEADER_PREFIX_SIZE;
+    let copies = [buf[3], buf[3 + s], buf[3 + 2 * s]];
+    copies.iter().filter(|&&b| b == format::MAGIC_BYTE).count() >= 2
 }
 
 mod archiver;

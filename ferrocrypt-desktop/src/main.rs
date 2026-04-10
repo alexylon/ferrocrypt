@@ -316,9 +316,18 @@ fn apply_input_path(weak: &slint::Weak<AppWindow>, path: PathBuf) {
         });
 
     let detected_mode = detect_mode_from_path(&selected);
-    let is_decrypt = detected_mode.is_some_and(is_decrypt_mode);
 
     let Some(app) = weak.upgrade() else { return };
+
+    let detected_mode = match detected_mode {
+        Ok(mode) => mode,
+        Err(e) => {
+            app.set_status_err(e.to_string().into());
+            return;
+        }
+    };
+    let is_decrypt = detected_mode.is_some_and(is_decrypt_mode);
+
     let inpath_elide = if app.get_combined_picker() {
         ELIDE
     } else {
@@ -514,10 +523,10 @@ fn validate_selected_key(app: &AppWindow, key_path: &str) {
     }
 }
 
-fn detect_mode_from_path(path: &str) -> Option<i32> {
-    match detect_encryption_mode(Path::new(path)) {
-        Ok(Some(EncryptionMode::Symmetric)) => Some(MODE_SYMMETRIC_DECRYPT),
-        Ok(Some(EncryptionMode::Hybrid)) => Some(MODE_HYBRID_DECRYPT),
-        _ => None,
+fn detect_mode_from_path(path: &str) -> Result<Option<i32>, ferrocrypt::CryptoError> {
+    match detect_encryption_mode(Path::new(path))? {
+        Some(EncryptionMode::Symmetric) => Ok(Some(MODE_SYMMETRIC_DECRYPT)),
+        Some(EncryptionMode::Hybrid) => Ok(Some(MODE_HYBRID_DECRYPT)),
+        None => Ok(None),
     }
 }

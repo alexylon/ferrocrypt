@@ -2249,6 +2249,76 @@ fn test_symmetric_decrypt_marks_incomplete_directory() -> Result<(), CryptoError
 }
 
 #[test]
+fn test_successful_decrypt_produces_final_name_not_incomplete() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("decrypt_final_name");
+    let input_file = test_dir.join("payload.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+    fs::write(&input_file, "clean decryption")?;
+
+    let passphrase = SecretString::from("final_name_pass".to_string());
+    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+
+    let output = symmetric_auto(
+        encrypt_dir.join("payload.fcr"),
+        &decrypt_dir,
+        &passphrase,
+        None,
+        None,
+        |_| {},
+    )?;
+    assert!(output.exists());
+    assert_eq!(output, decrypt_dir.join("payload.txt"));
+    assert!(!decrypt_dir.join("payload.txt.incomplete").exists());
+
+    Ok(())
+}
+
+#[test]
+fn test_existing_incomplete_blocks_retry() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("incomplete_blocks_retry");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+    fs::write(&input_file, "some content")?;
+
+    let passphrase = SecretString::from("retry_pass".to_string());
+    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+
+    // Simulate leftover .incomplete from a previous failed attempt
+    fs::write(decrypt_dir.join("data.txt.incomplete"), "stale partial")?;
+
+    let result = symmetric_auto(
+        encrypt_dir.join("data.fcr"),
+        &decrypt_dir,
+        &passphrase,
+        None,
+        None,
+        |_| {},
+    );
+    assert!(result.is_err());
+    match result {
+        Err(CryptoError::InvalidInput(msg)) => {
+            assert!(
+                msg.contains("Incomplete output from a previous attempt"),
+                "got: {msg}"
+            );
+        }
+        other => panic!("expected InvalidInput about incomplete, got: {other:?}"),
+    }
+
+    // Stale .incomplete must not be overwritten
+    let stale = fs::read_to_string(decrypt_dir.join("data.txt.incomplete"))?;
+    assert_eq!(stale, "stale partial");
+
+    Ok(())
+}
+
+#[test]
 fn test_keygen_no_partial_state_on_existing_key() -> Result<(), CryptoError> {
     let test_dir = setup_test_dir("keygen_no_partial");
     let passphrase = SecretString::from("atomic_pass".to_string());

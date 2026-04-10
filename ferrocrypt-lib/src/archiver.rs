@@ -160,10 +160,12 @@ fn archive_directory<W: Write>(
 }
 
 /// Extracts a TAR archive from `reader` into the specified directory.
-/// Checks that the output path does not already exist before extracting.
-/// On failure, any partially extracted roots are renamed with an `.incomplete`
-/// suffix so the user can identify them.
-/// Returns the output path as a string.
+///
+/// All output is written under an `.incomplete` working name so that
+/// plaintext never appears under the final name during streaming
+/// decryption. On success, the working name is atomically renamed to the
+/// final name. On failure, the `.incomplete` output stays on disk for
+/// the user to inspect or delete.
 pub fn unarchive<R: Read>(reader: R, output_dir: &Path) -> Result<PathBuf, CryptoError> {
     let mut archive = tar::Archive::new(reader);
     let mut first_entry_root: Option<PathBuf> = None;
@@ -176,47 +178,22 @@ pub fn unarchive<R: Read>(reader: R, output_dir: &Path) -> Result<PathBuf, Crypt
         &mut checked_roots,
     );
 
-    if let Err(e) = extract_result {
-        for root_name in &checked_roots {
-            let current = output_dir.join(root_name);
-            if current.exists() {
-                if let Err(rename_err) = rename_to_incomplete(&current, output_dir, root_name) {
-                    return Err(CryptoError::InternalError(format!(
-                        "Decryption failed ({e}) and could not mark partial output as incomplete: {rename_err}"
-                    )));
-                }
-            }
+    extract_result?;
+
+    // Rename each root from .incomplete working name to final name.
+    for root_name in &checked_roots {
+        let mut incomplete_name = root_name.clone();
+        incomplete_name.push(".incomplete");
+        let working_path = output_dir.join(&incomplete_name);
+        let final_path = output_dir.join(root_name);
+        if let Err(e) = rename_no_clobber(&working_path, &final_path) {
+            return Err(CryptoError::InternalError(format!(
+                "Decryption succeeded but could not rename to final output: {e}"
+            )));
         }
-        return Err(e);
     }
 
     first_entry_root.ok_or_else(|| CryptoError::InvalidInput("Empty archive".to_string()))
-}
-
-/// Renames `source` to `output_dir/{root}.incomplete`, using a numbered suffix
-/// (`.incomplete.2`, `.incomplete.3`, etc.) if earlier incomplete output exists.
-/// Uses platform-native no-clobber rename to prevent overwriting.
-fn rename_to_incomplete(source: &Path, output_dir: &Path, root_name: &OsStr) -> io::Result<()> {
-    let mut base = root_name.to_os_string();
-    base.push(".incomplete");
-
-    match rename_no_clobber(source, &output_dir.join(&base)) {
-        Ok(()) => return Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(e),
-    }
-    for n in 2..u32::MAX {
-        let mut numbered = base.clone();
-        numbered.push(format!(".{n}"));
-        match rename_no_clobber(source, &output_dir.join(&numbered)) {
-            Ok(()) => return Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
-        }
-    }
-    Err(io::Error::other(
-        "Could not find an unused .incomplete name",
-    ))
 }
 
 /// Atomically renames `from` to `to`, failing if `to` already exists.
@@ -296,31 +273,41 @@ fn extract_entries<R: Read>(
         let root_name = first_component.as_os_str().to_os_string();
 
         if !checked_roots.contains(&root_name) {
-            let full_path = output_dir.join(&root_name);
-            if full_path.exists() {
+            let final_path = output_dir.join(&root_name);
+            if final_path.exists() {
                 return Err(CryptoError::InvalidInput(format!(
                     "Output already exists: {}",
-                    full_path.display()
+                    final_path.display()
+                )));
+            }
+            let mut incomplete_name = root_name.clone();
+            incomplete_name.push(".incomplete");
+            let incomplete_path = output_dir.join(&incomplete_name);
+            if incomplete_path.exists() {
+                return Err(CryptoError::InvalidInput(format!(
+                    "Incomplete output from a previous attempt already exists: {}",
+                    incomplete_path.display()
                 )));
             }
             if first_entry_root.is_none() {
-                *first_entry_root = Some(full_path.clone());
+                *first_entry_root = Some(final_path);
             }
-            checked_roots.push(root_name);
+            checked_roots.push(root_name.clone());
         }
 
-        let full_path = output_dir.join(&path);
+        // Rewrite the entry path: replace the root component with {root}.incomplete
+        let working_path = incomplete_entry_path(output_dir, &root_name, &path);
         let entry_type = entry.header().entry_type();
 
         if entry_type.is_dir() {
-            fs::create_dir_all(&full_path)?;
+            fs::create_dir_all(&working_path)?;
         } else if entry_type.is_file() {
-            if let Some(parent) = full_path.parent() {
+            if let Some(parent) = working_path.parent() {
                 if !parent.exists() {
                     fs::create_dir_all(parent)?;
                 }
             }
-            let mut outfile = File::create(&full_path)?;
+            let mut outfile = File::create(&working_path)?;
             io::copy(&mut entry, &mut outfile)?;
         } else {
             return Err(CryptoError::InvalidInput(format!(
@@ -331,6 +318,20 @@ fn extract_entries<R: Read>(
         }
     }
     Ok(())
+}
+
+/// Rewrites a TAR entry path so the root component has an `.incomplete` suffix.
+///
+/// - Single file `hello.txt` → `output_dir/hello.txt.incomplete`
+/// - Directory entry `mydir/sub/file.txt` → `output_dir/mydir.incomplete/sub/file.txt`
+fn incomplete_entry_path(output_dir: &Path, root_name: &OsStr, entry_path: &Path) -> PathBuf {
+    let mut incomplete_root = root_name.to_os_string();
+    incomplete_root.push(".incomplete");
+    match entry_path.strip_prefix(root_name) {
+        Ok(rest) if rest.as_os_str().is_empty() => output_dir.join(&incomplete_root),
+        Ok(rest) => output_dir.join(&incomplete_root).join(rest),
+        Err(_) => output_dir.join(&incomplete_root),
+    }
 }
 
 #[cfg(test)]

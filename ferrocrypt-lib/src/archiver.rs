@@ -1,4 +1,4 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -180,9 +180,7 @@ pub fn unarchive<R: Read>(reader: R, output_dir: &Path) -> Result<PathBuf, Crypt
         for root_name in &checked_roots {
             let current = output_dir.join(root_name);
             if current.exists() {
-                let mut incomplete_name = root_name.clone();
-                incomplete_name.push(".incomplete");
-                if let Err(rename_err) = fs::rename(&current, output_dir.join(&incomplete_name)) {
+                if let Err(rename_err) = rename_to_incomplete(&current, output_dir, root_name) {
                     return Err(CryptoError::InternalError(format!(
                         "Decryption failed ({e}) and could not mark partial output as incomplete: {rename_err}"
                     )));
@@ -193,6 +191,91 @@ pub fn unarchive<R: Read>(reader: R, output_dir: &Path) -> Result<PathBuf, Crypt
     }
 
     first_entry_root.ok_or_else(|| CryptoError::InvalidInput("Empty archive".to_string()))
+}
+
+/// Renames `source` to `output_dir/{root}.incomplete`, using a numbered suffix
+/// (`.incomplete.2`, `.incomplete.3`, etc.) if earlier incomplete output exists.
+/// Uses platform-native no-clobber rename to prevent overwriting.
+fn rename_to_incomplete(source: &Path, output_dir: &Path, root_name: &OsStr) -> io::Result<()> {
+    let mut base = root_name.to_os_string();
+    base.push(".incomplete");
+
+    match rename_no_clobber(source, &output_dir.join(&base)) {
+        Ok(()) => return Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    for n in 2..u32::MAX {
+        let mut numbered = base.clone();
+        numbered.push(format!(".{n}"));
+        match rename_no_clobber(source, &output_dir.join(&numbered)) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::other(
+        "Could not find an unused .incomplete name",
+    ))
+}
+
+/// Atomically renames `from` to `to`, failing if `to` already exists.
+#[cfg(target_os = "linux")]
+fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let from_c = CString::new(from.as_os_str().as_bytes())
+        .map_err(|_| io::Error::other("path contains null byte"))?;
+    let to_c = CString::new(to.as_os_str().as_bytes())
+        .map_err(|_| io::Error::other("path contains null byte"))?;
+    let ret = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            from_c.as_ptr(),
+            libc::AT_FDCWD,
+            to_c.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let from_c = CString::new(from.as_os_str().as_bytes())
+        .map_err(|_| io::Error::other("path contains null byte"))?;
+    let to_c = CString::new(to.as_os_str().as_bytes())
+        .map_err(|_| io::Error::other("path contains null byte"))?;
+    let ret = unsafe { libc::renamex_np(from_c.as_ptr(), to_c.as_ptr(), libc::RENAME_EXCL) };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
+    // std::fs::rename on Windows already fails if the target exists.
+    fs::rename(from, to)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
+    // Fallback: check + rename (TOCTOU possible, best effort).
+    if to.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "target exists",
+        ));
+    }
+    fs::rename(from, to)
 }
 
 fn extract_entries<R: Read>(

@@ -25,6 +25,8 @@ All notable changes to FerroCrypt are documented in this file.
 
 ### Changed
 - `detect_encryption_mode` now fails closed on malformed headers: files that start with the FerroCrypt magic byte pattern but have a corrupted, truncated, or unrecognized header return `Err(InvalidFormat)` instead of `Ok(None)`. This prevents corrupted `.fcr` files from being silently re-encrypted by the auto-routing helpers.
+- Failed `.incomplete` rename during extraction now returns an error instead of being silently swallowed. Previously, if the rename failed, partial plaintext could remain under the original name with no warning.
+- Key generation now calls `sync_all()` on key files before the atomic rename, ensuring key data is durable on disk before the final filenames become visible.
 - **Library API:** Renamed public functions and types for idiomatic Rust naming (see API docs for updated names)
 - Migrated Argon2id implementation from `rust-argon2` to RustCrypto `argon2` crate for better maintenance and ecosystem alignment. KDF output is now stack-allocated (`[u8; 32]`) instead of heap-allocated (`Vec<u8>`), improving zeroization guarantees. No format change — existing encrypted files and key files remain fully compatible.
 - Tightened KDF parameter validation: `mem_cost` minimum now enforces Argon2's requirement (`>= 8 × lanes`) instead of allowing any nonzero value. Rejects maliciously crafted headers with clearer errors.

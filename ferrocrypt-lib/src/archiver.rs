@@ -182,7 +182,11 @@ pub fn unarchive<R: Read>(reader: R, output_dir: &Path) -> Result<PathBuf, Crypt
             if current.exists() {
                 let mut incomplete_name = root_name.clone();
                 incomplete_name.push(".incomplete");
-                let _ = fs::rename(&current, output_dir.join(incomplete_name));
+                if let Err(rename_err) = fs::rename(&current, output_dir.join(&incomplete_name)) {
+                    return Err(CryptoError::InternalError(format!(
+                        "Decryption failed ({e}) and could not mark partial output as incomplete: {rename_err}"
+                    )));
+                }
             }
         }
         return Err(e);

@@ -490,6 +490,7 @@ pub fn generate_key_pair(
         secret_key_file.write_all(&salt)?;
         secret_key_file.write_all(&nonce)?;
         secret_key_file.write_all(&encrypted_secret)?;
+        secret_key_file.sync_all()?;
 
         let mut public_key_file = OpenOptions::new()
             .write(true)
@@ -497,6 +498,7 @@ pub fn generate_key_pair(
             .open(&tmp_public)?;
         public_key_file.write_all(&public_header)?;
         public_key_file.write_all(public_key.as_bytes())?;
+        public_key_file.sync_all()?;
 
         fs::rename(&tmp_secret, &secret_key_path)?;
         if let Err(e) = fs::rename(&tmp_public, &public_key_path) {

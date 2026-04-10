@@ -105,10 +105,24 @@ pub fn encrypt_file(
         Some(path) => path.to_path_buf(),
         None => output_dir.join(format!("{}.{}", base_name, format::ENCRYPTED_EXTENSION)),
     };
+    if output_path.exists() {
+        return Err(CryptoError::InvalidInput(format!(
+            "Output file already exists: {}",
+            output_path.display()
+        )));
+    }
+    let mut working_name = output_path.as_os_str().to_os_string();
+    working_name.push(".incomplete");
+    let working_path = PathBuf::from(working_name);
+    if working_path.exists() {
+        return Err(CryptoError::InvalidInput(format!(
+            "Previous .incomplete exists: {}",
+            working_path.display()
+        )));
+    }
 
     let mut file_created = false;
-
-    let result = (|| -> Result<PathBuf, CryptoError> {
+    let result = (|| -> Result<(), CryptoError> {
         let cipher = XChaCha20Poly1305::new(&encryption_key);
 
         let mut nonce = [0u8; STREAM_NONCE_SIZE];
@@ -120,13 +134,6 @@ pub fn encrypt_file(
 
         let recipient_public = read_public_key(public_key_path)?;
         let envelope = seal_envelope(&combined_key, &recipient_public)?;
-
-        if output_path.exists() {
-            return Err(CryptoError::InvalidInput(format!(
-                "Output file already exists: {}",
-                output_path.display()
-            )));
-        }
 
         let encoded_envelope = encode(&envelope);
         let encoded_nonce = encode(&nonce);
@@ -150,7 +157,7 @@ pub fn encrypt_file(
         let mut dest = OpenOptions::new()
             .append(true)
             .create_new(true)
-            .open(&output_path)?;
+            .open(&working_path)?;
         file_created = true;
 
         dest.write_all(&encoded_prefix)?;
@@ -164,17 +171,22 @@ pub fn encrypt_file(
         dest.sync_all()?;
 
         nonce.zeroize();
-
-        Ok(output_path.clone())
+        Ok(())
     })();
 
-    if result.is_err() && file_created {
-        let _ = fs::remove_file(&output_path);
+    if let Err(e) = result {
+        if file_created {
+            let _ = fs::remove_file(&working_path);
+        }
+        encryption_key.zeroize();
+        hmac_key.zeroize();
+        return Err(e);
     }
 
     encryption_key.zeroize();
     hmac_key.zeroize();
-    result
+    archiver::rename_no_clobber(&working_path, &output_path)?;
+    Ok(output_path)
 }
 
 pub fn decrypt_file(

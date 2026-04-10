@@ -88,12 +88,23 @@ pub fn encrypt_file(
             output_path.display()
         )));
     }
+    let mut working_name = output_path.as_os_str().to_os_string();
+    working_name.push(".incomplete");
+    let working_path = PathBuf::from(working_name);
+    if working_path.exists() {
+        return Err(CryptoError::InvalidInput(format!(
+            "Previous .incomplete exists: {}",
+            working_path.display()
+        )));
+    }
 
+    let mut file_created = false;
     let encrypt_result: Result<(), CryptoError> = (|| {
         let mut dest = OpenOptions::new()
             .append(true)
             .create_new(true)
-            .open(&output_path)?;
+            .open(&working_path)?;
+        file_created = true;
 
         let encoded_salt = encode(&salt);
         let encoded_hkdf_salt = encode(&hkdf_salt);
@@ -150,10 +161,13 @@ pub fn encrypt_file(
     })();
 
     if let Err(e) = encrypt_result {
-        let _ = fs::remove_file(&output_path);
+        if file_created {
+            let _ = fs::remove_file(&working_path);
+        }
         return Err(e);
     }
 
+    archiver::rename_no_clobber(&working_path, &output_path)?;
     Ok(output_path)
 }
 

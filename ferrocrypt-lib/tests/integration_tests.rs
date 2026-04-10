@@ -2303,10 +2303,7 @@ fn test_existing_incomplete_blocks_retry() -> Result<(), CryptoError> {
     assert!(result.is_err());
     match result {
         Err(CryptoError::InvalidInput(msg)) => {
-            assert!(
-                msg.contains("Incomplete output from a previous attempt"),
-                "got: {msg}"
-            );
+            assert!(msg.contains("Previous .incomplete exists"), "got: {msg}");
         }
         other => panic!("expected InvalidInput about incomplete, got: {other:?}"),
     }
@@ -2314,6 +2311,55 @@ fn test_existing_incomplete_blocks_retry() -> Result<(), CryptoError> {
     // Stale .incomplete must not be overwritten
     let stale = fs::read_to_string(decrypt_dir.join("data.txt.incomplete"))?;
     assert_eq!(stale, "stale partial");
+
+    Ok(())
+}
+
+#[test]
+fn test_encrypt_produces_final_name_not_incomplete() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("encrypt_final_name");
+    let input_file = test_dir.join("secret.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::write(&input_file, "secret data")?;
+
+    let passphrase = SecretString::from("enc_final".to_string());
+    let output = symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+
+    assert!(output.exists());
+    assert_eq!(output, encrypt_dir.join("secret.fcr"));
+    assert!(!encrypt_dir.join("secret.fcr.incomplete").exists());
+
+    Ok(())
+}
+
+#[test]
+fn test_existing_incomplete_blocks_encryption() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("incomplete_blocks_encrypt");
+    let input_file = test_dir.join("payload.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::write(&input_file, "payload")?;
+
+    // Simulate leftover .incomplete from a previous failed encryption
+    fs::write(
+        encrypt_dir.join("payload.fcr.incomplete"),
+        "stale ciphertext",
+    )?;
+
+    let passphrase = SecretString::from("block_pass".to_string());
+    let result = symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {});
+    assert!(result.is_err());
+    match result {
+        Err(CryptoError::InvalidInput(msg)) => {
+            assert!(msg.contains("Previous .incomplete exists"), "got: {msg}");
+        }
+        other => panic!("expected InvalidInput about incomplete, got: {other:?}"),
+    }
+
+    // Stale .incomplete must not be overwritten
+    let stale = fs::read_to_string(encrypt_dir.join("payload.fcr.incomplete"))?;
+    assert_eq!(stale, "stale ciphertext");
 
     Ok(())
 }

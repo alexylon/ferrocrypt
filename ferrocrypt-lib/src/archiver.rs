@@ -188,7 +188,7 @@ pub fn unarchive<R: Read>(reader: R, output_dir: &Path) -> Result<PathBuf, Crypt
         let final_path = output_dir.join(root_name);
         if let Err(e) = rename_no_clobber(&working_path, &final_path) {
             return Err(CryptoError::InternalError(format!(
-                "Decryption succeeded but could not rename to final output: {e}"
+                "Cannot rename to final output: {e}"
             )));
         }
     }
@@ -198,7 +198,7 @@ pub fn unarchive<R: Read>(reader: R, output_dir: &Path) -> Result<PathBuf, Crypt
 
 /// Atomically renames `from` to `to`, failing if `to` already exists.
 #[cfg(target_os = "linux")]
-fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
+pub(crate) fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
     let from_c = CString::new(from.as_os_str().as_bytes())
@@ -222,7 +222,7 @@ fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
+pub(crate) fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
     let from_c = CString::new(from.as_os_str().as_bytes())
@@ -238,13 +238,13 @@ fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 #[cfg(target_os = "windows")]
-fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
+pub(crate) fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
     // std::fs::rename on Windows already fails if the target exists.
     fs::rename(from, to)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
+pub(crate) fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
     // Fallback: check + rename (TOCTOU possible, best effort).
     if to.exists() {
         return Err(io::Error::new(
@@ -285,7 +285,7 @@ fn extract_entries<R: Read>(
             let incomplete_path = output_dir.join(&incomplete_name);
             if incomplete_path.exists() {
                 return Err(CryptoError::InvalidInput(format!(
-                    "Incomplete output from a previous attempt already exists: {}",
+                    "Previous .incomplete exists: {}",
                     incomplete_path.display()
                 )));
             }

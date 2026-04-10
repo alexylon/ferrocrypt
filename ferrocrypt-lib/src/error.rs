@@ -53,7 +53,7 @@ pub enum CryptoError {
     UnsupportedVersion(String),
     #[error("{0}")]
     InvalidKdfParams(String),
-    #[error("File requires {required_kib} KiB for key derivation, limit is {max_kib} KiB")]
+    #[error("KDF needs {required_kib} KiB, limit is {max_kib} KiB")]
     ExcessiveWork { required_kib: u32, max_kib: u32 },
     #[error("{0}")]
     InternalError(String),

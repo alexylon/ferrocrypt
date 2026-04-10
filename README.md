@@ -57,7 +57,7 @@ Every `.fcr` file starts with a header followed by the encrypted payload. The he
 - Passphrases handled via the `secrecy` crate (zeroized on drop, hidden from Debug/Display)
 - Triple-replicated headers with majority-vote decoding for error correction (see [Why triple replication?](#why-triple-replication) below)
 - Symlink inputs are rejected; directory encryption does not follow symlinks — prevents unintended inclusion of files outside the selected tree. Directories containing symlinks or other special entries (sockets, FIFOs, devices) are rejected at encryption time with a clear error. Hardlinks are archived as regular file contents; hardlink relationships are not preserved.
-- Failed encryptions clean up partial `.fcr` output files; decryption writes output to `myfile.txt.incomplete` or `myfolder.incomplete` and only renames to the final name on success — plaintext never appears under the final name during streaming decryption. On failure, the `.incomplete` output stays on disk intentionally — it may be the only recoverable data when the original ciphertext is damaged
+- Both encryption and decryption write output under an `.incomplete` working name (e.g. `myfile.fcr.incomplete`, `myfile.txt.incomplete`, `myfolder.incomplete`) and only rename to the final name on success. Output never appears under the final name during streaming. Failed encryptions clean up the `.incomplete` file (ciphertext only); failed decryptions leave it on disk intentionally — it may be the only recoverable data when the original ciphertext is damaged
 - Versioned file format with magic bytes — corrupted or incompatible files produce clear errors
 
 ### Limitations

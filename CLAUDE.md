@@ -94,6 +94,7 @@ Decryption reverses: read header → derive/decrypt keys → verify HMAC → Dec
 - Prefer authenticated encryption.
 - Fail closed on malformed, truncated, ambiguous, or unsupported input.
 - Use strong types where possible.
+- Keep errors and messages up to 64 characters to fit the desktop field.
 - Keep parsing, validation, crypto, and I/O separated.
 - Add or update important tests and keep them self-contained.
 - Add regression tests for security-sensitive and format bugs.

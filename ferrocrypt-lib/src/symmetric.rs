@@ -13,8 +13,8 @@ use zeroize::Zeroizing;
 
 use crate::common::{
     ARGON2_SALT_SIZE, DecryptReader, ENCRYPTION_KEY_SIZE, EncryptWriter, FILE_TOO_SHORT,
-    HMAC_KEY_SIZE, HMAC_TAG_SIZE, KDF_PARAMS_SIZE, KdfParams, STREAM_NONCE_SIZE, ct_eq_32,
-    encryption_base_name, hmac_sha3_256, hmac_sha3_256_verify, sha3_256_hash,
+    HMAC_KEY_SIZE, HMAC_TAG_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams, STREAM_NONCE_SIZE,
+    ct_eq_32, encryption_base_name, hmac_sha3_256, hmac_sha3_256_verify, sha3_256_hash,
 };
 use crate::format::{self, HEADER_PREFIX_ENCODED_SIZE};
 use crate::replication::{decode_exact, encode, encoded_size};
@@ -164,6 +164,7 @@ pub fn decrypt_file(
     input_path: &Path,
     output_dir: &Path,
     passphrase: &SecretString,
+    kdf_limit: Option<&KdfLimit>,
     on_progress: &dyn Fn(&str),
 ) -> Result<PathBuf, CryptoError> {
     let mut encrypted_file = fs::File::open(input_path)?;
@@ -178,6 +179,7 @@ pub fn decrypt_file(
             header,
             output_dir,
             passphrase,
+            kdf_limit,
             on_progress,
         ),
         _ => Err(format::unsupported_file_version_error(
@@ -196,6 +198,7 @@ fn decrypt_file_v3(
     header: format::FileHeader,
     output_dir: &Path,
     passphrase: &SecretString,
+    kdf_limit: Option<&KdfLimit>,
     on_progress: &dyn Fn(&str),
 ) -> Result<PathBuf, CryptoError> {
     format::validate_file_flags(&header)?;
@@ -248,7 +251,7 @@ fn decrypt_file_v3(
     let salt = decode_exact(&encoded_salt, ARGON2_SALT_SIZE)?;
     let hkdf_salt = decode_exact(&encoded_hkdf_salt, HKDF_SALT_SIZE)?;
     let kdf_bytes = decode_exact(&encoded_kdf, KDF_PARAMS_SIZE)?;
-    let kdf_params = KdfParams::from_bytes(kdf_bytes.as_slice().try_into()?)?;
+    let kdf_params = KdfParams::from_bytes(kdf_bytes.as_slice().try_into()?, kdf_limit)?;
     let nonce = decode_exact(&encoded_nonce, STREAM_NONCE_SIZE)?;
     let verification_hash = decode_exact(&encoded_key_hash, ENCRYPTION_KEY_SIZE)?;
     let hmac_tag = decode_exact(&encoded_hmac_tag, HMAC_TAG_SIZE)?;
@@ -334,7 +337,7 @@ mod tests {
         let salt = decode_exact(&enc_salt, ARGON2_SALT_SIZE)?;
         let hkdf_salt = decode_exact(&enc_hkdf, HKDF_SALT_SIZE)?;
         let kdf_bytes = decode_exact(&enc_kdf, KDF_PARAMS_SIZE)?;
-        let kdf_params = KdfParams::from_bytes(kdf_bytes.as_slice().try_into()?)?;
+        let kdf_params = KdfParams::from_bytes(kdf_bytes.as_slice().try_into()?, None)?;
         let nonce = decode_exact(&enc_nonce, STREAM_NONCE_SIZE)?;
         let verification_hash = decode_exact(&enc_keyhash, ENCRYPTION_KEY_SIZE)?;
 
@@ -380,7 +383,7 @@ mod tests {
         fs::write(&encrypted_path, &output)?;
 
         // --- Decrypt with the current v3 reader ---
-        let output = decrypt_file(&encrypted_path, &decrypt_dir, &passphrase, &|_| {})?;
+        let output = decrypt_file(&encrypted_path, &decrypt_dir, &passphrase, None, &|_| {})?;
         assert!(output.exists());
 
         let decrypted = fs::read_to_string(decrypt_dir.join("data.txt"))?;

@@ -72,7 +72,8 @@ fn test_symmetric_encrypt_decrypt_single_file() -> Result<(), CryptoError> {
     let passphrase = SecretString::from("test_password_123".to_string());
 
     // Encrypt
-    let encrypt_result = symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, |_| {})?;
+    let encrypt_result =
+        symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
     assert!(encrypt_result.exists());
     assert!(encrypt_dir.join("input.fcr").exists());
@@ -82,6 +83,7 @@ fn test_symmetric_encrypt_decrypt_single_file() -> Result<(), CryptoError> {
         encrypt_dir.join("input.fcr"),
         &decrypt_dir,
         &passphrase,
+        None,
         None,
         |_| {},
     )?;
@@ -108,7 +110,7 @@ fn test_symmetric_encrypt_decrypt_directory() -> Result<(), CryptoError> {
     let passphrase = SecretString::from("directory_password".to_string());
 
     // Encrypt directory
-    let encrypt_result = symmetric_auto(&input_dir, &encrypt_dir, &passphrase, None, |_| {})?;
+    let encrypt_result = symmetric_auto(&input_dir, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
     assert!(encrypt_result.exists());
     assert!(encrypt_dir.join("test_folder.fcr").exists());
@@ -118,6 +120,7 @@ fn test_symmetric_encrypt_decrypt_directory() -> Result<(), CryptoError> {
         encrypt_dir.join("test_folder.fcr"),
         &decrypt_dir,
         &passphrase,
+        None,
         None,
         |_| {},
     )?;
@@ -156,13 +159,14 @@ fn test_symmetric_wrong_password() -> Result<(), CryptoError> {
     let wrong_pass = SecretString::from("wrong_password".to_string());
 
     // Encrypt with correct password
-    symmetric_auto(&input_file, &encrypt_dir, &correct_pass, None, |_| {})?;
+    symmetric_auto(&input_file, &encrypt_dir, &correct_pass, None, None, |_| {})?;
 
     // Try to decrypt with wrong password - should fail
     let result = symmetric_auto(
         encrypt_dir.join("secret.fcr"),
         &decrypt_dir,
         &wrong_pass,
+        None,
         None,
         |_| {},
     );
@@ -191,7 +195,7 @@ fn test_symmetric_encrypt_decrypt_multi_chunk_file() -> Result<(), CryptoError> 
 
     let passphrase = SecretString::from("multi_chunk_password".to_string());
 
-    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, |_| {})?;
+    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
     assert!(encrypt_dir.join("multi_chunk.fcr").exists());
 
@@ -199,6 +203,7 @@ fn test_symmetric_encrypt_decrypt_multi_chunk_file() -> Result<(), CryptoError> 
         encrypt_dir.join("multi_chunk.fcr"),
         &decrypt_dir,
         &passphrase,
+        None,
         None,
         |_| {},
     )?;
@@ -276,6 +281,7 @@ fn test_hybrid_keygen_encrypt_decrypt_file() -> Result<(), CryptoError> {
         &pub_key_path,
         &empty_pass,
         None,
+        None,
         |_| {},
     )?;
 
@@ -290,6 +296,7 @@ fn test_hybrid_keygen_encrypt_decrypt_file() -> Result<(), CryptoError> {
         &decrypt_dir,
         &secret_key_path,
         &key_passphrase,
+        None,
         None,
         |_| {},
     )?;
@@ -330,6 +337,7 @@ fn test_hybrid_encrypt_decrypt_directory() -> Result<(), CryptoError> {
         &pub_key_path,
         &empty_pass,
         None,
+        None,
         |_| {},
     )?;
 
@@ -343,6 +351,7 @@ fn test_hybrid_encrypt_decrypt_directory() -> Result<(), CryptoError> {
         &decrypt_dir,
         &secret_key_path,
         &key_passphrase,
+        None,
         None,
         |_| {},
     )?;
@@ -386,6 +395,7 @@ fn test_hybrid_wrong_key_passphrase() -> Result<(), CryptoError> {
         &pub_key_path,
         &empty_pass,
         None,
+        None,
         |_| {},
     )?;
 
@@ -397,6 +407,7 @@ fn test_hybrid_wrong_key_passphrase() -> Result<(), CryptoError> {
         &decrypt_dir,
         &secret_key_path,
         &wrong_pass,
+        None,
         None,
         |_| {},
     );
@@ -426,13 +437,14 @@ fn test_empty_file_encryption() -> Result<(), CryptoError> {
     let passphrase = SecretString::from("empty_test".to_string());
 
     // Encrypt empty file
-    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, |_| {})?;
+    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
     // Decrypt
     symmetric_auto(
         encrypt_dir.join("empty.fcr"),
         &decrypt_dir,
         &passphrase,
+        None,
         None,
         |_| {},
     )?;
@@ -460,13 +472,14 @@ fn test_unicode_content() -> Result<(), CryptoError> {
     let passphrase = SecretString::from("unicode_pass".to_string());
 
     // Encrypt
-    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, |_| {})?;
+    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
     // Decrypt
     symmetric_auto(
         encrypt_dir.join("unicode.fcr"),
         &decrypt_dir,
         &passphrase,
+        None,
         None,
         |_| {},
     )?;
@@ -492,12 +505,13 @@ fn test_special_characters_in_filename() -> Result<(), CryptoError> {
 
     let passphrase = SecretString::from("special_pass".to_string());
 
-    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, |_| {})?;
+    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
     symmetric_auto(
         encrypt_dir.join("file-with_special.chars.fcr"),
         &decrypt_dir,
         &passphrase,
+        None,
         None,
         |_| {},
     )?;
@@ -515,6 +529,7 @@ fn test_nonexistent_output_dir() {
         "Cargo.toml",
         "/nonexistent/path/output",
         &passphrase,
+        None,
         None,
         |_| {},
     );
@@ -534,6 +549,7 @@ fn test_decrypt_nonexistent_fcr_file() {
         "/nonexistent/missing.fcr",
         &decrypt_dir,
         &passphrase,
+        None,
         None,
         |_| {},
     );
@@ -557,12 +573,13 @@ fn test_binary_file_content() -> Result<(), CryptoError> {
 
     let passphrase = SecretString::from("binary_pass".to_string());
 
-    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, |_| {})?;
+    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
     symmetric_auto(
         encrypt_dir.join("data.fcr"),
         &decrypt_dir,
         &passphrase,
+        None,
         None,
         |_| {},
     )?;
@@ -589,13 +606,14 @@ fn test_symmetric_streaming_wrong_password() -> Result<(), CryptoError> {
     let correct_pass = SecretString::from("correct".to_string());
     let wrong_pass = SecretString::from("wrong".to_string());
 
-    symmetric_auto(&input_file, &encrypt_dir, &correct_pass, None, |_| {})?;
+    symmetric_auto(&input_file, &encrypt_dir, &correct_pass, None, None, |_| {})?;
 
     // Decrypt with wrong password
     let result = symmetric_auto(
         encrypt_dir.join("data.fcr"),
         &decrypt_dir,
         &wrong_pass,
+        None,
         None,
         |_| {},
     );
@@ -621,7 +639,7 @@ fn test_symmetric_encrypt_decrypt_directory_streaming() -> Result<(), CryptoErro
 
     let passphrase = SecretString::from("dir_streaming_pass".to_string());
 
-    symmetric_auto(&input_dir, &encrypt_dir, &passphrase, None, |_| {})?;
+    symmetric_auto(&input_dir, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
     assert!(encrypt_dir.join("test_folder.fcr").exists());
 
@@ -629,6 +647,7 @@ fn test_symmetric_encrypt_decrypt_directory_streaming() -> Result<(), CryptoErro
         encrypt_dir.join("test_folder.fcr"),
         &decrypt_dir,
         &passphrase,
+        None,
         None,
         |_| {},
     )?;
@@ -658,7 +677,7 @@ fn test_symmetric_empty_password_rejected() {
 
     let empty_pass = SecretString::from("".to_string());
 
-    let result = symmetric_auto(&input_file, &encrypt_dir, &empty_pass, None, |_| {});
+    let result = symmetric_auto(&input_file, &encrypt_dir, &empty_pass, None, None, |_| {});
 
     assert!(result.is_err());
     match result {
@@ -705,6 +724,7 @@ fn test_hybrid_wrong_key_pair() -> Result<(), CryptoError> {
         &pub_key_a,
         &empty_pass,
         None,
+        None,
         |_| {},
     )?;
 
@@ -716,6 +736,7 @@ fn test_hybrid_wrong_key_pair() -> Result<(), CryptoError> {
         &decrypt_dir,
         &secret_key_b,
         &pass_b,
+        None,
         None,
         |_| {},
     );
@@ -754,6 +775,7 @@ fn test_hybrid_key_round_trip() -> Result<(), CryptoError> {
         &pub_key_path,
         &empty_pass,
         None,
+        None,
         |_| {},
     )?;
 
@@ -767,6 +789,7 @@ fn test_hybrid_key_round_trip() -> Result<(), CryptoError> {
         &decrypt_dir,
         &secret_key_path,
         &key_passphrase,
+        None,
         None,
         |_| {},
     )?;
@@ -804,6 +827,7 @@ fn test_hybrid_binary_file() -> Result<(), CryptoError> {
         &pub_key_path,
         &empty_pass,
         None,
+        None,
         |_| {},
     )?;
 
@@ -814,6 +838,7 @@ fn test_hybrid_binary_file() -> Result<(), CryptoError> {
         &decrypt_dir,
         &secret_key_path,
         &key_passphrase,
+        None,
         None,
         |_| {},
     )?;
@@ -836,6 +861,7 @@ fn test_nonexistent_input_path_encrypt() {
         "/nonexistent/path/file.txt",
         &encrypt_dir,
         &passphrase,
+        None,
         None,
         |_| {},
     );
@@ -861,7 +887,7 @@ fn test_truncated_symmetric_file() -> Result<(), CryptoError> {
     create_test_file(&input_file, "truncation test data");
     let passphrase = SecretString::from("test".to_string());
 
-    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, |_| {})?;
+    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
     let encrypted_path = encrypt_dir.join("data.fcr");
     let data = fs::read(&encrypted_path)?;
@@ -870,7 +896,14 @@ fn test_truncated_symmetric_file() -> Result<(), CryptoError> {
     let truncated = &data[..30];
     fs::write(&encrypted_path, truncated)?;
 
-    let result = symmetric_auto(&encrypted_path, &decrypt_dir, &passphrase, None, |_| {});
+    let result = symmetric_auto(
+        &encrypted_path,
+        &decrypt_dir,
+        &passphrase,
+        None,
+        None,
+        |_| {},
+    );
     assert!(result.is_err());
 
     Ok(())
@@ -903,6 +936,7 @@ fn test_truncated_hybrid_file() -> Result<(), CryptoError> {
         &public_key,
         &empty_pass,
         None,
+        None,
         |_| {},
     )?;
 
@@ -916,6 +950,7 @@ fn test_truncated_hybrid_file() -> Result<(), CryptoError> {
         &decrypt_dir,
         &secret_key,
         &key_passphrase,
+        None,
         None,
         |_| {},
     );
@@ -939,7 +974,7 @@ fn test_symmetric_header_tamper_detection() -> Result<(), CryptoError> {
 
     let passphrase = SecretString::from("tamper_pass".to_string());
 
-    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, |_| {})?;
+    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
     // Tamper with the same salt byte in all three replicated copies so majority
     // vote cannot recover the original value and the decoded salt changes.
@@ -954,7 +989,14 @@ fn test_symmetric_header_tamper_detection() -> Result<(), CryptoError> {
     data[PREFIX + 3 + 2 * SALT_LEN + SALT_BYTE] ^= 0xFF;
     fs::write(&encrypted_path, &data)?;
 
-    let result = symmetric_auto(&encrypted_path, &decrypt_dir, &passphrase, None, |_| {});
+    let result = symmetric_auto(
+        &encrypted_path,
+        &decrypt_dir,
+        &passphrase,
+        None,
+        None,
+        |_| {},
+    );
 
     assert!(result.is_err());
 
@@ -987,6 +1029,7 @@ fn test_hybrid_header_tamper_detection() -> Result<(), CryptoError> {
         &pub_key_path,
         &empty_pass,
         None,
+        None,
         |_| {},
     )?;
 
@@ -1017,6 +1060,7 @@ fn test_hybrid_header_tamper_detection() -> Result<(), CryptoError> {
         &secret_key_path,
         &key_passphrase,
         None,
+        None,
         |_| {},
     );
 
@@ -1040,7 +1084,7 @@ fn test_symmetric_single_copy_corruption_recovery() -> Result<(), CryptoError> {
 
     let passphrase = SecretString::from("recovery_pass".to_string());
 
-    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, |_| {})?;
+    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
     // Corrupt one byte in copy 0 only — majority vote with copies 1 and 2 recovers it.
     // Encoded salt layout: [prefix(27)] [padding(3)] [copy0(32)] [copy1(32)] [copy2(32)]
@@ -1051,7 +1095,14 @@ fn test_symmetric_single_copy_corruption_recovery() -> Result<(), CryptoError> {
     data[PREFIX + 3 + SALT_BYTE] ^= 0xFF;
     fs::write(&encrypted_path, &data)?;
 
-    symmetric_auto(&encrypted_path, &decrypt_dir, &passphrase, None, |_| {})?;
+    symmetric_auto(
+        &encrypted_path,
+        &decrypt_dir,
+        &passphrase,
+        None,
+        None,
+        |_| {},
+    )?;
 
     let decrypted = fs::read_to_string(decrypt_dir.join("secret.txt"))?;
     assert_eq!(decrypted, content);
@@ -1073,7 +1124,7 @@ fn test_symmetric_two_copy_corruption_detected() -> Result<(), CryptoError> {
 
     let passphrase = SecretString::from("two_copy_pass".to_string());
 
-    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, |_| {})?;
+    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
     // Corrupt the same byte in 2 of 3 copies — majority vote picks the corrupted value,
     // changing the decoded salt and causing HMAC or key derivation failure.
@@ -1086,7 +1137,14 @@ fn test_symmetric_two_copy_corruption_detected() -> Result<(), CryptoError> {
     data[PREFIX + 3 + SALT_LEN + SALT_BYTE] ^= 0xFF;
     fs::write(&encrypted_path, &data)?;
 
-    let result = symmetric_auto(&encrypted_path, &decrypt_dir, &passphrase, None, |_| {});
+    let result = symmetric_auto(
+        &encrypted_path,
+        &decrypt_dir,
+        &passphrase,
+        None,
+        None,
+        |_| {},
+    );
 
     assert!(result.is_err());
 
@@ -1107,7 +1165,7 @@ fn test_symmetric_prefix_flags_tamper_detected() -> Result<(), CryptoError> {
 
     let passphrase = SecretString::from("prefix_flags_pass".to_string());
 
-    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, |_| {})?;
+    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
     // Flip a bit in the flags field (logical prefix byte 6) across 2 of 3
     // replicated copies so majority vote picks the corrupted value.
@@ -1119,7 +1177,14 @@ fn test_symmetric_prefix_flags_tamper_detected() -> Result<(), CryptoError> {
     data[11 + FLAGS_LOGICAL] ^= 0x01; // copy 1
     fs::write(&encrypted_path, &data)?;
 
-    let result = symmetric_auto(&encrypted_path, &decrypt_dir, &passphrase, None, |_| {});
+    let result = symmetric_auto(
+        &encrypted_path,
+        &decrypt_dir,
+        &passphrase,
+        None,
+        None,
+        |_| {},
+    );
 
     assert!(result.is_err());
 
@@ -1152,6 +1217,7 @@ fn test_hybrid_single_copy_corruption_recovery() -> Result<(), CryptoError> {
         &pub_key_path,
         &SecretString::from("".to_string()),
         None,
+        None,
         |_| {},
     )?;
 
@@ -1175,6 +1241,7 @@ fn test_hybrid_single_copy_corruption_recovery() -> Result<(), CryptoError> {
         &decrypt_dir,
         &secret_key_path,
         &key_passphrase,
+        None,
         None,
         |_| {},
     )?;
@@ -1200,7 +1267,7 @@ fn test_non_ferrocrypt_fcr_file_can_be_encrypted() {
     fs::write(&fake_file, content).unwrap();
 
     let passphrase = SecretString::from("test".to_string());
-    let result = symmetric_auto(&fake_file, &encrypt_dir, &passphrase, None, |_| {});
+    let result = symmetric_auto(&fake_file, &encrypt_dir, &passphrase, None, None, |_| {});
     assert!(
         result.is_ok(),
         "Expected encryption to succeed, got: {:?}",
@@ -1211,7 +1278,14 @@ fn test_non_ferrocrypt_fcr_file_can_be_encrypted() {
     let encrypted_path = encrypt_dir.join("photo.fcr");
     assert!(encrypted_path.exists());
 
-    let result = symmetric_auto(&encrypted_path, &decrypt_dir, &passphrase, None, |_| {});
+    let result = symmetric_auto(
+        &encrypted_path,
+        &decrypt_dir,
+        &passphrase,
+        None,
+        None,
+        |_| {},
+    );
     assert!(result.is_ok());
 
     let decrypted = fs::read(decrypt_dir.join("photo.fcr")).unwrap();
@@ -1230,7 +1304,7 @@ fn test_future_major_version_rejected() -> Result<(), CryptoError> {
     create_test_file(&input_file, "version test");
     let passphrase = SecretString::from("pass".to_string());
 
-    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, |_| {})?;
+    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
     // Patch the major version (logical prefix byte 2) in all 3 replicated copies
     // Encoded prefix: [pad(3)] [copy0(8)] [copy1(8)] [copy2(8)]
@@ -1242,7 +1316,14 @@ fn test_future_major_version_rejected() -> Result<(), CryptoError> {
     data[19 + MAJOR_LOGICAL] = 99; // copy 2
     fs::write(&encrypted_path, &data)?;
 
-    let result = symmetric_auto(&encrypted_path, &decrypt_dir, &passphrase, None, |_| {});
+    let result = symmetric_auto(
+        &encrypted_path,
+        &decrypt_dir,
+        &passphrase,
+        None,
+        None,
+        |_| {},
+    );
 
     assert!(result.is_err());
     match result {
@@ -1282,13 +1363,21 @@ fn test_wrong_format_type_hybrid_as_symmetric() -> Result<(), CryptoError> {
         &pub_key_path,
         &empty_pass,
         None,
+        None,
         |_| {},
     )?;
 
     // Try to decrypt a hybrid .fcr file with symmetric_encryption — format type mismatch
     let encrypted_path = encrypt_dir.join("data.fcr");
     let passphrase = SecretString::from("pass".to_string());
-    let result = symmetric_auto(&encrypted_path, &decrypt_dir, &passphrase, None, |_| {});
+    let result = symmetric_auto(
+        &encrypted_path,
+        &decrypt_dir,
+        &passphrase,
+        None,
+        None,
+        |_| {},
+    );
 
     assert!(result.is_err());
     match result {
@@ -1326,6 +1415,7 @@ fn test_hybrid_empty_file() -> Result<(), CryptoError> {
         &pub_key,
         &empty_pass,
         None,
+        None,
         |_| {},
     )?;
 
@@ -1336,6 +1426,7 @@ fn test_hybrid_empty_file() -> Result<(), CryptoError> {
         &decrypt_dir,
         &secret_key,
         &key_passphrase,
+        None,
         None,
         |_| {},
     )?;
@@ -1359,9 +1450,9 @@ fn test_two_encryptions_produce_different_output() -> Result<(), CryptoError> {
     create_test_file(&input_file, "Same content encrypted twice");
     let passphrase = SecretString::from("same_pass".to_string());
 
-    symmetric_auto(&input_file, &encrypt_dir_a, &passphrase, None, |_| {})?;
+    symmetric_auto(&input_file, &encrypt_dir_a, &passphrase, None, None, |_| {})?;
 
-    symmetric_auto(&input_file, &encrypt_dir_b, &passphrase, None, |_| {})?;
+    symmetric_auto(&input_file, &encrypt_dir_b, &passphrase, None, None, |_| {})?;
 
     let file_a = fs::read(encrypt_dir_a.join("data.fcr"))?;
     let file_b = fs::read(encrypt_dir_b.join("data.fcr"))?;
@@ -1391,6 +1482,7 @@ fn test_symmetric_output_file_override() -> Result<(), CryptoError> {
         &encrypt_dir,
         &passphrase,
         Some(custom_output.as_path()),
+        None,
         |_| {},
     )?;
 
@@ -1400,7 +1492,14 @@ fn test_symmetric_output_file_override() -> Result<(), CryptoError> {
     assert!(!encrypt_dir.join("data.fcr").exists());
 
     // Decrypt the custom-named file
-    let decrypt_result = symmetric_auto(&custom_output, &decrypt_dir, &passphrase, None, |_| {})?;
+    let decrypt_result = symmetric_auto(
+        &custom_output,
+        &decrypt_dir,
+        &passphrase,
+        None,
+        None,
+        |_| {},
+    )?;
 
     assert!(decrypt_result.exists());
     let content = fs::read_to_string(decrypt_dir.join("data.txt"))?;
@@ -1437,6 +1536,7 @@ fn test_hybrid_output_file_override() -> Result<(), CryptoError> {
         &pub_key,
         &empty,
         Some(custom_output.as_path()),
+        None,
         |_| {},
     )?;
 
@@ -1450,6 +1550,7 @@ fn test_hybrid_output_file_override() -> Result<(), CryptoError> {
         &decrypt_dir,
         &secret_key,
         &passphrase,
+        None,
         None,
         |_| {},
     )?;
@@ -1472,7 +1573,7 @@ fn test_output_file_none_uses_default_name() -> Result<(), CryptoError> {
     create_test_file(&input_file, "default naming test");
     let passphrase = SecretString::from("test_password_123".to_string());
 
-    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, |_| {})?;
+    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
     let expected = encrypt_dir.join(format!("report.{}", ENCRYPTED_EXTENSION));
     assert!(expected.exists());
@@ -1498,7 +1599,7 @@ fn test_symmetric_empty_file_rejected() -> Result<(), CryptoError> {
     create_test_file(&input_file, "payload");
     let passphrase = SecretString::from("test".to_string());
 
-    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, |_| {})?;
+    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
     let encrypted_path = encrypt_dir.join("data.fcr");
     let data = fs::read(&encrypted_path)?;
@@ -1507,7 +1608,14 @@ fn test_symmetric_empty_file_rejected() -> Result<(), CryptoError> {
     let prefix_only = &data[..27];
     fs::write(&encrypted_path, prefix_only)?;
 
-    let result = symmetric_auto(&encrypted_path, &decrypt_dir, &passphrase, None, |_| {});
+    let result = symmetric_auto(
+        &encrypted_path,
+        &decrypt_dir,
+        &passphrase,
+        None,
+        None,
+        |_| {},
+    );
     assert!(result.is_err());
 
     Ok(())
@@ -1540,6 +1648,7 @@ fn test_hybrid_empty_file_rejected() -> Result<(), CryptoError> {
         &public_key,
         &empty_pass,
         None,
+        None,
         |_| {},
     )?;
 
@@ -1553,6 +1662,7 @@ fn test_hybrid_empty_file_rejected() -> Result<(), CryptoError> {
         &decrypt_dir,
         &secret_key,
         &key_pass,
+        None,
         None,
         |_| {},
     );
@@ -1572,7 +1682,7 @@ fn test_symmetric_truncated_mid_header() -> Result<(), CryptoError> {
     create_test_file(&input_file, "Truncation mid-header test");
     let passphrase = SecretString::from("pass".to_string());
 
-    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, |_| {})?;
+    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let data = fs::read(&encrypted_path)?;
@@ -1582,7 +1692,14 @@ fn test_symmetric_truncated_mid_header() -> Result<(), CryptoError> {
     let truncated = &data[..30];
     fs::write(&encrypted_path, truncated)?;
 
-    let result = symmetric_auto(&encrypted_path, &decrypt_dir, &passphrase, None, |_| {});
+    let result = symmetric_auto(
+        &encrypted_path,
+        &decrypt_dir,
+        &passphrase,
+        None,
+        None,
+        |_| {},
+    );
     assert!(result.is_err());
     Ok(())
 }
@@ -1599,7 +1716,7 @@ fn test_symmetric_oversized_header_len() -> Result<(), CryptoError> {
     create_test_file(&input_file, "Oversized header_len test");
     let passphrase = SecretString::from("pass".to_string());
 
-    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, |_| {})?;
+    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
     // Set header_len to 0xFFFF in all 3 replicated copies
     // Encoded prefix: [pad(3)] [copy0(8)] [copy1(8)] [copy2(8)]
@@ -1613,7 +1730,14 @@ fn test_symmetric_oversized_header_len() -> Result<(), CryptoError> {
     }
     fs::write(&encrypted_path, &data)?;
 
-    let result = symmetric_auto(&encrypted_path, &decrypt_dir, &passphrase, None, |_| {});
+    let result = symmetric_auto(
+        &encrypted_path,
+        &decrypt_dir,
+        &passphrase,
+        None,
+        None,
+        |_| {},
+    );
     assert!(result.is_err());
     Ok(())
 }
@@ -1633,7 +1757,7 @@ fn test_symmetric_header_len_too_small() {
     fs::write(&file, &data).unwrap();
 
     let passphrase = SecretString::from("test".to_string());
-    let result = symmetric_auto(&file, &decrypt_dir, &passphrase, None, |_| {});
+    let result = symmetric_auto(&file, &decrypt_dir, &passphrase, None, None, |_| {});
     assert!(result.is_err());
 }
 
@@ -1662,7 +1786,7 @@ fn test_symmetric_all_zero_header_body() {
     fs::write(&file, &data).unwrap();
 
     let passphrase = SecretString::from("test".to_string());
-    let result = symmetric_auto(&file, &decrypt_dir, &passphrase, None, |_| {});
+    let result = symmetric_auto(&file, &decrypt_dir, &passphrase, None, None, |_| {});
     assert!(result.is_err());
 }
 
@@ -1692,6 +1816,7 @@ fn test_hybrid_truncated_mid_header() -> Result<(), CryptoError> {
         &pub_key,
         &empty_pass,
         None,
+        None,
         |_| {},
     )?;
 
@@ -1708,6 +1833,7 @@ fn test_hybrid_truncated_mid_header() -> Result<(), CryptoError> {
         &decrypt_dir,
         &secret_key,
         &key_pass,
+        None,
         None,
         |_| {},
     );
@@ -1741,6 +1867,7 @@ fn test_hybrid_oversized_header_len() -> Result<(), CryptoError> {
         &pub_key,
         &empty_pass,
         None,
+        None,
         |_| {},
     )?;
 
@@ -1761,6 +1888,7 @@ fn test_hybrid_oversized_header_len() -> Result<(), CryptoError> {
         &decrypt_dir,
         &secret_key,
         &key_pass,
+        None,
         None,
         |_| {},
     );
@@ -1784,7 +1912,7 @@ fn test_symmetric_ciphertext_bit_flip_detected() -> Result<(), CryptoError> {
     create_test_file(&input_file, "AEAD ciphertext integrity test");
     let passphrase = SecretString::from("ct_flip_pass".to_string());
 
-    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, |_| {})?;
+    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
@@ -1794,7 +1922,14 @@ fn test_symmetric_ciphertext_bit_flip_detected() -> Result<(), CryptoError> {
     data[flip_offset] ^= 0xFF;
     fs::write(&encrypted_path, &data)?;
 
-    let result = symmetric_auto(&encrypted_path, &decrypt_dir, &passphrase, None, |_| {});
+    let result = symmetric_auto(
+        &encrypted_path,
+        &decrypt_dir,
+        &passphrase,
+        None,
+        None,
+        |_| {},
+    );
     assert!(result.is_err());
     Ok(())
 }
@@ -1825,6 +1960,7 @@ fn test_hybrid_ciphertext_bit_flip_detected() -> Result<(), CryptoError> {
         &pub_key,
         &empty_pass,
         None,
+        None,
         |_| {},
     )?;
 
@@ -1841,6 +1977,7 @@ fn test_hybrid_ciphertext_bit_flip_detected() -> Result<(), CryptoError> {
         &decrypt_dir,
         &secret_key,
         &key_pass,
+        None,
         None,
         |_| {},
     );
@@ -1862,7 +1999,7 @@ fn test_symmetric_ciphertext_truncation_detected() -> Result<(), CryptoError> {
     create_test_file(&input_file, &content);
     let passphrase = SecretString::from("trunc_pass".to_string());
 
-    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, |_| {})?;
+    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let data = fs::read(&encrypted_path)?;
@@ -1871,7 +2008,14 @@ fn test_symmetric_ciphertext_truncation_detected() -> Result<(), CryptoError> {
     let half = data.len() / 2;
     fs::write(&encrypted_path, &data[..half])?;
 
-    let result = symmetric_auto(&encrypted_path, &decrypt_dir, &passphrase, None, |_| {});
+    let result = symmetric_auto(
+        &encrypted_path,
+        &decrypt_dir,
+        &passphrase,
+        None,
+        None,
+        |_| {},
+    );
     assert!(result.is_err());
     Ok(())
 }
@@ -1888,7 +2032,7 @@ fn test_symmetric_ciphertext_appended_bytes_detected() -> Result<(), CryptoError
     create_test_file(&input_file, "Append detection test");
     let passphrase = SecretString::from("append_pass".to_string());
 
-    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, |_| {})?;
+    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
@@ -1897,7 +2041,14 @@ fn test_symmetric_ciphertext_appended_bytes_detected() -> Result<(), CryptoError
     data.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
     fs::write(&encrypted_path, &data)?;
 
-    let result = symmetric_auto(&encrypted_path, &decrypt_dir, &passphrase, None, |_| {});
+    let result = symmetric_auto(
+        &encrypted_path,
+        &decrypt_dir,
+        &passphrase,
+        None,
+        None,
+        |_| {},
+    );
     assert!(result.is_err());
     Ok(())
 }
@@ -1960,7 +2111,7 @@ fn test_symmetric_encrypt_cleans_up_on_failure() -> Result<(), CryptoError> {
     std::os::unix::fs::symlink(&real_file, &symlink_path).unwrap();
 
     let passphrase = SecretString::from("cleanup_pass".to_string());
-    let result = symmetric_auto(&symlink_path, &encrypt_dir, &passphrase, None, |_| {});
+    let result = symmetric_auto(&symlink_path, &encrypt_dir, &passphrase, None, None, |_| {});
     assert!(result.is_err());
 
     let would_be_output = encrypt_dir.join(format!("link.{}", ENCRYPTED_EXTENSION));
@@ -1994,6 +2145,7 @@ fn test_hybrid_encrypt_cleans_up_on_failure() -> Result<(), CryptoError> {
         keys_dir.join("public.key"),
         &key_pass,
         None,
+        None,
         |_| {},
     );
     assert!(result.is_err());
@@ -2021,7 +2173,7 @@ fn test_symmetric_decrypt_marks_incomplete_file() -> Result<(), CryptoError> {
     fs::write(&input_file, &big_data)?;
 
     let passphrase = SecretString::from("incomplete_pass".to_string());
-    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, |_| {})?;
+    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
     let encrypted_path = encrypt_dir.join("bigfile.fcr");
     let mut data = fs::read(&encrypted_path)?;
@@ -2030,7 +2182,14 @@ fn test_symmetric_decrypt_marks_incomplete_file() -> Result<(), CryptoError> {
     data[flip_offset] ^= 0xFF;
     fs::write(&encrypted_path, &data)?;
 
-    let result = symmetric_auto(&encrypted_path, &decrypt_dir, &passphrase, None, |_| {});
+    let result = symmetric_auto(
+        &encrypted_path,
+        &decrypt_dir,
+        &passphrase,
+        None,
+        None,
+        |_| {},
+    );
     assert!(result.is_err());
 
     let incomplete_path = decrypt_dir.join("bigfile.bin.incomplete");
@@ -2060,7 +2219,7 @@ fn test_symmetric_decrypt_marks_incomplete_directory() -> Result<(), CryptoError
     fs::write(input_dir.join("bigfile.bin"), &big_data)?;
 
     let passphrase = SecretString::from("incomplete_dir_pass".to_string());
-    symmetric_auto(&input_dir, &encrypt_dir, &passphrase, None, |_| {})?;
+    symmetric_auto(&input_dir, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
     let encrypted_path = encrypt_dir.join("mydir.fcr");
     let mut data = fs::read(&encrypted_path)?;
@@ -2068,7 +2227,14 @@ fn test_symmetric_decrypt_marks_incomplete_directory() -> Result<(), CryptoError
     data[flip_offset] ^= 0xFF;
     fs::write(&encrypted_path, &data)?;
 
-    let result = symmetric_auto(&encrypted_path, &decrypt_dir, &passphrase, None, |_| {});
+    let result = symmetric_auto(
+        &encrypted_path,
+        &decrypt_dir,
+        &passphrase,
+        None,
+        None,
+        |_| {},
+    );
     assert!(result.is_err());
 
     let incomplete_path = decrypt_dir.join("mydir.incomplete");
@@ -2137,7 +2303,7 @@ fn test_older_major_version_rejected() -> Result<(), CryptoError> {
 
     create_test_file(&input_file, "version test");
     let passphrase = SecretString::from("pass".to_string());
-    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, |_| {})?;
+    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
     // Patch the major version to an older value in all 3 replicated copies
     let encrypted_path = encrypt_dir.join("data.fcr");
@@ -2148,7 +2314,14 @@ fn test_older_major_version_rejected() -> Result<(), CryptoError> {
     data[19 + MAJOR_OFFSET] = 1; // copy 2
     fs::write(&encrypted_path, &data)?;
 
-    let result = symmetric_auto(&encrypted_path, &decrypt_dir, &passphrase, None, |_| {});
+    let result = symmetric_auto(
+        &encrypted_path,
+        &decrypt_dir,
+        &passphrase,
+        None,
+        None,
+        |_| {},
+    );
     assert!(result.is_err());
     match result {
         Err(CryptoError::UnsupportedVersion(msg)) => {
@@ -2183,6 +2356,7 @@ fn test_older_key_version_rejected() -> Result<(), CryptoError> {
         keys_dir.join("public.key"),
         &empty,
         None,
+        None,
         |_| {},
     )?;
 
@@ -2197,6 +2371,7 @@ fn test_older_key_version_rejected() -> Result<(), CryptoError> {
         &decrypt_dir,
         &secret_key_path,
         &passphrase,
+        None,
         None,
         |_| {},
     );

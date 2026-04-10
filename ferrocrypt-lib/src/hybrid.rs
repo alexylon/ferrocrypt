@@ -12,8 +12,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::common::{
     ARGON2_SALT_SIZE, DecryptReader, ENCRYPTION_KEY_SIZE, EncryptWriter, FILE_TOO_SHORT,
-    HMAC_KEY_SIZE, HMAC_TAG_SIZE, KDF_PARAMS_SIZE, KdfParams, STREAM_NONCE_SIZE, TAG_SIZE,
-    encryption_base_name, hmac_sha3_256, hmac_sha3_256_verify,
+    HMAC_KEY_SIZE, HMAC_TAG_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams, STREAM_NONCE_SIZE,
+    TAG_SIZE, encryption_base_name, hmac_sha3_256, hmac_sha3_256_verify,
 };
 use crate::format::{self, HEADER_PREFIX_ENCODED_SIZE, PUBLIC_KEY_DATA_SIZE, SECRET_KEY_DATA_SIZE};
 use crate::replication::{decode_exact, encode, encoded_size};
@@ -182,6 +182,7 @@ pub fn decrypt_file(
     output_dir: &Path,
     secret_key_path: &Path,
     passphrase: &SecretString,
+    kdf_limit: Option<&KdfLimit>,
     on_progress: &dyn Fn(&str),
 ) -> Result<PathBuf, CryptoError> {
     on_progress("Decrypting\u{2026}");
@@ -201,6 +202,7 @@ pub fn decrypt_file(
             output_dir,
             secret_key_path,
             passphrase,
+            kdf_limit,
             on_progress,
         ),
         _ => Err(format::unsupported_file_version_error(
@@ -213,6 +215,7 @@ pub fn decrypt_file(
 // If a future 3.x minor introduces non-trivial behavior, add explicit gating here:
 //   match header.minor { 0 => ..., 1 => ..., _ => unsupported }
 // instead of relying solely on skip_unknown_header_bytes.
+#[allow(clippy::too_many_arguments)]
 fn decrypt_file_v3(
     mut encrypted_file: fs::File,
     prefix_bytes: [u8; format::HEADER_PREFIX_SIZE],
@@ -220,6 +223,7 @@ fn decrypt_file_v3(
     output_dir: &Path,
     secret_key_path: &Path,
     passphrase: &SecretString,
+    kdf_limit: Option<&KdfLimit>,
     _on_progress: &dyn Fn(&str),
 ) -> Result<PathBuf, CryptoError> {
     format::validate_file_flags(&header)?;
@@ -258,7 +262,7 @@ fn decrypt_file_v3(
         .try_into()
         .map_err(|_| CryptoError::InvalidFormat("Envelope has unexpected length".to_string()))?;
 
-    let recipient_secret = read_secret_key(secret_key_path, passphrase)?;
+    let recipient_secret = read_secret_key(secret_key_path, passphrase, kdf_limit)?;
     let envelope_result = open_envelope(&envelope, &recipient_secret);
     drop(recipient_secret);
     let mut decrypted_combined_key = envelope_result?;
@@ -308,11 +312,12 @@ fn read_public_key_v2(
 fn read_secret_key(
     path: &Path,
     passphrase: &SecretString,
+    kdf_limit: Option<&KdfLimit>,
 ) -> Result<ZeroizingSecretKey, CryptoError> {
     let data = fs::read(path)?;
     let header = format::parse_key_file_header(&data, format::KEY_FILE_TYPE_SECRET)?;
     match header.version {
-        2 => read_secret_key_v2(&data, &header, passphrase),
+        2 => read_secret_key_v2(&data, &header, passphrase, kdf_limit),
         _ => Err(format::unsupported_key_version_error(header.version)),
     }
 }
@@ -321,12 +326,13 @@ fn read_secret_key_v2(
     data: &[u8],
     header: &format::KeyFileHeader,
     passphrase: &SecretString,
+    kdf_limit: Option<&KdfLimit>,
 ) -> Result<ZeroizingSecretKey, CryptoError> {
     format::validate_key_v2_layout(data, header, SECRET_KEY_DATA_SIZE)?;
 
     let body_start = format::KEY_FILE_HEADER_SIZE;
     let body = &data[body_start..body_start + SECRET_KEY_DATA_SIZE];
-    let kdf_params = KdfParams::from_bytes(body[..KDF_PARAMS_SIZE].try_into()?)?;
+    let kdf_params = KdfParams::from_bytes(body[..KDF_PARAMS_SIZE].try_into()?, kdf_limit)?;
     let salt = &body[KDF_PARAMS_SIZE..KDF_PARAMS_SIZE + ARGON2_SALT_SIZE];
     let nonce = chacha20poly1305::XNonce::from_slice(
         &body[KDF_PARAMS_SIZE + ARGON2_SALT_SIZE
@@ -562,7 +568,7 @@ mod tests {
         let envelope: [u8; ENVELOPE_SIZE] = envelope_vec.as_slice().try_into().unwrap();
 
         // Open envelope to get the HMAC key
-        let secret = read_secret_key(&keys_dir.join(PRIVATE_KEY_FILENAME), &key_pass)?;
+        let secret = read_secret_key(&keys_dir.join(PRIVATE_KEY_FILENAME), &key_pass, None)?;
         let decrypted = open_envelope(&envelope, &secret)?;
         drop(secret);
         let hmac_key = &decrypted[ENCRYPTION_KEY_SIZE..COMBINED_KEY_SIZE];
@@ -606,6 +612,7 @@ mod tests {
             &decrypt_dir,
             &keys_dir.join(PRIVATE_KEY_FILENAME),
             &key_pass,
+            None,
             &|_| {},
         )?;
         assert!(output.exists());

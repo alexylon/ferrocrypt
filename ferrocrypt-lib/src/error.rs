@@ -12,6 +12,7 @@ use thiserror::Error;
 /// | `InvalidFormat` | File or key-file structure is invalid or corrupted | Check file integrity |
 /// | `UnsupportedVersion` | File or key format version not supported | Upgrade/downgrade FerroCrypt |
 /// | `InvalidKdfParams` | KDF parameters out of safe bounds | Re-encrypt with valid parameters |
+/// | `ExcessiveWork` | KDF memory cost exceeds caller limit | Raise `--max-kdf-memory` or re-encrypt with lower cost |
 /// | `InternalError` | Unexpected internal crypto failure | Report as a bug |
 /// | `InputPath` | Missing input file or folder | Provide an existing path |
 /// | `InvalidInput` | Validation failure with human-readable context | Inspect message for details |
@@ -52,6 +53,8 @@ pub enum CryptoError {
     UnsupportedVersion(String),
     #[error("{0}")]
     InvalidKdfParams(String),
+    #[error("File requires {required_kib} KiB for key derivation, limit is {max_kib} KiB")]
+    ExcessiveWork { required_kib: u32, max_kib: u32 },
     #[error("{0}")]
     InternalError(String),
     #[error("Input file or folder missing: {0}")]

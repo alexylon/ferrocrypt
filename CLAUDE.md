@@ -97,10 +97,12 @@ Decryption reverses: read header → derive/decrypt keys → verify HMAC → Dec
 - Keep parsing, validation, crypto, and I/O separated.
 - Add or update important tests and keep them self-contained.
 - Add regression tests for security-sensitive and format bugs.
-- After each important change, update:
+- After each important change, update if needed:
     - `README.md`
     - `CHANGELOG.md` under `[Unreleased]`
     - `ferrocrypt-lib/FORMAT.md`
+    - `ferrocrypt-lib/fuzz/fuzz_targets`
+    - `stress_test.sh`
 - Run:
     - `cargo fmt --all`
     - `cargo clippy --all-targets -- -D warnings`

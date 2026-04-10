@@ -216,7 +216,7 @@ fn main() {
                 let start = std::time::Instant::now();
                 let result: Result<PathBuf, _> = match mode {
                     MODE_SYMMETRIC_ENCRYPT | MODE_SYMMETRIC_DECRYPT => {
-                        symmetric_auto(inpath, output_dir_path, &pwd, save_as, &on_progress)
+                        symmetric_auto(inpath, output_dir_path, &pwd, save_as, None, &on_progress)
                     }
                     MODE_HYBRID_ENCRYPT | MODE_HYBRID_DECRYPT => hybrid_auto(
                         inpath,
@@ -224,6 +224,7 @@ fn main() {
                         keypath,
                         &pwd,
                         save_as,
+                        None,
                         &on_progress,
                     ),
                     MODE_KEYGEN => generate_key_pair(&pwd, output_dir_path, &on_progress)

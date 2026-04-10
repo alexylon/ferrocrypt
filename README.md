@@ -191,6 +191,7 @@ ferrocrypt> quit
 | `-o, --output-path` | Output directory |
 | `-p, --passphrase` | Password for encryption/decryption |
 | `-s, --save-as` | Custom output file path (encrypt only, optional) |
+| `--max-kdf-memory` | Maximum KDF memory cost to accept in MiB (decrypt only, optional) |
 
 #### `hybrid`
 
@@ -201,6 +202,7 @@ ferrocrypt> quit
 | `-k, --key` | Public key (encrypt) or private key (decrypt) |
 | `-p, --passphrase` | Private key passphrase (decrypt only) |
 | `-s, --save-as` | Custom output file path (encrypt only, optional) |
+| `--max-kdf-memory` | Maximum KDF memory cost to accept in MiB (decrypt only, optional) |
 
 #### `keygen`
 

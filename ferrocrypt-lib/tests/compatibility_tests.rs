@@ -30,7 +30,14 @@ fn test_v3_symmetric_fixture_decrypts() -> Result<(), CryptoError> {
     let passphrase = SecretString::from(SYM_PASSWORD.to_string());
     let encrypted = Path::new(FIXTURE_DIR).join("v3/symmetric/hello.fcr");
 
-    let result = symmetric_auto(&encrypted, decrypt_dir.path(), &passphrase, None, |_| {})?;
+    let result = symmetric_auto(
+        &encrypted,
+        decrypt_dir.path(),
+        &passphrase,
+        None,
+        None,
+        |_| {},
+    )?;
     assert!(result.exists());
 
     let expected = fs::read_to_string(Path::new(FIXTURE_DIR).join("v3/symmetric/hello.txt"))?;
@@ -51,6 +58,7 @@ fn test_v3_hybrid_fixture_decrypts() -> Result<(), CryptoError> {
         decrypt_dir.path(),
         &private_key,
         &passphrase,
+        None,
         None,
         |_| {},
     )?;
@@ -74,7 +82,14 @@ fn test_v3_symmetric_binary_fixture_decrypts() -> Result<(), CryptoError> {
     let passphrase = SecretString::from(SYM_PASSWORD.to_string());
     let encrypted = Path::new(FIXTURE_DIR).join("v3/symmetric/data.fcr");
 
-    symmetric_auto(&encrypted, decrypt_dir.path(), &passphrase, None, |_| {})?;
+    symmetric_auto(
+        &encrypted,
+        decrypt_dir.path(),
+        &passphrase,
+        None,
+        None,
+        |_| {},
+    )?;
 
     let expected: Vec<u8> = (0..=255).cycle().take(1024).collect();
     let actual = fs::read(decrypt_dir.path().join("data.bin"))?;
@@ -88,7 +103,14 @@ fn test_v3_symmetric_directory_fixture_decrypts() -> Result<(), CryptoError> {
     let passphrase = SecretString::from(SYM_PASSWORD.to_string());
     let encrypted = Path::new(FIXTURE_DIR).join("v3/symmetric/testdir.fcr");
 
-    symmetric_auto(&encrypted, decrypt_dir.path(), &passphrase, None, |_| {})?;
+    symmetric_auto(
+        &encrypted,
+        decrypt_dir.path(),
+        &passphrase,
+        None,
+        None,
+        |_| {},
+    )?;
 
     let a = fs::read_to_string(decrypt_dir.path().join("testdir/a.txt"))?;
     let b = fs::read_to_string(decrypt_dir.path().join("testdir/sub/b.txt"))?;
@@ -109,6 +131,7 @@ fn test_v3_hybrid_binary_fixture_decrypts() -> Result<(), CryptoError> {
         decrypt_dir.path(),
         &private_key,
         &passphrase,
+        None,
         None,
         |_| {},
     )?;
@@ -131,6 +154,7 @@ fn test_v3_hybrid_directory_fixture_decrypts() -> Result<(), CryptoError> {
         decrypt_dir.path(),
         &private_key,
         &passphrase,
+        None,
         None,
         |_| {},
     )?;
@@ -170,14 +194,14 @@ fn generate_v3_fixtures() -> Result<(), CryptoError> {
     let plaintext = "Hello from FerroCrypt v3 symmetric fixture.\n";
     let hello_txt = sym_dir.join("hello.txt");
     fs::write(&hello_txt, plaintext)?;
-    symmetric_auto(&hello_txt, &sym_dir, &passphrase, None, |_| {})?;
+    symmetric_auto(&hello_txt, &sym_dir, &passphrase, None, None, |_| {})?;
     assert!(sym_dir.join("hello.fcr").exists());
 
     // Binary file
     let binary_data: Vec<u8> = (0..=255).cycle().take(1024).collect();
     let bin_file = sym_dir.join("data.bin");
     fs::write(&bin_file, &binary_data)?;
-    symmetric_auto(&bin_file, &sym_dir, &passphrase, None, |_| {})?;
+    symmetric_auto(&bin_file, &sym_dir, &passphrase, None, None, |_| {})?;
     assert!(sym_dir.join("data.fcr").exists());
 
     // Directory
@@ -186,7 +210,7 @@ fn generate_v3_fixtures() -> Result<(), CryptoError> {
     fs::create_dir_all(&sub_dir)?;
     fs::write(dir_fixture.join("a.txt"), "file a")?;
     fs::write(sub_dir.join("b.txt"), "file b")?;
-    symmetric_auto(&dir_fixture, &sym_dir, &passphrase, None, |_| {})?;
+    symmetric_auto(&dir_fixture, &sym_dir, &passphrase, None, None, |_| {})?;
     assert!(sym_dir.join("testdir.fcr").exists());
 
     // --- Hybrid fixtures ---
@@ -209,6 +233,7 @@ fn generate_v3_fixtures() -> Result<(), CryptoError> {
         hyb_dir.join("public.key"),
         &empty_pass,
         None,
+        None,
         |_| {},
     )?;
     assert!(hyb_dir.join("hello.fcr").exists());
@@ -221,6 +246,7 @@ fn generate_v3_fixtures() -> Result<(), CryptoError> {
         &hyb_dir,
         hyb_dir.join("public.key"),
         &empty_pass,
+        None,
         None,
         |_| {},
     )?;
@@ -237,6 +263,7 @@ fn generate_v3_fixtures() -> Result<(), CryptoError> {
         &hyb_dir,
         hyb_dir.join("public.key"),
         &empty_pass,
+        None,
         None,
         |_| {},
     )?;

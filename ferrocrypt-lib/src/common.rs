@@ -14,6 +14,37 @@ use crate::CryptoError;
 
 type HmacSha3_256 = Hmac<Sha3_256>;
 
+/// Caller-controlled limit on KDF memory cost accepted during decryption.
+///
+/// When processing untrusted files, this prevents a malicious header from
+/// forcing arbitrarily expensive key derivation. Pass `None` to decrypt
+/// functions to use the built-in default ceiling.
+pub struct KdfLimit {
+    /// Maximum accepted memory cost in KiB.
+    pub max_mem_cost_kib: u32,
+}
+
+impl KdfLimit {
+    pub fn new(max_mem_cost_kib: u32) -> Self {
+        Self { max_mem_cost_kib }
+    }
+
+    pub fn from_mib(mib: u32) -> Result<Self, CryptoError> {
+        let kib = mib.checked_mul(1024).ok_or_else(|| {
+            CryptoError::InvalidInput(format!("KDF memory limit overflow: {} MiB", mib))
+        })?;
+        Ok(Self::new(kib))
+    }
+}
+
+impl Default for KdfLimit {
+    fn default() -> Self {
+        Self {
+            max_mem_cost_kib: KdfParams::MAX_MEM_COST,
+        }
+    }
+}
+
 /// KDF parameters stored in file headers and key files so that decryption
 /// uses the same cost parameters that were used during encryption.
 pub struct KdfParams {
@@ -45,11 +76,14 @@ impl KdfParams {
 
     // Upper bounds for KDF parameters from untrusted headers.
     // These prevent malicious files from causing excessive CPU/memory usage.
-    const MAX_MEM_COST: u32 = 2 * 1024 * 1024; // 2 GiB
+    pub(crate) const MAX_MEM_COST: u32 = 2 * 1024 * 1024; // 2 GiB
     const MAX_TIME_COST: u32 = 12;
     const MAX_LANES: u32 = 8;
 
-    pub fn from_bytes(bytes: &[u8; KDF_PARAMS_SIZE]) -> Result<Self, CryptoError> {
+    pub fn from_bytes(
+        bytes: &[u8; KDF_PARAMS_SIZE],
+        limit: Option<&KdfLimit>,
+    ) -> Result<Self, CryptoError> {
         let params = Self {
             mem_cost: u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
             time_cost: u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
@@ -74,6 +108,17 @@ impl KdfParams {
                 params.time_cost
             )));
         }
+
+        let effective_max = limit
+            .map(|l| l.max_mem_cost_kib)
+            .unwrap_or(Self::MAX_MEM_COST);
+        if params.mem_cost > effective_max {
+            return Err(CryptoError::ExcessiveWork {
+                required_kib: params.mem_cost,
+                max_kib: effective_max,
+            });
+        }
+
         Ok(params)
     }
 
@@ -444,42 +489,42 @@ mod tests {
     fn test_kdf_params_valid_defaults() {
         let params = KdfParams::default();
         let bytes = params.to_bytes();
-        assert!(KdfParams::from_bytes(&bytes).is_ok());
+        assert!(KdfParams::from_bytes(&bytes, None).is_ok());
     }
 
     #[test]
     fn test_kdf_params_rejects_zero_mem_cost() {
         let mut bytes = KdfParams::default().to_bytes();
         bytes[0..4].copy_from_slice(&0u32.to_be_bytes());
-        assert!(KdfParams::from_bytes(&bytes).is_err());
+        assert!(KdfParams::from_bytes(&bytes, None).is_err());
     }
 
     #[test]
     fn test_kdf_params_rejects_zero_time_cost() {
         let mut bytes = KdfParams::default().to_bytes();
         bytes[4..8].copy_from_slice(&0u32.to_be_bytes());
-        assert!(KdfParams::from_bytes(&bytes).is_err());
+        assert!(KdfParams::from_bytes(&bytes, None).is_err());
     }
 
     #[test]
     fn test_kdf_params_rejects_zero_lanes() {
         let mut bytes = KdfParams::default().to_bytes();
         bytes[8..12].copy_from_slice(&0u32.to_be_bytes());
-        assert!(KdfParams::from_bytes(&bytes).is_err());
+        assert!(KdfParams::from_bytes(&bytes, None).is_err());
     }
 
     #[test]
     fn test_kdf_params_rejects_excessive_time_cost() {
         let mut bytes = KdfParams::default().to_bytes();
         bytes[4..8].copy_from_slice(&13u32.to_be_bytes());
-        assert!(KdfParams::from_bytes(&bytes).is_err());
+        assert!(KdfParams::from_bytes(&bytes, None).is_err());
     }
 
     #[test]
     fn test_kdf_params_rejects_excessive_lanes() {
         let mut bytes = KdfParams::default().to_bytes();
         bytes[8..12].copy_from_slice(&9u32.to_be_bytes());
-        assert!(KdfParams::from_bytes(&bytes).is_err());
+        assert!(KdfParams::from_bytes(&bytes, None).is_err());
     }
 
     #[test]
@@ -491,7 +536,7 @@ mod tests {
             lanes: 4,
         }
         .to_bytes();
-        assert!(KdfParams::from_bytes(&bytes).is_err());
+        assert!(KdfParams::from_bytes(&bytes, None).is_err());
     }
 
     #[test]
@@ -502,6 +547,44 @@ mod tests {
             lanes: 8,
         }
         .to_bytes();
-        assert!(KdfParams::from_bytes(&bytes).is_ok());
+        assert!(KdfParams::from_bytes(&bytes, None).is_ok());
+    }
+
+    #[test]
+    fn test_kdf_limit_rejects_excessive_mem_cost() {
+        let bytes = KdfParams {
+            mem_cost: 1_048_576, // 1 GiB
+            time_cost: 4,
+            lanes: 4,
+        }
+        .to_bytes();
+        let limit = KdfLimit::new(512 * 1024); // 512 MiB
+        match KdfParams::from_bytes(&bytes, Some(&limit)) {
+            Err(CryptoError::ExcessiveWork {
+                required_kib: 1_048_576,
+                max_kib: 524_288,
+            }) => {}
+            Err(other) => panic!("expected ExcessiveWork, got: {other}"),
+            Ok(_) => panic!("expected ExcessiveWork error, got Ok"),
+        }
+    }
+
+    #[test]
+    fn test_kdf_limit_accepts_within_bound() {
+        let bytes = KdfParams {
+            mem_cost: 1_048_576, // 1 GiB
+            time_cost: 4,
+            lanes: 4,
+        }
+        .to_bytes();
+        let limit = KdfLimit::new(2 * 1024 * 1024); // 2 GiB
+        assert!(KdfParams::from_bytes(&bytes, Some(&limit)).is_ok());
+    }
+
+    #[test]
+    fn test_kdf_limit_default_accepts_default_params() {
+        let bytes = KdfParams::default().to_bytes();
+        let limit = KdfLimit::default();
+        assert!(KdfParams::from_bytes(&bytes, Some(&limit)).is_ok());
     }
 }

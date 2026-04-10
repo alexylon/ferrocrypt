@@ -3,8 +3,8 @@ use std::path::Path;
 use clap::{Parser, Subcommand};
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
-    CryptoError, detect_encryption_mode, generate_key_pair, hybrid_auto, public_key_fingerprint,
-    symmetric_auto, validate_secret_key_file,
+    CryptoError, KdfLimit, detect_encryption_mode, generate_key_pair, hybrid_auto,
+    public_key_fingerprint, symmetric_auto, validate_secret_key_file,
 };
 
 use rustyline::DefaultEditor;
@@ -49,6 +49,9 @@ pub enum CliCommand {
             help = "Save encrypted output to this file path (encrypt only)"
         )]
         save_as: Option<String>,
+
+        #[arg(long, help = "Maximum KDF memory cost to accept (MiB, decrypt only)")]
+        max_kdf_memory: Option<u32>,
     },
 
     #[command(alias = "fp")]
@@ -74,6 +77,9 @@ pub enum CliCommand {
             help = "Save encrypted output to this file path (encrypt only)"
         )]
         save_as: Option<String>,
+
+        #[arg(long, help = "Maximum KDF memory cost to accept (MiB, decrypt only)")]
+        max_kdf_memory: Option<u32>,
     },
 }
 
@@ -122,6 +128,7 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
             key,
             passphrase,
             save_as,
+            max_kdf_memory,
         } => {
             let input_path = Path::new(&input_path);
             let output_path = Path::new(&output_path);
@@ -135,6 +142,7 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
                 validate_secret_key_file(key)?;
             }
             let passphrase = SecretString::from(passphrase);
+            let kdf_limit = max_kdf_memory.map(KdfLimit::from_mib).transpose()?;
             let start = std::time::Instant::now();
             let output = hybrid_auto(
                 input_path,
@@ -142,6 +150,7 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
                 key,
                 &passphrase,
                 save_as.as_deref().map(Path::new),
+                kdf_limit.as_ref(),
                 |msg| eprintln!("{msg}"),
             )?;
             let action = if is_encrypt {
@@ -162,17 +171,20 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
             output_path,
             passphrase,
             save_as,
+            max_kdf_memory,
         } => {
             let input_path = Path::new(&input_path);
             let output_path = Path::new(&output_path);
             let is_encrypt = detect_encryption_mode(input_path)?.is_none();
             let passphrase = SecretString::from(passphrase);
+            let kdf_limit = max_kdf_memory.map(KdfLimit::from_mib).transpose()?;
             let start = std::time::Instant::now();
             let output = symmetric_auto(
                 input_path,
                 output_path,
                 &passphrase,
                 save_as.as_deref().map(Path::new),
+                kdf_limit.as_ref(),
                 |msg| eprintln!("{msg}"),
             )?;
             let action = if is_encrypt {

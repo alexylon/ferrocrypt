@@ -34,5 +34,12 @@ fuzz_target!(|data: &[u8]| {
     drop(f);
 
     let passphrase = SecretString::from("fuzz_key".to_string());
-    let _ = hybrid_decrypt(&input_path, &output_dir, &priv_key, &passphrase, |_| {});
+    let _ = hybrid_decrypt(
+        &input_path,
+        &output_dir,
+        &priv_key,
+        &passphrase,
+        None,
+        |_| {},
+    );
 });

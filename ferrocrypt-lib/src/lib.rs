@@ -25,7 +25,7 @@
 //! println!("Encrypted to {}", encrypted.display());
 //!
 //! // Decrypt
-//! let decrypted = symmetric_decrypt(&encrypted, Path::new("./restored"), &passphrase, |_| {})?;
+//! let decrypted = symmetric_decrypt(&encrypted, Path::new("./restored"), &passphrase, None, |_| {})?;
 //! println!("Decrypted to {}", decrypted.display());
 //! # Ok(()) }
 //! # fn main() { run().unwrap(); }
@@ -51,7 +51,7 @@
 //! // 3) Decrypt with private key + passphrase
 //! let decrypted = hybrid_decrypt(
 //!     &encrypted, Path::new("./restored"),
-//!     &keys.private_key_path, &passphrase, |_| {},
+//!     &keys.private_key_path, &passphrase, None, |_| {},
 //! )?;
 //! println!("Decrypted to {}", decrypted.display());
 //! # Ok(()) }
@@ -89,6 +89,7 @@ use std::path::{Path, PathBuf};
 
 use secrecy::{ExposeSecret as _, SecretString};
 
+pub use crate::common::KdfLimit;
 use crate::common::{hex_encode, sha3_256_hash};
 pub use crate::error::CryptoError;
 pub use crate::format::ENCRYPTED_EXTENSION;
@@ -252,11 +253,15 @@ pub fn symmetric_encrypt(
 
 /// Decrypts a symmetric-encrypted `.fcr` file.
 ///
+/// Pass `kdf_limit` to cap the maximum KDF memory cost accepted from the
+/// file header. `None` uses the built-in default ceiling (2 GiB).
+///
 /// Returns the path to the extracted output.
 pub fn symmetric_decrypt(
     input_path: impl AsRef<Path>,
     output_dir: impl AsRef<Path>,
     passphrase: &SecretString,
+    kdf_limit: Option<&KdfLimit>,
     on_progress: impl Fn(&str),
 ) -> Result<PathBuf, CryptoError> {
     validate_passphrase(passphrase)?;
@@ -265,6 +270,7 @@ pub fn symmetric_decrypt(
         input_path.as_ref(),
         output_dir.as_ref(),
         passphrase,
+        kdf_limit,
         &on_progress,
     )
 }
@@ -293,12 +299,17 @@ pub fn hybrid_encrypt(
 /// Decrypts a hybrid-encrypted `.fcr` file.
 ///
 /// Requires the recipient's private key and its passphrase.
+/// Pass `kdf_limit` to cap the maximum KDF memory cost accepted when
+/// decrypting the private key file. `None` uses the built-in default
+/// ceiling (2 GiB).
+///
 /// Returns the path to the extracted output.
 pub fn hybrid_decrypt(
     input_path: impl AsRef<Path>,
     output_dir: impl AsRef<Path>,
     private_key: impl AsRef<Path>,
     passphrase: &SecretString,
+    kdf_limit: Option<&KdfLimit>,
     on_progress: impl Fn(&str),
 ) -> Result<PathBuf, CryptoError> {
     validate_input_path(input_path.as_ref())?;
@@ -307,6 +318,7 @@ pub fn hybrid_decrypt(
         output_dir.as_ref(),
         private_key.as_ref(),
         passphrase,
+        kdf_limit,
         &on_progress,
     )
 }
@@ -322,6 +334,7 @@ pub fn symmetric_auto(
     output_dir: impl AsRef<Path>,
     passphrase: &SecretString,
     save_as: Option<&Path>,
+    kdf_limit: Option<&KdfLimit>,
     on_progress: impl Fn(&str),
 ) -> Result<PathBuf, CryptoError> {
     validate_passphrase(passphrase)?;
@@ -329,7 +342,7 @@ pub fn symmetric_auto(
     let output = output_dir.as_ref();
     validate_input_path(input)?;
     if detect_encryption_mode(input)?.is_some() {
-        symmetric::decrypt_file(input, output, passphrase, &on_progress)
+        symmetric::decrypt_file(input, output, passphrase, kdf_limit, &on_progress)
     } else {
         symmetric::encrypt_file(input, output, passphrase, save_as, &on_progress)
     }
@@ -345,6 +358,7 @@ pub fn hybrid_auto(
     key_file: impl AsRef<Path>,
     passphrase: &SecretString,
     save_as: Option<&Path>,
+    kdf_limit: Option<&KdfLimit>,
     on_progress: impl Fn(&str),
 ) -> Result<PathBuf, CryptoError> {
     let input = input_path.as_ref();
@@ -352,7 +366,7 @@ pub fn hybrid_auto(
     let key = key_file.as_ref();
     validate_input_path(input)?;
     if detect_encryption_mode(input)?.is_some() {
-        hybrid::decrypt_file(input, output, key, passphrase, &on_progress)
+        hybrid::decrypt_file(input, output, key, passphrase, kdf_limit, &on_progress)
     } else {
         hybrid::encrypt_file(input, output, key, save_as, &on_progress)
     }

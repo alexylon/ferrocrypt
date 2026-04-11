@@ -6,6 +6,10 @@ All notable changes to FerroCrypt are documented in this file.
 
 ### Added
 - **Library API:** `encode_recipient` / `decode_recipient` / `encode_recipient_from_bytes` — Bech32 public recipient strings (`fcr1...`) for human-readable key exchange. Checksummed, copy-paste friendly, validated on decode (HRP, length, checksum).
+- **CLI:** `recipient` subcommand (alias `rc`) to print a public key as a Bech32 `fcr1...` string
+- **CLI:** `hybrid --recipient / -r` flag to encrypt directly with a Bech32 recipient string instead of a key file
+- **CLI:** `keygen` now prints the recipient string alongside the fingerprint
+- **Library API:** `hybrid_encrypt_from_recipient` — encrypt using raw 32-byte public key bytes (no key file needed)
 - **Library API:** `KdfLimit` struct for caller-controlled KDF memory cost ceiling on decrypt. Decrypt functions (`symmetric_decrypt`, `hybrid_decrypt`, `symmetric_auto`, `hybrid_auto`) accept an optional `KdfLimit` parameter. When a file's KDF memory cost exceeds the limit, decryption fails with `CryptoError::ExcessiveWork` instead of a generic error.
 - **CLI:** `--max-kdf-memory <MiB>` flag on `symmetric` and `hybrid` subcommands to cap accepted KDF memory cost during decryption
 - **CLI:** `fingerprint` subcommand (alias `fp`) to print a public key's SHA3-256 fingerprint for out-of-band verification

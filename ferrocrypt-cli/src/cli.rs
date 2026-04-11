@@ -1,10 +1,11 @@
 use std::path::Path;
 
 use clap::{Parser, Subcommand};
-use ferrocrypt::secrecy::SecretString;
+use ferrocrypt::secrecy::{ExposeSecret, SecretString};
 use ferrocrypt::{
-    CryptoError, KdfLimit, detect_encryption_mode, generate_key_pair, hybrid_auto,
-    public_key_fingerprint, symmetric_auto, validate_secret_key_file,
+    CryptoError, KdfLimit, decode_recipient, detect_encryption_mode, encode_recipient,
+    generate_key_pair, hybrid_auto, hybrid_encrypt_from_recipient, public_key_fingerprint,
+    symmetric_auto, validate_secret_key_file,
 };
 
 use rustyline::DefaultEditor;
@@ -37,8 +38,20 @@ pub enum CliCommand {
         #[arg(short, long)]
         output_path: String,
 
-        #[arg(short, long)]
-        key: String,
+        #[arg(
+            short,
+            long,
+            help = "Key file path (public for encrypt, private for decrypt)"
+        )]
+        key: Option<String>,
+
+        #[arg(
+            short,
+            long,
+            conflicts_with = "key",
+            help = "Bech32 recipient string for encryption (fcr1...)"
+        )]
+        recipient: Option<String>,
 
         #[arg(short, long, default_value = "")]
         passphrase: String,
@@ -57,7 +70,13 @@ pub enum CliCommand {
     #[command(alias = "fp")]
     Fingerprint {
         #[arg(help = "Path to a public key file")]
-        key_file: String,
+        public_key_file: String,
+    },
+
+    #[command(alias = "rc")]
+    Recipient {
+        #[arg(help = "Path to a public key file")]
+        public_key_file: String,
     },
 
     #[command(alias = "sym")]
@@ -113,46 +132,110 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
             let output_path = Path::new(&output_path);
             let passphrase = SecretString::from(passphrase);
             let info = generate_key_pair(&passphrase, output_path, |msg| eprintln!("{msg}"))?;
+            let recipient = encode_recipient(&info.public_key_path)?;
             println!("\nGenerated key pair in {}\n", output_path.display());
             println!("Public key fingerprint: {}", info.fingerprint);
+            println!("Public key recipient:   {}", recipient);
         }
 
-        CliCommand::Fingerprint { key_file } => {
-            let fp = public_key_fingerprint(Path::new(&key_file))?;
+        CliCommand::Fingerprint { public_key_file } => {
+            let fp = public_key_fingerprint(Path::new(&public_key_file))?;
             println!("{}", fp);
+        }
+
+        CliCommand::Recipient { public_key_file } => {
+            let recipient = encode_recipient(Path::new(&public_key_file))?;
+            println!("{}", recipient);
         }
 
         CliCommand::Hybrid {
             input_path,
             output_path,
             key,
+            recipient,
             passphrase,
             save_as,
             max_kdf_memory,
         } => {
             let input_path = Path::new(&input_path);
             let output_path = Path::new(&output_path);
-            let key = Path::new(&key);
             let is_encrypt = detect_encryption_mode(input_path)?.is_none();
-            if is_encrypt {
-                if let Ok(fp) = public_key_fingerprint(key) {
-                    println!("Encrypting to: {}", fp);
-                }
-            } else {
-                validate_secret_key_file(key)?;
-            }
             let passphrase = SecretString::from(passphrase);
             let kdf_limit = max_kdf_memory.map(KdfLimit::from_mib).transpose()?;
             let start = std::time::Instant::now();
-            let output = hybrid_auto(
-                input_path,
-                output_path,
-                key,
-                &passphrase,
-                save_as.as_deref().map(Path::new),
-                kdf_limit.as_ref(),
-                |msg| eprintln!("{msg}"),
-            )?;
+
+            if is_encrypt {
+                if !passphrase.expose_secret().is_empty() {
+                    return Err(CryptoError::InvalidInput(
+                        "--passphrase is for decryption only".to_string(),
+                    ));
+                }
+                if kdf_limit.is_some() {
+                    return Err(CryptoError::InvalidInput(
+                        "--max-kdf-memory is for decryption only".to_string(),
+                    ));
+                }
+            } else {
+                if recipient.is_some() {
+                    return Err(CryptoError::InvalidInput(
+                        "--recipient is for encryption only".to_string(),
+                    ));
+                }
+                if save_as.is_some() {
+                    return Err(CryptoError::InvalidInput(
+                        "--save-as is for encryption only".to_string(),
+                    ));
+                }
+            }
+
+            let output = if is_encrypt {
+                if let Some(ref r) = recipient {
+                    let recipient_bytes = decode_recipient(r)?;
+                    println!("Encrypting to: {}", r);
+                    hybrid_encrypt_from_recipient(
+                        input_path,
+                        output_path,
+                        &recipient_bytes,
+                        save_as.as_deref().map(Path::new),
+                        |msg| eprintln!("{msg}"),
+                    )?
+                } else {
+                    let key = key.as_deref().ok_or_else(|| {
+                        CryptoError::InvalidInput(
+                            "Encrypt requires --key or --recipient".to_string(),
+                        )
+                    })?;
+                    let key_path = Path::new(key);
+                    if let Ok(fp) = public_key_fingerprint(key_path) {
+                        println!("Encrypting to: {}", fp);
+                    }
+                    hybrid_auto(
+                        input_path,
+                        output_path,
+                        key_path,
+                        &passphrase,
+                        save_as.as_deref().map(Path::new),
+                        kdf_limit.as_ref(),
+                        |msg| eprintln!("{msg}"),
+                    )?
+                }
+            } else {
+                let key = key.as_deref().ok_or_else(|| {
+                    CryptoError::InvalidInput("Decrypt requires --key".to_string())
+                })?;
+                let key_path = Path::new(key);
+                validate_secret_key_file(key_path)?;
+                hybrid_auto(
+                    input_path,
+                    output_path,
+                    key_path,
+                    &passphrase,
+                    save_as.as_deref().map(Path::new),
+                    kdf_limit.as_ref(),
+                    |msg| eprintln!("{msg}"),
+                )?
+            };
+
             let action = if is_encrypt {
                 "Encrypted to"
             } else {
@@ -179,6 +262,19 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
             let passphrase = SecretString::from(passphrase);
             let kdf_limit = max_kdf_memory.map(KdfLimit::from_mib).transpose()?;
             let start = std::time::Instant::now();
+
+            if is_encrypt {
+                if kdf_limit.is_some() {
+                    return Err(CryptoError::InvalidInput(
+                        "--max-kdf-memory is for decryption only".to_string(),
+                    ));
+                }
+            } else if save_as.is_some() {
+                return Err(CryptoError::InvalidInput(
+                    "--save-as is for encryption only".to_string(),
+                ));
+            }
+
             let output = symmetric_auto(
                 input_path,
                 output_path,
@@ -206,7 +302,9 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
 
 fn interactive_mode() -> Result<(), CryptoError> {
     println!("\nFerroCrypt interactive mode\n");
-    println!("Commands: symmetric (sym), hybrid (hyb), keygen (gen), fingerprint (fp), quit\n");
+    println!(
+        "Commands: symmetric (sym), hybrid (hyb), keygen (gen), fingerprint (fp), recipient (rc), quit\n"
+    );
 
     let mut rl = match DefaultEditor::new() {
         Ok(editor) => editor,
@@ -250,7 +348,7 @@ fn interactive_mode() -> Result<(), CryptoError> {
                             }
                         } else {
                             eprintln!(
-                                "No command given. Try: symmetric (sym), hybrid (hyb), keygen (gen)"
+                                "No command given. Try: symmetric (sym), hybrid (hyb), keygen (gen), fingerprint (fp), recipient (rc)"
                             );
                         }
                     }

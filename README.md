@@ -153,6 +153,7 @@ It may be increased in future releases if required by dependencies or language i
 | `hybrid` | `hyb` | Encrypt/decrypt with public/private keys |
 | `keygen` | `gen` | Generate a key pair |
 | `fingerprint` | `fp` | Print a public key's SHA3-256 fingerprint |
+| `recipient` | `rc` | Print a public key as a Bech32 `fcr1…` string |
 
 Run without arguments to start an interactive REPL. Aliases are available in interactive mode.
 
@@ -174,13 +175,19 @@ ferrocrypt symmetric -i secret.txt -o ./encrypted -p "my password" -s ./encrypte
 ### Hybrid
 
 ```bash
-# Generate keys (prints fingerprint)
+# Generate keys (prints fingerprint and recipient string)
 ferrocrypt keygen -o ./keys -p "key password"
+
+# Print recipient string (for sharing)
+ferrocrypt recipient ./keys/public.key
 
 # Verify a public key's fingerprint
 ferrocrypt fingerprint ./keys/public.key
 
-# Encrypt with public key (prints recipient fingerprint)
+# Encrypt with recipient string
+ferrocrypt hybrid -i secret.txt -o ./encrypted -r fcr1...
+
+# Encrypt with public key file
 ferrocrypt hybrid -i secret.txt -o ./encrypted -k ./keys/public.key
 
 # Decrypt with private key
@@ -192,7 +199,7 @@ ferrocrypt hybrid -i ./encrypted/secret.fcr -o ./decrypted -k ./keys/private.key
 ```text
 $ ferrocrypt
 FerroCrypt interactive mode
-Commands: symmetric (sym), hybrid (hyb), keygen (gen), fingerprint (fp), quit
+Commands: symmetric (sym), hybrid (hyb), keygen (gen), fingerprint (fp), recipient (rc), quit
 
 ferrocrypt> sym -i secret.txt -o out -p "my password"
 ferrocrypt> quit
@@ -216,7 +223,8 @@ ferrocrypt> quit
 |---|---|
 | `-i, --input-path` | Input file or directory |
 | `-o, --output-path` | Output directory |
-| `-k, --key` | Public key (encrypt) or private key (decrypt) |
+| `-k, --key` | Key file path: public key for encrypt, private key for decrypt |
+| `-r, --recipient` | Bech32 recipient string for encryption (`fcr1...`) |
 | `-p, --passphrase` | Private key passphrase (decrypt only) |
 | `-s, --save-as` | Custom output file path (encrypt only, optional) |
 | `--max-kdf-memory` | Maximum KDF memory cost to accept in MiB (decrypt only, optional) |
@@ -229,6 +237,12 @@ ferrocrypt> quit
 | `-p, --passphrase` | Passphrase to encrypt the private key |
 
 #### `fingerprint`
+
+| Argument | Description |
+|---|---|
+| `<key_file>` | Path to a public key file |
+
+#### `recipient`
 
 | Argument | Description |
 |---|---|

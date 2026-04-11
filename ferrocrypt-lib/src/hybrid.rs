@@ -72,6 +72,40 @@ pub fn encrypt_file(
     output_file: Option<&Path>,
     on_progress: &dyn Fn(&str),
 ) -> Result<PathBuf, CryptoError> {
+    let recipient_public = read_public_key(public_key_path)?;
+    encrypt_file_inner(
+        input_path,
+        output_dir,
+        &recipient_public,
+        output_file,
+        on_progress,
+    )
+}
+
+pub fn encrypt_file_from_bytes(
+    input_path: &Path,
+    output_dir: &Path,
+    public_key_bytes: &[u8; 32],
+    output_file: Option<&Path>,
+    on_progress: &dyn Fn(&str),
+) -> Result<PathBuf, CryptoError> {
+    let recipient_public = PublicKey::from(*public_key_bytes);
+    encrypt_file_inner(
+        input_path,
+        output_dir,
+        &recipient_public,
+        output_file,
+        on_progress,
+    )
+}
+
+fn encrypt_file_inner(
+    input_path: &Path,
+    output_dir: &Path,
+    recipient_public: &PublicKey,
+    output_file: Option<&Path>,
+    on_progress: &dyn Fn(&str),
+) -> Result<PathBuf, CryptoError> {
     let base_name = &encryption_base_name(input_path)?;
     on_progress("Encrypting\u{2026}");
 
@@ -110,8 +144,7 @@ pub fn encrypt_file(
         combined_key[..ENCRYPTION_KEY_SIZE].copy_from_slice(&encryption_key);
         combined_key[ENCRYPTION_KEY_SIZE..].copy_from_slice(&hmac_key);
 
-        let recipient_public = read_public_key(public_key_path)?;
-        let envelope = seal_envelope(&combined_key, &recipient_public)?;
+        let envelope = seal_envelope(&combined_key, recipient_public)?;
 
         let encoded_envelope = encode(&envelope);
         let encoded_nonce = encode(&nonce);

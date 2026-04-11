@@ -395,6 +395,27 @@ pub fn hybrid_encrypt(
     )
 }
 
+/// Encrypts a file or directory with hybrid encryption using raw public key bytes.
+///
+/// Accepts a 32-byte X25519 public key directly (e.g. from [`decode_recipient`]).
+/// Returns the path to the created `.fcr` file.
+pub fn hybrid_encrypt_from_recipient(
+    input_path: impl AsRef<Path>,
+    output_dir: impl AsRef<Path>,
+    recipient_bytes: &[u8; 32],
+    save_as: Option<&Path>,
+    on_progress: impl Fn(&str),
+) -> Result<PathBuf, CryptoError> {
+    validate_input_path(input_path.as_ref())?;
+    hybrid::encrypt_file_from_bytes(
+        input_path.as_ref(),
+        output_dir.as_ref(),
+        recipient_bytes,
+        save_as,
+        &on_progress,
+    )
+}
+
 /// Decrypts a hybrid-encrypted `.fcr` file.
 ///
 /// Requires the recipient's private key and its passphrase.

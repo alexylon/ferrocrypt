@@ -351,6 +351,19 @@ hyb_saveas_roundtrip() {
 }
 run_test "hyb: custom output name" hyb_saveas_roundtrip
 
+# Recipient-string encrypt → decrypt roundtrip
+hyb_recipient_roundtrip() {
+    local rcpt_enc="$WORKDIR/rcpt_enc"
+    local rcpt_dec="$WORKDIR/rcpt_dec"
+    mkdir -p "$rcpt_enc" "$rcpt_dec"
+    local RCPT
+    RCPT=$($FC recipient "$PUB")
+    $FC hybrid -i "$WORKDIR/small.txt" -o "$rcpt_enc" -r "$RCPT" && \
+    $FC hybrid -i "$rcpt_enc"/*.fcr -o "$rcpt_dec" -k "$SECRET_KEY" -p "$PASS" && \
+    assert_identical "$WORKDIR/small.txt" "$rcpt_dec/small.txt"
+}
+run_test "hyb: recipient string roundtrip" hyb_recipient_roundtrip
+
 echo ""
 
 # ──────────────────────────────────────────────

@@ -642,6 +642,532 @@ fn test_cli_keygen_prints_fingerprint() {
     );
 }
 
+#[test]
+fn test_cli_recipient() {
+    let test_dir = setup_test_dir("cli_recipient");
+    let keys_dir = test_dir.join("keys");
+    fs::create_dir_all(&keys_dir).unwrap();
+
+    let binary = get_binary_path();
+
+    // Generate keys first
+    let keygen = Command::new(&binary)
+        .arg("keygen")
+        .arg("-o")
+        .arg(&keys_dir)
+        .arg("-p")
+        .arg("rcpt_pass")
+        .output()
+        .expect("Failed to execute keygen");
+    assert!(keygen.status.success());
+
+    // Get recipient string
+    let output = Command::new(&binary)
+        .arg("recipient")
+        .arg(keys_dir.join("public.key"))
+        .output()
+        .expect("Failed to execute recipient");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let recipient = stdout.trim();
+    assert!(
+        recipient.starts_with("fcr1"),
+        "recipient should start with fcr1, got: {}",
+        recipient
+    );
+}
+
+#[test]
+fn test_cli_keygen_prints_recipient() {
+    let test_dir = setup_test_dir("cli_keygen_rcpt");
+    let keys_dir = test_dir.join("keys");
+    fs::create_dir_all(&keys_dir).unwrap();
+
+    let binary = get_binary_path();
+
+    let output = Command::new(&binary)
+        .arg("keygen")
+        .arg("-o")
+        .arg(&keys_dir)
+        .arg("-p")
+        .arg("keygen_rcpt_pass")
+        .output()
+        .expect("Failed to execute keygen");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("fcr1"),
+        "keygen output should include recipient string, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_cli_hybrid_encrypt_with_recipient_string() {
+    let test_dir = setup_test_dir("cli_hybrid_recipient");
+    let keys_dir = test_dir.join("keys");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&keys_dir).unwrap();
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    fs::create_dir_all(&decrypt_dir).unwrap();
+
+    let binary = get_binary_path();
+
+    // Generate keys
+    let keygen = Command::new(&binary)
+        .arg("keygen")
+        .arg("-o")
+        .arg(&keys_dir)
+        .arg("-p")
+        .arg("rcpt_enc_pass")
+        .output()
+        .expect("Failed to execute keygen");
+    assert!(keygen.status.success());
+
+    // Get recipient string
+    let rcpt_output = Command::new(&binary)
+        .arg("recipient")
+        .arg(keys_dir.join("public.key"))
+        .output()
+        .expect("Failed to get recipient");
+    assert!(rcpt_output.status.success());
+    let recipient = String::from_utf8_lossy(&rcpt_output.stdout)
+        .trim()
+        .to_string();
+
+    // Encrypt with --recipient
+    let input_file = test_dir.join("secret.txt");
+    create_test_file(&input_file, "recipient encryption test");
+
+    let encrypt = Command::new(&binary)
+        .arg("hybrid")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .arg("-r")
+        .arg(&recipient)
+        .output()
+        .expect("Failed to encrypt with recipient");
+    assert!(
+        encrypt.status.success(),
+        "Encrypt with recipient failed: {}",
+        String::from_utf8_lossy(&encrypt.stderr)
+    );
+    assert!(encrypt_dir.join("secret.fcr").exists());
+
+    // Decrypt with private key
+    let decrypt = Command::new(&binary)
+        .arg("hybrid")
+        .arg("-i")
+        .arg(encrypt_dir.join("secret.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir)
+        .arg("-k")
+        .arg(keys_dir.join("private.key"))
+        .arg("-p")
+        .arg("rcpt_enc_pass")
+        .output()
+        .expect("Failed to decrypt");
+    assert!(
+        decrypt.status.success(),
+        "Decrypt failed: {}",
+        String::from_utf8_lossy(&decrypt.stderr)
+    );
+
+    let content = fs::read_to_string(decrypt_dir.join("secret.txt")).unwrap();
+    assert_eq!(content, "recipient encryption test");
+}
+
+#[test]
+fn test_cli_recipient_alias_rc() {
+    let test_dir = setup_test_dir("cli_recipient_alias_rc");
+    let keys_dir = test_dir.join("keys");
+    fs::create_dir_all(&keys_dir).unwrap();
+
+    let binary = get_binary_path();
+
+    let keygen = Command::new(&binary)
+        .arg("keygen")
+        .arg("-o")
+        .arg(&keys_dir)
+        .arg("-p")
+        .arg("alias_rc_pass")
+        .output()
+        .expect("Failed to execute keygen");
+    assert!(keygen.status.success());
+
+    let output = Command::new(&binary)
+        .arg("rc")
+        .arg(keys_dir.join("public.key"))
+        .output()
+        .expect("Failed to execute rc alias");
+
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .starts_with("fcr1")
+    );
+}
+
+#[test]
+fn test_cli_hybrid_rejects_invalid_recipient_string() {
+    let test_dir = setup_test_dir("cli_hybrid_invalid_recipient");
+    let input_file = test_dir.join("secret.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    create_test_file(&input_file, "invalid recipient test");
+
+    let binary = get_binary_path();
+
+    let output = Command::new(&binary)
+        .arg("hybrid")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .arg("-r")
+        .arg("fcr1not-valid-bech32!!!")
+        .output()
+        .expect("Failed to execute hybrid with invalid recipient");
+
+    assert!(!output.status.success());
+}
+
+#[test]
+fn test_cli_hybrid_rejects_key_and_recipient_together() {
+    let test_dir = setup_test_dir("cli_hybrid_key_and_recipient_conflict");
+    let keys_dir = test_dir.join("keys");
+    let input_file = test_dir.join("secret.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    fs::create_dir_all(&keys_dir).unwrap();
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    create_test_file(&input_file, "conflict test");
+
+    let binary = get_binary_path();
+
+    let keygen = Command::new(&binary)
+        .arg("keygen")
+        .arg("-o")
+        .arg(&keys_dir)
+        .arg("-p")
+        .arg("conflict_pass")
+        .output()
+        .expect("Failed to execute keygen");
+    assert!(keygen.status.success());
+
+    let rcpt_output = Command::new(&binary)
+        .arg("recipient")
+        .arg(keys_dir.join("public.key"))
+        .output()
+        .expect("Failed to get recipient");
+    assert!(rcpt_output.status.success());
+    let recipient = String::from_utf8_lossy(&rcpt_output.stdout)
+        .trim()
+        .to_string();
+
+    let output = Command::new(&binary)
+        .arg("hybrid")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .arg("-k")
+        .arg(keys_dir.join("public.key"))
+        .arg("-r")
+        .arg(&recipient)
+        .output()
+        .expect("Failed to execute conflicting hybrid command");
+
+    assert!(!output.status.success());
+}
+
+#[test]
+fn test_cli_hybrid_decrypt_rejects_recipient_flag() {
+    let test_dir = setup_test_dir("cli_hybrid_decrypt_recipient_rejected");
+    let keys_dir = test_dir.join("keys");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    let input_file = test_dir.join("secret.txt");
+    fs::create_dir_all(&keys_dir).unwrap();
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    fs::create_dir_all(&decrypt_dir).unwrap();
+    create_test_file(&input_file, "recipient decrypt reject test");
+
+    let binary = get_binary_path();
+
+    let keygen = Command::new(&binary)
+        .arg("keygen")
+        .arg("-o")
+        .arg(&keys_dir)
+        .arg("-p")
+        .arg("decrypt_reject_pass")
+        .output()
+        .expect("Failed to execute keygen");
+    assert!(keygen.status.success());
+
+    let encrypt = Command::new(&binary)
+        .arg("hybrid")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .arg("-k")
+        .arg(keys_dir.join("public.key"))
+        .output()
+        .expect("Failed to execute encrypt");
+    assert!(encrypt.status.success());
+
+    let rcpt_output = Command::new(&binary)
+        .arg("recipient")
+        .arg(keys_dir.join("public.key"))
+        .output()
+        .expect("Failed to get recipient");
+    assert!(rcpt_output.status.success());
+    let recipient = String::from_utf8_lossy(&rcpt_output.stdout)
+        .trim()
+        .to_string();
+
+    let decrypt = Command::new(&binary)
+        .arg("hybrid")
+        .arg("-i")
+        .arg(encrypt_dir.join("secret.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir)
+        .arg("-k")
+        .arg(keys_dir.join("private.key"))
+        .arg("-r")
+        .arg(&recipient)
+        .arg("-p")
+        .arg("decrypt_reject_pass")
+        .output()
+        .expect("Failed to execute decrypt with recipient flag");
+
+    assert!(!decrypt.status.success());
+}
+
+#[test]
+fn test_cli_hybrid_encrypt_requires_key_or_recipient() {
+    let test_dir = setup_test_dir("cli_hybrid_requires_key_or_recipient");
+    let input_file = test_dir.join("secret.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    create_test_file(&input_file, "missing key test");
+
+    let binary = get_binary_path();
+
+    let output = Command::new(&binary)
+        .arg("hybrid")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .output()
+        .expect("Failed to execute hybrid without key or recipient");
+
+    assert!(!output.status.success());
+}
+
+#[test]
+fn test_cli_symmetric_decrypt_rejects_save_as() {
+    let test_dir = setup_test_dir("cli_symmetric_decrypt_rejects_save_as");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    fs::create_dir_all(&decrypt_dir).unwrap();
+    create_test_file(&input_file, "save-as reject test");
+
+    let binary = get_binary_path();
+
+    let encrypt = Command::new(&binary)
+        .arg("symmetric")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .arg("-p")
+        .arg("save_as_pass")
+        .output()
+        .expect("Failed to encrypt");
+    assert!(encrypt.status.success());
+
+    let decrypt = Command::new(&binary)
+        .arg("symmetric")
+        .arg("-i")
+        .arg(encrypt_dir.join("data.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir)
+        .arg("-p")
+        .arg("save_as_pass")
+        .arg("-s")
+        .arg(decrypt_dir.join("ignored.txt"))
+        .output()
+        .expect("Failed to execute decrypt with save-as");
+
+    assert!(!decrypt.status.success());
+}
+
+#[test]
+fn test_cli_hybrid_decrypt_rejects_save_as() {
+    let test_dir = setup_test_dir("cli_hybrid_decrypt_rejects_save_as");
+    let keys_dir = test_dir.join("keys");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&keys_dir).unwrap();
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    fs::create_dir_all(&decrypt_dir).unwrap();
+    create_test_file(&input_file, "hybrid save-as reject test");
+
+    let binary = get_binary_path();
+
+    let keygen = Command::new(&binary)
+        .arg("keygen")
+        .arg("-o")
+        .arg(&keys_dir)
+        .arg("-p")
+        .arg("hybrid_save_as_pass")
+        .output()
+        .expect("Failed to execute keygen");
+    assert!(keygen.status.success());
+
+    let encrypt = Command::new(&binary)
+        .arg("hybrid")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .arg("-k")
+        .arg(keys_dir.join("public.key"))
+        .output()
+        .expect("Failed to execute encrypt");
+    assert!(encrypt.status.success());
+
+    let decrypt = Command::new(&binary)
+        .arg("hybrid")
+        .arg("-i")
+        .arg(encrypt_dir.join("data.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir)
+        .arg("-k")
+        .arg(keys_dir.join("private.key"))
+        .arg("-p")
+        .arg("hybrid_save_as_pass")
+        .arg("-s")
+        .arg(decrypt_dir.join("ignored.txt"))
+        .output()
+        .expect("Failed to execute decrypt with save-as");
+
+    assert!(!decrypt.status.success());
+}
+
+#[test]
+fn test_cli_hybrid_encrypt_rejects_passphrase_flag() {
+    let test_dir = setup_test_dir("cli_hybrid_encrypt_rejects_passphrase_flag");
+    let keys_dir = test_dir.join("keys");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    fs::create_dir_all(&keys_dir).unwrap();
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    create_test_file(&input_file, "hybrid passphrase reject test");
+
+    let binary = get_binary_path();
+
+    let keygen = Command::new(&binary)
+        .arg("keygen")
+        .arg("-o")
+        .arg(&keys_dir)
+        .arg("-p")
+        .arg("hybrid_encrypt_reject_pass")
+        .output()
+        .expect("Failed to execute keygen");
+    assert!(keygen.status.success());
+
+    let output = Command::new(&binary)
+        .arg("hybrid")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .arg("-k")
+        .arg(keys_dir.join("public.key"))
+        .arg("-p")
+        .arg("should_fail")
+        .output()
+        .expect("Failed to execute hybrid encrypt with passphrase");
+
+    assert!(!output.status.success());
+}
+
+#[test]
+fn test_cli_hybrid_encrypt_rejects_max_kdf_memory() {
+    let test_dir = setup_test_dir("cli_hybrid_encrypt_rejects_max_kdf_memory");
+    let keys_dir = test_dir.join("keys");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    fs::create_dir_all(&keys_dir).unwrap();
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    create_test_file(&input_file, "hybrid kdf reject test");
+
+    let binary = get_binary_path();
+
+    let keygen = Command::new(&binary)
+        .arg("keygen")
+        .arg("-o")
+        .arg(&keys_dir)
+        .arg("-p")
+        .arg("hybrid_kdf_reject_pass")
+        .output()
+        .expect("Failed to execute keygen");
+    assert!(keygen.status.success());
+
+    let output = Command::new(&binary)
+        .arg("hybrid")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .arg("-k")
+        .arg(keys_dir.join("public.key"))
+        .arg("--max-kdf-memory")
+        .arg("64")
+        .output()
+        .expect("Failed to execute hybrid encrypt with max-kdf-memory");
+
+    assert!(!output.status.success());
+}
+
+#[test]
+fn test_cli_symmetric_encrypt_rejects_max_kdf_memory() {
+    let test_dir = setup_test_dir("cli_symmetric_encrypt_rejects_max_kdf_memory");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    create_test_file(&input_file, "symmetric kdf reject test");
+
+    let binary = get_binary_path();
+
+    let output = Command::new(&binary)
+        .arg("symmetric")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .arg("-p")
+        .arg("sym_reject_pass")
+        .arg("--max-kdf-memory")
+        .arg("64")
+        .output()
+        .expect("Failed to execute symmetric encrypt with max-kdf-memory");
+
+    assert!(!output.status.success());
+}
+
 #[ctor::dtor]
 fn cleanup() {
     cleanup_test_workspace();

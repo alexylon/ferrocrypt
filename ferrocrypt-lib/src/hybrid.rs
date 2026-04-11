@@ -4,16 +4,18 @@ use std::path::{Path, PathBuf};
 
 use chacha20poly1305::{
     XChaCha20Poly1305,
-    aead::{Aead, KeyInit, OsRng, rand_core::RngCore, stream},
+    aead::{Aead, AeadCore, KeyInit, OsRng, rand_core::RngCore, stream},
 };
-use crypto_box::{ChaChaBox, PublicKey, SecretKey, aead::AeadCore};
+use hkdf::Hkdf;
 use secrecy::{ExposeSecret, SecretString};
+use sha2::Sha256;
+use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::common::{
     ARGON2_SALT_SIZE, DecryptReader, ENCRYPTION_KEY_SIZE, EncryptWriter, FILE_TOO_SHORT,
     HMAC_KEY_SIZE, HMAC_TAG_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams, STREAM_NONCE_SIZE,
-    TAG_SIZE, encryption_base_name, hmac_sha3_256, hmac_sha3_256_verify,
+    TAG_SIZE, ct_eq_32, encryption_base_name, hmac_sha3_256, hmac_sha3_256_verify,
 };
 use crate::format::{self, HEADER_PREFIX_ENCODED_SIZE, PUBLIC_KEY_DATA_SIZE, SECRET_KEY_DATA_SIZE};
 use crate::replication::{decode_exact, encode, encoded_size};
@@ -33,58 +35,34 @@ const SECRET_KEY_SIZE: usize = 32;
 const PUBLIC_KEY_FILENAME: &str = "public.key";
 const PRIVATE_KEY_FILENAME: &str = "private.key";
 
-// Compile-time guard: if crypto_box changes SecretKey's layout (fields added,
-// removed, or reordered), this assertion fails and forces a review of the
-// unsafe zeroization below. Verified against crypto_box 0.9.1 where SecretKey
-// is [u8; 32] (bytes) + Scalar (32 bytes) = 64 bytes.
-const _: () = assert!(size_of::<SecretKey>() == 64);
+const HYBRID_ENVELOPE_INFO: &[u8] = b"ferrocrypt hybrid envelope key v4";
 
-/// Zeroizes the entire `SecretKey` struct including the raw `bytes` field.
-/// Upstream `Drop` (crypto_box 0.9.1) only zeroizes the `scalar` field,
-/// leaving the 32-byte key material in `bytes` intact. This function
-/// compensates by wiping all bytes of the struct via volatile writes.
-fn zeroize_secret_key(key: &mut SecretKey) {
-    // SAFETY: SecretKey is a plain data struct ([u8; 32] + Scalar) with no
-    // pointer or reference fields. The size assertion above guarantees the
-    // layout matches our expectation. Writing zeros via the zeroize crate's
-    // volatile writes is safe and prevents the compiler from eliding them.
-    unsafe {
-        let ptr = key as *mut SecretKey as *mut u8;
-        let len = size_of::<SecretKey>();
-        std::slice::from_raw_parts_mut(ptr, len).zeroize();
-    }
-}
-
-/// Internal RAII wrapper that guarantees full key zeroization on drop.
+/// Derives a 32-byte wrapping key for the hybrid envelope AEAD.
 ///
-/// This keeps the `unsafe` wipe centralized and prevents call sites from
-/// needing to remember explicit zeroization.
-struct ZeroizingSecretKey(SecretKey);
+/// HKDF-SHA256 with:
+/// - IKM: X25519 shared secret
+/// - salt: ephemeral_public || recipient_public
+/// - info: version-specific domain label
+fn derive_envelope_key(
+    ephemeral_public: &PublicKey,
+    recipient_public: &PublicKey,
+    shared_secret: &[u8; 32],
+) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
+    let mut salt = [0u8; 64];
+    salt[..32].copy_from_slice(ephemeral_public.as_bytes());
+    salt[32..].copy_from_slice(recipient_public.as_bytes());
 
-impl ZeroizingSecretKey {
-    fn new(key: SecretKey) -> Self {
-        Self(key)
-    }
+    let hkdf = Hkdf::<Sha256>::new(Some(&salt), shared_secret);
+    let mut key = Zeroizing::new([0u8; 32]);
+    hkdf.expand(HYBRID_ENVELOPE_INFO, key.as_mut())
+        .map_err(|_| CryptoError::InternalError("Envelope HKDF expand failed".to_string()))?;
+    Ok(key)
 }
 
-impl std::ops::Deref for ZeroizingSecretKey {
-    type Target = SecretKey;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl std::ops::DerefMut for ZeroizingSecretKey {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl Drop for ZeroizingSecretKey {
-    fn drop(&mut self) {
-        zeroize_secret_key(&mut self.0);
-    }
+/// Detects all-zero X25519 shared secrets (small-order public key defense).
+/// Uses constant-time comparison to avoid timing side channels.
+fn shared_secret_is_all_zero(shared: &[u8; 32]) -> bool {
+    ct_eq_32(shared, &[0u8; 32])
 }
 
 pub fn encrypt_file(
@@ -96,10 +74,6 @@ pub fn encrypt_file(
 ) -> Result<PathBuf, CryptoError> {
     let base_name = &encryption_base_name(input_path)?;
     on_progress("Encrypting\u{2026}");
-
-    let mut encryption_key = XChaCha20Poly1305::generate_key(&mut OsRng);
-    let mut hmac_key = [0u8; HMAC_KEY_SIZE];
-    OsRng.fill_bytes(&mut hmac_key);
 
     let output_path = match output_file {
         Some(path) => path.to_path_buf(),
@@ -120,6 +94,10 @@ pub fn encrypt_file(
             working_path.display()
         )));
     }
+
+    let mut encryption_key = XChaCha20Poly1305::generate_key(&mut OsRng);
+    let mut hmac_key = [0u8; HMAC_KEY_SIZE];
+    OsRng.fill_bytes(&mut hmac_key);
 
     let mut file_created = false;
     let result = (|| -> Result<(), CryptoError> {
@@ -142,7 +120,12 @@ pub fn encrypt_file(
             + encoded_envelope.len()
             + encoded_nonce.len()
             + encoded_size(HMAC_TAG_SIZE)) as u16;
-        let prefix = format::build_header_prefix(format::TYPE_HYBRID, 0, header_len);
+        let prefix = format::build_header_prefix(
+            format::TYPE_HYBRID,
+            format::HYBRID_VERSION_MAJOR,
+            0,
+            header_len,
+        );
         let encoded_prefix = encode(&prefix);
 
         let stream_encryptor = stream::EncryptorBE32::from_aead(cipher, nonce.as_ref().into());
@@ -199,15 +182,13 @@ pub fn decrypt_file(
 ) -> Result<PathBuf, CryptoError> {
     on_progress("Decrypting\u{2026}");
 
-    // Parse and validate the file header before loading the private key —
-    // no point running Argon2id if the file is invalid.
     let mut encrypted_file = fs::File::open(input_path)?;
 
     let (prefix_bytes, header) =
         format::read_header_from_reader(&mut encrypted_file, format::TYPE_HYBRID)?;
 
     match header.major {
-        3 => decrypt_file_v3(
+        4 => decrypt_file_v4(
             encrypted_file,
             prefix_bytes,
             header,
@@ -220,15 +201,13 @@ pub fn decrypt_file(
         _ => Err(format::unsupported_file_version_error(
             header.major,
             header.minor,
+            format::HYBRID_VERSION_MAJOR,
         )),
     }
 }
 
-// If a future 3.x minor introduces non-trivial behavior, add explicit gating here:
-//   match header.minor { 0 => ..., 1 => ..., _ => unsupported }
-// instead of relying solely on skip_unknown_header_bytes.
 #[allow(clippy::too_many_arguments)]
-fn decrypt_file_v3(
+fn decrypt_file_v4(
     mut encrypted_file: fs::File,
     prefix_bytes: [u8; format::HEADER_PREFIX_SIZE],
     header: format::FileHeader,
@@ -305,19 +284,20 @@ fn read_public_key(path: &Path) -> Result<PublicKey, CryptoError> {
     let data = fs::read(path)?;
     let header = format::parse_key_file_header(&data, format::KEY_FILE_TYPE_PUBLIC)?;
     match header.version {
-        2 => read_public_key_v2(&data, &header),
+        2 | 3 => read_public_key_data(&data, &header),
         _ => Err(format::unsupported_key_version_error(header.version)),
     }
 }
 
-fn read_public_key_v2(
+fn read_public_key_data(
     data: &[u8],
     header: &format::KeyFileHeader,
 ) -> Result<PublicKey, CryptoError> {
     format::validate_key_v2_layout(data, header, PUBLIC_KEY_DATA_SIZE)?;
     let body_start = format::KEY_FILE_HEADER_SIZE;
-    let mut key_bytes = [0u8; PUBLIC_KEY_DATA_SIZE];
-    key_bytes.copy_from_slice(&data[body_start..body_start + PUBLIC_KEY_DATA_SIZE]);
+    let key_bytes: [u8; PUBLIC_KEY_DATA_SIZE] = data[body_start..body_start + PUBLIC_KEY_DATA_SIZE]
+        .try_into()
+        .map_err(|_| CryptoError::InvalidFormat("Invalid public key data".to_string()))?;
     Ok(PublicKey::from(key_bytes))
 }
 
@@ -325,21 +305,21 @@ fn read_secret_key(
     path: &Path,
     passphrase: &SecretString,
     kdf_limit: Option<&KdfLimit>,
-) -> Result<ZeroizingSecretKey, CryptoError> {
+) -> Result<StaticSecret, CryptoError> {
     let data = fs::read(path)?;
     let header = format::parse_key_file_header(&data, format::KEY_FILE_TYPE_SECRET)?;
     match header.version {
-        2 => read_secret_key_v2(&data, &header, passphrase, kdf_limit),
+        2 | 3 => read_secret_key_data(&data, &header, passphrase, kdf_limit),
         _ => Err(format::unsupported_key_version_error(header.version)),
     }
 }
 
-fn read_secret_key_v2(
+fn read_secret_key_data(
     data: &[u8],
     header: &format::KeyFileHeader,
     passphrase: &SecretString,
     kdf_limit: Option<&KdfLimit>,
-) -> Result<ZeroizingSecretKey, CryptoError> {
+) -> Result<StaticSecret, CryptoError> {
     format::validate_key_v2_layout(data, header, SECRET_KEY_DATA_SIZE)?;
 
     let body_start = format::KEY_FILE_HEADER_SIZE;
@@ -355,20 +335,24 @@ fn read_secret_key_v2(
     let derived_key = kdf_params.hash_passphrase(passphrase.expose_secret().as_bytes(), salt)?;
 
     let cipher = XChaCha20Poly1305::new(derived_key.as_ref().into());
-    let plaintext = cipher
+    let mut plaintext = cipher
         .decrypt(nonce, ciphertext)
         .map_err(|_| CryptoError::AuthenticationFailed)?;
 
     drop(derived_key);
 
-    let mut secret_bytes: [u8; SECRET_KEY_SIZE] =
-        plaintext.as_slice().try_into().map_err(|_| {
-            CryptoError::InvalidFormat("Decrypted key has unexpected length".to_string())
-        })?;
-    let mut plaintext = plaintext;
+    if plaintext.len() != SECRET_KEY_SIZE {
+        plaintext.zeroize();
+        return Err(CryptoError::InvalidFormat(
+            "Decrypted key has unexpected length".to_string(),
+        ));
+    }
+
+    let mut secret_bytes = [0u8; SECRET_KEY_SIZE];
+    secret_bytes.copy_from_slice(&plaintext);
     plaintext.zeroize();
 
-    let key = ZeroizingSecretKey::new(SecretKey::from(secret_bytes));
+    let key = StaticSecret::from(secret_bytes);
     secret_bytes.zeroize();
     Ok(key)
 }
@@ -377,12 +361,20 @@ fn seal_envelope(
     combined_key: &[u8],
     recipient_public: &PublicKey,
 ) -> Result<[u8; ENVELOPE_SIZE], CryptoError> {
-    let ephemeral_secret = ZeroizingSecretKey::new(SecretKey::generate(&mut OsRng));
-    let ephemeral_public = ephemeral_secret.public_key();
-    let chacha_box = ChaChaBox::new(recipient_public, &ephemeral_secret);
-    drop(ephemeral_secret);
-    let nonce = ChaChaBox::generate_nonce(&mut OsRng);
-    let ciphertext = chacha_box
+    let ephemeral_secret = EphemeralSecret::random_from_rng(OsRng);
+    let ephemeral_public = PublicKey::from(&ephemeral_secret);
+    let shared = ephemeral_secret.diffie_hellman(recipient_public);
+    if shared_secret_is_all_zero(shared.as_bytes()) {
+        return Err(CryptoError::InvalidInput(
+            "Invalid recipient public key".to_string(),
+        ));
+    }
+
+    let wrapping_key = derive_envelope_key(&ephemeral_public, recipient_public, shared.as_bytes())?;
+
+    let cipher = XChaCha20Poly1305::new(wrapping_key.as_ref().into());
+    let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let ciphertext = cipher
         .encrypt(&nonce, combined_key)
         .map_err(|_| CryptoError::InternalError("Envelope encryption failed".to_string()))?;
 
@@ -395,19 +387,30 @@ fn seal_envelope(
 
 fn open_envelope(
     envelope: &[u8; ENVELOPE_SIZE],
-    recipient_secret: &SecretKey,
+    recipient_secret: &StaticSecret,
 ) -> Result<[u8; COMBINED_KEY_SIZE], CryptoError> {
-    let ephemeral_public =
-        PublicKey::from_slice(&envelope[..EPHEMERAL_PUB_SIZE]).map_err(|_| {
+    let ephemeral_public_bytes: [u8; EPHEMERAL_PUB_SIZE] =
+        envelope[..EPHEMERAL_PUB_SIZE].try_into().map_err(|_| {
             CryptoError::InvalidFormat("Invalid ephemeral public key in envelope".to_string())
         })?;
+    let ephemeral_public = PublicKey::from(ephemeral_public_bytes);
+
     let nonce = chacha20poly1305::XNonce::from_slice(
         &envelope[EPHEMERAL_PUB_SIZE..EPHEMERAL_PUB_SIZE + ENVELOPE_NONCE_SIZE],
     );
     let ciphertext = &envelope[EPHEMERAL_PUB_SIZE + ENVELOPE_NONCE_SIZE..];
 
-    let chacha_box = ChaChaBox::new(&ephemeral_public, recipient_secret);
-    let mut plaintext = chacha_box
+    let shared = recipient_secret.diffie_hellman(&ephemeral_public);
+    if shared_secret_is_all_zero(shared.as_bytes()) {
+        return Err(CryptoError::AuthenticationFailed);
+    }
+
+    let recipient_public = PublicKey::from(recipient_secret);
+    let wrapping_key =
+        derive_envelope_key(&ephemeral_public, &recipient_public, shared.as_bytes())?;
+
+    let cipher = XChaCha20Poly1305::new(wrapping_key.as_ref().into());
+    let mut plaintext = cipher
         .decrypt(nonce, ciphertext)
         .map_err(|_| CryptoError::AuthenticationFailed)?;
 
@@ -438,8 +441,8 @@ pub fn generate_key_pair(
     fs::create_dir_all(output_dir)?;
     on_progress("Generating key pair…");
 
-    let secret_key = ZeroizingSecretKey::new(SecretKey::generate(&mut OsRng));
-    let public_key = secret_key.public_key();
+    let secret_key = StaticSecret::random_from_rng(OsRng);
+    let public_key = PublicKey::from(&secret_key);
 
     // Encrypt private key at rest with passphrase via Argon2id + XChaCha20-Poly1305
     let kdf_params = KdfParams::default();
@@ -535,8 +538,8 @@ mod tests {
     use std::io::Cursor;
 
     /// Proves the forward-compatibility mechanism for hybrid files: a synthetic
-    /// v3.1 file with extra trailing header bytes (and correctly recomputed HMAC)
-    /// is decrypted successfully by the current v3 reader.
+    /// v4.1 file with extra trailing header bytes (and correctly recomputed HMAC)
+    /// is decrypted successfully by the current v4 reader.
     #[test]
     fn future_minor_version_forward_compatible_hybrid() -> Result<(), CryptoError> {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -564,7 +567,7 @@ mod tests {
         let encrypted_path = encrypt_dir.join("data.fcr");
         let original = fs::read(&encrypted_path)?;
 
-        // --- Decode the v3.0 header ---
+        // --- Decode the v4.0 header ---
         let encoded_prefix = &original[..HEADER_PREFIX_ENCODED_SIZE];
         let prefix_bytes = decode_exact(encoded_prefix, format::HEADER_PREFIX_SIZE)?;
         let old_header_len = u16::from_be_bytes([prefix_bytes[4], prefix_bytes[5]]) as usize;
@@ -587,13 +590,13 @@ mod tests {
         drop(secret);
         let hmac_key = &decrypted[ENCRYPTION_KEY_SIZE..COMBINED_KEY_SIZE];
 
-        // --- Build a synthetic v3.1 prefix with larger header_len ---
+        // --- Build a synthetic v4.1 prefix with larger header_len ---
         let extra_bytes = 16usize;
         let new_header_len = (old_header_len + extra_bytes) as u16;
         let new_prefix = [
             format::MAGIC_BYTE,
             format::TYPE_HYBRID,
-            format::VERSION_MAJOR,
+            format::HYBRID_VERSION_MAJOR,
             1, // minor = 1
             (new_header_len >> 8) as u8,
             (new_header_len & 0xFF) as u8,
@@ -620,7 +623,7 @@ mod tests {
 
         fs::write(&encrypted_path, &output)?;
 
-        // --- Decrypt with the current v3 reader ---
+        // --- Decrypt with the current v4 reader ---
         let output = decrypt_file(
             &encrypted_path,
             &decrypt_dir,
@@ -635,5 +638,77 @@ mod tests {
         assert_eq!(decrypted_content, "hybrid forward compat test");
 
         Ok(())
+    }
+
+    #[test]
+    fn all_zero_shared_secret_detected() {
+        assert!(shared_secret_is_all_zero(&[0u8; 32]));
+    }
+
+    #[test]
+    fn nonzero_shared_secret_not_detected() {
+        let mut val = [0u8; 32];
+        val[31] = 1;
+        assert!(!shared_secret_is_all_zero(&val));
+    }
+
+    /// Regression test: a known small-order X25519 public key must be rejected
+    /// through the real envelope path, not just the helper.
+    /// The identity point [1, 0, ..., 0] is a small-order point that produces
+    /// an all-zero shared secret with any private key.
+    #[test]
+    fn small_order_public_key_rejected_in_seal() {
+        let mut identity_point = [0u8; 32];
+        identity_point[0] = 1; // Montgomery u-coordinate of the identity
+        let bad_pk = PublicKey::from(identity_point);
+
+        let combined_key = [0xAA; COMBINED_KEY_SIZE];
+        let result = seal_envelope(&combined_key, &bad_pk);
+        assert!(result.is_err());
+    }
+
+    /// Regression test: a small-order ephemeral public key in an envelope must
+    /// be rejected during decryption.
+    #[test]
+    fn small_order_ephemeral_key_rejected_in_open() {
+        let mut identity_point = [0u8; 32];
+        identity_point[0] = 1;
+
+        // Build a fake envelope with the identity point as ephemeral public key
+        let mut envelope = [0u8; ENVELOPE_SIZE];
+        envelope[..EPHEMERAL_PUB_SIZE].copy_from_slice(&identity_point);
+        // Rest is arbitrary — should fail before AEAD decryption
+
+        let secret = StaticSecret::random_from_rng(OsRng);
+        let result = open_envelope(&envelope, &secret);
+        assert!(result.is_err());
+    }
+
+    /// Envelope round-trip: seal with a recipient's public key, open with the
+    /// matching secret key, verify the combined key is recovered exactly.
+    #[test]
+    fn seal_open_envelope_round_trip() {
+        let secret = StaticSecret::random_from_rng(OsRng);
+        let public = PublicKey::from(&secret);
+
+        let mut combined_key = [0u8; COMBINED_KEY_SIZE];
+        OsRng.fill_bytes(&mut combined_key);
+
+        let envelope = seal_envelope(&combined_key, &public).unwrap();
+        let recovered = open_envelope(&envelope, &secret).unwrap();
+        assert_eq!(combined_key, recovered);
+    }
+
+    /// Wrong secret key must fail to open an envelope.
+    #[test]
+    fn open_envelope_wrong_key_fails() {
+        let secret = StaticSecret::random_from_rng(OsRng);
+        let public = PublicKey::from(&secret);
+        let wrong_secret = StaticSecret::random_from_rng(OsRng);
+
+        let combined_key = [0xBB; COMBINED_KEY_SIZE];
+        let envelope = seal_envelope(&combined_key, &public).unwrap();
+        let result = open_envelope(&envelope, &wrong_secret);
+        assert!(result.is_err());
     }
 }

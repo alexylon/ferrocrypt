@@ -51,8 +51,8 @@ Every `.fcr` file starts with a header followed by the encrypted payload. The he
 ### Security
 
 - **Symmetric encryption:** XChaCha20-Poly1305 via the [`chacha20poly1305`](https://crates.io/crates/chacha20poly1305) crate ([audited by NCC Group](https://research.nccgroup.com/2020/02/26/public-report-rustcrypto-aes-gcm-and-chacha20poly1305-implementation-review/)), with Argon2id key derivation and HKDF-SHA3-256 subkey expansion
-- **Hybrid encryption:** X25519 key agreement + XChaCha20-Poly1305 envelope via the [`crypto_box`](https://crates.io/crates/crypto_box) crate ([audited by Cure53](https://cure53.de/pentest-report_rust-libs.pdf))
-- HMAC-SHA3-256 header authentication — tampering is detected before decryption begins
+- **Hybrid encryption:** X25519 ECDH key agreement via [`x25519-dalek`](https://crates.io/crates/x25519-dalek), HKDF-SHA256 envelope key derivation, XChaCha20-Poly1305 envelope encryption
+- HMAC-SHA3-256 header authentication — tampering is detected before payload decryption begins; in hybrid mode the envelope is opened first to recover the HMAC key
 - Streaming encryption — plaintext never touches disk as an intermediate file
 - Passphrases handled via the `secrecy` crate (zeroized on drop, hidden from Debug/Display)
 - Triple-replicated headers with majority-vote decoding for error correction (see [Why triple replication?](#why-triple-replication) below)

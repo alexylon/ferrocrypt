@@ -205,6 +205,8 @@ pub(crate) fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
         .map_err(|_| io::Error::other("path contains null byte"))?;
     let to_c = CString::new(to.as_os_str().as_bytes())
         .map_err(|_| io::Error::other("path contains null byte"))?;
+    // SAFETY: CString pointers are valid, null-terminated, and live for the call.
+    #[allow(unsafe_code)]
     let ret = unsafe {
         libc::renameat2(
             libc::AT_FDCWD,
@@ -229,6 +231,8 @@ pub(crate) fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
         .map_err(|_| io::Error::other("path contains null byte"))?;
     let to_c = CString::new(to.as_os_str().as_bytes())
         .map_err(|_| io::Error::other("path contains null byte"))?;
+    // SAFETY: CString pointers are valid, null-terminated, and live for the call.
+    #[allow(unsafe_code)]
     let ret = unsafe { libc::renamex_np(from_c.as_ptr(), to_c.as_ptr(), libc::RENAME_EXCL) };
     if ret == 0 {
         Ok(())

@@ -74,6 +74,7 @@ pub const MAGIC_BYTE: u8 = 0xFC;
 pub const TYPE_SYMMETRIC: u8 = 0x53; // 'S'
 pub const TYPE_HYBRID: u8 = 0x48; // 'H'
 pub const VERSION_MAJOR: u8 = 3;
+pub const HYBRID_VERSION_MAJOR: u8 = 4;
 pub const VERSION_MINOR: u8 = 0;
 pub const HEADER_PREFIX_SIZE: usize = 8;
 pub const HEADER_PREFIX_ENCODED_SIZE: usize = encoded_size(HEADER_PREFIX_SIZE);
@@ -100,13 +101,14 @@ pub struct KeyFileHeader {
 /// Builds the 8-byte header prefix as a byte array.
 pub fn build_header_prefix(
     format_type: u8,
+    major: u8,
     flags: u16,
     header_len: u16,
 ) -> [u8; HEADER_PREFIX_SIZE] {
     [
         MAGIC_BYTE,
         format_type,
-        VERSION_MAJOR,
+        major,
         VERSION_MINOR,
         (header_len >> 8) as u8,
         (header_len & 0xFF) as u8,
@@ -212,8 +214,8 @@ pub fn validate_file_flags(header: &FileHeader) -> Result<(), CryptoError> {
     Ok(())
 }
 
-pub fn unsupported_file_version_error(major: u8, minor: u8) -> CryptoError {
-    if major < VERSION_MAJOR {
+pub fn unsupported_file_version_error(major: u8, minor: u8, expected_major: u8) -> CryptoError {
+    if major < expected_major {
         CryptoError::UnsupportedVersion(format!(
             "Older file format (v{}.{}). Use a previous release.",
             major, minor
@@ -259,7 +261,7 @@ pub const KEY_FILE_TYPE_SECRET: u8 = 0x53; // 'S'
 pub const PUBLIC_KEY_DATA_SIZE: usize = 32;
 // kdf_params(12) + salt(32) + nonce(24) + encrypted_key(32) + tag(16)
 pub const SECRET_KEY_DATA_SIZE: usize = 116;
-pub const KEY_FILE_VERSION: u8 = 2;
+pub const KEY_FILE_VERSION: u8 = 3;
 pub const KEY_FILE_ALG_X25519: u8 = 1;
 
 pub fn build_key_file_header(key_type: u8, data_len: u16) -> [u8; KEY_FILE_HEADER_SIZE] {

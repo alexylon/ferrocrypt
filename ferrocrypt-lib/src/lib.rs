@@ -82,6 +82,8 @@
 //! ## License
 //! Licensed under GPL-3.0-only. See the LICENSE file in the repository.
 
+#![deny(unsafe_code)]
+
 #[cfg(all(feature = "fast-kdf", not(debug_assertions)))]
 compile_error!("fast-kdf feature must not be used in release builds");
 
@@ -212,7 +214,7 @@ pub fn public_key_fingerprint(key_file: impl AsRef<Path>) -> Result<String, Cryp
     let data = std::fs::read(key_file.as_ref())?;
     let header = format::parse_key_file_header(&data, format::KEY_FILE_TYPE_PUBLIC)?;
     match header.version {
-        2 => {
+        2 | 3 => {
             format::validate_key_v2_layout(&data, &header, format::PUBLIC_KEY_DATA_SIZE)?;
             let key_bytes = &data[format::KEY_FILE_HEADER_SIZE
                 ..format::KEY_FILE_HEADER_SIZE + format::PUBLIC_KEY_DATA_SIZE];
@@ -231,7 +233,7 @@ pub fn validate_secret_key_file(key_file: impl AsRef<Path>) -> Result<(), Crypto
     let data = std::fs::read(key_file.as_ref())?;
     let header = format::parse_key_file_header(&data, format::KEY_FILE_TYPE_SECRET)?;
     match header.version {
-        2 => format::validate_key_v2_layout(&data, &header, format::SECRET_KEY_DATA_SIZE),
+        2 | 3 => format::validate_key_v2_layout(&data, &header, format::SECRET_KEY_DATA_SIZE),
         _ => Err(format::unsupported_key_version_error(header.version)),
     }
 }

@@ -123,7 +123,12 @@ pub fn encrypt_file(
             + encoded_nonce.len()
             + encoded_key_hash.len()
             + encoded_size(HMAC_TAG_SIZE)) as u16;
-        let prefix = format::build_header_prefix(format::TYPE_SYMMETRIC, 0, header_len);
+        let prefix = format::build_header_prefix(
+            format::TYPE_SYMMETRIC,
+            format::VERSION_MAJOR,
+            0,
+            header_len,
+        );
         let encoded_prefix = encode(&prefix);
 
         let stream_encryptor = stream::EncryptorBE32::from_aead(cipher, nonce.as_ref().into());
@@ -199,6 +204,7 @@ pub fn decrypt_file(
         _ => Err(format::unsupported_file_version_error(
             header.major,
             header.minor,
+            format::VERSION_MAJOR,
         )),
     }
 }

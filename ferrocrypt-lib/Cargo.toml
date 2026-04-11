@@ -21,7 +21,8 @@ publish = true
 fast-kdf = []
 
 [dependencies]
-crypto_box = { version = "0.9", features = ["chacha20"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+sha2 = "0.11"
 zeroize = "1"
 secrecy = "0.10"
 thiserror = "2"

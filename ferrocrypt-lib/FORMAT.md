@@ -115,7 +115,8 @@ Every `.fcr` file begins with a logical 8-byte prefix, stored in encoded form.
 
 #### Current values
 
-- encrypted-file major version: `3`
+- symmetric encrypted-file major version: `3`
+- hybrid encrypted-file major version: `4`
 - encrypted-file minor version: `0`
 
 ---
@@ -229,7 +230,9 @@ So a current symmetric `v3.0` file is laid out as:
 
 Hybrid mode uses:
 
-- an ephemeral sender secret and the recipient public key to seal a per-file envelope
+- ephemeral X25519 ECDH key agreement with the recipient's static public key
+- HKDF-SHA256 to derive an envelope wrapping key from the shared secret
+- XChaCha20-Poly1305 envelope encryption for per-file random keys
 - XChaCha20-Poly1305 stream encryption for the payload
 - HMAC-SHA3-256 for the outer header
 
@@ -240,7 +243,7 @@ The envelope transports two per-file random keys:
 
 ### 5.1 Header fields and order
 
-In the current `v3.0` hybrid format, every defined header field listed below is stored in encoded form and appears in this order:
+In the current `v4.0` hybrid format, every defined header field listed below is stored in encoded form and appears in this order:
 
 1. file prefix (`8` logical bytes, stored encoded)
 2. sealed envelope (`136` logical bytes, stored encoded)
@@ -255,8 +258,8 @@ The decoded envelope is:
 
 | Offset | Size | Field |
 |---|---:|---|
-| 0..=31 | 32 | ephemeral public key |
-| 32..=55 | 24 | envelope nonce |
+| 0..=31 | 32 | ephemeral X25519 public key |
+| 32..=55 | 24 | XChaCha20-Poly1305 envelope nonce |
 | 56..=135 | 80 | envelope ciphertext |
 
 Envelope ciphertext is the encrypted form of:
@@ -267,7 +270,18 @@ Envelope ciphertext is the encrypted form of:
 
 So the envelope plaintext is `64` bytes and the ciphertext is `64 + 16 = 80` bytes.
 
-### 5.3 Stored sizes (v3.0 hybrid)
+### 5.3 Envelope key derivation
+
+The envelope wrapping key is derived via HKDF-SHA256:
+
+- **IKM:** X25519 shared secret (`ephemeral_secret.diffie_hellman(recipient_public)`)
+- **Salt:** `ephemeral_public (32) || recipient_public (32)` (64 bytes)
+- **Info:** `b"ferrocrypt hybrid envelope key v4"`
+- **Output:** 32-byte wrapping key for XChaCha20-Poly1305
+
+All-zero shared secrets (indicating a small-order public key) are rejected before key derivation.
+
+### 5.4 Stored sizes (v4.0 hybrid)
 
 | Field | Logical size | Stored size |
 |---|---:|---:|
@@ -277,7 +291,7 @@ So the envelope plaintext is `64` bytes and the ciphertext is `64 + 16 = 80` byt
 | HMAC tag | 32 | 99 |
 | **Total header size** | — | **600 bytes** |
 
-So a current hybrid `v3.0` file is laid out as:
+So a current hybrid `v4.0` file is laid out as:
 
 ```text
 0..27    encoded prefix
@@ -337,7 +351,7 @@ Key files use a separate, non-replicated 8-byte header.
 | 4..=5 | 2 | Data length | big-endian `u16`, number of body bytes after the header |
 | 6..=7 | 2 | Flags | big-endian `u16`, currently must be `0` |
 
-Current key-file version: `2`
+Current key-file version: `3`
 
 ### 7.2 `public.key` layout
 
@@ -437,7 +451,7 @@ In hybrid mode, the outer HMAC authenticates the **decoded** values of:
 
 The payload ciphertext is authenticated per stream chunk by XChaCha20-Poly1305.
 
-The envelope itself is also an AEAD ciphertext produced by `ChaChaBox`.
+The envelope itself is also an AEAD ciphertext (XChaCha20-Poly1305 with an HKDF-derived wrapping key).
 
 ### What hybrid mode does not authenticate
 
@@ -490,27 +504,23 @@ In practice, tampering with the stored KDF params, salt, nonce, or ciphertext sh
 
 Current reader behavior is:
 
-- accept current major version `3`
-- allow compatible future **minor** versions within major `3`
-- reject older or newer **major** versions
+- **Symmetric:** accept major version `3`, allow compatible future minor versions within major `3`
+- **Hybrid:** accept major version `4`, allow compatible future minor versions within major `4`
+- reject older or newer major versions for the respective mode
 - reject unknown nonzero header flags
 
 Files produced before the current magic-byte-based format family are not supported by current readers.
-
-Future major versions are intended to retain readers for previously released major versions (e.g. a v4 reader would still accept v3 encrypted files), so that upgrading FerroCrypt does not orphan existing encrypted data.
 
 ## 9.2 Key files
 
 Current reader behavior is:
 
-- accept key-file version `2`
+- accept key-file version `2` or `3`
 - reject older or newer key-file versions
 - reject unknown nonzero key-file flags
 - reject unknown key algorithms
 
-So current key-file compatibility is **exact-version**, not major/minor compatible.
-
-Future key-file versions are intended to retain readers for previously released versions.
+Key-file versions `2` and `3` have identical byte layout — the version bump reflects a change in the hybrid envelope construction, not the key file structure itself. New keys are written as version `3`.
 
 ## 9.3 KDF parameter compatibility
 
@@ -645,7 +655,8 @@ The archive semantics are intended for safe consumer file encryption, not for fa
 - magic byte: `0xFC`
 - symmetric type: `0x53` (`'S'`)
 - hybrid type: `0x48` (`'H'`)
-- current encrypted-file version: `3.0`
+- current symmetric version: `3.0`
+- current hybrid version: `4.0`
 - extension: `.fcr`
 
 ### Key files
@@ -653,7 +664,8 @@ The archive semantics are intended for safe consumer file encryption, not for fa
 - magic byte: `0xFC`
 - public key type: `0x50` (`'P'`)
 - secret/private key type: `0x53` (`'S'`)
-- current key-file version: `2`
+- current key-file version: `3`
+- accepted key-file versions: `2`, `3`
 - algorithm id: `0x01` (`X25519`)
 
 ---
@@ -664,7 +676,8 @@ This document defines the current byte-level contract and behavior that callers 
 
 It does **not** imply:
 
-- backward compatibility with pre-v3 encrypted files
+- backward compatibility with pre-v3 symmetric encrypted files
+- backward compatibility with pre-v4 hybrid encrypted files
 - backward compatibility with pre-v2 key files
 - support for arbitrary future key-file versions
 - preservation of full filesystem metadata

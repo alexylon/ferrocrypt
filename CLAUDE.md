@@ -35,7 +35,7 @@ Three crates, one shared library:
 |---|---|
 | `lib.rs` | Public API: explicit `symmetric_encrypt`/`decrypt`, `hybrid_encrypt`/`decrypt`, auto-routing wrappers (`symmetric_auto`/`hybrid_auto`), `GeneratedKeyPair`, `detect_encryption_mode`, path validation, key fingerprint |
 | `symmetric.rs` | Argon2id → HKDF-SHA3-256 → XChaCha20-Poly1305 streaming encrypt/decrypt |
-| `hybrid.rs` | X25519 + XChaCha20-Poly1305 envelope + XChaCha20-Poly1305 streaming encrypt/decrypt |
+| `hybrid.rs` | X25519 ECDH + HKDF-SHA256 + XChaCha20-Poly1305 envelope + XChaCha20-Poly1305 streaming encrypt/decrypt |
 | `archiver.rs` | TAR archive/unarchive (streaming, preserves directory structure). Manual recursive walk rejects symlinks and special entries at archive time; hardlinks archived as regular files. Failed extractions rename partial output with `.incomplete` suffix. |
 | `format.rs` | File format constants, header/key-file parsing, version-dispatch helpers, forward-compatibility skip for minor versions |
 | `replication.rs` | Triple replication with majority-vote decoding for header error correction |
@@ -46,7 +46,7 @@ Three crates, one shared library:
 
 ```
 Input file/dir
-  → derive keys (Argon2id+HKDF for symmetric, random+X25519/ChaChaBox for hybrid)
+  → derive keys (Argon2id+HKDF for symmetric, random+X25519 ECDH+HKDF-SHA256 for hybrid)
   → build header (magic bytes + triple-replicated fields + HMAC)
   → write header to output .fcr file
   → tar::Builder<EncryptWriter<File>> streams TAR data through XChaCha20-Poly1305 directly to disk
@@ -63,10 +63,10 @@ Decryption reverses: read header → derive/decrypt keys → verify HMAC → Dec
 - `src/password_scorer.rs` — Password strength scoring (0–4 scale) with character-class analysis, sequence/repetition penalties, and common-password detection.
 - macOS uses native `NSOpenPanel` (via objc2) for combined file+folder picker; other platforms use `rfd`.
 
-### File Format (v3.0)
+### File Format (symmetric v3.0, hybrid v4.0)
 
 8-byte logical prefix: `[0xFC, type, major, minor, header_len_be16, flags_be16]`
-- Type `0x53` ('S') = symmetric, `0x48` ('H') = hybrid
+- Type `0x53` ('S') = symmetric (major 3), `0x48` ('H') = hybrid (major 4)
 - The entire header — including the prefix — is triple-replicated for error correction
 - HMAC-SHA3-256 authenticates the header (prefix + decoded canonical field values, excluding the HMAC tag itself). The HMAC is computed over majority-vote-decoded values so that single-copy replication corruption is correctable without failing HMAC verification.
 - Forward compatibility: a minor-version bump may append fields **after** the HMAC tag; older readers use `header_len` to skip them (`skip_unknown_header_bytes`)

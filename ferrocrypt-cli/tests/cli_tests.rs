@@ -309,16 +309,17 @@ fn test_cli_hybrid_wrong_key_passphrase() {
     let binary = get_binary_path();
 
     // Generate keys with passphrase
-    Command::new(&binary)
+    let keygen = Command::new(&binary)
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
         .env("FERROCRYPT_PASSPHRASE", "correct_key_pass")
         .output()
         .expect("Failed to execute keygen");
+    assert!(keygen.status.success());
 
     // Encrypt
-    Command::new(&binary)
+    let encrypt = Command::new(&binary)
         .arg("hybrid")
         .arg("-i")
         .arg(&input_file)
@@ -328,6 +329,7 @@ fn test_cli_hybrid_wrong_key_passphrase() {
         .arg(keys_dir.join("public.key"))
         .output()
         .expect("Failed to execute encrypt");
+    assert!(encrypt.status.success());
 
     // Try to decrypt with wrong passphrase
     let decrypt_output = Command::new(&binary)
@@ -482,13 +484,14 @@ fn test_cli_hybrid_save_as() {
 
     let binary = get_binary_path();
 
-    Command::new(&binary)
+    let keygen = Command::new(&binary)
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
         .env("FERROCRYPT_PASSPHRASE", "key_pass")
         .output()
         .expect("Failed to execute keygen");
+    assert!(keygen.status.success());
 
     let custom_output = encrypt_dir.join("backup.enc");
 
@@ -571,13 +574,14 @@ fn test_cli_fingerprint() {
 
     let binary = get_binary_path();
 
-    Command::new(&binary)
+    let keygen = Command::new(&binary)
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
         .env("FERROCRYPT_PASSPHRASE", "fp_pass")
         .output()
         .expect("Failed to execute keygen");
+    assert!(keygen.status.success());
 
     let fp_output = Command::new(&binary)
         .arg("fingerprint")
@@ -1150,6 +1154,235 @@ fn test_cli_fails_without_passphrase_and_no_tty() {
 
         assert!(!output.status.success());
     }
+}
+
+#[test]
+fn test_cli_hybrid_decrypt_requires_key() {
+    let test_dir = setup_test_dir("cli_hybrid_decrypt_requires_key");
+    let keys_dir = test_dir.join("keys");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&keys_dir).unwrap();
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    fs::create_dir_all(&decrypt_dir).unwrap();
+    create_test_file(&input_file, "missing key on decrypt test");
+
+    let binary = get_binary_path();
+
+    let keygen = Command::new(&binary)
+        .arg("keygen")
+        .arg("-o")
+        .arg(&keys_dir)
+        .env("FERROCRYPT_PASSPHRASE", "dk_pass")
+        .output()
+        .expect("Failed to execute keygen");
+    assert!(keygen.status.success());
+
+    let encrypt = Command::new(&binary)
+        .arg("hybrid")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .arg("-k")
+        .arg(keys_dir.join("public.key"))
+        .output()
+        .expect("Failed to encrypt");
+    assert!(encrypt.status.success());
+
+    let decrypt = Command::new(&binary)
+        .arg("hybrid")
+        .arg("-i")
+        .arg(encrypt_dir.join("data.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "dk_pass")
+        .output()
+        .expect("Failed to execute decrypt without key");
+
+    assert!(!decrypt.status.success());
+}
+
+#[test]
+fn test_cli_hybrid_nonexistent_key_file() {
+    let test_dir = setup_test_dir("cli_hybrid_nonexistent_key");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    create_test_file(&input_file, "nonexistent key test");
+
+    let binary = get_binary_path();
+
+    let output = Command::new(&binary)
+        .arg("hybrid")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .arg("-k")
+        .arg(test_dir.join("nonexistent.key"))
+        .output()
+        .expect("Failed to execute with nonexistent key");
+
+    assert!(!output.status.success());
+}
+
+#[test]
+fn test_cli_symmetric_nonexistent_input() {
+    let test_dir = setup_test_dir("cli_sym_nonexistent_input");
+
+    let binary = get_binary_path();
+
+    let output = Command::new(&binary)
+        .arg("symmetric")
+        .arg("-i")
+        .arg(test_dir.join("nonexistent.txt"))
+        .arg("-o")
+        .arg(&test_dir)
+        .env("FERROCRYPT_PASSPHRASE", "noinput_pass")
+        .output()
+        .expect("Failed to execute with nonexistent input");
+
+    assert!(!output.status.success());
+}
+
+#[test]
+fn test_cli_hybrid_nonexistent_input() {
+    let test_dir = setup_test_dir("cli_hyb_nonexistent_input");
+    let keys_dir = test_dir.join("keys");
+    fs::create_dir_all(&keys_dir).unwrap();
+
+    let binary = get_binary_path();
+
+    let keygen = Command::new(&binary)
+        .arg("keygen")
+        .arg("-o")
+        .arg(&keys_dir)
+        .env("FERROCRYPT_PASSPHRASE", "noinput_pass")
+        .output()
+        .expect("Failed to execute keygen");
+    assert!(keygen.status.success());
+
+    let output = Command::new(&binary)
+        .arg("hybrid")
+        .arg("-i")
+        .arg(test_dir.join("nonexistent.txt"))
+        .arg("-o")
+        .arg(&test_dir)
+        .arg("-k")
+        .arg(keys_dir.join("public.key"))
+        .output()
+        .expect("Failed to execute with nonexistent input");
+
+    assert!(!output.status.success());
+}
+
+#[test]
+fn test_cli_fingerprint_nonexistent_file() {
+    let test_dir = setup_test_dir("cli_fp_nonexistent");
+
+    let binary = get_binary_path();
+
+    let output = Command::new(&binary)
+        .arg("fingerprint")
+        .arg(test_dir.join("nonexistent.key"))
+        .output()
+        .expect("Failed to execute fingerprint with nonexistent file");
+
+    assert!(!output.status.success());
+}
+
+#[test]
+fn test_cli_recipient_nonexistent_file() {
+    let test_dir = setup_test_dir("cli_rcpt_nonexistent");
+
+    let binary = get_binary_path();
+
+    let output = Command::new(&binary)
+        .arg("recipient")
+        .arg(test_dir.join("nonexistent.key"))
+        .output()
+        .expect("Failed to execute recipient with nonexistent file");
+
+    assert!(!output.status.success());
+}
+
+#[test]
+fn test_cli_symmetric_alias_sym() {
+    let test_dir = setup_test_dir("cli_alias_sym");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    create_test_file(&input_file, "alias test");
+
+    let binary = get_binary_path();
+
+    let output = Command::new(&binary)
+        .arg("sym")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "alias_pass")
+        .output()
+        .expect("Failed to execute sym alias");
+
+    assert!(output.status.success());
+    assert!(encrypt_dir.join("data.fcr").exists());
+}
+
+#[test]
+fn test_cli_keygen_alias_gen() {
+    let test_dir = setup_test_dir("cli_alias_gen");
+    let keys_dir = test_dir.join("keys");
+    fs::create_dir_all(&keys_dir).unwrap();
+
+    let binary = get_binary_path();
+
+    let output = Command::new(&binary)
+        .arg("gen")
+        .arg("-o")
+        .arg(&keys_dir)
+        .env("FERROCRYPT_PASSPHRASE", "alias_gen_pass")
+        .output()
+        .expect("Failed to execute gen alias");
+
+    assert!(output.status.success());
+    assert!(keys_dir.join("private.key").exists());
+    assert!(keys_dir.join("public.key").exists());
+}
+
+#[test]
+fn test_cli_fingerprint_alias_fp() {
+    let test_dir = setup_test_dir("cli_alias_fp");
+    let keys_dir = test_dir.join("keys");
+    fs::create_dir_all(&keys_dir).unwrap();
+
+    let binary = get_binary_path();
+
+    let keygen = Command::new(&binary)
+        .arg("keygen")
+        .arg("-o")
+        .arg(&keys_dir)
+        .env("FERROCRYPT_PASSPHRASE", "alias_fp_pass")
+        .output()
+        .expect("Failed to execute keygen");
+    assert!(keygen.status.success());
+
+    let output = Command::new(&binary)
+        .arg("fp")
+        .arg(keys_dir.join("public.key"))
+        .output()
+        .expect("Failed to execute fp alias");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim().len() == 64,
+        "expected 64-char fingerprint, got: {}",
+        stdout.trim()
+    );
 }
 
 #[ctor::dtor]

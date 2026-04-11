@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
-    CryptoError, ENCRYPTED_EXTENSION, detect_encryption_mode, generate_key_pair, hybrid_auto,
-    public_key_fingerprint, symmetric_auto, validate_secret_key_file,
+    CryptoError, ENCRYPTED_EXTENSION, decode_recipient, detect_encryption_mode, encode_recipient,
+    encode_recipient_from_bytes, generate_key_pair, hybrid_auto, public_key_fingerprint,
+    symmetric_auto, validate_secret_key_file,
 };
 
 const TEST_WORKSPACE: &str = "tests/workspace";
@@ -2677,6 +2678,95 @@ fn test_detect_corrupted_fcr_not_silently_encrypted() {
         result.is_err(),
         "corrupted .fcr should not be silently re-encrypted"
     );
+}
+
+// ─── Bech32 recipient tests ──────────────────────────────────────────────
+
+#[test]
+fn test_recipient_round_trip() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("recipient_roundtrip");
+    let keys_dir = test_dir.join("keys");
+    let passphrase = SecretString::from("rp".to_string());
+    generate_key_pair(&passphrase, &keys_dir, |_| {})?;
+
+    let encoded = encode_recipient(keys_dir.join("public.key"))?;
+    assert!(encoded.starts_with("fcr1"));
+
+    let decoded = decode_recipient(&encoded)?;
+    let re_encoded = encode_recipient_from_bytes(&decoded)?;
+    assert_eq!(encoded, re_encoded);
+
+    Ok(())
+}
+
+#[test]
+fn test_recipient_wrong_hrp_rejected() {
+    // Valid Bech32 with wrong HRP
+    let wrong =
+        bech32::encode::<bech32::Bech32>(bech32::Hrp::parse_unchecked("age"), &[0xBB; 32]).unwrap();
+    let result = decode_recipient(&wrong);
+    assert!(result.is_err());
+    match result {
+        Err(CryptoError::InvalidInput(msg)) => {
+            assert!(msg.contains("Not a FerroCrypt"), "got: {msg}");
+        }
+        other => panic!("Expected InvalidInput, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_recipient_wrong_length_rejected() {
+    // Encode 16 bytes (too short for X25519) with the right HRP
+    let short =
+        bech32::encode::<bech32::Bech32>(bech32::Hrp::parse_unchecked("fcr"), &[0xAA; 16]).unwrap();
+    let result = decode_recipient(&short);
+    assert!(result.is_err());
+    match result {
+        Err(CryptoError::InvalidInput(msg)) => {
+            assert!(msg.contains("length"), "got: {msg}");
+        }
+        other => panic!("Expected InvalidInput, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_recipient_malformed_bech32_rejected() {
+    let result = decode_recipient("fcr1not-valid-bech32!!!");
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_recipient_decodes_to_key_file_bytes() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("recipient_keybytes");
+    let keys_dir = test_dir.join("keys");
+    let passphrase = SecretString::from("rf".to_string());
+    generate_key_pair(&passphrase, &keys_dir, |_| {})?;
+
+    let pub_path = keys_dir.join("public.key");
+    let recipient = encode_recipient(&pub_path)?;
+    let decoded_bytes = decode_recipient(&recipient)?;
+
+    // Verify decoded bytes match the raw key in the file (after 8-byte header)
+    let raw_file = fs::read(&pub_path)?;
+    assert_eq!(&decoded_bytes, &raw_file[8..40]);
+
+    Ok(())
+}
+
+#[test]
+fn test_recipient_uppercase_accepted() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("recipient_uppercase");
+    let keys_dir = test_dir.join("keys");
+    let passphrase = SecretString::from("uc".to_string());
+    generate_key_pair(&passphrase, &keys_dir, |_| {})?;
+
+    let encoded = encode_recipient(keys_dir.join("public.key"))?;
+    let uppercased = encoded.to_uppercase();
+    let decoded = decode_recipient(&uppercased)?;
+    let original = decode_recipient(&encoded)?;
+    assert_eq!(decoded, original);
+
+    Ok(())
 }
 
 #[ctor::dtor]

@@ -76,6 +76,7 @@ Decryption reverses: read header → derive/decrypt keys → verify HMAC → Dec
 - Primary API: `symmetric_encrypt`/`symmetric_decrypt`, `hybrid_encrypt`/`hybrid_decrypt` — explicit, return `PathBuf`.
 - Auto-routing: `symmetric_auto`/`hybrid_auto` — detect encrypt vs decrypt by magic bytes, used by CLI/desktop.
 - `generate_key_pair` returns `GeneratedKeyPair` with paths and fingerprint.
+- `encode_recipient`/`decode_recipient` — Bech32 `fcr1...` strings for human-readable public key exchange.
 - Encrypt functions accept `save_as: Option<&Path>` to override the default `{stem}.fcr` output path.
 - Integration tests use `tests/workspace/` as a temp directory, cleaned up by a `#[ctor::dtor]` hook.
 - `ENCRYPTED_EXTENSION` ("fcr") constant lives in `format.rs`.

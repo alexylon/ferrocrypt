@@ -96,6 +96,8 @@ use crate::common::{hex_encode, sha3_256_hash};
 pub use crate::error::CryptoError;
 pub use crate::format::ENCRYPTED_EXTENSION;
 
+const RECIPIENT_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("fcr");
+
 pub use secrecy;
 
 /// The encryption mode used to create an `.fcr` file.
@@ -196,6 +198,22 @@ mod hybrid;
 mod replication;
 mod symmetric;
 
+/// Reads and validates a public key file, returning the raw 32-byte key.
+fn read_public_key_bytes(key_file: impl AsRef<Path>) -> Result<[u8; 32], CryptoError> {
+    let data = std::fs::read(key_file.as_ref())?;
+    let header = format::parse_key_file_header(&data, format::KEY_FILE_TYPE_PUBLIC)?;
+    match header.version {
+        2 | 3 => {
+            format::validate_key_v2_layout(&data, &header, format::PUBLIC_KEY_DATA_SIZE)?;
+            let start = format::KEY_FILE_HEADER_SIZE;
+            Ok(data[start..start + format::PUBLIC_KEY_DATA_SIZE]
+                .try_into()
+                .map_err(|_| CryptoError::InvalidFormat("Invalid public key data".to_string()))?)
+        }
+        _ => Err(format::unsupported_key_version_error(header.version)),
+    }
+}
+
 /// Computes the SHA3-256 fingerprint of a public key file.
 ///
 /// Returns the hash as a 64-character lowercase hex string.
@@ -211,18 +229,54 @@ mod symmetric;
 /// # Ok::<(), ferrocrypt::CryptoError>(())
 /// ```
 pub fn public_key_fingerprint(key_file: impl AsRef<Path>) -> Result<String, CryptoError> {
-    let data = std::fs::read(key_file.as_ref())?;
-    let header = format::parse_key_file_header(&data, format::KEY_FILE_TYPE_PUBLIC)?;
-    match header.version {
-        2 | 3 => {
-            format::validate_key_v2_layout(&data, &header, format::PUBLIC_KEY_DATA_SIZE)?;
-            let key_bytes = &data[format::KEY_FILE_HEADER_SIZE
-                ..format::KEY_FILE_HEADER_SIZE + format::PUBLIC_KEY_DATA_SIZE];
-            let hash = sha3_256_hash(key_bytes)?;
-            Ok(hex_encode(&hash))
-        }
-        _ => Err(format::unsupported_key_version_error(header.version)),
+    let key_bytes = read_public_key_bytes(key_file)?;
+    let hash = sha3_256_hash(&key_bytes)?;
+    Ok(hex_encode(&hash))
+}
+
+/// Encodes a public key file as a Bech32 recipient string (`fcr1...`).
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::path::Path;
+/// use ferrocrypt::encode_recipient;
+///
+/// let r = encode_recipient(Path::new("./keys/public.key"))?;
+/// println!("{}", r);  // fcr1qw508d6q...
+/// # Ok::<(), ferrocrypt::CryptoError>(())
+/// ```
+pub fn encode_recipient(key_file: impl AsRef<Path>) -> Result<String, CryptoError> {
+    let key_bytes = read_public_key_bytes(key_file)?;
+    bech32::encode::<bech32::Bech32>(RECIPIENT_HRP, &key_bytes)
+        .map_err(|e| CryptoError::InternalError(format!("Bech32 encode failed: {}", e)))
+}
+
+/// Encodes raw 32-byte public key bytes as a Bech32 recipient string (`fcr1...`).
+pub fn encode_recipient_from_bytes(key_bytes: &[u8; 32]) -> Result<String, CryptoError> {
+    bech32::encode::<bech32::Bech32>(RECIPIENT_HRP, key_bytes)
+        .map_err(|e| CryptoError::InternalError(format!("Bech32 encode failed: {}", e)))
+}
+
+/// Decodes a Bech32 recipient string (`fcr1...`) into raw 32-byte public key bytes.
+///
+/// Validates the HRP and exact payload length.
+pub fn decode_recipient(recipient: &str) -> Result<[u8; 32], CryptoError> {
+    use bech32::primitives::decode::CheckedHrpstring;
+
+    let parsed = CheckedHrpstring::new::<bech32::Bech32>(recipient)
+        .map_err(|_| CryptoError::InvalidInput("Invalid Bech32 encoding".to_string()))?;
+
+    if parsed.hrp() != RECIPIENT_HRP {
+        return Err(CryptoError::InvalidInput(
+            "Not a FerroCrypt recipient string".to_string(),
+        ));
     }
+
+    let bytes: Vec<u8> = parsed.byte_iter().collect();
+    bytes
+        .try_into()
+        .map_err(|_| CryptoError::InvalidInput("Recipient has wrong key length".to_string()))
 }
 
 /// Validates that a file is a well-formed FerroCrypt private key file.

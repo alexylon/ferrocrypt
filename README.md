@@ -46,7 +46,7 @@ Every `.fcr` file starts with a header followed by the encrypted payload. The he
 | **Symmetric `.fcr`** | Format identifier, version, Argon2id salt, HKDF salt, KDF parameters (memory cost, iterations, parallelism), stream nonce, key verification hash, HMAC authentication tag |
 | **Hybrid `.fcr`** | Format identifier, version, sealed key envelope (ephemeral public key + encrypted random key), stream nonce, HMAC authentication tag |
 | **`private.key`** | KDF parameters, Argon2id salt, nonce, passphrase-encrypted secret key (the raw key is never stored unencrypted) |
-| **`public.key`** | Raw 32-byte X25519 public key (not secret) |
+| **`public.key`** | Raw 32-byte X25519 public key (not secret). Can also be shared as a Bech32 `fcr1…` recipient string via the library API. |
 
 ### Security
 
@@ -63,7 +63,7 @@ Every `.fcr` file starts with a header followed by the encrypted payload. The he
 ### Limitations
 
 - **File metadata is not fully preserved.** FerroCrypt preserves file contents and directory structure. It does not preserve permissions, timestamps, or ownership. Hardlink relationships are not preserved (hardlinked files are archived as independent copies). Symlinks and special entries cause an error at encryption time. If you need faithful filesystem backup/restore semantics, use a dedicated backup tool and encrypt its output with FerroCrypt.
-- **No backward compatibility with pre-v3 format versions.** The current release uses encrypted-file format v3.0 and key-file format v2.0. Files and keys produced by earlier versions (v0.1.x / v0.2.x) cannot be decrypted or used — those versions relied on a different crypto stack (RSA/OpenSSL). If you have data encrypted with an older version, decrypt it with that version first (available on crates.io), then re-encrypt with the current release. Future FerroCrypt releases are intended to continue decrypting previously released v3+ encrypted-file formats and reading previously released v2+ key-file formats whenever practical.
+- **No backward compatibility with older format versions.** The current release uses symmetric encrypted-file format v3.0, hybrid encrypted-file format v4.0, and key-file format v3. Files and keys produced by earlier versions (v0.1.x / v0.2.x) cannot be decrypted or used — those versions relied on a different crypto stack (RSA/OpenSSL). If you have data encrypted with an older version, decrypt it with that version first (available on crates.io), then re-encrypt with the current release.
 
 ### Why triple replication?
 

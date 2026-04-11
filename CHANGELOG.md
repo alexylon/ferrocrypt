@@ -5,6 +5,7 @@ All notable changes to FerroCrypt are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Library API:** `encode_recipient` / `decode_recipient` / `encode_recipient_from_bytes` — Bech32 public recipient strings (`fcr1...`) for human-readable key exchange. Checksummed, copy-paste friendly, validated on decode (HRP, length, checksum).
 - **Library API:** `KdfLimit` struct for caller-controlled KDF memory cost ceiling on decrypt. Decrypt functions (`symmetric_decrypt`, `hybrid_decrypt`, `symmetric_auto`, `hybrid_auto`) accept an optional `KdfLimit` parameter. When a file's KDF memory cost exceeds the limit, decryption fails with `CryptoError::ExcessiveWork` instead of a generic error.
 - **CLI:** `--max-kdf-memory <MiB>` flag on `symmetric` and `hybrid` subcommands to cap accepted KDF memory cost during decryption
 - **CLI:** `fingerprint` subcommand (alias `fp`) to print a public key's SHA3-256 fingerprint for out-of-band verification
@@ -24,6 +25,7 @@ All notable changes to FerroCrypt are documented in this file.
 - Versioned file format with magic bytes (`0xFC` + type), major/minor version, and header length field. Forward-compatible within a major version: future minor versions may append optional trailing fields that older readers can skip via the header length. Minor versions must not change required decryption or authentication semantics.
 
 ### Changed
+- **Breaking:** Hybrid encryption uses X25519 ECDH + HKDF-SHA256 + XChaCha20-Poly1305 envelope. Encrypted-file format `4.0`, key-file version `3` (byte layout unchanged; v2 key files accepted). All-zero shared secrets rejected as a small-order key defense.
 - `detect_encryption_mode` now fails closed on malformed headers: files that start with the FerroCrypt magic byte pattern but have a corrupted, truncated, or unrecognized header return `Err(InvalidFormat)` instead of `Ok(None)`. This prevents corrupted `.fcr` files from being silently re-encrypted by the auto-routing helpers.
 - Both encryption and decryption now write output under an `.incomplete` working name and only rename to the final name on success using platform-native non-overwriting rename (`renameat2` on Linux, `renamex_np` on macOS). Output never appears under the final name during streaming. Failed encryptions delete the `.incomplete` file (ciphertext only); failed decryptions leave it on disk for inspection. A subsequent attempt errors if the `.incomplete` output already exists.
 - Key generation now calls `sync_all()` on key files before the atomic rename, ensuring key data is durable on disk before the final filenames become visible.
@@ -33,7 +35,7 @@ All notable changes to FerroCrypt are documented in this file.
 - Version-dispatch architecture: decrypt and key-reading paths now dispatch by file/key format version, enabling future reader compatibility for the current format line (encrypted files v3+, key files v2+). Golden fixture tests guard against regressions.
 - **Breaking:** Encrypted-file format bumped to 3.0 — files from older versions cannot be decrypted. Unified file extension from `.fcs`/`.fch` to single `.fcr`.
 - **Breaking:** Key-file format bumped to 2.0 — public/private key files from the older RSA/OpenSSL line are not supported by the current release.
-- **Breaking:** Replaced RSA-4096 OAEP (OpenSSL) with X25519 + XChaCha20-Poly1305 (`crypto_box` crate, `ChaChaBox`) for hybrid envelope encryption. Removes the OpenSSL C dependency — the project is now pure Rust.
+- **Breaking:** Replaced RSA-4096 OAEP (OpenSSL) with X25519 ECDH + HKDF-SHA256 + XChaCha20-Poly1305 for hybrid envelope encryption. Removes the OpenSSL C dependency — the project is now pure Rust.
 - **Breaking:** Streaming TAR encryption pipeline — input is archived and encrypted directly to the output file in a single pass. No plaintext intermediate files touch disk. Replaces the previous ZIP-based approach.
 - **Breaking:** Entire header (including prefix and padding indicator) is now triple-replicated for uniform error correction
 - **Breaking:** Argon2id parameters raised to 1 GiB memory / t=4 / p=4 for stronger brute-force resistance. KDF parameters are now stored in the symmetric file header and private key file, so decryption always uses the exact parameters that were used during encryption.
@@ -63,7 +65,6 @@ All notable changes to FerroCrypt are documented in this file.
 - HMAC covers decoded (canonical) field values — single-copy replication corruption recovered by majority vote no longer causes HMAC verification failure
 - Private key files written with `0o600` (owner-only) on POSIX systems
 - Key material zeroized on all error paths (decrypted envelope keys, combined key buffer, hybrid plaintext buffers, HMAC failure early returns)
-- Compile-time size assertion on `crypto_box::SecretKey` to guard unsafe zeroization against upstream layout changes
 - Length validation on decrypted envelope key material
 - Crash on truncated, corrupted, maliciously crafted `.fcr` files, or unexpected replicated decoding output length
 - Nonexistent input paths silently producing empty encrypted files

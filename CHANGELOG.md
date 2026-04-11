@@ -4,6 +4,9 @@ All notable changes to FerroCrypt are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- **Archiver:** File and directory permissions are now preserved through encrypt/decrypt round-trips on Unix. Setuid, setgid, and sticky bits are stripped on both archiving and extraction. On non-Unix platforms, permission handling is platform-limited and archive mode metadata may be approximate.
+
 ### Added
 - **CLI:** Early conflict detection for encrypt and keygen — errors before overwriting existing `.fcr` files or key pairs
 - **CLI:** `--output-path` is now optional when `--save-as` is given for encryption

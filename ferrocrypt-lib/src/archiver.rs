@@ -5,6 +5,15 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::CryptoError;
 
+/// Default file mode for non-Unix platforms (rw-r--r--).
+#[cfg(not(unix))]
+const DEFAULT_FILE_MODE: u32 = 0o644;
+
+/// Mask that keeps only owner/group/other rwx bits, stripping
+/// setuid, setgid, and sticky bits from tar-stored permissions.
+#[cfg(unix)]
+const PERMISSION_BITS_MASK: u32 = 0o777;
+
 /// Rejects paths that could escape the output directory (path traversal).
 pub(crate) fn validate_archive_path(path: &Path) -> Result<(), CryptoError> {
     for component in path.components() {
@@ -87,9 +96,36 @@ fn append_file<W: Write>(
     }
     let mut header = tar::Header::new_gnu();
     header.set_size(metadata.len());
-    header.set_mode(0o644);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        header.set_mode(metadata.permissions().mode() & PERMISSION_BITS_MASK);
+    }
+    #[cfg(not(unix))]
+    header.set_mode(DEFAULT_FILE_MODE);
     header.set_cksum();
     builder.append_data(&mut header, archive_path, &mut file)?;
+    Ok(())
+}
+
+fn append_dir_entry<W: Write>(
+    builder: &mut tar::Builder<W>,
+    src_path: &Path,
+    archive_path: &Path,
+) -> Result<(), CryptoError> {
+    let metadata = fs::metadata(src_path)?;
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Directory);
+    header.set_size(0);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        header.set_mode(metadata.permissions().mode() & PERMISSION_BITS_MASK);
+    }
+    #[cfg(not(unix))]
+    header.set_mode(0o755);
+    header.set_cksum();
+    builder.append_data(&mut header, archive_path, &mut io::empty())?;
     Ok(())
 }
 
@@ -132,7 +168,7 @@ fn archive_directory<W: Write>(
     dir_path: &Path,
     archive_prefix: &Path,
 ) -> Result<(), CryptoError> {
-    builder.append_dir(archive_prefix, dir_path)?;
+    append_dir_entry(builder, dir_path, archive_prefix)?;
 
     for entry in fs::read_dir(dir_path)? {
         let entry = entry?;
@@ -265,6 +301,11 @@ fn extract_entries<R: Read>(
     first_entry_root: &mut Option<PathBuf>,
     checked_roots: &mut Vec<OsString>,
 ) -> Result<(), CryptoError> {
+    // Directory permissions are applied after all entries are extracted,
+    // deepest first, so that a restrictive parent mode (e.g. 0o500) does
+    // not block creation of child entries.
+    let mut dir_permissions: Vec<(PathBuf, u32)> = Vec::new();
+
     for entry_result in archive.entries()? {
         let mut entry = entry_result?;
         let path = entry.path()?.to_path_buf();
@@ -305,6 +346,9 @@ fn extract_entries<R: Read>(
 
         if entry_type.is_dir() {
             fs::create_dir_all(&working_path)?;
+            if let Ok(mode) = entry.header().mode() {
+                dir_permissions.push((working_path, mode));
+            }
         } else if entry_type.is_file() {
             if let Some(parent) = working_path.parent() {
                 if !parent.exists() {
@@ -313,6 +357,8 @@ fn extract_entries<R: Read>(
             }
             let mut outfile = File::create(&working_path)?;
             io::copy(&mut entry, &mut outfile)?;
+            drop(outfile);
+            restore_permissions(entry.header(), &working_path)?;
         } else {
             return Err(CryptoError::InvalidInput(format!(
                 "Unsupported archive entry type {:?} for path: {}",
@@ -321,6 +367,14 @@ fn extract_entries<R: Read>(
             )));
         }
     }
+
+    // Apply directory permissions deepest-first so that restricting a parent
+    // does not prevent setting permissions on its children.
+    dir_permissions.sort_by(|a, b| b.0.components().count().cmp(&a.0.components().count()));
+    for (path, mode) in &dir_permissions {
+        restore_permissions_from_mode(*mode, path)?;
+    }
+
     Ok(())
 }
 
@@ -336,6 +390,40 @@ fn incomplete_entry_path(output_dir: &Path, root_name: &OsStr, entry_path: &Path
         Ok(rest) => output_dir.join(&incomplete_root).join(rest),
         Err(_) => output_dir.join(&incomplete_root),
     }
+}
+
+/// Restores file permissions from the TAR header.
+/// On Unix, applies the stored mode with setuid/setgid/sticky bits stripped.
+/// On other platforms this is a no-op.
+#[cfg(unix)]
+fn restore_permissions(header: &tar::Header, path: &Path) -> Result<(), CryptoError> {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(mode) = header.mode() {
+        // Strip setuid, setgid, and sticky bits for safety.
+        let safe_mode = mode & PERMISSION_BITS_MASK;
+        fs::set_permissions(path, std::fs::Permissions::from_mode(safe_mode))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restore_permissions(_header: &tar::Header, _path: &Path) -> Result<(), CryptoError> {
+    Ok(())
+}
+
+/// Applies a stored mode to a path, stripping dangerous bits.
+/// Used for deferred directory permission restoration.
+#[cfg(unix)]
+fn restore_permissions_from_mode(mode: u32, path: &Path) -> Result<(), CryptoError> {
+    use std::os::unix::fs::PermissionsExt;
+    let safe_mode = mode & PERMISSION_BITS_MASK;
+    fs::set_permissions(path, std::fs::Permissions::from_mode(safe_mode))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restore_permissions_from_mode(_mode: u32, _path: &Path) -> Result<(), CryptoError> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -527,5 +615,203 @@ mod tests {
 
         let restored = fs::read(extract_dir.join("data.bin")).unwrap();
         assert_eq!(restored, binary_data);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_preserves_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let input_file = tmp.path().join("script.sh");
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&extract_dir).unwrap();
+        fs::write(&input_file, "#!/bin/sh\necho hi").unwrap();
+        fs::set_permissions(&input_file, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut buf = Vec::new();
+        let (_, _) = archive(&input_file, &mut buf).unwrap();
+
+        unarchive(Cursor::new(buf), &extract_dir).unwrap();
+
+        let restored = extract_dir.join("script.sh");
+        let mode = fs::metadata(&restored).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "expected 0o755, got 0o{mode:o}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_preserves_directory_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let input_dir = tmp.path().join("mydir");
+        let sub_dir = input_dir.join("restricted");
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&sub_dir).unwrap();
+        fs::create_dir_all(&extract_dir).unwrap();
+        fs::write(sub_dir.join("secret.txt"), "data").unwrap();
+        fs::set_permissions(&sub_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let mut buf = Vec::new();
+        let (_, _) = archive(&input_dir, &mut buf).unwrap();
+
+        unarchive(Cursor::new(buf), &extract_dir).unwrap();
+
+        let restored_sub = extract_dir.join("mydir/restricted");
+        let mode = fs::metadata(&restored_sub).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "expected 0o700, got 0o{mode:o}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_restrictive_dir_does_not_block_children() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let input_dir = tmp.path().join("mydir");
+        let sub_dir = input_dir.join("readonly");
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&sub_dir).unwrap();
+        fs::create_dir_all(&extract_dir).unwrap();
+        fs::write(sub_dir.join("inner.txt"), "hello").unwrap();
+        // r-x------ : no write permission
+        fs::set_permissions(&sub_dir, fs::Permissions::from_mode(0o500)).unwrap();
+
+        let mut buf = Vec::new();
+        let (_, _) = archive(&input_dir, &mut buf).unwrap();
+
+        // Must not fail with "Permission denied" when extracting inner.txt
+        unarchive(Cursor::new(buf), &extract_dir).unwrap();
+
+        let restored_file = extract_dir.join("mydir/readonly/inner.txt");
+        assert_eq!(fs::read_to_string(&restored_file).unwrap(), "hello");
+
+        let dir_mode = fs::metadata(extract_dir.join("mydir/readonly"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o500, "expected 0o500, got 0o{dir_mode:o}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_strips_special_bits_on_extract() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let cases: &[(u32, &str)] = &[
+            (0o4755, "setuid"),
+            (0o2755, "setgid"),
+            (0o1755, "sticky"),
+            (0o6755, "setuid+setgid"),
+            (0o7777, "all special + all rwx"),
+        ];
+
+        for &(input_mode, label) in cases {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let extract_dir = tmp.path().join("extracted");
+            fs::create_dir_all(&extract_dir).unwrap();
+
+            let data = b"payload";
+            let mut buf = Vec::new();
+            {
+                let mut builder = tar::Builder::new(&mut buf);
+                let mut header = tar::Header::new_gnu();
+                header.set_size(data.len() as u64);
+                header.set_mode(input_mode);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, "file.sh", &data[..])
+                    .unwrap();
+                builder.finish().unwrap();
+            }
+
+            unarchive(Cursor::new(buf), &extract_dir).unwrap();
+
+            let restored = extract_dir.join("file.sh");
+            let mode = fs::metadata(&restored).unwrap().permissions().mode() & 0o7777;
+            let expected = input_mode & 0o777;
+            assert_eq!(
+                mode, expected,
+                "{label}: expected 0o{expected:o}, got 0o{mode:o}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_strips_special_bits_on_directory_extract() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        let mut buf = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut buf);
+
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_size(0);
+            header.set_mode(0o4755); // setuid on directory
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "stickydir/", &[] as &[u8])
+                .unwrap();
+
+            let data = b"child";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "stickydir/child.txt", &data[..])
+                .unwrap();
+
+            builder.finish().unwrap();
+        }
+
+        unarchive(Cursor::new(buf), &extract_dir).unwrap();
+
+        let dir_mode = fs::metadata(extract_dir.join("stickydir"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(
+            dir_mode, 0o755,
+            "directory setuid should be stripped: expected 0o755, got 0o{dir_mode:o}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_strips_special_bits_on_archive_side() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let input_file = tmp.path().join("script.sh");
+        fs::write(&input_file, "#!/bin/sh").unwrap();
+        fs::set_permissions(&input_file, fs::Permissions::from_mode(0o4755)).unwrap();
+
+        let mut buf = Vec::new();
+        let (_, _) = archive(&input_file, &mut buf).unwrap();
+
+        // Read the mode stored in the tar header directly.
+        let mut tar_archive = tar::Archive::new(Cursor::new(buf));
+        let entry = tar_archive.entries().unwrap().next().unwrap().unwrap();
+        let stored_mode = entry.header().mode().unwrap();
+        assert_eq!(
+            stored_mode & 0o7000,
+            0,
+            "special bits should not be stored in archive: mode 0o{stored_mode:o}"
+        );
+        assert_eq!(
+            stored_mode & 0o777,
+            0o755,
+            "rwx bits should be preserved: mode 0o{stored_mode:o}"
+        );
     }
 }

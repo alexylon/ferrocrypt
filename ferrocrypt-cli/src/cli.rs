@@ -1,11 +1,12 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use ferrocrypt::secrecy::{ExposeSecret, SecretString};
 use ferrocrypt::{
-    CryptoError, KdfLimit, decode_recipient, detect_encryption_mode, encode_recipient,
-    generate_key_pair, hybrid_auto, hybrid_encrypt_from_recipient, public_key_fingerprint,
-    symmetric_auto, validate_secret_key_file,
+    CryptoError, KdfLimit, PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME, decode_recipient,
+    default_encrypted_filename, detect_encryption_mode, encode_recipient, generate_key_pair,
+    hybrid_auto, hybrid_encrypt_from_recipient, public_key_fingerprint, symmetric_auto,
+    validate_secret_key_file,
 };
 use rpassword::prompt_password;
 use rustyline::DefaultEditor;
@@ -148,6 +149,49 @@ fn format_duration(d: std::time::Duration) -> String {
     }
 }
 
+fn effective_encrypt_output(
+    output_dir: &Path,
+    input_path: &Path,
+    save_as: Option<&str>,
+) -> Result<PathBuf, CryptoError> {
+    match save_as {
+        Some(p) => Ok(PathBuf::from(p)),
+        None => Ok(output_dir.join(default_encrypted_filename(input_path)?)),
+    }
+}
+
+fn check_encrypt_conflict(
+    output_dir: &Path,
+    input_path: &Path,
+    save_as: Option<&str>,
+) -> Result<(), CryptoError> {
+    let target = effective_encrypt_output(output_dir, input_path, save_as)?;
+    if target.exists() {
+        return Err(CryptoError::InvalidInput(format!(
+            "Already exists: {}",
+            target.display()
+        )));
+    }
+    Ok(())
+}
+
+fn check_keygen_conflict(output_dir: &Path) -> Result<(), CryptoError> {
+    let secret_exists = output_dir.join(PRIVATE_KEY_FILENAME).exists();
+    let pub_exists = output_dir.join(PUBLIC_KEY_FILENAME).exists();
+    match (secret_exists, pub_exists) {
+        (true, true) => Err(CryptoError::InvalidInput(
+            "Key pair already exists in output folder".into(),
+        )),
+        (true, false) => Err(CryptoError::InvalidInput(
+            "Private key already exists in output folder".into(),
+        )),
+        (false, true) => Err(CryptoError::InvalidInput(
+            "Public key already exists in output folder".into(),
+        )),
+        _ => Ok(()),
+    }
+}
+
 pub fn run() -> Result<(), CryptoError> {
     let cli = Cli::parse();
 
@@ -164,6 +208,7 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
     match cmd {
         CliCommand::Keygen { output_path } => {
             let output_path = Path::new(&output_path);
+            check_keygen_conflict(output_path)?;
             let passphrase = read_passphrase(true)?;
             let info = generate_key_pair(&passphrase, output_path, |msg| eprintln!("{msg}"))?;
             let recipient = encode_recipient(&info.public_key_path)?;
@@ -202,6 +247,7 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
                         "--max-kdf-memory is for decryption only".to_string(),
                     ));
                 }
+                check_encrypt_conflict(output_path, input_path, save_as.as_deref())?;
             } else {
                 if recipient.is_some() {
                     return Err(CryptoError::InvalidInput(
@@ -295,6 +341,7 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
                         "--max-kdf-memory is for decryption only".to_string(),
                     ));
                 }
+                check_encrypt_conflict(output_path, input_path, save_as.as_deref())?;
             } else if save_as.is_some() {
                 return Err(CryptoError::InvalidInput(
                     "--save-as is for encryption only".to_string(),

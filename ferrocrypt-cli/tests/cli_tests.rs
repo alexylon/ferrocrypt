@@ -1385,6 +1385,288 @@ fn test_cli_fingerprint_alias_fp() {
     );
 }
 
+// ─── Conflict detection tests ──────────────────────────────────────────────
+
+#[test]
+fn test_symmetric_encrypt_conflict_detected() {
+    let test_dir = setup_test_dir("sym_encrypt_conflict");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    create_test_file(&input_file, "payload");
+
+    let binary = get_binary_path();
+
+    // First encrypt succeeds
+    let first = Command::new(&binary)
+        .arg("sym")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("first encrypt");
+    assert!(first.status.success(), "first encrypt should succeed");
+    assert!(encrypt_dir.join("data.fcr").exists());
+
+    // Second encrypt hits the conflict (non-interactive → error)
+    let second = Command::new(&binary)
+        .arg("sym")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("second encrypt");
+    assert!(
+        !second.status.success(),
+        "second encrypt should fail on conflict"
+    );
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        stderr.contains("Already exists"),
+        "expected conflict message, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_symmetric_encrypt_conflict_with_save_as() {
+    let test_dir = setup_test_dir("sym_save_as_conflict");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let custom_out = encrypt_dir.join("custom.fcr");
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    create_test_file(&input_file, "payload");
+
+    let binary = get_binary_path();
+
+    // Create the target file so the conflict fires
+    create_test_file(&custom_out, "placeholder");
+
+    let output = Command::new(&binary)
+        .arg("sym")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .arg("-s")
+        .arg(&custom_out)
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("encrypt with save_as conflict");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Already exists"),
+        "expected conflict for save_as path, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_hybrid_encrypt_conflict_detected() {
+    let test_dir = setup_test_dir("hyb_encrypt_conflict");
+    let input_file = test_dir.join("secret.txt");
+    let keys_dir = test_dir.join("keys");
+    let encrypt_dir = test_dir.join("encrypted");
+    fs::create_dir_all(&keys_dir).unwrap();
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    create_test_file(&input_file, "secret data");
+
+    let binary = get_binary_path();
+
+    // Generate key pair
+    let kg = Command::new(&binary)
+        .arg("keygen")
+        .arg("-o")
+        .arg(&keys_dir)
+        .env("FERROCRYPT_PASSPHRASE", "keypass")
+        .output()
+        .expect("keygen");
+    assert!(kg.status.success());
+
+    // First encrypt
+    let first = Command::new(&binary)
+        .arg("hyb")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .arg("-k")
+        .arg(keys_dir.join("public.key"))
+        .output()
+        .expect("first hybrid encrypt");
+    assert!(
+        first.status.success(),
+        "first encrypt failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    // Second encrypt hits conflict
+    let second = Command::new(&binary)
+        .arg("hyb")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .arg("-k")
+        .arg(keys_dir.join("public.key"))
+        .output()
+        .expect("second hybrid encrypt");
+    assert!(
+        !second.status.success(),
+        "second encrypt should fail on conflict"
+    );
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        stderr.contains("Already exists"),
+        "expected conflict message, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_keygen_conflict_both_keys() {
+    let test_dir = setup_test_dir("keygen_conflict_both");
+    let keys_dir = test_dir.join("keys");
+    fs::create_dir_all(&keys_dir).unwrap();
+
+    let binary = get_binary_path();
+
+    // First keygen succeeds
+    let first = Command::new(&binary)
+        .arg("keygen")
+        .arg("-o")
+        .arg(&keys_dir)
+        .env("FERROCRYPT_PASSPHRASE", "keypass")
+        .output()
+        .expect("first keygen");
+    assert!(first.status.success());
+
+    // Second keygen hits conflict (non-interactive → error)
+    let second = Command::new(&binary)
+        .arg("keygen")
+        .arg("-o")
+        .arg(&keys_dir)
+        .env("FERROCRYPT_PASSPHRASE", "keypass")
+        .output()
+        .expect("second keygen");
+    assert!(
+        !second.status.success(),
+        "second keygen should fail on conflict"
+    );
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        stderr.contains("Key pair already exists"),
+        "expected key pair conflict, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_keygen_conflict_private_only() {
+    let test_dir = setup_test_dir("keygen_conflict_priv");
+    let keys_dir = test_dir.join("keys");
+    fs::create_dir_all(&keys_dir).unwrap();
+
+    // Place only private.key
+    create_test_file(&keys_dir.join("private.key"), "dummy");
+
+    let binary = get_binary_path();
+    let output = Command::new(&binary)
+        .arg("keygen")
+        .arg("-o")
+        .arg(&keys_dir)
+        .env("FERROCRYPT_PASSPHRASE", "keypass")
+        .output()
+        .expect("keygen with private conflict");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Private key already exists"),
+        "expected private key conflict, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_keygen_conflict_public_only() {
+    let test_dir = setup_test_dir("keygen_conflict_pub");
+    let keys_dir = test_dir.join("keys");
+    fs::create_dir_all(&keys_dir).unwrap();
+
+    // Place only public.key
+    create_test_file(&keys_dir.join("public.key"), "dummy");
+
+    let binary = get_binary_path();
+    let output = Command::new(&binary)
+        .arg("keygen")
+        .arg("-o")
+        .arg(&keys_dir)
+        .env("FERROCRYPT_PASSPHRASE", "keypass")
+        .output()
+        .expect("keygen with public conflict");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Public key already exists"),
+        "expected public key conflict, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_decrypt_does_not_trigger_cli_conflict_check() {
+    let test_dir = setup_test_dir("no_cli_conflict_decrypt");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    fs::create_dir_all(&decrypt_dir).unwrap();
+    create_test_file(&input_file, "payload");
+
+    let binary = get_binary_path();
+
+    // Encrypt
+    let enc = Command::new(&binary)
+        .arg("sym")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("encrypt");
+    assert!(enc.status.success());
+
+    // Decrypt once to populate the output dir
+    let dec1 = Command::new(&binary)
+        .arg("sym")
+        .arg("-i")
+        .arg(encrypt_dir.join("data.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("first decrypt");
+    assert!(dec1.status.success());
+
+    // Decrypt again — the library may reject overwrite, but the CLI conflict
+    // check (which uses "Already exists: ..." prefix) must NOT fire since
+    // conflict checks only apply to encryption, matching desktop behavior.
+    let dec2 = Command::new(&binary)
+        .arg("sym")
+        .arg("-i")
+        .arg(encrypt_dir.join("data.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("second decrypt");
+    let stderr = String::from_utf8_lossy(&dec2.stderr);
+    assert!(
+        !stderr.contains("Already exists:"),
+        "decrypt must not trigger CLI conflict check, got: {stderr}"
+    );
+}
+
 #[ctor::dtor]
 fn cleanup() {
     cleanup_test_workspace();

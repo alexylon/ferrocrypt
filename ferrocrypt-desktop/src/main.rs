@@ -5,8 +5,9 @@ slint::include_modules!();
 
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
-    EncryptionMode, default_encrypted_filename, detect_encryption_mode, generate_key_pair,
-    hybrid_auto, public_key_fingerprint, symmetric_auto, validate_secret_key_file,
+    EncryptionMode, PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME, default_encrypted_filename,
+    detect_encryption_mode, generate_key_pair, hybrid_auto, public_key_fingerprint, symmetric_auto,
+    validate_secret_key_file,
 };
 use std::path::{Path, PathBuf};
 
@@ -430,11 +431,11 @@ fn clear_fields(app: &AppWindow) {
 }
 
 fn public_key_path(dir: &str) -> PathBuf {
-    Path::new(dir).join("public.key")
+    Path::new(dir).join(PUBLIC_KEY_FILENAME)
 }
 
 fn private_key_path(dir: &str) -> PathBuf {
-    Path::new(dir).join("private.key")
+    Path::new(dir).join(PRIVATE_KEY_FILENAME)
 }
 
 fn path_to_string(path: &Path) -> String {

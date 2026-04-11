@@ -32,8 +32,8 @@ const ENVELOPE_SIZE: usize = EPHEMERAL_PUB_SIZE + ENVELOPE_NONCE_SIZE + ENVELOPE
 const SECRET_KEY_NONCE_SIZE: usize = 24;
 const SECRET_KEY_SIZE: usize = 32;
 
-const PUBLIC_KEY_FILENAME: &str = "public.key";
-const PRIVATE_KEY_FILENAME: &str = "private.key";
+pub const PUBLIC_KEY_FILENAME: &str = "public.key";
+pub const PRIVATE_KEY_FILENAME: &str = "private.key";
 
 const HYBRID_ENVELOPE_INFO: &[u8] = b"ferrocrypt hybrid envelope key v4";
 

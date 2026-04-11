@@ -16,7 +16,19 @@ use subtle::ConstantTimeEq;
 const PASSPHRASE_ENV: &str = "FERROCRYPT_PASSPHRASE";
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, about, long_about = None,
+    after_help = "\
+Examples:
+  ferrocrypt sym -i secret.txt -o ./encrypted
+  ferrocrypt sym -i ./encrypted/secret.fcr -o ./decrypted
+  ferrocrypt gen -o ./keys
+  ferrocrypt hyb -i secret.txt -o ./encrypted -k ./keys/public.key
+  ferrocrypt hyb -i ./encrypted/secret.fcr -o ./decrypted -k ./keys/private.key
+  ferrocrypt fp ./keys/public.key
+  ferrocrypt rc ./keys/public.key
+
+Run <command> --help for full options (e.g. ferrocrypt sym --help)"
+)]
 pub struct Cli {
     /// Subcommand to run. If omitted, the CLI starts in interactive mode.
     #[command(subcommand)]
@@ -25,18 +37,18 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum CliCommand {
-    #[command(alias = "gen")]
+    #[command(visible_alias = "gen", about = "Generate a key pair")]
     Keygen {
-        #[arg(short, long)]
+        #[arg(short, long, help = "Directory to write key files into")]
         output_path: String,
     },
 
-    #[command(alias = "hyb")]
+    #[command(visible_alias = "hyb", about = "Hybrid encrypt or decrypt")]
     Hybrid {
-        #[arg(short, long)]
+        #[arg(short, long, help = "File or directory to process")]
         input_path: String,
 
-        #[arg(short, long)]
+        #[arg(short, long, help = "Output directory")]
         output_path: String,
 
         #[arg(
@@ -65,24 +77,24 @@ pub enum CliCommand {
         max_kdf_memory: Option<u32>,
     },
 
-    #[command(alias = "fp")]
+    #[command(visible_alias = "fp", about = "Show public key fingerprint")]
     Fingerprint {
         #[arg(help = "Path to a public key file")]
         public_key_file: String,
     },
 
-    #[command(alias = "rc")]
+    #[command(visible_alias = "rc", about = "Show public key recipient string")]
     Recipient {
         #[arg(help = "Path to a public key file")]
         public_key_file: String,
     },
 
-    #[command(alias = "sym")]
+    #[command(visible_alias = "sym", about = "Symmetric encrypt or decrypt")]
     Symmetric {
-        #[arg(short, long)]
+        #[arg(short, long, help = "File or directory to process")]
         input_path: String,
 
-        #[arg(short, long)]
+        #[arg(short, long, help = "Output directory")]
         output_path: String,
 
         #[arg(

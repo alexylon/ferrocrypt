@@ -5,7 +5,9 @@ All notable changes to FerroCrypt are documented in this file.
 ## [Unreleased]
 
 ### Added
-- **CLI:** Early conflict detection for encrypt and keygen — warns before overwriting existing `.fcr` files or key pairs. Interactive: prompts `Overwrite? [y/N]`. Non-interactive: hard error.
+- **CLI:** Early conflict detection for encrypt and keygen — errors before overwriting existing `.fcr` files or key pairs
+- **CLI:** `--output-path` is now optional when `--save-as` is given for encryption
+- **CLI:** Subcommand help text with descriptions, visible aliases, flag descriptions, and usage examples
 - **Library API:** Exported `PUBLIC_KEY_FILENAME` and `PRIVATE_KEY_FILENAME` constants
 - **Library API:** `encode_recipient` / `decode_recipient` / `encode_recipient_from_bytes` — Bech32 public recipient strings (`fcr1...`) for human-readable key exchange. Checksummed, copy-paste friendly, validated on decode (HRP, length, checksum).
 - **CLI:** `recipient` subcommand (alias `rc`) to print a public key as a Bech32 `fcr1...` string

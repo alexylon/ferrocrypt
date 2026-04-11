@@ -1667,6 +1667,135 @@ fn test_decrypt_does_not_trigger_cli_conflict_check() {
     );
 }
 
+// ─── Optional --output-path tests ──────────────────────────────────────────
+
+#[test]
+fn test_symmetric_encrypt_save_as_without_output_path() {
+    let test_dir = setup_test_dir("sym_save_as_no_out");
+    let input_file = test_dir.join("data.txt");
+    let target = test_dir.join("result.fcr");
+    create_test_file(&input_file, "payload");
+
+    let binary = get_binary_path();
+
+    // Encrypt with --save-as only, no -o
+    let output = Command::new(&binary)
+        .arg("sym")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-s")
+        .arg(&target)
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("encrypt with save_as only");
+    assert!(
+        output.status.success(),
+        "encrypt without -o should succeed when --save-as is given: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(target.exists());
+}
+
+#[test]
+fn test_hybrid_encrypt_save_as_without_output_path() {
+    let test_dir = setup_test_dir("hyb_save_as_no_out");
+    let input_file = test_dir.join("data.txt");
+    let keys_dir = test_dir.join("keys");
+    let target = test_dir.join("result.fcr");
+    fs::create_dir_all(&keys_dir).unwrap();
+    create_test_file(&input_file, "payload");
+
+    let binary = get_binary_path();
+
+    let kg = Command::new(&binary)
+        .arg("keygen")
+        .arg("-o")
+        .arg(&keys_dir)
+        .env("FERROCRYPT_PASSPHRASE", "kp")
+        .output()
+        .expect("keygen");
+    assert!(kg.status.success());
+
+    // Encrypt with --save-as only, no -o
+    let output = Command::new(&binary)
+        .arg("hyb")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-k")
+        .arg(keys_dir.join("public.key"))
+        .arg("-s")
+        .arg(&target)
+        .output()
+        .expect("encrypt with save_as only");
+    assert!(
+        output.status.success(),
+        "encrypt without -o should succeed when --save-as is given: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(target.exists());
+}
+
+#[test]
+fn test_symmetric_encrypt_without_output_path_or_save_as_fails() {
+    let test_dir = setup_test_dir("sym_no_out_no_save");
+    let input_file = test_dir.join("data.txt");
+    create_test_file(&input_file, "payload");
+
+    let binary = get_binary_path();
+
+    let output = Command::new(&binary)
+        .arg("sym")
+        .arg("-i")
+        .arg(&input_file)
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("encrypt without -o or -s");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--output-path is required"),
+        "expected --output-path error, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_symmetric_decrypt_without_output_path_fails() {
+    let test_dir = setup_test_dir("sym_decrypt_no_out");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    create_test_file(&input_file, "payload");
+
+    let binary = get_binary_path();
+
+    // Encrypt first
+    let enc = Command::new(&binary)
+        .arg("sym")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("encrypt");
+    assert!(enc.status.success());
+
+    // Decrypt without -o
+    let dec = Command::new(&binary)
+        .arg("sym")
+        .arg("-i")
+        .arg(encrypt_dir.join("data.fcr"))
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("decrypt without -o");
+    assert!(!dec.status.success());
+    let stderr = String::from_utf8_lossy(&dec.stderr);
+    assert!(
+        stderr.contains("--output-path is required"),
+        "expected --output-path error, got: {stderr}"
+    );
+}
+
 #[ctor::dtor]
 fn cleanup() {
     cleanup_test_workspace();

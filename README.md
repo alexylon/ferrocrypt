@@ -168,8 +168,8 @@ ferrocrypt symmetric -i secret.txt -o ./encrypted
 # Decrypt (prompts for passphrase)
 ferrocrypt symmetric -i ./encrypted/secret.fcr -o ./decrypted
 
-# Encrypt with custom output filename
-ferrocrypt symmetric -i secret.txt -o ./encrypted -s ./encrypted/backup.fcr
+# Encrypt with custom output path (--output-path not needed)
+ferrocrypt symmetric -i secret.txt -s ./backup.fcr
 ```
 
 ### Hybrid
@@ -186,6 +186,9 @@ ferrocrypt fingerprint ./keys/public.key
 
 # Encrypt with recipient string (no passphrase needed)
 ferrocrypt hybrid -i secret.txt -o ./encrypted -r fcr1...
+
+# Encrypt with custom output path (--output-path not needed)
+ferrocrypt hybrid -i secret.txt -s ./secret.fcr -r fcr1...
 
 # Encrypt with public key file (no passphrase needed)
 ferrocrypt hybrid -i secret.txt -o ./encrypted -k ./keys/public.key
@@ -214,20 +217,20 @@ ferrocrypt> quit
 | Flag | Description |
 |---|---|
 | `-i, --input-path` | Input file or directory |
-| `-o, --output-path` | Output directory |
-| `-s, --save-as` | Custom output file path (encrypt only, optional) |
-| `--max-kdf-memory` | Maximum KDF memory cost to accept in MiB (decrypt only, optional) |
+| `-o, --output-path` | Output directory (optional with `--save-as`) |
+| `-s, --save-as` | Custom output file path (encrypt only) |
+| `--max-kdf-memory` | Maximum KDF memory cost to accept in MiB (decrypt only) |
 
 #### `hybrid`
 
 | Flag | Description |
 |---|---|
 | `-i, --input-path` | Input file or directory |
-| `-o, --output-path` | Output directory |
+| `-o, --output-path` | Output directory (optional with `--save-as`) |
 | `-k, --key` | Key file path: public key for encrypt, private key for decrypt |
 | `-r, --recipient` | Bech32 recipient string for encryption (`fcr1...`) |
-| `-s, --save-as` | Custom output file path (encrypt only, optional) |
-| `--max-kdf-memory` | Maximum KDF memory cost to accept in MiB (decrypt only, optional) |
+| `-s, --save-as` | Custom output file path (encrypt only) |
+| `--max-kdf-memory` | Maximum KDF memory cost to accept in MiB (decrypt only) |
 
 #### `keygen`
 

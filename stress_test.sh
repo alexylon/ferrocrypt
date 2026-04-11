@@ -8,6 +8,7 @@ FC="./target/release/ferrocrypt"
 WORKDIR="$(mktemp -d)"
 PASS="stress-test-passphrase-2024!"
 PASS2="wrong-passphrase-nope"
+export FERROCRYPT_PASSPHRASE="$PASS"
 PASSED=0
 FAILED=0
 TOTAL=0
@@ -83,13 +84,13 @@ KEYS="$WORKDIR/keys"
 mkdir -p "$KEYS"
 
 run_test "keygen: generate key pair" \
-    $FC keygen -o "$KEYS" -p "$PASS"
+    $FC keygen -o "$KEYS"
 
 # Generate a second key pair for wrong-key tests
 KEYS2="$WORKDIR/keys2"
 mkdir -p "$KEYS2"
 run_test "keygen: generate second key pair" \
-    $FC keygen -o "$KEYS2" -p "$PASS2"
+    env FERROCRYPT_PASSPHRASE="$PASS2" $FC keygen -o "$KEYS2"
 
 # Verify key files exist
 run_test "keygen: verify keys exist" \
@@ -118,8 +119,8 @@ sym_roundtrip_file() {
     local enc_dir="$WORKDIR/enc_sym_${label}"
     local dec_dir="$WORKDIR/dec_sym_${label}"
     mkdir -p "$enc_dir" "$dec_dir"
-    $FC symmetric -i "$src" -o "$enc_dir" -p "$PASS" && \
-    $FC symmetric -i "$enc_dir"/*.fcr -o "$dec_dir" -p "$PASS" && \
+    $FC symmetric -i "$src" -o "$enc_dir" && \
+    $FC symmetric -i "$enc_dir"/*.fcr -o "$dec_dir" && \
     assert_identical "$src" "$dec_dir/$(basename "$src")"
 }
 
@@ -130,8 +131,8 @@ sym_roundtrip_dir() {
     local enc_dir="$WORKDIR/enc_sym_${label}"
     local dec_dir="$WORKDIR/dec_sym_${label}"
     mkdir -p "$enc_dir" "$dec_dir"
-    $FC symmetric -i "$src" -o "$enc_dir" -p "$PASS" && \
-    $FC symmetric -i "$enc_dir"/*.fcr -o "$dec_dir" -p "$PASS" && \
+    $FC symmetric -i "$src" -o "$enc_dir" && \
+    $FC symmetric -i "$enc_dir"/*.fcr -o "$dec_dir" && \
     assert_dirs_identical "$src" "$dec_dir/$(basename "$src")"
 }
 
@@ -174,8 +175,8 @@ dd if=/dev/urandom of="$WORKDIR/100mb.bin" bs=1048576 count=100 2>/dev/null
 enc100="$WORKDIR/enc_sym_100mb"
 dec100="$WORKDIR/dec_sym_100mb"
 mkdir -p "$enc100" "$dec100"
-if $FC symmetric -i "$WORKDIR/100mb.bin" -o "$enc100" -p "$PASS" 2>/dev/null && \
-   $FC symmetric -i "$enc100"/*.fcr -o "$dec100" -p "$PASS" 2>/dev/null && \
+if $FC symmetric -i "$WORKDIR/100mb.bin" -o "$enc100" 2>/dev/null && \
+   $FC symmetric -i "$enc100"/*.fcr -o "$dec100" 2>/dev/null && \
    assert_identical "$WORKDIR/100mb.bin" "$dec100/100mb.bin"; then
     echo "PASS"
     PASSED=$((PASSED + 1))
@@ -222,7 +223,7 @@ hyb_roundtrip_file() {
     local dec_dir="$WORKDIR/dec_hyb_${label}"
     mkdir -p "$enc_dir" "$dec_dir"
     $FC hybrid -i "$src" -o "$enc_dir" -k "$pubkey" && \
-    $FC hybrid -i "$enc_dir"/*.fcr -o "$dec_dir" -k "$secretkey" -p "$PASS" && \
+    $FC hybrid -i "$enc_dir"/*.fcr -o "$dec_dir" -k "$secretkey" && \
     assert_identical "$src" "$dec_dir/$(basename "$src")"
 }
 
@@ -235,7 +236,7 @@ hyb_roundtrip_dir() {
     local dec_dir="$WORKDIR/dec_hyb_${label}"
     mkdir -p "$enc_dir" "$dec_dir"
     $FC hybrid -i "$src" -o "$enc_dir" -k "$pubkey" && \
-    $FC hybrid -i "$enc_dir"/*.fcr -o "$dec_dir" -k "$secretkey" -p "$PASS" && \
+    $FC hybrid -i "$enc_dir"/*.fcr -o "$dec_dir" -k "$secretkey" && \
     assert_dirs_identical "$src" "$dec_dir/$(basename "$src")"
 }
 
@@ -256,7 +257,7 @@ enc100h="$WORKDIR/enc_hyb_100mb"
 dec100h="$WORKDIR/dec_hyb_100mb"
 mkdir -p "$enc100h" "$dec100h"
 if $FC hybrid -i "$WORKDIR/100mb_hyb.bin" -o "$enc100h" -k "$PUB" 2>/dev/null && \
-   $FC hybrid -i "$enc100h"/*.fcr -o "$dec100h" -k "$SECRET_KEY" -p "$PASS" 2>/dev/null && \
+   $FC hybrid -i "$enc100h"/*.fcr -o "$dec100h" -k "$SECRET_KEY" 2>/dev/null && \
    assert_identical "$WORKDIR/100mb_hyb.bin" "$dec100h/100mb_hyb.bin"; then
     echo "PASS"
     PASSED=$((PASSED + 1))
@@ -333,9 +334,9 @@ sym_saveas_roundtrip() {
     local saveas_dir="$WORKDIR/saveas"
     local saveas_dec="$WORKDIR/saveas_dec"
     mkdir -p "$saveas_dir" "$saveas_dec"
-    $FC symmetric -i "$WORKDIR/small.txt" -o "$saveas_dir" -p "$PASS" -s "$saveas_dir/custom_name.fcr" && \
+    $FC symmetric -i "$WORKDIR/small.txt" -o "$saveas_dir" -s "$saveas_dir/custom_name.fcr" && \
     test -f "$saveas_dir/custom_name.fcr" && \
-    $FC symmetric -i "$saveas_dir/custom_name.fcr" -o "$saveas_dec" -p "$PASS" && \
+    $FC symmetric -i "$saveas_dir/custom_name.fcr" -o "$saveas_dec" && \
     assert_identical "$WORKDIR/small.txt" "$saveas_dec/small.txt"
 }
 run_test "sym: custom output name" sym_saveas_roundtrip
@@ -346,7 +347,7 @@ hyb_saveas_roundtrip() {
     mkdir -p "$saveas2_dir" "$saveas2_dec"
     $FC hybrid -i "$WORKDIR/small.txt" -o "$saveas2_dir" -k "$PUB" -s "$saveas2_dir/renamed.fcr" && \
     test -f "$saveas2_dir/renamed.fcr" && \
-    $FC hybrid -i "$saveas2_dir/renamed.fcr" -o "$saveas2_dec" -k "$SECRET_KEY" -p "$PASS" && \
+    $FC hybrid -i "$saveas2_dir/renamed.fcr" -o "$saveas2_dec" -k "$SECRET_KEY" && \
     assert_identical "$WORKDIR/small.txt" "$saveas2_dec/small.txt"
 }
 run_test "hyb: custom output name" hyb_saveas_roundtrip
@@ -359,7 +360,7 @@ hyb_recipient_roundtrip() {
     local RCPT
     RCPT=$($FC recipient "$PUB")
     $FC hybrid -i "$WORKDIR/small.txt" -o "$rcpt_enc" -r "$RCPT" && \
-    $FC hybrid -i "$rcpt_enc"/*.fcr -o "$rcpt_dec" -k "$SECRET_KEY" -p "$PASS" && \
+    $FC hybrid -i "$rcpt_enc"/*.fcr -o "$rcpt_dec" -k "$SECRET_KEY" && \
     assert_identical "$WORKDIR/small.txt" "$rcpt_dec/small.txt"
 }
 run_test "hyb: recipient string roundtrip" hyb_recipient_roundtrip
@@ -375,40 +376,36 @@ echo "--- Phase 6: Error Handling & Rejection ---"
 err1_enc="$WORKDIR/err1_enc"
 err1_dec="$WORKDIR/err1_dec"
 mkdir -p "$err1_enc" "$err1_dec"
-$FC symmetric -i "$WORKDIR/small.txt" -o "$err1_enc" -p "$PASS" 2>/dev/null
+$FC symmetric -i "$WORKDIR/small.txt" -o "$err1_enc" 2>/dev/null
 run_test_expect_fail "sym: wrong password rejects" \
-    $FC symmetric -i "$err1_enc"/*.fcr -o "$err1_dec" -p "$PASS2"
-
+    env FERROCRYPT_PASSPHRASE="$PASS2" $FC symmetric -i "$err1_enc"/*.fcr -o "$err1_dec"
 # Wrong passphrase on hybrid decrypt
 err2_enc="$WORKDIR/err2_enc"
 err2_dec="$WORKDIR/err2_dec"
 mkdir -p "$err2_enc" "$err2_dec"
 $FC hybrid -i "$WORKDIR/small.txt" -o "$err2_enc" -k "$PUB" 2>/dev/null
 run_test_expect_fail "hyb: wrong passphrase rejects" \
-    $FC hybrid -i "$err2_enc"/*.fcr -o "$err2_dec" -k "$SECRET_KEY" -p "$PASS2"
-
+    env FERROCRYPT_PASSPHRASE="$PASS2" $FC hybrid -i "$err2_enc"/*.fcr -o "$err2_dec" -k "$SECRET_KEY"
 # Wrong key entirely (different keypair)
 err3_dec="$WORKDIR/err3_dec"
 mkdir -p "$err3_dec"
 run_test_expect_fail "hyb: wrong key rejects" \
-    $FC hybrid -i "$err2_enc"/*.fcr -o "$err3_dec" -k "$SECRET_KEY2" -p "$PASS2"
-
+    env FERROCRYPT_PASSPHRASE="$PASS2" $FC hybrid -i "$err2_enc"/*.fcr -o "$err3_dec" -k "$SECRET_KEY2"
 # Non-existent input file
 run_test_expect_fail "sym: non-existent input rejects" \
-    $FC symmetric -i "$WORKDIR/does_not_exist.txt" -o "$WORKDIR" -p "$PASS"
-
+    $FC symmetric -i "$WORKDIR/does_not_exist.txt" -o "$WORKDIR"
 run_test_expect_fail "hyb: non-existent input rejects" \
     $FC hybrid -i "$WORKDIR/does_not_exist.txt" -o "$WORKDIR" -k "$PUB"
 
 # Empty password for symmetric
 run_test_expect_fail "sym: empty password rejects" \
-    $FC symmetric -i "$WORKDIR/small.txt" -o "$WORKDIR/err_empty" -p ""
+    env FERROCRYPT_PASSPHRASE="" $FC symmetric -i "$WORKDIR/small.txt" -o "$WORKDIR/err_empty"
 
 # Corrupted ciphertext: flip bytes in the middle of encrypted file
 corr_enc="$WORKDIR/corr_enc"
 corr_dec="$WORKDIR/corr_dec"
 mkdir -p "$corr_enc" "$corr_dec"
-$FC symmetric -i "$WORKDIR/1mb.bin" -o "$corr_enc" -p "$PASS" 2>/dev/null
+$FC symmetric -i "$WORKDIR/1mb.bin" -o "$corr_enc" 2>/dev/null
 CORR_FILE="$corr_enc/1mb.fcr"
 # Flip 100 bytes near the middle of the file
 FILE_SIZE=$(stat -f%z "$CORR_FILE" 2>/dev/null || stat -c%s "$CORR_FILE" 2>/dev/null)
@@ -422,13 +419,12 @@ for i in range(100):
 open('$CORR_FILE', 'wb').write(data)
 "
 run_test_expect_fail "sym: corrupted ciphertext rejects" \
-    $FC symmetric -i "$CORR_FILE" -o "$corr_dec" -p "$PASS"
-
+    $FC symmetric -i "$CORR_FILE" -o "$corr_dec"
 # Corrupted header: flip the magic byte
 corr2_enc="$WORKDIR/corr2_enc"
 corr2_dec="$WORKDIR/corr2_dec"
 mkdir -p "$corr2_enc" "$corr2_dec"
-$FC symmetric -i "$WORKDIR/small.txt" -o "$corr2_enc" -p "$PASS" 2>/dev/null
+$FC symmetric -i "$WORKDIR/small.txt" -o "$corr2_enc" 2>/dev/null
 CORR2_FILE="$corr2_enc/small.fcr"
 python3 -c "
 data = bytearray(open('$CORR2_FILE', 'rb').read())
@@ -442,19 +438,17 @@ open('$CORR2_FILE', 'wb').write(data)
 # value → file is not detected as FerroCrypt → routes to encrypt (not decrypt).
 # The file is treated as a normal input and encrypted successfully.
 run_test "sym: corrupted magic byte encrypts (not detected as FerroCrypt)" \
-    $FC symmetric -i "$CORR2_FILE" -o "$corr2_dec" -p "$PASS"
-
+    $FC symmetric -i "$CORR2_FILE" -o "$corr2_dec"
 # Truncated file (cut at half)
 trunc_enc="$WORKDIR/trunc_enc"
 trunc_dec="$WORKDIR/trunc_dec"
 mkdir -p "$trunc_enc" "$trunc_dec"
-$FC symmetric -i "$WORKDIR/1mb.bin" -o "$trunc_enc" -p "$PASS" 2>/dev/null
+$FC symmetric -i "$WORKDIR/1mb.bin" -o "$trunc_enc" 2>/dev/null
 TRUNC_FILE="$trunc_enc/1mb.fcr"
 TRUNC_SIZE=$(stat -f%z "$TRUNC_FILE" 2>/dev/null || stat -c%s "$TRUNC_FILE" 2>/dev/null)
 dd if="$TRUNC_FILE" of="$TRUNC_FILE.trunc" bs=$((TRUNC_SIZE / 2)) count=1 2>/dev/null
 run_test_expect_fail "sym: truncated file rejects" \
-    $FC symmetric -i "$TRUNC_FILE.trunc" -o "$trunc_dec" -p "$PASS"
-
+    $FC symmetric -i "$TRUNC_FILE.trunc" -o "$trunc_dec"
 # Corrupted hybrid file
 corr3_enc="$WORKDIR/corr3_enc"
 corr3_dec="$WORKDIR/corr3_dec"
@@ -469,8 +463,7 @@ for i in range(200):
 open('$CORR3_FILE', 'wb').write(data)
 "
 run_test_expect_fail "hyb: corrupted ciphertext rejects" \
-    $FC hybrid -i "$CORR3_FILE" -o "$corr3_dec" -k "$SECRET_KEY" -p "$PASS"
-
+    $FC hybrid -i "$CORR3_FILE" -o "$corr3_dec" -k "$SECRET_KEY"
 echo ""
 
 # ──────────────────────────────────────────────
@@ -483,18 +476,16 @@ cross_dec="$WORKDIR/cross_dec"
 mkdir -p "$cross_enc" "$cross_dec"
 
 # Encrypt with symmetric, try to decrypt with hybrid
-$FC symmetric -i "$WORKDIR/small.txt" -o "$cross_enc" -p "$PASS" 2>/dev/null
+$FC symmetric -i "$WORKDIR/small.txt" -o "$cross_enc" 2>/dev/null
 run_test_expect_fail "cross: sym-encrypted file via hybrid rejects" \
-    $FC hybrid -i "$cross_enc"/small.fcr -o "$cross_dec" -k "$SECRET_KEY" -p "$PASS"
-
+    $FC hybrid -i "$cross_enc"/small.fcr -o "$cross_dec" -k "$SECRET_KEY"
 # Encrypt with hybrid, try to decrypt with symmetric
 cross2_enc="$WORKDIR/cross2_enc"
 cross2_dec="$WORKDIR/cross2_dec"
 mkdir -p "$cross2_enc" "$cross2_dec"
 $FC hybrid -i "$WORKDIR/small.txt" -o "$cross2_enc" -k "$PUB" 2>/dev/null
 run_test_expect_fail "cross: hyb-encrypted file via symmetric rejects" \
-    $FC symmetric -i "$cross2_enc"/small.fcr -o "$cross2_dec" -p "$PASS"
-
+    $FC symmetric -i "$cross2_enc"/small.fcr -o "$cross2_dec"
 echo ""
 
 # ──────────────────────────────────────────────
@@ -513,12 +504,10 @@ run_test_expect_fail "hyb: malformed key file rejects (encrypt)" \
 # Also try malformed key for decryption
 $FC hybrid -i "$WORKDIR/small.txt" -o "$mal_enc" -k "$PUB" 2>/dev/null
 run_test_expect_fail "hyb: malformed key file rejects (decrypt)" \
-    $FC hybrid -i "$mal_enc"/small.fcr -o "$mal_dec" -k "$malformed_key" -p "$PASS"
-
+    $FC hybrid -i "$mal_enc"/small.fcr -o "$mal_dec" -k "$malformed_key"
 # Key overwrite (keygen into directory with existing keys)
 run_test_expect_fail "keygen: refuses to overwrite existing keys" \
-    $FC keygen -o "$KEYS" -p "$PASS"
-
+    $FC keygen -o "$KEYS"
 # Tiny random files with .fcr extension are not detected as FerroCrypt files
 # (magic-byte routing), so the CLI encrypts them. Verify roundtrip works.
 tiny_enc="$WORKDIR/tiny_enc"
@@ -527,14 +516,14 @@ mkdir -p "$tiny_enc" "$tiny_dec"
 for sz in 1 3 5 7; do
     dd if=/dev/urandom of="$WORKDIR/tiny_${sz}.fcr" bs="$sz" count=1 2>/dev/null
     run_test "sym: ${sz}-byte .fcr file encrypts (not detected as FerroCrypt)" \
-        $FC symmetric -i "$WORKDIR/tiny_${sz}.fcr" -o "$tiny_enc" -p "$PASS"
+        $FC symmetric -i "$WORKDIR/tiny_${sz}.fcr" -o "$tiny_enc"
 done
 
 # Corrupted header fields (version, header length, HMAC tag)
 hdr_src="$WORKDIR/hdr_enc"
 hdr_dec="$WORKDIR/hdr_dec"
 mkdir -p "$hdr_src" "$hdr_dec"
-$FC symmetric -i "$WORKDIR/1mb.bin" -o "$hdr_src" -p "$PASS" 2>/dev/null
+$FC symmetric -i "$WORKDIR/1mb.bin" -o "$hdr_src" 2>/dev/null
 HDR_FILE="$hdr_src/1mb.fcr"
 HDR_SIZE=$(stat -f%z "$HDR_FILE" 2>/dev/null || stat -c%s "$HDR_FILE" 2>/dev/null)
 
@@ -548,8 +537,7 @@ data[11 + 2] ^= 0xFF  # copy 1, major version
 open('$WORKDIR/corrupt_version.fcr', 'wb').write(data)
 "
 run_test_expect_fail "sym: corrupted version byte rejects" \
-    $FC symmetric -i "$WORKDIR/corrupt_version.fcr" -o "$hdr_dec" -p "$PASS"
-
+    $FC symmetric -i "$WORKDIR/corrupt_version.fcr" -o "$hdr_dec"
 # Flip header length bytes (logical prefix bytes 4-5) in all 3 replicated copies
 # Encoded prefix: [pad(3)] [copy0(8)] [copy1(8)] [copy2(8)]
 cp "$HDR_FILE" "$WORKDIR/corrupt_hdrlen.fcr"
@@ -561,8 +549,7 @@ for copy_start in [3, 11, 19]:
 open('$WORKDIR/corrupt_hdrlen.fcr', 'wb').write(data)
 "
 run_test_expect_fail "sym: corrupted header length rejects" \
-    $FC symmetric -i "$WORKDIR/corrupt_hdrlen.fcr" -o "$hdr_dec" -p "$PASS"
-
+    $FC symmetric -i "$WORKDIR/corrupt_hdrlen.fcr" -o "$hdr_dec"
 # Corrupt the same salt byte in all three replicated copies so majority vote
 # cannot recover the original, causing HMAC mismatch.
 # Symmetric header: [prefix(27)] [encoded_salt(99)] ...
@@ -578,8 +565,7 @@ data[base + 3 + 64 + byte_pos] ^= 0xFF      # copy 2
 open('$WORKDIR/corrupt_hmac.fcr', 'wb').write(data)
 "
 run_test_expect_fail "sym: corrupted header data (HMAC mismatch) rejects" \
-    $FC symmetric -i "$WORKDIR/corrupt_hmac.fcr" -o "$hdr_dec" -p "$PASS"
-
+    $FC symmetric -i "$WORKDIR/corrupt_hmac.fcr" -o "$hdr_dec"
 echo ""
 
 # ──────────────────────────────────────────────
@@ -602,7 +588,7 @@ pids=()
 all_ok=true
 for i in $(seq 1 8); do
     mkdir -p "$CONC_DIR/enc_$i"
-    $FC symmetric -i "$CONC_DIR/src_$i.bin" -o "$CONC_DIR/enc_$i" -p "$PASS" 2>/dev/null &
+    $FC symmetric -i "$CONC_DIR/src_$i.bin" -o "$CONC_DIR/enc_$i" 2>/dev/null &
     pids+=($!)
 done
 for pid in "${pids[@]}"; do
@@ -625,7 +611,7 @@ pids=()
 all_ok=true
 for i in $(seq 1 8); do
     mkdir -p "$CONC_DIR/dec_$i"
-    $FC symmetric -i "$CONC_DIR/enc_$i"/*.fcr -o "$CONC_DIR/dec_$i" -p "$PASS" 2>/dev/null &
+    $FC symmetric -i "$CONC_DIR/enc_$i"/*.fcr -o "$CONC_DIR/dec_$i" 2>/dev/null &
     pids+=($!)
 done
 for pid in "${pids[@]}"; do
@@ -660,7 +646,7 @@ pids=()
 all_ok=true
 for i in $(seq 1 4); do
     mkdir -p "$CONC_DIR/mix_sym_enc_$i" "$CONC_DIR/mix_hyb_enc_$i"
-    $FC symmetric -i "$CONC_DIR/src_$i.bin" -o "$CONC_DIR/mix_sym_enc_$i" -p "$PASS" 2>/dev/null &
+    $FC symmetric -i "$CONC_DIR/src_$i.bin" -o "$CONC_DIR/mix_sym_enc_$i" 2>/dev/null &
     pids+=($!)
     $FC hybrid -i "$CONC_DIR/src_$((i+4)).bin" -o "$CONC_DIR/mix_hyb_enc_$i" -k "$PUB" 2>/dev/null &
     pids+=($!)
@@ -692,8 +678,8 @@ big_enc="$WORKDIR/big_enc"
 big_dec="$WORKDIR/big_dec"
 mkdir -p "$big_enc" "$big_dec"
 START=$(date +%s)
-if $FC symmetric -i "$WORKDIR/3gb.bin" -o "$big_enc" -p "$PASS" 2>/dev/null && \
-   $FC symmetric -i "$big_enc"/*.fcr -o "$big_dec" -p "$PASS" 2>/dev/null && \
+if $FC symmetric -i "$WORKDIR/3gb.bin" -o "$big_enc" 2>/dev/null && \
+   $FC symmetric -i "$big_enc"/*.fcr -o "$big_dec" 2>/dev/null && \
    assert_identical "$WORKDIR/3gb.bin" "$big_dec/3gb.bin"; then
     END=$(date +%s)
     echo "PASS ($((END - START))s)"
@@ -721,11 +707,11 @@ for round in $(seq 1 10); do
     cyc_enc="$WORKDIR/cycle_enc_$round"
     cyc_dec="$WORKDIR/cycle_dec_$round"
     mkdir -p "$cyc_enc" "$cyc_dec"
-    if ! $FC symmetric -i "$WORKDIR/cycle_current.bin" -o "$cyc_enc" -p "$PASS" 2>/dev/null; then
+    if ! $FC symmetric -i "$WORKDIR/cycle_current.bin" -o "$cyc_enc" 2>/dev/null; then
         cycle_ok=false
         break
     fi
-    if ! $FC symmetric -i "$cyc_enc"/*.fcr -o "$cyc_dec" -p "$PASS" 2>/dev/null; then
+    if ! $FC symmetric -i "$cyc_enc"/*.fcr -o "$cyc_dec" 2>/dev/null; then
         cycle_ok=false
         break
     fi
@@ -752,8 +738,8 @@ mkdir -p "$dbl_enc1" "$dbl_dec1"
 
 echo -n "[$((TOTAL + 1))] sym: passing .fcr to symmetric auto-decrypts ... "
 TOTAL=$((TOTAL + 1))
-if $FC symmetric -i "$WORKDIR/1mb.bin" -o "$dbl_enc1" -p "$PASS" 2>/dev/null && \
-   $FC symmetric -i "$dbl_enc1"/*.fcr -o "$dbl_dec1" -p "$PASS" 2>/dev/null && \
+if $FC symmetric -i "$WORKDIR/1mb.bin" -o "$dbl_enc1" 2>/dev/null && \
+   $FC symmetric -i "$dbl_enc1"/*.fcr -o "$dbl_dec1" 2>/dev/null && \
    assert_identical "$WORKDIR/1mb.bin" "$dbl_dec1/1mb.bin"; then
     echo "PASS"
     PASSED=$((PASSED + 1))
@@ -798,8 +784,8 @@ echo "--- Phase 14: Non-determinism Verification ---"
 det_enc1="$WORKDIR/det_enc1"
 det_enc2="$WORKDIR/det_enc2"
 mkdir -p "$det_enc1" "$det_enc2"
-$FC symmetric -i "$WORKDIR/small.txt" -o "$det_enc1" -p "$PASS" 2>/dev/null
-$FC symmetric -i "$WORKDIR/small.txt" -o "$det_enc2" -p "$PASS" 2>/dev/null
+$FC symmetric -i "$WORKDIR/small.txt" -o "$det_enc1" 2>/dev/null
+$FC symmetric -i "$WORKDIR/small.txt" -o "$det_enc2" 2>/dev/null
 
 echo -n "[$((TOTAL + 1))] sym: encryptions produce different ciphertexts (non-deterministic) ... "
 TOTAL=$((TOTAL + 1))
@@ -842,11 +828,11 @@ for i in $(seq 1 30); do
     rdec="$WORKDIR/rapid_dec_$i"
     mkdir -p "$rdir" "$rdec"
     printf "rapid test data #%d with some padding to make it interesting %s" "$i" "$(head -c 100 /dev/urandom | base64)" > "$WORKDIR/rapid_src_$i.txt"
-    if ! $FC symmetric -i "$WORKDIR/rapid_src_$i.txt" -o "$rdir" -p "$PASS" 2>/dev/null; then
+    if ! $FC symmetric -i "$WORKDIR/rapid_src_$i.txt" -o "$rdir" 2>/dev/null; then
         rapid_ok=false
         break
     fi
-    if ! $FC symmetric -i "$rdir"/*.fcr -o "$rdec" -p "$PASS" 2>/dev/null; then
+    if ! $FC symmetric -i "$rdir"/*.fcr -o "$rdec" 2>/dev/null; then
         rapid_ok=false
         break
     fi

@@ -61,8 +61,7 @@ fn test_cli_symmetric_encrypt_decrypt_file() {
         .arg(&input_file)
         .arg("-o")
         .arg(&encrypt_dir)
-        .arg("-p")
-        .arg("test_password")
+        .env("FERROCRYPT_PASSPHRASE", "test_password")
         .output()
         .expect("Failed to execute encrypt command");
 
@@ -81,8 +80,7 @@ fn test_cli_symmetric_encrypt_decrypt_file() {
         .arg(encrypt_dir.join("test.fcr"))
         .arg("-o")
         .arg(&decrypt_dir)
-        .arg("-p")
-        .arg("test_password")
+        .env("FERROCRYPT_PASSPHRASE", "test_password")
         .output()
         .expect("Failed to execute decrypt command");
 
@@ -119,8 +117,7 @@ fn test_cli_symmetric_multi_chunk_file() {
         .arg(&input_file)
         .arg("-o")
         .arg(&encrypt_dir)
-        .arg("-p")
-        .arg("multi_chunk_password")
+        .env("FERROCRYPT_PASSPHRASE", "multi_chunk_password")
         .output()
         .expect("Failed to execute encrypt command");
 
@@ -133,8 +130,7 @@ fn test_cli_symmetric_multi_chunk_file() {
         .arg(encrypt_dir.join("multi_chunk.fcr"))
         .arg("-o")
         .arg(&decrypt_dir)
-        .arg("-p")
-        .arg("multi_chunk_password")
+        .env("FERROCRYPT_PASSPHRASE", "multi_chunk_password")
         .output()
         .expect("Failed to execute decrypt command");
 
@@ -166,8 +162,7 @@ fn test_cli_symmetric_wrong_password() {
         .arg(&input_file)
         .arg("-o")
         .arg(&encrypt_dir)
-        .arg("-p")
-        .arg("correct_password")
+        .env("FERROCRYPT_PASSPHRASE", "correct_password")
         .output()
         .expect("Failed to execute encrypt command");
 
@@ -180,8 +175,7 @@ fn test_cli_symmetric_wrong_password() {
         .arg(encrypt_dir.join("secret.fcr"))
         .arg("-o")
         .arg(&decrypt_dir)
-        .arg("-p")
-        .arg("wrong_password")
+        .env("FERROCRYPT_PASSPHRASE", "wrong_password")
         .output()
         .expect("Failed to execute decrypt command");
 
@@ -203,8 +197,7 @@ fn test_cli_keygen() {
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
-        .arg("-p")
-        .arg("key_password")
+        .env("FERROCRYPT_PASSPHRASE", "key_password")
         .output()
         .expect("Failed to execute keygen command");
 
@@ -248,8 +241,7 @@ fn test_cli_hybrid_encrypt_decrypt_file() {
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
-        .arg("-p")
-        .arg("key_pass")
+        .env("FERROCRYPT_PASSPHRASE", "key_pass")
         .output()
         .expect("Failed to execute keygen");
 
@@ -284,8 +276,7 @@ fn test_cli_hybrid_encrypt_decrypt_file() {
         .arg(&decrypt_dir)
         .arg("-k")
         .arg(keys_dir.join("private.key"))
-        .arg("-p")
-        .arg("key_pass")
+        .env("FERROCRYPT_PASSPHRASE", "key_pass")
         .output()
         .expect("Failed to execute decrypt");
 
@@ -322,8 +313,7 @@ fn test_cli_hybrid_wrong_key_passphrase() {
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
-        .arg("-p")
-        .arg("correct_key_pass")
+        .env("FERROCRYPT_PASSPHRASE", "correct_key_pass")
         .output()
         .expect("Failed to execute keygen");
 
@@ -348,8 +338,7 @@ fn test_cli_hybrid_wrong_key_passphrase() {
         .arg(&decrypt_dir)
         .arg("-k")
         .arg(keys_dir.join("private.key"))
-        .arg("-p")
-        .arg("wrong_key_pass")
+        .env("FERROCRYPT_PASSPHRASE", "wrong_key_pass")
         .output()
         .expect("Failed to execute decrypt");
 
@@ -385,8 +374,7 @@ fn test_cli_directory_encryption() {
         .arg(&input_dir)
         .arg("-o")
         .arg(&encrypt_dir)
-        .arg("-p")
-        .arg("dir_password")
+        .env("FERROCRYPT_PASSPHRASE", "dir_password")
         .output()
         .expect("Failed to execute encrypt command");
 
@@ -400,8 +388,7 @@ fn test_cli_directory_encryption() {
         .arg(encrypt_dir.join("input_folder.fcr"))
         .arg("-o")
         .arg(&decrypt_dir)
-        .arg("-p")
-        .arg("dir_password")
+        .env("FERROCRYPT_PASSPHRASE", "dir_password")
         .output()
         .expect("Failed to execute decrypt command");
 
@@ -441,10 +428,9 @@ fn test_cli_symmetric_save_as() {
         .arg(&input_file)
         .arg("-o")
         .arg(&encrypt_dir)
-        .arg("-p")
-        .arg("test_password")
         .arg("-s")
         .arg(&custom_output)
+        .env("FERROCRYPT_PASSPHRASE", "test_password")
         .output()
         .expect("Failed to execute encrypt command");
 
@@ -464,8 +450,7 @@ fn test_cli_symmetric_save_as() {
         .arg(&custom_output)
         .arg("-o")
         .arg(&decrypt_dir)
-        .arg("-p")
-        .arg("test_password")
+        .env("FERROCRYPT_PASSPHRASE", "test_password")
         .output()
         .expect("Failed to execute decrypt command");
 
@@ -501,8 +486,7 @@ fn test_cli_hybrid_save_as() {
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
-        .arg("-p")
-        .arg("key_pass")
+        .env("FERROCRYPT_PASSPHRASE", "key_pass")
         .output()
         .expect("Failed to execute keygen");
 
@@ -538,8 +522,7 @@ fn test_cli_hybrid_save_as() {
         .arg(&decrypt_dir)
         .arg("-k")
         .arg(keys_dir.join("private.key"))
-        .arg("-p")
-        .arg("key_pass")
+        .env("FERROCRYPT_PASSPHRASE", "key_pass")
         .output()
         .expect("Failed to execute decrypt");
 
@@ -572,8 +555,7 @@ fn test_cli_symmetric_without_save_as_uses_default() {
         .arg(&input_file)
         .arg("-o")
         .arg(&encrypt_dir)
-        .arg("-p")
-        .arg("test_password")
+        .env("FERROCRYPT_PASSPHRASE", "test_password")
         .output()
         .expect("Failed to execute encrypt command");
 
@@ -593,8 +575,7 @@ fn test_cli_fingerprint() {
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
-        .arg("-p")
-        .arg("fp_pass")
+        .env("FERROCRYPT_PASSPHRASE", "fp_pass")
         .output()
         .expect("Failed to execute keygen");
 
@@ -628,8 +609,7 @@ fn test_cli_keygen_prints_fingerprint() {
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
-        .arg("-p")
-        .arg("keygen_fp_pass")
+        .env("FERROCRYPT_PASSPHRASE", "keygen_fp_pass")
         .output()
         .expect("Failed to execute keygen");
 
@@ -655,8 +635,7 @@ fn test_cli_recipient() {
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
-        .arg("-p")
-        .arg("rcpt_pass")
+        .env("FERROCRYPT_PASSPHRASE", "rcpt_pass")
         .output()
         .expect("Failed to execute keygen");
     assert!(keygen.status.success());
@@ -690,8 +669,7 @@ fn test_cli_keygen_prints_recipient() {
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
-        .arg("-p")
-        .arg("keygen_rcpt_pass")
+        .env("FERROCRYPT_PASSPHRASE", "keygen_rcpt_pass")
         .output()
         .expect("Failed to execute keygen");
 
@@ -721,8 +699,7 @@ fn test_cli_hybrid_encrypt_with_recipient_string() {
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
-        .arg("-p")
-        .arg("rcpt_enc_pass")
+        .env("FERROCRYPT_PASSPHRASE", "rcpt_enc_pass")
         .output()
         .expect("Failed to execute keygen");
     assert!(keygen.status.success());
@@ -768,8 +745,7 @@ fn test_cli_hybrid_encrypt_with_recipient_string() {
         .arg(&decrypt_dir)
         .arg("-k")
         .arg(keys_dir.join("private.key"))
-        .arg("-p")
-        .arg("rcpt_enc_pass")
+        .env("FERROCRYPT_PASSPHRASE", "rcpt_enc_pass")
         .output()
         .expect("Failed to decrypt");
     assert!(
@@ -794,8 +770,7 @@ fn test_cli_recipient_alias_rc() {
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
-        .arg("-p")
-        .arg("alias_rc_pass")
+        .env("FERROCRYPT_PASSPHRASE", "alias_rc_pass")
         .output()
         .expect("Failed to execute keygen");
     assert!(keygen.status.success());
@@ -854,8 +829,7 @@ fn test_cli_hybrid_rejects_key_and_recipient_together() {
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
-        .arg("-p")
-        .arg("conflict_pass")
+        .env("FERROCRYPT_PASSPHRASE", "conflict_pass")
         .output()
         .expect("Failed to execute keygen");
     assert!(keygen.status.success());
@@ -904,8 +878,7 @@ fn test_cli_hybrid_decrypt_rejects_recipient_flag() {
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
-        .arg("-p")
-        .arg("decrypt_reject_pass")
+        .env("FERROCRYPT_PASSPHRASE", "decrypt_reject_pass")
         .output()
         .expect("Failed to execute keygen");
     assert!(keygen.status.success());
@@ -932,6 +905,7 @@ fn test_cli_hybrid_decrypt_rejects_recipient_flag() {
         .trim()
         .to_string();
 
+    // -k and -r conflict at clap level, so this should fail
     let decrypt = Command::new(&binary)
         .arg("hybrid")
         .arg("-i")
@@ -942,8 +916,7 @@ fn test_cli_hybrid_decrypt_rejects_recipient_flag() {
         .arg(keys_dir.join("private.key"))
         .arg("-r")
         .arg(&recipient)
-        .arg("-p")
-        .arg("decrypt_reject_pass")
+        .env("FERROCRYPT_PASSPHRASE", "decrypt_reject_pass")
         .output()
         .expect("Failed to execute decrypt with recipient flag");
 
@@ -990,8 +963,7 @@ fn test_cli_symmetric_decrypt_rejects_save_as() {
         .arg(&input_file)
         .arg("-o")
         .arg(&encrypt_dir)
-        .arg("-p")
-        .arg("save_as_pass")
+        .env("FERROCRYPT_PASSPHRASE", "save_as_pass")
         .output()
         .expect("Failed to encrypt");
     assert!(encrypt.status.success());
@@ -1002,10 +974,9 @@ fn test_cli_symmetric_decrypt_rejects_save_as() {
         .arg(encrypt_dir.join("data.fcr"))
         .arg("-o")
         .arg(&decrypt_dir)
-        .arg("-p")
-        .arg("save_as_pass")
         .arg("-s")
         .arg(decrypt_dir.join("ignored.txt"))
+        .env("FERROCRYPT_PASSPHRASE", "save_as_pass")
         .output()
         .expect("Failed to execute decrypt with save-as");
 
@@ -1030,8 +1001,7 @@ fn test_cli_hybrid_decrypt_rejects_save_as() {
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
-        .arg("-p")
-        .arg("hybrid_save_as_pass")
+        .env("FERROCRYPT_PASSPHRASE", "hybrid_save_as_pass")
         .output()
         .expect("Failed to execute keygen");
     assert!(keygen.status.success());
@@ -1056,52 +1026,13 @@ fn test_cli_hybrid_decrypt_rejects_save_as() {
         .arg(&decrypt_dir)
         .arg("-k")
         .arg(keys_dir.join("private.key"))
-        .arg("-p")
-        .arg("hybrid_save_as_pass")
         .arg("-s")
         .arg(decrypt_dir.join("ignored.txt"))
+        .env("FERROCRYPT_PASSPHRASE", "hybrid_save_as_pass")
         .output()
         .expect("Failed to execute decrypt with save-as");
 
     assert!(!decrypt.status.success());
-}
-
-#[test]
-fn test_cli_hybrid_encrypt_rejects_passphrase_flag() {
-    let test_dir = setup_test_dir("cli_hybrid_encrypt_rejects_passphrase_flag");
-    let keys_dir = test_dir.join("keys");
-    let input_file = test_dir.join("data.txt");
-    let encrypt_dir = test_dir.join("encrypted");
-    fs::create_dir_all(&keys_dir).unwrap();
-    fs::create_dir_all(&encrypt_dir).unwrap();
-    create_test_file(&input_file, "hybrid passphrase reject test");
-
-    let binary = get_binary_path();
-
-    let keygen = Command::new(&binary)
-        .arg("keygen")
-        .arg("-o")
-        .arg(&keys_dir)
-        .arg("-p")
-        .arg("hybrid_encrypt_reject_pass")
-        .output()
-        .expect("Failed to execute keygen");
-    assert!(keygen.status.success());
-
-    let output = Command::new(&binary)
-        .arg("hybrid")
-        .arg("-i")
-        .arg(&input_file)
-        .arg("-o")
-        .arg(&encrypt_dir)
-        .arg("-k")
-        .arg(keys_dir.join("public.key"))
-        .arg("-p")
-        .arg("should_fail")
-        .output()
-        .expect("Failed to execute hybrid encrypt with passphrase");
-
-    assert!(!output.status.success());
 }
 
 #[test]
@@ -1120,8 +1051,7 @@ fn test_cli_hybrid_encrypt_rejects_max_kdf_memory() {
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
-        .arg("-p")
-        .arg("hybrid_kdf_reject_pass")
+        .env("FERROCRYPT_PASSPHRASE", "hybrid_kdf_reject_pass")
         .output()
         .expect("Failed to execute keygen");
     assert!(keygen.status.success());
@@ -1158,14 +1088,68 @@ fn test_cli_symmetric_encrypt_rejects_max_kdf_memory() {
         .arg(&input_file)
         .arg("-o")
         .arg(&encrypt_dir)
-        .arg("-p")
-        .arg("sym_reject_pass")
+        .env("FERROCRYPT_PASSPHRASE", "sym_reject_pass")
         .arg("--max-kdf-memory")
         .arg("64")
         .output()
         .expect("Failed to execute symmetric encrypt with max-kdf-memory");
 
     assert!(!output.status.success());
+}
+
+#[test]
+fn test_cli_rejects_empty_passphrase_env_var() {
+    let test_dir = setup_test_dir("cli_empty_passphrase_env");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    create_test_file(&input_file, "empty passphrase test");
+
+    let binary = get_binary_path();
+
+    let output = Command::new(&binary)
+        .arg("symmetric")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "")
+        .output()
+        .expect("Failed to execute with empty passphrase");
+
+    assert!(!output.status.success());
+}
+
+#[test]
+fn test_cli_fails_without_passphrase_and_no_tty() {
+    // On Unix, rpassword reads from /dev/tty directly, so null stdin does
+    // not simulate a non-interactive session.
+    #[cfg(unix)]
+    return;
+
+    #[cfg(not(unix))]
+    {
+        let test_dir = setup_test_dir("cli_no_passphrase_no_tty");
+        let input_file = test_dir.join("data.txt");
+        let encrypt_dir = test_dir.join("encrypted");
+        fs::create_dir_all(&encrypt_dir).unwrap();
+        create_test_file(&input_file, "no tty test");
+
+        let binary = get_binary_path();
+
+        let output = Command::new(&binary)
+            .arg("symmetric")
+            .arg("-i")
+            .arg(&input_file)
+            .arg("-o")
+            .arg(&encrypt_dir)
+            .env_remove("FERROCRYPT_PASSPHRASE")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("Failed to execute without passphrase");
+
+        assert!(!output.status.success());
+    }
 }
 
 #[ctor::dtor]

@@ -157,26 +157,26 @@ It may be increased in future releases if required by dependencies or language i
 
 Run without arguments to start an interactive REPL. Aliases are available in interactive mode.
 
-**Note:** The `-p` flag passes the passphrase on the command line, which may be recorded in shell history. Consider clearing your history after use, or wrapping the call in a script that reads the passphrase from a secure source.
+Passphrases are never passed on the command line. The CLI prompts interactively with hidden input when a passphrase is needed (with confirmation on encrypt/keygen). For non-interactive use (scripts, CI), set the `FERROCRYPT_PASSPHRASE` environment variable.
 
 ### Symmetric
 
 ```bash
-# Encrypt
-ferrocrypt symmetric -i secret.txt -o ./encrypted -p "my password"
+# Encrypt (prompts for passphrase with confirmation)
+ferrocrypt symmetric -i secret.txt -o ./encrypted
 
-# Decrypt
-ferrocrypt symmetric -i ./encrypted/secret.fcr -o ./decrypted -p "my password"
+# Decrypt (prompts for passphrase)
+ferrocrypt symmetric -i ./encrypted/secret.fcr -o ./decrypted
 
 # Encrypt with custom output filename
-ferrocrypt symmetric -i secret.txt -o ./encrypted -p "my password" -s ./encrypted/backup.fcr
+ferrocrypt symmetric -i secret.txt -o ./encrypted -s ./encrypted/backup.fcr
 ```
 
 ### Hybrid
 
 ```bash
-# Generate keys (prints fingerprint and recipient string)
-ferrocrypt keygen -o ./keys -p "key password"
+# Generate keys (prompts for passphrase with confirmation)
+ferrocrypt keygen -o ./keys
 
 # Print recipient string (for sharing)
 ferrocrypt recipient ./keys/public.key
@@ -184,14 +184,14 @@ ferrocrypt recipient ./keys/public.key
 # Verify a public key's fingerprint
 ferrocrypt fingerprint ./keys/public.key
 
-# Encrypt with recipient string
+# Encrypt with recipient string (no passphrase needed)
 ferrocrypt hybrid -i secret.txt -o ./encrypted -r fcr1...
 
-# Encrypt with public key file
+# Encrypt with public key file (no passphrase needed)
 ferrocrypt hybrid -i secret.txt -o ./encrypted -k ./keys/public.key
 
-# Decrypt with private key
-ferrocrypt hybrid -i ./encrypted/secret.fcr -o ./decrypted -k ./keys/private.key -p "key password"
+# Decrypt with private key (prompts for passphrase)
+ferrocrypt hybrid -i ./encrypted/secret.fcr -o ./decrypted -k ./keys/private.key
 ```
 
 ### Interactive Mode
@@ -201,7 +201,9 @@ $ ferrocrypt
 FerroCrypt interactive mode
 Commands: symmetric (sym), hybrid (hyb), keygen (gen), fingerprint (fp), recipient (rc), quit
 
-ferrocrypt> sym -i secret.txt -o out -p "my password"
+ferrocrypt> sym -i secret.txt -o out
+Passphrase:
+Confirm passphrase:
 ferrocrypt> quit
 ```
 
@@ -213,7 +215,6 @@ ferrocrypt> quit
 |---|---|
 | `-i, --input-path` | Input file or directory |
 | `-o, --output-path` | Output directory |
-| `-p, --passphrase` | Password for encryption/decryption |
 | `-s, --save-as` | Custom output file path (encrypt only, optional) |
 | `--max-kdf-memory` | Maximum KDF memory cost to accept in MiB (decrypt only, optional) |
 
@@ -225,7 +226,6 @@ ferrocrypt> quit
 | `-o, --output-path` | Output directory |
 | `-k, --key` | Key file path: public key for encrypt, private key for decrypt |
 | `-r, --recipient` | Bech32 recipient string for encryption (`fcr1...`) |
-| `-p, --passphrase` | Private key passphrase (decrypt only) |
 | `-s, --save-as` | Custom output file path (encrypt only, optional) |
 | `--max-kdf-memory` | Maximum KDF memory cost to accept in MiB (decrypt only, optional) |
 
@@ -234,7 +234,6 @@ ferrocrypt> quit
 | Flag | Description |
 |---|---|
 | `-o, --output-path` | Output directory for the key pair |
-| `-p, --passphrase` | Passphrase to encrypt the private key |
 
 #### `fingerprint`
 

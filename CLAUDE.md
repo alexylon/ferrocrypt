@@ -78,8 +78,9 @@ Decryption reverses: read header → derive/decrypt keys → verify HMAC → Dec
 - `generate_key_pair` returns `GeneratedKeyPair` with paths and fingerprint.
 - `encode_recipient`/`decode_recipient` — Bech32 `fcr1...` strings for human-readable public key exchange. `hybrid_encrypt_from_recipient` encrypts from raw bytes without a key file.
 - CLI `hybrid --recipient / -r` accepts a `fcr1...` string directly for encryption. `recipient` (alias `rc`) subcommand prints the string from a key file.
+- CLI never accepts passphrases as command-line arguments. Passphrases are prompted interactively via `rpassword` (hidden TTY input) with confirmation on encrypt/keygen. For non-interactive use (tests, scripts), set the `FERROCRYPT_PASSPHRASE` environment variable.
 - Encrypt functions accept `save_as: Option<&Path>` to override the default `{stem}.fcr` output path.
-- Integration tests use `tests/workspace/` as a temp directory, cleaned up by a `#[ctor::dtor]` hook.
+- Integration tests use `tests/workspace/` as a temp directory, cleaned up by a `#[ctor::dtor]` hook. CLI integration tests use `FERROCRYPT_PASSPHRASE` env var to supply passphrases non-interactively.
 - `ENCRYPTED_EXTENSION` ("fcr") constant lives in `format.rs`.
 
 ## Non-Negotiable Rules

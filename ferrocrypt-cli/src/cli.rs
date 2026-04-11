@@ -7,9 +7,12 @@ use ferrocrypt::{
     generate_key_pair, hybrid_auto, hybrid_encrypt_from_recipient, public_key_fingerprint,
     symmetric_auto, validate_secret_key_file,
 };
-
+use rpassword::prompt_password;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
+use subtle::ConstantTimeEq;
+
+const PASSPHRASE_ENV: &str = "FERROCRYPT_PASSPHRASE";
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -25,9 +28,6 @@ pub enum CliCommand {
     Keygen {
         #[arg(short, long)]
         output_path: String,
-
-        #[arg(short, long)]
-        passphrase: String,
     },
 
     #[command(alias = "hyb")]
@@ -52,9 +52,6 @@ pub enum CliCommand {
             help = "Bech32 recipient string for encryption (fcr1...)"
         )]
         recipient: Option<String>,
-
-        #[arg(short, long, default_value = "")]
-        passphrase: String,
 
         #[arg(
             short,
@@ -87,9 +84,6 @@ pub enum CliCommand {
         #[arg(short, long)]
         output_path: String,
 
-        #[arg(short, long)]
-        passphrase: String,
-
         #[arg(
             short,
             long,
@@ -100,6 +94,49 @@ pub enum CliCommand {
         #[arg(long, help = "Maximum KDF memory cost to accept (MiB, decrypt only)")]
         max_kdf_memory: Option<u32>,
     },
+}
+
+/// Reads a passphrase from the `FERROCRYPT_PASSPHRASE` environment variable
+/// (for non-interactive use) or prompts via the TTY with hidden input.
+///
+/// When `confirm` is `true` (encryption), the user is prompted twice and the
+/// inputs are compared in constant time.
+fn read_passphrase(confirm: bool) -> Result<SecretString, CryptoError> {
+    if let Ok(val) = std::env::var(PASSPHRASE_ENV) {
+        let secret = SecretString::from(val);
+        if secret.expose_secret().is_empty() {
+            return Err(CryptoError::InvalidInput(
+                "Passphrase must not be empty".to_string(),
+            ));
+        }
+        return Ok(secret);
+    }
+
+    let passphrase = SecretString::from(prompt_password("Passphrase: ").map_err(CryptoError::Io)?);
+
+    if passphrase.expose_secret().is_empty() {
+        return Err(CryptoError::InvalidInput(
+            "Passphrase must not be empty".to_string(),
+        ));
+    }
+
+    if confirm {
+        let confirm_passphrase =
+            SecretString::from(prompt_password("Confirm passphrase: ").map_err(CryptoError::Io)?);
+
+        if !bool::from(
+            passphrase
+                .expose_secret()
+                .as_bytes()
+                .ct_eq(confirm_passphrase.expose_secret().as_bytes()),
+        ) {
+            return Err(CryptoError::InvalidInput(
+                "Passphrases do not match".to_string(),
+            ));
+        }
+    }
+
+    Ok(passphrase)
 }
 
 fn format_duration(d: std::time::Duration) -> String {
@@ -125,12 +162,9 @@ pub fn run() -> Result<(), CryptoError> {
 
 fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
     match cmd {
-        CliCommand::Keygen {
-            output_path,
-            passphrase,
-        } => {
+        CliCommand::Keygen { output_path } => {
             let output_path = Path::new(&output_path);
-            let passphrase = SecretString::from(passphrase);
+            let passphrase = read_passphrase(true)?;
             let info = generate_key_pair(&passphrase, output_path, |msg| eprintln!("{msg}"))?;
             let recipient = encode_recipient(&info.public_key_path)?;
             println!("\nGenerated key pair in {}\n", output_path.display());
@@ -153,23 +187,16 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
             output_path,
             key,
             recipient,
-            passphrase,
             save_as,
             max_kdf_memory,
         } => {
             let input_path = Path::new(&input_path);
             let output_path = Path::new(&output_path);
             let is_encrypt = detect_encryption_mode(input_path)?.is_none();
-            let passphrase = SecretString::from(passphrase);
             let kdf_limit = max_kdf_memory.map(KdfLimit::from_mib).transpose()?;
             let start = std::time::Instant::now();
 
             if is_encrypt {
-                if !passphrase.expose_secret().is_empty() {
-                    return Err(CryptoError::InvalidInput(
-                        "--passphrase is for decryption only".to_string(),
-                    ));
-                }
                 if kdf_limit.is_some() {
                     return Err(CryptoError::InvalidInput(
                         "--max-kdf-memory is for decryption only".to_string(),
@@ -213,7 +240,7 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
                         input_path,
                         output_path,
                         key_path,
-                        &passphrase,
+                        &SecretString::from(String::new()),
                         save_as.as_deref().map(Path::new),
                         kdf_limit.as_ref(),
                         |msg| eprintln!("{msg}"),
@@ -225,6 +252,7 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
                 })?;
                 let key_path = Path::new(key);
                 validate_secret_key_file(key_path)?;
+                let passphrase = read_passphrase(false)?;
                 hybrid_auto(
                     input_path,
                     output_path,
@@ -252,14 +280,12 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
         CliCommand::Symmetric {
             input_path,
             output_path,
-            passphrase,
             save_as,
             max_kdf_memory,
         } => {
             let input_path = Path::new(&input_path);
             let output_path = Path::new(&output_path);
             let is_encrypt = detect_encryption_mode(input_path)?.is_none();
-            let passphrase = SecretString::from(passphrase);
             let kdf_limit = max_kdf_memory.map(KdfLimit::from_mib).transpose()?;
             let start = std::time::Instant::now();
 
@@ -275,6 +301,7 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
                 ));
             }
 
+            let passphrase = read_passphrase(is_encrypt)?;
             let output = symmetric_auto(
                 input_path,
                 output_path,

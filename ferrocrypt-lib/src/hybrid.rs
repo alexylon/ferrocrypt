@@ -711,4 +711,65 @@ mod tests {
         let result = open_envelope(&envelope, &wrong_secret);
         assert!(result.is_err());
     }
+
+    /// Well-sized but garbage envelope bytes must fail AEAD decryption.
+    #[test]
+    fn garbage_envelope_fails() {
+        let secret = StaticSecret::random_from_rng(OsRng);
+        let mut garbage = [0xCC; ENVELOPE_SIZE];
+        // Put a valid-looking (but wrong) public key so DH doesn't produce all-zero
+        let decoy_pk = PublicKey::from(&StaticSecret::random_from_rng(OsRng));
+        garbage[..EPHEMERAL_PUB_SIZE].copy_from_slice(decoy_pk.as_bytes());
+
+        let result = open_envelope(&garbage, &secret);
+        assert!(result.is_err());
+    }
+
+    /// Flipping one bit in an otherwise valid envelope must fail.
+    #[test]
+    fn envelope_single_bit_flip_detected() {
+        let secret = StaticSecret::random_from_rng(OsRng);
+        let public = PublicKey::from(&secret);
+        let combined_key = [0xAA; COMBINED_KEY_SIZE];
+
+        let mut envelope = seal_envelope(&combined_key, &public).unwrap();
+        // Flip one bit in the ciphertext region
+        envelope[EPHEMERAL_PUB_SIZE + ENVELOPE_NONCE_SIZE + 10] ^= 0x01;
+
+        let result = open_envelope(&envelope, &secret);
+        assert!(result.is_err());
+    }
+
+    /// Key file with unsupported algorithm byte must be rejected.
+    #[test]
+    fn key_file_wrong_algorithm_rejected() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let key_pass = SecretString::from("p".to_string());
+        generate_key_pair(&key_pass, tmp.path(), &|_| {}).unwrap();
+
+        // Patch algorithm byte (offset 3) to an unknown value
+        let pub_path = tmp.path().join(PUBLIC_KEY_FILENAME);
+        let mut data = fs::read(&pub_path).unwrap();
+        data[3] = 0xFF;
+        fs::write(&pub_path, &data).unwrap();
+
+        let result = read_public_key(&pub_path);
+        assert!(result.is_err());
+    }
+
+    /// Key file truncated to just the header must be rejected.
+    #[test]
+    fn truncated_key_file_rejected() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let key_pass = SecretString::from("p".to_string());
+        generate_key_pair(&key_pass, tmp.path(), &|_| {}).unwrap();
+
+        let pub_path = tmp.path().join(PUBLIC_KEY_FILENAME);
+        let data = fs::read(&pub_path).unwrap();
+        // Write only the 8-byte header, no key data
+        fs::write(&pub_path, &data[..format::KEY_FILE_HEADER_SIZE]).unwrap();
+
+        let result = read_public_key(&pub_path);
+        assert!(result.is_err());
+    }
 }

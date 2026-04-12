@@ -1,5 +1,5 @@
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use chacha20poly1305::{
@@ -12,12 +12,12 @@ use sha3::Sha3_256;
 use zeroize::Zeroizing;
 
 use crate::common::{
-    ARGON2_SALT_SIZE, DecryptReader, ENCRYPTION_KEY_SIZE, EncryptWriter, FILE_TOO_SHORT,
-    HMAC_KEY_SIZE, HMAC_TAG_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams, STREAM_NONCE_SIZE,
-    ct_eq_32, encryption_base_name, hmac_sha3_256, hmac_sha3_256_verify, sha3_256_hash,
+    ARGON2_SALT_SIZE, DecryptReader, ENCRYPTION_KEY_SIZE, EncryptWriter, HMAC_KEY_SIZE,
+    HMAC_TAG_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams, STREAM_NONCE_SIZE, ct_eq_32,
+    encryption_base_name, hmac_sha3_256, hmac_sha3_256_verify, sha3_256_hash,
 };
-use crate::format;
-use crate::replication::{decode_exact, encode, encoded_size};
+use crate::format::{self, HEADER_PREFIX_SIZE};
+use crate::replication::encode;
 use crate::{CryptoError, archiver};
 
 const HKDF_SALT_SIZE: usize = 32;
@@ -28,6 +28,104 @@ type DerivedKeys = (
     Zeroizing<[u8; ENCRYPTION_KEY_SIZE]>,
     Zeroizing<[u8; HMAC_KEY_SIZE]>,
 );
+
+/// Authenticated core of a symmetric `.fcr` header.
+///
+/// Sits between the 8-byte prefix (which carries `ext_len`) and the trailing
+/// HMAC tag. Field order is the single source of truth for the symmetric
+/// wire format — every code path (encrypt, decrypt, HMAC computation) goes
+/// through this struct so writer and reader cannot drift.
+struct SymmetricHeaderCore {
+    salt: [u8; ARGON2_SALT_SIZE],
+    hkdf_salt: [u8; HKDF_SALT_SIZE],
+    kdf_bytes: [u8; KDF_PARAMS_SIZE],
+    stream_nonce: [u8; STREAM_NONCE_SIZE],
+    verification_hash: [u8; ENCRYPTION_KEY_SIZE],
+    ext_bytes: Vec<u8>,
+}
+
+impl SymmetricHeaderCore {
+    /// Constructs a core after validating the `ext_bytes` length bound.
+    ///
+    /// `ext_bytes.len()` must fit in a `u16` because the header prefix stores
+    /// `ext_len` as a big-endian `u16`. This is the single enforcement point:
+    /// once a `SymmetricHeaderCore` exists, `ext_len()` is infallible by
+    /// construction.
+    fn new(
+        salt: [u8; ARGON2_SALT_SIZE],
+        hkdf_salt: [u8; HKDF_SALT_SIZE],
+        kdf_bytes: [u8; KDF_PARAMS_SIZE],
+        stream_nonce: [u8; STREAM_NONCE_SIZE],
+        verification_hash: [u8; ENCRYPTION_KEY_SIZE],
+        ext_bytes: Vec<u8>,
+    ) -> Result<Self, CryptoError> {
+        if ext_bytes.len() > u16::MAX as usize {
+            return Err(CryptoError::InvalidInput(
+                "ext_bytes exceeds u16::MAX".to_string(),
+            ));
+        }
+        Ok(Self {
+            salt,
+            hkdf_salt,
+            kdf_bytes,
+            stream_nonce,
+            verification_hash,
+            ext_bytes,
+        })
+    }
+
+    /// Writes every field, in canonical order, using triple replication.
+    fn write_to(&self, writer: &mut impl Write) -> io::Result<()> {
+        writer.write_all(&encode(&self.salt))?;
+        writer.write_all(&encode(&self.hkdf_salt))?;
+        writer.write_all(&encode(&self.kdf_bytes))?;
+        writer.write_all(&encode(&self.stream_nonce))?;
+        writer.write_all(&encode(&self.verification_hash))?;
+        writer.write_all(&encode(&self.ext_bytes))?;
+        Ok(())
+    }
+
+    /// Reads every field, in canonical order, from a triple-replicated stream.
+    /// `ext_len` is the logical size of the `ext_bytes` region, taken from
+    /// the authenticated header prefix.
+    fn read_from(reader: &mut impl io::Read, ext_len: usize) -> Result<Self, CryptoError> {
+        Self::new(
+            format::read_replicated_field::<ARGON2_SALT_SIZE>(reader)?,
+            format::read_replicated_field::<HKDF_SALT_SIZE>(reader)?,
+            format::read_replicated_field::<KDF_PARAMS_SIZE>(reader)?,
+            format::read_replicated_field::<STREAM_NONCE_SIZE>(reader)?,
+            format::read_replicated_field::<ENCRYPTION_KEY_SIZE>(reader)?,
+            format::read_replicated_vec(reader, ext_len)?,
+        )
+    }
+
+    /// Canonical HMAC-SHA3-256 input: `prefix || fixed_core || ext_bytes`.
+    fn hmac_input(&self, prefix: &[u8; HEADER_PREFIX_SIZE]) -> Vec<u8> {
+        let mut msg = Vec::with_capacity(
+            prefix.len()
+                + ARGON2_SALT_SIZE
+                + HKDF_SALT_SIZE
+                + KDF_PARAMS_SIZE
+                + STREAM_NONCE_SIZE
+                + ENCRYPTION_KEY_SIZE
+                + self.ext_bytes.len(),
+        );
+        msg.extend_from_slice(prefix);
+        msg.extend_from_slice(&self.salt);
+        msg.extend_from_slice(&self.hkdf_salt);
+        msg.extend_from_slice(&self.kdf_bytes);
+        msg.extend_from_slice(&self.stream_nonce);
+        msg.extend_from_slice(&self.verification_hash);
+        msg.extend_from_slice(&self.ext_bytes);
+        msg
+    }
+
+    /// Returns the `ext_len` value to pack into the header prefix.
+    /// Infallible by construction: `Self::new` rejects oversized `ext_bytes`.
+    fn ext_len(&self) -> u16 {
+        self.ext_bytes.len() as u16
+    }
+}
 
 /// Derives domain-separated encryption and HMAC subkeys from a passphrase.
 ///
@@ -106,59 +204,35 @@ pub fn encrypt_file(
             .open(&working_path)?;
         file_created = true;
 
-        let encoded_salt = encode(&salt);
-        let encoded_hkdf_salt = encode(&hkdf_salt);
-        let kdf_bytes = kdf_params.to_bytes();
-        let encoded_kdf = encode(&kdf_bytes);
-        let encoded_key_hash = encode(&verification_hash);
+        let mut stream_nonce = [0u8; STREAM_NONCE_SIZE];
+        OsRng.fill_bytes(&mut stream_nonce);
 
-        let mut nonce = [0u8; STREAM_NONCE_SIZE];
-        OsRng.fill_bytes(&mut nonce);
-        let encoded_nonce = encode(&nonce);
-
-        // No extensions today. ext_bytes is an empty authenticated region;
+        // No extensions today. `ext_bytes` is an empty authenticated region;
         // future minor versions append optional data here and it will be
         // bound to the file by the HMAC.
-        let ext_bytes: [u8; 0] = [];
-        let encoded_ext = encode(&ext_bytes);
+        let core = SymmetricHeaderCore::new(
+            salt,
+            hkdf_salt,
+            kdf_params.to_bytes(),
+            stream_nonce,
+            verification_hash,
+            Vec::new(),
+        )?;
 
         let prefix = format::build_header_prefix(
             format::TYPE_SYMMETRIC,
             format::VERSION_MAJOR,
             0,
-            ext_bytes.len() as u16,
+            core.ext_len(),
         );
-        let encoded_prefix = encode(&prefix);
+        let hmac_tag = hmac_sha3_256(hmac_key.as_ref(), &core.hmac_input(&prefix))?;
 
-        let stream_encryptor = stream::EncryptorBE32::from_aead(cipher, nonce.as_ref().into());
+        let stream_encryptor =
+            stream::EncryptorBE32::from_aead(cipher, stream_nonce.as_ref().into());
 
-        let mut hmac_message = Vec::with_capacity(
-            prefix.len()
-                + ARGON2_SALT_SIZE
-                + HKDF_SALT_SIZE
-                + KDF_PARAMS_SIZE
-                + STREAM_NONCE_SIZE
-                + ENCRYPTION_KEY_SIZE
-                + ext_bytes.len(),
-        );
-        hmac_message.extend_from_slice(&prefix);
-        hmac_message.extend_from_slice(&salt);
-        hmac_message.extend_from_slice(&hkdf_salt);
-        hmac_message.extend_from_slice(&kdf_bytes);
-        hmac_message.extend_from_slice(&nonce);
-        hmac_message.extend_from_slice(&verification_hash);
-        hmac_message.extend_from_slice(&ext_bytes);
-        let hmac_tag = hmac_sha3_256(hmac_key.as_ref(), &hmac_message)?;
-        let encoded_hmac_tag = encode(&hmac_tag);
-
-        dest.write_all(&encoded_prefix)?;
-        dest.write_all(&encoded_salt)?;
-        dest.write_all(&encoded_hkdf_salt)?;
-        dest.write_all(&encoded_kdf)?;
-        dest.write_all(&encoded_nonce)?;
-        dest.write_all(&encoded_key_hash)?;
-        dest.write_all(&encoded_ext)?;
-        dest.write_all(&encoded_hmac_tag)?;
+        dest.write_all(&encode(&prefix))?;
+        core.write_to(&mut dest)?;
+        dest.write_all(&encode(&hmac_tag))?;
 
         let encrypt_writer = EncryptWriter::new(stream_encryptor, dest);
         let (_, encrypt_writer) = archiver::archive(input_path, encrypt_writer)?;
@@ -225,71 +299,22 @@ fn decrypt_file_v3(
 ) -> Result<PathBuf, CryptoError> {
     format::validate_file_flags(&header)?;
 
-    let ext_len = header.ext_len as usize;
+    let core = SymmetricHeaderCore::read_from(&mut encrypted_file, header.ext_len as usize)?;
+    let hmac_tag = format::read_replicated_field::<HMAC_TAG_SIZE>(&mut encrypted_file)?;
 
-    let mut encoded_salt = vec![0u8; encoded_size(ARGON2_SALT_SIZE)];
-    let mut encoded_hkdf_salt = vec![0u8; encoded_size(HKDF_SALT_SIZE)];
-    let mut encoded_kdf = vec![0u8; encoded_size(KDF_PARAMS_SIZE)];
-    let mut encoded_nonce = vec![0u8; encoded_size(STREAM_NONCE_SIZE)];
-    let mut encoded_key_hash = vec![0u8; encoded_size(ENCRYPTION_KEY_SIZE)];
-    let mut encoded_ext = vec![0u8; encoded_size(ext_len)];
-    let mut encoded_hmac_tag = vec![0u8; encoded_size(HMAC_TAG_SIZE)];
-
-    encrypted_file
-        .read_exact(&mut encoded_salt)
-        .map_err(|_| CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()))?;
-    encrypted_file
-        .read_exact(&mut encoded_hkdf_salt)
-        .map_err(|_| CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()))?;
-    encrypted_file
-        .read_exact(&mut encoded_kdf)
-        .map_err(|_| CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()))?;
-    encrypted_file
-        .read_exact(&mut encoded_nonce)
-        .map_err(|_| CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()))?;
-    encrypted_file
-        .read_exact(&mut encoded_key_hash)
-        .map_err(|_| CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()))?;
-    encrypted_file
-        .read_exact(&mut encoded_ext)
-        .map_err(|_| CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()))?;
-    encrypted_file
-        .read_exact(&mut encoded_hmac_tag)
-        .map_err(|_| CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()))?;
-
-    let salt = decode_exact(&encoded_salt, ARGON2_SALT_SIZE)?;
-    let hkdf_salt = decode_exact(&encoded_hkdf_salt, HKDF_SALT_SIZE)?;
-    let kdf_bytes = decode_exact(&encoded_kdf, KDF_PARAMS_SIZE)?;
-    let kdf_params = KdfParams::from_bytes(kdf_bytes.as_slice().try_into()?, kdf_limit)?;
-    let nonce = decode_exact(&encoded_nonce, STREAM_NONCE_SIZE)?;
-    let verification_hash = decode_exact(&encoded_key_hash, ENCRYPTION_KEY_SIZE)?;
-    let ext_bytes = decode_exact(&encoded_ext, ext_len)?;
-    let hmac_tag = decode_exact(&encoded_hmac_tag, HMAC_TAG_SIZE)?;
+    let kdf_params = KdfParams::from_bytes(&core.kdf_bytes, kdf_limit)?;
 
     on_progress("Deriving key\u{2026}");
-    let (encryption_key, hmac_key) = derive_keys(passphrase, &salt, &hkdf_salt, &kdf_params)?;
+    let (encryption_key, hmac_key) =
+        derive_keys(passphrase, &core.salt, &core.hkdf_salt, &kdf_params)?;
 
-    let mut hmac_message = Vec::with_capacity(
-        prefix_bytes.len()
-            + salt.len()
-            + hkdf_salt.len()
-            + KDF_PARAMS_SIZE
-            + nonce.len()
-            + verification_hash.len()
-            + ext_bytes.len(),
-    );
-    hmac_message.extend_from_slice(&prefix_bytes);
-    hmac_message.extend_from_slice(&salt);
-    hmac_message.extend_from_slice(&hkdf_salt);
-    hmac_message.extend_from_slice(&kdf_bytes);
-    hmac_message.extend_from_slice(&nonce);
-    hmac_message.extend_from_slice(&verification_hash);
-    hmac_message.extend_from_slice(&ext_bytes);
-
-    if let Err(hmac_err) = hmac_sha3_256_verify(hmac_key.as_ref(), &hmac_message, &hmac_tag) {
+    if let Err(hmac_err) = hmac_sha3_256_verify(
+        hmac_key.as_ref(),
+        &core.hmac_input(&prefix_bytes),
+        &hmac_tag,
+    ) {
         let key_hash: [u8; ENCRYPTION_KEY_SIZE] = sha3_256_hash(encryption_key.as_ref())?;
-        let key_correct = ct_eq_32(&key_hash, verification_hash.as_slice().try_into()?);
-        if !key_correct {
+        if !ct_eq_32(&key_hash, &core.verification_hash) {
             return Err(CryptoError::AuthenticationFailed);
         }
         return Err(hmac_err);
@@ -297,7 +322,8 @@ fn decrypt_file_v3(
 
     on_progress("Decrypting\u{2026}");
     let cipher = XChaCha20Poly1305::new(encryption_key.as_ref().into());
-    let stream_decryptor = stream::DecryptorBE32::from_aead(cipher, nonce.as_slice().into());
+    let stream_decryptor =
+        stream::DecryptorBE32::from_aead(cipher, core.stream_nonce.as_slice().into());
 
     let decrypt_reader = DecryptReader::new(stream_decryptor, encrypted_file);
     archiver::unarchive(decrypt_reader, output_dir)
@@ -307,7 +333,8 @@ fn decrypt_file_v3(
 mod tests {
     use super::*;
     use crate::format::HEADER_PREFIX_ENCODED_SIZE;
-    use std::io::Cursor;
+    use crate::replication::{decode_exact, encoded_size};
+    use std::io::{Cursor, Read};
 
     /// Helper: reads the v3.0 header of a freshly-encrypted file and returns the
     /// decoded fields plus the byte offset at which ciphertext begins.
@@ -493,5 +520,44 @@ mod tests {
         let result = decrypt_file(&encrypted_path, &decrypt_dir, &passphrase, None, &|_| {});
         assert!(result.is_err(), "tampered ext_bytes must fail HMAC");
         Ok(())
+    }
+
+    /// `SymmetricHeaderCore::new` must accept an `ext_bytes` exactly the size
+    /// of `u16::MAX` (the on-disk maximum) and reject anything larger. This
+    /// is the single enforcement point for the wire-format bound; an untested
+    /// check is an aspirational check.
+    #[test]
+    fn new_rejects_oversized_ext_bytes() {
+        let salt = [0u8; ARGON2_SALT_SIZE];
+        let hkdf_salt = [0u8; HKDF_SALT_SIZE];
+        let kdf_bytes = [0u8; KDF_PARAMS_SIZE];
+        let stream_nonce = [0u8; STREAM_NONCE_SIZE];
+        let verification_hash = [0u8; ENCRYPTION_KEY_SIZE];
+
+        // Max u16 accepted.
+        let accepted = SymmetricHeaderCore::new(
+            salt,
+            hkdf_salt,
+            kdf_bytes,
+            stream_nonce,
+            verification_hash,
+            vec![0u8; u16::MAX as usize],
+        );
+        assert!(accepted.is_ok(), "u16::MAX ext_bytes must be accepted");
+
+        // One byte over max is rejected.
+        let rejected = SymmetricHeaderCore::new(
+            salt,
+            hkdf_salt,
+            kdf_bytes,
+            stream_nonce,
+            verification_hash,
+            vec![0u8; u16::MAX as usize + 1],
+        );
+        match rejected {
+            Ok(_) => panic!("u16::MAX + 1 ext_bytes must be rejected"),
+            Err(CryptoError::InvalidInput(_)) => {}
+            Err(other) => panic!("expected InvalidInput, got: {other:?}"),
+        }
     }
 }

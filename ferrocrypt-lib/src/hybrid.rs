@@ -1,5 +1,5 @@
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use chacha20poly1305::{
@@ -13,12 +13,12 @@ use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::common::{
-    ARGON2_SALT_SIZE, DecryptReader, ENCRYPTION_KEY_SIZE, EncryptWriter, FILE_TOO_SHORT,
-    HMAC_KEY_SIZE, HMAC_TAG_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams, STREAM_NONCE_SIZE,
-    TAG_SIZE, ct_eq_32, encryption_base_name, hmac_sha3_256, hmac_sha3_256_verify,
+    ARGON2_SALT_SIZE, DecryptReader, ENCRYPTION_KEY_SIZE, EncryptWriter, HMAC_KEY_SIZE,
+    HMAC_TAG_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams, STREAM_NONCE_SIZE, TAG_SIZE, ct_eq_32,
+    encryption_base_name, hmac_sha3_256, hmac_sha3_256_verify,
 };
-use crate::format::{self, PUBLIC_KEY_DATA_SIZE, SECRET_KEY_DATA_SIZE};
-use crate::replication::{decode_exact, encode, encoded_size};
+use crate::format::{self, HEADER_PREFIX_SIZE, PUBLIC_KEY_DATA_SIZE, SECRET_KEY_DATA_SIZE};
+use crate::replication::encode;
 use crate::{CryptoError, archiver};
 
 // Both keys are packed into a single envelope: [encryption_key | hmac_key]
@@ -28,6 +28,80 @@ const EPHEMERAL_PUB_SIZE: usize = 32;
 const ENVELOPE_NONCE_SIZE: usize = 24;
 const ENVELOPE_CIPHERTEXT_SIZE: usize = COMBINED_KEY_SIZE + TAG_SIZE;
 const ENVELOPE_SIZE: usize = EPHEMERAL_PUB_SIZE + ENVELOPE_NONCE_SIZE + ENVELOPE_CIPHERTEXT_SIZE;
+
+/// Authenticated core of a hybrid `.fcr` header.
+///
+/// Sits between the 8-byte prefix (which carries `ext_len`) and the trailing
+/// HMAC tag. Field order is the single source of truth for the hybrid wire
+/// format — every code path (encrypt, decrypt, HMAC computation) goes through
+/// this struct so writer and reader cannot drift.
+struct HybridHeaderCore {
+    envelope: [u8; ENVELOPE_SIZE],
+    stream_nonce: [u8; STREAM_NONCE_SIZE],
+    ext_bytes: Vec<u8>,
+}
+
+impl HybridHeaderCore {
+    /// Constructs a core after validating the `ext_bytes` length bound.
+    ///
+    /// `ext_bytes.len()` must fit in a `u16` because the header prefix stores
+    /// `ext_len` as a big-endian `u16`. This is the single enforcement point:
+    /// once a `HybridHeaderCore` exists, `ext_len()` is infallible by
+    /// construction.
+    fn new(
+        envelope: [u8; ENVELOPE_SIZE],
+        stream_nonce: [u8; STREAM_NONCE_SIZE],
+        ext_bytes: Vec<u8>,
+    ) -> Result<Self, CryptoError> {
+        if ext_bytes.len() > u16::MAX as usize {
+            return Err(CryptoError::InvalidInput(
+                "ext_bytes exceeds u16::MAX".to_string(),
+            ));
+        }
+        Ok(Self {
+            envelope,
+            stream_nonce,
+            ext_bytes,
+        })
+    }
+
+    /// Writes every field, in canonical order, using triple replication.
+    fn write_to(&self, writer: &mut impl Write) -> io::Result<()> {
+        writer.write_all(&encode(&self.envelope))?;
+        writer.write_all(&encode(&self.stream_nonce))?;
+        writer.write_all(&encode(&self.ext_bytes))?;
+        Ok(())
+    }
+
+    /// Reads every field, in canonical order, from a triple-replicated stream.
+    /// `ext_len` is the logical size of the `ext_bytes` region, taken from the
+    /// authenticated header prefix.
+    fn read_from(reader: &mut impl io::Read, ext_len: usize) -> Result<Self, CryptoError> {
+        Self::new(
+            format::read_replicated_field::<ENVELOPE_SIZE>(reader)?,
+            format::read_replicated_field::<STREAM_NONCE_SIZE>(reader)?,
+            format::read_replicated_vec(reader, ext_len)?,
+        )
+    }
+
+    /// Canonical HMAC-SHA3-256 input: `prefix || envelope || stream_nonce || ext_bytes`.
+    fn hmac_input(&self, prefix: &[u8; HEADER_PREFIX_SIZE]) -> Vec<u8> {
+        let mut msg = Vec::with_capacity(
+            prefix.len() + ENVELOPE_SIZE + STREAM_NONCE_SIZE + self.ext_bytes.len(),
+        );
+        msg.extend_from_slice(prefix);
+        msg.extend_from_slice(&self.envelope);
+        msg.extend_from_slice(&self.stream_nonce);
+        msg.extend_from_slice(&self.ext_bytes);
+        msg
+    }
+
+    /// Returns the `ext_len` value to pack into the header prefix.
+    /// Infallible by construction: `Self::new` rejects oversized `ext_bytes`.
+    fn ext_len(&self) -> u16 {
+        self.ext_bytes.len() as u16
+    }
+}
 
 const SECRET_KEY_NONCE_SIZE: usize = 24;
 const SECRET_KEY_SIZE: usize = 32;
@@ -137,8 +211,8 @@ fn encrypt_file_inner(
     let result = (|| -> Result<(), CryptoError> {
         let cipher = XChaCha20Poly1305::new(&encryption_key);
 
-        let mut nonce = [0u8; STREAM_NONCE_SIZE];
-        OsRng.fill_bytes(&mut nonce);
+        let mut stream_nonce = [0u8; STREAM_NONCE_SIZE];
+        OsRng.fill_bytes(&mut stream_nonce);
 
         let mut combined_key = Zeroizing::new(vec![0u8; COMBINED_KEY_SIZE]);
         combined_key[..ENCRYPTION_KEY_SIZE].copy_from_slice(&encryption_key);
@@ -146,33 +220,21 @@ fn encrypt_file_inner(
 
         let envelope = seal_envelope(&combined_key, recipient_public)?;
 
-        let encoded_envelope = encode(&envelope);
-        let encoded_nonce = encode(&nonce);
-
-        // No extensions today. ext_bytes is an empty authenticated region;
+        // No extensions today. `ext_bytes` is an empty authenticated region;
         // future minor versions append optional data here and it will be
         // bound to the file by the HMAC.
-        let ext_bytes: [u8; 0] = [];
-        let encoded_ext = encode(&ext_bytes);
+        let core = HybridHeaderCore::new(envelope, stream_nonce, Vec::new())?;
 
         let prefix = format::build_header_prefix(
             format::TYPE_HYBRID,
             format::HYBRID_VERSION_MAJOR,
             0,
-            ext_bytes.len() as u16,
+            core.ext_len(),
         );
-        let encoded_prefix = encode(&prefix);
+        let hmac_tag = hmac_sha3_256(&hmac_key, &core.hmac_input(&prefix))?;
 
-        let stream_encryptor = stream::EncryptorBE32::from_aead(cipher, nonce.as_ref().into());
-
-        let mut hmac_message =
-            Vec::with_capacity(prefix.len() + envelope.len() + nonce.len() + ext_bytes.len());
-        hmac_message.extend_from_slice(&prefix);
-        hmac_message.extend_from_slice(&envelope);
-        hmac_message.extend_from_slice(&nonce);
-        hmac_message.extend_from_slice(&ext_bytes);
-        let hmac_tag = hmac_sha3_256(&hmac_key, &hmac_message)?;
-        let encoded_hmac_tag = encode(&hmac_tag);
+        let stream_encryptor =
+            stream::EncryptorBE32::from_aead(cipher, stream_nonce.as_ref().into());
 
         let mut dest = OpenOptions::new()
             .append(true)
@@ -180,18 +242,16 @@ fn encrypt_file_inner(
             .open(&working_path)?;
         file_created = true;
 
-        dest.write_all(&encoded_prefix)?;
-        dest.write_all(&encoded_envelope)?;
-        dest.write_all(&encoded_nonce)?;
-        dest.write_all(&encoded_ext)?;
-        dest.write_all(&encoded_hmac_tag)?;
+        dest.write_all(&encode(&prefix))?;
+        core.write_to(&mut dest)?;
+        dest.write_all(&encode(&hmac_tag))?;
 
         let encrypt_writer = EncryptWriter::new(stream_encryptor, dest);
         let (_, encrypt_writer) = archiver::archive(input_path, encrypt_writer)?;
         let dest = encrypt_writer.finish()?;
         dest.sync_all()?;
 
-        nonce.zeroize();
+        stream_nonce.zeroize();
         Ok(())
     })();
 
@@ -257,55 +317,22 @@ fn decrypt_file_v4(
 ) -> Result<PathBuf, CryptoError> {
     format::validate_file_flags(&header)?;
 
-    let ext_len = header.ext_len as usize;
-
-    let mut encoded_envelope = vec![0u8; encoded_size(ENVELOPE_SIZE)];
-    let mut encoded_nonce = vec![0u8; encoded_size(STREAM_NONCE_SIZE)];
-    let mut encoded_ext = vec![0u8; encoded_size(ext_len)];
-    let mut encoded_hmac_tag = vec![0u8; encoded_size(HMAC_TAG_SIZE)];
-
-    encrypted_file
-        .read_exact(&mut encoded_envelope)
-        .map_err(|_| CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()))?;
-    encrypted_file
-        .read_exact(&mut encoded_nonce)
-        .map_err(|_| CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()))?;
-    encrypted_file
-        .read_exact(&mut encoded_ext)
-        .map_err(|_| CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()))?;
-    encrypted_file
-        .read_exact(&mut encoded_hmac_tag)
-        .map_err(|_| CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()))?;
-
-    let envelope_vec = decode_exact(&encoded_envelope, ENVELOPE_SIZE)?;
-    let nonce = decode_exact(&encoded_nonce, STREAM_NONCE_SIZE)?;
-    let ext_bytes = decode_exact(&encoded_ext, ext_len)?;
-    let hmac_tag = decode_exact(&encoded_hmac_tag, HMAC_TAG_SIZE)?;
-
-    let envelope: [u8; ENVELOPE_SIZE] = envelope_vec
-        .as_slice()
-        .try_into()
-        .map_err(|_| CryptoError::InvalidFormat("Envelope has unexpected length".to_string()))?;
+    let core = HybridHeaderCore::read_from(&mut encrypted_file, header.ext_len as usize)?;
+    let hmac_tag = format::read_replicated_field::<HMAC_TAG_SIZE>(&mut encrypted_file)?;
 
     let recipient_secret = read_secret_key(secret_key_path, passphrase, kdf_limit)?;
-    let envelope_result = open_envelope(&envelope, &recipient_secret);
+    let envelope_result = open_envelope(&core.envelope, &recipient_secret);
     drop(recipient_secret);
     let mut decrypted_combined_key = envelope_result?;
 
     let result = (|| -> Result<PathBuf, CryptoError> {
         let hmac_key = &decrypted_combined_key[ENCRYPTION_KEY_SIZE..COMBINED_KEY_SIZE];
-
-        let mut hmac_message =
-            Vec::with_capacity(prefix_bytes.len() + envelope.len() + nonce.len() + ext_bytes.len());
-        hmac_message.extend_from_slice(&prefix_bytes);
-        hmac_message.extend_from_slice(&envelope);
-        hmac_message.extend_from_slice(&nonce);
-        hmac_message.extend_from_slice(&ext_bytes);
-        hmac_sha3_256_verify(hmac_key, &hmac_message, &hmac_tag)?;
+        hmac_sha3_256_verify(hmac_key, &core.hmac_input(&prefix_bytes), &hmac_tag)?;
 
         let cipher =
             XChaCha20Poly1305::new((&decrypted_combined_key[..ENCRYPTION_KEY_SIZE]).into());
-        let stream_decryptor = stream::DecryptorBE32::from_aead(cipher, nonce.as_slice().into());
+        let stream_decryptor =
+            stream::DecryptorBE32::from_aead(cipher, core.stream_nonce.as_slice().into());
 
         let decrypt_reader = DecryptReader::new(stream_decryptor, encrypted_file);
         archiver::unarchive(decrypt_reader, output_dir)
@@ -571,7 +598,8 @@ pub fn generate_key_pair(
 mod tests {
     use super::*;
     use crate::format::HEADER_PREFIX_ENCODED_SIZE;
-    use std::io::Cursor;
+    use crate::replication::{decode_exact, encoded_size};
+    use std::io::{Cursor, Read};
 
     /// Proves the forward-compatibility mechanism for hybrid files: a synthetic
     /// v4.1 file with a non-empty authenticated `ext_bytes` region (and correctly
@@ -894,5 +922,27 @@ mod tests {
 
         let result = read_public_key(&pub_path);
         assert!(result.is_err());
+    }
+
+    /// `HybridHeaderCore::new` must accept an `ext_bytes` exactly the size of
+    /// `u16::MAX` and reject anything larger. The on-disk prefix stores
+    /// `ext_len` as a `u16`, so this is the wire-format boundary.
+    #[test]
+    fn new_rejects_oversized_ext_bytes() {
+        let envelope = [0u8; ENVELOPE_SIZE];
+        let stream_nonce = [0u8; STREAM_NONCE_SIZE];
+
+        // Max u16 accepted.
+        let accepted = HybridHeaderCore::new(envelope, stream_nonce, vec![0u8; u16::MAX as usize]);
+        assert!(accepted.is_ok(), "u16::MAX ext_bytes must be accepted");
+
+        // One byte over max is rejected.
+        let rejected =
+            HybridHeaderCore::new(envelope, stream_nonce, vec![0u8; u16::MAX as usize + 1]);
+        match rejected {
+            Ok(_) => panic!("u16::MAX + 1 ext_bytes must be rejected"),
+            Err(CryptoError::InvalidInput(_)) => {}
+            Err(other) => panic!("expected InvalidInput, got: {other:?}"),
+        }
     }
 }

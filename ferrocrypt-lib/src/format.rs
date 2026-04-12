@@ -74,6 +74,36 @@ use crate::CryptoError;
 use crate::common::FILE_TOO_SHORT;
 use crate::replication::{decode_exact, encoded_size};
 
+/// Reads a single triple-replicated field of logical size `N` from the reader
+/// and returns the decoded bytes as a fixed-size array.
+///
+/// Fails with `InvalidFormat(FILE_TOO_SHORT)` if the reader is short, and with
+/// the error from `decode_exact` if the decoded length doesn't match `N`
+/// (e.g., corrupted padding indicator that survives majority vote).
+pub fn read_replicated_field<const N: usize>(
+    reader: &mut impl Read,
+) -> Result<[u8; N], CryptoError> {
+    let mut encoded = vec![0u8; encoded_size(N)];
+    reader
+        .read_exact(&mut encoded)
+        .map_err(|_| CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()))?;
+    let decoded = decode_exact(&encoded, N)?;
+    decoded
+        .try_into()
+        .map_err(|_| CryptoError::InvalidFormat("Header field length mismatch".to_string()))
+}
+
+/// Reads a triple-replicated variable-length region of logical size `len`.
+/// Used for the authenticated `ext_bytes` region whose length comes from the
+/// header prefix.
+pub fn read_replicated_vec(reader: &mut impl Read, len: usize) -> Result<Vec<u8>, CryptoError> {
+    let mut encoded = vec![0u8; encoded_size(len)];
+    reader
+        .read_exact(&mut encoded)
+        .map_err(|_| CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()))?;
+    decode_exact(&encoded, len)
+}
+
 // ─── Shared ────────────────────────────────────────────────────────────────
 
 pub const MAGIC_BYTE: u8 = 0xFC;

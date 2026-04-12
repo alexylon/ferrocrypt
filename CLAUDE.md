@@ -65,11 +65,11 @@ Decryption reverses: read header → derive/decrypt keys → verify HMAC → Dec
 
 ### File Format (symmetric v3.0, hybrid v4.0)
 
-8-byte logical prefix: `[0xFC, type, major, minor, header_len_be16, flags_be16]`
+8-byte logical prefix: `[0xFC, type, major, minor, flags_be16, ext_len_be16]`
 - Type `0x53` ('S') = symmetric (major 3), `0x48` ('H') = hybrid (major 4)
 - The entire header — including the prefix — is triple-replicated for error correction
-- HMAC-SHA3-256 authenticates the header (prefix + decoded canonical field values, excluding the HMAC tag itself). The HMAC is computed over majority-vote-decoded values so that single-copy replication corruption is correctable without failing HMAC verification.
-- Forward compatibility: a minor-version bump may append fields **after** the HMAC tag; older readers use `header_len` to skip them (`skip_unknown_header_bytes`)
+- HMAC-SHA3-256 authenticates the header: `prefix || fixed_core_fields || ext_bytes` (all in decoded form, excluding the HMAC tag itself). Single-copy replication corruption is corrected by majority vote before HMAC verification.
+- Forward compatibility: a minor-version bump puts new data inside the authenticated `ext_bytes` region (sized by `ext_len` in the prefix). Older readers include the raw bytes in HMAC verification and ignore their contents — extensions are bound to the file, not trusted by convention.
 
 ## Key Conventions
 

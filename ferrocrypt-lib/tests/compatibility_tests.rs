@@ -1,25 +1,39 @@
-//! Golden fixture tests for version compatibility.
+//! On-disk format regression fixtures.
 //!
-//! These tests verify that the current code can still decrypt files and read keys
-//! produced by previously released format versions. The fixtures are read-only
-//! artifacts committed once and never regenerated — they represent the format
-//! as-shipped.
+//! These tests lock in the byte-level layout of `.fcr` files and key files
+//! produced by this branch, so accidental format drift fails the test suite
+//! before it can reach users. The fixtures under `tests/fixtures/v3/` and
+//! `tests/fixtures/v4/` are committed binary artifacts; every CI run decrypts
+//! them and compares against known plaintext.
 //!
-//! ## Fixture discipline
+//! ## Current status: pre-release regression fixtures
 //!
-//! - Fixtures must never be regenerated without explicit justification.
-//! - Any change to committed fixtures must be reviewed and documented in
-//!   the changelog / release notes.
-//! - The `generate_*_fixtures` tests are `#[ignore]` and must only be run
-//!   once during initial fixture creation.
+//! FerroCrypt has not yet cut a stable release, so the fixtures here represent
+//! the *current branch's* definition of symmetric v3.0 and hybrid v4.0 — not
+//! files that any external user actually has on disk. They exist to catch
+//! unintended byte-level changes during pre-release development.
+//!
+//! A format-affecting change on the pre-release branch may therefore
+//! deliberately regenerate these fixtures, as part of a reviewed PR that also
+//! updates `FORMAT.md` and `CHANGELOG.md [Unreleased]`.
+//!
+//! ## After the first stable release
+//!
+//! At the first stable release, the then-current fixtures become **historical
+//! compatibility fixtures**: they represent bytes that real users have on
+//! disk. From that point on:
+//!
+//! - Fixtures must never be regenerated. Any change is a wire-format break.
+//! - Changes to committed fixtures must be reviewed and documented in the
+//!   changelog as a format version bump.
+//! - The `generate_*_fixtures` tests below remain `#[ignore]` and must not be
+//!   re-run against already-published format versions.
 
 use std::fs;
 use std::path::Path;
 
 use ferrocrypt::secrecy::SecretString;
-use ferrocrypt::{
-    CryptoError, hybrid_auto, public_key_fingerprint, symmetric_auto, validate_secret_key_file,
-};
+use ferrocrypt::{CryptoError, hybrid_auto, public_key_fingerprint, symmetric_auto};
 
 const FIXTURE_DIR: &str = "tests/fixtures";
 const SYM_PASSWORD: &str = "fixture-password-v3";
@@ -89,28 +103,6 @@ fn test_v3_symmetric_directory_fixture_decrypts() -> Result<(), CryptoError> {
     let b = fs::read_to_string(decrypt_dir.path().join("testdir/sub/b.txt"))?;
     assert_eq!(a, "file a");
     assert_eq!(b, "file b");
-    Ok(())
-}
-
-// ─── v2 key file fixtures (still supported with v3 key reader) ───────────
-// These live under v3/hybrid/ because that was the release directory.
-// The key files themselves are key-format v2 (same byte layout as v3).
-
-#[test]
-fn test_v2_private_key_fixture_validates() -> Result<(), CryptoError> {
-    let private_key = Path::new(FIXTURE_DIR).join("v3/hybrid/private.key");
-    validate_secret_key_file(&private_key)
-}
-
-#[test]
-fn test_v2_public_key_fingerprint_stable() -> Result<(), CryptoError> {
-    let public_key = Path::new(FIXTURE_DIR).join("v3/hybrid/public.key");
-    let fp = public_key_fingerprint(&public_key)?;
-    assert_eq!(fp.len(), 64);
-
-    // Regression: fingerprint must not change across releases
-    let expected_fp = fs::read_to_string(Path::new(FIXTURE_DIR).join("v3/hybrid/fingerprint.txt"))?;
-    assert_eq!(fp, expected_fp.trim());
     Ok(())
 }
 
@@ -198,9 +190,14 @@ fn test_v4_public_key_fingerprint_stable() -> Result<(), CryptoError> {
     Ok(())
 }
 
-// ─── Fixture generators (run once, then commit fixtures) ─────────────────
+// ─── Fixture generators ──────────────────────────────────────────────────
+//
+// These are intentionally `#[ignore]` so normal test runs don't regenerate
+// the committed fixtures. Run them only as part of an approved pre-release
+// format change. After the first stable release, do not run them at all
+// against already-published format versions.
 
-/// Generates the v3 golden fixtures. Run once with:
+/// Regenerates the current-branch v3 symmetric fixtures. Run with:
 ///   cargo test -p ferrocrypt generate_v3_fixtures -- --ignored --test-threads=1
 #[test]
 #[ignore]
@@ -239,7 +236,7 @@ fn generate_v3_fixtures() -> Result<(), CryptoError> {
     Ok(())
 }
 
-/// Generates the v4 hybrid golden fixtures. Run once with:
+/// Regenerates the current-branch v4 hybrid fixtures. Run with:
 ///   cargo test -p ferrocrypt generate_v4_hybrid_fixtures -- --ignored --test-threads=1
 #[test]
 #[ignore]

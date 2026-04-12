@@ -80,9 +80,7 @@ Without a readable header, all of these collapse into a single generic "invalid 
 
 The mechanism is deliberately simple: store three identical copies of each header field and pick the majority value per byte. If two out of three copies agree, the correct value is recovered. This gives 33% corruption tolerance across the stored header bytes — one copy can be completely destroyed and the header still parses correctly.
 
-**Why not Reed-Solomon?** Header fields are decoded independently (each field is its own unit), which forces RS to operate at k=1 (one data symbol per codeword). At k=1, RS degenerates to the same correction capability as triple replication — one-symbol correction — but adds Galois field arithmetic, polynomial evaluation, and a substantially larger implementation surface. For small pieces of data such as the file header, triple replication achieves the same result with plain byte comparison: no arithmetic, no lookup tables, no side-channel concerns.
-
-For a security tool, implementation simplicity is a feature. The entire replication decoder is ~30 lines of majority-vote logic with no integer overflow risk, no GF(256) operations, and no subtle correctness edge cases. This keeps the auditing surface minimal and the attack surface close to zero — properties that matter more than the theoretical elegance of a more complex code.
+**Why not Reed-Solomon?** For FerroCrypt’s header, implementation simplicity matters more than maximizing error-correction strength. The header is small, authenticated, and only needs to remain readable enough to identify the format, parse decryption parameters, and produce specific error messages. Triple replication keeps the implementation tiny and easy to audit: plain byte comparison, no Galois field arithmetic, no polynomial machinery, and very little bug surface.
 
 ### Project Structure
 

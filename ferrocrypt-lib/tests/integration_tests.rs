@@ -1706,28 +1706,29 @@ fn test_symmetric_truncated_mid_header() -> Result<(), CryptoError> {
 }
 
 #[test]
-fn test_symmetric_oversized_header_len() -> Result<(), CryptoError> {
-    let test_dir = setup_test_dir("sym_oversized_header_len");
+fn test_symmetric_oversized_ext_len() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("sym_oversized_ext_len");
     let input_file = test_dir.join("secret.txt");
     let encrypt_dir = test_dir.join("encrypted");
     let decrypt_dir = test_dir.join("decrypted");
     fs::create_dir_all(&encrypt_dir)?;
     fs::create_dir_all(&decrypt_dir)?;
 
-    create_test_file(&input_file, "Oversized header_len test");
+    create_test_file(&input_file, "Oversized ext_len test");
     let passphrase = SecretString::from("pass".to_string());
 
     symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
-    // Set header_len to 0xFFFF in all 3 replicated copies
+    // Set ext_len to 0xFFFF in all 3 replicated copies of the prefix.
     // Encoded prefix: [pad(3)] [copy0(8)] [copy1(8)] [copy2(8)]
+    // ext_len lives at offsets 6..=7 inside each 8-byte copy.
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
-    const HLEN_HI: usize = 4;
-    const HLEN_LO: usize = 5;
+    const EXT_HI: usize = 6;
+    const EXT_LO: usize = 7;
     for copy_start in [3, 11, 19] {
-        data[copy_start + HLEN_HI] = 0xFF;
-        data[copy_start + HLEN_LO] = 0xFF;
+        data[copy_start + EXT_HI] = 0xFF;
+        data[copy_start + EXT_LO] = 0xFF;
     }
     fs::write(&encrypted_path, &data)?;
 
@@ -1744,42 +1745,14 @@ fn test_symmetric_oversized_header_len() -> Result<(), CryptoError> {
 }
 
 #[test]
-fn test_symmetric_header_len_too_small() {
-    let test_dir = setup_test_dir("sym_header_len_too_small");
-    let decrypt_dir = test_dir.join("decrypted");
-    fs::create_dir_all(&decrypt_dir).unwrap();
-
-    // Build a replicated prefix with header_len = 4, which is invalid
-    let prefix: [u8; 8] = [0xFC, 0x53, 3, 0, 0, 4, 0, 0];
-    let mut data = encode_test_prefix(&prefix);
-    data.extend_from_slice(&[0u8; 64]);
-
-    let file = test_dir.join("bad_hlen.fcr");
-    fs::write(&file, &data).unwrap();
-
-    let passphrase = SecretString::from("test".to_string());
-    let result = symmetric_auto(&file, &decrypt_dir, &passphrase, None, None, |_| {});
-    assert!(result.is_err());
-}
-
-#[test]
 fn test_symmetric_all_zero_header_body() {
     let test_dir = setup_test_dir("sym_zero_header_body");
     let decrypt_dir = test_dir.join("decrypted");
     fs::create_dir_all(&decrypt_dir).unwrap();
 
-    // Valid prefix magic/type/version, plausible header_len, but zero-filled fields
-    let header_len: u16 = 600;
-    let prefix: [u8; 8] = [
-        0xFC,
-        0x53,
-        3,
-        0,
-        (header_len >> 8) as u8,
-        (header_len & 0xFF) as u8,
-        0,
-        0,
-    ];
+    // Valid prefix magic/type/version, flags=0, ext_len=0. Body is zero-filled,
+    // so HMAC verification (and every subsequent check) must fail.
+    let prefix: [u8; 8] = [0xFC, 0x53, 3, 0, 0, 0, 0, 0];
     let mut data = encode_test_prefix(&prefix);
     data.extend_from_slice(&[0u8; 600]);
 
@@ -1843,8 +1816,8 @@ fn test_hybrid_truncated_mid_header() -> Result<(), CryptoError> {
 }
 
 #[test]
-fn test_hybrid_oversized_header_len() -> Result<(), CryptoError> {
-    let test_dir = setup_test_dir("hyb_oversized_header_len");
+fn test_hybrid_oversized_ext_len() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("hyb_oversized_ext_len");
     let keys_dir = test_dir.join("keys");
     let input_file = test_dir.join("secret.txt");
     let encrypt_dir = test_dir.join("encrypted");
@@ -1860,7 +1833,7 @@ fn test_hybrid_oversized_header_len() -> Result<(), CryptoError> {
     let secret_key = keys_dir.join("private.key");
     let empty_pass = SecretString::from("".to_string());
 
-    create_test_file(&input_file, "Hybrid oversized header_len");
+    create_test_file(&input_file, "Hybrid oversized ext_len");
 
     hybrid_auto(
         &input_file,
@@ -1872,15 +1845,15 @@ fn test_hybrid_oversized_header_len() -> Result<(), CryptoError> {
         |_| {},
     )?;
 
-    // Set header_len to 0xFFFF in all 3 replicated copies
-    // Encoded prefix: [pad(3)] [copy0(8)] [copy1(8)] [copy2(8)]
+    // Set ext_len to 0xFFFF in all 3 replicated copies of the prefix.
+    // ext_len lives at offsets 6..=7 inside each 8-byte copy.
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
-    const HLEN_HI: usize = 4;
-    const HLEN_LO: usize = 5;
+    const EXT_HI: usize = 6;
+    const EXT_LO: usize = 7;
     for copy_start in [3, 11, 19] {
-        data[copy_start + HLEN_HI] = 0xFF;
-        data[copy_start + HLEN_LO] = 0xFF;
+        data[copy_start + EXT_HI] = 0xFF;
+        data[copy_start + EXT_LO] = 0xFF;
     }
     fs::write(&encrypted_path, &data)?;
 

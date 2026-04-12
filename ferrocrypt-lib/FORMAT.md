@@ -105,8 +105,8 @@ Every `.fcr` file begins with a logical 8-byte prefix, stored in encoded form.
 | 1 | 1 | Type | `0x53` = symmetric, `0x48` = hybrid |
 | 2 | 1 | Major version | breaking format changes |
 | 3 | 1 | Minor version | backward-compatible additions |
-| 4..=5 | 2 | Header length | big-endian `u16`, total bytes from file start to first ciphertext byte |
-| 6..=7 | 2 | Flags | big-endian `u16`, currently must be `0` |
+| 4..=5 | 2 | Flags | big-endian `u16`, currently must be `0` |
+| 6..=7 | 2 | Extension length | big-endian `u16`, logical size of the authenticated `ext_bytes` region (0 when no extensions) |
 
 #### Stored size
 
@@ -140,8 +140,8 @@ In the current `v3.0` symmetric format, every defined header field listed below 
 4. KDF params (`12` logical bytes, stored encoded)
 5. stream nonce (`19` logical bytes, stored encoded)
 6. key verification hash (`32` logical bytes, stored encoded)
-7. HMAC tag (`32` logical bytes, stored encoded)
-8. optional future minor-version trailing bytes, if any
+7. `ext_bytes` — authenticated extension region (`ext_len` logical bytes, stored encoded; `ext_len = 0` in `v3.0`)
+8. HMAC tag (`32` logical bytes, stored encoded)
 9. ciphertext payload
 
 ### 4.2 KDF params layout
@@ -198,7 +198,7 @@ It is used to help distinguish:
 
 It is part of the authenticated symmetric header.
 
-### 4.5 Stored sizes (v3.0 symmetric)
+### 4.5 Stored sizes (v3.0 symmetric, `ext_len = 0`)
 
 | Field | Logical size | Stored size |
 |---|---:|---:|
@@ -208,10 +208,11 @@ It is part of the authenticated symmetric header.
 | KDF params | 12 | 39 |
 | Stream nonce | 19 | 63 |
 | Key verification hash | 32 | 99 |
+| `ext_bytes` | 0 | 3 |
 | HMAC tag | 32 | 99 |
-| **Total header size** | — | **525 bytes** |
+| **Total header size** | — | **528 bytes** |
 
-So a current symmetric `v3.0` file is laid out as:
+So a current symmetric `v3.0` file (with no extensions) is laid out as:
 
 ```text
 0..27    encoded prefix
@@ -220,9 +221,14 @@ So a current symmetric `v3.0` file is laid out as:
 225..264 encoded KDF params
 264..327 encoded stream nonce
 327..426 encoded key verification hash
-426..525 encoded HMAC tag
-525..end ciphertext payload
+426..429 encoded ext_bytes (empty)
+429..528 encoded HMAC tag
+528..end ciphertext payload
 ```
+
+A future minor version that ships `ext_len = L` logical bytes of authenticated
+extension data adds exactly `encoded_size(L) - encoded_size(0)` bytes before the
+HMAC tag; all other offsets shift accordingly.
 
 ---
 
@@ -248,8 +254,8 @@ In the current `v4.0` hybrid format, every defined header field listed below is 
 1. file prefix (`8` logical bytes, stored encoded)
 2. sealed envelope (`136` logical bytes, stored encoded)
 3. stream nonce (`19` logical bytes, stored encoded)
-4. HMAC tag (`32` logical bytes, stored encoded)
-5. optional future minor-version trailing bytes, if any
+4. `ext_bytes` — authenticated extension region (`ext_len` logical bytes, stored encoded; `ext_len = 0` in `v4.0`)
+5. HMAC tag (`32` logical bytes, stored encoded)
 6. ciphertext payload
 
 ### 5.2 Envelope layout
@@ -281,24 +287,26 @@ The envelope wrapping key is derived via HKDF-SHA256:
 
 All-zero shared secrets (indicating a small-order public key) are rejected before key derivation.
 
-### 5.4 Stored sizes (v4.0 hybrid)
+### 5.4 Stored sizes (v4.0 hybrid, `ext_len = 0`)
 
 | Field | Logical size | Stored size |
 |---|---:|---:|
 | Prefix | 8 | 27 |
 | Envelope | 136 | 411 |
 | Stream nonce | 19 | 63 |
+| `ext_bytes` | 0 | 3 |
 | HMAC tag | 32 | 99 |
-| **Total header size** | — | **600 bytes** |
+| **Total header size** | — | **603 bytes** |
 
-So a current hybrid `v4.0` file is laid out as:
+So a current hybrid `v4.0` file (with no extensions) is laid out as:
 
 ```text
 0..27    encoded prefix
 27..438  encoded envelope
 438..501 encoded stream nonce
-501..600 encoded HMAC tag
-600..end ciphertext payload
+501..504 encoded ext_bytes (empty)
+504..603 encoded HMAC tag
+603..end ciphertext payload
 ```
 
 ---
@@ -416,38 +424,47 @@ This section defines what current readers authenticate and what they do not.
 
 In symmetric mode, the header HMAC authenticates the **decoded** values of:
 
-- file prefix
+- file prefix (including `ext_len`)
 - Argon2 salt
 - HKDF salt
 - KDF params
 - stream nonce
 - key verification hash
+- `ext_bytes` (any authenticated extension data)
 
-The outer HMAC tag itself is then stored in replicated form.
+The outer HMAC tag itself is then stored in replicated form immediately after
+`ext_bytes`.
 
 The payload ciphertext is authenticated per stream chunk by XChaCha20-Poly1305.
 
-### Not authenticated by older readers
+### Minor-version extensions are authenticated
 
-If a future minor version appends bytes **after** the stored HMAC tag, older readers will:
+A future minor version adding data does so by shipping non-empty `ext_bytes` and
+setting `ext_len` accordingly. Older readers:
 
-- verify the HMAC over the fields they know
-- skip the trailing bytes using `header_len`
-- continue decrypting
+- read `ext_len` from the prefix
+- read the encoded extension region, decode it, and include the decoded `ext_bytes` in HMAC verification
+- then discard the extension contents before proceeding
 
-Therefore, trailing minor-version bytes are **not authenticated by older readers** and must be:
+Because the HMAC covers `ext_bytes`, an attacker cannot tamper with the
+extension without breaking HMAC verification. Minor-version additions must
+still be:
 
-- optional
-- non-security-critical
-- ignorable without affecting correct decryption
+- optional (older readers can decrypt without interpreting them)
+- non-security-critical (older readers will not act on their contents)
+- ignorable (older readers produce correct output regardless of what they contain)
+
+A change that violates any of these requirements is a **major** version bump,
+not a minor one.
 
 ## 8.2 Hybrid `.fcr`
 
 In hybrid mode, the outer HMAC authenticates the **decoded** values of:
 
-- file prefix
+- file prefix (including `ext_len`)
 - envelope
 - stream nonce
+- `ext_bytes` (any authenticated extension data)
 
 The payload ciphertext is authenticated per stream chunk by XChaCha20-Poly1305.
 
@@ -459,9 +476,12 @@ Hybrid mode does **not** bind the ciphertext to a long-term sender identity.
 
 It provides confidentiality and integrity for the recipient, but it is not a substitute for digital signatures or persistent sender authentication.
 
-### Not authenticated by older readers
+### Minor-version extensions are authenticated
 
-The same minor-version rule applies here: trailing bytes added after the stored HMAC tag are not authenticated by older readers and must be optional and ignorable.
+The same authenticated-extension rule applies here: a future `v4.x` minor
+version extends the header via `ext_bytes`, and the HMAC binds those bytes to
+the file. Older readers read the encoded extension region, decode it, include
+the decoded `ext_bytes` in HMAC verification, and ignore the contents.
 
 ## 8.3 `public.key`
 
@@ -547,12 +567,14 @@ Examples of major-version changes:
 
 Increment the encrypted-file **minor** version only for backward-compatible additions that older readers of the same major can safely ignore.
 
-Minor-version additions must be placed:
+Minor-version additions must be placed inside the authenticated `ext_bytes`
+region and the writer must set `ext_len` in the prefix to match. Older readers
+of the same major:
 
-- **after the stored HMAC tag**
-- **before the ciphertext payload**
-
-Older readers rely on `header_len` to skip such bytes.
+- read `ext_len` from the prefix,
+- read the encoded extension region,
+- decode it and include the decoded `ext_bytes` in HMAC verification (binding the extension to the file),
+- and then discard the contents.
 
 Minor versions must **not** introduce:
 

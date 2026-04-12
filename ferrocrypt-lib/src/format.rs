@@ -7,32 +7,44 @@
 ///
 /// ## Logical prefix layout (8 bytes, after decoding)
 ///
-/// | Offset | Size | Field         | Description                                      |
-/// |--------|------|---------------|--------------------------------------------------|
-/// | 0      | 1    | Magic         | `0xFC` — identifies this as a FerroCrypt file    |
-/// | 1      | 1    | Type          | `0x53` ('S') symmetric, `0x48` ('H') hybrid      |
-/// | 2      | 1    | Major version | Breaking format changes increment this            |
-/// | 3      | 1    | Minor version | Backward-compatible additions increment this      |
-/// | 4-5    | 2    | Header length | Big-endian u16: bytes from offset 0 to ciphertext |
-/// | 6-7    | 2    | Flags         | Big-endian u16: reserved for future use            |
+/// | Offset | Size | Field         | Description                                         |
+/// |--------|------|---------------|-----------------------------------------------------|
+/// | 0      | 1    | Magic         | `0xFC` — identifies this as a FerroCrypt file        |
+/// | 1      | 1    | Type          | `0x53` ('S') symmetric, `0x48` ('H') hybrid          |
+/// | 2      | 1    | Major version | Breaking format changes increment this               |
+/// | 3      | 1    | Minor version | Backward-compatible additions increment this         |
+/// | 4-5    | 2    | Flags         | Big-endian u16: reserved, must be `0` for now        |
+/// | 6-7    | 2    | Ext length    | Big-endian u16: logical size of authenticated ext    |
+///
+/// ## Logical header layout (everything before the ciphertext)
+///
+/// ```text
+/// [ prefix ][ fixed core fields ][ ext_bytes (ext_len bytes) ][ hmac_tag ][ ciphertext ]
+///  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+///  authenticated by hmac_tag (HMAC-SHA3-256)
+/// ```
+///
+/// - The fixed core fields are defined per-format (symmetric / hybrid).
+/// - `ext_bytes` is a single opaque authenticated extension region of `ext_len`
+///   logical bytes (zero-length when no extensions are present).
+/// - The HMAC tag is stored immediately after `ext_bytes` and covers
+///   `prefix || fixed_core || ext_bytes` (all values in their decoded form).
 ///
 /// ## Version handling
 ///
 /// The format version is independent of the crate version. It only changes when
 /// the on-disk byte layout changes:
 ///
-/// - **Major bump** (e.g., 1 → 2): new cipher, different header layout, or other
-///   breaking change. Older versions reject the file with a clear upgrade message.
-/// - **Minor bump** (e.g., 1.0 → 1.1): backward-compatible addition such as an
-///   optional metadata field. New fields must be placed **after** the HMAC tag so
-///   that older readers can verify the HMAC over known fields, then use the header
-///   length to skip the unknown trailing fields before ciphertext.
-///
-/// Most crate releases do not change the format version at all.
+/// - **Major bump**: new cipher, incompatible header layout, or any change that
+///   older readers cannot safely interpret. Older versions reject the file with
+///   a clear upgrade message.
+/// - **Minor bump**: backward-compatible addition placed inside the authenticated
+///   `ext_bytes` region. Older readers still authenticate the extension bytes via
+///   the HMAC (so tampering is detected), then ignore the unknown contents.
 ///
 /// ## Minor-version contract
 ///
-/// A minor bump is only valid for changes that older readers of the same major
+/// Minor bumps are only valid for changes that older readers of the same major
 /// can safely ignore. Minor versions **must not** introduce:
 /// - required crypto or AEAD changes
 /// - required KDF behavior changes
@@ -42,16 +54,13 @@
 /// If a change requires the reader to understand the new field to decrypt
 /// safely, it **must** be a major bump.
 ///
-/// ## HMAC trust boundary for trailing fields
+/// ## Authentication of extension bytes
 ///
-/// The current HMAC authenticates the decoded prefix and all known header fields
-/// **before** the stored HMAC tag. Any trailing bytes appended
-/// by a future minor version (skipped via `header_len`) are **outside** the
-/// HMAC coverage as understood by older readers. This means skipped trailing
-/// fields are not authenticated by older readers and must therefore be:
-/// - optional (not required for decryption)
-/// - non-security-critical (not trusted for access control or key derivation)
-/// - ignorable (older readers produce correct output without them)
+/// Unlike earlier designs that appended minor-version fields **after** the HMAC
+/// tag (outside HMAC coverage), `ext_bytes` sits **before** the HMAC tag and is
+/// fully authenticated. An attacker cannot tamper with the extension contents
+/// without breaking HMAC verification. Older readers still skip the contents,
+/// but the bytes themselves are bound to the file by the HMAC.
 ///
 /// ## Detection of old files
 ///
@@ -59,7 +68,7 @@
 /// After reading and decoding the replicated prefix, the magic byte check
 /// (`0xFC`) rejects them with a clear error instead of a misleading "wrong
 /// password."
-use std::io::{self, Read};
+use std::io::Read;
 
 use crate::CryptoError;
 use crate::common::FILE_TOO_SHORT;
@@ -85,8 +94,8 @@ pub struct FileHeader {
     pub format_type: u8,
     pub major: u8,
     pub minor: u8,
-    pub header_len: u16,
     pub flags: u16,
+    pub ext_len: u16,
 }
 
 #[allow(dead_code)]
@@ -98,22 +107,26 @@ pub struct KeyFileHeader {
     pub flags: u16,
 }
 
-/// Builds the 8-byte header prefix as a byte array.
+/// Builds the 8-byte header prefix for the current writer minor version.
+///
+/// This helper always writes `VERSION_MINOR` into byte 3. Tests that need to
+/// synthesize future-compatible minor versions may mutate that byte after
+/// construction.
 pub fn build_header_prefix(
     format_type: u8,
     major: u8,
     flags: u16,
-    header_len: u16,
+    ext_len: u16,
 ) -> [u8; HEADER_PREFIX_SIZE] {
     [
         MAGIC_BYTE,
         format_type,
         major,
         VERSION_MINOR,
-        (header_len >> 8) as u8,
-        (header_len & 0xFF) as u8,
         (flags >> 8) as u8,
         (flags & 0xFF) as u8,
+        (ext_len >> 8) as u8,
+        (ext_len & 0xFF) as u8,
     ]
 }
 
@@ -136,34 +149,9 @@ pub fn read_header_from_reader(
     Ok((prefix, header))
 }
 
-/// Advances the reader past any header bytes not consumed by this version.
-/// Enables forward compatibility: a newer minor version may append fields
-/// after the HMAC tag, and older readers use `header_len` to skip them.
-pub fn skip_unknown_header_bytes(
-    reader: &mut impl Read,
-    header_len: u16,
-    bytes_read_after_prefix: usize,
-) -> Result<(), CryptoError> {
-    let expected_after_prefix = (header_len as usize).saturating_sub(HEADER_PREFIX_ENCODED_SIZE);
-    if bytes_read_after_prefix > expected_after_prefix {
-        return Err(CryptoError::InvalidFormat(
-            "Header is corrupted (read more bytes than header declares)".to_string(),
-        ));
-    }
-    let to_skip = expected_after_prefix - bytes_read_after_prefix;
-    if to_skip > 0 {
-        let skipped = io::copy(&mut reader.take(to_skip as u64), &mut io::sink())
-            .map_err(|_| CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()))?;
-        if (skipped as usize) < to_skip {
-            return Err(CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()));
-        }
-    }
-    Ok(())
-}
-
 /// Parses the decoded 8-byte prefix into a `FileHeader`.
-/// Validates magic byte, type, and minimum header length.
-/// Does NOT enforce version or flags policy — callers dispatch on `header.major`.
+/// Validates magic byte and type. Does NOT enforce version or flags policy —
+/// callers dispatch on `header.major`.
 fn parse_header_bytes(
     prefix: &[u8; HEADER_PREFIX_SIZE],
     expected_type: u8,
@@ -188,19 +176,12 @@ fn parse_header_bytes(
         )));
     }
 
-    let header_len = u16::from_be_bytes([prefix[4], prefix[5]]);
-    if (header_len as usize) < HEADER_PREFIX_ENCODED_SIZE {
-        return Err(CryptoError::InvalidFormat(
-            "File header is corrupted (invalid header length)".to_string(),
-        ));
-    }
-
     Ok(FileHeader {
         format_type: prefix[1],
         major: prefix[2],
         minor: prefix[3],
-        header_len,
-        flags: u16::from_be_bytes([prefix[6], prefix[7]]),
+        flags: u16::from_be_bytes([prefix[4], prefix[5]]),
+        ext_len: u16::from_be_bytes([prefix[6], prefix[7]]),
     })
 }
 
@@ -354,32 +335,52 @@ pub fn validate_key_v2_layout(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
 
     #[test]
-    fn skip_is_noop_when_all_bytes_consumed() {
-        let data = vec![0xAA; 10];
-        let mut cursor = Cursor::new(data);
-        let header_len = (HEADER_PREFIX_ENCODED_SIZE + 5) as u16;
-        skip_unknown_header_bytes(&mut cursor, header_len, 5).unwrap();
-        assert_eq!(cursor.position(), 0);
+    fn prefix_round_trip_ext_len_zero() {
+        let prefix = build_header_prefix(TYPE_SYMMETRIC, VERSION_MAJOR, 0, 0);
+        let header = parse_header_bytes(&prefix, TYPE_SYMMETRIC).unwrap();
+        assert_eq!(header.format_type, TYPE_SYMMETRIC);
+        assert_eq!(header.major, VERSION_MAJOR);
+        assert_eq!(header.minor, VERSION_MINOR);
+        assert_eq!(header.flags, 0);
+        assert_eq!(header.ext_len, 0);
     }
 
     #[test]
-    fn skip_advances_past_unknown_fields() {
-        let data = vec![0xBB; 40];
-        let mut cursor = Cursor::new(data);
-        // header_len = 37 total, encoded prefix = 27, so 10 bytes after prefix.
-        // 6 already consumed → skip 4.
-        skip_unknown_header_bytes(&mut cursor, 37, 6).unwrap();
-        assert_eq!(cursor.position(), 4);
+    fn prefix_round_trip_nonzero_ext_len() {
+        let prefix = build_header_prefix(TYPE_HYBRID, HYBRID_VERSION_MAJOR, 0, 0x1234);
+        let header = parse_header_bytes(&prefix, TYPE_HYBRID).unwrap();
+        assert_eq!(header.format_type, TYPE_HYBRID);
+        assert_eq!(header.ext_len, 0x1234);
     }
 
     #[test]
-    fn skip_fails_when_file_too_short() {
-        let data = vec![0xCC; 2];
-        let mut cursor = Cursor::new(data);
-        let header_len = (HEADER_PREFIX_ENCODED_SIZE + 15) as u16;
-        assert!(skip_unknown_header_bytes(&mut cursor, header_len, 5).is_err());
+    fn prefix_rejects_wrong_magic() {
+        let mut prefix = build_header_prefix(TYPE_SYMMETRIC, VERSION_MAJOR, 0, 0);
+        prefix[0] = 0x00;
+        assert!(parse_header_bytes(&prefix, TYPE_SYMMETRIC).is_err());
+    }
+
+    #[test]
+    fn prefix_rejects_wrong_type() {
+        let prefix = build_header_prefix(TYPE_SYMMETRIC, VERSION_MAJOR, 0, 0);
+        assert!(parse_header_bytes(&prefix, TYPE_HYBRID).is_err());
+    }
+
+    /// Wire-format regression: prefix byte offsets are part of the on-disk
+    /// contract. Reordering them is a breaking change that must be noticed
+    /// immediately rather than caught by downstream HMAC failures.
+    #[test]
+    fn prefix_wire_format_offsets() {
+        let prefix = build_header_prefix(TYPE_SYMMETRIC, VERSION_MAJOR, 0x1234, 0x5678);
+        assert_eq!(prefix[0], MAGIC_BYTE);
+        assert_eq!(prefix[1], TYPE_SYMMETRIC);
+        assert_eq!(prefix[2], VERSION_MAJOR);
+        assert_eq!(prefix[3], VERSION_MINOR);
+        assert_eq!(prefix[4], 0x12);
+        assert_eq!(prefix[5], 0x34);
+        assert_eq!(prefix[6], 0x56);
+        assert_eq!(prefix[7], 0x78);
     }
 }

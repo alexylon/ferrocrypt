@@ -16,7 +16,7 @@ use crate::common::{
     HMAC_KEY_SIZE, HMAC_TAG_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams, STREAM_NONCE_SIZE,
     ct_eq_32, encryption_base_name, hmac_sha3_256, hmac_sha3_256_verify, sha3_256_hash,
 };
-use crate::format::{self, HEADER_PREFIX_ENCODED_SIZE};
+use crate::format;
 use crate::replication::{decode_exact, encode, encoded_size};
 use crate::{CryptoError, archiver};
 
@@ -116,18 +116,17 @@ pub fn encrypt_file(
         OsRng.fill_bytes(&mut nonce);
         let encoded_nonce = encode(&nonce);
 
-        let header_len = (HEADER_PREFIX_ENCODED_SIZE
-            + encoded_salt.len()
-            + encoded_hkdf_salt.len()
-            + encoded_kdf.len()
-            + encoded_nonce.len()
-            + encoded_key_hash.len()
-            + encoded_size(HMAC_TAG_SIZE)) as u16;
+        // No extensions today. ext_bytes is an empty authenticated region;
+        // future minor versions append optional data here and it will be
+        // bound to the file by the HMAC.
+        let ext_bytes: [u8; 0] = [];
+        let encoded_ext = encode(&ext_bytes);
+
         let prefix = format::build_header_prefix(
             format::TYPE_SYMMETRIC,
             format::VERSION_MAJOR,
             0,
-            header_len,
+            ext_bytes.len() as u16,
         );
         let encoded_prefix = encode(&prefix);
 
@@ -139,7 +138,8 @@ pub fn encrypt_file(
                 + HKDF_SALT_SIZE
                 + KDF_PARAMS_SIZE
                 + STREAM_NONCE_SIZE
-                + ENCRYPTION_KEY_SIZE,
+                + ENCRYPTION_KEY_SIZE
+                + ext_bytes.len(),
         );
         hmac_message.extend_from_slice(&prefix);
         hmac_message.extend_from_slice(&salt);
@@ -147,6 +147,7 @@ pub fn encrypt_file(
         hmac_message.extend_from_slice(&kdf_bytes);
         hmac_message.extend_from_slice(&nonce);
         hmac_message.extend_from_slice(&verification_hash);
+        hmac_message.extend_from_slice(&ext_bytes);
         let hmac_tag = hmac_sha3_256(hmac_key.as_ref(), &hmac_message)?;
         let encoded_hmac_tag = encode(&hmac_tag);
 
@@ -156,6 +157,7 @@ pub fn encrypt_file(
         dest.write_all(&encoded_kdf)?;
         dest.write_all(&encoded_nonce)?;
         dest.write_all(&encoded_key_hash)?;
+        dest.write_all(&encoded_ext)?;
         dest.write_all(&encoded_hmac_tag)?;
 
         let encrypt_writer = EncryptWriter::new(stream_encryptor, dest);
@@ -211,7 +213,7 @@ pub fn decrypt_file(
 
 // If a future 3.x minor introduces non-trivial behavior, add explicit gating here:
 //   match header.minor { 0 => ..., 1 => ..., _ => unsupported }
-// instead of relying solely on skip_unknown_header_bytes.
+// on top of the default "authenticate-and-ignore" ext_bytes handling.
 fn decrypt_file_v3(
     mut encrypted_file: fs::File,
     prefix_bytes: [u8; format::HEADER_PREFIX_SIZE],
@@ -223,22 +225,14 @@ fn decrypt_file_v3(
 ) -> Result<PathBuf, CryptoError> {
     format::validate_file_flags(&header)?;
 
-    let min_header_size = HEADER_PREFIX_ENCODED_SIZE
-        + encoded_size(ARGON2_SALT_SIZE)
-        + encoded_size(HKDF_SALT_SIZE)
-        + encoded_size(KDF_PARAMS_SIZE)
-        + encoded_size(STREAM_NONCE_SIZE)
-        + encoded_size(ENCRYPTION_KEY_SIZE)
-        + encoded_size(HMAC_TAG_SIZE);
-    if (header.header_len as usize) < min_header_size {
-        return Err(CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()));
-    }
+    let ext_len = header.ext_len as usize;
 
     let mut encoded_salt = vec![0u8; encoded_size(ARGON2_SALT_SIZE)];
     let mut encoded_hkdf_salt = vec![0u8; encoded_size(HKDF_SALT_SIZE)];
     let mut encoded_kdf = vec![0u8; encoded_size(KDF_PARAMS_SIZE)];
     let mut encoded_nonce = vec![0u8; encoded_size(STREAM_NONCE_SIZE)];
     let mut encoded_key_hash = vec![0u8; encoded_size(ENCRYPTION_KEY_SIZE)];
+    let mut encoded_ext = vec![0u8; encoded_size(ext_len)];
     let mut encoded_hmac_tag = vec![0u8; encoded_size(HMAC_TAG_SIZE)];
 
     encrypted_file
@@ -257,16 +251,11 @@ fn decrypt_file_v3(
         .read_exact(&mut encoded_key_hash)
         .map_err(|_| CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()))?;
     encrypted_file
+        .read_exact(&mut encoded_ext)
+        .map_err(|_| CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()))?;
+    encrypted_file
         .read_exact(&mut encoded_hmac_tag)
         .map_err(|_| CryptoError::InvalidFormat(FILE_TOO_SHORT.to_string()))?;
-
-    let bytes_after_prefix = encoded_salt.len()
-        + encoded_hkdf_salt.len()
-        + encoded_kdf.len()
-        + encoded_nonce.len()
-        + encoded_key_hash.len()
-        + encoded_hmac_tag.len();
-    format::skip_unknown_header_bytes(&mut encrypted_file, header.header_len, bytes_after_prefix)?;
 
     let salt = decode_exact(&encoded_salt, ARGON2_SALT_SIZE)?;
     let hkdf_salt = decode_exact(&encoded_hkdf_salt, HKDF_SALT_SIZE)?;
@@ -274,6 +263,7 @@ fn decrypt_file_v3(
     let kdf_params = KdfParams::from_bytes(kdf_bytes.as_slice().try_into()?, kdf_limit)?;
     let nonce = decode_exact(&encoded_nonce, STREAM_NONCE_SIZE)?;
     let verification_hash = decode_exact(&encoded_key_hash, ENCRYPTION_KEY_SIZE)?;
+    let ext_bytes = decode_exact(&encoded_ext, ext_len)?;
     let hmac_tag = decode_exact(&encoded_hmac_tag, HMAC_TAG_SIZE)?;
 
     on_progress("Deriving key\u{2026}");
@@ -285,7 +275,8 @@ fn decrypt_file_v3(
             + hkdf_salt.len()
             + KDF_PARAMS_SIZE
             + nonce.len()
-            + verification_hash.len(),
+            + verification_hash.len()
+            + ext_bytes.len(),
     );
     hmac_message.extend_from_slice(&prefix_bytes);
     hmac_message.extend_from_slice(&salt);
@@ -293,6 +284,7 @@ fn decrypt_file_v3(
     hmac_message.extend_from_slice(&kdf_bytes);
     hmac_message.extend_from_slice(&nonce);
     hmac_message.extend_from_slice(&verification_hash);
+    hmac_message.extend_from_slice(&ext_bytes);
 
     if let Err(hmac_err) = hmac_sha3_256_verify(hmac_key.as_ref(), &hmac_message, &hmac_tag) {
         let key_hash: [u8; ENCRYPTION_KEY_SIZE] = sha3_256_hash(encryption_key.as_ref())?;
@@ -314,11 +306,57 @@ fn decrypt_file_v3(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::format::HEADER_PREFIX_ENCODED_SIZE;
     use std::io::Cursor;
 
-    /// Proves the forward-compatibility mechanism: a synthetic v3.1 file with
-    /// extra trailing header bytes (and correctly recomputed HMAC) is decrypted
-    /// successfully by the current v3 reader via `skip_unknown_header_bytes`.
+    /// Helper: reads the v3.0 header of a freshly-encrypted file and returns the
+    /// decoded fields plus the byte offset at which ciphertext begins.
+    #[allow(clippy::type_complexity)]
+    fn read_v3_header_fields(
+        bytes: &[u8],
+    ) -> Result<
+        (
+            Vec<u8>, // salt
+            Vec<u8>, // hkdf_salt
+            Vec<u8>, // kdf_bytes
+            Vec<u8>, // nonce
+            Vec<u8>, // verification_hash
+            usize,   // ciphertext_offset
+        ),
+        CryptoError,
+    > {
+        let mut cursor = Cursor::new(&bytes[HEADER_PREFIX_ENCODED_SIZE..]);
+        let mut enc_salt = vec![0u8; encoded_size(ARGON2_SALT_SIZE)];
+        let mut enc_hkdf = vec![0u8; encoded_size(HKDF_SALT_SIZE)];
+        let mut enc_kdf = vec![0u8; encoded_size(KDF_PARAMS_SIZE)];
+        let mut enc_nonce = vec![0u8; encoded_size(STREAM_NONCE_SIZE)];
+        let mut enc_keyhash = vec![0u8; encoded_size(ENCRYPTION_KEY_SIZE)];
+        let mut enc_ext = vec![0u8; encoded_size(0)]; // v3.0 ships ext_len = 0
+        let mut enc_hmac = vec![0u8; encoded_size(HMAC_TAG_SIZE)];
+        cursor.read_exact(&mut enc_salt)?;
+        cursor.read_exact(&mut enc_hkdf)?;
+        cursor.read_exact(&mut enc_kdf)?;
+        cursor.read_exact(&mut enc_nonce)?;
+        cursor.read_exact(&mut enc_keyhash)?;
+        cursor.read_exact(&mut enc_ext)?;
+        cursor.read_exact(&mut enc_hmac)?;
+
+        let ciphertext_offset = HEADER_PREFIX_ENCODED_SIZE + cursor.position() as usize;
+        Ok((
+            decode_exact(&enc_salt, ARGON2_SALT_SIZE)?,
+            decode_exact(&enc_hkdf, HKDF_SALT_SIZE)?,
+            decode_exact(&enc_kdf, KDF_PARAMS_SIZE)?,
+            decode_exact(&enc_nonce, STREAM_NONCE_SIZE)?,
+            decode_exact(&enc_keyhash, ENCRYPTION_KEY_SIZE)?,
+            ciphertext_offset,
+        ))
+    }
+
+    /// Proves the forward-compatibility mechanism: a synthetic v3.1 file with a
+    /// non-empty authenticated `ext_bytes` region (and correctly recomputed HMAC)
+    /// is decrypted successfully by the current v3 reader. The reader reads
+    /// `ext_len` bytes, feeds them into the HMAC verification, and then ignores
+    /// their contents.
     #[test]
     fn future_minor_version_forward_compatible() -> Result<(), CryptoError> {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -335,49 +373,93 @@ mod tests {
         let encrypted_path = encrypt_dir.join("data.fcr");
         let original = fs::read(&encrypted_path)?;
 
-        // --- Decode the v3.0 header to extract fields and derive keys ---
-        let encoded_prefix = &original[..HEADER_PREFIX_ENCODED_SIZE];
-        let prefix_bytes = decode_exact(encoded_prefix, format::HEADER_PREFIX_SIZE)?;
-        let old_header_len = u16::from_be_bytes([prefix_bytes[4], prefix_bytes[5]]) as usize;
-
-        let mut cursor = Cursor::new(&original[HEADER_PREFIX_ENCODED_SIZE..]);
-        let mut enc_salt = vec![0u8; encoded_size(ARGON2_SALT_SIZE)];
-        let mut enc_hkdf = vec![0u8; encoded_size(HKDF_SALT_SIZE)];
-        let mut enc_kdf = vec![0u8; encoded_size(KDF_PARAMS_SIZE)];
-        let mut enc_nonce = vec![0u8; encoded_size(STREAM_NONCE_SIZE)];
-        let mut enc_keyhash = vec![0u8; encoded_size(ENCRYPTION_KEY_SIZE)];
-        let mut enc_hmac = vec![0u8; encoded_size(HMAC_TAG_SIZE)];
-        cursor.read_exact(&mut enc_salt)?;
-        cursor.read_exact(&mut enc_hkdf)?;
-        cursor.read_exact(&mut enc_kdf)?;
-        cursor.read_exact(&mut enc_nonce)?;
-        cursor.read_exact(&mut enc_keyhash)?;
-        cursor.read_exact(&mut enc_hmac)?;
-
-        let salt = decode_exact(&enc_salt, ARGON2_SALT_SIZE)?;
-        let hkdf_salt = decode_exact(&enc_hkdf, HKDF_SALT_SIZE)?;
-        let kdf_bytes = decode_exact(&enc_kdf, KDF_PARAMS_SIZE)?;
+        let (salt, hkdf_salt, kdf_bytes, nonce, verification_hash, ciphertext_offset) =
+            read_v3_header_fields(&original)?;
         let kdf_params = KdfParams::from_bytes(kdf_bytes.as_slice().try_into()?, None)?;
-        let nonce = decode_exact(&enc_nonce, STREAM_NONCE_SIZE)?;
-        let verification_hash = decode_exact(&enc_keyhash, ENCRYPTION_KEY_SIZE)?;
-
         let (_encryption_key, hmac_key) = derive_keys(&passphrase, &salt, &hkdf_salt, &kdf_params)?;
 
-        // --- Build a synthetic v3.1 prefix with larger header_len ---
-        let extra_bytes = 16usize;
-        let new_header_len = (old_header_len + extra_bytes) as u16;
-        let new_prefix = [
-            format::MAGIC_BYTE,
+        // Synthetic v3.1 extension: 16 opaque authenticated bytes.
+        let ext_bytes: Vec<u8> = (0..16u8).collect();
+        let new_prefix = format::build_header_prefix(
             format::TYPE_SYMMETRIC,
             format::VERSION_MAJOR,
-            1, // minor = 1
-            (new_header_len >> 8) as u8,
-            (new_header_len & 0xFF) as u8,
             0,
-            0,
-        ];
+            ext_bytes.len() as u16,
+        );
+        let mut new_prefix_with_minor = new_prefix;
+        new_prefix_with_minor[3] = 1; // minor = 1
 
-        // --- Recompute HMAC over the new prefix + same decoded fields ---
+        // Recompute HMAC over prefix || fixed_core || ext_bytes.
+        let mut hmac_message = Vec::new();
+        hmac_message.extend_from_slice(&new_prefix_with_minor);
+        hmac_message.extend_from_slice(&salt);
+        hmac_message.extend_from_slice(&hkdf_salt);
+        hmac_message.extend_from_slice(&kdf_bytes);
+        hmac_message.extend_from_slice(&nonce);
+        hmac_message.extend_from_slice(&verification_hash);
+        hmac_message.extend_from_slice(&ext_bytes);
+        let new_hmac_tag = hmac_sha3_256(hmac_key.as_ref(), &hmac_message)?;
+
+        // Reassemble: new prefix + fixed core + ext_bytes + new HMAC + ciphertext.
+        let ciphertext = &original[ciphertext_offset..];
+        let mut output = Vec::new();
+        output.extend_from_slice(&encode(&new_prefix_with_minor));
+        // Copy fixed core bytes verbatim from the original file.
+        let fixed_core_end = HEADER_PREFIX_ENCODED_SIZE
+            + encoded_size(ARGON2_SALT_SIZE)
+            + encoded_size(HKDF_SALT_SIZE)
+            + encoded_size(KDF_PARAMS_SIZE)
+            + encoded_size(STREAM_NONCE_SIZE)
+            + encoded_size(ENCRYPTION_KEY_SIZE);
+        output.extend_from_slice(&original[HEADER_PREFIX_ENCODED_SIZE..fixed_core_end]);
+        output.extend_from_slice(&encode(&ext_bytes));
+        output.extend_from_slice(&encode(&new_hmac_tag));
+        output.extend_from_slice(ciphertext);
+
+        fs::write(&encrypted_path, &output)?;
+
+        let output = decrypt_file(&encrypted_path, &decrypt_dir, &passphrase, None, &|_| {})?;
+        assert!(output.exists());
+
+        let decrypted = fs::read_to_string(decrypt_dir.join("data.txt"))?;
+        assert_eq!(decrypted, "forward compat test");
+
+        Ok(())
+    }
+
+    /// Tampering any byte inside the authenticated `ext_bytes` region must break
+    /// HMAC verification and cause decryption to fail. This is the structural
+    /// property introduced by the new header layout — older designs could not
+    /// detect tampering of trailing extension bytes.
+    #[test]
+    fn ext_bytes_tamper_detected() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let input_file = tmp.path().join("data.txt");
+        let encrypt_dir = tmp.path().join("encrypted");
+        let decrypt_dir = tmp.path().join("decrypted");
+        fs::create_dir_all(&encrypt_dir)?;
+        fs::create_dir_all(&decrypt_dir)?;
+        fs::write(&input_file, "tamper test")?;
+
+        let passphrase = SecretString::from("pass".to_string());
+        encrypt_file(&input_file, &encrypt_dir, &passphrase, None, &|_| {})?;
+
+        let encrypted_path = encrypt_dir.join("data.fcr");
+        let original = fs::read(&encrypted_path)?;
+
+        let (salt, hkdf_salt, kdf_bytes, nonce, verification_hash, ciphertext_offset) =
+            read_v3_header_fields(&original)?;
+        let kdf_params = KdfParams::from_bytes(kdf_bytes.as_slice().try_into()?, None)?;
+        let (_enc_key, hmac_key) = derive_keys(&passphrase, &salt, &hkdf_salt, &kdf_params)?;
+
+        // Build a legitimate v3.1 file with 8 bytes of ext_bytes, authenticated.
+        let ext_bytes = vec![0xAAu8; 8];
+        let new_prefix = format::build_header_prefix(
+            format::TYPE_SYMMETRIC,
+            format::VERSION_MAJOR,
+            0,
+            ext_bytes.len() as u16,
+        );
         let mut hmac_message = Vec::new();
         hmac_message.extend_from_slice(&new_prefix);
         hmac_message.extend_from_slice(&salt);
@@ -385,30 +467,31 @@ mod tests {
         hmac_message.extend_from_slice(&kdf_bytes);
         hmac_message.extend_from_slice(&nonce);
         hmac_message.extend_from_slice(&verification_hash);
-        let new_hmac_tag = hmac_sha3_256(hmac_key.as_ref(), &hmac_message)?;
+        hmac_message.extend_from_slice(&ext_bytes);
+        let hmac_tag = hmac_sha3_256(hmac_key.as_ref(), &hmac_message)?;
 
-        // --- Reassemble: new prefix + same fields + new HMAC + trailing + ciphertext ---
-        let ciphertext = &original[old_header_len..];
+        let ciphertext = &original[ciphertext_offset..];
+        let fixed_core_end = HEADER_PREFIX_ENCODED_SIZE
+            + encoded_size(ARGON2_SALT_SIZE)
+            + encoded_size(HKDF_SALT_SIZE)
+            + encoded_size(KDF_PARAMS_SIZE)
+            + encoded_size(STREAM_NONCE_SIZE)
+            + encoded_size(ENCRYPTION_KEY_SIZE);
+
+        // Tamper ext_bytes: flip every byte to 0xBB before encoding.
+        let tampered_ext = vec![0xBBu8; 8];
+
         let mut output = Vec::new();
         output.extend_from_slice(&encode(&new_prefix));
-        output.extend_from_slice(&enc_salt);
-        output.extend_from_slice(&enc_hkdf);
-        output.extend_from_slice(&enc_kdf);
-        output.extend_from_slice(&enc_nonce);
-        output.extend_from_slice(&enc_keyhash);
-        output.extend_from_slice(&encode(&new_hmac_tag));
-        output.extend_from_slice(&vec![0xAA; extra_bytes]); // synthetic trailing field
+        output.extend_from_slice(&original[HEADER_PREFIX_ENCODED_SIZE..fixed_core_end]);
+        output.extend_from_slice(&encode(&tampered_ext));
+        output.extend_from_slice(&encode(&hmac_tag));
         output.extend_from_slice(ciphertext);
 
         fs::write(&encrypted_path, &output)?;
 
-        // --- Decrypt with the current v3 reader ---
-        let output = decrypt_file(&encrypted_path, &decrypt_dir, &passphrase, None, &|_| {})?;
-        assert!(output.exists());
-
-        let decrypted = fs::read_to_string(decrypt_dir.join("data.txt"))?;
-        assert_eq!(decrypted, "forward compat test");
-
+        let result = decrypt_file(&encrypted_path, &decrypt_dir, &passphrase, None, &|_| {});
+        assert!(result.is_err(), "tampered ext_bytes must fail HMAC");
         Ok(())
     }
 }

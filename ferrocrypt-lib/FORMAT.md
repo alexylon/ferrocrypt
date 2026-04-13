@@ -119,6 +119,8 @@ Every `.fcr` file begins with a logical 8-byte prefix, stored in encoded form.
 - hybrid encrypted-file major version: `4`
 - encrypted-file minor version: `0`
 
+Symmetric and hybrid major versions increment independently based on per-mode format changes. They are not required to match each other or the crate version, and the current asymmetry (`3` / `4`) reflects the independent development history of each mode.
+
 ---
 
 ## 4. Symmetric `.fcr` layout

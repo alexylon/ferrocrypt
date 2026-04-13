@@ -105,6 +105,92 @@ impl HybridHeaderCore {
 
 const SECRET_KEY_NONCE_SIZE: usize = 24;
 const SECRET_KEY_SIZE: usize = 32;
+const SECRET_KEY_BLOB_SIZE: usize = SECRET_KEY_SIZE + TAG_SIZE;
+
+// Compile-time guard: the local field sum must match the format-level
+// `SECRET_KEY_DATA_SIZE` constant declared in `format.rs`. If a future change
+// touches one without the other the build breaks here.
+const _: () = assert!(
+    KDF_PARAMS_SIZE + ARGON2_SALT_SIZE + SECRET_KEY_NONCE_SIZE + SECRET_KEY_BLOB_SIZE
+        == SECRET_KEY_DATA_SIZE
+);
+
+/// X25519 hybrid envelope wire format: ephemeral public key, AEAD nonce, AEAD
+/// ciphertext (the encrypted combined key). Centralizes field offsets so
+/// `seal_envelope` and `open_envelope` work in field accesses, not index math.
+struct Envelope {
+    ephemeral_public: [u8; EPHEMERAL_PUB_SIZE],
+    nonce: [u8; ENVELOPE_NONCE_SIZE],
+    ciphertext: [u8; ENVELOPE_CIPHERTEXT_SIZE],
+}
+
+impl Envelope {
+    fn to_bytes(&self) -> [u8; ENVELOPE_SIZE] {
+        let mut out = [0u8; ENVELOPE_SIZE];
+        let (pk_slot, rest) = out.split_at_mut(EPHEMERAL_PUB_SIZE);
+        let (nonce_slot, ct_slot) = rest.split_at_mut(ENVELOPE_NONCE_SIZE);
+        pk_slot.copy_from_slice(&self.ephemeral_public);
+        nonce_slot.copy_from_slice(&self.nonce);
+        ct_slot.copy_from_slice(&self.ciphertext);
+        out
+    }
+
+    fn from_bytes(bytes: &[u8; ENVELOPE_SIZE]) -> Self {
+        let (pk, rest) = bytes.split_at(EPHEMERAL_PUB_SIZE);
+        let (nonce, ciphertext) = rest.split_at(ENVELOPE_NONCE_SIZE);
+        let mut out = Self {
+            ephemeral_public: [0u8; EPHEMERAL_PUB_SIZE],
+            nonce: [0u8; ENVELOPE_NONCE_SIZE],
+            ciphertext: [0u8; ENVELOPE_CIPHERTEXT_SIZE],
+        };
+        out.ephemeral_public.copy_from_slice(pk);
+        out.nonce.copy_from_slice(nonce);
+        out.ciphertext.copy_from_slice(ciphertext);
+        out
+    }
+}
+
+/// Body of a `private.key` file: KDF params, Argon2 salt, AEAD nonce, and the
+/// AEAD-encrypted X25519 secret key. Centralizes field offsets so
+/// `read_secret_key_data` and `generate_key_pair` work in field accesses, not
+/// chained slice indices.
+struct SecretKeyBody {
+    kdf_bytes: [u8; KDF_PARAMS_SIZE],
+    salt: [u8; ARGON2_SALT_SIZE],
+    nonce: [u8; SECRET_KEY_NONCE_SIZE],
+    ciphertext: [u8; SECRET_KEY_BLOB_SIZE],
+}
+
+impl SecretKeyBody {
+    fn to_bytes(&self) -> [u8; SECRET_KEY_DATA_SIZE] {
+        let mut out = [0u8; SECRET_KEY_DATA_SIZE];
+        let (kdf_slot, rest) = out.split_at_mut(KDF_PARAMS_SIZE);
+        let (salt_slot, rest) = rest.split_at_mut(ARGON2_SALT_SIZE);
+        let (nonce_slot, ct_slot) = rest.split_at_mut(SECRET_KEY_NONCE_SIZE);
+        kdf_slot.copy_from_slice(&self.kdf_bytes);
+        salt_slot.copy_from_slice(&self.salt);
+        nonce_slot.copy_from_slice(&self.nonce);
+        ct_slot.copy_from_slice(&self.ciphertext);
+        out
+    }
+
+    fn from_bytes(bytes: &[u8; SECRET_KEY_DATA_SIZE]) -> Self {
+        let (kdf, rest) = bytes.split_at(KDF_PARAMS_SIZE);
+        let (salt, rest) = rest.split_at(ARGON2_SALT_SIZE);
+        let (nonce, ciphertext) = rest.split_at(SECRET_KEY_NONCE_SIZE);
+        let mut out = Self {
+            kdf_bytes: [0u8; KDF_PARAMS_SIZE],
+            salt: [0u8; ARGON2_SALT_SIZE],
+            nonce: [0u8; SECRET_KEY_NONCE_SIZE],
+            ciphertext: [0u8; SECRET_KEY_BLOB_SIZE],
+        };
+        out.kdf_bytes.copy_from_slice(kdf);
+        out.salt.copy_from_slice(salt);
+        out.nonce.copy_from_slice(nonce);
+        out.ciphertext.copy_from_slice(ciphertext);
+        out
+    }
+}
 
 pub const PUBLIC_KEY_FILENAME: &str = "public.key";
 pub const PRIVATE_KEY_FILENAME: &str = "private.key";
@@ -385,20 +471,19 @@ fn read_secret_key_data(
     format::validate_key_v2_layout(data, header, SECRET_KEY_DATA_SIZE)?;
 
     let body_start = format::KEY_FILE_HEADER_SIZE;
-    let body = &data[body_start..body_start + SECRET_KEY_DATA_SIZE];
-    let kdf_params = KdfParams::from_bytes(body[..KDF_PARAMS_SIZE].try_into()?, kdf_limit)?;
-    let salt = &body[KDF_PARAMS_SIZE..KDF_PARAMS_SIZE + ARGON2_SALT_SIZE];
-    let nonce = chacha20poly1305::XNonce::from_slice(
-        &body[KDF_PARAMS_SIZE + ARGON2_SALT_SIZE
-            ..KDF_PARAMS_SIZE + ARGON2_SALT_SIZE + SECRET_KEY_NONCE_SIZE],
-    );
-    let ciphertext = &body[KDF_PARAMS_SIZE + ARGON2_SALT_SIZE + SECRET_KEY_NONCE_SIZE..];
+    let body: &[u8; SECRET_KEY_DATA_SIZE] = data[body_start..body_start + SECRET_KEY_DATA_SIZE]
+        .try_into()
+        .map_err(|_| CryptoError::InvalidFormat("Key body length mismatch".to_string()))?;
+    let parsed = SecretKeyBody::from_bytes(body);
 
-    let derived_key = kdf_params.hash_passphrase(passphrase.expose_secret().as_bytes(), salt)?;
+    let kdf_params = KdfParams::from_bytes(&parsed.kdf_bytes, kdf_limit)?;
+    let derived_key =
+        kdf_params.hash_passphrase(passphrase.expose_secret().as_bytes(), &parsed.salt)?;
 
     let cipher = XChaCha20Poly1305::new(derived_key.as_ref().into());
+    let nonce = chacha20poly1305::XNonce::from_slice(&parsed.nonce);
     let mut plaintext = cipher
-        .decrypt(nonce, ciphertext)
+        .decrypt(nonce, parsed.ciphertext.as_slice())
         .map_err(|_| CryptoError::AuthenticationFailed)?;
 
     drop(derived_key);
@@ -435,32 +520,32 @@ fn seal_envelope(
     let wrapping_key = derive_envelope_key(&ephemeral_public, recipient_public, shared.as_bytes())?;
 
     let cipher = XChaCha20Poly1305::new(wrapping_key.as_ref().into());
-    let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
-    let ciphertext = cipher
-        .encrypt(&nonce, combined_key)
+    let aead_nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let ciphertext_vec = cipher
+        .encrypt(&aead_nonce, combined_key)
         .map_err(|_| CryptoError::InternalError("Envelope encryption failed".to_string()))?;
 
-    let mut envelope = [0u8; ENVELOPE_SIZE];
-    envelope[..EPHEMERAL_PUB_SIZE].copy_from_slice(ephemeral_public.as_bytes());
-    envelope[EPHEMERAL_PUB_SIZE..EPHEMERAL_PUB_SIZE + ENVELOPE_NONCE_SIZE].copy_from_slice(&nonce);
-    envelope[EPHEMERAL_PUB_SIZE + ENVELOPE_NONCE_SIZE..].copy_from_slice(&ciphertext);
-    Ok(envelope)
+    let mut nonce = [0u8; ENVELOPE_NONCE_SIZE];
+    nonce.copy_from_slice(&aead_nonce);
+    let ciphertext: [u8; ENVELOPE_CIPHERTEXT_SIZE] =
+        ciphertext_vec.as_slice().try_into().map_err(|_| {
+            CryptoError::InternalError("Envelope ciphertext length mismatch".to_string())
+        })?;
+
+    Ok(Envelope {
+        ephemeral_public: *ephemeral_public.as_bytes(),
+        nonce,
+        ciphertext,
+    }
+    .to_bytes())
 }
 
 fn open_envelope(
     envelope: &[u8; ENVELOPE_SIZE],
     recipient_secret: &StaticSecret,
 ) -> Result<[u8; COMBINED_KEY_SIZE], CryptoError> {
-    let ephemeral_public_bytes: [u8; EPHEMERAL_PUB_SIZE] =
-        envelope[..EPHEMERAL_PUB_SIZE].try_into().map_err(|_| {
-            CryptoError::InvalidFormat("Invalid ephemeral public key in envelope".to_string())
-        })?;
-    let ephemeral_public = PublicKey::from(ephemeral_public_bytes);
-
-    let nonce = chacha20poly1305::XNonce::from_slice(
-        &envelope[EPHEMERAL_PUB_SIZE..EPHEMERAL_PUB_SIZE + ENVELOPE_NONCE_SIZE],
-    );
-    let ciphertext = &envelope[EPHEMERAL_PUB_SIZE + ENVELOPE_NONCE_SIZE..];
+    let parsed = Envelope::from_bytes(envelope);
+    let ephemeral_public = PublicKey::from(parsed.ephemeral_public);
 
     let shared = recipient_secret.diffie_hellman(&ephemeral_public);
     if shared_secret_is_all_zero(shared.as_bytes()) {
@@ -472,8 +557,9 @@ fn open_envelope(
         derive_envelope_key(&ephemeral_public, &recipient_public, shared.as_bytes())?;
 
     let cipher = XChaCha20Poly1305::new(wrapping_key.as_ref().into());
+    let nonce = chacha20poly1305::XNonce::from_slice(&parsed.nonce);
     let mut plaintext = cipher
-        .decrypt(nonce, ciphertext)
+        .decrypt(nonce, parsed.ciphertext.as_slice())
         .map_err(|_| CryptoError::AuthenticationFailed)?;
 
     if plaintext.len() != COMBINED_KEY_SIZE {
@@ -515,14 +601,27 @@ pub fn generate_key_pair(
     let derived_key = kdf_params.hash_passphrase(passphrase.expose_secret().as_bytes(), &salt)?;
 
     let cipher = XChaCha20Poly1305::new(derived_key.as_ref().into());
-    let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let aead_nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
     let raw_secret = Zeroizing::new(secret_key.to_bytes());
     drop(secret_key);
     let encrypted_secret = cipher
-        .encrypt(&nonce, raw_secret.as_slice())
+        .encrypt(&aead_nonce, raw_secret.as_slice())
         .map_err(|_| CryptoError::InternalError("Failed to encrypt private key".to_string()))?;
     drop(raw_secret);
     drop(derived_key);
+
+    let mut nonce = [0u8; SECRET_KEY_NONCE_SIZE];
+    nonce.copy_from_slice(&aead_nonce);
+    let ciphertext: [u8; SECRET_KEY_BLOB_SIZE] =
+        encrypted_secret.as_slice().try_into().map_err(|_| {
+            CryptoError::InternalError("Private key ciphertext length mismatch".to_string())
+        })?;
+    let secret_body = SecretKeyBody {
+        kdf_bytes,
+        salt,
+        nonce,
+        ciphertext,
+    };
 
     let secret_header =
         format::build_key_file_header(format::KEY_FILE_TYPE_SECRET, SECRET_KEY_DATA_SIZE as u16);
@@ -563,10 +662,7 @@ pub fn generate_key_pair(
         }
         let mut secret_key_file = secret_key_opts.open(&tmp_secret)?;
         secret_key_file.write_all(&secret_header)?;
-        secret_key_file.write_all(&kdf_bytes)?;
-        secret_key_file.write_all(&salt)?;
-        secret_key_file.write_all(&nonce)?;
-        secret_key_file.write_all(&encrypted_secret)?;
+        secret_key_file.write_all(&secret_body.to_bytes())?;
         secret_key_file.sync_all()?;
 
         let mut public_key_file = OpenOptions::new()
@@ -944,5 +1040,65 @@ mod tests {
             Err(CryptoError::InvalidInput(_)) => {}
             Err(other) => panic!("expected InvalidInput, got: {other:?}"),
         }
+    }
+
+    /// `Envelope::to_bytes` and `from_bytes` must round-trip: the parsed
+    /// struct equals the original, and field bytes land at the canonical
+    /// offsets. Locks the wire layout so a future field reorder fails the
+    /// suite immediately instead of via a downstream HMAC mismatch.
+    #[test]
+    fn envelope_round_trip() {
+        let original = Envelope {
+            ephemeral_public: [0x11; EPHEMERAL_PUB_SIZE],
+            nonce: [0x22; ENVELOPE_NONCE_SIZE],
+            ciphertext: [0x33; ENVELOPE_CIPHERTEXT_SIZE],
+        };
+        let bytes = original.to_bytes();
+
+        // Wire-format offsets: pk || nonce || ciphertext.
+        assert!(bytes[..EPHEMERAL_PUB_SIZE].iter().all(|&b| b == 0x11));
+        assert!(
+            bytes[EPHEMERAL_PUB_SIZE..EPHEMERAL_PUB_SIZE + ENVELOPE_NONCE_SIZE]
+                .iter()
+                .all(|&b| b == 0x22)
+        );
+        assert!(
+            bytes[EPHEMERAL_PUB_SIZE + ENVELOPE_NONCE_SIZE..]
+                .iter()
+                .all(|&b| b == 0x33)
+        );
+
+        let parsed = Envelope::from_bytes(&bytes);
+        assert_eq!(parsed.ephemeral_public, original.ephemeral_public);
+        assert_eq!(parsed.nonce, original.nonce);
+        assert_eq!(parsed.ciphertext, original.ciphertext);
+    }
+
+    /// `SecretKeyBody::to_bytes` and `from_bytes` must round-trip and place
+    /// fields at their canonical offsets in the `private.key` body.
+    #[test]
+    fn secret_key_body_round_trip() {
+        let original = SecretKeyBody {
+            kdf_bytes: [0x44; KDF_PARAMS_SIZE],
+            salt: [0x55; ARGON2_SALT_SIZE],
+            nonce: [0x66; SECRET_KEY_NONCE_SIZE],
+            ciphertext: [0x77; SECRET_KEY_BLOB_SIZE],
+        };
+        let bytes = original.to_bytes();
+
+        // Wire-format offsets: kdf || salt || nonce || ciphertext.
+        let kdf_end = KDF_PARAMS_SIZE;
+        let salt_end = kdf_end + ARGON2_SALT_SIZE;
+        let nonce_end = salt_end + SECRET_KEY_NONCE_SIZE;
+        assert!(bytes[..kdf_end].iter().all(|&b| b == 0x44));
+        assert!(bytes[kdf_end..salt_end].iter().all(|&b| b == 0x55));
+        assert!(bytes[salt_end..nonce_end].iter().all(|&b| b == 0x66));
+        assert!(bytes[nonce_end..].iter().all(|&b| b == 0x77));
+
+        let parsed = SecretKeyBody::from_bytes(&bytes);
+        assert_eq!(parsed.kdf_bytes, original.kdf_bytes);
+        assert_eq!(parsed.salt, original.salt);
+        assert_eq!(parsed.nonce, original.nonce);
+        assert_eq!(parsed.ciphertext, original.ciphertext);
     }
 }

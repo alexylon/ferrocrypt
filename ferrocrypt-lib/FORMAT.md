@@ -325,7 +325,7 @@ The payload is a **TAR archive** encrypted as a streaming XChaCha20-Poly1305 AEA
 
 Plaintext TAR bytes are processed in chunks of:
 
-- plaintext chunk size: `65536` bytes
+- plaintext chunk size: `65536` bytes (64 KiB)
 - authentication tag per chunk: `16` bytes
 
 Non-final chunks use `encrypt_next`; the final chunk uses `encrypt_last`.

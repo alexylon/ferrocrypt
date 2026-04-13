@@ -675,8 +675,8 @@ pub fn generate_key_pair(
         public_key_file.write_all(public_key.as_bytes())?;
         public_key_file.sync_all()?;
 
-        fs::rename(&tmp_secret, &secret_key_path)?;
-        if let Err(e) = fs::rename(&tmp_public, &public_key_path) {
+        archiver::rename_no_clobber(&tmp_secret, &secret_key_path)?;
+        if let Err(e) = archiver::rename_no_clobber(&tmp_public, &public_key_path) {
             let _ = fs::remove_file(&secret_key_path);
             return Err(e.into());
         }

@@ -17,23 +17,26 @@ the on-disk format.
 Directory names reflect the on-disk major version number of the files inside,
 not the crate or release version.
 
-## Current status: pre-release regression fixtures
+## Current status: pre-release format fixtures
 
-FerroCrypt has not yet cut a stable release. These fixtures represent the
-**current branch's** definition of v3.0 / v4.0, not files that any external
-user has on disk. They exist to catch accidental format drift during
-pre-release development.
+The symmetric `v3.0` / hybrid `v4.0` format family described here is a
+breaking change on the current branch and has **not yet shipped in any
+published crate release** — `CHANGELOG.md` still has it under `[Unreleased]`.
+These fixtures represent the current branch's definition of v3.0 / v4.0,
+not files that any user of a released version of FerroCrypt has on disk.
+They exist to catch accidental format drift during pre-release development
+of the new format family.
 
-A format-affecting change on the pre-release branch may therefore deliberately
+A format-affecting change on this branch may therefore deliberately
 regenerate these fixtures, as part of a reviewed PR that also updates
 `FORMAT.md` and `CHANGELOG.md [Unreleased]`. Regeneration uses the
 `#[ignore]`-gated `generate_*_fixtures` tests.
 
-## After the first stable release
+## After the first release that ships this format family
 
-At the first stable release, the then-current fixtures become **historical
-compatibility fixtures** — they will represent bytes real users have on disk.
-From that point on:
+Once a crate release (expected `0.3.0`) ships the v3/v4 format family, the
+then-current fixtures become **historical compatibility fixtures** — they
+will represent bytes real users have on disk. From that point on:
 
 - Do not regenerate or replace committed fixtures. Any change is a
   wire-format break.

@@ -15,7 +15,7 @@ It covers:
 - what is and is not authenticated
 - archive semantics
 
-This specification describes the **current released format family** implemented by the library. The crate version and the on-disk format version are separate.
+This specification describes the **current format family** implemented by the library on this branch. The v3/v4 family is a breaking change that has not yet shipped in a published crate release — see `CHANGELOG.md [Unreleased]`. The crate version and the on-disk format version are separate.
 
 This document is meant to be concrete rather than cryptic: the current field order, byte sizes, and compatibility rules are described explicitly below.
 

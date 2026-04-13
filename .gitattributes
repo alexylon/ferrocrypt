@@ -1,0 +1,5 @@
+# Test fixtures must preserve byte-exact content across platforms so that
+# compatibility tests can compare decrypted output against committed reference
+# files. Git's autocrlf on Windows would otherwise rewrite .txt fixtures to
+# CRLF on checkout, breaking the round-trip comparison.
+ferrocrypt-lib/tests/fixtures/** -text

@@ -25,10 +25,12 @@ pub struct KdfLimit {
 }
 
 impl KdfLimit {
+    /// Builds a limit directly from a KiB value.
     pub fn new(max_mem_cost_kib: u32) -> Self {
         Self { max_mem_cost_kib }
     }
 
+    /// Builds a limit from MiB, returning an error on integer overflow.
     pub fn from_mib(mib: u32) -> Result<Self, CryptoError> {
         let kib = mib.checked_mul(1024).ok_or_else(|| {
             CryptoError::InvalidInput(format!("KDF memory limit overflow: {} MiB", mib))
@@ -630,8 +632,7 @@ mod tests {
     /// Flip one byte in a late ciphertext chunk. The reader should return the
     /// already-verified first plaintext chunk, then fail when it reaches the
     /// corrupted later chunk instead of silently accepting modified data.
-    /// Bounds unauthenticated output to at most one chunk past the last
-    /// verified chunk.
+    /// Confirms that no bytes from the failing chunk are returned.
     #[test]
     fn streaming_aead_late_ciphertext_bit_flip_rejected() {
         let plaintext: Vec<u8> = (0..(BUFFER_SIZE * 2 + 1234))

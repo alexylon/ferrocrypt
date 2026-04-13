@@ -32,7 +32,7 @@ This document is meant to be concrete rather than cryptic: the current field ord
 
 ## 2. Triple-replication encoding
 
-In the current `v3.0` `.fcr` format, **all defined encrypted-file header fields** are stored using a simple triple-replication scheme for error correction.
+In the current encrypted-file format family (**symmetric `v3.0`, hybrid `v4.0`**), **all defined encrypted-file header fields** are stored using a simple triple-replication scheme for error correction.
 
 ### Wire format
 
@@ -72,7 +72,7 @@ Examples:
 
 ### Scope
 
-For the current `v3.0` encrypted-file format, every defined `.fcr` header field is triple-replicated.
+For the current encrypted-file format family, every defined `.fcr` header field is triple-replicated.
 
 This does **not** apply to:
 
@@ -328,7 +328,9 @@ Plaintext TAR bytes are processed in chunks of:
 - plaintext chunk size: `65536` bytes (64 KiB)
 - authentication tag per chunk: `16` bytes
 
-Non-final chunks use `encrypt_next`; the final chunk uses `encrypt_last`.
+Non-final chunks carry `65536` plaintext bytes plus a `16`-byte tag.
+The stream ends with one final AEAD chunk, which may be shorter and may be
+only a tag if the plaintext length is an exact multiple of `65536` bytes.
 
 ### 6.3 What is inside the TAR stream
 
@@ -657,11 +659,16 @@ FerroCrypt preserves:
 - file contents
 - directory structure
 
+The current implementation also attempts to preserve regular-file and directory
+permission bits on Unix, with setuid, setgid, and sticky bits stripped on both
+archive creation and extraction. That is current behavior, not a guaranteed
+cross-platform compatibility contract.
+
 FerroCrypt does **not** preserve as part of its compatibility contract:
 
 - ownership
 - timestamps
-- permissions
+- permission preservation across all platforms and implementations
 - hardlink identity
 - symlink relationships
 - special filesystem entries

@@ -4,91 +4,46 @@ All notable changes to FerroCrypt are documented in this file.
 
 ## [Unreleased]
 
-### Changed
-- **Archiver:** File and directory permissions are now preserved through encrypt/decrypt round-trips on Unix. Setuid, setgid, and sticky bits are stripped on both archiving and extraction. On non-Unix platforms, permission handling is platform-limited and archive mode metadata may be approximate.
-
 ### Added
-- **CLI:** Early conflict detection for encrypt and keygen — errors before overwriting existing `.fcr` files or key pairs
-- **CLI:** `--output-path` is now optional when `--save-as` is given for encryption
-- **CLI:** Subcommand help text with descriptions, visible aliases, flag descriptions, and usage examples
-- **Library API:** Exported `PUBLIC_KEY_FILENAME` and `PRIVATE_KEY_FILENAME` constants
-- **Library API:** `encode_recipient` / `decode_recipient` / `encode_recipient_from_bytes` — Bech32 public recipient strings (`fcr1...`) for human-readable key exchange. Checksummed, copy-paste friendly, validated on decode (HRP, length, checksum).
-- **CLI:** `recipient` subcommand (alias `rc`) to print a public key as a Bech32 `fcr1...` string
-- **CLI:** `hybrid --recipient / -r` flag to encrypt directly with a Bech32 recipient string instead of a key file
-- **CLI:** `keygen` now prints the recipient string alongside the fingerprint
-- **Library API:** `hybrid_encrypt_from_recipient` — encrypt using raw 32-byte public key bytes (no key file needed)
-- **Library API:** `KdfLimit` struct for caller-controlled KDF memory cost ceiling on decrypt. Decrypt functions (`symmetric_decrypt`, `hybrid_decrypt`, `symmetric_auto`, `hybrid_auto`) accept an optional `KdfLimit` parameter. When a file's KDF memory cost exceeds the limit, decryption fails with `CryptoError::ExcessiveWork` instead of a generic error.
-- **CLI:** `--max-kdf-memory <MiB>` flag on `symmetric` and `hybrid` subcommands to cap accepted KDF memory cost during decryption
-- **CLI:** `fingerprint` subcommand (alias `fp`) to print a public key's SHA3-256 fingerprint for out-of-band verification
-- **CLI:** `keygen` now prints the public key fingerprint after generation
-- **CLI:** `hybrid` encrypt now prints the recipient's key fingerprint before encryption
-- **CLI:** Progress messages (`Deriving key…`, `Encrypting…`, etc.) now printed to stderr
-- **CLI:** Private key file validated before hybrid decryption
-- **CLI:** `--save-as` / `-s` flag on `symmetric` and `hybrid` subcommands
-- **CLI:** Interactive mode aliases: `sym` for `symmetric`, `hyb` for `hybrid`, `gen` for `keygen`
-- **Desktop app:** Slint-based desktop GUI (`ferrocrypt-desktop`) with two tabs: Symmetric and Hybrid. Key generation is inline within the Hybrid tab. After generating a key pair, the app auto-transitions to Hybrid Encrypt with the public key pre-filled. Includes "Save As" dialog, auto-detection of encryption mode from file headers, and conflict warnings.
-- **Desktop app:** Public key fingerprint display with copy-to-clipboard button in hybrid encrypt mode
-- **Desktop app:** Key file validation on selection — invalid key files show an error and disable the action button
-- **Desktop app:** Password strength indicator (visible in Symmetric Encrypt and Key Gen modes). Scoring adapted from Proton Pass.
-- HKDF-SHA3-256 subkey derivation with domain separation (`ferrocrypt-enc`, `ferrocrypt-hmac`)
-- HMAC-SHA3-256 header authentication — tampering is detected before decryption begins
-- **CI:** `cargo-audit` dependency vulnerability scanning in GitHub Actions
-- Versioned file format with magic bytes (`0xFC` + type), major/minor version, and header length field. Forward-compatible within a major version: future minor versions may append optional trailing fields that older readers can skip via the header length. Minor versions must not change required decryption or authentication semantics.
+- **Bech32 recipient strings (`fcr1...`)** for human-readable public key exchange. Checksummed and validated on decode. Library: `encode_recipient` / `decode_recipient` / `encode_recipient_from_bytes` / `hybrid_encrypt_from_recipient`. CLI: new `recipient` subcommand (alias `rc`) and `hybrid --recipient` / `-r` flag to encrypt directly with a recipient string instead of a key file.
+- **Public key fingerprints (SHA3-256)** for out-of-band verification. CLI: new `fingerprint` subcommand (alias `fp`); `keygen` and `hybrid` encrypt now print the relevant fingerprint. Desktop app shows the fingerprint with a copy-to-clipboard button.
+- **`--max-kdf-memory <MiB>`** flag on `symmetric` and `hybrid` to cap accepted KDF memory cost during decryption. Library: `KdfLimit` struct accepted by all decrypt functions; out-of-budget files fail with `CryptoError::ExcessiveWork`.
+- **`--save-as` / `-s`** flag to choose the encrypted output filename. `--output-path` is optional when `--save-as` is given.
+- **Early conflict detection** for `encrypt` and `keygen` — fails before overwriting an existing `.fcr` file or key pair.
+- **Subcommand help** with descriptions, aliases, and usage examples. Aliases: `sym` for `symmetric`, `hyb` for `hybrid`, `gen` for `keygen`, `rc` for `recipient`, `fp` for `fingerprint`.
+- **Slint-based desktop app** (`ferrocrypt-desktop`) with Symmetric and Hybrid tabs. Key generation is inline within the Hybrid tab; after generation the app auto-transitions to Hybrid Encrypt with the public key pre-filled. Includes "Save As" dialog, magic-byte mode detection, conflict warnings, key file validation on selection, and a password strength indicator (scoring adapted from Proton Pass).
+- Progress messages (`Deriving key…`, `Encrypting…`, etc.) printed to stderr.
+- `cargo-audit` dependency vulnerability scanning in GitHub Actions.
+- Library: `PUBLIC_KEY_FILENAME` and `PRIVATE_KEY_FILENAME` constants exported.
 
 ### Changed
-- **Breaking (CLI):** Removed `-p` / `--passphrase` flag from all commands. Passphrases are now prompted interactively with hidden input (via `rpassword`), with confirmation on encrypt/keygen. For non-interactive use (scripts, CI), set the `FERROCRYPT_PASSPHRASE` environment variable. Passphrase confirmation uses constant-time comparison.
-- **Breaking:** Hybrid encryption uses X25519 ECDH + HKDF-SHA256 + XChaCha20-Poly1305 envelope. Encrypted-file format `4.0`, key-file version `3` (byte layout unchanged; v2 key files accepted). All-zero shared secrets rejected as a small-order key defense.
-- `detect_encryption_mode` now fails closed on malformed headers: files that start with the FerroCrypt magic byte pattern but have a corrupted, truncated, or unrecognized header return `Err(InvalidFormat)` instead of `Ok(None)`. This prevents corrupted `.fcr` files from being silently re-encrypted by the auto-routing helpers.
-- Both encryption and decryption now write output under an `.incomplete` working name and only rename to the final name on success using platform-native non-overwriting rename (`renameat2` on Linux, `renamex_np` on macOS). Output never appears under the final name during streaming. Failed encryptions delete the `.incomplete` file (ciphertext only); failed decryptions leave it on disk for inspection. A subsequent attempt errors if the `.incomplete` output already exists.
-- Key generation now calls `sync_all()` on key files before the atomic rename, ensuring key data is durable on disk before the final filenames become visible.
-- **Library API:** Renamed public functions and types for idiomatic Rust naming (see API docs for updated names)
-- Migrated Argon2id implementation from `rust-argon2` to RustCrypto `argon2` crate for better maintenance and ecosystem alignment. KDF output is now stack-allocated (`[u8; 32]`) instead of heap-allocated (`Vec<u8>`), improving zeroization guarantees. No format change — existing encrypted files and key files remain fully compatible.
-- Tightened KDF parameter validation: `mem_cost` minimum now enforces Argon2's requirement (`>= 8 × lanes`) instead of allowing any nonzero value. Rejects maliciously crafted headers with clearer errors.
-- Version-dispatch architecture: decrypt and key-reading paths now dispatch by file/key format version, enabling future reader compatibility for the current format line (encrypted files v3+, key files v2+). Golden fixture tests guard against regressions.
-- **Breaking:** Encrypted-file format bumped to 3.0 — files from older versions cannot be decrypted. Unified file extension from `.fcs`/`.fch` to single `.fcr`.
-- **Breaking:** Key-file format bumped to 2.0 — public/private key files from the older RSA/OpenSSL line are not supported by the current release.
-- **Breaking:** Replaced RSA-4096 OAEP (OpenSSL) with X25519 ECDH + HKDF-SHA256 + XChaCha20-Poly1305 for hybrid envelope encryption. Removes the OpenSSL C dependency — the project is now pure Rust.
-- **Breaking:** Streaming TAR encryption pipeline — input is archived and encrypted directly to the output file in a single pass. No plaintext intermediate files touch disk. Replaces the previous ZIP-based approach.
-- **Breaking:** Entire header (including prefix and padding indicator) is now triple-replicated for uniform error correction
-- **Breaking:** Argon2id parameters raised to 1 GiB memory / t=4 / p=4 for stronger brute-force resistance. KDF parameters are now stored in the symmetric file header and private key file, so decryption always uses the exact parameters that were used during encryption.
-- **Breaking (library API):** Explicit `symmetric_encrypt` / `symmetric_decrypt` / `hybrid_encrypt` / `hybrid_decrypt` functions replace the auto-routing `symmetric_encryption` / `hybrid_encryption`. Auto-routing wrappers renamed to `symmetric_auto` / `hybrid_auto`. All encrypt/decrypt functions now return `Result<PathBuf, CryptoError>` instead of `Result<String, CryptoError>`. `generate_key_pair` returns `KeyPairInfo` struct with paths and fingerprint. `detect_encryption_mode` returns `Result<Option<EncryptionMode>, CryptoError>` instead of `Option`. `hybrid_encrypt` no longer requires a passphrase argument.
-- **Breaking (library API):** Renamed functions (`generate_asymmetric_key_pair` → `generate_key_pair`), parameters (`rsa_key_pem` → `key_file`), and `CryptoError` variants. Removed `bit_size` parameter, `_with_progress` function variants, `serde::Serialize` on `CryptoError`, and error variants tied to removed dependencies. All public path parameters now use `impl AsRef<Path>` instead of `&str`; `save_as` changed from `Option<&str>` to `Option<&Path>`.
-- **Breaking (CLI):** Removed `--bit-size` / `-b` and `--large` / `-l` flags
-- Key files use `private.key` (passphrase-protected via Argon2id + XChaCha20-Poly1305) and `public.key` (raw 32 bytes)
-- Encrypt vs decrypt determined by reading file header magic bytes, not file extension
-- Replaced `reed-solomon-simd` with simple triple replication (RS with 1 original shard was producing identical copies)
-- Replaced bincode header serialization with raw byte layout for long-term format stability
-- Stream encryption buffer increased from 500 bytes to 64 KiB
-- Empty passphrases rejected for symmetric encryption
-- Moved Tauri and Dioxus GUIs to `experiments/`
+- **Breaking:** Hybrid encryption migrated from RSA-4096 (OpenSSL) to **X25519 ECDH + HKDF-SHA256 + XChaCha20-Poly1305** envelope encryption. Removes the OpenSSL C dependency — the project is now pure Rust. All-zero shared secrets are rejected as a small-order key defense. Pre-`0.3.0` hybrid files cannot be decrypted; old key pairs must be regenerated.
+- **Breaking:** New `.fcr` file format family (symmetric `v3.0`, hybrid `v4.0`, single `.fcr` extension replacing `.fcs` / `.fch`).
+- **Breaking:** `.fcr` headers are now **triple-replicated** for error correction and **authenticated by HMAC-SHA3-256** before any payload decryption begins, so attacker-controlled changes to salts, nonces, KDF parameters, key-verification hashes, or authenticated extension bytes are rejected before they affect decryption state.
+- **Breaking:** `.fcr` payloads are now a streaming **XChaCha20-Poly1305** AEAD over a TAR archive, encrypted directly to the output file — no plaintext intermediate files touch disk. Each **64 KiB** plaintext chunk has its own Poly1305 authentication tag, and the reader verifies each chunk before yielding that chunk’s plaintext. Bytes from a failing chunk are never returned, though earlier verified plaintext may already have been written or extracted before a later failure. Future minor versions can append optional metadata to a single authenticated extension region; older readers authenticate those bytes via HMAC and then ignore the contents. Files from earlier releases cannot be decrypted.
+- **Breaking:** New key file format. `private.key` is passphrase-protected via Argon2id + XChaCha20-Poly1305 and written with `0o600` on POSIX; `public.key` holds the raw 32-byte X25519 public key. Pre-`0.3.0` key pairs are not supported.
+- **Breaking:** Symmetric password-based key derivation pipeline: **Argon2id** (1 GiB memory / time cost 4 / parallelism 4) → **HKDF-SHA3-256** with domain separation → independent encryption and HMAC subkeys. A compromise of one subkey does not reveal the other. KDF parameters are stored in the header so decryption always uses the exact values from encryption time.
+- **Breaking (CLI):** Removed `-p` / `--passphrase` flag. Passphrases are prompted interactively with hidden input and confirmation on encrypt and keygen; passphrase confirmation uses constant-time comparison. For non-interactive use (scripts, CI) set the `FERROCRYPT_PASSPHRASE` environment variable. Empty passphrases are rejected.
+- **Breaking (CLI):** Removed `--bit-size` / `-b` and `--large` / `-l` flags (RSA-only).
+- **Breaking (library API):** Explicit `symmetric_encrypt` / `symmetric_decrypt` / `hybrid_encrypt` / `hybrid_decrypt` functions; auto-routing wrappers renamed to `symmetric_auto` / `hybrid_auto`. Encrypt/decrypt return `Result<PathBuf, CryptoError>`. `generate_key_pair` returns `GeneratedKeyPair` with paths and fingerprint. `detect_encryption_mode` returns `Result<Option<EncryptionMode>, CryptoError>`. All public path parameters use `impl AsRef<Path>`. Several `CryptoError` variants and function signatures changed.
+- **Encrypt vs. decrypt routing uses magic-byte detection only** — file extension no longer forces a path. Files that start with the FerroCrypt magic bytes but have a corrupted header now fail closed with `InvalidFormat` instead of being silently re-encrypted by the auto-routing helpers.
+- **Atomic output handling.** Both encryption and decryption write under an `.incomplete` working name and rename to the final name only on success, using platform-native non-overwriting rename (`renameat2` on Linux, `renamex_np` on macOS). Failed encryptions delete the working file; failed decryptions leave it on disk for inspection. A second attempt fails if an `.incomplete` already exists. Encrypted output is `fsync`'d before success is reported.
+- **File and directory permissions are preserved** through encrypt/decrypt round-trips on Unix. Setuid, setgid, and sticky bits are stripped on both archiving and extraction. Decrypted regular files are no longer marked executable. On non-Unix platforms, permission handling is platform-limited.
+- Tauri and Dioxus GUI experiments moved to `experiments/`; replaced by the new Slint desktop app.
 
 ### Fixed
-- **Security:** `EncryptWriter` and `DecryptReader` now zeroize plaintext buffers on drop, preventing cleartext from lingering on the heap after errors or normal completion
-- Archived files now use `0o644` permissions instead of `0o755` — decrypted files are no longer marked executable
-- Encrypted output files are now `fsync`'d to disk before reporting success, preventing data loss if the system crashes before the OS flushes write buffers
-- Encrypt/decrypt routing now uses magic-byte detection only — `.fcr` extension no longer forces the decrypt path, so non-FerroCrypt files named `.fcr` can be encrypted
-- Default encrypted output naming for directories with dots (e.g. `photos.v1/`) now preserves the full directory name (`photos.v1.fcr` instead of `photos.fcr`)
-- Directory archiver replaced with a manual recursive walk: symlinks and special entries (sockets, FIFOs, devices) are rejected at encryption time; hardlinks are archived as regular file contents. File opens use `O_NOFOLLOW` on Unix, with post-open regular-file validation, to harden against symlink and special-file TOCTOU races during archiving. Extraction also rejects unsupported entry types instead of silently dropping them.
-- **Security:** KDF parameters from untrusted file headers are now fully bounded — `time_cost`, `lanes`, and zero values are rejected in addition to the existing `mem_cost` cap, preventing denial-of-service via crafted encrypted files or key files
-- Symmetric decryption error message for wrong password is now "Password incorrect or file header corrupted" to account for ambiguous corruption cases
-- **Stream truncation vulnerability:** symmetric decryption had a code path that skipped `decrypt_last()`, allowing truncation at chunk boundaries without detection
-- **Security:** Directory encryption no longer follows symlinks — prevents unintended inclusion of files outside the selected directory tree. Symlink inputs are now explicitly rejected.
-- Symmetric decryption now verifies the HMAC before the key-hash check, so header tampering is reported as an authentication failure rather than "wrong password"
-- HMAC covers decoded (canonical) field values — single-copy replication corruption recovered by majority vote no longer causes HMAC verification failure
-- Private key files written with `0o600` (owner-only) on POSIX systems
-- Key material zeroized on all error paths (decrypted envelope keys, combined key buffer, hybrid plaintext buffers, HMAC failure early returns)
-- Length validation on decrypted envelope key material
-- Crash on truncated, corrupted, maliciously crafted `.fcr` files, or unexpected replicated decoding output length
-- Nonexistent input paths silently producing empty encrypted files
-- `keygen` now creates missing output directories
-- Temporary directory cleanup masking the original crypto error and race condition with concurrent encryptions
-- Directory archiver silently skipping inaccessible files and path errors
-- Failed encryptions clean up partial `.fcr` output files; failed decryptions rename partial output with `.incomplete` suffix
-- Key pair generation is now atomic — both files are written to temp names and renamed into place; partial state is cleaned up on failure
+- **Security: directory encryption no longer follows symlinks.** Symlink inputs and symlink entries inside directories are rejected at archive time. File opens use `O_NOFOLLOW` on Unix with post-open regular-file validation, hardening against symlink and special-file TOCTOU races. Hardlinks are archived as regular file contents. Extraction rejects unsupported TAR entry types instead of silently dropping them.
+- **Security: KDF parameters from untrusted headers are bounded in every dimension** (`mem_cost`, `time_cost`, `lanes`, plus rejection of zero values), preventing denial-of-service via crafted encrypted files or key files.
+- **Security: per-chunk plaintext buffers in the streaming AEAD adapters are zeroized** between chunks, on `finish()`, and on `Drop` — preventing plaintext from lingering on the heap after error or normal completion. Decrypted key material is also zeroized on every error path.
+- Symmetric decryption distinguishes wrong-password from header tampering: HMAC is verified before the key-hash check. The user-facing message for the ambiguous case is "Password incorrect or file header corrupted".
+- Crash on truncated, corrupted, or maliciously crafted `.fcr` files replaced with structured `InvalidFormat` errors.
+- Default encrypted output naming for directories with dots (e.g. `photos.v1/`) preserves the full directory name (`photos.v1.fcr` instead of `photos.fcr`).
+- Nonexistent input paths no longer silently produce empty encrypted files.
+- `keygen` creates missing output directories. Key pair generation is atomic: both files are written to temp names, `fsync`'d to disk, and renamed into place; partial state is cleaned up on failure.
+- Directory archiver no longer silently skips inaccessible files or path errors.
 
 ### Removed
-- `openssl`, `reed-solomon-simd`, `bincode`, and `serde` dependencies
-- `normalize_paths` helper and `ENCRYPTED_DOT_EXTENSION` constant (replaced by `Path` operations)
+- `openssl`, `reed-solomon-simd`, `bincode`, and `serde` dependencies.
 
 ## [0.2.5] - 2025-12-18
 

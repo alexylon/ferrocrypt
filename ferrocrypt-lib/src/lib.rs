@@ -7,8 +7,9 @@
 //!
 //! ## Design goals
 //! - **Confidentiality + integrity** for small-to-medium file trees.
-//! - **Simple ergonomics**: pick symmetric (password) or hybrid (public/private
-//!   key + optional passphrase) based on your distribution needs.
+//! - **Simple ergonomics**: pick symmetric (password) or hybrid (recipient
+//!   public key for encryption, passphrase-protected private key for
+//!   decryption) based on your distribution needs.
 //! - **Batteries included**: streaming encryption pipeline, path handling,
 //!   and output file naming are handled for you.
 //!
@@ -450,6 +451,11 @@ pub fn hybrid_decrypt(
 ///
 /// Convenience wrapper for CLI/GUI use. Library consumers should prefer
 /// the explicit [`symmetric_encrypt`] / [`symmetric_decrypt`] functions.
+///
+/// - If `input_path` is an existing FerroCrypt file, this decrypts and
+///   `save_as` is ignored.
+/// - Otherwise, this encrypts and `output_dir` is treated as the destination
+///   directory unless `save_as` is provided.
 pub fn symmetric_auto(
     input_path: impl AsRef<Path>,
     output_dir: impl AsRef<Path>,
@@ -473,6 +479,12 @@ pub fn symmetric_auto(
 ///
 /// Convenience wrapper for CLI/GUI use. Library consumers should prefer
 /// the explicit [`hybrid_encrypt`] / [`hybrid_decrypt`] functions.
+///
+/// - If `input_path` is an existing FerroCrypt file, this decrypts using
+///   `key_file` as the private key file, `passphrase` as its passphrase,
+///   and `save_as` is ignored.
+/// - Otherwise, this encrypts using `key_file` as the recipient public key.
+///   The `passphrase` and `kdf_limit` arguments are ignored on this path.
 pub fn hybrid_auto(
     input_path: impl AsRef<Path>,
     output_dir: impl AsRef<Path>,

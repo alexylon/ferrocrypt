@@ -28,14 +28,14 @@ Cross-platform file encryption tool with CLI and desktop interfaces. Written in 
 
 ## About
 
-FerroCrypt encrypts and decrypts files and directories. It supports two modes:
+FerroCrypt encrypts and decrypts files and directories in two modes:
 
-- **Symmetric** — Password-based. Uses XChaCha20-Poly1305 with Argon2id key derivation and HKDF-SHA3-256 subkey expansion. Same password encrypts and decrypts.
-- **Hybrid** — Public/private key based. Combines X25519 key agreement with XChaCha20-Poly1305 (data encryption). Each file gets a unique random key sealed with the recipient's public key. Decryption requires the private key and its passphrase. Hybrid mode provides confidentiality and integrity for the recipient, but does not authenticate the sender — it is not a substitute for digital signatures.
+- **Symmetric** — Password-based. Uses XChaCha20-Poly1305 with Argon2id key derivation and HKDF-SHA3-256 subkey expansion. The same password encrypts and decrypts.
+- **Hybrid** — Public/private-key based. Combines X25519 key agreement with XChaCha20-Poly1305 data encryption. Each file gets a unique random key sealed with the recipient's public key. Decryption requires the matching private key and its passphrase. Hybrid mode provides confidentiality and integrity for the recipient, but it does not authenticate the sender; it is not a substitute for digital signatures.
 
-Both modes produce `.fcr` files. Decryption is based on magic bytes in the file header, not the file extension — renaming a file won't break anything.
+Both modes produce `.fcr` files. Decryption is based on magic bytes in the file header, not the file extension — renaming a file does not change how FerroCrypt interprets it.
 
-A standalone format specification is available at [`ferrocrypt-lib/FORMAT.md`](ferrocrypt-lib/FORMAT.md).
+For the byte-level on-disk format, see `ferrocrypt-lib/FORMAT.md` in the repository.
 
 ### What's stored in an encrypted file
 
@@ -53,18 +53,18 @@ Every `.fcr` file starts with a header followed by the encrypted payload. The he
 - **Symmetric encryption:** XChaCha20-Poly1305 via the [`chacha20poly1305`](https://crates.io/crates/chacha20poly1305) crate ([audited by NCC Group](https://research.nccgroup.com/2020/02/26/public-report-rustcrypto-aes-gcm-and-chacha20poly1305-implementation-review/)), with Argon2id key derivation and HKDF-SHA3-256 subkey expansion
 - **Hybrid encryption:** X25519 ECDH key agreement via [`x25519-dalek`](https://crates.io/crates/x25519-dalek), HKDF-SHA256 envelope key derivation, XChaCha20-Poly1305 envelope encryption
 - HMAC-SHA3-256 header authentication — tampering is detected before payload decryption begins; in hybrid mode the envelope is opened first to recover the HMAC key
-- Streaming encryption — plaintext never touches disk as an intermediate file
-- Passphrases handled via the `secrecy` crate (zeroized on drop, hidden from Debug/Display)
+- Streaming encryption — plaintext is streamed directly into the encryptor; no plaintext temporary archive is written to disk
+- Passphrases are handled via the `secrecy` crate (hidden from `Debug`/`Display`, zeroized on drop)
 - Triple-replicated headers with majority-vote decoding for error correction (see [Why triple replication?](#why-triple-replication) below)
-- File and directory permissions are preserved through encrypt/decrypt round-trips on Unix. Setuid, setgid, and sticky bits are stripped on both archiving and extraction. On non-Unix platforms, permission metadata may be approximate
-- Symlink inputs are rejected; directory encryption does not follow symlinks — prevents unintended inclusion of files outside the selected tree. Directories containing symlinks or other special entries (sockets, FIFOs, devices) are rejected at encryption time with a clear error. Hardlinks are archived as regular file contents; hardlink relationships are not preserved.
-- Both encryption and decryption write output under an `.incomplete` working name (e.g. `myfile.fcr.incomplete`, `myfile.txt.incomplete`, `myfolder.incomplete`) and only rename to the final name on success. Output never appears under the final name during streaming. Failed encryptions clean up the `.incomplete` file (ciphertext only); failed decryptions leave it on disk intentionally — it may be the only recoverable data when the original ciphertext is damaged
+- The current implementation preserves regular-file and directory permission bits through encrypt/decrypt round-trips on Unix. Setuid, setgid, and sticky bits are stripped on both archiving and extraction. This is current behavior rather than a cross-platform compatibility guarantee; on non-Unix platforms, permission metadata may be approximate
+- Symlink inputs are rejected; directory encryption does not follow symlinks, preventing unintended inclusion of files outside the selected tree. Directories containing symlinks or other special entries (sockets, FIFOs, devices) are rejected at encryption time. Hardlinks are archived as regular file contents; hardlink relationships are not preserved.
+- Both encryption and decryption write output under an `.incomplete` working name (for example `myfile.fcr.incomplete`, `myfile.txt.incomplete`, `myfolder.incomplete`) and only rename to the final name on success. Failed encryptions clean up the working file; failed decryptions leave it on disk intentionally because it may contain the only recoverable plaintext when ciphertext is damaged
 - Versioned file format with magic bytes — corrupted or incompatible files produce clear errors
 
 ### Limitations
 
-- **File metadata is not fully preserved.** FerroCrypt preserves file contents, directory structure, and file/directory permissions (on Unix). It does not preserve timestamps or ownership. Setuid, setgid, and sticky bits are stripped on both archiving and extraction. On non-Unix platforms, permission handling is platform-limited and archive mode metadata may be approximate. Hardlink relationships are not preserved (hardlinked files are archived as independent copies). Symlinks and special entries cause an error at encryption time. Directory encryption is a convenience feature, not a full archiving solution. If you need faithful filesystem backup/restore semantics, use a dedicated archiving tool and encrypt its output with FerroCrypt.
-- **No backward compatibility with older format versions.** The current release uses symmetric encrypted-file format v3.0, hybrid encrypted-file format v4.0, and key-file format v3. Files and keys produced by earlier versions (v0.1.x / v0.2.x) cannot be decrypted or used — those versions relied on a different crypto stack (RSA/OpenSSL). If you have data encrypted with an older version, decrypt it with that version first (available on crates.io), then re-encrypt with the current release.
+- **File metadata is not fully preserved.** FerroCrypt always preserves file contents and directory structure. The current implementation also preserves regular-file and directory permission bits on Unix, with setuid, setgid, and sticky bits stripped, but that behavior is best-effort rather than a stable cross-platform format guarantee. FerroCrypt does not preserve timestamps or ownership. On non-Unix platforms, permission handling is platform-limited and archive metadata may be approximate. Hardlink relationships are not preserved (hardlinked files are archived as independent copies). Symlinks and special entries cause an error at encryption time. Directory encryption is a convenience feature, not a full backup/archive format. If you need faithful filesystem backup/restore semantics, use a dedicated archiving tool and encrypt its output with FerroCrypt.
+- **No backward compatibility with older format versions.** The current release uses symmetric encrypted-file format v3.0, hybrid encrypted-file format v4.0, and key-file format v3. Files and keys produced by earlier versions (v0.1.x / v0.2.x) cannot be decrypted or used by the current release. Those releases used a different format family; in hybrid mode and key files they also used a different crypto stack (RSA/OpenSSL). If you still have data encrypted with an older version, decrypt it with that version first (available on crates.io), then re-encrypt with the current release.
 
 ### Why triple replication?
 
@@ -253,8 +253,8 @@ ferrocrypt> quit
 
 Select a file or folder, then choose the encryption mode. The app auto-detects encrypted files by reading the file header, regardless of extension.
 
-- **Symmetric** — Enter a password. The output path is auto-filled as `{name}.fcr` and can be changed with "Save As". Decryption uses a directory picker.
-- **Hybrid** — Use an existing public key to encrypt, or create a new key pair inline. After key generation, the app switches to encryption with the new public key pre-filled. The recipient's public key fingerprint is shown for out-of-band verification. Key files are validated on selection — invalid files show an error and disable the action button. Decryption requires a private key + passphrase.
+- **Symmetric** — Enter a password. The output path is auto-filled as `{name}.fcr` and can be changed with Save As. Decryption uses a directory picker.
+- **Hybrid** — Use an existing public key to encrypt, or create a new key pair inline. After key generation, the app switches to encryption with the new public key pre-filled. The recipient's public key fingerprint is shown with a copy button for out-of-band verification. Key files are validated on selection and invalid files show an error before the operation starts. Decryption requires a private key and its passphrase.
 
 A password strength indicator (based on [Proton Pass](https://github.com/protonpass/proton-pass-common) implementation) is shown during encryption and key generation.
 

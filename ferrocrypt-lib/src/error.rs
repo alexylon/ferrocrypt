@@ -12,7 +12,7 @@ use thiserror::Error;
 /// | `InvalidFormat` | File or key-file structure is invalid or corrupted | Check file integrity |
 /// | `UnsupportedVersion` | File or key format version not supported | Upgrade/downgrade FerroCrypt |
 /// | `InvalidKdfParams` | KDF parameters out of safe bounds | Re-encrypt with valid parameters |
-/// | `ExcessiveWork` | KDF memory cost exceeds caller limit | Raise `--max-kdf-memory` or re-encrypt with lower cost |
+/// | `ExcessiveWork` | KDF memory cost exceeds caller limit | Raise the accepted KDF memory limit or re-encrypt with lower cost |
 /// | `InternalError` | Unexpected internal crypto failure | Report as a bug |
 /// | `InputPath` | Missing input file or folder | Provide an existing path |
 /// | `InvalidInput` | Validation failure with human-readable context | Inspect message for details |
@@ -37,28 +37,40 @@ use thiserror::Error;
 /// ```
 #[derive(Error, Debug)]
 pub enum CryptoError {
+    /// Filesystem or stream I/O failure.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    /// AEAD encryption or decryption failure from the underlying cipher.
     #[error(transparent)]
     Cipher(#[from] chacha20poly1305::Error),
+    /// Argon2 key-derivation failure.
     #[error(transparent)]
     KeyDerivation(#[from] argon2::Error),
+    /// Fixed-size byte conversion failed due to an unexpected length.
     #[error(transparent)]
     SliceConversion(#[from] std::array::TryFromSliceError),
+    /// Authentication failed: wrong password, wrong key, or tampered data.
     #[error("Authentication failed: wrong password, wrong key, or tampered data")]
     AuthenticationFailed,
+    /// File or key-file structure is invalid, truncated, or corrupted.
     #[error("{0}")]
     InvalidFormat(String),
+    /// File or key-file version is outside the set supported by this release.
     #[error("{0}")]
     UnsupportedVersion(String),
+    /// Header- or key-file-supplied KDF parameters are outside safe bounds.
     #[error("{0}")]
     InvalidKdfParams(String),
+    /// Caller-specified KDF work limit was exceeded.
     #[error("KDF needs {required_kib} KiB, limit is {max_kib} KiB")]
     ExcessiveWork { required_kib: u32, max_kib: u32 },
+    /// Unexpected internal failure; usually indicates a bug or impossible state.
     #[error("{0}")]
     InternalError(String),
+    /// Input file or directory does not exist.
     #[error("Input file or folder missing: {0}")]
     InputPath(String),
+    /// Invalid caller input with a human-readable explanation.
     #[error("{0}")]
     InvalidInput(String),
 }

@@ -117,6 +117,7 @@ pub const HYBRID_VERSION_MAJOR: u8 = 4;
 pub const VERSION_MINOR: u8 = 0;
 pub const HEADER_PREFIX_SIZE: usize = 8;
 pub const HEADER_PREFIX_ENCODED_SIZE: usize = encoded_size(HEADER_PREFIX_SIZE);
+/// Default file extension for encrypted FerroCrypt payload files.
 pub const ENCRYPTED_EXTENSION: &str = "fcr";
 
 #[allow(dead_code)]

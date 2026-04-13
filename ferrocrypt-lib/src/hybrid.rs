@@ -192,7 +192,9 @@ impl SecretKeyBody {
     }
 }
 
+/// Default filename for the hybrid public key file.
 pub const PUBLIC_KEY_FILENAME: &str = "public.key";
+/// Default filename for the hybrid private key file.
 pub const PRIVATE_KEY_FILENAME: &str = "private.key";
 
 const HYBRID_ENVELOPE_INFO: &[u8] = b"ferrocrypt hybrid envelope key v4";

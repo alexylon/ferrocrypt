@@ -21,11 +21,18 @@ cargo test "output_file" -- --test-threads=1 # filter by substring
 
 # Format
 ./fmt.sh   # formats all crates including desktop and experiments
+
+# Windows cross-check (for cfg(target_os = "windows") code such as the
+# MoveFileExW FFI in archiver.rs). Requires `rustup target add x86_64-pc-windows-gnu`,
+# which is already installed on this machine.
+cargo check  --package ferrocrypt --target x86_64-pc-windows-gnu
+cargo clippy --package ferrocrypt --target x86_64-pc-windows-gnu --all-targets
 ```
 
 Notes:
 - For **doc-only changes**, do not run code tests/builds unless the change affects rustdoc rendering or examples.
 - The desktop crate is excluded from the workspace, so root-level `cargo test` / `cargo clippy` do not cover it.
+- The Windows cross-check only type-checks (no linker), so it is sufficient for verifying `cfg(target_os = "windows")` arms compile, but does not actually run Windows code. Use it whenever you touch `rename_no_clobber` or any other Windows-specific branch.
 
 ## Architecture
 

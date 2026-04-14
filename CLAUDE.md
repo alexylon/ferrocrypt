@@ -22,9 +22,10 @@ cargo test "output_file" -- --test-threads=1 # filter by substring
 # Format
 ./fmt.sh   # formats all crates including desktop and experiments
 
-# Windows cross-check (for cfg(target_os = "windows") code such as the
-# MoveFileExW FFI in archiver.rs). Requires `rustup target add x86_64-pc-windows-gnu`,
-# which is already installed on this machine.
+# Windows cross-check (for `cfg(target_os = "windows")` / `cfg(not(unix))`
+# arms such as the Windows fallback path in `atomic_output.rs`). Requires
+# `rustup target add x86_64-pc-windows-gnu`, which is already installed on
+# this machine.
 cargo check  --package ferrocrypt --target x86_64-pc-windows-gnu
 cargo clippy --package ferrocrypt --target x86_64-pc-windows-gnu --all-targets
 ```
@@ -32,7 +33,7 @@ cargo clippy --package ferrocrypt --target x86_64-pc-windows-gnu --all-targets
 Notes:
 - For **doc-only changes**, do not run code tests/builds unless the change affects rustdoc rendering or examples.
 - The desktop crate is excluded from the workspace, so root-level `cargo test` / `cargo clippy` do not cover it.
-- The Windows cross-check only type-checks (no linker), so it is sufficient for verifying `cfg(target_os = "windows")` arms compile, but does not actually run Windows code. Use it whenever you touch `rename_no_clobber` or any other Windows-specific branch.
+- The Windows cross-check only type-checks (no linker), so it is sufficient for verifying `cfg(target_os = "windows")` / `cfg(not(unix))` arms compile. Use it whenever you touch `atomic_output` or any other branch that varies by platform.
 
 ## Architecture
 
@@ -120,7 +121,7 @@ Decryption reverses: read header → derive/decrypt keys → verify HMAC → Dec
 - Keep parsing, validation, crypto, and I/O separated.
 - Add or update important tests and keep them self-contained.
 - Add regression tests for security-sensitive and format bugs.
-- After each important change, update if relevant:
+- After each important change, but only when we are ready to commit, update if relevant:
     - `README.md`
     - `CHANGELOG.md` under `[Unreleased]`
     - `ferrocrypt-lib/FORMAT.md`

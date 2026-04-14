@@ -428,6 +428,7 @@ dependencies = [
  "hkdf",
  "hmac",
  "libc",
+ "rustix",
  "secrecy",
  "sha2",
  "sha3",

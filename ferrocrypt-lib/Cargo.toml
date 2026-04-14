@@ -34,12 +34,15 @@ hmac = "0.13"
 hkdf = "0.13"
 constant_time_eq = "0.4"
 bech32 = "0.11"
+tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+rustix = { version = "1", features = ["fs"] }
+
 [dev-dependencies]
 ferrocrypt = { path = ".", features = ["fast-kdf"] }
 ctor = "0.8"
-tempfile = "3"
 tar = "0.4"

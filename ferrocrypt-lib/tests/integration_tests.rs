@@ -2308,37 +2308,6 @@ fn test_encrypt_produces_final_name_not_incomplete() -> Result<(), CryptoError> 
 }
 
 #[test]
-fn test_existing_incomplete_blocks_encryption() -> Result<(), CryptoError> {
-    let test_dir = setup_test_dir("incomplete_blocks_encrypt");
-    let input_file = test_dir.join("payload.txt");
-    let encrypt_dir = test_dir.join("encrypted");
-    fs::create_dir_all(&encrypt_dir)?;
-    fs::write(&input_file, "payload")?;
-
-    // Simulate leftover .incomplete from a previous failed encryption
-    fs::write(
-        encrypt_dir.join("payload.fcr.incomplete"),
-        "stale ciphertext",
-    )?;
-
-    let passphrase = SecretString::from("block_pass".to_string());
-    let result = symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {});
-    assert!(result.is_err());
-    match result {
-        Err(CryptoError::InvalidInput(msg)) => {
-            assert!(msg.contains("Previous .incomplete exists"), "got: {msg}");
-        }
-        other => panic!("expected InvalidInput about incomplete, got: {other:?}"),
-    }
-
-    // Stale .incomplete must not be overwritten
-    let stale = fs::read_to_string(encrypt_dir.join("payload.fcr.incomplete"))?;
-    assert_eq!(stale, "stale ciphertext");
-
-    Ok(())
-}
-
-#[test]
 fn test_keygen_no_partial_state_on_existing_key() -> Result<(), CryptoError> {
     let test_dir = setup_test_dir("keygen_no_partial");
     let passphrase = SecretString::from("atomic_pass".to_string());
@@ -2351,33 +2320,6 @@ fn test_keygen_no_partial_state_on_existing_key() -> Result<(), CryptoError> {
     // Second keygen to the same dir fails — keys already exist
     let result = generate_key_pair(&passphrase, &test_dir, |_| {});
     assert!(result.is_err());
-
-    // No temp files should be left behind
-    assert!(!test_dir.join(".private.key.tmp").exists());
-    assert!(!test_dir.join(".public.key.tmp").exists());
-
-    Ok(())
-}
-
-#[test]
-fn test_keygen_cleans_up_temp_files_on_failure() -> Result<(), CryptoError> {
-    let test_dir = setup_test_dir("keygen_cleanup");
-
-    // Place a directory where the public key temp file would go —
-    // create_new can't open it as a file, and remove_file can't
-    // delete it, so it survives stale cleanup and forces a failure
-    // after the private key temp has been written.
-    fs::create_dir_all(test_dir.join(".public.key.tmp"))?;
-
-    let passphrase = SecretString::from("cleanup_pass".to_string());
-    let result = generate_key_pair(&passphrase, &test_dir, |_| {});
-    assert!(result.is_err());
-
-    // Neither final key file should exist
-    assert!(!test_dir.join("private.key").exists());
-    assert!(!test_dir.join("public.key").exists());
-    // Private key temp file should have been cleaned up
-    assert!(!test_dir.join(".private.key.tmp").exists());
 
     Ok(())
 }

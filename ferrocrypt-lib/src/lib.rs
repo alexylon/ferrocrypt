@@ -83,7 +83,7 @@
 //! ## License
 //! Licensed under GPL-3.0-only. See the LICENSE file in the repository.
 
-#![deny(unsafe_code)]
+#![forbid(unsafe_code)]
 
 #[cfg(all(feature = "fast-kdf", not(debug_assertions)))]
 compile_error!("fast-kdf feature must not be used in release builds");
@@ -193,6 +193,7 @@ fn has_encoded_magic_byte(buf: &[u8; format::HEADER_PREFIX_ENCODED_SIZE]) -> boo
 }
 
 mod archiver;
+mod atomic_output;
 mod common;
 mod error;
 mod format;

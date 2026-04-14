@@ -222,7 +222,7 @@ pub fn unarchive<R: Read>(reader: R, output_dir: &Path) -> Result<PathBuf, Crypt
         incomplete_name.push(".incomplete");
         let working_path = output_dir.join(&incomplete_name);
         let final_path = output_dir.join(root_name);
-        if let Err(e) = rename_no_clobber(&working_path, &final_path) {
+        if let Err(e) = crate::atomic_output::rename_dir_no_clobber(&working_path, &final_path) {
             return Err(CryptoError::InternalError(format!(
                 "Cannot rename to final output: {e}"
             )));
@@ -230,241 +230,6 @@ pub fn unarchive<R: Read>(reader: R, output_dir: &Path) -> Result<PathBuf, Crypt
     }
 
     first_entry_root.ok_or_else(|| CryptoError::InvalidInput("Empty archive".to_string()))
-}
-
-/// Atomically renames `from` to `to`, failing if `to` already exists.
-#[cfg(target_os = "linux")]
-pub(crate) fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-    let from_c = CString::new(from.as_os_str().as_bytes())
-        .map_err(|_| io::Error::other("path contains null byte"))?;
-    let to_c = CString::new(to.as_os_str().as_bytes())
-        .map_err(|_| io::Error::other("path contains null byte"))?;
-    // SAFETY: CString pointers are valid, null-terminated, and live for the call.
-    #[allow(unsafe_code)]
-    let ret = unsafe {
-        libc::renameat2(
-            libc::AT_FDCWD,
-            from_c.as_ptr(),
-            libc::AT_FDCWD,
-            to_c.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
-    };
-    if ret == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-    let from_c = CString::new(from.as_os_str().as_bytes())
-        .map_err(|_| io::Error::other("path contains null byte"))?;
-    let to_c = CString::new(to.as_os_str().as_bytes())
-        .map_err(|_| io::Error::other("path contains null byte"))?;
-    // SAFETY: CString pointers are valid, null-terminated, and live for the call.
-    #[allow(unsafe_code)]
-    let ret = unsafe { libc::renamex_np(from_c.as_ptr(), to_c.as_ptr(), libc::RENAME_EXCL) };
-    if ret == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-#[cfg(target_os = "windows")]
-pub(crate) fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-
-    // Windows path encoding constants.
-    const BACK: u16 = b'\\' as u16;
-    const QUESTION: u16 = b'?' as u16;
-    const DOT: u16 = b'.' as u16;
-    // Paths whose wide-encoded length (including null terminator) exceeds
-    // this threshold are converted to the \\?\ verbatim form so they can
-    // bypass the MAX_PATH limit on Windows APIs.
-    const MAX_PATH: usize = 260;
-
-    // Encode a path as a null-terminated UTF-16 wide string, rejecting
-    // embedded NUL code units (which are invalid in Windows paths anyway).
-    fn to_wide(p: &Path) -> io::Result<Vec<u16>> {
-        let mut out: Vec<u16> = Vec::with_capacity(p.as_os_str().len() + 1);
-        for u in p.as_os_str().encode_wide() {
-            if u == 0 {
-                return Err(io::Error::other("path contains null code unit"));
-            }
-            out.push(u);
-        }
-        out.push(0);
-        Ok(out)
-    }
-
-    // True when the wide path is already in the Win32 file namespace
-    // (`\\?\...`) or the device namespace (`\\.\...`), in which case it
-    // must be passed through untouched.
-    fn is_verbatim(w: &[u16]) -> bool {
-        w.len() >= 4
-            && w[0] == BACK
-            && w[1] == BACK
-            && (w[2] == QUESTION || w[2] == DOT)
-            && w[3] == BACK
-    }
-
-    // Canonicalize a path via GetFullPathNameW. Required before verbatim
-    // prefixing because verbatim paths do not undergo `.` / `..` / redundant
-    // separator normalization — the literal string is handed to the kernel.
-    fn full_path(input: &[u16]) -> io::Result<Vec<u16>> {
-        #[link(name = "kernel32")]
-        extern "system" {
-            fn GetFullPathNameW(
-                lp_file_name: *const u16,
-                n_buffer_length: u32,
-                lp_buffer: *mut u16,
-                lp_file_part: *mut *mut u16,
-            ) -> u32;
-        }
-
-        // Probe for the required buffer size (return value includes the
-        // terminating null). SAFETY: `input` is a valid null-terminated
-        // UTF-16 buffer; passing (length = 0, buffer = null) for the output
-        // is a documented Win32 pattern.
-        #[allow(unsafe_code)]
-        let required = unsafe {
-            GetFullPathNameW(
-                input.as_ptr(),
-                0,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
-        if required == 0 {
-            return Err(io::Error::last_os_error());
-        }
-
-        let mut buf: Vec<u16> = vec![0u16; required as usize];
-        // SAFETY: `input` and `buf` are valid for the duration of the call;
-        // `buf` has capacity for exactly `required` wide chars, matching
-        // what the probe demanded.
-        #[allow(unsafe_code)]
-        let written = unsafe {
-            GetFullPathNameW(
-                input.as_ptr(),
-                required,
-                buf.as_mut_ptr(),
-                std::ptr::null_mut(),
-            )
-        };
-        if written == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // `written` excludes the null terminator. If it equals or exceeds
-        // `required` the canonical form grew between the two calls — fail
-        // instead of silently truncating.
-        if written >= required {
-            return Err(io::Error::other("path grew during canonicalization"));
-        }
-        buf.truncate(written as usize + 1);
-        Ok(buf)
-    }
-
-    // Prepend the appropriate verbatim prefix to a canonical absolute path.
-    // GetFullPathNameW returns either drive-letter form (`C:\...`) or UNC
-    // form (`\\server\share\...`); map them to `\\?\C:\...` and
-    // `\\?\UNC\server\share\...` respectively.
-    fn to_verbatim(canonical: Vec<u16>) -> Vec<u16> {
-        debug_assert_eq!(canonical.last(), Some(&0));
-        let body_len = canonical.len() - 1;
-        let body = &canonical[..body_len];
-
-        let is_unc = body_len >= 2 && body[0] == BACK && body[1] == BACK;
-
-        if is_unc {
-            const PREFIX: [u16; 8] = [
-                BACK,
-                BACK,
-                QUESTION,
-                BACK,
-                b'U' as u16,
-                b'N' as u16,
-                b'C' as u16,
-                BACK,
-            ];
-            let mut out = Vec::with_capacity(PREFIX.len() + body_len - 2 + 1);
-            out.extend_from_slice(&PREFIX);
-            out.extend_from_slice(&body[2..]);
-            out.push(0);
-            out
-        } else {
-            const PREFIX: [u16; 4] = [BACK, BACK, QUESTION, BACK];
-            let mut out = Vec::with_capacity(PREFIX.len() + body_len + 1);
-            out.extend_from_slice(&PREFIX);
-            out.extend_from_slice(body);
-            out.push(0);
-            out
-        }
-    }
-
-    // Convert any path into a form MoveFileExW can always handle. Short
-    // and already-verbatim paths pass through unchanged; long paths are
-    // canonicalized and prefixed so they bypass the MAX_PATH limit.
-    fn prepare(p: &Path) -> io::Result<Vec<u16>> {
-        let wide = to_wide(p)?;
-        if is_verbatim(&wide) || wide.len() <= MAX_PATH {
-            return Ok(wide);
-        }
-        let canonical = full_path(&wide)?;
-        // Defensive: GetFullPathNameW is not documented to introduce a
-        // verbatim prefix on its own, but if it ever did we must not
-        // double-prefix it here.
-        if is_verbatim(&canonical) {
-            return Ok(canonical);
-        }
-        Ok(to_verbatim(canonical))
-    }
-
-    // MoveFileExW with dwFlags = 0 fails with ERROR_ALREADY_EXISTS if `to`
-    // exists. Rust's `std::fs::rename` on Windows sets the replace-if-exists
-    // flag and would silently clobber the destination, which is why this
-    // arm uses a direct FFI call instead of `std::fs::rename`.
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn MoveFileExW(
-            lp_existing_file_name: *const u16,
-            lp_new_file_name: *const u16,
-            dw_flags: u32,
-        ) -> i32;
-    }
-
-    let from_w = prepare(from)?;
-    let to_w = prepare(to)?;
-
-    // SAFETY: both pointers reference valid, null-terminated UTF-16 buffers
-    // that live for the duration of the call. `dw_flags = 0` is a well-
-    // defined value (no replace, no cross-volume copy, no delay).
-    #[allow(unsafe_code)]
-    let ret = unsafe { MoveFileExW(from_w.as_ptr(), to_w.as_ptr(), 0) };
-    if ret != 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-pub(crate) fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
-    // Fallback: check + rename (TOCTOU possible, best effort).
-    if to.exists() {
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "target exists",
-        ));
-    }
-    fs::rename(from, to)
 }
 
 fn extract_entries<R: Read>(
@@ -527,7 +292,13 @@ fn extract_entries<R: Read>(
                     fs::create_dir_all(parent)?;
                 }
             }
-            let mut outfile = File::create(&working_path)?;
+            // `create_new(true)` refuses to open a pre-existing file so a
+            // malicious archive containing duplicate entries at the same
+            // path cannot silently overwrite the first entry.
+            let mut outfile = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&working_path)?;
             io::copy(&mut entry, &mut outfile)?;
             drop(outfile);
             restore_permissions(entry.header(), &working_path)?;
@@ -603,7 +374,7 @@ mod tests {
     use std::fs;
     use std::io::Cursor;
 
-    use crate::archiver::{archive, rename_no_clobber, unarchive};
+    use crate::archiver::{archive, unarchive};
 
     #[test]
     fn archive_and_unarchive_file() {
@@ -767,6 +538,58 @@ mod tests {
         assert!(
             err.to_string().contains("Unsupported archive entry type"),
             "expected unsupported entry error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn unarchive_rejects_duplicate_file_entries() {
+        // A maliciously crafted archive with two file entries at the same
+        // path must not silently overwrite the first with the second.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        let mut buf = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut buf);
+
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_size(0);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "mydir/", &[] as &[u8])
+                .unwrap();
+
+            let first = b"first payload";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(first.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "mydir/dup.txt", &first[..])
+                .unwrap();
+
+            let second = b"attacker payload";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(second.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "mydir/dup.txt", &second[..])
+                .unwrap();
+
+            builder.finish().unwrap();
+        }
+
+        let err = unarchive(Cursor::new(buf), &extract_dir).unwrap_err();
+        // The second entry's create_new fails with AlreadyExists, which
+        // propagates as CryptoError::Io.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("exists") || msg.contains("File exists"),
+            "expected already-exists error, got: {msg}"
         );
     }
 
@@ -985,37 +808,5 @@ mod tests {
             0o755,
             "rwx bits should be preserved: mode 0o{stored_mode:o}"
         );
-    }
-
-    #[test]
-    fn rename_no_clobber_refuses_to_overwrite() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let from = tmp.path().join("src.txt");
-        let to = tmp.path().join("dst.txt");
-        fs::write(&from, "new").unwrap();
-        fs::write(&to, "existing").unwrap();
-
-        let err = rename_no_clobber(&from, &to).unwrap_err();
-        assert_eq!(
-            err.kind(),
-            std::io::ErrorKind::AlreadyExists,
-            "expected AlreadyExists, got: {err:?}"
-        );
-        // Destination must be untouched and source must still exist.
-        assert_eq!(fs::read_to_string(&to).unwrap(), "existing");
-        assert!(from.exists(), "source should not have been moved");
-    }
-
-    #[test]
-    fn rename_no_clobber_succeeds_when_target_missing() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let from = tmp.path().join("src.txt");
-        let to = tmp.path().join("dst.txt");
-        fs::write(&from, "payload").unwrap();
-
-        rename_no_clobber(&from, &to).unwrap();
-
-        assert!(!from.exists(), "source should have been moved");
-        assert_eq!(fs::read_to_string(&to).unwrap(), "payload");
     }
 }

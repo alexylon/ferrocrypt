@@ -1,4 +1,4 @@
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -11,6 +11,7 @@ use secrecy::{ExposeSecret, SecretString};
 use sha3::Sha3_256;
 use zeroize::Zeroizing;
 
+use crate::atomic_output;
 use crate::common::{
     ARGON2_SALT_SIZE, DecryptReader, ENCRYPTION_KEY_SIZE, EncryptWriter, HMAC_KEY_SIZE,
     HMAC_TAG_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams, STREAM_NONCE_SIZE, ct_eq_32,
@@ -186,24 +187,17 @@ pub fn encrypt_file(
             output_path.display()
         )));
     }
-    let mut working_name = output_path.as_os_str().to_os_string();
-    working_name.push(".incomplete");
-    let working_path = PathBuf::from(working_name);
-    if working_path.exists() {
-        return Err(CryptoError::InvalidInput(format!(
-            "Previous .incomplete exists: {}",
-            working_path.display()
-        )));
-    }
 
-    let mut file_created = false;
-    let encrypt_result: Result<(), CryptoError> = (|| {
-        let mut dest = OpenOptions::new()
-            .append(true)
-            .create_new(true)
-            .open(&working_path)?;
-        file_created = true;
+    let temp_dir = output_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".ferrocrypt-")
+        .suffix(".incomplete")
+        .tempfile_in(temp_dir)?;
 
+    let encrypt_result: Result<tempfile::NamedTempFile, CryptoError> = (|| {
         let mut stream_nonce = [0u8; STREAM_NONCE_SIZE];
         OsRng.fill_bytes(&mut stream_nonce);
 
@@ -230,25 +224,22 @@ pub fn encrypt_file(
         let stream_encryptor =
             stream::EncryptorBE32::from_aead(cipher, stream_nonce.as_ref().into());
 
-        dest.write_all(&encode(&prefix))?;
-        core.write_to(&mut dest)?;
-        dest.write_all(&encode(&hmac_tag))?;
+        tmp.as_file_mut().write_all(&encode(&prefix))?;
+        core.write_to(tmp.as_file_mut())?;
+        tmp.as_file_mut().write_all(&encode(&hmac_tag))?;
 
-        let encrypt_writer = EncryptWriter::new(stream_encryptor, dest);
+        // Pass the temp file by value so the encrypted stream writes
+        // through the same handle used for the header, then recover it
+        // for sync + persist.
+        let encrypt_writer = EncryptWriter::new(stream_encryptor, tmp);
         let (_, encrypt_writer) = archiver::archive(input_path, encrypt_writer)?;
-        let dest = encrypt_writer.finish()?;
-        dest.sync_all()?;
-        Ok(())
+        let tmp = encrypt_writer.finish()?;
+        tmp.as_file().sync_all()?;
+        Ok(tmp)
     })();
 
-    if let Err(e) = encrypt_result {
-        if file_created {
-            let _ = fs::remove_file(&working_path);
-        }
-        return Err(e);
-    }
-
-    archiver::rename_no_clobber(&working_path, &output_path)?;
+    let tmp = encrypt_result?;
+    atomic_output::finalize_file(tmp, &output_path)?;
     Ok(output_path)
 }
 

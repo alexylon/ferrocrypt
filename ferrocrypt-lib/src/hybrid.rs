@@ -1,4 +1,4 @@
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -12,6 +12,7 @@ use sha2::Sha256;
 use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::atomic_output;
 use crate::common::{
     ARGON2_SALT_SIZE, DecryptReader, ENCRYPTION_KEY_SIZE, EncryptWriter, HMAC_KEY_SIZE,
     HMAC_TAG_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams, STREAM_NONCE_SIZE, TAG_SIZE, ct_eq_32,
@@ -281,22 +282,22 @@ fn encrypt_file_inner(
             output_path.display()
         )));
     }
-    let mut working_name = output_path.as_os_str().to_os_string();
-    working_name.push(".incomplete");
-    let working_path = PathBuf::from(working_name);
-    if working_path.exists() {
-        return Err(CryptoError::InvalidInput(format!(
-            "Previous .incomplete exists: {}",
-            working_path.display()
-        )));
-    }
+
+    let temp_dir = output_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let tmp = tempfile::Builder::new()
+        .prefix(".ferrocrypt-")
+        .suffix(".incomplete")
+        .tempfile_in(temp_dir)?;
 
     let mut encryption_key = XChaCha20Poly1305::generate_key(&mut OsRng);
     let mut hmac_key = [0u8; HMAC_KEY_SIZE];
     OsRng.fill_bytes(&mut hmac_key);
 
-    let mut file_created = false;
-    let result = (|| -> Result<(), CryptoError> {
+    let result: Result<tempfile::NamedTempFile, CryptoError> = (|| {
+        let mut tmp = tmp;
         let cipher = XChaCha20Poly1305::new(&encryption_key);
 
         let mut stream_nonce = [0u8; STREAM_NONCE_SIZE];
@@ -324,37 +325,24 @@ fn encrypt_file_inner(
         let stream_encryptor =
             stream::EncryptorBE32::from_aead(cipher, stream_nonce.as_ref().into());
 
-        let mut dest = OpenOptions::new()
-            .append(true)
-            .create_new(true)
-            .open(&working_path)?;
-        file_created = true;
+        tmp.as_file_mut().write_all(&encode(&prefix))?;
+        core.write_to(tmp.as_file_mut())?;
+        tmp.as_file_mut().write_all(&encode(&hmac_tag))?;
 
-        dest.write_all(&encode(&prefix))?;
-        core.write_to(&mut dest)?;
-        dest.write_all(&encode(&hmac_tag))?;
-
-        let encrypt_writer = EncryptWriter::new(stream_encryptor, dest);
+        let encrypt_writer = EncryptWriter::new(stream_encryptor, tmp);
         let (_, encrypt_writer) = archiver::archive(input_path, encrypt_writer)?;
-        let dest = encrypt_writer.finish()?;
-        dest.sync_all()?;
+        let tmp = encrypt_writer.finish()?;
+        tmp.as_file().sync_all()?;
 
         stream_nonce.zeroize();
-        Ok(())
+        Ok(tmp)
     })();
-
-    if let Err(e) = result {
-        if file_created {
-            let _ = fs::remove_file(&working_path);
-        }
-        encryption_key.zeroize();
-        hmac_key.zeroize();
-        return Err(e);
-    }
 
     encryption_key.zeroize();
     hmac_key.zeroize();
-    archiver::rename_no_clobber(&working_path, &output_path)?;
+
+    let tmp = result?;
+    atomic_output::finalize_file(tmp, &output_path)?;
     Ok(output_path)
 }
 
@@ -632,8 +620,6 @@ pub fn generate_key_pair(
 
     let secret_key_path = output_dir.join(PRIVATE_KEY_FILENAME);
     let public_key_path = output_dir.join(PUBLIC_KEY_FILENAME);
-    let tmp_secret = output_dir.join(".private.key.tmp");
-    let tmp_public = output_dir.join(".public.key.tmp");
 
     if secret_key_path.exists() {
         return Err(CryptoError::InvalidInput(format!(
@@ -648,44 +634,43 @@ pub fn generate_key_pair(
         )));
     }
 
-    // Clean up stale temp files from a previous crashed run
-    let _ = fs::remove_file(&tmp_secret);
-    let _ = fs::remove_file(&tmp_public);
+    // Write public key first, then the secret key. If the secret key
+    // write fails, a successfully persisted public key is orphaned but
+    // harmless (public keys are meant to be public); we still remove it
+    // so the user's output directory is clean.
+    //
+    // Public key permissions are relaxed to 0o644 on Unix so the file is
+    // world-readable (public keys are not secret); the secret key
+    // tempfile keeps tempfile's default 0o600.
+    let mut public_builder = tempfile::Builder::new();
+    public_builder.prefix(".ferrocrypt-pubkey-").suffix(".tmp");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        public_builder.permissions(fs::Permissions::from_mode(0o644));
+    }
+    let mut public_tmp = public_builder.tempfile_in(output_dir)?;
+    public_tmp.as_file_mut().write_all(&public_header)?;
+    public_tmp.as_file_mut().write_all(public_key.as_bytes())?;
+    public_tmp.as_file().sync_all()?;
+    atomic_output::finalize_file(public_tmp, &public_key_path)?;
 
-    // Write both key files to temp names first, then rename atomically.
-    // If anything fails, clean up temp files so no partial state remains.
-    let write_result: Result<(), CryptoError> = (|| {
-        let mut secret_key_opts = OpenOptions::new();
-        secret_key_opts.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            secret_key_opts.mode(0o600);
-        }
-        let mut secret_key_file = secret_key_opts.open(&tmp_secret)?;
-        secret_key_file.write_all(&secret_header)?;
-        secret_key_file.write_all(&secret_body.to_bytes())?;
-        secret_key_file.sync_all()?;
-
-        let mut public_key_file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp_public)?;
-        public_key_file.write_all(&public_header)?;
-        public_key_file.write_all(public_key.as_bytes())?;
-        public_key_file.sync_all()?;
-
-        archiver::rename_no_clobber(&tmp_secret, &secret_key_path)?;
-        if let Err(e) = archiver::rename_no_clobber(&tmp_public, &public_key_path) {
-            let _ = fs::remove_file(&secret_key_path);
-            return Err(e.into());
-        }
+    let secret_write: Result<(), CryptoError> = (|| {
+        let mut secret_tmp = tempfile::Builder::new()
+            .prefix(".ferrocrypt-seckey-")
+            .suffix(".tmp")
+            .tempfile_in(output_dir)?;
+        secret_tmp.as_file_mut().write_all(&secret_header)?;
+        secret_tmp
+            .as_file_mut()
+            .write_all(&secret_body.to_bytes())?;
+        secret_tmp.as_file().sync_all()?;
+        atomic_output::finalize_file(secret_tmp, &secret_key_path)?;
         Ok(())
     })();
 
-    if let Err(e) = write_result {
-        let _ = fs::remove_file(&tmp_secret);
-        let _ = fs::remove_file(&tmp_public);
+    if let Err(e) = secret_write {
+        let _ = fs::remove_file(&public_key_path);
         return Err(e);
     }
 

@@ -252,13 +252,13 @@ pub fn public_key_fingerprint(key_file: impl AsRef<Path>) -> Result<String, Cryp
 pub fn encode_recipient(key_file: impl AsRef<Path>) -> Result<String, CryptoError> {
     let key_bytes = read_public_key_bytes(key_file)?;
     bech32::encode::<bech32::Bech32>(RECIPIENT_HRP, &key_bytes)
-        .map_err(|e| CryptoError::InternalError(format!("Bech32 encode failed: {}", e)))
+        .map_err(|e| CryptoError::InternalInvariant(format!("Bech32 encode failed: {}", e)))
 }
 
 /// Encodes raw 32-byte public key bytes as a Bech32 recipient string (`fcr1...`).
 pub fn encode_recipient_from_bytes(key_bytes: &[u8; 32]) -> Result<String, CryptoError> {
     bech32::encode::<bech32::Bech32>(RECIPIENT_HRP, key_bytes)
-        .map_err(|e| CryptoError::InternalError(format!("Bech32 encode failed: {}", e)))
+        .map_err(|e| CryptoError::InternalInvariant(format!("Bech32 encode failed: {}", e)))
 }
 
 /// Decodes a Bech32 recipient string (`fcr1...`) into raw 32-byte public key bytes.

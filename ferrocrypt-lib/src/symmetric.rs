@@ -144,10 +144,12 @@ fn derive_keys(
     let mut hmac_key = Zeroizing::new([0u8; HMAC_KEY_SIZE]);
     hkdf.expand(HKDF_INFO_ENC, encryption_key.as_mut())
         .map_err(|_| {
-            CryptoError::InternalError("HKDF expand failed for encryption key".to_string())
+            CryptoError::InternalCryptoFailure("HKDF expand failed for encryption key".to_string())
         })?;
     hkdf.expand(HKDF_INFO_HMAC, hmac_key.as_mut())
-        .map_err(|_| CryptoError::InternalError("HKDF expand failed for HMAC key".to_string()))?;
+        .map_err(|_| {
+            CryptoError::InternalCryptoFailure("HKDF expand failed for HMAC key".to_string())
+        })?;
 
     Ok((encryption_key, hmac_key))
 }
@@ -306,7 +308,7 @@ fn decrypt_file_v3(
     ) {
         let key_hash: [u8; ENCRYPTION_KEY_SIZE] = sha3_256_hash(encryption_key.as_ref())?;
         if !ct_eq_32(&key_hash, &core.verification_hash) {
-            return Err(CryptoError::AuthenticationFailed);
+            return Err(CryptoError::HeaderAuthenticationFailed);
         }
         return Err(hmac_err);
     }

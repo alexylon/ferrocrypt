@@ -218,7 +218,9 @@ fn derive_envelope_key(
     let hkdf = Hkdf::<Sha256>::new(Some(&salt), shared_secret);
     let mut key = Zeroizing::new([0u8; 32]);
     hkdf.expand(HYBRID_ENVELOPE_INFO, key.as_mut())
-        .map_err(|_| CryptoError::InternalError("Envelope HKDF expand failed".to_string()))?;
+        .map_err(|_| {
+            CryptoError::InternalCryptoFailure("Envelope HKDF expand failed".to_string())
+        })?;
     Ok(key)
 }
 
@@ -474,7 +476,7 @@ fn read_secret_key_data(
     let nonce = chacha20poly1305::XNonce::from_slice(&parsed.nonce);
     let mut plaintext = cipher
         .decrypt(nonce, parsed.ciphertext.as_slice())
-        .map_err(|_| CryptoError::AuthenticationFailed)?;
+        .map_err(|_| CryptoError::KeyFileUnlockFailed)?;
 
     drop(derived_key);
 
@@ -511,15 +513,15 @@ fn seal_envelope(
 
     let cipher = XChaCha20Poly1305::new(wrapping_key.as_ref().into());
     let aead_nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
-    let ciphertext_vec = cipher
-        .encrypt(&aead_nonce, combined_key)
-        .map_err(|_| CryptoError::InternalError("Envelope encryption failed".to_string()))?;
+    let ciphertext_vec = cipher.encrypt(&aead_nonce, combined_key).map_err(|_| {
+        CryptoError::InternalCryptoFailure("Envelope encryption failed".to_string())
+    })?;
 
     let mut nonce = [0u8; ENVELOPE_NONCE_SIZE];
     nonce.copy_from_slice(&aead_nonce);
     let ciphertext: [u8; ENVELOPE_CIPHERTEXT_SIZE] =
         ciphertext_vec.as_slice().try_into().map_err(|_| {
-            CryptoError::InternalError("Envelope ciphertext length mismatch".to_string())
+            CryptoError::InternalInvariant("Envelope ciphertext length mismatch".to_string())
         })?;
 
     Ok(Envelope {
@@ -539,7 +541,7 @@ fn open_envelope(
 
     let shared = recipient_secret.diffie_hellman(&ephemeral_public);
     if shared_secret_is_all_zero(shared.as_bytes()) {
-        return Err(CryptoError::AuthenticationFailed);
+        return Err(CryptoError::HeaderAuthenticationFailed);
     }
 
     let recipient_public = PublicKey::from(recipient_secret);
@@ -550,7 +552,7 @@ fn open_envelope(
     let nonce = chacha20poly1305::XNonce::from_slice(&parsed.nonce);
     let mut plaintext = cipher
         .decrypt(nonce, parsed.ciphertext.as_slice())
-        .map_err(|_| CryptoError::AuthenticationFailed)?;
+        .map_err(|_| CryptoError::HeaderAuthenticationFailed)?;
 
     if plaintext.len() != COMBINED_KEY_SIZE {
         plaintext.zeroize();
@@ -596,7 +598,9 @@ pub fn generate_key_pair(
     drop(secret_key);
     let encrypted_secret = cipher
         .encrypt(&aead_nonce, raw_secret.as_slice())
-        .map_err(|_| CryptoError::InternalError("Failed to encrypt private key".to_string()))?;
+        .map_err(|_| {
+            CryptoError::InternalCryptoFailure("Failed to encrypt private key".to_string())
+        })?;
     drop(raw_secret);
     drop(derived_key);
 
@@ -604,7 +608,7 @@ pub fn generate_key_pair(
     nonce.copy_from_slice(&aead_nonce);
     let ciphertext: [u8; SECRET_KEY_BLOB_SIZE] =
         encrypted_secret.as_slice().try_into().map_err(|_| {
-            CryptoError::InternalError("Private key ciphertext length mismatch".to_string())
+            CryptoError::InternalInvariant("Private key ciphertext length mismatch".to_string())
         })?;
     let secret_body = SecretKeyBody {
         kdf_bytes,

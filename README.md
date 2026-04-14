@@ -73,8 +73,8 @@ The file header holds the salts, nonces, and KDF parameters needed to begin decr
 - "Unsupported file version" — instead of failing to identify the format at all
 - "Unrecognized encryption type: 0xNN" — instead of treating the file as plaintext
 - "Invalid KDF memory cost" / "File requires N KiB, limit is M KiB" — instead of silently allocating unbounded memory
-- "Authentication failed: wrong password, wrong key, or tampered data" — instead of not knowing whether the password is wrong or the file is damaged
-- "Encrypted stream truncated" / per-chunk AEAD failure — instead of not reaching decryption at all
+- "Header authentication failed: wrong password/key or tampered" — instead of not knowing whether the password or key is wrong or the file header is damaged
+- "Encrypted file is truncated" / "Payload authentication failed: data tampered or corrupted" — instead of not reaching payload decryption at all
 
 Without a readable header, all of these collapse into a single generic "invalid format" error.
 
@@ -257,6 +257,17 @@ Select a file or folder, then choose the encryption mode. The app auto-detects e
 - **Hybrid** — Use an existing public key to encrypt, or create a new key pair inline. After key generation, the app switches to encryption with the new public key pre-filled. The recipient's public key fingerprint is shown with a copy button for out-of-band verification. Key files are validated on selection and invalid files show an error before the operation starts. Decryption requires a private key and its passphrase.
 
 A password strength indicator (based on [Proton Pass](https://github.com/protonpass/proton-pass-common) implementation) is shown during encryption and key generation.
+
+## Decryption errors
+
+FerroCrypt distinguishes a few distinct decryption-failure stages so that a failed decrypt tells you what actually went wrong:
+
+- **Private key file unlock failed: wrong passphrase** — The hybrid private key file is encrypted with its own passphrase, and the passphrase you entered did not decrypt it. Retry with the correct passphrase; the encrypted file is not involved at this stage.
+- **Header authentication failed: wrong password/key or tampered** — Either the symmetric password or the hybrid recipient key is wrong, or the encrypted file's header has been modified. No plaintext has been produced.
+- **Payload authentication failed: data tampered or corrupted** — The header authenticated successfully, but a later ciphertext chunk failed its authentication tag. This usually means the file has been corrupted or truncated partway through, or an attacker has modified bytes after the header. During streaming decryption, earlier chunks that authenticated successfully may already have been written to disk under an `.incomplete` working directory before the failing chunk was reached.
+- **Encrypted file is truncated** — The encrypted stream ends before its final authenticated chunk, usually because of a partial download or an interrupted copy.
+
+None of these failures produce a file at the final output path. Partial plaintext may have been written under a sibling `.incomplete` working directory (FerroCrypt leaves it there on purpose, because when ciphertext is damaged it may hold the only recoverable data). A retry starts fresh once that `.incomplete` directory is removed.
 
 ## Acknowledgments
 

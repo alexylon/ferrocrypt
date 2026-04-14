@@ -174,8 +174,50 @@ fn test_symmetric_wrong_password() -> Result<(), CryptoError> {
 
     assert!(result.is_err());
     match result {
-        Err(CryptoError::AuthenticationFailed) => {}
-        other => panic!("Expected AuthenticationFailed, got {:?}", other),
+        Err(CryptoError::HeaderAuthenticationFailed) => {}
+        other => panic!("Expected HeaderAuthenticationFailed, got {:?}", other),
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_symmetric_payload_tamper_mid_chunk() -> Result<(), CryptoError> {
+    // Flipping a byte inside a ciphertext chunk (not the header) must
+    // surface as PayloadAuthenticationFailed, not as a generic Io error.
+    let test_dir = setup_test_dir("symmetric_payload_tamper");
+    let input_file = test_dir.join("payload.bin");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    // Big enough to span multiple AEAD chunks so the tamper lands well
+    // past the header.
+    let big_data: Vec<u8> = (0..200_000u32).map(|i| (i % 256) as u8).collect();
+    fs::write(&input_file, &big_data)?;
+
+    let passphrase = SecretString::from("tamper_pass".to_string());
+    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+
+    let encrypted_path = encrypt_dir.join("payload.fcr");
+    let mut ct = fs::read(&encrypted_path)?;
+    // Flip a byte deep into the ciphertext, far past the header region.
+    let flip_offset = ct.len() / 2;
+    ct[flip_offset] ^= 0xFF;
+    fs::write(&encrypted_path, &ct)?;
+
+    let result = symmetric_auto(
+        &encrypted_path,
+        &decrypt_dir,
+        &passphrase,
+        None,
+        None,
+        |_| {},
+    );
+    match result {
+        Err(CryptoError::PayloadAuthenticationFailed) => {}
+        other => panic!("Expected PayloadAuthenticationFailed, got {:?}", other),
     }
 
     Ok(())
@@ -400,7 +442,9 @@ fn test_hybrid_wrong_key_passphrase() -> Result<(), CryptoError> {
         |_| {},
     )?;
 
-    // Try to decrypt with wrong passphrase
+    // Try to decrypt with wrong passphrase for the private key file.
+    // The passphrase protects the private key file itself, so a wrong
+    // passphrase fails at the key-file unlock stage.
     let secret_key_path = keys_dir.join("private.key");
 
     let result = hybrid_auto(
@@ -415,8 +459,8 @@ fn test_hybrid_wrong_key_passphrase() -> Result<(), CryptoError> {
 
     assert!(result.is_err());
     match result {
-        Err(CryptoError::AuthenticationFailed) => {}
-        other => panic!("Expected AuthenticationFailed, got {:?}", other),
+        Err(CryptoError::KeyFileUnlockFailed) => {}
+        other => panic!("Expected KeyFileUnlockFailed, got {:?}", other),
     }
 
     Ok(())
@@ -621,8 +665,8 @@ fn test_symmetric_streaming_wrong_password() -> Result<(), CryptoError> {
 
     assert!(result.is_err());
     match result {
-        Err(CryptoError::AuthenticationFailed) => {}
-        other => panic!("Expected AuthenticationFailed, got {:?}", other),
+        Err(CryptoError::HeaderAuthenticationFailed) => {}
+        other => panic!("Expected HeaderAuthenticationFailed, got {:?}", other),
     }
 
     Ok(())
@@ -729,7 +773,10 @@ fn test_hybrid_wrong_key_pair() -> Result<(), CryptoError> {
         |_| {},
     )?;
 
-    // Try to decrypt with key pair B's private key — should fail
+    // Try to decrypt with key pair B's private key — the passphrase is
+    // correct for key pair B (so private.key unlocks fine), but the
+    // ECDH envelope was sealed for recipient A, so envelope AEAD fails
+    // and the decryption must surface as HeaderAuthenticationFailed.
     let secret_key_b = keys_b.join("private.key");
 
     let result = hybrid_auto(
@@ -742,7 +789,10 @@ fn test_hybrid_wrong_key_pair() -> Result<(), CryptoError> {
         |_| {},
     );
 
-    assert!(result.is_err());
+    match result {
+        Err(CryptoError::HeaderAuthenticationFailed) => {}
+        other => panic!("Expected HeaderAuthenticationFailed, got {:?}", other),
+    }
 
     Ok(())
 }

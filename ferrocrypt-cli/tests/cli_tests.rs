@@ -179,8 +179,19 @@ fn test_cli_symmetric_wrong_password() {
         .output()
         .expect("Failed to execute decrypt command");
 
-    // Should fail
+    // Should fail with the typed Display message from the library. The CLI
+    // formats errors via `Display`, so a regression to `Debug` or a change
+    // to the wording would break this assertion.
     assert!(!decrypt_output.status.success());
+    let stderr = String::from_utf8_lossy(&decrypt_output.stderr);
+    assert!(
+        stderr.contains("Header authentication failed: wrong password/key or tampered"),
+        "expected typed header-auth message on stderr, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("aead::Error"),
+        "stderr must not leak internal crate error names, got: {stderr}"
+    );
 }
 
 #[test]

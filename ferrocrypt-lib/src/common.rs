@@ -11,6 +11,14 @@ use sha3::{Digest, Sha3_256};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::CryptoError;
+use crate::error::StreamError;
+
+/// Wraps a [`StreamError`] as an [`io::Error`] with the given kind so that
+/// the typed marker can traverse [`Read`]/[`Write`] trait boundaries and
+/// later be downcast by `From<io::Error> for CryptoError`.
+fn stream_io_error(kind: io::ErrorKind, err: StreamError) -> io::Error {
+    io::Error::new(kind, err)
+}
 
 type HmacSha3_256 = Hmac<Sha3_256>;
 
@@ -223,7 +231,7 @@ pub fn ct_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
 
 pub fn hmac_sha3_256(key: &[u8], data: &[u8]) -> Result<[u8; 32], CryptoError> {
     let mut mac = HmacSha3_256::new_from_slice(key)
-        .map_err(|e| CryptoError::InternalError(format!("HMAC key error: {}", e)))?;
+        .map_err(|_| CryptoError::InternalInvariant("HMAC key length rejected".to_string()))?;
     mac.update(data);
     let result = mac.finalize();
     let bytes: [u8; 32] = result.into_bytes().into();
@@ -233,10 +241,10 @@ pub fn hmac_sha3_256(key: &[u8], data: &[u8]) -> Result<[u8; 32], CryptoError> {
 /// Verifies HMAC-SHA3-256 in constant time. Returns error if mismatch.
 pub fn hmac_sha3_256_verify(key: &[u8], data: &[u8], tag: &[u8]) -> Result<(), CryptoError> {
     let mut mac = HmacSha3_256::new_from_slice(key)
-        .map_err(|e| CryptoError::InternalError(format!("HMAC key error: {}", e)))?;
+        .map_err(|_| CryptoError::InternalInvariant("HMAC key length rejected".to_string()))?;
     mac.update(data);
     mac.verify_slice(tag)
-        .map_err(|_| CryptoError::AuthenticationFailed)
+        .map_err(|_| CryptoError::HeaderAuthenticationFailed)
 }
 
 /// Streaming encryption writer: buffers plaintext writes into `BUFFER_SIZE`
@@ -280,14 +288,16 @@ impl<W: Write> EncryptWriter<W> {
     /// Returns the inner writer so the caller can finalize it (e.g. `sync_all`).
     pub fn finish(mut self) -> Result<W, CryptoError> {
         let encryptor = self.encryptor.take().ok_or_else(|| {
-            CryptoError::InvalidInput("EncryptWriter already finished".to_string())
+            CryptoError::InternalInvariant("EncryptWriter already finished".to_string())
         })?;
         let mut output = self.output.take().ok_or_else(|| {
-            CryptoError::InvalidInput("EncryptWriter already finished".to_string())
+            CryptoError::InternalInvariant("EncryptWriter already finished".to_string())
         })?;
         encryptor
             .encrypt_last_in_place(b"", &mut self.chunk)
-            .map_err(CryptoError::Cipher)?;
+            .map_err(|_| {
+                CryptoError::InternalCryptoFailure(StreamError::EncryptAead.to_string())
+            })?;
         output.write_all(&self.chunk)?;
         output.flush()?;
         self.chunk.zeroize();
@@ -305,17 +315,15 @@ impl<W: Write> Write for EncryptWriter<W> {
             written += take;
 
             if self.chunk.len() == BUFFER_SIZE {
-                let encryptor = self
-                    .encryptor
-                    .as_mut()
-                    .ok_or_else(|| io::Error::other("EncryptWriter already finished"))?;
+                let encryptor = self.encryptor.as_mut().ok_or_else(|| {
+                    stream_io_error(io::ErrorKind::Other, StreamError::StateExhausted)
+                })?;
                 encryptor
                     .encrypt_next_in_place(b"", &mut self.chunk)
-                    .map_err(|e| io::Error::other(e.to_string()))?;
-                let output = self
-                    .output
-                    .as_mut()
-                    .ok_or_else(|| io::Error::other("EncryptWriter already finished"))?;
+                    .map_err(|_| stream_io_error(io::ErrorKind::Other, StreamError::EncryptAead))?;
+                let output = self.output.as_mut().ok_or_else(|| {
+                    stream_io_error(io::ErrorKind::Other, StreamError::StateExhausted)
+                })?;
                 output.write_all(&self.chunk)?;
                 // Zeroize the chunk (plaintext + tag) before refilling for
                 // the next chunk. `zeroize` resets length to 0 and preserves
@@ -378,6 +386,19 @@ impl<R: Read> DecryptReader<R> {
         }
     }
 
+    /// Refill the plaintext window by reading and decrypting the next
+    /// encrypted chunk. Truncation is reported via two distinct paths:
+    ///
+    /// - **Chunk-boundary truncation** — `read` returns 0 immediately,
+    ///   meaning the final authenticated chunk is missing entirely. This
+    ///   surfaces as [`StreamError::Truncated`] → [`CryptoError::TruncatedStream`].
+    /// - **Mid-chunk truncation** — some bytes were read but fewer than a
+    ///   full `BUFFER_SIZE + TAG_SIZE`. We treat the short buffer as the
+    ///   final chunk and run `decrypt_last_in_place`. AEAD authentication
+    ///   will reject it, surfacing as [`StreamError::DecryptAead`] →
+    ///   [`CryptoError::PayloadAuthenticationFailed`]. This is the correct
+    ///   outcome — we cannot distinguish a mid-chunk truncation from a
+    ///   tampered tail, and both must fail closed.
     fn fill_buffer(&mut self) -> io::Result<()> {
         const ENCRYPTED_CHUNK_SIZE: usize = BUFFER_SIZE + TAG_SIZE;
 
@@ -403,28 +424,30 @@ impl<R: Read> DecryptReader<R> {
             // A valid stream always ends with an encrypt_last chunk (>= TAG_SIZE
             // bytes). Reading 0 bytes means the final chunk is missing — the
             // ciphertext was truncated at a chunk boundary.
-            return Err(io::Error::new(
+            return Err(stream_io_error(
                 io::ErrorKind::UnexpectedEof,
-                "encrypted stream truncated: missing final chunk",
+                StreamError::Truncated,
             ));
         }
 
         if filled == ENCRYPTED_CHUNK_SIZE {
-            let decryptor = self
-                .decryptor
-                .as_mut()
-                .ok_or_else(|| io::Error::other("decryptor already consumed"))?;
+            let decryptor = self.decryptor.as_mut().ok_or_else(|| {
+                stream_io_error(io::ErrorKind::Other, StreamError::StateExhausted)
+            })?;
             decryptor
                 .decrypt_next_in_place(b"", &mut self.chunk)
-                .map_err(|e| io::Error::other(e.to_string()))?;
+                .map_err(|_| {
+                    stream_io_error(io::ErrorKind::InvalidData, StreamError::DecryptAead)
+                })?;
         } else {
-            let decryptor = self
-                .decryptor
-                .take()
-                .ok_or_else(|| io::Error::other("decryptor already consumed"))?;
+            let decryptor = self.decryptor.take().ok_or_else(|| {
+                stream_io_error(io::ErrorKind::Other, StreamError::StateExhausted)
+            })?;
             decryptor
                 .decrypt_last_in_place(b"", &mut self.chunk)
-                .map_err(|e| io::Error::other(e.to_string()))?;
+                .map_err(|_| {
+                    stream_io_error(io::ErrorKind::InvalidData, StreamError::DecryptAead)
+                })?;
             self.done = true;
         }
 
@@ -619,9 +642,15 @@ mod tests {
         let (out, err) = drain_decrypt_reader(&mut reader);
         let err = err.expect("expected truncation error, got clean EOF");
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+        // Downcast the typed marker so the test is robust against changes
+        // to the Display text.
+        let marker = err
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<StreamError>())
+            .expect("expected StreamError marker");
         assert!(
-            err.to_string().contains("missing final chunk"),
-            "unexpected error: {err}"
+            matches!(marker, StreamError::Truncated),
+            "expected StreamError::Truncated, got {marker:?}"
         );
         // The first chunk was fully authenticated before truncation was
         // discovered, so its plaintext must have been served before the
@@ -651,11 +680,51 @@ mod tests {
         let mut reader = DecryptReader::new(fresh_decryptor(), ciphertext.as_slice());
         let (out, err) = drain_decrypt_reader(&mut reader);
         let err = err.expect("expected AEAD tamper error, got clean EOF");
-        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let marker = err
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<StreamError>())
+            .expect("expected StreamError marker");
+        assert!(
+            matches!(marker, StreamError::DecryptAead),
+            "expected StreamError::DecryptAead, got {marker:?}"
+        );
         // Exactly the first chunk's plaintext must have been served:
         //  - chunk 1 was fully verified, so its plaintext is delivered;
         //  - chunk 2 failed AEAD verification, so none of its bytes leak;
         //  - the final chunk is never reached.
+        assert_eq!(out.as_slice(), &plaintext[..BUFFER_SIZE]);
+    }
+
+    /// Mid-chunk truncation: the final encrypted chunk is partially present
+    /// but shorter than `BUFFER_SIZE + TAG_SIZE`. `fill_buffer` treats the
+    /// short buffer as the final chunk and runs `decrypt_last_in_place`,
+    /// which must fail AEAD authentication. The user-visible variant is
+    /// `PayloadAuthenticationFailed`, not `TruncatedStream`: we cannot
+    /// distinguish a truncated tail from a tampered tail, and either way
+    /// the tail must be rejected.
+    #[test]
+    fn streaming_aead_mid_chunk_truncation_rejected() {
+        let plaintext: Vec<u8> = (0..(BUFFER_SIZE + 500)).map(|i| (i % 251) as u8).collect();
+        let mut ciphertext = encrypt_to_vec(&plaintext);
+        // Drop 10 bytes from inside the final (short) chunk, leaving a
+        // partial chunk that still has data but is not a valid AEAD frame.
+        ciphertext.truncate(ciphertext.len() - 10);
+
+        let mut reader = DecryptReader::new(fresh_decryptor(), ciphertext.as_slice());
+        let (out, err) = drain_decrypt_reader(&mut reader);
+        let err = err.expect("expected AEAD error on mid-chunk truncation");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let marker = err
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<StreamError>())
+            .expect("expected StreamError marker");
+        assert!(
+            matches!(marker, StreamError::DecryptAead),
+            "expected StreamError::DecryptAead, got {marker:?}"
+        );
+        // First chunk verified cleanly and its plaintext was delivered;
+        // mid-chunk truncation aborts the final chunk with no leaked bytes.
         assert_eq!(out.as_slice(), &plaintext[..BUFFER_SIZE]);
     }
 

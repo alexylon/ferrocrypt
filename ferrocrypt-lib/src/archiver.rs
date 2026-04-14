@@ -223,7 +223,7 @@ pub fn unarchive<R: Read>(reader: R, output_dir: &Path) -> Result<PathBuf, Crypt
         let working_path = output_dir.join(&incomplete_name);
         let final_path = output_dir.join(root_name);
         if let Err(e) = crate::atomic_output::rename_dir_no_clobber(&working_path, &final_path) {
-            return Err(CryptoError::InternalError(format!(
+            return Err(CryptoError::InternalInvariant(format!(
                 "Cannot rename to final output: {e}"
             )));
         }

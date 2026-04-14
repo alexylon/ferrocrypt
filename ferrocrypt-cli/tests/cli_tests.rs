@@ -185,7 +185,7 @@ fn test_cli_symmetric_wrong_password() {
     assert!(!decrypt_output.status.success());
     let stderr = String::from_utf8_lossy(&decrypt_output.stderr);
     assert!(
-        stderr.contains("Header authentication failed: wrong password/key or tampered"),
+        stderr.contains("Wrong password/key or file was tampered with"),
         "expected typed header-auth message on stderr, got: {stderr}"
     );
     assert!(
@@ -304,6 +304,64 @@ fn test_cli_hybrid_encrypt_decrypt_file() {
 }
 
 #[test]
+fn test_cli_symmetric_payload_tamper_message() {
+    let test_dir = setup_test_dir("cli_symmetric_payload_tamper");
+    let input_file = test_dir.join("payload.bin");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    fs::create_dir_all(&decrypt_dir).unwrap();
+
+    let content = "payload tamper test\n".repeat(20_000);
+    create_test_file(&input_file, &content);
+
+    let binary = get_binary_path();
+
+    let encrypt_output = Command::new(&binary)
+        .arg("symmetric")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "tamper_password")
+        .output()
+        .expect("Failed to execute encrypt command");
+    assert!(
+        encrypt_output.status.success(),
+        "Encryption failed: {}",
+        String::from_utf8_lossy(&encrypt_output.stderr)
+    );
+
+    let encrypted_path = encrypt_dir.join("payload.fcr");
+    let mut ciphertext = fs::read(&encrypted_path).expect("Failed to read encrypted file");
+    let flip_offset = ciphertext.len() / 2;
+    ciphertext[flip_offset] ^= 0xFF;
+    fs::write(&encrypted_path, &ciphertext).expect("Failed to write tampered ciphertext");
+
+    let decrypt_output = Command::new(&binary)
+        .arg("symmetric")
+        .arg("-i")
+        .arg(&encrypted_path)
+        .arg("-o")
+        .arg(&decrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "tamper_password")
+        .output()
+        .expect("Failed to execute decrypt command");
+
+    assert!(!decrypt_output.status.success());
+    let stderr = String::from_utf8_lossy(&decrypt_output.stderr);
+    assert!(
+        stderr.contains("Payload authentication failed: data tampered or corrupted"),
+        "expected typed payload-auth message on stderr, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("aead::Error"),
+        "stderr must not leak internal crate error names, got: {stderr}"
+    );
+}
+
+#[test]
 fn test_cli_hybrid_wrong_key_passphrase() {
     let test_dir = setup_test_dir("cli_hybrid_wrong_pass");
     let keys_dir = test_dir.join("keys");
@@ -355,8 +413,16 @@ fn test_cli_hybrid_wrong_key_passphrase() {
         .output()
         .expect("Failed to execute decrypt");
 
-    // Should fail
     assert!(!decrypt_output.status.success());
+    let stderr = String::from_utf8_lossy(&decrypt_output.stderr);
+    assert!(
+        stderr.contains("Private key file unlock failed: wrong passphrase"),
+        "expected typed key-unlock message on stderr, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("aead::Error"),
+        "stderr must not leak internal crate error names, got: {stderr}"
+    );
 }
 
 #[test]

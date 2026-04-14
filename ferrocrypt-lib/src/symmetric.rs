@@ -144,11 +144,13 @@ fn derive_keys(
     let mut hmac_key = Zeroizing::new([0u8; HMAC_KEY_SIZE]);
     hkdf.expand(HKDF_INFO_ENC, encryption_key.as_mut())
         .map_err(|_| {
-            CryptoError::InternalCryptoFailure("HKDF expand failed for encryption key".to_string())
+            CryptoError::InternalCryptoFailure("internal error: failed to derive encryption key")
         })?;
     hkdf.expand(HKDF_INFO_HMAC, hmac_key.as_mut())
         .map_err(|_| {
-            CryptoError::InternalCryptoFailure("HKDF expand failed for HMAC key".to_string())
+            CryptoError::InternalCryptoFailure(
+                "internal error: failed to derive header authentication key",
+            )
         })?;
 
     Ok((encryption_key, hmac_key))

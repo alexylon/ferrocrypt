@@ -18,6 +18,7 @@ use crate::common::{
     HMAC_TAG_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams, STREAM_NONCE_SIZE, TAG_SIZE, ct_eq_32,
     encryption_base_name, hmac_sha3_256, hmac_sha3_256_verify,
 };
+use crate::error::FormatDefect;
 use crate::format::{self, HEADER_PREFIX_SIZE, PUBLIC_KEY_DATA_SIZE, SECRET_KEY_DATA_SIZE};
 use crate::replication::encode;
 use crate::{CryptoError, archiver};
@@ -219,7 +220,7 @@ fn derive_envelope_key(
     let mut key = Zeroizing::new([0u8; 32]);
     hkdf.expand(HYBRID_ENVELOPE_INFO, key.as_mut())
         .map_err(|_| {
-            CryptoError::InternalCryptoFailure("Envelope HKDF expand failed".to_string())
+            CryptoError::InternalCryptoFailure("internal error: failed to derive envelope key")
         })?;
     Ok(key)
 }
@@ -437,7 +438,7 @@ fn read_public_key_data(
     let body_start = format::KEY_FILE_HEADER_SIZE;
     let key_bytes: [u8; PUBLIC_KEY_DATA_SIZE] = data[body_start..body_start + PUBLIC_KEY_DATA_SIZE]
         .try_into()
-        .map_err(|_| CryptoError::InvalidFormat("Invalid public key data".to_string()))?;
+        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::UnexpectedKeyLength))?;
     Ok(PublicKey::from(key_bytes))
 }
 
@@ -465,7 +466,7 @@ fn read_secret_key_data(
     let body_start = format::KEY_FILE_HEADER_SIZE;
     let body: &[u8; SECRET_KEY_DATA_SIZE] = data[body_start..body_start + SECRET_KEY_DATA_SIZE]
         .try_into()
-        .map_err(|_| CryptoError::InvalidFormat("Key body length mismatch".to_string()))?;
+        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::UnexpectedKeyLength))?;
     let parsed = SecretKeyBody::from_bytes(body);
 
     let kdf_params = KdfParams::from_bytes(&parsed.kdf_bytes, kdf_limit)?;
@@ -483,7 +484,7 @@ fn read_secret_key_data(
     if plaintext.len() != SECRET_KEY_SIZE {
         plaintext.zeroize();
         return Err(CryptoError::InvalidFormat(
-            "Decrypted key has unexpected length".to_string(),
+            FormatDefect::UnexpectedKeyLength,
         ));
     }
 
@@ -514,14 +515,16 @@ fn seal_envelope(
     let cipher = XChaCha20Poly1305::new(wrapping_key.as_ref().into());
     let aead_nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
     let ciphertext_vec = cipher.encrypt(&aead_nonce, combined_key).map_err(|_| {
-        CryptoError::InternalCryptoFailure("Envelope encryption failed".to_string())
+        CryptoError::InternalCryptoFailure("internal error: envelope encryption failed")
     })?;
 
     let mut nonce = [0u8; ENVELOPE_NONCE_SIZE];
     nonce.copy_from_slice(&aead_nonce);
     let ciphertext: [u8; ENVELOPE_CIPHERTEXT_SIZE] =
         ciphertext_vec.as_slice().try_into().map_err(|_| {
-            CryptoError::InternalInvariant("Envelope ciphertext length mismatch".to_string())
+            CryptoError::InternalInvariant(
+                "internal error: envelope ciphertext has an unexpected length",
+            )
         })?;
 
     Ok(Envelope {
@@ -557,7 +560,7 @@ fn open_envelope(
     if plaintext.len() != COMBINED_KEY_SIZE {
         plaintext.zeroize();
         return Err(CryptoError::InvalidFormat(
-            "Decrypted envelope has unexpected length".to_string(),
+            FormatDefect::UnexpectedKeyLength,
         ));
     }
 
@@ -599,7 +602,7 @@ pub fn generate_key_pair(
     let encrypted_secret = cipher
         .encrypt(&aead_nonce, raw_secret.as_slice())
         .map_err(|_| {
-            CryptoError::InternalCryptoFailure("Failed to encrypt private key".to_string())
+            CryptoError::InternalCryptoFailure("internal error: private key encryption failed")
         })?;
     drop(raw_secret);
     drop(derived_key);
@@ -608,7 +611,9 @@ pub fn generate_key_pair(
     nonce.copy_from_slice(&aead_nonce);
     let ciphertext: [u8; SECRET_KEY_BLOB_SIZE] =
         encrypted_secret.as_slice().try_into().map_err(|_| {
-            CryptoError::InternalInvariant("Private key ciphertext length mismatch".to_string())
+            CryptoError::InternalInvariant(
+                "internal error: encrypted private key blob has an unexpected length",
+            )
         })?;
     let secret_body = SecretKeyBody {
         kdf_bytes,

@@ -11,7 +11,7 @@ use sha3::{Digest, Sha3_256};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::CryptoError;
-use crate::error::StreamError;
+use crate::error::{InvalidKdfParams, StreamError};
 
 /// Wraps a [`StreamError`] as an [`io::Error`] with the given kind so that
 /// the typed marker can traverse [`Read`]/[`Write`] trait boundaries and
@@ -100,22 +100,19 @@ impl KdfParams {
             lanes: u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
         };
         if params.lanes == 0 || params.lanes > Self::MAX_LANES {
-            return Err(CryptoError::InvalidKdfParams(format!(
-                "Invalid KDF parallelism: {}",
-                params.lanes
-            )));
+            return Err(CryptoError::InvalidKdfParams(
+                InvalidKdfParams::Parallelism(params.lanes),
+            ));
         }
         let min_mem_cost = 8 * params.lanes;
         if params.mem_cost < min_mem_cost || params.mem_cost > Self::MAX_MEM_COST {
-            return Err(CryptoError::InvalidKdfParams(format!(
-                "Invalid KDF memory cost: {} KiB",
-                params.mem_cost
+            return Err(CryptoError::InvalidKdfParams(InvalidKdfParams::MemoryCost(
+                params.mem_cost,
             )));
         }
         if params.time_cost == 0 || params.time_cost > Self::MAX_TIME_COST {
-            return Err(CryptoError::InvalidKdfParams(format!(
-                "Invalid KDF time cost: {}",
-                params.time_cost
+            return Err(CryptoError::InvalidKdfParams(InvalidKdfParams::TimeCost(
+                params.time_cost,
             )));
         }
 
@@ -187,9 +184,6 @@ pub const TAG_SIZE: usize = 16;
 /// STREAM nonce size: XChaCha20's 24-byte nonce minus 5 bytes for counter and last-block flag.
 pub const STREAM_NONCE_SIZE: usize = 19;
 
-// ─── Error messages ───────────────────────────────────────────────────────
-pub const FILE_TOO_SHORT: &str = "File is too short or corrupted";
-
 pub fn file_stem(filename: &Path) -> Result<&OsStr, CryptoError> {
     filename
         .file_stem()
@@ -231,7 +225,7 @@ pub fn ct_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
 
 pub fn hmac_sha3_256(key: &[u8], data: &[u8]) -> Result<[u8; 32], CryptoError> {
     let mut mac = HmacSha3_256::new_from_slice(key)
-        .map_err(|_| CryptoError::InternalInvariant("HMAC key length rejected".to_string()))?;
+        .map_err(|_| CryptoError::InternalInvariant("internal error: invalid HMAC key length"))?;
     mac.update(data);
     let result = mac.finalize();
     let bytes: [u8; 32] = result.into_bytes().into();
@@ -241,7 +235,7 @@ pub fn hmac_sha3_256(key: &[u8], data: &[u8]) -> Result<[u8; 32], CryptoError> {
 /// Verifies HMAC-SHA3-256 in constant time. Returns error if mismatch.
 pub fn hmac_sha3_256_verify(key: &[u8], data: &[u8], tag: &[u8]) -> Result<(), CryptoError> {
     let mut mac = HmacSha3_256::new_from_slice(key)
-        .map_err(|_| CryptoError::InternalInvariant("HMAC key length rejected".to_string()))?;
+        .map_err(|_| CryptoError::InternalInvariant("internal error: invalid HMAC key length"))?;
     mac.update(data);
     mac.verify_slice(tag)
         .map_err(|_| CryptoError::HeaderAuthenticationFailed)
@@ -287,16 +281,16 @@ impl<W: Write> EncryptWriter<W> {
     /// Must be called exactly once after all plaintext has been written.
     /// Returns the inner writer so the caller can finalize it (e.g. `sync_all`).
     pub fn finish(mut self) -> Result<W, CryptoError> {
-        let encryptor = self.encryptor.take().ok_or_else(|| {
-            CryptoError::InternalInvariant("EncryptWriter already finished".to_string())
-        })?;
-        let mut output = self.output.take().ok_or_else(|| {
-            CryptoError::InternalInvariant("EncryptWriter already finished".to_string())
-        })?;
+        let encryptor = self.encryptor.take().ok_or(CryptoError::InternalInvariant(
+            "internal error: encrypt writer already finished",
+        ))?;
+        let mut output = self.output.take().ok_or(CryptoError::InternalInvariant(
+            "internal error: encrypt writer already finished",
+        ))?;
         encryptor
             .encrypt_last_in_place(b"", &mut self.chunk)
             .map_err(|_| {
-                CryptoError::InternalCryptoFailure(StreamError::EncryptAead.to_string())
+                CryptoError::InternalCryptoFailure("internal error: payload encryption failed")
             })?;
         output.write_all(&self.chunk)?;
         output.flush()?;

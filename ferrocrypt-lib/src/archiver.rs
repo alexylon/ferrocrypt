@@ -560,10 +560,9 @@ fn extract_entries<R: Read>(
         let rel = match path.strip_prefix(&root_name) {
             Ok(r) => r.to_path_buf(),
             Err(_) => {
-                return Err(CryptoError::InternalInvariant(format!(
-                    "Entry path {} does not start with its root component",
-                    path.display()
-                )));
+                return Err(CryptoError::InternalInvariant(
+                    "internal error: entry path missing root component",
+                ));
             }
         };
 
@@ -639,7 +638,7 @@ fn extract_entries<R: Read>(
             Some(RootKind::Directory(fd)) => fd,
             _ => {
                 return Err(CryptoError::InternalInvariant(
-                    "Root fd disappeared after insertion".to_string(),
+                    "internal error: root dirfd disappeared after insertion",
                 ));
             }
         };
@@ -678,7 +677,7 @@ fn extract_entries<R: Read>(
             Some(RootKind::Directory(fd)) => fd,
             _ => {
                 return Err(CryptoError::InternalInvariant(
-                    "Root fd missing at dir-perm stage".to_string(),
+                    "internal error: root dirfd missing at dir-perm stage",
                 ));
             }
         };

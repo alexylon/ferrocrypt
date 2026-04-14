@@ -65,16 +65,16 @@ Every `.fcr` file starts with a header followed by the encrypted payload. The he
 ### Limitations
 
 - **File metadata is not fully preserved.** FerroCrypt always preserves file contents and directory structure. The current implementation also preserves regular-file and directory permission bits on Unix, with setuid, setgid, and sticky bits stripped, but that behavior is best-effort rather than a stable cross-platform format guarantee. FerroCrypt does not preserve timestamps or ownership. On non-Unix platforms, permission handling is platform-limited and archive metadata may be approximate. Hardlink relationships are not preserved (hardlinked files are archived as independent copies). Symlinks and special entries cause an error at encryption time. Directory encryption is a convenience feature, not a full backup/archive format. If you need faithful filesystem backup/restore semantics, use a dedicated archiving tool and encrypt its output with FerroCrypt.
-- **No backward compatibility with older format versions.** The current release uses symmetric encrypted-file format v3.0, hybrid encrypted-file format v4.0, and key-file format v3. Files and keys produced by earlier versions (v0.1.x / v0.2.x) cannot be decrypted or used by the current release. Those releases used a different format family; in hybrid mode and key files they also used a different crypto stack (RSA/OpenSSL). If you still have data encrypted with an older version, decrypt it with that version first (available on crates.io), then re-encrypt with the current release.
+- **No backward compatibility with older format versions.** The next release will use symmetric encrypted-file format v3.0, hybrid encrypted-file format v4.0, and key-file format v3. This is a breaking change on `main` that has not yet shipped in a published crate release — see `CHANGELOG.md [Unreleased]` and `ferrocrypt-lib/FORMAT.md`. Files and keys produced by earlier versions (v0.1.x / v0.2.x on crates.io) cannot be decrypted or used by the new format family. Those releases use a different format family; in hybrid mode and key files they also use a different crypto stack (RSA/OpenSSL). If you still have data encrypted with an older version, decrypt it with that version first (available on crates.io), then re-encrypt once the new release ships.
 
 ### Why triple replication?
 
 The file header holds the salts, nonces, and KDF parameters needed to begin decryption. If the header can't be parsed, the tool can't distinguish a wrong password from a corrupted file from an unsupported format — every failure looks the same. The encrypted payload is much larger and far more likely to be damaged on unreliable storage, so header replication usually does not save the file. What it saves is the **diagnostic**: by correcting single-copy header corruption, the user still gets a specific error message:
 
-- "Unsupported file version" — instead of failing to identify the format at all
-- "Unrecognized encryption type: 0xNN" — instead of treating the file as plaintext
-- "Invalid KDF memory cost" / "File requires N KiB, limit is M KiB" — instead of silently allocating unbounded memory
-- "Header authentication failed: wrong password/key or tampered" — instead of not knowing whether the password or key is wrong or the file header is damaged
+- "Newer file format (vX.Y). Upgrade FerroCrypt." — instead of failing to identify the format at all
+- "Unknown encryption type in FerroCrypt file: 0xNN" — instead of treating the file as plaintext
+- "File has invalid unlock settings (N KiB memory)" / "File needs N KiB to unlock; limit is M KiB" — instead of silently allocating unbounded memory
+- "Wrong password/key or file was tampered with" — instead of not knowing whether the password or key is wrong or the file header is damaged
 - "Encrypted file is truncated" / "Payload authentication failed: data tampered or corrupted" — instead of not reaching payload decryption at all
 
 Without a readable header, all of these collapse into a single generic "invalid format" error.
@@ -264,7 +264,7 @@ A password strength indicator (based on [Proton Pass](https://github.com/protonp
 FerroCrypt distinguishes a few distinct decryption-failure stages so that a failed decrypt tells you what actually went wrong:
 
 - **Private key file unlock failed: wrong passphrase** — The hybrid private key file is encrypted with its own passphrase, and the passphrase you entered did not decrypt it. Retry with the correct passphrase; the encrypted file is not involved at this stage.
-- **Header authentication failed: wrong password/key or tampered** — Either the symmetric password or the hybrid recipient key is wrong, or the encrypted file's header has been modified. No plaintext has been produced.
+- **Wrong password/key or file was tampered with** — Either the symmetric password or the hybrid recipient key is wrong, or the encrypted file's header has been modified. No plaintext has been produced.
 - **Payload authentication failed: data tampered or corrupted** — The header authenticated successfully, but a later ciphertext chunk failed its authentication tag. This usually means the file has been corrupted or truncated partway through, or an attacker has modified bytes after the header. During streaming decryption, earlier chunks that authenticated successfully may already have been written to disk under an `.incomplete` working directory before the failing chunk was reached.
 - **Encrypted file is truncated** — The encrypted stream ends before its final authenticated chunk, usually because of a partial download or an interrupted copy.
 

@@ -193,7 +193,7 @@ fn test_symmetric_payload_tamper_mid_chunk() -> Result<(), CryptoError> {
     fs::create_dir_all(&decrypt_dir)?;
 
     // Big enough to span multiple AEAD chunks so the tamper lands well
-    // past the header.
+    // past the header region.
     let big_data: Vec<u8> = (0..200_000u32).map(|i| (i % 256) as u8).collect();
     fs::write(&input_file, &big_data)?;
 
@@ -1377,8 +1377,9 @@ fn test_future_major_version_rejected() -> Result<(), CryptoError> {
     );
 
     assert!(result.is_err());
-    match result {
-        Err(CryptoError::UnsupportedVersion(msg)) => {
+    match &result {
+        Err(CryptoError::UnsupportedVersion(v)) => {
+            let msg = v.to_string();
             assert!(msg.contains("Newer file format"), "got: {msg}");
             assert!(msg.contains("Upgrade"), "got: {msg}");
         }
@@ -1431,9 +1432,13 @@ fn test_wrong_format_type_hybrid_as_symmetric() -> Result<(), CryptoError> {
     );
 
     assert!(result.is_err());
-    match result {
-        Err(CryptoError::InvalidFormat(msg)) => {
-            assert!(msg.contains("different format type"));
+    match &result {
+        Err(CryptoError::InvalidFormat(defect)) => {
+            assert!(
+                defect
+                    .to_string()
+                    .contains("Wrong encrypted file type for this operation")
+            );
         }
         other => panic!("Expected format type error, got {:?}", other),
     }
@@ -1862,6 +1867,7 @@ fn test_hybrid_truncated_mid_header() -> Result<(), CryptoError> {
         |_| {},
     );
     assert!(result.is_err());
+
     Ok(())
 }
 
@@ -1917,6 +1923,7 @@ fn test_hybrid_oversized_ext_len() -> Result<(), CryptoError> {
         |_| {},
     );
     assert!(result.is_err());
+
     Ok(())
 }
 
@@ -2405,8 +2412,10 @@ fn test_older_major_version_rejected() -> Result<(), CryptoError> {
         |_| {},
     );
     assert!(result.is_err());
-    match result {
-        Err(CryptoError::UnsupportedVersion(msg)) => {
+    match &result {
+        Err(CryptoError::UnsupportedVersion(v)) => {
+            let msg = v.to_string();
+            assert!(msg.contains("Older file format"), "got: {msg}");
             assert!(msg.contains("Use a previous release"), "got: {msg}");
         }
         other => panic!("Expected version error, got {:?}", other),
@@ -2458,8 +2467,10 @@ fn test_older_key_version_rejected() -> Result<(), CryptoError> {
         |_| {},
     );
     assert!(result.is_err());
-    match result {
-        Err(CryptoError::UnsupportedVersion(msg)) => {
+    match &result {
+        Err(CryptoError::UnsupportedVersion(v)) => {
+            let msg = v.to_string();
+            assert!(msg.contains("Older key format"), "got: {msg}");
             assert!(msg.contains("Use a previous release"), "got: {msg}");
         }
         other => panic!("Expected key version error, got {:?}", other),
@@ -2485,8 +2496,9 @@ fn test_future_key_version_rejected() -> Result<(), CryptoError> {
 
     let result = validate_secret_key_file(&secret_key_path);
     assert!(result.is_err());
-    match result {
-        Err(CryptoError::UnsupportedVersion(msg)) => {
+    match &result {
+        Err(CryptoError::UnsupportedVersion(v)) => {
+            let msg = v.to_string();
             assert!(msg.contains("Newer key format"), "got: {msg}");
             assert!(msg.contains("Upgrade"), "got: {msg}");
         }
@@ -2501,8 +2513,9 @@ fn test_future_key_version_rejected() -> Result<(), CryptoError> {
 
     let result = public_key_fingerprint(&public_key_path);
     assert!(result.is_err());
-    match result {
-        Err(CryptoError::UnsupportedVersion(msg)) => {
+    match &result {
+        Err(CryptoError::UnsupportedVersion(v)) => {
+            let msg = v.to_string();
             assert!(msg.contains("Newer key format"), "got: {msg}");
             assert!(msg.contains("Upgrade"), "got: {msg}");
         }
@@ -2581,8 +2594,9 @@ fn test_detect_truncated_fcr_file_returns_error() {
         result.is_err(),
         "expected error for truncated .fcr, got: {result:?}"
     );
-    match result {
-        Err(CryptoError::InvalidFormat(msg)) => {
+    match &result {
+        Err(CryptoError::InvalidFormat(defect)) => {
+            let msg = defect.to_string();
             assert!(msg.contains("truncated"), "got: {msg}");
         }
         other => panic!("expected InvalidFormat, got: {other:?}"),
@@ -2643,8 +2657,9 @@ fn test_detect_unknown_type_byte_returns_error() {
         result.is_err(),
         "expected error for unknown type, got: {result:?}"
     );
-    match result {
-        Err(CryptoError::InvalidFormat(msg)) => {
+    match &result {
+        Err(CryptoError::InvalidFormat(defect)) => {
+            let msg = defect.to_string();
             assert!(msg.contains("0x41"), "got: {msg}");
         }
         other => panic!("expected InvalidFormat with type byte, got: {other:?}"),

@@ -94,7 +94,7 @@ use secrecy::{ExposeSecret as _, SecretString};
 
 pub use crate::common::KdfLimit;
 use crate::common::{hex_encode, sha3_256_hash};
-pub use crate::error::CryptoError;
+pub use crate::error::{CryptoError, FormatDefect, InvalidKdfParams, UnsupportedVersion};
 pub use crate::format::ENCRYPTED_EXTENSION;
 pub use crate::hybrid::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};
 
@@ -172,17 +172,13 @@ pub fn detect_encryption_mode(
         // the three replication copy positions contain the magic byte —
         // positions beyond `filled` are still 0x00 from initialization.
         if has_encoded_magic_byte(&buf) {
-            return Err(CryptoError::InvalidFormat(
-                "File appears to be a truncated FerroCrypt file".to_string(),
-            ));
+            return Err(CryptoError::InvalidFormat(FormatDefect::Truncated));
         }
         return Ok(None);
     }
     let Ok(prefix) = replication::decode(&buf) else {
         if has_encoded_magic_byte(&buf) {
-            return Err(CryptoError::InvalidFormat(
-                "FerroCrypt header is corrupted".to_string(),
-            ));
+            return Err(CryptoError::InvalidFormat(FormatDefect::CorruptedHeader));
         }
         return Ok(None);
     };
@@ -192,10 +188,9 @@ pub fn detect_encryption_mode(
     match prefix[1] {
         format::TYPE_SYMMETRIC => Ok(Some(EncryptionMode::Symmetric)),
         format::TYPE_HYBRID => Ok(Some(EncryptionMode::Hybrid)),
-        _ => Err(CryptoError::InvalidFormat(format!(
-            "Unrecognized FerroCrypt encryption type: 0x{:02X}",
-            prefix[1]
-        ))),
+        _ => Err(CryptoError::InvalidFormat(
+            FormatDefect::UnknownEncryptionType(prefix[1]),
+        )),
     }
 }
 
@@ -226,7 +221,7 @@ fn read_public_key_bytes(key_file: impl AsRef<Path>) -> Result<[u8; 32], CryptoE
             let start = format::KEY_FILE_HEADER_SIZE;
             Ok(data[start..start + format::PUBLIC_KEY_DATA_SIZE]
                 .try_into()
-                .map_err(|_| CryptoError::InvalidFormat("Invalid public key data".to_string()))?)
+                .map_err(|_| CryptoError::InvalidFormat(FormatDefect::UnexpectedKeyLength))?)
         }
         _ => Err(format::unsupported_key_version_error(header.version)),
     }
@@ -267,13 +262,13 @@ pub fn public_key_fingerprint(key_file: impl AsRef<Path>) -> Result<String, Cryp
 pub fn encode_recipient(key_file: impl AsRef<Path>) -> Result<String, CryptoError> {
     let key_bytes = read_public_key_bytes(key_file)?;
     bech32::encode::<bech32::Bech32>(RECIPIENT_HRP, &key_bytes)
-        .map_err(|e| CryptoError::InternalInvariant(format!("Bech32 encode failed: {}", e)))
+        .map_err(|_| CryptoError::InternalInvariant("internal error: recipient encoding failed"))
 }
 
 /// Encodes raw 32-byte public key bytes as a Bech32 recipient string (`fcr1...`).
 pub fn encode_recipient_from_bytes(key_bytes: &[u8; 32]) -> Result<String, CryptoError> {
     bech32::encode::<bech32::Bech32>(RECIPIENT_HRP, key_bytes)
-        .map_err(|e| CryptoError::InternalInvariant(format!("Bech32 encode failed: {}", e)))
+        .map_err(|_| CryptoError::InternalInvariant("internal error: recipient encoding failed"))
 }
 
 /// Decodes a Bech32 recipient string (`fcr1...`) into raw 32-byte public key bytes.
@@ -283,18 +278,18 @@ pub fn decode_recipient(recipient: &str) -> Result<[u8; 32], CryptoError> {
     use bech32::primitives::decode::CheckedHrpstring;
 
     let parsed = CheckedHrpstring::new::<bech32::Bech32>(recipient)
-        .map_err(|_| CryptoError::InvalidInput("Invalid Bech32 encoding".to_string()))?;
+        .map_err(|_| CryptoError::InvalidInput("Recipient string is invalid".to_string()))?;
 
     if parsed.hrp() != RECIPIENT_HRP {
         return Err(CryptoError::InvalidInput(
-            "Not a FerroCrypt recipient string".to_string(),
+            "Not a FerroCrypt recipient".to_string(),
         ));
     }
 
     let bytes: Vec<u8> = parsed.byte_iter().collect();
     bytes
         .try_into()
-        .map_err(|_| CryptoError::InvalidInput("Recipient has wrong key length".to_string()))
+        .map_err(|_| CryptoError::InvalidInput("Recipient has invalid length".to_string()))
 }
 
 /// Validates that a file is a well-formed FerroCrypt private key file.

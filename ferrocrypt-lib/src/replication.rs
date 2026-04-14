@@ -1,4 +1,5 @@
 use crate::CryptoError;
+use crate::error::FormatDefect;
 
 /// Calculates the size of triple-replicated data for a given original data size.
 /// The encoded format is: [pad, pad, pad, copy_0, copy_1, copy_2]
@@ -79,9 +80,7 @@ pub fn decode(data: &[u8]) -> Result<Vec<u8>, CryptoError> {
 pub fn decode_exact(data: &[u8], expected_len: usize) -> Result<Vec<u8>, CryptoError> {
     let decoded = decode(data)?;
     if decoded.len() != expected_len {
-        return Err(CryptoError::InvalidFormat(
-            "File is corrupted (invalid field length after decoding)".to_string(),
-        ));
+        return Err(CryptoError::InvalidFormat(FormatDefect::CorruptedHeader));
     }
     Ok(decoded)
 }

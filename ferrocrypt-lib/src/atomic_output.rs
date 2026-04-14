@@ -9,16 +9,15 @@
 //! - [`finalize_file`] — promote a [`tempfile::NamedTempFile`] to its final
 //!   path with atomic no-clobber semantics. Used by encryption output and
 //!   key generation.
-//! - [`rename_dir_no_clobber`] — rename a staged `.incomplete` directory
-//!   to its final name with no-clobber semantics. Used by archive
-//!   extraction.
+//! - [`rename_no_clobber`] — rename a staged `.incomplete` entry (directory
+//!   or regular file) to its final name with no-clobber semantics. Used by
+//!   archive extraction for both directory roots and single-file roots.
 //!
 //! **Zero in-repo unsafe.** The file case delegates entirely to
-//! `tempfile`; the Linux and macOS directory case delegates to `rustix`'s
-//! safe `renameat_with` wrapper; the Windows directory case uses
-//! `try_exists()` + `std::fs::rename`, which keeps the crate zero-unsafe
-//! but offers a somewhat narrower best-effort no-clobber guarantee for
-//! directory finalization.
+//! `tempfile`; the Linux and macOS rename case delegates to `rustix`'s safe
+//! `renameat_with` wrapper; the Windows rename case uses `try_exists()` +
+//! `std::fs::rename`, which keeps the crate zero-unsafe but offers a
+//! somewhat narrower best-effort no-clobber guarantee on that target.
 
 use std::io;
 use std::path::Path;
@@ -71,7 +70,9 @@ pub(crate) fn finalize_file(tmp: NamedTempFile, final_path: &Path) -> io::Result
         })
 }
 
-/// No-clobber rename for a directory. Fails with
+/// No-clobber rename of a filesystem entry. Works for both regular files
+/// and directories — the underlying primitives (`renameat_with` on Linux
+/// and macOS, `rename` on Windows) treat them uniformly. Fails with
 /// [`io::ErrorKind::AlreadyExists`] if `to` already exists.
 ///
 /// Platform strategy (ferrocrypt targets Linux / macOS / Windows desktops):
@@ -83,7 +84,7 @@ pub(crate) fn finalize_file(tmp: NamedTempFile, final_path: &Path) -> io::Result
 /// - Other targets: unsupported in this helper rather than silently applying
 ///   desktop-target assumptions to platforms ferrocrypt does not currently aim
 ///   to support here.
-pub(crate) fn rename_dir_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
+pub(crate) fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         use rustix::fs::{CWD, RenameFlags, renameat_with};
@@ -113,7 +114,7 @@ pub(crate) fn rename_dir_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
         let _ = to;
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "directory finalization is not supported on this target",
+            "atomic rename is not supported on this target",
         ))
     }
 }
@@ -156,7 +157,7 @@ mod tests {
     }
 
     #[test]
-    fn rename_dir_no_clobber_refuses_to_overwrite() {
+    fn rename_no_clobber_refuses_to_overwrite_dir() {
         let tmp_dir = tempfile::TempDir::new().unwrap();
         let from = tmp_dir.path().join("src");
         let to = tmp_dir.path().join("dst");
@@ -165,7 +166,7 @@ mod tests {
         fs::create_dir(&to).unwrap();
         fs::write(to.join("existing.txt"), "existing").unwrap();
 
-        let err = rename_dir_no_clobber(&from, &to).unwrap_err();
+        let err = rename_no_clobber(&from, &to).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
         assert!(from.exists(), "source should not have been moved");
         assert!(
@@ -175,17 +176,39 @@ mod tests {
     }
 
     #[test]
-    fn rename_dir_no_clobber_succeeds_when_target_missing() {
+    fn rename_no_clobber_succeeds_when_target_missing_dir() {
         let tmp_dir = tempfile::TempDir::new().unwrap();
         let from = tmp_dir.path().join("src");
         let to = tmp_dir.path().join("dst");
         fs::create_dir(&from).unwrap();
         fs::write(from.join("payload.txt"), "hello").unwrap();
 
-        rename_dir_no_clobber(&from, &to).unwrap();
+        rename_no_clobber(&from, &to).unwrap();
 
         assert!(!from.exists(), "source should have been moved");
         assert!(to.is_dir(), "destination should exist as a directory");
         assert_eq!(fs::read_to_string(to.join("payload.txt")).unwrap(), "hello",);
+    }
+
+    #[test]
+    fn rename_no_clobber_handles_regular_file() {
+        // The helper is used for both directory roots and single-file
+        // roots during archive extraction; prove the file case works
+        // with both the success path and the refuse-to-overwrite path.
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let from = tmp_dir.path().join("staged.txt");
+        let to = tmp_dir.path().join("final.txt");
+        fs::write(&from, "payload").unwrap();
+
+        rename_no_clobber(&from, &to).unwrap();
+        assert!(!from.exists());
+        assert_eq!(fs::read_to_string(&to).unwrap(), "payload");
+
+        // Re-stage and confirm the no-clobber branch also fires on files.
+        fs::write(&from, "second").unwrap();
+        let err = rename_no_clobber(&from, &to).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(&to).unwrap(), "payload");
+        assert_eq!(fs::read_to_string(&from).unwrap(), "second");
     }
 }

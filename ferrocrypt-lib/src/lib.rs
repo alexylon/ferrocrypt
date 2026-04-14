@@ -134,8 +134,20 @@ pub fn detect_encryption_mode(
     file_path: impl AsRef<Path>,
 ) -> Result<Option<EncryptionMode>, CryptoError> {
     use std::io::Read;
+    let path = file_path.as_ref();
+
+    // Short-circuit directories up-front so the behavior is uniform across
+    // platforms. Without this pre-check, Unix lets us open a directory and
+    // only fails at `read()` with `IsADirectory`, while Windows' `CreateFile`
+    // refuses to open directories outright (requires `FILE_FLAG_BACKUP_SEMANTICS`)
+    // and surfaces as `ERROR_ACCESS_DENIED` — indistinguishable from a real
+    // permission error. One explicit check, one answer, on every platform.
+    if path.is_dir() {
+        return Ok(None);
+    }
+
     let mut buf = [0u8; format::HEADER_PREFIX_ENCODED_SIZE];
-    let mut file = std::fs::File::open(file_path.as_ref())?;
+    let mut file = std::fs::File::open(path)?;
 
     // Read up to HEADER_PREFIX_ENCODED_SIZE bytes, tracking how many we got.
     // We avoid read_exact because its API does not guarantee buffer contents
@@ -146,7 +158,10 @@ pub fn detect_encryption_mode(
             Ok(0) => break,
             Ok(n) => filled += n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            // Directories can be opened on macOS but not read.
+            // Defensive: on Unix, a TOCTOU race could swap the pre-checked
+            // path for a directory between `is_dir()` and `File::open()`.
+            // Keep the runtime handler so the race is still classified
+            // correctly instead of surfacing as a generic I/O error.
             Err(e) if e.kind() == std::io::ErrorKind::IsADirectory => return Ok(None),
             Err(e) => return Err(CryptoError::Io(e)),
         }

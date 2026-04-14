@@ -1,3 +1,4 @@
+use std::io::{IsTerminal, stdin};
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
@@ -111,29 +112,49 @@ pub enum CliCommand {
     },
 }
 
+/// Wraps a raw passphrase string in a zeroizing [`SecretString`] and rejects
+/// the empty input at the single enforcement point. The env-var source and
+/// primary prompt both funnel through here so the emptiness rule cannot drift
+/// between them. The confirmation prompt (encryption only) is intentionally
+/// *not* routed through this helper: its outcome must be decided by the
+/// constant-time byte compare against the primary, so the error surfaced to
+/// the user cannot distinguish "empty confirmation" from "non-empty wrong
+/// confirmation."
+fn validate_non_empty_passphrase(raw: String) -> Result<SecretString, CryptoError> {
+    let secret = SecretString::from(raw);
+    if secret.expose_secret().is_empty() {
+        return Err(CryptoError::InvalidInput(
+            "Passphrase must not be empty".to_string(),
+        ));
+    }
+    Ok(secret)
+}
+
 /// Reads a passphrase from the `FERROCRYPT_PASSPHRASE` environment variable
-/// (for non-interactive use) or prompts via the TTY with hidden input.
+/// for non-interactive use, or prompts via the controlling terminal with
+/// hidden input. Refuses to prompt when stdin is not a terminal so callers
+/// (cron, systemd, Docker without `-t`, CI, piped scripts) fail fast instead
+/// of blocking on a hidden console.
 ///
 /// When `confirm` is `true` (encryption), the user is prompted twice and the
 /// inputs are compared in constant time.
 fn read_passphrase(confirm: bool) -> Result<SecretString, CryptoError> {
     if let Ok(val) = std::env::var(PASSPHRASE_ENV) {
-        let secret = SecretString::from(val);
-        if secret.expose_secret().is_empty() {
-            return Err(CryptoError::InvalidInput(
-                "Passphrase must not be empty".to_string(),
-            ));
-        }
-        return Ok(secret);
+        return validate_non_empty_passphrase(val);
     }
 
-    let passphrase = SecretString::from(prompt_password("Passphrase: ").map_err(CryptoError::Io)?);
-
-    if passphrase.expose_secret().is_empty() {
-        return Err(CryptoError::InvalidInput(
-            "Passphrase must not be empty".to_string(),
-        ));
+    // `rpassword` bypasses stdin and reads directly from the controlling
+    // terminal (`/dev/tty` on Unix, `CONIN$` on Windows), so redirecting the
+    // child's stdin to a pipe or null is not enough on its own to prevent a
+    // hang. The guard has to run before the prompt is attempted.
+    if !stdin().is_terminal() {
+        return Err(CryptoError::InvalidInput(format!(
+            "No passphrase provided: set the {PASSPHRASE_ENV} environment variable or run from an interactive terminal"
+        )));
     }
+
+    let passphrase =
+        validate_non_empty_passphrase(prompt_password("Passphrase: ").map_err(CryptoError::Io)?)?;
 
     if confirm {
         let confirm_passphrase =

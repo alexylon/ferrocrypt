@@ -113,17 +113,20 @@ fn append_dir_entry<W: Write>(
     src_path: &Path,
     archive_path: &Path,
 ) -> Result<(), CryptoError> {
-    let metadata = fs::metadata(src_path)?;
     let mut header = tar::Header::new_gnu();
     header.set_entry_type(tar::EntryType::Directory);
     header.set_size(0);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        let metadata = fs::metadata(src_path)?;
         header.set_mode(metadata.permissions().mode() & PERMISSION_BITS_MASK);
     }
     #[cfg(not(unix))]
-    header.set_mode(0o755);
+    {
+        let _ = src_path;
+        header.set_mode(0o755);
+    }
     header.set_cksum();
     builder.append_data(&mut header, archive_path, &mut io::empty())?;
     Ok(())

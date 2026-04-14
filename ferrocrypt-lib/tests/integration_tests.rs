@@ -2532,6 +2532,28 @@ fn test_detect_empty_file_returns_none() -> Result<(), CryptoError> {
     Ok(())
 }
 
+/// A directory is unambiguously "not an encrypted file." Unix lets us open a
+/// directory fd and only fails at `read()` with `IsADirectory`; Windows'
+/// `CreateFile` rejects directories outright with `ERROR_ACCESS_DENIED`.
+/// Regardless of platform, `detect_encryption_mode` must classify a directory
+/// as `Ok(None)` so that auto-routing wrappers take the encrypt branch rather
+/// than surfacing a permission error. Covers both populated and empty roots.
+#[test]
+fn test_detect_directory_returns_none() -> Result<(), CryptoError> {
+    let dir = setup_test_dir("detect_directory");
+
+    let populated = dir.join("populated");
+    fs::create_dir_all(&populated)?;
+    create_test_file(&populated.join("inside.txt"), "content");
+    assert!(detect_encryption_mode(&populated)?.is_none());
+
+    let empty = dir.join("empty");
+    fs::create_dir_all(&empty)?;
+    assert!(detect_encryption_mode(&empty)?.is_none());
+
+    Ok(())
+}
+
 #[test]
 fn test_detect_valid_symmetric_file() -> Result<(), CryptoError> {
     let dir = setup_test_dir("detect_sym");

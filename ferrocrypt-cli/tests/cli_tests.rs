@@ -1137,34 +1137,39 @@ fn test_cli_rejects_empty_passphrase_env_var() {
 
 #[test]
 fn test_cli_fails_without_passphrase_and_no_tty() {
-    // On Unix, rpassword reads from /dev/tty directly, so null stdin does
-    // not simulate a non-interactive session.
-    #[cfg(unix)]
-    return;
+    let test_dir = setup_test_dir("cli_no_passphrase_no_tty");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    create_test_file(&input_file, "no tty test");
 
-    #[cfg(not(unix))]
-    {
-        let test_dir = setup_test_dir("cli_no_passphrase_no_tty");
-        let input_file = test_dir.join("data.txt");
-        let encrypt_dir = test_dir.join("encrypted");
-        fs::create_dir_all(&encrypt_dir).unwrap();
-        create_test_file(&input_file, "no tty test");
+    let binary = get_binary_path();
 
-        let binary = get_binary_path();
+    // Null stdin = no terminal. On Unix rpassword would otherwise open
+    // /dev/tty directly and block; on Windows it would open CONIN$ and
+    // block the same way. The CLI's cross-platform `is_terminal()` guard
+    // must catch this up-front and fail with a clear error rather than
+    // hang or silently prompt on some hidden console.
+    let output = Command::new(&binary)
+        .arg("symmetric")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .env_remove("FERROCRYPT_PASSPHRASE")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("Failed to execute without passphrase");
 
-        let output = Command::new(&binary)
-            .arg("symmetric")
-            .arg("-i")
-            .arg(&input_file)
-            .arg("-o")
-            .arg(&encrypt_dir)
-            .env_remove("FERROCRYPT_PASSPHRASE")
-            .stdin(std::process::Stdio::null())
-            .output()
-            .expect("Failed to execute without passphrase");
-
-        assert!(!output.status.success());
-    }
+    assert!(
+        !output.status.success(),
+        "binary should exit non-zero without a passphrase and no terminal"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FERROCRYPT_PASSPHRASE") || stderr.contains("interactive terminal"),
+        "expected non-interactive passphrase error, got: {stderr}"
+    );
 }
 
 #[test]

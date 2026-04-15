@@ -87,6 +87,51 @@ jobs:
       - name: Run dependency audit
         run: cargo audit
 
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain with clippy
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ferrocrypt-desktop
+
+      - name: Install Slint system dependencies (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig-dev \
+            libfreetype-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libssl-dev
+
+      - name: Clippy ferrocrypt-desktop
+        working-directory: ferrocrypt-desktop
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build ferrocrypt-desktop
+        working-directory: ferrocrypt-desktop
+        run: cargo build --verbose
+
+      - name: Test ferrocrypt-desktop
+        working-directory: ferrocrypt-desktop
+        run: cargo test --verbose -- --test-threads=1
+
   fuzz:
     runs-on: ubuntu-latest
     timeout-minutes: 20

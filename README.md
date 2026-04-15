@@ -117,17 +117,27 @@ Build from source — requires [Rust](https://www.rust-lang.org/tools/install) a
 
 ```bash
 cd ferrocrypt-desktop
-cargo bundle --release # produces .app (macOS) / .deb (Linux) / .msi (Windows)
+cargo bundle --release # produces .app (macOS) / .deb + .AppImage (Linux) / .msi (Windows)
 ```
 
 **Linux only** — install system dependencies first:
 
 ```bash
 # Debian/Ubuntu
-sudo apt install libfontconfig-dev libfreetype-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
+sudo apt update && sudo apt install libfontconfig-dev libfreetype-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libwayland-dev libssl-dev
 
 # Fedora
-sudo dnf install fontconfig-devel freetype-devel libxcb-devel libxkbcommon-devel openssl-devel
+sudo dnf install fontconfig-devel freetype-devel libxcb-devel libxkbcommon-devel wayland-devel openssl-devel
+```
+
+The AppImage output additionally needs `mksquashfs`. Skip this if you only want the `.deb`:
+
+```bash
+# Debian/Ubuntu
+sudo apt install squashfs-tools
+
+# Fedora
+sudo dnf install squashfs-tools
 ```
 
 ### Library

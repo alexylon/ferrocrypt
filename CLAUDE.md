@@ -32,7 +32,7 @@ cargo clippy --package ferrocrypt --target x86_64-pc-windows-gnu --all-targets
 
 Notes:
 - For **doc-only changes**, do not run code tests/builds unless the change affects rustdoc rendering or examples.
-- The desktop crate is excluded from the workspace, so root-level `cargo test` / `cargo clippy` do not cover it.
+- The desktop crate is excluded from the workspace, so root-level `cargo test` / `cargo clippy` do not cover it locally. **CI does cover it** via a separate `desktop` job that runs clippy + build + tests on Ubuntu / macOS / Windows on every PR.
 - The Windows cross-check only type-checks (no linker), so it is sufficient for verifying `cfg(target_os = "windows")` / `cfg(not(unix))` arms compile. Use it whenever you touch `atomic_output` or any other branch that varies by platform.
 
 ## Architecture

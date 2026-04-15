@@ -19,6 +19,9 @@ publish = true
 
 [features]
 fast-kdf = []
+# Re-exports internal parser surfaces for the in-repo fuzz targets. Not
+# part of the public API — enabled only by `ferrocrypt-lib/fuzz`.
+fuzzing = []
 
 [dependencies]
 x25519-dalek = { version = "2", features = ["static_secrets"] }

@@ -70,6 +70,9 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Run clippy with fuzzing feature
+        run: cargo clippy --package ferrocrypt --features fuzzing --all-targets -- -D warnings
+
   audit:
     runs-on: ubuntu-latest
     steps:
@@ -83,3 +86,65 @@ jobs:
 
       - name: Run dependency audit
         run: cargo audit
+
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ferrocrypt-lib/fuzz
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Clippy fuzz crate
+        working-directory: ferrocrypt-lib/fuzz
+        run: cargo +nightly clippy --all-targets -- -D warnings
+
+      - name: Build every fuzz target
+        working-directory: ferrocrypt-lib/fuzz
+        run: cargo +nightly fuzz build
+
+      - name: Smoke-fuzz parser-surface targets (10s each)
+        working-directory: ferrocrypt-lib/fuzz
+        run: |
+          set -euo pipefail
+          # Every target except the two integration-level ones that run
+          # a full Argon2id derivation per iteration — those are too
+          # slow for a 10s smoke budget. They're still built above, so
+          # API drift still fails the job.
+          skip='^(fuzz_symmetric_decrypt|fuzz_hybrid_decrypt)$'
+          # Capture to a variable so `set -e` trips if `fuzz list` fails.
+          # Command substitution inside a `for ... in $(...)` word list
+          # is not subject to fail-fast in bash.
+          targets=$(cargo +nightly fuzz list)
+          if [[ -z "$targets" ]]; then
+            echo "::error::cargo fuzz list returned no targets"
+            exit 1
+          fi
+          for target in $targets; do
+            if [[ "$target" =~ $skip ]]; then
+              echo "=== $target (skipped: integration-level) ==="
+              continue
+            fi
+            echo "=== $target ==="
+            cargo +nightly fuzz run "$target" -- -max_total_time=10
+          done
+
+      - name: Upload fuzz crash artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: |
+            ferrocrypt-lib/fuzz/artifacts/
+            ferrocrypt-lib/fuzz/corpus/
+          if-no-files-found: ignore
+          retention-days: 14

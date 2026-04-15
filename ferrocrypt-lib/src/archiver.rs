@@ -243,7 +243,7 @@ mod nofollow {
 /// (leading `./`) is rejected because ferrocrypt's own archiver never
 /// produces it and it turns `root_name` into `.`, which then conflicts
 /// with the final rename step.
-pub(crate) fn validate_archive_path(path: &Path) -> Result<(), CryptoError> {
+pub fn validate_archive_path(path: &Path) -> Result<(), CryptoError> {
     for component in path.components() {
         match component {
             Component::ParentDir

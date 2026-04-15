@@ -211,6 +211,9 @@ mod hybrid;
 mod replication;
 mod symmetric;
 
+#[cfg(feature = "fuzzing")]
+pub mod fuzz_exports;
+
 /// Reads and validates a public key file, returning the raw 32-byte key.
 fn read_public_key_bytes(key_file: impl AsRef<Path>) -> Result<[u8; 32], CryptoError> {
     let data = std::fs::read(key_file.as_ref())?;

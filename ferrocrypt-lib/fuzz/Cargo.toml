@@ -13,9 +13,12 @@ tempfile = "3"
 
 [dependencies.ferrocrypt]
 path = ".."
+features = ["fuzzing"]
 
 [workspace]
 members = ["."]
+
+# ─── Integration-level targets (full decrypt pipeline; slower) ──────────
 
 [[bin]]
 name = "fuzz_symmetric_decrypt"
@@ -27,12 +30,39 @@ name = "fuzz_hybrid_decrypt"
 path = "fuzz_targets/fuzz_hybrid_decrypt.rs"
 doc = false
 
+# ─── Parser-surface targets (cheap; high iteration rate) ────────────────
+
 [[bin]]
-name = "fuzz_symmetric_encrypt"
-path = "fuzz_targets/fuzz_symmetric_encrypt.rs"
+name = "fuzz_header_prefix"
+path = "fuzz_targets/fuzz_header_prefix.rs"
 doc = false
 
 [[bin]]
-name = "fuzz_hybrid_encrypt"
-path = "fuzz_targets/fuzz_hybrid_encrypt.rs"
+name = "fuzz_key_file_header"
+path = "fuzz_targets/fuzz_key_file_header.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_kdf_params"
+path = "fuzz_targets/fuzz_kdf_params.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_replication_decode"
+path = "fuzz_targets/fuzz_replication_decode.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_archive_path"
+path = "fuzz_targets/fuzz_archive_path.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_recipient_decode"
+path = "fuzz_targets/fuzz_recipient_decode.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_detect_mode"
+path = "fuzz_targets/fuzz_detect_mode.rs"
 doc = false

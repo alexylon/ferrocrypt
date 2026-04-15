@@ -4,12 +4,51 @@ use thiserror::Error;
 ///
 /// All `Display` messages are short, user-facing, and free of internal
 /// type names so that consumers can surface them directly without
-/// additional mapping. Variants are identity-only where possible: none
-/// of them carry per-operation context like paths or byte offsets —
-/// that context belongs at the caller, not in the error. Variants that
-/// do carry data carry typed structured data (`FormatDefect`,
-/// `UnsupportedVersion`, `InvalidKdfParams`, `&'static str`), not
-/// heap-allocated `String`s.
+/// additional mapping.
+///
+/// # Design: identity-only where possible
+///
+/// Most variants are **identity-only**: they carry no per-operation
+/// context (no paths, no byte offsets, no wrapped error text), because
+/// that context belongs at the *caller*, not inside the error. A CLI
+/// frontend can prepend the file path if it wants to; a GUI can elide
+/// it; a server can log structured fields. The library stays agnostic.
+///
+/// Variants that do carry data carry *typed structured data*, not
+/// heap-allocated strings:
+/// - [`CryptoError::InvalidFormat`] carries a [`FormatDefect`]
+/// - [`CryptoError::UnsupportedVersion`] carries an [`UnsupportedVersion`]
+/// - [`CryptoError::InvalidKdfParams`] carries an [`InvalidKdfParams`]
+/// - [`CryptoError::InternalInvariant`] and [`CryptoError::InternalCryptoFailure`]
+///   carry a `&'static str` marker (no heap allocation)
+/// - [`CryptoError::ExcessiveWork`] has named `u32` fields
+///
+/// Consumers can pattern-match on these shapes without substring
+/// comparisons. Ferrocrypt's error type is closely modelled on the
+/// `age` crate's `DecryptError`, which takes the same stance.
+///
+/// # The one escape hatch: [`CryptoError::InvalidInput`]
+///
+/// One variant — [`CryptoError::InvalidInput`] — carries a free-form
+/// `String`. It exists because the tar-archive layer inside the library
+/// genuinely needs to surface *which archive entry* triggered a
+/// fail-closed rejection ("symlink entry `foo/bar`", "unsafe path in
+/// archive `../escape.txt`", "archive mixes file and directory at root
+/// `mydir`", etc.). A malformed or attacker-crafted `.fcr` can hold
+/// thousands of entries; without the entry path embedded in the error,
+/// a developer debugging a failing extraction would see only "something
+/// in this archive is bad" and be unable to locate it. Typing the
+/// entry path via structured variants would require ~25 new variants
+/// each carrying a `PathBuf`, which reintroduces the exact "library
+/// carries per-operation context" problem the rest of the type
+/// deliberately avoids.
+///
+/// `InvalidInput` is therefore the **designated heterogeneous
+/// caller-input bucket**. It is *not* where paths from the user's
+/// invocation live (those belong at the CLI/desktop boundary), and
+/// it is *not* used for anything the other variants can express as
+/// typed data. Library consumers treating it as an opaque string and
+/// surfacing it via `Display` is the correct pattern.
 ///
 /// # Examples
 ///
@@ -21,7 +60,7 @@ use thiserror::Error;
 ///     let passphrase = SecretString::from("test".to_string());
 ///     match symmetric_encrypt(Path::new("./missing.txt"), Path::new("./out"), &passphrase, None, |_| {}) {
 ///         Ok(path) => println!("Output: {}", path.display()),
-///         Err(CryptoError::InputPath(msg)) => eprintln!("Missing input: {}", msg),
+///         Err(CryptoError::InputPath) => eprintln!("Input file or folder missing"),
 ///         Err(e) => eprintln!("{e}"),
 ///     }
 ///     Ok(())
@@ -33,10 +72,15 @@ pub enum CryptoError {
     /// Filesystem or stream I/O failure.
     #[error(transparent)]
     Io(std::io::Error),
-    /// Input file or directory does not exist.
-    #[error("Input file or folder missing: {0}")]
-    InputPath(String),
-    /// Invalid caller input with a human-readable explanation.
+    /// Input file or directory does not exist. Identity-only — the
+    /// caller knows which path it passed in.
+    #[error("Input file or folder missing")]
+    InputPath,
+    /// Invalid caller input with a human-readable explanation. See the
+    /// type-level docs for the design rationale — this is the one
+    /// `String`-carrying variant in the type, and it exists for
+    /// archive-layer rejections that need to identify which entry
+    /// triggered the failure.
     #[error("{0}")]
     InvalidInput(String),
 
@@ -302,13 +346,17 @@ impl From<std::io::Error> for CryptoError {
 mod tests {
     use super::*;
 
-    /// Lock in the exact user-facing Display text for the typed decryption
-    /// error variants. The CLI and desktop app surface `Display` directly,
-    /// so a silent wording change would be a visible UX regression. If a
-    /// message genuinely needs to change, update this test in the same
-    /// commit so the intent is reviewable.
+    /// Lock in the exact user-facing Display text for the bare `CryptoError`
+    /// variants. The CLI and desktop app surface `Display` directly, so a
+    /// silent wording change would be a visible UX regression. If a message
+    /// genuinely needs to change, update this test in the same commit so
+    /// the intent is reviewable.
     #[test]
     fn typed_decryption_errors_display_exact_strings() {
+        assert_eq!(
+            CryptoError::InputPath.to_string(),
+            "Input file or folder missing"
+        );
         assert_eq!(
             CryptoError::KeyFileUnlockFailed.to_string(),
             "Private key file unlock failed: wrong passphrase"
@@ -383,12 +431,12 @@ mod tests {
         );
     }
 
-    /// Budget: every static user-facing `CryptoError` message — plus the
-    /// worst-case formatted variants — must fit in the desktop status
-    /// line's 64-char window. Dynamic `InvalidInput` / `InputPath`
-    /// messages are exempt because the desktop frontend runs them
-    /// through path elision; this test covers the messages that have
-    /// no path to elide.
+    /// Budget: every static user-facing `CryptoError` message — plus
+    /// the worst-case formatted variants — must fit in the desktop
+    /// status line's 64-char window. Dynamic `InvalidInput` messages
+    /// are exempt because the desktop frontend runs them through path
+    /// elision; this test covers the messages that have no path to
+    /// elide.
     #[test]
     fn user_facing_messages_fit_status_line_budget() {
         const BUDGET: usize = 64;
@@ -402,6 +450,7 @@ mod tests {
         }
 
         // Fixed-payload CryptoError variants.
+        check("InputPath", &CryptoError::InputPath.to_string());
         check(
             "KeyFileUnlockFailed",
             &CryptoError::KeyFileUnlockFailed.to_string(),

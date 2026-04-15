@@ -919,7 +919,7 @@ fn test_nonexistent_input_path_encrypt() {
 
     assert!(result.is_err());
     match result {
-        Err(CryptoError::InputPath(_)) => {}
+        Err(CryptoError::InputPath) => {}
         other => panic!("Expected InputPath error, got {:?}", other),
     }
 }

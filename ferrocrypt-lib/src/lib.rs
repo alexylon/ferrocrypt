@@ -326,7 +326,7 @@ fn validate_passphrase(passphrase: &SecretString) -> Result<(), CryptoError> {
 
 fn validate_input_path(input_path: &Path) -> Result<(), CryptoError> {
     if !input_path.exists() {
-        return Err(CryptoError::InputPath(input_path.display().to_string()));
+        return Err(CryptoError::InputPath);
     }
     Ok(())
 }

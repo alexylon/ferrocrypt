@@ -50,6 +50,19 @@ jobs:
       - name: Test ferrocrypt-lib on MSRV
         run: cargo test -p ferrocrypt --verbose
 
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain with rustfmt
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
   clippy:
     strategy:
       fail-fast: false

@@ -28,3 +28,8 @@ consolidate-commits = false
 # Run tests before release
 verify = true
 
+# Sync desktop crate version (excluded from workspace, not handled by shared-version)
+pre-release-replacements = [
+    { file = "ferrocrypt-desktop/Cargo.toml", search = '^version = ".*"', replace = 'version = "{{version}}"', exactly = 1 },
+]
+

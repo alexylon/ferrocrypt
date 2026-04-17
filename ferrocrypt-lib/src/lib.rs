@@ -68,6 +68,16 @@
 //!   private key can decrypt. Each file gets a unique random key. Produces
 //!   `.fcr` files.
 //!
+//! ## Migrating from 0.2.x
+//! Version 0.3.0 introduces a new file format family (symmetric v3.0, hybrid
+//! v4.0) and replaces RSA-4096 with X25519 for hybrid encryption. Files and
+//! keys from 0.2.x are **not compatible**. Decrypt any existing data with the
+//! old version first, then re-encrypt with 0.3.0.
+//!
+//! All patch and minor releases within the 0.3.x series will remain backward
+//! compatible — files encrypted with 0.3.0 will be readable by any 0.3.x
+//! release.
+//!
 //! ## Security notes
 //! - All cryptographic operations depend on a secure OS RNG; ensure the target
 //!   platform provides one.

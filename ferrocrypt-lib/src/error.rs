@@ -67,6 +67,7 @@ use thiserror::Error;
 /// }
 /// ```
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum CryptoError {
     // ─── Input & filesystem ──────────────────────────────────────────────
     /// Filesystem or stream I/O failure.
@@ -156,6 +157,7 @@ pub enum CryptoError {
 /// failures can be pattern-matched without substring comparisons and
 /// without heap-allocated `String`s.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FormatDefect {
     /// Input ended before a complete field or header could be read.
     Truncated,
@@ -224,6 +226,7 @@ impl std::fmt::Display for FormatDefect {
 /// File-format or key-file version rejection. Carries the raw version
 /// bytes so callers can inspect them without parsing a formatted string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum UnsupportedVersion {
     /// Encrypted file version is older than the current release supports.
     OlderFile { major: u8, minor: u8 },
@@ -260,6 +263,7 @@ impl std::fmt::Display for UnsupportedVersion {
 /// bound check. Carries the raw value so callers can decide whether to
 /// re-try with looser limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum InvalidKdfParams {
     /// `lanes` is zero or exceeds the library's maximum.
     Parallelism(u32),

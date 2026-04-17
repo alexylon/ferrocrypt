@@ -104,6 +104,7 @@ pub use secrecy;
 
 /// The encryption mode used to create an `.fcr` file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EncryptionMode {
     /// Password-based symmetric encryption (XChaCha20-Poly1305 + Argon2id).
     Symmetric,
@@ -113,6 +114,7 @@ pub enum EncryptionMode {
 
 /// Result of a successful key pair generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct GeneratedKeyPair {
     /// Path to the generated private key file.
     pub private_key_path: PathBuf,

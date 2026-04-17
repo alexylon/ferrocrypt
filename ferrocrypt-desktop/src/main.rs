@@ -528,6 +528,7 @@ fn detect_mode_from_path(path: &str) -> Result<Option<i32>, ferrocrypt::CryptoEr
     match detect_encryption_mode(Path::new(path))? {
         Some(EncryptionMode::Symmetric) => Ok(Some(MODE_SYMMETRIC_DECRYPT)),
         Some(EncryptionMode::Hybrid) => Ok(Some(MODE_HYBRID_DECRYPT)),
+        Some(_) => Ok(None),
         None => Ok(None),
     }
 }

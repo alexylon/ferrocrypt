@@ -6,8 +6,8 @@ use ferrocrypt::secrecy::{ExposeSecret, SecretString};
 use ferrocrypt::{
     CryptoError, KdfLimit, PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME, decode_recipient,
     default_encrypted_filename, detect_encryption_mode, encode_recipient, generate_key_pair,
-    hybrid_auto, hybrid_encrypt_from_recipient, public_key_fingerprint, symmetric_auto,
-    validate_secret_key_file,
+    hybrid_decrypt, hybrid_encrypt, hybrid_encrypt_from_recipient, public_key_fingerprint,
+    symmetric_decrypt, symmetric_encrypt, validate_secret_key_file,
 };
 use rpassword::prompt_password;
 use rustyline::DefaultEditor;
@@ -15,9 +15,22 @@ use rustyline::error::ReadlineError;
 use subtle::ConstantTimeEq;
 
 const PASSPHRASE_ENV: &str = "FERROCRYPT_PASSPHRASE";
+const BINARY_NAME: &str = env!("CARGO_BIN_NAME");
+const INTERACTIVE_PROMPT: &str = concat!(env!("CARGO_BIN_NAME"), "> ");
+const SUBCOMMAND_HELP: &str =
+    "symmetric (sym), hybrid (hyb), keygen (gen), fingerprint (fp), recipient (rc)";
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None,
+#[command(
+    author,
+    version,
+    about,
+    long_about = "\
+Command-line interface for FerroCrypt.
+
+File formats and primitives:
+  Symmetric (v3.0): Argon2id -> HKDF-SHA3-256 -> XChaCha20-Poly1305
+  Hybrid    (v4.0): X25519 ECDH -> HKDF-SHA256 -> XChaCha20-Poly1305",
     after_help = "\
 Examples:
   ferrocrypt sym -i secret.txt -o ./encrypted
@@ -184,17 +197,6 @@ fn format_duration(d: std::time::Duration) -> String {
     }
 }
 
-fn effective_encrypt_output(
-    output_dir: &Path,
-    input_path: &Path,
-    save_as: Option<&str>,
-) -> Result<PathBuf, CryptoError> {
-    match save_as {
-        Some(p) => Ok(PathBuf::from(p)),
-        None => Ok(output_dir.join(default_encrypted_filename(input_path)?)),
-    }
-}
-
 fn require_output_path(output_path: &Option<String>) -> Result<&Path, CryptoError> {
     output_path
         .as_deref()
@@ -202,12 +204,32 @@ fn require_output_path(output_path: &Option<String>) -> Result<&Path, CryptoErro
         .ok_or_else(|| CryptoError::InvalidInput("--output-path is required".to_string()))
 }
 
+/// Resolves the output directory for an encrypt operation. When `--save-as`
+/// is given, the library ignores the output directory entirely, so an empty
+/// path is returned if the caller did not provide one.
+fn resolve_encrypt_output_dir(
+    output_path: &Option<String>,
+    save_as: Option<&str>,
+) -> Result<PathBuf, CryptoError> {
+    if save_as.is_some() {
+        Ok(output_path
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_default())
+    } else {
+        Ok(PathBuf::from(require_output_path(output_path)?))
+    }
+}
+
 fn check_encrypt_conflict(
     output_dir: &Path,
     input_path: &Path,
     save_as: Option<&str>,
 ) -> Result<(), CryptoError> {
-    let target = effective_encrypt_output(output_dir, input_path, save_as)?;
+    let target = match save_as {
+        Some(p) => PathBuf::from(p),
+        None => output_dir.join(default_encrypted_filename(input_path)?),
+    };
     if target.exists() {
         return Err(CryptoError::InvalidInput(format!(
             "Already exists: {}",
@@ -215,6 +237,40 @@ fn check_encrypt_conflict(
         )));
     }
     Ok(())
+}
+
+fn reject_encrypt_only_flag(flag: &str, is_set: bool) -> Result<(), CryptoError> {
+    if is_set {
+        Err(CryptoError::InvalidInput(format!(
+            "{flag} is for encryption only"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn reject_decrypt_only_flag(flag: &str, is_set: bool) -> Result<(), CryptoError> {
+    if is_set {
+        Err(CryptoError::InvalidInput(format!(
+            "{flag} is for decryption only"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn print_result(is_encrypt: bool, output: &Path, elapsed: std::time::Duration) {
+    let action = if is_encrypt {
+        "Encrypted to"
+    } else {
+        "Decrypted to"
+    };
+    println!(
+        "\n{} {} in {}\n",
+        action,
+        output.display(),
+        format_duration(elapsed)
+    );
 }
 
 fn check_keygen_conflict(output_dir: &Path) -> Result<(), CryptoError> {
@@ -279,49 +335,22 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
         } => {
             let input_path = Path::new(&input_path);
             let is_encrypt = detect_encryption_mode(input_path)?.is_none();
-            let kdf_limit = max_kdf_memory.map(KdfLimit::from_mib).transpose()?;
             let start = std::time::Instant::now();
 
-            if is_encrypt {
-                if kdf_limit.is_some() {
-                    return Err(CryptoError::InvalidInput(
-                        "--max-kdf-memory is for decryption only".to_string(),
-                    ));
-                }
-                let out_dir = if save_as.is_some() {
-                    output_path.as_deref().map(Path::new)
-                } else {
-                    Some(require_output_path(&output_path)?)
-                };
-                let fallback = Path::new("");
-                let out_dir = out_dir.unwrap_or(fallback);
-                check_encrypt_conflict(out_dir, input_path, save_as.as_deref())?;
-            } else {
-                if recipient.is_some() {
-                    return Err(CryptoError::InvalidInput(
-                        "--recipient is for encryption only".to_string(),
-                    ));
-                }
-                if save_as.is_some() {
-                    return Err(CryptoError::InvalidInput(
-                        "--save-as is for encryption only".to_string(),
-                    ));
-                }
-                require_output_path(&output_path)?;
-            }
-
-            let fallback = Path::new("");
-            let output_dir = output_path.as_deref().map(Path::new).unwrap_or(fallback);
-
             let output = if is_encrypt {
-                if let Some(ref r) = recipient {
+                reject_decrypt_only_flag("--max-kdf-memory", max_kdf_memory.is_some())?;
+                let output_dir = resolve_encrypt_output_dir(&output_path, save_as.as_deref())?;
+                check_encrypt_conflict(&output_dir, input_path, save_as.as_deref())?;
+                let save_as_path = save_as.as_deref().map(Path::new);
+
+                if let Some(r) = recipient.as_deref() {
                     let recipient_bytes = decode_recipient(r)?;
-                    println!("Encrypting to: {}", r);
+                    println!("Encrypting to: {r}");
                     hybrid_encrypt_from_recipient(
                         input_path,
-                        output_dir,
+                        &output_dir,
                         &recipient_bytes,
-                        save_as.as_deref().map(Path::new),
+                        save_as_path,
                         |msg| eprintln!("{msg}"),
                     )?
                 } else {
@@ -331,48 +360,36 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
                         )
                     })?;
                     let key_path = Path::new(key);
-                    if let Ok(fp) = public_key_fingerprint(key_path) {
-                        println!("Encrypting to: {}", fp);
+                    match public_key_fingerprint(key_path) {
+                        Ok(fp) => println!("Encrypting to: {fp}"),
+                        Err(_) => println!("Using key file: {}", key_path.display()),
                     }
-                    hybrid_auto(
-                        input_path,
-                        output_dir,
-                        key_path,
-                        &SecretString::from(String::new()),
-                        save_as.as_deref().map(Path::new),
-                        kdf_limit.as_ref(),
-                        |msg| eprintln!("{msg}"),
-                    )?
+                    hybrid_encrypt(input_path, &output_dir, key_path, save_as_path, |msg| {
+                        eprintln!("{msg}")
+                    })?
                 }
             } else {
+                reject_encrypt_only_flag("--recipient", recipient.is_some())?;
+                reject_encrypt_only_flag("--save-as", save_as.is_some())?;
+                let output_dir = require_output_path(&output_path)?;
                 let key = key.as_deref().ok_or_else(|| {
                     CryptoError::InvalidInput("Decrypt requires --key".to_string())
                 })?;
                 let key_path = Path::new(key);
                 validate_secret_key_file(key_path)?;
+                let kdf_limit = max_kdf_memory.map(KdfLimit::from_mib).transpose()?;
                 let passphrase = read_passphrase(false)?;
-                hybrid_auto(
+                hybrid_decrypt(
                     input_path,
                     output_dir,
                     key_path,
                     &passphrase,
-                    save_as.as_deref().map(Path::new),
                     kdf_limit.as_ref(),
                     |msg| eprintln!("{msg}"),
                 )?
             };
 
-            let action = if is_encrypt {
-                "Encrypted to"
-            } else {
-                "Decrypted to"
-            };
-            println!(
-                "\n{} {} in {}\n",
-                action,
-                output.display(),
-                format_duration(start.elapsed())
-            );
+            print_result(is_encrypt, &output, start.elapsed());
         }
 
         CliCommand::Symmetric {
@@ -383,55 +400,35 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
         } => {
             let input_path = Path::new(&input_path);
             let is_encrypt = detect_encryption_mode(input_path)?.is_none();
-            let kdf_limit = max_kdf_memory.map(KdfLimit::from_mib).transpose()?;
             let start = std::time::Instant::now();
 
-            if is_encrypt {
-                if kdf_limit.is_some() {
-                    return Err(CryptoError::InvalidInput(
-                        "--max-kdf-memory is for decryption only".to_string(),
-                    ));
-                }
-                let out_dir = if save_as.is_some() {
-                    output_path.as_deref().map(Path::new)
-                } else {
-                    Some(require_output_path(&output_path)?)
-                };
-                let fallback = Path::new("");
-                let out_dir = out_dir.unwrap_or(fallback);
-                check_encrypt_conflict(out_dir, input_path, save_as.as_deref())?;
+            let output = if is_encrypt {
+                reject_decrypt_only_flag("--max-kdf-memory", max_kdf_memory.is_some())?;
+                let output_dir = resolve_encrypt_output_dir(&output_path, save_as.as_deref())?;
+                check_encrypt_conflict(&output_dir, input_path, save_as.as_deref())?;
+                let passphrase = read_passphrase(true)?;
+                symmetric_encrypt(
+                    input_path,
+                    &output_dir,
+                    &passphrase,
+                    save_as.as_deref().map(Path::new),
+                    |msg| eprintln!("{msg}"),
+                )?
             } else {
-                if save_as.is_some() {
-                    return Err(CryptoError::InvalidInput(
-                        "--save-as is for encryption only".to_string(),
-                    ));
-                }
-                require_output_path(&output_path)?;
-            }
-
-            let fallback = Path::new("");
-            let output_dir = output_path.as_deref().map(Path::new).unwrap_or(fallback);
-
-            let passphrase = read_passphrase(is_encrypt)?;
-            let output = symmetric_auto(
-                input_path,
-                output_dir,
-                &passphrase,
-                save_as.as_deref().map(Path::new),
-                kdf_limit.as_ref(),
-                |msg| eprintln!("{msg}"),
-            )?;
-            let action = if is_encrypt {
-                "Encrypted to"
-            } else {
-                "Decrypted to"
+                reject_encrypt_only_flag("--save-as", save_as.is_some())?;
+                let output_dir = require_output_path(&output_path)?;
+                let kdf_limit = max_kdf_memory.map(KdfLimit::from_mib).transpose()?;
+                let passphrase = read_passphrase(false)?;
+                symmetric_decrypt(
+                    input_path,
+                    output_dir,
+                    &passphrase,
+                    kdf_limit.as_ref(),
+                    |msg| eprintln!("{msg}"),
+                )?
             };
-            println!(
-                "\n{} {} in {}\n",
-                action,
-                output.display(),
-                format_duration(start.elapsed())
-            );
+
+            print_result(is_encrypt, &output, start.elapsed());
         }
     }
 
@@ -440,9 +437,7 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
 
 fn interactive_mode() -> Result<(), CryptoError> {
     println!("\nFerroCrypt interactive mode\n");
-    println!(
-        "Commands: symmetric (sym), hybrid (hyb), keygen (gen), fingerprint (fp), recipient (rc), quit\n"
-    );
+    println!("Commands: {SUBCOMMAND_HELP}, quit\n");
 
     let mut rl = match DefaultEditor::new() {
         Ok(editor) => editor,
@@ -453,7 +448,7 @@ fn interactive_mode() -> Result<(), CryptoError> {
     };
 
     loop {
-        match rl.readline("ferrocrypt> ") {
+        match rl.readline(INTERACTIVE_PROMPT) {
             Ok(line) => {
                 let line = line.trim();
                 if line.is_empty() {
@@ -476,7 +471,7 @@ fn interactive_mode() -> Result<(), CryptoError> {
                     }
                 };
 
-                let args = std::iter::once("ferrocrypt".to_string()).chain(parts);
+                let args = std::iter::once(BINARY_NAME.to_string()).chain(parts);
 
                 match Cli::try_parse_from(args) {
                     Ok(cli) => {
@@ -485,9 +480,7 @@ fn interactive_mode() -> Result<(), CryptoError> {
                                 eprintln!("Error: {e}");
                             }
                         } else {
-                            eprintln!(
-                                "No command given. Try: symmetric (sym), hybrid (hyb), keygen (gen), fingerprint (fp), recipient (rc)"
-                            );
+                            eprintln!("No command given. Try: {SUBCOMMAND_HELP}");
                         }
                     }
                     Err(e) => {

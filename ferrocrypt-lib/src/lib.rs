@@ -473,10 +473,13 @@ pub fn hybrid_decrypt(
 
 // ─── Auto-routing convenience wrappers ────────────────────────────────────
 
-/// Auto-detects encrypt vs decrypt by reading the file header.
+/// Routes to encrypt or decrypt based on magic-byte detection of the input
+/// file.
 ///
-/// Convenience wrapper for CLI/GUI use. Library consumers should prefer
-/// the explicit [`symmetric_encrypt`] / [`symmetric_decrypt`] functions.
+/// Convenience for callers that don't already know the direction. When the
+/// caller already branches on direction (e.g. for flag validation or UI
+/// state), prefer the explicit [`symmetric_encrypt`] / [`symmetric_decrypt`]
+/// functions.
 ///
 /// - If `input_path` is an existing FerroCrypt file, this decrypts and
 ///   `save_as` is ignored.
@@ -501,10 +504,13 @@ pub fn symmetric_auto(
     }
 }
 
-/// Auto-detects encrypt vs decrypt by reading the file header.
+/// Routes to encrypt or decrypt based on magic-byte detection of the input
+/// file.
 ///
-/// Convenience wrapper for CLI/GUI use. Library consumers should prefer
-/// the explicit [`hybrid_encrypt`] / [`hybrid_decrypt`] functions.
+/// Convenience for callers that don't already know the direction. When the
+/// caller already branches on direction (e.g. for flag validation or UI
+/// state), prefer the explicit [`hybrid_encrypt`] / [`hybrid_decrypt`]
+/// functions.
 ///
 /// - If `input_path` is an existing FerroCrypt file, this decrypts using
 ///   `key_file` as the private key file, `passphrase` as its passphrase,

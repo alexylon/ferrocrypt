@@ -87,8 +87,8 @@ Decryption reverses: read header → derive/decrypt keys → verify HMAC → Dec
 
 ## Key Conventions
 
-- Primary API: `symmetric_encrypt`/`symmetric_decrypt`, `hybrid_encrypt`/`hybrid_decrypt` — explicit, return `PathBuf`.
-- Auto-routing: `symmetric_auto`/`hybrid_auto` — detect encrypt vs decrypt by magic bytes, used by CLI/desktop.
+- Primary API: `symmetric_encrypt`/`symmetric_decrypt`, `hybrid_encrypt`/`hybrid_decrypt` — explicit, return `PathBuf`. **In-repo convention:** ferrocrypt-cli and ferrocrypt-desktop call `detect_encryption_mode` first to drive UI/flag branching, then dispatch to the explicit function. (Desktop migration is post-0.3.0; see the desktop audit M-7.)
+- Auto-routing wrappers: `symmetric_auto`/`hybrid_auto` — detect encrypt vs decrypt internally. Convenience for external consumers that don't already know direction; not used by the in-repo tools.
 - `generate_key_pair` returns `GeneratedKeyPair` with paths and fingerprint.
 - `encode_recipient`/`decode_recipient` — Bech32 `fcr1...` strings for human-readable public key exchange. `hybrid_encrypt_from_recipient` encrypts from raw bytes without a key file.
 - `symmetric_auto` caveats:
@@ -133,3 +133,4 @@ Decryption reverses: read header → derive/decrypt keys → verify HMAC → Dec
     - workspace: `cargo test -- --test-threads=1`
     - desktop (if touched): `cd ferrocrypt-desktop && cargo clippy --all-targets -- -D warnings`
 - Before finishing, review the change with adversarial thinking and future-proofing in mind.
+- Never commit or stage changes with Git.

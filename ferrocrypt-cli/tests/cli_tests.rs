@@ -1878,6 +1878,530 @@ fn test_symmetric_decrypt_without_output_path_fails() {
     );
 }
 
+// ─── Help and version output ───────────────────────────────────────────────
+
+#[test]
+fn test_cli_help_flag_lists_subcommands() {
+    let output = Command::new(get_binary_path())
+        .arg("--help")
+        .output()
+        .expect("--help");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Usage:"),
+        "expected Usage section, got:\n{stdout}"
+    );
+    for sub in ["symmetric", "hybrid", "keygen", "fingerprint", "recipient"] {
+        assert!(
+            stdout.contains(sub),
+            "missing subcommand {sub} in:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn test_cli_help_shows_format_primitives() {
+    let output = Command::new(get_binary_path())
+        .arg("--help")
+        .output()
+        .expect("--help");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for token in ["Argon2id", "XChaCha20-Poly1305", "X25519"] {
+        assert!(
+            stdout.contains(token),
+            "long_about should mention {token}, got:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn test_cli_version_flag_matches_cargo_pkg_version() {
+    let output = Command::new(get_binary_path())
+        .arg("--version")
+        .output()
+        .expect("--version");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let expected = env!("CARGO_PKG_VERSION");
+    assert!(
+        stdout.contains(expected),
+        "expected version {expected} in output, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn test_cli_subcommand_help_symmetric() {
+    let output = Command::new(get_binary_path())
+        .args(["symmetric", "--help"])
+        .output()
+        .expect("sym --help");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for token in [
+        "--input-path",
+        "--output-path",
+        "--save-as",
+        "--max-kdf-memory",
+    ] {
+        assert!(stdout.contains(token), "missing {token} in:\n{stdout}");
+    }
+}
+
+#[test]
+fn test_cli_subcommand_help_hybrid() {
+    let output = Command::new(get_binary_path())
+        .args(["hybrid", "--help"])
+        .output()
+        .expect("hyb --help");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for token in [
+        "--input-path",
+        "--output-path",
+        "--key",
+        "--recipient",
+        "--save-as",
+        "--max-kdf-memory",
+    ] {
+        assert!(stdout.contains(token), "missing {token} in:\n{stdout}");
+    }
+}
+
+#[test]
+fn test_cli_subcommand_help_keygen() {
+    let output = Command::new(get_binary_path())
+        .args(["keygen", "--help"])
+        .output()
+        .expect("gen --help");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--output-path"));
+}
+
+#[test]
+fn test_cli_subcommand_help_fingerprint() {
+    let output = Command::new(get_binary_path())
+        .args(["fingerprint", "--help"])
+        .output()
+        .expect("fp --help");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.to_lowercase().contains("public key"));
+}
+
+#[test]
+fn test_cli_subcommand_help_recipient() {
+    let output = Command::new(get_binary_path())
+        .args(["recipient", "--help"])
+        .output()
+        .expect("rc --help");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.to_lowercase().contains("recipient"));
+}
+
+// ─── Exit codes ────────────────────────────────────────────────────────────
+
+#[test]
+fn test_cli_wrong_passphrase_returns_nonzero() {
+    let test_dir = setup_test_dir("cli_exit_wrong_password");
+    let input_file = test_dir.join("test.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    fs::create_dir_all(&decrypt_dir).unwrap();
+    create_test_file(&input_file, "content");
+
+    let binary = get_binary_path();
+    let enc = Command::new(&binary)
+        .args(["sym", "-i"])
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "right")
+        .output()
+        .expect("encrypt");
+    assert_eq!(enc.status.code(), Some(0));
+
+    let dec = Command::new(&binary)
+        .args(["sym", "-i"])
+        .arg(encrypt_dir.join("test.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "wrong")
+        .output()
+        .expect("decrypt");
+    assert_ne!(dec.status.code(), Some(0));
+}
+
+#[test]
+fn test_cli_unknown_flag_returns_nonzero() {
+    let output = Command::new(get_binary_path())
+        .args(["sym", "--not-a-real-flag"])
+        .output()
+        .expect("bad args");
+    assert_ne!(output.status.code(), Some(0));
+}
+
+#[test]
+fn test_cli_missing_required_input_returns_nonzero() {
+    let output = Command::new(get_binary_path())
+        .arg("sym")
+        .output()
+        .expect("missing args");
+    assert_ne!(output.status.code(), Some(0));
+}
+
+// ─── Empty inputs ──────────────────────────────────────────────────────────
+
+#[test]
+fn test_cli_symmetric_empty_file_roundtrip() {
+    let test_dir = setup_test_dir("cli_empty_file_sym");
+    let input_file = test_dir.join("empty.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    fs::create_dir_all(&decrypt_dir).unwrap();
+    create_test_file(&input_file, "");
+    assert_eq!(fs::metadata(&input_file).unwrap().len(), 0);
+
+    let binary = get_binary_path();
+    let enc = Command::new(&binary)
+        .args(["sym", "-i"])
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("encrypt");
+    assert!(
+        enc.status.success(),
+        "encrypt failed: {}",
+        String::from_utf8_lossy(&enc.stderr)
+    );
+
+    let dec = Command::new(&binary)
+        .args(["sym", "-i"])
+        .arg(encrypt_dir.join("empty.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("decrypt");
+    assert!(
+        dec.status.success(),
+        "decrypt failed: {}",
+        String::from_utf8_lossy(&dec.stderr)
+    );
+
+    let decrypted = decrypt_dir.join("empty.txt");
+    assert!(decrypted.exists());
+    assert_eq!(fs::metadata(&decrypted).unwrap().len(), 0);
+}
+
+#[test]
+fn test_cli_hybrid_empty_file_roundtrip() {
+    let test_dir = setup_test_dir("cli_empty_file_hyb");
+    let keys_dir = test_dir.join("keys");
+    let input_file = test_dir.join("empty.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&keys_dir).unwrap();
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    fs::create_dir_all(&decrypt_dir).unwrap();
+    create_test_file(&input_file, "");
+
+    let binary = get_binary_path();
+    let kg = Command::new(&binary)
+        .args(["gen", "-o"])
+        .arg(&keys_dir)
+        .env("FERROCRYPT_PASSPHRASE", "key")
+        .output()
+        .expect("keygen");
+    assert!(kg.status.success());
+
+    let enc = Command::new(&binary)
+        .args(["hyb", "-i"])
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .arg("-k")
+        .arg(keys_dir.join("public.key"))
+        .output()
+        .expect("encrypt");
+    assert!(
+        enc.status.success(),
+        "encrypt failed: {}",
+        String::from_utf8_lossy(&enc.stderr)
+    );
+
+    let dec = Command::new(&binary)
+        .args(["hyb", "-i"])
+        .arg(encrypt_dir.join("empty.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir)
+        .arg("-k")
+        .arg(keys_dir.join("private.key"))
+        .env("FERROCRYPT_PASSPHRASE", "key")
+        .output()
+        .expect("decrypt");
+    assert!(
+        dec.status.success(),
+        "decrypt failed: {}",
+        String::from_utf8_lossy(&dec.stderr)
+    );
+
+    let decrypted = decrypt_dir.join("empty.txt");
+    assert!(decrypted.exists());
+    assert_eq!(fs::metadata(&decrypted).unwrap().len(), 0);
+}
+
+#[test]
+fn test_cli_symmetric_empty_directory_roundtrip() {
+    let test_dir = setup_test_dir("cli_empty_dir");
+    let input_dir = test_dir.join("emptydir");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&input_dir).unwrap();
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    fs::create_dir_all(&decrypt_dir).unwrap();
+    assert!(input_dir.read_dir().unwrap().next().is_none());
+
+    let binary = get_binary_path();
+    let enc = Command::new(&binary)
+        .args(["sym", "-i"])
+        .arg(&input_dir)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("encrypt");
+    assert!(
+        enc.status.success(),
+        "encrypt failed: {}",
+        String::from_utf8_lossy(&enc.stderr)
+    );
+
+    let dec = Command::new(&binary)
+        .args(["sym", "-i"])
+        .arg(encrypt_dir.join("emptydir.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("decrypt");
+    assert!(
+        dec.status.success(),
+        "decrypt failed: {}",
+        String::from_utf8_lossy(&dec.stderr)
+    );
+
+    let decrypted_dir = decrypt_dir.join("emptydir");
+    assert!(decrypted_dir.exists() && decrypted_dir.is_dir());
+    assert!(decrypted_dir.read_dir().unwrap().next().is_none());
+}
+
+// ─── Malformed key files at CLI layer ──────────────────────────────────────
+
+#[test]
+fn test_cli_hybrid_encrypt_with_malformed_public_key_fails() {
+    let test_dir = setup_test_dir("cli_hybrid_malformed_public");
+    let keys_dir = test_dir.join("keys");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    fs::create_dir_all(&keys_dir).unwrap();
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    create_test_file(&input_file, "content");
+    fs::write(keys_dir.join("public.key"), b"not a real key file").unwrap();
+
+    let output = Command::new(get_binary_path())
+        .args(["hyb", "-i"])
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .arg("-k")
+        .arg(keys_dir.join("public.key"))
+        .output()
+        .expect("encrypt");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("aead::Error"),
+        "internal error name leaked: {stderr}"
+    );
+}
+
+#[test]
+fn test_cli_hybrid_decrypt_with_malformed_private_key_fails() {
+    let test_dir = setup_test_dir("cli_hybrid_malformed_private");
+    let keys_dir = test_dir.join("keys");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&keys_dir).unwrap();
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    fs::create_dir_all(&decrypt_dir).unwrap();
+    create_test_file(&input_file, "content");
+
+    let binary = get_binary_path();
+    let kg = Command::new(&binary)
+        .args(["gen", "-o"])
+        .arg(&keys_dir)
+        .env("FERROCRYPT_PASSPHRASE", "key")
+        .output()
+        .expect("keygen");
+    assert!(kg.status.success());
+    let enc = Command::new(&binary)
+        .args(["hyb", "-i"])
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .arg("-k")
+        .arg(keys_dir.join("public.key"))
+        .output()
+        .expect("encrypt");
+    assert!(enc.status.success());
+
+    fs::write(keys_dir.join("private.key"), b"not a real private key").unwrap();
+
+    let dec = Command::new(&binary)
+        .args(["hyb", "-i"])
+        .arg(encrypt_dir.join("data.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir)
+        .arg("-k")
+        .arg(keys_dir.join("private.key"))
+        .env("FERROCRYPT_PASSPHRASE", "key")
+        .output()
+        .expect("decrypt");
+    assert!(!dec.status.success());
+    let stderr = String::from_utf8_lossy(&dec.stderr);
+    assert!(
+        !stderr.contains("aead::Error"),
+        "internal error name leaked: {stderr}"
+    );
+}
+
+#[test]
+fn test_cli_fingerprint_on_malformed_key_fails() {
+    let test_dir = setup_test_dir("cli_fp_malformed");
+    let bad_key = test_dir.join("bad.key");
+    fs::write(&bad_key, b"garbage").unwrap();
+
+    let output = Command::new(get_binary_path())
+        .arg("fp")
+        .arg(&bad_key)
+        .output()
+        .expect("fp");
+    assert!(!output.status.success());
+}
+
+#[test]
+fn test_cli_recipient_on_malformed_key_fails() {
+    let test_dir = setup_test_dir("cli_rc_malformed");
+    let bad_key = test_dir.join("bad.key");
+    fs::write(&bad_key, b"garbage").unwrap();
+
+    let output = Command::new(get_binary_path())
+        .arg("rc")
+        .arg(&bad_key)
+        .output()
+        .expect("rc");
+    assert!(!output.status.success());
+}
+
+#[test]
+fn test_cli_fingerprint_on_private_key_fails() {
+    let test_dir = setup_test_dir("cli_fp_on_private");
+    let keys_dir = test_dir.join("keys");
+    fs::create_dir_all(&keys_dir).unwrap();
+
+    let binary = get_binary_path();
+    let kg = Command::new(&binary)
+        .args(["gen", "-o"])
+        .arg(&keys_dir)
+        .env("FERROCRYPT_PASSPHRASE", "key")
+        .output()
+        .expect("keygen");
+    assert!(kg.status.success());
+
+    let output = Command::new(&binary)
+        .arg("fp")
+        .arg(keys_dir.join("private.key"))
+        .output()
+        .expect("fp");
+    assert!(!output.status.success());
+}
+
+#[test]
+fn test_cli_recipient_on_private_key_fails() {
+    let test_dir = setup_test_dir("cli_rc_on_private");
+    let keys_dir = test_dir.join("keys");
+    fs::create_dir_all(&keys_dir).unwrap();
+
+    let binary = get_binary_path();
+    let kg = Command::new(&binary)
+        .args(["gen", "-o"])
+        .arg(&keys_dir)
+        .env("FERROCRYPT_PASSPHRASE", "key")
+        .output()
+        .expect("keygen");
+    assert!(kg.status.success());
+
+    let output = Command::new(&binary)
+        .arg("rc")
+        .arg(keys_dir.join("private.key"))
+        .output()
+        .expect("rc");
+    assert!(!output.status.success());
+}
+
+#[test]
+fn test_cli_hybrid_decrypt_rejects_public_key_as_private() {
+    let test_dir = setup_test_dir("cli_hybrid_wrong_key_type");
+    let keys_dir = test_dir.join("keys");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&keys_dir).unwrap();
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    fs::create_dir_all(&decrypt_dir).unwrap();
+    create_test_file(&input_file, "content");
+
+    let binary = get_binary_path();
+    let kg = Command::new(&binary)
+        .args(["gen", "-o"])
+        .arg(&keys_dir)
+        .env("FERROCRYPT_PASSPHRASE", "key")
+        .output()
+        .expect("keygen");
+    assert!(kg.status.success());
+    let enc = Command::new(&binary)
+        .args(["hyb", "-i"])
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .arg("-k")
+        .arg(keys_dir.join("public.key"))
+        .output()
+        .expect("encrypt");
+    assert!(enc.status.success());
+
+    let dec = Command::new(&binary)
+        .args(["hyb", "-i"])
+        .arg(encrypt_dir.join("data.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir)
+        .arg("-k")
+        .arg(keys_dir.join("public.key"))
+        .env("FERROCRYPT_PASSPHRASE", "key")
+        .output()
+        .expect("decrypt");
+    assert!(!dec.status.success());
+}
+
 #[ctor::dtor]
 fn cleanup() {
     cleanup_test_workspace();

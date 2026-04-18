@@ -94,10 +94,12 @@ component SmallButton inherits Rectangle {
 // Main application window
 // ---------------------------------------------------------------------------
 export component AppWindow inherits Window {
-    title: "FerroCrypt";
+    title: app-version != "" ? "FerroCrypt v" + app-version : "FerroCrypt";
     background: Theme.bg;
     width: 450px;
     height: 700px;
+
+    in property <string> app-version;
 
     // ── State ───────────────────────────────────────────────────────────
     // Mode: 0=SE  1=SD  2=HE  3=HD  4=GK

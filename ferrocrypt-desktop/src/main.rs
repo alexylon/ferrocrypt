@@ -43,6 +43,7 @@ fn pick_file_or_folder() -> Option<PathBuf> {
 fn main() {
     let app = AppWindow::new().unwrap();
 
+    app.set_app_version(env!("CARGO_PKG_VERSION").into());
     app.set_combined_picker(cfg!(target_os = "macos"));
 
     app.on_mode_changed({
@@ -188,92 +189,117 @@ fn main() {
 
             let weak = weak.clone();
             std::thread::spawn(move || {
-                let pwd = SecretString::from(password);
-                let keygen_dir = if mode == MODE_KEYGEN {
-                    Some(output_dir.clone())
-                } else {
-                    None
-                };
+                // If the worker body panics without `catch_unwind`, the
+                // success handler below (which clears `is-working` via
+                // `invoke_from_event_loop`) never runs and the UI stays
+                // permanently disabled. The library is designed to avoid
+                // panics, but Argon2id can still OOM on constrained hosts.
+                let panic_weak = weak.clone();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                    let pwd = SecretString::from(password);
+                    let keygen_dir = if mode == MODE_KEYGEN {
+                        Some(output_dir.clone())
+                    } else {
+                        None
+                    };
 
-                let on_progress = {
-                    let weak = weak.clone();
-                    move |msg: &str| {
-                        let msg = msg.to_string();
+                    let on_progress = {
                         let weak = weak.clone();
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(app) = weak.upgrade() {
-                                app.set_status_ok(msg.into());
-                            }
-                        });
-                    }
-                };
+                        move |msg: &str| {
+                            let msg = msg.to_string();
+                            let weak = weak.clone();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(app) = weak.upgrade() {
+                                    app.set_status_ok(msg.into());
+                                }
+                            });
+                        }
+                    };
 
-                let inpath = Path::new(&inpath);
-                let output_dir_path = Path::new(&output_dir);
-                let keypath = Path::new(&keypath);
-                let save_as = output_file.as_deref().map(Path::new);
+                    let inpath = Path::new(&inpath);
+                    let output_dir_path = Path::new(&output_dir);
+                    let keypath = Path::new(&keypath);
+                    let save_as = output_file.as_deref().map(Path::new);
 
-                let is_decrypt = is_decrypt_mode(mode);
-                let start = std::time::Instant::now();
-                let result: Result<PathBuf, _> = match mode {
-                    MODE_SYMMETRIC_ENCRYPT | MODE_SYMMETRIC_DECRYPT => {
-                        symmetric_auto(inpath, output_dir_path, &pwd, save_as, None, &on_progress)
-                    }
-                    MODE_HYBRID_ENCRYPT | MODE_HYBRID_DECRYPT => hybrid_auto(
-                        inpath,
-                        output_dir_path,
-                        keypath,
-                        &pwd,
-                        save_as,
-                        None,
-                        &on_progress,
-                    ),
-                    MODE_KEYGEN => generate_key_pair(&pwd, output_dir_path, &on_progress)
-                        .map(|info| info.public_key_path),
-                    _ => unreachable!(),
-                };
-                let elapsed = start.elapsed().as_secs_f64();
+                    let is_decrypt = is_decrypt_mode(mode);
+                    let start = std::time::Instant::now();
+                    let result: Result<PathBuf, _> = match mode {
+                        MODE_SYMMETRIC_ENCRYPT | MODE_SYMMETRIC_DECRYPT => symmetric_auto(
+                            inpath,
+                            output_dir_path,
+                            &pwd,
+                            save_as,
+                            None,
+                            &on_progress,
+                        ),
+                        MODE_HYBRID_ENCRYPT | MODE_HYBRID_DECRYPT => hybrid_auto(
+                            inpath,
+                            output_dir_path,
+                            keypath,
+                            &pwd,
+                            save_as,
+                            None,
+                            &on_progress,
+                        ),
+                        MODE_KEYGEN => generate_key_pair(&pwd, output_dir_path, &on_progress)
+                            .map(|info| info.public_key_path),
+                        _ => unreachable!(),
+                    };
+                    let elapsed = start.elapsed().as_secs_f64();
 
-                let _ = slint::invoke_from_event_loop(move || {
-                    let Some(app) = weak.upgrade() else { return };
-                    app.set_is_working(false);
+                    let _ = slint::invoke_from_event_loop(move || {
+                        let Some(app) = weak.upgrade() else { return };
+                        app.set_is_working(false);
 
-                    match result {
-                        Ok(output) => {
-                            if let Some(dir) = keygen_dir {
-                                let pub_key = path_to_string(&public_key_path(&dir));
-                                app.set_password(Default::default());
-                                app.set_password_repeated(Default::default());
-                                app.set_hide_password(true);
-                                app.set_password_strength(password_scorer::PW_EMPTY);
-                                app.set_keygen_output_dir(Default::default());
-                                app.set_keygen_output_dir_display(Default::default());
-                                app.set_conflict_warning(Default::default());
-                                app.set_status_err(Default::default());
-                                app.set_mode(MODE_HYBRID_ENCRYPT);
-                                app.set_key_path_display(elide_left(&pub_key, ELIDE).into());
-                                app.set_key_path(pub_key.clone().into());
-                                validate_selected_key(&app, &pub_key);
-                                app.set_status_ok(
-                                    "Key pair generated \u{2014} public key selected".into(),
-                                );
-                            } else {
-                                clear_fields(&app);
-                                let action = if is_decrypt {
-                                    "Decrypted to"
+                        match result {
+                            Ok(output) => {
+                                if let Some(dir) = keygen_dir {
+                                    let pub_key = path_to_string(&public_key_path(&dir));
+                                    app.set_password(Default::default());
+                                    app.set_password_repeated(Default::default());
+                                    app.set_hide_password(true);
+                                    app.set_password_strength(password_scorer::PW_EMPTY);
+                                    app.set_keygen_output_dir(Default::default());
+                                    app.set_keygen_output_dir_display(Default::default());
+                                    app.set_conflict_warning(Default::default());
+                                    app.set_status_err(Default::default());
+                                    app.set_mode(MODE_HYBRID_ENCRYPT);
+                                    app.set_key_path_display(elide_left(&pub_key, ELIDE).into());
+                                    app.set_key_path(pub_key.clone().into());
+                                    validate_selected_key(&app, &pub_key);
+                                    app.set_status_ok(
+                                        "Key pair generated \u{2014} public key selected".into(),
+                                    );
                                 } else {
-                                    "Encrypted to"
-                                };
-                                let status = format_duration(action, &output, elapsed);
-                                app.set_status_ok(elide_result_path(&status).into());
+                                    clear_fields(&app);
+                                    let action = if is_decrypt {
+                                        "Decrypted to"
+                                    } else {
+                                        "Encrypted to"
+                                    };
+                                    let status = format_duration(action, &output, elapsed);
+                                    app.set_status_ok(elide_result_path(&status).into());
+                                }
+                            }
+                            Err(e) => {
+                                app.set_status_ok("".into());
+                                app.set_status_err(elide_result_path(&e.to_string()).into());
                             }
                         }
-                        Err(e) => {
+                    });
+                }));
+
+                if result.is_err() {
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(app) = panic_weak.upgrade() {
+                            app.set_is_working(false);
                             app.set_status_ok("".into());
-                            app.set_status_err(elide_result_path(&e.to_string()).into());
+                            app.set_status_err(
+                                "Operation failed unexpectedly (internal error)".into(),
+                            );
                         }
-                    }
-                });
+                    });
+                }
             });
         }
     });

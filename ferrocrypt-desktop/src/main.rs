@@ -3,7 +3,7 @@
 
 slint::include_modules!();
 
-use ferrocrypt::secrecy::SecretString;
+use ferrocrypt::secrecy::{ExposeSecret, SecretString};
 use ferrocrypt::{
     EncryptionMode, PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME, default_encrypted_filename,
     detect_encryption_mode, generate_key_pair, hybrid_decrypt, hybrid_encrypt,
@@ -155,8 +155,8 @@ fn main() {
         let weak = app.as_weak();
         move || {
             if let Some(app) = weak.upgrade() {
-                let pwd = app.get_password().to_string();
-                app.set_password_strength(password_scorer::password_strength(&pwd));
+                let pwd = SecretString::from(app.get_password().to_string());
+                app.set_password_strength(password_scorer::password_strength(pwd.expose_secret()));
             }
         }
     });
@@ -169,7 +169,11 @@ fn main() {
             let mode = app.get_mode();
             let inpath = app.get_input_path().to_string();
             let outpath = app.get_output_path().to_string();
-            let password = app.get_password().to_string();
+            // Wrap immediately so the password bytes are zeroized on drop,
+            // even on the hybrid-encrypt path where the library doesn't
+            // consume them, and even if the worker panics before the
+            // crypto call runs.
+            let pwd = SecretString::from(app.get_password().to_string());
             let keypath = app.get_key_path().to_string();
             let keygen_outdir = app.get_keygen_output_dir().to_string();
 
@@ -196,10 +200,6 @@ fn main() {
                 // panics, but Argon2id can still OOM on constrained hosts.
                 let panic_weak = weak.clone();
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                    // Always wrap in `SecretString` so the password bytes
-                    // are zeroized on drop, even on the hybrid-encrypt path
-                    // where the library doesn't consume them.
-                    let pwd = SecretString::from(password);
                     let keygen_dir = if mode == MODE_KEYGEN {
                         Some(output_dir.clone())
                     } else {

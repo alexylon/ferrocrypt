@@ -435,6 +435,66 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
     Ok(())
 }
 
+/// Outcome of dispatching a single REPL input line. The outer interactive
+/// loop uses this to decide what to print and whether to continue or exit.
+/// Returning a typed outcome instead of printing inline keeps the dispatch
+/// logic unit-testable without a TTY.
+#[derive(Debug)]
+enum ReplOutcome {
+    /// User typed `exit` / `quit` (case-insensitive). Loop should break.
+    Exit,
+    /// Empty or whitespace-only input. Loop should continue silently.
+    Empty,
+    /// Parse succeeded but no subcommand was given. Unreachable through
+    /// normal trimmed input; kept as a defensive fallback in case shell-word
+    /// split or the clap parser ever accepts a bare flag-only invocation.
+    NoCommand,
+    /// Shell-word split failed (unclosed quote, etc).
+    ShellError(shell_words::ParseError),
+    /// Clap argument parsing failed, or `--help` / `--version` was used
+    /// (which clap surfaces via `ErrorKind::DisplayHelp` / `DisplayVersion`).
+    ParseError(clap::Error),
+    /// Command ran to completion successfully.
+    Ran,
+    /// Command ran but returned a runtime error.
+    Failed(CryptoError),
+}
+
+fn is_exit_command(trimmed: &str) -> bool {
+    trimmed.eq_ignore_ascii_case("exit") || trimmed.eq_ignore_ascii_case("quit")
+}
+
+/// Parses a single line of REPL input and dispatches it. The raw line is
+/// trimmed, checked for the `exit` / `quit` sentinels, shell-split, and
+/// then fed through the same `Cli` parser as the subcommand entry point.
+fn dispatch_repl_line(line: &str) -> ReplOutcome {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return ReplOutcome::Empty;
+    }
+    if is_exit_command(trimmed) {
+        return ReplOutcome::Exit;
+    }
+
+    let parts = match shell_words::split(trimmed) {
+        Ok(v) => v,
+        Err(e) => return ReplOutcome::ShellError(e),
+    };
+
+    let args = std::iter::once(BINARY_NAME.to_string()).chain(parts);
+
+    match Cli::try_parse_from(args) {
+        Ok(cli) => match cli.command {
+            Some(cmd) => match run_command(cmd) {
+                Ok(()) => ReplOutcome::Ran,
+                Err(e) => ReplOutcome::Failed(e),
+            },
+            None => ReplOutcome::NoCommand,
+        },
+        Err(e) => ReplOutcome::ParseError(e),
+    }
+}
+
 fn interactive_mode() -> Result<(), CryptoError> {
     println!("\nFerroCrypt interactive mode\n");
     println!("Commands: {SUBCOMMAND_HELP}, quit\n");
@@ -450,44 +510,26 @@ fn interactive_mode() -> Result<(), CryptoError> {
     loop {
         match rl.readline(INTERACTIVE_PROMPT) {
             Ok(line) => {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-
-                if line.eq_ignore_ascii_case("exit") || line.eq_ignore_ascii_case("quit") {
-                    break;
-                }
-
-                if let Err(e) = rl.add_history_entry(line) {
-                    eprintln!("Failed to add history entry: {e}");
-                }
-
-                let parts: Vec<String> = match shell_words::split(line) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        eprintln!("Parse error: {e}");
-                        continue;
+                let trimmed = line.trim();
+                if !trimmed.is_empty() && !is_exit_command(trimmed) {
+                    if let Err(e) = rl.add_history_entry(trimmed) {
+                        eprintln!("Failed to add history entry: {e}");
                     }
-                };
-
-                let args = std::iter::once(BINARY_NAME.to_string()).chain(parts);
-
-                match Cli::try_parse_from(args) {
-                    Ok(cli) => {
-                        if let Some(cmd) = cli.command {
-                            if let Err(e) = run_command(cmd) {
-                                eprintln!("Error: {e}");
-                            }
-                        } else {
-                            eprintln!("No command given. Try: {SUBCOMMAND_HELP}");
-                        }
+                }
+                match dispatch_repl_line(&line) {
+                    ReplOutcome::Exit => break,
+                    ReplOutcome::Empty => {}
+                    ReplOutcome::NoCommand => {
+                        eprintln!("No command given. Try: {SUBCOMMAND_HELP}");
                     }
-                    Err(e) => {
+                    ReplOutcome::ShellError(e) => eprintln!("Parse error: {e}"),
+                    ReplOutcome::ParseError(e) => {
                         if let Err(print_err) = e.print() {
                             eprintln!("Failed to print error: {print_err}");
                         }
                     }
+                    ReplOutcome::Ran => {}
+                    ReplOutcome::Failed(e) => eprintln!("Error: {e}"),
                 }
             }
 
@@ -507,4 +549,123 @@ fn interactive_mode() -> Result<(), CryptoError> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exit_recognized_case_insensitively_and_with_whitespace() {
+        for input in ["exit", "quit", "EXIT", "Quit", "  exit  ", "\tquit\n"] {
+            assert!(
+                matches!(dispatch_repl_line(input), ReplOutcome::Exit),
+                "input {input:?} should be Exit"
+            );
+        }
+    }
+
+    #[test]
+    fn words_containing_exit_or_quit_are_not_exit() {
+        for input in ["exiting", "quitter", "exit now", "goto quit", "unquit"] {
+            assert!(
+                !matches!(dispatch_repl_line(input), ReplOutcome::Exit),
+                "input {input:?} should NOT be Exit"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_or_whitespace_is_empty() {
+        for input in ["", "   ", "\t", "\n", "\r\n", " \t\n "] {
+            assert!(
+                matches!(dispatch_repl_line(input), ReplOutcome::Empty),
+                "input {input:?} should be Empty"
+            );
+        }
+    }
+
+    #[test]
+    fn unclosed_quote_is_shell_error() {
+        assert!(matches!(
+            dispatch_repl_line("sym -i 'unclosed"),
+            ReplOutcome::ShellError(_)
+        ));
+    }
+
+    #[test]
+    fn unknown_subcommand_is_parse_error() {
+        assert!(matches!(
+            dispatch_repl_line("nonexistent-subcommand"),
+            ReplOutcome::ParseError(_)
+        ));
+    }
+
+    #[test]
+    fn missing_required_arg_is_parse_error() {
+        assert!(matches!(
+            dispatch_repl_line("sym"),
+            ReplOutcome::ParseError(_)
+        ));
+    }
+
+    #[test]
+    fn help_flag_surfaces_as_display_help_kind() {
+        match dispatch_repl_line("--help") {
+            ReplOutcome::ParseError(e) => {
+                assert_eq!(e.kind(), clap::error::ErrorKind::DisplayHelp)
+            }
+            other => panic!("expected ParseError(DisplayHelp), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn version_flag_surfaces_as_display_version_kind() {
+        match dispatch_repl_line("--version") {
+            ReplOutcome::ParseError(e) => {
+                assert_eq!(e.kind(), clap::error::ErrorKind::DisplayVersion)
+            }
+            other => panic!("expected ParseError(DisplayVersion), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subcommand_help_surfaces_as_display_help_kind() {
+        match dispatch_repl_line("sym --help") {
+            ReplOutcome::ParseError(e) => {
+                assert_eq!(e.kind(), clap::error::ErrorKind::DisplayHelp)
+            }
+            other => panic!("expected ParseError(DisplayHelp), got {other:?}"),
+        }
+    }
+
+    /// Builds a process-unique path inside the OS temp dir, shell-quoted
+    /// for safe interpolation into a REPL line. Guarantees the path does
+    /// not exist at test start and handles temp-dir paths that contain
+    /// spaces (e.g. Windows user profiles with spaces).
+    fn nonexistent_temp_path_quoted() -> String {
+        let path = std::env::temp_dir().join(format!(
+            "ferrocrypt-unit-nonexistent-{}",
+            std::process::id()
+        ));
+        shell_words::quote(&path.to_string_lossy()).into_owned()
+    }
+
+    #[test]
+    fn fingerprint_on_nonexistent_path_is_failed() {
+        let line = format!("fp {}", nonexistent_temp_path_quoted());
+        match dispatch_repl_line(&line) {
+            ReplOutcome::Failed(_) => {}
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn recipient_on_nonexistent_path_is_failed() {
+        let line = format!("rc {}", nonexistent_temp_path_quoted());
+        match dispatch_repl_line(&line) {
+            ReplOutcome::Failed(_) => {}
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
 }

@@ -6,8 +6,8 @@ slint::include_modules!();
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
     EncryptionMode, PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME, default_encrypted_filename,
-    detect_encryption_mode, generate_key_pair, hybrid_auto, public_key_fingerprint, symmetric_auto,
-    validate_secret_key_file,
+    detect_encryption_mode, generate_key_pair, hybrid_decrypt, hybrid_encrypt,
+    public_key_fingerprint, symmetric_decrypt, symmetric_encrypt, validate_secret_key_file,
 };
 use std::path::{Path, PathBuf};
 
@@ -196,6 +196,9 @@ fn main() {
                 // panics, but Argon2id can still OOM on constrained hosts.
                 let panic_weak = weak.clone();
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                    // Always wrap in `SecretString` so the password bytes
+                    // are zeroized on drop, even on the hybrid-encrypt path
+                    // where the library doesn't consume them.
                     let pwd = SecretString::from(password);
                     let keygen_dir = if mode == MODE_KEYGEN {
                         Some(output_dir.clone())
@@ -224,20 +227,20 @@ fn main() {
                     let is_decrypt = is_decrypt_mode(mode);
                     let start = std::time::Instant::now();
                     let result: Result<PathBuf, _> = match mode {
-                        MODE_SYMMETRIC_ENCRYPT | MODE_SYMMETRIC_DECRYPT => symmetric_auto(
-                            inpath,
-                            output_dir_path,
-                            &pwd,
-                            save_as,
-                            None,
-                            &on_progress,
-                        ),
-                        MODE_HYBRID_ENCRYPT | MODE_HYBRID_DECRYPT => hybrid_auto(
+                        MODE_SYMMETRIC_ENCRYPT => {
+                            symmetric_encrypt(inpath, output_dir_path, &pwd, save_as, &on_progress)
+                        }
+                        MODE_SYMMETRIC_DECRYPT => {
+                            symmetric_decrypt(inpath, output_dir_path, &pwd, None, &on_progress)
+                        }
+                        MODE_HYBRID_ENCRYPT => {
+                            hybrid_encrypt(inpath, output_dir_path, keypath, save_as, &on_progress)
+                        }
+                        MODE_HYBRID_DECRYPT => hybrid_decrypt(
                             inpath,
                             output_dir_path,
                             keypath,
                             &pwd,
-                            save_as,
                             None,
                             &on_progress,
                         ),

@@ -794,7 +794,7 @@ fn extract_entries<R: Read>(
 
     // Apply directory permissions deepest-first so that restricting a parent
     // does not prevent setting permissions on its children.
-    dir_permissions.sort_by(|a, b| b.0.components().count().cmp(&a.0.components().count()));
+    dir_permissions.sort_by_key(|entry| std::cmp::Reverse(entry.0.components().count()));
     for (path, mode) in &dir_permissions {
         restore_permissions_from_mode(*mode, path)?;
     }

@@ -280,9 +280,6 @@ pub fn decrypt_file(
     }
 }
 
-// If a future 3.x minor introduces non-trivial behavior, add explicit gating here:
-//   match header.minor { 0 => ..., 1 => ..., _ => unsupported }
-// on top of the default "authenticate-and-ignore" ext_bytes handling.
 fn decrypt_file_v3(
     mut encrypted_file: fs::File,
     prefix_bytes: [u8; format::HEADER_PREFIX_SIZE],
@@ -293,6 +290,15 @@ fn decrypt_file_v3(
     on_progress: &dyn Fn(&str),
 ) -> Result<PathBuf, CryptoError> {
     format::validate_file_flags(&header)?;
+
+    // v3 minor-version dispatch: every 3.x minor decrypts identically — the
+    // ext_bytes region is authenticated by HMAC and the contents are ignored.
+    // Bound here so the field is read on the success path and the contract
+    // is visible at the call site. Per FORMAT.md §10.2, minor versions are
+    // always forward-compatible (never rejected); a future 3.x minor that
+    // needs special behavior would replace this with a `match header.minor`
+    // where the wildcard arm is still the default ignore.
+    let _minor: u8 = header.minor;
 
     let core = SymmetricHeaderCore::read_from(&mut encrypted_file, header.ext_len as usize)?;
     let hmac_tag = format::read_replicated_field::<HMAC_TAG_SIZE>(&mut encrypted_file)?;
@@ -515,6 +521,71 @@ mod tests {
         let result = decrypt_file(&encrypted_path, &decrypt_dir, &passphrase, None, &|_| {});
         assert!(result.is_err(), "tampered ext_bytes must fail HMAC");
         Ok(())
+    }
+
+    /// Reserved-bit fail-closed: a v3.0 file with `flags = 0x0001` must be
+    /// rejected with the typed `UnknownHeaderFlags` variant. Since the header
+    /// HMAC covers the prefix (flags included), this test recomputes a valid
+    /// HMAC for the patched prefix — without that, an HMAC failure could
+    /// mask what the flag check actually does, and the assertion would not
+    /// pin the flag-rejection path independently.
+    #[test]
+    fn nonzero_flags_rejected_with_valid_hmac() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let input_file = tmp.path().join("data.txt");
+        let encrypt_dir = tmp.path().join("encrypted");
+        let decrypt_dir = tmp.path().join("decrypted");
+        fs::create_dir_all(&encrypt_dir)?;
+        fs::create_dir_all(&decrypt_dir)?;
+        fs::write(&input_file, "flag rejection test")?;
+
+        let passphrase = SecretString::from("pass".to_string());
+        encrypt_file(&input_file, &encrypt_dir, &passphrase, None, &|_| {})?;
+
+        let encrypted_path = encrypt_dir.join("data.fcr");
+        let original = fs::read(&encrypted_path)?;
+
+        let (salt, hkdf_salt, kdf_bytes, nonce, verification_hash, ciphertext_offset) =
+            read_v3_header_fields(&original)?;
+        let kdf_params = KdfParams::from_bytes(kdf_bytes.as_slice().try_into()?, None)?;
+        let (_enc_key, hmac_key) = derive_keys(&passphrase, &salt, &hkdf_salt, &kdf_params)?;
+
+        // Build a v3.0 header with flags = 0x0001 and a recomputed valid HMAC.
+        let new_prefix =
+            format::build_header_prefix(format::TYPE_SYMMETRIC, format::VERSION_MAJOR, 0x0001, 0);
+        let mut hmac_message = Vec::new();
+        hmac_message.extend_from_slice(&new_prefix);
+        hmac_message.extend_from_slice(&salt);
+        hmac_message.extend_from_slice(&hkdf_salt);
+        hmac_message.extend_from_slice(&kdf_bytes);
+        hmac_message.extend_from_slice(&nonce);
+        hmac_message.extend_from_slice(&verification_hash);
+        let hmac_tag = hmac_sha3_256(hmac_key.as_ref(), &hmac_message)?;
+
+        let ciphertext = &original[ciphertext_offset..];
+        let fixed_core_end = HEADER_PREFIX_ENCODED_SIZE
+            + encoded_size(ARGON2_SALT_SIZE)
+            + encoded_size(HKDF_SALT_SIZE)
+            + encoded_size(KDF_PARAMS_SIZE)
+            + encoded_size(STREAM_NONCE_SIZE)
+            + encoded_size(ENCRYPTION_KEY_SIZE);
+
+        let mut output = Vec::new();
+        output.extend_from_slice(&encode(&new_prefix));
+        output.extend_from_slice(&original[HEADER_PREFIX_ENCODED_SIZE..fixed_core_end]);
+        output.extend_from_slice(&encode(&[])); // ext_bytes = empty
+        output.extend_from_slice(&encode(&hmac_tag));
+        output.extend_from_slice(ciphertext);
+
+        fs::write(&encrypted_path, &output)?;
+
+        let result = decrypt_file(&encrypted_path, &decrypt_dir, &passphrase, None, &|_| {});
+        match result {
+            Err(CryptoError::InvalidFormat(crate::error::FormatDefect::UnknownHeaderFlags(
+                0x0001,
+            ))) => Ok(()),
+            other => panic!("expected UnknownHeaderFlags(0x0001), got: {other:?}"),
+        }
     }
 
     /// `SymmetricHeaderCore::new` must accept an `ext_bytes` exactly the size

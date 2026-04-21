@@ -332,7 +332,21 @@ Non-final chunks carry `65536` plaintext bytes plus a `16`-byte tag.
 The stream ends with one final AEAD chunk, which may be shorter and may be
 only a tag if the plaintext length is an exact multiple of `65536` bytes.
 
-### 6.3 What is inside the TAR stream
+### 6.3 Maximum stream size
+
+The streaming AEAD construction uses a 32-bit big-endian chunk counter
+(`chacha20poly1305::stream::EncryptorBE32` / `DecryptorBE32`). With 64 KiB
+plaintext chunks, a single encrypted stream can therefore carry at most
+`2^32 × 65_536 = 2^48` bytes of plaintext (≈ **256 TiB**) before the counter
+is exhausted. The archive layer produces a TAR stream, so this is a limit
+on the total size of the *archived* payload, not on any individual file
+inside it.
+
+Current implementations do not enforce this bound explicitly because no
+realistic input reaches it. Behavior at the boundary is defined by the
+underlying `chacha20poly1305` crate's counter-overflow handling.
+
+### 6.4 What is inside the TAR stream
 
 - If the input was a file, the TAR contains one top-level file entry with the original file name.
 - If the input was a directory, the TAR contains one top-level directory entry with the directory name, then its accepted descendants.
@@ -539,12 +553,15 @@ Files produced before the current magic-byte-based format family are not support
 
 Current reader behavior is:
 
-- accept key-file version `2` or `3`
+- accept key-file version `3` only
 - reject older or newer key-file versions
 - reject unknown nonzero key-file flags
 - reject unknown key algorithms
 
-Key-file versions `2` and `3` have identical byte layout — the version bump reflects a change in the hybrid envelope construction, not the key file structure itself. New keys are written as version `3`.
+A v2 key-file version existed during pre-release development (the bump from
+v2 to v3 reflected a change in the hybrid envelope construction, not the key
+file structure itself). v2 has never appeared in a published release and is
+no longer accepted. New keys are written as version `3`.
 
 ## 9.3 KDF parameter compatibility
 
@@ -696,7 +713,7 @@ The archive semantics are intended for safe consumer file encryption, not for fa
 - public key type: `0x50` (`'P'`)
 - secret/private key type: `0x53` (`'S'`)
 - current key-file version: `3`
-- accepted key-file versions: `2`, `3`
+- accepted key-file versions: `3`
 - algorithm id: `0x01` (`X25519`)
 
 ---
@@ -709,7 +726,7 @@ It does **not** imply:
 
 - backward compatibility with pre-v3 symmetric encrypted files
 - backward compatibility with pre-v4 hybrid encrypted files
-- backward compatibility with pre-v2 key files
+- backward compatibility with pre-v3 key files
 - support for arbitrary future key-file versions
 - preservation of full filesystem metadata
 - suitability for high-assurance or regulated environments

@@ -239,7 +239,7 @@ pub fn unsupported_key_version_error(version: u8) -> CryptoError {
 // |--------|------|-----------|----------------------------------------------|
 // | 0      | 1    | Magic     | `0xFC` — identifies this as a FerroCrypt file|
 // | 1      | 1    | Type      | `0x50` ('P') public, `0x53` ('S') secret     |
-// | 2      | 1    | Version   | Key file format version (currently 2)        |
+// | 2      | 1    | Version   | Key file format version (currently 3)        |
 // | 3      | 1    | Algorithm | `0x01` = X25519                              |
 // | 4-5    | 2    | Data len  | Big-endian u16: bytes after this header       |
 // | 6-7    | 2    | Flags     | Big-endian u16: reserved for future use       |
@@ -288,8 +288,13 @@ pub fn parse_key_file_header(data: &[u8], expected_type: u8) -> Result<KeyFileHe
     })
 }
 
-/// Validates key file v2 layout: algorithm, data length, flags, and total file size.
-pub fn validate_key_v2_layout(
+/// Second-stage key-file validation: algorithm byte, `data_len` field, flags
+/// field, and total file size (which must equal
+/// `KEY_FILE_HEADER_SIZE + expected_data_size`). `parse_key_file_header`
+/// handles the first stage (magic byte + key type). Shared by `public.key`
+/// and `private.key`, which use the same 8-byte header layout and differ only
+/// in the key-type byte and expected body size.
+pub fn validate_key_layout(
     data: &[u8],
     header: &KeyFileHeader,
     expected_data_size: usize,

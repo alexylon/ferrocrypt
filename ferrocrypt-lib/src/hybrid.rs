@@ -396,6 +396,15 @@ fn decrypt_file_v4(
 ) -> Result<PathBuf, CryptoError> {
     format::validate_file_flags(&header)?;
 
+    // v4 minor-version dispatch: every 4.x minor decrypts identically — the
+    // ext_bytes region is authenticated by HMAC and the contents are ignored.
+    // Bound here so the field is read on the success path and the contract
+    // is visible at the call site. Per FORMAT.md §10.2, minor versions are
+    // always forward-compatible (never rejected); a future 4.x minor that
+    // needs special behavior would replace this with a `match header.minor`
+    // where the wildcard arm is still the default ignore.
+    let _minor: u8 = header.minor;
+
     let core = HybridHeaderCore::read_from(&mut encrypted_file, header.ext_len as usize)?;
     let hmac_tag = format::read_replicated_field::<HMAC_TAG_SIZE>(&mut encrypted_file)?;
 
@@ -425,7 +434,7 @@ fn read_public_key(path: &Path) -> Result<PublicKey, CryptoError> {
     let data = fs::read(path)?;
     let header = format::parse_key_file_header(&data, format::KEY_FILE_TYPE_PUBLIC)?;
     match header.version {
-        2 | 3 => read_public_key_data(&data, &header),
+        3 => read_public_key_data(&data, &header),
         _ => Err(format::unsupported_key_version_error(header.version)),
     }
 }
@@ -434,7 +443,7 @@ fn read_public_key_data(
     data: &[u8],
     header: &format::KeyFileHeader,
 ) -> Result<PublicKey, CryptoError> {
-    format::validate_key_v2_layout(data, header, PUBLIC_KEY_DATA_SIZE)?;
+    format::validate_key_layout(data, header, PUBLIC_KEY_DATA_SIZE)?;
     let body_start = format::KEY_FILE_HEADER_SIZE;
     let key_bytes: [u8; PUBLIC_KEY_DATA_SIZE] = data[body_start..body_start + PUBLIC_KEY_DATA_SIZE]
         .try_into()
@@ -450,7 +459,7 @@ fn read_secret_key(
     let data = fs::read(path)?;
     let header = format::parse_key_file_header(&data, format::KEY_FILE_TYPE_SECRET)?;
     match header.version {
-        2 | 3 => read_secret_key_data(&data, &header, passphrase, kdf_limit),
+        3 => read_secret_key_data(&data, &header, passphrase, kdf_limit),
         _ => Err(format::unsupported_key_version_error(header.version)),
     }
 }
@@ -461,7 +470,7 @@ fn read_secret_key_data(
     passphrase: &SecretString,
     kdf_limit: Option<&KdfLimit>,
 ) -> Result<StaticSecret, CryptoError> {
-    format::validate_key_v2_layout(data, header, SECRET_KEY_DATA_SIZE)?;
+    format::validate_key_layout(data, header, SECRET_KEY_DATA_SIZE)?;
 
     let body_start = format::KEY_FILE_HEADER_SIZE;
     let body: &[u8; SECRET_KEY_DATA_SIZE] = data[body_start..body_start + SECRET_KEY_DATA_SIZE]
@@ -1014,6 +1023,126 @@ mod tests {
 
         let result = read_public_key(&pub_path);
         assert!(result.is_err());
+    }
+
+    /// Reserved-bit fail-closed: a v4.0 hybrid file with `flags = 0x0001` must
+    /// be rejected with the typed `UnknownHeaderFlags` variant. Since the
+    /// header HMAC covers the prefix (flags included), this test re-opens the
+    /// envelope to recover the HMAC key and recomputes a valid HMAC for the
+    /// patched prefix — without that, an HMAC failure could mask what the
+    /// flag check actually does, and the assertion would not pin the
+    /// flag-rejection path independently.
+    #[test]
+    fn nonzero_flags_rejected_with_valid_hmac() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let keys_dir = tmp.path().join("keys");
+        let encrypt_dir = tmp.path().join("encrypted");
+        let decrypt_dir = tmp.path().join("decrypted");
+        fs::create_dir_all(&keys_dir)?;
+        fs::create_dir_all(&encrypt_dir)?;
+        fs::create_dir_all(&decrypt_dir)?;
+
+        let key_pass = SecretString::from("kp".to_string());
+        generate_key_pair(&key_pass, &keys_dir, &|_| {})?;
+
+        let input_file = tmp.path().join("data.txt");
+        fs::write(&input_file, "flag rejection test")?;
+
+        encrypt_file(
+            &input_file,
+            &encrypt_dir,
+            &keys_dir.join(PUBLIC_KEY_FILENAME),
+            None,
+            &|_| {},
+        )?;
+
+        let encrypted_path = encrypt_dir.join("data.fcr");
+        let original = fs::read(&encrypted_path)?;
+
+        let mut cursor = Cursor::new(&original[HEADER_PREFIX_ENCODED_SIZE..]);
+        let mut enc_envelope = vec![0u8; encoded_size(ENVELOPE_SIZE)];
+        let mut enc_nonce = vec![0u8; encoded_size(STREAM_NONCE_SIZE)];
+        let mut enc_old_ext = vec![0u8; encoded_size(0)];
+        let mut enc_hmac = vec![0u8; encoded_size(HMAC_TAG_SIZE)];
+        cursor.read_exact(&mut enc_envelope)?;
+        cursor.read_exact(&mut enc_nonce)?;
+        cursor.read_exact(&mut enc_old_ext)?;
+        cursor.read_exact(&mut enc_hmac)?;
+        let ciphertext_offset = HEADER_PREFIX_ENCODED_SIZE + cursor.position() as usize;
+
+        let envelope_vec = decode_exact(&enc_envelope, ENVELOPE_SIZE)?;
+        let nonce = decode_exact(&enc_nonce, STREAM_NONCE_SIZE)?;
+        let envelope: [u8; ENVELOPE_SIZE] = envelope_vec.as_slice().try_into().unwrap();
+
+        let secret = read_secret_key(&keys_dir.join(PRIVATE_KEY_FILENAME), &key_pass, None)?;
+        let decrypted = open_envelope(&envelope, &secret)?;
+        drop(secret);
+        let hmac_key = &decrypted[ENCRYPTION_KEY_SIZE..COMBINED_KEY_SIZE];
+
+        // Build a v4.0 header with flags = 0x0001 and a recomputed valid HMAC.
+        let new_prefix = format::build_header_prefix(
+            format::TYPE_HYBRID,
+            format::HYBRID_VERSION_MAJOR,
+            0x0001,
+            0,
+        );
+        let mut hmac_message = Vec::new();
+        hmac_message.extend_from_slice(&new_prefix);
+        hmac_message.extend_from_slice(&envelope);
+        hmac_message.extend_from_slice(&nonce);
+        let hmac_tag = hmac_sha3_256(hmac_key, &hmac_message)?;
+
+        let ciphertext = &original[ciphertext_offset..];
+        let mut output = Vec::new();
+        output.extend_from_slice(&encode(&new_prefix));
+        output.extend_from_slice(&enc_envelope);
+        output.extend_from_slice(&enc_nonce);
+        output.extend_from_slice(&encode(&[])); // ext_bytes = empty
+        output.extend_from_slice(&encode(&hmac_tag));
+        output.extend_from_slice(ciphertext);
+
+        fs::write(&encrypted_path, &output)?;
+
+        let result = decrypt_file(
+            &encrypted_path,
+            &decrypt_dir,
+            &keys_dir.join(PRIVATE_KEY_FILENAME),
+            &key_pass,
+            None,
+            &|_| {},
+        );
+        match result {
+            Err(CryptoError::InvalidFormat(crate::error::FormatDefect::UnknownHeaderFlags(
+                0x0001,
+            ))) => Ok(()),
+            other => panic!("expected UnknownHeaderFlags(0x0001), got: {other:?}"),
+        }
+    }
+
+    /// Reserved-bit fail-closed: a key file with `flags = 0x0001` (any nonzero
+    /// value) must be rejected with the typed `UnknownKeyFileFlags` variant.
+    /// Key files have no separate HMAC over their own header — the layout
+    /// validator is the only fail-closed gate for unknown bits.
+    #[test]
+    fn key_file_nonzero_flags_rejected() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let key_pass = SecretString::from("p".to_string());
+        generate_key_pair(&key_pass, tmp.path(), &|_| {})?;
+
+        // Patch flags (header bytes 6..=7) to 0x0001 in the public key file.
+        let pub_path = tmp.path().join(PUBLIC_KEY_FILENAME);
+        let mut data = fs::read(&pub_path)?;
+        data[6] = 0x00;
+        data[7] = 0x01;
+        fs::write(&pub_path, &data)?;
+
+        let result = read_public_key(&pub_path);
+        match result {
+            Err(CryptoError::InvalidFormat(crate::error::FormatDefect::UnknownKeyFileFlags(
+                0x0001,
+            ))) => Ok(()),
+            other => panic!("expected UnknownKeyFileFlags(0x0001), got: {other:?}"),
+        }
     }
 
     /// `HybridHeaderCore::new` must accept an `ext_bytes` exactly the size of

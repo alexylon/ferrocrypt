@@ -231,8 +231,8 @@ fn read_public_key_bytes(key_file: impl AsRef<Path>) -> Result<[u8; 32], CryptoE
     let data = std::fs::read(key_file.as_ref())?;
     let header = format::parse_key_file_header(&data, format::KEY_FILE_TYPE_PUBLIC)?;
     match header.version {
-        2 | 3 => {
-            format::validate_key_v2_layout(&data, &header, format::PUBLIC_KEY_DATA_SIZE)?;
+        3 => {
+            format::validate_key_layout(&data, &header, format::PUBLIC_KEY_DATA_SIZE)?;
             let start = format::KEY_FILE_HEADER_SIZE;
             Ok(data[start..start + format::PUBLIC_KEY_DATA_SIZE]
                 .try_into()
@@ -315,7 +315,7 @@ pub fn validate_secret_key_file(key_file: impl AsRef<Path>) -> Result<(), Crypto
     let data = std::fs::read(key_file.as_ref())?;
     let header = format::parse_key_file_header(&data, format::KEY_FILE_TYPE_SECRET)?;
     match header.version {
-        2 | 3 => format::validate_key_v2_layout(&data, &header, format::SECRET_KEY_DATA_SIZE),
+        3 => format::validate_key_layout(&data, &header, format::SECRET_KEY_DATA_SIZE),
         _ => Err(format::unsupported_key_version_error(header.version)),
     }
 }

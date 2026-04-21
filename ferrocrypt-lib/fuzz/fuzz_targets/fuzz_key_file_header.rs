@@ -6,12 +6,12 @@
 //! or a private-key file (they differ in `expected_data_size` and in
 //! the expected type byte). The remaining bytes are passed verbatim to
 //! `parse_key_file_header` and then — on success — to
-//! `validate_key_v2_layout` so the second-stage checks (algorithm,
+//! `validate_key_layout` so the second-stage checks (algorithm,
 //! data_len, flags, total size) are also exercised.
 
 use ferrocrypt::fuzz_exports::{
     KEY_FILE_TYPE_PUBLIC, KEY_FILE_TYPE_SECRET, PUBLIC_KEY_DATA_SIZE, SECRET_KEY_DATA_SIZE,
-    parse_key_file_header, validate_key_v2_layout,
+    parse_key_file_header, validate_key_layout,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -27,5 +27,5 @@ fuzz_target!(|data: &[u8]| {
     let Ok(header) = parse_key_file_header(rest, expected_type) else {
         return;
     };
-    let _ = validate_key_v2_layout(rest, &header, expected_data_size);
+    let _ = validate_key_layout(rest, &header, expected_data_size);
 });

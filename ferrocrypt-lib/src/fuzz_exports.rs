@@ -18,6 +18,6 @@ pub use crate::common::{KDF_PARAMS_SIZE, KdfParams};
 pub use crate::format::{
     KEY_FILE_TYPE_PUBLIC, KEY_FILE_TYPE_SECRET, PUBLIC_KEY_DATA_SIZE, SECRET_KEY_DATA_SIZE,
     TYPE_HYBRID, TYPE_SYMMETRIC, parse_key_file_header, read_header_from_reader,
-    validate_key_v2_layout,
+    validate_key_layout,
 };
 pub use crate::replication::{decode, decode_exact};

@@ -27,6 +27,11 @@ type HmacSha3_256 = Hmac<Sha3_256>;
 /// When processing untrusted files, this prevents a malicious header from
 /// forcing arbitrarily expensive key derivation. Pass `None` to decrypt
 /// functions to use the built-in default ceiling.
+///
+/// Construct via [`KdfLimit::new`] or [`KdfLimit::from_mib`]. The struct is
+/// `#[non_exhaustive]` so future releases can add additional limit dimensions
+/// (e.g. time cost, parallelism) without a breaking change.
+#[non_exhaustive]
 pub struct KdfLimit {
     /// Maximum accepted memory cost in KiB.
     pub max_mem_cost_kib: u32,

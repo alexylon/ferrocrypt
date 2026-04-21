@@ -16,8 +16,8 @@
 pub use crate::archiver::validate_archive_path;
 pub use crate::common::{KDF_PARAMS_SIZE, KdfParams};
 pub use crate::format::{
-    KEY_FILE_TYPE_PUBLIC, KEY_FILE_TYPE_SECRET, PUBLIC_KEY_DATA_SIZE, SECRET_KEY_DATA_SIZE,
-    TYPE_HYBRID, TYPE_SYMMETRIC, parse_key_file_header, read_header_from_reader,
-    validate_key_layout,
+    KEY_FILE_TYPE_PRIVATE, KEY_FILE_TYPE_PUBLIC, PUBLIC_KEY_DATA_SIZE, TYPE_HYBRID, TYPE_SYMMETRIC,
+    parse_key_file_header, read_header_from_reader, validate_key_layout,
 };
+pub use crate::hybrid::validate_private_key_body_shape;
 pub use crate::replication::{decode, decode_exact};

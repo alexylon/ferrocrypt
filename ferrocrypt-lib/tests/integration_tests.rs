@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
     CryptoError, ENCRYPTED_EXTENSION, PublicKey, decode_recipient, detect_encryption_mode,
-    validate_secret_key_file,
+    validate_private_key_file,
 };
 
 use common::{generate_key_pair, hybrid_auto, symmetric_auto};
@@ -282,9 +282,9 @@ fn test_hybrid_keygen_private_key_permissions() -> Result<(), CryptoError> {
 
     generate_key_pair(&passphrase, &test_dir, |_| {})?;
 
-    let secret_key = test_dir.join("private.key");
+    let private_key_path = test_dir.join("private.key");
     let pub_key = test_dir.join("public.key");
-    let priv_mode = fs::metadata(&secret_key)?.permissions().mode() & 0o777;
+    let priv_mode = fs::metadata(&private_key_path)?.permissions().mode() & 0o777;
     let pub_mode = fs::metadata(&pub_key)?.permissions().mode() & 0o777;
 
     assert_eq!(priv_mode, 0o600, "private key should be owner-only");
@@ -335,12 +335,12 @@ fn test_hybrid_keygen_encrypt_decrypt_file() -> Result<(), CryptoError> {
     assert!(encrypt_dir.join("data.fcr").exists());
 
     // Decrypt with private key
-    let secret_key_path = keys_dir.join("private.key");
+    let private_key_path = keys_dir.join("private.key");
 
     let decrypt_result = hybrid_auto(
         encrypt_dir.join("data.fcr"),
         &decrypt_dir,
-        &secret_key_path,
+        &private_key_path,
         &key_passphrase,
         None,
         None,
@@ -390,12 +390,12 @@ fn test_hybrid_encrypt_decrypt_directory() -> Result<(), CryptoError> {
     assert!(encrypt_dir.join("test_folder.fcr").exists());
 
     // Decrypt directory
-    let secret_key_path = keys_dir.join("private.key");
+    let private_key_path = keys_dir.join("private.key");
 
     hybrid_auto(
         encrypt_dir.join("test_folder.fcr"),
         &decrypt_dir,
-        &secret_key_path,
+        &private_key_path,
         &key_passphrase,
         None,
         None,
@@ -448,12 +448,12 @@ fn test_hybrid_wrong_key_passphrase() -> Result<(), CryptoError> {
     // Try to decrypt with wrong passphrase for the private key file.
     // The passphrase protects the private key file itself, so a wrong
     // passphrase fails at the key-file unlock stage.
-    let secret_key_path = keys_dir.join("private.key");
+    let private_key_path = keys_dir.join("private.key");
 
     let result = hybrid_auto(
         encrypt_dir.join("data.fcr"),
         &decrypt_dir,
-        &secret_key_path,
+        &private_key_path,
         &wrong_pass,
         None,
         None,
@@ -780,12 +780,12 @@ fn test_hybrid_wrong_key_pair() -> Result<(), CryptoError> {
     // correct for key pair B (so private.key unlocks fine), but the
     // ECDH envelope was sealed for recipient A, so envelope AEAD fails
     // and the decryption must surface as HeaderAuthenticationFailed.
-    let secret_key_b = keys_b.join("private.key");
+    let private_key_b = keys_b.join("private.key");
 
     let result = hybrid_auto(
         encrypt_dir.join("data.fcr"),
         &decrypt_dir,
-        &secret_key_b,
+        &private_key_b,
         &pass_b,
         None,
         None,
@@ -836,12 +836,12 @@ fn test_hybrid_key_round_trip() -> Result<(), CryptoError> {
     assert!(encrypt_dir.join("data.fcr").exists());
 
     // Decrypt
-    let secret_key_path = keys_dir.join("private.key");
+    let private_key_path = keys_dir.join("private.key");
 
     hybrid_auto(
         encrypt_dir.join("data.fcr"),
         &decrypt_dir,
-        &secret_key_path,
+        &private_key_path,
         &key_passphrase,
         None,
         None,
@@ -885,12 +885,12 @@ fn test_hybrid_binary_file() -> Result<(), CryptoError> {
         |_| {},
     )?;
 
-    let secret_key_path = keys_dir.join("private.key");
+    let private_key_path = keys_dir.join("private.key");
 
     hybrid_auto(
         encrypt_dir.join("data.fcr"),
         &decrypt_dir,
-        &secret_key_path,
+        &private_key_path,
         &key_passphrase,
         None,
         None,
@@ -977,7 +977,7 @@ fn test_truncated_hybrid_file() -> Result<(), CryptoError> {
     generate_key_pair(&key_passphrase, &keys_dir, |_| {})?;
 
     let public_key = keys_dir.join("public.key");
-    let secret_key = keys_dir.join("private.key");
+    let private_key_path = keys_dir.join("private.key");
 
     // Encrypt a real file, then truncate so the header prefix is intact
     // (magic bytes detected) but the rest of the header is missing.
@@ -1002,7 +1002,7 @@ fn test_truncated_hybrid_file() -> Result<(), CryptoError> {
     let result = hybrid_auto(
         &encrypted_path,
         &decrypt_dir,
-        &secret_key,
+        &private_key_path,
         &key_passphrase,
         None,
         None,
@@ -1106,12 +1106,12 @@ fn test_hybrid_header_tamper_detection() -> Result<(), CryptoError> {
     data[NONCE_REGION + 3 + 2 * PADDED_NONCE + NONCE_BYTE] ^= 0xFF;
     fs::write(&encrypted_path, &data)?;
 
-    let secret_key_path = keys_dir.join("private.key");
+    let private_key_path = keys_dir.join("private.key");
 
     let result = hybrid_auto(
         &encrypted_path,
         &decrypt_dir,
-        &secret_key_path,
+        &private_key_path,
         &key_passphrase,
         None,
         None,
@@ -1288,12 +1288,12 @@ fn test_hybrid_single_copy_corruption_recovery() -> Result<(), CryptoError> {
     data[NONCE_REGION + 3 + NONCE_BYTE] ^= 0xFF;
     fs::write(&encrypted_path, &data)?;
 
-    let secret_key_path = keys_dir.join("private.key");
+    let private_key_path = keys_dir.join("private.key");
 
     hybrid_auto(
         &encrypted_path,
         &decrypt_dir,
-        &secret_key_path,
+        &private_key_path,
         &key_passphrase,
         None,
         None,
@@ -1478,12 +1478,12 @@ fn test_hybrid_empty_file() -> Result<(), CryptoError> {
         |_| {},
     )?;
 
-    let secret_key = keys_dir.join("private.key");
+    let private_key_path = keys_dir.join("private.key");
 
     hybrid_auto(
         encrypt_dir.join("empty.fcr"),
         &decrypt_dir,
-        &secret_key,
+        &private_key_path,
         &key_passphrase,
         None,
         None,
@@ -1585,7 +1585,7 @@ fn test_hybrid_output_file_override() -> Result<(), CryptoError> {
     generate_key_pair(&passphrase, &key_dir, |_| {})?;
 
     let pub_key = key_dir.join("public.key");
-    let secret_key = key_dir.join("private.key");
+    let private_key_path = key_dir.join("private.key");
     let custom_output = encrypt_dir.join("my_vault.fcr");
     let empty = SecretString::from("".to_string());
 
@@ -1607,7 +1607,7 @@ fn test_hybrid_output_file_override() -> Result<(), CryptoError> {
     let decrypt_result = hybrid_auto(
         &custom_output,
         &decrypt_dir,
-        &secret_key,
+        &private_key_path,
         &passphrase,
         None,
         None,
@@ -1694,7 +1694,7 @@ fn test_hybrid_empty_file_rejected() -> Result<(), CryptoError> {
     generate_key_pair(&key_pass, &keys_dir, |_| {})?;
 
     let public_key = keys_dir.join("public.key");
-    let secret_key = keys_dir.join("private.key");
+    let private_key_path = keys_dir.join("private.key");
 
     // Encrypt a real file, then truncate to prefix-only so magic-byte
     // detection routes to decrypt, which then fails on the empty payload.
@@ -1719,7 +1719,7 @@ fn test_hybrid_empty_file_rejected() -> Result<(), CryptoError> {
     let result = hybrid_auto(
         &encrypted_path,
         &decrypt_dir,
-        &secret_key,
+        &private_key_path,
         &key_pass,
         None,
         None,
@@ -1837,7 +1837,7 @@ fn test_hybrid_truncated_mid_header() -> Result<(), CryptoError> {
     generate_key_pair(&key_pass, &keys_dir, |_| {})?;
 
     let pub_key = keys_dir.join("public.key");
-    let secret_key = keys_dir.join("private.key");
+    let private_key_path = keys_dir.join("private.key");
     let empty_pass = SecretString::from("".to_string());
 
     create_test_file(&input_file, "Hybrid truncation mid-header");
@@ -1863,7 +1863,7 @@ fn test_hybrid_truncated_mid_header() -> Result<(), CryptoError> {
     let result = hybrid_auto(
         &encrypted_path,
         &decrypt_dir,
-        &secret_key,
+        &private_key_path,
         &key_pass,
         None,
         None,
@@ -1889,7 +1889,7 @@ fn test_hybrid_oversized_ext_len() -> Result<(), CryptoError> {
     generate_key_pair(&key_pass, &keys_dir, |_| {})?;
 
     let pub_key = keys_dir.join("public.key");
-    let secret_key = keys_dir.join("private.key");
+    let private_key_path = keys_dir.join("private.key");
     let empty_pass = SecretString::from("".to_string());
 
     create_test_file(&input_file, "Hybrid oversized ext_len");
@@ -1919,7 +1919,7 @@ fn test_hybrid_oversized_ext_len() -> Result<(), CryptoError> {
     let result = hybrid_auto(
         &encrypted_path,
         &decrypt_dir,
-        &secret_key,
+        &private_key_path,
         &key_pass,
         None,
         None,
@@ -1983,7 +1983,7 @@ fn test_hybrid_ciphertext_bit_flip_detected() -> Result<(), CryptoError> {
     generate_key_pair(&key_pass, &keys_dir, |_| {})?;
 
     let pub_key = keys_dir.join("public.key");
-    let secret_key = keys_dir.join("private.key");
+    let private_key_path = keys_dir.join("private.key");
     let empty_pass = SecretString::from("".to_string());
 
     create_test_file(&input_file, "Hybrid AEAD ciphertext integrity test");
@@ -2009,7 +2009,7 @@ fn test_hybrid_ciphertext_bit_flip_detected() -> Result<(), CryptoError> {
     let result = hybrid_auto(
         &encrypted_path,
         &decrypt_dir,
-        &secret_key,
+        &private_key_path,
         &key_pass,
         None,
         None,
@@ -2107,8 +2107,12 @@ fn test_public_key_fingerprint() -> Result<(), CryptoError> {
     assert_eq!(fp, fp2);
 
     // Rejects private key files
-    let secret_key = keys_dir.join("private.key");
-    assert!(PublicKey::from_key_file(&secret_key).fingerprint().is_err());
+    let private_key_path = keys_dir.join("private.key");
+    assert!(
+        PublicKey::from_key_file(&private_key_path)
+            .fingerprint()
+            .is_err()
+    );
 
     Ok(())
 }
@@ -2539,15 +2543,15 @@ fn test_older_key_version_rejected() -> Result<(), CryptoError> {
     )?;
 
     // Patch private key version to an older value (byte offset 2)
-    let secret_key_path = keys_dir.join("private.key");
-    let mut key_data = fs::read(&secret_key_path)?;
+    let private_key_path = keys_dir.join("private.key");
+    let mut key_data = fs::read(&private_key_path)?;
     key_data[2] = 1; // older version
-    fs::write(&secret_key_path, &key_data)?;
+    fs::write(&private_key_path, &key_data)?;
 
     let result = hybrid_auto(
         encrypt_dir.join("data.fcr"),
         &decrypt_dir,
-        &secret_key_path,
+        &private_key_path,
         &passphrase,
         None,
         None,
@@ -2566,6 +2570,126 @@ fn test_older_key_version_rejected() -> Result<(), CryptoError> {
     Ok(())
 }
 
+/// Flipping a byte in the cleartext salt region of a v4 `private.key`
+/// file must cause decryption to fail. v4 binds the cleartext
+/// header/KDF-params/salt/nonce/ext_len/ext_bytes as AEAD associated
+/// data; in the old v3 format the same tamper would only make the
+/// derived key wrong, producing an identical AEAD failure downstream,
+/// so this test documents the behavior at the public API surface.
+#[test]
+fn test_private_key_v4_salt_tamper_rejected() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("v4_salt_tamper");
+    let keys_dir = test_dir.join("keys");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&keys_dir)?;
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    let passphrase = SecretString::from("aad_salt_pass".to_string());
+    generate_key_pair(&passphrase, &keys_dir, |_| {})?;
+
+    let input_file = test_dir.join("data.txt");
+    create_test_file(&input_file, "confidential");
+    let empty = SecretString::from("".to_string());
+    hybrid_auto(
+        &input_file,
+        &encrypt_dir,
+        keys_dir.join("public.key"),
+        &empty,
+        None,
+        None,
+        |_| {},
+    )?;
+
+    // Flip one byte inside the 32-byte Argon2 salt region. v4 body layout:
+    //   [kdf(12)][salt(32)][nonce(24)][ext_len(2)][ext_bytes(0)][ciphertext+tag(48)]
+    // The salt region starts at header(8) + kdf(12) = offset 20.
+    let private_key_path = keys_dir.join("private.key");
+    let mut key_data = fs::read(&private_key_path)?;
+    let salt_offset = 8 + 12;
+    key_data[salt_offset] ^= 0x01;
+    fs::write(&private_key_path, &key_data)?;
+
+    let result = hybrid_auto(
+        encrypt_dir.join("data.fcr"),
+        &decrypt_dir,
+        &private_key_path,
+        &passphrase,
+        None,
+        None,
+        |_| {},
+    );
+    assert!(
+        result.is_err(),
+        "tampered salt must not decrypt even with the correct passphrase"
+    );
+
+    Ok(())
+}
+
+/// Setting a reserved key-file flag bit must be rejected by the
+/// structural validator before the KDF is even attempted. The flags
+/// field is also part of the AEAD AAD on decrypt — even if the
+/// validator were bypassed, AEAD authentication would also reject the
+/// tampered file — but the cheap structural check comes first.
+#[test]
+fn test_private_key_v4_flags_tamper_rejected() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("v4_flags_tamper");
+    let keys_dir = test_dir.join("keys");
+    fs::create_dir_all(&keys_dir)?;
+
+    let passphrase = SecretString::from("flags_pass".to_string());
+    generate_key_pair(&passphrase, &keys_dir, |_| {})?;
+
+    // Flip a reserved flag bit in the 8-byte key-file header. Flags are
+    // the big-endian u16 at bytes 6..=7.
+    let private_key_path = keys_dir.join("private.key");
+    let mut key_data = fs::read(&private_key_path)?;
+    key_data[7] |= 0x01;
+    fs::write(&private_key_path, &key_data)?;
+
+    match validate_private_key_file(&private_key_path) {
+        Err(ferrocrypt::CryptoError::InvalidFormat(
+            ferrocrypt::FormatDefect::UnknownKeyFileFlags(_),
+        )) => {}
+        other => panic!("expected UnknownKeyFileFlags, got {:?}", other),
+    }
+
+    Ok(())
+}
+
+/// The body-size consistency check rejects a file whose declared
+/// `data_len` disagrees with the parsed `ext_len`. This test corrupts
+/// `data_len` without adjusting the body so the two disagree.
+#[test]
+fn test_private_key_v4_data_len_mismatch_rejected() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("v4_data_len_mismatch");
+    let keys_dir = test_dir.join("keys");
+    fs::create_dir_all(&keys_dir)?;
+
+    let passphrase = SecretString::from("dl_pass".to_string());
+    generate_key_pair(&passphrase, &keys_dir, |_| {})?;
+
+    // Bump `data_len` (big-endian u16 at bytes 4..=5) by 1 — the body
+    // itself stays 118 bytes so the declared size no longer matches
+    // the on-disk size.
+    let private_key_path = keys_dir.join("private.key");
+    let mut key_data = fs::read(&private_key_path)?;
+    let current = u16::from_be_bytes([key_data[4], key_data[5]]);
+    let bumped = current.wrapping_add(1).to_be_bytes();
+    key_data[4] = bumped[0];
+    key_data[5] = bumped[1];
+    fs::write(&private_key_path, &key_data)?;
+
+    match validate_private_key_file(&private_key_path) {
+        Err(ferrocrypt::CryptoError::InvalidFormat(ferrocrypt::FormatDefect::BadKeyFileSize)) => {}
+        other => panic!("expected BadKeyFileSize, got {:?}", other),
+    }
+
+    Ok(())
+}
+
 #[test]
 fn test_future_key_version_rejected() -> Result<(), CryptoError> {
     let test_dir = setup_test_dir("future_key_version");
@@ -2576,12 +2700,12 @@ fn test_future_key_version_rejected() -> Result<(), CryptoError> {
     generate_key_pair(&passphrase, &keys_dir, |_| {})?;
 
     // Patch private key version to a future value
-    let secret_key_path = keys_dir.join("private.key");
-    let mut key_data = fs::read(&secret_key_path)?;
+    let private_key_path = keys_dir.join("private.key");
+    let mut key_data = fs::read(&private_key_path)?;
     key_data[2] = 99; // future version
-    fs::write(&secret_key_path, &key_data)?;
+    fs::write(&private_key_path, &key_data)?;
 
-    let result = validate_secret_key_file(&secret_key_path);
+    let result = validate_private_key_file(&private_key_path);
     assert!(result.is_err());
     match &result {
         Err(CryptoError::UnsupportedVersion(v)) => {

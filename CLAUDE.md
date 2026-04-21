@@ -85,6 +85,15 @@ Decryption reverses: read header → derive/decrypt keys → verify HMAC → Dec
 - HMAC-SHA3-256 authenticates the header: `prefix || fixed_core_fields || ext_bytes` (all in decoded form, excluding the HMAC tag itself). Single-copy replication corruption is corrected by majority vote before HMAC verification.
 - Forward compatibility: a minor-version bump puts new data inside the authenticated `ext_bytes` region (sized by `ext_len` in the prefix). Older readers decode the region, include the decoded `ext_bytes` in HMAC verification, and ignore the contents.
 
+### Key File Format (public.key v3, private.key v4)
+
+8-byte key-file header: `[0xFC, type, version, algorithm, data_len_be16, flags_be16]`
+- `public.key` (type `0x50` 'P', version `3`): header + 32-byte raw X25519 public key = 40 bytes total. No AEAD, no MAC — authenticity comes from out-of-band fingerprint verification.
+- `private.key` (type `0x53` 'S', version `4`): header + body with layout `[kdf(12)][salt(32)][nonce(24)][ext_len_be16][ext_bytes][ciphertext+tag(48)]`. Today `ext_len = 0`, total file size 126 bytes.
+- `private.key v4` binds the entire cleartext (header + kdf + salt + nonce + ext_len + ext_bytes) as AEAD **associated data**, so every byte on disk is cryptographically authenticated. The AEAD primitive can't distinguish "wrong passphrase" from "tampered cleartext" — both surface as `CryptoError::KeyFileUnlockFailed`, whose Display wording (`"Private key unlock failed: wrong passphrase or tampered file"`) reflects both causes.
+- Forward compatibility: future `v4.x` minors can populate `ext_bytes` with TLV metadata. Older `v4` readers authenticate the bytes via the AEAD tag and ignore unrecognized tags.
+- 0.3.0 is the first release to define versioned key-file formats. Starting numbers (`public.key v3` / `private.key v4`) are above `1` because the formats went through iterations during pre-release development; no earlier shape ever shipped. `public.key` stayed at its pre-release value because it's 40 bytes and carries no secret — redesigning it buys nothing.
+
 ## Key Conventions
 
 - Operation API: each public operation function takes a config struct by value plus a `Fn(&ProgressEvent)` callback and returns a `*Outcome` struct. The 5 operations are `symmetric_encrypt` / `symmetric_decrypt` / `hybrid_encrypt` / `hybrid_decrypt` / `generate_key_pair`. All config and outcome types are `#[non_exhaustive]` so fields and enum variants can grow without breaking downstream callers.

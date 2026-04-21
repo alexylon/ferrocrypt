@@ -637,14 +637,17 @@ fn read_public_key_bytes(key_file: impl AsRef<Path>) -> Result<[u8; 32], CryptoE
     let data = std::fs::read(key_file.as_ref())?;
     let header = format::parse_key_file_header(&data, format::KEY_FILE_TYPE_PUBLIC)?;
     match header.version {
-        3 => {
+        format::PUBLIC_KEY_VERSION => {
             format::validate_key_layout(&data, &header, format::PUBLIC_KEY_DATA_SIZE)?;
             let start = format::KEY_FILE_HEADER_SIZE;
             Ok(data[start..start + format::PUBLIC_KEY_DATA_SIZE]
                 .try_into()
                 .map_err(|_| CryptoError::InvalidFormat(FormatDefect::UnexpectedKeyLength))?)
         }
-        _ => Err(format::unsupported_key_version_error(header.version)),
+        other => Err(format::unsupported_key_version_error(
+            other,
+            format::PUBLIC_KEY_VERSION,
+        )),
     }
 }
 
@@ -674,14 +677,19 @@ pub fn decode_recipient(recipient: &str) -> Result<[u8; 32], CryptoError> {
 
 /// Validates that a file is a well-formed FerroCrypt private key file.
 ///
-/// Checks magic byte, key type, version, algorithm, and exact file size.
-/// Does **not** attempt to decrypt the key (no passphrase needed).
-pub fn validate_secret_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError> {
+/// Checks magic byte, key type, version, algorithm, unknown-flags
+/// rejection, body size (lower bound plus internal consistency between
+/// the declared `data_len` and the encoded `ext_len`). Does **not**
+/// attempt to decrypt the key (no passphrase needed).
+pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError> {
     let data = std::fs::read(key_file.as_ref())?;
-    let header = format::parse_key_file_header(&data, format::KEY_FILE_TYPE_SECRET)?;
+    let header = format::parse_key_file_header(&data, format::KEY_FILE_TYPE_PRIVATE)?;
     match header.version {
-        3 => format::validate_key_layout(&data, &header, format::SECRET_KEY_DATA_SIZE),
-        _ => Err(format::unsupported_key_version_error(header.version)),
+        format::PRIVATE_KEY_VERSION => hybrid::validate_private_key_body_shape(&data, &header),
+        other => Err(format::unsupported_key_version_error(
+            other,
+            format::PRIVATE_KEY_VERSION,
+        )),
     }
 }
 

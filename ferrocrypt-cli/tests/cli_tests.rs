@@ -222,12 +222,15 @@ fn test_cli_keygen() {
     assert!(keys_dir.join("private.key").exists());
     assert!(keys_dir.join("public.key").exists());
 
-    // Verify keys have expected sizes (secret: 116 bytes + header, public: 32 bytes + header)
-    let secret_key_size = fs::metadata(keys_dir.join("private.key")).unwrap().len();
-    let pub_key_size = fs::metadata(keys_dir.join("public.key")).unwrap().len();
+    // Verify keys have expected sizes.
+    // private.key v4: 8-byte header + 118-byte fixed body (kdf 12 + salt 32
+    // + nonce 24 + ext_len 2 + ciphertext+tag 48) + 0-byte ext_bytes = 126.
+    // public.key  v3: 8-byte header + 32-byte raw key = 40.
+    let private_key_size = fs::metadata(keys_dir.join("private.key")).unwrap().len();
+    let public_key_size = fs::metadata(keys_dir.join("public.key")).unwrap().len();
 
-    assert_eq!(secret_key_size, 124);
-    assert_eq!(pub_key_size, 40);
+    assert_eq!(private_key_size, 126);
+    assert_eq!(public_key_size, 40);
 }
 
 #[test]
@@ -416,7 +419,7 @@ fn test_cli_hybrid_wrong_key_passphrase() {
     assert!(!decrypt_output.status.success());
     let stderr = String::from_utf8_lossy(&decrypt_output.stderr);
     assert!(
-        stderr.contains("Private key file unlock failed: wrong passphrase"),
+        stderr.contains("Private key unlock failed: wrong passphrase or tampered file"),
         "expected typed key-unlock message on stderr, got: {stderr}"
     );
     assert!(

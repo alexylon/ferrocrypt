@@ -7,7 +7,8 @@ use ferrocrypt::{
     CryptoError, HybridDecryptConfig, HybridEncryptConfig, KdfLimit, KeyGenConfig,
     PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME, PrivateKey, PublicKey, SymmetricDecryptConfig,
     SymmetricEncryptConfig, default_encrypted_filename, detect_encryption_mode, generate_key_pair,
-    hybrid_decrypt, hybrid_encrypt, symmetric_decrypt, symmetric_encrypt, validate_secret_key_file,
+    hybrid_decrypt, hybrid_encrypt, symmetric_decrypt, symmetric_encrypt,
+    validate_private_key_file,
 };
 use rpassword::prompt_password;
 use rustyline::DefaultEditor;
@@ -274,9 +275,9 @@ fn print_result(is_encrypt: bool, output: &Path, elapsed: std::time::Duration) {
 }
 
 fn check_keygen_conflict(output_dir: &Path) -> Result<(), CryptoError> {
-    let secret_exists = output_dir.join(PRIVATE_KEY_FILENAME).exists();
-    let pub_exists = output_dir.join(PUBLIC_KEY_FILENAME).exists();
-    match (secret_exists, pub_exists) {
+    let private_exists = output_dir.join(PRIVATE_KEY_FILENAME).exists();
+    let public_exists = output_dir.join(PUBLIC_KEY_FILENAME).exists();
+    match (private_exists, public_exists) {
         (true, true) => Err(CryptoError::InvalidInput(
             "Key pair already exists in output folder".into(),
         )),
@@ -377,7 +378,7 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
                     CryptoError::InvalidInput("Decrypt requires --key".to_string())
                 })?;
                 let key_path = Path::new(key);
-                validate_secret_key_file(key_path)?;
+                validate_private_key_file(key_path)?;
                 let kdf_limit = max_kdf_memory.map(KdfLimit::from_mib).transpose()?;
                 let passphrase = read_passphrase(false)?;
                 let mut config = HybridDecryptConfig::new(

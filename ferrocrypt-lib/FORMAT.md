@@ -373,13 +373,13 @@ Key files use a separate, non-replicated 8-byte header.
 | Offset | Size | Field | Meaning |
 |---|---:|---|---|
 | 0 | 1 | Magic | `0xFC` |
-| 1 | 1 | Type | `0x50` = public, `0x53` = secret/private |
-| 2 | 1 | Version | current key-file version |
+| 1 | 1 | Type | `0x50` = public, `0x53` = private |
+| 2 | 1 | Version | per-key-type (public = `3`, private = `4`) |
 | 3 | 1 | Algorithm | `0x01` = X25519 |
 | 4..=5 | 2 | Data length | big-endian `u16`, number of body bytes after the header |
 | 6..=7 | 2 | Flags | big-endian `u16`, currently must be `0` |
 
-Current key-file version: `3`
+The version byte is version-per-key-type, not a single family version: `public.key` is at version `3` and `private.key` is at version `4`. They can evolve independently. See §9.2 for why the starting numbers aren't `1`.
 
 ### 7.2 `public.key` layout
 
@@ -400,7 +400,13 @@ A public key file is:
 A private key file is:
 
 ```text
-[key header][KDF params][Argon2 salt][XChaCha20-Poly1305 nonce][encrypted secret key blob]
+[key header]
+[KDF params]
+[Argon2 salt]
+[XChaCha20-Poly1305 nonce]
+[ext_len:u16 BE]
+[ext_bytes]
+[encrypted private-key blob]
 ```
 
 #### Body layout
@@ -410,19 +416,27 @@ A private key file is:
 | 0..=11 | 12 | KDF params |
 | 12..=43 | 32 | Argon2 salt |
 | 44..=67 | 24 | XChaCha20-Poly1305 nonce |
-| 68..=115 | 48 | encrypted secret key blob |
+| 68..=69 | 2 | `ext_len` (big-endian `u16`) |
+| 70..=(70 + ext_len − 1) | `ext_len` | `ext_bytes` (authenticated extension region) |
+| 70 + `ext_len`..=(70 + `ext_len` + 47) | 48 | encrypted private-key blob |
 
-The encrypted secret key blob is:
+The encrypted private-key blob is:
 
-- plaintext secret key: `32` bytes
+- plaintext private key: `32` bytes
 - AEAD tag: `16` bytes
 - ciphertext+tag total: `48` bytes
 
 #### Sizes
 
 - header: `8` bytes
-- body: `116` bytes
-- total file size: `124` bytes
+- fixed-minimum body (excluding `ext_bytes`): `118` bytes
+- body: `118 + ext_len` bytes
+- total file size: `126 + ext_len` bytes
+
+Current releases emit `ext_len = 0` (total 126 bytes on disk). Future
+`v4.x` minors may populate `ext_bytes` with authenticated TLV
+metadata; readers that don't recognize a tag must still authenticate
+the full region via AEAD and then skip it.
 
 ### 7.4 Private-key encryption
 
@@ -431,8 +445,22 @@ Private keys are encrypted at rest using:
 - Argon2id with the stored KDF params and salt
 - the resulting 32-byte Argon2id output directly as the XChaCha20-Poly1305 key
 - the stored 24-byte nonce for AEAD encryption/decryption
+- the 8-byte cleartext key-file header, the KDF params, the Argon2
+  salt, the nonce, the big-endian `ext_len`, and the `ext_bytes`
+  payload as **AEAD associated data (AAD)**
 
-Unlike `.fcr` headers, key files do **not** use replicated fields and do **not** use a separate header HMAC.
+Binding the cleartext header and body fields as AAD means every byte
+on disk — including fields that wouldn't otherwise affect key
+derivation (header, flags, `ext_len`, `ext_bytes`) — is
+cryptographically authenticated by the AEAD tag. This is
+defense-in-depth rather than a distinct user-facing error signal:
+the AEAD primitive returns a single undifferentiated failure for
+both "wrong passphrase" and "tampered cleartext", and both surface
+as the same `KeyFileUnlockFailed` error. Its Display wording
+reflects both causes.
+
+Unlike `.fcr` headers, key files do **not** use replicated fields and
+do **not** use a separate header HMAC.
 
 ---
 
@@ -526,15 +554,41 @@ A private key file is structurally validated:
 - type
 - version
 - algorithm
-- data length
-- exact total size
+- `data_len` lower-bounded by the fixed-minimum body size
+- total on-disk size matches `8 + data_len`
+- internal consistency between `data_len` and the parsed `ext_len`
+- unknown nonzero flags rejected
 - KDF parameter bounds
 
-The encrypted secret-key blob is authenticated by XChaCha20-Poly1305 during decryption.
+The encrypted private-key blob is authenticated by
+XChaCha20-Poly1305 during decryption, and that AEAD binds the
+following cleartext fields as **associated data**:
 
-However, the key-file header and its KDF metadata are **not** covered by a separate header MAC like `.fcr` files are.
+- the 8-byte key-file header (magic, type, version, algorithm,
+  `data_len`, flags)
+- the stored KDF params
+- the Argon2 salt
+- the AEAD nonce
+- the big-endian `ext_len`
+- the `ext_bytes` payload
 
-In practice, tampering with the stored KDF params, salt, nonce, or ciphertext should result in decryption failure or validation failure, but the format does not define an additional independent key-file header authentication layer.
+Tamper on any of those bytes causes the decrypt-side AEAD to fail
+authentication. Unlike the `.fcr` header, `private.key` has **no**
+separate HMAC layer and **no** replicated fields — authentication
+comes entirely from the AEAD tag over the AAD + ciphertext.
+
+### Minor-version extensions are authenticated
+
+A future `v4.x` minor private-key version may populate `ext_bytes`
+with TLV metadata. Readers of any `v4.x` minor:
+
+- read `ext_len` from the body
+- read `ext_bytes`
+- include both in the AEAD AAD during decryption
+- interpret tags they recognize; authenticate-and-ignore tags they don't
+
+The same optional / non-security-critical / ignorable requirements
+apply to private-key extensions as to `.fcr` extensions (see 8.1).
 
 ---
 
@@ -555,15 +609,15 @@ Files produced before the current magic-byte-based format family are not support
 
 Current reader behavior is:
 
-- accept key-file version `3` only
-- reject older or newer key-file versions
+- accept `public.key` version `3` only
+- accept `private.key` version `4` only
+- reject any other key-file version (older or newer) for the respective file
 - reject unknown nonzero key-file flags
 - reject unknown key algorithms
+- for `private.key`, reject bodies where `data_len` disagrees with the parsed `ext_len`
+- for `private.key v4.x` minors, authenticate-and-ignore any `ext_bytes` TLV tags the reader does not recognize
 
-A v2 key-file version existed during pre-release development (the bump from
-v2 to v3 reflected a change in the hybrid envelope construction, not the key
-file structure itself). v2 has never appeared in a published release and is
-no longer accepted. New keys are written as version `3`.
+0.3.0 is the first FerroCrypt release to define versioned `.fcr` and key-file formats. The numbers `symmetric .fcr v3.0` / `hybrid .fcr v4.0` / `public.key v3` / `private.key v4` start above 1 because the formats went through a few iterations during 0.3.0 pre-release development; none of those earlier shapes ever appeared in a published release.
 
 ## 9.3 KDF parameter compatibility
 
@@ -610,9 +664,15 @@ If the new field must be understood to decrypt safely, it is **not** a minor cha
 
 ## 10.3 Key-file versioning
 
-Key files currently use a single version byte, not a separate major/minor pair.
+Key files use a single version byte per key type, not a separate major/minor pair.
 
-Any incompatible or structurally distinct key-file revision must use a new key-file version and be handled by explicit version dispatch in the reader.
+`public.key` and `private.key` are versioned independently:
+
+- the two files can evolve at different rates (the current release keeps `public.key` at `v3` while bumping `private.key` to `v4`)
+- a new `public.key` layout bumps the public-key version only; a new `private.key` layout bumps the private-key version only
+- `private.key` follows a `v<major>.<x>` style implicitly: `ext_bytes` provides the same authenticated-extension forward-compat mechanism that `.fcr` minors use, so a `v4.1` `private.key` that adds an optional field via TLV stays readable by `v4.0` readers
+
+Any incompatible or structurally distinct key-file revision that cannot be expressed as an authenticated `ext_bytes` addition must use a new top-level key-file version and be handled by explicit version dispatch in the reader.
 
 ---
 
@@ -719,9 +779,11 @@ The archive semantics are intended for safe consumer file encryption, not for fa
 
 - magic byte: `0xFC`
 - public key type: `0x50` (`'P'`)
-- secret/private key type: `0x53` (`'S'`)
-- current key-file version: `3`
-- accepted key-file versions: `3`
+- private key type: `0x53` (`'S'`)
+- current `public.key` version: `3`
+- current `private.key` version: `4`
+- accepted `public.key` versions: `3`
+- accepted `private.key` versions: `4`
 - algorithm id: `0x01` (`X25519`)
 
 ---
@@ -732,9 +794,7 @@ This document defines the current byte-level contract and behavior that callers 
 
 It does **not** imply:
 
-- backward compatibility with pre-v3 symmetric encrypted files
-- backward compatibility with pre-v4 hybrid encrypted files
-- backward compatibility with pre-v3 key files
+- backward compatibility with anything produced before FerroCrypt 0.3.0 (which is the first release to define these versioned formats)
 - support for arbitrary future key-file versions
 - preservation of full filesystem metadata
 - suitability for high-assurance or regulated environments

@@ -19,7 +19,7 @@ use crate::common::{
     encryption_base_name, hmac_sha3_256, hmac_sha3_256_verify,
 };
 use crate::error::FormatDefect;
-use crate::format::{self, HEADER_PREFIX_SIZE, PUBLIC_KEY_DATA_SIZE, SECRET_KEY_DATA_SIZE};
+use crate::format::{self, HEADER_PREFIX_SIZE, PRIVATE_KEY_FIXED_BODY_SIZE, PUBLIC_KEY_DATA_SIZE};
 use crate::replication::encode;
 use crate::{CryptoError, ProgressEvent, archiver};
 
@@ -105,17 +105,27 @@ impl HybridHeaderCore {
     }
 }
 
-const SECRET_KEY_NONCE_SIZE: usize = 24;
-const SECRET_KEY_SIZE: usize = 32;
-const SECRET_KEY_BLOB_SIZE: usize = SECRET_KEY_SIZE + TAG_SIZE;
+const PRIVATE_KEY_NONCE_SIZE: usize = 24;
+const PRIVATE_KEY_SIZE: usize = 32;
+const PRIVATE_KEY_BLOB_SIZE: usize = PRIVATE_KEY_SIZE + TAG_SIZE;
+const PRIVATE_KEY_EXT_LEN_SIZE: usize = 2;
 
-// Compile-time guard: the local field sum must match the format-level
-// `SECRET_KEY_DATA_SIZE` constant declared in `format.rs`. If a future change
-// touches one without the other the build breaks here.
+// Compile-time guard: the v4 body's fixed-minimum footprint (everything
+// except the optional `ext_bytes`) must match the format-level
+// `PRIVATE_KEY_FIXED_BODY_SIZE` constant. If a future change touches
+// one without the other the build breaks here.
 const _: () = assert!(
-    KDF_PARAMS_SIZE + ARGON2_SALT_SIZE + SECRET_KEY_NONCE_SIZE + SECRET_KEY_BLOB_SIZE
-        == SECRET_KEY_DATA_SIZE
+    KDF_PARAMS_SIZE
+        + ARGON2_SALT_SIZE
+        + PRIVATE_KEY_NONCE_SIZE
+        + PRIVATE_KEY_EXT_LEN_SIZE
+        + PRIVATE_KEY_BLOB_SIZE
+        == PRIVATE_KEY_FIXED_BODY_SIZE
 );
+
+// Byte offset of the `ext_len` u16 within a v4 private-key body.
+const PRIVATE_KEY_EXT_LEN_OFFSET: usize =
+    KDF_PARAMS_SIZE + ARGON2_SALT_SIZE + PRIVATE_KEY_NONCE_SIZE;
 
 /// X25519 hybrid envelope wire format: ephemeral public key, AEAD nonce, AEAD
 /// ciphertext (the encrypted combined key). Centralizes field offsets so
@@ -152,46 +162,154 @@ impl Envelope {
     }
 }
 
-/// Body of a `private.key` file: KDF params, Argon2 salt, AEAD nonce, and the
-/// AEAD-encrypted X25519 secret key. Centralizes field offsets so
-/// `read_secret_key_data` and `generate_key_pair` work in field accesses, not
-/// chained slice indices.
-struct SecretKeyBody {
+/// Body of a v4 `private.key` file: KDF params, Argon2 salt, AEAD nonce,
+/// a forward-compatible authenticated `ext_bytes` region, and the
+/// AEAD-encrypted X25519 private key. The AEAD decrypt step binds the
+/// cleartext header + every field above as associated data, so every
+/// byte on disk is cryptographically authenticated.
+///
+/// AEAD limitation: the primitive returns a single undifferentiated
+/// failure for both "wrong passphrase" and "tampered cleartext". Both
+/// surface as [`CryptoError::KeyFileUnlockFailed`]; its Display
+/// wording reflects both causes.
+///
+/// `ext_bytes` is opaque to the current release: v4 writers emit an
+/// empty region (`ext_len = 0`), and v4 readers authenticate the
+/// bytes via the AEAD tag and then ignore the contents. Future 0.3.x
+/// minors can populate it with TLV-encoded metadata; readers that
+/// don't recognize a tag skip it.
+struct PrivateKeyBody {
     kdf_bytes: [u8; KDF_PARAMS_SIZE],
     salt: [u8; ARGON2_SALT_SIZE],
-    nonce: [u8; SECRET_KEY_NONCE_SIZE],
-    ciphertext: [u8; SECRET_KEY_BLOB_SIZE],
+    nonce: [u8; PRIVATE_KEY_NONCE_SIZE],
+    ext_bytes: Vec<u8>,
+    ciphertext: [u8; PRIVATE_KEY_BLOB_SIZE],
 }
 
-impl SecretKeyBody {
-    fn to_bytes(&self) -> [u8; SECRET_KEY_DATA_SIZE] {
-        let mut out = [0u8; SECRET_KEY_DATA_SIZE];
-        let (kdf_slot, rest) = out.split_at_mut(KDF_PARAMS_SIZE);
-        let (salt_slot, rest) = rest.split_at_mut(ARGON2_SALT_SIZE);
-        let (nonce_slot, ct_slot) = rest.split_at_mut(SECRET_KEY_NONCE_SIZE);
-        kdf_slot.copy_from_slice(&self.kdf_bytes);
-        salt_slot.copy_from_slice(&self.salt);
-        nonce_slot.copy_from_slice(&self.nonce);
-        ct_slot.copy_from_slice(&self.ciphertext);
+impl PrivateKeyBody {
+    /// Returns the total body size in bytes (fixed minimum + extension region).
+    fn total_len(&self) -> usize {
+        PRIVATE_KEY_FIXED_BODY_SIZE + self.ext_bytes.len()
+    }
+
+    /// `ext_len` field packed into the body. Infallible by construction:
+    /// callers never build a body with more than `u16::MAX` extension bytes.
+    fn ext_len_be_bytes(&self) -> [u8; PRIVATE_KEY_EXT_LEN_SIZE] {
+        (self.ext_bytes.len() as u16).to_be_bytes()
+    }
+
+    /// Builds the AEAD associated-data buffer. Bound fields in order:
+    /// the 8-byte cleartext key-file header, the KDF params, the Argon2
+    /// salt, the AEAD nonce, the big-endian `ext_len`, and the
+    /// `ext_bytes` payload. Tamper on any of these causes AEAD
+    /// authentication to fail on decrypt.
+    fn aad(&self, header: &[u8; format::KEY_FILE_HEADER_SIZE]) -> Vec<u8> {
+        let mut aad = Vec::with_capacity(
+            format::KEY_FILE_HEADER_SIZE
+                + KDF_PARAMS_SIZE
+                + ARGON2_SALT_SIZE
+                + PRIVATE_KEY_NONCE_SIZE
+                + PRIVATE_KEY_EXT_LEN_SIZE
+                + self.ext_bytes.len(),
+        );
+        aad.extend_from_slice(header);
+        aad.extend_from_slice(&self.kdf_bytes);
+        aad.extend_from_slice(&self.salt);
+        aad.extend_from_slice(&self.nonce);
+        aad.extend_from_slice(&self.ext_len_be_bytes());
+        aad.extend_from_slice(&self.ext_bytes);
+        aad
+    }
+
+    /// Serializes the body for on-disk writing: kdf params, salt,
+    /// nonce, big-endian `ext_len`, `ext_bytes`, ciphertext+tag.
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.total_len());
+        out.extend_from_slice(&self.kdf_bytes);
+        out.extend_from_slice(&self.salt);
+        out.extend_from_slice(&self.nonce);
+        out.extend_from_slice(&self.ext_len_be_bytes());
+        out.extend_from_slice(&self.ext_bytes);
+        out.extend_from_slice(&self.ciphertext);
         out
     }
 
-    fn from_bytes(bytes: &[u8; SECRET_KEY_DATA_SIZE]) -> Self {
-        let (kdf, rest) = bytes.split_at(KDF_PARAMS_SIZE);
-        let (salt, rest) = rest.split_at(ARGON2_SALT_SIZE);
-        let (nonce, ciphertext) = rest.split_at(SECRET_KEY_NONCE_SIZE);
-        let mut out = Self {
-            kdf_bytes: [0u8; KDF_PARAMS_SIZE],
-            salt: [0u8; ARGON2_SALT_SIZE],
-            nonce: [0u8; SECRET_KEY_NONCE_SIZE],
-            ciphertext: [0u8; SECRET_KEY_BLOB_SIZE],
-        };
-        out.kdf_bytes.copy_from_slice(kdf);
-        out.salt.copy_from_slice(salt);
-        out.nonce.copy_from_slice(nonce);
-        out.ciphertext.copy_from_slice(ciphertext);
-        out
+    /// Parses an on-disk v4 body. Caller must have already run
+    /// [`validate_private_key_body_shape`] on the full file bytes,
+    /// which enforces `data_len ≥ fixed_minimum` and the internal
+    /// consistency between `data_len` and the parsed `ext_len`. `body`
+    /// here is the slice after the 8-byte header and has length
+    /// `header.data_len`.
+    fn from_bytes(body: &[u8]) -> Result<Self, CryptoError> {
+        if body.len() < PRIVATE_KEY_FIXED_BODY_SIZE {
+            return Err(CryptoError::InvalidFormat(FormatDefect::BadKeyFileSize));
+        }
+        let mut kdf_bytes = [0u8; KDF_PARAMS_SIZE];
+        let mut salt = [0u8; ARGON2_SALT_SIZE];
+        let mut nonce = [0u8; PRIVATE_KEY_NONCE_SIZE];
+        let mut ciphertext = [0u8; PRIVATE_KEY_BLOB_SIZE];
+
+        let mut offset = 0;
+        kdf_bytes.copy_from_slice(&body[offset..offset + KDF_PARAMS_SIZE]);
+        offset += KDF_PARAMS_SIZE;
+        salt.copy_from_slice(&body[offset..offset + ARGON2_SALT_SIZE]);
+        offset += ARGON2_SALT_SIZE;
+        nonce.copy_from_slice(&body[offset..offset + PRIVATE_KEY_NONCE_SIZE]);
+        offset += PRIVATE_KEY_NONCE_SIZE;
+
+        let ext_len = u16::from_be_bytes([body[offset], body[offset + 1]]) as usize;
+        offset += PRIVATE_KEY_EXT_LEN_SIZE;
+
+        if body.len() != PRIVATE_KEY_FIXED_BODY_SIZE + ext_len {
+            return Err(CryptoError::InvalidFormat(FormatDefect::BadKeyFileSize));
+        }
+
+        let ext_bytes = body[offset..offset + ext_len].to_vec();
+        offset += ext_len;
+        ciphertext.copy_from_slice(&body[offset..offset + PRIVATE_KEY_BLOB_SIZE]);
+
+        Ok(Self {
+            kdf_bytes,
+            salt,
+            nonce,
+            ext_bytes,
+            ciphertext,
+        })
     }
+}
+
+/// Structural validator for a v4 `private.key` file: checks the key
+/// type byte, algorithm byte, unknown-flags rejection, body-size lower
+/// bound, and the internal consistency between `data_len` and the
+/// parsed `ext_len`. Does **not** attempt to decrypt or derive any
+/// keys. Re-exported to the fuzz target via `fuzz_exports`.
+pub fn validate_private_key_body_shape(
+    data: &[u8],
+    header: &format::KeyFileHeader,
+) -> Result<(), CryptoError> {
+    if header.algorithm != format::KEY_FILE_ALG_X25519 {
+        return Err(CryptoError::InvalidFormat(
+            FormatDefect::UnsupportedKeyFileAlgorithm(header.algorithm),
+        ));
+    }
+    if header.flags != 0 {
+        return Err(CryptoError::InvalidFormat(
+            FormatDefect::UnknownKeyFileFlags(header.flags),
+        ));
+    }
+    let data_len = header.data_len as usize;
+    if data_len < PRIVATE_KEY_FIXED_BODY_SIZE {
+        return Err(CryptoError::InvalidFormat(FormatDefect::BadKeyFileSize));
+    }
+    if data.len() != format::KEY_FILE_HEADER_SIZE + data_len {
+        return Err(CryptoError::InvalidFormat(FormatDefect::BadKeyFileSize));
+    }
+    let ext_len_offset = format::KEY_FILE_HEADER_SIZE + PRIVATE_KEY_EXT_LEN_OFFSET;
+    let ext_len = u16::from_be_bytes([data[ext_len_offset], data[ext_len_offset + 1]]) as usize;
+    if data_len != PRIVATE_KEY_FIXED_BODY_SIZE + ext_len {
+        return Err(CryptoError::InvalidFormat(FormatDefect::BadKeyFileSize));
+    }
+    Ok(())
 }
 
 /// Default filename for the hybrid public key file.
@@ -358,7 +476,7 @@ fn encrypt_file_inner(
 pub fn decrypt_file(
     input_path: &Path,
     output_dir: &Path,
-    secret_key_path: &Path,
+    private_key_path: &Path,
     passphrase: &SecretString,
     kdf_limit: Option<&KdfLimit>,
     on_event: &dyn Fn(&ProgressEvent),
@@ -376,7 +494,7 @@ pub fn decrypt_file(
             prefix_bytes,
             header,
             output_dir,
-            secret_key_path,
+            private_key_path,
             passphrase,
             kdf_limit,
             on_event,
@@ -395,7 +513,7 @@ fn decrypt_file_v4(
     prefix_bytes: [u8; format::HEADER_PREFIX_SIZE],
     header: format::FileHeader,
     output_dir: &Path,
-    secret_key_path: &Path,
+    private_key_path: &Path,
     passphrase: &SecretString,
     kdf_limit: Option<&KdfLimit>,
     _on_event: &dyn Fn(&ProgressEvent),
@@ -414,7 +532,7 @@ fn decrypt_file_v4(
     let core = HybridHeaderCore::read_from(&mut encrypted_file, header.ext_len as usize)?;
     let hmac_tag = format::read_replicated_field::<HMAC_TAG_SIZE>(&mut encrypted_file)?;
 
-    let recipient_secret = read_secret_key(secret_key_path, passphrase, kdf_limit)?;
+    let recipient_secret = read_private_key(private_key_path, passphrase, kdf_limit)?;
     let envelope_result = open_envelope(&core.envelope, &recipient_secret);
     drop(recipient_secret);
     let mut decrypted_combined_key = envelope_result?;
@@ -441,8 +559,11 @@ fn read_public_key(path: &Path) -> Result<PublicKey, CryptoError> {
     let data = fs::read(path)?;
     let header = format::parse_key_file_header(&data, format::KEY_FILE_TYPE_PUBLIC)?;
     match header.version {
-        3 => read_public_key_data(&data, &header),
-        _ => Err(format::unsupported_key_version_error(header.version)),
+        format::PUBLIC_KEY_VERSION => read_public_key_data(&data, &header),
+        other => Err(format::unsupported_key_version_error(
+            other,
+            format::PUBLIC_KEY_VERSION,
+        )),
     }
 }
 
@@ -459,32 +580,38 @@ fn read_public_key_data(
     Ok(PublicKey::from(key_bytes))
 }
 
-fn read_secret_key(
+fn read_private_key(
     path: &Path,
     passphrase: &SecretString,
     kdf_limit: Option<&KdfLimit>,
 ) -> Result<StaticSecret, CryptoError> {
     let data = fs::read(path)?;
-    let header = format::parse_key_file_header(&data, format::KEY_FILE_TYPE_SECRET)?;
+    let header = format::parse_key_file_header(&data, format::KEY_FILE_TYPE_PRIVATE)?;
     match header.version {
-        3 => read_secret_key_data(&data, &header, passphrase, kdf_limit),
-        _ => Err(format::unsupported_key_version_error(header.version)),
+        format::PRIVATE_KEY_VERSION => read_private_key_data(&data, &header, passphrase, kdf_limit),
+        other => Err(format::unsupported_key_version_error(
+            other,
+            format::PRIVATE_KEY_VERSION,
+        )),
     }
 }
 
-fn read_secret_key_data(
+fn read_private_key_data(
     data: &[u8],
     header: &format::KeyFileHeader,
     passphrase: &SecretString,
     kdf_limit: Option<&KdfLimit>,
 ) -> Result<StaticSecret, CryptoError> {
-    format::validate_key_layout(data, header, SECRET_KEY_DATA_SIZE)?;
+    validate_private_key_body_shape(data, header)?;
 
     let body_start = format::KEY_FILE_HEADER_SIZE;
-    let body: &[u8; SECRET_KEY_DATA_SIZE] = data[body_start..body_start + SECRET_KEY_DATA_SIZE]
+    let body = &data[body_start..body_start + header.data_len as usize];
+    let parsed = PrivateKeyBody::from_bytes(body)?;
+
+    let header_bytes: [u8; format::KEY_FILE_HEADER_SIZE] = data[..format::KEY_FILE_HEADER_SIZE]
         .try_into()
-        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::UnexpectedKeyLength))?;
-    let parsed = SecretKeyBody::from_bytes(body);
+        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::Truncated))?;
+    let aad = parsed.aad(&header_bytes);
 
     let kdf_params = KdfParams::from_bytes(&parsed.kdf_bytes, kdf_limit)?;
     let derived_key =
@@ -493,24 +620,30 @@ fn read_secret_key_data(
     let cipher = XChaCha20Poly1305::new(derived_key.as_ref().into());
     let nonce = chacha20poly1305::XNonce::from_slice(&parsed.nonce);
     let mut plaintext = cipher
-        .decrypt(nonce, parsed.ciphertext.as_slice())
+        .decrypt(
+            nonce,
+            chacha20poly1305::aead::Payload {
+                msg: parsed.ciphertext.as_slice(),
+                aad: aad.as_slice(),
+            },
+        )
         .map_err(|_| CryptoError::KeyFileUnlockFailed)?;
 
     drop(derived_key);
 
-    if plaintext.len() != SECRET_KEY_SIZE {
+    if plaintext.len() != PRIVATE_KEY_SIZE {
         plaintext.zeroize();
         return Err(CryptoError::InvalidFormat(
             FormatDefect::UnexpectedKeyLength,
         ));
     }
 
-    let mut secret_bytes = [0u8; SECRET_KEY_SIZE];
-    secret_bytes.copy_from_slice(&plaintext);
+    let mut private_key_bytes = [0u8; PRIVATE_KEY_SIZE];
+    private_key_bytes.copy_from_slice(&plaintext);
     plaintext.zeroize();
 
-    let key = StaticSecret::from(secret_bytes);
-    secret_bytes.zeroize();
+    let key = StaticSecret::from(private_key_bytes);
+    private_key_bytes.zeroize();
     Ok(key)
 }
 
@@ -601,8 +734,8 @@ pub fn generate_key_pair(
     fs::create_dir_all(output_dir)?;
     on_event(&ProgressEvent::GeneratingKeyPair);
 
-    let secret_key = StaticSecret::random_from_rng(OsRng);
-    let public_key = PublicKey::from(&secret_key);
+    let private_key = StaticSecret::random_from_rng(OsRng);
+    let public_key = PublicKey::from(&private_key);
 
     // Encrypt private key at rest with passphrase via Argon2id + XChaCha20-Poly1305
     let kdf_params = KdfParams::default();
@@ -612,45 +745,89 @@ pub fn generate_key_pair(
 
     let derived_key = kdf_params.hash_passphrase(passphrase.expose_secret().as_bytes(), &salt)?;
 
+    // v4 writers emit an empty extension region. The field is
+    // authenticated by the AEAD tag either way, so a future 0.3.x minor
+    // can populate `ext_bytes` without breaking v4 readers.
+    let ext_bytes: Vec<u8> = Vec::new();
+
     let cipher = XChaCha20Poly1305::new(derived_key.as_ref().into());
     let aead_nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
-    let raw_secret = Zeroizing::new(secret_key.to_bytes());
-    drop(secret_key);
-    let encrypted_secret = cipher
-        .encrypt(&aead_nonce, raw_secret.as_slice())
+    let mut nonce = [0u8; PRIVATE_KEY_NONCE_SIZE];
+    nonce.copy_from_slice(&aead_nonce);
+
+    // The AAD binds the cleartext header + every cleartext body field
+    // (kdf, salt, nonce, ext_len, ext_bytes) to the ciphertext so
+    // every byte on disk is cryptographically authenticated. Tamper
+    // on any of those cleartext fields, and wrong-passphrase, both
+    // surface as the same `KeyFileUnlockFailed` error (the AEAD
+    // primitive returns a single undifferentiated failure).
+    let private_body_data_len = (PRIVATE_KEY_FIXED_BODY_SIZE + ext_bytes.len()) as u16;
+    let private_header = format::build_key_file_header(
+        format::KEY_FILE_TYPE_PRIVATE,
+        format::PRIVATE_KEY_VERSION,
+        private_body_data_len,
+    );
+    let public_header = format::build_key_file_header(
+        format::KEY_FILE_TYPE_PUBLIC,
+        format::PUBLIC_KEY_VERSION,
+        PUBLIC_KEY_DATA_SIZE as u16,
+    );
+
+    let aad = {
+        let mut aad = Vec::with_capacity(
+            format::KEY_FILE_HEADER_SIZE
+                + KDF_PARAMS_SIZE
+                + ARGON2_SALT_SIZE
+                + PRIVATE_KEY_NONCE_SIZE
+                + PRIVATE_KEY_EXT_LEN_SIZE
+                + ext_bytes.len(),
+        );
+        aad.extend_from_slice(&private_header);
+        aad.extend_from_slice(&kdf_bytes);
+        aad.extend_from_slice(&salt);
+        aad.extend_from_slice(&nonce);
+        aad.extend_from_slice(&(ext_bytes.len() as u16).to_be_bytes());
+        aad.extend_from_slice(&ext_bytes);
+        aad
+    };
+
+    let raw_private_key = Zeroizing::new(private_key.to_bytes());
+    drop(private_key);
+    let encrypted_private_key = cipher
+        .encrypt(
+            chacha20poly1305::XNonce::from_slice(&nonce),
+            chacha20poly1305::aead::Payload {
+                msg: raw_private_key.as_slice(),
+                aad: aad.as_slice(),
+            },
+        )
         .map_err(|_| {
             CryptoError::InternalCryptoFailure("internal error: private key encryption failed")
         })?;
-    drop(raw_secret);
+    drop(raw_private_key);
     drop(derived_key);
 
-    let mut nonce = [0u8; SECRET_KEY_NONCE_SIZE];
-    nonce.copy_from_slice(&aead_nonce);
-    let ciphertext: [u8; SECRET_KEY_BLOB_SIZE] =
-        encrypted_secret.as_slice().try_into().map_err(|_| {
+    let ciphertext: [u8; PRIVATE_KEY_BLOB_SIZE] =
+        encrypted_private_key.as_slice().try_into().map_err(|_| {
             CryptoError::InternalInvariant(
                 "internal error: encrypted private key blob has an unexpected length",
             )
         })?;
-    let secret_body = SecretKeyBody {
+    let private_body = PrivateKeyBody {
         kdf_bytes,
         salt,
         nonce,
+        ext_bytes,
         ciphertext,
     };
 
-    let secret_header =
-        format::build_key_file_header(format::KEY_FILE_TYPE_SECRET, SECRET_KEY_DATA_SIZE as u16);
-    let public_header =
-        format::build_key_file_header(format::KEY_FILE_TYPE_PUBLIC, PUBLIC_KEY_DATA_SIZE as u16);
-
-    let secret_key_path = output_dir.join(PRIVATE_KEY_FILENAME);
+    let private_key_path = output_dir.join(PRIVATE_KEY_FILENAME);
     let public_key_path = output_dir.join(PUBLIC_KEY_FILENAME);
 
-    if secret_key_path.exists() {
+    if private_key_path.exists() {
         return Err(CryptoError::InvalidInput(format!(
             "Key file already exists: {}",
-            secret_key_path.display()
+            private_key_path.display()
         )));
     }
     if public_key_path.exists() {
@@ -660,13 +837,13 @@ pub fn generate_key_pair(
         )));
     }
 
-    // Write public key first, then the secret key. If the secret key
+    // Write public key first, then the private key. If the private-key
     // write fails, a successfully persisted public key is orphaned but
     // harmless (public keys are meant to be public); we still remove it
     // so the user's output directory is clean.
     //
     // Public key permissions are relaxed to 0o644 on Unix so the file is
-    // world-readable (public keys are not secret); the secret key
+    // world-readable (public keys are not secret); the private-key
     // tempfile keeps tempfile's default 0o600.
     let mut public_builder = tempfile::Builder::new();
     public_builder.prefix(".ferrocrypt-pubkey-").suffix(".tmp");
@@ -681,26 +858,26 @@ pub fn generate_key_pair(
     public_tmp.as_file().sync_all()?;
     atomic_output::finalize_file(public_tmp, &public_key_path)?;
 
-    let secret_write: Result<(), CryptoError> = (|| {
-        let mut secret_tmp = tempfile::Builder::new()
-            .prefix(".ferrocrypt-seckey-")
+    let private_write: Result<(), CryptoError> = (|| {
+        let mut private_tmp = tempfile::Builder::new()
+            .prefix(".ferrocrypt-privkey-")
             .suffix(".tmp")
             .tempfile_in(output_dir)?;
-        secret_tmp.as_file_mut().write_all(&secret_header)?;
-        secret_tmp
+        private_tmp.as_file_mut().write_all(&private_header)?;
+        private_tmp
             .as_file_mut()
-            .write_all(&secret_body.to_bytes())?;
-        secret_tmp.as_file().sync_all()?;
-        atomic_output::finalize_file(secret_tmp, &secret_key_path)?;
+            .write_all(&private_body.to_bytes())?;
+        private_tmp.as_file().sync_all()?;
+        atomic_output::finalize_file(private_tmp, &private_key_path)?;
         Ok(())
     })();
 
-    if let Err(e) = secret_write {
+    if let Err(e) = private_write {
         let _ = fs::remove_file(&public_key_path);
         return Err(e);
     }
 
-    Ok((secret_key_path, public_key_path))
+    Ok((private_key_path, public_key_path))
 }
 
 #[cfg(test)]
@@ -758,9 +935,9 @@ mod tests {
         let envelope: [u8; ENVELOPE_SIZE] = envelope_vec.as_slice().try_into().unwrap();
 
         // Open envelope to get the HMAC key
-        let secret = read_secret_key(&keys_dir.join(PRIVATE_KEY_FILENAME), &key_pass, None)?;
-        let decrypted = open_envelope(&envelope, &secret)?;
-        drop(secret);
+        let private_key = read_private_key(&keys_dir.join(PRIVATE_KEY_FILENAME), &key_pass, None)?;
+        let decrypted = open_envelope(&envelope, &private_key)?;
+        drop(private_key);
         let hmac_key = &decrypted[ENCRYPTION_KEY_SIZE..COMBINED_KEY_SIZE];
 
         // Synthetic v4.1 extension: 16 opaque authenticated bytes.
@@ -854,9 +1031,9 @@ mod tests {
         let nonce = decode_exact(&enc_nonce, STREAM_NONCE_SIZE)?;
         let envelope: [u8; ENVELOPE_SIZE] = envelope_vec.as_slice().try_into().unwrap();
 
-        let secret = read_secret_key(&keys_dir.join(PRIVATE_KEY_FILENAME), &key_pass, None)?;
-        let decrypted = open_envelope(&envelope, &secret)?;
-        drop(secret);
+        let private_key = read_private_key(&keys_dir.join(PRIVATE_KEY_FILENAME), &key_pass, None)?;
+        let decrypted = open_envelope(&envelope, &private_key)?;
+        drop(private_key);
         let hmac_key = &decrypted[ENCRYPTION_KEY_SIZE..COMBINED_KEY_SIZE];
 
         // Build a legitimate v4.1 file with 8 bytes of ext_bytes, authenticated.
@@ -939,31 +1116,31 @@ mod tests {
         envelope[..EPHEMERAL_PUB_SIZE].copy_from_slice(&identity_point);
         // Rest is arbitrary — should fail before AEAD decryption
 
-        let secret = StaticSecret::random_from_rng(OsRng);
-        let result = open_envelope(&envelope, &secret);
+        let private_key = StaticSecret::random_from_rng(OsRng);
+        let result = open_envelope(&envelope, &private_key);
         assert!(result.is_err());
     }
 
     /// Envelope round-trip: seal with a recipient's public key, open with the
-    /// matching secret key, verify the combined key is recovered exactly.
+    /// matching private key, verify the combined key is recovered exactly.
     #[test]
     fn seal_open_envelope_round_trip() {
-        let secret = StaticSecret::random_from_rng(OsRng);
-        let public = PublicKey::from(&secret);
+        let private_key = StaticSecret::random_from_rng(OsRng);
+        let public = PublicKey::from(&private_key);
 
         let mut combined_key = [0u8; COMBINED_KEY_SIZE];
         OsRng.fill_bytes(&mut combined_key);
 
         let envelope = seal_envelope(&combined_key, &public).unwrap();
-        let recovered = open_envelope(&envelope, &secret).unwrap();
+        let recovered = open_envelope(&envelope, &private_key).unwrap();
         assert_eq!(combined_key, recovered);
     }
 
-    /// Wrong secret key must fail to open an envelope.
+    /// Wrong private key must fail to open an envelope.
     #[test]
     fn open_envelope_wrong_key_fails() {
-        let secret = StaticSecret::random_from_rng(OsRng);
-        let public = PublicKey::from(&secret);
+        let private_key = StaticSecret::random_from_rng(OsRng);
+        let public = PublicKey::from(&private_key);
         let wrong_secret = StaticSecret::random_from_rng(OsRng);
 
         let combined_key = [0xBB; COMBINED_KEY_SIZE];
@@ -975,28 +1152,28 @@ mod tests {
     /// Well-sized but garbage envelope bytes must fail AEAD decryption.
     #[test]
     fn garbage_envelope_fails() {
-        let secret = StaticSecret::random_from_rng(OsRng);
+        let private_key = StaticSecret::random_from_rng(OsRng);
         let mut garbage = [0xCC; ENVELOPE_SIZE];
         // Put a valid-looking (but wrong) public key so DH doesn't produce all-zero
         let decoy_pk = PublicKey::from(&StaticSecret::random_from_rng(OsRng));
         garbage[..EPHEMERAL_PUB_SIZE].copy_from_slice(decoy_pk.as_bytes());
 
-        let result = open_envelope(&garbage, &secret);
+        let result = open_envelope(&garbage, &private_key);
         assert!(result.is_err());
     }
 
     /// Flipping one bit in an otherwise valid envelope must fail.
     #[test]
     fn envelope_single_bit_flip_detected() {
-        let secret = StaticSecret::random_from_rng(OsRng);
-        let public = PublicKey::from(&secret);
+        let private_key = StaticSecret::random_from_rng(OsRng);
+        let public = PublicKey::from(&private_key);
         let combined_key = [0xAA; COMBINED_KEY_SIZE];
 
         let mut envelope = seal_envelope(&combined_key, &public).unwrap();
         // Flip one bit in the ciphertext region
         envelope[EPHEMERAL_PUB_SIZE + ENVELOPE_NONCE_SIZE + 10] ^= 0x01;
 
-        let result = open_envelope(&envelope, &secret);
+        let result = open_envelope(&envelope, &private_key);
         assert!(result.is_err());
     }
 
@@ -1082,9 +1259,9 @@ mod tests {
         let nonce = decode_exact(&enc_nonce, STREAM_NONCE_SIZE)?;
         let envelope: [u8; ENVELOPE_SIZE] = envelope_vec.as_slice().try_into().unwrap();
 
-        let secret = read_secret_key(&keys_dir.join(PRIVATE_KEY_FILENAME), &key_pass, None)?;
-        let decrypted = open_envelope(&envelope, &secret)?;
-        drop(secret);
+        let private_key = read_private_key(&keys_dir.join(PRIVATE_KEY_FILENAME), &key_pass, None)?;
+        let decrypted = open_envelope(&envelope, &private_key)?;
+        drop(private_key);
         let hmac_key = &decrypted[ENCRYPTION_KEY_SIZE..COMBINED_KEY_SIZE];
 
         // Build a v4.0 header with flags = 0x0001 and a recomputed valid HMAC.
@@ -1207,31 +1384,43 @@ mod tests {
         assert_eq!(parsed.ciphertext, original.ciphertext);
     }
 
-    /// `SecretKeyBody::to_bytes` and `from_bytes` must round-trip and place
-    /// fields at their canonical offsets in the `private.key` body.
+    /// `PrivateKeyBody::to_bytes` and `from_bytes` must round-trip and
+    /// place fields at their canonical offsets, including the
+    /// big-endian `ext_len` and the variable `ext_bytes` region. Uses
+    /// a non-empty `ext_bytes` to exercise the variable-length path.
     #[test]
-    fn secret_key_body_round_trip() {
-        let original = SecretKeyBody {
+    fn private_key_body_round_trip() {
+        let ext_payload: Vec<u8> = (0..5u8).collect();
+        let original = PrivateKeyBody {
             kdf_bytes: [0x44; KDF_PARAMS_SIZE],
             salt: [0x55; ARGON2_SALT_SIZE],
-            nonce: [0x66; SECRET_KEY_NONCE_SIZE],
-            ciphertext: [0x77; SECRET_KEY_BLOB_SIZE],
+            nonce: [0x66; PRIVATE_KEY_NONCE_SIZE],
+            ext_bytes: ext_payload.clone(),
+            ciphertext: [0x77; PRIVATE_KEY_BLOB_SIZE],
         };
         let bytes = original.to_bytes();
 
-        // Wire-format offsets: kdf || salt || nonce || ciphertext.
+        // Wire-format offsets: kdf || salt || nonce || ext_len || ext_bytes || ciphertext.
         let kdf_end = KDF_PARAMS_SIZE;
         let salt_end = kdf_end + ARGON2_SALT_SIZE;
-        let nonce_end = salt_end + SECRET_KEY_NONCE_SIZE;
+        let nonce_end = salt_end + PRIVATE_KEY_NONCE_SIZE;
+        let ext_len_end = nonce_end + PRIVATE_KEY_EXT_LEN_SIZE;
+        let ext_end = ext_len_end + ext_payload.len();
         assert!(bytes[..kdf_end].iter().all(|&b| b == 0x44));
         assert!(bytes[kdf_end..salt_end].iter().all(|&b| b == 0x55));
         assert!(bytes[salt_end..nonce_end].iter().all(|&b| b == 0x66));
-        assert!(bytes[nonce_end..].iter().all(|&b| b == 0x77));
+        assert_eq!(
+            u16::from_be_bytes([bytes[nonce_end], bytes[nonce_end + 1]]) as usize,
+            ext_payload.len()
+        );
+        assert_eq!(&bytes[ext_len_end..ext_end], ext_payload.as_slice());
+        assert!(bytes[ext_end..].iter().all(|&b| b == 0x77));
 
-        let parsed = SecretKeyBody::from_bytes(&bytes);
+        let parsed = PrivateKeyBody::from_bytes(&bytes).expect("round-trip must parse");
         assert_eq!(parsed.kdf_bytes, original.kdf_bytes);
         assert_eq!(parsed.salt, original.salt);
         assert_eq!(parsed.nonce, original.nonce);
+        assert_eq!(parsed.ext_bytes, original.ext_bytes);
         assert_eq!(parsed.ciphertext, original.ciphertext);
     }
 }

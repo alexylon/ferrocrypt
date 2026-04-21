@@ -8,7 +8,8 @@ use ferrocrypt::{
     EncryptionMode, HybridDecryptConfig, HybridEncryptConfig, KeyGenConfig, PRIVATE_KEY_FILENAME,
     PUBLIC_KEY_FILENAME, PrivateKey, ProgressEvent, PublicKey, SymmetricDecryptConfig,
     SymmetricEncryptConfig, default_encrypted_filename, detect_encryption_mode, generate_key_pair,
-    hybrid_decrypt, hybrid_encrypt, symmetric_decrypt, symmetric_encrypt, validate_secret_key_file,
+    hybrid_decrypt, hybrid_encrypt, symmetric_decrypt, symmetric_encrypt,
+    validate_private_key_file,
 };
 use std::path::{Path, PathBuf};
 
@@ -572,7 +573,7 @@ fn validate_selected_key(app: &AppWindow, key_path: &str) {
         },
         MODE_HYBRID_DECRYPT => {
             app.set_key_fingerprint(Default::default());
-            if let Err(e) = validate_secret_key_file(key_path) {
+            if let Err(e) = validate_private_key_file(key_path) {
                 app.set_key_invalid(true);
                 app.set_status_err(e.to_string().into());
             } else {

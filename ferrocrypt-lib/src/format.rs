@@ -223,8 +223,13 @@ pub fn unsupported_file_version_error(major: u8, minor: u8, expected_major: u8) 
     }
 }
 
-pub fn unsupported_key_version_error(version: u8) -> CryptoError {
-    if version < KEY_FILE_VERSION {
+/// Classifies a rejected key-file version as older-than or newer-than the
+/// version the caller expected. `public.key` expects `PUBLIC_KEY_VERSION`;
+/// `private.key` expects `PRIVATE_KEY_VERSION`. Taking the expected value
+/// as a parameter lets the error reflect the per-key-type policy instead
+/// of a single global key-file version.
+pub fn unsupported_key_version_error(version: u8, expected: u8) -> CryptoError {
+    if version < expected {
         CryptoError::UnsupportedVersion(UnsupportedVersion::OlderKey { version })
     } else {
         CryptoError::UnsupportedVersion(UnsupportedVersion::NewerKey { version })
@@ -238,26 +243,48 @@ pub fn unsupported_key_version_error(version: u8) -> CryptoError {
 // | Offset | Size | Field     | Description                                  |
 // |--------|------|-----------|----------------------------------------------|
 // | 0      | 1    | Magic     | `0xFC` — identifies this as a FerroCrypt file|
-// | 1      | 1    | Type      | `0x50` ('P') public, `0x53` ('S') secret     |
-// | 2      | 1    | Version   | Key file format version (currently 3)        |
+// | 1      | 1    | Type      | `0x50` ('P') public, `0x53` ('S') private    |
+// | 2      | 1    | Version   | Per-key-type version (public = 3, private = 4)|
 // | 3      | 1    | Algorithm | `0x01` = X25519                              |
 // | 4-5    | 2    | Data len  | Big-endian u16: bytes after this header       |
 // | 6-7    | 2    | Flags     | Big-endian u16: reserved for future use       |
 
 pub const KEY_FILE_HEADER_SIZE: usize = 8;
 pub const KEY_FILE_TYPE_PUBLIC: u8 = 0x50; // 'P'
-pub const KEY_FILE_TYPE_SECRET: u8 = 0x53; // 'S'
+pub const KEY_FILE_TYPE_PRIVATE: u8 = 0x53; // 'S'
 pub const PUBLIC_KEY_DATA_SIZE: usize = 32;
-// kdf_params(12) + salt(32) + nonce(24) + encrypted_key(32) + tag(16)
-pub const SECRET_KEY_DATA_SIZE: usize = 116;
-pub const KEY_FILE_VERSION: u8 = 3;
+
+/// Version byte stored in a `public.key` file. `public.key` carries no
+/// secret material and is only 40 bytes on disk.
+pub const PUBLIC_KEY_VERSION: u8 = 3;
+
+/// Version byte stored in a `private.key` file. The body binds every
+/// cleartext header/body field as AEAD associated data and reserves a
+/// forward-compatible authenticated `ext_bytes` extension region.
+///
+/// `public.key` and `private.key` are versioned independently; see the
+/// FORMAT.md §9.2 note on why the 0.3.0 starting numbers are above 1.
+pub const PRIVATE_KEY_VERSION: u8 = 4;
+
+/// Fixed minimum body size of a `private.key` v4 file: the sum of the
+/// KDF parameters (12), Argon2 salt (32), XChaCha20-Poly1305 nonce
+/// (24), `ext_len` field (2), and encrypted private-key blob
+/// (ciphertext + tag, 48). A real file has body size
+/// `PRIVATE_KEY_FIXED_BODY_SIZE + ext_len` bytes, where `ext_len`
+/// is the runtime-parsed extension-region size.
+pub const PRIVATE_KEY_FIXED_BODY_SIZE: usize = 118;
+
 pub const KEY_FILE_ALG_X25519: u8 = 1;
 
-pub fn build_key_file_header(key_type: u8, data_len: u16) -> [u8; KEY_FILE_HEADER_SIZE] {
+pub fn build_key_file_header(
+    key_type: u8,
+    version: u8,
+    data_len: u16,
+) -> [u8; KEY_FILE_HEADER_SIZE] {
     [
         MAGIC_BYTE,
         key_type,
-        KEY_FILE_VERSION,
+        version,
         KEY_FILE_ALG_X25519,
         (data_len >> 8) as u8,
         (data_len & 0xFF) as u8,

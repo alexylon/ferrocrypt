@@ -110,10 +110,15 @@ pub enum CryptoError {
     ExcessiveWork { required_kib: u32, max_kib: u32 },
 
     // ─── Authentication failures ─────────────────────────────────────────
-    /// Unlocking the private key file with the supplied passphrase
-    /// failed. The key file is structurally valid; the passphrase does
-    /// not decrypt it.
-    #[error("Private key file unlock failed: wrong passphrase")]
+    /// Unlocking the private key file failed AEAD authentication. The
+    /// key file is structurally valid, but either the supplied
+    /// passphrase does not decrypt it, or its cleartext fields have
+    /// been tampered with after the file was written. The AEAD
+    /// primitive cannot distinguish the two cases — the
+    /// associated-data binding introduced in `private.key v4` catches
+    /// tampering cryptographically, but both failure modes surface as
+    /// the same error. The Display wording reflects both causes.
+    #[error("Private key unlock failed: wrong passphrase or tampered file")]
     KeyFileUnlockFailed,
     /// The encrypted file's header failed authentication. Produced when
     /// the symmetric header HMAC does not verify, when the hybrid envelope
@@ -365,7 +370,7 @@ mod tests {
         );
         assert_eq!(
             CryptoError::KeyFileUnlockFailed.to_string(),
-            "Private key file unlock failed: wrong passphrase"
+            "Private key unlock failed: wrong passphrase or tampered file"
         );
         assert_eq!(
             CryptoError::HeaderAuthenticationFailed.to_string(),

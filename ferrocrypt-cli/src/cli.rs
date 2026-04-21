@@ -4,10 +4,10 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand};
 use ferrocrypt::secrecy::{ExposeSecret, SecretString};
 use ferrocrypt::{
-    CryptoError, KdfLimit, PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME, decode_recipient,
-    default_encrypted_filename, detect_encryption_mode, encode_recipient, generate_key_pair,
-    hybrid_decrypt, hybrid_encrypt, hybrid_encrypt_from_recipient, public_key_fingerprint,
-    symmetric_decrypt, symmetric_encrypt, validate_secret_key_file,
+    CryptoError, HybridDecryptConfig, HybridEncryptConfig, KdfLimit, KeyGenConfig,
+    PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME, PrivateKey, PublicKey, SymmetricDecryptConfig,
+    SymmetricEncryptConfig, default_encrypted_filename, detect_encryption_mode, generate_key_pair,
+    hybrid_decrypt, hybrid_encrypt, symmetric_decrypt, symmetric_encrypt, validate_secret_key_file,
 };
 use rpassword::prompt_password;
 use rustyline::DefaultEditor;
@@ -308,20 +308,23 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
             let output_path = Path::new(&output_path);
             check_keygen_conflict(output_path)?;
             let passphrase = read_passphrase(true)?;
-            let info = generate_key_pair(&passphrase, output_path, |msg| eprintln!("{msg}"))?;
-            let recipient = encode_recipient(&info.public_key_path)?;
+            let outcome = generate_key_pair(KeyGenConfig::new(output_path, passphrase), |ev| {
+                eprintln!("{ev}")
+            })?;
+            let recipient =
+                PublicKey::from_key_file(&outcome.public_key_path).to_recipient_string()?;
             println!("\nGenerated key pair in {}\n", output_path.display());
-            println!("Public key fingerprint: {}", info.fingerprint);
+            println!("Public key fingerprint: {}", outcome.fingerprint);
             println!("Public key recipient:   {}", recipient);
         }
 
         CliCommand::Fingerprint { public_key_file } => {
-            let fp = public_key_fingerprint(Path::new(&public_key_file))?;
+            let fp = PublicKey::from_key_file(&public_key_file).fingerprint()?;
             println!("{}", fp);
         }
 
         CliCommand::Recipient { public_key_file } => {
-            let recipient = encode_recipient(Path::new(&public_key_file))?;
+            let recipient = PublicKey::from_key_file(&public_key_file).to_recipient_string()?;
             println!("{}", recipient);
         }
 
@@ -343,16 +346,9 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
                 check_encrypt_conflict(&output_dir, input_path, save_as.as_deref())?;
                 let save_as_path = save_as.as_deref().map(Path::new);
 
-                if let Some(r) = recipient.as_deref() {
-                    let recipient_bytes = decode_recipient(r)?;
+                let public_key = if let Some(r) = recipient.as_deref() {
                     println!("Encrypting to: {r}");
-                    hybrid_encrypt_from_recipient(
-                        input_path,
-                        &output_dir,
-                        &recipient_bytes,
-                        save_as_path,
-                        |msg| eprintln!("{msg}"),
-                    )?
+                    PublicKey::from_recipient_string(r)?
                 } else {
                     let key = key.as_deref().ok_or_else(|| {
                         CryptoError::InvalidInput(
@@ -360,14 +356,19 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
                         )
                     })?;
                     let key_path = Path::new(key);
-                    match public_key_fingerprint(key_path) {
+                    let public_key = PublicKey::from_key_file(key_path);
+                    match public_key.fingerprint() {
                         Ok(fp) => println!("Encrypting to: {fp}"),
                         Err(_) => println!("Using key file: {}", key_path.display()),
                     }
-                    hybrid_encrypt(input_path, &output_dir, key_path, save_as_path, |msg| {
-                        eprintln!("{msg}")
-                    })?
+                    public_key
+                };
+
+                let mut config = HybridEncryptConfig::new(input_path, &output_dir, public_key);
+                if let Some(save_as_path) = save_as_path {
+                    config = config.save_as(save_as_path);
                 }
+                hybrid_encrypt(config, |ev| eprintln!("{ev}"))?.output_path
             } else {
                 reject_encrypt_only_flag("--recipient", recipient.is_some())?;
                 reject_encrypt_only_flag("--save-as", save_as.is_some())?;
@@ -379,14 +380,16 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
                 validate_secret_key_file(key_path)?;
                 let kdf_limit = max_kdf_memory.map(KdfLimit::from_mib).transpose()?;
                 let passphrase = read_passphrase(false)?;
-                hybrid_decrypt(
+                let mut config = HybridDecryptConfig::new(
                     input_path,
                     output_dir,
-                    key_path,
-                    &passphrase,
-                    kdf_limit.as_ref(),
-                    |msg| eprintln!("{msg}"),
-                )?
+                    PrivateKey::from_key_file(key_path),
+                    passphrase,
+                );
+                if let Some(limit) = kdf_limit {
+                    config = config.kdf_limit(limit);
+                }
+                hybrid_decrypt(config, |ev| eprintln!("{ev}"))?.output_path
             };
 
             print_result(is_encrypt, &output, start.elapsed());
@@ -407,25 +410,21 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
                 let output_dir = resolve_encrypt_output_dir(&output_path, save_as.as_deref())?;
                 check_encrypt_conflict(&output_dir, input_path, save_as.as_deref())?;
                 let passphrase = read_passphrase(true)?;
-                symmetric_encrypt(
-                    input_path,
-                    &output_dir,
-                    &passphrase,
-                    save_as.as_deref().map(Path::new),
-                    |msg| eprintln!("{msg}"),
-                )?
+                let mut config = SymmetricEncryptConfig::new(input_path, &output_dir, passphrase);
+                if let Some(s) = save_as.as_deref() {
+                    config = config.save_as(Path::new(s));
+                }
+                symmetric_encrypt(config, |ev| eprintln!("{ev}"))?.output_path
             } else {
                 reject_encrypt_only_flag("--save-as", save_as.is_some())?;
                 let output_dir = require_output_path(&output_path)?;
                 let kdf_limit = max_kdf_memory.map(KdfLimit::from_mib).transpose()?;
                 let passphrase = read_passphrase(false)?;
-                symmetric_decrypt(
-                    input_path,
-                    output_dir,
-                    &passphrase,
-                    kdf_limit.as_ref(),
-                    |msg| eprintln!("{msg}"),
-                )?
+                let mut config = SymmetricDecryptConfig::new(input_path, output_dir, passphrase);
+                if let Some(limit) = kdf_limit {
+                    config = config.kdf_limit(limit);
+                }
+                symmetric_decrypt(config, |ev| eprintln!("{ev}"))?.output_path
             };
 
             print_result(is_encrypt, &output, start.elapsed());

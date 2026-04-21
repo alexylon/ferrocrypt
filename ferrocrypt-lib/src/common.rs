@@ -31,6 +31,7 @@ type HmacSha3_256 = Hmac<Sha3_256>;
 /// Construct via [`KdfLimit::new`] or [`KdfLimit::from_mib`]. The struct is
 /// `#[non_exhaustive]` so future releases can add additional limit dimensions
 /// (e.g. time cost, parallelism) without a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct KdfLimit {
     /// Maximum accepted memory cost in KiB.

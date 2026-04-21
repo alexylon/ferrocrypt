@@ -4,7 +4,9 @@ use std::fs;
 use std::io::Write;
 
 use ferrocrypt::secrecy::SecretString;
-use ferrocrypt::{generate_key_pair, hybrid_decrypt};
+use ferrocrypt::{
+    HybridDecryptConfig, KeyGenConfig, PrivateKey, generate_key_pair, hybrid_decrypt,
+};
 use libfuzzer_sys::fuzz_target;
 
 /// Generates a keypair once per process into a persistent temp directory.
@@ -14,7 +16,7 @@ fn key_dir() -> &'static std::path::Path {
     DIR.get_or_init(|| {
         let dir = tempfile::tempdir().unwrap();
         let pass = SecretString::from("fuzz_key".to_string());
-        generate_key_pair(&pass, dir.path(), |_| {}).unwrap();
+        generate_key_pair(KeyGenConfig::new(dir.path(), pass), |_| {}).unwrap();
         dir
     })
     .path()
@@ -34,12 +36,11 @@ fuzz_target!(|data: &[u8]| {
     drop(f);
 
     let passphrase = SecretString::from("fuzz_key".to_string());
-    let _ = hybrid_decrypt(
+    let config = HybridDecryptConfig::new(
         &input_path,
         &output_dir,
-        &priv_key,
-        &passphrase,
-        None,
-        |_| {},
+        PrivateKey::from_key_file(&priv_key),
+        passphrase,
     );
+    let _ = hybrid_decrypt(config, |_| {});
 });

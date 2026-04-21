@@ -29,11 +29,15 @@
 //! - The `generate_*_fixtures` tests below remain `#[ignore]` and must not be
 //!   re-run against already-published format versions.
 
+mod common;
+
 use std::fs;
 use std::path::Path;
 
 use ferrocrypt::secrecy::SecretString;
-use ferrocrypt::{CryptoError, hybrid_auto, public_key_fingerprint, symmetric_auto};
+use ferrocrypt::{CryptoError, KeyGenConfig, PublicKey};
+
+use common::{hybrid_auto, symmetric_auto};
 
 const FIXTURE_DIR: &str = "tests/fixtures";
 const SYM_PASSWORD: &str = "fixture-password-v3";
@@ -182,7 +186,7 @@ fn test_v4_hybrid_directory_fixture_decrypts() -> Result<(), CryptoError> {
 #[test]
 fn test_v4_public_key_fingerprint_stable() -> Result<(), CryptoError> {
     let public_key = Path::new(FIXTURE_DIR).join("v4/hybrid/public.key");
-    let fp = public_key_fingerprint(&public_key)?;
+    let fp = PublicKey::from_key_file(&public_key).fingerprint()?;
     assert_eq!(fp.len(), 64);
 
     let expected_fp = fs::read_to_string(Path::new(FIXTURE_DIR).join("v4/hybrid/fingerprint.txt"))?;
@@ -246,7 +250,7 @@ fn generate_v4_hybrid_fixtures() -> Result<(), CryptoError> {
     fs::create_dir_all(&hyb_dir)?;
 
     let key_pass = SecretString::from(KEY_PASSWORD_V4.to_string());
-    ferrocrypt::generate_key_pair(&key_pass, &hyb_dir, |_| {})?;
+    ferrocrypt::generate_key_pair(KeyGenConfig::new(&hyb_dir, key_pass.clone()), |_| {})?;
     assert!(hyb_dir.join("public.key").exists());
     assert!(hyb_dir.join("private.key").exists());
 
@@ -300,7 +304,7 @@ fn generate_v4_hybrid_fixtures() -> Result<(), CryptoError> {
     assert!(hyb_dir.join("testdir.fcr").exists());
 
     // Save fingerprint for regression
-    let fp = public_key_fingerprint(hyb_dir.join("public.key"))?;
+    let fp = PublicKey::from_key_file(hyb_dir.join("public.key")).fingerprint()?;
     fs::write(hyb_dir.join("fingerprint.txt"), &fp)?;
 
     println!("v4 hybrid fixtures generated at {}", base.display());

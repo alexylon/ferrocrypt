@@ -19,7 +19,7 @@ use crate::common::{
 };
 use crate::format::{self, HEADER_PREFIX_SIZE};
 use crate::replication::encode;
-use crate::{CryptoError, archiver};
+use crate::{CryptoError, ProgressEvent, archiver};
 
 const HKDF_SALT_SIZE: usize = 32;
 const HKDF_INFO_ENC: &[u8] = b"ferrocrypt-enc";
@@ -164,9 +164,9 @@ pub fn encrypt_file(
     output_dir: &Path,
     passphrase: &SecretString,
     output_file: Option<&Path>,
-    on_progress: &dyn Fn(&str),
+    on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<PathBuf, CryptoError> {
-    on_progress("Deriving key\u{2026}");
+    on_event(&ProgressEvent::DerivingKey);
     let kdf_params = KdfParams::default();
     let mut salt = [0u8; ARGON2_SALT_SIZE];
     OsRng.fill_bytes(&mut salt);
@@ -179,7 +179,7 @@ pub fn encrypt_file(
     let verification_hash: [u8; ENCRYPTION_KEY_SIZE] = sha3_256_hash(encryption_key.as_ref())?;
 
     let base_name = &encryption_base_name(input_path)?;
-    on_progress("Encrypting\u{2026}");
+    on_event(&ProgressEvent::Encrypting);
 
     let output_path = match output_file {
         Some(path) => path.to_path_buf(),
@@ -255,7 +255,7 @@ pub fn decrypt_file(
     output_dir: &Path,
     passphrase: &SecretString,
     kdf_limit: Option<&KdfLimit>,
-    on_progress: &dyn Fn(&str),
+    on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<PathBuf, CryptoError> {
     let mut encrypted_file = fs::File::open(input_path)?;
 
@@ -270,7 +270,7 @@ pub fn decrypt_file(
             output_dir,
             passphrase,
             kdf_limit,
-            on_progress,
+            on_event,
         ),
         _ => Err(format::unsupported_file_version_error(
             header.major,
@@ -287,7 +287,7 @@ fn decrypt_file_v3(
     output_dir: &Path,
     passphrase: &SecretString,
     kdf_limit: Option<&KdfLimit>,
-    on_progress: &dyn Fn(&str),
+    on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<PathBuf, CryptoError> {
     format::validate_file_flags(&header)?;
 
@@ -305,7 +305,7 @@ fn decrypt_file_v3(
 
     let kdf_params = KdfParams::from_bytes(&core.kdf_bytes, kdf_limit)?;
 
-    on_progress("Deriving key\u{2026}");
+    on_event(&ProgressEvent::DerivingKey);
     let (encryption_key, hmac_key) =
         derive_keys(passphrase, &core.salt, &core.hkdf_salt, &kdf_params)?;
 
@@ -321,7 +321,7 @@ fn decrypt_file_v3(
         return Err(hmac_err);
     }
 
-    on_progress("Decrypting\u{2026}");
+    on_event(&ProgressEvent::Decrypting);
     let cipher = XChaCha20Poly1305::new(encryption_key.as_ref().into());
     let stream_decryptor =
         stream::DecryptorBE32::from_aead(cipher, core.stream_nonce.as_slice().into());

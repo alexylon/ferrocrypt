@@ -53,13 +53,15 @@ use thiserror::Error;
 /// # Examples
 ///
 /// ```rust
-/// use std::path::Path;
-/// use ferrocrypt::{symmetric_encrypt, CryptoError, secrecy::SecretString};
+/// use ferrocrypt::{
+///     symmetric_encrypt, SymmetricEncryptConfig, CryptoError, secrecy::SecretString,
+/// };
 ///
 /// fn example() -> Result<(), CryptoError> {
 ///     let passphrase = SecretString::from("test".to_string());
-///     match symmetric_encrypt(Path::new("./missing.txt"), Path::new("./out"), &passphrase, None, |_| {}) {
-///         Ok(path) => println!("Output: {}", path.display()),
+///     let config = SymmetricEncryptConfig::new("./missing.txt", "./out", passphrase);
+///     match symmetric_encrypt(config, |_| {}) {
+///         Ok(outcome) => println!("Output: {}", outcome.output_path.display()),
 ///         Err(CryptoError::InputPath) => eprintln!("Input file or folder missing"),
 ///         Err(e) => eprintln!("{e}"),
 ///     }

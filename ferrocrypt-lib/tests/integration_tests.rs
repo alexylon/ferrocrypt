@@ -1,13 +1,16 @@
 /// Integration tests for ferrocrypt library
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
-    CryptoError, ENCRYPTED_EXTENSION, decode_recipient, detect_encryption_mode, encode_recipient,
-    encode_recipient_from_bytes, generate_key_pair, hybrid_auto, public_key_fingerprint,
-    symmetric_auto, validate_secret_key_file,
+    CryptoError, ENCRYPTED_EXTENSION, PublicKey, decode_recipient, detect_encryption_mode,
+    validate_secret_key_file,
 };
+
+use common::{generate_key_pair, hybrid_auto, symmetric_auto};
 
 const TEST_WORKSPACE: &str = "tests/workspace";
 
@@ -2094,18 +2097,18 @@ fn test_public_key_fingerprint() -> Result<(), CryptoError> {
     generate_key_pair(&passphrase, &keys_dir, |_| {})?;
 
     let pub_key = keys_dir.join("public.key");
-    let fp = public_key_fingerprint(&pub_key)?;
+    let fp = PublicKey::from_key_file(&pub_key).fingerprint()?;
 
     assert_eq!(fp.len(), 64);
     assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
 
     // Deterministic: same key always produces the same fingerprint
-    let fp2 = public_key_fingerprint(&pub_key)?;
+    let fp2 = PublicKey::from_key_file(&pub_key).fingerprint()?;
     assert_eq!(fp, fp2);
 
     // Rejects private key files
     let secret_key = keys_dir.join("private.key");
-    assert!(public_key_fingerprint(&secret_key).is_err());
+    assert!(PublicKey::from_key_file(&secret_key).fingerprint().is_err());
 
     Ok(())
 }
@@ -2122,10 +2125,94 @@ fn test_different_keys_different_fingerprints() -> Result<(), CryptoError> {
     generate_key_pair(&passphrase, &keys_a, |_| {})?;
     generate_key_pair(&passphrase, &keys_b, |_| {})?;
 
-    let fp_a = public_key_fingerprint(keys_a.join("public.key"))?;
-    let fp_b = public_key_fingerprint(keys_b.join("public.key"))?;
+    let fp_a = PublicKey::from_key_file(keys_a.join("public.key")).fingerprint()?;
+    let fp_b = PublicKey::from_key_file(keys_b.join("public.key")).fingerprint()?;
 
     assert_ne!(fp_a, fp_b);
+
+    Ok(())
+}
+
+/// `PublicKey::to_bytes` round-trips through a generated key file and
+/// matches the raw 32-byte payload stored after the 8-byte key-file
+/// header. Also verifies the byte-source variant simply returns what
+/// was passed in.
+#[test]
+fn test_public_key_to_bytes_round_trip() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("pubkey_to_bytes");
+    let keys_dir = test_dir.join("keys");
+    fs::create_dir_all(&keys_dir)?;
+
+    let passphrase = SecretString::from("tb".to_string());
+    generate_key_pair(&passphrase, &keys_dir, |_| {})?;
+
+    let pub_path = keys_dir.join("public.key");
+    let from_file = PublicKey::from_key_file(&pub_path).to_bytes()?;
+
+    // The key file stores the 8-byte header followed by the raw key.
+    let raw_file = fs::read(&pub_path)?;
+    assert_eq!(&from_file, &raw_file[8..40]);
+
+    // Round-trip: from_bytes → to_bytes is the identity.
+    let echoed = PublicKey::from_bytes(from_file).to_bytes()?;
+    assert_eq!(echoed, from_file);
+
+    Ok(())
+}
+
+/// `PublicKey::validate` succeeds on a well-formed key file, succeeds
+/// unconditionally on the bytes source, and fails with a structural
+/// error (not a panic) when pointed at a file that does not exist.
+#[test]
+fn test_public_key_validate() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("pubkey_validate");
+    let keys_dir = test_dir.join("keys");
+    fs::create_dir_all(&keys_dir)?;
+
+    let passphrase = SecretString::from("vp".to_string());
+    generate_key_pair(&passphrase, &keys_dir, |_| {})?;
+
+    // Valid file: validate passes.
+    PublicKey::from_key_file(keys_dir.join("public.key")).validate()?;
+
+    // Raw bytes: validate is always Ok (no structural checks apply).
+    PublicKey::from_bytes([0xAB; 32]).validate()?;
+
+    // Nonexistent file: validate returns an I/O error, not a panic.
+    let missing = keys_dir.join("does_not_exist.key");
+    assert!(PublicKey::from_key_file(&missing).validate().is_err());
+
+    // Pointing at a private-key file: the public-key parser rejects the
+    // wrong key-file kind instead of leaking secret material.
+    let private_as_public = PublicKey::from_key_file(keys_dir.join("private.key"));
+    assert!(private_as_public.validate().is_err());
+
+    Ok(())
+}
+
+/// The `FromStr` impl routes through `PublicKey::from_recipient_string`,
+/// so `"fcr1…".parse::<PublicKey>()` must accept a valid recipient
+/// string and round-trip back through `to_recipient_string`, and must
+/// reject Bech32 with the wrong HRP.
+#[test]
+fn test_public_key_from_str_round_trip() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("pubkey_from_str");
+    let keys_dir = test_dir.join("keys");
+    fs::create_dir_all(&keys_dir)?;
+
+    let passphrase = SecretString::from("fs".to_string());
+    generate_key_pair(&passphrase, &keys_dir, |_| {})?;
+
+    let encoded = PublicKey::from_key_file(keys_dir.join("public.key")).to_recipient_string()?;
+    let parsed: PublicKey = encoded
+        .parse()
+        .expect("valid recipient string must parse via FromStr");
+    assert_eq!(parsed.to_recipient_string()?, encoded);
+
+    // Wrong HRP must fail to parse.
+    let wrong_hrp =
+        bech32::encode::<bech32::Bech32>(bech32::Hrp::parse_unchecked("age"), &[0xCC; 32]).unwrap();
+    assert!(wrong_hrp.parse::<PublicKey>().is_err());
 
     Ok(())
 }
@@ -2511,7 +2598,7 @@ fn test_future_key_version_rejected() -> Result<(), CryptoError> {
     pub_data[2] = 99;
     fs::write(&public_key_path, &pub_data)?;
 
-    let result = public_key_fingerprint(&public_key_path);
+    let result = PublicKey::from_key_file(&public_key_path).fingerprint();
     assert!(result.is_err());
     match &result {
         Err(CryptoError::UnsupportedVersion(v)) => {
@@ -2691,11 +2778,11 @@ fn test_recipient_round_trip() -> Result<(), CryptoError> {
     let passphrase = SecretString::from("rp".to_string());
     generate_key_pair(&passphrase, &keys_dir, |_| {})?;
 
-    let encoded = encode_recipient(keys_dir.join("public.key"))?;
+    let encoded = PublicKey::from_key_file(keys_dir.join("public.key")).to_recipient_string()?;
     assert!(encoded.starts_with("fcr1"));
 
     let decoded = decode_recipient(&encoded)?;
-    let re_encoded = encode_recipient_from_bytes(&decoded)?;
+    let re_encoded = PublicKey::from_bytes(decoded).to_recipient_string()?;
     assert_eq!(encoded, re_encoded);
 
     Ok(())
@@ -2745,7 +2832,7 @@ fn test_recipient_decodes_to_key_file_bytes() -> Result<(), CryptoError> {
     generate_key_pair(&passphrase, &keys_dir, |_| {})?;
 
     let pub_path = keys_dir.join("public.key");
-    let recipient = encode_recipient(&pub_path)?;
+    let recipient = PublicKey::from_key_file(&pub_path).to_recipient_string()?;
     let decoded_bytes = decode_recipient(&recipient)?;
 
     // Verify decoded bytes match the raw key in the file (after 8-byte header)
@@ -2762,7 +2849,7 @@ fn test_recipient_uppercase_accepted() -> Result<(), CryptoError> {
     let passphrase = SecretString::from("uc".to_string());
     generate_key_pair(&passphrase, &keys_dir, |_| {})?;
 
-    let encoded = encode_recipient(keys_dir.join("public.key"))?;
+    let encoded = PublicKey::from_key_file(keys_dir.join("public.key")).to_recipient_string()?;
     let uppercased = encoded.to_uppercase();
     let decoded = decode_recipient(&uppercased)?;
     let original = decode_recipient(&encoded)?;

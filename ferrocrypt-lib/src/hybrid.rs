@@ -21,7 +21,7 @@ use crate::common::{
 use crate::error::FormatDefect;
 use crate::format::{self, HEADER_PREFIX_SIZE, PUBLIC_KEY_DATA_SIZE, SECRET_KEY_DATA_SIZE};
 use crate::replication::encode;
-use crate::{CryptoError, archiver};
+use crate::{CryptoError, ProgressEvent, archiver};
 
 // Both keys are packed into a single envelope: [encryption_key | hmac_key]
 const COMBINED_KEY_SIZE: usize = ENCRYPTION_KEY_SIZE + HMAC_KEY_SIZE;
@@ -231,12 +231,18 @@ fn shared_secret_is_all_zero(shared: &[u8; 32]) -> bool {
     ct_eq_32(shared, &[0u8; 32])
 }
 
-pub fn encrypt_file(
+// Only used by in-module tests now that the public API resolves the
+// recipient's public key to raw bytes via `PublicKey` and calls
+// `encrypt_file_from_bytes` directly. Kept so the existing test
+// scenarios (path-based encrypt against freshly generated key files)
+// remain self-contained.
+#[cfg(test)]
+fn encrypt_file(
     input_path: &Path,
     output_dir: &Path,
     public_key_path: &Path,
     output_file: Option<&Path>,
-    on_progress: &dyn Fn(&str),
+    on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<PathBuf, CryptoError> {
     let recipient_public = read_public_key(public_key_path)?;
     encrypt_file_inner(
@@ -244,7 +250,7 @@ pub fn encrypt_file(
         output_dir,
         &recipient_public,
         output_file,
-        on_progress,
+        on_event,
     )
 }
 
@@ -253,7 +259,7 @@ pub fn encrypt_file_from_bytes(
     output_dir: &Path,
     public_key_bytes: &[u8; 32],
     output_file: Option<&Path>,
-    on_progress: &dyn Fn(&str),
+    on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<PathBuf, CryptoError> {
     let recipient_public = PublicKey::from(*public_key_bytes);
     encrypt_file_inner(
@@ -261,7 +267,7 @@ pub fn encrypt_file_from_bytes(
         output_dir,
         &recipient_public,
         output_file,
-        on_progress,
+        on_event,
     )
 }
 
@@ -270,10 +276,10 @@ fn encrypt_file_inner(
     output_dir: &Path,
     recipient_public: &PublicKey,
     output_file: Option<&Path>,
-    on_progress: &dyn Fn(&str),
+    on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<PathBuf, CryptoError> {
     let base_name = &encryption_base_name(input_path)?;
-    on_progress("Encrypting\u{2026}");
+    on_event(&ProgressEvent::Encrypting);
 
     let output_path = match output_file {
         Some(path) => path.to_path_buf(),
@@ -355,9 +361,9 @@ pub fn decrypt_file(
     secret_key_path: &Path,
     passphrase: &SecretString,
     kdf_limit: Option<&KdfLimit>,
-    on_progress: &dyn Fn(&str),
+    on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<PathBuf, CryptoError> {
-    on_progress("Decrypting\u{2026}");
+    on_event(&ProgressEvent::Decrypting);
 
     let mut encrypted_file = fs::File::open(input_path)?;
 
@@ -373,7 +379,7 @@ pub fn decrypt_file(
             secret_key_path,
             passphrase,
             kdf_limit,
-            on_progress,
+            on_event,
         ),
         _ => Err(format::unsupported_file_version_error(
             header.major,
@@ -392,7 +398,7 @@ fn decrypt_file_v4(
     secret_key_path: &Path,
     passphrase: &SecretString,
     kdf_limit: Option<&KdfLimit>,
-    _on_progress: &dyn Fn(&str),
+    _on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<PathBuf, CryptoError> {
     format::validate_file_flags(&header)?;
 
@@ -430,6 +436,7 @@ fn decrypt_file_v4(
     result
 }
 
+#[cfg(test)]
 fn read_public_key(path: &Path) -> Result<PublicKey, CryptoError> {
     let data = fs::read(path)?;
     let header = format::parse_key_file_header(&data, format::KEY_FILE_TYPE_PUBLIC)?;
@@ -439,6 +446,7 @@ fn read_public_key(path: &Path) -> Result<PublicKey, CryptoError> {
     }
 }
 
+#[cfg(test)]
 fn read_public_key_data(
     data: &[u8],
     header: &format::KeyFileHeader,
@@ -583,7 +591,7 @@ fn open_envelope(
 pub fn generate_key_pair(
     passphrase: &SecretString,
     output_dir: &Path,
-    on_progress: &dyn Fn(&str),
+    on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<(PathBuf, PathBuf), CryptoError> {
     if passphrase.expose_secret().is_empty() {
         return Err(CryptoError::InvalidInput(
@@ -591,7 +599,7 @@ pub fn generate_key_pair(
         ));
     }
     fs::create_dir_all(output_dir)?;
-    on_progress("Generating key pair…");
+    on_event(&ProgressEvent::GeneratingKeyPair);
 
     let secret_key = StaticSecret::random_from_rng(OsRng);
     let public_key = PublicKey::from(&secret_key);

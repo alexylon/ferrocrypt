@@ -47,7 +47,7 @@ Repository layout:
 
 | Module | Role |
 |---|---|
-| `lib.rs` | Public API: explicit `symmetric_encrypt`/`decrypt`, `hybrid_encrypt`/`decrypt`, auto-routing wrappers (`symmetric_auto`/`hybrid_auto`), `GeneratedKeyPair`, `detect_encryption_mode`, path validation, key fingerprint |
+| `lib.rs` | Public API: config-struct operation surface (`symmetric_encrypt` / `symmetric_decrypt` / `hybrid_encrypt` / `hybrid_decrypt` / `generate_key_pair`) plus their `*Config` / `*Outcome` types, the `PublicKey` / `PrivateKey` / `ProgressEvent` abstractions, `detect_encryption_mode`, path validation |
 | `symmetric.rs` | Argon2id → HKDF-SHA3-256 → XChaCha20-Poly1305 streaming encrypt/decrypt |
 | `hybrid.rs` | X25519 ECDH + HKDF-SHA256 + XChaCha20-Poly1305 envelope + XChaCha20-Poly1305 streaming encrypt/decrypt |
 | `archiver.rs` | TAR archive/unarchive (streaming, preserves directory structure). Manual recursive walk rejects symlinks and special entries at archive time; hardlinks archived as regular files. Decryption writes under an `.incomplete` working name throughout and renames to the final name on success; failure leaves the `.incomplete` on disk for inspection. On Linux and macOS, extraction is anchored at a directory file descriptor and uses `openat`/`mkdirat` with `O_NOFOLLOW` to defeat local symlink/component-race attacks. |
@@ -87,20 +87,15 @@ Decryption reverses: read header → derive/decrypt keys → verify HMAC → Dec
 
 ## Key Conventions
 
-- Primary API: `symmetric_encrypt`/`symmetric_decrypt`, `hybrid_encrypt`/`hybrid_decrypt` — explicit, return `PathBuf`. **In-repo convention:** ferrocrypt-cli and ferrocrypt-desktop call `detect_encryption_mode` (CLI) or read `mode` from UI state (desktop) first, then dispatch to the explicit function.
-- Auto-routing wrappers: `symmetric_auto`/`hybrid_auto` — detect encrypt vs decrypt internally. Convenience for external consumers that don't already know direction; not used by the in-repo tools.
-- `generate_key_pair` returns `GeneratedKeyPair` with paths and fingerprint.
-- `encode_recipient`/`decode_recipient` — Bech32 `fcr1...` strings for human-readable public key exchange. `hybrid_encrypt_from_recipient` encrypts from raw bytes without a key file.
-- `symmetric_auto` caveats:
-  - if `input_path` is already a FerroCrypt file, it decrypts and ignores `save_as`
-  - otherwise it encrypts; `output_dir` is the destination directory unless `save_as` is provided
-- `hybrid_auto` caveats:
-  - decrypt path: `key_file` must be the private key; `passphrase` is required; `save_as` is ignored
-  - encrypt path: `key_file` must be the public key; `passphrase` and `kdf_limit` are ignored
+- Operation API: each public operation function takes a config struct by value plus a `Fn(&ProgressEvent)` callback and returns a `*Outcome` struct. The 5 operations are `symmetric_encrypt` / `symmetric_decrypt` / `hybrid_encrypt` / `hybrid_decrypt` / `generate_key_pair`. All config and outcome types are `#[non_exhaustive]` so fields and enum variants can grow without breaking downstream callers.
+- Config construction: `SymmetricEncryptConfig::new(input, output_dir, passphrase)` sets required fields; `.save_as(path)` / `.kdf_limit(limit)` builder methods set optional fields. Configs are `Clone` so a template can be reused across multiple operations.
+- Key-source abstractions: `hybrid_encrypt` consumes a `PublicKey` in its config; `hybrid_decrypt` consumes a `PrivateKey`. `PublicKey` has constructors `from_key_file(path)`, `from_bytes([u8; 32])`, `from_recipient_string("fcr1…")` (plus `FromStr`), and methods `fingerprint()`, `to_recipient_string()`, `to_bytes()`, `validate()`. `PrivateKey` has `from_key_file(path)` today. Both wrappers are `#[non_exhaustive]` structs over a private inner enum so new sources (in-memory secret material, hardware-backed keys) can be added as constructors without breaking the config shape. There is no separate `Recipient` type — the domain role is captured by the field name (`HybridEncryptConfig::public_key`) mirroring the decrypt side's `HybridDecryptConfig::private_key`.
+- Progress signalling: `ProgressEvent` is a `#[non_exhaustive]` enum with 4 current variants (`DerivingKey`, `Encrypting`, `Decrypting`, `GeneratingKeyPair`). It implements `Display` with wording that is locked in by a unit test; CLI and desktop render `{event}` directly. New progress phases are added as new variants — match arms in caller code need a `_` wildcard.
+- **In-repo direction routing:** ferrocrypt-cli and ferrocrypt-desktop call `detect_encryption_mode` (CLI) or read `mode` from UI state (desktop) first, then build the appropriate explicit config. The library no longer exposes auto-routing convenience wrappers — direction detection is a caller concern.
+- Bech32 `fcr1…` recipient strings are the human-readable public-key exchange format. The typed entry point is `PublicKey::from_recipient_string(&str)` or `"fcr1…".parse::<PublicKey>()` (see the key-source abstractions bullet above); `decode_recipient(&str) -> [u8; 32]` is kept as the low-level primitive for the `fuzz_recipient_decode` fuzz target and callers that specifically want raw bytes.
 - CLI `hybrid --recipient / -r` accepts a `fcr1...` string directly for encryption. `recipient` (alias `rc`) subcommand prints the string from a key file.
 - CLI never accepts passphrases as command-line arguments. Passphrases are prompted interactively via `rpassword` (hidden TTY input) with confirmation on encrypt/keygen. For non-interactive use (tests, scripts), set the `FERROCRYPT_PASSPHRASE` environment variable.
-- Encrypt functions accept `save_as: Option<&Path>` to override the default `{stem}.fcr` output path.
-- Integration tests use `tests/workspace/` as a temp directory, cleaned up by a `#[ctor::dtor]` hook. CLI integration tests use `FERROCRYPT_PASSPHRASE` env var to supply passphrases non-interactively.
+- Integration tests use `tests/workspace/` as a temp directory, cleaned up by a `#[ctor::dtor]` hook. CLI integration tests use `FERROCRYPT_PASSPHRASE` env var to supply passphrases non-interactively. Both integration and compatibility test binaries pull `symmetric_auto` / `hybrid_auto` / `generate_key_pair` shims from a shared `tests/common/mod.rs` module — these preserve the pre-0.3.0 positional-arg call shape around the new config API so the ~140 existing call sites don't churn.
 - `ENCRYPTED_EXTENSION` (`"fcr"`) is re-exported from `format.rs`.
 
 ## Non-Negotiable Rules
@@ -123,7 +118,7 @@ Decryption reverses: read header → derive/decrypt keys → verify HMAC → Dec
 - Add regression tests for security-sensitive and format bugs.
 - After each important change, but only when we are ready to commit, update if relevant:
     - `README.md`
-    - `CHANGELOG.md` under `[Unreleased]`
+    - `CHANGELOG.md` under `[Unreleased]` — user-relevant changes only (functionality, security behavior, public API, supported platforms, major technical decisions). Keep CI/build/tooling entries to one-liners; skip entirely if not user-visible.
     - `ferrocrypt-lib/FORMAT.md`
     - `ferrocrypt-lib/fuzz/fuzz_targets`
     - `stress_test.sh`

@@ -5,9 +5,10 @@ slint::include_modules!();
 
 use ferrocrypt::secrecy::{ExposeSecret, SecretString};
 use ferrocrypt::{
-    EncryptionMode, PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME, default_encrypted_filename,
-    detect_encryption_mode, generate_key_pair, hybrid_decrypt, hybrid_encrypt,
-    public_key_fingerprint, symmetric_decrypt, symmetric_encrypt, validate_secret_key_file,
+    EncryptionMode, HybridDecryptConfig, HybridEncryptConfig, KeyGenConfig, PRIVATE_KEY_FILENAME,
+    PUBLIC_KEY_FILENAME, PrivateKey, ProgressEvent, PublicKey, SymmetricDecryptConfig,
+    SymmetricEncryptConfig, default_encrypted_filename, detect_encryption_mode, generate_key_pair,
+    hybrid_decrypt, hybrid_encrypt, symmetric_decrypt, symmetric_encrypt, validate_secret_key_file,
 };
 use std::path::{Path, PathBuf};
 
@@ -206,10 +207,10 @@ fn main() {
                         None
                     };
 
-                    let on_progress = {
+                    let on_event = {
                         let weak = weak.clone();
-                        move |msg: &str| {
-                            let msg = msg.to_string();
+                        move |event: &ProgressEvent| {
+                            let msg = event.to_string();
                             let weak = weak.clone();
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(app) = weak.upgrade() {
@@ -221,31 +222,47 @@ fn main() {
 
                     let inpath = Path::new(&inpath);
                     let output_dir_path = Path::new(&output_dir);
-                    let keypath = Path::new(&keypath);
                     let save_as = output_file.as_deref().map(Path::new);
 
                     let is_decrypt = is_decrypt_mode(mode);
                     let start = std::time::Instant::now();
                     let result: Result<PathBuf, _> = match mode {
                         MODE_SYMMETRIC_ENCRYPT => {
-                            symmetric_encrypt(inpath, output_dir_path, &pwd, save_as, &on_progress)
+                            let mut config =
+                                SymmetricEncryptConfig::new(inpath, output_dir_path, pwd);
+                            if let Some(s) = save_as {
+                                config = config.save_as(s);
+                            }
+                            symmetric_encrypt(config, &on_event).map(|o| o.output_path)
                         }
                         MODE_SYMMETRIC_DECRYPT => {
-                            symmetric_decrypt(inpath, output_dir_path, &pwd, None, &on_progress)
+                            let config = SymmetricDecryptConfig::new(inpath, output_dir_path, pwd);
+                            symmetric_decrypt(config, &on_event).map(|o| o.output_path)
                         }
                         MODE_HYBRID_ENCRYPT => {
-                            hybrid_encrypt(inpath, output_dir_path, keypath, save_as, &on_progress)
+                            let mut config = HybridEncryptConfig::new(
+                                inpath,
+                                output_dir_path,
+                                PublicKey::from_key_file(Path::new(&keypath)),
+                            );
+                            if let Some(s) = save_as {
+                                config = config.save_as(s);
+                            }
+                            hybrid_encrypt(config, &on_event).map(|o| o.output_path)
                         }
-                        MODE_HYBRID_DECRYPT => hybrid_decrypt(
-                            inpath,
-                            output_dir_path,
-                            keypath,
-                            &pwd,
-                            None,
-                            &on_progress,
-                        ),
-                        MODE_KEYGEN => generate_key_pair(&pwd, output_dir_path, &on_progress)
-                            .map(|info| info.public_key_path),
+                        MODE_HYBRID_DECRYPT => {
+                            let config = HybridDecryptConfig::new(
+                                inpath,
+                                output_dir_path,
+                                PrivateKey::from_key_file(Path::new(&keypath)),
+                                pwd,
+                            );
+                            hybrid_decrypt(config, &on_event).map(|o| o.output_path)
+                        }
+                        MODE_KEYGEN => {
+                            let config = KeyGenConfig::new(output_dir_path, pwd);
+                            generate_key_pair(config, &on_event).map(|o| o.public_key_path)
+                        }
                         _ => unreachable!(),
                     };
                     let elapsed = start.elapsed().as_secs_f64();
@@ -541,7 +558,7 @@ fn elide_result_path(msg: &str) -> String {
 fn validate_selected_key(app: &AppWindow, key_path: &str) {
     let key_path = Path::new(key_path);
     match app.get_mode() {
-        MODE_HYBRID_ENCRYPT => match public_key_fingerprint(key_path) {
+        MODE_HYBRID_ENCRYPT => match PublicKey::from_key_file(key_path).fingerprint() {
             Ok(fp) => {
                 app.set_key_fingerprint(fp.into());
                 app.set_key_invalid(false);

@@ -4,7 +4,7 @@ use std::fs;
 use std::io::Write;
 
 use ferrocrypt::secrecy::SecretString;
-use ferrocrypt::symmetric_decrypt;
+use ferrocrypt::{SymmetricDecryptConfig, symmetric_decrypt};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -18,5 +18,6 @@ fuzz_target!(|data: &[u8]| {
     drop(f);
 
     let passphrase = SecretString::from("fuzz".to_string());
-    let _ = symmetric_decrypt(&input_path, &output_dir, &passphrase, None, |_| {});
+    let config = SymmetricDecryptConfig::new(&input_path, &output_dir, passphrase);
+    let _ = symmetric_decrypt(config, |_| {});
 });

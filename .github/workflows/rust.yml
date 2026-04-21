@@ -116,6 +116,20 @@ jobs:
       - name: Run dependency audit
         run: cargo audit
 
+  vet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-vet
+        run: cargo install --locked cargo-vet
+
+      - name: Run supply-chain vet
+        run: cargo vet
+
   desktop:
     strategy:
       fail-fast: false

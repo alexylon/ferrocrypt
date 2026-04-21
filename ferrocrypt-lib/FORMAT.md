@@ -351,6 +351,8 @@ underlying `chacha20poly1305` crate's counter-overflow handling.
 - If the input was a file, the TAR contains one top-level file entry with the original file name.
 - If the input was a directory, the TAR contains one top-level directory entry with the directory name, then its accepted descendants.
 
+Extraction enforces the same single-root invariant (see §11.3), so a crafted archive carrying a second top-level root is rejected.
+
 The encrypted payload does **not** expose plaintext file contents.
 
 The header also does **not** expose filenames or timestamps.
@@ -646,13 +648,19 @@ Extraction rejects archive paths that contain:
 
 This prevents path traversal outside the selected output directory.
 
-## 11.3 Output collision policy
+## 11.3 Archive root cardinality on extraction
 
-During extraction, each top-level root created by the archive must not already exist in the chosen output directory.
+FerroCrypt's archiver always produces exactly one top-level root (see §6.4).
 
-If a top-level root already exists, extraction fails before writing into it.
+Extraction enforces the same invariant: an archive that contains entries under more than one distinct top-level root is rejected before any output is finalized. This keeps the decryption function's single returned output path faithful to what extraction actually creates on disk.
 
-## 11.4 Unsupported TAR entry types on extraction
+## 11.4 Output collision policy
+
+During extraction, the top-level root created by the archive must not already exist in the chosen output directory.
+
+If the top-level root already exists, extraction fails before writing into it.
+
+## 11.5 Unsupported TAR entry types on extraction
 
 Extraction accepts only:
 
@@ -661,15 +669,15 @@ Extraction accepts only:
 
 Other TAR entry types are rejected, including symlink entries.
 
-## 11.5 Partial extraction behavior
+## 11.6 Partial extraction behavior
 
 Decryption/extraction is intentionally **non-transactional**.
 
-If extraction fails after some output has already been written, each created top-level root is renamed with a `.incomplete` suffix.
+If extraction fails after some output has already been written, the top-level root is renamed with a `.incomplete` suffix.
 
 This preserves partially recovered plaintext for inspection or salvage.
 
-## 11.6 Metadata preservation
+## 11.7 Metadata preservation
 
 FerroCrypt preserves:
 

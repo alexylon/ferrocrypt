@@ -29,7 +29,7 @@ sha2 = "0.11"
 zeroize = "1"
 secrecy = "0.10"
 thiserror = "2"
-tar = "0.4"
+tar = "0.4.45"
 chacha20poly1305 = { version = "0.10", features = ["std", "stream"] }
 argon2 = { version = "0.5", features = ["std"] }
 sha3 = "0.11"
@@ -48,4 +48,4 @@ rustix = { version = "1", features = ["fs"] }
 [dev-dependencies]
 ferrocrypt = { path = ".", features = ["fast-kdf"] }
 ctor = "0.8"
-tar = "0.4"
+tar = "0.4.45"

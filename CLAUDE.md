@@ -132,5 +132,6 @@ Decryption reverses: read header → derive/decrypt keys → verify HMAC → Dec
     - workspace: `cargo clippy --workspace --all-targets -- -D warnings`
     - workspace: `cargo test -- --test-threads=1`
     - desktop (if touched): `cd ferrocrypt-desktop && cargo clippy --all-targets -- -D warnings`
+    - supply chain (if `Cargo.toml` / `Cargo.lock` changed): `cargo vet` — mirrors the `vet` job in `.github/workflows/rust.yml` so local runs catch failures before GitHub CI does. Requires `cargo install --locked cargo-vet` once.
 - Before finishing, review the change with adversarial thinking and future-proofing in mind.
 - Never commit or stage changes with Git.

@@ -537,6 +537,18 @@ fn extract_entries<R: Read>(
         let root_name = first_component.as_os_str().to_os_string();
 
         if !checked_roots.contains(&root_name) {
+            // Ferrocrypt's archiver only produces single-root payloads
+            // (one top-level file or one top-level directory — see
+            // FORMAT.md §6.4). Reject any crafted archive that tries to
+            // smuggle a second top-level root so `unarchive`'s single
+            // `PathBuf` return value always accounts for every output it
+            // creates.
+            if !checked_roots.is_empty() {
+                return Err(CryptoError::InvalidInput(format!(
+                    "Archive has multiple top-level roots: {}",
+                    path.display()
+                )));
+            }
             let final_path = output_dir.join(&root_name);
             // `symlink_metadata` does not follow the final symlink, so a
             // dangling symlink at `final_path` is caught here instead of
@@ -725,6 +737,17 @@ fn extract_entries<R: Read>(
         let root_name = first_component.as_os_str().to_os_string();
 
         if !checked_roots.contains(&root_name) {
+            // See the Linux/macOS arm for the rationale. Ferrocrypt's
+            // own archiver only emits single-root payloads, and a
+            // second top-level root is rejected to keep `unarchive`'s
+            // single `PathBuf` return aligned with what extraction
+            // actually creates.
+            if !checked_roots.is_empty() {
+                return Err(CryptoError::InvalidInput(format!(
+                    "Archive has multiple top-level roots: {}",
+                    path.display()
+                )));
+            }
             let final_path = output_dir.join(&root_name);
             // `symlink_metadata` does not follow the final symlink, so a
             // dangling symlink at `final_path` is caught here instead of
@@ -953,10 +976,60 @@ mod tests {
     }
 
     #[test]
-    fn unarchive_rejects_second_root_that_conflicts() {
-        // Craft a TAR with two top-level roots: "innocent/" and "victim.txt".
-        // Pre-create "victim.txt" in the extract dir to prove the second root
-        // is checked and the extraction is refused.
+    fn unarchive_rejects_multi_root_archive() {
+        // Ferrocrypt's archiver only produces single-root payloads
+        // (see FORMAT.md §6.4 and §11). A crafted archive with two
+        // distinct top-level roots must be rejected so that
+        // `unarchive`'s single `PathBuf` return value always accounts
+        // for every output it creates.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        let mut buf = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut buf);
+
+            let data_a = b"payload a";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data_a.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "first.txt", &data_a[..])
+                .unwrap();
+
+            let data_b = b"payload b";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data_b.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "second.txt", &data_b[..])
+                .unwrap();
+
+            builder.finish().unwrap();
+        }
+
+        let err = unarchive(Cursor::new(buf), &extract_dir).unwrap_err();
+        assert!(
+            err.to_string().contains("multiple top-level roots"),
+            "expected multi-root rejection, got: {err}"
+        );
+
+        // Neither root's final name should have been promoted from
+        // `.incomplete`, because the rejection fires mid-extraction.
+        assert!(!extract_dir.join("first.txt").exists());
+        assert!(!extract_dir.join("second.txt").exists());
+    }
+
+    #[test]
+    fn unarchive_multi_root_cannot_overwrite_pre_existing_output() {
+        // Adversarial scenario: attacker places an innocent first root
+        // and a malicious second entry whose name collides with an
+        // existing file at the output. The multi-root rejection must
+        // fire before any collision/overwrite check, leaving the
+        // pre-existing file byte-for-byte intact.
         let tmp = tempfile::TempDir::new().unwrap();
         let extract_dir = tmp.path().join("extracted");
         fs::create_dir_all(&extract_dir).unwrap();
@@ -989,11 +1062,10 @@ mod tests {
 
         let err = unarchive(Cursor::new(buf), &extract_dir).unwrap_err();
         assert!(
-            err.to_string().contains("Output already exists"),
-            "expected conflict error, got: {err}"
+            err.to_string().contains("multiple top-level roots"),
+            "expected multi-root rejection, got: {err}"
         );
 
-        // Verify the original file was NOT overwritten
         let content = fs::read_to_string(extract_dir.join("victim.txt")).unwrap();
         assert_eq!(content, "original");
     }

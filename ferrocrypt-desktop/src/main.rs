@@ -366,15 +366,9 @@ fn apply_input_path(weak: &slint::Weak<AppWindow>, path: PathBuf) {
     app.set_input_path_display(elide_left(&selected, inpath_elide).into());
     app.set_input_path(selected.clone().into());
     let old_mode = app.get_mode();
-    match detected_mode {
-        Some(m) => app.set_mode(m),
-        None => match old_mode {
-            MODE_SYMMETRIC_DECRYPT => app.set_mode(MODE_SYMMETRIC_ENCRYPT),
-            MODE_HYBRID_DECRYPT => app.set_mode(MODE_HYBRID_ENCRYPT),
-            _ => {}
-        },
-    }
-    if app.get_mode() != old_mode {
+    let new_mode = next_mode(old_mode, detected_mode);
+    if new_mode != old_mode {
+        app.set_mode(new_mode);
         app.set_password(Default::default());
         app.set_password_repeated(Default::default());
         app.set_hide_password(true);
@@ -408,28 +402,52 @@ fn update_output_path(app: &AppWindow, path: &str) {
 fn check_conflicts(app: &AppWindow) {
     let mode = app.get_mode();
     let outpath = app.get_output_path().to_string();
+    let keygen_dir = app.get_keygen_output_dir().to_string();
 
-    let mut warning = String::new();
+    let out_exists = is_encrypt_mode(mode) && !outpath.is_empty() && Path::new(&outpath).exists();
+    let (secret_exists, pub_exists) = if mode == MODE_KEYGEN && !keygen_dir.is_empty() {
+        (
+            private_key_path(&keygen_dir).exists(),
+            public_key_path(&keygen_dir).exists(),
+        )
+    } else {
+        (false, false)
+    };
 
-    if is_encrypt_mode(mode) && !outpath.is_empty() && Path::new(&outpath).exists() {
-        warning = format!("Already exists: {}", elide_left(&outpath, ELIDE));
-    }
-
-    if mode == MODE_KEYGEN && warning.is_empty() {
-        let kg_dir = app.get_keygen_output_dir().to_string();
-        if !kg_dir.is_empty() {
-            let secret_exists = private_key_path(&kg_dir).exists();
-            let pub_exists = public_key_path(&kg_dir).exists();
-            warning = match (secret_exists, pub_exists) {
-                (true, true) => "Key pair already exists in output folder".into(),
-                (true, false) => "Private key already exists in output folder".into(),
-                (false, true) => "Public key already exists in output folder".into(),
-                _ => String::new(),
-            };
-        }
-    }
-
+    let warning = compute_conflict_warning(
+        mode,
+        &outpath,
+        &keygen_dir,
+        out_exists,
+        secret_exists,
+        pub_exists,
+    );
     app.set_conflict_warning(warning.into());
+}
+
+/// Pure conflict-detection logic: given the current UI mode, resolved output
+/// paths, and the filesystem existence of each, return the warning string to
+/// display (or empty string when there is no conflict).
+fn compute_conflict_warning(
+    mode: i32,
+    outpath: &str,
+    keygen_dir: &str,
+    out_exists: bool,
+    secret_exists: bool,
+    pub_exists: bool,
+) -> String {
+    if is_encrypt_mode(mode) && !outpath.is_empty() && out_exists {
+        return format!("Already exists: {}", elide_left(outpath, ELIDE));
+    }
+    if mode == MODE_KEYGEN && !keygen_dir.is_empty() {
+        return match (secret_exists, pub_exists) {
+            (true, true) => "Key pair already exists in output folder".into(),
+            (true, false) => "Private key already exists in output folder".into(),
+            (false, true) => "Public key already exists in output folder".into(),
+            _ => String::new(),
+        };
+    }
+    String::new()
 }
 
 fn clear_fields(app: &AppWindow) {
@@ -451,11 +469,10 @@ fn clear_fields(app: &AppWindow) {
     app.set_password_strength(password_scorer::PW_EMPTY);
     app.set_key_fingerprint(Default::default());
     app.set_key_invalid(false);
-    // Snap back to the encrypt mode of the current tab
-    match app.get_mode() {
-        MODE_SYMMETRIC_DECRYPT => app.set_mode(MODE_SYMMETRIC_ENCRYPT),
-        MODE_HYBRID_DECRYPT | MODE_KEYGEN => app.set_mode(MODE_HYBRID_ENCRYPT),
-        _ => {}
+    let current = app.get_mode();
+    let snapped = snap_back_mode(current);
+    if snapped != current {
+        app.set_mode(snapped);
     }
 }
 
@@ -559,5 +576,298 @@ fn detect_mode_from_path(path: &str) -> Result<Option<i32>, ferrocrypt::CryptoEr
         Some(EncryptionMode::Hybrid) => Ok(Some(MODE_HYBRID_DECRYPT)),
         Some(_) => Ok(None),
         None => Ok(None),
+    }
+}
+
+/// Given the current UI mode and the mode detected from a newly selected input
+/// file's header, decide which mode the UI should switch to.
+///
+/// - `detected = Some(m)`: the file self-identifies as encrypted in mode `m`.
+/// - `detected = None`: the file is not a FerroCrypt payload. If we were in a
+///   decrypt mode, flip back to the matching encrypt mode of the same tab;
+///   otherwise leave the mode alone.
+fn next_mode(old_mode: i32, detected: Option<i32>) -> i32 {
+    match detected {
+        Some(m) => m,
+        None => match old_mode {
+            MODE_SYMMETRIC_DECRYPT => MODE_SYMMETRIC_ENCRYPT,
+            MODE_HYBRID_DECRYPT => MODE_HYBRID_ENCRYPT,
+            _ => old_mode,
+        },
+    }
+}
+
+/// Maps the current mode to the mode `clear_fields` should leave the UI in:
+/// decrypt and keygen modes snap back to the encrypt mode of their tab, all
+/// other modes are unchanged.
+fn snap_back_mode(mode: i32) -> i32 {
+    match mode {
+        MODE_SYMMETRIC_DECRYPT => MODE_SYMMETRIC_ENCRYPT,
+        MODE_HYBRID_DECRYPT | MODE_KEYGEN => MODE_HYBRID_ENCRYPT,
+        _ => mode,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encrypt_decrypt_mode_predicates() {
+        assert!(is_encrypt_mode(MODE_SYMMETRIC_ENCRYPT));
+        assert!(is_encrypt_mode(MODE_HYBRID_ENCRYPT));
+        assert!(!is_encrypt_mode(MODE_SYMMETRIC_DECRYPT));
+        assert!(!is_encrypt_mode(MODE_HYBRID_DECRYPT));
+        assert!(!is_encrypt_mode(MODE_KEYGEN));
+
+        assert!(is_decrypt_mode(MODE_SYMMETRIC_DECRYPT));
+        assert!(is_decrypt_mode(MODE_HYBRID_DECRYPT));
+        assert!(!is_decrypt_mode(MODE_SYMMETRIC_ENCRYPT));
+        assert!(!is_decrypt_mode(MODE_HYBRID_ENCRYPT));
+        assert!(!is_decrypt_mode(MODE_KEYGEN));
+    }
+
+    #[test]
+    fn next_mode_adopts_detected_mode() {
+        assert_eq!(
+            next_mode(MODE_SYMMETRIC_ENCRYPT, Some(MODE_HYBRID_DECRYPT)),
+            MODE_HYBRID_DECRYPT
+        );
+        assert_eq!(
+            next_mode(MODE_HYBRID_ENCRYPT, Some(MODE_SYMMETRIC_DECRYPT)),
+            MODE_SYMMETRIC_DECRYPT
+        );
+    }
+
+    #[test]
+    fn next_mode_flips_decrypt_back_to_encrypt_when_not_detected() {
+        assert_eq!(
+            next_mode(MODE_SYMMETRIC_DECRYPT, None),
+            MODE_SYMMETRIC_ENCRYPT
+        );
+        assert_eq!(next_mode(MODE_HYBRID_DECRYPT, None), MODE_HYBRID_ENCRYPT);
+    }
+
+    #[test]
+    fn next_mode_keeps_non_decrypt_modes_when_not_detected() {
+        assert_eq!(
+            next_mode(MODE_SYMMETRIC_ENCRYPT, None),
+            MODE_SYMMETRIC_ENCRYPT
+        );
+        assert_eq!(next_mode(MODE_HYBRID_ENCRYPT, None), MODE_HYBRID_ENCRYPT);
+        assert_eq!(next_mode(MODE_KEYGEN, None), MODE_KEYGEN);
+    }
+
+    #[test]
+    fn snap_back_mode_folds_decrypt_and_keygen_to_tab_encrypt() {
+        assert_eq!(
+            snap_back_mode(MODE_SYMMETRIC_DECRYPT),
+            MODE_SYMMETRIC_ENCRYPT
+        );
+        assert_eq!(snap_back_mode(MODE_HYBRID_DECRYPT), MODE_HYBRID_ENCRYPT);
+        assert_eq!(snap_back_mode(MODE_KEYGEN), MODE_HYBRID_ENCRYPT);
+    }
+
+    #[test]
+    fn snap_back_mode_leaves_encrypt_modes_alone() {
+        assert_eq!(
+            snap_back_mode(MODE_SYMMETRIC_ENCRYPT),
+            MODE_SYMMETRIC_ENCRYPT
+        );
+        assert_eq!(snap_back_mode(MODE_HYBRID_ENCRYPT), MODE_HYBRID_ENCRYPT);
+    }
+
+    #[test]
+    fn conflict_warning_empty_when_no_output_path() {
+        let w = compute_conflict_warning(MODE_SYMMETRIC_ENCRYPT, "", "", false, false, false);
+        assert!(w.is_empty());
+    }
+
+    #[test]
+    fn conflict_warning_empty_when_encrypt_output_missing() {
+        let w =
+            compute_conflict_warning(MODE_HYBRID_ENCRYPT, "/tmp/out.fcr", "", false, false, false);
+        assert!(w.is_empty());
+    }
+
+    #[test]
+    fn conflict_warning_flags_existing_encrypt_output() {
+        let w = compute_conflict_warning(
+            MODE_SYMMETRIC_ENCRYPT,
+            "/tmp/out.fcr",
+            "",
+            true,
+            false,
+            false,
+        );
+        assert_eq!(w, "Already exists: /tmp/out.fcr");
+
+        let w =
+            compute_conflict_warning(MODE_HYBRID_ENCRYPT, "/tmp/out.fcr", "", true, false, false);
+        assert_eq!(w, "Already exists: /tmp/out.fcr");
+    }
+
+    #[test]
+    fn conflict_warning_ignores_existing_decrypt_output() {
+        // Decrypt modes must never block on output existence — the library's
+        // atomic output handling is authoritative, and the output path in
+        // decrypt mode is a directory.
+        for mode in [MODE_SYMMETRIC_DECRYPT, MODE_HYBRID_DECRYPT] {
+            let w = compute_conflict_warning(mode, "/tmp/out", "", true, false, false);
+            assert!(w.is_empty(), "mode {} unexpectedly warned", mode);
+        }
+    }
+
+    #[test]
+    fn conflict_warning_elides_long_encrypt_paths() {
+        let long = format!("/tmp/{}", "a".repeat(80));
+        let w = compute_conflict_warning(MODE_SYMMETRIC_ENCRYPT, &long, "", true, false, false);
+        assert!(w.starts_with("Already exists: \u{2026}"), "got: {}", w);
+    }
+
+    #[test]
+    fn conflict_warning_keygen_variants() {
+        let cases = [
+            (true, true, "Key pair already exists in output folder"),
+            (true, false, "Private key already exists in output folder"),
+            (false, true, "Public key already exists in output folder"),
+            (false, false, ""),
+        ];
+        for (sec, pubk, expected) in cases {
+            let w = compute_conflict_warning(MODE_KEYGEN, "", "/tmp/keys", false, sec, pubk);
+            assert_eq!(w, expected, "sec={sec} pub={pubk}");
+        }
+    }
+
+    #[test]
+    fn conflict_warning_keygen_empty_dir_never_warns() {
+        for (sec, pubk) in [(true, true), (true, false), (false, true), (false, false)] {
+            let w = compute_conflict_warning(MODE_KEYGEN, "", "", false, sec, pubk);
+            assert!(w.is_empty());
+        }
+    }
+
+    #[test]
+    fn elide_left_passthrough_when_short() {
+        assert_eq!(elide_left("short", 52), "short");
+        assert_eq!(elide_left("", 52), "");
+    }
+
+    #[test]
+    fn elide_left_passthrough_at_exact_boundary() {
+        let s = "a".repeat(52);
+        assert_eq!(elide_left(&s, 52), s);
+    }
+
+    #[test]
+    fn elide_left_shortens_longer_paths_with_ellipsis() {
+        let s = "a".repeat(60);
+        let out = elide_left(&s, 52);
+        assert!(out.starts_with('\u{2026}'));
+        // 52 'a's preserved + one ellipsis char (3 UTF-8 bytes) prefix.
+        assert_eq!(out.chars().filter(|c| *c == 'a').count(), 52);
+    }
+
+    #[test]
+    fn elide_left_respects_multibyte_boundaries() {
+        // 60 'é' glyphs (2 bytes each) => 120 bytes. Must not panic and must
+        // still produce a valid UTF-8 string.
+        let s = "é".repeat(60);
+        let out = elide_left(&s, 52);
+        assert!(out.is_char_boundary(out.len()));
+        assert!(out.starts_with('\u{2026}'));
+        // ceil_char_boundary may skip one byte to land on a boundary, so we
+        // get either 26 or 25 'é' glyphs — both are acceptable.
+        let count = out.chars().filter(|c| *c == 'é').count();
+        assert!((25..=26).contains(&count), "got {count} é glyphs");
+    }
+
+    #[test]
+    fn elide_result_path_shortens_encrypted_to_message() {
+        let long = "a".repeat(200);
+        let msg = format!("Encrypted to /tmp/{long} in 1.23 sec");
+        let out = elide_result_path(&msg);
+        assert!(out.starts_with("Encrypted to "));
+        assert!(out.ends_with(" in 1.23 sec"));
+        assert!(out.contains('\u{2026}'));
+    }
+
+    #[test]
+    fn elide_result_path_shortens_decrypted_to_message() {
+        let long = "b".repeat(200);
+        let msg = format!("Decrypted to /tmp/{long} in 0.50 sec");
+        let out = elide_result_path(&msg);
+        assert!(out.starts_with("Decrypted to "));
+        assert!(out.ends_with(" in 0.50 sec"));
+        assert!(out.contains('\u{2026}'));
+    }
+
+    #[test]
+    fn elide_result_path_shortens_output_conflict_messages() {
+        let long = "c".repeat(200);
+        for prefix in ["Output file already exists: ", "Output already exists: "] {
+            let msg = format!("{prefix}/tmp/{long}");
+            let out = elide_result_path(&msg);
+            assert!(out.starts_with(prefix));
+            assert!(out.contains('\u{2026}'));
+        }
+    }
+
+    #[test]
+    fn elide_result_path_passthrough_for_unknown_prefix() {
+        assert_eq!(
+            elide_result_path("Some other message"),
+            "Some other message"
+        );
+    }
+
+    #[test]
+    fn elide_result_path_trims_whitespace() {
+        assert_eq!(elide_result_path("  Short message  "), "Short message");
+    }
+
+    #[test]
+    fn format_duration_under_one_minute() {
+        let out = format_duration("Encrypted to", Path::new("/tmp/out"), 1.234);
+        assert_eq!(out, "Encrypted to /tmp/out in 1.23 sec");
+    }
+
+    #[test]
+    fn format_duration_at_and_past_one_minute() {
+        // Exact 60s must cross into the min/sec branch.
+        let out = format_duration("Decrypted to", Path::new("/tmp/out"), 60.0);
+        assert!(out.contains("1 min"));
+
+        let out = format_duration("Encrypted to", Path::new("/tmp/out"), 125.5);
+        assert!(out.contains("2 min"));
+        assert!(out.contains("5.50 sec"));
+    }
+
+    #[test]
+    fn parent_dir_returns_parent() {
+        assert_eq!(parent_dir("/tmp/foo/bar"), Some("/tmp/foo".to_string()));
+    }
+
+    #[test]
+    fn parent_dir_of_bare_filename_is_empty_string() {
+        // `Path::parent()` returns Some("") for relative bare names.
+        assert_eq!(parent_dir("bare"), Some(String::new()));
+    }
+
+    #[test]
+    fn parent_dir_of_root_is_none() {
+        // On Unix, "/" has no parent.
+        #[cfg(unix)]
+        assert_eq!(parent_dir("/"), None);
+    }
+
+    #[test]
+    fn key_paths_join_directory() {
+        let pub_p = public_key_path("/tmp/keys");
+        let priv_p = private_key_path("/tmp/keys");
+        assert!(pub_p.ends_with(PUBLIC_KEY_FILENAME));
+        assert!(priv_p.ends_with(PRIVATE_KEY_FILENAME));
+        assert_eq!(pub_p.parent(), Some(Path::new("/tmp/keys")));
+        assert_eq!(priv_p.parent(), Some(Path::new("/tmp/keys")));
     }
 }

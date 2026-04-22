@@ -975,6 +975,96 @@ mod tests {
         Ok(())
     }
 
+    /// Regression: a `private.key` file written with non-empty
+    /// `ext_bytes` (simulating a future `v4.x` minor that ships TLV
+    /// metadata) must still unlock under the current reader. The AEAD
+    /// AAD binds `ext_len` and `ext_bytes`, so the tag recomputes over
+    /// the new region; the reader reads, authenticates, and ignores
+    /// unknown TLV content.
+    #[test]
+    fn v4_private_key_forward_compat_with_ext_bytes() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let keys_dir = tmp.path();
+        let passphrase = SecretString::from("fwd-compat".to_string());
+
+        generate_key_pair(&passphrase, keys_dir, &|_| {})?;
+        let private_key_path = keys_dir.join(PRIVATE_KEY_FILENAME);
+
+        // Parse the freshly-written v4 file and recover the raw X25519
+        // private key by running the AEAD open with the authentic AAD.
+        let original = fs::read(&private_key_path)?;
+        let header = format::parse_key_file_header(&original, format::KEY_FILE_TYPE_PRIVATE)?;
+        let body_start = format::KEY_FILE_HEADER_SIZE;
+        let body = &original[body_start..body_start + header.data_len as usize];
+        let parsed = PrivateKeyBody::from_bytes(body)?;
+
+        let kdf_params = KdfParams::from_bytes(&parsed.kdf_bytes, None)?;
+        let derived_key =
+            kdf_params.hash_passphrase(passphrase.expose_secret().as_bytes(), &parsed.salt)?;
+        let original_header_bytes: [u8; format::KEY_FILE_HEADER_SIZE] =
+            original[..format::KEY_FILE_HEADER_SIZE].try_into().unwrap();
+        let cipher = XChaCha20Poly1305::new(derived_key.as_ref().into());
+        let raw_private_key = Zeroizing::new(
+            cipher
+                .decrypt(
+                    chacha20poly1305::XNonce::from_slice(&parsed.nonce),
+                    chacha20poly1305::aead::Payload {
+                        msg: parsed.ciphertext.as_slice(),
+                        aad: parsed.aad(&original_header_bytes).as_slice(),
+                    },
+                )
+                .expect("decrypt of freshly-generated private.key must succeed"),
+        );
+        assert_eq!(raw_private_key.len(), PRIVATE_KEY_SIZE);
+
+        // Construct a synthetic v4 file carrying 16 opaque TLV bytes in
+        // `ext_bytes`. Fresh AEAD nonce, updated header `data_len`, AAD
+        // covers the new `ext_len`/`ext_bytes` region.
+        let synth_ext: Vec<u8> = (0..16u8).collect();
+        let new_data_len = (PRIVATE_KEY_FIXED_BODY_SIZE + synth_ext.len()) as u16;
+        let new_header = format::build_key_file_header(
+            format::KEY_FILE_TYPE_PRIVATE,
+            format::PRIVATE_KEY_VERSION,
+            new_data_len,
+        );
+
+        let mut new_nonce = [0u8; PRIVATE_KEY_NONCE_SIZE];
+        OsRng.fill_bytes(&mut new_nonce);
+
+        let mut new_body = PrivateKeyBody {
+            kdf_bytes: parsed.kdf_bytes,
+            salt: parsed.salt,
+            nonce: new_nonce,
+            ext_bytes: synth_ext,
+            ciphertext: [0u8; PRIVATE_KEY_BLOB_SIZE],
+        };
+        let new_aad = new_body.aad(&new_header);
+        let new_ciphertext_vec = cipher
+            .encrypt(
+                chacha20poly1305::XNonce::from_slice(&new_nonce),
+                chacha20poly1305::aead::Payload {
+                    msg: raw_private_key.as_slice(),
+                    aad: new_aad.as_slice(),
+                },
+            )
+            .expect("re-encrypt with synthetic ext_bytes must succeed");
+        new_body.ciphertext = new_ciphertext_vec
+            .as_slice()
+            .try_into()
+            .expect("envelope ciphertext has fixed length");
+
+        let mut new_file = Vec::new();
+        new_file.extend_from_slice(&new_header);
+        new_file.extend_from_slice(&new_body.to_bytes());
+        fs::write(&private_key_path, &new_file)?;
+
+        // Current reader must authenticate and ignore the unknown TLV
+        // bytes and unlock the key successfully.
+        read_private_key(&private_key_path, &passphrase, None)?;
+
+        Ok(())
+    }
+
     /// Tampering any byte inside the authenticated `ext_bytes` region of a
     /// hybrid file must break HMAC verification. This is the structural
     /// property introduced by the new header layout.

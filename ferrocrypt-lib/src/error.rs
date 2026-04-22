@@ -106,7 +106,7 @@ pub enum CryptoError {
     #[error("{0}")]
     InvalidKdfParams(InvalidKdfParams),
     /// KDF memory cost exceeds the caller-supplied work limit.
-    #[error("File needs {required_kib} KiB to unlock; limit is {max_kib} KiB")]
+    #[error("Needs {required_kib} KiB to decrypt; limit is {max_kib} KiB")]
     ExcessiveWork { required_kib: u32, max_kib: u32 },
 
     // ─── Authentication failures ─────────────────────────────────────────
@@ -295,12 +295,12 @@ impl std::fmt::Display for InvalidKdfParams {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Parallelism(n) => {
-                write!(f, "File has invalid unlock settings (parallelism {n})")
+                write!(f, "File has invalid decrypt settings (parallelism {n})")
             }
             Self::MemoryCost(n) => {
-                write!(f, "File has invalid unlock settings ({n} KiB memory)")
+                write!(f, "File has invalid decrypt settings ({n} KiB memory)")
             }
-            Self::TimeCost(n) => write!(f, "File has invalid unlock settings (time cost {n})"),
+            Self::TimeCost(n) => write!(f, "File has invalid decrypt settings (time cost {n})"),
         }
     }
 }
@@ -444,15 +444,15 @@ mod tests {
         );
         assert_eq!(
             InvalidKdfParams::Parallelism(9999).to_string(),
-            "File has invalid unlock settings (parallelism 9999)"
+            "File has invalid decrypt settings (parallelism 9999)"
         );
         assert_eq!(
             InvalidKdfParams::MemoryCost(42).to_string(),
-            "File has invalid unlock settings (42 KiB memory)"
+            "File has invalid decrypt settings (42 KiB memory)"
         );
         assert_eq!(
             InvalidKdfParams::TimeCost(7).to_string(),
-            "File has invalid unlock settings (time cost 7)"
+            "File has invalid decrypt settings (time cost 7)"
         );
     }
 

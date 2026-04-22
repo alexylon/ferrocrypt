@@ -461,7 +461,6 @@ fn encrypt_file_inner(
         let tmp = encrypt_writer.finish()?;
         tmp.as_file().sync_all()?;
 
-        stream_nonce.zeroize();
         Ok(tmp)
     })();
 
@@ -721,11 +720,6 @@ pub fn generate_key_pair(
     output_dir: &Path,
     on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<(PathBuf, PathBuf), CryptoError> {
-    if passphrase.expose_secret().is_empty() {
-        return Err(CryptoError::InvalidInput(
-            "Passphrase must not be empty for private key encryption".to_string(),
-        ));
-    }
     fs::create_dir_all(output_dir)?;
     on_event(&ProgressEvent::GeneratingKeyPair);
 

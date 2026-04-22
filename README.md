@@ -73,7 +73,7 @@ The file header holds the salts, nonces, and KDF parameters needed to begin decr
 
 - "Newer file format (vX.Y). Upgrade FerroCrypt." — instead of failing to identify the format at all
 - "Unknown encryption type in FerroCrypt file: 0xNN" — instead of treating the file as plaintext
-- "File has invalid unlock settings (N KiB memory)" / "File needs N KiB to unlock; limit is M KiB" — instead of silently allocating unbounded memory
+- "File has invalid decrypt settings (N KiB memory)" / "Needs N KiB to decrypt; limit is M KiB" — instead of silently allocating unbounded memory
 - "Decryption failed: wrong passphrase or tampered file" (symmetric) / "Decryption failed: wrong private key or tampered file" (hybrid) — instead of not knowing whether the credential is wrong or the file header is damaged
 - "Encrypted file is truncated" / "Payload authentication failed: data tampered or corrupted" — instead of not reaching payload decryption at all
 

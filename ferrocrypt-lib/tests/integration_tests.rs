@@ -2951,11 +2951,15 @@ fn test_detect_valid_symmetric_file() -> Result<(), CryptoError> {
 fn test_detect_truncated_fcr_file_returns_error() {
     let dir = setup_test_dir("detect_truncated");
     let path = dir.join("truncated.fcr");
-    // Write a partial encoded prefix with magic byte in at least two copy positions.
-    // Copy 0 starts at byte 3, copy 1 at byte 11 — both need 0xFC for majority vote.
-    let mut data = vec![0u8; 15];
-    data[3] = 0xFC; // magic byte in copy 0
-    data[11] = 0xFC; // magic byte in copy 1
+    // Encoded prefix replicated at bytes 3, 11, 19 (HEADER_PREFIX_SIZE = 8
+    // between copies). File must extend past byte 19 so all three copy
+    // positions are present; otherwise the detector refuses to claim
+    // truncation to avoid the short-file coincidence covered by
+    // `test_detect_short_file_with_two_magic_bytes_returns_none`.
+    let mut data = vec![0u8; 20];
+    data[3] = 0xFC;
+    data[11] = 0xFC;
+    data[19] = 0xFC;
     fs::write(&path, &data).unwrap();
     let result = detect_encryption_mode(&path);
     assert!(
@@ -2969,6 +2973,25 @@ fn test_detect_truncated_fcr_file_returns_error() {
         }
         other => panic!("expected InvalidFormat, got: {other:?}"),
     }
+}
+
+/// L-4 regression: a short random file with `0xFC` at bytes 3 and 11 (the
+/// first two replication-copy positions) must not be misclassified as a
+/// truncated `.fcr`. The detector requires every copy position to be
+/// within the read-in region before voting, so a file shorter than 20
+/// bytes returns `Ok(None)` regardless of which bytes happen to match.
+#[test]
+fn test_detect_short_file_with_two_magic_bytes_returns_none() {
+    let dir = setup_test_dir("detect_two_magic_coincidence");
+    let path = dir.join("coincidence.bin");
+    let mut data = vec![0u8; 15];
+    data[3] = 0xFC;
+    data[11] = 0xFC;
+    fs::write(&path, &data).unwrap();
+    assert!(
+        detect_encryption_mode(&path).unwrap().is_none(),
+        "a sub-20-byte file cannot be classified as a truncated `.fcr`"
+    );
 }
 
 #[test]

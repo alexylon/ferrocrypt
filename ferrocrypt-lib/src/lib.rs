@@ -586,16 +586,13 @@ pub fn detect_encryption_mode(
     }
 
     if filled < buf.len() {
-        // File is shorter than the encoded prefix. Check if at least two of
-        // the three replication copy positions contain the magic byte —
-        // positions beyond `filled` are still 0x00 from initialization.
-        if has_encoded_magic_byte(&buf) {
+        if has_encoded_magic_byte(&buf, filled) {
             return Err(CryptoError::InvalidFormat(FormatDefect::Truncated));
         }
         return Ok(None);
     }
     let Ok(prefix) = replication::decode(&buf) else {
-        if has_encoded_magic_byte(&buf) {
+        if has_encoded_magic_byte(&buf, filled) {
             return Err(CryptoError::InvalidFormat(FormatDefect::CorruptedHeader));
         }
         return Ok(None);
@@ -612,12 +609,22 @@ pub fn detect_encryption_mode(
     }
 }
 
-/// Checks whether a raw encoded buffer contains the magic byte in at least
-/// two of the three replication copy positions (majority vote on byte 0).
-fn has_encoded_magic_byte(buf: &[u8; format::HEADER_PREFIX_ENCODED_SIZE]) -> bool {
+/// Returns `true` only when every replication copy position (bytes 3,
+/// 11, 19) lies within the first `filled` bytes **and** at least two of
+/// them equal the magic byte. Requiring all three positions to be in
+/// range keeps a small random file from producing a 2-of-3 majority out
+/// of two in-range `0xFC` coincidences.
+fn has_encoded_magic_byte(buf: &[u8; format::HEADER_PREFIX_ENCODED_SIZE], filled: usize) -> bool {
     let s = format::HEADER_PREFIX_SIZE;
-    let copies = [buf[3], buf[3 + s], buf[3 + 2 * s]];
-    copies.iter().filter(|&&b| b == format::MAGIC_BYTE).count() >= 2
+    let positions = [3, 3 + s, 3 + 2 * s];
+    if positions.iter().any(|&pos| pos >= filled) {
+        return false;
+    }
+    positions
+        .iter()
+        .filter(|&&pos| buf[pos] == format::MAGIC_BYTE)
+        .count()
+        >= 2
 }
 
 mod archiver;
@@ -839,6 +846,7 @@ pub fn generate_key_pair(
     config: KeyGenConfig,
     on_event: impl Fn(&ProgressEvent),
 ) -> Result<KeyGenOutcome, CryptoError> {
+    validate_passphrase(&config.passphrase)?;
     let (private_key_path, public_key_path) =
         hybrid::generate_key_pair(&config.passphrase, &config.output_dir, &on_event)?;
     let fingerprint = PublicKey::from_key_file(&public_key_path).fingerprint()?;
@@ -852,6 +860,30 @@ pub fn generate_key_pair(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// L-4 regression: a short random file that happens to have `0xFC` at
+    /// bytes 3 and 11 must not be misclassified as a truncated `.fcr`. The
+    /// pre-fix implementation counted bytes beyond `filled` as implicit
+    /// non-matches (they were `0x00` from init), which let a 2-of-3
+    /// majority form from two in-range coincidences — about a 1/65 000
+    /// hit rate on random small files. The fixed helper refuses to vote
+    /// unless every replication copy position is inside `filled`.
+    #[test]
+    fn has_encoded_magic_byte_requires_all_positions_in_range() {
+        let mut buf = [0u8; format::HEADER_PREFIX_ENCODED_SIZE];
+        buf[3] = format::MAGIC_BYTE;
+        buf[3 + format::HEADER_PREFIX_SIZE] = format::MAGIC_BYTE;
+        // Third copy (byte 19) is outside `filled`, left as 0x00.
+        assert!(
+            !has_encoded_magic_byte(&buf, 15),
+            "a 15-byte file cannot be classified as a truncated `.fcr` — \
+             the third magic-byte position is outside the read-in region"
+        );
+
+        // A genuinely-full read with a 2-of-3 majority remains positive.
+        buf[3 + 2 * format::HEADER_PREFIX_SIZE] = format::MAGIC_BYTE;
+        assert!(has_encoded_magic_byte(&buf, buf.len()));
+    }
 
     /// Lock in the exact user-facing Display text for every `ProgressEvent`
     /// variant. CLI and desktop surface `{event}` directly, so a silent

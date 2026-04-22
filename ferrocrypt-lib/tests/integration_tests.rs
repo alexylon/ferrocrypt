@@ -177,8 +177,11 @@ fn test_symmetric_wrong_password() -> Result<(), CryptoError> {
 
     assert!(result.is_err());
     match result {
-        Err(CryptoError::HeaderAuthenticationFailed) => {}
-        other => panic!("Expected HeaderAuthenticationFailed, got {:?}", other),
+        Err(CryptoError::SymmetricHeaderAuthenticationFailed) => {}
+        other => panic!(
+            "Expected SymmetricHeaderAuthenticationFailed, got {:?}",
+            other
+        ),
     }
 
     Ok(())
@@ -819,8 +822,11 @@ fn test_symmetric_streaming_wrong_password() -> Result<(), CryptoError> {
 
     assert!(result.is_err());
     match result {
-        Err(CryptoError::HeaderAuthenticationFailed) => {}
-        other => panic!("Expected HeaderAuthenticationFailed, got {:?}", other),
+        Err(CryptoError::SymmetricHeaderAuthenticationFailed) => {}
+        other => panic!(
+            "Expected SymmetricHeaderAuthenticationFailed, got {:?}",
+            other
+        ),
     }
 
     Ok(())
@@ -930,7 +936,7 @@ fn test_hybrid_wrong_key_pair() -> Result<(), CryptoError> {
     // Try to decrypt with key pair B's private key — the passphrase is
     // correct for key pair B (so private.key unlocks fine), but the
     // ECDH envelope was sealed for recipient A, so envelope AEAD fails
-    // and the decryption must surface as HeaderAuthenticationFailed.
+    // and the decryption must surface as HybridHeaderAuthenticationFailed.
     let private_key_b = keys_b.join("private.key");
 
     let result = hybrid_auto(
@@ -944,8 +950,8 @@ fn test_hybrid_wrong_key_pair() -> Result<(), CryptoError> {
     );
 
     match result {
-        Err(CryptoError::HeaderAuthenticationFailed) => {}
-        other => panic!("Expected HeaderAuthenticationFailed, got {:?}", other),
+        Err(CryptoError::HybridHeaderAuthenticationFailed) => {}
+        other => panic!("Expected HybridHeaderAuthenticationFailed, got {:?}", other),
     }
 
     Ok(())

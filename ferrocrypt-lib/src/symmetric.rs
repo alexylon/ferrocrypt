@@ -304,6 +304,7 @@ fn decrypt_file_v3(
         hmac_key.as_ref(),
         &core.hmac_input(&prefix_bytes),
         &hmac_tag,
+        || CryptoError::SymmetricHeaderAuthenticationFailed,
     )?;
 
     on_event(&ProgressEvent::Decrypting);

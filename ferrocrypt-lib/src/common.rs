@@ -247,13 +247,19 @@ pub fn hmac_sha3_256(key: &[u8], data: &[u8]) -> Result<[u8; 32], CryptoError> {
     Ok(bytes)
 }
 
-/// Verifies HMAC-SHA3-256 in constant time. Returns error if mismatch.
-pub fn hmac_sha3_256_verify(key: &[u8], data: &[u8], tag: &[u8]) -> Result<(), CryptoError> {
+/// Verifies HMAC-SHA3-256 in constant time. Returns the error produced by
+/// `on_mismatch` on tag mismatch so that callers can route the failure to
+/// a mode-specific variant (symmetric vs hybrid header authentication).
+pub fn hmac_sha3_256_verify(
+    key: &[u8],
+    data: &[u8],
+    tag: &[u8],
+    on_mismatch: impl FnOnce() -> CryptoError,
+) -> Result<(), CryptoError> {
     let mut mac = HmacSha3_256::new_from_slice(key)
         .map_err(|_| CryptoError::InternalInvariant("internal error: invalid HMAC key length"))?;
     mac.update(data);
-    mac.verify_slice(tag)
-        .map_err(|_| CryptoError::HeaderAuthenticationFailed)
+    mac.verify_slice(tag).map_err(|_| on_mismatch())
 }
 
 /// Streaming encryption writer: buffers plaintext writes into `BUFFER_SIZE`

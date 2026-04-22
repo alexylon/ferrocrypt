@@ -120,13 +120,23 @@ pub enum CryptoError {
     /// the same error. The Display wording reflects both causes.
     #[error("Private key unlock failed: wrong passphrase or tampered file")]
     KeyFileUnlockFailed,
-    /// The encrypted file's header failed authentication. Produced when
-    /// the symmetric header HMAC does not verify, when the hybrid envelope
-    /// AEAD refuses to unwrap, or when the derived X25519 shared secret
-    /// is all zero. From the user's perspective: wrong password, wrong
-    /// key, or the encrypted file has been tampered with.
-    #[error("Wrong password/key or file was tampered with")]
-    HeaderAuthenticationFailed,
+    /// A symmetric encrypted file failed header authentication. Either
+    /// the passphrase does not derive the right keys, or the header has
+    /// been tampered with. The HMAC primitive cannot distinguish the
+    /// two cases — the tampered path is caught by the header HMAC, and
+    /// the wrong-passphrase path produces a wrong HMAC key that fails
+    /// the same verification.
+    #[error("Decryption failed: wrong passphrase or tampered file")]
+    SymmetricHeaderAuthenticationFailed,
+    /// A hybrid encrypted file failed header authentication. Either the
+    /// supplied private key does not match the key pair this file was
+    /// encrypted for, or the header has been tampered with. Fires from
+    /// three checks that cannot be distinguished by the caller: the
+    /// envelope AEAD open (wrong-key and envelope-tamper are
+    /// indistinguishable there), the all-zero X25519 shared-secret
+    /// guard, and the outer HMAC over the rest of the header.
+    #[error("Decryption failed: wrong private key or tampered file")]
+    HybridHeaderAuthenticationFailed,
     /// An encrypted payload chunk failed AEAD authentication during
     /// streaming decryption. The ciphertext has been tampered with or
     /// corrupted after the header was authenticated.
@@ -373,8 +383,12 @@ mod tests {
             "Private key unlock failed: wrong passphrase or tampered file"
         );
         assert_eq!(
-            CryptoError::HeaderAuthenticationFailed.to_string(),
-            "Wrong password/key or file was tampered with"
+            CryptoError::SymmetricHeaderAuthenticationFailed.to_string(),
+            "Decryption failed: wrong passphrase or tampered file"
+        );
+        assert_eq!(
+            CryptoError::HybridHeaderAuthenticationFailed.to_string(),
+            "Decryption failed: wrong private key or tampered file"
         );
         assert_eq!(
             CryptoError::PayloadAuthenticationFailed.to_string(),
@@ -467,8 +481,12 @@ mod tests {
             &CryptoError::KeyFileUnlockFailed.to_string(),
         );
         check(
-            "HeaderAuthenticationFailed",
-            &CryptoError::HeaderAuthenticationFailed.to_string(),
+            "SymmetricHeaderAuthenticationFailed",
+            &CryptoError::SymmetricHeaderAuthenticationFailed.to_string(),
+        );
+        check(
+            "HybridHeaderAuthenticationFailed",
+            &CryptoError::HybridHeaderAuthenticationFailed.to_string(),
         );
         check(
             "PayloadAuthenticationFailed",

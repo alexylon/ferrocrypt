@@ -212,7 +212,7 @@ So a current symmetric `v3.0` file (with no extensions) is laid out as:
 429..end ciphertext payload
 ```
 
-The `hmac_key` and `encryption_key` are derived from the same passphrase + Argon2 salt + KDF params + HKDF salt, so a wrong passphrase or a tampered key-derivation field produces a wrong `hmac_key` and HMAC verification fails before any ciphertext is read. No separate key-verification hash is required; both "wrong passphrase" and "header tampered" surface as a single `HeaderAuthenticationFailed` error.
+The `hmac_key` and `encryption_key` are derived from the same passphrase + Argon2 salt + KDF params + HKDF salt, so a wrong passphrase or a tampered key-derivation field produces a wrong `hmac_key` and HMAC verification fails before any ciphertext is read. No separate key-verification hash is required; both "wrong passphrase" and "header tampered" surface as a single `SymmetricHeaderAuthenticationFailed` error (the hybrid path uses the parallel `HybridHeaderAuthenticationFailed`).
 
 A future minor version that ships `ext_len = L` logical bytes of authenticated
 extension data adds exactly `encoded_size(L) - encoded_size(0)` bytes before the

@@ -185,7 +185,7 @@ fn test_cli_symmetric_wrong_password() {
     assert!(!decrypt_output.status.success());
     let stderr = String::from_utf8_lossy(&decrypt_output.stderr);
     assert!(
-        stderr.contains("Wrong password/key or file was tampered with"),
+        stderr.contains("Decryption failed: wrong passphrase or tampered file"),
         "expected typed header-auth message on stderr, got: {stderr}"
     );
     assert!(

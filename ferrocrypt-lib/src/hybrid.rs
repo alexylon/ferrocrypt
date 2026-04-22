@@ -538,7 +538,9 @@ fn decrypt_file_v4(
 
     let result = (|| -> Result<PathBuf, CryptoError> {
         let hmac_key = &decrypted_combined_key[ENCRYPTION_KEY_SIZE..COMBINED_KEY_SIZE];
-        hmac_sha3_256_verify(hmac_key, &core.hmac_input(&prefix_bytes), &hmac_tag)?;
+        hmac_sha3_256_verify(hmac_key, &core.hmac_input(&prefix_bytes), &hmac_tag, || {
+            CryptoError::HybridHeaderAuthenticationFailed
+        })?;
 
         let cipher =
             XChaCha20Poly1305::new((&decrypted_combined_key[..ENCRYPTION_KEY_SIZE]).into());
@@ -694,7 +696,7 @@ fn open_envelope(
 
     let shared = recipient_secret.diffie_hellman(&ephemeral_public);
     if shared_secret_is_all_zero(shared.as_bytes()) {
-        return Err(CryptoError::HeaderAuthenticationFailed);
+        return Err(CryptoError::HybridHeaderAuthenticationFailed);
     }
 
     let recipient_public = PublicKey::from(recipient_secret);
@@ -705,7 +707,7 @@ fn open_envelope(
     let nonce = chacha20poly1305::XNonce::from_slice(&parsed.nonce);
     let mut plaintext = cipher
         .decrypt(nonce, parsed.ciphertext.as_slice())
-        .map_err(|_| CryptoError::HeaderAuthenticationFailed)?;
+        .map_err(|_| CryptoError::HybridHeaderAuthenticationFailed)?;
 
     if plaintext.len() != COMBINED_KEY_SIZE {
         plaintext.zeroize();

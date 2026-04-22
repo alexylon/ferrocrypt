@@ -74,7 +74,7 @@ The file header holds the salts, nonces, and KDF parameters needed to begin decr
 - "Newer file format (vX.Y). Upgrade FerroCrypt." — instead of failing to identify the format at all
 - "Unknown encryption type in FerroCrypt file: 0xNN" — instead of treating the file as plaintext
 - "File has invalid unlock settings (N KiB memory)" / "File needs N KiB to unlock; limit is M KiB" — instead of silently allocating unbounded memory
-- "Wrong password/key or file was tampered with" — instead of not knowing whether the password or key is wrong or the file header is damaged
+- "Decryption failed: wrong passphrase or tampered file" (symmetric) / "Decryption failed: wrong private key or tampered file" (hybrid) — instead of not knowing whether the credential is wrong or the file header is damaged
 - "Encrypted file is truncated" / "Payload authentication failed: data tampered or corrupted" — instead of not reaching payload decryption at all
 
 Without a readable header, all of these collapse into a single generic "invalid format" error.
@@ -274,7 +274,8 @@ A password strength indicator (based on [Proton Pass](https://github.com/protonp
 FerroCrypt distinguishes a few distinct decryption-failure stages so that a failed decrypt tells you what actually went wrong:
 
 - **Private key unlock failed: wrong passphrase or tampered file** — The hybrid private key file failed AEAD authentication. Either the passphrase does not decrypt it, or one of the file's cleartext fields (header, KDF params, salt, nonce, or extension region) has been tampered with since the file was written. The AEAD primitive cannot distinguish the two cases. Retry with the correct passphrase first; if that still fails, regenerate the key pair and re-encrypt.
-- **Wrong password/key or file was tampered with** — Either the symmetric password or the hybrid recipient key is wrong, or the encrypted file's header has been modified. No plaintext has been produced.
+- **Decryption failed: wrong passphrase or tampered file** (symmetric) — The passphrase does not unlock the file, or the header has been modified. No plaintext has been produced.
+- **Decryption failed: wrong private key or tampered file** (hybrid) — The supplied private key does not match the key pair the file was encrypted for, or the header has been modified. No plaintext has been produced.
 - **Payload authentication failed: data tampered or corrupted** — The header authenticated successfully, but a later ciphertext chunk failed its authentication tag. This usually means the file has been corrupted or truncated partway through, or an attacker has modified bytes after the header. During streaming decryption, earlier chunks that authenticated successfully may already have been written to disk under an `.incomplete` working directory before the failing chunk was reached.
 - **Encrypted file is truncated** — The encrypted stream ends before its final authenticated chunk, usually because of a partial download or an interrupted copy.
 

@@ -43,7 +43,7 @@ Every `.fcr` file starts with a header followed by the encrypted payload. The he
 
 | File | Contents |
 |---|---|
-| **Symmetric `.fcr`** | Format identifier, version, Argon2id salt, HKDF salt, KDF parameters (memory cost, iterations, parallelism), stream nonce, key verification hash, HMAC authentication tag |
+| **Symmetric `.fcr`** | Format identifier, version, Argon2id salt, HKDF salt, KDF parameters (memory cost, iterations, parallelism), stream nonce, HMAC authentication tag |
 | **Hybrid `.fcr`** | Format identifier, version, sealed key envelope (ephemeral public key + encrypted random key), stream nonce, HMAC authentication tag |
 | **`private.key`** | KDF parameters, Argon2id salt, AEAD nonce, authenticated extension region, passphrase-encrypted private key (the raw key is never stored unencrypted; the cleartext header and all cleartext body fields are bound as AEAD associated data so tampering fails authentication) |
 | **`public.key`** | Raw 32-byte X25519 public key (not secret). Can also be shared as a Bech32 `fcr1…` recipient string via the library API. |

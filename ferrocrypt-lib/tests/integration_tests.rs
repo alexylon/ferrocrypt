@@ -272,6 +272,157 @@ fn test_hybrid_keygen_rejects_empty_passphrase() {
     );
 }
 
+/// M-3 regression: `hybrid_decrypt` must reject an empty passphrase at the
+/// top of the function, before `validate_input_path` and before any KDF work
+/// runs. The symmetric path already did this pre-audit; the hybrid path was
+/// a consistency gap that let an empty passphrase burn an Argon2id cycle on
+/// the private-key file before failing.
+#[test]
+fn test_hybrid_decrypt_rejects_empty_passphrase_before_kdf() {
+    use ferrocrypt::{HybridDecryptConfig, PrivateKey, ProgressEvent, hybrid_decrypt};
+    use std::cell::Cell;
+
+    let test_dir = setup_test_dir("hybrid_decrypt_empty_pass");
+    let empty = SecretString::from("".to_string());
+
+    // The input and key file paths are not resolved — the passphrase check
+    // must fire first, so the paths can be placeholders that do not exist.
+    let config = HybridDecryptConfig::new(
+        test_dir.join("nonexistent.fcr"),
+        &test_dir,
+        PrivateKey::from_key_file(test_dir.join("nonexistent.key")),
+        empty,
+    );
+
+    let saw_deriving = Cell::new(false);
+    let err = hybrid_decrypt(config, |ev| {
+        if matches!(ev, ProgressEvent::DerivingKey) {
+            saw_deriving.set(true);
+        }
+    })
+    .unwrap_err();
+
+    assert!(
+        err.to_string().contains("empty"),
+        "expected empty-passphrase error, got: {err}"
+    );
+    assert!(
+        !saw_deriving.get(),
+        "DerivingKey must not fire before the empty-passphrase check"
+    );
+}
+
+/// M-4 regression: `symmetric_encrypt` must reject a symlink input with a
+/// typed `InvalidInput` error *before* kicking off Argon2id. Pre-audit the
+/// rejection happened inside `archiver::archive`, which runs after the KDF
+/// — an accidental symlink cost the user seconds and up to 1 GiB of RAM.
+/// Observes the `DerivingKey` progress event to prove the rejection
+/// short-circuits the KDF path.
+#[cfg(unix)]
+#[test]
+fn test_symmetric_encrypt_rejects_symlink_before_kdf() {
+    use ferrocrypt::{ProgressEvent, SymmetricEncryptConfig, symmetric_encrypt};
+    use std::cell::Cell;
+    use std::os::unix::fs::symlink;
+
+    let test_dir = setup_test_dir("symmetric_encrypt_symlink");
+    let target = create_test_file(&test_dir.join("real.txt"), "data");
+    let link = test_dir.join("link.txt");
+    symlink(&target, &link).expect("failed to create symlink");
+
+    let output_dir = test_dir.join("out");
+    fs::create_dir_all(&output_dir).unwrap();
+    let passphrase = SecretString::from("pass".to_string());
+
+    let config = SymmetricEncryptConfig::new(&link, &output_dir, passphrase);
+    let saw_deriving = Cell::new(false);
+    let err = symmetric_encrypt(config, |ev| {
+        if matches!(ev, ProgressEvent::DerivingKey) {
+            saw_deriving.set(true);
+        }
+    })
+    .unwrap_err();
+
+    match err {
+        CryptoError::InvalidInput(ref msg) => {
+            assert!(
+                msg.contains("symlink"),
+                "expected symlink error, got: {msg}"
+            );
+        }
+        other => panic!("expected InvalidInput, got: {other:?}"),
+    }
+    assert!(
+        !saw_deriving.get(),
+        "DerivingKey must not fire before the symlink check"
+    );
+}
+
+/// L-2 regression: on a successful hybrid decrypt, `DerivingKey` fires before
+/// the private-key Argon2id runs and `Decrypting` fires only after the
+/// envelope/HMAC checks pass (just before streaming unarchive). Pre-audit the
+/// path emitted `Decrypting` immediately at the top of `hybrid::decrypt_file`
+/// and never emitted `DerivingKey`, so a UI would mislabel the multi-second
+/// KDF window as "decrypting".
+#[test]
+fn test_hybrid_decrypt_progress_events_in_order() -> Result<(), CryptoError> {
+    use ferrocrypt::ProgressEvent;
+    use std::sync::Mutex;
+
+    let test_dir = setup_test_dir("hybrid_decrypt_progress");
+    let keys_dir = test_dir.join("keys");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&keys_dir)?;
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    let passphrase = SecretString::from("pass".to_string());
+    generate_key_pair(&passphrase, &keys_dir, |_| {})?;
+
+    let input_file = test_dir.join("data.txt");
+    create_test_file(&input_file, "hybrid progress order");
+
+    let public_key_path = keys_dir.join("public.key");
+    hybrid_auto(
+        &input_file,
+        &encrypt_dir,
+        &public_key_path,
+        &passphrase,
+        None,
+        None,
+        |_| {},
+    )?;
+
+    let encrypted_path = encrypt_dir.join("data.fcr");
+    let events: Mutex<Vec<ProgressEvent>> = Mutex::new(Vec::new());
+    hybrid_auto(
+        &encrypted_path,
+        &decrypt_dir,
+        keys_dir.join("private.key"),
+        &passphrase,
+        None,
+        None,
+        |ev| events.lock().unwrap().push(*ev),
+    )?;
+
+    let events = events.into_inner().unwrap();
+    let deriving_at = events
+        .iter()
+        .position(|e| matches!(e, ProgressEvent::DerivingKey));
+    let decrypting_at = events
+        .iter()
+        .position(|e| matches!(e, ProgressEvent::Decrypting));
+    let deriving_at = deriving_at.expect("DerivingKey must fire on hybrid decrypt");
+    let decrypting_at = decrypting_at.expect("Decrypting must fire on hybrid decrypt");
+    assert!(
+        deriving_at < decrypting_at,
+        "DerivingKey ({deriving_at}) must fire before Decrypting ({decrypting_at}); events: {events:?}"
+    );
+
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn test_hybrid_keygen_private_key_permissions() -> Result<(), CryptoError> {

@@ -269,16 +269,26 @@ pub fn validate_archive_path(path: &Path) -> Result<(), CryptoError> {
 /// to give per-entry control: symlinks and special entries (sockets, FIFOs,
 /// devices) are rejected with a clear error. Hardlinks are archived as regular
 /// file contents without preserving link identity.
-pub fn archive<W: Write>(
-    input_path: impl AsRef<Path>,
-    writer: W,
-) -> Result<(String, W), CryptoError> {
-    let input_path = input_path.as_ref();
+/// Rejects inputs the archiver will not accept: symlinks (live or dangling)
+/// and anything that isn't a regular file or directory. Defined here because
+/// these are the archiver's per-entry rules; `lib.rs` also calls this at the
+/// top of every encrypt entry point so that the rejection fires before any
+/// Argon2id or cipher work runs (up to a gigabyte of RAM and several seconds
+/// of CPU on default settings), not only at archive time. The archive-time
+/// call remains as defense-in-depth against TOCTOU and direct callers.
+///
+/// The `is_symlink` check runs before the existence check so that dangling
+/// symlinks fail with a clear "Input is a symlink" message instead of a
+/// generic `InputPath` not-found.
+pub(crate) fn validate_encrypt_input(input_path: &Path) -> Result<(), CryptoError> {
     if input_path.is_symlink() {
         return Err(CryptoError::InvalidInput(format!(
             "Input is a symlink: {}",
             input_path.display()
         )));
+    }
+    if !input_path.exists() {
+        return Err(CryptoError::InputPath);
     }
     if !input_path.is_file() && !input_path.is_dir() {
         return Err(CryptoError::InvalidInput(format!(
@@ -286,6 +296,15 @@ pub fn archive<W: Write>(
             input_path.display()
         )));
     }
+    Ok(())
+}
+
+pub fn archive<W: Write>(
+    input_path: impl AsRef<Path>,
+    writer: W,
+) -> Result<(String, W), CryptoError> {
+    let input_path = input_path.as_ref();
+    validate_encrypt_input(input_path)?;
     let mut builder = tar::Builder::new(writer);
 
     let stem = if input_path.is_file() {

@@ -481,8 +481,6 @@ pub fn decrypt_file(
     kdf_limit: Option<&KdfLimit>,
     on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<PathBuf, CryptoError> {
-    on_event(&ProgressEvent::Decrypting);
-
     let mut encrypted_file = fs::File::open(input_path)?;
 
     let (prefix_bytes, header) =
@@ -516,7 +514,7 @@ fn decrypt_file_v4(
     private_key_path: &Path,
     passphrase: &SecretString,
     kdf_limit: Option<&KdfLimit>,
-    _on_event: &dyn Fn(&ProgressEvent),
+    on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<PathBuf, CryptoError> {
     format::validate_file_flags(&header)?;
 
@@ -532,6 +530,7 @@ fn decrypt_file_v4(
     let core = HybridHeaderCore::read_from(&mut encrypted_file, header.ext_len as usize)?;
     let hmac_tag = format::read_replicated_field::<HMAC_TAG_SIZE>(&mut encrypted_file)?;
 
+    on_event(&ProgressEvent::DerivingKey);
     let recipient_secret = read_private_key(private_key_path, passphrase, kdf_limit)?;
     let envelope_result = open_envelope(&core.envelope, &recipient_secret);
     drop(recipient_secret);
@@ -546,6 +545,7 @@ fn decrypt_file_v4(
         let stream_decryptor =
             stream::DecryptorBE32::from_aead(cipher, core.stream_nonce.as_slice().into());
 
+        on_event(&ProgressEvent::Decrypting);
         let decrypt_reader = DecryptReader::new(stream_decryptor, encrypted_file);
         archiver::unarchive(decrypt_reader, output_dir)
     })();

@@ -55,8 +55,13 @@ impl KdfLimit {
 
 impl Default for KdfLimit {
     fn default() -> Self {
+        // Matches the writer's `KdfParams::DEFAULT_MEM_COST`: any file
+        // produced with the library's own default KDF settings decrypts
+        // under the default ceiling, but an attacker-controlled header
+        // cannot force more than 1 GiB of Argon2id memory unless the
+        // caller opts into a higher `KdfLimit` explicitly.
         Self {
-            max_mem_cost_kib: KdfParams::MAX_MEM_COST,
+            max_mem_cost_kib: KdfParams::DEFAULT_MEM_COST,
         }
     }
 }
@@ -72,7 +77,7 @@ pub struct KdfParams {
 pub const KDF_PARAMS_SIZE: usize = 12; // 3 × u32 big-endian
 
 impl KdfParams {
-    const DEFAULT_MEM_COST: u32 = 1_048_576; // 1 GiB
+    pub(crate) const DEFAULT_MEM_COST: u32 = 1_048_576; // 1 GiB
     const DEFAULT_TIME_COST: u32 = 4;
     const DEFAULT_LANES: u32 = 4;
 
@@ -122,9 +127,13 @@ impl KdfParams {
             )));
         }
 
+        // `None` means "no explicit caller limit", but the library still
+        // applies its own default ceiling so callers cannot be silently
+        // exposed to attacker-controlled 2 GiB allocations just because
+        // they did not set `.kdf_limit(...)` on their config.
         let effective_max = limit
             .map(|l| l.max_mem_cost_kib)
-            .unwrap_or(Self::MAX_MEM_COST);
+            .unwrap_or(Self::DEFAULT_MEM_COST);
         if params.mem_cost > effective_max {
             return Err(CryptoError::ExcessiveWork {
                 required_kib: params.mem_cost,
@@ -860,7 +869,11 @@ mod tests {
             lanes: 8,
         }
         .to_bytes();
-        assert!(KdfParams::from_bytes(&bytes, None).is_ok());
+        // Structurally valid at the hard 2 GiB ceiling. Callers who want
+        // to accept such a header opt into the matching `KdfLimit`
+        // explicitly; the default 1 GiB cap is enforced elsewhere.
+        let limit = KdfLimit::new(KdfParams::MAX_MEM_COST);
+        assert!(KdfParams::from_bytes(&bytes, Some(&limit)).is_ok());
     }
 
     #[test]
@@ -899,5 +912,57 @@ mod tests {
         let bytes = KdfParams::default().to_bytes();
         let limit = KdfLimit::default();
         assert!(KdfParams::from_bytes(&bytes, Some(&limit)).is_ok());
+    }
+
+    /// M-2 regression: `KdfLimit::default()` caps accepted `mem_cost` at the
+    /// writer's default (1 GiB). A structurally-valid header requesting the
+    /// hard maximum (2 GiB) must be rejected with `ExcessiveWork` when the
+    /// caller does not opt into a wider limit explicitly. Locks in the
+    /// post-audit tightening so it cannot silently regress.
+    #[test]
+    fn test_kdf_limit_default_rejects_max_mem_cost_header() {
+        let bytes = KdfParams {
+            mem_cost: KdfParams::MAX_MEM_COST, // 2 GiB — structurally valid
+            time_cost: 4,
+            lanes: 4,
+        }
+        .to_bytes();
+        let limit = KdfLimit::default();
+        match KdfParams::from_bytes(&bytes, Some(&limit)) {
+            Err(CryptoError::ExcessiveWork {
+                required_kib,
+                max_kib,
+            }) => {
+                assert_eq!(required_kib, KdfParams::MAX_MEM_COST);
+                assert_eq!(max_kib, KdfParams::DEFAULT_MEM_COST);
+            }
+            Err(other) => panic!("expected ExcessiveWork, got: {other}"),
+            Ok(_) => panic!("default limit must reject a 2 GiB header"),
+        }
+    }
+
+    /// M-2 regression: when `limit = None` (the library's "no explicit cap"
+    /// convenience), `from_bytes` must still apply the default ceiling so
+    /// callers who do not pass a `KdfLimit` are not silently exposed to
+    /// 2 GiB allocations from attacker-controlled headers.
+    #[test]
+    fn test_kdf_limit_none_applies_default_ceiling() {
+        let bytes = KdfParams {
+            mem_cost: KdfParams::MAX_MEM_COST,
+            time_cost: 4,
+            lanes: 4,
+        }
+        .to_bytes();
+        match KdfParams::from_bytes(&bytes, None) {
+            Err(CryptoError::ExcessiveWork {
+                required_kib,
+                max_kib,
+            }) => {
+                assert_eq!(required_kib, KdfParams::MAX_MEM_COST);
+                assert_eq!(max_kib, KdfParams::DEFAULT_MEM_COST);
+            }
+            Err(other) => panic!("expected ExcessiveWork, got: {other}"),
+            Ok(_) => panic!("None limit must apply default ceiling"),
+        }
     }
 }

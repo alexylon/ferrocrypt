@@ -141,10 +141,9 @@ In the current `v3.0` symmetric format, every defined header field listed below 
 3. HKDF salt (`32` logical bytes, stored encoded)
 4. KDF params (`12` logical bytes, stored encoded)
 5. stream nonce (`19` logical bytes, stored encoded)
-6. key verification hash (`32` logical bytes, stored encoded)
-7. `ext_bytes` — authenticated extension region (`ext_len` logical bytes, stored encoded; `ext_len = 0` in `v3.0`)
-8. HMAC tag (`32` logical bytes, stored encoded)
-9. ciphertext payload
+6. `ext_bytes` — authenticated extension region (`ext_len` logical bytes, stored encoded; `ext_len = 0` in `v3.0`)
+7. HMAC tag (`32` logical bytes, stored encoded)
+8. ciphertext payload
 
 ### 4.2 KDF params layout
 
@@ -172,6 +171,8 @@ The `mem_cost` lower bound of `8 * lanes` is an Argon2 requirement (memory must 
 
 Files outside those bounds are rejected by current readers.
 
+Library callers additionally get a **default** `KdfLimit` of `1_048_576` KiB (1 GiB), matching the writer's own default. Files whose header `mem_cost` exceeds this ceiling are rejected with `ExcessiveWork` unless the caller opts into a higher limit. The 2 GiB bound above is the hard structural maximum enforced regardless of caller choice.
+
 ### 4.3 Key derivation pipeline
 
 Symmetric mode derives keys as follows:
@@ -185,22 +186,7 @@ IKM + HKDF salt
     -> 32-byte header HMAC key
 ```
 
-### 4.4 Key verification hash
-
-The key verification hash is:
-
-```text
-SHA3-256(encryption_key)
-```
-
-It is used to help distinguish:
-
-- wrong password / wrong derived key
-- vs. generic header authentication failure
-
-It is part of the authenticated symmetric header.
-
-### 4.5 Stored sizes (v3.0 symmetric, `ext_len = 0`)
+### 4.4 Stored sizes (v3.0 symmetric, `ext_len = 0`)
 
 | Field | Logical size | Stored size |
 |---|---:|---:|
@@ -209,10 +195,9 @@ It is part of the authenticated symmetric header.
 | HKDF salt | 32 | 99 |
 | KDF params | 12 | 39 |
 | Stream nonce | 19 | 63 |
-| Key verification hash | 32 | 99 |
 | `ext_bytes` | 0 | 3 |
 | HMAC tag | 32 | 99 |
-| **Total header size** | — | **528 bytes** |
+| **Total header size** | — | **429 bytes** |
 
 So a current symmetric `v3.0` file (with no extensions) is laid out as:
 
@@ -222,11 +207,12 @@ So a current symmetric `v3.0` file (with no extensions) is laid out as:
 126..225 encoded HKDF salt
 225..264 encoded KDF params
 264..327 encoded stream nonce
-327..426 encoded key verification hash
-426..429 encoded ext_bytes (empty)
-429..528 encoded HMAC tag
-528..end ciphertext payload
+327..330 encoded ext_bytes (empty)
+330..429 encoded HMAC tag
+429..end ciphertext payload
 ```
+
+The `hmac_key` and `encryption_key` are derived from the same passphrase + Argon2 salt + KDF params + HKDF salt, so a wrong passphrase or a tampered key-derivation field produces a wrong `hmac_key` and HMAC verification fails before any ciphertext is read. No separate key-verification hash is required; both "wrong passphrase" and "header tampered" surface as a single `HeaderAuthenticationFailed` error.
 
 A future minor version that ships `ext_len = L` logical bytes of authenticated
 extension data adds exactly `encoded_size(L) - encoded_size(0)` bytes before the
@@ -477,7 +463,6 @@ In symmetric mode, the header HMAC authenticates the **decoded** values of:
 - HKDF salt
 - KDF params
 - stream nonce
-- key verification hash
 - `ext_bytes` (any authenticated extension data)
 
 The outer HMAC tag itself is then stored in replicated form immediately after

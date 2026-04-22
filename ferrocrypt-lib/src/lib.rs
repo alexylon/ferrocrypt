@@ -736,7 +736,7 @@ pub fn symmetric_encrypt(
     on_event: impl Fn(&ProgressEvent),
 ) -> Result<EncryptOutcome, CryptoError> {
     validate_passphrase(&config.passphrase)?;
-    validate_input_path(&config.input)?;
+    archiver::validate_encrypt_input(&config.input)?;
     let output_path = symmetric::encrypt_file(
         &config.input,
         &config.output_dir,
@@ -787,7 +787,7 @@ pub fn hybrid_encrypt(
     config: HybridEncryptConfig,
     on_event: impl Fn(&ProgressEvent),
 ) -> Result<EncryptOutcome, CryptoError> {
-    validate_input_path(&config.input)?;
+    archiver::validate_encrypt_input(&config.input)?;
     let public_key_bytes = config.public_key.resolve()?;
     let output_path = hybrid::encrypt_file_from_bytes(
         &config.input,
@@ -804,6 +804,7 @@ pub fn hybrid_decrypt(
     config: HybridDecryptConfig,
     on_event: impl Fn(&ProgressEvent),
 ) -> Result<DecryptOutcome, CryptoError> {
+    validate_passphrase(&config.passphrase)?;
     validate_input_path(&config.input)?;
     let output_path = hybrid::decrypt_file(
         &config.input,

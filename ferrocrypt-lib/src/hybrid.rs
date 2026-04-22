@@ -534,26 +534,20 @@ fn decrypt_file_v4(
     let recipient_secret = read_private_key(private_key_path, passphrase, kdf_limit)?;
     let envelope_result = open_envelope(&core.envelope, &recipient_secret);
     drop(recipient_secret);
-    let mut decrypted_combined_key = envelope_result?;
+    let decrypted_combined_key = envelope_result?;
 
-    let result = (|| -> Result<PathBuf, CryptoError> {
-        let hmac_key = &decrypted_combined_key[ENCRYPTION_KEY_SIZE..COMBINED_KEY_SIZE];
-        hmac_sha3_256_verify(hmac_key, &core.hmac_input(&prefix_bytes), &hmac_tag, || {
-            CryptoError::HybridHeaderAuthenticationFailed
-        })?;
+    let hmac_key = &decrypted_combined_key[ENCRYPTION_KEY_SIZE..COMBINED_KEY_SIZE];
+    hmac_sha3_256_verify(hmac_key, &core.hmac_input(&prefix_bytes), &hmac_tag, || {
+        CryptoError::HybridHeaderAuthenticationFailed
+    })?;
 
-        let cipher =
-            XChaCha20Poly1305::new((&decrypted_combined_key[..ENCRYPTION_KEY_SIZE]).into());
-        let stream_decryptor =
-            stream::DecryptorBE32::from_aead(cipher, core.stream_nonce.as_slice().into());
+    let cipher = XChaCha20Poly1305::new((&decrypted_combined_key[..ENCRYPTION_KEY_SIZE]).into());
+    let stream_decryptor =
+        stream::DecryptorBE32::from_aead(cipher, core.stream_nonce.as_slice().into());
 
-        on_event(&ProgressEvent::Decrypting);
-        let decrypt_reader = DecryptReader::new(stream_decryptor, encrypted_file);
-        archiver::unarchive(decrypt_reader, output_dir)
-    })();
-
-    decrypted_combined_key.zeroize();
-    result
+    on_event(&ProgressEvent::Decrypting);
+    let decrypt_reader = DecryptReader::new(stream_decryptor, encrypted_file);
+    archiver::unarchive(decrypt_reader, output_dir)
 }
 
 #[cfg(test)]
@@ -640,12 +634,11 @@ fn read_private_key_data(
         ));
     }
 
-    let mut private_key_bytes = [0u8; PRIVATE_KEY_SIZE];
+    let mut private_key_bytes = Zeroizing::new([0u8; PRIVATE_KEY_SIZE]);
     private_key_bytes.copy_from_slice(&plaintext);
     plaintext.zeroize();
 
-    let key = StaticSecret::from(private_key_bytes);
-    private_key_bytes.zeroize();
+    let key = StaticSecret::from(*private_key_bytes);
     Ok(key)
 }
 
@@ -690,7 +683,7 @@ fn seal_envelope(
 fn open_envelope(
     envelope: &[u8; ENVELOPE_SIZE],
     recipient_secret: &StaticSecret,
-) -> Result<[u8; COMBINED_KEY_SIZE], CryptoError> {
+) -> Result<Zeroizing<[u8; COMBINED_KEY_SIZE]>, CryptoError> {
     let parsed = Envelope::from_bytes(envelope);
     let ephemeral_public = PublicKey::from(parsed.ephemeral_public);
 
@@ -716,7 +709,7 @@ fn open_envelope(
         ));
     }
 
-    let mut result = [0u8; COMBINED_KEY_SIZE];
+    let mut result = Zeroizing::new([0u8; COMBINED_KEY_SIZE]);
     result.copy_from_slice(&plaintext);
     plaintext.zeroize();
     Ok(result)
@@ -1135,7 +1128,7 @@ mod tests {
 
         let envelope = seal_envelope(&combined_key, &public).unwrap();
         let recovered = open_envelope(&envelope, &private_key).unwrap();
-        assert_eq!(combined_key, recovered);
+        assert_eq!(combined_key, *recovered);
     }
 
     /// Wrong private key must fail to open an envelope.

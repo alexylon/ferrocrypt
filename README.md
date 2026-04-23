@@ -73,7 +73,7 @@ The 8-byte header prefix (`FCR\0` magic, version, type, extension length) select
 
 - "Newer file format (v2). Upgrade FerroCrypt." — instead of failing to identify the format at all
 - "Unknown encrypted file type: 0xNN" — instead of treating the file as plaintext
-- "File has invalid decrypt settings (N KiB memory)" / "Needs N KiB to decrypt; limit is M KiB" — instead of silently allocating unbounded memory
+- "File has invalid KDF settings (N KiB memory)" / "Needs N KiB to decrypt; limit is M KiB" — instead of silently allocating unbounded memory
 - "Decryption failed: wrong passphrase or tampered envelope" (symmetric) / "Decryption failed: wrong private key or tampered envelope" (hybrid) — instead of not knowing whether the credential is wrong or the envelope is damaged
 - "Encrypted file is truncated" / "Payload authentication failed: data tampered or corrupted" — instead of not reaching payload decryption at all
 

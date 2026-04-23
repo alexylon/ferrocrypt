@@ -100,7 +100,7 @@ pub(crate) fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
         if to.try_exists()? {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
-                "target exists",
+                "Target already exists",
             ));
         }
         std::fs::rename(from, to)?;
@@ -114,7 +114,7 @@ pub(crate) fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
         let _ = to;
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "atomic rename is not supported on this target",
+            "Atomic rename is not supported on this target",
         ))
     }
 }

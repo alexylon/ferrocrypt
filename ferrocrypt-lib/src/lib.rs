@@ -665,7 +665,10 @@ pub fn decode_recipient(recipient: &str) -> Result<[u8; 32], CryptoError> {
 /// total file size. Does **not** attempt to decrypt the key (no
 /// passphrase needed).
 pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError> {
-    let data = std::fs::read(key_file.as_ref())?;
+    let data = std::fs::read(key_file.as_ref()).map_err(hybrid::map_user_path_io_error)?;
+    if hybrid::is_valid_public_key_file(&data) {
+        return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
+    }
     let header = format::parse_private_key_header(&data)?;
     hybrid::validate_private_key_shape(&data, &header)
 }

@@ -106,7 +106,7 @@ mod nofollow {
         if FileType::from_raw_mode(stat.st_mode) != FileType::Directory {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "mkdirat target is not a directory after open",
+                "Created directory is no longer a directory (race detected)",
             ));
         }
         Ok(fd)
@@ -178,9 +178,13 @@ mod nofollow {
         rel: &Path,
     ) -> Result<(OwnedFd, OsString), CryptoError> {
         let mut components: Vec<Component<'_>> = rel.components().collect();
-        let last = components
-            .pop()
-            .ok_or_else(|| CryptoError::InvalidInput("Empty entry relative path".to_string()))?;
+        // Caller guarantees `rel` is non-empty (the upstream
+        // `rel.as_os_str().is_empty()` branch handles the root-
+        // level case) and `validate_archive_path` has reduced it to
+        // Normal components only, so `pop()` never returns None here.
+        let last = components.pop().ok_or(CryptoError::InternalInvariant(
+            "Internal error: archive entry resolved to empty path",
+        ))?;
         let final_name = normal_component(last, rel)?.to_os_string();
 
         let mut cur = root_fd
@@ -340,7 +344,7 @@ fn append_file<W: Write>(
     let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Err(CryptoError::InvalidInput(format!(
-            "Path is no longer a regular file: {}",
+            "Input is no longer a regular file: {}",
             src_path.display()
         )));
     }
@@ -395,7 +399,7 @@ fn open_no_follow(path: &Path) -> Result<File, CryptoError> {
         .open(path)
         .map_err(|e| {
             if e.raw_os_error() == Some(libc::ELOOP) {
-                CryptoError::InvalidInput(format!("Path is a symlink: {}", path.display()))
+                CryptoError::InvalidInput(format!("Input is a symlink: {}", path.display()))
             } else {
                 CryptoError::Io(e)
             }
@@ -407,7 +411,7 @@ fn open_no_follow(path: &Path) -> Result<File, CryptoError> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.file_type().is_file() {
         return Err(CryptoError::InvalidInput(format!(
-            "Path is not a regular file: {}",
+            "Input is no longer a regular file: {}",
             path.display()
         )));
     }
@@ -592,7 +596,7 @@ fn extract_entries<R: Read>(
             Ok(r) => r.to_path_buf(),
             Err(_) => {
                 return Err(CryptoError::InternalInvariant(
-                    "internal error: entry path missing root component",
+                    "Internal error: entry path missing root component",
                 ));
             }
         };
@@ -669,7 +673,7 @@ fn extract_entries<R: Read>(
             Some(RootKind::Directory(fd)) => fd,
             _ => {
                 return Err(CryptoError::InternalInvariant(
-                    "internal error: root dirfd disappeared after insertion",
+                    "Internal error: root dirfd disappeared after insertion",
                 ));
             }
         };
@@ -708,7 +712,7 @@ fn extract_entries<R: Read>(
             Some(RootKind::Directory(fd)) => fd,
             _ => {
                 return Err(CryptoError::InternalInvariant(
-                    "internal error: root dirfd missing at dir-perm stage",
+                    "Internal error: root dirfd missing at dir-perm stage",
                 ));
             }
         };

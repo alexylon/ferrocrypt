@@ -449,12 +449,16 @@ Readers MUST:
 - verify the BIP 173 checksum;
 - reject non-canonical encodings, including any uppercase or mixed-case
   string;
-- reject leading / trailing whitespace other than a single trailing
-  LF;
-- reject extra lines;
 - reject unknown `algorithm` bytes (`FormatDefect::UnknownAlgorithm`);
 - reject key material whose length does not match the algorithm
   (`FormatDefect::UnexpectedKeyLength`).
+
+Readers SHOULD strip leading and trailing ASCII whitespace (spaces,
+tabs, CR, LF) before parsing so that files saved with differing
+line endings, a missing trailing LF, or an editor-inserted trailing
+newline all parse identically. Internal whitespace inside the
+`fcr1…` string is rejected by the Bech32 checksum; no dedicated
+error is needed.
 
 ### 7.2 Fingerprint
 

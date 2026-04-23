@@ -274,7 +274,7 @@ pub fn ct_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
 
 pub fn hmac_sha3_256(key: &[u8], data: &[u8]) -> Result<[u8; 32], CryptoError> {
     let mut mac = HmacSha3_256::new_from_slice(key)
-        .map_err(|_| CryptoError::InternalInvariant("internal error: invalid HMAC key length"))?;
+        .map_err(|_| CryptoError::InternalInvariant("Internal error: invalid HMAC key length"))?;
     mac.update(data);
     let result = mac.finalize();
     let bytes: [u8; 32] = result.into_bytes().into();
@@ -293,7 +293,7 @@ pub fn hmac_sha3_256(key: &[u8], data: &[u8]) -> Result<[u8; 32], CryptoError> {
 /// earlier.
 pub fn hmac_sha3_256_verify(key: &[u8], data: &[u8], tag: &[u8]) -> Result<(), CryptoError> {
     let mut mac = HmacSha3_256::new_from_slice(key)
-        .map_err(|_| CryptoError::InternalInvariant("internal error: invalid HMAC key length"))?;
+        .map_err(|_| CryptoError::InternalInvariant("Internal error: invalid HMAC key length"))?;
     mac.update(data);
     mac.verify_slice(tag)
         .map_err(|_| CryptoError::HeaderTampered)
@@ -380,9 +380,9 @@ pub fn seal_file_key(
     let nonce = XNonce::from_slice(wrap_nonce);
     let ciphertext = cipher
         .encrypt(nonce, file_key.as_ref())
-        .map_err(|_| CryptoError::InternalCryptoFailure("internal error: envelope seal failed"))?;
+        .map_err(|_| CryptoError::InternalCryptoFailure("Internal error: envelope seal failed"))?;
     ciphertext.as_slice().try_into().map_err(|_| {
-        CryptoError::InternalInvariant("internal error: envelope ciphertext size mismatch")
+        CryptoError::InternalInvariant("Internal error: envelope ciphertext size mismatch")
     })
 }
 
@@ -414,7 +414,7 @@ pub fn open_file_key(
     let mut out = Zeroizing::new([0u8; FILE_KEY_SIZE]);
     if plaintext.len() != FILE_KEY_SIZE {
         return Err(CryptoError::InternalInvariant(
-            "internal error: unwrapped file key size mismatch",
+            "Internal error: unwrapped file key size mismatch",
         ));
     }
     out.copy_from_slice(&plaintext);
@@ -432,7 +432,7 @@ pub fn hkdf_expand_sha3_256(
     let hkdf = Hkdf::<Sha3_256>::new(salt, ikm);
     let mut out = Zeroizing::new([0u8; 32]);
     hkdf.expand(info, out.as_mut())
-        .map_err(|_| CryptoError::InternalCryptoFailure("internal error: HKDF expand failed"))?;
+        .map_err(|_| CryptoError::InternalCryptoFailure("Internal error: HKDF expand failed"))?;
     Ok(out)
 }
 
@@ -567,15 +567,15 @@ impl<W: Write> EncryptWriter<W> {
     /// Returns the inner writer so the caller can finalize it (e.g. `sync_all`).
     pub fn finish(mut self) -> Result<W, CryptoError> {
         let encryptor = self.encryptor.take().ok_or(CryptoError::InternalInvariant(
-            "internal error: encrypt writer already finished",
+            "Internal error: encrypt writer already finished",
         ))?;
         let mut output = self.output.take().ok_or(CryptoError::InternalInvariant(
-            "internal error: encrypt writer already finished",
+            "Internal error: encrypt writer already finished",
         ))?;
         encryptor
             .encrypt_last_in_place(b"", &mut self.chunk)
             .map_err(|_| {
-                CryptoError::InternalCryptoFailure("internal error: payload encryption failed")
+                CryptoError::InternalCryptoFailure("Internal error: payload encryption failed")
             })?;
         output.write_all(&self.chunk)?;
         output.flush()?;

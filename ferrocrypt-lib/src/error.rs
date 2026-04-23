@@ -30,9 +30,10 @@ use thiserror::Error;
 /// # The one escape hatch: [`CryptoError::InvalidInput`]
 ///
 /// One variant — [`CryptoError::InvalidInput`] — carries a free-form
-/// `String`. It exists because two layers inside the library genuinely
-/// need to surface *which* caller-supplied value triggered a fail-closed
-/// rejection:
+/// `String`. It is the **designated heterogeneous caller-input
+/// bucket** for fail-closed rejections whose only useful context is
+/// a path or short token that has to be echoed back to the user.
+/// Concretely it covers:
 ///
 /// - **tar-archive layer**: "symlink entry `foo/bar`", "unsafe path in
 ///   archive `../escape.txt`", "archive mixes file and directory at
@@ -45,18 +46,24 @@ use thiserror::Error;
 ///   prefix…", "Recipient string must be lowercase"). Callers pass
 ///   recipient strings through as opaque values, so the parser has to
 ///   echo the input back for the user to spot a typo.
+/// - **Caller-invocation path conflicts and shape rejections**:
+///   "Output already exists: `path`", "Key file already exists:
+///   `path`", "Input is a symlink: `path`", "Unsupported file type:
+///   `path`", "Invalid recipient public key". These surface *which*
+///   user-supplied path or value triggered the rejection so
+///   operators can fix it without extra debugging.
+/// - **Caller-supplied config values** outside the valid range:
+///   "KDF memory limit overflow: `N` MiB", "Passphrase must not be
+///   empty".
 ///
 /// Typing these via structured variants would require dozens of new
 /// variants each carrying a `PathBuf` or `String`, which reintroduces
 /// the exact "library carries per-operation context" problem the rest
 /// of the type deliberately avoids.
 ///
-/// `InvalidInput` is therefore the **designated heterogeneous
-/// caller-input bucket**. It is *not* where paths from the user's
-/// invocation live (those belong at the CLI/desktop boundary), and
-/// it is *not* used for anything the other variants can express as
-/// typed data. Library consumers treating it as an opaque string and
-/// surfacing it via `Display` is the correct pattern.
+/// Library consumers treat `InvalidInput` as an opaque string and
+/// surface it via `Display`; the CLI and desktop frontends do exactly
+/// that.
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum CryptoError {
@@ -113,10 +120,17 @@ pub enum CryptoError {
     /// them into a single error.
     #[error("Decryption failed: wrong passphrase or tampered envelope")]
     SymmetricEnvelopeUnlockFailed,
-    /// A hybrid `.fcr` envelope failed to unlock. Fires from the envelope
-    /// AEAD-open (wrong private key or tampered envelope are
-    /// indistinguishable there) and from the all-zero X25519
-    /// shared-secret guard (small-order recipient public key).
+    /// A hybrid `.fcr` envelope failed to unlock during **decrypt**.
+    /// Fires from the envelope AEAD-open (wrong private key or
+    /// tampered envelope are indistinguishable at that layer) and
+    /// from the decrypt-side all-zero X25519 shared-secret guard (a
+    /// small-order ephemeral pubkey stored in the envelope).
+    ///
+    /// The **encrypt-side** small-order guard, by contrast, fires on
+    /// a caller-supplied recipient public key and surfaces as
+    /// [`CryptoError::InvalidInput`] with the "Invalid recipient
+    /// public key" message — an encrypt-time user error, not a
+    /// decrypt-time forensic failure.
     #[error("Decryption failed: wrong private key or tampered envelope")]
     HybridEnvelopeUnlockFailed,
     /// The envelope unwrapped successfully but the header HMAC failed.
@@ -139,11 +153,6 @@ pub enum CryptoError {
     /// decrypted. The file has unexpected trailing data.
     #[error("Encrypted file has unexpected trailing data")]
     ExtraDataAfterPayload,
-
-    // ─── Low-level primitives ────────────────────────────────────────────
-    /// Fixed-size byte conversion failed due to an unexpected length.
-    #[error(transparent)]
-    SliceConversion(#[from] std::array::TryFromSliceError),
 
     // ─── Internal invariants ─────────────────────────────────────────────
     /// A non-cryptographic invariant that should hold by construction did
@@ -193,7 +202,8 @@ pub enum FormatDefect {
     /// A TLV tag in the critical range (`0x8001..=0xFFFF`) is not
     /// recognised by this release.
     UnknownCriticalTag { tag: u16 },
-    /// Input looks structurally valid but is not a FerroCrypt key file.
+    /// Leading magic bytes do not match `"FCR\0"` — not a FerroCrypt
+    /// key file. Key-file analogue of [`FormatDefect::BadMagic`].
     NotAKeyFile,
     /// Key file is the wrong kind for this operation (public vs private).
     WrongKeyFileType,
@@ -212,7 +222,11 @@ impl std::fmt::Display for FormatDefect {
             Self::Truncated => f.write_str("File is truncated or corrupted"),
             Self::CorruptedHeader => f.write_str("File header is corrupted"),
             Self::CorruptedPrefix { decoded_view } => {
-                write!(f, "File header corrupted (declared v{})", decoded_view[4])
+                write!(
+                    f,
+                    "File header is corrupted (declared v{})",
+                    decoded_view[4]
+                )
             }
             Self::BadMagic => f.write_str("Not a FerroCrypt file"),
             Self::UnknownType { type_byte } => {
@@ -232,10 +246,10 @@ impl std::fmt::Display for FormatDefect {
             Self::NotAKeyFile => f.write_str("Not a FerroCrypt key file"),
             Self::WrongKeyFileType => f.write_str("Wrong key file kind (public vs private)"),
             Self::UnknownAlgorithm { algorithm } => {
-                write!(f, "Unsupported key algorithm: 0x{algorithm:02X}")
+                write!(f, "Unknown key algorithm: 0x{algorithm:02X}")
             }
             Self::BadKeyFileSize => f.write_str("Key file has unexpected size"),
-            Self::UnexpectedKeyLength => f.write_str("Key data has an invalid length"),
+            Self::UnexpectedKeyLength => f.write_str("Key material has unexpected length"),
         }
     }
 }
@@ -293,12 +307,12 @@ impl std::fmt::Display for InvalidKdfParams {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Parallelism(n) => {
-                write!(f, "File has invalid decrypt settings (parallelism {n})")
+                write!(f, "File has invalid KDF settings (parallelism {n})")
             }
             Self::MemoryCost(n) => {
-                write!(f, "File has invalid decrypt settings ({n} KiB memory)")
+                write!(f, "File has invalid KDF settings ({n} KiB memory)")
             }
-            Self::TimeCost(n) => write!(f, "File has invalid decrypt settings (time cost {n})"),
+            Self::TimeCost(n) => write!(f, "File has invalid KDF settings (time cost {n})"),
         }
     }
 }
@@ -330,11 +344,11 @@ pub(crate) enum StreamError {
 impl std::fmt::Display for StreamError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let msg = match self {
-            StreamError::DecryptAead => "payload authentication failed",
-            StreamError::EncryptAead => "internal error: payload encryption failed",
-            StreamError::Truncated => "encrypted stream truncated",
-            StreamError::ExtraData => "encrypted stream has trailing data",
-            StreamError::StateExhausted => "internal error: stream state already finalized",
+            StreamError::DecryptAead => "Payload authentication failed",
+            StreamError::EncryptAead => "Internal error: payload encryption failed",
+            StreamError::Truncated => "Encrypted stream truncated",
+            StreamError::ExtraData => "Encrypted stream has trailing data",
+            StreamError::StateExhausted => "Internal error: stream state already finalized",
         };
         f.write_str(msg)
     }
@@ -359,10 +373,10 @@ impl From<std::io::Error> for CryptoError {
                 StreamError::Truncated => CryptoError::PayloadTruncated,
                 StreamError::ExtraData => CryptoError::ExtraDataAfterPayload,
                 StreamError::EncryptAead => {
-                    CryptoError::InternalCryptoFailure("internal error: payload encryption failed")
+                    CryptoError::InternalCryptoFailure("Internal error: payload encryption failed")
                 }
                 StreamError::StateExhausted => {
-                    CryptoError::InternalInvariant("internal error: stream state already finalized")
+                    CryptoError::InternalInvariant("Internal error: stream state already finalized")
                 }
             };
         }
@@ -433,7 +447,7 @@ mod tests {
                 decoded_view: [b'F', b'C', b'R', 0, 2, 0x53, 0, 0]
             }
             .to_string(),
-            "File header corrupted (declared v2)"
+            "File header is corrupted (declared v2)"
         );
         assert_eq!(FormatDefect::BadMagic.to_string(), "Not a FerroCrypt file");
         assert_eq!(
@@ -466,7 +480,7 @@ mod tests {
         );
         assert_eq!(
             FormatDefect::UnknownAlgorithm { algorithm: 0xFF }.to_string(),
-            "Unsupported key algorithm: 0xFF"
+            "Unknown key algorithm: 0xFF"
         );
         assert_eq!(
             FormatDefect::BadKeyFileSize.to_string(),
@@ -490,15 +504,42 @@ mod tests {
         );
         assert_eq!(
             InvalidKdfParams::Parallelism(9999).to_string(),
-            "File has invalid decrypt settings (parallelism 9999)"
+            "File has invalid KDF settings (parallelism 9999)"
         );
         assert_eq!(
             InvalidKdfParams::MemoryCost(42).to_string(),
-            "File has invalid decrypt settings (42 KiB memory)"
+            "File has invalid KDF settings (42 KiB memory)"
         );
         assert_eq!(
             InvalidKdfParams::TimeCost(7).to_string(),
-            "File has invalid decrypt settings (time cost 7)"
+            "File has invalid KDF settings (time cost 7)"
+        );
+
+        // StreamError — every variant stringifies to a capitalized
+        // sentence start, matching the rest of the error surface. The
+        // three non-internal markers (DecryptAead / Truncated /
+        // ExtraData) have no CryptoError payload carrying their text
+        // (they downcast to typed variants with their own Display),
+        // so this is the only place their wording is locked in.
+        assert_eq!(
+            StreamError::DecryptAead.to_string(),
+            "Payload authentication failed"
+        );
+        assert_eq!(
+            StreamError::EncryptAead.to_string(),
+            "Internal error: payload encryption failed"
+        );
+        assert_eq!(
+            StreamError::Truncated.to_string(),
+            "Encrypted stream truncated"
+        );
+        assert_eq!(
+            StreamError::ExtraData.to_string(),
+            "Encrypted stream has trailing data"
+        );
+        assert_eq!(
+            StreamError::StateExhausted.to_string(),
+            "Internal error: stream state already finalized"
         );
     }
 
@@ -674,14 +715,14 @@ mod tests {
         ));
         match from_marker(StreamError::EncryptAead) {
             CryptoError::InternalCryptoFailure(msg) => {
-                assert_eq!(msg, "internal error: payload encryption failed");
+                assert_eq!(msg, "Internal error: payload encryption failed");
                 assert_eq!(msg, StreamError::EncryptAead.to_string());
             }
             other => panic!("expected InternalCryptoFailure, got {other:?}"),
         }
         match from_marker(StreamError::StateExhausted) {
             CryptoError::InternalInvariant(msg) => {
-                assert_eq!(msg, "internal error: stream state already finalized");
+                assert_eq!(msg, "Internal error: stream state already finalized");
                 assert_eq!(msg, StreamError::StateExhausted.to_string());
             }
             other => panic!("expected InternalInvariant, got {other:?}"),

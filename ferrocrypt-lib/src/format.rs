@@ -130,7 +130,7 @@ pub fn build_encoded_header_prefix(
 ) -> Result<[u8; HEADER_PREFIX_ENCODED_SIZE], CryptoError> {
     let logical = build_header_prefix(format_type, ext_len);
     encode(&logical).as_slice().try_into().map_err(|_| {
-        CryptoError::InternalInvariant("internal error: prefix encoding size mismatch")
+        CryptoError::InternalInvariant("Internal error: prefix encoding size mismatch")
     })
 }
 

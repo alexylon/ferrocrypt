@@ -143,7 +143,7 @@ pub fn encrypt_file(
     };
     if output_path.exists() {
         return Err(CryptoError::InvalidInput(format!(
-            "Output file already exists: {}",
+            "Output already exists: {}",
             output_path.display()
         )));
     }

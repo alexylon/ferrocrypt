@@ -32,7 +32,7 @@
 //! ```
 
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use bech32::{Bech32, Hrp};
@@ -204,7 +204,7 @@ pub fn encrypt_file_from_bytes(
     };
     if output_path.exists() {
         return Err(CryptoError::InvalidInput(format!(
-            "Output file already exists: {}",
+            "Output already exists: {}",
             output_path.display()
         )));
     }
@@ -397,6 +397,59 @@ fn private_key_aad(
     aad
 }
 
+/// Returns `true` if `data` parses as a valid v1 `public.key` text
+/// file — a canonical Bech32 `fcr1…` recipient string with
+/// whitespace tolerated on either end. Used by the private-key
+/// readers (`read_private_key`, `validate_private_key_file`) to
+/// short-circuit with `WrongKeyFileType` when a caller hands them
+/// an actual public.key by mistake.
+///
+/// Runs the full Bech32 decode rather than a cheap `fcr1` prefix
+/// sniff so random garbage starting with those four bytes (e.g.
+/// `"fcr1foobar"`, or a public.key with a corrupted checksum) is
+/// NOT labelled "wrong kind of key file" — the file truly isn't a
+/// public.key, and it correctly falls through to the generic
+/// `NotAKeyFile` / `Truncated` diagnostics.
+pub(crate) fn is_valid_public_key_file(data: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(data) else {
+        return false;
+    };
+    decode_recipient_string(text.trim()).is_ok()
+}
+
+/// Returns `true` if `data` is a structurally valid v1 `private.key`
+/// file — magic, version, type, algorithm byte, and size all
+/// pass the non-cryptographic checks. Does NOT attempt to decrypt
+/// the key (no passphrase required) and does NOT perform the AEAD
+/// authentication that catches cleartext tampering. Used by
+/// `read_public_key` to short-circuit with `WrongKeyFileType` when
+/// a caller hands it an actual private.key by mistake.
+///
+/// Like [`is_valid_public_key_file`], runs the full structural
+/// validator rather than a cheap magic-byte peek so random binary
+/// starting with `"FCR\0"` (a `.fcr` encrypted file, or arbitrary
+/// junk) is NOT labelled "wrong kind of key file" — it isn't a
+/// private.key at all.
+pub(crate) fn is_valid_private_key_file(data: &[u8]) -> bool {
+    match format::parse_private_key_header(data) {
+        Ok(header) => validate_private_key_shape(data, &header).is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// Converts an [`io::Error`] from a user-provided path read into a
+/// typed [`CryptoError`]. `NotFound` maps to [`CryptoError::InputPath`]
+/// so "file does not exist" gives the same pretty message here as it
+/// does from the upfront `validate_input_path` check. Everything else
+/// falls through to [`CryptoError::Io`].
+pub(crate) fn map_user_path_io_error(e: io::Error) -> CryptoError {
+    if e.kind() == io::ErrorKind::NotFound {
+        CryptoError::InputPath
+    } else {
+        CryptoError::Io(e)
+    }
+}
+
 /// Reads and unlocks a `private.key` file. Returns the raw X25519
 /// private key as a [`StaticSecret`]. KDF parameter bounds are checked
 /// BEFORE Argon2id fires, so a hostile file cannot force unbounded work
@@ -406,7 +459,15 @@ fn read_private_key(
     passphrase: &SecretString,
     kdf_limit: Option<&KdfLimit>,
 ) -> Result<StaticSecret, CryptoError> {
-    let data = fs::read(path)?;
+    let data = fs::read(path).map_err(map_user_path_io_error)?;
+    // If the caller pointed this at a text `public.key` by mistake,
+    // short-circuit to `WrongKeyFileType` instead of leaking the
+    // magic-byte mismatch as the generic `NotAKeyFile` defect.
+    // Trim leading whitespace first so files with an editor-inserted
+    // blank line still get the friendly diagnostic.
+    if is_valid_public_key_file(&data) {
+        return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
+    }
     if data.len() < PRIVATE_KEY_HEADER_SIZE {
         return Err(CryptoError::InvalidFormat(FormatDefect::Truncated));
     }
@@ -420,9 +481,10 @@ fn read_private_key(
     // KDF param bounds BEFORE Argon2id runs.
     let kdf_params = KdfParams::from_bytes(&parsed.kdf_bytes, kdf_limit)?;
 
-    let header_bytes: [u8; PRIVATE_KEY_HEADER_SIZE] = data[..PRIVATE_KEY_HEADER_SIZE]
-        .try_into()
-        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::Truncated))?;
+    // Length is guaranteed ≥ `PRIVATE_KEY_HEADER_SIZE` by the check
+    // above — this copy cannot fail.
+    let mut header_bytes = [0u8; PRIVATE_KEY_HEADER_SIZE];
+    header_bytes.copy_from_slice(&data[..PRIVATE_KEY_HEADER_SIZE]);
     let aad = private_key_aad(
         &header_bytes,
         &parsed.argon2_salt,
@@ -547,14 +609,14 @@ pub fn generate_key_pair(
             },
         )
         .map_err(|_| {
-            CryptoError::InternalCryptoFailure("internal error: private key encryption failed")
+            CryptoError::InternalCryptoFailure("Internal error: private key encryption failed")
         })?;
     drop(raw_private_key);
     drop(wrap_key);
 
     let wrapped_privkey: [u8; PRIVATE_KEY_CIPHERTEXT_SIZE] =
         wrapped_vec.as_slice().try_into().map_err(|_| {
-            CryptoError::InternalInvariant("internal error: wrapped private key size mismatch")
+            CryptoError::InternalInvariant("Internal error: wrapped private key size mismatch")
         })?;
 
     // Write public.key (text file, `fcr1…\n`). Public key isn't secret
@@ -631,7 +693,7 @@ pub fn recipient_canonical_bytes(pubkey_bytes: &[u8; 32]) -> [u8; 1 + 32] {
 pub fn encode_recipient_string(pubkey_bytes: &[u8; 32]) -> Result<String, CryptoError> {
     let data = recipient_canonical_bytes(pubkey_bytes);
     bech32::encode::<Bech32>(RECIPIENT_HRP, &data)
-        .map_err(|_| CryptoError::InternalInvariant("internal error: Bech32 encode failed"))
+        .map_err(|_| CryptoError::InternalInvariant("Internal error: Bech32 encode failed"))
 }
 
 /// Decodes a canonical lowercase `fcr1…` Bech32 recipient string into
@@ -677,18 +739,22 @@ pub fn decode_recipient_string(s: &str) -> Result<[u8; 32], CryptoError> {
 }
 
 /// Reads a v1 `public.key` text file and returns the raw 32-byte
-/// X25519 public key. Strict parser: one Bech32 line, optional single
-/// trailing LF, no extra whitespace, canonical lowercase only.
+/// X25519 public key. Leading and trailing whitespace is stripped
+/// before parsing; canonical lowercase Bech32 is still required
+/// (mixed case is rejected by `decode_recipient_string`).
+///
+/// If the caller accidentally points this at a binary `private.key`
+/// (magic `FCR\0`), the reader surfaces
+/// [`FormatDefect::WrongKeyFileType`] instead of a cryptic UTF-8
+/// decode error.
 pub fn read_public_key(path: &Path) -> Result<[u8; 32], CryptoError> {
-    let contents = fs::read_to_string(path)?;
-    // Accept exactly one trailing `\n`, nothing else.
-    let trimmed = contents.strip_suffix('\n').unwrap_or(&contents);
-    if trimmed.contains('\n') || trimmed != trimmed.trim() {
-        return Err(CryptoError::InvalidInput(
-            "public.key: extra whitespace or lines".to_string(),
-        ));
+    let bytes = fs::read(path).map_err(map_user_path_io_error)?;
+    if is_valid_private_key_file(&bytes) {
+        return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
     }
-    decode_recipient_string(trimmed)
+    let contents = String::from_utf8(bytes)
+        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::NotAKeyFile))?;
+    decode_recipient_string(contents.trim())
 }
 
 // ─── Structural validator (kept for fuzz exports) ──────────────────────────
@@ -872,6 +938,251 @@ mod tests {
         // Parse roundtrip.
         let pk_bytes = read_public_key(&pubkey_path)?;
         assert_eq!(pk_bytes.len(), 32);
+        Ok(())
+    }
+
+    /// Pointing `read_public_key` at a binary `private.key` must
+    /// surface `WrongKeyFileType` rather than the old UTF-8 decode
+    /// `io::Error` — the user swapped the key-file kind, not the
+    /// file family.
+    #[test]
+    fn read_public_key_rejects_private_key_file_as_wrong_type() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pass = SecretString::from("kp".to_string());
+        let (privkey_path, _pubkey_path) = generate_key_pair(&pass, tmp.path(), &|_| {})?;
+        match read_public_key(&privkey_path) {
+            Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)) => Ok(()),
+            other => panic!("expected WrongKeyFileType, got {other:?}"),
+        }
+    }
+
+    /// Pointing `read_private_key` at a text `public.key` must
+    /// surface `WrongKeyFileType` rather than the old generic
+    /// `NotAKeyFile` — the Bech32 `fcr1…` prefix is unambiguous
+    /// enough to identify the mix-up.
+    ///
+    /// This also locks in the leading-whitespace tolerance: a
+    /// `public.key` that an editor saved with a stray leading blank
+    /// line must still be classified as "wrong kind", not
+    /// "structural garbage".
+    #[test]
+    fn read_private_key_rejects_public_key_file_as_wrong_type() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pass = SecretString::from("kp".to_string());
+        let (_privkey_path, pubkey_path) = generate_key_pair(&pass, tmp.path(), &|_| {})?;
+
+        // Baseline: canonical public.key file.
+        match read_private_key(&pubkey_path, &pass, None).map(|_| ()) {
+            Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)) => {}
+            other => panic!("expected WrongKeyFileType (canonical), got {other:?}"),
+        }
+
+        // With leading ASCII whitespace — trim must run before the
+        // `fcr1` probe so the friendly diagnostic still fires.
+        let original = fs::read_to_string(&pubkey_path)?;
+        for decorated in [
+            format!("  {original}"),
+            format!("\n{original}"),
+            format!("\r\n{original}"),
+            format!("\t \n{original}"),
+        ] {
+            fs::write(&pubkey_path, decorated.as_bytes())?;
+            match read_private_key(&pubkey_path, &pass, None).map(|_| ()) {
+                Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)) => {}
+                other => panic!(
+                    "expected WrongKeyFileType for leading-whitespace variant, got {other:?}"
+                ),
+            }
+        }
+        Ok(())
+    }
+
+    /// `validate_private_key_file` must agree with `read_private_key`
+    /// on the pub/priv mix-up verdict. Before this fix, the two paths
+    /// disagreed: `read_private_key` returned `WrongKeyFileType` but
+    /// `validate_private_key_file` surfaced the generic `NotAKeyFile`
+    /// because it went through `parse_private_key_header` directly.
+    #[test]
+    fn validate_private_key_file_rejects_public_key_as_wrong_type() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pass = SecretString::from("kp".to_string());
+        let (_privkey_path, pubkey_path) = generate_key_pair(&pass, tmp.path(), &|_| {})?;
+        match crate::validate_private_key_file(&pubkey_path) {
+            Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)) => Ok(()),
+            other => panic!("expected WrongKeyFileType, got {other:?}"),
+        }
+    }
+
+    /// A file whose contents merely *start with* `fcr1` but don't
+    /// parse as a valid recipient string (e.g. truncated garbage like
+    /// `fcr1foobar`, or a public.key with a corrupted checksum) must
+    /// NOT be labelled `WrongKeyFileType` — that wording claims the
+    /// file *is* a public.key, just the wrong kind. Such junk should
+    /// fall through to the generic private-key-header diagnostics.
+    #[test]
+    fn read_private_key_does_not_claim_garbage_fcr1_as_public_key() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pass = SecretString::from("kp".to_string());
+        let path = tmp.path().join("junk.key");
+
+        for junk in ["fcr1foobar", "fcr1", "fcr1aaaaaa", "fcr1 with space"] {
+            fs::write(&path, junk)?;
+            match read_private_key(&path, &pass, None).map(|_| ()) {
+                Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)) => {
+                    panic!("junk `{junk}` must not be classified as WrongKeyFileType");
+                }
+                // Anything else is fine — NotAKeyFile, Truncated, etc.
+                // are all legitimate "we can't tell what this is" verdicts.
+                Err(CryptoError::InvalidFormat(_)) => {}
+                other => panic!("expected InvalidFormat for junk `{junk}`, got {other:?}"),
+            }
+        }
+        Ok(())
+    }
+
+    /// Symmetric check on the public-key side: a file that merely
+    /// starts with `FCR\0` but isn't a structurally valid private.key
+    /// (e.g. a `.fcr` encrypted file, or truncated binary junk) must
+    /// NOT be reported as `WrongKeyFileType`. Only a real private.key
+    /// header (magic + version + type `K` + algorithm `0x01` + size)
+    /// earns that verdict.
+    #[test]
+    fn read_public_key_does_not_claim_fcr_magic_junk_as_private_key() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("junk.key");
+
+        // `FCR\0` + garbage (not enough bytes, wrong type, wrong algorithm).
+        let junk_cases: &[(&str, Vec<u8>)] = &[
+            ("bare magic", b"FCR\0".to_vec()),
+            (
+                "magic + wrong type byte `S` (would be symmetric .fcr)",
+                b"FCR\0\x01Sxx".to_vec(),
+            ),
+            (
+                "magic + correct type `K` but truncated body",
+                b"FCR\0\x01K\x01\x00\x00".to_vec(),
+            ),
+        ];
+
+        for (label, junk) in junk_cases {
+            fs::write(&path, junk)?;
+            match read_public_key(&path) {
+                Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)) => {
+                    panic!("junk `{label}` must not be classified as WrongKeyFileType");
+                }
+                // Anything else is fine — `NotAKeyFile`, recipient-
+                // decoder failures, etc. are all legitimate "we
+                // can't tell what this is" verdicts.
+                Err(_) => {}
+                Ok(_) => panic!("junk `{label}` must not parse as a valid public.key"),
+            }
+        }
+        Ok(())
+    }
+
+    /// A missing key file must surface as `InputPath`, the same
+    /// friendly "Input file or folder missing" variant that the
+    /// upfront `validate_input_path` check produces — not the raw
+    /// OS error text that `fs::read` returns by default. Covers all
+    /// three key-reading entry points so they stay aligned.
+    #[test]
+    fn key_readers_map_missing_file_to_input_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let missing = tmp.path().join("no-such.key");
+        let pass = SecretString::from("kp".to_string());
+
+        assert!(matches!(
+            read_public_key(&missing),
+            Err(CryptoError::InputPath)
+        ));
+        assert!(matches!(
+            read_private_key(&missing, &pass, None).map(|_| ()),
+            Err(CryptoError::InputPath)
+        ));
+        assert!(matches!(
+            crate::validate_private_key_file(&missing),
+            Err(CryptoError::InputPath)
+        ));
+    }
+
+    /// Whitespace around the `fcr1…` string must be stripped rather
+    /// than rejected: editors routinely add a trailing newline and
+    /// Windows line endings (`\r\n`) should parse the same as Unix.
+    #[test]
+    fn read_public_key_trims_surrounding_whitespace() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pass = SecretString::from("kp".to_string());
+        let (_privkey_path, pubkey_path) = generate_key_pair(&pass, tmp.path(), &|_| {})?;
+        let canonical = fs::read_to_string(&pubkey_path)?;
+        let canonical = canonical.trim();
+        let expected = read_public_key(&pubkey_path)?;
+
+        for decorated in [
+            canonical.to_string(),          // no trailing LF
+            format!("{canonical}\n"),       // Unix single LF (already covered)
+            format!("{canonical}\r\n"),     // Windows line ending
+            format!("  {canonical}\n"),     // leading spaces
+            format!("{canonical}  \n"),     // trailing spaces
+            format!("\n\n{canonical}\n\n"), // leading + trailing blank lines
+            format!("\t{canonical}\t\r\n"), // tabs and CRLF
+        ] {
+            fs::write(&pubkey_path, decorated.as_bytes())?;
+            let got = read_public_key(&pubkey_path)?;
+            assert_eq!(got, expected);
+        }
+        Ok(())
+    }
+
+    /// The leniency of [`read_public_key`] relies on the Bech32
+    /// decoder, not [`str::trim`], catching malformed payloads.
+    /// `trim()` only strips Unicode `White_Space`; any remaining
+    /// non-Bech32 character — whether it survived the trim (ZWSP,
+    /// BOM) or was injected between payload chars (internal LF,
+    /// NBSP) — must still be rejected.
+    ///
+    /// This test pins that invariant. If a future `bech32` crate
+    /// upgrade loosened charset enforcement, this test would fail
+    /// and surface the regression before a release.
+    #[test]
+    fn read_public_key_rejects_internal_non_bech32_chars() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pass = SecretString::from("kp".to_string());
+        let (_privkey_path, pubkey_path) = generate_key_pair(&pass, tmp.path(), &|_| {})?;
+        let raw = fs::read_to_string(&pubkey_path)?;
+        let canonical: &str = raw.trim();
+
+        // Pick a split point inside the payload (after the `fcr1`
+        // HRP + separator) so we inject into the data body rather
+        // than into the HRP.
+        assert!(canonical.starts_with("fcr1"));
+        let split = canonical.len() / 2;
+        let (head, tail) = canonical.split_at(split);
+
+        // HRP-corrupted variant: space inside the `fcr` HRP.
+        let hrp_ws = format!("fc r1{}", &canonical["fcr1".len()..]);
+
+        // U+200B ZWSP and U+FEFF BOM are Unicode `Format` chars, NOT
+        // `White_Space` — `str::trim` leaves them in place. Bech32
+        // must reject them as non-ASCII on its own.
+        let corrupted: &[(&str, String)] = &[
+            ("internal space", format!("{head} {tail}")),
+            ("internal LF", format!("{head}\n{tail}")),
+            ("internal tab", format!("{head}\t{tail}")),
+            ("internal CR", format!("{head}\r{tail}")),
+            ("internal NBSP", format!("{head}\u{00A0}{tail}")),
+            ("leading ZWSP", format!("\u{200B}{canonical}")),
+            ("leading BOM", format!("\u{FEFF}{canonical}")),
+            ("HRP whitespace", hrp_ws),
+        ];
+
+        for (label, bad) in corrupted {
+            fs::write(&pubkey_path, bad.as_bytes())?;
+            let res = read_public_key(&pubkey_path);
+            assert!(
+                res.is_err(),
+                "expected rejection for `{label}`, got Ok: {bad:?}"
+            );
+        }
         Ok(())
     }
 }

@@ -309,7 +309,7 @@ pub(crate) enum StreamError {
     /// Encrypted stream ended before the final-flag chunk.
     Truncated,
     /// Bytes remain after the final-flag chunk. Reserved for future
-    /// spec-compliant detection per FORMAT.md §3.7; trailing data
+    /// spec-compliant detection per FORMAT.md §4.9; trailing data
     /// currently surfaces via `DecryptAead` when the final-chunk AEAD
     /// fails on appended bytes. Wiring an explicit post-unarchive
     /// probe into the decrypt path is planned follow-up work.

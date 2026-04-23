@@ -4,7 +4,7 @@ version = "0.2.5"
 edition = "2021"
 rust-version = "1.87"
 
-description = "Core FerroCrypt library: symmetric (XChaCha20-Poly1305 + Argon2id) and hybrid (X25519 ECDH + HKDF-SHA256 + XChaCha20-Poly1305) encryption utilities."
+description = "Core FerroCrypt library: symmetric (XChaCha20-Poly1305 + Argon2id) and hybrid (X25519 ECDH + HKDF-SHA3-256 + XChaCha20-Poly1305) encryption utilities."
 authors = ["Alexander Alexandrov"]
 license = "GPL-3.0-only"
 readme = "../README.md"

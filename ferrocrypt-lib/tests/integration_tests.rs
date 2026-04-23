@@ -1181,17 +1181,13 @@ fn test_symmetric_header_tamper_detection() -> Result<(), CryptoError> {
 
     symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
-    // Tamper with the same salt byte in all three replicated copies so majority
-    // vote cannot recover the original value and the decoded salt changes.
-    // Encoded salt layout: [prefix(27)] [padding(3)] [copy0(32)] [copy1(32)] [copy2(32)]
+    // Flip one byte in the authenticated stream_nonce. The envelope still
+    // unlocks, but the header HMAC no longer matches, so decrypt must fail at
+    // the post-unlock tamper check.
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
-    const PREFIX: usize = 27; // HEADER_PREFIX_ENCODED_SIZE
-    const SALT_LEN: usize = 32;
-    const SALT_BYTE: usize = 1; // which byte within each copy to corrupt
-    data[PREFIX + 3 + SALT_BYTE] ^= 0xFF;
-    data[PREFIX + 3 + SALT_LEN + SALT_BYTE] ^= 0xFF;
-    data[PREFIX + 3 + 2 * SALT_LEN + SALT_BYTE] ^= 0xFF;
+    const NONCE_OFFSET: usize = 27 + 116; // prefix + symmetric envelope
+    data[NONCE_OFFSET] ^= 0xFF;
     fs::write(&encrypted_path, &data)?;
 
     let result = symmetric_auto(
@@ -1203,7 +1199,10 @@ fn test_symmetric_header_tamper_detection() -> Result<(), CryptoError> {
         |_| {},
     );
 
-    assert!(result.is_err());
+    match result {
+        Err(CryptoError::HeaderTampered) => {}
+        other => panic!("expected HeaderTampered, got {other:?}"),
+    }
 
     Ok(())
 }
@@ -1238,23 +1237,12 @@ fn test_hybrid_header_tamper_detection() -> Result<(), CryptoError> {
         |_| {},
     )?;
 
-    // Tamper with the same nonce byte in all three replicated copies so majority
-    // vote cannot recover the original value and the decoded nonce changes.
-    // Hybrid header: [prefix(27)] [encoded_envelope(411)] [encoded_nonce(63)] [encoded_hmac(99)]
-    // encoded_envelope = replication::encode(136-byte envelope) = 3 + 136*3 = 411
-    // encoded_nonce layout: [padding(3)] [copy0(20)] [copy1(20)] [copy2(20)]
-    // (STREAM_NONCE_SIZE=19, padded to 20)
+    // Flip one byte in the authenticated stream_nonce. The hybrid envelope can
+    // still open, but the header HMAC must fail afterwards.
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
-    const PREFIX: usize = 27;
-    const ENVELOPE_SIZE: usize = 136;
-    const ENCODED_ENVELOPE_LEN: usize = 3 + ENVELOPE_SIZE * 3;
-    const PADDED_NONCE: usize = 20; // 19 rounded up to even
-    const NONCE_REGION: usize = PREFIX + ENCODED_ENVELOPE_LEN; // start of encoded_nonce
-    const NONCE_BYTE: usize = 5;
-    data[NONCE_REGION + 3 + NONCE_BYTE] ^= 0xFF;
-    data[NONCE_REGION + 3 + PADDED_NONCE + NONCE_BYTE] ^= 0xFF;
-    data[NONCE_REGION + 3 + 2 * PADDED_NONCE + NONCE_BYTE] ^= 0xFF;
+    const NONCE_OFFSET: usize = 27 + 104; // prefix + hybrid envelope
+    data[NONCE_OFFSET] ^= 0xFF;
     fs::write(&encrypted_path, &data)?;
 
     let private_key_path = keys_dir.join("private.key");
@@ -1269,7 +1257,10 @@ fn test_hybrid_header_tamper_detection() -> Result<(), CryptoError> {
         |_| {},
     );
 
-    assert!(result.is_err());
+    match result {
+        Err(CryptoError::HeaderTampered) => {}
+        other => panic!("expected HeaderTampered, got {other:?}"),
+    }
 
     Ok(())
 }
@@ -1290,15 +1281,15 @@ fn test_symmetric_two_copy_corruption_detected() -> Result<(), CryptoError> {
 
     symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
-    // Corrupt the same byte in 2 of 3 copies — majority vote picks the corrupted value,
-    // changing the decoded salt and causing HMAC or key derivation failure.
+    // Corrupt the version byte in 2 of the 3 replicated prefix copies. Majority
+    // decoding now sees the corrupted logical value, but the on-disk bytes are
+    // no longer the canonical 27-byte encoding of that majority view, so the
+    // file must be rejected as a corrupted prefix rather than silently parsed.
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
-    const PREFIX: usize = 27;
-    const SALT_LEN: usize = 32;
-    const SALT_BYTE: usize = 5;
-    data[PREFIX + 3 + SALT_BYTE] ^= 0xFF;
-    data[PREFIX + 3 + SALT_LEN + SALT_BYTE] ^= 0xFF;
+    const VERSION_LOGICAL: usize = 4;
+    data[3 + VERSION_LOGICAL] ^= 0x03; // copy 0: v1 -> v2
+    data[11 + VERSION_LOGICAL] ^= 0x03; // copy 1: v1 -> v2
     fs::write(&encrypted_path, &data)?;
 
     let result = symmetric_auto(
@@ -1310,7 +1301,10 @@ fn test_symmetric_two_copy_corruption_detected() -> Result<(), CryptoError> {
         |_| {},
     );
 
-    assert!(result.is_err());
+    match result {
+        Err(CryptoError::InvalidFormat(ferrocrypt::FormatDefect::CorruptedPrefix { .. })) => {}
+        other => panic!("expected CorruptedPrefix, got {other:?}"),
+    }
 
     Ok(())
 }
@@ -2145,8 +2139,12 @@ fn test_public_key_validate() -> Result<(), CryptoError> {
 
     // Pointing at a private-key file: the public-key parser rejects the
     // wrong key-file kind instead of leaking secret material.
-    let private_as_public = PublicKey::from_key_file(keys_dir.join("private.key"));
-    assert!(private_as_public.validate().is_err());
+    let private_key_path = keys_dir.join("private.key");
+    assert!(
+        PublicKey::from_key_file(&private_key_path)
+            .validate()
+            .is_err()
+    );
 
     Ok(())
 }
@@ -2609,15 +2607,18 @@ fn test_detect_short_file_with_single_magic_byte_returns_none() {
 fn test_detect_corrupted_fcr_not_silently_encrypted() {
     let dir = setup_test_dir("detect_no_reencrypt");
     let input = dir.join("corrupted.fcr");
-    // A file with magic bytes but corrupted — should not be re-encrypted
-    let prefix: [u8; 8] = [0xFC, 0x41, 3, 0, 0, 30, 0, 0];
+    // Minimal v1-looking symmetric prefix only: detection must route this file
+    // to decrypt, where the missing rest-of-header fails closed instead of the
+    // helper treating it as plaintext and re-encrypting it.
+    let prefix: [u8; 8] = [b'F', b'C', b'R', 0, 1, b'S', 0, 0];
     let encoded = encode_test_prefix(&prefix);
     fs::write(&input, &encoded).unwrap();
     let pass = SecretString::from("pw".to_string());
     let result = symmetric_auto(&input, &dir, &pass, None, None, |_| {});
     assert!(
-        result.is_err(),
-        "corrupted .fcr should not be silently re-encrypted"
+        matches!(result, Err(CryptoError::InvalidFormat(_))),
+        "corrupted .fcr should fail closed, got: {:?}",
+        result
     );
 }
 
@@ -2647,7 +2648,7 @@ fn test_recipient_malformed_bech32_rejected() {
 }
 
 #[test]
-fn test_recipient_uppercase_accepted() -> Result<(), CryptoError> {
+fn test_recipient_uppercase_rejected() -> Result<(), CryptoError> {
     let test_dir = setup_test_dir("recipient_uppercase");
     let keys_dir = test_dir.join("keys");
     let passphrase = SecretString::from("uc".to_string());
@@ -2655,9 +2656,10 @@ fn test_recipient_uppercase_accepted() -> Result<(), CryptoError> {
 
     let encoded = PublicKey::from_key_file(keys_dir.join("public.key")).to_recipient_string()?;
     let uppercased = encoded.to_uppercase();
-    let decoded = decode_recipient(&uppercased)?;
-    let original = decode_recipient(&encoded)?;
-    assert_eq!(decoded, original);
+    assert!(
+        decode_recipient(&uppercased).is_err(),
+        "uppercase-only recipient strings are non-canonical and must be rejected"
+    );
 
     Ok(())
 }

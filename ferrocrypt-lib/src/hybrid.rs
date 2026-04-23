@@ -616,15 +616,16 @@ pub fn encode_recipient_string(pubkey_bytes: &[u8; 32]) -> Result<String, Crypto
         .map_err(|_| CryptoError::InternalInvariant("internal error: Bech32 encode failed"))
 }
 
-/// Decodes a canonical `fcr1…` Bech32 recipient string into the raw
-/// 32-byte X25519 public key. Rejects mixed case, unknown algorithm
-/// bytes, bad material length, and malformed Bech32 per
-/// `ferrocrypt-lib/FORMAT.md` §7.1.
+/// Decodes a canonical lowercase `fcr1…` Bech32 recipient string into
+/// the raw 32-byte X25519 public key. Rejects non-canonical encodings
+/// (including uppercase or mixed case), unknown algorithm bytes, bad
+/// material length, and malformed Bech32 per `ferrocrypt-lib/FORMAT.md`
+/// §7.1.
 pub fn decode_recipient_string(s: &str) -> Result<[u8; 32], CryptoError> {
-    // Reject mixed-case per BIP 173.
-    if s.chars().any(|c| c.is_ascii_uppercase()) && s.chars().any(|c| c.is_ascii_lowercase()) {
+    // Canonical v1 recipient strings are lowercase only.
+    if s.chars().any(|c| c.is_ascii_uppercase()) {
         return Err(CryptoError::InvalidInput(
-            "Recipient string has mixed case".to_string(),
+            "Recipient string must be lowercase".to_string(),
         ));
     }
 
@@ -659,7 +660,7 @@ pub fn decode_recipient_string(s: &str) -> Result<[u8; 32], CryptoError> {
 
 /// Reads a v1 `public.key` text file and returns the raw 32-byte
 /// X25519 public key. Strict parser: one Bech32 line, optional single
-/// trailing LF, no extra whitespace, lowercase only.
+/// trailing LF, no extra whitespace, canonical lowercase only.
 pub fn read_public_key(path: &Path) -> Result<[u8; 32], CryptoError> {
     let contents = fs::read_to_string(path)?;
     // Accept exactly one trailing `\n`, nothing else.
@@ -818,13 +819,22 @@ mod tests {
         Ok(())
     }
 
-    /// Mixed-case recipient strings MUST be rejected per BIP 173.
+    /// Non-canonical recipient strings MUST be rejected: uppercase-only
+    /// and mixed-case both fail even though Bech32 itself can decode
+    /// either case in isolation.
     #[test]
-    fn recipient_string_rejects_mixed_case() {
-        let mut s = encode_recipient_string(&[0x42; 32]).unwrap();
-        // Flip one character to uppercase to break the case rule.
-        s.replace_range(4..5, &s[4..5].to_uppercase());
-        match decode_recipient_string(&s) {
+    fn recipient_string_rejects_non_canonical_case() {
+        let canonical = encode_recipient_string(&[0x42; 32]).unwrap();
+
+        let upper = canonical.to_uppercase();
+        match decode_recipient_string(&upper) {
+            Err(CryptoError::InvalidInput(_)) => {}
+            other => panic!("expected InvalidInput for uppercase-only, got {other:?}"),
+        }
+
+        let mut mixed = canonical.clone();
+        mixed.replace_range(4..5, &mixed[4..5].to_uppercase());
+        match decode_recipient_string(&mixed) {
             Err(CryptoError::InvalidInput(_)) => {}
             other => panic!("expected InvalidInput for mixed case, got {other:?}"),
         }

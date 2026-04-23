@@ -226,10 +226,11 @@ impl PublicKey {
         }
     }
 
-    /// Decodes a Bech32 `fcr1…` recipient string (as produced by
-    /// [`PublicKey::to_recipient_string`] or the `ferrocrypt recipient`
-    /// subcommand) into a `PublicKey`. The HRP, checksum, and payload
-    /// length are all validated.
+    /// Decodes a canonical lowercase Bech32 `fcr1…` recipient string
+    /// (as produced by [`PublicKey::to_recipient_string`] or the
+    /// `ferrocrypt recipient` subcommand) into a `PublicKey`. The HRP,
+    /// checksum, canonical-case rule, and payload length are all
+    /// validated.
     pub fn from_recipient_string(recipient: &str) -> Result<Self, CryptoError> {
         Ok(Self::from_bytes(decode_recipient(recipient)?))
     }
@@ -649,8 +650,8 @@ pub mod fuzz_exports;
 /// Decodes a Bech32 recipient string (`fcr1…`) into raw 32-byte public
 /// key material.
 ///
-/// Validates the HRP, checksum, mixed-case rule, algorithm byte, and
-/// material length. This is the low-level primitive; most callers
+/// Validates the HRP, checksum, canonical-case rule, algorithm byte,
+/// and material length. This is the low-level primitive; most callers
 /// should prefer [`PublicKey::from_recipient_string`] or
 /// `"fcr1…".parse::<PublicKey>()`, which wrap this function and yield
 /// a typed [`PublicKey`].

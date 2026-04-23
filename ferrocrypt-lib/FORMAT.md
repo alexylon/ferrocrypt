@@ -315,8 +315,9 @@ Normative behaviour:
   chunk with `last_flag = 0x01`;
 - decryptors MUST raise `PayloadTruncated` if EOF is reached without
   successfully decrypting a final-flag chunk;
-- decryptors MUST raise `ExtraDataAfterPayload` if bytes remain after
-  a successfully decrypted final-flag chunk;
+- decryptors MUST reject bytes appended after the authenticated payload;
+  current v1 readers may surface this via the generic AEAD-failure path
+  (`PayloadTampered`) rather than a dedicated trailing-data variant;
 - any chunk AEAD failure is `PayloadTampered`.
 
 Writers SHOULD refuse payloads larger than `2^32` chunks of 65 536
@@ -364,37 +365,41 @@ ext_bytes = *tlv
 tlv       = tag (u16 BE) || len (u16 BE) || value (len bytes)
 ```
 
-### 6.1 Normative rules
+### 6.1 Tag classes
+
+- `0x0001..=0x7FFF` — **ignorable** tags
+- `0x8001..=0xFFFF` — **critical** tags
+- `0x0000` and `0x8000` are reserved and MUST NOT be emitted
+
+### 6.2 Normative rules
 
 This is the complete TLV specification.
 
-1. **All tags are ignorable.** Readers that do not recognise a tag
-   MUST authenticate it (it is covered by HMAC or AEAD-AAD) and skip
-   its value.
-2. **Order is writer-defined.** The authenticator covers bytes
-   exactly as written.
-3. **Duplicate tags are permitted.** A future feature may
-   semantically require multiple entries of one tag.
-4. **`len` is authoritative.** `len` MUST equal the actual byte
+1. **Tags MUST appear in strictly ascending numeric order.**
+2. **Duplicate tags MUST be rejected.**
+3. **`len` is authoritative.** `len` MUST equal the actual byte
    length of `value`. Readers MUST reject if `tag || len || value`
    would extend past the end of `ext_bytes`.
-5. **Zero-length values are permitted.** A `tag || 0x0000` entry is
+4. **Zero-length values are permitted.** A `tag || 0x0000` entry is
    well-formed; its meaning is tag-specific.
-6. **v1.0 writers emit `ext_len = 0`** unless using a tag defined in
+5. **Unknown ignorable tags are skipped after authentication.**
+   Readers that do not recognise a tag in `0x0001..=0x7FFF` MUST
+   authenticate it (it is covered by HMAC or AEAD-AAD) and skip its
+   value.
+6. **Unknown critical tags are rejected after authentication.**
+   Readers that do not recognise a tag in `0x8001..=0xFFFF` MUST reject
+   the file with `FormatDefect::UnknownCriticalTag { tag }`. v1.0
+   defines none, so any critical tag today is an upgrade-required
+   signal.
+7. **v1.0 writers emit `ext_len = 0`** unless using a tag defined in
    a later v1.x revision.
-7. **`ext_len` is capped at 32 KiB.** Readers MUST reject larger
+8. **`ext_len` is capped at 32 KiB.** Readers MUST reject larger
    values with `FormatDefect::ExtTooLarge`.
-8. **Tags in `0x8001..=0xFFFF` are critical.** Readers that do not
-   recognise a critical tag MUST reject the file with
-   `FormatDefect::UnknownCriticalTag { tag }`. v1.0 defines none, so
-   any critical tag today is an upgrade-required signal.
-9. **Tags `0x0000` and `0x8000` are reserved** and MUST NOT be
-   emitted.
 
 If a change is "so critical that old readers must reject files that
 use it," that change is a `version = 2` bump, not a TLV tag.
 
-### 6.2 How future features ship
+### 6.3 How future features ship
 
 When a future release adds a TLV tag, the PR that adds it:
 
@@ -410,8 +415,8 @@ No pre-allocation, no separate registry, no governance process.
 ## 7. `public.key` — text form, canonical `fcr1…`
 
 `public.key` is a **UTF-8 text file** containing exactly one line: the
-canonical Bech32 recipient string, optionally followed by a single
-trailing line feed.
+canonical lowercase Bech32 recipient string, optionally followed by a
+single trailing line feed.
 
 Example:
 
@@ -442,7 +447,8 @@ verified.
 Readers MUST:
 
 - verify the BIP 173 checksum;
-- reject mixed-case strings;
+- reject non-canonical encodings, including any uppercase or mixed-case
+  string;
 - reject leading / trailing whitespace other than a single trailing
   LF;
 - reject extra lines;
@@ -645,9 +651,11 @@ is part of the product promise.
 - `HeaderTampered` — HMAC mismatch after successful envelope unwrap
   (the right key opened the envelope, but `stream_nonce` or
   `ext_bytes` were tampered with)
-- `PayloadTampered` — per-chunk AEAD failed
+- `PayloadTampered` — per-chunk AEAD failed; current v1 readers may
+  also surface appended trailing bytes this way
 - `PayloadTruncated` — EOF before the final-flag chunk
-- `ExtraDataAfterPayload` — bytes remain after the final-flag chunk
+- `ExtraDataAfterPayload` — dedicated trailing-data variant reserved
+  for future explicit detection
 - `KeyFileUnlockFailed` — `private.key` AEAD failed (wrong passphrase
   **or** tampered cleartext; the two are indistinguishable by design)
 

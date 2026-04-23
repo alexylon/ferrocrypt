@@ -77,6 +77,12 @@ pub fn decode(data: &[u8]) -> Result<Vec<u8>, CryptoError> {
 
 /// Decodes and validates the output is exactly `expected_len` bytes.
 /// Prevents panics from indexing decoded output before HMAC verification.
+///
+/// The v1 library code no longer calls this directly (only the 8-byte
+/// prefix is replicated, and its decode goes through
+/// `format::decode_and_canonicalize_prefix`). Kept as a public utility
+/// for fuzz targets and re-exported via `fuzz_exports`.
+#[allow(dead_code)]
 pub fn decode_exact(data: &[u8], expected_len: usize) -> Result<Vec<u8>, CryptoError> {
     let decoded = decode(data)?;
     if decoded.len() != expected_len {

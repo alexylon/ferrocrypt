@@ -1,377 +1,150 @@
+//! Hybrid (X25519 recipient) `.fcr` encrypt and decrypt, plus the
+//! passphrase-wrapped `private.key` format.
+//!
+//! Pipeline:
+//!
+//!   - **Encrypt:** ephemeral X25519 key → ECDH with recipient pubkey
+//!     → HKDF-SHA3-256 → `wrap_key`. `wrap_key` seals a random 32-byte
+//!     `file_key`. `file_key` → HKDF-SHA3-256 → `payload_key` +
+//!     `header_key`. `payload_key` encrypts the TAR payload via
+//!     STREAM-BE32. `header_key` HMAC-SHA3-256 authenticates the
+//!     on-disk header.
+//!
+//!   - **Decrypt:** read `private.key` (passphrase + Argon2id +
+//!     HKDF-SHA3-256 + XChaCha20-Poly1305 with AAD binding every
+//!     cleartext byte). Derive `wrap_key` from ECDH and unwrap
+//!     `file_key`. Rest matches symmetric.
+//!
+//! Wire format (see `ferrocrypt-lib/FORMAT.md` §4.3, §4.4, §8):
+//!
+//! ```text
+//! .fcr:
+//!   [ replicated_prefix (27 B) ]
+//!   [ envelope (104 B) = ephemeral_pubkey(32) | wrap_nonce(24) | wrapped_file_key(48) ]
+//!   [ stream_nonce (19 B) ]
+//!   [ ext_bytes (ext_len B) ]
+//!   [ hmac_tag (32 B) ]
+//!   [ payload (STREAM) ]
+//!
+//! private.key (125 B when ext_len = 0):
+//!   header(9) | argon2_salt(32) | kdf_params(12) | wrap_nonce(24) | ext_bytes | wrapped_privkey(48)
+//!   AEAD-AAD binds every cleartext byte before wrapped_privkey.
+//! ```
+
 use std::fs;
-use std::io::{self, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use bech32::{Bech32, Hrp};
 use chacha20poly1305::{
-    XChaCha20Poly1305,
-    aead::{Aead, AeadCore, KeyInit, OsRng, rand_core::RngCore, stream},
+    XChaCha20Poly1305, XNonce,
+    aead::{Aead, KeyInit as AeadKeyInit, OsRng, Payload, stream},
 };
-use hkdf::Hkdf;
-use secrecy::{ExposeSecret, SecretString};
-use sha2::Sha256;
+use secrecy::SecretString;
 use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::atomic_output;
 use crate::common::{
-    ARGON2_SALT_SIZE, DecryptReader, ENCRYPTION_KEY_SIZE, EncryptWriter, HMAC_KEY_SIZE,
-    HMAC_TAG_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams, STREAM_NONCE_SIZE, TAG_SIZE, ct_eq_32,
-    encryption_base_name, hmac_sha3_256, hmac_sha3_256_verify,
+    ARGON2_SALT_SIZE, DecryptReader, EncryptWriter, HKDF_INFO_HYB_WRAP, HKDF_INFO_PRIVATE_KEY_WRAP,
+    HMAC_TAG_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams, STREAM_NONCE_SIZE, WRAP_NONCE_SIZE,
+    WRAPPED_FILE_KEY_SIZE, build_header_hmac_input, ct_eq_32, derive_passphrase_wrap_key,
+    derive_subkeys, encryption_base_name, generate_file_key, hkdf_expand_sha3_256, hmac_sha3_256,
+    hmac_sha3_256_verify, open_file_key, random_bytes, read_exact_or_truncated, seal_file_key,
+    validate_tlv,
 };
 use crate::error::FormatDefect;
-use crate::format::{self, HEADER_PREFIX_SIZE, PRIVATE_KEY_FIXED_BODY_SIZE, PUBLIC_KEY_DATA_SIZE};
-use crate::replication::encode;
+use crate::format::{
+    self, KEY_FILE_ALG_X25519, PRIVATE_KEY_CIPHERTEXT_SIZE, PRIVATE_KEY_FIXED_BODY_SIZE,
+    PRIVATE_KEY_HEADER_SIZE,
+};
 use crate::{CryptoError, ProgressEvent, archiver};
 
-// Both keys are packed into a single envelope: [encryption_key | hmac_key]
-const COMBINED_KEY_SIZE: usize = ENCRYPTION_KEY_SIZE + HMAC_KEY_SIZE;
-
-const EPHEMERAL_PUB_SIZE: usize = 32;
-const ENVELOPE_NONCE_SIZE: usize = 24;
-const ENVELOPE_CIPHERTEXT_SIZE: usize = COMBINED_KEY_SIZE + TAG_SIZE;
-const ENVELOPE_SIZE: usize = EPHEMERAL_PUB_SIZE + ENVELOPE_NONCE_SIZE + ENVELOPE_CIPHERTEXT_SIZE;
-
-/// Authenticated core of a hybrid `.fcr` header.
-///
-/// Sits between the 8-byte prefix (which carries `ext_len`) and the trailing
-/// HMAC tag. Field order is the single source of truth for the hybrid wire
-/// format — every code path (encrypt, decrypt, HMAC computation) goes through
-/// this struct so writer and reader cannot drift.
-struct HybridHeaderCore {
-    envelope: [u8; ENVELOPE_SIZE],
-    stream_nonce: [u8; STREAM_NONCE_SIZE],
-    ext_bytes: Vec<u8>,
-}
-
-impl HybridHeaderCore {
-    /// Constructs a core after validating the `ext_bytes` length bound.
-    ///
-    /// `ext_bytes.len()` must fit in a `u16` because the header prefix stores
-    /// `ext_len` as a big-endian `u16`. This is the single enforcement point:
-    /// once a `HybridHeaderCore` exists, `ext_len()` is infallible by
-    /// construction.
-    fn new(
-        envelope: [u8; ENVELOPE_SIZE],
-        stream_nonce: [u8; STREAM_NONCE_SIZE],
-        ext_bytes: Vec<u8>,
-    ) -> Result<Self, CryptoError> {
-        if ext_bytes.len() > u16::MAX as usize {
-            return Err(CryptoError::InvalidInput(
-                "ext_bytes exceeds u16::MAX".to_string(),
-            ));
-        }
-        Ok(Self {
-            envelope,
-            stream_nonce,
-            ext_bytes,
-        })
-    }
-
-    /// Writes every field, in canonical order, using triple replication.
-    fn write_to(&self, writer: &mut impl Write) -> io::Result<()> {
-        writer.write_all(&encode(&self.envelope))?;
-        writer.write_all(&encode(&self.stream_nonce))?;
-        writer.write_all(&encode(&self.ext_bytes))?;
-        Ok(())
-    }
-
-    /// Reads every field, in canonical order, from a triple-replicated stream.
-    /// `ext_len` is the logical size of the `ext_bytes` region, taken from the
-    /// authenticated header prefix.
-    fn read_from(reader: &mut impl io::Read, ext_len: usize) -> Result<Self, CryptoError> {
-        Self::new(
-            format::read_replicated_field::<ENVELOPE_SIZE>(reader)?,
-            format::read_replicated_field::<STREAM_NONCE_SIZE>(reader)?,
-            format::read_replicated_vec(reader, ext_len)?,
-        )
-    }
-
-    /// Canonical HMAC-SHA3-256 input: `prefix || envelope || stream_nonce || ext_bytes`.
-    fn hmac_input(&self, prefix: &[u8; HEADER_PREFIX_SIZE]) -> Vec<u8> {
-        let mut msg = Vec::with_capacity(
-            prefix.len() + ENVELOPE_SIZE + STREAM_NONCE_SIZE + self.ext_bytes.len(),
-        );
-        msg.extend_from_slice(prefix);
-        msg.extend_from_slice(&self.envelope);
-        msg.extend_from_slice(&self.stream_nonce);
-        msg.extend_from_slice(&self.ext_bytes);
-        msg
-    }
-
-    /// Returns the `ext_len` value to pack into the header prefix.
-    /// Infallible by construction: `Self::new` rejects oversized `ext_bytes`.
-    fn ext_len(&self) -> u16 {
-        self.ext_bytes.len() as u16
-    }
-}
-
-const PRIVATE_KEY_NONCE_SIZE: usize = 24;
-const PRIVATE_KEY_SIZE: usize = 32;
-const PRIVATE_KEY_BLOB_SIZE: usize = PRIVATE_KEY_SIZE + TAG_SIZE;
-const PRIVATE_KEY_EXT_LEN_SIZE: usize = 2;
-
-// Compile-time guard: the v4 body's fixed-minimum footprint (everything
-// except the optional `ext_bytes`) must match the format-level
-// `PRIVATE_KEY_FIXED_BODY_SIZE` constant. If a future change touches
-// one without the other the build breaks here.
-const _: () = assert!(
-    KDF_PARAMS_SIZE
-        + ARGON2_SALT_SIZE
-        + PRIVATE_KEY_NONCE_SIZE
-        + PRIVATE_KEY_EXT_LEN_SIZE
-        + PRIVATE_KEY_BLOB_SIZE
-        == PRIVATE_KEY_FIXED_BODY_SIZE
-);
-
-// Byte offset of the `ext_len` u16 within a v4 private-key body.
-const PRIVATE_KEY_EXT_LEN_OFFSET: usize =
-    KDF_PARAMS_SIZE + ARGON2_SALT_SIZE + PRIVATE_KEY_NONCE_SIZE;
-
-/// X25519 hybrid envelope wire format: ephemeral public key, AEAD nonce, AEAD
-/// ciphertext (the encrypted combined key). Centralizes field offsets so
-/// `seal_envelope` and `open_envelope` work in field accesses, not index math.
-struct Envelope {
-    ephemeral_public: [u8; EPHEMERAL_PUB_SIZE],
-    nonce: [u8; ENVELOPE_NONCE_SIZE],
-    ciphertext: [u8; ENVELOPE_CIPHERTEXT_SIZE],
-}
-
-impl Envelope {
-    fn to_bytes(&self) -> [u8; ENVELOPE_SIZE] {
-        let mut out = [0u8; ENVELOPE_SIZE];
-        let (pk_slot, rest) = out.split_at_mut(EPHEMERAL_PUB_SIZE);
-        let (nonce_slot, ct_slot) = rest.split_at_mut(ENVELOPE_NONCE_SIZE);
-        pk_slot.copy_from_slice(&self.ephemeral_public);
-        nonce_slot.copy_from_slice(&self.nonce);
-        ct_slot.copy_from_slice(&self.ciphertext);
-        out
-    }
-
-    fn from_bytes(bytes: &[u8; ENVELOPE_SIZE]) -> Self {
-        let (pk, rest) = bytes.split_at(EPHEMERAL_PUB_SIZE);
-        let (nonce, ciphertext) = rest.split_at(ENVELOPE_NONCE_SIZE);
-        let mut out = Self {
-            ephemeral_public: [0u8; EPHEMERAL_PUB_SIZE],
-            nonce: [0u8; ENVELOPE_NONCE_SIZE],
-            ciphertext: [0u8; ENVELOPE_CIPHERTEXT_SIZE],
-        };
-        out.ephemeral_public.copy_from_slice(pk);
-        out.nonce.copy_from_slice(nonce);
-        out.ciphertext.copy_from_slice(ciphertext);
-        out
-    }
-}
-
-/// Body of a v4 `private.key` file: KDF params, Argon2 salt, AEAD nonce,
-/// a forward-compatible authenticated `ext_bytes` region, and the
-/// AEAD-encrypted X25519 private key. The AEAD decrypt step binds the
-/// cleartext header + every field above as associated data, so every
-/// byte on disk is cryptographically authenticated.
-///
-/// AEAD limitation: the primitive returns a single undifferentiated
-/// failure for both "wrong passphrase" and "tampered cleartext". Both
-/// surface as [`CryptoError::KeyFileUnlockFailed`]; its Display
-/// wording reflects both causes.
-///
-/// `ext_bytes` is opaque to the current release: v4 writers emit an
-/// empty region (`ext_len = 0`), and v4 readers authenticate the
-/// bytes via the AEAD tag and then ignore the contents. Future 0.3.x
-/// minors can populate it with TLV-encoded metadata; readers that
-/// don't recognize a tag skip it.
-struct PrivateKeyBody {
-    kdf_bytes: [u8; KDF_PARAMS_SIZE],
-    salt: [u8; ARGON2_SALT_SIZE],
-    nonce: [u8; PRIVATE_KEY_NONCE_SIZE],
-    ext_bytes: Vec<u8>,
-    ciphertext: [u8; PRIVATE_KEY_BLOB_SIZE],
-}
-
-impl PrivateKeyBody {
-    /// Returns the total body size in bytes (fixed minimum + extension region).
-    fn total_len(&self) -> usize {
-        PRIVATE_KEY_FIXED_BODY_SIZE + self.ext_bytes.len()
-    }
-
-    /// `ext_len` field packed into the body. Infallible by construction:
-    /// callers never build a body with more than `u16::MAX` extension bytes.
-    fn ext_len_be_bytes(&self) -> [u8; PRIVATE_KEY_EXT_LEN_SIZE] {
-        (self.ext_bytes.len() as u16).to_be_bytes()
-    }
-
-    /// Builds the AEAD associated-data buffer. Bound fields in order:
-    /// the 8-byte cleartext key-file header, the KDF params, the Argon2
-    /// salt, the AEAD nonce, the big-endian `ext_len`, and the
-    /// `ext_bytes` payload. Tamper on any of these causes AEAD
-    /// authentication to fail on decrypt.
-    fn aad(&self, header: &[u8; format::KEY_FILE_HEADER_SIZE]) -> Vec<u8> {
-        let mut aad = Vec::with_capacity(
-            format::KEY_FILE_HEADER_SIZE
-                + KDF_PARAMS_SIZE
-                + ARGON2_SALT_SIZE
-                + PRIVATE_KEY_NONCE_SIZE
-                + PRIVATE_KEY_EXT_LEN_SIZE
-                + self.ext_bytes.len(),
-        );
-        aad.extend_from_slice(header);
-        aad.extend_from_slice(&self.kdf_bytes);
-        aad.extend_from_slice(&self.salt);
-        aad.extend_from_slice(&self.nonce);
-        aad.extend_from_slice(&self.ext_len_be_bytes());
-        aad.extend_from_slice(&self.ext_bytes);
-        aad
-    }
-
-    /// Serializes the body for on-disk writing: kdf params, salt,
-    /// nonce, big-endian `ext_len`, `ext_bytes`, ciphertext+tag.
-    fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(self.total_len());
-        out.extend_from_slice(&self.kdf_bytes);
-        out.extend_from_slice(&self.salt);
-        out.extend_from_slice(&self.nonce);
-        out.extend_from_slice(&self.ext_len_be_bytes());
-        out.extend_from_slice(&self.ext_bytes);
-        out.extend_from_slice(&self.ciphertext);
-        out
-    }
-
-    /// Parses an on-disk v4 body. Caller must have already run
-    /// [`validate_private_key_body_shape`] on the full file bytes,
-    /// which enforces `data_len ≥ fixed_minimum` and the internal
-    /// consistency between `data_len` and the parsed `ext_len`. `body`
-    /// here is the slice after the 8-byte header and has length
-    /// `header.data_len`.
-    fn from_bytes(body: &[u8]) -> Result<Self, CryptoError> {
-        if body.len() < PRIVATE_KEY_FIXED_BODY_SIZE {
-            return Err(CryptoError::InvalidFormat(FormatDefect::BadKeyFileSize));
-        }
-        let mut kdf_bytes = [0u8; KDF_PARAMS_SIZE];
-        let mut salt = [0u8; ARGON2_SALT_SIZE];
-        let mut nonce = [0u8; PRIVATE_KEY_NONCE_SIZE];
-        let mut ciphertext = [0u8; PRIVATE_KEY_BLOB_SIZE];
-
-        let mut offset = 0;
-        kdf_bytes.copy_from_slice(&body[offset..offset + KDF_PARAMS_SIZE]);
-        offset += KDF_PARAMS_SIZE;
-        salt.copy_from_slice(&body[offset..offset + ARGON2_SALT_SIZE]);
-        offset += ARGON2_SALT_SIZE;
-        nonce.copy_from_slice(&body[offset..offset + PRIVATE_KEY_NONCE_SIZE]);
-        offset += PRIVATE_KEY_NONCE_SIZE;
-
-        let ext_len = u16::from_be_bytes([body[offset], body[offset + 1]]) as usize;
-        offset += PRIVATE_KEY_EXT_LEN_SIZE;
-
-        if body.len() != PRIVATE_KEY_FIXED_BODY_SIZE + ext_len {
-            return Err(CryptoError::InvalidFormat(FormatDefect::BadKeyFileSize));
-        }
-
-        let ext_bytes = body[offset..offset + ext_len].to_vec();
-        offset += ext_len;
-        ciphertext.copy_from_slice(&body[offset..offset + PRIVATE_KEY_BLOB_SIZE]);
-
-        Ok(Self {
-            kdf_bytes,
-            salt,
-            nonce,
-            ext_bytes,
-            ciphertext,
-        })
-    }
-}
-
-/// Structural validator for a v4 `private.key` file: checks the key
-/// type byte, algorithm byte, unknown-flags rejection, body-size lower
-/// bound, and the internal consistency between `data_len` and the
-/// parsed `ext_len`. Does **not** attempt to decrypt or derive any
-/// keys. Re-exported to the fuzz target via `fuzz_exports`.
-pub fn validate_private_key_body_shape(
-    data: &[u8],
-    header: &format::KeyFileHeader,
-) -> Result<(), CryptoError> {
-    if header.algorithm != format::KEY_FILE_ALG_X25519 {
-        return Err(CryptoError::InvalidFormat(
-            FormatDefect::UnsupportedKeyFileAlgorithm(header.algorithm),
-        ));
-    }
-    if header.flags != 0 {
-        return Err(CryptoError::InvalidFormat(
-            FormatDefect::UnknownKeyFileFlags(header.flags),
-        ));
-    }
-    let data_len = header.data_len as usize;
-    if data_len < PRIVATE_KEY_FIXED_BODY_SIZE {
-        return Err(CryptoError::InvalidFormat(FormatDefect::BadKeyFileSize));
-    }
-    if data.len() != format::KEY_FILE_HEADER_SIZE + data_len {
-        return Err(CryptoError::InvalidFormat(FormatDefect::BadKeyFileSize));
-    }
-    let ext_len_offset = format::KEY_FILE_HEADER_SIZE + PRIVATE_KEY_EXT_LEN_OFFSET;
-    let ext_len = u16::from_be_bytes([data[ext_len_offset], data[ext_len_offset + 1]]) as usize;
-    if data_len != PRIVATE_KEY_FIXED_BODY_SIZE + ext_len {
-        return Err(CryptoError::InvalidFormat(FormatDefect::BadKeyFileSize));
-    }
-    Ok(())
-}
-
-/// Default filename for the hybrid public key file.
+/// Default filename for the hybrid public key file (text form).
 pub const PUBLIC_KEY_FILENAME: &str = "public.key";
-/// Default filename for the hybrid private key file.
+/// Default filename for the hybrid private key file (binary, wrapped).
 pub const PRIVATE_KEY_FILENAME: &str = "private.key";
 
-const HYBRID_ENVELOPE_INFO: &[u8] = b"ferrocrypt hybrid envelope key v4";
+/// Bech32 HRP for v1 recipient strings (`fcr1…`). Parsed at compile
+/// time via `parse_unchecked` so runtime encode/decode paths don't
+/// repeat the validation.
+const RECIPIENT_HRP: Hrp = Hrp::parse_unchecked("fcr");
+/// Size of the X25519 ephemeral public key carried in the hybrid envelope.
+const EPHEMERAL_PUBKEY_SIZE: usize = 32;
+/// Raw X25519 private-key size (the plaintext wrapped inside `private.key`).
+const PRIVATE_KEY_PLAINTEXT_SIZE: usize = 32;
 
-/// Derives a 32-byte wrapping key for the hybrid envelope AEAD.
-///
-/// HKDF-SHA256 with:
-/// - IKM: X25519 shared secret
-/// - salt: ephemeral_public || recipient_public
-/// - info: version-specific domain label
-fn derive_envelope_key(
-    ephemeral_public: &PublicKey,
-    recipient_public: &PublicKey,
+/// Total hybrid envelope size, raw on disk:
+/// `ephemeral_pubkey(32) || wrap_nonce(24) || wrapped_file_key(48)` = 104 bytes.
+pub const HYBRID_ENVELOPE_SIZE: usize =
+    EPHEMERAL_PUBKEY_SIZE + WRAP_NONCE_SIZE + WRAPPED_FILE_KEY_SIZE;
+
+// ─── Envelope ──────────────────────────────────────────────────────────────
+
+/// In-memory view of the 104-byte hybrid envelope. Writer, reader, and
+/// HMAC input all go through this struct's byte layout so field order
+/// cannot drift.
+struct HybridEnvelope {
+    ephemeral_pubkey: [u8; EPHEMERAL_PUBKEY_SIZE],
+    wrap_nonce: [u8; WRAP_NONCE_SIZE],
+    wrapped_file_key: [u8; WRAPPED_FILE_KEY_SIZE],
+}
+
+impl HybridEnvelope {
+    fn to_bytes(&self) -> [u8; HYBRID_ENVELOPE_SIZE] {
+        let mut out = [0u8; HYBRID_ENVELOPE_SIZE];
+        let mut off = 0;
+        out[off..off + EPHEMERAL_PUBKEY_SIZE].copy_from_slice(&self.ephemeral_pubkey);
+        off += EPHEMERAL_PUBKEY_SIZE;
+        out[off..off + WRAP_NONCE_SIZE].copy_from_slice(&self.wrap_nonce);
+        off += WRAP_NONCE_SIZE;
+        out[off..].copy_from_slice(&self.wrapped_file_key);
+        out
+    }
+
+    fn from_bytes(bytes: &[u8; HYBRID_ENVELOPE_SIZE]) -> Self {
+        let mut off = 0;
+        let mut ephemeral_pubkey = [0u8; EPHEMERAL_PUBKEY_SIZE];
+        ephemeral_pubkey.copy_from_slice(&bytes[off..off + EPHEMERAL_PUBKEY_SIZE]);
+        off += EPHEMERAL_PUBKEY_SIZE;
+        let mut wrap_nonce = [0u8; WRAP_NONCE_SIZE];
+        wrap_nonce.copy_from_slice(&bytes[off..off + WRAP_NONCE_SIZE]);
+        off += WRAP_NONCE_SIZE;
+        let mut wrapped_file_key = [0u8; WRAPPED_FILE_KEY_SIZE];
+        wrapped_file_key.copy_from_slice(&bytes[off..]);
+        Self {
+            ephemeral_pubkey,
+            wrap_nonce,
+            wrapped_file_key,
+        }
+    }
+}
+
+/// Derives the hybrid envelope wrap key from an X25519 ECDH shared
+/// secret. Salt binds both public keys so a single ECDH session
+/// produces a single wrap key bound to this specific exchange.
+fn derive_hybrid_wrap_key(
+    ephemeral_pubkey: &[u8; 32],
+    recipient_pubkey: &[u8; 32],
     shared_secret: &[u8; 32],
 ) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
     let mut salt = [0u8; 64];
-    salt[..32].copy_from_slice(ephemeral_public.as_bytes());
-    salt[32..].copy_from_slice(recipient_public.as_bytes());
-
-    let hkdf = Hkdf::<Sha256>::new(Some(&salt), shared_secret);
-    let mut key = Zeroizing::new([0u8; 32]);
-    hkdf.expand(HYBRID_ENVELOPE_INFO, key.as_mut())
-        .map_err(|_| {
-            CryptoError::InternalCryptoFailure("internal error: failed to derive envelope key")
-        })?;
-    Ok(key)
+    salt[..32].copy_from_slice(ephemeral_pubkey);
+    salt[32..].copy_from_slice(recipient_pubkey);
+    hkdf_expand_sha3_256(Some(&salt), shared_secret, HKDF_INFO_HYB_WRAP)
 }
 
-/// Detects all-zero X25519 shared secrets (small-order public key defense).
-/// Uses constant-time comparison to avoid timing side channels.
+/// Small-order public-key defence: rejects all-zero X25519 shared
+/// secrets via constant-time compare.
 fn shared_secret_is_all_zero(shared: &[u8; 32]) -> bool {
     ct_eq_32(shared, &[0u8; 32])
 }
 
-// Only used by in-module tests now that the public API resolves the
-// recipient's public key to raw bytes via `PublicKey` and calls
-// `encrypt_file_from_bytes` directly. Kept so the existing test
-// scenarios (path-based encrypt against freshly generated key files)
-// remain self-contained.
-#[cfg(test)]
-fn encrypt_file(
-    input_path: &Path,
-    output_dir: &Path,
-    public_key_path: &Path,
-    output_file: Option<&Path>,
-    on_event: &dyn Fn(&ProgressEvent),
-) -> Result<PathBuf, CryptoError> {
-    let recipient_public = read_public_key(public_key_path)?;
-    encrypt_file_inner(
-        input_path,
-        output_dir,
-        &recipient_public,
-        output_file,
-        on_event,
-    )
-}
+// ─── Encrypt ───────────────────────────────────────────────────────────────
 
+/// Encrypts under a recipient's raw 32-byte X25519 public key. The
+/// caller (typically `lib.rs`) is responsible for obtaining the bytes
+/// from a `fcr1…` recipient string or a `public.key` text file.
 pub fn encrypt_file_from_bytes(
     input_path: &Path,
     output_dir: &Path,
@@ -379,28 +152,54 @@ pub fn encrypt_file_from_bytes(
     output_file: Option<&Path>,
     on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<PathBuf, CryptoError> {
-    let recipient_public = PublicKey::from(*public_key_bytes);
-    encrypt_file_inner(
-        input_path,
-        output_dir,
-        &recipient_public,
-        output_file,
-        on_event,
-    )
-}
+    on_event(&ProgressEvent::DerivingKey);
 
-fn encrypt_file_inner(
-    input_path: &Path,
-    output_dir: &Path,
-    recipient_public: &PublicKey,
-    output_file: Option<&Path>,
-    on_event: &dyn Fn(&ProgressEvent),
-) -> Result<PathBuf, CryptoError> {
+    let ephemeral_secret = EphemeralSecret::random_from_rng(OsRng);
+    let ephemeral_public = PublicKey::from(&ephemeral_secret);
+    let recipient_public = PublicKey::from(*public_key_bytes);
+    let shared = ephemeral_secret.diffie_hellman(&recipient_public);
+
+    if shared_secret_is_all_zero(shared.as_bytes()) {
+        return Err(CryptoError::InvalidInput(
+            "Invalid recipient public key".to_string(),
+        ));
+    }
+
+    let wrap_key = derive_hybrid_wrap_key(
+        ephemeral_public.as_bytes(),
+        recipient_public.as_bytes(),
+        shared.as_bytes(),
+    )?;
+
+    let file_key = generate_file_key();
+    let wrap_nonce = random_bytes::<WRAP_NONCE_SIZE>();
+    let wrapped_file_key = seal_file_key(&wrap_key, &wrap_nonce, &file_key)?;
+    drop(wrap_key);
+
+    let stream_nonce = random_bytes::<STREAM_NONCE_SIZE>();
+    let (payload_key, header_key) = derive_subkeys(&file_key, &stream_nonce)?;
+
+    let envelope = HybridEnvelope {
+        ephemeral_pubkey: *ephemeral_public.as_bytes(),
+        wrap_nonce,
+        wrapped_file_key,
+    };
+    let envelope_bytes = envelope.to_bytes();
+
+    let ext_bytes: Vec<u8> = Vec::new();
+    let on_disk_prefix =
+        format::build_encoded_header_prefix(format::TYPE_HYBRID, ext_bytes.len() as u16)?;
+
+    let tag = hmac_sha3_256(
+        header_key.as_ref(),
+        &build_header_hmac_input(&on_disk_prefix, &envelope_bytes, &stream_nonce, &ext_bytes),
+    )?;
+
     let base_name = &encryption_base_name(input_path)?;
     on_event(&ProgressEvent::Encrypting);
 
     let output_path = match output_file {
-        Some(path) => path.to_path_buf(),
+        Some(p) => p.to_path_buf(),
         None => output_dir.join(format!("{}.{}", base_name, format::ENCRYPTED_EXTENSION)),
     };
     if output_path.exists() {
@@ -414,64 +213,40 @@ fn encrypt_file_inner(
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let tmp = tempfile::Builder::new()
+    let mut tmp = tempfile::Builder::new()
         .prefix(".ferrocrypt-")
         .suffix(".incomplete")
         .tempfile_in(temp_dir)?;
 
-    let mut encryption_key = XChaCha20Poly1305::generate_key(&mut OsRng);
-    let mut hmac_key = [0u8; HMAC_KEY_SIZE];
-    OsRng.fill_bytes(&mut hmac_key);
+    let encrypt_result: Result<tempfile::NamedTempFile, CryptoError> = (|| {
+        tmp.as_file_mut().write_all(&on_disk_prefix)?;
+        tmp.as_file_mut().write_all(&envelope_bytes)?;
+        tmp.as_file_mut().write_all(&stream_nonce)?;
+        tmp.as_file_mut().write_all(&ext_bytes)?;
+        tmp.as_file_mut().write_all(&tag)?;
 
-    let result: Result<tempfile::NamedTempFile, CryptoError> = (|| {
-        let mut tmp = tmp;
-        let cipher = XChaCha20Poly1305::new(&encryption_key);
-
-        let mut stream_nonce = [0u8; STREAM_NONCE_SIZE];
-        OsRng.fill_bytes(&mut stream_nonce);
-
-        let mut combined_key = Zeroizing::new(vec![0u8; COMBINED_KEY_SIZE]);
-        combined_key[..ENCRYPTION_KEY_SIZE].copy_from_slice(&encryption_key);
-        combined_key[ENCRYPTION_KEY_SIZE..].copy_from_slice(&hmac_key);
-
-        let envelope = seal_envelope(&combined_key, recipient_public)?;
-
-        // No extensions today. `ext_bytes` is an empty authenticated region;
-        // future minor versions append optional data here and it will be
-        // bound to the file by the HMAC.
-        let core = HybridHeaderCore::new(envelope, stream_nonce, Vec::new())?;
-
-        let prefix = format::build_header_prefix(
-            format::TYPE_HYBRID,
-            format::HYBRID_VERSION_MAJOR,
-            0,
-            core.ext_len(),
-        );
-        let hmac_tag = hmac_sha3_256(&hmac_key, &core.hmac_input(&prefix))?;
-
+        let cipher = XChaCha20Poly1305::new(payload_key.as_ref().into());
         let stream_encryptor =
             stream::EncryptorBE32::from_aead(cipher, stream_nonce.as_ref().into());
-
-        tmp.as_file_mut().write_all(&encode(&prefix))?;
-        core.write_to(tmp.as_file_mut())?;
-        tmp.as_file_mut().write_all(&encode(&hmac_tag))?;
 
         let encrypt_writer = EncryptWriter::new(stream_encryptor, tmp);
         let (_, encrypt_writer) = archiver::archive(input_path, encrypt_writer)?;
         let tmp = encrypt_writer.finish()?;
         tmp.as_file().sync_all()?;
-
         Ok(tmp)
     })();
 
-    encryption_key.zeroize();
-    hmac_key.zeroize();
-
-    let tmp = result?;
+    let tmp = encrypt_result?;
     atomic_output::finalize_file(tmp, &output_path)?;
     Ok(output_path)
 }
 
+// ─── Decrypt ───────────────────────────────────────────────────────────────
+
+/// Decrypts a hybrid `.fcr` file using the recipient's `private.key`
+/// (which is passphrase-wrapped on disk). Follows the eight-step order
+/// from `ferrocrypt-lib/FORMAT.md` §4.8, adapted to the hybrid path
+/// (steps 3–5 are ECDH + envelope unwrap instead of Argon2id).
 pub fn decrypt_file(
     input_path: &Path,
     output_dir: &Path,
@@ -482,239 +257,223 @@ pub fn decrypt_file(
 ) -> Result<PathBuf, CryptoError> {
     let mut encrypted_file = fs::File::open(input_path)?;
 
-    let (prefix_bytes, header) =
+    // 1. Prefix + canonicity + magic/type/version/ext_len checks.
+    let (on_disk_prefix, header) =
         format::read_header_from_reader(&mut encrypted_file, format::TYPE_HYBRID)?;
 
-    match header.major {
-        4 => decrypt_file_v4(
-            encrypted_file,
-            prefix_bytes,
-            header,
-            output_dir,
-            private_key_path,
-            passphrase,
-            kdf_limit,
-            on_event,
-        ),
-        _ => Err(format::unsupported_file_version_error(
-            header.major,
-            header.minor,
-            format::HYBRID_VERSION_MAJOR,
-        )),
-    }
-}
+    // 2. Fixed header fields after the prefix.
+    let mut envelope_bytes = [0u8; HYBRID_ENVELOPE_SIZE];
+    read_exact_or_truncated(&mut encrypted_file, &mut envelope_bytes)?;
+    let mut stream_nonce = [0u8; STREAM_NONCE_SIZE];
+    read_exact_or_truncated(&mut encrypted_file, &mut stream_nonce)?;
+    let mut ext_bytes = vec![0u8; header.ext_len as usize];
+    read_exact_or_truncated(&mut encrypted_file, &mut ext_bytes)?;
+    let mut tag = [0u8; HMAC_TAG_SIZE];
+    read_exact_or_truncated(&mut encrypted_file, &mut tag)?;
 
-#[allow(clippy::too_many_arguments)]
-fn decrypt_file_v4(
-    mut encrypted_file: fs::File,
-    prefix_bytes: [u8; format::HEADER_PREFIX_SIZE],
-    header: format::FileHeader,
-    output_dir: &Path,
-    private_key_path: &Path,
-    passphrase: &SecretString,
-    kdf_limit: Option<&KdfLimit>,
-    on_event: &dyn Fn(&ProgressEvent),
-) -> Result<PathBuf, CryptoError> {
-    format::validate_file_flags(&header)?;
+    let envelope = HybridEnvelope::from_bytes(&envelope_bytes);
 
-    // v4 minor-version dispatch: every 4.x minor decrypts identically — the
-    // ext_bytes region is authenticated by HMAC and the contents are ignored.
-    // Bound here so the field is read on the success path and the contract
-    // is visible at the call site. Per FORMAT.md §10.2, minor versions are
-    // always forward-compatible (never rejected); a future 4.x minor that
-    // needs special behavior would replace this with a `match header.minor`
-    // where the wildcard arm is still the default ignore.
-    let _minor: u8 = header.minor;
-
-    let core = HybridHeaderCore::read_from(&mut encrypted_file, header.ext_len as usize)?;
-    let hmac_tag = format::read_replicated_field::<HMAC_TAG_SIZE>(&mut encrypted_file)?;
-
+    // 3. Unlock recipient's private key (runs Argon2id on the passphrase).
     on_event(&ProgressEvent::DerivingKey);
     let recipient_secret = read_private_key(private_key_path, passphrase, kdf_limit)?;
-    let envelope_result = open_envelope(&core.envelope, &recipient_secret);
+
+    // 4. X25519 ECDH with the ephemeral pubkey from the envelope.
+    let ephemeral_public = PublicKey::from(envelope.ephemeral_pubkey);
+    let recipient_public = PublicKey::from(&recipient_secret);
+    let shared = recipient_secret.diffie_hellman(&ephemeral_public);
     drop(recipient_secret);
-    let decrypted_combined_key = envelope_result?;
 
-    let hmac_key = &decrypted_combined_key[ENCRYPTION_KEY_SIZE..COMBINED_KEY_SIZE];
-    hmac_sha3_256_verify(hmac_key, &core.hmac_input(&prefix_bytes), &hmac_tag, || {
-        CryptoError::HybridHeaderAuthenticationFailed
-    })?;
+    if shared_secret_is_all_zero(shared.as_bytes()) {
+        return Err(CryptoError::HybridEnvelopeUnlockFailed);
+    }
 
-    let cipher = XChaCha20Poly1305::new((&decrypted_combined_key[..ENCRYPTION_KEY_SIZE]).into());
-    let stream_decryptor =
-        stream::DecryptorBE32::from_aead(cipher, core.stream_nonce.as_slice().into());
+    let wrap_key = derive_hybrid_wrap_key(
+        &envelope.ephemeral_pubkey,
+        recipient_public.as_bytes(),
+        shared.as_bytes(),
+    )?;
 
+    // 5. Unwrap file_key. Wrong recipient key and tampered envelope
+    //    are indistinguishable at the AEAD layer, by design.
+    let file_key = open_file_key(
+        &wrap_key,
+        &envelope.wrap_nonce,
+        &envelope.wrapped_file_key,
+        || CryptoError::HybridEnvelopeUnlockFailed,
+    )?;
+    drop(wrap_key);
+
+    // 6. Post-unwrap subkeys.
+    let (payload_key, header_key) = derive_subkeys(&file_key, &stream_nonce)?;
+
+    // 7. HMAC verify — right key, tampered rest-of-header → HeaderTampered.
+    hmac_sha3_256_verify(
+        header_key.as_ref(),
+        &build_header_hmac_input(&on_disk_prefix, &envelope_bytes, &stream_nonce, &ext_bytes),
+        &tag,
+    )?;
+
+    // 8. TLV canonicity, after authentication.
+    validate_tlv(&ext_bytes)?;
+
+    // 9. STREAM payload.
     on_event(&ProgressEvent::Decrypting);
+    let cipher = XChaCha20Poly1305::new(payload_key.as_ref().into());
+    let stream_decryptor = stream::DecryptorBE32::from_aead(cipher, stream_nonce.as_ref().into());
     let decrypt_reader = DecryptReader::new(stream_decryptor, encrypted_file);
     archiver::unarchive(decrypt_reader, output_dir)
 }
 
-#[cfg(test)]
-fn read_public_key(path: &Path) -> Result<PublicKey, CryptoError> {
-    let data = fs::read(path)?;
-    let header = format::parse_key_file_header(&data, format::KEY_FILE_TYPE_PUBLIC)?;
-    match header.version {
-        format::PUBLIC_KEY_VERSION => read_public_key_data(&data, &header),
-        other => Err(format::unsupported_key_version_error(
-            other,
-            format::PUBLIC_KEY_VERSION,
-        )),
+// ─── private.key read ──────────────────────────────────────────────────────
+
+/// In-memory view of the `private.key` body (everything after the 9-byte
+/// cleartext header). Field order is fixed by the wire format.
+struct PrivateKeyBody {
+    argon2_salt: [u8; ARGON2_SALT_SIZE],
+    kdf_bytes: [u8; KDF_PARAMS_SIZE],
+    wrap_nonce: [u8; WRAP_NONCE_SIZE],
+    ext_bytes: Vec<u8>,
+    wrapped_privkey: [u8; PRIVATE_KEY_CIPHERTEXT_SIZE],
+}
+
+impl PrivateKeyBody {
+    /// Parses the body (everything after the 9-byte cleartext header)
+    /// given the header's declared `ext_len`.
+    fn from_bytes(body: &[u8], ext_len: usize) -> Result<Self, CryptoError> {
+        let expected = PRIVATE_KEY_FIXED_BODY_SIZE + ext_len + PRIVATE_KEY_CIPHERTEXT_SIZE;
+        if body.len() != expected {
+            return Err(CryptoError::InvalidFormat(FormatDefect::BadKeyFileSize));
+        }
+        let mut off = 0;
+        let mut argon2_salt = [0u8; ARGON2_SALT_SIZE];
+        argon2_salt.copy_from_slice(&body[off..off + ARGON2_SALT_SIZE]);
+        off += ARGON2_SALT_SIZE;
+        let mut kdf_bytes = [0u8; KDF_PARAMS_SIZE];
+        kdf_bytes.copy_from_slice(&body[off..off + KDF_PARAMS_SIZE]);
+        off += KDF_PARAMS_SIZE;
+        let mut wrap_nonce = [0u8; WRAP_NONCE_SIZE];
+        wrap_nonce.copy_from_slice(&body[off..off + WRAP_NONCE_SIZE]);
+        off += WRAP_NONCE_SIZE;
+        let ext_bytes = body[off..off + ext_len].to_vec();
+        off += ext_len;
+        let mut wrapped_privkey = [0u8; PRIVATE_KEY_CIPHERTEXT_SIZE];
+        wrapped_privkey.copy_from_slice(&body[off..off + PRIVATE_KEY_CIPHERTEXT_SIZE]);
+        Ok(Self {
+            argon2_salt,
+            kdf_bytes,
+            wrap_nonce,
+            ext_bytes,
+            wrapped_privkey,
+        })
     }
 }
 
-#[cfg(test)]
-fn read_public_key_data(
-    data: &[u8],
-    header: &format::KeyFileHeader,
-) -> Result<PublicKey, CryptoError> {
-    format::validate_key_layout(data, header, PUBLIC_KEY_DATA_SIZE)?;
-    let body_start = format::KEY_FILE_HEADER_SIZE;
-    let key_bytes: [u8; PUBLIC_KEY_DATA_SIZE] = data[body_start..body_start + PUBLIC_KEY_DATA_SIZE]
-        .try_into()
-        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::UnexpectedKeyLength))?;
-    Ok(PublicKey::from(key_bytes))
+/// AEAD-AAD for `private.key` wrap/unwrap: every cleartext byte before
+/// `wrapped_privkey` (header + argon2_salt + kdf_params + wrap_nonce +
+/// ext_bytes). Shared by writer and reader so the AAD sequence cannot
+/// drift.
+fn private_key_aad(
+    header: &[u8; PRIVATE_KEY_HEADER_SIZE],
+    argon2_salt: &[u8; ARGON2_SALT_SIZE],
+    kdf_bytes: &[u8; KDF_PARAMS_SIZE],
+    wrap_nonce: &[u8; WRAP_NONCE_SIZE],
+    ext_bytes: &[u8],
+) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(
+        PRIVATE_KEY_HEADER_SIZE
+            + ARGON2_SALT_SIZE
+            + KDF_PARAMS_SIZE
+            + WRAP_NONCE_SIZE
+            + ext_bytes.len(),
+    );
+    aad.extend_from_slice(header);
+    aad.extend_from_slice(argon2_salt);
+    aad.extend_from_slice(kdf_bytes);
+    aad.extend_from_slice(wrap_nonce);
+    aad.extend_from_slice(ext_bytes);
+    aad
 }
 
+/// Reads and unlocks a `private.key` file. Returns the raw X25519
+/// private key as a [`StaticSecret`]. KDF parameter bounds are checked
+/// BEFORE Argon2id fires, so a hostile file cannot force unbounded work
+/// ahead of authentication.
 fn read_private_key(
     path: &Path,
     passphrase: &SecretString,
     kdf_limit: Option<&KdfLimit>,
 ) -> Result<StaticSecret, CryptoError> {
     let data = fs::read(path)?;
-    let header = format::parse_key_file_header(&data, format::KEY_FILE_TYPE_PRIVATE)?;
-    match header.version {
-        format::PRIVATE_KEY_VERSION => read_private_key_data(&data, &header, passphrase, kdf_limit),
-        other => Err(format::unsupported_key_version_error(
-            other,
-            format::PRIVATE_KEY_VERSION,
-        )),
+    if data.len() < PRIVATE_KEY_HEADER_SIZE {
+        return Err(CryptoError::InvalidFormat(FormatDefect::Truncated));
     }
-}
 
-fn read_private_key_data(
-    data: &[u8],
-    header: &format::KeyFileHeader,
-    passphrase: &SecretString,
-    kdf_limit: Option<&KdfLimit>,
-) -> Result<StaticSecret, CryptoError> {
-    validate_private_key_body_shape(data, header)?;
+    let header = format::parse_private_key_header(&data)?;
 
-    let body_start = format::KEY_FILE_HEADER_SIZE;
-    let body = &data[body_start..body_start + header.data_len as usize];
-    let parsed = PrivateKeyBody::from_bytes(body)?;
+    let body_start = PRIVATE_KEY_HEADER_SIZE;
+    let body = &data[body_start..];
+    let parsed = PrivateKeyBody::from_bytes(body, header.ext_len as usize)?;
 
-    let header_bytes: [u8; format::KEY_FILE_HEADER_SIZE] = data[..format::KEY_FILE_HEADER_SIZE]
+    // KDF param bounds BEFORE Argon2id runs.
+    let kdf_params = KdfParams::from_bytes(&parsed.kdf_bytes, kdf_limit)?;
+
+    let header_bytes: [u8; PRIVATE_KEY_HEADER_SIZE] = data[..PRIVATE_KEY_HEADER_SIZE]
         .try_into()
         .map_err(|_| CryptoError::InvalidFormat(FormatDefect::Truncated))?;
-    let aad = parsed.aad(&header_bytes);
+    let aad = private_key_aad(
+        &header_bytes,
+        &parsed.argon2_salt,
+        &parsed.kdf_bytes,
+        &parsed.wrap_nonce,
+        &parsed.ext_bytes,
+    );
 
-    let kdf_params = KdfParams::from_bytes(&parsed.kdf_bytes, kdf_limit)?;
-    let derived_key =
-        kdf_params.hash_passphrase(passphrase.expose_secret().as_bytes(), &parsed.salt)?;
+    let wrap_key = derive_passphrase_wrap_key(
+        passphrase,
+        &parsed.argon2_salt,
+        &kdf_params,
+        HKDF_INFO_PRIVATE_KEY_WRAP,
+    )?;
 
-    let cipher = XChaCha20Poly1305::new(derived_key.as_ref().into());
-    let nonce = chacha20poly1305::XNonce::from_slice(&parsed.nonce);
+    let cipher = XChaCha20Poly1305::new(wrap_key.as_ref().into());
+    let nonce = XNonce::from_slice(&parsed.wrap_nonce);
     let mut plaintext = cipher
         .decrypt(
             nonce,
-            chacha20poly1305::aead::Payload {
-                msg: parsed.ciphertext.as_slice(),
+            Payload {
+                msg: parsed.wrapped_privkey.as_slice(),
                 aad: aad.as_slice(),
             },
         )
         .map_err(|_| CryptoError::KeyFileUnlockFailed)?;
+    drop(wrap_key);
 
-    drop(derived_key);
+    // Validate TLV only after AEAD-AAD authentication succeeded.
+    validate_tlv(&parsed.ext_bytes)?;
 
-    if plaintext.len() != PRIVATE_KEY_SIZE {
+    if plaintext.len() != PRIVATE_KEY_PLAINTEXT_SIZE {
         plaintext.zeroize();
         return Err(CryptoError::InvalidFormat(
             FormatDefect::UnexpectedKeyLength,
         ));
     }
 
-    let mut private_key_bytes = Zeroizing::new([0u8; PRIVATE_KEY_SIZE]);
-    private_key_bytes.copy_from_slice(&plaintext);
+    let mut private_bytes = Zeroizing::new([0u8; PRIVATE_KEY_PLAINTEXT_SIZE]);
+    private_bytes.copy_from_slice(&plaintext);
     plaintext.zeroize();
 
-    let key = StaticSecret::from(*private_key_bytes);
-    Ok(key)
+    Ok(StaticSecret::from(*private_bytes))
 }
 
-fn seal_envelope(
-    combined_key: &[u8],
-    recipient_public: &PublicKey,
-) -> Result<[u8; ENVELOPE_SIZE], CryptoError> {
-    let ephemeral_secret = EphemeralSecret::random_from_rng(OsRng);
-    let ephemeral_public = PublicKey::from(&ephemeral_secret);
-    let shared = ephemeral_secret.diffie_hellman(recipient_public);
-    if shared_secret_is_all_zero(shared.as_bytes()) {
-        return Err(CryptoError::InvalidInput(
-            "Invalid recipient public key".to_string(),
-        ));
-    }
+// ─── generate_key_pair ─────────────────────────────────────────────────────
 
-    let wrapping_key = derive_envelope_key(&ephemeral_public, recipient_public, shared.as_bytes())?;
-
-    let cipher = XChaCha20Poly1305::new(wrapping_key.as_ref().into());
-    let aead_nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
-    let ciphertext_vec = cipher.encrypt(&aead_nonce, combined_key).map_err(|_| {
-        CryptoError::InternalCryptoFailure("internal error: envelope encryption failed")
-    })?;
-
-    let mut nonce = [0u8; ENVELOPE_NONCE_SIZE];
-    nonce.copy_from_slice(&aead_nonce);
-    let ciphertext: [u8; ENVELOPE_CIPHERTEXT_SIZE] =
-        ciphertext_vec.as_slice().try_into().map_err(|_| {
-            CryptoError::InternalInvariant(
-                "internal error: envelope ciphertext has an unexpected length",
-            )
-        })?;
-
-    Ok(Envelope {
-        ephemeral_public: *ephemeral_public.as_bytes(),
-        nonce,
-        ciphertext,
-    }
-    .to_bytes())
-}
-
-fn open_envelope(
-    envelope: &[u8; ENVELOPE_SIZE],
-    recipient_secret: &StaticSecret,
-) -> Result<Zeroizing<[u8; COMBINED_KEY_SIZE]>, CryptoError> {
-    let parsed = Envelope::from_bytes(envelope);
-    let ephemeral_public = PublicKey::from(parsed.ephemeral_public);
-
-    let shared = recipient_secret.diffie_hellman(&ephemeral_public);
-    if shared_secret_is_all_zero(shared.as_bytes()) {
-        return Err(CryptoError::HybridHeaderAuthenticationFailed);
-    }
-
-    let recipient_public = PublicKey::from(recipient_secret);
-    let wrapping_key =
-        derive_envelope_key(&ephemeral_public, &recipient_public, shared.as_bytes())?;
-
-    let cipher = XChaCha20Poly1305::new(wrapping_key.as_ref().into());
-    let nonce = chacha20poly1305::XNonce::from_slice(&parsed.nonce);
-    let mut plaintext = cipher
-        .decrypt(nonce, parsed.ciphertext.as_slice())
-        .map_err(|_| CryptoError::HybridHeaderAuthenticationFailed)?;
-
-    if plaintext.len() != COMBINED_KEY_SIZE {
-        plaintext.zeroize();
-        return Err(CryptoError::InvalidFormat(
-            FormatDefect::UnexpectedKeyLength,
-        ));
-    }
-
-    let mut result = Zeroizing::new([0u8; COMBINED_KEY_SIZE]);
-    result.copy_from_slice(&plaintext);
-    plaintext.zeroize();
-    Ok(result)
-}
-
-/// Returns (private_key_path, public_key_path) on success.
+/// Generates an X25519 key pair and writes both files to `output_dir`.
+/// Returns `(private_key_path, public_key_path)`.
+///
+/// - `private.key` is binary, passphrase-wrapped, with every cleartext
+///   byte AAD-bound.
+/// - `public.key` is a UTF-8 text file containing the canonical
+///   `fcr1…` Bech32 recipient string.
 pub fn generate_key_pair(
     passphrase: &SecretString,
     output_dir: &Path,
@@ -726,66 +485,38 @@ pub fn generate_key_pair(
     let private_key = StaticSecret::random_from_rng(OsRng);
     let public_key = PublicKey::from(&private_key);
 
-    // Encrypt private key at rest with passphrase via Argon2id + XChaCha20-Poly1305
+    // Derive wrap_key from passphrase + Argon2id + HKDF-SHA3-256.
+    let argon2_salt = random_bytes::<ARGON2_SALT_SIZE>();
     let kdf_params = KdfParams::default();
     let kdf_bytes = kdf_params.to_bytes();
-    let mut salt = [0u8; ARGON2_SALT_SIZE];
-    OsRng.fill_bytes(&mut salt);
+    let wrap_key = derive_passphrase_wrap_key(
+        passphrase,
+        &argon2_salt,
+        &kdf_params,
+        HKDF_INFO_PRIVATE_KEY_WRAP,
+    )?;
 
-    let derived_key = kdf_params.hash_passphrase(passphrase.expose_secret().as_bytes(), &salt)?;
-
-    // v4 writers emit an empty extension region. The field is
-    // authenticated by the AEAD tag either way, so a future 0.3.x minor
-    // can populate `ext_bytes` without breaking v4 readers.
+    let wrap_nonce = random_bytes::<WRAP_NONCE_SIZE>();
     let ext_bytes: Vec<u8> = Vec::new();
 
-    let cipher = XChaCha20Poly1305::new(derived_key.as_ref().into());
-    let aead_nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
-    let mut nonce = [0u8; PRIVATE_KEY_NONCE_SIZE];
-    nonce.copy_from_slice(&aead_nonce);
-
-    // The AAD binds the cleartext header + every cleartext body field
-    // (kdf, salt, nonce, ext_len, ext_bytes) to the ciphertext so
-    // every byte on disk is cryptographically authenticated. Tamper
-    // on any of those cleartext fields, and wrong-passphrase, both
-    // surface as the same `KeyFileUnlockFailed` error (the AEAD
-    // primitive returns a single undifferentiated failure).
-    let private_body_data_len = (PRIVATE_KEY_FIXED_BODY_SIZE + ext_bytes.len()) as u16;
-    let private_header = format::build_key_file_header(
-        format::KEY_FILE_TYPE_PRIVATE,
-        format::PRIVATE_KEY_VERSION,
-        private_body_data_len,
+    let private_header = format::build_private_key_header(ext_bytes.len() as u16);
+    let aad = private_key_aad(
+        &private_header,
+        &argon2_salt,
+        &kdf_bytes,
+        &wrap_nonce,
+        &ext_bytes,
     );
-    let public_header = format::build_key_file_header(
-        format::KEY_FILE_TYPE_PUBLIC,
-        format::PUBLIC_KEY_VERSION,
-        PUBLIC_KEY_DATA_SIZE as u16,
-    );
-
-    let aad = {
-        let mut aad = Vec::with_capacity(
-            format::KEY_FILE_HEADER_SIZE
-                + KDF_PARAMS_SIZE
-                + ARGON2_SALT_SIZE
-                + PRIVATE_KEY_NONCE_SIZE
-                + PRIVATE_KEY_EXT_LEN_SIZE
-                + ext_bytes.len(),
-        );
-        aad.extend_from_slice(&private_header);
-        aad.extend_from_slice(&kdf_bytes);
-        aad.extend_from_slice(&salt);
-        aad.extend_from_slice(&nonce);
-        aad.extend_from_slice(&(ext_bytes.len() as u16).to_be_bytes());
-        aad.extend_from_slice(&ext_bytes);
-        aad
-    };
 
     let raw_private_key = Zeroizing::new(private_key.to_bytes());
     drop(private_key);
-    let encrypted_private_key = cipher
+
+    let cipher = XChaCha20Poly1305::new(wrap_key.as_ref().into());
+    let nonce = XNonce::from_slice(&wrap_nonce);
+    let wrapped_vec = cipher
         .encrypt(
-            chacha20poly1305::XNonce::from_slice(&nonce),
-            chacha20poly1305::aead::Payload {
+            nonce,
+            Payload {
                 msg: raw_private_key.as_slice(),
                 aad: aad.as_slice(),
             },
@@ -794,21 +525,12 @@ pub fn generate_key_pair(
             CryptoError::InternalCryptoFailure("internal error: private key encryption failed")
         })?;
     drop(raw_private_key);
-    drop(derived_key);
+    drop(wrap_key);
 
-    let ciphertext: [u8; PRIVATE_KEY_BLOB_SIZE] =
-        encrypted_private_key.as_slice().try_into().map_err(|_| {
-            CryptoError::InternalInvariant(
-                "internal error: encrypted private key blob has an unexpected length",
-            )
+    let wrapped_privkey: [u8; PRIVATE_KEY_CIPHERTEXT_SIZE] =
+        wrapped_vec.as_slice().try_into().map_err(|_| {
+            CryptoError::InternalInvariant("internal error: wrapped private key size mismatch")
         })?;
-    let private_body = PrivateKeyBody {
-        kdf_bytes,
-        salt,
-        nonce,
-        ext_bytes,
-        ciphertext,
-    };
 
     let private_key_path = output_dir.join(PRIVATE_KEY_FILENAME);
     let public_key_path = output_dir.join(PUBLIC_KEY_FILENAME);
@@ -826,14 +548,9 @@ pub fn generate_key_pair(
         )));
     }
 
-    // Write public key first, then the private key. If the private-key
-    // write fails, a successfully persisted public key is orphaned but
-    // harmless (public keys are meant to be public); we still remove it
-    // so the user's output directory is clean.
-    //
-    // Public key permissions are relaxed to 0o644 on Unix so the file is
-    // world-readable (public keys are not secret); the private-key
-    // tempfile keeps tempfile's default 0o600.
+    // Write public.key (text file, `fcr1…\n`). Public key isn't secret
+    // so permissions relax to 0o644 on Unix.
+    let recipient_string = encode_recipient_string(public_key.as_bytes())?;
     let mut public_builder = tempfile::Builder::new();
     public_builder.prefix(".ferrocrypt-pubkey-").suffix(".tmp");
     #[cfg(unix)]
@@ -842,20 +559,27 @@ pub fn generate_key_pair(
         public_builder.permissions(fs::Permissions::from_mode(0o644));
     }
     let mut public_tmp = public_builder.tempfile_in(output_dir)?;
-    public_tmp.as_file_mut().write_all(&public_header)?;
-    public_tmp.as_file_mut().write_all(public_key.as_bytes())?;
+    public_tmp
+        .as_file_mut()
+        .write_all(recipient_string.as_bytes())?;
+    public_tmp.as_file_mut().write_all(b"\n")?;
     public_tmp.as_file().sync_all()?;
     atomic_output::finalize_file(public_tmp, &public_key_path)?;
 
+    // Write private.key. If this fails, clean up the public.key we
+    // just wrote (public keys are not secret, but leaving orphaned
+    // output is unfriendly).
     let private_write: Result<(), CryptoError> = (|| {
         let mut private_tmp = tempfile::Builder::new()
             .prefix(".ferrocrypt-privkey-")
             .suffix(".tmp")
             .tempfile_in(output_dir)?;
         private_tmp.as_file_mut().write_all(&private_header)?;
-        private_tmp
-            .as_file_mut()
-            .write_all(&private_body.to_bytes())?;
+        private_tmp.as_file_mut().write_all(&argon2_salt)?;
+        private_tmp.as_file_mut().write_all(&kdf_bytes)?;
+        private_tmp.as_file_mut().write_all(&wrap_nonce)?;
+        private_tmp.as_file_mut().write_all(&ext_bytes)?;
+        private_tmp.as_file_mut().write_all(&wrapped_privkey)?;
         private_tmp.as_file().sync_all()?;
         atomic_output::finalize_file(private_tmp, &private_key_path)?;
         Ok(())
@@ -869,637 +593,257 @@ pub fn generate_key_pair(
     Ok((private_key_path, public_key_path))
 }
 
+// ─── Bech32 recipient string ───────────────────────────────────────────────
+
+/// Canonical `algorithm(1) || public_key_material(32)` byte form used
+/// both by [`encode_recipient_string`] (as the Bech32 data payload)
+/// and by [`crate::PublicKey::fingerprint`] (as the SHA3-256 input).
+/// Single source of truth so the fingerprint and the `fcr1…` encoding
+/// cannot silently diverge.
+pub fn recipient_canonical_bytes(pubkey_bytes: &[u8; 32]) -> [u8; 1 + 32] {
+    let mut out = [0u8; 1 + 32];
+    out[0] = KEY_FILE_ALG_X25519;
+    out[1..].copy_from_slice(pubkey_bytes);
+    out
+}
+
+/// Encodes a 32-byte X25519 public key as the canonical `fcr1…` Bech32
+/// recipient string. `DATA = algorithm(1) || public_key_material(32)`
+/// per `ferrocrypt-lib/FORMAT.md` §7.1.
+pub fn encode_recipient_string(pubkey_bytes: &[u8; 32]) -> Result<String, CryptoError> {
+    let data = recipient_canonical_bytes(pubkey_bytes);
+    bech32::encode::<Bech32>(RECIPIENT_HRP, &data)
+        .map_err(|_| CryptoError::InternalInvariant("internal error: Bech32 encode failed"))
+}
+
+/// Decodes a canonical `fcr1…` Bech32 recipient string into the raw
+/// 32-byte X25519 public key. Rejects mixed case, unknown algorithm
+/// bytes, bad material length, and malformed Bech32 per
+/// `ferrocrypt-lib/FORMAT.md` §7.1.
+pub fn decode_recipient_string(s: &str) -> Result<[u8; 32], CryptoError> {
+    // Reject mixed-case per BIP 173.
+    if s.chars().any(|c| c.is_ascii_uppercase()) && s.chars().any(|c| c.is_ascii_lowercase()) {
+        return Err(CryptoError::InvalidInput(
+            "Recipient string has mixed case".to_string(),
+        ));
+    }
+
+    let (hrp, data) = bech32::decode(s)
+        .map_err(|_| CryptoError::InvalidInput(format!("Invalid recipient string: {s}")))?;
+
+    if hrp != RECIPIENT_HRP {
+        return Err(CryptoError::InvalidInput(format!(
+            "Unexpected recipient prefix (want '{}', got '{}')",
+            RECIPIENT_HRP.as_str(),
+            hrp.as_str()
+        )));
+    }
+
+    if data.len() != 33 {
+        return Err(CryptoError::InvalidFormat(
+            FormatDefect::UnexpectedKeyLength,
+        ));
+    }
+
+    let algorithm = data[0];
+    if algorithm != KEY_FILE_ALG_X25519 {
+        return Err(CryptoError::InvalidFormat(FormatDefect::UnknownAlgorithm {
+            algorithm,
+        }));
+    }
+
+    let mut pubkey = [0u8; 32];
+    pubkey.copy_from_slice(&data[1..]);
+    Ok(pubkey)
+}
+
+/// Reads a v1 `public.key` text file and returns the raw 32-byte
+/// X25519 public key. Strict parser: one Bech32 line, optional single
+/// trailing LF, no extra whitespace, lowercase only.
+pub fn read_public_key(path: &Path) -> Result<[u8; 32], CryptoError> {
+    let contents = fs::read_to_string(path)?;
+    // Accept exactly one trailing `\n`, nothing else.
+    let trimmed = contents.strip_suffix('\n').unwrap_or(&contents);
+    if trimmed.contains('\n') || trimmed != trimmed.trim() {
+        return Err(CryptoError::InvalidInput(
+            "public.key: extra whitespace or lines".to_string(),
+        ));
+    }
+    decode_recipient_string(trimmed)
+}
+
+// ─── Structural validator (kept for fuzz exports) ──────────────────────────
+
+/// Validates the structural shape of a `private.key` file. Does not
+/// attempt to decrypt or derive any keys. Re-exported via
+/// `fuzz_exports` so the fuzz harness can exercise the parser in
+/// isolation.
+pub fn validate_private_key_shape(
+    data: &[u8],
+    header: &format::PrivateKeyHeader,
+) -> Result<(), CryptoError> {
+    if header.algorithm != KEY_FILE_ALG_X25519 {
+        return Err(CryptoError::InvalidFormat(FormatDefect::UnknownAlgorithm {
+            algorithm: header.algorithm,
+        }));
+    }
+    let expected_total = PRIVATE_KEY_HEADER_SIZE
+        + PRIVATE_KEY_FIXED_BODY_SIZE
+        + header.ext_len as usize
+        + PRIVATE_KEY_CIPHERTEXT_SIZE;
+    if data.len() != expected_total {
+        return Err(CryptoError::InvalidFormat(FormatDefect::BadKeyFileSize));
+    }
+    Ok(())
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::format::HEADER_PREFIX_ENCODED_SIZE;
-    use crate::replication::{decode_exact, encoded_size};
-    use std::io::{Cursor, Read};
 
-    /// Proves the forward-compatibility mechanism for hybrid files: a synthetic
-    /// v4.1 file with a non-empty authenticated `ext_bytes` region (and correctly
-    /// recomputed HMAC) is decrypted successfully by the current v4 reader.
-    #[test]
-    fn future_minor_version_forward_compatible_hybrid() -> Result<(), CryptoError> {
+    /// Harness: generate a key pair, write a test file, and encrypt it.
+    /// Returns the tempdir, encrypted file path, decrypted-output dir,
+    /// private-key path, and the passphrase used to wrap the private
+    /// key. Every hybrid test starts from this setup.
+    fn hybrid_fixture(
+        content: &str,
+        key_passphrase: &str,
+    ) -> Result<(tempfile::TempDir, PathBuf, PathBuf, PathBuf, SecretString), CryptoError> {
         let tmp = tempfile::TempDir::new().unwrap();
         let keys_dir = tmp.path().join("keys");
-        let encrypt_dir = tmp.path().join("encrypted");
-        let decrypt_dir = tmp.path().join("decrypted");
+        let enc_dir = tmp.path().join("encrypted");
+        let dec_dir = tmp.path().join("decrypted");
         fs::create_dir_all(&keys_dir)?;
-        fs::create_dir_all(&encrypt_dir)?;
-        fs::create_dir_all(&decrypt_dir)?;
+        fs::create_dir_all(&enc_dir)?;
+        fs::create_dir_all(&dec_dir)?;
 
-        let key_pass = SecretString::from("kp".to_string());
-        generate_key_pair(&key_pass, &keys_dir, &|_| {})?;
+        let pass = SecretString::from(key_passphrase.to_string());
+        let (privkey_path, pubkey_path) = generate_key_pair(&pass, &keys_dir, &|_| {})?;
 
-        let input_file = tmp.path().join("data.txt");
-        fs::write(&input_file, "hybrid forward compat test")?;
+        let pubkey_bytes = read_public_key(&pubkey_path)?;
+        let input = tmp.path().join("data.txt");
+        fs::write(&input, content)?;
 
-        encrypt_file(
-            &input_file,
-            &encrypt_dir,
-            &keys_dir.join(PUBLIC_KEY_FILENAME),
-            None,
-            &|_| {},
-        )?;
+        encrypt_file_from_bytes(&input, &enc_dir, &pubkey_bytes, None, &|_| {})?;
+        let fcr = enc_dir.join("data.fcr");
+        Ok((tmp, fcr, dec_dir, privkey_path, pass))
+    }
 
-        let encrypted_path = encrypt_dir.join("data.fcr");
-        let original = fs::read(&encrypted_path)?;
-
-        // Read v4.0 fixed header fields (ext_len = 0 in the current writer).
-        let mut cursor = Cursor::new(&original[HEADER_PREFIX_ENCODED_SIZE..]);
-        let mut enc_envelope = vec![0u8; encoded_size(ENVELOPE_SIZE)];
-        let mut enc_nonce = vec![0u8; encoded_size(STREAM_NONCE_SIZE)];
-        let mut enc_old_ext = vec![0u8; encoded_size(0)];
-        let mut enc_hmac = vec![0u8; encoded_size(HMAC_TAG_SIZE)];
-        cursor.read_exact(&mut enc_envelope)?;
-        cursor.read_exact(&mut enc_nonce)?;
-        cursor.read_exact(&mut enc_old_ext)?;
-        cursor.read_exact(&mut enc_hmac)?;
-
-        let ciphertext_offset = HEADER_PREFIX_ENCODED_SIZE + cursor.position() as usize;
-
-        let envelope_vec = decode_exact(&enc_envelope, ENVELOPE_SIZE)?;
-        let nonce = decode_exact(&enc_nonce, STREAM_NONCE_SIZE)?;
-        let envelope: [u8; ENVELOPE_SIZE] = envelope_vec.as_slice().try_into().unwrap();
-
-        // Open envelope to get the HMAC key
-        let private_key = read_private_key(&keys_dir.join(PRIVATE_KEY_FILENAME), &key_pass, None)?;
-        let decrypted = open_envelope(&envelope, &private_key)?;
-        drop(private_key);
-        let hmac_key = &decrypted[ENCRYPTION_KEY_SIZE..COMBINED_KEY_SIZE];
-
-        // Synthetic v4.1 extension: 16 opaque authenticated bytes.
-        let ext_bytes: Vec<u8> = (0..16u8).collect();
-        let mut new_prefix = format::build_header_prefix(
-            format::TYPE_HYBRID,
-            format::HYBRID_VERSION_MAJOR,
-            0,
-            ext_bytes.len() as u16,
-        );
-        new_prefix[3] = 1; // minor = 1
-
-        // Recompute HMAC over prefix || envelope || nonce || ext_bytes.
-        let mut hmac_message = Vec::new();
-        hmac_message.extend_from_slice(&new_prefix);
-        hmac_message.extend_from_slice(&envelope);
-        hmac_message.extend_from_slice(&nonce);
-        hmac_message.extend_from_slice(&ext_bytes);
-        let new_hmac_tag = hmac_sha3_256(hmac_key, &hmac_message)?;
-
-        // Reassemble: new prefix + envelope + nonce + ext_bytes + HMAC + ciphertext.
-        let ciphertext = &original[ciphertext_offset..];
-        let mut output = Vec::new();
-        output.extend_from_slice(&encode(&new_prefix));
-        output.extend_from_slice(&enc_envelope);
-        output.extend_from_slice(&enc_nonce);
-        output.extend_from_slice(&encode(&ext_bytes));
-        output.extend_from_slice(&encode(&new_hmac_tag));
-        output.extend_from_slice(ciphertext);
-
-        fs::write(&encrypted_path, &output)?;
-
-        let output = decrypt_file(
-            &encrypted_path,
-            &decrypt_dir,
-            &keys_dir.join(PRIVATE_KEY_FILENAME),
-            &key_pass,
-            None,
-            &|_| {},
-        )?;
-        assert!(output.exists());
-
-        let decrypted_content = fs::read_to_string(decrypt_dir.join("data.txt"))?;
-        assert_eq!(decrypted_content, "hybrid forward compat test");
-
+    #[test]
+    fn encrypt_decrypt_round_trip() -> Result<(), CryptoError> {
+        let (_tmp, fcr, dec_dir, privkey, pass) = hybrid_fixture("hybrid round trip", "kp")?;
+        assert!(fcr.exists());
+        decrypt_file(&fcr, &dec_dir, &privkey, &pass, None, &|_| {})?;
+        let restored = fs::read_to_string(dec_dir.join("data.txt"))?;
+        assert_eq!(restored, "hybrid round trip");
         Ok(())
     }
 
-    /// Regression: a `private.key` file written with non-empty
-    /// `ext_bytes` (simulating a future `v4.x` minor that ships TLV
-    /// metadata) must still unlock under the current reader. The AEAD
-    /// AAD binds `ext_len` and `ext_bytes`, so the tag recomputes over
-    /// the new region; the reader reads, authenticates, and ignores
-    /// unknown TLV content.
+    /// Encrypting to Alice but decrypting with Bob's private key must
+    /// surface `HybridEnvelopeUnlockFailed`, not `HeaderTampered`.
     #[test]
-    fn v4_private_key_forward_compat_with_ext_bytes() -> Result<(), CryptoError> {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let keys_dir = tmp.path();
-        let passphrase = SecretString::from("fwd-compat".to_string());
+    fn decrypt_with_wrong_private_key_fails_at_envelope() -> Result<(), CryptoError> {
+        // Alice's keys: hybrid_fixture gives us Alice.
+        let (tmp, fcr, dec_dir, _alice_privkey, _alice_pass) = hybrid_fixture("x", "alice")?;
+        // Bob's separate key pair.
+        let bob_keys = tmp.path().join("bob_keys");
+        fs::create_dir_all(&bob_keys)?;
+        let bob_pass = SecretString::from("bob".to_string());
+        let (bob_privkey, _bob_pubkey) = generate_key_pair(&bob_pass, &bob_keys, &|_| {})?;
 
-        generate_key_pair(&passphrase, keys_dir, &|_| {})?;
-        let private_key_path = keys_dir.join(PRIVATE_KEY_FILENAME);
-
-        // Parse the freshly-written v4 file and recover the raw X25519
-        // private key by running the AEAD open with the authentic AAD.
-        let original = fs::read(&private_key_path)?;
-        let header = format::parse_key_file_header(&original, format::KEY_FILE_TYPE_PRIVATE)?;
-        let body_start = format::KEY_FILE_HEADER_SIZE;
-        let body = &original[body_start..body_start + header.data_len as usize];
-        let parsed = PrivateKeyBody::from_bytes(body)?;
-
-        let kdf_params = KdfParams::from_bytes(&parsed.kdf_bytes, None)?;
-        let derived_key =
-            kdf_params.hash_passphrase(passphrase.expose_secret().as_bytes(), &parsed.salt)?;
-        let original_header_bytes: [u8; format::KEY_FILE_HEADER_SIZE] =
-            original[..format::KEY_FILE_HEADER_SIZE].try_into().unwrap();
-        let cipher = XChaCha20Poly1305::new(derived_key.as_ref().into());
-        let raw_private_key = Zeroizing::new(
-            cipher
-                .decrypt(
-                    chacha20poly1305::XNonce::from_slice(&parsed.nonce),
-                    chacha20poly1305::aead::Payload {
-                        msg: parsed.ciphertext.as_slice(),
-                        aad: parsed.aad(&original_header_bytes).as_slice(),
-                    },
-                )
-                .expect("decrypt of freshly-generated private.key must succeed"),
-        );
-        assert_eq!(raw_private_key.len(), PRIVATE_KEY_SIZE);
-
-        // Construct a synthetic v4 file carrying 16 opaque TLV bytes in
-        // `ext_bytes`. Fresh AEAD nonce, updated header `data_len`, AAD
-        // covers the new `ext_len`/`ext_bytes` region.
-        let synth_ext: Vec<u8> = (0..16u8).collect();
-        let new_data_len = (PRIVATE_KEY_FIXED_BODY_SIZE + synth_ext.len()) as u16;
-        let new_header = format::build_key_file_header(
-            format::KEY_FILE_TYPE_PRIVATE,
-            format::PRIVATE_KEY_VERSION,
-            new_data_len,
-        );
-
-        let mut new_nonce = [0u8; PRIVATE_KEY_NONCE_SIZE];
-        OsRng.fill_bytes(&mut new_nonce);
-
-        let mut new_body = PrivateKeyBody {
-            kdf_bytes: parsed.kdf_bytes,
-            salt: parsed.salt,
-            nonce: new_nonce,
-            ext_bytes: synth_ext,
-            ciphertext: [0u8; PRIVATE_KEY_BLOB_SIZE],
-        };
-        let new_aad = new_body.aad(&new_header);
-        let new_ciphertext_vec = cipher
-            .encrypt(
-                chacha20poly1305::XNonce::from_slice(&new_nonce),
-                chacha20poly1305::aead::Payload {
-                    msg: raw_private_key.as_slice(),
-                    aad: new_aad.as_slice(),
-                },
-            )
-            .expect("re-encrypt with synthetic ext_bytes must succeed");
-        new_body.ciphertext = new_ciphertext_vec
-            .as_slice()
-            .try_into()
-            .expect("envelope ciphertext has fixed length");
-
-        let mut new_file = Vec::new();
-        new_file.extend_from_slice(&new_header);
-        new_file.extend_from_slice(&new_body.to_bytes());
-        fs::write(&private_key_path, &new_file)?;
-
-        // Current reader must authenticate and ignore the unknown TLV
-        // bytes and unlock the key successfully.
-        read_private_key(&private_key_path, &passphrase, None)?;
-
-        Ok(())
-    }
-
-    /// Tampering any byte inside the authenticated `ext_bytes` region of a
-    /// hybrid file must break HMAC verification. This is the structural
-    /// property introduced by the new header layout.
-    #[test]
-    fn ext_bytes_tamper_detected_hybrid() -> Result<(), CryptoError> {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let keys_dir = tmp.path().join("keys");
-        let encrypt_dir = tmp.path().join("encrypted");
-        let decrypt_dir = tmp.path().join("decrypted");
-        fs::create_dir_all(&keys_dir)?;
-        fs::create_dir_all(&encrypt_dir)?;
-        fs::create_dir_all(&decrypt_dir)?;
-
-        let key_pass = SecretString::from("kp".to_string());
-        generate_key_pair(&key_pass, &keys_dir, &|_| {})?;
-
-        let input_file = tmp.path().join("data.txt");
-        fs::write(&input_file, "hybrid tamper test")?;
-
-        encrypt_file(
-            &input_file,
-            &encrypt_dir,
-            &keys_dir.join(PUBLIC_KEY_FILENAME),
-            None,
-            &|_| {},
-        )?;
-
-        let encrypted_path = encrypt_dir.join("data.fcr");
-        let original = fs::read(&encrypted_path)?;
-
-        let mut cursor = Cursor::new(&original[HEADER_PREFIX_ENCODED_SIZE..]);
-        let mut enc_envelope = vec![0u8; encoded_size(ENVELOPE_SIZE)];
-        let mut enc_nonce = vec![0u8; encoded_size(STREAM_NONCE_SIZE)];
-        let mut enc_old_ext = vec![0u8; encoded_size(0)];
-        let mut enc_hmac = vec![0u8; encoded_size(HMAC_TAG_SIZE)];
-        cursor.read_exact(&mut enc_envelope)?;
-        cursor.read_exact(&mut enc_nonce)?;
-        cursor.read_exact(&mut enc_old_ext)?;
-        cursor.read_exact(&mut enc_hmac)?;
-        let ciphertext_offset = HEADER_PREFIX_ENCODED_SIZE + cursor.position() as usize;
-
-        let envelope_vec = decode_exact(&enc_envelope, ENVELOPE_SIZE)?;
-        let nonce = decode_exact(&enc_nonce, STREAM_NONCE_SIZE)?;
-        let envelope: [u8; ENVELOPE_SIZE] = envelope_vec.as_slice().try_into().unwrap();
-
-        let private_key = read_private_key(&keys_dir.join(PRIVATE_KEY_FILENAME), &key_pass, None)?;
-        let decrypted = open_envelope(&envelope, &private_key)?;
-        drop(private_key);
-        let hmac_key = &decrypted[ENCRYPTION_KEY_SIZE..COMBINED_KEY_SIZE];
-
-        // Build a legitimate v4.1 file with 8 bytes of ext_bytes, authenticated.
-        let ext_bytes = vec![0xAAu8; 8];
-        let new_prefix = format::build_header_prefix(
-            format::TYPE_HYBRID,
-            format::HYBRID_VERSION_MAJOR,
-            0,
-            ext_bytes.len() as u16,
-        );
-        let mut hmac_message = Vec::new();
-        hmac_message.extend_from_slice(&new_prefix);
-        hmac_message.extend_from_slice(&envelope);
-        hmac_message.extend_from_slice(&nonce);
-        hmac_message.extend_from_slice(&ext_bytes);
-        let hmac_tag = hmac_sha3_256(hmac_key, &hmac_message)?;
-
-        // Replace the real ext_bytes with a tampered value before encoding.
-        let tampered_ext = vec![0xBBu8; 8];
-        let ciphertext = &original[ciphertext_offset..];
-
-        let mut output = Vec::new();
-        output.extend_from_slice(&encode(&new_prefix));
-        output.extend_from_slice(&enc_envelope);
-        output.extend_from_slice(&enc_nonce);
-        output.extend_from_slice(&encode(&tampered_ext));
-        output.extend_from_slice(&encode(&hmac_tag));
-        output.extend_from_slice(ciphertext);
-
-        fs::write(&encrypted_path, &output)?;
-
-        let result = decrypt_file(
-            &encrypted_path,
-            &decrypt_dir,
-            &keys_dir.join(PRIVATE_KEY_FILENAME),
-            &key_pass,
-            None,
-            &|_| {},
-        );
-        assert!(result.is_err(), "tampered ext_bytes must fail HMAC");
-        Ok(())
-    }
-
-    #[test]
-    fn all_zero_shared_secret_detected() {
-        assert!(shared_secret_is_all_zero(&[0u8; 32]));
-    }
-
-    #[test]
-    fn nonzero_shared_secret_not_detected() {
-        let mut val = [0u8; 32];
-        val[31] = 1;
-        assert!(!shared_secret_is_all_zero(&val));
-    }
-
-    /// Regression test: a known small-order X25519 public key must be rejected
-    /// through the real envelope path, not just the helper.
-    /// The identity point [1, 0, ..., 0] is a small-order point that produces
-    /// an all-zero shared secret with any private key.
-    #[test]
-    fn small_order_public_key_rejected_in_seal() {
-        let mut identity_point = [0u8; 32];
-        identity_point[0] = 1; // Montgomery u-coordinate of the identity
-        let bad_pk = PublicKey::from(identity_point);
-
-        let combined_key = [0xAA; COMBINED_KEY_SIZE];
-        let result = seal_envelope(&combined_key, &bad_pk);
-        assert!(result.is_err());
-    }
-
-    /// Regression test: a small-order ephemeral public key in an envelope must
-    /// be rejected during decryption.
-    #[test]
-    fn small_order_ephemeral_key_rejected_in_open() {
-        let mut identity_point = [0u8; 32];
-        identity_point[0] = 1;
-
-        // Build a fake envelope with the identity point as ephemeral public key
-        let mut envelope = [0u8; ENVELOPE_SIZE];
-        envelope[..EPHEMERAL_PUB_SIZE].copy_from_slice(&identity_point);
-        // Rest is arbitrary — should fail before AEAD decryption
-
-        let private_key = StaticSecret::random_from_rng(OsRng);
-        let result = open_envelope(&envelope, &private_key);
-        assert!(result.is_err());
-    }
-
-    /// Envelope round-trip: seal with a recipient's public key, open with the
-    /// matching private key, verify the combined key is recovered exactly.
-    #[test]
-    fn seal_open_envelope_round_trip() {
-        let private_key = StaticSecret::random_from_rng(OsRng);
-        let public = PublicKey::from(&private_key);
-
-        let mut combined_key = [0u8; COMBINED_KEY_SIZE];
-        OsRng.fill_bytes(&mut combined_key);
-
-        let envelope = seal_envelope(&combined_key, &public).unwrap();
-        let recovered = open_envelope(&envelope, &private_key).unwrap();
-        assert_eq!(combined_key, *recovered);
-    }
-
-    /// Wrong private key must fail to open an envelope.
-    #[test]
-    fn open_envelope_wrong_key_fails() {
-        let private_key = StaticSecret::random_from_rng(OsRng);
-        let public = PublicKey::from(&private_key);
-        let wrong_secret = StaticSecret::random_from_rng(OsRng);
-
-        let combined_key = [0xBB; COMBINED_KEY_SIZE];
-        let envelope = seal_envelope(&combined_key, &public).unwrap();
-        let result = open_envelope(&envelope, &wrong_secret);
-        assert!(result.is_err());
-    }
-
-    /// Well-sized but garbage envelope bytes must fail AEAD decryption.
-    #[test]
-    fn garbage_envelope_fails() {
-        let private_key = StaticSecret::random_from_rng(OsRng);
-        let mut garbage = [0xCC; ENVELOPE_SIZE];
-        // Put a valid-looking (but wrong) public key so DH doesn't produce all-zero
-        let decoy_pk = PublicKey::from(&StaticSecret::random_from_rng(OsRng));
-        garbage[..EPHEMERAL_PUB_SIZE].copy_from_slice(decoy_pk.as_bytes());
-
-        let result = open_envelope(&garbage, &private_key);
-        assert!(result.is_err());
-    }
-
-    /// Flipping one bit in an otherwise valid envelope must fail.
-    #[test]
-    fn envelope_single_bit_flip_detected() {
-        let private_key = StaticSecret::random_from_rng(OsRng);
-        let public = PublicKey::from(&private_key);
-        let combined_key = [0xAA; COMBINED_KEY_SIZE];
-
-        let mut envelope = seal_envelope(&combined_key, &public).unwrap();
-        // Flip one bit in the ciphertext region
-        envelope[EPHEMERAL_PUB_SIZE + ENVELOPE_NONCE_SIZE + 10] ^= 0x01;
-
-        let result = open_envelope(&envelope, &private_key);
-        assert!(result.is_err());
-    }
-
-    /// Key file with unsupported algorithm byte must be rejected.
-    #[test]
-    fn key_file_wrong_algorithm_rejected() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let key_pass = SecretString::from("p".to_string());
-        generate_key_pair(&key_pass, tmp.path(), &|_| {}).unwrap();
-
-        // Patch algorithm byte (offset 3) to an unknown value
-        let pub_path = tmp.path().join(PUBLIC_KEY_FILENAME);
-        let mut data = fs::read(&pub_path).unwrap();
-        data[3] = 0xFF;
-        fs::write(&pub_path, &data).unwrap();
-
-        let result = read_public_key(&pub_path);
-        assert!(result.is_err());
-    }
-
-    /// Key file truncated to just the header must be rejected.
-    #[test]
-    fn truncated_key_file_rejected() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let key_pass = SecretString::from("p".to_string());
-        generate_key_pair(&key_pass, tmp.path(), &|_| {}).unwrap();
-
-        let pub_path = tmp.path().join(PUBLIC_KEY_FILENAME);
-        let data = fs::read(&pub_path).unwrap();
-        // Write only the 8-byte header, no key data
-        fs::write(&pub_path, &data[..format::KEY_FILE_HEADER_SIZE]).unwrap();
-
-        let result = read_public_key(&pub_path);
-        assert!(result.is_err());
-    }
-
-    /// Reserved-bit fail-closed: a v4.0 hybrid file with `flags = 0x0001` must
-    /// be rejected with the typed `UnknownHeaderFlags` variant. Since the
-    /// header HMAC covers the prefix (flags included), this test re-opens the
-    /// envelope to recover the HMAC key and recomputes a valid HMAC for the
-    /// patched prefix — without that, an HMAC failure could mask what the
-    /// flag check actually does, and the assertion would not pin the
-    /// flag-rejection path independently.
-    #[test]
-    fn nonzero_flags_rejected_with_valid_hmac() -> Result<(), CryptoError> {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let keys_dir = tmp.path().join("keys");
-        let encrypt_dir = tmp.path().join("encrypted");
-        let decrypt_dir = tmp.path().join("decrypted");
-        fs::create_dir_all(&keys_dir)?;
-        fs::create_dir_all(&encrypt_dir)?;
-        fs::create_dir_all(&decrypt_dir)?;
-
-        let key_pass = SecretString::from("kp".to_string());
-        generate_key_pair(&key_pass, &keys_dir, &|_| {})?;
-
-        let input_file = tmp.path().join("data.txt");
-        fs::write(&input_file, "flag rejection test")?;
-
-        encrypt_file(
-            &input_file,
-            &encrypt_dir,
-            &keys_dir.join(PUBLIC_KEY_FILENAME),
-            None,
-            &|_| {},
-        )?;
-
-        let encrypted_path = encrypt_dir.join("data.fcr");
-        let original = fs::read(&encrypted_path)?;
-
-        let mut cursor = Cursor::new(&original[HEADER_PREFIX_ENCODED_SIZE..]);
-        let mut enc_envelope = vec![0u8; encoded_size(ENVELOPE_SIZE)];
-        let mut enc_nonce = vec![0u8; encoded_size(STREAM_NONCE_SIZE)];
-        let mut enc_old_ext = vec![0u8; encoded_size(0)];
-        let mut enc_hmac = vec![0u8; encoded_size(HMAC_TAG_SIZE)];
-        cursor.read_exact(&mut enc_envelope)?;
-        cursor.read_exact(&mut enc_nonce)?;
-        cursor.read_exact(&mut enc_old_ext)?;
-        cursor.read_exact(&mut enc_hmac)?;
-        let ciphertext_offset = HEADER_PREFIX_ENCODED_SIZE + cursor.position() as usize;
-
-        let envelope_vec = decode_exact(&enc_envelope, ENVELOPE_SIZE)?;
-        let nonce = decode_exact(&enc_nonce, STREAM_NONCE_SIZE)?;
-        let envelope: [u8; ENVELOPE_SIZE] = envelope_vec.as_slice().try_into().unwrap();
-
-        let private_key = read_private_key(&keys_dir.join(PRIVATE_KEY_FILENAME), &key_pass, None)?;
-        let decrypted = open_envelope(&envelope, &private_key)?;
-        drop(private_key);
-        let hmac_key = &decrypted[ENCRYPTION_KEY_SIZE..COMBINED_KEY_SIZE];
-
-        // Build a v4.0 header with flags = 0x0001 and a recomputed valid HMAC.
-        let new_prefix = format::build_header_prefix(
-            format::TYPE_HYBRID,
-            format::HYBRID_VERSION_MAJOR,
-            0x0001,
-            0,
-        );
-        let mut hmac_message = Vec::new();
-        hmac_message.extend_from_slice(&new_prefix);
-        hmac_message.extend_from_slice(&envelope);
-        hmac_message.extend_from_slice(&nonce);
-        let hmac_tag = hmac_sha3_256(hmac_key, &hmac_message)?;
-
-        let ciphertext = &original[ciphertext_offset..];
-        let mut output = Vec::new();
-        output.extend_from_slice(&encode(&new_prefix));
-        output.extend_from_slice(&enc_envelope);
-        output.extend_from_slice(&enc_nonce);
-        output.extend_from_slice(&encode(&[])); // ext_bytes = empty
-        output.extend_from_slice(&encode(&hmac_tag));
-        output.extend_from_slice(ciphertext);
-
-        fs::write(&encrypted_path, &output)?;
-
-        let result = decrypt_file(
-            &encrypted_path,
-            &decrypt_dir,
-            &keys_dir.join(PRIVATE_KEY_FILENAME),
-            &key_pass,
-            None,
-            &|_| {},
-        );
-        match result {
-            Err(CryptoError::InvalidFormat(crate::error::FormatDefect::UnknownHeaderFlags(
-                0x0001,
-            ))) => Ok(()),
-            other => panic!("expected UnknownHeaderFlags(0x0001), got: {other:?}"),
+        match decrypt_file(&fcr, &dec_dir, &bob_privkey, &bob_pass, None, &|_| {}) {
+            Err(CryptoError::HybridEnvelopeUnlockFailed) => Ok(()),
+            other => panic!("expected HybridEnvelopeUnlockFailed, got {other:?}"),
         }
     }
 
-    /// Reserved-bit fail-closed: a key file with `flags = 0x0001` (any nonzero
-    /// value) must be rejected with the typed `UnknownKeyFileFlags` variant.
-    /// Key files have no separate HMAC over their own header — the layout
-    /// validator is the only fail-closed gate for unknown bits.
+    /// Wrong passphrase for the correct private-key file must surface
+    /// as `KeyFileUnlockFailed` — distinct from envelope failure.
     #[test]
-    fn key_file_nonzero_flags_rejected() -> Result<(), CryptoError> {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let key_pass = SecretString::from("p".to_string());
-        generate_key_pair(&key_pass, tmp.path(), &|_| {})?;
-
-        // Patch flags (header bytes 6..=7) to 0x0001 in the public key file.
-        let pub_path = tmp.path().join(PUBLIC_KEY_FILENAME);
-        let mut data = fs::read(&pub_path)?;
-        data[6] = 0x00;
-        data[7] = 0x01;
-        fs::write(&pub_path, &data)?;
-
-        let result = read_public_key(&pub_path);
-        match result {
-            Err(CryptoError::InvalidFormat(crate::error::FormatDefect::UnknownKeyFileFlags(
-                0x0001,
-            ))) => Ok(()),
-            other => panic!("expected UnknownKeyFileFlags(0x0001), got: {other:?}"),
+    fn decrypt_with_wrong_private_key_passphrase_fails_at_keyfile() -> Result<(), CryptoError> {
+        let (_tmp, fcr, dec_dir, privkey, _pass) = hybrid_fixture("x", "right")?;
+        let wrong = SecretString::from("wrong".to_string());
+        match decrypt_file(&fcr, &dec_dir, &privkey, &wrong, None, &|_| {}) {
+            Err(CryptoError::KeyFileUnlockFailed) => Ok(()),
+            other => panic!("expected KeyFileUnlockFailed, got {other:?}"),
         }
     }
 
-    /// `HybridHeaderCore::new` must accept an `ext_bytes` exactly the size of
-    /// `u16::MAX` and reject anything larger. The on-disk prefix stores
-    /// `ext_len` as a `u16`, so this is the wire-format boundary.
+    /// Tampering the stream_nonce must be caught by the header HMAC
+    /// AFTER successful envelope unwrap — surfaces as `HeaderTampered`.
     #[test]
-    fn new_rejects_oversized_ext_bytes() {
-        let envelope = [0u8; ENVELOPE_SIZE];
-        let stream_nonce = [0u8; STREAM_NONCE_SIZE];
+    fn decrypt_with_tampered_stream_nonce_fails_at_hmac() -> Result<(), CryptoError> {
+        let (_tmp, fcr, dec_dir, privkey, pass) = hybrid_fixture("x", "kp")?;
+        let mut bytes = fs::read(&fcr)?;
+        // stream_nonce starts at format::HEADER_PREFIX_ENCODED_SIZE + HYBRID_ENVELOPE_SIZE.
+        let nonce_offset = format::HEADER_PREFIX_ENCODED_SIZE + HYBRID_ENVELOPE_SIZE;
+        bytes[nonce_offset] ^= 0xFF;
+        fs::write(&fcr, &bytes)?;
+        match decrypt_file(&fcr, &dec_dir, &privkey, &pass, None, &|_| {}) {
+            Err(CryptoError::HeaderTampered) => Ok(()),
+            other => panic!("expected HeaderTampered, got {other:?}"),
+        }
+    }
 
-        // Max u16 accepted.
-        let accepted = HybridHeaderCore::new(envelope, stream_nonce, vec![0u8; u16::MAX as usize]);
-        assert!(accepted.is_ok(), "u16::MAX ext_bytes must be accepted");
+    /// Tampering `wrapped_file_key` inside the envelope surfaces as
+    /// `HybridEnvelopeUnlockFailed` at AEAD-open time.
+    #[test]
+    fn decrypt_with_tampered_envelope_fails_at_unwrap() -> Result<(), CryptoError> {
+        let (_tmp, fcr, dec_dir, privkey, pass) = hybrid_fixture("x", "kp")?;
+        let mut bytes = fs::read(&fcr)?;
+        // wrapped_file_key lives at offset: prefix(27) + ephemeral(32) + wrap_nonce(24) = 83.
+        let wrapped_offset =
+            format::HEADER_PREFIX_ENCODED_SIZE + EPHEMERAL_PUBKEY_SIZE + WRAP_NONCE_SIZE;
+        bytes[wrapped_offset] ^= 0x01;
+        fs::write(&fcr, &bytes)?;
+        match decrypt_file(&fcr, &dec_dir, &privkey, &pass, None, &|_| {}) {
+            Err(CryptoError::HybridEnvelopeUnlockFailed) => Ok(()),
+            other => panic!("expected HybridEnvelopeUnlockFailed, got {other:?}"),
+        }
+    }
 
-        // One byte over max is rejected.
-        let rejected =
-            HybridHeaderCore::new(envelope, stream_nonce, vec![0u8; u16::MAX as usize + 1]);
-        match rejected {
-            Ok(_) => panic!("u16::MAX + 1 ext_bytes must be rejected"),
+    /// Recipient string encode + decode must round-trip bit-for-bit.
+    #[test]
+    fn recipient_string_round_trip() -> Result<(), CryptoError> {
+        let mut pk = [0u8; 32];
+        for (i, b) in pk.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let s = encode_recipient_string(&pk)?;
+        assert!(s.starts_with("fcr1"));
+        let back = decode_recipient_string(&s)?;
+        assert_eq!(pk, back);
+        Ok(())
+    }
+
+    /// Mixed-case recipient strings MUST be rejected per BIP 173.
+    #[test]
+    fn recipient_string_rejects_mixed_case() {
+        let mut s = encode_recipient_string(&[0x42; 32]).unwrap();
+        // Flip one character to uppercase to break the case rule.
+        s.replace_range(4..5, &s[4..5].to_uppercase());
+        match decode_recipient_string(&s) {
             Err(CryptoError::InvalidInput(_)) => {}
-            Err(other) => panic!("expected InvalidInput, got: {other:?}"),
+            other => panic!("expected InvalidInput for mixed case, got {other:?}"),
         }
     }
 
-    /// `Envelope::to_bytes` and `from_bytes` must round-trip: the parsed
-    /// struct equals the original, and field bytes land at the canonical
-    /// offsets. Locks the wire layout so a future field reorder fails the
-    /// suite immediately instead of via a downstream HMAC mismatch.
+    /// `public.key` round-trip as text file.
     #[test]
-    fn envelope_round_trip() {
-        let original = Envelope {
-            ephemeral_public: [0x11; EPHEMERAL_PUB_SIZE],
-            nonce: [0x22; ENVELOPE_NONCE_SIZE],
-            ciphertext: [0x33; ENVELOPE_CIPHERTEXT_SIZE],
-        };
-        let bytes = original.to_bytes();
-
-        // Wire-format offsets: pk || nonce || ciphertext.
-        assert!(bytes[..EPHEMERAL_PUB_SIZE].iter().all(|&b| b == 0x11));
-        assert!(
-            bytes[EPHEMERAL_PUB_SIZE..EPHEMERAL_PUB_SIZE + ENVELOPE_NONCE_SIZE]
-                .iter()
-                .all(|&b| b == 0x22)
-        );
-        assert!(
-            bytes[EPHEMERAL_PUB_SIZE + ENVELOPE_NONCE_SIZE..]
-                .iter()
-                .all(|&b| b == 0x33)
-        );
-
-        let parsed = Envelope::from_bytes(&bytes);
-        assert_eq!(parsed.ephemeral_public, original.ephemeral_public);
-        assert_eq!(parsed.nonce, original.nonce);
-        assert_eq!(parsed.ciphertext, original.ciphertext);
-    }
-
-    /// `PrivateKeyBody::to_bytes` and `from_bytes` must round-trip and
-    /// place fields at their canonical offsets, including the
-    /// big-endian `ext_len` and the variable `ext_bytes` region. Uses
-    /// a non-empty `ext_bytes` to exercise the variable-length path.
-    #[test]
-    fn private_key_body_round_trip() {
-        let ext_payload: Vec<u8> = (0..5u8).collect();
-        let original = PrivateKeyBody {
-            kdf_bytes: [0x44; KDF_PARAMS_SIZE],
-            salt: [0x55; ARGON2_SALT_SIZE],
-            nonce: [0x66; PRIVATE_KEY_NONCE_SIZE],
-            ext_bytes: ext_payload.clone(),
-            ciphertext: [0x77; PRIVATE_KEY_BLOB_SIZE],
-        };
-        let bytes = original.to_bytes();
-
-        // Wire-format offsets: kdf || salt || nonce || ext_len || ext_bytes || ciphertext.
-        let kdf_end = KDF_PARAMS_SIZE;
-        let salt_end = kdf_end + ARGON2_SALT_SIZE;
-        let nonce_end = salt_end + PRIVATE_KEY_NONCE_SIZE;
-        let ext_len_end = nonce_end + PRIVATE_KEY_EXT_LEN_SIZE;
-        let ext_end = ext_len_end + ext_payload.len();
-        assert!(bytes[..kdf_end].iter().all(|&b| b == 0x44));
-        assert!(bytes[kdf_end..salt_end].iter().all(|&b| b == 0x55));
-        assert!(bytes[salt_end..nonce_end].iter().all(|&b| b == 0x66));
-        assert_eq!(
-            u16::from_be_bytes([bytes[nonce_end], bytes[nonce_end + 1]]) as usize,
-            ext_payload.len()
-        );
-        assert_eq!(&bytes[ext_len_end..ext_end], ext_payload.as_slice());
-        assert!(bytes[ext_end..].iter().all(|&b| b == 0x77));
-
-        let parsed = PrivateKeyBody::from_bytes(&bytes).expect("round-trip must parse");
-        assert_eq!(parsed.kdf_bytes, original.kdf_bytes);
-        assert_eq!(parsed.salt, original.salt);
-        assert_eq!(parsed.nonce, original.nonce);
-        assert_eq!(parsed.ext_bytes, original.ext_bytes);
-        assert_eq!(parsed.ciphertext, original.ciphertext);
+    fn public_key_file_round_trip() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pass = SecretString::from("kp".to_string());
+        let (_privkey, pubkey_path) = generate_key_pair(&pass, tmp.path(), &|_| {})?;
+        // Verify text format: single fcr1 line + newline.
+        let contents = fs::read_to_string(&pubkey_path)?;
+        assert!(contents.starts_with("fcr1"));
+        assert!(contents.ends_with('\n'));
+        assert_eq!(contents.lines().count(), 1);
+        // Parse roundtrip.
+        let pk_bytes = read_public_key(&pubkey_path)?;
+        assert_eq!(pk_bytes.len(), 32);
+        Ok(())
     }
 }

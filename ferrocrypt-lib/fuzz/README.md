@@ -25,8 +25,9 @@ the integration targets.
 
 | Target | What it exercises |
 |---|---|
-| `fuzz_header_prefix` | `read_header_from_reader` — 27-byte triple-replicated prefix, magic byte, type check |
-| `fuzz_key_file_header` | `parse_key_file_header` + `validate_key_layout` — both public and private key-file variants |
+| `fuzz_header_prefix` | `read_header_from_reader` — 27-byte triple-replicated prefix, `FCR\0` magic, type check, canonicity |
+| `fuzz_private_key_header` | `parse_private_key_header` + `validate_private_key_shape` — `private.key` cleartext header |
+| `fuzz_tlv` | `validate_tlv` — extension-region TLV grammar (canonical ordering, critical-tag rejection) |
 | `fuzz_kdf_params` | `KdfParams::from_bytes` — 12-byte KDF parameter bounds |
 | `fuzz_replication_decode` | `replication::decode` and `decode_exact` — majority-vote decoder |
 | `fuzz_archive_path` | `validate_archive_path` — tar-entry path guard |

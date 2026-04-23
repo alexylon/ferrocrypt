@@ -97,8 +97,8 @@ run_test "keygen: verify keys exist" \
     test -f "$KEYS/public.key" -a -f "$KEYS/private.key"
 
 run_test "keygen: verify key file sizes" \
-    test "$(stat -f%z "$KEYS/private.key" 2>/dev/null || stat -c%s "$KEYS/private.key" 2>/dev/null)" -eq 124 -a \
-         "$(stat -f%z "$KEYS/public.key" 2>/dev/null || stat -c%s "$KEYS/public.key" 2>/dev/null)" -eq 40
+    test "$(stat -f%z "$KEYS/private.key" 2>/dev/null || stat -c%s "$KEYS/private.key" 2>/dev/null)" -eq 125 -a \
+         "$(stat -f%z "$KEYS/public.key" 2>/dev/null || stat -c%s "$KEYS/public.key" 2>/dev/null)" -eq 64
 
 PUB="$KEYS/public.key"
 SECRET_KEY="$KEYS/private.key"
@@ -420,7 +420,7 @@ open('$CORR_FILE', 'wb').write(data)
 "
 run_test_expect_fail "sym: corrupted ciphertext rejects" \
     $FC symmetric -i "$CORR_FILE" -o "$corr_dec"
-# Corrupted header: flip the magic byte
+# Corrupted header: flip the first byte of the 4-byte magic
 corr2_enc="$WORKDIR/corr2_enc"
 corr2_dec="$WORKDIR/corr2_dec"
 mkdir -p "$corr2_enc" "$corr2_dec"
@@ -428,16 +428,17 @@ $FC symmetric -i "$WORKDIR/small.txt" -o "$corr2_enc" 2>/dev/null
 CORR2_FILE="$corr2_enc/small.fcr"
 python3 -c "
 data = bytearray(open('$CORR2_FILE', 'rb').read())
-# Magic byte is at logical prefix offset 0; corrupt 2 of 3 replicated copies.
+# The 4-byte magic starts at logical prefix offset 0; corrupt the first
+# magic byte across 2 of 3 replicated copies.
 # Encoded prefix: [pad(3)] [copy0(8)] [copy1(8)] [copy2(8)]
 data[3] ^= 0xFF   # copy 0
 data[11] ^= 0xFF  # copy 1
 open('$CORR2_FILE', 'wb').write(data)
 "
-# With 2 of 3 magic byte copies corrupted, majority vote yields the corrupted
-# value → file is not detected as FerroCrypt → routes to encrypt (not decrypt).
-# The file is treated as a normal input and encrypted successfully.
-run_test "sym: corrupted magic byte encrypts (not detected as FerroCrypt)" \
+# With 2 of 3 copies corrupted at the first magic byte, majority vote yields
+# the corrupted value → file is not detected as FerroCrypt → routes to encrypt
+# (not decrypt). The file is treated as a normal input and encrypted successfully.
+run_test "sym: corrupted magic encrypts (not detected as FerroCrypt)" \
     $FC symmetric -i "$CORR2_FILE" -o "$corr2_dec"
 # Truncated file (cut at half)
 trunc_enc="$WORKDIR/trunc_enc"

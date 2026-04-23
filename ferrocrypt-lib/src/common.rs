@@ -3,15 +3,20 @@ use std::ffi::OsStr;
 use std::io::{self, Read, Write};
 use std::path::Path;
 
-use chacha20poly1305::{XChaCha20Poly1305, aead::stream};
+use chacha20poly1305::{
+    XChaCha20Poly1305, XNonce,
+    aead::{Aead, KeyInit as AeadKeyInit, OsRng, rand_core::RngCore, stream},
+};
 use constant_time_eq::constant_time_eq_32;
+use hkdf::Hkdf;
 use hmac::{Hmac, KeyInit, Mac};
 use sha3::{Digest, Sha3_256};
 
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::CryptoError;
-use crate::error::{InvalidKdfParams, StreamError};
+use crate::error::{FormatDefect, InvalidKdfParams, StreamError};
+use crate::format::EXT_LEN_MAX;
 
 /// Wraps a [`StreamError`] as an [`io::Error`] with the given kind so that
 /// the typed marker can traverse [`Read`]/[`Write`] trait boundaries and
@@ -187,6 +192,37 @@ pub const HMAC_KEY_SIZE: usize = 32;
 /// HMAC-SHA3-256 output size in bytes (distinct from `HMAC_KEY_SIZE`).
 pub const HMAC_TAG_SIZE: usize = 32;
 pub const ARGON2_SALT_SIZE: usize = 32;
+/// Size of the per-file random key that both symmetric and hybrid
+/// `.fcr` modes wrap via their mode envelope. Post-unwrap subkey
+/// derivation keys off this value; see [`derive_subkeys`].
+pub const FILE_KEY_SIZE: usize = 32;
+/// XChaCha20-Poly1305 single-shot nonce size, used for both mode
+/// envelopes (`wrap_nonce`) and the `private.key` AEAD.
+pub const WRAP_NONCE_SIZE: usize = 24;
+/// Size of an AEAD-wrapped 32-byte file key: 32-byte ciphertext +
+/// 16-byte Poly1305 tag.
+pub const WRAPPED_FILE_KEY_SIZE: usize = FILE_KEY_SIZE + TAG_SIZE;
+
+// ─── HKDF info strings (pinned wire format) ───────────────────────────────
+//
+// Every HKDF info string in v1 is literal ASCII of the form
+// `"ferrocrypt/v1/<subsystem>"`. Pinning these as constants means a
+// silent typo in any single call site regresses test fixtures
+// immediately, and a future v2 cannot accidentally reuse a v1 derivation.
+
+/// HKDF info for deriving the symmetric-envelope wrap key from Argon2id
+/// output.
+pub const HKDF_INFO_SYM_WRAP: &[u8] = b"ferrocrypt/v1/sym/wrap";
+/// HKDF info for deriving the hybrid-envelope wrap key from X25519 ECDH.
+pub const HKDF_INFO_HYB_WRAP: &[u8] = b"ferrocrypt/v1/hyb/wrap";
+/// HKDF info for deriving the `private.key` wrap key from Argon2id.
+pub const HKDF_INFO_PRIVATE_KEY_WRAP: &[u8] = b"ferrocrypt/v1/private-key/wrap";
+/// HKDF info for the per-file payload AEAD key, derived from
+/// `file_key` with `stream_nonce` as HKDF salt.
+pub const HKDF_INFO_PAYLOAD: &[u8] = b"ferrocrypt/v1/payload";
+/// HKDF info for the per-file header HMAC key, derived from `file_key`
+/// with an empty HKDF salt.
+pub const HKDF_INFO_HEADER: &[u8] = b"ferrocrypt/v1/header";
 
 // ─── Streaming encryption sizes ───────────────────────────────────────────
 /// Plaintext chunk size for streaming XChaCha20-Poly1305 AEAD (64 KiB).
@@ -247,19 +283,249 @@ pub fn hmac_sha3_256(key: &[u8], data: &[u8]) -> Result<[u8; 32], CryptoError> {
     Ok(bytes)
 }
 
-/// Verifies HMAC-SHA3-256 in constant time. Returns the error produced by
-/// `on_mismatch` on tag mismatch so that callers can route the failure to
-/// a mode-specific variant (symmetric vs hybrid header authentication).
-pub fn hmac_sha3_256_verify(
-    key: &[u8],
-    data: &[u8],
-    tag: &[u8],
-    on_mismatch: impl FnOnce() -> CryptoError,
-) -> Result<(), CryptoError> {
+/// Verifies HMAC-SHA3-256 in constant time. Returns
+/// [`CryptoError::HeaderTampered`] on tag mismatch.
+///
+/// In v1 this function is called only during `.fcr` decrypt, after the
+/// mode envelope has successfully unwrapped `file_key`. Any mismatch at
+/// that point means the header was tampered with outside the envelope
+/// (replicated prefix, `stream_nonce`, or `ext_bytes`), so both
+/// symmetric and hybrid paths want the same error — mode distinction is
+/// already captured by the `*EnvelopeUnlockFailed` variants emitted
+/// earlier.
+pub fn hmac_sha3_256_verify(key: &[u8], data: &[u8], tag: &[u8]) -> Result<(), CryptoError> {
     let mut mac = HmacSha3_256::new_from_slice(key)
         .map_err(|_| CryptoError::InternalInvariant("internal error: invalid HMAC key length"))?;
     mac.update(data);
-    mac.verify_slice(tag).map_err(|_| on_mismatch())
+    mac.verify_slice(tag)
+        .map_err(|_| CryptoError::HeaderTampered)
+}
+
+// ─── Random bytes / file-key indirection ──────────────────────────────────
+
+/// Fill a fresh stack-allocated `[u8; N]` from the OS CSPRNG. Use this
+/// for **non-secret** random material (salts, nonces, ephemeral-public
+/// scratch) where zero-on-drop provides no security benefit.
+pub fn random_bytes<const N: usize>() -> [u8; N] {
+    let mut buf = [0u8; N];
+    OsRng.fill_bytes(&mut buf);
+    buf
+}
+
+/// Fill a fresh `Zeroizing<[u8; N]>` from the OS CSPRNG. Use this for
+/// **secret** random material (file keys, ephemeral secret keys) where
+/// drop-time clearing is the right default.
+pub fn random_secret<const N: usize>() -> Zeroizing<[u8; N]> {
+    let mut buf = Zeroizing::new([0u8; N]);
+    OsRng.fill_bytes(buf.as_mut());
+    buf
+}
+
+/// Generates a fresh 32-byte file key using the OS CSPRNG. Both
+/// symmetric and hybrid `.fcr` modes produce one per-file `file_key`;
+/// the mode envelope wraps it, and [`derive_subkeys`] derives the
+/// payload and header subkeys from it.
+pub fn generate_file_key() -> Zeroizing<[u8; FILE_KEY_SIZE]> {
+    random_secret::<FILE_KEY_SIZE>()
+}
+
+/// Derives a 32-byte wrap key from a passphrase via
+/// `Argon2id → HKDF-SHA3-256`. Used by:
+/// - symmetric `.fcr` envelope wrap (`info = "ferrocrypt/v1/sym/wrap"`)
+/// - `private.key` wrap  (`info = "ferrocrypt/v1/private-key/wrap"`)
+///
+/// `argon2_salt` doubles as the Argon2id salt AND the HKDF salt.
+/// Saves storing two distinct salts on disk.
+pub fn derive_passphrase_wrap_key(
+    passphrase: &secrecy::SecretString,
+    argon2_salt: &[u8; ARGON2_SALT_SIZE],
+    kdf_params: &KdfParams,
+    info: &[u8],
+) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
+    use secrecy::ExposeSecret;
+    let ikm = kdf_params.hash_passphrase(passphrase.expose_secret().as_bytes(), argon2_salt)?;
+    hkdf_expand_sha3_256(Some(argon2_salt), ikm.as_ref(), info)
+}
+
+/// Builds the `.fcr` header HMAC input:
+/// `on_disk_prefix (27) || envelope_bytes || stream_nonce (19) || ext_bytes`.
+///
+/// Shared by symmetric and hybrid so the authentication-input order
+/// cannot drift between modes. `envelope_bytes` is a slice because the
+/// symmetric envelope is 116 bytes and the hybrid envelope is 104.
+pub fn build_header_hmac_input(
+    on_disk_prefix: &[u8],
+    envelope_bytes: &[u8],
+    stream_nonce: &[u8; STREAM_NONCE_SIZE],
+    ext_bytes: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(
+        on_disk_prefix.len() + envelope_bytes.len() + STREAM_NONCE_SIZE + ext_bytes.len(),
+    );
+    out.extend_from_slice(on_disk_prefix);
+    out.extend_from_slice(envelope_bytes);
+    out.extend_from_slice(stream_nonce);
+    out.extend_from_slice(ext_bytes);
+    out
+}
+
+/// Seals a 32-byte `file_key` with XChaCha20-Poly1305. Returns the
+/// 48-byte wrapped form (ciphertext + tag) suitable for placement in
+/// a mode envelope. `AAD` is empty — both modes' other fields are
+/// covered by the outer HMAC.
+pub fn seal_file_key(
+    wrap_key: &[u8; 32],
+    wrap_nonce: &[u8; WRAP_NONCE_SIZE],
+    file_key: &[u8; FILE_KEY_SIZE],
+) -> Result<[u8; WRAPPED_FILE_KEY_SIZE], CryptoError> {
+    let cipher = XChaCha20Poly1305::new(wrap_key.into());
+    let nonce = XNonce::from_slice(wrap_nonce);
+    let ciphertext = cipher
+        .encrypt(nonce, file_key.as_ref())
+        .map_err(|_| CryptoError::InternalCryptoFailure("internal error: envelope seal failed"))?;
+    ciphertext.as_slice().try_into().map_err(|_| {
+        CryptoError::InternalInvariant("internal error: envelope ciphertext size mismatch")
+    })
+}
+
+/// Reads exactly `buf.len()` bytes or maps any read failure to
+/// [`FormatDefect::Truncated`]. Used by `.fcr` decrypt paths where a
+/// short read on a fixed-size header field is a format-level
+/// truncation rather than a generic I/O error.
+pub fn read_exact_or_truncated(reader: &mut impl Read, buf: &mut [u8]) -> Result<(), CryptoError> {
+    reader
+        .read_exact(buf)
+        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::Truncated))
+}
+
+/// Opens an AEAD-wrapped file key. `on_fail` is called on AEAD-tag
+/// mismatch so callers can route the failure to a mode-specific
+/// variant ([`CryptoError::SymmetricEnvelopeUnlockFailed`] or
+/// [`CryptoError::HybridEnvelopeUnlockFailed`]).
+pub fn open_file_key(
+    wrap_key: &[u8; 32],
+    wrap_nonce: &[u8; WRAP_NONCE_SIZE],
+    wrapped: &[u8; WRAPPED_FILE_KEY_SIZE],
+    on_fail: impl FnOnce() -> CryptoError,
+) -> Result<Zeroizing<[u8; FILE_KEY_SIZE]>, CryptoError> {
+    let cipher = XChaCha20Poly1305::new(wrap_key.into());
+    let nonce = XNonce::from_slice(wrap_nonce);
+    let plaintext = cipher
+        .decrypt(nonce, wrapped.as_ref())
+        .map_err(|_| on_fail())?;
+    let mut out = Zeroizing::new([0u8; FILE_KEY_SIZE]);
+    if plaintext.len() != FILE_KEY_SIZE {
+        return Err(CryptoError::InternalInvariant(
+            "internal error: unwrapped file key size mismatch",
+        ));
+    }
+    out.copy_from_slice(&plaintext);
+    Ok(out)
+}
+
+/// HKDF-SHA3-256 expansion to a 32-byte key. Every v1 HKDF derivation
+/// goes through this helper so the hash family and output length are
+/// fixed in one place.
+pub fn hkdf_expand_sha3_256(
+    salt: Option<&[u8]>,
+    ikm: &[u8],
+    info: &[u8],
+) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
+    let hkdf = Hkdf::<Sha3_256>::new(salt, ikm);
+    let mut out = Zeroizing::new([0u8; 32]);
+    hkdf.expand(info, out.as_mut())
+        .map_err(|_| CryptoError::InternalCryptoFailure("internal error: HKDF expand failed"))?;
+    Ok(out)
+}
+
+/// Payload AEAD key + header HMAC key, derived from a successfully
+/// unwrapped [`FILE_KEY_SIZE`]-byte `file_key`.
+pub type DerivedSubkeys = (
+    Zeroizing<[u8; ENCRYPTION_KEY_SIZE]>,
+    Zeroizing<[u8; HMAC_KEY_SIZE]>,
+);
+
+/// Derives the payload and header subkeys from `file_key`.
+///
+/// - `payload_key = HKDF-SHA3-256(salt = stream_nonce, ikm = file_key,
+///    info = "ferrocrypt/v1/payload", L = 32)`
+/// - `header_key  = HKDF-SHA3-256(salt = empty,        ikm = file_key,
+///    info = "ferrocrypt/v1/header",  L = 32)`
+///
+/// Binding the payload key to `stream_nonce` (rather than using an
+/// empty salt) is defence-in-depth: it ties the derived key to every
+/// byte of the stored nonce, matching age's "file key + nonce → payload
+/// key" pattern.
+pub fn derive_subkeys(
+    file_key: &[u8; FILE_KEY_SIZE],
+    stream_nonce: &[u8; STREAM_NONCE_SIZE],
+) -> Result<DerivedSubkeys, CryptoError> {
+    let payload_key = hkdf_expand_sha3_256(Some(stream_nonce), file_key, HKDF_INFO_PAYLOAD)?;
+    let header_key = hkdf_expand_sha3_256(None, file_key, HKDF_INFO_HEADER)?;
+    Ok((payload_key, header_key))
+}
+
+// ─── TLV extension region ─────────────────────────────────────────────────
+
+/// Validates the TLV extension region per FORMAT.md §6.
+///
+/// Checks:
+/// - each entry's `tag(u16) || len(u16)` fits within the region;
+/// - `len` is authoritative (the entry's `value` does not extend past
+///   the end of the region);
+/// - tags appear in strictly ascending numeric order (rejects
+///   duplicates by construction);
+/// - no reserved tag (`0x0000`, `0x8000`) is emitted;
+/// - no critical tag (`0x8001..=0xFFFF`) appears — v1.0 defines none,
+///   so any critical tag is an upgrade-required signal.
+///
+/// Ignorable tags (`0x0001..=0x7FFF`) are accepted silently once
+/// canonicity is verified; v1.0 writers emit an empty region so
+/// callers don't yet need to extract tag values. Future v1.x releases
+/// that define a known tag will extract its value by extending this
+/// path or adding a sibling helper.
+pub fn validate_tlv(ext_bytes: &[u8]) -> Result<(), CryptoError> {
+    if ext_bytes.len() > EXT_LEN_MAX as usize {
+        return Err(CryptoError::InvalidFormat(FormatDefect::ExtTooLarge {
+            len: ext_bytes.len().min(u16::MAX as usize) as u16,
+        }));
+    }
+
+    let mut cursor = 0;
+    let mut prev_tag: Option<u16> = None;
+    while cursor < ext_bytes.len() {
+        // tag (u16) + len (u16) = 4 bytes of entry header.
+        if ext_bytes.len() - cursor < 4 {
+            return Err(CryptoError::InvalidFormat(FormatDefect::MalformedTlv));
+        }
+        let tag = u16::from_be_bytes([ext_bytes[cursor], ext_bytes[cursor + 1]]);
+        let len = u16::from_be_bytes([ext_bytes[cursor + 2], ext_bytes[cursor + 3]]) as usize;
+        cursor += 4;
+
+        if tag == 0x0000 || tag == 0x8000 {
+            return Err(CryptoError::InvalidFormat(FormatDefect::MalformedTlv));
+        }
+
+        if let Some(prev) = prev_tag {
+            if tag <= prev {
+                return Err(CryptoError::InvalidFormat(FormatDefect::MalformedTlv));
+            }
+        }
+        prev_tag = Some(tag);
+
+        if ext_bytes.len() - cursor < len {
+            return Err(CryptoError::InvalidFormat(FormatDefect::MalformedTlv));
+        }
+        cursor += len;
+
+        // Critical-range tag: v1.0 knows none, so reject.
+        if tag & 0x8000 != 0 {
+            return Err(CryptoError::InvalidFormat(
+                FormatDefect::UnknownCriticalTag { tag },
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Streaming encryption writer: buffers plaintext writes into `BUFFER_SIZE`
@@ -406,12 +672,12 @@ impl<R: Read> DecryptReader<R> {
     ///
     /// - **Chunk-boundary truncation** — `read` returns 0 immediately,
     ///   meaning the final authenticated chunk is missing entirely. This
-    ///   surfaces as [`StreamError::Truncated`] → [`CryptoError::TruncatedStream`].
+    ///   surfaces as [`StreamError::Truncated`] → [`CryptoError::PayloadTruncated`].
     /// - **Mid-chunk truncation** — some bytes were read but fewer than a
     ///   full `BUFFER_SIZE + TAG_SIZE`. We treat the short buffer as the
     ///   final chunk and run `decrypt_last_in_place`. AEAD authentication
     ///   will reject it, surfacing as [`StreamError::DecryptAead`] →
-    ///   [`CryptoError::PayloadAuthenticationFailed`]. This is the correct
+    ///   [`CryptoError::PayloadTampered`]. This is the correct
     ///   outcome — we cannot distinguish a mid-chunk truncation from a
     ///   tampered tail, and both must fail closed.
     fn fill_buffer(&mut self) -> io::Result<()> {
@@ -715,9 +981,9 @@ mod tests {
     /// but shorter than `BUFFER_SIZE + TAG_SIZE`. `fill_buffer` treats the
     /// short buffer as the final chunk and runs `decrypt_last_in_place`,
     /// which must fail AEAD authentication. The user-visible variant is
-    /// `PayloadAuthenticationFailed`, not `TruncatedStream`: we cannot
-    /// distinguish a truncated tail from a tampered tail, and either way
-    /// the tail must be rejected.
+    /// `PayloadTampered`, not `PayloadTruncated`: we cannot distinguish a
+    /// truncated tail from a tampered tail, and either way the tail must
+    /// be rejected.
     #[test]
     fn streaming_aead_mid_chunk_truncation_rejected() {
         let plaintext: Vec<u8> = (0..(BUFFER_SIZE + 500)).map(|i| (i % 251) as u8).collect();
@@ -970,5 +1236,232 @@ mod tests {
             Err(other) => panic!("expected ExcessiveWork, got: {other}"),
             Ok(_) => panic!("None limit must apply default ceiling"),
         }
+    }
+
+    // ─── File key / subkey derivation / TLV ──────────────────────────────
+
+    #[test]
+    fn generate_file_key_has_correct_size() {
+        let key = generate_file_key();
+        assert_eq!(key.len(), FILE_KEY_SIZE);
+    }
+
+    #[test]
+    fn generate_file_key_is_random() {
+        let a = generate_file_key();
+        let b = generate_file_key();
+        assert_ne!(*a, *b, "two consecutive file keys must differ");
+    }
+
+    #[test]
+    fn hkdf_expand_sha3_256_is_deterministic() {
+        let ikm = [0x11u8; 32];
+        let salt = [0x22u8; 16];
+        let info = b"ferrocrypt/v1/test";
+        let a = hkdf_expand_sha3_256(Some(&salt), &ikm, info).unwrap();
+        let b = hkdf_expand_sha3_256(Some(&salt), &ikm, info).unwrap();
+        assert_eq!(*a, *b);
+    }
+
+    #[test]
+    fn hkdf_expand_sha3_256_domain_separates_on_info() {
+        let ikm = [0x11u8; 32];
+        let a = hkdf_expand_sha3_256(None, &ikm, HKDF_INFO_PAYLOAD).unwrap();
+        let b = hkdf_expand_sha3_256(None, &ikm, HKDF_INFO_HEADER).unwrap();
+        assert_ne!(*a, *b, "different info strings must produce different keys");
+    }
+
+    #[test]
+    fn hkdf_expand_sha3_256_domain_separates_on_salt() {
+        let ikm = [0x11u8; 32];
+        let info = HKDF_INFO_PAYLOAD;
+        let salt_a = [0x22u8; 16];
+        let salt_b = [0x33u8; 16];
+        let a = hkdf_expand_sha3_256(Some(&salt_a), &ikm, info).unwrap();
+        let b = hkdf_expand_sha3_256(Some(&salt_b), &ikm, info).unwrap();
+        assert_ne!(*a, *b, "different salts must produce different keys");
+    }
+
+    #[test]
+    fn derive_subkeys_round_trip() {
+        let file_key = [0x11u8; FILE_KEY_SIZE];
+        let nonce = [0x22u8; STREAM_NONCE_SIZE];
+        let (payload_a, header_a) = derive_subkeys(&file_key, &nonce).unwrap();
+        let (payload_b, header_b) = derive_subkeys(&file_key, &nonce).unwrap();
+        assert_eq!(*payload_a, *payload_b);
+        assert_eq!(*header_a, *header_b);
+    }
+
+    #[test]
+    fn derive_subkeys_payload_depends_on_stream_nonce() {
+        let file_key = [0x11u8; FILE_KEY_SIZE];
+        let nonce_a = [0x22u8; STREAM_NONCE_SIZE];
+        let nonce_b = [0x33u8; STREAM_NONCE_SIZE];
+        let (payload_a, header_a) = derive_subkeys(&file_key, &nonce_a).unwrap();
+        let (payload_b, header_b) = derive_subkeys(&file_key, &nonce_b).unwrap();
+        assert_ne!(
+            *payload_a, *payload_b,
+            "payload key depends on stream_nonce"
+        );
+        // Header key uses empty salt so stream_nonce must NOT affect it.
+        assert_eq!(
+            *header_a, *header_b,
+            "header key is independent of stream_nonce"
+        );
+    }
+
+    #[test]
+    fn derive_subkeys_depends_on_file_key() {
+        let file_a = [0x11u8; FILE_KEY_SIZE];
+        let file_b = [0x33u8; FILE_KEY_SIZE];
+        let nonce = [0x22u8; STREAM_NONCE_SIZE];
+        let (payload_a, _) = derive_subkeys(&file_a, &nonce).unwrap();
+        let (payload_b, _) = derive_subkeys(&file_b, &nonce).unwrap();
+        assert_ne!(*payload_a, *payload_b);
+    }
+
+    /// Builds a single TLV entry `tag || len(be) || value`. Callers
+    /// concatenate results for multi-entry cases.
+    fn tlv(tag: u16, value: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(4 + value.len());
+        out.extend_from_slice(&tag.to_be_bytes());
+        out.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        out.extend_from_slice(value);
+        out
+    }
+
+    #[test]
+    fn validate_tlv_accepts_empty_region() {
+        assert!(validate_tlv(&[]).is_ok());
+    }
+
+    #[test]
+    fn validate_tlv_accepts_single_ignorable_tag() {
+        let region = tlv(0x0001, &[0xAA; 8]);
+        assert!(validate_tlv(&region).is_ok());
+    }
+
+    #[test]
+    fn validate_tlv_accepts_zero_length_ignorable_tag() {
+        let region = tlv(0x0001, &[]);
+        assert!(validate_tlv(&region).is_ok());
+    }
+
+    #[test]
+    fn validate_tlv_accepts_ascending_ignorable_tags() {
+        let mut region = tlv(0x0001, &[0xAA]);
+        region.extend_from_slice(&tlv(0x0002, &[0xBB; 3]));
+        region.extend_from_slice(&tlv(0x7FFF, &[0xCC; 16]));
+        assert!(validate_tlv(&region).is_ok());
+    }
+
+    #[test]
+    fn validate_tlv_rejects_unknown_critical_tag() {
+        let region = tlv(0x8001, &[0xAA; 4]);
+        match validate_tlv(&region) {
+            Err(CryptoError::InvalidFormat(FormatDefect::UnknownCriticalTag { tag: 0x8001 })) => {}
+            other => panic!("expected UnknownCriticalTag(0x8001), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_tlv_rejects_reserved_tag_0x0000() {
+        let region = tlv(0x0000, &[]);
+        match validate_tlv(&region) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedTlv)) => {}
+            other => panic!("expected MalformedTlv for 0x0000, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_tlv_rejects_reserved_tag_0x8000() {
+        let region = tlv(0x8000, &[]);
+        match validate_tlv(&region) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedTlv)) => {}
+            other => panic!("expected MalformedTlv for 0x8000, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_tlv_rejects_descending_tags() {
+        let mut region = tlv(0x0002, &[0xAA]);
+        region.extend_from_slice(&tlv(0x0001, &[0xBB]));
+        match validate_tlv(&region) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedTlv)) => {}
+            other => panic!("expected MalformedTlv for descending, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_tlv_rejects_duplicate_tags() {
+        let mut region = tlv(0x0001, &[0xAA]);
+        region.extend_from_slice(&tlv(0x0001, &[0xBB]));
+        match validate_tlv(&region) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedTlv)) => {}
+            other => panic!("expected MalformedTlv for duplicate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_tlv_rejects_len_past_end() {
+        // tag=0x0001, len=100 but only 3 bytes of value follow.
+        let mut region = Vec::new();
+        region.extend_from_slice(&0x0001u16.to_be_bytes());
+        region.extend_from_slice(&100u16.to_be_bytes());
+        region.extend_from_slice(&[0xAA; 3]);
+        match validate_tlv(&region) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedTlv)) => {}
+            other => panic!("expected MalformedTlv for len-past-end, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_tlv_rejects_truncated_entry_header() {
+        // Only 3 bytes of TLV header (need at least 4).
+        let region = vec![0x00, 0x01, 0x00];
+        match validate_tlv(&region) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedTlv)) => {}
+            other => panic!("expected MalformedTlv for truncated header, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_tlv_rejects_region_over_cap() {
+        // A region > 32 KiB is rejected structurally, before per-entry parsing.
+        let region = vec![0u8; EXT_LEN_MAX as usize + 1];
+        match validate_tlv(&region) {
+            Err(CryptoError::InvalidFormat(FormatDefect::ExtTooLarge { .. })) => {}
+            other => panic!("expected ExtTooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn random_bytes_produces_different_outputs() {
+        let a = random_bytes::<32>();
+        let b = random_bytes::<32>();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn random_secret_has_correct_size_and_is_random() {
+        let a = random_secret::<24>();
+        let b = random_secret::<24>();
+        assert_eq!(a.len(), 24);
+        assert_ne!(*a, *b);
+    }
+
+    /// Pins the exact HKDF info strings against silent typos. The info
+    /// bytes become part of the on-disk wire derivation; changing them
+    /// invalidates every fixture.
+    #[test]
+    fn hkdf_info_strings_are_canonical() {
+        assert_eq!(HKDF_INFO_SYM_WRAP, b"ferrocrypt/v1/sym/wrap");
+        assert_eq!(HKDF_INFO_HYB_WRAP, b"ferrocrypt/v1/hyb/wrap");
+        assert_eq!(
+            HKDF_INFO_PRIVATE_KEY_WRAP,
+            b"ferrocrypt/v1/private-key/wrap"
+        );
+        assert_eq!(HKDF_INFO_PAYLOAD, b"ferrocrypt/v1/payload");
+        assert_eq!(HKDF_INFO_HEADER, b"ferrocrypt/v1/header");
     }
 }

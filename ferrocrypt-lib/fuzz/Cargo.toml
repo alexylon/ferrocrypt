@@ -38,13 +38,18 @@ path = "fuzz_targets/fuzz_header_prefix.rs"
 doc = false
 
 [[bin]]
-name = "fuzz_key_file_header"
-path = "fuzz_targets/fuzz_key_file_header.rs"
+name = "fuzz_private_key_header"
+path = "fuzz_targets/fuzz_private_key_header.rs"
 doc = false
 
 [[bin]]
 name = "fuzz_kdf_params"
 path = "fuzz_targets/fuzz_kdf_params.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_tlv"
+path = "fuzz_targets/fuzz_tlv.rs"
 doc = false
 
 [[bin]]

@@ -1,13 +1,12 @@
-//! Test support helpers shared between `integration_tests.rs` and
-//! `compatibility_tests.rs`.
+//! Test support helpers for `integration_tests.rs`.
 //!
 //! The pre-0.3.0 library exposed `symmetric_auto` / `hybrid_auto`
 //! convenience wrappers that detected direction from magic bytes. The
 //! post-refactor public API dropped them in favor of explicit config
 //! constructors; these file-private helpers preserve the old call shape
-//! so the existing integration + compatibility test call sites don't
-//! need to churn for the API reshape while still exercising the new
-//! public surface end-to-end.
+//! so the existing integration test call sites don't need to churn for
+//! the API reshape while still exercising the new public surface
+//! end-to-end.
 //!
 //! Validation order mirrors the library's explicit operation functions
 //! (`validate_passphrase` before `validate_input_path` for symmetric;

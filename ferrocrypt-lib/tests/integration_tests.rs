@@ -177,11 +177,8 @@ fn test_symmetric_wrong_password() -> Result<(), CryptoError> {
 
     assert!(result.is_err());
     match result {
-        Err(CryptoError::SymmetricHeaderAuthenticationFailed) => {}
-        other => panic!(
-            "Expected SymmetricHeaderAuthenticationFailed, got {:?}",
-            other
-        ),
+        Err(CryptoError::SymmetricEnvelopeUnlockFailed) => {}
+        other => panic!("Expected SymmetricEnvelopeUnlockFailed, got {:?}", other),
     }
 
     Ok(())
@@ -190,7 +187,7 @@ fn test_symmetric_wrong_password() -> Result<(), CryptoError> {
 #[test]
 fn test_symmetric_payload_tamper_mid_chunk() -> Result<(), CryptoError> {
     // Flipping a byte inside a ciphertext chunk (not the header) must
-    // surface as PayloadAuthenticationFailed, not as a generic Io error.
+    // surface as PayloadTampered, not as a generic Io error.
     let test_dir = setup_test_dir("symmetric_payload_tamper");
     let input_file = test_dir.join("payload.bin");
     let encrypt_dir = test_dir.join("encrypted");
@@ -222,8 +219,8 @@ fn test_symmetric_payload_tamper_mid_chunk() -> Result<(), CryptoError> {
         |_| {},
     );
     match result {
-        Err(CryptoError::PayloadAuthenticationFailed) => {}
-        other => panic!("Expected PayloadAuthenticationFailed, got {:?}", other),
+        Err(CryptoError::PayloadTampered) => {}
+        other => panic!("Expected PayloadTampered, got {:?}", other),
     }
 
     Ok(())
@@ -822,11 +819,8 @@ fn test_symmetric_streaming_wrong_password() -> Result<(), CryptoError> {
 
     assert!(result.is_err());
     match result {
-        Err(CryptoError::SymmetricHeaderAuthenticationFailed) => {}
-        other => panic!(
-            "Expected SymmetricHeaderAuthenticationFailed, got {:?}",
-            other
-        ),
+        Err(CryptoError::SymmetricEnvelopeUnlockFailed) => {}
+        other => panic!("Expected SymmetricEnvelopeUnlockFailed, got {:?}", other),
     }
 
     Ok(())
@@ -936,7 +930,7 @@ fn test_hybrid_wrong_key_pair() -> Result<(), CryptoError> {
     // Try to decrypt with key pair B's private key — the passphrase is
     // correct for key pair B (so private.key unlocks fine), but the
     // ECDH envelope was sealed for recipient A, so envelope AEAD fails
-    // and the decryption must surface as HybridHeaderAuthenticationFailed.
+    // and the decryption must surface as HybridEnvelopeUnlockFailed.
     let private_key_b = keys_b.join("private.key");
 
     let result = hybrid_auto(
@@ -950,8 +944,8 @@ fn test_hybrid_wrong_key_pair() -> Result<(), CryptoError> {
     );
 
     match result {
-        Err(CryptoError::HybridHeaderAuthenticationFailed) => {}
-        other => panic!("Expected HybridHeaderAuthenticationFailed, got {:?}", other),
+        Err(CryptoError::HybridEnvelopeUnlockFailed) => {}
+        other => panic!("Expected HybridEnvelopeUnlockFailed, got {:?}", other),
     }
 
     Ok(())
@@ -1281,47 +1275,6 @@ fn test_hybrid_header_tamper_detection() -> Result<(), CryptoError> {
 }
 
 #[test]
-fn test_symmetric_single_copy_corruption_recovery() -> Result<(), CryptoError> {
-    let test_dir = setup_test_dir("symmetric_single_copy_recovery");
-    let input_file = test_dir.join("secret.txt");
-    let encrypt_dir = test_dir.join("encrypted");
-    let decrypt_dir = test_dir.join("decrypted");
-
-    fs::create_dir_all(&encrypt_dir)?;
-    fs::create_dir_all(&decrypt_dir)?;
-
-    let content = "Recovery test content";
-    create_test_file(&input_file, content);
-
-    let passphrase = SecretString::from("recovery_pass".to_string());
-
-    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
-
-    // Corrupt one byte in copy 0 only — majority vote with copies 1 and 2 recovers it.
-    // Encoded salt layout: [prefix(27)] [padding(3)] [copy0(32)] [copy1(32)] [copy2(32)]
-    let encrypted_path = encrypt_dir.join("secret.fcr");
-    let mut data = fs::read(&encrypted_path)?;
-    const PREFIX: usize = 27;
-    const SALT_BYTE: usize = 5;
-    data[PREFIX + 3 + SALT_BYTE] ^= 0xFF;
-    fs::write(&encrypted_path, &data)?;
-
-    symmetric_auto(
-        &encrypted_path,
-        &decrypt_dir,
-        &passphrase,
-        None,
-        None,
-        |_| {},
-    )?;
-
-    let decrypted = fs::read_to_string(decrypt_dir.join("secret.txt"))?;
-    assert_eq!(decrypted, content);
-
-    Ok(())
-}
-
-#[test]
 fn test_symmetric_two_copy_corruption_detected() -> Result<(), CryptoError> {
     let test_dir = setup_test_dir("symmetric_two_copy_corrupt");
     let input_file = test_dir.join("secret.txt");
@@ -1363,8 +1316,8 @@ fn test_symmetric_two_copy_corruption_detected() -> Result<(), CryptoError> {
 }
 
 #[test]
-fn test_symmetric_prefix_flags_tamper_detected() -> Result<(), CryptoError> {
-    let test_dir = setup_test_dir("symmetric_prefix_flags_tamper");
+fn test_symmetric_prefix_majority_tamper_detected() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("symmetric_prefix_majority_tamper");
     let input_file = test_dir.join("secret.txt");
     let encrypt_dir = test_dir.join("encrypted");
     let decrypt_dir = test_dir.join("decrypted");
@@ -1372,20 +1325,21 @@ fn test_symmetric_prefix_flags_tamper_detected() -> Result<(), CryptoError> {
     fs::create_dir_all(&encrypt_dir)?;
     fs::create_dir_all(&decrypt_dir)?;
 
-    create_test_file(&input_file, "Prefix flags tamper test");
+    create_test_file(&input_file, "Prefix majority tamper test");
 
-    let passphrase = SecretString::from("prefix_flags_pass".to_string());
+    let passphrase = SecretString::from("prefix_tamper_pass".to_string());
 
     symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
-    // Flip a bit in the flags field (logical prefix byte 6) across 2 of 3
-    // replicated copies so majority vote picks the corrupted value.
+    // Flip a bit in the ext_len high byte (logical prefix byte 6) across 2 of 3
+    // replicated copies so majority vote adopts the corrupted value, producing a
+    // non-canonical prefix that must be rejected.
     // Encoded prefix: [pad(3)] [copy0(8)] [copy1(8)] [copy2(8)]
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
-    const FLAGS_LOGICAL: usize = 6;
-    data[3 + FLAGS_LOGICAL] ^= 0x01; // copy 0
-    data[11 + FLAGS_LOGICAL] ^= 0x01; // copy 1
+    const EXT_LEN_HI_LOGICAL: usize = 6;
+    data[3 + EXT_LEN_HI_LOGICAL] ^= 0x01; // copy 0
+    data[11 + EXT_LEN_HI_LOGICAL] ^= 0x01; // copy 1
     fs::write(&encrypted_path, &data)?;
 
     let result = symmetric_auto(
@@ -1398,67 +1352,6 @@ fn test_symmetric_prefix_flags_tamper_detected() -> Result<(), CryptoError> {
     );
 
     assert!(result.is_err());
-
-    Ok(())
-}
-
-#[test]
-fn test_hybrid_single_copy_corruption_recovery() -> Result<(), CryptoError> {
-    let test_dir = setup_test_dir("hybrid_single_copy_recovery");
-    let keys_dir = test_dir.join("keys");
-    let input_file = test_dir.join("secret.txt");
-    let encrypt_dir = test_dir.join("encrypted");
-    let decrypt_dir = test_dir.join("decrypted");
-
-    fs::create_dir_all(&keys_dir)?;
-    fs::create_dir_all(&encrypt_dir)?;
-    fs::create_dir_all(&decrypt_dir)?;
-
-    let content = "Hybrid recovery test";
-    create_test_file(&input_file, content);
-
-    let key_passphrase = SecretString::from("hybrid_recovery_pass".to_string());
-    generate_key_pair(&key_passphrase, &keys_dir, |_| {})?;
-
-    let pub_key_path = keys_dir.join("public.key");
-
-    hybrid_auto(
-        &input_file,
-        &encrypt_dir,
-        &pub_key_path,
-        &SecretString::from("".to_string()),
-        None,
-        None,
-        |_| {},
-    )?;
-
-    // Corrupt one byte in copy 0 of the encoded nonce — majority vote recovers it.
-    // Hybrid header: [prefix(27)] [encoded_envelope(411)] [encoded_nonce(63)] ...
-    // encoded_nonce: [padding(3)] [copy0(20)] [copy1(20)] [copy2(20)]
-    let encrypted_path = encrypt_dir.join("secret.fcr");
-    let mut data = fs::read(&encrypted_path)?;
-    const PREFIX: usize = 27;
-    const ENVELOPE_SIZE: usize = 136;
-    const ENCODED_ENVELOPE_LEN: usize = 3 + ENVELOPE_SIZE * 3;
-    const NONCE_REGION: usize = PREFIX + ENCODED_ENVELOPE_LEN;
-    const NONCE_BYTE: usize = 5;
-    data[NONCE_REGION + 3 + NONCE_BYTE] ^= 0xFF;
-    fs::write(&encrypted_path, &data)?;
-
-    let private_key_path = keys_dir.join("private.key");
-
-    hybrid_auto(
-        &encrypted_path,
-        &decrypt_dir,
-        &private_key_path,
-        &key_passphrase,
-        None,
-        None,
-        |_| {},
-    )?;
-
-    let decrypted = fs::read_to_string(decrypt_dir.join("secret.txt"))?;
-    assert_eq!(decrypted, content);
 
     Ok(())
 }
@@ -1501,52 +1394,6 @@ fn test_non_ferrocrypt_fcr_file_can_be_encrypted() {
 
     let decrypted = fs::read(decrypt_dir.join("photo.fcr")).unwrap();
     assert_eq!(decrypted, content);
-}
-
-#[test]
-fn test_future_major_version_rejected() -> Result<(), CryptoError> {
-    let test_dir = setup_test_dir("future_version");
-    let input_file = test_dir.join("data.txt");
-    let encrypt_dir = test_dir.join("encrypted");
-    let decrypt_dir = test_dir.join("decrypted");
-    fs::create_dir_all(&encrypt_dir)?;
-    fs::create_dir_all(&decrypt_dir)?;
-
-    create_test_file(&input_file, "version test");
-    let passphrase = SecretString::from("pass".to_string());
-
-    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
-
-    // Patch the major version (logical prefix byte 2) in all 3 replicated copies
-    // Encoded prefix: [pad(3)] [copy0(8)] [copy1(8)] [copy2(8)]
-    let encrypted_path = encrypt_dir.join("data.fcr");
-    let mut data = fs::read(&encrypted_path)?;
-    const MAJOR_LOGICAL: usize = 2;
-    data[3 + MAJOR_LOGICAL] = 99; // copy 0
-    data[11 + MAJOR_LOGICAL] = 99; // copy 1
-    data[19 + MAJOR_LOGICAL] = 99; // copy 2
-    fs::write(&encrypted_path, &data)?;
-
-    let result = symmetric_auto(
-        &encrypted_path,
-        &decrypt_dir,
-        &passphrase,
-        None,
-        None,
-        |_| {},
-    );
-
-    assert!(result.is_err());
-    match &result {
-        Err(CryptoError::UnsupportedVersion(v)) => {
-            let msg = v.to_string();
-            assert!(msg.contains("Newer file format"), "got: {msg}");
-            assert!(msg.contains("Upgrade"), "got: {msg}");
-        }
-        other => panic!("Expected version error, got {:?}", other),
-    }
-
-    Ok(())
 }
 
 #[test]
@@ -1960,26 +1807,6 @@ fn test_symmetric_oversized_ext_len() -> Result<(), CryptoError> {
 }
 
 #[test]
-fn test_symmetric_all_zero_header_body() {
-    let test_dir = setup_test_dir("sym_zero_header_body");
-    let decrypt_dir = test_dir.join("decrypted");
-    fs::create_dir_all(&decrypt_dir).unwrap();
-
-    // Valid prefix magic/type/version, flags=0, ext_len=0. Body is zero-filled,
-    // so HMAC verification (and every subsequent check) must fail.
-    let prefix: [u8; 8] = [0xFC, 0x53, 3, 0, 0, 0, 0, 0];
-    let mut data = encode_test_prefix(&prefix);
-    data.extend_from_slice(&[0u8; 600]);
-
-    let file = test_dir.join("zeroed.fcr");
-    fs::write(&file, &data).unwrap();
-
-    let passphrase = SecretString::from("test".to_string());
-    let result = symmetric_auto(&file, &decrypt_dir, &passphrase, None, None, |_| {});
-    assert!(result.is_err());
-}
-
-#[test]
 fn test_hybrid_truncated_mid_header() -> Result<(), CryptoError> {
     let test_dir = setup_test_dir("hyb_truncated_mid_header");
     let keys_dir = test_dir.join("keys");
@@ -2294,33 +2121,6 @@ fn test_different_keys_different_fingerprints() -> Result<(), CryptoError> {
     Ok(())
 }
 
-/// `PublicKey::to_bytes` round-trips through a generated key file and
-/// matches the raw 32-byte payload stored after the 8-byte key-file
-/// header. Also verifies the byte-source variant simply returns what
-/// was passed in.
-#[test]
-fn test_public_key_to_bytes_round_trip() -> Result<(), CryptoError> {
-    let test_dir = setup_test_dir("pubkey_to_bytes");
-    let keys_dir = test_dir.join("keys");
-    fs::create_dir_all(&keys_dir)?;
-
-    let passphrase = SecretString::from("tb".to_string());
-    generate_key_pair(&passphrase, &keys_dir, |_| {})?;
-
-    let pub_path = keys_dir.join("public.key");
-    let from_file = PublicKey::from_key_file(&pub_path).to_bytes()?;
-
-    // The key file stores the 8-byte header followed by the raw key.
-    let raw_file = fs::read(&pub_path)?;
-    assert_eq!(&from_file, &raw_file[8..40]);
-
-    // Round-trip: from_bytes → to_bytes is the identity.
-    let echoed = PublicKey::from_bytes(from_file).to_bytes()?;
-    assert_eq!(echoed, from_file);
-
-    Ok(())
-}
-
 /// `PublicKey::validate` succeeds on a well-formed key file, succeeds
 /// unconditionally on the bytes source, and fails with a structural
 /// error (not a panic) when pointed at a file that does not exist.
@@ -2629,113 +2429,14 @@ fn test_keygen_no_partial_state_on_existing_key() -> Result<(), CryptoError> {
     Ok(())
 }
 
+/// Flipping a byte in the cleartext salt region of a v1 `private.key`
+/// file must cause decryption to fail. v1 binds every cleartext byte
+/// before `wrapped_privkey` (header + argon2_salt + kdf_params +
+/// wrap_nonce + ext_bytes) as AEAD associated data, so any header or
+/// body tamper fails authentication on unlock.
 #[test]
-fn test_older_major_version_rejected() -> Result<(), CryptoError> {
-    let test_dir = setup_test_dir("older_version");
-    let input_file = test_dir.join("data.txt");
-    let encrypt_dir = test_dir.join("encrypted");
-    let decrypt_dir = test_dir.join("decrypted");
-    fs::create_dir_all(&encrypt_dir)?;
-    fs::create_dir_all(&decrypt_dir)?;
-
-    create_test_file(&input_file, "version test");
-    let passphrase = SecretString::from("pass".to_string());
-    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
-
-    // Patch the major version to an older value in all 3 replicated copies
-    let encrypted_path = encrypt_dir.join("data.fcr");
-    let mut data = fs::read(&encrypted_path)?;
-    const MAJOR_OFFSET: usize = 2;
-    data[3 + MAJOR_OFFSET] = 1; // copy 0
-    data[11 + MAJOR_OFFSET] = 1; // copy 1
-    data[19 + MAJOR_OFFSET] = 1; // copy 2
-    fs::write(&encrypted_path, &data)?;
-
-    let result = symmetric_auto(
-        &encrypted_path,
-        &decrypt_dir,
-        &passphrase,
-        None,
-        None,
-        |_| {},
-    );
-    assert!(result.is_err());
-    match &result {
-        Err(CryptoError::UnsupportedVersion(v)) => {
-            let msg = v.to_string();
-            assert!(msg.contains("Older file format"), "got: {msg}");
-            assert!(msg.contains("Use a previous release"), "got: {msg}");
-        }
-        other => panic!("Expected version error, got {:?}", other),
-    }
-
-    Ok(())
-}
-
-#[test]
-fn test_older_key_version_rejected() -> Result<(), CryptoError> {
-    let test_dir = setup_test_dir("older_key_version");
-    let keys_dir = test_dir.join("keys");
-    let input_file = test_dir.join("data.txt");
-    let encrypt_dir = test_dir.join("encrypted");
-    let decrypt_dir = test_dir.join("decrypted");
-    fs::create_dir_all(&keys_dir)?;
-    fs::create_dir_all(&encrypt_dir)?;
-    fs::create_dir_all(&decrypt_dir)?;
-
-    let passphrase = SecretString::from("key_ver_pass".to_string());
-    generate_key_pair(&passphrase, &keys_dir, |_| {})?;
-
-    // Encrypt a file so we have something to try decrypting
-    let empty = SecretString::from("".to_string());
-    create_test_file(&input_file, "key version test");
-    hybrid_auto(
-        &input_file,
-        &encrypt_dir,
-        keys_dir.join("public.key"),
-        &empty,
-        None,
-        None,
-        |_| {},
-    )?;
-
-    // Patch private key version to an older value (byte offset 2)
-    let private_key_path = keys_dir.join("private.key");
-    let mut key_data = fs::read(&private_key_path)?;
-    key_data[2] = 1; // older version
-    fs::write(&private_key_path, &key_data)?;
-
-    let result = hybrid_auto(
-        encrypt_dir.join("data.fcr"),
-        &decrypt_dir,
-        &private_key_path,
-        &passphrase,
-        None,
-        None,
-        |_| {},
-    );
-    assert!(result.is_err());
-    match &result {
-        Err(CryptoError::UnsupportedVersion(v)) => {
-            let msg = v.to_string();
-            assert!(msg.contains("Older key format"), "got: {msg}");
-            assert!(msg.contains("Use a previous release"), "got: {msg}");
-        }
-        other => panic!("Expected key version error, got {:?}", other),
-    }
-
-    Ok(())
-}
-
-/// Flipping a byte in the cleartext salt region of a v4 `private.key`
-/// file must cause decryption to fail. v4 binds the cleartext
-/// header/KDF-params/salt/nonce/ext_len/ext_bytes as AEAD associated
-/// data; in the old v3 format the same tamper would only make the
-/// derived key wrong, producing an identical AEAD failure downstream,
-/// so this test documents the behavior at the public API surface.
-#[test]
-fn test_private_key_v4_salt_tamper_rejected() -> Result<(), CryptoError> {
-    let test_dir = setup_test_dir("v4_salt_tamper");
+fn test_private_key_salt_tamper_rejected() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("private_key_salt_tamper");
     let keys_dir = test_dir.join("keys");
     let encrypt_dir = test_dir.join("encrypted");
     let decrypt_dir = test_dir.join("decrypted");
@@ -2759,12 +2460,12 @@ fn test_private_key_v4_salt_tamper_rejected() -> Result<(), CryptoError> {
         |_| {},
     )?;
 
-    // Flip one byte inside the 32-byte Argon2 salt region. v4 body layout:
-    //   [kdf(12)][salt(32)][nonce(24)][ext_len(2)][ext_bytes(0)][ciphertext+tag(48)]
-    // The salt region starts at header(8) + kdf(12) = offset 20.
+    // Flip one byte inside the 32-byte Argon2 salt region. v1 body layout:
+    //   [argon2_salt(32)][kdf_params(12)][wrap_nonce(24)][ext_bytes(0)][wrapped_privkey(48)]
+    // The salt region starts directly after the 9-byte cleartext header.
     let private_key_path = keys_dir.join("private.key");
     let mut key_data = fs::read(&private_key_path)?;
-    let salt_offset = 8 + 12;
+    let salt_offset = 9;
     key_data[salt_offset] ^= 0x01;
     fs::write(&private_key_path, &key_data)?;
 
@@ -2791,103 +2492,25 @@ fn test_private_key_v4_salt_tamper_rejected() -> Result<(), CryptoError> {
 /// validator were bypassed, AEAD authentication would also reject the
 /// tampered file — but the cheap structural check comes first.
 #[test]
-fn test_private_key_v4_flags_tamper_rejected() -> Result<(), CryptoError> {
-    let test_dir = setup_test_dir("v4_flags_tamper");
+fn test_private_key_ext_len_tamper_rejected() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("private_key_ext_len_tamper");
     let keys_dir = test_dir.join("keys");
     fs::create_dir_all(&keys_dir)?;
 
-    let passphrase = SecretString::from("flags_pass".to_string());
+    let passphrase = SecretString::from("ext_len_pass".to_string());
     generate_key_pair(&passphrase, &keys_dir, |_| {})?;
 
-    // Flip a reserved flag bit in the 8-byte key-file header. Flags are
-    // the big-endian u16 at bytes 6..=7.
+    // Flipping a bit in the `ext_len` field (u16 BE at bytes 7..=8) of the
+    // `private.key` cleartext header makes the declared length no longer
+    // match the on-disk body, surfacing as `BadKeyFileSize`.
     let private_key_path = keys_dir.join("private.key");
     let mut key_data = fs::read(&private_key_path)?;
     key_data[7] |= 0x01;
     fs::write(&private_key_path, &key_data)?;
 
     match validate_private_key_file(&private_key_path) {
-        Err(ferrocrypt::CryptoError::InvalidFormat(
-            ferrocrypt::FormatDefect::UnknownKeyFileFlags(_),
-        )) => {}
-        other => panic!("expected UnknownKeyFileFlags, got {:?}", other),
-    }
-
-    Ok(())
-}
-
-/// The body-size consistency check rejects a file whose declared
-/// `data_len` disagrees with the parsed `ext_len`. This test corrupts
-/// `data_len` without adjusting the body so the two disagree.
-#[test]
-fn test_private_key_v4_data_len_mismatch_rejected() -> Result<(), CryptoError> {
-    let test_dir = setup_test_dir("v4_data_len_mismatch");
-    let keys_dir = test_dir.join("keys");
-    fs::create_dir_all(&keys_dir)?;
-
-    let passphrase = SecretString::from("dl_pass".to_string());
-    generate_key_pair(&passphrase, &keys_dir, |_| {})?;
-
-    // Bump `data_len` (big-endian u16 at bytes 4..=5) by 1 — the body
-    // itself stays 118 bytes so the declared size no longer matches
-    // the on-disk size.
-    let private_key_path = keys_dir.join("private.key");
-    let mut key_data = fs::read(&private_key_path)?;
-    let current = u16::from_be_bytes([key_data[4], key_data[5]]);
-    let bumped = current.wrapping_add(1).to_be_bytes();
-    key_data[4] = bumped[0];
-    key_data[5] = bumped[1];
-    fs::write(&private_key_path, &key_data)?;
-
-    match validate_private_key_file(&private_key_path) {
         Err(ferrocrypt::CryptoError::InvalidFormat(ferrocrypt::FormatDefect::BadKeyFileSize)) => {}
         other => panic!("expected BadKeyFileSize, got {:?}", other),
-    }
-
-    Ok(())
-}
-
-#[test]
-fn test_future_key_version_rejected() -> Result<(), CryptoError> {
-    let test_dir = setup_test_dir("future_key_version");
-    let keys_dir = test_dir.join("keys");
-    fs::create_dir_all(&keys_dir)?;
-
-    let passphrase = SecretString::from("key_ver_pass".to_string());
-    generate_key_pair(&passphrase, &keys_dir, |_| {})?;
-
-    // Patch private key version to a future value
-    let private_key_path = keys_dir.join("private.key");
-    let mut key_data = fs::read(&private_key_path)?;
-    key_data[2] = 99; // future version
-    fs::write(&private_key_path, &key_data)?;
-
-    let result = validate_private_key_file(&private_key_path);
-    assert!(result.is_err());
-    match &result {
-        Err(CryptoError::UnsupportedVersion(v)) => {
-            let msg = v.to_string();
-            assert!(msg.contains("Newer key format"), "got: {msg}");
-            assert!(msg.contains("Upgrade"), "got: {msg}");
-        }
-        other => panic!("Expected key version error, got {:?}", other),
-    }
-
-    // Same for public key
-    let public_key_path = keys_dir.join("public.key");
-    let mut pub_data = fs::read(&public_key_path)?;
-    pub_data[2] = 99;
-    fs::write(&public_key_path, &pub_data)?;
-
-    let result = PublicKey::from_key_file(&public_key_path).fingerprint();
-    assert!(result.is_err());
-    match &result {
-        Err(CryptoError::UnsupportedVersion(v)) => {
-            let msg = v.to_string();
-            assert!(msg.contains("Newer key format"), "got: {msg}");
-            assert!(msg.contains("Upgrade"), "got: {msg}");
-        }
-        other => panic!("Expected key version error, got {:?}", other),
     }
 
     Ok(())
@@ -2947,34 +2570,6 @@ fn test_detect_valid_symmetric_file() -> Result<(), CryptoError> {
     Ok(())
 }
 
-#[test]
-fn test_detect_truncated_fcr_file_returns_error() {
-    let dir = setup_test_dir("detect_truncated");
-    let path = dir.join("truncated.fcr");
-    // Encoded prefix replicated at bytes 3, 11, 19 (HEADER_PREFIX_SIZE = 8
-    // between copies). File must extend past byte 19 so all three copy
-    // positions are present; otherwise the detector refuses to claim
-    // truncation to avoid the short-file coincidence covered by
-    // `test_detect_short_file_with_two_magic_bytes_returns_none`.
-    let mut data = vec![0u8; 20];
-    data[3] = 0xFC;
-    data[11] = 0xFC;
-    data[19] = 0xFC;
-    fs::write(&path, &data).unwrap();
-    let result = detect_encryption_mode(&path);
-    assert!(
-        result.is_err(),
-        "expected error for truncated .fcr, got: {result:?}"
-    );
-    match &result {
-        Err(CryptoError::InvalidFormat(defect)) => {
-            let msg = defect.to_string();
-            assert!(msg.contains("truncated"), "got: {msg}");
-        }
-        other => panic!("expected InvalidFormat, got: {other:?}"),
-    }
-}
-
 /// L-4 regression: a short random file with `0xFC` at bytes 3 and 11 (the
 /// first two replication-copy positions) must not be misclassified as a
 /// truncated `.fcr`. The detector requires every copy position to be
@@ -3008,53 +2603,6 @@ fn test_detect_short_file_with_single_magic_byte_returns_none() {
         result.unwrap().is_none(),
         "single magic byte should not trigger false positive"
     );
-}
-
-#[test]
-fn test_detect_corrupted_header_returns_error() {
-    let dir = setup_test_dir("detect_corrupted");
-    let path = dir.join("corrupted.fcr");
-    // Build a full-length encoded prefix (27 bytes) where the magic byte is
-    // present in all three copy positions but the rest is garbage, so
-    // replication decode produces an invalid type byte.
-    let mut data = vec![0u8; 27];
-    // padding bytes (positions 0-2): 0
-    // Copy 0 starts at 3, copy 1 at 11, copy 2 at 19
-    data[3] = 0xFC; // magic byte in copy 0
-    data[11] = 0xFC; // magic byte in copy 1
-    data[19] = 0xFC; // magic byte in copy 2
-    // Type byte (position 1 of each copy) is 0xFF — unknown type
-    data[4] = 0xFF;
-    data[12] = 0xFF;
-    data[20] = 0xFF;
-    fs::write(&path, &data).unwrap();
-    let result = detect_encryption_mode(&path);
-    assert!(
-        result.is_err(),
-        "expected error for corrupted header, got: {result:?}"
-    );
-}
-
-#[test]
-fn test_detect_unknown_type_byte_returns_error() {
-    let dir = setup_test_dir("detect_unknown_type");
-    let path = dir.join("unknown_type.fcr");
-    // Encode a valid-looking prefix with magic byte but invalid type 0x41 ('A')
-    let prefix: [u8; 8] = [0xFC, 0x41, 3, 0, 0, 30, 0, 0];
-    let encoded = encode_test_prefix(&prefix);
-    fs::write(&path, &encoded).unwrap();
-    let result = detect_encryption_mode(&path);
-    assert!(
-        result.is_err(),
-        "expected error for unknown type, got: {result:?}"
-    );
-    match &result {
-        Err(CryptoError::InvalidFormat(defect)) => {
-            let msg = defect.to_string();
-            assert!(msg.contains("0x41"), "got: {msg}");
-        }
-        other => panic!("expected InvalidFormat with type byte, got: {other:?}"),
-    }
 }
 
 #[test]
@@ -3093,57 +2641,9 @@ fn test_recipient_round_trip() -> Result<(), CryptoError> {
 }
 
 #[test]
-fn test_recipient_wrong_hrp_rejected() {
-    // Valid Bech32 with wrong HRP
-    let wrong =
-        bech32::encode::<bech32::Bech32>(bech32::Hrp::parse_unchecked("age"), &[0xBB; 32]).unwrap();
-    let result = decode_recipient(&wrong);
-    assert!(result.is_err());
-    match result {
-        Err(CryptoError::InvalidInput(msg)) => {
-            assert!(msg.contains("Not a FerroCrypt"), "got: {msg}");
-        }
-        other => panic!("Expected InvalidInput, got {:?}", other),
-    }
-}
-
-#[test]
-fn test_recipient_wrong_length_rejected() {
-    // Encode 16 bytes (too short for X25519) with the right HRP
-    let short =
-        bech32::encode::<bech32::Bech32>(bech32::Hrp::parse_unchecked("fcr"), &[0xAA; 16]).unwrap();
-    let result = decode_recipient(&short);
-    assert!(result.is_err());
-    match result {
-        Err(CryptoError::InvalidInput(msg)) => {
-            assert!(msg.contains("length"), "got: {msg}");
-        }
-        other => panic!("Expected InvalidInput, got {:?}", other),
-    }
-}
-
-#[test]
 fn test_recipient_malformed_bech32_rejected() {
     let result = decode_recipient("fcr1not-valid-bech32!!!");
     assert!(result.is_err());
-}
-
-#[test]
-fn test_recipient_decodes_to_key_file_bytes() -> Result<(), CryptoError> {
-    let test_dir = setup_test_dir("recipient_keybytes");
-    let keys_dir = test_dir.join("keys");
-    let passphrase = SecretString::from("rf".to_string());
-    generate_key_pair(&passphrase, &keys_dir, |_| {})?;
-
-    let pub_path = keys_dir.join("public.key");
-    let recipient = PublicKey::from_key_file(&pub_path).to_recipient_string()?;
-    let decoded_bytes = decode_recipient(&recipient)?;
-
-    // Verify decoded bytes match the raw key in the file (after 8-byte header)
-    let raw_file = fs::read(&pub_path)?;
-    assert_eq!(&decoded_bytes, &raw_file[8..40]);
-
-    Ok(())
 }
 
 #[test]

@@ -1,785 +1,726 @@
-# FerroCrypt Format Specification
+# FerroCrypt on-disk format — v1 specification
 
-This document specifies the current on-disk formats used by `ferrocrypt-lib`:
+Authoritative byte-level contract for the FerroCrypt v1 on-disk format.
+
+Covers:
 
 - encrypted payload files: `*.fcr`
-- hybrid public key files: `public.key`
-- hybrid private key files: `private.key`
-
-It covers:
-
-- file format layout
-- key file layout
-- compatibility guarantees
-- minor/major versioning rules
+- public recipient: `public.key` (UTF-8 text file carrying a Bech32 `fcr1…` string)
+- passphrase-wrapped private key: `private.key`
+- TLV extension region grammar
+- compatibility & versioning policy
 - what is and is not authenticated
 - archive semantics
 
-This specification describes the **current format family** implemented by the library on this branch. The v3/v4 family is a breaking change that has not yet shipped in a published crate release — see `CHANGELOG.md [Unreleased]`. The crate version and the on-disk format version are separate.
-
-This document is meant to be concrete rather than cryptic: the current field order, byte sizes, and compatibility rules are described explicitly below.
-
----
-
-## 1. Terminology
-
-- **Encoded** means a current `.fcr` header field stored using FerroCrypt's triple-replication format.
-- **Decoded** means the original logical bytes recovered after majority-vote decoding.
-- **Header** means all bytes before the encrypted payload ciphertext begins.
-- **Payload** means the encrypted TAR stream after the header.
+This is the **final** v1 format. It resets the pre-release v3/v4 draft
+numbering to a single clean `v1` across every artefact, unifies on
+SHA-3, introduces a per-file `file_key` abstraction (borrowed from
+age), and collapses the full-header triple replication into a single
+replicated prefix that preserves only the diagnostic UX it was
+designed for.
 
 ---
 
-## 2. Triple-replication encoding
+## 1. Design principles
 
-In the current encrypted-file format family (**symmetric `v3.0`, hybrid `v4.0`**), **all defined encrypted-file header fields** are stored using a simple triple-replication scheme for error correction.
+These are load-bearing; later sections cite them.
 
-### Wire format
-
-For an input byte string `data`:
-
-```text
-[pad, pad, pad, copy_0, copy_1, copy_2]
-```
-
-Where:
-
-- `pad` is `0` if the input length is even
-- `pad` is `1` if the input length is odd
-- odd-length inputs are zero-padded to even length before replication
-- the three `pad` bytes are themselves replicated so a single corrupted pad byte can be corrected
-- each output byte position is recovered by majority vote across the three copies
-
-### Encoded size
-
-For an original logical size `N`:
-
-```text
-padded = N if N is even, else N + 1
-encoded_size = 3 + 3 * padded
-```
-
-Examples:
-
-| Logical size | Encoded size |
-|---|---:|
-| 8 | 27 |
-| 12 | 39 |
-| 19 | 63 |
-| 24 | 75 |
-| 32 | 99 |
-| 136 | 411 |
-
-### Scope
-
-For the current encrypted-file format family, every defined `.fcr` header field is triple-replicated.
-
-This does **not** apply to:
-
-- `public.key`
-- `private.key`
-
-It also does **not** imply that a future optional trailing minor-version field must use triple replication, although the current defined header does.
+1. **Authenticate everything the reader acts on.** Prefix, envelope,
+   stream nonce, TLV region — all covered by HMAC-SHA3-256 or
+   AEAD-AAD. No unauthenticated dispatch.
+2. **On-disk bytes = authenticated bytes.** Triple replication is
+   enforced canonically *before* HMAC verification (§5.1), so a
+   tampered replica surfaces as a specific diagnostic error rather
+   than as silently corrected input with a passing HMAC.
+3. **Minimum mechanism.** The grammar is the smallest one that lets
+   v1 decrypt correctly and lets v1.x extend authenticably.
+4. **One hash family.** SHA-3 throughout: HMAC, HKDF, fingerprint.
+5. **Per-version domain separation.** Every HKDF info string begins
+   `ferrocrypt/v1/…`. A future v2 uses `ferrocrypt/v2/…` and cannot
+   collide.
+6. **Diagnostic quality is a product promise.** Prefix replication
+   and specific error variants exist to serve that promise.
+7. **Canonical recipient is `fcr1…`.** `public.key` is a text file
+   containing that string. No binary public-key blob.
+8. **v2 safety belt.** A future `version = 2` MUST change either the
+   magic bytes or the prefix length so a v1 parser cannot silently
+   misinterpret a v2 file (§10).
 
 ---
 
-## 3. Encrypted file format (`.fcr`)
+## 2. Cryptographic primitives
 
-Every encrypted FerroCrypt file consists of:
+| Role | Primitive |
+|---|---|
+| Payload AEAD (`.fcr`) | XChaCha20-Poly1305, STREAM-BE32 |
+| Envelope AEAD (`.fcr`) | XChaCha20-Poly1305 (single-shot) |
+| `private.key` AEAD | XChaCha20-Poly1305 (single-shot) |
+| Passphrase KDF | Argon2id |
+| Key derivation / expansion | HKDF-SHA3-256 |
+| Header MAC | HMAC-SHA3-256 |
+| Key agreement | X25519 |
+| Public-key fingerprint | SHA3-256 (of `algorithm \|\| key_material`) |
+| Recipient string | Bech32 (BIP 173) with HRP `"fcr"` |
 
-```text
-[header][ciphertext payload]
-```
+### 2.1 Argon2id parameter bounds (normative)
 
-The header identifies the mode, version, and decryption parameters. The payload is a streamed XChaCha20-Poly1305 encryption of a TAR archive.
-
-### 3.1 Shared encrypted-file prefix
-
-Every `.fcr` file begins with a logical 8-byte prefix, stored in encoded form.
-
-#### Logical prefix layout
-
-| Offset | Size | Field | Meaning |
-|---|---:|---|---|
-| 0 | 1 | Magic | `0xFC` |
-| 1 | 1 | Type | `0x53` = symmetric, `0x48` = hybrid |
-| 2 | 1 | Major version | breaking format changes |
-| 3 | 1 | Minor version | backward-compatible additions |
-| 4..=5 | 2 | Flags | big-endian `u16`, currently must be `0` |
-| 6..=7 | 2 | Extension length | big-endian `u16`, logical size of the authenticated `ext_bytes` region (0 when no extensions) |
-
-#### Stored size
-
-- logical size: `8`
-- encoded size: `27`
-
-#### Current values
-
-- symmetric encrypted-file major version: `3`
-- hybrid encrypted-file major version: `4`
-- encrypted-file minor version: `0`
-
-Symmetric and hybrid major versions increment independently based on per-mode format changes. They are not required to match each other or the crate version, and the current asymmetry (`3` / `4`) reflects the independent development history of each mode.
-
----
-
-## 4. Symmetric `.fcr` layout
-
-Symmetric mode uses:
-
-- Argon2id for password-based key derivation
-- HKDF-SHA3-256 for subkey separation
-- XChaCha20-Poly1305 stream encryption for the payload
-- HMAC-SHA3-256 for header authentication
-
-### 4.1 Header fields and order
-
-In the current `v3.0` symmetric format, every defined header field listed below is stored in encoded form and appears in this order:
-
-1. file prefix (`8` logical bytes, stored encoded)
-2. Argon2 salt (`32` logical bytes, stored encoded)
-3. HKDF salt (`32` logical bytes, stored encoded)
-4. KDF params (`12` logical bytes, stored encoded)
-5. stream nonce (`19` logical bytes, stored encoded)
-6. `ext_bytes` — authenticated extension region (`ext_len` logical bytes, stored encoded; `ext_len = 0` in `v3.0`)
-7. HMAC tag (`32` logical bytes, stored encoded)
-8. ciphertext payload
-
-### 4.2 KDF params layout
-
-KDF params are stored as three big-endian `u32` values:
-
-| Offset | Size | Field |
-|---|---:|---|
-| 0..=3 | 4 | `mem_cost` (KiB) |
-| 4..=7 | 4 | `time_cost` |
-| 8..=11 | 4 | `lanes` |
-
-Current default values used for newly encrypted files are:
-
-- `mem_cost = 1_048_576` KiB (1 GiB)
-- `time_cost = 4`
-- `lanes = 4`
-
-Current readers additionally enforce safety bounds on header-supplied KDF params:
-
-- `8 * lanes <= mem_cost <= 2 * 1024 * 1024` KiB (2 GiB)
-- `1 <= time_cost <= 12`
+- `8 * lanes <= mem_kib <= 2 * 1024 * 1024`
+- `1 <= time <= 12`
 - `1 <= lanes <= 8`
 
-The `mem_cost` lower bound of `8 * lanes` is an Argon2 requirement (memory must be at least 8 × parallelism).
-
-Files outside those bounds are rejected by current readers.
-
-Library callers additionally get a **default** `KdfLimit` of `1_048_576` KiB (1 GiB), matching the writer's own default. Files whose header `mem_cost` exceeds this ceiling are rejected with `ExcessiveWork` unless the caller opts into a higher limit. The 2 GiB bound above is the hard structural maximum enforced regardless of caller choice.
-
-### 4.3 Key derivation pipeline
-
-Symmetric mode derives keys as follows:
-
-```text
-passphrase + Argon2 salt + KDF params
-    -> Argon2id -> 32-byte IKM
-IKM + HKDF salt
-    -> HKDF-SHA3-256
-    -> 32-byte encryption key
-    -> 32-byte header HMAC key
-```
-
-### 4.4 Stored sizes (v3.0 symmetric, `ext_len = 0`)
-
-| Field | Logical size | Stored size |
-|---|---:|---:|
-| Prefix | 8 | 27 |
-| Argon2 salt | 32 | 99 |
-| HKDF salt | 32 | 99 |
-| KDF params | 12 | 39 |
-| Stream nonce | 19 | 63 |
-| `ext_bytes` | 0 | 3 |
-| HMAC tag | 32 | 99 |
-| **Total header size** | — | **429 bytes** |
-
-So a current symmetric `v3.0` file (with no extensions) is laid out as:
-
-```text
-0..27    encoded prefix
-27..126  encoded Argon2 salt
-126..225 encoded HKDF salt
-225..264 encoded KDF params
-264..327 encoded stream nonce
-327..330 encoded ext_bytes (empty)
-330..429 encoded HMAC tag
-429..end ciphertext payload
-```
-
-The `hmac_key` and `encryption_key` are derived from the same passphrase + Argon2 salt + KDF params + HKDF salt, so a wrong passphrase or a tampered key-derivation field produces a wrong `hmac_key` and HMAC verification fails before any ciphertext is read. No separate key-verification hash is required; both "wrong passphrase" and "header tampered" surface as a single `SymmetricHeaderAuthenticationFailed` error (the hybrid path uses the parallel `HybridHeaderAuthenticationFailed`).
-
-A future minor version that ships `ext_len = L` logical bytes of authenticated
-extension data adds exactly `encoded_size(L) - encoded_size(0)` bytes before the
-HMAC tag; all other offsets shift accordingly.
+Readers MUST reject out-of-range values with
+`InvalidKdfParams::{Parallelism | MemoryCost | TimeCost}`. A
+caller-supplied `KdfLimit` MAY further cap accepted `mem_kib` from
+untrusted input; the default cap matches the writer's default cost
+(~1 GiB), not the structural maximum.
 
 ---
 
-## 5. Hybrid `.fcr` layout
+## 3. Canonical encoding rules (normative)
 
-Hybrid mode uses:
+1. All fixed-layout integer fields are big-endian.
+2. Reserved bytes / reserved bits MUST be zero on write; readers MUST
+   reject any nonzero reserved value.
+3. `ext_len` in both `.fcr` and `private.key` MUST be `<= 32768`.
+4. The only replicated bytes in v1 are the 27 on-disk bytes of the
+   `.fcr` prefix (§5.1). Everything else is stored raw.
+5. The TLV extension region (§6) is canonical: each entry's `len` MUST
+   equal its actual value size; entries MUST NOT extend past the end
+   of the region.
 
-- ephemeral X25519 ECDH key agreement with the recipient's static public key
-- HKDF-SHA256 to derive an envelope wrapping key from the shared secret
-- XChaCha20-Poly1305 envelope encryption for per-file random keys
-- XChaCha20-Poly1305 stream encryption for the payload
-- HMAC-SHA3-256 for the outer header
+Readers MUST reject non-canonical fixed-field values **before any
+cryptographic operation**. Non-canonical TLV structure is rejected
+**after** the extension region has been authenticated (HMAC for
+`.fcr`, AEAD-AAD for `private.key`).
 
-The envelope transports two per-file random keys:
+---
 
-- payload encryption key (`32` bytes)
-- outer HMAC key (`32` bytes)
+## 4. `.fcr` encrypted file — v1 layout
 
-### 5.1 Header fields and order
+Every `.fcr` file is:
 
-In the current `v4.0` hybrid format, every defined header field listed below is stored in encoded form and appears in this order:
+```text
+[ replicated_prefix (27 bytes) ]
+[ mode_envelope (116 B symmetric | 104 B hybrid) ]
+[ stream_nonce (19 bytes) ]
+[ ext_bytes (ext_len bytes) ]
+[ hmac_tag (32 bytes) ]
+[ payload ]
+```
 
-1. file prefix (`8` logical bytes, stored encoded)
-2. sealed envelope (`136` logical bytes, stored encoded)
-3. stream nonce (`19` logical bytes, stored encoded)
-4. `ext_bytes` — authenticated extension region (`ext_len` logical bytes, stored encoded; `ext_len = 0` in `v4.0`)
-5. HMAC tag (`32` logical bytes, stored encoded)
-6. ciphertext payload
+Total header with `ext_len = 0`: **194 bytes** (symmetric) or
+**182 bytes** (hybrid).
 
-### 5.2 Envelope layout
+### 4.1 Replicated prefix
 
-The decoded envelope is:
+The logical prefix is 8 bytes:
+
+| Offset | Size | Field | Value / meaning |
+|---:|---:|---|---|
+| 0–3 | 4 | `magic` | `"FCR\0"` = `0x46 0x43 0x52 0x00` |
+| 4 | 1 | `version` | `0x01` |
+| 5 | 1 | `type` | `0x53 'S'` symmetric · `0x48 'H'` hybrid |
+| 6–7 | 2 | `ext_len` | `u16 BE`; byte length of `ext_bytes` |
+
+The on-disk encoding is always 27 bytes:
+
+```text
+pad0 || pad1 || pad2 || copy1 || copy2 || copy3
+```
+
+- each `pad` byte MUST be `0x00`
+- `copy1`, `copy2`, `copy3` are the same 8-byte logical prefix
+
+**Writer rule.** Writers MUST emit the canonical form only: all pads
+zero, three byte-identical copies.
+
+**Reader rule.** Readers MUST:
+
+1. read 27 bytes;
+2. recover a best-effort logical 8-byte prefix by majority vote per
+   byte position;
+3. re-encode that logical prefix canonically;
+4. compare the on-disk 27 bytes to the canonical re-encoding.
+
+If any byte position has no majority, or if the on-disk bytes are not
+the canonical encoding, the file MUST be rejected as a **corrupted
+prefix** (`FormatDefect::CorruptedPrefix { decoded_view }`). The
+decoded view carries the majority-voted logical prefix so callers can
+surface upgrade messaging ("file says v2, upgrade FerroCrypt") even
+on a bit-rotten file.
+
+**Rationale.** Decoding still runs on a corrupted prefix — but only
+to produce a useful error. Acceptance requires canonical on-disk
+bytes, so writer and reader always HMAC the same bytes and on-disk ≡
+authenticated.
+
+**Scope of replication.** Only the 8-byte prefix. Everything after it
+(salts, nonces, envelopes, ext_bytes, HMAC tag, ciphertext) is raw
+— each is either random, cryptographically authenticated by the AEAD
+primitive or the HMAC, or both.
+
+### 4.2 Symmetric envelope
+
+116 raw bytes, written immediately after the replicated prefix.
 
 | Offset | Size | Field |
-|---|---:|---|
-| 0..=31 | 32 | ephemeral X25519 public key |
-| 32..=55 | 24 | XChaCha20-Poly1305 envelope nonce |
-| 56..=135 | 80 | envelope ciphertext |
+|---:|---:|---|
+| 0–31 | 32 | `argon2_salt` |
+| 32–43 | 12 | `kdf_params` = `mem_kib u32 \|\| time u32 \|\| lanes u32` |
+| 44–67 | 24 | `wrap_nonce` |
+| 68–115 | 48 | `wrapped_file_key` (32 B ciphertext + 16 B Poly1305 tag) |
 
-Envelope ciphertext is the encrypted form of:
-
-```text
-[payload_encryption_key (32) | header_hmac_key (32)]
-```
-
-So the envelope plaintext is `64` bytes and the ciphertext is `64 + 16 = 80` bytes.
-
-### 5.3 Envelope key derivation
-
-The envelope wrapping key is derived via HKDF-SHA256:
-
-- **IKM:** X25519 shared secret (`ephemeral_secret.diffie_hellman(recipient_public)`)
-- **Salt:** `ephemeral_public (32) || recipient_public (32)` (64 bytes)
-- **Info:** `b"ferrocrypt hybrid envelope key v4"`
-- **Output:** 32-byte wrapping key for XChaCha20-Poly1305
-
-All-zero shared secrets (indicating a small-order public key) are rejected before key derivation.
-
-### 5.4 Stored sizes (v4.0 hybrid, `ext_len = 0`)
-
-| Field | Logical size | Stored size |
-|---|---:|---:|
-| Prefix | 8 | 27 |
-| Envelope | 136 | 411 |
-| Stream nonce | 19 | 63 |
-| `ext_bytes` | 0 | 3 |
-| HMAC tag | 32 | 99 |
-| **Total header size** | — | **603 bytes** |
-
-So a current hybrid `v4.0` file (with no extensions) is laid out as:
+Per-file derivation:
 
 ```text
-0..27    encoded prefix
-27..438  encoded envelope
-438..501 encoded stream nonce
-501..504 encoded ext_bytes (empty)
-504..603 encoded HMAC tag
-603..end ciphertext payload
+file_key = random 32 bytes (CSPRNG)
+ikm      = Argon2id(passphrase, argon2_salt, kdf_params)
+wrap_key = HKDF-SHA3-256(
+    salt = argon2_salt,
+    ikm  = ikm,
+    info = "ferrocrypt/v1/sym/wrap",
+    L    = 32)
+wrapped_file_key = XChaCha20-Poly1305-Seal(wrap_key, wrap_nonce, file_key, AAD = empty)
 ```
 
----
+Reusing `argon2_salt` as the HKDF salt is safe; it saves storing two
+distinct salts on disk.
 
-## 6. Payload format
+### 4.3 Hybrid envelope
 
-After the header, both symmetric and hybrid modes store the encrypted payload.
-
-### 6.1 What the payload is
-
-The payload is a **TAR archive** encrypted as a streaming XChaCha20-Poly1305 AEAD stream.
-
-### 6.2 Streaming behavior
-
-Plaintext TAR bytes are processed in chunks of:
-
-- plaintext chunk size: `65536` bytes (64 KiB)
-- authentication tag per chunk: `16` bytes
-
-Non-final chunks carry `65536` plaintext bytes plus a `16`-byte tag.
-The stream ends with one final AEAD chunk, which may be shorter and may be
-only a tag if the plaintext length is an exact multiple of `65536` bytes.
-
-### 6.3 Maximum stream size
-
-The streaming AEAD construction uses a 32-bit big-endian chunk counter
-(`chacha20poly1305::stream::EncryptorBE32` / `DecryptorBE32`). With 64 KiB
-plaintext chunks, a single encrypted stream can therefore carry at most
-`2^32 × 65_536 = 2^48` bytes of plaintext (≈ **256 TiB**) before the counter
-is exhausted. The archive layer produces a TAR stream, so this is a limit
-on the total size of the *archived* payload, not on any individual file
-inside it.
-
-Current implementations do not enforce this bound explicitly because no
-realistic input reaches it. Behavior at the boundary is defined by the
-underlying `chacha20poly1305` crate's counter-overflow handling.
-
-### 6.4 What is inside the TAR stream
-
-- If the input was a file, the TAR contains one top-level file entry with the original file name.
-- If the input was a directory, the TAR contains one top-level directory entry with the directory name, then its accepted descendants.
-
-Extraction enforces the same single-root invariant (see §11.3), so a crafted archive carrying a second top-level root is rejected.
-
-The encrypted payload does **not** expose plaintext file contents.
-
-The header also does **not** expose filenames or timestamps.
-
----
-
-## 7. Key file formats
-
-FerroCrypt hybrid mode uses two key files:
-
-- `public.key`
-- `private.key`
-
-Key files use a separate, non-replicated 8-byte header.
-
-### 7.1 Shared key-file header
-
-| Offset | Size | Field | Meaning |
-|---|---:|---|---|
-| 0 | 1 | Magic | `0xFC` |
-| 1 | 1 | Type | `0x50` = public, `0x53` = private |
-| 2 | 1 | Version | per-key-type (public = `3`, private = `4`) |
-| 3 | 1 | Algorithm | `0x01` = X25519 |
-| 4..=5 | 2 | Data length | big-endian `u16`, number of body bytes after the header |
-| 6..=7 | 2 | Flags | big-endian `u16`, currently must be `0` |
-
-The version byte is version-per-key-type, not a single family version: `public.key` is at version `3` and `private.key` is at version `4`. They can evolve independently. See §9.2 for why the starting numbers aren't `1`.
-
-### 7.2 `public.key` layout
-
-A public key file is:
-
-```text
-[key header][32-byte raw X25519 public key]
-```
-
-#### Sizes
-
-- header: `8` bytes
-- body: `32` bytes
-- total file size: `40` bytes
-
-### 7.3 `private.key` layout
-
-A private key file is:
-
-```text
-[key header]
-[KDF params]
-[Argon2 salt]
-[XChaCha20-Poly1305 nonce]
-[ext_len:u16 BE]
-[ext_bytes]
-[encrypted private-key blob]
-```
-
-#### Body layout
+104 raw bytes, written immediately after the replicated prefix.
 
 | Offset | Size | Field |
-|---|---:|---|
-| 0..=11 | 12 | KDF params |
-| 12..=43 | 32 | Argon2 salt |
-| 44..=67 | 24 | XChaCha20-Poly1305 nonce |
-| 68..=69 | 2 | `ext_len` (big-endian `u16`) |
-| 70..=(70 + ext_len − 1) | `ext_len` | `ext_bytes` (authenticated extension region) |
-| 70 + `ext_len`..=(70 + `ext_len` + 47) | 48 | encrypted private-key blob |
+|---:|---:|---|
+| 0–31 | 32 | `ephemeral_pubkey` (X25519) |
+| 32–55 | 24 | `wrap_nonce` |
+| 56–103 | 48 | `wrapped_file_key` |
 
-The encrypted private-key blob is:
+Per-file derivation:
 
-- plaintext private key: `32` bytes
-- AEAD tag: `16` bytes
-- ciphertext+tag total: `48` bytes
+```text
+file_key         = random 32 bytes (CSPRNG)
+ephemeral_secret = random X25519 private key (CSPRNG)
+ephemeral_public = X25519_basepoint_mult(ephemeral_secret)
+shared           = X25519(ephemeral_secret, recipient_pubkey)
+  -- MUST reject if `shared` is all zero (small-order public key defence)
+wrap_key         = HKDF-SHA3-256(
+    salt = ephemeral_public || recipient_pubkey,
+    ikm  = shared,
+    info = "ferrocrypt/v1/hyb/wrap",
+    L    = 32)
+wrapped_file_key = XChaCha20-Poly1305-Seal(wrap_key, wrap_nonce, file_key, AAD = empty)
+```
 
-#### Sizes
+Binding the salt to both public keys means a single ECDH session
+produces a single wrap key bound to that specific exchange.
 
-- header: `8` bytes
-- fixed-minimum body (excluding `ext_bytes`): `118` bytes
-- body: `118 + ext_len` bytes
-- total file size: `126 + ext_len` bytes
+### 4.4 Header tail
 
-Current releases emit `ext_len = 0` (total 126 bytes on disk). Future
-`v4.x` minors may populate `ext_bytes` with authenticated TLV
-metadata; readers that don't recognize a tag must still authenticate
-the full region via AEAD and then skip it.
+After the mode envelope, both modes store:
 
-### 7.4 Private-key encryption
+| Size | Field |
+|---:|---|
+| 19 | `stream_nonce` (XChaCha20-Poly1305 STREAM-BE32 base nonce) |
+| `ext_len` | `ext_bytes` (TLV region, §6) |
+| 32 | `hmac_tag` (HMAC-SHA3-256 over everything above) |
 
-Private keys are encrypted at rest using:
+### 4.5 Post-unwrap subkeys
 
-- Argon2id with the stored KDF params and salt
-- the resulting 32-byte Argon2id output directly as the XChaCha20-Poly1305 key
-- the stored 24-byte nonce for AEAD encryption/decryption
-- the 8-byte cleartext key-file header, the KDF params, the Argon2
-  salt, the nonce, the big-endian `ext_len`, and the `ext_bytes`
-  payload as **AEAD associated data (AAD)**
+```text
+payload_key = HKDF-SHA3-256(
+    salt = stream_nonce,
+    ikm  = file_key,
+    info = "ferrocrypt/v1/payload",
+    L    = 32)
+header_key  = HKDF-SHA3-256(
+    salt = empty,
+    ikm  = file_key,
+    info = "ferrocrypt/v1/header",
+    L    = 32)
+```
 
-Binding the cleartext header and body fields as AAD means every byte
-on disk — including fields that wouldn't otherwise affect key
-derivation (header, flags, `ext_len`, `ext_bytes`) — is
-cryptographically authenticated by the AEAD tag. This is
-defense-in-depth rather than a distinct user-facing error signal:
-the AEAD primitive returns a single undifferentiated failure for
-both "wrong passphrase" and "tampered cleartext", and both surface
-as the same `KeyFileUnlockFailed` error. Its Display wording
-reflects both causes.
+### 4.6 HMAC input
 
-Unlike `.fcr` headers, key files do **not** use replicated fields and
-do **not** use a separate header HMAC.
+```text
+hmac_input =
+    on_disk_prefix     (27 bytes, canonical)
+ || envelope_bytes     (116 B symmetric | 104 B hybrid)
+ || stream_nonce       (19 bytes)
+ || ext_bytes          (ext_len bytes)
 
----
+hmac_tag = HMAC-SHA3-256(header_key, hmac_input)
+```
 
-## 8. Authentication boundaries
+`header_key` is derived from `file_key`, so readers MUST unwrap the
+envelope **before** verifying the header MAC. Consequences:
 
-This section defines what current readers authenticate and what they do not.
+- wrong passphrase / wrong private key / envelope tamper → fails at
+  envelope unwrap (`SymmetricEnvelopeUnlockFailed` or
+  `HybridEnvelopeUnlockFailed`) before HMAC is ever reached;
+- right passphrase / right key but tampered rest-of-header → fails at
+  HMAC verification (`HeaderTampered`) — a distinct, more actionable
+  error than a collapsed "authentication failed".
 
-## 8.1 Symmetric `.fcr`
+### 4.7 AEAD AAD for mode envelopes
 
-In symmetric mode, the header HMAC authenticates the **decoded** values of:
+All `.fcr` AEAD operations (wrap, unwrap) use `AAD = empty`.
+Envelope-internal fields participate in `wrap_key` derivation or are
+the AEAD's own nonce input, so tampering any of them changes derived
+values and the AEAD primitive rejects on its own. Outside-envelope
+fields (prefix, stream_nonce, ext_bytes) are covered by the header
+HMAC. `private.key` (§7) is different: it has no separate HMAC, so
+every cleartext byte is bound as AEAD-AAD.
 
-- file prefix (including `ext_len`)
-- Argon2 salt
-- HKDF salt
-- KDF params
-- stream nonce
-- `ext_bytes` (any authenticated extension data)
+### 4.8 Decryption processing order (normative)
 
-The outer HMAC tag itself is then stored in replicated form immediately after
-`ext_bytes`.
+Readers MUST process `.fcr` files in this order:
 
-The payload ciphertext is authenticated per stream chunk by XChaCha20-Poly1305.
+1. read and validate the replicated prefix (bad magic, unsupported
+   version, unknown type, oversized `ext_len`, corrupted prefix are
+   all rejected here);
+2. read the rest of the fixed header;
+3. validate KDF parameter bounds if `type = Symmetric`;
+4. unwrap `file_key` from the envelope;
+5. derive `header_key` and `payload_key` from `file_key`;
+6. verify `hmac_tag`;
+7. parse `ext_bytes` under the TLV rules in §6;
+8. decrypt the payload stream.
 
-### Minor-version extensions are authenticated
+Wrong passphrase / wrong recipient key / envelope tamper fails at
+step 4; header tamper outside the envelope fails at step 6;
+malformed or unrecognised-critical TLV fails at step 7; payload
+truncation / trailing data / payload tamper fails at step 8.
 
-A future minor version adding data does so by shipping non-empty `ext_bytes` and
-setting `ext_len` accordingly. Older readers:
+### 4.9 Payload stream
 
-- read `ext_len` from the prefix
-- read the encoded extension region, decode it, and include the decoded `ext_bytes` in HMAC verification
-- then discard the extension contents before proceeding
+The payload is a TAR stream encrypted with XChaCha20-Poly1305
+STREAM-BE32.
 
-Because the HMAC covers `ext_bytes`, an attacker cannot tamper with the
-extension without breaking HMAC verification. Minor-version additions must
-still be:
+- **Chunk size:** 65 536 bytes plaintext, 16-byte Poly1305 tag per
+  chunk.
+- **Stored base nonce:** the 19-byte `stream_nonce` from the header.
+- **Per-chunk nonce:** `stream_nonce (19) || chunk_counter_u32_be (4)
+  || last_flag_u8 (1)` — exactly the scheme implemented by
+  `chacha20poly1305::stream::EncryptorBE32` / `DecryptorBE32`.
+- **Counter:** starts at `0` and increments by `1` per chunk.
+- **Last flag:** `0x00` on every non-final chunk, `0x01` on the
+  final chunk.
 
-- optional (older readers can decrypt without interpreting them)
-- non-security-critical (older readers will not act on their contents)
-- ignorable (older readers produce correct output regardless of what they contain)
+Normative behaviour:
 
-A change that violates any of these requirements is a **major** version bump,
-not a minor one.
+- the final chunk MAY be shorter than 65 536 bytes;
+- the final chunk MUST NOT be empty unless the whole plaintext is
+  empty, in which case the payload consists of a single empty-plaintext
+  chunk with `last_flag = 0x01`;
+- decryptors MUST raise `PayloadTruncated` if EOF is reached without
+  successfully decrypting a final-flag chunk;
+- decryptors MUST raise `ExtraDataAfterPayload` if bytes remain after
+  a successfully decrypted final-flag chunk;
+- any chunk AEAD failure is `PayloadTampered`.
 
-## 8.2 Hybrid `.fcr`
-
-In hybrid mode, the outer HMAC authenticates the **decoded** values of:
-
-- file prefix (including `ext_len`)
-- envelope
-- stream nonce
-- `ext_bytes` (any authenticated extension data)
-
-The payload ciphertext is authenticated per stream chunk by XChaCha20-Poly1305.
-
-The envelope itself is also an AEAD ciphertext (XChaCha20-Poly1305 with an HKDF-derived wrapping key).
-
-### What hybrid mode does not authenticate
-
-Hybrid mode does **not** bind the ciphertext to a long-term sender identity.
-
-It provides confidentiality and integrity for the recipient, but it is not a substitute for digital signatures or persistent sender authentication.
-
-### Minor-version extensions are authenticated
-
-The same authenticated-extension rule applies here: a future `v4.x` minor
-version extends the header via `ext_bytes`, and the HMAC binds those bytes to
-the file. Older readers read the encoded extension region, decode it, include
-the decoded `ext_bytes` in HMAC verification, and ignore the contents.
-
-## 8.3 `public.key`
-
-A public key file is structurally validated:
-
-- magic
-- type
-- version
-- algorithm
-- data length
-- exact total size
-
-There is **no cryptographic authentication tag** on `public.key` itself.
-
-Out-of-band verification is expected to use the public-key fingerprint.
-
-## 8.4 `private.key`
-
-A private key file is structurally validated:
-
-- magic
-- type
-- version
-- algorithm
-- `data_len` lower-bounded by the fixed-minimum body size
-- total on-disk size matches `8 + data_len`
-- internal consistency between `data_len` and the parsed `ext_len`
-- unknown nonzero flags rejected
-- KDF parameter bounds
-
-The encrypted private-key blob is authenticated by
-XChaCha20-Poly1305 during decryption, and that AEAD binds the
-following cleartext fields as **associated data**:
-
-- the 8-byte key-file header (magic, type, version, algorithm,
-  `data_len`, flags)
-- the stored KDF params
-- the Argon2 salt
-- the AEAD nonce
-- the big-endian `ext_len`
-- the `ext_bytes` payload
-
-Tamper on any of those bytes causes the decrypt-side AEAD to fail
-authentication. Unlike the `.fcr` header, `private.key` has **no**
-separate HMAC layer and **no** replicated fields — authentication
-comes entirely from the AEAD tag over the AAD + ciphertext.
-
-### Minor-version extensions are authenticated
-
-A future `v4.x` minor private-key version may populate `ext_bytes`
-with TLV metadata. Readers of any `v4.x` minor:
-
-- read `ext_len` from the body
-- read `ext_bytes`
-- include both in the AEAD AAD during decryption
-- interpret tags they recognize; authenticate-and-ignore tags they don't
-
-The same optional / non-security-critical / ignorable requirements
-apply to private-key extensions as to `.fcr` extensions (see 8.1).
+Writers SHOULD refuse payloads larger than `2^32` chunks of 65 536
+bytes (~256 TiB); real inputs never reach this bound.
 
 ---
 
-## 9. Compatibility guarantees
+## 5. Payload format (TAR archive inside STREAM AEAD)
 
-## 9.1 Encrypted files (`.fcr`)
+The decrypted payload is a TAR archive with these normative semantics:
 
-Current reader behavior is:
+- if the input was a file, the TAR contains one top-level file entry
+  with the original file name;
+- if the input was a directory, the TAR contains one top-level
+  directory entry and its accepted descendants;
+- only regular files and directories are valid entry kinds;
+- symlinks, devices, FIFOs, sockets, and other special entries MUST
+  be rejected by conforming writers and readers;
+- extraction MUST reject absolute paths, `..`, host-specific path
+  prefixes, and archives with more than one top-level root;
+- extraction MUST reject collisions with an already-existing
+  top-level output path.
 
-- **Symmetric:** accept major version `3`, allow compatible future minor versions within major `3`
-- **Hybrid:** accept major version `4`, allow compatible future minor versions within major `4`
-- reject older or newer major versions for the respective mode
-- reject unknown nonzero header flags
+What v1 preserves as part of the format contract:
 
-Files produced before the current magic-byte-based format family are not supported by current readers.
+- file contents;
+- directory structure.
 
-## 9.2 Key files
+What v1 does **not** guarantee across implementations:
 
-Current reader behavior is:
-
-- accept `public.key` version `3` only
-- accept `private.key` version `4` only
-- reject any other key-file version (older or newer) for the respective file
-- reject unknown nonzero key-file flags
-- reject unknown key algorithms
-- for `private.key`, reject bodies where `data_len` disagrees with the parsed `ext_len`
-- for `private.key v4.x` minors, authenticate-and-ignore any `ext_bytes` TLV tags the reader does not recognize
-
-0.3.0 is the first FerroCrypt release to define versioned `.fcr` and key-file formats. The numbers `symmetric .fcr v3.0` / `hybrid .fcr v4.0` / `public.key v3` / `private.key v4` start above 1 because the formats went through a few iterations during 0.3.0 pre-release development; none of those earlier shapes ever appeared in a published release.
-
-## 9.3 KDF parameter compatibility
-
-For both symmetric file headers and private-key files, current readers only accept KDF params within the current safety bounds.
-
-That means a file can be structurally well-formed yet still be rejected if it carries out-of-policy KDF parameters.
+- ownership;
+- timestamps;
+- full permission fidelity on every platform;
+- hardlink identity;
+- symlink relationships.
 
 ---
 
-## 10. Versioning rules
+## 6. TLV extension region (`ext_bytes`)
 
-## 10.1 Encrypted-file major version
+Authenticated extension region used by both `.fcr` and `private.key`.
 
-Increment the encrypted-file **major** version when a reader from the previous major cannot safely decrypt the new file.
+```text
+ext_bytes = *tlv
+tlv       = tag (u16 BE) || len (u16 BE) || value (len bytes)
+```
 
-Examples of major-version changes:
+### 6.1 Normative rules
 
-- changing the payload cipher or stream construction
-- changing the meaning or required interpretation of existing fields
-- adding a required field that older readers must understand to decrypt safely
-- changing authentication semantics in a way older readers must know about
+This is the complete TLV specification.
 
-## 10.2 Encrypted-file minor version
+1. **All tags are ignorable.** Readers that do not recognise a tag
+   MUST authenticate it (it is covered by HMAC or AEAD-AAD) and skip
+   its value.
+2. **Order is writer-defined.** The authenticator covers bytes
+   exactly as written.
+3. **Duplicate tags are permitted.** A future feature may
+   semantically require multiple entries of one tag.
+4. **`len` is authoritative.** `len` MUST equal the actual byte
+   length of `value`. Readers MUST reject if `tag || len || value`
+   would extend past the end of `ext_bytes`.
+5. **Zero-length values are permitted.** A `tag || 0x0000` entry is
+   well-formed; its meaning is tag-specific.
+6. **v1.0 writers emit `ext_len = 0`** unless using a tag defined in
+   a later v1.x revision.
+7. **`ext_len` is capped at 32 KiB.** Readers MUST reject larger
+   values with `FormatDefect::ExtTooLarge`.
+8. **Tags in `0x8001..=0xFFFF` are critical.** Readers that do not
+   recognise a critical tag MUST reject the file with
+   `FormatDefect::UnknownCriticalTag { tag }`. v1.0 defines none, so
+   any critical tag today is an upgrade-required signal.
+9. **Tags `0x0000` and `0x8000` are reserved** and MUST NOT be
+   emitted.
 
-Increment the encrypted-file **minor** version only for backward-compatible additions that older readers of the same major can safely ignore.
+If a change is "so critical that old readers must reject files that
+use it," that change is a `version = 2` bump, not a TLV tag.
 
-Minor-version additions must be placed inside the authenticated `ext_bytes`
-region and the writer must set `ext_len` in the prefix to match. Older readers
-of the same major:
+### 6.2 How future features ship
 
-- read `ext_len` from the prefix,
-- read the encoded extension region,
-- decode it and include the decoded `ext_bytes` in HMAC verification (binding the extension to the file),
-- and then discard the contents.
+When a future release adds a TLV tag, the PR that adds it:
 
-Minor versions must **not** introduce:
+1. Picks the next available `u16` value.
+2. Documents the tag number, semantics, value format, and any size
+   constraints in this specification.
+3. Adds test vectors under `testvectors/suite/`.
 
-- required cipher changes
-- required KDF changes
-- required authentication changes
-- fields that older readers must interpret to decrypt correctly
-
-If the new field must be understood to decrypt safely, it is **not** a minor change.
-
-## 10.3 Key-file versioning
-
-Key files use a single version byte per key type, not a separate major/minor pair.
-
-`public.key` and `private.key` are versioned independently:
-
-- the two files can evolve at different rates (the current release keeps `public.key` at `v3` while bumping `private.key` to `v4`)
-- a new `public.key` layout bumps the public-key version only; a new `private.key` layout bumps the private-key version only
-- `private.key` follows a `v<major>.<x>` style implicitly: `ext_bytes` provides the same authenticated-extension forward-compat mechanism that `.fcr` minors use, so a `v4.1` `private.key` that adds an optional field via TLV stays readable by `v4.0` readers
-
-Any incompatible or structurally distinct key-file revision that cannot be expressed as an authenticated `ext_bytes` addition must use a new top-level key-file version and be handled by explicit version dispatch in the reader.
-
----
-
-## 11. Archive semantics
-
-The encrypted payload is a TAR stream produced and consumed with the following policy.
-
-## 11.1 Input acceptance during archiving
-
-### Accepted
-
-- regular files
-- directories containing only regular files and subdirectories
-
-### Rejected
-
-- symlink inputs
-- directories containing symlinks
-- sockets
-- FIFOs
-- device files
-- other special filesystem entries
-
-On Unix, regular files are opened with `O_NOFOLLOW` so the open itself refuses symlinks atomically.
-
-## 11.2 Directory traversal safety on extraction
-
-Extraction rejects archive paths that contain:
-
-- `..`
-- absolute roots
-- Windows/host-specific path prefixes
-
-This prevents path traversal outside the selected output directory.
-
-## 11.3 Archive root cardinality on extraction
-
-FerroCrypt's archiver always produces exactly one top-level root (see §6.4).
-
-Extraction enforces the same invariant: an archive that contains entries under more than one distinct top-level root is rejected before any output is finalized. This keeps the decryption function's single returned output path faithful to what extraction actually creates on disk.
-
-## 11.4 Output collision policy
-
-During extraction, the top-level root created by the archive must not already exist in the chosen output directory.
-
-If the top-level root already exists, extraction fails before writing into it.
-
-## 11.5 Unsupported TAR entry types on extraction
-
-Extraction accepts only:
-
-- directory entries
-- regular file entries
-
-Other TAR entry types are rejected, including symlink entries.
-
-## 11.6 Partial extraction behavior
-
-Decryption/extraction is intentionally **non-transactional**.
-
-If extraction fails after some output has already been written, the top-level root is renamed with a `.incomplete` suffix.
-
-This preserves partially recovered plaintext for inspection or salvage.
-
-## 11.7 Metadata preservation
-
-FerroCrypt preserves:
-
-- file contents
-- directory structure
-
-The current implementation also attempts to preserve regular-file and directory
-permission bits on Unix, with setuid, setgid, and sticky bits stripped on both
-archive creation and extraction. That is current behavior, not a guaranteed
-cross-platform compatibility contract.
-
-FerroCrypt does **not** preserve as part of its compatibility contract:
-
-- ownership
-- timestamps
-- permission preservation across all platforms and implementations
-- hardlink identity
-- symlink relationships
-- special filesystem entries
-
-Hardlinks are archived as ordinary file contents rather than preserved as links.
-
-The archive semantics are intended for safe consumer file encryption, not for faithful filesystem backup/restore.
+No pre-allocation, no separate registry, no governance process.
 
 ---
 
-## 12. Current format identifiers summary
+## 7. `public.key` — text form, canonical `fcr1…`
 
-### Encrypted files
+`public.key` is a **UTF-8 text file** containing exactly one line: the
+canonical Bech32 recipient string, optionally followed by a single
+trailing line feed.
 
-- magic byte: `0xFC`
+Example:
+
+```
+fcr1qqpjkm5g7wk60xptrc30ah3ks55z0a9dyrvprm8jyutswmgkp4lqqjuvzyg
+```
+
+No binary header, no separate integrity tag. The Bech32 checksum
+(BIP 173, 6 characters) provides copy-paste error detection. Identity
+("is this really Alice's key?") is verified out-of-band via the
+fingerprint.
+
+### 7.1 `fcr1…` payload
+
+```text
+HRP  = "fcr"
+DATA = algorithm (1 byte) || public_key_material
+```
+
+Defined algorithms in v1:
+
+- `0x01` — X25519; `public_key_material` length = 32 bytes.
+
+Future algorithms use new `algorithm` values. The original BIP 173
+90-character length cap is explicitly lifted; the checksum is still
+verified.
+
+Readers MUST:
+
+- verify the BIP 173 checksum;
+- reject mixed-case strings;
+- reject leading / trailing whitespace other than a single trailing
+  LF;
+- reject extra lines;
+- reject unknown `algorithm` bytes (`FormatDefect::UnknownAlgorithm`);
+- reject key material whose length does not match the algorithm
+  (`FormatDefect::UnexpectedKeyLength`).
+
+### 7.2 Fingerprint
+
+```text
+fingerprint = SHA3-256(algorithm || public_key_material)
+```
+
+Displayed as the first 16 hex characters (short) or all 64 hex
+characters (full). Hashing `algorithm || key_material` avoids
+cross-algorithm fingerprint collisions when future public-key
+algorithms are added.
+
+---
+
+## 8. `private.key` — binary, passphrase-wrapped
+
+`private.key` is the only binary on-disk artefact other than `.fcr`.
+There is no separate HMAC; the AEAD tag is the sole integrity
+mechanism, so every cleartext byte is bound as AEAD-AAD.
+
+### 8.1 Layout
+
+Total 125 bytes when `ext_len = 0`.
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0–3 | 4 | `magic` = `"FCR\0"` |
+| 4 | 1 | `version` = `0x01` |
+| 5 | 1 | `type` = `0x4B` (`'K'`) |
+| 6 | 1 | `algorithm` = `0x01` (X25519) |
+| 7–8 | 2 | `ext_len` (u16 BE) |
+| 9–40 | 32 | `argon2_salt` |
+| 41–52 | 12 | `kdf_params` |
+| 53–76 | 24 | `wrap_nonce` |
+| 77… | `ext_len` | `ext_bytes` |
+| next | 48 | `wrapped_privkey` (32 B ciphertext + 16 B tag) |
+
+The `type` byte is `0x4B` rather than `0x53` so `file(1)`-style
+matchers can disambiguate a `private.key` file from a symmetric
+`.fcr` file by a single byte.
+
+### 8.2 Key wrapping
+
+```text
+ikm         = Argon2id(passphrase, argon2_salt, kdf_params)
+wrap_key    = HKDF-SHA3-256(
+    salt = argon2_salt,
+    ikm  = ikm,
+    info = "ferrocrypt/v1/private-key/wrap",
+    L    = 32)
+
+aad         = bytes[0 .. start_of_wrapped_privkey)   -- every cleartext byte
+wrapped     = XChaCha20-Poly1305-Seal(wrap_key, wrap_nonce, private_key_material, aad)
+```
+
+Tampering any cleartext byte — header, KDF params, salt, nonce,
+`ext_len`, `ext_bytes` — causes the AEAD decrypt to fail with
+`CryptoError::KeyFileUnlockFailed`. That error is intentionally
+indistinguishable from "wrong passphrase" at the AEAD layer; a local
+attacker with read access gains nothing from the distinction.
+
+### 8.3 Reader rules
+
+Readers MUST:
+
+1. reject bad `magic`, unsupported `version`, wrong `type`, unknown
+   `algorithm`, or oversized `ext_len`;
+2. check total file size against the parsed structure;
+3. validate KDF parameter bounds **before** attempting Argon2id;
+4. authenticate and decrypt `wrapped_privkey` using the full
+   cleartext prefix as AAD;
+5. parse `ext_bytes` under the TLV rules in §6 after the AEAD tag
+   authenticates.
+
+---
+
+## 9. HKDF info-string convention
+
+Every HKDF info string is literal ASCII of the form
+`ferrocrypt/v1/<part>`. Pinned exactly:
+
+| Info string | Purpose |
+|---|---|
+| `ferrocrypt/v1/sym/wrap` | Symmetric-envelope wrap key |
+| `ferrocrypt/v1/hyb/wrap` | Hybrid-envelope wrap key |
+| `ferrocrypt/v1/private-key/wrap` | `private.key` wrap key |
+| `ferrocrypt/v1/payload` | Payload AEAD key (from `file_key`) |
+| `ferrocrypt/v1/header` | Header HMAC key (from `file_key`) |
+
+A future v2 uses `ferrocrypt/v2/…`; non-colliding by construction.
+
+Fingerprints (§7.2) are a plain SHA3-256 hash and deliberately do
+**not** use an HKDF info string.
+
+---
+
+## 10. Versioning and the v2 safety belt
+
+### 10.1 Versioning policy
+
+- `.fcr` uses a single `version` byte, starting at `0x01`.
+- `private.key` uses a single `version` byte, starting at `0x01`.
+- `public.key` has no binary version byte; its compatibility surface
+  is the Bech32 grammar plus `algorithm` IDs.
+
+There is no separate major/minor split in v1.
+
+### 10.2 Backward-compatible evolution
+
+Backward-compatible evolution within v1 happens through:
+
+- ignorable TLV tags in `ext_bytes`;
+- new public-key `algorithm` IDs;
+- new `.fcr` `type` values (e.g. a future PQ-hybrid mode).
+
+Unknown ignorable TLV tags are skipped after authentication. Unknown
+critical TLV tags are rejected after authentication. Unknown `type`
+or `algorithm` values are rejected immediately with a specific error.
+
+### 10.3 What requires `version = 0x02`
+
+A new `.fcr` or `private.key` version is required for any change that
+breaks a v1 reader's ability to parse or safely act on the file,
+including:
+
+- changing the logical `.fcr` prefix layout;
+- changing the replication rule for that prefix;
+- changing the meaning of existing fixed fields;
+- changing the payload-stream construction;
+- changing the `private.key` fixed header layout;
+- swapping a cryptographic primitive for an existing `type` in a way
+  v1 readers cannot safely ignore.
+
+### 10.4 v2 safety belt
+
+A future `version = 0x02` MUST change either:
+
+- the magic bytes, or
+- the logical `.fcr` prefix length.
+
+This ensures a v1 parser cannot silently misinterpret a v2 file under
+any reader bug.
+
+### 10.5 Compatibility boundary
+
+v1 intentionally does **not** preserve compatibility with older
+pre-v1 FerroCrypt draft formats (the v3/v4 numbering iterated during
+0.3.0 pre-release development and never shipped publicly). The reset
+is worth doing once, before the format ships as a stable long-term
+contract.
+
+---
+
+## 11. Authentication coverage (summary)
+
+| Asset | Authenticated by | Scope |
+|---|---|---|
+| `.fcr` prefix | canonicity check + HMAC-SHA3-256 | all 27 on-disk bytes |
+| `.fcr` envelope | AEAD primitive + HMAC | self-integrity via `wrap_key`; bytes also in HMAC scope |
+| `.fcr` stream_nonce | HMAC | 19 bytes |
+| `.fcr` ext_bytes | HMAC | full region |
+| `.fcr` payload | AEAD per chunk + final-flag semantics | every chunk, every byte |
+| `private.key` cleartext | AEAD-AAD | every cleartext byte |
+| `private.key` body | AEAD tag | 32 B key material |
+| `public.key` / `fcr1…` | BIP 173 checksum | copy-paste integrity only |
+| public-key identity | out-of-band fingerprint comparison | SHA3-256 of `algorithm \|\| key_material` |
+
+---
+
+## 12. Diagnostic error surface
+
+FerroCrypt distinguishes the following failure classes; the exact
+enum names are implementation-specific, but the distinction itself
+is part of the product promise.
+
+- `InvalidFormat::BadMagic` — not a FerroCrypt file
+- `InvalidFormat::UnknownType { type_byte }` — unknown `.fcr` type
+- `UnsupportedVersion { version }` — unknown major version
+- `InvalidFormat::CorruptedPrefix { decoded_view }` — replicated
+  prefix failed canonicity (carries the decoded view so diagnostics
+  can still surface the declared version)
+- `InvalidFormat::ExtTooLarge { len }` — `ext_len` over 32 KiB
+- `InvalidFormat::MalformedTlv` — TLV ordering / duplicate / length
+  violation
+- `InvalidFormat::UnknownCriticalTag { tag }` — critical TLV tag
+  the reader doesn't understand
+- `InvalidKdfParams` — KDF params outside structural bounds
+- `ExcessiveWork { required_kib, max_kib }` — KDF memory exceeds
+  caller's `KdfLimit`
+- `SymmetricEnvelopeUnlockFailed` — wrong passphrase or tampered
+  symmetric envelope
+- `HybridEnvelopeUnlockFailed` — wrong private key or tampered
+  hybrid envelope (also fires on all-zero X25519 shared secret)
+- `HeaderTampered` — HMAC mismatch after successful envelope unwrap
+  (the right key opened the envelope, but `stream_nonce` or
+  `ext_bytes` were tampered with)
+- `PayloadTampered` — per-chunk AEAD failed
+- `PayloadTruncated` — EOF before the final-flag chunk
+- `ExtraDataAfterPayload` — bytes remain after the final-flag chunk
+- `KeyFileUnlockFailed` — `private.key` AEAD failed (wrong passphrase
+  **or** tampered cleartext; the two are indistinguishable by design)
+
+---
+
+## 13. Test vectors and conformance
+
+v1 ships with committed test vectors split into two directories:
+
+- **`testvectors/wire/`** — frozen v1 examples referenced directly
+  by this specification. Not regenerated once v1 ships.
+- **`testvectors/suite/`** — extensible edge-case corpus for
+  malformed inputs; versioned separately via a `SUITE-VERSION` file.
+
+Minimum coverage:
+
+- empty, one-byte, and multi-chunk `.fcr` files for both modes;
+- one valid `public.key` / `private.key` pair;
+- corrupted replicated prefix;
+- malformed TLV (ordering, duplicates, len-past-end);
+- unknown critical and unknown ignorable TLV tags;
+- out-of-range KDF parameters;
+- truncated payload;
+- trailing data after final payload chunk;
+- wrong-passphrase / wrong-recipient envelope failures;
+- header MAC failure after successful unwrap.
+
+Equivalent cases are exercised by the in-tree unit tests
+(`src/symmetric.rs::tests`, `src/hybrid.rs::tests`,
+`src/format.rs::tests`, `src/common.rs::tests`); the `testvectors/`
+corpus extends this coverage to independent reader implementations.
+
+---
+
+## 14. Format identifiers summary
+
+### `.fcr`
+
+- magic: `"FCR\0"` = `0x46 0x43 0x52 0x00`
+- version: `0x01`
 - symmetric type: `0x53` (`'S'`)
 - hybrid type: `0x48` (`'H'`)
-- current symmetric version: `3.0`
-- current hybrid version: `4.0`
 - extension: `.fcr`
+- prefix length (logical / on-disk): 8 / 27 bytes
 
-### Key files
+### `private.key`
 
-- magic byte: `0xFC`
-- public key type: `0x50` (`'P'`)
-- private key type: `0x53` (`'S'`)
-- current `public.key` version: `3`
-- current `private.key` version: `4`
-- accepted `public.key` versions: `3`
-- accepted `private.key` versions: `4`
-- algorithm id: `0x01` (`X25519`)
+- magic: `"FCR\0"`
+- version: `0x01`
+- type: `0x4B` (`'K'`)
+- algorithm: `0x01` (X25519)
+- fixed total (with `ext_len = 0`): 125 bytes
+
+### `public.key`
+
+- text file, single `fcr1…` line + optional trailing LF
+- HRP: `"fcr"`
+- payload: `algorithm(1) || key_material`
+- for X25519 (the only v1 algorithm): ~64 bytes on disk
 
 ---
 
-## 13. Practical scope of this specification
+## 15. Practical scope
 
-This document defines the current byte-level contract and behavior that callers can rely on.
+This document defines the byte-level contract that callers can rely
+on. It does **not** imply:
 
-It does **not** imply:
+- backward compatibility with anything produced before FerroCrypt
+  0.3.0 (which is the first release to define versioned v1 formats);
+- support for arbitrary future `type` or `algorithm` values;
+- preservation of full filesystem metadata;
+- suitability for high-assurance or regulated environments.
 
-- backward compatibility with anything produced before FerroCrypt 0.3.0 (which is the first release to define these versioned formats)
-- support for arbitrary future key-file versions
-- preservation of full filesystem metadata
-- suitability for high-assurance or regulated environments
+Independent reader implementations MUST implement §1–§11 as
+normative; §12–§15 are informative descriptions of the FerroCrypt
+reference implementation's behaviour.

@@ -90,10 +90,10 @@
 //!   `.fcr` files.
 //!
 //! ## Migrating from 0.2.x
-//! Version 0.3.0 introduces a new file format family (symmetric v3.0, hybrid
-//! v4.0) and replaces RSA-4096 with X25519 for hybrid encryption. Files and
-//! keys from 0.2.x are **not compatible**. Decrypt any existing data with the
-//! old version first, then re-encrypt with 0.3.0.
+//! Version 0.3.0 introduces on-disk format **v1** (unified across `.fcr` files,
+//! `public.key`, and `private.key`) and replaces RSA-4096 with X25519 for hybrid
+//! encryption. Files and keys from 0.2.x are **not compatible**. Decrypt any
+//! existing data with the old version first, then re-encrypt with 0.3.0.
 //!
 //! All patch and minor releases within the 0.3.x series will remain backward
 //! compatible — files encrypted with 0.3.0 will be readable by any 0.3.x
@@ -128,8 +128,6 @@ use crate::common::{hex_encode, sha3_256_hash};
 pub use crate::error::{CryptoError, FormatDefect, InvalidKdfParams, UnsupportedVersion};
 pub use crate::format::ENCRYPTED_EXTENSION;
 pub use crate::hybrid::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};
-
-const RECIPIENT_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("fcr");
 
 pub use secrecy;
 
@@ -236,21 +234,24 @@ impl PublicKey {
         Ok(Self::from_bytes(decode_recipient(recipient)?))
     }
 
-    /// Computes the SHA3-256 fingerprint as a 64-character lowercase
-    /// hex string. Performs filesystem I/O for the key-file source.
+    /// Computes the SHA3-256 fingerprint of `algorithm || key_material`
+    /// as a 64-character lowercase hex string. Binding the algorithm
+    /// byte into the input avoids fingerprint collisions across future
+    /// public-key algorithms. Uses the same canonical byte form as
+    /// [`PublicKey::to_recipient_string`] so a fingerprint always
+    /// matches the `fcr1…` encoding's data payload.
     pub fn fingerprint(&self) -> Result<String, CryptoError> {
         let bytes = self.resolve()?;
-        let hash = sha3_256_hash(&bytes)?;
+        let canonical = hybrid::recipient_canonical_bytes(&bytes);
+        let hash = sha3_256_hash(&canonical)?;
         Ok(hex_encode(&hash))
     }
 
-    /// Encodes the key as a Bech32 `fcr1…` recipient string. Performs
-    /// filesystem I/O for the key-file source.
+    /// Encodes the key as the canonical Bech32 `fcr1…` recipient string.
+    /// Performs filesystem I/O for the key-file source.
     pub fn to_recipient_string(&self) -> Result<String, CryptoError> {
         let bytes = self.resolve()?;
-        bech32::encode::<bech32::Bech32>(RECIPIENT_HRP, &bytes).map_err(|_| {
-            CryptoError::InternalInvariant("internal error: recipient encoding failed")
-        })
+        hybrid::encode_recipient_string(&bytes)
     }
 
     /// Returns the raw 32-byte X25519 public-key material as an owned
@@ -271,7 +272,7 @@ impl PublicKey {
     /// from disk if the source is a path.
     fn resolve(&self) -> Result<[u8; 32], CryptoError> {
         match &self.source {
-            PublicKeySource::KeyFile(path) => read_public_key_bytes(path),
+            PublicKeySource::KeyFile(path) => hybrid::read_public_key(path),
             PublicKeySource::Bytes(bytes) => Ok(*bytes),
         }
     }
@@ -586,43 +587,49 @@ pub fn detect_encryption_mode(
     }
 
     if filled < buf.len() {
-        if has_encoded_magic_byte(&buf, filled) {
+        if has_encoded_magic(&buf, filled) {
             return Err(CryptoError::InvalidFormat(FormatDefect::Truncated));
         }
         return Ok(None);
     }
     let Ok(prefix) = replication::decode(&buf) else {
-        if has_encoded_magic_byte(&buf, filled) {
+        if has_encoded_magic(&buf, filled) {
             return Err(CryptoError::InvalidFormat(FormatDefect::CorruptedHeader));
         }
         return Ok(None);
     };
-    if prefix.len() < 2 || prefix[0] != format::MAGIC_BYTE {
+    // Logical prefix layout (v1): magic(4) | version(1) | type(1) | ext_len(2).
+    if prefix.len() < format::HEADER_PREFIX_SIZE || prefix[0..4] != format::MAGIC {
         return Ok(None);
     }
-    match prefix[1] {
+    let type_byte = prefix[5];
+    match type_byte {
         format::TYPE_SYMMETRIC => Ok(Some(EncryptionMode::Symmetric)),
         format::TYPE_HYBRID => Ok(Some(EncryptionMode::Hybrid)),
-        _ => Err(CryptoError::InvalidFormat(
-            FormatDefect::UnknownEncryptionType(prefix[1]),
-        )),
+        _ => Err(CryptoError::InvalidFormat(FormatDefect::UnknownType {
+            type_byte,
+        })),
     }
 }
 
-/// Returns `true` only when every replication copy position (bytes 3,
-/// 11, 19) lies within the first `filled` bytes **and** at least two of
-/// them equal the magic byte. Requiring all three positions to be in
-/// range keeps a small random file from producing a 2-of-3 majority out
-/// of two in-range `0xFC` coincidences.
-fn has_encoded_magic_byte(buf: &[u8; format::HEADER_PREFIX_ENCODED_SIZE], filled: usize) -> bool {
+/// Returns `true` only when every replication copy position (offsets 3,
+/// 11, 19 within the 27-byte on-disk prefix) can hold the 4-byte magic
+/// within `filled` AND at least two of them carry `"FCR\0"`. Requiring
+/// all three positions to be in range keeps a small random file from
+/// producing a 2-of-3 majority out of two in-range coincidental
+/// magic-byte sequences.
+fn has_encoded_magic(buf: &[u8; format::HEADER_PREFIX_ENCODED_SIZE], filled: usize) -> bool {
     let s = format::HEADER_PREFIX_SIZE;
     let positions = [3, 3 + s, 3 + 2 * s];
-    if positions.iter().any(|&pos| pos >= filled) {
+    if positions
+        .iter()
+        .any(|&pos| pos + format::MAGIC_SIZE > filled)
+    {
         return false;
     }
     positions
         .iter()
-        .filter(|&&pos| buf[pos] == format::MAGIC_BYTE)
+        .filter(|&&pos| buf[pos..pos + format::MAGIC_SIZE] == format::MAGIC)
         .count()
         >= 2
 }
@@ -639,65 +646,27 @@ mod symmetric;
 #[cfg(feature = "fuzzing")]
 pub mod fuzz_exports;
 
-/// Reads and validates a public key file, returning the raw 32-byte key.
-fn read_public_key_bytes(key_file: impl AsRef<Path>) -> Result<[u8; 32], CryptoError> {
-    let data = std::fs::read(key_file.as_ref())?;
-    let header = format::parse_key_file_header(&data, format::KEY_FILE_TYPE_PUBLIC)?;
-    match header.version {
-        format::PUBLIC_KEY_VERSION => {
-            format::validate_key_layout(&data, &header, format::PUBLIC_KEY_DATA_SIZE)?;
-            let start = format::KEY_FILE_HEADER_SIZE;
-            Ok(data[start..start + format::PUBLIC_KEY_DATA_SIZE]
-                .try_into()
-                .map_err(|_| CryptoError::InvalidFormat(FormatDefect::UnexpectedKeyLength))?)
-        }
-        other => Err(format::unsupported_key_version_error(
-            other,
-            format::PUBLIC_KEY_VERSION,
-        )),
-    }
-}
-
-/// Decodes a Bech32 recipient string (`fcr1...`) into raw 32-byte public key bytes.
+/// Decodes a Bech32 recipient string (`fcr1…`) into raw 32-byte public
+/// key material.
 ///
-/// Validates the HRP and exact payload length. This is the low-level
-/// primitive; most callers should prefer
-/// [`PublicKey::from_recipient_string`] or `"fcr1…".parse::<PublicKey>()`,
-/// which wrap this function and yield a typed [`PublicKey`].
+/// Validates the HRP, checksum, mixed-case rule, algorithm byte, and
+/// material length. This is the low-level primitive; most callers
+/// should prefer [`PublicKey::from_recipient_string`] or
+/// `"fcr1…".parse::<PublicKey>()`, which wrap this function and yield
+/// a typed [`PublicKey`].
 pub fn decode_recipient(recipient: &str) -> Result<[u8; 32], CryptoError> {
-    use bech32::primitives::decode::CheckedHrpstring;
-
-    let parsed = CheckedHrpstring::new::<bech32::Bech32>(recipient)
-        .map_err(|_| CryptoError::InvalidInput("Recipient string is invalid".to_string()))?;
-
-    if parsed.hrp() != RECIPIENT_HRP {
-        return Err(CryptoError::InvalidInput(
-            "Not a FerroCrypt recipient".to_string(),
-        ));
-    }
-
-    let bytes: Vec<u8> = parsed.byte_iter().collect();
-    bytes
-        .try_into()
-        .map_err(|_| CryptoError::InvalidInput("Recipient has invalid length".to_string()))
+    hybrid::decode_recipient_string(recipient)
 }
 
-/// Validates that a file is a well-formed FerroCrypt private key file.
+/// Validates that a file is a well-formed FerroCrypt `private.key` file.
 ///
-/// Checks magic byte, key type, version, algorithm, unknown-flags
-/// rejection, body size (lower bound plus internal consistency between
-/// the declared `data_len` and the encoded `ext_len`). Does **not**
-/// attempt to decrypt the key (no passphrase needed).
+/// Checks magic bytes, version, type, algorithm, `ext_len` bound, and
+/// total file size. Does **not** attempt to decrypt the key (no
+/// passphrase needed).
 pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError> {
     let data = std::fs::read(key_file.as_ref())?;
-    let header = format::parse_key_file_header(&data, format::KEY_FILE_TYPE_PRIVATE)?;
-    match header.version {
-        format::PRIVATE_KEY_VERSION => hybrid::validate_private_key_body_shape(&data, &header),
-        other => Err(format::unsupported_key_version_error(
-            other,
-            format::PRIVATE_KEY_VERSION,
-        )),
-    }
+    let header = format::parse_private_key_header(&data)?;
+    hybrid::validate_private_key_shape(&data, &header)
 }
 
 /// Returns the default encrypted filename for a given input path (e.g. `"secrets.fcr"`).
@@ -865,24 +834,25 @@ mod tests {
     /// bytes 3 and 11 must not be misclassified as a truncated `.fcr`. The
     /// pre-fix implementation counted bytes beyond `filled` as implicit
     /// non-matches (they were `0x00` from init), which let a 2-of-3
-    /// majority form from two in-range coincidences — about a 1/65 000
-    /// hit rate on random small files. The fixed helper refuses to vote
-    /// unless every replication copy position is inside `filled`.
+    /// majority form from two in-range coincidences. The fixed helper
+    /// refuses to vote unless every replication copy position can hold
+    /// the full 4-byte magic within `filled`.
     #[test]
-    fn has_encoded_magic_byte_requires_all_positions_in_range() {
+    fn has_encoded_magic_requires_all_positions_in_range() {
         let mut buf = [0u8; format::HEADER_PREFIX_ENCODED_SIZE];
-        buf[3] = format::MAGIC_BYTE;
-        buf[3 + format::HEADER_PREFIX_SIZE] = format::MAGIC_BYTE;
-        // Third copy (byte 19) is outside `filled`, left as 0x00.
+        buf[3..3 + format::MAGIC_SIZE].copy_from_slice(&format::MAGIC);
+        let s = format::HEADER_PREFIX_SIZE;
+        buf[3 + s..3 + s + format::MAGIC_SIZE].copy_from_slice(&format::MAGIC);
+        // Third copy's magic window (bytes 19..23) is outside `filled = 20`.
         assert!(
-            !has_encoded_magic_byte(&buf, 15),
-            "a 15-byte file cannot be classified as a truncated `.fcr` — \
-             the third magic-byte position is outside the read-in region"
+            !has_encoded_magic(&buf, 20),
+            "a short file cannot be classified as a truncated `.fcr` — \
+             the third magic window must fit inside the read-in region"
         );
 
         // A genuinely-full read with a 2-of-3 majority remains positive.
-        buf[3 + 2 * format::HEADER_PREFIX_SIZE] = format::MAGIC_BYTE;
-        assert!(has_encoded_magic_byte(&buf, buf.len()));
+        buf[3 + 2 * s..3 + 2 * s + format::MAGIC_SIZE].copy_from_slice(&format::MAGIC);
+        assert!(has_encoded_magic(&buf, buf.len()));
     }
 
     /// Lock in the exact user-facing Display text for every `ProgressEvent`

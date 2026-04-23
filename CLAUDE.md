@@ -48,27 +48,32 @@ Repository layout:
 | Module | Role |
 |---|---|
 | `lib.rs` | Public API: config-struct operation surface (`symmetric_encrypt` / `symmetric_decrypt` / `hybrid_encrypt` / `hybrid_decrypt` / `generate_key_pair`) plus their `*Config` / `*Outcome` types, the `PublicKey` / `PrivateKey` / `ProgressEvent` abstractions, `detect_encryption_mode`, path validation |
-| `symmetric.rs` | Argon2id → HKDF-SHA3-256 → XChaCha20-Poly1305 streaming encrypt/decrypt |
-| `hybrid.rs` | X25519 ECDH + HKDF-SHA256 + XChaCha20-Poly1305 envelope + XChaCha20-Poly1305 streaming encrypt/decrypt |
+| `symmetric.rs` | Passphrase → Argon2id → HKDF-SHA3-256 → `wrap_key`; wraps a per-file random `file_key` via XChaCha20-Poly1305; derives `payload_key` + `header_key` from `file_key` via HKDF-SHA3-256; streaming encrypt/decrypt. |
+| `hybrid.rs` | X25519 ECDH → HKDF-SHA3-256 → `wrap_key`; same file-key indirection + post-unwrap subkey derivation as symmetric. Also owns the `private.key` (passphrase-wrapped, binary) and `public.key` (UTF-8 text file carrying `fcr1…`) handling, plus Bech32 recipient-string encode/decode. |
 | `archiver.rs` | TAR archive/unarchive (streaming, preserves directory structure). Owns `validate_encrypt_input`, the per-entry rule set (reject symlinks and non-regular/non-directory inputs); the encrypt entry points in `lib.rs` call this up-front so Argon2id never fires for a symlink, and `archive` re-runs it as defense-in-depth. Hardlinks are archived as regular files. Decryption writes under an `.incomplete` working name throughout and renames to the final name on success; failure leaves the `.incomplete` on disk for inspection. On Linux and macOS, extraction is anchored at a directory file descriptor and uses `openat`/`mkdirat` with `O_NOFOLLOW` to defeat local symlink/component-race attacks. |
-| `format.rs` | File format constants, header/key-file parsing, version-dispatch helpers, forward-compatibility skip for minor versions |
-| `replication.rs` | Triple replication with majority-vote decoding for header error correction |
-| `common.rs` | Shared: `EncryptWriter`/`DecryptReader` streaming adapters (**64 KiB** chunks), HMAC-SHA3-256, `KdfParams` (serialized to headers/key files), shared crypto constants |
-| `error.rs` | `CryptoError` enum, grouped by concern: filesystem/input (`Io`, `InputPath`, `InvalidInput`), format/version (`InvalidFormat`, `UnsupportedVersion`), KDF/work (`KeyDerivation`, `InvalidKdfParams`, `ExcessiveWork`), authentication (`KeyFileUnlockFailed`, `SymmetricHeaderAuthenticationFailed`, `HybridHeaderAuthenticationFailed`, `PayloadAuthenticationFailed`, `TruncatedStream`), primitives (`SliceConversion`), internal invariants (`InternalInvariant`, `InternalCryptoFailure`). Also defines the crate-private `StreamError` marker used to thread decrypt-path failures from `DecryptReader`/`EncryptWriter` through `io::Error` back into typed `CryptoError` variants via a manual `From<io::Error>` impl. |
+| `format.rs` | v1 format constants, 8-byte prefix layout, `private.key` cleartext header, replicated-prefix encode/decode with canonicity check (`decode_and_canonicalize_prefix`), `build_encoded_header_prefix` helper. |
+| `replication.rs` | Triple-replication `encode` / `decode` / `decode_exact` primitives used only for the 8-byte `.fcr` prefix. Body fields are stored raw in v1. |
+| `common.rs` | Shared: `EncryptWriter`/`DecryptReader` streaming adapters (**64 KiB** chunks), HMAC-SHA3-256 helpers, `KdfParams`, `KdfLimit`, HKDF-SHA3-256 expansion helper, file-key derivation (`generate_file_key`, `seal_file_key`, `open_file_key`, `derive_subkeys`, `derive_passphrase_wrap_key`), canonical TLV validator (`validate_tlv`), pinned HKDF info-string constants (`HKDF_INFO_SYM_WRAP`, `HKDF_INFO_HYB_WRAP`, `HKDF_INFO_PRIVATE_KEY_WRAP`, `HKDF_INFO_PAYLOAD`, `HKDF_INFO_HEADER`), random-bytes helpers (`random_bytes`, `random_secret`). |
+| `error.rs` | `CryptoError` enum, grouped by concern: filesystem/input (`Io`, `InputPath`, `InvalidInput`), format/version (`InvalidFormat`, `UnsupportedVersion`), KDF/work (`KeyDerivation`, `InvalidKdfParams`, `ExcessiveWork`), authentication (`KeyFileUnlockFailed`, `SymmetricEnvelopeUnlockFailed`, `HybridEnvelopeUnlockFailed`, `HeaderTampered`, `PayloadTampered`, `PayloadTruncated`, `ExtraDataAfterPayload`), primitives (`SliceConversion`), internal invariants (`InternalInvariant`, `InternalCryptoFailure`). Also defines the crate-private `StreamError` marker used to thread decrypt-path failures from `DecryptReader`/`EncryptWriter` through `io::Error` back into typed `CryptoError` variants via a manual `From<io::Error>` impl. |
 
-### Encryption Pipeline
+### Encryption Pipeline (v1)
 
 ```
 Input file/dir
-  → derive keys (Argon2id+HKDF for symmetric, random+X25519 ECDH+HKDF-SHA256 for hybrid)
-  → build header (magic bytes + triple-replicated fields + HMAC)
+  → derive wrap_key (passphrase → Argon2id → HKDF-SHA3-256 for symmetric;
+                     X25519 ECDH → HKDF-SHA3-256 for hybrid)
+  → generate random 32-byte file_key
+  → seal file_key with wrap_key (XChaCha20-Poly1305) → wrapped_file_key
+  → derive payload_key + header_key from file_key (HKDF-SHA3-256)
+  → build header (replicated prefix + mode envelope + stream_nonce + ext_bytes + HMAC)
   → write header to output .fcr file
-  → tar::Builder<EncryptWriter<File>> streams TAR data through XChaCha20-Poly1305 directly to disk
+  → tar::Builder<EncryptWriter<File>> streams TAR data through XChaCha20-Poly1305
+    directly to disk, keyed by payload_key
 ```
 
 No plaintext intermediate files touch disk. The TAR archive is never materialized — it streams directly through the encryption layer.
 
-Decryption reverses: read header → derive/decrypt keys → verify HMAC → DecryptReader streams ciphertext through XChaCha20-Poly1305 → tar::Archive unpacks directly. (Keys are derived first because the HMAC key comes from Argon2id+HKDF in symmetric, or from the X25519-decrypted envelope in hybrid.)
+Decryption reverses (FORMAT.md §4.8 eight-step order): read + canonicity-check prefix → read fixed header → validate KDF params → unwrap file_key via envelope AEAD (wrong passphrase / wrong key → `*EnvelopeUnlockFailed`) → derive header_key + payload_key → verify HMAC (tamper outside envelope → `HeaderTampered`) → validate TLV after authentication → DecryptReader streams ciphertext through XChaCha20-Poly1305 → tar::Archive unpacks directly.
 
 ### Desktop App Structure
 
@@ -77,22 +82,38 @@ Decryption reverses: read header → derive/decrypt keys → verify HMAC → Dec
 - `src/password_scorer.rs` — Password strength scoring (0–4 scale) adapted from Proton Pass.
 - File and folder pickers go through `rfd::FileDialog` on every platform. On macOS the desktop crate calls `pick_file_or_folder()` (rfd's combined picker, which internally wraps `NSOpenPanel`); on other platforms it falls back to `pick_file()` / `pick_folder()` because rfd does not expose a combined picker outside macOS.
 
-### File Format (symmetric v3.0, hybrid v4.0)
+### File Format (v1 — every artefact)
 
-8-byte logical prefix: `[0xFC, type, major, minor, flags_be16, ext_len_be16]`
-- Type `0x53` ('S') = symmetric (major 3), `0x48` ('H') = hybrid (major 4)
-- The entire encrypted-file header — including the prefix — is triple-replicated for error correction
-- HMAC-SHA3-256 authenticates the header: `prefix || fixed_core_fields || ext_bytes` (all in decoded form, excluding the HMAC tag itself). Single-copy replication corruption is corrected by majority vote before HMAC verification.
-- Forward compatibility: a minor-version bump puts new data inside the authenticated `ext_bytes` region (sized by `ext_len` in the prefix). Older readers decode the region, include the decoded `ext_bytes` in HMAC verification, and ignore the contents.
+See `ferrocrypt-lib/FORMAT.md` for the full byte-level spec. Summary:
 
-### Key File Format (public.key v3, private.key v4)
+**`.fcr` 8-byte logical prefix (27 bytes on disk, triple-replicated):**
+`[magic(4) "FCR\0"][version(1)=0x01][type(1)][ext_len_be16]`
 
-8-byte key-file header: `[0xFC, type, version, algorithm, data_len_be16, flags_be16]`
-- `public.key` (type `0x50` 'P', version `3`): header + 32-byte raw X25519 public key = 40 bytes total. No AEAD, no MAC — authenticity comes from out-of-band fingerprint verification.
-- `private.key` (type `0x53` 'S', version `4`): header + body with layout `[kdf(12)][salt(32)][nonce(24)][ext_len_be16][ext_bytes][ciphertext+tag(48)]`. Today `ext_len = 0`, total file size 126 bytes.
-- `private.key v4` binds the entire cleartext (header + kdf + salt + nonce + ext_len + ext_bytes) as AEAD **associated data**, so every byte on disk is cryptographically authenticated. The AEAD primitive can't distinguish "wrong passphrase" from "tampered cleartext" — both surface as `CryptoError::KeyFileUnlockFailed`, whose Display wording (`"Private key unlock failed: wrong passphrase or tampered file"`) reflects both causes.
-- Forward compatibility: future `v4.x` minors can populate `ext_bytes` with TLV metadata. Older `v4` readers authenticate the bytes via the AEAD tag and ignore unrecognized tags.
-- 0.3.0 is the first release to define versioned key-file formats. Starting numbers (`public.key v3` / `private.key v4`) are above `1` because the formats went through iterations during pre-release development; no earlier shape ever shipped. `public.key` stayed at its pre-release value because it's 40 bytes and carries no secret — redesigning it buys nothing.
+- Type `0x53` ('S') = symmetric, `0x48` ('H') = hybrid
+- Replication scope is **only** the prefix. Body fields (envelope, stream_nonce, ext_bytes, HMAC tag, ciphertext) are stored raw.
+- Canonicity is enforced before HMAC: readers majority-decode the logical prefix, re-encode canonically, and reject `CorruptedPrefix` if on-disk ≠ canonical. The decoded view is returned in the error so upgrade diagnostics still surface on a bit-rotten file.
+- HMAC-SHA3-256 authenticates: `on_disk_prefix(27) || envelope(104/116) || stream_nonce(19) || ext_bytes`.
+- Forward compatibility: ignorable TLV tags in `ext_bytes` are authenticated + skipped; critical tags (`0x8001..=0xFFFF`) are rejected as `UnknownCriticalTag`. See FORMAT.md §6.
+
+**Mode envelopes (raw, not replicated):**
+- Symmetric (116 B): `argon2_salt(32) || kdf_params(12) || wrap_nonce(24) || wrapped_file_key(48)`
+- Hybrid (104 B): `ephemeral_pubkey(32) || wrap_nonce(24) || wrapped_file_key(48)`
+
+**File-key indirection:** both modes wrap a random per-file 32-byte `file_key`. `payload_key` and `header_key` are derived from `file_key` via HKDF-SHA3-256 (`info = "ferrocrypt/v1/payload"` with salt = `stream_nonce`; `info = "ferrocrypt/v1/header"` with empty salt). Identical post-unwrap shape across modes; future PQ hybrids plug in as new `type` bytes without touching anything downstream.
+
+### Key File Format (v1)
+
+**`public.key`** is a **UTF-8 text file** containing exactly one line: the canonical `fcr1…` Bech32 recipient string, optionally followed by a single trailing LF. No binary header. Copy-paste integrity via BIP 173 checksum (6 characters); identity verification is out-of-band via the fingerprint. Bech32 payload: `algorithm(1) || public_key_material(32)` = 33 bytes for X25519. Total file size ~64 bytes.
+
+**`private.key`** v1 (125 bytes when `ext_len = 0`):
+- Cleartext header (9 B): `[magic(4) "FCR\0"][version(1)=0x01][type(1)=0x4B 'K'][algorithm(1)=0x01][ext_len_be16]`
+- Fixed body (68 B): `argon2_salt(32) || kdf_params(12) || wrap_nonce(24)`
+- Variable: `ext_bytes(ext_len)`
+- Wrapped private key (48 B): 32-byte ciphertext + 16-byte Poly1305 tag
+- Every cleartext byte before `wrapped_privkey` is bound as AEAD **associated data**, so tampering any cleartext field fails authentication. AEAD cannot distinguish "wrong passphrase" from "tampered cleartext" — both surface as `CryptoError::KeyFileUnlockFailed` with wording `"Private key unlock failed: wrong passphrase or tampered file"`.
+- Wrap-key derivation: `HKDF-SHA3-256(salt=argon2_salt, ikm=Argon2id(passphrase, argon2_salt, kdf_params), info="ferrocrypt/v1/private-key/wrap", L=32)`.
+- Type byte is `0x4B` ('K'), not `0x53` — `file(1)`-style matchers can disambiguate `private.key` from symmetric `.fcr` by a single byte.
+- Forward compatibility: TLV tags in `ext_bytes` authenticated via AEAD-AAD. Validated after successful AEAD unwrap.
 
 ## Key Conventions
 
@@ -104,7 +125,7 @@ Decryption reverses: read header → derive/decrypt keys → verify HMAC → Dec
 - Bech32 `fcr1…` recipient strings are the human-readable public-key exchange format. The typed entry point is `PublicKey::from_recipient_string(&str)` or `"fcr1…".parse::<PublicKey>()` (see the key-source abstractions bullet above); `decode_recipient(&str) -> [u8; 32]` is kept as the low-level primitive for the `fuzz_recipient_decode` fuzz target and callers that specifically want raw bytes.
 - CLI `hybrid --recipient / -r` accepts a `fcr1...` string directly for encryption. `recipient` (alias `rc`) subcommand prints the string from a key file.
 - CLI never accepts passphrases as command-line arguments. Passphrases are prompted interactively via `rpassword` (hidden TTY input) with confirmation on encrypt/keygen. For non-interactive use (tests, scripts), set the `FERROCRYPT_PASSPHRASE` environment variable.
-- Integration tests use `tests/workspace/` as a temp directory, cleaned up by a `#[ctor::dtor]` hook. CLI integration tests use `FERROCRYPT_PASSPHRASE` env var to supply passphrases non-interactively. Both integration and compatibility test binaries pull `symmetric_auto` / `hybrid_auto` / `generate_key_pair` shims from a shared `tests/common/mod.rs` module — these preserve the pre-0.3.0 positional-arg call shape around the new config API so the ~140 existing call sites don't churn.
+- Integration tests use `tests/workspace/` as a temp directory, cleaned up by a `#[ctor::dtor]` hook. CLI integration tests use `FERROCRYPT_PASSPHRASE` env var to supply passphrases non-interactively. Integration tests pull `symmetric_auto` / `hybrid_auto` / `generate_key_pair` shims from a shared `tests/common/mod.rs` module — these preserve a stable positional-arg call shape around the config API so existing test call sites don't churn. Low-level format mechanics (prefix encoding, header parsing, envelope unwrap, version/algorithm rejection, recipient decoding) are exercised by in-module unit tests (`src/symmetric.rs::tests`, `src/hybrid.rs::tests`, `src/format.rs::tests`, `src/common.rs::tests`).
 - `ENCRYPTED_EXTENSION` (`"fcr"`) is re-exported from `format.rs`.
 
 ## Non-Negotiable Rules

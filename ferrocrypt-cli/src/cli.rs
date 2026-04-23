@@ -29,9 +29,9 @@ const SUBCOMMAND_HELP: &str =
     long_about = "\
 Command-line interface for FerroCrypt.
 
-File formats and primitives:
-  Symmetric (v3.0): Argon2id -> HKDF-SHA3-256 -> XChaCha20-Poly1305
-  Hybrid    (v4.0): X25519 ECDH -> HKDF-SHA256 -> XChaCha20-Poly1305",
+File format v1 and primitives:
+  Symmetric: Argon2id -> HKDF-SHA3-256 -> XChaCha20-Poly1305
+  Hybrid:    X25519 ECDH -> HKDF-SHA3-256 -> XChaCha20-Poly1305",
     after_help = "\
 Examples:
   ferrocrypt sym -i secret.txt -o ./encrypted

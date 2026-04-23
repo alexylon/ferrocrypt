@@ -30,32 +30,32 @@ Cross-platform file encryption tool with CLI and desktop interfaces. Written in 
 
 FerroCrypt encrypts and decrypts files and directories in two modes:
 
-- **Symmetric** — Password-based. Uses XChaCha20-Poly1305 with Argon2id key derivation and HKDF-SHA3-256 subkey expansion. The same password encrypts and decrypts.
-- **Hybrid** — Public/private-key based. Combines X25519 key agreement with XChaCha20-Poly1305 data encryption. Each file gets a unique random key sealed with the recipient's public key. Decryption requires the matching private key and its passphrase. Hybrid mode provides confidentiality and integrity for the recipient, but it does not authenticate the sender; it is not a substitute for digital signatures.
+- **Symmetric** — Password-based. Uses XChaCha20-Poly1305 with Argon2id passphrase derivation and HKDF-SHA3-256 subkey expansion. Each file gets a unique random file key, wrapped by the passphrase-derived key; the same password encrypts and decrypts.
+- **Hybrid** — Public/private-key based. Combines X25519 key agreement with XChaCha20-Poly1305 data encryption. Each file gets a unique random file key sealed for the recipient's public key. Decryption requires the matching private key and its passphrase. Hybrid mode provides confidentiality and integrity for the recipient, but it does not authenticate the sender; it is not a substitute for digital signatures.
 
-Both modes produce `.fcr` files. Decryption is based on magic bytes in the file header, not the file extension — renaming a file does not change how FerroCrypt interprets it.
+Both modes produce `.fcr` files. Decryption is based on the 4-byte `FCR\0` magic in the file header, not the file extension — renaming a file does not change how FerroCrypt interprets it.
 
 For the byte-level on-disk format, see `ferrocrypt-lib/FORMAT.md` in the repository.
 
 ### What's stored in an encrypted file
 
-Every `.fcr` file starts with a header followed by the encrypted payload. The header contains only the metadata needed to begin decryption — no filenames, timestamps, or plaintext content is exposed. All header fields are triple-replicated for error correction.
+Every `.fcr` file starts with a header followed by the encrypted payload. The header contains only the metadata needed to begin decryption — no filenames, timestamps, or plaintext content is exposed. The 8-byte prefix (magic, version, type, extension length) is triple-replicated for error correction; the remaining header fields are authenticated by HMAC but not replicated.
 
 | File | Contents |
 |---|---|
-| **Symmetric `.fcr`** | Format identifier, version, Argon2id salt, HKDF salt, KDF parameters (memory cost, iterations, parallelism), stream nonce, HMAC authentication tag |
-| **Hybrid `.fcr`** | Format identifier, version, sealed key envelope (ephemeral public key + encrypted random key), stream nonce, HMAC authentication tag |
-| **`private.key`** | KDF parameters, Argon2id salt, AEAD nonce, authenticated extension region, passphrase-encrypted private key (the raw key is never stored unencrypted; the cleartext header and all cleartext body fields are bound as AEAD associated data so tampering fails authentication) |
-| **`public.key`** | Raw 32-byte X25519 public key (not secret). Can also be shared as a Bech32 `fcr1…` recipient string via the library API. |
+| **Symmetric `.fcr`** | 4-byte `FCR\0` magic, version, type, extension length, envelope (Argon2id salt + KDF parameters + wrap nonce + wrapped file key), extension region, stream nonce, HMAC authentication tag |
+| **Hybrid `.fcr`** | 4-byte `FCR\0` magic, version, type, extension length, envelope (ephemeral X25519 public key + wrap nonce + wrapped file key), extension region, stream nonce, HMAC authentication tag |
+| **`private.key`** | 8-byte header (magic, version, type, extension length), KDF parameters, Argon2id salt, AEAD nonce, extension region, passphrase-encrypted X25519 private key (the raw key is never stored unencrypted; the entire cleartext — header, KDF params, salt, nonce, extension region — is bound as AEAD associated data so tampering fails authentication) |
+| **`public.key`** | UTF-8 text file containing a single Bech32 `fcr1…` recipient string followed by a newline. The recipient string encodes a 1-byte algorithm identifier followed by the 32-byte X25519 public key (not secret). |
 
 ### Security
 
-- **Symmetric encryption:** XChaCha20-Poly1305 via the [`chacha20poly1305`](https://crates.io/crates/chacha20poly1305) crate ([audited by NCC Group](https://research.nccgroup.com/2020/02/26/public-report-rustcrypto-aes-gcm-and-chacha20poly1305-implementation-review/)), with Argon2id key derivation and HKDF-SHA3-256 subkey expansion
-- **Hybrid encryption:** X25519 ECDH key agreement via [`x25519-dalek`](https://crates.io/crates/x25519-dalek), HKDF-SHA256 envelope key derivation, XChaCha20-Poly1305 envelope encryption
-- HMAC-SHA3-256 header authentication — tampering is detected before payload decryption begins; in hybrid mode the envelope is opened first to recover the HMAC key
+- **Symmetric encryption:** XChaCha20-Poly1305 via the [`chacha20poly1305`](https://crates.io/crates/chacha20poly1305) crate ([audited by NCC Group](https://research.nccgroup.com/2020/02/26/public-report-rustcrypto-aes-gcm-and-chacha20poly1305-implementation-review/)), with Argon2id passphrase derivation and HKDF-SHA3-256 subkey expansion; each file gets a random file key wrapped by the passphrase-derived key
+- **Hybrid encryption:** X25519 ECDH key agreement via [`x25519-dalek`](https://crates.io/crates/x25519-dalek), HKDF-SHA3-256 wrap-key derivation, XChaCha20-Poly1305 envelope encryption; each file gets a random file key sealed for the recipient
+- HMAC-SHA3-256 header authentication — tampering is detected before payload decryption begins; the envelope is opened first to recover the file key, and the header HMAC key is derived from it
 - Streaming encryption — plaintext is streamed directly into the encryptor; no plaintext temporary archive is written to disk
 - Passphrases are handled via the `secrecy` crate (hidden from `Debug`/`Display`, zeroized on drop)
-- Triple-replicated headers with majority-vote decoding for error correction (see [Why triple replication?](#why-triple-replication) below)
+- Triple-replicated 8-byte prefix with majority-vote decoding and canonicity check for error correction (see [Why triple replication?](#why-triple-replication) below)
 - The current implementation preserves regular-file and directory permission bits through encrypt/decrypt round-trips on Unix. Setuid, setgid, and sticky bits are stripped on both archiving and extraction. This is current behavior rather than a cross-platform compatibility guarantee; on non-Unix platforms, permission metadata may be approximate
 - Symlink inputs are rejected; directory encryption does not follow symlinks, preventing unintended inclusion of files outside the selected tree. Directories containing symlinks or other special entries (sockets, FIFOs, devices) are rejected at encryption time. Hardlinks are archived as regular file contents; hardlink relationships are not preserved.
 - Directory extraction is hardened against local symlink and directory-component races on Linux and macOS. Every write inside the `.incomplete` working tree is rooted at a directory file descriptor and resolved via `openat`/`mkdirat` with `O_NOFOLLOW`, so a concurrent local attacker who swaps a path component for a symlink cannot redirect plaintext writes outside the destination tree. The extraction aborts with a typed error instead. Windows and non-Linux/non-macOS Unix targets use a path-based extraction path that is less strict against in-tree races.
@@ -65,23 +65,23 @@ Every `.fcr` file starts with a header followed by the encrypted payload. The he
 ### Limitations
 
 - **File metadata is not fully preserved.** FerroCrypt always preserves file contents and directory structure. The current implementation also preserves regular-file and directory permission bits on Unix, with setuid, setgid, and sticky bits stripped, but that behavior is best-effort rather than a stable cross-platform format guarantee. FerroCrypt does not preserve timestamps or ownership. On non-Unix platforms, permission handling is platform-limited and archive metadata may be approximate. Hardlink relationships are not preserved (hardlinked files are archived as independent copies). Symlinks and special entries cause an error at encryption time. Directory encryption is a convenience feature, not a full backup/archive format. If you need faithful filesystem backup/restore semantics, use a dedicated archiving tool and encrypt its output with FerroCrypt.
-- **No backward compatibility with older format versions.** The next release will use symmetric encrypted-file format v3.0, hybrid encrypted-file format v4.0, `public.key` v3, and `private.key` v4. This is a breaking change on `main` that has not yet shipped in a published crate release — see `CHANGELOG.md [Unreleased]` and `ferrocrypt-lib/FORMAT.md`. Files and keys produced by earlier versions (v0.1.x / v0.2.x on crates.io) cannot be decrypted or used by the new format family. Those releases use a different format family; in hybrid mode and key files they also use a different crypto stack (RSA/OpenSSL). If you still have data encrypted with an older version, decrypt it with that version first (available on crates.io), then re-encrypt once the new release ships.
+- **No backward compatibility with older format versions.** The next release will use a unified on-disk format v1 across `.fcr` files, `public.key`, and `private.key`. This is a breaking change on `main` that has not yet shipped in a published crate release — see `CHANGELOG.md [Unreleased]` and `ferrocrypt-lib/FORMAT.md`. Files and keys produced by earlier versions (v0.1.x / v0.2.x on crates.io) cannot be decrypted or used by the new format. Those releases use a different format family; in hybrid mode and key files they also use a different crypto stack (RSA/OpenSSL). If you still have data encrypted with an older version, decrypt it with that version first (available on crates.io), then re-encrypt once the new release ships.
 
 ### Why triple replication?
 
-The file header holds the salts, nonces, and KDF parameters needed to begin decryption. If the header can't be parsed, the tool can't distinguish a wrong password from a corrupted file from an unsupported format — every failure looks the same. The encrypted payload is much larger and far more likely to be damaged on unreliable storage, so header replication usually does not save the file. What it saves is the **diagnostic**: by correcting single-copy header corruption, the user still gets a specific error message:
+The 8-byte header prefix (`FCR\0` magic, version, type, extension length) selects the parser that reads the rest of the file. If the prefix can't be parsed, the tool can't distinguish a wrong password from a corrupted file from an unsupported format — every failure looks the same. The encrypted payload is much larger and far more likely to be damaged on unreliable storage, so replication usually does not save the file. What it saves is the **diagnostic**: by correcting single-copy prefix corruption, the user still gets a specific error message:
 
-- "Newer file format (vX.Y). Upgrade FerroCrypt." — instead of failing to identify the format at all
-- "Unknown encryption type in FerroCrypt file: 0xNN" — instead of treating the file as plaintext
+- "Newer file format (v2). Upgrade FerroCrypt." — instead of failing to identify the format at all
+- "Unknown encrypted file type: 0xNN" — instead of treating the file as plaintext
 - "File has invalid decrypt settings (N KiB memory)" / "Needs N KiB to decrypt; limit is M KiB" — instead of silently allocating unbounded memory
-- "Decryption failed: wrong passphrase or tampered file" (symmetric) / "Decryption failed: wrong private key or tampered file" (hybrid) — instead of not knowing whether the credential is wrong or the file header is damaged
-- "Encrypted file is truncated" / "Payload authentication failed: data tampered or corrupted" — instead of not reaching payload decryption at all
+- "Decryption failed: wrong passphrase or tampered envelope" (symmetric) / "Decryption failed: wrong private key or tampered envelope" (hybrid) — instead of not knowing whether the credential is wrong or the envelope is damaged
+- "Encrypted file is truncated" / "Payload authentication failed: data tampered or corrupted" / "Encrypted file has unexpected trailing data" — instead of not reaching payload decryption at all
 
-Without a readable header, all of these collapse into a single generic "invalid format" error.
+Without a readable prefix, all of these collapse into a single generic "invalid format" error.
 
-The mechanism is deliberately simple: store three identical copies of each header field and pick the majority value per byte. If two out of three copies agree, the correct value is recovered. This gives 33% corruption tolerance across the stored header bytes — one copy can be completely destroyed and the header still parses correctly.
+The mechanism is deliberately simple: store three identical copies of the 8-byte prefix back-to-back and pick the majority value per byte; after decoding, the result is re-encoded and compared against the raw bytes to ensure canonical form before HMAC verification. If two out of three copies agree, the correct value is recovered. This gives 33% corruption tolerance across the stored prefix bytes — one copy can be completely destroyed and the prefix still parses correctly. Replication is limited to the prefix; the rest of the header is covered only by HMAC, which is sufficient once the prefix has selected the right parser.
 
-**Why not Reed-Solomon?** For FerroCrypt’s header, implementation simplicity matters more than maximizing error-correction strength. The header is small, authenticated, and only needs to remain readable enough to identify the format, parse decryption parameters, and produce specific error messages. Triple replication keeps the implementation tiny and easy to audit: plain byte comparison, no Galois field arithmetic, no polynomial machinery, and very little bug surface.
+**Why not Reed-Solomon?** For FerroCrypt’s prefix, implementation simplicity matters more than maximizing error-correction strength. The prefix is tiny, authenticated via canonical re-encoding, and only needs to remain readable enough to identify the format, parse decryption parameters, and produce specific error messages. Triple replication keeps the implementation tiny and easy to audit: plain byte comparison, no Galois field arithmetic, no polynomial machinery, and very little bug surface.
 
 ### Project Structure
 
@@ -271,13 +271,15 @@ A password strength indicator (based on [Proton Pass](https://github.com/protonp
 
 ## Decryption errors
 
-FerroCrypt distinguishes a few distinct decryption-failure stages so that a failed decrypt tells you what actually went wrong:
+FerroCrypt distinguishes several distinct decryption-failure stages so that a failed decrypt tells you what actually went wrong:
 
 - **Private key unlock failed: wrong passphrase or tampered file** — The hybrid private key file failed AEAD authentication. Either the passphrase does not decrypt it, or one of the file's cleartext fields (header, KDF params, salt, nonce, or extension region) has been tampered with since the file was written. The AEAD primitive cannot distinguish the two cases. Retry with the correct passphrase first; if that still fails, regenerate the key pair and re-encrypt.
-- **Decryption failed: wrong passphrase or tampered file** (symmetric) — The passphrase does not unlock the file, or the header has been modified. No plaintext has been produced.
-- **Decryption failed: wrong private key or tampered file** (hybrid) — The supplied private key does not match the key pair the file was encrypted for, or the header has been modified. No plaintext has been produced.
+- **Decryption failed: wrong passphrase or tampered envelope** (symmetric) — The passphrase does not unwrap the file key, or the envelope bytes have been modified. No plaintext has been produced.
+- **Decryption failed: wrong private key or tampered envelope** (hybrid) — The supplied private key does not match the key pair the file was encrypted for, or the envelope bytes have been modified. No plaintext has been produced.
+- **Decryption failed: header tampered after unlock** — The envelope unlocked successfully, but the header HMAC does not match. The header's non-replicated fields (envelope, stream nonce, extension region) have been tampered with or corrupted since writing.
 - **Payload authentication failed: data tampered or corrupted** — The header authenticated successfully, but a later ciphertext chunk failed its authentication tag. This usually means the file has been corrupted or truncated partway through, or an attacker has modified bytes after the header. During streaming decryption, earlier chunks that authenticated successfully may already have been written to disk under an `.incomplete` working directory before the failing chunk was reached.
 - **Encrypted file is truncated** — The encrypted stream ends before its final authenticated chunk, usually because of a partial download or an interrupted copy.
+- **Encrypted file has unexpected trailing data** — The final authenticated chunk decrypted successfully, but additional bytes follow the payload. The extra bytes are not part of the authenticated stream and may indicate file concatenation or tampering.
 
 None of these failures produce a file at the final output path. Partial plaintext may have been written under a sibling `.incomplete` working directory (FerroCrypt leaves it there on purpose, because when ciphertext is damaged it may hold the only recoverable data). A retry starts fresh once that `.incomplete` directory is removed.
 

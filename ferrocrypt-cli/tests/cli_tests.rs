@@ -185,8 +185,8 @@ fn test_cli_symmetric_wrong_password() {
     assert!(!decrypt_output.status.success());
     let stderr = String::from_utf8_lossy(&decrypt_output.stderr);
     assert!(
-        stderr.contains("Decryption failed: wrong passphrase or tampered file"),
-        "expected typed header-auth message on stderr, got: {stderr}"
+        stderr.contains("Decryption failed: wrong passphrase or tampered envelope"),
+        "expected typed envelope-unlock message on stderr, got: {stderr}"
     );
     assert!(
         !stderr.contains("aead::Error"),
@@ -223,14 +223,18 @@ fn test_cli_keygen() {
     assert!(keys_dir.join("public.key").exists());
 
     // Verify keys have expected sizes.
-    // private.key v4: 8-byte header + 118-byte fixed body (kdf 12 + salt 32
-    // + nonce 24 + ext_len 2 + ciphertext+tag 48) + 0-byte ext_bytes = 126.
-    // public.key  v3: 8-byte header + 32-byte raw key = 40.
+    // private.key v1: 9-byte header (magic 4 + version 1 + type 1 +
+    // algorithm 1 + ext_len 2) + 68-byte fixed body (argon2_salt 32 +
+    // kdf_params 12 + wrap_nonce 24) + 0-byte ext_bytes + 48-byte
+    // wrapped_privkey (32 plaintext + 16 tag) = 125.
+    // public.key v1: text file "fcr1…\n" — HRP(3) + sep(1) + data(53)
+    // + checksum(6) + LF(1) = 64 bytes for a 33-byte Bech32 payload
+    // (1-byte algorithm + 32-byte X25519 public key).
     let private_key_size = fs::metadata(keys_dir.join("private.key")).unwrap().len();
     let public_key_size = fs::metadata(keys_dir.join("public.key")).unwrap().len();
 
-    assert_eq!(private_key_size, 126);
-    assert_eq!(public_key_size, 40);
+    assert_eq!(private_key_size, 125);
+    assert_eq!(public_key_size, 64);
 }
 
 #[test]

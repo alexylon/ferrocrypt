@@ -257,12 +257,10 @@ pub fn encryption_base_name(path: impl AsRef<Path>) -> Result<String, CryptoErro
     }
 }
 
-pub fn sha3_256_hash(data: &[u8]) -> Result<[u8; 32], CryptoError> {
+pub fn sha3_256_hash(data: &[u8]) -> [u8; 32] {
     let mut hasher = Sha3_256::new();
     hasher.update(data);
-    let digest: [u8; 32] = hasher.finalize().as_slice().try_into()?;
-
-    Ok(digest)
+    hasher.finalize().into()
 }
 
 pub fn hex_encode(bytes: &[u8]) -> String {
@@ -680,6 +678,28 @@ impl<R: Read> DecryptReader<R> {
     ///   [`CryptoError::PayloadTampered`]. This is the correct
     ///   outcome — we cannot distinguish a mid-chunk truncation from a
     ///   tampered tail, and both must fail closed.
+    ///
+    /// **Trailing-data probe.** After `decrypt_last_in_place` succeeds we
+    /// probe the inner reader for one additional byte; a positive return
+    /// means the underlying stream has bytes **past** the final
+    /// authenticated chunk and surfaces as [`StreamError::ExtraData`] →
+    /// [`CryptoError::ExtraDataAfterPayload`]. In practice STREAM-BE32's
+    /// per-chunk nonce binding already rejects any naive append as an
+    /// AEAD-tamper failure (the attacker cannot craft a valid "last"
+    /// chunk), and the `filled < ENCRYPTED_CHUNK_SIZE` branch only fires
+    /// after the underlying reader signalled EOF inside the read loop —
+    /// so for a well-behaved [`Read`] implementation the probe never
+    /// triggers. The probe is kept as defense-in-depth:
+    /// - it closes the last gap against pathological readers that return
+    ///   `Ok(0)` and then later produce more bytes (non-blocking sockets,
+    ///   mis-implemented `Take`-style wrappers);
+    /// - it promotes a whole class of "payload followed by garbage" inputs
+    ///   from the generic `PayloadTampered` bucket to the more specific
+    ///   `ExtraDataAfterPayload` bucket for upstream diagnostics;
+    /// - it pins the spec-declared error variant in the actual read path
+    ///   so future format-version changes that weaken the cryptographic
+    ///   binding do not silently regress to missing the trailing-data
+    ///   case.
     fn fill_buffer(&mut self) -> io::Result<()> {
         const ENCRYPTED_CHUNK_SIZE: usize = BUFFER_SIZE + TAG_SIZE;
 
@@ -730,6 +750,20 @@ impl<R: Read> DecryptReader<R> {
                     stream_io_error(io::ErrorKind::InvalidData, StreamError::DecryptAead)
                 })?;
             self.done = true;
+
+            // Defense-in-depth trailing-data probe: see the doc comment
+            // above. A single-byte read is enough because any positive
+            // return value means "the reader claims EOF is not yet
+            // reached" — we don't need to know how much extra data there
+            // is, only that there is some.
+            let mut probe = [0u8; 1];
+            let n = self.input.read(&mut probe)?;
+            if n > 0 {
+                return Err(stream_io_error(
+                    io::ErrorKind::InvalidData,
+                    StreamError::ExtraData,
+                ));
+            }
         }
 
         self.pos = 0;
@@ -936,7 +970,7 @@ mod tests {
         // The first chunk was fully authenticated before truncation was
         // discovered, so its plaintext must have been served before the
         // error. Bounds the unauthenticated-output property under truncation.
-        assert_eq!(out.as_slice(), plaintext.as_slice());
+        assert_eq!(out.as_slice(), &plaintext[..BUFFER_SIZE]);
     }
 
     /// Flip one byte in a late ciphertext chunk. The reader should return the
@@ -1009,6 +1043,121 @@ mod tests {
         assert_eq!(out.as_slice(), &plaintext[..BUFFER_SIZE]);
     }
 
+    /// Reader that first yields the "legitimate" ciphertext segment (the
+    /// valid stream, as written by `EncryptWriter::finish`) signalling EOF
+    /// at its end, then — on the *next* `read()` call — returns additional
+    /// bytes. This is exactly the pathological pattern the `ExtraData`
+    /// probe defends against: a non-blocking socket or Take-style wrapper
+    /// that returns `Ok(0)` prematurely and then later produces more data.
+    ///
+    /// A plain `&[u8]` reader cannot exercise this branch because its
+    /// read loop reads all remaining bytes in one pass and lets AEAD
+    /// authentication reject the trailing bytes as `PayloadTampered`.
+    struct LegitThenExtraReader<'a> {
+        legit: &'a [u8],
+        extra: &'a [u8],
+        legit_pos: usize,
+        extra_pos: usize,
+        /// Flips to `true` the first time we hit EOF inside `legit`, so
+        /// the subsequent `read` call is the one that starts dispensing
+        /// bytes from `extra`.
+        legit_exhausted: bool,
+    }
+
+    impl<'a> LegitThenExtraReader<'a> {
+        fn new(legit: &'a [u8], extra: &'a [u8]) -> Self {
+            Self {
+                legit,
+                extra,
+                legit_pos: 0,
+                extra_pos: 0,
+                legit_exhausted: false,
+            }
+        }
+    }
+
+    impl<'a> Read for LegitThenExtraReader<'a> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if !self.legit_exhausted {
+                let remaining = self.legit.len() - self.legit_pos;
+                if remaining == 0 {
+                    // First EOF on the legit segment: caller (fill_buffer
+                    // inner loop) will treat this as "done" and proceed
+                    // into decrypt_last. The probe then calls read again
+                    // and we start dispensing `extra`.
+                    self.legit_exhausted = true;
+                    return Ok(0);
+                }
+                let n = cmp::min(buf.len(), remaining);
+                buf[..n].copy_from_slice(&self.legit[self.legit_pos..self.legit_pos + n]);
+                self.legit_pos += n;
+                return Ok(n);
+            }
+
+            let remaining = self.extra.len() - self.extra_pos;
+            if remaining == 0 {
+                return Ok(0);
+            }
+            let n = cmp::min(buf.len(), remaining);
+            buf[..n].copy_from_slice(&self.extra[self.extra_pos..self.extra_pos + n]);
+            self.extra_pos += n;
+            Ok(n)
+        }
+    }
+
+    /// Pathological-reader trailing-data case: a reader that returns the
+    /// valid ciphertext, signals EOF, and then produces extra bytes.
+    /// `fill_buffer` treats the EOF as the end of the final chunk and
+    /// runs `decrypt_last_in_place` successfully; the trailing-data probe
+    /// then catches the stray bytes and rejects the stream with
+    /// [`StreamError::ExtraData`]. Locks in the L3 defense-in-depth
+    /// wiring so the dedicated error variant cannot silently regress to
+    /// unreachable code.
+    #[test]
+    fn streaming_aead_extra_data_after_final_chunk_rejected() {
+        // Use multi-chunk plaintext so the first chunk is served through
+        // `Read` before the probe fires. On a single-chunk plaintext the whole
+        // authenticated payload would be dropped when the probe returns Err (the
+        // plaintext in `self.chunk` is only dispensed by subsequent
+        // `read()` calls, and `fill_buffer`'s Err propagates first) —
+        // that's correct fail-closed behaviour but makes the partial-
+        // output assertion trivially empty.
+        let plaintext: Vec<u8> = (0..(BUFFER_SIZE + 500)).map(|i| (i % 251) as u8).collect();
+        let ciphertext = encrypt_to_vec(&plaintext);
+        let trailing = b"garbage-appended-by-attacker";
+
+        let reader_wrapper = LegitThenExtraReader::new(&ciphertext, trailing);
+        // `DecryptReader` requires the reader type to be `Read`; the
+        // wrapper above satisfies that contract. We cannot reuse
+        // `drain_decrypt_reader` here because it's hard-coded to
+        // `&[u8]`; inline the drain loop instead.
+        let mut reader = DecryptReader::new(fresh_decryptor(), reader_wrapper);
+        let mut out = Vec::new();
+        let mut scratch = [0u8; 4096];
+        let err = loop {
+            match reader.read(&mut scratch) {
+                Ok(0) => panic!("expected ExtraData error, got clean EOF"),
+                Ok(n) => out.extend_from_slice(&scratch[..n]),
+                Err(e) => break e,
+            }
+        };
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let marker = err
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<StreamError>())
+            .expect("expected StreamError marker");
+        assert!(
+            matches!(marker, StreamError::ExtraData),
+            "expected StreamError::ExtraData, got {marker:?}"
+        );
+        // The first chunk (BUFFER_SIZE bytes) is fully authenticated and
+        // served through `read()` before the second `fill_buffer` call
+        // decrypts the final chunk and the probe fires. The final chunk's
+        // 500 authenticated plaintext bytes are dropped on the Err path —
+        // that's the correct fail-closed outcome for a tainted stream.
+        assert_eq!(out.as_slice(), &plaintext[..BUFFER_SIZE]);
+    }
+
     #[test]
     fn test_encryption_base_name_file() {
         let stem = encryption_base_name("path/to/file.txt").unwrap();
@@ -1033,21 +1182,21 @@ mod tests {
     #[test]
     fn test_sha3_hash_consistency() {
         let data = b"test data for hashing";
-        let hash1 = sha3_256_hash(data).unwrap();
-        let hash2 = sha3_256_hash(data).unwrap();
+        let hash1 = sha3_256_hash(data);
+        let hash2 = sha3_256_hash(data);
         assert_eq!(hash1, hash2);
     }
 
     #[test]
     fn test_sha3_hash_different_inputs() {
-        let hash1 = sha3_256_hash(b"data1").unwrap();
-        let hash2 = sha3_256_hash(b"data2").unwrap();
+        let hash1 = sha3_256_hash(b"data1");
+        let hash2 = sha3_256_hash(b"data2");
         assert_ne!(hash1, hash2);
     }
 
     #[test]
     fn test_sha3_hash_empty_input() {
-        let hash = sha3_256_hash(b"").unwrap();
+        let hash = sha3_256_hash(b"");
         assert_eq!(hash.len(), 32);
     }
 

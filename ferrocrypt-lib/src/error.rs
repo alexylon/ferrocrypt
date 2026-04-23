@@ -30,18 +30,26 @@ use thiserror::Error;
 /// # The one escape hatch: [`CryptoError::InvalidInput`]
 ///
 /// One variant — [`CryptoError::InvalidInput`] — carries a free-form
-/// `String`. It exists because the tar-archive layer inside the library
-/// genuinely needs to surface *which archive entry* triggered a
-/// fail-closed rejection ("symlink entry `foo/bar`", "unsafe path in
-/// archive `../escape.txt`", "archive mixes file and directory at root
-/// `mydir`", etc.). A malformed or attacker-crafted `.fcr` can hold
-/// thousands of entries; without the entry path embedded in the error,
-/// a developer debugging a failing extraction would see only "something
-/// in this archive is bad" and be unable to locate it. Typing the
-/// entry path via structured variants would require ~25 new variants
-/// each carrying a `PathBuf`, which reintroduces the exact "library
-/// carries per-operation context" problem the rest of the type
-/// deliberately avoids.
+/// `String`. It exists because two layers inside the library genuinely
+/// need to surface *which* caller-supplied value triggered a fail-closed
+/// rejection:
+///
+/// - **tar-archive layer**: "symlink entry `foo/bar`", "unsafe path in
+///   archive `../escape.txt`", "archive mixes file and directory at
+///   root `mydir`", etc. A malformed or attacker-crafted `.fcr` can
+///   hold thousands of entries; without the entry path embedded in the
+///   error, a developer debugging a failing extraction would see only
+///   "something in this archive is bad" and be unable to locate it.
+/// - **Bech32 recipient parser**: reports the offending recipient
+///   string ("Invalid recipient string: `fcr1…`", "Unexpected recipient
+///   prefix…", "Recipient string must be lowercase"). Callers pass
+///   recipient strings through as opaque values, so the parser has to
+///   echo the input back for the user to spot a typo.
+///
+/// Typing these via structured variants would require dozens of new
+/// variants each carrying a `PathBuf` or `String`, which reintroduces
+/// the exact "library carries per-operation context" problem the rest
+/// of the type deliberately avoids.
 ///
 /// `InvalidInput` is therefore the **designated heterogeneous
 /// caller-input bucket**. It is *not* where paths from the user's

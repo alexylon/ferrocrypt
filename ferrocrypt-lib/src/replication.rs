@@ -1,44 +1,72 @@
+//! Triple-replication encoder and decoder for the 8-byte `.fcr`
+//! logical prefix.
+//!
+//! v1 replicates exactly one field — the 8-byte on-disk header
+//! prefix — so the encoder and decoder here only need to handle
+//! even-length payloads. The wire format is:
+//!
+//! ```text
+//! [ pad(0x00) | pad(0x00) | pad(0x00) | copy_0 | copy_1 | copy_2 ]
+//! ```
+//!
+//! The three leading pad bytes are always `0x00` per FORMAT.md §5.1.
+//! Older drafts used the leading pad bytes as an odd-length padding
+//! indicator; v1 never replicates odd-length payloads, so the pad
+//! bytes are literal zeros and the odd-length machinery has been
+//! removed. Non-zero pad bytes break canonicity and are rejected by
+//! [`decode_and_canonicalize_prefix`](crate::format::decode_and_canonicalize_prefix).
+
 use crate::CryptoError;
-use crate::error::FormatDefect;
 
-/// Calculates the size of triple-replicated data for a given original data size.
-/// The encoded format is: [pad, pad, pad, copy_0, copy_1, copy_2]
-/// where each copy is even-length (zero-padded if input is odd-length)
-/// and the padding indicator is itself triple-replicated.
+/// Encoded size for a replicated payload of `original_size` bytes.
+///
+/// v1 only replicates the 8-byte `.fcr` logical prefix; callers MUST
+/// pass an even value. `build_encoded_header_prefix` is the single
+/// in-tree caller.
 pub const fn encoded_size(original_size: usize) -> usize {
-    let padded_size = if !original_size.is_multiple_of(2) {
-        original_size + 1
-    } else {
-        original_size
-    };
-
-    3 + (padded_size * 3)
+    3 + original_size * 3
 }
 
-/// Encodes data using triple replication for error correction.
-/// Wire format: [pad, pad, pad, copy_0, copy_1, copy_2]
+/// Triple-replicates `data` with three zero pad bytes prepended. The
+/// output is exactly [`encoded_size(data.len())`](encoded_size) bytes.
+///
+/// Callers MUST pass even-length `data`. The single v1 call site
+/// passes the 8-byte logical prefix. `debug_assert!` pins the
+/// invariant so a future caller that passes odd-length data fails
+/// loudly in tests instead of silently producing output that would be
+/// rejected at decode time.
 pub fn encode(data: &[u8]) -> Vec<u8> {
-    let mut padded = data.to_vec();
-    let padding_byte = if !data.len().is_multiple_of(2) {
-        padded.push(0);
-        1u8
-    } else {
-        0u8
-    };
-
-    let mut output = Vec::with_capacity(3 + padded.len() * 3);
-    output.push(padding_byte);
-    output.push(padding_byte);
-    output.push(padding_byte);
-    output.extend_from_slice(&padded);
-    output.extend_from_slice(&padded);
-    output.extend_from_slice(&padded);
+    debug_assert!(
+        data.len().is_multiple_of(2),
+        "replication::encode: v1 only replicates even-length payloads"
+    );
+    let mut output = Vec::with_capacity(3 + data.len() * 3);
+    output.push(0);
+    output.push(0);
+    output.push(0);
+    output.extend_from_slice(data);
+    output.extend_from_slice(data);
+    output.extend_from_slice(data);
     output
 }
 
-/// Decodes triple-replicated data using majority vote per byte position.
-/// Corrects any single-copy corruption at each byte, including the
-/// padding indicator.
+/// Majority-vote decodes a triple-replicated payload, corrects
+/// single-copy bit flips at every byte position, and returns the
+/// recovered logical bytes.
+///
+/// Structural checks:
+/// - `data.len() >= 3` (room for three pad bytes);
+/// - `(data.len() - 3) % 3 == 0` (payload splits evenly into three
+///   copies).
+///
+/// Leading pad-byte inspection is deliberately NOT a rejection point
+/// here: callers that need canonicity (writers emit three zero pads,
+/// any non-zero pad breaks canonicity) verify it by re-encoding and
+/// comparing on-disk bytes — see
+/// [`crate::format::decode_and_canonicalize_prefix`]. The fuzz target
+/// drives this function on arbitrary input, so keeping `decode`
+/// permissive about pad bytes means fuzzing exercises the
+/// majority-vote core without pre-filtering canonical inputs.
 pub fn decode(data: &[u8]) -> Result<Vec<u8>, CryptoError> {
     if data.len() < 3 {
         return Err(CryptoError::InvalidInput(
@@ -46,10 +74,7 @@ pub fn decode(data: &[u8]) -> Result<Vec<u8>, CryptoError> {
         ));
     }
 
-    let (p0, p1, p2) = (data[0], data[1], data[2]);
-    let padding_byte = if p0 == p1 || p0 == p2 { p0 } else { p1 };
     let remaining = &data[3..];
-
     if !remaining.len().is_multiple_of(3) {
         return Err(CryptoError::InvalidInput(
             "Incorrect encoded bytes length".to_string(),
@@ -61,39 +86,37 @@ pub fn decode(data: &[u8]) -> Result<Vec<u8>, CryptoError> {
     let copy_1 = &remaining[shard_bytes..2 * shard_bytes];
     let copy_2 = &remaining[2 * shard_bytes..3 * shard_bytes];
 
-    // Majority vote across 3 copies per byte position
+    // Majority vote across 3 copies per byte position.
     let mut result = Vec::with_capacity(shard_bytes);
     for i in 0..shard_bytes {
         let (a, b, c) = (copy_0[i], copy_1[i], copy_2[i]);
         result.push(if a == b || a == c { a } else { b });
     }
 
-    if padding_byte == 1 && !result.is_empty() {
-        result.pop();
-    }
-
     Ok(result)
-}
-
-/// Decodes and validates the output is exactly `expected_len` bytes.
-/// Prevents panics from indexing decoded output before HMAC verification.
-///
-/// The v1 library code no longer calls this directly (only the 8-byte
-/// prefix is replicated, and its decode goes through
-/// `format::decode_and_canonicalize_prefix`). Kept as a public utility
-/// for fuzz targets and re-exported via `fuzz_exports`.
-#[allow(dead_code)]
-pub fn decode_exact(data: &[u8], expected_len: usize) -> Result<Vec<u8>, CryptoError> {
-    let decoded = decode(data)?;
-    if decoded.len() != expected_len {
-        return Err(CryptoError::InvalidFormat(FormatDefect::CorruptedHeader));
-    }
-    Ok(decoded)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encode_decode_8_byte_prefix() {
+        let original: [u8; 8] = [b'F', b'C', b'R', 0, 1, b'S', 0, 0];
+        let encoded = encode(&original);
+        assert_eq!(encoded.len(), encoded_size(original.len()));
+        assert_eq!(&encoded[0..3], &[0, 0, 0]); // pads always zero
+        let decoded = decode(&encoded).unwrap();
+        assert_eq!(decoded.as_slice(), original.as_slice());
+    }
+
+    #[test]
+    fn encode_emits_three_zero_pads() {
+        // Pads are always 0 for any even-length input — v1 has no
+        // odd-length replicated fields.
+        let encoded = encode(&[0xAA; 8]);
+        assert_eq!(&encoded[0..3], &[0, 0, 0]);
+    }
 
     #[test]
     fn encode_decode_even_length_data() {
@@ -105,29 +128,6 @@ mod tests {
         let encoded = encode(&original);
         assert_eq!(encoded.len(), encoded_size(original.len()));
 
-        let decoded = decode(&encoded).unwrap();
-        assert_eq!(original.to_vec(), decoded);
-    }
-
-    #[test]
-    fn encode_decode_odd_length_data() {
-        let original = [10, 20, 30, 40, 50];
-
-        let encoded = encode(&original);
-        // Odd length (5) gets padded to 6, so encoded = 3 + 6*3 = 21
-        assert_eq!(encoded.len(), encoded_size(original.len()));
-        assert_eq!(encoded[0], 1); // padding bytes should be 1
-        assert_eq!(encoded[1], 1);
-        assert_eq!(encoded[2], 1);
-
-        let decoded = decode(&encoded).unwrap();
-        assert_eq!(original.to_vec(), decoded);
-    }
-
-    #[test]
-    fn encode_decode_single_byte() {
-        let original = [42u8];
-        let encoded = encode(&original);
         let decoded = decode(&encoded).unwrap();
         assert_eq!(original.to_vec(), decoded);
     }
@@ -149,13 +149,13 @@ mod tests {
 
         let mut encoded = encode(&original);
 
-        // Corrupt bytes in the first copy (indices 3..35)
+        // Corrupt bytes in the first copy (indices 3..35).
         encoded[3] = 0xFF;
         encoded[12] = 0xFF;
         encoded[22] = 0xFF;
         encoded[32] = 0xFF;
 
-        // Other two copies should outvote the corrupted one
+        // Other two copies should outvote the corrupted one.
         let decoded = decode(&encoded).unwrap();
         assert_eq!(original.to_vec(), decoded);
     }
@@ -169,12 +169,12 @@ mod tests {
 
         let mut encoded = encode(&original);
 
-        // Corrupt bytes in the second copy (indices 35..67)
+        // Corrupt bytes in the second copy (indices 35..67).
         encoded[35] = 0xFF;
         encoded[42] = 0xFF;
         encoded[52] = 0xFF;
 
-        // First + third copies should outvote the corrupted second
+        // First + third copies should outvote the corrupted second.
         let decoded = decode(&encoded).unwrap();
         assert_eq!(original.to_vec(), decoded);
     }
@@ -193,53 +193,33 @@ mod tests {
 
     #[test]
     fn decode_invalid_length_returns_error() {
-        // After removing the 3 padding bytes, remaining length must be divisible by 3
+        // After removing the 3 padding bytes, remaining length must be divisible by 3.
         let result = decode(&[0, 0, 0, 1, 2, 3, 4]);
         assert!(result.is_err());
     }
 
     #[test]
+    fn decode_permissive_about_nonzero_pads() {
+        // `decode` itself does not enforce zero pads — that invariant
+        // is enforced by the canonicity check in
+        // `format::decode_and_canonicalize_prefix`. Keeping decode
+        // permissive lets the fuzz harness exercise the majority-vote
+        // core on arbitrary inputs without the pad check filtering
+        // them out first.
+        let mut encoded = encode(&[0xAAu8; 8]);
+        encoded[0] = 0xFF;
+        encoded[1] = 0xFF;
+        encoded[2] = 0xFF;
+        let decoded = decode(&encoded).unwrap();
+        assert_eq!(decoded, vec![0xAA; 8]);
+    }
+
+    #[test]
     fn encoded_size_calculation() {
-        // Even: 32 -> 3 + 32*3 = 99
+        // v1 only calls this for the 8-byte prefix, but the helper
+        // stays valid for any even-length input.
+        assert_eq!(encoded_size(8), 27);
         assert_eq!(encoded_size(32), 99);
-        // Odd: 5 -> padded to 6 -> 3 + 6*3 = 21
-        assert_eq!(encoded_size(5), 21);
-        // Even: 24 -> 3 + 24*3 = 75
         assert_eq!(encoded_size(24), 75);
-        // Odd: 19 -> padded to 20 -> 3 + 20*3 = 63
-        assert_eq!(encoded_size(19), 63);
-    }
-
-    #[test]
-    fn decode_exact_wrong_length_returns_error() {
-        let original = [1u8; 32];
-        let mut encoded = encode(&original);
-        // Corrupt 2 of 3 padding bytes to make majority vote pick 1,
-        // causing decode to pop a byte and return 31 instead of 32
-        encoded[0] = 1;
-        encoded[1] = 1;
-        let result = decode_exact(&encoded, 32);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn reconstruct_with_corrupted_padding_byte() {
-        let original = [10, 20, 30, 40, 50]; // odd-length, padding byte = 1
-        let mut encoded = encode(&original);
-        assert_eq!(encoded[0], 1);
-
-        // Corrupt one of the 3 padding bytes — majority vote recovers
-        encoded[0] = 0;
-        let decoded = decode_exact(&encoded, original.len()).unwrap();
-        assert_eq!(decoded, original.to_vec());
-    }
-
-    #[test]
-    fn decode_exact_correct_length() {
-        let original = [1u8; 32];
-        let encoded = encode(&original);
-        let decoded = decode_exact(&encoded, 32).unwrap();
-        assert_eq!(decoded.len(), 32);
-        assert_eq!(decoded, original.to_vec());
     }
 }

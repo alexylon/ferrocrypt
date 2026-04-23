@@ -316,7 +316,10 @@ pub fn decrypt_file(
     // 8. TLV canonicity, after authentication.
     validate_tlv(&ext_bytes)?;
 
-    // 9. STREAM payload.
+    // 9. STREAM payload. (The hybrid path numbers 1..=9 because
+    // steps 3..=5 — private-key unlock, X25519 ECDH, envelope unwrap —
+    // expand what the symmetric FORMAT.md §4.8 path collapses into a
+    // single "unwrap file_key" step.)
     on_event(&ProgressEvent::Decrypting);
     let cipher = XChaCha20Poly1305::new(payload_key.as_ref().into());
     let stream_decryptor = stream::DecryptorBE32::from_aead(cipher, stream_nonce.as_ref().into());
@@ -480,6 +483,28 @@ pub fn generate_key_pair(
     on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<(PathBuf, PathBuf), CryptoError> {
     fs::create_dir_all(output_dir)?;
+
+    // Existence pre-check BEFORE Argon2id so re-running `keygen` against
+    // a populated directory returns a helpful error in milliseconds
+    // instead of after ~1 GiB / multi-second KDF work. The atomic
+    // no-clobber rename at `finalize_file` below is still what actually
+    // guarantees we never overwrite an existing key; this check is just
+    // a fast-path user-experience win.
+    let private_key_path = output_dir.join(PRIVATE_KEY_FILENAME);
+    let public_key_path = output_dir.join(PUBLIC_KEY_FILENAME);
+    if private_key_path.exists() {
+        return Err(CryptoError::InvalidInput(format!(
+            "Key file already exists: {}",
+            private_key_path.display()
+        )));
+    }
+    if public_key_path.exists() {
+        return Err(CryptoError::InvalidInput(format!(
+            "Key file already exists: {}",
+            public_key_path.display()
+        )));
+    }
+
     on_event(&ProgressEvent::GeneratingKeyPair);
 
     let private_key = StaticSecret::random_from_rng(OsRng);
@@ -532,22 +557,6 @@ pub fn generate_key_pair(
             CryptoError::InternalInvariant("internal error: wrapped private key size mismatch")
         })?;
 
-    let private_key_path = output_dir.join(PRIVATE_KEY_FILENAME);
-    let public_key_path = output_dir.join(PUBLIC_KEY_FILENAME);
-
-    if private_key_path.exists() {
-        return Err(CryptoError::InvalidInput(format!(
-            "Key file already exists: {}",
-            private_key_path.display()
-        )));
-    }
-    if public_key_path.exists() {
-        return Err(CryptoError::InvalidInput(format!(
-            "Key file already exists: {}",
-            public_key_path.display()
-        )));
-    }
-
     // Write public.key (text file, `fcr1…\n`). Public key isn't secret
     // so permissions relax to 0o644 on Unix.
     let recipient_string = encode_recipient_string(public_key.as_bytes())?;
@@ -568,12 +577,21 @@ pub fn generate_key_pair(
 
     // Write private.key. If this fails, clean up the public.key we
     // just wrote (public keys are not secret, but leaving orphaned
-    // output is unfriendly).
+    // output is unfriendly). The `tempfile` 3.x default on Unix already
+    // uses 0o600, but we set it explicitly so the permission invariant
+    // is visible here and cannot silently regress if the upstream
+    // default ever changes.
     let private_write: Result<(), CryptoError> = (|| {
-        let mut private_tmp = tempfile::Builder::new()
+        let mut private_builder = tempfile::Builder::new();
+        private_builder
             .prefix(".ferrocrypt-privkey-")
-            .suffix(".tmp")
-            .tempfile_in(output_dir)?;
+            .suffix(".tmp");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            private_builder.permissions(fs::Permissions::from_mode(0o600));
+        }
+        let mut private_tmp = private_builder.tempfile_in(output_dir)?;
         private_tmp.as_file_mut().write_all(&private_header)?;
         private_tmp.as_file_mut().write_all(&argon2_salt)?;
         private_tmp.as_file_mut().write_all(&kdf_bytes)?;

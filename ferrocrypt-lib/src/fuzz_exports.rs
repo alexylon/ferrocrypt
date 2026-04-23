@@ -21,4 +21,26 @@ pub use crate::format::{
     read_header_from_reader,
 };
 pub use crate::hybrid::validate_private_key_shape;
-pub use crate::replication::{decode, decode_exact};
+pub use crate::replication::decode;
+
+use crate::CryptoError;
+use crate::error::FormatDefect;
+
+/// Decodes a triple-replicated payload and verifies its logical
+/// length equals `expected_len`. Wraps [`decode`] with a
+/// `FormatDefect::CorruptedHeader` length check.
+///
+/// Lives here (rather than in `replication.rs`) because the library
+/// itself never calls it — the one replicated field in v1, the 8-byte
+/// `.fcr` prefix, goes through [`crate::format::decode_and_canonicalize_prefix`],
+/// which performs the length check implicitly by fixed-size array
+/// typing. The fuzz harness (`fuzz_replication_decode`) drives this
+/// path directly to exercise the length-mismatch rejection without
+/// paying for a full header parse.
+pub fn decode_exact(data: &[u8], expected_len: usize) -> Result<Vec<u8>, CryptoError> {
+    let decoded = decode(data)?;
+    if decoded.len() != expected_len {
+        return Err(CryptoError::InvalidFormat(FormatDefect::CorruptedHeader));
+    }
+    Ok(decoded)
+}

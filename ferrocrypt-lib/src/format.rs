@@ -70,7 +70,7 @@ use std::io::Read;
 
 use crate::CryptoError;
 use crate::error::{FormatDefect, UnsupportedVersion};
-use crate::replication::{decode, decode_exact, encode, encoded_size};
+use crate::replication::{decode, encode, encoded_size};
 
 // ─── Shared ────────────────────────────────────────────────────────────────
 
@@ -252,30 +252,6 @@ pub fn unsupported_file_version_error(version: u8) -> CryptoError {
     } else {
         CryptoError::UnsupportedVersion(UnsupportedVersion::NewerFile { version })
     }
-}
-
-/// Reads a single triple-replicated field of logical size `N` from the
-/// reader and returns the decoded bytes as a fixed-size array.
-///
-/// Fails with [`FormatDefect::Truncated`] if the reader is short,
-/// and with [`FormatDefect::CorruptedHeader`] if the decoded length
-/// doesn't match `N`.
-///
-/// In the v1 format no body field is replicated (only the prefix, via
-/// [`read_header_from_reader`]). This helper is kept as a utility for
-/// fuzz targets that exercise the replication decoder directly.
-#[allow(dead_code)]
-pub fn read_replicated_field<const N: usize>(
-    reader: &mut impl Read,
-) -> Result<[u8; N], CryptoError> {
-    let mut encoded = vec![0u8; encoded_size(N)];
-    reader
-        .read_exact(&mut encoded)
-        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::Truncated))?;
-    let decoded = decode_exact(&encoded, N)?;
-    decoded
-        .try_into()
-        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::CorruptedHeader))
 }
 
 // ─── Key file format — v1 ──────────────────────────────────────────────────

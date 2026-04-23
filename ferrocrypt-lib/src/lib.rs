@@ -244,7 +244,7 @@ impl PublicKey {
     pub fn fingerprint(&self) -> Result<String, CryptoError> {
         let bytes = self.resolve()?;
         let canonical = hybrid::recipient_canonical_bytes(&bytes);
-        let hash = sha3_256_hash(&canonical)?;
+        let hash = sha3_256_hash(&canonical);
         Ok(hex_encode(&hash))
     }
 

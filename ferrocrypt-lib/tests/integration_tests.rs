@@ -14,10 +14,16 @@ use common::{generate_key_pair, hybrid_auto, symmetric_auto};
 
 const TEST_WORKSPACE: &str = "tests/workspace";
 
-/// Triple-replicates an 8-byte prefix for constructing test headers.
+/// Triple-replicates an 8-byte prefix for constructing malformed-header
+/// fixtures. Hand-rolled rather than reusing `replication::encode`
+/// because the encoder isn't part of the public library surface and
+/// the fuzz-exports feature-flag machinery isn't enabled for the
+/// integration-test binary. Kept byte-identical to the canonical
+/// encoder: three zero pad bytes followed by three copies of the
+/// 8-byte prefix (see FORMAT.md §5.1).
 fn encode_test_prefix(prefix: &[u8; 8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(27);
-    out.push(0); // padding bytes (8 is even)
+    out.push(0); // canonical pad: always zero for v1's 8-byte prefix.
     out.push(0);
     out.push(0);
     out.extend_from_slice(prefix);

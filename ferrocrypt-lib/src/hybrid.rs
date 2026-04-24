@@ -739,9 +739,12 @@ pub fn decode_recipient_string(s: &str) -> Result<[u8; 32], CryptoError> {
 }
 
 /// Reads a v1 `public.key` text file and returns the raw 32-byte
-/// X25519 public key. Leading and trailing whitespace is stripped
-/// before parsing; canonical lowercase Bech32 is still required
-/// (mixed case is rejected by `decode_recipient_string`).
+/// X25519 public key. The file content MUST be the canonical
+/// lowercase `fcr1…` recipient string, optionally followed by
+/// exactly one trailing `\n` (FORMAT.md §7). Anything else
+/// — leading whitespace, CRLF line endings, extra blank lines,
+/// trailing spaces or tabs, internal whitespace — is rejected as
+/// [`FormatDefect::MalformedPublicKey`].
 ///
 /// If the caller accidentally points this at a binary `private.key`
 /// (magic `FCR\0`), the reader surfaces
@@ -754,7 +757,14 @@ pub fn read_public_key(path: &Path) -> Result<[u8; 32], CryptoError> {
     }
     let contents = String::from_utf8(bytes)
         .map_err(|_| CryptoError::InvalidFormat(FormatDefect::NotAKeyFile))?;
-    decode_recipient_string(contents.trim())
+    // Non-whitespace junk (BOM, ZWSP, non-Bech32 chars) is left
+    // for the Bech32 decoder to reject as InvalidInput — a format
+    // violation in the whitespace grammar deserves its own bucket.
+    let recipient = contents.strip_suffix('\n').unwrap_or(&contents);
+    if recipient.bytes().any(|b| b.is_ascii_whitespace()) {
+        return Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey));
+    }
+    decode_recipient_string(recipient)
 }
 
 // ─── Structural validator (kept for fuzz exports) ──────────────────────────
@@ -1105,11 +1115,15 @@ mod tests {
         ));
     }
 
-    /// Whitespace around the `fcr1…` string must be stripped rather
-    /// than rejected: editors routinely add a trailing newline and
-    /// Windows line endings (`\r\n`) should parse the same as Unix.
+    /// FORMAT.md §7 accepts exactly two encodings of `public.key`:
+    /// the canonical `fcr1…` string with no trailer, and the same
+    /// string followed by a single `\n`. Any other surrounding
+    /// whitespace — CRLF, leading blanks, trailing spaces, extra
+    /// blank lines — is a format violation and must surface as
+    /// [`FormatDefect::MalformedPublicKey`], not be silently
+    /// trimmed.
     #[test]
-    fn read_public_key_trims_surrounding_whitespace() -> Result<(), CryptoError> {
+    fn read_public_key_accepts_only_canonical_forms() -> Result<(), CryptoError> {
         let tmp = tempfile::TempDir::new().unwrap();
         let pass = SecretString::from("kp".to_string());
         let (_privkey_path, pubkey_path) = generate_key_pair(&pass, tmp.path(), &|_| {})?;
@@ -1117,32 +1131,42 @@ mod tests {
         let canonical = canonical.trim();
         let expected = read_public_key(&pubkey_path)?;
 
+        // Two canonical encodings — both accepted.
+        for decorated in [canonical.to_string(), format!("{canonical}\n")] {
+            fs::write(&pubkey_path, decorated.as_bytes())?;
+            let got = read_public_key(&pubkey_path)?;
+            assert_eq!(got, expected, "canonical form `{decorated:?}` must parse");
+        }
+
+        // Every other surrounding-whitespace variant must be
+        // rejected as MalformedPublicKey.
         for decorated in [
-            canonical.to_string(),          // no trailing LF
-            format!("{canonical}\n"),       // Unix single LF (already covered)
             format!("{canonical}\r\n"),     // Windows line ending
+            format!("{canonical}\n\n"),     // double trailing LF
             format!("  {canonical}\n"),     // leading spaces
             format!("{canonical}  \n"),     // trailing spaces
             format!("\n\n{canonical}\n\n"), // leading + trailing blank lines
             format!("\t{canonical}\t\r\n"), // tabs and CRLF
+            format!("{canonical}\r"),       // bare trailing CR
         ] {
             fs::write(&pubkey_path, decorated.as_bytes())?;
-            let got = read_public_key(&pubkey_path)?;
-            assert_eq!(got, expected);
+            match read_public_key(&pubkey_path) {
+                Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
+                other => panic!("expected MalformedPublicKey for `{decorated:?}`, got {other:?}"),
+            }
         }
         Ok(())
     }
 
-    /// The leniency of [`read_public_key`] relies on the Bech32
-    /// decoder, not [`str::trim`], catching malformed payloads.
-    /// `trim()` only strips Unicode `White_Space`; any remaining
-    /// non-Bech32 character — whether it survived the trim (ZWSP,
-    /// BOM) or was injected between payload chars (internal LF,
-    /// NBSP) — must still be rejected.
-    ///
-    /// This test pins that invariant. If a future `bech32` crate
-    /// upgrade loosened charset enforcement, this test would fail
-    /// and surface the regression before a release.
+    /// Payload corruptions that [`read_public_key`]'s own
+    /// `is_ascii_whitespace` guard does NOT catch — specifically
+    /// Unicode `Format` chars (ZWSP U+200B, BOM U+FEFF) and NBSP
+    /// (U+00A0, Unicode-but-not-ASCII whitespace) — MUST still be
+    /// rejected by the Bech32 decoder. This test pins that
+    /// invariant so a future `bech32` crate upgrade loosening
+    /// charset enforcement surfaces as a test regression. Internal
+    /// ASCII whitespace is included for completeness (now handled
+    /// by the MalformedPublicKey arm upstream of Bech32).
     #[test]
     fn read_public_key_rejects_internal_non_bech32_chars() -> Result<(), CryptoError> {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1161,9 +1185,9 @@ mod tests {
         // HRP-corrupted variant: space inside the `fcr` HRP.
         let hrp_ws = format!("fc r1{}", &canonical["fcr1".len()..]);
 
-        // U+200B ZWSP and U+FEFF BOM are Unicode `Format` chars, NOT
-        // `White_Space` — `str::trim` leaves them in place. Bech32
-        // must reject them as non-ASCII on its own.
+        // NBSP / ZWSP / BOM are NOT ASCII whitespace — the
+        // MalformedPublicKey guard doesn't catch them, so the
+        // Bech32 decoder has to reject them as non-ASCII on its own.
         let corrupted: &[(&str, String)] = &[
             ("internal space", format!("{head} {tail}")),
             ("internal LF", format!("{head}\n{tail}")),

@@ -214,6 +214,13 @@ pub enum FormatDefect {
     BadKeyFileSize,
     /// Key material or decrypted envelope has an unexpected byte length.
     UnexpectedKeyLength,
+    /// `public.key` text file violates the canonical grammar
+    /// (FORMAT.md §7): the file MUST contain the lowercase `fcr1…`
+    /// recipient string optionally followed by exactly one trailing
+    /// `\n`. Leading/trailing whitespace other than a single final
+    /// LF, CRLF line endings, extra blank lines, and any other
+    /// surrounding whitespace are all rejected.
+    MalformedPublicKey,
 }
 
 impl std::fmt::Display for FormatDefect {
@@ -250,6 +257,7 @@ impl std::fmt::Display for FormatDefect {
             }
             Self::BadKeyFileSize => f.write_str("Key file has unexpected size"),
             Self::UnexpectedKeyLength => f.write_str("Key material has unexpected length"),
+            Self::MalformedPublicKey => f.write_str("Public key file has extra whitespace"),
         }
     }
 }
@@ -330,12 +338,17 @@ pub(crate) enum StreamError {
     EncryptAead,
     /// Encrypted stream ended before the final-flag chunk.
     Truncated,
-    /// Bytes remain after the final-flag chunk. Reserved for future
-    /// spec-compliant detection per FORMAT.md §4.9; trailing data
-    /// currently surfaces via `DecryptAead` when the final-chunk AEAD
-    /// fails on appended bytes. Wiring an explicit post-unarchive
-    /// probe into the decrypt path is planned follow-up work.
-    #[allow(dead_code)]
+    /// Bytes remain after the final-flag chunk was successfully
+    /// decrypted. Raised by the post-`decrypt_last_in_place` probe
+    /// in [`crate::common::DecryptReader::fill_buffer`]. Ordinary
+    /// appended-bytes cases on a plain `File` / `&[u8]` reader fail
+    /// earlier via [`StreamError::DecryptAead`] (STREAM-BE32's
+    /// per-chunk nonce binding rejects a naive append as an AEAD
+    /// tamper); this variant is the defense-in-depth path for
+    /// pathological readers that signal EOF at the chunk boundary
+    /// and then yield more bytes (non-blocking sockets, buggy
+    /// `Take`-style wrappers). Downcast to
+    /// [`CryptoError::ExtraDataAfterPayload`] via `From<io::Error>`.
     ExtraData,
     /// Writer or reader state was already consumed (programmer bug).
     StateExhausted,
@@ -487,6 +500,10 @@ mod tests {
             "Key file has unexpected size"
         );
         assert_eq!(
+            FormatDefect::MalformedPublicKey.to_string(),
+            "Public key file has extra whitespace"
+        );
+        assert_eq!(
             UnsupportedVersion::NewerFile { version: 9 }.to_string(),
             "Newer file format (v9). Upgrade FerroCrypt."
         );
@@ -626,6 +643,7 @@ mod tests {
             ),
             ("BadKeyFileSize", FormatDefect::BadKeyFileSize),
             ("UnexpectedKeyLength", FormatDefect::UnexpectedKeyLength),
+            ("MalformedPublicKey", FormatDefect::MalformedPublicKey),
         ];
         for (label, d) in defects {
             check(label, &d.to_string());

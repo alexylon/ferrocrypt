@@ -89,6 +89,44 @@ pub const TYPE_SYMMETRIC: u8 = 0x53; // 'S'
 /// Hybrid `.fcr` type byte.
 pub const TYPE_HYBRID: u8 = 0x48; // 'H'
 
+/// Typed view of the `.fcr` `type` byte. Adding a new variant
+/// here is a deliberate breaking change inside the crate: every
+/// `match` over an `EncryptedFileType` becomes a compile error
+/// until the new mode is handled, which is the point — the
+/// previous `format_type: u8` field let new modes silently slip
+/// past the routing path in `detect_encryption_mode` and surface
+/// as `InternalInvariant` at runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncryptedFileType {
+    /// Passphrase-based symmetric `.fcr` (type byte `0x53` `'S'`).
+    Symmetric,
+    /// X25519 hybrid `.fcr` (type byte `0x48` `'H'`).
+    Hybrid,
+}
+
+impl EncryptedFileType {
+    /// Wire-format type byte for this mode.
+    pub const fn type_byte(self) -> u8 {
+        match self {
+            Self::Symmetric => TYPE_SYMMETRIC,
+            Self::Hybrid => TYPE_HYBRID,
+        }
+    }
+
+    /// Decodes a wire-format `.fcr` type byte. Unknown bytes
+    /// surface as [`FormatDefect::UnknownType`] for the
+    /// upgrade-hinting diagnostic.
+    pub fn from_byte(byte: u8) -> Result<Self, CryptoError> {
+        match byte {
+            TYPE_SYMMETRIC => Ok(Self::Symmetric),
+            TYPE_HYBRID => Ok(Self::Hybrid),
+            _ => Err(CryptoError::InvalidFormat(FormatDefect::UnknownType {
+                type_byte: byte,
+            })),
+        }
+    }
+}
+
 pub const HEADER_PREFIX_SIZE: usize = 8;
 pub const HEADER_PREFIX_ENCODED_SIZE: usize = encoded_size(HEADER_PREFIX_SIZE);
 
@@ -105,7 +143,7 @@ pub const ENCRYPTED_EXTENSION: &str = "fcr";
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct FileHeader {
-    pub format_type: u8,
+    pub format_type: EncryptedFileType,
     pub version: u8,
     pub ext_len: u16,
 }
@@ -156,7 +194,7 @@ pub fn read_header_from_reader(
         .map_err(|_| CryptoError::InvalidFormat(FormatDefect::Truncated))?;
 
     let (logical, canonical) = decode_and_canonicalize_prefix(&on_disk)?;
-    let header = parse_header_bytes(&logical, expected_type)?;
+    let header = parse_header_bytes(&logical, Some(expected_type))?;
     Ok((canonical, header))
 }
 
@@ -197,9 +235,15 @@ pub fn decode_and_canonicalize_prefix(
 /// Parses a decoded 8-byte logical prefix into a [`FileHeader`]. Does
 /// NOT enforce canonicity (the caller is expected to have done so via
 /// [`decode_and_canonicalize_prefix`]).
+///
+/// `expected_type` controls the type-byte branch:
+/// - `Some(t)` — used by the decrypt paths; rejects `WrongEncryptedFileType`
+///   if a known but mismatched type is seen.
+/// - `None` — used by the detection path; accepts any known type and
+///   reports `UnknownType` only for genuinely unrecognised bytes.
 fn parse_header_bytes(
     logical: &[u8; HEADER_PREFIX_SIZE],
-    expected_type: u8,
+    expected_type: Option<u8>,
 ) -> Result<FileHeader, CryptoError> {
     if logical[0..4] != MAGIC {
         return Err(CryptoError::InvalidFormat(FormatDefect::BadMagic));
@@ -210,19 +254,18 @@ fn parse_header_bytes(
         return Err(unsupported_file_version_error(version));
     }
 
-    let format_type = logical[5];
-    if format_type != expected_type {
-        // Distinguish "unknown type byte" from "known type but not what
-        // we were asked to parse". The former hints "upgrade"; the
-        // latter hints "you picked the wrong operation".
-        if format_type != TYPE_SYMMETRIC && format_type != TYPE_HYBRID {
-            return Err(CryptoError::InvalidFormat(FormatDefect::UnknownType {
-                type_byte: format_type,
-            }));
+    // `from_byte` returns `UnknownType` for genuinely unrecognised
+    // bytes — the upgrade-hinting diagnostic — so it fires before
+    // the expected-type check below regardless of caller intent.
+    let format_type = EncryptedFileType::from_byte(logical[5])?;
+    if let Some(expected) = expected_type {
+        if format_type.type_byte() != expected {
+            // Known type but not the one the decrypt path asked for —
+            // hints "you picked the wrong operation".
+            return Err(CryptoError::InvalidFormat(
+                FormatDefect::WrongEncryptedFileType,
+            ));
         }
-        return Err(CryptoError::InvalidFormat(
-            FormatDefect::WrongEncryptedFileType,
-        ));
     }
 
     let ext_len = u16::from_be_bytes([logical[6], logical[7]]);
@@ -233,6 +276,25 @@ fn parse_header_bytes(
         version,
         ext_len,
     })
+}
+
+/// Validates a 27-byte on-disk prefix for the detection path.
+/// Same checks as [`read_header_from_reader`] except the type
+/// byte is not constrained to a caller-specified expected value:
+/// any known v1 type (Symmetric / Hybrid) is accepted, an unknown
+/// type byte surfaces as [`FormatDefect::UnknownType`].
+///
+/// Used by [`crate::detect_encryption_mode`] so the routing
+/// pre-check enforces the same canonicity / version / `ext_len`
+/// invariants as the real decrypt path. Bit-rotten or future-
+/// version files therefore surface specific structural errors at
+/// detection time instead of being routed into a decrypt that
+/// would fail with the same error a moment later.
+pub fn parse_header_for_detection(
+    on_disk: &[u8; HEADER_PREFIX_ENCODED_SIZE],
+) -> Result<FileHeader, CryptoError> {
+    let (logical, _) = decode_and_canonicalize_prefix(on_disk)?;
+    parse_header_bytes(&logical, None)
 }
 
 /// Rejects an `ext_len` that exceeds [`EXT_LEN_MAX`]. Shared by the
@@ -366,13 +428,40 @@ mod tests {
         read_header_from_reader(&mut std::io::Cursor::new(on_disk), expected_type)
     }
 
+    /// `EncryptedFileType::type_byte()` and `from_byte()` must
+    /// round-trip every defined variant. Pins the enum to the
+    /// wire-format `TYPE_*` constants so a future renumbering
+    /// cannot drift the on-disk meaning silently.
+    #[test]
+    fn encrypted_file_type_round_trips_through_byte() {
+        for variant in [EncryptedFileType::Symmetric, EncryptedFileType::Hybrid] {
+            let byte = variant.type_byte();
+            let recovered = EncryptedFileType::from_byte(byte).unwrap();
+            assert_eq!(variant, recovered);
+        }
+        assert_eq!(EncryptedFileType::Symmetric.type_byte(), TYPE_SYMMETRIC);
+        assert_eq!(EncryptedFileType::Hybrid.type_byte(), TYPE_HYBRID);
+    }
+
+    /// `from_byte` on an unknown type byte MUST surface
+    /// `FormatDefect::UnknownType` so the upgrade-hint
+    /// diagnostic path fires even when the byte is decoded
+    /// outside `parse_header_bytes` (e.g. by future callers).
+    #[test]
+    fn encrypted_file_type_from_byte_rejects_unknown() {
+        match EncryptedFileType::from_byte(0x5A) {
+            Err(CryptoError::InvalidFormat(FormatDefect::UnknownType { type_byte: 0x5A })) => {}
+            other => panic!("expected UnknownType(0x5A), got {other:?}"),
+        }
+    }
+
     #[test]
     fn prefix_round_trip_symmetric() {
         let prefix = build_header_prefix(TYPE_SYMMETRIC, 0);
         let on_disk = encode_to_array(&prefix);
         let (canonical, header) = parse_on_disk(&on_disk, TYPE_SYMMETRIC).unwrap();
         assert_eq!(canonical, on_disk);
-        assert_eq!(header.format_type, TYPE_SYMMETRIC);
+        assert_eq!(header.format_type, EncryptedFileType::Symmetric);
         assert_eq!(header.version, VERSION);
         assert_eq!(header.ext_len, 0);
     }
@@ -382,7 +471,7 @@ mod tests {
         let prefix = build_header_prefix(TYPE_HYBRID, 0x1234);
         let on_disk = encode_to_array(&prefix);
         let (_, header) = parse_on_disk(&on_disk, TYPE_HYBRID).unwrap();
-        assert_eq!(header.format_type, TYPE_HYBRID);
+        assert_eq!(header.format_type, EncryptedFileType::Hybrid);
         assert_eq!(header.ext_len, 0x1234);
     }
 

@@ -55,8 +55,8 @@ use crate::common::{
 };
 use crate::error::FormatDefect;
 use crate::format::{
-    self, KEY_FILE_ALG_X25519, PRIVATE_KEY_CIPHERTEXT_SIZE, PRIVATE_KEY_FIXED_BODY_SIZE,
-    PRIVATE_KEY_HEADER_SIZE,
+    self, KEY_FILE_ALG_X25519, KEY_FILE_TYPE_PRIVATE, PRIVATE_KEY_CIPHERTEXT_SIZE,
+    PRIVATE_KEY_FIXED_BODY_SIZE, PRIVATE_KEY_HEADER_SIZE,
 };
 use crate::{CryptoError, ProgressEvent, archiver};
 
@@ -397,43 +397,61 @@ fn private_key_aad(
     aad
 }
 
-/// Returns `true` if `data` parses as a valid v1 `public.key` text
-/// file — a canonical Bech32 `fcr1…` recipient string with
-/// whitespace tolerated on either end. Used by the private-key
-/// readers (`read_private_key`, `validate_private_key_file`) to
-/// short-circuit with `WrongKeyFileType` when a caller hands them
-/// an actual public.key by mistake.
+/// Heuristic classification of key-file bytes. Cheap, non-
+/// authenticating: callers use it to surface the friendly
+/// `WrongKeyFileType` diagnostic when a user hands the wrong
+/// kind of key file to a reader. The strict parse — Bech32 +
+/// algorithm + length for public, magic + version + type +
+/// algorithm + size + AEAD for private — runs downstream in
+/// each reader against the actual unlock or extract path.
 ///
-/// Runs the full Bech32 decode rather than a cheap `fcr1` prefix
-/// sniff so random garbage starting with those four bytes (e.g.
-/// `"fcr1foobar"`, or a public.key with a corrupted checksum) is
-/// NOT labelled "wrong kind of key file" — the file truly isn't a
-/// public.key, and it correctly falls through to the generic
-/// `NotAKeyFile` / `Truncated` diagnostics.
-pub(crate) fn is_valid_public_key_file(data: &[u8]) -> bool {
-    let Ok(text) = std::str::from_utf8(data) else {
-        return false;
-    };
-    decode_recipient_string(text.trim()).is_ok()
+/// Adding a new variant is a deliberate breaking change inside
+/// the crate: every `match` over a `KeyFileKind` becomes a
+/// compile error until the new kind is handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyFileKind {
+    /// Bytes look like a v1 `public.key`: a UTF-8 string that
+    /// decodes as a canonical Bech32 `fcr1…` recipient (with
+    /// surrounding whitespace tolerated for the heuristic — the
+    /// strict parser in `read_public_key` enforces canonical
+    /// whitespace separately).
+    Public,
+    /// Bytes carry the v1 `private.key` signature: at least 9
+    /// bytes of `FCR\0 || ?? || 'K'`. Magic + type byte is
+    /// sufficient regardless of `version`, so a future v2
+    /// `private.key` still classifies as `Private` and surfaces
+    /// the friendly diagnostic instead of `NotAKeyFile`.
+    Private,
+    /// Neither signature matches.
+    Unknown,
 }
 
-/// Returns `true` if `data` is a structurally valid v1 `private.key`
-/// file — magic, version, type, algorithm byte, and size all
-/// pass the non-cryptographic checks. Does NOT attempt to decrypt
-/// the key (no passphrase required) and does NOT perform the AEAD
-/// authentication that catches cleartext tampering. Used by
-/// `read_public_key` to short-circuit with `WrongKeyFileType` when
-/// a caller hands it an actual private.key by mistake.
-///
-/// Like [`is_valid_public_key_file`], runs the full structural
-/// validator rather than a cheap magic-byte peek so random binary
-/// starting with `"FCR\0"` (a `.fcr` encrypted file, or arbitrary
-/// junk) is NOT labelled "wrong kind of key file" — it isn't a
-/// private.key at all.
-pub(crate) fn is_valid_private_key_file(data: &[u8]) -> bool {
-    match format::parse_private_key_header(data) {
-        Ok(header) => validate_private_key_shape(data, &header).is_ok(),
-        Err(_) => false,
+impl KeyFileKind {
+    /// Classifies `data` against the two v1 key-file shapes.
+    /// Probes the cheap binary signature first; falls back to
+    /// the more expensive Bech32 decode for the public-key
+    /// text shape.
+    ///
+    /// Adversarial inputs that do NOT match either signature
+    /// (a `.fcr` encrypted file with type byte `'S'`/`'H'`,
+    /// random binary without magic, garbage `fcr1…` text with a
+    /// bad checksum) classify as `Unknown` and fall through to
+    /// the caller's generic rejection path. Probability of an
+    /// accidental `Private` match on truly random binary is
+    /// `2^-40` (the five specific bytes in the signature).
+    pub(crate) fn classify(data: &[u8]) -> Self {
+        if data.len() >= PRIVATE_KEY_HEADER_SIZE
+            && data[0..4] == format::MAGIC
+            && data[5] == KEY_FILE_TYPE_PRIVATE
+        {
+            return Self::Private;
+        }
+        if let Ok(text) = std::str::from_utf8(data) {
+            if decode_recipient_string(text.trim()).is_ok() {
+                return Self::Public;
+            }
+        }
+        Self::Unknown
     }
 }
 
@@ -460,12 +478,10 @@ fn read_private_key(
     kdf_limit: Option<&KdfLimit>,
 ) -> Result<StaticSecret, CryptoError> {
     let data = fs::read(path).map_err(map_user_path_io_error)?;
-    // If the caller pointed this at a text `public.key` by mistake,
-    // short-circuit to `WrongKeyFileType` instead of leaking the
-    // magic-byte mismatch as the generic `NotAKeyFile` defect.
-    // Trim leading whitespace first so files with an editor-inserted
-    // blank line still get the friendly diagnostic.
-    if is_valid_public_key_file(&data) {
+    // Caller pointed this at a text `public.key` by mistake →
+    // surface the friendly mix-up diagnostic instead of letting
+    // the magic-byte mismatch leak as `NotAKeyFile`.
+    if matches!(KeyFileKind::classify(&data), KeyFileKind::Public) {
         return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
     }
     if data.len() < PRIVATE_KEY_HEADER_SIZE {
@@ -752,7 +768,7 @@ pub fn decode_recipient_string(s: &str) -> Result<[u8; 32], CryptoError> {
 /// decode error.
 pub fn read_public_key(path: &Path) -> Result<[u8; 32], CryptoError> {
     let bytes = fs::read(path).map_err(map_user_path_io_error)?;
-    if is_valid_private_key_file(&bytes) {
+    if matches!(KeyFileKind::classify(&bytes), KeyFileKind::Private) {
         return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
     }
     let contents = String::from_utf8(bytes)
@@ -1007,6 +1023,53 @@ mod tests {
         Ok(())
     }
 
+    /// `KeyFileKind::classify` is the single source of truth for
+    /// the cross-mix-up heuristic. Pin every classification arm so
+    /// a future refactor that drifts the order or weakens a branch
+    /// fails loudly.
+    #[test]
+    fn key_file_kind_classifies_each_shape() -> Result<(), CryptoError> {
+        // Real public.key text → Public.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pass = SecretString::from("kp".to_string());
+        let (privkey_path, pubkey_path) = generate_key_pair(&pass, tmp.path(), &|_| {})?;
+        let pub_bytes = fs::read(&pubkey_path)?;
+        assert_eq!(KeyFileKind::classify(&pub_bytes), KeyFileKind::Public);
+
+        // Real private.key binary → Private.
+        let priv_bytes = fs::read(&privkey_path)?;
+        assert_eq!(KeyFileKind::classify(&priv_bytes), KeyFileKind::Private);
+
+        // Magic + future version + type K (a v2 private.key) → Private.
+        let v2_priv = b"FCR\0\x02K\x01\x00\x00";
+        assert_eq!(KeyFileKind::classify(v2_priv), KeyFileKind::Private);
+
+        // Magic but type byte is 'S' (a symmetric .fcr) → Unknown,
+        // not Private. The `.fcr` mix-up heuristic lives elsewhere
+        // (`detect_encryption_mode`); a key-file path should not
+        // claim it.
+        let fcr_symmetric = b"FCR\0\x01Sxx\x00\x00";
+        assert_eq!(KeyFileKind::classify(fcr_symmetric), KeyFileKind::Unknown);
+
+        // Bare magic, too short for the signature → Unknown.
+        assert_eq!(KeyFileKind::classify(b"FCR\0"), KeyFileKind::Unknown);
+
+        // Random binary without magic → Unknown.
+        assert_eq!(
+            KeyFileKind::classify(b"this isn't ours at all"),
+            KeyFileKind::Unknown
+        );
+
+        // `fcr1`-prefixed garbage that fails Bech32 checksum →
+        // Unknown (NOT Public). We don't claim ownership of files
+        // we can't actually read.
+        assert_eq!(KeyFileKind::classify(b"fcr1foobar"), KeyFileKind::Unknown);
+
+        // Empty input → Unknown.
+        assert_eq!(KeyFileKind::classify(b""), KeyFileKind::Unknown);
+        Ok(())
+    }
+
     /// `validate_private_key_file` must agree with `read_private_key`
     /// on the pub/priv mix-up verdict. Before this fix, the two paths
     /// disagreed: `read_private_key` returned `WrongKeyFileType` but
@@ -1021,6 +1084,44 @@ mod tests {
             Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)) => Ok(()),
             other => panic!("expected WrongKeyFileType, got {other:?}"),
         }
+    }
+
+    /// Symmetric companion: `validate_public_key_file` accepts a
+    /// real public.key and rejects a private.key with the same
+    /// `WrongKeyFileType` diagnostic that `read_public_key` would
+    /// produce. Pins the public-side validator against silent
+    /// drift away from the read path.
+    #[test]
+    fn validate_public_key_file_round_trips_and_rejects_private() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pass = SecretString::from("kp".to_string());
+        let (privkey_path, pubkey_path) = generate_key_pair(&pass, tmp.path(), &|_| {})?;
+
+        // Happy path: a real public.key validates cleanly.
+        crate::validate_public_key_file(&pubkey_path)?;
+
+        // Mix-up path: a private.key surfaces WrongKeyFileType.
+        match crate::validate_public_key_file(&privkey_path) {
+            Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)) => Ok(()),
+            other => panic!("expected WrongKeyFileType for private.key, got {other:?}"),
+        }
+    }
+
+    /// Missing-file paths surface as `InputPath` for both
+    /// `validate_*_key_file` functions, matching the rest of the
+    /// key-reader API.
+    #[test]
+    fn validate_key_file_functions_map_missing_to_input_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let missing = tmp.path().join("no-such.key");
+        assert!(matches!(
+            crate::validate_public_key_file(&missing),
+            Err(CryptoError::InputPath)
+        ));
+        assert!(matches!(
+            crate::validate_private_key_file(&missing),
+            Err(CryptoError::InputPath)
+        ));
     }
 
     /// A file whose contents merely *start with* `fcr1` but don't
@@ -1050,41 +1151,60 @@ mod tests {
         Ok(())
     }
 
-    /// Symmetric check on the public-key side: a file that merely
-    /// starts with `FCR\0` but isn't a structurally valid private.key
-    /// (e.g. a `.fcr` encrypted file, or truncated binary junk) must
-    /// NOT be reported as `WrongKeyFileType`. Only a real private.key
-    /// header (magic + version + type `K` + algorithm `0x01` + size)
-    /// earns that verdict.
+    /// `WrongKeyFileType` fires only when the file carries the
+    /// private-key signature: at least 9 bytes of `FCR\0 || ?? || 'K'`.
+    /// Files without that signature — bare magic, magic with the
+    /// wrong type byte (e.g. a symmetric `.fcr`), random binary —
+    /// must fall through to the generic rejection path.
     #[test]
-    fn read_public_key_does_not_claim_fcr_magic_junk_as_private_key() -> Result<(), CryptoError> {
+    fn read_public_key_only_claims_private_key_on_magic_and_type_byte() -> Result<(), CryptoError> {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("junk.key");
 
-        // `FCR\0` + garbage (not enough bytes, wrong type, wrong algorithm).
-        let junk_cases: &[(&str, Vec<u8>)] = &[
-            ("bare magic", b"FCR\0".to_vec()),
+        // No private-key signature → must NOT surface WrongKeyFileType.
+        let no_signature: &[(&str, Vec<u8>)] = &[
+            ("bare magic (under header size)", b"FCR\0".to_vec()),
             (
-                "magic + wrong type byte `S` (would be symmetric .fcr)",
-                b"FCR\0\x01Sxx".to_vec(),
+                "magic + type byte `S` (a symmetric `.fcr`)",
+                b"FCR\0\x01Sxx\x00\x00".to_vec(),
             ),
             (
-                "magic + correct type `K` but truncated body",
-                b"FCR\0\x01K\x01\x00\x00".to_vec(),
+                "magic + type byte `H` (a hybrid `.fcr`)",
+                b"FCR\0\x01Hxx\x00\x00".to_vec(),
             ),
+            ("just random binary", b"this isn't ours at all".to_vec()),
         ];
-
-        for (label, junk) in junk_cases {
+        for (label, junk) in no_signature {
             fs::write(&path, junk)?;
             match read_public_key(&path) {
                 Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)) => {
-                    panic!("junk `{label}` must not be classified as WrongKeyFileType");
+                    panic!("`{label}` must not be classified as WrongKeyFileType");
                 }
-                // Anything else is fine — `NotAKeyFile`, recipient-
-                // decoder failures, etc. are all legitimate "we
-                // can't tell what this is" verdicts.
                 Err(_) => {}
-                Ok(_) => panic!("junk `{label}` must not parse as a valid public.key"),
+                Ok(_) => panic!("`{label}` must not parse as a valid public.key"),
+            }
+        }
+
+        // Has the signature — even if otherwise malformed (truncated
+        // body, unsupported version) — MUST surface WrongKeyFileType.
+        // Closes the cross-version friendliness gap: a future v2
+        // private.key file passed to a v1 reader is "the wrong kind
+        // of key" from the user's perspective, not generic "garbage".
+        let signature_cases: &[(&str, Vec<u8>)] = &[
+            (
+                "magic + version 1 + type K + truncated body",
+                b"FCR\0\x01K\x01\x00\x00".to_vec(),
+            ),
+            (
+                "magic + future version 2 + type K (v2 private.key)",
+                b"FCR\0\x02K\x01\x00\x00".to_vec(),
+            ),
+        ];
+        for (label, junk) in signature_cases {
+            fs::write(&path, junk)?;
+            match read_public_key(&path) {
+                Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)) => {}
+                other => panic!("`{label}` must surface WrongKeyFileType, got {other:?}"),
             }
         }
         Ok(())

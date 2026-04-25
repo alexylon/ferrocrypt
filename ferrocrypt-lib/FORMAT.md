@@ -315,9 +315,12 @@ Normative behaviour:
   chunk with `last_flag = 0x01`;
 - decryptors MUST raise `PayloadTruncated` if EOF is reached without
   successfully decrypting a final-flag chunk;
-- decryptors MUST reject bytes appended after the authenticated payload;
-  current v1 readers may surface this via the generic AEAD-failure path
-  (`PayloadTampered`) rather than a dedicated trailing-data variant;
+- decryptors MUST reject bytes appended after the authenticated payload.
+  STREAM-BE32's per-chunk nonce binding rejects ordinary appends as
+  `PayloadTampered` (a naive append cannot produce a valid final chunk);
+  pathological readers that signal EOF at a chunk boundary and then
+  yield more bytes are caught by an explicit post-`decrypt_last`
+  trailing-data probe and surface as `ExtraDataAfterPayload`;
 - any chunk AEAD failure is `PayloadTampered`.
 
 Writers SHOULD refuse payloads larger than `2^32` chunks of 65 536
@@ -655,11 +658,13 @@ is part of the product promise.
 - `HeaderTampered` — HMAC mismatch after successful envelope unwrap
   (the right key opened the envelope, but `stream_nonce` or
   `ext_bytes` were tampered with)
-- `PayloadTampered` — per-chunk AEAD failed; current v1 readers may
-  also surface appended trailing bytes this way
+- `PayloadTampered` — per-chunk AEAD failed; ordinary appended bytes
+  on a regular file fail here because STREAM-BE32's per-chunk nonce
+  rejects a naive append
 - `PayloadTruncated` — EOF before the final-flag chunk
-- `ExtraDataAfterPayload` — dedicated trailing-data variant reserved
-  for future explicit detection
+- `ExtraDataAfterPayload` — defense-in-depth trailing-data probe fired
+  after a successful final-chunk decrypt; catches pathological readers
+  that signal EOF at the chunk boundary and then yield more bytes
 - `KeyFileUnlockFailed` — `private.key` AEAD failed (wrong passphrase
   **or** tampered cleartext; the two are indistinguishable by design)
 

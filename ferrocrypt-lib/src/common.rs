@@ -244,9 +244,22 @@ pub fn file_stem(filename: &Path) -> Result<&OsStr, CryptoError> {
 /// Returns the base name for building the default encrypted output filename.
 /// For regular files, returns the file stem (without extension).
 /// For directories, returns the full directory name (preserving dots like `photos.v1`).
+///
+/// Uses `symlink_metadata` (lstat) rather than `Path::is_dir` so a
+/// symlink that races into place between the upstream
+/// `validate_encrypt_input` symlink check and this lookup cannot be
+/// followed to a directory and silently change the chosen output
+/// name. The downstream `open_no_follow` would still abort the
+/// archive step, but defending here keeps the directory-vs-file
+/// classification honest. Falls back to the file branch when
+/// `symlink_metadata` fails (e.g. NotFound after a race), letting
+/// the subsequent `file_stem` surface the real error.
 pub fn encryption_base_name(path: impl AsRef<Path>) -> Result<String, CryptoError> {
     let path = path.as_ref();
-    if path.is_dir() {
+    let is_real_dir = std::fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_dir())
+        .unwrap_or(false);
+    if is_real_dir {
         Ok(path
             .file_name()
             .ok_or_else(|| CryptoError::InvalidInput("Cannot get directory name".to_string()))?

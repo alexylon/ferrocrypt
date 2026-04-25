@@ -190,6 +190,57 @@ fn test_symmetric_wrong_password() -> Result<(), CryptoError> {
     Ok(())
 }
 
+/// Appending bytes to a finished `.fcr` file must fail closed at the
+/// public API level. STREAM-BE32's per-chunk nonce binding rejects the
+/// append as a tampered final chunk, so the user-visible variant is
+/// `PayloadTampered`. The dedicated `ExtraDataAfterPayload` variant
+/// covers the orthogonal "pathological reader signals EOF then yields
+/// more bytes" case, which is unreachable through a path-based API
+/// (`File`'s `Read` impl does not violate the trait contract that way)
+/// — that branch is exercised by `streaming_aead_extra_data_after_final_chunk_rejected`
+/// in `common.rs::tests` via a custom `Read` wrapper, and the
+/// `From<io::Error>` mapping is locked in by
+/// `stream_error_markers_map_to_typed_variants` in `error.rs::tests`.
+/// Together these three tests form the regression coverage for the
+/// trailing-data probe wiring; this integration test pins the
+/// realistic file-with-appended-bytes shape through the public API.
+#[test]
+fn test_symmetric_appended_bytes_fail_closed_at_public_api() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("symmetric_appended_bytes");
+    let input_file = test_dir.join("payload.bin");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    // Multi-chunk plaintext so the final partial chunk is short and
+    // the appended bytes land alongside it inside `decrypt_last`'s
+    // input buffer (the realistic on-disk shape for an attacker
+    // tacking bytes onto a finished `.fcr`).
+    let big_data: Vec<u8> = (0..200_000u32).map(|i| (i % 256) as u8).collect();
+    fs::write(&input_file, &big_data)?;
+
+    let passphrase = SecretString::from("appended_pass".to_string());
+    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+
+    let encrypted_path = encrypt_dir.join("payload.fcr");
+    let mut ct = fs::read(&encrypted_path)?;
+    ct.extend_from_slice(b"garbage-appended-by-attacker");
+    fs::write(&encrypted_path, &ct)?;
+
+    match symmetric_auto(
+        &encrypted_path,
+        &decrypt_dir,
+        &passphrase,
+        None,
+        None,
+        |_| {},
+    ) {
+        Err(CryptoError::PayloadTampered) => Ok(()),
+        other => panic!("expected PayloadTampered for appended bytes, got {other:?}"),
+    }
+}
+
 #[test]
 fn test_symmetric_payload_tamper_mid_chunk() -> Result<(), CryptoError> {
     // Flipping a byte inside a ciphertext chunk (not the header) must

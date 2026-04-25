@@ -544,12 +544,28 @@ pub struct KeyGenOutcome {
 
 /// Reads the header prefix of an `.fcr` file and returns the encryption mode.
 ///
-/// Returns `Ok(None)` if the file is clearly not a FerroCrypt file.
-/// Returns `Err(InvalidFormat)` if the file appears to be a FerroCrypt file
-/// (starts with the magic byte pattern) but the header is malformed or
-/// truncated — this prevents corrupted `.fcr` files from being silently
-/// re-encrypted.
+/// Returns `Ok(None)` if the file is clearly not a FerroCrypt file
+/// (no two-of-three magic-byte majority in the replicated prefix
+/// positions, or a directory). Returns `Ok(Some(EncryptionMode))`
+/// for a structurally valid v1 `.fcr` prefix.
+///
+/// Returns `Err(InvalidFormat)` if the file claims to be a
+/// FerroCrypt file (the magic-byte heuristic matches) but its
+/// prefix fails any of the structural checks the decrypt path
+/// would apply: truncation, replication non-canonicity, oversized
+/// `ext_len`, unknown `type`, or unsupported `version`. This means
+/// the routing pre-check enforces the same invariants as the
+/// canonical decrypt path — bit-rotten or attacker-tampered files
+/// fail with their specific structural diagnostic at detection
+/// time instead of being routed into a decrypt that would fail
+/// with the same error a moment later.
+///
 /// Returns `Err(Io)` if the file cannot be opened or read.
+///
+/// **Detection is structural, not cryptographic.** A canonical
+/// prefix that would later fail envelope unwrap, HMAC verification,
+/// or payload AEAD still returns `Ok(Some(_))` here — those are
+/// post-key-material checks that require running the full decrypt.
 pub fn detect_encryption_mode(
     file_path: impl AsRef<Path>,
 ) -> Result<Option<EncryptionMode>, CryptoError> {
@@ -587,30 +603,29 @@ pub fn detect_encryption_mode(
         }
     }
 
+    // Below the magic-claim threshold → not a FerroCrypt file →
+    // route to plaintext encrypt with `Ok(None)`. Once the magic
+    // gate passes, `Ok(None)` is no longer reachable: a magic-
+    // claiming file must surface as a valid prefix or a typed
+    // error.
+    if !has_encoded_magic(&buf, filled) {
+        return Ok(None);
+    }
+
     if filled < buf.len() {
-        if has_encoded_magic(&buf, filled) {
-            return Err(CryptoError::InvalidFormat(FormatDefect::Truncated));
-        }
-        return Ok(None);
+        return Err(CryptoError::InvalidFormat(FormatDefect::Truncated));
     }
-    let Ok(prefix) = replication::decode(&buf) else {
-        if has_encoded_magic(&buf, filled) {
-            return Err(CryptoError::InvalidFormat(FormatDefect::CorruptedHeader));
-        }
-        return Ok(None);
-    };
-    // Logical prefix layout (v1): magic(4) | version(1) | type(1) | ext_len(2).
-    if prefix.len() < format::HEADER_PREFIX_SIZE || prefix[0..4] != format::MAGIC {
-        return Ok(None);
-    }
-    let type_byte = prefix[5];
-    match type_byte {
-        format::TYPE_SYMMETRIC => Ok(Some(EncryptionMode::Symmetric)),
-        format::TYPE_HYBRID => Ok(Some(EncryptionMode::Hybrid)),
-        _ => Err(CryptoError::InvalidFormat(FormatDefect::UnknownType {
-            type_byte,
-        })),
-    }
+
+    // Full read with magic claim → MUST parse as a canonical
+    // v1 prefix. `parse_header_for_detection` runs the same
+    // canonicity / version / `ext_len` checks the decrypt path
+    // applies, so a bit-rotten or future-version file surfaces
+    // its specific diagnostic immediately.
+    let header = format::parse_header_for_detection(&buf)?;
+    Ok(Some(match header.format_type {
+        format::EncryptedFileType::Symmetric => EncryptionMode::Symmetric,
+        format::EncryptedFileType::Hybrid => EncryptionMode::Hybrid,
+    }))
 }
 
 /// Returns `true` only when every replication copy position (offsets 3,
@@ -663,14 +678,37 @@ pub fn decode_recipient(recipient: &str) -> Result<[u8; 32], CryptoError> {
 ///
 /// Checks magic bytes, version, type, algorithm, `ext_len` bound, and
 /// total file size. Does **not** attempt to decrypt the key (no
-/// passphrase needed).
+/// passphrase needed). If the caller accidentally points this at a
+/// text `public.key`, the friendly
+/// [`FormatDefect::WrongKeyFileType`] surfaces instead of a generic
+/// `NotAKeyFile`.
 pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError> {
     let data = std::fs::read(key_file.as_ref()).map_err(hybrid::map_user_path_io_error)?;
-    if hybrid::is_valid_public_key_file(&data) {
+    if matches!(
+        hybrid::KeyFileKind::classify(&data),
+        hybrid::KeyFileKind::Public
+    ) {
         return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
     }
     let header = format::parse_private_key_header(&data)?;
     hybrid::validate_private_key_shape(&data, &header)
+}
+
+/// Validates that a file is a well-formed FerroCrypt `public.key`
+/// text file.
+///
+/// Checks the canonical `fcr1…` recipient string grammar (Bech32
+/// checksum, HRP, algorithm byte, key-material length). Does
+/// **not** require any passphrase. If the caller accidentally
+/// points this at a binary `private.key`, the friendly
+/// [`FormatDefect::WrongKeyFileType`] surfaces instead of a UTF-8
+/// decode error.
+///
+/// Symmetric to [`validate_private_key_file`]; thin wrapper
+/// around [`PublicKey::from_key_file`] + [`PublicKey::validate`]
+/// for callers who already have a path and want a free function.
+pub fn validate_public_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError> {
+    PublicKey::from_key_file(key_file).validate()
 }
 
 /// Returns the default encrypted filename for a given input path (e.g. `"secrets.fcr"`).
@@ -833,6 +871,127 @@ pub fn generate_key_pair(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Builds a canonical 27-byte on-disk prefix from a logical
+    /// 8-byte prefix — three zero pads followed by three identical
+    /// copies. Used by the `detect_encryption_mode` regression
+    /// tests to construct fixtures without depending on the
+    /// `replication::encode` private API or the fuzz-exports
+    /// feature flag.
+    fn canonical_on_disk(logical: &[u8; format::HEADER_PREFIX_SIZE]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(format::HEADER_PREFIX_ENCODED_SIZE);
+        out.extend_from_slice(&[0, 0, 0]);
+        out.extend_from_slice(logical);
+        out.extend_from_slice(logical);
+        out.extend_from_slice(logical);
+        out
+    }
+
+    /// Writes a 27-byte prefix to a fresh tempfile, calls
+    /// [`detect_encryption_mode`], and returns the result. Saves
+    /// every prefix-shape detection test from declaring its own
+    /// `tempfile` boilerplate.
+    fn detect_from_prefix(prefix: &[u8]) -> Result<Option<EncryptionMode>, CryptoError> {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), prefix).unwrap();
+        detect_encryption_mode(tmp.path())
+    }
+
+    /// Canonical Symmetric / Hybrid prefixes parse cleanly and
+    /// route to the matching mode. Anchors the happy path so the
+    /// strict-validation regressions below have a baseline.
+    #[test]
+    fn detect_encryption_mode_routes_canonical_prefixes() {
+        let sym = canonical_on_disk(&format::build_header_prefix(format::TYPE_SYMMETRIC, 0));
+        assert_eq!(
+            detect_from_prefix(&sym).unwrap(),
+            Some(EncryptionMode::Symmetric)
+        );
+
+        let hyb = canonical_on_disk(&format::build_header_prefix(format::TYPE_HYBRID, 0));
+        assert_eq!(
+            detect_from_prefix(&hyb).unwrap(),
+            Some(EncryptionMode::Hybrid)
+        );
+    }
+
+    /// A flipped byte inside one of the three replicated copies
+    /// still recovers the logical prefix via majority vote, but
+    /// the on-disk bytes are no longer canonical. Detection MUST
+    /// surface that as `CorruptedPrefix` immediately rather than
+    /// returning `Ok(Some(Symmetric))` and deferring the rejection
+    /// to `symmetric_decrypt`. Closes the L-3 routing-vs-decrypt
+    /// gap.
+    #[test]
+    fn detect_encryption_mode_rejects_non_canonical_replica() {
+        let mut on_disk =
+            canonical_on_disk(&format::build_header_prefix(format::TYPE_SYMMETRIC, 0));
+        // Flip one byte inside the middle copy (offset 12 = 3
+        // pads + copy_0(8) + byte 1 of copy_1).
+        on_disk[12] ^= 0xFF;
+        match detect_from_prefix(&on_disk) {
+            Err(CryptoError::InvalidFormat(FormatDefect::CorruptedPrefix { decoded_view })) => {
+                assert_eq!(decoded_view[0..4], format::MAGIC);
+                assert_eq!(decoded_view[5], format::TYPE_SYMMETRIC);
+            }
+            other => panic!("expected CorruptedPrefix at detect, got {other:?}"),
+        }
+    }
+
+    /// A future v2 file (version byte = 2) with otherwise-canonical
+    /// shape MUST surface `UnsupportedVersion::NewerFile` at detect
+    /// time so the CLI / desktop can render the "Upgrade FerroCrypt"
+    /// diagnostic without paying for an attempted decrypt.
+    #[test]
+    fn detect_encryption_mode_rejects_newer_version() {
+        let mut logical = format::build_header_prefix(format::TYPE_SYMMETRIC, 0);
+        logical[4] = 2;
+        let on_disk = canonical_on_disk(&logical);
+        match detect_from_prefix(&on_disk) {
+            Err(CryptoError::UnsupportedVersion(UnsupportedVersion::NewerFile { version: 2 })) => {}
+            other => panic!("expected UnsupportedVersion::NewerFile(2), got {other:?}"),
+        }
+    }
+
+    /// An unknown type byte (neither Symmetric nor Hybrid) MUST
+    /// surface `UnknownType` at detect time. Pre-existing behaviour;
+    /// kept as a regression guard now that the detection path runs
+    /// the strict parser.
+    #[test]
+    fn detect_encryption_mode_rejects_unknown_type() {
+        let mut logical = format::build_header_prefix(format::TYPE_SYMMETRIC, 0);
+        logical[5] = 0x5A;
+        let on_disk = canonical_on_disk(&logical);
+        match detect_from_prefix(&on_disk) {
+            Err(CryptoError::InvalidFormat(FormatDefect::UnknownType { type_byte: 0x5A })) => {}
+            other => panic!("expected UnknownType(0x5A), got {other:?}"),
+        }
+    }
+
+    /// `ext_len` over the 32 KiB structural cap MUST surface
+    /// `ExtTooLarge` at detect time. Pre-strict implementation
+    /// would silently route to decrypt and let the cap fire there.
+    #[test]
+    fn detect_encryption_mode_rejects_ext_len_over_bound() {
+        let logical = format::build_header_prefix(format::TYPE_SYMMETRIC, format::EXT_LEN_MAX + 1);
+        let on_disk = canonical_on_disk(&logical);
+        match detect_from_prefix(&on_disk) {
+            Err(CryptoError::InvalidFormat(FormatDefect::ExtTooLarge { .. })) => {}
+            other => panic!("expected ExtTooLarge, got {other:?}"),
+        }
+    }
+
+    /// A non-FerroCrypt file (no two-of-three magic majority)
+    /// must still route to `Ok(None)` so the encrypt path can
+    /// treat it as plaintext. The strict-detection refactor must
+    /// not regress this.
+    #[test]
+    fn detect_encryption_mode_returns_none_for_non_fcr_file() {
+        let plaintext = b"this is just a regular text file with no magic at all";
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), plaintext).unwrap();
+        assert_eq!(detect_encryption_mode(tmp.path()).unwrap(), None);
+    }
 
     /// L-4 regression: a short random file that happens to have `0xFC` at
     /// bytes 3 and 11 must not be misclassified as a truncated `.fcr`. The

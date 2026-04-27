@@ -47,33 +47,50 @@ Repository layout:
 
 | Module | Role |
 |---|---|
-| `lib.rs` | Public API: config-struct operation surface (`symmetric_encrypt` / `symmetric_decrypt` / `hybrid_encrypt` / `hybrid_decrypt` / `generate_key_pair`) plus their `*Config` / `*Outcome` types, the `PublicKey` / `PrivateKey` / `ProgressEvent` abstractions, `detect_encryption_mode`, path validation |
-| `symmetric.rs` | Passphrase → Argon2id → HKDF-SHA3-256 → `wrap_key`; wraps a per-file random `file_key` via XChaCha20-Poly1305; derives `payload_key` + `header_key` from `file_key` via HKDF-SHA3-256; streaming encrypt/decrypt. |
-| `hybrid.rs` | X25519 ECDH → HKDF-SHA3-256 → `wrap_key`; same file-key indirection + post-unwrap subkey derivation as symmetric. Also owns the `private.key` (passphrase-wrapped, binary) and `public.key` (UTF-8 text file carrying `fcr1…`) handling, plus Bech32 recipient-string encode/decode. |
+| `lib.rs` | Public API: config-struct operation surface (`symmetric_encrypt` / `symmetric_decrypt` / `hybrid_encrypt` / `hybrid_decrypt` / `generate_key_pair`) plus their `*Config` / `*Outcome` types, the `PublicKey` / `PrivateKey` / `ProgressEvent` abstractions, `detect_encryption_mode`, path validation. |
+| `symmetric.rs` | Passphrase encrypt/decrypt: emits / consumes a single `argon2id` recipient entry. Per-file random `file_key`; subkey derivation; STREAM payload; ten-step decrypt acceptance order per `FORMAT.md` §3.7. |
+| `hybrid.rs` | X25519 encrypt/decrypt: emits a single `x25519` recipient entry; decrypt iterates supported `x25519` slots in declared order. Owns `read_public_key` (text), `open_x25519_private_key` (binary, passphrase-wrapped via `private_key.rs`), `KeyFileKind::classify` (cheap pub/priv heuristic), and `validate_private_key_shape` (re-exported via `fuzz_exports`). |
+| `recipients/mod.rs` | `NativeRecipientType` (Argon2id / X25519), `RecipientEntry` framing (`type_name_len(2) || recipient_flags(2) || body_len(4) || type_name || body`), `MixingPolicy` (Exclusive / PublicKeyMixable), `enforce_recipient_mixing_policy`, `classify_encryption_mode`, `validate_type_name` (`FORMAT.md` §3.3 grammar), `parse_recipient_entries`. Ships per-type submodules `argon2id.rs` and `x25519.rs` that own the body layout, wrap/unwrap, and HKDF info string for that recipient. Adding a new native recipient is a new submodule plus a `NativeRecipientType` variant. |
+| `encrypted_file.rs` | Single source of truth for `.fcr` header build/parse: `HeaderReadLimits`, `ParsedEncryptedHeader`, `BuiltEncryptedHeader`, `read_encrypted_header`, `build_encrypted_header`. Header MAC is computed/verified by `format::compute_header_mac` / `verify_header_mac`; this module includes the MAC tag in the on-disk byte stream and the parsed result, but the caller is responsible for verifying it after a successful recipient unwrap. |
+| `private_key.rs` | v1 `private.key` byte layout (`PrivateKeyHeader`, `PRIVATE_KEY_HEADER_FIXED_SIZE = 90`), `seal_private_key`, `open_private_key`, `OpenedPrivateKey`. Cleartext fields are bound as AEAD AAD; AEAD cannot distinguish wrong-passphrase from tampered-cleartext, both surface as `KeyFileUnlockFailed`. |
+| `public_key.rs` | v1 `public.key` Bech32 grammar (`encode_recipient_string`, `decode_recipient_string`, `DecodedRecipient`, `RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT`), internal SHA3-256 typed-payload checksum domain-separated from the BIP 173 checksum, fingerprint helper (`fingerprint_hex` over `type_name \|\| key_material`). |
 | `archiver.rs` | TAR archive/unarchive (streaming, preserves directory structure). Owns `validate_encrypt_input`, the per-entry rule set (reject symlinks and non-regular/non-directory inputs); the encrypt entry points in `lib.rs` call this up-front so Argon2id never fires for a symlink, and `archive` re-runs it as defense-in-depth. Hardlinks are archived as regular files. Decryption writes under an `.incomplete` working name throughout and renames to the final name on success; failure leaves the `.incomplete` on disk for inspection. On Linux and macOS, extraction is anchored at a directory file descriptor and uses `openat`/`mkdirat` with `O_NOFOLLOW` to defeat local symlink/component-race attacks. |
-| `format.rs` | v1 format constants, 8-byte prefix layout, `private.key` cleartext header, replicated-prefix encode/decode with canonicity check (`decode_and_canonicalize_prefix`), `build_encoded_header_prefix` helper. |
-| `replication.rs` | Triple-replication `encode` / `decode` / `decode_exact` primitives used only for the 8-byte `.fcr` prefix. Body fields are stored raw in v1. |
-| `common.rs` | Shared: `EncryptWriter`/`DecryptReader` streaming adapters (**64 KiB** chunks), HMAC-SHA3-256 helpers, `KdfParams`, `KdfLimit`, HKDF-SHA3-256 expansion helper, file-key derivation (`generate_file_key`, `seal_file_key`, `open_file_key`, `derive_subkeys`, `derive_passphrase_wrap_key`), canonical TLV validator (`validate_tlv`), pinned HKDF info-string constants (`HKDF_INFO_SYM_WRAP`, `HKDF_INFO_HYB_WRAP`, `HKDF_INFO_PRIVATE_KEY_WRAP`, `HKDF_INFO_PAYLOAD`, `HKDF_INFO_HEADER`), random-bytes helpers (`random_bytes`, `random_secret`). |
-| `error.rs` | `CryptoError` enum, grouped by concern: filesystem/input (`Io`, `InputPath`, `InvalidInput`), format/version (`InvalidFormat`, `UnsupportedVersion`), KDF/work (`KeyDerivation`, `InvalidKdfParams`, `ExcessiveWork`), authentication (`KeyFileUnlockFailed`, `SymmetricEnvelopeUnlockFailed`, `HybridEnvelopeUnlockFailed`, `HeaderTampered`, `PayloadTampered`, `PayloadTruncated`, `ExtraDataAfterPayload`), primitives (`SliceConversion`), internal invariants (`InternalInvariant`, `InternalCryptoFailure`). Also defines the crate-private `StreamError` marker used to thread decrypt-path failures from `DecryptReader`/`EncryptWriter` through `io::Error` back into typed `CryptoError` variants via a manual `From<io::Error>` impl. |
+| `format.rs` | v1 format constants and primitives: `MAGIC`, `VERSION`, `Kind` (`KIND_ENCRYPTED = 0x45 'E'`, `KIND_PRIVATE_KEY = 0x4B 'K'`), `PREFIX_SIZE = 12`, `HEADER_FIXED_SIZE = 31`, `HEADER_MAC_SIZE = 32`, structural caps (`HEADER_LEN_MAX`, `RECIPIENT_COUNT_MAX`, `BODY_LEN_MAX`, `EXT_LEN_MAX`) and matching `*_LOCAL_CAP_DEFAULT` resource caps, `Prefix` / `HeaderFixed` parse+build, `compute_header_mac` / `verify_header_mac`. |
+| `common.rs` | Shared: `EncryptWriter`/`DecryptReader` streaming adapters (**64 KiB** chunks; FORMAT.md §5 deferred-last-chunk rule for writers, one-byte peek-ahead for readers), HMAC-SHA3-256 helpers (`hmac_sha3_256_parts`, `hmac_sha3_256_parts_verify`), `KdfParams`, `KdfLimit`, HKDF-SHA3-256 expansion helper, file-key derivation (`generate_file_key`, `derive_subkeys`, `derive_passphrase_wrap_key`), canonical TLV validator (`validate_tlv`), pinned HKDF info-string constants (`HKDF_INFO_PRIVATE_KEY_WRAP`, `HKDF_INFO_PAYLOAD`, `HKDF_INFO_HEADER`; per-recipient wrap infos live in the recipient submodules), `random_bytes`. |
+| `error.rs` | `CryptoError` enum, grouped by concern: filesystem/input (`Io`, `InputPath`, `InvalidInput`), format/version (`InvalidFormat(FormatDefect)`, `UnsupportedVersion`), KDF/resource caps (`KeyDerivation`, `InvalidKdfParams`, `KdfResourceCapExceeded`, `HeaderLenCapExceeded`, `RecipientCountCapExceeded`, `RecipientBodyCapExceeded`, `RecipientStringCapExceeded`), authentication (`KeyFileUnlockFailed`, `RecipientUnwrapFailed { type_name }`, `HeaderTampered`, `HeaderMacFailedAfterUnwrap { type_name }`, `UnknownCriticalRecipient { type_name }`, `NoSupportedRecipient`, `PassphraseRecipientMixed`, `PayloadTampered`, `PayloadTruncated`, `ExtraDataAfterPayload`), internal invariants (`InternalInvariant`, `InternalCryptoFailure`). `FormatDefect` is the structural-defect taxonomy (`BadMagic`, `Truncated`, `ExtTooLarge { len: u32 }`, `MalformedTlv`, `UnknownCriticalTag`, `NotAKeyFile`, `WrongKeyFileType`, `MalformedPublicKey`, `WrongKind { kind }`, `MalformedHeader`, `OversizedHeader { header_len }`, `RecipientCountOutOfRange`, `MalformedTypeName`, `MalformedRecipientEntry`, `RecipientFlagsReserved`, `MalformedPrivateKey`). Also defines the crate-private `StreamError` marker used to thread decrypt-path failures from `DecryptReader`/`EncryptWriter` through `io::Error` back into typed `CryptoError` variants via a manual `From<io::Error>` impl. |
 
 ### Encryption Pipeline (v1)
 
 ```
 Input file/dir
-  → derive wrap_key (passphrase → Argon2id → HKDF-SHA3-256 for symmetric;
-                     X25519 ECDH → HKDF-SHA3-256 for hybrid)
-  → generate random 32-byte file_key
-  → seal file_key with wrap_key (XChaCha20-Poly1305) → wrapped_file_key
+  → generate random 32-byte file_key + 19-byte stream_nonce
   → derive payload_key + header_key from file_key (HKDF-SHA3-256)
-  → build header (replicated prefix + mode envelope + stream_nonce + ext_bytes + HMAC)
-  → write header to output .fcr file
-  → tar::Builder<EncryptWriter<File>> streams TAR data through XChaCha20-Poly1305
-    directly to disk, keyed by payload_key
+  → for each recipient: wrap file_key into a recipient body
+       argon2id: passphrase → Argon2id → HKDF → wrap_key → seal file_key
+       x25519:   ECDH(ephemeral, recipient_pubkey) → HKDF → wrap_key → seal file_key
+  → build header (prefix(12) || header_fixed(31) || recipient_entries(N) || ext_bytes)
+  → HMAC-SHA3-256 over (prefix || header_fixed || recipient_entries || ext_bytes)
+    with header_key → header_mac(32)
+  → write prefix || header || header_mac to output .fcr file
+  → tar::Builder<EncryptWriter<File>> streams TAR data through
+    XChaCha20-Poly1305 STREAM-BE32 directly to disk, keyed by payload_key
 ```
 
-No plaintext intermediate files touch disk. The TAR archive is never materialized — it streams directly through the encryption layer.
+No plaintext intermediate files touch disk. The TAR archive is never materialized — it streams directly through the encryption layer. The `EncryptWriter` defers committing a full chunk until either more plaintext arrives (then `encrypt_next`) or `finish()` is called (then `encrypt_last`), so a non-empty plaintext whose length is an exact multiple of 65,536 ends with a full-size FINAL chunk, not a stray empty trailer (`FORMAT.md` §5).
 
-Decryption reverses (FORMAT.md §4.8 eight-step order): read + canonicity-check prefix → read fixed header → validate KDF params → unwrap file_key via envelope AEAD (wrong passphrase / wrong key → `*EnvelopeUnlockFailed`) → derive header_key + payload_key → verify HMAC (tamper outside envelope → `HeaderTampered`) → validate TLV after authentication → DecryptReader streams ciphertext through XChaCha20-Poly1305 → tar::Archive unpacks directly.
+Decryption reverses (`FORMAT.md` §3.7 acceptance order):
+
+1. read + structurally validate the header (`encrypted_file::read_encrypted_header`); local caps enforced before any allocation.
+2. `recipients::classify_encryption_mode` — reject unknown-critical entries, enforce `argon2id` exclusivity (before any KDF).
+3. iterate supported recipient slots in declared order:
+   - flags-zero / body-len shape check;
+   - per-recipient `unwrap` (Argon2id for `argon2id`, ECDH for `x25519`);
+   - on success, derive `payload_key + header_key` from the candidate `file_key`;
+   - `format::verify_header_mac` is the FINAL acceptance gate (per-candidate failure → `HeaderMacFailedAfterUnwrap { type_name }`, loop continues).
+4. validate TLV `ext_bytes` (`common::validate_tlv`) AFTER MAC verify, so the validator operates on authenticated bytes.
+5. `DecryptReader` streams ciphertext through XChaCha20-Poly1305 STREAM-BE32, peek-ahead resolves "exact-N final chunk" vs "exact-N then more data"; `tar::Archive` unpacks the result.
+
+A single-recipient MAC failure surfaces as `HeaderTampered` (the loop has no further candidates); list-exhaustion without success surfaces as `NoSupportedRecipient`.
 
 ### Desktop App Structure
 
@@ -86,34 +103,54 @@ Decryption reverses (FORMAT.md §4.8 eight-step order): read + canonicity-check 
 
 See `ferrocrypt-lib/FORMAT.md` for the full byte-level spec. Summary:
 
-**`.fcr` 8-byte logical prefix (27 bytes on disk, triple-replicated):**
-`[magic(4) "FCR\0"][version(1)=0x01][type(1)][ext_len_be16]`
+**`.fcr` 12-byte plain prefix at offset 0:**
+`magic(4) "FCR\0" || version(1)=0x01 || kind(1)=0x45 'E' || prefix_flags(2) || header_len(4)`
 
-- Type `0x53` ('S') = symmetric, `0x48` ('H') = hybrid
-- Replication scope is **only** the prefix. Body fields (envelope, stream_nonce, ext_bytes, HMAC tag, ciphertext) are stored raw.
-- Canonicity is enforced before HMAC: readers majority-decode the logical prefix, re-encode canonically, and reject `CorruptedPrefix` if on-disk ≠ canonical. The decoded view is returned in the error so upgrade diagnostics still surface on a bit-rotten file.
-- HMAC-SHA3-256 authenticates: `on_disk_prefix(27) || envelope(104/116) || stream_nonce(19) || ext_bytes`.
-- Forward compatibility: ignorable TLV tags in `ext_bytes` are authenticated + skipped; critical tags (`0x8001..=0xFFFF`) are rejected as `UnknownCriticalTag`. See FORMAT.md §6.
+- `kind = 0x45 'E'` for any encrypted file. The symmetric-vs-hybrid distinction is **not** in the prefix; it's derived from the recipient list (one `argon2id` entry → Symmetric; one or more supported `x25519` entries → Hybrid).
+- `prefix_flags` MUST be zero in v1; non-zero rejects as `MalformedHeader`.
+- `header_len <= HEADER_LEN_MAX` (16 MiB structural). Local resource cap (`HEADER_LEN_LOCAL_CAP_DEFAULT`, 1 MiB) rejects oversized declarations as `HeaderLenCapExceeded` before allocation.
 
-**Mode envelopes (raw, not replicated):**
-- Symmetric (116 B): `argon2_salt(32) || kdf_params(12) || wrap_nonce(24) || wrapped_file_key(48)`
-- Hybrid (104 B): `ephemeral_pubkey(32) || wrap_nonce(24) || wrapped_file_key(48)`
+**Header layout (right after the prefix):**
 
-**File-key indirection:** both modes wrap a random per-file 32-byte `file_key`. `payload_key` and `header_key` are derived from `file_key` via HKDF-SHA3-256 (`info = "ferrocrypt/v1/payload"` with salt = `stream_nonce`; `info = "ferrocrypt/v1/header"` with empty salt). Identical post-unwrap shape across modes; future PQ hybrids plug in as new `type` bytes without touching anything downstream.
+```
+header_fixed(31) || recipient_entries(recipient_entries_len bytes)
+                || ext_bytes(ext_len bytes) || header_mac(32)
+```
+
+`header_fixed = header_flags(2) || recipient_count(2) || recipient_entries_len(4) || ext_len(4) || stream_nonce(19)`. HMAC-SHA3-256 with `header_key` authenticates `prefix(12) || header_fixed || recipient_entries || ext_bytes` (32-byte tag = `header_mac`). Forward compatibility: ignorable TLV tags in `ext_bytes` are authenticated + skipped; critical tags (`0x8001..=0xFFFF`) are rejected as `UnknownCriticalTag`. See `FORMAT.md` §6.
+
+**Recipient entry framing** (`FORMAT.md` §3.5):
+
+```
+recipient_entry = type_name_len(2) || recipient_flags(2) || body_len(4)
+                  || type_name (UTF-8, validated against §3.3 grammar)
+                  || body (opaque to framing; per-recipient module parses it)
+```
+
+`recipient_flags` defines bit 0 as `critical`; all other bits MUST be zero in v1.
+
+**Native recipient bodies** (v1 ships two native types):
+
+- `argon2id` (116 B): `argon2_salt(32) || kdf_params(12) || wrap_nonce(24) || wrapped_file_key(48)`. `MixingPolicy::Exclusive` — must appear alone.
+- `x25519` (104 B): `ephemeral_pubkey(32) || wrap_nonce(24) || wrapped_file_key(48)`. `MixingPolicy::PublicKeyMixable` — multiple `x25519` slots allowed in one file (decrypt iterates).
+
+**File-key indirection:** every recipient body seals the same per-file random 32-byte `file_key`. After unwrap, `payload_key` and `header_key` are derived from `file_key` via HKDF-SHA3-256 (`info = "ferrocrypt/v1/payload"` with salt = `stream_nonce`; `info = "ferrocrypt/v1/header"` with empty salt). Identical post-unwrap shape across recipient types; future native types (post-quantum, hybrid KEMs) plug in as new `RecipientEntry` `type_name`s without touching the header-MAC scope or the payload pipeline.
+
+**Payload (`FORMAT.md` §5):** XChaCha20-Poly1305 STREAM-BE32 over 64 KiB plaintext chunks. Writers MUST NOT emit an empty trailing chunk after non-empty plaintext that ends on a 65,536-byte boundary; the final non-empty chunk uses `last_flag = 1`. Empty plaintext is encoded as a single tag-only `last` chunk.
 
 ### Key File Format (v1)
 
-**`public.key`** is a **UTF-8 text file** containing exactly one line: the canonical `fcr1…` Bech32 recipient string, optionally followed by a single trailing LF. No binary header. Copy-paste integrity via BIP 173 checksum (6 characters); identity verification is out-of-band via the fingerprint. Bech32 payload: `algorithm(1) || public_key_material(32)` = 33 bytes for X25519. Total file size ~64 bytes.
+**`public.key`** is a **UTF-8 text file** containing exactly one line: the canonical lowercase `fcr1…` Bech32 recipient string, optionally followed by a single trailing LF (any other surrounding whitespace rejects as `MalformedPublicKey`). The Bech32 payload carries a typed body `type_name_len(2) || key_material_len(4) || type_name || key_material` plus an internal SHA3-256 checksum (in addition to the BIP 173 checksum), domain-separated so cross-algorithm collisions are impossible. For X25519 the file is ~107 bytes on disk. Identity verification is out-of-band via the SHA3-256 fingerprint of `type_name || key_material`.
 
-**`private.key`** v1 (125 bytes when `ext_len = 0`):
-- Cleartext header (9 B): `[magic(4) "FCR\0"][version(1)=0x01][type(1)=0x4B 'K'][algorithm(1)=0x01][ext_len_be16]`
-- Fixed body (68 B): `argon2_salt(32) || kdf_params(12) || wrap_nonce(24)`
-- Variable: `ext_bytes(ext_len)`
-- Wrapped private key (48 B): 32-byte ciphertext + 16-byte Poly1305 tag
-- Every cleartext byte before `wrapped_privkey` is bound as AEAD **associated data**, so tampering any cleartext field fails authentication. AEAD cannot distinguish "wrong passphrase" from "tampered cleartext" — both surface as `CryptoError::KeyFileUnlockFailed` with wording `"Private key unlock failed: wrong passphrase or tampered file"`.
+**`private.key`** v1 (176 bytes for X25519 with `ext_len = 0`):
+- Cleartext fixed header (90 B): `magic(4) || version(1) || kind(1)=0x4B 'K' || key_flags(2) || type_name_len(2) || public_len(4) || ext_len(4) || wrapped_secret_len(4) || argon2_salt(32) || kdf_params(12) || wrap_nonce(24)`
+- Variable fields (right after the fixed header): `type_name(type_name_len) || public_material(public_len) || ext_bytes(ext_len)`
+- Wrapped secret (`wrapped_secret_len` bytes): `secret_material(secret_len) || Poly1305_tag(16)`
+- Every cleartext byte before `wrapped_secret` is bound as AEAD **associated data**, so tampering any cleartext field fails authentication. AEAD cannot distinguish "wrong passphrase" from "tampered cleartext" — both surface as `CryptoError::KeyFileUnlockFailed` with wording `"Private key unlock failed: wrong passphrase or tampered file"`.
 - Wrap-key derivation: `HKDF-SHA3-256(salt=argon2_salt, ikm=Argon2id(passphrase, argon2_salt, kdf_params), info="ferrocrypt/v1/private-key/wrap", L=32)`.
-- Type byte is `0x4B` ('K'), not `0x53` — `file(1)`-style matchers can disambiguate `private.key` from symmetric `.fcr` by a single byte.
-- Forward compatibility: TLV tags in `ext_bytes` authenticated via AEAD-AAD. Validated after successful AEAD unwrap.
+- `kind = 0x4B` ('K') is deliberately distinct from the encrypted-file `kind = 0x45` ('E') so `file(1)`-style matchers and the in-tree `KeyFileKind::classify` heuristic can disambiguate `private.key` from `.fcr` on a single byte.
+- The `type_name` field is the recipient discriminator (no separate algorithm byte). v1 ships `"x25519"`; future native key kinds (post-quantum, hybrid KEMs) extend the `type_name` set without touching the header layout.
+- Forward compatibility: TLV tags in `ext_bytes` are authenticated via AEAD-AAD. Validated after successful AEAD unwrap.
 
 ## Key Conventions
 
@@ -125,7 +162,7 @@ See `ferrocrypt-lib/FORMAT.md` for the full byte-level spec. Summary:
 - Bech32 `fcr1…` recipient strings are the human-readable public-key exchange format. The typed entry point is `PublicKey::from_recipient_string(&str)` or `"fcr1…".parse::<PublicKey>()` (see the key-source abstractions bullet above); `decode_recipient(&str) -> [u8; 32]` is kept as the low-level primitive for the `fuzz_recipient_decode` fuzz target and callers that specifically want raw bytes.
 - CLI `hybrid --recipient / -r` accepts a `fcr1...` string directly for encryption. `recipient` (alias `rc`) subcommand prints the string from a key file.
 - CLI never accepts passphrases as command-line arguments. Passphrases are prompted interactively via `rpassword` (hidden TTY input) with confirmation on encrypt/keygen. For non-interactive use (tests, scripts), set the `FERROCRYPT_PASSPHRASE` environment variable.
-- Integration tests use `tests/workspace/` as a temp directory, cleaned up by a `#[ctor::dtor]` hook. CLI integration tests use `FERROCRYPT_PASSPHRASE` env var to supply passphrases non-interactively. Integration tests pull `symmetric_auto` / `hybrid_auto` / `generate_key_pair` shims from a shared `tests/common/mod.rs` module — these preserve a stable positional-arg call shape around the config API so existing test call sites don't churn. Low-level format mechanics (prefix encoding, header parsing, envelope unwrap, version/algorithm rejection, recipient decoding) are exercised by in-module unit tests (`src/symmetric.rs::tests`, `src/hybrid.rs::tests`, `src/format.rs::tests`, `src/common.rs::tests`).
+- Integration tests use `tests/workspace/` as a temp directory, cleaned up by a `#[ctor::dtor]` hook. CLI integration tests use `FERROCRYPT_PASSPHRASE` env var to supply passphrases non-interactively. Integration tests pull `symmetric_auto` / `hybrid_auto` / `generate_key_pair` shims from a shared `tests/common/mod.rs` module — these preserve a stable positional-arg call shape around the config API so existing test call sites don't churn. Low-level format mechanics (prefix parsing, `header_fixed` parsing, recipient-entry framing, recipient unwrap, version / kind rejection, TLV grammar, public-key Bech32 + internal SHA3-256 checksum, `private.key` shape) are exercised by in-module unit tests (`src/format.rs::tests`, `src/encrypted_file.rs::tests`, `src/recipients/mod.rs::tests`, `src/recipients/argon2id.rs::tests`, `src/recipients/x25519.rs::tests`, `src/private_key.rs::tests`, `src/public_key.rs::tests`, `src/common.rs::tests`, `src/symmetric.rs::tests`, `src/hybrid.rs::tests`). The forward-compat multi-recipient cases (FORMAT.md §3.4 / §3.5) are covered by `src/hybrid.rs::tests::multi_*`, which build hand-crafted multi-entry `.fcr` bytes via `encrypted_file::build_encrypted_header` since the public encrypt API is single-recipient.
 - `ENCRYPTED_EXTENSION` (`"fcr"`) is re-exported from `format.rs`.
 
 ## Non-Negotiable Rules
@@ -160,3 +197,4 @@ See `ferrocrypt-lib/FORMAT.md` for the full byte-level spec. Summary:
     - supply chain (if `Cargo.toml` / `Cargo.lock` changed): `cargo vet` — mirrors the `vet` job in `.github/workflows/rust.yml` so local runs catch failures before GitHub CI does. Requires `cargo install --locked cargo-vet` once.
 - Before finishing, review the change with adversarial thinking and future-proofing in mind.
 - Never commit or stage changes with Git.
+- Never manually bump `version` in any `Cargo.toml`. Versioning is automated; see `RELEASE.md`.

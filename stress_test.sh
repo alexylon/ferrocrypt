@@ -428,16 +428,12 @@ $FC symmetric -i "$WORKDIR/small.txt" -o "$corr2_enc" 2>/dev/null
 CORR2_FILE="$corr2_enc/small.fcr"
 python3 -c "
 data = bytearray(open('$CORR2_FILE', 'rb').read())
-# The 4-byte magic starts at logical prefix offset 0; corrupt the first
-# magic byte across 2 of 3 replicated copies.
-# Encoded prefix: [pad(3)] [copy0(8)] [copy1(8)] [copy2(8)]
-data[3] ^= 0xFF   # copy 0
-data[11] ^= 0xFF  # copy 1
+# v1 prefix: magic(4) || version(1) || kind(1) || prefix_flags(2) || header_len(4)
+# Corrupt the first magic byte so detection no longer routes the file to
+# decrypt; it routes to encrypt (treated as plaintext).
+data[0] ^= 0xFF
 open('$CORR2_FILE', 'wb').write(data)
 "
-# With 2 of 3 copies corrupted at the first magic byte, majority vote yields
-# the corrupted value → file is not detected as FerroCrypt → routes to encrypt
-# (not decrypt). The file is treated as a normal input and encrypted successfully.
 run_test "sym: corrupted magic encrypts (not detected as FerroCrypt)" \
     $FC symmetric -i "$CORR2_FILE" -o "$corr2_dec"
 # Truncated file (cut at half)
@@ -528,45 +524,44 @@ $FC symmetric -i "$WORKDIR/1mb.bin" -o "$hdr_src" 2>/dev/null
 HDR_FILE="$hdr_src/1mb.fcr"
 HDR_SIZE=$(stat -f%z "$HDR_FILE" 2>/dev/null || stat -c%s "$HDR_FILE" 2>/dev/null)
 
-# Flip major version (logical prefix byte 2) in 2 of 3 replicated copies
-# Encoded prefix: [pad(3)] [copy0(8)] [copy1(8)] [copy2(8)]
+# Flip the version byte (v1 prefix byte 4). Decryption rejects with
+# UnsupportedVersion / InvalidFormat before any KDF runs.
 cp "$HDR_FILE" "$WORKDIR/corrupt_version.fcr"
 python3 -c "
 data = bytearray(open('$WORKDIR/corrupt_version.fcr', 'rb').read())
-data[3 + 2] ^= 0xFF   # copy 0, major version
-data[11 + 2] ^= 0xFF  # copy 1, major version
+data[4] ^= 0x10
 open('$WORKDIR/corrupt_version.fcr', 'wb').write(data)
 "
 run_test_expect_fail "sym: corrupted version byte rejects" \
     $FC symmetric -i "$WORKDIR/corrupt_version.fcr" -o "$hdr_dec"
-# Flip header length bytes (logical prefix bytes 4-5) in all 3 replicated copies
-# Encoded prefix: [pad(3)] [copy0(8)] [copy1(8)] [copy2(8)]
+
+# Flip a byte in header_len (v1 prefix bytes 8..=11). Either parses as an
+# oversized declared length and rejects with OversizedHeader, or as a
+# truncation and rejects with MalformedHeader / Truncated. Either way,
+# decrypt fails before any crypto runs.
 cp "$HDR_FILE" "$WORKDIR/corrupt_hdrlen.fcr"
 python3 -c "
 data = bytearray(open('$WORKDIR/corrupt_hdrlen.fcr', 'rb').read())
-for copy_start in [3, 11, 19]:
-    data[copy_start + 4] ^= 0xFF
-    data[copy_start + 5] ^= 0xFF
+data[8] ^= 0xFF
 open('$WORKDIR/corrupt_hdrlen.fcr', 'wb').write(data)
 "
 run_test_expect_fail "sym: corrupted header length rejects" \
     $FC symmetric -i "$WORKDIR/corrupt_hdrlen.fcr" -o "$hdr_dec"
-# Corrupt the same salt byte in all three replicated copies so majority vote
-# cannot recover the original, causing HMAC mismatch.
-# Symmetric header: [prefix(27)] [encoded_salt(99)] ...
-# encoded_salt layout: [padding(3)] [copy0(32)] [copy1(32)] [copy2(32)]
-cp "$HDR_FILE" "$WORKDIR/corrupt_hmac.fcr"
+
+# Corrupt a byte inside the argon2id recipient body's argon2_salt. The
+# argon2_salt lives at file offset PREFIX_SIZE(12) + HEADER_FIXED_SIZE(31)
+# + ENTRY_HEADER_SIZE(8) + len("argon2id")(8) = 59. Tampering yields a
+# different wrap_key, so AEAD-decrypt of wrapped_file_key fails with
+# RecipientUnwrapFailed{argon2id} — verifying that recipient bodies are
+# under MAC scope but unwrap-failure surfaces before MAC verify.
+cp "$HDR_FILE" "$WORKDIR/corrupt_salt.fcr"
 python3 -c "
-data = bytearray(open('$WORKDIR/corrupt_hmac.fcr', 'rb').read())
-base = 27  # start of encoded_salt (after 27-byte encoded prefix)
-byte_pos = 5  # which salt byte to corrupt
-data[base + 3 + byte_pos] ^= 0xFF           # copy 0
-data[base + 3 + 32 + byte_pos] ^= 0xFF      # copy 1
-data[base + 3 + 64 + byte_pos] ^= 0xFF      # copy 2
-open('$WORKDIR/corrupt_hmac.fcr', 'wb').write(data)
+data = bytearray(open('$WORKDIR/corrupt_salt.fcr', 'rb').read())
+data[59] ^= 0xFF
+open('$WORKDIR/corrupt_salt.fcr', 'wb').write(data)
 "
-run_test_expect_fail "sym: corrupted header data (HMAC mismatch) rejects" \
-    $FC symmetric -i "$WORKDIR/corrupt_hmac.fcr" -o "$hdr_dec"
+run_test_expect_fail "sym: corrupted argon2_salt rejects" \
+    $FC symmetric -i "$WORKDIR/corrupt_salt.fcr" -o "$hdr_dec"
 echo ""
 
 # ──────────────────────────────────────────────

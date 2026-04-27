@@ -531,12 +531,6 @@ notes = "Single unsafe usage that looks sound, no ambient capabilities"
 
 [audits.fermyon.audits]
 
-[[audits.google.audits.base64]]
-who = "amarjotgill <amarjotgill@google.com>"
-criteria = "safe-to-deploy"
-version = "0.22.1"
-aggregated-from = "https://chromium.googlesource.com/chromium/src/+/main/third_party/rust/chromium_crates_io/supply-chain/audits.toml?format=TEXT"
-
 [[audits.google.audits.bitflags]]
 who = "Lukasz Anforowicz <lukasza@chromium.org>"
 criteria = "safe-to-deploy"

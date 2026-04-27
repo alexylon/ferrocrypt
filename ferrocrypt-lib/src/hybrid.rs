@@ -1242,4 +1242,315 @@ mod tests {
         }
         Ok(())
     }
+
+    // ─── Forward-compat multi-recipient tests (FORMAT.md §3.4 / §3.5) ───
+    //
+    // The single-recipient public encrypt API can't produce multi-recipient
+    // files, so these tests build the on-disk bytes by hand using
+    // `encrypted_file::build_encrypted_header` and exercise the decrypt
+    // path against the resulting fixtures. They lock in the rules
+    // `MIGRATION.md §1.10` calls out: list iteration on `x25519`, skip
+    // unknown non-critical, reject unknown critical, reject argon2id
+    // mixing before any KDF runs, enforce the local body cap on unknown
+    // entries.
+
+    use crate::common::{derive_subkeys, generate_file_key, random_bytes};
+    use crate::recipients::{
+        NativeRecipientType, RECIPIENT_FLAG_CRITICAL, RecipientEntry, argon2id, x25519,
+    };
+    use chacha20poly1305::aead::stream;
+
+    /// Build a complete `.fcr` byte sequence with the given recipient
+    /// entries and plaintext. The caller has already wrapped `file_key`
+    /// for each entry that actually needs to unwrap; entries with
+    /// arbitrary bodies (synthetic unknown types, hostile mixes) are
+    /// kept verbatim.
+    fn build_multi_recipient_fcr(
+        entries: &[RecipientEntry],
+        file_key: &Zeroizing<[u8; 32]>,
+        plaintext: &[u8],
+        path: &Path,
+    ) -> Result<(), CryptoError> {
+        let stream_nonce = random_bytes::<STREAM_NONCE_SIZE>();
+        let (payload_key, header_key) = derive_subkeys(file_key, &stream_nonce)?;
+
+        let built =
+            crate::encrypted_file::build_encrypted_header(entries, b"", stream_nonce, &header_key)?;
+
+        // Encrypt the TAR payload into a separate buffer so the
+        // `EncryptWriter`'s mutable borrow over the buffer is released
+        // before we concatenate. `EncryptWriter::finish` consumes the
+        // writer and returns the inner `W`; binding to `_` drops it
+        // and the embedded `&mut payload_buf`.
+        let mut payload_buf: Vec<u8> = Vec::new();
+        {
+            let cipher = XChaCha20Poly1305::new(payload_key.as_ref().into());
+            let stream_encryptor =
+                stream::EncryptorBE32::from_aead(cipher, stream_nonce.as_ref().into());
+            let writer = EncryptWriter::new(stream_encryptor, &mut payload_buf);
+            let mut tar_builder = tar::Builder::new(writer);
+            let mut header = tar::Header::new_ustar();
+            header.set_path("data.txt").map_err(CryptoError::Io)?;
+            header.set_size(plaintext.len() as u64);
+            header.set_mode(0o644);
+            header.set_mtime(0);
+            header.set_cksum();
+            tar_builder
+                .append(&header, plaintext)
+                .map_err(CryptoError::Io)?;
+            tar_builder.finish().map_err(CryptoError::Io)?;
+            let writer = tar_builder.into_inner().map_err(CryptoError::Io)?;
+            let _ = writer.finish()?;
+        }
+
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(&built.prefix_bytes);
+        buf.extend_from_slice(&built.header_bytes);
+        buf.extend_from_slice(&built.header_mac);
+        buf.extend_from_slice(&payload_buf);
+        fs::write(path, &buf)?;
+        Ok(())
+    }
+
+    /// Generates an X25519 keypair, persists a v1 `private.key` for
+    /// it, and returns `(public_bytes, private_key_path, passphrase)`.
+    fn keypair_fixture(
+        keys_dir: &Path,
+        label: &str,
+        pass: &str,
+    ) -> Result<([u8; 32], PathBuf, SecretString), CryptoError> {
+        let pass = SecretString::from(pass.to_string());
+        let dir = keys_dir.join(label);
+        fs::create_dir_all(&dir)?;
+        let (privkey_path, pubkey_path) = generate_key_pair(&pass, &dir, &|_| {})?;
+        let pub_bytes = read_public_key(&pubkey_path)?;
+        Ok((pub_bytes, privkey_path, pass))
+    }
+
+    /// 1-entry round-trip is already covered by `encrypt_decrypt_round_trip`
+    /// above. This case exercises **two** supported `x25519` recipients
+    /// in the same file: the decrypt loop must iterate the list and
+    /// accept whichever slot the caller's private key matches. Per
+    /// `FORMAT.md` §3.7, the candidate is final only after the header
+    /// MAC also verifies against the unwrapped `file_key`.
+    #[test]
+    fn multi_x25519_decrypts_via_either_recipient() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let keys_dir = tmp.path().join("keys");
+        let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
+        let (pub_b, priv_b, pass_b) = keypair_fixture(&keys_dir, "bob", "bob-pass")?;
+
+        let file_key = generate_file_key();
+        let body_a = x25519::wrap(&file_key, &pub_a)?;
+        let body_b = x25519::wrap(&file_key, &pub_b)?;
+        let entries = [
+            RecipientEntry::native(NativeRecipientType::X25519, body_a.to_vec())?,
+            RecipientEntry::native(NativeRecipientType::X25519, body_b.to_vec())?,
+        ];
+
+        let payload = b"two-x25519 round trip";
+        let fcr = tmp.path().join("multi.fcr");
+        build_multi_recipient_fcr(&entries, &file_key, payload, &fcr)?;
+
+        for (label, privkey, pass) in [("alice", &priv_a, &pass_a), ("bob", &priv_b, &pass_b)] {
+            let dec_dir = tmp.path().join(format!("decrypted-{label}"));
+            fs::create_dir_all(&dec_dir)?;
+            decrypt_file(&fcr, &dec_dir, privkey, pass, None, &|_| {})?;
+            let restored = fs::read(dec_dir.join("data.txt"))?;
+            assert_eq!(
+                restored, payload,
+                "{label} should decrypt the same plaintext"
+            );
+        }
+        Ok(())
+    }
+
+    /// One supported `x25519` recipient plus one unknown non-critical
+    /// recipient: the decrypt loop must skip the unknown entry and
+    /// decrypt via the supported one. Entry order matters here — we
+    /// place the unknown FIRST to prove the loop doesn't bail out on
+    /// the first unsupported entry it sees.
+    #[test]
+    fn multi_x25519_plus_unknown_non_critical_skips_unknown() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let keys_dir = tmp.path().join("keys");
+        let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
+
+        let file_key = generate_file_key();
+        let body_a = x25519::wrap(&file_key, &pub_a)?;
+        let unknown_entry = RecipientEntry {
+            type_name: "example.com/unknown".to_string(),
+            recipient_flags: 0,
+            body: vec![0xCDu8; 64],
+        };
+        let entries = [
+            unknown_entry,
+            RecipientEntry::native(NativeRecipientType::X25519, body_a.to_vec())?,
+        ];
+
+        let payload = b"skip unknown non-critical";
+        let fcr = tmp.path().join("skip.fcr");
+        build_multi_recipient_fcr(&entries, &file_key, payload, &fcr)?;
+
+        let dec_dir = tmp.path().join("decrypted");
+        fs::create_dir_all(&dec_dir)?;
+        decrypt_file(&fcr, &dec_dir, &priv_a, &pass_a, None, &|_| {})?;
+        let restored = fs::read(dec_dir.join("data.txt"))?;
+        assert_eq!(restored, payload);
+        Ok(())
+    }
+
+    /// One supported `x25519` recipient plus one unknown CRITICAL
+    /// recipient: the file MUST be rejected as
+    /// `UnknownCriticalRecipient` before any recipient unwrap or KDF
+    /// runs. Per `FORMAT.md` §3.4, an implementation that doesn't
+    /// recognise a critical entry cannot safely process the file.
+    #[test]
+    fn multi_unknown_critical_rejected_before_any_unwrap() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let keys_dir = tmp.path().join("keys");
+        let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
+
+        let file_key = generate_file_key();
+        let body_a = x25519::wrap(&file_key, &pub_a)?;
+        let unknown_critical = RecipientEntry {
+            type_name: "example.com/critical".to_string(),
+            recipient_flags: RECIPIENT_FLAG_CRITICAL,
+            body: vec![0u8; 32],
+        };
+        let entries = [
+            RecipientEntry::native(NativeRecipientType::X25519, body_a.to_vec())?,
+            unknown_critical,
+        ];
+
+        let fcr = tmp.path().join("critical.fcr");
+        build_multi_recipient_fcr(&entries, &file_key, b"x", &fcr)?;
+
+        let dec_dir = tmp.path().join("decrypted");
+        fs::create_dir_all(&dec_dir)?;
+        match decrypt_file(&fcr, &dec_dir, &priv_a, &pass_a, None, &|_| {}) {
+            Err(CryptoError::UnknownCriticalRecipient { ref type_name })
+                if type_name == "example.com/critical" =>
+            {
+                Ok(())
+            }
+            other => {
+                panic!("expected UnknownCriticalRecipient(example.com/critical), got {other:?}")
+            }
+        }
+    }
+
+    /// Mixing `argon2id` with any other recipient (here `x25519`) MUST
+    /// be rejected as `PassphraseRecipientMixed` BEFORE Argon2id runs.
+    /// Per `FORMAT.md` §3.4, `argon2id` is `MixingPolicy::Exclusive`;
+    /// the structural rejection prevents a hostile file from forcing
+    /// expensive KDF work.
+    ///
+    /// The `argon2id` body here is synthetic (the right length but
+    /// arbitrary bytes) to prove rejection happens without ever
+    /// calling `argon2id::unwrap`. If the mixing-policy check were
+    /// dropped, the test would still fail later — but with an AEAD
+    /// rather than a structural error.
+    #[test]
+    fn multi_argon2id_plus_x25519_rejected_as_mixed() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let keys_dir = tmp.path().join("keys");
+        let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
+
+        let file_key = generate_file_key();
+        let body_x = x25519::wrap(&file_key, &pub_a)?;
+        let synthetic_argon2id = RecipientEntry {
+            type_name: argon2id::TYPE_NAME.to_string(),
+            recipient_flags: 0,
+            body: vec![0u8; argon2id::BODY_LENGTH],
+        };
+        let entries = [
+            synthetic_argon2id,
+            RecipientEntry::native(NativeRecipientType::X25519, body_x.to_vec())?,
+        ];
+
+        let fcr = tmp.path().join("mixed.fcr");
+        build_multi_recipient_fcr(&entries, &file_key, b"x", &fcr)?;
+
+        let dec_dir = tmp.path().join("decrypted");
+        fs::create_dir_all(&dec_dir)?;
+        match decrypt_file(&fcr, &dec_dir, &priv_a, &pass_a, None, &|_| {}) {
+            Err(CryptoError::PassphraseRecipientMixed) => Ok(()),
+            other => panic!("expected PassphraseRecipientMixed, got {other:?}"),
+        }
+    }
+
+    /// An unknown non-critical recipient whose body sits **at** the
+    /// local cap must be accepted (and skipped); a recipient whose
+    /// body sits **above** the cap must be rejected as a resource-cap
+    /// violation, not silently skipped. Otherwise an attacker could
+    /// pad a file with one supported entry plus one 60 MiB "unknown"
+    /// entry to DoS readers that "skip" unknowns blindly.
+    #[test]
+    fn multi_unknown_body_at_local_cap_decrypts() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let keys_dir = tmp.path().join("keys");
+        let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
+
+        let file_key = generate_file_key();
+        let body_a = x25519::wrap(&file_key, &pub_a)?;
+        let unknown_at_cap = RecipientEntry {
+            type_name: "example.com/at-cap".to_string(),
+            recipient_flags: 0,
+            body: vec![0xAB; format::BODY_LEN_LOCAL_CAP_DEFAULT as usize],
+        };
+        let entries = [
+            unknown_at_cap,
+            RecipientEntry::native(NativeRecipientType::X25519, body_a.to_vec())?,
+        ];
+
+        let fcr = tmp.path().join("at-cap.fcr");
+        build_multi_recipient_fcr(&entries, &file_key, b"at-cap payload", &fcr)?;
+
+        let dec_dir = tmp.path().join("decrypted");
+        fs::create_dir_all(&dec_dir)?;
+        decrypt_file(&fcr, &dec_dir, &priv_a, &pass_a, None, &|_| {})?;
+        Ok(())
+    }
+
+    #[test]
+    fn multi_unknown_body_above_local_cap_rejected() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let keys_dir = tmp.path().join("keys");
+        let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
+
+        let file_key = generate_file_key();
+        let body_a = x25519::wrap(&file_key, &pub_a)?;
+        let oversize = (format::BODY_LEN_LOCAL_CAP_DEFAULT as usize) + 1;
+        let unknown_oversize = RecipientEntry {
+            type_name: "example.com/oversize".to_string(),
+            recipient_flags: 0,
+            body: vec![0xAB; oversize],
+        };
+        let entries = [
+            unknown_oversize,
+            RecipientEntry::native(NativeRecipientType::X25519, body_a.to_vec())?,
+        ];
+
+        let fcr = tmp.path().join("oversize.fcr");
+        build_multi_recipient_fcr(&entries, &file_key, b"x", &fcr)?;
+
+        // The parser rejects on body-len cap before recipient unwrap
+        // runs, so the private key never gets exercised in this case;
+        // we still pass valid credentials to prove the rejection
+        // happens in the structural-parse stage rather than later.
+        let dec_dir = tmp.path().join("decrypted");
+        fs::create_dir_all(&dec_dir)?;
+        match decrypt_file(&fcr, &dec_dir, &priv_a, &pass_a, None, &|_| {}) {
+            Err(CryptoError::RecipientBodyCapExceeded {
+                body_len,
+                local_cap,
+            }) => {
+                assert_eq!(body_len as usize, oversize);
+                assert_eq!(local_cap, format::BODY_LEN_LOCAL_CAP_DEFAULT);
+                Ok(())
+            }
+            other => panic!("expected RecipientBodyCapExceeded, got {other:?}"),
+        }
+    }
 }

@@ -107,9 +107,15 @@ impl KdfParams {
     const MAX_TIME_COST: u32 = 12;
     const MAX_LANES: u32 = 8;
 
-    pub fn from_bytes(
+    /// Structural-only parse: validates lanes, time_cost, and mem_cost
+    /// against the v1 absolute structural bounds (`MAX_LANES`,
+    /// `MAX_TIME_COST`, `MAX_MEM_COST`). Does **not** apply any caller
+    /// resource policy — call [`enforce_limit`](Self::enforce_limit) on
+    /// the result for that. `pub(crate)` deliberately: external callers
+    /// must go through [`from_bytes`](Self::from_bytes), which always
+    /// applies the policy gate, so a missed call cannot bypass the cap.
+    pub(crate) fn from_bytes_structural(
         bytes: &[u8; KDF_PARAMS_SIZE],
-        limit: Option<&KdfLimit>,
     ) -> Result<Self, CryptoError> {
         let params = Self {
             mem_cost: u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
@@ -132,22 +138,35 @@ impl KdfParams {
                 params.time_cost,
             )));
         }
+        Ok(params)
+    }
 
-        // `None` means "no explicit caller limit", but the library still
-        // applies its own default ceiling so callers cannot be silently
-        // exposed to attacker-controlled 2 GiB allocations just because
-        // they did not set `.kdf_limit(...)` on their config.
+    /// Applies the caller-supplied resource cap on top of structurally
+    /// valid params. `None` means "no explicit caller limit", but the
+    /// library still applies its own default ceiling
+    /// (`DEFAULT_MEM_COST`, 1 GiB) so callers cannot be silently exposed
+    /// to attacker-controlled 2 GiB allocations just because they did
+    /// not set `.kdf_limit(...)` on their config. `pub(crate)`
+    /// deliberately: pairs with [`from_bytes_structural`] and is not
+    /// part of the stable public API.
+    pub(crate) fn enforce_limit(self, limit: Option<&KdfLimit>) -> Result<Self, CryptoError> {
         let effective_max = limit
             .map(|l| l.max_mem_cost_kib)
             .unwrap_or(Self::DEFAULT_MEM_COST);
-        if params.mem_cost > effective_max {
+        if self.mem_cost > effective_max {
             return Err(CryptoError::KdfResourceCapExceeded {
-                mem_cost_kib: params.mem_cost,
+                mem_cost_kib: self.mem_cost,
                 local_cap_kib: effective_max,
             });
         }
+        Ok(self)
+    }
 
-        Ok(params)
+    pub fn from_bytes(
+        bytes: &[u8; KDF_PARAMS_SIZE],
+        limit: Option<&KdfLimit>,
+    ) -> Result<Self, CryptoError> {
+        Self::from_bytes_structural(bytes)?.enforce_limit(limit)
     }
 
     pub fn hash_passphrase(

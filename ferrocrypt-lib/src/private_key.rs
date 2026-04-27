@@ -162,10 +162,12 @@ impl PrivateKeyHeader {
         let mut kdf_params_bytes = [0u8; KDF_PARAMS_SIZE];
         kdf_params_bytes
             .copy_from_slice(&bytes[KDF_PARAMS_OFFSET..KDF_PARAMS_OFFSET + KDF_PARAMS_SIZE]);
-        // Structural KDF-parameter validation (lanes, time_cost, mem_cost
-        // upper/lower structural bounds). Caller-supplied resource limit
-        // is applied separately in `open_private_key`.
-        let kdf_params = KdfParams::from_bytes(&kdf_params_bytes, None)?;
+        // Structural KDF-parameter validation only (lanes, time_cost,
+        // mem_cost against v1 absolute bounds). Caller-supplied resource
+        // policy is applied separately in `open_private_key` so a
+        // caller's explicit higher `KdfLimit` is not silently overridden
+        // by the library's default ceiling at parse time.
+        let kdf_params = KdfParams::from_bytes_structural(&kdf_params_bytes)?;
         let mut wrap_nonce = [0u8; WRAP_NONCE_SIZE];
         wrap_nonce.copy_from_slice(&bytes[WRAP_NONCE_OFFSET..WRAP_NONCE_OFFSET + WRAP_NONCE_SIZE]);
         Ok(Self {
@@ -321,11 +323,14 @@ pub fn open_private_key(
         .ok_or_else(malformed_private_key)?;
     let header = PrivateKeyHeader::parse(header_bytes)?;
 
-    // Re-validate kdf_params against the caller's resource limit. The
-    // structural validation in `parse` only enforces the library's
-    // hard ceiling (2 GiB mem); this call surfaces the caller-tighter
-    // limit as `KdfResourceCapExceeded` before any Argon2id work runs.
-    KdfParams::from_bytes(&header.kdf_params.to_bytes(), kdf_limit)?;
+    // Apply the caller's resource policy. `parse` only enforces the
+    // v1 absolute structural ceiling (2 GiB mem); this surfaces the
+    // caller's `KdfLimit` (or the library default of 1 GiB when the
+    // caller passed `None`) as `KdfResourceCapExceeded` before any
+    // Argon2id work runs. Without this split, a structurally valid
+    // header in the 1–2 GiB band could not be unlocked even when the
+    // caller explicitly opted into a higher limit.
+    header.kdf_params.enforce_limit(kdf_limit)?;
 
     if header.wrapped_secret_len > local_wrapped_secret_cap {
         return Err(malformed_private_key());
@@ -644,6 +649,28 @@ mod tests {
             Err(CryptoError::InvalidKdfParams(InvalidKdfParams::MemoryCost(_))) => {}
             other => panic!("expected InvalidKdfParams::MemoryCost, got {other:?}"),
         }
+    }
+
+    /// `parse` performs structural validation only: a `mem_cost` above
+    /// the library's default policy ceiling (1 GiB) but within the v1
+    /// structural maximum (2 GiB) MUST parse cleanly. The caller-
+    /// supplied resource policy is applied separately in
+    /// `open_private_key` so a caller that opts into a higher
+    /// `KdfLimit` is not silently overridden by the library default at
+    /// parse time. This test never runs Argon2id; it only exercises the
+    /// structural-vs-policy split.
+    #[test]
+    fn parse_accepts_structural_kdf_above_default_policy_cap() {
+        let high_but_structural = KdfParams {
+            mem_cost: KdfParams::MAX_MEM_COST,
+            time_cost: 1,
+            lanes: 1,
+        };
+        let mut bytes = sample_header_bytes();
+        bytes[KDF_PARAMS_OFFSET..KDF_PARAMS_OFFSET + KDF_PARAMS_SIZE]
+            .copy_from_slice(&high_but_structural.to_bytes());
+        let parsed = PrivateKeyHeader::parse(&bytes).expect("structural parse must accept");
+        assert_eq!(parsed.kdf_params.mem_cost, KdfParams::MAX_MEM_COST);
     }
 
     #[test]

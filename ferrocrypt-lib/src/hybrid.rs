@@ -319,7 +319,13 @@ pub fn decrypt_file(
 /// - [`FormatDefect::WrongKeyFileType`] for a private.key that wraps a
 ///   non-X25519 secret (e.g. a future native key kind)
 /// - [`FormatDefect::MalformedPrivateKey`] for a structurally valid
-///   private.key whose decrypted secret has the wrong length for X25519
+///   private.key whose authenticated `public_material` is not 32 bytes,
+///   whose decrypted `secret_material` is not 32 bytes, or whose
+///   stored public material does not match
+///   `X25519(secret_material, basepoint)` (the FORMAT.md §8 native
+///   recipient-specific check)
+/// - [`FormatDefect::MalformedTlv`] / [`FormatDefect::UnknownCriticalTag`]
+///   for malformed or unknown-critical entries in `ext_bytes`
 fn open_x25519_private_key(
     path: &Path,
     passphrase: &SecretString,
@@ -346,6 +352,12 @@ fn open_x25519_private_key(
         return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
     }
 
+    let public_material: [u8; crate::recipients::x25519::PUBKEY_SIZE] = opened
+        .public_material
+        .as_slice()
+        .try_into()
+        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey))?;
+
     if opened.secret_material.len() != crate::recipients::x25519::PRIVATE_KEY_SIZE {
         return Err(CryptoError::InvalidFormat(
             FormatDefect::MalformedPrivateKey,
@@ -359,6 +371,21 @@ fn open_x25519_private_key(
 
     let mut secret = Zeroizing::new([0u8; crate::recipients::x25519::PRIVATE_KEY_SIZE]);
     secret.copy_from_slice(&opened.secret_material);
+
+    // FORMAT.md §8: native X25519 readers MUST compute
+    // X25519(secret_material, basepoint) and reject unless the result
+    // exactly equals the authenticated `public_material`. AEAD-AAD
+    // already authenticated `public_material` against tampering, but a
+    // file produced by a buggy or malicious writer can still seal a
+    // mismatched pair; this check rejects that case before the secret
+    // is ever used to unwrap a recipient body.
+    let derived_public = PublicKey::from(&StaticSecret::from(*secret));
+    if derived_public.as_bytes() != &public_material {
+        return Err(CryptoError::InvalidFormat(
+            FormatDefect::MalformedPrivateKey,
+        ));
+    }
+
     Ok(secret)
 }
 
@@ -1146,6 +1173,73 @@ mod tests {
             crate::validate_private_key_file(&missing),
             Err(CryptoError::InputPath)
         ));
+    }
+
+    /// FORMAT.md §8 mandates that native X25519 readers compute
+    /// `X25519(secret_material, basepoint)` and reject the file unless
+    /// the result equals the authenticated `public_material`. AEAD-AAD
+    /// authentication alone cannot catch a structurally valid
+    /// `private.key` whose two halves were sealed inconsistently (a
+    /// buggy or malicious writer can do this); only the native
+    /// derivation check does.
+    #[test]
+    fn open_private_key_rejects_x25519_public_secret_mismatch() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("private.key");
+        let pass = SecretString::from("pw".to_string());
+
+        let secret = StaticSecret::random_from_rng(OsRng);
+        let secret_material = secret.to_bytes();
+        let other_secret = StaticSecret::random_from_rng(OsRng);
+        let wrong_public = PublicKey::from(&other_secret);
+
+        let bytes = crate::private_key::seal_private_key(
+            &secret_material,
+            crate::recipients::x25519::TYPE_NAME,
+            wrong_public.as_bytes(),
+            &[],
+            &pass,
+            &KdfParams::default(),
+        )?;
+        fs::write(&path, bytes)?;
+
+        match open_x25519_private_key(&path, &pass, None).map(|_| ()) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => Ok(()),
+            other => {
+                panic!("expected MalformedPrivateKey for public/secret mismatch, got {other:?}")
+            }
+        }
+    }
+
+    /// A `private.key` whose `public_len` is a structurally valid value
+    /// other than 32 (the X25519 size) decodes through the generic
+    /// private-key reader, but the X25519 adapter MUST reject it: the
+    /// stored public material cannot represent an X25519 point at any
+    /// length other than 32. Surfaces as `MalformedPrivateKey`.
+    #[test]
+    fn open_private_key_rejects_x25519_public_len_mismatch() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("private.key");
+        let pass = SecretString::from("pw".to_string());
+
+        let secret = StaticSecret::random_from_rng(OsRng);
+        let secret_material = secret.to_bytes();
+        let malformed_public = [0u8; crate::recipients::x25519::PUBKEY_SIZE - 1];
+
+        let bytes = crate::private_key::seal_private_key(
+            &secret_material,
+            crate::recipients::x25519::TYPE_NAME,
+            &malformed_public,
+            &[],
+            &pass,
+            &KdfParams::default(),
+        )?;
+        fs::write(&path, bytes)?;
+
+        match open_x25519_private_key(&path, &pass, None).map(|_| ()) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => Ok(()),
+            other => panic!("expected MalformedPrivateKey for public_len mismatch, got {other:?}"),
+        }
     }
 
     /// FORMAT.md §7 accepts exactly two encodings of `public.key`:

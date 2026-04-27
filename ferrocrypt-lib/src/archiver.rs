@@ -16,6 +16,202 @@ const DEFAULT_FILE_MODE: u32 = 0o644;
 #[cfg(unix)]
 const PERMISSION_BITS_MASK: u32 = 0o777;
 
+/// Raw POSIX ustar header constants (`FORMAT.md` §9). Used by both the
+/// writer (canonical emission) and the reader (per-entry strict
+/// subset validation).
+mod ustar {
+    pub(super) const TYPEFLAG_OFFSET: usize = 156;
+    pub(super) const MAGIC_OFFSET: usize = 257;
+    pub(super) const MAGIC: &[u8; 6] = b"ustar\0";
+    pub(super) const VERSION_OFFSET: usize = 263;
+    pub(super) const VERSION: &[u8; 2] = b"00";
+
+    pub(super) const NAME_SIZE: usize = 100;
+    pub(super) const PREFIX_SIZE: usize = 155;
+    /// Maximum path length representable purely via the ustar
+    /// `name` + `/` + `prefix` fields; anything longer requires a GNU
+    /// long-name or PAX extension record, which v1 forbids.
+    pub(super) const PATH_REPRESENTABLE_MAX: usize = NAME_SIZE + 1 + PREFIX_SIZE;
+
+    pub(super) const TYPEFLAG_REGULAR_NUL: u8 = b'\0';
+    pub(super) const TYPEFLAG_REGULAR_ZERO: u8 = b'0';
+    pub(super) const TYPEFLAG_DIRECTORY: u8 = b'5';
+}
+
+/// `FORMAT.md` §9 archive subset classification for a successfully
+/// validated entry: ferrocrypt v1 recognises only regular files and
+/// directories.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UstarEntryKind {
+    File,
+    Directory,
+}
+
+/// Per-entry POSIX ustar subset validation result. `canonical_path` has
+/// any single trailing `/` from a directory entry stripped, so a file
+/// entry `foo` and a directory entry `foo/` are recognised as the same
+/// canonical output and rejected as duplicates.
+struct NormalizedEntry {
+    canonical_path: PathBuf,
+    kind: UstarEntryKind,
+}
+
+/// Validates a single TAR entry against the v1 archive subset
+/// (`FORMAT.md` §9). Catches:
+///
+/// - non-POSIX-ustar headers (GNU magic, missing `00` version);
+/// - typeflags outside `{file, directory}` (symlink, hardlink,
+///   device, fifo, GNU/PAX extension records);
+/// - GNU long-name / long-link records: when the tar crate
+///   transparently merges an extension into the next entry,
+///   `entry.path_bytes()` carries the long path while
+///   `entry.header().path_bytes()` still carries the truncated
+///   in-header name. A mismatch means an extension was applied;
+/// - empty paths, paths with NUL or `\` bytes, repeated `/`
+///   separators, paths longer than the ustar representable cap;
+/// - non-UTF-8 paths;
+/// - file entries whose path ends with `/`, directory entries
+///   whose path does not;
+/// - `.` and `..` components, absolute paths, Windows path
+///   prefixes (covered by `validate_archive_path`).
+///
+/// Known limitation: a non-path-altering PAX extended header (`'x'`
+/// typeflag carrying e.g. mtime / size attributes) is consumed by the
+/// tar crate before the entry is yielded, leaving
+/// `header_path == entry_path`. The practical impact is bounded —
+/// such attributes only affect timestamps / permissions, which
+/// extraction filters separately, and ferrocrypt's own writer never
+/// emits PAX records. A fully strict implementation would replace
+/// `tar::Archive::entries()` with a custom 512-byte-block parser.
+fn validate_ustar_entry<R: Read>(
+    entry: &mut tar::Entry<'_, R>,
+) -> Result<NormalizedEntry, CryptoError> {
+    let raw = entry.header().as_bytes();
+
+    if &raw[ustar::MAGIC_OFFSET..ustar::MAGIC_OFFSET + ustar::MAGIC.len()] != ustar::MAGIC {
+        return Err(CryptoError::InvalidInput(
+            "Archive header is not POSIX ustar".to_string(),
+        ));
+    }
+    if &raw[ustar::VERSION_OFFSET..ustar::VERSION_OFFSET + ustar::VERSION.len()] != ustar::VERSION {
+        return Err(CryptoError::InvalidInput(
+            "Archive header version is not POSIX ustar 00".to_string(),
+        ));
+    }
+
+    let typeflag = raw[ustar::TYPEFLAG_OFFSET];
+    let kind = match typeflag {
+        ustar::TYPEFLAG_REGULAR_NUL | ustar::TYPEFLAG_REGULAR_ZERO => UstarEntryKind::File,
+        ustar::TYPEFLAG_DIRECTORY => UstarEntryKind::Directory,
+        _ => {
+            return Err(CryptoError::InvalidInput(format!(
+                "Unsupported archive entry type: typeflag 0x{typeflag:02X}"
+            )));
+        }
+    };
+
+    // GNU long-name / long-link detection. The tar crate transparently
+    // consumes `'L'` / `'K'` extension records and applies the long path
+    // to the next entry's `entry.path_bytes()`, but `entry.header()`
+    // still reflects the next entry's raw header (whose `path_bytes()`
+    // returns the in-header name+prefix only). Inequality means an
+    // extension record was used. Both Cows borrow `entry` shared so the
+    // comparison runs without allocating.
+    let header_path = entry.header().path_bytes();
+    let entry_path = entry.path_bytes();
+    if *header_path != *entry_path {
+        return Err(CryptoError::InvalidInput(
+            "Archive uses GNU long-name or long-link extension".to_string(),
+        ));
+    }
+
+    let path_bytes: &[u8] = &entry_path;
+    if path_bytes.is_empty() {
+        return Err(CryptoError::InvalidInput(
+            "Empty archive entry path".to_string(),
+        ));
+    }
+    if path_bytes.len() > ustar::PATH_REPRESENTABLE_MAX {
+        return Err(CryptoError::InvalidInput(
+            "Archive path exceeds POSIX ustar representable length".to_string(),
+        ));
+    }
+    if path_bytes.contains(&b'\0') {
+        return Err(CryptoError::InvalidInput(
+            "Archive path contains NUL byte".to_string(),
+        ));
+    }
+    if path_bytes.contains(&b'\\') {
+        return Err(CryptoError::InvalidInput(
+            "Archive path contains backslash".to_string(),
+        ));
+    }
+    if path_bytes.windows(2).any(|w| w == b"//") {
+        return Err(CryptoError::InvalidInput(
+            "Archive path contains repeated slash separators".to_string(),
+        ));
+    }
+
+    let path_str = std::str::from_utf8(path_bytes)
+        .map_err(|_| CryptoError::InvalidInput("Archive path is not valid UTF-8".to_string()))?;
+
+    let ends_with_slash = path_str.ends_with('/');
+    match (kind, ends_with_slash) {
+        (UstarEntryKind::Directory, false) => {
+            return Err(CryptoError::InvalidInput(
+                "Directory entry path must end with /".to_string(),
+            ));
+        }
+        (UstarEntryKind::File, true) => {
+            return Err(CryptoError::InvalidInput(
+                "File entry path must not end with /".to_string(),
+            ));
+        }
+        _ => {}
+    }
+
+    let canonical_str = if ends_with_slash {
+        &path_str[..path_str.len() - 1]
+    } else {
+        path_str
+    };
+    for component in canonical_str.split('/') {
+        if component.is_empty() || component == "." || component == ".." {
+            return Err(CryptoError::InvalidInput(format!(
+                "Archive path has forbidden component: {path_str}"
+            )));
+        }
+    }
+
+    let canonical_path = PathBuf::from(canonical_str);
+    validate_archive_path(&canonical_path)?;
+
+    Ok(NormalizedEntry {
+        canonical_path,
+        kind,
+    })
+}
+
+/// Drains the underlying reader after the TAR entry iterator has
+/// returned `None` and verifies that every remaining byte of the
+/// authenticated plaintext is zero. Per `FORMAT.md` §9, the v1
+/// archive payload terminates with the standard two 512-byte zero
+/// blocks; any non-zero trailing byte is a malformed archive.
+fn drain_and_verify_zero_padding<R: Read>(mut reader: R) -> Result<(), CryptoError> {
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            return Ok(());
+        }
+        if buf[..n].iter().any(|&b| b != 0) {
+            return Err(CryptoError::InvalidInput(
+                "Non-zero trailing data after TAR end-of-archive marker".to_string(),
+            ));
+        }
+    }
+}
+
 /// Component-by-component no-follow extraction primitives.
 ///
 /// The hardened extraction walker anchors every operation to a directory
@@ -335,6 +531,104 @@ pub fn archive<W: Write>(
     Ok((stem, writer))
 }
 
+/// Translates a relative `archive_path` (any platform) into the
+/// canonical UTF-8 `/`-separated form required by the v1 archive
+/// subset and rejects inputs that cannot be represented in raw POSIX
+/// ustar (`name(100) || prefix(155)`). Directory paths get a single
+/// trailing `/`; file paths must not end with one.
+///
+/// `Builder::append_data` would silently fall back to a GNU long-name
+/// extension record for paths above the ustar limit; v1 forbids those,
+/// so the rejection has to happen here, before any header bytes are
+/// emitted.
+fn ustar_archive_path_string(
+    archive_path: &Path,
+    kind: UstarEntryKind,
+) -> Result<String, CryptoError> {
+    let mut joined = String::new();
+    let mut iter = archive_path.components().peekable();
+    while let Some(component) = iter.next() {
+        let part = match component {
+            Component::Normal(s) => s.to_str().ok_or_else(|| {
+                CryptoError::InvalidInput(format!(
+                    "Archive path is not valid UTF-8: {}",
+                    archive_path.display()
+                ))
+            })?,
+            _ => {
+                return Err(CryptoError::InvalidInput(format!(
+                    "Archive path has forbidden component: {}",
+                    archive_path.display()
+                )));
+            }
+        };
+        // Symmetric with the reader's `validate_ustar_entry` raw-byte
+        // checks: a Unix filename containing `\` or NUL is technically
+        // legal at the kernel level but produces an archive that v1
+        // readers MUST reject (`FORMAT.md` §9). Rejecting here keeps
+        // the writer round-trip-safe rather than emitting bytes our
+        // own reader will refuse to decrypt.
+        if part.contains('\\') || part.contains('\0') {
+            return Err(CryptoError::InvalidInput(format!(
+                "Archive path component contains forbidden byte (`\\` or NUL): {}",
+                archive_path.display()
+            )));
+        }
+        joined.push_str(part);
+        if iter.peek().is_some() {
+            joined.push('/');
+        }
+    }
+    if joined.is_empty() {
+        return Err(CryptoError::InvalidInput(
+            "Empty archive entry path".to_string(),
+        ));
+    }
+    if matches!(kind, UstarEntryKind::Directory) {
+        joined.push('/');
+    }
+    if joined.len() > ustar::PATH_REPRESENTABLE_MAX {
+        return Err(CryptoError::InvalidInput(format!(
+            "Archive path cannot be represented in POSIX ustar: {}",
+            archive_path.display()
+        )));
+    }
+    Ok(joined)
+}
+
+/// Builds a v1-conforming ustar header for one archive entry. Pulled
+/// out so `append_file` and `append_dir_entry` share the
+/// path-normalization → `new_ustar` → `set_path` → `set_entry_type` →
+/// `set_mode` → `set_cksum` sequence and the same error-message
+/// translation for paths that don't fit the ustar `name + prefix`
+/// split. `Header::set_path` would otherwise let `Builder::append_data`
+/// silently fall back to a GNU long-name extension; we use
+/// `Builder::append` at the call sites so this header is written
+/// verbatim, with no auto-extension path.
+fn build_ustar_header(
+    archive_path: &Path,
+    kind: UstarEntryKind,
+    size: u64,
+    mode: u32,
+) -> Result<tar::Header, CryptoError> {
+    let path_str = ustar_archive_path_string(archive_path, kind)?;
+    let mut header = tar::Header::new_ustar();
+    header.set_path(&path_str).map_err(|_| {
+        CryptoError::InvalidInput(format!(
+            "Archive path cannot be represented in POSIX ustar: {}",
+            archive_path.display()
+        ))
+    })?;
+    header.set_entry_type(match kind {
+        UstarEntryKind::File => tar::EntryType::Regular,
+        UstarEntryKind::Directory => tar::EntryType::Directory,
+    });
+    header.set_size(size);
+    header.set_mode(mode);
+    header.set_cksum();
+    Ok(header)
+}
+
 fn append_file<W: Write>(
     builder: &mut tar::Builder<W>,
     src_path: &Path,
@@ -348,17 +642,17 @@ fn append_file<W: Write>(
             src_path.display()
         )));
     }
-    let mut header = tar::Header::new_gnu();
-    header.set_size(metadata.len());
+
     #[cfg(unix)]
-    {
+    let mode = {
         use std::os::unix::fs::PermissionsExt;
-        header.set_mode(metadata.permissions().mode() & PERMISSION_BITS_MASK);
-    }
+        metadata.permissions().mode() & PERMISSION_BITS_MASK
+    };
     #[cfg(not(unix))]
-    header.set_mode(DEFAULT_FILE_MODE);
-    header.set_cksum();
-    builder.append_data(&mut header, archive_path, &mut file)?;
+    let mode = DEFAULT_FILE_MODE;
+
+    let header = build_ustar_header(archive_path, UstarEntryKind::File, metadata.len(), mode)?;
+    builder.append(&header, &mut file)?;
     Ok(())
 }
 
@@ -367,22 +661,20 @@ fn append_dir_entry<W: Write>(
     src_path: &Path,
     archive_path: &Path,
 ) -> Result<(), CryptoError> {
-    let mut header = tar::Header::new_gnu();
-    header.set_entry_type(tar::EntryType::Directory);
-    header.set_size(0);
     #[cfg(unix)]
-    {
+    let mode = {
         use std::os::unix::fs::PermissionsExt;
         let metadata = fs::metadata(src_path)?;
-        header.set_mode(metadata.permissions().mode() & PERMISSION_BITS_MASK);
-    }
+        metadata.permissions().mode() & PERMISSION_BITS_MASK
+    };
     #[cfg(not(unix))]
-    {
+    let mode = {
         let _ = src_path;
-        header.set_mode(0o755);
-    }
-    header.set_cksum();
-    builder.append_data(&mut header, archive_path, &mut io::empty())?;
+        0o755
+    };
+
+    let header = build_ustar_header(archive_path, UstarEntryKind::Directory, 0, mode)?;
+    builder.append(&header, io::empty())?;
     Ok(())
 }
 
@@ -473,6 +765,12 @@ pub fn unarchive<R: Read>(reader: R, output_dir: &Path) -> Result<PathBuf, Crypt
 
     extract_result?;
 
+    // FORMAT.md §9: after the TAR end-of-archive marker the rest of
+    // the authenticated plaintext MUST be zero. Drain whatever the tar
+    // crate left in the underlying reader and reject any non-zero
+    // trailing byte before promoting the `.incomplete` outputs.
+    drain_and_verify_zero_padding(archive.into_inner())?;
+
     // Rename each root from .incomplete working name to final name.
     // A failure here is an environment / I/O condition — not a library
     // invariant violation. `AlreadyExists` means the final name appeared
@@ -547,11 +845,23 @@ fn extract_entries<R: Read>(
     // Deferred directory permissions: (root name, rel path under root, mode).
     // `rel` is empty for the root directory itself.
     let mut dir_permissions: Vec<(OsString, PathBuf, u32)> = Vec::new();
+    // Canonical-path duplicate detection (`FORMAT.md` §9): a file `foo`
+    // and a directory `foo/` share the same canonical path after the one
+    // trailing slash is stripped, so they count as duplicates.
+    let mut seen_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
     for entry_result in archive.entries()? {
         let mut entry = entry_result?;
-        let path = entry.path()?.to_path_buf();
-        validate_archive_path(&path)?;
+        let normalized = validate_ustar_entry(&mut entry)?;
+        let path = normalized.canonical_path;
+        let kind = normalized.kind;
+
+        if !seen_paths.insert(path.clone()) {
+            return Err(CryptoError::InvalidInput(format!(
+                "Duplicate archive entry: {}",
+                path.display()
+            )));
+        }
 
         let first_component = path
             .components()
@@ -601,53 +911,50 @@ fn extract_entries<R: Read>(
             }
         };
 
-        let entry_type = entry.header().entry_type();
         let mut incomplete_name = root_name.clone();
         incomplete_name.push(".incomplete");
 
         // Case A: entry IS the root (single-file archive or a root-level
         // directory entry).
         if rel.as_os_str().is_empty() {
-            if entry_type.is_dir() {
-                match roots.get(&root_name) {
-                    Some(RootKind::SingleFile) => {
+            match kind {
+                UstarEntryKind::Directory => {
+                    match roots.get(&root_name) {
+                        Some(RootKind::SingleFile) => {
+                            return Err(CryptoError::InvalidInput(format!(
+                                "Archive mixes file and directory at root: {}",
+                                path.display()
+                            )));
+                        }
+                        Some(RootKind::Directory(_)) => {}
+                        None => {
+                            let fd = nofollow::mkdirat_strict(&output_fd, &incomplete_name)
+                                .map_err(|e| {
+                                    map_incomplete_create_err(e, output_dir, &incomplete_name)
+                                })?;
+                            roots.insert(root_name.clone(), RootKind::Directory(fd));
+                        }
+                    }
+                    if let Ok(mode) = entry.header().mode() {
+                        dir_permissions.push((root_name.clone(), PathBuf::new(), mode));
+                    }
+                }
+                UstarEntryKind::File => {
+                    if roots.contains_key(&root_name) {
                         return Err(CryptoError::InvalidInput(format!(
-                            "Archive mixes file and directory at root: {}",
+                            "Archive has mixed or duplicate root entries: {}",
                             path.display()
                         )));
                     }
-                    Some(RootKind::Directory(_)) => {}
-                    None => {
-                        let fd = nofollow::mkdirat_strict(&output_fd, &incomplete_name).map_err(
-                            |e| map_incomplete_create_err(e, output_dir, &incomplete_name),
-                        )?;
-                        roots.insert(root_name.clone(), RootKind::Directory(fd));
+                    let mut outfile = nofollow::create_file_at(&output_fd, &incomplete_name, 0o600)
+                        .map_err(|e| map_incomplete_create_err(e, output_dir, &incomplete_name))?;
+                    io::copy(&mut entry, &mut outfile)?;
+                    if let Ok(mode) = entry.header().mode() {
+                        nofollow::fchmod(outfile.as_fd(), mode & PERMISSION_BITS_MASK)?;
                     }
+                    drop(outfile);
+                    roots.insert(root_name.clone(), RootKind::SingleFile);
                 }
-                if let Ok(mode) = entry.header().mode() {
-                    dir_permissions.push((root_name.clone(), PathBuf::new(), mode));
-                }
-            } else if entry_type.is_file() {
-                if roots.contains_key(&root_name) {
-                    return Err(CryptoError::InvalidInput(format!(
-                        "Archive has mixed or duplicate root entries: {}",
-                        path.display()
-                    )));
-                }
-                let mut outfile = nofollow::create_file_at(&output_fd, &incomplete_name, 0o600)
-                    .map_err(|e| map_incomplete_create_err(e, output_dir, &incomplete_name))?;
-                io::copy(&mut entry, &mut outfile)?;
-                if let Ok(mode) = entry.header().mode() {
-                    nofollow::fchmod(outfile.as_fd(), mode & PERMISSION_BITS_MASK)?;
-                }
-                drop(outfile);
-                roots.insert(root_name.clone(), RootKind::SingleFile);
-            } else {
-                return Err(CryptoError::InvalidInput(format!(
-                    "Unsupported archive entry type {:?} for path: {}",
-                    entry_type,
-                    path.display()
-                )));
             }
             continue;
         }
@@ -678,29 +985,26 @@ fn extract_entries<R: Read>(
             }
         };
 
-        if entry_type.is_dir() {
-            let (parent_fd, final_name) = nofollow::walk_to_parent(root_fd, &rel)?;
-            let _dir_fd = nofollow::ensure_dir(&parent_fd, &final_name)?;
-            if let Ok(mode) = entry.header().mode() {
-                dir_permissions.push((root_name.clone(), rel, mode));
+        match kind {
+            UstarEntryKind::Directory => {
+                let (parent_fd, final_name) = nofollow::walk_to_parent(root_fd, &rel)?;
+                let _dir_fd = nofollow::ensure_dir(&parent_fd, &final_name)?;
+                if let Ok(mode) = entry.header().mode() {
+                    dir_permissions.push((root_name.clone(), rel, mode));
+                }
             }
-        } else if entry_type.is_file() {
-            let (parent_fd, final_name) = nofollow::walk_to_parent(root_fd, &rel)?;
-            // Initial mode is restrictive; the archived mode is applied
-            // via `fchmod` after writing, so plaintext is never briefly
-            // visible to unintended users.
-            let mut outfile = nofollow::create_file_at(&parent_fd, &final_name, 0o600)?;
-            io::copy(&mut entry, &mut outfile)?;
-            if let Ok(mode) = entry.header().mode() {
-                nofollow::fchmod(outfile.as_fd(), mode & PERMISSION_BITS_MASK)?;
+            UstarEntryKind::File => {
+                let (parent_fd, final_name) = nofollow::walk_to_parent(root_fd, &rel)?;
+                // Initial mode is restrictive; the archived mode is applied
+                // via `fchmod` after writing, so plaintext is never briefly
+                // visible to unintended users.
+                let mut outfile = nofollow::create_file_at(&parent_fd, &final_name, 0o600)?;
+                io::copy(&mut entry, &mut outfile)?;
+                if let Ok(mode) = entry.header().mode() {
+                    nofollow::fchmod(outfile.as_fd(), mode & PERMISSION_BITS_MASK)?;
+                }
+                drop(outfile);
             }
-            drop(outfile);
-        } else {
-            return Err(CryptoError::InvalidInput(format!(
-                "Unsupported archive entry type {:?} for path: {}",
-                entry_type,
-                path.display()
-            )));
         }
     }
 
@@ -747,11 +1051,22 @@ fn extract_entries<R: Read>(
     // deepest first, so that a restrictive parent mode (e.g. 0o500) does
     // not block creation of child entries.
     let mut dir_permissions: Vec<(PathBuf, u32)> = Vec::new();
+    // Canonical-path duplicate detection (`FORMAT.md` §9). Equivalent to
+    // the `seen_paths` set on the Linux/macOS arm.
+    let mut seen_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
     for entry_result in archive.entries()? {
         let mut entry = entry_result?;
-        let path = entry.path()?.to_path_buf();
-        validate_archive_path(&path)?;
+        let normalized = validate_ustar_entry(&mut entry)?;
+        let path = normalized.canonical_path;
+        let kind = normalized.kind;
+
+        if !seen_paths.insert(path.clone()) {
+            return Err(CryptoError::InvalidInput(format!(
+                "Duplicate archive entry: {}",
+                path.display()
+            )));
+        }
 
         let first_component = path
             .components()
@@ -806,35 +1121,33 @@ fn extract_entries<R: Read>(
 
         // Rewrite the entry path: replace the root component with {root}.incomplete
         let working_path = incomplete_entry_path(output_dir, &root_name, &path);
-        let entry_type = entry.header().entry_type();
 
-        if entry_type.is_dir() {
-            fs::create_dir_all(&working_path)?;
-            if let Ok(mode) = entry.header().mode() {
-                dir_permissions.push((working_path, mode));
-            }
-        } else if entry_type.is_file() {
-            if let Some(parent) = working_path.parent() {
-                if !parent.exists() {
-                    fs::create_dir_all(parent)?;
+        match kind {
+            UstarEntryKind::Directory => {
+                fs::create_dir_all(&working_path)?;
+                if let Ok(mode) = entry.header().mode() {
+                    dir_permissions.push((working_path, mode));
                 }
             }
-            // `create_new(true)` refuses to open a pre-existing file so a
-            // malicious archive containing duplicate entries at the same
-            // path cannot silently overwrite the first entry.
-            let mut outfile = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&working_path)?;
-            io::copy(&mut entry, &mut outfile)?;
-            drop(outfile);
-            restore_permissions(entry.header(), &working_path)?;
-        } else {
-            return Err(CryptoError::InvalidInput(format!(
-                "Unsupported archive entry type {:?} for path: {}",
-                entry_type,
-                path.display()
-            )));
+            UstarEntryKind::File => {
+                if let Some(parent) = working_path.parent() {
+                    if !parent.exists() {
+                        fs::create_dir_all(parent)?;
+                    }
+                }
+                // `create_new(true)` is now defense-in-depth — the
+                // canonical-path `seen_paths` set above already rejects
+                // duplicates per `FORMAT.md` §9, before any file is
+                // created. The `create_new` guard remains so a TOCTOU
+                // race or future refactor cannot silently overwrite.
+                let mut outfile = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&working_path)?;
+                io::copy(&mut entry, &mut outfile)?;
+                drop(outfile);
+                restore_permissions(entry.header(), &working_path)?;
+            }
         }
     }
 
@@ -900,8 +1213,9 @@ fn restore_permissions_from_mode(_mode: u32, _path: &Path) -> Result<(), CryptoE
 mod tests {
     use std::fs;
     use std::io::Cursor;
+    use std::path::PathBuf;
 
-    use crate::archiver::{archive, unarchive};
+    use crate::archiver::{UstarEntryKind, archive, unarchive, ustar, ustar_archive_path_string};
 
     #[test]
     fn archive_and_unarchive_file() {
@@ -1014,7 +1328,7 @@ mod tests {
             let mut builder = tar::Builder::new(&mut buf);
 
             let data_a = b"payload a";
-            let mut header = tar::Header::new_gnu();
+            let mut header = tar::Header::new_ustar();
             header.set_size(data_a.len() as u64);
             header.set_mode(0o644);
             header.set_cksum();
@@ -1023,7 +1337,7 @@ mod tests {
                 .unwrap();
 
             let data_b = b"payload b";
-            let mut header = tar::Header::new_gnu();
+            let mut header = tar::Header::new_ustar();
             header.set_size(data_b.len() as u64);
             header.set_mode(0o644);
             header.set_cksum();
@@ -1062,7 +1376,7 @@ mod tests {
         {
             let mut builder = tar::Builder::new(&mut buf);
 
-            let mut header = tar::Header::new_gnu();
+            let mut header = tar::Header::new_ustar();
             header.set_entry_type(tar::EntryType::Directory);
             header.set_size(0);
             header.set_mode(0o755);
@@ -1072,7 +1386,7 @@ mod tests {
                 .unwrap();
 
             let data = b"malicious payload";
-            let mut header = tar::Header::new_gnu();
+            let mut header = tar::Header::new_ustar();
             header.set_size(data.len() as u64);
             header.set_mode(0o644);
             header.set_cksum();
@@ -1103,7 +1417,7 @@ mod tests {
         {
             let mut builder = tar::Builder::new(&mut buf);
 
-            let mut header = tar::Header::new_gnu();
+            let mut header = tar::Header::new_ustar();
             header.set_entry_type(tar::EntryType::Symlink);
             header.set_size(0);
             header.set_mode(0o755);
@@ -1134,7 +1448,7 @@ mod tests {
         {
             let mut builder = tar::Builder::new(&mut buf);
 
-            let mut header = tar::Header::new_gnu();
+            let mut header = tar::Header::new_ustar();
             header.set_entry_type(tar::EntryType::Directory);
             header.set_size(0);
             header.set_mode(0o755);
@@ -1144,7 +1458,7 @@ mod tests {
                 .unwrap();
 
             let first = b"first payload";
-            let mut header = tar::Header::new_gnu();
+            let mut header = tar::Header::new_ustar();
             header.set_size(first.len() as u64);
             header.set_mode(0o644);
             header.set_cksum();
@@ -1153,7 +1467,7 @@ mod tests {
                 .unwrap();
 
             let second = b"attacker payload";
-            let mut header = tar::Header::new_gnu();
+            let mut header = tar::Header::new_ustar();
             header.set_size(second.len() as u64);
             header.set_mode(0o644);
             header.set_cksum();
@@ -1165,12 +1479,14 @@ mod tests {
         }
 
         let err = unarchive(Cursor::new(buf), &extract_dir).unwrap_err();
-        // The second entry's create_new fails with AlreadyExists, which
-        // propagates as CryptoError::Io.
+        // FORMAT.md §9 dup detection runs on the canonical path before
+        // any filesystem write, so the second entry surfaces as a
+        // typed "Duplicate archive entry" rejection rather than the
+        // older AlreadyExists race-fallback path.
         let msg = err.to_string();
         assert!(
-            msg.contains("exists") || msg.contains("File exists"),
-            "expected already-exists error, got: {msg}"
+            msg.contains("Duplicate archive entry"),
+            "expected duplicate-entry error, got: {msg}"
         );
     }
 
@@ -1293,7 +1609,7 @@ mod tests {
             let mut buf = Vec::new();
             {
                 let mut builder = tar::Builder::new(&mut buf);
-                let mut header = tar::Header::new_gnu();
+                let mut header = tar::Header::new_ustar();
                 header.set_size(data.len() as u64);
                 header.set_mode(input_mode);
                 header.set_cksum();
@@ -1328,7 +1644,7 @@ mod tests {
         {
             let mut builder = tar::Builder::new(&mut buf);
 
-            let mut header = tar::Header::new_gnu();
+            let mut header = tar::Header::new_ustar();
             header.set_entry_type(tar::EntryType::Directory);
             header.set_size(0);
             header.set_mode(0o4755); // setuid on directory
@@ -1338,7 +1654,7 @@ mod tests {
                 .unwrap();
 
             let data = b"child";
-            let mut header = tar::Header::new_gnu();
+            let mut header = tar::Header::new_ustar();
             header.set_size(data.len() as u64);
             header.set_mode(0o644);
             header.set_cksum();
@@ -1411,7 +1727,7 @@ mod tests {
         let mut buf = Vec::new();
         {
             let mut builder = tar::Builder::new(&mut buf);
-            let mut header = tar::Header::new_gnu();
+            let mut header = tar::Header::new_ustar();
             header.set_entry_type(tar::EntryType::Directory);
             header.set_size(0);
             header.set_mode(0o755);
@@ -1421,7 +1737,7 @@ mod tests {
                 .unwrap();
 
             let data = b"plaintext payload";
-            let mut header = tar::Header::new_gnu();
+            let mut header = tar::Header::new_ustar();
             header.set_size(data.len() as u64);
             header.set_mode(0o644);
             header.set_cksum();
@@ -1460,7 +1776,7 @@ mod tests {
         let mut buf = Vec::new();
         {
             let mut builder = tar::Builder::new(&mut buf);
-            let mut header = tar::Header::new_gnu();
+            let mut header = tar::Header::new_ustar();
             header.set_entry_type(tar::EntryType::Directory);
             header.set_size(0);
             header.set_mode(0o755);
@@ -1499,7 +1815,7 @@ mod tests {
         let mut buf = Vec::new();
         {
             let mut builder = tar::Builder::new(&mut buf);
-            let mut header = tar::Header::new_gnu();
+            let mut header = tar::Header::new_ustar();
             header.set_entry_type(tar::EntryType::Directory);
             header.set_size(0);
             header.set_mode(0o755);
@@ -1508,15 +1824,300 @@ mod tests {
             builder.finish().unwrap();
         }
 
+        // Per FORMAT.md §9 a directory path must end with `/`; a bare
+        // `.` violates that first, before the path-traversal check
+        // ever runs. Either rejection is acceptable so long as the
+        // archive is refused and the extract directory stays empty.
         let err = unarchive(Cursor::new(buf), &extract_dir).unwrap_err();
+        let msg = err.to_string();
         assert!(
-            err.to_string().contains("Unsafe path"),
-            "expected unsafe-path error, got: {err}"
+            msg.contains("Directory entry path must end with /")
+                || msg.contains("Unsafe path")
+                || msg.contains("forbidden component"),
+            "expected curdir / trailing-slash / forbidden-component error, got: {msg}"
         );
 
         assert!(
             extract_dir.read_dir().unwrap().next().is_none(),
             "extract dir must remain empty after refused archive"
+        );
+    }
+
+    /// `FORMAT.md` §9 requires every emitted header to use the POSIX
+    /// ustar magic (`"ustar\0" + "00"` at offsets 257..265) and forbids
+    /// GNU magic. Pin the writer's per-entry magic + version bytes so a
+    /// future regression that switches back to `new_gnu()` (or to a
+    /// helper that auto-promotes overlong paths to a long-name
+    /// extension) fails this test loudly.
+    #[test]
+    fn archive_emits_posix_ustar_headers() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let input = tmp.path().join("hello.txt");
+        fs::write(&input, "hello").unwrap();
+
+        let mut buf = Vec::new();
+        let (_, _) = archive(&input, &mut buf).unwrap();
+
+        let mut ar = tar::Archive::new(Cursor::new(buf));
+        let mut entries = ar.entries().unwrap();
+        let entry = entries.next().expect("one entry").unwrap();
+        let raw = entry.header().as_bytes();
+
+        assert_eq!(&raw[257..263], b"ustar\0", "expected POSIX ustar magic");
+        assert_eq!(&raw[263..265], b"00", "expected ustar version 00");
+        assert_eq!(raw[156], b'0', "expected typeflag '0' for regular file");
+    }
+
+    /// `FORMAT.md` §9 forbids GNU long-name records and the writer
+    /// must reject overlong paths up-front rather than silently
+    /// promoting them to an extension. The exact ustar limit is
+    /// `name(100) + '/' + prefix(155)`; any path over that surfaces
+    /// as a typed `InvalidInput` rejection.
+    ///
+    /// We drive the writer-side ustar path normalizer directly rather
+    /// than going through `archive()` because some host filesystems
+    /// (notably macOS APFS) reject single components ≥255 chars
+    /// before our code sees them; the helper is the canonical
+    /// rejection point used by both `append_file` and
+    /// `append_dir_entry`.
+    #[test]
+    fn archive_rejects_path_that_cannot_fit_ustar() {
+        let too_long: String = "a".repeat(ustar::PATH_REPRESENTABLE_MAX + 4);
+        let path = PathBuf::from(too_long);
+        let err = ustar_archive_path_string(&path, UstarEntryKind::File).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("POSIX ustar"),
+            "expected POSIX ustar rejection, got: {msg}"
+        );
+    }
+
+    /// Writer-side symmetry with the reader's `\` / NUL rejection
+    /// (`FORMAT.md` §9). Unix kernels permit `\` in filenames, so a
+    /// naive walker could emit an archive whose paths the reader
+    /// would refuse to decrypt. Gated to `#[cfg(unix)]` because on
+    /// Windows the `Path` API treats `\` as a separator, so a single
+    /// `Normal` component can never contain a literal `\` byte and
+    /// the bug doesn't apply.
+    #[cfg(unix)]
+    #[test]
+    fn archive_rejects_backslash_in_path_component() {
+        let weird = PathBuf::from("weird\\file.txt");
+        let err = ustar_archive_path_string(&weird, UstarEntryKind::File).unwrap_err();
+        assert!(
+            err.to_string().contains("forbidden byte"),
+            "expected backslash rejection, got: {err}"
+        );
+    }
+
+    /// Reader-side enforcement of `FORMAT.md` §9 directory trailing
+    /// slash. A typeflag-`5` entry whose path doesn't end in `/`
+    /// is malformed regardless of how it got into the stream.
+    #[test]
+    fn unarchive_rejects_directory_without_trailing_slash() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        let mut buf = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut buf);
+            let mut header = tar::Header::new_ustar();
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_size(0);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "mydir", &[] as &[u8])
+                .unwrap();
+            builder.finish().unwrap();
+        }
+
+        let err = unarchive(Cursor::new(buf), &extract_dir).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Directory entry path must end with /"),
+            "expected directory-trailing-slash error, got: {err}"
+        );
+    }
+
+    /// Reader-side enforcement of `FORMAT.md` §9 file-no-trailing-
+    /// slash. A typeflag-`0` entry whose path ends in `/` is
+    /// malformed.
+    #[test]
+    fn unarchive_rejects_file_with_trailing_slash() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        let mut buf = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut buf);
+            let mut header = tar::Header::new_ustar();
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_size(0);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "weird/", &[] as &[u8])
+                .unwrap();
+            builder.finish().unwrap();
+        }
+
+        let err = unarchive(Cursor::new(buf), &extract_dir).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("File entry path must not end with /"),
+            "expected file-no-trailing-slash error, got: {err}"
+        );
+    }
+
+    /// Two directory entries declaring the same canonical path form a
+    /// duplicate per `FORMAT.md` §9. The dup detection runs on the
+    /// canonical (trailing-slash-stripped) path so the rejection
+    /// fires even if the entries differ in superficial details.
+    #[test]
+    fn unarchive_rejects_duplicate_directory_entries() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        let mut buf = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut buf);
+            for _ in 0..2 {
+                let mut header = tar::Header::new_ustar();
+                header.set_entry_type(tar::EntryType::Directory);
+                header.set_size(0);
+                header.set_mode(0o755);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, "mydir/", &[] as &[u8])
+                    .unwrap();
+            }
+            builder.finish().unwrap();
+        }
+
+        let err = unarchive(Cursor::new(buf), &extract_dir).unwrap_err();
+        assert!(
+            err.to_string().contains("Duplicate archive entry"),
+            "expected duplicate-entry error, got: {err}"
+        );
+    }
+
+    /// A file entry `foo` and a directory entry `foo/` collide on the
+    /// canonical path (one trailing `/` stripped from the directory).
+    /// Per `FORMAT.md` §9 this is a duplicate, not two distinct
+    /// entries.
+    #[test]
+    fn unarchive_rejects_file_dir_canonical_collision() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        let mut buf = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut buf);
+
+            let data = b"file";
+            let mut header = tar::Header::new_ustar();
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, "name", &data[..]).unwrap();
+
+            let mut header = tar::Header::new_ustar();
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_size(0);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "name/", &[] as &[u8])
+                .unwrap();
+            builder.finish().unwrap();
+        }
+
+        let err = unarchive(Cursor::new(buf), &extract_dir).unwrap_err();
+        assert!(
+            err.to_string().contains("Duplicate archive entry"),
+            "expected file/dir canonical collision, got: {err}"
+        );
+    }
+
+    /// Per `FORMAT.md` §9 the TAR payload terminates with two 512-byte
+    /// zero blocks; any non-zero byte after the end-of-archive marker
+    /// must be rejected (otherwise an attacker could smuggle data in
+    /// the trailing region of an authenticated `.fcr` payload).
+    #[test]
+    fn unarchive_rejects_nonzero_trailing_data() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        let mut buf = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut buf);
+            let data = b"payload";
+            let mut header = tar::Header::new_ustar();
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "hello.txt", &data[..])
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        // Smuggle a non-zero byte past the end-of-archive zero blocks.
+        buf.push(0xAA);
+
+        let err = unarchive(Cursor::new(buf), &extract_dir).unwrap_err();
+        assert!(
+            err.to_string().contains("Non-zero trailing data"),
+            "expected non-zero-trailing-data rejection, got: {err}"
+        );
+    }
+
+    /// Reader-side rejection of a GNU long-name extension record. The
+    /// tar crate transparently consumes `'L'` records and applies the
+    /// long path to the next entry; `validate_ustar_entry` detects
+    /// the extension by comparing the in-header path to the merged
+    /// `entry.path_bytes()`. A 200-char path forces the long-name
+    /// path on the writer side regardless of the `new_gnu()` /
+    /// `new_ustar()` choice.
+    #[test]
+    fn unarchive_rejects_gnu_long_name_extension() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        // Build via `new_gnu()` + a 200-char path so the tar crate
+        // emits a `././@LongLink` extension record before the regular
+        // entry. POSIX ustar can encode up to ~256 chars only with a
+        // valid `name + '/' + prefix` split; a path with no `/` of
+        // 200 chars cannot be split and must use the GNU extension.
+        let long_name: String = "a".repeat(200);
+        let mut buf = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut buf);
+            let data = b"x";
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, &long_name, &data[..])
+                .unwrap();
+            builder.finish().unwrap();
+        }
+
+        let err = unarchive(Cursor::new(buf), &extract_dir).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("GNU long-name") || msg.contains("not POSIX ustar"),
+            "expected GNU-extension or non-ustar rejection, got: {msg}"
         );
     }
 

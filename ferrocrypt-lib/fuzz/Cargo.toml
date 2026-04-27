@@ -53,11 +53,6 @@ path = "fuzz_targets/fuzz_tlv.rs"
 doc = false
 
 [[bin]]
-name = "fuzz_replication_decode"
-path = "fuzz_targets/fuzz_replication_decode.rs"
-doc = false
-
-[[bin]]
 name = "fuzz_archive_path"
 path = "fuzz_targets/fuzz_archive_path.rs"
 doc = false

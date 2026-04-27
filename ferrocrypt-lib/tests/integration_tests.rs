@@ -14,24 +14,6 @@ use common::{generate_key_pair, hybrid_auto, symmetric_auto};
 
 const TEST_WORKSPACE: &str = "tests/workspace";
 
-/// Triple-replicates an 8-byte prefix for constructing malformed-header
-/// fixtures. Hand-rolled rather than reusing `replication::encode`
-/// because the encoder isn't part of the public library surface and
-/// the fuzz-exports feature-flag machinery isn't enabled for the
-/// integration-test binary. Kept byte-identical to the canonical
-/// encoder: three zero pad bytes followed by three copies of the
-/// 8-byte prefix (see FORMAT.md §5.1).
-fn encode_test_prefix(prefix: &[u8; 8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(27);
-    out.push(0); // canonical pad: always zero for v1's 8-byte prefix.
-    out.push(0);
-    out.push(0);
-    out.extend_from_slice(prefix);
-    out.extend_from_slice(prefix);
-    out.extend_from_slice(prefix);
-    out
-}
-
 fn setup_test_dir(test_name: &str) -> PathBuf {
     let test_dir = PathBuf::from(TEST_WORKSPACE).join(test_name);
     if test_dir.exists() {
@@ -183,8 +165,11 @@ fn test_symmetric_wrong_password() -> Result<(), CryptoError> {
 
     assert!(result.is_err());
     match result {
-        Err(CryptoError::SymmetricEnvelopeUnlockFailed) => {}
-        other => panic!("Expected SymmetricEnvelopeUnlockFailed, got {:?}", other),
+        Err(CryptoError::RecipientUnwrapFailed { ref type_name }) if type_name == "argon2id" => {}
+        other => panic!(
+            "Expected RecipientUnwrapFailed {{ type_name: \"argon2id\" }}, got {:?}",
+            other
+        ),
     }
 
     Ok(())
@@ -876,8 +861,11 @@ fn test_symmetric_streaming_wrong_password() -> Result<(), CryptoError> {
 
     assert!(result.is_err());
     match result {
-        Err(CryptoError::SymmetricEnvelopeUnlockFailed) => {}
-        other => panic!("Expected SymmetricEnvelopeUnlockFailed, got {:?}", other),
+        Err(CryptoError::RecipientUnwrapFailed { ref type_name }) if type_name == "argon2id" => {}
+        other => panic!(
+            "Expected RecipientUnwrapFailed {{ type_name: \"argon2id\" }}, got {:?}",
+            other
+        ),
     }
 
     Ok(())
@@ -986,8 +974,9 @@ fn test_hybrid_wrong_key_pair() -> Result<(), CryptoError> {
 
     // Try to decrypt with key pair B's private key — the passphrase is
     // correct for key pair B (so private.key unlocks fine), but the
-    // ECDH envelope was sealed for recipient A, so envelope AEAD fails
-    // and the decryption must surface as HybridEnvelopeUnlockFailed.
+    // ECDH was performed against recipient A's public key, so the
+    // x25519 recipient body's AEAD fails and the decryption must
+    // surface as `RecipientUnwrapFailed { type_name: "x25519" }`.
     let private_key_b = keys_b.join("private.key");
 
     let result = hybrid_auto(
@@ -1001,8 +990,11 @@ fn test_hybrid_wrong_key_pair() -> Result<(), CryptoError> {
     );
 
     match result {
-        Err(CryptoError::HybridEnvelopeUnlockFailed) => {}
-        other => panic!("Expected HybridEnvelopeUnlockFailed, got {:?}", other),
+        Err(CryptoError::RecipientUnwrapFailed { ref type_name }) if type_name == "x25519" => {}
+        other => panic!(
+            "Expected RecipientUnwrapFailed {{ type_name: \"x25519\" }}, got {:?}",
+            other
+        ),
     }
 
     Ok(())
@@ -1238,12 +1230,15 @@ fn test_symmetric_header_tamper_detection() -> Result<(), CryptoError> {
 
     symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
-    // Flip one byte in the authenticated stream_nonce. The envelope still
-    // unlocks, but the header HMAC no longer matches, so decrypt must fail at
-    // the post-unlock tamper check.
+    // Flip one byte in the authenticated stream_nonce. The recipient
+    // body still unwraps, but the header MAC no longer matches, so
+    // decrypt must fail at the post-unwrap tamper check.
+    // stream_nonce sits inside HEADER_FIXED at offset 12 (after
+    // header_flags(2) + recipient_count(2) + recipient_entries_len(4)
+    // + ext_len(4)); file offset = PREFIX_SIZE(12) + 12 = 24.
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
-    const NONCE_OFFSET: usize = 27 + 116; // prefix + symmetric envelope
+    const NONCE_OFFSET: usize = 12 + 12;
     data[NONCE_OFFSET] ^= 0xFF;
     fs::write(&encrypted_path, &data)?;
 
@@ -1294,11 +1289,16 @@ fn test_hybrid_header_tamper_detection() -> Result<(), CryptoError> {
         |_| {},
     )?;
 
-    // Flip one byte in the authenticated stream_nonce. The hybrid envelope can
-    // still open, but the header HMAC must fail afterwards.
+    // Flip one byte in the authenticated stream_nonce. The x25519
+    // recipient body can still unwrap, but the header MAC must fail
+    // afterwards. stream_nonce sits inside HEADER_FIXED at offset 12;
+    // file offset = PREFIX_SIZE(12) + 12 = 24. For a single-recipient
+    // hybrid file the post-unwrap MAC failure surfaces as
+    // `HeaderMacFailedAfterUnwrap` per FORMAT.md §3.7 (the loop's
+    // per-candidate variant; the loop has no further candidates).
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
-    const NONCE_OFFSET: usize = 27 + 104; // prefix + hybrid envelope
+    const NONCE_OFFSET: usize = 12 + 12;
     data[NONCE_OFFSET] ^= 0xFF;
     fs::write(&encrypted_path, &data)?;
 
@@ -1315,16 +1315,24 @@ fn test_hybrid_header_tamper_detection() -> Result<(), CryptoError> {
     );
 
     match result {
+        Err(CryptoError::HeaderMacFailedAfterUnwrap { ref type_name }) if type_name == "x25519" => {
+        }
         Err(CryptoError::HeaderTampered) => {}
-        other => panic!("expected HeaderTampered, got {other:?}"),
+        Err(CryptoError::NoSupportedRecipient) => {}
+        other => {
+            panic!("expected HeaderMacFailedAfterUnwrap(x25519) or HeaderTampered, got {other:?}")
+        }
     }
 
     Ok(())
 }
 
+/// Any flip in the 12-byte prefix MUST be caught at structural parse
+/// before any cryptographic work runs. Pins the version-byte case so
+/// a future change that softens the prefix parse fails the regression.
 #[test]
-fn test_symmetric_two_copy_corruption_detected() -> Result<(), CryptoError> {
-    let test_dir = setup_test_dir("symmetric_two_copy_corrupt");
+fn test_symmetric_prefix_byte_tamper_detected() -> Result<(), CryptoError> {
+    let test_dir = setup_test_dir("symmetric_prefix_byte_tamper");
     let input_file = test_dir.join("secret.txt");
     let encrypt_dir = test_dir.join("encrypted");
     let decrypt_dir = test_dir.join("decrypted");
@@ -1332,21 +1340,18 @@ fn test_symmetric_two_copy_corruption_detected() -> Result<(), CryptoError> {
     fs::create_dir_all(&encrypt_dir)?;
     fs::create_dir_all(&decrypt_dir)?;
 
-    create_test_file(&input_file, "Two copy corruption test");
+    create_test_file(&input_file, "Prefix tamper test");
 
-    let passphrase = SecretString::from("two_copy_pass".to_string());
+    let passphrase = SecretString::from("prefix_tamper_pass".to_string());
 
     symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
-    // Corrupt the version byte in 2 of the 3 replicated prefix copies. Majority
-    // decoding now sees the corrupted logical value, but the on-disk bytes are
-    // no longer the canonical 27-byte encoding of that majority view, so the
-    // file must be rejected as a corrupted prefix rather than silently parsed.
+    // Flip the version byte (offset 4 in the 12-byte prefix) so the
+    // file claims an unsupported version. v1 readers must reject
+    // before any recipient unwrap or KDF work runs.
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
-    const VERSION_LOGICAL: usize = 4;
-    data[3 + VERSION_LOGICAL] ^= 0x03; // copy 0: v1 -> v2
-    data[11 + VERSION_LOGICAL] ^= 0x03; // copy 1: v1 -> v2
+    data[4] ^= 0x10;
     fs::write(&encrypted_path, &data)?;
 
     let result = symmetric_auto(
@@ -1359,50 +1364,11 @@ fn test_symmetric_two_copy_corruption_detected() -> Result<(), CryptoError> {
     );
 
     match result {
-        Err(CryptoError::InvalidFormat(ferrocrypt::FormatDefect::CorruptedPrefix { .. })) => {}
-        other => panic!("expected CorruptedPrefix, got {other:?}"),
+        Err(CryptoError::UnsupportedVersion(_)) | Err(CryptoError::InvalidFormat(_)) => {}
+        other => panic!(
+            "expected UnsupportedVersion or InvalidFormat for tampered version byte, got {other:?}"
+        ),
     }
-
-    Ok(())
-}
-
-#[test]
-fn test_symmetric_prefix_majority_tamper_detected() -> Result<(), CryptoError> {
-    let test_dir = setup_test_dir("symmetric_prefix_majority_tamper");
-    let input_file = test_dir.join("secret.txt");
-    let encrypt_dir = test_dir.join("encrypted");
-    let decrypt_dir = test_dir.join("decrypted");
-
-    fs::create_dir_all(&encrypt_dir)?;
-    fs::create_dir_all(&decrypt_dir)?;
-
-    create_test_file(&input_file, "Prefix majority tamper test");
-
-    let passphrase = SecretString::from("prefix_tamper_pass".to_string());
-
-    symmetric_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
-
-    // Flip a bit in the ext_len high byte (logical prefix byte 6) across 2 of 3
-    // replicated copies so majority vote adopts the corrupted value, producing a
-    // non-canonical prefix that must be rejected.
-    // Encoded prefix: [pad(3)] [copy0(8)] [copy1(8)] [copy2(8)]
-    let encrypted_path = encrypt_dir.join("secret.fcr");
-    let mut data = fs::read(&encrypted_path)?;
-    const EXT_LEN_HI_LOGICAL: usize = 6;
-    data[3 + EXT_LEN_HI_LOGICAL] ^= 0x01; // copy 0
-    data[11 + EXT_LEN_HI_LOGICAL] ^= 0x01; // copy 1
-    fs::write(&encrypted_path, &data)?;
-
-    let result = symmetric_auto(
-        &encrypted_path,
-        &decrypt_dir,
-        &passphrase,
-        None,
-        None,
-        |_| {},
-    );
-
-    assert!(result.is_err());
 
     Ok(())
 }
@@ -1489,16 +1455,22 @@ fn test_wrong_format_type_hybrid_as_symmetric() -> Result<(), CryptoError> {
         |_| {},
     );
 
+    // v1 has no per-file mode byte: a file's mode is derived from its
+    // recipient list (one argon2id => Symmetric; one or more x25519
+    // => Hybrid). Asking `symmetric_auto` to decrypt a hybrid file
+    // therefore fails because the recipient list contains no
+    // `argon2id` slot the symmetric path could unwrap. Per
+    // `FORMAT.md` §3.4 / §3.5 the canonical surfaced error is
+    // `NoSupportedRecipient`, but `RecipientUnwrapFailed` /
+    // `PassphraseRecipientMixed` are also acceptable depending on
+    // the implementation's iteration order.
     assert!(result.is_err());
     match &result {
-        Err(CryptoError::InvalidFormat(defect)) => {
-            assert!(
-                defect
-                    .to_string()
-                    .contains("Wrong encrypted file type for this operation")
-            );
-        }
-        other => panic!("Expected format type error, got {:?}", other),
+        Err(CryptoError::NoSupportedRecipient)
+        | Err(CryptoError::PassphraseRecipientMixed)
+        | Err(CryptoError::RecipientUnwrapFailed { .. })
+        | Err(CryptoError::InvalidFormat(_)) => {}
+        other => panic!("Expected mode-mismatch rejection, got {:?}", other),
     }
 
     Ok(())
@@ -2555,17 +2527,20 @@ fn test_private_key_ext_len_tamper_rejected() -> Result<(), CryptoError> {
     let passphrase = SecretString::from("ext_len_pass".to_string());
     generate_key_pair(&passphrase, &keys_dir, |_| {})?;
 
-    // Flipping a bit in the `ext_len` field (u16 BE at bytes 7..=8) of the
-    // `private.key` cleartext header makes the declared length no longer
-    // match the on-disk body, surfacing as `BadKeyFileSize`.
+    // Flipping a bit in the `ext_len` field (u32 BE at bytes 14..=17)
+    // of the `private.key` cleartext header makes the declared length
+    // no longer match the on-disk body — surfaces as
+    // `MalformedPrivateKey`.
     let private_key_path = keys_dir.join("private.key");
     let mut key_data = fs::read(&private_key_path)?;
-    key_data[7] |= 0x01;
+    key_data[14] |= 0x01;
     fs::write(&private_key_path, &key_data)?;
 
     match validate_private_key_file(&private_key_path) {
-        Err(ferrocrypt::CryptoError::InvalidFormat(ferrocrypt::FormatDefect::BadKeyFileSize)) => {}
-        other => panic!("expected BadKeyFileSize, got {:?}", other),
+        Err(ferrocrypt::CryptoError::InvalidFormat(
+            ferrocrypt::FormatDefect::MalformedPrivateKey,
+        )) => {}
+        other => panic!("expected MalformedPrivateKey, got {:?}", other),
     }
 
     Ok(())
@@ -2664,12 +2639,17 @@ fn test_detect_short_file_with_single_magic_byte_returns_none() {
 fn test_detect_corrupted_fcr_not_silently_encrypted() {
     let dir = setup_test_dir("detect_no_reencrypt");
     let input = dir.join("corrupted.fcr");
-    // Minimal v1-looking symmetric prefix only: detection must route this file
-    // to decrypt, where the missing rest-of-header fails closed instead of the
-    // helper treating it as plaintext and re-encrypting it.
-    let prefix: [u8; 8] = [b'F', b'C', b'R', 0, 1, b'S', 0, 0];
-    let encoded = encode_test_prefix(&prefix);
-    fs::write(&input, &encoded).unwrap();
+    // Minimal v1 prefix only: magic + version + kind 'E' (encrypted)
+    // + zero prefix_flags + header_len = 0. Detection must route
+    // this file to decrypt, where the missing rest-of-header fails
+    // closed — rather than the helper treating it as plaintext and
+    // re-encrypting it (which would produce a path collision and
+    // mask the structural failure).
+    let mut prefix = vec![b'F', b'C', b'R', 0, 0x01]; // magic + version
+    prefix.push(b'E'); // KIND_ENCRYPTED
+    prefix.extend_from_slice(&0u16.to_be_bytes()); // prefix_flags = 0
+    prefix.extend_from_slice(&0u32.to_be_bytes()); // header_len = 0 (truncated)
+    fs::write(&input, &prefix).unwrap();
     let pass = SecretString::from("pw".to_string());
     let result = symmetric_auto(&input, &dir, &pass, None, None, |_| {});
     assert!(

@@ -25,7 +25,6 @@ fuzzing = []
 
 [dependencies]
 x25519-dalek = { version = "2", features = ["static_secrets"] }
-sha2 = "0.11"
 zeroize = "1"
 secrecy = "0.10"
 thiserror = "2"

@@ -10,7 +10,7 @@ use chacha20poly1305::{
 use constant_time_eq::constant_time_eq_32;
 use hkdf::Hkdf;
 use hmac::{Hmac, KeyInit, Mac};
-use sha3::{Digest, Sha3_256};
+use sha3::Sha3_256;
 
 use zeroize::{Zeroize, Zeroizing};
 
@@ -73,6 +73,7 @@ impl Default for KdfLimit {
 
 /// KDF parameters stored in file headers and key files so that decryption
 /// uses the same cost parameters that were used during encryption.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KdfParams {
     pub mem_cost: u32,
     pub time_cost: u32,
@@ -92,7 +93,7 @@ impl KdfParams {
     const FAST_KDF_MEM_COST: u32 = 8192;
     const FAST_KDF_TIME_COST: u32 = 1;
 
-    pub fn to_bytes(&self) -> [u8; KDF_PARAMS_SIZE] {
+    pub fn to_bytes(self) -> [u8; KDF_PARAMS_SIZE] {
         let mut buf = [0u8; KDF_PARAMS_SIZE];
         buf[0..4].copy_from_slice(&self.mem_cost.to_be_bytes());
         buf[4..8].copy_from_slice(&self.time_cost.to_be_bytes());
@@ -140,9 +141,9 @@ impl KdfParams {
             .map(|l| l.max_mem_cost_kib)
             .unwrap_or(Self::DEFAULT_MEM_COST);
         if params.mem_cost > effective_max {
-            return Err(CryptoError::ExcessiveWork {
-                required_kib: params.mem_cost,
-                max_kib: effective_max,
+            return Err(CryptoError::KdfResourceCapExceeded {
+                mem_cost_kib: params.mem_cost,
+                local_cap_kib: effective_max,
             });
         }
 
@@ -209,12 +210,12 @@ pub const WRAPPED_FILE_KEY_SIZE: usize = FILE_KEY_SIZE + TAG_SIZE;
 // `"ferrocrypt/v1/<subsystem>"`. Pinning these as constants means a
 // silent typo in any single call site regresses test fixtures
 // immediately, and a future v2 cannot accidentally reuse a v1 derivation.
+//
+// Recipient-type wrap-key info strings live next to their recipient
+// implementations (see `recipients::argon2id::HKDF_INFO_WRAP` and
+// `recipients::x25519::HKDF_INFO_WRAP`) so each recipient module
+// is the sole owner of its key-derivation contract.
 
-/// HKDF info for deriving the symmetric-envelope wrap key from Argon2id
-/// output.
-pub const HKDF_INFO_SYM_WRAP: &[u8] = b"ferrocrypt/v1/sym/wrap";
-/// HKDF info for deriving the hybrid-envelope wrap key from X25519 ECDH.
-pub const HKDF_INFO_HYB_WRAP: &[u8] = b"ferrocrypt/v1/hyb/wrap";
 /// HKDF info for deriving the `private.key` wrap key from Argon2id.
 pub const HKDF_INFO_PRIVATE_KEY_WRAP: &[u8] = b"ferrocrypt/v1/private-key/wrap";
 /// HKDF info for the per-file payload AEAD key, derived from
@@ -270,12 +271,6 @@ pub fn encryption_base_name(path: impl AsRef<Path>) -> Result<String, CryptoErro
     }
 }
 
-pub fn sha3_256_hash(data: &[u8]) -> [u8; 32] {
-    let mut hasher = Sha3_256::new();
-    hasher.update(data);
-    hasher.finalize().into()
-}
-
 pub fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
@@ -285,31 +280,41 @@ pub fn ct_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
     constant_time_eq_32(a, b)
 }
 
-pub fn hmac_sha3_256(key: &[u8], data: &[u8]) -> Result<[u8; 32], CryptoError> {
-    let mut mac = HmacSha3_256::new_from_slice(key)
-        .map_err(|_| CryptoError::InternalInvariant("Internal error: invalid HMAC key length"))?;
-    mac.update(data);
-    let result = mac.finalize();
-    let bytes: [u8; 32] = result.into_bytes().into();
-    Ok(bytes)
+/// HMAC-SHA3-256 over a sequence of byte parts, fed into the MAC in
+/// order with no separator. Equivalent to MAC'ing the concatenation
+/// of `parts` but does not allocate. Used by the v1 header MAC, which
+/// covers `prefix(12) || header(header_len)` per `FORMAT.md` §3.6.
+pub fn hmac_sha3_256_parts(key: &[u8], parts: &[&[u8]]) -> Result<[u8; 32], CryptoError> {
+    Ok(hmac_state_for_parts(key, parts)?
+        .finalize()
+        .into_bytes()
+        .into())
 }
 
-/// Verifies HMAC-SHA3-256 in constant time. Returns
-/// [`CryptoError::HeaderTampered`] on tag mismatch.
-///
-/// In v1 this function is called only during `.fcr` decrypt, after the
-/// mode envelope has successfully unwrapped `file_key`. Any mismatch at
-/// that point means the header was tampered with outside the envelope
-/// (replicated prefix, `stream_nonce`, or `ext_bytes`), so both
-/// symmetric and hybrid paths want the same error — mode distinction is
-/// already captured by the `*EnvelopeUnlockFailed` variants emitted
-/// earlier.
-pub fn hmac_sha3_256_verify(key: &[u8], data: &[u8], tag: &[u8]) -> Result<(), CryptoError> {
+/// Constant-time HMAC-SHA3-256 verification over a sequence of byte
+/// parts. Returns [`CryptoError::HeaderTampered`] on tag mismatch.
+/// See [`hmac_sha3_256_parts`] for the input layout.
+pub fn hmac_sha3_256_parts_verify(
+    key: &[u8],
+    parts: &[&[u8]],
+    tag: &[u8],
+) -> Result<(), CryptoError> {
+    hmac_state_for_parts(key, parts)?
+        .verify_slice(tag)
+        .map_err(|_| CryptoError::HeaderTampered)
+}
+
+// Internal helper: builds a fresh HMAC-SHA3-256 state and updates it
+// with `parts` in declared order. Both the compute and verify entry
+// points share this so the key-init wording, the parts iteration
+// order, and the empty-parts behaviour cannot drift between them.
+fn hmac_state_for_parts(key: &[u8], parts: &[&[u8]]) -> Result<HmacSha3_256, CryptoError> {
     let mut mac = HmacSha3_256::new_from_slice(key)
         .map_err(|_| CryptoError::InternalInvariant("Internal error: invalid HMAC key length"))?;
-    mac.update(data);
-    mac.verify_slice(tag)
-        .map_err(|_| CryptoError::HeaderTampered)
+    for part in parts {
+        mac.update(part);
+    }
+    Ok(mac)
 }
 
 // ─── Random bytes / file-key indirection ──────────────────────────────────
@@ -342,8 +347,9 @@ pub fn generate_file_key() -> Zeroizing<[u8; FILE_KEY_SIZE]> {
 
 /// Derives a 32-byte wrap key from a passphrase via
 /// `Argon2id → HKDF-SHA3-256`. Used by:
-/// - symmetric `.fcr` envelope wrap (`info = "ferrocrypt/v1/sym/wrap"`)
-/// - `private.key` wrap  (`info = "ferrocrypt/v1/private-key/wrap"`)
+/// - the `argon2id` recipient body wrap
+///   (`info = "ferrocrypt/v1/recipient/argon2id/wrap"`)
+/// - the `private.key` wrap (`info = "ferrocrypt/v1/private-key/wrap"`)
 ///
 /// `argon2_salt` doubles as the Argon2id salt AND the HKDF salt.
 /// Saves storing two distinct salts on disk.
@@ -356,28 +362,6 @@ pub fn derive_passphrase_wrap_key(
     use secrecy::ExposeSecret;
     let ikm = kdf_params.hash_passphrase(passphrase.expose_secret().as_bytes(), argon2_salt)?;
     hkdf_expand_sha3_256(Some(argon2_salt), ikm.as_ref(), info)
-}
-
-/// Builds the `.fcr` header HMAC input:
-/// `on_disk_prefix (27) || envelope_bytes || stream_nonce (19) || ext_bytes`.
-///
-/// Shared by symmetric and hybrid so the authentication-input order
-/// cannot drift between modes. `envelope_bytes` is a slice because the
-/// symmetric envelope is 116 bytes and the hybrid envelope is 104.
-pub fn build_header_hmac_input(
-    on_disk_prefix: &[u8],
-    envelope_bytes: &[u8],
-    stream_nonce: &[u8; STREAM_NONCE_SIZE],
-    ext_bytes: &[u8],
-) -> Vec<u8> {
-    let mut out = Vec::with_capacity(
-        on_disk_prefix.len() + envelope_bytes.len() + STREAM_NONCE_SIZE + ext_bytes.len(),
-    );
-    out.extend_from_slice(on_disk_prefix);
-    out.extend_from_slice(envelope_bytes);
-    out.extend_from_slice(stream_nonce);
-    out.extend_from_slice(ext_bytes);
-    out
 }
 
 /// Seals a 32-byte `file_key` with XChaCha20-Poly1305. Returns the
@@ -480,10 +464,14 @@ pub fn derive_subkeys(
 
 /// Validates the TLV extension region per FORMAT.md §6.
 ///
-/// Checks:
-/// - each entry's `tag(u16) || len(u16)` fits within the region;
+/// Per `FORMAT.md` §6, each entry is `tag(u16) || len(u32) || value`
+/// (6-byte entry header, big-endian). Checks:
+/// - each entry's `tag(u16) || len(u32)` fits within the region;
 /// - `len` is authoritative (the entry's `value` does not extend past
 ///   the end of the region);
+/// - declared `len` does not exceed the region cap (catches a
+///   bogus 4-billion-byte length declaration before per-byte
+///   accounting could underflow);
 /// - tags appear in strictly ascending numeric order (rejects
 ///   duplicates by construction);
 /// - no reserved tag (`0x0000`, `0x8000`) is emitted;
@@ -496,22 +484,30 @@ pub fn derive_subkeys(
 /// that define a known tag will extract its value by extending this
 /// path or adding a sibling helper.
 pub fn validate_tlv(ext_bytes: &[u8]) -> Result<(), CryptoError> {
-    if ext_bytes.len() > EXT_LEN_MAX as usize {
+    let region_len = u32::try_from(ext_bytes.len()).unwrap_or(u32::MAX);
+    if region_len > EXT_LEN_MAX {
         return Err(CryptoError::InvalidFormat(FormatDefect::ExtTooLarge {
-            len: ext_bytes.len().min(u16::MAX as usize) as u16,
+            len: region_len,
         }));
     }
+
+    // Entry header = tag(u16) + len(u32) = 6 bytes.
+    const ENTRY_HEADER_SIZE: usize = 6;
 
     let mut cursor = 0;
     let mut prev_tag: Option<u16> = None;
     while cursor < ext_bytes.len() {
-        // tag (u16) + len (u16) = 4 bytes of entry header.
-        if ext_bytes.len() - cursor < 4 {
+        if ext_bytes.len() - cursor < ENTRY_HEADER_SIZE {
             return Err(CryptoError::InvalidFormat(FormatDefect::MalformedTlv));
         }
         let tag = u16::from_be_bytes([ext_bytes[cursor], ext_bytes[cursor + 1]]);
-        let len = u16::from_be_bytes([ext_bytes[cursor + 2], ext_bytes[cursor + 3]]) as usize;
-        cursor += 4;
+        let len = u32::from_be_bytes([
+            ext_bytes[cursor + 2],
+            ext_bytes[cursor + 3],
+            ext_bytes[cursor + 4],
+            ext_bytes[cursor + 5],
+        ]);
+        cursor += ENTRY_HEADER_SIZE;
 
         if tag == 0x0000 || tag == 0x8000 {
             return Err(CryptoError::InvalidFormat(FormatDefect::MalformedTlv));
@@ -524,6 +520,16 @@ pub fn validate_tlv(ext_bytes: &[u8]) -> Result<(), CryptoError> {
         }
         prev_tag = Some(tag);
 
+        // Reject a declared `len` that exceeds the region cap before
+        // converting to `usize`. The region cap is already enforced
+        // above, so any per-entry length larger than that cannot fit;
+        // catching it here gives a precise diagnostic and removes
+        // any risk of integer-conversion edge cases on smaller
+        // address-space targets.
+        if len > EXT_LEN_MAX {
+            return Err(CryptoError::InvalidFormat(FormatDefect::MalformedTlv));
+        }
+        let len = len as usize;
         if ext_bytes.len() - cursor < len {
             return Err(CryptoError::InvalidFormat(FormatDefect::MalformedTlv));
         }
@@ -539,23 +545,31 @@ pub fn validate_tlv(ext_bytes: &[u8]) -> Result<(), CryptoError> {
     Ok(())
 }
 
-/// Streaming encryption writer: buffers plaintext writes into `BUFFER_SIZE`
-/// chunks, encrypts each chunk in place with `encrypt_next_in_place`, and
-/// writes ciphertext to the inner writer. Call `finish()` after all data is
-/// written to encrypt the final (possibly partial) chunk with
-/// `encrypt_last_in_place`.
+/// Streaming encryption writer: buffers plaintext writes into
+/// `BUFFER_SIZE` chunks and emits AEAD-encrypted chunks per
+/// `FORMAT.md` §5.
 ///
-/// Full `BUFFER_SIZE` chunks use `encrypt_next_in_place`; the final chunk
-/// (0..BUFFER_SIZE bytes) uses `encrypt_last_in_place`.
+/// Per `FORMAT.md` §5, a non-empty plaintext whose length is an exact
+/// multiple of `BUFFER_SIZE` MUST end with a full-size **final** chunk
+/// (`last_flag = 1`) — writers MUST NOT append an extra empty final
+/// chunk. To satisfy this rule, this writer cannot eagerly call
+/// `encrypt_next_in_place` the moment the buffer fills, because the
+/// fill might be the last data the caller ever writes. Instead, when
+/// the buffer reaches `BUFFER_SIZE` we **defer**: the chunk stays
+/// buffered. On the next [`Write::write`] call (more data exists →
+/// previous chunk is non-final) we flush the deferred chunk via
+/// `encrypt_next_in_place`. On [`finish`](Self::finish) (no more data
+/// exists → buffered chunk, however many bytes, is the final chunk)
+/// we flush via `encrypt_last_in_place`.
 ///
 /// ## Memory hygiene
 ///
 /// A single `chunk` buffer is pre-allocated with capacity `BUFFER_SIZE +
 /// TAG_SIZE` and reused across every chunk. The same allocation holds
-/// plaintext on entry and ciphertext on exit (the in-place AEAD appends the
-/// authentication tag without growing the underlying allocation), and is
-/// zeroized between chunks and on drop. There are no per-chunk plaintext
-/// `Vec`s left to the allocator.
+/// plaintext on entry and ciphertext on exit (the in-place AEAD
+/// appends the authentication tag without growing the underlying
+/// allocation), and is zeroized between chunks and on drop. There are
+/// no per-chunk plaintext `Vec`s left to the allocator.
 pub struct EncryptWriter<W: Write> {
     encryptor: Option<stream::EncryptorBE32<XChaCha20Poly1305>>,
     chunk: Vec<u8>,
@@ -575,9 +589,13 @@ impl<W: Write> EncryptWriter<W> {
         }
     }
 
-    /// Encrypts the remaining buffer as the final AEAD chunk and flushes.
-    /// Must be called exactly once after all plaintext has been written.
-    /// Returns the inner writer so the caller can finalize it (e.g. `sync_all`).
+    /// Encrypts the buffered chunk (whatever its length, including
+    /// `0` for empty plaintext or `BUFFER_SIZE` for an exact-multiple
+    /// boundary) as the AEAD final chunk and flushes.
+    ///
+    /// MUST be called exactly once after all plaintext has been
+    /// written. Returns the inner writer so the caller can finalize
+    /// it (e.g. `sync_all`).
     pub fn finish(mut self) -> Result<W, CryptoError> {
         let encryptor = self.encryptor.take().ok_or(CryptoError::InternalInvariant(
             "Internal error: encrypt writer already finished",
@@ -601,11 +619,15 @@ impl<W: Write> Write for EncryptWriter<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let mut written = 0;
         while written < buf.len() {
-            let space = BUFFER_SIZE - self.chunk.len();
-            let take = cmp::min(space, buf.len() - written);
-            self.chunk.extend_from_slice(&buf[written..written + take]);
-            written += take;
-
+            // If the buffer already holds a full chunk, the previous
+            // `write` call left it deferred. Now that more plaintext
+            // is arriving, we know the deferred chunk is non-final
+            // and can flush it via `encrypt_next_in_place`. This is
+            // the FORMAT.md §5 conformance check: writers must wait
+            // until they observe more data before committing a chunk
+            // as non-final, so an exact-`BUFFER_SIZE`-multiple
+            // plaintext ends with a full-size FINAL chunk rather than
+            // a stray empty trailing chunk.
             if self.chunk.len() == BUFFER_SIZE {
                 let encryptor = self.encryptor.as_mut().ok_or_else(|| {
                     stream_io_error(io::ErrorKind::Other, StreamError::StateExhausted)
@@ -617,12 +639,17 @@ impl<W: Write> Write for EncryptWriter<W> {
                     stream_io_error(io::ErrorKind::Other, StreamError::StateExhausted)
                 })?;
                 output.write_all(&self.chunk)?;
-                // Zeroize the chunk (plaintext + tag) before refilling for
-                // the next chunk. `zeroize` resets length to 0 and preserves
-                // capacity, so the next `extend_from_slice` reuses the
-                // same allocation.
+                // Zeroize the chunk (plaintext + tag) before refilling
+                // for the next chunk. `zeroize` resets length to 0 and
+                // preserves capacity, so the next `extend_from_slice`
+                // reuses the same allocation.
                 self.chunk.zeroize();
             }
+
+            let space = BUFFER_SIZE - self.chunk.len();
+            let take = cmp::min(space, buf.len() - written);
+            self.chunk.extend_from_slice(&buf[written..written + take]);
+            written += take;
         }
         Ok(buf.len())
     }
@@ -641,27 +668,47 @@ impl<W: Write> Drop for EncryptWriter<W> {
     }
 }
 
-/// Streaming decryption reader: reads ciphertext chunks of `BUFFER_SIZE + TAG_SIZE`
-/// from the inner reader, decrypts each in place with `decrypt_next_in_place`
-/// / `decrypt_last_in_place`, and serves plaintext through the `Read`
-/// interface.
+/// Streaming decryption reader: reads ciphertext chunks of
+/// `BUFFER_SIZE + TAG_SIZE` from the inner reader, decrypts each in
+/// place with `decrypt_next_in_place` / `decrypt_last_in_place`, and
+/// serves plaintext through the `Read` interface.
 ///
-/// A full-size ciphertext chunk (`BUFFER_SIZE + TAG_SIZE` bytes) is a non-final
-/// chunk; a shorter read indicates the final chunk.
+/// Per `FORMAT.md` §5 a non-empty plaintext whose length is an exact
+/// multiple of `BUFFER_SIZE` ends with a full-size **final** chunk
+/// (`last_flag = 1`). The reader therefore cannot rely on "short
+/// read = final chunk" alone; it must inspect end-of-input
+/// explicitly. After reading a full `ENCRYPTED_CHUNK_SIZE`, we probe
+/// the inner reader for one byte:
+/// - probe returns `0` (EOF) → the chunk we just read is the final
+///   chunk; decrypt with `decrypt_last_in_place`.
+/// - probe returns `1` byte → another chunk follows; decrypt the
+///   current chunk with `decrypt_next_in_place` and stash the probe
+///   byte as the first byte of the next chunk.
+///
+/// A short read (filled < `ENCRYPTED_CHUNK_SIZE`) always indicates the
+/// final chunk; AEAD authentication on `decrypt_last_in_place` rejects
+/// any mid-chunk truncation as a tamper failure.
 ///
 /// ## Memory hygiene
 ///
-/// A single `chunk` buffer is pre-allocated with capacity `BUFFER_SIZE +
-/// TAG_SIZE` and reused across every chunk. The same allocation holds
-/// ciphertext on entry and plaintext on exit (the in-place AEAD truncates the
-/// authentication tag during decryption), and is zeroized before each refill
-/// and on drop. There are no per-chunk `Vec`s left to the allocator.
+/// A single `chunk` buffer is pre-allocated with capacity
+/// `BUFFER_SIZE + TAG_SIZE` and reused across every chunk. The same
+/// allocation holds ciphertext on entry and plaintext on exit (the
+/// in-place AEAD truncates the authentication tag during decryption),
+/// and is zeroized before each refill and on drop. There are no
+/// per-chunk `Vec`s left to the allocator.
 pub struct DecryptReader<R: Read> {
     decryptor: Option<stream::DecryptorBE32<XChaCha20Poly1305>>,
     input: R,
     chunk: Vec<u8>,
     pos: usize,
     done: bool,
+    /// One byte read from the inner reader past the current chunk
+    /// boundary. `Some(b)` means the previous fill confirmed more
+    /// data exists, so the byte belongs to the *next* chunk. `None`
+    /// means no peek byte is held (initial state, or after the final
+    /// chunk has been consumed).
+    lookahead: Option<u8>,
 }
 
 impl<R: Read> DecryptReader<R> {
@@ -675,44 +722,42 @@ impl<R: Read> DecryptReader<R> {
             chunk: Vec::with_capacity(BUFFER_SIZE + TAG_SIZE),
             pos: 0,
             done: false,
+            lookahead: None,
         }
     }
 
     /// Refill the plaintext window by reading and decrypting the next
-    /// encrypted chunk. Truncation is reported via two distinct paths:
+    /// encrypted chunk. The "is this the final chunk?" decision is
+    /// resolved by a one-byte peek past `ENCRYPTED_CHUNK_SIZE`:
     ///
-    /// - **Chunk-boundary truncation** — `read` returns 0 immediately,
-    ///   meaning the final authenticated chunk is missing entirely. This
-    ///   surfaces as [`StreamError::Truncated`] → [`CryptoError::PayloadTruncated`].
-    /// - **Mid-chunk truncation** — some bytes were read but fewer than a
-    ///   full `BUFFER_SIZE + TAG_SIZE`. We treat the short buffer as the
-    ///   final chunk and run `decrypt_last_in_place`. AEAD authentication
-    ///   will reject it, surfacing as [`StreamError::DecryptAead`] →
+    /// - peek returns `0` → final chunk; `decrypt_last_in_place`.
+    /// - peek returns `1` byte → non-final chunk;
+    ///   `decrypt_next_in_place`, stash the byte as `lookahead` for
+    ///   the next call.
+    ///
+    /// Truncation is reported via two distinct paths:
+    ///
+    /// - **Chunk-boundary truncation** — `read` returns 0 immediately
+    ///   AND no `lookahead` is held, meaning the final authenticated
+    ///   chunk is missing entirely. Surfaces as
+    ///   [`StreamError::Truncated`] → [`CryptoError::PayloadTruncated`].
+    /// - **Mid-chunk truncation** — some bytes were read but fewer
+    ///   than a full `ENCRYPTED_CHUNK_SIZE`. The short buffer is
+    ///   treated as the final chunk and run through
+    ///   `decrypt_last_in_place`. AEAD authentication will reject it,
+    ///   surfacing as [`StreamError::DecryptAead`] →
     ///   [`CryptoError::PayloadTampered`]. This is the correct
-    ///   outcome — we cannot distinguish a mid-chunk truncation from a
-    ///   tampered tail, and both must fail closed.
+    ///   outcome — we cannot distinguish a mid-chunk truncation from
+    ///   a tampered tail, and both must fail closed.
     ///
-    /// **Trailing-data probe.** After `decrypt_last_in_place` succeeds we
-    /// probe the inner reader for one additional byte; a positive return
-    /// means the underlying stream has bytes **past** the final
-    /// authenticated chunk and surfaces as [`StreamError::ExtraData`] →
-    /// [`CryptoError::ExtraDataAfterPayload`]. In practice STREAM-BE32's
-    /// per-chunk nonce binding already rejects any naive append as an
-    /// AEAD-tamper failure (the attacker cannot craft a valid "last"
-    /// chunk), and the `filled < ENCRYPTED_CHUNK_SIZE` branch only fires
-    /// after the underlying reader signalled EOF inside the read loop —
-    /// so for a well-behaved [`Read`] implementation the probe never
-    /// triggers. The probe is kept as defense-in-depth:
-    /// - it closes the last gap against pathological readers that return
-    ///   `Ok(0)` and then later produce more bytes (non-blocking sockets,
-    ///   mis-implemented `Take`-style wrappers);
-    /// - it promotes a whole class of "payload followed by garbage" inputs
-    ///   from the generic `PayloadTampered` bucket to the more specific
-    ///   `ExtraDataAfterPayload` bucket for upstream diagnostics;
-    /// - it pins the spec-declared error variant in the actual read path
-    ///   so future format-version changes that weaken the cryptographic
-    ///   binding do not silently regress to missing the trailing-data
-    ///   case.
+    /// **Trailing-data probe.** After `decrypt_last_in_place` succeeds
+    /// we probe the inner reader for one additional byte. With the
+    /// peek-ahead model the probe can only fire if the inner reader
+    /// returned `Ok(0)` and then later produced more bytes — a
+    /// pathological case (non-blocking sockets, mis-implemented
+    /// `Take`-style wrappers). Kept as defense-in-depth so any such
+    /// reader still surfaces [`StreamError::ExtraData`] →
+    /// [`CryptoError::ExtraDataAfterPayload`].
     fn fill_buffer(&mut self) -> io::Result<()> {
         const ENCRYPTED_CHUNK_SIZE: usize = BUFFER_SIZE + TAG_SIZE;
 
@@ -721,7 +766,12 @@ impl<R: Read> DecryptReader<R> {
         self.chunk.zeroize();
         self.chunk.resize(ENCRYPTED_CHUNK_SIZE, 0);
 
+        // Seed with any byte stashed from the previous chunk's lookahead.
         let mut filled = 0;
+        if let Some(b) = self.lookahead.take() {
+            self.chunk[0] = b;
+            filled = 1;
+        }
         while filled < ENCRYPTED_CHUNK_SIZE {
             let n = self.input.read(&mut self.chunk[filled..])?;
             if n == 0 {
@@ -735,16 +785,29 @@ impl<R: Read> DecryptReader<R> {
         self.chunk.truncate(filled);
 
         if filled == 0 {
-            // A valid stream always ends with an encrypt_last chunk (>= TAG_SIZE
-            // bytes). Reading 0 bytes means the final chunk is missing — the
-            // ciphertext was truncated at a chunk boundary.
+            // A valid stream always ends with an encrypt_last chunk
+            // (>= TAG_SIZE bytes). Reading 0 bytes here, with no
+            // lookahead either, means the final authenticated chunk is
+            // missing — the ciphertext was truncated at a chunk boundary.
             return Err(stream_io_error(
                 io::ErrorKind::UnexpectedEof,
                 StreamError::Truncated,
             ));
         }
 
-        if filled == ENCRYPTED_CHUNK_SIZE {
+        // Resolve "is this the final chunk?" via a one-byte peek when we
+        // filled exactly `ENCRYPTED_CHUNK_SIZE`. A short read already
+        // signalled EOF inside the loop, so it's the final chunk.
+        let mut probe = [0u8; 1];
+        let probe_n = if filled == ENCRYPTED_CHUNK_SIZE {
+            self.input.read(&mut probe)?
+        } else {
+            0
+        };
+
+        if filled == ENCRYPTED_CHUNK_SIZE && probe_n > 0 {
+            // Non-final chunk: stash the peek byte for the next refill.
+            self.lookahead = Some(probe[0]);
             let decryptor = self.decryptor.as_mut().ok_or_else(|| {
                 stream_io_error(io::ErrorKind::Other, StreamError::StateExhausted)
             })?;
@@ -754,6 +817,7 @@ impl<R: Read> DecryptReader<R> {
                     stream_io_error(io::ErrorKind::InvalidData, StreamError::DecryptAead)
                 })?;
         } else {
+            // Final chunk: short read OR exact-`ENCRYPTED_CHUNK_SIZE` with EOF.
             let decryptor = self.decryptor.take().ok_or_else(|| {
                 stream_io_error(io::ErrorKind::Other, StreamError::StateExhausted)
             })?;
@@ -764,13 +828,12 @@ impl<R: Read> DecryptReader<R> {
                 })?;
             self.done = true;
 
-            // Defense-in-depth trailing-data probe: see the doc comment
-            // above. A single-byte read is enough because any positive
-            // return value means "the reader claims EOF is not yet
-            // reached" — we don't need to know how much extra data there
-            // is, only that there is some.
-            let mut probe = [0u8; 1];
-            let n = self.input.read(&mut probe)?;
+            // Defense-in-depth trailing-data probe. With the peek-ahead
+            // model this can only fire if the inner reader returned 0
+            // earlier and then later produced more bytes; well-behaved
+            // readers never trigger it.
+            let mut probe2 = [0u8; 1];
+            let n = self.input.read(&mut probe2)?;
             if n > 0 {
                 return Err(stream_io_error(
                     io::ErrorKind::InvalidData,
@@ -854,19 +917,21 @@ mod tests {
         out
     }
 
-    /// Plaintext exactly equal to one chunk: the writer hands off a full
-    /// `BUFFER_SIZE` block via `encrypt_next_in_place`, then `finish()`
-    /// encrypts an **empty** buffer via `encrypt_last_in_place`, producing
-    /// a tag-only final chunk. The total ciphertext is one full encrypted
-    /// chunk plus one 16-byte tag-only final chunk.
+    /// Plaintext exactly equal to one chunk: per `FORMAT.md` §5,
+    /// writers MUST NOT append an extra empty final chunk after
+    /// non-empty plaintext whose length is a multiple of `BUFFER_SIZE`.
+    /// The writer therefore defers the full `BUFFER_SIZE` chunk
+    /// until `finish()` and emits it as a single full-size **final**
+    /// chunk via `encrypt_last_in_place`. Total ciphertext is exactly
+    /// one full encrypted chunk (no separate tag-only trailer).
     #[test]
     fn streaming_aead_round_trip_exact_buffer_size() {
         let plaintext: Vec<u8> = (0..BUFFER_SIZE).map(|i| (i % 251) as u8).collect();
         let ciphertext = encrypt_to_vec(&plaintext);
         assert_eq!(
             ciphertext.len(),
-            BUFFER_SIZE + TAG_SIZE + TAG_SIZE,
-            "expected one full chunk plus a tag-only final chunk"
+            BUFFER_SIZE + TAG_SIZE,
+            "expected exactly one full final chunk (FORMAT.md §5: no empty trailer)"
         );
         let decrypted = decrypt_to_vec(&ciphertext);
         assert_eq!(decrypted, plaintext);
@@ -892,22 +957,38 @@ mod tests {
         assert_eq!(decrypted, plaintext);
     }
 
-    /// Plaintext is an exact multiple of `BUFFER_SIZE`. Every full chunk
-    /// goes through `encrypt_next_in_place`, then `finish()` encrypts an
-    /// empty buffer via `encrypt_last_in_place`. The decoder must serve
-    /// every plaintext byte and then return `Ok(0)` on the empty final
-    /// chunk without spuriously appending tag bytes to the plaintext.
+    /// Plaintext is an exact 3× multiple of `BUFFER_SIZE`. Per
+    /// `FORMAT.md` §5, the file is laid out as two `next` chunks
+    /// followed by a full-size `last` chunk — no empty trailer.
+    /// The reader must use its 1-byte peek to distinguish
+    /// "exact-N-final" from "exact-N-then-more" without misclassifying
+    /// either.
     #[test]
-    fn streaming_aead_round_trip_empty_final_chunk() {
+    fn streaming_aead_exact_multiple_no_empty_trailer() {
         let plaintext: Vec<u8> = (0..(BUFFER_SIZE * 3)).map(|i| (i % 251) as u8).collect();
         let ciphertext = encrypt_to_vec(&plaintext);
         assert_eq!(
             ciphertext.len(),
-            3 * (BUFFER_SIZE + TAG_SIZE) + TAG_SIZE,
-            "expected three full chunks plus a tag-only final chunk"
+            3 * (BUFFER_SIZE + TAG_SIZE),
+            "expected three full chunks (last one is the FINAL chunk; FORMAT.md §5)"
         );
         let decrypted = decrypt_to_vec(&ciphertext);
         assert_eq!(decrypted, plaintext);
+    }
+
+    /// Empty plaintext is encoded as one empty FINAL chunk (just the
+    /// 16-byte AEAD tag). FORMAT.md §5 calls this out as the only
+    /// case where an empty final chunk is permitted.
+    #[test]
+    fn streaming_aead_empty_plaintext_is_single_tag_only_chunk() {
+        let ciphertext = encrypt_to_vec(&[]);
+        assert_eq!(
+            ciphertext.len(),
+            TAG_SIZE,
+            "empty plaintext must produce exactly one tag-only final chunk"
+        );
+        let decrypted = decrypt_to_vec(&ciphertext);
+        assert_eq!(decrypted, &[] as &[u8]);
     }
 
     /// Drain `DecryptReader` through tiny consumer buffers. The reader
@@ -954,24 +1035,20 @@ mod tests {
         }
     }
 
-    /// Exact-buffer plaintext produces a full encrypted chunk followed by a
-    /// tag-only final chunk. If that final chunk is missing, `DecryptReader`
-    /// must reject the stream through the dedicated `filled == 0` truncation
-    /// path instead of silently treating EOF as success — and the
-    /// already-authenticated first chunk's plaintext must still be served
-    /// before the error is raised.
+    /// A completely empty input (0 bytes) hits the dedicated
+    /// `filled == 0` truncation path: there is no final
+    /// authenticated chunk at all, and the reader rejects via
+    /// `StreamError::Truncated` → `CryptoError::PayloadTruncated`
+    /// rather than silently returning empty plaintext. (Empty
+    /// **plaintext** is a different case: the writer still emits one
+    /// tag-only `encrypt_last` chunk; see
+    /// `streaming_aead_empty_plaintext_is_single_tag_only_chunk`.)
     #[test]
-    fn streaming_aead_missing_tag_only_final_chunk_rejected() {
-        let plaintext: Vec<u8> = (0..BUFFER_SIZE).map(|i| (i % 251) as u8).collect();
-        let mut ciphertext = encrypt_to_vec(&plaintext);
-        ciphertext.truncate(ciphertext.len() - TAG_SIZE);
-
-        let mut reader = DecryptReader::new(fresh_decryptor(), ciphertext.as_slice());
+    fn streaming_aead_empty_input_rejected_as_truncation() {
+        let mut reader = DecryptReader::new(fresh_decryptor(), &[][..]);
         let (out, err) = drain_decrypt_reader(&mut reader);
         let err = err.expect("expected truncation error, got clean EOF");
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
-        // Downcast the typed marker so the test is robust against changes
-        // to the Display text.
         let marker = err
             .get_ref()
             .and_then(|inner| inner.downcast_ref::<StreamError>())
@@ -980,10 +1057,50 @@ mod tests {
             matches!(marker, StreamError::Truncated),
             "expected StreamError::Truncated, got {marker:?}"
         );
-        // The first chunk was fully authenticated before truncation was
-        // discovered, so its plaintext must have been served before the
-        // error. Bounds the unauthenticated-output property under truncation.
-        assert_eq!(out.as_slice(), &plaintext[..BUFFER_SIZE]);
+        assert!(
+            out.is_empty(),
+            "no plaintext should be served on empty input"
+        );
+    }
+
+    /// Truncating a multi-chunk stream at an exact chunk boundary
+    /// (so the file ends after a `next` chunk with no `last` chunk
+    /// at all) surfaces as AEAD authentication failure on the
+    /// remaining chunk: AEAD-BE32 binds the `last_flag` in the
+    /// chunk nonce, so a truncated `next` chunk cannot be
+    /// re-authenticated as `last`. This test pins the behavior so a
+    /// future regression that bypasses the AEAD binding would be
+    /// caught.
+    #[test]
+    fn streaming_aead_chunk_boundary_truncation_rejected() {
+        // 2× BUFFER_SIZE plaintext → 1 `next` chunk + 1 full-size
+        // `last` chunk under FORMAT.md §5.
+        let plaintext: Vec<u8> = (0..(BUFFER_SIZE * 2)).map(|i| (i % 251) as u8).collect();
+        let mut ciphertext = encrypt_to_vec(&plaintext);
+        // Drop the entire `last` chunk: file now ends right after a
+        // `next` chunk.
+        ciphertext.truncate(BUFFER_SIZE + TAG_SIZE);
+
+        let mut reader = DecryptReader::new(fresh_decryptor(), ciphertext.as_slice());
+        let (out, err) = drain_decrypt_reader(&mut reader);
+        let err = err.expect("expected AEAD error on chunk-boundary truncation");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let marker = err
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<StreamError>())
+            .expect("expected StreamError marker");
+        assert!(
+            matches!(marker, StreamError::DecryptAead),
+            "expected StreamError::DecryptAead, got {marker:?}"
+        );
+        // No plaintext was served: the reader's 1-byte peek returned 0
+        // (EOF) immediately after the only chunk, so it tried to
+        // decrypt the chunk as `last`, which fails AEAD because the
+        // chunk was actually written with `last_flag = 0`.
+        assert!(
+            out.is_empty(),
+            "no plaintext should leak from a truncated `next` chunk"
+        );
     }
 
     /// Flip one byte in a late ciphertext chunk. The reader should return the
@@ -1193,27 +1310,6 @@ mod tests {
     }
 
     #[test]
-    fn test_sha3_hash_consistency() {
-        let data = b"test data for hashing";
-        let hash1 = sha3_256_hash(data);
-        let hash2 = sha3_256_hash(data);
-        assert_eq!(hash1, hash2);
-    }
-
-    #[test]
-    fn test_sha3_hash_different_inputs() {
-        let hash1 = sha3_256_hash(b"data1");
-        let hash2 = sha3_256_hash(b"data2");
-        assert_ne!(hash1, hash2);
-    }
-
-    #[test]
-    fn test_sha3_hash_empty_input() {
-        let hash = sha3_256_hash(b"");
-        assert_eq!(hash.len(), 32);
-    }
-
-    #[test]
     fn test_constant_time_compare_equal() {
         let data = [42u8; 32];
         assert!(ct_eq_32(&data, &data));
@@ -1320,12 +1416,12 @@ mod tests {
         .to_bytes();
         let limit = KdfLimit::new(512 * 1024); // 512 MiB
         match KdfParams::from_bytes(&bytes, Some(&limit)) {
-            Err(CryptoError::ExcessiveWork {
-                required_kib: 1_048_576,
-                max_kib: 524_288,
+            Err(CryptoError::KdfResourceCapExceeded {
+                mem_cost_kib: 1_048_576,
+                local_cap_kib: 524_288,
             }) => {}
-            Err(other) => panic!("expected ExcessiveWork, got: {other}"),
-            Ok(_) => panic!("expected ExcessiveWork error, got Ok"),
+            Err(other) => panic!("expected KdfResourceCapExceeded, got: {other}"),
+            Ok(_) => panic!("expected KdfResourceCapExceeded error, got Ok"),
         }
     }
 
@@ -1350,9 +1446,9 @@ mod tests {
 
     /// M-2 regression: `KdfLimit::default()` caps accepted `mem_cost` at the
     /// writer's default (1 GiB). A structurally-valid header requesting the
-    /// hard maximum (2 GiB) must be rejected with `ExcessiveWork` when the
-    /// caller does not opt into a wider limit explicitly. Locks in the
-    /// post-audit tightening so it cannot silently regress.
+    /// hard maximum (2 GiB) must be rejected with `KdfResourceCapExceeded`
+    /// when the caller does not opt into a wider limit explicitly. Locks
+    /// in the post-audit tightening so it cannot silently regress.
     #[test]
     fn test_kdf_limit_default_rejects_max_mem_cost_header() {
         let bytes = KdfParams {
@@ -1363,14 +1459,14 @@ mod tests {
         .to_bytes();
         let limit = KdfLimit::default();
         match KdfParams::from_bytes(&bytes, Some(&limit)) {
-            Err(CryptoError::ExcessiveWork {
-                required_kib,
-                max_kib,
+            Err(CryptoError::KdfResourceCapExceeded {
+                mem_cost_kib,
+                local_cap_kib,
             }) => {
-                assert_eq!(required_kib, KdfParams::MAX_MEM_COST);
-                assert_eq!(max_kib, KdfParams::DEFAULT_MEM_COST);
+                assert_eq!(mem_cost_kib, KdfParams::MAX_MEM_COST);
+                assert_eq!(local_cap_kib, KdfParams::DEFAULT_MEM_COST);
             }
-            Err(other) => panic!("expected ExcessiveWork, got: {other}"),
+            Err(other) => panic!("expected KdfResourceCapExceeded, got: {other}"),
             Ok(_) => panic!("default limit must reject a 2 GiB header"),
         }
     }
@@ -1388,14 +1484,14 @@ mod tests {
         }
         .to_bytes();
         match KdfParams::from_bytes(&bytes, None) {
-            Err(CryptoError::ExcessiveWork {
-                required_kib,
-                max_kib,
+            Err(CryptoError::KdfResourceCapExceeded {
+                mem_cost_kib,
+                local_cap_kib,
             }) => {
-                assert_eq!(required_kib, KdfParams::MAX_MEM_COST);
-                assert_eq!(max_kib, KdfParams::DEFAULT_MEM_COST);
+                assert_eq!(mem_cost_kib, KdfParams::MAX_MEM_COST);
+                assert_eq!(local_cap_kib, KdfParams::DEFAULT_MEM_COST);
             }
-            Err(other) => panic!("expected ExcessiveWork, got: {other}"),
+            Err(other) => panic!("expected KdfResourceCapExceeded, got: {other}"),
             Ok(_) => panic!("None limit must apply default ceiling"),
         }
     }
@@ -1482,12 +1578,13 @@ mod tests {
         assert_ne!(*payload_a, *payload_b);
     }
 
-    /// Builds a single TLV entry `tag || len(be) || value`. Callers
-    /// concatenate results for multi-entry cases.
+    /// Builds a single TLV entry `tag(u16) || len(u32) || value` per
+    /// `FORMAT.md` §6. Callers concatenate results for multi-entry
+    /// cases.
     fn tlv(tag: u16, value: &[u8]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(4 + value.len());
+        let mut out = Vec::with_capacity(6 + value.len());
         out.extend_from_slice(&tag.to_be_bytes());
-        out.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        out.extend_from_slice(&(value.len() as u32).to_be_bytes());
         out.extend_from_slice(value);
         out
     }
@@ -1569,7 +1666,7 @@ mod tests {
         // tag=0x0001, len=100 but only 3 bytes of value follow.
         let mut region = Vec::new();
         region.extend_from_slice(&0x0001u16.to_be_bytes());
-        region.extend_from_slice(&100u16.to_be_bytes());
+        region.extend_from_slice(&100u32.to_be_bytes());
         region.extend_from_slice(&[0xAA; 3]);
         match validate_tlv(&region) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedTlv)) => {}
@@ -1579,11 +1676,26 @@ mod tests {
 
     #[test]
     fn validate_tlv_rejects_truncated_entry_header() {
-        // Only 3 bytes of TLV header (need at least 4).
-        let region = vec![0x00, 0x01, 0x00];
+        // Only 5 bytes of TLV header (need at least 6 = tag(u16) + len(u32)).
+        let region = vec![0x00, 0x01, 0x00, 0x00, 0x00];
         match validate_tlv(&region) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedTlv)) => {}
             other => panic!("expected MalformedTlv for truncated header, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_tlv_rejects_len_above_region_cap() {
+        // tag=0x0001, len=u32::MAX. Even though the on-disk region
+        // is sized within `EXT_LEN_MAX`, a per-entry `len` field that
+        // exceeds the cap must be rejected before integer
+        // conversion to `usize`.
+        let mut region = Vec::new();
+        region.extend_from_slice(&0x0001u16.to_be_bytes());
+        region.extend_from_slice(&u32::MAX.to_be_bytes());
+        match validate_tlv(&region) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedTlv)) => {}
+            other => panic!("expected MalformedTlv for len-over-cap, got {other:?}"),
         }
     }
 
@@ -1614,11 +1726,10 @@ mod tests {
 
     /// Pins the exact HKDF info strings against silent typos. The info
     /// bytes become part of the on-disk wire derivation; changing them
-    /// invalidates every fixture.
+    /// invalidates every fixture. Recipient-type wrap info strings are
+    /// pinned alongside their recipient module's tests.
     #[test]
     fn hkdf_info_strings_are_canonical() {
-        assert_eq!(HKDF_INFO_SYM_WRAP, b"ferrocrypt/v1/sym/wrap");
-        assert_eq!(HKDF_INFO_HYB_WRAP, b"ferrocrypt/v1/hyb/wrap");
         assert_eq!(
             HKDF_INFO_PRIVATE_KEY_WRAP,
             b"ferrocrypt/v1/private-key/wrap"

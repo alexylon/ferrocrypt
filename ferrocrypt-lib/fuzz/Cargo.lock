@@ -283,7 +283,6 @@ dependencies = [
  "libc",
  "rustix",
  "secrecy",
- "sha2",
  "sha3",
  "tar",
  "tempfile",
@@ -705,17 +704,6 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
-]
-
-[[package]]
-name = "sha2"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
-dependencies = [
- "cfg-if",
- "cpufeatures 0.3.0",
- "digest 0.11.2",
 ]
 
 [[package]]

@@ -1,63 +1,45 @@
-//! Hybrid (X25519 recipient) `.fcr` encrypt and decrypt, plus the
-//! passphrase-wrapped `private.key` format.
+//! Hybrid (X25519 recipient) `.fcr` encrypt and decrypt, plus thin
+//! wrappers around the v1 `private.key` reader for the X25519 case.
 //!
 //! Pipeline:
+//!   per-file random `file_key` (32 B)
+//!   X25519 ECDH (caller pubkey on encrypt, recipient privkey on decrypt) →
+//!     HKDF-SHA3-256 → `wrap_key`
+//!   `wrap_key` + XChaCha20-Poly1305 seals `file_key` into the
+//!     x25519 recipient body (104 B; see `recipients::x25519`)
+//!   `file_key` + `stream_nonce` + HKDF-SHA3-256 → `payload_key` + `header_key`
+//!   `payload_key` encrypts the TAR payload via STREAM-BE32
+//!   `header_key` HMAC-SHA3-256 authenticates the on-disk header
 //!
-//!   - **Encrypt:** ephemeral X25519 key → ECDH with recipient pubkey
-//!     → HKDF-SHA3-256 → `wrap_key`. `wrap_key` seals a random 32-byte
-//!     `file_key`. `file_key` → HKDF-SHA3-256 → `payload_key` +
-//!     `header_key`. `payload_key` encrypts the TAR payload via
-//!     STREAM-BE32. `header_key` HMAC-SHA3-256 authenticates the
-//!     on-disk header.
+//! Decryption requires the recipient's `private.key` (passphrase-
+//! wrapped via `private_key.rs`); on multi-recipient files the
+//! decrypt loop iterates `x25519` slots in declared order, accepting
+//! the first slot whose unwrap and header MAC both verify.
 //!
-//!   - **Decrypt:** read `private.key` (passphrase + Argon2id +
-//!     HKDF-SHA3-256 + XChaCha20-Poly1305 with AAD binding every
-//!     cleartext byte). Derive `wrap_key` from ECDH and unwrap
-//!     `file_key`. Rest matches symmetric.
-//!
-//! Wire format (see `ferrocrypt-lib/FORMAT.md` §4.3, §4.4, §8):
-//!
-//! ```text
-//! .fcr:
-//!   [ replicated_prefix (27 B) ]
-//!   [ envelope (104 B) = ephemeral_pubkey(32) | wrap_nonce(24) | wrapped_file_key(48) ]
-//!   [ stream_nonce (19 B) ]
-//!   [ ext_bytes (ext_len B) ]
-//!   [ hmac_tag (32 B) ]
-//!   [ payload (STREAM) ]
-//!
-//! private.key (125 B when ext_len = 0):
-//!   header(9) | argon2_salt(32) | kdf_params(12) | wrap_nonce(24) | ext_bytes | wrapped_privkey(48)
-//!   AEAD-AAD binds every cleartext byte before wrapped_privkey.
-//! ```
+//! Wire format: a v1 `.fcr` container with one or more `x25519`
+//! recipient entries. See `ferrocrypt-lib/FORMAT.md` §3 and
+//! `encrypted_file.rs` for the shared header layout.
 
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use bech32::{Bech32, Hrp};
 use chacha20poly1305::{
-    XChaCha20Poly1305, XNonce,
-    aead::{Aead, KeyInit as AeadKeyInit, OsRng, Payload, stream},
+    XChaCha20Poly1305,
+    aead::{KeyInit as AeadKeyInit, OsRng, stream},
 };
 use secrecy::SecretString;
-use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
-use zeroize::{Zeroize, Zeroizing};
+use x25519_dalek::{PublicKey, StaticSecret};
+use zeroize::Zeroizing;
 
 use crate::atomic_output;
 use crate::common::{
-    ARGON2_SALT_SIZE, DecryptReader, EncryptWriter, HKDF_INFO_HYB_WRAP, HKDF_INFO_PRIVATE_KEY_WRAP,
-    HMAC_TAG_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams, STREAM_NONCE_SIZE, WRAP_NONCE_SIZE,
-    WRAPPED_FILE_KEY_SIZE, build_header_hmac_input, ct_eq_32, derive_passphrase_wrap_key,
-    derive_subkeys, encryption_base_name, generate_file_key, hkdf_expand_sha3_256, hmac_sha3_256,
-    hmac_sha3_256_verify, open_file_key, random_bytes, read_exact_or_truncated, seal_file_key,
-    validate_tlv,
+    DecryptReader, EncryptWriter, KdfLimit, KdfParams, STREAM_NONCE_SIZE, derive_subkeys,
+    encryption_base_name, generate_file_key, random_bytes, validate_tlv,
 };
 use crate::error::FormatDefect;
-use crate::format::{
-    self, KEY_FILE_ALG_X25519, KEY_FILE_TYPE_PRIVATE, PRIVATE_KEY_CIPHERTEXT_SIZE,
-    PRIVATE_KEY_FIXED_BODY_SIZE, PRIVATE_KEY_HEADER_SIZE,
-};
+use crate::format;
+use crate::private_key::PRIVATE_KEY_HEADER_FIXED_SIZE;
 use crate::{CryptoError, ProgressEvent, archiver};
 
 /// Default filename for the hybrid public key file (text form).
@@ -65,86 +47,24 @@ pub const PUBLIC_KEY_FILENAME: &str = "public.key";
 /// Default filename for the hybrid private key file (binary, wrapped).
 pub const PRIVATE_KEY_FILENAME: &str = "private.key";
 
-/// Bech32 HRP for v1 recipient strings (`fcr1…`). Parsed at compile
-/// time via `parse_unchecked` so runtime encode/decode paths don't
-/// repeat the validation.
-const RECIPIENT_HRP: Hrp = Hrp::parse_unchecked("fcr");
-/// Size of the X25519 ephemeral public key carried in the hybrid envelope.
-const EPHEMERAL_PUBKEY_SIZE: usize = 32;
-/// Raw X25519 private-key size (the plaintext wrapped inside `private.key`).
-const PRIVATE_KEY_PLAINTEXT_SIZE: usize = 32;
-
-/// Total hybrid envelope size, raw on disk:
-/// `ephemeral_pubkey(32) || wrap_nonce(24) || wrapped_file_key(48)` = 104 bytes.
-pub const HYBRID_ENVELOPE_SIZE: usize =
-    EPHEMERAL_PUBKEY_SIZE + WRAP_NONCE_SIZE + WRAPPED_FILE_KEY_SIZE;
-
-// ─── Envelope ──────────────────────────────────────────────────────────────
-
-/// In-memory view of the 104-byte hybrid envelope. Writer, reader, and
-/// HMAC input all go through this struct's byte layout so field order
-/// cannot drift.
-struct HybridEnvelope {
-    ephemeral_pubkey: [u8; EPHEMERAL_PUBKEY_SIZE],
-    wrap_nonce: [u8; WRAP_NONCE_SIZE],
-    wrapped_file_key: [u8; WRAPPED_FILE_KEY_SIZE],
-}
-
-impl HybridEnvelope {
-    fn to_bytes(&self) -> [u8; HYBRID_ENVELOPE_SIZE] {
-        let mut out = [0u8; HYBRID_ENVELOPE_SIZE];
-        let mut off = 0;
-        out[off..off + EPHEMERAL_PUBKEY_SIZE].copy_from_slice(&self.ephemeral_pubkey);
-        off += EPHEMERAL_PUBKEY_SIZE;
-        out[off..off + WRAP_NONCE_SIZE].copy_from_slice(&self.wrap_nonce);
-        off += WRAP_NONCE_SIZE;
-        out[off..].copy_from_slice(&self.wrapped_file_key);
-        out
-    }
-
-    fn from_bytes(bytes: &[u8; HYBRID_ENVELOPE_SIZE]) -> Self {
-        let mut off = 0;
-        let mut ephemeral_pubkey = [0u8; EPHEMERAL_PUBKEY_SIZE];
-        ephemeral_pubkey.copy_from_slice(&bytes[off..off + EPHEMERAL_PUBKEY_SIZE]);
-        off += EPHEMERAL_PUBKEY_SIZE;
-        let mut wrap_nonce = [0u8; WRAP_NONCE_SIZE];
-        wrap_nonce.copy_from_slice(&bytes[off..off + WRAP_NONCE_SIZE]);
-        off += WRAP_NONCE_SIZE;
-        let mut wrapped_file_key = [0u8; WRAPPED_FILE_KEY_SIZE];
-        wrapped_file_key.copy_from_slice(&bytes[off..]);
-        Self {
-            ephemeral_pubkey,
-            wrap_nonce,
-            wrapped_file_key,
-        }
-    }
-}
-
-/// Derives the hybrid envelope wrap key from an X25519 ECDH shared
-/// secret. Salt binds both public keys so a single ECDH session
-/// produces a single wrap key bound to this specific exchange.
-fn derive_hybrid_wrap_key(
-    ephemeral_pubkey: &[u8; 32],
-    recipient_pubkey: &[u8; 32],
-    shared_secret: &[u8; 32],
-) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
-    let mut salt = [0u8; 64];
-    salt[..32].copy_from_slice(ephemeral_pubkey);
-    salt[32..].copy_from_slice(recipient_pubkey);
-    hkdf_expand_sha3_256(Some(&salt), shared_secret, HKDF_INFO_HYB_WRAP)
-}
-
-/// Small-order public-key defence: rejects all-zero X25519 shared
-/// secrets via constant-time compare.
-fn shared_secret_is_all_zero(shared: &[u8; 32]) -> bool {
-    ct_eq_32(shared, &[0u8; 32])
-}
-
 // ─── Encrypt ───────────────────────────────────────────────────────────────
 
 /// Encrypts under a recipient's raw 32-byte X25519 public key. The
 /// caller (typically `lib.rs`) is responsible for obtaining the bytes
 /// from a `fcr1…` recipient string or a `public.key` text file.
+///
+/// Wire format: a v1 `.fcr` container with exactly one `x25519`
+/// recipient entry. Per `FORMAT.md` §3.4, `x25519` is public-key-
+/// mixable, so future callers may encrypt to multiple recipients;
+/// today's API exposes the single-recipient path. The recipient body
+/// (`ephemeral_pubkey || wrap_nonce || wrapped_file_key`, 104 B) is
+/// built by [`crate::recipients::x25519::wrap`], which generates the
+/// ephemeral X25519 keypair, runs ECDH against `public_key_bytes`,
+/// rejects an all-zero shared secret, derives the wrap key via
+/// HKDF-SHA3-256, and AEAD-seals `file_key`. The rest of the header
+/// (prefix, fixed, recipient_entries, MAC) is assembled by
+/// [`crate::encrypted_file::build_encrypted_header`], which is the
+/// single source of truth for header MAC scope across both modes.
 pub fn encrypt_file_from_bytes(
     input_path: &Path,
     output_dir: &Path,
@@ -154,48 +74,39 @@ pub fn encrypt_file_from_bytes(
 ) -> Result<PathBuf, CryptoError> {
     on_event(&ProgressEvent::DerivingKey);
 
-    let ephemeral_secret = EphemeralSecret::random_from_rng(OsRng);
-    let ephemeral_public = PublicKey::from(&ephemeral_secret);
-    let recipient_public = PublicKey::from(*public_key_bytes);
-    let shared = ephemeral_secret.diffie_hellman(&recipient_public);
-
-    if shared_secret_is_all_zero(shared.as_bytes()) {
-        return Err(CryptoError::InvalidInput(
-            "Invalid recipient public key".to_string(),
-        ));
-    }
-
-    let wrap_key = derive_hybrid_wrap_key(
-        ephemeral_public.as_bytes(),
-        recipient_public.as_bytes(),
-        shared.as_bytes(),
-    )?;
-
+    // Generate per-file random material first so the rest of the
+    // build is a pure function of (file_key, recipient_pubkey,
+    // stream_nonce, input bytes). file_key lives in `Zeroizing`, so
+    // an early return wipes it.
     let file_key = generate_file_key();
-    let wrap_nonce = random_bytes::<WRAP_NONCE_SIZE>();
-    let wrapped_file_key = seal_file_key(&wrap_key, &wrap_nonce, &file_key)?;
-    drop(wrap_key);
-
     let stream_nonce = random_bytes::<STREAM_NONCE_SIZE>();
     let (payload_key, header_key) = derive_subkeys(&file_key, &stream_nonce)?;
 
-    let envelope = HybridEnvelope {
-        ephemeral_pubkey: *ephemeral_public.as_bytes(),
-        wrap_nonce,
-        wrapped_file_key,
-    };
-    let envelope_bytes = envelope.to_bytes();
+    // Wrap the file_key for the X25519 recipient. Ephemeral keypair
+    // generation, ECDH, all-zero-shared rejection, wrap-key
+    // derivation, and AEAD seal all run inside this call. After the
+    // body is built, the raw file_key is no longer needed; drop it
+    // immediately so the plaintext window in memory is minimal.
+    let body = crate::recipients::x25519::wrap(&file_key, public_key_bytes)?;
+    drop(file_key);
 
-    let ext_bytes: Vec<u8> = Vec::new();
-    let on_disk_prefix =
-        format::build_encoded_header_prefix(format::TYPE_HYBRID, ext_bytes.len() as u16)?;
-
-    let tag = hmac_sha3_256(
-        header_key.as_ref(),
-        &build_header_hmac_input(&on_disk_prefix, &envelope_bytes, &stream_nonce, &ext_bytes),
+    let entry = crate::recipients::RecipientEntry::native(
+        crate::recipients::NativeRecipientType::X25519,
+        body.to_vec(),
     )?;
 
-    let base_name = &encryption_base_name(input_path)?;
+    // Assemble prefix + header + MAC. `build_encrypted_header` is the
+    // single byte-arithmetic implementation; encrypt and decrypt
+    // share its MAC scope.
+    let built = crate::encrypted_file::build_encrypted_header(
+        std::slice::from_ref(&entry),
+        b"", // v1.0 writers emit ext_len = 0
+        stream_nonce,
+        &header_key,
+    )?;
+    drop(header_key);
+
+    let base_name = encryption_base_name(input_path)?;
     on_event(&ProgressEvent::Encrypting);
 
     let output_path = match output_file {
@@ -219,11 +130,10 @@ pub fn encrypt_file_from_bytes(
         .tempfile_in(temp_dir)?;
 
     let encrypt_result: Result<tempfile::NamedTempFile, CryptoError> = (|| {
-        tmp.as_file_mut().write_all(&on_disk_prefix)?;
-        tmp.as_file_mut().write_all(&envelope_bytes)?;
-        tmp.as_file_mut().write_all(&stream_nonce)?;
-        tmp.as_file_mut().write_all(&ext_bytes)?;
-        tmp.as_file_mut().write_all(&tag)?;
+        // On-disk order: prefix(12) || header(31 + entries + ext) || mac(32) || payload(STREAM)
+        tmp.as_file_mut().write_all(&built.prefix_bytes)?;
+        tmp.as_file_mut().write_all(&built.header_bytes)?;
+        tmp.as_file_mut().write_all(&built.header_mac)?;
 
         let cipher = XChaCha20Poly1305::new(payload_key.as_ref().into());
         let stream_encryptor =
@@ -244,9 +154,31 @@ pub fn encrypt_file_from_bytes(
 // ─── Decrypt ───────────────────────────────────────────────────────────────
 
 /// Decrypts a hybrid `.fcr` file using the recipient's `private.key`
-/// (which is passphrase-wrapped on disk). Follows the eight-step order
-/// from `ferrocrypt-lib/FORMAT.md` §4.8, adapted to the hybrid path
-/// (steps 3–5 are ECDH + envelope unwrap instead of Argon2id).
+/// (passphrase-wrapped via `private_key.rs`). Follows the FORMAT.md
+/// §3.7 acceptance order, extended to multi-recipient files:
+///
+/// 1. read + structurally validate the header (`read_encrypted_header`)
+/// 2. classify the recipient list — rejects unknown critical entries,
+///    enforces `argon2id` exclusivity, requires the file to carry at
+///    least one supported `x25519` recipient. All checks fire BEFORE
+///    Argon2id runs on the `private.key`.
+/// 3. unlock the recipient's `private.key` via
+///    [`open_x25519_private_key`] (Argon2id + AEAD-AAD validation).
+/// 4. iterate `x25519` recipient slots in declared order:
+///    - flags must be zero (native v1 — critical bit unused on
+///      types the reader handles natively);
+///    - body length must be 104;
+///    - try `recipients::x25519::unwrap`. On failure, continue to
+///      the next slot.
+///    - on success, derive `payload_key` + `header_key` and verify
+///      the header MAC. On MAC failure, continue to the next slot
+///      (the unwrap may have been a forged or tampered slot).
+///    - on MAC success, this slot is the recipient's: validate TLV
+///      and STREAM-decrypt the payload.
+/// 5. if no slot succeeds:
+///    - had at least one successful unwrap → [`CryptoError::HeaderTampered`]
+///    - no successful unwraps at all →
+///      [`CryptoError::RecipientUnwrapFailed`] with `type_name = "x25519"`
 pub fn decrypt_file(
     input_path: &Path,
     output_dir: &Path,
@@ -257,145 +189,180 @@ pub fn decrypt_file(
 ) -> Result<PathBuf, CryptoError> {
     let mut encrypted_file = fs::File::open(input_path)?;
 
-    // 1. Prefix + canonicity + magic/type/version/ext_len checks.
-    let (on_disk_prefix, header) =
-        format::read_header_from_reader(&mut encrypted_file, format::TYPE_HYBRID)?;
-
-    // 2. Fixed header fields after the prefix.
-    let mut envelope_bytes = [0u8; HYBRID_ENVELOPE_SIZE];
-    read_exact_or_truncated(&mut encrypted_file, &mut envelope_bytes)?;
-    let mut stream_nonce = [0u8; STREAM_NONCE_SIZE];
-    read_exact_or_truncated(&mut encrypted_file, &mut stream_nonce)?;
-    let mut ext_bytes = vec![0u8; header.ext_len as usize];
-    read_exact_or_truncated(&mut encrypted_file, &mut ext_bytes)?;
-    let mut tag = [0u8; HMAC_TAG_SIZE];
-    read_exact_or_truncated(&mut encrypted_file, &mut tag)?;
-
-    let envelope = HybridEnvelope::from_bytes(&envelope_bytes);
-
-    // 3. Unlock recipient's private key (runs Argon2id on the passphrase).
-    on_event(&ProgressEvent::DerivingKey);
-    let recipient_secret = read_private_key(private_key_path, passphrase, kdf_limit)?;
-
-    // 4. X25519 ECDH with the ephemeral pubkey from the envelope.
-    let ephemeral_public = PublicKey::from(envelope.ephemeral_pubkey);
-    let recipient_public = PublicKey::from(&recipient_secret);
-    let shared = recipient_secret.diffie_hellman(&ephemeral_public);
-    drop(recipient_secret);
-
-    if shared_secret_is_all_zero(shared.as_bytes()) {
-        return Err(CryptoError::HybridEnvelopeUnlockFailed);
-    }
-
-    let wrap_key = derive_hybrid_wrap_key(
-        &envelope.ephemeral_pubkey,
-        recipient_public.as_bytes(),
-        shared.as_bytes(),
+    // 1. Structural read. Performs zero crypto, enforces local caps.
+    let parsed = crate::encrypted_file::read_encrypted_header(
+        &mut encrypted_file,
+        crate::encrypted_file::HeaderReadLimits::default(),
     )?;
 
-    // 5. Unwrap file_key. Wrong recipient key and tampered envelope
-    //    are indistinguishable at the AEAD layer, by design.
-    let file_key = open_file_key(
-        &wrap_key,
-        &envelope.wrap_nonce,
-        &envelope.wrapped_file_key,
-        || CryptoError::HybridEnvelopeUnlockFailed,
-    )?;
-    drop(wrap_key);
-
-    // 6. Post-unwrap subkeys.
-    let (payload_key, header_key) = derive_subkeys(&file_key, &stream_nonce)?;
-
-    // 7. HMAC verify — right key, tampered rest-of-header → HeaderTampered.
-    hmac_sha3_256_verify(
-        header_key.as_ref(),
-        &build_header_hmac_input(&on_disk_prefix, &envelope_bytes, &stream_nonce, &ext_bytes),
-        &tag,
-    )?;
-
-    // 8. TLV canonicity, after authentication.
-    validate_tlv(&ext_bytes)?;
-
-    // 9. STREAM payload. (The hybrid path numbers 1..=9 because
-    // steps 3..=5 — private-key unlock, X25519 ECDH, envelope unwrap —
-    // expand what the symmetric FORMAT.md §4.8 path collapses into a
-    // single "unwrap file_key" step.)
-    on_event(&ProgressEvent::Decrypting);
-    let cipher = XChaCha20Poly1305::new(payload_key.as_ref().into());
-    let stream_decryptor = stream::DecryptorBE32::from_aead(cipher, stream_nonce.as_ref().into());
-    let decrypt_reader = DecryptReader::new(stream_decryptor, encrypted_file);
-    archiver::unarchive(decrypt_reader, output_dir)
-}
-
-// ─── private.key read ──────────────────────────────────────────────────────
-
-/// In-memory view of the `private.key` body (everything after the 9-byte
-/// cleartext header). Field order is fixed by the wire format.
-struct PrivateKeyBody {
-    argon2_salt: [u8; ARGON2_SALT_SIZE],
-    kdf_bytes: [u8; KDF_PARAMS_SIZE],
-    wrap_nonce: [u8; WRAP_NONCE_SIZE],
-    ext_bytes: Vec<u8>,
-    wrapped_privkey: [u8; PRIVATE_KEY_CIPHERTEXT_SIZE],
-}
-
-impl PrivateKeyBody {
-    /// Parses the body (everything after the 9-byte cleartext header)
-    /// given the header's declared `ext_len`.
-    fn from_bytes(body: &[u8], ext_len: usize) -> Result<Self, CryptoError> {
-        let expected = PRIVATE_KEY_FIXED_BODY_SIZE + ext_len + PRIVATE_KEY_CIPHERTEXT_SIZE;
-        if body.len() != expected {
-            return Err(CryptoError::InvalidFormat(FormatDefect::BadKeyFileSize));
+    // 2. Classify the recipient list. Unknown critical entries,
+    //    argon2id-exclusivity violations, and "no supported native
+    //    recipient" all surface here BEFORE any KDF runs (the
+    //    private.key Argon2id work in step 3 is gated by this check
+    //    succeeding).
+    match crate::recipients::classify_encryption_mode(&parsed.recipient_entries)? {
+        crate::EncryptionMode::Hybrid => {}
+        crate::EncryptionMode::Symmetric => {
+            // Caller invoked `hybrid_decrypt` on a passphrase file.
+            // The right path is `symmetric_decrypt`; surface the
+            // generic "no recipient could unlock the file" diagnostic.
+            return Err(CryptoError::NoSupportedRecipient);
         }
-        let mut off = 0;
-        let mut argon2_salt = [0u8; ARGON2_SALT_SIZE];
-        argon2_salt.copy_from_slice(&body[off..off + ARGON2_SALT_SIZE]);
-        off += ARGON2_SALT_SIZE;
-        let mut kdf_bytes = [0u8; KDF_PARAMS_SIZE];
-        kdf_bytes.copy_from_slice(&body[off..off + KDF_PARAMS_SIZE]);
-        off += KDF_PARAMS_SIZE;
-        let mut wrap_nonce = [0u8; WRAP_NONCE_SIZE];
-        wrap_nonce.copy_from_slice(&body[off..off + WRAP_NONCE_SIZE]);
-        off += WRAP_NONCE_SIZE;
-        let ext_bytes = body[off..off + ext_len].to_vec();
-        off += ext_len;
-        let mut wrapped_privkey = [0u8; PRIVATE_KEY_CIPHERTEXT_SIZE];
-        wrapped_privkey.copy_from_slice(&body[off..off + PRIVATE_KEY_CIPHERTEXT_SIZE]);
-        Ok(Self {
-            argon2_salt,
-            kdf_bytes,
-            wrap_nonce,
-            ext_bytes,
-            wrapped_privkey,
-        })
     }
+
+    // 3. Unlock the recipient's private key. Argon2id and AEAD-AAD
+    //    validation happen inside `open_x25519_private_key` →
+    //    `private_key::open_private_key`.
+    on_event(&ProgressEvent::DerivingKey);
+    let recipient_secret = open_x25519_private_key(private_key_path, passphrase, kdf_limit)?;
+
+    // 4. Iterate x25519 recipient slots, looking for the slot whose
+    //    unwrap recovers a `file_key` whose `header_key` verifies the
+    //    header MAC. Per FORMAT.md §3.7, MAC verification is the final
+    //    acceptance gate — until it succeeds, the candidate is not
+    //    final.
+    let stream_nonce = parsed.fixed.stream_nonce;
+    let mut had_successful_unwrap = false;
+
+    for entry in parsed.recipient_entries.iter() {
+        if entry.type_name != crate::recipients::x25519::TYPE_NAME {
+            // Unknown non-critical entries are skipped per FORMAT.md
+            // §3.4; classification above already rejected unknown
+            // critical entries, so anything we encounter here that is
+            // not `x25519` is a non-critical slot we are entitled to
+            // ignore.
+            continue;
+        }
+
+        // Native v1 recipients do not use the critical bit (the reader
+        // handles them natively); a set flag on `x25519` is a
+        // structural anomaly, not a slot we should attempt and skip.
+        if entry.recipient_flags != 0 {
+            return Err(CryptoError::InvalidFormat(
+                FormatDefect::MalformedRecipientEntry,
+            ));
+        }
+
+        let body: [u8; crate::recipients::x25519::BODY_LENGTH] =
+            entry
+                .body
+                .as_slice()
+                .try_into()
+                .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry))?;
+
+        // Try unwrap. Wrong recipient key, all-zero shared secret, and
+        // tampered body all surface from `unwrap` as
+        // `RecipientUnwrapFailed`; skip to the next slot rather than
+        // aborting — a multi-recipient file may have a slot for us
+        // later in the list.
+        let file_key = match crate::recipients::x25519::unwrap(&body, &recipient_secret) {
+            Ok(k) => k,
+            Err(_) => continue,
+        };
+        had_successful_unwrap = true;
+
+        let (payload_key, header_key) = derive_subkeys(&file_key, &stream_nonce)?;
+        drop(file_key);
+
+        // Header MAC is the FINAL acceptance gate. If MAC fails, the
+        // candidate `file_key` is not trusted; continue to the next
+        // x25519 slot. (`payload_key` and `header_key` are dropped
+        // implicitly when this iteration ends.)
+        if format::verify_header_mac(
+            &parsed.prefix_bytes,
+            &parsed.header_bytes,
+            &header_key,
+            &parsed.header_mac,
+        )
+        .is_err()
+        {
+            drop(header_key);
+            continue;
+        }
+        drop(header_key);
+
+        // SUCCESS: TLV validation runs AFTER MAC verify, so the
+        // validator is operating on authenticated bytes.
+        validate_tlv(&parsed.ext_bytes)?;
+
+        on_event(&ProgressEvent::Decrypting);
+        let cipher = XChaCha20Poly1305::new(payload_key.as_ref().into());
+        let stream_decryptor =
+            stream::DecryptorBE32::from_aead(cipher, stream_nonce.as_ref().into());
+        let decrypt_reader = DecryptReader::new(stream_decryptor, encrypted_file);
+        return archiver::unarchive(decrypt_reader, output_dir);
+    }
+
+    // No slot accepted. Distinguish "we had a candidate but MAC failed"
+    // (file is tampered with or contains a forged slot) from "no
+    // candidate unwrapped at all" (this private.key is not a recipient
+    // of the file).
+    drop(recipient_secret);
+    Err(if had_successful_unwrap {
+        CryptoError::HeaderTampered
+    } else {
+        CryptoError::RecipientUnwrapFailed {
+            type_name: crate::recipients::x25519::TYPE_NAME.to_string(),
+        }
+    })
 }
 
-/// AEAD-AAD for `private.key` wrap/unwrap: every cleartext byte before
-/// `wrapped_privkey` (header + argon2_salt + kdf_params + wrap_nonce +
-/// ext_bytes). Shared by writer and reader so the AAD sequence cannot
-/// drift.
-fn private_key_aad(
-    header: &[u8; PRIVATE_KEY_HEADER_SIZE],
-    argon2_salt: &[u8; ARGON2_SALT_SIZE],
-    kdf_bytes: &[u8; KDF_PARAMS_SIZE],
-    wrap_nonce: &[u8; WRAP_NONCE_SIZE],
-    ext_bytes: &[u8],
-) -> Vec<u8> {
-    let mut aad = Vec::with_capacity(
-        PRIVATE_KEY_HEADER_SIZE
-            + ARGON2_SALT_SIZE
-            + KDF_PARAMS_SIZE
-            + WRAP_NONCE_SIZE
-            + ext_bytes.len(),
-    );
-    aad.extend_from_slice(header);
-    aad.extend_from_slice(argon2_salt);
-    aad.extend_from_slice(kdf_bytes);
-    aad.extend_from_slice(wrap_nonce);
-    aad.extend_from_slice(ext_bytes);
-    aad
+/// Reads and unlocks a v1 `private.key` file, returning the raw 32-byte
+/// X25519 secret. Wraps [`crate::private_key::open_private_key`] with
+/// the X25519-specific type-name and length checks plus TLV validation.
+///
+/// Errors:
+/// - [`CryptoError::InputPath`] if the file does not exist
+/// - [`CryptoError::Io`] for other read errors
+/// - [`CryptoError::KeyFileUnlockFailed`] for wrong passphrase or
+///   tampered cleartext (AEAD cannot distinguish)
+/// - [`FormatDefect::WrongKeyFileType`] for a private.key that wraps a
+///   non-X25519 secret (e.g. a future native key kind)
+/// - [`FormatDefect::MalformedPrivateKey`] for a structurally valid
+///   private.key whose decrypted secret has the wrong length for X25519
+fn open_x25519_private_key(
+    path: &Path,
+    passphrase: &SecretString,
+    kdf_limit: Option<&KdfLimit>,
+) -> Result<Zeroizing<[u8; crate::recipients::x25519::PRIVATE_KEY_SIZE]>, CryptoError> {
+    let bytes = fs::read(path).map_err(map_user_path_io_error)?;
+
+    // Friendly diagnostic for the cross-mix-up: a user pointing the
+    // private-key reader at a `public.key` text file gets
+    // `WrongKeyFileType` rather than the generic `NotAKeyFile` that
+    // `open_private_key`'s magic check would surface.
+    if matches!(KeyFileKind::classify(&bytes), KeyFileKind::Public) {
+        return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
+    }
+
+    let opened = crate::private_key::open_private_key(
+        &bytes,
+        passphrase,
+        kdf_limit,
+        crate::private_key::PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT,
+    )?;
+
+    if opened.type_name != crate::recipients::x25519::TYPE_NAME {
+        return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
+    }
+
+    if opened.secret_material.len() != crate::recipients::x25519::PRIVATE_KEY_SIZE {
+        return Err(CryptoError::InvalidFormat(
+            FormatDefect::MalformedPrivateKey,
+        ));
+    }
+
+    // TLV validation is safe to run after AEAD-AAD authentication
+    // succeeded — `private_key::open_private_key` only returns Ok
+    // after the AEAD pass that bound `ext_bytes` as AAD.
+    validate_tlv(&opened.ext_bytes)?;
+
+    let mut secret = Zeroizing::new([0u8; crate::recipients::x25519::PRIVATE_KEY_SIZE]);
+    secret.copy_from_slice(&opened.secret_material);
+    Ok(secret)
 }
+
+// ─── Key-file readers ──────────────────────────────────────────────────────
 
 /// Heuristic classification of key-file bytes. Cheap, non-
 /// authenticating: callers use it to surface the friendly
@@ -432,22 +399,35 @@ impl KeyFileKind {
     /// the more expensive Bech32 decode for the public-key
     /// text shape.
     ///
+    /// The binary signature is `magic(4) || version(1) || kind(1)
+    /// = 'K'`. The version byte is intentionally not constrained,
+    /// so a future v2 `private.key` still classifies as `Private`
+    /// and surfaces the friendly diagnostic instead of `NotAKeyFile`.
+    ///
     /// Adversarial inputs that do NOT match either signature
-    /// (a `.fcr` encrypted file with type byte `'S'`/`'H'`,
+    /// (a `.fcr` encrypted file whose `kind` byte is `'E'`,
     /// random binary without magic, garbage `fcr1…` text with a
     /// bad checksum) classify as `Unknown` and fall through to
     /// the caller's generic rejection path. Probability of an
     /// accidental `Private` match on truly random binary is
     /// `2^-40` (the five specific bytes in the signature).
     pub(crate) fn classify(data: &[u8]) -> Self {
-        if data.len() >= PRIVATE_KEY_HEADER_SIZE
+        // Smallest prefix needed to read the kind byte at offset 5:
+        // magic(4) || version(1) || kind(1).
+        const SIGNATURE_LEN: usize = 6;
+        if data.len() >= SIGNATURE_LEN
             && data[0..4] == format::MAGIC
-            && data[5] == KEY_FILE_TYPE_PRIVATE
+            && data[5] == format::KIND_PRIVATE_KEY
         {
             return Self::Private;
         }
         if let Ok(text) = std::str::from_utf8(data) {
-            if decode_recipient_string(text.trim()).is_ok() {
+            if crate::public_key::decode_recipient_string(
+                text.trim(),
+                crate::public_key::RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT,
+            )
+            .is_ok()
+            {
                 return Self::Public;
             }
         }
@@ -468,93 +448,18 @@ pub(crate) fn map_user_path_io_error(e: io::Error) -> CryptoError {
     }
 }
 
-/// Reads and unlocks a `private.key` file. Returns the raw X25519
-/// private key as a [`StaticSecret`]. KDF parameter bounds are checked
-/// BEFORE Argon2id fires, so a hostile file cannot force unbounded work
-/// ahead of authentication.
-fn read_private_key(
-    path: &Path,
-    passphrase: &SecretString,
-    kdf_limit: Option<&KdfLimit>,
-) -> Result<StaticSecret, CryptoError> {
-    let data = fs::read(path).map_err(map_user_path_io_error)?;
-    // Caller pointed this at a text `public.key` by mistake →
-    // surface the friendly mix-up diagnostic instead of letting
-    // the magic-byte mismatch leak as `NotAKeyFile`.
-    if matches!(KeyFileKind::classify(&data), KeyFileKind::Public) {
-        return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
-    }
-    if data.len() < PRIVATE_KEY_HEADER_SIZE {
-        return Err(CryptoError::InvalidFormat(FormatDefect::Truncated));
-    }
-
-    let header = format::parse_private_key_header(&data)?;
-
-    let body_start = PRIVATE_KEY_HEADER_SIZE;
-    let body = &data[body_start..];
-    let parsed = PrivateKeyBody::from_bytes(body, header.ext_len as usize)?;
-
-    // KDF param bounds BEFORE Argon2id runs.
-    let kdf_params = KdfParams::from_bytes(&parsed.kdf_bytes, kdf_limit)?;
-
-    // Length is guaranteed ≥ `PRIVATE_KEY_HEADER_SIZE` by the check
-    // above — this copy cannot fail.
-    let mut header_bytes = [0u8; PRIVATE_KEY_HEADER_SIZE];
-    header_bytes.copy_from_slice(&data[..PRIVATE_KEY_HEADER_SIZE]);
-    let aad = private_key_aad(
-        &header_bytes,
-        &parsed.argon2_salt,
-        &parsed.kdf_bytes,
-        &parsed.wrap_nonce,
-        &parsed.ext_bytes,
-    );
-
-    let wrap_key = derive_passphrase_wrap_key(
-        passphrase,
-        &parsed.argon2_salt,
-        &kdf_params,
-        HKDF_INFO_PRIVATE_KEY_WRAP,
-    )?;
-
-    let cipher = XChaCha20Poly1305::new(wrap_key.as_ref().into());
-    let nonce = XNonce::from_slice(&parsed.wrap_nonce);
-    let mut plaintext = cipher
-        .decrypt(
-            nonce,
-            Payload {
-                msg: parsed.wrapped_privkey.as_slice(),
-                aad: aad.as_slice(),
-            },
-        )
-        .map_err(|_| CryptoError::KeyFileUnlockFailed)?;
-    drop(wrap_key);
-
-    // Validate TLV only after AEAD-AAD authentication succeeded.
-    validate_tlv(&parsed.ext_bytes)?;
-
-    if plaintext.len() != PRIVATE_KEY_PLAINTEXT_SIZE {
-        plaintext.zeroize();
-        return Err(CryptoError::InvalidFormat(
-            FormatDefect::UnexpectedKeyLength,
-        ));
-    }
-
-    let mut private_bytes = Zeroizing::new([0u8; PRIVATE_KEY_PLAINTEXT_SIZE]);
-    private_bytes.copy_from_slice(&plaintext);
-    plaintext.zeroize();
-
-    Ok(StaticSecret::from(*private_bytes))
-}
-
 // ─── generate_key_pair ─────────────────────────────────────────────────────
 
 /// Generates an X25519 key pair and writes both files to `output_dir`.
 /// Returns `(private_key_path, public_key_path)`.
 ///
-/// - `private.key` is binary, passphrase-wrapped, with every cleartext
-///   byte AAD-bound.
+/// - `private.key` is the v1 passphrase-wrapped binary keyfile.
+///   `private_key::seal_private_key` owns the byte layout (cleartext
+///   header → AEAD-AAD-bound → wrapped secret). Permissions: `0o600`
+///   on Unix.
 /// - `public.key` is a UTF-8 text file containing the canonical
-///   `fcr1…` Bech32 recipient string.
+///   `fcr1…` Bech32 recipient string. Permissions: `0o644` on Unix
+///   (public keys are not secret).
 pub fn generate_key_pair(
     passphrase: &SecretString,
     output_dir: &Path,
@@ -585,59 +490,39 @@ pub fn generate_key_pair(
 
     on_event(&ProgressEvent::GeneratingKeyPair);
 
-    let private_key = StaticSecret::random_from_rng(OsRng);
-    let public_key = PublicKey::from(&private_key);
+    // Generate the X25519 keypair. `secret_material` is held in
+    // `Zeroizing` so the 32-byte private bytes are wiped from memory
+    // when this stack frame unwinds, regardless of whether the
+    // subsequent seal/write succeeds.
+    let secret = StaticSecret::random_from_rng(OsRng);
+    let public = PublicKey::from(&secret);
+    let secret_material = Zeroizing::new(secret.to_bytes());
+    drop(secret);
+    let public_material = *public.as_bytes();
 
-    // Derive wrap_key from passphrase + Argon2id + HKDF-SHA3-256.
-    let argon2_salt = random_bytes::<ARGON2_SALT_SIZE>();
-    let kdf_params = KdfParams::default();
-    let kdf_bytes = kdf_params.to_bytes();
-    let wrap_key = derive_passphrase_wrap_key(
+    // Hand off all `private.key` byte-layout, AEAD, and AAD scope to
+    // `private_key.rs` — this used to be hand-rolled here and is now
+    // the single source of truth.
+    let private_key_bytes = crate::private_key::seal_private_key(
+        secret_material.as_ref(),
+        crate::recipients::x25519::TYPE_NAME,
+        &public_material,
+        &[], // no v1 ext_bytes for the X25519 case
         passphrase,
-        &argon2_salt,
-        &kdf_params,
-        HKDF_INFO_PRIVATE_KEY_WRAP,
+        &KdfParams::default(),
     )?;
+    drop(secret_material);
 
-    let wrap_nonce = random_bytes::<WRAP_NONCE_SIZE>();
-    let ext_bytes: Vec<u8> = Vec::new();
-
-    let private_header = format::build_private_key_header(ext_bytes.len() as u16);
-    let aad = private_key_aad(
-        &private_header,
-        &argon2_salt,
-        &kdf_bytes,
-        &wrap_nonce,
-        &ext_bytes,
-    );
-
-    let raw_private_key = Zeroizing::new(private_key.to_bytes());
-    drop(private_key);
-
-    let cipher = XChaCha20Poly1305::new(wrap_key.as_ref().into());
-    let nonce = XNonce::from_slice(&wrap_nonce);
-    let wrapped_vec = cipher
-        .encrypt(
-            nonce,
-            Payload {
-                msg: raw_private_key.as_slice(),
-                aad: aad.as_slice(),
-            },
-        )
-        .map_err(|_| {
-            CryptoError::InternalCryptoFailure("Internal error: private key encryption failed")
-        })?;
-    drop(raw_private_key);
-    drop(wrap_key);
-
-    let wrapped_privkey: [u8; PRIVATE_KEY_CIPHERTEXT_SIZE] =
-        wrapped_vec.as_slice().try_into().map_err(|_| {
-            CryptoError::InternalInvariant("Internal error: wrapped private key size mismatch")
-        })?;
+    // Encode the canonical `fcr1…` recipient string via `public_key.rs`
+    // (validates type-name grammar, computes the internal SHA3-256
+    // checksum, emits BIP 173 lowercase Bech32).
+    let recipient_string = crate::public_key::encode_recipient_string(
+        crate::recipients::x25519::TYPE_NAME,
+        &public_material,
+    )?;
 
     // Write public.key (text file, `fcr1…\n`). Public key isn't secret
     // so permissions relax to 0o644 on Unix.
-    let recipient_string = encode_recipient_string(public_key.as_bytes())?;
     let mut public_builder = tempfile::Builder::new();
     public_builder.prefix(".ferrocrypt-pubkey-").suffix(".tmp");
     #[cfg(unix)]
@@ -670,12 +555,7 @@ pub fn generate_key_pair(
             private_builder.permissions(fs::Permissions::from_mode(0o600));
         }
         let mut private_tmp = private_builder.tempfile_in(output_dir)?;
-        private_tmp.as_file_mut().write_all(&private_header)?;
-        private_tmp.as_file_mut().write_all(&argon2_salt)?;
-        private_tmp.as_file_mut().write_all(&kdf_bytes)?;
-        private_tmp.as_file_mut().write_all(&wrap_nonce)?;
-        private_tmp.as_file_mut().write_all(&ext_bytes)?;
-        private_tmp.as_file_mut().write_all(&wrapped_privkey)?;
+        private_tmp.as_file_mut().write_all(&private_key_bytes)?;
         private_tmp.as_file().sync_all()?;
         atomic_output::finalize_file(private_tmp, &private_key_path)?;
         Ok(())
@@ -687,71 +567,6 @@ pub fn generate_key_pair(
     }
 
     Ok((private_key_path, public_key_path))
-}
-
-// ─── Bech32 recipient string ───────────────────────────────────────────────
-
-/// Canonical `algorithm(1) || public_key_material(32)` byte form used
-/// both by [`encode_recipient_string`] (as the Bech32 data payload)
-/// and by [`crate::PublicKey::fingerprint`] (as the SHA3-256 input).
-/// Single source of truth so the fingerprint and the `fcr1…` encoding
-/// cannot silently diverge.
-pub fn recipient_canonical_bytes(pubkey_bytes: &[u8; 32]) -> [u8; 1 + 32] {
-    let mut out = [0u8; 1 + 32];
-    out[0] = KEY_FILE_ALG_X25519;
-    out[1..].copy_from_slice(pubkey_bytes);
-    out
-}
-
-/// Encodes a 32-byte X25519 public key as the canonical `fcr1…` Bech32
-/// recipient string. `DATA = algorithm(1) || public_key_material(32)`
-/// per `ferrocrypt-lib/FORMAT.md` §7.1.
-pub fn encode_recipient_string(pubkey_bytes: &[u8; 32]) -> Result<String, CryptoError> {
-    let data = recipient_canonical_bytes(pubkey_bytes);
-    bech32::encode::<Bech32>(RECIPIENT_HRP, &data)
-        .map_err(|_| CryptoError::InternalInvariant("Internal error: Bech32 encode failed"))
-}
-
-/// Decodes a canonical lowercase `fcr1…` Bech32 recipient string into
-/// the raw 32-byte X25519 public key. Rejects non-canonical encodings
-/// (including uppercase or mixed case), unknown algorithm bytes, bad
-/// material length, and malformed Bech32 per `ferrocrypt-lib/FORMAT.md`
-/// §7.1.
-pub fn decode_recipient_string(s: &str) -> Result<[u8; 32], CryptoError> {
-    // Canonical v1 recipient strings are lowercase only.
-    if s.chars().any(|c| c.is_ascii_uppercase()) {
-        return Err(CryptoError::InvalidInput(
-            "Recipient string must be lowercase".to_string(),
-        ));
-    }
-
-    let (hrp, data) = bech32::decode(s)
-        .map_err(|_| CryptoError::InvalidInput(format!("Invalid recipient string: {s}")))?;
-
-    if hrp != RECIPIENT_HRP {
-        return Err(CryptoError::InvalidInput(format!(
-            "Unexpected recipient prefix (want '{}', got '{}')",
-            RECIPIENT_HRP.as_str(),
-            hrp.as_str()
-        )));
-    }
-
-    if data.len() != 33 {
-        return Err(CryptoError::InvalidFormat(
-            FormatDefect::UnexpectedKeyLength,
-        ));
-    }
-
-    let algorithm = data[0];
-    if algorithm != KEY_FILE_ALG_X25519 {
-        return Err(CryptoError::InvalidFormat(FormatDefect::UnknownAlgorithm {
-            algorithm,
-        }));
-    }
-
-    let mut pubkey = [0u8; 32];
-    pubkey.copy_from_slice(&data[1..]);
-    Ok(pubkey)
 }
 
 /// Reads a v1 `public.key` text file and returns the raw 32-byte
@@ -766,6 +581,10 @@ pub fn decode_recipient_string(s: &str) -> Result<[u8; 32], CryptoError> {
 /// (magic `FCR\0`), the reader surfaces
 /// [`FormatDefect::WrongKeyFileType`] instead of a cryptic UTF-8
 /// decode error.
+///
+/// Decoding delegates to [`crate::public_key::decode_recipient_string`],
+/// which is the single source of truth for the Bech32 grammar,
+/// internal SHA3-256 checksum, and resource caps.
 pub fn read_public_key(path: &Path) -> Result<[u8; 32], CryptoError> {
     let bytes = fs::read(path).map_err(map_user_path_io_error)?;
     if matches!(KeyFileKind::classify(&bytes), KeyFileKind::Private) {
@@ -773,38 +592,92 @@ pub fn read_public_key(path: &Path) -> Result<[u8; 32], CryptoError> {
     }
     let contents = String::from_utf8(bytes)
         .map_err(|_| CryptoError::InvalidFormat(FormatDefect::NotAKeyFile))?;
-    // Non-whitespace junk (BOM, ZWSP, non-Bech32 chars) is left
-    // for the Bech32 decoder to reject as InvalidInput — a format
-    // violation in the whitespace grammar deserves its own bucket.
+    // Non-whitespace junk (BOM, ZWSP, non-Bech32 chars) is left for
+    // `decode_recipient_string` to reject — a format violation in the
+    // whitespace grammar deserves its own bucket.
     let recipient = contents.strip_suffix('\n').unwrap_or(&contents);
     if recipient.bytes().any(|b| b.is_ascii_whitespace()) {
         return Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey));
     }
-    decode_recipient_string(recipient)
+    let decoded = crate::public_key::decode_recipient_string(
+        recipient,
+        crate::public_key::RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT,
+    )?;
+    if decoded.type_name != crate::recipients::x25519::TYPE_NAME {
+        return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
+    }
+    decoded
+        .key_material
+        .as_slice()
+        .try_into()
+        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey))
 }
 
 // ─── Structural validator (kept for fuzz exports) ──────────────────────────
 
-/// Validates the structural shape of a `private.key` file. Does not
-/// attempt to decrypt or derive any keys. Re-exported via
-/// `fuzz_exports` so the fuzz harness can exercise the parser in
-/// isolation.
-pub fn validate_private_key_shape(
-    data: &[u8],
-    header: &format::PrivateKeyHeader,
-) -> Result<(), CryptoError> {
-    if header.algorithm != KEY_FILE_ALG_X25519 {
-        return Err(CryptoError::InvalidFormat(FormatDefect::UnknownAlgorithm {
-            algorithm: header.algorithm,
-        }));
+/// Validates the structural shape of a v1 `private.key` file. Does not
+/// attempt to decrypt or derive any keys. Used by
+/// [`crate::validate_private_key_file`] and re-exported via
+/// `fuzz_exports` for the fuzz harness.
+///
+/// Checks (in order):
+/// - file is large enough to hold the 90-byte cleartext fixed header;
+/// - [`crate::private_key::PrivateKeyHeader::parse`] accepts the
+///   header (magic, version, kind, `key_flags == 0`, length-field
+///   structural ranges);
+/// - `type_name` is `"x25519"` (the only v1 native key kind);
+/// - `public_len` equals the X25519 public-key size (32);
+/// - the file's total length matches `90 + type_name_len + public_len
+///   + ext_len + wrapped_secret_len`.
+///
+/// Does NOT validate `ext_bytes` TLV canonicity. TLV canonicity runs
+/// only after AEAD-AAD authentication, which structural validation by
+/// definition does not perform.
+pub fn validate_private_key_shape(data: &[u8]) -> Result<(), CryptoError> {
+    let header_bytes =
+        data.first_chunk::<PRIVATE_KEY_HEADER_FIXED_SIZE>()
+            .ok_or(CryptoError::InvalidFormat(
+                FormatDefect::MalformedPrivateKey,
+            ))?;
+    let header = crate::private_key::PrivateKeyHeader::parse(header_bytes)?;
+
+    let type_name_start = PRIVATE_KEY_HEADER_FIXED_SIZE;
+    let type_name_end = type_name_start
+        .checked_add(header.type_name_len as usize)
+        .ok_or(CryptoError::InvalidFormat(
+            FormatDefect::MalformedPrivateKey,
+        ))?;
+    if data.len() < type_name_end {
+        return Err(CryptoError::InvalidFormat(
+            FormatDefect::MalformedPrivateKey,
+        ));
     }
-    let expected_total = PRIVATE_KEY_HEADER_SIZE
-        + PRIVATE_KEY_FIXED_BODY_SIZE
-        + header.ext_len as usize
-        + PRIVATE_KEY_CIPHERTEXT_SIZE;
-    if data.len() != expected_total {
-        return Err(CryptoError::InvalidFormat(FormatDefect::BadKeyFileSize));
+    let type_name = std::str::from_utf8(&data[type_name_start..type_name_end])
+        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedTypeName))?;
+    if type_name != crate::recipients::x25519::TYPE_NAME {
+        return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
     }
+
+    if header.public_len != crate::recipients::x25519::PUBKEY_SIZE as u32 {
+        return Err(CryptoError::InvalidFormat(
+            FormatDefect::MalformedPrivateKey,
+        ));
+    }
+
+    let expected_total = (PRIVATE_KEY_HEADER_FIXED_SIZE as u64)
+        .checked_add(header.type_name_len as u64)
+        .and_then(|v| v.checked_add(header.public_len as u64))
+        .and_then(|v| v.checked_add(header.ext_len as u64))
+        .and_then(|v| v.checked_add(header.wrapped_secret_len as u64))
+        .ok_or(CryptoError::InvalidFormat(
+            FormatDefect::MalformedPrivateKey,
+        ))?;
+    if (data.len() as u64) != expected_total {
+        return Err(CryptoError::InvalidFormat(
+            FormatDefect::MalformedPrivateKey,
+        ));
+    }
+
     Ok(())
 }
 
@@ -853,7 +726,10 @@ mod tests {
     }
 
     /// Encrypting to Alice but decrypting with Bob's private key must
-    /// surface `HybridEnvelopeUnlockFailed`, not `HeaderTampered`.
+    /// surface `RecipientUnwrapFailed { type_name: "x25519" }` at the
+    /// recipient-unwrap step (single-recipient file, so the loop
+    /// terminates with the per-candidate error rather than
+    /// `NoSupportedRecipient`).
     #[test]
     fn decrypt_with_wrong_private_key_fails_at_envelope() -> Result<(), CryptoError> {
         // Alice's keys: hybrid_fixture gives us Alice.
@@ -865,8 +741,12 @@ mod tests {
         let (bob_privkey, _bob_pubkey) = generate_key_pair(&bob_pass, &bob_keys, &|_| {})?;
 
         match decrypt_file(&fcr, &dec_dir, &bob_privkey, &bob_pass, None, &|_| {}) {
-            Err(CryptoError::HybridEnvelopeUnlockFailed) => Ok(()),
-            other => panic!("expected HybridEnvelopeUnlockFailed, got {other:?}"),
+            Err(CryptoError::RecipientUnwrapFailed { ref type_name })
+                if type_name == crate::recipients::x25519::TYPE_NAME =>
+            {
+                Ok(())
+            }
+            other => panic!("expected RecipientUnwrapFailed(x25519), got {other:?}"),
         }
     }
 
@@ -882,50 +762,77 @@ mod tests {
         }
     }
 
-    /// Tampering the stream_nonce must be caught by the header HMAC
-    /// AFTER successful envelope unwrap — surfaces as `HeaderTampered`.
+    /// Tampering the stream_nonce must be caught by the header MAC
+    /// AFTER successful recipient unwrap — surfaces as
+    /// `HeaderMacFailedAfterUnwrap` for a single-recipient file (the
+    /// loop yields the per-candidate variant, then short-circuits to
+    /// it as the only candidate).
     #[test]
     fn decrypt_with_tampered_stream_nonce_fails_at_hmac() -> Result<(), CryptoError> {
         let (_tmp, fcr, dec_dir, privkey, pass) = hybrid_fixture("x", "kp")?;
         let mut bytes = fs::read(&fcr)?;
-        // stream_nonce starts at format::HEADER_PREFIX_ENCODED_SIZE + HYBRID_ENVELOPE_SIZE.
-        let nonce_offset = format::HEADER_PREFIX_ENCODED_SIZE + HYBRID_ENVELOPE_SIZE;
+        // stream_nonce sits inside HEADER_FIXED at offset 12 (after
+        // header_flags(2) + recipient_count(2) + recipient_entries_len(4)
+        // + ext_len(4)). File offset = PREFIX_SIZE + 12.
+        let nonce_offset = format::PREFIX_SIZE + 12;
         bytes[nonce_offset] ^= 0xFF;
         fs::write(&fcr, &bytes)?;
         match decrypt_file(&fcr, &dec_dir, &privkey, &pass, None, &|_| {}) {
-            Err(CryptoError::HeaderTampered) => Ok(()),
-            other => panic!("expected HeaderTampered, got {other:?}"),
+            Err(CryptoError::HeaderMacFailedAfterUnwrap { ref type_name })
+                if type_name == crate::recipients::x25519::TYPE_NAME => {}
+            Err(CryptoError::HeaderTampered) => {}
+            other => panic!(
+                "expected HeaderMacFailedAfterUnwrap(x25519) or HeaderTampered, got {other:?}"
+            ),
         }
+        Ok(())
     }
 
-    /// Tampering `wrapped_file_key` inside the envelope surfaces as
-    /// `HybridEnvelopeUnlockFailed` at AEAD-open time.
+    /// Tampering `wrapped_file_key` inside the x25519 recipient body
+    /// surfaces as `RecipientUnwrapFailed { type_name: "x25519" }` at
+    /// AEAD-open time.
     #[test]
     fn decrypt_with_tampered_envelope_fails_at_unwrap() -> Result<(), CryptoError> {
         let (_tmp, fcr, dec_dir, privkey, pass) = hybrid_fixture("x", "kp")?;
         let mut bytes = fs::read(&fcr)?;
-        // wrapped_file_key lives at offset: prefix(27) + ephemeral(32) + wrap_nonce(24) = 83.
-        let wrapped_offset =
-            format::HEADER_PREFIX_ENCODED_SIZE + EPHEMERAL_PUBKEY_SIZE + WRAP_NONCE_SIZE;
+        // x25519 body starts after PREFIX_SIZE + HEADER_FIXED_SIZE +
+        // ENTRY_HEADER_SIZE + "x25519".len(). Inside the body,
+        // wrapped_file_key is past ephemeral_pubkey(32) + wrap_nonce(24)
+        // = 56 bytes.
+        let body_start = format::PREFIX_SIZE
+            + format::HEADER_FIXED_SIZE
+            + crate::recipients::ENTRY_HEADER_SIZE
+            + crate::recipients::x25519::TYPE_NAME.len();
+        let wrapped_offset = body_start + 32 + 24;
         bytes[wrapped_offset] ^= 0x01;
         fs::write(&fcr, &bytes)?;
         match decrypt_file(&fcr, &dec_dir, &privkey, &pass, None, &|_| {}) {
-            Err(CryptoError::HybridEnvelopeUnlockFailed) => Ok(()),
-            other => panic!("expected HybridEnvelopeUnlockFailed, got {other:?}"),
+            Err(CryptoError::RecipientUnwrapFailed { ref type_name })
+                if type_name == crate::recipients::x25519::TYPE_NAME =>
+            {
+                Ok(())
+            }
+            other => panic!("expected RecipientUnwrapFailed(x25519), got {other:?}"),
         }
     }
 
-    /// Recipient string encode + decode must round-trip bit-for-bit.
+    /// Recipient string encode + decode must round-trip bit-for-bit
+    /// through `crate::public_key::*`.
     #[test]
     fn recipient_string_round_trip() -> Result<(), CryptoError> {
         let mut pk = [0u8; 32];
         for (i, b) in pk.iter_mut().enumerate() {
             *b = i as u8;
         }
-        let s = encode_recipient_string(&pk)?;
+        let s =
+            crate::public_key::encode_recipient_string(crate::recipients::x25519::TYPE_NAME, &pk)?;
         assert!(s.starts_with("fcr1"));
-        let back = decode_recipient_string(&s)?;
-        assert_eq!(pk, back);
+        let decoded = crate::public_key::decode_recipient_string(
+            &s,
+            crate::public_key::RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT,
+        )?;
+        assert_eq!(decoded.type_name, crate::recipients::x25519::TYPE_NAME);
+        assert_eq!(decoded.key_material.as_slice(), pk.as_slice());
         Ok(())
     }
 
@@ -934,19 +841,26 @@ mod tests {
     /// either case in isolation.
     #[test]
     fn recipient_string_rejects_non_canonical_case() {
-        let canonical = encode_recipient_string(&[0x42; 32]).unwrap();
+        let canonical = crate::public_key::encode_recipient_string(
+            crate::recipients::x25519::TYPE_NAME,
+            &[0x42; 32],
+        )
+        .unwrap();
 
+        let cap = crate::public_key::RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT;
         let upper = canonical.to_uppercase();
-        match decode_recipient_string(&upper) {
-            Err(CryptoError::InvalidInput(_)) => {}
-            other => panic!("expected InvalidInput for uppercase-only, got {other:?}"),
+        match crate::public_key::decode_recipient_string(&upper, cap) {
+            Err(CryptoError::InvalidInput(_))
+            | Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
+            other => panic!("expected lowercase rejection for uppercase-only, got {other:?}"),
         }
 
         let mut mixed = canonical.clone();
         mixed.replace_range(4..5, &mixed[4..5].to_uppercase());
-        match decode_recipient_string(&mixed) {
-            Err(CryptoError::InvalidInput(_)) => {}
-            other => panic!("expected InvalidInput for mixed case, got {other:?}"),
+        match crate::public_key::decode_recipient_string(&mixed, cap) {
+            Err(CryptoError::InvalidInput(_))
+            | Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
+            other => panic!("expected lowercase rejection for mixed case, got {other:?}"),
         }
     }
 
@@ -968,9 +882,8 @@ mod tests {
     }
 
     /// Pointing `read_public_key` at a binary `private.key` must
-    /// surface `WrongKeyFileType` rather than the old UTF-8 decode
-    /// `io::Error` — the user swapped the key-file kind, not the
-    /// file family.
+    /// surface `WrongKeyFileType` — the user swapped the key-file
+    /// kind, not the file family. (No raw UTF-8 decode error.)
     #[test]
     fn read_public_key_rejects_private_key_file_as_wrong_type() -> Result<(), CryptoError> {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -983,9 +896,9 @@ mod tests {
     }
 
     /// Pointing `read_private_key` at a text `public.key` must
-    /// surface `WrongKeyFileType` rather than the old generic
-    /// `NotAKeyFile` — the Bech32 `fcr1…` prefix is unambiguous
-    /// enough to identify the mix-up.
+    /// surface `WrongKeyFileType` — the Bech32 `fcr1…` prefix is
+    /// unambiguous enough to identify the mix-up rather than
+    /// surfacing the generic `NotAKeyFile`.
     ///
     /// This also locks in the leading-whitespace tolerance: a
     /// `public.key` that an editor saved with a stray leading blank
@@ -998,7 +911,7 @@ mod tests {
         let (_privkey_path, pubkey_path) = generate_key_pair(&pass, tmp.path(), &|_| {})?;
 
         // Baseline: canonical public.key file.
-        match read_private_key(&pubkey_path, &pass, None).map(|_| ()) {
+        match open_x25519_private_key(&pubkey_path, &pass, None).map(|_| ()) {
             Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)) => {}
             other => panic!("expected WrongKeyFileType (canonical), got {other:?}"),
         }
@@ -1013,7 +926,7 @@ mod tests {
             format!("\t \n{original}"),
         ] {
             fs::write(&pubkey_path, decorated.as_bytes())?;
-            match read_private_key(&pubkey_path, &pass, None).map(|_| ()) {
+            match open_x25519_private_key(&pubkey_path, &pass, None).map(|_| ()) {
                 Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)) => {}
                 other => panic!(
                     "expected WrongKeyFileType for leading-whitespace variant, got {other:?}"
@@ -1138,7 +1051,7 @@ mod tests {
 
         for junk in ["fcr1foobar", "fcr1", "fcr1aaaaaa", "fcr1 with space"] {
             fs::write(&path, junk)?;
-            match read_private_key(&path, &pass, None).map(|_| ()) {
+            match open_x25519_private_key(&path, &pass, None).map(|_| ()) {
                 Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)) => {
                     panic!("junk `{junk}` must not be classified as WrongKeyFileType");
                 }
@@ -1226,7 +1139,7 @@ mod tests {
             Err(CryptoError::InputPath)
         ));
         assert!(matches!(
-            read_private_key(&missing, &pass, None).map(|_| ()),
+            open_x25519_private_key(&missing, &pass, None).map(|_| ()),
             Err(CryptoError::InputPath)
         ));
         assert!(matches!(

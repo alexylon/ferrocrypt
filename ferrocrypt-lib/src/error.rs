@@ -21,7 +21,18 @@ use thiserror::Error;
 /// - [`CryptoError::InvalidKdfParams`] carries an [`InvalidKdfParams`]
 /// - [`CryptoError::InternalInvariant`] and [`CryptoError::InternalCryptoFailure`]
 ///   carry a `&'static str` marker (no heap allocation)
-/// - [`CryptoError::ExcessiveWork`] has named `u32` fields
+/// - The `*CapExceeded` variants ([`CryptoError::HeaderLenCapExceeded`],
+///   [`CryptoError::RecipientCountCapExceeded`],
+///   [`CryptoError::RecipientBodyCapExceeded`],
+///   [`CryptoError::RecipientStringCapExceeded`],
+///   [`CryptoError::KdfResourceCapExceeded`]) each carry the offending
+///   value plus the configured local cap as named integer fields,
+///   matching the "distinct resource-cap error" classes that
+///   `FORMAT.md` §3.2 / §12 enumerate
+/// - The multi-recipient diagnostics ([`CryptoError::RecipientUnwrapFailed`],
+///   [`CryptoError::HeaderMacFailedAfterUnwrap`],
+///   [`CryptoError::UnknownCriticalRecipient`]) each carry the
+///   `type_name` so callers can tell which recipient slot raised them
 ///
 /// Consumers can pattern-match on these shapes without substring
 /// comparisons. Ferrocrypt's error type is closely modelled on the
@@ -97,9 +108,56 @@ pub enum CryptoError {
     /// structural bounds.
     #[error("{0}")]
     InvalidKdfParams(InvalidKdfParams),
-    /// KDF memory cost exceeds the caller-supplied work limit.
-    #[error("Needs {required_kib} KiB to decrypt; limit is {max_kib} KiB")]
-    ExcessiveWork { required_kib: u32, max_kib: u32 },
+    /// Argon2id memory cost from a header exceeds the caller-configured
+    /// local resource cap. Per `FORMAT.md` §3.2, exceeding a local cap
+    /// produces a distinct resource-cap error rather than a generic
+    /// malformed-file error. Distinct from
+    /// [`InvalidKdfParams`] (structurally invalid params) and
+    /// [`KeyDerivation`] (Argon2id itself failed): here the params
+    /// are well-formed but cost more than the caller is willing to
+    /// spend.
+    #[error("KDF resource cap exceeded ({mem_cost_kib} KiB, cap {local_cap_kib})")]
+    KdfResourceCapExceeded {
+        mem_cost_kib: u32,
+        local_cap_kib: u32,
+    },
+    /// `header_len` exceeds the caller-configured local cap. The
+    /// structural max (`HEADER_LEN_MAX = 16 MiB` per `FORMAT.md` §3.1)
+    /// is much higher; this fires when the header would exceed the
+    /// caller's resource policy. Distinct from
+    /// [`FormatDefect::OversizedHeader`] (above structural max) per
+    /// `FORMAT.md` §3.2.
+    #[error("Header length cap exceeded ({header_len} bytes, cap {local_cap})")]
+    HeaderLenCapExceeded { header_len: u32, local_cap: u32 },
+    /// `recipient_count` exceeds the caller-configured local cap. The
+    /// structural range (`1..=4096` per `FORMAT.md` §3.2) is much
+    /// wider; this fires when the count would exceed the caller's
+    /// resource policy. Distinct from
+    /// [`FormatDefect::RecipientCountOutOfRange`] (above structural
+    /// max).
+    #[error("Recipient count cap exceeded ({count} entries, cap {local_cap})")]
+    RecipientCountCapExceeded { count: u16, local_cap: u16 },
+    /// A recipient entry's `body_len` exceeds the local resource cap.
+    /// The structural max (`BODY_LEN_MAX = 16 MiB` per `FORMAT.md`
+    /// §3.3) is much higher; this fires when the body would exceed the
+    /// caller-configured local cap (`FORMAT.md` §3.2 recommends 8 KiB
+    /// for untrusted input). Distinct from
+    /// [`FormatDefect::MalformedRecipientEntry`]: the file is
+    /// structurally valid; the reader's resource policy is the
+    /// constraint, and callers MAY raise the cap for trusted input.
+    #[error("Recipient body cap exceeded ({body_len} bytes, cap {local_cap})")]
+    RecipientBodyCapExceeded { body_len: u32, local_cap: u32 },
+    /// Bech32 recipient string exceeds the caller-configured local
+    /// length cap. Distinct from any malformed-input error per
+    /// `FORMAT.md` §3.2: the string may be perfectly valid; the
+    /// reader's resource policy is what rejects it, and callers MAY
+    /// raise the cap for trusted input. Spec ceiling is 20,000 chars
+    /// (§7.1); the recommended local default is much smaller.
+    /// Saturating casts: an input > `u32::MAX` chars (4 GiB+) reports
+    /// `u32::MAX` for `input_chars`, but the cap rejection itself is
+    /// still correct.
+    #[error("Recipient string cap exceeded ({input_chars} chars, cap {local_cap})")]
+    RecipientStringCapExceeded { input_chars: u32, local_cap: u32 },
 
     // ─── Authentication failures ─────────────────────────────────────────
     /// Unlocking the `private.key` file failed AEAD authentication. The
@@ -112,34 +170,55 @@ pub enum CryptoError {
     /// error by design. The Display wording reflects both causes.
     #[error("Private key unlock failed: wrong passphrase or tampered file")]
     KeyFileUnlockFailed,
-    /// A symmetric `.fcr` envelope failed to unlock. Either the
-    /// passphrase does not derive the right wrap key, or the envelope
-    /// ciphertext / wrap-derivation fields (argon2_salt, kdf_params,
-    /// wrap_nonce) were tampered with. The AEAD primitive cannot
-    /// distinguish the two cases, and the format deliberately collapses
-    /// them into a single error.
-    #[error("Decryption failed: wrong passphrase or tampered envelope")]
-    SymmetricEnvelopeUnlockFailed,
-    /// A hybrid `.fcr` envelope failed to unlock during **decrypt**.
-    /// Fires from the envelope AEAD-open (wrong private key or
-    /// tampered envelope are indistinguishable at that layer) and
-    /// from the decrypt-side all-zero X25519 shared-secret guard (a
-    /// small-order ephemeral pubkey stored in the envelope).
-    ///
-    /// The **encrypt-side** small-order guard, by contrast, fires on
-    /// a caller-supplied recipient public key and surfaces as
-    /// [`CryptoError::InvalidInput`] with the "Invalid recipient
-    /// public key" message — an encrypt-time user error, not a
-    /// decrypt-time forensic failure.
-    #[error("Decryption failed: wrong private key or tampered envelope")]
-    HybridEnvelopeUnlockFailed,
-    /// The envelope unwrapped successfully but the header HMAC failed.
-    /// This means the caller has the right passphrase / private key, but
-    /// header bytes outside the envelope (replicated prefix,
-    /// `stream_nonce`, `ext_bytes`) were tampered with after the file
-    /// was written.
+    /// The single-recipient header MAC failed after the recipient
+    /// successfully unwrapped a candidate `file_key`. The caller has
+    /// the right passphrase or private key, but bytes inside the
+    /// MAC scope (prefix, header_fixed, recipient_entries, ext_bytes)
+    /// were tampered with after the file was written. In a multi-
+    /// recipient file the per-candidate MAC failure surfaces as
+    /// [`HeaderMacFailedAfterUnwrap`] instead so the decrypt loop can
+    /// continue iterating; this variant is the final error for the
+    /// single-recipient case where there is no other slot to try.
     #[error("Decryption failed: header tampered after unlock")]
     HeaderTampered,
+    /// In a multi-recipient decrypt loop, a recipient candidate
+    /// unwrapped a `file_key`, but the resulting `header_key` did not
+    /// verify the header MAC. Per `FORMAT.md` §3.7 the unwrap is not
+    /// final until the MAC verifies; the loop catches this variant and
+    /// continues to the next supported recipient entry. Distinct from
+    /// [`HeaderTampered`] which is the final error when no further
+    /// recipient slot remains. The `type_name` identifies which
+    /// recipient slot produced the failed candidate.
+    #[error("Decryption failed: recipient `{type_name}` MAC mismatch")]
+    HeaderMacFailedAfterUnwrap { type_name: String },
+    /// A native or plugin recipient entry's body failed to unwrap. The
+    /// `type_name` distinguishes which recipient kind raised it (e.g.
+    /// `"argon2id"`, `"x25519"`). Wrong passphrase, wrong key, and
+    /// tampered envelope are indistinguishable at the AEAD layer; all
+    /// three surface here. Per `FORMAT.md` §3.7, recipient unwrap is
+    /// not considered final until the header MAC also verifies.
+    #[error("Decryption failed: recipient `{type_name}` unwrap failed")]
+    RecipientUnwrapFailed { type_name: String },
+    /// The recipient list contains a `recipient_flags.critical = 1`
+    /// entry whose `type_name` is unknown to this implementation. Per
+    /// `FORMAT.md` §3.4 unknown critical entries MUST cause file
+    /// rejection (vs unknown non-critical, which are skipped).
+    #[error("Unknown critical recipient: `{type_name}`. Upgrade FerroCrypt.")]
+    UnknownCriticalRecipient { type_name: String },
+    /// The recipient list was iterated to exhaustion without any
+    /// supported recipient yielding a `file_key` that verified the
+    /// header MAC. Distinct from [`RecipientUnwrapFailed`] (which is
+    /// per-candidate during iteration) and [`HeaderTampered`] (which is
+    /// the final single-recipient error). Per `FORMAT.md` §12.
+    #[error("Decryption failed: no recipient could unlock the file")]
+    NoSupportedRecipient,
+    /// The recipient list contains an `argon2id` entry alongside one or
+    /// more other recipients. Per `FORMAT.md` §4.1 `argon2id` is
+    /// exclusive: a file containing it MUST contain exactly that one
+    /// entry. Readers MUST reject the mix structurally before running
+    /// any Argon2id work.
+    #[error("Passphrase recipient mixed with another recipient")]
+    PassphraseRecipientMixed,
     /// An encrypted payload chunk failed AEAD authentication during
     /// streaming decryption. The ciphertext has been tampered with or
     /// corrupted after the header was authenticated.
@@ -173,91 +252,121 @@ pub enum CryptoError {
 /// or key file. Carried inside [`CryptoError::InvalidFormat`] so format
 /// failures can be pattern-matched without substring comparisons and
 /// without heap-allocated `String`s.
+///
+/// Each variant is the most granular structural class `FORMAT.md` §12
+/// admits. Resource-cap exceedances are *not* `FormatDefect`s — they
+/// are top-level [`CryptoError`] variants in the `*CapExceeded` family
+/// (e.g. [`FormatDefect::OversizedHeader`] is the structural max
+/// violation; the local-cap counterpart is
+/// [`CryptoError::HeaderLenCapExceeded`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FormatDefect {
     /// Input ended before a complete field or header could be read.
     Truncated,
-    /// Replication decoding produced a logical length that does not
-    /// match the expected structural layout.
-    CorruptedHeader,
-    /// The 27-byte on-disk replicated prefix is not the canonical
-    /// encoding of its majority-voted 8-byte logical form. `decoded_view`
-    /// carries the logical bytes so callers can still surface upgrade
-    /// messages ("file says v2") even on a bit-rotten file.
-    CorruptedPrefix { decoded_view: [u8; 8] },
     /// Leading magic bytes do not match `"FCR\0"`.
     BadMagic,
-    /// `.fcr` type byte is not recognised.
-    UnknownType { type_byte: u8 },
-    /// File is the wrong format family for the current operation
-    /// (e.g. caller asked for symmetric but the file is hybrid).
-    WrongEncryptedFileType,
-    /// `ext_len` (in a `.fcr` prefix or `private.key` header) exceeds
-    /// the reader's structural cap of 32 KiB.
-    ExtTooLarge { len: u16 },
+    /// `ext_len` (in a `.fcr` prefix or `private.key` header)
+    /// exceeds the reader's structural cap (`EXT_LEN_MAX`, 64 KiB).
+    /// Carried as `u32` because the cap is `65_536`, which exceeds
+    /// `u16::MAX`.
+    ExtTooLarge { len: u32 },
     /// A TLV entry in the extension region is malformed: bad ordering,
     /// duplicate tag, or `len` extends past the end of the region.
+    /// `FORMAT.md` §6.
     MalformedTlv,
     /// A TLV tag in the critical range (`0x8001..=0xFFFF`) is not
-    /// recognised by this release.
+    /// recognised by this release. Per `FORMAT.md` §6, unknown
+    /// critical TLV tags MUST cause file rejection.
     UnknownCriticalTag { tag: u16 },
     /// Leading magic bytes do not match `"FCR\0"` — not a FerroCrypt
     /// key file. Key-file analogue of [`FormatDefect::BadMagic`].
     NotAKeyFile,
     /// Key file is the wrong kind for this operation (public vs private).
     WrongKeyFileType,
-    /// Key-file or `fcr1…` algorithm byte is not supported.
-    UnknownAlgorithm { algorithm: u8 },
-    /// Key file has an unexpected total size relative to its parsed
-    /// layout.
-    BadKeyFileSize,
-    /// Key material or decrypted envelope has an unexpected byte length.
-    UnexpectedKeyLength,
     /// `public.key` text file violates the canonical grammar
-    /// (FORMAT.md §7): the file MUST contain the lowercase `fcr1…`
+    /// (`FORMAT.md` §7.4): the file MUST contain the lowercase `fcr1…`
     /// recipient string optionally followed by exactly one trailing
-    /// `\n`. Leading/trailing whitespace other than a single final
-    /// LF, CRLF line endings, extra blank lines, and any other
-    /// surrounding whitespace are all rejected.
+    /// `\n`, OR the typed payload itself is structurally invalid.
+    /// Leading/trailing whitespace other than a single final LF, CRLF
+    /// line endings, extra blank lines, internal whitespace, header
+    /// length-field violations, and internal-checksum mismatch all
+    /// surface here.
     MalformedPublicKey,
+    /// `.fcr` `kind` byte does not match the expected value for this
+    /// operation (e.g. caller asked for `.fcr` but got a `private.key`,
+    /// or vice versa). `FORMAT.md` §3.1.
+    WrongKind { kind: u8 },
+    /// Structural defect in the header_fixed layout (non-zero
+    /// `header_flags`, `ext_len` over the structural cap, or length
+    /// fields that don't sum to `header_len`). Distinct from
+    /// [`OversizedHeader`] (header_len > 16 MiB structural max) and
+    /// [`RecipientCountOutOfRange`] (recipient_count outside 1..=4096).
+    /// `FORMAT.md` §3.2.
+    MalformedHeader,
+    /// `header_len` exceeds the structural maximum (`HEADER_LEN_MAX =
+    /// 16 MiB` per `FORMAT.md` §3.1). Distinct from
+    /// [`CryptoError::HeaderLenCapExceeded`] which fires on the
+    /// caller-configured local cap (resource policy, not format
+    /// violation).
+    OversizedHeader { header_len: u32 },
+    /// `recipient_count` is outside the structural range `1..=4096`
+    /// (`FORMAT.md` §3.2). Distinct from
+    /// [`CryptoError::RecipientCountCapExceeded`] which fires on the
+    /// caller-configured local cap.
+    RecipientCountOutOfRange { count: u16 },
+    /// Recipient `type_name` does not satisfy the grammar in
+    /// `FORMAT.md` §3.3 (lowercase ASCII, allowed character set, no
+    /// leading/trailing punctuation, no `..` or `//`).
+    MalformedTypeName,
+    /// Recipient entry framing is structurally invalid: 8-byte header
+    /// truncated, length fields out of range, declared entry size
+    /// exceeds the bytes available, or the recipient region's per-entry
+    /// total accounting doesn't add up to `recipient_entries_len`.
+    /// `FORMAT.md` §3.5.
+    MalformedRecipientEntry,
+    /// Recipient entry has reserved bits set in `recipient_flags`. Per
+    /// `FORMAT.md` §3.5, only bit 0 (the `critical` flag) is defined in
+    /// v1; all other bits MUST be zero on the wire.
+    RecipientFlagsReserved,
+    /// `private.key` cleartext header is structurally invalid: bad
+    /// magic-after-prefix-checks, non-zero `key_flags`, length fields
+    /// out of structural range, declared variable fields exceed the
+    /// file size, or trailing bytes after the wrapped secret. Per
+    /// `FORMAT.md` §8.
+    MalformedPrivateKey,
 }
 
 impl std::fmt::Display for FormatDefect {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Truncated => f.write_str("File is truncated or corrupted"),
-            Self::CorruptedHeader => f.write_str("File header is corrupted"),
-            Self::CorruptedPrefix { decoded_view } => {
-                write!(
-                    f,
-                    "File header is corrupted (declared v{})",
-                    decoded_view[4]
-                )
-            }
             Self::BadMagic => f.write_str("Not a FerroCrypt file"),
-            Self::UnknownType { type_byte } => {
-                write!(f, "Unknown encrypted file type: 0x{type_byte:02X}")
-            }
-            Self::WrongEncryptedFileType => {
-                f.write_str("Wrong encrypted file type for this operation")
-            }
             Self::ExtTooLarge { len } => {
-                write!(f, "File extension region too large ({len} bytes)")
+                write!(f, "Extension region is too large ({len} bytes)")
             }
-            Self::MalformedTlv => f.write_str("File extension region malformed"),
+            Self::MalformedTlv => f.write_str("Extension region is malformed"),
             Self::UnknownCriticalTag { tag } => write!(
                 f,
                 "Unknown required file feature (tag 0x{tag:04X}). Upgrade FerroCrypt."
             ),
             Self::NotAKeyFile => f.write_str("Not a FerroCrypt key file"),
             Self::WrongKeyFileType => f.write_str("Wrong key file kind (public vs private)"),
-            Self::UnknownAlgorithm { algorithm } => {
-                write!(f, "Unknown key algorithm: 0x{algorithm:02X}")
+            Self::MalformedPublicKey => f.write_str("Public key is malformed"),
+            Self::WrongKind { kind } => {
+                write!(f, "Wrong file kind: 0x{kind:02X}")
             }
-            Self::BadKeyFileSize => f.write_str("Key file has unexpected size"),
-            Self::UnexpectedKeyLength => f.write_str("Key material has unexpected length"),
-            Self::MalformedPublicKey => f.write_str("Public key file has extra whitespace"),
+            Self::MalformedHeader => f.write_str("File header is malformed"),
+            Self::OversizedHeader { header_len } => {
+                write!(f, "File header is too large ({header_len} bytes)")
+            }
+            Self::RecipientCountOutOfRange { count } => {
+                write!(f, "Recipient count out of range ({count})")
+            }
+            Self::MalformedTypeName => f.write_str("Recipient type name is malformed"),
+            Self::MalformedRecipientEntry => f.write_str("Recipient entry is malformed"),
+            Self::RecipientFlagsReserved => f.write_str("Recipient entry uses reserved flag bits"),
+            Self::MalformedPrivateKey => f.write_str("Private key is malformed"),
         }
     }
 }
@@ -417,16 +526,30 @@ mod tests {
             "Private key unlock failed: wrong passphrase or tampered file"
         );
         assert_eq!(
-            CryptoError::SymmetricEnvelopeUnlockFailed.to_string(),
-            "Decryption failed: wrong passphrase or tampered envelope"
-        );
-        assert_eq!(
-            CryptoError::HybridEnvelopeUnlockFailed.to_string(),
-            "Decryption failed: wrong private key or tampered envelope"
-        );
-        assert_eq!(
             CryptoError::HeaderTampered.to_string(),
             "Decryption failed: header tampered after unlock"
+        );
+        assert_eq!(
+            CryptoError::HeaderMacFailedAfterUnwrap {
+                type_name: "x25519".to_owned()
+            }
+            .to_string(),
+            "Decryption failed: recipient `x25519` MAC mismatch"
+        );
+        assert_eq!(
+            CryptoError::UnknownCriticalRecipient {
+                type_name: "mlkem768x25519".to_owned()
+            }
+            .to_string(),
+            "Unknown critical recipient: `mlkem768x25519`. Upgrade FerroCrypt."
+        );
+        assert_eq!(
+            CryptoError::NoSupportedRecipient.to_string(),
+            "Decryption failed: no recipient could unlock the file"
+        );
+        assert_eq!(
+            CryptoError::PassphraseRecipientMixed.to_string(),
+            "Passphrase recipient mixed with another recipient"
         );
         assert_eq!(
             CryptoError::PayloadTampered.to_string(),
@@ -440,6 +563,53 @@ mod tests {
             CryptoError::ExtraDataAfterPayload.to_string(),
             "Encrypted file has unexpected trailing data"
         );
+        assert_eq!(
+            CryptoError::RecipientUnwrapFailed {
+                type_name: "x25519".to_owned()
+            }
+            .to_string(),
+            "Decryption failed: recipient `x25519` unwrap failed"
+        );
+        assert_eq!(
+            CryptoError::RecipientBodyCapExceeded {
+                body_len: 10_000,
+                local_cap: 8_192
+            }
+            .to_string(),
+            "Recipient body cap exceeded (10000 bytes, cap 8192)"
+        );
+        assert_eq!(
+            CryptoError::RecipientStringCapExceeded {
+                input_chars: 5_000,
+                local_cap: 1_024,
+            }
+            .to_string(),
+            "Recipient string cap exceeded (5000 chars, cap 1024)"
+        );
+        assert_eq!(
+            CryptoError::HeaderLenCapExceeded {
+                header_len: 2_000_000,
+                local_cap: 1_048_576,
+            }
+            .to_string(),
+            "Header length cap exceeded (2000000 bytes, cap 1048576)"
+        );
+        assert_eq!(
+            CryptoError::RecipientCountCapExceeded {
+                count: 100,
+                local_cap: 64,
+            }
+            .to_string(),
+            "Recipient count cap exceeded (100 entries, cap 64)"
+        );
+        assert_eq!(
+            CryptoError::KdfResourceCapExceeded {
+                mem_cost_kib: 1_048_576,
+                local_cap_kib: 524_288,
+            }
+            .to_string(),
+            "KDF resource cap exceeded (1048576 KiB, cap 524288)"
+        );
     }
 
     /// Lock in the Display text of the typed `FormatDefect`,
@@ -451,33 +621,14 @@ mod tests {
             FormatDefect::Truncated.to_string(),
             "File is truncated or corrupted"
         );
-        assert_eq!(
-            FormatDefect::CorruptedHeader.to_string(),
-            "File header is corrupted"
-        );
-        assert_eq!(
-            FormatDefect::CorruptedPrefix {
-                decoded_view: [b'F', b'C', b'R', 0, 2, 0x53, 0, 0]
-            }
-            .to_string(),
-            "File header is corrupted (declared v2)"
-        );
         assert_eq!(FormatDefect::BadMagic.to_string(), "Not a FerroCrypt file");
         assert_eq!(
-            FormatDefect::UnknownType { type_byte: 0x41 }.to_string(),
-            "Unknown encrypted file type: 0x41"
-        );
-        assert_eq!(
-            FormatDefect::WrongEncryptedFileType.to_string(),
-            "Wrong encrypted file type for this operation"
-        );
-        assert_eq!(
-            FormatDefect::ExtTooLarge { len: 65535 }.to_string(),
-            "File extension region too large (65535 bytes)"
+            FormatDefect::ExtTooLarge { len: 65_537 }.to_string(),
+            "Extension region is too large (65537 bytes)"
         );
         assert_eq!(
             FormatDefect::MalformedTlv.to_string(),
-            "File extension region malformed"
+            "Extension region is malformed"
         );
         assert_eq!(
             FormatDefect::UnknownCriticalTag { tag: 0x8001 }.to_string(),
@@ -492,16 +643,43 @@ mod tests {
             "Wrong key file kind (public vs private)"
         );
         assert_eq!(
-            FormatDefect::UnknownAlgorithm { algorithm: 0xFF }.to_string(),
-            "Unknown key algorithm: 0xFF"
-        );
-        assert_eq!(
-            FormatDefect::BadKeyFileSize.to_string(),
-            "Key file has unexpected size"
-        );
-        assert_eq!(
             FormatDefect::MalformedPublicKey.to_string(),
-            "Public key file has extra whitespace"
+            "Public key is malformed"
+        );
+        assert_eq!(
+            FormatDefect::WrongKind { kind: 0x99 }.to_string(),
+            "Wrong file kind: 0x99"
+        );
+        assert_eq!(
+            FormatDefect::MalformedHeader.to_string(),
+            "File header is malformed"
+        );
+        assert_eq!(
+            FormatDefect::OversizedHeader {
+                header_len: 16_777_217
+            }
+            .to_string(),
+            "File header is too large (16777217 bytes)"
+        );
+        assert_eq!(
+            FormatDefect::MalformedTypeName.to_string(),
+            "Recipient type name is malformed"
+        );
+        assert_eq!(
+            FormatDefect::MalformedRecipientEntry.to_string(),
+            "Recipient entry is malformed"
+        );
+        assert_eq!(
+            FormatDefect::RecipientFlagsReserved.to_string(),
+            "Recipient entry uses reserved flag bits"
+        );
+        assert_eq!(
+            FormatDefect::MalformedPrivateKey.to_string(),
+            "Private key is malformed"
+        );
+        assert_eq!(
+            FormatDefect::RecipientCountOutOfRange { count: 5000 }.to_string(),
+            "Recipient count out of range (5000)"
         );
         assert_eq!(
             UnsupportedVersion::NewerFile { version: 9 }.to_string(),
@@ -581,15 +759,15 @@ mod tests {
             "KeyFileUnlockFailed",
             &CryptoError::KeyFileUnlockFailed.to_string(),
         );
-        check(
-            "SymmetricEnvelopeUnlockFailed",
-            &CryptoError::SymmetricEnvelopeUnlockFailed.to_string(),
-        );
-        check(
-            "HybridEnvelopeUnlockFailed",
-            &CryptoError::HybridEnvelopeUnlockFailed.to_string(),
-        );
         check("HeaderTampered", &CryptoError::HeaderTampered.to_string());
+        check(
+            "NoSupportedRecipient",
+            &CryptoError::NoSupportedRecipient.to_string(),
+        );
+        check(
+            "PassphraseRecipientMixed",
+            &CryptoError::PassphraseRecipientMixed.to_string(),
+        );
         check("PayloadTampered", &CryptoError::PayloadTampered.to_string());
         check(
             "PayloadTruncated",
@@ -599,13 +777,46 @@ mod tests {
             "ExtraDataAfterPayload",
             &CryptoError::ExtraDataAfterPayload.to_string(),
         );
-        // ExcessiveWork at both-u32-max so numeric interpolation cannot
-        // blow the budget at runtime.
+        // Cap-exceeded variants at worst-case integer payloads — the
+        // budget assertion has to hold even when both fields render at
+        // their maximum width.
         check(
-            "ExcessiveWork(max)",
-            &CryptoError::ExcessiveWork {
-                required_kib: u32::MAX,
-                max_kib: u32::MAX,
+            "KdfResourceCapExceeded(max)",
+            &CryptoError::KdfResourceCapExceeded {
+                mem_cost_kib: u32::MAX,
+                local_cap_kib: u32::MAX,
+            }
+            .to_string(),
+        );
+        check(
+            "HeaderLenCapExceeded(max)",
+            &CryptoError::HeaderLenCapExceeded {
+                header_len: u32::MAX,
+                local_cap: u32::MAX,
+            }
+            .to_string(),
+        );
+        check(
+            "RecipientCountCapExceeded(max)",
+            &CryptoError::RecipientCountCapExceeded {
+                count: u16::MAX,
+                local_cap: u16::MAX,
+            }
+            .to_string(),
+        );
+        check(
+            "RecipientBodyCapExceeded(max)",
+            &CryptoError::RecipientBodyCapExceeded {
+                body_len: u32::MAX,
+                local_cap: u32::MAX,
+            }
+            .to_string(),
+        );
+        check(
+            "RecipientStringCapExceeded(max)",
+            &CryptoError::RecipientStringCapExceeded {
+                input_chars: u32::MAX,
+                local_cap: u32::MAX,
             }
             .to_string(),
         );
@@ -613,23 +824,8 @@ mod tests {
         // FormatDefect — every variant at its worst-case payload.
         let defects: &[(&str, FormatDefect)] = &[
             ("Truncated", FormatDefect::Truncated),
-            ("CorruptedHeader", FormatDefect::CorruptedHeader),
-            (
-                "CorruptedPrefix",
-                FormatDefect::CorruptedPrefix {
-                    decoded_view: [b'F', b'C', b'R', 0, u8::MAX, u8::MAX, u8::MAX, u8::MAX],
-                },
-            ),
             ("BadMagic", FormatDefect::BadMagic),
-            (
-                "UnknownType",
-                FormatDefect::UnknownType { type_byte: u8::MAX },
-            ),
-            (
-                "WrongEncryptedFileType",
-                FormatDefect::WrongEncryptedFileType,
-            ),
-            ("ExtTooLarge", FormatDefect::ExtTooLarge { len: u16::MAX }),
+            ("ExtTooLarge", FormatDefect::ExtTooLarge { len: u32::MAX }),
             ("MalformedTlv", FormatDefect::MalformedTlv),
             (
                 "UnknownCriticalTag",
@@ -637,13 +833,29 @@ mod tests {
             ),
             ("NotAKeyFile", FormatDefect::NotAKeyFile),
             ("WrongKeyFileType", FormatDefect::WrongKeyFileType),
-            (
-                "UnknownAlgorithm",
-                FormatDefect::UnknownAlgorithm { algorithm: u8::MAX },
-            ),
-            ("BadKeyFileSize", FormatDefect::BadKeyFileSize),
-            ("UnexpectedKeyLength", FormatDefect::UnexpectedKeyLength),
             ("MalformedPublicKey", FormatDefect::MalformedPublicKey),
+            ("WrongKind", FormatDefect::WrongKind { kind: u8::MAX }),
+            ("MalformedHeader", FormatDefect::MalformedHeader),
+            (
+                "OversizedHeader(max)",
+                FormatDefect::OversizedHeader {
+                    header_len: u32::MAX,
+                },
+            ),
+            (
+                "RecipientCountOutOfRange(max)",
+                FormatDefect::RecipientCountOutOfRange { count: u16::MAX },
+            ),
+            ("MalformedTypeName", FormatDefect::MalformedTypeName),
+            (
+                "MalformedRecipientEntry",
+                FormatDefect::MalformedRecipientEntry,
+            ),
+            (
+                "RecipientFlagsReserved",
+                FormatDefect::RecipientFlagsReserved,
+            ),
+            ("MalformedPrivateKey", FormatDefect::MalformedPrivateKey),
         ];
         for (label, d) in defects {
             check(label, &d.to_string());

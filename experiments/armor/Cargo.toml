@@ -1,0 +1,10 @@
+[package]
+name = "ferrocrypt-armor-experiment"
+version = "0.0.1"
+edition = "2021"
+publish = false
+description = "Parked ASCII-armor encoder/decoder for FerroCrypt v1 (FORMAT.md §10). Lifted out of ferrocrypt-lib for a future release; see armor_review_findings.md for the audit trail."
+
+[dependencies]
+base64 = "0.22"
+zeroize = "1"

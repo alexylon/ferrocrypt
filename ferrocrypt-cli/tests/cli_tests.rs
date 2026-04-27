@@ -185,8 +185,8 @@ fn test_cli_symmetric_wrong_password() {
     assert!(!decrypt_output.status.success());
     let stderr = String::from_utf8_lossy(&decrypt_output.stderr);
     assert!(
-        stderr.contains("Decryption failed: wrong passphrase or tampered envelope"),
-        "expected typed envelope-unlock message on stderr, got: {stderr}"
+        stderr.contains("recipient `argon2id` unwrap failed"),
+        "expected typed argon2id-recipient unwrap-failure message on stderr, got: {stderr}"
     );
     assert!(
         !stderr.contains("aead::Error"),
@@ -222,19 +222,16 @@ fn test_cli_keygen() {
     assert!(keys_dir.join("private.key").exists());
     assert!(keys_dir.join("public.key").exists());
 
-    // Verify keys have expected sizes.
-    // private.key v1: 9-byte header (magic 4 + version 1 + type 1 +
-    // algorithm 1 + ext_len 2) + 68-byte fixed body (argon2_salt 32 +
-    // kdf_params 12 + wrap_nonce 24) + 0-byte ext_bytes + 48-byte
-    // wrapped_privkey (32 plaintext + 16 tag) = 125.
-    // public.key v1: text file "fcr1…\n" — HRP(3) + sep(1) + data(53)
-    // + checksum(6) + LF(1) = 64 bytes for a 33-byte Bech32 payload
-    // (1-byte algorithm + 32-byte X25519 public key).
+    // Pin the on-disk byte counts so a silent change to either layout
+    // (private.key cleartext header per `FORMAT.md` §8, public.key
+    // Bech32 grammar per §7) shows up as a test failure alongside the
+    // spec update. private.key with `ext_len = 0`:
+    // header_fixed(90) + type_name("x25519" = 6) + public(32)
+    //   + ext(0) + wrapped_secret(32 + 16 tag) = 176.
     let private_key_size = fs::metadata(keys_dir.join("private.key")).unwrap().len();
     let public_key_size = fs::metadata(keys_dir.join("public.key")).unwrap().len();
-
-    assert_eq!(private_key_size, 125);
-    assert_eq!(public_key_size, 64);
+    assert_eq!(private_key_size, 176, "v1 X25519 private.key size");
+    assert_eq!(public_key_size, 107, "v1 X25519 public.key text size");
 }
 
 #[test]

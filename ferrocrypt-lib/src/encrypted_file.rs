@@ -384,6 +384,7 @@ pub(crate) fn write_encrypted_file(
     output_file: Option<&Path>,
     base_name: &str,
     built: &BuiltEncryptedHeader,
+    archive_limits: archiver::ArchiveLimits,
 ) -> Result<PathBuf, CryptoError> {
     let output_path = resolve_encrypted_output_path(output_dir, output_file, base_name);
     if output_path.exists() {
@@ -410,7 +411,7 @@ pub(crate) fn write_encrypted_file(
     let stream_encryptor = stream::EncryptorBE32::from_aead(cipher, (&built.stream_nonce).into());
 
     let encrypt_writer = EncryptWriter::new(stream_encryptor, tmp);
-    let (_, encrypt_writer) = archiver::archive(input_path, encrypt_writer)?;
+    let (_, encrypt_writer) = archiver::archive(input_path, encrypt_writer, archive_limits)?;
     let tmp = encrypt_writer.finish()?;
     tmp.as_file().sync_all()?;
 

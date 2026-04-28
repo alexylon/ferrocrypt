@@ -118,6 +118,7 @@ pub fn encrypt_file_from_bytes(
         output_file,
         &base_name,
         &built,
+        archiver::ArchiveLimits::default(),
     )
 }
 
@@ -302,7 +303,11 @@ pub fn decrypt_file(
     let cipher = XChaCha20Poly1305::new(payload_key.as_ref().into());
     let stream_decryptor = stream::DecryptorBE32::from_aead(cipher, stream_nonce.as_ref().into());
     let decrypt_reader = DecryptReader::new(stream_decryptor, encrypted_file);
-    archiver::unarchive(decrypt_reader, output_dir)
+    archiver::unarchive(
+        decrypt_reader,
+        output_dir,
+        archiver::ArchiveLimits::default(),
+    )
 }
 
 /// Reads and unlocks a v1 `private.key` file, returning the raw 32-byte

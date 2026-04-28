@@ -1,5 +1,46 @@
 use thiserror::Error;
 
+/// Maximum number of `chars` (counting an inserted ellipsis as one) a
+/// `type_name` is allowed to occupy when interpolated into a user-facing
+/// error message. Sized to keep the longest interpolating message
+/// (`UnknownCriticalRecipient`, fixed wording = 51 chars) within the
+/// 64-char desktop status-line budget enforced by
+/// [`tests::user_facing_messages_fit_status_line_budget`].
+const TYPE_NAME_DISPLAY_MAX: usize = 13;
+
+/// Wraps a `type_name` so its `Display` rendering truncates to
+/// [`TYPE_NAME_DISPLAY_MAX`] chars, replacing the tail with `…` when
+/// truncation actually occurs. Operates on `chars()` so a name that
+/// happens to contain non-ASCII (the FORMAT.md §3.3 grammar rejects it,
+/// but a `CryptoError::*` variant can be hand-constructed from any
+/// string) does not split a UTF-8 code point.
+struct DisplayableTypeName<'a>(&'a str);
+
+impl std::fmt::Display for DisplayableTypeName<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut iter = self.0.chars();
+        for _ in 0..TYPE_NAME_DISPLAY_MAX - 1 {
+            match iter.next() {
+                Some(ch) => write!(f, "{ch}")?,
+                None => return Ok(()),
+            }
+        }
+        // We've written `MAX - 1` chars. If exactly one char remains,
+        // emit it (the input is at the cap, no truncation needed). If
+        // more remain, emit `…` to signal truncation.
+        match iter.next() {
+            None => Ok(()),
+            Some(last) => {
+                if iter.next().is_some() {
+                    f.write_str("…")
+                } else {
+                    write!(f, "{last}")
+                }
+            }
+        }
+    }
+}
+
 /// Errors that can occur during key generation, encryption, or decryption.
 ///
 /// All `Display` messages are short, user-facing, and free of internal
@@ -189,7 +230,10 @@ pub enum CryptoError {
     /// [`HeaderTampered`] which is the final error when no further
     /// recipient slot remains. The `type_name` identifies which
     /// recipient slot produced the failed candidate.
-    #[error("Decryption failed: recipient `{type_name}` MAC mismatch")]
+    #[error(
+        "Decryption failed: recipient `{}` MAC mismatch",
+        DisplayableTypeName(type_name)
+    )]
     HeaderMacFailedAfterUnwrap { type_name: String },
     /// A native or plugin recipient entry's body failed to unwrap. The
     /// `type_name` distinguishes which recipient kind raised it (e.g.
@@ -197,13 +241,19 @@ pub enum CryptoError {
     /// tampered envelope are indistinguishable at the AEAD layer; all
     /// three surface here. Per `FORMAT.md` §3.7, recipient unwrap is
     /// not considered final until the header MAC also verifies.
-    #[error("Decryption failed: recipient `{type_name}` unwrap failed")]
+    #[error(
+        "Decryption failed: recipient `{}` unwrap failed",
+        DisplayableTypeName(type_name)
+    )]
     RecipientUnwrapFailed { type_name: String },
     /// The recipient list contains a `recipient_flags.critical = 1`
     /// entry whose `type_name` is unknown to this implementation. Per
     /// `FORMAT.md` §3.4 unknown critical entries MUST cause file
     /// rejection (vs unknown non-critical, which are skipped).
-    #[error("Unknown critical recipient: `{type_name}`. Upgrade FerroCrypt.")]
+    #[error(
+        "Unknown critical recipient: `{}`. Upgrade FerroCrypt.",
+        DisplayableTypeName(type_name)
+    )]
     UnknownCriticalRecipient { type_name: String },
     /// The recipient list was iterated to exhaustion without any
     /// supported recipient yielding a `file_key` that verified the
@@ -536,12 +586,16 @@ mod tests {
             .to_string(),
             "Decryption failed: recipient `x25519` MAC mismatch"
         );
+        // `type_name` is intentionally over `TYPE_NAME_DISPLAY_MAX` to
+        // exercise truncation: a 14-char input renders as 12 chars +
+        // `…` (= 13 chars total), keeping the full message under the
+        // 64-char desktop budget.
         assert_eq!(
             CryptoError::UnknownCriticalRecipient {
                 type_name: "mlkem768x25519".to_owned()
             }
             .to_string(),
-            "Unknown critical recipient: `mlkem768x25519`. Upgrade FerroCrypt."
+            "Unknown critical recipient: `mlkem768x255…`. Upgrade FerroCrypt."
         );
         assert_eq!(
             CryptoError::NoSupportedRecipient.to_string(),
@@ -745,11 +799,16 @@ mod tests {
     fn user_facing_messages_fit_status_line_budget() {
         const BUDGET: usize = 64;
 
+        // Count `chars` (display columns for the ASCII-plus-ellipsis
+        // alphabet we actually emit), not bytes: the budget is the
+        // status-line column width, and a multi-byte glyph like the
+        // truncation ellipsis (`…`, 3 bytes / 1 column) must count
+        // for a single column.
         fn check(label: &str, msg: &str) {
+            let chars = msg.chars().count();
             assert!(
-                msg.len() <= BUDGET,
-                "message over {BUDGET}-char budget ({} chars) [{label}]: {msg}",
-                msg.len()
+                chars <= BUDGET,
+                "message over {BUDGET}-char budget ({chars} chars) [{label}]: {msg}",
             );
         }
 
@@ -817,6 +876,34 @@ mod tests {
             &CryptoError::RecipientStringCapExceeded {
                 input_chars: u32::MAX,
                 local_cap: u32::MAX,
+            }
+            .to_string(),
+        );
+
+        // The three `type_name`-bearing variants must fit the budget
+        // even when handed a worst-case 255-byte name (FORMAT.md §3.3
+        // upper bound). The `DisplayableTypeName` wrapper truncates the
+        // interpolated name, but this check pins that the truncation
+        // actually keeps the full message in budget.
+        let max_name = "x".repeat(u8::MAX as usize);
+        check(
+            "RecipientUnwrapFailed(max-name)",
+            &CryptoError::RecipientUnwrapFailed {
+                type_name: max_name.clone(),
+            }
+            .to_string(),
+        );
+        check(
+            "HeaderMacFailedAfterUnwrap(max-name)",
+            &CryptoError::HeaderMacFailedAfterUnwrap {
+                type_name: max_name.clone(),
+            }
+            .to_string(),
+        );
+        check(
+            "UnknownCriticalRecipient(max-name)",
+            &CryptoError::UnknownCriticalRecipient {
+                type_name: max_name,
             }
             .to_string(),
         );

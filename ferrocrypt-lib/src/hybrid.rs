@@ -153,7 +153,10 @@ pub fn encrypt_file_from_bytes(
 ///    - selected `payload_key` present → validate TLV, STREAM-
 ///      decrypt the payload;
 ///    - no selection but had a successful unwrap →
-///      [`CryptoError::HeaderTampered`];
+///      [`CryptoError::HeaderMacFailedAfterUnwrap`] with
+///      `type_name = "x25519"` (a slot unwrapped a `file_key` but the
+///      derived `header_key` did not verify the MAC; reserved for the
+///      hybrid path because the slot identity is meaningful here);
 ///    - no successful unwrap →
 ///      [`CryptoError::RecipientUnwrapFailed`] with `type_name = "x25519"`.
 pub fn decrypt_file(
@@ -276,16 +279,18 @@ pub fn decrypt_file(
     drop(recipient_secret);
 
     let Some(payload_key) = selected_payload_key else {
+        // Per FORMAT.md §3.7 the per-candidate variant
+        // `HeaderMacFailedAfterUnwrap` carries the slot's `type_name`;
+        // the bare `HeaderTampered` is reserved for single-recipient
+        // symmetric files where there's no slot identity to attach.
+        // `had_successful_unwrap` distinguishes "this private.key isn't
+        // a recipient of the file at all" from "we unwrapped a slot
+        // but its derived header_key didn't verify the MAC".
+        let type_name = crate::recipients::x25519::TYPE_NAME.to_string();
         return Err(if had_successful_unwrap {
-            // We unwrapped at least one candidate but no header MAC
-            // verified — the file is tampered with or contains forged
-            // slots. Distinct from "this private.key isn't a recipient
-            // of the file at all".
-            CryptoError::HeaderTampered
+            CryptoError::HeaderMacFailedAfterUnwrap { type_name }
         } else {
-            CryptoError::RecipientUnwrapFailed {
-                type_name: crate::recipients::x25519::TYPE_NAME.to_string(),
-            }
+            CryptoError::RecipientUnwrapFailed { type_name }
         });
     };
 
@@ -784,9 +789,10 @@ mod tests {
 
     /// Tampering the stream_nonce must be caught by the header MAC
     /// AFTER successful recipient unwrap — surfaces as
-    /// `HeaderMacFailedAfterUnwrap` for a single-recipient file (the
-    /// loop yields the per-candidate variant, then short-circuits to
-    /// it as the only candidate).
+    /// `HeaderMacFailedAfterUnwrap { type_name: "x25519" }`. The
+    /// hybrid loop attaches the slot identity rather than collapsing
+    /// to bare `HeaderTampered` (the latter is reserved for symmetric
+    /// files, which have no slot to identify).
     #[test]
     fn decrypt_with_tampered_stream_nonce_fails_at_hmac() -> Result<(), CryptoError> {
         let (_tmp, fcr, dec_dir, privkey, pass) = hybrid_fixture("x", "kp")?;
@@ -799,13 +805,12 @@ mod tests {
         fs::write(&fcr, &bytes)?;
         match decrypt_file(&fcr, &dec_dir, &privkey, &pass, None, &|_| {}) {
             Err(CryptoError::HeaderMacFailedAfterUnwrap { ref type_name })
-                if type_name == crate::recipients::x25519::TYPE_NAME => {}
-            Err(CryptoError::HeaderTampered) => {}
-            other => panic!(
-                "expected HeaderMacFailedAfterUnwrap(x25519) or HeaderTampered, got {other:?}"
-            ),
+                if type_name == crate::recipients::x25519::TYPE_NAME =>
+            {
+                Ok(())
+            }
+            other => panic!("expected HeaderMacFailedAfterUnwrap(x25519), got {other:?}"),
         }
-        Ok(())
     }
 
     /// Tampering `wrapped_file_key` inside the x25519 recipient body
@@ -1688,6 +1693,52 @@ mod tests {
                 Ok(())
             }
             other => panic!("expected RecipientBodyCapExceeded, got {other:?}"),
+        }
+    }
+
+    /// Slot A wraps a *decoy* `file_key` for alice; the file's MAC and
+    /// payload are keyed off a *different* real `file_key`. Alice's
+    /// private key unwraps slot A successfully (yielding the decoy),
+    /// but the resulting `header_key` does not verify the MAC. Slot B
+    /// targets bob, so alice's privkey fails to unwrap it. The decrypt
+    /// loop must surface
+    /// `HeaderMacFailedAfterUnwrap { type_name: "x25519" }`
+    /// — distinct from `HeaderTampered` (single-recipient symmetric
+    /// final error) and `RecipientUnwrapFailed` (no slot unwrapped at
+    /// all). Locks the post-loop branch in
+    /// [`hybrid::decrypt_file`].
+    #[test]
+    fn multi_x25519_decoy_unwrap_returns_mac_failed_after_unwrap() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let keys_dir = tmp.path().join("keys");
+        let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
+        let (pub_b, _priv_b, _pass_b) = keypair_fixture(&keys_dir, "bob", "bob-pass")?;
+
+        // Two distinct file_keys: `real_file_key` drives the MAC and
+        // payload; `decoy_file_key` is what slot A wraps. Collision
+        // probability is 2^-256.
+        let real_file_key = generate_file_key();
+        let decoy_file_key = generate_file_key();
+
+        let body_a = x25519::wrap(&decoy_file_key, &pub_a)?;
+        let body_b = x25519::wrap(&decoy_file_key, &pub_b)?;
+        let entries = [
+            RecipientEntry::native(NativeRecipientType::X25519, body_a.to_vec())?,
+            RecipientEntry::native(NativeRecipientType::X25519, body_b.to_vec())?,
+        ];
+
+        let fcr = tmp.path().join("decoy-unwrap.fcr");
+        build_multi_recipient_fcr(&entries, &real_file_key, b"payload", &fcr)?;
+
+        let dec_dir = tmp.path().join("decrypted");
+        fs::create_dir_all(&dec_dir)?;
+        match decrypt_file(&fcr, &dec_dir, &priv_a, &pass_a, None, &|_| {}) {
+            Err(CryptoError::HeaderMacFailedAfterUnwrap { ref type_name })
+                if type_name == crate::recipients::x25519::TYPE_NAME =>
+            {
+                Ok(())
+            }
+            other => panic!("expected HeaderMacFailedAfterUnwrap(x25519), got {other:?}"),
         }
     }
 }

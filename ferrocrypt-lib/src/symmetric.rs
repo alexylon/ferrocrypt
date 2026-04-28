@@ -17,19 +17,21 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chacha20poly1305::{
-    XChaCha20Poly1305,
-    aead::{KeyInit, stream},
-};
 use secrecy::SecretString;
 
+use crate::archiver::{ArchiveLimits, unarchive};
 use crate::common::{
-    DecryptReader, KdfLimit, KdfParams, STREAM_NONCE_SIZE, derive_subkeys, encryption_base_name,
-    generate_file_key, random_bytes, validate_tlv,
+    DerivedSubkeys, KdfLimit, KdfParams, STREAM_NONCE_SIZE, derive_subkeys, encryption_base_name,
+    generate_file_key, payload_decryptor, random_bytes, validate_tlv,
 };
-use crate::error::FormatDefect;
+use crate::encrypted_file::{
+    HeaderReadLimits, build_encrypted_header, read_encrypted_header, write_encrypted_file,
+};
 use crate::format;
-use crate::{CryptoError, ProgressEvent, archiver};
+use crate::recipients::{
+    NativeRecipientType, RecipientEntry, argon2id, enforce_recipient_mixing_policy,
+};
+use crate::{CryptoError, ProgressEvent};
 
 /// Encrypts a file or directory under a passphrase. Input is archived
 /// into a TAR stream and encrypted directly to the output file — no
@@ -57,27 +59,27 @@ pub fn encrypt_file(
     // wipes it.
     let file_key = generate_file_key();
     let stream_nonce = random_bytes::<STREAM_NONCE_SIZE>();
-    let (payload_key, header_key) = derive_subkeys(&file_key, &stream_nonce)?;
+    let DerivedSubkeys {
+        payload_key,
+        header_key,
+    } = derive_subkeys(&file_key, &stream_nonce)?;
 
     // Wrap the file_key with the passphrase via `argon2id` — Argon2id
     // and the wrap-key derivation run inside this call. After the
     // body is built, the raw file_key is no longer needed; drop it
     // immediately so the plaintext window in memory is minimal.
     let kdf_params = KdfParams::default();
-    let body = crate::recipients::argon2id::wrap(&file_key, passphrase, &kdf_params)?;
+    let body = argon2id::wrap(&file_key, passphrase, &kdf_params)?;
     drop(file_key);
 
-    let entry = crate::recipients::RecipientEntry::native(
-        crate::recipients::NativeRecipientType::Argon2id,
-        body.to_vec(),
-    )?;
+    let entry = RecipientEntry::native(NativeRecipientType::Argon2id, body.to_vec())?;
 
     // Assemble prefix + header + MAC. `build_encrypted_header` is the
     // single byte-arithmetic implementation; encrypt and decrypt
     // share its MAC scope. `payload_key` and `stream_nonce` move into
     // the returned bundle so the writer cannot be paired with material
     // from a different derivation.
-    let built = crate::encrypted_file::build_encrypted_header(
+    let built = build_encrypted_header(
         std::slice::from_ref(&entry),
         b"", // v1.0 writers emit ext_len = 0
         stream_nonce,
@@ -89,13 +91,13 @@ pub fn encrypt_file(
     let base_name = encryption_base_name(input_path)?;
     on_event(&ProgressEvent::Encrypting);
 
-    crate::encrypted_file::write_encrypted_file(
+    write_encrypted_file(
         input_path,
         output_dir,
         output_file,
         &base_name,
         &built,
-        archiver::ArchiveLimits::default(),
+        ArchiveLimits::default(),
     )
 }
 
@@ -125,54 +127,34 @@ pub fn decrypt_file(
     let mut encrypted_file = fs::File::open(input_path)?;
 
     // 1. Structural read. Performs zero crypto, enforces local caps.
-    let parsed = crate::encrypted_file::read_encrypted_header(
-        &mut encrypted_file,
-        crate::encrypted_file::HeaderReadLimits::default(),
-    )?;
+    let parsed = read_encrypted_header(&mut encrypted_file, HeaderReadLimits::default())?;
 
     // 2. Mixing policy BEFORE any KDF. A hostile mixed-recipient file
     //    (argon2id + anything else) is rejected here without spending
     //    Argon2id work on it.
-    crate::recipients::enforce_recipient_mixing_policy(&parsed.recipient_entries)?;
+    enforce_recipient_mixing_policy(&parsed.recipient_entries)?;
 
-    // 3. Locate the argon2id recipient. After step 2, if any
-    //    `argon2id` is present it is the only entry, so this find
-    //    either succeeds with the unique slot or there is no
-    //    passphrase recipient in the file at all (e.g. caller invoked
-    //    `symmetric_decrypt` on a hybrid `.fcr` — surface as
+    // 3-5. Locate and shape-check the argon2id recipient body. After
+    //    step 2, if any `argon2id` entry is present it is the only
+    //    entry, so this either succeeds with the unique slot or there
+    //    is no passphrase recipient in the file at all (e.g. caller
+    //    invoked `symmetric_decrypt` on a hybrid `.fcr` — surfaces as
     //    `NoSupportedRecipient` so the user knows to switch modes).
-    let entry = parsed
-        .recipient_entries
-        .iter()
-        .find(|e| e.type_name == crate::recipients::argon2id::TYPE_NAME)
-        .ok_or(CryptoError::NoSupportedRecipient)?;
-
-    // 4. Recipient flags must be zero. Native v1 recipients do not use
-    //    the critical bit (the reader handles them natively); a set
-    //    flag on `argon2id` is a structural anomaly.
-    if entry.recipient_flags != 0 {
-        return Err(CryptoError::InvalidFormat(
-            FormatDefect::MalformedRecipientEntry,
-        ));
-    }
-
-    // 5. Body length must match the canonical 116-byte argon2id body.
-    let body: [u8; crate::recipients::argon2id::BODY_LENGTH] = entry
-        .body
-        .as_slice()
-        .try_into()
-        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry))?;
+    let body = find_argon2id_body(&parsed.recipient_entries)?;
 
     // 6. Argon2id unwrap. KDF parameter bounds and `kdf_limit` are
     //    checked inside `unwrap` BEFORE Argon2id runs; wrong
     //    passphrase and tampered envelope both surface as
     //    `RecipientUnwrapFailed { type_name: "argon2id" }`.
     on_event(&ProgressEvent::DerivingKey);
-    let file_key = crate::recipients::argon2id::unwrap(&body, passphrase, kdf_limit)?;
+    let file_key = argon2id::unwrap(&body, passphrase, kdf_limit)?;
 
     // 7. Subkeys.
     let stream_nonce = parsed.fixed.stream_nonce;
-    let (payload_key, header_key) = derive_subkeys(&file_key, &stream_nonce)?;
+    let DerivedSubkeys {
+        payload_key,
+        header_key,
+    } = derive_subkeys(&file_key, &stream_nonce)?;
     drop(file_key);
 
     // 8. Header MAC verify — the FINAL acceptance gate. Until this
@@ -194,20 +176,57 @@ pub fn decrypt_file(
 
     // 10. STREAM payload decrypt + unarchive.
     on_event(&ProgressEvent::Decrypting);
-    let cipher = XChaCha20Poly1305::new(payload_key.as_ref().into());
-    let stream_decryptor = stream::DecryptorBE32::from_aead(cipher, stream_nonce.as_ref().into());
-    let decrypt_reader = DecryptReader::new(stream_decryptor, encrypted_file);
-    archiver::unarchive(
-        decrypt_reader,
-        output_dir,
-        archiver::ArchiveLimits::default(),
-    )
+    let decrypt_reader = payload_decryptor(&payload_key, &stream_nonce, encrypted_file);
+    unarchive(decrypt_reader, output_dir, ArchiveLimits::default())
+}
+
+/// Locates the unique `argon2id` recipient and returns its body as a
+/// canonical `BODY_LENGTH`-sized fixed array. Per `FORMAT.md` §3.7
+/// steps 3-5: the entry exists (one and only one — the mixing-policy
+/// check upstream guarantees uniqueness), and its structural shape
+/// passes [`RecipientEntry::expect_native_body`] (zero flags + correct
+/// body length).
+///
+/// Absence of an `argon2id` entry surfaces as
+/// [`CryptoError::NoSupportedRecipient`] (the canonical "wrong mode"
+/// diagnostic for callers who invoked `symmetric_decrypt` on a hybrid
+/// `.fcr`); structural anomalies surface as
+/// [`FormatDefect::MalformedRecipientEntry`].
+fn find_argon2id_body(
+    entries: &[RecipientEntry],
+) -> Result<[u8; argon2id::BODY_LENGTH], CryptoError> {
+    entries
+        .iter()
+        .find(|e| e.type_name == argon2id::TYPE_NAME)
+        .ok_or(CryptoError::NoSupportedRecipient)?
+        .expect_native_body()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::{ARGON2_SALT_SIZE, KDF_PARAMS_SIZE, WRAP_NONCE_SIZE};
     use crate::error::FormatDefect;
+    use crate::format::{HEADER_FIXED_SIZE, PREFIX_SIZE};
+    use crate::recipients::ENTRY_HEADER_SIZE;
+
+    /// File offset of `stream_nonce`. It is the trailing field of
+    /// `header_fixed`, so the offset within `header_fixed` is
+    /// `HEADER_FIXED_SIZE - STREAM_NONCE_SIZE`; add `PREFIX_SIZE` for
+    /// the absolute file offset.
+    const STREAM_NONCE_FILE_OFFSET: usize = PREFIX_SIZE + HEADER_FIXED_SIZE - STREAM_NONCE_SIZE;
+
+    /// File offset of the start of the lone `argon2id` recipient body
+    /// (per `FORMAT.md` §3.5): prefix + fixed header + entry header
+    /// + the `"argon2id"` `type_name`.
+    const ARGON2ID_BODY_FILE_OFFSET: usize =
+        PREFIX_SIZE + HEADER_FIXED_SIZE + ENTRY_HEADER_SIZE + argon2id::TYPE_NAME.len();
+
+    /// Offset of `wrapped_file_key` inside the `argon2id` body
+    /// (per `FORMAT.md` §4.1): salt || kdf_params || wrap_nonce
+    /// precede it.
+    const ARGON2ID_WRAPPED_FILE_KEY_BODY_OFFSET: usize =
+        ARGON2_SALT_SIZE + KDF_PARAMS_SIZE + WRAP_NONCE_SIZE;
 
     /// Harness: set up a tempdir with encrypted/ and decrypted/
     /// subdirs, write `content` to a `data.txt` input, and encrypt it
@@ -252,7 +271,7 @@ mod tests {
         let wrong = SecretString::from("wrong".to_string());
         match decrypt_file(&fcr, &dec_dir, &wrong, None, &|_| {}) {
             Err(CryptoError::RecipientUnwrapFailed { ref type_name })
-                if type_name == crate::recipients::argon2id::TYPE_NAME =>
+                if type_name == argon2id::TYPE_NAME =>
             {
                 Ok(())
             }
@@ -268,11 +287,7 @@ mod tests {
     fn decrypt_with_tampered_stream_nonce_fails_at_hmac() -> Result<(), CryptoError> {
         let (_tmp, fcr, dec_dir, pass) = encrypt_fixture("x", "pass")?;
         let mut bytes = fs::read(&fcr)?;
-        // stream_nonce sits inside HEADER_FIXED at offset 12 (after
-        // header_flags(2) + recipient_count(2) + recipient_entries_len(4)
-        // + ext_len(4)). File offset = PREFIX_SIZE + 12.
-        let nonce_offset = format::PREFIX_SIZE + 12;
-        bytes[nonce_offset] ^= 0xFF;
+        bytes[STREAM_NONCE_FILE_OFFSET] ^= 0xFF;
         fs::write(&fcr, &bytes)?;
         match decrypt_file(&fcr, &dec_dir, &pass, None, &|_| {}) {
             Err(CryptoError::HeaderTampered) => Ok(()),
@@ -287,20 +302,12 @@ mod tests {
     fn decrypt_with_tampered_envelope_fails_at_unwrap() -> Result<(), CryptoError> {
         let (_tmp, fcr, dec_dir, pass) = encrypt_fixture("x", "pass")?;
         let mut bytes = fs::read(&fcr)?;
-        // Body starts after PREFIX_SIZE + HEADER_FIXED_SIZE +
-        // ENTRY_HEADER_SIZE + "argon2id".len(); inside the body,
-        // wrapped_file_key is past argon2_salt(32) + kdf_params(12) +
-        // wrap_nonce(24) = 68 bytes.
-        let body_start = format::PREFIX_SIZE
-            + format::HEADER_FIXED_SIZE
-            + crate::recipients::ENTRY_HEADER_SIZE
-            + crate::recipients::argon2id::TYPE_NAME.len();
-        let wrapped_offset = body_start + 32 + 12 + 24;
+        let wrapped_offset = ARGON2ID_BODY_FILE_OFFSET + ARGON2ID_WRAPPED_FILE_KEY_BODY_OFFSET;
         bytes[wrapped_offset] ^= 0x01;
         fs::write(&fcr, &bytes)?;
         match decrypt_file(&fcr, &dec_dir, &pass, None, &|_| {}) {
             Err(CryptoError::RecipientUnwrapFailed { ref type_name })
-                if type_name == crate::recipients::argon2id::TYPE_NAME =>
+                if type_name == argon2id::TYPE_NAME =>
             {
                 Ok(())
             }

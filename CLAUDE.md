@@ -180,6 +180,7 @@ recipient_entry = type_name_len(2) || recipient_flags(2) || body_len(4)
 - Fail closed on malformed, truncated, ambiguous, or unsupported input.
 - Use strong types where possible.
 - Prefer concise user-facing messages; desktop UI space is limited.
+- Keep explanations concise and written for humans: plain language, short, clear, no needless jargon. Use analogies when they help, skip ceremony, do not pad with restated context.
 - Keep parsing, validation, crypto, and I/O separated.
 - Add or update important tests and keep them self-contained.
 - Add regression tests for security-sensitive and format bugs.

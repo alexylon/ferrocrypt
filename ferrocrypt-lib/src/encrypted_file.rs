@@ -36,13 +36,11 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use chacha20poly1305::{
-    XChaCha20Poly1305,
-    aead::{KeyInit, stream},
-};
 use zeroize::Zeroizing;
 
-use crate::common::{ENCRYPTION_KEY_SIZE, EncryptWriter, HMAC_KEY_SIZE, read_exact_or_truncated};
+use crate::common::{
+    ENCRYPTION_KEY_SIZE, HMAC_KEY_SIZE, payload_encryptor, read_exact_or_truncated,
+};
 use crate::error::{CryptoError, FormatDefect};
 use crate::format::{
     self, HEADER_FIXED_SIZE, HEADER_MAC_SIZE, HeaderFixed, Kind, PREFIX_SIZE, Prefix,
@@ -407,10 +405,7 @@ pub(crate) fn write_encrypted_file(
     tmp.as_file_mut().write_all(&built.header_bytes)?;
     tmp.as_file_mut().write_all(&built.header_mac)?;
 
-    let cipher = XChaCha20Poly1305::new(built.payload_key.as_ref().into());
-    let stream_encryptor = stream::EncryptorBE32::from_aead(cipher, (&built.stream_nonce).into());
-
-    let encrypt_writer = EncryptWriter::new(stream_encryptor, tmp);
+    let encrypt_writer = payload_encryptor(&built.payload_key, &built.stream_nonce, tmp);
     let (_, encrypt_writer) = archiver::archive(input_path, encrypt_writer, archive_limits)?;
     let tmp = encrypt_writer.finish()?;
     tmp.as_file().sync_all()?;
@@ -442,7 +437,10 @@ mod tests {
 
     #[test]
     fn build_then_read_round_trip_single_recipient() {
-        let (payload_key, header_key) = dummy_subkeys();
+        let DerivedSubkeys {
+            payload_key,
+            header_key,
+        } = dummy_subkeys();
         let stream_nonce = [0x07u8; STREAM_NONCE_SIZE];
         let entry = dummy_entry("argon2id", 116);
 
@@ -488,7 +486,10 @@ mod tests {
 
     #[test]
     fn build_then_read_round_trip_two_recipients_with_ext() {
-        let (payload_key, header_key) = dummy_subkeys();
+        let DerivedSubkeys {
+            payload_key,
+            header_key,
+        } = dummy_subkeys();
         let stream_nonce = [0x09u8; STREAM_NONCE_SIZE];
         let entries = vec![
             dummy_entry("x25519", 104),
@@ -528,7 +529,10 @@ mod tests {
 
     #[test]
     fn build_rejects_zero_recipients() {
-        let (payload_key, header_key) = dummy_subkeys();
+        let DerivedSubkeys {
+            payload_key,
+            header_key,
+        } = dummy_subkeys();
         let err =
             build_encrypted_header(&[], b"", [0u8; STREAM_NONCE_SIZE], payload_key, &header_key)
                 .unwrap_err();
@@ -542,7 +546,10 @@ mod tests {
     fn build_rejects_ext_above_structural_cap() {
         // `EXT_LEN_MAX = 65_536`. One byte over fires `ExtTooLarge`
         // (the precise diagnostic), not generic `MalformedHeader`.
-        let (payload_key, header_key) = dummy_subkeys();
+        let DerivedSubkeys {
+            payload_key,
+            header_key,
+        } = dummy_subkeys();
         let entry = dummy_entry("argon2id", 116);
         let oversize = vec![0u8; format::EXT_LEN_MAX as usize + 1];
         let err = build_encrypted_header(
@@ -563,7 +570,10 @@ mod tests {
     fn read_rejects_header_len_above_local_cap() {
         // Build a legitimate header with one large `ext_bytes` region so
         // header_len exceeds the small cap we'll set.
-        let (payload_key, header_key) = dummy_subkeys();
+        let DerivedSubkeys {
+            payload_key,
+            header_key,
+        } = dummy_subkeys();
         let stream_nonce = [0x07u8; STREAM_NONCE_SIZE];
         let entry = dummy_entry("argon2id", 116);
         let big_ext = vec![0u8; 4096];
@@ -589,7 +599,10 @@ mod tests {
 
     #[test]
     fn read_rejects_recipient_count_above_local_cap() {
-        let (payload_key, header_key) = dummy_subkeys();
+        let DerivedSubkeys {
+            payload_key,
+            header_key,
+        } = dummy_subkeys();
         let stream_nonce = [0x07u8; STREAM_NONCE_SIZE];
         let entries: Vec<_> = (0..3).map(|_| dummy_entry("argon2id", 116)).collect();
         let built =
@@ -616,7 +629,10 @@ mod tests {
 
     #[test]
     fn read_rejects_recipient_body_above_local_cap() {
-        let (payload_key, header_key) = dummy_subkeys();
+        let DerivedSubkeys {
+            payload_key,
+            header_key,
+        } = dummy_subkeys();
         let stream_nonce = [0x07u8; STREAM_NONCE_SIZE];
         // Build an entry larger than the per-entry cap we'll set.
         let entry = dummy_entry("argon2id", 200);
@@ -644,7 +660,10 @@ mod tests {
 
     #[test]
     fn mac_verify_rejects_tampered_header_byte() {
-        let (payload_key, header_key) = dummy_subkeys();
+        let DerivedSubkeys {
+            payload_key,
+            header_key,
+        } = dummy_subkeys();
         let stream_nonce = [0x07u8; STREAM_NONCE_SIZE];
         let entry = dummy_entry("argon2id", 116);
         let built =

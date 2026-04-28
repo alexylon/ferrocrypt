@@ -1,9 +1,10 @@
+use crate::CryptoError;
+use crate::atomic_output::rename_no_clobber;
+use crate::common::file_stem;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
-
-use crate::CryptoError;
 
 /// Default file mode for non-Unix platforms (rw-r--r--).
 #[cfg(not(unix))]
@@ -766,9 +767,7 @@ pub fn archive<W: Write>(
             &limits,
         )?;
 
-        crate::common::file_stem(input_path)?
-            .to_string_lossy()
-            .into_owned()
+        file_stem(input_path)?.to_string_lossy().into_owned()
     } else {
         let dir_name = input_path
             .file_name()
@@ -1055,7 +1054,7 @@ pub fn unarchive<R: Read>(
     for root_name in &checked_roots {
         let working_path = output_dir.join(incomplete_working_name(root_name));
         let final_path = output_dir.join(root_name);
-        crate::atomic_output::rename_no_clobber(&working_path, &final_path).map_err(|e| {
+        rename_no_clobber(&working_path, &final_path).map_err(|e| {
             if e.kind() == io::ErrorKind::AlreadyExists {
                 CryptoError::InvalidInput(format!(
                     "Output already exists: {}",

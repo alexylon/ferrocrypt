@@ -413,9 +413,9 @@ pub fn read_exact_or_truncated(reader: &mut impl Read, buf: &mut [u8]) -> Result
 }
 
 /// Opens an AEAD-wrapped file key. `on_fail` is called on AEAD-tag
-/// mismatch so callers can route the failure to a mode-specific
-/// variant ([`CryptoError::SymmetricEnvelopeUnlockFailed`] or
-/// [`CryptoError::HybridEnvelopeUnlockFailed`]).
+/// mismatch so callers can route the failure to a recipient-specific
+/// variant — typically [`CryptoError::RecipientUnwrapFailed`] with the
+/// recipient's `type_name`, per `FORMAT.md` §3.7.
 pub fn open_file_key(
     wrap_key: &[u8; 32],
     wrap_nonce: &[u8; WRAP_NONCE_SIZE],
@@ -453,11 +453,20 @@ pub fn hkdf_expand_sha3_256(
 }
 
 /// Payload AEAD key + header HMAC key, derived from a successfully
-/// unwrapped [`FILE_KEY_SIZE`]-byte `file_key`.
-pub type DerivedSubkeys = (
-    Zeroizing<[u8; ENCRYPTION_KEY_SIZE]>,
-    Zeroizing<[u8; HMAC_KEY_SIZE]>,
-);
+/// unwrapped [`FILE_KEY_SIZE`]-byte `file_key` via [`derive_subkeys`].
+///
+/// Named-field struct rather than a tuple so callers cannot
+/// accidentally swap `payload_key` and `header_key` at the destructure
+/// (both are `Zeroizing<[u8; 32]>` and would compile either way).
+pub struct DerivedSubkeys {
+    /// XChaCha20-Poly1305 key for the streaming payload AEAD.
+    /// Derived with HKDF info `"ferrocrypt/v1/payload"` and
+    /// `salt = stream_nonce`.
+    pub payload_key: Zeroizing<[u8; ENCRYPTION_KEY_SIZE]>,
+    /// HMAC-SHA3-256 key for the on-disk header MAC. Derived with
+    /// HKDF info `"ferrocrypt/v1/header"` and an empty salt.
+    pub header_key: Zeroizing<[u8; HMAC_KEY_SIZE]>,
+}
 
 /// Derives the payload and header subkeys from `file_key`.
 ///
@@ -476,7 +485,10 @@ pub fn derive_subkeys(
 ) -> Result<DerivedSubkeys, CryptoError> {
     let payload_key = hkdf_expand_sha3_256(Some(stream_nonce), file_key, HKDF_INFO_PAYLOAD)?;
     let header_key = hkdf_expand_sha3_256(None, file_key, HKDF_INFO_HEADER)?;
-    Ok((payload_key, header_key))
+    Ok(DerivedSubkeys {
+        payload_key,
+        header_key,
+    })
 }
 
 // ─── TLV extension region ─────────────────────────────────────────────────
@@ -892,10 +904,49 @@ impl<R: Read> Drop for DecryptReader<R> {
     }
 }
 
+// ─── Payload AEAD-stream factories ────────────────────────────────────────
+
+/// Constructs an [`EncryptWriter`] for the per-file payload pipeline.
+///
+/// Wraps the boilerplate `XChaCha20Poly1305::new` then
+/// `EncryptorBE32::from_aead` then `EncryptWriter::new` chain so
+/// symmetric, hybrid, and forward-compat test paths share a single
+/// source of truth for the payload-streaming constructor.
+///
+/// `payload_key` and `stream_nonce` MUST come from the same successful
+/// subkey derivation (see [`derive_subkeys`]) — pairing them with
+/// material from a different derivation produces ciphertext that no
+/// reader will accept.
+pub fn payload_encryptor<W: Write>(
+    payload_key: &[u8; ENCRYPTION_KEY_SIZE],
+    stream_nonce: &[u8; STREAM_NONCE_SIZE],
+    writer: W,
+) -> EncryptWriter<W> {
+    let cipher = XChaCha20Poly1305::new(payload_key.into());
+    let stream_encryptor = stream::EncryptorBE32::from_aead(cipher, stream_nonce.into());
+    EncryptWriter::new(stream_encryptor, writer)
+}
+
+/// Constructs a [`DecryptReader`] for the per-file payload pipeline.
+///
+/// The decrypt counterpart of [`payload_encryptor`]. `payload_key` and
+/// `stream_nonce` MUST come from a header whose MAC has been verified
+/// (see `format::verify_header_mac`); per `FORMAT.md` §3.7 a candidate
+/// `file_key` is not final until the header MAC also verifies, so this
+/// helper does not authenticate either input on its own.
+pub fn payload_decryptor<R: Read>(
+    payload_key: &[u8; ENCRYPTION_KEY_SIZE],
+    stream_nonce: &[u8; STREAM_NONCE_SIZE],
+    reader: R,
+) -> DecryptReader<R> {
+    let cipher = XChaCha20Poly1305::new(payload_key.into());
+    let stream_decryptor = stream::DecryptorBE32::from_aead(cipher, stream_nonce.into());
+    DecryptReader::new(stream_decryptor, reader)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chacha20poly1305::KeyInit;
     use secrecy::SecretString;
 
     // ─── Streaming AEAD adapter helpers ───────────────────────────────────
@@ -911,26 +962,16 @@ mod tests {
     const TEST_KEY: [u8; ENCRYPTION_KEY_SIZE] = [0x42; ENCRYPTION_KEY_SIZE];
     const TEST_NONCE: [u8; STREAM_NONCE_SIZE] = [0x37; STREAM_NONCE_SIZE];
 
-    fn fresh_encryptor() -> stream::EncryptorBE32<XChaCha20Poly1305> {
-        let cipher = XChaCha20Poly1305::new((&TEST_KEY).into());
-        stream::EncryptorBE32::from_aead(cipher, TEST_NONCE.as_ref().into())
-    }
-
-    fn fresh_decryptor() -> stream::DecryptorBE32<XChaCha20Poly1305> {
-        let cipher = XChaCha20Poly1305::new((&TEST_KEY).into());
-        stream::DecryptorBE32::from_aead(cipher, TEST_NONCE.as_ref().into())
-    }
-
     fn encrypt_to_vec(plaintext: &[u8]) -> Vec<u8> {
         let mut ciphertext: Vec<u8> = Vec::new();
-        let mut writer = EncryptWriter::new(fresh_encryptor(), &mut ciphertext);
+        let mut writer = payload_encryptor(&TEST_KEY, &TEST_NONCE, &mut ciphertext);
         writer.write_all(plaintext).unwrap();
         let _ = writer.finish().unwrap();
         ciphertext
     }
 
     fn decrypt_to_vec(ciphertext: &[u8]) -> Vec<u8> {
-        let mut reader = DecryptReader::new(fresh_decryptor(), ciphertext);
+        let mut reader = payload_decryptor(&TEST_KEY, &TEST_NONCE, ciphertext);
         let mut out = Vec::new();
         reader.read_to_end(&mut out).unwrap();
         out
@@ -967,7 +1008,7 @@ mod tests {
             .map(|i| (i % 251) as u8)
             .collect();
         let mut ciphertext: Vec<u8> = Vec::new();
-        let mut writer = EncryptWriter::new(fresh_encryptor(), &mut ciphertext);
+        let mut writer = payload_encryptor(&TEST_KEY, &TEST_NONCE, &mut ciphertext);
         for byte in &plaintext {
             writer.write_all(std::slice::from_ref(byte)).unwrap();
         }
@@ -1023,7 +1064,7 @@ mod tests {
             .collect();
         let ciphertext = encrypt_to_vec(&plaintext);
 
-        let mut reader = DecryptReader::new(fresh_decryptor(), ciphertext.as_slice());
+        let mut reader = payload_decryptor(&TEST_KEY, &TEST_NONCE, ciphertext.as_slice());
         let mut decrypted = Vec::with_capacity(plaintext.len());
         let mut tiny_buf = [0u8; 7];
         loop {
@@ -1064,7 +1105,7 @@ mod tests {
     /// `streaming_aead_empty_plaintext_is_single_tag_only_chunk`.)
     #[test]
     fn streaming_aead_empty_input_rejected_as_truncation() {
-        let mut reader = DecryptReader::new(fresh_decryptor(), &[][..]);
+        let mut reader = payload_decryptor(&TEST_KEY, &TEST_NONCE, &[][..]);
         let (out, err) = drain_decrypt_reader(&mut reader);
         let err = err.expect("expected truncation error, got clean EOF");
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
@@ -1100,7 +1141,7 @@ mod tests {
         // `next` chunk.
         ciphertext.truncate(BUFFER_SIZE + TAG_SIZE);
 
-        let mut reader = DecryptReader::new(fresh_decryptor(), ciphertext.as_slice());
+        let mut reader = payload_decryptor(&TEST_KEY, &TEST_NONCE, ciphertext.as_slice());
         let (out, err) = drain_decrypt_reader(&mut reader);
         let err = err.expect("expected AEAD error on chunk-boundary truncation");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
@@ -1141,7 +1182,7 @@ mod tests {
         let second_chunk_offset = BUFFER_SIZE + TAG_SIZE;
         ciphertext[second_chunk_offset + 100] ^= 0x01;
 
-        let mut reader = DecryptReader::new(fresh_decryptor(), ciphertext.as_slice());
+        let mut reader = payload_decryptor(&TEST_KEY, &TEST_NONCE, ciphertext.as_slice());
         let (out, err) = drain_decrypt_reader(&mut reader);
         let err = err.expect("expected AEAD tamper error, got clean EOF");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
@@ -1175,7 +1216,7 @@ mod tests {
         // partial chunk that still has data but is not a valid AEAD frame.
         ciphertext.truncate(ciphertext.len() - 10);
 
-        let mut reader = DecryptReader::new(fresh_decryptor(), ciphertext.as_slice());
+        let mut reader = payload_decryptor(&TEST_KEY, &TEST_NONCE, ciphertext.as_slice());
         let (out, err) = drain_decrypt_reader(&mut reader);
         let err = err.expect("expected AEAD error on mid-chunk truncation");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
@@ -1280,7 +1321,7 @@ mod tests {
         // wrapper above satisfies that contract. We cannot reuse
         // `drain_decrypt_reader` here because it's hard-coded to
         // `&[u8]`; inline the drain loop instead.
-        let mut reader = DecryptReader::new(fresh_decryptor(), reader_wrapper);
+        let mut reader = payload_decryptor(&TEST_KEY, &TEST_NONCE, reader_wrapper);
         let mut out = Vec::new();
         let mut scratch = [0u8; 4096];
         let err = loop {
@@ -1563,10 +1604,10 @@ mod tests {
     fn derive_subkeys_round_trip() {
         let file_key = [0x11u8; FILE_KEY_SIZE];
         let nonce = [0x22u8; STREAM_NONCE_SIZE];
-        let (payload_a, header_a) = derive_subkeys(&file_key, &nonce).unwrap();
-        let (payload_b, header_b) = derive_subkeys(&file_key, &nonce).unwrap();
-        assert_eq!(*payload_a, *payload_b);
-        assert_eq!(*header_a, *header_b);
+        let a = derive_subkeys(&file_key, &nonce).unwrap();
+        let b = derive_subkeys(&file_key, &nonce).unwrap();
+        assert_eq!(*a.payload_key, *b.payload_key);
+        assert_eq!(*a.header_key, *b.header_key);
     }
 
     #[test]
@@ -1574,15 +1615,15 @@ mod tests {
         let file_key = [0x11u8; FILE_KEY_SIZE];
         let nonce_a = [0x22u8; STREAM_NONCE_SIZE];
         let nonce_b = [0x33u8; STREAM_NONCE_SIZE];
-        let (payload_a, header_a) = derive_subkeys(&file_key, &nonce_a).unwrap();
-        let (payload_b, header_b) = derive_subkeys(&file_key, &nonce_b).unwrap();
+        let a = derive_subkeys(&file_key, &nonce_a).unwrap();
+        let b = derive_subkeys(&file_key, &nonce_b).unwrap();
         assert_ne!(
-            *payload_a, *payload_b,
+            *a.payload_key, *b.payload_key,
             "payload key depends on stream_nonce"
         );
         // Header key uses empty salt so stream_nonce must NOT affect it.
         assert_eq!(
-            *header_a, *header_b,
+            *a.header_key, *b.header_key,
             "header key is independent of stream_nonce"
         );
     }
@@ -1592,9 +1633,9 @@ mod tests {
         let file_a = [0x11u8; FILE_KEY_SIZE];
         let file_b = [0x33u8; FILE_KEY_SIZE];
         let nonce = [0x22u8; STREAM_NONCE_SIZE];
-        let (payload_a, _) = derive_subkeys(&file_a, &nonce).unwrap();
-        let (payload_b, _) = derive_subkeys(&file_b, &nonce).unwrap();
-        assert_ne!(*payload_a, *payload_b);
+        let a = derive_subkeys(&file_a, &nonce).unwrap();
+        let b = derive_subkeys(&file_b, &nonce).unwrap();
+        assert_ne!(*a.payload_key, *b.payload_key);
     }
 
     /// Builds a single TLV entry `tag(u16) || len(u32) || value` per

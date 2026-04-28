@@ -226,6 +226,30 @@ impl RecipientEntry {
         (self.recipient_flags & RECIPIENT_FLAG_CRITICAL) != 0
     }
 
+    /// Validates this entry's structural shape against a native v1
+    /// recipient type and returns its body as a canonical fixed-size
+    /// `[u8; N]` array. Per `FORMAT.md` §3.7 (per-slot validation):
+    /// `recipient_flags` MUST be zero (native v1 recipients do not use
+    /// the critical bit — the reader handles them natively) and
+    /// `body_len` MUST match the type's declared `BODY_LENGTH`.
+    ///
+    /// Both rule violations surface as
+    /// [`FormatDefect::MalformedRecipientEntry`]. Decrypt paths call
+    /// this once per supported slot AFTER the recipient-mixing policy
+    /// has accepted the file but BEFORE running any per-recipient
+    /// unwrap (Argon2id for `argon2id`, ECDH for `x25519`).
+    pub fn expect_native_body<const N: usize>(&self) -> Result<[u8; N], CryptoError> {
+        if self.recipient_flags != 0 {
+            return Err(CryptoError::InvalidFormat(
+                FormatDefect::MalformedRecipientEntry,
+            ));
+        }
+        self.body
+            .as_slice()
+            .try_into()
+            .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry))
+    }
+
     /// Serialises this entry as `type_name_len(2) || recipient_flags(2)
     /// || body_len(4) || type_name || body`. Casts assume the entry was
     /// constructed from a valid native call site (`type_name.len() <=

@@ -24,7 +24,7 @@ This specification defines:
 - payload stream encryption;
 - public recipient keys;
 - passphrase-wrapped private keys;
-- optional ASCII armor (deferred in v1.0; see §10);
+- optional ASCII armor;
 - the required safe archive payload subset.
 
 FerroCrypt v1 is built around one central abstraction:
@@ -972,12 +972,6 @@ relationships.
 
 ## 10. ASCII armor
 
-> **Status:** deferred to a future release. The armor encoder/decoder is not
-> shipped in this version of `ferrocrypt-lib`. A reference implementation is
-> parked under `experiments/armor/` and may be reintroduced in a later version.
-> The specification below remains authoritative for that future revival; no
-> wire-format change is implied.
-
 ASCII armor is an optional transport encoding around a complete binary `.fcr`
 file. It does not change the binary wire format and is not an authenticity
 mechanism.
@@ -1073,13 +1067,14 @@ expose specific subclasses for clearer diagnostics:
 - payload truncation, authentication failure, or trailing data;
 - malformed public key or private key;
 - private-key unlock failure;
+- malformed armor;
 - unsafe or unsupported archive entry.
 
 Implementations MAY claim conformance at one of these levels:
 
 | Level | Requirement |
 |---|---|
-| Core parser | Parses `.fcr` structure, recipient entries, TLV, and payload framing, but need not decrypt |
+| Core parser | Parses `.fcr` structure, recipient entries, TLV, armor, and payload framing, but need not decrypt |
 | Native reader | Core parser plus native `argon2id` and `x25519` recipient opening |
 | Native writer | Native reader plus canonical native recipient writing |
 | Plugin-capable reader | Core parser plus external recipient implementations through the generic recipient-entry API |
@@ -1090,9 +1085,8 @@ that recipient type's required test vectors.
 
 A conforming FerroCrypt v1 release MUST ship committed test vectors and publish
 frozen wire vectors at a stable HTTPS URL. Vectors MUST cover valid and invalid
-`.fcr`, `public.key`, `private.key`, payload-stream, recipient, TLV, KDF,
-prefix, and archive cases. Armor vectors are required only for releases that
-ship the optional armor transport (deferred in v1.0; see §10).
+`.fcr`, `public.key`, `private.key`, payload-stream, recipient, TLV, armor, KDF,
+prefix, and archive cases.
 
 Each recipient type specification MUST publish positive, wrong-key, malformed,
 and tamper vectors, including unknown-non-critical, illegal-mixing, and

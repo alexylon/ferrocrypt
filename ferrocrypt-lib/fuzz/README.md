@@ -25,14 +25,13 @@ the integration targets.
 
 | Target | What it exercises |
 |---|---|
-| `fuzz_header_prefix` | `read_header_from_reader` — 27-byte triple-replicated prefix, `FCR\0` magic, type check, canonicity |
-| `fuzz_private_key_header` | `parse_private_key_header` + `validate_private_key_shape` — `private.key` cleartext header |
-| `fuzz_tlv` | `validate_tlv` — extension-region TLV grammar (canonical ordering, critical-tag rejection) |
-| `fuzz_kdf_params` | `KdfParams::from_bytes` — 12-byte KDF parameter bounds |
-| `fuzz_replication_decode` | `replication::decode` and `decode_exact` — majority-vote decoder |
-| `fuzz_archive_path` | `validate_archive_path` — tar-entry path guard |
-| `fuzz_recipient_decode` | `decode_recipient` — Bech32 `fcr1…` recipient string parser |
-| `fuzz_detect_mode` | `detect_encryption_mode` — public top-level parser entry, end-to-end via a real temp file |
+| `fuzz_header_prefix` | v1 12-byte prefix + `header_fixed` + recipient-entry framing via `read_encrypted_header` |
+| `fuzz_private_key_header` | v1 90-byte `private.key` cleartext header and total-size shape checks |
+| `fuzz_tlv` | `validate_tlv` extension-region grammar: canonical ordering, reserved tags, critical-tag rejection |
+| `fuzz_kdf_params` | `KdfParams::from_bytes` structural and local-resource bounds |
+| `fuzz_archive_path` | `validate_archive_path` tar-entry path guard |
+| `fuzz_recipient_decode` | Bech32 `fcr1…` recipient string parser and internal SHA3-256 checksum |
+| `fuzz_detect_mode` | `detect_encryption_mode` top-level parser entry, end-to-end via a real temp file |
 
 ### Integration (secondary)
 

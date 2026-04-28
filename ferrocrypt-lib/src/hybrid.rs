@@ -164,21 +164,28 @@ pub fn encrypt_file_from_bytes(
 ///    Argon2id runs on the `private.key`.
 /// 3. unlock the recipient's `private.key` via
 ///    [`open_x25519_private_key`] (Argon2id + AEAD-AAD validation).
-/// 4. iterate `x25519` recipient slots in declared order:
+/// 4. iterate `x25519` recipient slots in declared order, attempting
+///    every supported entry before deciding (per `FORMAT.md` §3.7
+///    SHOULD-level mitigation and `MIGRATION.md` §1.2's "default to
+///    attempting all" — reduces timing leakage about which slot
+///    matched). Per slot:
 ///    - flags must be zero (native v1 — critical bit unused on
 ///      types the reader handles natively);
 ///    - body length must be 104;
-///    - try `recipients::x25519::unwrap`. On failure, continue to
-///      the next slot.
+///    - try `recipients::x25519::unwrap`. On failure, continue.
 ///    - on success, derive `payload_key` + `header_key` and verify
-///      the header MAC. On MAC failure, continue to the next slot
-///      (the unwrap may have been a forged or tampered slot).
-///    - on MAC success, this slot is the recipient's: validate TLV
-///      and STREAM-decrypt the payload.
-/// 5. if no slot succeeds:
-///    - had at least one successful unwrap → [`CryptoError::HeaderTampered`]
-///    - no successful unwraps at all →
-///      [`CryptoError::RecipientUnwrapFailed`] with `type_name = "x25519"`
+///      the header MAC. On MAC success, keep this slot's
+///      `payload_key` as the selected one (first MAC-verified slot
+///      wins; later candidates are dropped) but keep scanning the
+///      remaining slots so the loop's wall time does not betray
+///      which slot matched.
+/// 5. after the loop:
+///    - selected `payload_key` present → validate TLV, STREAM-
+///      decrypt the payload;
+///    - no selection but had a successful unwrap →
+///      [`CryptoError::HeaderTampered`];
+///    - no successful unwrap →
+///      [`CryptoError::RecipientUnwrapFailed`] with `type_name = "x25519"`.
 pub fn decrypt_file(
     input_path: &Path,
     output_dir: &Path,
@@ -221,8 +228,19 @@ pub fn decrypt_file(
     //    header MAC. Per FORMAT.md §3.7, MAC verification is the final
     //    acceptance gate — until it succeeds, the candidate is not
     //    final.
+    //
+    //    Per FORMAT.md §3.7 SHOULD-level mitigation and MIGRATION.md
+    //    §1.2's "default to attempting all", the loop visits EVERY
+    //    supported `x25519` entry before deciding rather than
+    //    short-circuiting on the first MAC-verified slot. This makes
+    //    the wall-clock cost a function of `recipient_count` (capped
+    //    by `HeaderReadLimits`) rather than of which slot matched, so
+    //    elapsed time does not leak the recipient's position in the
+    //    list. The first MAC-verified slot wins; later candidates are
+    //    dropped.
     let stream_nonce = parsed.fixed.stream_nonce;
     let mut had_successful_unwrap = false;
+    let mut selected_payload_key: Option<Zeroizing<[u8; 32]>> = None;
 
     for entry in parsed.recipient_entries.iter() {
         if entry.type_name != crate::recipients::x25519::TYPE_NAME {
@@ -264,47 +282,52 @@ pub fn decrypt_file(
         let (payload_key, header_key) = derive_subkeys(&file_key, &stream_nonce)?;
         drop(file_key);
 
-        // Header MAC is the FINAL acceptance gate. If MAC fails, the
-        // candidate `file_key` is not trusted; continue to the next
-        // x25519 slot. (`payload_key` and `header_key` are dropped
-        // implicitly when this iteration ends.)
+        // Header MAC is the FINAL acceptance gate. On success, keep
+        // this slot's `payload_key` as the selected one IF none has
+        // been selected yet; on failure, continue to the next slot.
+        // We deliberately do NOT short-circuit on first match: scanning
+        // all remaining supported slots costs constant time per slot
+        // and is what makes the loop's wall time independent of which
+        // slot matched.
         if format::verify_header_mac(
             &parsed.prefix_bytes,
             &parsed.header_bytes,
             &header_key,
             &parsed.header_mac,
         )
-        .is_err()
+        .is_ok()
+            && selected_payload_key.is_none()
         {
-            drop(header_key);
-            continue;
+            selected_payload_key = Some(payload_key);
         }
         drop(header_key);
-
-        // SUCCESS: TLV validation runs AFTER MAC verify, so the
-        // validator is operating on authenticated bytes.
-        validate_tlv(&parsed.ext_bytes)?;
-
-        on_event(&ProgressEvent::Decrypting);
-        let cipher = XChaCha20Poly1305::new(payload_key.as_ref().into());
-        let stream_decryptor =
-            stream::DecryptorBE32::from_aead(cipher, stream_nonce.as_ref().into());
-        let decrypt_reader = DecryptReader::new(stream_decryptor, encrypted_file);
-        return archiver::unarchive(decrypt_reader, output_dir);
     }
 
-    // No slot accepted. Distinguish "we had a candidate but MAC failed"
-    // (file is tampered with or contains a forged slot) from "no
-    // candidate unwrapped at all" (this private.key is not a recipient
-    // of the file).
     drop(recipient_secret);
-    Err(if had_successful_unwrap {
-        CryptoError::HeaderTampered
-    } else {
-        CryptoError::RecipientUnwrapFailed {
-            type_name: crate::recipients::x25519::TYPE_NAME.to_string(),
-        }
-    })
+
+    let Some(payload_key) = selected_payload_key else {
+        return Err(if had_successful_unwrap {
+            // We unwrapped at least one candidate but no header MAC
+            // verified — the file is tampered with or contains forged
+            // slots. Distinct from "this private.key isn't a recipient
+            // of the file at all".
+            CryptoError::HeaderTampered
+        } else {
+            CryptoError::RecipientUnwrapFailed {
+                type_name: crate::recipients::x25519::TYPE_NAME.to_string(),
+            }
+        });
+    };
+
+    // SUCCESS: TLV validation runs AFTER MAC verify, so the validator
+    // is operating on authenticated bytes.
+    validate_tlv(&parsed.ext_bytes)?;
+
+    on_event(&ProgressEvent::Decrypting);
+    let cipher = XChaCha20Poly1305::new(payload_key.as_ref().into());
+    let stream_decryptor = stream::DecryptorBE32::from_aead(cipher, stream_nonce.as_ref().into());
+    let decrypt_reader = DecryptReader::new(stream_decryptor, encrypted_file);
+    archiver::unarchive(decrypt_reader, output_dir)
 }
 
 /// Reads and unlocks a v1 `private.key` file, returning the raw 32-byte
@@ -1457,6 +1480,48 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    /// FORMAT.md §3.7 SHOULD-level mitigation: the decrypt loop must
+    /// visit every supported `x25519` slot before deciding, not
+    /// short-circuit on the first MAC-verified one. Observable proof:
+    /// place a malformed `x25519` slot AFTER a valid one. The
+    /// short-circuit behavior (pre-FC-AUDIT-006) would return success
+    /// from slot 1 without ever inspecting slot 2; the attempt-all
+    /// behavior visits slot 2, fails the body-length check, and
+    /// rejects the whole file as malformed.
+    #[test]
+    fn multi_x25519_attempt_all_visits_every_slot() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let keys_dir = tmp.path().join("keys");
+        let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
+
+        let file_key = generate_file_key();
+        let body_a = x25519::wrap(&file_key, &pub_a)?;
+        let valid_slot = RecipientEntry::native(NativeRecipientType::X25519, body_a.to_vec())?;
+        // Construct directly via public fields to bypass `native`'s
+        // body-length validation; the parser accepts any body_len
+        // within the local resource cap, so an attacker-forged file
+        // can carry a wrong-length `x25519` slot that we must reject.
+        let malformed_slot = RecipientEntry {
+            type_name: crate::recipients::x25519::TYPE_NAME.to_string(),
+            recipient_flags: 0,
+            body: vec![0u8; crate::recipients::x25519::BODY_LENGTH - 4],
+        };
+        let entries = [valid_slot, malformed_slot];
+
+        let fcr = tmp.path().join("multi-attempt-all.fcr");
+        build_multi_recipient_fcr(&entries, &file_key, b"x", &fcr)?;
+
+        let dec_dir = tmp.path().join("decrypted");
+        fs::create_dir_all(&dec_dir)?;
+        let err = decrypt_file(&fcr, &dec_dir, &priv_a, &pass_a, None, &|_| {}).unwrap_err();
+        match err {
+            CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry) => Ok(()),
+            other => panic!(
+                "expected MalformedRecipientEntry from slot-2 inspection (proves attempt-all); got {other:?}"
+            ),
+        }
     }
 
     /// One supported `x25519` recipient plus one unknown non-critical

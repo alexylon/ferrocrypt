@@ -82,6 +82,11 @@ pub struct KdfParams {
 
 pub const KDF_PARAMS_SIZE: usize = 12; // 3 × u32 big-endian
 
+const KDF_MEM_COST_OFFSET: usize = 0;
+const KDF_TIME_COST_OFFSET: usize = KDF_MEM_COST_OFFSET + size_of::<u32>();
+const KDF_LANES_OFFSET: usize = KDF_TIME_COST_OFFSET + size_of::<u32>();
+const _: () = assert!(KDF_LANES_OFFSET + size_of::<u32>() == KDF_PARAMS_SIZE);
+
 impl KdfParams {
     pub(crate) const DEFAULT_MEM_COST: u32 = 1_048_576; // 1 GiB
     const DEFAULT_TIME_COST: u32 = 4;
@@ -95,9 +100,9 @@ impl KdfParams {
 
     pub fn to_bytes(self) -> [u8; KDF_PARAMS_SIZE] {
         let mut buf = [0u8; KDF_PARAMS_SIZE];
-        buf[0..4].copy_from_slice(&self.mem_cost.to_be_bytes());
-        buf[4..8].copy_from_slice(&self.time_cost.to_be_bytes());
-        buf[8..12].copy_from_slice(&self.lanes.to_be_bytes());
+        write_u32_be(&mut buf, KDF_MEM_COST_OFFSET, self.mem_cost);
+        write_u32_be(&mut buf, KDF_TIME_COST_OFFSET, self.time_cost);
+        write_u32_be(&mut buf, KDF_LANES_OFFSET, self.lanes);
         buf
     }
 
@@ -118,9 +123,9 @@ impl KdfParams {
         bytes: &[u8; KDF_PARAMS_SIZE],
     ) -> Result<Self, CryptoError> {
         let params = Self {
-            mem_cost: u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-            time_cost: u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
-            lanes: u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
+            mem_cost: read_u32_be(bytes, KDF_MEM_COST_OFFSET),
+            time_cost: read_u32_be(bytes, KDF_TIME_COST_OFFSET),
+            lanes: read_u32_be(bytes, KDF_LANES_OFFSET),
         };
         if params.lanes == 0 || params.lanes > Self::MAX_LANES {
             return Err(CryptoError::InvalidKdfParams(
@@ -297,6 +302,32 @@ pub fn hex_encode(bytes: &[u8]) -> String {
 /// Compares two 256-bit byte strings in constant time.
 pub fn ct_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
     constant_time_eq_32(a, b)
+}
+
+// Big-endian read/write helpers used by `to_bytes` / `parse` for the on-disk
+// fixed-layout structs across the crate (`format::Prefix`, `format::HeaderFixed`,
+// `private_key::PrivateKeyHeader`, `KdfParams`). Taking the buffer plus an
+// offset lets callers use named offset constants directly.
+
+pub(crate) fn read_u16_be(bytes: &[u8], offset: usize) -> u16 {
+    u16::from_be_bytes([bytes[offset], bytes[offset + 1]])
+}
+
+pub(crate) fn read_u32_be(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_be_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes[offset + 2],
+        bytes[offset + 3],
+    ])
+}
+
+pub(crate) fn write_u16_be(bytes: &mut [u8], offset: usize, value: u16) {
+    bytes[offset..offset + size_of::<u16>()].copy_from_slice(&value.to_be_bytes());
+}
+
+pub(crate) fn write_u32_be(bytes: &mut [u8], offset: usize, value: u32) {
+    bytes[offset..offset + size_of::<u32>()].copy_from_slice(&value.to_be_bytes());
 }
 
 /// HMAC-SHA3-256 over a sequence of byte parts, fed into the MAC in
@@ -531,13 +562,8 @@ pub fn validate_tlv(ext_bytes: &[u8]) -> Result<(), CryptoError> {
         if ext_bytes.len() - cursor < ENTRY_HEADER_SIZE {
             return Err(CryptoError::InvalidFormat(FormatDefect::MalformedTlv));
         }
-        let tag = u16::from_be_bytes([ext_bytes[cursor], ext_bytes[cursor + 1]]);
-        let len = u32::from_be_bytes([
-            ext_bytes[cursor + 2],
-            ext_bytes[cursor + 3],
-            ext_bytes[cursor + 4],
-            ext_bytes[cursor + 5],
-        ]);
+        let tag = read_u16_be(ext_bytes, cursor);
+        let len = read_u32_be(ext_bytes, cursor + size_of::<u16>());
         cursor += ENTRY_HEADER_SIZE;
 
         if tag == 0x0000 || tag == 0x8000 {

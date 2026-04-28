@@ -32,7 +32,7 @@ use bech32::{Bech32, Checksum, Hrp};
 use sha3::{Digest, Sha3_256};
 
 use crate::CryptoError;
-use crate::common::hex_encode;
+use crate::common::{hex_encode, read_u16_be, read_u32_be};
 use crate::error::FormatDefect;
 use crate::recipients::{TYPE_NAME_MAX_LEN, validate_type_name};
 
@@ -49,7 +49,11 @@ pub const PUBLIC_KEY_CHECKSUM_SIZE: usize = 16;
 
 /// Total size of the typed-payload header (`type_name_len(2) ||
 /// key_material_len(4)`), in bytes.
-pub const PAYLOAD_HEADER_SIZE: usize = 2 + 4;
+pub const PAYLOAD_HEADER_SIZE: usize = size_of::<u16>() + size_of::<u32>();
+
+const PAYLOAD_TYPE_NAME_LEN_OFFSET: usize = 0;
+const PAYLOAD_KEY_MATERIAL_LEN_OFFSET: usize = PAYLOAD_TYPE_NAME_LEN_OFFSET + size_of::<u16>();
+const _: () = assert!(PAYLOAD_KEY_MATERIAL_LEN_OFFSET + size_of::<u32>() == PAYLOAD_HEADER_SIZE);
 
 /// Spec maximum for the recipient string length in ASCII characters
 /// (`FORMAT.md` §7.1). [`KEY_MATERIAL_LEN_MAX`] derives from this
@@ -123,9 +127,7 @@ pub fn encode_recipient_string(
     let type_name_len = u16::try_from(type_name_bytes.len())
         .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedTypeName))?;
     let key_material_len = u32::try_from(key_material.len()).map_err(|_| malformed_public_key())?;
-    if key_material_len > KEY_MATERIAL_LEN_MAX {
-        return Err(malformed_public_key());
-    }
+    check_key_material_len(key_material_len)?;
 
     let cs = compute_checksum(type_name, key_material);
 
@@ -187,28 +189,13 @@ pub fn decode_recipient_string(
     }
     let data: Vec<u8> = checked.byte_iter().collect();
 
-    if data.len() < PAYLOAD_HEADER_SIZE + PUBLIC_KEY_CHECKSUM_SIZE {
-        return Err(malformed_public_key());
-    }
+    check_payload_data_len(data.len())?;
 
-    let type_name_len = u16::from_be_bytes([data[0], data[1]]);
-    let key_material_len = u32::from_be_bytes([data[2], data[3], data[4], data[5]]);
-
-    if type_name_len == 0 || (type_name_len as usize) > TYPE_NAME_MAX_LEN {
-        return Err(malformed_public_key());
-    }
-    if key_material_len > KEY_MATERIAL_LEN_MAX {
-        return Err(malformed_public_key());
-    }
-
-    let total_expected = PAYLOAD_HEADER_SIZE
-        .checked_add(type_name_len as usize)
-        .and_then(|v| v.checked_add(key_material_len as usize))
-        .and_then(|v| v.checked_add(PUBLIC_KEY_CHECKSUM_SIZE))
-        .ok_or_else(malformed_public_key)?;
-    if data.len() != total_expected {
-        return Err(malformed_public_key());
-    }
+    let type_name_len = read_u16_be(&data, PAYLOAD_TYPE_NAME_LEN_OFFSET);
+    check_type_name_len(type_name_len)?;
+    let key_material_len = read_u32_be(&data, PAYLOAD_KEY_MATERIAL_LEN_OFFSET);
+    check_key_material_len(key_material_len)?;
+    check_total_payload_size(data.len(), type_name_len, key_material_len)?;
 
     let type_name_start = PAYLOAD_HEADER_SIZE;
     let type_name_end = type_name_start + type_name_len as usize;
@@ -235,6 +222,52 @@ pub fn decode_recipient_string(
         type_name: type_name.to_owned(),
         key_material,
     })
+}
+
+// Per-field structural checks. `check_key_material_len` is shared by
+// `encode_recipient_string` (writer) and `decode_recipient_string` (reader)
+// so the cap rule cannot drift between the two paths. The remaining checks
+// are reader-only because the writer constructs validated lengths directly
+// from caller-supplied byte slices.
+
+fn check_payload_data_len(data_len: usize) -> Result<(), CryptoError> {
+    if data_len < PAYLOAD_HEADER_SIZE + PUBLIC_KEY_CHECKSUM_SIZE {
+        return Err(malformed_public_key());
+    }
+    Ok(())
+}
+
+fn check_type_name_len(len: u16) -> Result<(), CryptoError> {
+    if len == 0 || (len as usize) > TYPE_NAME_MAX_LEN {
+        return Err(malformed_public_key());
+    }
+    Ok(())
+}
+
+fn check_key_material_len(len: u32) -> Result<(), CryptoError> {
+    if len > KEY_MATERIAL_LEN_MAX {
+        return Err(malformed_public_key());
+    }
+    Ok(())
+}
+
+// Overflow-safe arithmetic: every length comes from untrusted bytes, so
+// the four-term sum is widened/checked before comparison. Mirrors the
+// `format::HeaderFixed::check_header_section_lengths` pattern.
+fn check_total_payload_size(
+    data_len: usize,
+    type_name_len: u16,
+    key_material_len: u32,
+) -> Result<(), CryptoError> {
+    let total_expected = PAYLOAD_HEADER_SIZE
+        .checked_add(type_name_len as usize)
+        .and_then(|v| v.checked_add(key_material_len as usize))
+        .and_then(|v| v.checked_add(PUBLIC_KEY_CHECKSUM_SIZE))
+        .ok_or_else(malformed_public_key)?;
+    if data_len != total_expected {
+        return Err(malformed_public_key());
+    }
+    Ok(())
 }
 
 /// SHA3-256-based internal checksum, truncated to

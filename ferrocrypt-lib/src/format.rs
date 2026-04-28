@@ -40,7 +40,8 @@ use std::io::Read;
 
 use crate::CryptoError;
 use crate::common::{
-    HMAC_KEY_SIZE, HMAC_TAG_SIZE, hmac_sha3_256_parts, hmac_sha3_256_parts_verify,
+    HMAC_KEY_SIZE, HMAC_TAG_SIZE, hmac_sha3_256_parts, hmac_sha3_256_parts_verify, read_u16_be,
+    read_u32_be, write_u16_be, write_u32_be,
 };
 use crate::error::{FormatDefect, UnsupportedVersion};
 
@@ -144,6 +145,12 @@ impl Kind {
 
 // ─── Prefix ─────────────────────────────────────────────────────────────────
 
+const PREFIX_VERSION_OFFSET: usize = MAGIC_SIZE;
+const PREFIX_KIND_OFFSET: usize = PREFIX_VERSION_OFFSET + 1;
+const PREFIX_FLAGS_OFFSET: usize = PREFIX_KIND_OFFSET + 1;
+const PREFIX_HEADER_LEN_OFFSET: usize = PREFIX_FLAGS_OFFSET + size_of::<u16>();
+const _: () = assert!(PREFIX_HEADER_LEN_OFFSET + size_of::<u32>() == PREFIX_SIZE);
+
 /// Parsed `.fcr` / `private.key` 12-byte prefix. Round-trips through
 /// [`Prefix::to_bytes`] and [`Prefix::parse`] are the writer/reader
 /// surface; structural validation lives in [`Prefix::validate`] and is
@@ -188,11 +195,11 @@ impl Prefix {
     /// constructed with caller-supplied values.
     pub fn to_bytes(self) -> [u8; PREFIX_SIZE] {
         let mut out = [0u8; PREFIX_SIZE];
-        out[0..4].copy_from_slice(&MAGIC);
-        out[4] = self.version;
-        out[5] = self.kind.byte();
-        out[6..8].copy_from_slice(&self.prefix_flags.to_be_bytes());
-        out[8..PREFIX_SIZE].copy_from_slice(&self.header_len.to_be_bytes());
+        out[..MAGIC_SIZE].copy_from_slice(&MAGIC);
+        out[PREFIX_VERSION_OFFSET] = self.version;
+        out[PREFIX_KIND_OFFSET] = self.kind.byte();
+        write_u16_be(&mut out, PREFIX_FLAGS_OFFSET, self.prefix_flags);
+        write_u32_be(&mut out, PREFIX_HEADER_LEN_OFFSET, self.header_len);
         out
     }
 
@@ -202,23 +209,20 @@ impl Prefix {
     /// structural diagnostic (`BadMagic`, `UnsupportedVersion`,
     /// `WrongKind`, `MalformedHeader`, `OversizedHeader`).
     pub fn parse(bytes: &[u8; PREFIX_SIZE], expected_kind: Kind) -> Result<Self, CryptoError> {
-        if bytes[0..4] != MAGIC {
+        if bytes[..MAGIC_SIZE] != MAGIC {
             return Err(CryptoError::InvalidFormat(FormatDefect::BadMagic));
         }
-        let version = bytes[4];
+        let version = bytes[PREFIX_VERSION_OFFSET];
         check_version(version)?;
-        let kind_byte = bytes[5];
-        let kind = match Kind::from_byte(kind_byte) {
-            Some(k) if k == expected_kind => k,
-            _ => {
-                return Err(CryptoError::InvalidFormat(FormatDefect::WrongKind {
-                    kind: kind_byte,
-                }));
-            }
-        };
-        let prefix_flags = u16::from_be_bytes([bytes[6], bytes[7]]);
+        let kind_byte = bytes[PREFIX_KIND_OFFSET];
+        let kind = Kind::from_byte(kind_byte)
+            .filter(|k| *k == expected_kind)
+            .ok_or(CryptoError::InvalidFormat(FormatDefect::WrongKind {
+                kind: kind_byte,
+            }))?;
+        let prefix_flags = read_u16_be(bytes, PREFIX_FLAGS_OFFSET);
         check_prefix_flags(prefix_flags)?;
-        let header_len = u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+        let header_len = read_u32_be(bytes, PREFIX_HEADER_LEN_OFFSET);
         check_header_len(header_len)?;
         Ok(Self {
             version,
@@ -293,6 +297,15 @@ pub fn read_prefix_from_reader(
 
 // ─── header_fixed ───────────────────────────────────────────────────────────
 
+const HEADER_FIXED_FLAGS_OFFSET: usize = 0;
+const HEADER_FIXED_RECIPIENT_COUNT_OFFSET: usize = HEADER_FIXED_FLAGS_OFFSET + size_of::<u16>();
+const HEADER_FIXED_RECIPIENT_ENTRIES_LEN_OFFSET: usize =
+    HEADER_FIXED_RECIPIENT_COUNT_OFFSET + size_of::<u16>();
+const HEADER_FIXED_EXT_LEN_OFFSET: usize =
+    HEADER_FIXED_RECIPIENT_ENTRIES_LEN_OFFSET + size_of::<u32>();
+const HEADER_FIXED_STREAM_NONCE_OFFSET: usize = HEADER_FIXED_EXT_LEN_OFFSET + size_of::<u32>();
+const _: () = assert!(HEADER_FIXED_STREAM_NONCE_OFFSET + STREAM_NONCE_SIZE == HEADER_FIXED_SIZE);
+
 /// Parsed `header_fixed` (31-byte fixed section at the start of `header`).
 #[derive(Debug, Clone, Copy)]
 pub struct HeaderFixed {
@@ -307,11 +320,20 @@ impl HeaderFixed {
     /// Serialises the 31-byte fixed-header section.
     pub fn to_bytes(self) -> [u8; HEADER_FIXED_SIZE] {
         let mut out = [0u8; HEADER_FIXED_SIZE];
-        out[0..2].copy_from_slice(&self.header_flags.to_be_bytes());
-        out[2..4].copy_from_slice(&self.recipient_count.to_be_bytes());
-        out[4..8].copy_from_slice(&self.recipient_entries_len.to_be_bytes());
-        out[8..12].copy_from_slice(&self.ext_len.to_be_bytes());
-        out[12..HEADER_FIXED_SIZE].copy_from_slice(&self.stream_nonce);
+        write_u16_be(&mut out, HEADER_FIXED_FLAGS_OFFSET, self.header_flags);
+        write_u16_be(
+            &mut out,
+            HEADER_FIXED_RECIPIENT_COUNT_OFFSET,
+            self.recipient_count,
+        );
+        write_u32_be(
+            &mut out,
+            HEADER_FIXED_RECIPIENT_ENTRIES_LEN_OFFSET,
+            self.recipient_entries_len,
+        );
+        write_u32_be(&mut out, HEADER_FIXED_EXT_LEN_OFFSET, self.ext_len);
+        out[HEADER_FIXED_STREAM_NONCE_OFFSET..HEADER_FIXED_SIZE]
+            .copy_from_slice(&self.stream_nonce);
         out
     }
 
@@ -323,33 +345,16 @@ impl HeaderFixed {
     /// - `ext_len <= EXT_LEN_MAX`;
     /// - `recipient_entries_len + ext_len + HEADER_FIXED_SIZE == header_len`.
     pub fn parse(bytes: &[u8; HEADER_FIXED_SIZE], header_len: u32) -> Result<Self, CryptoError> {
-        let header_flags = u16::from_be_bytes([bytes[0], bytes[1]]);
-        if header_flags != 0 {
-            return Err(CryptoError::InvalidFormat(FormatDefect::MalformedHeader));
-        }
-        let recipient_count = u16::from_be_bytes([bytes[2], bytes[3]]);
-        if recipient_count == 0 || recipient_count > RECIPIENT_COUNT_MAX {
-            return Err(CryptoError::InvalidFormat(
-                FormatDefect::RecipientCountOutOfRange {
-                    count: recipient_count,
-                },
-            ));
-        }
-        let recipient_entries_len = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-        let ext_len = u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
-        if ext_len > EXT_LEN_MAX {
-            return Err(CryptoError::InvalidFormat(FormatDefect::MalformedHeader));
-        }
-        // Overflow-safe arithmetic per `FORMAT.md` §1 conventions.
-        let computed = (HEADER_FIXED_SIZE as u64)
-            .checked_add(recipient_entries_len as u64)
-            .and_then(|v| v.checked_add(ext_len as u64))
-            .ok_or(CryptoError::InvalidFormat(FormatDefect::MalformedHeader))?;
-        if computed != header_len as u64 {
-            return Err(CryptoError::InvalidFormat(FormatDefect::MalformedHeader));
-        }
+        let header_flags = read_u16_be(bytes, HEADER_FIXED_FLAGS_OFFSET);
+        check_header_flags(header_flags)?;
+        let recipient_count = read_u16_be(bytes, HEADER_FIXED_RECIPIENT_COUNT_OFFSET);
+        check_recipient_count(recipient_count)?;
+        let recipient_entries_len = read_u32_be(bytes, HEADER_FIXED_RECIPIENT_ENTRIES_LEN_OFFSET);
+        let ext_len = read_u32_be(bytes, HEADER_FIXED_EXT_LEN_OFFSET);
+        check_ext_len(ext_len)?;
+        check_header_section_lengths(recipient_entries_len, ext_len, header_len)?;
         let mut stream_nonce = [0u8; STREAM_NONCE_SIZE];
-        stream_nonce.copy_from_slice(&bytes[12..HEADER_FIXED_SIZE]);
+        stream_nonce.copy_from_slice(&bytes[HEADER_FIXED_STREAM_NONCE_OFFSET..HEADER_FIXED_SIZE]);
         Ok(Self {
             header_flags,
             recipient_count,
@@ -358,6 +363,51 @@ impl HeaderFixed {
             stream_nonce,
         })
     }
+}
+
+// Per-field structural checks for `HeaderFixed`. Mirror the `Prefix`
+// `check_*` pattern so `parse` reads as a sequence of `read → check` lines
+// with the validation rules surfaced one per function.
+
+fn check_header_flags(flags: u16) -> Result<(), CryptoError> {
+    if flags != 0 {
+        return Err(CryptoError::InvalidFormat(FormatDefect::MalformedHeader));
+    }
+    Ok(())
+}
+
+fn check_recipient_count(count: u16) -> Result<(), CryptoError> {
+    if count == 0 || count > RECIPIENT_COUNT_MAX {
+        return Err(CryptoError::InvalidFormat(
+            FormatDefect::RecipientCountOutOfRange { count },
+        ));
+    }
+    Ok(())
+}
+
+fn check_ext_len(ext_len: u32) -> Result<(), CryptoError> {
+    if ext_len > EXT_LEN_MAX {
+        return Err(CryptoError::InvalidFormat(FormatDefect::MalformedHeader));
+    }
+    Ok(())
+}
+
+// Overflow-safe arithmetic per `FORMAT.md` §1 conventions: widen to u64 so
+// a u32 + u32 + HEADER_FIXED_SIZE sum that overflows u32 still surfaces as
+// a clean `MalformedHeader` rather than wrapping silently.
+fn check_header_section_lengths(
+    recipient_entries_len: u32,
+    ext_len: u32,
+    header_len: u32,
+) -> Result<(), CryptoError> {
+    let computed = (HEADER_FIXED_SIZE as u64)
+        .checked_add(recipient_entries_len as u64)
+        .and_then(|v| v.checked_add(ext_len as u64))
+        .ok_or(CryptoError::InvalidFormat(FormatDefect::MalformedHeader))?;
+    if computed != header_len as u64 {
+        return Err(CryptoError::InvalidFormat(FormatDefect::MalformedHeader));
+    }
+    Ok(())
 }
 
 // ─── Header MAC ─────────────────────────────────────────────────────────────

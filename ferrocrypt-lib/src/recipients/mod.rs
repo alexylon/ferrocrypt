@@ -38,6 +38,7 @@ pub mod argon2id;
 pub mod x25519;
 
 use crate::CryptoError;
+use crate::common::{read_u16_be, read_u32_be};
 use crate::error::FormatDefect;
 use crate::format::BODY_LEN_MAX;
 
@@ -168,6 +169,11 @@ pub fn validate_type_name(name: &str) -> Result<(), CryptoError> {
 /// recipient_flags:u16 || body_len:u32`), per `FORMAT.md` §3.5.
 pub const ENTRY_HEADER_SIZE: usize = 8;
 
+const ENTRY_TYPE_NAME_LEN_OFFSET: usize = 0;
+const ENTRY_RECIPIENT_FLAGS_OFFSET: usize = ENTRY_TYPE_NAME_LEN_OFFSET + size_of::<u16>();
+const ENTRY_BODY_LEN_OFFSET: usize = ENTRY_RECIPIENT_FLAGS_OFFSET + size_of::<u16>();
+const _: () = assert!(ENTRY_BODY_LEN_OFFSET + size_of::<u32>() == ENTRY_HEADER_SIZE);
+
 /// Bit 0 of `recipient_flags`. When set, an unknown recipient type
 /// MUST cause file rejection (`FORMAT.md` §3.4); when clear, an unknown
 /// recipient is skipped.
@@ -281,9 +287,9 @@ impl RecipientEntry {
         if bytes.len() < ENTRY_HEADER_SIZE {
             return Err(malformed());
         }
-        let type_name_len = u16::from_be_bytes([bytes[0], bytes[1]]);
-        let recipient_flags = u16::from_be_bytes([bytes[2], bytes[3]]);
-        let body_len = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        let type_name_len = read_u16_be(bytes, ENTRY_TYPE_NAME_LEN_OFFSET);
+        let recipient_flags = read_u16_be(bytes, ENTRY_RECIPIENT_FLAGS_OFFSET);
+        let body_len = read_u32_be(bytes, ENTRY_BODY_LEN_OFFSET);
 
         if type_name_len == 0 || type_name_len as usize > TYPE_NAME_MAX_LEN {
             return Err(malformed());

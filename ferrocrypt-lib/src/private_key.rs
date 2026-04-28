@@ -38,7 +38,8 @@ use zeroize::Zeroizing;
 use crate::CryptoError;
 use crate::common::{
     ARGON2_SALT_SIZE, HKDF_INFO_PRIVATE_KEY_WRAP, KDF_PARAMS_SIZE, KdfLimit, KdfParams, TAG_SIZE,
-    WRAP_NONCE_SIZE, derive_passphrase_wrap_key, random_bytes,
+    WRAP_NONCE_SIZE, derive_passphrase_wrap_key, random_bytes, read_u16_be, read_u32_be,
+    write_u16_be, write_u32_be,
 };
 use crate::error::FormatDefect;
 use crate::format::{KIND_PRIVATE_KEY, MAGIC, MAGIC_SIZE, VERSION, unsupported_key_version_error};
@@ -69,11 +70,11 @@ pub const PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT: u32 = 4_096;
 const VERSION_OFFSET: usize = MAGIC_SIZE;
 const KIND_OFFSET: usize = VERSION_OFFSET + 1;
 const KEY_FLAGS_OFFSET: usize = KIND_OFFSET + 1;
-const TYPE_NAME_LEN_OFFSET: usize = KEY_FLAGS_OFFSET + 2;
-const PUBLIC_LEN_OFFSET: usize = TYPE_NAME_LEN_OFFSET + 2;
-const EXT_LEN_OFFSET: usize = PUBLIC_LEN_OFFSET + 4;
-const WRAPPED_SECRET_LEN_OFFSET: usize = EXT_LEN_OFFSET + 4;
-const ARGON2_SALT_OFFSET: usize = WRAPPED_SECRET_LEN_OFFSET + 4;
+const TYPE_NAME_LEN_OFFSET: usize = KEY_FLAGS_OFFSET + size_of::<u16>();
+const PUBLIC_LEN_OFFSET: usize = TYPE_NAME_LEN_OFFSET + size_of::<u16>();
+const EXT_LEN_OFFSET: usize = PUBLIC_LEN_OFFSET + size_of::<u32>();
+const WRAPPED_SECRET_LEN_OFFSET: usize = EXT_LEN_OFFSET + size_of::<u32>();
+const ARGON2_SALT_OFFSET: usize = WRAPPED_SECRET_LEN_OFFSET + size_of::<u32>();
 const KDF_PARAMS_OFFSET: usize = ARGON2_SALT_OFFSET + ARGON2_SALT_SIZE;
 const WRAP_NONCE_OFFSET: usize = KDF_PARAMS_OFFSET + KDF_PARAMS_SIZE;
 const _: () = assert!(WRAP_NONCE_OFFSET + WRAP_NONCE_SIZE == PRIVATE_KEY_HEADER_FIXED_SIZE);
@@ -98,14 +99,11 @@ impl PrivateKeyHeader {
         out[..MAGIC_SIZE].copy_from_slice(&MAGIC);
         out[VERSION_OFFSET] = VERSION;
         out[KIND_OFFSET] = KIND_PRIVATE_KEY;
-        out[KEY_FLAGS_OFFSET..KEY_FLAGS_OFFSET + 2].copy_from_slice(&self.key_flags.to_be_bytes());
-        out[TYPE_NAME_LEN_OFFSET..TYPE_NAME_LEN_OFFSET + 2]
-            .copy_from_slice(&self.type_name_len.to_be_bytes());
-        out[PUBLIC_LEN_OFFSET..PUBLIC_LEN_OFFSET + 4]
-            .copy_from_slice(&self.public_len.to_be_bytes());
-        out[EXT_LEN_OFFSET..EXT_LEN_OFFSET + 4].copy_from_slice(&self.ext_len.to_be_bytes());
-        out[WRAPPED_SECRET_LEN_OFFSET..WRAPPED_SECRET_LEN_OFFSET + 4]
-            .copy_from_slice(&self.wrapped_secret_len.to_be_bytes());
+        write_u16_be(&mut out, KEY_FLAGS_OFFSET, self.key_flags);
+        write_u16_be(&mut out, TYPE_NAME_LEN_OFFSET, self.type_name_len);
+        write_u32_be(&mut out, PUBLIC_LEN_OFFSET, self.public_len);
+        write_u32_be(&mut out, EXT_LEN_OFFSET, self.ext_len);
+        write_u32_be(&mut out, WRAPPED_SECRET_LEN_OFFSET, self.wrapped_secret_len);
         out[ARGON2_SALT_OFFSET..ARGON2_SALT_OFFSET + ARGON2_SALT_SIZE]
             .copy_from_slice(&self.argon2_salt);
         out[KDF_PARAMS_OFFSET..KDF_PARAMS_OFFSET + KDF_PARAMS_SIZE]
@@ -132,30 +130,16 @@ impl PrivateKeyHeader {
         if kind_byte != KIND_PRIVATE_KEY {
             return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
         }
-        let key_flags = u16::from_be_bytes([bytes[KEY_FLAGS_OFFSET], bytes[KEY_FLAGS_OFFSET + 1]]);
-        if key_flags != 0 {
-            return Err(malformed_private_key());
-        }
-        let type_name_len =
-            u16::from_be_bytes([bytes[TYPE_NAME_LEN_OFFSET], bytes[TYPE_NAME_LEN_OFFSET + 1]]);
-        if type_name_len == 0 || type_name_len as usize > TYPE_NAME_MAX_LEN {
-            return Err(malformed_private_key());
-        }
-        let public_len = read_u32_be(&bytes[PUBLIC_LEN_OFFSET..PUBLIC_LEN_OFFSET + 4]);
-        if public_len > PRIVATE_KEY_PUBLIC_LEN_MAX {
-            return Err(malformed_private_key());
-        }
-        let ext_len = read_u32_be(&bytes[EXT_LEN_OFFSET..EXT_LEN_OFFSET + 4]);
-        if ext_len > PRIVATE_KEY_EXT_LEN_MAX {
-            return Err(malformed_private_key());
-        }
-        let wrapped_secret_len =
-            read_u32_be(&bytes[WRAPPED_SECRET_LEN_OFFSET..WRAPPED_SECRET_LEN_OFFSET + 4]);
-        if !(PRIVATE_KEY_WRAPPED_SECRET_LEN_MIN..=PRIVATE_KEY_WRAPPED_SECRET_LEN_MAX)
-            .contains(&wrapped_secret_len)
-        {
-            return Err(malformed_private_key());
-        }
+        let key_flags = read_u16_be(bytes, KEY_FLAGS_OFFSET);
+        check_key_flags(key_flags)?;
+        let type_name_len = read_u16_be(bytes, TYPE_NAME_LEN_OFFSET);
+        check_type_name_len(type_name_len)?;
+        let public_len = read_u32_be(bytes, PUBLIC_LEN_OFFSET);
+        check_public_len(public_len)?;
+        let ext_len = read_u32_be(bytes, EXT_LEN_OFFSET);
+        check_ext_len(ext_len)?;
+        let wrapped_secret_len = read_u32_be(bytes, WRAPPED_SECRET_LEN_OFFSET);
+        check_wrapped_secret_len(wrapped_secret_len)?;
         let mut argon2_salt = [0u8; ARGON2_SALT_SIZE];
         argon2_salt
             .copy_from_slice(&bytes[ARGON2_SALT_OFFSET..ARGON2_SALT_OFFSET + ARGON2_SALT_SIZE]);
@@ -183,8 +167,45 @@ impl PrivateKeyHeader {
     }
 }
 
-fn read_u32_be(slice: &[u8]) -> u32 {
-    u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]])
+// Per-field structural checks. Shared by `PrivateKeyHeader::parse` (reader)
+// and `seal_private_key` (writer) for the cap rules so the two paths cannot
+// drift. `key_flags` and `type_name_len` are reader-only because the writer
+// builds them from validated inputs (`key_flags = 0` literally; type_name
+// length is bounded by the prior `validate_type_name` call).
+
+fn check_key_flags(flags: u16) -> Result<(), CryptoError> {
+    if flags != 0 {
+        return Err(malformed_private_key());
+    }
+    Ok(())
+}
+
+fn check_type_name_len(len: u16) -> Result<(), CryptoError> {
+    if len == 0 || len as usize > TYPE_NAME_MAX_LEN {
+        return Err(malformed_private_key());
+    }
+    Ok(())
+}
+
+fn check_public_len(len: u32) -> Result<(), CryptoError> {
+    if len > PRIVATE_KEY_PUBLIC_LEN_MAX {
+        return Err(malformed_private_key());
+    }
+    Ok(())
+}
+
+fn check_ext_len(len: u32) -> Result<(), CryptoError> {
+    if len > PRIVATE_KEY_EXT_LEN_MAX {
+        return Err(malformed_private_key());
+    }
+    Ok(())
+}
+
+fn check_wrapped_secret_len(len: u32) -> Result<(), CryptoError> {
+    if !(PRIVATE_KEY_WRAPPED_SECRET_LEN_MIN..=PRIVATE_KEY_WRAPPED_SECRET_LEN_MAX).contains(&len) {
+        return Err(malformed_private_key());
+    }
+    Ok(())
 }
 
 fn malformed_private_key() -> CryptoError {
@@ -234,24 +255,16 @@ pub fn seal_private_key(
     let type_name_len = u16::try_from(type_name_bytes.len())
         .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedTypeName))?;
     let public_len = u32::try_from(public_material.len()).map_err(|_| malformed_private_key())?;
-    if public_len > PRIVATE_KEY_PUBLIC_LEN_MAX {
-        return Err(malformed_private_key());
-    }
+    check_public_len(public_len)?;
     let ext_len = u32::try_from(ext_bytes.len()).map_err(|_| malformed_private_key())?;
-    if ext_len > PRIVATE_KEY_EXT_LEN_MAX {
-        return Err(malformed_private_key());
-    }
+    check_ext_len(ext_len)?;
     let wrapped_secret_len_usize = secret_material
         .len()
         .checked_add(TAG_SIZE)
         .ok_or_else(malformed_private_key)?;
     let wrapped_secret_len =
         u32::try_from(wrapped_secret_len_usize).map_err(|_| malformed_private_key())?;
-    if !(PRIVATE_KEY_WRAPPED_SECRET_LEN_MIN..=PRIVATE_KEY_WRAPPED_SECRET_LEN_MAX)
-        .contains(&wrapped_secret_len)
-    {
-        return Err(malformed_private_key());
-    }
+    check_wrapped_secret_len(wrapped_secret_len)?;
 
     let argon2_salt = random_bytes::<ARGON2_SALT_SIZE>();
     let wrap_nonce = random_bytes::<WRAP_NONCE_SIZE>();
@@ -447,6 +460,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(opened.ext_bytes, ext);
+    }
+
+    /// `seal_private_key` MUST reject `public_material` whose length
+    /// would push `public_len` past the structural cap, with the same
+    /// `MalformedPrivateKey` diagnostic that `PrivateKeyHeader::parse`
+    /// uses on the read side. Locks in the writer/reader cap symmetry
+    /// enforced by `check_public_len`. Cap fires before any Argon2id
+    /// work, so the test runs cheaply.
+    #[test]
+    fn seal_rejects_public_material_above_max() {
+        let secret = [0x11u8; 32];
+        let oversize = vec![0u8; (PRIVATE_KEY_PUBLIC_LEN_MAX as usize) + 1];
+        let pass = test_passphrase("pw");
+        let kdf = KdfParams::default();
+        match seal_private_key(&secret, "x25519", &oversize, &[], &pass, &kdf) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => {}
+            other => panic!("expected MalformedPrivateKey for oversize public, got {other:?}"),
+        }
+    }
+
+    /// Companion of [`seal_rejects_public_material_above_max`] for the
+    /// `ext_bytes` cap. Pins the shared `check_ext_len` contract.
+    #[test]
+    fn seal_rejects_ext_bytes_above_max() {
+        let (secret, public) = x25519_shaped();
+        let oversize_ext = vec![0u8; (PRIVATE_KEY_EXT_LEN_MAX as usize) + 1];
+        let pass = test_passphrase("pw");
+        let kdf = KdfParams::default();
+        match seal_private_key(&secret, "x25519", &public, &oversize_ext, &pass, &kdf) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => {}
+            other => panic!("expected MalformedPrivateKey for oversize ext, got {other:?}"),
+        }
     }
 
     #[test]

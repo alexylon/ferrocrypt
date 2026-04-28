@@ -33,15 +33,23 @@
 //! - It does not enforce recipient-mixing policy, classify modes, or run
 //!   recipient unwrap. Those concerns live in `recipients/mod.rs`.
 
-use std::io::Read;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 
-use crate::common::{HMAC_KEY_SIZE, read_exact_or_truncated};
+use chacha20poly1305::{
+    XChaCha20Poly1305,
+    aead::{KeyInit, stream},
+};
+use zeroize::Zeroizing;
+
+use crate::common::{ENCRYPTION_KEY_SIZE, EncryptWriter, HMAC_KEY_SIZE, read_exact_or_truncated};
 use crate::error::{CryptoError, FormatDefect};
 use crate::format::{
     self, HEADER_FIXED_SIZE, HEADER_MAC_SIZE, HeaderFixed, Kind, PREFIX_SIZE, Prefix,
     STREAM_NONCE_SIZE,
 };
 use crate::recipients::{self, RecipientEntry};
+use crate::{archiver, atomic_output};
 
 /// Local resource caps applied while reading an encrypted-file header. The
 /// defaults mirror `format::*_LOCAL_CAP_DEFAULT` and apply to every reader
@@ -101,16 +109,62 @@ pub(crate) struct ParsedEncryptedHeader {
     pub header_mac: [u8; HEADER_MAC_SIZE],
 }
 
-/// A serialized `.fcr` header ready to write to disk.
+/// A serialized `.fcr` header bundled with the streaming materials needed
+/// to write the rest of the file.
 ///
 /// Wire layout: `prefix_bytes || header_bytes || header_mac || <payload>`.
 /// The caller writes these three byte regions in order, then streams the
-/// encrypted payload after `header_mac`.
-#[derive(Debug)]
+/// encrypted payload after `header_mac` using `payload_key` + `stream_nonce`.
+///
+/// `payload_key` and `stream_nonce` are bundled in (rather than threaded
+/// through a separate channel) so a caller cannot accidentally pair the
+/// header with subkeys derived from a different `file_key`/`stream_nonce`:
+/// the only constructor is [`build_encrypted_header`], which derives the
+/// MAC from the same `header_key` and binds `payload_key`/`stream_nonce`
+/// to the returned header in one move.
 pub(crate) struct BuiltEncryptedHeader {
     pub prefix_bytes: [u8; PREFIX_SIZE],
     pub header_bytes: Vec<u8>,
     pub header_mac: [u8; HEADER_MAC_SIZE],
+    pub stream_nonce: [u8; STREAM_NONCE_SIZE],
+    pub payload_key: Zeroizing<[u8; ENCRYPTION_KEY_SIZE]>,
+}
+
+/// Wraps a byte slice so `{:?}` renders as compact lowercase hex
+/// instead of `[70, 67, 82, 0, ...]`. Local to the manual `Debug`
+/// impl below; not allocating (writes byte-by-byte to the formatter).
+struct HexBytes<'a>(&'a [u8]);
+
+impl std::fmt::Debug for HexBytes<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for b in self.0 {
+            write!(f, "{b:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+// Manual `Debug` redacts `payload_key`. `Zeroizing<[u8; 32]>` derives
+// `Debug` transparently from `[u8; 32]`, which would print the raw key
+// bytes via `{:?}` (used by `Result::unwrap_err`, panic messages, etc.).
+// If a future field also holds secret material, redact it here too.
+//
+// The non-secret byte fields (`prefix_bytes`, `header_mac`,
+// `stream_nonce`) render as lowercase hex via `HexBytes` — easier to
+// read in panic / log lines than a raw decimal byte array.
+// `header_bytes` shows only its length: it can be up to ~1 MiB
+// (`HEADER_LEN_MAX`), so dumping its content in every debug print
+// would be hostile.
+impl std::fmt::Debug for BuiltEncryptedHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BuiltEncryptedHeader")
+            .field("prefix_bytes", &HexBytes(&self.prefix_bytes))
+            .field("header_bytes_len", &self.header_bytes.len())
+            .field("header_mac", &HexBytes(&self.header_mac))
+            .field("stream_nonce", &HexBytes(&self.stream_nonce))
+            .field("payload_key", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Reads, structurally validates, and bounds-checks a `.fcr` header from
@@ -195,22 +249,25 @@ pub(crate) fn read_encrypted_header<R: Read>(
 }
 
 /// Builds and authenticates a `.fcr` header from caller-supplied recipient
-/// entries, ext_bytes, stream nonce, and header key.
+/// entries, ext_bytes, stream nonce, and the subkeys derived from the
+/// per-file `file_key`.
 ///
 /// The caller is responsible for:
 /// - generating `stream_nonce` (typically `random_bytes::<STREAM_NONCE_SIZE>()`);
-/// - deriving `header_key` from the freshly generated `file_key` via
-///   `common::derive_subkeys` (or equivalent);
+/// - deriving `payload_key` and `header_key` from the freshly generated
+///   `file_key` via `common::derive_subkeys` (or equivalent);
 /// - constructing `recipient_entries` via the per-recipient `wrap`
 ///   helpers (`recipients::argon2id::wrap`, `recipients::x25519::wrap`).
 ///
-/// On success returns the three byte regions to write in order: prefix,
-/// header, MAC. The encrypted payload is streamed by the caller AFTER
-/// `header_mac`.
+/// On success returns a [`BuiltEncryptedHeader`] holding the three byte
+/// regions to write in order (prefix, header, MAC) plus `stream_nonce`
+/// and `payload_key` for the payload streamer. Bundling these together
+/// makes a (header, payload_key, stream_nonce) mismatch unrepresentable.
 pub(crate) fn build_encrypted_header(
     recipient_entries: &[RecipientEntry],
     ext_bytes: &[u8],
     stream_nonce: [u8; STREAM_NONCE_SIZE],
+    payload_key: Zeroizing<[u8; ENCRYPTION_KEY_SIZE]>,
     header_key: &[u8; HMAC_KEY_SIZE],
 ) -> Result<BuiltEncryptedHeader, CryptoError> {
     if recipient_entries.is_empty() {
@@ -285,13 +342,86 @@ pub(crate) fn build_encrypted_header(
         prefix_bytes,
         header_bytes,
         header_mac,
+        stream_nonce,
+        payload_key,
     })
+}
+
+/// Resolves the destination path for an encrypted file. If `output_file`
+/// is supplied, it's used verbatim; otherwise the file is written under
+/// `output_dir` as `<base_name>.<ENCRYPTED_EXTENSION>`.
+fn resolve_encrypted_output_path(
+    output_dir: &Path,
+    output_file: Option<&Path>,
+    base_name: &str,
+) -> PathBuf {
+    match output_file {
+        Some(path) => path.to_path_buf(),
+        None => output_dir.join(format!("{}.{}", base_name, format::ENCRYPTED_EXTENSION)),
+    }
+}
+
+/// Streams `input_path` into an encrypted `.fcr` file at the resolved
+/// output path, using the supplied [`BuiltEncryptedHeader`] bundle.
+///
+/// On-disk byte order: `prefix(12) || header(31 + entries + ext) || mac(32)
+/// || payload(STREAM)`. The header bytes, MAC, payload key, and stream
+/// nonce all live in `built` so that they cannot be paired with material
+/// from a different `file_key`/`stream_nonce`. The payload is
+/// XChaCha20-Poly1305 STREAM-BE32 keyed by `built.payload_key` over the
+/// TAR archive of `input_path`. No plaintext intermediate files touch
+/// disk: the TAR stream is piped directly through [`EncryptWriter`].
+///
+/// Atomicity: the file is written under a `.ferrocrypt-*.incomplete`
+/// tempfile in the destination's parent directory, then renamed via
+/// [`atomic_output::finalize_file`] only after `sync_all`. A pre-existing
+/// output path rejects with `CryptoError::InvalidInput` BEFORE any
+/// tempfile is created, so an unrelated file at the destination is
+/// never touched.
+pub(crate) fn write_encrypted_file(
+    input_path: &Path,
+    output_dir: &Path,
+    output_file: Option<&Path>,
+    base_name: &str,
+    built: &BuiltEncryptedHeader,
+) -> Result<PathBuf, CryptoError> {
+    let output_path = resolve_encrypted_output_path(output_dir, output_file, base_name);
+    if output_path.exists() {
+        return Err(CryptoError::InvalidInput(format!(
+            "Output already exists: {}",
+            output_path.display()
+        )));
+    }
+
+    let temp_dir = output_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".ferrocrypt-")
+        .suffix(".incomplete")
+        .tempfile_in(temp_dir)?;
+
+    tmp.as_file_mut().write_all(&built.prefix_bytes)?;
+    tmp.as_file_mut().write_all(&built.header_bytes)?;
+    tmp.as_file_mut().write_all(&built.header_mac)?;
+
+    let cipher = XChaCha20Poly1305::new(built.payload_key.as_ref().into());
+    let stream_encryptor = stream::EncryptorBE32::from_aead(cipher, (&built.stream_nonce).into());
+
+    let encrypt_writer = EncryptWriter::new(stream_encryptor, tmp);
+    let (_, encrypt_writer) = archiver::archive(input_path, encrypt_writer)?;
+    let tmp = encrypt_writer.finish()?;
+    tmp.as_file().sync_all()?;
+
+    atomic_output::finalize_file(tmp, &output_path)?;
+    Ok(output_path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::{FILE_KEY_SIZE, derive_subkeys};
+    use crate::common::{DerivedSubkeys, FILE_KEY_SIZE, derive_subkeys};
     use crate::recipients::RECIPIENT_FLAG_CRITICAL;
 
     fn dummy_entry(type_name: &str, body_len: usize) -> RecipientEntry {
@@ -302,23 +432,27 @@ mod tests {
         }
     }
 
-    fn dummy_subkeys() -> ([u8; 32], [u8; 32]) {
+    fn dummy_subkeys() -> DerivedSubkeys {
         // Stable inputs so the test is deterministic.
         let file_key = [0x42u8; FILE_KEY_SIZE];
         let stream_nonce = [0x07u8; STREAM_NONCE_SIZE];
-        let (payload_key, header_key) = derive_subkeys(&file_key, &stream_nonce).unwrap();
-        (*payload_key, *header_key)
+        derive_subkeys(&file_key, &stream_nonce).unwrap()
     }
 
     #[test]
     fn build_then_read_round_trip_single_recipient() {
-        let (_payload_key, header_key) = dummy_subkeys();
+        let (payload_key, header_key) = dummy_subkeys();
         let stream_nonce = [0x07u8; STREAM_NONCE_SIZE];
         let entry = dummy_entry("argon2id", 116);
 
-        let built =
-            build_encrypted_header(std::slice::from_ref(&entry), b"", stream_nonce, &header_key)
-                .unwrap();
+        let built = build_encrypted_header(
+            std::slice::from_ref(&entry),
+            b"",
+            stream_nonce,
+            payload_key,
+            &header_key,
+        )
+        .unwrap();
 
         // Compose on-disk layout: prefix || header || mac.
         let mut bytes = Vec::new();
@@ -353,7 +487,7 @@ mod tests {
 
     #[test]
     fn build_then_read_round_trip_two_recipients_with_ext() {
-        let (_payload_key, header_key) = dummy_subkeys();
+        let (payload_key, header_key) = dummy_subkeys();
         let stream_nonce = [0x09u8; STREAM_NONCE_SIZE];
         let entries = vec![
             dummy_entry("x25519", 104),
@@ -365,7 +499,8 @@ mod tests {
         ];
         let ext = b"hello-ext";
 
-        let built = build_encrypted_header(&entries, ext, stream_nonce, &header_key).unwrap();
+        let built =
+            build_encrypted_header(&entries, ext, stream_nonce, payload_key, &header_key).unwrap();
 
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&built.prefix_bytes);
@@ -392,9 +527,10 @@ mod tests {
 
     #[test]
     fn build_rejects_zero_recipients() {
-        let (_payload_key, header_key) = dummy_subkeys();
+        let (payload_key, header_key) = dummy_subkeys();
         let err =
-            build_encrypted_header(&[], b"", [0u8; STREAM_NONCE_SIZE], &header_key).unwrap_err();
+            build_encrypted_header(&[], b"", [0u8; STREAM_NONCE_SIZE], payload_key, &header_key)
+                .unwrap_err();
         match err {
             CryptoError::InvalidFormat(FormatDefect::RecipientCountOutOfRange { count: 0 }) => {}
             other => panic!("expected RecipientCountOutOfRange(0), got {other:?}"),
@@ -405,12 +541,17 @@ mod tests {
     fn build_rejects_ext_above_structural_cap() {
         // `EXT_LEN_MAX = 65_536`. One byte over fires `ExtTooLarge`
         // (the precise diagnostic), not generic `MalformedHeader`.
-        let (_payload_key, header_key) = dummy_subkeys();
+        let (payload_key, header_key) = dummy_subkeys();
         let entry = dummy_entry("argon2id", 116);
         let oversize = vec![0u8; format::EXT_LEN_MAX as usize + 1];
-        let err =
-            build_encrypted_header(&[entry], &oversize, [0u8; STREAM_NONCE_SIZE], &header_key)
-                .unwrap_err();
+        let err = build_encrypted_header(
+            &[entry],
+            &oversize,
+            [0u8; STREAM_NONCE_SIZE],
+            payload_key,
+            &header_key,
+        )
+        .unwrap_err();
         match err {
             CryptoError::InvalidFormat(FormatDefect::ExtTooLarge { .. }) => {}
             other => panic!("expected ExtTooLarge, got {other:?}"),
@@ -421,11 +562,13 @@ mod tests {
     fn read_rejects_header_len_above_local_cap() {
         // Build a legitimate header with one large `ext_bytes` region so
         // header_len exceeds the small cap we'll set.
-        let (_payload_key, header_key) = dummy_subkeys();
+        let (payload_key, header_key) = dummy_subkeys();
         let stream_nonce = [0x07u8; STREAM_NONCE_SIZE];
         let entry = dummy_entry("argon2id", 116);
         let big_ext = vec![0u8; 4096];
-        let built = build_encrypted_header(&[entry], &big_ext, stream_nonce, &header_key).unwrap();
+        let built =
+            build_encrypted_header(&[entry], &big_ext, stream_nonce, payload_key, &header_key)
+                .unwrap();
 
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&built.prefix_bytes);
@@ -445,10 +588,11 @@ mod tests {
 
     #[test]
     fn read_rejects_recipient_count_above_local_cap() {
-        let (_payload_key, header_key) = dummy_subkeys();
+        let (payload_key, header_key) = dummy_subkeys();
         let stream_nonce = [0x07u8; STREAM_NONCE_SIZE];
         let entries: Vec<_> = (0..3).map(|_| dummy_entry("argon2id", 116)).collect();
-        let built = build_encrypted_header(&entries, b"", stream_nonce, &header_key).unwrap();
+        let built =
+            build_encrypted_header(&entries, b"", stream_nonce, payload_key, &header_key).unwrap();
 
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&built.prefix_bytes);
@@ -471,11 +615,12 @@ mod tests {
 
     #[test]
     fn read_rejects_recipient_body_above_local_cap() {
-        let (_payload_key, header_key) = dummy_subkeys();
+        let (payload_key, header_key) = dummy_subkeys();
         let stream_nonce = [0x07u8; STREAM_NONCE_SIZE];
         // Build an entry larger than the per-entry cap we'll set.
         let entry = dummy_entry("argon2id", 200);
-        let built = build_encrypted_header(&[entry], b"", stream_nonce, &header_key).unwrap();
+        let built =
+            build_encrypted_header(&[entry], b"", stream_nonce, payload_key, &header_key).unwrap();
 
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&built.prefix_bytes);
@@ -498,10 +643,11 @@ mod tests {
 
     #[test]
     fn mac_verify_rejects_tampered_header_byte() {
-        let (_payload_key, header_key) = dummy_subkeys();
+        let (payload_key, header_key) = dummy_subkeys();
         let stream_nonce = [0x07u8; STREAM_NONCE_SIZE];
         let entry = dummy_entry("argon2id", 116);
-        let built = build_encrypted_header(&[entry], b"", stream_nonce, &header_key).unwrap();
+        let built =
+            build_encrypted_header(&[entry], b"", stream_nonce, payload_key, &header_key).unwrap();
 
         // Flip a byte inside header_bytes; MAC must reject.
         let mut tampered = built.header_bytes.clone();

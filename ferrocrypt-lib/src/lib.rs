@@ -890,15 +890,21 @@ mod tests {
     #[test]
     fn detect_encryption_mode_routes_argon2id_recipient_as_symmetric() {
         let header_key = [0x42u8; common::HMAC_KEY_SIZE];
+        let payload_key = zeroize::Zeroizing::new([0u8; common::ENCRYPTION_KEY_SIZE]);
         let stream_nonce = [0x07u8; format::STREAM_NONCE_SIZE];
         let entry = recipients::RecipientEntry::native(
             recipients::NativeRecipientType::Argon2id,
             vec![0u8; recipients::argon2id::BODY_LENGTH],
         )
         .unwrap();
-        let built =
-            encrypted_file::build_encrypted_header(&[entry], b"", stream_nonce, &header_key)
-                .unwrap();
+        let built = encrypted_file::build_encrypted_header(
+            &[entry],
+            b"",
+            stream_nonce,
+            payload_key,
+            &header_key,
+        )
+        .unwrap();
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let mut bytes = Vec::new();
@@ -918,15 +924,21 @@ mod tests {
     #[test]
     fn detect_encryption_mode_routes_x25519_recipient_as_hybrid() {
         let header_key = [0x42u8; common::HMAC_KEY_SIZE];
+        let payload_key = zeroize::Zeroizing::new([0u8; common::ENCRYPTION_KEY_SIZE]);
         let stream_nonce = [0x07u8; format::STREAM_NONCE_SIZE];
         let entry = recipients::RecipientEntry::native(
             recipients::NativeRecipientType::X25519,
             vec![0u8; recipients::x25519::BODY_LENGTH],
         )
         .unwrap();
-        let built =
-            encrypted_file::build_encrypted_header(&[entry], b"", stream_nonce, &header_key)
-                .unwrap();
+        let built = encrypted_file::build_encrypted_header(
+            &[entry],
+            b"",
+            stream_nonce,
+            payload_key,
+            &header_key,
+        )
+        .unwrap();
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let mut bytes = Vec::new();

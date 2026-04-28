@@ -34,8 +34,8 @@ use zeroize::Zeroizing;
 
 use crate::atomic_output;
 use crate::common::{
-    DecryptReader, EncryptWriter, KdfLimit, KdfParams, STREAM_NONCE_SIZE, derive_subkeys,
-    encryption_base_name, generate_file_key, random_bytes, validate_tlv,
+    DecryptReader, KdfLimit, KdfParams, STREAM_NONCE_SIZE, derive_subkeys, encryption_base_name,
+    generate_file_key, random_bytes, validate_tlv,
 };
 use crate::error::FormatDefect;
 use crate::format;
@@ -97,11 +97,14 @@ pub fn encrypt_file_from_bytes(
 
     // Assemble prefix + header + MAC. `build_encrypted_header` is the
     // single byte-arithmetic implementation; encrypt and decrypt
-    // share its MAC scope.
+    // share its MAC scope. `payload_key` and `stream_nonce` move into
+    // the returned bundle so the writer cannot be paired with material
+    // from a different derivation.
     let built = crate::encrypted_file::build_encrypted_header(
         std::slice::from_ref(&entry),
         b"", // v1.0 writers emit ext_len = 0
         stream_nonce,
+        payload_key,
         &header_key,
     )?;
     drop(header_key);
@@ -109,46 +112,13 @@ pub fn encrypt_file_from_bytes(
     let base_name = encryption_base_name(input_path)?;
     on_event(&ProgressEvent::Encrypting);
 
-    let output_path = match output_file {
-        Some(p) => p.to_path_buf(),
-        None => output_dir.join(format!("{}.{}", base_name, format::ENCRYPTED_EXTENSION)),
-    };
-    if output_path.exists() {
-        return Err(CryptoError::InvalidInput(format!(
-            "Output already exists: {}",
-            output_path.display()
-        )));
-    }
-
-    let temp_dir = output_path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let mut tmp = tempfile::Builder::new()
-        .prefix(".ferrocrypt-")
-        .suffix(".incomplete")
-        .tempfile_in(temp_dir)?;
-
-    let encrypt_result: Result<tempfile::NamedTempFile, CryptoError> = (|| {
-        // On-disk order: prefix(12) || header(31 + entries + ext) || mac(32) || payload(STREAM)
-        tmp.as_file_mut().write_all(&built.prefix_bytes)?;
-        tmp.as_file_mut().write_all(&built.header_bytes)?;
-        tmp.as_file_mut().write_all(&built.header_mac)?;
-
-        let cipher = XChaCha20Poly1305::new(payload_key.as_ref().into());
-        let stream_encryptor =
-            stream::EncryptorBE32::from_aead(cipher, stream_nonce.as_ref().into());
-
-        let encrypt_writer = EncryptWriter::new(stream_encryptor, tmp);
-        let (_, encrypt_writer) = archiver::archive(input_path, encrypt_writer)?;
-        let tmp = encrypt_writer.finish()?;
-        tmp.as_file().sync_all()?;
-        Ok(tmp)
-    })();
-
-    let tmp = encrypt_result?;
-    atomic_output::finalize_file(tmp, &output_path)?;
-    Ok(output_path)
+    crate::encrypted_file::write_encrypted_file(
+        input_path,
+        output_dir,
+        output_file,
+        &base_name,
+        &built,
+    )
 }
 
 // ─── Decrypt ───────────────────────────────────────────────────────────────
@@ -1371,7 +1341,7 @@ mod tests {
     // mixing before any KDF runs, enforce the local body cap on unknown
     // entries.
 
-    use crate::common::{derive_subkeys, generate_file_key, random_bytes};
+    use crate::common::{EncryptWriter, derive_subkeys, generate_file_key, random_bytes};
     use crate::recipients::{
         NativeRecipientType, RECIPIENT_FLAG_CRITICAL, RecipientEntry, argon2id, x25519,
     };
@@ -1391,8 +1361,16 @@ mod tests {
         let stream_nonce = random_bytes::<STREAM_NONCE_SIZE>();
         let (payload_key, header_key) = derive_subkeys(file_key, &stream_nonce)?;
 
-        let built =
-            crate::encrypted_file::build_encrypted_header(entries, b"", stream_nonce, &header_key)?;
+        // The bundle now owns `payload_key` and `stream_nonce`. The
+        // payload-encryption block below borrows them back through
+        // `built`; the original locals would be moved into the call.
+        let built = crate::encrypted_file::build_encrypted_header(
+            entries,
+            b"",
+            stream_nonce,
+            payload_key,
+            &header_key,
+        )?;
 
         // Encrypt the TAR payload into a separate buffer so the
         // `EncryptWriter`'s mutable borrow over the buffer is released
@@ -1401,9 +1379,9 @@ mod tests {
         // and the embedded `&mut payload_buf`.
         let mut payload_buf: Vec<u8> = Vec::new();
         {
-            let cipher = XChaCha20Poly1305::new(payload_key.as_ref().into());
+            let cipher = XChaCha20Poly1305::new(built.payload_key.as_ref().into());
             let stream_encryptor =
-                stream::EncryptorBE32::from_aead(cipher, stream_nonce.as_ref().into());
+                stream::EncryptorBE32::from_aead(cipher, (&built.stream_nonce).into());
             let writer = EncryptWriter::new(stream_encryptor, &mut payload_buf);
             let mut tar_builder = tar::Builder::new(writer);
             let mut header = tar::Header::new_ustar();

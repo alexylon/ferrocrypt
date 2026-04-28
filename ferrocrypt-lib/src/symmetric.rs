@@ -15,7 +15,6 @@
 //! the shared header layout.
 
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use chacha20poly1305::{
@@ -24,10 +23,9 @@ use chacha20poly1305::{
 };
 use secrecy::SecretString;
 
-use crate::atomic_output;
 use crate::common::{
-    DecryptReader, EncryptWriter, KdfLimit, KdfParams, STREAM_NONCE_SIZE, derive_subkeys,
-    encryption_base_name, generate_file_key, random_bytes, validate_tlv,
+    DecryptReader, KdfLimit, KdfParams, STREAM_NONCE_SIZE, derive_subkeys, encryption_base_name,
+    generate_file_key, random_bytes, validate_tlv,
 };
 use crate::error::FormatDefect;
 use crate::format;
@@ -76,11 +74,14 @@ pub fn encrypt_file(
 
     // Assemble prefix + header + MAC. `build_encrypted_header` is the
     // single byte-arithmetic implementation; encrypt and decrypt
-    // share its MAC scope.
+    // share its MAC scope. `payload_key` and `stream_nonce` move into
+    // the returned bundle so the writer cannot be paired with material
+    // from a different derivation.
     let built = crate::encrypted_file::build_encrypted_header(
         std::slice::from_ref(&entry),
         b"", // v1.0 writers emit ext_len = 0
         stream_nonce,
+        payload_key,
         &header_key,
     )?;
     drop(header_key);
@@ -88,46 +89,13 @@ pub fn encrypt_file(
     let base_name = encryption_base_name(input_path)?;
     on_event(&ProgressEvent::Encrypting);
 
-    let output_path = match output_file {
-        Some(path) => path.to_path_buf(),
-        None => output_dir.join(format!("{}.{}", base_name, format::ENCRYPTED_EXTENSION)),
-    };
-    if output_path.exists() {
-        return Err(CryptoError::InvalidInput(format!(
-            "Output already exists: {}",
-            output_path.display()
-        )));
-    }
-
-    let temp_dir = output_path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let mut tmp = tempfile::Builder::new()
-        .prefix(".ferrocrypt-")
-        .suffix(".incomplete")
-        .tempfile_in(temp_dir)?;
-
-    let encrypt_result: Result<tempfile::NamedTempFile, CryptoError> = (|| {
-        // On-disk order: prefix(12) || header(31 + entries + ext) || mac(32) || payload(STREAM)
-        tmp.as_file_mut().write_all(&built.prefix_bytes)?;
-        tmp.as_file_mut().write_all(&built.header_bytes)?;
-        tmp.as_file_mut().write_all(&built.header_mac)?;
-
-        let cipher = XChaCha20Poly1305::new(payload_key.as_ref().into());
-        let stream_encryptor =
-            stream::EncryptorBE32::from_aead(cipher, stream_nonce.as_ref().into());
-
-        let encrypt_writer = EncryptWriter::new(stream_encryptor, tmp);
-        let (_, encrypt_writer) = archiver::archive(input_path, encrypt_writer)?;
-        let tmp = encrypt_writer.finish()?;
-        tmp.as_file().sync_all()?;
-        Ok(tmp)
-    })();
-
-    let tmp = encrypt_result?;
-    atomic_output::finalize_file(tmp, &output_path)?;
-    Ok(output_path)
+    crate::encrypted_file::write_encrypted_file(
+        input_path,
+        output_dir,
+        output_file,
+        &base_name,
+        &built,
+    )
 }
 
 /// Decrypts a `.fcr` file produced by [`encrypt_file`]. Follows the

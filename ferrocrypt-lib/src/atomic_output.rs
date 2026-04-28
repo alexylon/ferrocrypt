@@ -33,25 +33,15 @@ use tempfile::NamedTempFile;
 /// - finalization has already succeeded by the time this runs
 /// - returning an error after the final path is visible would be more
 ///   confusing to callers than helpful
+#[cfg(unix)]
 fn sync_parent_dir(path: &Path) {
-    // Suppress the "unused" warning on non-Unix targets where the body
-    // below is entirely cfg-gated out.
-    let _ = path;
-
-    #[cfg(unix)]
-    {
-        use std::fs::File;
-
-        let parent = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-
-        if let Ok(dir) = File::open(parent) {
-            let _ = dir.sync_all();
-        }
+    if let Ok(dir) = std::fs::File::open(crate::common::parent_or_cwd(path)) {
+        let _ = dir.sync_all();
     }
 }
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_path: &Path) {}
 
 /// Promotes a `NamedTempFile` to its final path with atomic no-clobber
 /// semantics. Fails with [`io::ErrorKind::AlreadyExists`] if the final
@@ -63,11 +53,9 @@ fn sync_parent_dir(path: &Path) {
 /// created inside the destination directory via
 /// `tempfile::Builder::tempfile_in`).
 pub(crate) fn finalize_file(tmp: NamedTempFile, final_path: &Path) -> io::Result<()> {
-    tmp.persist_noclobber(final_path)
-        .map_err(|e| e.error)
-        .map(|_| {
-            sync_parent_dir(final_path);
-        })
+    tmp.persist_noclobber(final_path).map_err(|e| e.error)?;
+    sync_parent_dir(final_path);
+    Ok(())
 }
 
 /// No-clobber rename of a filesystem entry. Works for both regular files
@@ -85,38 +73,34 @@ pub(crate) fn finalize_file(tmp: NamedTempFile, final_path: &Path) -> io::Result
 ///   desktop-target assumptions to platforms ferrocrypt does not currently aim
 ///   to support here.
 pub(crate) fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    {
-        use rustix::fs::{CWD, RenameFlags, renameat_with};
-        renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE)
-            .map_err(io::Error::from)
-            .map(|_| {
-                sync_parent_dir(to);
-            })
-    }
+    rename_no_clobber_impl(from, to)?;
+    sync_parent_dir(to);
+    Ok(())
+}
 
-    #[cfg(target_os = "windows")]
-    {
-        if to.try_exists()? {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "Target already exists",
-            ));
-        }
-        std::fs::rename(from, to)?;
-        sync_parent_dir(to);
-        Ok(())
-    }
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn rename_no_clobber_impl(from: &Path, to: &Path) -> io::Result<()> {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+    renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE).map_err(io::Error::from)
+}
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    {
-        let _ = from;
-        let _ = to;
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "Atomic rename is not supported on this target",
-        ))
+#[cfg(target_os = "windows")]
+fn rename_no_clobber_impl(from: &Path, to: &Path) -> io::Result<()> {
+    if to.try_exists()? {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "Target already exists",
+        ));
     }
+    std::fs::rename(from, to)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn rename_no_clobber_impl(_from: &Path, _to: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Atomic rename is not supported on this target",
+    ))
 }
 
 #[cfg(test)]

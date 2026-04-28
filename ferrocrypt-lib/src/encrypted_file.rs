@@ -39,7 +39,8 @@ use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
 use crate::common::{
-    ENCRYPTION_KEY_SIZE, HMAC_KEY_SIZE, payload_encryptor, read_exact_or_truncated,
+    ENCRYPTION_KEY_SIZE, HMAC_KEY_SIZE, INCOMPLETE_SUFFIX, parent_or_cwd, payload_encryptor,
+    read_exact_or_truncated,
 };
 use crate::error::{CryptoError, FormatDefect};
 use crate::format::{
@@ -48,6 +49,13 @@ use crate::format::{
 };
 use crate::recipients::{self, RecipientEntry};
 use crate::{archiver, atomic_output};
+
+/// Tempfile name prefix for the in-flight `.fcr` write. Combined with
+/// [`INCOMPLETE_SUFFIX`] this yields a `.ferrocrypt-*.incomplete`
+/// staging name in the destination directory; on success
+/// [`atomic_output::finalize_file`] promotes it to the user-visible
+/// output path.
+const TEMP_FILE_PREFIX: &str = ".ferrocrypt-";
 
 /// Local resource caps applied while reading an encrypted-file header. The
 /// defaults mirror `format::*_LOCAL_CAP_DEFAULT` and apply to every reader
@@ -175,16 +183,17 @@ impl std::fmt::Debug for BuiltEncryptedHeader {
 /// 1. read 12-byte prefix → [`Prefix::parse`] (BadMagic / WrongKind /
 ///    UnsupportedVersion / MalformedHeader / OversizedHeader);
 /// 2. enforce `prefix.header_len <= limits.max_header_len`;
-/// 3. read 31-byte `header_fixed` → [`HeaderFixed::parse`]
+/// 3. read the entire `header_len`-byte `header` region into one buffer;
+/// 4. parse the leading 31 bytes as `header_fixed` → [`HeaderFixed::parse`]
 ///    (header_flags == 0, recipient_count in range, ext_len in range,
 ///    region lengths self-consistent);
-/// 4. enforce `recipient_count <= limits.max_recipient_count`;
-/// 5. read the remaining `header_len - 31` bytes as recipient_entries +
-///    ext_bytes;
-/// 6. parse the recipient list, enforcing
-///    `body_len <= limits.max_recipient_body_len` per entry;
-/// 7. read the 32-byte header MAC tag;
-/// 8. return the parsed header. **MAC is not yet verified.**
+/// 5. enforce `recipient_count <= limits.max_recipient_count`;
+/// 6. parse the recipient list from `header[31..31+recipient_entries_len]`,
+///    enforcing `body_len <= limits.max_recipient_body_len` per entry;
+/// 7. capture the trailing `ext_bytes` slice (TLV validation deferred
+///    to AFTER MAC verification — see `FORMAT.md` §3.7);
+/// 8. read the 32-byte header MAC tag;
+/// 9. return the parsed header. **MAC is not yet verified.**
 pub(crate) fn read_encrypted_header<R: Read>(
     reader: &mut R,
     limits: HeaderReadLimits,
@@ -203,9 +212,14 @@ pub(crate) fn read_encrypted_header<R: Read>(
     let mut header_bytes = vec![0u8; header_len];
     read_exact_or_truncated(reader, &mut header_bytes)?;
 
-    let mut fixed_bytes = [0u8; HEADER_FIXED_SIZE];
-    fixed_bytes.copy_from_slice(&header_bytes[..HEADER_FIXED_SIZE]);
-    let fixed = HeaderFixed::parse(&fixed_bytes, prefix.header_len)?;
+    // `header_len >= HEADER_FIXED_SIZE` was already enforced by
+    // `Prefix::parse` via `check_header_len`, so `first_chunk` is
+    // structurally guaranteed to return `Some`; the `ok_or` is a
+    // belt-and-braces guard so an upstream regression cannot panic here.
+    let fixed_bytes: &[u8; HEADER_FIXED_SIZE] = header_bytes
+        .first_chunk()
+        .ok_or(CryptoError::InvalidFormat(FormatDefect::MalformedHeader))?;
+    let fixed = HeaderFixed::parse(fixed_bytes, prefix.header_len)?;
 
     if fixed.recipient_count > limits.max_recipient_count {
         return Err(CryptoError::RecipientCountCapExceeded {
@@ -392,14 +406,10 @@ pub(crate) fn write_encrypted_file(
         )));
     }
 
-    let temp_dir = output_path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
     let mut tmp = tempfile::Builder::new()
-        .prefix(".ferrocrypt-")
-        .suffix(".incomplete")
-        .tempfile_in(temp_dir)?;
+        .prefix(TEMP_FILE_PREFIX)
+        .suffix(INCOMPLETE_SUFFIX)
+        .tempfile_in(parent_or_cwd(&output_path))?;
 
     tmp.as_file_mut().write_all(&built.prefix_bytes)?;
     tmp.as_file_mut().write_all(&built.header_bytes)?;
@@ -418,7 +428,7 @@ pub(crate) fn write_encrypted_file(
 mod tests {
     use super::*;
     use crate::common::{DerivedSubkeys, FILE_KEY_SIZE, derive_subkeys};
-    use crate::recipients::RECIPIENT_FLAG_CRITICAL;
+    use crate::recipients::{RECIPIENT_FLAG_CRITICAL, argon2id, x25519};
 
     fn dummy_entry(type_name: &str, body_len: usize) -> RecipientEntry {
         RecipientEntry {
@@ -435,6 +445,19 @@ mod tests {
         derive_subkeys(&file_key, &stream_nonce).unwrap()
     }
 
+    /// Concatenates the three on-disk byte regions a writer emits in
+    /// order: `prefix || header || mac`. Used by every round-trip /
+    /// reader-side test below to feed the parser.
+    fn on_disk_bytes(built: &BuiltEncryptedHeader) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(
+            built.prefix_bytes.len() + built.header_bytes.len() + built.header_mac.len(),
+        );
+        bytes.extend_from_slice(&built.prefix_bytes);
+        bytes.extend_from_slice(&built.header_bytes);
+        bytes.extend_from_slice(&built.header_mac);
+        bytes
+    }
+
     #[test]
     fn build_then_read_round_trip_single_recipient() {
         let DerivedSubkeys {
@@ -442,7 +465,7 @@ mod tests {
             header_key,
         } = dummy_subkeys();
         let stream_nonce = [0x07u8; STREAM_NONCE_SIZE];
-        let entry = dummy_entry("argon2id", 116);
+        let entry = dummy_entry(argon2id::TYPE_NAME, argon2id::BODY_LENGTH);
 
         let built = build_encrypted_header(
             std::slice::from_ref(&entry),
@@ -453,12 +476,7 @@ mod tests {
         )
         .unwrap();
 
-        // Compose on-disk layout: prefix || header || mac.
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&built.prefix_bytes);
-        bytes.extend_from_slice(&built.header_bytes);
-        bytes.extend_from_slice(&built.header_mac);
-
+        let bytes = on_disk_bytes(&built);
         let parsed =
             read_encrypted_header(&mut bytes.as_slice(), HeaderReadLimits::default()).unwrap();
 
@@ -469,7 +487,7 @@ mod tests {
         assert_eq!(parsed.fixed.stream_nonce, stream_nonce);
         assert_eq!(parsed.fixed.ext_len, 0);
         assert_eq!(parsed.recipient_entries.len(), 1);
-        assert_eq!(parsed.recipient_entries[0].type_name, "argon2id");
+        assert_eq!(parsed.recipient_entries[0].type_name, argon2id::TYPE_NAME);
         assert_eq!(parsed.recipient_entries[0].body, entry.body);
         assert!(parsed.ext_bytes.is_empty());
 
@@ -492,11 +510,11 @@ mod tests {
         } = dummy_subkeys();
         let stream_nonce = [0x09u8; STREAM_NONCE_SIZE];
         let entries = vec![
-            dummy_entry("x25519", 104),
+            dummy_entry(x25519::TYPE_NAME, x25519::BODY_LENGTH),
             RecipientEntry {
-                type_name: "x25519".to_string(),
+                type_name: x25519::TYPE_NAME.to_string(),
                 recipient_flags: RECIPIENT_FLAG_CRITICAL,
-                body: vec![0xCDu8; 104],
+                body: vec![0xCDu8; x25519::BODY_LENGTH],
             },
         ];
         let ext = b"hello-ext";
@@ -504,11 +522,7 @@ mod tests {
         let built =
             build_encrypted_header(&entries, ext, stream_nonce, payload_key, &header_key).unwrap();
 
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&built.prefix_bytes);
-        bytes.extend_from_slice(&built.header_bytes);
-        bytes.extend_from_slice(&built.header_mac);
-
+        let bytes = on_disk_bytes(&built);
         let parsed =
             read_encrypted_header(&mut bytes.as_slice(), HeaderReadLimits::default()).unwrap();
         assert_eq!(parsed.fixed.recipient_count, 2);
@@ -550,7 +564,7 @@ mod tests {
             payload_key,
             header_key,
         } = dummy_subkeys();
-        let entry = dummy_entry("argon2id", 116);
+        let entry = dummy_entry(argon2id::TYPE_NAME, argon2id::BODY_LENGTH);
         let oversize = vec![0u8; format::EXT_LEN_MAX as usize + 1];
         let err = build_encrypted_header(
             &[entry],
@@ -575,17 +589,13 @@ mod tests {
             header_key,
         } = dummy_subkeys();
         let stream_nonce = [0x07u8; STREAM_NONCE_SIZE];
-        let entry = dummy_entry("argon2id", 116);
+        let entry = dummy_entry(argon2id::TYPE_NAME, argon2id::BODY_LENGTH);
         let big_ext = vec![0u8; 4096];
         let built =
             build_encrypted_header(&[entry], &big_ext, stream_nonce, payload_key, &header_key)
                 .unwrap();
 
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&built.prefix_bytes);
-        bytes.extend_from_slice(&built.header_bytes);
-        bytes.extend_from_slice(&built.header_mac);
-
+        let bytes = on_disk_bytes(&built);
         let tight_limits = HeaderReadLimits {
             max_header_len: 256,
             ..HeaderReadLimits::default()
@@ -604,15 +614,13 @@ mod tests {
             header_key,
         } = dummy_subkeys();
         let stream_nonce = [0x07u8; STREAM_NONCE_SIZE];
-        let entries: Vec<_> = (0..3).map(|_| dummy_entry("argon2id", 116)).collect();
+        let entries: Vec<_> = (0..3)
+            .map(|_| dummy_entry(argon2id::TYPE_NAME, argon2id::BODY_LENGTH))
+            .collect();
         let built =
             build_encrypted_header(&entries, b"", stream_nonce, payload_key, &header_key).unwrap();
 
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&built.prefix_bytes);
-        bytes.extend_from_slice(&built.header_bytes);
-        bytes.extend_from_slice(&built.header_mac);
-
+        let bytes = on_disk_bytes(&built);
         let tight_limits = HeaderReadLimits {
             max_recipient_count: 2,
             ..HeaderReadLimits::default()
@@ -635,26 +643,26 @@ mod tests {
         } = dummy_subkeys();
         let stream_nonce = [0x07u8; STREAM_NONCE_SIZE];
         // Build an entry larger than the per-entry cap we'll set.
-        let entry = dummy_entry("argon2id", 200);
+        let oversize_body_len = argon2id::BODY_LENGTH + 84;
+        let local_body_cap: u32 = (argon2id::BODY_LENGTH + 12) as u32;
+        let entry = dummy_entry(argon2id::TYPE_NAME, oversize_body_len);
         let built =
             build_encrypted_header(&[entry], b"", stream_nonce, payload_key, &header_key).unwrap();
 
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&built.prefix_bytes);
-        bytes.extend_from_slice(&built.header_bytes);
-        bytes.extend_from_slice(&built.header_mac);
-
+        let bytes = on_disk_bytes(&built);
         let tight_limits = HeaderReadLimits {
-            max_recipient_body_len: 128,
+            max_recipient_body_len: local_body_cap,
             ..HeaderReadLimits::default()
         };
         let err = read_encrypted_header(&mut bytes.as_slice(), tight_limits).unwrap_err();
         match err {
             CryptoError::RecipientBodyCapExceeded {
-                body_len: 200,
-                local_cap: 128,
-            } => {}
-            other => panic!("expected RecipientBodyCapExceeded(200, 128), got {other:?}"),
+                body_len,
+                local_cap,
+            } if body_len as usize == oversize_body_len && local_cap == local_body_cap => {}
+            other => panic!(
+                "expected RecipientBodyCapExceeded({oversize_body_len}, {local_body_cap}), got {other:?}"
+            ),
         }
     }
 
@@ -665,7 +673,7 @@ mod tests {
             header_key,
         } = dummy_subkeys();
         let stream_nonce = [0x07u8; STREAM_NONCE_SIZE];
-        let entry = dummy_entry("argon2id", 116);
+        let entry = dummy_entry(argon2id::TYPE_NAME, argon2id::BODY_LENGTH);
         let built =
             build_encrypted_header(&[entry], b"", stream_nonce, payload_key, &header_key).unwrap();
 

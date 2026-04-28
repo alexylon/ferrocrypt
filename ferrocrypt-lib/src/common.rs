@@ -295,6 +295,23 @@ pub fn encryption_base_name(path: impl AsRef<Path>) -> Result<String, CryptoErro
     }
 }
 
+/// Suffix appended to atomic-write working names so plaintext (or any
+/// not-yet-finalised output) is never visible under the final name.
+/// Used by `encrypted_file::write_encrypted_file` for the streaming
+/// `.fcr` tempfile and by `archiver::unarchive` for the per-root
+/// rename-into-place pattern.
+pub(crate) const INCOMPLETE_SUFFIX: &str = ".incomplete";
+
+/// Returns the parent directory of `path`, or `Path::new(".")` when the
+/// parent is empty or absent. Centralises the "directory in which to
+/// create the staging tempfile / open a dirfd for `sync_all`" lookup
+/// shared by `atomic_output` and `encrypted_file`.
+pub(crate) fn parent_or_cwd(path: &Path) -> &Path {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
 pub fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
@@ -1393,6 +1410,20 @@ mod tests {
         std::fs::create_dir(&dotted_dir).unwrap();
         let name = encryption_base_name(&dotted_dir).unwrap();
         assert_eq!(name, "photos.v1");
+    }
+
+    #[test]
+    fn parent_or_cwd_returns_parent_when_present() {
+        assert_eq!(parent_or_cwd(Path::new("dir/file.txt")), Path::new("dir"));
+        assert_eq!(parent_or_cwd(Path::new("/abs/file.txt")), Path::new("/abs"));
+    }
+
+    #[test]
+    fn parent_or_cwd_falls_back_to_cwd() {
+        // `Path::parent` returns `Some("")` for a bare filename and `None` for
+        // the empty path; both must collapse to ".".
+        assert_eq!(parent_or_cwd(Path::new("file.txt")), Path::new("."));
+        assert_eq!(parent_or_cwd(Path::new("")), Path::new("."));
     }
 
     #[test]

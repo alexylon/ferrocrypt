@@ -1,6 +1,6 @@
 use crate::CryptoError;
 use crate::atomic_output::rename_no_clobber;
-use crate::common::file_stem;
+use crate::common::{INCOMPLETE_SUFFIX, file_stem};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -1075,7 +1075,7 @@ pub fn unarchive<R: Read>(
 /// and `OsStr` arguments without an extra conversion at the call site.
 fn incomplete_working_name(root_name: &OsStr) -> OsString {
     let mut name = root_name.to_os_string();
-    name.push(".incomplete");
+    name.push(INCOMPLETE_SUFFIX);
     name
 }
 

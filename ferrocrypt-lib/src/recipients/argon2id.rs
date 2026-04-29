@@ -24,10 +24,9 @@ use secrecy::SecretString;
 use zeroize::Zeroizing;
 
 use crate::CryptoError;
-use crate::common::{
-    ARGON2_SALT_SIZE, FILE_KEY_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams, WRAP_NONCE_SIZE,
-    WRAPPED_FILE_KEY_SIZE, derive_passphrase_wrap_key, open_file_key, random_bytes, seal_file_key,
-};
+use crate::crypto::aead::{WRAP_NONCE_SIZE, WRAPPED_FILE_KEY_SIZE, open_file_key, seal_file_key};
+use crate::crypto::kdf::{ARGON2_SALT_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams};
+use crate::crypto::keys::{FILE_KEY_SIZE, derive_passphrase_wrap_key, random_bytes};
 
 /// Wire-format `type_name` for this recipient.
 pub const TYPE_NAME: &str = "argon2id";

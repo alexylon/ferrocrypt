@@ -34,10 +34,10 @@ use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
 use crate::CryptoError;
-use crate::common::{
-    FILE_KEY_SIZE, WRAP_NONCE_SIZE, WRAPPED_FILE_KEY_SIZE, ct_eq_32, hkdf_expand_sha3_256,
-    open_file_key, random_bytes, seal_file_key,
-};
+use crate::crypto::aead::{WRAP_NONCE_SIZE, WRAPPED_FILE_KEY_SIZE, open_file_key, seal_file_key};
+use crate::crypto::hkdf::hkdf_expand_sha3_256;
+use crate::crypto::keys::{FILE_KEY_SIZE, random_bytes};
+use crate::crypto::mac::ct_eq_32;
 
 /// Wire-format `type_name` for this recipient.
 pub const TYPE_NAME: &str = "x25519";

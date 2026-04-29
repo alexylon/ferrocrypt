@@ -15,7 +15,8 @@
 #![allow(missing_docs)]
 
 pub use crate::archiver::validate_archive_path;
-pub use crate::common::{KDF_PARAMS_SIZE, KdfParams, validate_tlv};
+pub use crate::crypto::kdf::{KDF_PARAMS_SIZE, KdfParams};
+pub use crate::crypto::tlv::validate_tlv;
 pub use crate::hybrid::validate_private_key_shape;
 pub use crate::key::private::PrivateKeyHeader;
 pub use crate::key::public::{RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT, decode_recipient_string};

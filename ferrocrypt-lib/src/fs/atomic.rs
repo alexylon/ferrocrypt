@@ -35,7 +35,7 @@ use tempfile::NamedTempFile;
 ///   confusing to callers than helpful
 #[cfg(unix)]
 fn sync_parent_dir(path: &Path) {
-    if let Ok(dir) = std::fs::File::open(crate::common::parent_or_cwd(path)) {
+    if let Ok(dir) = std::fs::File::open(crate::fs::paths::parent_or_cwd(path)) {
         let _ = dir.sync_all();
     }
 }

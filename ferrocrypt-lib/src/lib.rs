@@ -123,7 +123,7 @@ use std::path::{Path, PathBuf};
 
 use secrecy::{ExposeSecret as _, SecretString};
 
-pub use crate::common::KdfLimit;
+pub use crate::crypto::kdf::KdfLimit;
 pub use crate::error::{CryptoError, FormatDefect, InvalidKdfParams, UnsupportedVersion};
 pub use crate::format::ENCRYPTED_EXTENSION;
 pub use crate::hybrid::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};
@@ -485,8 +485,8 @@ pub fn detect_encryption_mode(
 }
 
 mod archiver;
-mod common;
 mod container;
+mod crypto;
 mod error;
 mod format;
 mod fs;
@@ -537,7 +537,7 @@ pub fn decode_recipient(recipient: &str) -> Result<[u8; 32], CryptoError> {
 /// [`FormatDefect::WrongKeyFileType`] surfaces instead of a generic
 /// `NotAKeyFile`.
 pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError> {
-    let data = std::fs::read(key_file.as_ref()).map_err(hybrid::map_user_path_io_error)?;
+    let data = std::fs::read(key_file.as_ref()).map_err(fs::paths::map_user_path_io_error)?;
     if matches!(
         hybrid::KeyFileKind::classify(&data),
         hybrid::KeyFileKind::Public
@@ -567,7 +567,7 @@ pub fn validate_public_key_file(key_file: impl AsRef<Path>) -> Result<(), Crypto
 /// Returns the default encrypted filename for a given input path (e.g. `"secrets.fcr"`).
 /// For files, uses the stem (without extension). For directories, uses the full name.
 pub fn default_encrypted_filename(input_path: impl AsRef<Path>) -> Result<String, CryptoError> {
-    let base_name = common::encryption_base_name(input_path)?;
+    let base_name = fs::paths::encryption_base_name(input_path)?;
     Ok(format!("{}.{}", base_name, ENCRYPTED_EXTENSION))
 }
 
@@ -732,8 +732,8 @@ mod tests {
     /// exercises the same byte path the real encrypt would write.
     #[test]
     fn detect_encryption_mode_routes_argon2id_recipient_as_symmetric() {
-        let header_key = [0x42u8; common::HMAC_KEY_SIZE];
-        let payload_key = zeroize::Zeroizing::new([0u8; common::ENCRYPTION_KEY_SIZE]);
+        let header_key = [0x42u8; crypto::mac::HMAC_KEY_SIZE];
+        let payload_key = zeroize::Zeroizing::new([0u8; crypto::keys::ENCRYPTION_KEY_SIZE]);
         let stream_nonce = [0x07u8; format::STREAM_NONCE_SIZE];
         let entry = recipients::RecipientEntry::native(
             recipients::NativeRecipientType::Argon2id,
@@ -766,8 +766,8 @@ mod tests {
     /// `EncryptionMode::Hybrid`.
     #[test]
     fn detect_encryption_mode_routes_x25519_recipient_as_hybrid() {
-        let header_key = [0x42u8; common::HMAC_KEY_SIZE];
-        let payload_key = zeroize::Zeroizing::new([0u8; common::ENCRYPTION_KEY_SIZE]);
+        let header_key = [0x42u8; crypto::mac::HMAC_KEY_SIZE];
+        let payload_key = zeroize::Zeroizing::new([0u8; crypto::keys::ENCRYPTION_KEY_SIZE]);
         let stream_nonce = [0x07u8; format::STREAM_NONCE_SIZE];
         let entry = recipients::RecipientEntry::native(
             recipients::NativeRecipientType::X25519,

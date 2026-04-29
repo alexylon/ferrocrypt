@@ -21,7 +21,7 @@
 //! `container.rs` for the shared header layout.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use chacha20poly1305::aead::OsRng;
@@ -30,16 +30,17 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
 use crate::archiver::{ArchiveLimits, unarchive};
-use crate::common::{
-    DerivedSubkeys, KdfLimit, KdfParams, STREAM_NONCE_SIZE, derive_subkeys, encryption_base_name,
-    generate_file_key, payload_decryptor, random_bytes, validate_tlv,
-};
 use crate::container::{
     HeaderReadLimits, build_encrypted_header, read_encrypted_header, write_encrypted_file,
 };
+use crate::crypto::kdf::{KdfLimit, KdfParams};
+use crate::crypto::keys::{DerivedSubkeys, derive_subkeys, generate_file_key, random_bytes};
+use crate::crypto::stream::{STREAM_NONCE_SIZE, payload_decryptor};
+use crate::crypto::tlv::validate_tlv;
 use crate::error::FormatDefect;
 use crate::format;
 use crate::fs::atomic;
+use crate::fs::paths::{encryption_base_name, map_user_path_io_error};
 use crate::key::private::{
     PRIVATE_KEY_HEADER_FIXED_SIZE, PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT, PrivateKeyHeader,
     open_private_key, seal_private_key,
@@ -455,19 +456,6 @@ impl KeyFileKind {
     }
 }
 
-/// Converts an [`io::Error`] from a user-provided path read into a
-/// typed [`CryptoError`]. `NotFound` maps to [`CryptoError::InputPath`]
-/// so "file does not exist" gives the same pretty message here as it
-/// does from the upfront `validate_input_path` check. Everything else
-/// falls through to [`CryptoError::Io`].
-pub(crate) fn map_user_path_io_error(e: io::Error) -> CryptoError {
-    if e.kind() == io::ErrorKind::NotFound {
-        CryptoError::InputPath
-    } else {
-        CryptoError::Io(e)
-    }
-}
-
 // ─── generate_key_pair ─────────────────────────────────────────────────────
 
 /// Generates an X25519 key pair and writes both files to `output_dir`.
@@ -700,7 +688,8 @@ pub fn validate_private_key_shape(data: &[u8]) -> Result<(), CryptoError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::{WRAP_NONCE_SIZE, payload_encryptor};
+    use crate::crypto::aead::WRAP_NONCE_SIZE;
+    use crate::crypto::stream::payload_encryptor;
     use crate::format::{HEADER_FIXED_SIZE, PREFIX_SIZE};
     use crate::recipients::{ENTRY_HEADER_SIZE, RECIPIENT_FLAG_CRITICAL, argon2id};
 

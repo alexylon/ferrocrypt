@@ -32,9 +32,13 @@ use bech32::{Bech32, Checksum, Hrp};
 use sha3::{Digest, Sha3_256};
 
 use crate::CryptoError;
-use crate::common::{hex_encode, read_u16_be, read_u32_be};
 use crate::error::FormatDefect;
+use crate::format::{read_u16_be, read_u32_be};
 use crate::recipients::{TYPE_NAME_MAX_LEN, validate_type_name};
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
 
 /// Bech32 HRP for FerroCrypt recipient strings.
 pub const RECIPIENT_HRP: Hrp = Hrp::parse_unchecked("fcr");

@@ -28,7 +28,7 @@
 //!   verifies.
 //! - It does not validate `ext_bytes` TLV structure. TLV validation runs
 //!   *after* MAC verification (so the validator can trust authenticated
-//!   bytes). Callers invoke `common::validate_tlv` on `ext_bytes` after
+//!   bytes). Callers invoke `crypto::tlv::validate_tlv` on `ext_bytes` after
 //!   `format::verify_header_mac` succeeds.
 //! - It does not enforce recipient-mixing policy, classify modes, or run
 //!   recipient unwrap. Those concerns live in `recipients/mod.rs`.
@@ -39,16 +39,16 @@ use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
 use crate::archiver;
-use crate::common::{
-    ENCRYPTION_KEY_SIZE, HMAC_KEY_SIZE, INCOMPLETE_SUFFIX, parent_or_cwd, payload_encryptor,
-    read_exact_or_truncated,
-};
+use crate::crypto::keys::ENCRYPTION_KEY_SIZE;
+use crate::crypto::mac::HMAC_KEY_SIZE;
+use crate::crypto::stream::{STREAM_NONCE_SIZE, payload_encryptor};
 use crate::error::{CryptoError, FormatDefect};
 use crate::format::{
     self, HEADER_FIXED_SIZE, HEADER_MAC_SIZE, HeaderFixed, Kind, PREFIX_SIZE, Prefix,
-    STREAM_NONCE_SIZE,
+    read_exact_or_truncated,
 };
 use crate::fs::atomic;
+use crate::fs::paths::{INCOMPLETE_SUFFIX, parent_or_cwd};
 use crate::recipients::{self, RecipientEntry};
 
 /// Tempfile name prefix for the in-flight `.fcr` write. Combined with
@@ -109,7 +109,7 @@ pub(crate) struct ParsedEncryptedHeader {
     /// `fixed.recipient_count`.
     pub recipient_entries: Vec<RecipientEntry>,
     /// Authenticated extension TLV region. Caller MUST run
-    /// `common::validate_tlv` on this AFTER MAC verification.
+    /// `crypto::tlv::validate_tlv` on this AFTER MAC verification.
     pub ext_bytes: Vec<u8>,
     /// On-disk header MAC tag. Caller MUST verify against
     /// `format::compute_header_mac(prefix_bytes, header_bytes, header_key)`.
@@ -268,7 +268,7 @@ pub(crate) fn read_encrypted_header<R: Read>(
 /// The caller is responsible for:
 /// - generating `stream_nonce` (typically `random_bytes::<STREAM_NONCE_SIZE>()`);
 /// - deriving `payload_key` and `header_key` from the freshly generated
-///   `file_key` via `common::derive_subkeys` (or equivalent);
+///   `file_key` via `crypto::keys::derive_subkeys` (or equivalent);
 /// - constructing `recipient_entries` via the per-recipient `wrap`
 ///   helpers (`recipients::argon2id::wrap`, `recipients::x25519::wrap`).
 ///
@@ -428,7 +428,7 @@ pub(crate) fn write_encrypted_file(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::{DerivedSubkeys, FILE_KEY_SIZE, derive_subkeys};
+    use crate::crypto::keys::{DerivedSubkeys, FILE_KEY_SIZE, derive_subkeys};
     use crate::recipients::{RECIPIENT_FLAG_CRITICAL, argon2id, x25519};
 
     fn dummy_entry(type_name: &str, body_len: usize) -> RecipientEntry {

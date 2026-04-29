@@ -36,14 +36,18 @@ use secrecy::SecretString;
 use zeroize::Zeroizing;
 
 use crate::CryptoError;
-use crate::common::{
-    ARGON2_SALT_SIZE, HKDF_INFO_PRIVATE_KEY_WRAP, KDF_PARAMS_SIZE, KdfLimit, KdfParams, TAG_SIZE,
-    WRAP_NONCE_SIZE, derive_passphrase_wrap_key, random_bytes, read_u16_be, read_u32_be,
-    write_u16_be, write_u32_be,
-};
+use crate::crypto::aead::{TAG_SIZE, WRAP_NONCE_SIZE};
+use crate::crypto::kdf::{ARGON2_SALT_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams};
+use crate::crypto::keys::{derive_passphrase_wrap_key, random_bytes};
 use crate::error::FormatDefect;
-use crate::format::{KIND_PRIVATE_KEY, MAGIC, MAGIC_SIZE, VERSION, unsupported_key_version_error};
+use crate::format::{
+    KIND_PRIVATE_KEY, MAGIC, MAGIC_SIZE, VERSION, read_u16_be, read_u32_be,
+    unsupported_key_version_error, write_u16_be, write_u32_be,
+};
 use crate::recipients::{TYPE_NAME_MAX_LEN, validate_type_name};
+
+/// HKDF info for deriving the `private.key` wrap key from Argon2id.
+pub(crate) const HKDF_INFO_PRIVATE_KEY_WRAP: &[u8] = b"ferrocrypt/v1/private-key/wrap";
 
 /// Size of the cleartext fixed-header section, in bytes.
 pub const PRIVATE_KEY_HEADER_FIXED_SIZE: usize = 90;
@@ -455,6 +459,17 @@ impl PrivateKey {
 mod tests {
     use super::*;
     use crate::error::UnsupportedVersion;
+
+    /// Pins the private-key wrap HKDF info string against silent typos.
+    /// Recipient and payload/header info strings are pinned alongside
+    /// their owning module's tests.
+    #[test]
+    fn hkdf_info_string_is_canonical() {
+        assert_eq!(
+            HKDF_INFO_PRIVATE_KEY_WRAP,
+            b"ferrocrypt/v1/private-key/wrap"
+        );
+    }
 
     fn test_passphrase(s: &str) -> SecretString {
         SecretString::from(s.to_string())

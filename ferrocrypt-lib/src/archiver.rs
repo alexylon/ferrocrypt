@@ -1,6 +1,6 @@
 use crate::CryptoError;
-use crate::common::{INCOMPLETE_SUFFIX, file_stem};
 use crate::fs::atomic::rename_no_clobber;
+use crate::fs::paths::{INCOMPLETE_SUFFIX, file_stem};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};

@@ -20,14 +20,15 @@ use std::path::{Path, PathBuf};
 use secrecy::SecretString;
 
 use crate::archiver::{ArchiveLimits, unarchive};
-use crate::common::{
-    DerivedSubkeys, KdfLimit, KdfParams, STREAM_NONCE_SIZE, derive_subkeys, encryption_base_name,
-    generate_file_key, payload_decryptor, random_bytes, validate_tlv,
-};
 use crate::container::{
     HeaderReadLimits, build_encrypted_header, read_encrypted_header, write_encrypted_file,
 };
+use crate::crypto::kdf::{KdfLimit, KdfParams};
+use crate::crypto::keys::{DerivedSubkeys, derive_subkeys, generate_file_key, random_bytes};
+use crate::crypto::stream::{STREAM_NONCE_SIZE, payload_decryptor};
+use crate::crypto::tlv::validate_tlv;
 use crate::format;
+use crate::fs::paths::encryption_base_name;
 use crate::recipients::{
     NativeRecipientType, RecipientEntry, argon2id, enforce_recipient_mixing_policy,
 };
@@ -205,7 +206,8 @@ fn find_argon2id_body(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::{ARGON2_SALT_SIZE, KDF_PARAMS_SIZE, WRAP_NONCE_SIZE};
+    use crate::crypto::aead::WRAP_NONCE_SIZE;
+    use crate::crypto::kdf::{ARGON2_SALT_SIZE, KDF_PARAMS_SIZE};
     use crate::error::FormatDefect;
     use crate::format::{HEADER_FIXED_SIZE, PREFIX_SIZE};
     use crate::recipients::ENTRY_HEADER_SIZE;

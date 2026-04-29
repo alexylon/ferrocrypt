@@ -499,7 +499,7 @@ pub(crate) enum StreamError {
     Truncated,
     /// Bytes remain after the final-flag chunk was successfully
     /// decrypted. Raised by the post-`decrypt_last_in_place` probe
-    /// in [`crate::common::DecryptReader::fill_buffer`]. Ordinary
+    /// in [`crate::crypto::stream::DecryptReader::fill_buffer`]. Ordinary
     /// appended-bytes cases on a plain `File` / `&[u8]` reader fail
     /// earlier via [`StreamError::DecryptAead`] (STREAM-BE32's
     /// per-chunk nonce binding rejects a naive append as an AEAD

@@ -39,11 +39,49 @@
 use std::io::Read;
 
 use crate::CryptoError;
-use crate::common::{
-    HMAC_KEY_SIZE, HMAC_TAG_SIZE, hmac_sha3_256_parts, hmac_sha3_256_parts_verify, read_u16_be,
-    read_u32_be, write_u16_be, write_u32_be,
+use crate::crypto::mac::{
+    HMAC_KEY_SIZE, HMAC_TAG_SIZE, hmac_sha3_256_parts, hmac_sha3_256_parts_verify,
 };
 use crate::error::{FormatDefect, UnsupportedVersion};
+
+// Big-endian read/write helpers used by `to_bytes` / `parse` for the on-disk
+// fixed-layout structs across the crate (`format::Prefix`, `format::HeaderFixed`,
+// `key::private::PrivateKeyHeader`, `KdfParams`). Taking the buffer plus an
+// offset lets callers use named offset constants directly.
+
+pub(crate) fn read_u16_be(bytes: &[u8], offset: usize) -> u16 {
+    u16::from_be_bytes([bytes[offset], bytes[offset + 1]])
+}
+
+pub(crate) fn read_u32_be(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_be_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes[offset + 2],
+        bytes[offset + 3],
+    ])
+}
+
+pub(crate) fn write_u16_be(bytes: &mut [u8], offset: usize, value: u16) {
+    bytes[offset..offset + size_of::<u16>()].copy_from_slice(&value.to_be_bytes());
+}
+
+pub(crate) fn write_u32_be(bytes: &mut [u8], offset: usize, value: u32) {
+    bytes[offset..offset + size_of::<u32>()].copy_from_slice(&value.to_be_bytes());
+}
+
+/// Reads exactly `buf.len()` bytes or maps any read failure to
+/// [`FormatDefect::Truncated`]. Used by `.fcr` decrypt paths where a
+/// short read on a fixed-size header field is a format-level
+/// truncation rather than a generic I/O error.
+pub(crate) fn read_exact_or_truncated(
+    reader: &mut impl Read,
+    buf: &mut [u8],
+) -> Result<(), CryptoError> {
+    reader
+        .read_exact(buf)
+        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::Truncated))
+}
 
 // ─── Shared constants ──────────────────────────────────────────────────────
 

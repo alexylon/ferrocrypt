@@ -38,9 +38,8 @@ pub mod argon2id;
 pub mod x25519;
 
 use crate::CryptoError;
-use crate::common::{read_u16_be, read_u32_be};
 use crate::error::FormatDefect;
-use crate::format::BODY_LEN_MAX;
+use crate::format::{BODY_LEN_MAX, read_u16_be, read_u32_be};
 
 /// Registered native v1 recipient types. Adding a variant here is a
 /// deliberate breaking change inside the crate: every `match` on

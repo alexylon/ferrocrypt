@@ -235,7 +235,7 @@ export component AppWindow inherits Window {
                         }
                     }
                     Text {
-                        text: "Symmetric";
+                        text: "Password";
                         color: parent.active ? Theme.text :
                                !sym-ta.enabled ? Theme.text-off : Theme.text-secondary;
                         font-size: Theme.field-text-size;
@@ -266,7 +266,7 @@ export component AppWindow inherits Window {
                         }
                     }
                     Text {
-                        text: "Hybrid";
+                        text: "Key pair";
                         color: parent.active ? Theme.text :
                                !hyb-ta.enabled ? Theme.text-off : Theme.text-secondary;
                         font-size: Theme.field-text-size;
@@ -281,9 +281,9 @@ export component AppWindow inherits Window {
 
         Rectangle { height: 6px; }
         Text {
-            text: mode == 0 || mode == 1 ? "Password-based encryption" :
-                  mode == 4 ? "Key pair generation" :
-                  "Public/private key encryption";
+            text: mode == 0 || mode == 1 ? "Encrypt and decrypt with a password" :
+                  mode == 4 ? "Generate a key pair" :
+                  "Encrypt with a public key, decrypt with a private key";
             color: Theme.text-dim;
             font-size: 11.5px;
             horizontal-alignment: center;

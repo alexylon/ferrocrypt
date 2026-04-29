@@ -297,7 +297,7 @@ pub fn encryption_base_name(path: impl AsRef<Path>) -> Result<String, CryptoErro
 
 /// Suffix appended to atomic-write working names so plaintext (or any
 /// not-yet-finalised output) is never visible under the final name.
-/// Used by `encrypted_file::write_encrypted_file` for the streaming
+/// Used by `container::write_encrypted_file` for the streaming
 /// `.fcr` tempfile and by `archiver::unarchive` for the per-root
 /// rename-into-place pattern.
 pub(crate) const INCOMPLETE_SUFFIX: &str = ".incomplete";
@@ -305,7 +305,7 @@ pub(crate) const INCOMPLETE_SUFFIX: &str = ".incomplete";
 /// Returns the parent directory of `path`, or `Path::new(".")` when the
 /// parent is empty or absent. Centralises the "directory in which to
 /// create the staging tempfile / open a dirfd for `sync_all`" lookup
-/// shared by `atomic_output` and `encrypted_file`.
+/// shared by `fs::atomic` and `container`.
 pub(crate) fn parent_or_cwd(path: &Path) -> &Path {
     path.parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -323,7 +323,7 @@ pub fn ct_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
 
 // Big-endian read/write helpers used by `to_bytes` / `parse` for the on-disk
 // fixed-layout structs across the crate (`format::Prefix`, `format::HeaderFixed`,
-// `private_key::PrivateKeyHeader`, `KdfParams`). Taking the buffer plus an
+// `key::private::PrivateKeyHeader`, `KdfParams`). Taking the buffer plus an
 // offset lets callers use named offset constants directly.
 
 pub(crate) fn read_u16_be(bytes: &[u8], offset: usize) -> u16 {

@@ -320,6 +320,125 @@ pub fn fingerprint_hex(type_name: &str, key_material: &[u8]) -> String {
     hex_encode(&fingerprint_bytes(type_name, key_material))
 }
 
+// ─── Public-recipient wrapper ──────────────────────────────────────────────
+
+/// A FerroCrypt X25519 public key.
+///
+/// Abstracts over the source of the key material: a stored public-key
+/// file on disk, raw 32-byte key material, or a decoded Bech32 `fcr1…`
+/// recipient string. Filesystem sources defer I/O until the key is
+/// actually used, so construction is infallible for the file and bytes
+/// variants.
+///
+/// Once constructed, a `PublicKey` can be:
+/// - passed to [`crate::hybrid_encrypt`] via
+///   [`crate::HybridEncryptConfig::new`] as the recipient for envelope
+///   encryption,
+/// - rendered as a Bech32 `fcr1…` recipient string via
+///   [`PublicKey::to_recipient_string`],
+/// - fingerprinted via [`PublicKey::fingerprint`].
+///
+/// The struct is `#[non_exhaustive]` so future sources (key servers,
+/// hardware-backed keys) can be added without a breaking change.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct PublicKey {
+    source: PublicKeySource,
+}
+
+#[derive(Debug, Clone)]
+enum PublicKeySource {
+    KeyFile(std::path::PathBuf),
+    Bytes([u8; 32]),
+}
+
+impl PublicKey {
+    /// References a FerroCrypt public-key file at the given path. The
+    /// file is not opened until a method that needs the key material
+    /// (e.g. [`fingerprint`](Self::fingerprint),
+    /// [`to_recipient_string`](Self::to_recipient_string)) is called.
+    pub fn from_key_file(path: impl AsRef<std::path::Path>) -> Self {
+        Self {
+            source: PublicKeySource::KeyFile(path.as_ref().to_path_buf()),
+        }
+    }
+
+    /// Wraps raw 32-byte X25519 public-key material directly.
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self {
+            source: PublicKeySource::Bytes(bytes),
+        }
+    }
+
+    /// Decodes a canonical lowercase Bech32 `fcr1…` recipient string
+    /// (as produced by [`PublicKey::to_recipient_string`] or the
+    /// `ferrocrypt recipient` subcommand) into a `PublicKey`. Validates
+    /// HRP, BIP 173 checksum, internal SHA3-256 checksum, payload
+    /// structural fields, type-name grammar, and (for v1 X25519
+    /// recipients) the recipient `type_name == "x25519"` and 32-byte
+    /// key-material length.
+    pub fn from_recipient_string(recipient: &str) -> Result<Self, CryptoError> {
+        Ok(Self::from_bytes(crate::decode_recipient(recipient)?))
+    }
+
+    /// Computes the SHA3-256 fingerprint of the X25519 recipient as a
+    /// 64-character lowercase hex string. Domain-separated by the
+    /// recipient `type_name` ("x25519") so future native types
+    /// (post-quantum, hybrid KEMs, etc.) cannot collide with this
+    /// namespace. Output matches `key::public::fingerprint_hex` and the
+    /// `ferrocrypt recipient` subcommand.
+    pub fn fingerprint(&self) -> Result<String, CryptoError> {
+        let bytes = self.resolve()?;
+        Ok(fingerprint_hex(
+            crate::recipients::x25519::TYPE_NAME,
+            &bytes,
+        ))
+    }
+
+    /// Encodes the key as the canonical Bech32 `fcr1…` recipient
+    /// string. Routes through `key::public::encode_recipient_string`
+    /// with the X25519 type name. Performs filesystem I/O for the
+    /// key-file source.
+    pub fn to_recipient_string(&self) -> Result<String, CryptoError> {
+        let bytes = self.resolve()?;
+        encode_recipient_string(crate::recipients::x25519::TYPE_NAME, &bytes)
+    }
+
+    /// Returns the raw 32-byte X25519 public-key material as an owned
+    /// array. Performs filesystem I/O for the key-file source.
+    pub fn to_bytes(&self) -> Result<[u8; 32], CryptoError> {
+        self.resolve()
+    }
+
+    /// Validates that the key source is well-formed without exposing
+    /// the bytes. For a key-file source this opens the file, parses
+    /// the header, and checks the layout; for a bytes source this is
+    /// always `Ok(())`.
+    pub fn validate(&self) -> Result<(), CryptoError> {
+        self.resolve().map(|_| ())
+    }
+
+    /// Resolves the key to raw 32-byte material, reading the key file
+    /// from disk if the source is a path.
+    fn resolve(&self) -> Result<[u8; 32], CryptoError> {
+        match &self.source {
+            PublicKeySource::KeyFile(path) => crate::hybrid::read_public_key(path),
+            PublicKeySource::Bytes(bytes) => Ok(*bytes),
+        }
+    }
+}
+
+impl std::str::FromStr for PublicKey {
+    type Err = CryptoError;
+
+    /// Parses a Bech32 `fcr1…` recipient string into a `PublicKey`.
+    /// Equivalent to [`PublicKey::from_recipient_string`], enabling
+    /// `"fcr1…".parse::<PublicKey>()`.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_recipient_string(s)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

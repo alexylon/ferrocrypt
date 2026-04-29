@@ -1,6 +1,6 @@
 use crate::CryptoError;
-use crate::atomic_output::rename_no_clobber;
 use crate::common::{INCOMPLETE_SUFFIX, file_stem};
+use crate::fs::atomic::rename_no_clobber;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -1369,7 +1369,7 @@ fn extract_entries<R: Read>(
 /// `O_NOFOLLOW` on every component; Windows would require
 /// `NtCreateFile` with relative-`OBJECT_ATTRIBUTES` (or equivalent
 /// winapi work) to match, which the crate does not currently take on
-/// because of its zero-`unsafe` stance (`atomic_output.rs` documents
+/// because of its zero-`unsafe` stance (`fs/atomic.rs` documents
 /// the same trade-off for the rename helper).
 ///
 /// Partial mitigations that DO apply on this path:

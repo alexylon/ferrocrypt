@@ -17,18 +17,18 @@
 pub use crate::archiver::validate_archive_path;
 pub use crate::common::{KDF_PARAMS_SIZE, KdfParams, validate_tlv};
 pub use crate::hybrid::validate_private_key_shape;
-pub use crate::private_key::PrivateKeyHeader;
-pub use crate::public_key::{RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT, decode_recipient_string};
+pub use crate::key::private::PrivateKeyHeader;
+pub use crate::key::public::{RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT, decode_recipient_string};
 
-// Re-exports of `encrypted_file` items used by `fuzz_header_prefix`.
+// Re-exports of `container` items used by `fuzz_header_prefix`.
 // The items themselves are `pub(crate)` inside the module; this thin
 // wrapper bridges them into the (feature-gated) `fuzz_exports` public
 // surface without changing their crate-internal visibility.
-pub struct HeaderReadLimits(crate::encrypted_file::HeaderReadLimits);
+pub struct HeaderReadLimits(crate::container::HeaderReadLimits);
 
 impl Default for HeaderReadLimits {
     fn default() -> Self {
-        Self(crate::encrypted_file::HeaderReadLimits::default())
+        Self(crate::container::HeaderReadLimits::default())
     }
 }
 
@@ -36,5 +36,5 @@ pub fn read_encrypted_header<R: std::io::Read>(
     reader: &mut R,
     limits: HeaderReadLimits,
 ) -> Result<(), crate::CryptoError> {
-    crate::encrypted_file::read_encrypted_header(reader, limits.0).map(|_| ())
+    crate::container::read_encrypted_header(reader, limits.0).map(|_| ())
 }

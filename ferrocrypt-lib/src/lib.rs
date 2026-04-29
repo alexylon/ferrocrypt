@@ -178,162 +178,8 @@ impl std::fmt::Display for ProgressEvent {
     }
 }
 
-/// A FerroCrypt X25519 public key.
-///
-/// Abstracts over the source of the key material: a stored public-key
-/// file on disk, raw 32-byte key material, or a decoded Bech32 `fcr1…`
-/// recipient string. Filesystem sources defer I/O until the key is
-/// actually used, so construction is infallible for the file and bytes
-/// variants.
-///
-/// Once constructed, a `PublicKey` can be:
-/// - passed to [`hybrid_encrypt`] via [`HybridEncryptConfig::new`] as the
-///   recipient for envelope encryption,
-/// - rendered as a Bech32 `fcr1…` recipient string via
-///   [`PublicKey::to_recipient_string`],
-/// - fingerprinted via [`PublicKey::fingerprint`].
-///
-/// The struct is `#[non_exhaustive]` so future sources (key servers,
-/// hardware-backed keys) can be added without a breaking change.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct PublicKey {
-    source: PublicKeySource,
-}
-
-#[derive(Debug, Clone)]
-enum PublicKeySource {
-    KeyFile(PathBuf),
-    Bytes([u8; 32]),
-}
-
-impl PublicKey {
-    /// References a FerroCrypt public-key file at the given path. The
-    /// file is not opened until a method that needs the key material
-    /// (e.g. [`fingerprint`](Self::fingerprint),
-    /// [`to_recipient_string`](Self::to_recipient_string)) is called.
-    pub fn from_key_file(path: impl AsRef<Path>) -> Self {
-        Self {
-            source: PublicKeySource::KeyFile(path.as_ref().to_path_buf()),
-        }
-    }
-
-    /// Wraps raw 32-byte X25519 public-key material directly.
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self {
-            source: PublicKeySource::Bytes(bytes),
-        }
-    }
-
-    /// Decodes a canonical lowercase Bech32 `fcr1…` recipient string
-    /// (as produced by [`PublicKey::to_recipient_string`] or the
-    /// `ferrocrypt recipient` subcommand) into a `PublicKey`. Validates
-    /// HRP, BIP 173 checksum, internal SHA3-256 checksum, payload
-    /// structural fields, type-name grammar, and (for v1 X25519
-    /// recipients) the recipient `type_name == "x25519"` and 32-byte
-    /// key-material length.
-    pub fn from_recipient_string(recipient: &str) -> Result<Self, CryptoError> {
-        Ok(Self::from_bytes(decode_recipient(recipient)?))
-    }
-
-    /// Computes the SHA3-256 fingerprint of the X25519 recipient as a
-    /// 64-character lowercase hex string. Domain-separated by the
-    /// recipient `type_name` ("x25519") so future native types
-    /// (post-quantum, hybrid KEMs, etc.) cannot collide with this
-    /// namespace. Output matches `public_key::fingerprint_hex` and the
-    /// `ferrocrypt recipient` subcommand.
-    pub fn fingerprint(&self) -> Result<String, CryptoError> {
-        let bytes = self.resolve()?;
-        Ok(public_key::fingerprint_hex(
-            recipients::x25519::TYPE_NAME,
-            &bytes,
-        ))
-    }
-
-    /// Encodes the key as the canonical Bech32 `fcr1…` recipient
-    /// string. Routes through `public_key::encode_recipient_string`
-    /// with the X25519 type name. Performs filesystem I/O for the
-    /// key-file source.
-    pub fn to_recipient_string(&self) -> Result<String, CryptoError> {
-        let bytes = self.resolve()?;
-        public_key::encode_recipient_string(recipients::x25519::TYPE_NAME, &bytes)
-    }
-
-    /// Returns the raw 32-byte X25519 public-key material as an owned
-    /// array. Performs filesystem I/O for the key-file source.
-    pub fn to_bytes(&self) -> Result<[u8; 32], CryptoError> {
-        self.resolve()
-    }
-
-    /// Validates that the key source is well-formed without exposing
-    /// the bytes. For a key-file source this opens the file, parses
-    /// the header, and checks the layout; for a bytes source this is
-    /// always `Ok(())`.
-    pub fn validate(&self) -> Result<(), CryptoError> {
-        self.resolve().map(|_| ())
-    }
-
-    /// Resolves the key to raw 32-byte material, reading the key file
-    /// from disk if the source is a path.
-    fn resolve(&self) -> Result<[u8; 32], CryptoError> {
-        match &self.source {
-            PublicKeySource::KeyFile(path) => hybrid::read_public_key(path),
-            PublicKeySource::Bytes(bytes) => Ok(*bytes),
-        }
-    }
-}
-
-impl std::str::FromStr for PublicKey {
-    type Err = CryptoError;
-
-    /// Parses a Bech32 `fcr1…` recipient string into a `PublicKey`.
-    /// Equivalent to [`PublicKey::from_recipient_string`], enabling
-    /// `"fcr1…".parse::<PublicKey>()`.
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::from_recipient_string(s)
-    }
-}
-
-/// Source of a private key for hybrid decryption.
-///
-/// Today the only supported source is a passphrase-protected FerroCrypt
-/// private-key file on disk. The wrapper is kept deliberately thin and
-/// `#[non_exhaustive]` so future sources (for example in-memory encrypted
-/// secrets or hardware-backed keys) can be added without a breaking
-/// change to [`HybridDecryptConfig`].
-///
-/// Construct with [`PrivateKey::from_key_file`].
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct PrivateKey {
-    source: PrivateKeySource,
-}
-
-#[derive(Debug, Clone)]
-enum PrivateKeySource {
-    KeyFile(PathBuf),
-}
-
-impl PrivateKey {
-    /// References a passphrase-protected FerroCrypt private-key file at
-    /// the given path. The file is not opened until the private key is
-    /// used in a decrypt operation.
-    pub fn from_key_file(path: impl AsRef<Path>) -> Self {
-        Self {
-            source: PrivateKeySource::KeyFile(path.as_ref().to_path_buf()),
-        }
-    }
-
-    /// Internal: returns the key-file path for source variants that
-    /// point at one. Every current variant does; future non-path
-    /// sources would extend this enum and the decrypt path with a
-    /// different resolution strategy.
-    fn key_file_path(&self) -> &Path {
-        match &self.source {
-            PrivateKeySource::KeyFile(path) => path,
-        }
-    }
-}
+pub use crate::key::private::PrivateKey;
+pub use crate::key::public::PublicKey;
 
 /// Configuration for [`symmetric_encrypt`].
 ///
@@ -629,10 +475,8 @@ pub fn detect_encryption_mode(
     // of dropping and re-opening avoids both an extra syscall and a
     // TOCTOU window where the path could be swapped between checks.
     file.seek(SeekFrom::Start(0))?;
-    let parsed = encrypted_file::read_encrypted_header(
-        &mut file,
-        encrypted_file::HeaderReadLimits::default(),
-    )?;
+    let parsed =
+        container::read_encrypted_header(&mut file, container::HeaderReadLimits::default())?;
 
     // Structural classification only. `classify_encryption_mode`
     // does not verify the header MAC or run any recipient unwrap.
@@ -641,14 +485,13 @@ pub fn detect_encryption_mode(
 }
 
 mod archiver;
-mod atomic_output;
 mod common;
-mod encrypted_file;
+mod container;
 mod error;
 mod format;
+mod fs;
 mod hybrid;
-mod private_key;
-mod public_key;
+mod key;
 mod recipients;
 mod symmetric;
 
@@ -660,7 +503,7 @@ pub mod fuzz_exports;
 ///
 /// Validates HRP, BIP 173 checksum, internal SHA3-256 checksum,
 /// payload structural fields, type-name grammar, the
-/// [`public_key::RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT`] character
+/// [`key::public::RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT`] character
 /// cap, and (for v1 X25519 recipients) the recipient `type_name ==
 /// "x25519"` and exactly 32-byte key-material length.
 ///
@@ -669,9 +512,9 @@ pub mod fuzz_exports;
 /// `"fcr1…".parse::<PublicKey>()`, which wrap this function and yield
 /// a typed [`PublicKey`].
 pub fn decode_recipient(recipient: &str) -> Result<[u8; 32], CryptoError> {
-    let decoded = public_key::decode_recipient_string(
+    let decoded = key::public::decode_recipient_string(
         recipient,
-        public_key::RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT,
+        key::public::RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT,
     )?;
     if decoded.type_name != recipients::x25519::TYPE_NAME {
         return Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey));
@@ -816,7 +659,7 @@ pub fn hybrid_encrypt(
     on_event: impl Fn(&ProgressEvent),
 ) -> Result<EncryptOutcome, CryptoError> {
     archiver::validate_encrypt_input(&config.input)?;
-    let public_key_bytes = config.public_key.resolve()?;
+    let public_key_bytes = config.public_key.to_bytes()?;
     let output_path = hybrid::encrypt_file_from_bytes(
         &config.input,
         &config.output_dir,
@@ -885,7 +728,7 @@ mod tests {
     /// Routes a `.fcr` file with a single `argon2id` recipient as
     /// `EncryptionMode::Symmetric`, mirroring v1's "exactly one
     /// argon2id => Symmetric" classification rule. Builds the file
-    /// via `encrypted_file::build_encrypted_header` so the test
+    /// via `container::build_encrypted_header` so the test
     /// exercises the same byte path the real encrypt would write.
     #[test]
     fn detect_encryption_mode_routes_argon2id_recipient_as_symmetric() {
@@ -897,7 +740,7 @@ mod tests {
             vec![0u8; recipients::argon2id::BODY_LENGTH],
         )
         .unwrap();
-        let built = encrypted_file::build_encrypted_header(
+        let built = container::build_encrypted_header(
             &[entry],
             b"",
             stream_nonce,
@@ -931,7 +774,7 @@ mod tests {
             vec![0u8; recipients::x25519::BODY_LENGTH],
         )
         .unwrap();
-        let built = encrypted_file::build_encrypted_header(
+        let built = container::build_encrypted_header(
             &[entry],
             b"",
             stream_nonce,

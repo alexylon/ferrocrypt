@@ -229,7 +229,7 @@ impl<W: Write> ArmoredWriter<W> {
     /// Callers wrapping a buffered writer (`BufWriter`, `File` with
     /// OS-level buffering, etc.) should flush explicitly if they
     /// need delayed I/O errors to surface here rather than at drop
-    /// time. FerroCrypt callers funnel through `atomic_output`,
+    /// time. FerroCrypt callers funnel through `fs::atomic`,
     /// which performs its own flush+sync before commit, so this
     /// adapter intentionally leaves the final flush to the caller.
     pub fn finish(self) -> io::Result<W> {

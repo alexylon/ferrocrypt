@@ -408,6 +408,49 @@ pub fn open_private_key(
     })
 }
 
+// ─── Private-key wrapper ───────────────────────────────────────────────────
+
+/// Source of a private key for hybrid decryption.
+///
+/// Today the only supported source is a passphrase-protected FerroCrypt
+/// private-key file on disk. The wrapper is kept deliberately thin and
+/// `#[non_exhaustive]` so future sources (for example in-memory encrypted
+/// secrets or hardware-backed keys) can be added without a breaking
+/// change to [`crate::HybridDecryptConfig`].
+///
+/// Construct with [`PrivateKey::from_key_file`].
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct PrivateKey {
+    source: PrivateKeySource,
+}
+
+#[derive(Debug, Clone)]
+enum PrivateKeySource {
+    KeyFile(std::path::PathBuf),
+}
+
+impl PrivateKey {
+    /// References a passphrase-protected FerroCrypt private-key file at
+    /// the given path. The file is not opened until the private key is
+    /// used in a decrypt operation.
+    pub fn from_key_file(path: impl AsRef<std::path::Path>) -> Self {
+        Self {
+            source: PrivateKeySource::KeyFile(path.as_ref().to_path_buf()),
+        }
+    }
+
+    /// Internal: returns the key-file path for source variants that
+    /// point at one. Every current variant does; future non-path
+    /// sources would extend this enum and the decrypt path with a
+    /// different resolution strategy.
+    pub(crate) fn key_file_path(&self) -> &std::path::Path {
+        match &self.source {
+            PrivateKeySource::KeyFile(path) => path,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

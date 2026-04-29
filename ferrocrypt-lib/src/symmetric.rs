@@ -11,7 +11,7 @@
 //!
 //! Wire format: a v1 `.fcr` container with exactly one `argon2id`
 //! recipient entry (the `argon2id::wrap` body lives in the recipient
-//! list). See `ferrocrypt-lib/FORMAT.md` §3 and `encrypted_file.rs` for
+//! list). See `ferrocrypt-lib/FORMAT.md` §3 and `container.rs` for
 //! the shared header layout.
 
 use std::fs;
@@ -24,7 +24,7 @@ use crate::common::{
     DerivedSubkeys, KdfLimit, KdfParams, STREAM_NONCE_SIZE, derive_subkeys, encryption_base_name,
     generate_file_key, payload_decryptor, random_bytes, validate_tlv,
 };
-use crate::encrypted_file::{
+use crate::container::{
     HeaderReadLimits, build_encrypted_header, read_encrypted_header, write_encrypted_file,
 };
 use crate::format;
@@ -42,7 +42,7 @@ use crate::{CryptoError, ProgressEvent};
 /// the recipient list contains only this one entry. The `file_key`
 /// is wrapped via [`recipients::argon2id::wrap`]; the rest of the
 /// header (prefix, fixed, recipient_entries, MAC) is assembled by
-/// [`encrypted_file::build_encrypted_header`], which is the single
+/// [`container::build_encrypted_header`], which is the single
 /// source of truth for MAC scope.
 pub fn encrypt_file(
     input_path: &Path,

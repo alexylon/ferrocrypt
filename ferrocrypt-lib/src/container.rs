@@ -38,6 +38,7 @@ use std::path::{Path, PathBuf};
 
 use zeroize::Zeroizing;
 
+use crate::archiver;
 use crate::common::{
     ENCRYPTION_KEY_SIZE, HMAC_KEY_SIZE, INCOMPLETE_SUFFIX, parent_or_cwd, payload_encryptor,
     read_exact_or_truncated,
@@ -47,13 +48,13 @@ use crate::format::{
     self, HEADER_FIXED_SIZE, HEADER_MAC_SIZE, HeaderFixed, Kind, PREFIX_SIZE, Prefix,
     STREAM_NONCE_SIZE,
 };
+use crate::fs::atomic;
 use crate::recipients::{self, RecipientEntry};
-use crate::{archiver, atomic_output};
 
 /// Tempfile name prefix for the in-flight `.fcr` write. Combined with
 /// [`INCOMPLETE_SUFFIX`] this yields a `.ferrocrypt-*.incomplete`
 /// staging name in the destination directory; on success
-/// [`atomic_output::finalize_file`] promotes it to the user-visible
+/// [`atomic::finalize_file`] promotes it to the user-visible
 /// output path.
 const TEMP_FILE_PREFIX: &str = ".ferrocrypt-";
 
@@ -386,7 +387,7 @@ fn resolve_encrypted_output_path(
 ///
 /// Atomicity: the file is written under a `.ferrocrypt-*.incomplete`
 /// tempfile in the destination's parent directory, then renamed via
-/// [`atomic_output::finalize_file`] only after `sync_all`. A pre-existing
+/// [`atomic::finalize_file`] only after `sync_all`. A pre-existing
 /// output path rejects with `CryptoError::InvalidInput` BEFORE any
 /// tempfile is created, so an unrelated file at the destination is
 /// never touched.
@@ -420,7 +421,7 @@ pub(crate) fn write_encrypted_file(
     let tmp = encrypt_writer.finish()?;
     tmp.as_file().sync_all()?;
 
-    atomic_output::finalize_file(tmp, &output_path)?;
+    atomic::finalize_file(tmp, &output_path)?;
     Ok(output_path)
 }
 

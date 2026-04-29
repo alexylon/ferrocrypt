@@ -18,7 +18,7 @@
 //!
 //! Wire format: a v1 `.fcr` container with one or more `x25519`
 //! recipient entries. See `ferrocrypt-lib/FORMAT.md` §3 and
-//! `encrypted_file.rs` for the shared header layout.
+//! `container.rs` for the shared header layout.
 
 use std::fs;
 use std::io::{self, Write};
@@ -30,21 +30,21 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
 use crate::archiver::{ArchiveLimits, unarchive};
-use crate::atomic_output;
 use crate::common::{
     DerivedSubkeys, KdfLimit, KdfParams, STREAM_NONCE_SIZE, derive_subkeys, encryption_base_name,
     generate_file_key, payload_decryptor, random_bytes, validate_tlv,
 };
-use crate::encrypted_file::{
+use crate::container::{
     HeaderReadLimits, build_encrypted_header, read_encrypted_header, write_encrypted_file,
 };
 use crate::error::FormatDefect;
 use crate::format;
-use crate::private_key::{
+use crate::fs::atomic;
+use crate::key::private::{
     PRIVATE_KEY_HEADER_FIXED_SIZE, PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT, PrivateKeyHeader,
     open_private_key, seal_private_key,
 };
-use crate::public_key::{
+use crate::key::public::{
     RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT, decode_recipient_string, encode_recipient_string,
 };
 use crate::recipients::{NativeRecipientType, RecipientEntry, classify_encryption_mode, x25519};
@@ -71,7 +71,7 @@ pub const PRIVATE_KEY_FILENAME: &str = "private.key";
 /// rejects an all-zero shared secret, derives the wrap key via
 /// HKDF-SHA3-256, and AEAD-seals `file_key`. The rest of the header
 /// (prefix, fixed, recipient_entries, MAC) is assembled by
-/// [`crate::encrypted_file::build_encrypted_header`], which is the
+/// [`crate::container::build_encrypted_header`], which is the
 /// single source of truth for header MAC scope across both modes.
 pub fn encrypt_file_from_bytes(
     input_path: &Path,
@@ -198,7 +198,7 @@ pub fn decrypt_file(
 
     // 3. Unlock the recipient's private key. Argon2id and AEAD-AAD
     //    validation happen inside `open_x25519_private_key` →
-    //    `private_key::open_private_key`.
+    //    `key::private::open_private_key`.
     on_event(&ProgressEvent::DerivingKey);
     let recipient_secret = open_x25519_private_key(private_key_path, passphrase, kdf_limit)?;
 
@@ -304,7 +304,7 @@ pub fn decrypt_file(
 }
 
 /// Reads and unlocks a v1 `private.key` file, returning the raw 32-byte
-/// X25519 secret. Wraps [`crate::private_key::open_private_key`] with
+/// X25519 secret. Wraps [`crate::key::private::open_private_key`] with
 /// the X25519-specific type-name and length checks plus TLV validation.
 ///
 /// Errors:
@@ -362,7 +362,7 @@ fn open_x25519_private_key(
     }
 
     // TLV validation is safe to run after AEAD-AAD authentication
-    // succeeded — `private_key::open_private_key` only returns Ok
+    // succeeded — `key::private::open_private_key` only returns Ok
     // after the AEAD pass that bound `ext_bytes` as AAD.
     validate_tlv(&opened.ext_bytes)?;
 
@@ -474,7 +474,7 @@ pub(crate) fn map_user_path_io_error(e: io::Error) -> CryptoError {
 /// Returns `(private_key_path, public_key_path)`.
 ///
 /// - `private.key` is the v1 passphrase-wrapped binary keyfile.
-///   `private_key::seal_private_key` owns the byte layout (cleartext
+///   `key::private::seal_private_key` owns the byte layout (cleartext
 ///   header → AEAD-AAD-bound → wrapped secret). Permissions: `0o600`
 ///   on Unix.
 /// - `public.key` is a UTF-8 text file containing the canonical
@@ -553,7 +553,7 @@ pub fn generate_key_pair(
         .write_all(recipient_string.as_bytes())?;
     public_tmp.as_file_mut().write_all(b"\n")?;
     public_tmp.as_file().sync_all()?;
-    atomic_output::finalize_file(public_tmp, &public_key_path)?;
+    atomic::finalize_file(public_tmp, &public_key_path)?;
 
     // Write private.key. If this fails, clean up the public.key we
     // just wrote (public keys are not secret, but leaving orphaned
@@ -574,7 +574,7 @@ pub fn generate_key_pair(
         let mut private_tmp = private_builder.tempfile_in(output_dir)?;
         private_tmp.as_file_mut().write_all(&private_key_bytes)?;
         private_tmp.as_file().sync_all()?;
-        atomic_output::finalize_file(private_tmp, &private_key_path)?;
+        atomic::finalize_file(private_tmp, &private_key_path)?;
         Ok(())
     })();
 
@@ -599,7 +599,7 @@ pub fn generate_key_pair(
 /// [`FormatDefect::WrongKeyFileType`] instead of a cryptic UTF-8
 /// decode error.
 ///
-/// Decoding delegates to [`crate::public_key::decode_recipient_string`],
+/// Decoding delegates to [`crate::key::public::decode_recipient_string`],
 /// which is the single source of truth for the Bech32 grammar,
 /// internal SHA3-256 checksum, and resource caps.
 pub fn read_public_key(path: &Path) -> Result<[u8; 32], CryptoError> {
@@ -636,7 +636,7 @@ pub fn read_public_key(path: &Path) -> Result<[u8; 32], CryptoError> {
 ///
 /// Checks (in order):
 /// - file is large enough to hold the 90-byte cleartext fixed header;
-/// - [`crate::private_key::PrivateKeyHeader::parse`] accepts the
+/// - [`crate::key::private::PrivateKeyHeader::parse`] accepts the
 ///   header (magic, version, kind, `key_flags == 0`, length-field
 ///   structural ranges);
 /// - `type_name` is `"x25519"` (the only v1 native key kind);
@@ -840,7 +840,7 @@ mod tests {
     }
 
     /// Recipient string encode + decode must round-trip bit-for-bit
-    /// through `crate::public_key::*`.
+    /// through `crate::key::public::*`.
     #[test]
     fn recipient_string_round_trip() -> Result<(), CryptoError> {
         let mut pk = [0u8; 32];
@@ -1329,7 +1329,7 @@ mod tests {
     //
     // The single-recipient public encrypt API can't produce multi-recipient
     // files, so these tests build the on-disk bytes by hand using
-    // `encrypted_file::build_encrypted_header` and exercise the decrypt
+    // `container::build_encrypted_header` and exercise the decrypt
     // path against the resulting fixtures. They lock in the rules
     // `MIGRATION.md §1.10` calls out: list iteration on `x25519`, skip
     // unknown non-critical, reject unknown critical, reject argon2id

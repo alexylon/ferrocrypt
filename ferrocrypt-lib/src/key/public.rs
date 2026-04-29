@@ -324,6 +324,52 @@ pub fn fingerprint_hex(type_name: &str, key_material: &[u8]) -> String {
     hex_encode(&fingerprint_bytes(type_name, key_material))
 }
 
+// ─── public.key text reader ────────────────────────────────────────────────
+
+/// Reads a v1 `public.key` text file and returns the raw 32-byte
+/// X25519 public key. The file content MUST be the canonical
+/// lowercase `fcr1…` recipient string, optionally followed by
+/// exactly one trailing `\n` (FORMAT.md §7). Anything else
+/// — leading whitespace, CRLF line endings, extra blank lines,
+/// trailing spaces or tabs, internal whitespace — is rejected as
+/// [`FormatDefect::MalformedPublicKey`].
+///
+/// If the caller accidentally points this at a binary `private.key`
+/// (magic `FCR\0`), the reader surfaces
+/// [`FormatDefect::WrongKeyFileType`] instead of a cryptic UTF-8
+/// decode error.
+///
+/// Decoding delegates to [`decode_recipient_string`], the single
+/// source of truth for the Bech32 grammar, internal SHA3-256
+/// checksum, and resource caps.
+pub fn read_public_key(path: &std::path::Path) -> Result<[u8; 32], CryptoError> {
+    let bytes = std::fs::read(path).map_err(crate::fs::paths::map_user_path_io_error)?;
+    if matches!(
+        crate::key::files::KeyFileKind::classify(&bytes),
+        crate::key::files::KeyFileKind::Private
+    ) {
+        return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
+    }
+    let contents = String::from_utf8(bytes)
+        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::NotAKeyFile))?;
+    // Non-whitespace junk (BOM, ZWSP, non-Bech32 chars) is left for
+    // `decode_recipient_string` to reject — a format violation in the
+    // whitespace grammar deserves its own bucket.
+    let recipient = contents.strip_suffix('\n').unwrap_or(&contents);
+    if recipient.bytes().any(|b| b.is_ascii_whitespace()) {
+        return Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey));
+    }
+    let decoded = decode_recipient_string(recipient, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT)?;
+    if decoded.type_name != crate::recipient::x25519::TYPE_NAME {
+        return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
+    }
+    decoded
+        .key_material
+        .as_slice()
+        .try_into()
+        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey))
+}
+
 // ─── Public-recipient wrapper ──────────────────────────────────────────────
 
 /// A FerroCrypt X25519 public key.
@@ -423,7 +469,7 @@ impl PublicKey {
     /// from disk if the source is a path.
     fn resolve(&self) -> Result<[u8; 32], CryptoError> {
         match &self.source {
-            PublicKeySource::KeyFile(path) => crate::hybrid::read_public_key(path),
+            PublicKeySource::KeyFile(path) => read_public_key(path),
             PublicKeySource::Bytes(bytes) => Ok(*bytes),
         }
     }

@@ -126,7 +126,7 @@ use secrecy::{ExposeSecret as _, SecretString};
 pub use crate::crypto::kdf::KdfLimit;
 pub use crate::error::{CryptoError, FormatDefect, InvalidKdfParams, UnsupportedVersion};
 pub use crate::format::ENCRYPTED_EXTENSION;
-pub use crate::hybrid::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};
+pub use crate::key::files::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};
 
 pub use secrecy;
 
@@ -538,12 +538,12 @@ pub fn decode_recipient(recipient: &str) -> Result<[u8; 32], CryptoError> {
 pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError> {
     let data = std::fs::read(key_file.as_ref()).map_err(fs::paths::map_user_path_io_error)?;
     if matches!(
-        hybrid::KeyFileKind::classify(&data),
-        hybrid::KeyFileKind::Public
+        key::files::KeyFileKind::classify(&data),
+        key::files::KeyFileKind::Public
     ) {
         return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
     }
-    hybrid::validate_private_key_shape(&data)
+    recipient::native::x25519::validate_private_key_shape(&data)
 }
 
 /// Validates that a file is a well-formed FerroCrypt `public.key`

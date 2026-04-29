@@ -24,9 +24,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use chacha20poly1305::aead::OsRng;
 use secrecy::SecretString;
-use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
 use crate::archiver::{ArchiveLimits, unarchive};
@@ -37,24 +35,14 @@ use crate::crypto::kdf::{KdfLimit, KdfParams};
 use crate::crypto::keys::{DerivedSubkeys, derive_subkeys, generate_file_key, random_bytes};
 use crate::crypto::stream::{STREAM_NONCE_SIZE, payload_decryptor};
 use crate::crypto::tlv::validate_tlv;
-use crate::error::FormatDefect;
 use crate::format;
 use crate::fs::atomic;
-use crate::fs::paths::{encryption_base_name, map_user_path_io_error};
-use crate::key::private::{
-    PRIVATE_KEY_HEADER_FIXED_SIZE, PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT, PrivateKeyHeader,
-    open_private_key, seal_private_key,
-};
-use crate::key::public::{
-    RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT, decode_recipient_string, encode_recipient_string,
-};
+use crate::fs::paths::encryption_base_name;
+use crate::key::files::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};
+use crate::key::private::seal_private_key;
+use crate::key::public::encode_recipient_string;
 use crate::recipient::{NativeRecipientType, RecipientEntry, classify_encryption_mode, x25519};
 use crate::{CryptoError, EncryptionMode, ProgressEvent};
-
-/// Default filename for the hybrid public key file (text form).
-pub const PUBLIC_KEY_FILENAME: &str = "public.key";
-/// Default filename for the hybrid private key file (binary, wrapped).
-pub const PRIVATE_KEY_FILENAME: &str = "private.key";
 
 // ─── Encrypt ───────────────────────────────────────────────────────────────
 
@@ -201,7 +189,8 @@ pub fn decrypt_file(
     //    validation happen inside `open_x25519_private_key` →
     //    `key::private::open_private_key`.
     on_event(&ProgressEvent::DerivingKey);
-    let recipient_secret = open_x25519_private_key(private_key_path, passphrase, kdf_limit)?;
+    let recipient_secret =
+        x25519::open_x25519_private_key(private_key_path, passphrase, kdf_limit)?;
 
     // 4. Iterate x25519 recipient slots, looking for the slot whose
     //    unwrap recovers a `file_key` whose `header_key` verifies the
@@ -304,158 +293,6 @@ pub fn decrypt_file(
     unarchive(decrypt_reader, output_dir, ArchiveLimits::default())
 }
 
-/// Reads and unlocks a v1 `private.key` file, returning the raw 32-byte
-/// X25519 secret. Wraps [`crate::key::private::open_private_key`] with
-/// the X25519-specific type-name and length checks plus TLV validation.
-///
-/// Errors:
-/// - [`CryptoError::InputPath`] if the file does not exist
-/// - [`CryptoError::Io`] for other read errors
-/// - [`CryptoError::KeyFileUnlockFailed`] for wrong passphrase or
-///   tampered cleartext (AEAD cannot distinguish)
-/// - [`FormatDefect::WrongKeyFileType`] for a private.key that wraps a
-///   non-X25519 secret (e.g. a future native key kind)
-/// - [`FormatDefect::MalformedPrivateKey`] for a structurally valid
-///   private.key whose authenticated `public_material` is not 32 bytes,
-///   whose decrypted `secret_material` is not 32 bytes, or whose
-///   stored public material does not match
-///   `X25519(secret_material, basepoint)` (the FORMAT.md §8 native
-///   recipient-specific check)
-/// - [`FormatDefect::MalformedTlv`] / [`FormatDefect::UnknownCriticalTag`]
-///   for malformed or unknown-critical entries in `ext_bytes`
-fn open_x25519_private_key(
-    path: &Path,
-    passphrase: &SecretString,
-    kdf_limit: Option<&KdfLimit>,
-) -> Result<Zeroizing<[u8; x25519::PRIVATE_KEY_SIZE]>, CryptoError> {
-    let bytes = fs::read(path).map_err(map_user_path_io_error)?;
-
-    // Friendly diagnostic for the cross-mix-up: a user pointing the
-    // private-key reader at a `public.key` text file gets
-    // `WrongKeyFileType` rather than the generic `NotAKeyFile` that
-    // `open_private_key`'s magic check would surface.
-    if matches!(KeyFileKind::classify(&bytes), KeyFileKind::Public) {
-        return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
-    }
-
-    let opened = open_private_key(
-        &bytes,
-        passphrase,
-        kdf_limit,
-        PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT,
-    )?;
-
-    if opened.type_name != x25519::TYPE_NAME {
-        return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
-    }
-
-    let public_material: [u8; x25519::PUBKEY_SIZE] =
-        opened
-            .public_material
-            .as_slice()
-            .try_into()
-            .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey))?;
-
-    if opened.secret_material.len() != x25519::PRIVATE_KEY_SIZE {
-        return Err(CryptoError::InvalidFormat(
-            FormatDefect::MalformedPrivateKey,
-        ));
-    }
-
-    // TLV validation is safe to run after AEAD-AAD authentication
-    // succeeded — `key::private::open_private_key` only returns Ok
-    // after the AEAD pass that bound `ext_bytes` as AAD.
-    validate_tlv(&opened.ext_bytes)?;
-
-    let mut secret = Zeroizing::new([0u8; x25519::PRIVATE_KEY_SIZE]);
-    secret.copy_from_slice(&opened.secret_material);
-
-    // FORMAT.md §8: native X25519 readers MUST compute
-    // X25519(secret_material, basepoint) and reject unless the result
-    // exactly equals the authenticated `public_material`. AEAD-AAD
-    // already authenticated `public_material` against tampering, but a
-    // file produced by a buggy or malicious writer can still seal a
-    // mismatched pair; this check rejects that case before the secret
-    // is ever used to unwrap a recipient body.
-    let derived_public = PublicKey::from(&StaticSecret::from(*secret));
-    if derived_public.as_bytes() != &public_material {
-        return Err(CryptoError::InvalidFormat(
-            FormatDefect::MalformedPrivateKey,
-        ));
-    }
-
-    Ok(secret)
-}
-
-// ─── Key-file readers ──────────────────────────────────────────────────────
-
-/// Heuristic classification of key-file bytes. Cheap, non-
-/// authenticating: callers use it to surface the friendly
-/// `WrongKeyFileType` diagnostic when a user hands the wrong
-/// kind of key file to a reader. The strict parse — Bech32 +
-/// algorithm + length for public, magic + version + type +
-/// algorithm + size + AEAD for private — runs downstream in
-/// each reader against the actual unlock or extract path.
-///
-/// Adding a new variant is a deliberate breaking change inside
-/// the crate: every `match` over a `KeyFileKind` becomes a
-/// compile error until the new kind is handled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum KeyFileKind {
-    /// Bytes look like a v1 `public.key`: a UTF-8 string that
-    /// decodes as a canonical Bech32 `fcr1…` recipient (with
-    /// surrounding whitespace tolerated for the heuristic — the
-    /// strict parser in `read_public_key` enforces canonical
-    /// whitespace separately).
-    Public,
-    /// Bytes carry the v1 `private.key` signature: at least 9
-    /// bytes of `FCR\0 || ?? || 'K'`. Magic + type byte is
-    /// sufficient regardless of `version`, so a future v2
-    /// `private.key` still classifies as `Private` and surfaces
-    /// the friendly diagnostic instead of `NotAKeyFile`.
-    Private,
-    /// Neither signature matches.
-    Unknown,
-}
-
-impl KeyFileKind {
-    /// Classifies `data` against the two v1 key-file shapes.
-    /// Probes the cheap binary signature first; falls back to
-    /// the more expensive Bech32 decode for the public-key
-    /// text shape.
-    ///
-    /// The binary signature is `magic(4) || version(1) || kind(1)
-    /// = 'K'`. The version byte is intentionally not constrained,
-    /// so a future v2 `private.key` still classifies as `Private`
-    /// and surfaces the friendly diagnostic instead of `NotAKeyFile`.
-    ///
-    /// Adversarial inputs that do NOT match either signature
-    /// (a `.fcr` encrypted file whose `kind` byte is `'E'`,
-    /// random binary without magic, garbage `fcr1…` text with a
-    /// bad checksum) classify as `Unknown` and fall through to
-    /// the caller's generic rejection path. Probability of an
-    /// accidental `Private` match on truly random binary is
-    /// `2^-40` (the five specific bytes in the signature).
-    pub(crate) fn classify(data: &[u8]) -> Self {
-        // Smallest prefix needed to read the kind byte at offset 5:
-        // magic(4) || version(1) || kind(1).
-        const SIGNATURE_LEN: usize = 6;
-        if data.len() >= SIGNATURE_LEN
-            && data[0..4] == format::MAGIC
-            && data[5] == format::KIND_PRIVATE_KEY
-        {
-            return Self::Private;
-        }
-        if let Ok(text) = std::str::from_utf8(data) {
-            if decode_recipient_string(text.trim(), RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT).is_ok()
-            {
-                return Self::Public;
-            }
-        }
-        Self::Unknown
-    }
-}
-
 // ─── generate_key_pair ─────────────────────────────────────────────────────
 
 /// Generates an X25519 key pair and writes both files to `output_dir`.
@@ -498,18 +335,14 @@ pub fn generate_key_pair(
 
     on_event(&ProgressEvent::GeneratingKeyPair);
 
-    // Generate the X25519 keypair. `secret_material` is held in
-    // `Zeroizing` so the 32-byte private bytes are wiped from memory
-    // when this stack frame unwinds, regardless of whether the
-    // subsequent seal/write succeeds.
-    let secret = StaticSecret::random_from_rng(OsRng);
-    let public = PublicKey::from(&secret);
-    let secret_material = Zeroizing::new(secret.to_bytes());
-    drop(secret);
-    let public_material = *public.as_bytes();
+    // Generate the X25519 keypair via the recipient module. The secret
+    // material is returned in `Zeroizing` so it's wiped from memory when
+    // this stack frame unwinds, regardless of whether the subsequent
+    // seal/write succeeds.
+    let (secret_material, public_material) = x25519::generate_keypair();
 
     // Hand off all `private.key` byte-layout, AEAD, and AAD scope to
-    // `private_key.rs` — this used to be hand-rolled here and is now
+    // `key/private.rs` — this used to be hand-rolled here and is now
     // the single source of truth.
     let private_key_bytes = seal_private_key(
         secret_material.as_ref(),
@@ -574,115 +407,6 @@ pub fn generate_key_pair(
     Ok((private_key_path, public_key_path))
 }
 
-/// Reads a v1 `public.key` text file and returns the raw 32-byte
-/// X25519 public key. The file content MUST be the canonical
-/// lowercase `fcr1…` recipient string, optionally followed by
-/// exactly one trailing `\n` (FORMAT.md §7). Anything else
-/// — leading whitespace, CRLF line endings, extra blank lines,
-/// trailing spaces or tabs, internal whitespace — is rejected as
-/// [`FormatDefect::MalformedPublicKey`].
-///
-/// If the caller accidentally points this at a binary `private.key`
-/// (magic `FCR\0`), the reader surfaces
-/// [`FormatDefect::WrongKeyFileType`] instead of a cryptic UTF-8
-/// decode error.
-///
-/// Decoding delegates to [`crate::key::public::decode_recipient_string`],
-/// which is the single source of truth for the Bech32 grammar,
-/// internal SHA3-256 checksum, and resource caps.
-pub fn read_public_key(path: &Path) -> Result<[u8; 32], CryptoError> {
-    let bytes = fs::read(path).map_err(map_user_path_io_error)?;
-    if matches!(KeyFileKind::classify(&bytes), KeyFileKind::Private) {
-        return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
-    }
-    let contents = String::from_utf8(bytes)
-        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::NotAKeyFile))?;
-    // Non-whitespace junk (BOM, ZWSP, non-Bech32 chars) is left for
-    // `decode_recipient_string` to reject — a format violation in the
-    // whitespace grammar deserves its own bucket.
-    let recipient = contents.strip_suffix('\n').unwrap_or(&contents);
-    if recipient.bytes().any(|b| b.is_ascii_whitespace()) {
-        return Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey));
-    }
-    let decoded = decode_recipient_string(recipient, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT)?;
-    if decoded.type_name != x25519::TYPE_NAME {
-        return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
-    }
-    decoded
-        .key_material
-        .as_slice()
-        .try_into()
-        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey))
-}
-
-// ─── Structural validator (kept for fuzz exports) ──────────────────────────
-
-/// Validates the structural shape of a v1 `private.key` file. Does not
-/// attempt to decrypt or derive any keys. Used by
-/// [`crate::validate_private_key_file`] and re-exported via
-/// `fuzz_exports` for the fuzz harness.
-///
-/// Checks (in order):
-/// - file is large enough to hold the 90-byte cleartext fixed header;
-/// - [`crate::key::private::PrivateKeyHeader::parse`] accepts the
-///   header (magic, version, kind, `key_flags == 0`, length-field
-///   structural ranges);
-/// - `type_name` is `"x25519"` (the only v1 native key kind);
-/// - `public_len` equals the X25519 public-key size (32);
-/// - the file's total length matches `90 + type_name_len + public_len
-///   + ext_len + wrapped_secret_len`.
-///
-/// Does NOT validate `ext_bytes` TLV canonicity. TLV canonicity runs
-/// only after AEAD-AAD authentication, which structural validation by
-/// definition does not perform.
-pub fn validate_private_key_shape(data: &[u8]) -> Result<(), CryptoError> {
-    let header_bytes =
-        data.first_chunk::<PRIVATE_KEY_HEADER_FIXED_SIZE>()
-            .ok_or(CryptoError::InvalidFormat(
-                FormatDefect::MalformedPrivateKey,
-            ))?;
-    let header = PrivateKeyHeader::parse(header_bytes)?;
-
-    let type_name_start = PRIVATE_KEY_HEADER_FIXED_SIZE;
-    let type_name_end = type_name_start
-        .checked_add(header.type_name_len as usize)
-        .ok_or(CryptoError::InvalidFormat(
-            FormatDefect::MalformedPrivateKey,
-        ))?;
-    if data.len() < type_name_end {
-        return Err(CryptoError::InvalidFormat(
-            FormatDefect::MalformedPrivateKey,
-        ));
-    }
-    let type_name = std::str::from_utf8(&data[type_name_start..type_name_end])
-        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedTypeName))?;
-    if type_name != x25519::TYPE_NAME {
-        return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
-    }
-
-    if header.public_len != x25519::PUBKEY_SIZE as u32 {
-        return Err(CryptoError::InvalidFormat(
-            FormatDefect::MalformedPrivateKey,
-        ));
-    }
-
-    let expected_total = (PRIVATE_KEY_HEADER_FIXED_SIZE as u64)
-        .checked_add(header.type_name_len as u64)
-        .and_then(|v| v.checked_add(header.public_len as u64))
-        .and_then(|v| v.checked_add(header.ext_len as u64))
-        .and_then(|v| v.checked_add(header.wrapped_secret_len as u64))
-        .ok_or(CryptoError::InvalidFormat(
-            FormatDefect::MalformedPrivateKey,
-        ))?;
-    if (data.len() as u64) != expected_total {
-        return Err(CryptoError::InvalidFormat(
-            FormatDefect::MalformedPrivateKey,
-        ));
-    }
-
-    Ok(())
-}
-
 // ─── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -690,9 +414,14 @@ mod tests {
     use super::*;
     use crate::crypto::aead::WRAP_NONCE_SIZE;
     use crate::crypto::stream::payload_encryptor;
+    use crate::error::FormatDefect;
     use crate::format::{HEADER_FIXED_SIZE, PREFIX_SIZE};
+    use crate::key::public::{
+        RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT, decode_recipient_string, read_public_key,
+    };
     use crate::recipient::argon2id;
     use crate::recipient::entry::{ENTRY_HEADER_SIZE, RECIPIENT_FLAG_CRITICAL};
+    use crate::recipient::native::x25519::open_x25519_private_key;
 
     /// File offset of `stream_nonce`. Mirrors the symmetric-side
     /// constant: `stream_nonce` is the trailing field of `header_fixed`,
@@ -941,53 +670,6 @@ mod tests {
         Ok(())
     }
 
-    /// `KeyFileKind::classify` is the single source of truth for
-    /// the cross-mix-up heuristic. Pin every classification arm so
-    /// a future refactor that drifts the order or weakens a branch
-    /// fails loudly.
-    #[test]
-    fn key_file_kind_classifies_each_shape() -> Result<(), CryptoError> {
-        // Real public.key text → Public.
-        let tmp = tempfile::TempDir::new().unwrap();
-        let pass = SecretString::from("kp".to_string());
-        let (privkey_path, pubkey_path) = generate_key_pair(&pass, tmp.path(), &|_| {})?;
-        let pub_bytes = fs::read(&pubkey_path)?;
-        assert_eq!(KeyFileKind::classify(&pub_bytes), KeyFileKind::Public);
-
-        // Real private.key binary → Private.
-        let priv_bytes = fs::read(&privkey_path)?;
-        assert_eq!(KeyFileKind::classify(&priv_bytes), KeyFileKind::Private);
-
-        // Magic + future version + type K (a v2 private.key) → Private.
-        let v2_priv = b"FCR\0\x02K\x01\x00\x00";
-        assert_eq!(KeyFileKind::classify(v2_priv), KeyFileKind::Private);
-
-        // Magic but type byte is 'S' (a symmetric .fcr) → Unknown,
-        // not Private. The `.fcr` mix-up heuristic lives elsewhere
-        // (`detect_encryption_mode`); a key-file path should not
-        // claim it.
-        let fcr_symmetric = b"FCR\0\x01Sxx\x00\x00";
-        assert_eq!(KeyFileKind::classify(fcr_symmetric), KeyFileKind::Unknown);
-
-        // Bare magic, too short for the signature → Unknown.
-        assert_eq!(KeyFileKind::classify(b"FCR\0"), KeyFileKind::Unknown);
-
-        // Random binary without magic → Unknown.
-        assert_eq!(
-            KeyFileKind::classify(b"this isn't ours at all"),
-            KeyFileKind::Unknown
-        );
-
-        // `fcr1`-prefixed garbage that fails Bech32 checksum →
-        // Unknown (NOT Public). We don't claim ownership of files
-        // we can't actually read.
-        assert_eq!(KeyFileKind::classify(b"fcr1foobar"), KeyFileKind::Unknown);
-
-        // Empty input → Unknown.
-        assert_eq!(KeyFileKind::classify(b""), KeyFileKind::Unknown);
-        Ok(())
-    }
-
     /// `validate_private_key_file` must agree with `read_private_key`
     /// on the pub/priv mix-up verdict. Before this fix, the two paths
     /// disagreed: `read_private_key` returned `WrongKeyFileType` but
@@ -1151,73 +833,6 @@ mod tests {
             crate::validate_private_key_file(&missing),
             Err(CryptoError::InputPath)
         ));
-    }
-
-    /// FORMAT.md §8 mandates that native X25519 readers compute
-    /// `X25519(secret_material, basepoint)` and reject the file unless
-    /// the result equals the authenticated `public_material`. AEAD-AAD
-    /// authentication alone cannot catch a structurally valid
-    /// `private.key` whose two halves were sealed inconsistently (a
-    /// buggy or malicious writer can do this); only the native
-    /// derivation check does.
-    #[test]
-    fn open_private_key_rejects_x25519_public_secret_mismatch() -> Result<(), CryptoError> {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let path = tmp.path().join("private.key");
-        let pass = SecretString::from("pw".to_string());
-
-        let secret = StaticSecret::random_from_rng(OsRng);
-        let secret_material = secret.to_bytes();
-        let other_secret = StaticSecret::random_from_rng(OsRng);
-        let wrong_public = PublicKey::from(&other_secret);
-
-        let bytes = seal_private_key(
-            &secret_material,
-            x25519::TYPE_NAME,
-            wrong_public.as_bytes(),
-            &[],
-            &pass,
-            &KdfParams::default(),
-        )?;
-        fs::write(&path, bytes)?;
-
-        match open_x25519_private_key(&path, &pass, None).map(|_| ()) {
-            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => Ok(()),
-            other => {
-                panic!("expected MalformedPrivateKey for public/secret mismatch, got {other:?}")
-            }
-        }
-    }
-
-    /// A `private.key` whose `public_len` is a structurally valid value
-    /// other than 32 (the X25519 size) decodes through the generic
-    /// private-key reader, but the X25519 adapter MUST reject it: the
-    /// stored public material cannot represent an X25519 point at any
-    /// length other than 32. Surfaces as `MalformedPrivateKey`.
-    #[test]
-    fn open_private_key_rejects_x25519_public_len_mismatch() -> Result<(), CryptoError> {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let path = tmp.path().join("private.key");
-        let pass = SecretString::from("pw".to_string());
-
-        let secret = StaticSecret::random_from_rng(OsRng);
-        let secret_material = secret.to_bytes();
-        let malformed_public = [0u8; x25519::PUBKEY_SIZE - 1];
-
-        let bytes = seal_private_key(
-            &secret_material,
-            x25519::TYPE_NAME,
-            &malformed_public,
-            &[],
-            &pass,
-            &KdfParams::default(),
-        )?;
-        fs::write(&path, bytes)?;
-
-        match open_x25519_private_key(&path, &pass, None).map(|_| ()) {
-            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => Ok(()),
-            other => panic!("expected MalformedPrivateKey for public_len mismatch, got {other:?}"),
-        }
     }
 
     /// FORMAT.md §7 accepts exactly two encodings of `public.key`:

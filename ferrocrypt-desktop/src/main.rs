@@ -1,11 +1,15 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// Step 10 of the lib restructure migrates this crate off the deprecated free
+// functions onto `Encryptor` / `Decryptor`. Step 8 keeps the call sites here
+// to keep that diff small; allow the deprecation warnings until then.
+#![allow(deprecated)]
 
 slint::include_modules!();
 
 use ferrocrypt::secrecy::{ExposeSecret, SecretString};
 use ferrocrypt::{
-    EncryptionMode, HybridDecryptConfig, HybridEncryptConfig, KeyGenConfig, PRIVATE_KEY_FILENAME,
+    EncryptionMode, HybridDecryptConfig, HybridEncryptConfig, PRIVATE_KEY_FILENAME,
     PUBLIC_KEY_FILENAME, PrivateKey, ProgressEvent, PublicKey, SymmetricDecryptConfig,
     SymmetricEncryptConfig, default_encrypted_filename, detect_encryption_mode, generate_key_pair,
     hybrid_decrypt, hybrid_encrypt, symmetric_decrypt, symmetric_encrypt,
@@ -260,10 +264,8 @@ fn main() {
                             );
                             hybrid_decrypt(config, &on_event).map(|o| o.output_path)
                         }
-                        MODE_KEYGEN => {
-                            let config = KeyGenConfig::new(output_dir_path, pwd);
-                            generate_key_pair(config, &on_event).map(|o| o.public_key_path)
-                        }
+                        MODE_KEYGEN => generate_key_pair(output_dir_path, pwd, &on_event)
+                            .map(|o| o.public_key_path),
                         _ => unreachable!(),
                     };
                     let elapsed = start.elapsed().as_secs_f64();

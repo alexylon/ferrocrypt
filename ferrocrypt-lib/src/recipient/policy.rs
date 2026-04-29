@@ -74,8 +74,8 @@ impl NativeRecipientType {
 /// Only the variants required by v1 native types are defined.
 /// Future native types whose policy doesn't fit either variant
 /// will extend this enum (it is `#[non_exhaustive]`); v1 readers
-/// will then need to handle the new variant explicitly via
-/// [`enforce_recipient_mixing_policy`].
+/// will then need to handle the new variant explicitly when
+/// enforcing the mixing policy across a parsed recipient list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MixingPolicy {

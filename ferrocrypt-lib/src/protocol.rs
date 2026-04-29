@@ -57,14 +57,13 @@ use crate::{EncryptionMode, ProgressEvent};
 /// Encrypt-side scheme: turn a [`FileKey`] into a recipient body of
 /// scheme-specific bytes.
 ///
-/// `TYPE_NAME` and `MIXING_POLICY` are associated constants so multi-
-/// recipient construction (when it lands) can enforce mixing policy at
-/// compile time before any KDF runs. Implementations must NOT build
-/// full [`RecipientEntry`] framing or compute the header MAC — those
+/// `TYPE_NAME` and `MIXING_POLICY` are associated constants so the
+/// multi-recipient `encrypt` orchestrator can enforce the mixing policy
+/// before any KDF runs. Implementations must NOT build full
+/// [`RecipientEntry`] framing or compute the header MAC — those
 /// concerns live in this module.
 pub(crate) trait RecipientScheme {
     const TYPE_NAME: &'static str;
-    #[allow(dead_code)] // surfaces in v1 multi-recipient API (step 8)
     const MIXING_POLICY: MixingPolicy;
 
     fn wrap_file_key(&self, file_key: &FileKey) -> Result<RecipientBody, CryptoError>;
@@ -93,16 +92,37 @@ pub(crate) trait IdentityScheme {
 
 // ─── Encrypt ───────────────────────────────────────────────────────────────
 
-/// Encrypts `input_path` under a single recipient scheme. Wire format
-/// is the v1 `.fcr` container with exactly one recipient entry whose
-/// type matches `R::TYPE_NAME`.
+/// Encrypts `input_path` under one or more recipients of a single
+/// scheme. Wire format is the v1 `.fcr` container with `recipients.len()`
+/// entries whose type matches `R::TYPE_NAME`. Every entry seals the same
+/// per-file `file_key` for its respective recipient.
+///
+/// Defense-in-depth checks:
+///
+/// - `recipients` MUST be non-empty (the public API enforces this at
+///   construction time; the orchestrator double-checks).
+/// - If `R::MIXING_POLICY == MixingPolicy::Exclusive` then
+///   `recipients.len()` MUST be exactly 1. The public API can only
+///   reach this code with a single passphrase, but the assertion stops
+///   a future caller bypass from emitting an `argon2id` file with two
+///   bodies (`FORMAT.md` §4.1 forbids it).
 pub(crate) fn encrypt<R: RecipientScheme>(
-    recipient: &R,
+    recipients: &[R],
+    archive_limits: ArchiveLimits,
     input_path: &Path,
     output_dir: &Path,
     output_file: Option<&Path>,
     on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<PathBuf, CryptoError> {
+    if recipients.is_empty() {
+        return Err(CryptoError::EmptyRecipientList);
+    }
+    if R::MIXING_POLICY == MixingPolicy::Exclusive && recipients.len() > 1 {
+        return Err(CryptoError::IncompatibleRecipients {
+            policy: R::MIXING_POLICY,
+        });
+    }
+
     on_event(&ProgressEvent::DerivingKey);
 
     // Generate per-file random material first so the rest of the build
@@ -116,19 +136,21 @@ pub(crate) fn encrypt<R: RecipientScheme>(
         header_key,
     } = derive_subkeys(&file_key, &stream_nonce)?;
 
-    // Wrap the file_key for the chosen recipient scheme. After the
-    // body is built, the raw file_key is no longer needed; drop it
-    // immediately so the plaintext window in memory is minimal.
-    let body = recipient.wrap_file_key(&file_key)?;
+    // Wrap the file_key for each recipient under the same scheme. After
+    // the bodies are built, the raw file_key is no longer needed; drop
+    // it immediately so the plaintext window in memory is minimal.
+    let mut entries = Vec::with_capacity(recipients.len());
+    for recipient in recipients {
+        let body = recipient.wrap_file_key(&file_key)?;
+        entries.push(build_native_entry(R::TYPE_NAME, body)?);
+    }
     drop(file_key);
-
-    let entry = build_native_entry(R::TYPE_NAME, body)?;
 
     // Assemble prefix + header + MAC. `build_encrypted_header` owns the
     // single byte-arithmetic implementation; encrypt and decrypt share
     // its MAC scope.
     let built = build_encrypted_header(
-        std::slice::from_ref(&entry),
+        &entries,
         b"", // v1.0 writers emit ext_len = 0
         stream_nonce,
         payload_key,
@@ -145,7 +167,7 @@ pub(crate) fn encrypt<R: RecipientScheme>(
         output_file,
         &base_name,
         &built,
-        ArchiveLimits::default(),
+        archive_limits,
     )
 }
 
@@ -292,8 +314,10 @@ pub(crate) fn decrypt<I: IdentityScheme>(
 fn mode_matches_scheme<I: IdentityScheme>(mode: EncryptionMode) -> bool {
     matches!(
         (mode, I::TYPE_NAME),
-        (EncryptionMode::Symmetric, crate::recipient::argon2id::TYPE_NAME)
-            | (EncryptionMode::Hybrid, crate::recipient::x25519::TYPE_NAME)
+        (
+            EncryptionMode::Symmetric,
+            crate::recipient::argon2id::TYPE_NAME
+        ) | (EncryptionMode::Hybrid, crate::recipient::x25519::TYPE_NAME)
     )
 }
 
@@ -779,6 +803,77 @@ mod tests {
                 Ok(())
             }
             other => panic!("expected HeaderMacFailedAfterUnwrap(x25519), got {other:?}"),
+        }
+    }
+
+    /// Defense-in-depth: an exclusive scheme (`argon2id`) MUST not be
+    /// emitted with more than one recipient. The public API has no path
+    /// to construct that, but a future caller bypass would break the
+    /// `FORMAT.md` §4.1 mixing rule before any output bytes are
+    /// written. The orchestrator catches this before any KDF runs.
+    #[test]
+    fn encrypt_rejects_multi_passphrase_recipient_list() -> Result<(), CryptoError> {
+        let pass = SecretString::from("pass".to_string());
+        let kdf_params = crate::crypto::kdf::KdfParams::default();
+        let r1 = argon2id::PassphraseRecipient {
+            passphrase: &pass,
+            kdf_params,
+        };
+        let r2 = argon2id::PassphraseRecipient {
+            passphrase: &pass,
+            kdf_params,
+        };
+        let recipients = [r1, r2];
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let input = tmp.path().join("data.txt");
+        fs::write(&input, b"x")?;
+        let out_dir = tmp.path().join("out");
+        fs::create_dir_all(&out_dir)?;
+
+        let err = encrypt(
+            &recipients,
+            ArchiveLimits::default(),
+            &input,
+            &out_dir,
+            None,
+            &|_| {},
+        )
+        .unwrap_err();
+        match err {
+            CryptoError::IncompatibleRecipients {
+                policy: MixingPolicy::Exclusive,
+            } => Ok(()),
+            other => panic!("expected IncompatibleRecipients(Exclusive), got {other:?}"),
+        }
+    }
+
+    /// Defense-in-depth: empty recipient list rejected before any
+    /// allocation or KDF. The public API gates this at construction
+    /// time (`with_recipients` returns `EmptyRecipientList`), but the
+    /// orchestrator re-checks so a callable internal short-circuit
+    /// can't bypass the contract.
+    #[test]
+    fn encrypt_rejects_empty_recipient_list() -> Result<(), CryptoError> {
+        let recipients: [argon2id::PassphraseRecipient; 0] = [];
+        let tmp = tempfile::TempDir::new().unwrap();
+        let input = tmp.path().join("data.txt");
+        fs::write(&input, b"x")?;
+        let out_dir = tmp.path().join("out");
+        fs::create_dir_all(&out_dir)?;
+
+        let err = encrypt(
+            &recipients,
+            ArchiveLimits::default(),
+            &input,
+            &out_dir,
+            None,
+            &|_| {},
+        )
+        .unwrap_err();
+        match err {
+            CryptoError::EmptyRecipientList => Ok(()),
+            other => panic!("expected EmptyRecipientList, got {other:?}"),
         }
     }
 }

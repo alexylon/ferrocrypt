@@ -1,4 +1,9 @@
 #![no_main]
+// `fuzz_symmetric_decrypt` exercises the deprecated decrypt entry point
+// on purpose so coverage of the existing wire-format decode pipeline
+// does not move under us mid-restructure. Step 10 swaps it for the new
+// API.
+#![allow(deprecated)]
 
 use std::fs;
 use std::io::Write;

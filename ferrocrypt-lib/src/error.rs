@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::recipient::policy::MixingPolicy;
+
 /// Maximum number of `chars` (counting an inserted ellipsis as one) a
 /// `type_name` is allowed to occupy when interpolated into a user-facing
 /// error message. Sized to keep the longest interpolating message
@@ -269,6 +271,21 @@ pub enum CryptoError {
     /// any Argon2id work.
     #[error("Passphrase recipient mixed with another recipient")]
     PassphraseRecipientMixed,
+    /// The caller invoked an `Encryptor` constructor (e.g.
+    /// `with_recipients`) with an empty list. The encrypt API requires
+    /// at least one recipient — there is nothing to wrap the per-file
+    /// `file_key` for.
+    #[error("Recipient list cannot be empty")]
+    EmptyRecipientList,
+    /// The caller invoked `Encryptor::with_recipients` with a
+    /// heterogeneous list whose schemes do not share the same
+    /// [`MixingPolicy`]. Per `FORMAT.md` §3.4 / §4.1 each native
+    /// recipient type declares a mixing policy, and only same-policy
+    /// recipients may share a file. The `policy` field carries the
+    /// scheme policy that was incompatible with the rest of the list,
+    /// so callers can pattern-match without parsing the message.
+    #[error("Recipients use incompatible mixing policies")]
+    IncompatibleRecipients { policy: MixingPolicy },
     /// An encrypted payload chunk failed AEAD authentication during
     /// streaming decryption. The ciphertext has been tampered with or
     /// corrupted after the header was authenticated.
@@ -606,6 +623,17 @@ mod tests {
             "Passphrase recipient mixed with another recipient"
         );
         assert_eq!(
+            CryptoError::EmptyRecipientList.to_string(),
+            "Recipient list cannot be empty"
+        );
+        assert_eq!(
+            CryptoError::IncompatibleRecipients {
+                policy: MixingPolicy::Exclusive,
+            }
+            .to_string(),
+            "Recipients use incompatible mixing policies"
+        );
+        assert_eq!(
             CryptoError::PayloadTampered.to_string(),
             "Payload authentication failed: data tampered or corrupted"
         );
@@ -826,6 +854,24 @@ mod tests {
         check(
             "PassphraseRecipientMixed",
             &CryptoError::PassphraseRecipientMixed.to_string(),
+        );
+        check(
+            "EmptyRecipientList",
+            &CryptoError::EmptyRecipientList.to_string(),
+        );
+        check(
+            "IncompatibleRecipients(Exclusive)",
+            &CryptoError::IncompatibleRecipients {
+                policy: MixingPolicy::Exclusive,
+            }
+            .to_string(),
+        );
+        check(
+            "IncompatibleRecipients(PublicKeyMixable)",
+            &CryptoError::IncompatibleRecipients {
+                policy: MixingPolicy::PublicKeyMixable,
+            }
+            .to_string(),
         );
         check("PayloadTampered", &CryptoError::PayloadTampered.to_string());
         check(

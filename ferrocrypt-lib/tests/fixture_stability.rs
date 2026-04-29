@@ -22,11 +22,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use ferrocrypt::secrecy::SecretString;
-use ferrocrypt::{
-    HybridDecryptConfig, HybridEncryptConfig, KeyGenConfig, PrivateKey, PublicKey,
-    SymmetricDecryptConfig, SymmetricEncryptConfig, generate_key_pair, hybrid_decrypt,
-    hybrid_encrypt, symmetric_decrypt, symmetric_encrypt,
-};
+use ferrocrypt::{CryptoError, Decryptor, Encryptor, PrivateKey, PublicKey, generate_key_pair};
 
 const FIXTURE_PASSPHRASE: &str = "fixture-passphrase-not-secret-do-not-reuse";
 const TEST_WORKSPACE: &str = "tests/workspace_fixture_stability";
@@ -118,15 +114,36 @@ fn assert_dirs_equal(expected_root: &Path, actual_root: &Path) {
     }
 }
 
+fn passphrase_decrypt(fcr: PathBuf, out: &Path) -> Result<(), CryptoError> {
+    match Decryptor::open(&fcr)? {
+        Decryptor::Passphrase(d) => {
+            d.decrypt(fixture_passphrase(), out, |_| {})?;
+            Ok(())
+        }
+        other => panic!("expected passphrase decryptor, got {other:?}"),
+    }
+}
+
+fn recipient_decrypt(fcr: PathBuf, out: &Path) -> Result<(), CryptoError> {
+    match Decryptor::open(&fcr)? {
+        Decryptor::Recipient(d) => {
+            d.decrypt(
+                PrivateKey::from_key_file(keys_dir().join(PRIVATE_KEY_FILE)),
+                fixture_passphrase(),
+                out,
+                |_| {},
+            )?;
+            Ok(())
+        }
+        other => panic!("expected recipient decryptor, got {other:?}"),
+    }
+}
+
 #[test]
 fn decrypt_passphrase_file_fixture_matches_source() {
     let out = fresh_temp("decrypt_passphrase_file");
-    let cfg = SymmetricDecryptConfig::new(
-        encrypted_dir().join(PASSPHRASE_FILE_FCR),
-        &out,
-        fixture_passphrase(),
-    );
-    symmetric_decrypt(cfg, |_| {}).expect("decrypt passphrase-file fixture");
+    passphrase_decrypt(encrypted_dir().join(PASSPHRASE_FILE_FCR), &out)
+        .expect("decrypt passphrase-file fixture");
     let decrypted = fs::read(out.join(SMALL_FILE_NAME)).expect("read decrypted plaintext");
     let expected = fs::read(source_dir().join(SMALL_FILE_NAME)).expect("read source plaintext");
     assert_eq!(
@@ -138,12 +155,8 @@ fn decrypt_passphrase_file_fixture_matches_source() {
 #[test]
 fn decrypt_passphrase_dir_fixture_matches_source() {
     let out = fresh_temp("decrypt_passphrase_dir");
-    let cfg = SymmetricDecryptConfig::new(
-        encrypted_dir().join(PASSPHRASE_DIR_FCR),
-        &out,
-        fixture_passphrase(),
-    );
-    symmetric_decrypt(cfg, |_| {}).expect("decrypt passphrase-dir fixture");
+    passphrase_decrypt(encrypted_dir().join(PASSPHRASE_DIR_FCR), &out)
+        .expect("decrypt passphrase-dir fixture");
     assert_dirs_equal(
         &source_dir().join(SMALL_DIR_NAME),
         &out.join(SMALL_DIR_NAME),
@@ -153,13 +166,8 @@ fn decrypt_passphrase_dir_fixture_matches_source() {
 #[test]
 fn decrypt_recipient_file_fixture_matches_source() {
     let out = fresh_temp("decrypt_recipient_file");
-    let cfg = HybridDecryptConfig::new(
-        encrypted_dir().join(RECIPIENT_FILE_FCR),
-        &out,
-        PrivateKey::from_key_file(keys_dir().join(PRIVATE_KEY_FILE)),
-        fixture_passphrase(),
-    );
-    hybrid_decrypt(cfg, |_| {}).expect("decrypt recipient-file fixture");
+    recipient_decrypt(encrypted_dir().join(RECIPIENT_FILE_FCR), &out)
+        .expect("decrypt recipient-file fixture");
     let decrypted = fs::read(out.join(SMALL_FILE_NAME)).expect("read decrypted plaintext");
     let expected = fs::read(source_dir().join(SMALL_FILE_NAME)).expect("read source plaintext");
     assert_eq!(
@@ -171,13 +179,8 @@ fn decrypt_recipient_file_fixture_matches_source() {
 #[test]
 fn decrypt_recipient_dir_fixture_matches_source() {
     let out = fresh_temp("decrypt_recipient_dir");
-    let cfg = HybridDecryptConfig::new(
-        encrypted_dir().join(RECIPIENT_DIR_FCR),
-        &out,
-        PrivateKey::from_key_file(keys_dir().join(PRIVATE_KEY_FILE)),
-        fixture_passphrase(),
-    );
-    hybrid_decrypt(cfg, |_| {}).expect("decrypt recipient-dir fixture");
+    recipient_decrypt(encrypted_dir().join(RECIPIENT_DIR_FCR), &out)
+        .expect("decrypt recipient-dir fixture");
     assert_dirs_equal(
         &source_dir().join(SMALL_DIR_NAME),
         &out.join(SMALL_DIR_NAME),
@@ -201,54 +204,30 @@ fn regenerate_fixtures() {
     fs::create_dir_all(encrypted_dir()).expect("create encrypted/");
     fs::create_dir_all(keys_dir()).expect("create keys/");
 
-    let kg_outcome = generate_key_pair(KeyGenConfig::new(keys_dir(), fixture_passphrase()), |_| {})
+    let kg_outcome = generate_key_pair(keys_dir(), fixture_passphrase(), |_| {})
         .expect("generate fixture key pair");
     eprintln!(
         "fixture key pair regenerated; public fingerprint = {}",
         kg_outcome.fingerprint
     );
 
-    symmetric_encrypt(
-        SymmetricEncryptConfig::new(
-            source_dir().join(SMALL_FILE_NAME),
-            encrypted_dir(),
-            fixture_passphrase(),
-        )
-        .save_as(encrypted_dir().join(PASSPHRASE_FILE_FCR)),
-        |_| {},
-    )
-    .expect("encrypt passphrase-file fixture");
+    Encryptor::with_passphrase(fixture_passphrase())
+        .save_as(encrypted_dir().join(PASSPHRASE_FILE_FCR))
+        .write(source_dir().join(SMALL_FILE_NAME), encrypted_dir(), |_| {})
+        .expect("encrypt passphrase-file fixture");
 
-    symmetric_encrypt(
-        SymmetricEncryptConfig::new(
-            source_dir().join(SMALL_DIR_NAME),
-            encrypted_dir(),
-            fixture_passphrase(),
-        )
-        .save_as(encrypted_dir().join(PASSPHRASE_DIR_FCR)),
-        |_| {},
-    )
-    .expect("encrypt passphrase-dir fixture");
+    Encryptor::with_passphrase(fixture_passphrase())
+        .save_as(encrypted_dir().join(PASSPHRASE_DIR_FCR))
+        .write(source_dir().join(SMALL_DIR_NAME), encrypted_dir(), |_| {})
+        .expect("encrypt passphrase-dir fixture");
 
-    hybrid_encrypt(
-        HybridEncryptConfig::new(
-            source_dir().join(SMALL_FILE_NAME),
-            encrypted_dir(),
-            PublicKey::from_key_file(keys_dir().join(PUBLIC_KEY_FILE)),
-        )
-        .save_as(encrypted_dir().join(RECIPIENT_FILE_FCR)),
-        |_| {},
-    )
-    .expect("encrypt recipient-file fixture");
+    Encryptor::with_recipient(PublicKey::from_key_file(keys_dir().join(PUBLIC_KEY_FILE)))
+        .save_as(encrypted_dir().join(RECIPIENT_FILE_FCR))
+        .write(source_dir().join(SMALL_FILE_NAME), encrypted_dir(), |_| {})
+        .expect("encrypt recipient-file fixture");
 
-    hybrid_encrypt(
-        HybridEncryptConfig::new(
-            source_dir().join(SMALL_DIR_NAME),
-            encrypted_dir(),
-            PublicKey::from_key_file(keys_dir().join(PUBLIC_KEY_FILE)),
-        )
-        .save_as(encrypted_dir().join(RECIPIENT_DIR_FCR)),
-        |_| {},
-    )
-    .expect("encrypt recipient-dir fixture");
+    Encryptor::with_recipient(PublicKey::from_key_file(keys_dir().join(PUBLIC_KEY_FILE)))
+        .save_as(encrypted_dir().join(RECIPIENT_DIR_FCR))
+        .write(source_dir().join(SMALL_DIR_NAME), encrypted_dir(), |_| {})
+        .expect("encrypt recipient-dir fixture");
 }

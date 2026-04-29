@@ -1,18 +1,11 @@
 //! Test support helpers for `integration_tests.rs`.
 //!
-//! The pre-0.3.0 library exposed `symmetric_auto` / `hybrid_auto`
+//! Pre-restructure the library exposed `symmetric_auto` / `hybrid_auto`
 //! convenience wrappers that detected direction from magic bytes. The
-//! post-refactor public API dropped them in favor of explicit config
-//! constructors; these file-private helpers preserve the old call shape
-//! so the existing integration test call sites don't need to churn for
-//! the API reshape while still exercising the new public surface
-//! end-to-end.
-//!
-//! Validation order mirrors the library's explicit operation functions
-//! (`validate_passphrase` before `validate_input_path` for symmetric;
-//! `validate_input_path` only for hybrid). The input-exists pre-check is
-//! necessary in the helpers because `detect_encryption_mode` on a
-//! nonexistent file surfaces as `Io(NotFound)` instead of `InputPath`.
+//! post-refactor public API split that into [`Encryptor`] / [`Decryptor`];
+//! these file-private helpers preserve the old call shape so the existing
+//! integration test call sites don't need to churn while still exercising
+//! the new public surface end-to-end.
 //!
 //! Each integration-test binary compiles this module separately; when a
 //! binary only imports a subset of the helpers the rest would trip
@@ -23,13 +16,10 @@
 
 use std::path::{Path, PathBuf};
 
-use ferrocrypt::secrecy::{ExposeSecret, SecretString};
+use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
-    CryptoError, HybridDecryptConfig, HybridEncryptConfig, KdfLimit, KeyGenConfig, KeyGenOutcome,
-    PrivateKey, ProgressEvent, PublicKey, SymmetricDecryptConfig, SymmetricEncryptConfig,
-    detect_encryption_mode, generate_key_pair as lib_generate_key_pair,
-    hybrid_decrypt as lib_hybrid_decrypt, hybrid_encrypt as lib_hybrid_encrypt,
-    symmetric_decrypt as lib_symmetric_decrypt, symmetric_encrypt as lib_symmetric_encrypt,
+    CryptoError, Decryptor, Encryptor, KdfLimit, KeyGenOutcome, PrivateKey, ProgressEvent,
+    PublicKey, detect_encryption_mode, generate_key_pair as lib_generate_key_pair,
 };
 
 pub fn symmetric_auto(
@@ -40,28 +30,31 @@ pub fn symmetric_auto(
     kdf_limit: Option<&KdfLimit>,
     on_event: impl Fn(&ProgressEvent),
 ) -> Result<PathBuf, CryptoError> {
-    if passphrase.expose_secret().is_empty() {
-        return Err(CryptoError::InvalidInput(
-            "Passphrase must not be empty".to_string(),
-        ));
-    }
     let input = input.as_ref();
     let output_dir = output_dir.as_ref();
     if !input.exists() {
         return Err(CryptoError::InputPath);
     }
     if detect_encryption_mode(input)?.is_some() {
-        let mut config = SymmetricDecryptConfig::new(input, output_dir, passphrase.clone());
-        if let Some(limit) = kdf_limit {
-            config = config.kdf_limit(*limit);
+        match Decryptor::open(input)? {
+            Decryptor::Passphrase(mut d) => {
+                if let Some(limit) = kdf_limit {
+                    d = d.kdf_limit(*limit);
+                }
+                d.decrypt(passphrase.clone(), output_dir, on_event)
+                    .map(|o| o.output_path)
+            }
+            Decryptor::Recipient(_) => Err(CryptoError::NoSupportedRecipient),
+            _ => Err(CryptoError::NoSupportedRecipient),
         }
-        lib_symmetric_decrypt(config, on_event).map(|o| o.output_path)
     } else {
-        let mut config = SymmetricEncryptConfig::new(input, output_dir, passphrase.clone());
+        let mut encryptor = Encryptor::with_passphrase(passphrase.clone());
         if let Some(s) = save_as {
-            config = config.save_as(s);
+            encryptor = encryptor.save_as(s);
         }
-        lib_symmetric_encrypt(config, on_event).map(|o| o.output_path)
+        encryptor
+            .write(input, output_dir, on_event)
+            .map(|o| o.output_path)
     }
 }
 
@@ -81,23 +74,30 @@ pub fn hybrid_auto(
         return Err(CryptoError::InputPath);
     }
     if detect_encryption_mode(input)?.is_some() {
-        let mut config = HybridDecryptConfig::new(
-            input,
-            output_dir,
-            PrivateKey::from_key_file(key_file),
-            passphrase.clone(),
-        );
-        if let Some(limit) = kdf_limit {
-            config = config.kdf_limit(*limit);
+        match Decryptor::open(input)? {
+            Decryptor::Recipient(mut d) => {
+                if let Some(limit) = kdf_limit {
+                    d = d.kdf_limit(*limit);
+                }
+                d.decrypt(
+                    PrivateKey::from_key_file(key_file),
+                    passphrase.clone(),
+                    output_dir,
+                    on_event,
+                )
+                .map(|o| o.output_path)
+            }
+            Decryptor::Passphrase(_) => Err(CryptoError::NoSupportedRecipient),
+            _ => Err(CryptoError::NoSupportedRecipient),
         }
-        lib_hybrid_decrypt(config, on_event).map(|o| o.output_path)
     } else {
-        let mut config =
-            HybridEncryptConfig::new(input, output_dir, PublicKey::from_key_file(key_file));
+        let mut encryptor = Encryptor::with_recipient(PublicKey::from_key_file(key_file));
         if let Some(s) = save_as {
-            config = config.save_as(s);
+            encryptor = encryptor.save_as(s);
         }
-        lib_hybrid_encrypt(config, on_event).map(|o| o.output_path)
+        encryptor
+            .write(input, output_dir, on_event)
+            .map(|o| o.output_path)
     }
 }
 
@@ -106,5 +106,5 @@ pub fn generate_key_pair(
     output_dir: impl AsRef<Path>,
     on_event: impl Fn(&ProgressEvent),
 ) -> Result<KeyGenOutcome, CryptoError> {
-    lib_generate_key_pair(KeyGenConfig::new(output_dir, passphrase.clone()), on_event)
+    lib_generate_key_pair(output_dir, passphrase.clone(), on_event)
 }

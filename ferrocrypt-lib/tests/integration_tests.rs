@@ -318,8 +318,11 @@ fn test_hybrid_keygen_rejects_empty_passphrase() {
 /// top of the function, before `validate_input_path` and before any KDF work
 /// runs. The symmetric path already did this pre-audit; the hybrid path was
 /// a consistency gap that let an empty passphrase burn an Argon2id cycle on
-/// the private-key file before failing.
+/// the private-key file before failing. Pinned to the deprecated free
+/// function until step 10 removes it; the analogous coverage for the new
+/// API lives alongside `Decryptor::open`.
 #[test]
+#[allow(deprecated)]
 fn test_hybrid_decrypt_rejects_empty_passphrase_before_kdf() {
     use ferrocrypt::{HybridDecryptConfig, PrivateKey, ProgressEvent, hybrid_decrypt};
     use std::cell::Cell;
@@ -359,9 +362,12 @@ fn test_hybrid_decrypt_rejects_empty_passphrase_before_kdf() {
 /// rejection happened inside `archiver::archive`, which runs after the KDF
 /// — an accidental symlink cost the user seconds and up to 1 GiB of RAM.
 /// Observes the `DerivingKey` progress event to prove the rejection
-/// short-circuits the KDF path.
+/// short-circuits the KDF path. Pinned to the deprecated free function
+/// until step 10 removes it; the analogous coverage for the new API
+/// lives alongside `Encryptor::write`.
 #[cfg(unix)]
 #[test]
+#[allow(deprecated)]
 fn test_symmetric_encrypt_rejects_symlink_before_kdf() {
     use ferrocrypt::{ProgressEvent, SymmetricEncryptConfig, symmetric_encrypt};
     use std::cell::Cell;

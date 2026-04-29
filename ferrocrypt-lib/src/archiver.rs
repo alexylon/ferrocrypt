@@ -101,7 +101,8 @@ fn archive_dir_mode(src_path: &Path) -> Result<u32, CryptoError> {
 /// pathological inputs (millions of empty entries, multi-TiB declared
 /// sizes, deeply nested directory trees).
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct ArchiveLimits {
+#[non_exhaustive]
+pub struct ArchiveLimits {
     /// Maximum number of TAR entries (regular files + directories)
     /// admissible in a single extract. Exceeding this rejects the
     /// archive before the offending entry's `seen_paths` slot is
@@ -119,6 +120,29 @@ pub(crate) struct ArchiveLimits {
     /// nested but byte-economical paths (e.g. `a/b/c/.../z`) before
     /// the per-component openat walk.
     pub max_path_depth: u32,
+}
+
+impl ArchiveLimits {
+    /// Replaces the maximum TAR entry count. See
+    /// [`ArchiveLimits::max_entry_count`].
+    pub fn with_max_entry_count(mut self, n: u32) -> Self {
+        self.max_entry_count = n;
+        self
+    }
+
+    /// Replaces the maximum cumulative plaintext byte cap. See
+    /// [`ArchiveLimits::max_total_plaintext_bytes`].
+    pub fn with_max_total_plaintext_bytes(mut self, n: u64) -> Self {
+        self.max_total_plaintext_bytes = n;
+        self
+    }
+
+    /// Replaces the maximum per-entry path-component depth. See
+    /// [`ArchiveLimits::max_path_depth`].
+    pub fn with_max_path_depth(mut self, n: u32) -> Self {
+        self.max_path_depth = n;
+        self
+    }
 }
 
 impl Default for ArchiveLimits {

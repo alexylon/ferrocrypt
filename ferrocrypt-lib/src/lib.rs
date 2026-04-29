@@ -13,69 +13,58 @@
 //! - **Batteries included**: streaming encryption pipeline, path handling,
 //!   and output file naming are handled for you.
 //!
-//! ## Quick start (symmetric)
+//! ## Quick start (symmetric / passphrase)
 //! ```rust,no_run
-//! use ferrocrypt::{
-//!     symmetric_encrypt, symmetric_decrypt, SymmetricEncryptConfig,
-//!     SymmetricDecryptConfig, CryptoError, secrecy::SecretString,
-//! };
+//! use ferrocrypt::{Decryptor, Encryptor, CryptoError, secrecy::SecretString};
 //!
 //! # fn run() -> Result<(), CryptoError> {
 //! let passphrase = SecretString::from("correct horse battery staple".to_string());
 //!
 //! // Encrypt
-//! let encrypted = symmetric_encrypt(
-//!     SymmetricEncryptConfig::new("./secrets", "./out", passphrase.clone()),
-//!     |ev| eprintln!("{ev}"),
-//! )?;
+//! let encrypted = Encryptor::with_passphrase(passphrase.clone())
+//!     .write("./secrets", "./out", |ev| eprintln!("{ev}"))?;
 //! println!("Encrypted to {}", encrypted.output_path.display());
 //!
 //! // Decrypt
-//! let decrypted = symmetric_decrypt(
-//!     SymmetricDecryptConfig::new(&encrypted.output_path, "./restored", passphrase),
-//!     |ev| eprintln!("{ev}"),
-//! )?;
-//! println!("Decrypted to {}", decrypted.output_path.display());
+//! let restored = match Decryptor::open(&encrypted.output_path)? {
+//!     Decryptor::Passphrase(d) => d.decrypt(passphrase, "./restored", |ev| eprintln!("{ev}"))?,
+//!     Decryptor::Recipient(_) => unreachable!("we just encrypted with a passphrase"),
+//!     _ => unreachable!("Decryptor is non_exhaustive; v1 has only Passphrase + Recipient"),
+//! };
+//! println!("Decrypted to {}", restored.output_path.display());
 //! # Ok(()) }
 //! # fn main() { run().unwrap(); }
 //! ```
 //!
-//! ## Quick start (hybrid)
+//! ## Quick start (hybrid / public-key recipients)
 //! ```rust,no_run
 //! use ferrocrypt::{
-//!     generate_key_pair, hybrid_encrypt, hybrid_decrypt,
-//!     KeyGenConfig, HybridEncryptConfig, HybridDecryptConfig,
-//!     PublicKey, PrivateKey,
+//!     Decryptor, Encryptor, generate_key_pair, PublicKey, PrivateKey,
 //!     CryptoError, secrecy::SecretString,
 //! };
 //!
 //! # fn run() -> Result<(), CryptoError> {
 //! // 1) Generate X25519 keypair
 //! let passphrase = SecretString::from("my-key-pass".to_string());
-//! let keys = generate_key_pair(
-//!     KeyGenConfig::new("./keys", passphrase.clone()),
-//!     |ev| eprintln!("{ev}"),
-//! )?;
+//! let keys = generate_key_pair("./keys", passphrase.clone(), |ev| eprintln!("{ev}"))?;
 //! println!("Fingerprint: {}", keys.fingerprint);
 //!
-//! // 2) Encrypt with public key (no passphrase needed)
-//! let encrypted = hybrid_encrypt(
-//!     HybridEncryptConfig::new(
-//!         "./payload", "./out",
-//!         PublicKey::from_key_file(&keys.public_key_path),
-//!     ),
-//!     |ev| eprintln!("{ev}"),
-//! )?;
+//! // 2) Encrypt with the recipient's public key (no passphrase required)
+//! let encrypted = Encryptor::with_recipient(PublicKey::from_key_file(&keys.public_key_path))
+//!     .write("./payload", "./out", |ev| eprintln!("{ev}"))?;
 //!
-//! // 3) Decrypt with private key + passphrase
-//! let decrypted = hybrid_decrypt(
-//!     HybridDecryptConfig::new(
-//!         &encrypted.output_path, "./restored",
-//!         PrivateKey::from_key_file(&keys.private_key_path), passphrase,
-//!     ),
-//!     |ev| eprintln!("{ev}"),
-//! )?;
-//! println!("Decrypted to {}", decrypted.output_path.display());
+//! // 3) Decrypt with the recipient's private key + passphrase
+//! let restored = match Decryptor::open(&encrypted.output_path)? {
+//!     Decryptor::Recipient(d) => d.decrypt(
+//!         PrivateKey::from_key_file(&keys.private_key_path),
+//!         passphrase,
+//!         "./restored",
+//!         |ev| eprintln!("{ev}"),
+//!     )?,
+//!     Decryptor::Passphrase(_) => unreachable!("we just encrypted to a public key"),
+//!     _ => unreachable!("Decryptor is non_exhaustive; v1 has only Passphrase + Recipient"),
+//! };
+//! println!("Decrypted to {}", restored.output_path.display());
 //! # Ok(()) }
 //! # fn main() { run().unwrap(); }
 //! ```
@@ -121,12 +110,18 @@ compile_error!("fast-kdf feature must not be used in release builds");
 
 use std::path::{Path, PathBuf};
 
-use secrecy::{ExposeSecret as _, SecretString};
+use secrecy::SecretString;
 
+pub use crate::api::{
+    Decryptor, Encryptor, PassphraseDecryptor, RecipientDecryptor, default_encrypted_filename,
+    detect_encryption_mode, generate_key_pair, validate_private_key_file, validate_public_key_file,
+};
+pub use crate::archiver::ArchiveLimits;
 pub use crate::crypto::kdf::KdfLimit;
 pub use crate::error::{CryptoError, FormatDefect, InvalidKdfParams, UnsupportedVersion};
 pub use crate::format::ENCRYPTED_EXTENSION;
 pub use crate::key::files::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};
+pub use crate::recipient::policy::MixingPolicy;
 
 pub use secrecy;
 
@@ -181,11 +176,22 @@ impl std::fmt::Display for ProgressEvent {
 pub use crate::key::private::PrivateKey;
 pub use crate::key::public::PublicKey;
 
+/// Alternative name for [`PublicKey`] using the `FORMAT.md` recipient
+/// vocabulary. Identical type — choose whichever name reads more
+/// naturally at the call site.
+pub type RecipientKey = PublicKey;
+
+/// Alternative name for [`PrivateKey`] using the `FORMAT.md` identity
+/// vocabulary. Identical type — choose whichever name reads more
+/// naturally at the call site.
+pub type IdentityKey = PrivateKey;
+
 /// Configuration for [`symmetric_encrypt`].
 ///
 /// Built via [`SymmetricEncryptConfig::new`]. Optional fields are set
 /// with builder-style methods. The struct is `#[non_exhaustive]` so
 /// future fields can be added without a breaking change.
+#[deprecated(note = "use Encryptor::with_passphrase().write(); see RESTRUCTURE_PLAN.md")]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct SymmetricEncryptConfig {
@@ -201,6 +207,7 @@ pub struct SymmetricEncryptConfig {
     pub save_as: Option<PathBuf>,
 }
 
+#[allow(deprecated)]
 impl SymmetricEncryptConfig {
     /// Starts a config with the required fields. `save_as` defaults to
     /// `None`.
@@ -225,6 +232,7 @@ impl SymmetricEncryptConfig {
 }
 
 /// Configuration for [`symmetric_decrypt`].
+#[deprecated(note = "use Decryptor::open()/PassphraseDecryptor; see RESTRUCTURE_PLAN.md")]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct SymmetricDecryptConfig {
@@ -239,6 +247,7 @@ pub struct SymmetricDecryptConfig {
     pub kdf_limit: Option<KdfLimit>,
 }
 
+#[allow(deprecated)]
 impl SymmetricDecryptConfig {
     /// Starts a config with the required fields. `kdf_limit` defaults
     /// to `None`.
@@ -263,6 +272,7 @@ impl SymmetricDecryptConfig {
 }
 
 /// Configuration for [`hybrid_encrypt`].
+#[deprecated(note = "use Encryptor::with_recipient or with_recipients then .write(); see RESTRUCTURE_PLAN.md")]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct HybridEncryptConfig {
@@ -279,6 +289,7 @@ pub struct HybridEncryptConfig {
     pub save_as: Option<PathBuf>,
 }
 
+#[allow(deprecated)]
 impl HybridEncryptConfig {
     /// Starts a config with the required fields.
     pub fn new(
@@ -302,6 +313,7 @@ impl HybridEncryptConfig {
 }
 
 /// Configuration for [`hybrid_decrypt`].
+#[deprecated(note = "use Decryptor::open()/RecipientDecryptor; see RESTRUCTURE_PLAN.md")]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct HybridDecryptConfig {
@@ -318,6 +330,7 @@ pub struct HybridDecryptConfig {
     pub kdf_limit: Option<KdfLimit>,
 }
 
+#[allow(deprecated)]
 impl HybridDecryptConfig {
     /// Starts a config with the required fields. `kdf_limit` defaults
     /// to `None`.
@@ -343,7 +356,15 @@ impl HybridDecryptConfig {
     }
 }
 
-/// Configuration for [`generate_key_pair`].
+/// Configuration for the legacy `generate_key_pair(KeyGenConfig, ...)`
+/// signature. The new [`generate_key_pair`] takes
+/// `(output_dir, passphrase, on_event)` directly, so this struct is no
+/// longer threaded into any public function and exists only as a
+/// deprecated identifier for source-level compatibility during the
+/// transition.
+#[deprecated(
+    note = "use generate_key_pair(output_dir, passphrase, on_event); see RESTRUCTURE_PLAN.md"
+)]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct KeyGenConfig {
@@ -354,6 +375,7 @@ pub struct KeyGenConfig {
     pub passphrase: SecretString,
 }
 
+#[allow(deprecated)]
 impl KeyGenConfig {
     /// Starts a config with the required fields.
     pub fn new(output_dir: impl AsRef<Path>, passphrase: SecretString) -> Self {
@@ -392,98 +414,7 @@ pub struct KeyGenOutcome {
     pub fingerprint: String,
 }
 
-/// Reads the structural header of an `.fcr` file and classifies its
-/// encryption mode from the recipient list.
-///
-/// Returns `Ok(None)` if the path is a directory, the file is empty,
-/// or the first 4 bytes are not the FerroCrypt magic. These cases
-/// mean "this isn't a FerroCrypt file at all" — callers route to
-/// plaintext encrypt.
-///
-/// Returns `Ok(Some(EncryptionMode))` when the prefix matches and the
-/// header parses + classifies cleanly. The mode is derived from the
-/// recipient list per `FORMAT.md` §3.4 / §3.5 (one `argon2id` →
-/// `Symmetric`, one or more supported `x25519` → `Hybrid`); see
-/// [`recipient::classify_encryption_mode`] for the full rule set.
-///
-/// Returns `Err(InvalidFormat)` when the magic matches but the
-/// prefix or header is malformed (bad version / kind / flags,
-/// oversized `header_len`, malformed recipient entries, etc.). The
-/// detection pre-check therefore enforces the same structural
-/// invariants the decrypt path would, so bit-rotten or
-/// attacker-tampered files surface their specific diagnostic at
-/// detection time.
-///
-/// Returns `Err(...)` typed under the recipient classification rules
-/// when the recipient list is structurally valid but cannot be
-/// classified: `UnknownCriticalRecipient` for an unknown critical
-/// entry, `PassphraseRecipientMixed` for a mixed-passphrase file,
-/// `NoSupportedRecipient` for a list with no supported native entry.
-///
-/// Returns `Err(Io)` if the file cannot be opened or read.
-///
-/// **Detection is structural, not cryptographic.** No recipient
-/// unwrap runs (no Argon2id, no X25519 ECDH, no private-key
-/// operations), no header MAC is verified, and no payload bytes are
-/// decrypted. A canonical header that would later fail recipient
-/// unwrap or MAC verify still returns `Ok(Some(_))` here — those
-/// checks require running the full decrypt.
-pub fn detect_encryption_mode(
-    file_path: impl AsRef<Path>,
-) -> Result<Option<EncryptionMode>, CryptoError> {
-    use std::io::{Read, Seek, SeekFrom};
-    let path = file_path.as_ref();
-
-    // Short-circuit directories up-front so the behavior is uniform across
-    // platforms. Without this pre-check, Unix lets us open a directory and
-    // only fails at `read()` with `IsADirectory`, while Windows' `CreateFile`
-    // refuses to open directories outright (requires `FILE_FLAG_BACKUP_SEMANTICS`)
-    // and surfaces as `ERROR_ACCESS_DENIED` — indistinguishable from a real
-    // permission error. One explicit check, one answer, on every platform.
-    if path.is_dir() {
-        return Ok(None);
-    }
-
-    let mut file = std::fs::File::open(path)?;
-
-    // Peek the 4-byte magic. Anything that doesn't claim to be a
-    // FerroCrypt file (empty, too short, wrong magic) routes to
-    // plaintext-encrypt as `Ok(None)`. Once magic matches, `Ok(None)`
-    // is no longer reachable: a magic-claiming file must surface as
-    // a valid header or a typed structural error.
-    let mut magic_buf = [0u8; format::MAGIC_SIZE];
-    let mut filled = 0;
-    while filled < magic_buf.len() {
-        match file.read(&mut magic_buf[filled..]) {
-            Ok(0) => break,
-            Ok(n) => filled += n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            // Defensive: on Unix, a TOCTOU race could swap the pre-checked
-            // path for a directory between `is_dir()` and `File::open()`.
-            // Keep the runtime handler so the race is still classified
-            // correctly instead of surfacing as a generic I/O error.
-            Err(e) if e.kind() == std::io::ErrorKind::IsADirectory => return Ok(None),
-            Err(e) => return Err(CryptoError::Io(e)),
-        }
-    }
-    if filled < magic_buf.len() || magic_buf != format::MAGIC {
-        return Ok(None);
-    }
-
-    // Magic matched. Rewind the same handle and run the structural
-    // reader against the full prefix + header. Using `seek` instead
-    // of dropping and re-opening avoids both an extra syscall and a
-    // TOCTOU window where the path could be swapped between checks.
-    file.seek(SeekFrom::Start(0))?;
-    let parsed =
-        container::read_encrypted_header(&mut file, container::HeaderReadLimits::default())?;
-
-    // Structural classification only. `classify_encryption_mode`
-    // does not verify the header MAC or run any recipient unwrap.
-    let mode = recipient::classify_encryption_mode(&parsed.recipient_entries)?;
-    Ok(Some(mode))
-}
-
+mod api;
 mod archiver;
 mod container;
 mod crypto;
@@ -526,92 +457,25 @@ pub fn decode_recipient(recipient: &str) -> Result<[u8; 32], CryptoError> {
     Ok(bytes)
 }
 
-/// Validates that a file is a well-formed FerroCrypt `private.key` file.
-///
-/// Checks magic bytes, version, type, algorithm, `ext_len` bound, and
-/// total file size. Does **not** attempt to decrypt the key (no
-/// passphrase needed). If the caller accidentally points this at a
-/// text `public.key`, the friendly
-/// [`FormatDefect::WrongKeyFileType`] surfaces instead of a generic
-/// `NotAKeyFile`.
-pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError> {
-    let data = std::fs::read(key_file.as_ref()).map_err(fs::paths::map_user_path_io_error)?;
-    if matches!(
-        key::files::KeyFileKind::classify(&data),
-        key::files::KeyFileKind::Public
-    ) {
-        return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
-    }
-    recipient::native::x25519::validate_private_key_shape(&data)
-}
+// ─── Deprecated operation API ─────────────────────────────────────────────
 
-/// Validates that a file is a well-formed FerroCrypt `public.key`
-/// text file.
-///
-/// Checks the canonical `fcr1…` recipient string grammar (Bech32
-/// checksum, HRP, algorithm byte, key-material length). Does
-/// **not** require any passphrase. If the caller accidentally
-/// points this at a binary `private.key`, the friendly
-/// [`FormatDefect::WrongKeyFileType`] surfaces instead of a UTF-8
-/// decode error.
-///
-/// Symmetric to [`validate_private_key_file`]; thin wrapper
-/// around [`PublicKey::from_key_file`] + [`PublicKey::validate`]
-/// for callers who already have a path and want a free function.
-pub fn validate_public_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError> {
-    PublicKey::from_key_file(key_file).validate()
-}
-
-/// Returns the default encrypted filename for a given input path (e.g. `"secrets.fcr"`).
-/// For files, uses the stem (without extension). For directories, uses the full name.
-pub fn default_encrypted_filename(input_path: impl AsRef<Path>) -> Result<String, CryptoError> {
-    let base_name = fs::paths::encryption_base_name(input_path)?;
-    Ok(format!("{}.{}", base_name, ENCRYPTED_EXTENSION))
-}
-
-fn validate_passphrase(passphrase: &SecretString) -> Result<(), CryptoError> {
-    if passphrase.expose_secret().is_empty() {
-        return Err(CryptoError::InvalidInput(
-            "Passphrase must not be empty".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_input_path(input_path: &Path) -> Result<(), CryptoError> {
-    if !input_path.exists() {
-        return Err(CryptoError::InputPath);
-    }
-    Ok(())
-}
-
-// ─── Operation API ────────────────────────────────────────────────────────
-
-/// Encrypts a file or directory with password-based symmetric encryption.
-///
-/// # Examples
-///
-/// ```no_run
-/// use ferrocrypt::{symmetric_encrypt, SymmetricEncryptConfig, secrecy::SecretString};
-///
-/// let passphrase = SecretString::from("my-secret-password".to_string());
-/// let config = SymmetricEncryptConfig::new("./document.txt", "./encrypted", passphrase);
-/// let outcome = symmetric_encrypt(config, |ev| eprintln!("{ev}"))?;
-/// println!("Encrypted to {}", outcome.output_path.display());
-/// # Ok::<(), ferrocrypt::CryptoError>(())
-/// ```
+/// Encrypts a file or directory with password-based symmetric
+/// encryption. Replaced by [`Encryptor::with_passphrase`].
+#[deprecated(note = "use Encryptor::with_passphrase().write(); see RESTRUCTURE_PLAN.md")]
+#[allow(deprecated)]
 pub fn symmetric_encrypt(
     config: SymmetricEncryptConfig,
     on_event: impl Fn(&ProgressEvent),
 ) -> Result<EncryptOutcome, CryptoError> {
-    validate_passphrase(&config.passphrase)?;
+    api::validate_passphrase(&config.passphrase)?;
     archiver::validate_encrypt_input(&config.input)?;
     let recipient = recipient::argon2id::PassphraseRecipient {
         passphrase: &config.passphrase,
         kdf_params: crypto::kdf::KdfParams::default(),
     };
     let output_path = protocol::encrypt(
-        &recipient,
+        std::slice::from_ref(&recipient),
+        archiver::ArchiveLimits::default(),
         &config.input,
         &config.output_dir,
         config.save_as.as_deref(),
@@ -620,13 +484,16 @@ pub fn symmetric_encrypt(
     Ok(EncryptOutcome { output_path })
 }
 
-/// Decrypts a symmetric-encrypted `.fcr` file.
+/// Decrypts a symmetric-encrypted `.fcr` file. Replaced by
+/// [`Decryptor::open`] returning a [`PassphraseDecryptor`].
+#[deprecated(note = "use Decryptor::open()/PassphraseDecryptor; see RESTRUCTURE_PLAN.md")]
+#[allow(deprecated)]
 pub fn symmetric_decrypt(
     config: SymmetricDecryptConfig,
     on_event: impl Fn(&ProgressEvent),
 ) -> Result<DecryptOutcome, CryptoError> {
-    validate_passphrase(&config.passphrase)?;
-    validate_input_path(&config.input)?;
+    api::validate_passphrase(&config.passphrase)?;
+    api::validate_input_path(&config.input)?;
     let identity = recipient::argon2id::PassphraseIdentity {
         passphrase: &config.passphrase,
         kdf_limit: config.kdf_limit.as_ref(),
@@ -636,25 +503,11 @@ pub fn symmetric_decrypt(
     Ok(DecryptOutcome { output_path })
 }
 
-/// Encrypts a file or directory with hybrid (X25519 + XChaCha20-Poly1305)
-/// envelope encryption.
-///
-/// The recipient is supplied as a [`PublicKey`] inside
-/// [`HybridEncryptConfig`]. The `PublicKey` can wrap a public-key file
-/// path, raw 32-byte key material, or a decoded Bech32 `fcr1…` string
-/// — see [`PublicKey`] for the available constructors.
-///
-/// # Examples
-///
-/// ```no_run
-/// use ferrocrypt::{hybrid_encrypt, HybridEncryptConfig, PublicKey};
-///
-/// let public_key = PublicKey::from_key_file("./keys/public.key");
-/// let config = HybridEncryptConfig::new("./payload", "./out", public_key);
-/// let outcome = hybrid_encrypt(config, |ev| eprintln!("{ev}"))?;
-/// println!("Encrypted to {}", outcome.output_path.display());
-/// # Ok::<(), ferrocrypt::CryptoError>(())
-/// ```
+/// Encrypts a file or directory with hybrid (X25519 +
+/// XChaCha20-Poly1305) envelope encryption. Replaced by
+/// [`Encryptor::with_recipient`] / [`Encryptor::with_recipients`].
+#[deprecated(note = "use Encryptor::with_recipient or with_recipients then .write(); see RESTRUCTURE_PLAN.md")]
+#[allow(deprecated)]
 pub fn hybrid_encrypt(
     config: HybridEncryptConfig,
     on_event: impl Fn(&ProgressEvent),
@@ -665,7 +518,8 @@ pub fn hybrid_encrypt(
         recipient_pubkey: &public_key_bytes,
     };
     let output_path = protocol::encrypt(
-        &recipient,
+        std::slice::from_ref(&recipient),
+        archiver::ArchiveLimits::default(),
         &config.input,
         &config.output_dir,
         config.save_as.as_deref(),
@@ -674,13 +528,16 @@ pub fn hybrid_encrypt(
     Ok(EncryptOutcome { output_path })
 }
 
-/// Decrypts a hybrid-encrypted `.fcr` file.
+/// Decrypts a hybrid-encrypted `.fcr` file. Replaced by
+/// [`Decryptor::open`] returning a [`RecipientDecryptor`].
+#[deprecated(note = "use Decryptor::open()/RecipientDecryptor; see RESTRUCTURE_PLAN.md")]
+#[allow(deprecated)]
 pub fn hybrid_decrypt(
     config: HybridDecryptConfig,
     on_event: impl Fn(&ProgressEvent),
 ) -> Result<DecryptOutcome, CryptoError> {
-    validate_passphrase(&config.passphrase)?;
-    validate_input_path(&config.input)?;
+    api::validate_passphrase(&config.passphrase)?;
+    api::validate_input_path(&config.input)?;
     on_event(&ProgressEvent::DerivingKey);
     let recipient_secret = recipient::native::x25519::open_x25519_private_key(
         config.private_key.key_file_path(),
@@ -690,39 +547,6 @@ pub fn hybrid_decrypt(
     let identity = recipient::x25519::X25519Identity { recipient_secret };
     let output_path = protocol::decrypt(&identity, &config.input, &config.output_dir, &on_event)?;
     Ok(DecryptOutcome { output_path })
-}
-
-// ─── Key generation ───────────────────────────────────────────────────────
-
-/// Generates and stores an X25519 key pair for hybrid encryption.
-///
-/// Keys are written into `config.output_dir` as `private.key` and
-/// `public.key`. The passphrase encrypts the private key file at rest.
-///
-/// # Examples
-///
-/// ```no_run
-/// use ferrocrypt::{generate_key_pair, KeyGenConfig, secrecy::SecretString};
-///
-/// let passphrase = SecretString::from("protect-my-secret-key".to_string());
-/// let config = KeyGenConfig::new("./my_keys", passphrase);
-/// let outcome = generate_key_pair(config, |ev| eprintln!("{ev}"))?;
-/// println!("Public key fingerprint: {}", outcome.fingerprint);
-/// # Ok::<(), ferrocrypt::CryptoError>(())
-/// ```
-pub fn generate_key_pair(
-    config: KeyGenConfig,
-    on_event: impl Fn(&ProgressEvent),
-) -> Result<KeyGenOutcome, CryptoError> {
-    validate_passphrase(&config.passphrase)?;
-    let (private_key_path, public_key_path) =
-        protocol::generate_key_pair(&config.passphrase, &config.output_dir, &on_event)?;
-    let fingerprint = PublicKey::from_key_file(&public_key_path).fingerprint()?;
-    Ok(KeyGenOutcome {
-        private_key_path,
-        public_key_path,
-        fingerprint,
-    })
 }
 
 #[cfg(test)]
@@ -852,8 +676,11 @@ mod tests {
     /// `SecretString` implements Debug as a redaction marker; this test
     /// pins the invariant against accidental `#[derive(Debug)]` drift
     /// (e.g. replacing the `SecretString` field with a raw `String`)
-    /// for every current passphrase-carrying config.
+    /// for every current passphrase-carrying config. Until the
+    /// deprecated `*Config` types are deleted in step 10 the
+    /// regression coverage stays here.
     #[test]
+    #[allow(deprecated)]
     fn config_debug_does_not_leak_passphrase() {
         const PASSPHRASE: &str = "super-secret-passphrase";
         let pass = || SecretString::from(PASSPHRASE.to_string());

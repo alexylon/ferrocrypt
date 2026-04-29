@@ -1,14 +1,19 @@
+// Step 9 of the lib restructure migrates the CLI off the deprecated free
+// functions onto `Encryptor` / `Decryptor`. Step 8 keeps the old call
+// sites here so the diff stays small; allow the deprecation warnings
+// at the module level until that migration lands.
+#![allow(deprecated)]
+
 use std::io::{IsTerminal, stdin};
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use ferrocrypt::secrecy::{ExposeSecret, SecretString};
 use ferrocrypt::{
-    CryptoError, HybridDecryptConfig, HybridEncryptConfig, KdfLimit, KeyGenConfig,
-    PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME, PrivateKey, PublicKey, SymmetricDecryptConfig,
-    SymmetricEncryptConfig, default_encrypted_filename, detect_encryption_mode, generate_key_pair,
-    hybrid_decrypt, hybrid_encrypt, symmetric_decrypt, symmetric_encrypt,
-    validate_private_key_file,
+    CryptoError, HybridDecryptConfig, HybridEncryptConfig, KdfLimit, PRIVATE_KEY_FILENAME,
+    PUBLIC_KEY_FILENAME, PrivateKey, PublicKey, SymmetricDecryptConfig, SymmetricEncryptConfig,
+    default_encrypted_filename, detect_encryption_mode, generate_key_pair, hybrid_decrypt,
+    hybrid_encrypt, symmetric_decrypt, symmetric_encrypt, validate_private_key_file,
 };
 use rpassword::prompt_password;
 use rustyline::DefaultEditor;
@@ -309,9 +314,7 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
             let output_path = Path::new(&output_path);
             check_keygen_conflict(output_path)?;
             let passphrase = read_passphrase(true)?;
-            let outcome = generate_key_pair(KeyGenConfig::new(output_path, passphrase), |ev| {
-                eprintln!("{ev}")
-            })?;
+            let outcome = generate_key_pair(output_path, passphrase, |ev| eprintln!("{ev}"))?;
             let recipient =
                 PublicKey::from_key_file(&outcome.public_key_path).to_recipient_string()?;
             println!("\nGenerated key pair in {}\n", output_path.display());

@@ -1,10 +1,10 @@
 //! File-key generation, payload/header subkey derivation, and shared
 //! key-size constants.
 //!
-//! Both symmetric and hybrid `.fcr` modes produce one per-file random
-//! `file_key`; the recipient body wraps it, and [`derive_subkeys`]
-//! derives the payload AEAD key and header MAC key from it. A
-//! compromise of one subkey does not reveal the other.
+//! Every `.fcr` produces exactly one per-file random `file_key`,
+//! regardless of recipient kind; each recipient entry wraps it, and
+//! [`derive_subkeys`] derives the payload AEAD key and header MAC key
+//! from it. A compromise of one subkey does not reveal the other.
 //!
 //! ## Typed key newtypes
 //!
@@ -27,9 +27,9 @@ use crate::crypto::mac::HMAC_KEY_SIZE;
 /// XChaCha20-Poly1305 key size in bytes.
 pub const ENCRYPTION_KEY_SIZE: usize = 32;
 
-/// Size of the per-file random key that both symmetric and hybrid
-/// `.fcr` modes wrap via their mode envelope. Post-unwrap subkey
-/// derivation keys off this value; see [`derive_subkeys`].
+/// Size of the per-file random key that every `.fcr` wraps via its
+/// recipient entries. Post-unwrap subkey derivation keys off this
+/// value; see [`derive_subkeys`].
 pub const FILE_KEY_SIZE: usize = 32;
 
 /// HKDF info for the per-file payload AEAD key, derived from
@@ -58,8 +58,8 @@ pub fn random_secret<const N: usize>() -> Zeroizing<[u8; N]> {
     buf
 }
 
-/// Per-file random key. Both symmetric and hybrid `.fcr` modes
-/// produce one of these per file; the recipient body wraps it, and
+/// Per-file random key. Every `.fcr` produces one of these regardless
+/// of recipient kind; each recipient entry wraps it, and
 /// [`derive_subkeys`] derives the payload AEAD key and header MAC key
 /// from its bytes.
 ///

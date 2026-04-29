@@ -314,38 +314,53 @@ fn test_hybrid_keygen_rejects_empty_passphrase() {
     );
 }
 
-/// M-3 regression: `hybrid_decrypt` must reject an empty passphrase at the
-/// top of the function, before `validate_input_path` and before any KDF work
-/// runs. The symmetric path already did this pre-audit; the hybrid path was
-/// a consistency gap that let an empty passphrase burn an Argon2id cycle on
-/// the private-key file before failing. Pinned to the deprecated free
-/// function until step 10 removes it; the analogous coverage for the new
-/// API lives alongside `Decryptor::open`.
+/// M-3 regression: `RecipientDecryptor::decrypt` must reject an empty
+/// passphrase at the top of the function, before `open_x25519_private_key`
+/// and any KDF work runs. Pre-restructure the hybrid path was a
+/// consistency gap that let an empty passphrase burn an Argon2id cycle
+/// on the private-key file before failing.
 #[test]
-#[allow(deprecated)]
-fn test_hybrid_decrypt_rejects_empty_passphrase_before_kdf() {
-    use ferrocrypt::{HybridDecryptConfig, PrivateKey, ProgressEvent, hybrid_decrypt};
+fn test_recipient_decrypt_rejects_empty_passphrase_before_kdf() {
+    use ferrocrypt::{
+        Decryptor, Encryptor, PrivateKey, ProgressEvent, PublicKey, generate_key_pair,
+    };
     use std::cell::Cell;
 
-    let test_dir = setup_test_dir("hybrid_decrypt_empty_pass");
-    let empty = SecretString::from("".to_string());
+    let test_dir = setup_test_dir("recipient_decrypt_empty_pass");
+    let keys_dir = test_dir.join("keys");
+    fs::create_dir_all(&keys_dir).unwrap();
 
-    // The input and key file paths are not resolved — the passphrase check
-    // must fire first, so the paths can be placeholders that do not exist.
-    let config = HybridDecryptConfig::new(
-        test_dir.join("nonexistent.fcr"),
-        &test_dir,
-        PrivateKey::from_key_file(test_dir.join("nonexistent.key")),
-        empty,
-    );
+    // Build a real hybrid `.fcr` so `Decryptor::open` returns the
+    // `Recipient` variant. Setup `DerivingKey` events fire here, before
+    // we install the observing closure.
+    let setup_pass = SecretString::from("setup-pass".to_string());
+    let kg = generate_key_pair(&keys_dir, setup_pass, |_| {}).expect("generate fixture key pair");
+    let input = test_dir.join("data.txt");
+    fs::write(&input, b"x").unwrap();
+    let encrypted_dir = test_dir.join("encrypted");
+    fs::create_dir_all(&encrypted_dir).unwrap();
+    let outcome = Encryptor::with_recipient(PublicKey::from_key_file(&kg.public_key_path))
+        .write(&input, &encrypted_dir, |_| {})
+        .expect("encrypt fixture file");
 
+    let restore_dir = test_dir.join("restored");
+    fs::create_dir_all(&restore_dir).unwrap();
     let saw_deriving = Cell::new(false);
-    let err = hybrid_decrypt(config, |ev| {
-        if matches!(ev, ProgressEvent::DerivingKey) {
-            saw_deriving.set(true);
-        }
-    })
-    .unwrap_err();
+    let err = match Decryptor::open(&outcome.output_path).expect("open") {
+        Decryptor::Recipient(d) => d
+            .decrypt(
+                PrivateKey::from_key_file(&kg.private_key_path),
+                SecretString::from(String::new()),
+                &restore_dir,
+                |ev| {
+                    if matches!(ev, ProgressEvent::DerivingKey) {
+                        saw_deriving.set(true);
+                    }
+                },
+            )
+            .unwrap_err(),
+        other => panic!("expected Recipient decryptor, got {other:?}"),
+    };
 
     assert!(
         err.to_string().contains("empty"),
@@ -357,23 +372,20 @@ fn test_hybrid_decrypt_rejects_empty_passphrase_before_kdf() {
     );
 }
 
-/// M-4 regression: `symmetric_encrypt` must reject a symlink input with a
-/// typed `InvalidInput` error *before* kicking off Argon2id. Pre-audit the
-/// rejection happened inside `archiver::archive`, which runs after the KDF
-/// — an accidental symlink cost the user seconds and up to 1 GiB of RAM.
-/// Observes the `DerivingKey` progress event to prove the rejection
-/// short-circuits the KDF path. Pinned to the deprecated free function
-/// until step 10 removes it; the analogous coverage for the new API
-/// lives alongside `Encryptor::write`.
+/// M-4 regression: `Encryptor::write` must reject a symlink input with
+/// a typed `InvalidInput` error *before* kicking off Argon2id. Pre-audit
+/// the rejection happened inside `archiver::archive`, which runs after
+/// the KDF — an accidental symlink cost the user seconds and up to 1 GiB
+/// of RAM. Observes the `DerivingKey` progress event to prove the
+/// rejection short-circuits the KDF path.
 #[cfg(unix)]
 #[test]
-#[allow(deprecated)]
-fn test_symmetric_encrypt_rejects_symlink_before_kdf() {
-    use ferrocrypt::{ProgressEvent, SymmetricEncryptConfig, symmetric_encrypt};
+fn test_passphrase_encrypt_rejects_symlink_before_kdf() {
+    use ferrocrypt::{Encryptor, ProgressEvent};
     use std::cell::Cell;
     use std::os::unix::fs::symlink;
 
-    let test_dir = setup_test_dir("symmetric_encrypt_symlink");
+    let test_dir = setup_test_dir("passphrase_encrypt_symlink");
     let target = create_test_file(&test_dir.join("real.txt"), "data");
     let link = test_dir.join("link.txt");
     symlink(&target, &link).expect("failed to create symlink");
@@ -382,14 +394,14 @@ fn test_symmetric_encrypt_rejects_symlink_before_kdf() {
     fs::create_dir_all(&output_dir).unwrap();
     let passphrase = SecretString::from("pass".to_string());
 
-    let config = SymmetricEncryptConfig::new(&link, &output_dir, passphrase);
     let saw_deriving = Cell::new(false);
-    let err = symmetric_encrypt(config, |ev| {
-        if matches!(ev, ProgressEvent::DerivingKey) {
-            saw_deriving.set(true);
-        }
-    })
-    .unwrap_err();
+    let err = Encryptor::with_passphrase(passphrase)
+        .write(&link, &output_dir, |ev| {
+            if matches!(ev, ProgressEvent::DerivingKey) {
+                saw_deriving.set(true);
+            }
+        })
+        .unwrap_err();
 
     match err {
         CryptoError::InvalidInput(ref msg) => {
@@ -2602,7 +2614,7 @@ fn test_detect_valid_symmetric_file() -> Result<(), CryptoError> {
     let pass = SecretString::from("pw".to_string());
     let encrypted = symmetric_auto(&input, &dir, &pass, None, None, |_| {})?;
     let mode = detect_encryption_mode(&encrypted)?;
-    assert_eq!(mode, Some(ferrocrypt::EncryptionMode::Symmetric));
+    assert_eq!(mode, Some(ferrocrypt::EncryptionMode::Passphrase));
     Ok(())
 }
 

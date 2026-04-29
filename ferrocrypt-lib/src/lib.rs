@@ -108,9 +108,7 @@
 #[cfg(all(feature = "fast-kdf", not(debug_assertions)))]
 compile_error!("fast-kdf feature must not be used in release builds");
 
-use std::path::{Path, PathBuf};
-
-use secrecy::SecretString;
+use std::path::PathBuf;
 
 pub use crate::api::{
     Decryptor, Encryptor, PassphraseDecryptor, RecipientDecryptor, default_encrypted_filename,
@@ -125,14 +123,18 @@ pub use crate::recipient::policy::MixingPolicy;
 
 pub use secrecy;
 
-/// The encryption mode used to create an `.fcr` file.
+/// The encryption mode used to create an `.fcr` file. Classified from
+/// the recipient list per `FORMAT.md` §3.4 / §3.5.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EncryptionMode {
-    /// Password-based symmetric encryption (XChaCha20-Poly1305 + Argon2id).
-    Symmetric,
-    /// Public/private key hybrid encryption (X25519 + XChaCha20-Poly1305).
-    Hybrid,
+    /// File is sealed by exactly one `argon2id` recipient — the user
+    /// decrypts with a passphrase.
+    Passphrase,
+    /// File is sealed to one or more `x25519` public-key recipients —
+    /// the user decrypts with a `PrivateKey` whose public material
+    /// matches one of the recipient slots.
+    Recipient,
 }
 
 /// Structured progress signal emitted during encrypt, decrypt, and key
@@ -151,7 +153,9 @@ pub enum EncryptionMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ProgressEvent {
-    /// Argon2id or hybrid KDF is running and may block for multiple seconds.
+    /// Argon2id is running (passphrase wrap-key derivation, or
+    /// `private.key` unlock on the recipient decrypt path) and may
+    /// block for multiple seconds.
     DerivingKey,
     /// Encrypting a payload. Emitted once per encrypt call.
     Encrypting,
@@ -186,209 +190,7 @@ pub type RecipientKey = PublicKey;
 /// naturally at the call site.
 pub type IdentityKey = PrivateKey;
 
-/// Configuration for [`symmetric_encrypt`].
-///
-/// Built via [`SymmetricEncryptConfig::new`]. Optional fields are set
-/// with builder-style methods. The struct is `#[non_exhaustive]` so
-/// future fields can be added without a breaking change.
-#[deprecated(note = "use Encryptor::with_passphrase().write(); see RESTRUCTURE_PLAN.md")]
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct SymmetricEncryptConfig {
-    /// Input file or directory to encrypt.
-    pub input: PathBuf,
-    /// Destination directory for the encrypted output. Ignored when
-    /// [`save_as`](Self::save_as) is set.
-    pub output_dir: PathBuf,
-    /// Password that drives the Argon2id KDF.
-    pub passphrase: SecretString,
-    /// Explicit output file path. Overrides the default
-    /// `{stem}.fcr` naming inside `output_dir`.
-    pub save_as: Option<PathBuf>,
-}
-
-#[allow(deprecated)]
-impl SymmetricEncryptConfig {
-    /// Starts a config with the required fields. `save_as` defaults to
-    /// `None`.
-    pub fn new(
-        input: impl AsRef<Path>,
-        output_dir: impl AsRef<Path>,
-        passphrase: SecretString,
-    ) -> Self {
-        Self {
-            input: input.as_ref().to_path_buf(),
-            output_dir: output_dir.as_ref().to_path_buf(),
-            passphrase,
-            save_as: None,
-        }
-    }
-
-    /// Sets the explicit output file path.
-    pub fn save_as(mut self, path: impl AsRef<Path>) -> Self {
-        self.save_as = Some(path.as_ref().to_path_buf());
-        self
-    }
-}
-
-/// Configuration for [`symmetric_decrypt`].
-#[deprecated(note = "use Decryptor::open()/PassphraseDecryptor; see RESTRUCTURE_PLAN.md")]
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct SymmetricDecryptConfig {
-    /// Input `.fcr` file produced by symmetric encryption.
-    pub input: PathBuf,
-    /// Directory into which the decrypted output is written.
-    pub output_dir: PathBuf,
-    /// Password that drives the Argon2id KDF.
-    pub passphrase: SecretString,
-    /// Optional cap on the KDF memory cost accepted from the file header.
-    /// `None` uses the built-in default ceiling.
-    pub kdf_limit: Option<KdfLimit>,
-}
-
-#[allow(deprecated)]
-impl SymmetricDecryptConfig {
-    /// Starts a config with the required fields. `kdf_limit` defaults
-    /// to `None`.
-    pub fn new(
-        input: impl AsRef<Path>,
-        output_dir: impl AsRef<Path>,
-        passphrase: SecretString,
-    ) -> Self {
-        Self {
-            input: input.as_ref().to_path_buf(),
-            output_dir: output_dir.as_ref().to_path_buf(),
-            passphrase,
-            kdf_limit: None,
-        }
-    }
-
-    /// Sets the KDF memory-cost ceiling.
-    pub fn kdf_limit(mut self, limit: KdfLimit) -> Self {
-        self.kdf_limit = Some(limit);
-        self
-    }
-}
-
-/// Configuration for [`hybrid_encrypt`].
-#[deprecated(
-    note = "use Encryptor::with_recipient or with_recipients then .write(); see RESTRUCTURE_PLAN.md"
-)]
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct HybridEncryptConfig {
-    /// Input file or directory to encrypt.
-    pub input: PathBuf,
-    /// Destination directory for the encrypted output. Ignored when
-    /// [`save_as`](Self::save_as) is set.
-    pub output_dir: PathBuf,
-    /// Recipient's X25519 public key. Used to wrap the per-file
-    /// encryption key via the envelope construction.
-    pub public_key: PublicKey,
-    /// Explicit output file path. Overrides the default
-    /// `{stem}.fcr` naming inside `output_dir`.
-    pub save_as: Option<PathBuf>,
-}
-
-#[allow(deprecated)]
-impl HybridEncryptConfig {
-    /// Starts a config with the required fields.
-    pub fn new(
-        input: impl AsRef<Path>,
-        output_dir: impl AsRef<Path>,
-        public_key: PublicKey,
-    ) -> Self {
-        Self {
-            input: input.as_ref().to_path_buf(),
-            output_dir: output_dir.as_ref().to_path_buf(),
-            public_key,
-            save_as: None,
-        }
-    }
-
-    /// Sets the explicit output file path.
-    pub fn save_as(mut self, path: impl AsRef<Path>) -> Self {
-        self.save_as = Some(path.as_ref().to_path_buf());
-        self
-    }
-}
-
-/// Configuration for [`hybrid_decrypt`].
-#[deprecated(note = "use Decryptor::open()/RecipientDecryptor; see RESTRUCTURE_PLAN.md")]
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct HybridDecryptConfig {
-    /// Input `.fcr` file produced by hybrid encryption.
-    pub input: PathBuf,
-    /// Directory into which the decrypted output is written.
-    pub output_dir: PathBuf,
-    /// Recipient's private key.
-    pub private_key: PrivateKey,
-    /// Passphrase that unlocks the private key.
-    pub passphrase: SecretString,
-    /// Optional cap on the KDF memory cost accepted when unlocking
-    /// the private key. `None` uses the built-in default ceiling.
-    pub kdf_limit: Option<KdfLimit>,
-}
-
-#[allow(deprecated)]
-impl HybridDecryptConfig {
-    /// Starts a config with the required fields. `kdf_limit` defaults
-    /// to `None`.
-    pub fn new(
-        input: impl AsRef<Path>,
-        output_dir: impl AsRef<Path>,
-        private_key: PrivateKey,
-        passphrase: SecretString,
-    ) -> Self {
-        Self {
-            input: input.as_ref().to_path_buf(),
-            output_dir: output_dir.as_ref().to_path_buf(),
-            private_key,
-            passphrase,
-            kdf_limit: None,
-        }
-    }
-
-    /// Sets the KDF memory-cost ceiling for unlocking the private key.
-    pub fn kdf_limit(mut self, limit: KdfLimit) -> Self {
-        self.kdf_limit = Some(limit);
-        self
-    }
-}
-
-/// Configuration for the legacy `generate_key_pair(KeyGenConfig, ...)`
-/// signature. The new [`generate_key_pair`] takes
-/// `(output_dir, passphrase, on_event)` directly, so this struct is no
-/// longer threaded into any public function and exists only as a
-/// deprecated identifier for source-level compatibility during the
-/// transition.
-#[deprecated(
-    note = "use generate_key_pair(output_dir, passphrase, on_event); see RESTRUCTURE_PLAN.md"
-)]
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct KeyGenConfig {
-    /// Directory into which the `private.key` and `public.key` files
-    /// are written.
-    pub output_dir: PathBuf,
-    /// Passphrase that encrypts the private-key file at rest.
-    pub passphrase: SecretString,
-}
-
-#[allow(deprecated)]
-impl KeyGenConfig {
-    /// Starts a config with the required fields.
-    pub fn new(output_dir: impl AsRef<Path>, passphrase: SecretString) -> Self {
-        Self {
-            output_dir: output_dir.as_ref().to_path_buf(),
-            passphrase,
-        }
-    }
-}
-
-/// Successful outcome of a symmetric or hybrid encrypt operation.
+/// Successful outcome of an [`Encryptor::write`] call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct EncryptOutcome {
@@ -396,7 +198,8 @@ pub struct EncryptOutcome {
     pub output_path: PathBuf,
 }
 
-/// Successful outcome of a symmetric or hybrid decrypt operation.
+/// Successful outcome of [`PassphraseDecryptor::decrypt`] or
+/// [`RecipientDecryptor::decrypt`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DecryptOutcome {
@@ -459,111 +262,17 @@ pub fn decode_recipient(recipient: &str) -> Result<[u8; 32], CryptoError> {
     Ok(bytes)
 }
 
-// ─── Deprecated operation API ─────────────────────────────────────────────
-
-/// Encrypts a file or directory with password-based symmetric
-/// encryption. Replaced by [`Encryptor::with_passphrase`].
-#[deprecated(note = "use Encryptor::with_passphrase().write(); see RESTRUCTURE_PLAN.md")]
-#[allow(deprecated)]
-pub fn symmetric_encrypt(
-    config: SymmetricEncryptConfig,
-    on_event: impl Fn(&ProgressEvent),
-) -> Result<EncryptOutcome, CryptoError> {
-    api::validate_passphrase(&config.passphrase)?;
-    archiver::validate_encrypt_input(&config.input)?;
-    let recipient = recipient::argon2id::PassphraseRecipient {
-        passphrase: &config.passphrase,
-        kdf_params: crypto::kdf::KdfParams::default(),
-    };
-    let output_path = protocol::encrypt(
-        std::slice::from_ref(&recipient),
-        archiver::ArchiveLimits::default(),
-        &config.input,
-        &config.output_dir,
-        config.save_as.as_deref(),
-        &on_event,
-    )?;
-    Ok(EncryptOutcome { output_path })
-}
-
-/// Decrypts a symmetric-encrypted `.fcr` file. Replaced by
-/// [`Decryptor::open`] returning a [`PassphraseDecryptor`].
-#[deprecated(note = "use Decryptor::open()/PassphraseDecryptor; see RESTRUCTURE_PLAN.md")]
-#[allow(deprecated)]
-pub fn symmetric_decrypt(
-    config: SymmetricDecryptConfig,
-    on_event: impl Fn(&ProgressEvent),
-) -> Result<DecryptOutcome, CryptoError> {
-    api::validate_passphrase(&config.passphrase)?;
-    api::validate_input_path(&config.input)?;
-    let identity = recipient::argon2id::PassphraseIdentity {
-        passphrase: &config.passphrase,
-        kdf_limit: config.kdf_limit.as_ref(),
-    };
-    on_event(&ProgressEvent::DerivingKey);
-    let output_path = protocol::decrypt(&identity, &config.input, &config.output_dir, &on_event)?;
-    Ok(DecryptOutcome { output_path })
-}
-
-/// Encrypts a file or directory with hybrid (X25519 +
-/// XChaCha20-Poly1305) envelope encryption. Replaced by
-/// [`Encryptor::with_recipient`] / [`Encryptor::with_recipients`].
-#[deprecated(
-    note = "use Encryptor::with_recipient or with_recipients then .write(); see RESTRUCTURE_PLAN.md"
-)]
-#[allow(deprecated)]
-pub fn hybrid_encrypt(
-    config: HybridEncryptConfig,
-    on_event: impl Fn(&ProgressEvent),
-) -> Result<EncryptOutcome, CryptoError> {
-    archiver::validate_encrypt_input(&config.input)?;
-    let public_key_bytes = config.public_key.to_bytes()?;
-    let recipient = recipient::x25519::X25519Recipient {
-        recipient_pubkey: &public_key_bytes,
-    };
-    let output_path = protocol::encrypt(
-        std::slice::from_ref(&recipient),
-        archiver::ArchiveLimits::default(),
-        &config.input,
-        &config.output_dir,
-        config.save_as.as_deref(),
-        &on_event,
-    )?;
-    Ok(EncryptOutcome { output_path })
-}
-
-/// Decrypts a hybrid-encrypted `.fcr` file. Replaced by
-/// [`Decryptor::open`] returning a [`RecipientDecryptor`].
-#[deprecated(note = "use Decryptor::open()/RecipientDecryptor; see RESTRUCTURE_PLAN.md")]
-#[allow(deprecated)]
-pub fn hybrid_decrypt(
-    config: HybridDecryptConfig,
-    on_event: impl Fn(&ProgressEvent),
-) -> Result<DecryptOutcome, CryptoError> {
-    api::validate_passphrase(&config.passphrase)?;
-    api::validate_input_path(&config.input)?;
-    on_event(&ProgressEvent::DerivingKey);
-    let recipient_secret = recipient::native::x25519::open_x25519_private_key(
-        config.private_key.key_file_path(),
-        &config.passphrase,
-        config.kdf_limit.as_ref(),
-    )?;
-    let identity = recipient::x25519::X25519Identity { recipient_secret };
-    let output_path = protocol::decrypt(&identity, &config.input, &config.output_dir, &on_event)?;
-    Ok(DecryptOutcome { output_path })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// Routes a `.fcr` file with a single `argon2id` recipient as
-    /// `EncryptionMode::Symmetric`, mirroring v1's "exactly one
-    /// argon2id => Symmetric" classification rule. Builds the file
-    /// via `container::build_encrypted_header` so the test
-    /// exercises the same byte path the real encrypt would write.
+    /// `EncryptionMode::Passphrase`, mirroring v1's "exactly one
+    /// argon2id => Passphrase" classification rule. Builds the file
+    /// via `container::build_encrypted_header` so the test exercises
+    /// the same byte path the real encrypt would write.
     #[test]
-    fn detect_encryption_mode_routes_argon2id_recipient_as_symmetric() {
+    fn detect_encryption_mode_routes_argon2id_recipient_as_passphrase() {
         let header_key =
             crypto::keys::HeaderKey::from_bytes_for_tests([0x42u8; crypto::mac::HMAC_KEY_SIZE]);
         let payload_key = crypto::keys::PayloadKey::from_bytes_for_tests(
@@ -593,14 +302,14 @@ mod tests {
 
         assert_eq!(
             detect_encryption_mode(tmp.path()).unwrap(),
-            Some(EncryptionMode::Symmetric)
+            Some(EncryptionMode::Passphrase)
         );
     }
 
     /// Routes a `.fcr` file with one `x25519` recipient as
-    /// `EncryptionMode::Hybrid`.
+    /// `EncryptionMode::Recipient`.
     #[test]
-    fn detect_encryption_mode_routes_x25519_recipient_as_hybrid() {
+    fn detect_encryption_mode_routes_x25519_recipient_as_recipient() {
         let header_key =
             crypto::keys::HeaderKey::from_bytes_for_tests([0x42u8; crypto::mac::HMAC_KEY_SIZE]);
         let payload_key = crypto::keys::PayloadKey::from_bytes_for_tests(
@@ -630,7 +339,7 @@ mod tests {
 
         assert_eq!(
             detect_encryption_mode(tmp.path()).unwrap(),
-            Some(EncryptionMode::Hybrid)
+            Some(EncryptionMode::Recipient)
         );
     }
 
@@ -672,59 +381,6 @@ mod tests {
         assert_eq!(
             ProgressEvent::GeneratingKeyPair.to_string(),
             "Generating key pair\u{2026}"
-        );
-    }
-
-    /// `Debug` on every config struct that holds a passphrase must not
-    /// leak the passphrase contents. The `secrecy` crate's
-    /// `SecretString` implements Debug as a redaction marker; this test
-    /// pins the invariant against accidental `#[derive(Debug)]` drift
-    /// (e.g. replacing the `SecretString` field with a raw `String`)
-    /// for every current passphrase-carrying config. Until the
-    /// deprecated `*Config` types are deleted in step 10 the
-    /// regression coverage stays here.
-    #[test]
-    #[allow(deprecated)]
-    fn config_debug_does_not_leak_passphrase() {
-        const PASSPHRASE: &str = "super-secret-passphrase";
-        let pass = || SecretString::from(PASSPHRASE.to_string());
-
-        let assert_no_leak = |rendered: String, label: &str| {
-            assert!(
-                !rendered.contains(PASSPHRASE),
-                "{label} leaked passphrase into Debug output: {rendered}"
-            );
-        };
-
-        assert_no_leak(
-            format!(
-                "{:?}",
-                SymmetricEncryptConfig::new("/tmp/in", "/tmp/out", pass())
-            ),
-            "SymmetricEncryptConfig",
-        );
-        assert_no_leak(
-            format!(
-                "{:?}",
-                SymmetricDecryptConfig::new("/tmp/in", "/tmp/out", pass())
-            ),
-            "SymmetricDecryptConfig",
-        );
-        assert_no_leak(
-            format!(
-                "{:?}",
-                HybridDecryptConfig::new(
-                    "/tmp/in",
-                    "/tmp/out",
-                    PrivateKey::from_key_file("/tmp/key"),
-                    pass(),
-                )
-            ),
-            "HybridDecryptConfig",
-        );
-        assert_no_leak(
-            format!("{:?}", KeyGenConfig::new("/tmp/dir", pass())),
-            "KeyGenConfig",
         );
     }
 }

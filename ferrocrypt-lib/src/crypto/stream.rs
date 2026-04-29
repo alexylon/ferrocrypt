@@ -375,8 +375,8 @@ impl<R: Read> Drop for DecryptReader<R> {
 /// Constructs an [`EncryptWriter`] for the per-file payload pipeline.
 ///
 /// Wraps the boilerplate `XChaCha20Poly1305::new` then
-/// `EncryptorBE32::from_aead` then `EncryptWriter::new` chain so
-/// symmetric, hybrid, and forward-compat test paths share a single
+/// `EncryptorBE32::from_aead` then `EncryptWriter::new` chain so the
+/// passphrase, recipient, and forward-compat test paths share a single
 /// source of truth for the payload-streaming constructor.
 ///
 /// `payload_key` and `stream_nonce` MUST come from the same successful

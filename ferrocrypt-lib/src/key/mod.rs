@@ -10,7 +10,7 @@
 //! - [`private`] — `private.key` binary layout, cleartext header
 //!   parsing, passphrase-wrapped secret encryption/decryption,
 //!   private-key TLV validation after authentication, and the
-//!   [`PrivateKey`] wrapper for hybrid decrypt sources.
+//!   [`PrivateKey`] wrapper for the recipient decrypt path.
 //! - [`files`] — filesystem-level key helpers (default filenames,
 //!   key-file classification, read/write wrappers, staging generated
 //!   key files). Populated in step 5 of the restructure plan;

@@ -192,7 +192,7 @@ fn build_native_entry(
 /// Iterates every supported recipient slot in declared order before
 /// emitting a final verdict. The slot loop is identical for the
 /// single-candidate (passphrase) and multi-candidate (X25519) cases —
-/// the symmetric path is just a slot loop of length 1. Visiting every
+/// the passphrase path is just a slot loop of length 1. Visiting every
 /// supported slot, rather than short-circuiting on the first MAC
 /// match, makes wall-clock cost a function of `recipient_count`
 /// (capped by `HeaderReadLimits`) rather than of which slot matched,
@@ -216,20 +216,20 @@ pub(crate) fn decrypt<I: IdentityScheme>(
     //    by name.
     let mode = classify_encryption_mode(&parsed.recipient_entries)?;
 
-    // Cross-mode mismatch: caller invoked the symmetric decrypt path
-    // on a hybrid-only file (or vice versa). The classified mode does
-    // not match the identity's scheme.
+    // Cross-mode mismatch: caller invoked the passphrase decrypt path
+    // on a recipient-only file (or vice versa). The classified mode
+    // does not match the identity's scheme.
     if !mode_matches_scheme::<I>(mode) {
         return Err(CryptoError::NoSupportedRecipient);
     }
 
-    // The caller (`lib::symmetric_decrypt` / `lib::hybrid_decrypt`) is
-    // responsible for emitting `DerivingKey` before the heaviest KDF
-    // op — for hybrid that's the `private.key` unlock (which runs
-    // before this function), for symmetric it's the slot-loop
-    // Argon2id (which runs inside this function). Emitting it once at
-    // the call site keeps the event count to one per decrypt
-    // regardless of mode.
+    // The caller (`PassphraseDecryptor::decrypt` / `RecipientDecryptor::decrypt`)
+    // is responsible for emitting `DerivingKey` before the heaviest KDF
+    // op — for the recipient path that's the `private.key` unlock
+    // (which runs before this function), for the passphrase path it's
+    // the slot-loop Argon2id (which runs inside this function).
+    // Emitting it once at the call site keeps the event count to one
+    // per decrypt regardless of mode.
 
     // 7-8. Iterate supported recipient slots. Per FORMAT.md §3.7 the
     //      candidate `file_key` is not final until the header MAC also
@@ -289,9 +289,9 @@ pub(crate) fn decrypt<I: IdentityScheme>(
     let Some(payload_key) = selected_payload_key else {
         // No slot produced a candidate that MAC-verified. The error
         // wording depends on (a) whether any slot AEAD-unwrapped at
-        // all, and (b) which mode the file is in — symmetric
+        // all, and (b) which mode the file is in — passphrase
         // single-recipient files surface bare `HeaderTampered` (no
-        // slot identity is meaningful), hybrid multi-slot files
+        // slot identity is meaningful), recipient multi-slot files
         // surface the per-candidate `HeaderMacFailedAfterUnwrap`.
         return Err(failure_for(mode, I::TYPE_NAME, had_successful_unwrap));
     };
@@ -310,21 +310,25 @@ pub(crate) fn decrypt<I: IdentityScheme>(
 /// Maps a classified mode to the identity scheme that should handle
 /// it. The orchestrator uses this to surface a friendly
 /// `NoSupportedRecipient` when a caller invokes the wrong decrypt
-/// entry point (e.g. `symmetric_decrypt` on a hybrid file).
+/// entry point (e.g. a `PassphraseDecryptor` against a recipient-sealed
+/// file).
 fn mode_matches_scheme<I: IdentityScheme>(mode: EncryptionMode) -> bool {
     matches!(
         (mode, I::TYPE_NAME),
         (
-            EncryptionMode::Symmetric,
+            EncryptionMode::Passphrase,
             crate::recipient::argon2id::TYPE_NAME
-        ) | (EncryptionMode::Hybrid, crate::recipient::x25519::TYPE_NAME)
+        ) | (
+            EncryptionMode::Recipient,
+            crate::recipient::x25519::TYPE_NAME
+        )
     )
 }
 
 /// Decrypt-time error wording when no slot produced a MAC-verified
-/// candidate. Differentiates by mode so the symmetric path keeps
+/// candidate. Differentiates by mode so the passphrase path keeps
 /// emitting bare `HeaderTampered` (single recipient, no slot identity
-/// to attach) while the hybrid path emits the per-candidate
+/// to attach) while the recipient path emits the per-candidate
 /// `HeaderMacFailedAfterUnwrap { type_name }` variant.
 fn failure_for(mode: EncryptionMode, type_name: &'static str, had_unwrap: bool) -> CryptoError {
     if !had_unwrap {
@@ -333,8 +337,8 @@ fn failure_for(mode: EncryptionMode, type_name: &'static str, had_unwrap: bool) 
         };
     }
     match mode {
-        EncryptionMode::Symmetric => CryptoError::HeaderTampered,
-        EncryptionMode::Hybrid => CryptoError::HeaderMacFailedAfterUnwrap {
+        EncryptionMode::Passphrase => CryptoError::HeaderTampered,
+        EncryptionMode::Recipient => CryptoError::HeaderMacFailedAfterUnwrap {
             type_name: type_name.to_string(),
         },
     }
@@ -549,9 +553,11 @@ mod tests {
         Ok((pub_bytes, privkey_path, pass))
     }
 
-    /// Decrypt helper: builds the same `HybridDecryptConfig` flow that
-    /// `lib::hybrid_decrypt` does, but leaves error variants untouched.
-    fn hybrid_decrypt(
+    /// Decrypt helper: opens the X25519 `private.key`, builds an
+    /// `X25519Identity`, and runs the orchestrator's slot loop directly
+    /// (mirrors what `RecipientDecryptor::decrypt` does in `api.rs` but
+    /// preserves raw error variants for assertion).
+    fn recipient_decrypt(
         fcr: &Path,
         dec_dir: &Path,
         privkey_path: &Path,
@@ -587,7 +593,7 @@ mod tests {
         for (label, privkey, pass) in [("alice", &priv_a, &pass_a), ("bob", &priv_b, &pass_b)] {
             let dec_dir = tmp.path().join(format!("decrypted-{label}"));
             fs::create_dir_all(&dec_dir)?;
-            hybrid_decrypt(&fcr, &dec_dir, privkey, pass)?;
+            recipient_decrypt(&fcr, &dec_dir, privkey, pass)?;
             let restored = fs::read(dec_dir.join("data.txt"))?;
             assert_eq!(
                 restored, payload,
@@ -625,7 +631,7 @@ mod tests {
 
         let dec_dir = tmp.path().join("decrypted");
         fs::create_dir_all(&dec_dir)?;
-        let err = hybrid_decrypt(&fcr, &dec_dir, &priv_a, &pass_a).unwrap_err();
+        let err = recipient_decrypt(&fcr, &dec_dir, &priv_a, &pass_a).unwrap_err();
         match err {
             CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry) => Ok(()),
             other => panic!(
@@ -662,7 +668,7 @@ mod tests {
 
         let dec_dir = tmp.path().join("decrypted");
         fs::create_dir_all(&dec_dir)?;
-        hybrid_decrypt(&fcr, &dec_dir, &priv_a, &pass_a)?;
+        recipient_decrypt(&fcr, &dec_dir, &priv_a, &pass_a)?;
         let restored = fs::read(dec_dir.join("data.txt"))?;
         assert_eq!(restored, payload);
         Ok(())
@@ -695,7 +701,7 @@ mod tests {
 
         let dec_dir = tmp.path().join("decrypted");
         fs::create_dir_all(&dec_dir)?;
-        match hybrid_decrypt(&fcr, &dec_dir, &priv_a, &pass_a) {
+        match recipient_decrypt(&fcr, &dec_dir, &priv_a, &pass_a) {
             Err(CryptoError::UnknownCriticalRecipient { ref type_name })
                 if type_name == "example.com/critical" =>
             {
@@ -732,7 +738,7 @@ mod tests {
 
         let dec_dir = tmp.path().join("decrypted");
         fs::create_dir_all(&dec_dir)?;
-        match hybrid_decrypt(&fcr, &dec_dir, &priv_a, &pass_a) {
+        match recipient_decrypt(&fcr, &dec_dir, &priv_a, &pass_a) {
             Err(CryptoError::PassphraseRecipientMixed) => Ok(()),
             other => panic!("expected PassphraseRecipientMixed, got {other:?}"),
         }
@@ -764,7 +770,7 @@ mod tests {
 
         let dec_dir = tmp.path().join("decrypted");
         fs::create_dir_all(&dec_dir)?;
-        hybrid_decrypt(&fcr, &dec_dir, &priv_a, &pass_a)?;
+        recipient_decrypt(&fcr, &dec_dir, &priv_a, &pass_a)?;
         Ok(())
     }
 
@@ -796,7 +802,7 @@ mod tests {
 
         let dec_dir = tmp.path().join("decrypted");
         fs::create_dir_all(&dec_dir)?;
-        match hybrid_decrypt(&fcr, &dec_dir, &priv_a, &pass_a) {
+        match recipient_decrypt(&fcr, &dec_dir, &priv_a, &pass_a) {
             Err(CryptoError::HeaderMacFailedAfterUnwrap { ref type_name })
                 if type_name == x25519::TYPE_NAME =>
             {

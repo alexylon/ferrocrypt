@@ -1,19 +1,13 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-// Step 10 of the lib restructure migrates this crate off the deprecated free
-// functions onto `Encryptor` / `Decryptor`. Step 8 keeps the call sites here
-// to keep that diff small; allow the deprecation warnings until then.
-#![allow(deprecated)]
 
 slint::include_modules!();
 
 use ferrocrypt::secrecy::{ExposeSecret, SecretString};
 use ferrocrypt::{
-    EncryptionMode, HybridDecryptConfig, HybridEncryptConfig, PRIVATE_KEY_FILENAME,
-    PUBLIC_KEY_FILENAME, PrivateKey, ProgressEvent, PublicKey, SymmetricDecryptConfig,
-    SymmetricEncryptConfig, default_encrypted_filename, detect_encryption_mode, generate_key_pair,
-    hybrid_decrypt, hybrid_encrypt, symmetric_decrypt, symmetric_encrypt,
-    validate_private_key_file,
+    CryptoError, Decryptor, EncryptionMode, Encryptor, PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME,
+    PrivateKey, ProgressEvent, PublicKey, default_encrypted_filename, detect_encryption_mode,
+    generate_key_pair, validate_private_key_file,
 };
 use std::path::{Path, PathBuf};
 
@@ -233,37 +227,58 @@ fn main() {
                     let start = std::time::Instant::now();
                     let result: Result<PathBuf, _> = match mode {
                         MODE_SYMMETRIC_ENCRYPT => {
-                            let mut config =
-                                SymmetricEncryptConfig::new(inpath, output_dir_path, pwd);
+                            let mut encryptor = Encryptor::with_passphrase(pwd);
                             if let Some(s) = save_as {
-                                config = config.save_as(s);
+                                encryptor = encryptor.save_as(s);
                             }
-                            symmetric_encrypt(config, &on_event).map(|o| o.output_path)
+                            encryptor
+                                .write(inpath, output_dir_path, &on_event)
+                                .map(|o| o.output_path)
                         }
-                        MODE_SYMMETRIC_DECRYPT => {
-                            let config = SymmetricDecryptConfig::new(inpath, output_dir_path, pwd);
-                            symmetric_decrypt(config, &on_event).map(|o| o.output_path)
-                        }
+                        MODE_SYMMETRIC_DECRYPT => match Decryptor::open(inpath) {
+                            Ok(Decryptor::Passphrase(d)) => d
+                                .decrypt(pwd, output_dir_path, &on_event)
+                                .map(|o| o.output_path),
+                            Ok(Decryptor::Recipient(_)) => Err(CryptoError::InvalidInput(
+                                "This file is sealed for public-key recipients; switch to the Hybrid tab"
+                                    .to_string(),
+                            )),
+                            Ok(_) => Err(CryptoError::InvalidInput(
+                                "Unsupported FerroCrypt encryption mode for the Symmetric tab"
+                                    .to_string(),
+                            )),
+                            Err(e) => Err(e),
+                        },
                         MODE_HYBRID_ENCRYPT => {
-                            let mut config = HybridEncryptConfig::new(
-                                inpath,
-                                output_dir_path,
+                            let mut encryptor = Encryptor::with_recipient(
                                 PublicKey::from_key_file(Path::new(&keypath)),
                             );
                             if let Some(s) = save_as {
-                                config = config.save_as(s);
+                                encryptor = encryptor.save_as(s);
                             }
-                            hybrid_encrypt(config, &on_event).map(|o| o.output_path)
+                            encryptor
+                                .write(inpath, output_dir_path, &on_event)
+                                .map(|o| o.output_path)
                         }
-                        MODE_HYBRID_DECRYPT => {
-                            let config = HybridDecryptConfig::new(
-                                inpath,
-                                output_dir_path,
-                                PrivateKey::from_key_file(Path::new(&keypath)),
-                                pwd,
-                            );
-                            hybrid_decrypt(config, &on_event).map(|o| o.output_path)
-                        }
+                        MODE_HYBRID_DECRYPT => match Decryptor::open(inpath) {
+                            Ok(Decryptor::Recipient(d)) => d
+                                .decrypt(
+                                    PrivateKey::from_key_file(Path::new(&keypath)),
+                                    pwd,
+                                    output_dir_path,
+                                    &on_event,
+                                )
+                                .map(|o| o.output_path),
+                            Ok(Decryptor::Passphrase(_)) => Err(CryptoError::InvalidInput(
+                                "This file is sealed with a passphrase; switch to the Symmetric tab"
+                                    .to_string(),
+                            )),
+                            Ok(_) => Err(CryptoError::InvalidInput(
+                                "Unsupported FerroCrypt encryption mode for the Hybrid tab"
+                                    .to_string(),
+                            )),
+                            Err(e) => Err(e),
+                        },
                         MODE_KEYGEN => generate_key_pair(output_dir_path, pwd, &on_event)
                             .map(|o| o.public_key_path),
                         _ => unreachable!(),
@@ -592,8 +607,8 @@ fn validate_selected_key(app: &AppWindow, key_path: &str) {
 
 fn detect_mode_from_path(path: &str) -> Result<Option<i32>, ferrocrypt::CryptoError> {
     match detect_encryption_mode(Path::new(path))? {
-        Some(EncryptionMode::Symmetric) => Ok(Some(MODE_SYMMETRIC_DECRYPT)),
-        Some(EncryptionMode::Hybrid) => Ok(Some(MODE_HYBRID_DECRYPT)),
+        Some(EncryptionMode::Passphrase) => Ok(Some(MODE_SYMMETRIC_DECRYPT)),
+        Some(EncryptionMode::Recipient) => Ok(Some(MODE_HYBRID_DECRYPT)),
         Some(_) => Ok(None),
         None => Ok(None),
     }

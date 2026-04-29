@@ -64,7 +64,7 @@ use crate::{
 ///
 /// ## Examples
 ///
-/// Symmetric:
+/// Passphrase:
 ///
 /// ```no_run
 /// use ferrocrypt::{Encryptor, secrecy::SecretString};
@@ -75,7 +75,7 @@ use crate::{
 /// # Ok::<(), ferrocrypt::CryptoError>(())
 /// ```
 ///
-/// Hybrid (single recipient):
+/// Single public-key recipient:
 ///
 /// ```no_run
 /// use ferrocrypt::{Encryptor, PublicKey};
@@ -85,7 +85,7 @@ use crate::{
 /// # Ok::<(), ferrocrypt::CryptoError>(())
 /// ```
 ///
-/// Hybrid (multi-recipient):
+/// Multiple public-key recipients:
 ///
 /// ```no_run
 /// use ferrocrypt::{Encryptor, PublicKey};
@@ -194,8 +194,8 @@ impl Encryptor {
         let save_as = self.save_as.as_deref();
 
         // Cheap caller-supplied invariant first so an empty passphrase
-        // surfaces before any filesystem syscall — matching the
-        // ordering of the deprecated `symmetric_encrypt` path.
+        // surfaces before any filesystem syscall — fail fast on the
+        // O(1) check before the kernel-side syscall.
         if let EncryptorState::Passphrase(p) = &self.state {
             validate_passphrase(p)?;
         }
@@ -298,11 +298,11 @@ impl Decryptor {
         let mode = detect_encryption_mode(&input)?
             .ok_or(CryptoError::InvalidFormat(FormatDefect::BadMagic))?;
         match mode {
-            EncryptionMode::Symmetric => Ok(Self::Passphrase(PassphraseDecryptor {
+            EncryptionMode::Passphrase => Ok(Self::Passphrase(PassphraseDecryptor {
                 input,
                 kdf_limit: None,
             })),
-            EncryptionMode::Hybrid => Ok(Self::Recipient(RecipientDecryptor {
+            EncryptionMode::Recipient => Ok(Self::Recipient(RecipientDecryptor {
                 input,
                 kdf_limit: None,
             })),
@@ -312,7 +312,7 @@ impl Decryptor {
 
 /// Decryptor for password-sealed `.fcr` files. Returned from
 /// [`Decryptor::open`] when the file's recipient list classifies as
-/// [`EncryptionMode::Symmetric`].
+/// [`EncryptionMode::Passphrase`].
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct PassphraseDecryptor {
@@ -351,7 +351,7 @@ impl PassphraseDecryptor {
 
 /// Decryptor for public-key-sealed `.fcr` files. Returned from
 /// [`Decryptor::open`] when the file's recipient list classifies as
-/// [`EncryptionMode::Hybrid`].
+/// [`EncryptionMode::Recipient`].
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct RecipientDecryptor {
@@ -398,7 +398,8 @@ impl RecipientDecryptor {
 
 // ─── Key generation ─────────────────────────────────────────────────────────
 
-/// Generates and stores an X25519 key pair for hybrid encryption.
+/// Generates and stores an X25519 key pair for public-key
+/// (recipient) encryption.
 ///
 /// Writes `private.key` (passphrase-wrapped at rest) and `public.key`
 /// (UTF-8 `fcr1…` recipient string) into `output_dir`. Returns the
@@ -442,7 +443,7 @@ pub fn generate_key_pair(
 /// Returns `Ok(Some(EncryptionMode))` when the prefix matches and the
 /// header parses + classifies cleanly. The mode is derived from the
 /// recipient list per `FORMAT.md` §3.4 / §3.5 (one `argon2id` →
-/// `Symmetric`, one or more supported `x25519` → `Hybrid`).
+/// `Passphrase`, one or more supported `x25519` → `Recipient`).
 ///
 /// Returns `Err(InvalidFormat)` when the magic matches but the
 /// prefix or header is malformed (bad version / kind / flags,

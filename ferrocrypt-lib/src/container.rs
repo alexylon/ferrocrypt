@@ -1,8 +1,8 @@
 //! Shared `.fcr` encrypted-file header build/parse path.
 //!
 //! v1 defines **one** encrypted-file container with a typed recipient list —
-//! there is no per-mode envelope or "symmetric vs hybrid" type byte. Both
-//! `symmetric.rs` and `hybrid.rs` therefore share the same header
+//! there is no per-mode envelope or "symmetric vs hybrid" type byte.
+//! Every encrypt and decrypt path therefore shares the same header
 //! arithmetic and MAC scope, and this module is the **single source of
 //! truth** for it.
 //!
@@ -490,8 +490,8 @@ mod tests {
         assert_eq!(parsed.recipient_entries[0].body, entry.body);
         assert!(parsed.ext_bytes.is_empty());
 
-        // MAC verifies under the same header_key (sanity check; this is
-        // what the symmetric/hybrid decrypt path does after recipient unwrap).
+        // MAC verifies under the same header_key (sanity check; this
+        // is what `protocol::decrypt` does after recipient unwrap).
         format::verify_header_mac(
             &parsed.prefix_bytes,
             &parsed.header_bytes,

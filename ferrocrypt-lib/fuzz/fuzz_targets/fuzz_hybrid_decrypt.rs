@@ -1,14 +1,16 @@
 #![no_main]
-// `fuzz_hybrid_decrypt` exercises the deprecated decrypt entry point on
-// purpose so coverage of the existing wire-format decode pipeline does
-// not move under us mid-restructure. Step 10 swaps it for the new API.
-#![allow(deprecated)]
+//! End-to-end fuzz target for the recipient (X25519) decrypt pipeline.
+//! Drives arbitrary bytes through `Decryptor::open` +
+//! `RecipientDecryptor::decrypt` so coverage stays on the full
+//! wire-format → MAC → AEAD path. The harness ignores all errors —
+//! rejection is the expected outcome for almost every input; we only
+//! care that the library never panics.
 
 use std::fs;
 use std::io::Write;
 
 use ferrocrypt::secrecy::SecretString;
-use ferrocrypt::{HybridDecryptConfig, PrivateKey, generate_key_pair, hybrid_decrypt};
+use ferrocrypt::{Decryptor, PrivateKey, generate_key_pair};
 use libfuzzer_sys::fuzz_target;
 
 /// Generates a keypair once per process into a persistent temp directory.
@@ -37,12 +39,13 @@ fuzz_target!(|data: &[u8]| {
     f.write_all(data).unwrap();
     drop(f);
 
-    let passphrase = SecretString::from("fuzz_key".to_string());
-    let config = HybridDecryptConfig::new(
-        &input_path,
-        &output_dir,
-        PrivateKey::from_key_file(&priv_key),
-        passphrase,
-    );
-    let _ = hybrid_decrypt(config, |_| {});
+    if let Ok(Decryptor::Recipient(d)) = Decryptor::open(&input_path) {
+        let passphrase = SecretString::from("fuzz_key".to_string());
+        let _ = d.decrypt(
+            PrivateKey::from_key_file(&priv_key),
+            passphrase,
+            &output_dir,
+            |_| {},
+        );
+    }
 });

@@ -381,9 +381,9 @@ pub fn read_public_key(path: &std::path::Path) -> Result<[u8; 32], CryptoError> 
 /// variants.
 ///
 /// Once constructed, a `PublicKey` can be:
-/// - passed to [`crate::hybrid_encrypt`] via
-///   [`crate::HybridEncryptConfig::new`] as the recipient for envelope
-///   encryption,
+/// - handed to [`crate::Encryptor::with_recipient`] (or
+///   [`crate::Encryptor::with_recipients`]) as the envelope-encryption
+///   target,
 /// - rendered as a Bech32 `fcr1…` recipient string via
 ///   [`PublicKey::to_recipient_string`],
 /// - fingerprinted via [`PublicKey::fingerprint`].

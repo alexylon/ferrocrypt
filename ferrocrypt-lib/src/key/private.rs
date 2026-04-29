@@ -414,13 +414,13 @@ pub fn open_private_key(
 
 // ─── Private-key wrapper ───────────────────────────────────────────────────
 
-/// Source of a private key for hybrid decryption.
+/// Source of a private key for the recipient (X25519) decrypt path.
 ///
 /// Today the only supported source is a passphrase-protected FerroCrypt
 /// private-key file on disk. The wrapper is kept deliberately thin and
-/// `#[non_exhaustive]` so future sources (for example in-memory encrypted
-/// secrets or hardware-backed keys) can be added without a breaking
-/// change to [`crate::HybridDecryptConfig`].
+/// `#[non_exhaustive]` so future sources (for example in-memory
+/// encrypted secrets or hardware-backed keys) can be added without a
+/// breaking change to the [`crate::Decryptor::Recipient`] decrypt path.
 ///
 /// Construct with [`PrivateKey::from_key_file`].
 #[derive(Debug, Clone)]

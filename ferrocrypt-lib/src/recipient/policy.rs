@@ -133,8 +133,8 @@ pub fn enforce_recipient_mixing_policy(entries: &[RecipientEntry]) -> Result<(),
     Ok(())
 }
 
-/// Classifies a parsed recipient list as either `Symmetric` (one
-/// `argon2id` recipient, alone) or `Hybrid` (one or more supported
+/// Classifies a parsed recipient list as either `Passphrase` (one
+/// `argon2id` recipient, alone) or `Recipient` (one or more supported
 /// `x25519` recipients with no `argon2id`). Returns an error for any
 /// list that does not fit into one of those two modes.
 ///
@@ -148,9 +148,9 @@ pub fn enforce_recipient_mixing_policy(entries: &[RecipientEntry]) -> Result<(),
 /// 1. Reject any unknown **critical** entry with
 ///    [`CryptoError::UnknownCriticalRecipient`].
 /// 2. Run [`enforce_recipient_mixing_policy`] (`argon2id` is exclusive).
-/// 3. Exactly one `argon2id` (alone) → [`crate::EncryptionMode::Symmetric`].
+/// 3. Exactly one `argon2id` (alone) → [`crate::EncryptionMode::Passphrase`].
 /// 4. One or more supported `x25519` (and no `argon2id`) →
-///    [`crate::EncryptionMode::Hybrid`].
+///    [`crate::EncryptionMode::Recipient`].
 /// 5. Otherwise (no supported native recipient and no unknown
 ///    critical) → [`CryptoError::NoSupportedRecipient`].
 ///
@@ -180,10 +180,10 @@ pub fn classify_encryption_mode(
     if has_argon2id {
         // `enforce_recipient_mixing_policy` already guaranteed the
         // list is exactly `[argon2id]`.
-        return Ok(crate::EncryptionMode::Symmetric);
+        return Ok(crate::EncryptionMode::Passphrase);
     }
     if has_supported_x25519 {
-        return Ok(crate::EncryptionMode::Hybrid);
+        return Ok(crate::EncryptionMode::Recipient);
     }
 
     // Step 5: no supported native recipient. Unknown non-critical
@@ -331,19 +331,19 @@ mod tests {
     #[test]
     fn classify_returns_symmetric_for_lone_argon2id() {
         let mode = classify_encryption_mode(&[argon2id_entry()]).unwrap();
-        assert_eq!(mode, crate::EncryptionMode::Symmetric);
+        assert_eq!(mode, crate::EncryptionMode::Passphrase);
     }
 
     #[test]
     fn classify_returns_hybrid_for_x25519() {
         let mode = classify_encryption_mode(&[x25519_entry()]).unwrap();
-        assert_eq!(mode, crate::EncryptionMode::Hybrid);
+        assert_eq!(mode, crate::EncryptionMode::Recipient);
     }
 
     #[test]
     fn classify_returns_hybrid_for_multiple_x25519() {
         let mode = classify_encryption_mode(&[x25519_entry(), x25519_entry()]).unwrap();
-        assert_eq!(mode, crate::EncryptionMode::Hybrid);
+        assert_eq!(mode, crate::EncryptionMode::Recipient);
     }
 
     #[test]
@@ -354,7 +354,7 @@ mod tests {
         let mode =
             classify_encryption_mode(&[unknown_entry("future-thing", false), x25519_entry()])
                 .unwrap();
-        assert_eq!(mode, crate::EncryptionMode::Hybrid);
+        assert_eq!(mode, crate::EncryptionMode::Recipient);
     }
 
     #[test]

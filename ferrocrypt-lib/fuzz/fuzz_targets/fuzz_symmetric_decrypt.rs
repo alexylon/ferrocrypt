@@ -1,15 +1,15 @@
 #![no_main]
-// `fuzz_symmetric_decrypt` exercises the deprecated decrypt entry point
-// on purpose so coverage of the existing wire-format decode pipeline
-// does not move under us mid-restructure. Step 10 swaps it for the new
-// API.
-#![allow(deprecated)]
+//! End-to-end fuzz target for the passphrase decrypt pipeline. Drives
+//! arbitrary bytes through `Decryptor::open` + `PassphraseDecryptor::decrypt`
+//! to keep coverage on the full wire-format → MAC → AEAD path. The
+//! fuzz harness ignores all errors (rejection is the expected outcome
+//! for almost every input); we only care that the library never panics.
 
 use std::fs;
 use std::io::Write;
 
 use ferrocrypt::secrecy::SecretString;
-use ferrocrypt::{SymmetricDecryptConfig, symmetric_decrypt};
+use ferrocrypt::Decryptor;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -22,7 +22,8 @@ fuzz_target!(|data: &[u8]| {
     f.write_all(data).unwrap();
     drop(f);
 
-    let passphrase = SecretString::from("fuzz".to_string());
-    let config = SymmetricDecryptConfig::new(&input_path, &output_dir, passphrase);
-    let _ = symmetric_decrypt(config, |_| {});
+    if let Ok(Decryptor::Passphrase(d)) = Decryptor::open(&input_path) {
+        let passphrase = SecretString::from("fuzz".to_string());
+        let _ = d.decrypt(passphrase, &output_dir, |_| {});
+    }
 });

@@ -1,19 +1,12 @@
-// Step 9 of the lib restructure migrates the CLI off the deprecated free
-// functions onto `Encryptor` / `Decryptor`. Step 8 keeps the old call
-// sites here so the diff stays small; allow the deprecation warnings
-// at the module level until that migration lands.
-#![allow(deprecated)]
-
 use std::io::{IsTerminal, stdin};
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use ferrocrypt::secrecy::{ExposeSecret, SecretString};
 use ferrocrypt::{
-    CryptoError, HybridDecryptConfig, HybridEncryptConfig, KdfLimit, PRIVATE_KEY_FILENAME,
-    PUBLIC_KEY_FILENAME, PrivateKey, PublicKey, SymmetricDecryptConfig, SymmetricEncryptConfig,
-    default_encrypted_filename, detect_encryption_mode, generate_key_pair, hybrid_decrypt,
-    hybrid_encrypt, symmetric_decrypt, symmetric_encrypt, validate_private_key_file,
+    CryptoError, Decryptor, Encryptor, KdfLimit, PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME,
+    PrivateKey, PublicKey, default_encrypted_filename, detect_encryption_mode, generate_key_pair,
+    validate_private_key_file,
 };
 use rpassword::prompt_password;
 use rustyline::DefaultEditor;
@@ -368,32 +361,49 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
                     public_key
                 };
 
-                let mut config = HybridEncryptConfig::new(input_path, &output_dir, public_key);
+                let mut encryptor = Encryptor::with_recipient(public_key);
                 if let Some(save_as_path) = save_as_path {
-                    config = config.save_as(save_as_path);
+                    encryptor = encryptor.save_as(save_as_path);
                 }
-                hybrid_encrypt(config, |ev| eprintln!("{ev}"))?.output_path
+                encryptor
+                    .write(input_path, &output_dir, |ev| eprintln!("{ev}"))?
+                    .output_path
             } else {
                 reject_encrypt_only_flag("--recipient", recipient.is_some())?;
                 reject_encrypt_only_flag("--save-as", save_as.is_some())?;
                 let output_dir = require_output_path(&output_path)?;
-                let key = key.as_deref().ok_or_else(|| {
-                    CryptoError::InvalidInput("Decrypt requires --key".to_string())
-                })?;
-                let key_path = Path::new(key);
-                validate_private_key_file(key_path)?;
-                let kdf_limit = max_kdf_memory.map(KdfLimit::from_mib).transpose()?;
-                let passphrase = read_passphrase(false)?;
-                let mut config = HybridDecryptConfig::new(
-                    input_path,
-                    output_dir,
-                    PrivateKey::from_key_file(key_path),
-                    passphrase,
-                );
-                if let Some(limit) = kdf_limit {
-                    config = config.kdf_limit(limit);
+                match Decryptor::open(input_path)? {
+                    Decryptor::Recipient(mut decryptor) => {
+                        let key = key.as_deref().ok_or_else(|| {
+                            CryptoError::InvalidInput("Decrypt requires --key".to_string())
+                        })?;
+                        let key_path = Path::new(key);
+                        validate_private_key_file(key_path)?;
+                        if let Some(limit) = max_kdf_memory.map(KdfLimit::from_mib).transpose()? {
+                            decryptor = decryptor.kdf_limit(limit);
+                        }
+                        let passphrase = read_passphrase(false)?;
+                        decryptor
+                            .decrypt(
+                                PrivateKey::from_key_file(key_path),
+                                passphrase,
+                                output_dir,
+                                |ev| eprintln!("{ev}"),
+                            )?
+                            .output_path
+                    }
+                    Decryptor::Passphrase(_) => {
+                        return Err(CryptoError::InvalidInput(
+                            "This file is sealed with a passphrase; use `ferrocrypt symmetric` to decrypt"
+                                .to_string(),
+                        ));
+                    }
+                    _ => {
+                        return Err(CryptoError::InvalidInput(
+                            "Unsupported FerroCrypt encryption mode for `hybrid`".to_string(),
+                        ));
+                    }
                 }
-                hybrid_decrypt(config, |ev| eprintln!("{ev}"))?.output_path
             };
 
             print_result(is_encrypt, &output, start.elapsed());
@@ -414,21 +424,38 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
                 let output_dir = resolve_encrypt_output_dir(&output_path, save_as.as_deref())?;
                 check_encrypt_conflict(&output_dir, input_path, save_as.as_deref())?;
                 let passphrase = read_passphrase(true)?;
-                let mut config = SymmetricEncryptConfig::new(input_path, &output_dir, passphrase);
+                let mut encryptor = Encryptor::with_passphrase(passphrase);
                 if let Some(s) = save_as.as_deref() {
-                    config = config.save_as(Path::new(s));
+                    encryptor = encryptor.save_as(Path::new(s));
                 }
-                symmetric_encrypt(config, |ev| eprintln!("{ev}"))?.output_path
+                encryptor
+                    .write(input_path, &output_dir, |ev| eprintln!("{ev}"))?
+                    .output_path
             } else {
                 reject_encrypt_only_flag("--save-as", save_as.is_some())?;
                 let output_dir = require_output_path(&output_path)?;
-                let kdf_limit = max_kdf_memory.map(KdfLimit::from_mib).transpose()?;
-                let passphrase = read_passphrase(false)?;
-                let mut config = SymmetricDecryptConfig::new(input_path, output_dir, passphrase);
-                if let Some(limit) = kdf_limit {
-                    config = config.kdf_limit(limit);
+                match Decryptor::open(input_path)? {
+                    Decryptor::Passphrase(mut decryptor) => {
+                        if let Some(limit) = max_kdf_memory.map(KdfLimit::from_mib).transpose()? {
+                            decryptor = decryptor.kdf_limit(limit);
+                        }
+                        let passphrase = read_passphrase(false)?;
+                        decryptor
+                            .decrypt(passphrase, output_dir, |ev| eprintln!("{ev}"))?
+                            .output_path
+                    }
+                    Decryptor::Recipient(_) => {
+                        return Err(CryptoError::InvalidInput(
+                            "This file is sealed for public-key recipients; use `ferrocrypt hybrid` to decrypt"
+                                .to_string(),
+                        ));
+                    }
+                    _ => {
+                        return Err(CryptoError::InvalidInput(
+                            "Unsupported FerroCrypt encryption mode for `symmetric`".to_string(),
+                        ));
+                    }
                 }
-                symmetric_decrypt(config, |ev| eprintln!("{ev}"))?.output_path
             };
 
             print_result(is_encrypt, &output, start.elapsed());

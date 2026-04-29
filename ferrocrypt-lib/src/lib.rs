@@ -272,7 +272,9 @@ impl SymmetricDecryptConfig {
 }
 
 /// Configuration for [`hybrid_encrypt`].
-#[deprecated(note = "use Encryptor::with_recipient or with_recipients then .write(); see RESTRUCTURE_PLAN.md")]
+#[deprecated(
+    note = "use Encryptor::with_recipient or with_recipients then .write(); see RESTRUCTURE_PLAN.md"
+)]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct HybridEncryptConfig {
@@ -506,7 +508,9 @@ pub fn symmetric_decrypt(
 /// Encrypts a file or directory with hybrid (X25519 +
 /// XChaCha20-Poly1305) envelope encryption. Replaced by
 /// [`Encryptor::with_recipient`] / [`Encryptor::with_recipients`].
-#[deprecated(note = "use Encryptor::with_recipient or with_recipients then .write(); see RESTRUCTURE_PLAN.md")]
+#[deprecated(
+    note = "use Encryptor::with_recipient or with_recipients then .write(); see RESTRUCTURE_PLAN.md"
+)]
 #[allow(deprecated)]
 pub fn hybrid_encrypt(
     config: HybridEncryptConfig,

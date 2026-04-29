@@ -1,0 +1,4 @@
+Ferrocrypt wire-format stability fixture.
+Single small file, deterministic content.
+Do not edit; regenerate via:
+  cargo test --package ferrocrypt fixture_stability::regenerate -- --ignored --test-threads=1

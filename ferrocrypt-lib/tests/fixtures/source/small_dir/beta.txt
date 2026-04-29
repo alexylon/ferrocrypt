@@ -1,0 +1,1 @@
+fixture file beta — second top-level entry inside small_dir.

@@ -1,0 +1,1 @@
+fixture file gamma — nested entry inside small_dir/nested/.

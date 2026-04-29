@@ -44,7 +44,7 @@ use crate::format::{
     KIND_PRIVATE_KEY, MAGIC, MAGIC_SIZE, VERSION, read_u16_be, read_u32_be,
     unsupported_key_version_error, write_u16_be, write_u32_be,
 };
-use crate::recipients::{TYPE_NAME_MAX_LEN, validate_type_name};
+use crate::recipient::{TYPE_NAME_MAX_LEN, validate_type_name};
 
 /// HKDF info for deriving the `private.key` wrap key from Argon2id.
 pub(crate) const HKDF_INFO_PRIVATE_KEY_WRAP: &[u8] = b"ferrocrypt/v1/private-key/wrap";

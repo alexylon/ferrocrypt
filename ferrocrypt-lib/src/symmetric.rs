@@ -4,7 +4,7 @@
 //!   per-file random `file_key` (32 B)
 //!   passphrase + Argon2id + HKDF-SHA3-256 → `wrap_key`
 //!   `wrap_key` + XChaCha20-Poly1305 seals `file_key` into the
-//!     argon2id recipient body (116 B; see `recipients::argon2id`)
+//!     argon2id recipient body (116 B; see `recipient::argon2id`)
 //!   `file_key` + `stream_nonce` + HKDF-SHA3-256 → `payload_key` + `header_key`
 //!   `payload_key` encrypts the TAR payload via STREAM-BE32
 //!   `header_key` HMAC-SHA3-256 authenticates the on-disk header
@@ -29,7 +29,7 @@ use crate::crypto::stream::{STREAM_NONCE_SIZE, payload_decryptor};
 use crate::crypto::tlv::validate_tlv;
 use crate::format;
 use crate::fs::paths::encryption_base_name;
-use crate::recipients::{
+use crate::recipient::{
     NativeRecipientType, RecipientEntry, argon2id, enforce_recipient_mixing_policy,
 };
 use crate::{CryptoError, ProgressEvent};
@@ -41,7 +41,7 @@ use crate::{CryptoError, ProgressEvent};
 /// Wire format: a v1 `.fcr` container with exactly one `argon2id`
 /// recipient entry. Per `FORMAT.md` §3.4, `argon2id` is exclusive:
 /// the recipient list contains only this one entry. The `file_key`
-/// is wrapped via [`recipients::argon2id::wrap`]; the rest of the
+/// is wrapped via [`recipient::argon2id::wrap`]; the rest of the
 /// header (prefix, fixed, recipient_entries, MAC) is assembled by
 /// [`container::build_encrypted_header`], which is the single
 /// source of truth for MAC scope.
@@ -110,8 +110,8 @@ pub fn encrypt_file(
 ///    mixed-recipient file cannot force a KDF run)
 /// 3. require exactly one `argon2id` recipient (the symmetric mode)
 /// 4. require recipient flags == 0
-/// 5. require body length == `recipients::argon2id::BODY_LENGTH`
-/// 6. unwrap the candidate `file_key` via `recipients::argon2id::unwrap`
+/// 5. require body length == `recipient::argon2id::BODY_LENGTH`
+/// 6. unwrap the candidate `file_key` via `recipient::argon2id::unwrap`
 /// 7. derive `payload_key` + `header_key` from `file_key + stream_nonce`
 /// 8. verify the header MAC under `header_key` (final acceptance gate
 ///    per `FORMAT.md` §3.7 — until this succeeds, the candidate is not
@@ -210,7 +210,7 @@ mod tests {
     use crate::crypto::kdf::{ARGON2_SALT_SIZE, KDF_PARAMS_SIZE};
     use crate::error::FormatDefect;
     use crate::format::{HEADER_FIXED_SIZE, PREFIX_SIZE};
-    use crate::recipients::ENTRY_HEADER_SIZE;
+    use crate::recipient::entry::ENTRY_HEADER_SIZE;
 
     /// File offset of `stream_nonce`. It is the trailing field of
     /// `header_fixed`, so the offset within `header_fixed` is

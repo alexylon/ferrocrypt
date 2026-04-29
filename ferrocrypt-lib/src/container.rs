@@ -31,7 +31,7 @@
 //!   bytes). Callers invoke `crypto::tlv::validate_tlv` on `ext_bytes` after
 //!   `format::verify_header_mac` succeeds.
 //! - It does not enforce recipient-mixing policy, classify modes, or run
-//!   recipient unwrap. Those concerns live in `recipients/mod.rs`.
+//!   recipient unwrap. Those concerns live in `recipient/policy.rs`.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -49,7 +49,7 @@ use crate::format::{
 };
 use crate::fs::atomic;
 use crate::fs::paths::{INCOMPLETE_SUFFIX, parent_or_cwd};
-use crate::recipients::{self, RecipientEntry};
+use crate::recipient::{self, RecipientEntry};
 
 /// Tempfile name prefix for the in-flight `.fcr` write. Combined with
 /// [`INCOMPLETE_SUFFIX`] this yields a `.ferrocrypt-*.incomplete`
@@ -240,7 +240,7 @@ pub(crate) fn read_encrypted_header<R: Read>(
         return Err(CryptoError::InvalidFormat(FormatDefect::MalformedHeader));
     }
 
-    let recipient_entries = recipients::parse_recipient_entries(
+    let recipient_entries = recipient::parse_recipient_entries(
         &header_bytes[entries_start..entries_end],
         fixed.recipient_count,
         limits.max_recipient_body_len,
@@ -270,7 +270,7 @@ pub(crate) fn read_encrypted_header<R: Read>(
 /// - deriving `payload_key` and `header_key` from the freshly generated
 ///   `file_key` via `crypto::keys::derive_subkeys` (or equivalent);
 /// - constructing `recipient_entries` via the per-recipient `wrap`
-///   helpers (`recipients::argon2id::wrap`, `recipients::x25519::wrap`).
+///   helpers (`recipient::argon2id::wrap`, `recipient::x25519::wrap`).
 ///
 /// On success returns a [`BuiltEncryptedHeader`] holding the three byte
 /// regions to write in order (prefix, header, MAC) plus `stream_nonce`
@@ -429,7 +429,8 @@ pub(crate) fn write_encrypted_file(
 mod tests {
     use super::*;
     use crate::crypto::keys::{DerivedSubkeys, FILE_KEY_SIZE, derive_subkeys};
-    use crate::recipients::{RECIPIENT_FLAG_CRITICAL, argon2id, x25519};
+    use crate::recipient::entry::RECIPIENT_FLAG_CRITICAL;
+    use crate::recipient::{argon2id, x25519};
 
     fn dummy_entry(type_name: &str, body_len: usize) -> RecipientEntry {
         RecipientEntry {

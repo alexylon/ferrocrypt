@@ -34,7 +34,7 @@ use sha3::{Digest, Sha3_256};
 use crate::CryptoError;
 use crate::error::FormatDefect;
 use crate::format::{read_u16_be, read_u32_be};
-use crate::recipients::{TYPE_NAME_MAX_LEN, validate_type_name};
+use crate::recipient::{TYPE_NAME_MAX_LEN, validate_type_name};
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
@@ -393,10 +393,7 @@ impl PublicKey {
     /// `ferrocrypt recipient` subcommand.
     pub fn fingerprint(&self) -> Result<String, CryptoError> {
         let bytes = self.resolve()?;
-        Ok(fingerprint_hex(
-            crate::recipients::x25519::TYPE_NAME,
-            &bytes,
-        ))
+        Ok(fingerprint_hex(crate::recipient::x25519::TYPE_NAME, &bytes))
     }
 
     /// Encodes the key as the canonical Bech32 `fcr1…` recipient
@@ -405,7 +402,7 @@ impl PublicKey {
     /// key-file source.
     pub fn to_recipient_string(&self) -> Result<String, CryptoError> {
         let bytes = self.resolve()?;
-        encode_recipient_string(crate::recipients::x25519::TYPE_NAME, &bytes)
+        encode_recipient_string(crate::recipient::x25519::TYPE_NAME, &bytes)
     }
 
     /// Returns the raw 32-byte X25519 public-key material as an owned

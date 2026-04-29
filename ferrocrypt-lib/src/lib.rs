@@ -404,7 +404,7 @@ pub struct KeyGenOutcome {
 /// header parses + classifies cleanly. The mode is derived from the
 /// recipient list per `FORMAT.md` §3.4 / §3.5 (one `argon2id` →
 /// `Symmetric`, one or more supported `x25519` → `Hybrid`); see
-/// [`recipients::classify_encryption_mode`] for the full rule set.
+/// [`recipient::classify_encryption_mode`] for the full rule set.
 ///
 /// Returns `Err(InvalidFormat)` when the magic matches but the
 /// prefix or header is malformed (bad version / kind / flags,
@@ -480,7 +480,7 @@ pub fn detect_encryption_mode(
 
     // Structural classification only. `classify_encryption_mode`
     // does not verify the header MAC or run any recipient unwrap.
-    let mode = recipients::classify_encryption_mode(&parsed.recipient_entries)?;
+    let mode = recipient::classify_encryption_mode(&parsed.recipient_entries)?;
     Ok(Some(mode))
 }
 
@@ -492,7 +492,7 @@ mod format;
 mod fs;
 mod hybrid;
 mod key;
-mod recipients;
+mod recipient;
 mod symmetric;
 
 #[cfg(feature = "fuzzing")]
@@ -516,15 +516,14 @@ pub fn decode_recipient(recipient: &str) -> Result<[u8; 32], CryptoError> {
         recipient,
         key::public::RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT,
     )?;
-    if decoded.type_name != recipients::x25519::TYPE_NAME {
+    if decoded.type_name != recipient::x25519::TYPE_NAME {
         return Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey));
     }
-    let bytes: [u8; recipients::x25519::PUBKEY_SIZE] =
-        decoded
-            .key_material
-            .as_slice()
-            .try_into()
-            .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey))?;
+    let bytes: [u8; recipient::x25519::PUBKEY_SIZE] = decoded
+        .key_material
+        .as_slice()
+        .try_into()
+        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey))?;
     Ok(bytes)
 }
 
@@ -735,9 +734,9 @@ mod tests {
         let header_key = [0x42u8; crypto::mac::HMAC_KEY_SIZE];
         let payload_key = zeroize::Zeroizing::new([0u8; crypto::keys::ENCRYPTION_KEY_SIZE]);
         let stream_nonce = [0x07u8; format::STREAM_NONCE_SIZE];
-        let entry = recipients::RecipientEntry::native(
-            recipients::NativeRecipientType::Argon2id,
-            vec![0u8; recipients::argon2id::BODY_LENGTH],
+        let entry = recipient::RecipientEntry::native(
+            recipient::NativeRecipientType::Argon2id,
+            vec![0u8; recipient::argon2id::BODY_LENGTH],
         )
         .unwrap();
         let built = container::build_encrypted_header(
@@ -769,9 +768,9 @@ mod tests {
         let header_key = [0x42u8; crypto::mac::HMAC_KEY_SIZE];
         let payload_key = zeroize::Zeroizing::new([0u8; crypto::keys::ENCRYPTION_KEY_SIZE]);
         let stream_nonce = [0x07u8; format::STREAM_NONCE_SIZE];
-        let entry = recipients::RecipientEntry::native(
-            recipients::NativeRecipientType::X25519,
-            vec![0u8; recipients::x25519::BODY_LENGTH],
+        let entry = recipient::RecipientEntry::native(
+            recipient::NativeRecipientType::X25519,
+            vec![0u8; recipient::x25519::BODY_LENGTH],
         )
         .unwrap();
         let built = container::build_encrypted_header(

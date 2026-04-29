@@ -6,7 +6,7 @@
 //!   X25519 ECDH (caller pubkey on encrypt, recipient privkey on decrypt) →
 //!     HKDF-SHA3-256 → `wrap_key`
 //!   `wrap_key` + XChaCha20-Poly1305 seals `file_key` into the
-//!     x25519 recipient body (104 B; see `recipients::x25519`)
+//!     x25519 recipient body (104 B; see `recipient::x25519`)
 //!   `file_key` + `stream_nonce` + HKDF-SHA3-256 → `payload_key` + `header_key`
 //!   `payload_key` encrypts the TAR payload via STREAM-BE32
 //!   `header_key` HMAC-SHA3-256 authenticates the on-disk header
@@ -48,7 +48,7 @@ use crate::key::private::{
 use crate::key::public::{
     RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT, decode_recipient_string, encode_recipient_string,
 };
-use crate::recipients::{NativeRecipientType, RecipientEntry, classify_encryption_mode, x25519};
+use crate::recipient::{NativeRecipientType, RecipientEntry, classify_encryption_mode, x25519};
 use crate::{CryptoError, EncryptionMode, ProgressEvent};
 
 /// Default filename for the hybrid public key file (text form).
@@ -67,7 +67,7 @@ pub const PRIVATE_KEY_FILENAME: &str = "private.key";
 /// mixable, so future callers may encrypt to multiple recipients;
 /// today's API exposes the single-recipient path. The recipient body
 /// (`ephemeral_pubkey || wrap_nonce || wrapped_file_key`, 104 B) is
-/// built by [`crate::recipients::x25519::wrap`], which generates the
+/// built by [`crate::recipient::x25519::wrap`], which generates the
 /// ephemeral X25519 keypair, runs ECDH against `public_key_bytes`,
 /// rejects an all-zero shared secret, derives the wrap key via
 /// HKDF-SHA3-256, and AEAD-seals `file_key`. The rest of the header
@@ -152,7 +152,7 @@ pub fn encrypt_file_from_bytes(
 ///    - flags must be zero (native v1 — critical bit unused on
 ///      types the reader handles natively);
 ///    - body length must be 104;
-///    - try `recipients::x25519::unwrap`. On failure, continue.
+///    - try `recipient::x25519::unwrap`. On failure, continue.
 ///    - on success, derive `payload_key` + `header_key` and verify
 ///      the header MAC. On MAC success, keep this slot's
 ///      `payload_key` as the selected one (first MAC-verified slot
@@ -691,7 +691,8 @@ mod tests {
     use crate::crypto::aead::WRAP_NONCE_SIZE;
     use crate::crypto::stream::payload_encryptor;
     use crate::format::{HEADER_FIXED_SIZE, PREFIX_SIZE};
-    use crate::recipients::{ENTRY_HEADER_SIZE, RECIPIENT_FLAG_CRITICAL, argon2id};
+    use crate::recipient::argon2id;
+    use crate::recipient::entry::{ENTRY_HEADER_SIZE, RECIPIENT_FLAG_CRITICAL};
 
     /// File offset of `stream_nonce`. Mirrors the symmetric-side
     /// constant: `stream_nonce` is the trailing field of `header_fixed`,
@@ -1552,7 +1553,7 @@ mod tests {
 
     /// Mixing `argon2id` with any other recipient (here `x25519`) MUST
     /// be rejected as `PassphraseRecipientMixed` BEFORE Argon2id runs.
-    /// Per `FORMAT.md` §3.4, `argon2id` is `MixingPolicy::Exclusive`;
+    /// Per `FORMAT.md` §3.4, `argon2id` is `policy::MixingPolicy::Exclusive`;
     /// the structural rejection prevents a hostile file from forcing
     /// expensive KDF work.
     ///

@@ -157,6 +157,59 @@ fn derive_wrap_key(
     hkdf_expand_sha3_256(Some(&salt), shared_secret, HKDF_INFO_WRAP)
 }
 
+// ─── Protocol-trait impls ──────────────────────────────────────────────────
+
+/// Encrypt-side handle for the `x25519` recipient: borrows a 32-byte
+/// recipient public key.
+pub(crate) struct X25519Recipient<'a> {
+    pub recipient_pubkey: &'a [u8; PUBKEY_SIZE],
+}
+
+impl<'a> crate::protocol::RecipientScheme for X25519Recipient<'a> {
+    const TYPE_NAME: &'static str = TYPE_NAME;
+    const MIXING_POLICY: crate::recipient::policy::MixingPolicy =
+        crate::recipient::policy::MixingPolicy::PublicKeyMixable;
+
+    fn wrap_file_key(
+        &self,
+        file_key: &FileKey,
+    ) -> Result<crate::recipient::entry::RecipientBody, CryptoError> {
+        let bytes = wrap(file_key, self.recipient_pubkey)?;
+        Ok(crate::recipient::entry::RecipientBody {
+            type_name: TYPE_NAME,
+            bytes: bytes.to_vec(),
+        })
+    }
+}
+
+/// Decrypt-side handle for the `x25519` recipient. Owns the 32-byte
+/// recipient secret in `Zeroizing` so it's wiped on drop.
+pub(crate) struct X25519Identity {
+    pub recipient_secret: Zeroizing<[u8; PRIVATE_KEY_SIZE]>,
+}
+
+impl crate::protocol::IdentityScheme for X25519Identity {
+    const TYPE_NAME: &'static str = TYPE_NAME;
+
+    fn unwrap_file_key(
+        &self,
+        body: &crate::recipient::entry::RecipientBody,
+    ) -> Result<Option<FileKey>, CryptoError> {
+        let body_array: &[u8; BODY_LENGTH] = body.bytes.as_slice().try_into().map_err(|_| {
+            CryptoError::InvalidFormat(crate::error::FormatDefect::MalformedRecipientEntry)
+        })?;
+        // Wrong recipient key, all-zero shared secret, and tampered
+        // body all surface from `unwrap` as `RecipientUnwrapFailed`;
+        // per `IdentityScheme` semantics we collapse those into
+        // `Ok(None)` so the orchestrator's slot loop continues.
+        match unwrap(body_array, &self.recipient_secret) {
+            Ok(file_key) => Ok(Some(file_key)),
+            Err(CryptoError::RecipientUnwrapFailed { .. }) => Ok(None),
+            Err(other) => Err(other),
+        }
+    }
+}
+
 // ─── Key-pair generation ───────────────────────────────────────────────────
 
 /// Generates a fresh X25519 key pair via the OS CSPRNG. Returns

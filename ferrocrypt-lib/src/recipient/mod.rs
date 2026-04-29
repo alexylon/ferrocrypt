@@ -37,4 +37,4 @@ pub mod policy;
 pub use entry::{RecipientEntry, parse_recipient_entries};
 pub use name::{TYPE_NAME_MAX_LEN, validate_type_name};
 pub use native::{argon2id, x25519};
-pub use policy::{NativeRecipientType, classify_encryption_mode, enforce_recipient_mixing_policy};
+pub use policy::classify_encryption_mode;

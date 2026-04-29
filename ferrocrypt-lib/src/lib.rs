@@ -490,10 +490,9 @@ mod crypto;
 mod error;
 mod format;
 mod fs;
-mod hybrid;
 mod key;
+mod protocol;
 mod recipient;
-mod symmetric;
 
 #[cfg(feature = "fuzzing")]
 pub mod fuzz_exports;
@@ -607,10 +606,14 @@ pub fn symmetric_encrypt(
 ) -> Result<EncryptOutcome, CryptoError> {
     validate_passphrase(&config.passphrase)?;
     archiver::validate_encrypt_input(&config.input)?;
-    let output_path = symmetric::encrypt_file(
+    let recipient = recipient::argon2id::PassphraseRecipient {
+        passphrase: &config.passphrase,
+        kdf_params: crypto::kdf::KdfParams::default(),
+    };
+    let output_path = protocol::encrypt(
+        &recipient,
         &config.input,
         &config.output_dir,
-        &config.passphrase,
         config.save_as.as_deref(),
         &on_event,
     )?;
@@ -624,13 +627,12 @@ pub fn symmetric_decrypt(
 ) -> Result<DecryptOutcome, CryptoError> {
     validate_passphrase(&config.passphrase)?;
     validate_input_path(&config.input)?;
-    let output_path = symmetric::decrypt_file(
-        &config.input,
-        &config.output_dir,
-        &config.passphrase,
-        config.kdf_limit.as_ref(),
-        &on_event,
-    )?;
+    let identity = recipient::argon2id::PassphraseIdentity {
+        passphrase: &config.passphrase,
+        kdf_limit: config.kdf_limit.as_ref(),
+    };
+    on_event(&ProgressEvent::DerivingKey);
+    let output_path = protocol::decrypt(&identity, &config.input, &config.output_dir, &on_event)?;
     Ok(DecryptOutcome { output_path })
 }
 
@@ -659,10 +661,13 @@ pub fn hybrid_encrypt(
 ) -> Result<EncryptOutcome, CryptoError> {
     archiver::validate_encrypt_input(&config.input)?;
     let public_key_bytes = config.public_key.to_bytes()?;
-    let output_path = hybrid::encrypt_file_from_bytes(
+    let recipient = recipient::x25519::X25519Recipient {
+        recipient_pubkey: &public_key_bytes,
+    };
+    let output_path = protocol::encrypt(
+        &recipient,
         &config.input,
         &config.output_dir,
-        &public_key_bytes,
         config.save_as.as_deref(),
         &on_event,
     )?;
@@ -676,14 +681,14 @@ pub fn hybrid_decrypt(
 ) -> Result<DecryptOutcome, CryptoError> {
     validate_passphrase(&config.passphrase)?;
     validate_input_path(&config.input)?;
-    let output_path = hybrid::decrypt_file(
-        &config.input,
-        &config.output_dir,
+    on_event(&ProgressEvent::DerivingKey);
+    let recipient_secret = recipient::native::x25519::open_x25519_private_key(
         config.private_key.key_file_path(),
         &config.passphrase,
         config.kdf_limit.as_ref(),
-        &on_event,
     )?;
+    let identity = recipient::x25519::X25519Identity { recipient_secret };
+    let output_path = protocol::decrypt(&identity, &config.input, &config.output_dir, &on_event)?;
     Ok(DecryptOutcome { output_path })
 }
 
@@ -711,7 +716,7 @@ pub fn generate_key_pair(
 ) -> Result<KeyGenOutcome, CryptoError> {
     validate_passphrase(&config.passphrase)?;
     let (private_key_path, public_key_path) =
-        hybrid::generate_key_pair(&config.passphrase, &config.output_dir, &on_event)?;
+        protocol::generate_key_pair(&config.passphrase, &config.output_dir, &on_event)?;
     let fingerprint = PublicKey::from_key_file(&public_key_path).fingerprint()?;
     Ok(KeyGenOutcome {
         private_key_path,
@@ -738,7 +743,7 @@ mod tests {
         );
         let stream_nonce = [0x07u8; format::STREAM_NONCE_SIZE];
         let entry = recipient::RecipientEntry::native(
-            recipient::NativeRecipientType::Argon2id,
+            recipient::policy::NativeRecipientType::Argon2id,
             vec![0u8; recipient::argon2id::BODY_LENGTH],
         )
         .unwrap();
@@ -775,7 +780,7 @@ mod tests {
         );
         let stream_nonce = [0x07u8; format::STREAM_NONCE_SIZE];
         let entry = recipient::RecipientEntry::native(
-            recipient::NativeRecipientType::X25519,
+            recipient::policy::NativeRecipientType::X25519,
             vec![0u8; recipient::x25519::BODY_LENGTH],
         )
         .unwrap();

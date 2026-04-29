@@ -105,6 +105,62 @@ pub(crate) fn unwrap(
     })
 }
 
+// ─── Protocol-trait impls ──────────────────────────────────────────────────
+
+/// Encrypt-side handle for the `argon2id` recipient: borrows a
+/// passphrase and KDF parameters.
+pub(crate) struct PassphraseRecipient<'a> {
+    pub passphrase: &'a SecretString,
+    pub kdf_params: KdfParams,
+}
+
+impl<'a> crate::protocol::RecipientScheme for PassphraseRecipient<'a> {
+    const TYPE_NAME: &'static str = TYPE_NAME;
+    const MIXING_POLICY: crate::recipient::policy::MixingPolicy =
+        crate::recipient::policy::MixingPolicy::Exclusive;
+
+    fn wrap_file_key(
+        &self,
+        file_key: &FileKey,
+    ) -> Result<crate::recipient::entry::RecipientBody, CryptoError> {
+        let bytes = wrap(file_key, self.passphrase, &self.kdf_params)?;
+        Ok(crate::recipient::entry::RecipientBody {
+            type_name: TYPE_NAME,
+            bytes: bytes.to_vec(),
+        })
+    }
+}
+
+/// Decrypt-side handle for the `argon2id` recipient.
+pub(crate) struct PassphraseIdentity<'a> {
+    pub passphrase: &'a SecretString,
+    pub kdf_limit: Option<&'a KdfLimit>,
+}
+
+impl<'a> crate::protocol::IdentityScheme for PassphraseIdentity<'a> {
+    const TYPE_NAME: &'static str = TYPE_NAME;
+
+    fn unwrap_file_key(
+        &self,
+        body: &crate::recipient::entry::RecipientBody,
+    ) -> Result<Option<FileKey>, CryptoError> {
+        let body_array: &[u8; BODY_LENGTH] = body.bytes.as_slice().try_into().map_err(|_| {
+            CryptoError::InvalidFormat(crate::error::FormatDefect::MalformedRecipientEntry)
+        })?;
+        // KDF cap and structural KDF-param validation happen inside
+        // `unwrap` BEFORE Argon2id runs. Wrong passphrase / tampered
+        // body surface as `RecipientUnwrapFailed` from `unwrap`; per
+        // `IdentityScheme` semantics we collapse those into `Ok(None)`
+        // and propagate everything else (including the cap-exceeded
+        // error) as `Err`.
+        match unwrap(body_array, self.passphrase, self.kdf_limit) {
+            Ok(file_key) => Ok(Some(file_key)),
+            Err(CryptoError::RecipientUnwrapFailed { .. }) => Ok(None),
+            Err(other) => Err(other),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

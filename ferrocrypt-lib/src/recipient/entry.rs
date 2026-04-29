@@ -38,6 +38,17 @@ pub const RECIPIENT_FLAG_CRITICAL: u16 = 1 << 0;
 /// zero on the wire; readers reject any entry with a reserved bit set.
 pub const RECIPIENT_FLAGS_RESERVED_MASK: u16 = !RECIPIENT_FLAG_CRITICAL;
 
+/// Recipient body bytes plus their declared scheme `type_name`. The
+/// type produced by [`crate::protocol::RecipientScheme::wrap_file_key`]
+/// and consumed by [`crate::protocol::IdentityScheme::unwrap_file_key`]
+/// — schemes never construct or parse full recipient entries; that is
+/// `protocol.rs`'s responsibility.
+#[derive(Debug, Clone)]
+pub(crate) struct RecipientBody {
+    pub type_name: &'static str,
+    pub bytes: Vec<u8>,
+}
+
 /// A parsed recipient entry per `FORMAT.md` §3.5. Owns its
 /// `type_name` (validated against the §3.3 grammar) and `body` (opaque
 /// to the framing layer; per-recipient modules parse the body).
@@ -85,30 +96,6 @@ impl RecipientEntry {
     /// rejection; unknown non-critical entries are skipped.
     pub const fn is_critical(&self) -> bool {
         (self.recipient_flags & RECIPIENT_FLAG_CRITICAL) != 0
-    }
-
-    /// Validates this entry's structural shape against a native v1
-    /// recipient type and returns its body as a canonical fixed-size
-    /// `[u8; N]` array. Per `FORMAT.md` §3.7 (per-slot validation):
-    /// `recipient_flags` MUST be zero (native v1 recipients do not use
-    /// the critical bit — the reader handles them natively) and
-    /// `body_len` MUST match the type's declared `BODY_LENGTH`.
-    ///
-    /// Both rule violations surface as
-    /// [`FormatDefect::MalformedRecipientEntry`]. Decrypt paths call
-    /// this once per supported slot AFTER the recipient-mixing policy
-    /// has accepted the file but BEFORE running any per-recipient
-    /// unwrap (Argon2id for `argon2id`, ECDH for `x25519`).
-    pub fn expect_native_body<const N: usize>(&self) -> Result<[u8; N], CryptoError> {
-        if self.recipient_flags != 0 {
-            return Err(CryptoError::InvalidFormat(
-                FormatDefect::MalformedRecipientEntry,
-            ));
-        }
-        self.body
-            .as_slice()
-            .try_into()
-            .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry))
     }
 
     /// Serialises this entry as `type_name_len(2) || recipient_flags(2)

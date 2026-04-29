@@ -99,7 +99,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let pass = SecretString::from("kp".to_string());
         let (privkey_path, pubkey_path) =
-            crate::hybrid::generate_key_pair(&pass, tmp.path(), &|_| {})?;
+            crate::protocol::generate_key_pair(&pass, tmp.path(), &|_| {})?;
         let pub_bytes = fs::read(&pubkey_path)?;
         assert_eq!(KeyFileKind::classify(&pub_bytes), KeyFileKind::Public);
 

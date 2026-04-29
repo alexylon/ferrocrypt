@@ -21,12 +21,11 @@
 //! list parser, not here.
 
 use secrecy::SecretString;
-use zeroize::Zeroizing;
 
 use crate::CryptoError;
 use crate::crypto::aead::{WRAP_NONCE_SIZE, WRAPPED_FILE_KEY_SIZE, open_file_key, seal_file_key};
 use crate::crypto::kdf::{ARGON2_SALT_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams};
-use crate::crypto::keys::{FILE_KEY_SIZE, derive_passphrase_wrap_key, random_bytes};
+use crate::crypto::keys::{FileKey, derive_passphrase_wrap_key, random_bytes};
 
 /// Wire-format `type_name` for this recipient.
 pub const TYPE_NAME: &str = "argon2id";
@@ -49,8 +48,8 @@ const WRAPPED_FILE_KEY_OFFSET: usize = WRAP_NONCE_OFFSET + WRAP_NONCE_SIZE;
 /// then HKDF-SHA3-256 to derive the wrap key, and seals `file_key`
 /// via XChaCha20-Poly1305 with empty AAD. Returns the canonical
 /// 116-byte recipient body.
-pub fn wrap(
-    file_key: &[u8; FILE_KEY_SIZE],
+pub(crate) fn wrap(
+    file_key: &FileKey,
     passphrase: &SecretString,
     kdf_params: &KdfParams,
 ) -> Result<[u8; BODY_LENGTH], CryptoError> {
@@ -79,11 +78,11 @@ pub fn wrap(
 /// [`CryptoError::RecipientUnwrapFailed`] with `type_name = "argon2id"`.
 /// Per `FORMAT.md` §3.7, the candidate `file_key` is not considered
 /// final until the header MAC also verifies.
-pub fn unwrap(
+pub(crate) fn unwrap(
     body: &[u8; BODY_LENGTH],
     passphrase: &SecretString,
     kdf_limit: Option<&KdfLimit>,
-) -> Result<Zeroizing<[u8; FILE_KEY_SIZE]>, CryptoError> {
+) -> Result<FileKey, CryptoError> {
     let mut argon2_salt = [0u8; ARGON2_SALT_SIZE];
     argon2_salt.copy_from_slice(&body[SALT_OFFSET..SALT_OFFSET + ARGON2_SALT_SIZE]);
 
@@ -109,6 +108,7 @@ pub fn unwrap(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::keys::FILE_KEY_SIZE;
 
     fn passphrase(s: &str) -> SecretString {
         SecretString::from(s.to_string())
@@ -138,17 +138,17 @@ mod tests {
 
     #[test]
     fn wrap_unwrap_round_trip() {
-        let file_key = [0x42u8; FILE_KEY_SIZE];
+        let file_key = FileKey::from_bytes_for_tests([0x42u8; FILE_KEY_SIZE]);
         let pass = passphrase("correct horse battery staple");
         let kdf = KdfParams::default();
         let body = wrap(&file_key, &pass, &kdf).unwrap();
         let recovered = unwrap(&body, &pass, None).unwrap();
-        assert_eq!(*recovered, file_key);
+        assert_eq!(recovered.expose(), file_key.expose());
     }
 
     #[test]
     fn unwrap_with_wrong_passphrase_fails_with_recipient_unwrap_failed() {
-        let file_key = [0u8; FILE_KEY_SIZE];
+        let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let right = passphrase("right");
         let wrong = passphrase("wrong");
         let kdf = KdfParams::default();
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn unwrap_with_tampered_wrapped_file_key_fails_with_recipient_unwrap_failed() {
-        let file_key = [0u8; FILE_KEY_SIZE];
+        let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let pass = passphrase("p");
         let kdf = KdfParams::default();
         let mut body = wrap(&file_key, &pass, &kdf).unwrap();
@@ -178,7 +178,7 @@ mod tests {
 
     #[test]
     fn unwrap_with_tampered_argon2_salt_fails_with_recipient_unwrap_failed() {
-        let file_key = [0u8; FILE_KEY_SIZE];
+        let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let pass = passphrase("p");
         let kdf = KdfParams::default();
         let mut body = wrap(&file_key, &pass, &kdf).unwrap();
@@ -198,7 +198,7 @@ mod tests {
         // the original (fast-kdf: 1 → 3; default: 4 → 6). Argon2id with
         // different params produces a different ikm → different wrap
         // key → AEAD fails → RecipientUnwrapFailed.
-        let file_key = [0u8; FILE_KEY_SIZE];
+        let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let pass = passphrase("p");
         let kdf = KdfParams::default();
         let mut body = wrap(&file_key, &pass, &kdf).unwrap();
@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn unwrap_with_tampered_wrap_nonce_fails_with_recipient_unwrap_failed() {
-        let file_key = [0u8; FILE_KEY_SIZE];
+        let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let pass = passphrase("p");
         let kdf = KdfParams::default();
         let mut body = wrap(&file_key, &pass, &kdf).unwrap();
@@ -230,7 +230,7 @@ mod tests {
     fn unwrap_with_malformed_kdf_params_fails_before_argon2id_runs() {
         // Set `lanes = 0` (out of structural bounds 1..=8). Per
         // `FORMAT.md` §2.2 this MUST be rejected before Argon2id runs.
-        let file_key = [0u8; FILE_KEY_SIZE];
+        let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let pass = passphrase("p");
         let kdf = KdfParams::default();
         let mut body = wrap(&file_key, &pass, &kdf).unwrap();
@@ -247,7 +247,7 @@ mod tests {
         // Construct a body with mem_cost = 2 GiB (the structural max),
         // then unwrap with a kdf_limit of 64 KiB. The resource cap
         // MUST surface as KdfResourceCapExceeded before Argon2id runs.
-        let file_key = [0u8; FILE_KEY_SIZE];
+        let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let pass = passphrase("p");
         let high_mem_kdf = KdfParams {
             mem_cost: 2 * 1024 * 1024,
@@ -279,7 +279,7 @@ mod tests {
         // salt(32) || kdf_params(12) || wrap_nonce(24) || wrapped(48).
         // A reordering would produce a body that this reader rejects
         // and that conforming readers reject the same way.
-        let file_key = [0x11u8; FILE_KEY_SIZE];
+        let file_key = FileKey::from_bytes_for_tests([0x11u8; FILE_KEY_SIZE]);
         let pass = passphrase("p");
         let kdf = KdfParams::default();
         let body = wrap(&file_key, &pass, &kdf).unwrap();

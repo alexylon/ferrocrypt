@@ -12,7 +12,7 @@ use chacha20poly1305::{
 use zeroize::Zeroizing;
 
 use crate::CryptoError;
-use crate::crypto::keys::FILE_KEY_SIZE;
+use crate::crypto::keys::{FILE_KEY_SIZE, FileKey};
 
 /// XChaCha20-Poly1305 single-shot nonce size, used for both mode
 /// envelopes (`wrap_nonce`) and the `private.key` AEAD.
@@ -25,19 +25,19 @@ pub const TAG_SIZE: usize = 16;
 /// 16-byte Poly1305 tag.
 pub const WRAPPED_FILE_KEY_SIZE: usize = FILE_KEY_SIZE + TAG_SIZE;
 
-/// Seals a 32-byte `file_key` with XChaCha20-Poly1305. Returns the
+/// Seals a [`FileKey`] with XChaCha20-Poly1305. Returns the
 /// 48-byte wrapped form (ciphertext + tag) suitable for placement in
 /// a mode envelope. `AAD` is empty — both modes' other fields are
 /// covered by the outer HMAC.
-pub fn seal_file_key(
+pub(crate) fn seal_file_key(
     wrap_key: &[u8; 32],
     wrap_nonce: &[u8; WRAP_NONCE_SIZE],
-    file_key: &[u8; FILE_KEY_SIZE],
+    file_key: &FileKey,
 ) -> Result<[u8; WRAPPED_FILE_KEY_SIZE], CryptoError> {
     let cipher = XChaCha20Poly1305::new(wrap_key.into());
     let nonce = XNonce::from_slice(wrap_nonce);
     let ciphertext = cipher
-        .encrypt(nonce, file_key.as_ref())
+        .encrypt(nonce, file_key.expose().as_ref())
         .map_err(|_| CryptoError::InternalCryptoFailure("Internal error: envelope seal failed"))?;
     ciphertext.as_slice().try_into().map_err(|_| {
         CryptoError::InternalInvariant("Internal error: envelope ciphertext size mismatch")
@@ -48,12 +48,12 @@ pub fn seal_file_key(
 /// mismatch so callers can route the failure to a recipient-specific
 /// variant — typically [`CryptoError::RecipientUnwrapFailed`] with the
 /// recipient's `type_name`, per `FORMAT.md` §3.7.
-pub fn open_file_key(
+pub(crate) fn open_file_key(
     wrap_key: &[u8; 32],
     wrap_nonce: &[u8; WRAP_NONCE_SIZE],
     wrapped: &[u8; WRAPPED_FILE_KEY_SIZE],
     on_fail: impl FnOnce() -> CryptoError,
-) -> Result<Zeroizing<[u8; FILE_KEY_SIZE]>, CryptoError> {
+) -> Result<FileKey, CryptoError> {
     let cipher = XChaCha20Poly1305::new(wrap_key.into());
     let nonce = XNonce::from_slice(wrap_nonce);
     let plaintext = cipher
@@ -66,5 +66,5 @@ pub fn open_file_key(
         ));
     }
     out.copy_from_slice(&plaintext);
-    Ok(out)
+    Ok(FileKey::from_zeroizing(out))
 }

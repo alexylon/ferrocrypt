@@ -24,7 +24,7 @@ use crate::container::{
     HeaderReadLimits, build_encrypted_header, read_encrypted_header, write_encrypted_file,
 };
 use crate::crypto::kdf::{KdfLimit, KdfParams};
-use crate::crypto::keys::{DerivedSubkeys, derive_subkeys, generate_file_key, random_bytes};
+use crate::crypto::keys::{DerivedSubkeys, FileKey, derive_subkeys, random_bytes};
 use crate::crypto::stream::{STREAM_NONCE_SIZE, payload_decryptor};
 use crate::crypto::tlv::validate_tlv;
 use crate::format;
@@ -58,7 +58,7 @@ pub fn encrypt_file(
     // build is a pure function of (file_key, passphrase, stream_nonce,
     // input bytes). file_key lives in `Zeroizing`, so an early return
     // wipes it.
-    let file_key = generate_file_key();
+    let file_key = FileKey::generate();
     let stream_nonce = random_bytes::<STREAM_NONCE_SIZE>();
     let DerivedSubkeys {
         payload_key,

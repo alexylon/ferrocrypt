@@ -36,11 +36,8 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use zeroize::Zeroizing;
-
 use crate::archiver;
-use crate::crypto::keys::ENCRYPTION_KEY_SIZE;
-use crate::crypto::mac::HMAC_KEY_SIZE;
+use crate::crypto::keys::{HeaderKey, PayloadKey};
 use crate::crypto::stream::{STREAM_NONCE_SIZE, payload_encryptor};
 use crate::error::{CryptoError, FormatDefect};
 use crate::format::{
@@ -134,7 +131,7 @@ pub(crate) struct BuiltEncryptedHeader {
     pub header_bytes: Vec<u8>,
     pub header_mac: [u8; HEADER_MAC_SIZE],
     pub stream_nonce: [u8; STREAM_NONCE_SIZE],
-    pub payload_key: Zeroizing<[u8; ENCRYPTION_KEY_SIZE]>,
+    pub payload_key: PayloadKey,
 }
 
 /// Wraps a byte slice so `{:?}` renders as compact lowercase hex
@@ -280,8 +277,8 @@ pub(crate) fn build_encrypted_header(
     recipient_entries: &[RecipientEntry],
     ext_bytes: &[u8],
     stream_nonce: [u8; STREAM_NONCE_SIZE],
-    payload_key: Zeroizing<[u8; ENCRYPTION_KEY_SIZE]>,
-    header_key: &[u8; HMAC_KEY_SIZE],
+    payload_key: PayloadKey,
+    header_key: &HeaderKey,
 ) -> Result<BuiltEncryptedHeader, CryptoError> {
     if recipient_entries.is_empty() {
         return Err(CryptoError::InvalidFormat(
@@ -428,7 +425,7 @@ pub(crate) fn write_encrypted_file(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::keys::{DerivedSubkeys, FILE_KEY_SIZE, derive_subkeys};
+    use crate::crypto::keys::{DerivedSubkeys, FILE_KEY_SIZE, FileKey, derive_subkeys};
     use crate::recipient::entry::RECIPIENT_FLAG_CRITICAL;
     use crate::recipient::{argon2id, x25519};
 
@@ -442,7 +439,7 @@ mod tests {
 
     fn dummy_subkeys() -> DerivedSubkeys {
         // Stable inputs so the test is deterministic.
-        let file_key = [0x42u8; FILE_KEY_SIZE];
+        let file_key = FileKey::from_bytes_for_tests([0x42u8; FILE_KEY_SIZE]);
         let stream_nonce = [0x07u8; STREAM_NONCE_SIZE];
         derive_subkeys(&file_key, &stream_nonce).unwrap()
     }

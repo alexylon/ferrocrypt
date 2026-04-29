@@ -36,7 +36,7 @@ use zeroize::Zeroizing;
 use crate::CryptoError;
 use crate::crypto::aead::{WRAP_NONCE_SIZE, WRAPPED_FILE_KEY_SIZE, open_file_key, seal_file_key};
 use crate::crypto::hkdf::hkdf_expand_sha3_256;
-use crate::crypto::keys::{FILE_KEY_SIZE, random_bytes};
+use crate::crypto::keys::{FileKey, random_bytes};
 use crate::crypto::mac::ct_eq_32;
 
 /// Wire-format `type_name` for this recipient.
@@ -71,8 +71,8 @@ const WRAPPED_FILE_KEY_OFFSET: usize = WRAP_NONCE_OFFSET + WRAP_NONCE_SIZE;
 /// [`CryptoError::InvalidInput`] with the "Invalid recipient public
 /// key" message, since this is an encrypt-time user error (the
 /// caller-supplied recipient public key is degenerate).
-pub fn wrap(
-    file_key: &[u8; FILE_KEY_SIZE],
+pub(crate) fn wrap(
+    file_key: &FileKey,
     recipient_pubkey: &[u8; PUBKEY_SIZE],
 ) -> Result<[u8; BODY_LENGTH], CryptoError> {
     let ephemeral_secret = EphemeralSecret::random_from_rng(OsRng);
@@ -109,10 +109,10 @@ pub fn wrap(
 /// `type_name = "x25519"`. Per `FORMAT.md` §3.7, the candidate
 /// `file_key` is not considered final until the header MAC also
 /// verifies.
-pub fn unwrap(
+pub(crate) fn unwrap(
     body: &[u8; BODY_LENGTH],
     recipient_secret_bytes: &[u8; PRIVATE_KEY_SIZE],
-) -> Result<Zeroizing<[u8; FILE_KEY_SIZE]>, CryptoError> {
+) -> Result<FileKey, CryptoError> {
     let mut ephemeral_pubkey_bytes = [0u8; PUBKEY_SIZE];
     ephemeral_pubkey_bytes
         .copy_from_slice(&body[EPHEMERAL_PUBKEY_OFFSET..EPHEMERAL_PUBKEY_OFFSET + PUBKEY_SIZE]);
@@ -341,6 +341,7 @@ mod tests {
     use super::*;
     use crate::CryptoError;
     use crate::crypto::kdf::KdfParams;
+    use crate::crypto::keys::FILE_KEY_SIZE;
     use crate::error::FormatDefect;
     use crate::key::private::seal_private_key;
     use secrecy::SecretString;
@@ -443,16 +444,16 @@ mod tests {
 
     #[test]
     fn wrap_unwrap_round_trip() {
-        let file_key = [0x42u8; FILE_KEY_SIZE];
+        let file_key = FileKey::from_bytes_for_tests([0x42u8; FILE_KEY_SIZE]);
         let (sk, pk) = keypair();
         let body = wrap(&file_key, &pk).unwrap();
         let recovered = unwrap(&body, &sk).unwrap();
-        assert_eq!(*recovered, file_key);
+        assert_eq!(recovered.expose(), file_key.expose());
     }
 
     #[test]
     fn unwrap_with_wrong_private_key_fails_with_recipient_unwrap_failed() {
-        let file_key = [0u8; FILE_KEY_SIZE];
+        let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let (_alice_sk, alice_pk) = keypair();
         let (bob_sk, _bob_pk) = keypair();
         let body = wrap(&file_key, &alice_pk).unwrap();
@@ -466,7 +467,7 @@ mod tests {
 
     #[test]
     fn unwrap_with_tampered_wrapped_file_key_fails_with_recipient_unwrap_failed() {
-        let file_key = [0u8; FILE_KEY_SIZE];
+        let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let (sk, pk) = keypair();
         let mut body = wrap(&file_key, &pk).unwrap();
         body[WRAPPED_FILE_KEY_OFFSET] ^= 0x01;
@@ -480,7 +481,7 @@ mod tests {
 
     #[test]
     fn unwrap_with_tampered_ephemeral_pubkey_fails_with_recipient_unwrap_failed() {
-        let file_key = [0u8; FILE_KEY_SIZE];
+        let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let (sk, pk) = keypair();
         let mut body = wrap(&file_key, &pk).unwrap();
         body[EPHEMERAL_PUBKEY_OFFSET] ^= 0x01;
@@ -494,7 +495,7 @@ mod tests {
 
     #[test]
     fn unwrap_with_tampered_wrap_nonce_fails_with_recipient_unwrap_failed() {
-        let file_key = [0u8; FILE_KEY_SIZE];
+        let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let (sk, pk) = keypair();
         let mut body = wrap(&file_key, &pk).unwrap();
         body[WRAP_NONCE_OFFSET] ^= 0x01;
@@ -512,7 +513,7 @@ mod tests {
         // point: X25519(any_secret, all_zero_pubkey) = all_zero_shared.
         // Per `FORMAT.md` §2.4 this MUST be rejected by readers before
         // deriving the wrap key.
-        let file_key = [0u8; FILE_KEY_SIZE];
+        let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let (sk, pk) = keypair();
         let mut body = wrap(&file_key, &pk).unwrap();
         body[EPHEMERAL_PUBKEY_OFFSET..EPHEMERAL_PUBKEY_OFFSET + PUBKEY_SIZE].fill(0);
@@ -526,7 +527,7 @@ mod tests {
 
     #[test]
     fn wrap_rejects_all_zero_recipient_pubkey() {
-        let file_key = [0u8; FILE_KEY_SIZE];
+        let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let zero_pk = [0u8; PUBKEY_SIZE];
         match wrap(&file_key, &zero_pk) {
             Err(CryptoError::InvalidInput(msg)) => {
@@ -542,7 +543,7 @@ mod tests {
         // ephemeral_pubkey(32) || wrap_nonce(24) || wrapped(48). A
         // reordering would produce a body that this reader rejects
         // and that conforming readers reject the same way.
-        let file_key = [0x11u8; FILE_KEY_SIZE];
+        let file_key = FileKey::from_bytes_for_tests([0x11u8; FILE_KEY_SIZE]);
         let (_, pk) = keypair();
         let body = wrap(&file_key, &pk).unwrap();
         assert_eq!(EPHEMERAL_PUBKEY_OFFSET, 0);

@@ -25,14 +25,13 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use secrecy::SecretString;
-use zeroize::Zeroizing;
 
 use crate::archiver::{ArchiveLimits, unarchive};
 use crate::container::{
     HeaderReadLimits, build_encrypted_header, read_encrypted_header, write_encrypted_file,
 };
 use crate::crypto::kdf::{KdfLimit, KdfParams};
-use crate::crypto::keys::{DerivedSubkeys, derive_subkeys, generate_file_key, random_bytes};
+use crate::crypto::keys::{DerivedSubkeys, FileKey, derive_subkeys, random_bytes};
 use crate::crypto::stream::{STREAM_NONCE_SIZE, payload_decryptor};
 use crate::crypto::tlv::validate_tlv;
 use crate::format;
@@ -75,7 +74,7 @@ pub fn encrypt_file_from_bytes(
     // build is a pure function of (file_key, recipient_pubkey,
     // stream_nonce, input bytes). file_key lives in `Zeroizing`, so
     // an early return wipes it.
-    let file_key = generate_file_key();
+    let file_key = FileKey::generate();
     let stream_nonce = random_bytes::<STREAM_NONCE_SIZE>();
     let DerivedSubkeys {
         payload_key,
@@ -209,7 +208,7 @@ pub fn decrypt_file(
     //    dropped.
     let stream_nonce = parsed.fixed.stream_nonce;
     let mut had_successful_unwrap = false;
-    let mut selected_payload_key: Option<Zeroizing<[u8; 32]>> = None;
+    let mut selected_payload_key: Option<crate::crypto::keys::PayloadKey> = None;
 
     for entry in parsed.recipient_entries.iter() {
         if entry.type_name != x25519::TYPE_NAME {
@@ -948,7 +947,7 @@ mod tests {
     /// kept verbatim.
     fn build_multi_recipient_fcr(
         entries: &[RecipientEntry],
-        file_key: &Zeroizing<[u8; 32]>,
+        file_key: &FileKey,
         plaintext: &[u8],
         path: &Path,
     ) -> Result<(), CryptoError> {
@@ -1024,7 +1023,7 @@ mod tests {
         let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
         let (pub_b, priv_b, pass_b) = keypair_fixture(&keys_dir, "bob", "bob-pass")?;
 
-        let file_key = generate_file_key();
+        let file_key = FileKey::generate();
         let body_a = x25519::wrap(&file_key, &pub_a)?;
         let body_b = x25519::wrap(&file_key, &pub_b)?;
         let entries = [
@@ -1063,7 +1062,7 @@ mod tests {
         let keys_dir = tmp.path().join("keys");
         let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
 
-        let file_key = generate_file_key();
+        let file_key = FileKey::generate();
         let body_a = x25519::wrap(&file_key, &pub_a)?;
         let valid_slot = RecipientEntry::native(NativeRecipientType::X25519, body_a.to_vec())?;
         // Construct directly via public fields to bypass `native`'s
@@ -1102,7 +1101,7 @@ mod tests {
         let keys_dir = tmp.path().join("keys");
         let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
 
-        let file_key = generate_file_key();
+        let file_key = FileKey::generate();
         let body_a = x25519::wrap(&file_key, &pub_a)?;
         let unknown_entry = RecipientEntry {
             type_name: "example.com/unknown".to_string(),
@@ -1137,7 +1136,7 @@ mod tests {
         let keys_dir = tmp.path().join("keys");
         let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
 
-        let file_key = generate_file_key();
+        let file_key = FileKey::generate();
         let body_a = x25519::wrap(&file_key, &pub_a)?;
         let unknown_critical = RecipientEntry {
             type_name: "example.com/critical".to_string(),
@@ -1183,7 +1182,7 @@ mod tests {
         let keys_dir = tmp.path().join("keys");
         let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
 
-        let file_key = generate_file_key();
+        let file_key = FileKey::generate();
         let body_x = x25519::wrap(&file_key, &pub_a)?;
         let synthetic_argon2id = RecipientEntry {
             type_name: argon2id::TYPE_NAME.to_string(),
@@ -1218,7 +1217,7 @@ mod tests {
         let keys_dir = tmp.path().join("keys");
         let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
 
-        let file_key = generate_file_key();
+        let file_key = FileKey::generate();
         let body_a = x25519::wrap(&file_key, &pub_a)?;
         let unknown_at_cap = RecipientEntry {
             type_name: "example.com/at-cap".to_string(),
@@ -1245,7 +1244,7 @@ mod tests {
         let keys_dir = tmp.path().join("keys");
         let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
 
-        let file_key = generate_file_key();
+        let file_key = FileKey::generate();
         let body_a = x25519::wrap(&file_key, &pub_a)?;
         let oversize = (format::BODY_LEN_LOCAL_CAP_DEFAULT as usize) + 1;
         let unknown_oversize = RecipientEntry {
@@ -1301,8 +1300,8 @@ mod tests {
         // Two distinct file_keys: `real_file_key` drives the MAC and
         // payload; `decoy_file_key` is what slot A wraps. Collision
         // probability is 2^-256.
-        let real_file_key = generate_file_key();
-        let decoy_file_key = generate_file_key();
+        let real_file_key = FileKey::generate();
+        let decoy_file_key = FileKey::generate();
 
         let body_a = x25519::wrap(&decoy_file_key, &pub_a)?;
         let body_b = x25519::wrap(&decoy_file_key, &pub_b)?;

@@ -731,8 +731,11 @@ mod tests {
     /// exercises the same byte path the real encrypt would write.
     #[test]
     fn detect_encryption_mode_routes_argon2id_recipient_as_symmetric() {
-        let header_key = [0x42u8; crypto::mac::HMAC_KEY_SIZE];
-        let payload_key = zeroize::Zeroizing::new([0u8; crypto::keys::ENCRYPTION_KEY_SIZE]);
+        let header_key =
+            crypto::keys::HeaderKey::from_bytes_for_tests([0x42u8; crypto::mac::HMAC_KEY_SIZE]);
+        let payload_key = crypto::keys::PayloadKey::from_bytes_for_tests(
+            [0u8; crypto::keys::ENCRYPTION_KEY_SIZE],
+        );
         let stream_nonce = [0x07u8; format::STREAM_NONCE_SIZE];
         let entry = recipient::RecipientEntry::native(
             recipient::NativeRecipientType::Argon2id,
@@ -765,8 +768,11 @@ mod tests {
     /// `EncryptionMode::Hybrid`.
     #[test]
     fn detect_encryption_mode_routes_x25519_recipient_as_hybrid() {
-        let header_key = [0x42u8; crypto::mac::HMAC_KEY_SIZE];
-        let payload_key = zeroize::Zeroizing::new([0u8; crypto::keys::ENCRYPTION_KEY_SIZE]);
+        let header_key =
+            crypto::keys::HeaderKey::from_bytes_for_tests([0x42u8; crypto::mac::HMAC_KEY_SIZE]);
+        let payload_key = crypto::keys::PayloadKey::from_bytes_for_tests(
+            [0u8; crypto::keys::ENCRYPTION_KEY_SIZE],
+        );
         let stream_nonce = [0x07u8; format::STREAM_NONCE_SIZE];
         let entry = recipient::RecipientEntry::native(
             recipient::NativeRecipientType::X25519,

@@ -39,9 +39,7 @@
 use std::io::Read;
 
 use crate::CryptoError;
-use crate::crypto::mac::{
-    HMAC_KEY_SIZE, HMAC_TAG_SIZE, hmac_sha3_256_parts, hmac_sha3_256_parts_verify,
-};
+use crate::crypto::mac::{HMAC_TAG_SIZE, hmac_sha3_256_parts, hmac_sha3_256_parts_verify};
 use crate::error::{FormatDefect, UnsupportedVersion};
 
 // Big-endian read/write helpers used by `to_bytes` / `parse` for the on-disk
@@ -460,12 +458,12 @@ fn check_header_section_lengths(
 /// `ext_len`, `stream_nonce`, the on-wire recipient list in
 /// declared order, and `ext_bytes`), but excludes both the MAC tag
 /// itself and the encrypted payload.
-pub fn compute_header_mac(
+pub(crate) fn compute_header_mac(
     prefix_bytes: &[u8; PREFIX_SIZE],
     header_bytes: &[u8],
-    header_key: &[u8; HMAC_KEY_SIZE],
+    header_key: &crate::crypto::keys::HeaderKey,
 ) -> Result<[u8; HEADER_MAC_SIZE], CryptoError> {
-    hmac_sha3_256_parts(header_key, &[prefix_bytes, header_bytes])
+    hmac_sha3_256_parts(header_key.expose(), &[prefix_bytes, header_bytes])
 }
 
 /// Constant-time verification of a v1 `header_mac` over `prefix(12) ||
@@ -476,13 +474,13 @@ pub fn compute_header_mac(
 /// per-candidate "wrong recipient slot" diagnostic before continuing
 /// iteration; the bare `HeaderTampered` is correct only when no further
 /// recipient slot remains to try.
-pub fn verify_header_mac(
+pub(crate) fn verify_header_mac(
     prefix_bytes: &[u8; PREFIX_SIZE],
     header_bytes: &[u8],
-    header_key: &[u8; HMAC_KEY_SIZE],
+    header_key: &crate::crypto::keys::HeaderKey,
     tag: &[u8; HEADER_MAC_SIZE],
 ) -> Result<(), CryptoError> {
-    hmac_sha3_256_parts_verify(header_key, &[prefix_bytes, header_bytes], tag)
+    hmac_sha3_256_parts_verify(header_key.expose(), &[prefix_bytes, header_bytes], tag)
 }
 
 // ─── Errors ─────────────────────────────────────────────────────────────────
@@ -512,6 +510,7 @@ pub fn unsupported_key_version_error(version: u8) -> CryptoError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::mac::HMAC_KEY_SIZE;
 
     #[test]
     fn kind_round_trips_through_byte() {
@@ -874,10 +873,10 @@ mod tests {
     /// triple for header-MAC tests. The header bytes are arbitrary
     /// stand-ins for `header_fixed || recipient_entries || ext_bytes`;
     /// the MAC primitive is content-agnostic.
-    fn header_mac_fixture() -> ([u8; PREFIX_SIZE], Vec<u8>, [u8; HMAC_KEY_SIZE]) {
+    fn header_mac_fixture() -> ([u8; PREFIX_SIZE], Vec<u8>, crate::crypto::keys::HeaderKey) {
         let prefix = Prefix::build_encrypted(200).unwrap();
         let header = vec![0xCDu8; 200];
-        let key = [0xABu8; HMAC_KEY_SIZE];
+        let key = crate::crypto::keys::HeaderKey::from_bytes_for_tests([0xABu8; HMAC_KEY_SIZE]);
         (prefix, header, key)
     }
 
@@ -933,8 +932,9 @@ mod tests {
     fn header_mac_rejects_wrong_key() {
         let (prefix, header, key) = header_mac_fixture();
         let tag = compute_header_mac(&prefix, &header, &key).unwrap();
-        let mut other_key = key;
-        other_key[0] ^= 0x01;
+        let mut other_bytes = *key.expose();
+        other_bytes[0] ^= 0x01;
+        let other_key = crate::crypto::keys::HeaderKey::from_bytes_for_tests(other_bytes);
         match verify_header_mac(&prefix, &header, &other_key, &tag) {
             Err(CryptoError::HeaderTampered) => {}
             other => panic!("expected HeaderTampered for wrong key, got {other:?}"),
@@ -964,7 +964,7 @@ mod tests {
         // different MACs. This locks in `FORMAT.md` §3.6: reorder
         // attacks invalidate the MAC.
         let prefix = Prefix::build_encrypted(200).unwrap();
-        let key = [0x77u8; HMAC_KEY_SIZE];
+        let key = crate::crypto::keys::HeaderKey::from_bytes_for_tests([0x77u8; HMAC_KEY_SIZE]);
         let entry_a = [0x11u8; 50];
         let entry_b = [0x22u8; 50];
         let header_ab: Vec<u8> = entry_a.iter().chain(entry_b.iter()).copied().collect();

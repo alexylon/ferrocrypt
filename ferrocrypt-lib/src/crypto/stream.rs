@@ -23,7 +23,7 @@ use zeroize::Zeroize;
 
 use crate::CryptoError;
 use crate::crypto::aead::TAG_SIZE;
-use crate::crypto::keys::ENCRYPTION_KEY_SIZE;
+use crate::crypto::keys::PayloadKey;
 use crate::error::StreamError;
 
 /// Plaintext chunk size for streaming XChaCha20-Poly1305 AEAD (64 KiB).
@@ -383,12 +383,12 @@ impl<R: Read> Drop for DecryptReader<R> {
 /// subkey derivation (see [`crate::crypto::keys::derive_subkeys`]) —
 /// pairing them with material from a different derivation produces
 /// ciphertext that no reader will accept.
-pub fn payload_encryptor<W: Write>(
-    payload_key: &[u8; ENCRYPTION_KEY_SIZE],
+pub(crate) fn payload_encryptor<W: Write>(
+    payload_key: &PayloadKey,
     stream_nonce: &[u8; STREAM_NONCE_SIZE],
     writer: W,
 ) -> EncryptWriter<W> {
-    let cipher = XChaCha20Poly1305::new(payload_key.into());
+    let cipher = XChaCha20Poly1305::new(payload_key.expose().into());
     let stream_encryptor = stream::EncryptorBE32::from_aead(cipher, stream_nonce.into());
     EncryptWriter::new(stream_encryptor, writer)
 }
@@ -400,12 +400,12 @@ pub fn payload_encryptor<W: Write>(
 /// (see `format::verify_header_mac`); per `FORMAT.md` §3.7 a candidate
 /// `file_key` is not final until the header MAC also verifies, so this
 /// helper does not authenticate either input on its own.
-pub fn payload_decryptor<R: Read>(
-    payload_key: &[u8; ENCRYPTION_KEY_SIZE],
+pub(crate) fn payload_decryptor<R: Read>(
+    payload_key: &PayloadKey,
     stream_nonce: &[u8; STREAM_NONCE_SIZE],
     reader: R,
 ) -> DecryptReader<R> {
-    let cipher = XChaCha20Poly1305::new(payload_key.into());
+    let cipher = XChaCha20Poly1305::new(payload_key.expose().into());
     let stream_decryptor = stream::DecryptorBE32::from_aead(cipher, stream_nonce.into());
     DecryptReader::new(stream_decryptor, reader)
 }
@@ -413,6 +413,7 @@ pub fn payload_decryptor<R: Read>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::keys::ENCRYPTION_KEY_SIZE;
 
     // ─── Streaming AEAD adapter helpers ───────────────────────────────────
     //
@@ -424,19 +425,22 @@ mod tests {
     // chunk, small consumer buffers) at the adapter level so a regression
     // in `fill_buffer` or the in-place AEAD wiring fails immediately.
 
-    const TEST_KEY: [u8; ENCRYPTION_KEY_SIZE] = [0x42; ENCRYPTION_KEY_SIZE];
     const TEST_NONCE: [u8; STREAM_NONCE_SIZE] = [0x37; STREAM_NONCE_SIZE];
+
+    fn test_key() -> PayloadKey {
+        PayloadKey::from_bytes_for_tests([0x42; ENCRYPTION_KEY_SIZE])
+    }
 
     fn encrypt_to_vec(plaintext: &[u8]) -> Vec<u8> {
         let mut ciphertext: Vec<u8> = Vec::new();
-        let mut writer = payload_encryptor(&TEST_KEY, &TEST_NONCE, &mut ciphertext);
+        let mut writer = payload_encryptor(&test_key(), &TEST_NONCE, &mut ciphertext);
         writer.write_all(plaintext).unwrap();
         let _ = writer.finish().unwrap();
         ciphertext
     }
 
     fn decrypt_to_vec(ciphertext: &[u8]) -> Vec<u8> {
-        let mut reader = payload_decryptor(&TEST_KEY, &TEST_NONCE, ciphertext);
+        let mut reader = payload_decryptor(&test_key(), &TEST_NONCE, ciphertext);
         let mut out = Vec::new();
         reader.read_to_end(&mut out).unwrap();
         out
@@ -473,7 +477,7 @@ mod tests {
             .map(|i| (i % 251) as u8)
             .collect();
         let mut ciphertext: Vec<u8> = Vec::new();
-        let mut writer = payload_encryptor(&TEST_KEY, &TEST_NONCE, &mut ciphertext);
+        let mut writer = payload_encryptor(&test_key(), &TEST_NONCE, &mut ciphertext);
         for byte in &plaintext {
             writer.write_all(std::slice::from_ref(byte)).unwrap();
         }
@@ -529,7 +533,7 @@ mod tests {
             .collect();
         let ciphertext = encrypt_to_vec(&plaintext);
 
-        let mut reader = payload_decryptor(&TEST_KEY, &TEST_NONCE, ciphertext.as_slice());
+        let mut reader = payload_decryptor(&test_key(), &TEST_NONCE, ciphertext.as_slice());
         let mut decrypted = Vec::with_capacity(plaintext.len());
         let mut tiny_buf = [0u8; 7];
         loop {
@@ -570,7 +574,7 @@ mod tests {
     /// `streaming_aead_empty_plaintext_is_single_tag_only_chunk`.)
     #[test]
     fn streaming_aead_empty_input_rejected_as_truncation() {
-        let mut reader = payload_decryptor(&TEST_KEY, &TEST_NONCE, &[][..]);
+        let mut reader = payload_decryptor(&test_key(), &TEST_NONCE, &[][..]);
         let (out, err) = drain_decrypt_reader(&mut reader);
         let err = err.expect("expected truncation error, got clean EOF");
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
@@ -606,7 +610,7 @@ mod tests {
         // `next` chunk.
         ciphertext.truncate(BUFFER_SIZE + TAG_SIZE);
 
-        let mut reader = payload_decryptor(&TEST_KEY, &TEST_NONCE, ciphertext.as_slice());
+        let mut reader = payload_decryptor(&test_key(), &TEST_NONCE, ciphertext.as_slice());
         let (out, err) = drain_decrypt_reader(&mut reader);
         let err = err.expect("expected AEAD error on chunk-boundary truncation");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
@@ -647,7 +651,7 @@ mod tests {
         let second_chunk_offset = BUFFER_SIZE + TAG_SIZE;
         ciphertext[second_chunk_offset + 100] ^= 0x01;
 
-        let mut reader = payload_decryptor(&TEST_KEY, &TEST_NONCE, ciphertext.as_slice());
+        let mut reader = payload_decryptor(&test_key(), &TEST_NONCE, ciphertext.as_slice());
         let (out, err) = drain_decrypt_reader(&mut reader);
         let err = err.expect("expected AEAD tamper error, got clean EOF");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
@@ -681,7 +685,7 @@ mod tests {
         // partial chunk that still has data but is not a valid AEAD frame.
         ciphertext.truncate(ciphertext.len() - 10);
 
-        let mut reader = payload_decryptor(&TEST_KEY, &TEST_NONCE, ciphertext.as_slice());
+        let mut reader = payload_decryptor(&test_key(), &TEST_NONCE, ciphertext.as_slice());
         let (out, err) = drain_decrypt_reader(&mut reader);
         let err = err.expect("expected AEAD error on mid-chunk truncation");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
@@ -786,7 +790,7 @@ mod tests {
         // wrapper above satisfies that contract. We cannot reuse
         // `drain_decrypt_reader` here because it's hard-coded to
         // `&[u8]`; inline the drain loop instead.
-        let mut reader = payload_decryptor(&TEST_KEY, &TEST_NONCE, reader_wrapper);
+        let mut reader = payload_decryptor(&test_key(), &TEST_NONCE, reader_wrapper);
         let mut out = Vec::new();
         let mut scratch = [0u8; 4096];
         let err = loop {

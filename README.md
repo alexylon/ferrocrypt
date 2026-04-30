@@ -12,7 +12,7 @@
 &nbsp;
 [![crate: ferrocrypt-cli](https://img.shields.io/crates/v/ferrocrypt-cli.svg?label=crate%3A%20ferrocrypt-cli&color=blue)](https://crates.io/crates/ferrocrypt-cli)
 
-A file encryption tool for files and directories, implemented entirely in Rust and available as a library, command-line interface, and desktop application, supporting both password-based symmetric encryption and recipient-based hybrid encryption.
+FerroCrypt is a file and directory encryption tool written in Rust. It is available as a Rust library, a command-line program, and a desktop application. It supports password-based and public-key encryption, storing encrypted data in the `.fcr` file format.
 
 <div align="center">
   <img src="/assets/screenshot-1.png" width="400" alt="FerroCrypt">&nbsp;&nbsp;
@@ -26,167 +26,37 @@ A file encryption tool for files and directories, implemented entirely in Rust a
   <img src="/assets/screenshot-3.png" width="400" alt="FerroCrypt">
 </div>
 
-## About
+## Overview
 
-FerroCrypt encrypts files and directories into `.fcr` files. It supports two
-user-facing encryption paths:
+FerroCrypt encrypts a file or directory into a single `.fcr` file. Two encryption modes are supported:
 
-- **Symmetric** — password-based encryption. The file contains exactly one
-  native `argon2id` recipient. The passphrase is processed with Argon2id and
-  HKDF-SHA3-256 to unwrap the per-file key during decryption.
-- **Hybrid** — public/private-key encryption. The file contains one or more
-  native `x25519` recipients. Each recipient entry wraps the same per-file key
-  for a recipient public key. Decryption requires a matching `private.key` file
-  and that key file's passphrase.
+- **Symmetric encryption** — encryption and decryption use the same passphrase. Typical use is encrypting data that only the user needs to read again.
+- **Hybrid encryption** — encryption uses a recipient public key; decryption uses the matching password-protected private key. Typical use is sending encrypted data to someone else.
 
-Both paths use the same v1 `.fcr` container: one random 32-byte `file_key`, one
-STREAM-BE32 encrypted payload, and one or more typed recipient entries that
-independently wrap the same `file_key`. Mode is derived from the authenticated
-recipient list, not from the filename or a per-mode magic byte.
+Both modes use the same encrypted-file container. The mode is determined from authenticated metadata inside the file, not from the filename or extension. Renaming an encrypted file does not change how FerroCrypt interprets it.
 
-The current implementation ships two native recipient types:
-
-- `argon2id` — passphrase recipient, exclusive; it must appear alone.
-- `x25519` — public-key recipient, public-key-mixable; multiple X25519
-  recipients may share a file.
-
-The v1 format reserves space for future recipient types and authenticated TLV
-extensions, but the stable public library API does not currently expose a
-third-party crypto plugin interface.
-
-### Crates and applications
-
-| Crate | Purpose |
-|---|---|
-| [`ferrocrypt-lib`](https://crates.io/crates/ferrocrypt) (crate `ferrocrypt`) | Core Rust library: file format handling, encryption/decryption orchestration, key files, archive handling, typed errors, and the `Encryptor` / `Decryptor` API. |
-| [`ferrocrypt-cli`](https://crates.io/crates/ferrocrypt-cli) | Command-line interface that installs the `ferrocrypt` binary. It exposes `symmetric`, `hybrid`, `keygen`, `fingerprint`, and `recipient` subcommands. |
-| `ferrocrypt-desktop` | Slint-based desktop app using the library. It provides symmetric and hybrid workflows, key generation, key-file validation, conflict warnings, and fingerprint display. |
-
-Canonical reference documents live in `ferrocrypt-lib/`:
-
-- [**`FORMAT.md`**](ferrocrypt-lib/FORMAT.md) — byte-level v1 wire format:
-  `.fcr`, `private.key`, `public.key`, recipient entries, payload stream, TLV
-  extensions, and archive subset.
-- [**`STRUCTURE.md`**](ferrocrypt-lib/STRUCTURE.md) — library architecture:
-  module ownership, single sources of truth, public API shape, dependency
-  direction, and decryption ordering.
-
-### Main features
-
-- **Pure Rust cryptographic stack:** XChaCha20-Poly1305, Argon2id,
-  HKDF-SHA3-256, HMAC-SHA3-256, SHA3-256, and X25519.
-- **Unified `.fcr` format:** one encrypted-file container for passphrase and
-  public-key recipients.
-- **HMAC-SHA3-256 header authentication:** the prefix, fixed header fields,
-  recipient list, and extension region are authenticated by a 32-byte tag. A
-  recipient unwrap is not accepted until the candidate file key verifies the
-  header MAC, so tampering is detected before any payload byte is decrypted.
-- **Streaming encryption:** plaintext is streamed directly through
-  XChaCha20-Poly1305 STREAM-BE32 in 64 KiB chunks. The TAR archive of a
-  directory payload is never materialized as a plaintext temp file.
-- **Typed library API:** `Encryptor` and `Decryptor` route callers to passphrase
-  or recipient decryption based on the file's recipient list.
-- **Multi-recipient public-key encryption:**
-  `Encryptor::with_recipients([alice, bob])` writes one `.fcr` file that either
-  listed recipient can decrypt with their own private key.
-- **Bech32 public recipient strings:** public keys can be shared as lowercase
-  `fcr1…` strings with both the BIP 173 checksum and an internal SHA3-256
-  checksum over the typed payload.
-- **SHA3-256 fingerprints:** public-recipient fingerprints are 64 lowercase hex
-  characters over `type_name || 0x00 || key_material`.
-- **Safe archive subset:** directory payloads use a restricted POSIX ustar subset
-  and reject symlinks, hardlink entries, device files, FIFOs, sockets, unsafe
-  paths, duplicate output paths, and archives with more than one top-level root.
-- **Hardened extraction on Linux and macOS:** every write inside the
-  `.incomplete` working tree is anchored to a directory file descriptor and
-  resolves intermediate components with `openat`/`mkdirat` and `O_NOFOLLOW`,
-  so a local attacker who swaps a path component for a symlink cannot redirect
-  plaintext writes outside the destination tree. Other platforms use a
-  path-based extraction path that is less strict against in-tree races.
-- **Atomic output:** encrypted files and generated key files are staged and
-  promoted only after success. Failed decryptions leave an `.incomplete` working
-  directory rather than a final output path.
-- **Typed errors:** structural format failures, KDF resource-cap failures,
-  private-key unlock failures, recipient unwrap failures, header MAC failures,
-  payload authentication failures, truncation, and trailing data have distinct
-  public error variants.
-
-Decryption is based on the `FCR\0` magic bytes and v1 header structure, not on
-the file extension. Renaming a file does not change how FerroCrypt interprets
-it.
-
-### What's new in 0.3.0
-
-FerroCrypt 0.3.0 is a ground-up rewrite of the library, CLI, desktop app, and
-on-disk format. The main changes are:
-
-- **Unified format v1:** one `.fcr` container for passphrase and public-key
-  encryption, with mode derived from the recipient list.
-- **Pure Rust hybrid encryption:** X25519 + HKDF-SHA3-256 replaces the previous
-  RSA/OpenSSL-based hybrid path. Older hybrid files and key pairs must be
-  decrypted with an older release and regenerated.
-- **New library API:** `Encryptor` / `Decryptor` replace the legacy per-mode
-  config structs and free functions.
-- **Multi-recipient public-key encryption:** one `.fcr` file can be encrypted to
-  multiple X25519 recipients.
-- **Bech32 recipient strings and fingerprints:** public keys can be shared as
-  lowercase `fcr1…` strings and verified with SHA3-256 fingerprints.
-- **New key formats:** `public.key` is canonical Bech32 text; `private.key` is a
-  passphrase-wrapped v1 binary key file.
-- **Resource caps and safer archives:** KDF memory limits and archive caps are
-  enforced before expensive work, and directory payloads use a strict safe ustar
-  subset.
-- **Atomic output and clearer errors:** output files are staged before finalizing,
-  and decryption failures surface as typed, user-readable errors.
-- **Slint desktop app:** the desktop UI was rewritten with mode detection,
-  key-file validation, conflict warnings, fingerprint display, and inline key
-  generation.
-
-### Security and limitations
-
-- Sender authentication is not part of the v1 format. Hybrid encryption controls
-  which private keys can decrypt; it does not prove who encrypted the file.
-- Directory encryption is a safe-file-transfer convenience, not a full backup
-  format. FerroCrypt preserves file contents and directory structure. It does
-  not guarantee preservation of ownership, timestamps, ACLs, extended
-  attributes, symlink relationships, hardlink identity, or platform-specific
-  metadata.
-- Symlinks and special filesystem entries are rejected during encryption.
-  Filesystem hardlinks may be archived as independent regular files.
-- Archive resource caps are enforced on both encrypt and decrypt: by default,
-  at most 250,000 entries, 64 GiB total regular-file content, and 64 path
-  components per entry.
-- Encrypted files and generated key files are staged under temporary names and
-  promoted only after success. Failed decryptions may leave a sibling
-  `.incomplete` working directory.
-- The current v1 format is not backward-compatible with pre-v1 FerroCrypt files
-  or key pairs. Decrypt older data with the release that created it, then
-  re-encrypt with the current release.
-- This project has not undergone an independent third-party security audit.
-
-### What's stored in an encrypted file
-
-Every `.fcr` file starts with a plain 12-byte prefix, followed by an
-authenticated header, a 32-byte header MAC, and the encrypted payload. The
-header contains the metadata needed to attempt decryption: fixed header fields,
-the typed recipient list, the stream nonce, and optional authenticated extension
-bytes. Payload filenames and file contents are inside the encrypted archive
-payload, not in the header.
-
-| File | Contents |
-|---|---|
-| **Symmetric `.fcr`** | 12-byte prefix (`FCR\0` magic, version, kind `'E'`, prefix flags, header length), `header_fixed`, one `argon2id` recipient entry, extension region, header HMAC tag, encrypted payload |
-| **Hybrid `.fcr`** | 12-byte prefix (`FCR\0` magic, version, kind `'E'`, prefix flags, header length), `header_fixed`, one or more `x25519` recipient entries, extension region, header HMAC tag, encrypted payload |
-| **`private.key`** | Binary v1 key file: cleartext fixed header and variable cleartext fields authenticated as AEAD associated data, followed by a passphrase-wrapped X25519 secret |
-| **`public.key`** | UTF-8 text file containing the canonical lowercase Bech32 `fcr1…` recipient string, written with one trailing newline; readers also accept the same string without the final newline |
+Directory encryption is intended for safe transfer and storage of file contents. It preserves directory structure and regular file data, but it is not a full system-backup format.
 
 ## Installation
 
-Pre-built packages are available on the [GitHub Releases](https://github.com/alexylon/ferrocrypt/releases) page: CLI binaries for macOS, Linux, and Windows, plus desktop app packages (`.app` for macOS, `.deb` for Debian/Ubuntu, `.rpm` for Fedora/RHEL, `.msi` for Windows).
+Pre-built CLI binaries and desktop packages are published on the [GitHub Releases](https://github.com/alexylon/ferrocrypt/releases) page.
 
-### CLI
+Available release artifacts include:
 
-From crates.io:
+- CLI binaries for macOS, Linux, and Windows
+- Desktop packages for macOS, Debian/Ubuntu, Fedora/RHEL, and Windows
+
+### Rust library
+
+```bash
+cargo add ferrocrypt
+```
+
+API documentation is available on [docs.rs](https://docs.rs/ferrocrypt/latest/ferrocrypt/).
+
+### Command-line interface
+
+Install from crates.io:
 
 ```bash
 cargo install ferrocrypt-cli
@@ -198,105 +68,85 @@ Or build from source:
 cargo build --release
 ```
 
-Binary output: `target/release/ferrocrypt` (macOS/Linux) or `target\release\ferrocrypt.exe` (Windows).
+The compiled binary is written to `target/release/ferrocrypt` on macOS and Linux, or `target\release\ferrocrypt.exe` on Windows.
 
-### Desktop App
+### Desktop application
 
-Build from source — requires [Rust](https://www.rust-lang.org/tools/install) and [cargo-bundle](https://github.com/nickelc/cargo-bundle):
+Building the desktop application from source requires Rust and `cargo-bundle`:
 
 ```bash
 cd ferrocrypt-desktop
-cargo bundle --release # produces .app (macOS) / .deb + .AppImage (Linux) / .msi (Windows)
+cargo bundle --release
 ```
 
-**Linux only** — install system dependencies first:
+The bundle command produces platform-specific packages, such as `.app`, `.deb`, `.AppImage`, or `.msi`, depending on the host platform and installed tooling.
+
+Linux builds also require these system packages:
 
 ```bash
 # Debian/Ubuntu
-sudo apt update && sudo apt install libfontconfig-dev libfreetype-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libwayland-dev libssl-dev
+sudo apt install libfontconfig-dev libfreetype-dev libxcb-shape0-dev \
+                 libxcb-xfixes0-dev libxkbcommon-dev libwayland-dev libssl-dev
 
 # Fedora
-sudo dnf install fontconfig-devel freetype-devel libxcb-devel libxkbcommon-devel wayland-devel openssl-devel
+sudo dnf install fontconfig-devel freetype-devel libxcb-devel \
+                 libxkbcommon-devel wayland-devel openssl-devel
 ```
 
-The AppImage output additionally needs `mksquashfs`. Skip this if you only want the `.deb`:
+AppImage output also requires `mksquashfs`, provided by the `squashfs-tools` package.
+
+## Command-line usage
+
+The CLI runs as a one-shot command, or starts an interactive prompt when invoked without arguments.
+
+### Password-based encryption
 
 ```bash
-# Debian/Ubuntu
-sudo apt install squashfs-tools
-
-# Fedora
-sudo dnf install squashfs-tools
-```
-
-### Library
-
-```bash
-cargo add ferrocrypt
-```
-
-## Rust version support
-
-The `ferrocrypt` library crate currently targets **MSRV 1.87**.
-
-This minimum supported Rust version is checked in CI for `ferrocrypt-lib`.
-It may be increased in future releases if required by dependencies or language improvements.
-
-## CLI Usage
-
-### Subcommands
-
-| Subcommand | Alias | Purpose |
-|---|---|---|
-| `symmetric` | `sym` | Encrypt/decrypt with a password |
-| `hybrid` | `hyb` | Encrypt/decrypt with public/private keys |
-| `keygen` | `gen` | Generate a key pair |
-| `fingerprint` | `fp` | Print a public key's SHA3-256 fingerprint |
-| `recipient` | `rc` | Print a public key as a Bech32 `fcr1…` string |
-
-Run without arguments to start an interactive REPL. Aliases are available in interactive mode.
-
-Passphrases are never passed on the command line. The CLI prompts interactively with hidden input when a passphrase is needed (with confirmation on encrypt/keygen). For non-interactive use (scripts, CI), set the `FERROCRYPT_PASSPHRASE` environment variable.
-
-### Symmetric
-
-```bash
-# Encrypt (prompts for passphrase with confirmation)
+# Encrypt a file or directory with a passphrase
 ferrocrypt symmetric -i secret.txt -o ./encrypted
 
-# Decrypt (prompts for passphrase)
+# Decrypt the resulting .fcr file
 ferrocrypt symmetric -i ./encrypted/secret.fcr -o ./decrypted
 
-# Encrypt with custom output path (--output-path not needed)
-ferrocrypt symmetric -i secret.txt -s ./backup.fcr
+# Write the encrypted file to an explicit path
+ferrocrypt symmetric -i secret.txt -s ./secret.fcr
 ```
 
-### Hybrid
+The shorter alias `sym` may be used instead of `symmetric`.
+
+### Public-key encryption
 
 ```bash
-# Generate keys (prompts for passphrase with confirmation)
+# Generate a key pair
 ferrocrypt keygen -o ./keys
 
-# Print recipient string (for sharing)
-ferrocrypt recipient ./keys/public.key
-
-# Verify a public key's fingerprint
-ferrocrypt fingerprint ./keys/public.key
-
-# Encrypt with recipient string (no passphrase needed)
-ferrocrypt hybrid -i secret.txt -o ./encrypted -r fcr1...
-
-# Encrypt with custom output path (--output-path not needed)
-ferrocrypt hybrid -i secret.txt -s ./secret.fcr -r fcr1...
-
-# Encrypt with public key file (no passphrase needed)
+# Encrypt with a public key file
 ferrocrypt hybrid -i secret.txt -o ./encrypted -k ./keys/public.key
 
-# Decrypt with private key (prompts for passphrase)
+# Decrypt with the matching private key
 ferrocrypt hybrid -i ./encrypted/secret.fcr -o ./decrypted -k ./keys/private.key
 ```
 
-### Interactive Mode
+The shorter aliases `gen` and `hyb` may be used instead of `keygen` and `hybrid`.
+
+Public keys can also be represented as recipient strings:
+
+```bash
+# Print the recipient string stored in a public key file
+ferrocrypt recipient ./keys/public.key
+
+# Print the public key fingerprint for independent verification
+ferrocrypt fingerprint ./keys/public.key
+
+# Encrypt directly to a recipient string
+ferrocrypt hybrid -i secret.txt -o ./encrypted -r fcr1...
+```
+
+The shorter aliases `rc` and `fp` may be used instead of `recipient` and `fingerprint`.
+
+Passphrases are not accepted as command-line arguments. The CLI prompts for them with hidden input. For scripts and CI environments, the `FERROCRYPT_PASSPHRASE` environment variable may be used.
+
+### Interactive mode
 
 ```text
 $ ferrocrypt
@@ -309,76 +159,118 @@ Confirm passphrase:
 ferrocrypt> quit
 ```
 
-The REPL exits on `quit`, `exit` (case-insensitive), or Ctrl-D (EOF). Ctrl-C cancels the current line without exiting.
+The interactive prompt exits on `quit`, `exit`, or Ctrl-D. Ctrl-C cancels the current line without exiting the prompt.
 
-### Flag Reference
+### Subcommands
 
-#### `symmetric`
+| Subcommand | Alias | Purpose |
+|---|---|---|
+| `symmetric` | `sym` | Encrypt or decrypt with a passphrase |
+| `hybrid` | `hyb` | Encrypt or decrypt with public/private keys |
+| `keygen` | `gen` | Generate a public/private key pair |
+| `fingerprint` | `fp` | Print a public key fingerprint |
+| `recipient` | `rc` | Print a public key as an `fcr1...` recipient string |
 
-| Flag | Description |
-|---|---|
-| `-i, --input-path` | Input file or directory |
-| `-o, --output-path` | Output directory (optional with `--save-as`) |
-| `-s, --save-as` | Custom output file path (encrypt only) |
-| `--max-kdf-memory` | Maximum KDF memory cost to accept in MiB (decrypt only) |
+The `fingerprint` and `recipient` subcommands take a public key file path directly: `ferrocrypt fingerprint ./keys/public.key`.
 
-#### `hybrid`
+### Common options
 
-| Flag | Description |
-|---|---|
-| `-i, --input-path` | Input file or directory |
-| `-o, --output-path` | Output directory (optional with `--save-as`) |
-| `-k, --key` | Key file path: public key for encrypt, private key for decrypt |
-| `-r, --recipient` | Bech32 recipient string for encryption (`fcr1...`) |
-| `-s, --save-as` | Custom output file path (encrypt only) |
-| `--max-kdf-memory` | Maximum KDF memory cost to accept in MiB (decrypt only) |
+| Option | Applies to | Description |
+|---|---|---|
+| `-i, --input-path` | `symmetric`, `hybrid` | Input file or directory |
+| `-o, --output-path` | `symmetric`, `hybrid`, `keygen` | Output directory |
+| `-s, --save-as` | `symmetric`, `hybrid` | Explicit encrypted output file path |
+| `-k, --key` | `hybrid` | Public key for encryption, private key for decryption |
+| `-r, --recipient` | `hybrid` | Recipient string for encryption |
+| `--max-kdf-memory` | `symmetric`, `hybrid` | Maximum Argon2id memory cost accepted during decryption |
 
-#### `keygen`
+## Desktop application
 
-| Flag | Description |
-|---|---|
-| `-o, --output-path` | Output directory for the key pair |
+The desktop application provides the same encryption workflows through a graphical interface. It accepts files and directories as input and detects encrypted files by reading their file headers.
 
-#### `fingerprint`
+- **Password** tab — passphrase-based (symmetric) encryption.
+- **Key pair** tab — public/private-key (hybrid) encryption. Key pairs can be generated from inside the application. Public key fingerprints are displayed for independent verification.
 
-| Argument | Description |
-|---|---|
-| `<key_file>` | Path to a public key file |
+Encrypted output is named automatically and can be changed with Save As. Key files are validated on selection, and invalid inputs or output conflicts are reported before encryption or decryption begins. A password-strength indicator is shown when a password is entered.
 
-#### `recipient`
+## Main properties
 
-| Argument | Description |
-|---|---|
-| `<key_file>` | Path to a public key file |
+- **Single encrypted-file format.** Password-based and public-key encryption both produce `.fcr` files.
+- **Mode detection from file contents.** Encrypted files are recognized from their internal header, not from the file extension.
+- **Authenticated metadata.** File headers are authenticated before any plaintext is produced.
+- **Streaming encryption.** File data is processed in chunks, so large inputs do not need to be held entirely in memory.
+- **Directory support.** Directories are stored as a restricted internal archive and encrypted as part of the payload.
+- **Public recipient strings.** Public keys can be shared as lowercase `fcr1...` recipient strings.
+- **Public key fingerprints.** SHA3-256 fingerprints provide a stable ID for independent public-key verification.
+- **Atomic output.** Encrypted files and generated key files are staged before being moved into their final location.
+- **Hardened extraction on Linux and macOS.** Extraction resists local symlink and path-component-race attacks; data cannot be redirected outside the chosen output directory.
+- **Typed library errors.** The Rust API distinguishes wrong credentials, unsupported data, authentication failures, truncation, and resource-limit failures.
+- **Pure Rust implementation.** The cryptographic implementation does not depend on OpenSSL. The library forbids `unsafe` code.
 
-## Desktop App Usage
+Multi-recipient public-key encryption is supported by the library API. A single `.fcr` file can be encrypted for several X25519 public keys, allowing any matching private key to decrypt it.
 
-Select a file or folder, then choose the encryption mode. The app auto-detects encrypted files by reading the file header, regardless of extension.
+## Security and limitations
 
-- **Symmetric** — Enter a password. The output path is auto-filled as `{name}.fcr` and can be changed with Save As. Decryption uses a directory picker.
-- **Hybrid** — Use an existing public key to encrypt, or create a new key pair inline. After key generation, the app switches to encryption with the new public key pre-filled. The recipient's public key fingerprint is shown with a copy button for out-of-band verification. Key files are validated on selection and invalid files show an error before the operation starts. Decryption requires a private key and its passphrase.
+FerroCrypt is an encryption tool, not an authentication or identity system. Public-key encryption controls which private keys can decrypt a file, but it does not prove who created the encrypted file. Sender authentication requires a separate signing mechanism.
 
-A password strength indicator (based on [Proton Pass](https://github.com/protonpass/proton-pass-common) implementation) is shown during encryption and key generation.
+The project has not undergone an independent third-party security audit. The [`chacha20poly1305`](https://crates.io/crates/chacha20poly1305) AEAD crate it uses for data encryption was [audited by NCC Group](https://research.nccgroup.com/2020/02/26/public-report-rustcrypto-aes-gcm-and-chacha20poly1305-implementation-review/).
+
+Limitations:
+
+- Pre-v1 FerroCrypt files and key pairs are not compatible with the current v1 format. Older data must be decrypted with the release that created it and then re-encrypted with the current release.
+- Directory encryption preserves file contents, directory structure, and Unix file permissions. It does not preserve ownership, timestamps, ACLs, extended attributes, hardlink identity, setuid/setgid/sticky bits, or platform-specific metadata.
+- Symlinks, hardlink archive entries, device files, FIFOs, sockets, unsafe paths, duplicate output paths, and archives with more than one top-level root are rejected during archive processing.
+- Filesystem hardlinks encountered during encryption are stored as independent regular files.
+- Default archive limits are enforced during encryption and decryption: at most 250,000 entries, 64 GiB of total regular-file content, and 64 path components per entry.
+- Failed decryptions do not write to the final output path. Partial plaintext may remain in a sibling `.incomplete` working copy when corruption is detected after some chunks have already authenticated.
+- Hardened extraction is available only on Linux and macOS. On a Windows machine where other local users have access, extract into a directory that is not writable by them.
 
 ## Decryption errors
 
-FerroCrypt distinguishes several distinct decryption-failure stages so that a failed decrypt tells you what actually went wrong:
+FerroCrypt reports decryption failures according to the stage that failed. This helps distinguish common causes without treating all failures as a generic wrong-password error.
 
-- **Private key unlock failed: wrong passphrase or tampered file** — The hybrid private key file failed AEAD authentication. Either the passphrase does not decrypt it, or one of the file's cleartext fields (header, KDF params, salt, nonce, public material, or extension region) has been tampered with since the file was written. The AEAD primitive cannot distinguish the two cases. Retry with the correct passphrase first; if that still fails, regenerate the key pair and re-encrypt.
-- **Decryption failed: recipient `argon2id` unwrap failed** (symmetric) — The passphrase does not unwrap the file key, or the recipient body has been modified. No plaintext has been produced.
-- **Decryption failed: recipient `x25519` unwrap failed** (hybrid) — The supplied private key does not match the key pair the file was encrypted for, or the recipient body has been modified. No plaintext has been produced.
-- **Decryption failed: no recipient could unlock the file** — The recipient list was iterated to exhaustion without any supported entry yielding a `file_key` that verified the header MAC. In single-recipient files this overlaps with the per-recipient unwrap failure above; in multi-recipient files it is the final error after every supported slot has been tried.
-- **Decryption failed: header tampered after unlock** — A recipient entry produced a candidate file key, but that key did not verify the header HMAC. This does not prove which input was wrong or modified; the credential, recipient body, or bytes inside the MAC scope may be the cause.
-- **Payload authentication failed: data tampered or corrupted** — The header authenticated successfully, but a later ciphertext chunk failed its authentication tag. This usually means the file has been corrupted or truncated partway through, an attacker has modified bytes after the header, or extra bytes were appended after the authenticated payload. During streaming decryption, earlier chunks that authenticated successfully may already have been written to disk under an `.incomplete` working directory before the failing chunk was reached.
-- **Encrypted file is truncated** — The encrypted stream ends before its final authenticated chunk, usually because of a partial download or an interrupted copy.
-- **Encrypted file has unexpected trailing data** — Bytes remain after the final authenticated chunk was decrypted successfully. Ordinary appended-bytes cases on a local file are already caught as a payload authentication failure (above), because the per-chunk AEAD's final-flag binding rejects a naive append. This dedicated variant is the defense-in-depth path for pathological input readers — non-blocking sockets, `Take`-style wrappers, or similar — that signal end-of-file at the chunk boundary and then yield additional bytes; FerroCrypt refuses to return success on such a stream.
-- **KDF resource cap exceeded** — The encrypted file's stored Argon2id memory cost exceeds the `--max-kdf-memory` cap (or the built-in 1 GiB ceiling, when the flag isn't set). The error reports both the file's required `mem_cost` and the configured cap. Re-run with a higher cap if you trust the source of the file.
+Common failure categories include:
 
-None of these failures produce a file at the final output path. Partial plaintext may have been written under a sibling `.incomplete` working directory (FerroCrypt leaves it there on purpose, because when ciphertext is damaged it may hold the only recoverable data). A retry starts fresh once that `.incomplete` directory is removed.
+- **Private key unlock failed: wrong passphrase or tampered file** — the private key passphrase is wrong, or the encrypted private key file has been modified.
+- **Decryption failed: recipient `argon2id` unwrap failed** (symmetric) — the supplied passphrase does not unlock the file, or the recipient metadata has been modified.
+- **Decryption failed: recipient `x25519` unwrap failed** (hybrid) — the supplied private key does not unlock the file, or the recipient metadata has been modified.
+- **Decryption failed: recipient `x25519` MAC mismatch** (multi-recipient hybrid) — a recipient unwrapped a candidate file key, but the authenticated header did not verify. Decryption continues with the next recipient in the file.
+- **Decryption failed: no recipient could unlock the file** — none of the supported recipients in the file could unlock the file key.
+- **Decryption failed: header tampered after unlock** — a candidate file key was found, but the authenticated header did not verify.
+- **Payload authentication failed: data tampered or corrupted** — the header verified, but the encrypted payload was corrupted or modified.
+- **Encrypted file is truncated** — the encrypted stream ended before its final authenticated chunk.
+- **Encrypted file has unexpected trailing data** — extra data was found after the authenticated encrypted stream.
+- **KDF resource cap exceeded** — the file requests more Argon2id memory than the configured limit permits. The default cap is 1 GiB; raise it with `--max-kdf-memory` if the source is trusted.
+- **Unknown critical recipient: `<type>`. Upgrade FerroCrypt.** — the file uses a recipient type marked as required that this release does not support.
+
+No failed decryption produces a completed output at the requested final path. If an `.incomplete` working copy is left behind, removing it resets the destination for a later retry.
+
+## Technical reference
+
+The canonical technical references are:
+
+- [**`FORMAT.md`**](ferrocrypt-lib/FORMAT.md) — `.fcr`, `private.key`, `public.key`, recipient entries, payload stream, extension data, and archive rules.
+- [**`STRUCTURE.md`**](ferrocrypt-lib/STRUCTURE.md) — library organization, API boundaries, dependency direction, and decryption flow.
+
+The cryptographic implementation uses:
+
+| Role | Primitive |
+|---|---|
+| Payload encryption | XChaCha20-Poly1305 STREAM-BE32 |
+| Passphrase KDF | Argon2id |
+| Public-key agreement | X25519 |
+| Key derivation | HKDF-SHA3-256 |
+| Header authentication | HMAC-SHA3-256 |
+| Public-key fingerprint | SHA3-256 |
+| Recipient string encoding | Bech32, HRP `fcr` |
+
+## Rust version support
+
+The `ferrocrypt` library crate currently targets **MSRV 1.87**. This minimum supported Rust version is checked in CI and may be raised in future releases if required by dependencies or language changes.
 
 ## Acknowledgments
 
-The desktop app is built with [Slint](https://slint.dev/).
+The desktop application is built with [Slint](https://slint.dev/).
 
 Password strength scoring is adapted from [Proton Pass](https://github.com/protonpass/proton-pass-common) (GPLv3).
 

@@ -88,14 +88,24 @@
 //! ## Format compatibility
 //!
 //! The current on-disk format is FerroCrypt v1 for `.fcr`, `public.key`, and
-//! `private.key`. Older pre-v1 files and key pairs use a different format family
-//! and, for historical hybrid encryption, a different key-agreement stack. To
-//! migrate older data, decrypt it with the release that created it, then
-//! re-encrypt it with the current release.
+//! `private.key`. Files written by any release that produces format v1 will
+//! decrypt under any later release that supports format v1. If a future release
+//! introduces format v2, format v1 reading will be maintained for compatibility
+//! with older files.
 //!
-//! All patch and minor releases within the 0.3.x series remain backward
-//! compatible — files encrypted with 0.3.0 will be readable by any 0.3.x
-//! release.
+//! Older pre-v1 files and key pairs use a different format family and, for
+//! historical hybrid encryption, a different key-agreement stack. To migrate
+//! older data, decrypt it with the release that created it, then re-encrypt it
+//! with the current release.
+//!
+//! ## API stability
+//!
+//! The on-disk format is stable and versioned independently from the crate.
+//! The public Rust API ([`Encryptor`], [`Decryptor`], [`PublicKey`],
+//! [`PrivateKey`], the error types) is pre-1.0; it may change in minor releases
+//! (0.x → 0.y), while patch releases (0.x.y → 0.x.z) preserve it. See the
+//! repository [`CHANGELOG.md`](https://github.com/alexylon/ferrocrypt/blob/main/CHANGELOG.md)
+//! for release notes.
 //!
 //! ## Security notes
 //!

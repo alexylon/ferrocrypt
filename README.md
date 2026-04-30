@@ -12,8 +12,7 @@
 &nbsp;
 [![crate: ferrocrypt-cli](https://img.shields.io/crates/v/ferrocrypt-cli.svg?label=crate%3A%20ferrocrypt-cli&color=blue)](https://crates.io/crates/ferrocrypt-cli)
 
-Recipient-oriented file encryption for files and directories, with a Rust library,
-command-line tool, and desktop app.
+A file encryption tool for files and directories, implemented entirely in Rust and available as a library, command-line interface, and desktop application, supporting both password-based symmetric encryption and recipient-based hybrid encryption.
 
 <div align="center">
   <img src="/assets/screenshot-1.png" width="400" alt="FerroCrypt">&nbsp;&nbsp;

@@ -1,23 +1,29 @@
+//! Decrypt-side TAR reading and output reconstruction.
+//!
+//! [`unarchive`] streams an authenticated TAR payload into the
+//! caller-supplied `output_dir`, writing every output under an
+//! `.incomplete` working name and atomically promoting the working
+//! root to its final name only after the whole archive validates.
+//!
+//! Per-entry validation runs before any filesystem write — see
+//! [`validate_ustar_entry`] (`FORMAT.md` §9). On Linux and macOS,
+//! `extract_entries` anchors every operation to a directory file
+//! descriptor opened by [`super::platform::open_anchor`] and uses
+//! `openat`/`mkdirat` with `O_NOFOLLOW`; on other platforms the path-
+//! based fallback documents its narrower threat model inline.
+
+use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
+use std::fs;
+use std::io::{self, Read};
+use std::path::{Path, PathBuf};
+
 use crate::CryptoError;
 use crate::fs::atomic::rename_no_clobber;
-use crate::fs::paths::{INCOMPLETE_SUFFIX, file_stem};
-use std::ffi::{OsStr, OsString};
-use std::fs::{self, File};
-use std::io::{self, Read, Write};
-use std::path::{Component, Path, PathBuf};
+use crate::fs::paths::INCOMPLETE_SUFFIX;
 
-/// Default file mode for non-Unix platforms (rw-r--r--).
-#[cfg(not(unix))]
-const DEFAULT_FILE_MODE: u32 = 0o644;
-
-/// Default directory mode for non-Unix platforms (rwxr-xr-x).
-#[cfg(not(unix))]
-const DEFAULT_DIR_MODE: u32 = 0o755;
-
-/// Mask that keeps only owner/group/other rwx bits, stripping
-/// setuid, setgid, and sticky bits from tar-stored permissions.
-#[cfg(unix)]
-const PERMISSION_BITS_MASK: u32 = 0o777;
+use super::limits::{ArchiveLimits, enforce_per_entry_caps, enforce_total_bytes_cap};
+use super::path::{UstarEntryKind, ustar, validate_archive_path};
 
 /// Initial mode for newly-created regular-file extraction outputs
 /// (rw-------). Restrictive on purpose: the tar-stored mode is applied
@@ -27,192 +33,6 @@ const PERMISSION_BITS_MASK: u32 = 0o777;
 /// plaintext.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const INITIAL_FILE_CREATE_MODE: u32 = 0o600;
-
-/// Default mode passed to `mkdirat` when creating a fresh extraction
-/// directory (rwxr-xr-x). The tar-stored directory mode is applied
-/// later via `fchmod` so that a restrictive parent (e.g. 0o500)
-/// declared higher up in the archive doesn't block creation of its
-/// children.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-const DIR_CREATE_MODE: u32 = 0o755;
-
-/// Reads the rwx-only Unix permission word from `metadata`, stripping
-/// setuid/setgid/sticky. Used by the encrypt-side header builders to
-/// fold the `cfg(unix)`-gated `PermissionsExt` import into one place.
-#[cfg(unix)]
-fn metadata_perm_mode(metadata: &fs::Metadata) -> u32 {
-    use std::os::unix::fs::PermissionsExt;
-    metadata.permissions().mode() & PERMISSION_BITS_MASK
-}
-
-/// Mode to store in a TAR header for a regular file. On Unix the rwx
-/// bits of the source file (special bits stripped); on non-Unix targets
-/// a fixed default since Unix permission semantics don't apply. Folds
-/// the per-platform `cfg` dance out of `append_file`.
-fn archive_file_mode(metadata: &fs::Metadata) -> u32 {
-    #[cfg(unix)]
-    {
-        metadata_perm_mode(metadata)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = metadata;
-        DEFAULT_FILE_MODE
-    }
-}
-
-/// Mode to store in a TAR header for a directory. Reads `src_path`
-/// metadata fresh on Unix; on non-Unix returns the fixed default
-/// without touching the filesystem (Windows has no rwx perms to read,
-/// and skipping the syscall avoids a fresh failure mode where a
-/// concurrent removal between `read_dir` and `append_dir_entry` would
-/// otherwise abort the archive).
-fn archive_dir_mode(src_path: &Path) -> Result<u32, CryptoError> {
-    #[cfg(unix)]
-    {
-        Ok(metadata_perm_mode(&fs::metadata(src_path)?))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = src_path;
-        Ok(DEFAULT_DIR_MODE)
-    }
-}
-
-/// Resource caps applied during TAR archive AND extract operations.
-///
-/// On the **extract** side, the `.fcr` payload is post-MAC authenticated,
-/// so an external attacker cannot forge a malicious archive — but a
-/// sender error or stress-test corpus can still legitimately produce a
-/// payload that would exhaust the reader's RAM (`seen_paths` HashSet),
-/// file-descriptor table (one `OwnedFd` per intermediate directory on
-/// Linux/macOS), or disk. Each cap fires before the next allocation /
-/// `io::copy`.
-///
-/// On the **archive** side, the same caps run as a writer-side
-/// preflight: a tree the extractor would refuse must NOT be encryptable
-/// in the first place, otherwise a user could encrypt a file they
-/// cannot decrypt with the default policy. Encrypt-side rejection
-/// fires BEFORE the entry's TAR header is emitted, so the writer
-/// short-circuits early and no partial archive is produced.
-///
-/// Defaults are sized for typical desktop content (large source repos,
-/// photo libraries, multi-GiB document trees) while rejecting
-/// pathological inputs (millions of empty entries, multi-TiB declared
-/// sizes, deeply nested directory trees).
-#[derive(Debug, Clone, Copy)]
-#[non_exhaustive]
-pub struct ArchiveLimits {
-    /// Maximum number of TAR entries (regular files + directories)
-    /// admissible in a single extract. Exceeding this rejects the
-    /// archive before the offending entry's `seen_paths` slot is
-    /// allocated.
-    pub max_entry_count: u32,
-    /// Maximum cumulative announced plaintext bytes across all regular
-    /// file entries. Directory entries do not contribute. Each entry's
-    /// announced size (`entry.header().size()`) is added to a running
-    /// total and checked BEFORE the entry's content is copied, so a
-    /// hostile size declaration cannot force a partial write.
-    pub max_total_plaintext_bytes: u64,
-    /// Maximum path component count of any single entry (directory
-    /// depth + filename). The ustar `PATH_REPRESENTABLE_MAX` already
-    /// caps the byte length of the path; this cap rejects deeply
-    /// nested but byte-economical paths (e.g. `a/b/c/.../z`) before
-    /// the per-component openat walk.
-    pub max_path_depth: u32,
-}
-
-impl ArchiveLimits {
-    /// Replaces the maximum TAR entry count. See
-    /// [`ArchiveLimits::max_entry_count`].
-    pub fn with_max_entry_count(mut self, n: u32) -> Self {
-        self.max_entry_count = n;
-        self
-    }
-
-    /// Replaces the maximum cumulative plaintext byte cap. See
-    /// [`ArchiveLimits::max_total_plaintext_bytes`].
-    pub fn with_max_total_plaintext_bytes(mut self, n: u64) -> Self {
-        self.max_total_plaintext_bytes = n;
-        self
-    }
-
-    /// Replaces the maximum per-entry path-component depth. See
-    /// [`ArchiveLimits::max_path_depth`].
-    pub fn with_max_path_depth(mut self, n: u32) -> Self {
-        self.max_path_depth = n;
-        self
-    }
-}
-
-impl Default for ArchiveLimits {
-    fn default() -> Self {
-        Self {
-            max_entry_count: 250_000,
-            max_total_plaintext_bytes: 64 * 1024 * 1024 * 1024,
-            max_path_depth: 64,
-        }
-    }
-}
-
-/// Per-entry resource-cap check shared by encrypt-side preflight
-/// (`archive`) and decrypt-side extraction (`extract_entries`, both
-/// arms). Caller has already incremented `entry_count` for the current
-/// entry. Rejects with [`CryptoError::InvalidInput`] (the archive-layer
-/// escape-hatch class) so the diagnostic carries the offending count
-/// or path inline.
-fn enforce_per_entry_caps(
-    entry_count: u32,
-    path: &Path,
-    limits: &ArchiveLimits,
-) -> Result<(), CryptoError> {
-    if entry_count > limits.max_entry_count {
-        return Err(CryptoError::InvalidInput(format!(
-            "Archive entry-count cap exceeded ({} entries, cap {})",
-            entry_count, limits.max_entry_count
-        )));
-    }
-    let depth = u32::try_from(path.components().count()).unwrap_or(u32::MAX);
-    if depth > limits.max_path_depth {
-        return Err(CryptoError::InvalidInput(format!(
-            "Archive path depth cap exceeded ({} components, cap {}): {}",
-            depth,
-            limits.max_path_depth,
-            path.display()
-        )));
-    }
-    Ok(())
-}
-
-/// Per-file-entry total-bytes cap check shared by encrypt-side preflight
-/// and decrypt-side extraction. Updates `total_bytes` in place
-/// (saturating to `u64::MAX`) BEFORE the cap comparison so an overflow
-/// cannot underflow the rejection — the cap value is bounded by `u64`,
-/// so the saturated sum always exceeds it.
-fn enforce_total_bytes_cap(
-    entry_size: u64,
-    total_bytes: &mut u64,
-    limits: &ArchiveLimits,
-) -> Result<(), CryptoError> {
-    *total_bytes = total_bytes.saturating_add(entry_size);
-    if *total_bytes > limits.max_total_plaintext_bytes {
-        return Err(CryptoError::InvalidInput(format!(
-            "Archive total-bytes cap exceeded ({} bytes, cap {})",
-            *total_bytes, limits.max_total_plaintext_bytes
-        )));
-    }
-    Ok(())
-}
-
-/// Running totals threaded through the recursive archive walk so the
-/// encrypt-side preflight (`archive` → `archive_directory` →
-/// `append_file` / `append_dir_entry`) can enforce [`ArchiveLimits`]
-/// across the entire tree, not just per-call.
-#[derive(Debug, Default)]
-struct ArchiveCounters {
-    entry_count: u32,
-    total_bytes: u64,
-}
 
 /// Decrypt-side per-iteration accounting bundled into one struct so the
 /// shared `pre_validate_entry` method runs identical resource-cap +
@@ -225,7 +45,7 @@ struct ArchiveCounters {
 struct ExtractCounters {
     entry_count: u32,
     total_bytes: u64,
-    seen_paths: std::collections::HashSet<PathBuf>,
+    seen_paths: HashSet<PathBuf>,
 }
 
 impl ExtractCounters {
@@ -255,37 +75,6 @@ impl ExtractCounters {
         }
         Ok(normalized)
     }
-}
-
-/// Raw POSIX ustar header constants (`FORMAT.md` §9). Used by both the
-/// writer (canonical emission) and the reader (per-entry strict
-/// subset validation).
-mod ustar {
-    pub(super) const TYPEFLAG_OFFSET: usize = 156;
-    pub(super) const MAGIC_OFFSET: usize = 257;
-    pub(super) const MAGIC: &[u8; 6] = b"ustar\0";
-    pub(super) const VERSION_OFFSET: usize = 263;
-    pub(super) const VERSION: &[u8; 2] = b"00";
-
-    pub(super) const NAME_SIZE: usize = 100;
-    pub(super) const PREFIX_SIZE: usize = 155;
-    /// Maximum path length representable purely via the ustar
-    /// `name` + `/` + `prefix` fields; anything longer requires a GNU
-    /// long-name or PAX extension record, which v1 forbids.
-    pub(super) const PATH_REPRESENTABLE_MAX: usize = NAME_SIZE + 1 + PREFIX_SIZE;
-
-    pub(super) const TYPEFLAG_REGULAR_NUL: u8 = b'\0';
-    pub(super) const TYPEFLAG_REGULAR_ZERO: u8 = b'0';
-    pub(super) const TYPEFLAG_DIRECTORY: u8 = b'5';
-}
-
-/// `FORMAT.md` §9 archive subset classification for a successfully
-/// validated entry: ferrocrypt v1 recognises only regular files and
-/// directories.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UstarEntryKind {
-    File,
-    Directory,
 }
 
 /// Per-entry POSIX ustar subset validation result. `canonical_path` has
@@ -453,590 +242,6 @@ fn drain_and_verify_zero_padding<R: Read>(mut reader: R) -> Result<(), CryptoErr
     }
 }
 
-/// Component-by-component no-follow extraction primitives.
-///
-/// The hardened extraction walker anchors every operation to a directory
-/// file descriptor rooted in the user's trusted `output_dir`. Every
-/// intermediate component is resolved via `openat`/`mkdirat` with
-/// `O_NOFOLLOW`, so a concurrent local attacker who can write inside the
-/// destination tree cannot race a directory into a symlink and redirect
-/// the write elsewhere. The final regular file is created with
-/// `O_CREAT | O_EXCL | O_NOFOLLOW` so a pre-placed symlink fails closed
-/// with `AlreadyExists`.
-///
-/// **Platform coverage.** This hardening only applies on Linux and
-/// macOS. The fallback path-based extractor used on Windows and other
-/// non-Linux/non-macOS Unix targets walks plain `&Path` and HAS a
-/// symlink-race window — see the docstring on the `not(linux/macos)`
-/// arm of [`extract_entries`] (and on [`open_no_follow`] for the encode
-/// side) for the threat model and the operator-level mitigation
-/// (don't extract attacker-influenced archives into a directory writable
-/// by other local users). Closing the gap on Windows would require
-/// `NtCreateFile` with `OBJECT_ATTRIBUTES`, which the crate does not
-/// take on because of its zero-`unsafe` stance.
-///
-/// Gated to Linux and macOS because rustix is only pulled in there; the
-/// other-platform extraction path keeps the existing path-based approach.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-mod nofollow {
-    use std::ffi::{OsStr, OsString};
-    use std::fs::File;
-    use std::io;
-    use std::os::fd::{AsFd, OwnedFd};
-    use std::path::{Component, Path};
-
-    use rustix::fs::{FileType, Mode, OFlags, RawMode};
-    use rustix::io::Errno;
-
-    use crate::CryptoError;
-
-    /// Defensive mask for `mode_from`: keeps the rwx + setuid/setgid/
-    /// sticky bits (4 octal digits) and drops everything else, so a
-    /// stray caller passing a value with high bits set cannot silently
-    /// truncate on targets where `RawMode` is narrower than `u32`
-    /// (notably macOS's `u16`).
-    const MODE_AND_SPECIAL_BITS_MASK: u32 = 0o7777;
-
-    /// Converts a tar-style u32 permission word into a `rustix::fs::Mode`,
-    /// coping with targets where `mode_t` is narrower than `u32`. The
-    /// defensive [`MODE_AND_SPECIAL_BITS_MASK`] keeps only permission and
-    /// special bits, so a stray caller passing a value with high bits
-    /// set cannot silently truncate on macOS's `u16` `RawMode`.
-    pub(super) fn mode_from(mode: u32) -> Mode {
-        Mode::from_raw_mode((mode & MODE_AND_SPECIAL_BITS_MASK) as RawMode)
-    }
-
-    /// Opens the user-supplied output directory as a dirfd anchor. The
-    /// output directory itself is chosen by the caller (argv / GUI picker)
-    /// and is trusted, so NOFOLLOW is not applied here.
-    pub(super) fn open_anchor(output_dir: &Path) -> Result<OwnedFd, CryptoError> {
-        rustix::fs::open(
-            output_dir,
-            OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|e| CryptoError::Io(io::Error::from(e)))
-    }
-
-    /// Opens `name` under `parent_fd` without following symlinks on the
-    /// final component and without any assumption about file type. The
-    /// combination `O_NOFOLLOW | O_NONBLOCK` catches symlinks (ELOOP)
-    /// before resolving, and prevents hangs if an attacker places a FIFO
-    /// at the name. `O_DIRECTORY` is intentionally omitted — on macOS
-    /// combining it with `O_NOFOLLOW` makes the kernel report `ENOTDIR`
-    /// instead of `ELOOP` on a symlink target, so we verify the file
-    /// type via `fstat` on the returned fd instead.
-    fn openat_nofollow(parent_fd: &OwnedFd, name: &OsStr) -> Result<OwnedFd, Errno> {
-        rustix::fs::openat(
-            parent_fd.as_fd(),
-            name,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-    }
-
-    fn ensure_fd_is_directory(fd: &OwnedFd, name: &OsStr) -> Result<(), CryptoError> {
-        let stat =
-            rustix::fs::fstat(fd.as_fd()).map_err(|e| CryptoError::Io(io::Error::from(e)))?;
-        if FileType::from_raw_mode(stat.st_mode) != FileType::Directory {
-            return Err(CryptoError::InvalidInput(format!(
-                "Expected directory at: {}",
-                Path::new(name).display()
-            )));
-        }
-        Ok(())
-    }
-
-    /// Creates a fresh directory `name` under `parent_fd` and opens it
-    /// NOFOLLOW. Fails with `AlreadyExists` if anything — including a
-    /// symlink — already exists at that name.
-    pub(super) fn mkdirat_strict(parent_fd: &OwnedFd, name: &OsStr) -> io::Result<OwnedFd> {
-        rustix::fs::mkdirat(parent_fd.as_fd(), name, mode_from(super::DIR_CREATE_MODE))
-            .map_err(io::Error::from)?;
-        let fd = openat_nofollow(parent_fd, name).map_err(io::Error::from)?;
-        // fstat the freshly-opened fd to confirm it is a directory —
-        // catches a racing attacker who replaced our mkdirat result with
-        // a different file type between the syscalls.
-        let stat = rustix::fs::fstat(fd.as_fd()).map_err(io::Error::from)?;
-        if FileType::from_raw_mode(stat.st_mode) != FileType::Directory {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Created directory is no longer a directory (race detected)",
-            ));
-        }
-        Ok(fd)
-    }
-
-    /// Ensures `name` exists as a directory under `parent_fd`, returning
-    /// its fd. Opens NOFOLLOW first; on `NotFound` creates it then
-    /// reopens. A symlink at that name aborts with a typed error, as does
-    /// any non-directory file type.
-    pub(super) fn ensure_dir(parent_fd: &OwnedFd, name: &OsStr) -> Result<OwnedFd, CryptoError> {
-        match openat_nofollow(parent_fd, name) {
-            Ok(fd) => {
-                ensure_fd_is_directory(&fd, name)?;
-                Ok(fd)
-            }
-            Err(Errno::NOENT) => {
-                rustix::fs::mkdirat(parent_fd.as_fd(), name, mode_from(super::DIR_CREATE_MODE))
-                    .map_err(|e| CryptoError::Io(io::Error::from(e)))?;
-                let fd = openat_nofollow(parent_fd, name)
-                    .map_err(|e| CryptoError::Io(io::Error::from(e)))?;
-                ensure_fd_is_directory(&fd, name)?;
-                Ok(fd)
-            }
-            Err(Errno::LOOP) => Err(symlink_err(name)),
-            Err(e) => Err(CryptoError::Io(io::Error::from(e))),
-        }
-    }
-
-    /// Opens an existing directory under `parent_fd` without creating
-    /// anything. A symlink at that name aborts with a typed error; a
-    /// non-directory file type does the same.
-    fn open_existing_dir(parent_fd: &OwnedFd, name: &OsStr) -> Result<OwnedFd, CryptoError> {
-        let fd = openat_nofollow(parent_fd, name).map_err(|e| {
-            if e == Errno::LOOP {
-                symlink_err(name)
-            } else {
-                CryptoError::Io(io::Error::from(e))
-            }
-        })?;
-        ensure_fd_is_directory(&fd, name)?;
-        Ok(fd)
-    }
-
-    fn symlink_err(name: &OsStr) -> CryptoError {
-        CryptoError::InvalidInput(format!(
-            "Symlink in extraction path: {}",
-            Path::new(name).display()
-        ))
-    }
-
-    fn normal_component<'a>(
-        component: Component<'a>,
-        full: &Path,
-    ) -> Result<&'a OsStr, CryptoError> {
-        match component {
-            Component::Normal(s) => Ok(s),
-            _ => Err(CryptoError::InvalidInput(format!(
-                "Invalid component in archive entry: {}",
-                full.display()
-            ))),
-        }
-    }
-
-    /// Walks `rel` under `root_fd`, creating intermediate directories
-    /// as needed. Returns an fd of the final component's parent and
-    /// the final component's name. Every step uses `NOFOLLOW`.
-    pub(super) fn walk_to_parent(
-        root_fd: &OwnedFd,
-        rel: &Path,
-    ) -> Result<(OwnedFd, OsString), CryptoError> {
-        let mut components: Vec<Component<'_>> = rel.components().collect();
-        // Caller guarantees `rel` is non-empty (the upstream
-        // `rel.as_os_str().is_empty()` branch handles the root-
-        // level case) and `validate_archive_path` has reduced it to
-        // Normal components only, so `pop()` never returns None here.
-        let last = components.pop().ok_or(CryptoError::InternalInvariant(
-            "Internal error: archive entry resolved to empty path",
-        ))?;
-        let final_name = normal_component(last, rel)?.to_os_string();
-
-        let mut cur = root_fd
-            .as_fd()
-            .try_clone_to_owned()
-            .map_err(CryptoError::Io)?;
-        for component in components {
-            let name = normal_component(component, rel)?;
-            cur = ensure_dir(&cur, name)?;
-        }
-        Ok((cur, final_name))
-    }
-
-    /// Walks `rel` under `root_fd` without creating anything, returning
-    /// an fd to the final directory. Used at chmod-time so deferred
-    /// directory permissions can be applied against a fresh fd instead
-    /// of a re-resolved path.
-    ///
-    /// **Empty-`rel` behavior:** when `rel` has no components,
-    /// `rel.components()` yields nothing and the for-loop is a no-op,
-    /// so the function returns a freshly-cloned fd of `root_fd` itself.
-    /// The deferred dir-permissions loop relies on this to fold the
-    /// "root directory" and "descendant directory" cases into a single
-    /// call site without an explicit empty-path branch.
-    pub(super) fn open_dir_at_rel(root_fd: &OwnedFd, rel: &Path) -> Result<OwnedFd, CryptoError> {
-        let mut cur = root_fd
-            .as_fd()
-            .try_clone_to_owned()
-            .map_err(CryptoError::Io)?;
-        for component in rel.components() {
-            let name = normal_component(component, rel)?;
-            cur = open_existing_dir(&cur, name)?;
-        }
-        Ok(cur)
-    }
-
-    /// Atomically creates a new regular file under `parent_fd`. Any
-    /// pre-existing entry — including a symlink — causes `AlreadyExists`.
-    /// The initial permission word is restrictive (`0o600`); callers
-    /// apply the tar-stored mode via `fchmod` after writing so plaintext
-    /// is never briefly visible to unintended users.
-    pub(super) fn create_file_at(
-        parent_fd: &OwnedFd,
-        name: &OsStr,
-        create_mode: u32,
-    ) -> io::Result<File> {
-        let fd = rustix::fs::openat(
-            parent_fd.as_fd(),
-            name,
-            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            mode_from(create_mode),
-        )
-        .map_err(io::Error::from)?;
-        Ok(File::from(fd))
-    }
-
-    /// Sets the rwx permission bits of an already-open fd. Special bits
-    /// (setuid/setgid/sticky) are stripped — extraction never honors a
-    /// tar-stored special bit, so callers can pass the raw header mode
-    /// without pre-masking. Accepts any `AsFd` so it works for both
-    /// regular-file and directory fds.
-    pub(super) fn fchmod<Fd: AsFd>(fd: Fd, mode: u32) -> Result<(), CryptoError> {
-        rustix::fs::fchmod(fd, mode_from(mode & super::PERMISSION_BITS_MASK))
-            .map_err(|e| CryptoError::Io(io::Error::from(e)))
-    }
-}
-
-/// Rejects paths that could escape the output directory (path traversal)
-/// or confuse the root-aware extraction logic. `Component::CurDir`
-/// (leading `./`) is rejected because ferrocrypt's own archiver never
-/// produces it and it turns `root_name` into `.`, which then conflicts
-/// with the final rename step.
-pub fn validate_archive_path(path: &Path) -> Result<(), CryptoError> {
-    for component in path.components() {
-        match component {
-            Component::ParentDir
-            | Component::RootDir
-            | Component::Prefix(_)
-            | Component::CurDir => {
-                return Err(CryptoError::InvalidInput(format!(
-                    "Unsafe path in archive: {}",
-                    path.display()
-                )));
-            }
-            Component::Normal(_) => {}
-        }
-    }
-    Ok(())
-}
-
-/// Archives a file or directory into a TAR stream written to `writer`.
-/// Returns a tuple of the file stem (base name without extension for files,
-/// directory name for directories) and the writer, so the caller can finalize it.
-///
-/// For directories, uses a manual recursive walk instead of `append_dir_all`
-/// to give per-entry control: symlinks and special entries (sockets, FIFOs,
-/// devices) are rejected with a clear error. Hardlinks are archived as regular
-/// file contents without preserving link identity.
-/// Rejects inputs the archiver will not accept: symlinks (live or dangling)
-/// and anything that isn't a regular file or directory. Defined here because
-/// these are the archiver's per-entry rules; `lib.rs` also calls this at the
-/// top of every encrypt entry point so that the rejection fires before any
-/// Argon2id or cipher work runs (up to a gigabyte of RAM and several seconds
-/// of CPU on default settings), not only at archive time. The archive-time
-/// call remains as defense-in-depth against TOCTOU and direct callers.
-///
-/// The `is_symlink` check runs before the existence check so that dangling
-/// symlinks fail with a clear "Input is a symlink" message instead of a
-/// generic `InputPath` not-found.
-pub(crate) fn validate_encrypt_input(input_path: &Path) -> Result<(), CryptoError> {
-    if input_path.is_symlink() {
-        return Err(CryptoError::InvalidInput(format!(
-            "Input is a symlink: {}",
-            input_path.display()
-        )));
-    }
-    if !input_path.exists() {
-        return Err(CryptoError::InputPath);
-    }
-    if !input_path.is_file() && !input_path.is_dir() {
-        return Err(CryptoError::InvalidInput(format!(
-            "Unsupported file type: {}",
-            input_path.display()
-        )));
-    }
-    Ok(())
-}
-
-pub fn archive<W: Write>(
-    input_path: impl AsRef<Path>,
-    writer: W,
-    limits: ArchiveLimits,
-) -> Result<(String, W), CryptoError> {
-    let input_path = input_path.as_ref();
-    validate_encrypt_input(input_path)?;
-    let mut builder = tar::Builder::new(writer);
-    let mut counters = ArchiveCounters::default();
-
-    let stem = if input_path.is_file() {
-        let file_name = input_path
-            .file_name()
-            .ok_or_else(|| CryptoError::InvalidInput("Cannot get file name".to_string()))?;
-
-        append_file(
-            &mut builder,
-            input_path,
-            Path::new(file_name),
-            &mut counters,
-            &limits,
-        )?;
-
-        file_stem(input_path)?.to_string_lossy().into_owned()
-    } else {
-        let dir_name = input_path
-            .file_name()
-            .ok_or_else(|| CryptoError::InvalidInput("Cannot get directory name".to_string()))?;
-
-        let archive_root = PathBuf::from(dir_name);
-        archive_directory(
-            &mut builder,
-            input_path,
-            &archive_root,
-            &mut counters,
-            &limits,
-        )?;
-        dir_name.to_string_lossy().into_owned()
-    };
-
-    let writer = builder.into_inner()?;
-    Ok((stem, writer))
-}
-
-/// Translates a relative `archive_path` (any platform) into the
-/// canonical UTF-8 `/`-separated form required by the v1 archive
-/// subset and rejects inputs that cannot be represented in raw POSIX
-/// ustar (`name(100) || prefix(155)`). Directory paths get a single
-/// trailing `/`; file paths must not end with one.
-///
-/// `Builder::append_data` would silently fall back to a GNU long-name
-/// extension record for paths above the ustar limit; v1 forbids those,
-/// so the rejection has to happen here, before any header bytes are
-/// emitted.
-fn ustar_archive_path_string(
-    archive_path: &Path,
-    kind: UstarEntryKind,
-) -> Result<String, CryptoError> {
-    let mut joined = String::new();
-    let mut iter = archive_path.components().peekable();
-    while let Some(component) = iter.next() {
-        let part = match component {
-            Component::Normal(s) => s.to_str().ok_or_else(|| {
-                CryptoError::InvalidInput(format!(
-                    "Archive path is not valid UTF-8: {}",
-                    archive_path.display()
-                ))
-            })?,
-            _ => {
-                return Err(CryptoError::InvalidInput(format!(
-                    "Archive path has forbidden component: {}",
-                    archive_path.display()
-                )));
-            }
-        };
-        // Symmetric with the reader's `validate_ustar_entry` raw-byte
-        // checks: a Unix filename containing `\` or NUL is technically
-        // legal at the kernel level but produces an archive that v1
-        // readers MUST reject (`FORMAT.md` §9). Rejecting here keeps
-        // the writer round-trip-safe rather than emitting bytes our
-        // own reader will refuse to decrypt.
-        if part.contains('\\') || part.contains('\0') {
-            return Err(CryptoError::InvalidInput(format!(
-                "Archive path component contains forbidden byte (`\\` or NUL): {}",
-                archive_path.display()
-            )));
-        }
-        joined.push_str(part);
-        if iter.peek().is_some() {
-            joined.push('/');
-        }
-    }
-    if joined.is_empty() {
-        return Err(CryptoError::InvalidInput(
-            "Empty archive entry path".to_string(),
-        ));
-    }
-    if matches!(kind, UstarEntryKind::Directory) {
-        joined.push('/');
-    }
-    if joined.len() > ustar::PATH_REPRESENTABLE_MAX {
-        return Err(CryptoError::InvalidInput(format!(
-            "Archive path cannot be represented in POSIX ustar: {}",
-            archive_path.display()
-        )));
-    }
-    Ok(joined)
-}
-
-/// Builds a v1-conforming ustar header for one archive entry. Pulled
-/// out so `append_file` and `append_dir_entry` share the
-/// path-normalization → `new_ustar` → `set_path` → `set_entry_type` →
-/// `set_mode` → `set_cksum` sequence and the same error-message
-/// translation for paths that don't fit the ustar `name + prefix`
-/// split. `Header::set_path` would otherwise let `Builder::append_data`
-/// silently fall back to a GNU long-name extension; we use
-/// `Builder::append` at the call sites so this header is written
-/// verbatim, with no auto-extension path.
-fn build_ustar_header(
-    archive_path: &Path,
-    kind: UstarEntryKind,
-    size: u64,
-    mode: u32,
-) -> Result<tar::Header, CryptoError> {
-    let path_str = ustar_archive_path_string(archive_path, kind)?;
-    let mut header = tar::Header::new_ustar();
-    header.set_path(&path_str).map_err(|_| {
-        CryptoError::InvalidInput(format!(
-            "Archive path cannot be represented in POSIX ustar: {}",
-            archive_path.display()
-        ))
-    })?;
-    header.set_entry_type(match kind {
-        UstarEntryKind::File => tar::EntryType::Regular,
-        UstarEntryKind::Directory => tar::EntryType::Directory,
-    });
-    header.set_size(size);
-    header.set_mode(mode);
-    header.set_cksum();
-    Ok(header)
-}
-
-fn append_file<W: Write>(
-    builder: &mut tar::Builder<W>,
-    src_path: &Path,
-    archive_path: &Path,
-    counters: &mut ArchiveCounters,
-    limits: &ArchiveLimits,
-) -> Result<(), CryptoError> {
-    counters.entry_count = counters.entry_count.saturating_add(1);
-    enforce_per_entry_caps(counters.entry_count, archive_path, limits)?;
-
-    let mut file = open_no_follow(src_path)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() {
-        return Err(CryptoError::InvalidInput(format!(
-            "Input is no longer a regular file: {}",
-            src_path.display()
-        )));
-    }
-
-    enforce_total_bytes_cap(metadata.len(), &mut counters.total_bytes, limits)?;
-
-    let mode = archive_file_mode(&metadata);
-    let header = build_ustar_header(archive_path, UstarEntryKind::File, metadata.len(), mode)?;
-    builder.append(&header, &mut file)?;
-    Ok(())
-}
-
-fn append_dir_entry<W: Write>(
-    builder: &mut tar::Builder<W>,
-    src_path: &Path,
-    archive_path: &Path,
-    counters: &mut ArchiveCounters,
-    limits: &ArchiveLimits,
-) -> Result<(), CryptoError> {
-    counters.entry_count = counters.entry_count.saturating_add(1);
-    enforce_per_entry_caps(counters.entry_count, archive_path, limits)?;
-
-    let mode = archive_dir_mode(src_path)?;
-    let header = build_ustar_header(archive_path, UstarEntryKind::Directory, 0, mode)?;
-    builder.append(&header, io::empty())?;
-    Ok(())
-}
-
-/// Opens a file refusing to follow symlinks.
-/// On Unix, uses `O_NOFOLLOW` so the open itself is atomic.
-/// On other platforms, falls back to a symlink_metadata check before opening.
-#[cfg(unix)]
-fn open_no_follow(path: &Path) -> Result<File, CryptoError> {
-    use std::fs::OpenOptions;
-    use std::os::unix::fs::OpenOptionsExt;
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-        .map_err(|e| {
-            if e.raw_os_error() == Some(libc::ELOOP) {
-                CryptoError::InvalidInput(format!("Input is a symlink: {}", path.display()))
-            } else {
-                CryptoError::Io(e)
-            }
-        })
-}
-
-/// Best-effort no-follow open for Windows / non-Unix targets.
-///
-/// **Hardening note (Windows / non-Unix):** unlike the Unix branch
-/// above, this implementation has a TOCTOU window between
-/// `symlink_metadata` and `File::open`: a local attacker who can
-/// rename the input path between the two syscalls can swap a regular
-/// file for a symlink and have the open follow it. Closing the gap
-/// requires `NtCreateFile` with `OBJECT_ATTRIBUTES` (or equivalent
-/// winapi work), which the crate does not currently take on because
-/// of its zero-`unsafe` stance. The pre-archive
-/// [`validate_encrypt_input`] still rejects symlinks at the *outermost*
-/// input path, and the per-entry recursive walker re-applies symlink
-/// rejection — so an attacker's window is the syscall gap on each
-/// open, not the entire archive run.
-#[cfg(not(unix))]
-fn open_no_follow(path: &Path) -> Result<File, CryptoError> {
-    let metadata = fs::symlink_metadata(path)?;
-    if !metadata.file_type().is_file() {
-        return Err(CryptoError::InvalidInput(format!(
-            "Input is no longer a regular file: {}",
-            path.display()
-        )));
-    }
-    Ok(File::open(path)?)
-}
-
-/// Recursively archives a directory. Uses `entry.file_type()` (lstat-based)
-/// to classify entries without following symlinks. Per-entry resource
-/// caps from `limits` are enforced inside `append_file` /
-/// `append_dir_entry` before each TAR header is emitted.
-fn archive_directory<W: Write>(
-    builder: &mut tar::Builder<W>,
-    dir_path: &Path,
-    archive_prefix: &Path,
-    counters: &mut ArchiveCounters,
-    limits: &ArchiveLimits,
-) -> Result<(), CryptoError> {
-    append_dir_entry(builder, dir_path, archive_prefix, counters, limits)?;
-
-    for entry in fs::read_dir(dir_path)? {
-        let entry = entry?;
-        let src_path = entry.path();
-        let ft = entry.file_type()?;
-        let entry_archive_path = archive_prefix.join(entry.file_name());
-
-        if ft.is_symlink() {
-            return Err(CryptoError::InvalidInput(format!(
-                "Directory contains a symlink: {}",
-                src_path.display()
-            )));
-        } else if ft.is_dir() {
-            archive_directory(builder, &src_path, &entry_archive_path, counters, limits)?;
-        } else if ft.is_file() {
-            append_file(builder, &src_path, &entry_archive_path, counters, limits)?;
-        } else {
-            return Err(CryptoError::InvalidInput(format!(
-                "Unsupported file type in directory: {}",
-                src_path.display()
-            )));
-        }
-    }
-    Ok(())
-}
-
 /// Extracts a TAR archive from `reader` into the specified directory.
 ///
 /// All output is written under an `.incomplete` working name so that
@@ -1044,7 +249,7 @@ fn archive_directory<W: Write>(
 /// decryption. On success, the working name is atomically renamed to the
 /// final name. On failure, the `.incomplete` output stays on disk for
 /// the user to inspect or delete.
-pub fn unarchive<R: Read>(
+pub(crate) fn unarchive<R: Read>(
     reader: R,
     output_dir: &Path,
     limits: ArchiveLimits,
@@ -1196,7 +401,10 @@ fn extract_entries<R: Read>(
     limits: &ArchiveLimits,
 ) -> Result<(), CryptoError> {
     use std::collections::HashMap;
+    use std::fs::File;
     use std::os::fd::{AsFd, OwnedFd};
+
+    use super::platform;
 
     /// Per-root state. A tar root can be either a directory (the usual
     /// multi-entry case) or a regular file (single-file archives where
@@ -1245,7 +453,7 @@ fn extract_entries<R: Read>(
                 RootKind::Directory(fd) => Ok(fd),
             },
             Entry::Vacant(vac) => {
-                let fd = nofollow::mkdirat_strict(output_fd, incomplete_name)
+                let fd = platform::mkdirat_strict(output_fd, incomplete_name)
                     .map_err(|e| map_incomplete_create_err(e, output_dir, incomplete_name))?;
                 match vac.insert(RootKind::Directory(fd)) {
                     RootKind::Directory(fd) => Ok(fd),
@@ -1260,19 +468,19 @@ fn extract_entries<R: Read>(
     /// `outfile` is consumed (and dropped at scope exit) so the file is
     /// closed before this returns. The two file-extraction sites (Case A
     /// single-file root and Case B descendant) share this exact
-    /// sequence; `nofollow::fchmod` strips the special bits internally.
+    /// sequence; `platform::fchmod` strips the special bits internally.
     fn copy_payload_and_apply_mode<R: Read>(
         mut outfile: File,
         entry: &mut tar::Entry<'_, R>,
     ) -> Result<(), CryptoError> {
         io::copy(entry, &mut outfile)?;
         if let Ok(mode) = entry.header().mode() {
-            nofollow::fchmod(outfile.as_fd(), mode)?;
+            platform::fchmod(outfile.as_fd(), mode)?;
         }
         Ok(())
     }
 
-    let output_fd = nofollow::open_anchor(output_dir)?;
+    let output_fd = platform::open_anchor(output_dir)?;
     let mut roots: HashMap<OsString, RootKind> = HashMap::new();
     // Deferred directory permissions: (root name, rel path under root, mode).
     // `rel` is empty for the root directory itself.
@@ -1321,7 +529,7 @@ fn extract_entries<R: Read>(
                             path.display()
                         )));
                     }
-                    let outfile = nofollow::create_file_at(
+                    let outfile = platform::create_file_at(
                         &output_fd,
                         &incomplete_name,
                         INITIAL_FILE_CREATE_MODE,
@@ -1346,17 +554,17 @@ fn extract_entries<R: Read>(
             &incomplete_name,
             &path,
         )?;
-        let (parent_fd, final_name) = nofollow::walk_to_parent(root_fd, &rel)?;
+        let (parent_fd, final_name) = platform::walk_to_parent(root_fd, &rel)?;
         match kind {
             UstarEntryKind::Directory => {
-                let _dir_fd = nofollow::ensure_dir(&parent_fd, &final_name)?;
+                let _dir_fd = platform::ensure_dir(&parent_fd, &final_name)?;
                 if let Ok(mode) = entry.header().mode() {
                     dir_permissions.push((root_name.clone(), rel, mode));
                 }
             }
             UstarEntryKind::File => {
                 let outfile =
-                    nofollow::create_file_at(&parent_fd, &final_name, INITIAL_FILE_CREATE_MODE)?;
+                    platform::create_file_at(&parent_fd, &final_name, INITIAL_FILE_CREATE_MODE)?;
                 copy_payload_and_apply_mode(outfile, &mut entry)?;
             }
         }
@@ -1373,8 +581,8 @@ fn extract_entries<R: Read>(
                 "Internal error: root dirfd missing at dir-perm stage",
             ));
         };
-        let dir_fd = nofollow::open_dir_at_rel(root_fd, rel)?;
-        nofollow::fchmod(&dir_fd, *mode)?;
+        let dir_fd = platform::open_dir_at_rel(root_fd, rel)?;
+        platform::fchmod(&dir_fd, *mode)?;
     }
 
     Ok(())
@@ -1503,7 +711,7 @@ fn incomplete_entry_path(output_dir: &Path, root_name: &OsStr, entry_path: &Path
 #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
 fn restore_permissions_from_mode(mode: u32, path: &Path) -> Result<(), CryptoError> {
     use std::os::unix::fs::PermissionsExt;
-    let safe_mode = mode & PERMISSION_BITS_MASK;
+    let safe_mode = mode & super::PERMISSION_BITS_MASK;
     fs::set_permissions(path, std::fs::Permissions::from_mode(safe_mode))?;
     Ok(())
 }
@@ -1515,108 +723,11 @@ fn restore_permissions_from_mode(_mode: u32, _path: &Path) -> Result<(), CryptoE
 
 #[cfg(test)]
 mod tests {
+    use super::super::limits::ArchiveLimits;
+    use super::unarchive;
+
     use std::fs;
     use std::io::Cursor;
-    use std::path::PathBuf;
-
-    use crate::archiver::{
-        ArchiveLimits, UstarEntryKind, archive, unarchive, ustar, ustar_archive_path_string,
-    };
-
-    #[test]
-    fn archive_and_unarchive_file() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let input_file = tmp.path().join("hello.txt");
-        let extract_dir = tmp.path().join("extracted");
-        fs::create_dir_all(&extract_dir).unwrap();
-        fs::write(&input_file, "file content here").unwrap();
-
-        let mut buf = Vec::new();
-        let (stem, _) = archive(&input_file, &mut buf, ArchiveLimits::default()).unwrap();
-        assert_eq!(stem, "hello");
-
-        let output = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap();
-        assert!(output.exists());
-
-        let restored = fs::read_to_string(extract_dir.join("hello.txt")).unwrap();
-        assert_eq!(restored, "file content here");
-    }
-
-    #[test]
-    fn archive_and_unarchive_directory() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let input_dir = tmp.path().join("mydir");
-        let sub_dir = input_dir.join("sub");
-        let extract_dir = tmp.path().join("extracted");
-        fs::create_dir_all(&sub_dir).unwrap();
-        fs::create_dir_all(&extract_dir).unwrap();
-
-        fs::write(input_dir.join("a.txt"), "file a").unwrap();
-        fs::write(sub_dir.join("b.txt"), "file b").unwrap();
-
-        let mut buf = Vec::new();
-        let (stem, _) = archive(&input_dir, &mut buf, ArchiveLimits::default()).unwrap();
-        assert_eq!(stem, "mydir");
-
-        let output = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap();
-        assert!(output.exists());
-
-        let restored_a = fs::read_to_string(extract_dir.join("mydir/a.txt")).unwrap();
-        assert_eq!(restored_a, "file a");
-        let restored_b = fs::read_to_string(extract_dir.join("mydir/sub/b.txt")).unwrap();
-        assert_eq!(restored_b, "file b");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn archive_rejects_directory_with_symlink() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let input_dir = tmp.path().join("mydir");
-        fs::create_dir_all(&input_dir).unwrap();
-        fs::write(input_dir.join("real.txt"), "content").unwrap();
-        std::os::unix::fs::symlink("/etc/passwd", input_dir.join("link.txt")).unwrap();
-
-        let mut buf = Vec::new();
-        let err = archive(&input_dir, &mut buf, ArchiveLimits::default()).unwrap_err();
-        assert!(
-            err.to_string().contains("symlink"),
-            "expected symlink error, got: {err}"
-        );
-    }
-
-    #[test]
-    fn archive_empty_file() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let input_file = tmp.path().join("empty.txt");
-        let extract_dir = tmp.path().join("extracted");
-        fs::create_dir_all(&extract_dir).unwrap();
-        fs::write(&input_file, "").unwrap();
-
-        let mut buf = Vec::new();
-        let (stem, _) = archive(&input_file, &mut buf, ArchiveLimits::default()).unwrap();
-        assert_eq!(stem, "empty");
-
-        unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap();
-        let restored = fs::read_to_string(extract_dir.join("empty.txt")).unwrap();
-        assert_eq!(restored, "");
-    }
-
-    #[test]
-    fn validate_rejects_path_traversal() {
-        use crate::archiver::validate_archive_path;
-        use std::path::Path;
-
-        assert!(validate_archive_path(Path::new("safe.txt")).is_ok());
-        assert!(validate_archive_path(Path::new("dir/file.txt")).is_ok());
-        assert!(validate_archive_path(Path::new("../escape.txt")).is_err());
-        assert!(validate_archive_path(Path::new("dir/../../escape.txt")).is_err());
-        assert!(validate_archive_path(Path::new("/etc/passwd")).is_err());
-        // Leading `./` turns root_name into `.` and breaks the final
-        // rename, so reject it early. Ferrocrypt's own archiver never
-        // produces such paths.
-        assert!(validate_archive_path(Path::new("./foo/bar")).is_err());
-        assert!(validate_archive_path(Path::new(".")).is_err());
-    }
 
     #[test]
     fn unarchive_rejects_multi_root_archive() {
@@ -1796,103 +907,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn archive_binary_content() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let input_file = tmp.path().join("data.bin");
-        let extract_dir = tmp.path().join("extracted");
-        fs::create_dir_all(&extract_dir).unwrap();
-
-        let binary_data: Vec<u8> = (0..=255).collect();
-        fs::write(&input_file, &binary_data).unwrap();
-
-        let mut buf = Vec::new();
-        let (_, _) = archive(&input_file, &mut buf, ArchiveLimits::default()).unwrap();
-
-        unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap();
-
-        let restored = fs::read(extract_dir.join("data.bin")).unwrap();
-        assert_eq!(restored, binary_data);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn archive_preserves_file_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let tmp = tempfile::TempDir::new().unwrap();
-        let input_file = tmp.path().join("script.sh");
-        let extract_dir = tmp.path().join("extracted");
-        fs::create_dir_all(&extract_dir).unwrap();
-        fs::write(&input_file, "#!/bin/sh\necho hi").unwrap();
-        fs::set_permissions(&input_file, fs::Permissions::from_mode(0o755)).unwrap();
-
-        let mut buf = Vec::new();
-        let (_, _) = archive(&input_file, &mut buf, ArchiveLimits::default()).unwrap();
-
-        unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap();
-
-        let restored = extract_dir.join("script.sh");
-        let mode = fs::metadata(&restored).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o755, "expected 0o755, got 0o{mode:o}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn archive_preserves_directory_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let tmp = tempfile::TempDir::new().unwrap();
-        let input_dir = tmp.path().join("mydir");
-        let sub_dir = input_dir.join("restricted");
-        let extract_dir = tmp.path().join("extracted");
-        fs::create_dir_all(&sub_dir).unwrap();
-        fs::create_dir_all(&extract_dir).unwrap();
-        fs::write(sub_dir.join("secret.txt"), "data").unwrap();
-        fs::set_permissions(&sub_dir, fs::Permissions::from_mode(0o700)).unwrap();
-
-        let mut buf = Vec::new();
-        let (_, _) = archive(&input_dir, &mut buf, ArchiveLimits::default()).unwrap();
-
-        unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap();
-
-        let restored_sub = extract_dir.join("mydir/restricted");
-        let mode = fs::metadata(&restored_sub).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o700, "expected 0o700, got 0o{mode:o}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn archive_restrictive_dir_does_not_block_children() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let tmp = tempfile::TempDir::new().unwrap();
-        let input_dir = tmp.path().join("mydir");
-        let sub_dir = input_dir.join("readonly");
-        let extract_dir = tmp.path().join("extracted");
-        fs::create_dir_all(&sub_dir).unwrap();
-        fs::create_dir_all(&extract_dir).unwrap();
-        fs::write(sub_dir.join("inner.txt"), "hello").unwrap();
-        // r-x------ : no write permission
-        fs::set_permissions(&sub_dir, fs::Permissions::from_mode(0o500)).unwrap();
-
-        let mut buf = Vec::new();
-        let (_, _) = archive(&input_dir, &mut buf, ArchiveLimits::default()).unwrap();
-
-        // Must not fail with "Permission denied" when extracting inner.txt
-        unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap();
-
-        let restored_file = extract_dir.join("mydir/readonly/inner.txt");
-        assert_eq!(fs::read_to_string(&restored_file).unwrap(), "hello");
-
-        let dir_mode = fs::metadata(extract_dir.join("mydir/readonly"))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(dir_mode, 0o500, "expected 0o500, got 0o{dir_mode:o}");
-    }
-
     #[cfg(unix)]
     #[test]
     fn archive_strips_special_bits_on_extract() {
@@ -1981,35 +995,6 @@ mod tests {
         assert_eq!(
             dir_mode, 0o755,
             "directory setuid should be stripped: expected 0o755, got 0o{dir_mode:o}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn archive_strips_special_bits_on_archive_side() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let tmp = tempfile::TempDir::new().unwrap();
-        let input_file = tmp.path().join("script.sh");
-        fs::write(&input_file, "#!/bin/sh").unwrap();
-        fs::set_permissions(&input_file, fs::Permissions::from_mode(0o4755)).unwrap();
-
-        let mut buf = Vec::new();
-        let (_, _) = archive(&input_file, &mut buf, ArchiveLimits::default()).unwrap();
-
-        // Read the mode stored in the tar header directly.
-        let mut tar_archive = tar::Archive::new(Cursor::new(buf));
-        let entry = tar_archive.entries().unwrap().next().unwrap().unwrap();
-        let stored_mode = entry.header().mode().unwrap();
-        assert_eq!(
-            stored_mode & 0o7000,
-            0,
-            "special bits should not be stored in archive: mode 0o{stored_mode:o}"
-        );
-        assert_eq!(
-            stored_mode & 0o777,
-            0o755,
-            "rwx bits should be preserved: mode 0o{stored_mode:o}"
         );
     }
 
@@ -2146,73 +1131,6 @@ mod tests {
         assert!(
             extract_dir.read_dir().unwrap().next().is_none(),
             "extract dir must remain empty after refused archive"
-        );
-    }
-
-    /// `FORMAT.md` §9 requires every emitted header to use the POSIX
-    /// ustar magic (`"ustar\0" + "00"` at offsets 257..265) and forbids
-    /// GNU magic. Pin the writer's per-entry magic + version bytes so a
-    /// future regression that switches back to `new_gnu()` (or to a
-    /// helper that auto-promotes overlong paths to a long-name
-    /// extension) fails this test loudly.
-    #[test]
-    fn archive_emits_posix_ustar_headers() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let input = tmp.path().join("hello.txt");
-        fs::write(&input, "hello").unwrap();
-
-        let mut buf = Vec::new();
-        let (_, _) = archive(&input, &mut buf, ArchiveLimits::default()).unwrap();
-
-        let mut ar = tar::Archive::new(Cursor::new(buf));
-        let mut entries = ar.entries().unwrap();
-        let entry = entries.next().expect("one entry").unwrap();
-        let raw = entry.header().as_bytes();
-
-        assert_eq!(&raw[257..263], b"ustar\0", "expected POSIX ustar magic");
-        assert_eq!(&raw[263..265], b"00", "expected ustar version 00");
-        assert_eq!(raw[156], b'0', "expected typeflag '0' for regular file");
-    }
-
-    /// `FORMAT.md` §9 forbids GNU long-name records and the writer
-    /// must reject overlong paths up-front rather than silently
-    /// promoting them to an extension. The exact ustar limit is
-    /// `name(100) + '/' + prefix(155)`; any path over that surfaces
-    /// as a typed `InvalidInput` rejection.
-    ///
-    /// We drive the writer-side ustar path normalizer directly rather
-    /// than going through `archive()` because some host filesystems
-    /// (notably macOS APFS) reject single components ≥255 chars
-    /// before our code sees them; the helper is the canonical
-    /// rejection point used by both `append_file` and
-    /// `append_dir_entry`.
-    #[test]
-    fn archive_rejects_path_that_cannot_fit_ustar() {
-        let too_long: String = "a".repeat(ustar::PATH_REPRESENTABLE_MAX + 4);
-        let path = PathBuf::from(too_long);
-        let err = ustar_archive_path_string(&path, UstarEntryKind::File).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("POSIX ustar"),
-            "expected POSIX ustar rejection, got: {msg}"
-        );
-    }
-
-    /// Writer-side symmetry with the reader's `\` / NUL rejection
-    /// (`FORMAT.md` §9). Unix kernels permit `\` in filenames, so a
-    /// naive walker could emit an archive whose paths the reader
-    /// would refuse to decrypt. Gated to `#[cfg(unix)]` because on
-    /// Windows the `Path` API treats `\` as a separator, so a single
-    /// `Normal` component can never contain a literal `\` byte and
-    /// the bug doesn't apply.
-    #[cfg(unix)]
-    #[test]
-    fn archive_rejects_backslash_in_path_component() {
-        let weird = PathBuf::from("weird\\file.txt");
-        let err = ustar_archive_path_string(&weird, UstarEntryKind::File).unwrap_err();
-        assert!(
-            err.to_string().contains("forbidden byte"),
-            "expected backslash rejection, got: {err}"
         );
     }
 
@@ -2551,171 +1469,5 @@ mod tests {
             "expected path depth cap rejection, got: {err}"
         );
         assert!(!extract_dir.join("myroot").exists());
-    }
-
-    /// Encrypt-side preflight: a directory whose entry count would
-    /// exceed `ArchiveLimits::max_entry_count` must be rejected by
-    /// `archive` BEFORE TAR bytes are emitted, so the writer never
-    /// produces an archive that the default-config decrypt would
-    /// refuse. Mirrors the decrypt-side `entry-count cap` test.
-    #[test]
-    fn archive_rejects_input_above_entry_count_cap() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let input_dir = tmp.path().join("myroot");
-        fs::create_dir_all(&input_dir).unwrap();
-        // 1 directory entry (the root) + 5 files = 6 entries.
-        for i in 0..5 {
-            fs::write(input_dir.join(format!("file_{i}")), b"x").unwrap();
-        }
-
-        let limits = ArchiveLimits {
-            max_entry_count: 3,
-            ..ArchiveLimits::default()
-        };
-        let mut buf = Vec::new();
-        let err = archive(&input_dir, &mut buf, limits).unwrap_err();
-        assert!(
-            err.to_string().contains("entry-count cap"),
-            "expected entry-count cap rejection, got: {err}"
-        );
-    }
-
-    /// Encrypt-side preflight: an input file whose size exceeds
-    /// `ArchiveLimits::max_total_plaintext_bytes` must be rejected by
-    /// `archive` BEFORE the TAR header for the entry is emitted.
-    #[test]
-    fn archive_rejects_input_above_total_bytes_cap() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let input_file = tmp.path().join("big.bin");
-        fs::write(&input_file, vec![0u8; 1000]).unwrap();
-
-        let limits = ArchiveLimits {
-            max_total_plaintext_bytes: 100,
-            ..ArchiveLimits::default()
-        };
-        let mut buf = Vec::new();
-        let err = archive(&input_file, &mut buf, limits).unwrap_err();
-        assert!(
-            err.to_string().contains("total-bytes cap"),
-            "expected total-bytes cap rejection, got: {err}"
-        );
-    }
-
-    /// Encrypt-side preflight: a directory whose entry path depth
-    /// exceeds `ArchiveLimits::max_path_depth` must be rejected by
-    /// `archive` before the deep entry's TAR header is emitted.
-    #[test]
-    fn archive_rejects_input_above_path_depth_cap() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        // Root-relative depth 7: myroot/a/b/c/d/e/file.txt.
-        let input_dir = tmp.path().join("myroot");
-        let deep_parent = input_dir.join("a/b/c/d/e");
-        fs::create_dir_all(&deep_parent).unwrap();
-        fs::write(deep_parent.join("file.txt"), b"x").unwrap();
-
-        let limits = ArchiveLimits {
-            max_path_depth: 4,
-            ..ArchiveLimits::default()
-        };
-        let mut buf = Vec::new();
-        let err = archive(&input_dir, &mut buf, limits).unwrap_err();
-        assert!(
-            err.to_string().contains("path depth cap"),
-            "expected path depth cap rejection, got: {err}"
-        );
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    mod nofollow_tests {
-        use std::ffi::OsStr;
-        use std::fs;
-        use std::io;
-        use std::os::unix::fs as unix_fs;
-        use std::path::Path;
-
-        use crate::archiver::nofollow;
-
-        #[test]
-        fn ensure_dir_rejects_symlink_at_name() {
-            let tmp = tempfile::TempDir::new().unwrap();
-            unix_fs::symlink("/tmp", tmp.path().join("evil")).unwrap();
-
-            let parent_fd = nofollow::open_anchor(tmp.path()).unwrap();
-            let err = nofollow::ensure_dir(&parent_fd, OsStr::new("evil")).unwrap_err();
-            assert!(
-                err.to_string().contains("Symlink in extraction path"),
-                "expected symlink error, got: {err}"
-            );
-        }
-
-        #[test]
-        fn walk_to_parent_rejects_intermediate_symlink() {
-            let tmp = tempfile::TempDir::new().unwrap();
-            let root = tmp.path().join("root");
-            let a = root.join("a");
-            fs::create_dir_all(&a).unwrap();
-            let victim = tmp.path().join("victim_dir");
-            fs::create_dir_all(&victim).unwrap();
-            unix_fs::symlink(&victim, a.join("b")).unwrap();
-
-            let root_fd = nofollow::open_anchor(&root).unwrap();
-            let err = nofollow::walk_to_parent(&root_fd, Path::new("a/b/file.txt")).unwrap_err();
-            assert!(
-                err.to_string().contains("Symlink in extraction path"),
-                "expected symlink error, got: {err}"
-            );
-
-            assert!(
-                victim.read_dir().unwrap().next().is_none(),
-                "victim directory must remain empty"
-            );
-        }
-
-        #[test]
-        fn create_file_at_rejects_existing_symlink() {
-            let tmp = tempfile::TempDir::new().unwrap();
-            let victim = tmp.path().join("victim.txt");
-            fs::write(&victim, "original").unwrap();
-            unix_fs::symlink(&victim, tmp.path().join("link.txt")).unwrap();
-
-            let parent_fd = nofollow::open_anchor(tmp.path()).unwrap();
-            let err =
-                nofollow::create_file_at(&parent_fd, OsStr::new("link.txt"), 0o600).unwrap_err();
-            assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
-
-            assert_eq!(
-                fs::read_to_string(&victim).unwrap(),
-                "original",
-                "victim file must not be touched through the symlink"
-            );
-        }
-
-        /// `open_dir_at_rel` documents that an empty `rel` yields a fresh
-        /// clone of `root_fd`. The deferred-dir-permissions loop in
-        /// `extract_entries` relies on this to fold the root-directory
-        /// case into the same call site as descendant directories — if
-        /// the helper ever changes to error or panic on empty paths,
-        /// root-level dir permissions would stop applying.
-        #[test]
-        fn open_dir_at_rel_with_empty_rel_returns_root_clone() {
-            use std::os::fd::AsRawFd;
-
-            let tmp = tempfile::TempDir::new().unwrap();
-            let root = tmp.path().join("root");
-            fs::create_dir_all(&root).unwrap();
-
-            let root_fd = nofollow::open_anchor(&root).unwrap();
-            let cloned = nofollow::open_dir_at_rel(&root_fd, Path::new("")).unwrap();
-
-            // Distinct fd numbers — proves it's a fresh clone, not the
-            // same fd handed back.
-            assert_ne!(root_fd.as_raw_fd(), cloned.as_raw_fd());
-
-            // The cloned fd points at the same directory: a file created
-            // under it must appear at the root's path.
-            let _via_clone =
-                nofollow::create_file_at(&cloned, OsStr::new("via_clone.txt"), 0o600).unwrap();
-            assert!(root.join("via_clone.txt").exists());
-        }
     }
 }

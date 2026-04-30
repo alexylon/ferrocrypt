@@ -16,7 +16,7 @@ use crate::CryptoError;
 /// Suffix appended to atomic-write working names so plaintext (or any
 /// not-yet-finalised output) is never visible under the final name.
 /// Used by `container::write_encrypted_file` for the streaming
-/// `.fcr` tempfile and by `archiver::unarchive` for the per-root
+/// `.fcr` tempfile and by `archive::decode::unarchive` for the per-root
 /// rename-into-place pattern.
 pub(crate) const INCOMPLETE_SUFFIX: &str = ".incomplete";
 

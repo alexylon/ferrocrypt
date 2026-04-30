@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 
 use secrecy::{ExposeSecret as _, SecretString};
 
-use crate::archiver::{self, ArchiveLimits};
+use crate::archive::{self, ArchiveLimits};
 use crate::container;
 use crate::crypto::kdf::{KdfLimit, KdfParams};
 use crate::error::FormatDefect;
@@ -199,7 +199,7 @@ impl Encryptor {
         if let EncryptorState::Passphrase(p) = &self.state {
             validate_passphrase(p)?;
         }
-        archiver::validate_encrypt_input(input)?;
+        archive::validate_encrypt_input(input)?;
 
         let output_path = match self.state {
             EncryptorState::Passphrase(passphrase) => {

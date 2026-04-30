@@ -114,7 +114,7 @@ pub use crate::api::{
     Decryptor, Encryptor, PassphraseDecryptor, RecipientDecryptor, default_encrypted_filename,
     detect_encryption_mode, generate_key_pair, validate_private_key_file, validate_public_key_file,
 };
-pub use crate::archiver::ArchiveLimits;
+pub use crate::archive::ArchiveLimits;
 pub use crate::crypto::kdf::KdfLimit;
 pub use crate::error::{CryptoError, FormatDefect, InvalidKdfParams, UnsupportedVersion};
 pub use crate::format::ENCRYPTED_EXTENSION;
@@ -220,7 +220,7 @@ pub struct KeyGenOutcome {
 }
 
 mod api;
-mod archiver;
+mod archive;
 mod container;
 mod crypto;
 mod error;

@@ -374,7 +374,7 @@ fn test_recipient_decrypt_rejects_empty_passphrase_before_kdf() {
 
 /// M-4 regression: `Encryptor::write` must reject a symlink input with
 /// a typed `InvalidInput` error *before* kicking off Argon2id. Pre-audit
-/// the rejection happened inside `archiver::archive`, which runs after
+/// the rejection happened inside `archive::archive`, which runs after
 /// the KDF — an accidental symlink cost the user seconds and up to 1 GiB
 /// of RAM. Observes the `DerivingKey` progress event to prove the
 /// rejection short-circuits the KDF path.

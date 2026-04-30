@@ -36,7 +36,7 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::archiver;
+use crate::archive;
 use crate::crypto::keys::{HeaderKey, PayloadKey};
 use crate::crypto::stream::{STREAM_NONCE_SIZE, payload_encryptor};
 use crate::error::{CryptoError, FormatDefect};
@@ -394,7 +394,7 @@ pub(crate) fn write_encrypted_file(
     output_file: Option<&Path>,
     base_name: &str,
     built: &BuiltEncryptedHeader,
-    archive_limits: archiver::ArchiveLimits,
+    archive_limits: archive::ArchiveLimits,
 ) -> Result<PathBuf, CryptoError> {
     let output_path = resolve_encrypted_output_path(output_dir, output_file, base_name);
     if output_path.exists() {
@@ -414,7 +414,7 @@ pub(crate) fn write_encrypted_file(
     tmp.as_file_mut().write_all(&built.header_mac)?;
 
     let encrypt_writer = payload_encryptor(&built.payload_key, &built.stream_nonce, tmp);
-    let (_, encrypt_writer) = archiver::archive(input_path, encrypt_writer, archive_limits)?;
+    let (_, encrypt_writer) = archive::archive(input_path, encrypt_writer, archive_limits)?;
     let tmp = encrypt_writer.finish()?;
     tmp.as_file().sync_all()?;
 

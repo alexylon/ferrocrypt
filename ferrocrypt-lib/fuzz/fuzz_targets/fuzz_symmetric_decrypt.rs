@@ -8,8 +8,8 @@
 use std::fs;
 use std::io::Write;
 
-use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::Decryptor;
+use ferrocrypt::secrecy::SecretString;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

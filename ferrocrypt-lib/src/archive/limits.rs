@@ -1,70 +1,65 @@
-//! Resource caps applied symmetrically on encrypt-side preflight and
-//! decrypt-side extraction.
+//! Resource caps for FerroCrypt archive encoding and extraction.
+//!
+//! Directory encryption stores the plaintext as a restricted POSIX ustar stream
+//! before payload encryption. These caps are applied on both sides of that
+//! archive layer:
+//!
+//! - During encryption, writer-side preflight rejects a tree that the default
+//!   extractor would later refuse.
+//! - During decryption, extraction rejects oversized authenticated archives
+//!   before the next allocation or file-content copy.
+//!
+//! The default limits are 250,000 entries, 64 GiB total regular-file content,
+//! and 64 path components per entry.
 
 use std::path::Path;
 
 use crate::CryptoError;
 
-/// Resource caps applied during TAR archive AND extract operations.
+/// Resource caps for FerroCrypt archive encoding and extraction.
 ///
-/// On the **extract** side, the `.fcr` payload is post-MAC authenticated,
-/// so an external attacker cannot forge a malicious archive — but a
-/// sender error or stress-test corpus can still legitimately produce a
-/// payload that would exhaust the reader's RAM (`seen_paths` HashSet),
-/// file-descriptor table (one `OwnedFd` per intermediate directory on
-/// Linux/macOS), or disk. Each cap fires before the next allocation /
-/// `io::copy`.
+/// Directory encryption stores the plaintext as a restricted POSIX ustar stream
+/// before payload encryption. These caps are applied on both sides of that
+/// archive layer:
 ///
-/// On the **archive** side, the same caps run as a writer-side
-/// preflight: a tree the extractor would refuse must NOT be encryptable
-/// in the first place, otherwise a user could encrypt a file they
-/// cannot decrypt with the default policy. Encrypt-side rejection
-/// fires BEFORE the entry's TAR header is emitted, so the writer
-/// short-circuits early and no partial archive is produced.
+/// - During encryption, writer-side preflight rejects a tree that the default
+///   extractor would later refuse, so a user cannot encrypt a file they could
+///   not decrypt with the default policy.
+/// - During decryption, the `.fcr` payload is post-MAC authenticated, so an
+///   external attacker cannot forge a malicious archive — but a sender error
+///   or stress-test corpus can still legitimately produce a payload that would
+///   exhaust the reader's RAM, file-descriptor table, or disk. Each cap fires
+///   before the next allocation or `io::copy`.
 ///
-/// Defaults are sized for typical desktop content (large source repos,
-/// photo libraries, multi-GiB document trees) while rejecting
-/// pathological inputs (millions of empty entries, multi-TiB declared
-/// sizes, deeply nested directory trees).
+/// The default limits are 250,000 entries, 64 GiB total regular-file content,
+/// and 64 path components per entry.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct ArchiveLimits {
-    /// Maximum number of TAR entries (regular files + directories)
-    /// admissible in a single extract. Exceeding this rejects the
-    /// archive before the offending entry's `seen_paths` slot is
-    /// allocated.
+    /// Maximum number of archive entries (regular files plus directories).
     pub max_entry_count: u32,
-    /// Maximum cumulative announced plaintext bytes across all regular
-    /// file entries. Directory entries do not contribute. Each entry's
-    /// announced size (`entry.header().size()`) is added to a running
-    /// total and checked BEFORE the entry's content is copied, so a
-    /// hostile size declaration cannot force a partial write.
+    /// Maximum cumulative announced plaintext bytes across all regular-file
+    /// entries. Directory entries do not contribute.
     pub max_total_plaintext_bytes: u64,
-    /// Maximum path component count of any single entry (directory
-    /// depth + filename). The ustar `PATH_REPRESENTABLE_MAX` already
-    /// caps the byte length of the path; this cap rejects deeply
-    /// nested but byte-economical paths (e.g. `a/b/c/.../z`) before
-    /// the per-component openat walk.
+    /// Maximum path component count for any single archive entry, including
+    /// the file name for regular-file entries.
     pub max_path_depth: u32,
 }
 
 impl ArchiveLimits {
-    /// Replaces the maximum TAR entry count. See
-    /// [`ArchiveLimits::max_entry_count`].
+    /// Replaces [`ArchiveLimits::max_entry_count`].
     pub fn with_max_entry_count(mut self, n: u32) -> Self {
         self.max_entry_count = n;
         self
     }
 
-    /// Replaces the maximum cumulative plaintext byte cap. See
-    /// [`ArchiveLimits::max_total_plaintext_bytes`].
+    /// Replaces [`ArchiveLimits::max_total_plaintext_bytes`].
     pub fn with_max_total_plaintext_bytes(mut self, n: u64) -> Self {
         self.max_total_plaintext_bytes = n;
         self
     }
 
-    /// Replaces the maximum per-entry path-component depth. See
-    /// [`ArchiveLimits::max_path_depth`].
+    /// Replaces [`ArchiveLimits::max_path_depth`].
     pub fn with_max_path_depth(mut self, n: u32) -> Self {
         self.max_path_depth = n;
         self

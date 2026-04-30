@@ -12,7 +12,8 @@
 &nbsp;
 [![crate: ferrocrypt-cli](https://img.shields.io/crates/v/ferrocrypt-cli.svg?label=crate%3A%20ferrocrypt-cli&color=blue)](https://crates.io/crates/ferrocrypt-cli)
 
-Cross-platform file encryption tool with CLI and desktop interfaces. Written in Rust.
+Recipient-oriented file encryption for files and directories, with a Rust library,
+command-line tool, and desktop app.
 
 <div align="center">
   <img src="/assets/screenshot-1.png" width="400" alt="FerroCrypt">&nbsp;&nbsp;
@@ -28,71 +29,157 @@ Cross-platform file encryption tool with CLI and desktop interfaces. Written in 
 
 ## About
 
-FerroCrypt 0.3.0 is a ground-up rewrite of the library, CLI, and desktop app. The internal organization, the public API, and the on-disk file format have all been redesigned together so each layer reflects the same recipient-oriented model: each `.fcr` file holds one random `file_key`, one streamed authenticated payload, and one or more typed recipient entries that independently wrap the same `file_key`. Passphrase encryption and X25519 public-key encryption are recipient schemes over a single protocol pipeline rather than separate code paths, so future native or plugin recipient types — post-quantum KEMs, hybrid KEMs, hardware tokens — plug in without changing the container layout or the payload pipeline.
+FerroCrypt encrypts files and directories into `.fcr` files. It supports two
+user-facing encryption paths:
 
-What 0.3.0 brings:
+- **Symmetric** — password-based encryption. The file contains exactly one
+  native `argon2id` recipient. The passphrase is processed with Argon2id and
+  HKDF-SHA3-256 to unwrap the per-file key during decryption.
+- **Hybrid** — public/private-key encryption. The file contains one or more
+  native `x25519` recipients. Each recipient entry wraps the same per-file key
+  for a recipient public key. Decryption requires a matching `private.key` file
+  and that key file's passphrase.
 
-- **Pure-Rust hybrid stack.** X25519 ECDH + HKDF-SHA3-256 + XChaCha20-Poly1305 replaces the previous RSA-4096 / OpenSSL pipeline. No C dependency.
-- **Unified `.fcr` container.** One file extension across both modes; mode is derived from the recipient list, not the file name or a per-mode magic byte. SHA-3 is used uniformly across header MAC, every key derivation, fingerprints, and the internal Bech32 checksum.
-- **Typed public API.** `Encryptor` and `Decryptor` value types in `ferrocrypt-lib` replace the previous per-mode config structs. Wrong-credential mismatches (passphrase used against a public-key file, or vice versa) fail at compile time instead of surfacing as runtime "no supported recipient" errors. Multi-recipient encryption (`Encryptor::with_recipients([alice, bob])`) produces a single file decryptable by any listed recipient.
-- **Bech32 recipient strings and SHA3-256 fingerprints.** Public keys are exchanged as `fcr1…` Bech32 strings carrying both the BIP 173 outer checksum and an internal SHA3-256 typed-payload checksum, so transcription errors are caught before any cryptographic step runs. Public-key fingerprints are 64-char lowercase hex of `SHA3-256(type_name || 0x00 || key_material)`, domain-separated so future native types cannot collide with X25519.
-- **Hardened extraction and atomic output.** Linux/macOS extraction anchors every filesystem write to a directory file descriptor and resolves intermediate components via `openat`/`mkdirat` with `O_NOFOLLOW`, so a local attacker who swaps a path component for a symlink cannot redirect plaintext writes outside the destination tree. Encrypted files and key files are staged under temporary names and only promoted to the final name on success. Archive resource caps gate writer and reader symmetrically — a tree the default decrypt would refuse cannot be encrypted in the first place.
-- **Typed, user-readable errors.** Decryption failures are named and distinct (wrong passphrase or tampered file, header MAC mismatch, payload truncation, trailing data, KDF cap exceeded, …) rather than wrapped internal AEAD strings. Library consumers can pattern-match on typed `FormatDefect`, `UnsupportedVersion`, and `InvalidKdfParams` shapes without substring comparisons.
-- **Canonical specifications.** Two reference documents ship with the library: `ferrocrypt-lib/FORMAT.md` (byte-level wire format) and `ferrocrypt-lib/STRUCTURE.md` (code architecture, single sources of truth, dependency direction, public API shape, decryption security ordering).
-- **Slint-based desktop app.** Rewritten from scratch using [Slint](https://slint.dev/), with magic-byte mode auto-detection, conflict warnings, key-file validation on selection, recipient-fingerprint display with a copy button, and a password strength indicator.
+Both paths use the same v1 `.fcr` container: one random 32-byte `file_key`, one
+STREAM-BE32 encrypted payload, and one or more typed recipient entries that
+independently wrap the same `file_key`. Mode is derived from the authenticated
+recipient list, not from the filename or a per-mode magic byte.
 
-FerroCrypt encrypts and decrypts files and directories in two modes:
+The current implementation ships two native recipient types:
 
-- **Symmetric** — Password-based. Uses XChaCha20-Poly1305 with Argon2id passphrase derivation and HKDF-SHA3-256 subkey expansion. Each file gets a unique random file key, wrapped by the passphrase-derived key; the same password encrypts and decrypts.
-- **Hybrid** — Public/private-key based. Combines X25519 key agreement with XChaCha20-Poly1305 data encryption. Each file gets a unique random file key sealed for the recipient's public key. Decryption requires the matching private key and its passphrase. Hybrid mode provides confidentiality and integrity for the recipient, but it does not authenticate the sender; it is not a substitute for digital signatures.
+- `argon2id` — passphrase recipient, exclusive; it must appear alone.
+- `x25519` — public-key recipient, public-key-mixable; multiple X25519
+  recipients may share a file.
 
-Both modes produce `.fcr` files. Decryption is based on the 4-byte `FCR\0` magic in the file header, not the file extension — renaming a file does not change how FerroCrypt interprets it.
+The v1 format reserves space for future recipient types and authenticated TLV
+extensions, but the stable public library API does not currently expose a
+third-party crypto plugin interface.
 
-For the byte-level on-disk format, see `ferrocrypt-lib/FORMAT.md` in the repository.
+### Crates and applications
+
+| Crate | Purpose |
+|---|---|
+| [`ferrocrypt-lib`](https://crates.io/crates/ferrocrypt) (crate `ferrocrypt`) | Core Rust library: file format handling, encryption/decryption orchestration, key files, archive handling, typed errors, and the `Encryptor` / `Decryptor` API. |
+| [`ferrocrypt-cli`](https://crates.io/crates/ferrocrypt-cli) | Command-line interface that installs the `ferrocrypt` binary. It exposes `symmetric`, `hybrid`, `keygen`, `fingerprint`, and `recipient` subcommands. |
+| `ferrocrypt-desktop` | Slint-based desktop app using the library. It provides symmetric and hybrid workflows, key generation, key-file validation, conflict warnings, and fingerprint display. |
+
+Canonical reference documents live in `ferrocrypt-lib/`:
+
+- [**`FORMAT.md`**](ferrocrypt-lib/FORMAT.md) — byte-level v1 wire format:
+  `.fcr`, `private.key`, `public.key`, recipient entries, payload stream, TLV
+  extensions, and archive subset.
+- [**`STRUCTURE.md`**](ferrocrypt-lib/STRUCTURE.md) — library architecture:
+  module ownership, single sources of truth, public API shape, dependency
+  direction, and decryption ordering.
+
+### Main features
+
+- **Pure Rust cryptographic stack:** XChaCha20-Poly1305, Argon2id,
+  HKDF-SHA3-256, HMAC-SHA3-256, SHA3-256, and X25519.
+- **Unified `.fcr` format:** one encrypted-file container for passphrase and
+  public-key recipients.
+- **HMAC-SHA3-256 header authentication:** the prefix, fixed header fields,
+  recipient list, and extension region are authenticated by a 32-byte tag. A
+  recipient unwrap is not accepted until the candidate file key verifies the
+  header MAC, so tampering is detected before any payload byte is decrypted.
+- **Streaming encryption:** plaintext is streamed directly through
+  XChaCha20-Poly1305 STREAM-BE32 in 64 KiB chunks. The TAR archive of a
+  directory payload is never materialized as a plaintext temp file.
+- **Typed library API:** `Encryptor` and `Decryptor` route callers to passphrase
+  or recipient decryption based on the file's recipient list.
+- **Multi-recipient public-key encryption:**
+  `Encryptor::with_recipients([alice, bob])` writes one `.fcr` file that either
+  listed recipient can decrypt with their own private key.
+- **Bech32 public recipient strings:** public keys can be shared as lowercase
+  `fcr1…` strings with both the BIP 173 checksum and an internal SHA3-256
+  checksum over the typed payload.
+- **SHA3-256 fingerprints:** public-recipient fingerprints are 64 lowercase hex
+  characters over `type_name || 0x00 || key_material`.
+- **Safe archive subset:** directory payloads use a restricted POSIX ustar subset
+  and reject symlinks, hardlink entries, device files, FIFOs, sockets, unsafe
+  paths, duplicate output paths, and archives with more than one top-level root.
+- **Hardened extraction on Linux and macOS:** every write inside the
+  `.incomplete` working tree is anchored to a directory file descriptor and
+  resolves intermediate components with `openat`/`mkdirat` and `O_NOFOLLOW`,
+  so a local attacker who swaps a path component for a symlink cannot redirect
+  plaintext writes outside the destination tree. Other platforms use a
+  path-based extraction path that is less strict against in-tree races.
+- **Atomic output:** encrypted files and generated key files are staged and
+  promoted only after success. Failed decryptions leave an `.incomplete` working
+  directory rather than a final output path.
+- **Typed errors:** structural format failures, KDF resource-cap failures,
+  private-key unlock failures, recipient unwrap failures, header MAC failures,
+  payload authentication failures, truncation, and trailing data have distinct
+  public error variants.
+
+Decryption is based on the `FCR\0` magic bytes and v1 header structure, not on
+the file extension. Renaming a file does not change how FerroCrypt interprets
+it.
+
+### What's new in 0.3.0
+
+FerroCrypt 0.3.0 is a ground-up rewrite of the library, CLI, desktop app, and
+on-disk format. The main changes are:
+
+- **Unified format v1:** one `.fcr` container for passphrase and public-key
+  encryption, with mode derived from the recipient list.
+- **Pure Rust hybrid encryption:** X25519 + HKDF-SHA3-256 replaces the previous
+  RSA/OpenSSL-based hybrid path. Older hybrid files and key pairs must be
+  decrypted with an older release and regenerated.
+- **New library API:** `Encryptor` / `Decryptor` replace the legacy per-mode
+  config structs and free functions.
+- **Multi-recipient public-key encryption:** one `.fcr` file can be encrypted to
+  multiple X25519 recipients.
+- **Bech32 recipient strings and fingerprints:** public keys can be shared as
+  lowercase `fcr1…` strings and verified with SHA3-256 fingerprints.
+- **New key formats:** `public.key` is canonical Bech32 text; `private.key` is a
+  passphrase-wrapped v1 binary key file.
+- **Resource caps and safer archives:** KDF memory limits and archive caps are
+  enforced before expensive work, and directory payloads use a strict safe ustar
+  subset.
+- **Atomic output and clearer errors:** output files are staged before finalizing,
+  and decryption failures surface as typed, user-readable errors.
+- **Slint desktop app:** the desktop UI was rewritten with mode detection,
+  key-file validation, conflict warnings, fingerprint display, and inline key
+  generation.
+
+### Security and limitations
+
+- Sender authentication is not part of the v1 format. Hybrid encryption controls
+  which private keys can decrypt; it does not prove who encrypted the file.
+- Directory encryption is a safe-file-transfer convenience, not a full backup
+  format. FerroCrypt preserves file contents and directory structure. It does
+  not guarantee preservation of ownership, timestamps, ACLs, extended
+  attributes, symlink relationships, hardlink identity, or platform-specific
+  metadata.
+- Symlinks and special filesystem entries are rejected during encryption.
+  Filesystem hardlinks may be archived as independent regular files.
+- Archive resource caps are enforced on both encrypt and decrypt: by default,
+  at most 250,000 entries, 64 GiB total regular-file content, and 64 path
+  components per entry.
+- Encrypted files and generated key files are staged under temporary names and
+  promoted only after success. Failed decryptions may leave a sibling
+  `.incomplete` working directory.
+- The current v1 format is not backward-compatible with pre-v1 FerroCrypt files
+  or key pairs. Decrypt older data with the release that created it, then
+  re-encrypt with the current release.
+- This project has not undergone an independent third-party security audit.
 
 ### What's stored in an encrypted file
 
-Every `.fcr` file starts with a header followed by the encrypted payload. The header contains only the metadata needed to begin decryption — no filenames, timestamps, or plaintext content is exposed. A plain 12-byte prefix at file offset 0 (magic, version, kind, prefix flags, header length) carries enough information to identify the file and locate the rest of the header; the entire header — prefix, fixed fields, recipient list, and extension region — is authenticated by HMAC-SHA3-256 before any payload byte is decrypted.
+Every `.fcr` file starts with a plain 12-byte prefix, followed by an
+authenticated header, a 32-byte header MAC, and the encrypted payload. The
+header contains the metadata needed to attempt decryption: fixed header fields,
+the typed recipient list, the stream nonce, and optional authenticated extension
+bytes. Payload filenames and file contents are inside the encrypted archive
+payload, not in the header.
 
 | File | Contents |
 |---|---|
-| **Symmetric `.fcr`** | 12-byte prefix (`FCR\0` magic, version, kind `'E'`, prefix flags, header length), header_fixed (header flags, recipient count, recipient-entries length, extension length, stream nonce), one `argon2id` recipient entry (Argon2id salt + KDF parameters + wrap nonce + wrapped file key), extension region, header HMAC tag, encrypted payload |
-| **Hybrid `.fcr`** | 12-byte prefix (`FCR\0` magic, version, kind `'E'`, prefix flags, header length), header_fixed (header flags, recipient count, recipient-entries length, extension length, stream nonce), one `x25519` recipient entry (ephemeral X25519 public key + wrap nonce + wrapped file key), extension region, header HMAC tag, encrypted payload |
-| **`private.key`** | Cleartext header (magic, version, kind `'K'`, key flags, type-name length, public-material length, extension length, wrapped-secret length, Argon2id salt, KDF parameters, AEAD nonce), variable region (recipient type name, public material, extension region), passphrase-encrypted X25519 private key (the raw key is never stored unencrypted; the entire cleartext is bound as AEAD associated data so tampering fails authentication) |
-| **`public.key`** | UTF-8 text file containing the canonical lowercase Bech32 `fcr1…` recipient string followed by a newline. The Bech32 payload is a typed encoding of the recipient type name and public-key material, with an internal SHA3-256 checksum for early detection of malformed input. |
-
-### Security
-
-- **Symmetric encryption:** XChaCha20-Poly1305 via the [`chacha20poly1305`](https://crates.io/crates/chacha20poly1305) crate ([audited by NCC Group](https://research.nccgroup.com/2020/02/26/public-report-rustcrypto-aes-gcm-and-chacha20poly1305-implementation-review/)), with Argon2id passphrase derivation and HKDF-SHA3-256 subkey expansion; each file gets a random file key wrapped by the passphrase-derived key
-- **Hybrid encryption:** X25519 ECDH key agreement via [`x25519-dalek`](https://crates.io/crates/x25519-dalek), HKDF-SHA3-256 wrap-key derivation, XChaCha20-Poly1305 envelope encryption; each file gets a random file key sealed for the recipient
-- HMAC-SHA3-256 header authentication — tampering is detected before payload decryption begins; a recipient entry is opened first to recover the file key, and the header HMAC key is derived from it. The HMAC scope covers the full prefix, fixed header, recipient list, and extension region, so reordering or modifying any of those fields invalidates the tag.
-- Streaming encryption — plaintext is streamed directly into the encryptor; no plaintext temporary archive is written to disk
-- Passphrases are handled via the `secrecy` crate (hidden from `Debug`/`Display`, zeroized on drop)
-- Bech32 recipient strings carry an internal SHA3-256 checksum in addition to the BIP 173 outer checksum, so transcription errors and truncation are caught with a clear error before any cryptographic step runs
-- The current implementation preserves regular-file and directory permission bits through encrypt/decrypt round-trips on Unix. Setuid, setgid, and sticky bits are stripped on both archiving and extraction. This is current behavior rather than a cross-platform compatibility guarantee; on non-Unix platforms, permission metadata may be approximate
-- Symlink inputs are rejected; directory encryption does not follow symlinks, preventing unintended inclusion of files outside the selected tree. Directories containing symlinks or other special entries (sockets, FIFOs, devices) are rejected at encryption time. Hardlinks are archived as regular file contents; hardlink relationships are not preserved.
-- Directory extraction is hardened against local symlink and directory-component races on Linux and macOS. Every write inside the `.incomplete` working tree is rooted at a directory file descriptor and resolved via `openat`/`mkdirat` with `O_NOFOLLOW`, so a concurrent local attacker who swaps a path component for a symlink cannot redirect plaintext writes outside the destination tree. The extraction aborts with a typed error instead. Windows and non-Linux/non-macOS Unix targets use a path-based extraction path that is less strict against in-tree races. When extracting archives whose authenticity you do not trust on Windows, choose an output directory that is not writable by other local users.
-- Archive operations enforce resource caps to bound DoS exposure on both encrypt and decrypt. Defaults: at most **250,000 files and folders** in one archive, **64 GiB total file content**, and **paths nested at most 64 levels deep** (counting each `/`-separated segment including the filename — e.g. `a/b/c/file.txt` is 4 levels). The same caps gate writer-side preflight, so a tree the default-config decrypt would refuse cannot be encrypted in the first place — preventing the "encrypt fine but cannot decrypt your own file" footgun. Pathological inputs (millions of empty entries, multi-TiB declared sizes, deeply nested trees) reject with `InvalidInput` before allocation or `io::copy` runs.
-- Encrypted files and generated key files are staged under temporary names in the destination directory and only promoted to the final name on success. Decrypted output is staged under `.incomplete` working names and promoted at the end. Failed encryptions usually clean up their temp files; failed decryptions intentionally leave the `.incomplete` output behind because it may contain the only recoverable plaintext when ciphertext is damaged. On Linux and macOS, directory finalization uses a strict no-clobber path; on Windows, the directory step is a little more conservative and best-effort.
-- Versioned file format with magic bytes — corrupted or incompatible files produce clear errors
-
-### Limitations
-
-- **File metadata is not fully preserved.** FerroCrypt always preserves file contents and directory structure. The current implementation also preserves regular-file and directory permission bits on Unix, with setuid, setgid, and sticky bits stripped, but that behavior is best-effort rather than a stable cross-platform format guarantee. FerroCrypt does not preserve timestamps or ownership. On non-Unix platforms, permission handling is platform-limited and archive metadata may be approximate. Hardlink relationships are not preserved (hardlinked files are archived as independent copies). Symlinks and special entries cause an error at encryption time. Directory encryption is a convenience feature, not a full backup/archive format. If you need faithful filesystem backup/restore semantics, use a dedicated archiving tool and encrypt its output with FerroCrypt.
-- **No backward compatibility with older format versions.** v0.3.0 introduced a unified on-disk format v1 across `.fcr` files, `public.key`, and `private.key`. Files and keys produced by earlier versions (v0.1.x / v0.2.x) cannot be decrypted or used by v0.3.0 or later. Those releases use a different format family; in hybrid mode and key files they also use a different crypto stack (RSA/OpenSSL). If you still have data encrypted with an older version, install that older version (still available on crates.io as a pinned dependency), decrypt with it, then re-encrypt with the current release. The full list of changes is in `CHANGELOG.md`.
-
-### Project Structure
-
-| Crate | Description |
-|---|---|
-| `ferrocrypt-lib` | Core encryption library ([crates.io](https://crates.io/crates/ferrocrypt)) |
-| `ferrocrypt-cli` | CLI binary ([crates.io](https://crates.io/crates/ferrocrypt-cli)) |
-| `ferrocrypt-desktop` | Desktop app built with [Slint](https://slint.dev/) |
-
-Two canonical specification documents live in `ferrocrypt-lib/`:
-
-- **`FORMAT.md`** — wire format specification: `.fcr` byte layout, `private.key` / `public.key` file formats, recipient entry framing, payload stream rules, TLV extension grammar.
-- **`STRUCTURE.md`** — code architecture specification: module layout, single sources of truth for security-sensitive concerns, dependency direction, public API shape, and decryption security ordering.
+| **Symmetric `.fcr`** | 12-byte prefix (`FCR\0` magic, version, kind `'E'`, prefix flags, header length), `header_fixed`, one `argon2id` recipient entry, extension region, header HMAC tag, encrypted payload |
+| **Hybrid `.fcr`** | 12-byte prefix (`FCR\0` magic, version, kind `'E'`, prefix flags, header length), `header_fixed`, one or more `x25519` recipient entries, extension region, header HMAC tag, encrypted payload |
+| **`private.key`** | Binary v1 key file: cleartext fixed header and variable cleartext fields authenticated as AEAD associated data, followed by a passphrase-wrapped X25519 secret |
+| **`public.key`** | UTF-8 text file containing the canonical lowercase Bech32 `fcr1…` recipient string, written with one trailing newline; readers also accept the same string without the final newline |
 
 ## Installation
 
@@ -282,7 +369,7 @@ FerroCrypt distinguishes several distinct decryption-failure stages so that a fa
 - **Decryption failed: recipient `argon2id` unwrap failed** (symmetric) — The passphrase does not unwrap the file key, or the recipient body has been modified. No plaintext has been produced.
 - **Decryption failed: recipient `x25519` unwrap failed** (hybrid) — The supplied private key does not match the key pair the file was encrypted for, or the recipient body has been modified. No plaintext has been produced.
 - **Decryption failed: no recipient could unlock the file** — The recipient list was iterated to exhaustion without any supported entry yielding a `file_key` that verified the header MAC. In single-recipient files this overlaps with the per-recipient unwrap failure above; in multi-recipient files it is the final error after every supported slot has been tried.
-- **Decryption failed: header tampered after unlock** — A recipient entry unwrapped successfully, but the header HMAC does not match. Header bytes inside the MAC scope — the prefix, fixed header, recipient list, or extension region — have been tampered with or corrupted since writing.
+- **Decryption failed: header tampered after unlock** — A recipient entry produced a candidate file key, but that key did not verify the header HMAC. This does not prove which input was wrong or modified; the credential, recipient body, or bytes inside the MAC scope may be the cause.
 - **Payload authentication failed: data tampered or corrupted** — The header authenticated successfully, but a later ciphertext chunk failed its authentication tag. This usually means the file has been corrupted or truncated partway through, an attacker has modified bytes after the header, or extra bytes were appended after the authenticated payload. During streaming decryption, earlier chunks that authenticated successfully may already have been written to disk under an `.incomplete` working directory before the failing chunk was reached.
 - **Encrypted file is truncated** — The encrypted stream ends before its final authenticated chunk, usually because of a partial download or an interrupted copy.
 - **Encrypted file has unexpected trailing data** — Bytes remain after the final authenticated chunk was decrypted successfully. Ordinary appended-bytes cases on a local file are already caught as a payload authentication failure (above), because the per-chunk AEAD's final-flag binding rejects a naive append. This dedicated variant is the defense-in-depth path for pathological input readers — non-blocking sockets, `Take`-style wrappers, or similar — that signal end-of-file at the chunk boundary and then yield additional bytes; FerroCrypt refuses to return success on such a stream.

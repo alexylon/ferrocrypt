@@ -1,4 +1,4 @@
-//! Generic recipient-entry framing per `FORMAT.md` §3.5.
+//! Generic recipient-entry framing per `FORMAT.md` §3.3.
 //!
 //! Wire shape:
 //!
@@ -20,7 +20,7 @@ use crate::recipient::name::{TYPE_NAME_MAX_LEN, validate_type_name};
 use crate::recipient::policy::NativeRecipientType;
 
 /// On-wire size of a recipient-entry header (`type_name_len:u16 ||
-/// recipient_flags:u16 || body_len:u32`), per `FORMAT.md` §3.5.
+/// recipient_flags:u16 || body_len:u32`), per `FORMAT.md` §3.3.
 pub const ENTRY_HEADER_SIZE: usize = 8;
 
 const ENTRY_TYPE_NAME_LEN_OFFSET: usize = 0;
@@ -49,7 +49,7 @@ pub(crate) struct RecipientBody {
     pub bytes: Vec<u8>,
 }
 
-/// A parsed recipient entry per `FORMAT.md` §3.5. Owns its
+/// A parsed recipient entry per `FORMAT.md` §3.3. Owns its
 /// `type_name` (validated against the §3.3 grammar) and `body` (opaque
 /// to the framing layer; per-recipient modules parse the body).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,7 +119,7 @@ impl RecipientEntry {
     /// the parsed entry and the number of bytes consumed
     /// (`ENTRY_HEADER_SIZE + type_name_len + body_len`).
     ///
-    /// Validates per `FORMAT.md` §3.5 in cheap-to-expensive order:
+    /// Validates per `FORMAT.md` §3.3 and §3.4 in cheap-to-expensive order:
     /// header is large enough, length fields are in range, reserved
     /// flag bits are zero, body is within the local resource cap, the
     /// declared total fits in `bytes`, and the `type_name` satisfies
@@ -185,7 +185,7 @@ impl RecipientEntry {
 /// [`FormatDefect::MalformedRecipientEntry`].
 ///
 /// `local_body_cap` is forwarded to each [`RecipientEntry::parse_one`]
-/// call. Per `FORMAT.md` §3.5, the local cap applies to every entry,
+/// call. Per `FORMAT.md` §3.2, the local cap applies to every entry,
 /// including unknown entries that will later be skipped, so an
 /// attacker-supplied unknown entry cannot DoS a reader that "skips" it.
 pub fn parse_recipient_entries(

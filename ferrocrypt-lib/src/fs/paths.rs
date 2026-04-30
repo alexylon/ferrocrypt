@@ -2,10 +2,8 @@
 //! extraction, parent-directory resolution, and user-path I/O error
 //! mapping.
 //!
-//! Centralises the small filesystem-level helpers that don't belong
-//! to a single crypto or container module so the relevant logic lives
-//! in one place per the single-source-of-truth table
-//! (`notes/STRUCTURE_PROPOSAL.md` §6.1).
+//! Centralises small filesystem-level helpers that do not belong to a single
+//! crypto or container module.
 
 use std::ffi::OsStr;
 use std::io;

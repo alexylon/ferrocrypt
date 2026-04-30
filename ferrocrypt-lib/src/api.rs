@@ -24,9 +24,10 @@
 //! [`Decryptor::open`] inspects the file's recipient list (no crypto)
 //! and returns a typed variant: [`Decryptor::Passphrase`] for files
 //! sealed with a passphrase, [`Decryptor::Recipient`] for files sealed
-//! to public keys. The variants take only the credentials they can use,
-//! so wrong-credential mismatches surface as compile errors rather than
-//! runtime "no supported recipient" failures.
+//! to public keys. Each variant's `decrypt` method accepts only the
+//! credentials that variant can actually use, so a mismatched-credential
+//! call — e.g. passing a [`PrivateKey`] to a passphrase-sealed file — is
+//! a compile error rather than a runtime "no supported recipient" failure.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -110,10 +111,12 @@ enum EncryptorState {
 }
 
 impl Encryptor {
-    /// Configures password-based encryption. The resulting `.fcr`
-    /// contains exactly one `argon2id` recipient. The passphrase is
-    /// validated for non-emptiness when [`Encryptor::write`] runs;
-    /// constructing this builder is infallible.
+    /// Configures passphrase encryption.
+    ///
+    /// The resulting `.fcr` contains exactly one native `argon2id`
+    /// recipient. The passphrase is checked for non-emptiness when
+    /// [`Encryptor::write`] runs; constructing this builder is
+    /// infallible.
     pub fn with_passphrase(passphrase: SecretString) -> Self {
         Self {
             state: EncryptorState::Passphrase(passphrase),
@@ -122,11 +125,10 @@ impl Encryptor {
         }
     }
 
-    /// Configures encryption to a single public-key recipient. Sugar
-    /// for [`Encryptor::with_recipients`] with a one-element list;
-    /// kept as its own constructor because the single-recipient case
-    /// is the common one and `with_recipients` returns a `Result` for
-    /// the empty-list and mixing-policy checks.
+    /// Configures encryption to one public-key recipient.
+    ///
+    /// This is a convenience wrapper around [`Encryptor::with_recipients`]
+    /// for the common single-recipient case.
     pub fn with_recipient(recipient: PublicKey) -> Self {
         Self {
             state: EncryptorState::Recipients(vec![recipient]),
@@ -136,17 +138,16 @@ impl Encryptor {
     }
 
     /// Configures encryption to one or more public-key recipients.
-    /// Each recipient seals the same per-file `file_key` independently,
-    /// so any one of them can decrypt the resulting `.fcr`.
     ///
-    /// Errors:
+    /// Each recipient entry wraps the same per-file `file_key`
+    /// independently, so any listed recipient can decrypt the resulting
+    /// `.fcr` with their matching private key.
     ///
-    /// - Empty list → [`CryptoError::EmptyRecipientList`].
-    /// - Heterogeneous mixing policies →
-    ///   [`CryptoError::IncompatibleRecipients`]. In v1 every
-    ///   [`PublicKey`] is X25519 (`MixingPolicy::PublicKeyMixable`), so
-    ///   this can't fire today; the check is forward-compatible with
-    ///   future native key kinds.
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::EmptyRecipientList`] if the iterator is empty.
+    /// All public keys in the current v1 implementation are X25519 recipients;
+    /// future key kinds may add additional mixing-policy checks.
     pub fn with_recipients(
         recipients: impl IntoIterator<Item = PublicKey>,
     ) -> Result<Self, CryptoError> {
@@ -164,8 +165,10 @@ impl Encryptor {
         })
     }
 
-    /// Sets an explicit output path. Overrides the default
-    /// `{stem}.fcr` naming inside `output_dir`.
+    /// Sets the encrypted output file path.
+    ///
+    /// When set, this path is used instead of the default
+    /// `{output_dir}/{stem}.fcr` destination chosen by [`Encryptor::write`].
     pub fn save_as(mut self, path: impl AsRef<Path>) -> Self {
         self.save_as = Some(path.as_ref().to_path_buf());
         self
@@ -179,9 +182,16 @@ impl Encryptor {
         self
     }
 
-    /// Encrypts `input` (file or directory) and writes the result.
-    /// Default destination is `{output_dir}/{stem}.fcr`; overridden
-    /// by [`Encryptor::save_as`].
+    /// Encrypts `input` and writes the resulting `.fcr` file.
+    ///
+    /// `input` may be a regular file or a directory. Directory inputs are
+    /// encoded as FerroCrypt's safe ustar subset before payload encryption.
+    /// The default destination is `{output_dir}/{stem}.fcr`; use
+    /// [`Encryptor::save_as`] to supply an explicit output file path.
+    ///
+    /// Errors include invalid inputs, output conflicts, unsupported archive
+    /// entries, passphrase validation failure, key wrapping failure, archive
+    /// resource-cap failure, and I/O errors.
     pub fn write(
         self,
         input: impl AsRef<Path>,
@@ -257,9 +267,9 @@ impl Encryptor {
 /// - [`Decryptor::Recipient`] takes a [`PrivateKey`] plus its unlock
 ///   passphrase.
 ///
-/// A mismatched-credential bug — e.g. trying to decrypt a passphrase
-/// file with a `PrivateKey` — is therefore a compile error rather than
-/// a runtime `NoSupportedRecipient` failure.
+/// A mismatched-credential call — e.g. trying to decrypt a passphrase-sealed
+/// file with a [`PrivateKey`] — is therefore a compile error rather than a
+/// runtime `NoSupportedRecipient` failure.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Decryptor {
@@ -276,16 +286,14 @@ impl Decryptor {
     /// unwrap, no MAC, no payload bytes touched) and returns the
     /// matching variant.
     ///
-    /// Errors:
+    /// # Errors
     ///
-    /// - `input` does not exist → [`CryptoError::InputPath`].
-    /// - `input` is a directory → [`CryptoError::InvalidInput`].
-    /// - File is not a FerroCrypt `.fcr` →
-    ///   [`CryptoError::InvalidFormat`] with [`FormatDefect::BadMagic`].
-    /// - Header structurally malformed → typed [`FormatDefect`]
-    ///   variants per `FORMAT.md` §3.2.
-    /// - Recipient list cannot be classified (unknown critical entry,
-    ///   illegal mixing) → typed `CryptoError` variants.
+    /// Returns [`CryptoError::InputPath`] if `input` does not exist and
+    /// [`CryptoError::InvalidInput`] if `input` is a directory. Files that do
+    /// not contain a FerroCrypt header return [`CryptoError::InvalidFormat`]
+    /// with [`FormatDefect::BadMagic`]. Malformed headers, unsupported
+    /// versions, unknown critical recipients, and illegal recipient mixes return
+    /// their corresponding `CryptoError` or [`FormatDefect`] variants.
     pub fn open(input: impl AsRef<Path>) -> Result<Self, CryptoError> {
         let input = input.as_ref().to_path_buf();
         validate_input_path(&input)?;
@@ -321,16 +329,21 @@ pub struct PassphraseDecryptor {
 }
 
 impl PassphraseDecryptor {
-    /// Sets a caller-controlled cap on the Argon2id memory cost
-    /// accepted from the file header. Defaults to the built-in
-    /// ceiling when unset.
+    /// Sets the maximum Argon2id memory cost accepted from the file header.
+    ///
+    /// If unset, the decrypt path applies [`KdfLimit::default`].
     pub fn kdf_limit(mut self, limit: KdfLimit) -> Self {
         self.kdf_limit = Some(limit);
         self
     }
 
-    /// Unwraps the `argon2id` recipient with `passphrase` and decrypts
-    /// the payload into `output_dir`.
+    /// Decrypts this passphrase-sealed `.fcr` into `output_dir`.
+    ///
+    /// The passphrase is checked for non-emptiness, then used to unwrap the
+    /// file's `argon2id` recipient. The recovered candidate file key is
+    /// accepted only after the header MAC verifies. On success, the decrypted
+    /// file or directory is promoted into `output_dir` and returned in
+    /// [`DecryptOutcome::output_path`].
     pub fn decrypt(
         self,
         passphrase: SecretString,
@@ -360,17 +373,23 @@ pub struct RecipientDecryptor {
 }
 
 impl RecipientDecryptor {
-    /// Sets a caller-controlled cap on the Argon2id memory cost
-    /// accepted when unlocking the `private.key` file. Defaults to
-    /// the built-in ceiling when unset.
+    /// Sets the maximum Argon2id memory cost accepted when unlocking
+    /// `private.key`.
+    ///
+    /// If unset, the decrypt path applies [`KdfLimit::default`].
     pub fn kdf_limit(mut self, limit: KdfLimit) -> Self {
         self.kdf_limit = Some(limit);
         self
     }
 
-    /// Unlocks `identity` with `identity_passphrase`, iterates the
-    /// supported `x25519` recipient slots in declared order, and
-    /// decrypts the payload into `output_dir`.
+    /// Decrypts this public-key-recipient `.fcr` into `output_dir`.
+    ///
+    /// `identity` must reference a FerroCrypt `private.key` file. The private
+    /// key is unlocked with `identity_passphrase`, then the decryptor tries the
+    /// supported `x25519` recipient slots until one yields a candidate file key
+    /// that verifies the header MAC. On success, the decrypted file or directory
+    /// is promoted into `output_dir` and returned in
+    /// [`DecryptOutcome::output_path`].
     pub fn decrypt(
         self,
         identity: PrivateKey,
@@ -441,11 +460,13 @@ pub fn generate_key_pair(
 /// plaintext encrypt.
 ///
 /// Returns `Ok(Some(EncryptionMode))` when the prefix matches and the
-/// header parses + classifies cleanly. The mode is derived from the
-/// recipient list per `FORMAT.md` §3.4 / §3.5 (one `argon2id` →
-/// `Passphrase`, one or more supported `x25519` → `Recipient`).
+/// header parses and classifies cleanly. The mode is derived from the
+/// recipient list: exactly one native `argon2id` recipient maps to
+/// [`EncryptionMode::Passphrase`], and one or more supported `x25519`
+/// recipients with no `argon2id` recipient map to
+/// [`EncryptionMode::Recipient`].
 ///
-/// Returns `Err(InvalidFormat)` when the magic matches but the
+/// Returns [`CryptoError::InvalidFormat`] when the magic matches but the
 /// prefix or header is malformed (bad version / kind / flags,
 /// oversized `header_len`, malformed recipient entries, etc.). The
 /// detection pre-check therefore enforces the same structural
@@ -453,13 +474,11 @@ pub fn generate_key_pair(
 /// attacker-tampered files surface their specific diagnostic at
 /// detection time.
 ///
-/// Returns `Err(...)` typed under the recipient classification rules
-/// when the recipient list is structurally valid but cannot be
-/// classified: `UnknownCriticalRecipient` for an unknown critical
-/// entry, `PassphraseRecipientMixed` for a mixed-passphrase file,
-/// `NoSupportedRecipient` for a list with no supported native entry.
+/// Returns typed recipient-classification errors when the recipient list is
+/// structurally valid but cannot be classified: unknown critical recipients,
+/// illegal passphrase mixing, or no supported native recipient.
 ///
-/// Returns `Err(Io)` if the file cannot be opened or read.
+/// Returns [`CryptoError::Io`] if the file cannot be opened or read.
 ///
 /// **Detection is structural, not cryptographic.** No recipient
 /// unwrap runs (no Argon2id, no X25519 ECDH, no private-key
@@ -535,12 +554,12 @@ pub fn default_encrypted_filename(input_path: impl AsRef<Path>) -> Result<String
 
 /// Validates that a file is a well-formed FerroCrypt `private.key` file.
 ///
-/// Checks magic bytes, version, type, algorithm, `ext_len` bound, and
-/// total file size. Does **not** attempt to decrypt the key (no
-/// passphrase needed). If the caller accidentally points this at a
-/// text `public.key`, the friendly
-/// [`FormatDefect::WrongKeyFileType`] surfaces instead of a generic
-/// `NotAKeyFile`.
+/// Checks the cleartext v1 structure: magic bytes, version, key-file kind,
+/// flags, length fields, X25519 type name, X25519 public-material length, and
+/// total file size. This does **not** attempt to decrypt the key and does not
+/// require a passphrase. If the caller accidentally points this at a text
+/// `public.key`, [`FormatDefect::WrongKeyFileType`] is returned instead of a
+/// generic key-file parse error.
 pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError> {
     let data = fs::read(key_file.as_ref()).map_err(paths::map_user_path_io_error)?;
     if matches!(KeyFileKind::classify(&data), KeyFileKind::Public) {
@@ -552,14 +571,14 @@ pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), Crypt
 /// Validates that a file is a well-formed FerroCrypt `public.key`
 /// text file.
 ///
-/// Checks the canonical `fcr1…` recipient string grammar (Bech32
-/// checksum, HRP, algorithm byte, key-material length). Does
-/// **not** require any passphrase. If the caller accidentally
-/// points this at a binary `private.key`, the friendly
-/// [`FormatDefect::WrongKeyFileType`] surfaces instead of a UTF-8
-/// decode error.
+/// Checks the canonical `fcr1…` recipient string grammar, including
+/// Bech32 checksum, HRP, typed payload lengths, type name, key-material
+/// length, and internal SHA3-256 checksum. Does **not** require a
+/// passphrase. If the caller accidentally
+/// points this at a binary `private.key`, [`FormatDefect::WrongKeyFileType`] is
+/// returned instead of a UTF-8 decode error.
 ///
-/// Symmetric to [`validate_private_key_file`].
+/// Companion to [`validate_private_key_file`].
 pub fn validate_public_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError> {
     PublicKey::from_key_file(key_file).validate()
 }

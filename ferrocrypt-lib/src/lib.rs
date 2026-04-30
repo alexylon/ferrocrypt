@@ -1,17 +1,23 @@
 //! # ferrocrypt
 //!
-//! High-level helpers for encrypting and decrypting files or directories using
-//! password-based symmetric encryption or hybrid (asymmetric + symmetric)
-//! encryption. Designed for straightforward, scriptable workflows rather than
+//! High-level file encryption for files and directories.
+//!
+//! FerroCrypt writes `.fcr` files using one recipient-oriented v1 container:
+//! one random per-file key, one streamed authenticated payload, and one or more
+//! typed recipient entries that independently wrap the same file key. The public
+//! API exposes this through [`Encryptor`] and [`Decryptor`] rather than through
 //! low-level cryptographic building blocks.
 //!
 //! ## Design goals
-//! - **Confidentiality + integrity** for small-to-medium file trees.
-//! - **Simple ergonomics**: pick symmetric (password) or hybrid (recipient
-//!   public key for encryption, passphrase-protected private key for
-//!   decryption) based on your distribution needs.
-//! - **Batteries included**: streaming encryption pipeline, path handling,
-//!   and output file naming are handled for you.
+//!
+//! - **Recipient-oriented encryption**: passphrases and public keys are native
+//!   recipient schemes over the same `.fcr` container.
+//! - **Path-based file workflows**: archiving, streaming encryption, staging,
+//!   and output naming are handled by the library.
+//! - **Typed routing**: [`Decryptor::open`] inspects the recipient list and
+//!   returns a passphrase or public-recipient decryptor variant.
+//! - **Typed diagnostics**: operations return [`CryptoError`] values with
+//!   structured format, KDF, recipient, authentication, and I/O failures.
 //!
 //! ## Quick start (symmetric / passphrase)
 //! ```rust,no_run
@@ -69,36 +75,43 @@
 //! # fn main() { run().unwrap(); }
 //! ```
 //!
-//! ## When to choose which mode
-//! - **Symmetric**: Fastest; same password encrypts and decrypts. Great for
-//!   personal backups or team secrets when you can share the password securely.
-//!   Produces `.fcr` files.
-//! - **Hybrid**: Safer for distribution—encrypt with a recipient's public key
-//!   (no password needed for encryption); only their passphrase-protected
-//!   private key can decrypt. Each file gets a unique random key. Produces
-//!   `.fcr` files.
+//! ## Choosing a recipient path
 //!
-//! ## Migrating from 0.2.x
-//! Version 0.3.0 introduces on-disk format **v1** (unified across `.fcr` files,
-//! `public.key`, and `private.key`) and replaces RSA-4096 with X25519 for hybrid
-//! encryption. Files and keys from 0.2.x are **not compatible**. Decrypt any
-//! existing data with the old version first, then re-encrypt with 0.3.0.
+//! - **Passphrase / symmetric**: use [`Encryptor::with_passphrase`] when the
+//!   same passphrase should encrypt and decrypt the file. The resulting `.fcr`
+//!   contains exactly one native `argon2id` recipient.
+//! - **Public-key / hybrid**: use [`Encryptor::with_recipient`] or
+//!   [`Encryptor::with_recipients`] when the sender should encrypt to one or
+//!   more public recipient keys. Decryption requires a matching [`PrivateKey`]
+//!   file and that key file's passphrase. This does not authenticate the sender.
 //!
-//! All patch and minor releases within the 0.3.x series will remain backward
+//! ## Format compatibility
+//!
+//! The current on-disk format is FerroCrypt v1 for `.fcr`, `public.key`, and
+//! `private.key`. Older pre-v1 files and key pairs use a different format family
+//! and, for historical hybrid encryption, a different key-agreement stack. To
+//! migrate older data, decrypt it with the release that created it, then
+//! re-encrypt it with the current release.
+//!
+//! All patch and minor releases within the 0.3.x series remain backward
 //! compatible — files encrypted with 0.3.0 will be readable by any 0.3.x
 //! release.
 //!
 //! ## Security notes
+//!
 //! - All cryptographic operations depend on a secure OS RNG; ensure the target
 //!   platform provides one.
-//! - Ciphertext integrity is enforced; modification or wrong keys will yield
-//!   `CryptoError` results rather than corrupted plaintext.
+//! - Sender authentication is out of scope; public-key encryption identifies who
+//!   can decrypt, not who encrypted.
+//! - Ciphertext integrity is enforced; modification or wrong keys yield
+//!   [`CryptoError`] results rather than corrupted plaintext.
 //! - This crate is **not** third-party audited and is not advertised as
 //!   compliance-certified.
 //!
 //! ## Error handling
-//! Every fallible operation returns `Result<T, CryptoError>`. See `CryptoError`
-//! for variant meanings and remediation hints.
+//!
+//! Every fallible operation returns `Result<T, CryptoError>`. See
+//! [`CryptoError`] for variant meanings and remediation hints.
 //!
 //! ## License
 //! Licensed under GPL-3.0-only. See the LICENSE file in the repository.
@@ -123,17 +136,19 @@ pub use crate::recipient::policy::MixingPolicy;
 
 pub use secrecy;
 
-/// The encryption mode used to create an `.fcr` file. Classified from
-/// the recipient list per `FORMAT.md` §3.4 / §3.5.
+/// Public classification of the native recipients in an `.fcr` file.
+///
+/// This is derived from the recipient list by structural inspection only. No
+/// passphrase derivation, private-key operation, header MAC verification, or
+/// payload decryption is performed during classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EncryptionMode {
-    /// File is sealed by exactly one `argon2id` recipient — the user
-    /// decrypts with a passphrase.
+    /// File contains exactly one native `argon2id` recipient and is decrypted
+    /// with a passphrase.
     Passphrase,
-    /// File is sealed to one or more `x25519` public-key recipients —
-    /// the user decrypts with a `PrivateKey` whose public material
-    /// matches one of the recipient slots.
+    /// File contains one or more native `x25519` public-key recipients and is
+    /// decrypted with a matching [`PrivateKey`].
     Recipient,
 }
 
@@ -233,13 +248,13 @@ mod recipient;
 #[cfg(feature = "fuzzing")]
 pub mod fuzz_exports;
 
-/// Decodes a Bech32 recipient string (`fcr1…`) into raw 32-byte
-/// X25519 public-key material.
+/// Decodes a Bech32 recipient string (`fcr1…`) into raw X25519 public-key
+/// material.
 ///
 /// Validates HRP, BIP 173 checksum, internal SHA3-256 checksum,
-/// payload structural fields, type-name grammar, a 1,024-character
-/// recipient-string cap, and (for v1 X25519 recipients) the recipient
-/// `type_name == "x25519"` and exactly 32-byte key-material length.
+/// payload structural fields, type-name grammar, a 1,024-byte local
+/// recipient-string cap, and the v1 X25519 payload constraints:
+/// `type_name == "x25519"` and exactly 32 bytes of key material.
 ///
 /// This is the low-level primitive; most callers should prefer
 /// [`PublicKey::from_recipient_string`] or
@@ -384,7 +399,7 @@ mod tests {
     }
 
     /// `decode_recipient`'s docstring inlines the recipient-string
-    /// length cap as the literal "1,024" because the underlying
+    /// local cap as the literal "1,024" because the underlying
     /// constant lives in a private module and rustdoc cannot resolve
     /// an intra-doc link across the privacy boundary. Pin the literal
     /// against the constant so a future bump (e.g. wider caps for

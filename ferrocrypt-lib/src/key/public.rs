@@ -149,15 +149,18 @@ pub fn encode_recipient_string(
 }
 
 /// Decodes a canonical lowercase Bech32 recipient string into the
-/// typed payload. Validates, in order: input length cap, lowercase
-/// grammar, **strict** Bech32 (rejecting Bech32m), HRP equals `"fcr"`,
-/// structural length fields, type_name UTF-8 + grammar, and the
-/// internal SHA3-256 checksum.
+/// typed payload.
 ///
-/// `local_max_chars` caps the input length before any decode work
-/// runs. The spec ceiling is [`RECIPIENT_STRING_LEN_MAX`] (20,000);
-/// callers SHOULD pass the smaller [`RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT`]
-/// for untrusted input unless they have a reason to widen it.
+/// Validates, in order: local input-length cap, lowercase grammar,
+/// strict Bech32 (BIP 173, rejecting Bech32m), HRP `"fcr"`, structural
+/// length fields, `type_name` UTF-8 and grammar, and the internal
+/// SHA3-256 checksum.
+///
+/// `local_max_chars` is a local policy cap checked before decode work runs.
+/// The v1 structural ceiling is [`RECIPIENT_STRING_LEN_MAX`] (20,000 ASCII
+/// characters); callers should normally pass the smaller
+/// [`RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT`] for untrusted input unless they
+/// intentionally accept larger future recipient strings.
 pub fn decode_recipient_string(
     s: &str,
     local_max_chars: usize,
@@ -372,21 +375,20 @@ pub fn read_public_key(path: &std::path::Path) -> Result<[u8; 32], CryptoError> 
 
 // ─── Public-recipient wrapper ──────────────────────────────────────────────
 
-/// A FerroCrypt X25519 public key.
+/// Public recipient key for FerroCrypt public-key encryption.
 ///
-/// Abstracts over the source of the key material: a stored public-key
-/// file on disk, raw 32-byte key material, or a decoded Bech32 `fcr1…`
-/// recipient string. Filesystem sources defer I/O until the key is
-/// actually used, so construction is infallible for the file and bytes
-/// variants.
+/// In v1, public recipient keys are native X25519 public keys. A `PublicKey`
+/// can reference a `public.key` file, hold raw 32-byte X25519 public material,
+/// or be constructed from a Bech32 `fcr1…` recipient string. Filesystem sources
+/// defer I/O until a method needs the key material.
 ///
 /// Once constructed, a `PublicKey` can be:
-/// - handed to [`crate::Encryptor::with_recipient`] (or
-///   [`crate::Encryptor::with_recipients`]) as the envelope-encryption
-///   target,
-/// - rendered as a Bech32 `fcr1…` recipient string via
-///   [`PublicKey::to_recipient_string`],
-/// - fingerprinted via [`PublicKey::fingerprint`].
+///
+/// - passed to [`crate::Encryptor::with_recipient`] or
+///   [`crate::Encryptor::with_recipients`];
+/// - rendered as a Bech32 `fcr1…` recipient string with
+///   [`PublicKey::to_recipient_string`];
+/// - fingerprinted with [`PublicKey::fingerprint`].
 ///
 /// The struct is `#[non_exhaustive]` so future sources (key servers,
 /// hardware-backed keys) can be added without a breaking change.
@@ -403,10 +405,12 @@ enum PublicKeySource {
 }
 
 impl PublicKey {
-    /// References a FerroCrypt public-key file at the given path. The
-    /// file is not opened until a method that needs the key material
-    /// (e.g. [`fingerprint`](Self::fingerprint),
-    /// [`to_recipient_string`](Self::to_recipient_string)) is called.
+    /// References a FerroCrypt `public.key` file.
+    ///
+    /// The file is not opened until a method that needs the key material is
+    /// called, such as [`fingerprint`](Self::fingerprint),
+    /// [`to_recipient_string`](Self::to_recipient_string),
+    /// [`to_bytes`](Self::to_bytes), or [`validate`](Self::validate).
     pub fn from_key_file(path: impl AsRef<std::path::Path>) -> Self {
         Self {
             source: PublicKeySource::KeyFile(path.as_ref().to_path_buf()),
@@ -431,21 +435,23 @@ impl PublicKey {
         Ok(Self::from_bytes(crate::decode_recipient(recipient)?))
     }
 
-    /// Computes the SHA3-256 fingerprint of the X25519 recipient as a
-    /// 64-character lowercase hex string. Domain-separated by the
-    /// recipient `type_name` ("x25519") so future native types
-    /// (post-quantum, hybrid KEMs, etc.) cannot collide with this
-    /// namespace. Output matches `key::public::fingerprint_hex` and the
-    /// `ferrocrypt recipient` subcommand.
+    /// Computes the public-recipient fingerprint.
+    ///
+    /// Returns 64 lowercase hexadecimal characters: SHA3-256 over
+    /// `type_name || 0x00 || key_material`, using the v1 `"x25519"` type
+    /// name. The `type_name` prefix and length-separator byte
+    /// domain-separate the fingerprint by recipient kind, so future
+    /// native types (post-quantum, hybrid KEMs) cannot collide with this
+    /// namespace. Matches the `ferrocrypt fingerprint` subcommand.
     pub fn fingerprint(&self) -> Result<String, CryptoError> {
         let bytes = self.resolve()?;
         Ok(fingerprint_hex(crate::recipient::x25519::TYPE_NAME, &bytes))
     }
 
-    /// Encodes the key as the canonical Bech32 `fcr1…` recipient
-    /// string. Routes through `key::public::encode_recipient_string`
-    /// with the X25519 type name. Performs filesystem I/O for the
-    /// key-file source.
+    /// Encodes the key as the canonical lowercase Bech32 `fcr1…`
+    /// recipient string.
+    ///
+    /// Performs filesystem I/O if this `PublicKey` references a key file.
     pub fn to_recipient_string(&self) -> Result<String, CryptoError> {
         let bytes = self.resolve()?;
         encode_recipient_string(crate::recipient::x25519::TYPE_NAME, &bytes)
@@ -457,10 +463,11 @@ impl PublicKey {
         self.resolve()
     }
 
-    /// Validates that the key source is well-formed without exposing
-    /// the bytes. For a key-file source this opens the file, parses
-    /// the header, and checks the layout; for a bytes source this is
-    /// always `Ok(())`.
+    /// Validates that the key source is well-formed without exposing the
+    /// bytes to the caller.
+    ///
+    /// For a key-file source this opens and parses the `public.key` text file.
+    /// For a raw-bytes source this is always `Ok(())`.
     pub fn validate(&self) -> Result<(), CryptoError> {
         self.resolve().map(|_| ())
     }

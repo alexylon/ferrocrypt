@@ -78,8 +78,7 @@ impl std::fmt::Display for DisplayableTypeName<'_> {
 ///   `type_name` so callers can tell which recipient slot raised them
 ///
 /// Consumers can pattern-match on these shapes without substring
-/// comparisons. Ferrocrypt's error type is closely modelled on the
-/// `age` crate's `DecryptError`, which takes the same stance.
+/// comparisons.
 ///
 /// # The one escape hatch: [`CryptoError::InvalidInput`]
 ///
@@ -191,14 +190,14 @@ pub enum CryptoError {
     #[error("Recipient body cap exceeded ({body_len} bytes, cap {local_cap})")]
     RecipientBodyCapExceeded { body_len: u32, local_cap: u32 },
     /// Bech32 recipient string exceeds the caller-configured local
-    /// length cap. Distinct from any malformed-input error per
-    /// `FORMAT.md` §3.2: the string may be perfectly valid; the
-    /// reader's resource policy is what rejects it, and callers MAY
-    /// raise the cap for trusted input. Spec ceiling is 20,000 chars
-    /// (§7.1); the recommended local default is much smaller.
-    /// Saturating casts: an input > `u32::MAX` chars (4 GiB+) reports
-    /// `u32::MAX` for `input_chars`, but the cap rejection itself is
-    /// still correct.
+    /// length cap.
+    ///
+    /// Distinct from malformed public-key input: the string may be
+    /// structurally valid, but the reader's resource policy rejected it.
+    /// The v1 structural ceiling is 20,000 ASCII characters (`FORMAT.md`
+    /// §7); the recommended local default is smaller. For valid recipient
+    /// strings, byte length and character count are the same because the
+    /// encoding is ASCII.
     #[error("Recipient string cap exceeded ({input_chars} chars, cap {local_cap})")]
     RecipientStringCapExceeded { input_chars: u32, local_cap: u32 },
 
@@ -213,36 +212,37 @@ pub enum CryptoError {
     /// error by design. The Display wording reflects both causes.
     #[error("Private key unlock failed: wrong passphrase or tampered file")]
     KeyFileUnlockFailed,
-    /// The single-recipient header MAC failed after the recipient
-    /// successfully unwrapped a candidate `file_key`. The caller has
-    /// the right passphrase or private key, but bytes inside the
-    /// MAC scope (prefix, header_fixed, recipient_entries, ext_bytes)
-    /// were tampered with after the file was written. In a multi-
-    /// recipient file the per-candidate MAC failure surfaces as
-    /// [`Self::HeaderMacFailedAfterUnwrap`] instead so the decrypt loop can
-    /// continue iterating; this variant is the final error for the
-    /// single-recipient case where there is no other slot to try.
+    /// The single-recipient header MAC failed after a recipient
+    /// unwrapped a candidate `file_key`.
+    ///
+    /// Per `FORMAT.md` §3.7, recipient unwrap is not accepted until the
+    /// candidate key verifies the header MAC. This failure does not by
+    /// itself prove whether the credential, recipient body, or header bytes
+    /// were modified. In a multi-recipient file the per-candidate MAC failure
+    /// surfaces as [`Self::HeaderMacFailedAfterUnwrap`] so the decrypt loop can
+    /// continue; this variant is the final error for the single-recipient case.
     #[error("Decryption failed: header tampered after unlock")]
     HeaderTampered,
     /// In a multi-recipient decrypt loop, a recipient candidate
     /// unwrapped a `file_key`, but the resulting `header_key` did not
-    /// verify the header MAC. Per `FORMAT.md` §3.7 the unwrap is not
-    /// final until the MAC verifies; the loop catches this variant and
-    /// continues to the next supported recipient entry. Distinct from
-    /// [`Self::HeaderTampered`] which is the final error when no further
-    /// recipient slot remains. The `type_name` identifies which
-    /// recipient slot produced the failed candidate.
+    /// verify the header MAC.
+    ///
+    /// The unwrap is not final until the MAC verifies. The decrypt loop may
+    /// catch this variant and continue to the next supported recipient entry.
+    /// Distinct from [`Self::HeaderTampered`], which is the final error when no
+    /// further recipient slot remains. The `type_name` identifies which
+    /// recipient type produced the failed candidate.
     #[error(
         "Decryption failed: recipient `{}` MAC mismatch",
         DisplayableTypeName(type_name)
     )]
     HeaderMacFailedAfterUnwrap { type_name: String },
-    /// A native or plugin recipient entry's body failed to unwrap. The
-    /// `type_name` distinguishes which recipient kind raised it (e.g.
-    /// `"argon2id"`, `"x25519"`). Wrong passphrase, wrong key, and
-    /// tampered envelope are indistinguishable at the AEAD layer; all
-    /// three surface here. Per `FORMAT.md` §3.7, recipient unwrap is
-    /// not considered final until the header MAC also verifies.
+    /// A supported recipient entry's body failed to unwrap.
+    ///
+    /// The `type_name` distinguishes which recipient kind raised it (for
+    /// example, `"argon2id"` or `"x25519"`). Wrong passphrase, wrong key, and
+    /// recipient-body tampering are indistinguishable at this layer. Recipient
+    /// unwrap is not considered final until the header MAC also verifies.
     #[error(
         "Decryption failed: recipient `{}` unwrap failed",
         DisplayableTypeName(type_name)
@@ -271,19 +271,16 @@ pub enum CryptoError {
     /// any Argon2id work.
     #[error("Passphrase recipient mixed with another recipient")]
     PassphraseRecipientMixed,
-    /// The caller invoked an `Encryptor` constructor (e.g.
-    /// `with_recipients`) with an empty list. The encrypt API requires
-    /// at least one recipient — there is nothing to wrap the per-file
-    /// `file_key` for.
+    /// The caller provided no encryption recipients.
+    ///
+    /// `Encryptor::with_recipients` requires at least one public recipient;
+    /// otherwise there is no recipient entry to wrap the per-file `file_key`.
     #[error("Recipient list cannot be empty")]
     EmptyRecipientList,
-    /// The caller invoked `Encryptor::with_recipients` with a
-    /// heterogeneous list whose schemes do not share the same
-    /// [`MixingPolicy`]. Per `FORMAT.md` §3.4 / §4.1 each native
-    /// recipient type declares a mixing policy, and only same-policy
-    /// recipients may share a file. The `policy` field carries the
-    /// scheme policy that was incompatible with the rest of the list,
-    /// so callers can pattern-match without parsing the message.
+    /// The caller provided recipients whose mixing policies cannot share one
+    /// `.fcr` file. The `policy` field carries the policy that conflicted with
+    /// the rest of the list, so callers can pattern-match without parsing the
+    /// message.
     #[error("Recipients use incompatible mixing policies")]
     IncompatibleRecipients { policy: MixingPolicy },
     /// An encrypted payload chunk failed AEAD authentication during
@@ -352,7 +349,7 @@ pub enum FormatDefect {
     /// Key file is the wrong kind for this operation (public vs private).
     WrongKeyFileType,
     /// `public.key` text file violates the canonical grammar
-    /// (`FORMAT.md` §7.4): the file MUST contain the lowercase `fcr1…`
+    /// (`FORMAT.md` §7.1): the file MUST contain the lowercase `fcr1…`
     /// recipient string optionally followed by exactly one trailing
     /// `\n`, OR the typed payload itself is structurally invalid.
     /// Leading/trailing whitespace other than a single final LF, CRLF
@@ -390,10 +387,10 @@ pub enum FormatDefect {
     /// truncated, length fields out of range, declared entry size
     /// exceeds the bytes available, or the recipient region's per-entry
     /// total accounting doesn't add up to `recipient_entries_len`.
-    /// `FORMAT.md` §3.5.
+    /// `FORMAT.md` §3.3.
     MalformedRecipientEntry,
     /// Recipient entry has reserved bits set in `recipient_flags`. Per
-    /// `FORMAT.md` §3.5, only bit 0 (the `critical` flag) is defined in
+    /// `FORMAT.md` §3.4, only bit 0 (the `critical` flag) is defined in
     /// v1; all other bits MUST be zero on the wire.
     RecipientFlagsReserved,
     /// `private.key` cleartext header is structurally invalid: bad

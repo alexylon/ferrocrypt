@@ -1,6 +1,6 @@
 //! FerroCrypt v1 recipient layer.
 //!
-//! Per `FORMAT.md` §3.5, a recipient entry is an independently framed
+//! Per `FORMAT.md` §3.3, a recipient entry is an independently framed
 //! method for recovering the per-file `file_key`. Two native v1
 //! recipient types are defined:
 //!
@@ -27,7 +27,8 @@
 //! name containing `/` (e.g. `example.com/enigma`). Native-name
 //! prefixes `mlkem`, `pq`, `hpke`, `tag`, `xwing`, `kem` and any name
 //! ending in `tag` are reserved for future FerroCrypt-defined recipient
-//! types. Plugin registries MUST reject such names.
+//! types. The stable public API does not expose a third-party recipient plugin
+//! registration surface.
 
 pub mod entry;
 pub mod name;

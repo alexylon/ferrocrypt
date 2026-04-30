@@ -18,15 +18,21 @@ use crate::format::{read_u32_be, write_u32_be};
 /// `private.key` cleartext header).
 pub const ARGON2_SALT_SIZE: usize = 32;
 
-/// Caller-controlled limit on KDF memory cost accepted during decryption.
+/// Local policy limit for Argon2id work accepted during decryption.
 ///
-/// When processing untrusted files, this prevents a malicious header from
-/// forcing arbitrarily expensive key derivation. Pass `None` to decrypt
-/// functions to use the built-in default ceiling.
+/// A v1 file or `private.key` stores its Argon2id parameters in the cleartext
+/// header. When processing untrusted input, `KdfLimit` prevents a malicious
+/// header from forcing arbitrarily expensive key derivation: any structurally
+/// valid input whose memory cost exceeds the configured cap is rejected
+/// before Argon2id runs. If no limit is configured on a decryptor, the
+/// library applies [`KdfLimit::default`], which matches the writer's default
+/// memory cost.
 ///
-/// Construct via [`KdfLimit::new`] or [`KdfLimit::from_mib`]. The struct is
-/// `#[non_exhaustive]` so future releases can add additional limit dimensions
-/// (e.g. time cost, parallelism) without a breaking change.
+/// Construct with [`KdfLimit::new`] for KiB or [`KdfLimit::from_mib`] for MiB,
+/// then pass it to [`crate::PassphraseDecryptor::kdf_limit`] or
+/// [`crate::RecipientDecryptor::kdf_limit`]. The struct is `#[non_exhaustive]`
+/// so future releases can add additional limit dimensions without a breaking
+/// change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct KdfLimit {
@@ -40,7 +46,9 @@ impl KdfLimit {
         Self { max_mem_cost_kib }
     }
 
-    /// Builds a limit from MiB, returning an error on integer overflow.
+    /// Builds a limit from MiB.
+    ///
+    /// Returns [`CryptoError::InvalidInput`] if `mib * 1024` overflows `u32`.
     pub fn from_mib(mib: u32) -> Result<Self, CryptoError> {
         let kib = mib.checked_mul(1024).ok_or_else(|| {
             CryptoError::InvalidInput(format!("KDF memory limit overflow: {} MiB", mib))

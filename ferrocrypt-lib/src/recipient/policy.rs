@@ -1,20 +1,15 @@
 //! Mixing-policy enforcement, native-scheme classification, and the
 //! `NativeRecipientType` registry.
 //!
-//! Native classification and mixing policy always change together —
-//! every new `NativeRecipientType` variant requires a coordinated edit
-//! to its mixing policy and the classifier — so they live in one file
-//! per `notes/STRUCTURE_PROPOSAL.md` §3.7.
+//! Native classification and mixing policy are kept together because adding a
+//! native recipient type requires coordinated updates to both.
 
 use crate::CryptoError;
 use crate::error::FormatDefect;
 use crate::recipient::entry::RecipientEntry;
 use crate::recipient::native::{argon2id, x25519};
 
-/// Registered native v1 recipient types. Adding a variant here is a
-/// deliberate breaking change inside the crate: every `match` on
-/// [`NativeRecipientType`] becomes a compile error until the new variant
-/// is handled.
+/// Registered native recipient types supported by this implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeRecipientType {
     /// Passphrase recipient. See [`crate::recipient::native::argon2id`].
@@ -24,8 +19,9 @@ pub enum NativeRecipientType {
 }
 
 impl NativeRecipientType {
-    /// Looks up a `type_name` against the v1 native recipient registry.
-    /// Returns `None` for unrecognised names. Per `FORMAT.md` §3.4
+    /// Looks up a recipient `type_name` in the native registry.
+    ///
+    /// Returns `None` for unrecognised names. Per `FORMAT.md` §3.4,
     /// non-critical unknown recipients are skipped by callers; critical
     /// unknown recipients cause file rejection.
     pub fn from_type_name(name: &str) -> Option<Self> {
@@ -52,7 +48,7 @@ impl NativeRecipientType {
         }
     }
 
-    /// Recipient-mixing rule for this native type, per `FORMAT.md` §3.4.
+    /// Recipient-mixing rule for this native type, per `FORMAT.md` §3.5.
     /// Used by [`enforce_recipient_mixing_policy`] before any
     /// recipient unwrap or KDF runs.
     pub const fn mixing_policy(self) -> MixingPolicy {
@@ -67,16 +63,13 @@ impl NativeRecipientType {
     }
 }
 
-/// Mixing rule for a native recipient type, per `FORMAT.md` §3.4.
+/// Mixing rule for a native recipient type, per `FORMAT.md` §3.5.
 ///
 /// Applied before recipient unwrap so a hostile mixed file cannot
 /// trick the reader into running an expensive KDF unnecessarily.
 ///
-/// Only the variants required by v1 native types are defined.
-/// Future native types whose policy doesn't fit either variant
-/// will extend this enum (it is `#[non_exhaustive]`); v1 readers
-/// will then need to handle the new variant explicitly when
-/// enforcing the mixing policy across a parsed recipient list.
+/// The enum is `#[non_exhaustive]` so future native recipient types can add
+/// additional policies without a breaking API change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MixingPolicy {
@@ -90,14 +83,15 @@ pub enum MixingPolicy {
     PublicKeyMixable,
 }
 
-/// Enforces the v1 recipient-mixing policy across a parsed entry list,
-/// per `FORMAT.md` §3.4. Returns immediately if the rule is satisfied;
-/// otherwise returns a typed error.
+/// Enforces recipient-mixing policy across a parsed entry list,
+/// per `FORMAT.md` §3.5.
 ///
-/// This MUST be called BEFORE running any recipient unwrap (especially
-/// the Argon2id KDF on `argon2id`), so a hostile mixed-recipient file
-/// cannot force expensive cryptographic work that the policy would
-/// have rejected anyway.
+/// Returns `Ok(())` if the list satisfies all supported native mixing rules;
+/// otherwise returns a typed [`CryptoError`].
+///
+/// This must run before any recipient unwrap, especially before the Argon2id
+/// KDF for `argon2id`, so an invalid mixed-recipient file cannot force work
+/// that policy would reject.
 ///
 /// Rule: `argon2id` is [`MixingPolicy::Exclusive`]. If any entry is
 /// `argon2id` AND the list has more than one entry — *including a
@@ -139,7 +133,7 @@ pub fn enforce_recipient_mixing_policy(entries: &[RecipientEntry]) -> Result<(),
 /// `x25519` recipients with no `argon2id`). Returns an error for any
 /// list that does not fit into one of those two modes.
 ///
-/// Per `FORMAT.md` §3.4 / §3.5, this scans the **entire** list rather
+/// This scans the **entire** list rather
 /// than only the first entry — future valid files may place unknown
 /// non-critical recipients before a supported native recipient, and a
 /// classifier that looked at only the first entry would misclassify

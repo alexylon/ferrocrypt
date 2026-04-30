@@ -156,7 +156,7 @@ pub enum CryptoError {
     /// produces a distinct resource-cap error rather than a generic
     /// malformed-file error. Distinct from
     /// [`InvalidKdfParams`] (structurally invalid params) and
-    /// [`KeyDerivation`] (Argon2id itself failed): here the params
+    /// [`Self::KeyDerivation`] (Argon2id itself failed): here the params
     /// are well-formed but cost more than the caller is willing to
     /// spend.
     #[error("KDF resource cap exceeded ({mem_cost_kib} KiB, cap {local_cap_kib})")]
@@ -219,7 +219,7 @@ pub enum CryptoError {
     /// MAC scope (prefix, header_fixed, recipient_entries, ext_bytes)
     /// were tampered with after the file was written. In a multi-
     /// recipient file the per-candidate MAC failure surfaces as
-    /// [`HeaderMacFailedAfterUnwrap`] instead so the decrypt loop can
+    /// [`Self::HeaderMacFailedAfterUnwrap`] instead so the decrypt loop can
     /// continue iterating; this variant is the final error for the
     /// single-recipient case where there is no other slot to try.
     #[error("Decryption failed: header tampered after unlock")]
@@ -229,7 +229,7 @@ pub enum CryptoError {
     /// verify the header MAC. Per `FORMAT.md` §3.7 the unwrap is not
     /// final until the MAC verifies; the loop catches this variant and
     /// continues to the next supported recipient entry. Distinct from
-    /// [`HeaderTampered`] which is the final error when no further
+    /// [`Self::HeaderTampered`] which is the final error when no further
     /// recipient slot remains. The `type_name` identifies which
     /// recipient slot produced the failed candidate.
     #[error(
@@ -259,8 +259,8 @@ pub enum CryptoError {
     UnknownCriticalRecipient { type_name: String },
     /// The recipient list was iterated to exhaustion without any
     /// supported recipient yielding a `file_key` that verified the
-    /// header MAC. Distinct from [`RecipientUnwrapFailed`] (which is
-    /// per-candidate during iteration) and [`HeaderTampered`] (which is
+    /// header MAC. Distinct from [`Self::RecipientUnwrapFailed`] (which is
+    /// per-candidate during iteration) and [`Self::HeaderTampered`] (which is
     /// the final single-recipient error). Per `FORMAT.md` §12.
     #[error("Decryption failed: no recipient could unlock the file")]
     NoSupportedRecipient,
@@ -367,8 +367,8 @@ pub enum FormatDefect {
     /// Structural defect in the header_fixed layout (non-zero
     /// `header_flags`, `ext_len` over the structural cap, or length
     /// fields that don't sum to `header_len`). Distinct from
-    /// [`OversizedHeader`] (header_len > 16 MiB structural max) and
-    /// [`RecipientCountOutOfRange`] (recipient_count outside 1..=4096).
+    /// [`Self::OversizedHeader`] (header_len > 16 MiB structural max) and
+    /// [`Self::RecipientCountOutOfRange`] (recipient_count outside 1..=4096).
     /// `FORMAT.md` §3.2.
     MalformedHeader,
     /// `header_len` exceeds the structural maximum (`HEADER_LEN_MAX =

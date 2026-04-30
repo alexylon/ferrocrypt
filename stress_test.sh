@@ -97,8 +97,8 @@ run_test "keygen: verify keys exist" \
     test -f "$KEYS/public.key" -a -f "$KEYS/private.key"
 
 run_test "keygen: verify key file sizes" \
-    test "$(stat -f%z "$KEYS/private.key" 2>/dev/null || stat -c%s "$KEYS/private.key" 2>/dev/null)" -eq 125 -a \
-         "$(stat -f%z "$KEYS/public.key" 2>/dev/null || stat -c%s "$KEYS/public.key" 2>/dev/null)" -eq 64
+    test "$(stat -f%z "$KEYS/private.key" 2>/dev/null || stat -c%s "$KEYS/private.key" 2>/dev/null)" -eq 176 -a \
+         "$(stat -f%z "$KEYS/public.key" 2>/dev/null || stat -c%s "$KEYS/public.key" 2>/dev/null)" -eq 107
 
 PUB="$KEYS/public.key"
 SECRET_KEY="$KEYS/private.key"
@@ -759,10 +759,15 @@ run_test "sym: filename with spaces" sym_roundtrip_file "$WORKDIR/file with spac
 echo "dots test" > "$WORKDIR/file.multiple.dots.here.txt"
 run_test "sym: filename with multiple dots" sym_roundtrip_file "$WORKDIR/file.multiple.dots.here.txt" "dots"
 
-# Long filename (200 chars)
-LONGNAME=$(python3 -c "print('a' * 200 + '.txt')")
+# Long filename (99 bytes, just under the v1 ustar `name(100)` field cap).
+# v1 forbids GNU long-name extension records, so a single-component name
+# above 100 bytes cannot be represented in the on-disk archive subset
+# (see ferrocrypt-lib/FORMAT.md §9). Splitting across a directory works
+# up to NAME_SIZE(100) + '/' + PREFIX_SIZE(155) = 256 bytes total —
+# tested separately by the deeply-nested directory cases below.
+LONGNAME=$(python3 -c "print('a' * 95 + '.txt')")
 echo "long name test" > "$WORKDIR/$LONGNAME"
-run_test "sym: very long filename (200 chars)" sym_roundtrip_file "$WORKDIR/$LONGNAME" "longname"
+run_test "sym: long filename (99 bytes, ustar name-field cap)" sym_roundtrip_file "$WORKDIR/$LONGNAME" "longname"
 
 # Directory with spaces
 SPACEDIR="$WORKDIR/dir with spaces/sub dir"

@@ -237,10 +237,9 @@ pub mod fuzz_exports;
 /// X25519 public-key material.
 ///
 /// Validates HRP, BIP 173 checksum, internal SHA3-256 checksum,
-/// payload structural fields, type-name grammar, the
-/// [`key::public::RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT`] character
-/// cap, and (for v1 X25519 recipients) the recipient `type_name ==
-/// "x25519"` and exactly 32-byte key-material length.
+/// payload structural fields, type-name grammar, a 1,024-character
+/// recipient-string cap, and (for v1 X25519 recipients) the recipient
+/// `type_name == "x25519"` and exactly 32-byte key-material length.
 ///
 /// This is the low-level primitive; most callers should prefer
 /// [`PublicKey::from_recipient_string`] or
@@ -381,6 +380,24 @@ mod tests {
         assert_eq!(
             ProgressEvent::GeneratingKeyPair.to_string(),
             "Generating key pair\u{2026}"
+        );
+    }
+
+    /// `decode_recipient`'s docstring inlines the recipient-string
+    /// length cap as the literal "1,024" because the underlying
+    /// constant lives in a private module and rustdoc cannot resolve
+    /// an intra-doc link across the privacy boundary. Pin the literal
+    /// against the constant so a future bump (e.g. wider caps for
+    /// post-quantum recipient strings) cannot silently drift the
+    /// docstring out of sync.
+    #[test]
+    fn decode_recipient_doc_cap_matches_constant() {
+        assert_eq!(
+            key::public::RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT,
+            1_024,
+            "decode_recipient docstring inlines the cap value; \
+             update both lib.rs:decode_recipient and this test in \
+             the same commit if the cap changes"
         );
     }
 }

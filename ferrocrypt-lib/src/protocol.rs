@@ -269,9 +269,14 @@ pub(crate) fn decrypt<I: IdentityScheme>(
         drop(file_key);
 
         // Header MAC is the final acceptance gate. The first slot
-        // whose MAC verifies wins; later slots still execute (drop
-        // their derived keys) so the loop's wall time does not betray
-        // which slot matched.
+        // whose MAC verifies wins; the loop does NOT short-circuit
+        // there — every supported slot still attempts unwrap, so wall
+        // time does not betray which MAC-verified slot matched
+        // (FORMAT.md §3.7 SHOULD-level mitigation). Slots whose AEAD
+        // unwrap fails (`Ok(None)`) skip the `derive_subkeys` and the
+        // `verify_header_mac` below, so a residual delta of
+        // ~one HKDF + one HMAC remains between AEAD-pass and AEAD-fail
+        // slots.
         if format::verify_header_mac(
             &parsed.prefix_bytes,
             &parsed.header_bytes,

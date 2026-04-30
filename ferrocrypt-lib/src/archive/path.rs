@@ -46,6 +46,14 @@ pub(crate) enum UstarEntryKind {
 /// (leading `./`) is rejected because ferrocrypt's own archiver never
 /// produces it and it turns `root_name` into `.`, which then conflicts
 /// with the final rename step.
+///
+/// An empty path (no components) is permissively accepted: the loop is
+/// a no-op and the function returns `Ok(())`. The main decode flow
+/// never reaches here with an empty path — `validate_ustar_entry`
+/// rejects empty paths up-front — but the function is `pub` and
+/// reachable via the `fuzz_exports` surface, so the permissive empty-
+/// path contract is intentional and pinned by
+/// [`tests::validate_accepts_empty_path`].
 pub fn validate_archive_path(path: &Path) -> Result<(), CryptoError> {
     for component in path.components() {
         match component {

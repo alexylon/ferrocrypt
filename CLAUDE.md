@@ -47,6 +47,15 @@ Repository layout:
 - **ferrocrypt-cli** — CLI binary (`ferrocrypt`). Thin wrapper calling library functions.
 - **ferrocrypt-desktop** — Slint GUI app. Excluded from the Cargo workspace; built separately.
 
+### Canonical specifications
+
+Two shipping specification documents in `ferrocrypt-lib/` are the authoritative references:
+
+- **`ferrocrypt-lib/FORMAT.md`** — v1 wire format spec (`.fcr` byte layout, `private.key` / `public.key` formats, recipient entries, payload stream, TLV grammar).
+- **`ferrocrypt-lib/STRUCTURE.md`** — code architecture spec (module layout, single sources of truth, dependency direction, public API shape, decryption security ordering, architectural invariants).
+
+The "Library Module Roles" table below, plus the "Encryption Pipeline" / "File Format" / "Key File Format" sections in this file, are quick at-a-glance references for working in-code. If any of them disagrees with `FORMAT.md` or `STRUCTURE.md`, the canonical specs win.
+
 ### Library Module Roles
 
 | Module | Role |
@@ -207,7 +216,8 @@ recipient_entry = type_name_len(2) || recipient_flags(2) || body_len(4)
 - After each important change, but only when we are ready to commit, update if relevant:
     - `README.md`
     - `CHANGELOG.md` under `[Unreleased]` — user-relevant changes only (functionality, security behavior, public API, supported platforms, major technical decisions). Keep CI/build/tooling entries to one-liners; skip entirely if not user-visible.
-    - `ferrocrypt-lib/FORMAT.md`
+    - `ferrocrypt-lib/FORMAT.md` (canonical wire-format spec)
+    - `ferrocrypt-lib/STRUCTURE.md` (canonical code-architecture spec) — update for any change to module ownership, dependency direction, public API shape, or single-source-of-truth assignments.
     - `ferrocrypt-lib/fuzz/fuzz_targets`
     - `stress_test.sh`
 - When touching code, run the relevant checks:

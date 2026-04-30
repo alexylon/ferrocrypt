@@ -7,6 +7,7 @@
 //! per `notes/STRUCTURE_PROPOSAL.md` §3.7.
 
 use crate::CryptoError;
+use crate::error::FormatDefect;
 use crate::recipient::entry::RecipientEntry;
 use crate::recipient::native::{argon2id, x25519};
 
@@ -145,8 +146,15 @@ pub fn enforce_recipient_mixing_policy(entries: &[RecipientEntry]) -> Result<(),
 /// those.
 ///
 /// Order of checks:
-/// 1. Reject any unknown **critical** entry with
-///    [`CryptoError::UnknownCriticalRecipient`].
+/// 1. For each entry, reject either a known native entry whose
+///    `recipient_flags != 0` (per `FORMAT.md` §3.4: "Native `argon2id`
+///    and `x25519` entries MUST have `recipient_flags = 0`") with
+///    [`CryptoError::InvalidFormat`] /
+///    [`FormatDefect::MalformedRecipientEntry`], or an unknown critical
+///    entry with [`CryptoError::UnknownCriticalRecipient`]. Reserved
+///    bits 1..=15 are already rejected at parse time
+///    (`RECIPIENT_FLAGS_RESERVED_MASK`), so by the time this runs only
+///    bit 0 (critical) can be set among the flags.
 /// 2. Run [`enforce_recipient_mixing_policy`] (`argon2id` is exclusive).
 /// 3. Exactly one `argon2id` (alone) → [`crate::EncryptionMode::Passphrase`].
 /// 4. One or more supported `x25519` (and no `argon2id`) →
@@ -160,13 +168,26 @@ pub fn enforce_recipient_mixing_policy(entries: &[RecipientEntry]) -> Result<(),
 pub fn classify_encryption_mode(
     entries: &[RecipientEntry],
 ) -> Result<crate::EncryptionMode, CryptoError> {
-    // Step 1: reject unknown critical entries up front. A reader MUST
-    // refuse to process a file that declares it cannot be skipped.
+    // Step 1: per-entry flag rejection. A reader MUST refuse to process
+    // a file that either declares an unknown entry it cannot skip, or
+    // tags a known native entry with a non-zero flag. Both checks ride
+    // the same iteration so the rejection fires before any KDF.
     for entry in entries {
-        if NativeRecipientType::from_type_name(&entry.type_name).is_none() && entry.is_critical() {
-            return Err(CryptoError::UnknownCriticalRecipient {
-                type_name: entry.type_name.clone(),
-            });
+        match NativeRecipientType::from_type_name(&entry.type_name) {
+            Some(_native) => {
+                if entry.recipient_flags != 0 {
+                    return Err(CryptoError::InvalidFormat(
+                        FormatDefect::MalformedRecipientEntry,
+                    ));
+                }
+            }
+            None => {
+                if entry.is_critical() {
+                    return Err(CryptoError::UnknownCriticalRecipient {
+                        type_name: entry.type_name.clone(),
+                    });
+                }
+            }
         }
     }
 
@@ -390,5 +411,73 @@ mod tests {
         // with an empty slice. NoSupportedRecipient is the right class.
         let err = classify_encryption_mode(&[]).unwrap_err();
         assert!(matches!(err, CryptoError::NoSupportedRecipient));
+    }
+
+    /// FORMAT.md §3.4 mandates `recipient_flags = 0` on native
+    /// `argon2id` and `x25519` entries. A native entry with the
+    /// critical bit set is structurally malformed and must be rejected
+    /// at classify time — not just inside `protocol::decrypt`'s slot
+    /// loop — so `detect_encryption_mode` and the cross-mode mismatch
+    /// path both surface the typed `MalformedRecipientEntry` rather
+    /// than misroute the file.
+    #[test]
+    fn classify_rejects_native_argon2id_with_critical_bit() {
+        let bad = RecipientEntry {
+            type_name: argon2id::TYPE_NAME.to_owned(),
+            recipient_flags: RECIPIENT_FLAG_CRITICAL,
+            body: vec![0u8; argon2id::BODY_LENGTH],
+        };
+        let err = classify_encryption_mode(&[bad]).unwrap_err();
+        match err {
+            CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry) => {}
+            other => {
+                panic!(
+                    "expected MalformedRecipientEntry for native argon2id+critical, got {other:?}"
+                )
+            }
+        }
+    }
+
+    /// Companion of [`classify_rejects_native_argon2id_with_critical_bit`]
+    /// for the `x25519` native type — same `FORMAT.md` §3.4 rule.
+    #[test]
+    fn classify_rejects_native_x25519_with_critical_bit() {
+        let bad = RecipientEntry {
+            type_name: x25519::TYPE_NAME.to_owned(),
+            recipient_flags: RECIPIENT_FLAG_CRITICAL,
+            body: vec![0u8; x25519::BODY_LENGTH],
+        };
+        let err = classify_encryption_mode(&[bad]).unwrap_err();
+        match err {
+            CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry) => {}
+            other => {
+                panic!("expected MalformedRecipientEntry for native x25519+critical, got {other:?}")
+            }
+        }
+    }
+
+    /// When BOTH a native-flags violation AND an unknown-critical entry
+    /// are present, the file is rejected. Either rejection is correct
+    /// per `FORMAT.md` §3.4; the test asserts only the rejection, not
+    /// which diagnostic surfaces first, so a future refactor of the
+    /// per-entry walk is not constrained by a non-spec ordering
+    /// invariant. The single-violation cases above pin the precise
+    /// diagnostic per case.
+    #[test]
+    fn classify_rejects_when_native_critical_and_unknown_critical_both_present() {
+        let bad_native = RecipientEntry {
+            type_name: x25519::TYPE_NAME.to_owned(),
+            recipient_flags: RECIPIENT_FLAG_CRITICAL,
+            body: vec![0u8; x25519::BODY_LENGTH],
+        };
+        let unknown_crit = unknown_entry("future-critical", true);
+        let err = classify_encryption_mode(&[bad_native, unknown_crit]).unwrap_err();
+        match err {
+            CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)
+            | CryptoError::UnknownCriticalRecipient { .. } => {}
+            other => panic!(
+                "expected MalformedRecipientEntry or UnknownCriticalRecipient when both violations present, got {other:?}"
+            ),
+        }
     }
 }

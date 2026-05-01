@@ -231,6 +231,33 @@ pub fn decode_recipient_string(
     })
 }
 
+/// Canonical X25519-typed Bech32 decoder. Single source of truth for
+/// "given a `fcr1…` recipient string, return raw 32-byte X25519 key
+/// material." Both [`crate::decode_recipient`] (the public free
+/// function) and [`PublicKey::from_recipient_string`] route through
+/// here so a future cap-policy or type-name change cannot drift between
+/// the two public entry points.
+///
+/// Validates HRP, BIP 173 checksum, internal SHA3-256 checksum, the
+/// recipient `type_name == "x25519"` constraint, and the 32-byte
+/// key-material length. Applies [`RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT`]
+/// as the structural cap.
+pub(crate) fn decode_x25519_recipient(recipient: &str) -> Result<[u8; 32], CryptoError> {
+    let decoded = decode_recipient_string(recipient, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT)?;
+    if decoded.type_name != crate::recipient::x25519::TYPE_NAME {
+        return Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey));
+    }
+    let bytes: [u8; 32] = decoded
+        .key_material
+        .as_slice()
+        .try_into()
+        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey))?;
+    if crate::recipient::x25519::is_zero_public_key(&bytes) {
+        return Err(malformed_public_key());
+    }
+    Ok(bytes)
+}
+
 // Per-field structural checks. `check_key_material_len` is shared by
 // `encode_recipient_string` (writer) and `decode_recipient_string` (reader)
 // so the cap rule cannot drift between the two paths. The remaining checks
@@ -366,11 +393,15 @@ pub fn read_public_key(path: &std::path::Path) -> Result<[u8; 32], CryptoError> 
     if decoded.type_name != crate::recipient::x25519::TYPE_NAME {
         return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
     }
-    decoded
+    let bytes: [u8; 32] = decoded
         .key_material
         .as_slice()
         .try_into()
-        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey))
+        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey))?;
+    if crate::recipient::x25519::is_zero_public_key(&bytes) {
+        return Err(malformed_public_key());
+    }
+    Ok(bytes)
 }
 
 // ─── Public-recipient wrapper ──────────────────────────────────────────────
@@ -418,10 +449,20 @@ impl PublicKey {
     }
 
     /// Wraps raw 32-byte X25519 public-key material directly.
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self {
-            source: PublicKeySource::Bytes(bytes),
+    ///
+    /// Rejects the all-zero point structurally — the only small-order
+    /// X25519 public key we can pre-screen without an explicit
+    /// RFC 7748 §6.1 list. Other degenerate inputs are caught at the
+    /// ECDH site by `wrap` / `unwrap`'s shared-secret check; this
+    /// ingress check just stops the most common attack from
+    /// constructing a `PublicKey` value at all.
+    pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, CryptoError> {
+        if crate::recipient::x25519::is_zero_public_key(&bytes) {
+            return Err(malformed_public_key());
         }
+        Ok(Self {
+            source: PublicKeySource::Bytes(bytes),
+        })
     }
 
     /// Decodes a canonical lowercase Bech32 `fcr1…` recipient string
@@ -433,7 +474,7 @@ impl PublicKey {
     /// recipients) the recipient `type_name == "x25519"` and 32-byte
     /// key-material length.
     pub fn from_recipient_string(recipient: &str) -> Result<Self, CryptoError> {
-        Ok(Self::from_bytes(crate::decode_recipient(recipient)?))
+        Self::from_bytes(decode_x25519_recipient(recipient)?)
     }
 
     /// Computes the public-recipient fingerprint.
@@ -467,8 +508,11 @@ impl PublicKey {
     /// Validates that the key source is well-formed without exposing the
     /// bytes to the caller.
     ///
-    /// For a key-file source this opens and parses the `public.key` text file.
-    /// For a raw-bytes source this is always `Ok(())`.
+    /// For a key-file source this opens and parses the `public.key`
+    /// text file. For a raw-bytes source this is always `Ok(())` —
+    /// structural rejection of degenerate keys (e.g. all-zero) already
+    /// happens inside [`PublicKey::from_bytes`], so a constructed
+    /// `PublicKey` cannot wrap a value that fails this check.
     pub fn validate(&self) -> Result<(), CryptoError> {
         self.resolve().map(|_| ())
     }
@@ -861,6 +905,45 @@ mod tests {
         match encode_recipient_string(&big_type_name, &one_too_big) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
             other => panic!("expected MalformedPublicKey for key_material > cap, got {other:?}"),
+        }
+    }
+
+    /// Pin the structural ingress reject for the all-zero X25519 public
+    /// key. Three paths exist for materialising a `PublicKey` (raw
+    /// bytes, Bech32 string, on-disk file); each must reject the
+    /// degenerate value at construction so a downstream consumer
+    /// cannot inherit it. The ECDH-time check inside
+    /// [`crate::recipient::x25519::wrap`] / `unwrap` remains as
+    /// defense-in-depth for other small-order points.
+    #[test]
+    fn public_key_from_bytes_rejects_all_zero() {
+        match PublicKey::from_bytes([0u8; 32]) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
+            other => panic!("expected MalformedPublicKey for all-zero pubkey, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn public_key_from_recipient_string_rejects_all_zero() {
+        let s = encode_recipient_string(crate::recipient::x25519::TYPE_NAME, &[0u8; 32]).unwrap();
+        match PublicKey::from_recipient_string(&s) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
+            other => {
+                panic!("expected MalformedPublicKey for all-zero recipient string, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn read_public_key_rejects_all_zero_on_disk() {
+        let s = encode_recipient_string(crate::recipient::x25519::TYPE_NAME, &[0u8; 32]).unwrap();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), s.as_bytes()).unwrap();
+        match read_public_key(tmp.path()) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
+            other => {
+                panic!("expected MalformedPublicKey for all-zero on-disk public key, got {other:?}")
+            }
         }
     }
 }

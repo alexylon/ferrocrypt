@@ -7,7 +7,7 @@
 
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
-    aead::{Aead, KeyInit as AeadKeyInit},
+    aead::{Aead, KeyInit as AeadKeyInit, Payload},
 };
 use zeroize::Zeroizing;
 
@@ -67,4 +67,62 @@ pub(crate) fn open_file_key(
     }
     out.copy_from_slice(&plaintext);
     Ok(FileKey::from_zeroizing(out))
+}
+
+/// XChaCha20-Poly1305 AEAD seal with caller-supplied AAD. Returns
+/// `ciphertext || Poly1305_tag` as an owned `Vec<u8>`.
+///
+/// `aad` is bound by the AEAD construction — any tamper to either the
+/// ciphertext or the AAD surfaces as a decrypt failure indistinguishable
+/// from a wrong key, which is the right semantics for cleartext-bound
+/// headers (e.g. `private.key` per `FORMAT.md` §8). Callers that do not
+/// need AAD use [`seal_file_key`] instead.
+pub(crate) fn seal_with_aad(
+    wrap_key: &[u8; 32],
+    wrap_nonce: &[u8; WRAP_NONCE_SIZE],
+    plaintext: &[u8],
+    aad: &[u8],
+    on_fail: impl FnOnce() -> CryptoError,
+) -> Result<Vec<u8>, CryptoError> {
+    let cipher = XChaCha20Poly1305::new(wrap_key.into());
+    let nonce = XNonce::from_slice(wrap_nonce);
+    cipher
+        .encrypt(
+            nonce,
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
+        .map_err(|_| on_fail())
+}
+
+/// XChaCha20-Poly1305 AEAD open with caller-supplied AAD. `on_fail` is
+/// invoked on tag mismatch so the caller can route to the appropriate
+/// typed error (wrong-passphrase, tampered-AAD, wrong-recipient, …).
+///
+/// The plaintext is wrapped in [`Zeroizing`] **inside** the decrypt
+/// expression so it never lives as a bare `Vec<u8>` on the stack — a
+/// panic between decrypt-success and the wrapper would otherwise free
+/// the allocation without zeroing and leave cleartext in released memory.
+pub(crate) fn open_with_aad(
+    wrap_key: &[u8; 32],
+    wrap_nonce: &[u8; WRAP_NONCE_SIZE],
+    ciphertext: &[u8],
+    aad: &[u8],
+    on_fail: impl FnOnce() -> CryptoError,
+) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+    let cipher = XChaCha20Poly1305::new(wrap_key.into());
+    let nonce = XNonce::from_slice(wrap_nonce);
+    Ok(Zeroizing::new(
+        cipher
+            .decrypt(
+                nonce,
+                Payload {
+                    msg: ciphertext,
+                    aad,
+                },
+            )
+            .map_err(|_| on_fail())?,
+    ))
 }

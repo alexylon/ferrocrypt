@@ -14,7 +14,7 @@
 
 #![allow(missing_docs)]
 
-pub use crate::archive::path::validate_archive_path;
+pub use crate::archive::path::validate_archive_path_components;
 pub use crate::crypto::kdf::{KDF_PARAMS_SIZE, KdfParams};
 pub use crate::crypto::tlv::validate_tlv;
 pub use crate::key::private::PrivateKeyHeader;

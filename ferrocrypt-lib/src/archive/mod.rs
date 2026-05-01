@@ -5,7 +5,7 @@
 //! - [`limits`] — [`ArchiveLimits`] and resource-cap helpers shared by
 //!   the encrypt-side preflight and the decrypt-side extraction loop.
 //! - [`path`] — archive path canonicalization and rejection
-//!   ([`validate_archive_path`]), the POSIX ustar wire-format constants
+//!   ([`validate_archive_path_components`]), the POSIX ustar wire-format constants
 //!   used by both writer and reader, and the [`UstarEntryKind`]
 //!   classification.
 //! - [`encode`] — encrypt-side traversal: [`validate_encrypt_input`],
@@ -19,7 +19,7 @@
 //!   primitives (`openat`/`mkdirat`/`O_NOFOLLOW`).
 //!
 //! [`ArchiveLimits`]: crate::ArchiveLimits
-//! [`validate_archive_path`]: crate::archive::validate_archive_path
+//! [`validate_archive_path_components`]: crate::archive::validate_archive_path_components
 //! [`validate_encrypt_input`]: crate::archive::validate_encrypt_input
 //! [`archive`]: crate::archive::archive
 //! [`unarchive`]: crate::archive::unarchive

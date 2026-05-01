@@ -2177,8 +2177,10 @@ fn test_public_key_validate() -> Result<(), CryptoError> {
     // Valid file: validate passes.
     PublicKey::from_key_file(keys_dir.join("public.key")).validate()?;
 
-    // Raw bytes: validate is always Ok (no structural checks apply).
-    PublicKey::from_bytes([0xAB; 32]).validate()?;
+    // Raw bytes: `from_bytes` already structurally rejects degenerate
+    // (e.g. all-zero) inputs at construction, so any successfully
+    // constructed `PublicKey::from_bytes` value passes `validate()`.
+    PublicKey::from_bytes([0xAB; 32])?.validate()?;
 
     // Nonexistent file: validate returns an I/O error, not a panic.
     let missing = keys_dir.join("does_not_exist.key");
@@ -2690,7 +2692,7 @@ fn test_recipient_round_trip() -> Result<(), CryptoError> {
     assert!(encoded.starts_with("fcr1"));
 
     let decoded = decode_recipient(&encoded)?;
-    let re_encoded = PublicKey::from_bytes(decoded).to_recipient_string()?;
+    let re_encoded = PublicKey::from_bytes(decoded)?.to_recipient_string()?;
     assert_eq!(encoded, re_encoded);
 
     Ok(())

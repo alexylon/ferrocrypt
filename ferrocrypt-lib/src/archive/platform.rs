@@ -184,7 +184,7 @@ pub(crate) fn walk_to_parent(
     let mut components: Vec<Component<'_>> = rel.components().collect();
     // Caller guarantees `rel` is non-empty (the upstream
     // `rel.as_os_str().is_empty()` branch handles the root-
-    // level case) and `validate_archive_path` has reduced it to
+    // level case) and `validate_archive_path_components` has reduced it to
     // Normal components only, so `pop()` never returns None here.
     let last = components.pop().ok_or(CryptoError::InternalInvariant(
         "Internal error: archive entry resolved to empty path",

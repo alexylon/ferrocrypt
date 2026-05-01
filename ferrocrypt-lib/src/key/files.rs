@@ -74,7 +74,15 @@ impl KeyFileKind {
         {
             return Self::Private;
         }
-        if let Ok(text) = std::str::from_utf8(data) {
+        // Bound the UTF-8 attempt at one byte past the recipient-string
+        // cap. A blob longer than the cap could never decode as a valid
+        // recipient anyway (the decoder rejects on length), so paying
+        // O(n) UTF-8 validation across the whole input adds no signal.
+        // The `+ 1` ensures an at-cap valid recipient still fits while
+        // an over-cap input is recognisably over-cap to the decoder
+        // rather than being silently truncated into a valid prefix.
+        let probe_len = data.len().min(RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT + 1);
+        if let Ok(text) = std::str::from_utf8(&data[..probe_len]) {
             if decode_recipient_string(text.trim(), RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT).is_ok()
             {
                 return Self::Public;
@@ -135,5 +143,20 @@ mod tests {
         // Empty input → Unknown.
         assert_eq!(KeyFileKind::classify(b""), KeyFileKind::Unknown);
         Ok(())
+    }
+
+    /// A multi-MB blob whose first 4 bytes look like an `fcr1…` recipient
+    /// must classify as `Unknown` without paying O(n) UTF-8 validation
+    /// over every byte. `classify` bounds the probe at the recipient-
+    /// string cap (1 KiB + 1), so an oversize input is recognisably
+    /// over-cap to the decoder and we return `Unknown`.
+    #[test]
+    fn classify_does_not_scan_oversize_blob() {
+        let mut blob = vec![0xFFu8; 4 * 1024 * 1024];
+        blob[0] = b'f';
+        blob[1] = b'c';
+        blob[2] = b'r';
+        blob[3] = b'1';
+        assert_eq!(KeyFileKind::classify(&blob), KeyFileKind::Unknown);
     }
 }

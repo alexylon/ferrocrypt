@@ -23,7 +23,7 @@ use crate::fs::atomic::rename_no_clobber;
 use crate::fs::paths::INCOMPLETE_SUFFIX;
 
 use super::limits::{ArchiveLimits, enforce_per_entry_caps, enforce_total_bytes_cap};
-use super::path::{UstarEntryKind, ustar, validate_archive_path};
+use super::path::{UstarEntryKind, ustar, validate_archive_path_components};
 
 /// Initial mode for newly-created regular-file extraction outputs
 /// (rw-------). Restrictive on purpose: the tar-stored mode is applied
@@ -97,21 +97,26 @@ struct NormalizedEntry {
 ///   `entry.path_bytes()` carries the long path while
 ///   `entry.header().path_bytes()` still carries the truncated
 ///   in-header name. A mismatch means an extension was applied;
+/// - PAX `'x'` extended headers that override the size attribute
+///   (`entry.size()` differs from `entry.header().size()`); the
+///   path-altering case is already covered by the GNU long-name
+///   check above since PAX `path=` rewrites flow through the same
+///   merged-path channel;
 /// - empty paths, paths with NUL or `\` bytes, repeated `/`
 ///   separators, paths longer than the ustar representable cap;
 /// - non-UTF-8 paths;
 /// - file entries whose path ends with `/`, directory entries
 ///   whose path does not;
 /// - `.` and `..` components, absolute paths, Windows path
-///   prefixes (covered by `validate_archive_path`).
+///   prefixes (covered by `validate_archive_path_components`).
 ///
-/// Known limitation: a non-path-altering PAX extended header (`'x'`
-/// typeflag carrying e.g. mtime / size attributes) is consumed by the
-/// tar crate before the entry is yielded, leaving
-/// `header_path == entry_path`. The practical impact is bounded —
-/// such attributes only affect timestamps / permissions, which
-/// extraction filters separately, and ferrocrypt's own writer never
-/// emits PAX records. A fully strict implementation would replace
+/// Residual limitation: a PAX extended header that overrides only
+/// timestamp or permission attributes (no size, no path) is consumed
+/// by the tar crate without leaving a detectable signature. The
+/// practical impact is bounded — extraction filters strip the
+/// non-permission mode bits, ferrocrypt's own writer never emits PAX
+/// records, and the underlying payload is AEAD-authenticated end to
+/// end. A fully strict implementation would replace
 /// `tar::Archive::entries()` with a custom 512-byte-block parser.
 fn validate_ustar_entry<R: Read>(
     entry: &mut tar::Entry<'_, R>,
@@ -152,6 +157,26 @@ fn validate_ustar_entry<R: Read>(
     if *header_path != *entry_path {
         return Err(CryptoError::InvalidInput(
             "Archive uses GNU long-name or long-link extension".to_string(),
+        ));
+    }
+
+    // PAX 'x' extended-header detection (size override). Same shape as
+    // the GNU long-name check above: the tar crate consumes a PAX 'x'
+    // record before yielding the next entry, so the 'x' typeflag never
+    // reaches our typeflag match. If the PAX record overrode the size
+    // attribute, `entry.size()` reflects the override while
+    // `entry.header().size()` returns the raw in-header octal —
+    // inequality means a PAX record was applied. mtime/perm-only PAX
+    // overrides are not detectable this way, but their impact is
+    // bounded (extraction filters strip non-permission bits and the
+    // payload itself is AEAD-authenticated). ferrocrypt's own writer
+    // never emits PAX, so this fires only on adversarial input.
+    let header_size = entry.header().size().map_err(|_| {
+        CryptoError::InvalidInput("Archive header size field is malformed".to_string())
+    })?;
+    if entry.size() != header_size {
+        return Err(CryptoError::InvalidInput(
+            "Archive uses PAX extended header (size override)".to_string(),
         ));
     }
 
@@ -214,7 +239,7 @@ fn validate_ustar_entry<R: Read>(
     }
 
     let canonical_path = PathBuf::from(canonical_str);
-    validate_archive_path(&canonical_path)?;
+    validate_archive_path_components(&canonical_path)?;
 
     Ok(NormalizedEntry {
         canonical_path,
@@ -1093,7 +1118,7 @@ mod tests {
     }
 
     /// Regression: a tar entry whose path is a bare `.` is rejected by
-    /// `validate_archive_path`. tar-rs strips leading `./` from longer
+    /// `validate_archive_path_components`. tar-rs strips leading `./` from longer
     /// paths on write, so `.` is the only single-component CurDir path
     /// that can round-trip through the builder — it still exercises the
     /// validator's CurDir rejection.

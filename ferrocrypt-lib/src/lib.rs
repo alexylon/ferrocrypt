@@ -271,19 +271,7 @@ pub mod fuzz_exports;
 /// `"fcr1…".parse::<PublicKey>()`, which wrap this function and yield
 /// a typed [`PublicKey`].
 pub fn decode_recipient(recipient: &str) -> Result<[u8; 32], CryptoError> {
-    let decoded = key::public::decode_recipient_string(
-        recipient,
-        key::public::RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT,
-    )?;
-    if decoded.type_name != recipient::x25519::TYPE_NAME {
-        return Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey));
-    }
-    let bytes: [u8; recipient::x25519::PUBKEY_SIZE] = decoded
-        .key_material
-        .as_slice()
-        .try_into()
-        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey))?;
-    Ok(bytes)
+    key::public::decode_x25519_recipient(recipient)
 }
 
 #[cfg(test)]
@@ -424,5 +412,21 @@ mod tests {
              update both lib.rs:decode_recipient and this test in \
              the same commit if the cap changes"
         );
+    }
+
+    /// `decode_recipient` shares the canonical `decode_x25519_recipient`
+    /// path with `PublicKey::from_recipient_string`, so it must inherit
+    /// the all-zero ingress reject. Pin the contract directly at the
+    /// free-function entry so a future refactor that bypasses the
+    /// canonical decoder (e.g. inlining the bech32 path) cannot let a
+    /// degenerate value through this surface.
+    #[test]
+    fn decode_recipient_rejects_all_zero_pubkey() {
+        let s =
+            key::public::encode_recipient_string(recipient::x25519::TYPE_NAME, &[0u8; 32]).unwrap();
+        match decode_recipient(&s) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
+            other => panic!("expected MalformedPublicKey, got {other:?}"),
+        }
     }
 }

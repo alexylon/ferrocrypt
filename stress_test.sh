@@ -334,7 +334,9 @@ sym_saveas_roundtrip() {
     local saveas_dir="$WORKDIR/saveas"
     local saveas_dec="$WORKDIR/saveas_dec"
     mkdir -p "$saveas_dir" "$saveas_dec"
-    $FC encrypt -i "$WORKDIR/small.txt" -o "$saveas_dir" -s "$saveas_dir/custom_name.fcr" && \
+    # `--save-as` carries the full output path; the CLI rejects `-o` and
+    # `-s` together (clap-level conflict introduced in the CLI redesign).
+    $FC encrypt -i "$WORKDIR/small.txt" -s "$saveas_dir/custom_name.fcr" && \
     test -f "$saveas_dir/custom_name.fcr" && \
     $FC decrypt -i "$saveas_dir/custom_name.fcr" -o "$saveas_dec" && \
     assert_identical "$WORKDIR/small.txt" "$saveas_dec/small.txt"
@@ -345,7 +347,7 @@ hyb_saveas_roundtrip() {
     local saveas2_dir="$WORKDIR/saveas2"
     local saveas2_dec="$WORKDIR/saveas2_dec"
     mkdir -p "$saveas2_dir" "$saveas2_dec"
-    $FC encrypt -i "$WORKDIR/small.txt" -o "$saveas2_dir" -k "$PUB" -s "$saveas2_dir/renamed.fcr" && \
+    $FC encrypt -i "$WORKDIR/small.txt" -k "$PUB" -s "$saveas2_dir/renamed.fcr" && \
     test -f "$saveas2_dir/renamed.fcr" && \
     $FC decrypt -i "$saveas2_dir/renamed.fcr" -o "$saveas2_dec" -K "$SECRET_KEY" && \
     assert_identical "$WORKDIR/small.txt" "$saveas2_dec/small.txt"

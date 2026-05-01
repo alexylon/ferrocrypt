@@ -58,6 +58,20 @@ const EPHEMERAL_PUBKEY_OFFSET: usize = 0;
 const WRAP_NONCE_OFFSET: usize = EPHEMERAL_PUBKEY_OFFSET + PUBKEY_SIZE;
 const WRAPPED_FILE_KEY_OFFSET: usize = WRAP_NONCE_OFFSET + WRAP_NONCE_SIZE;
 
+/// Structurally rejects the all-zero X25519 public key — the only
+/// small-order point we can pre-screen without baking in an explicit
+/// RFC 7748 §6.1 list. Public-key ingress points (`PublicKey::from_bytes`,
+/// `decode_x25519_recipient`, `read_public_key`) call this so a
+/// degenerate key cannot construct a `PublicKey` value in the first
+/// place. Other small-order points are still backstopped by the
+/// shared-secret all-zero check inside [`wrap`] and [`unwrap`].
+///
+/// Constant-time compare so timing of structural rejection cannot leak
+/// the input bytes.
+pub(crate) fn is_zero_public_key(bytes: &[u8; PUBKEY_SIZE]) -> bool {
+    ct_eq_32(bytes, &[0u8; PUBKEY_SIZE])
+}
+
 /// Wraps `file_key` for an X25519 recipient.
 ///
 /// Generates a fresh ephemeral X25519 keypair, performs ECDH against

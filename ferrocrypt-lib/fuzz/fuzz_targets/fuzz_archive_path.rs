@@ -1,6 +1,6 @@
 #![no_main]
 
-//! Fuzzes `validate_archive_path` — the tar-entry path guard that
+//! Fuzzes `validate_archive_path_components` — the tar-entry path guard that
 //! rejects `..`, `/`, drive prefixes, and leading `.` components before
 //! any filesystem work happens.
 //!
@@ -14,7 +14,7 @@
 
 use std::path::Path;
 
-use ferrocrypt::fuzz_exports::validate_archive_path;
+use ferrocrypt::fuzz_exports::validate_archive_path_components;
 use libfuzzer_sys::fuzz_target;
 
 #[cfg(unix)]
@@ -33,5 +33,5 @@ fn to_path(data: &[u8]) -> &Path {
 }
 
 fuzz_target!(|data: &[u8]| {
-    let _ = validate_archive_path(to_path(data));
+    let _ = validate_archive_path_components(to_path(data));
 });

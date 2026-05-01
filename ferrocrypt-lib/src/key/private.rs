@@ -30,13 +30,11 @@
 //! [`CryptoError::KeyFileUnlockFailed`] — wrong passphrase and
 //! cleartext-tamper are indistinguishable at the AEAD layer.
 
-use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use secrecy::SecretString;
 use zeroize::Zeroizing;
 
 use crate::CryptoError;
-use crate::crypto::aead::{TAG_SIZE, WRAP_NONCE_SIZE};
+use crate::crypto::aead::{TAG_SIZE, WRAP_NONCE_SIZE, open_with_aad, seal_with_aad};
 use crate::crypto::kdf::{ARGON2_SALT_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams};
 use crate::crypto::keys::{derive_passphrase_wrap_key, random_bytes};
 use crate::error::FormatDefect;
@@ -301,19 +299,9 @@ pub fn seal_private_key(
         kdf_params,
         HKDF_INFO_PRIVATE_KEY_WRAP,
     )?;
-    let cipher = XChaCha20Poly1305::new(wrap_key.as_ref().into());
-    let nonce = XNonce::from_slice(&wrap_nonce);
-    let ciphertext = cipher
-        .encrypt(
-            nonce,
-            Payload {
-                msg: secret_material,
-                aad: &cleartext,
-            },
-        )
-        .map_err(|_| {
-            CryptoError::InternalCryptoFailure("Internal error: private key seal failed")
-        })?;
+    let ciphertext = seal_with_aad(&wrap_key, &wrap_nonce, secret_material, &cleartext, || {
+        CryptoError::InternalCryptoFailure("Internal error: private key seal failed")
+    })?;
 
     let mut out = cleartext;
     out.extend_from_slice(&ciphertext);
@@ -385,24 +373,16 @@ pub fn open_private_key(
         &header.kdf_params,
         HKDF_INFO_PRIVATE_KEY_WRAP,
     )?;
-    let cipher = XChaCha20Poly1305::new(wrap_key.as_ref().into());
-    let nonce = XNonce::from_slice(&header.wrap_nonce);
-    // Wrap into `Zeroizing` *inside* the decrypt expression so the
-    // unwrapped secret never lives as a bare `Vec<u8>` on the stack,
-    // not even for one statement. A panic between decrypt-success and
-    // the wrapper would otherwise free the allocation without zeroing
-    // and leave cleartext in the released memory.
-    let secret_material = Zeroizing::new(
-        cipher
-            .decrypt(
-                nonce,
-                Payload {
-                    msg: wrapped_secret,
-                    aad: cleartext,
-                },
-            )
-            .map_err(|_| CryptoError::KeyFileUnlockFailed)?,
-    );
+    // `open_with_aad` wraps the plaintext in `Zeroizing` *inside* the
+    // decrypt expression so the unwrapped secret never lives as a
+    // bare `Vec<u8>` on the stack — see the helper's docstring.
+    let secret_material = open_with_aad(
+        &wrap_key,
+        &header.wrap_nonce,
+        wrapped_secret,
+        cleartext,
+        || CryptoError::KeyFileUnlockFailed,
+    )?;
 
     Ok(OpenedPrivateKey {
         type_name: type_name.to_owned(),

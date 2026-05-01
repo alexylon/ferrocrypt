@@ -1,7 +1,7 @@
 //! Archive path canonicalization, rejection, and POSIX ustar wire-format
 //! shared between writer and reader.
 //!
-//! [`validate_archive_path`] is the path-traversal guard run on every
+//! [`validate_archive_path_components`] is the path-traversal guard run on every
 //! decrypt-side entry and re-exported via `fuzz_exports`. The [`ustar`]
 //! submodule pins the raw POSIX ustar header offsets so the writer
 //! emits and the reader strict-validates the same byte layout.
@@ -54,7 +54,7 @@ pub(crate) enum UstarEntryKind {
 /// reachable via the `fuzz_exports` surface, so the permissive empty-
 /// path contract is intentional and pinned by
 /// [`tests::validate_accepts_empty_path`].
-pub fn validate_archive_path(path: &Path) -> Result<(), CryptoError> {
+pub fn validate_archive_path_components(path: &Path) -> Result<(), CryptoError> {
     for component in path.components() {
         match component {
             Component::ParentDir
@@ -74,21 +74,21 @@ pub fn validate_archive_path(path: &Path) -> Result<(), CryptoError> {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_archive_path;
+    use super::validate_archive_path_components;
     use std::path::Path;
 
     #[test]
     fn validate_rejects_path_traversal() {
-        assert!(validate_archive_path(Path::new("safe.txt")).is_ok());
-        assert!(validate_archive_path(Path::new("dir/file.txt")).is_ok());
-        assert!(validate_archive_path(Path::new("../escape.txt")).is_err());
-        assert!(validate_archive_path(Path::new("dir/../../escape.txt")).is_err());
-        assert!(validate_archive_path(Path::new("/etc/passwd")).is_err());
+        assert!(validate_archive_path_components(Path::new("safe.txt")).is_ok());
+        assert!(validate_archive_path_components(Path::new("dir/file.txt")).is_ok());
+        assert!(validate_archive_path_components(Path::new("../escape.txt")).is_err());
+        assert!(validate_archive_path_components(Path::new("dir/../../escape.txt")).is_err());
+        assert!(validate_archive_path_components(Path::new("/etc/passwd")).is_err());
         // Leading `./` turns root_name into `.` and breaks the final
         // rename, so reject it early. Ferrocrypt's own archiver never
         // produces such paths.
-        assert!(validate_archive_path(Path::new("./foo/bar")).is_err());
-        assert!(validate_archive_path(Path::new(".")).is_err());
+        assert!(validate_archive_path_components(Path::new("./foo/bar")).is_err());
+        assert!(validate_archive_path_components(Path::new(".")).is_err());
     }
 
     /// A bare `..` is a single `Component::ParentDir`. The mid-path case
@@ -97,7 +97,7 @@ mod tests {
     /// can't accidentally let it through.
     #[test]
     fn validate_rejects_bare_parent_dir() {
-        assert!(validate_archive_path(Path::new("..")).is_err());
+        assert!(validate_archive_path_components(Path::new("..")).is_err());
     }
 
     /// An empty path has no components, so the loop is a no-op and the
@@ -109,6 +109,6 @@ mod tests {
     /// behavior break that should be caught here, not in fuzzers.
     #[test]
     fn validate_accepts_empty_path() {
-        assert!(validate_archive_path(Path::new("")).is_ok());
+        assert!(validate_archive_path_components(Path::new("")).is_ok());
     }
 }

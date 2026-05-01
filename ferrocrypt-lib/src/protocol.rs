@@ -119,6 +119,7 @@ pub(crate) fn encrypt<R: RecipientScheme>(
     }
     if R::MIXING_POLICY == MixingPolicy::Exclusive && recipients.len() > 1 {
         return Err(CryptoError::IncompatibleRecipients {
+            type_name: R::TYPE_NAME.to_string(),
             policy: R::MIXING_POLICY,
         });
     }
@@ -201,6 +202,7 @@ pub(crate) fn decrypt<I: IdentityScheme>(
     identity: &I,
     input_path: &Path,
     output_dir: &Path,
+    archive_limits: ArchiveLimits,
     on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<PathBuf, CryptoError> {
     let mut encrypted_file = fs::File::open(input_path)?;
@@ -309,7 +311,7 @@ pub(crate) fn decrypt<I: IdentityScheme>(
     //        are enforced inside `unarchive` before any write.
     on_event(&ProgressEvent::Decrypting);
     let decrypt_reader = payload_decryptor(&payload_key, &stream_nonce, encrypted_file);
-    unarchive(decrypt_reader, output_dir, ArchiveLimits::default())
+    unarchive(decrypt_reader, output_dir, archive_limits)
 }
 
 /// Maps a classified mode to the identity scheme that should handle
@@ -570,7 +572,7 @@ mod tests {
     ) -> Result<PathBuf, CryptoError> {
         let recipient_secret = x25519::open_x25519_private_key(privkey_path, pass, None)?;
         let identity = x25519::X25519Identity { recipient_secret };
-        decrypt(&identity, fcr, dec_dir, &|_| {})
+        decrypt(&identity, fcr, dec_dir, ArchiveLimits::default(), &|_| {})
     }
 
     /// Two `x25519` recipients in one file: the decrypt loop must
@@ -719,7 +721,8 @@ mod tests {
     }
 
     /// Mixing `argon2id` with any other recipient (here `x25519`) MUST
-    /// be rejected as `PassphraseRecipientMixed` BEFORE Argon2id runs.
+    /// be rejected as `IncompatibleRecipients { type_name: "argon2id", .. }`
+    /// BEFORE Argon2id runs.
     #[test]
     fn multi_argon2id_plus_x25519_rejected_as_mixed() -> Result<(), CryptoError> {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -744,8 +747,12 @@ mod tests {
         let dec_dir = tmp.path().join("decrypted");
         fs::create_dir_all(&dec_dir)?;
         match recipient_decrypt(&fcr, &dec_dir, &priv_a, &pass_a) {
-            Err(CryptoError::PassphraseRecipientMixed) => Ok(()),
-            other => panic!("expected PassphraseRecipientMixed, got {other:?}"),
+            Err(CryptoError::IncompatibleRecipients { type_name, policy })
+                if type_name == argon2id::TYPE_NAME && policy == MixingPolicy::Exclusive =>
+            {
+                Ok(())
+            }
+            other => panic!("expected IncompatibleRecipients(argon2id, Exclusive), got {other:?}"),
         }
     }
 
@@ -853,9 +860,10 @@ mod tests {
         .unwrap_err();
         match err {
             CryptoError::IncompatibleRecipients {
+                ref type_name,
                 policy: MixingPolicy::Exclusive,
-            } => Ok(()),
-            other => panic!("expected IncompatibleRecipients(Exclusive), got {other:?}"),
+            } if type_name == argon2id::TYPE_NAME => Ok(()),
+            other => panic!("expected IncompatibleRecipients(argon2id, Exclusive), got {other:?}"),
         }
     }
 

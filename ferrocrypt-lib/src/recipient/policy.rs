@@ -93,11 +93,13 @@ pub enum MixingPolicy {
 /// KDF for `argon2id`, so an invalid mixed-recipient file cannot force work
 /// that policy would reject.
 ///
-/// Rule: `argon2id` is [`MixingPolicy::Exclusive`]. If any entry is
-/// `argon2id` AND the list has more than one entry — *including a
-/// second `argon2id` entry, an `x25519` entry, or any unknown non-
-/// critical entry* — fail with
-/// [`CryptoError::PassphraseRecipientMixed`].
+/// Rule: any entry whose native type declares [`MixingPolicy::Exclusive`]
+/// (today only `argon2id`) MUST appear alone. If such an entry shares
+/// the list with any other entry — *including a second entry of the
+/// same Exclusive type, a different native entry, or any unknown
+/// non-critical entry* — fail with
+/// [`CryptoError::IncompatibleRecipients`], naming the offending
+/// type and its policy.
 ///
 /// All other combinations are allowed at this layer; finer
 /// classification (no supported recipient, only-unknown-non-critical,
@@ -119,7 +121,10 @@ pub fn enforce_recipient_mixing_policy(entries: &[RecipientEntry]) -> Result<(),
         match ty.mixing_policy() {
             MixingPolicy::Exclusive => {
                 if entries.len() != 1 {
-                    return Err(CryptoError::PassphraseRecipientMixed);
+                    return Err(CryptoError::IncompatibleRecipients {
+                        type_name: entry.type_name.clone(),
+                        policy: ty.mixing_policy(),
+                    });
                 }
             }
             MixingPolicy::PublicKeyMixable => {}
@@ -309,10 +314,22 @@ mod tests {
         enforce_recipient_mixing_policy(&[x25519_entry(), x25519_entry()]).unwrap();
     }
 
+    /// Helper: assert `err` is the `IncompatibleRecipients` variant
+    /// naming `argon2id` with the `Exclusive` policy.
+    fn assert_argon2id_mixing_violation(err: CryptoError) {
+        match err {
+            CryptoError::IncompatibleRecipients { type_name, policy } => {
+                assert_eq!(type_name, argon2id::TYPE_NAME);
+                assert_eq!(policy, MixingPolicy::Exclusive);
+            }
+            other => panic!("expected IncompatibleRecipients(argon2id, Exclusive), got {other:?}"),
+        }
+    }
+
     #[test]
     fn enforce_mixing_rejects_argon2id_plus_x25519() {
         let err = enforce_recipient_mixing_policy(&[argon2id_entry(), x25519_entry()]).unwrap_err();
-        assert!(matches!(err, CryptoError::PassphraseRecipientMixed));
+        assert_argon2id_mixing_violation(err);
     }
 
     #[test]
@@ -322,13 +339,13 @@ mod tests {
         // test makes it explicit.
         let err =
             enforce_recipient_mixing_policy(&[argon2id_entry(), argon2id_entry()]).unwrap_err();
-        assert!(matches!(err, CryptoError::PassphraseRecipientMixed));
+        assert_argon2id_mixing_violation(err);
     }
 
     #[test]
     fn classify_rejects_two_argon2ids() {
         let err = classify_encryption_mode(&[argon2id_entry(), argon2id_entry()]).unwrap_err();
-        assert!(matches!(err, CryptoError::PassphraseRecipientMixed));
+        assert_argon2id_mixing_violation(err);
     }
 
     #[test]
@@ -340,7 +357,7 @@ mod tests {
             unknown_entry("future-thing", false),
         ])
         .unwrap_err();
-        assert!(matches!(err, CryptoError::PassphraseRecipientMixed));
+        assert_argon2id_mixing_violation(err);
     }
 
     #[test]
@@ -386,9 +403,9 @@ mod tests {
     }
 
     #[test]
-    fn classify_rejects_argon2id_mixed_via_passphrase_recipient_mixed() {
+    fn classify_rejects_argon2id_mixed_via_incompatible_recipients() {
         let err = classify_encryption_mode(&[argon2id_entry(), x25519_entry()]).unwrap_err();
-        assert!(matches!(err, CryptoError::PassphraseRecipientMixed));
+        assert_argon2id_mixing_violation(err);
     }
 
     #[test]

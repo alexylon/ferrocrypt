@@ -1,8 +1,24 @@
 # `testvectors/wire/` — frozen v1 wire-format fixtures
 
-**Status:** frozen on the v1 release. **Do not regenerate** these fixtures
-in a patch or minor release — they are the on-disk contract that
-independent implementers build against.
+**Status:** pre-1.0, currently empty. At the 1.0 release tag, the
+fixtures listed below MUST be populated (see `FORMAT.md` §12). Once
+shipped, they are frozen forever — any change to their bytes is a
+breaking change requiring a `version = 2` bump.
+
+## Purpose vs `tests/fixtures/`
+
+These are the public conformance contract for FerroCrypt v1. An
+independent implementer — someone writing a reader in another language
+or a separate Rust crate with no access to this codebase — should be
+able to fetch this directory and prove their implementation is
+spec-compliant by decrypting each fixture and comparing against the
+expected plaintext.
+
+This is a different role from `tests/fixtures/`. That directory is an
+internal regression net for *this* codebase that the team regenerates
+when the wire format intentionally changes. `testvectors/wire/` is a
+one-way commitment to the outside world: once v1.0 ships, the bytes
+never change.
 
 ## Intended contents
 
@@ -39,6 +55,7 @@ generation code should live in a `cargo run --bin generate-wire-vectors`
 binary or similar so the procedure is explicit and reviewable. It is
 not part of the library's public API.
 
-Until that tool ships, this directory documents the intended layout;
-individual fixtures are added in subsequent commits as generation is
-implemented.
+Both the generator and the populated fixtures are 1.0-release
+deliverables, not deferred follow-up work. Until they land, this
+README documents the intended layout; individual fixtures land when
+the generator does.

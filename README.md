@@ -12,7 +12,7 @@
 &nbsp;
 [![crate: ferrocrypt-cli](https://img.shields.io/crates/v/ferrocrypt-cli.svg?label=crate%3A%20ferrocrypt-cli&color=blue)](https://crates.io/crates/ferrocrypt-cli)
 
-FerroCrypt is a file and directory encryption tool written in Rust. It is available as a Rust library, a command-line program, and a desktop application. It supports password-based and public-key encryption, storing encrypted data in the `.fcr` file format.
+FerroCrypt is a pure Rust library, CLI, and desktop application for encrypting and decrypting files and directories using password-based or key-pair-based encryption.
 
 <div align="center">
   <img src="/assets/screenshot-1.png" width="400" alt="FerroCrypt">&nbsp;&nbsp;

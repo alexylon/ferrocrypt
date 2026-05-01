@@ -6,6 +6,11 @@ asserts that the recovered plaintext matches the matching file under
 `source/`. Failure means decrypt behaviour drifted — investigate before
 merging.
 
+This is an **internal** regression net for *this* codebase, regenerated
+on demand when the team intentionally changes the wire format. It is
+**not** the public v1 conformance contract — that lives in
+`testvectors/`, whose bytes are committed at the 1.0 release.
+
 The single per-step acceptance check from `notes/RESTRUCTURE_PLAN.md`
 ("Core invariant: pure refactor → Verifying the invariant at every
 step") relies on these fixtures.

@@ -758,6 +758,8 @@ pub struct PassphraseDecryptor { /* opaque */ }
 impl PassphraseDecryptor {
     pub fn kdf_limit(self, limit: KdfLimit) -> Self;
 
+    pub fn archive_limits(self, limits: ArchiveLimits) -> Self;
+
     pub fn decrypt(
         self,
         passphrase: SecretString,
@@ -771,6 +773,8 @@ pub struct RecipientDecryptor { /* opaque */ }
 impl RecipientDecryptor {
     pub fn kdf_limit(self, limit: KdfLimit) -> Self;
 
+    pub fn archive_limits(self, limits: ArchiveLimits) -> Self;
+
     pub fn decrypt(
         self,
         identity: PrivateKey,
@@ -780,6 +784,8 @@ impl RecipientDecryptor {
     ) -> Result<DecryptOutcome, CryptoError>;
 }
 ```
+
+`archive_limits` on the decrypt side mirrors `Encryptor::archive_limits` on the encrypt side. Both default to [`ArchiveLimits::default`] when unset; symmetry between encrypt-side preflight and decrypt-side extraction is the caller's responsibility — a `.fcr` produced under elevated encrypt caps can only be round-tripped by passing the same elevated value to the corresponding decryptor.
 
 Preferred public concepts are `Passphrase` and `Recipient`. Internals are not organized around `Symmetric` and `Hybrid` because those names describe historical modes rather than the recipient-entry model.
 

@@ -74,7 +74,8 @@ impl std::fmt::Display for DisplayableTypeName<'_> {
 ///   `FORMAT.md` §3.2 / §12 enumerate
 /// - The multi-recipient diagnostics ([`CryptoError::RecipientUnwrapFailed`],
 ///   [`CryptoError::HeaderMacFailedAfterUnwrap`],
-///   [`CryptoError::UnknownCriticalRecipient`]) each carry the
+///   [`CryptoError::UnknownCriticalRecipient`],
+///   [`CryptoError::IncompatibleRecipients`]) each carry the
 ///   `type_name` so callers can tell which recipient slot raised them
 ///
 /// Consumers can pattern-match on these shapes without substring
@@ -264,25 +265,34 @@ pub enum CryptoError {
     /// the final single-recipient error). Per `FORMAT.md` §12.
     #[error("Decryption failed: no recipient could unlock the file")]
     NoSupportedRecipient,
-    /// The recipient list contains an `argon2id` entry alongside one or
-    /// more other recipients. Per `FORMAT.md` §4.1 `argon2id` is
-    /// exclusive: a file containing it MUST contain exactly that one
-    /// entry. Readers MUST reject the mix structurally before running
-    /// any Argon2id work.
-    #[error("Passphrase recipient mixed with another recipient")]
-    PassphraseRecipientMixed,
     /// The caller provided no encryption recipients.
     ///
     /// `Encryptor::with_recipients` requires at least one public recipient;
     /// otherwise there is no recipient entry to wrap the per-file `file_key`.
     #[error("Recipient list cannot be empty")]
     EmptyRecipientList,
-    /// The caller provided recipients whose mixing policies cannot share one
-    /// `.fcr` file. The `policy` field carries the policy that conflicted with
-    /// the rest of the list, so callers can pattern-match without parsing the
-    /// message.
-    #[error("Recipients use incompatible mixing policies")]
-    IncompatibleRecipients { policy: MixingPolicy },
+    /// The recipient list contains an entry whose [`MixingPolicy`] forbids
+    /// the company it is in. The most common v1 trigger is an
+    /// [`MixingPolicy::Exclusive`] native type (today only `argon2id`)
+    /// sharing a file with any other entry — per `FORMAT.md` §4.1 such
+    /// types MUST appear alone, and readers MUST reject the mix
+    /// structurally before running any KDF.
+    ///
+    /// `type_name` identifies which entry triggered the rejection;
+    /// `policy` carries the [`MixingPolicy`] variant the entry declared,
+    /// so callers can pattern-match without parsing the message. The
+    /// same variant surfaces from both the decrypt-side mixing
+    /// enforcement (run before any KDF) and the encrypt-side preflight
+    /// (run before any output bytes are written), with identical
+    /// wording in both directions.
+    #[error(
+        "Recipient `{}` mixed with another recipient",
+        DisplayableTypeName(type_name)
+    )]
+    IncompatibleRecipients {
+        type_name: String,
+        policy: MixingPolicy,
+    },
     /// An encrypted payload chunk failed AEAD authentication during
     /// streaming decryption. The ciphertext has been tampered with or
     /// corrupted after the header was authenticated.
@@ -616,19 +626,27 @@ mod tests {
             "Decryption failed: no recipient could unlock the file"
         );
         assert_eq!(
-            CryptoError::PassphraseRecipientMixed.to_string(),
-            "Passphrase recipient mixed with another recipient"
-        );
-        assert_eq!(
             CryptoError::EmptyRecipientList.to_string(),
             "Recipient list cannot be empty"
         );
         assert_eq!(
             CryptoError::IncompatibleRecipients {
+                type_name: "argon2id".to_owned(),
                 policy: MixingPolicy::Exclusive,
             }
             .to_string(),
-            "Recipients use incompatible mixing policies"
+            "Recipient `argon2id` mixed with another recipient"
+        );
+        // Worst-case truncation: a 14-char `type_name` renders as
+        // 12 chars + `…` = 13 chars total inside the message, holding
+        // the rendered output under the 64-char desktop budget.
+        assert_eq!(
+            CryptoError::IncompatibleRecipients {
+                type_name: "mlkem768x25519".to_owned(),
+                policy: MixingPolicy::Exclusive,
+            }
+            .to_string(),
+            "Recipient `mlkem768x255…` mixed with another recipient"
         );
         assert_eq!(
             CryptoError::PayloadTampered.to_string(),
@@ -849,23 +867,32 @@ mod tests {
             &CryptoError::NoSupportedRecipient.to_string(),
         );
         check(
-            "PassphraseRecipientMixed",
-            &CryptoError::PassphraseRecipientMixed.to_string(),
-        );
-        check(
             "EmptyRecipientList",
             &CryptoError::EmptyRecipientList.to_string(),
         );
         check(
-            "IncompatibleRecipients(Exclusive)",
+            "IncompatibleRecipients(argon2id, Exclusive)",
             &CryptoError::IncompatibleRecipients {
+                type_name: "argon2id".to_owned(),
+                policy: MixingPolicy::Exclusive,
+            }
+            .to_string(),
+        );
+        // Truncated `type_name` upper bound: 14 chars in, 13 chars
+        // out (`mlkem768x255…`), exercising the budget on the
+        // longest plausibly-rendered Exclusive-policy native name.
+        check(
+            "IncompatibleRecipients(truncated, Exclusive)",
+            &CryptoError::IncompatibleRecipients {
+                type_name: "mlkem768x25519".to_owned(),
                 policy: MixingPolicy::Exclusive,
             }
             .to_string(),
         );
         check(
-            "IncompatibleRecipients(PublicKeyMixable)",
+            "IncompatibleRecipients(argon2id, PublicKeyMixable)",
             &CryptoError::IncompatibleRecipients {
+                type_name: "argon2id".to_owned(),
                 policy: MixingPolicy::PublicKeyMixable,
             }
             .to_string(),

@@ -309,10 +309,12 @@ impl Decryptor {
             EncryptionMode::Passphrase => Ok(Self::Passphrase(PassphraseDecryptor {
                 input,
                 kdf_limit: None,
+                archive_limits: None,
             })),
             EncryptionMode::Recipient => Ok(Self::Recipient(RecipientDecryptor {
                 input,
                 kdf_limit: None,
+                archive_limits: None,
             })),
         }
     }
@@ -326,6 +328,7 @@ impl Decryptor {
 pub struct PassphraseDecryptor {
     input: PathBuf,
     kdf_limit: Option<KdfLimit>,
+    archive_limits: Option<ArchiveLimits>,
 }
 
 impl PassphraseDecryptor {
@@ -334,6 +337,15 @@ impl PassphraseDecryptor {
     /// If unset, the decrypt path applies [`KdfLimit::default`].
     pub fn kdf_limit(mut self, limit: KdfLimit) -> Self {
         self.kdf_limit = Some(limit);
+        self
+    }
+
+    /// Overrides the default archive resource caps applied during
+    /// extraction. Must match (or exceed) the limits the writer used —
+    /// a file produced with [`Encryptor::archive_limits`] above the
+    /// default cannot be decrypted under [`ArchiveLimits::default`].
+    pub fn archive_limits(mut self, limits: ArchiveLimits) -> Self {
+        self.archive_limits = Some(limits);
         self
     }
 
@@ -355,9 +367,15 @@ impl PassphraseDecryptor {
             passphrase: &passphrase,
             kdf_limit: self.kdf_limit.as_ref(),
         };
+        let archive_limits = self.archive_limits.unwrap_or_default();
         on_event(&ProgressEvent::DerivingKey);
-        let output_path =
-            protocol::decrypt(&identity, &self.input, output_dir.as_ref(), &on_event)?;
+        let output_path = protocol::decrypt(
+            &identity,
+            &self.input,
+            output_dir.as_ref(),
+            archive_limits,
+            &on_event,
+        )?;
         Ok(DecryptOutcome { output_path })
     }
 }
@@ -370,6 +388,7 @@ impl PassphraseDecryptor {
 pub struct RecipientDecryptor {
     input: PathBuf,
     kdf_limit: Option<KdfLimit>,
+    archive_limits: Option<ArchiveLimits>,
 }
 
 impl RecipientDecryptor {
@@ -379,6 +398,15 @@ impl RecipientDecryptor {
     /// If unset, the decrypt path applies [`KdfLimit::default`].
     pub fn kdf_limit(mut self, limit: KdfLimit) -> Self {
         self.kdf_limit = Some(limit);
+        self
+    }
+
+    /// Overrides the default archive resource caps applied during
+    /// extraction. Must match (or exceed) the limits the writer used —
+    /// a file produced with [`Encryptor::archive_limits`] above the
+    /// default cannot be decrypted under [`ArchiveLimits::default`].
+    pub fn archive_limits(mut self, limits: ArchiveLimits) -> Self {
+        self.archive_limits = Some(limits);
         self
     }
 
@@ -405,10 +433,12 @@ impl RecipientDecryptor {
             self.kdf_limit.as_ref(),
         )?;
         let identity_scheme = recipient::x25519::X25519Identity { recipient_secret };
+        let archive_limits = self.archive_limits.unwrap_or_default();
         let output_path = protocol::decrypt(
             &identity_scheme,
             &self.input,
             output_dir.as_ref(),
+            archive_limits,
             &on_event,
         )?;
         Ok(DecryptOutcome { output_path })

@@ -1480,12 +1480,12 @@ fn test_wrong_format_type_hybrid_as_symmetric() -> Result<(), CryptoError> {
     // `argon2id` slot the symmetric path could unwrap. Per
     // `FORMAT.md` §3.4 / §3.5 the canonical surfaced error is
     // `NoSupportedRecipient`, but `RecipientUnwrapFailed` /
-    // `PassphraseRecipientMixed` are also acceptable depending on
-    // the implementation's iteration order.
+    // `IncompatibleRecipients` are also acceptable depending on the
+    // implementation's iteration order.
     assert!(result.is_err());
     match &result {
         Err(CryptoError::NoSupportedRecipient)
-        | Err(CryptoError::PassphraseRecipientMixed)
+        | Err(CryptoError::IncompatibleRecipients { .. })
         | Err(CryptoError::RecipientUnwrapFailed { .. })
         | Err(CryptoError::InvalidFormat(_)) => {}
         other => panic!("Expected mode-mismatch rejection, got {:?}", other),

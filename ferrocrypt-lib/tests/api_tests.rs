@@ -249,3 +249,129 @@ fn detect_encryption_mode_round_trips_via_encryptor() {
         "encrypt output must classify as a known FerroCrypt mode"
     );
 }
+
+/// Exercises the new `archive_limits()` builder on
+/// [`PassphraseDecryptor`]. The bug being guarded is that callers who
+/// raise the encrypt-side cap had no way to lift the decrypt-side cap,
+/// so a legitimately-encrypted archive could be un-decryptable under
+/// default decrypt limits. Setting a TIGHT decrypt cap proves the
+/// value is plumbed through to `unarchive`.
+#[test]
+fn passphrase_decryptor_archive_limits_constrains_extraction() {
+    use ferrocrypt::ArchiveLimits;
+
+    let work = fresh_workspace("passphrase_archive_limits");
+    let dir = work.join("input");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("a.txt"), b"a").unwrap();
+    fs::write(dir.join("b.txt"), b"b").unwrap();
+    fs::write(dir.join("c.txt"), b"c").unwrap();
+    let out_dir = work.join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+
+    let outcome = Encryptor::with_passphrase(pass())
+        .write(&dir, &out_dir, |_| {})
+        .expect("encrypt");
+
+    let restore = work.join("restored");
+    fs::create_dir_all(&restore).unwrap();
+    let tight = ArchiveLimits::default().with_max_entry_count(1);
+    let result = match Decryptor::open(&outcome.output_path).expect("open") {
+        Decryptor::Passphrase(d) => d.archive_limits(tight).decrypt(pass(), &restore, |_| {}),
+        _ => panic!("expected passphrase decryptor"),
+    };
+    match result {
+        Err(CryptoError::InvalidInput(msg)) => {
+            assert!(
+                msg.contains("entry-count cap exceeded"),
+                "expected entry-count cap error, got: {msg}"
+            );
+        }
+        other => panic!("expected InvalidInput cap error, got {other:?}"),
+    }
+}
+
+/// Mirrors `passphrase_decryptor_archive_limits_constrains_extraction`
+/// for [`RecipientDecryptor`]: the `archive_limits()` builder must
+/// reach `unarchive` on the recipient decrypt path too.
+#[test]
+fn recipient_decryptor_archive_limits_constrains_extraction() {
+    use ferrocrypt::ArchiveLimits;
+
+    let work = fresh_workspace("recipient_archive_limits");
+    let keys = work.join("keys");
+    fs::create_dir_all(&keys).unwrap();
+    let kg = generate_key_pair(&keys, pass(), |_| {}).expect("keygen");
+    let dir = work.join("input");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("a.txt"), b"a").unwrap();
+    fs::write(dir.join("b.txt"), b"b").unwrap();
+    fs::write(dir.join("c.txt"), b"c").unwrap();
+    let out_dir = work.join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+
+    let outcome = Encryptor::with_recipient(PublicKey::from_key_file(&kg.public_key_path))
+        .write(&dir, &out_dir, |_| {})
+        .expect("encrypt");
+
+    let restore = work.join("restored");
+    fs::create_dir_all(&restore).unwrap();
+    let tight = ArchiveLimits::default().with_max_entry_count(1);
+    let result = match Decryptor::open(&outcome.output_path).expect("open") {
+        Decryptor::Recipient(d) => d.archive_limits(tight).decrypt(
+            PrivateKey::from_key_file(&kg.private_key_path),
+            pass(),
+            &restore,
+            |_| {},
+        ),
+        _ => panic!("expected recipient decryptor"),
+    };
+    match result {
+        Err(CryptoError::InvalidInput(msg)) => {
+            assert!(
+                msg.contains("entry-count cap exceeded"),
+                "expected entry-count cap error, got: {msg}"
+            );
+        }
+        other => panic!("expected InvalidInput cap error, got {other:?}"),
+    }
+}
+
+/// Round-trip with raised caps on both sides — the symmetric case
+/// the new builder enables. Without `Decryptor::archive_limits`, this
+/// pattern was impossible: the encrypt side could exceed defaults but
+/// the decrypt side was hardcoded to `ArchiveLimits::default()`.
+#[test]
+fn archive_limits_raised_on_both_sides_round_trips() {
+    use ferrocrypt::ArchiveLimits;
+
+    let work = fresh_workspace("archive_limits_raised");
+    let dir = work.join("input");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("a.txt"), b"alpha").unwrap();
+    fs::write(dir.join("b.txt"), b"beta").unwrap();
+    let out_dir = work.join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+
+    let raised = ArchiveLimits::default()
+        .with_max_entry_count(8)
+        .with_max_path_depth(8);
+    let outcome = Encryptor::with_passphrase(pass())
+        .archive_limits(raised)
+        .write(&dir, &out_dir, |_| {})
+        .expect("encrypt");
+
+    let restore = work.join("restored");
+    fs::create_dir_all(&restore).unwrap();
+    let outcome_decrypt = match Decryptor::open(&outcome.output_path).expect("open") {
+        Decryptor::Passphrase(d) => d
+            .archive_limits(raised)
+            .decrypt(pass(), &restore, |_| {})
+            .expect("decrypt"),
+        _ => panic!("expected passphrase decryptor"),
+    };
+    let extracted = outcome_decrypt.output_path;
+    assert!(extracted.is_dir());
+    assert_eq!(fs::read(extracted.join("a.txt")).unwrap(), b"alpha");
+    assert_eq!(fs::read(extracted.join("b.txt")).unwrap(), b"beta");
+}

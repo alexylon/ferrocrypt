@@ -68,17 +68,24 @@ pub(crate) fn write_u32_be(bytes: &mut [u8], offset: usize, value: u32) {
     bytes[offset..offset + size_of::<u32>()].copy_from_slice(&value.to_be_bytes());
 }
 
-/// Reads exactly `buf.len()` bytes or maps any read failure to
-/// [`FormatDefect::Truncated`]. Used by `.fcr` decrypt paths where a
-/// short read on a fixed-size header field is a format-level
-/// truncation rather than a generic I/O error.
+/// Reads exactly `buf.len()` bytes from `reader`, mapping `UnexpectedEof`
+/// to [`FormatDefect::Truncated`] and forwarding every other `io::Error`
+/// as [`CryptoError::Io`]. Used by `.fcr` decrypt paths where a short read
+/// on a fixed-size header field is a format-level truncation, but a real
+/// I/O failure (e.g. `PermissionDenied`) must surface unchanged so the
+/// caller can distinguish "file is corrupted" from "filesystem is
+/// misbehaving".
 pub(crate) fn read_exact_or_truncated(
     reader: &mut impl Read,
     buf: &mut [u8],
 ) -> Result<(), CryptoError> {
-    reader
-        .read_exact(buf)
-        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::Truncated))
+    reader.read_exact(buf).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::UnexpectedEof {
+            CryptoError::InvalidFormat(FormatDefect::Truncated)
+        } else {
+            CryptoError::Io(e)
+        }
+    })
 }
 
 // ─── Shared constants ──────────────────────────────────────────────────────
@@ -820,6 +827,44 @@ mod tests {
         }
         let mut reader = PermissionDenied;
         match read_prefix_from_reader(&mut reader, Kind::Encrypted) {
+            Err(CryptoError::Io(e)) => {
+                assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
+            }
+            other => panic!("expected Io(PermissionDenied), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_exact_or_truncated_maps_unexpected_eof_to_truncated() {
+        // Short buffer: `read_exact` returns UnexpectedEof, which the
+        // helper maps to FormatDefect::Truncated.
+        let mut reader: &[u8] = &[0u8; 3];
+        let mut buf = [0u8; 8];
+        match read_exact_or_truncated(&mut reader, &mut buf) {
+            Err(CryptoError::InvalidFormat(FormatDefect::Truncated)) => {}
+            other => panic!("expected Truncated for short read, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_exact_or_truncated_propagates_non_eof_io_errors() {
+        // Regression guard for the post-prefix header reads: a
+        // PermissionDenied (or any non-EOF io::Error) must surface as
+        // `CryptoError::Io`, not as `Truncated`. The two helpers used
+        // to drift — this test pins them at parity with the prefix
+        // path's `read_prefix_propagates_non_eof_io_errors` test.
+        struct PermissionDenied;
+        impl std::io::Read for PermissionDenied {
+            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "test",
+                ))
+            }
+        }
+        let mut reader = PermissionDenied;
+        let mut buf = [0u8; 8];
+        match read_exact_or_truncated(&mut reader, &mut buf) {
             Err(CryptoError::Io(e)) => {
                 assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
             }

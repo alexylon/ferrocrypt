@@ -55,23 +55,36 @@ use crate::recipient::{self, RecipientEntry};
 /// output path.
 const TEMP_FILE_PREFIX: &str = ".ferrocrypt-";
 
-/// Local resource caps applied while reading an encrypted-file header. The
-/// defaults mirror `format::*_LOCAL_CAP_DEFAULT` and apply to every reader
-/// path; callers that legitimately need higher caps (e.g. a fuzz target)
-/// may construct this explicitly.
+/// Local resource caps applied while reading an encrypted-file header.
+///
+/// The defaults mirror `format::*_LOCAL_CAP_DEFAULT` and apply to every
+/// reader path. Callers MAY raise individual caps for trusted input
+/// (e.g. files from a known origin that legitimately use more
+/// recipient slots, larger recipient bodies, or a larger header than
+/// the conservative defaults allow) by calling the `max_*` builder
+/// methods. Each builder clamps at the structural maximum for that
+/// field — the v1 format cannot represent values above
+/// [`HeaderReadLimits::HEADER_LEN_STRUCTURAL_MAX`],
+/// [`HeaderReadLimits::RECIPIENT_COUNT_STRUCTURAL_MAX`], or
+/// [`HeaderReadLimits::RECIPIENT_BODY_LEN_STRUCTURAL_MAX`], so callers
+/// cannot accidentally request a cap higher than what the structural
+/// parser would accept anyway.
 ///
 /// Caps are enforced **before** any cryptographic operation runs. Per
-/// `FORMAT.md` §1, hostile input must not be able to force unbounded work.
+/// `FORMAT.md` §1 and §3.2, hostile input must not be able to force
+/// unbounded work, and exceeding a local cap surfaces as a distinct
+/// `*CapExceeded` error rather than as a generic format defect.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct HeaderReadLimits {
+#[non_exhaustive]
+pub struct HeaderReadLimits {
     /// Hard cap on `prefix.header_len`.
-    pub max_header_len: u32,
+    pub(crate) max_header_len: u32,
     /// Hard cap on `header_fixed.recipient_count`.
-    pub max_recipient_count: u16,
+    pub(crate) max_recipient_count: u16,
     /// Hard cap on each individual recipient entry's `body_len`. Applies
     /// to known and unknown entries alike, so an unknown-recipient slot
     /// cannot DoS a reader that would have skipped it.
-    pub max_recipient_body_len: u32,
+    pub(crate) max_recipient_body_len: u32,
 }
 
 impl Default for HeaderReadLimits {
@@ -81,6 +94,45 @@ impl Default for HeaderReadLimits {
             max_recipient_count: format::RECIPIENT_COUNT_LOCAL_CAP_DEFAULT,
             max_recipient_body_len: format::BODY_LEN_LOCAL_CAP_DEFAULT,
         }
+    }
+}
+
+impl HeaderReadLimits {
+    /// Structural maximum for `prefix.header_len` (v1 = 16 MiB,
+    /// `FORMAT.md` §3.1). Builder methods clamp at this value.
+    pub const HEADER_LEN_STRUCTURAL_MAX: u32 = format::HEADER_LEN_MAX;
+    /// Structural maximum for `header_fixed.recipient_count` (v1 = 4096,
+    /// `FORMAT.md` §3.2). Builder methods clamp at this value.
+    pub const RECIPIENT_COUNT_STRUCTURAL_MAX: u16 = format::RECIPIENT_COUNT_MAX;
+    /// Structural maximum for each recipient entry's `body_len`
+    /// (v1 = 16 MiB, `FORMAT.md` §3.3). Builder methods clamp at this
+    /// value.
+    pub const RECIPIENT_BODY_LEN_STRUCTURAL_MAX: u32 = format::BODY_LEN_MAX;
+
+    /// Sets the maximum accepted `prefix.header_len`, clamped at
+    /// [`Self::HEADER_LEN_STRUCTURAL_MAX`]. Files declaring a longer
+    /// header reject with [`CryptoError::HeaderLenCapExceeded`] before
+    /// any allocation.
+    pub fn max_header_len(mut self, value: u32) -> Self {
+        self.max_header_len = value.min(Self::HEADER_LEN_STRUCTURAL_MAX);
+        self
+    }
+
+    /// Sets the maximum accepted recipient count, clamped at
+    /// [`Self::RECIPIENT_COUNT_STRUCTURAL_MAX`]. Files declaring more
+    /// entries reject with [`CryptoError::RecipientCountCapExceeded`].
+    pub fn max_recipient_count(mut self, value: u16) -> Self {
+        self.max_recipient_count = value.min(Self::RECIPIENT_COUNT_STRUCTURAL_MAX);
+        self
+    }
+
+    /// Sets the maximum accepted per-entry `body_len`, clamped at
+    /// [`Self::RECIPIENT_BODY_LEN_STRUCTURAL_MAX`]. Applies to known and
+    /// unknown recipient types alike. Entries with a larger body reject
+    /// with [`CryptoError::RecipientBodyCapExceeded`].
+    pub fn max_recipient_body_len(mut self, value: u32) -> Self {
+        self.max_recipient_body_len = value.min(Self::RECIPIENT_BODY_LEN_STRUCTURAL_MAX);
+        self
     }
 }
 
@@ -604,6 +656,122 @@ mod tests {
             CryptoError::HeaderLenCapExceeded { local_cap: 256, .. } => {}
             other => panic!("expected HeaderLenCapExceeded, got {other:?}"),
         }
+    }
+
+    /// Builder methods preserve normal in-range values and produce a
+    /// struct equal to the chained construction. Pins the field-by-field
+    /// effect of each setter.
+    #[test]
+    fn header_read_limits_builder_round_trips_normal_values() {
+        let limits = HeaderReadLimits::default()
+            .max_header_len(2 * 1024 * 1024)
+            .max_recipient_count(128)
+            .max_recipient_body_len(16 * 1024);
+        assert_eq!(limits.max_header_len, 2 * 1024 * 1024);
+        assert_eq!(limits.max_recipient_count, 128);
+        assert_eq!(limits.max_recipient_body_len, 16 * 1024);
+    }
+
+    /// Builder methods clamp at the v1 structural maximum so a caller
+    /// cannot raise a cap above what the structural parser would
+    /// accept. Locks in the security guarantee that the public API
+    /// cannot be used to bypass the structural ceilings declared in
+    /// `FORMAT.md` §3.1 / §3.2 / §3.3.
+    #[test]
+    fn header_read_limits_builder_clamps_at_structural_max() {
+        let clamped = HeaderReadLimits::default()
+            .max_header_len(u32::MAX)
+            .max_recipient_count(u16::MAX)
+            .max_recipient_body_len(u32::MAX);
+        assert_eq!(
+            clamped.max_header_len,
+            HeaderReadLimits::HEADER_LEN_STRUCTURAL_MAX
+        );
+        assert_eq!(
+            clamped.max_recipient_count,
+            HeaderReadLimits::RECIPIENT_COUNT_STRUCTURAL_MAX
+        );
+        assert_eq!(
+            clamped.max_recipient_body_len,
+            HeaderReadLimits::RECIPIENT_BODY_LEN_STRUCTURAL_MAX
+        );
+    }
+
+    /// A file with a recipient count above the conservative default
+    /// (`RECIPIENT_COUNT_LOCAL_CAP_DEFAULT = 64`) but below the
+    /// structural max (`RECIPIENT_COUNT_MAX = 4096`) is rejected by
+    /// default and accepted when the caller raises the cap via
+    /// [`HeaderReadLimits::max_recipient_count`]. Confirms the
+    /// audit-flagged Low 2 finding is closed: a caller can opt into
+    /// reading a structurally valid file the conservative defaults
+    /// would refuse.
+    #[test]
+    fn read_accepts_when_caller_raises_recipient_count_cap() {
+        let DerivedSubkeys {
+            payload_key,
+            header_key,
+        } = dummy_subkeys();
+        let stream_nonce = [0x07u8; STREAM_NONCE_SIZE];
+        // 80 entries: above the 64-entry default local cap, below the
+        // 4096-entry structural max.
+        let entries: Vec<_> = (0..80)
+            .map(|_| dummy_entry(argon2id::TYPE_NAME, argon2id::BODY_LENGTH))
+            .collect();
+        let built =
+            build_encrypted_header(&entries, b"", stream_nonce, payload_key, &header_key).unwrap();
+
+        let bytes = on_disk_bytes(&built);
+
+        // Default caps: rejected.
+        match read_encrypted_header(&mut bytes.as_slice(), HeaderReadLimits::default()) {
+            Err(CryptoError::RecipientCountCapExceeded { count: 80, .. }) => {}
+            other => panic!("expected RecipientCountCapExceeded with default cap, got {other:?}"),
+        }
+
+        // Caller raises the cap: accepted.
+        let raised = HeaderReadLimits::default().max_recipient_count(128);
+        let parsed = read_encrypted_header(&mut bytes.as_slice(), raised)
+            .expect("raised recipient_count cap must accept the file");
+        assert_eq!(parsed.recipient_entries.len(), 80);
+    }
+
+    /// A file with a per-entry `body_len` above the conservative
+    /// default (`BODY_LEN_LOCAL_CAP_DEFAULT = 8 KiB`) but below the
+    /// structural max (`BODY_LEN_MAX = 16 MiB`) is rejected by default
+    /// and accepted when the caller raises the cap via
+    /// [`HeaderReadLimits::max_recipient_body_len`]. Companion to
+    /// [`read_accepts_when_caller_raises_recipient_count_cap`].
+    #[test]
+    fn read_accepts_when_caller_raises_body_len_cap() {
+        let DerivedSubkeys {
+            payload_key,
+            header_key,
+        } = dummy_subkeys();
+        let stream_nonce = [0x07u8; STREAM_NONCE_SIZE];
+        // 10 KiB body: above the 8 KiB default cap, below the 16 MiB
+        // structural max.
+        let oversize_body_len: usize = 10 * 1024;
+        let entry = dummy_entry(argon2id::TYPE_NAME, oversize_body_len);
+        let built =
+            build_encrypted_header(&[entry], b"", stream_nonce, payload_key, &header_key).unwrap();
+
+        let bytes = on_disk_bytes(&built);
+
+        // Default caps: rejected.
+        match read_encrypted_header(&mut bytes.as_slice(), HeaderReadLimits::default()) {
+            Err(CryptoError::RecipientBodyCapExceeded { body_len, .. })
+                if body_len as usize == oversize_body_len => {}
+            other => panic!(
+                "expected RecipientBodyCapExceeded({oversize_body_len}, ..) with default cap, got {other:?}"
+            ),
+        }
+
+        // Caller raises the cap: accepted.
+        let raised = HeaderReadLimits::default().max_recipient_body_len(16 * 1024);
+        let parsed = read_encrypted_header(&mut bytes.as_slice(), raised)
+            .expect("raised body_len cap must accept the file");
+        assert_eq!(parsed.recipient_entries.len(), 1);
+        assert_eq!(parsed.recipient_entries[0].body.len(), oversize_body_len);
     }
 
     #[test]

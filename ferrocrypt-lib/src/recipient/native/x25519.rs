@@ -25,9 +25,16 @@
 //!
 //! ## All-zero shared-secret rejection
 //!
-//! Both [`wrap`] and [`unwrap`] reject an all-zero X25519 shared
-//! secret per `FORMAT.md` §2.4. This catches a small-order ephemeral /
+//! Both [`wrap`] and [`unwrap`] reject an all-zero X25519 shared secret
+//! per `FORMAT.md` §2.4 / §4.2. This catches a small-order ephemeral /
 //! recipient key combination; the check uses constant-time compare.
+//!
+//! On the decrypt side the rejection is **file-fatal**, not
+//! slot-skippable: an all-zero shared secret is identity-independent
+//! (any decryptor would compute the same value), so [`unwrap`] surfaces
+//! it as `InvalidFormat(MalformedRecipientEntry)` and the
+//! [`X25519Identity`] adapter propagates the error rather than
+//! collapsing it to the slot-skip channel reserved for AEAD failures.
 
 use chacha20poly1305::aead::OsRng;
 use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
@@ -38,6 +45,7 @@ use crate::crypto::aead::{WRAP_NONCE_SIZE, WRAPPED_FILE_KEY_SIZE, open_file_key,
 use crate::crypto::hkdf::hkdf_expand_sha3_256;
 use crate::crypto::keys::{FileKey, random_bytes};
 use crate::crypto::mac::ct_eq_32;
+use crate::error::FormatDefect;
 
 /// Wire-format `type_name` for this recipient.
 pub const TYPE_NAME: &str = "x25519";
@@ -117,12 +125,24 @@ pub(crate) fn wrap(
 /// Opens an `x25519` recipient body and recovers a candidate
 /// `file_key` using the recipient's static X25519 private key.
 ///
-/// Rejects all-zero shared secrets per `FORMAT.md` §2.4. Wrong private
-/// key and tampered envelope are indistinguishable at the AEAD layer;
-/// both surface as [`CryptoError::RecipientUnwrapFailed`] with
-/// `type_name = "x25519"`. Per `FORMAT.md` §3.7, the candidate
-/// `file_key` is not considered final until the header MAC also
-/// verifies.
+/// Two failure classes, deliberately distinguished:
+///
+/// - **Structural malformation:** an all-zero ECDH shared secret per
+///   `FORMAT.md` §2.4 / §4.2 — surfaces as
+///   `CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)`.
+///   Identity-independent: any decryptor would observe the same all-zero
+///   value, so the spec mandates file-fatal rejection. The
+///   [`X25519Identity`] adapter propagates this error rather than
+///   collapsing it to `Ok(None)`.
+/// - **AEAD authentication failure:** wrong recipient private key or
+///   tampered wrapped envelope — both surface as
+///   [`CryptoError::RecipientUnwrapFailed`] with `type_name = "x25519"`.
+///   Indistinguishable at the AEAD layer and identity-dependent (a
+///   different key holder might still unwrap a sibling slot), so the
+///   adapter collapses these into the slot-skip channel.
+///
+/// Per `FORMAT.md` §3.7 the candidate `file_key` is not considered
+/// final until the header MAC also verifies.
 pub(crate) fn unwrap(
     body: &[u8; BODY_LENGTH],
     recipient_secret_bytes: &[u8; PRIVATE_KEY_SIZE],
@@ -142,9 +162,9 @@ pub(crate) fn unwrap(
     let ephemeral_public = PublicKey::from(ephemeral_pubkey_bytes);
     let shared = recipient_secret.diffie_hellman(&ephemeral_public);
     if ct_eq_32(shared.as_bytes(), &[0u8; PUBKEY_SIZE]) {
-        return Err(CryptoError::RecipientUnwrapFailed {
-            type_name: TYPE_NAME.to_string(),
-        });
+        return Err(CryptoError::InvalidFormat(
+            FormatDefect::MalformedRecipientEntry,
+        ));
     }
     let wrap_key = derive_wrap_key(
         &ephemeral_pubkey_bytes,
@@ -209,13 +229,18 @@ impl crate::protocol::IdentityScheme for X25519Identity {
         &self,
         body: &crate::recipient::entry::RecipientBody,
     ) -> Result<Option<FileKey>, CryptoError> {
-        let body_array: &[u8; BODY_LENGTH] = body.bytes.as_slice().try_into().map_err(|_| {
-            CryptoError::InvalidFormat(crate::error::FormatDefect::MalformedRecipientEntry)
-        })?;
-        // Wrong recipient key, all-zero shared secret, and tampered
-        // body all surface from `unwrap` as `RecipientUnwrapFailed`;
-        // per `IdentityScheme` semantics we collapse those into
-        // `Ok(None)` so the orchestrator's slot loop continues.
+        let body_array: &[u8; BODY_LENGTH] = body
+            .bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry))?;
+        // Per [`unwrap`]'s contract, wrong-recipient-key and tampered-body
+        // surface as `RecipientUnwrapFailed` (identity-dependent: collapse
+        // to `Ok(None)` so the slot loop tries the next supported entry).
+        // An all-zero ECDH shared secret surfaces as
+        // `InvalidFormat(MalformedRecipientEntry)` (identity-independent
+        // structural defect per FORMAT.md §2.4 / §4.2: propagate so the
+        // entire file is rejected).
         match unwrap(body_array, &self.recipient_secret) {
             Ok(file_key) => Ok(Some(file_key)),
             Err(CryptoError::RecipientUnwrapFailed { .. }) => Ok(None),
@@ -578,17 +603,52 @@ mod tests {
     fn unwrap_rejects_small_order_ephemeral_via_all_zero_shared() {
         // An all-zero ephemeral pubkey is a known X25519 small-order
         // point: X25519(any_secret, all_zero_pubkey) = all_zero_shared.
-        // Per `FORMAT.md` §2.4 this MUST be rejected by readers before
-        // deriving the wrap key.
+        // Per `FORMAT.md` §2.4 / §4.2 this MUST be rejected by readers
+        // before deriving the wrap key, and the rejection is
+        // identity-independent — readers MUST surface it as a structural
+        // defect (file-fatal) rather than as a slot-skippable AEAD
+        // failure, so the [`X25519Identity`] adapter propagates the
+        // error instead of collapsing to `Ok(None)`.
         let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let (sk, pk) = keypair();
         let mut body = wrap(&file_key, &pk).unwrap();
         body[EPHEMERAL_PUBKEY_OFFSET..EPHEMERAL_PUBKEY_OFFSET + PUBKEY_SIZE].fill(0);
         match unwrap(&body, &sk) {
-            Err(CryptoError::RecipientUnwrapFailed { type_name }) => {
-                assert_eq!(type_name, TYPE_NAME);
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)) => {}
+            other => {
+                panic!("expected MalformedRecipientEntry for all-zero ephemeral, got {other:?}")
             }
-            other => panic!("expected RecipientUnwrapFailed for all-zero ephemeral, got {other:?}"),
+        }
+    }
+
+    /// Identity-adapter contract: an all-zero shared secret must NOT be
+    /// collapsed into the slot-skip channel. The adapter propagates
+    /// `InvalidFormat(MalformedRecipientEntry)` so the surrounding
+    /// decrypt loop rejects the whole file (FORMAT.md §2.4 / §4.2).
+    /// Wrong-key AEAD failures keep their existing `Ok(None)` mapping —
+    /// covered by the dedicated wrong-key test above.
+    #[test]
+    fn identity_adapter_propagates_all_zero_shared_secret() {
+        use crate::protocol::IdentityScheme;
+        use crate::recipient::entry::RecipientBody;
+
+        let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
+        let (sk, pk) = keypair();
+        let mut body_bytes = wrap(&file_key, &pk).unwrap();
+        body_bytes[EPHEMERAL_PUBKEY_OFFSET..EPHEMERAL_PUBKEY_OFFSET + PUBKEY_SIZE].fill(0);
+
+        let identity = X25519Identity {
+            recipient_secret: Zeroizing::new(sk),
+        };
+        let body = RecipientBody {
+            type_name: TYPE_NAME,
+            bytes: body_bytes.to_vec(),
+        };
+        match identity.unwrap_file_key(&body) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)) => {}
+            other => panic!(
+                "adapter must propagate all-zero shared as MalformedRecipientEntry, got {other:?}"
+            ),
         }
     }
 

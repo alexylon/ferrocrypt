@@ -21,21 +21,14 @@ pub use crate::key::private::PrivateKeyHeader;
 pub use crate::key::public::{RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT, decode_recipient_string};
 pub use crate::recipient::native::x25519::validate_private_key_shape;
 
-// Re-exports of `container` items used by `fuzz_header_prefix`.
-// The items themselves are `pub(crate)` inside the module; this thin
-// wrapper bridges them into the (feature-gated) `fuzz_exports` public
-// surface without changing their crate-internal visibility.
-pub struct HeaderReadLimits(crate::container::HeaderReadLimits);
-
-impl Default for HeaderReadLimits {
-    fn default() -> Self {
-        Self(crate::container::HeaderReadLimits::default())
-    }
-}
+// `HeaderReadLimits` is part of the stable public API; re-export the
+// crate-internal `read_encrypted_header` here so fuzz targets can drive
+// the parser without paying the cost of a full Argon2id derivation.
+pub use crate::HeaderReadLimits;
 
 pub fn read_encrypted_header<R: std::io::Read>(
     reader: &mut R,
     limits: HeaderReadLimits,
 ) -> Result<(), crate::CryptoError> {
-    crate::container::read_encrypted_header(reader, limits.0).map(|_| ())
+    crate::container::read_encrypted_header(reader, limits).map(|_| ())
 }

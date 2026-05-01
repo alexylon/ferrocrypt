@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
-    CryptoError, Decryptor, Encryptor, FormatDefect, PrivateKey, PublicKey, detect_encryption_mode,
-    generate_key_pair,
+    CryptoError, Decryptor, Encryptor, FormatDefect, HeaderReadLimits, PrivateKey, PublicKey,
+    detect_encryption_mode, detect_encryption_mode_with_limits, generate_key_pair,
 };
 
 const PASSPHRASE: &str = "api-test-passphrase";
@@ -374,4 +374,112 @@ fn archive_limits_raised_on_both_sides_round_trips() {
     assert!(extracted.is_dir());
     assert_eq!(fs::read(extracted.join("a.txt")).unwrap(), b"alpha");
     assert_eq!(fs::read(extracted.join("b.txt")).unwrap(), b"beta");
+}
+
+/// Encrypts to 80 of the same recipient — above the default
+/// `RECIPIENT_COUNT_LOCAL_CAP_DEFAULT` (64) but well below the
+/// structural ceiling (4096). [`Decryptor::open`] with default limits
+/// MUST refuse the file with [`CryptoError::RecipientCountCapExceeded`];
+/// the same file MUST decrypt successfully when the caller raises the
+/// cap via [`Decryptor::open_with_limits`] /
+/// [`HeaderReadLimits::max_recipient_count`]. Pins the audit-flagged
+/// Low 2 finding closed at the public-API level (not just the
+/// internal parser).
+#[test]
+fn decryptor_open_with_limits_accepts_recipient_count_above_default() {
+    let work = fresh_workspace("recipient_count_above_default");
+    let keys = work.join("keys");
+    fs::create_dir_all(&keys).unwrap();
+    let kg = generate_key_pair(&keys, pass(), |_| {}).expect("keygen");
+    let input = work.join("data.txt");
+    fs::write(&input, b"raised count payload").unwrap();
+    let out_dir = work.join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+
+    // 80 copies of the same recipient produce a file with 80 x25519
+    // recipient entries. Each entry independently wraps the same
+    // file_key, so the holder of `kg`'s private key can decrypt any
+    // of them.
+    const RECIPIENT_COUNT: usize = 80;
+    let recipients: Vec<PublicKey> = (0..RECIPIENT_COUNT)
+        .map(|_| PublicKey::from_key_file(&kg.public_key_path))
+        .collect();
+    let outcome = Encryptor::with_recipients(recipients)
+        .expect("with_recipients")
+        .write(&input, &out_dir, |_| {})
+        .expect("encrypt");
+
+    // Default open: rejected by recipient_count cap.
+    match Decryptor::open(&outcome.output_path) {
+        Err(CryptoError::RecipientCountCapExceeded { count, local_cap }) => {
+            assert_eq!(count, RECIPIENT_COUNT as u16);
+            assert!(
+                local_cap < count,
+                "default local_cap should be below file count"
+            );
+        }
+        other => panic!("expected RecipientCountCapExceeded with default cap, got {other:?}"),
+    }
+
+    // Same file via open_with_limits: succeeds.
+    let raised = HeaderReadLimits::default().max_recipient_count(128);
+    let restore = work.join("restored");
+    fs::create_dir_all(&restore).unwrap();
+    let decrypted = match Decryptor::open_with_limits(&outcome.output_path, raised)
+        .expect("open_with_limits")
+    {
+        Decryptor::Recipient(d) => d
+            .decrypt(
+                PrivateKey::from_key_file(&kg.private_key_path),
+                pass(),
+                &restore,
+                |_| {},
+            )
+            .expect("decrypt"),
+        _ => panic!("expected recipient decryptor"),
+    };
+    assert_eq!(
+        fs::read(decrypted.output_path).unwrap(),
+        b"raised count payload"
+    );
+}
+
+/// `detect_encryption_mode_with_limits` honors the elevated cap when
+/// classifying a file the default-limited variant refuses. Companion
+/// to [`decryptor_open_with_limits_accepts_recipient_count_above_default`]
+/// for the detection-only path used by callers that want to classify
+/// without going through `Decryptor::open`.
+#[test]
+fn detect_encryption_mode_with_limits_accepts_above_default() {
+    use ferrocrypt::EncryptionMode;
+
+    let work = fresh_workspace("detect_with_limits");
+    let keys = work.join("keys");
+    fs::create_dir_all(&keys).unwrap();
+    let kg = generate_key_pair(&keys, pass(), |_| {}).expect("keygen");
+    let input = work.join("data.txt");
+    fs::write(&input, b"x").unwrap();
+    let out_dir = work.join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+
+    let recipients: Vec<PublicKey> = (0..80)
+        .map(|_| PublicKey::from_key_file(&kg.public_key_path))
+        .collect();
+    let outcome = Encryptor::with_recipients(recipients)
+        .expect("with_recipients")
+        .write(&input, &out_dir, |_| {})
+        .expect("encrypt");
+
+    // Default detect: rejected.
+    match detect_encryption_mode(&outcome.output_path) {
+        Err(CryptoError::RecipientCountCapExceeded { .. }) => {}
+        other => panic!("expected RecipientCountCapExceeded with default detect, got {other:?}"),
+    }
+
+    // Raised detect: classifies cleanly.
+    let raised = HeaderReadLimits::default().max_recipient_count(128);
+    match detect_encryption_mode_with_limits(&outcome.output_path, raised) {
+        Ok(Some(EncryptionMode::Recipient)) => {}
+        other => panic!("expected Ok(Some(Recipient)) under raised cap, got {other:?}"),
+    }
 }

@@ -240,7 +240,7 @@ It contains:
 
 It contains:
 
-- `HeaderReadLimits`;
+- `HeaderReadLimits` (public, `#[non_exhaustive]`, builder methods clamp at the v1 structural maxima);
 - parsed encrypted-header structures;
 - `build_encrypted_header`;
 - `read_encrypted_header`;
@@ -496,7 +496,7 @@ It contains:
 - X25519 recipient body layout;
 - X25519 recipient body length validation;
 - ephemeral key handling;
-- all-zero shared-secret rejection;
+- all-zero shared-secret rejection (file-fatal `InvalidFormat(MalformedRecipientEntry)` on the decrypt side per `FORMAT.md` §2.4 / §4.2; the identity adapter propagates it instead of collapsing to the slot-skip channel reserved for AEAD failures);
 - wrap-key derivation;
 - file-key seal/open logic;
 - X25519 key-pair generation logic;

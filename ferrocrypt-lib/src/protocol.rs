@@ -203,13 +203,14 @@ pub(crate) fn decrypt<I: IdentityScheme>(
     input_path: &Path,
     output_dir: &Path,
     archive_limits: ArchiveLimits,
+    header_read_limits: HeaderReadLimits,
     on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<PathBuf, CryptoError> {
     let mut encrypted_file = fs::File::open(input_path)?;
 
     // 1-4. Structural read + parse. Performs zero crypto; enforces
     //      local caps before any allocation.
-    let parsed = read_encrypted_header(&mut encrypted_file, HeaderReadLimits::default())?;
+    let parsed = read_encrypted_header(&mut encrypted_file, header_read_limits)?;
 
     // 5. Reject illegal mixing and unknown critical recipients before
     //    any expensive recipient work. `classify_encryption_mode`
@@ -572,7 +573,14 @@ mod tests {
     ) -> Result<PathBuf, CryptoError> {
         let recipient_secret = x25519::open_x25519_private_key(privkey_path, pass, None)?;
         let identity = x25519::X25519Identity { recipient_secret };
-        decrypt(&identity, fcr, dec_dir, ArchiveLimits::default(), &|_| {})
+        decrypt(
+            &identity,
+            fcr,
+            dec_dir,
+            ArchiveLimits::default(),
+            HeaderReadLimits::default(),
+            &|_| {},
+        )
     }
 
     /// Two `x25519` recipients in one file: the decrypt loop must
@@ -644,6 +652,103 @@ mod tests {
             other => panic!(
                 "expected MalformedRecipientEntry from slot-2 inspection (proves attempt-all); got {other:?}"
             ),
+        }
+    }
+
+    /// FORMAT.md §2.4 / §4.2: an `x25519` recipient slot whose ECDH
+    /// shared secret is all-zero MUST cause file-fatal rejection, not
+    /// slot-skip — the all-zero shared is identity-independent
+    /// (every decryptor observes the same value), so it cannot be
+    /// confused with "this slot was for someone else." The decrypt
+    /// loop must reject the whole file even when an earlier valid
+    /// slot has already MAC-verified.
+    #[test]
+    fn multi_x25519_all_zero_ephemeral_after_valid_is_file_fatal() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let keys_dir = tmp.path().join("keys");
+        let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
+
+        let file_key = FileKey::generate();
+        let body_a = x25519::wrap(&file_key, &pub_a)?;
+        let valid_slot = RecipientEntry::native(NativeRecipientType::X25519, body_a.to_vec())?;
+
+        // Hand-craft a malformed `x25519` body: literal all-zero
+        // ephemeral pubkey forces an all-zero ECDH shared secret per
+        // RFC 7748 regardless of the recipient's private key. The rest
+        // of the body is filler — the rejection fires before AEAD.
+        let mut malformed_body = vec![0u8; x25519::BODY_LENGTH];
+        malformed_body[x25519::BODY_LENGTH - 1] = 0xAB;
+        let malformed_slot = RecipientEntry::native(NativeRecipientType::X25519, malformed_body)?;
+
+        let entries = [valid_slot, malformed_slot];
+        let fcr = tmp.path().join("zero-ephemeral-after.fcr");
+        build_multi_recipient_fcr(&entries, &file_key, b"x", &fcr)?;
+
+        let dec_dir = tmp.path().join("decrypted");
+        fs::create_dir_all(&dec_dir)?;
+        match recipient_decrypt(&fcr, &dec_dir, &priv_a, &pass_a) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)) => Ok(()),
+            other => panic!("all-zero shared secret in slot 2 must be file-fatal, got {other:?}"),
+        }
+    }
+
+    /// Same property as
+    /// [`multi_x25519_all_zero_ephemeral_after_valid_is_file_fatal`] but
+    /// with the malformed slot first. The decrypt loop encounters the
+    /// structural defect before reaching the valid slot; it must still
+    /// reject the whole file rather than continuing past the malformed
+    /// entry.
+    #[test]
+    fn multi_x25519_all_zero_ephemeral_before_valid_is_file_fatal() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let keys_dir = tmp.path().join("keys");
+        let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
+
+        let file_key = FileKey::generate();
+        let body_a = x25519::wrap(&file_key, &pub_a)?;
+        let valid_slot = RecipientEntry::native(NativeRecipientType::X25519, body_a.to_vec())?;
+
+        let mut malformed_body = vec![0u8; x25519::BODY_LENGTH];
+        malformed_body[x25519::BODY_LENGTH - 1] = 0xAB;
+        let malformed_slot = RecipientEntry::native(NativeRecipientType::X25519, malformed_body)?;
+
+        let entries = [malformed_slot, valid_slot];
+        let fcr = tmp.path().join("zero-ephemeral-before.fcr");
+        build_multi_recipient_fcr(&entries, &file_key, b"x", &fcr)?;
+
+        let dec_dir = tmp.path().join("decrypted");
+        fs::create_dir_all(&dec_dir)?;
+        match recipient_decrypt(&fcr, &dec_dir, &priv_a, &pass_a) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)) => Ok(()),
+            other => panic!("all-zero shared secret in slot 1 must be file-fatal, got {other:?}"),
+        }
+    }
+
+    /// Single-recipient case: an `x25519` file with a single
+    /// all-zero-ephemeral slot must also be file-fatal. Confirms the
+    /// rejection path is independent of recipient cardinality.
+    #[test]
+    fn single_x25519_all_zero_ephemeral_is_file_fatal() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let keys_dir = tmp.path().join("keys");
+        let (_pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
+
+        let file_key = FileKey::generate();
+        let mut malformed_body = vec![0u8; x25519::BODY_LENGTH];
+        malformed_body[x25519::BODY_LENGTH - 1] = 0xAB;
+        let entries = [RecipientEntry::native(
+            NativeRecipientType::X25519,
+            malformed_body,
+        )?];
+
+        let fcr = tmp.path().join("single-zero-ephemeral.fcr");
+        build_multi_recipient_fcr(&entries, &file_key, b"x", &fcr)?;
+
+        let dec_dir = tmp.path().join("decrypted");
+        fs::create_dir_all(&dec_dir)?;
+        match recipient_decrypt(&fcr, &dec_dir, &priv_a, &pass_a) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)) => Ok(()),
+            other => panic!("single all-zero-ephemeral file must be file-fatal, got {other:?}"),
         }
     }
 

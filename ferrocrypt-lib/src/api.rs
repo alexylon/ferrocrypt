@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use secrecy::{ExposeSecret as _, SecretString};
 
 use crate::archive::{self, ArchiveLimits};
-use crate::container;
+use crate::container::{self, HeaderReadLimits};
 use crate::crypto::kdf::{KdfLimit, KdfParams};
 use crate::error::FormatDefect;
 use crate::format;
@@ -295,7 +295,33 @@ impl Decryptor {
     /// versions, unknown critical recipients, and illegal recipient mixes return
     /// their corresponding `CryptoError` or [`FormatDefect`] variants.
     pub fn open(input: impl AsRef<Path>) -> Result<Self, CryptoError> {
-        let input = input.as_ref().to_path_buf();
+        Self::open_inner(input.as_ref(), None)
+    }
+
+    /// Same as [`Decryptor::open`] but uses the supplied
+    /// [`HeaderReadLimits`] for the structural header read instead of
+    /// the conservative defaults.
+    ///
+    /// Callers handling files whose recipient strings, recipient
+    /// counts, or header lengths legitimately exceed the defaults
+    /// (e.g. forward-compatibility with future fat-recipient native
+    /// types) should construct a `HeaderReadLimits` via the builder
+    /// methods and pass it here. The same limits are stashed on the
+    /// returned variant so the second header read inside
+    /// [`PassphraseDecryptor::decrypt`] / [`RecipientDecryptor::decrypt`]
+    /// uses them too — callers do not need to set them twice.
+    pub fn open_with_limits(
+        input: impl AsRef<Path>,
+        header_read_limits: HeaderReadLimits,
+    ) -> Result<Self, CryptoError> {
+        Self::open_inner(input.as_ref(), Some(header_read_limits))
+    }
+
+    fn open_inner(
+        input: &Path,
+        header_read_limits: Option<HeaderReadLimits>,
+    ) -> Result<Self, CryptoError> {
+        let input = input.to_path_buf();
         validate_input_path(&input)?;
         if input.is_dir() {
             return Err(CryptoError::InvalidInput(format!(
@@ -303,18 +329,21 @@ impl Decryptor {
                 input.display()
             )));
         }
-        let mode = detect_encryption_mode(&input)?
-            .ok_or(CryptoError::InvalidFormat(FormatDefect::BadMagic))?;
+        let mode =
+            detect_encryption_mode_with_limits(&input, header_read_limits.unwrap_or_default())?
+                .ok_or(CryptoError::InvalidFormat(FormatDefect::BadMagic))?;
         match mode {
             EncryptionMode::Passphrase => Ok(Self::Passphrase(PassphraseDecryptor {
                 input,
                 kdf_limit: None,
                 archive_limits: None,
+                header_read_limits,
             })),
             EncryptionMode::Recipient => Ok(Self::Recipient(RecipientDecryptor {
                 input,
                 kdf_limit: None,
                 archive_limits: None,
+                header_read_limits,
             })),
         }
     }
@@ -329,6 +358,7 @@ pub struct PassphraseDecryptor {
     input: PathBuf,
     kdf_limit: Option<KdfLimit>,
     archive_limits: Option<ArchiveLimits>,
+    header_read_limits: Option<HeaderReadLimits>,
 }
 
 impl PassphraseDecryptor {
@@ -346,6 +376,16 @@ impl PassphraseDecryptor {
     /// default cannot be decrypted under [`ArchiveLimits::default`].
     pub fn archive_limits(mut self, limits: ArchiveLimits) -> Self {
         self.archive_limits = Some(limits);
+        self
+    }
+
+    /// Overrides the header-read caps applied while parsing the
+    /// `.fcr` header during decrypt. The same limits used at
+    /// [`Decryptor::open`] / [`Decryptor::open_with_limits`] are
+    /// carried into the variant; this builder lets callers tighten or
+    /// loosen them between open and decrypt for advanced flows.
+    pub fn header_read_limits(mut self, limits: HeaderReadLimits) -> Self {
+        self.header_read_limits = Some(limits);
         self
     }
 
@@ -368,12 +408,14 @@ impl PassphraseDecryptor {
             kdf_limit: self.kdf_limit.as_ref(),
         };
         let archive_limits = self.archive_limits.unwrap_or_default();
+        let header_read_limits = self.header_read_limits.unwrap_or_default();
         on_event(&ProgressEvent::DerivingKey);
         let output_path = protocol::decrypt(
             &identity,
             &self.input,
             output_dir.as_ref(),
             archive_limits,
+            header_read_limits,
             &on_event,
         )?;
         Ok(DecryptOutcome { output_path })
@@ -389,6 +431,7 @@ pub struct RecipientDecryptor {
     input: PathBuf,
     kdf_limit: Option<KdfLimit>,
     archive_limits: Option<ArchiveLimits>,
+    header_read_limits: Option<HeaderReadLimits>,
 }
 
 impl RecipientDecryptor {
@@ -407,6 +450,16 @@ impl RecipientDecryptor {
     /// default cannot be decrypted under [`ArchiveLimits::default`].
     pub fn archive_limits(mut self, limits: ArchiveLimits) -> Self {
         self.archive_limits = Some(limits);
+        self
+    }
+
+    /// Overrides the header-read caps applied while parsing the
+    /// `.fcr` header during decrypt. The same limits used at
+    /// [`Decryptor::open`] / [`Decryptor::open_with_limits`] are
+    /// carried into the variant; this builder lets callers tighten or
+    /// loosen them between open and decrypt for advanced flows.
+    pub fn header_read_limits(mut self, limits: HeaderReadLimits) -> Self {
+        self.header_read_limits = Some(limits);
         self
     }
 
@@ -434,11 +487,13 @@ impl RecipientDecryptor {
         )?;
         let identity_scheme = recipient::x25519::X25519Identity { recipient_secret };
         let archive_limits = self.archive_limits.unwrap_or_default();
+        let header_read_limits = self.header_read_limits.unwrap_or_default();
         let output_path = protocol::decrypt(
             &identity_scheme,
             &self.input,
             output_dir.as_ref(),
             archive_limits,
+            header_read_limits,
             &on_event,
         )?;
         Ok(DecryptOutcome { output_path })
@@ -519,6 +574,22 @@ pub fn generate_key_pair(
 pub fn detect_encryption_mode(
     file_path: impl AsRef<Path>,
 ) -> Result<Option<EncryptionMode>, CryptoError> {
+    detect_encryption_mode_with_limits(file_path, HeaderReadLimits::default())
+}
+
+/// Same as [`detect_encryption_mode`] but uses the supplied
+/// [`HeaderReadLimits`] for the structural header read instead of the
+/// conservative defaults.
+///
+/// Use this when classifying files whose recipient strings, recipient
+/// counts, or header lengths legitimately exceed the default local
+/// caps (forward-compatibility with future fat-recipient native types).
+/// All other behavior — directory short-circuit, magic-byte fast path,
+/// typed-error surface — is identical.
+pub fn detect_encryption_mode_with_limits(
+    file_path: impl AsRef<Path>,
+    limits: HeaderReadLimits,
+) -> Result<Option<EncryptionMode>, CryptoError> {
     use std::io::{Read, Seek, SeekFrom};
     let path = file_path.as_ref();
 
@@ -563,8 +634,7 @@ pub fn detect_encryption_mode(
     // of dropping and re-opening avoids both an extra syscall and a
     // TOCTOU window where the path could be swapped between checks.
     file.seek(SeekFrom::Start(0))?;
-    let parsed =
-        container::read_encrypted_header(&mut file, container::HeaderReadLimits::default())?;
+    let parsed = container::read_encrypted_header(&mut file, limits)?;
 
     // Structural classification only. `classify_encryption_mode`
     // does not verify the header MAC or run any recipient unwrap.

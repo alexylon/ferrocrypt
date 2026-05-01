@@ -140,7 +140,7 @@ pub use crate::api::{
 pub use crate::archive::ArchiveLimits;
 pub use crate::crypto::kdf::KdfLimit;
 pub use crate::error::{CryptoError, FormatDefect, InvalidKdfParams, UnsupportedVersion};
-pub use crate::format::ENCRYPTED_EXTENSION;
+pub use crate::format::{ENCRYPTED_EXTENSION, MAGIC};
 pub use crate::key::files::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};
 pub use crate::recipient::policy::MixingPolicy;
 

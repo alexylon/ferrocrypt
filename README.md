@@ -97,22 +97,22 @@ AppImage output also requires `mksquashfs`, provided by the `squashfs-tools` pac
 
 ## Command-line usage
 
-The CLI runs as a one-shot command, or starts an interactive prompt when invoked without arguments.
+The CLI exposes four subcommands — `encrypt`, `decrypt`, `keygen`, `fingerprint` — and starts an interactive prompt when invoked without arguments. The encryption mode (passphrase or public-key) is chosen by the credentials supplied to `encrypt`; `decrypt` reads the file's recipient list and routes itself.
 
 ### Password-based encryption
 
 ```bash
 # Encrypt a file or directory with a passphrase
-ferrocrypt symmetric -i secret.txt -o ./encrypted
+ferrocrypt encrypt -i secret.txt -o ./encrypted
 
 # Decrypt the resulting .fcr file
-ferrocrypt symmetric -i ./encrypted/secret.fcr -o ./decrypted
+ferrocrypt decrypt -i ./encrypted/secret.fcr -o ./decrypted
 
 # Write the encrypted file to an explicit path
-ferrocrypt symmetric -i secret.txt -s ./secret.fcr
+ferrocrypt encrypt -i secret.txt -s ./secret.fcr
 ```
 
-The shorter alias `sym` may be used instead of `symmetric`.
+When neither `--public-key` nor `--recipient` is given, `encrypt` runs in passphrase mode. `--passphrase` (`-p`) makes the choice explicit.
 
 ### Public-key encryption
 
@@ -121,39 +121,50 @@ The shorter alias `sym` may be used instead of `symmetric`.
 ferrocrypt keygen -o ./keys
 
 # Encrypt with a public key file
-ferrocrypt hybrid -i secret.txt -o ./encrypted -k ./keys/public.key
+ferrocrypt encrypt -i secret.txt -o ./encrypted -k ./keys/public.key
 
 # Decrypt with the matching private key
-ferrocrypt hybrid -i ./encrypted/secret.fcr -o ./decrypted -k ./keys/private.key
+ferrocrypt decrypt -i ./encrypted/secret.fcr -o ./decrypted -K ./keys/private.key
 ```
 
-The shorter aliases `gen` and `hyb` may be used instead of `keygen` and `hybrid`.
+`-k` (lowercase) selects the shareable public key; `-K` (uppercase) selects the secret private key. Each flag has exactly one meaning.
 
-Public keys can also be represented as recipient strings:
+Multiple recipients can be combined into one `.fcr`: pass `-k` and `-r` repeatedly and any matching private key will decrypt the file.
+
+```bash
+# Encrypt to two public-key recipients in a single file
+ferrocrypt encrypt -i secret.txt -o ./encrypted \
+  -k ./alice/public.key \
+  -k ./bob/public.key
+```
+
+Public keys can also be represented as `fcr1...` recipient strings. The contents of `public.key` is already such a string, so a separate command to extract it is not needed:
 
 ```bash
 # Print the recipient string stored in a public key file
-ferrocrypt recipient ./keys/public.key
+cat ./keys/public.key
 
 # Print the public key fingerprint for independent verification
 ferrocrypt fingerprint ./keys/public.key
 
 # Encrypt directly to a recipient string
-ferrocrypt hybrid -i secret.txt -o ./encrypted -r fcr1...
+ferrocrypt encrypt -i secret.txt -o ./encrypted -r fcr1...
 ```
 
-The shorter aliases `rc` and `fp` may be used instead of `recipient` and `fingerprint`.
+The shorter aliases `enc`, `dec`, `gen`, and `fp` may be used in place of the full subcommand names.
 
 Passphrases are not accepted as command-line arguments. The CLI prompts for them with hidden input. For scripts and CI environments, the `FERROCRYPT_PASSPHRASE` environment variable may be used.
+
+If `encrypt` is given an input that already begins with the FerroCrypt magic bytes, it warns and prompts for confirmation on an interactive shell, refuses with exit code 1 on a non-interactive shell, or proceeds when `--allow-double-encrypt` is set.
 
 ### Interactive mode
 
 ```text
 $ ferrocrypt
 FerroCrypt interactive mode
-Commands: symmetric (sym), hybrid (hyb), keygen (gen), fingerprint (fp), recipient (rc), quit
+Commands: encrypt (enc), decrypt (dec), keygen (gen), fingerprint (fp), quit
 
-ferrocrypt> sym -i secret.txt -o out
+ferrocrypt> encrypt -i secret.txt -o out
 Passphrase:
 Confirm passphrase:
 ferrocrypt> quit
@@ -165,24 +176,26 @@ The interactive prompt exits on `quit`, `exit`, or Ctrl-D. Ctrl-C cancels the cu
 
 | Subcommand | Alias | Purpose |
 |---|---|---|
-| `symmetric` | `sym` | Encrypt or decrypt with a passphrase |
-| `hybrid` | `hyb` | Encrypt or decrypt with public/private keys |
+| `encrypt` | `enc` | Encrypt a file or directory |
+| `decrypt` | `dec` | Decrypt a `.fcr` file |
 | `keygen` | `gen` | Generate a public/private key pair |
 | `fingerprint` | `fp` | Print a public key fingerprint |
-| `recipient` | `rc` | Print a public key as an `fcr1...` recipient string |
 
-The `fingerprint` and `recipient` subcommands take a public key file path directly: `ferrocrypt fingerprint ./keys/public.key`.
+`fingerprint` takes a public key file path directly: `ferrocrypt fingerprint ./keys/public.key`.
 
 ### Common options
 
 | Option | Applies to | Description |
 |---|---|---|
-| `-i, --input-path` | `symmetric`, `hybrid` | Input file or directory |
-| `-o, --output-path` | `symmetric`, `hybrid`, `keygen` | Output directory |
-| `-s, --save-as` | `symmetric`, `hybrid` | Explicit encrypted output file path |
-| `-k, --key` | `hybrid` | Public key for encryption, private key for decryption |
-| `-r, --recipient` | `hybrid` | Recipient string for encryption |
-| `--max-kdf-memory` | `symmetric`, `hybrid` | Maximum Argon2id memory cost accepted during decryption |
+| `-i, --input` | `encrypt`, `decrypt` | Input file or directory |
+| `-o, --output-dir` | `encrypt`, `decrypt`, `keygen` | Output directory |
+| `-s, --save-as` | `encrypt` | Explicit encrypted output file path |
+| `-p, --passphrase` | `encrypt` | Encrypt with a passphrase (default when no recipient is given) |
+| `-r, --recipient` | `encrypt` | Public recipient string (`fcr1...`); repeatable |
+| `-k, --public-key` | `encrypt` | Public key file; repeatable |
+| `-K, --private-key` | `decrypt` | Private key file (required for public-recipient files) |
+| `--allow-double-encrypt` | `encrypt` | Permit encrypting an input that already looks like a `.fcr` file |
+| `--max-kdf-memory` | `decrypt` | Maximum Argon2id memory cost accepted during decryption |
 
 ## Desktop application
 

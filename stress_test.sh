@@ -112,27 +112,27 @@ echo ""
 # ──────────────────────────────────────────────
 echo "--- Phase 2: Symmetric Encryption Roundtrips ---"
 
-# Helper: symmetric roundtrip test for a single file
+# Helper: passphrase roundtrip test for a single file
 sym_roundtrip_file() {
     local src="$1"
     local label="$2"
     local enc_dir="$WORKDIR/enc_sym_${label}"
     local dec_dir="$WORKDIR/dec_sym_${label}"
     mkdir -p "$enc_dir" "$dec_dir"
-    $FC symmetric -i "$src" -o "$enc_dir" && \
-    $FC symmetric -i "$enc_dir"/*.fcr -o "$dec_dir" && \
+    $FC encrypt -i "$src" -o "$enc_dir" && \
+    $FC decrypt -i "$enc_dir"/*.fcr -o "$dec_dir" && \
     assert_identical "$src" "$dec_dir/$(basename "$src")"
 }
 
-# Helper: symmetric roundtrip test for a directory
+# Helper: passphrase roundtrip test for a directory
 sym_roundtrip_dir() {
     local src="$1"
     local label="$2"
     local enc_dir="$WORKDIR/enc_sym_${label}"
     local dec_dir="$WORKDIR/dec_sym_${label}"
     mkdir -p "$enc_dir" "$dec_dir"
-    $FC symmetric -i "$src" -o "$enc_dir" && \
-    $FC symmetric -i "$enc_dir"/*.fcr -o "$dec_dir" && \
+    $FC encrypt -i "$src" -o "$enc_dir" && \
+    $FC decrypt -i "$enc_dir"/*.fcr -o "$dec_dir" && \
     assert_dirs_identical "$src" "$dec_dir/$(basename "$src")"
 }
 
@@ -175,8 +175,8 @@ dd if=/dev/urandom of="$WORKDIR/100mb.bin" bs=1048576 count=100 2>/dev/null
 enc100="$WORKDIR/enc_sym_100mb"
 dec100="$WORKDIR/dec_sym_100mb"
 mkdir -p "$enc100" "$dec100"
-if $FC symmetric -i "$WORKDIR/100mb.bin" -o "$enc100" 2>/dev/null && \
-   $FC symmetric -i "$enc100"/*.fcr -o "$dec100" 2>/dev/null && \
+if $FC encrypt -i "$WORKDIR/100mb.bin" -o "$enc100" 2>/dev/null && \
+   $FC decrypt -i "$enc100"/*.fcr -o "$dec100" 2>/dev/null && \
    assert_identical "$WORKDIR/100mb.bin" "$dec100/100mb.bin"; then
     echo "PASS"
     PASSED=$((PASSED + 1))
@@ -222,8 +222,8 @@ hyb_roundtrip_file() {
     local enc_dir="$WORKDIR/enc_hyb_${label}"
     local dec_dir="$WORKDIR/dec_hyb_${label}"
     mkdir -p "$enc_dir" "$dec_dir"
-    $FC hybrid -i "$src" -o "$enc_dir" -k "$pubkey" && \
-    $FC hybrid -i "$enc_dir"/*.fcr -o "$dec_dir" -k "$secretkey" && \
+    $FC encrypt -i "$src" -o "$enc_dir" -k "$pubkey" && \
+    $FC decrypt -i "$enc_dir"/*.fcr -o "$dec_dir" -K "$secretkey" && \
     assert_identical "$src" "$dec_dir/$(basename "$src")"
 }
 
@@ -235,8 +235,8 @@ hyb_roundtrip_dir() {
     local enc_dir="$WORKDIR/enc_hyb_${label}"
     local dec_dir="$WORKDIR/dec_hyb_${label}"
     mkdir -p "$enc_dir" "$dec_dir"
-    $FC hybrid -i "$src" -o "$enc_dir" -k "$pubkey" && \
-    $FC hybrid -i "$enc_dir"/*.fcr -o "$dec_dir" -k "$secretkey" && \
+    $FC encrypt -i "$src" -o "$enc_dir" -k "$pubkey" && \
+    $FC decrypt -i "$enc_dir"/*.fcr -o "$dec_dir" -K "$secretkey" && \
     assert_dirs_identical "$src" "$dec_dir/$(basename "$src")"
 }
 
@@ -256,8 +256,8 @@ dd if=/dev/urandom of="$WORKDIR/100mb_hyb.bin" bs=1048576 count=100 2>/dev/null
 enc100h="$WORKDIR/enc_hyb_100mb"
 dec100h="$WORKDIR/dec_hyb_100mb"
 mkdir -p "$enc100h" "$dec100h"
-if $FC hybrid -i "$WORKDIR/100mb_hyb.bin" -o "$enc100h" -k "$PUB" 2>/dev/null && \
-   $FC hybrid -i "$enc100h"/*.fcr -o "$dec100h" -k "$SECRET_KEY" 2>/dev/null && \
+if $FC encrypt -i "$WORKDIR/100mb_hyb.bin" -o "$enc100h" -k "$PUB" 2>/dev/null && \
+   $FC decrypt -i "$enc100h"/*.fcr -o "$dec100h" -K "$SECRET_KEY" 2>/dev/null && \
    assert_identical "$WORKDIR/100mb_hyb.bin" "$dec100h/100mb_hyb.bin"; then
     echo "PASS"
     PASSED=$((PASSED + 1))
@@ -334,9 +334,9 @@ sym_saveas_roundtrip() {
     local saveas_dir="$WORKDIR/saveas"
     local saveas_dec="$WORKDIR/saveas_dec"
     mkdir -p "$saveas_dir" "$saveas_dec"
-    $FC symmetric -i "$WORKDIR/small.txt" -o "$saveas_dir" -s "$saveas_dir/custom_name.fcr" && \
+    $FC encrypt -i "$WORKDIR/small.txt" -o "$saveas_dir" -s "$saveas_dir/custom_name.fcr" && \
     test -f "$saveas_dir/custom_name.fcr" && \
-    $FC symmetric -i "$saveas_dir/custom_name.fcr" -o "$saveas_dec" && \
+    $FC decrypt -i "$saveas_dir/custom_name.fcr" -o "$saveas_dec" && \
     assert_identical "$WORKDIR/small.txt" "$saveas_dec/small.txt"
 }
 run_test "sym: custom output name" sym_saveas_roundtrip
@@ -345,22 +345,23 @@ hyb_saveas_roundtrip() {
     local saveas2_dir="$WORKDIR/saveas2"
     local saveas2_dec="$WORKDIR/saveas2_dec"
     mkdir -p "$saveas2_dir" "$saveas2_dec"
-    $FC hybrid -i "$WORKDIR/small.txt" -o "$saveas2_dir" -k "$PUB" -s "$saveas2_dir/renamed.fcr" && \
+    $FC encrypt -i "$WORKDIR/small.txt" -o "$saveas2_dir" -k "$PUB" -s "$saveas2_dir/renamed.fcr" && \
     test -f "$saveas2_dir/renamed.fcr" && \
-    $FC hybrid -i "$saveas2_dir/renamed.fcr" -o "$saveas2_dec" -k "$SECRET_KEY" && \
+    $FC decrypt -i "$saveas2_dir/renamed.fcr" -o "$saveas2_dec" -K "$SECRET_KEY" && \
     assert_identical "$WORKDIR/small.txt" "$saveas2_dec/small.txt"
 }
 run_test "hyb: custom output name" hyb_saveas_roundtrip
 
-# Recipient-string encrypt → decrypt roundtrip
+# Recipient-string encrypt → decrypt roundtrip. `public.key` is itself the
+# canonical fcr1... text (UTF-8, single line), so reading the file is enough.
 hyb_recipient_roundtrip() {
     local rcpt_enc="$WORKDIR/rcpt_enc"
     local rcpt_dec="$WORKDIR/rcpt_dec"
     mkdir -p "$rcpt_enc" "$rcpt_dec"
     local RCPT
-    RCPT=$($FC recipient "$PUB")
-    $FC hybrid -i "$WORKDIR/small.txt" -o "$rcpt_enc" -r "$RCPT" && \
-    $FC hybrid -i "$rcpt_enc"/*.fcr -o "$rcpt_dec" -k "$SECRET_KEY" && \
+    RCPT=$(tr -d '\n' < "$PUB")
+    $FC encrypt -i "$WORKDIR/small.txt" -o "$rcpt_enc" -r "$RCPT" && \
+    $FC decrypt -i "$rcpt_enc"/*.fcr -o "$rcpt_dec" -K "$SECRET_KEY" && \
     assert_identical "$WORKDIR/small.txt" "$rcpt_dec/small.txt"
 }
 run_test "hyb: recipient string roundtrip" hyb_recipient_roundtrip
@@ -372,40 +373,40 @@ echo ""
 # ──────────────────────────────────────────────
 echo "--- Phase 6: Error Handling & Rejection ---"
 
-# Wrong password on symmetric decrypt
+# Wrong password on passphrase decrypt
 err1_enc="$WORKDIR/err1_enc"
 err1_dec="$WORKDIR/err1_dec"
 mkdir -p "$err1_enc" "$err1_dec"
-$FC symmetric -i "$WORKDIR/small.txt" -o "$err1_enc" 2>/dev/null
+$FC encrypt -i "$WORKDIR/small.txt" -o "$err1_enc" 2>/dev/null
 run_test_expect_fail "sym: wrong password rejects" \
-    env FERROCRYPT_PASSPHRASE="$PASS2" $FC symmetric -i "$err1_enc"/*.fcr -o "$err1_dec"
-# Wrong passphrase on hybrid decrypt
+    env FERROCRYPT_PASSPHRASE="$PASS2" $FC decrypt -i "$err1_enc"/*.fcr -o "$err1_dec"
+# Wrong passphrase on recipient decrypt
 err2_enc="$WORKDIR/err2_enc"
 err2_dec="$WORKDIR/err2_dec"
 mkdir -p "$err2_enc" "$err2_dec"
-$FC hybrid -i "$WORKDIR/small.txt" -o "$err2_enc" -k "$PUB" 2>/dev/null
+$FC encrypt -i "$WORKDIR/small.txt" -o "$err2_enc" -k "$PUB" 2>/dev/null
 run_test_expect_fail "hyb: wrong passphrase rejects" \
-    env FERROCRYPT_PASSPHRASE="$PASS2" $FC hybrid -i "$err2_enc"/*.fcr -o "$err2_dec" -k "$SECRET_KEY"
+    env FERROCRYPT_PASSPHRASE="$PASS2" $FC decrypt -i "$err2_enc"/*.fcr -o "$err2_dec" -K "$SECRET_KEY"
 # Wrong key entirely (different keypair)
 err3_dec="$WORKDIR/err3_dec"
 mkdir -p "$err3_dec"
 run_test_expect_fail "hyb: wrong key rejects" \
-    env FERROCRYPT_PASSPHRASE="$PASS2" $FC hybrid -i "$err2_enc"/*.fcr -o "$err3_dec" -k "$SECRET_KEY2"
+    env FERROCRYPT_PASSPHRASE="$PASS2" $FC decrypt -i "$err2_enc"/*.fcr -o "$err3_dec" -K "$SECRET_KEY2"
 # Non-existent input file
 run_test_expect_fail "sym: non-existent input rejects" \
-    $FC symmetric -i "$WORKDIR/does_not_exist.txt" -o "$WORKDIR"
+    $FC encrypt -i "$WORKDIR/does_not_exist.txt" -o "$WORKDIR"
 run_test_expect_fail "hyb: non-existent input rejects" \
-    $FC hybrid -i "$WORKDIR/does_not_exist.txt" -o "$WORKDIR" -k "$PUB"
+    $FC encrypt -i "$WORKDIR/does_not_exist.txt" -o "$WORKDIR" -k "$PUB"
 
-# Empty password for symmetric
+# Empty password
 run_test_expect_fail "sym: empty password rejects" \
-    env FERROCRYPT_PASSPHRASE="" $FC symmetric -i "$WORKDIR/small.txt" -o "$WORKDIR/err_empty"
+    env FERROCRYPT_PASSPHRASE="" $FC encrypt -i "$WORKDIR/small.txt" -o "$WORKDIR/err_empty"
 
 # Corrupted ciphertext: flip bytes in the middle of encrypted file
 corr_enc="$WORKDIR/corr_enc"
 corr_dec="$WORKDIR/corr_dec"
 mkdir -p "$corr_enc" "$corr_dec"
-$FC symmetric -i "$WORKDIR/1mb.bin" -o "$corr_enc" 2>/dev/null
+$FC encrypt -i "$WORKDIR/1mb.bin" -o "$corr_enc" 2>/dev/null
 CORR_FILE="$corr_enc/1mb.fcr"
 # Flip 100 bytes near the middle of the file
 FILE_SIZE=$(stat -f%z "$CORR_FILE" 2>/dev/null || stat -c%s "$CORR_FILE" 2>/dev/null)
@@ -419,38 +420,38 @@ for i in range(100):
 open('$CORR_FILE', 'wb').write(data)
 "
 run_test_expect_fail "sym: corrupted ciphertext rejects" \
-    $FC symmetric -i "$CORR_FILE" -o "$corr_dec"
+    $FC decrypt -i "$CORR_FILE" -o "$corr_dec"
 # Corrupted header: flip the first byte of the 4-byte magic
 corr2_enc="$WORKDIR/corr2_enc"
 corr2_dec="$WORKDIR/corr2_dec"
 mkdir -p "$corr2_enc" "$corr2_dec"
-$FC symmetric -i "$WORKDIR/small.txt" -o "$corr2_enc" 2>/dev/null
+$FC encrypt -i "$WORKDIR/small.txt" -o "$corr2_enc" 2>/dev/null
 CORR2_FILE="$corr2_enc/small.fcr"
 python3 -c "
 data = bytearray(open('$CORR2_FILE', 'rb').read())
 # v1 prefix: magic(4) || version(1) || kind(1) || prefix_flags(2) || header_len(4)
-# Corrupt the first magic byte so detection no longer routes the file to
-# decrypt; it routes to encrypt (treated as plaintext).
+# Corrupt the first magic byte so the .fcr is no longer recognized: encrypt
+# proceeds (the magic-byte peek does not match), and decrypt would error.
 data[0] ^= 0xFF
 open('$CORR2_FILE', 'wb').write(data)
 "
-run_test "sym: corrupted magic encrypts (not detected as FerroCrypt)" \
-    $FC symmetric -i "$CORR2_FILE" -o "$corr2_dec"
+run_test "sym: corrupted-magic .fcr accepted as plaintext input by encrypt" \
+    $FC encrypt -i "$CORR2_FILE" -o "$corr2_dec"
 # Truncated file (cut at half)
 trunc_enc="$WORKDIR/trunc_enc"
 trunc_dec="$WORKDIR/trunc_dec"
 mkdir -p "$trunc_enc" "$trunc_dec"
-$FC symmetric -i "$WORKDIR/1mb.bin" -o "$trunc_enc" 2>/dev/null
+$FC encrypt -i "$WORKDIR/1mb.bin" -o "$trunc_enc" 2>/dev/null
 TRUNC_FILE="$trunc_enc/1mb.fcr"
 TRUNC_SIZE=$(stat -f%z "$TRUNC_FILE" 2>/dev/null || stat -c%s "$TRUNC_FILE" 2>/dev/null)
 dd if="$TRUNC_FILE" of="$TRUNC_FILE.trunc" bs=$((TRUNC_SIZE / 2)) count=1 2>/dev/null
 run_test_expect_fail "sym: truncated file rejects" \
-    $FC symmetric -i "$TRUNC_FILE.trunc" -o "$trunc_dec"
-# Corrupted hybrid file
+    $FC decrypt -i "$TRUNC_FILE.trunc" -o "$trunc_dec"
+# Corrupted recipient file
 corr3_enc="$WORKDIR/corr3_enc"
 corr3_dec="$WORKDIR/corr3_dec"
 mkdir -p "$corr3_enc" "$corr3_dec"
-$FC hybrid -i "$WORKDIR/1mb.bin" -o "$corr3_enc" -k "$PUB" 2>/dev/null
+$FC encrypt -i "$WORKDIR/1mb.bin" -o "$corr3_enc" -k "$PUB" 2>/dev/null
 CORR3_FILE=$(ls "$corr3_enc"/*.fcr)
 python3 -c "
 data = bytearray(open('$CORR3_FILE', 'rb').read())
@@ -460,7 +461,7 @@ for i in range(200):
 open('$CORR3_FILE', 'wb').write(data)
 "
 run_test_expect_fail "hyb: corrupted ciphertext rejects" \
-    $FC hybrid -i "$CORR3_FILE" -o "$corr3_dec" -k "$SECRET_KEY"
+    $FC decrypt -i "$CORR3_FILE" -o "$corr3_dec" -K "$SECRET_KEY"
 echo ""
 
 # ──────────────────────────────────────────────
@@ -472,17 +473,18 @@ cross_enc="$WORKDIR/cross_enc"
 cross_dec="$WORKDIR/cross_dec"
 mkdir -p "$cross_enc" "$cross_dec"
 
-# Encrypt with symmetric, try to decrypt with hybrid
-$FC symmetric -i "$WORKDIR/small.txt" -o "$cross_enc" 2>/dev/null
-run_test_expect_fail "cross: sym-encrypted file via hybrid rejects" \
-    $FC hybrid -i "$cross_enc"/small.fcr -o "$cross_dec" -k "$SECRET_KEY"
-# Encrypt with hybrid, try to decrypt with symmetric
+# Encrypt with passphrase, then try to decrypt with -K (private key supplied
+# against a passphrase-sealed file).
+$FC encrypt -i "$WORKDIR/small.txt" -o "$cross_enc" 2>/dev/null
+run_test_expect_fail "cross: passphrase-sealed file decrypted with -K rejects" \
+    $FC decrypt -i "$cross_enc"/small.fcr -o "$cross_dec" -K "$SECRET_KEY"
+# Encrypt to a recipient, then try to decrypt without -K.
 cross2_enc="$WORKDIR/cross2_enc"
 cross2_dec="$WORKDIR/cross2_dec"
 mkdir -p "$cross2_enc" "$cross2_dec"
-$FC hybrid -i "$WORKDIR/small.txt" -o "$cross2_enc" -k "$PUB" 2>/dev/null
-run_test_expect_fail "cross: hyb-encrypted file via symmetric rejects" \
-    $FC symmetric -i "$cross2_enc"/small.fcr -o "$cross2_dec"
+$FC encrypt -i "$WORKDIR/small.txt" -o "$cross2_enc" -k "$PUB" 2>/dev/null
+run_test_expect_fail "cross: recipient-sealed file decrypted without -K rejects" \
+    $FC decrypt -i "$cross2_enc"/small.fcr -o "$cross2_dec"
 echo ""
 
 # ──────────────────────────────────────────────
@@ -497,11 +499,11 @@ mal_enc="$WORKDIR/mal_enc"
 mal_dec="$WORKDIR/mal_dec"
 mkdir -p "$mal_enc" "$mal_dec"
 run_test_expect_fail "hyb: malformed key file rejects (encrypt)" \
-    $FC hybrid -i "$WORKDIR/small.txt" -o "$mal_enc" -k "$malformed_key"
+    $FC encrypt -i "$WORKDIR/small.txt" -o "$mal_enc" -k "$malformed_key"
 # Also try malformed key for decryption
-$FC hybrid -i "$WORKDIR/small.txt" -o "$mal_enc" -k "$PUB" 2>/dev/null
+$FC encrypt -i "$WORKDIR/small.txt" -o "$mal_enc" -k "$PUB" 2>/dev/null
 run_test_expect_fail "hyb: malformed key file rejects (decrypt)" \
-    $FC hybrid -i "$mal_enc"/small.fcr -o "$mal_dec" -k "$malformed_key"
+    $FC decrypt -i "$mal_enc"/small.fcr -o "$mal_dec" -K "$malformed_key"
 # Key overwrite (keygen into directory with existing keys)
 run_test_expect_fail "keygen: refuses to overwrite existing keys" \
     $FC keygen -o "$KEYS"
@@ -513,14 +515,14 @@ mkdir -p "$tiny_enc" "$tiny_dec"
 for sz in 1 3 5 7; do
     dd if=/dev/urandom of="$WORKDIR/tiny_${sz}.fcr" bs="$sz" count=1 2>/dev/null
     run_test "sym: ${sz}-byte .fcr file encrypts (not detected as FerroCrypt)" \
-        $FC symmetric -i "$WORKDIR/tiny_${sz}.fcr" -o "$tiny_enc"
+        $FC encrypt -i "$WORKDIR/tiny_${sz}.fcr" -o "$tiny_enc"
 done
 
 # Corrupted header fields (version, header length, HMAC tag)
 hdr_src="$WORKDIR/hdr_enc"
 hdr_dec="$WORKDIR/hdr_dec"
 mkdir -p "$hdr_src" "$hdr_dec"
-$FC symmetric -i "$WORKDIR/1mb.bin" -o "$hdr_src" 2>/dev/null
+$FC encrypt -i "$WORKDIR/1mb.bin" -o "$hdr_src" 2>/dev/null
 HDR_FILE="$hdr_src/1mb.fcr"
 HDR_SIZE=$(stat -f%z "$HDR_FILE" 2>/dev/null || stat -c%s "$HDR_FILE" 2>/dev/null)
 
@@ -533,7 +535,7 @@ data[4] ^= 0x10
 open('$WORKDIR/corrupt_version.fcr', 'wb').write(data)
 "
 run_test_expect_fail "sym: corrupted version byte rejects" \
-    $FC symmetric -i "$WORKDIR/corrupt_version.fcr" -o "$hdr_dec"
+    $FC decrypt -i "$WORKDIR/corrupt_version.fcr" -o "$hdr_dec"
 
 # Flip a byte in header_len (v1 prefix bytes 8..=11). Either parses as an
 # oversized declared length and rejects with OversizedHeader, or as a
@@ -546,7 +548,7 @@ data[8] ^= 0xFF
 open('$WORKDIR/corrupt_hdrlen.fcr', 'wb').write(data)
 "
 run_test_expect_fail "sym: corrupted header length rejects" \
-    $FC symmetric -i "$WORKDIR/corrupt_hdrlen.fcr" -o "$hdr_dec"
+    $FC decrypt -i "$WORKDIR/corrupt_hdrlen.fcr" -o "$hdr_dec"
 
 # Corrupt a byte inside the argon2id recipient body's argon2_salt. The
 # argon2_salt lives at file offset PREFIX_SIZE(12) + HEADER_FIXED_SIZE(31)
@@ -561,7 +563,7 @@ data[59] ^= 0xFF
 open('$WORKDIR/corrupt_salt.fcr', 'wb').write(data)
 "
 run_test_expect_fail "sym: corrupted argon2_salt rejects" \
-    $FC symmetric -i "$WORKDIR/corrupt_salt.fcr" -o "$hdr_dec"
+    $FC decrypt -i "$WORKDIR/corrupt_salt.fcr" -o "$hdr_dec"
 echo ""
 
 # ──────────────────────────────────────────────
@@ -584,7 +586,7 @@ pids=()
 all_ok=true
 for i in $(seq 1 8); do
     mkdir -p "$CONC_DIR/enc_$i"
-    $FC symmetric -i "$CONC_DIR/src_$i.bin" -o "$CONC_DIR/enc_$i" 2>/dev/null &
+    $FC encrypt -i "$CONC_DIR/src_$i.bin" -o "$CONC_DIR/enc_$i" 2>/dev/null &
     pids+=($!)
 done
 for pid in "${pids[@]}"; do
@@ -607,7 +609,7 @@ pids=()
 all_ok=true
 for i in $(seq 1 8); do
     mkdir -p "$CONC_DIR/dec_$i"
-    $FC symmetric -i "$CONC_DIR/enc_$i"/*.fcr -o "$CONC_DIR/dec_$i" 2>/dev/null &
+    $FC decrypt -i "$CONC_DIR/enc_$i"/*.fcr -o "$CONC_DIR/dec_$i" 2>/dev/null &
     pids+=($!)
 done
 for pid in "${pids[@]}"; do
@@ -642,9 +644,9 @@ pids=()
 all_ok=true
 for i in $(seq 1 4); do
     mkdir -p "$CONC_DIR/mix_sym_enc_$i" "$CONC_DIR/mix_hyb_enc_$i"
-    $FC symmetric -i "$CONC_DIR/src_$i.bin" -o "$CONC_DIR/mix_sym_enc_$i" 2>/dev/null &
+    $FC encrypt -i "$CONC_DIR/src_$i.bin" -o "$CONC_DIR/mix_sym_enc_$i" 2>/dev/null &
     pids+=($!)
-    $FC hybrid -i "$CONC_DIR/src_$((i+4)).bin" -o "$CONC_DIR/mix_hyb_enc_$i" -k "$PUB" 2>/dev/null &
+    $FC encrypt -i "$CONC_DIR/src_$((i+4)).bin" -o "$CONC_DIR/mix_hyb_enc_$i" -k "$PUB" 2>/dev/null &
     pids+=($!)
 done
 for pid in "${pids[@]}"; do
@@ -674,8 +676,8 @@ big_enc="$WORKDIR/big_enc"
 big_dec="$WORKDIR/big_dec"
 mkdir -p "$big_enc" "$big_dec"
 START=$(date +%s)
-if $FC symmetric -i "$WORKDIR/3gb.bin" -o "$big_enc" 2>/dev/null && \
-   $FC symmetric -i "$big_enc"/*.fcr -o "$big_dec" 2>/dev/null && \
+if $FC encrypt -i "$WORKDIR/3gb.bin" -o "$big_enc" 2>/dev/null && \
+   $FC decrypt -i "$big_enc"/*.fcr -o "$big_dec" 2>/dev/null && \
    assert_identical "$WORKDIR/3gb.bin" "$big_dec/3gb.bin"; then
     END=$(date +%s)
     echo "PASS ($((END - START))s)"
@@ -703,11 +705,11 @@ for round in $(seq 1 10); do
     cyc_enc="$WORKDIR/cycle_enc_$round"
     cyc_dec="$WORKDIR/cycle_dec_$round"
     mkdir -p "$cyc_enc" "$cyc_dec"
-    if ! $FC symmetric -i "$WORKDIR/cycle_current.bin" -o "$cyc_enc" 2>/dev/null; then
+    if ! $FC encrypt -i "$WORKDIR/cycle_current.bin" -o "$cyc_enc" 2>/dev/null; then
         cycle_ok=false
         break
     fi
-    if ! $FC symmetric -i "$cyc_enc"/*.fcr -o "$cyc_dec" 2>/dev/null; then
+    if ! $FC decrypt -i "$cyc_enc"/*.fcr -o "$cyc_dec" 2>/dev/null; then
         cycle_ok=false
         break
     fi
@@ -724,19 +726,31 @@ fi
 echo ""
 
 # ──────────────────────────────────────────────
-# PHASE 12: Auto-detection (encrypted input auto-decrypts)
+# PHASE 12: Double-encrypt gate
 # ──────────────────────────────────────────────
-echo "--- Phase 12: Auto-detection ---"
+echo "--- Phase 12: Double-encrypt gate ---"
 
 dbl_enc1="$WORKDIR/dbl_enc1"
-dbl_dec1="$WORKDIR/dbl_dec1"
-mkdir -p "$dbl_enc1" "$dbl_dec1"
+dbl_enc2="$WORKDIR/dbl_enc2"
+dbl_dec_outer="$WORKDIR/dbl_dec_outer"
+dbl_dec_inner="$WORKDIR/dbl_dec_inner"
+mkdir -p "$dbl_enc1" "$dbl_enc2" "$dbl_dec_outer" "$dbl_dec_inner"
+$FC encrypt -i "$WORKDIR/1mb.bin" -o "$dbl_enc1" 2>/dev/null
+INNER_FCR="$dbl_enc1/1mb.fcr"
 
-echo -n "[$((TOTAL + 1))] sym: passing .fcr to symmetric auto-decrypts ... "
+# Without --allow-double-encrypt and with stdin closed (no TTY), encrypt
+# must refuse a .fcr input.
+run_test_expect_fail "sym: double-encrypt without flag refuses (non-TTY)" \
+    bash -c "$FC encrypt -i '$INNER_FCR' -o '$dbl_enc2' </dev/null"
+
+# With --allow-double-encrypt, encrypt proceeds and a full onion round trip
+# (outer decrypt → inner decrypt) recovers the plaintext.
+echo -n "[$((TOTAL + 1))] sym: double-encrypt with --allow-double-encrypt round-trips ... "
 TOTAL=$((TOTAL + 1))
-if $FC symmetric -i "$WORKDIR/1mb.bin" -o "$dbl_enc1" 2>/dev/null && \
-   $FC symmetric -i "$dbl_enc1"/*.fcr -o "$dbl_dec1" 2>/dev/null && \
-   assert_identical "$WORKDIR/1mb.bin" "$dbl_dec1/1mb.bin"; then
+if $FC encrypt -i "$INNER_FCR" -o "$dbl_enc2" --allow-double-encrypt </dev/null 2>/dev/null && \
+   $FC decrypt -i "$dbl_enc2"/1mb.fcr -o "$dbl_dec_outer" 2>/dev/null && \
+   $FC decrypt -i "$dbl_dec_outer"/1mb.fcr -o "$dbl_dec_inner" 2>/dev/null && \
+   assert_identical "$WORKDIR/1mb.bin" "$dbl_dec_inner/1mb.bin"; then
     echo "PASS"
     PASSED=$((PASSED + 1))
 else
@@ -785,8 +799,8 @@ echo "--- Phase 14: Non-determinism Verification ---"
 det_enc1="$WORKDIR/det_enc1"
 det_enc2="$WORKDIR/det_enc2"
 mkdir -p "$det_enc1" "$det_enc2"
-$FC symmetric -i "$WORKDIR/small.txt" -o "$det_enc1" 2>/dev/null
-$FC symmetric -i "$WORKDIR/small.txt" -o "$det_enc2" 2>/dev/null
+$FC encrypt -i "$WORKDIR/small.txt" -o "$det_enc1" 2>/dev/null
+$FC encrypt -i "$WORKDIR/small.txt" -o "$det_enc2" 2>/dev/null
 
 echo -n "[$((TOTAL + 1))] sym: encryptions produce different ciphertexts (non-deterministic) ... "
 TOTAL=$((TOTAL + 1))
@@ -801,8 +815,8 @@ fi
 det_enc3="$WORKDIR/det_enc3"
 det_enc4="$WORKDIR/det_enc4"
 mkdir -p "$det_enc3" "$det_enc4"
-$FC hybrid -i "$WORKDIR/small.txt" -o "$det_enc3" -k "$PUB" 2>/dev/null
-$FC hybrid -i "$WORKDIR/small.txt" -o "$det_enc4" -k "$PUB" 2>/dev/null
+$FC encrypt -i "$WORKDIR/small.txt" -o "$det_enc3" -k "$PUB" 2>/dev/null
+$FC encrypt -i "$WORKDIR/small.txt" -o "$det_enc4" -k "$PUB" 2>/dev/null
 
 echo -n "[$((TOTAL + 1))] hyb: encryptions produce different ciphertexts (non-deterministic) ... "
 TOTAL=$((TOTAL + 1))
@@ -829,11 +843,11 @@ for i in $(seq 1 30); do
     rdec="$WORKDIR/rapid_dec_$i"
     mkdir -p "$rdir" "$rdec"
     printf "rapid test data #%d with some padding to make it interesting %s" "$i" "$(head -c 100 /dev/urandom | base64)" > "$WORKDIR/rapid_src_$i.txt"
-    if ! $FC symmetric -i "$WORKDIR/rapid_src_$i.txt" -o "$rdir" 2>/dev/null; then
+    if ! $FC encrypt -i "$WORKDIR/rapid_src_$i.txt" -o "$rdir" 2>/dev/null; then
         rapid_ok=false
         break
     fi
-    if ! $FC symmetric -i "$rdir"/*.fcr -o "$rdec" 2>/dev/null; then
+    if ! $FC decrypt -i "$rdir"/*.fcr -o "$rdec" 2>/dev/null; then
         rapid_ok=false
         break
     fi

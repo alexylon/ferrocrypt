@@ -425,8 +425,9 @@ impl PublicKey {
     }
 
     /// Decodes a canonical lowercase Bech32 `fcr1…` recipient string
-    /// (as produced by [`PublicKey::to_recipient_string`] or the
-    /// `ferrocrypt recipient` subcommand) into a `PublicKey`. Validates
+    /// (as produced by [`PublicKey::to_recipient_string`] or read directly
+    /// from a `public.key` file, which is itself the canonical text)
+    /// into a `PublicKey`. Validates
     /// HRP, BIP 173 checksum, internal SHA3-256 checksum, payload
     /// structural fields, type-name grammar, and (for v1 X25519
     /// recipients) the recipient `type_name == "x25519"` and 32-byte

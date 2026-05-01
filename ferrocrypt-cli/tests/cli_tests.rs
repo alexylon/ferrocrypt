@@ -40,8 +40,8 @@ fn cleanup_test_workspace() {
 }
 
 #[test]
-fn test_cli_symmetric_encrypt_decrypt_file() {
-    let test_dir = setup_test_dir("cli_symmetric_file");
+fn test_cli_passphrase_encrypt_decrypt_file() {
+    let test_dir = setup_test_dir("cli_passphrase_file");
     let input_file = test_dir.join("test.txt");
     let encrypt_dir = test_dir.join("encrypted");
     let decrypt_dir = test_dir.join("decrypted");
@@ -54,9 +54,8 @@ fn test_cli_symmetric_encrypt_decrypt_file() {
 
     let binary = get_binary_path();
 
-    // Encrypt
     let encrypt_output = Command::new(&binary)
-        .arg("symmetric")
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
         .arg("-o")
@@ -73,9 +72,8 @@ fn test_cli_symmetric_encrypt_decrypt_file() {
 
     assert!(encrypt_dir.join("test.fcr").exists());
 
-    // Decrypt
     let decrypt_output = Command::new(&binary)
-        .arg("symmetric")
+        .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("test.fcr"))
         .arg("-o")
@@ -90,15 +88,14 @@ fn test_cli_symmetric_encrypt_decrypt_file() {
         String::from_utf8_lossy(&decrypt_output.stderr)
     );
 
-    // Verify content
     let decrypted_content =
         fs::read_to_string(decrypt_dir.join("test.txt")).expect("Failed to read decrypted file");
     assert_eq!(content, decrypted_content);
 }
 
 #[test]
-fn test_cli_symmetric_multi_chunk_file() {
-    let test_dir = setup_test_dir("cli_symmetric_multi_chunk");
+fn test_cli_passphrase_multi_chunk_file() {
+    let test_dir = setup_test_dir("cli_passphrase_multi_chunk");
     let input_file = test_dir.join("multi_chunk.txt");
     let encrypt_dir = test_dir.join("encrypted");
     let decrypt_dir = test_dir.join("decrypted");
@@ -112,7 +109,7 @@ fn test_cli_symmetric_multi_chunk_file() {
     let binary = get_binary_path();
 
     let encrypt_output = Command::new(&binary)
-        .arg("symmetric")
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
         .arg("-o")
@@ -125,7 +122,7 @@ fn test_cli_symmetric_multi_chunk_file() {
     assert!(encrypt_dir.join("multi_chunk.fcr").exists());
 
     let decrypt_output = Command::new(&binary)
-        .arg("symmetric")
+        .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("multi_chunk.fcr"))
         .arg("-o")
@@ -142,8 +139,8 @@ fn test_cli_symmetric_multi_chunk_file() {
 }
 
 #[test]
-fn test_cli_symmetric_wrong_password() {
-    let test_dir = setup_test_dir("cli_symmetric_wrong_pass");
+fn test_cli_passphrase_wrong_password() {
+    let test_dir = setup_test_dir("cli_passphrase_wrong_pass");
     let input_file = test_dir.join("secret.txt");
     let encrypt_dir = test_dir.join("encrypted");
     let decrypt_dir = test_dir.join("decrypted");
@@ -155,9 +152,8 @@ fn test_cli_symmetric_wrong_password() {
 
     let binary = get_binary_path();
 
-    // Encrypt with correct password
     let encrypt_output = Command::new(&binary)
-        .arg("symmetric")
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
         .arg("-o")
@@ -168,9 +164,8 @@ fn test_cli_symmetric_wrong_password() {
 
     assert!(encrypt_output.status.success());
 
-    // Try to decrypt with wrong password
     let decrypt_output = Command::new(&binary)
-        .arg("symmetric")
+        .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("secret.fcr"))
         .arg("-o")
@@ -203,7 +198,6 @@ fn test_cli_keygen() {
 
     let binary = get_binary_path();
 
-    // Generate key pair
     let keygen_output = Command::new(&binary)
         .arg("keygen")
         .arg("-o")
@@ -218,7 +212,6 @@ fn test_cli_keygen() {
         String::from_utf8_lossy(&keygen_output.stderr)
     );
 
-    // Check that keys were generated
     assert!(keys_dir.join("private.key").exists());
     assert!(keys_dir.join("public.key").exists());
 
@@ -235,8 +228,8 @@ fn test_cli_keygen() {
 }
 
 #[test]
-fn test_cli_hybrid_encrypt_decrypt_file() {
-    let test_dir = setup_test_dir("cli_hybrid_file");
+fn test_cli_recipient_encrypt_decrypt_file() {
+    let test_dir = setup_test_dir("cli_recipient_file");
     let keys_dir = test_dir.join("keys");
     let input_file = test_dir.join("data.txt");
     let encrypt_dir = test_dir.join("encrypted");
@@ -246,12 +239,11 @@ fn test_cli_hybrid_encrypt_decrypt_file() {
     fs::create_dir_all(&encrypt_dir).unwrap();
     fs::create_dir_all(&decrypt_dir).unwrap();
 
-    let content = "Hybrid encryption test data";
+    let content = "Public-key encryption test data";
     create_test_file(&input_file, content);
 
     let binary = get_binary_path();
 
-    // Generate keys
     let keygen_output = Command::new(&binary)
         .arg("keygen")
         .arg("-o")
@@ -262,9 +254,8 @@ fn test_cli_hybrid_encrypt_decrypt_file() {
 
     assert!(keygen_output.status.success());
 
-    // Encrypt with public key
     let encrypt_output = Command::new(&binary)
-        .arg("hybrid")
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
         .arg("-o")
@@ -282,14 +273,13 @@ fn test_cli_hybrid_encrypt_decrypt_file() {
 
     assert!(encrypt_dir.join("data.fcr").exists());
 
-    // Decrypt with private key
     let decrypt_output = Command::new(&binary)
-        .arg("hybrid")
+        .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("data.fcr"))
         .arg("-o")
         .arg(&decrypt_dir)
-        .arg("-k")
+        .arg("-K")
         .arg(keys_dir.join("private.key"))
         .env("FERROCRYPT_PASSPHRASE", "key_pass")
         .output()
@@ -301,15 +291,14 @@ fn test_cli_hybrid_encrypt_decrypt_file() {
         String::from_utf8_lossy(&decrypt_output.stderr)
     );
 
-    // Verify content
     let decrypted_content =
         fs::read_to_string(decrypt_dir.join("data.txt")).expect("Failed to read decrypted file");
     assert_eq!(content, decrypted_content);
 }
 
 #[test]
-fn test_cli_symmetric_payload_tamper_message() {
-    let test_dir = setup_test_dir("cli_symmetric_payload_tamper");
+fn test_cli_passphrase_payload_tamper_message() {
+    let test_dir = setup_test_dir("cli_passphrase_payload_tamper");
     let input_file = test_dir.join("payload.bin");
     let encrypt_dir = test_dir.join("encrypted");
     let decrypt_dir = test_dir.join("decrypted");
@@ -323,7 +312,7 @@ fn test_cli_symmetric_payload_tamper_message() {
     let binary = get_binary_path();
 
     let encrypt_output = Command::new(&binary)
-        .arg("symmetric")
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
         .arg("-o")
@@ -344,7 +333,7 @@ fn test_cli_symmetric_payload_tamper_message() {
     fs::write(&encrypted_path, &ciphertext).expect("Failed to write tampered ciphertext");
 
     let decrypt_output = Command::new(&binary)
-        .arg("symmetric")
+        .arg("decrypt")
         .arg("-i")
         .arg(&encrypted_path)
         .arg("-o")
@@ -366,8 +355,8 @@ fn test_cli_symmetric_payload_tamper_message() {
 }
 
 #[test]
-fn test_cli_hybrid_wrong_key_passphrase() {
-    let test_dir = setup_test_dir("cli_hybrid_wrong_pass");
+fn test_cli_recipient_wrong_key_passphrase() {
+    let test_dir = setup_test_dir("cli_recipient_wrong_pass");
     let keys_dir = test_dir.join("keys");
     let input_file = test_dir.join("data.txt");
     let encrypt_dir = test_dir.join("encrypted");
@@ -377,11 +366,10 @@ fn test_cli_hybrid_wrong_key_passphrase() {
     fs::create_dir_all(&encrypt_dir).unwrap();
     fs::create_dir_all(&decrypt_dir).unwrap();
 
-    create_test_file(&input_file, "Secret hybrid data");
+    create_test_file(&input_file, "Secret recipient data");
 
     let binary = get_binary_path();
 
-    // Generate keys with passphrase
     let keygen = Command::new(&binary)
         .arg("keygen")
         .arg("-o")
@@ -391,9 +379,8 @@ fn test_cli_hybrid_wrong_key_passphrase() {
         .expect("Failed to execute keygen");
     assert!(keygen.status.success());
 
-    // Encrypt
     let encrypt = Command::new(&binary)
-        .arg("hybrid")
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
         .arg("-o")
@@ -404,14 +391,13 @@ fn test_cli_hybrid_wrong_key_passphrase() {
         .expect("Failed to execute encrypt");
     assert!(encrypt.status.success());
 
-    // Try to decrypt with wrong passphrase
     let decrypt_output = Command::new(&binary)
-        .arg("hybrid")
+        .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("data.fcr"))
         .arg("-o")
         .arg(&decrypt_dir)
-        .arg("-k")
+        .arg("-K")
         .arg(keys_dir.join("private.key"))
         .env("FERROCRYPT_PASSPHRASE", "wrong_key_pass")
         .output()
@@ -440,7 +426,6 @@ fn test_cli_directory_encryption() {
     fs::create_dir_all(&encrypt_dir).unwrap();
     fs::create_dir_all(&decrypt_dir).unwrap();
 
-    // Create test directory structure
     create_test_file(&input_dir.join("file1.txt"), "Content 1");
     create_test_file(&input_dir.join("file2.txt"), "Content 2");
 
@@ -450,9 +435,8 @@ fn test_cli_directory_encryption() {
 
     let binary = get_binary_path();
 
-    // Encrypt directory
     let encrypt_output = Command::new(&binary)
-        .arg("symmetric")
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_dir)
         .arg("-o")
@@ -464,9 +448,8 @@ fn test_cli_directory_encryption() {
     assert!(encrypt_output.status.success());
     assert!(encrypt_dir.join("input_folder.fcr").exists());
 
-    // Decrypt directory
     let decrypt_output = Command::new(&binary)
-        .arg("symmetric")
+        .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("input_folder.fcr"))
         .arg("-o")
@@ -477,21 +460,19 @@ fn test_cli_directory_encryption() {
 
     assert!(decrypt_output.status.success());
 
-    // Verify directory structure
     let decrypted_dir = decrypt_dir.join("input_folder");
     assert!(decrypted_dir.exists());
     assert!(decrypted_dir.join("file1.txt").exists());
     assert!(decrypted_dir.join("file2.txt").exists());
     assert!(decrypted_dir.join("subdir/file3.txt").exists());
 
-    // Verify content
     let content1 = fs::read_to_string(decrypted_dir.join("file1.txt")).unwrap();
     assert_eq!("Content 1", content1);
 }
 
 #[test]
-fn test_cli_symmetric_save_as() {
-    let test_dir = setup_test_dir("cli_symmetric_save_as");
+fn test_cli_passphrase_save_as() {
+    let test_dir = setup_test_dir("cli_passphrase_save_as");
     let input_file = test_dir.join("data.txt");
     let encrypt_dir = test_dir.join("encrypted");
     let decrypt_dir = test_dir.join("decrypted");
@@ -506,11 +487,9 @@ fn test_cli_symmetric_save_as() {
     let binary = get_binary_path();
 
     let encrypt_output = Command::new(&binary)
-        .arg("symmetric")
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
-        .arg("-o")
-        .arg(&encrypt_dir)
         .arg("-s")
         .arg(&custom_output)
         .env("FERROCRYPT_PASSPHRASE", "test_password")
@@ -524,11 +503,9 @@ fn test_cli_symmetric_save_as() {
     );
 
     assert!(custom_output.exists());
-    assert!(!encrypt_dir.join("data.fcr").exists());
 
-    // Decrypt the custom-named file
     let decrypt_output = Command::new(&binary)
-        .arg("symmetric")
+        .arg("decrypt")
         .arg("-i")
         .arg(&custom_output)
         .arg("-o")
@@ -549,8 +526,8 @@ fn test_cli_symmetric_save_as() {
 }
 
 #[test]
-fn test_cli_hybrid_save_as() {
-    let test_dir = setup_test_dir("cli_hybrid_save_as");
+fn test_cli_recipient_save_as() {
+    let test_dir = setup_test_dir("cli_recipient_save_as");
     let keys_dir = test_dir.join("keys");
     let input_file = test_dir.join("data.txt");
     let encrypt_dir = test_dir.join("encrypted");
@@ -560,7 +537,7 @@ fn test_cli_hybrid_save_as() {
     fs::create_dir_all(&encrypt_dir).unwrap();
     fs::create_dir_all(&decrypt_dir).unwrap();
 
-    let content = "Hybrid save-as test";
+    let content = "Recipient save-as test";
     create_test_file(&input_file, content);
 
     let binary = get_binary_path();
@@ -577,11 +554,9 @@ fn test_cli_hybrid_save_as() {
     let custom_output = encrypt_dir.join("backup.enc");
 
     let encrypt_output = Command::new(&binary)
-        .arg("hybrid")
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
-        .arg("-o")
-        .arg(&encrypt_dir)
         .arg("-k")
         .arg(keys_dir.join("public.key"))
         .arg("-s")
@@ -596,15 +571,14 @@ fn test_cli_hybrid_save_as() {
     );
 
     assert!(custom_output.exists());
-    assert!(!encrypt_dir.join("data.fcr").exists());
 
     let decrypt_output = Command::new(&binary)
-        .arg("hybrid")
+        .arg("decrypt")
         .arg("-i")
         .arg(&custom_output)
         .arg("-o")
         .arg(&decrypt_dir)
-        .arg("-k")
+        .arg("-K")
         .arg(keys_dir.join("private.key"))
         .env("FERROCRYPT_PASSPHRASE", "key_pass")
         .output()
@@ -622,8 +596,8 @@ fn test_cli_hybrid_save_as() {
 }
 
 #[test]
-fn test_cli_symmetric_without_save_as_uses_default() {
-    let test_dir = setup_test_dir("cli_symmetric_no_save_as");
+fn test_cli_passphrase_without_save_as_uses_default() {
+    let test_dir = setup_test_dir("cli_passphrase_no_save_as");
     let input_file = test_dir.join("report.txt");
     let encrypt_dir = test_dir.join("encrypted");
 
@@ -634,7 +608,7 @@ fn test_cli_symmetric_without_save_as_uses_default() {
     let binary = get_binary_path();
 
     let output = Command::new(&binary)
-        .arg("symmetric")
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
         .arg("-o")
@@ -708,41 +682,6 @@ fn test_cli_keygen_prints_fingerprint() {
 }
 
 #[test]
-fn test_cli_recipient() {
-    let test_dir = setup_test_dir("cli_recipient");
-    let keys_dir = test_dir.join("keys");
-    fs::create_dir_all(&keys_dir).unwrap();
-
-    let binary = get_binary_path();
-
-    // Generate keys first
-    let keygen = Command::new(&binary)
-        .arg("keygen")
-        .arg("-o")
-        .arg(&keys_dir)
-        .env("FERROCRYPT_PASSPHRASE", "rcpt_pass")
-        .output()
-        .expect("Failed to execute keygen");
-    assert!(keygen.status.success());
-
-    // Get recipient string
-    let output = Command::new(&binary)
-        .arg("recipient")
-        .arg(keys_dir.join("public.key"))
-        .output()
-        .expect("Failed to execute recipient");
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let recipient = stdout.trim();
-    assert!(
-        recipient.starts_with("fcr1"),
-        "recipient should start with fcr1, got: {}",
-        recipient
-    );
-}
-
-#[test]
 fn test_cli_keygen_prints_recipient() {
     let test_dir = setup_test_dir("cli_keygen_rcpt");
     let keys_dir = test_dir.join("keys");
@@ -767,9 +706,19 @@ fn test_cli_keygen_prints_recipient() {
     );
 }
 
+/// Reads the canonical `fcr1...` recipient string out of a `public.key` file
+/// the way the CLI's `recipient` subcommand used to. The subcommand was
+/// removed because `public.key` is already a UTF-8 single-line text file.
+fn read_recipient_from_public_key(public_key: &Path) -> String {
+    fs::read_to_string(public_key)
+        .expect("read public.key")
+        .trim()
+        .to_string()
+}
+
 #[test]
-fn test_cli_hybrid_encrypt_with_recipient_string() {
-    let test_dir = setup_test_dir("cli_hybrid_recipient");
+fn test_cli_encrypt_with_recipient_string() {
+    let test_dir = setup_test_dir("cli_encrypt_recipient_string");
     let keys_dir = test_dir.join("keys");
     let encrypt_dir = test_dir.join("encrypted");
     let decrypt_dir = test_dir.join("decrypted");
@@ -779,7 +728,6 @@ fn test_cli_hybrid_encrypt_with_recipient_string() {
 
     let binary = get_binary_path();
 
-    // Generate keys
     let keygen = Command::new(&binary)
         .arg("keygen")
         .arg("-o")
@@ -789,23 +737,14 @@ fn test_cli_hybrid_encrypt_with_recipient_string() {
         .expect("Failed to execute keygen");
     assert!(keygen.status.success());
 
-    // Get recipient string
-    let rcpt_output = Command::new(&binary)
-        .arg("recipient")
-        .arg(keys_dir.join("public.key"))
-        .output()
-        .expect("Failed to get recipient");
-    assert!(rcpt_output.status.success());
-    let recipient = String::from_utf8_lossy(&rcpt_output.stdout)
-        .trim()
-        .to_string();
+    let recipient = read_recipient_from_public_key(&keys_dir.join("public.key"));
+    assert!(recipient.starts_with("fcr1"));
 
-    // Encrypt with --recipient
     let input_file = test_dir.join("secret.txt");
     create_test_file(&input_file, "recipient encryption test");
 
     let encrypt = Command::new(&binary)
-        .arg("hybrid")
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
         .arg("-o")
@@ -821,14 +760,13 @@ fn test_cli_hybrid_encrypt_with_recipient_string() {
     );
     assert!(encrypt_dir.join("secret.fcr").exists());
 
-    // Decrypt with private key
     let decrypt = Command::new(&binary)
-        .arg("hybrid")
+        .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("secret.fcr"))
         .arg("-o")
         .arg(&decrypt_dir)
-        .arg("-k")
+        .arg("-K")
         .arg(keys_dir.join("private.key"))
         .env("FERROCRYPT_PASSPHRASE", "rcpt_enc_pass")
         .output()
@@ -844,39 +782,8 @@ fn test_cli_hybrid_encrypt_with_recipient_string() {
 }
 
 #[test]
-fn test_cli_recipient_alias_rc() {
-    let test_dir = setup_test_dir("cli_recipient_alias_rc");
-    let keys_dir = test_dir.join("keys");
-    fs::create_dir_all(&keys_dir).unwrap();
-
-    let binary = get_binary_path();
-
-    let keygen = Command::new(&binary)
-        .arg("keygen")
-        .arg("-o")
-        .arg(&keys_dir)
-        .env("FERROCRYPT_PASSPHRASE", "alias_rc_pass")
-        .output()
-        .expect("Failed to execute keygen");
-    assert!(keygen.status.success());
-
-    let output = Command::new(&binary)
-        .arg("rc")
-        .arg(keys_dir.join("public.key"))
-        .output()
-        .expect("Failed to execute rc alias");
-
-    assert!(output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .starts_with("fcr1")
-    );
-}
-
-#[test]
-fn test_cli_hybrid_rejects_invalid_recipient_string() {
-    let test_dir = setup_test_dir("cli_hybrid_invalid_recipient");
+fn test_cli_encrypt_rejects_invalid_recipient_string() {
+    let test_dir = setup_test_dir("cli_encrypt_invalid_recipient");
     let input_file = test_dir.join("secret.txt");
     let encrypt_dir = test_dir.join("encrypted");
     fs::create_dir_all(&encrypt_dir).unwrap();
@@ -885,7 +792,7 @@ fn test_cli_hybrid_rejects_invalid_recipient_string() {
     let binary = get_binary_path();
 
     let output = Command::new(&binary)
-        .arg("hybrid")
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
         .arg("-o")
@@ -893,20 +800,24 @@ fn test_cli_hybrid_rejects_invalid_recipient_string() {
         .arg("-r")
         .arg("fcr1not-valid-bech32!!!")
         .output()
-        .expect("Failed to execute hybrid with invalid recipient");
+        .expect("Failed to execute encrypt with invalid recipient");
 
     assert!(!output.status.success());
 }
 
 #[test]
-fn test_cli_hybrid_rejects_key_and_recipient_together() {
-    let test_dir = setup_test_dir("cli_hybrid_key_and_recipient_conflict");
+fn test_cli_encrypt_mixes_public_key_and_recipient() {
+    // The new encrypt subcommand allows -k and -r to be combined: every
+    // listed key/recipient gets its own X25519 entry in the .fcr.
+    let test_dir = setup_test_dir("cli_encrypt_mixed_key_and_recipient");
     let keys_dir = test_dir.join("keys");
     let input_file = test_dir.join("secret.txt");
     let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
     fs::create_dir_all(&keys_dir).unwrap();
     fs::create_dir_all(&encrypt_dir).unwrap();
-    create_test_file(&input_file, "conflict test");
+    fs::create_dir_all(&decrypt_dir).unwrap();
+    create_test_file(&input_file, "mixed mode test");
 
     let binary = get_binary_path();
 
@@ -914,23 +825,15 @@ fn test_cli_hybrid_rejects_key_and_recipient_together() {
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
-        .env("FERROCRYPT_PASSPHRASE", "conflict_pass")
+        .env("FERROCRYPT_PASSPHRASE", "mixed_pass")
         .output()
         .expect("Failed to execute keygen");
     assert!(keygen.status.success());
 
-    let rcpt_output = Command::new(&binary)
-        .arg("recipient")
-        .arg(keys_dir.join("public.key"))
-        .output()
-        .expect("Failed to get recipient");
-    assert!(rcpt_output.status.success());
-    let recipient = String::from_utf8_lossy(&rcpt_output.stdout)
-        .trim()
-        .to_string();
+    let recipient = read_recipient_from_public_key(&keys_dir.join("public.key"));
 
     let output = Command::new(&binary)
-        .arg("hybrid")
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
         .arg("-o")
@@ -940,137 +843,261 @@ fn test_cli_hybrid_rejects_key_and_recipient_together() {
         .arg("-r")
         .arg(&recipient)
         .output()
-        .expect("Failed to execute conflicting hybrid command");
+        .expect("Failed to execute encrypt with mixed -k and -r");
 
-    assert!(!output.status.success());
-}
+    assert!(
+        output.status.success(),
+        "encrypt with -k and -r should succeed, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(encrypt_dir.join("secret.fcr").exists());
 
-#[test]
-fn test_cli_hybrid_decrypt_rejects_recipient_flag() {
-    let test_dir = setup_test_dir("cli_hybrid_decrypt_recipient_rejected");
-    let keys_dir = test_dir.join("keys");
-    let encrypt_dir = test_dir.join("encrypted");
-    let decrypt_dir = test_dir.join("decrypted");
-    let input_file = test_dir.join("secret.txt");
-    fs::create_dir_all(&keys_dir).unwrap();
-    fs::create_dir_all(&encrypt_dir).unwrap();
-    fs::create_dir_all(&decrypt_dir).unwrap();
-    create_test_file(&input_file, "recipient decrypt reject test");
-
-    let binary = get_binary_path();
-
-    let keygen = Command::new(&binary)
-        .arg("keygen")
-        .arg("-o")
-        .arg(&keys_dir)
-        .env("FERROCRYPT_PASSPHRASE", "decrypt_reject_pass")
-        .output()
-        .expect("Failed to execute keygen");
-    assert!(keygen.status.success());
-
-    let encrypt = Command::new(&binary)
-        .arg("hybrid")
-        .arg("-i")
-        .arg(&input_file)
-        .arg("-o")
-        .arg(&encrypt_dir)
-        .arg("-k")
-        .arg(keys_dir.join("public.key"))
-        .output()
-        .expect("Failed to execute encrypt");
-    assert!(encrypt.status.success());
-
-    let rcpt_output = Command::new(&binary)
-        .arg("recipient")
-        .arg(keys_dir.join("public.key"))
-        .output()
-        .expect("Failed to get recipient");
-    assert!(rcpt_output.status.success());
-    let recipient = String::from_utf8_lossy(&rcpt_output.stdout)
-        .trim()
-        .to_string();
-
-    // -k and -r conflict at clap level, so this should fail
-    let decrypt = Command::new(&binary)
-        .arg("hybrid")
+    // Either entry can decrypt the file.
+    let dec = Command::new(&binary)
+        .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("secret.fcr"))
         .arg("-o")
         .arg(&decrypt_dir)
-        .arg("-k")
+        .arg("-K")
         .arg(keys_dir.join("private.key"))
-        .arg("-r")
-        .arg(&recipient)
-        .env("FERROCRYPT_PASSPHRASE", "decrypt_reject_pass")
+        .env("FERROCRYPT_PASSPHRASE", "mixed_pass")
         .output()
-        .expect("Failed to execute decrypt with recipient flag");
-
-    assert!(!decrypt.status.success());
+        .expect("decrypt mixed file");
+    assert!(dec.status.success());
+    assert_eq!(
+        fs::read_to_string(decrypt_dir.join("secret.txt")).unwrap(),
+        "mixed mode test"
+    );
 }
 
 #[test]
-fn test_cli_hybrid_encrypt_requires_key_or_recipient() {
-    let test_dir = setup_test_dir("cli_hybrid_requires_key_or_recipient");
+fn test_cli_encrypt_multiple_public_keys() {
+    let test_dir = setup_test_dir("cli_encrypt_multi_public_key");
+    let keys_a = test_dir.join("keys_a");
+    let keys_b = test_dir.join("keys_b");
+    let input_file = test_dir.join("secret.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir_a = test_dir.join("dec_a");
+    let decrypt_dir_b = test_dir.join("dec_b");
+    for d in [
+        &keys_a,
+        &keys_b,
+        &encrypt_dir,
+        &decrypt_dir_a,
+        &decrypt_dir_b,
+    ] {
+        fs::create_dir_all(d).unwrap();
+    }
+    create_test_file(&input_file, "two-recipient test");
+
+    let binary = get_binary_path();
+
+    for (dir, pass) in [(&keys_a, "pa"), (&keys_b, "pb")] {
+        let kg = Command::new(&binary)
+            .arg("keygen")
+            .arg("-o")
+            .arg(dir)
+            .env("FERROCRYPT_PASSPHRASE", pass)
+            .output()
+            .expect("keygen");
+        assert!(kg.status.success());
+    }
+
+    let enc = Command::new(&binary)
+        .arg("encrypt")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .arg("-k")
+        .arg(keys_a.join("public.key"))
+        .arg("-k")
+        .arg(keys_b.join("public.key"))
+        .output()
+        .expect("encrypt");
+    assert!(
+        enc.status.success(),
+        "encrypt with two -k flags failed: {}",
+        String::from_utf8_lossy(&enc.stderr)
+    );
+
+    // Either private key decrypts the file.
+    let dec_a = Command::new(&binary)
+        .arg("decrypt")
+        .arg("-i")
+        .arg(encrypt_dir.join("secret.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir_a)
+        .arg("-K")
+        .arg(keys_a.join("private.key"))
+        .env("FERROCRYPT_PASSPHRASE", "pa")
+        .output()
+        .expect("decrypt A");
+    assert!(dec_a.status.success());
+
+    let dec_b = Command::new(&binary)
+        .arg("decrypt")
+        .arg("-i")
+        .arg(encrypt_dir.join("secret.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir_b)
+        .arg("-K")
+        .arg(keys_b.join("private.key"))
+        .env("FERROCRYPT_PASSPHRASE", "pb")
+        .output()
+        .expect("decrypt B");
+    assert!(dec_b.status.success());
+}
+
+#[test]
+fn test_cli_decrypt_rejects_recipient_flag() {
+    // -r is encrypt-only; clap rejects it on `decrypt` at parse time.
+    let test_dir = setup_test_dir("cli_decrypt_recipient_rejected");
+    let bad_input = test_dir.join("does_not_matter.fcr");
+    fs::write(&bad_input, b"not a real .fcr").unwrap();
+
+    let output = Command::new(get_binary_path())
+        .arg("decrypt")
+        .arg("-i")
+        .arg(&bad_input)
+        .arg("-o")
+        .arg(&test_dir)
+        .arg("-r")
+        .arg("fcr1...")
+        .output()
+        .expect("decrypt with -r");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unexpected") || stderr.to_lowercase().contains("argument"),
+        "expected clap unrecognized-flag error, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_cli_encrypt_passphrase_conflicts_with_recipient_flag() {
+    let test_dir = setup_test_dir("cli_encrypt_p_conflicts_r");
     let input_file = test_dir.join("secret.txt");
     let encrypt_dir = test_dir.join("encrypted");
     fs::create_dir_all(&encrypt_dir).unwrap();
-    create_test_file(&input_file, "missing key test");
+    create_test_file(&input_file, "conflict");
 
-    let binary = get_binary_path();
-
-    let output = Command::new(&binary)
-        .arg("hybrid")
+    let output = Command::new(get_binary_path())
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
         .arg("-o")
         .arg(&encrypt_dir)
+        .arg("-p")
+        .arg("-r")
+        .arg("fcr1deadbeef")
         .output()
-        .expect("Failed to execute hybrid without key or recipient");
-
+        .expect("encrypt -p -r");
     assert!(!output.status.success());
 }
 
 #[test]
-fn test_cli_symmetric_decrypt_rejects_save_as() {
-    let test_dir = setup_test_dir("cli_symmetric_decrypt_rejects_save_as");
-    let input_file = test_dir.join("data.txt");
+fn test_cli_encrypt_passphrase_conflicts_with_public_key_flag() {
+    let test_dir = setup_test_dir("cli_encrypt_p_conflicts_k");
+    let keys_dir = test_dir.join("keys");
+    let input_file = test_dir.join("secret.txt");
     let encrypt_dir = test_dir.join("encrypted");
-    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&keys_dir).unwrap();
     fs::create_dir_all(&encrypt_dir).unwrap();
-    fs::create_dir_all(&decrypt_dir).unwrap();
-    create_test_file(&input_file, "save-as reject test");
+    create_test_file(&input_file, "conflict");
 
     let binary = get_binary_path();
 
-    let encrypt = Command::new(&binary)
-        .arg("symmetric")
+    let kg = Command::new(&binary)
+        .arg("keygen")
+        .arg("-o")
+        .arg(&keys_dir)
+        .env("FERROCRYPT_PASSPHRASE", "kp")
+        .output()
+        .expect("keygen");
+    assert!(kg.status.success());
+
+    let output = Command::new(&binary)
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
         .arg("-o")
         .arg(&encrypt_dir)
-        .env("FERROCRYPT_PASSPHRASE", "save_as_pass")
+        .arg("-p")
+        .arg("-k")
+        .arg(keys_dir.join("public.key"))
         .output()
-        .expect("Failed to encrypt");
-    assert!(encrypt.status.success());
-
-    let decrypt = Command::new(&binary)
-        .arg("symmetric")
-        .arg("-i")
-        .arg(encrypt_dir.join("data.fcr"))
-        .arg("-o")
-        .arg(&decrypt_dir)
-        .arg("-s")
-        .arg(decrypt_dir.join("ignored.txt"))
-        .env("FERROCRYPT_PASSPHRASE", "save_as_pass")
-        .output()
-        .expect("Failed to execute decrypt with save-as");
-
-    assert!(!decrypt.status.success());
+        .expect("encrypt -p -k");
+    assert!(!output.status.success());
 }
 
 #[test]
-fn test_cli_hybrid_decrypt_rejects_save_as() {
-    let test_dir = setup_test_dir("cli_hybrid_decrypt_rejects_save_as");
+fn test_cli_encrypt_output_dir_conflicts_with_save_as() {
+    let test_dir = setup_test_dir("cli_encrypt_o_conflicts_s");
+    let input_file = test_dir.join("secret.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let target = test_dir.join("custom.fcr");
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    create_test_file(&input_file, "conflict");
+
+    let output = Command::new(get_binary_path())
+        .arg("encrypt")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .arg("-s")
+        .arg(&target)
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("encrypt -o -s");
+    assert!(!output.status.success());
+}
+
+#[test]
+fn test_cli_encrypt_explicit_passphrase_flag_succeeds() {
+    let test_dir = setup_test_dir("cli_encrypt_explicit_p");
+    let input_file = test_dir.join("secret.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    fs::create_dir_all(&decrypt_dir).unwrap();
+    create_test_file(&input_file, "explicit -p test");
+
+    let binary = get_binary_path();
+
+    let enc = Command::new(&binary)
+        .arg("encrypt")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .arg("-p")
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("encrypt -p");
+    assert!(
+        enc.status.success(),
+        "encrypt -p should produce a passphrase file: {}",
+        String::from_utf8_lossy(&enc.stderr)
+    );
+
+    let dec = Command::new(&binary)
+        .arg("decrypt")
+        .arg("-i")
+        .arg(encrypt_dir.join("secret.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("decrypt");
+    assert!(dec.status.success());
+}
+
+#[test]
+fn test_cli_decrypt_passphrase_file_with_private_key_fails_before_prompt() {
+    let test_dir = setup_test_dir("cli_decrypt_passphrase_with_K");
     let keys_dir = test_dir.join("keys");
     let input_file = test_dir.join("data.txt");
     let encrypt_dir = test_dir.join("encrypted");
@@ -1078,107 +1105,239 @@ fn test_cli_hybrid_decrypt_rejects_save_as() {
     fs::create_dir_all(&keys_dir).unwrap();
     fs::create_dir_all(&encrypt_dir).unwrap();
     fs::create_dir_all(&decrypt_dir).unwrap();
-    create_test_file(&input_file, "hybrid save-as reject test");
+    create_test_file(&input_file, "passphrase file");
 
     let binary = get_binary_path();
 
-    let keygen = Command::new(&binary)
+    let kg = Command::new(&binary)
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
-        .env("FERROCRYPT_PASSPHRASE", "hybrid_save_as_pass")
+        .env("FERROCRYPT_PASSPHRASE", "kp")
         .output()
-        .expect("Failed to execute keygen");
-    assert!(keygen.status.success());
+        .expect("keygen");
+    assert!(kg.status.success());
 
-    let encrypt = Command::new(&binary)
-        .arg("hybrid")
+    let enc = Command::new(&binary)
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
         .arg("-o")
         .arg(&encrypt_dir)
-        .arg("-k")
-        .arg(keys_dir.join("public.key"))
+        .env("FERROCRYPT_PASSPHRASE", "pass")
         .output()
-        .expect("Failed to execute encrypt");
-    assert!(encrypt.status.success());
+        .expect("encrypt");
+    assert!(enc.status.success());
 
-    let decrypt = Command::new(&binary)
-        .arg("hybrid")
+    // Even with no passphrase env var, the dispatcher must reject -K
+    // before the prompt fires. stdin is null so a leaked prompt would hang.
+    let dec = Command::new(&binary)
+        .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("data.fcr"))
         .arg("-o")
         .arg(&decrypt_dir)
-        .arg("-k")
+        .arg("-K")
         .arg(keys_dir.join("private.key"))
-        .arg("-s")
-        .arg(decrypt_dir.join("ignored.txt"))
-        .env("FERROCRYPT_PASSPHRASE", "hybrid_save_as_pass")
+        .env_remove("FERROCRYPT_PASSPHRASE")
+        .stdin(std::process::Stdio::null())
         .output()
-        .expect("Failed to execute decrypt with save-as");
-
-    assert!(!decrypt.status.success());
+        .expect("decrypt with -K");
+    assert!(!dec.status.success());
+    let stderr = String::from_utf8_lossy(&dec.stderr);
+    assert!(
+        stderr.contains("--private-key is not applicable"),
+        "expected typed rejection message, got: {stderr}"
+    );
 }
 
 #[test]
-fn test_cli_hybrid_encrypt_rejects_max_kdf_memory() {
-    let test_dir = setup_test_dir("cli_hybrid_encrypt_rejects_max_kdf_memory");
+fn test_cli_decrypt_recipient_file_without_private_key_fails() {
+    let test_dir = setup_test_dir("cli_decrypt_recipient_without_K");
     let keys_dir = test_dir.join("keys");
     let input_file = test_dir.join("data.txt");
     let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
     fs::create_dir_all(&keys_dir).unwrap();
     fs::create_dir_all(&encrypt_dir).unwrap();
-    create_test_file(&input_file, "hybrid kdf reject test");
+    fs::create_dir_all(&decrypt_dir).unwrap();
+    create_test_file(&input_file, "recipient file");
 
     let binary = get_binary_path();
 
-    let keygen = Command::new(&binary)
+    let kg = Command::new(&binary)
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
-        .env("FERROCRYPT_PASSPHRASE", "hybrid_kdf_reject_pass")
+        .env("FERROCRYPT_PASSPHRASE", "kp")
         .output()
-        .expect("Failed to execute keygen");
-    assert!(keygen.status.success());
+        .expect("keygen");
+    assert!(kg.status.success());
 
-    let output = Command::new(&binary)
-        .arg("hybrid")
+    let enc = Command::new(&binary)
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
         .arg("-o")
         .arg(&encrypt_dir)
         .arg("-k")
         .arg(keys_dir.join("public.key"))
-        .arg("--max-kdf-memory")
-        .arg("64")
         .output()
-        .expect("Failed to execute hybrid encrypt with max-kdf-memory");
+        .expect("encrypt");
+    assert!(enc.status.success());
 
-    assert!(!output.status.success());
+    let dec = Command::new(&binary)
+        .arg("decrypt")
+        .arg("-i")
+        .arg(encrypt_dir.join("data.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "kp")
+        .output()
+        .expect("decrypt without -K");
+    assert!(!dec.status.success());
+    let stderr = String::from_utf8_lossy(&dec.stderr);
+    assert!(
+        stderr.contains("--private-key is required"),
+        "expected typed --private-key required message, got: {stderr}"
+    );
 }
 
 #[test]
-fn test_cli_symmetric_encrypt_rejects_max_kdf_memory() {
-    let test_dir = setup_test_dir("cli_symmetric_encrypt_rejects_max_kdf_memory");
+fn test_cli_decrypt_accepts_max_kdf_memory_passphrase_mode() {
+    let test_dir = setup_test_dir("cli_decrypt_kdf_passphrase");
     let input_file = test_dir.join("data.txt");
     let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
     fs::create_dir_all(&encrypt_dir).unwrap();
-    create_test_file(&input_file, "symmetric kdf reject test");
+    fs::create_dir_all(&decrypt_dir).unwrap();
+    create_test_file(&input_file, "kdf passphrase test");
 
     let binary = get_binary_path();
-
-    let output = Command::new(&binary)
-        .arg("symmetric")
+    let enc = Command::new(&binary)
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
         .arg("-o")
         .arg(&encrypt_dir)
-        .env("FERROCRYPT_PASSPHRASE", "sym_reject_pass")
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("encrypt");
+    assert!(enc.status.success());
+
+    // 2048 MiB is wide enough to admit the default 1 GiB Argon2id cost.
+    let dec = Command::new(&binary)
+        .arg("decrypt")
+        .arg("-i")
+        .arg(encrypt_dir.join("data.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir)
+        .arg("--max-kdf-memory")
+        .arg("2048")
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("decrypt with --max-kdf-memory");
+    assert!(
+        dec.status.success(),
+        "decrypt with widened --max-kdf-memory failed: {}",
+        String::from_utf8_lossy(&dec.stderr)
+    );
+}
+
+#[test]
+fn test_cli_decrypt_accepts_max_kdf_memory_recipient_mode() {
+    let test_dir = setup_test_dir("cli_decrypt_kdf_recipient");
+    let keys_dir = test_dir.join("keys");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&keys_dir).unwrap();
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    fs::create_dir_all(&decrypt_dir).unwrap();
+    create_test_file(&input_file, "kdf recipient test");
+
+    let binary = get_binary_path();
+    let kg = Command::new(&binary)
+        .arg("keygen")
+        .arg("-o")
+        .arg(&keys_dir)
+        .env("FERROCRYPT_PASSPHRASE", "kp")
+        .output()
+        .expect("keygen");
+    assert!(kg.status.success());
+
+    let enc = Command::new(&binary)
+        .arg("encrypt")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .arg("-k")
+        .arg(keys_dir.join("public.key"))
+        .output()
+        .expect("encrypt");
+    assert!(enc.status.success());
+
+    let dec = Command::new(&binary)
+        .arg("decrypt")
+        .arg("-i")
+        .arg(encrypt_dir.join("data.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir)
+        .arg("-K")
+        .arg(keys_dir.join("private.key"))
+        .arg("--max-kdf-memory")
+        .arg("2048")
+        .env("FERROCRYPT_PASSPHRASE", "kp")
+        .output()
+        .expect("decrypt with --max-kdf-memory");
+    assert!(
+        dec.status.success(),
+        "decrypt with widened --max-kdf-memory (recipient mode) failed: {}",
+        String::from_utf8_lossy(&dec.stderr)
+    );
+}
+
+#[test]
+fn test_cli_encrypt_rejects_max_kdf_memory_flag() {
+    // --max-kdf-memory is decrypt-only; clap rejects it on `encrypt`.
+    let test_dir = setup_test_dir("cli_encrypt_rejects_max_kdf");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    create_test_file(&input_file, "kdf reject test");
+
+    let output = Command::new(get_binary_path())
+        .arg("encrypt")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
         .arg("--max-kdf-memory")
         .arg("64")
+        .env("FERROCRYPT_PASSPHRASE", "p")
         .output()
-        .expect("Failed to execute symmetric encrypt with max-kdf-memory");
+        .expect("encrypt --max-kdf-memory");
+    assert!(!output.status.success());
+}
 
+#[test]
+fn test_cli_decrypt_rejects_save_as_flag() {
+    // -s is encrypt-only; clap rejects it on `decrypt`.
+    let test_dir = setup_test_dir("cli_decrypt_rejects_s");
+    let bad_input = test_dir.join("does_not_matter.fcr");
+    fs::write(&bad_input, b"not a real .fcr").unwrap();
+
+    let output = Command::new(get_binary_path())
+        .arg("decrypt")
+        .arg("-i")
+        .arg(&bad_input)
+        .arg("-o")
+        .arg(&test_dir)
+        .arg("-s")
+        .arg(test_dir.join("ignored.txt"))
+        .output()
+        .expect("decrypt -s");
     assert!(!output.status.success());
 }
 
@@ -1190,10 +1349,8 @@ fn test_cli_rejects_empty_passphrase_env_var() {
     fs::create_dir_all(&encrypt_dir).unwrap();
     create_test_file(&input_file, "empty passphrase test");
 
-    let binary = get_binary_path();
-
-    let output = Command::new(&binary)
-        .arg("symmetric")
+    let output = Command::new(get_binary_path())
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
         .arg("-o")
@@ -1213,15 +1370,13 @@ fn test_cli_fails_without_passphrase_and_no_tty() {
     fs::create_dir_all(&encrypt_dir).unwrap();
     create_test_file(&input_file, "no tty test");
 
-    let binary = get_binary_path();
-
     // Null stdin = no terminal. On Unix rpassword would otherwise open
     // /dev/tty directly and block; on Windows it would open CONIN$ and
     // block the same way. The CLI's cross-platform `is_terminal()` guard
     // must catch this up-front and fail with a clear error rather than
     // hang or silently prompt on some hidden console.
-    let output = Command::new(&binary)
-        .arg("symmetric")
+    let output = Command::new(get_binary_path())
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
         .arg("-o")
@@ -1243,65 +1398,15 @@ fn test_cli_fails_without_passphrase_and_no_tty() {
 }
 
 #[test]
-fn test_cli_hybrid_decrypt_requires_key() {
-    let test_dir = setup_test_dir("cli_hybrid_decrypt_requires_key");
-    let keys_dir = test_dir.join("keys");
-    let input_file = test_dir.join("data.txt");
-    let encrypt_dir = test_dir.join("encrypted");
-    let decrypt_dir = test_dir.join("decrypted");
-    fs::create_dir_all(&keys_dir).unwrap();
-    fs::create_dir_all(&encrypt_dir).unwrap();
-    fs::create_dir_all(&decrypt_dir).unwrap();
-    create_test_file(&input_file, "missing key on decrypt test");
-
-    let binary = get_binary_path();
-
-    let keygen = Command::new(&binary)
-        .arg("keygen")
-        .arg("-o")
-        .arg(&keys_dir)
-        .env("FERROCRYPT_PASSPHRASE", "dk_pass")
-        .output()
-        .expect("Failed to execute keygen");
-    assert!(keygen.status.success());
-
-    let encrypt = Command::new(&binary)
-        .arg("hybrid")
-        .arg("-i")
-        .arg(&input_file)
-        .arg("-o")
-        .arg(&encrypt_dir)
-        .arg("-k")
-        .arg(keys_dir.join("public.key"))
-        .output()
-        .expect("Failed to encrypt");
-    assert!(encrypt.status.success());
-
-    let decrypt = Command::new(&binary)
-        .arg("hybrid")
-        .arg("-i")
-        .arg(encrypt_dir.join("data.fcr"))
-        .arg("-o")
-        .arg(&decrypt_dir)
-        .env("FERROCRYPT_PASSPHRASE", "dk_pass")
-        .output()
-        .expect("Failed to execute decrypt without key");
-
-    assert!(!decrypt.status.success());
-}
-
-#[test]
-fn test_cli_hybrid_nonexistent_key_file() {
-    let test_dir = setup_test_dir("cli_hybrid_nonexistent_key");
+fn test_cli_recipient_nonexistent_key_file() {
+    let test_dir = setup_test_dir("cli_nonexistent_key");
     let input_file = test_dir.join("data.txt");
     let encrypt_dir = test_dir.join("encrypted");
     fs::create_dir_all(&encrypt_dir).unwrap();
     create_test_file(&input_file, "nonexistent key test");
 
-    let binary = get_binary_path();
-
-    let output = Command::new(&binary)
-        .arg("hybrid")
+    let output = Command::new(get_binary_path())
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
         .arg("-o")
@@ -1315,13 +1420,11 @@ fn test_cli_hybrid_nonexistent_key_file() {
 }
 
 #[test]
-fn test_cli_symmetric_nonexistent_input() {
-    let test_dir = setup_test_dir("cli_sym_nonexistent_input");
+fn test_cli_passphrase_nonexistent_input() {
+    let test_dir = setup_test_dir("cli_passphrase_nonexistent_input");
 
-    let binary = get_binary_path();
-
-    let output = Command::new(&binary)
-        .arg("symmetric")
+    let output = Command::new(get_binary_path())
+        .arg("encrypt")
         .arg("-i")
         .arg(test_dir.join("nonexistent.txt"))
         .arg("-o")
@@ -1334,24 +1437,24 @@ fn test_cli_symmetric_nonexistent_input() {
 }
 
 #[test]
-fn test_cli_hybrid_nonexistent_input() {
-    let test_dir = setup_test_dir("cli_hyb_nonexistent_input");
+fn test_cli_recipient_nonexistent_input() {
+    let test_dir = setup_test_dir("cli_recipient_nonexistent_input");
     let keys_dir = test_dir.join("keys");
     fs::create_dir_all(&keys_dir).unwrap();
 
     let binary = get_binary_path();
 
-    let keygen = Command::new(&binary)
+    let kg = Command::new(&binary)
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
         .env("FERROCRYPT_PASSPHRASE", "noinput_pass")
         .output()
         .expect("Failed to execute keygen");
-    assert!(keygen.status.success());
+    assert!(kg.status.success());
 
     let output = Command::new(&binary)
-        .arg("hybrid")
+        .arg("encrypt")
         .arg("-i")
         .arg(test_dir.join("nonexistent.txt"))
         .arg("-o")
@@ -1368,9 +1471,7 @@ fn test_cli_hybrid_nonexistent_input() {
 fn test_cli_fingerprint_nonexistent_file() {
     let test_dir = setup_test_dir("cli_fp_nonexistent");
 
-    let binary = get_binary_path();
-
-    let output = Command::new(&binary)
+    let output = Command::new(get_binary_path())
         .arg("fingerprint")
         .arg(test_dir.join("nonexistent.key"))
         .output()
@@ -1380,42 +1481,65 @@ fn test_cli_fingerprint_nonexistent_file() {
 }
 
 #[test]
-fn test_cli_recipient_nonexistent_file() {
-    let test_dir = setup_test_dir("cli_rcpt_nonexistent");
-
-    let binary = get_binary_path();
-
-    let output = Command::new(&binary)
-        .arg("recipient")
-        .arg(test_dir.join("nonexistent.key"))
-        .output()
-        .expect("Failed to execute recipient with nonexistent file");
-
-    assert!(!output.status.success());
-}
-
-#[test]
-fn test_cli_symmetric_alias_sym() {
-    let test_dir = setup_test_dir("cli_alias_sym");
+fn test_cli_encrypt_alias_enc() {
+    let test_dir = setup_test_dir("cli_alias_enc");
     let input_file = test_dir.join("data.txt");
     let encrypt_dir = test_dir.join("encrypted");
     fs::create_dir_all(&encrypt_dir).unwrap();
-    create_test_file(&input_file, "alias test");
+    create_test_file(&input_file, "alias enc test");
 
-    let binary = get_binary_path();
-
-    let output = Command::new(&binary)
-        .arg("sym")
+    let output = Command::new(get_binary_path())
+        .arg("enc")
         .arg("-i")
         .arg(&input_file)
         .arg("-o")
         .arg(&encrypt_dir)
         .env("FERROCRYPT_PASSPHRASE", "alias_pass")
         .output()
-        .expect("Failed to execute sym alias");
+        .expect("Failed to execute enc alias");
 
     assert!(output.status.success());
     assert!(encrypt_dir.join("data.fcr").exists());
+}
+
+#[test]
+fn test_cli_decrypt_alias_dec() {
+    let test_dir = setup_test_dir("cli_alias_dec");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    fs::create_dir_all(&decrypt_dir).unwrap();
+    create_test_file(&input_file, "alias dec test");
+
+    let binary = get_binary_path();
+
+    let enc = Command::new(&binary)
+        .arg("encrypt")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "alias_dec_pass")
+        .output()
+        .expect("encrypt");
+    assert!(enc.status.success());
+
+    let output = Command::new(&binary)
+        .arg("dec")
+        .arg("-i")
+        .arg(encrypt_dir.join("data.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "alias_dec_pass")
+        .output()
+        .expect("Failed to execute dec alias");
+
+    assert!(output.status.success());
+    assert_eq!(
+        fs::read_to_string(decrypt_dir.join("data.txt")).unwrap(),
+        "alias dec test"
+    );
 }
 
 #[test]
@@ -1424,9 +1548,7 @@ fn test_cli_keygen_alias_gen() {
     let keys_dir = test_dir.join("keys");
     fs::create_dir_all(&keys_dir).unwrap();
 
-    let binary = get_binary_path();
-
-    let output = Command::new(&binary)
+    let output = Command::new(get_binary_path())
         .arg("gen")
         .arg("-o")
         .arg(&keys_dir)
@@ -1474,8 +1596,8 @@ fn test_cli_fingerprint_alias_fp() {
 // ─── Conflict detection tests ──────────────────────────────────────────────
 
 #[test]
-fn test_symmetric_encrypt_conflict_detected() {
-    let test_dir = setup_test_dir("sym_encrypt_conflict");
+fn test_passphrase_encrypt_conflict_detected() {
+    let test_dir = setup_test_dir("passphrase_encrypt_conflict");
     let input_file = test_dir.join("data.txt");
     let encrypt_dir = test_dir.join("encrypted");
     fs::create_dir_all(&encrypt_dir).unwrap();
@@ -1483,9 +1605,8 @@ fn test_symmetric_encrypt_conflict_detected() {
 
     let binary = get_binary_path();
 
-    // First encrypt succeeds
     let first = Command::new(&binary)
-        .arg("sym")
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
         .arg("-o")
@@ -1496,9 +1617,8 @@ fn test_symmetric_encrypt_conflict_detected() {
     assert!(first.status.success(), "first encrypt should succeed");
     assert!(encrypt_dir.join("data.fcr").exists());
 
-    // Second encrypt hits the conflict (non-interactive → error)
     let second = Command::new(&binary)
-        .arg("sym")
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
         .arg("-o")
@@ -1518,25 +1638,20 @@ fn test_symmetric_encrypt_conflict_detected() {
 }
 
 #[test]
-fn test_symmetric_encrypt_conflict_with_save_as() {
-    let test_dir = setup_test_dir("sym_save_as_conflict");
+fn test_passphrase_encrypt_conflict_with_save_as() {
+    let test_dir = setup_test_dir("passphrase_save_as_conflict");
     let input_file = test_dir.join("data.txt");
     let encrypt_dir = test_dir.join("encrypted");
     let custom_out = encrypt_dir.join("custom.fcr");
     fs::create_dir_all(&encrypt_dir).unwrap();
     create_test_file(&input_file, "payload");
 
-    let binary = get_binary_path();
-
-    // Create the target file so the conflict fires
     create_test_file(&custom_out, "placeholder");
 
-    let output = Command::new(&binary)
-        .arg("sym")
+    let output = Command::new(get_binary_path())
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
-        .arg("-o")
-        .arg(&encrypt_dir)
         .arg("-s")
         .arg(&custom_out)
         .env("FERROCRYPT_PASSPHRASE", "pass")
@@ -1551,8 +1666,8 @@ fn test_symmetric_encrypt_conflict_with_save_as() {
 }
 
 #[test]
-fn test_hybrid_encrypt_conflict_detected() {
-    let test_dir = setup_test_dir("hyb_encrypt_conflict");
+fn test_recipient_encrypt_conflict_detected() {
+    let test_dir = setup_test_dir("recipient_encrypt_conflict");
     let input_file = test_dir.join("secret.txt");
     let keys_dir = test_dir.join("keys");
     let encrypt_dir = test_dir.join("encrypted");
@@ -1562,7 +1677,6 @@ fn test_hybrid_encrypt_conflict_detected() {
 
     let binary = get_binary_path();
 
-    // Generate key pair
     let kg = Command::new(&binary)
         .arg("keygen")
         .arg("-o")
@@ -1572,9 +1686,8 @@ fn test_hybrid_encrypt_conflict_detected() {
         .expect("keygen");
     assert!(kg.status.success());
 
-    // First encrypt
     let first = Command::new(&binary)
-        .arg("hyb")
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
         .arg("-o")
@@ -1582,16 +1695,15 @@ fn test_hybrid_encrypt_conflict_detected() {
         .arg("-k")
         .arg(keys_dir.join("public.key"))
         .output()
-        .expect("first hybrid encrypt");
+        .expect("first recipient encrypt");
     assert!(
         first.status.success(),
         "first encrypt failed: {}",
         String::from_utf8_lossy(&first.stderr)
     );
 
-    // Second encrypt hits conflict
     let second = Command::new(&binary)
-        .arg("hyb")
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
         .arg("-o")
@@ -1599,7 +1711,7 @@ fn test_hybrid_encrypt_conflict_detected() {
         .arg("-k")
         .arg(keys_dir.join("public.key"))
         .output()
-        .expect("second hybrid encrypt");
+        .expect("second recipient encrypt");
     assert!(
         !second.status.success(),
         "second encrypt should fail on conflict"
@@ -1619,7 +1731,6 @@ fn test_keygen_conflict_both_keys() {
 
     let binary = get_binary_path();
 
-    // First keygen succeeds
     let first = Command::new(&binary)
         .arg("keygen")
         .arg("-o")
@@ -1629,7 +1740,6 @@ fn test_keygen_conflict_both_keys() {
         .expect("first keygen");
     assert!(first.status.success());
 
-    // Second keygen hits conflict (non-interactive → error)
     let second = Command::new(&binary)
         .arg("keygen")
         .arg("-o")
@@ -1654,11 +1764,9 @@ fn test_keygen_conflict_private_only() {
     let keys_dir = test_dir.join("keys");
     fs::create_dir_all(&keys_dir).unwrap();
 
-    // Place only private.key
     create_test_file(&keys_dir.join("private.key"), "dummy");
 
-    let binary = get_binary_path();
-    let output = Command::new(&binary)
+    let output = Command::new(get_binary_path())
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
@@ -1679,11 +1787,9 @@ fn test_keygen_conflict_public_only() {
     let keys_dir = test_dir.join("keys");
     fs::create_dir_all(&keys_dir).unwrap();
 
-    // Place only public.key
     create_test_file(&keys_dir.join("public.key"), "dummy");
 
-    let binary = get_binary_path();
-    let output = Command::new(&binary)
+    let output = Command::new(get_binary_path())
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
@@ -1710,9 +1816,8 @@ fn test_decrypt_does_not_trigger_cli_conflict_check() {
 
     let binary = get_binary_path();
 
-    // Encrypt
     let enc = Command::new(&binary)
-        .arg("sym")
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
         .arg("-o")
@@ -1722,9 +1827,8 @@ fn test_decrypt_does_not_trigger_cli_conflict_check() {
         .expect("encrypt");
     assert!(enc.status.success());
 
-    // Decrypt once to populate the output dir
     let dec1 = Command::new(&binary)
-        .arg("sym")
+        .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("data.fcr"))
         .arg("-o")
@@ -1738,7 +1842,7 @@ fn test_decrypt_does_not_trigger_cli_conflict_check() {
     // check (which uses "Already exists: ..." prefix) must NOT fire since
     // conflict checks only apply to encryption, matching desktop behavior.
     let dec2 = Command::new(&binary)
-        .arg("sym")
+        .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("data.fcr"))
         .arg("-o")
@@ -1753,20 +1857,17 @@ fn test_decrypt_does_not_trigger_cli_conflict_check() {
     );
 }
 
-// ─── Optional --output-path tests ──────────────────────────────────────────
+// ─── -o / -s requirement tests ─────────────────────────────────────────────
 
 #[test]
-fn test_symmetric_encrypt_save_as_without_output_path() {
-    let test_dir = setup_test_dir("sym_save_as_no_out");
+fn test_passphrase_encrypt_save_as_without_output_dir() {
+    let test_dir = setup_test_dir("passphrase_save_as_no_out");
     let input_file = test_dir.join("data.txt");
     let target = test_dir.join("result.fcr");
     create_test_file(&input_file, "payload");
 
-    let binary = get_binary_path();
-
-    // Encrypt with --save-as only, no -o
-    let output = Command::new(&binary)
-        .arg("sym")
+    let output = Command::new(get_binary_path())
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
         .arg("-s")
@@ -1783,8 +1884,8 @@ fn test_symmetric_encrypt_save_as_without_output_path() {
 }
 
 #[test]
-fn test_hybrid_encrypt_save_as_without_output_path() {
-    let test_dir = setup_test_dir("hyb_save_as_no_out");
+fn test_recipient_encrypt_save_as_without_output_dir() {
+    let test_dir = setup_test_dir("recipient_save_as_no_out");
     let input_file = test_dir.join("data.txt");
     let keys_dir = test_dir.join("keys");
     let target = test_dir.join("result.fcr");
@@ -1802,9 +1903,8 @@ fn test_hybrid_encrypt_save_as_without_output_path() {
         .expect("keygen");
     assert!(kg.status.success());
 
-    // Encrypt with --save-as only, no -o
     let output = Command::new(&binary)
-        .arg("hyb")
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
         .arg("-k")
@@ -1822,31 +1922,24 @@ fn test_hybrid_encrypt_save_as_without_output_path() {
 }
 
 #[test]
-fn test_symmetric_encrypt_without_output_path_or_save_as_fails() {
-    let test_dir = setup_test_dir("sym_no_out_no_save");
+fn test_encrypt_without_output_dir_or_save_as_fails() {
+    let test_dir = setup_test_dir("encrypt_no_out_no_save");
     let input_file = test_dir.join("data.txt");
     create_test_file(&input_file, "payload");
 
-    let binary = get_binary_path();
-
-    let output = Command::new(&binary)
-        .arg("sym")
+    let output = Command::new(get_binary_path())
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
         .env("FERROCRYPT_PASSPHRASE", "pass")
         .output()
         .expect("encrypt without -o or -s");
     assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("--output-path is required"),
-        "expected --output-path error, got: {stderr}"
-    );
 }
 
 #[test]
-fn test_symmetric_decrypt_without_output_path_fails() {
-    let test_dir = setup_test_dir("sym_decrypt_no_out");
+fn test_decrypt_without_output_dir_fails() {
+    let test_dir = setup_test_dir("decrypt_no_out");
     let input_file = test_dir.join("data.txt");
     let encrypt_dir = test_dir.join("encrypted");
     fs::create_dir_all(&encrypt_dir).unwrap();
@@ -1854,9 +1947,8 @@ fn test_symmetric_decrypt_without_output_path_fails() {
 
     let binary = get_binary_path();
 
-    // Encrypt first
     let enc = Command::new(&binary)
-        .arg("sym")
+        .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
         .arg("-o")
@@ -1866,19 +1958,193 @@ fn test_symmetric_decrypt_without_output_path_fails() {
         .expect("encrypt");
     assert!(enc.status.success());
 
-    // Decrypt without -o
     let dec = Command::new(&binary)
-        .arg("sym")
+        .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("data.fcr"))
         .env("FERROCRYPT_PASSPHRASE", "pass")
         .output()
         .expect("decrypt without -o");
     assert!(!dec.status.success());
-    let stderr = String::from_utf8_lossy(&dec.stderr);
+}
+
+// ─── Double-encrypt gate ───────────────────────────────────────────────────
+
+#[test]
+fn test_encrypt_double_encrypt_no_tty_refuses() {
+    let test_dir = setup_test_dir("double_encrypt_no_tty");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let encrypt_dir2 = test_dir.join("encrypted2");
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    fs::create_dir_all(&encrypt_dir2).unwrap();
+    create_test_file(&input_file, "double encrypt");
+
+    let binary = get_binary_path();
+
+    let enc = Command::new(&binary)
+        .arg("encrypt")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "p1")
+        .output()
+        .expect("first encrypt");
+    assert!(enc.status.success());
+    let first_fcr = encrypt_dir.join("data.fcr");
+
+    // Non-interactive (null stdin) must refuse without --allow-double-encrypt.
+    let again = Command::new(&binary)
+        .arg("encrypt")
+        .arg("-i")
+        .arg(&first_fcr)
+        .arg("-o")
+        .arg(&encrypt_dir2)
+        .env("FERROCRYPT_PASSPHRASE", "p2")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("second encrypt without TTY");
+    assert!(!again.status.success(), "should refuse without flag/TTY");
+    let stderr = String::from_utf8_lossy(&again.stderr);
     assert!(
-        stderr.contains("--output-path is required"),
-        "expected --output-path error, got: {stderr}"
+        stderr.contains("refusing to encrypt an existing FerroCrypt file"),
+        "expected double-encrypt refusal, got: {stderr}"
+    );
+}
+
+#[test]
+fn test_encrypt_double_encrypt_with_flag_succeeds() {
+    let test_dir = setup_test_dir("double_encrypt_with_flag");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let encrypt_dir2 = test_dir.join("encrypted2");
+    let decrypt_outer = test_dir.join("dec_outer");
+    let decrypt_inner = test_dir.join("dec_inner");
+    for d in [&encrypt_dir, &encrypt_dir2, &decrypt_outer, &decrypt_inner] {
+        fs::create_dir_all(d).unwrap();
+    }
+    create_test_file(&input_file, "onion-layer test");
+
+    let binary = get_binary_path();
+
+    let enc = Command::new(&binary)
+        .arg("encrypt")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "p1")
+        .output()
+        .expect("first encrypt");
+    assert!(enc.status.success());
+    let first_fcr = encrypt_dir.join("data.fcr");
+
+    let again = Command::new(&binary)
+        .arg("encrypt")
+        .arg("-i")
+        .arg(&first_fcr)
+        .arg("-o")
+        .arg(&encrypt_dir2)
+        .arg("--allow-double-encrypt")
+        .env("FERROCRYPT_PASSPHRASE", "p2")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("second encrypt with flag");
+    assert!(
+        again.status.success(),
+        "encrypt with --allow-double-encrypt should succeed: {}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&again.stderr).contains("already be a FerroCrypt file"),
+        "expected the warning to still fire on stderr"
+    );
+
+    // Round-trip the onion: outer pass, then inner.
+    let outer_fcr = encrypt_dir2.join("data.fcr");
+    let dec_outer = Command::new(&binary)
+        .arg("decrypt")
+        .arg("-i")
+        .arg(&outer_fcr)
+        .arg("-o")
+        .arg(&decrypt_outer)
+        .env("FERROCRYPT_PASSPHRASE", "p2")
+        .output()
+        .expect("outer decrypt");
+    assert!(dec_outer.status.success());
+    // The outer decrypt restores the original .fcr name (data.fcr).
+    let inner_fcr = decrypt_outer.join("data.fcr");
+    assert!(inner_fcr.exists());
+
+    let dec_inner = Command::new(&binary)
+        .arg("decrypt")
+        .arg("-i")
+        .arg(&inner_fcr)
+        .arg("-o")
+        .arg(&decrypt_inner)
+        .env("FERROCRYPT_PASSPHRASE", "p1")
+        .output()
+        .expect("inner decrypt");
+    assert!(dec_inner.status.success());
+    assert_eq!(
+        fs::read_to_string(decrypt_inner.join("data.txt")).unwrap(),
+        "onion-layer test"
+    );
+}
+
+#[test]
+fn test_encrypt_output_conflict_wins_over_double_encrypt_gate() {
+    // When both `output exists` and `input is .fcr` are true, the conflict
+    // check must fire first so the user sees `Already exists` immediately
+    // rather than being asked a y/N about double-encrypting an output that
+    // we'd then refuse to write anyway.
+    let test_dir = setup_test_dir("encrypt_conflict_wins_over_gate");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let encrypt_dir2 = test_dir.join("encrypted2");
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    fs::create_dir_all(&encrypt_dir2).unwrap();
+    create_test_file(&input_file, "ordering test");
+
+    let binary = get_binary_path();
+
+    let enc = Command::new(&binary)
+        .arg("encrypt")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "p1")
+        .output()
+        .expect("first encrypt");
+    assert!(enc.status.success());
+    let inner_fcr = encrypt_dir.join("data.fcr");
+
+    // Pre-create the would-be output of the second encrypt so the conflict
+    // check has something to fire on.
+    let target = encrypt_dir2.join("data.fcr");
+    create_test_file(&target, "placeholder");
+
+    let again = Command::new(&binary)
+        .arg("encrypt")
+        .arg("-i")
+        .arg(&inner_fcr)
+        .arg("-o")
+        .arg(&encrypt_dir2)
+        .env("FERROCRYPT_PASSPHRASE", "p2")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("second encrypt");
+    assert!(!again.status.success());
+    let stderr = String::from_utf8_lossy(&again.stderr);
+    assert!(
+        stderr.contains("Already exists"),
+        "conflict check should fire first; got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("refusing to encrypt an existing FerroCrypt file"),
+        "double-encrypt gate should not have fired before the conflict check; got: {stderr}"
     );
 }
 
@@ -1896,7 +2162,7 @@ fn test_cli_help_flag_lists_subcommands() {
         stdout.contains("Usage:"),
         "expected Usage section, got:\n{stdout}"
     );
-    for sub in ["symmetric", "hybrid", "keygen", "fingerprint", "recipient"] {
+    for sub in ["encrypt", "decrypt", "keygen", "fingerprint"] {
         assert!(
             stdout.contains(sub),
             "missing subcommand {sub} in:\n{stdout}"
@@ -1936,37 +2202,38 @@ fn test_cli_version_flag_matches_cargo_pkg_version() {
 }
 
 #[test]
-fn test_cli_subcommand_help_symmetric() {
+fn test_cli_subcommand_help_encrypt() {
     let output = Command::new(get_binary_path())
-        .args(["symmetric", "--help"])
+        .args(["encrypt", "--help"])
         .output()
-        .expect("sym --help");
+        .expect("encrypt --help");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     for token in [
-        "--input-path",
-        "--output-path",
+        "--input",
+        "--output-dir",
         "--save-as",
-        "--max-kdf-memory",
+        "--passphrase",
+        "--recipient",
+        "--public-key",
+        "--allow-double-encrypt",
     ] {
         assert!(stdout.contains(token), "missing {token} in:\n{stdout}");
     }
 }
 
 #[test]
-fn test_cli_subcommand_help_hybrid() {
+fn test_cli_subcommand_help_decrypt() {
     let output = Command::new(get_binary_path())
-        .args(["hybrid", "--help"])
+        .args(["decrypt", "--help"])
         .output()
-        .expect("hyb --help");
+        .expect("decrypt --help");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     for token in [
-        "--input-path",
-        "--output-path",
-        "--key",
-        "--recipient",
-        "--save-as",
+        "--input",
+        "--output-dir",
+        "--private-key",
         "--max-kdf-memory",
     ] {
         assert!(stdout.contains(token), "missing {token} in:\n{stdout}");
@@ -1978,10 +2245,10 @@ fn test_cli_subcommand_help_keygen() {
     let output = Command::new(get_binary_path())
         .args(["keygen", "--help"])
         .output()
-        .expect("gen --help");
+        .expect("keygen --help");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("--output-path"));
+    assert!(stdout.contains("--output-dir"));
 }
 
 #[test]
@@ -1989,21 +2256,10 @@ fn test_cli_subcommand_help_fingerprint() {
     let output = Command::new(get_binary_path())
         .args(["fingerprint", "--help"])
         .output()
-        .expect("fp --help");
+        .expect("fingerprint --help");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.to_lowercase().contains("public key"));
-}
-
-#[test]
-fn test_cli_subcommand_help_recipient() {
-    let output = Command::new(get_binary_path())
-        .args(["recipient", "--help"])
-        .output()
-        .expect("rc --help");
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.to_lowercase().contains("recipient"));
 }
 
 // ─── Exit codes ────────────────────────────────────────────────────────────
@@ -2020,7 +2276,7 @@ fn test_cli_wrong_passphrase_returns_nonzero() {
 
     let binary = get_binary_path();
     let enc = Command::new(&binary)
-        .args(["sym", "-i"])
+        .args(["encrypt", "-i"])
         .arg(&input_file)
         .arg("-o")
         .arg(&encrypt_dir)
@@ -2030,7 +2286,7 @@ fn test_cli_wrong_passphrase_returns_nonzero() {
     assert_eq!(enc.status.code(), Some(0));
 
     let dec = Command::new(&binary)
-        .args(["sym", "-i"])
+        .args(["decrypt", "-i"])
         .arg(encrypt_dir.join("test.fcr"))
         .arg("-o")
         .arg(&decrypt_dir)
@@ -2043,7 +2299,7 @@ fn test_cli_wrong_passphrase_returns_nonzero() {
 #[test]
 fn test_cli_unknown_flag_returns_nonzero() {
     let output = Command::new(get_binary_path())
-        .args(["sym", "--not-a-real-flag"])
+        .args(["encrypt", "--not-a-real-flag"])
         .output()
         .expect("bad args");
     assert_ne!(output.status.code(), Some(0));
@@ -2052,7 +2308,7 @@ fn test_cli_unknown_flag_returns_nonzero() {
 #[test]
 fn test_cli_missing_required_input_returns_nonzero() {
     let output = Command::new(get_binary_path())
-        .arg("sym")
+        .arg("encrypt")
         .output()
         .expect("missing args");
     assert_ne!(output.status.code(), Some(0));
@@ -2061,8 +2317,8 @@ fn test_cli_missing_required_input_returns_nonzero() {
 // ─── Empty inputs ──────────────────────────────────────────────────────────
 
 #[test]
-fn test_cli_symmetric_empty_file_roundtrip() {
-    let test_dir = setup_test_dir("cli_empty_file_sym");
+fn test_cli_passphrase_empty_file_roundtrip() {
+    let test_dir = setup_test_dir("cli_empty_file_passphrase");
     let input_file = test_dir.join("empty.txt");
     let encrypt_dir = test_dir.join("encrypted");
     let decrypt_dir = test_dir.join("decrypted");
@@ -2073,7 +2329,7 @@ fn test_cli_symmetric_empty_file_roundtrip() {
 
     let binary = get_binary_path();
     let enc = Command::new(&binary)
-        .args(["sym", "-i"])
+        .args(["encrypt", "-i"])
         .arg(&input_file)
         .arg("-o")
         .arg(&encrypt_dir)
@@ -2087,7 +2343,7 @@ fn test_cli_symmetric_empty_file_roundtrip() {
     );
 
     let dec = Command::new(&binary)
-        .args(["sym", "-i"])
+        .args(["decrypt", "-i"])
         .arg(encrypt_dir.join("empty.fcr"))
         .arg("-o")
         .arg(&decrypt_dir)
@@ -2106,8 +2362,8 @@ fn test_cli_symmetric_empty_file_roundtrip() {
 }
 
 #[test]
-fn test_cli_hybrid_empty_file_roundtrip() {
-    let test_dir = setup_test_dir("cli_empty_file_hyb");
+fn test_cli_recipient_empty_file_roundtrip() {
+    let test_dir = setup_test_dir("cli_empty_file_recipient");
     let keys_dir = test_dir.join("keys");
     let input_file = test_dir.join("empty.txt");
     let encrypt_dir = test_dir.join("encrypted");
@@ -2127,7 +2383,7 @@ fn test_cli_hybrid_empty_file_roundtrip() {
     assert!(kg.status.success());
 
     let enc = Command::new(&binary)
-        .args(["hyb", "-i"])
+        .args(["encrypt", "-i"])
         .arg(&input_file)
         .arg("-o")
         .arg(&encrypt_dir)
@@ -2142,11 +2398,11 @@ fn test_cli_hybrid_empty_file_roundtrip() {
     );
 
     let dec = Command::new(&binary)
-        .args(["hyb", "-i"])
+        .args(["decrypt", "-i"])
         .arg(encrypt_dir.join("empty.fcr"))
         .arg("-o")
         .arg(&decrypt_dir)
-        .arg("-k")
+        .arg("-K")
         .arg(keys_dir.join("private.key"))
         .env("FERROCRYPT_PASSPHRASE", "key")
         .output()
@@ -2163,7 +2419,7 @@ fn test_cli_hybrid_empty_file_roundtrip() {
 }
 
 #[test]
-fn test_cli_symmetric_empty_directory_roundtrip() {
+fn test_cli_passphrase_empty_directory_roundtrip() {
     let test_dir = setup_test_dir("cli_empty_dir");
     let input_dir = test_dir.join("emptydir");
     let encrypt_dir = test_dir.join("encrypted");
@@ -2175,7 +2431,7 @@ fn test_cli_symmetric_empty_directory_roundtrip() {
 
     let binary = get_binary_path();
     let enc = Command::new(&binary)
-        .args(["sym", "-i"])
+        .args(["encrypt", "-i"])
         .arg(&input_dir)
         .arg("-o")
         .arg(&encrypt_dir)
@@ -2189,7 +2445,7 @@ fn test_cli_symmetric_empty_directory_roundtrip() {
     );
 
     let dec = Command::new(&binary)
-        .args(["sym", "-i"])
+        .args(["decrypt", "-i"])
         .arg(encrypt_dir.join("emptydir.fcr"))
         .arg("-o")
         .arg(&decrypt_dir)
@@ -2210,8 +2466,8 @@ fn test_cli_symmetric_empty_directory_roundtrip() {
 // ─── Malformed key files at CLI layer ──────────────────────────────────────
 
 #[test]
-fn test_cli_hybrid_encrypt_with_malformed_public_key_fails() {
-    let test_dir = setup_test_dir("cli_hybrid_malformed_public");
+fn test_cli_encrypt_with_malformed_public_key_fails() {
+    let test_dir = setup_test_dir("cli_malformed_public");
     let keys_dir = test_dir.join("keys");
     let input_file = test_dir.join("data.txt");
     let encrypt_dir = test_dir.join("encrypted");
@@ -2221,7 +2477,7 @@ fn test_cli_hybrid_encrypt_with_malformed_public_key_fails() {
     fs::write(keys_dir.join("public.key"), b"not a real key file").unwrap();
 
     let output = Command::new(get_binary_path())
-        .args(["hyb", "-i"])
+        .args(["encrypt", "-i"])
         .arg(&input_file)
         .arg("-o")
         .arg(&encrypt_dir)
@@ -2238,8 +2494,8 @@ fn test_cli_hybrid_encrypt_with_malformed_public_key_fails() {
 }
 
 #[test]
-fn test_cli_hybrid_decrypt_with_malformed_private_key_fails() {
-    let test_dir = setup_test_dir("cli_hybrid_malformed_private");
+fn test_cli_decrypt_with_malformed_private_key_fails() {
+    let test_dir = setup_test_dir("cli_malformed_private");
     let keys_dir = test_dir.join("keys");
     let input_file = test_dir.join("data.txt");
     let encrypt_dir = test_dir.join("encrypted");
@@ -2258,7 +2514,7 @@ fn test_cli_hybrid_decrypt_with_malformed_private_key_fails() {
         .expect("keygen");
     assert!(kg.status.success());
     let enc = Command::new(&binary)
-        .args(["hyb", "-i"])
+        .args(["encrypt", "-i"])
         .arg(&input_file)
         .arg("-o")
         .arg(&encrypt_dir)
@@ -2271,11 +2527,11 @@ fn test_cli_hybrid_decrypt_with_malformed_private_key_fails() {
     fs::write(keys_dir.join("private.key"), b"not a real private key").unwrap();
 
     let dec = Command::new(&binary)
-        .args(["hyb", "-i"])
+        .args(["decrypt", "-i"])
         .arg(encrypt_dir.join("data.fcr"))
         .arg("-o")
         .arg(&decrypt_dir)
-        .arg("-k")
+        .arg("-K")
         .arg(keys_dir.join("private.key"))
         .env("FERROCRYPT_PASSPHRASE", "key")
         .output()
@@ -2303,20 +2559,6 @@ fn test_cli_fingerprint_on_malformed_key_fails() {
 }
 
 #[test]
-fn test_cli_recipient_on_malformed_key_fails() {
-    let test_dir = setup_test_dir("cli_rc_malformed");
-    let bad_key = test_dir.join("bad.key");
-    fs::write(&bad_key, b"garbage").unwrap();
-
-    let output = Command::new(get_binary_path())
-        .arg("rc")
-        .arg(&bad_key)
-        .output()
-        .expect("rc");
-    assert!(!output.status.success());
-}
-
-#[test]
 fn test_cli_fingerprint_on_private_key_fails() {
     let test_dir = setup_test_dir("cli_fp_on_private");
     let keys_dir = test_dir.join("keys");
@@ -2340,31 +2582,8 @@ fn test_cli_fingerprint_on_private_key_fails() {
 }
 
 #[test]
-fn test_cli_recipient_on_private_key_fails() {
-    let test_dir = setup_test_dir("cli_rc_on_private");
-    let keys_dir = test_dir.join("keys");
-    fs::create_dir_all(&keys_dir).unwrap();
-
-    let binary = get_binary_path();
-    let kg = Command::new(&binary)
-        .args(["gen", "-o"])
-        .arg(&keys_dir)
-        .env("FERROCRYPT_PASSPHRASE", "key")
-        .output()
-        .expect("keygen");
-    assert!(kg.status.success());
-
-    let output = Command::new(&binary)
-        .arg("rc")
-        .arg(keys_dir.join("private.key"))
-        .output()
-        .expect("rc");
-    assert!(!output.status.success());
-}
-
-#[test]
-fn test_cli_hybrid_decrypt_rejects_public_key_as_private() {
-    let test_dir = setup_test_dir("cli_hybrid_wrong_key_type");
+fn test_cli_decrypt_rejects_public_key_as_private() {
+    let test_dir = setup_test_dir("cli_wrong_key_type");
     let keys_dir = test_dir.join("keys");
     let input_file = test_dir.join("data.txt");
     let encrypt_dir = test_dir.join("encrypted");
@@ -2383,7 +2602,7 @@ fn test_cli_hybrid_decrypt_rejects_public_key_as_private() {
         .expect("keygen");
     assert!(kg.status.success());
     let enc = Command::new(&binary)
-        .args(["hyb", "-i"])
+        .args(["encrypt", "-i"])
         .arg(&input_file)
         .arg("-o")
         .arg(&encrypt_dir)
@@ -2394,16 +2613,71 @@ fn test_cli_hybrid_decrypt_rejects_public_key_as_private() {
     assert!(enc.status.success());
 
     let dec = Command::new(&binary)
-        .args(["hyb", "-i"])
+        .args(["decrypt", "-i"])
         .arg(encrypt_dir.join("data.fcr"))
         .arg("-o")
         .arg(&decrypt_dir)
-        .arg("-k")
+        .arg("-K")
         .arg(keys_dir.join("public.key"))
         .env("FERROCRYPT_PASSPHRASE", "key")
         .output()
         .expect("decrypt");
     assert!(!dec.status.success());
+}
+
+#[test]
+fn test_cli_decrypt_wrong_key_type_rejects_before_prompt() {
+    // `validate_private_key_file` must fire before the passphrase prompt:
+    // if it didn't, this command would hang on a hidden-input prompt because
+    // stdin is null and FERROCRYPT_PASSPHRASE is unset.
+    let test_dir = setup_test_dir("cli_wrong_key_type_before_prompt");
+    let keys_dir = test_dir.join("keys");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&keys_dir).unwrap();
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    fs::create_dir_all(&decrypt_dir).unwrap();
+    create_test_file(&input_file, "content");
+
+    let binary = get_binary_path();
+    let kg = Command::new(&binary)
+        .args(["gen", "-o"])
+        .arg(&keys_dir)
+        .env("FERROCRYPT_PASSPHRASE", "kp")
+        .output()
+        .expect("keygen");
+    assert!(kg.status.success());
+    let enc = Command::new(&binary)
+        .args(["encrypt", "-i"])
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .arg("-k")
+        .arg(keys_dir.join("public.key"))
+        .output()
+        .expect("encrypt");
+    assert!(enc.status.success());
+
+    let dec = Command::new(&binary)
+        .args(["decrypt", "-i"])
+        .arg(encrypt_dir.join("data.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir)
+        .arg("-K")
+        .arg(keys_dir.join("public.key"))
+        .env_remove("FERROCRYPT_PASSPHRASE")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("decrypt");
+    assert!(!dec.status.success());
+    let stderr = String::from_utf8_lossy(&dec.stderr);
+    // Whatever the exact wording, the failure must NOT be the no-passphrase
+    // prompt error — that would mean `validate_private_key_file` was bypassed.
+    assert!(
+        !stderr.contains("No passphrase provided"),
+        "expected validate_private_key_file to reject before prompt; got: {stderr}"
+    );
 }
 
 #[ctor::dtor]

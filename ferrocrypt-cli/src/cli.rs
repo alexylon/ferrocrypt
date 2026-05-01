@@ -1,11 +1,11 @@
-use std::io::{IsTerminal, stdin};
+use std::io::{self, IsTerminal, Read, Write, stdin};
 use std::path::{Path, PathBuf};
 
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 use ferrocrypt::secrecy::{ExposeSecret, SecretString};
 use ferrocrypt::{
-    CryptoError, Decryptor, Encryptor, KdfLimit, PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME,
-    PrivateKey, PublicKey, default_encrypted_filename, detect_encryption_mode, generate_key_pair,
+    CryptoError, Decryptor, Encryptor, KdfLimit, MAGIC, PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME,
+    PrivateKey, PublicKey, default_encrypted_filename, generate_key_pair,
     validate_private_key_file,
 };
 use rpassword::prompt_password;
@@ -16,8 +16,7 @@ use subtle::ConstantTimeEq;
 const PASSPHRASE_ENV: &str = "FERROCRYPT_PASSPHRASE";
 const BINARY_NAME: &str = env!("CARGO_BIN_NAME");
 const INTERACTIVE_PROMPT: &str = concat!(env!("CARGO_BIN_NAME"), "> ");
-const SUBCOMMAND_HELP: &str =
-    "symmetric (sym), hybrid (hyb), keygen (gen), fingerprint (fp), recipient (rc)";
+const SUBCOMMAND_HELP: &str = "encrypt (enc), decrypt (dec), keygen (gen), fingerprint (fp)";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -28,21 +27,21 @@ const SUBCOMMAND_HELP: &str =
 Command-line interface for FerroCrypt.
 
 File format v1 and primitives:
-  Symmetric: Argon2id -> HKDF-SHA3-256 -> XChaCha20-Poly1305
-  Hybrid:    X25519 ECDH -> HKDF-SHA3-256 -> XChaCha20-Poly1305",
+  Passphrase: Argon2id -> HKDF-SHA3-256 -> XChaCha20-Poly1305
+  Public-key: X25519 ECDH -> HKDF-SHA3-256 -> XChaCha20-Poly1305",
     after_help = "\
 Examples:
-  ferrocrypt sym -i secret.txt -o ./encrypted
-  ferrocrypt sym -i secret.txt -s ./secret.fcr
-  ferrocrypt sym -i ./encrypted/secret.fcr -o ./decrypted
-  ferrocrypt gen -o ./keys
-  ferrocrypt hyb -i secret.txt -o ./encrypted -k ./keys/public.key
-  ferrocrypt hyb -i secret.txt -s ./secret.fcr -r fcr1...
-  ferrocrypt hyb -i ./encrypted/secret.fcr -o ./decrypted -k ./keys/private.key
-  ferrocrypt fp ./keys/public.key
-  ferrocrypt rc ./keys/public.key
+  ferrocrypt encrypt -i secret.txt -o ./encrypted
+  ferrocrypt encrypt -i secret.txt -s ./secret.fcr
+  ferrocrypt encrypt -i secret.txt -o ./encrypted -p
+  ferrocrypt encrypt -i secret.txt -o ./encrypted -k ./keys/public.key
+  ferrocrypt encrypt -i secret.txt -o ./encrypted -r fcr1...
+  ferrocrypt decrypt -i ./encrypted/secret.fcr -o ./decrypted
+  ferrocrypt decrypt -i ./encrypted/secret.fcr -o ./decrypted -K ./keys/private.key
+  ferrocrypt keygen  -o ./keys
+  ferrocrypt fingerprint ./keys/public.key
 
-Run <command> --help for full options (e.g. ferrocrypt sym --help)"
+Run <command> --help for full options (e.g. ferrocrypt encrypt --help)"
 )]
 pub struct Cli {
     /// Subcommand to run. If omitted, the CLI starts in interactive mode.
@@ -52,75 +51,118 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum CliCommand {
-    #[command(visible_alias = "gen", about = "Generate a key pair")]
-    Keygen {
-        #[arg(short, long, help = "Directory to write key files into")]
-        output_path: String,
+    #[command(visible_alias = "enc", about = "Encrypt a file or directory")]
+    Encrypt {
+        #[arg(
+            short = 'i',
+            long = "input",
+            value_name = "INPUT",
+            help = "File or directory to encrypt"
+        )]
+        input: PathBuf,
+
+        #[arg(
+            short = 'o',
+            long = "output-dir",
+            value_name = "DIR",
+            conflicts_with = "save_as",
+            required_unless_present = "save_as",
+            help = "Directory where the encrypted .fcr file will be written"
+        )]
+        output_dir: Option<PathBuf>,
+
+        #[arg(
+            short = 's',
+            long = "save-as",
+            value_name = "FILE",
+            conflicts_with = "output_dir",
+            required_unless_present = "output_dir",
+            help = "Exact encrypted output file path"
+        )]
+        save_as: Option<PathBuf>,
+
+        #[arg(
+            short = 'p',
+            long = "passphrase",
+            conflicts_with_all = ["recipient", "public_key"],
+            help = "Encrypt with a passphrase (default when no recipient is given)"
+        )]
+        passphrase: bool,
+
+        #[arg(
+            short = 'r',
+            long = "recipient",
+            value_name = "FCR1",
+            action = ArgAction::Append,
+            help = "Public recipient string (fcr1...). Repeatable"
+        )]
+        recipient: Vec<String>,
+
+        #[arg(
+            short = 'k',
+            long = "public-key",
+            value_name = "PUBLIC_KEY_FILE",
+            action = ArgAction::Append,
+            help = "Public key file. Repeatable"
+        )]
+        public_key: Vec<PathBuf>,
+
+        #[arg(
+            long = "allow-double-encrypt",
+            help = "Allow encrypting an input that already looks like a FerroCrypt file"
+        )]
+        allow_double_encrypt: bool,
     },
 
-    #[command(visible_alias = "hyb", about = "Hybrid encrypt or decrypt")]
-    Hybrid {
-        #[arg(short, long, help = "File or directory to process")]
-        input_path: String,
-
-        #[arg(short, long, help = "Output directory (optional with --save-as)")]
-        output_path: Option<String>,
+    #[command(visible_alias = "dec", about = "Decrypt a .fcr file")]
+    Decrypt {
+        #[arg(
+            short = 'i',
+            long = "input",
+            value_name = "INPUT",
+            help = "Encrypted .fcr file to decrypt"
+        )]
+        input: PathBuf,
 
         #[arg(
-            short,
-            long,
-            help = "Key file path (public for encrypt, private for decrypt)"
+            short = 'o',
+            long = "output-dir",
+            value_name = "DIR",
+            help = "Directory where decrypted output will be written"
         )]
-        key: Option<String>,
+        output_dir: PathBuf,
 
         #[arg(
-            short,
-            long,
-            conflicts_with = "key",
-            help = "Bech32 recipient string for encryption (fcr1...)"
+            short = 'K',
+            long = "private-key",
+            value_name = "PRIVATE_KEY_FILE",
+            help = "Private key file (required for public-recipient files)"
         )]
-        recipient: Option<String>,
+        private_key: Option<PathBuf>,
 
         #[arg(
-            short,
             long,
-            help = "Save encrypted output to this file path (encrypt only)"
+            value_name = "MIB",
+            help = "Maximum Argon2id memory cost to accept (MiB)"
         )]
-        save_as: Option<String>,
-
-        #[arg(long, help = "Maximum KDF memory cost to accept (MiB, decrypt only)")]
         max_kdf_memory: Option<u32>,
+    },
+
+    #[command(visible_alias = "gen", about = "Generate a key pair")]
+    Keygen {
+        #[arg(
+            short = 'o',
+            long = "output-dir",
+            value_name = "DIR",
+            help = "Directory to write private.key and public.key"
+        )]
+        output_dir: PathBuf,
     },
 
     #[command(visible_alias = "fp", about = "Show public key fingerprint")]
     Fingerprint {
-        #[arg(help = "Path to a public key file")]
-        public_key_file: String,
-    },
-
-    #[command(visible_alias = "rc", about = "Show public key recipient string")]
-    Recipient {
-        #[arg(help = "Path to a public key file")]
-        public_key_file: String,
-    },
-
-    #[command(visible_alias = "sym", about = "Symmetric encrypt or decrypt")]
-    Symmetric {
-        #[arg(short, long, help = "File or directory to process")]
-        input_path: String,
-
-        #[arg(short, long, help = "Output directory (optional with --save-as)")]
-        output_path: Option<String>,
-
-        #[arg(
-            short,
-            long,
-            help = "Save encrypted output to this file path (encrypt only)"
-        )]
-        save_as: Option<String>,
-
-        #[arg(long, help = "Maximum KDF memory cost to accept (MiB, decrypt only)")]
-        max_kdf_memory: Option<u32>,
+        #[arg(value_name = "PUBLIC_KEY_FILE", help = "Path to a public key file")]
+        public_key_file: PathBuf,
     },
 }
 
@@ -196,38 +238,23 @@ fn format_duration(d: std::time::Duration) -> String {
     }
 }
 
-fn require_output_path(output_path: &Option<String>) -> Result<&Path, CryptoError> {
-    output_path
-        .as_deref()
-        .map(Path::new)
-        .ok_or_else(|| CryptoError::InvalidInput("--output-path is required".to_string()))
-}
-
-/// Resolves the output directory for an encrypt operation. When `--save-as`
-/// is given, the library ignores the output directory entirely, so an empty
-/// path is returned if the caller did not provide one.
-fn resolve_encrypt_output_dir(
-    output_path: &Option<String>,
-    save_as: Option<&str>,
-) -> Result<PathBuf, CryptoError> {
-    if save_as.is_some() {
-        Ok(output_path
-            .as_deref()
-            .map(PathBuf::from)
-            .unwrap_or_default())
-    } else {
-        Ok(PathBuf::from(require_output_path(output_path)?))
-    }
-}
-
 fn check_encrypt_conflict(
-    output_dir: &Path,
     input_path: &Path,
-    save_as: Option<&str>,
+    output_dir: Option<&Path>,
+    save_as: Option<&Path>,
 ) -> Result<(), CryptoError> {
     let target = match save_as {
-        Some(p) => PathBuf::from(p),
-        None => output_dir.join(default_encrypted_filename(input_path)?),
+        Some(path) => path.to_path_buf(),
+        None => {
+            // clap's `required_unless_present` guarantees output_dir is set
+            // here when save_as is None; the dispatcher relies on the same
+            // invariant when it forwards an empty PathBuf to the library
+            // for the save-as path.
+            let dir = output_dir.ok_or(CryptoError::InternalInvariant(
+                "--output-dir or --save-as required",
+            ))?;
+            dir.join(default_encrypted_filename(input_path)?)
+        }
     };
     if target.exists() {
         return Err(CryptoError::InvalidInput(format!(
@@ -236,26 +263,6 @@ fn check_encrypt_conflict(
         )));
     }
     Ok(())
-}
-
-fn reject_encrypt_only_flag(flag: &str, is_set: bool) -> Result<(), CryptoError> {
-    if is_set {
-        Err(CryptoError::InvalidInput(format!(
-            "{flag} is for encryption only"
-        )))
-    } else {
-        Ok(())
-    }
-}
-
-fn reject_decrypt_only_flag(flag: &str, is_set: bool) -> Result<(), CryptoError> {
-    if is_set {
-        Err(CryptoError::InvalidInput(format!(
-            "{flag} is for decryption only"
-        )))
-    } else {
-        Ok(())
-    }
 }
 
 fn print_result(is_encrypt: bool, output: &Path, elapsed: std::time::Duration) {
@@ -289,6 +296,81 @@ fn check_keygen_conflict(output_dir: &Path) -> Result<(), CryptoError> {
     }
 }
 
+/// Cheap probe: does this regular file's first 4 bytes match the FerroCrypt
+/// magic? Returns `false` for directories, missing files, and unreadable
+/// files — `Encryptor::write` will surface those as typed errors later.
+/// The redesign deliberately keeps this off the `Decryptor::open` path so
+/// the encrypt flow does not run header validation just to refuse work.
+fn input_looks_encrypted(input_path: &Path) -> bool {
+    if !input_path.is_file() {
+        return false;
+    }
+    let Ok(mut file) = std::fs::File::open(input_path) else {
+        return false;
+    };
+    let mut magic = [0u8; MAGIC.len()];
+    file.read_exact(&mut magic).is_ok() && magic == MAGIC
+}
+
+/// Default-deny double-encryption gate. If the input looks like a FerroCrypt
+/// file: when the override flag is set, warn and proceed; otherwise prompt
+/// y/N on a TTY (default N) or refuse outright on a non-TTY. Mirrors the
+/// `read_passphrase` TTY-or-explicit-flag pattern.
+fn confirm_or_reject_double_encrypt(
+    input_path: &Path,
+    allow_double_encrypt: bool,
+) -> Result<(), CryptoError> {
+    if !input_looks_encrypted(input_path) {
+        return Ok(());
+    }
+
+    if allow_double_encrypt {
+        eprintln!("warning: input appears to already be a FerroCrypt file; encrypting again");
+        return Ok(());
+    }
+
+    if !stdin().is_terminal() {
+        return Err(CryptoError::InvalidInput(
+            "refusing to encrypt an existing FerroCrypt file; \
+             pass --allow-double-encrypt to confirm"
+                .to_string(),
+        ));
+    }
+
+    eprintln!("warning: input appears to already be a FerroCrypt file");
+    eprint!("Encrypt it again (produce a double-encrypted file)? [y/N] ");
+    io::stderr().flush().ok();
+
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .map_err(CryptoError::Io)?;
+    let trimmed = answer.trim();
+    if matches!(trimmed, "y" | "Y") {
+        Ok(())
+    } else {
+        Err(CryptoError::InvalidInput(
+            "aborted: refusing to encrypt an existing FerroCrypt file".to_string(),
+        ))
+    }
+}
+
+fn load_encrypt_recipients(
+    recipient_strings: Vec<String>,
+    public_key_files: Vec<PathBuf>,
+) -> Result<Vec<PublicKey>, CryptoError> {
+    let mut recipients = Vec::with_capacity(recipient_strings.len() + public_key_files.len());
+
+    for recipient in recipient_strings {
+        recipients.push(PublicKey::from_recipient_string(&recipient)?);
+    }
+    for file in public_key_files {
+        recipients.push(PublicKey::from_key_file(file));
+    }
+
+    Ok(recipients)
+}
+
 pub fn run() -> Result<(), CryptoError> {
     let cli = Cli::parse();
 
@@ -303,165 +385,148 @@ pub fn run() -> Result<(), CryptoError> {
 
 fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
     match cmd {
-        CliCommand::Keygen { output_path } => {
-            let output_path = Path::new(&output_path);
-            check_keygen_conflict(output_path)?;
-            let passphrase = read_passphrase(true)?;
-            let outcome = generate_key_pair(output_path, passphrase, |ev| eprintln!("{ev}"))?;
-            let recipient =
-                PublicKey::from_key_file(&outcome.public_key_path).to_recipient_string()?;
-            println!("\nGenerated key pair in {}\n", output_path.display());
-            println!("Public key fingerprint: {}", outcome.fingerprint);
-            println!("Public key recipient:   {}", recipient);
-        }
-
-        CliCommand::Fingerprint { public_key_file } => {
-            let fp = PublicKey::from_key_file(&public_key_file).fingerprint()?;
-            println!("{}", fp);
-        }
-
-        CliCommand::Recipient { public_key_file } => {
-            let recipient = PublicKey::from_key_file(&public_key_file).to_recipient_string()?;
-            println!("{}", recipient);
-        }
-
-        CliCommand::Hybrid {
-            input_path,
-            output_path,
-            key,
+        CliCommand::Encrypt {
+            input,
+            output_dir,
+            save_as,
+            passphrase: _,
             recipient,
+            public_key,
+            allow_double_encrypt,
+        } => run_encrypt(
+            input,
+            output_dir,
             save_as,
+            recipient,
+            public_key,
+            allow_double_encrypt,
+        ),
+
+        CliCommand::Decrypt {
+            input,
+            output_dir,
+            private_key,
             max_kdf_memory,
-        } => {
-            let input_path = Path::new(&input_path);
-            let is_encrypt = detect_encryption_mode(input_path)?.is_none();
-            let start = std::time::Instant::now();
+        } => run_decrypt(input, output_dir, private_key, max_kdf_memory),
 
-            let output = if is_encrypt {
-                reject_decrypt_only_flag("--max-kdf-memory", max_kdf_memory.is_some())?;
-                let output_dir = resolve_encrypt_output_dir(&output_path, save_as.as_deref())?;
-                check_encrypt_conflict(&output_dir, input_path, save_as.as_deref())?;
-                let save_as_path = save_as.as_deref().map(Path::new);
+        CliCommand::Keygen { output_dir } => run_keygen(output_dir),
+        CliCommand::Fingerprint { public_key_file } => run_fingerprint(public_key_file),
+    }
+}
 
-                let public_key = if let Some(r) = recipient.as_deref() {
-                    println!("Encrypting to: {r}");
-                    PublicKey::from_recipient_string(r)?
-                } else {
-                    let key = key.as_deref().ok_or_else(|| {
-                        CryptoError::InvalidInput(
-                            "Encrypt requires --key or --recipient".to_string(),
-                        )
-                    })?;
-                    let key_path = Path::new(key);
-                    let public_key = PublicKey::from_key_file(key_path);
-                    match public_key.fingerprint() {
-                        Ok(fp) => println!("Encrypting to: {fp}"),
-                        Err(_) => println!("Using key file: {}", key_path.display()),
-                    }
-                    public_key
-                };
+fn run_encrypt(
+    input: PathBuf,
+    output_dir: Option<PathBuf>,
+    save_as: Option<PathBuf>,
+    recipient: Vec<String>,
+    public_key: Vec<PathBuf>,
+    allow_double_encrypt: bool,
+) -> Result<(), CryptoError> {
+    check_encrypt_conflict(&input, output_dir.as_deref(), save_as.as_deref())?;
+    confirm_or_reject_double_encrypt(&input, allow_double_encrypt)?;
 
-                let mut encryptor = Encryptor::with_recipient(public_key);
-                if let Some(save_as_path) = save_as_path {
-                    encryptor = encryptor.save_as(save_as_path);
-                }
-                encryptor
-                    .write(input_path, &output_dir, |ev| eprintln!("{ev}"))?
-                    .output_path
-            } else {
-                reject_encrypt_only_flag("--recipient", recipient.is_some())?;
-                reject_encrypt_only_flag("--save-as", save_as.is_some())?;
-                let output_dir = require_output_path(&output_path)?;
-                match Decryptor::open(input_path)? {
-                    Decryptor::Recipient(mut decryptor) => {
-                        let key = key.as_deref().ok_or_else(|| {
-                            CryptoError::InvalidInput("Decrypt requires --key".to_string())
-                        })?;
-                        let key_path = Path::new(key);
-                        validate_private_key_file(key_path)?;
-                        if let Some(limit) = max_kdf_memory.map(KdfLimit::from_mib).transpose()? {
-                            decryptor = decryptor.kdf_limit(limit);
-                        }
-                        let passphrase = read_passphrase(false)?;
-                        decryptor
-                            .decrypt(
-                                PrivateKey::from_key_file(key_path),
-                                passphrase,
-                                output_dir,
-                                |ev| eprintln!("{ev}"),
-                            )?
-                            .output_path
-                    }
-                    Decryptor::Passphrase(_) => {
-                        return Err(CryptoError::InvalidInput(
-                            "This file is sealed with a passphrase; use `ferrocrypt symmetric` to decrypt"
-                                .to_string(),
-                        ));
-                    }
-                    _ => {
-                        return Err(CryptoError::InvalidInput(
-                            "Unsupported FerroCrypt encryption mode for `hybrid`".to_string(),
-                        ));
-                    }
-                }
-            };
+    let start = std::time::Instant::now();
+    let recipients = load_encrypt_recipients(recipient, public_key)?;
 
-            print_result(is_encrypt, &output, start.elapsed());
+    let mut encryptor = if recipients.is_empty() {
+        let passphrase = read_passphrase(true)?;
+        Encryptor::with_passphrase(passphrase)
+    } else {
+        for r in &recipients {
+            if let Ok(fp) = r.fingerprint() {
+                println!("Encrypting to: {fp}");
+            }
         }
+        Encryptor::with_recipients(recipients)?
+    };
 
-        CliCommand::Symmetric {
-            input_path,
-            output_path,
-            save_as,
-            max_kdf_memory,
-        } => {
-            let input_path = Path::new(&input_path);
-            let is_encrypt = detect_encryption_mode(input_path)?.is_none();
-            let start = std::time::Instant::now();
-
-            let output = if is_encrypt {
-                reject_decrypt_only_flag("--max-kdf-memory", max_kdf_memory.is_some())?;
-                let output_dir = resolve_encrypt_output_dir(&output_path, save_as.as_deref())?;
-                check_encrypt_conflict(&output_dir, input_path, save_as.as_deref())?;
-                let passphrase = read_passphrase(true)?;
-                let mut encryptor = Encryptor::with_passphrase(passphrase);
-                if let Some(s) = save_as.as_deref() {
-                    encryptor = encryptor.save_as(Path::new(s));
-                }
-                encryptor
-                    .write(input_path, &output_dir, |ev| eprintln!("{ev}"))?
-                    .output_path
-            } else {
-                reject_encrypt_only_flag("--save-as", save_as.is_some())?;
-                let output_dir = require_output_path(&output_path)?;
-                match Decryptor::open(input_path)? {
-                    Decryptor::Passphrase(mut decryptor) => {
-                        if let Some(limit) = max_kdf_memory.map(KdfLimit::from_mib).transpose()? {
-                            decryptor = decryptor.kdf_limit(limit);
-                        }
-                        let passphrase = read_passphrase(false)?;
-                        decryptor
-                            .decrypt(passphrase, output_dir, |ev| eprintln!("{ev}"))?
-                            .output_path
-                    }
-                    Decryptor::Recipient(_) => {
-                        return Err(CryptoError::InvalidInput(
-                            "This file is sealed for public-key recipients; use `ferrocrypt hybrid` to decrypt"
-                                .to_string(),
-                        ));
-                    }
-                    _ => {
-                        return Err(CryptoError::InvalidInput(
-                            "Unsupported FerroCrypt encryption mode for `symmetric`".to_string(),
-                        ));
-                    }
-                }
-            };
-
-            print_result(is_encrypt, &output, start.elapsed());
-        }
+    if let Some(save_as_path) = save_as.as_deref() {
+        encryptor = encryptor.save_as(save_as_path);
     }
 
+    // When `--save-as` is given the library ignores the output directory;
+    // pass an empty PathBuf so the value is still well-typed.
+    let library_output_dir = output_dir.unwrap_or_default();
+
+    let output = encryptor
+        .write(&input, &library_output_dir, |ev| eprintln!("{ev}"))?
+        .output_path;
+
+    print_result(true, &output, start.elapsed());
+    Ok(())
+}
+
+fn run_decrypt(
+    input: PathBuf,
+    output_dir: PathBuf,
+    private_key: Option<PathBuf>,
+    max_kdf_memory: Option<u32>,
+) -> Result<(), CryptoError> {
+    let start = std::time::Instant::now();
+    let limit = max_kdf_memory.map(KdfLimit::from_mib).transpose()?;
+
+    let output = match Decryptor::open(&input)? {
+        Decryptor::Passphrase(mut decryptor) => {
+            if private_key.is_some() {
+                return Err(CryptoError::InvalidInput(
+                    "this file is sealed with a passphrase; --private-key is not applicable"
+                        .to_string(),
+                ));
+            }
+            if let Some(limit) = limit {
+                decryptor = decryptor.kdf_limit(limit);
+            }
+            let passphrase = read_passphrase(false)?;
+            decryptor
+                .decrypt(passphrase, &output_dir, |ev| eprintln!("{ev}"))?
+                .output_path
+        }
+        Decryptor::Recipient(mut decryptor) => {
+            let private_key = private_key.ok_or_else(|| {
+                CryptoError::InvalidInput(
+                    "this file is sealed to public-key recipients; --private-key is required"
+                        .to_string(),
+                )
+            })?;
+            validate_private_key_file(&private_key)?;
+            if let Some(limit) = limit {
+                decryptor = decryptor.kdf_limit(limit);
+            }
+            let passphrase = read_passphrase(false)?;
+            decryptor
+                .decrypt(
+                    PrivateKey::from_key_file(&private_key),
+                    passphrase,
+                    &output_dir,
+                    |ev| eprintln!("{ev}"),
+                )?
+                .output_path
+        }
+        _ => {
+            return Err(CryptoError::InvalidInput(
+                "unsupported FerroCrypt encryption mode".to_string(),
+            ));
+        }
+    };
+
+    print_result(false, &output, start.elapsed());
+    Ok(())
+}
+
+fn run_keygen(output_dir: PathBuf) -> Result<(), CryptoError> {
+    check_keygen_conflict(&output_dir)?;
+    let passphrase = read_passphrase(true)?;
+    let outcome = generate_key_pair(&output_dir, passphrase, |ev| eprintln!("{ev}"))?;
+    let recipient = PublicKey::from_key_file(&outcome.public_key_path).to_recipient_string()?;
+    println!("\nGenerated key pair in {}\n", output_dir.display());
+    println!("Public key fingerprint: {}", outcome.fingerprint);
+    println!("Public key recipient:   {}", recipient);
+    Ok(())
+}
+
+fn run_fingerprint(public_key_file: PathBuf) -> Result<(), CryptoError> {
+    let fp = PublicKey::from_key_file(&public_key_file).fingerprint()?;
+    println!("{}", fp);
     Ok(())
 }
 
@@ -618,7 +683,7 @@ mod tests {
     #[test]
     fn unclosed_quote_is_shell_error() {
         assert!(matches!(
-            dispatch_repl_line("sym -i 'unclosed"),
+            dispatch_repl_line("encrypt -i 'unclosed"),
             ReplOutcome::ShellError(_)
         ));
     }
@@ -634,7 +699,7 @@ mod tests {
     #[test]
     fn missing_required_arg_is_parse_error() {
         assert!(matches!(
-            dispatch_repl_line("sym"),
+            dispatch_repl_line("encrypt"),
             ReplOutcome::ParseError(_)
         ));
     }
@@ -661,7 +726,7 @@ mod tests {
 
     #[test]
     fn subcommand_help_surfaces_as_display_help_kind() {
-        match dispatch_repl_line("sym --help") {
+        match dispatch_repl_line("encrypt --help") {
             ReplOutcome::ParseError(e) => {
                 assert_eq!(e.kind(), clap::error::ErrorKind::DisplayHelp)
             }
@@ -684,15 +749,6 @@ mod tests {
     #[test]
     fn fingerprint_on_nonexistent_path_is_failed() {
         let line = format!("fp {}", nonexistent_temp_path_quoted());
-        match dispatch_repl_line(&line) {
-            ReplOutcome::Failed(_) => {}
-            other => panic!("expected Failed, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn recipient_on_nonexistent_path_is_failed() {
-        let line = format!("rc {}", nonexistent_temp_path_quoted());
         match dispatch_repl_line(&line) {
             ReplOutcome::Failed(_) => {}
             other => panic!("expected Failed, got {other:?}"),

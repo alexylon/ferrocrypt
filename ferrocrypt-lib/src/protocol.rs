@@ -86,6 +86,11 @@ pub(crate) trait RecipientScheme {
 ///   the body shape) are `Err(CryptoError::*)`.
 pub(crate) trait IdentityScheme {
     const TYPE_NAME: &'static str;
+    /// File mode this identity scheme can decrypt. Used by the
+    /// orchestrator to surface a typed
+    /// [`CryptoError::DecryptorModeMismatch`] when a caller drives
+    /// `decrypt` with the wrong identity for the file's recipient list.
+    const EXPECTED_MODE: EncryptionMode;
 
     fn unwrap_file_key(&self, body: &RecipientBody) -> Result<Option<FileKey>, CryptoError>;
 }
@@ -221,10 +226,13 @@ pub(crate) fn decrypt<I: IdentityScheme>(
 
     // Cross-mode mismatch: caller invoked the passphrase decrypt path
     // on a recipient-only file (or vice versa). The classified mode
-    // does not match the identity's scheme.
-    if !mode_matches_scheme::<I>(mode) {
-        return Err(CryptoError::NoSupportedRecipient);
-    }
+    // does not match the identity's scheme. Surfaces as a typed
+    // `DecryptorModeMismatch` rather than `NoSupportedRecipient`, which
+    // would imply "the loop iterated and found nothing" — misleading
+    // when the real cause is "wrong tool for this file." The public
+    // API can't reach this branch (Decryptor::open routes by mode);
+    // it exists for internal callers and any future plugin-style API.
+    check_mode_matches_scheme::<I>(mode)?;
 
     // The caller (`PassphraseDecryptor::decrypt` / `RecipientDecryptor::decrypt`)
     // is responsible for emitting `DerivingKey` before the heaviest KDF
@@ -315,22 +323,18 @@ pub(crate) fn decrypt<I: IdentityScheme>(
     unarchive(decrypt_reader, output_dir, archive_limits)
 }
 
-/// Maps a classified mode to the identity scheme that should handle
-/// it. The orchestrator uses this to surface a friendly
-/// `NoSupportedRecipient` when a caller invokes the wrong decrypt
-/// entry point (e.g. a `PassphraseDecryptor` against a recipient-sealed
-/// file).
-fn mode_matches_scheme<I: IdentityScheme>(mode: EncryptionMode) -> bool {
-    matches!(
-        (mode, I::TYPE_NAME),
-        (
-            EncryptionMode::Passphrase,
-            crate::recipient::argon2id::TYPE_NAME
-        ) | (
-            EncryptionMode::Recipient,
-            crate::recipient::x25519::TYPE_NAME
-        )
-    )
+/// Verifies that the classified file mode matches the identity scheme's
+/// declared [`IdentityScheme::EXPECTED_MODE`]. On mismatch, returns a
+/// typed [`CryptoError::DecryptorModeMismatch`] carrying both modes so
+/// the caller can pattern-match without comparing strings.
+fn check_mode_matches_scheme<I: IdentityScheme>(mode: EncryptionMode) -> Result<(), CryptoError> {
+    if mode == I::EXPECTED_MODE {
+        return Ok(());
+    }
+    Err(CryptoError::DecryptorModeMismatch {
+        expected: I::EXPECTED_MODE,
+        found: mode,
+    })
 }
 
 /// Decrypt-time error wording when no slot produced a MAC-verified
@@ -969,6 +973,92 @@ mod tests {
                 policy: MixingPolicy::Exclusive,
             } if type_name == argon2id::TYPE_NAME => Ok(()),
             other => panic!("expected IncompatibleRecipients(argon2id, Exclusive), got {other:?}"),
+        }
+    }
+
+    /// Cross-mode mismatch: a passphrase-only file is opened with an
+    /// `X25519Identity`. The orchestrator must surface
+    /// `DecryptorModeMismatch { expected: Recipient, found: Passphrase }`
+    /// before any slot loop runs — never the legacy
+    /// `NoSupportedRecipient`, which would imply "the loop iterated and
+    /// found nothing." The public Decryptor::open routes by mode and so
+    /// can't reach this branch; the test invokes `protocol::decrypt`
+    /// directly to lock in the wording for internal/plugin callers.
+    #[test]
+    fn decrypt_rejects_passphrase_file_with_x25519_identity() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let keys_dir = tmp.path().join("keys");
+        let (_pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
+
+        // Single argon2id recipient with a synthetic body. The
+        // cross-mode check fires before any AEAD/KDF runs, so the body
+        // contents are irrelevant — `classify_encryption_mode` only
+        // looks at type_name.
+        let synthetic = RecipientEntry::native(
+            NativeRecipientType::Argon2id,
+            vec![0u8; argon2id::BODY_LENGTH],
+        )?;
+        let file_key = FileKey::generate();
+        let fcr = tmp.path().join("passphrase.fcr");
+        build_multi_recipient_fcr(&[synthetic], &file_key, b"x", &fcr)?;
+
+        let dec_dir = tmp.path().join("decrypted");
+        fs::create_dir_all(&dec_dir)?;
+        match recipient_decrypt(&fcr, &dec_dir, &priv_a, &pass_a) {
+            Err(CryptoError::DecryptorModeMismatch { expected, found })
+                if expected == EncryptionMode::Recipient && found == EncryptionMode::Passphrase =>
+            {
+                Ok(())
+            }
+            other => panic!(
+                "expected DecryptorModeMismatch(expected=Recipient, found=Passphrase), got {other:?}"
+            ),
+        }
+    }
+
+    /// Cross-mode mismatch in the reverse direction: a recipient-sealed
+    /// file opened with a `PassphraseIdentity`. Symmetric assertion to
+    /// [`decrypt_rejects_passphrase_file_with_x25519_identity`].
+    #[test]
+    fn decrypt_rejects_recipient_file_with_passphrase_identity() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let keys_dir = tmp.path().join("keys");
+        let (pub_a, _priv_a, _pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
+
+        let file_key = FileKey::generate();
+        let body_a = x25519::wrap(&file_key, &pub_a)?;
+        let entries = [RecipientEntry::native(
+            NativeRecipientType::X25519,
+            body_a.to_vec(),
+        )?];
+        let fcr = tmp.path().join("recipient.fcr");
+        build_multi_recipient_fcr(&entries, &file_key, b"x", &fcr)?;
+
+        let dec_dir = tmp.path().join("decrypted");
+        fs::create_dir_all(&dec_dir)?;
+        let pass = SecretString::from("doesn't-matter".to_string());
+        let identity = argon2id::PassphraseIdentity {
+            passphrase: &pass,
+            kdf_limit: None,
+        };
+        let err = decrypt(
+            &identity,
+            &fcr,
+            &dec_dir,
+            ArchiveLimits::default(),
+            HeaderReadLimits::default(),
+            &|_| {},
+        )
+        .unwrap_err();
+        match err {
+            CryptoError::DecryptorModeMismatch { expected, found }
+                if expected == EncryptionMode::Passphrase && found == EncryptionMode::Recipient =>
+            {
+                Ok(())
+            }
+            other => panic!(
+                "expected DecryptorModeMismatch(expected=Passphrase, found=Recipient), got {other:?}"
+            ),
         }
     }
 

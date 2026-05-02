@@ -193,6 +193,7 @@ pub(crate) trait RecipientScheme {
 
 pub(crate) trait IdentityScheme {
     const TYPE_NAME: &'static str;
+    const EXPECTED_MODE: EncryptionMode;
 
     fn unwrap_file_key(
         &self,

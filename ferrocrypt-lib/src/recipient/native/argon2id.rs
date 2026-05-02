@@ -139,6 +139,7 @@ pub(crate) struct PassphraseIdentity<'a> {
 
 impl<'a> crate::protocol::IdentityScheme for PassphraseIdentity<'a> {
     const TYPE_NAME: &'static str = TYPE_NAME;
+    const EXPECTED_MODE: crate::EncryptionMode = crate::EncryptionMode::Passphrase;
 
     fn unwrap_file_key(
         &self,

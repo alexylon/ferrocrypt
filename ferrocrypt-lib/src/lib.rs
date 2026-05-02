@@ -164,6 +164,16 @@ pub enum EncryptionMode {
     Recipient,
 }
 
+impl std::fmt::Display for EncryptionMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = match self {
+            Self::Passphrase => "passphrase",
+            Self::Recipient => "recipient",
+        };
+        f.write_str(label)
+    }
+}
+
 /// Structured progress signal emitted during encrypt, decrypt, and key
 /// generation.
 ///

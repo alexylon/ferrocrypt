@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+use crate::EncryptionMode;
 use crate::recipient::policy::MixingPolicy;
 
 /// Maximum number of `chars` (counting an inserted ellipsis as one) a
@@ -265,6 +266,27 @@ pub enum CryptoError {
     /// the final single-recipient error). Per `FORMAT.md` §12.
     #[error("Decryption failed: no recipient could unlock the file")]
     NoSupportedRecipient,
+    /// The decryptor variant the caller chose does not match the file's
+    /// recipient mode (e.g. a passphrase decryptor invoked against a file
+    /// sealed to public-key recipients, or vice versa).
+    ///
+    /// The public API routes through [`crate::Decryptor::open`], which
+    /// inspects the file structurally and hands back the matching variant —
+    /// so callers using the public surface cannot reach this error. It is
+    /// reserved for internal callers and any future plugin-style API
+    /// where a caller drives `protocol::decrypt` directly with a chosen
+    /// identity scheme.
+    ///
+    /// `expected` is the mode the decryptor expected (its identity-scheme
+    /// mode); `found` is the mode classified from the file's recipient
+    /// list. Distinct from [`Self::NoSupportedRecipient`], which means
+    /// "the file's recipient list contains no entry I can unlock,"
+    /// not "I'm the wrong tool for this file."
+    #[error("Decryptor expects {expected} file, got {found}")]
+    DecryptorModeMismatch {
+        expected: EncryptionMode,
+        found: EncryptionMode,
+    },
     /// The caller provided no encryption recipients.
     ///
     /// `Encryptor::with_recipients` requires at least one public recipient;
@@ -626,6 +648,22 @@ mod tests {
             "Decryption failed: no recipient could unlock the file"
         );
         assert_eq!(
+            CryptoError::DecryptorModeMismatch {
+                expected: EncryptionMode::Passphrase,
+                found: EncryptionMode::Recipient,
+            }
+            .to_string(),
+            "Decryptor expects passphrase file, got recipient"
+        );
+        assert_eq!(
+            CryptoError::DecryptorModeMismatch {
+                expected: EncryptionMode::Recipient,
+                found: EncryptionMode::Passphrase,
+            }
+            .to_string(),
+            "Decryptor expects recipient file, got passphrase"
+        );
+        assert_eq!(
             CryptoError::EmptyRecipientList.to_string(),
             "Recipient list cannot be empty"
         );
@@ -865,6 +903,22 @@ mod tests {
         check(
             "NoSupportedRecipient",
             &CryptoError::NoSupportedRecipient.to_string(),
+        );
+        check(
+            "DecryptorModeMismatch(passphrase, recipient)",
+            &CryptoError::DecryptorModeMismatch {
+                expected: EncryptionMode::Passphrase,
+                found: EncryptionMode::Recipient,
+            }
+            .to_string(),
+        );
+        check(
+            "DecryptorModeMismatch(recipient, passphrase)",
+            &CryptoError::DecryptorModeMismatch {
+                expected: EncryptionMode::Recipient,
+                found: EncryptionMode::Passphrase,
+            }
+            .to_string(),
         );
         check(
             "EmptyRecipientList",

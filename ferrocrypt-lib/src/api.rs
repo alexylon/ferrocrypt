@@ -269,7 +269,7 @@ impl Encryptor {
 ///
 /// A mismatched-credential call — e.g. trying to decrypt a passphrase-sealed
 /// file with a [`PrivateKey`] — is therefore a compile error rather than a
-/// runtime `NoSupportedRecipient` failure.
+/// runtime [`CryptoError::DecryptorModeMismatch`] failure.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Decryptor {

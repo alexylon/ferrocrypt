@@ -15,8 +15,10 @@
 //!   `RecipientEntry`, framing parser.
 //! - [`name`] — `validate_type_name` and `TYPE_NAME_MAX_LEN` per
 //!   `FORMAT.md` §3.3 grammar.
-//! - [`policy`] — `NativeRecipientType` registry, `MixingPolicy`,
-//!   `enforce_recipient_mixing_policy`, `classify_encryption_mode`.
+//! - [`policy`] — `NativeRecipientType` registry, internal
+//!   `NativeMixingRule` enforcement type, public `MixingPolicy` diagnostic
+//!   projection, `enforce_recipient_mixing_policy`,
+//!   `classify_encryption_mode`.
 //! - [`native`] — per-algorithm scheme implementations:
 //!   [`native::argon2id`] and [`native::x25519`].
 //!

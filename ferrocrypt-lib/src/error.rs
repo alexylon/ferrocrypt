@@ -293,7 +293,7 @@ pub enum CryptoError {
     /// otherwise there is no recipient entry to wrap the per-file `file_key`.
     #[error("Recipient list cannot be empty")]
     EmptyRecipientList,
-    /// The recipient list contains an entry whose [`MixingPolicy`] forbids
+    /// The recipient list contains an entry whose mixing rule forbids
     /// the company it is in. The most common v1 trigger is an
     /// [`MixingPolicy::Exclusive`] native type (today only `argon2id`)
     /// sharing a file with any other entry — per `FORMAT.md` §4.1 such
@@ -301,8 +301,12 @@ pub enum CryptoError {
     /// structurally before running any KDF.
     ///
     /// `type_name` identifies which entry triggered the rejection;
-    /// `policy` carries the [`MixingPolicy`] variant the entry declared,
-    /// so callers can pattern-match without parsing the message. The
+    /// `policy` carries the [`MixingPolicy`] projection the offending
+    /// rule declared, so callers can pattern-match without parsing the
+    /// message. Future native types whose compatibility class differs
+    /// from the two fixed shorthand classes surface as
+    /// [`MixingPolicy::Custom { compatibility_class }`](MixingPolicy::Custom),
+    /// with the class identifier preserved in the variant payload. The
     /// same variant surfaces from both the decrypt-side mixing
     /// enforcement (run before any KDF) and the encrypt-side preflight
     /// (run before any output bytes are written), with identical
@@ -605,6 +609,7 @@ impl From<std::io::Error> for CryptoError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::recipient::policy::NativeMixingRule;
 
     /// Lock in the exact user-facing Display text for the bare `CryptoError`
     /// variants. The CLI and desktop app surface `Display` directly, so a
@@ -685,6 +690,20 @@ mod tests {
             }
             .to_string(),
             "Recipient `mlkem768x255…` mixed with another recipient"
+        );
+        // The new Custom variant projects through Display the same way
+        // — the `compatibility_class` payload is structured diagnostic
+        // detail for programmatic consumers, not part of the
+        // user-facing message. (15-char input renders as 12 chars + `…`.)
+        assert_eq!(
+            CryptoError::IncompatibleRecipients {
+                type_name: "x25519-mlkem768".to_owned(),
+                policy: MixingPolicy::Custom {
+                    compatibility_class: NativeMixingRule::POST_QUANTUM_CLASS,
+                },
+            }
+            .to_string(),
+            "Recipient `x25519-mlkem…` mixed with another recipient"
         );
         assert_eq!(
             CryptoError::PayloadTampered.to_string(),
@@ -948,6 +967,21 @@ mod tests {
             &CryptoError::IncompatibleRecipients {
                 type_name: "argon2id".to_owned(),
                 policy: MixingPolicy::PublicKeyMixable,
+            }
+            .to_string(),
+        );
+        // Same budget assertion against the Custom variant — the
+        // structured `compatibility_class` payload doesn't widen the
+        // user-facing message, but lock the worst-case `type_name`
+        // truncation against a plausibly-rendered PQ class so a
+        // future Display-impl change cannot regress the budget.
+        check(
+            "IncompatibleRecipients(truncated, Custom)",
+            &CryptoError::IncompatibleRecipients {
+                type_name: "x25519-mlkem768".to_owned(),
+                policy: MixingPolicy::Custom {
+                    compatibility_class: NativeMixingRule::POST_QUANTUM_CLASS,
+                },
             }
             .to_string(),
         );

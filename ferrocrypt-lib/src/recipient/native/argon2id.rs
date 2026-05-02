@@ -116,8 +116,12 @@ pub(crate) struct PassphraseRecipient<'a> {
 
 impl<'a> crate::protocol::RecipientScheme for PassphraseRecipient<'a> {
     const TYPE_NAME: &'static str = TYPE_NAME;
-    const MIXING_POLICY: crate::recipient::policy::MixingPolicy =
-        crate::recipient::policy::MixingPolicy::Exclusive;
+    // Read the rule from the native registry so adding or changing a
+    // policy in `NativeRecipientType::mixing_rule` cannot drift away
+    // from the encrypt-side trait const that the orchestrator uses
+    // for its defense-in-depth cardinality check.
+    const MIXING_RULE: crate::recipient::policy::NativeMixingRule =
+        crate::recipient::policy::NativeRecipientType::Argon2id.mixing_rule();
 
     fn wrap_file_key(
         &self,

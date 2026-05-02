@@ -623,17 +623,6 @@ entry in a file has an exclusive or incompatible mixing policy, readers MUST
 reject the file before running expensive KDFs or private-key operations.
 Passphrase-like recipient types SHOULD normally be exclusive.
 
-**Update.** A recipient type's mixing policy MAY equivalently be expressed as a
-set of **mixing labels** — short identifying strings such that two recipient
-entries are compatible in the same file iff their declared label sets are
-exactly equal. The fixed names above are convenient shorthands within this
-model: `public-key-mixable` corresponds to the empty set, `same-type-only` to a
-singleton matching the type's name, and `exclusive` to any singleton not
-declared by another type. Mixing labels are a per-type compile-time property
-and never appear on the wire. Implementations MAY use either representation
-internally; files are byte-identical and the reader-side rejection requirement
-above is unchanged.
-
 **Plugin recipients.** Plugin recipients MUST use fully qualified names
 containing `/`. The generic parser MUST pass exact recipient body bytes to plugin
 implementations without normalization or rewriting. Plugin implementations MUST

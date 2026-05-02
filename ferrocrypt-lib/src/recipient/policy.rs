@@ -1,8 +1,25 @@
-//! Mixing-policy enforcement, native-scheme classification, and the
+//! Mixing-rule enforcement, native-scheme classification, and the
 //! `NativeRecipientType` registry.
 //!
-//! Native classification and mixing policy are kept together because adding a
-//! native recipient type requires coordinated updates to both.
+//! Native classification and mixing enforcement are kept together because
+//! adding a native recipient type requires coordinated updates to both.
+//!
+//! ## Two layers
+//!
+//! - `NativeMixingRule` (`pub(crate)`) is the **internal enforcement
+//!   representation**. Each native recipient type declares one as a
+//!   compile-time constant. The enum has two structurally-distinct
+//!   shapes: `SingleEntry` (the type must appear alone, no class) and
+//!   `Class { name }` (multiple entries of the same class may coexist).
+//!   By construction, a single-entry rule has no class to compare, so
+//!   the cardinality and class-equality enforcement modes are mutually
+//!   exclusive at the type level.
+//! - [`MixingPolicy`] (`pub`) is the **public diagnostic projection** of
+//!   the rule, surfaced via [`CryptoError::IncompatibleRecipients`] so
+//!   callers can pattern-match on the cause without parsing the message.
+//!   New compatibility classes show up as
+//!   [`MixingPolicy::Custom { compatibility_class }`](MixingPolicy::Custom)
+//!   and do not require a new public enum variant.
 
 use crate::CryptoError;
 use crate::error::FormatDefect;
@@ -49,27 +66,43 @@ impl NativeRecipientType {
     }
 
     /// Recipient-mixing rule for this native type, per `FORMAT.md` §3.5.
-    /// Used by [`enforce_recipient_mixing_policy`] before any
-    /// recipient unwrap or KDF runs.
-    pub const fn mixing_policy(self) -> MixingPolicy {
+    /// Used by [`enforce_recipient_mixing_policy`] before any recipient
+    /// unwrap or KDF runs. Adding a new native type means adding one arm
+    /// here — the rest of the mixing-enforcement machinery is registry-
+    /// driven and does not need editing.
+    pub(crate) const fn mixing_rule(self) -> NativeMixingRule {
         match self {
-            // argon2id is exclusive: a passphrase recipient cannot be
-            // mixed with anything else, not even another argon2id slot
-            // or an unknown non-critical entry.
-            Self::Argon2id => MixingPolicy::Exclusive,
-            // x25519 admits multiple x25519 slots in the same file.
-            Self::X25519 => MixingPolicy::PublicKeyMixable,
+            Self::Argon2id => NativeMixingRule::exclusive(),
+            Self::X25519 => NativeMixingRule::public_key_mixable(),
+        }
+    }
+
+    /// Native [`crate::EncryptionMode`] for this type. Used by
+    /// [`classify_encryption_mode`] to pick the file's mode without a
+    /// second closed list of `has_*` booleans. Adding a new native type
+    /// means adding one arm here.
+    pub(crate) const fn encryption_mode(self) -> crate::EncryptionMode {
+        match self {
+            Self::Argon2id => crate::EncryptionMode::Passphrase,
+            Self::X25519 => crate::EncryptionMode::Recipient,
         }
     }
 }
 
-/// Mixing rule for a native recipient type, per `FORMAT.md` §3.5.
+/// Public diagnostic category for a recipient mixing rule, surfaced
+/// through [`CryptoError::IncompatibleRecipients`].
 ///
-/// Applied before recipient unwrap so a hostile mixed file cannot
-/// trick the reader into running an expensive KDF unnecessarily.
+/// This is intentionally not the full internal enforcement representation
+/// — that is the crate-private `NativeMixingRule` type, which can express
+/// new native compatibility classes without adding public enum variants.
+/// [`MixingPolicy::Custom`] is the catch-all for compatibility classes
+/// that do not match the two fixed shorthand variants below; the
+/// associated `compatibility_class` string preserves which class the
+/// offending rule declared, so programmatic diagnostics can distinguish
+/// (for example) a post-quantum class clash from any future custom class.
 ///
-/// The enum is `#[non_exhaustive]` so future native recipient types can add
-/// additional policies without a breaking API change.
+/// The enum is `#[non_exhaustive]` so future native rules can be added
+/// without a breaking API change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MixingPolicy {
@@ -78,71 +111,220 @@ pub enum MixingPolicy {
     /// `argon2id`.
     Exclusive,
     /// Standard public-key mixability: multiple recipients of this
-    /// type are permitted, alongside other public-key recipients.
-    /// Currently: `x25519`.
+    /// type are permitted, alongside other public-key recipients in
+    /// the same compatibility class. Currently: `x25519`.
     PublicKeyMixable,
+    /// A recipient-specific compatibility class not represented by the
+    /// fixed shorthand variants above. The `compatibility_class` field
+    /// carries the class identifier the offending rule declared so a
+    /// caller can distinguish — for example — a post-quantum class
+    /// clash (`"postquantum"`) from a future custom class.
+    Custom {
+        /// Class identifier as declared by the recipient type's
+        /// crate-private mixing rule. Stable per native type within a
+        /// release; not part of the wire format and never appears on
+        /// disk.
+        compatibility_class: &'static str,
+    },
 }
 
-/// Enforces recipient-mixing policy across a parsed entry list,
-/// per `FORMAT.md` §3.5.
+/// Internal native-recipient mixing rule, per `FORMAT.md` §3.5.
 ///
-/// Returns `Ok(())` if the list satisfies all supported native mixing rules;
-/// otherwise returns a typed [`CryptoError`].
+/// The enum has two structurally-distinct shapes — a single-entry rule
+/// has no compatibility class at all, so a class comparison cannot
+/// accidentally treat two single-entry rules as compatible. Cardinality
+/// (single-entry) and class equality are mutually exclusive enforcement
+/// modes by construction.
 ///
-/// This must run before any recipient unwrap, especially before the Argon2id
-/// KDF for `argon2id`, so an invalid mixed-recipient file cannot force work
-/// that policy would reject.
+/// `NativeMixingRule` is `pub(crate)` because it is the enforcement plane;
+/// public diagnostics surface as [`MixingPolicy`] (the projection
+/// returned by [`Self::diagnostic_policy`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeMixingRule {
+    /// The recipient type must be the only entry in the file (counting
+    /// unknown non-critical entries too, per `FORMAT.md` §4.1). There
+    /// is no compatibility class because a single-entry rule by
+    /// definition cannot coexist with anything. Currently: `argon2id`.
+    SingleEntry,
+    /// The recipient type may coexist with other entries declaring the
+    /// same compatibility class. Two `Class` rules are compatible iff
+    /// their `name` fields are exactly equal. Currently: `x25519`
+    /// declares `Class { name: PUBLIC_KEY_CLASS }`; the upcoming
+    /// `x25519-mlkem768` would declare
+    /// `Class { name: POST_QUANTUM_CLASS }`.
+    Class {
+        /// Compatibility-class identifier, fixed per native recipient
+        /// type and never appearing on the wire.
+        name: &'static str,
+    },
+}
+
+impl NativeMixingRule {
+    /// Class for ordinary public-key recipients that share an
+    /// unconstrained compatibility group.
+    pub(crate) const PUBLIC_KEY_CLASS: &'static str = "public-key";
+
+    /// Class for native post-quantum or hybrid-PQ recipients (reserved
+    /// for the upcoming `x25519-mlkem768` recipient type and any future
+    /// native PQ recipient sharing the same compatibility class).
+    #[allow(dead_code)] // referenced by the upcoming PQ recipient PR
+    pub(crate) const POST_QUANTUM_CLASS: &'static str = "postquantum";
+
+    /// `argon2id`-style rule: the type must be the only entry in the
+    /// file. Diagnostic projection is [`MixingPolicy::Exclusive`].
+    pub(crate) const fn exclusive() -> Self {
+        Self::SingleEntry
+    }
+
+    /// `x25519`-style rule: ordinary public-key compatibility class,
+    /// no cardinality constraint. Diagnostic projection is
+    /// [`MixingPolicy::PublicKeyMixable`].
+    pub(crate) const fn public_key_mixable() -> Self {
+        Self::Class {
+            name: Self::PUBLIC_KEY_CLASS,
+        }
+    }
+
+    /// Future native PQ / hybrid-PQ rule: post-quantum compatibility
+    /// class, no cardinality constraint. Diagnostic projection is
+    /// [`MixingPolicy::Custom { compatibility_class: "postquantum" }`].
+    #[allow(dead_code)] // referenced by the upcoming PQ recipient PR
+    pub(crate) const fn post_quantum() -> Self {
+        Self::Class {
+            name: Self::POST_QUANTUM_CLASS,
+        }
+    }
+
+    /// `true` iff this rule requires the recipient to be the only
+    /// entry in the file.
+    pub(crate) const fn requires_single_entry(self) -> bool {
+        matches!(self, Self::SingleEntry)
+    }
+
+    /// Public-API diagnostic projection of this rule. Used by
+    /// [`CryptoError::IncompatibleRecipients`] so callers can pattern-
+    /// match on the cause without inspecting the internal enum.
+    pub(crate) fn diagnostic_policy(self) -> MixingPolicy {
+        match self {
+            Self::SingleEntry => MixingPolicy::Exclusive,
+            Self::Class { name } if name == Self::PUBLIC_KEY_CLASS => {
+                MixingPolicy::PublicKeyMixable
+            }
+            Self::Class { name } => MixingPolicy::Custom {
+                compatibility_class: name,
+            },
+        }
+    }
+}
+
+/// Enforces recipient-mixing rules across a parsed entry list, per
+/// `FORMAT.md` §3.5.
 ///
-/// Rule: any entry whose native type declares [`MixingPolicy::Exclusive`]
-/// (today only `argon2id`) MUST appear alone. If such an entry shares
-/// the list with any other entry — *including a second entry of the
-/// same Exclusive type, a different native entry, or any unknown
-/// non-critical entry* — fail with
-/// [`CryptoError::IncompatibleRecipients`], naming the offending
-/// type and its policy.
+/// Returns `Ok(())` if the list satisfies every supported native mixing
+/// rule; otherwise returns a typed [`CryptoError::IncompatibleRecipients`]
+/// carrying the offending `type_name` and the rule's diagnostic
+/// [`MixingPolicy`] projection.
 ///
-/// All other combinations are allowed at this layer; finer
-/// classification (no supported recipient, only-unknown-non-critical,
-/// etc.) is the job of [`classify_encryption_mode`].
+/// This must run before any recipient unwrap, especially before the
+/// Argon2id KDF for `argon2id`, so an invalid mixed-recipient file
+/// cannot force work that policy would reject.
 ///
-/// Unknown critical entries are NOT rejected here. They are rejected
-/// inside [`classify_encryption_mode`] before classification commits.
+/// Rules:
+///
+/// 1. Cardinality. Any entry whose native rule is
+///    [`NativeMixingRule::SingleEntry`] (today only `argon2id`) MUST
+///    appear as the only entry in the file — counting unknown
+///    non-critical entries too, per `FORMAT.md` §4.1. A second
+///    same-type entry, a different native entry, or any unknown
+///    non-critical entry alongside it is a violation.
+///
+/// 2. Compatibility class. Two supported [`NativeMixingRule::Class`]
+///    rules are compatible iff their `name` fields are exactly equal.
+///    Unknown non-critical entries are skipped for the class
+///    comparison (they are forward-compatibility filler, not
+///    enforcement subjects). Unknown critical entries are rejected
+///    upstream by [`classify_encryption_mode`] before this function
+///    can matter.
+///
+/// On a class clash the reported `(type_name, policy)` favours the
+/// stricter / non-`PublicKeyMixable` side so the diagnostic identifies
+/// the recipient with the more specific compatibility class. The error
+/// shape carries one `type_name`, not both sides; the
+/// [`MixingPolicy::Custom`] variant additionally carries the offending
+/// rule's compatibility-class string so programmatic consumers can
+/// distinguish, for example, post-quantum from any future custom class.
 pub fn enforce_recipient_mixing_policy(entries: &[RecipientEntry]) -> Result<(), CryptoError> {
-    // The policy table on `NativeRecipientType` is the single source of
-    // truth: every native type declares its mixing rule via
-    // `mixing_policy()`, and adding a new native variant forces this
-    // function to handle it (the `MixingPolicy` enum is
-    // `#[non_exhaustive]`, so a new variant produces a compile error
-    // here until the new arm is wired in).
+    // The mixing-rule table on `NativeRecipientType::mixing_rule` is the
+    // single source of truth. Adding a new native type means adding one
+    // arm there; this function does not need to be edited.
+    let mut control: Option<(&RecipientEntry, NativeMixingRule)> = None;
     for entry in entries {
         let Some(ty) = NativeRecipientType::from_type_name(&entry.type_name) else {
+            // Unknown non-critical entries are skipped here. Critical
+            // unknowns were rejected by `classify_encryption_mode`
+            // before this function ran.
             continue;
         };
-        match ty.mixing_policy() {
-            MixingPolicy::Exclusive => {
-                if entries.len() != 1 {
+        let rule = ty.mixing_rule();
+
+        if rule.requires_single_entry() && entries.len() != 1 {
+            return Err(CryptoError::IncompatibleRecipients {
+                type_name: entry.type_name.clone(),
+                policy: rule.diagnostic_policy(),
+            });
+        }
+
+        match control {
+            None => control = Some((entry, rule)),
+            Some((first_entry, first_rule)) => match (first_rule, rule) {
+                // Same compatibility class: compatible. Control stays
+                // on the first entry so a third clashing entry is
+                // still reported against the original.
+                (NativeMixingRule::Class { name: a }, NativeMixingRule::Class { name: b })
+                    if a == b => {}
+                // Class clash: prefer the stricter / non-PublicKeyMixable
+                // side for the diagnostic so the reported `type_name`
+                // identifies the recipient with the more specific
+                // compatibility class.
+                (NativeMixingRule::Class { .. }, NativeMixingRule::Class { .. }) => {
+                    let (reported_entry, reported_rule) =
+                        if rule.diagnostic_policy() != MixingPolicy::PublicKeyMixable {
+                            (entry, rule)
+                        } else {
+                            (first_entry, first_rule)
+                        };
                     return Err(CryptoError::IncompatibleRecipients {
-                        type_name: entry.type_name.clone(),
-                        policy: ty.mixing_policy(),
+                        type_name: reported_entry.type_name.clone(),
+                        policy: reported_rule.diagnostic_policy(),
                     });
                 }
-            }
-            MixingPolicy::PublicKeyMixable => {}
+                // A `SingleEntry` rule on either side cannot reach this
+                // arm: the cardinality check at the start of each
+                // iteration rejects any single-entry rule whenever
+                // `entries.len() != 1`, and we only enter the
+                // class-comparison arm when a previous entry has
+                // already been processed (so `entries.len() >= 2`).
+                // Fail closed if the invariant ever breaks instead of
+                // accepting silently.
+                (NativeMixingRule::SingleEntry, _) | (_, NativeMixingRule::SingleEntry) => {
+                    return Err(CryptoError::InternalInvariant(
+                        "single-entry rule reached class comparison",
+                    ));
+                }
+            },
         }
     }
     Ok(())
 }
 
-/// Classifies a parsed recipient list as either `Passphrase` (one
-/// `argon2id` recipient, alone) or `Recipient` (one or more supported
-/// `x25519` recipients with no `argon2id`). Returns an error for any
-/// list that does not fit into one of those two modes.
+/// Classifies a parsed recipient list into the file's
+/// [`crate::EncryptionMode`]. Returns an error for any list that does
+/// not yield a unique mode.
 ///
-/// This scans the **entire** list rather
-/// than only the first entry — future valid files may place unknown
-/// non-critical recipients before a supported native recipient, and a
-/// classifier that looked at only the first entry would misclassify
-/// those.
+/// This scans the **entire** list rather than only the first entry —
+/// future valid files may place unknown non-critical recipients before
+/// a supported native recipient, and a classifier that looked at only
+/// the first entry would misclassify those.
 ///
 /// Order of checks:
 /// 1. For each entry, reject either a known native entry whose
@@ -154,12 +336,17 @@ pub fn enforce_recipient_mixing_policy(entries: &[RecipientEntry]) -> Result<(),
 ///    bits 1..=15 are already rejected at parse time
 ///    (`RECIPIENT_FLAGS_RESERVED_MASK`), so by the time this runs only
 ///    bit 0 (critical) can be set among the flags.
-/// 2. Run [`enforce_recipient_mixing_policy`] (`argon2id` is exclusive).
-/// 3. Exactly one `argon2id` (alone) → [`crate::EncryptionMode::Passphrase`].
-/// 4. One or more supported `x25519` (and no `argon2id`) →
-///    [`crate::EncryptionMode::Recipient`].
-/// 5. Otherwise (no supported native recipient and no unknown
-///    critical) → [`CryptoError::NoSupportedRecipient`].
+/// 2. Run [`enforce_recipient_mixing_policy`] (cardinality + class).
+/// 3. For each supported native entry, look up
+///    [`NativeRecipientType::encryption_mode`]; the file's mode is the
+///    common value across all supported entries.
+/// 4. If two supported native entries declare different modes the file
+///    is rejected (currently unreachable — the cardinality check on
+///    `argon2id` already forbids cross-mode mixes — but the branch is
+///    kept fail-closed in case a future native type breaks the
+///    one-class-implies-one-mode assumption).
+/// 5. If no supported native entry is present (only unknown non-critical
+///    entries) → [`CryptoError::NoSupportedRecipient`].
 ///
 /// This is structural classification only. The caller still has to
 /// run the appropriate per-recipient unwrap and the header MAC verify
@@ -190,25 +377,38 @@ pub fn classify_encryption_mode(
         }
     }
 
-    // Step 2: enforce mixing policy before any KDF/unwrap could run.
+    // Step 2: enforce mixing rules before any KDF/unwrap could run.
     enforce_recipient_mixing_policy(entries)?;
 
-    // Step 3 / 4: native classification.
-    let has_argon2id = entries.iter().any(|e| e.type_name == argon2id::TYPE_NAME);
-    let has_supported_x25519 = entries.iter().any(|e| e.type_name == x25519::TYPE_NAME);
-
-    if has_argon2id {
-        // `enforce_recipient_mixing_policy` already guaranteed the
-        // list is exactly `[argon2id]`.
-        return Ok(crate::EncryptionMode::Passphrase);
-    }
-    if has_supported_x25519 {
-        return Ok(crate::EncryptionMode::Recipient);
+    // Step 3 / 4: registry-driven mode classification. Walk the entry
+    // list once, look up `encryption_mode()` per supported native type,
+    // and confirm every supported entry agrees on a single mode.
+    let mut mode: Option<crate::EncryptionMode> = None;
+    for entry in entries {
+        let Some(ty) = NativeRecipientType::from_type_name(&entry.type_name) else {
+            continue;
+        };
+        let entry_mode = ty.encryption_mode();
+        match mode {
+            None => mode = Some(entry_mode),
+            Some(existing) if existing == entry_mode => {}
+            Some(_) => {
+                // Cross-mode native mix slipped past
+                // `enforce_recipient_mixing_policy`. Currently
+                // unreachable (argon2id's cardinality forbids it); kept
+                // fail-closed as defense-in-depth for future native
+                // types whose class might span modes.
+                return Err(CryptoError::IncompatibleRecipients {
+                    type_name: entry.type_name.clone(),
+                    policy: ty.mixing_rule().diagnostic_policy(),
+                });
+            }
+        }
     }
 
     // Step 5: no supported native recipient. Unknown non-critical
     // entries cannot decrypt the file on their own.
-    Err(CryptoError::NoSupportedRecipient)
+    mode.ok_or(CryptoError::NoSupportedRecipient)
 }
 
 #[cfg(test)]
@@ -252,17 +452,65 @@ mod tests {
     }
 
     #[test]
-    fn mixing_policy_per_native_type() {
-        // argon2id MUST be Exclusive — passphrase recipients cannot
-        // mix with anything per FORMAT.md §3.4.
+    fn mixing_rule_per_native_type() {
+        // argon2id: SingleEntry — diagnostic projection `Exclusive`.
+        // The variant carries no class field, so two argon2id rules
+        // cannot have a "matching class" by accident.
+        let argon = NativeRecipientType::Argon2id.mixing_rule();
+        assert_eq!(argon, NativeMixingRule::SingleEntry);
+        assert!(argon.requires_single_entry());
+        assert_eq!(argon.diagnostic_policy(), MixingPolicy::Exclusive);
+
+        // x25519: Class { name: PUBLIC_KEY_CLASS }, no cardinality,
+        // diagnostic projection `PublicKeyMixable`.
+        let x = NativeRecipientType::X25519.mixing_rule();
         assert_eq!(
-            NativeRecipientType::Argon2id.mixing_policy(),
-            MixingPolicy::Exclusive
+            x,
+            NativeMixingRule::Class {
+                name: NativeMixingRule::PUBLIC_KEY_CLASS,
+            }
         );
-        // x25519 admits multiple x25519 slots in the same file.
+        assert!(!x.requires_single_entry());
+        assert_eq!(x.diagnostic_policy(), MixingPolicy::PublicKeyMixable);
+    }
+
+    /// Confirm the [`NativeMixingRule::post_quantum`] / [`NativeMixingRule::POST_QUANTUM_CLASS`]
+    /// constants project to the documented public diagnostic shape.
+    /// Locks in the `Custom { compatibility_class: "postquantum" }`
+    /// wording so the upcoming `x25519-mlkem768` recipient PR does not
+    /// silently drift the class identifier.
+    #[test]
+    fn post_quantum_rule_projects_to_custom_diagnostic() {
+        let rule = NativeMixingRule::post_quantum();
         assert_eq!(
-            NativeRecipientType::X25519.mixing_policy(),
-            MixingPolicy::PublicKeyMixable
+            rule,
+            NativeMixingRule::Class {
+                name: NativeMixingRule::POST_QUANTUM_CLASS,
+            }
+        );
+        assert!(!rule.requires_single_entry());
+        assert_eq!(
+            rule.diagnostic_policy(),
+            MixingPolicy::Custom {
+                compatibility_class: NativeMixingRule::POST_QUANTUM_CLASS,
+            }
+        );
+    }
+
+    /// Native registry's [`NativeRecipientType::encryption_mode`]
+    /// must agree with what `classify_encryption_mode` emits for
+    /// single-recipient lists. Locks in the registry as the single
+    /// source of truth for mode classification (the classifier no
+    /// longer hard-codes `argon2id` / `x25519` type-name strings).
+    #[test]
+    fn encryption_mode_per_native_type() {
+        assert_eq!(
+            NativeRecipientType::Argon2id.encryption_mode(),
+            crate::EncryptionMode::Passphrase
+        );
+        assert_eq!(
+            NativeRecipientType::X25519.encryption_mode(),
+            crate::EncryptionMode::Recipient
         );
     }
 
@@ -329,6 +577,18 @@ mod tests {
     #[test]
     fn enforce_mixing_rejects_argon2id_plus_x25519() {
         let err = enforce_recipient_mixing_policy(&[argon2id_entry(), x25519_entry()]).unwrap_err();
+        assert_argon2id_mixing_violation(err);
+    }
+
+    /// Reverse-order companion of
+    /// [`enforce_mixing_rejects_argon2id_plus_x25519`]: place the
+    /// `x25519` entry first so the cardinality check fires on the
+    /// SECOND iteration. The error must still name `argon2id`
+    /// (not `x25519`) — the cardinality check on the single-entry
+    /// rule is what trips, regardless of iteration position.
+    #[test]
+    fn enforce_mixing_rejects_x25519_plus_argon2id() {
+        let err = enforce_recipient_mixing_policy(&[x25519_entry(), argon2id_entry()]).unwrap_err();
         assert_argon2id_mixing_violation(err);
     }
 

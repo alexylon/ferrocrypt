@@ -51,20 +51,22 @@ use crate::error::CryptoError;
 use crate::format;
 use crate::fs::paths::encryption_base_name;
 use crate::recipient::entry::{RecipientBody, RecipientEntry};
-use crate::recipient::policy::{MixingPolicy, NativeRecipientType, classify_encryption_mode};
+#[cfg(test)]
+use crate::recipient::policy::MixingPolicy;
+use crate::recipient::policy::{NativeMixingRule, NativeRecipientType, classify_encryption_mode};
 use crate::{EncryptionMode, ProgressEvent};
 
 /// Encrypt-side scheme: turn a [`FileKey`] into a recipient body of
 /// scheme-specific bytes.
 ///
-/// `TYPE_NAME` and `MIXING_POLICY` are associated constants so the
-/// multi-recipient `encrypt` orchestrator can enforce the mixing policy
+/// `TYPE_NAME` and `MIXING_RULE` are associated constants so the
+/// multi-recipient `encrypt` orchestrator can enforce the mixing rule
 /// before any KDF runs. Implementations must NOT build full
 /// [`RecipientEntry`] framing or compute the header MAC — those
 /// concerns live in this module.
 pub(crate) trait RecipientScheme {
     const TYPE_NAME: &'static str;
-    const MIXING_POLICY: MixingPolicy;
+    const MIXING_RULE: NativeMixingRule;
 
     fn wrap_file_key(&self, file_key: &FileKey) -> Result<RecipientBody, CryptoError>;
 }
@@ -106,11 +108,11 @@ pub(crate) trait IdentityScheme {
 ///
 /// - `recipients` MUST be non-empty (the public API enforces this at
 ///   construction time; the orchestrator double-checks).
-/// - If `R::MIXING_POLICY == MixingPolicy::Exclusive` then
-///   `recipients.len()` MUST be exactly 1. The public API can only
-///   reach this code with a single passphrase, but the assertion stops
-///   a future caller bypass from emitting an `argon2id` file with two
-///   bodies (`FORMAT.md` §4.1 forbids it).
+/// - If `R::MIXING_RULE.requires_single_entry()` then `recipients.len()`
+///   MUST be exactly 1. The public API can only reach this code with a
+///   single passphrase, but the assertion stops a future caller bypass
+///   from emitting an `argon2id` file with two bodies (`FORMAT.md` §4.1
+///   forbids it).
 pub(crate) fn encrypt<R: RecipientScheme>(
     recipients: &[R],
     archive_limits: ArchiveLimits,
@@ -122,10 +124,10 @@ pub(crate) fn encrypt<R: RecipientScheme>(
     if recipients.is_empty() {
         return Err(CryptoError::EmptyRecipientList);
     }
-    if R::MIXING_POLICY == MixingPolicy::Exclusive && recipients.len() > 1 {
+    if R::MIXING_RULE.requires_single_entry() && recipients.len() > 1 {
         return Err(CryptoError::IncompatibleRecipients {
             type_name: R::TYPE_NAME.to_string(),
-            policy: R::MIXING_POLICY,
+            policy: R::MIXING_RULE.diagnostic_policy(),
         });
     }
 

@@ -170,7 +170,7 @@ During decryption, `protocol.rs` coordinates:
 
 1. container prefix and encrypted-header reading;
 2. structural recipient parsing;
-3. recipient mixing-policy enforcement;
+3. recipient mixing-rule enforcement;
 4. local resource-cap enforcement;
 5. recipient-scheme file-key unwrapping;
 6. header MAC verification with each candidate `FileKey`;
@@ -186,7 +186,7 @@ During decryption, `protocol.rs` coordinates:
 ```rust
 pub(crate) trait RecipientScheme {
     const TYPE_NAME: &'static str;
-    const MIXING_POLICY: MixingPolicy;
+    const MIXING_RULE: NativeMixingRule;
 
     fn wrap_file_key(&self, file_key: &FileKey) -> Result<RecipientBody, CryptoError>;
 }
@@ -257,7 +257,7 @@ It contains:
 
 Errors remain centralized because they form a coherent diagnostic namespace. Public errors must be precise, stable, and careful not to overstate what cryptographic verification can prove.
 
-Error variants that carry data carry typed structured data, such as `FormatDefect`, `UnsupportedVersion`, `InvalidKdfParams`, `MixingPolicy`, named integer fields for resource caps, and owned `type_name` strings for per-recipient diagnostics. Consumers can pattern-match on error shapes without substring comparisons.
+Error variants that carry data carry typed structured data, such as `FormatDefect`, `UnsupportedVersion`, `InvalidKdfParams`, the `MixingPolicy` diagnostic projection (with a structured `Custom { compatibility_class }` payload for non-shorthand classes), named integer fields for resource caps, and owned `type_name` strings for per-recipient diagnostics. Consumers can pattern-match on error shapes without substring comparisons.
 
 Diagnostic rules:
 
@@ -431,35 +431,53 @@ All recipient type-name validation goes through this module.
 
 ### 5.3 `recipient/policy.rs`
 
-`recipient/policy.rs` owns recipient mixing policy, enforcement, and native-scheme classification.
+`recipient/policy.rs` owns recipient mixing-rule enforcement, the public diagnostic projection, and native-scheme classification.
 
-It contains:
+It contains two layers — an internal enforcement type and a public diagnostic projection:
 
 ```rust
+// Internal enforcement representation. `pub(crate)`; never appears on
+// the wire and is not part of the stable public API. The two variants
+// are structurally distinct so cardinality and class-equality
+// enforcement modes are mutually exclusive at the type level — a
+// `SingleEntry` rule has no class field, so two single-entry rules
+// cannot accidentally compare as compatible.
+pub(crate) enum NativeMixingRule {
+    SingleEntry,
+    Class { name: &'static str },
+}
+
+// Public diagnostic projection of `NativeMixingRule`, surfaced via
+// `CryptoError::IncompatibleRecipients`. New compatibility classes
+// surface through `Custom` without adding fixed enum variants.
 #[non_exhaustive]
 pub enum MixingPolicy {
     Exclusive,
     PublicKeyMixable,
+    Custom { compatibility_class: &'static str },
 }
 ```
 
-The `#[non_exhaustive]` attribute lets future variants — same-type-only, unrestricted, custom, plugin-specific policies — be added without a breaking change.
+The `#[non_exhaustive]` attribute on `MixingPolicy` lets future variants be added without a breaking change. New native compatibility classes surface as `MixingPolicy::Custom { compatibility_class: "<class>" }` and do not require new fixed variants.
 
 Responsibilities:
 
-- defining mixing-policy types;
-- enforcing mixing policy before expensive operations;
+- defining the internal `NativeMixingRule` type and its named constructors (`exclusive`, `public_key_mixable`, `post_quantum`);
+- defining the public `MixingPolicy` diagnostic projection;
+- enforcing mixing rules before expensive operations (cardinality bit + compatibility-class equality, both before any KDF or private-key work);
 - mapping type names to supported native scheme metadata;
+- declaring each native type's `EncryptionMode` via `NativeRecipientType::encryption_mode` so `classify_encryption_mode` is registry-driven (no hard-coded `argon2id` / `x25519` switches in the classifier);
 - classifying parsed headers as passphrase, public-recipient, unsupported, or mixed;
 - preserving unknown non-critical entries as opaque authenticated data.
 
 Rules:
 
-- `argon2id` is exclusive.
-- `x25519` is public-key-mixable.
-- Unknown non-critical recipients are ignored for scheme-specific opening but still count wherever the format says they count, including exclusive passphrase recipient checks.
-- Mixing policy is enforced before expensive KDF or private-key operations.
-- Native-scheme classification and mixing-policy enforcement are kept together because every native scheme addition requires coordinated changes to both.
+- `argon2id` is `NativeMixingRule::SingleEntry` (must appear alone; no compatibility class — cardinality is the only constraint).
+- `x25519` is `NativeMixingRule::Class { name: PUBLIC_KEY_CLASS }` (no cardinality constraint, mixes only with other entries declaring the same class).
+- Native PQ recipients (e.g. the upcoming `x25519-mlkem768`) declare `NativeMixingRule::Class { name: POST_QUANTUM_CLASS }` and project to `MixingPolicy::Custom { compatibility_class: "postquantum" }`.
+- Unknown non-critical recipients are ignored for class comparison but still count wherever the format says they count, including exclusive passphrase recipient checks.
+- Mixing rules are enforced before expensive KDF or private-key operations.
+- Native-scheme classification and mixing enforcement are kept together because every native scheme addition requires coordinated changes to both (`mixing_rule` + `encryption_mode` arms on `NativeRecipientType`).
 
 A separate recipient registry module is introduced only when a reviewed public plugin-registration API exists.
 

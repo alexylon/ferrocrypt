@@ -14,6 +14,10 @@ documentation = "https://docs.rs/ferrocrypt"
 keywords = ["cryptography", "encryption", "chacha20poly1305", "argon2", "X25519"]
 categories = ["cryptography"]
 publish = true
+# Internal regression fixtures (including a non-secret fixture private.key)
+# are not part of the published crate; they exist only to drive in-tree
+# integration tests.
+exclude = ["tests/fixtures/"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

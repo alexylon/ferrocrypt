@@ -227,6 +227,7 @@ recipient_entry = type_name_len(2) || recipient_flags(2) || body_len(4)
     - lib: `RUSTDOCFLAGS="-D warnings" cargo doc --package ferrocrypt --no-deps` — catches broken intra-doc links and other rustdoc issues that `cargo clippy` does not surface.
     - desktop (if touched): `cd ferrocrypt-desktop && cargo clippy --all-targets -- -D warnings`
     - supply chain (if `Cargo.toml` / `Cargo.lock` changed): `cargo vet` — mirrors the `vet` job in `.github/workflows/rust.yml` so local runs catch failures before GitHub CI does. Requires `cargo install --locked cargo-vet` once.
+    - advisory scan (if `Cargo.toml` / `Cargo.lock` changed): run `cargo audit` from the **workspace root** (`/Users/alex/git/aal/ferrocrypt`), not from inside `ferrocrypt-lib/`. The package directory has no `Cargo.lock` of its own; from there you'd need `cargo audit --file <workspace-root>/Cargo.lock`. Requires `cargo install --locked cargo-audit` once.
 - Before finishing, review the change with adversarial thinking and future-proofing in mind.
 - Never commit or stage changes with Git.
 - Never manually bump `version` in any `Cargo.toml`. Versioning is automated; see `RELEASE.md`.

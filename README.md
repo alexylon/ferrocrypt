@@ -236,7 +236,7 @@ Limitations:
 - Filesystem hardlinks encountered during encryption are stored as independent regular files.
 - Default archive limits are enforced during encryption and decryption: at most 250,000 entries, 64 GiB of total regular-file content, and 64 path components per entry.
 - Failed decryptions do not write to the final output path. Partial plaintext may remain in a sibling `.incomplete` working copy when corruption is detected after some chunks have already authenticated.
-- Hardened extraction is available only on Linux and macOS. On a Windows machine where other local users have access, extract into a directory that is not writable by them.
+- Hardened extraction is available only on Linux and macOS. On Windows, extraction is best-effort against local filesystem races; on shared Windows machines, choose an output directory writable only by the current user.
 
 ## Decryption errors
 

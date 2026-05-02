@@ -289,7 +289,15 @@ pub(crate) fn decrypt<I: IdentityScheme>(
         // unwrap fails (`Ok(None)`) skip the `derive_subkeys` and the
         // `verify_header_mac` below, so a residual delta of
         // ~one HKDF + one HMAC remains between AEAD-pass and AEAD-fail
-        // slots.
+        // slots. That delta is informationally redundant with the
+        // overall decrypt success/failure signal — under one private
+        // key, at most one slot AEAD-passes, so the delta only reveals
+        // "some slot matched", which the success outcome already
+        // tells the observer. Crucially, the delta does NOT depend on
+        // the matching slot's position in the list, so §3.7's
+        // recipient-anonymity goal is preserved without requiring
+        // unconditional derive_subkeys + verify_header_mac on every
+        // AEAD-fail slot.
         if format::verify_header_mac(
             &parsed.prefix_bytes,
             &parsed.header_bytes,

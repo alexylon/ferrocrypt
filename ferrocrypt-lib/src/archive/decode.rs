@@ -90,18 +90,15 @@ struct NormalizedEntry {
 /// (`FORMAT.md` §9). Catches:
 ///
 /// - non-POSIX-ustar headers (GNU magic, missing `00` version);
-/// - typeflags outside `{file, directory}` (symlink, hardlink,
-///   device, fifo, GNU/PAX extension records);
-/// - GNU long-name / long-link records: when the tar crate
-///   transparently merges an extension into the next entry,
-///   `entry.path_bytes()` carries the long path while
-///   `entry.header().path_bytes()` still carries the truncated
-///   in-header name. A mismatch means an extension was applied;
-/// - PAX `'x'` extended headers that override the size attribute
-///   (`entry.size()` differs from `entry.header().size()`); the
-///   path-altering case is already covered by the GNU long-name
-///   check above since PAX `path=` rewrites flow through the same
-///   merged-path channel;
+/// - typeflags outside `{file, directory}`. The reader runs in raw
+///   iteration mode (`tar::Entries::raw(true)`), so PAX `'x'` /
+///   `'g'` records and the GNU `'L'` / `'K'` / `'S'` / `'M'` / `'D'`
+///   / `'V'` / `'N'` extension records each surface as their own
+///   entry with their wire typeflag intact, instead of being merged
+///   into the next entry by the tar crate. The match arms below
+///   reject every PAX and GNU extension byte explicitly so the
+///   error message tells the user what the archive actually
+///   contained, rather than a generic "unsupported typeflag";
 /// - empty paths, paths with NUL or `\` bytes, repeated `/`
 ///   separators, paths longer than the ustar representable cap;
 /// - non-UTF-8 paths;
@@ -110,14 +107,12 @@ struct NormalizedEntry {
 /// - `.` and `..` components, absolute paths, Windows path
 ///   prefixes (covered by `validate_archive_path_components`).
 ///
-/// Residual limitation: a PAX extended header that overrides only
-/// timestamp or permission attributes (no size, no path) is consumed
-/// by the tar crate without leaving a detectable signature. The
-/// practical impact is bounded — extraction filters strip the
-/// non-permission mode bits, ferrocrypt's own writer never emits PAX
-/// records, and the underlying payload is AEAD-authenticated end to
-/// end. A fully strict implementation would replace
-/// `tar::Archive::entries()` with a custom 512-byte-block parser.
+/// Because raw iteration surfaces every header block with its own
+/// typeflag, no "merged-state" heuristic is needed — a PAX `'x'`
+/// record that overrode mtime, uid/gid, mode, or any other
+/// attribute is rejected at the typeflag check before any merging
+/// could happen. ferrocrypt's own writer never emits PAX or GNU
+/// records, so these branches fire only on adversarial input.
 fn validate_ustar_entry<R: Read>(
     entry: &mut tar::Entry<'_, R>,
 ) -> Result<NormalizedEntry, CryptoError> {
@@ -138,6 +133,23 @@ fn validate_ustar_entry<R: Read>(
     let kind = match typeflag {
         ustar::TYPEFLAG_REGULAR_NUL | ustar::TYPEFLAG_REGULAR_ZERO => UstarEntryKind::File,
         ustar::TYPEFLAG_DIRECTORY => UstarEntryKind::Directory,
+        ustar::TYPEFLAG_PAX_EXTENDED | ustar::TYPEFLAG_PAX_GLOBAL => {
+            return Err(CryptoError::InvalidInput(format!(
+                "Archive contains forbidden PAX extended header (typeflag 0x{typeflag:02X})"
+            )));
+        }
+        ustar::TYPEFLAG_GNU_LONG_NAME
+        | ustar::TYPEFLAG_GNU_LONG_LINK
+        | ustar::TYPEFLAG_GNU_SPARSE
+        | ustar::TYPEFLAG_GNU_MULTI_VOLUME
+        | ustar::TYPEFLAG_GNU_DUMPDIR
+        | ustar::TYPEFLAG_GNU_VOLUME_HEADER
+        | ustar::TYPEFLAG_GNU_NAMES
+        | ustar::TYPEFLAG_SOLARIS_EXTENDED => {
+            return Err(CryptoError::InvalidInput(format!(
+                "Archive contains forbidden GNU/Solaris extension (typeflag 0x{typeflag:02X})"
+            )));
+        }
         _ => {
             return Err(CryptoError::InvalidInput(format!(
                 "Unsupported archive entry type: typeflag 0x{typeflag:02X}"
@@ -145,41 +157,24 @@ fn validate_ustar_entry<R: Read>(
         }
     };
 
-    // GNU long-name / long-link detection. The tar crate transparently
-    // consumes `'L'` / `'K'` extension records and applies the long path
-    // to the next entry's `entry.path_bytes()`, but `entry.header()`
-    // still reflects the next entry's raw header (whose `path_bytes()`
-    // returns the in-header name+prefix only). Inequality means an
-    // extension record was used. Both Cows borrow `entry` shared so the
-    // comparison runs without allocating.
-    let header_path = entry.header().path_bytes();
+    // `FORMAT.md` §9 forbids the GNU binary numeric encoding (high bit
+    // set on the first byte of a numeric field). The size field is the
+    // only one that realistically gets extended to binary in practice
+    // — mode, uid, gid, and mtime fit the ustar octal allotment for
+    // any reasonable value — and an unchecked binary-size field would
+    // let an adversarial archive declare a multi-gigabyte regular
+    // entry that our writer's symmetric `FILE_SIZE_REPRESENTABLE_MAX`
+    // cap rejects on encrypt. Reject the encoding here so encrypt and
+    // decrypt agree on the boundary. This check is not redundant with
+    // the typeflag match above: a regular-file entry with typeflag
+    // `'0'` plus a binary-encoded size passes the typeflag arms.
+    if raw[ustar::SIZE_FIELD_OFFSET] & ustar::NUMERIC_BINARY_FLAG_BIT != 0 {
+        return Err(CryptoError::InvalidInput(
+            "Archive uses forbidden GNU binary numeric encoding for size".to_string(),
+        ));
+    }
+
     let entry_path = entry.path_bytes();
-    if *header_path != *entry_path {
-        return Err(CryptoError::InvalidInput(
-            "Archive uses GNU long-name or long-link extension".to_string(),
-        ));
-    }
-
-    // PAX 'x' extended-header detection (size override). Same shape as
-    // the GNU long-name check above: the tar crate consumes a PAX 'x'
-    // record before yielding the next entry, so the 'x' typeflag never
-    // reaches our typeflag match. If the PAX record overrode the size
-    // attribute, `entry.size()` reflects the override while
-    // `entry.header().size()` returns the raw in-header octal —
-    // inequality means a PAX record was applied. mtime/perm-only PAX
-    // overrides are not detectable this way, but their impact is
-    // bounded (extraction filters strip non-permission bits and the
-    // payload itself is AEAD-authenticated). ferrocrypt's own writer
-    // never emits PAX, so this fires only on adversarial input.
-    let header_size = entry.header().size().map_err(|_| {
-        CryptoError::InvalidInput("Archive header size field is malformed".to_string())
-    })?;
-    if entry.size() != header_size {
-        return Err(CryptoError::InvalidInput(
-            "Archive uses PAX extended header (size override)".to_string(),
-        ));
-    }
-
     let path_bytes: &[u8] = &entry_path;
     if path_bytes.is_empty() {
         return Err(CryptoError::InvalidInput(
@@ -512,7 +507,13 @@ fn extract_entries<R: Read>(
     let mut dir_permissions: Vec<(OsString, PathBuf, u32)> = Vec::new();
     let mut counters = ExtractCounters::default();
 
-    for entry_result in archive.entries()? {
+    // `raw(true)` disables tar-rs's merge preprocessing so PAX / GNU
+    // extension records surface as their own entries with the wire
+    // typeflag intact, where `validate_ustar_entry` rejects them.
+    // Without raw mode, a PAX `'x'` record overriding only mtime /
+    // uid/gid / mode would slip through silently into the merged
+    // entry's metadata. See `FORMAT.md` §9.
+    for entry_result in archive.entries()?.raw(true) {
         let mut entry = entry_result?;
         let NormalizedEntry {
             canonical_path: path,
@@ -663,7 +664,13 @@ fn extract_entries<R: Read>(
     let mut dir_permissions: Vec<(PathBuf, u32)> = Vec::new();
     let mut counters = ExtractCounters::default();
 
-    for entry_result in archive.entries()? {
+    // `raw(true)` disables tar-rs's merge preprocessing so PAX / GNU
+    // extension records surface as their own entries with the wire
+    // typeflag intact, where `validate_ustar_entry` rejects them.
+    // Without raw mode, a PAX `'x'` record overriding only mtime /
+    // uid/gid / mode would slip through silently into the merged
+    // entry's metadata. See `FORMAT.md` §9.
+    for entry_result in archive.entries()?.raw(true) {
         let mut entry = entry_result?;
         let NormalizedEntry {
             canonical_path: path,
@@ -749,6 +756,7 @@ fn restore_permissions_from_mode(_mode: u32, _path: &Path) -> Result<(), CryptoE
 #[cfg(test)]
 mod tests {
     use super::super::limits::ArchiveLimits;
+    use super::super::path::ustar;
     use super::unarchive;
 
     use std::fs;
@@ -1328,13 +1336,303 @@ mod tests {
         );
     }
 
+    /// Helper for the PAX / GNU rejection tests below. Builds a
+    /// minimal one-entry archive whose single header carries a chosen
+    /// `typeflag` byte but uses POSIX `ustar\000` magic, so the magic
+    /// check passes and the typeflag match in `validate_ustar_entry`
+    /// is the rejection point under test. The `body` bytes are
+    /// arbitrary — the reader rejects on typeflag before reading the
+    /// body — but we use realistic PAX `length key=value\n` records in
+    /// the call sites so the fixtures double as documentation.
+    fn extension_record_archive(typeflag: tar::EntryType, name: &str, body: &[u8]) -> Vec<u8> {
+        let mut header = tar::Header::new_ustar();
+        header.set_path(name).unwrap();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        header.set_entry_type(typeflag);
+        header.set_cksum();
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(header.as_bytes());
+        buf.extend_from_slice(body);
+        let pad = (ustar::BLOCK_SIZE - body.len() % ustar::BLOCK_SIZE) % ustar::BLOCK_SIZE;
+        buf.extend(std::iter::repeat_n(0u8, pad));
+        // End-of-archive: two consecutive zero blocks.
+        buf.extend(std::iter::repeat_n(0u8, 2 * ustar::BLOCK_SIZE));
+        buf
+    }
+
+    /// `FORMAT.md` §9 forbids PAX extended headers in any form. A PAX
+    /// `'x'` record overriding only `mtime` would not change the
+    /// merged entry's path or size, so the legacy "compare merged vs
+    /// in-header" detection had no signal to fire on. Raw iteration
+    /// now surfaces the `'x'` record as its own entry, where the
+    /// typeflag match rejects it directly.
+    #[test]
+    fn unarchive_rejects_pax_x_mtime_only_override() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        // PAX record format: `length key=value\n`. Self-counting length:
+        // the digits of `length` are part of the record, so the body is
+        // hand-balanced to be exactly the announced byte count.
+        let body = b"30 mtime=1700000000.000000\n\0\0\0".to_vec();
+        let buf = extension_record_archive(tar::EntryType::XHeader, "x_header", &body);
+
+        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("forbidden PAX"),
+            "expected PAX rejection, got: {msg}"
+        );
+    }
+
+    /// Realistic local-PAX shape: an `'x'` extension immediately
+    /// precedes the regular file it would have described under normal
+    /// tar-rs preprocessing. Raw iteration must reject the extension
+    /// before the following file is extracted, leaving the output
+    /// directory empty.
+    #[test]
+    fn unarchive_rejects_pax_x_before_following_file_without_extracting() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        let pax_body = b"22 mtime=1700000000.0\n";
+        let file_body = b"payload that must not be extracted";
+
+        let mut buf = Vec::new();
+
+        let mut pax_header = tar::Header::new_ustar();
+        pax_header.set_path("pax_header").unwrap();
+        pax_header.set_size(pax_body.len() as u64);
+        pax_header.set_mode(0o644);
+        pax_header.set_entry_type(tar::EntryType::XHeader);
+        pax_header.set_cksum();
+        buf.extend_from_slice(pax_header.as_bytes());
+        buf.extend_from_slice(pax_body);
+        let pad = (ustar::BLOCK_SIZE - pax_body.len() % ustar::BLOCK_SIZE) % ustar::BLOCK_SIZE;
+        buf.extend(std::iter::repeat_n(0u8, pad));
+
+        let mut file_header = tar::Header::new_ustar();
+        file_header.set_path("root.txt").unwrap();
+        file_header.set_size(file_body.len() as u64);
+        file_header.set_mode(0o644);
+        file_header.set_entry_type(tar::EntryType::Regular);
+        file_header.set_cksum();
+        buf.extend_from_slice(file_header.as_bytes());
+        buf.extend_from_slice(file_body);
+        let pad = (ustar::BLOCK_SIZE - file_body.len() % ustar::BLOCK_SIZE) % ustar::BLOCK_SIZE;
+        buf.extend(std::iter::repeat_n(0u8, pad));
+
+        buf.extend(std::iter::repeat_n(0u8, 2 * ustar::BLOCK_SIZE));
+
+        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("forbidden PAX"),
+            "expected PAX rejection, got: {msg}"
+        );
+        assert!(
+            extract_dir.read_dir().unwrap().next().is_none(),
+            "following file must not be extracted after a refused PAX header"
+        );
+    }
+
+    #[test]
+    fn unarchive_rejects_pax_x_uid_gid_override() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        let body = b"13 uid=1234\n13 gid=5678\n".to_vec();
+        let buf = extension_record_archive(tar::EntryType::XHeader, "x_header", &body);
+
+        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("forbidden PAX"),
+            "expected PAX rejection, got: {msg}"
+        );
+    }
+
+    /// PAX `'x'` overriding `mode`. Same rejection path.
+    #[test]
+    fn unarchive_rejects_pax_x_mode_only_override() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        // Plain `mode=` is not a standard PAX key, but the body is
+        // never parsed by the reader; the typeflag rejection fires
+        // first. The contents document attacker intent.
+        let body = b"14 mode=0007777\n".to_vec();
+        let buf = extension_record_archive(tar::EntryType::XHeader, "x_header", &body);
+
+        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("forbidden PAX"),
+            "expected PAX rejection, got: {msg}"
+        );
+    }
+
+    /// PAX `'x'` overriding `path`. The legacy detection caught this
+    /// case via the merged-vs-in-header comparison; with raw
+    /// iteration the typeflag match rejects it earlier and the error
+    /// message names PAX explicitly.
+    #[test]
+    fn unarchive_rejects_pax_x_path_override() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        let body = b"22 path=/etc/passwd\n\0\0".to_vec();
+        let buf = extension_record_archive(tar::EntryType::XHeader, "x_header", &body);
+
+        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("forbidden PAX"),
+            "expected PAX rejection, got: {msg}"
+        );
+    }
+
+    /// PAX `'x'` overriding `size`. The legacy detection caught this
+    /// case via the `entry.size() != header.size()` comparison; raw
+    /// iteration rejects at the typeflag match.
+    #[test]
+    fn unarchive_rejects_pax_x_size_override() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        let body = b"19 size=2147483648\n\0".to_vec();
+        let buf = extension_record_archive(tar::EntryType::XHeader, "x_header", &body);
+
+        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("forbidden PAX"),
+            "expected PAX rejection, got: {msg}"
+        );
+    }
+
+    /// PAX `'g'` global header. The strict no-PAX rule applies to
+    /// global headers as well as per-entry `'x'` headers.
+    #[test]
+    fn unarchive_rejects_pax_g_global_header() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        let body = b"15 comment=hi\n\0".to_vec();
+        let buf = extension_record_archive(tar::EntryType::XGlobalHeader, "g_header", &body);
+
+        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("forbidden PAX"),
+            "expected PAX rejection, got: {msg}"
+        );
+    }
+
+    /// GNU `'L'` long-name record carried in a header with POSIX
+    /// `ustar\000` magic (as opposed to GNU magic). The
+    /// `unarchive_rejects_gnu_long_name_extension` test below also
+    /// exercises this typeflag, but writes a GNU-magic header that
+    /// trips the magic check first; this test pins the typeflag-match
+    /// rejection branch specifically.
+    #[test]
+    fn unarchive_rejects_gnu_l_typeflag_with_posix_magic() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        let body = b"./long/path/that/would/be/applied/next\0".to_vec();
+        let buf = extension_record_archive(tar::EntryType::GNULongName, "@LongLink", &body);
+
+        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("forbidden GNU"),
+            "expected GNU-extension rejection, got: {msg}"
+        );
+    }
+
+    /// `FORMAT.md` §9 forbids the GNU binary numeric encoding on any
+    /// header field. The size field is the realistic concern: a
+    /// regular-file entry with typeflag `'0'` and a binary-encoded
+    /// size passes every typeflag-based check but lets the attacker
+    /// declare an arbitrary plaintext length. We rely on tar-rs's
+    /// `set_size` to do the binary fallback for sizes ≥ 2^33 — the
+    /// same fallback our encrypt-side cap is designed to prevent — so
+    /// this test doubles as a sanity check that tar-rs hasn't quietly
+    /// changed its switching point.
+    #[test]
+    fn unarchive_rejects_gnu_binary_size_encoding() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        let mut header = tar::Header::new_ustar();
+        header.set_path("big.bin").unwrap();
+        header.set_size(ustar::FILE_SIZE_REPRESENTABLE_MAX + 1);
+        header.set_mode(0o644);
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_cksum();
+
+        // Sanity: tar-rs really emitted the binary-size encoding for
+        // a value ≥ 2^33 — if a future tar-rs release changes the
+        // switching point, this assertion catches it loudly.
+        assert_eq!(
+            header.as_bytes()[ustar::SIZE_FIELD_OFFSET] & ustar::NUMERIC_BINARY_FLAG_BIT,
+            ustar::NUMERIC_BINARY_FLAG_BIT,
+            "expected tar-rs to emit GNU binary-size for size ≥ 2^33",
+        );
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(header.as_bytes());
+        // No body — the rejection fires on the header before any
+        // body bytes would be read.
+        buf.extend(std::iter::repeat_n(0u8, 2 * ustar::BLOCK_SIZE));
+
+        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("forbidden GNU binary numeric"),
+            "expected binary-size rejection, got: {msg}"
+        );
+    }
+
+    /// GNU `'S'` sparse-file record. v1 forbids sparse archives, and
+    /// raw iteration surfaces the sparse record's typeflag for the
+    /// reader to reject directly.
+    #[test]
+    fn unarchive_rejects_gnu_sparse_typeflag() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        let body = b"sparse-record-payload".to_vec();
+        let buf = extension_record_archive(tar::EntryType::GNUSparse, "sparse", &body);
+
+        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("forbidden GNU"),
+            "expected GNU-extension rejection, got: {msg}"
+        );
+    }
+
     /// Reader-side rejection of a GNU long-name extension record. The
-    /// tar crate transparently consumes `'L'` records and applies the
-    /// long path to the next entry; `validate_ustar_entry` detects
-    /// the extension by comparing the in-header path to the merged
-    /// `entry.path_bytes()`. A 200-char path forces the long-name
-    /// path on the writer side regardless of the `new_gnu()` /
-    /// `new_ustar()` choice.
+    /// `'L'` block uses GNU magic, so the magic check at the start of
+    /// `validate_ustar_entry` rejects it as "not POSIX ustar". This
+    /// test exists in addition to the POSIX-magic + `'L'` typeflag
+    /// test above so both rejection paths are pinned. A 200-char path
+    /// forces the long-name path on the writer side regardless of the
+    /// `new_gnu()` / `new_ustar()` choice.
     #[test]
     fn unarchive_rejects_gnu_long_name_extension() {
         let tmp = tempfile::TempDir::new().unwrap();

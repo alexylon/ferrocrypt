@@ -232,8 +232,9 @@ Limitations:
 
 - Pre-v1 FerroCrypt files and key pairs are not compatible with the current v1 format. Older data must be decrypted with the release that created it and then re-encrypted with the current release.
 - Directory encryption preserves file contents, directory structure, and Unix file permissions. It does not preserve ownership, timestamps, ACLs, extended attributes, hardlink identity, setuid/setgid/sticky bits, or platform-specific metadata.
-- Symlinks, hardlink archive entries, device files, FIFOs, sockets, unsafe paths, duplicate output paths, and archives with more than one top-level root are rejected during archive processing.
+- Symlinks, hardlink archive entries, device files, FIFOs, sockets, unsafe paths, duplicate output paths, archives with more than one top-level root, and any PAX or GNU TAR extension record are rejected during archive processing.
 - Filesystem hardlinks encountered during encryption are stored as independent regular files.
+- Single files inside an encrypted folder are limited to about 8 GiB (the largest value the standard ustar size field can carry, exactly 8,589,934,591 bytes); larger inputs are rejected up front. Archives can hold many such files up to the total-bytes cap below.
 - Default archive limits are enforced during encryption and decryption: at most 250,000 entries, 64 GiB of total regular-file content, and 64 path components per entry.
 - Failed decryptions do not write to the final output path. Partial plaintext may remain in a sibling `.incomplete` working copy when corruption is detected after some chunks have already authenticated.
 - Hardened extraction is available only on Linux and macOS. On Windows, extraction is best-effort against local filesystem races; on shared Windows machines, choose an output directory writable only by the current user.

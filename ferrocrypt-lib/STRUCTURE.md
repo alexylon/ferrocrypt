@@ -651,7 +651,8 @@ It rejects:
 - sockets;
 - FIFOs;
 - unsupported metadata;
-- paths not representable in the v1 safe ustar subset.
+- paths not representable in the v1 safe ustar subset;
+- regular-file inputs whose size exceeds `FILE_SIZE_REPRESENTABLE_MAX` (8 GiB minus one byte, the largest value the ustar octal `size` field can carry); the `tar` crate would otherwise silently emit a GNU binary-size header that the v1 reader rejects.
 
 Archive encoding performs all required preflight checks before producing encrypted output.
 
@@ -661,6 +662,7 @@ Archive encoding performs all required preflight checks before producing encrypt
 
 Rules:
 
+- TAR iteration runs in `tar::Entries::raw(true)` mode so PAX (`'x'`, `'g'`) and GNU (`'L'`, `'K'`, `'S'`, `'M'`, `'D'`, `'V'`, `'N'`) and Solaris (`'X'`) extension records surface as their own entries with the wire typeflag intact, where the typeflag match in `validate_ustar_entry` rejects them. Without raw mode, the `tar` crate would silently merge these records into the next entry's metadata.
 - Every archive path is validated through `archive/path.rs` before any filesystem write.
 - Duplicate paths are detected on canonical archive paths before extraction.
 - Single-top-level-root enforcement rejects an archive with multiple distinct roots before the second root's output is written.

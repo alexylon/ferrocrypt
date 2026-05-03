@@ -230,6 +230,13 @@ fn ustar_archive_path_string(
 /// silently fall back to a GNU long-name extension; we use
 /// `Builder::append` at the call sites so this header is written
 /// verbatim, with no auto-extension path.
+///
+/// File entries with `size > FILE_SIZE_REPRESENTABLE_MAX` are rejected
+/// here because `tar::Header::set_size` would otherwise switch to the
+/// GNU binary-size encoding (high-bit flag on the first byte) for any
+/// value ≥ 2^33; v1 forbids that encoding, so the resulting `.fcr`
+/// would be unreadable by a conforming reader. Directory entries
+/// always carry size 0 and skip the cap.
 fn build_ustar_header(
     archive_path: &Path,
     kind: UstarEntryKind,
@@ -248,6 +255,13 @@ fn build_ustar_header(
         UstarEntryKind::File => tar::EntryType::Regular,
         UstarEntryKind::Directory => tar::EntryType::Directory,
     });
+    if matches!(kind, UstarEntryKind::File) && size > ustar::FILE_SIZE_REPRESENTABLE_MAX {
+        return Err(CryptoError::InvalidInput(format!(
+            "File exceeds POSIX ustar representable size ({} bytes max): {}",
+            ustar::FILE_SIZE_REPRESENTABLE_MAX,
+            archive_path.display()
+        )));
+    }
     header.set_size(size);
     header.set_mode(mode);
     header.set_cksum();
@@ -710,6 +724,51 @@ mod tests {
             err.to_string().contains("total-bytes cap"),
             "expected total-bytes cap rejection, got: {err}"
         );
+    }
+
+    /// `FORMAT.md` §9: a regular-file entry whose size exceeds
+    /// `FILE_SIZE_REPRESENTABLE_MAX` (8 GiB minus one byte, the
+    /// largest value the ustar octal `size` field can carry) must be
+    /// rejected at header-build time. Without this guard,
+    /// `tar::Header::set_size` would silently switch to the GNU
+    /// binary-size encoding for any value ≥ 2^33, producing an
+    /// archive that no v1 reader would accept.
+    ///
+    /// Driven through `build_ustar_header` rather than `archive()`
+    /// because allocating an 8 GiB file in a unit test is impractical;
+    /// the helper is the canonical rejection point.
+    #[test]
+    fn archive_rejects_file_above_ustar_size_max() {
+        use super::build_ustar_header;
+        let path = PathBuf::from("big.bin");
+        let err = build_ustar_header(
+            &path,
+            UstarEntryKind::File,
+            ustar::FILE_SIZE_REPRESENTABLE_MAX + 1,
+            0o644,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("POSIX ustar representable size"),
+            "expected ustar size-cap rejection, got: {msg}"
+        );
+    }
+
+    /// Boundary: a file whose size equals `FILE_SIZE_REPRESENTABLE_MAX`
+    /// exactly must still build a valid header — the cap is inclusive
+    /// of `2^33 - 1`, exclusive of `2^33`.
+    #[test]
+    fn archive_accepts_file_at_ustar_size_max() {
+        use super::build_ustar_header;
+        let path = PathBuf::from("big.bin");
+        build_ustar_header(
+            &path,
+            UstarEntryKind::File,
+            ustar::FILE_SIZE_REPRESENTABLE_MAX,
+            0o644,
+        )
+        .expect("file at the ustar size cap should build a valid header");
     }
 
     /// Encrypt-side preflight: a directory whose entry path depth

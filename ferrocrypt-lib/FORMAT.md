@@ -932,11 +932,14 @@ Writers MUST emit only:
 - `/` separators;
 - regular-file entries;
 - directory entries;
-- POSIX ustar headers.
+- POSIX ustar headers (magic `"ustar\0"`, version `"00"` at offsets 257..265).
 
 Writers MUST NOT emit absolute paths, `..` components, symlinks, hardlinks,
-devices, FIFOs, sockets, sparse files, pax headers, GNU headers, GNU long-name or
-long-link records, or other special entry types.
+devices, FIFOs, sockets, sparse files, pax headers (typeflag `'x'` or `'g'`), GNU
+extension records (typeflag `'L'`, `'K'`, `'S'`, `'M'`, `'D'`, `'V'`, or `'N'`),
+Solaris extended records (typeflag `'X'`), or other special entry types. Writers
+MUST NOT use the GNU binary-size numeric extension (high bit set on the ustar
+`size` field's first byte).
 
 Archive paths MUST be canonical relative UTF-8 paths. Readers MUST reject empty
 paths, absolute paths, paths containing `.` or `..` components, repeated `/`
@@ -945,14 +948,23 @@ with `/`. Directory entry paths MUST end with `/`. Duplicate detection is
 performed after removing exactly one trailing `/` from directory entry paths.
 
 If source paths cannot be represented in the ustar subset, writers MUST reject
-the input. Filesystem hardlinks MAY be archived as independent regular files;
-hardlink TAR entries MUST NOT be emitted.
+the input. Regular-file entry sizes MUST fit the 11-octal-digit ustar `size`
+field (`8_589_934_591` bytes, i.e. one byte short of 8 GiB); writers MUST reject
+larger inputs rather than fall back to the GNU binary-size encoding. Filesystem
+hardlinks MAY be archived as independent regular files; hardlink TAR entries
+MUST NOT be emitted.
 
-Readers MUST reject unsafe paths, unsupported entry types, duplicate output
-paths, entries that collide with existing top-level output paths, and archives
-with more than one top-level root. The top-level root is the first path component
-after directory trailing-slash canonicalization; all entries in an archive MUST
-have the same top-level root.
+Readers MUST reject unsafe paths, unsupported entry types, pax/GNU/Solaris
+extension typeflags, duplicate output paths, entries that collide with existing
+top-level output paths, and archives with more than one top-level root. Readers
+MUST surface every header block independently (raw iteration) so an extension
+record cannot be silently merged into the next entry's metadata; the rejection
+fires on the extension record itself, before any merge could happen. Readers
+MUST reject any header whose `size` field uses the GNU binary numeric encoding
+(high bit set on the first byte of the field), so that writer and reader agree
+on the same `8_589_934_591`-byte ceiling. The top-level root is the first path
+component after directory trailing-slash canonicalization; all entries in an
+archive MUST have the same top-level root.
 
 Writers MUST terminate the TAR stream with the standard two 512-byte zero blocks.
 Readers MUST reject malformed ustar headers, invalid header checksums, file data

@@ -14,11 +14,30 @@ use crate::CryptoError;
 /// writer (canonical emission) and the reader (per-entry strict
 /// subset validation).
 pub(crate) mod ustar {
+    /// POSIX ustar fixed block size — every header is one block, every
+    /// entry's data is rounded up to a whole number of blocks, and the
+    /// archive ends with two consecutive zero blocks. Production code
+    /// reads the block via `tar::Header::as_bytes()`, so this constant
+    /// is only used in test fixtures that hand-craft archives at the
+    /// raw byte level.
+    #[cfg(test)]
+    pub(crate) const BLOCK_SIZE: usize = 512;
+
     pub(crate) const TYPEFLAG_OFFSET: usize = 156;
     pub(crate) const MAGIC_OFFSET: usize = 257;
     pub(crate) const MAGIC: &[u8; 6] = b"ustar\0";
     pub(crate) const VERSION_OFFSET: usize = 263;
     pub(crate) const VERSION: &[u8; 2] = b"00";
+
+    /// Offset of the `size` field in the ustar header. v1 forbids the
+    /// GNU binary numeric extension (high bit set on the first byte of
+    /// a numeric field), and the size field is the only one realistic
+    /// implementations would extend to binary; mode/uid/gid/mtime fit
+    /// the octal allotment for any sane value.
+    pub(crate) const SIZE_FIELD_OFFSET: usize = 124;
+    /// High bit on the first byte of a numeric field marks the GNU
+    /// binary numeric extension. Forbidden by `FORMAT.md` §9.
+    pub(crate) const NUMERIC_BINARY_FLAG_BIT: u8 = 0x80;
 
     pub(crate) const NAME_SIZE: usize = 100;
     pub(crate) const PREFIX_SIZE: usize = 155;
@@ -27,9 +46,37 @@ pub(crate) mod ustar {
     /// long-name or PAX extension record, which v1 forbids.
     pub(crate) const PATH_REPRESENTABLE_MAX: usize = NAME_SIZE + 1 + PREFIX_SIZE;
 
+    /// Maximum file size representable in the ustar `size` field
+    /// (11 octal digits + NUL = 33 bits = 8,589,934,591 bytes, one
+    /// byte short of 8 GiB). v1 forbids both the GNU binary-size and
+    /// PAX `x_size` extensions, so any file beyond this cap must be
+    /// rejected on encrypt; otherwise `tar::Header::set_size` would
+    /// silently fall back to the GNU binary-size encoding and the
+    /// resulting `.fcr` would be unreadable by a conforming reader.
+    pub(crate) const FILE_SIZE_REPRESENTABLE_MAX: u64 = 0o77_777_777_777;
+
     pub(crate) const TYPEFLAG_REGULAR_NUL: u8 = b'\0';
     pub(crate) const TYPEFLAG_REGULAR_ZERO: u8 = b'0';
     pub(crate) const TYPEFLAG_DIRECTORY: u8 = b'5';
+
+    /// Forbidden typeflags surfaced by `tar::Entries::raw(true)`. v1
+    /// forbids both PAX (`'x'` per-entry, `'g'` global) and the GNU
+    /// extension family (`'L'` long-name, `'K'` long-link, `'S'`
+    /// sparse, `'M'` multi-volume continuation, `'D'` GNU dumpdir,
+    /// `'V'` GNU volume-header, `'N'` legacy long-name, `'X'` Solaris
+    /// extended). Any of these reaching the typeflag match in the
+    /// reader is a v1 conformance violation regardless of payload —
+    /// see `FORMAT.md` §9.
+    pub(crate) const TYPEFLAG_PAX_EXTENDED: u8 = b'x';
+    pub(crate) const TYPEFLAG_PAX_GLOBAL: u8 = b'g';
+    pub(crate) const TYPEFLAG_GNU_LONG_NAME: u8 = b'L';
+    pub(crate) const TYPEFLAG_GNU_LONG_LINK: u8 = b'K';
+    pub(crate) const TYPEFLAG_GNU_SPARSE: u8 = b'S';
+    pub(crate) const TYPEFLAG_GNU_MULTI_VOLUME: u8 = b'M';
+    pub(crate) const TYPEFLAG_GNU_DUMPDIR: u8 = b'D';
+    pub(crate) const TYPEFLAG_GNU_VOLUME_HEADER: u8 = b'V';
+    pub(crate) const TYPEFLAG_GNU_NAMES: u8 = b'N';
+    pub(crate) const TYPEFLAG_SOLARIS_EXTENDED: u8 = b'X';
 }
 
 /// `FORMAT.md` §9 archive subset classification for a successfully

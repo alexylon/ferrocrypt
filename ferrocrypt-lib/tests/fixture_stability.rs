@@ -22,7 +22,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use ferrocrypt::secrecy::SecretString;
-use ferrocrypt::{CryptoError, Decryptor, Encryptor, PrivateKey, PublicKey, generate_key_pair};
+use ferrocrypt::{CryptoError, Decryptor, Encryptor, PrivateKey, PublicKey};
+use ferrocrypt_test_support::{fast_keypair_generator, fast_passphrase_encryptor};
 
 const FIXTURE_PASSPHRASE: &str = "fixture-passphrase-not-secret-do-not-reuse";
 const TEST_WORKSPACE: &str = "tests/workspace_fixture_stability";
@@ -204,19 +205,26 @@ fn regenerate_fixtures() {
     fs::create_dir_all(encrypted_dir()).expect("create encrypted/");
     fs::create_dir_all(keys_dir()).expect("create keys/");
 
-    let kg_outcome = generate_key_pair(keys_dir(), fixture_passphrase(), |_| {})
+    // Regenerated fixtures use the workspace-internal fast Argon2id
+    // parameters so committed `.fcr` and `private.key` artefacts unlock
+    // in milliseconds during routine `cargo test` runs, not seconds.
+    // Production strength is not the goal here — fixture stability is
+    // about wire-format invariants, and the KDF cost is independent of
+    // those invariants.
+    let kg_outcome = fast_keypair_generator(fixture_passphrase())
+        .write(keys_dir(), |_| {})
         .expect("generate fixture key pair");
     eprintln!(
         "fixture key pair regenerated; public fingerprint = {}",
         kg_outcome.fingerprint
     );
 
-    Encryptor::with_passphrase(fixture_passphrase())
+    fast_passphrase_encryptor(fixture_passphrase())
         .save_as(encrypted_dir().join(PASSPHRASE_FILE_FCR))
         .write(source_dir().join(SMALL_FILE_NAME), encrypted_dir(), |_| {})
         .expect("encrypt passphrase-file fixture");
 
-    Encryptor::with_passphrase(fixture_passphrase())
+    fast_passphrase_encryptor(fixture_passphrase())
         .save_as(encrypted_dir().join(PASSPHRASE_DIR_FCR))
         .write(source_dir().join(SMALL_DIR_NAME), encrypted_dir(), |_| {})
         .expect("encrypt passphrase-dir fixture");

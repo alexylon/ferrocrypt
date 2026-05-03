@@ -201,7 +201,7 @@ mod tests {
     fn wrap_unwrap_round_trip() {
         let file_key = FileKey::from_bytes_for_tests([0x42u8; FILE_KEY_SIZE]);
         let pass = passphrase("correct horse battery staple");
-        let kdf = KdfParams::default();
+        let kdf = KdfParams::test_fast_default();
         let body = wrap(&file_key, &pass, &kdf).unwrap();
         let recovered = unwrap(&body, &pass, None).unwrap();
         assert_eq!(recovered.expose(), file_key.expose());
@@ -212,7 +212,7 @@ mod tests {
         let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let right = passphrase("right");
         let wrong = passphrase("wrong");
-        let kdf = KdfParams::default();
+        let kdf = KdfParams::test_fast_default();
         let body = wrap(&file_key, &right, &kdf).unwrap();
         match unwrap(&body, &wrong, None) {
             Err(CryptoError::RecipientUnwrapFailed { type_name }) => {
@@ -226,7 +226,7 @@ mod tests {
     fn unwrap_with_tampered_wrapped_file_key_fails_with_recipient_unwrap_failed() {
         let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let pass = passphrase("p");
-        let kdf = KdfParams::default();
+        let kdf = KdfParams::test_fast_default();
         let mut body = wrap(&file_key, &pass, &kdf).unwrap();
         body[WRAPPED_FILE_KEY_OFFSET] ^= 0x01;
         match unwrap(&body, &pass, None) {
@@ -241,7 +241,7 @@ mod tests {
     fn unwrap_with_tampered_argon2_salt_fails_with_recipient_unwrap_failed() {
         let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let pass = passphrase("p");
-        let kdf = KdfParams::default();
+        let kdf = KdfParams::test_fast_default();
         let mut body = wrap(&file_key, &pass, &kdf).unwrap();
         body[SALT_OFFSET] ^= 0x01;
         match unwrap(&body, &pass, None) {
@@ -256,12 +256,12 @@ mod tests {
     fn unwrap_with_tampered_kdf_params_within_bounds_fails_with_recipient_unwrap_failed() {
         // Flip bit 1 (XOR 0x02) of the low byte of `time_cost`. The
         // value stays within structural bounds (`1..=12`) regardless of
-        // the original (fast-kdf: 1 → 3; default: 4 → 6). Argon2id with
+        // the original (test-fast: 1 → 3; default: 4 → 6). Argon2id with
         // different params produces a different ikm → different wrap
         // key → AEAD fails → RecipientUnwrapFailed.
         let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let pass = passphrase("p");
-        let kdf = KdfParams::default();
+        let kdf = KdfParams::test_fast_default();
         let mut body = wrap(&file_key, &pass, &kdf).unwrap();
         body[KDF_PARAMS_OFFSET + 7] ^= 0x02;
         match unwrap(&body, &pass, None) {
@@ -276,7 +276,7 @@ mod tests {
     fn unwrap_with_tampered_wrap_nonce_fails_with_recipient_unwrap_failed() {
         let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let pass = passphrase("p");
-        let kdf = KdfParams::default();
+        let kdf = KdfParams::test_fast_default();
         let mut body = wrap(&file_key, &pass, &kdf).unwrap();
         body[WRAP_NONCE_OFFSET] ^= 0x01;
         match unwrap(&body, &pass, None) {
@@ -293,7 +293,7 @@ mod tests {
         // `FORMAT.md` §2.2 this MUST be rejected before Argon2id runs.
         let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let pass = passphrase("p");
-        let kdf = KdfParams::default();
+        let kdf = KdfParams::test_fast_default();
         let mut body = wrap(&file_key, &pass, &kdf).unwrap();
         // `lanes` is the third u32 in `kdf_params`; offset KDF_PARAMS_OFFSET + 8.
         body[KDF_PARAMS_OFFSET + 8..KDF_PARAMS_OFFSET + 12].fill(0);
@@ -311,13 +311,13 @@ mod tests {
         let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let pass = passphrase("p");
         let high_mem_kdf = KdfParams {
-            mem_cost: 2 * 1024 * 1024,
+            mem_cost: KdfParams::MAX_MEM_COST,
             time_cost: 1,
             lanes: 1,
         };
         // We can't actually run wrap() with 2 GiB mem cost in a test; instead
         // construct the body directly with the high-mem KDF params field.
-        let kdf_low = KdfParams::default();
+        let kdf_low = KdfParams::test_fast_default();
         let mut body = wrap(&file_key, &pass, &kdf_low).unwrap();
         body[KDF_PARAMS_OFFSET..KDF_PARAMS_OFFSET + KDF_PARAMS_SIZE]
             .copy_from_slice(&high_mem_kdf.to_bytes());
@@ -342,7 +342,7 @@ mod tests {
         // and that conforming readers reject the same way.
         let file_key = FileKey::from_bytes_for_tests([0x11u8; FILE_KEY_SIZE]);
         let pass = passphrase("p");
-        let kdf = KdfParams::default();
+        let kdf = KdfParams::test_fast_default();
         let body = wrap(&file_key, &pass, &kdf).unwrap();
         assert_eq!(SALT_OFFSET, 0);
         assert_eq!(KDF_PARAMS_OFFSET, 32);

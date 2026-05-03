@@ -466,7 +466,7 @@ mod tests {
     fn round_trip_x25519_shaped() {
         let (secret, public) = x25519_shaped();
         let pass = test_passphrase("correct horse battery staple");
-        let kdf = KdfParams::default();
+        let kdf = KdfParams::test_fast_default();
         let bytes = seal_private_key(&secret, "x25519", &public, &[], &pass, &kdf).unwrap();
         // Total: 90 + 6 (type_name) + 32 (public) + 0 (ext) + 48 (wrap) = 176.
         assert_eq!(bytes.len(), 176);
@@ -487,7 +487,7 @@ mod tests {
     fn round_trip_with_ext_bytes() {
         let (secret, public) = x25519_shaped();
         let pass = test_passphrase("pw");
-        let kdf = KdfParams::default();
+        let kdf = KdfParams::test_fast_default();
         let ext = vec![0xDEu8, 0xAD, 0xBE, 0xEF];
         let bytes = seal_private_key(&secret, "x25519", &public, &ext, &pass, &kdf).unwrap();
         let opened = open_private_key(
@@ -511,7 +511,7 @@ mod tests {
         let secret = [0x11u8; 32];
         let oversize = vec![0u8; (PRIVATE_KEY_PUBLIC_LEN_MAX as usize) + 1];
         let pass = test_passphrase("pw");
-        let kdf = KdfParams::default();
+        let kdf = KdfParams::test_fast_default();
         match seal_private_key(&secret, "x25519", &oversize, &[], &pass, &kdf) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => {}
             other => panic!("expected MalformedPrivateKey for oversize public, got {other:?}"),
@@ -525,7 +525,7 @@ mod tests {
         let (secret, public) = x25519_shaped();
         let oversize_ext = vec![0u8; (PRIVATE_KEY_EXT_LEN_MAX as usize) + 1];
         let pass = test_passphrase("pw");
-        let kdf = KdfParams::default();
+        let kdf = KdfParams::test_fast_default();
         match seal_private_key(&secret, "x25519", &public, &oversize_ext, &pass, &kdf) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => {}
             other => panic!("expected MalformedPrivateKey for oversize ext, got {other:?}"),
@@ -537,7 +537,7 @@ mod tests {
         let (secret, public) = x25519_shaped();
         let right = test_passphrase("right");
         let wrong = test_passphrase("wrong");
-        let kdf = KdfParams::default();
+        let kdf = KdfParams::test_fast_default();
         let bytes = seal_private_key(&secret, "x25519", &public, &[], &right, &kdf).unwrap();
         match open_private_key(
             &bytes,
@@ -561,7 +561,7 @@ mod tests {
     fn tampering_aad_bound_region_specifically_fails_keyfile_unlock() {
         let (secret, public) = x25519_shaped();
         let pass = test_passphrase("pw");
-        let kdf = KdfParams::default();
+        let kdf = KdfParams::test_fast_default();
         let ext = vec![0xA5u8; 8];
         let original = seal_private_key(&secret, "x25519", &public, &ext, &pass, &kdf).unwrap();
         let cleartext_end =
@@ -618,7 +618,7 @@ mod tests {
     fn tampering_structural_region_fails_with_specific_error() {
         let (secret, public) = x25519_shaped();
         let pass = test_passphrase("pw");
-        let kdf = KdfParams::default();
+        let kdf = KdfParams::test_fast_default();
         let original = seal_private_key(&secret, "x25519", &public, &[], &pass, &kdf).unwrap();
         let cap = PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT;
 
@@ -818,7 +818,7 @@ mod tests {
     fn open_rejects_total_size_mismatch() {
         let (secret, public) = x25519_shaped();
         let pass = test_passphrase("pw");
-        let kdf = KdfParams::default();
+        let kdf = KdfParams::test_fast_default();
         let mut bytes = seal_private_key(&secret, "x25519", &public, &[], &pass, &kdf).unwrap();
         bytes.push(0); // Extra trailing byte.
         match open_private_key(
@@ -836,7 +836,7 @@ mod tests {
     fn open_rejects_wrapped_secret_above_local_cap() {
         let (secret, public) = x25519_shaped();
         let pass = test_passphrase("pw");
-        let kdf = KdfParams::default();
+        let kdf = KdfParams::test_fast_default();
         let bytes = seal_private_key(&secret, "x25519", &public, &[], &pass, &kdf).unwrap();
         // Local cap below the actual 48-byte wrapped secret.
         match open_private_key(&bytes, &pass, None, 32) {
@@ -894,7 +894,7 @@ mod tests {
             ext_len: 0,
             wrapped_secret_len: PRIVATE_KEY_WRAPPED_SECRET_LEN_MIN,
             argon2_salt: [0u8; ARGON2_SALT_SIZE],
-            kdf_params: KdfParams::default(),
+            kdf_params: KdfParams::test_fast_default(),
             wrap_nonce: [0u8; WRAP_NONCE_SIZE],
         };
         let mut bytes = header.to_bytes().to_vec();
@@ -930,7 +930,7 @@ mod tests {
             ext_len: 0,
             wrapped_secret_len: 48,
             argon2_salt: [0xAB; ARGON2_SALT_SIZE],
-            kdf_params: KdfParams::default(),
+            kdf_params: KdfParams::test_fast_default(),
             wrap_nonce: [0xCD; WRAP_NONCE_SIZE],
         };
         let bytes = header.to_bytes();
@@ -947,7 +947,7 @@ mod tests {
             ext_len: 0,
             wrapped_secret_len: 48,
             argon2_salt: [0xAB; ARGON2_SALT_SIZE],
-            kdf_params: KdfParams::default(),
+            kdf_params: KdfParams::test_fast_default(),
             wrap_nonce: [0xCD; WRAP_NONCE_SIZE],
         }
         .to_bytes()

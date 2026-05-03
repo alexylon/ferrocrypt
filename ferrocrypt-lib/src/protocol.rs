@@ -380,12 +380,12 @@ fn failure_for(mode: EncryptionMode, type_name: &'static str, had_unwrap: bool) 
 ///   (public keys are not secret).
 pub(crate) fn generate_key_pair(
     passphrase: &secrecy::SecretString,
+    kdf_params: &crate::crypto::kdf::KdfParams,
     output_dir: &Path,
     on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<(PathBuf, PathBuf), CryptoError> {
     use std::io::Write as _;
 
-    use crate::crypto::kdf::KdfParams;
     use crate::fs::atomic;
     use crate::key::files::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};
     use crate::key::private::seal_private_key;
@@ -431,7 +431,7 @@ pub(crate) fn generate_key_pair(
         &public_material,
         &[], // no v1 ext_bytes for the X25519 case
         passphrase,
-        &KdfParams::default(),
+        kdf_params,
     )?;
     drop(secret_material);
 
@@ -570,7 +570,12 @@ mod tests {
         let pass = SecretString::from(pass.to_string());
         let dir = keys_dir.join(label);
         fs::create_dir_all(&dir)?;
-        let (privkey_path, pubkey_path) = generate_key_pair(&pass, &dir, &|_| {})?;
+        let (privkey_path, pubkey_path) = generate_key_pair(
+            &pass,
+            &crate::crypto::kdf::KdfParams::test_fast_default(),
+            &dir,
+            &|_| {},
+        )?;
         let pub_bytes = read_public_key(&pubkey_path)?;
         Ok((pub_bytes, privkey_path, pass))
     }
@@ -951,7 +956,7 @@ mod tests {
     #[test]
     fn encrypt_rejects_multi_passphrase_recipient_list() -> Result<(), CryptoError> {
         let pass = SecretString::from("pass".to_string());
-        let kdf_params = crate::crypto::kdf::KdfParams::default();
+        let kdf_params = crate::crypto::kdf::KdfParams::test_fast_default();
         let r1 = argon2id::PassphraseRecipient {
             passphrase: &pass,
             kdf_params,

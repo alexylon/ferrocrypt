@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use clap::{ArgAction, Parser, Subcommand};
 use ferrocrypt::secrecy::{ExposeSecret, SecretString};
 use ferrocrypt::{
-    CryptoError, Decryptor, Encryptor, KdfLimit, MAGIC, PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME,
-    PrivateKey, PublicKey, default_encrypted_filename, generate_key_pair,
+    CryptoError, Decryptor, Encryptor, KdfLimit, KdfParams, KeyPairGenerator, MAGIC,
+    PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME, PrivateKey, PublicKey, default_encrypted_filename,
     validate_private_key_file,
 };
 use rpassword::prompt_password;
@@ -14,6 +14,53 @@ use rustyline::error::ReadlineError;
 use subtle::ConstantTimeEq;
 
 const PASSPHRASE_ENV: &str = "FERROCRYPT_PASSPHRASE";
+
+/// Picks the Argon2id parameters used by the CLI's `encrypt` (passphrase
+/// path) and `keygen` subcommands. Returns [`KdfParams::default`] in all
+/// release builds. In debug builds, honors the
+/// `FERROCRYPT_INTERNAL_TEST_FAST_KDF` env var as an explicit test-only
+/// escape hatch; the env var has no effect in release builds because the
+/// `cfg(debug_assertions)` branch is compiled out entirely. Production
+/// code MUST NOT set the env var.
+///
+/// All override-related state — env-var name, activation value, and the
+/// fast Argon2id triple — lives inside the `cfg(debug_assertions)` scope
+/// so release-profile compilation has no live references to it. Aligned
+/// with `ferrocrypt-test-support::fast_kdf_params` and the lib's
+/// internal `KdfParams::test_fast_default` (values 8 MiB / 1 / 4).
+fn select_kdf_params() -> KdfParams {
+    #[cfg(debug_assertions)]
+    {
+        const INTERNAL_TEST_FAST_KDF_ENV: &str = "FERROCRYPT_INTERNAL_TEST_FAST_KDF";
+        const INTERNAL_TEST_FAST_KDF_VALUE: &str = "1";
+        // Local copies, deliberately. The single source of truth for the
+        // test-fast-KDF triple lives in `ferrocrypt-test-support`, but
+        // that crate is `publish = false` and Cargo refuses to publish a
+        // crate whose regular dep tree includes a non-publishable
+        // workspace member. `ferrocrypt-cli` is `publish = true`, so it
+        // cannot take a regular dep on `ferrocrypt-test-support`. Keep
+        // these aligned with `ferrocrypt-test-support::TEST_FAST_KDF_*`.
+        const TEST_FAST_KDF_MEM_COST: u32 = 8192;
+        const TEST_FAST_KDF_TIME_COST: u32 = 1;
+        const TEST_FAST_KDF_LANES: u32 = 4;
+
+        if std::env::var(INTERNAL_TEST_FAST_KDF_ENV).as_deref() == Ok(INTERNAL_TEST_FAST_KDF_VALUE)
+        {
+            eprintln!(
+                "warning: {INTERNAL_TEST_FAST_KDF_ENV} is set; using fast \
+                 Argon2id parameters. This is for in-tree CLI tests only and \
+                 has no effect in release builds. Do not use this in production."
+            );
+            return KdfParams {
+                mem_cost: TEST_FAST_KDF_MEM_COST,
+                time_cost: TEST_FAST_KDF_TIME_COST,
+                lanes: TEST_FAST_KDF_LANES,
+            };
+        }
+    }
+    KdfParams::default()
+}
+
 const BINARY_NAME: &str = env!("CARGO_BIN_NAME");
 const INTERACTIVE_PROMPT: &str = concat!(env!("CARGO_BIN_NAME"), "> ");
 const SUBCOMMAND_HELP: &str = "encrypt (enc), decrypt (dec), keygen (gen), fingerprint (fp)";
@@ -430,7 +477,7 @@ fn run_encrypt(
 
     let mut encryptor = if recipients.is_empty() {
         let passphrase = read_passphrase(true)?;
-        Encryptor::with_passphrase(passphrase)
+        Encryptor::with_passphrase(passphrase).kdf_params(select_kdf_params())
     } else {
         for r in &recipients {
             if let Ok(fp) = r.fingerprint() {
@@ -516,7 +563,9 @@ fn run_decrypt(
 fn run_keygen(output_dir: PathBuf) -> Result<(), CryptoError> {
     check_keygen_conflict(&output_dir)?;
     let passphrase = read_passphrase(true)?;
-    let outcome = generate_key_pair(&output_dir, passphrase, |ev| eprintln!("{ev}"))?;
+    let outcome = KeyPairGenerator::with_passphrase(passphrase)
+        .kdf_params(select_kdf_params())
+        .write(&output_dir, |ev| eprintln!("{ev}"))?;
     let recipient = PublicKey::from_key_file(&outcome.public_key_path).to_recipient_string()?;
     println!("\nGenerated key pair in {}\n", output_dir.display());
     println!("Public key fingerprint: {}", outcome.fingerprint);

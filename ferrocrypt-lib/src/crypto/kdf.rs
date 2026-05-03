@@ -91,12 +91,6 @@ impl KdfParams {
     const DEFAULT_TIME_COST: u32 = 4;
     const DEFAULT_LANES: u32 = 4;
 
-    // Minimal params for fast test execution.
-    // Auto-enabled via [dev-dependencies]; blocked in release builds
-    // by a compile_error! guard in lib.rs.
-    const FAST_KDF_MEM_COST: u32 = 8192;
-    const FAST_KDF_TIME_COST: u32 = 1;
-
     pub fn to_bytes(self) -> [u8; KDF_PARAMS_SIZE] {
         let mut buf = [0u8; KDF_PARAMS_SIZE];
         write_u32_be(&mut buf, KDF_MEM_COST_OFFSET, self.mem_cost);
@@ -194,18 +188,31 @@ impl KdfParams {
 
 impl Default for KdfParams {
     fn default() -> Self {
-        if cfg!(feature = "fast-kdf") {
-            Self {
-                mem_cost: Self::FAST_KDF_MEM_COST,
-                time_cost: Self::FAST_KDF_TIME_COST,
-                lanes: Self::DEFAULT_LANES,
-            }
-        } else {
-            Self {
-                mem_cost: Self::DEFAULT_MEM_COST,
-                time_cost: Self::DEFAULT_TIME_COST,
-                lanes: Self::DEFAULT_LANES,
-            }
+        Self {
+            mem_cost: Self::DEFAULT_MEM_COST,
+            time_cost: Self::DEFAULT_TIME_COST,
+            lanes: Self::DEFAULT_LANES,
+        }
+    }
+}
+
+#[cfg(test)]
+impl KdfParams {
+    /// In-crate test helper: low-cost Argon2id parameters (8 MiB memory,
+    /// time_cost 1, parallelism 4) for the lib's own `mod tests`. Reads
+    /// the values from `ferrocrypt-test-support` (a `publish = false`
+    /// workspace dev-dep) so the workspace has a single source of truth
+    /// for the test-fast-KDF triple. The dev-dep cycle through
+    /// `ferrocrypt` is fine here because the constants are plain `u32`
+    /// — only typed `KdfParams` values from test-support hit the
+    /// "multiple different versions of crate ferrocrypt" trap, which is
+    /// why this helper constructs a fresh `Self` rather than calling
+    /// `ferrocrypt_test_support::fast_kdf_params()` directly.
+    pub(crate) fn test_fast_default() -> Self {
+        Self {
+            mem_cost: ferrocrypt_test_support::TEST_FAST_KDF_MEM_COST,
+            time_cost: ferrocrypt_test_support::TEST_FAST_KDF_TIME_COST,
+            lanes: ferrocrypt_test_support::TEST_FAST_KDF_LANES,
         }
     }
 }

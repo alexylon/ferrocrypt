@@ -1,9 +1,49 @@
-/// CLI integration tests for ferrocrypt-cli
+//! CLI integration tests for ferrocrypt-cli.
+//!
+//! ## Release-profile gating
+//!
+//! The cli binary's `select_kdf_params` reads
+//! `FERROCRYPT_INTERNAL_TEST_FAST_KDF=1` (set by [`cli_command`] below)
+//! ONLY inside its `#[cfg(debug_assertions)]` block. In `cargo test`
+//! (default debug profile) the override fires and KDF-heavy paths run
+//! in milliseconds. In `cargo test --release` the cli is compiled with
+//! `debug_assertions = false`, the override branch is gone, and every
+//! `encrypt`-passphrase / `keygen` / `decrypt`-passphrase /
+//! `decrypt`-recipient subprocess runs full-strength Argon2id (1 GiB
+//! memory, time_cost 4). With cargo's default per-binary parallelism
+//! that means concurrent multi-GiB allocations and, on typical dev
+//! machines, swap thrash and effectively-frozen sessions.
+//!
+//! Tests that exercise a full Argon2id run are therefore guarded with
+//! `#[cfg_attr(not(debug_assertions), ignore = "...")]`, so
+//! `cargo test --release` skips them and only validates the fast paths
+//! (clap parse errors, mode-check rejections, `--help` / `--version`,
+//! recipient-mode encrypt which uses ECDH and never runs Argon2id,
+//! malformed-input rejections that fail before KDF, etc.). Lib-side
+//! test binaries continue to run full-coverage in release because they
+//! thread fast Argon2id through `ferrocrypt-test-support` instead of
+//! spawning a release CLI subprocess.
+//!
+//! Run the gated tests explicitly with
+//! `cargo test --release --package ferrocrypt-cli --test cli_tests -- --ignored --test-threads=1`
+//! on a machine with enough RAM to absorb sequential 1 GiB Argon2id
+//! runs. Workspace-wide `cargo test ... -- --ignored` would also pull in
+//! the lib's `regenerate_fixtures` opt-in helper, which is unrelated.
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const TEST_WORKSPACE: &str = "tests/cli_workspace";
+/// Mirrors `INTERNAL_TEST_FAST_KDF_ENV` in the cli binary's production
+/// source. The cli's `cfg(debug_assertions)` branch reads this name and
+/// only activates fast Argon2id when the value is exactly
+/// [`INTERNAL_TEST_FAST_KDF_VALUE`]. Tests cannot import the const
+/// directly because `ferrocrypt-cli` is a binary crate with no `[lib]`
+/// target, so the name and value are mirrored here. Keep in sync with
+/// `ferrocrypt-cli/src/cli.rs`.
+const INTERNAL_TEST_FAST_KDF_ENV: &str = "FERROCRYPT_INTERNAL_TEST_FAST_KDF";
+const INTERNAL_TEST_FAST_KDF_VALUE: &str = "1";
 
 fn get_binary_path() -> PathBuf {
     let mut path = std::env::current_exe().expect("Failed to get current exe path");
@@ -18,6 +58,19 @@ fn get_binary_path() -> PathBuf {
     }
 
     path
+}
+
+/// Builds a `Command` for the cli binary with the in-tree test-only
+/// fast-Argon2id env var pre-set. The env var has effect ONLY in debug
+/// builds of the cli (i.e. plain `cargo test`); under
+/// `cargo test --release` the override branch is compiled out and the
+/// env var is silently ignored, so tests that actually run Argon2id are
+/// gated with `#[cfg_attr(not(debug_assertions), ignore = "...")]`.
+/// See the file-level doc comment for the full rationale.
+fn cli_command(binary: &Path) -> Command {
+    let mut cmd = Command::new(binary);
+    cmd.env(INTERNAL_TEST_FAST_KDF_ENV, INTERNAL_TEST_FAST_KDF_VALUE);
+    cmd
 }
 
 fn setup_test_dir(test_name: &str) -> PathBuf {
@@ -40,6 +93,7 @@ fn cleanup_test_workspace() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_passphrase_encrypt_decrypt_file() {
     let test_dir = setup_test_dir("cli_passphrase_file");
     let input_file = test_dir.join("test.txt");
@@ -54,7 +108,7 @@ fn test_cli_passphrase_encrypt_decrypt_file() {
 
     let binary = get_binary_path();
 
-    let encrypt_output = Command::new(&binary)
+    let encrypt_output = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -72,7 +126,7 @@ fn test_cli_passphrase_encrypt_decrypt_file() {
 
     assert!(encrypt_dir.join("test.fcr").exists());
 
-    let decrypt_output = Command::new(&binary)
+    let decrypt_output = cli_command(&binary)
         .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("test.fcr"))
@@ -94,6 +148,7 @@ fn test_cli_passphrase_encrypt_decrypt_file() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_passphrase_multi_chunk_file() {
     let test_dir = setup_test_dir("cli_passphrase_multi_chunk");
     let input_file = test_dir.join("multi_chunk.txt");
@@ -108,7 +163,7 @@ fn test_cli_passphrase_multi_chunk_file() {
 
     let binary = get_binary_path();
 
-    let encrypt_output = Command::new(&binary)
+    let encrypt_output = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -121,7 +176,7 @@ fn test_cli_passphrase_multi_chunk_file() {
     assert!(encrypt_output.status.success());
     assert!(encrypt_dir.join("multi_chunk.fcr").exists());
 
-    let decrypt_output = Command::new(&binary)
+    let decrypt_output = cli_command(&binary)
         .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("multi_chunk.fcr"))
@@ -139,6 +194,7 @@ fn test_cli_passphrase_multi_chunk_file() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_passphrase_wrong_password() {
     let test_dir = setup_test_dir("cli_passphrase_wrong_pass");
     let input_file = test_dir.join("secret.txt");
@@ -152,7 +208,7 @@ fn test_cli_passphrase_wrong_password() {
 
     let binary = get_binary_path();
 
-    let encrypt_output = Command::new(&binary)
+    let encrypt_output = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -164,7 +220,7 @@ fn test_cli_passphrase_wrong_password() {
 
     assert!(encrypt_output.status.success());
 
-    let decrypt_output = Command::new(&binary)
+    let decrypt_output = cli_command(&binary)
         .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("secret.fcr"))
@@ -190,6 +246,7 @@ fn test_cli_passphrase_wrong_password() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_keygen() {
     let test_dir = setup_test_dir("cli_keygen");
     let keys_dir = test_dir.join("keys");
@@ -198,7 +255,7 @@ fn test_cli_keygen() {
 
     let binary = get_binary_path();
 
-    let keygen_output = Command::new(&binary)
+    let keygen_output = cli_command(&binary)
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
@@ -228,6 +285,7 @@ fn test_cli_keygen() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_recipient_encrypt_decrypt_file() {
     let test_dir = setup_test_dir("cli_recipient_file");
     let keys_dir = test_dir.join("keys");
@@ -244,7 +302,7 @@ fn test_cli_recipient_encrypt_decrypt_file() {
 
     let binary = get_binary_path();
 
-    let keygen_output = Command::new(&binary)
+    let keygen_output = cli_command(&binary)
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
@@ -254,7 +312,7 @@ fn test_cli_recipient_encrypt_decrypt_file() {
 
     assert!(keygen_output.status.success());
 
-    let encrypt_output = Command::new(&binary)
+    let encrypt_output = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -273,7 +331,7 @@ fn test_cli_recipient_encrypt_decrypt_file() {
 
     assert!(encrypt_dir.join("data.fcr").exists());
 
-    let decrypt_output = Command::new(&binary)
+    let decrypt_output = cli_command(&binary)
         .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("data.fcr"))
@@ -297,6 +355,7 @@ fn test_cli_recipient_encrypt_decrypt_file() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_passphrase_payload_tamper_message() {
     let test_dir = setup_test_dir("cli_passphrase_payload_tamper");
     let input_file = test_dir.join("payload.bin");
@@ -311,7 +370,7 @@ fn test_cli_passphrase_payload_tamper_message() {
 
     let binary = get_binary_path();
 
-    let encrypt_output = Command::new(&binary)
+    let encrypt_output = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -332,7 +391,7 @@ fn test_cli_passphrase_payload_tamper_message() {
     ciphertext[flip_offset] ^= 0xFF;
     fs::write(&encrypted_path, &ciphertext).expect("Failed to write tampered ciphertext");
 
-    let decrypt_output = Command::new(&binary)
+    let decrypt_output = cli_command(&binary)
         .arg("decrypt")
         .arg("-i")
         .arg(&encrypted_path)
@@ -355,6 +414,7 @@ fn test_cli_passphrase_payload_tamper_message() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_recipient_wrong_key_passphrase() {
     let test_dir = setup_test_dir("cli_recipient_wrong_pass");
     let keys_dir = test_dir.join("keys");
@@ -370,7 +430,7 @@ fn test_cli_recipient_wrong_key_passphrase() {
 
     let binary = get_binary_path();
 
-    let keygen = Command::new(&binary)
+    let keygen = cli_command(&binary)
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
@@ -379,7 +439,7 @@ fn test_cli_recipient_wrong_key_passphrase() {
         .expect("Failed to execute keygen");
     assert!(keygen.status.success());
 
-    let encrypt = Command::new(&binary)
+    let encrypt = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -391,7 +451,7 @@ fn test_cli_recipient_wrong_key_passphrase() {
         .expect("Failed to execute encrypt");
     assert!(encrypt.status.success());
 
-    let decrypt_output = Command::new(&binary)
+    let decrypt_output = cli_command(&binary)
         .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("data.fcr"))
@@ -416,6 +476,7 @@ fn test_cli_recipient_wrong_key_passphrase() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_directory_encryption() {
     let test_dir = setup_test_dir("cli_directory");
     let input_dir = test_dir.join("input_folder");
@@ -435,7 +496,7 @@ fn test_cli_directory_encryption() {
 
     let binary = get_binary_path();
 
-    let encrypt_output = Command::new(&binary)
+    let encrypt_output = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_dir)
@@ -448,7 +509,7 @@ fn test_cli_directory_encryption() {
     assert!(encrypt_output.status.success());
     assert!(encrypt_dir.join("input_folder.fcr").exists());
 
-    let decrypt_output = Command::new(&binary)
+    let decrypt_output = cli_command(&binary)
         .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("input_folder.fcr"))
@@ -471,6 +532,7 @@ fn test_cli_directory_encryption() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_passphrase_save_as() {
     let test_dir = setup_test_dir("cli_passphrase_save_as");
     let input_file = test_dir.join("data.txt");
@@ -486,7 +548,7 @@ fn test_cli_passphrase_save_as() {
     let custom_output = encrypt_dir.join("my_vault.fcr");
     let binary = get_binary_path();
 
-    let encrypt_output = Command::new(&binary)
+    let encrypt_output = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -504,7 +566,7 @@ fn test_cli_passphrase_save_as() {
 
     assert!(custom_output.exists());
 
-    let decrypt_output = Command::new(&binary)
+    let decrypt_output = cli_command(&binary)
         .arg("decrypt")
         .arg("-i")
         .arg(&custom_output)
@@ -526,6 +588,7 @@ fn test_cli_passphrase_save_as() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_recipient_save_as() {
     let test_dir = setup_test_dir("cli_recipient_save_as");
     let keys_dir = test_dir.join("keys");
@@ -542,7 +605,7 @@ fn test_cli_recipient_save_as() {
 
     let binary = get_binary_path();
 
-    let keygen = Command::new(&binary)
+    let keygen = cli_command(&binary)
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
@@ -553,7 +616,7 @@ fn test_cli_recipient_save_as() {
 
     let custom_output = encrypt_dir.join("backup.enc");
 
-    let encrypt_output = Command::new(&binary)
+    let encrypt_output = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -572,7 +635,7 @@ fn test_cli_recipient_save_as() {
 
     assert!(custom_output.exists());
 
-    let decrypt_output = Command::new(&binary)
+    let decrypt_output = cli_command(&binary)
         .arg("decrypt")
         .arg("-i")
         .arg(&custom_output)
@@ -596,6 +659,7 @@ fn test_cli_recipient_save_as() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_passphrase_without_save_as_uses_default() {
     let test_dir = setup_test_dir("cli_passphrase_no_save_as");
     let input_file = test_dir.join("report.txt");
@@ -607,7 +671,7 @@ fn test_cli_passphrase_without_save_as_uses_default() {
 
     let binary = get_binary_path();
 
-    let output = Command::new(&binary)
+    let output = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -622,6 +686,7 @@ fn test_cli_passphrase_without_save_as_uses_default() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_fingerprint() {
     let test_dir = setup_test_dir("cli_fingerprint");
     let keys_dir = test_dir.join("keys");
@@ -629,7 +694,7 @@ fn test_cli_fingerprint() {
 
     let binary = get_binary_path();
 
-    let keygen = Command::new(&binary)
+    let keygen = cli_command(&binary)
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
@@ -638,7 +703,7 @@ fn test_cli_fingerprint() {
         .expect("Failed to execute keygen");
     assert!(keygen.status.success());
 
-    let fp_output = Command::new(&binary)
+    let fp_output = cli_command(&binary)
         .arg("fingerprint")
         .arg(keys_dir.join("public.key"))
         .output()
@@ -657,6 +722,7 @@ fn test_cli_fingerprint() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_keygen_prints_fingerprint() {
     let test_dir = setup_test_dir("cli_keygen_fp");
     let keys_dir = test_dir.join("keys");
@@ -664,7 +730,7 @@ fn test_cli_keygen_prints_fingerprint() {
 
     let binary = get_binary_path();
 
-    let output = Command::new(&binary)
+    let output = cli_command(&binary)
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
@@ -682,6 +748,7 @@ fn test_cli_keygen_prints_fingerprint() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_keygen_prints_recipient() {
     let test_dir = setup_test_dir("cli_keygen_rcpt");
     let keys_dir = test_dir.join("keys");
@@ -689,7 +756,7 @@ fn test_cli_keygen_prints_recipient() {
 
     let binary = get_binary_path();
 
-    let output = Command::new(&binary)
+    let output = cli_command(&binary)
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
@@ -717,6 +784,7 @@ fn read_recipient_from_public_key(public_key: &Path) -> String {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_encrypt_with_recipient_string() {
     let test_dir = setup_test_dir("cli_encrypt_recipient_string");
     let keys_dir = test_dir.join("keys");
@@ -728,7 +796,7 @@ fn test_cli_encrypt_with_recipient_string() {
 
     let binary = get_binary_path();
 
-    let keygen = Command::new(&binary)
+    let keygen = cli_command(&binary)
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
@@ -743,7 +811,7 @@ fn test_cli_encrypt_with_recipient_string() {
     let input_file = test_dir.join("secret.txt");
     create_test_file(&input_file, "recipient encryption test");
 
-    let encrypt = Command::new(&binary)
+    let encrypt = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -760,7 +828,7 @@ fn test_cli_encrypt_with_recipient_string() {
     );
     assert!(encrypt_dir.join("secret.fcr").exists());
 
-    let decrypt = Command::new(&binary)
+    let decrypt = cli_command(&binary)
         .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("secret.fcr"))
@@ -791,7 +859,7 @@ fn test_cli_encrypt_rejects_invalid_recipient_string() {
 
     let binary = get_binary_path();
 
-    let output = Command::new(&binary)
+    let output = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -806,6 +874,7 @@ fn test_cli_encrypt_rejects_invalid_recipient_string() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_encrypt_mixes_public_key_and_recipient() {
     // The new encrypt subcommand allows -k and -r to be combined: every
     // listed key/recipient gets its own X25519 entry in the .fcr.
@@ -821,7 +890,7 @@ fn test_cli_encrypt_mixes_public_key_and_recipient() {
 
     let binary = get_binary_path();
 
-    let keygen = Command::new(&binary)
+    let keygen = cli_command(&binary)
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
@@ -832,7 +901,7 @@ fn test_cli_encrypt_mixes_public_key_and_recipient() {
 
     let recipient = read_recipient_from_public_key(&keys_dir.join("public.key"));
 
-    let output = Command::new(&binary)
+    let output = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -853,7 +922,7 @@ fn test_cli_encrypt_mixes_public_key_and_recipient() {
     assert!(encrypt_dir.join("secret.fcr").exists());
 
     // Either entry can decrypt the file.
-    let dec = Command::new(&binary)
+    let dec = cli_command(&binary)
         .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("secret.fcr"))
@@ -872,6 +941,7 @@ fn test_cli_encrypt_mixes_public_key_and_recipient() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_encrypt_multiple_public_keys() {
     let test_dir = setup_test_dir("cli_encrypt_multi_public_key");
     let keys_a = test_dir.join("keys_a");
@@ -894,7 +964,7 @@ fn test_cli_encrypt_multiple_public_keys() {
     let binary = get_binary_path();
 
     for (dir, pass) in [(&keys_a, "pa"), (&keys_b, "pb")] {
-        let kg = Command::new(&binary)
+        let kg = cli_command(&binary)
             .arg("keygen")
             .arg("-o")
             .arg(dir)
@@ -904,7 +974,7 @@ fn test_cli_encrypt_multiple_public_keys() {
         assert!(kg.status.success());
     }
 
-    let enc = Command::new(&binary)
+    let enc = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -923,7 +993,7 @@ fn test_cli_encrypt_multiple_public_keys() {
     );
 
     // Either private key decrypts the file.
-    let dec_a = Command::new(&binary)
+    let dec_a = cli_command(&binary)
         .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("secret.fcr"))
@@ -936,7 +1006,7 @@ fn test_cli_encrypt_multiple_public_keys() {
         .expect("decrypt A");
     assert!(dec_a.status.success());
 
-    let dec_b = Command::new(&binary)
+    let dec_b = cli_command(&binary)
         .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("secret.fcr"))
@@ -957,7 +1027,7 @@ fn test_cli_decrypt_rejects_recipient_flag() {
     let bad_input = test_dir.join("does_not_matter.fcr");
     fs::write(&bad_input, b"not a real .fcr").unwrap();
 
-    let output = Command::new(get_binary_path())
+    let output = cli_command(&get_binary_path())
         .arg("decrypt")
         .arg("-i")
         .arg(&bad_input)
@@ -983,7 +1053,7 @@ fn test_cli_encrypt_passphrase_conflicts_with_recipient_flag() {
     fs::create_dir_all(&encrypt_dir).unwrap();
     create_test_file(&input_file, "conflict");
 
-    let output = Command::new(get_binary_path())
+    let output = cli_command(&get_binary_path())
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -998,6 +1068,7 @@ fn test_cli_encrypt_passphrase_conflicts_with_recipient_flag() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_encrypt_passphrase_conflicts_with_public_key_flag() {
     let test_dir = setup_test_dir("cli_encrypt_p_conflicts_k");
     let keys_dir = test_dir.join("keys");
@@ -1009,7 +1080,7 @@ fn test_cli_encrypt_passphrase_conflicts_with_public_key_flag() {
 
     let binary = get_binary_path();
 
-    let kg = Command::new(&binary)
+    let kg = cli_command(&binary)
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
@@ -1018,7 +1089,7 @@ fn test_cli_encrypt_passphrase_conflicts_with_public_key_flag() {
         .expect("keygen");
     assert!(kg.status.success());
 
-    let output = Command::new(&binary)
+    let output = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -1041,7 +1112,7 @@ fn test_cli_encrypt_output_dir_conflicts_with_save_as() {
     fs::create_dir_all(&encrypt_dir).unwrap();
     create_test_file(&input_file, "conflict");
 
-    let output = Command::new(get_binary_path())
+    let output = cli_command(&get_binary_path())
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -1056,6 +1127,7 @@ fn test_cli_encrypt_output_dir_conflicts_with_save_as() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_encrypt_explicit_passphrase_flag_succeeds() {
     let test_dir = setup_test_dir("cli_encrypt_explicit_p");
     let input_file = test_dir.join("secret.txt");
@@ -1067,7 +1139,7 @@ fn test_cli_encrypt_explicit_passphrase_flag_succeeds() {
 
     let binary = get_binary_path();
 
-    let enc = Command::new(&binary)
+    let enc = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -1083,7 +1155,7 @@ fn test_cli_encrypt_explicit_passphrase_flag_succeeds() {
         String::from_utf8_lossy(&enc.stderr)
     );
 
-    let dec = Command::new(&binary)
+    let dec = cli_command(&binary)
         .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("secret.fcr"))
@@ -1096,6 +1168,7 @@ fn test_cli_encrypt_explicit_passphrase_flag_succeeds() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_decrypt_passphrase_file_with_private_key_fails_before_prompt() {
     let test_dir = setup_test_dir("cli_decrypt_passphrase_with_K");
     let keys_dir = test_dir.join("keys");
@@ -1109,7 +1182,7 @@ fn test_cli_decrypt_passphrase_file_with_private_key_fails_before_prompt() {
 
     let binary = get_binary_path();
 
-    let kg = Command::new(&binary)
+    let kg = cli_command(&binary)
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
@@ -1118,7 +1191,7 @@ fn test_cli_decrypt_passphrase_file_with_private_key_fails_before_prompt() {
         .expect("keygen");
     assert!(kg.status.success());
 
-    let enc = Command::new(&binary)
+    let enc = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -1131,7 +1204,7 @@ fn test_cli_decrypt_passphrase_file_with_private_key_fails_before_prompt() {
 
     // Even with no passphrase env var, the dispatcher must reject -K
     // before the prompt fires. stdin is null so a leaked prompt would hang.
-    let dec = Command::new(&binary)
+    let dec = cli_command(&binary)
         .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("data.fcr"))
@@ -1152,6 +1225,7 @@ fn test_cli_decrypt_passphrase_file_with_private_key_fails_before_prompt() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_decrypt_recipient_file_without_private_key_fails() {
     let test_dir = setup_test_dir("cli_decrypt_recipient_without_K");
     let keys_dir = test_dir.join("keys");
@@ -1165,7 +1239,7 @@ fn test_cli_decrypt_recipient_file_without_private_key_fails() {
 
     let binary = get_binary_path();
 
-    let kg = Command::new(&binary)
+    let kg = cli_command(&binary)
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
@@ -1174,7 +1248,7 @@ fn test_cli_decrypt_recipient_file_without_private_key_fails() {
         .expect("keygen");
     assert!(kg.status.success());
 
-    let enc = Command::new(&binary)
+    let enc = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -1186,7 +1260,7 @@ fn test_cli_decrypt_recipient_file_without_private_key_fails() {
         .expect("encrypt");
     assert!(enc.status.success());
 
-    let dec = Command::new(&binary)
+    let dec = cli_command(&binary)
         .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("data.fcr"))
@@ -1204,6 +1278,7 @@ fn test_cli_decrypt_recipient_file_without_private_key_fails() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_decrypt_accepts_max_kdf_memory_passphrase_mode() {
     let test_dir = setup_test_dir("cli_decrypt_kdf_passphrase");
     let input_file = test_dir.join("data.txt");
@@ -1214,7 +1289,7 @@ fn test_cli_decrypt_accepts_max_kdf_memory_passphrase_mode() {
     create_test_file(&input_file, "kdf passphrase test");
 
     let binary = get_binary_path();
-    let enc = Command::new(&binary)
+    let enc = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -1226,7 +1301,7 @@ fn test_cli_decrypt_accepts_max_kdf_memory_passphrase_mode() {
     assert!(enc.status.success());
 
     // 2048 MiB is wide enough to admit the default 1 GiB Argon2id cost.
-    let dec = Command::new(&binary)
+    let dec = cli_command(&binary)
         .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("data.fcr"))
@@ -1245,6 +1320,7 @@ fn test_cli_decrypt_accepts_max_kdf_memory_passphrase_mode() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_decrypt_accepts_max_kdf_memory_recipient_mode() {
     let test_dir = setup_test_dir("cli_decrypt_kdf_recipient");
     let keys_dir = test_dir.join("keys");
@@ -1257,7 +1333,7 @@ fn test_cli_decrypt_accepts_max_kdf_memory_recipient_mode() {
     create_test_file(&input_file, "kdf recipient test");
 
     let binary = get_binary_path();
-    let kg = Command::new(&binary)
+    let kg = cli_command(&binary)
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
@@ -1266,7 +1342,7 @@ fn test_cli_decrypt_accepts_max_kdf_memory_recipient_mode() {
         .expect("keygen");
     assert!(kg.status.success());
 
-    let enc = Command::new(&binary)
+    let enc = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -1278,7 +1354,7 @@ fn test_cli_decrypt_accepts_max_kdf_memory_recipient_mode() {
         .expect("encrypt");
     assert!(enc.status.success());
 
-    let dec = Command::new(&binary)
+    let dec = cli_command(&binary)
         .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("data.fcr"))
@@ -1307,7 +1383,7 @@ fn test_cli_encrypt_rejects_max_kdf_memory_flag() {
     fs::create_dir_all(&encrypt_dir).unwrap();
     create_test_file(&input_file, "kdf reject test");
 
-    let output = Command::new(get_binary_path())
+    let output = cli_command(&get_binary_path())
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -1328,7 +1404,7 @@ fn test_cli_decrypt_rejects_save_as_flag() {
     let bad_input = test_dir.join("does_not_matter.fcr");
     fs::write(&bad_input, b"not a real .fcr").unwrap();
 
-    let output = Command::new(get_binary_path())
+    let output = cli_command(&get_binary_path())
         .arg("decrypt")
         .arg("-i")
         .arg(&bad_input)
@@ -1349,7 +1425,7 @@ fn test_cli_rejects_empty_passphrase_env_var() {
     fs::create_dir_all(&encrypt_dir).unwrap();
     create_test_file(&input_file, "empty passphrase test");
 
-    let output = Command::new(get_binary_path())
+    let output = cli_command(&get_binary_path())
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -1375,7 +1451,7 @@ fn test_cli_fails_without_passphrase_and_no_tty() {
     // block the same way. The CLI's cross-platform `is_terminal()` guard
     // must catch this up-front and fail with a clear error rather than
     // hang or silently prompt on some hidden console.
-    let output = Command::new(get_binary_path())
+    let output = cli_command(&get_binary_path())
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -1405,7 +1481,7 @@ fn test_cli_recipient_nonexistent_key_file() {
     fs::create_dir_all(&encrypt_dir).unwrap();
     create_test_file(&input_file, "nonexistent key test");
 
-    let output = Command::new(get_binary_path())
+    let output = cli_command(&get_binary_path())
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -1423,7 +1499,7 @@ fn test_cli_recipient_nonexistent_key_file() {
 fn test_cli_passphrase_nonexistent_input() {
     let test_dir = setup_test_dir("cli_passphrase_nonexistent_input");
 
-    let output = Command::new(get_binary_path())
+    let output = cli_command(&get_binary_path())
         .arg("encrypt")
         .arg("-i")
         .arg(test_dir.join("nonexistent.txt"))
@@ -1437,6 +1513,7 @@ fn test_cli_passphrase_nonexistent_input() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_recipient_nonexistent_input() {
     let test_dir = setup_test_dir("cli_recipient_nonexistent_input");
     let keys_dir = test_dir.join("keys");
@@ -1444,7 +1521,7 @@ fn test_cli_recipient_nonexistent_input() {
 
     let binary = get_binary_path();
 
-    let kg = Command::new(&binary)
+    let kg = cli_command(&binary)
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
@@ -1453,7 +1530,7 @@ fn test_cli_recipient_nonexistent_input() {
         .expect("Failed to execute keygen");
     assert!(kg.status.success());
 
-    let output = Command::new(&binary)
+    let output = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(test_dir.join("nonexistent.txt"))
@@ -1471,7 +1548,7 @@ fn test_cli_recipient_nonexistent_input() {
 fn test_cli_fingerprint_nonexistent_file() {
     let test_dir = setup_test_dir("cli_fp_nonexistent");
 
-    let output = Command::new(get_binary_path())
+    let output = cli_command(&get_binary_path())
         .arg("fingerprint")
         .arg(test_dir.join("nonexistent.key"))
         .output()
@@ -1481,6 +1558,7 @@ fn test_cli_fingerprint_nonexistent_file() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_encrypt_alias_enc() {
     let test_dir = setup_test_dir("cli_alias_enc");
     let input_file = test_dir.join("data.txt");
@@ -1488,7 +1566,7 @@ fn test_cli_encrypt_alias_enc() {
     fs::create_dir_all(&encrypt_dir).unwrap();
     create_test_file(&input_file, "alias enc test");
 
-    let output = Command::new(get_binary_path())
+    let output = cli_command(&get_binary_path())
         .arg("enc")
         .arg("-i")
         .arg(&input_file)
@@ -1503,6 +1581,7 @@ fn test_cli_encrypt_alias_enc() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_decrypt_alias_dec() {
     let test_dir = setup_test_dir("cli_alias_dec");
     let input_file = test_dir.join("data.txt");
@@ -1514,7 +1593,7 @@ fn test_cli_decrypt_alias_dec() {
 
     let binary = get_binary_path();
 
-    let enc = Command::new(&binary)
+    let enc = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -1525,7 +1604,7 @@ fn test_cli_decrypt_alias_dec() {
         .expect("encrypt");
     assert!(enc.status.success());
 
-    let output = Command::new(&binary)
+    let output = cli_command(&binary)
         .arg("dec")
         .arg("-i")
         .arg(encrypt_dir.join("data.fcr"))
@@ -1543,12 +1622,13 @@ fn test_cli_decrypt_alias_dec() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_keygen_alias_gen() {
     let test_dir = setup_test_dir("cli_alias_gen");
     let keys_dir = test_dir.join("keys");
     fs::create_dir_all(&keys_dir).unwrap();
 
-    let output = Command::new(get_binary_path())
+    let output = cli_command(&get_binary_path())
         .arg("gen")
         .arg("-o")
         .arg(&keys_dir)
@@ -1562,6 +1642,7 @@ fn test_cli_keygen_alias_gen() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_fingerprint_alias_fp() {
     let test_dir = setup_test_dir("cli_alias_fp");
     let keys_dir = test_dir.join("keys");
@@ -1569,7 +1650,7 @@ fn test_cli_fingerprint_alias_fp() {
 
     let binary = get_binary_path();
 
-    let keygen = Command::new(&binary)
+    let keygen = cli_command(&binary)
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
@@ -1578,7 +1659,7 @@ fn test_cli_fingerprint_alias_fp() {
         .expect("Failed to execute keygen");
     assert!(keygen.status.success());
 
-    let output = Command::new(&binary)
+    let output = cli_command(&binary)
         .arg("fp")
         .arg(keys_dir.join("public.key"))
         .output()
@@ -1596,6 +1677,7 @@ fn test_cli_fingerprint_alias_fp() {
 // ─── Conflict detection tests ──────────────────────────────────────────────
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_passphrase_encrypt_conflict_detected() {
     let test_dir = setup_test_dir("passphrase_encrypt_conflict");
     let input_file = test_dir.join("data.txt");
@@ -1605,7 +1687,7 @@ fn test_passphrase_encrypt_conflict_detected() {
 
     let binary = get_binary_path();
 
-    let first = Command::new(&binary)
+    let first = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -1617,7 +1699,7 @@ fn test_passphrase_encrypt_conflict_detected() {
     assert!(first.status.success(), "first encrypt should succeed");
     assert!(encrypt_dir.join("data.fcr").exists());
 
-    let second = Command::new(&binary)
+    let second = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -1648,7 +1730,7 @@ fn test_passphrase_encrypt_conflict_with_save_as() {
 
     create_test_file(&custom_out, "placeholder");
 
-    let output = Command::new(get_binary_path())
+    let output = cli_command(&get_binary_path())
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -1666,6 +1748,7 @@ fn test_passphrase_encrypt_conflict_with_save_as() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_recipient_encrypt_conflict_detected() {
     let test_dir = setup_test_dir("recipient_encrypt_conflict");
     let input_file = test_dir.join("secret.txt");
@@ -1677,7 +1760,7 @@ fn test_recipient_encrypt_conflict_detected() {
 
     let binary = get_binary_path();
 
-    let kg = Command::new(&binary)
+    let kg = cli_command(&binary)
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
@@ -1686,7 +1769,7 @@ fn test_recipient_encrypt_conflict_detected() {
         .expect("keygen");
     assert!(kg.status.success());
 
-    let first = Command::new(&binary)
+    let first = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -1702,7 +1785,7 @@ fn test_recipient_encrypt_conflict_detected() {
         String::from_utf8_lossy(&first.stderr)
     );
 
-    let second = Command::new(&binary)
+    let second = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -1724,6 +1807,7 @@ fn test_recipient_encrypt_conflict_detected() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_keygen_conflict_both_keys() {
     let test_dir = setup_test_dir("keygen_conflict_both");
     let keys_dir = test_dir.join("keys");
@@ -1731,7 +1815,7 @@ fn test_keygen_conflict_both_keys() {
 
     let binary = get_binary_path();
 
-    let first = Command::new(&binary)
+    let first = cli_command(&binary)
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
@@ -1740,7 +1824,7 @@ fn test_keygen_conflict_both_keys() {
         .expect("first keygen");
     assert!(first.status.success());
 
-    let second = Command::new(&binary)
+    let second = cli_command(&binary)
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
@@ -1766,7 +1850,7 @@ fn test_keygen_conflict_private_only() {
 
     create_test_file(&keys_dir.join("private.key"), "dummy");
 
-    let output = Command::new(get_binary_path())
+    let output = cli_command(&get_binary_path())
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
@@ -1789,7 +1873,7 @@ fn test_keygen_conflict_public_only() {
 
     create_test_file(&keys_dir.join("public.key"), "dummy");
 
-    let output = Command::new(get_binary_path())
+    let output = cli_command(&get_binary_path())
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
@@ -1805,6 +1889,7 @@ fn test_keygen_conflict_public_only() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_decrypt_does_not_trigger_cli_conflict_check() {
     let test_dir = setup_test_dir("no_cli_conflict_decrypt");
     let input_file = test_dir.join("data.txt");
@@ -1816,7 +1901,7 @@ fn test_decrypt_does_not_trigger_cli_conflict_check() {
 
     let binary = get_binary_path();
 
-    let enc = Command::new(&binary)
+    let enc = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -1827,7 +1912,7 @@ fn test_decrypt_does_not_trigger_cli_conflict_check() {
         .expect("encrypt");
     assert!(enc.status.success());
 
-    let dec1 = Command::new(&binary)
+    let dec1 = cli_command(&binary)
         .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("data.fcr"))
@@ -1841,7 +1926,7 @@ fn test_decrypt_does_not_trigger_cli_conflict_check() {
     // Decrypt again — the library may reject overwrite, but the CLI conflict
     // check (which uses "Already exists: ..." prefix) must NOT fire since
     // conflict checks only apply to encryption, matching desktop behavior.
-    let dec2 = Command::new(&binary)
+    let dec2 = cli_command(&binary)
         .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("data.fcr"))
@@ -1860,13 +1945,14 @@ fn test_decrypt_does_not_trigger_cli_conflict_check() {
 // ─── -o / -s requirement tests ─────────────────────────────────────────────
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_passphrase_encrypt_save_as_without_output_dir() {
     let test_dir = setup_test_dir("passphrase_save_as_no_out");
     let input_file = test_dir.join("data.txt");
     let target = test_dir.join("result.fcr");
     create_test_file(&input_file, "payload");
 
-    let output = Command::new(get_binary_path())
+    let output = cli_command(&get_binary_path())
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -1884,6 +1970,7 @@ fn test_passphrase_encrypt_save_as_without_output_dir() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_recipient_encrypt_save_as_without_output_dir() {
     let test_dir = setup_test_dir("recipient_save_as_no_out");
     let input_file = test_dir.join("data.txt");
@@ -1894,7 +1981,7 @@ fn test_recipient_encrypt_save_as_without_output_dir() {
 
     let binary = get_binary_path();
 
-    let kg = Command::new(&binary)
+    let kg = cli_command(&binary)
         .arg("keygen")
         .arg("-o")
         .arg(&keys_dir)
@@ -1903,7 +1990,7 @@ fn test_recipient_encrypt_save_as_without_output_dir() {
         .expect("keygen");
     assert!(kg.status.success());
 
-    let output = Command::new(&binary)
+    let output = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -1927,7 +2014,7 @@ fn test_encrypt_without_output_dir_or_save_as_fails() {
     let input_file = test_dir.join("data.txt");
     create_test_file(&input_file, "payload");
 
-    let output = Command::new(get_binary_path())
+    let output = cli_command(&get_binary_path())
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -1938,6 +2025,7 @@ fn test_encrypt_without_output_dir_or_save_as_fails() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_decrypt_without_output_dir_fails() {
     let test_dir = setup_test_dir("decrypt_no_out");
     let input_file = test_dir.join("data.txt");
@@ -1947,7 +2035,7 @@ fn test_decrypt_without_output_dir_fails() {
 
     let binary = get_binary_path();
 
-    let enc = Command::new(&binary)
+    let enc = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -1958,7 +2046,7 @@ fn test_decrypt_without_output_dir_fails() {
         .expect("encrypt");
     assert!(enc.status.success());
 
-    let dec = Command::new(&binary)
+    let dec = cli_command(&binary)
         .arg("decrypt")
         .arg("-i")
         .arg(encrypt_dir.join("data.fcr"))
@@ -1971,6 +2059,7 @@ fn test_decrypt_without_output_dir_fails() {
 // ─── Double-encrypt gate ───────────────────────────────────────────────────
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_encrypt_double_encrypt_no_tty_refuses() {
     let test_dir = setup_test_dir("double_encrypt_no_tty");
     let input_file = test_dir.join("data.txt");
@@ -1982,7 +2071,7 @@ fn test_encrypt_double_encrypt_no_tty_refuses() {
 
     let binary = get_binary_path();
 
-    let enc = Command::new(&binary)
+    let enc = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -1995,7 +2084,7 @@ fn test_encrypt_double_encrypt_no_tty_refuses() {
     let first_fcr = encrypt_dir.join("data.fcr");
 
     // Non-interactive (null stdin) must refuse without --allow-double-encrypt.
-    let again = Command::new(&binary)
+    let again = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&first_fcr)
@@ -2014,6 +2103,7 @@ fn test_encrypt_double_encrypt_no_tty_refuses() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_encrypt_double_encrypt_with_flag_succeeds() {
     let test_dir = setup_test_dir("double_encrypt_with_flag");
     let input_file = test_dir.join("data.txt");
@@ -2028,7 +2118,7 @@ fn test_encrypt_double_encrypt_with_flag_succeeds() {
 
     let binary = get_binary_path();
 
-    let enc = Command::new(&binary)
+    let enc = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -2040,7 +2130,7 @@ fn test_encrypt_double_encrypt_with_flag_succeeds() {
     assert!(enc.status.success());
     let first_fcr = encrypt_dir.join("data.fcr");
 
-    let again = Command::new(&binary)
+    let again = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&first_fcr)
@@ -2063,7 +2153,7 @@ fn test_encrypt_double_encrypt_with_flag_succeeds() {
 
     // Round-trip the onion: outer pass, then inner.
     let outer_fcr = encrypt_dir2.join("data.fcr");
-    let dec_outer = Command::new(&binary)
+    let dec_outer = cli_command(&binary)
         .arg("decrypt")
         .arg("-i")
         .arg(&outer_fcr)
@@ -2077,7 +2167,7 @@ fn test_encrypt_double_encrypt_with_flag_succeeds() {
     let inner_fcr = decrypt_outer.join("data.fcr");
     assert!(inner_fcr.exists());
 
-    let dec_inner = Command::new(&binary)
+    let dec_inner = cli_command(&binary)
         .arg("decrypt")
         .arg("-i")
         .arg(&inner_fcr)
@@ -2094,6 +2184,7 @@ fn test_encrypt_double_encrypt_with_flag_succeeds() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_encrypt_output_conflict_wins_over_double_encrypt_gate() {
     // When both `output exists` and `input is .fcr` are true, the conflict
     // check must fire first so the user sees `Already exists` immediately
@@ -2109,7 +2200,7 @@ fn test_encrypt_output_conflict_wins_over_double_encrypt_gate() {
 
     let binary = get_binary_path();
 
-    let enc = Command::new(&binary)
+    let enc = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -2126,7 +2217,7 @@ fn test_encrypt_output_conflict_wins_over_double_encrypt_gate() {
     let target = encrypt_dir2.join("data.fcr");
     create_test_file(&target, "placeholder");
 
-    let again = Command::new(&binary)
+    let again = cli_command(&binary)
         .arg("encrypt")
         .arg("-i")
         .arg(&inner_fcr)
@@ -2152,7 +2243,7 @@ fn test_encrypt_output_conflict_wins_over_double_encrypt_gate() {
 
 #[test]
 fn test_cli_help_flag_lists_subcommands() {
-    let output = Command::new(get_binary_path())
+    let output = cli_command(&get_binary_path())
         .arg("--help")
         .output()
         .expect("--help");
@@ -2172,7 +2263,7 @@ fn test_cli_help_flag_lists_subcommands() {
 
 #[test]
 fn test_cli_help_shows_format_primitives() {
-    let output = Command::new(get_binary_path())
+    let output = cli_command(&get_binary_path())
         .arg("--help")
         .output()
         .expect("--help");
@@ -2188,7 +2279,7 @@ fn test_cli_help_shows_format_primitives() {
 
 #[test]
 fn test_cli_version_flag_matches_cargo_pkg_version() {
-    let output = Command::new(get_binary_path())
+    let output = cli_command(&get_binary_path())
         .arg("--version")
         .output()
         .expect("--version");
@@ -2203,7 +2294,7 @@ fn test_cli_version_flag_matches_cargo_pkg_version() {
 
 #[test]
 fn test_cli_subcommand_help_encrypt() {
-    let output = Command::new(get_binary_path())
+    let output = cli_command(&get_binary_path())
         .args(["encrypt", "--help"])
         .output()
         .expect("encrypt --help");
@@ -2224,7 +2315,7 @@ fn test_cli_subcommand_help_encrypt() {
 
 #[test]
 fn test_cli_subcommand_help_decrypt() {
-    let output = Command::new(get_binary_path())
+    let output = cli_command(&get_binary_path())
         .args(["decrypt", "--help"])
         .output()
         .expect("decrypt --help");
@@ -2242,7 +2333,7 @@ fn test_cli_subcommand_help_decrypt() {
 
 #[test]
 fn test_cli_subcommand_help_keygen() {
-    let output = Command::new(get_binary_path())
+    let output = cli_command(&get_binary_path())
         .args(["keygen", "--help"])
         .output()
         .expect("keygen --help");
@@ -2253,7 +2344,7 @@ fn test_cli_subcommand_help_keygen() {
 
 #[test]
 fn test_cli_subcommand_help_fingerprint() {
-    let output = Command::new(get_binary_path())
+    let output = cli_command(&get_binary_path())
         .args(["fingerprint", "--help"])
         .output()
         .expect("fingerprint --help");
@@ -2265,6 +2356,7 @@ fn test_cli_subcommand_help_fingerprint() {
 // ─── Exit codes ────────────────────────────────────────────────────────────
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_wrong_passphrase_returns_nonzero() {
     let test_dir = setup_test_dir("cli_exit_wrong_password");
     let input_file = test_dir.join("test.txt");
@@ -2275,7 +2367,7 @@ fn test_cli_wrong_passphrase_returns_nonzero() {
     create_test_file(&input_file, "content");
 
     let binary = get_binary_path();
-    let enc = Command::new(&binary)
+    let enc = cli_command(&binary)
         .args(["encrypt", "-i"])
         .arg(&input_file)
         .arg("-o")
@@ -2285,7 +2377,7 @@ fn test_cli_wrong_passphrase_returns_nonzero() {
         .expect("encrypt");
     assert_eq!(enc.status.code(), Some(0));
 
-    let dec = Command::new(&binary)
+    let dec = cli_command(&binary)
         .args(["decrypt", "-i"])
         .arg(encrypt_dir.join("test.fcr"))
         .arg("-o")
@@ -2298,7 +2390,7 @@ fn test_cli_wrong_passphrase_returns_nonzero() {
 
 #[test]
 fn test_cli_unknown_flag_returns_nonzero() {
-    let output = Command::new(get_binary_path())
+    let output = cli_command(&get_binary_path())
         .args(["encrypt", "--not-a-real-flag"])
         .output()
         .expect("bad args");
@@ -2307,7 +2399,7 @@ fn test_cli_unknown_flag_returns_nonzero() {
 
 #[test]
 fn test_cli_missing_required_input_returns_nonzero() {
-    let output = Command::new(get_binary_path())
+    let output = cli_command(&get_binary_path())
         .arg("encrypt")
         .output()
         .expect("missing args");
@@ -2317,6 +2409,7 @@ fn test_cli_missing_required_input_returns_nonzero() {
 // ─── Empty inputs ──────────────────────────────────────────────────────────
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_passphrase_empty_file_roundtrip() {
     let test_dir = setup_test_dir("cli_empty_file_passphrase");
     let input_file = test_dir.join("empty.txt");
@@ -2328,7 +2421,7 @@ fn test_cli_passphrase_empty_file_roundtrip() {
     assert_eq!(fs::metadata(&input_file).unwrap().len(), 0);
 
     let binary = get_binary_path();
-    let enc = Command::new(&binary)
+    let enc = cli_command(&binary)
         .args(["encrypt", "-i"])
         .arg(&input_file)
         .arg("-o")
@@ -2342,7 +2435,7 @@ fn test_cli_passphrase_empty_file_roundtrip() {
         String::from_utf8_lossy(&enc.stderr)
     );
 
-    let dec = Command::new(&binary)
+    let dec = cli_command(&binary)
         .args(["decrypt", "-i"])
         .arg(encrypt_dir.join("empty.fcr"))
         .arg("-o")
@@ -2362,6 +2455,7 @@ fn test_cli_passphrase_empty_file_roundtrip() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_recipient_empty_file_roundtrip() {
     let test_dir = setup_test_dir("cli_empty_file_recipient");
     let keys_dir = test_dir.join("keys");
@@ -2374,7 +2468,7 @@ fn test_cli_recipient_empty_file_roundtrip() {
     create_test_file(&input_file, "");
 
     let binary = get_binary_path();
-    let kg = Command::new(&binary)
+    let kg = cli_command(&binary)
         .args(["gen", "-o"])
         .arg(&keys_dir)
         .env("FERROCRYPT_PASSPHRASE", "key")
@@ -2382,7 +2476,7 @@ fn test_cli_recipient_empty_file_roundtrip() {
         .expect("keygen");
     assert!(kg.status.success());
 
-    let enc = Command::new(&binary)
+    let enc = cli_command(&binary)
         .args(["encrypt", "-i"])
         .arg(&input_file)
         .arg("-o")
@@ -2397,7 +2491,7 @@ fn test_cli_recipient_empty_file_roundtrip() {
         String::from_utf8_lossy(&enc.stderr)
     );
 
-    let dec = Command::new(&binary)
+    let dec = cli_command(&binary)
         .args(["decrypt", "-i"])
         .arg(encrypt_dir.join("empty.fcr"))
         .arg("-o")
@@ -2419,6 +2513,7 @@ fn test_cli_recipient_empty_file_roundtrip() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_passphrase_empty_directory_roundtrip() {
     let test_dir = setup_test_dir("cli_empty_dir");
     let input_dir = test_dir.join("emptydir");
@@ -2430,7 +2525,7 @@ fn test_cli_passphrase_empty_directory_roundtrip() {
     assert!(input_dir.read_dir().unwrap().next().is_none());
 
     let binary = get_binary_path();
-    let enc = Command::new(&binary)
+    let enc = cli_command(&binary)
         .args(["encrypt", "-i"])
         .arg(&input_dir)
         .arg("-o")
@@ -2444,7 +2539,7 @@ fn test_cli_passphrase_empty_directory_roundtrip() {
         String::from_utf8_lossy(&enc.stderr)
     );
 
-    let dec = Command::new(&binary)
+    let dec = cli_command(&binary)
         .args(["decrypt", "-i"])
         .arg(encrypt_dir.join("emptydir.fcr"))
         .arg("-o")
@@ -2476,7 +2571,7 @@ fn test_cli_encrypt_with_malformed_public_key_fails() {
     create_test_file(&input_file, "content");
     fs::write(keys_dir.join("public.key"), b"not a real key file").unwrap();
 
-    let output = Command::new(get_binary_path())
+    let output = cli_command(&get_binary_path())
         .args(["encrypt", "-i"])
         .arg(&input_file)
         .arg("-o")
@@ -2494,6 +2589,7 @@ fn test_cli_encrypt_with_malformed_public_key_fails() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_decrypt_with_malformed_private_key_fails() {
     let test_dir = setup_test_dir("cli_malformed_private");
     let keys_dir = test_dir.join("keys");
@@ -2506,14 +2602,14 @@ fn test_cli_decrypt_with_malformed_private_key_fails() {
     create_test_file(&input_file, "content");
 
     let binary = get_binary_path();
-    let kg = Command::new(&binary)
+    let kg = cli_command(&binary)
         .args(["gen", "-o"])
         .arg(&keys_dir)
         .env("FERROCRYPT_PASSPHRASE", "key")
         .output()
         .expect("keygen");
     assert!(kg.status.success());
-    let enc = Command::new(&binary)
+    let enc = cli_command(&binary)
         .args(["encrypt", "-i"])
         .arg(&input_file)
         .arg("-o")
@@ -2526,7 +2622,7 @@ fn test_cli_decrypt_with_malformed_private_key_fails() {
 
     fs::write(keys_dir.join("private.key"), b"not a real private key").unwrap();
 
-    let dec = Command::new(&binary)
+    let dec = cli_command(&binary)
         .args(["decrypt", "-i"])
         .arg(encrypt_dir.join("data.fcr"))
         .arg("-o")
@@ -2550,7 +2646,7 @@ fn test_cli_fingerprint_on_malformed_key_fails() {
     let bad_key = test_dir.join("bad.key");
     fs::write(&bad_key, b"garbage").unwrap();
 
-    let output = Command::new(get_binary_path())
+    let output = cli_command(&get_binary_path())
         .arg("fp")
         .arg(&bad_key)
         .output()
@@ -2559,13 +2655,14 @@ fn test_cli_fingerprint_on_malformed_key_fails() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_fingerprint_on_private_key_fails() {
     let test_dir = setup_test_dir("cli_fp_on_private");
     let keys_dir = test_dir.join("keys");
     fs::create_dir_all(&keys_dir).unwrap();
 
     let binary = get_binary_path();
-    let kg = Command::new(&binary)
+    let kg = cli_command(&binary)
         .args(["gen", "-o"])
         .arg(&keys_dir)
         .env("FERROCRYPT_PASSPHRASE", "key")
@@ -2573,7 +2670,7 @@ fn test_cli_fingerprint_on_private_key_fails() {
         .expect("keygen");
     assert!(kg.status.success());
 
-    let output = Command::new(&binary)
+    let output = cli_command(&binary)
         .arg("fp")
         .arg(keys_dir.join("private.key"))
         .output()
@@ -2582,6 +2679,7 @@ fn test_cli_fingerprint_on_private_key_fails() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_decrypt_rejects_public_key_as_private() {
     let test_dir = setup_test_dir("cli_wrong_key_type");
     let keys_dir = test_dir.join("keys");
@@ -2594,14 +2692,14 @@ fn test_cli_decrypt_rejects_public_key_as_private() {
     create_test_file(&input_file, "content");
 
     let binary = get_binary_path();
-    let kg = Command::new(&binary)
+    let kg = cli_command(&binary)
         .args(["gen", "-o"])
         .arg(&keys_dir)
         .env("FERROCRYPT_PASSPHRASE", "key")
         .output()
         .expect("keygen");
     assert!(kg.status.success());
-    let enc = Command::new(&binary)
+    let enc = cli_command(&binary)
         .args(["encrypt", "-i"])
         .arg(&input_file)
         .arg("-o")
@@ -2612,7 +2710,7 @@ fn test_cli_decrypt_rejects_public_key_as_private() {
         .expect("encrypt");
     assert!(enc.status.success());
 
-    let dec = Command::new(&binary)
+    let dec = cli_command(&binary)
         .args(["decrypt", "-i"])
         .arg(encrypt_dir.join("data.fcr"))
         .arg("-o")
@@ -2626,6 +2724,7 @@ fn test_cli_decrypt_rejects_public_key_as_private() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_decrypt_wrong_key_type_rejects_before_prompt() {
     // `validate_private_key_file` must fire before the passphrase prompt:
     // if it didn't, this command would hang on a hidden-input prompt because
@@ -2641,14 +2740,14 @@ fn test_cli_decrypt_wrong_key_type_rejects_before_prompt() {
     create_test_file(&input_file, "content");
 
     let binary = get_binary_path();
-    let kg = Command::new(&binary)
+    let kg = cli_command(&binary)
         .args(["gen", "-o"])
         .arg(&keys_dir)
         .env("FERROCRYPT_PASSPHRASE", "kp")
         .output()
         .expect("keygen");
     assert!(kg.status.success());
-    let enc = Command::new(&binary)
+    let enc = cli_command(&binary)
         .args(["encrypt", "-i"])
         .arg(&input_file)
         .arg("-o")
@@ -2659,7 +2758,7 @@ fn test_cli_decrypt_wrong_key_type_rejects_before_prompt() {
         .expect("encrypt");
     assert!(enc.status.success());
 
-    let dec = Command::new(&binary)
+    let dec = cli_command(&binary)
         .args(["decrypt", "-i"])
         .arg(encrypt_dir.join("data.fcr"))
         .arg("-o")

@@ -106,8 +106,12 @@ mod tests {
         // Real public.key text → Public.
         let tmp = tempfile::TempDir::new().unwrap();
         let pass = SecretString::from("kp".to_string());
-        let (privkey_path, pubkey_path) =
-            crate::protocol::generate_key_pair(&pass, tmp.path(), &|_| {})?;
+        let (privkey_path, pubkey_path) = crate::protocol::generate_key_pair(
+            &pass,
+            &crate::crypto::kdf::KdfParams::test_fast_default(),
+            tmp.path(),
+            &|_| {},
+        )?;
         let pub_bytes = fs::read(&pubkey_path)?;
         assert_eq!(KeyFileKind::classify(&pub_bytes), KeyFileKind::Public);
 

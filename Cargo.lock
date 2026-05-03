@@ -424,7 +424,7 @@ dependencies = [
  "chacha20poly1305",
  "constant_time_eq",
  "ctor 0.8.0",
- "ferrocrypt",
+ "ferrocrypt-test-support",
  "hkdf",
  "hmac",
  "libc",
@@ -449,6 +449,13 @@ dependencies = [
  "rustyline",
  "shell-words",
  "subtle",
+]
+
+[[package]]
+name = "ferrocrypt-test-support"
+version = "0.0.0"
+dependencies = [
+ "ferrocrypt",
 ]
 
 [[package]]

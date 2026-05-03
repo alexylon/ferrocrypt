@@ -102,6 +102,7 @@ pub struct Encryptor {
     state: EncryptorState,
     save_as: Option<PathBuf>,
     archive_limits: Option<ArchiveLimits>,
+    kdf_params: Option<KdfParams>,
 }
 
 #[derive(Debug)]
@@ -122,6 +123,7 @@ impl Encryptor {
             state: EncryptorState::Passphrase(passphrase),
             save_as: None,
             archive_limits: None,
+            kdf_params: None,
         }
     }
 
@@ -134,6 +136,7 @@ impl Encryptor {
             state: EncryptorState::Recipients(vec![recipient]),
             save_as: None,
             archive_limits: None,
+            kdf_params: None,
         }
     }
 
@@ -162,6 +165,7 @@ impl Encryptor {
             state: EncryptorState::Recipients(recipients),
             save_as: None,
             archive_limits: None,
+            kdf_params: None,
         })
     }
 
@@ -179,6 +183,22 @@ impl Encryptor {
     /// trusted trees that legitimately exceed the defaults.
     pub fn archive_limits(mut self, limits: ArchiveLimits) -> Self {
         self.archive_limits = Some(limits);
+        self
+    }
+
+    /// Overrides the Argon2id parameters used by the passphrase recipient
+    /// (`Encryptor::with_passphrase`). Has no effect on public-key
+    /// (`Encryptor::with_recipient` / `with_recipients`) flows, which use
+    /// X25519 ECDH and never run Argon2id during encryption.
+    ///
+    /// If unset, the writer uses [`KdfParams::default`] (1 GiB memory,
+    /// time_cost 4, parallelism 4). Callers MUST NOT lower these
+    /// parameters in production code paths — the override exists for
+    /// callers with specific tuning needs (e.g. lower-spec embedded
+    /// targets) and for in-tree tests via the workspace-internal
+    /// `ferrocrypt-test-support` crate.
+    pub fn kdf_params(mut self, params: KdfParams) -> Self {
+        self.kdf_params = Some(params);
         self
     }
 
@@ -215,7 +235,7 @@ impl Encryptor {
             EncryptorState::Passphrase(passphrase) => {
                 let recipient = recipient::argon2id::PassphraseRecipient {
                     passphrase: &passphrase,
-                    kdf_params: KdfParams::default(),
+                    kdf_params: self.kdf_params.unwrap_or_default(),
                 };
                 protocol::encrypt(
                     std::slice::from_ref(&recipient),
@@ -502,12 +522,83 @@ impl RecipientDecryptor {
 
 // ─── Key generation ─────────────────────────────────────────────────────────
 
+/// Builder for X25519 key-pair generation.
+///
+/// Mirrors the [`Encryptor`] builder pattern: pick the passphrase at
+/// construction, optionally override the Argon2id parameters used to
+/// seal the resulting `private.key`, then call [`KeyPairGenerator::write`]
+/// with the destination directory.
+///
+/// The free function [`generate_key_pair`] is a thin convenience wrapper
+/// around this builder for callers that do not need to override KDF
+/// parameters.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct KeyPairGenerator {
+    passphrase: SecretString,
+    kdf_params: Option<KdfParams>,
+}
+
+impl KeyPairGenerator {
+    /// Constructs a key-pair generator with the passphrase that will be
+    /// used to seal the resulting `private.key`. The passphrase is
+    /// checked for non-emptiness when [`KeyPairGenerator::write`] runs;
+    /// constructing this builder is infallible.
+    pub fn with_passphrase(passphrase: SecretString) -> Self {
+        Self {
+            passphrase,
+            kdf_params: None,
+        }
+    }
+
+    /// Overrides the Argon2id parameters used to seal `private.key`.
+    /// If unset, the generator uses [`KdfParams::default`] (1 GiB memory,
+    /// time_cost 4, parallelism 4).
+    ///
+    /// Same misuse caveat as [`Encryptor::kdf_params`]: callers MUST NOT
+    /// lower these parameters in production code paths. The override
+    /// exists for callers with specific tuning needs (e.g. lower-spec
+    /// embedded targets) and for in-tree tests via the workspace-internal
+    /// `ferrocrypt-test-support` crate.
+    pub fn kdf_params(mut self, params: KdfParams) -> Self {
+        self.kdf_params = Some(params);
+        self
+    }
+
+    /// Generates the X25519 key pair and writes `private.key` +
+    /// `public.key` into `output_dir`.
+    pub fn write(
+        self,
+        output_dir: impl AsRef<Path>,
+        on_event: impl Fn(&ProgressEvent),
+    ) -> Result<KeyGenOutcome, CryptoError> {
+        validate_passphrase(&self.passphrase)?;
+        let kdf_params = self.kdf_params.unwrap_or_default();
+        let (private_key_path, public_key_path) = protocol::generate_key_pair(
+            &self.passphrase,
+            &kdf_params,
+            output_dir.as_ref(),
+            &on_event,
+        )?;
+        let fingerprint = PublicKey::from_key_file(&public_key_path).fingerprint()?;
+        Ok(KeyGenOutcome {
+            private_key_path,
+            public_key_path,
+            fingerprint,
+        })
+    }
+}
+
 /// Generates and stores an X25519 key pair for public-key
 /// (recipient) encryption.
 ///
 /// Writes `private.key` (passphrase-wrapped at rest) and `public.key`
 /// (UTF-8 `fcr1…` recipient string) into `output_dir`. Returns the
 /// final paths plus the SHA3-256 fingerprint of the public key.
+///
+/// Thin convenience wrapper around [`KeyPairGenerator`]. Callers that
+/// need to override Argon2id parameters should use the builder directly:
+/// `KeyPairGenerator::with_passphrase(pass).kdf_params(p).write(dir, ev)`.
 ///
 /// ## Examples
 ///
@@ -523,15 +614,7 @@ pub fn generate_key_pair(
     passphrase: SecretString,
     on_event: impl Fn(&ProgressEvent),
 ) -> Result<KeyGenOutcome, CryptoError> {
-    validate_passphrase(&passphrase)?;
-    let (private_key_path, public_key_path) =
-        protocol::generate_key_pair(&passphrase, output_dir.as_ref(), &on_event)?;
-    let fingerprint = PublicKey::from_key_file(&public_key_path).fingerprint()?;
-    Ok(KeyGenOutcome {
-        private_key_path,
-        public_key_path,
-        fingerprint,
-    })
+    KeyPairGenerator::with_passphrase(passphrase).write(output_dir, on_event)
 }
 
 // ─── Mode detection ─────────────────────────────────────────────────────────

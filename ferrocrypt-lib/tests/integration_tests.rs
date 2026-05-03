@@ -321,9 +321,8 @@ fn test_hybrid_keygen_rejects_empty_passphrase() {
 /// on the private-key file before failing.
 #[test]
 fn test_recipient_decrypt_rejects_empty_passphrase_before_kdf() {
-    use ferrocrypt::{
-        Decryptor, Encryptor, PrivateKey, ProgressEvent, PublicKey, generate_key_pair,
-    };
+    use ferrocrypt::{Decryptor, Encryptor, PrivateKey, ProgressEvent, PublicKey};
+    use ferrocrypt_test_support::fast_keypair_generator;
     use std::cell::Cell;
 
     let test_dir = setup_test_dir("recipient_decrypt_empty_pass");
@@ -334,7 +333,9 @@ fn test_recipient_decrypt_rejects_empty_passphrase_before_kdf() {
     // `Recipient` variant. Setup `DerivingKey` events fire here, before
     // we install the observing closure.
     let setup_pass = SecretString::from("setup-pass".to_string());
-    let kg = generate_key_pair(&keys_dir, setup_pass, |_| {}).expect("generate fixture key pair");
+    let kg = fast_keypair_generator(setup_pass)
+        .write(&keys_dir, |_| {})
+        .expect("generate fixture key pair");
     let input = test_dir.join("data.txt");
     fs::write(&input, b"x").unwrap();
     let encrypted_dir = test_dir.join("encrypted");

@@ -19,8 +19,9 @@ use std::path::{Path, PathBuf};
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
     CryptoError, Decryptor, Encryptor, KdfLimit, KeyGenOutcome, PrivateKey, ProgressEvent,
-    PublicKey, detect_encryption_mode, generate_key_pair as lib_generate_key_pair,
+    PublicKey, detect_encryption_mode,
 };
+use ferrocrypt_test_support::{fast_keypair_generator, fast_passphrase_encryptor};
 
 pub fn symmetric_auto(
     input: impl AsRef<Path>,
@@ -48,7 +49,7 @@ pub fn symmetric_auto(
             _ => Err(CryptoError::NoSupportedRecipient),
         }
     } else {
-        let mut encryptor = Encryptor::with_passphrase(passphrase.clone());
+        let mut encryptor = fast_passphrase_encryptor(passphrase.clone());
         if let Some(s) = save_as {
             encryptor = encryptor.save_as(s);
         }
@@ -106,5 +107,5 @@ pub fn generate_key_pair(
     output_dir: impl AsRef<Path>,
     on_event: impl Fn(&ProgressEvent),
 ) -> Result<KeyGenOutcome, CryptoError> {
-    lib_generate_key_pair(output_dir, passphrase.clone(), on_event)
+    fast_keypair_generator(passphrase.clone()).write(output_dir, on_event)
 }

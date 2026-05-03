@@ -22,7 +22,6 @@ exclude = ["tests/fixtures/"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-fast-kdf = []
 # Re-exports internal parser surfaces for the in-repo fuzz targets. Not
 # part of the public API — enabled only by `ferrocrypt-lib/fuzz`.
 fuzzing = []
@@ -49,6 +48,6 @@ libc = "0.2"
 rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
-ferrocrypt = { path = ".", features = ["fast-kdf"] }
+ferrocrypt-test-support = { path = "../ferrocrypt-test-support" }
 ctor = "0.8"
 tar = "0.4.45"

@@ -468,7 +468,7 @@ mod tests {
             wrong_public.as_bytes(),
             &[],
             &pass,
-            &KdfParams::default(),
+            &KdfParams::test_fast_default(),
         )?;
         fs::write(&path, bytes)?;
 
@@ -501,7 +501,7 @@ mod tests {
             &malformed_public,
             &[],
             &pass,
-            &KdfParams::default(),
+            &KdfParams::test_fast_default(),
         )?;
         fs::write(&path, bytes)?;
 

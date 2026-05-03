@@ -1,0 +1,13 @@
+[package]
+name = "ferrocrypt-test-support"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.87"
+publish = false
+
+description = "Workspace-internal test helpers for ferrocrypt. Not published."
+authors = ["Alexander Alexandrov"]
+license = "GPL-3.0-only"
+
+[dependencies]
+ferrocrypt = { path = "../ferrocrypt-lib" }

@@ -13,8 +13,20 @@ use std::path::{Path, PathBuf};
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
     CryptoError, Decryptor, Encryptor, FormatDefect, HeaderReadLimits, PrivateKey, PublicKey,
-    detect_encryption_mode, detect_encryption_mode_with_limits, generate_key_pair,
+    detect_encryption_mode, detect_encryption_mode_with_limits,
 };
+use ferrocrypt_test_support::{fast_keypair_generator, fast_passphrase_encryptor};
+
+/// Test-side keygen helper that mirrors the lib's free `generate_key_pair`
+/// signature but routes through the workspace-internal fast-Argon2id
+/// builder so each call returns in milliseconds rather than seconds.
+fn generate_key_pair(
+    output_dir: impl AsRef<Path>,
+    passphrase: SecretString,
+    on_event: impl Fn(&ferrocrypt::ProgressEvent),
+) -> Result<ferrocrypt::KeyGenOutcome, CryptoError> {
+    fast_keypair_generator(passphrase).write(output_dir, on_event)
+}
 
 const PASSPHRASE: &str = "api-test-passphrase";
 const TEST_WORKSPACE: &str = "tests/workspace_api";
@@ -47,7 +59,7 @@ fn encryptor_passphrase_round_trip() {
     let out_dir = work.join("out");
     fs::create_dir_all(&out_dir).unwrap();
 
-    let outcome = Encryptor::with_passphrase(pass())
+    let outcome = fast_passphrase_encryptor(pass())
         .write(&input, &out_dir, |_| {})
         .expect("encrypt");
 
@@ -156,7 +168,7 @@ fn save_as_overrides_default_filename() {
     fs::write(&input, b"x").unwrap();
     let custom = work.join("custom-name.fcr");
 
-    let outcome = Encryptor::with_passphrase(pass())
+    let outcome = fast_passphrase_encryptor(pass())
         .save_as(&custom)
         .write(&input, &work, |_| {})
         .expect("encrypt");
@@ -198,7 +210,7 @@ fn decryptor_open_rejects_missing_input() {
     );
 }
 
-/// `Encryptor::with_passphrase("")` must reject the empty passphrase
+/// `fast_passphrase_encryptor("")` must reject the empty passphrase
 /// at the top of `write`, before the input-existence check fires. Pins
 /// the cheap-caller-input-first ordering matching the deprecated
 /// `symmetric_encrypt` path so an empty passphrase against a missing
@@ -208,7 +220,7 @@ fn decryptor_open_rejects_missing_input() {
 fn encryptor_passphrase_rejects_empty_before_input_check() {
     let work = fresh_workspace("empty_pass_before_input");
     let missing = work.join("does-not-exist.txt");
-    let err = Encryptor::with_passphrase(SecretString::from(String::new()))
+    let err = fast_passphrase_encryptor(SecretString::from(String::new()))
         .write(&missing, &work, |_| {})
         .unwrap_err();
     match err {
@@ -226,7 +238,7 @@ fn encryptor_passphrase_rejects_empty_before_input_check() {
 #[test]
 fn encryptor_debug_does_not_leak_passphrase() {
     const SECRET: &str = "totally-secret-passphrase-9F2";
-    let encryptor = Encryptor::with_passphrase(SecretString::from(SECRET.to_string()));
+    let encryptor = fast_passphrase_encryptor(SecretString::from(SECRET.to_string()));
     let rendered = format!("{encryptor:?}");
     assert!(
         !rendered.contains(SECRET),
@@ -239,7 +251,7 @@ fn detect_encryption_mode_round_trips_via_encryptor() {
     let work = fresh_workspace("detect_round_trip");
     let input = work.join("data.txt");
     fs::write(&input, b"x").unwrap();
-    let outcome = Encryptor::with_passphrase(pass())
+    let outcome = fast_passphrase_encryptor(pass())
         .write(&input, &work, |_| {})
         .expect("encrypt");
     assert!(
@@ -269,7 +281,7 @@ fn passphrase_decryptor_archive_limits_constrains_extraction() {
     let out_dir = work.join("out");
     fs::create_dir_all(&out_dir).unwrap();
 
-    let outcome = Encryptor::with_passphrase(pass())
+    let outcome = fast_passphrase_encryptor(pass())
         .write(&dir, &out_dir, |_| {})
         .expect("encrypt");
 
@@ -356,7 +368,7 @@ fn archive_limits_raised_on_both_sides_round_trips() {
     let raised = ArchiveLimits::default()
         .with_max_entry_count(8)
         .with_max_path_depth(8);
-    let outcome = Encryptor::with_passphrase(pass())
+    let outcome = fast_passphrase_encryptor(pass())
         .archive_limits(raised)
         .write(&dir, &out_dir, |_| {})
         .expect("encrypt");

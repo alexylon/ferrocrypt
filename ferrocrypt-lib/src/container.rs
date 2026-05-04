@@ -90,9 +90,9 @@ pub struct HeaderReadLimits {
 impl Default for HeaderReadLimits {
     fn default() -> Self {
         Self {
-            max_header_len: format::HEADER_LEN_LOCAL_CAP_DEFAULT,
-            max_recipient_count: format::RECIPIENT_COUNT_LOCAL_CAP_DEFAULT,
-            max_recipient_body_len: format::BODY_LEN_LOCAL_CAP_DEFAULT,
+            max_header_len: Self::HEADER_LEN_DEFAULT,
+            max_recipient_count: Self::RECIPIENT_COUNT_DEFAULT,
+            max_recipient_body_len: Self::RECIPIENT_BODY_LEN_DEFAULT,
         }
     }
 }
@@ -108,6 +108,22 @@ impl HeaderReadLimits {
     /// (v1 = 16 MiB, `FORMAT.md` §3.3). Builder methods clamp at this
     /// value.
     pub const RECIPIENT_BODY_LEN_STRUCTURAL_MAX: u32 = format::BODY_LEN_MAX;
+
+    /// Default value used by [`HeaderReadLimits::default`] for
+    /// `max_header_len`. Mirrored on the writer side so the default
+    /// `Encryptor` never produces a header longer than the default
+    /// reader will accept.
+    pub const HEADER_LEN_DEFAULT: u32 = format::HEADER_LEN_LOCAL_CAP_DEFAULT;
+    /// Default value used by [`HeaderReadLimits::default`] for
+    /// `max_recipient_count`. Mirrored on the writer side via
+    /// [`crate::Encryptor::header_read_limits`] so a default
+    /// `Encryptor` rejects recipient lists above this cap before any
+    /// X25519 ECDH runs.
+    pub const RECIPIENT_COUNT_DEFAULT: u16 = format::RECIPIENT_COUNT_LOCAL_CAP_DEFAULT;
+    /// Default value used by [`HeaderReadLimits::default`] for
+    /// `max_recipient_body_len`. Applies symmetrically on encrypt
+    /// (entries native to v1 sit well under this cap) and decrypt.
+    pub const RECIPIENT_BODY_LEN_DEFAULT: u32 = format::BODY_LEN_LOCAL_CAP_DEFAULT;
 
     /// Sets the maximum accepted `prefix.header_len`, clamped at
     /// [`Self::HEADER_LEN_STRUCTURAL_MAX`]. Files declaring a longer
@@ -134,7 +150,48 @@ impl HeaderReadLimits {
         self.max_recipient_body_len = value.min(Self::RECIPIENT_BODY_LEN_STRUCTURAL_MAX);
         self
     }
+
+    /// Single source of truth for the `header_len` cap check. Used by
+    /// the reader's `read_encrypted_header` against the header declared
+    /// in the prefix; available to writer-side preflight when a future
+    /// fat-header recipient list could exceed
+    /// [`Self::HEADER_LEN_DEFAULT`].
+    pub(crate) fn enforce_header_len(&self, header_len: u32) -> Result<(), CryptoError> {
+        if header_len > self.max_header_len {
+            return Err(CryptoError::HeaderLenCapExceeded {
+                header_len,
+                local_cap: self.max_header_len,
+            });
+        }
+        Ok(())
+    }
+
+    /// Single source of truth for the `recipient_count` cap check.
+    /// Called from the reader's `read_encrypted_header` (against the
+    /// `header_fixed.recipient_count` declared on disk) AND from the
+    /// writer's [`crate::Encryptor::write`] (against the in-memory
+    /// recipient list size) so default-encrypt and default-decrypt
+    /// stay in lockstep.
+    pub(crate) fn enforce_recipient_count(&self, count: u16) -> Result<(), CryptoError> {
+        if count > self.max_recipient_count {
+            return Err(CryptoError::RecipientCountCapExceeded {
+                count,
+                local_cap: self.max_recipient_count,
+            });
+        }
+        Ok(())
+    }
 }
+
+// `max_recipient_body_len` is enforced inline inside
+// `RecipientEntry::parse_one` — that module sits below `container` in
+// the dependency graph and cannot import [`HeaderReadLimits`] without
+// a cycle, so the cap is plumbed through as a `u32` parameter and the
+// typed [`CryptoError::RecipientBodyCapExceeded`] is constructed
+// there. The cap value still has a single source of truth
+// ([`HeaderReadLimits::max_recipient_body_len`] +
+// [`HeaderReadLimits::RECIPIENT_BODY_LEN_DEFAULT`]); only the check
+// site is in `recipient/entry.rs`.
 
 /// A structurally parsed `.fcr` header. Authenticity has NOT been checked;
 /// the caller must call [`format::verify_header_mac`] with a `header_key`
@@ -250,12 +307,7 @@ pub(crate) fn read_encrypted_header<R: Read>(
 ) -> Result<ParsedEncryptedHeader, CryptoError> {
     let (prefix_bytes, prefix) = format::read_prefix_from_reader(reader, Kind::Encrypted)?;
 
-    if prefix.header_len > limits.max_header_len {
-        return Err(CryptoError::HeaderLenCapExceeded {
-            header_len: prefix.header_len,
-            local_cap: limits.max_header_len,
-        });
-    }
+    limits.enforce_header_len(prefix.header_len)?;
 
     // Cap-bounded above. Cast is safe.
     let header_len = prefix.header_len as usize;
@@ -271,12 +323,7 @@ pub(crate) fn read_encrypted_header<R: Read>(
         .ok_or(CryptoError::InvalidFormat(FormatDefect::MalformedHeader))?;
     let fixed = HeaderFixed::parse(fixed_bytes, prefix.header_len)?;
 
-    if fixed.recipient_count > limits.max_recipient_count {
-        return Err(CryptoError::RecipientCountCapExceeded {
-            count: fixed.recipient_count,
-            local_cap: limits.max_recipient_count,
-        });
-    }
+    limits.enforce_recipient_count(fixed.recipient_count)?;
 
     let entries_start = HEADER_FIXED_SIZE;
     let entries_end = entries_start
@@ -658,6 +705,41 @@ mod tests {
         }
     }
 
+    /// Direct boundary unit on [`HeaderReadLimits::enforce_header_len`]:
+    /// the comparison MUST be `>`, not `>=`, so a `header_len` exactly
+    /// at the cap is admissible and only `cap + 1` rejects.
+    #[test]
+    fn enforce_header_len_boundary() {
+        let limits = HeaderReadLimits::default().max_header_len(256);
+        limits.enforce_header_len(256).expect("at-cap must succeed");
+        match limits.enforce_header_len(257) {
+            Err(CryptoError::HeaderLenCapExceeded {
+                header_len: 257,
+                local_cap: 256,
+            }) => {}
+            other => panic!("expected HeaderLenCapExceeded(257, 256), got {other:?}"),
+        }
+    }
+
+    /// Direct boundary unit on
+    /// [`HeaderReadLimits::enforce_recipient_count`]: same `>` not
+    /// `>=` semantics, plus confirm the typed error fields carry
+    /// `count` and `local_cap` correctly.
+    #[test]
+    fn enforce_recipient_count_boundary() {
+        let limits = HeaderReadLimits::default().max_recipient_count(2);
+        limits
+            .enforce_recipient_count(2)
+            .expect("at-cap must succeed");
+        match limits.enforce_recipient_count(3) {
+            Err(CryptoError::RecipientCountCapExceeded {
+                count: 3,
+                local_cap: 2,
+            }) => {}
+            other => panic!("expected RecipientCountCapExceeded(3, 2), got {other:?}"),
+        }
+    }
+
     /// Builder methods preserve normal in-range values and produce a
     /// struct equal to the chained construction. Pins the field-by-field
     /// effect of each setter.
@@ -694,6 +776,54 @@ mod tests {
         assert_eq!(
             clamped.max_recipient_body_len,
             HeaderReadLimits::RECIPIENT_BODY_LEN_STRUCTURAL_MAX
+        );
+    }
+
+    /// The three default local caps
+    /// ([`HeaderReadLimits::RECIPIENT_COUNT_DEFAULT`],
+    /// [`HeaderReadLimits::RECIPIENT_BODY_LEN_DEFAULT`],
+    /// [`HeaderReadLimits::HEADER_LEN_DEFAULT`]) plus the structural
+    /// maxima [`EXT_LEN_MAX`] / [`HEADER_FIXED_SIZE`] /
+    /// [`crate::recipient::entry::ENTRY_HEADER_SIZE`] /
+    /// [`crate::recipient::name::TYPE_NAME_MAX_LEN`] MUST stay mutually
+    /// consistent: the worst-case `header_len` a default-cap reader
+    /// would still accept entry-by-entry (every recipient slot at the
+    /// per-entry body cap, every type-name at the grammar ceiling,
+    /// `ext_bytes` at its structural max) MUST fit inside the
+    /// `HEADER_LEN_DEFAULT` envelope. Otherwise the three caps would
+    /// silently refuse files the per-cap rules individually allow.
+    ///
+    /// Pins the inequality so a future cap bump (e.g. raising
+    /// `RECIPIENT_BODY_LEN_DEFAULT` for a fat-body post-quantum
+    /// recipient body) cannot silently break default round-trip
+    /// without surfacing on CI.
+    #[test]
+    fn default_local_caps_are_mutually_consistent() {
+        use crate::format::{EXT_LEN_MAX, HEADER_FIXED_SIZE};
+        use crate::recipient::entry::ENTRY_HEADER_SIZE;
+        use crate::recipient::name::TYPE_NAME_MAX_LEN;
+
+        // Maximum on-wire bytes a single recipient entry can occupy
+        // under the per-entry default cap with the type-name at its
+        // grammar ceiling.
+        let per_entry_max = ENTRY_HEADER_SIZE as u64
+            + TYPE_NAME_MAX_LEN as u64
+            + HeaderReadLimits::RECIPIENT_BODY_LEN_DEFAULT as u64;
+
+        // Worst-case header a default-cap reader would individually
+        // accept: every slot full, every type-name full, `ext_bytes`
+        // at the structural max.
+        let worst_case_header = (HeaderReadLimits::RECIPIENT_COUNT_DEFAULT as u64) * per_entry_max
+            + EXT_LEN_MAX as u64
+            + HEADER_FIXED_SIZE as u64;
+
+        let header_len_default = HeaderReadLimits::HEADER_LEN_DEFAULT as u64;
+        assert!(
+            worst_case_header <= header_len_default,
+            "Default local caps allow a worst-case header of {worst_case_header} bytes, \
+             which exceeds HeaderReadLimits::HEADER_LEN_DEFAULT ({header_len_default}). \
+             Either lower one of the per-cap defaults or raise \
+             HeaderReadLimits::HEADER_LEN_DEFAULT to keep default round-trip viable."
         );
     }
 

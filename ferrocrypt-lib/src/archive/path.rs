@@ -5,6 +5,33 @@
 //! decrypt-side entry and re-exported via `fuzz_exports`. The [`ustar`]
 //! submodule pins the raw POSIX ustar header offsets so the writer
 //! emits and the reader strict-validates the same byte layout.
+//!
+//! ## Path-subset enforcement (writer ↔ reader)
+//!
+//! The v1 archive subset's path rules — no NUL or `\` byte, no
+//! `.`/`..`/empty components, length ≤ [`ustar::PATH_REPRESENTABLE_MAX`],
+//! no path traversal, valid UTF-8, single trailing `/` only on directory
+//! entries — are enforced on **both** sides by two complementary helpers
+//! that operate on different input shapes:
+//!
+//! - **Writer** (`archive::encode::ustar_archive_path_string`) walks
+//!   [`std::path::Component`] values and refuses anything but
+//!   [`Component::Normal`], then byte-checks each component for NUL /
+//!   `\`. Repeated `//`, `.`/`..`/empty components are structurally
+//!   impossible because the writer joins single-`/` between Normal
+//!   components only.
+//! - **Reader** (`archive::decode::validate_ustar_entry` plus
+//!   [`validate_archive_path_components`]) operates on raw byte slices
+//!   (the on-disk header field), so every check is explicit: empty,
+//!   length, NUL, `\`, `//`, UTF-8, trailing `/`, per-component
+//!   `.`/`..`/empty, and the [`Component`]-level path-traversal subset
+//!   on the parsed `&Path`.
+//!
+//! The two helpers reach the same conclusion via different code paths
+//! rather than sharing one function because their inputs are different
+//! shapes (typed `&Path` vs raw byte slice). Both sides reference the
+//! shared constants in [`ustar`] so structural drift is impossible; a
+//! change to one side's rules MUST be mirrored in the other.
 
 use std::path::{Component, Path};
 

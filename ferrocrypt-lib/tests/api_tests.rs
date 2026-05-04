@@ -12,10 +12,13 @@ use std::path::{Path, PathBuf};
 
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
-    CryptoError, Decryptor, Encryptor, FormatDefect, HeaderReadLimits, PrivateKey, PublicKey,
-    detect_encryption_mode, detect_encryption_mode_with_limits,
+    CryptoError, Decryptor, Encryptor, FormatDefect, HeaderReadLimits, KdfLimit, KdfParams,
+    KeyPairGenerator, PrivateKey, PublicKey, detect_encryption_mode,
+    detect_encryption_mode_with_limits,
 };
-use ferrocrypt_test_support::{fast_keypair_generator, fast_passphrase_encryptor};
+use ferrocrypt_test_support::{
+    TEST_FAST_KDF_MEM_COST, fast_keypair_generator, fast_passphrase_encryptor,
+};
 
 /// Test-side keygen helper that mirrors the lib's free `generate_key_pair`
 /// signature but routes through the workspace-internal fast-Argon2id
@@ -349,6 +352,88 @@ fn recipient_decryptor_archive_limits_constrains_extraction() {
     }
 }
 
+/// Encrypt-side `archive_limits` raised above the default while the
+/// reader uses [`ArchiveLimits::default`]: a file containing a path
+/// deeper than the reader's default `max_path_depth` (64) is rejected
+/// at extract time with the typed `path depth cap exceeded` message,
+/// and the same file decrypts successfully when the reader raises
+/// `archive_limits` to match the writer.
+///
+/// Pins the documented asymmetry on
+/// [`PassphraseDecryptor::archive_limits`] / [`RecipientDecryptor::archive_limits`]
+/// ("Must match (or exceed) the limits the writer used") as
+/// intentional behavior rather than implicit. `max_path_depth` is
+/// used because it is the only `ArchiveLimits` axis whose default cap
+/// (64) is small enough to exercise asymmetrically with a tractable
+/// fixture; `max_entry_count` (250 000) and
+/// `max_total_plaintext_bytes` (64 GiB) would each require an
+/// impractical fixture.
+#[test]
+fn archive_limits_writer_raised_default_reader_rejects_path_depth() {
+    use ferrocrypt::ArchiveLimits;
+
+    let work = fresh_workspace("archive_limits_asymmetric_path_depth");
+    let input = work.join("input");
+    // Archive paths are emitted as `<root>/<rel>`: the input directory
+    // contributes one component (`input`), each nested `a` adds one,
+    // and the leaf file adds one. 64 nested directories therefore
+    // produce a leaf entry with 66 components — two over the default
+    // reader cap of 64, so the rejection cannot be a fence-post mistake.
+    let mut deepest = input.clone();
+    for _ in 0..64 {
+        deepest = deepest.join("a");
+    }
+    fs::create_dir_all(&deepest).unwrap();
+    fs::write(deepest.join("leaf.txt"), b"deep payload").unwrap();
+
+    let out_dir = work.join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+
+    // Writer raises `max_path_depth` so the encrypt-side preflight
+    // accepts the deep tree. Without this raise the writer's own
+    // preflight would reject before any payload bytes were written.
+    let raised = ArchiveLimits::default().with_max_path_depth(80);
+    let outcome = fast_passphrase_encryptor(pass())
+        .archive_limits(raised)
+        .write(&input, &out_dir, |_| {})
+        .expect("encrypt");
+
+    // Default reader: rejects on extract with the typed path-depth
+    // diagnostic. Surfaces from `enforce_per_entry_caps` as
+    // `CryptoError::InvalidInput(_)`.
+    let restore = work.join("restored");
+    fs::create_dir_all(&restore).unwrap();
+    let default_decrypt = match Decryptor::open(&outcome.output_path).expect("open") {
+        Decryptor::Passphrase(d) => d.decrypt(pass(), &restore, |_| {}),
+        _ => panic!("expected passphrase decryptor"),
+    };
+    match default_decrypt {
+        Err(CryptoError::InvalidInput(msg)) => assert!(
+            msg.contains("path depth cap"),
+            "expected path-depth cap rejection from default reader, got: {msg}"
+        ),
+        other => panic!("expected default reader to reject deep file, got {other:?}"),
+    }
+
+    // Reader raises `archive_limits` to match the writer: succeeds.
+    let restore2 = work.join("restored2");
+    fs::create_dir_all(&restore2).unwrap();
+    let raised_decrypt = match Decryptor::open(&outcome.output_path).expect("open") {
+        Decryptor::Passphrase(d) => d
+            .archive_limits(raised)
+            .decrypt(pass(), &restore2, |_| {})
+            .expect("raised reader must accept the file the default reader refused"),
+        _ => panic!("expected passphrase decryptor"),
+    };
+    assert!(raised_decrypt.output_path.is_dir());
+    let mut leaf = raised_decrypt.output_path.clone();
+    for _ in 0..64 {
+        leaf = leaf.join("a");
+    }
+    leaf = leaf.join("leaf.txt");
+    assert_eq!(fs::read(&leaf).unwrap(), b"deep payload");
+}
+
 /// Round-trip with raised caps on both sides — the symmetric case
 /// the new builder enables. Without `Decryptor::archive_limits`, this
 /// pattern was impossible: the encrypt side could exceed defaults but
@@ -416,8 +501,14 @@ fn decryptor_open_with_limits_accepts_recipient_count_above_default() {
     let recipients: Vec<PublicKey> = (0..RECIPIENT_COUNT)
         .map(|_| PublicKey::from_key_file(&kg.public_key_path))
         .collect();
+    // Symmetric-default contract: the writer refuses lists above the
+    // default `RECIPIENT_COUNT_LOCAL_CAP_DEFAULT` (64) unless the caller
+    // raises `Encryptor::header_read_limits` explicitly. The decryptor
+    // must mirror the raise via `Decryptor::open_with_limits`.
+    let writer_limits = HeaderReadLimits::default().max_recipient_count(128);
     let outcome = Encryptor::with_recipients(recipients)
         .expect("with_recipients")
+        .header_read_limits(writer_limits)
         .write(&input, &out_dir, |_| {})
         .expect("encrypt");
 
@@ -477,8 +568,13 @@ fn detect_encryption_mode_with_limits_accepts_above_default() {
     let recipients: Vec<PublicKey> = (0..80)
         .map(|_| PublicKey::from_key_file(&kg.public_key_path))
         .collect();
+    // Writer must opt into the raised recipient-count cap; the
+    // detection-only path below confirms the same opt-in is required
+    // on the read side.
+    let writer_limits = HeaderReadLimits::default().max_recipient_count(128);
     let outcome = Encryptor::with_recipients(recipients)
         .expect("with_recipients")
+        .header_read_limits(writer_limits)
         .write(&input, &out_dir, |_| {})
         .expect("encrypt");
 
@@ -494,4 +590,213 @@ fn detect_encryption_mode_with_limits_accepts_above_default() {
         Ok(Some(EncryptionMode::Recipient)) => {}
         other => panic!("expected Ok(Some(Recipient)) under raised cap, got {other:?}"),
     }
+}
+
+// ─── Symmetric-default writer caps ─────────────────────────────────────────
+//
+// Pin the contract that a default-configured `Encryptor` /
+// `KeyPairGenerator` produces files a default-configured `Decryptor`
+// (or `RecipientDecryptor` `private.key` unlock) can read. Going
+// above default requires the caller to opt in on BOTH sides; the
+// tests below pin both the rejection (no opt-in) and the acceptance
+// (opt-in matches) directions.
+
+/// Default `Encryptor::with_recipients(N>64)` rejects at write time
+/// with [`CryptoError::RecipientCountCapExceeded`] before any X25519
+/// ECDH or key wrapping runs. Pins the writer-side half of the
+/// recipient-count contract; the matching reader-side rejection /
+/// acceptance is pinned by
+/// [`decryptor_open_with_limits_accepts_recipient_count_above_default`].
+#[test]
+fn encryptor_with_recipients_above_default_rejects_without_opt_in() {
+    let work = fresh_workspace("recipients_above_default_rejects");
+    let keys = work.join("keys");
+    fs::create_dir_all(&keys).unwrap();
+    let kg = generate_key_pair(&keys, pass(), |_| {}).expect("keygen");
+    let input = work.join("data.txt");
+    fs::write(&input, b"x").unwrap();
+    let out_dir = work.join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+
+    let cap = HeaderReadLimits::RECIPIENT_COUNT_DEFAULT;
+
+    // One above the default cap — boundary rejection, not "way over".
+    let recipients: Vec<PublicKey> = (0..(cap as usize + 1))
+        .map(|_| PublicKey::from_key_file(&kg.public_key_path))
+        .collect();
+    let result = Encryptor::with_recipients(recipients)
+        .expect("with_recipients")
+        .write(&input, &out_dir, |_| {});
+    match result {
+        Err(CryptoError::RecipientCountCapExceeded { count, local_cap }) => {
+            assert_eq!(count, cap + 1);
+            assert_eq!(local_cap, cap);
+        }
+        other => panic!("expected RecipientCountCapExceeded, got {other:?}"),
+    }
+
+    // Boundary: a list at exactly the default cap MUST succeed under
+    // default settings. Pins the cap check uses `>`, not `>=`.
+    let at_cap: Vec<PublicKey> = (0..cap)
+        .map(|_| PublicKey::from_key_file(&kg.public_key_path))
+        .collect();
+    let at_cap_out = out_dir.join("at_cap");
+    fs::create_dir_all(&at_cap_out).unwrap();
+    let outcome = Encryptor::with_recipients(at_cap)
+        .expect("with_recipients at cap")
+        .write(&input, &at_cap_out, |_| {})
+        .expect("encrypt at exactly the default cap must succeed");
+    assert!(outcome.output_path.exists());
+}
+
+/// Default `Encryptor::kdf_params(P)` with `P.mem_cost > KdfLimit::default()`
+/// rejects at write time before Argon2id runs. The matching opt-in
+/// path is pinned by [`encryptor_kdf_params_at_kdf_limit_succeeds`].
+#[test]
+fn encryptor_kdf_params_above_default_rejects_with_default_kdf_limit() {
+    let work = fresh_workspace("kdf_above_default_rejects");
+    let input = work.join("data.txt");
+    fs::write(&input, b"x").unwrap();
+    let out_dir = work.join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+
+    // mem_cost = default + 1 KiB — minimal overflow, still well
+    // within `KdfParams::MAX_MEM_COST`, so the writer-side cap check
+    // is the only relevant gate (no structural validation runs on
+    // writer-supplied params).
+    let default_limit = KdfLimit::default();
+    let oversized_params = KdfParams {
+        mem_cost: default_limit.max_mem_cost_kib + 1,
+        time_cost: 4,
+        lanes: 4,
+    };
+    let result = Encryptor::with_passphrase(pass())
+        .kdf_params(oversized_params)
+        .write(&input, &out_dir, |_| {});
+    match result {
+        Err(CryptoError::KdfResourceCapExceeded {
+            mem_cost_kib,
+            local_cap_kib,
+        }) => {
+            assert_eq!(mem_cost_kib, oversized_params.mem_cost);
+            assert_eq!(local_cap_kib, default_limit.max_mem_cost_kib);
+        }
+        other => panic!("expected KdfResourceCapExceeded, got {other:?}"),
+    }
+}
+
+/// `Encryptor::kdf_params(P).kdf_limit(L)` with `P.mem_cost <= L` is
+/// accepted by the writer, the resulting `.fcr` round-trips under a
+/// matching reader-side `kdf_limit`, and the cap check uses `>`
+/// (boundary inclusive) — `mem_cost == max_mem_cost_kib` succeeds.
+///
+/// The test deliberately uses `TEST_FAST_KDF_MEM_COST` (8 MiB) so the
+/// real Argon2id run inside the assertion stays fast; the same
+/// boundary semantics apply at any `mem_cost` the writer might
+/// configure.
+#[test]
+fn encryptor_kdf_params_at_kdf_limit_succeeds() {
+    let work = fresh_workspace("kdf_at_limit_succeeds");
+    let input = work.join("data.txt");
+    fs::write(&input, b"hello").unwrap();
+    let out_dir = work.join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+
+    // Boundary: kdf_limit at exactly fast-KDF mem_cost. Cap check
+    // (`mem_cost > max_mem_cost_kib`) is `false`, so the encrypt
+    // proceeds into a real (fast) Argon2id run.
+    let exact = KdfLimit::new(TEST_FAST_KDF_MEM_COST);
+    let outcome = fast_passphrase_encryptor(pass())
+        .kdf_limit(exact)
+        .write(&input, &out_dir, |_| {})
+        .expect("encrypt with kdf_limit at boundary");
+
+    // Round-trip under matching reader settings.
+    let restore = work.join("restored");
+    fs::create_dir_all(&restore).unwrap();
+    let decrypted = match Decryptor::open(&outcome.output_path).expect("open") {
+        Decryptor::Passphrase(d) => d
+            .kdf_limit(exact)
+            .decrypt(pass(), &restore, |_| {})
+            .expect("decrypt"),
+        _ => panic!("expected passphrase decryptor"),
+    };
+    assert_eq!(fs::read(decrypted.output_path).unwrap(), b"hello");
+}
+
+/// Default `KeyPairGenerator::kdf_params(P)` with
+/// `P.mem_cost > KdfLimit::default()` rejects at write time before
+/// Argon2id runs.
+#[test]
+fn keypair_generator_kdf_params_above_default_rejects_with_default_kdf_limit() {
+    let work = fresh_workspace("keypair_kdf_above_default_rejects");
+    let keys = work.join("keys");
+    fs::create_dir_all(&keys).unwrap();
+
+    let default_limit = KdfLimit::default();
+    let oversized_params = KdfParams {
+        mem_cost: default_limit.max_mem_cost_kib + 1,
+        time_cost: 4,
+        lanes: 4,
+    };
+    let result = KeyPairGenerator::with_passphrase(pass())
+        .kdf_params(oversized_params)
+        .write(&keys, |_| {});
+    match result {
+        Err(CryptoError::KdfResourceCapExceeded {
+            mem_cost_kib,
+            local_cap_kib,
+        }) => {
+            assert_eq!(mem_cost_kib, oversized_params.mem_cost);
+            assert_eq!(local_cap_kib, default_limit.max_mem_cost_kib);
+        }
+        other => panic!("expected KdfResourceCapExceeded, got {other:?}"),
+    }
+}
+
+/// `KeyPairGenerator::kdf_params(P).kdf_limit(L)` with
+/// `P.mem_cost <= L` produces a `private.key` whose unlock under a
+/// matching `RecipientDecryptor::kdf_limit(L)` succeeds.
+#[test]
+fn keypair_generator_kdf_params_at_kdf_limit_succeeds() {
+    let work = fresh_workspace("keypair_kdf_at_limit_succeeds");
+    let keys = work.join("keys");
+    fs::create_dir_all(&keys).unwrap();
+
+    let exact = KdfLimit::new(TEST_FAST_KDF_MEM_COST);
+    let kg = fast_keypair_generator(pass())
+        .kdf_limit(exact)
+        .write(&keys, |_| {})
+        .expect("keygen with kdf_limit at boundary");
+
+    // Encrypt to that key with default Encryptor (X25519 path
+    // doesn't run Argon2id), then decrypt with the matching
+    // RecipientDecryptor::kdf_limit so the private.key unlock
+    // accepts the elevated mem_cost authenticated in the cleartext.
+    let input = work.join("data.txt");
+    fs::write(&input, b"x25519 round-trip via raised kdf").unwrap();
+    let out_dir = work.join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+    let outcome = Encryptor::with_recipient(PublicKey::from_key_file(&kg.public_key_path))
+        .write(&input, &out_dir, |_| {})
+        .expect("encrypt");
+
+    let restore = work.join("restored");
+    fs::create_dir_all(&restore).unwrap();
+    let decrypted = match Decryptor::open(&outcome.output_path).expect("open") {
+        Decryptor::Recipient(d) => d
+            .kdf_limit(exact)
+            .decrypt(
+                PrivateKey::from_key_file(&kg.private_key_path),
+                pass(),
+                &restore,
+                |_| {},
+            )
+            .expect("decrypt"),
+        _ => panic!("expected recipient decryptor"),
+    };
+    assert_eq!(
+        fs::read(decrypted.output_path).unwrap(),
+        b"x25519 round-trip via raised kdf"
+    );
 }

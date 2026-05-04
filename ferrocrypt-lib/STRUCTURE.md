@@ -743,6 +743,12 @@ impl Encryptor {
 
     pub fn archive_limits(self, limits: ArchiveLimits) -> Self;
 
+    pub fn header_read_limits(self, limits: HeaderReadLimits) -> Self;
+
+    pub fn kdf_params(self, params: KdfParams) -> Self;
+
+    pub fn kdf_limit(self, limit: KdfLimit) -> Self;
+
     pub fn write(
         self,
         input: impl AsRef<Path>,
@@ -760,6 +766,25 @@ Rules:
 - Recipient mixing is checked during construction.
 - Empty recipient lists reject immediately.
 - The API remains path-based because FerroCrypt security guarantees depend on archive preflight, streaming encryption, staging, and atomic finalization.
+- **Symmetric-default writer caps.** A default-configured `Encryptor` produces `.fcr` files a default-configured `Decryptor` can read. `write` enforces this at write time via the same `enforce_*` helpers the reader uses (single source of truth per cap — see "Centralized cap enforcement" below):
+  - `recipients.len() <= header_read_limits.max_recipient_count` (default 64). Lists above the cap reject with `CryptoError::RecipientCountCapExceeded`. To go above, the caller raises both [`Encryptor::header_read_limits`] AND the matching reader-side [`Decryptor::open_with_limits`] / decryptor `header_read_limits`.
+  - For the passphrase path, `kdf_params.mem_cost <= kdf_limit.max_mem_cost_kib` (default 1 GiB). Above-default `mem_cost` rejects with `CryptoError::KdfResourceCapExceeded`. To go above, the caller raises both [`Encryptor::kdf_limit`] AND the matching [`PassphraseDecryptor::kdf_limit`].
+  - The X25519 path never runs Argon2id during encrypt, so `kdf_limit` has no effect on `with_recipient` / `with_recipients` flows.
+  - Cap checks fire after `validate_passphrase` and before any filesystem syscall or KDF, so misconfiguration surfaces fast.
+
+### Centralized cap enforcement
+
+Every per-cap `if value > cap { return Err(...) }` lives in **one** method on the type that owns the cap. Both reader and writer call the same helper, so a cap value, its diagnostic, and its check semantics cannot drift.
+
+| Cap | Source of truth (constant) | Enforcement helper | Reader call site | Writer call site |
+|---|---|---|---|---|
+| `prefix.header_len` | `format::HEADER_LEN_LOCAL_CAP_DEFAULT` / `HeaderReadLimits::HEADER_LEN_DEFAULT` | `HeaderReadLimits::enforce_header_len` | `container::read_encrypted_header` | n/a — v1 native recipient bodies (104 / 116 B) keep the writer's `header_len` ≪ the default cap; a future fat-recipient mix calls the same helper before flushing the header |
+| `header_fixed.recipient_count` | `format::RECIPIENT_COUNT_LOCAL_CAP_DEFAULT` / `HeaderReadLimits::RECIPIENT_COUNT_DEFAULT` | `HeaderReadLimits::enforce_recipient_count` | `container::read_encrypted_header` | `Encryptor::write` (writer-side preflight against `recipients.len()`) |
+| Per-entry `body_len` | `format::BODY_LEN_LOCAL_CAP_DEFAULT` / `HeaderReadLimits::RECIPIENT_BODY_LEN_DEFAULT` | inline in `RecipientEntry::parse_one` (reader-only — `recipient/entry.rs` sits below `container.rs` in the dep graph and cannot import [`HeaderReadLimits`] without a cycle; cap value still has a single source of truth) | `RecipientEntry::parse_one` | n/a — native bodies (104 / 116 B) sit far under the default; a future fat-body recipient adds a writer-side preflight then |
+| Argon2id `mem_cost` | `KdfParams::DEFAULT_MEM_COST` / `KdfLimit::default()` | `KdfParams::enforce_limit` (consume-and-return; discard the returned `Self` when only the side-effect is wanted) | `KdfParams::from_bytes` (calls into `enforce_limit` after structural parse) | `Encryptor::write`, `KeyPairGenerator::write` |
+| Archive `max_entry_count`, `max_total_plaintext_bytes`, `max_path_depth` | `archive::limits::ArchiveLimits` defaults | `archive::limits::enforce_per_entry_caps`, `archive::limits::enforce_total_bytes_cap` | `archive::decode::extract_entries` (both arms) | `archive::encode::archive` (recursive walker) |
+
+Adding a new cap = add the field on the limit type, add one `enforce_*` method (or extend `KdfLimit` analogously), call it from both reader and writer call sites. The compiler can't let you forget either side because the call sites are by name.
 
 ### 9.2 Decryption
 
@@ -834,6 +859,22 @@ pub fn generate_key_pair(
     passphrase: SecretString,
     on_event: impl Fn(&ProgressEvent),
 ) -> Result<KeyGenOutcome, CryptoError>;
+
+pub struct KeyPairGenerator { /* opaque */ }
+
+impl KeyPairGenerator {
+    pub fn with_passphrase(passphrase: SecretString) -> Self;
+
+    pub fn kdf_params(self, params: KdfParams) -> Self;
+
+    pub fn kdf_limit(self, limit: KdfLimit) -> Self;
+
+    pub fn write(
+        self,
+        output_dir: impl AsRef<Path>,
+        on_event: impl Fn(&ProgressEvent),
+    ) -> Result<KeyGenOutcome, CryptoError>;
+}
 ```
 
 Ownership split:
@@ -841,6 +882,8 @@ Ownership split:
 - X25519 key generation lives in `recipient/native/x25519.rs`.
 - Key serialization lives in `key/`.
 - Key-file staging lives in `key/files.rs` and `fs/`.
+
+`KeyPairGenerator` mirrors `Encryptor`'s symmetric-default cap rule for the passphrase that seals `private.key`: `kdf_params.mem_cost <= kdf_limit.max_mem_cost_kib` (default 1 GiB) is enforced at `write` time before Argon2id runs. Above-default `mem_cost` rejects with `CryptoError::KdfResourceCapExceeded`; the unlocking [`RecipientDecryptor`] must be configured via [`RecipientDecryptor::kdf_limit`] with a matching [`KdfLimit`].
 
 ### 9.5 Mode detection
 

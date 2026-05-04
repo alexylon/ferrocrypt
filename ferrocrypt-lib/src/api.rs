@@ -103,6 +103,8 @@ pub struct Encryptor {
     save_as: Option<PathBuf>,
     archive_limits: Option<ArchiveLimits>,
     kdf_params: Option<KdfParams>,
+    header_read_limits: Option<HeaderReadLimits>,
+    kdf_limit: Option<KdfLimit>,
 }
 
 #[derive(Debug)]
@@ -124,6 +126,8 @@ impl Encryptor {
             save_as: None,
             archive_limits: None,
             kdf_params: None,
+            header_read_limits: None,
+            kdf_limit: None,
         }
     }
 
@@ -137,6 +141,8 @@ impl Encryptor {
             save_as: None,
             archive_limits: None,
             kdf_params: None,
+            header_read_limits: None,
+            kdf_limit: None,
         }
     }
 
@@ -145,6 +151,20 @@ impl Encryptor {
     /// Each recipient entry wraps the same per-file `file_key`
     /// independently, so any listed recipient can decrypt the resulting
     /// `.fcr` with their matching private key.
+    ///
+    /// # Default-decrypt round-trip
+    ///
+    /// By default the writer caps `recipients.len()` at the same
+    /// [`HeaderReadLimits::RECIPIENT_COUNT_DEFAULT`] (64) the reader
+    /// applies via [`HeaderReadLimits::default`], so a default-configured
+    /// [`Decryptor::open`] can read every file the default
+    /// `Encryptor` produces. Lists above the default reject with
+    /// [`CryptoError::RecipientCountCapExceeded`] at
+    /// [`Encryptor::write`] time. To produce a file with more
+    /// recipients, the caller MUST opt in via
+    /// [`Encryptor::header_read_limits`] with a raised
+    /// recipient-count limit; the receiving decryptor MUST be opened
+    /// via [`Decryptor::open_with_limits`] with matching limits.
     ///
     /// # Errors
     ///
@@ -166,6 +186,8 @@ impl Encryptor {
             save_as: None,
             archive_limits: None,
             kdf_params: None,
+            header_read_limits: None,
+            kdf_limit: None,
         })
     }
 
@@ -197,8 +219,61 @@ impl Encryptor {
     /// callers with specific tuning needs (e.g. lower-spec embedded
     /// targets) and for in-tree tests via the workspace-internal
     /// `ferrocrypt-test-support` crate.
+    ///
+    /// # Default-decrypt round-trip
+    ///
+    /// `kdf_params.mem_cost` is checked at [`Encryptor::write`] time
+    /// against the writer's [`KdfLimit`] ceiling (defaults to
+    /// [`KdfLimit::default`] = 1 GiB, matching [`KdfParams::default`]).
+    /// `params` whose `mem_cost` exceeds that ceiling reject with
+    /// [`CryptoError::KdfResourceCapExceeded`]. To produce a `.fcr` with
+    /// `mem_cost` above 1 GiB, the caller MUST opt in via
+    /// [`Encryptor::kdf_limit`] with a matching [`KdfLimit`]; the
+    /// decryptor MUST be configured the same way via
+    /// [`PassphraseDecryptor::kdf_limit`] before calling
+    /// [`PassphraseDecryptor::decrypt`].
     pub fn kdf_params(mut self, params: KdfParams) -> Self {
         self.kdf_params = Some(params);
+        self
+    }
+
+    /// Sets the writer-side header limits.
+    ///
+    /// By default the writer caps recipient count at
+    /// [`HeaderReadLimits::RECIPIENT_COUNT_DEFAULT`] so a default
+    /// [`Decryptor::open`] can read every file the default `Encryptor`
+    /// produces. Use this builder to raise the writer's recipient cap;
+    /// the receiving decryptor MUST be opened via
+    /// [`Decryptor::open_with_limits`] with at least the same
+    /// recipient-count limit.
+    ///
+    /// `max_header_len` and `max_recipient_body_len` are accepted for
+    /// API symmetry with the reader but never fire on writer-produced
+    /// files in v1: native recipient bodies (104 / 116 B) and the
+    /// resulting `header_len` are well under both default caps
+    /// ([`HeaderReadLimits::RECIPIENT_BODY_LEN_DEFAULT`] /
+    /// [`HeaderReadLimits::HEADER_LEN_DEFAULT`]).
+    pub fn header_read_limits(mut self, limits: HeaderReadLimits) -> Self {
+        self.header_read_limits = Some(limits);
+        self
+    }
+
+    /// Sets the writer-side ceiling for accepted `kdf_params.mem_cost`.
+    ///
+    /// By default the writer requires
+    /// `kdf_params.mem_cost <= KdfLimit::default().max_mem_cost_kib`
+    /// (1 GiB) so a default [`PassphraseDecryptor`] can unwrap the
+    /// produced `.fcr`. Use this builder together with
+    /// [`Encryptor::kdf_params`] to raise the ceiling; the receiving
+    /// passphrase decryptor MUST be configured via
+    /// [`PassphraseDecryptor::kdf_limit`] with a matching
+    /// [`KdfLimit`].
+    ///
+    /// Has no effect on public-key (`Encryptor::with_recipient` /
+    /// `with_recipients`) flows, which never run Argon2id during
+    /// encryption.
+    pub fn kdf_limit(mut self, limit: KdfLimit) -> Self {
+        self.kdf_limit = Some(limit);
         self
     }
 
@@ -221,6 +296,8 @@ impl Encryptor {
         let input = input.as_ref();
         let output_dir = output_dir.as_ref();
         let archive_limits = self.archive_limits.unwrap_or_default();
+        let header_read_limits = self.header_read_limits.unwrap_or_default();
+        let kdf_limit = self.kdf_limit.unwrap_or_default();
         let save_as = self.save_as.as_deref();
 
         // Cheap caller-supplied invariant first so an empty passphrase
@@ -229,6 +306,26 @@ impl Encryptor {
         if let EncryptorState::Passphrase(p) = &self.state {
             validate_passphrase(p)?;
         }
+
+        // Symmetric-default cap checks via the same `enforce_*`
+        // helpers the reader uses, so default-encrypt and default-
+        // decrypt cannot drift. Adding a new cap = add one method on
+        // the limit type; both sides pick it up.
+        match &self.state {
+            EncryptorState::Recipients(rs) => {
+                // `RECIPIENT_COUNT_MAX = 4096` fits u16; saturating cast
+                // keeps the cap diagnostic honest in the (theoretical)
+                // case of an in-memory list above u16::MAX, while still
+                // surfacing the cap-exceeded variant.
+                let count_u16: u16 = u16::try_from(rs.len()).unwrap_or(u16::MAX);
+                header_read_limits.enforce_recipient_count(count_u16)?;
+            }
+            EncryptorState::Passphrase(_) => {
+                let kdf_params = self.kdf_params.unwrap_or_default();
+                kdf_params.enforce_limit(Some(&kdf_limit))?;
+            }
+        }
+
         archive::validate_encrypt_input(input)?;
 
         let output_path = match self.state {
@@ -537,6 +634,7 @@ impl RecipientDecryptor {
 pub struct KeyPairGenerator {
     passphrase: SecretString,
     kdf_params: Option<KdfParams>,
+    kdf_limit: Option<KdfLimit>,
 }
 
 impl KeyPairGenerator {
@@ -548,6 +646,7 @@ impl KeyPairGenerator {
         Self {
             passphrase,
             kdf_params: None,
+            kdf_limit: None,
         }
     }
 
@@ -560,8 +659,35 @@ impl KeyPairGenerator {
     /// exists for callers with specific tuning needs (e.g. lower-spec
     /// embedded targets) and for in-tree tests via the workspace-internal
     /// `ferrocrypt-test-support` crate.
+    ///
+    /// # Default-decrypt round-trip
+    ///
+    /// `kdf_params.mem_cost` is checked at [`KeyPairGenerator::write`]
+    /// time against the writer's [`KdfLimit`] ceiling (defaults to
+    /// [`KdfLimit::default`] = 1 GiB, matching [`KdfParams::default`]).
+    /// `params` whose `mem_cost` exceeds that ceiling reject with
+    /// [`CryptoError::KdfResourceCapExceeded`]. To produce a
+    /// `private.key` with `mem_cost` above 1 GiB, the caller MUST opt
+    /// in via [`KeyPairGenerator::kdf_limit`] with a matching
+    /// [`KdfLimit`]; the unlocking
+    /// [`RecipientDecryptor`] MUST also be configured the same way via
+    /// [`RecipientDecryptor::kdf_limit`].
     pub fn kdf_params(mut self, params: KdfParams) -> Self {
         self.kdf_params = Some(params);
+        self
+    }
+
+    /// Sets the writer-side ceiling for accepted `kdf_params.mem_cost`.
+    ///
+    /// By default the generator requires
+    /// `kdf_params.mem_cost <= KdfLimit::default().max_mem_cost_kib`
+    /// (1 GiB) so a default [`RecipientDecryptor`] can unlock the
+    /// produced `private.key`. Use this builder together with
+    /// [`KeyPairGenerator::kdf_params`] to raise the ceiling; the
+    /// receiving recipient decryptor MUST be configured via
+    /// [`RecipientDecryptor::kdf_limit`] with a matching [`KdfLimit`].
+    pub fn kdf_limit(mut self, limit: KdfLimit) -> Self {
+        self.kdf_limit = Some(limit);
         self
     }
 
@@ -574,6 +700,12 @@ impl KeyPairGenerator {
     ) -> Result<KeyGenOutcome, CryptoError> {
         validate_passphrase(&self.passphrase)?;
         let kdf_params = self.kdf_params.unwrap_or_default();
+        let kdf_limit = self.kdf_limit.unwrap_or_default();
+        // Symmetric-default cap via the same `KdfParams::enforce_limit`
+        // the reader uses, so a `private.key` produced here is unlocked
+        // by a default `RecipientDecryptor::decrypt`. To go above
+        // default, the caller raises both sides explicitly.
+        kdf_params.enforce_limit(Some(&kdf_limit))?;
         let (private_key_path, public_key_path) = protocol::generate_key_pair(
             &self.passphrase,
             &kdf_params,

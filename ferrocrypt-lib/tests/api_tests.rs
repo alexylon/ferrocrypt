@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
-    CryptoError, Decryptor, Encryptor, FormatDefect, HeaderReadLimits, KdfLimit, KdfParams,
-    KeyPairGenerator, PrivateKey, PublicKey, detect_encryption_mode,
+    CryptoError, Decryptor, Encryptor, FormatDefect, HeaderReadLimits, InvalidKdfParams, KdfLimit,
+    KdfParams, KeyPairGenerator, PrivateKey, PublicKey, detect_encryption_mode,
     detect_encryption_mode_with_limits,
 };
 use ferrocrypt_test_support::{
@@ -649,6 +649,167 @@ fn encryptor_with_recipients_above_default_rejects_without_opt_in() {
     assert!(outcome.output_path.exists());
 }
 
+/// Writer-side `HeaderReadLimits` preflight applies to passphrase files
+/// too, not just public-recipient files. Tightening recipient_count
+/// below the one canonical `argon2id` slot rejects before Argon2id runs,
+/// preventing a file that the same limits would reject on decrypt.
+#[test]
+fn encryptor_passphrase_header_limits_reject_tight_recipient_count() {
+    let work = fresh_workspace("passphrase_header_count_tight");
+    let input = work.join("data.txt");
+    fs::write(&input, b"x").unwrap();
+    let out_dir = work.join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+
+    let tight = HeaderReadLimits::default().max_recipient_count(0);
+    let result = fast_passphrase_encryptor(pass())
+        .header_read_limits(tight)
+        .write(&input, &out_dir, |_| {});
+    match result {
+        Err(CryptoError::RecipientCountCapExceeded {
+            count: 1,
+            local_cap: 0,
+        }) => {}
+        other => panic!("expected RecipientCountCapExceeded(1, 0), got {other:?}"),
+    }
+}
+
+/// Writer-side `HeaderReadLimits::max_recipient_body_len` is enforced
+/// against native body lengths. A caller who tightens below the v1
+/// `argon2id` body length gets the same typed cap error during encrypt
+/// that a reader would later return.
+#[test]
+fn encryptor_passphrase_header_limits_reject_tight_body_len() {
+    let work = fresh_workspace("passphrase_header_body_tight");
+    let input = work.join("data.txt");
+    fs::write(&input, b"x").unwrap();
+    let out_dir = work.join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+
+    let tight = HeaderReadLimits::default().max_recipient_body_len(1);
+    let result = fast_passphrase_encryptor(pass())
+        .header_read_limits(tight)
+        .write(&input, &out_dir, |_| {});
+    match result {
+        Err(CryptoError::RecipientBodyCapExceeded {
+            body_len,
+            local_cap,
+        }) => {
+            assert!(body_len > local_cap);
+            assert_eq!(local_cap, 1);
+        }
+        other => panic!("expected RecipientBodyCapExceeded, got {other:?}"),
+    }
+}
+
+/// Writer-side `HeaderReadLimits::max_header_len` is enforced against
+/// the exact v1 header length the writer will emit. Tightening below
+/// that shape rejects before any output is written.
+#[test]
+fn encryptor_recipient_header_limits_reject_tight_header_len() {
+    let work = fresh_workspace("recipient_header_len_tight");
+    let keys = work.join("keys");
+    fs::create_dir_all(&keys).unwrap();
+    let kg = generate_key_pair(&keys, pass(), |_| {}).expect("keygen");
+    let input = work.join("data.txt");
+    fs::write(&input, b"x").unwrap();
+    let out_dir = work.join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+
+    let tight = HeaderReadLimits::default().max_header_len(32);
+    let result = Encryptor::with_recipient(PublicKey::from_key_file(&kg.public_key_path))
+        .header_read_limits(tight)
+        .write(&input, &out_dir, |_| {});
+    match result {
+        Err(CryptoError::HeaderLenCapExceeded {
+            header_len,
+            local_cap: 32,
+        }) => {
+            assert!(header_len > 32);
+        }
+        other => panic!("expected HeaderLenCapExceeded, got {other:?}"),
+    }
+}
+
+/// Writer-side KDF validation now mirrors reader-side structural rules,
+/// not just the local memory cap. A `time_cost` accepted by upstream
+/// Argon2 but outside FerroCrypt v1's structural range rejects at write
+/// time instead of producing an undecryptable `.fcr`.
+#[test]
+fn encryptor_kdf_params_rejects_structural_time_cost() {
+    let work = fresh_workspace("kdf_structural_time_rejects");
+    let input = work.join("data.txt");
+    fs::write(&input, b"x").unwrap();
+    let out_dir = work.join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+
+    let invalid = KdfParams {
+        mem_cost: TEST_FAST_KDF_MEM_COST,
+        time_cost: 13,
+        lanes: 4,
+    };
+    let result = Encryptor::with_passphrase(pass())
+        .kdf_params(invalid)
+        .write(&input, &out_dir, |_| {});
+    match result {
+        Err(CryptoError::InvalidKdfParams(InvalidKdfParams::TimeCost(13))) => {}
+        other => panic!("expected InvalidKdfParams::TimeCost(13), got {other:?}"),
+    }
+}
+
+/// Even with an explicitly raised writer-side `KdfLimit`, structural
+/// `mem_cost` above FerroCrypt's v1 maximum must reject before Argon2id
+/// runs. This prevents the resource-limit opt-in from bypassing the
+/// file-format structural ceiling.
+#[test]
+fn encryptor_kdf_params_rejects_structural_mem_cost_even_with_raised_limit() {
+    let work = fresh_workspace("kdf_structural_mem_rejects");
+    let input = work.join("data.txt");
+    fs::write(&input, b"x").unwrap();
+    let out_dir = work.join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+
+    let invalid_mem = 3 * 1024 * 1024;
+    let invalid = KdfParams {
+        mem_cost: invalid_mem,
+        time_cost: 4,
+        lanes: 4,
+    };
+    let result = Encryptor::with_passphrase(pass())
+        .kdf_params(invalid)
+        .kdf_limit(KdfLimit::new(4 * 1024 * 1024))
+        .write(&input, &out_dir, |_| {});
+    match result {
+        Err(CryptoError::InvalidKdfParams(InvalidKdfParams::MemoryCost(n))) => {
+            assert_eq!(n, invalid_mem);
+        }
+        other => panic!("expected InvalidKdfParams::MemoryCost, got {other:?}"),
+    }
+}
+
+/// Key-pair generation uses the same writer-side KDF validator as
+/// passphrase `.fcr` encryption. Invalid `lanes` rejects before a
+/// `private.key` containing reader-rejected KDF params can be written.
+#[test]
+fn keypair_generator_kdf_params_rejects_structural_lanes() {
+    let work = fresh_workspace("keypair_kdf_structural_lanes_rejects");
+    let keys = work.join("keys");
+    fs::create_dir_all(&keys).unwrap();
+
+    let invalid = KdfParams {
+        mem_cost: TEST_FAST_KDF_MEM_COST,
+        time_cost: 1,
+        lanes: 9,
+    };
+    let result = KeyPairGenerator::with_passphrase(pass())
+        .kdf_params(invalid)
+        .write(&keys, |_| {});
+    match result {
+        Err(CryptoError::InvalidKdfParams(InvalidKdfParams::Parallelism(9))) => {}
+        other => panic!("expected InvalidKdfParams::Parallelism(9), got {other:?}"),
+    }
+}
+
 /// Default `Encryptor::kdf_params(P)` with `P.mem_cost > KdfLimit::default()`
 /// rejects at write time before Argon2id runs. The matching opt-in
 /// path is pinned by [`encryptor_kdf_params_at_kdf_limit_succeeds`].
@@ -661,9 +822,8 @@ fn encryptor_kdf_params_above_default_rejects_with_default_kdf_limit() {
     fs::create_dir_all(&out_dir).unwrap();
 
     // mem_cost = default + 1 KiB — minimal overflow, still well
-    // within `KdfParams::MAX_MEM_COST`, so the writer-side cap check
-    // is the only relevant gate (no structural validation runs on
-    // writer-supplied params).
+    // within `KdfParams::MAX_MEM_COST`, so this exercises the
+    // writer-side resource cap after structural validation succeeds.
     let default_limit = KdfLimit::default();
     let oversized_params = KdfParams {
         mem_cost: default_limit.max_mem_cost_kib + 1,

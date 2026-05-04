@@ -86,6 +86,12 @@ const KDF_TIME_COST_OFFSET: usize = KDF_MEM_COST_OFFSET + size_of::<u32>();
 const KDF_LANES_OFFSET: usize = KDF_TIME_COST_OFFSET + size_of::<u32>();
 const _: () = assert!(KDF_LANES_OFFSET + size_of::<u32>() == KDF_PARAMS_SIZE);
 
+/// Argon2 spec constraint: `mem_cost` (in KiB) must be at least
+/// `ARGON2_MIN_MEM_COST_PER_LANE * lanes` for the per-lane workspace
+/// to be sized correctly. Values below this floor force Argon2 into
+/// a degraded fallback configuration. Used by [`KdfParams::validate_structural`].
+const ARGON2_MIN_MEM_COST_PER_LANE: u32 = 8;
+
 impl KdfParams {
     pub(crate) const DEFAULT_MEM_COST: u32 = 1_048_576; // 1 GiB
     const DEFAULT_TIME_COST: u32 = 4;
@@ -105,13 +111,41 @@ impl KdfParams {
     const MAX_TIME_COST: u32 = 12;
     const MAX_LANES: u32 = 8;
 
-    /// Structural-only parse: validates lanes, time_cost, and mem_cost
-    /// against the v1 absolute structural bounds (`MAX_LANES`,
-    /// `MAX_TIME_COST`, `MAX_MEM_COST`). Does **not** apply any caller
-    /// resource policy — call [`enforce_limit`](Self::enforce_limit) on
-    /// the result for that. `pub(crate)` deliberately: external callers
-    /// must go through [`from_bytes`](Self::from_bytes), which always
-    /// applies the policy gate, so a missed call cannot bypass the cap.
+    /// Field-level structural validation against v1 absolute bounds
+    /// (`MAX_LANES`, `MAX_TIME_COST`, `MAX_MEM_COST`, plus the Argon2
+    /// `mem_cost >= ARGON2_MIN_MEM_COST_PER_LANE * lanes` floor).
+    /// Shared by [`from_bytes_structural`](Self::from_bytes_structural)
+    /// (after parsing wire bytes) and
+    /// [`validate_for_write`](Self::validate_for_write) (against
+    /// caller-supplied params); single source of truth for the rule
+    /// set. Does **not** apply any caller resource policy.
+    fn validate_structural(&self) -> Result<(), CryptoError> {
+        if self.lanes == 0 || self.lanes > Self::MAX_LANES {
+            return Err(CryptoError::InvalidKdfParams(
+                InvalidKdfParams::Parallelism(self.lanes),
+            ));
+        }
+        let min_mem_cost = ARGON2_MIN_MEM_COST_PER_LANE * self.lanes;
+        if self.mem_cost < min_mem_cost || self.mem_cost > Self::MAX_MEM_COST {
+            return Err(CryptoError::InvalidKdfParams(InvalidKdfParams::MemoryCost(
+                self.mem_cost,
+            )));
+        }
+        if self.time_cost == 0 || self.time_cost > Self::MAX_TIME_COST {
+            return Err(CryptoError::InvalidKdfParams(InvalidKdfParams::TimeCost(
+                self.time_cost,
+            )));
+        }
+        Ok(())
+    }
+
+    /// Structural-only parse: parses wire bytes into a [`KdfParams`]
+    /// and runs [`validate_structural`](Self::validate_structural). Does
+    /// **not** apply any caller resource policy — call
+    /// [`enforce_limit`](Self::enforce_limit) on the result for that.
+    /// `pub(crate)` deliberately: external callers must go through
+    /// [`from_bytes`](Self::from_bytes), which always applies the
+    /// policy gate, so a missed call cannot bypass the cap.
     pub(crate) fn from_bytes_structural(
         bytes: &[u8; KDF_PARAMS_SIZE],
     ) -> Result<Self, CryptoError> {
@@ -120,22 +154,7 @@ impl KdfParams {
             time_cost: read_u32_be(bytes, KDF_TIME_COST_OFFSET),
             lanes: read_u32_be(bytes, KDF_LANES_OFFSET),
         };
-        if params.lanes == 0 || params.lanes > Self::MAX_LANES {
-            return Err(CryptoError::InvalidKdfParams(
-                InvalidKdfParams::Parallelism(params.lanes),
-            ));
-        }
-        let min_mem_cost = 8 * params.lanes;
-        if params.mem_cost < min_mem_cost || params.mem_cost > Self::MAX_MEM_COST {
-            return Err(CryptoError::InvalidKdfParams(InvalidKdfParams::MemoryCost(
-                params.mem_cost,
-            )));
-        }
-        if params.time_cost == 0 || params.time_cost > Self::MAX_TIME_COST {
-            return Err(CryptoError::InvalidKdfParams(InvalidKdfParams::TimeCost(
-                params.time_cost,
-            )));
-        }
+        params.validate_structural()?;
         Ok(params)
     }
 
@@ -165,6 +184,20 @@ impl KdfParams {
         limit: Option<&KdfLimit>,
     ) -> Result<Self, CryptoError> {
         Self::from_bytes_structural(bytes)?.enforce_limit(limit)
+    }
+
+    /// Validates caller-supplied writer parameters against the same v1
+    /// structural bounds the reader enforces, then applies the caller's
+    /// resource policy cap. This is the writer-side counterpart to
+    /// [`from_bytes`](Self::from_bytes): public builders accept a raw
+    /// [`KdfParams`] value, so they must run the same structural rules
+    /// before serialising it into an `argon2id` recipient body or
+    /// `private.key` header. Otherwise a caller could produce an artefact
+    /// whose KDF fields Argon2 itself accepts but the FerroCrypt reader
+    /// rejects before attempting unlock.
+    pub(crate) fn validate_for_write(self, limit: Option<&KdfLimit>) -> Result<Self, CryptoError> {
+        self.validate_structural()?;
+        self.enforce_limit(limit)
     }
 
     pub fn hash_passphrase(

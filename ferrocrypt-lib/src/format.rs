@@ -382,29 +382,39 @@ impl HeaderFixed {
 
     /// Parses and validates a 31-byte `header_fixed`.
     ///
-    /// Validates per `FORMAT.md` §3.2 structural limits:
+    /// Validates per `FORMAT.md` §3.2 structural limits via
+    /// [`Self::validate_structural`].
+    pub fn parse(bytes: &[u8; HEADER_FIXED_SIZE], header_len: u32) -> Result<Self, CryptoError> {
+        let mut stream_nonce = [0u8; STREAM_NONCE_SIZE];
+        stream_nonce.copy_from_slice(&bytes[HEADER_FIXED_STREAM_NONCE_OFFSET..HEADER_FIXED_SIZE]);
+        let parsed = Self {
+            header_flags: read_u16_be(bytes, HEADER_FIXED_FLAGS_OFFSET),
+            recipient_count: read_u16_be(bytes, HEADER_FIXED_RECIPIENT_COUNT_OFFSET),
+            recipient_entries_len: read_u32_be(bytes, HEADER_FIXED_RECIPIENT_ENTRIES_LEN_OFFSET),
+            ext_len: read_u32_be(bytes, HEADER_FIXED_EXT_LEN_OFFSET),
+            stream_nonce,
+        };
+        parsed.validate_structural(header_len)?;
+        Ok(parsed)
+    }
+
+    /// Single source of truth for `header_fixed` structural validation.
+    /// Called by [`Self::parse`] (after parsing wire bytes) and by the
+    /// writer's `container::build_encrypted_header` (after constructing
+    /// the field values from typed inputs) so the same rules — same
+    /// helpers, same error variants — fire on both sides.
+    ///
+    /// Rules per `FORMAT.md` §3.2:
     /// - `header_flags == 0`;
     /// - `1 <= recipient_count <= RECIPIENT_COUNT_MAX`;
     /// - `ext_len <= EXT_LEN_MAX`;
     /// - `recipient_entries_len + ext_len + HEADER_FIXED_SIZE == header_len`.
-    pub fn parse(bytes: &[u8; HEADER_FIXED_SIZE], header_len: u32) -> Result<Self, CryptoError> {
-        let header_flags = read_u16_be(bytes, HEADER_FIXED_FLAGS_OFFSET);
-        check_header_flags(header_flags)?;
-        let recipient_count = read_u16_be(bytes, HEADER_FIXED_RECIPIENT_COUNT_OFFSET);
-        check_recipient_count(recipient_count)?;
-        let recipient_entries_len = read_u32_be(bytes, HEADER_FIXED_RECIPIENT_ENTRIES_LEN_OFFSET);
-        let ext_len = read_u32_be(bytes, HEADER_FIXED_EXT_LEN_OFFSET);
-        check_ext_len(ext_len)?;
-        check_header_section_lengths(recipient_entries_len, ext_len, header_len)?;
-        let mut stream_nonce = [0u8; STREAM_NONCE_SIZE];
-        stream_nonce.copy_from_slice(&bytes[HEADER_FIXED_STREAM_NONCE_OFFSET..HEADER_FIXED_SIZE]);
-        Ok(Self {
-            header_flags,
-            recipient_count,
-            recipient_entries_len,
-            ext_len,
-            stream_nonce,
-        })
+    pub(crate) fn validate_structural(&self, header_len: u32) -> Result<(), CryptoError> {
+        check_header_flags(self.header_flags)?;
+        check_recipient_count(self.recipient_count)?;
+        check_ext_len(self.ext_len)?;
+        check_header_section_lengths(self.recipient_entries_len, self.ext_len, header_len)?;
+        Ok(())
     }
 }
 
@@ -430,7 +440,9 @@ fn check_recipient_count(count: u16) -> Result<(), CryptoError> {
 
 fn check_ext_len(ext_len: u32) -> Result<(), CryptoError> {
     if ext_len > EXT_LEN_MAX {
-        return Err(CryptoError::InvalidFormat(FormatDefect::MalformedHeader));
+        return Err(CryptoError::InvalidFormat(FormatDefect::ExtTooLarge {
+            len: ext_len,
+        }));
     }
     Ok(())
 }
@@ -766,8 +778,9 @@ mod tests {
         };
         let total = HEADER_FIXED_SIZE as u32 + 100 + (EXT_LEN_MAX + 1);
         match HeaderFixed::parse(&hf.to_bytes(), total) {
-            Err(CryptoError::InvalidFormat(FormatDefect::MalformedHeader)) => {}
-            other => panic!("expected MalformedHeader, got {other:?}"),
+            Err(CryptoError::InvalidFormat(FormatDefect::ExtTooLarge { len }))
+                if len == EXT_LEN_MAX + 1 => {}
+            other => panic!("expected ExtTooLarge({}), got {other:?}", EXT_LEN_MAX + 1),
         }
     }
 

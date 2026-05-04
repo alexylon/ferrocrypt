@@ -181,17 +181,35 @@ impl HeaderReadLimits {
         }
         Ok(())
     }
+
+    /// Single source of truth for the per-recipient `body_len` cap
+    /// check. The reader applies this inside `RecipientEntry::parse_one`
+    /// (to avoid a dependency cycle); writer-side preflight calls this
+    /// method against the canonical native body lengths before any
+    /// wrapping/KDF work runs.
+    pub(crate) fn enforce_recipient_body_len(&self, body_len: u32) -> Result<(), CryptoError> {
+        if body_len > self.max_recipient_body_len {
+            return Err(CryptoError::RecipientBodyCapExceeded {
+                body_len,
+                local_cap: self.max_recipient_body_len,
+            });
+        }
+        Ok(())
+    }
 }
 
-// `max_recipient_body_len` is enforced inline inside
-// `RecipientEntry::parse_one` — that module sits below `container` in
+// Reader-side `max_recipient_body_len` enforcement is inline inside
+// `RecipientEntry::parse_one`: that module sits below `container` in
 // the dependency graph and cannot import [`HeaderReadLimits`] without
 // a cycle, so the cap is plumbed through as a `u32` parameter and the
 // typed [`CryptoError::RecipientBodyCapExceeded`] is constructed
-// there. The cap value still has a single source of truth
+// there. Writer-side preflight calls
+// [`HeaderReadLimits::enforce_recipient_body_len`] directly against the
+// canonical native body lengths before any wrapping/KDF work runs. The
+// cap value still has a single source of truth
 // ([`HeaderReadLimits::max_recipient_body_len`] +
-// [`HeaderReadLimits::RECIPIENT_BODY_LEN_DEFAULT`]); only the check
-// site is in `recipient/entry.rs`.
+// [`HeaderReadLimits::RECIPIENT_BODY_LEN_DEFAULT`]); only the
+// reader-side check site is in `recipient/entry.rs`.
 
 /// A structurally parsed `.fcr` header. Authenticity has NOT been checked;
 /// the caller must call [`format::verify_header_mac`] with a `header_key`
@@ -379,44 +397,19 @@ pub(crate) fn build_encrypted_header(
     payload_key: PayloadKey,
     header_key: &HeaderKey,
 ) -> Result<BuiltEncryptedHeader, CryptoError> {
-    if recipient_entries.is_empty() {
-        return Err(CryptoError::InvalidFormat(
-            FormatDefect::RecipientCountOutOfRange { count: 0 },
-        ));
-    }
-
-    let entries_count = recipient_entries.len();
-    if entries_count > format::RECIPIENT_COUNT_MAX as usize {
-        return Err(CryptoError::InvalidFormat(
-            FormatDefect::RecipientCountOutOfRange {
-                // Saturate to u16::MAX for the diagnostic when the in-memory
-                // count actually exceeds the wire field width (impossible on
-                // disk, but the Rust caller handed us a Vec).
-                count: entries_count.try_into().unwrap_or(u16::MAX),
-            },
-        ));
-    }
-    // Bounded above by `RECIPIENT_COUNT_MAX` (u16). Cast is safe.
-    let recipient_count = entries_count as u16;
-
     let mut entries_bytes = Vec::new();
     for entry in recipient_entries {
         entries_bytes.extend_from_slice(&entry.to_bytes());
     }
-    let recipient_entries_len: u32 = entries_bytes
-        .len()
-        .try_into()
-        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedHeader))?;
-
-    let ext_len: u32 = ext_bytes
-        .len()
-        .try_into()
-        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedHeader))?;
-    if ext_len > format::EXT_LEN_MAX {
-        return Err(CryptoError::InvalidFormat(FormatDefect::ExtTooLarge {
-            len: ext_len,
-        }));
-    }
+    // Saturating casts: structural-range rejections (`count > MAX`,
+    // `ext_len > MAX`, `count == 0`) are emitted by
+    // `HeaderFixed::validate_structural` below. Casts at u32::MAX /
+    // u16::MAX always trip the corresponding `check_*` helper, so the
+    // saturating fallback is honest about "too big to represent" while
+    // still surfacing the typed cap-exceeded variant.
+    let recipient_count: u16 = recipient_entries.len().try_into().unwrap_or(u16::MAX);
+    let recipient_entries_len: u32 = entries_bytes.len().try_into().unwrap_or(u32::MAX);
+    let ext_len: u32 = ext_bytes.len().try_into().unwrap_or(u32::MAX);
 
     let header_len_u64 = (HEADER_FIXED_SIZE as u64)
         .checked_add(recipient_entries_len as u64)
@@ -428,8 +421,6 @@ pub(crate) fn build_encrypted_header(
         })
     })?;
 
-    let prefix_bytes = Prefix::build_encrypted(header_len)?;
-
     let fixed = HeaderFixed {
         header_flags: 0,
         recipient_count,
@@ -437,6 +428,13 @@ pub(crate) fn build_encrypted_header(
         ext_len,
         stream_nonce,
     };
+    // Single source of truth for `header_fixed` structural rules,
+    // shared with the reader's `HeaderFixed::parse`. Catches:
+    // `recipient_count == 0` / `> RECIPIENT_COUNT_MAX`, `ext_len >
+    // EXT_LEN_MAX`, and section-length consistency in one call.
+    fixed.validate_structural(header_len)?;
+
+    let prefix_bytes = Prefix::build_encrypted(header_len)?;
     let fixed_bytes = fixed.to_bytes();
 
     let mut header_bytes = Vec::with_capacity(header_len as usize);

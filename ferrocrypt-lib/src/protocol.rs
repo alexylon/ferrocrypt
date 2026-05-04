@@ -104,7 +104,7 @@ pub(crate) trait IdentityScheme {
 /// entries whose type matches `R::TYPE_NAME`. Every entry seals the same
 /// per-file `file_key` for its respective recipient.
 ///
-/// Defense-in-depth checks:
+/// Defense-in-depth checks (run by this function regardless of caller):
 ///
 /// - `recipients` MUST be non-empty (the public API enforces this at
 ///   construction time; the orchestrator double-checks).
@@ -113,6 +113,25 @@ pub(crate) trait IdentityScheme {
 ///   single passphrase, but the assertion stops a future caller bypass
 ///   from emitting an `argon2id` file with two bodies (`FORMAT.md` §4.1
 ///   forbids it).
+///
+/// # Caller obligations
+///
+/// This function is `pub(crate)` and **does not** enforce
+/// [`crate::HeaderReadLimits`] caps (`max_recipient_count`,
+/// `max_recipient_body_len`, `max_header_len`) or run
+/// [`crate::KdfParams`] structural / resource-cap validation against
+/// caller-supplied passphrase parameters. Those checks are the
+/// **api-layer's** responsibility and live in
+/// [`crate::api::Encryptor::write`] via
+/// `api::preflight_header_write_limits` and
+/// [`crate::KdfParams::validate_for_write`]. The same applies to the
+/// non-empty-passphrase check in [`crate::api::validate_passphrase`].
+///
+/// Any new in-crate caller of `protocol::encrypt` MUST run those
+/// preflight steps first (or accept the resulting symmetry break with
+/// the default reader). Tests in `protocol.rs::tests` deliberately
+/// bypass them to construct forward-compat fixtures; production
+/// callers must not.
 pub(crate) fn encrypt<R: RecipientScheme>(
     recipients: &[R],
     archive_limits: ArchiveLimits,
@@ -378,6 +397,20 @@ fn failure_for(mode: EncryptionMode, type_name: &'static str, had_unwrap: bool) 
 /// - `public.key` is a UTF-8 text file containing the canonical
 ///   `fcr1…` Bech32 recipient string. Permissions: `0o644` on Unix
 ///   (public keys are not secret).
+///
+/// # Caller obligations
+///
+/// This function is `pub(crate)` and **does not** validate the
+/// caller-supplied [`crate::KdfParams`] against v1 structural bounds
+/// or against a [`crate::KdfLimit`] resource cap. Those checks are
+/// the **api-layer's** responsibility and live in
+/// [`crate::api::KeyPairGenerator::write`] via
+/// [`crate::KdfParams::validate_for_write`]. The same applies to the
+/// non-empty-passphrase check in [`crate::api::validate_passphrase`].
+///
+/// Any new in-crate caller MUST run those preflight steps first
+/// (or accept the resulting symmetry break with the default reader's
+/// `RecipientDecryptor::decrypt`).
 pub(crate) fn generate_key_pair(
     passphrase: &secrecy::SecretString,
     kdf_params: &crate::crypto::kdf::KdfParams,

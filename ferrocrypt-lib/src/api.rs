@@ -204,6 +204,19 @@ impl Encryptor {
     /// Overrides the default archive resource caps applied during
     /// the writer-side preflight. Useful for callers operating on
     /// trusted trees that legitimately exceed the defaults.
+    ///
+    /// # Default-decrypt round-trip
+    ///
+    /// Raising `archive_limits` above [`ArchiveLimits::default`] can
+    /// produce a `.fcr` whose archive payload exceeds what a
+    /// default-configured [`PassphraseDecryptor`] /
+    /// [`RecipientDecryptor`] will extract. The receiving decryptor
+    /// MUST be configured via
+    /// [`PassphraseDecryptor::archive_limits`] /
+    /// [`RecipientDecryptor::archive_limits`] with limits that match
+    /// (or exceed) the file's actual content. Lowering
+    /// `archive_limits` only tightens what the encrypt-side preflight
+    /// accepts and never breaks default round-trip.
     pub fn archive_limits(mut self, limits: ArchiveLimits) -> Self {
         self.archive_limits = Some(limits);
         self

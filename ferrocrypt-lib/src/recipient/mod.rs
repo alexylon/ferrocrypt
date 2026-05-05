@@ -13,8 +13,9 @@
 //! - [`entry`] — generic recipient framing (`type_name_len:u16 ||
 //!   recipient_flags:u16 || body_len:u32 || type_name || body`),
 //!   `RecipientEntry`, framing parser.
-//! - [`name`] — `validate_type_name` and `TYPE_NAME_MAX_LEN` per
-//!   `FORMAT.md` §3.3 grammar.
+//! - [`name`] — `validate_type_name_grammar`,
+//!   `validate_external_type_name`, and `TYPE_NAME_MAX_LEN` per
+//!   `FORMAT.md` §3.3 grammar and §3.3.1 namespace policy.
 //! - [`policy`] — `NativeRecipientType` registry, internal
 //!   `NativeMixingRule` enforcement type, public `MixingPolicy` diagnostic
 //!   projection, `enforce_recipient_mixing_policy`,
@@ -38,6 +39,6 @@ pub mod native;
 pub mod policy;
 
 pub use entry::{RecipientEntry, parse_recipient_entries};
-pub use name::{TYPE_NAME_MAX_LEN, validate_type_name};
+pub use name::{TYPE_NAME_MAX_LEN, validate_type_name_grammar};
 pub use native::{argon2id, x25519};
 pub use policy::classify_encryption_mode;

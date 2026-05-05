@@ -34,7 +34,7 @@ use sha3::{Digest, Sha3_256};
 use crate::CryptoError;
 use crate::error::FormatDefect;
 use crate::format::{read_u16_be, read_u32_be};
-use crate::recipient::{TYPE_NAME_MAX_LEN, validate_type_name};
+use crate::recipient::{TYPE_NAME_MAX_LEN, validate_type_name_grammar};
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
@@ -126,7 +126,7 @@ pub fn encode_recipient_string(
     type_name: &str,
     key_material: &[u8],
 ) -> Result<String, CryptoError> {
-    validate_type_name(type_name)?;
+    validate_type_name_grammar(type_name)?;
     let type_name_bytes = type_name.as_bytes();
     let type_name_len = u16::try_from(type_name_bytes.len())
         .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedTypeName))?;
@@ -212,7 +212,7 @@ pub fn decode_recipient_string(
     let type_name_bytes = &data[type_name_start..type_name_end];
     let type_name = std::str::from_utf8(type_name_bytes)
         .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedTypeName))?;
-    validate_type_name(type_name)?;
+    validate_type_name_grammar(type_name)?;
 
     let key_material = data[type_name_end..key_material_end].to_vec();
     let stored_checksum = &data[key_material_end..checksum_end];
@@ -690,7 +690,7 @@ mod tests {
         // payload (after the 5-to-8 expansion) can be arbitrary.
         // Non-UTF-8 type_name bytes MUST surface as `MalformedTypeName`
         // via `std::str::from_utf8`, not silently flow into
-        // `validate_type_name` (which expects `&str`).
+        // `validate_type_name_grammar` (which expects `&str`).
         let mut data = Vec::new();
         data.extend_from_slice(&6u16.to_be_bytes());
         data.extend_from_slice(&0u32.to_be_bytes());
@@ -707,7 +707,7 @@ mod tests {
     fn decode_rejects_internal_checksum_mismatch() {
         // Encode a valid string, decode at the Bech32 layer, flip a
         // bit inside the type_name region (within the lowercase ASCII
-        // grammar so validate_type_name still passes), re-encode at
+        // grammar so validate_type_name_grammar still passes), re-encode at
         // the Bech32 layer with a fresh outer checksum. The inner
         // SHA3-256 checksum, computed from the *original* type_name,
         // will not match the modified type_name → MalformedPublicKey.
@@ -802,7 +802,7 @@ mod tests {
     #[test]
     fn decode_rejects_malformed_type_name_grammar() {
         // type_name "X25519" passes the structural lengths but fails
-        // validate_type_name (uppercase). Compute the inner checksum
+        // validate_type_name_grammar (uppercase). Compute the inner checksum
         // for "X25519" first so the only thing left to fail is grammar.
         let key = x25519_key();
         let cs = compute_checksum("X25519", &key);

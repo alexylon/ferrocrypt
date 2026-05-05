@@ -418,16 +418,13 @@ Rules:
 
 ### 5.2 `recipient/name.rs`
 
-`recipient/name.rs` owns recipient type-name validation and namespace rules.
+`recipient/name.rs` owns recipient type-name validation. The §3.3 byte-level grammar and the §3.3.1 namespace policy are exposed as **two distinct validators** so that wire-format parsing stays forward-compatible while plugin-supplied names are held to the stricter policy:
 
-It enforces:
+- `validate_type_name_grammar(name)` — the §3.3 byte-level grammar (1..=255 bytes, lowercase ASCII, allowed character set, no leading/trailing punctuation, no `..`/`//`). All in-tree wire-format readers and writers (`recipient/entry.rs`, `key/public.rs`, `key/private.rs`) call this and only this. The grammar deliberately accepts unknown short native names so a future FerroCrypt version can introduce a new native recipient type without breaking forward-compatible parsing in older readers.
+- `is_reserved_native_name(name)` — internal building block: returns `true` when `name` has the shape of a reserved FerroCrypt native type (no `/`, plus a reserved native prefix in `["mlkem", "pq", "hpke", "tag", "xwing", "kem"]` or the reserved `tag` suffix per `FORMAT.md` §3.3.1).
+- `validate_external_type_name(name)` — runs the grammar check, then enforces the §3.3.1 namespace policy: the name MUST contain `/` and MUST NOT impersonate a reserved native shape. v1 ships no public plugin / third-party recipient registration surface, so this validator currently has no in-tree caller; it exists so the §3.3.1 policy is enforceable the moment such a surface is added.
 
-- native names contain no `/`;
-- external names contain `/`;
-- allowed lowercase ASCII grammar;
-- reserved native prefixes and suffixes.
-
-All recipient type-name validation goes through this module.
+`is_reserved_native_name` and `validate_external_type_name` are `pub(crate)` until a plugin-facing API needs them; only `validate_type_name_grammar` and `TYPE_NAME_MAX_LEN` are re-exported through `recipient::mod`.
 
 ### 5.3 `recipient/policy.rs`
 

@@ -42,7 +42,7 @@ use crate::format::{
     KIND_PRIVATE_KEY, MAGIC, MAGIC_SIZE, VERSION, read_u16_be, read_u32_be,
     unsupported_key_version_error, write_u16_be, write_u32_be,
 };
-use crate::recipient::{TYPE_NAME_MAX_LEN, validate_type_name};
+use crate::recipient::{TYPE_NAME_MAX_LEN, validate_type_name_grammar};
 
 /// HKDF info for deriving the `private.key` wrap key from Argon2id.
 pub(crate) const HKDF_INFO_PRIVATE_KEY_WRAP: &[u8] = b"ferrocrypt/v1/private-key/wrap";
@@ -173,7 +173,7 @@ impl PrivateKeyHeader {
 // and `seal_private_key` (writer) for the cap rules so the two paths cannot
 // drift. `key_flags` and `type_name_len` are reader-only because the writer
 // builds them from validated inputs (`key_flags = 0` literally; type_name
-// length is bounded by the prior `validate_type_name` call).
+// length is bounded by the prior `validate_type_name_grammar` call).
 
 fn check_key_flags(flags: u16) -> Result<(), CryptoError> {
     if flags != 0 {
@@ -251,7 +251,7 @@ pub fn seal_private_key(
     passphrase: &SecretString,
     kdf_params: &KdfParams,
 ) -> Result<Vec<u8>, CryptoError> {
-    validate_type_name(type_name)?;
+    validate_type_name_grammar(type_name)?;
 
     let type_name_bytes = type_name.as_bytes();
     let type_name_len = u16::try_from(type_name_bytes.len())
@@ -360,7 +360,7 @@ pub fn open_private_key(
     let type_name_bytes = &bytes[type_name_start..type_name_end];
     let type_name = std::str::from_utf8(type_name_bytes)
         .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedTypeName))?;
-    validate_type_name(type_name)?;
+    validate_type_name_grammar(type_name)?;
 
     let public_material = bytes[type_name_end..public_end].to_vec();
     let ext_bytes_slice = bytes[public_end..ext_end].to_vec();
@@ -708,8 +708,8 @@ mod tests {
     #[test]
     fn parse_rejects_overlong_type_name_len() {
         // type_name_len = 256 must be rejected at parse time, not
-        // deferred to validate_type_name. Earlier rejection is the
-        // structural contract for every length field in this header.
+        // deferred to validate_type_name_grammar. Earlier rejection is
+        // the structural contract for every length field in this header.
         let mut bytes = sample_header_bytes();
         bytes[TYPE_NAME_LEN_OFFSET..TYPE_NAME_LEN_OFFSET + 2]
             .copy_from_slice(&((TYPE_NAME_MAX_LEN as u16) + 1).to_be_bytes());
@@ -866,7 +866,7 @@ mod tests {
     fn open_rejects_non_utf8_type_name() {
         // Non-UTF-8 bytes in the type_name slot must surface as
         // `MalformedTypeName` via `std::str::from_utf8`, not silently
-        // pass to `validate_type_name` (which expects `&str`) or be
+        // pass to `validate_type_name_grammar` (which expects `&str`) or be
         // collapsed into a generic structural error.
         let bytes = file_with_type_name_payload(&[0xFF; 6]);
         match open_private_key(

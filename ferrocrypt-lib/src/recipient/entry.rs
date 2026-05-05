@@ -16,7 +16,7 @@
 use crate::CryptoError;
 use crate::error::FormatDefect;
 use crate::format::{BODY_LEN_MAX, read_u16_be, read_u32_be};
-use crate::recipient::name::{TYPE_NAME_MAX_LEN, validate_type_name};
+use crate::recipient::name::{TYPE_NAME_MAX_LEN, validate_type_name_grammar};
 use crate::recipient::policy::NativeRecipientType;
 
 /// On-wire size of a recipient-entry header (`type_name_len:u16 ||
@@ -164,7 +164,7 @@ impl RecipientEntry {
         let type_name_bytes = &bytes[ENTRY_HEADER_SIZE..type_name_end];
         let type_name = std::str::from_utf8(type_name_bytes)
             .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedTypeName))?;
-        validate_type_name(type_name)?;
+        validate_type_name_grammar(type_name)?;
 
         let body = bytes[type_name_end..total].to_vec();
 

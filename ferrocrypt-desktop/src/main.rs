@@ -16,18 +16,18 @@ mod password_scorer;
 const ELIDE: usize = 52;
 
 // Slint app modes — must match the `mode` property values in app.slint
-const MODE_SYMMETRIC_ENCRYPT: i32 = 0;
-const MODE_SYMMETRIC_DECRYPT: i32 = 1;
-const MODE_HYBRID_ENCRYPT: i32 = 2;
-const MODE_HYBRID_DECRYPT: i32 = 3;
+const MODE_PASSPHRASE_ENCRYPT: i32 = 0;
+const MODE_PASSPHRASE_DECRYPT: i32 = 1;
+const MODE_RECIPIENT_ENCRYPT: i32 = 2;
+const MODE_RECIPIENT_DECRYPT: i32 = 3;
 const MODE_KEYGEN: i32 = 4;
 
 fn is_encrypt_mode(mode: i32) -> bool {
-    matches!(mode, MODE_SYMMETRIC_ENCRYPT | MODE_HYBRID_ENCRYPT)
+    matches!(mode, MODE_PASSPHRASE_ENCRYPT | MODE_RECIPIENT_ENCRYPT)
 }
 
 fn is_decrypt_mode(mode: i32) -> bool {
-    matches!(mode, MODE_SYMMETRIC_DECRYPT | MODE_HYBRID_DECRYPT)
+    matches!(mode, MODE_PASSPHRASE_DECRYPT | MODE_RECIPIENT_DECRYPT)
 }
 
 #[cfg(target_os = "macos")]
@@ -170,7 +170,7 @@ fn main() {
             let inpath = app.get_input_path().to_string();
             let outpath = app.get_output_path().to_string();
             // Wrap immediately so the password bytes are zeroized on drop,
-            // even on the hybrid-encrypt path where the library doesn't
+            // even on the recipient-encrypt path where the library doesn't
             // consume them, and even if the worker panics before the
             // crypto call runs.
             let pwd = SecretString::from(app.get_password().to_string());
@@ -226,7 +226,7 @@ fn main() {
                     let is_decrypt = is_decrypt_mode(mode);
                     let start = std::time::Instant::now();
                     let result: Result<PathBuf, _> = match mode {
-                        MODE_SYMMETRIC_ENCRYPT => {
+                        MODE_PASSPHRASE_ENCRYPT => {
                             let mut encryptor = Encryptor::with_passphrase(pwd);
                             if let Some(s) = save_as {
                                 encryptor = encryptor.save_as(s);
@@ -235,21 +235,21 @@ fn main() {
                                 .write(inpath, output_dir_path, &on_event)
                                 .map(|o| o.output_path)
                         }
-                        MODE_SYMMETRIC_DECRYPT => match Decryptor::open(inpath) {
+                        MODE_PASSPHRASE_DECRYPT => match Decryptor::open(inpath) {
                             Ok(Decryptor::Passphrase(d)) => d
                                 .decrypt(pwd, output_dir_path, &on_event)
                                 .map(|o| o.output_path),
                             Ok(Decryptor::Recipient(_)) => Err(CryptoError::InvalidInput(
-                                "This file is sealed for public-key recipients; switch to the Hybrid tab"
+                                "This file is sealed for public-key recipients; switch to the 'Key pair' tab"
                                     .to_string(),
                             )),
                             Ok(_) => Err(CryptoError::InvalidInput(
-                                "Unsupported FerroCrypt encryption mode for the Symmetric tab"
+                                "Unsupported FerroCrypt encryption mode for the 'Password' tab"
                                     .to_string(),
                             )),
                             Err(e) => Err(e),
                         },
-                        MODE_HYBRID_ENCRYPT => {
+                        MODE_RECIPIENT_ENCRYPT => {
                             let mut encryptor = Encryptor::with_recipient(
                                 PublicKey::from_key_file(Path::new(&keypath)),
                             );
@@ -260,7 +260,7 @@ fn main() {
                                 .write(inpath, output_dir_path, &on_event)
                                 .map(|o| o.output_path)
                         }
-                        MODE_HYBRID_DECRYPT => match Decryptor::open(inpath) {
+                        MODE_RECIPIENT_DECRYPT => match Decryptor::open(inpath) {
                             Ok(Decryptor::Recipient(d)) => d
                                 .decrypt(
                                     PrivateKey::from_key_file(Path::new(&keypath)),
@@ -270,11 +270,11 @@ fn main() {
                                 )
                                 .map(|o| o.output_path),
                             Ok(Decryptor::Passphrase(_)) => Err(CryptoError::InvalidInput(
-                                "This file is sealed with a passphrase; switch to the Symmetric tab"
+                                "This file is sealed with a passphrase; switch to the 'Password' tab"
                                     .to_string(),
                             )),
                             Ok(_) => Err(CryptoError::InvalidInput(
-                                "Unsupported FerroCrypt encryption mode for the Hybrid tab"
+                                "Unsupported FerroCrypt encryption mode for the 'Key pair' tab"
                                     .to_string(),
                             )),
                             Err(e) => Err(e),
@@ -301,7 +301,7 @@ fn main() {
                                     app.set_keygen_output_dir_display(Default::default());
                                     app.set_conflict_warning(Default::default());
                                     app.set_status_err(Default::default());
-                                    app.set_mode(MODE_HYBRID_ENCRYPT);
+                                    app.set_mode(MODE_RECIPIENT_ENCRYPT);
                                     app.set_key_path_display(elide_left(&pub_key, ELIDE).into());
                                     app.set_key_path(pub_key.clone().into());
                                     validate_selected_key(&app, &pub_key);
@@ -576,7 +576,7 @@ fn elide_result_path(msg: &str) -> String {
 fn validate_selected_key(app: &AppWindow, key_path: &str) {
     let key_path = Path::new(key_path);
     match app.get_mode() {
-        MODE_HYBRID_ENCRYPT => match PublicKey::from_key_file(key_path).fingerprint() {
+        MODE_RECIPIENT_ENCRYPT => match PublicKey::from_key_file(key_path).fingerprint() {
             Ok(fp) => {
                 app.set_key_fingerprint(fp.into());
                 app.set_key_invalid(false);
@@ -588,7 +588,7 @@ fn validate_selected_key(app: &AppWindow, key_path: &str) {
                 app.set_status_err(e.to_string().into());
             }
         },
-        MODE_HYBRID_DECRYPT => {
+        MODE_RECIPIENT_DECRYPT => {
             app.set_key_fingerprint(Default::default());
             if let Err(e) = validate_private_key_file(key_path) {
                 app.set_key_invalid(true);
@@ -607,8 +607,8 @@ fn validate_selected_key(app: &AppWindow, key_path: &str) {
 
 fn detect_mode_from_path(path: &str) -> Result<Option<i32>, ferrocrypt::CryptoError> {
     match detect_encryption_mode(Path::new(path))? {
-        Some(EncryptionMode::Passphrase) => Ok(Some(MODE_SYMMETRIC_DECRYPT)),
-        Some(EncryptionMode::Recipient) => Ok(Some(MODE_HYBRID_DECRYPT)),
+        Some(EncryptionMode::Passphrase) => Ok(Some(MODE_PASSPHRASE_DECRYPT)),
+        Some(EncryptionMode::Recipient) => Ok(Some(MODE_RECIPIENT_DECRYPT)),
         Some(_) => Ok(None),
         None => Ok(None),
     }
@@ -625,8 +625,8 @@ fn next_mode(old_mode: i32, detected: Option<i32>) -> i32 {
     match detected {
         Some(m) => m,
         None => match old_mode {
-            MODE_SYMMETRIC_DECRYPT => MODE_SYMMETRIC_ENCRYPT,
-            MODE_HYBRID_DECRYPT => MODE_HYBRID_ENCRYPT,
+            MODE_PASSPHRASE_DECRYPT => MODE_PASSPHRASE_ENCRYPT,
+            MODE_RECIPIENT_DECRYPT => MODE_RECIPIENT_ENCRYPT,
             _ => old_mode,
         },
     }
@@ -637,8 +637,8 @@ fn next_mode(old_mode: i32, detected: Option<i32>) -> i32 {
 /// other modes are unchanged.
 fn snap_back_mode(mode: i32) -> i32 {
     match mode {
-        MODE_SYMMETRIC_DECRYPT => MODE_SYMMETRIC_ENCRYPT,
-        MODE_HYBRID_DECRYPT | MODE_KEYGEN => MODE_HYBRID_ENCRYPT,
+        MODE_PASSPHRASE_DECRYPT => MODE_PASSPHRASE_ENCRYPT,
+        MODE_RECIPIENT_DECRYPT | MODE_KEYGEN => MODE_RECIPIENT_ENCRYPT,
         _ => mode,
     }
 }
@@ -649,86 +649,104 @@ mod tests {
 
     #[test]
     fn encrypt_decrypt_mode_predicates() {
-        assert!(is_encrypt_mode(MODE_SYMMETRIC_ENCRYPT));
-        assert!(is_encrypt_mode(MODE_HYBRID_ENCRYPT));
-        assert!(!is_encrypt_mode(MODE_SYMMETRIC_DECRYPT));
-        assert!(!is_encrypt_mode(MODE_HYBRID_DECRYPT));
+        assert!(is_encrypt_mode(MODE_PASSPHRASE_ENCRYPT));
+        assert!(is_encrypt_mode(MODE_RECIPIENT_ENCRYPT));
+        assert!(!is_encrypt_mode(MODE_PASSPHRASE_DECRYPT));
+        assert!(!is_encrypt_mode(MODE_RECIPIENT_DECRYPT));
         assert!(!is_encrypt_mode(MODE_KEYGEN));
 
-        assert!(is_decrypt_mode(MODE_SYMMETRIC_DECRYPT));
-        assert!(is_decrypt_mode(MODE_HYBRID_DECRYPT));
-        assert!(!is_decrypt_mode(MODE_SYMMETRIC_ENCRYPT));
-        assert!(!is_decrypt_mode(MODE_HYBRID_ENCRYPT));
+        assert!(is_decrypt_mode(MODE_PASSPHRASE_DECRYPT));
+        assert!(is_decrypt_mode(MODE_RECIPIENT_DECRYPT));
+        assert!(!is_decrypt_mode(MODE_PASSPHRASE_ENCRYPT));
+        assert!(!is_decrypt_mode(MODE_RECIPIENT_ENCRYPT));
         assert!(!is_decrypt_mode(MODE_KEYGEN));
     }
 
     #[test]
     fn next_mode_adopts_detected_mode() {
         assert_eq!(
-            next_mode(MODE_SYMMETRIC_ENCRYPT, Some(MODE_HYBRID_DECRYPT)),
-            MODE_HYBRID_DECRYPT
+            next_mode(MODE_PASSPHRASE_ENCRYPT, Some(MODE_RECIPIENT_DECRYPT)),
+            MODE_RECIPIENT_DECRYPT
         );
         assert_eq!(
-            next_mode(MODE_HYBRID_ENCRYPT, Some(MODE_SYMMETRIC_DECRYPT)),
-            MODE_SYMMETRIC_DECRYPT
+            next_mode(MODE_RECIPIENT_ENCRYPT, Some(MODE_PASSPHRASE_DECRYPT)),
+            MODE_PASSPHRASE_DECRYPT
         );
     }
 
     #[test]
     fn next_mode_flips_decrypt_back_to_encrypt_when_not_detected() {
         assert_eq!(
-            next_mode(MODE_SYMMETRIC_DECRYPT, None),
-            MODE_SYMMETRIC_ENCRYPT
+            next_mode(MODE_PASSPHRASE_DECRYPT, None),
+            MODE_PASSPHRASE_ENCRYPT
         );
-        assert_eq!(next_mode(MODE_HYBRID_DECRYPT, None), MODE_HYBRID_ENCRYPT);
+        assert_eq!(
+            next_mode(MODE_RECIPIENT_DECRYPT, None),
+            MODE_RECIPIENT_ENCRYPT
+        );
     }
 
     #[test]
     fn next_mode_keeps_non_decrypt_modes_when_not_detected() {
         assert_eq!(
-            next_mode(MODE_SYMMETRIC_ENCRYPT, None),
-            MODE_SYMMETRIC_ENCRYPT
+            next_mode(MODE_PASSPHRASE_ENCRYPT, None),
+            MODE_PASSPHRASE_ENCRYPT
         );
-        assert_eq!(next_mode(MODE_HYBRID_ENCRYPT, None), MODE_HYBRID_ENCRYPT);
+        assert_eq!(
+            next_mode(MODE_RECIPIENT_ENCRYPT, None),
+            MODE_RECIPIENT_ENCRYPT
+        );
         assert_eq!(next_mode(MODE_KEYGEN, None), MODE_KEYGEN);
     }
 
     #[test]
     fn snap_back_mode_folds_decrypt_and_keygen_to_tab_encrypt() {
         assert_eq!(
-            snap_back_mode(MODE_SYMMETRIC_DECRYPT),
-            MODE_SYMMETRIC_ENCRYPT
+            snap_back_mode(MODE_PASSPHRASE_DECRYPT),
+            MODE_PASSPHRASE_ENCRYPT
         );
-        assert_eq!(snap_back_mode(MODE_HYBRID_DECRYPT), MODE_HYBRID_ENCRYPT);
-        assert_eq!(snap_back_mode(MODE_KEYGEN), MODE_HYBRID_ENCRYPT);
+        assert_eq!(
+            snap_back_mode(MODE_RECIPIENT_DECRYPT),
+            MODE_RECIPIENT_ENCRYPT
+        );
+        assert_eq!(snap_back_mode(MODE_KEYGEN), MODE_RECIPIENT_ENCRYPT);
     }
 
     #[test]
     fn snap_back_mode_leaves_encrypt_modes_alone() {
         assert_eq!(
-            snap_back_mode(MODE_SYMMETRIC_ENCRYPT),
-            MODE_SYMMETRIC_ENCRYPT
+            snap_back_mode(MODE_PASSPHRASE_ENCRYPT),
+            MODE_PASSPHRASE_ENCRYPT
         );
-        assert_eq!(snap_back_mode(MODE_HYBRID_ENCRYPT), MODE_HYBRID_ENCRYPT);
+        assert_eq!(
+            snap_back_mode(MODE_RECIPIENT_ENCRYPT),
+            MODE_RECIPIENT_ENCRYPT
+        );
     }
 
     #[test]
     fn conflict_warning_empty_when_no_output_path() {
-        let w = compute_conflict_warning(MODE_SYMMETRIC_ENCRYPT, "", "", false, false, false);
+        let w = compute_conflict_warning(MODE_PASSPHRASE_ENCRYPT, "", "", false, false, false);
         assert!(w.is_empty());
     }
 
     #[test]
     fn conflict_warning_empty_when_encrypt_output_missing() {
-        let w =
-            compute_conflict_warning(MODE_HYBRID_ENCRYPT, "/tmp/out.fcr", "", false, false, false);
+        let w = compute_conflict_warning(
+            MODE_RECIPIENT_ENCRYPT,
+            "/tmp/out.fcr",
+            "",
+            false,
+            false,
+            false,
+        );
         assert!(w.is_empty());
     }
 
     #[test]
     fn conflict_warning_flags_existing_encrypt_output() {
         let w = compute_conflict_warning(
-            MODE_SYMMETRIC_ENCRYPT,
+            MODE_PASSPHRASE_ENCRYPT,
             "/tmp/out.fcr",
             "",
             true,
@@ -737,8 +755,14 @@ mod tests {
         );
         assert_eq!(w, "Already exists: /tmp/out.fcr");
 
-        let w =
-            compute_conflict_warning(MODE_HYBRID_ENCRYPT, "/tmp/out.fcr", "", true, false, false);
+        let w = compute_conflict_warning(
+            MODE_RECIPIENT_ENCRYPT,
+            "/tmp/out.fcr",
+            "",
+            true,
+            false,
+            false,
+        );
         assert_eq!(w, "Already exists: /tmp/out.fcr");
     }
 
@@ -747,7 +771,7 @@ mod tests {
         // Decrypt modes must never block on output existence — the library's
         // atomic output handling is authoritative, and the output path in
         // decrypt mode is a directory.
-        for mode in [MODE_SYMMETRIC_DECRYPT, MODE_HYBRID_DECRYPT] {
+        for mode in [MODE_PASSPHRASE_DECRYPT, MODE_RECIPIENT_DECRYPT] {
             let w = compute_conflict_warning(mode, "/tmp/out", "", true, false, false);
             assert!(w.is_empty(), "mode {} unexpectedly warned", mode);
         }
@@ -756,7 +780,7 @@ mod tests {
     #[test]
     fn conflict_warning_elides_long_encrypt_paths() {
         let long = format!("/tmp/{}", "a".repeat(80));
-        let w = compute_conflict_warning(MODE_SYMMETRIC_ENCRYPT, &long, "", true, false, false);
+        let w = compute_conflict_warning(MODE_PASSPHRASE_ENCRYPT, &long, "", true, false, false);
         assert!(w.starts_with("Already exists: \u{2026}"), "got: {}", w);
     }
 

@@ -216,7 +216,7 @@ export component AppWindow inherits Window {
                 padding: 3px;
                 spacing: 2px;
 
-                // ── Symmetric ──
+                // ── Password ──
                 Rectangle {
                     property <bool> active: mode == 0 || mode == 1;
                     horizontal-stretch: 1;
@@ -247,7 +247,7 @@ export component AppWindow inherits Window {
 
                 Rectangle { width: 1px; background: Theme.border; }
 
-                // ── Hybrid ──
+                // ── Key pair ──
                 Rectangle {
                     property <bool> active: mode == 2 || mode == 3 || mode == 4;
                     horizontal-stretch: 1;
@@ -428,7 +428,7 @@ export component AppWindow inherits Window {
             Rectangle { height: 1px; background: Theme.border; }
         }
 
-        // ═══════════ HYBRID KEY SECTION ═══════════
+        // ═══════════ KEY PAIR SECTION ═══════════
         if mode == 2 || mode == 4 : VerticalLayout {
             spacing: 0px;
             Rectangle { height: Theme.field-gap; }

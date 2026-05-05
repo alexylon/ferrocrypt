@@ -41,8 +41,8 @@ catch interaction bugs the parser-surface targets cannot see.
 
 | Target | What it exercises |
 |---|---|
-| `fuzz_symmetric_decrypt` | Feeds arbitrary bytes as a `.fcr` file into `symmetric_decrypt` |
-| `fuzz_hybrid_decrypt` | Same for `hybrid_decrypt`, with a one-time X25519 keypair |
+| `fuzz_symmetric_decrypt` | Drives arbitrary bytes through `Decryptor::open` and `PassphraseDecryptor::decrypt` (passphrase recipient mode) |
+| `fuzz_hybrid_decrypt` | Drives arbitrary bytes through `Decryptor::open` and `RecipientDecryptor::decrypt` (X25519 recipient mode), using a one-time generated keypair |
 
 ## Running
 

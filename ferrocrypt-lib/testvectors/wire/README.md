@@ -28,15 +28,15 @@ decryption result (where deterministic).
 
 | Fixture | Purpose |
 |---|---|
-| `symmetric-empty.fcr` | Symmetric `.fcr` with 0-byte plaintext |
-| `symmetric-1byte.fcr` | Symmetric `.fcr` with 1-byte plaintext |
-| `symmetric-multichunk.fcr` | Symmetric `.fcr` spanning > 1 STREAM chunk |
-| `hybrid-empty.fcr` | Hybrid `.fcr` with 0-byte plaintext |
-| `hybrid-1byte.fcr` | Hybrid `.fcr` with 1-byte plaintext |
-| `hybrid-multichunk.fcr` | Hybrid `.fcr` spanning > 1 STREAM chunk |
+| `argon2id-empty.fcr` | Passphrase recipient (`argon2id`) `.fcr` with 0-byte plaintext |
+| `argon2id-1byte.fcr` | Passphrase recipient (`argon2id`) `.fcr` with 1-byte plaintext |
+| `argon2id-multichunk.fcr` | Passphrase recipient (`argon2id`) `.fcr` spanning > 1 STREAM chunk |
+| `x25519-empty.fcr` | Public-key recipient (`x25519`) `.fcr` with 0-byte plaintext |
+| `x25519-1byte.fcr` | Public-key recipient (`x25519`) `.fcr` with 1-byte plaintext |
+| `x25519-multichunk.fcr` | Public-key recipient (`x25519`) `.fcr` spanning > 1 STREAM chunk |
 | `public.key` | Canonical v1 public key (text file, `fcr1…\n`) |
 | `private.key` | Matching v1 private key (binary, passphrase `test`) |
-| `passphrase.txt` | Passphrase used to wrap `private.key` and encrypt symmetric fixtures |
+| `passphrase.txt` | Passphrase used to wrap `private.key` and to seal the `argon2id-*.fcr` fixtures |
 
 ## Policy
 

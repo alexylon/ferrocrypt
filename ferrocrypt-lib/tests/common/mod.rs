@@ -1,11 +1,11 @@
 //! Test support helpers for `integration_tests.rs`.
 //!
-//! Pre-restructure the library exposed `symmetric_auto` / `hybrid_auto`
-//! convenience wrappers that detected direction from magic bytes. The
-//! post-refactor public API split that into [`Encryptor`] / [`Decryptor`];
-//! these file-private helpers preserve the old call shape so the existing
-//! integration test call sites don't need to churn while still exercising
-//! the new public surface end-to-end.
+//! `passphrase_auto` and `recipient_auto` wrap the public [`Encryptor`] /
+//! [`Decryptor`] API with magic-byte direction detection (encrypt if the
+//! input is plaintext, decrypt if it starts with the FerroCrypt magic)
+//! and inject the test-fast Argon2id parameters from
+//! `ferrocrypt-test-support` so the test suite doesn't burn seconds per
+//! derivation. `generate_key_pair` is the matching keygen wrapper.
 //!
 //! Each integration-test binary compiles this module separately; when a
 //! binary only imports a subset of the helpers the rest would trip
@@ -23,7 +23,7 @@ use ferrocrypt::{
 };
 use ferrocrypt_test_support::{fast_keypair_generator, fast_passphrase_encryptor};
 
-pub fn symmetric_auto(
+pub fn passphrase_auto(
     input: impl AsRef<Path>,
     output_dir: impl AsRef<Path>,
     passphrase: &SecretString,
@@ -59,7 +59,7 @@ pub fn symmetric_auto(
     }
 }
 
-pub fn hybrid_auto(
+pub fn recipient_auto(
     input: impl AsRef<Path>,
     output_dir: impl AsRef<Path>,
     key_file: impl AsRef<Path>,

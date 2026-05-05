@@ -28,12 +28,12 @@ FerroCrypt is a pure Rust library, CLI, and desktop application for encrypting a
 
 ## Overview
 
-FerroCrypt encrypts a file or directory into a single `.fcr` file. Two encryption modes are supported:
+FerroCrypt encrypts a file or directory into a single `.fcr` file. Each file carries one or more typed recipients — any one of them can unlock the same encrypted payload:
 
-- **Symmetric encryption** — encryption and decryption use the same passphrase. Typical use is encrypting data that only the user needs to read again.
-- **Hybrid encryption** — encryption uses a recipient public key; decryption uses the matching password-protected private key. Typical use is sending encrypted data to someone else.
+- **Passphrase recipient (`argon2id`)** — encryption and decryption use the same passphrase. Typical use is encrypting data that only the user needs to read again.
+- **Public-key recipient (`x25519`)** — encryption uses one or more recipient public keys; decryption uses the matching password-protected private key. Typical use is sending encrypted data to someone else, or to several recipients in a single file.
 
-Both modes use the same encrypted-file container. The mode is determined from authenticated metadata inside the file, not from the filename or extension. Renaming an encrypted file does not change how FerroCrypt interprets it.
+The recipient list is part of authenticated metadata inside the file, not the filename or extension. Renaming an encrypted file does not change how FerroCrypt interprets it.
 
 Directory encryption is intended for safe transfer and storage of file contents. It preserves directory structure and regular file data, but it is not a full system-backup format.
 
@@ -201,8 +201,8 @@ The interactive prompt exits on `quit`, `exit`, or Ctrl-D. Ctrl-C cancels the cu
 
 The desktop application provides the same encryption workflows through a graphical interface. It accepts files and directories as input and detects encrypted files by reading their file headers.
 
-- **Password** tab — passphrase-based (symmetric) encryption.
-- **Key pair** tab — public/private-key (hybrid) encryption. Key pairs can be generated from inside the application. Public key fingerprints are displayed for independent verification.
+- **Password** tab — passphrase-based encryption.
+- **Key pair** tab — public/private-key encryption. Key pairs can be generated from inside the application. Public key fingerprints are displayed for independent verification.
 
 Encrypted output is named automatically and can be changed with Save As. Key files are validated on selection, and invalid inputs or output conflicts are reported before encryption or decryption begins. A password-strength indicator is shown when a password is entered.
 
@@ -246,9 +246,9 @@ FerroCrypt reports decryption failures according to the stage that failed. This 
 Common failure categories include:
 
 - **Private key unlock failed: wrong passphrase or tampered file** — the private key passphrase is wrong, or the encrypted private key file has been modified.
-- **Decryption failed: recipient `argon2id` unwrap failed** (symmetric) — the supplied passphrase does not unlock the file, or the recipient metadata has been modified.
-- **Decryption failed: recipient `x25519` unwrap failed** (hybrid) — the supplied private key does not unlock the file, or the recipient metadata has been modified.
-- **Decryption failed: recipient `x25519` MAC mismatch** (multi-recipient hybrid) — a recipient unwrapped a candidate file key, but the authenticated header did not verify. Decryption continues with the next recipient in the file.
+- **Decryption failed: recipient `argon2id` unwrap failed** — the supplied passphrase does not unlock the file, or the recipient metadata has been modified.
+- **Decryption failed: recipient `x25519` unwrap failed** — the supplied private key does not unlock the file, or the recipient metadata has been modified.
+- **Decryption failed: recipient `x25519` MAC mismatch** (multi-recipient) — a recipient unwrapped a candidate file key, but the authenticated header did not verify. Decryption continues with the next recipient in the file.
 - **Decryption failed: no recipient could unlock the file** — none of the supported recipients in the file could unlock the file key.
 - **Decryption failed: header tampered after unlock** — a candidate file key was found, but the authenticated header did not verify.
 - **Payload authentication failed: data tampered or corrupted** — the header verified, but the encrypted payload was corrupted or modified.

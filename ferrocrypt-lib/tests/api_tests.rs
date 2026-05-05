@@ -1,7 +1,7 @@
 //! Public coverage for the new `Encryptor` / `Decryptor` API.
 //!
 //! `integration_tests.rs` exercises round-trip behavior through the
-//! `symmetric_auto` / `hybrid_auto` shims (which now wrap the new API
+//! `passphrase_auto` / `recipient_auto` shims (which now wrap the new API
 //! internally). This file targets the new API surface directly so the
 //! builder methods, `Decryptor::open` mode classification, multi-
 //! recipient encrypt, and `EmptyRecipientList` rejection have explicit
@@ -434,8 +434,8 @@ fn archive_limits_writer_raised_default_reader_rejects_path_depth() {
     assert_eq!(fs::read(&leaf).unwrap(), b"deep payload");
 }
 
-/// Round-trip with raised caps on both sides — the symmetric case
-/// the new builder enables. Without `Decryptor::archive_limits`, this
+/// Round-trip with raised caps on both sides — the writer-and-reader-
+/// aligned case the new builder enables. Without `Decryptor::archive_limits`, this
 /// pattern was impossible: the encrypt side could exceed defaults but
 /// the decrypt side was hardcoded to `ArchiveLimits::default()`.
 #[test]
@@ -501,7 +501,7 @@ fn decryptor_open_with_limits_accepts_recipient_count_above_default() {
     let recipients: Vec<PublicKey> = (0..RECIPIENT_COUNT)
         .map(|_| PublicKey::from_key_file(&kg.public_key_path))
         .collect();
-    // Symmetric-default contract: the writer refuses lists above the
+    // Writer-mirrors-reader contract: the writer refuses lists above the
     // default `RECIPIENT_COUNT_LOCAL_CAP_DEFAULT` (64) unless the caller
     // raises `Encryptor::header_read_limits` explicitly. The decryptor
     // must mirror the raise via `Decryptor::open_with_limits`.
@@ -592,7 +592,7 @@ fn detect_encryption_mode_with_limits_accepts_above_default() {
     }
 }
 
-// ─── Symmetric-default writer caps ─────────────────────────────────────────
+// ─── Writer caps mirror reader defaults ────────────────────────────────────
 //
 // Pin the contract that a default-configured `Encryptor` /
 // `KeyPairGenerator` produces files a default-configured `Decryptor`

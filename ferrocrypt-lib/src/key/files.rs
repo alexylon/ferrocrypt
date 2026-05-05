@@ -11,10 +11,10 @@
 use crate::format;
 use crate::key::public::{RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT, decode_recipient_string};
 
-/// Default filename for the hybrid public key file (text form).
+/// Default filename for the public key file (text form).
 pub const PUBLIC_KEY_FILENAME: &str = "public.key";
 
-/// Default filename for the hybrid private key file (binary, wrapped).
+/// Default filename for the private key file (binary, wrapped).
 pub const PRIVATE_KEY_FILENAME: &str = "private.key";
 
 /// Heuristic classification of key-file bytes. Cheap, non-

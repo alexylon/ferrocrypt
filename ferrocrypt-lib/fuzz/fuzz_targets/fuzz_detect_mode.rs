@@ -1,10 +1,11 @@
 #![no_main]
 
 //! Fuzzes `detect_encryption_mode` — the public entry point that reads
-//! the first 27 bytes of a candidate file, runs replication decode,
-//! and decides whether it is a symmetric `.fcr`, a hybrid `.fcr`, or
-//! not a FerroCrypt file at all. Written to a real temp file so the
-//! actual `File::read` path is exercised end-to-end.
+//! the v1 12-byte prefix and the recipient list of a candidate file
+//! and classifies it as `EncryptionMode::Passphrase`,
+//! `EncryptionMode::Recipient`, or not a FerroCrypt file at all.
+//! Written to a real temp file so the actual `File::read` path is
+//! exercised end-to-end.
 
 use std::io::Write;
 

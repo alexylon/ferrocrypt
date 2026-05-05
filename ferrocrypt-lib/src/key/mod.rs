@@ -11,10 +11,10 @@
 //!   parsing, passphrase-wrapped secret encryption/decryption,
 //!   private-key TLV validation after authentication, and the
 //!   [`PrivateKey`] wrapper for the recipient decrypt path.
-//! - [`files`] — filesystem-level key helpers (default filenames,
-//!   key-file classification, read/write wrappers, staging generated
-//!   key files). Populated in step 5 of the restructure plan;
-//!   currently empty.
+//! - [`files`] — filesystem-level key helpers: the canonical
+//!   `public.key` / `private.key` default filenames and the
+//!   `KeyFileKind` heuristic that classifies a path as a public or
+//!   private key file from a cheap byte sniff.
 //!
 //! [`PublicKey`]: crate::PublicKey
 //! [`PrivateKey`]: crate::PrivateKey

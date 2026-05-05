@@ -766,7 +766,7 @@ Rules:
 - Recipient mixing is checked during construction.
 - Empty recipient lists reject immediately.
 - The API remains path-based because FerroCrypt security guarantees depend on archive preflight, streaming encryption, staging, and atomic finalization.
-- **Symmetric-default writer caps.** A default-configured `Encryptor` produces `.fcr` files a default-configured `Decryptor` can read. `write` enforces this via the same helpers the reader uses (single source of truth per rule — see "Centralized cap enforcement" below):
+- **Writer caps mirror reader defaults.** A default-configured `Encryptor` produces `.fcr` files a default-configured `Decryptor` can read. `write` enforces this via the same helpers the reader uses (single source of truth per rule — see "Centralized cap enforcement" below):
   - `api::preflight_header_write_limits` checks all three axes of `HeaderReadLimits` against the exact header the writer will emit: `recipient_count`, per-entry `body_len` (canonical native value from `NativeRecipientType::body_len()`), and the computed `header_len`. Tightening any axis below the writer's natural output rejects with the corresponding typed `*CapExceeded` variant.
   - For the passphrase path, `KdfParams::validate_for_write` runs the same `validate_structural` the reader runs (`lanes`, `time_cost`, `mem_cost` against v1 absolute bounds + the Argon2 `mem_cost ≥ ARGON2_MIN_MEM_COST_PER_LANE × lanes` floor) and then `enforce_limit` against `KdfLimit`. Above-structural params reject with `InvalidKdfParams::*`; above-resource-cap reject with `KdfResourceCapExceeded`. The same rule chain applies to `KeyPairGenerator::write` for the passphrase that seals `private.key`.
   - The X25519 path never runs Argon2id during encrypt, so `kdf_limit` has no effect on `with_recipient` / `with_recipients` flows.
@@ -886,7 +886,7 @@ Ownership split:
 - Key serialization lives in `key/`.
 - Key-file staging lives in `key/files.rs` and `fs/`.
 
-`KeyPairGenerator` mirrors `Encryptor`'s symmetric-default cap rule for the passphrase that seals `private.key`: `kdf_params.mem_cost <= kdf_limit.max_mem_cost_kib` (default 1 GiB) is enforced at `write` time before Argon2id runs. Above-default `mem_cost` rejects with `CryptoError::KdfResourceCapExceeded`; the unlocking [`RecipientDecryptor`] must be configured via [`RecipientDecryptor::kdf_limit`] with a matching [`KdfLimit`].
+`KeyPairGenerator` mirrors `Encryptor`'s reader-aligned cap rule for the passphrase that seals `private.key`: `kdf_params.mem_cost <= kdf_limit.max_mem_cost_kib` (default 1 GiB) is enforced at `write` time before Argon2id runs. Above-default `mem_cost` rejects with `CryptoError::KdfResourceCapExceeded`; the unlocking [`RecipientDecryptor`] must be configured via [`RecipientDecryptor::kdf_limit`] with a matching [`KdfLimit`].
 
 ### 9.5 Mode detection
 

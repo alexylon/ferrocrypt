@@ -621,19 +621,19 @@ mod tests {
     }
 
     #[test]
-    fn classify_returns_symmetric_for_lone_argon2id() {
+    fn classify_returns_passphrase_for_lone_argon2id() {
         let mode = classify_encryption_mode(&[argon2id_entry()]).unwrap();
         assert_eq!(mode, crate::EncryptionMode::Passphrase);
     }
 
     #[test]
-    fn classify_returns_hybrid_for_x25519() {
+    fn classify_returns_recipient_for_x25519() {
         let mode = classify_encryption_mode(&[x25519_entry()]).unwrap();
         assert_eq!(mode, crate::EncryptionMode::Recipient);
     }
 
     #[test]
-    fn classify_returns_hybrid_for_multiple_x25519() {
+    fn classify_returns_recipient_for_multiple_x25519() {
         let mode = classify_encryption_mode(&[x25519_entry(), x25519_entry()]).unwrap();
         assert_eq!(mode, crate::EncryptionMode::Recipient);
     }

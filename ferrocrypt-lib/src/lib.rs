@@ -19,7 +19,7 @@
 //! - **Typed diagnostics**: operations return [`CryptoError`] values with
 //!   structured format, KDF, recipient, authentication, and I/O failures.
 //!
-//! ## Quick start (symmetric / passphrase)
+//! ## Quick start (passphrase recipient)
 //! ```rust,no_run
 //! use ferrocrypt::{Decryptor, Encryptor, CryptoError, secrecy::SecretString};
 //!
@@ -42,7 +42,7 @@
 //! # fn main() { run().unwrap(); }
 //! ```
 //!
-//! ## Quick start (hybrid / public-key recipients)
+//! ## Quick start (public-key recipients)
 //! ```rust,no_run
 //! use ferrocrypt::{
 //!     Decryptor, Encryptor, generate_key_pair, PublicKey, PrivateKey,
@@ -77,10 +77,10 @@
 //!
 //! ## Choosing a recipient path
 //!
-//! - **Passphrase / symmetric**: use [`Encryptor::with_passphrase`] when the
+//! - **Passphrase recipient**: use [`Encryptor::with_passphrase`] when the
 //!   same passphrase should encrypt and decrypt the file. The resulting `.fcr`
 //!   contains exactly one native `argon2id` recipient.
-//! - **Public-key / hybrid**: use [`Encryptor::with_recipient`] or
+//! - **Public-key recipient**: use [`Encryptor::with_recipient`] or
 //!   [`Encryptor::with_recipients`] when the sender should encrypt to one or
 //!   more public recipient keys. Decryption requires a matching [`PrivateKey`]
 //!   file and that key file's passphrase. This does not authenticate the sender.

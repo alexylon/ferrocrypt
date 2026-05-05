@@ -321,7 +321,7 @@ impl Encryptor {
             validate_passphrase(p)?;
         }
 
-        // Symmetric-default cap checks via the same `enforce_*`
+        // Writer caps mirror reader defaults via the same `enforce_*`
         // helpers the reader uses, so default-encrypt and default-
         // decrypt cannot drift. Adding a new cap = add one method on
         // the limit type; both sides pick it up.
@@ -719,10 +719,11 @@ impl KeyPairGenerator {
         validate_passphrase(&self.passphrase)?;
         let kdf_params = self.kdf_params.unwrap_or_default();
         let kdf_limit = self.kdf_limit.unwrap_or_default();
-        // Symmetric-default cap via the same structural + resource KDF
-        // validation the reader uses, so a `private.key` produced here
-        // is unlocked by a default `RecipientDecryptor::decrypt`. To go
-        // above default, the caller raises both sides explicitly.
+        // Writer caps mirror reader defaults via the same structural +
+        // resource KDF validation the reader uses, so a `private.key`
+        // produced here is unlocked by a default
+        // `RecipientDecryptor::decrypt`. To go above default, the
+        // caller raises both sides explicitly.
         kdf_params.validate_for_write(Some(&kdf_limit))?;
         let (private_key_path, public_key_path) = protocol::generate_key_pair(
             &self.passphrase,

@@ -22,6 +22,7 @@ use crate::CryptoError;
 use crate::fs::atomic::rename_no_clobber;
 use crate::fs::paths::INCOMPLETE_SUFFIX;
 
+use super::IncompleteOutputPolicy;
 use super::limits::{ArchiveLimits, enforce_per_entry_caps, enforce_total_bytes_cap};
 use super::path::{UstarEntryKind, ustar, validate_archive_path_components};
 
@@ -295,23 +296,81 @@ fn drain_and_verify_zero_padding<R: Read>(mut reader: R) -> Result<(), CryptoErr
 /// All output is written under an `.incomplete` working name so that
 /// plaintext never appears under the final name during streaming
 /// decryption. On success, the working name is atomically renamed to the
-/// final name. On failure, the `.incomplete` output stays on disk for
-/// the user to inspect or delete.
+/// final name.
+///
+/// On failure, `policy` controls what happens to the staged
+/// `.incomplete` working tree. With [`IncompleteOutputPolicy::DeleteOnError`]
+/// (the default) the staged tree is best-effort removed before the
+/// error returns; with [`IncompleteOutputPolicy::RetainOnError`] it is
+/// left on disk for the caller to inspect or recover. Cleanup
+/// failures (path already gone, permission denied, racing process)
+/// are swallowed so the caller always sees the original `CryptoError`.
+///
+/// Cleanup targets the `.incomplete` working tree only. If the
+/// rename to the final name has already succeeded but a later
+/// post-rename step fails (today: applying the tar-stored root
+/// directory mode), the renamed final-name tree is left in place
+/// because its plaintext was already authenticated. The
+/// `.incomplete` no longer exists at that point so cleanup is a
+/// no-op for that root.
 pub(crate) fn unarchive<R: Read>(
     reader: R,
     output_dir: &Path,
     limits: ArchiveLimits,
+    policy: IncompleteOutputPolicy,
 ) -> Result<PathBuf, CryptoError> {
-    let mut archive = tar::Archive::new(reader);
     let mut first_entry_root: Option<PathBuf> = None;
     let mut checked_roots: Vec<OsString> = Vec::new();
+    // Roots whose `.incomplete` working tree this run actually
+    // created (via `mkdir_strict` / `create_file_at`). The cleanup
+    // path below uses *this* list rather than `checked_roots`: a
+    // pre-existing `.incomplete` left over from a previous failed
+    // run rejects with `Previous .incomplete exists` BEFORE
+    // `extract_entries` records it as created, so the prior partial
+    // is preserved across the retry — a safety net the user can use
+    // to inspect or recover the staged plaintext.
+    let mut created_incomplete_roots: Vec<OsString> = Vec::new();
+
+    let result = unarchive_into(
+        reader,
+        output_dir,
+        &limits,
+        &mut first_entry_root,
+        &mut checked_roots,
+        &mut created_incomplete_roots,
+    );
+
+    if result.is_err() && matches!(policy, IncompleteOutputPolicy::DeleteOnError) {
+        for root_name in &created_incomplete_roots {
+            let working_path = output_dir.join(incomplete_working_name(root_name));
+            cleanup_incomplete_path(&working_path);
+        }
+    }
+
+    result
+}
+
+/// Runs the actual extract → trailing-zero-block → rename → root-chmod
+/// pipeline. Split out from [`unarchive`] so the cleanup-on-error path
+/// in [`unarchive`] can borrow `created_incomplete_roots` after this
+/// function has returned a `Result`.
+fn unarchive_into<R: Read>(
+    reader: R,
+    output_dir: &Path,
+    limits: &ArchiveLimits,
+    first_entry_root: &mut Option<PathBuf>,
+    checked_roots: &mut Vec<OsString>,
+    created_incomplete_roots: &mut Vec<OsString>,
+) -> Result<PathBuf, CryptoError> {
+    let mut archive = tar::Archive::new(reader);
 
     let root_chmods = extract_entries(
         &mut archive,
         output_dir,
-        &mut first_entry_root,
-        &mut checked_roots,
-        &limits,
+        first_entry_root,
+        checked_roots,
+        created_incomplete_roots,
+        limits,
     )?;
 
     // FORMAT.md §9: a v1 archive payload ends with TWO 512-byte zero
@@ -342,7 +401,7 @@ pub(crate) fn unarchive<R: Read>(
     // already had their final modes applied deepest-first, and all
     // extraction `Dir` handles are dropped before this rename returns
     // control here.
-    for root_name in &checked_roots {
+    for root_name in &*checked_roots {
         let working_path = output_dir.join(incomplete_working_name(root_name));
         let final_path = output_dir.join(root_name);
         rename_no_clobber(&working_path, &final_path).map_err(|e| {
@@ -374,7 +433,37 @@ pub(crate) fn unarchive<R: Read>(
         }
     }
 
-    first_entry_root.ok_or_else(|| CryptoError::InvalidInput("Empty archive".to_string()))
+    first_entry_root
+        .clone()
+        .ok_or_else(|| CryptoError::InvalidInput("Empty archive".to_string()))
+}
+
+/// Best-effort removal of an `.incomplete` working path, used by
+/// [`unarchive`] under [`IncompleteOutputPolicy::DeleteOnError`].
+///
+/// Routes by `symlink_metadata` so a symlink at the working path is
+/// removed as a symlink rather than followed. Errors at any step
+/// (path already gone, permission denied, racing process) are
+/// swallowed so the caller always surfaces the original `CryptoError`
+/// from the failed decrypt rather than a cleanup-related I/O error.
+///
+/// Walking children of a directory at the working path uses
+/// [`std::fs::remove_dir_all`], which since Rust 1.71 is hardened
+/// against TOCTOU on Unix (`openat` + `unlinkat`) and does not follow
+/// symlinks — descendant symlinks pointing outside the staging tree
+/// are removed as symlinks rather than walked into.
+fn cleanup_incomplete_path(path: &Path) {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    if meta.file_type().is_symlink() {
+        let _ = fs::remove_file(path);
+    } else if meta.is_dir() {
+        let _ = fs::remove_dir_all(path);
+    } else {
+        let _ = fs::remove_file(path);
+    }
 }
 
 /// Builds the `{root}.incomplete` working name used throughout the
@@ -469,6 +558,7 @@ fn extract_entries<R: Read>(
     output_dir: &Path,
     first_entry_root: &mut Option<PathBuf>,
     checked_roots: &mut Vec<OsString>,
+    created_incomplete_roots: &mut Vec<OsString>,
     limits: &ArchiveLimits,
 ) -> Result<Vec<(OsString, u32)>, CryptoError> {
     use std::collections::HashMap;
@@ -523,6 +613,13 @@ fn extract_entries<R: Read>(
     /// canonical "mixes file and directory" error if a `SingleFile`
     /// root has already been recorded under the same name. Returns
     /// a borrow of the registered `Dir` handle.
+    ///
+    /// Pushes `root_name` onto `created_incomplete_roots` ONLY when
+    /// the underlying `mkdir_strict` succeeds — i.e. this run took
+    /// ownership of the staging directory. A pre-existing
+    /// `.incomplete` (which surfaces as `Previous .incomplete exists`)
+    /// MUST stay out of that list so `unarchive`'s cleanup-on-error
+    /// path does not delete a directory we never created.
     fn ensure_root_directory<'a>(
         roots: &'a mut HashMap<OsString, RootKind>,
         root_name: &OsString,
@@ -530,6 +627,7 @@ fn extract_entries<R: Read>(
         output_dir: &Path,
         incomplete_name: &OsStr,
         path: &Path,
+        created_incomplete_roots: &mut Vec<OsString>,
     ) -> Result<&'a Dir, CryptoError> {
         use std::collections::hash_map::Entry;
         match roots.entry(root_name.clone()) {
@@ -543,6 +641,7 @@ fn extract_entries<R: Read>(
             Entry::Vacant(vac) => {
                 let dir = platform::mkdir_strict(output_handle, incomplete_name)
                     .map_err(|e| map_incomplete_create_err(e, output_dir, incomplete_name))?;
+                created_incomplete_roots.push(root_name.clone());
                 match vac.insert(RootKind::Directory(dir)) {
                     RootKind::Directory(dir) => Ok(dir),
                     RootKind::SingleFile => unreachable!("just inserted Directory variant"),
@@ -612,6 +711,7 @@ fn extract_entries<R: Read>(
                         output_dir,
                         &incomplete_name,
                         &path,
+                        created_incomplete_roots,
                     )?;
                     if let Ok(mode) = entry.header().mode() {
                         dir_permissions.push((root_name.clone(), PathBuf::new(), mode));
@@ -630,6 +730,11 @@ fn extract_entries<R: Read>(
                         platform::INITIAL_FILE_CREATE_MODE,
                     )
                     .map_err(|e| map_create_file_err(e, output_dir, &incomplete_name))?;
+                    // create_file_at succeeded — this run owns the
+                    // staging file. Tracked symmetrically with the
+                    // directory-root branch so the cleanup-on-error
+                    // path can remove only roots we actually created.
+                    created_incomplete_roots.push(root_name.clone());
                     copy_payload_and_apply_mode(outfile, &mut entry)?;
                     roots.insert(root_name.clone(), RootKind::SingleFile);
                 }
@@ -648,6 +753,7 @@ fn extract_entries<R: Read>(
             output_dir,
             &incomplete_name,
             &path,
+            created_incomplete_roots,
         )?;
         let (parent_handle, final_name) = platform::walk_to_parent(root_handle, &rel)?;
         match kind {
@@ -712,6 +818,7 @@ fn extract_entries<R: Read>(
 mod tests {
     use super::super::limits::ArchiveLimits;
     use super::super::path::ustar;
+    use super::IncompleteOutputPolicy;
     use super::{read_required_zero_block, unarchive};
     use crate::CryptoError;
     use crate::error::StreamError;
@@ -755,7 +862,13 @@ mod tests {
             builder.finish().unwrap();
         }
 
-        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("multiple top-level roots"),
             "expected multi-root rejection, got: {err}"
@@ -804,7 +917,13 @@ mod tests {
             builder.finish().unwrap();
         }
 
-        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("multiple top-level roots"),
             "expected multi-root rejection, got: {err}"
@@ -836,7 +955,13 @@ mod tests {
             builder.finish().unwrap();
         }
 
-        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("Unsupported archive entry type"),
             "expected unsupported entry error, got: {err}"
@@ -885,7 +1010,13 @@ mod tests {
             builder.finish().unwrap();
         }
 
-        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap_err();
         // FORMAT.md §9 dup detection runs on the canonical path before
         // any filesystem write, so the second entry surfaces as a
         // typed "Duplicate archive entry" rejection rather than the
@@ -929,7 +1060,13 @@ mod tests {
                 builder.finish().unwrap();
             }
 
-            unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap();
+            unarchive(
+                Cursor::new(buf),
+                &extract_dir,
+                ArchiveLimits::default(),
+                IncompleteOutputPolicy::RetainOnError,
+            )
+            .unwrap();
 
             let restored = extract_dir.join("file.sh");
             let mode = fs::metadata(&restored).unwrap().permissions().mode() & 0o7777;
@@ -975,7 +1112,13 @@ mod tests {
             builder.finish().unwrap();
         }
 
-        unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap();
+        unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap();
 
         let dir_mode = fs::metadata(extract_dir.join("stickydir"))
             .unwrap()
@@ -1031,7 +1174,13 @@ mod tests {
             builder.finish().unwrap();
         }
 
-        unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap();
+        unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap();
 
         let root = extract_dir.join("locked");
         let root_mode = fs::metadata(&root).unwrap().permissions().mode() & 0o777;
@@ -1094,7 +1243,13 @@ mod tests {
             builder.finish().unwrap();
         }
 
-        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains(".incomplete exists") || msg.contains("exists") || msg.contains("Symlink"),
@@ -1134,7 +1289,13 @@ mod tests {
             builder.finish().unwrap();
         }
 
-        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("Output already exists"),
             "expected output-exists pre-check, got: {err}"
@@ -1175,7 +1336,13 @@ mod tests {
         // `.` violates that first, before the path-traversal check
         // ever runs. Either rejection is acceptable so long as the
         // archive is refused and the extract directory stays empty.
-        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("Directory entry path must end with /")
@@ -1213,7 +1380,13 @@ mod tests {
             builder.finish().unwrap();
         }
 
-        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap_err();
         assert!(
             err.to_string()
                 .contains("Directory entry path must end with /"),
@@ -1244,7 +1417,13 @@ mod tests {
             builder.finish().unwrap();
         }
 
-        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap_err();
         assert!(
             err.to_string()
                 .contains("File entry path must not end with /"),
@@ -1278,7 +1457,13 @@ mod tests {
             builder.finish().unwrap();
         }
 
-        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("Duplicate archive entry"),
             "expected duplicate-entry error, got: {err}"
@@ -1318,7 +1503,13 @@ mod tests {
             builder.finish().unwrap();
         }
 
-        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("Duplicate archive entry"),
             "expected file/dir canonical collision, got: {err}"
@@ -1425,7 +1616,13 @@ mod tests {
         // Deliberately omit both 512-byte zero blocks that
         // `Builder::finish` would normally append.
 
-        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap_err();
         assert!(
             err.to_string()
                 .contains("Missing TAR end-of-archive zero block"),
@@ -1463,7 +1660,13 @@ mod tests {
         let target_len = buf.len() - ustar::BLOCK_SIZE;
         buf.truncate(target_len);
 
-        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap_err();
         assert!(
             err.to_string()
                 .contains("Missing TAR end-of-archive zero block"),
@@ -1498,7 +1701,13 @@ mod tests {
         // Smuggle a non-zero byte past the end-of-archive zero blocks.
         buf.push(0xAA);
 
-        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("Non-zero trailing data"),
             "expected non-zero-trailing-data rejection, got: {err}"
@@ -1549,7 +1758,13 @@ mod tests {
         let body = b"30 mtime=1700000000.000000\n\0\0\0".to_vec();
         let buf = extension_record_archive(tar::EntryType::XHeader, "x_header", &body);
 
-        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("forbidden PAX"),
@@ -1597,7 +1812,13 @@ mod tests {
 
         buf.extend(std::iter::repeat_n(0u8, 2 * ustar::BLOCK_SIZE));
 
-        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("forbidden PAX"),
@@ -1618,7 +1839,13 @@ mod tests {
         let body = b"13 uid=1234\n13 gid=5678\n".to_vec();
         let buf = extension_record_archive(tar::EntryType::XHeader, "x_header", &body);
 
-        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("forbidden PAX"),
@@ -1639,7 +1866,13 @@ mod tests {
         let body = b"14 mode=0007777\n".to_vec();
         let buf = extension_record_archive(tar::EntryType::XHeader, "x_header", &body);
 
-        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("forbidden PAX"),
@@ -1660,7 +1893,13 @@ mod tests {
         let body = b"22 path=/etc/passwd\n\0\0".to_vec();
         let buf = extension_record_archive(tar::EntryType::XHeader, "x_header", &body);
 
-        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("forbidden PAX"),
@@ -1680,7 +1919,13 @@ mod tests {
         let body = b"19 size=2147483648\n\0".to_vec();
         let buf = extension_record_archive(tar::EntryType::XHeader, "x_header", &body);
 
-        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("forbidden PAX"),
@@ -1699,7 +1944,13 @@ mod tests {
         let body = b"15 comment=hi\n\0".to_vec();
         let buf = extension_record_archive(tar::EntryType::XGlobalHeader, "g_header", &body);
 
-        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("forbidden PAX"),
@@ -1722,7 +1973,13 @@ mod tests {
         let body = b"./long/path/that/would/be/applied/next\0".to_vec();
         let buf = extension_record_archive(tar::EntryType::GNULongName, "@LongLink", &body);
 
-        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("forbidden GNU"),
@@ -1767,7 +2024,13 @@ mod tests {
         // body bytes would be read.
         buf.extend(std::iter::repeat_n(0u8, 2 * ustar::BLOCK_SIZE));
 
-        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("forbidden GNU binary numeric"),
@@ -1787,7 +2050,13 @@ mod tests {
         let body = b"sparse-record-payload".to_vec();
         let buf = extension_record_archive(tar::EntryType::GNUSparse, "sparse", &body);
 
-        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("forbidden GNU"),
@@ -1829,7 +2098,13 @@ mod tests {
             builder.finish().unwrap();
         }
 
-        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("GNU long-name") || msg.contains("not POSIX ustar"),
@@ -1876,7 +2151,13 @@ mod tests {
             max_entry_count: 3,
             ..ArchiveLimits::default()
         };
-        let err = unarchive(Cursor::new(buf), &extract_dir, limits).unwrap_err();
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            limits,
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("entry-count cap"),
             "expected entry-count cap rejection, got: {err}"
@@ -1915,7 +2196,13 @@ mod tests {
             max_total_plaintext_bytes: 100,
             ..ArchiveLimits::default()
         };
-        let err = unarchive(Cursor::new(buf), &extract_dir, limits).unwrap_err();
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            limits,
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("total-bytes cap"),
             "expected total-bytes cap rejection, got: {err}"
@@ -1955,11 +2242,171 @@ mod tests {
             max_path_depth: 4,
             ..ArchiveLimits::default()
         };
-        let err = unarchive(Cursor::new(buf), &extract_dir, limits).unwrap_err();
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            limits,
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("path depth cap"),
             "expected path depth cap rejection, got: {err}"
         );
         assert!(!extract_dir.join("myroot").exists());
+    }
+
+    /// `IncompleteOutputPolicy::DeleteOnError` (the default) MUST
+    /// remove the staged `.incomplete` root after a post-extract
+    /// failure. Builds a single-entry archive without trailing zero
+    /// blocks so extraction succeeds (writing `hello.txt.incomplete`)
+    /// before `read_required_zero_block` rejects, then asserts the
+    /// staged file is gone.
+    #[test]
+    fn unarchive_delete_on_error_removes_incomplete_after_failure() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        let data = b"payload";
+        let mut header = tar::Header::new_ustar();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_path("hello.txt").unwrap();
+        header.set_cksum();
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(header.as_bytes());
+        buf.extend_from_slice(data);
+        let pad = (ustar::BLOCK_SIZE - data.len() % ustar::BLOCK_SIZE) % ustar::BLOCK_SIZE;
+        buf.extend(std::iter::repeat_n(0u8, pad));
+
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::DeleteOnError,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Missing TAR end-of-archive zero block"),
+            "expected missing-end-blocks rejection, got: {err}"
+        );
+
+        let working_path = extract_dir.join("hello.txt.incomplete");
+        assert!(
+            fs::symlink_metadata(&working_path).is_err(),
+            "DeleteOnError must remove .incomplete; still present: {}",
+            working_path.display()
+        );
+        assert!(
+            fs::symlink_metadata(extract_dir.join("hello.txt")).is_err(),
+            "final name must not exist after a failed decrypt"
+        );
+    }
+
+    /// `IncompleteOutputPolicy::RetainOnError` MUST leave the staged
+    /// `.incomplete` root on disk after the same post-extract failure
+    /// the previous test exercises. Symmetric to
+    /// [`unarchive_delete_on_error_removes_incomplete_after_failure`]
+    /// — same input bytes, opposite policy, opposite assertion.
+    #[test]
+    fn unarchive_retain_on_error_keeps_incomplete_after_failure() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        let data = b"payload";
+        let mut header = tar::Header::new_ustar();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_path("hello.txt").unwrap();
+        header.set_cksum();
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(header.as_bytes());
+        buf.extend_from_slice(data);
+        let pad = (ustar::BLOCK_SIZE - data.len() % ustar::BLOCK_SIZE) % ustar::BLOCK_SIZE;
+        buf.extend(std::iter::repeat_n(0u8, pad));
+
+        let _err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap_err();
+
+        let working_path = extract_dir.join("hello.txt.incomplete");
+        let meta =
+            fs::symlink_metadata(&working_path).expect("RetainOnError must keep .incomplete");
+        assert!(
+            meta.is_file(),
+            "expected staged file at {}",
+            working_path.display()
+        );
+        let restored = fs::read(&working_path).unwrap();
+        assert_eq!(
+            restored, data,
+            "retained .incomplete should hold the authenticated entry payload"
+        );
+    }
+
+    /// Directory-root variant: an archive where the root is a
+    /// directory must also have its `.incomplete` working tree
+    /// removed under `DeleteOnError`. Confirms
+    /// `cleanup_incomplete_path` dispatches `is_dir()` to
+    /// `remove_dir_all` rather than `remove_file`. Bytes are
+    /// hand-constructed (rather than via `tar::Builder`) because
+    /// `Builder`'s `Drop` impl auto-calls `finish`, which would
+    /// silently append the trailing zero blocks and turn the
+    /// expected failure into a success.
+    #[test]
+    fn unarchive_delete_on_error_removes_incomplete_directory_after_failure() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        let data = b"hi";
+        let mut header = tar::Header::new_ustar();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_path("treeroot/file.txt").unwrap();
+        header.set_cksum();
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(header.as_bytes());
+        buf.extend_from_slice(data);
+        let pad = (ustar::BLOCK_SIZE - data.len() % ustar::BLOCK_SIZE) % ustar::BLOCK_SIZE;
+        buf.extend(std::iter::repeat_n(0u8, pad));
+        // Deliberately omit both 512-byte zero blocks.
+
+        let err = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::DeleteOnError,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Missing TAR end-of-archive zero block"),
+            "expected missing-end-blocks rejection, got: {err}"
+        );
+
+        let working_dir = extract_dir.join("treeroot.incomplete");
+        assert!(
+            fs::symlink_metadata(&working_dir).is_err(),
+            "DeleteOnError must remove .incomplete directory; still present: {}",
+            working_dir.display()
+        );
+        assert!(
+            fs::symlink_metadata(extract_dir.join("treeroot")).is_err(),
+            "final root directory must not exist after a failed decrypt"
+        );
     }
 }

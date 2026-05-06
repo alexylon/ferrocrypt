@@ -675,6 +675,7 @@ Rules:
 - Resource limits are enforced while reading.
 - Extraction preserves the order: validate first, then create or write.
 - Decode logic does not bypass platform extraction hardening.
+- `unarchive` accepts an [`IncompleteOutputPolicy`] from the caller. The default ([`IncompleteOutputPolicy::DeleteOnError`]) best-effort removes the staged `.incomplete` working tree on any decrypt failure; [`IncompleteOutputPolicy::RetainOnError`] preserves it. Cleanup tracks only roots THIS run created — `mkdir_strict` / `create_file_at` push `created_incomplete_roots` only when they actually created the working name, so a pre-existing `.incomplete` from a prior failed run rejects with `Previous .incomplete exists` and is preserved across the retry. Cleanup helper `cleanup_incomplete_path` routes by `symlink_metadata` (symlinks removed as symlinks; directories via `remove_dir_all`, which since Rust 1.71 is TOCTOU-hardened on Unix and does not follow descendant symlinks) and swallows all I/O errors so the original `CryptoError` is the value the caller sees.
 
 ### 7.5 `archive/platform.rs`
 
@@ -823,6 +824,10 @@ impl PassphraseDecryptor {
 
     pub fn archive_limits(self, limits: ArchiveLimits) -> Self;
 
+    pub fn header_read_limits(self, limits: HeaderReadLimits) -> Self;
+
+    pub fn incomplete_output_policy(self, policy: IncompleteOutputPolicy) -> Self;
+
     pub fn decrypt(
         self,
         passphrase: SecretString,
@@ -838,6 +843,10 @@ impl RecipientDecryptor {
 
     pub fn archive_limits(self, limits: ArchiveLimits) -> Self;
 
+    pub fn header_read_limits(self, limits: HeaderReadLimits) -> Self;
+
+    pub fn incomplete_output_policy(self, policy: IncompleteOutputPolicy) -> Self;
+
     pub fn decrypt(
         self,
         identity: PrivateKey,
@@ -849,6 +858,8 @@ impl RecipientDecryptor {
 ```
 
 `archive_limits` on the decrypt side mirrors `Encryptor::archive_limits` on the encrypt side. Both default to [`ArchiveLimits::default`] when unset; symmetry between encrypt-side preflight and decrypt-side extraction is the caller's responsibility — a `.fcr` produced under elevated encrypt caps can only be round-tripped by passing the same elevated value to the corresponding decryptor.
+
+`incomplete_output_policy` defaults to [`IncompleteOutputPolicy::DeleteOnError`]: a failed decrypt removes the staged `.incomplete` plaintext so no authenticated-but-incomplete output lingers under `output_dir`. [`IncompleteOutputPolicy::RetainOnError`] preserves the staged tree for backup-recovery / forensic flows; callers that opt in MUST treat retained partials as a potentially attacker-chosen prefix (FerroCrypt's STREAM-BE32 payload only detects truncation when the final chunk arrives, so an attacker can choose any chunk-aligned prefix that the recovered plaintext represents).
 
 Preferred public concepts are `Passphrase` and `Recipient`. Internals are not organized around `Symmetric` and `Hybrid` because those names describe historical modes rather than the recipient-entry model.
 

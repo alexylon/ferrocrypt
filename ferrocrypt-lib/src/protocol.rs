@@ -40,7 +40,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::archive::{ArchiveLimits, unarchive};
+use crate::archive::{ArchiveLimits, IncompleteOutputPolicy, unarchive};
 use crate::container::{
     HeaderReadLimits, build_encrypted_header, read_encrypted_header, resolve_encrypted_output_path,
     write_encrypted_file,
@@ -269,6 +269,7 @@ pub(crate) fn decrypt<I: IdentityScheme>(
     output_dir: &Path,
     archive_limits: ArchiveLimits,
     header_read_limits: HeaderReadLimits,
+    incomplete_output_policy: IncompleteOutputPolicy,
     on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<PathBuf, CryptoError> {
     let mut encrypted_file = fs::File::open(input_path)?;
@@ -392,7 +393,12 @@ pub(crate) fn decrypt<I: IdentityScheme>(
     //        are enforced inside `unarchive` before any write.
     on_event(&ProgressEvent::Decrypting);
     let decrypt_reader = payload_decryptor(&payload_key, &stream_nonce, encrypted_file);
-    unarchive(decrypt_reader, output_dir, archive_limits)
+    unarchive(
+        decrypt_reader,
+        output_dir,
+        archive_limits,
+        incomplete_output_policy,
+    )
 }
 
 /// Verifies that the classified file mode matches the identity scheme's
@@ -667,6 +673,7 @@ mod tests {
             dec_dir,
             ArchiveLimits::default(),
             HeaderReadLimits::default(),
+            IncompleteOutputPolicy::default(),
             &|_| {},
         )
     }
@@ -1131,6 +1138,7 @@ mod tests {
             &dec_dir,
             ArchiveLimits::default(),
             HeaderReadLimits::default(),
+            IncompleteOutputPolicy::default(),
             &|_| {},
         )
         .unwrap_err();

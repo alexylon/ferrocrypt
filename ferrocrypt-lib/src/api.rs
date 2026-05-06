@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 
 use secrecy::{ExposeSecret as _, SecretString};
 
-use crate::archive::{self, ArchiveLimits};
+use crate::archive::{self, ArchiveLimits, IncompleteOutputPolicy};
 use crate::container::{self, HeaderReadLimits};
 use crate::crypto::kdf::{KdfLimit, KdfParams};
 use crate::error::FormatDefect;
@@ -473,12 +473,14 @@ impl Decryptor {
                 kdf_limit: None,
                 archive_limits: None,
                 header_read_limits,
+                incomplete_output_policy: None,
             })),
             EncryptionMode::Recipient => Ok(Self::Recipient(RecipientDecryptor {
                 input,
                 kdf_limit: None,
                 archive_limits: None,
                 header_read_limits,
+                incomplete_output_policy: None,
             })),
         }
     }
@@ -494,6 +496,7 @@ pub struct PassphraseDecryptor {
     kdf_limit: Option<KdfLimit>,
     archive_limits: Option<ArchiveLimits>,
     header_read_limits: Option<HeaderReadLimits>,
+    incomplete_output_policy: Option<IncompleteOutputPolicy>,
 }
 
 impl PassphraseDecryptor {
@@ -524,6 +527,21 @@ impl PassphraseDecryptor {
         self
     }
 
+    /// Sets the policy that governs the `.incomplete` working tree
+    /// when this decrypt fails.
+    ///
+    /// Defaults to [`IncompleteOutputPolicy::DeleteOnError`]: a failed
+    /// decrypt leaves no plaintext residue under `output_dir`. Pass
+    /// [`IncompleteOutputPolicy::RetainOnError`] for backup-recovery
+    /// or forensic flows where partial output is more useful than no
+    /// output. See [`IncompleteOutputPolicy::RetainOnError`] for the
+    /// truncation-prefix caveat callers MUST acknowledge before acting
+    /// on a retained partial.
+    pub fn incomplete_output_policy(mut self, policy: IncompleteOutputPolicy) -> Self {
+        self.incomplete_output_policy = Some(policy);
+        self
+    }
+
     /// Decrypts this passphrase-sealed `.fcr` into `output_dir`.
     ///
     /// The passphrase is checked for non-emptiness, then used to unwrap the
@@ -544,6 +562,7 @@ impl PassphraseDecryptor {
         };
         let archive_limits = self.archive_limits.unwrap_or_default();
         let header_read_limits = self.header_read_limits.unwrap_or_default();
+        let incomplete_output_policy = self.incomplete_output_policy.unwrap_or_default();
         // No early progress event here. `protocol::decrypt` parses the
         // header structurally before any KDF runs; if the file is
         // malformed or mode-mismatched, no event should fire. The
@@ -557,6 +576,7 @@ impl PassphraseDecryptor {
             output_dir.as_ref(),
             archive_limits,
             header_read_limits,
+            incomplete_output_policy,
             &on_event,
         )?;
         Ok(DecryptOutcome { output_path })
@@ -573,6 +593,7 @@ pub struct RecipientDecryptor {
     kdf_limit: Option<KdfLimit>,
     archive_limits: Option<ArchiveLimits>,
     header_read_limits: Option<HeaderReadLimits>,
+    incomplete_output_policy: Option<IncompleteOutputPolicy>,
 }
 
 impl RecipientDecryptor {
@@ -601,6 +622,21 @@ impl RecipientDecryptor {
     /// loosen them between open and decrypt for advanced flows.
     pub fn header_read_limits(mut self, limits: HeaderReadLimits) -> Self {
         self.header_read_limits = Some(limits);
+        self
+    }
+
+    /// Sets the policy that governs the `.incomplete` working tree
+    /// when this decrypt fails.
+    ///
+    /// Defaults to [`IncompleteOutputPolicy::DeleteOnError`]: a failed
+    /// decrypt leaves no plaintext residue under `output_dir`. Pass
+    /// [`IncompleteOutputPolicy::RetainOnError`] for backup-recovery
+    /// or forensic flows where partial output is more useful than no
+    /// output. See [`IncompleteOutputPolicy::RetainOnError`] for the
+    /// truncation-prefix caveat callers MUST acknowledge before acting
+    /// on a retained partial.
+    pub fn incomplete_output_policy(mut self, policy: IncompleteOutputPolicy) -> Self {
+        self.incomplete_output_policy = Some(policy);
         self
     }
 
@@ -635,12 +671,14 @@ impl RecipientDecryptor {
         let identity_scheme = recipient::x25519::X25519Identity { recipient_secret };
         let archive_limits = self.archive_limits.unwrap_or_default();
         let header_read_limits = self.header_read_limits.unwrap_or_default();
+        let incomplete_output_policy = self.incomplete_output_policy.unwrap_or_default();
         let output_path = protocol::decrypt(
             &identity_scheme,
             &self.input,
             output_dir.as_ref(),
             archive_limits,
             header_read_limits,
+            incomplete_output_policy,
             &on_event,
         )?;
         Ok(DecryptOutcome { output_path })

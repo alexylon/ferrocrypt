@@ -270,6 +270,142 @@ fn test_passphrase_payload_tamper_mid_chunk() -> Result<(), CryptoError> {
 }
 
 #[test]
+fn test_passphrase_decrypt_delete_on_error_removes_incomplete_after_payload_tamper()
+-> Result<(), CryptoError> {
+    use ferrocrypt::{Decryptor, IncompleteOutputPolicy};
+
+    let test_dir = setup_test_dir("decrypt_delete_on_error");
+    let input_file = test_dir.join("payload.bin");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    // Multi-chunk plaintext so the tamper-byte at ct.len()/2 lands
+    // inside a non-first STREAM chunk. Earlier chunks succeed and
+    // stream their bytes into `.incomplete`; the tampered chunk fails
+    // mid-extract, so cleanup has to handle a partially-populated
+    // `.incomplete` working tree.
+    let big_data: Vec<u8> = (0..200_000u32).map(|i| (i % 256) as u8).collect();
+    fs::write(&input_file, &big_data)?;
+
+    let passphrase = SecretString::from("delete-pass".to_string());
+    passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+
+    let encrypted_path = encrypt_dir.join("payload.fcr");
+    let mut ct = fs::read(&encrypted_path)?;
+    let flip_offset = ct.len() / 2;
+    ct[flip_offset] ^= 0xFF;
+    fs::write(&encrypted_path, &ct)?;
+
+    let Decryptor::Passphrase(decryptor) = Decryptor::open(&encrypted_path)? else {
+        panic!("expected passphrase-sealed file");
+    };
+    let result = decryptor
+        .incomplete_output_policy(IncompleteOutputPolicy::DeleteOnError)
+        .decrypt(passphrase, &decrypt_dir, |_| {});
+    match result {
+        Err(CryptoError::PayloadTampered) => {}
+        other => panic!("expected PayloadTampered, got {other:?}"),
+    }
+
+    let working_path = decrypt_dir.join("payload.bin.incomplete");
+    assert!(
+        fs::symlink_metadata(&working_path).is_err(),
+        "DeleteOnError must remove .incomplete; still present: {}",
+        working_path.display()
+    );
+    let final_path = decrypt_dir.join("payload.bin");
+    assert!(
+        fs::symlink_metadata(&final_path).is_err(),
+        "final name must not exist after a failed decrypt"
+    );
+    Ok(())
+}
+
+#[test]
+fn test_passphrase_decrypt_retain_on_error_keeps_incomplete_after_payload_tamper()
+-> Result<(), CryptoError> {
+    use ferrocrypt::{Decryptor, IncompleteOutputPolicy};
+
+    let test_dir = setup_test_dir("decrypt_retain_on_error");
+    let input_file = test_dir.join("payload.bin");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    let big_data: Vec<u8> = (0..200_000u32).map(|i| (i % 256) as u8).collect();
+    fs::write(&input_file, &big_data)?;
+
+    let passphrase = SecretString::from("retain-pass".to_string());
+    passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+
+    let encrypted_path = encrypt_dir.join("payload.fcr");
+    let mut ct = fs::read(&encrypted_path)?;
+    let flip_offset = ct.len() / 2;
+    ct[flip_offset] ^= 0xFF;
+    fs::write(&encrypted_path, &ct)?;
+
+    let Decryptor::Passphrase(decryptor) = Decryptor::open(&encrypted_path)? else {
+        panic!("expected passphrase-sealed file");
+    };
+    let result = decryptor
+        .incomplete_output_policy(IncompleteOutputPolicy::RetainOnError)
+        .decrypt(passphrase, &decrypt_dir, |_| {});
+    assert!(matches!(result, Err(CryptoError::PayloadTampered)));
+
+    let working_path = decrypt_dir.join("payload.bin.incomplete");
+    let meta = fs::symlink_metadata(&working_path).expect("RetainOnError must keep .incomplete");
+    assert!(
+        meta.is_file(),
+        "expected staged file at {}",
+        working_path.display()
+    );
+    Ok(())
+}
+
+#[test]
+fn test_passphrase_decrypt_default_policy_removes_incomplete() -> Result<(), CryptoError> {
+    use ferrocrypt::Decryptor;
+
+    // Confirms the implicit default (no `.incomplete_output_policy`
+    // call) matches `IncompleteOutputPolicy::DeleteOnError`.
+    let test_dir = setup_test_dir("decrypt_default_policy");
+    let input_file = test_dir.join("payload.bin");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    let big_data: Vec<u8> = (0..200_000u32).map(|i| (i % 256) as u8).collect();
+    fs::write(&input_file, &big_data)?;
+
+    let passphrase = SecretString::from("default-pass".to_string());
+    passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+
+    let encrypted_path = encrypt_dir.join("payload.fcr");
+    let mut ct = fs::read(&encrypted_path)?;
+    let flip_offset = ct.len() / 2;
+    ct[flip_offset] ^= 0xFF;
+    fs::write(&encrypted_path, &ct)?;
+
+    let Decryptor::Passphrase(decryptor) = Decryptor::open(&encrypted_path)? else {
+        panic!("expected passphrase-sealed file");
+    };
+    let result = decryptor.decrypt(passphrase, &decrypt_dir, |_| {});
+    assert!(matches!(result, Err(CryptoError::PayloadTampered)));
+
+    let working_path = decrypt_dir.join("payload.bin.incomplete");
+    assert!(
+        fs::symlink_metadata(&working_path).is_err(),
+        "default policy must match DeleteOnError; still present: {}",
+        working_path.display()
+    );
+    Ok(())
+}
+
+#[test]
 fn test_passphrase_encrypt_decrypt_multi_chunk_file() -> Result<(), CryptoError> {
     let test_dir = setup_test_dir("passphrase_multi_chunk");
     let input_file = test_dir.join("multi_chunk.txt");
@@ -524,14 +660,9 @@ fn test_passphrase_decrypt_progress_events_in_order() -> Result<(), CryptoError>
     create_test_file(&input_file, "passphrase progress order");
 
     let encrypt_events: Mutex<Vec<ProgressEvent>> = Mutex::new(Vec::new());
-    passphrase_auto(
-        &input_file,
-        &encrypt_dir,
-        &passphrase,
-        None,
-        None,
-        |ev| encrypt_events.lock().unwrap().push(*ev),
-    )?;
+    passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |ev| {
+        encrypt_events.lock().unwrap().push(*ev)
+    })?;
 
     let encrypted_path = encrypt_dir.join("data.fcr");
     let decrypt_events: Mutex<Vec<ProgressEvent>> = Mutex::new(Vec::new());
@@ -547,9 +678,8 @@ fn test_passphrase_decrypt_progress_events_in_order() -> Result<(), CryptoError>
     let encrypt_events = encrypt_events.into_inner().unwrap();
     let decrypt_events = decrypt_events.into_inner().unwrap();
 
-    let count = |evs: &[ProgressEvent], target: ProgressEvent| {
-        evs.iter().filter(|e| **e == target).count()
-    };
+    let count =
+        |evs: &[ProgressEvent], target: ProgressEvent| evs.iter().filter(|e| **e == target).count();
 
     assert_eq!(
         count(&encrypt_events, ProgressEvent::DerivingPassphraseWrapKey),
@@ -2463,6 +2593,8 @@ fn test_recipient_encrypt_cleans_up_on_failure() -> Result<(), CryptoError> {
 
 #[test]
 fn test_passphrase_decrypt_marks_incomplete_file() -> Result<(), CryptoError> {
+    use ferrocrypt::{Decryptor, IncompleteOutputPolicy};
+
     let test_dir = setup_test_dir("pass_decrypt_incomplete_file");
     let input_file = test_dir.join("bigfile.bin");
     let encrypt_dir = test_dir.join("encrypted");
@@ -2484,20 +2616,18 @@ fn test_passphrase_decrypt_marks_incomplete_file() -> Result<(), CryptoError> {
     data[flip_offset] ^= 0xFF;
     fs::write(&encrypted_path, &data)?;
 
-    let result = passphrase_auto(
-        &encrypted_path,
-        &decrypt_dir,
-        &passphrase,
-        None,
-        None,
-        |_| {},
-    );
+    let Decryptor::Passphrase(decryptor) = Decryptor::open(&encrypted_path)? else {
+        panic!("expected passphrase-sealed file");
+    };
+    let result = decryptor
+        .incomplete_output_policy(IncompleteOutputPolicy::RetainOnError)
+        .decrypt(passphrase, &decrypt_dir, |_| {});
     assert!(result.is_err());
 
     let incomplete_path = decrypt_dir.join("bigfile.bin.incomplete");
     assert!(
         incomplete_path.exists(),
-        "partial output should have been renamed to .incomplete"
+        "RetainOnError should leave the partial output as .incomplete"
     );
     // Original name should not exist
     assert!(!decrypt_dir.join("bigfile.bin").exists());
@@ -2507,6 +2637,8 @@ fn test_passphrase_decrypt_marks_incomplete_file() -> Result<(), CryptoError> {
 
 #[test]
 fn test_passphrase_decrypt_marks_incomplete_directory() -> Result<(), CryptoError> {
+    use ferrocrypt::{Decryptor, IncompleteOutputPolicy};
+
     let test_dir = setup_test_dir("pass_decrypt_incomplete_dir");
     let input_dir = test_dir.join("mydir");
     let encrypt_dir = test_dir.join("encrypted");
@@ -2529,20 +2661,18 @@ fn test_passphrase_decrypt_marks_incomplete_directory() -> Result<(), CryptoErro
     data[flip_offset] ^= 0xFF;
     fs::write(&encrypted_path, &data)?;
 
-    let result = passphrase_auto(
-        &encrypted_path,
-        &decrypt_dir,
-        &passphrase,
-        None,
-        None,
-        |_| {},
-    );
+    let Decryptor::Passphrase(decryptor) = Decryptor::open(&encrypted_path)? else {
+        panic!("expected passphrase-sealed file");
+    };
+    let result = decryptor
+        .incomplete_output_policy(IncompleteOutputPolicy::RetainOnError)
+        .decrypt(passphrase, &decrypt_dir, |_| {});
     assert!(result.is_err());
 
     let incomplete_path = decrypt_dir.join("mydir.incomplete");
     assert!(
         incomplete_path.exists(),
-        "partial directory should have been renamed to .incomplete"
+        "RetainOnError should leave the partial directory as .incomplete"
     );
     assert!(incomplete_path.is_dir());
     assert!(!decrypt_dir.join("mydir").exists());

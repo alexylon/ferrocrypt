@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 use clap::{ArgAction, Parser, Subcommand};
 use ferrocrypt::secrecy::{ExposeSecret, SecretString};
 use ferrocrypt::{
-    CryptoError, Decryptor, Encryptor, KdfLimit, KdfParams, KeyPairGenerator, MAGIC,
-    PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME, PrivateKey, PublicKey, default_encrypted_filename,
-    validate_private_key_file,
+    CryptoError, Decryptor, Encryptor, IncompleteOutputPolicy, KdfLimit, KdfParams,
+    KeyPairGenerator, MAGIC, PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME, PrivateKey, PublicKey,
+    default_encrypted_filename, validate_private_key_file,
 };
 use rpassword::prompt_password;
 use rustyline::DefaultEditor;
@@ -193,6 +193,12 @@ pub enum CliCommand {
             help = "Maximum Argon2id memory cost to accept (MiB)"
         )]
         max_kdf_memory: Option<u32>,
+
+        #[arg(
+            long = "keep-partial",
+            help = "Keep the .incomplete staged plaintext on decrypt failure (forensic / recovery use)"
+        )]
+        keep_partial: bool,
     },
 
     #[command(visible_alias = "gen", about = "Generate a key pair")]
@@ -454,7 +460,8 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
             output_dir,
             private_key,
             max_kdf_memory,
-        } => run_decrypt(input, output_dir, private_key, max_kdf_memory),
+            keep_partial,
+        } => run_decrypt(input, output_dir, private_key, max_kdf_memory, keep_partial),
 
         CliCommand::Keygen { output_dir } => run_keygen(output_dir),
         CliCommand::Fingerprint { public_key_file } => run_fingerprint(public_key_file),
@@ -508,9 +515,15 @@ fn run_decrypt(
     output_dir: PathBuf,
     private_key: Option<PathBuf>,
     max_kdf_memory: Option<u32>,
+    keep_partial: bool,
 ) -> Result<(), CryptoError> {
     let start = std::time::Instant::now();
     let limit = max_kdf_memory.map(KdfLimit::from_mib).transpose()?;
+    let policy = if keep_partial {
+        IncompleteOutputPolicy::RetainOnError
+    } else {
+        IncompleteOutputPolicy::DeleteOnError
+    };
 
     let output = match Decryptor::open(&input)? {
         Decryptor::Passphrase(mut decryptor) => {
@@ -523,6 +536,7 @@ fn run_decrypt(
             if let Some(limit) = limit {
                 decryptor = decryptor.kdf_limit(limit);
             }
+            decryptor = decryptor.incomplete_output_policy(policy);
             let passphrase = read_passphrase(false)?;
             decryptor
                 .decrypt(passphrase, &output_dir, |ev| eprintln!("{ev}"))?
@@ -539,6 +553,7 @@ fn run_decrypt(
             if let Some(limit) = limit {
                 decryptor = decryptor.kdf_limit(limit);
             }
+            decryptor = decryptor.incomplete_output_policy(policy);
             let passphrase = read_passphrase(false)?;
             decryptor
                 .decrypt(

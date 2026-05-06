@@ -397,6 +397,7 @@ fn archive_directory<W: Write>(
 
 #[cfg(test)]
 mod tests {
+    use super::super::IncompleteOutputPolicy;
     use super::super::limits::ArchiveLimits;
     use super::super::path::UstarEntryKind;
     use super::super::path::ustar;
@@ -419,7 +420,13 @@ mod tests {
         let (stem, _) = archive(&input_file, &mut buf, ArchiveLimits::default()).unwrap();
         assert_eq!(stem, "hello");
 
-        let output = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap();
+        let output = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap();
         assert!(output.exists());
 
         let restored = fs::read_to_string(extract_dir.join("hello.txt")).unwrap();
@@ -442,7 +449,13 @@ mod tests {
         let (stem, _) = archive(&input_dir, &mut buf, ArchiveLimits::default()).unwrap();
         assert_eq!(stem, "mydir");
 
-        let output = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap();
+        let output = unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap();
         assert!(output.exists());
 
         let restored_a = fs::read_to_string(extract_dir.join("mydir/a.txt")).unwrap();
@@ -480,7 +493,13 @@ mod tests {
         let (stem, _) = archive(&input_file, &mut buf, ArchiveLimits::default()).unwrap();
         assert_eq!(stem, "empty");
 
-        unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap();
+        unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap();
         let restored = fs::read_to_string(extract_dir.join("empty.txt")).unwrap();
         assert_eq!(restored, "");
     }
@@ -498,7 +517,13 @@ mod tests {
         let mut buf = Vec::new();
         let (_, _) = archive(&input_file, &mut buf, ArchiveLimits::default()).unwrap();
 
-        unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap();
+        unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap();
 
         let restored = fs::read(extract_dir.join("data.bin")).unwrap();
         assert_eq!(restored, binary_data);
@@ -519,7 +544,13 @@ mod tests {
         let mut buf = Vec::new();
         let (_, _) = archive(&input_file, &mut buf, ArchiveLimits::default()).unwrap();
 
-        unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap();
+        unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap();
 
         let restored = extract_dir.join("script.sh");
         let mode = fs::metadata(&restored).unwrap().permissions().mode() & 0o777;
@@ -543,7 +574,13 @@ mod tests {
         let mut buf = Vec::new();
         let (_, _) = archive(&input_dir, &mut buf, ArchiveLimits::default()).unwrap();
 
-        unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap();
+        unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap();
 
         let restored_sub = extract_dir.join("mydir/restricted");
         let mode = fs::metadata(&restored_sub).unwrap().permissions().mode() & 0o777;
@@ -569,7 +606,13 @@ mod tests {
         let (_, _) = archive(&input_dir, &mut buf, ArchiveLimits::default()).unwrap();
 
         // Must not fail with "Permission denied" when extracting inner.txt
-        unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap();
+        unarchive(
+            Cursor::new(buf),
+            &extract_dir,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        )
+        .unwrap();
 
         let restored_file = extract_dir.join("mydir/readonly/inner.txt");
         assert_eq!(fs::read_to_string(&restored_file).unwrap(), "hello");

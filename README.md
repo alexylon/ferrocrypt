@@ -236,7 +236,7 @@ Limitations:
 - Filesystem hardlinks encountered during encryption are stored as independent regular files.
 - Single files inside an encrypted folder are limited to about 8 GiB (the largest value the standard ustar size field can carry, exactly 8,589,934,591 bytes); larger inputs are rejected up front. Archives can hold many such files up to the total-bytes cap below.
 - Default archive limits are enforced during encryption and decryption: at most 250,000 entries, 64 GiB of total regular-file content, and 64 path components per entry.
-- Failed decryptions do not write to the final output path. Partial plaintext may remain in a sibling `.incomplete` working copy when corruption is detected after some chunks have already authenticated.
+- Failed decryptions do not write to the final output path. By default the staged `.incomplete` working copy is removed before the error returns, so a failed decrypt leaves no plaintext residue under the output directory. Pass `decrypt --keep-partial` (CLI) or `IncompleteOutputPolicy::RetainOnError` (library) to keep the staged copy for backup-recovery or forensic inspection; retained partials may represent an attacker-chosen prefix of the original because the per-chunk authentication only detects truncation when the final chunk arrives.
 - Hardened extraction is unified across Linux, macOS, and Windows: every directory open uses `cap-std` plus `cap-fs-ext` no-follow primitives, with an additional `FILE_ATTRIBUTE_REPARSE_POINT` rejection on Windows so junctions and mount points are refused alongside symlinks. The same code path applies on every supported OS.
 
 ## Decryption errors
@@ -257,7 +257,7 @@ Common failure categories include:
 - **KDF resource cap exceeded** — the file requests more Argon2id memory than the configured limit permits. The default cap is 1 GiB; raise it with `--max-kdf-memory` if the source is trusted.
 - **Unknown critical recipient: `<type>`. Upgrade FerroCrypt.** — the file uses a recipient type marked as required that this release does not support.
 
-No failed decryption produces a completed output at the requested final path. If an `.incomplete` working copy is left behind, removing it resets the destination for a later retry.
+No failed decryption produces a completed output at the requested final path. The default behavior removes any staged `.incomplete` working copy before the error returns; `--keep-partial` keeps it for inspection. A leftover `.incomplete` from a previous failed run is preserved across a retry that fails with `Previous .incomplete exists`, so the prior partial is not silently overwritten.
 
 ## Technical reference
 

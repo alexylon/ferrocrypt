@@ -135,7 +135,7 @@ pub use crate::api::{
     default_encrypted_filename, detect_encryption_mode, detect_encryption_mode_with_limits,
     generate_key_pair, validate_private_key_file, validate_public_key_file,
 };
-pub use crate::archive::ArchiveLimits;
+pub use crate::archive::{ArchiveLimits, IncompleteOutputPolicy};
 pub use crate::container::HeaderReadLimits;
 pub use crate::crypto::kdf::{KdfLimit, KdfParams};
 pub use crate::error::{CryptoError, FormatDefect, InvalidKdfParams, UnsupportedVersion};

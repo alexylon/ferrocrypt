@@ -968,7 +968,9 @@ archive MUST have the same top-level root.
 
 Writers MUST terminate the TAR stream with the standard two 512-byte zero blocks.
 Readers MUST reject malformed ustar headers, invalid header checksums, file data
-that runs past the archive, and non-zero data after the end-of-archive marker.
+that runs past the archive, archives whose end-of-archive marker is absent or
+incomplete (the two trailing 512-byte zero blocks MUST both be present), and
+non-zero data after the end-of-archive marker.
 
 Readers MUST treat TAR metadata outside path, entry type, size, and file contents
 as non-authoritative. Readers MUST NOT restore ownership and MUST NOT apply

@@ -43,11 +43,12 @@ use crate::CryptoError;
 pub(crate) mod ustar {
     /// POSIX ustar fixed block size — every header is one block, every
     /// entry's data is rounded up to a whole number of blocks, and the
-    /// archive ends with two consecutive zero blocks. Production code
-    /// reads the block via `tar::Header::as_bytes()`, so this constant
-    /// is only used in test fixtures that hand-craft archives at the
-    /// raw byte level.
-    #[cfg(test)]
+    /// archive ends with two consecutive zero blocks. Used by
+    /// `archive::decode::read_required_zero_block` to enforce the
+    /// second of those two trailing blocks (`FORMAT.md` §9), and by
+    /// hand-crafted test fixtures that build archives at the raw byte
+    /// level. Production header reads use `tar::Header::as_bytes()` and
+    /// do not reference this constant directly.
     pub(crate) const BLOCK_SIZE: usize = 512;
 
     pub(crate) const TYPEFLAG_OFFSET: usize = 156;

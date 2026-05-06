@@ -663,7 +663,7 @@ Rules:
 - Every archive path is validated through `archive/path.rs` before any filesystem write.
 - Duplicate paths are detected on canonical archive paths before extraction.
 - Single-top-level-root enforcement rejects an archive with multiple distinct roots before the second root's output is written.
-- Trailing zero padding after the TAR end-of-archive marker is verified.
+- Both 512-byte trailing zero blocks (`FORMAT.md` §9) are required: the `tar` raw iterator consumes only the first, so `read_required_zero_block` reads the second explicitly (`UnexpectedEof` → `"Missing TAR end-of-archive zero block"`). Any further trailing bytes are then drained through `drain_and_verify_zero_padding`, which rejects any non-zero byte.
 - Resource limits are enforced while reading.
 - Extraction preserves the order: validate first, then create or write.
 - Decode logic does not bypass platform extraction hardening.

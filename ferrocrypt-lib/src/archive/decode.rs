@@ -232,9 +232,47 @@ fn validate_ustar_entry<R: Read>(
     })
 }
 
-/// Drains the underlying reader after the TAR entry iterator has
-/// returned `None` and verifies that every remaining byte of the
-/// authenticated plaintext is zero. Per `FORMAT.md` §9, the v1
+/// Reads exactly one 512-byte block from `reader` and verifies it is
+/// all zero. Used by [`unarchive`] to enforce the second of the two
+/// trailing zero blocks required by `FORMAT.md` §9: the `tar` crate's
+/// raw iterator consumes the first all-zero block and returns `None`,
+/// but does not require the second one — without this gate, an
+/// archive with no end marker (or only the first block) would be
+/// silently accepted.
+///
+/// I/O errors are routed through the standard `From<io::Error>` first,
+/// so a [`crate::error::StreamError`] marker on the underlying
+/// [`crate::crypto::stream::DecryptReader`] (payload truncation, AEAD
+/// failure) surfaces as the typed [`CryptoError::PayloadTruncated`] /
+/// [`CryptoError::PayloadTampered`] variant rather than masquerading
+/// as a missing-end-block error. Only a *generic* [`io::Error`] of
+/// kind [`io::ErrorKind::UnexpectedEof`] — i.e. the plaintext stream
+/// ran out legitimately before delivering this block — is remapped to
+/// `"Missing TAR end-of-archive zero block"`.
+fn read_required_zero_block<R: Read>(reader: &mut R) -> Result<(), CryptoError> {
+    let mut block = [0u8; ustar::BLOCK_SIZE];
+    if let Err(e) = reader.read_exact(&mut block) {
+        let converted: CryptoError = e.into();
+        if let CryptoError::Io(ref io_err) = converted {
+            if io_err.kind() == io::ErrorKind::UnexpectedEof {
+                return Err(CryptoError::InvalidInput(
+                    "Missing TAR end-of-archive zero block".to_string(),
+                ));
+            }
+        }
+        return Err(converted);
+    }
+    if block.iter().any(|&b| b != 0) {
+        return Err(CryptoError::InvalidInput(
+            "Non-zero trailing data after TAR end-of-archive marker".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Drains the underlying reader after the second end-of-archive zero
+/// block has been consumed and verifies that every remaining byte of
+/// the authenticated plaintext is zero. Per `FORMAT.md` §9, the v1
 /// archive payload terminates with the standard two 512-byte zero
 /// blocks; any non-zero trailing byte is a malformed archive.
 fn drain_and_verify_zero_padding<R: Read>(mut reader: R) -> Result<(), CryptoError> {
@@ -276,11 +314,18 @@ pub(crate) fn unarchive<R: Read>(
         &limits,
     )?;
 
-    // FORMAT.md §9: after the TAR end-of-archive marker the rest of
-    // the authenticated plaintext MUST be zero. Drain whatever the tar
-    // crate left in the underlying reader and reject any non-zero
+    // FORMAT.md §9: a v1 archive payload ends with TWO 512-byte zero
+    // blocks. The `tar` raw iterator consumes the first block and then
+    // returns `None`, so we must read the second block ourselves —
+    // otherwise an archive missing one or both zero blocks would slip
+    // past validation (the legacy `drain_and_verify_zero_padding` only
+    // checked that *remaining* bytes were zero, which is vacuously true
+    // when nothing remains). After the required second block,
+    // `drain_and_verify_zero_padding` rejects any further non-zero
     // trailing byte before promoting the `.incomplete` outputs.
-    drain_and_verify_zero_padding(archive.into_inner())?;
+    let mut inner = archive.into_inner();
+    read_required_zero_block(&mut inner)?;
+    drain_and_verify_zero_padding(inner)?;
 
     // Rename each root from .incomplete working name to final name.
     // A failure here is an environment / I/O condition — not a library
@@ -667,10 +712,12 @@ fn extract_entries<R: Read>(
 mod tests {
     use super::super::limits::ArchiveLimits;
     use super::super::path::ustar;
-    use super::unarchive;
+    use super::{read_required_zero_block, unarchive};
+    use crate::CryptoError;
+    use crate::error::StreamError;
 
     use std::fs;
-    use std::io::Cursor;
+    use std::io::{self, Cursor, Read};
 
     #[test]
     fn unarchive_rejects_multi_root_archive() {
@@ -1275,6 +1322,152 @@ mod tests {
         assert!(
             err.to_string().contains("Duplicate archive entry"),
             "expected file/dir canonical collision, got: {err}"
+        );
+    }
+
+    /// `read_required_zero_block` MUST route I/O errors through the
+    /// standard `From<io::Error>` so a `StreamError::Truncated` marker
+    /// from `DecryptReader` (a real payload-ciphertext truncation, kind
+    /// = `UnexpectedEof`) surfaces as the typed
+    /// `CryptoError::PayloadTruncated`, *not* as the generic-EOF
+    /// "Missing TAR end-of-archive zero block" wording. Pinned for
+    /// BUG_REVIEW #4 second-pass: the first cut bare-mapped
+    /// `UnexpectedEof` and would have masked the marker.
+    #[test]
+    fn read_required_zero_block_preserves_payload_truncated_marker() {
+        struct TruncatingReader;
+        impl Read for TruncatingReader {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    StreamError::Truncated,
+                ))
+            }
+        }
+        let mut r = TruncatingReader;
+        match read_required_zero_block(&mut r) {
+            Err(CryptoError::PayloadTruncated) => {}
+            other => panic!("expected PayloadTruncated, got {other:?}"),
+        }
+    }
+
+    /// Companion to the truncation case: a `StreamError::DecryptAead`
+    /// marker (kind = `InvalidData`) MUST surface as the typed
+    /// `CryptoError::PayloadTampered`. Pinned for BUG_REVIEW #4
+    /// second-pass.
+    #[test]
+    fn read_required_zero_block_preserves_payload_tampered_marker() {
+        struct TamperingReader;
+        impl Read for TamperingReader {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    StreamError::DecryptAead,
+                ))
+            }
+        }
+        let mut r = TamperingReader;
+        match read_required_zero_block(&mut r) {
+            Err(CryptoError::PayloadTampered) => {}
+            other => panic!("expected PayloadTampered, got {other:?}"),
+        }
+    }
+
+    /// And the converse: a bare clean EOF (no `StreamError` marker)
+    /// is the case where the plaintext stream legitimately ran out
+    /// before delivering the second trailing zero block. That MUST
+    /// surface as `InvalidInput("Missing TAR end-of-archive zero block")`.
+    #[test]
+    fn read_required_zero_block_emits_missing_marker_for_clean_eof() {
+        // `io::empty()` returns `Ok(0)` on every read; `read_exact`
+        // therefore synthesises a generic `UnexpectedEof` with no
+        // `StreamError` marker — exactly the "plaintext truly ran
+        // out" case.
+        let mut r = io::empty();
+        match read_required_zero_block(&mut r) {
+            Err(CryptoError::InvalidInput(msg)) => {
+                assert!(
+                    msg.contains("Missing TAR end-of-archive zero block"),
+                    "unexpected message: {msg}"
+                );
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    /// Per `FORMAT.md` §9 the TAR payload MUST terminate with two
+    /// 512-byte zero blocks. The `tar` crate's raw iterator stops on
+    /// the first all-zero header it sees and does not require the
+    /// second block, so without the explicit `read_required_zero_block`
+    /// gate an archive missing every end block would slip past
+    /// validation. Pinned for BUG_REVIEW #4. Builds a one-entry
+    /// archive at the raw byte level (no `Builder::finish` call so no
+    /// zero blocks are appended) and asserts the rejection message.
+    #[test]
+    fn unarchive_rejects_missing_tar_end_blocks() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        let data = b"payload";
+        let mut header = tar::Header::new_ustar();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_path("hello.txt").unwrap();
+        header.set_cksum();
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(header.as_bytes());
+        buf.extend_from_slice(data);
+        let pad = (ustar::BLOCK_SIZE - data.len() % ustar::BLOCK_SIZE) % ustar::BLOCK_SIZE;
+        buf.extend(std::iter::repeat_n(0u8, pad));
+        // Deliberately omit both 512-byte zero blocks that
+        // `Builder::finish` would normally append.
+
+        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Missing TAR end-of-archive zero block"),
+            "expected missing-end-blocks rejection, got: {err}"
+        );
+    }
+
+    /// Companion case to `unarchive_rejects_missing_tar_end_blocks`:
+    /// an archive that carries only one of the two required zero
+    /// blocks must also reject. The `tar` crate consumes that single
+    /// zero block and ends iteration, so the explicit second-block
+    /// read is what catches this. Pinned for BUG_REVIEW #4.
+    #[test]
+    fn unarchive_rejects_only_one_tar_end_block() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        let mut buf = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut buf);
+            let data = b"payload";
+            let mut header = tar::Header::new_ustar();
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "hello.txt", &data[..])
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        // `Builder::finish` writes two trailing zero blocks; truncate
+        // back to a single one so the second-block read trips.
+        let target_len = buf.len() - ustar::BLOCK_SIZE;
+        buf.truncate(target_len);
+
+        let err = unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Missing TAR end-of-archive zero block"),
+            "expected missing-second-block rejection, got: {err}"
         );
     }
 

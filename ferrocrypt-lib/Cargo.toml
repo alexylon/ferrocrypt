@@ -31,7 +31,7 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 zeroize = "1"
 secrecy = "0.10"
 thiserror = "2"
-tar = "0.4.45"
+tar = { version = "0.4.45", default-features = false }
 chacha20poly1305 = { version = "0.10", features = ["std", "stream"] }
 argon2 = { version = "0.5", features = ["std"] }
 sha3 = "0.11"
@@ -50,4 +50,4 @@ rustix = { version = "1", features = ["fs"] }
 [dev-dependencies]
 ferrocrypt-test-support = { path = "../ferrocrypt-test-support" }
 ctor = "0.8"
-tar = "0.4.45"
+tar = { version = "0.4.45", default-features = false }

@@ -166,7 +166,7 @@ fn create_dir_with_default_mode(parent: &Dir, name: &OsStr) -> Result<Dir, Crypt
 
 #[cfg(unix)]
 fn set_initial_dir_mode(dir: &Dir) -> Result<(), CryptoError> {
-    chmod_dir_handle_ref(dir, DIR_CREATE_MODE)
+    chmod_dir_via_self_path(dir, DIR_CREATE_MODE)
 }
 
 #[cfg(not(unix))]
@@ -174,17 +174,31 @@ fn set_initial_dir_mode(_dir: &Dir) -> Result<(), CryptoError> {
     Ok(())
 }
 
+/// Internal helper: applies a Unix mode to the directory `dir` refers to.
+///
+/// **Why this is not `dir.try_clone().into_std_file().set_permissions(...)`.**
+/// cap-std opens directories with `O_RDONLY | O_DIRECTORY | O_NOFOLLOW`
+/// plus, on Linux, `O_PATH` (cap-primitives' `compute_oflags` adds
+/// `O_PATH` whenever `dir_required` is set without write or readdir
+/// access — which is every directory we open). `fchmod(2)` on an
+/// `O_PATH` fd returns `EBADF` on Linux, so calling
+/// `std_file.set_permissions(...)` against the underlying fd from
+/// `Dir::into_std_file()` always fails on Linux dir handles even
+/// though the same code runs cleanly on macOS (which has no
+/// `O_PATH`).
+///
+/// `Dir::set_permissions(".", perm)` routes through cap-primitives'
+/// `set_permissions_impl`, which on Linux uses the `/proc/self/fd/N`
+/// magic-link `chmodat` trick (precisely the workaround for
+/// `O_PATH`-vs-`fchmod`) and on macOS / other Unix opens the path
+/// with `read(true)` and fchmods the regular fd. Same code path on
+/// every Unix target, no `unsafe`, and the path resolution stays
+/// rooted in `dir`'s capability so it can never escape the sandbox.
 #[cfg(unix)]
-fn chmod_dir_handle_ref(dir: &Dir, mode: u32) -> Result<(), CryptoError> {
-    let std_file = dir.try_clone().map_err(CryptoError::Io)?.into_std_file();
-    chmod_std_file_handle(std_file, mode)
-}
-
-#[cfg(unix)]
-fn chmod_std_file_handle(std_file: std::fs::File, mode: u32) -> Result<(), CryptoError> {
-    use std::os::unix::fs::PermissionsExt;
-    let perms = std::fs::Permissions::from_mode(mode & super::PERMISSION_BITS_MASK);
-    std_file.set_permissions(perms).map_err(CryptoError::Io)
+fn chmod_dir_via_self_path(dir: &Dir, mode: u32) -> Result<(), CryptoError> {
+    use cap_std::fs::PermissionsExt;
+    let perm = cap_std::fs::Permissions::from_mode(mode & super::PERMISSION_BITS_MASK);
+    dir.set_permissions(".", perm).map_err(CryptoError::Io)
 }
 
 /// Walks `rel` under `root`, creating intermediate directories as
@@ -292,19 +306,19 @@ pub(crate) fn chmod_file_handle(_file: &File, _mode: u32) -> Result<(), CryptoEr
 }
 
 /// Sets the rwx permission bits on an already-open directory handle.
-/// Same handle-based semantics as [`chmod_file_handle`]: cap-std's
-/// `Dir` is converted to a `std::fs::File` via `into_std_file()` and
-/// `set_permissions` is applied to the underlying open handle, never
-/// via a re-resolved path. Unix-only; no-op on Windows.
+/// Routes through `Dir::set_permissions(".", perm)` so the chmod
+/// stays rooted in the capability `dir` already grants — see
+/// [`chmod_dir_via_self_path`] for why we cannot just `fchmod` the
+/// underlying fd on Linux. Unix-only; no-op on Windows.
 ///
-/// Consumes the `Dir` to make the conversion-to-`std::fs::File`
-/// explicit at the call site.
+/// Consumes the `Dir` because every caller (writer-side initial mode,
+/// decrypt-side deferred dir-permissions loop) uses the handle once
+/// and immediately drops it; making the consumption explicit prevents
+/// callers from accidentally reusing the handle after a chmod that
+/// might have made the directory unreadable to the holder.
 #[cfg(unix)]
 pub(crate) fn chmod_dir_handle(dir: Dir, mode: u32) -> Result<(), CryptoError> {
-    use std::os::unix::fs::PermissionsExt;
-    let std_file = dir.into_std_file();
-    let perms = std::fs::Permissions::from_mode(mode & super::PERMISSION_BITS_MASK);
-    std_file.set_permissions(perms).map_err(CryptoError::Io)
+    chmod_dir_via_self_path(&dir, mode)
 }
 
 #[cfg(not(unix))]

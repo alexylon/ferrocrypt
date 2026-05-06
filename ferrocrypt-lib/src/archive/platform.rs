@@ -153,29 +153,14 @@ pub(crate) fn mkdir_strict(parent: &Dir, name: &OsStr) -> Result<Dir, CryptoErro
 /// old "create directories as 0o755 initially, apply tar-stored mode
 /// later" behavior without ever chmod-ing through a re-resolved path.
 fn create_dir_with_default_mode(parent: &Dir, name: &OsStr) -> Result<Dir, CryptoError> {
-    eprintln!(
-        "[FCRDBG] create_dir_with_default_mode: name={}",
-        Path::new(name).display()
-    );
-    parent.create_dir(name).map_err(|e| {
-        eprintln!("[FCRDBG]   create_dir failed: kind={:?} err={e}", e.kind());
-        CryptoError::Io(e)
-    })?;
-    eprintln!("[FCRDBG]   create_dir ok");
+    parent.create_dir(name).map_err(CryptoError::Io)?;
 
-    let dir = parent.open_dir_nofollow(name).map_err(|e| {
-        eprintln!("[FCRDBG]   open_dir_nofollow failed: kind={:?} err={e}", e.kind());
-        classify_open_failure(parent, name, e)
-    })?;
-    eprintln!("[FCRDBG]   open_dir_nofollow ok");
+    let dir = parent
+        .open_dir_nofollow(name)
+        .map_err(|e| classify_open_failure(parent, name, e))?;
     let dir = finalize_dir_open(dir, name)?;
 
-    eprintln!("[FCRDBG]   set_initial_dir_mode");
-    set_initial_dir_mode(&dir).map_err(|e| {
-        eprintln!("[FCRDBG]   set_initial_dir_mode failed: {e:?}");
-        e
-    })?;
-    eprintln!("[FCRDBG]   set_initial_dir_mode ok");
+    set_initial_dir_mode(&dir)?;
     Ok(dir)
 }
 
@@ -212,15 +197,8 @@ fn set_initial_dir_mode(_dir: &Dir) -> Result<(), CryptoError> {
 #[cfg(unix)]
 fn chmod_dir_via_self_path(dir: &Dir, mode: u32) -> Result<(), CryptoError> {
     use cap_std::fs::PermissionsExt;
-    eprintln!("[FCRDBG] chmod_dir_via_self_path: mode=0o{mode:o}");
     let perm = cap_std::fs::Permissions::from_mode(mode & super::PERMISSION_BITS_MASK);
-    dir.set_permissions(".", perm).map_err(|e| {
-        eprintln!(
-            "[FCRDBG]   set_permissions(\".\") failed: kind={:?} err={e}",
-            e.kind()
-        );
-        CryptoError::Io(e)
-    })
+    dir.set_permissions(".", perm).map_err(CryptoError::Io)
 }
 
 /// Walks `rel` under `root`, creating intermediate directories as
@@ -253,9 +231,12 @@ pub(crate) fn walk_to_parent(root: &Dir, rel: &Path) -> Result<(Dir, OsString), 
 /// **Empty-`rel` behavior.** When `rel` has no components,
 /// `rel.components()` yields nothing and the for-loop is a no-op,
 /// so the function returns a fresh clone of `root` itself. The
-/// deferred dir-permissions loop relies on this to fold the
-/// "root directory" and "descendant directory" cases into a single
-/// call site without an explicit empty-path branch.
+/// in-`extract_entries` deferred dir-permissions loop only invokes
+/// this helper for non-empty `rel` (root-level chmods are deferred
+/// past rename and applied separately by `unarchive`); the
+/// empty-`rel` branch is preserved both for adversarial robustness
+/// and so the helper remains usable from future call sites that
+/// want a uniform parent-or-self handle.
 pub(crate) fn open_dir_at_rel(root: &Dir, rel: &Path) -> Result<Dir, CryptoError> {
     let mut cur = root.try_clone().map_err(CryptoError::Io)?;
     for component in rel.components() {

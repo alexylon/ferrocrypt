@@ -18,8 +18,6 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use cap_std::fs::Dir;
-
 use crate::CryptoError;
 use crate::fs::atomic::rename_no_clobber;
 use crate::fs::paths::INCOMPLETE_SUFFIX;
@@ -298,9 +296,11 @@ pub(crate) fn unarchive<R: Read>(
     //     rejects sources whose mode lacks the search bit), AND
     //   - non-owner local users see no greater access through the
     //     final name than they would at the tar-stored mode.
-    // The exact tar-stored mode is restored below via the live
-    // `Dir` handle that was used for the pre-rename chmod, so no
-    // path-based re-open happens between rename and final chmod.
+    // No `Dir` handle to the source remains open here: `roots` was
+    // dropped at `extract_entries` return, so neither Windows
+    // (which refuses to rename a directory with an open handle) nor
+    // macOS 14 (which has descendant-access quirks if the source fd
+    // is held during `renameatx_np`) has a contested rename target.
     for root_name in &checked_roots {
         let working_path = output_dir.join(incomplete_working_name(root_name));
         let final_path = output_dir.join(root_name);
@@ -316,17 +316,21 @@ pub(crate) fn unarchive<R: Read>(
         })?;
     }
 
-    // Restore the exact tar-stored mode on each root via the LIVE
-    // `Dir` handle that `extract_entries` opened pre-rename. The
-    // handle refers to the same inode after the rename above, so
-    // no path-based re-open happens here: a symlink or junction
-    // substituted at the final name between rename and now cannot
-    // redirect this chmod, and the typed "Symlink in extraction
-    // path" invariant is preserved automatically because the
-    // handle was already gated through `open_dir_nofollow` +
-    // `finalize_dir_open` when extract_entries first opened it.
-    for (_, mode, root_handle) in root_chmods {
-        crate::archive::platform::chmod_dir_handle(root_handle, mode)?;
+    // Restore the exact tar-stored mode on each root by re-anchoring
+    // at `output_dir` and walking to the renamed root via
+    // `open_dir_at_rel` — which routes every component through
+    // `open_dir_nofollow` + `finalize_dir_open` (Windows reparse-
+    // point bitmask check) + `classify_open_failure` (typed
+    // "Symlink in extraction path" diagnostic). A symlink or
+    // junction substituted at the final name between rename and now
+    // is rejected before any chmod runs.
+    if !root_chmods.is_empty() {
+        let output_handle = crate::archive::platform::open_anchor(output_dir)?;
+        for (root_name, mode) in root_chmods {
+            let root_dir =
+                crate::archive::platform::open_dir_at_rel(&output_handle, Path::new(&root_name))?;
+            crate::archive::platform::chmod_dir_handle(root_dir, mode)?;
+        }
     }
 
     first_entry_root.ok_or_else(|| CryptoError::InvalidInput("Empty archive".to_string()))
@@ -425,8 +429,10 @@ fn extract_entries<R: Read>(
     first_entry_root: &mut Option<PathBuf>,
     checked_roots: &mut Vec<OsString>,
     limits: &ArchiveLimits,
-) -> Result<Vec<(OsString, u32, Dir)>, CryptoError> {
+) -> Result<Vec<(OsString, u32)>, CryptoError> {
     use std::collections::HashMap;
+
+    use cap_std::fs::Dir;
 
     use super::platform;
 
@@ -634,25 +640,25 @@ fn extract_entries<R: Read>(
     //     non-owner local user observing the `.incomplete` directory
     //     just before rename or the final name just after rename
     //     sees no greater access than the tar-stored mode permits.
-    //   - owner read+search bits set, so:
-    //       * macOS 14 (Sonoma) `renameatx_np` accepts the rename
-    //         (it rejects sources whose mode lacks the search bit
-    //         with EACCES, even though POSIX `rename` and earlier
-    //         macOS versions accept it), AND
-    //       * the post-rename chmod via the same live `Dir` handle
-    //         can succeed on macOS, where cap-std's
-    //         `Dir::set_permissions(".", ...)` opens "." as
-    //         O_RDONLY before fchmod (the open requires owner read
-    //         on the directory).
+    //   - owner read+search bits set, so macOS 14 (Sonoma)
+    //     `renameatx_np` accepts the rename (it rejects sources
+    //     whose mode lacks the search bit with EACCES, even though
+    //     POSIX `rename` and earlier macOS versions accept it).
     //
-    // The post-rename chmod runs against the LIVE `Dir` handle
-    // cloned here, which still refers to the same inode after the
-    // `.incomplete` → final-name rename, so no path-based re-open
-    // is needed between rename and final chmod and no swap-between-
-    // rename-and-chmod attack can redirect either chmod.
+    // The chmod runs against a clone of the live `Dir` handle which
+    // is consumed in the call and dropped immediately. No `Dir`
+    // handle to the source survives past the end of this function:
+    // when `extract_entries` returns, `roots` is dropped and every
+    // open fd to a `.incomplete` subtree closes, so neither
+    // Windows (which refuses to rename a directory with an open
+    // handle) nor macOS 14 (which has descendant-access quirks if
+    // the source fd is held through `renameatx_np`) has a
+    // contested rename target. The caller re-opens each renamed
+    // root via `open_dir_at_rel` for the final chmod to the exact
+    // tar-stored mode.
     const PRE_RENAME_OWNER_RX_MASK: u32 = 0o500;
     dir_permissions.sort_by_key(|(_, rel, _)| std::cmp::Reverse(rel.components().count()));
-    let mut root_chmods: Vec<(OsString, u32, Dir)> = Vec::new();
+    let mut root_chmods: Vec<(OsString, u32)> = Vec::new();
     for (root_name, rel, mode) in dir_permissions {
         let Some(RootKind::Directory(root_handle)) = roots.get(&root_name) else {
             return Err(CryptoError::InternalInvariant(
@@ -660,10 +666,9 @@ fn extract_entries<R: Read>(
             ));
         };
         if rel.as_os_str().is_empty() {
-            let post_rename = root_handle.try_clone().map_err(CryptoError::Io)?;
             let pre_rename = root_handle.try_clone().map_err(CryptoError::Io)?;
             platform::chmod_dir_handle(pre_rename, mode | PRE_RENAME_OWNER_RX_MASK)?;
-            root_chmods.push((root_name, mode, post_rename));
+            root_chmods.push((root_name, mode));
             continue;
         }
         let dir_handle = platform::open_dir_at_rel(root_handle, &rel)?;

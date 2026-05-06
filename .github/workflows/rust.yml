@@ -201,7 +201,12 @@ jobs:
           workspaces: ferrocrypt-lib/fuzz
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        # No `--locked`: cargo-fuzz 0.13.1's published Cargo.lock pins
+        # rustix 0.36.5, which uses gated `rustc_attrs` internals that
+        # current nightly rejects. Letting cargo resolve fresh deps picks
+        # rustix 1.x, which compiles cleanly. Reproducibility cost is
+        # acceptable for a CI build tool that is not a project dependency.
+        run: cargo install cargo-fuzz
 
       - name: Clippy fuzz crate
         working-directory: ferrocrypt-lib/fuzz

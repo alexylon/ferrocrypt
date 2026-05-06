@@ -268,6 +268,8 @@ pub(crate) fn unarchive<R: Read>(
     let mut first_entry_root: Option<PathBuf> = None;
     let mut checked_roots: Vec<OsString> = Vec::new();
 
+    eprintln!("[FCRDBG] unarchive start: output_dir={}", output_dir.display());
+
     let extract_result = extract_entries(
         &mut archive,
         output_dir,
@@ -276,13 +278,16 @@ pub(crate) fn unarchive<R: Read>(
         &limits,
     );
 
+    eprintln!("[FCRDBG] extract_entries returned: {:?}", extract_result.as_ref().map_err(|e| format!("{e}")));
     extract_result?;
 
     // FORMAT.md §9: after the TAR end-of-archive marker the rest of
     // the authenticated plaintext MUST be zero. Drain whatever the tar
     // crate left in the underlying reader and reject any non-zero
     // trailing byte before promoting the `.incomplete` outputs.
+    eprintln!("[FCRDBG] drain start");
     drain_and_verify_zero_padding(archive.into_inner())?;
+    eprintln!("[FCRDBG] drain ok");
 
     // Rename each root from .incomplete working name to final name.
     // A failure here is an environment / I/O condition — not a library
@@ -293,7 +298,13 @@ pub(crate) fn unarchive<R: Read>(
     for root_name in &checked_roots {
         let working_path = output_dir.join(incomplete_working_name(root_name));
         let final_path = output_dir.join(root_name);
+        eprintln!(
+            "[FCRDBG] rename: {} -> {}",
+            working_path.display(),
+            final_path.display()
+        );
         rename_no_clobber(&working_path, &final_path).map_err(|e| {
+            eprintln!("[FCRDBG] rename failed: kind={:?} err={e}", e.kind());
             if e.kind() == io::ErrorKind::AlreadyExists {
                 CryptoError::InvalidInput(format!(
                     "Output already exists: {}",
@@ -303,8 +314,10 @@ pub(crate) fn unarchive<R: Read>(
                 CryptoError::Io(e)
             }
         })?;
+        eprintln!("[FCRDBG] rename ok");
     }
 
+    eprintln!("[FCRDBG] unarchive done");
     first_entry_root.ok_or_else(|| CryptoError::InvalidInput("Empty archive".to_string()))
 }
 
@@ -500,7 +513,12 @@ fn extract_entries<R: Read>(
         Ok(())
     }
 
+    eprintln!(
+        "[FCRDBG] extract_entries: opening anchor {}",
+        output_dir.display()
+    );
     let output_handle = platform::open_anchor(output_dir)?;
+    eprintln!("[FCRDBG] extract_entries: anchor opened");
     let mut roots: HashMap<OsString, RootKind> = HashMap::new();
     // Deferred directory permissions: (root name, rel path under root, mode).
     // `rel` is empty for the root directory itself.
@@ -520,6 +538,12 @@ fn extract_entries<R: Read>(
             kind,
         } = counters.pre_validate_entry(&mut entry, limits)?;
 
+        eprintln!(
+            "[FCRDBG] entry: path={} kind={:?}",
+            path.display(),
+            kind
+        );
+
         let root_name =
             extract_and_register_root(output_dir, &path, first_entry_root, checked_roots)?;
 
@@ -536,6 +560,7 @@ fn extract_entries<R: Read>(
         if rel.as_os_str().is_empty() {
             match kind {
                 UstarEntryKind::Directory => {
+                    eprintln!("[FCRDBG]   case A directory: ensure_root_directory");
                     ensure_root_directory(
                         &mut roots,
                         &root_name,
@@ -545,6 +570,7 @@ fn extract_entries<R: Read>(
                         &path,
                     )?;
                     if let Ok(mode) = entry.header().mode() {
+                        eprintln!("[FCRDBG]   case A directory: push dir_perm rel='' mode=0o{mode:o}");
                         dir_permissions.push((root_name.clone(), PathBuf::new(), mode));
                     }
                 }
@@ -572,6 +598,7 @@ fn extract_entries<R: Read>(
         // directory; `ensure_root_directory` lazily creates
         // `{root}.incomplete` if no explicit root-level directory entry
         // has been seen yet.
+        eprintln!("[FCRDBG]   case B: ensure_root_directory");
         let root_handle = ensure_root_directory(
             &mut roots,
             &root_name,
@@ -580,15 +607,28 @@ fn extract_entries<R: Read>(
             &incomplete_name,
             &path,
         )?;
+        eprintln!("[FCRDBG]   case B: walk_to_parent rel={}", rel.display());
         let (parent_handle, final_name) = platform::walk_to_parent(root_handle, &rel)?;
         match kind {
             UstarEntryKind::Directory => {
+                eprintln!(
+                    "[FCRDBG]   case B directory: ensure_dir name={}",
+                    Path::new(&final_name).display()
+                );
                 let _dir = platform::ensure_dir(&parent_handle, &final_name)?;
                 if let Ok(mode) = entry.header().mode() {
+                    eprintln!(
+                        "[FCRDBG]   case B directory: push dir_perm rel={} mode=0o{mode:o}",
+                        rel.display()
+                    );
                     dir_permissions.push((root_name.clone(), rel, mode));
                 }
             }
             UstarEntryKind::File => {
+                eprintln!(
+                    "[FCRDBG]   case B file: create_file_at name={}",
+                    Path::new(&final_name).display()
+                );
                 let outfile = platform::create_file_at(
                     &parent_handle,
                     &final_name,
@@ -606,16 +646,29 @@ fn extract_entries<R: Read>(
     // later reopen of a child directory.
     // `open_dir_at_rel` folds the root-vs-descendant case naturally —
     // see its doc-comment for the empty-`rel` contract.
+    eprintln!(
+        "[FCRDBG] deferred chmod: {} entries before sort",
+        dir_permissions.len()
+    );
     dir_permissions.sort_by_key(|(_, rel, _)| std::cmp::Reverse(rel.components().count()));
     for (root_name, rel, mode) in &dir_permissions {
+        eprintln!(
+            "[FCRDBG] deferred chmod step: root={:?} rel={} mode=0o{mode:o}",
+            root_name,
+            rel.display()
+        );
         let Some(RootKind::Directory(root_handle)) = roots.get(root_name) else {
             return Err(CryptoError::InternalInvariant(
                 "Internal error: root handle missing at dir-perm stage",
             ));
         };
+        eprintln!("[FCRDBG]   open_dir_at_rel");
         let dir_handle = platform::open_dir_at_rel(root_handle, rel)?;
+        eprintln!("[FCRDBG]   chmod_dir_handle");
         platform::chmod_dir_handle(dir_handle, *mode)?;
+        eprintln!("[FCRDBG]   chmod ok");
     }
+    eprintln!("[FCRDBG] deferred chmod loop ok");
 
     Ok(())
 }

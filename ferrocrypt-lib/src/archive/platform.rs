@@ -153,14 +153,29 @@ pub(crate) fn mkdir_strict(parent: &Dir, name: &OsStr) -> Result<Dir, CryptoErro
 /// old "create directories as 0o755 initially, apply tar-stored mode
 /// later" behavior without ever chmod-ing through a re-resolved path.
 fn create_dir_with_default_mode(parent: &Dir, name: &OsStr) -> Result<Dir, CryptoError> {
-    parent.create_dir(name).map_err(CryptoError::Io)?;
+    eprintln!(
+        "[FCRDBG] create_dir_with_default_mode: name={}",
+        Path::new(name).display()
+    );
+    parent.create_dir(name).map_err(|e| {
+        eprintln!("[FCRDBG]   create_dir failed: kind={:?} err={e}", e.kind());
+        CryptoError::Io(e)
+    })?;
+    eprintln!("[FCRDBG]   create_dir ok");
 
-    let dir = parent
-        .open_dir_nofollow(name)
-        .map_err(|e| classify_open_failure(parent, name, e))?;
+    let dir = parent.open_dir_nofollow(name).map_err(|e| {
+        eprintln!("[FCRDBG]   open_dir_nofollow failed: kind={:?} err={e}", e.kind());
+        classify_open_failure(parent, name, e)
+    })?;
+    eprintln!("[FCRDBG]   open_dir_nofollow ok");
     let dir = finalize_dir_open(dir, name)?;
 
-    set_initial_dir_mode(&dir)?;
+    eprintln!("[FCRDBG]   set_initial_dir_mode");
+    set_initial_dir_mode(&dir).map_err(|e| {
+        eprintln!("[FCRDBG]   set_initial_dir_mode failed: {e:?}");
+        e
+    })?;
+    eprintln!("[FCRDBG]   set_initial_dir_mode ok");
     Ok(dir)
 }
 
@@ -197,8 +212,15 @@ fn set_initial_dir_mode(_dir: &Dir) -> Result<(), CryptoError> {
 #[cfg(unix)]
 fn chmod_dir_via_self_path(dir: &Dir, mode: u32) -> Result<(), CryptoError> {
     use cap_std::fs::PermissionsExt;
+    eprintln!("[FCRDBG] chmod_dir_via_self_path: mode=0o{mode:o}");
     let perm = cap_std::fs::Permissions::from_mode(mode & super::PERMISSION_BITS_MASK);
-    dir.set_permissions(".", perm).map_err(CryptoError::Io)
+    dir.set_permissions(".", perm).map_err(|e| {
+        eprintln!(
+            "[FCRDBG]   set_permissions(\".\") failed: kind={:?} err={e}",
+            e.kind()
+        );
+        CryptoError::Io(e)
+    })
 }
 
 /// Walks `rel` under `root`, creating intermediate directories as

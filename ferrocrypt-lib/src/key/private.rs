@@ -317,11 +317,20 @@ pub fn seal_private_key(
 /// On AEAD failure surfaces [`CryptoError::KeyFileUnlockFailed`] —
 /// wrong passphrase and tampered cleartext fields are
 /// indistinguishable at the AEAD layer.
+///
+/// Emits [`crate::ProgressEvent::UnlockingPrivateKey`] immediately
+/// before the Argon2id call — that is, **after** structural header
+/// parsing, the caller-supplied `KdfLimit` resource cap, the
+/// `local_wrapped_secret_cap` cap, the total-length check, and
+/// type-name grammar validation have all passed. A structurally
+/// malformed key file or one that exceeds either cap is rejected with
+/// no event emitted.
 pub fn open_private_key(
     bytes: &[u8],
     passphrase: &SecretString,
     kdf_limit: Option<&KdfLimit>,
     local_wrapped_secret_cap: u32,
+    on_event: &dyn Fn(&crate::ProgressEvent),
 ) -> Result<OpenedPrivateKey, CryptoError> {
     let header_bytes = bytes
         .first_chunk::<PRIVATE_KEY_HEADER_FIXED_SIZE>()
@@ -367,6 +376,7 @@ pub fn open_private_key(
     let wrapped_secret = &bytes[ext_end..wrapped_secret_end];
     let cleartext = &bytes[..ext_end];
 
+    on_event(&crate::ProgressEvent::UnlockingPrivateKey);
     let wrap_key = derive_passphrase_wrap_key(
         passphrase,
         &header.argon2_salt,
@@ -475,6 +485,7 @@ mod tests {
             &pass,
             None,
             PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT,
+            &|_| {},
         )
         .unwrap();
         assert_eq!(opened.type_name, "x25519");
@@ -495,6 +506,7 @@ mod tests {
             &pass,
             None,
             PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT,
+            &|_| {},
         )
         .unwrap();
         assert_eq!(opened.ext_bytes, ext);
@@ -544,6 +556,7 @@ mod tests {
             &wrong,
             None,
             PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT,
+            &|_| {},
         ) {
             Err(CryptoError::KeyFileUnlockFailed) => {}
             other => panic!("expected KeyFileUnlockFailed, got {other:?}"),
@@ -601,6 +614,7 @@ mod tests {
                 &pass,
                 None,
                 PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT,
+                &|_| {},
             ) {
                 Err(CryptoError::KeyFileUnlockFailed) => {}
                 other => panic!(
@@ -624,28 +638,28 @@ mod tests {
 
         let mut bad_magic = original.clone();
         bad_magic[0] ^= 0x01;
-        match open_private_key(&bad_magic, &pass, None, cap) {
+        match open_private_key(&bad_magic, &pass, None, cap, &|_| {}) {
             Err(CryptoError::InvalidFormat(FormatDefect::NotAKeyFile)) => {}
             other => panic!("expected NotAKeyFile for magic tamper, got {other:?}"),
         }
 
         let mut bad_version = original.clone();
         bad_version[VERSION_OFFSET] = 2;
-        match open_private_key(&bad_version, &pass, None, cap) {
+        match open_private_key(&bad_version, &pass, None, cap, &|_| {}) {
             Err(CryptoError::UnsupportedVersion(UnsupportedVersion::NewerKey { version: 2 })) => {}
             other => panic!("expected NewerKey(2) for version tamper, got {other:?}"),
         }
 
         let mut bad_kind = original.clone();
         bad_kind[KIND_OFFSET] = 0x99;
-        match open_private_key(&bad_kind, &pass, None, cap) {
+        match open_private_key(&bad_kind, &pass, None, cap, &|_| {}) {
             Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)) => {}
             other => panic!("expected WrongKeyFileType for kind tamper, got {other:?}"),
         }
 
         let mut bad_flags = original.clone();
         bad_flags[KEY_FLAGS_OFFSET + 1] = 0x01;
-        match open_private_key(&bad_flags, &pass, None, cap) {
+        match open_private_key(&bad_flags, &pass, None, cap, &|_| {}) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => {}
             other => panic!("expected MalformedPrivateKey for key_flags tamper, got {other:?}"),
         }
@@ -808,6 +822,7 @@ mod tests {
             &test_passphrase("pw"),
             None,
             PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT,
+            &|_| {},
         ) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => {}
             other => panic!("expected MalformedPrivateKey, got {other:?}"),
@@ -826,6 +841,7 @@ mod tests {
             &pass,
             None,
             PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT,
+            &|_| {},
         ) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => {}
             other => panic!("expected MalformedPrivateKey for trailing byte, got {other:?}"),
@@ -839,7 +855,7 @@ mod tests {
         let kdf = KdfParams::test_fast_default();
         let bytes = seal_private_key(&secret, "x25519", &public, &[], &pass, &kdf).unwrap();
         // Local cap below the actual 48-byte wrapped secret.
-        match open_private_key(&bytes, &pass, None, 32) {
+        match open_private_key(&bytes, &pass, None, 32, &|_| {}) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => {}
             other => panic!("expected MalformedPrivateKey for cap exceeded, got {other:?}"),
         }
@@ -856,6 +872,7 @@ mod tests {
             &test_passphrase("pw"),
             None,
             PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT,
+            &|_| {},
         ) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedTypeName)) => {}
             other => panic!("expected MalformedTypeName for uppercase, got {other:?}"),
@@ -874,10 +891,115 @@ mod tests {
             &test_passphrase("pw"),
             None,
             PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT,
+            &|_| {},
         ) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedTypeName)) => {}
             other => panic!("expected MalformedTypeName for non-UTF8, got {other:?}"),
         }
+    }
+
+    /// Pins the work-boundary contract for `open_private_key`: on a
+    /// successful unlock the progress event fires exactly once, AFTER
+    /// every structural / cap / grammar check has passed. Without
+    /// this, a regression that moved the `on_event` call earlier
+    /// would emit a misleading "unlocking…" UI string for files that
+    /// will fail without ever running Argon2id.
+    #[test]
+    fn open_emits_unlocking_private_key_exactly_once_on_success() {
+        use std::cell::RefCell;
+
+        let (secret, public) = x25519_shaped();
+        let pass = test_passphrase("pw");
+        let kdf = KdfParams::test_fast_default();
+        let bytes = seal_private_key(&secret, "x25519", &public, &[], &pass, &kdf).unwrap();
+
+        let events = RefCell::new(Vec::<crate::ProgressEvent>::new());
+        let sink = |e: &crate::ProgressEvent| {
+            events.borrow_mut().push(*e);
+        };
+        open_private_key(
+            &bytes,
+            &pass,
+            None,
+            PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT,
+            &sink,
+        )
+        .unwrap();
+        assert_eq!(
+            events.borrow().clone(),
+            vec![crate::ProgressEvent::UnlockingPrivateKey]
+        );
+    }
+
+    /// Pins the work-boundary contract for `open_private_key` when the
+    /// stored `kdf_params` exceed the caller's `KdfLimit`: NO event
+    /// fires, because the resource-cap check runs before Argon2id.
+    /// Pre-#7 the orchestrator would have already emitted
+    /// `DerivingKey` from `RecipientDecryptor::decrypt`; the new
+    /// emission point is inside the function and gated on cap success.
+    #[test]
+    fn open_emits_no_event_when_kdf_params_exceed_resource_cap() {
+        use std::cell::RefCell;
+
+        let (secret, public) = x25519_shaped();
+        let pass = test_passphrase("pw");
+        // Build a key file with mem_cost = 2 GiB (the structural max),
+        // then unlock with a `KdfLimit` of 64 KiB. The cap rejects
+        // before Argon2id; we cannot actually seal at 2 GiB in a
+        // unit test, so we splice the bytes after sealing.
+        let kdf_low = KdfParams::test_fast_default();
+        let mut bytes = seal_private_key(&secret, "x25519", &public, &[], &pass, &kdf_low).unwrap();
+        let high_mem_kdf = KdfParams {
+            mem_cost: KdfParams::MAX_MEM_COST,
+            time_cost: 1,
+            lanes: 1,
+        };
+        bytes[KDF_PARAMS_OFFSET..KDF_PARAMS_OFFSET + KDF_PARAMS_SIZE]
+            .copy_from_slice(&high_mem_kdf.to_bytes());
+        let limit = KdfLimit::new(64);
+
+        let events = RefCell::new(Vec::<crate::ProgressEvent>::new());
+        let sink = |e: &crate::ProgressEvent| {
+            events.borrow_mut().push(*e);
+        };
+        let _ = open_private_key(
+            &bytes,
+            &pass,
+            Some(&limit),
+            PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT,
+            &sink,
+        );
+        assert!(
+            events.borrow().is_empty(),
+            "no event should fire before resource-cap check passes; got {:?}",
+            events.borrow()
+        );
+    }
+
+    /// Companion of the above: a structurally malformed key file
+    /// (truncated below the fixed header) MUST be rejected before any
+    /// event fires.
+    #[test]
+    fn open_emits_no_event_when_truncated_below_header() {
+        use std::cell::RefCell;
+
+        let too_short = vec![0u8; PRIVATE_KEY_HEADER_FIXED_SIZE - 1];
+        let events = RefCell::new(Vec::<crate::ProgressEvent>::new());
+        let sink = |e: &crate::ProgressEvent| {
+            events.borrow_mut().push(*e);
+        };
+        let _ = open_private_key(
+            &too_short,
+            &test_passphrase("pw"),
+            None,
+            PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT,
+            &sink,
+        );
+        assert!(
+            events.borrow().is_empty(),
+            "no event should fire before header parse passes; got {:?}",
+            events.borrow()
+        );
     }
 
     /// Builds a structurally-consistent private.key with the given

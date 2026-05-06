@@ -544,7 +544,13 @@ impl PassphraseDecryptor {
         };
         let archive_limits = self.archive_limits.unwrap_or_default();
         let header_read_limits = self.header_read_limits.unwrap_or_default();
-        on_event(&ProgressEvent::DerivingKey);
+        // No early progress event here. `protocol::decrypt` parses the
+        // header structurally before any KDF runs; if the file is
+        // malformed or mode-mismatched, no event should fire. The
+        // `DerivingPassphraseWrapKey` event fires from inside
+        // `argon2id::unwrap` once the slot loop reaches a structurally
+        // valid `argon2id` body whose `kdf_params` are within the
+        // resource cap — i.e. immediately before Argon2id actually runs.
         let output_path = protocol::decrypt(
             &identity,
             &self.input,
@@ -614,11 +620,17 @@ impl RecipientDecryptor {
         on_event: impl Fn(&ProgressEvent),
     ) -> Result<DecryptOutcome, CryptoError> {
         validate_passphrase(&identity_passphrase)?;
-        on_event(&ProgressEvent::DerivingKey);
+        // No early progress event here. `open_x25519_private_key` reads
+        // and structurally validates `private.key` first; only when it
+        // is about to run Argon2id does it emit
+        // `UnlockingPrivateKey` from inside
+        // `key::private::open_private_key`. A malformed or wrong-type
+        // key file is rejected with no event fired.
         let recipient_secret = recipient::native::x25519::open_x25519_private_key(
             identity.key_file_path(),
             &identity_passphrase,
             self.kdf_limit.as_ref(),
+            &on_event,
         )?;
         let identity_scheme = recipient::x25519::X25519Identity { recipient_secret };
         let archive_limits = self.archive_limits.unwrap_or_default();

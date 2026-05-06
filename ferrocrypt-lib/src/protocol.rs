@@ -65,11 +65,22 @@ use crate::{EncryptionMode, ProgressEvent};
 /// before any KDF runs. Implementations must NOT build full
 /// [`RecipientEntry`] framing or compute the header MAC — those
 /// concerns live in this module.
+///
+/// `on_event` lets schemes whose wrap step is expensive (today only
+/// `argon2id`) emit [`ProgressEvent::DerivingPassphraseWrapKey`] at the
+/// actual KDF call site. Schemes whose wrap is cheap (X25519: one
+/// scalar mult + one HKDF, sub-millisecond) MUST ignore the parameter
+/// — emitting from them would lie about a long pause that never
+/// happens.
 pub(crate) trait RecipientScheme {
     const TYPE_NAME: &'static str;
     const MIXING_RULE: NativeMixingRule;
 
-    fn wrap_file_key(&self, file_key: &FileKey) -> Result<RecipientBody, CryptoError>;
+    fn wrap_file_key(
+        &self,
+        file_key: &FileKey,
+        on_event: &dyn Fn(&ProgressEvent),
+    ) -> Result<RecipientBody, CryptoError>;
 }
 
 /// Decrypt-side scheme: try to unwrap a candidate [`FileKey`] from a
@@ -87,6 +98,11 @@ pub(crate) trait RecipientScheme {
 ///   This is the ONLY meaning of `Ok(None)`; hard failures (KDF cap
 ///   exceeded, malformed embedded KDF params, structural defects in
 ///   the body shape) are `Err(CryptoError::*)`.
+///
+/// `on_event` lets schemes whose unwrap step is expensive (today only
+/// `argon2id`) emit [`ProgressEvent::DerivingPassphraseWrapKey`] at the
+/// actual KDF call site. Schemes whose unwrap is cheap (X25519: one
+/// scalar mult + one HKDF, sub-millisecond) MUST ignore the parameter.
 pub(crate) trait IdentityScheme {
     const TYPE_NAME: &'static str;
     /// File mode this identity scheme can decrypt. Used by the
@@ -95,7 +111,11 @@ pub(crate) trait IdentityScheme {
     /// `decrypt` with the wrong identity for the file's recipient list.
     const EXPECTED_MODE: EncryptionMode;
 
-    fn unwrap_file_key(&self, body: &RecipientBody) -> Result<Option<FileKey>, CryptoError>;
+    fn unwrap_file_key(
+        &self,
+        body: &RecipientBody,
+        on_event: &dyn Fn(&ProgressEvent),
+    ) -> Result<Option<FileKey>, CryptoError>;
 }
 
 // ─── Encrypt ───────────────────────────────────────────────────────────────
@@ -163,7 +183,14 @@ pub(crate) fn encrypt<R: RecipientScheme>(
     let output_path = resolve_encrypted_output_path(output_dir, output_file, &base_name);
     reject_occupied(&output_path, "Output")?;
 
-    on_event(&ProgressEvent::DerivingKey);
+    // No `DerivingKey` here. Each recipient scheme emits its own
+    // work-boundary event from inside `wrap_file_key`. For the
+    // passphrase-only case, that's exactly one
+    // `DerivingPassphraseWrapKey` immediately before Argon2id; for
+    // pure X25519 wrapping (sub-millisecond), no event fires until
+    // `Encrypting` below — which is what the orchestrator wants:
+    // signal what the user can perceive, stay silent for what they
+    // can't.
 
     // Generate per-file random material first so the rest of the build
     // is a pure function of (file_key, recipient input, stream_nonce,
@@ -181,7 +208,7 @@ pub(crate) fn encrypt<R: RecipientScheme>(
     // it immediately so the plaintext window in memory is minimal.
     let mut entries = Vec::with_capacity(recipients.len());
     for recipient in recipients {
-        let body = recipient.wrap_file_key(&file_key)?;
+        let body = recipient.wrap_file_key(&file_key, on_event)?;
         entries.push(build_native_entry(R::TYPE_NAME, body)?);
     }
     drop(file_key);
@@ -267,13 +294,17 @@ pub(crate) fn decrypt<I: IdentityScheme>(
     // it exists for internal callers and any future plugin-style API.
     check_mode_matches_scheme::<I>(mode)?;
 
-    // The caller (`PassphraseDecryptor::decrypt` / `RecipientDecryptor::decrypt`)
-    // is responsible for emitting `DerivingKey` before the heaviest KDF
-    // op — for the recipient path that's the `private.key` unlock
-    // (which runs before this function), for the passphrase path it's
-    // the slot-loop Argon2id (which runs inside this function).
-    // Emitting it once at the call site keeps the event count to one
-    // per decrypt regardless of mode.
+    // No early `DerivingKey` here. Progress events fire at the actual
+    // KDF call boundary inside each scheme's `unwrap_file_key`. For the
+    // passphrase mode, that means the slot-loop Argon2id emission lives
+    // inside `recipient::native::argon2id::unwrap`, which fires
+    // `DerivingPassphraseWrapKey` only after the per-slot structural /
+    // resource-cap checks have passed. For the recipient (X25519) mode,
+    // the heaviest KDF (the `private.key` Argon2id unlock) already ran
+    // *before* this function was entered — `RecipientDecryptor::decrypt`
+    // calls `open_x25519_private_key` first, and that call emits
+    // `UnlockingPrivateKey` at its own work boundary inside
+    // `key::private::open_private_key`.
 
     // 7-8. Iterate supported recipient slots. Per FORMAT.md §3.7 the
     //      candidate `file_key` is not final until the header MAC also
@@ -300,7 +331,7 @@ pub(crate) fn decrypt<I: IdentityScheme>(
             type_name: I::TYPE_NAME,
             bytes: entry.body.clone(),
         };
-        let file_key = match identity.unwrap_file_key(&body)? {
+        let file_key = match identity.unwrap_file_key(&body, on_event)? {
             Some(k) => k,
             None => continue,
         };
@@ -628,7 +659,7 @@ mod tests {
         privkey_path: &Path,
         pass: &SecretString,
     ) -> Result<PathBuf, CryptoError> {
-        let recipient_secret = x25519::open_x25519_private_key(privkey_path, pass, None)?;
+        let recipient_secret = x25519::open_x25519_private_key(privkey_path, pass, None, &|_| {})?;
         let identity = x25519::X25519Identity { recipient_secret };
         decrypt(
             &identity,

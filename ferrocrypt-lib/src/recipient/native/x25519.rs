@@ -211,6 +211,12 @@ impl<'a> crate::protocol::RecipientScheme for X25519Recipient<'a> {
     fn wrap_file_key(
         &self,
         file_key: &FileKey,
+        // X25519 wrap is one ECDH + one HKDF + one AEAD — sub-millisecond
+        // even at the structural recipient cap. Emitting a progress
+        // event would lie about a long pause that never happens, so
+        // the parameter is intentionally ignored (per the
+        // `RecipientScheme::wrap_file_key` contract).
+        _on_event: &dyn Fn(&crate::ProgressEvent),
     ) -> Result<crate::recipient::entry::RecipientBody, CryptoError> {
         let bytes = wrap(file_key, self.recipient_pubkey)?;
         Ok(crate::recipient::entry::RecipientBody {
@@ -233,6 +239,12 @@ impl crate::protocol::IdentityScheme for X25519Identity {
     fn unwrap_file_key(
         &self,
         body: &crate::recipient::entry::RecipientBody,
+        // X25519 unwrap is one ECDH + one HKDF + one AEAD —
+        // sub-millisecond. The parameter is intentionally ignored
+        // (per the `IdentityScheme::unwrap_file_key` contract); the
+        // expensive `private.key` Argon2id step happens before the
+        // slot loop, in `recipient::native::x25519::open_x25519_private_key`.
+        _on_event: &dyn Fn(&crate::ProgressEvent),
     ) -> Result<Option<FileKey>, CryptoError> {
         let body_array: &[u8; BODY_LENGTH] = body
             .bytes
@@ -297,6 +309,7 @@ pub(crate) fn open_x25519_private_key(
     path: &std::path::Path,
     passphrase: &secrecy::SecretString,
     kdf_limit: Option<&crate::crypto::kdf::KdfLimit>,
+    on_event: &dyn Fn(&crate::ProgressEvent),
 ) -> Result<Zeroizing<[u8; PRIVATE_KEY_SIZE]>, CryptoError> {
     use crate::crypto::tlv::validate_tlv;
     use crate::error::FormatDefect;
@@ -319,6 +332,7 @@ pub(crate) fn open_x25519_private_key(
         passphrase,
         kdf_limit,
         PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT,
+        on_event,
     )?;
 
     if opened.type_name != TYPE_NAME {
@@ -472,7 +486,7 @@ mod tests {
         )?;
         fs::write(&path, bytes)?;
 
-        match open_x25519_private_key(&path, &pass, None).map(|_| ()) {
+        match open_x25519_private_key(&path, &pass, None, &|_| {}).map(|_| ()) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => Ok(()),
             other => {
                 panic!("expected MalformedPrivateKey for public/secret mismatch, got {other:?}")
@@ -505,7 +519,7 @@ mod tests {
         )?;
         fs::write(&path, bytes)?;
 
-        match open_x25519_private_key(&path, &pass, None).map(|_| ()) {
+        match open_x25519_private_key(&path, &pass, None, &|_| {}).map(|_| ()) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => Ok(()),
             other => panic!("expected MalformedPrivateKey for public_len mismatch, got {other:?}"),
         }
@@ -649,7 +663,7 @@ mod tests {
             type_name: TYPE_NAME,
             bytes: body_bytes.to_vec(),
         };
-        match identity.unwrap_file_key(&body) {
+        match identity.unwrap_file_key(&body, &|_| {}) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)) => {}
             other => panic!(
                 "adapter must propagate all-zero shared as MalformedRecipientEntry, got {other:?}"

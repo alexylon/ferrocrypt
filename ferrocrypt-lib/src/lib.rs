@@ -187,22 +187,36 @@ impl std::fmt::Display for EncryptionMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ProgressEvent {
-    /// Argon2id is running (passphrase wrap-key derivation, or
-    /// `private.key` unlock on the recipient decrypt path) and may
-    /// block for multiple seconds.
-    DerivingKey,
+    /// Argon2id is about to run to derive the passphrase wrap key for
+    /// an `argon2id` recipient. Emitted at the work boundary inside the
+    /// recipient module — after structural validation and resource-cap
+    /// checks, immediately before the KDF call. Fires zero times for a
+    /// pure-recipient (X25519) `.fcr` and zero times when a malformed
+    /// `.fcr` is rejected before any KDF runs. May block for multiple
+    /// seconds.
+    DerivingPassphraseWrapKey,
+    /// Argon2id is about to run to unlock a `private.key` file. Emitted
+    /// at the work boundary inside the key-file reader — after structural
+    /// validation and resource-cap checks, immediately before the KDF
+    /// call. Fires zero times when the `private.key` is malformed and
+    /// rejected before any KDF runs. May block for multiple seconds.
+    UnlockingPrivateKey,
     /// Encrypting a payload. Emitted once per encrypt call.
     Encrypting,
     /// Decrypting a payload. Emitted once per decrypt call.
     Decrypting,
-    /// Generating an X25519 key pair.
+    /// Generating an X25519 key pair. Covers the entire generation flow,
+    /// including the Argon2id-driven sealing of `private.key`. The library
+    /// does NOT emit a nested [`Self::DerivingPassphraseWrapKey`] inside
+    /// keygen; this event already signals the long pause.
     GeneratingKeyPair,
 }
 
 impl std::fmt::Display for ProgressEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let msg = match self {
-            Self::DerivingKey => "Deriving key\u{2026}",
+            Self::DerivingPassphraseWrapKey => "Deriving passphrase key\u{2026}",
+            Self::UnlockingPrivateKey => "Unlocking private key\u{2026}",
             Self::Encrypting => "Encrypting\u{2026}",
             Self::Decrypting => "Decrypting\u{2026}",
             Self::GeneratingKeyPair => "Generating key pair\u{2026}",
@@ -394,8 +408,12 @@ mod tests {
     #[test]
     fn progress_events_display_exact_strings() {
         assert_eq!(
-            ProgressEvent::DerivingKey.to_string(),
-            "Deriving key\u{2026}"
+            ProgressEvent::DerivingPassphraseWrapKey.to_string(),
+            "Deriving passphrase key\u{2026}"
+        );
+        assert_eq!(
+            ProgressEvent::UnlockingPrivateKey.to_string(),
+            "Unlocking private key\u{2026}"
         );
         assert_eq!(ProgressEvent::Encrypting.to_string(), "Encrypting\u{2026}");
         assert_eq!(ProgressEvent::Decrypting.to_string(), "Decrypting\u{2026}");

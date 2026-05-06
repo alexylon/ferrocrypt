@@ -23,6 +23,7 @@
 use secrecy::SecretString;
 
 use crate::CryptoError;
+use crate::ProgressEvent;
 use crate::crypto::aead::{WRAP_NONCE_SIZE, WRAPPED_FILE_KEY_SIZE, open_file_key, seal_file_key};
 use crate::crypto::kdf::{ARGON2_SALT_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams};
 use crate::crypto::keys::{FileKey, derive_passphrase_wrap_key, random_bytes};
@@ -48,12 +49,20 @@ const WRAPPED_FILE_KEY_OFFSET: usize = WRAP_NONCE_OFFSET + WRAP_NONCE_SIZE;
 /// then HKDF-SHA3-256 to derive the wrap key, and seals `file_key`
 /// via XChaCha20-Poly1305 with empty AAD. Returns the canonical
 /// 116-byte recipient body.
+///
+/// Emits [`ProgressEvent::DerivingPassphraseWrapKey`] immediately before
+/// the Argon2id call. The encrypt path has no preflight that can fail
+/// between fn entry and the KDF, so the event always fires exactly once
+/// for a successful wrap; in the unlikely event the OS CSPRNG fails to
+/// produce salt bytes, no event fires.
 pub(crate) fn wrap(
     file_key: &FileKey,
     passphrase: &SecretString,
     kdf_params: &KdfParams,
+    on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<[u8; BODY_LENGTH], CryptoError> {
     let argon2_salt = random_bytes::<ARGON2_SALT_SIZE>();
+    on_event(&ProgressEvent::DerivingPassphraseWrapKey);
     let wrap_key =
         derive_passphrase_wrap_key(passphrase, &argon2_salt, kdf_params, HKDF_INFO_WRAP)?;
     let wrap_nonce = random_bytes::<WRAP_NONCE_SIZE>();
@@ -78,10 +87,17 @@ pub(crate) fn wrap(
 /// [`CryptoError::RecipientUnwrapFailed`] with `type_name = "argon2id"`.
 /// Per `FORMAT.md` §3.7, the candidate `file_key` is not considered
 /// final until the header MAC also verifies.
+///
+/// Emits [`ProgressEvent::DerivingPassphraseWrapKey`] immediately before
+/// the Argon2id call — that is, **after** structural KDF-parameter
+/// validation and the resource-cap check have already passed. A
+/// malformed body or a body whose `kdf_params` exceed the caller's
+/// `kdf_limit` is rejected with no event emitted.
 pub(crate) fn unwrap(
     body: &[u8; BODY_LENGTH],
     passphrase: &SecretString,
     kdf_limit: Option<&KdfLimit>,
+    on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<FileKey, CryptoError> {
     let mut argon2_salt = [0u8; ARGON2_SALT_SIZE];
     argon2_salt.copy_from_slice(&body[SALT_OFFSET..SALT_OFFSET + ARGON2_SALT_SIZE]);
@@ -96,6 +112,7 @@ pub(crate) fn unwrap(
     let mut wrapped_file_key = [0u8; WRAPPED_FILE_KEY_SIZE];
     wrapped_file_key.copy_from_slice(&body[WRAPPED_FILE_KEY_OFFSET..]);
 
+    on_event(&ProgressEvent::DerivingPassphraseWrapKey);
     let wrap_key =
         derive_passphrase_wrap_key(passphrase, &argon2_salt, &kdf_params, HKDF_INFO_WRAP)?;
     open_file_key(&wrap_key, &wrap_nonce, &wrapped_file_key, || {
@@ -126,8 +143,9 @@ impl<'a> crate::protocol::RecipientScheme for PassphraseRecipient<'a> {
     fn wrap_file_key(
         &self,
         file_key: &FileKey,
+        on_event: &dyn Fn(&ProgressEvent),
     ) -> Result<crate::recipient::entry::RecipientBody, CryptoError> {
-        let bytes = wrap(file_key, self.passphrase, &self.kdf_params)?;
+        let bytes = wrap(file_key, self.passphrase, &self.kdf_params, on_event)?;
         Ok(crate::recipient::entry::RecipientBody {
             type_name: TYPE_NAME,
             bytes: bytes.to_vec(),
@@ -148,6 +166,7 @@ impl<'a> crate::protocol::IdentityScheme for PassphraseIdentity<'a> {
     fn unwrap_file_key(
         &self,
         body: &crate::recipient::entry::RecipientBody,
+        on_event: &dyn Fn(&ProgressEvent),
     ) -> Result<Option<FileKey>, CryptoError> {
         let body_array: &[u8; BODY_LENGTH] = body.bytes.as_slice().try_into().map_err(|_| {
             CryptoError::InvalidFormat(crate::error::FormatDefect::MalformedRecipientEntry)
@@ -157,8 +176,10 @@ impl<'a> crate::protocol::IdentityScheme for PassphraseIdentity<'a> {
         // body surface as `RecipientUnwrapFailed` from `unwrap`; per
         // `IdentityScheme` semantics we collapse those into `Ok(None)`
         // and propagate everything else (including the cap-exceeded
-        // error) as `Err`.
-        match unwrap(body_array, self.passphrase, self.kdf_limit) {
+        // error) as `Err`. The progress event is emitted inside
+        // `unwrap` only after structural / cap checks have already
+        // passed, so a cap-exceeded body produces no spurious event.
+        match unwrap(body_array, self.passphrase, self.kdf_limit, on_event) {
             Ok(file_key) => Ok(Some(file_key)),
             Err(CryptoError::RecipientUnwrapFailed { .. }) => Ok(None),
             Err(other) => Err(other),
@@ -168,11 +189,33 @@ impl<'a> crate::protocol::IdentityScheme for PassphraseIdentity<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use super::*;
     use crate::crypto::keys::FILE_KEY_SIZE;
 
     fn passphrase(s: &str) -> SecretString {
         SecretString::from(s.to_string())
+    }
+
+    /// No-op `on_event` for tests that aren't asserting on emission.
+    fn noop() -> impl Fn(&ProgressEvent) {
+        |_: &ProgressEvent| {}
+    }
+
+    /// Recording closure for tests that DO assert on emission. The
+    /// returned `RefCell` collects every event in order; tests typically
+    /// snapshot it via `events.borrow().clone()`.
+    fn recording() -> (
+        impl Fn(&ProgressEvent),
+        std::rc::Rc<RefCell<Vec<ProgressEvent>>>,
+    ) {
+        let events = std::rc::Rc::new(RefCell::new(Vec::<ProgressEvent>::new()));
+        let sink = events.clone();
+        let f = move |e: &ProgressEvent| {
+            sink.borrow_mut().push(*e);
+        };
+        (f, events)
     }
 
     #[test]
@@ -202,8 +245,8 @@ mod tests {
         let file_key = FileKey::from_bytes_for_tests([0x42u8; FILE_KEY_SIZE]);
         let pass = passphrase("correct horse battery staple");
         let kdf = KdfParams::test_fast_default();
-        let body = wrap(&file_key, &pass, &kdf).unwrap();
-        let recovered = unwrap(&body, &pass, None).unwrap();
+        let body = wrap(&file_key, &pass, &kdf, &noop()).unwrap();
+        let recovered = unwrap(&body, &pass, None, &noop()).unwrap();
         assert_eq!(recovered.expose(), file_key.expose());
     }
 
@@ -213,8 +256,8 @@ mod tests {
         let right = passphrase("right");
         let wrong = passphrase("wrong");
         let kdf = KdfParams::test_fast_default();
-        let body = wrap(&file_key, &right, &kdf).unwrap();
-        match unwrap(&body, &wrong, None) {
+        let body = wrap(&file_key, &right, &kdf, &noop()).unwrap();
+        match unwrap(&body, &wrong, None, &noop()) {
             Err(CryptoError::RecipientUnwrapFailed { type_name }) => {
                 assert_eq!(type_name, TYPE_NAME);
             }
@@ -227,9 +270,9 @@ mod tests {
         let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let pass = passphrase("p");
         let kdf = KdfParams::test_fast_default();
-        let mut body = wrap(&file_key, &pass, &kdf).unwrap();
+        let mut body = wrap(&file_key, &pass, &kdf, &noop()).unwrap();
         body[WRAPPED_FILE_KEY_OFFSET] ^= 0x01;
-        match unwrap(&body, &pass, None) {
+        match unwrap(&body, &pass, None, &noop()) {
             Err(CryptoError::RecipientUnwrapFailed { type_name }) => {
                 assert_eq!(type_name, TYPE_NAME);
             }
@@ -242,9 +285,9 @@ mod tests {
         let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let pass = passphrase("p");
         let kdf = KdfParams::test_fast_default();
-        let mut body = wrap(&file_key, &pass, &kdf).unwrap();
+        let mut body = wrap(&file_key, &pass, &kdf, &noop()).unwrap();
         body[SALT_OFFSET] ^= 0x01;
-        match unwrap(&body, &pass, None) {
+        match unwrap(&body, &pass, None, &noop()) {
             Err(CryptoError::RecipientUnwrapFailed { type_name }) => {
                 assert_eq!(type_name, TYPE_NAME);
             }
@@ -262,9 +305,9 @@ mod tests {
         let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let pass = passphrase("p");
         let kdf = KdfParams::test_fast_default();
-        let mut body = wrap(&file_key, &pass, &kdf).unwrap();
+        let mut body = wrap(&file_key, &pass, &kdf, &noop()).unwrap();
         body[KDF_PARAMS_OFFSET + 7] ^= 0x02;
-        match unwrap(&body, &pass, None) {
+        match unwrap(&body, &pass, None, &noop()) {
             Err(CryptoError::RecipientUnwrapFailed { type_name }) => {
                 assert_eq!(type_name, TYPE_NAME);
             }
@@ -277,9 +320,9 @@ mod tests {
         let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let pass = passphrase("p");
         let kdf = KdfParams::test_fast_default();
-        let mut body = wrap(&file_key, &pass, &kdf).unwrap();
+        let mut body = wrap(&file_key, &pass, &kdf, &noop()).unwrap();
         body[WRAP_NONCE_OFFSET] ^= 0x01;
-        match unwrap(&body, &pass, None) {
+        match unwrap(&body, &pass, None, &noop()) {
             Err(CryptoError::RecipientUnwrapFailed { type_name }) => {
                 assert_eq!(type_name, TYPE_NAME);
             }
@@ -294,10 +337,10 @@ mod tests {
         let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let pass = passphrase("p");
         let kdf = KdfParams::test_fast_default();
-        let mut body = wrap(&file_key, &pass, &kdf).unwrap();
+        let mut body = wrap(&file_key, &pass, &kdf, &noop()).unwrap();
         // `lanes` is the third u32 in `kdf_params`; offset KDF_PARAMS_OFFSET + 8.
         body[KDF_PARAMS_OFFSET + 8..KDF_PARAMS_OFFSET + 12].fill(0);
-        match unwrap(&body, &pass, None) {
+        match unwrap(&body, &pass, None, &noop()) {
             Err(CryptoError::InvalidKdfParams(_)) => {}
             other => panic!("expected InvalidKdfParams, got {other:?}"),
         }
@@ -318,11 +361,11 @@ mod tests {
         // We can't actually run wrap() with 2 GiB mem cost in a test; instead
         // construct the body directly with the high-mem KDF params field.
         let kdf_low = KdfParams::test_fast_default();
-        let mut body = wrap(&file_key, &pass, &kdf_low).unwrap();
+        let mut body = wrap(&file_key, &pass, &kdf_low, &noop()).unwrap();
         body[KDF_PARAMS_OFFSET..KDF_PARAMS_OFFSET + KDF_PARAMS_SIZE]
             .copy_from_slice(&high_mem_kdf.to_bytes());
         let limit = KdfLimit::new(64);
-        match unwrap(&body, &pass, Some(&limit)) {
+        match unwrap(&body, &pass, Some(&limit), &noop()) {
             Err(CryptoError::KdfResourceCapExceeded {
                 mem_cost_kib,
                 local_cap_kib,
@@ -343,11 +386,91 @@ mod tests {
         let file_key = FileKey::from_bytes_for_tests([0x11u8; FILE_KEY_SIZE]);
         let pass = passphrase("p");
         let kdf = KdfParams::test_fast_default();
-        let body = wrap(&file_key, &pass, &kdf).unwrap();
+        let body = wrap(&file_key, &pass, &kdf, &noop()).unwrap();
         assert_eq!(SALT_OFFSET, 0);
         assert_eq!(KDF_PARAMS_OFFSET, 32);
         assert_eq!(WRAP_NONCE_OFFSET, 44);
         assert_eq!(WRAPPED_FILE_KEY_OFFSET, 68);
         assert_eq!(body.len(), 116);
+    }
+
+    /// Pins the work-boundary contract for `wrap`: the progress event
+    /// fires exactly once per successful wrap. If a regression moved
+    /// the emission outside the function or duplicated it, this test
+    /// catches it.
+    #[test]
+    fn wrap_emits_deriving_passphrase_wrap_key_exactly_once() {
+        let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
+        let pass = passphrase("p");
+        let kdf = KdfParams::test_fast_default();
+        let (sink, events) = recording();
+        wrap(&file_key, &pass, &kdf, &sink).unwrap();
+        assert_eq!(
+            events.borrow().clone(),
+            vec![ProgressEvent::DerivingPassphraseWrapKey]
+        );
+    }
+
+    /// Pins the work-boundary contract for `unwrap` on the happy path:
+    /// the progress event fires exactly once per successful unwrap,
+    /// AFTER structural validation and the resource-cap check.
+    #[test]
+    fn unwrap_emits_deriving_passphrase_wrap_key_exactly_once_on_success() {
+        let file_key = FileKey::from_bytes_for_tests([0x42u8; FILE_KEY_SIZE]);
+        let pass = passphrase("p");
+        let kdf = KdfParams::test_fast_default();
+        let body = wrap(&file_key, &pass, &kdf, &noop()).unwrap();
+        let (sink, events) = recording();
+        unwrap(&body, &pass, None, &sink).unwrap();
+        assert_eq!(
+            events.borrow().clone(),
+            vec![ProgressEvent::DerivingPassphraseWrapKey]
+        );
+    }
+
+    /// Pins the work-boundary contract for `unwrap` when the body's
+    /// `kdf_params` are structurally malformed: NO event fires, because
+    /// Argon2id never runs.
+    #[test]
+    fn unwrap_emits_no_event_when_kdf_params_are_structurally_malformed() {
+        let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
+        let pass = passphrase("p");
+        let kdf = KdfParams::test_fast_default();
+        let mut body = wrap(&file_key, &pass, &kdf, &noop()).unwrap();
+        // Force `lanes = 0` (out of structural bounds 1..=8).
+        body[KDF_PARAMS_OFFSET + 8..KDF_PARAMS_OFFSET + 12].fill(0);
+        let (sink, events) = recording();
+        let _ = unwrap(&body, &pass, None, &sink);
+        assert!(
+            events.borrow().is_empty(),
+            "no event should fire before structural validation passes; got {:?}",
+            events.borrow()
+        );
+    }
+
+    /// Pins the work-boundary contract for `unwrap` when the body's
+    /// `kdf_params` exceed the caller's resource cap: NO event fires,
+    /// because the cap check runs before Argon2id.
+    #[test]
+    fn unwrap_emits_no_event_when_kdf_params_exceed_resource_cap() {
+        let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
+        let pass = passphrase("p");
+        let high_mem_kdf = KdfParams {
+            mem_cost: KdfParams::MAX_MEM_COST,
+            time_cost: 1,
+            lanes: 1,
+        };
+        let kdf_low = KdfParams::test_fast_default();
+        let mut body = wrap(&file_key, &pass, &kdf_low, &noop()).unwrap();
+        body[KDF_PARAMS_OFFSET..KDF_PARAMS_OFFSET + KDF_PARAMS_SIZE]
+            .copy_from_slice(&high_mem_kdf.to_bytes());
+        let limit = KdfLimit::new(64);
+        let (sink, events) = recording();
+        let _ = unwrap(&body, &pass, Some(&limit), &sink);
+        assert!(
+            events.borrow().is_empty(),
+            "no event should fire before resource-cap check passes; got {:?}",
+            events.borrow()
+        );
     }
 }

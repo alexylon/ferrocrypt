@@ -963,8 +963,8 @@ fn keypair_generator_kdf_params_at_kdf_limit_succeeds() {
 
 /// A second passphrase encrypt to a path already occupied by an `.fcr`
 /// file from the first run must reject *before* Argon2id fires. The
-/// output-precheck inside `protocol::encrypt` runs ahead of
-/// `ProgressEvent::DerivingKey`, so a `DerivingKey` event count of 0 on
+/// output-precheck inside `protocol::encrypt` runs ahead of any KDF
+/// emission, so a `DerivingPassphraseWrapKey` event count of 0 on
 /// the failing run proves the user did not pay for a multi-second KDF
 /// just to learn the destination was occupied. Pinned as a regression
 /// for BUG_REVIEW #2 — without the preflight, the failure used to
@@ -981,10 +981,10 @@ fn encryptor_passphrase_rejects_existing_output_before_kdf() {
         .write(&input, &out_dir, |_| {})
         .expect("first encrypt");
 
-    let deriving_count = std::cell::Cell::new(0u32);
+    let kdf_event_count = std::cell::Cell::new(0u32);
     let result = fast_passphrase_encryptor(pass()).write(&input, &out_dir, |evt| {
-        if matches!(evt, ferrocrypt::ProgressEvent::DerivingKey) {
-            deriving_count.set(deriving_count.get() + 1);
+        if matches!(evt, ferrocrypt::ProgressEvent::DerivingPassphraseWrapKey) {
+            kdf_event_count.set(kdf_event_count.get() + 1);
         }
     });
 
@@ -998,7 +998,7 @@ fn encryptor_passphrase_rejects_existing_output_before_kdf() {
         other => panic!("expected InvalidInput(Output already exists), got {other:?}"),
     }
     assert_eq!(
-        deriving_count.get(),
+        kdf_event_count.get(),
         0,
         "Argon2id ran before the output-conflict preflight"
     );
@@ -1009,9 +1009,9 @@ fn encryptor_passphrase_rejects_existing_output_before_kdf() {
 /// and would return `false` (target missing), letting Argon2id run
 /// before the atomic no-clobber rename finally refuses to overwrite.
 /// The fix routes the precheck through `symlink_metadata`, so a
-/// `DerivingKey` event count of 0 on the failing run proves the user
-/// did not pay for a multi-second KDF to learn that a stale symlink
-/// occupies the destination. Pinned for BUG_REVIEW #3.
+/// `DerivingPassphraseWrapKey` event count of 0 on the failing run
+/// proves the user did not pay for a multi-second KDF to learn that a
+/// stale symlink occupies the destination. Pinned for BUG_REVIEW #3.
 #[cfg(unix)]
 #[test]
 fn encryptor_passphrase_rejects_dangling_symlink_at_output_before_kdf() {
@@ -1027,10 +1027,10 @@ fn encryptor_passphrase_rejects_dangling_symlink_at_output_before_kdf() {
     symlink(out_dir.join("absent-target"), &dangling).unwrap();
     assert!(!dangling.exists(), "sanity: target really is missing");
 
-    let deriving_count = std::cell::Cell::new(0u32);
+    let kdf_event_count = std::cell::Cell::new(0u32);
     let result = fast_passphrase_encryptor(pass()).write(&input, &out_dir, |evt| {
-        if matches!(evt, ferrocrypt::ProgressEvent::DerivingKey) {
-            deriving_count.set(deriving_count.get() + 1);
+        if matches!(evt, ferrocrypt::ProgressEvent::DerivingPassphraseWrapKey) {
+            kdf_event_count.set(kdf_event_count.get() + 1);
         }
     });
 
@@ -1044,7 +1044,7 @@ fn encryptor_passphrase_rejects_dangling_symlink_at_output_before_kdf() {
         other => panic!("expected InvalidInput(Output already exists), got {other:?}"),
     }
     assert_eq!(
-        deriving_count.get(),
+        kdf_event_count.get(),
         0,
         "Argon2id ran before the dangling-symlink preflight"
     );

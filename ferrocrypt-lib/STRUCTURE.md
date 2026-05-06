@@ -188,7 +188,11 @@ pub(crate) trait RecipientScheme {
     const TYPE_NAME: &'static str;
     const MIXING_RULE: NativeMixingRule;
 
-    fn wrap_file_key(&self, file_key: &FileKey) -> Result<RecipientBody, CryptoError>;
+    fn wrap_file_key(
+        &self,
+        file_key: &FileKey,
+        on_event: &dyn Fn(&ProgressEvent),
+    ) -> Result<RecipientBody, CryptoError>;
 }
 
 pub(crate) trait IdentityScheme {
@@ -198,6 +202,7 @@ pub(crate) trait IdentityScheme {
     fn unwrap_file_key(
         &self,
         body: &RecipientBody,
+        on_event: &dyn Fn(&ProgressEvent),
     ) -> Result<Option<FileKey>, CryptoError>;
 }
 ```
@@ -209,6 +214,7 @@ Rules:
 - Scheme implementations return or accept recipient body bytes; they do not construct full headers.
 - Recipient schemes do not compute or verify header MACs.
 - A recipient unwrap is successful only after the candidate `FileKey` verifies the authenticated header MAC.
+- The orchestrator threads a single `&dyn Fn(&ProgressEvent)` callback into each scheme. Schemes whose KDF step is expensive (Argon2id) emit `ProgressEvent::DerivingPassphraseWrapKey` from inside `wrap` / `unwrap` immediately before the KDF call — that is, **after** structural validation and resource-cap checks have passed. Schemes whose wrap / unwrap is sub-millisecond (X25519) MUST ignore the callback so cheap operations never lie about a long pause. The `private.key` Argon2id boundary is owned separately by `key::private::open_private_key`, which emits `ProgressEvent::UnlockingPrivateKey` at its own work boundary; `protocol::decrypt` does NOT emit a `DerivingKey`-style event from the orchestrator.
 
 ### 3.4 `format.rs`
 
@@ -490,6 +496,7 @@ It contains:
 - wrap-key derivation;
 - file-key seal/open logic;
 - scheme-specific validation;
+- emission of `ProgressEvent::DerivingPassphraseWrapKey` at the actual Argon2id call boundary (after structural validation and `KdfLimit` resource-cap checks have passed, immediately before `derive_passphrase_wrap_key`);
 - `RecipientScheme` implementation;
 - `IdentityScheme` implementation for a passphrase identity;
 - tests and vectors for the native passphrase scheme.
@@ -500,7 +507,7 @@ It does not:
 - compute header MACs;
 - parse TLVs;
 - write files;
-- own progress events;
+- emit any other progress event (no `Encrypting` / `Decrypting` / `UnlockingPrivateKey` / `GeneratingKeyPair` from this module);
 - perform archive encoding or extraction.
 
 ### 5.5 `recipient/native/x25519.rs`
@@ -517,9 +524,9 @@ It contains:
 - file-key seal/open logic;
 - X25519 key-pair generation logic;
 - public-recipient conversion for X25519;
-- identity/private-key unlock glue for X25519;
-- `RecipientScheme` implementation;
-- `IdentityScheme` implementation;
+- identity/private-key unlock glue for X25519 (`open_x25519_private_key`), which threads `&dyn Fn(&ProgressEvent)` into `key::private::open_private_key` so the `UnlockingPrivateKey` event fires at the actual Argon2id boundary, not at this wrapper;
+- `RecipientScheme` implementation (ignores the progress callback — X25519 wrap is sub-millisecond);
+- `IdentityScheme` implementation (ignores the progress callback — X25519 unwrap is sub-millisecond, and the expensive `private.key` Argon2id ran before the slot loop in `open_x25519_private_key`);
 - tests and vectors for the native X25519 scheme.
 
 It does not own the generic `private.key` binary layout. Generic private-key file structure belongs to `key/private.rs`.
@@ -581,7 +588,8 @@ It contains:
 - passphrase-wrapped secret decryption;
 - private-key TLV validation after authentication;
 - generic typed secret material returned to recipient schemes;
-- construction and loading support for `PrivateKey`.
+- construction and loading support for `PrivateKey`;
+- emission of `ProgressEvent::UnlockingPrivateKey` at the actual Argon2id call boundary inside `open_private_key` (after structural header parsing, the caller's `KdfLimit` resource-cap check, the wrapped-secret-length cap, the total-length check, and type-name grammar validation have all passed). A structurally malformed key file or one that exceeds either cap is rejected with no event emitted. `seal_private_key` is silent: keygen owns its own outer `GeneratingKeyPair` event.
 
 It does not contain X25519-specific recipient policy. The X25519 recipient module verifies that decrypted secret material corresponds to X25519 public material.
 

@@ -331,8 +331,8 @@ fn test_recipient_decrypt_rejects_empty_passphrase_before_kdf() {
     fs::create_dir_all(&keys_dir).unwrap();
 
     // Build a real recipient `.fcr` so `Decryptor::open` returns the
-    // `Recipient` variant. Setup `DerivingKey` events fire here, before
-    // we install the observing closure.
+    // `Recipient` variant. Setup events fire here, before we install
+    // the observing closure.
     let setup_pass = SecretString::from("setup-pass".to_string());
     let kg = fast_keypair_generator(setup_pass)
         .write(&keys_dir, |_| {})
@@ -347,7 +347,7 @@ fn test_recipient_decrypt_rejects_empty_passphrase_before_kdf() {
 
     let restore_dir = test_dir.join("restored");
     fs::create_dir_all(&restore_dir).unwrap();
-    let saw_deriving = Cell::new(false);
+    let saw_kdf_event = Cell::new(false);
     let err = match Decryptor::open(&outcome.output_path).expect("open") {
         Decryptor::Recipient(d) => d
             .decrypt(
@@ -355,8 +355,12 @@ fn test_recipient_decrypt_rejects_empty_passphrase_before_kdf() {
                 SecretString::from(String::new()),
                 &restore_dir,
                 |ev| {
-                    if matches!(ev, ProgressEvent::DerivingKey) {
-                        saw_deriving.set(true);
+                    if matches!(
+                        ev,
+                        ProgressEvent::UnlockingPrivateKey
+                            | ProgressEvent::DerivingPassphraseWrapKey
+                    ) {
+                        saw_kdf_event.set(true);
                     }
                 },
             )
@@ -369,8 +373,8 @@ fn test_recipient_decrypt_rejects_empty_passphrase_before_kdf() {
         "expected empty-passphrase error, got: {err}"
     );
     assert!(
-        !saw_deriving.get(),
-        "DerivingKey must not fire before the empty-passphrase check"
+        !saw_kdf_event.get(),
+        "no KDF event must fire before the empty-passphrase check"
     );
 }
 
@@ -378,8 +382,8 @@ fn test_recipient_decrypt_rejects_empty_passphrase_before_kdf() {
 /// a typed `InvalidInput` error *before* kicking off Argon2id. Pre-audit
 /// the rejection happened inside `archive::archive`, which runs after
 /// the KDF — an accidental symlink cost the user seconds and up to 1 GiB
-/// of RAM. Observes the `DerivingKey` progress event to prove the
-/// rejection short-circuits the KDF path.
+/// of RAM. Observes the `DerivingPassphraseWrapKey` progress event to
+/// prove the rejection short-circuits the KDF path.
 #[cfg(unix)]
 #[test]
 fn test_passphrase_encrypt_rejects_symlink_before_kdf() {
@@ -396,11 +400,11 @@ fn test_passphrase_encrypt_rejects_symlink_before_kdf() {
     fs::create_dir_all(&output_dir).unwrap();
     let passphrase = SecretString::from("pass".to_string());
 
-    let saw_deriving = Cell::new(false);
+    let saw_kdf_event = Cell::new(false);
     let err = Encryptor::with_passphrase(passphrase)
         .write(&link, &output_dir, |ev| {
-            if matches!(ev, ProgressEvent::DerivingKey) {
-                saw_deriving.set(true);
+            if matches!(ev, ProgressEvent::DerivingPassphraseWrapKey) {
+                saw_kdf_event.set(true);
             }
         })
         .unwrap_err();
@@ -415,17 +419,19 @@ fn test_passphrase_encrypt_rejects_symlink_before_kdf() {
         other => panic!("expected InvalidInput, got: {other:?}"),
     }
     assert!(
-        !saw_deriving.get(),
-        "DerivingKey must not fire before the symlink check"
+        !saw_kdf_event.get(),
+        "no KDF event must fire before the symlink check"
     );
 }
 
-/// L-2 regression: on a successful recipient decrypt, `DerivingKey` fires before
-/// the private-key Argon2id runs and `Decrypting` fires only after the
-/// envelope/HMAC checks pass (just before streaming unarchive). Pre-audit the
-/// path emitted `Decrypting` immediately at the top of `hybrid::decrypt_file`
-/// and never emitted `DerivingKey`, so a UI would mislabel the multi-second
-/// KDF window as "decrypting".
+/// L-2 regression: on a successful recipient decrypt, `UnlockingPrivateKey`
+/// fires before the private-key Argon2id runs and `Decrypting` fires only after
+/// the envelope/HMAC checks pass (just before streaming unarchive). Pre-audit
+/// the path emitted `Decrypting` immediately at the top of `hybrid::decrypt_file`
+/// and never emitted any KDF event, so a UI would mislabel the multi-second KDF
+/// window as "decrypting". (Post-#7: the legacy single `DerivingKey` event was
+/// split into `UnlockingPrivateKey` for the `private.key` Argon2id boundary
+/// and `DerivingPassphraseWrapKey` for the passphrase recipient.)
 #[test]
 fn test_recipient_decrypt_progress_events_in_order() -> Result<(), CryptoError> {
     use ferrocrypt::ProgressEvent;
@@ -469,17 +475,185 @@ fn test_recipient_decrypt_progress_events_in_order() -> Result<(), CryptoError> 
     )?;
 
     let events = events.into_inner().unwrap();
-    let deriving_at = events
+    let unlocking_at = events
         .iter()
-        .position(|e| matches!(e, ProgressEvent::DerivingKey));
+        .position(|e| matches!(e, ProgressEvent::UnlockingPrivateKey));
     let decrypting_at = events
         .iter()
         .position(|e| matches!(e, ProgressEvent::Decrypting));
-    let deriving_at = deriving_at.expect("DerivingKey must fire on recipient decrypt");
+    let unlocking_at = unlocking_at.expect("UnlockingPrivateKey must fire on recipient decrypt");
     let decrypting_at = decrypting_at.expect("Decrypting must fire on recipient decrypt");
     assert!(
+        unlocking_at < decrypting_at,
+        "UnlockingPrivateKey ({unlocking_at}) must fire before Decrypting ({decrypting_at}); events: {events:?}"
+    );
+    // Recipient (X25519) decrypt MUST NOT fire `DerivingPassphraseWrapKey`
+    // — that event belongs to the passphrase-recipient slot loop, not
+    // to the X25519 unwrap path.
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, ProgressEvent::DerivingPassphraseWrapKey)),
+        "recipient decrypt must not emit DerivingPassphraseWrapKey; events: {events:?}"
+    );
+
+    Ok(())
+}
+
+/// Companion of `test_recipient_decrypt_progress_events_in_order` for
+/// the passphrase mode: a successful passphrase encrypt followed by a
+/// successful passphrase decrypt must emit exactly one
+/// `DerivingPassphraseWrapKey` per operation (paired with `Encrypting`
+/// or `Decrypting`), and zero `UnlockingPrivateKey` events at any
+/// point — the passphrase path never opens a `private.key`. Pinned
+/// after #7 to guarantee the work-boundary contract for the
+/// passphrase recipient stays honest end to end.
+#[test]
+fn test_passphrase_decrypt_progress_events_in_order() -> Result<(), CryptoError> {
+    use ferrocrypt::ProgressEvent;
+    use std::sync::Mutex;
+
+    let test_dir = setup_test_dir("passphrase_decrypt_progress");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    let passphrase = SecretString::from("passphrase progress order".to_string());
+    let input_file = test_dir.join("data.txt");
+    create_test_file(&input_file, "passphrase progress order");
+
+    let encrypt_events: Mutex<Vec<ProgressEvent>> = Mutex::new(Vec::new());
+    passphrase_auto(
+        &input_file,
+        &encrypt_dir,
+        &passphrase,
+        None,
+        None,
+        |ev| encrypt_events.lock().unwrap().push(*ev),
+    )?;
+
+    let encrypted_path = encrypt_dir.join("data.fcr");
+    let decrypt_events: Mutex<Vec<ProgressEvent>> = Mutex::new(Vec::new());
+    passphrase_auto(
+        &encrypted_path,
+        &decrypt_dir,
+        &passphrase,
+        None,
+        None,
+        |ev| decrypt_events.lock().unwrap().push(*ev),
+    )?;
+
+    let encrypt_events = encrypt_events.into_inner().unwrap();
+    let decrypt_events = decrypt_events.into_inner().unwrap();
+
+    let count = |evs: &[ProgressEvent], target: ProgressEvent| {
+        evs.iter().filter(|e| **e == target).count()
+    };
+
+    assert_eq!(
+        count(&encrypt_events, ProgressEvent::DerivingPassphraseWrapKey),
+        1,
+        "passphrase encrypt must emit exactly one DerivingPassphraseWrapKey; events: {encrypt_events:?}"
+    );
+    assert_eq!(
+        count(&encrypt_events, ProgressEvent::UnlockingPrivateKey),
+        0,
+        "passphrase encrypt must not emit UnlockingPrivateKey; events: {encrypt_events:?}"
+    );
+
+    assert_eq!(
+        count(&decrypt_events, ProgressEvent::DerivingPassphraseWrapKey),
+        1,
+        "passphrase decrypt must emit exactly one DerivingPassphraseWrapKey; events: {decrypt_events:?}"
+    );
+    assert_eq!(
+        count(&decrypt_events, ProgressEvent::UnlockingPrivateKey),
+        0,
+        "passphrase decrypt must not emit UnlockingPrivateKey; events: {decrypt_events:?}"
+    );
+
+    let deriving_at = encrypt_events
+        .iter()
+        .position(|e| matches!(e, ProgressEvent::DerivingPassphraseWrapKey))
+        .unwrap();
+    let encrypting_at = encrypt_events
+        .iter()
+        .position(|e| matches!(e, ProgressEvent::Encrypting))
+        .expect("Encrypting must fire");
+    assert!(
+        deriving_at < encrypting_at,
+        "DerivingPassphraseWrapKey ({deriving_at}) must precede Encrypting ({encrypting_at}); events: {encrypt_events:?}"
+    );
+
+    let deriving_at = decrypt_events
+        .iter()
+        .position(|e| matches!(e, ProgressEvent::DerivingPassphraseWrapKey))
+        .unwrap();
+    let decrypting_at = decrypt_events
+        .iter()
+        .position(|e| matches!(e, ProgressEvent::Decrypting))
+        .expect("Decrypting must fire");
+    assert!(
         deriving_at < decrypting_at,
-        "DerivingKey ({deriving_at}) must fire before Decrypting ({decrypting_at}); events: {events:?}"
+        "DerivingPassphraseWrapKey ({deriving_at}) must precede Decrypting ({decrypting_at}); events: {decrypt_events:?}"
+    );
+
+    Ok(())
+}
+
+/// Pure-X25519 encrypt MUST emit zero KDF events (no
+/// `DerivingPassphraseWrapKey`, no `UnlockingPrivateKey`) — every
+/// recipient is wrapped via X25519, which is sub-millisecond. Pre-#7
+/// the orchestrator emitted a generic `DerivingKey` here, lying about
+/// a multi-second pause that never happened.
+#[test]
+fn test_recipient_encrypt_emits_no_kdf_events() -> Result<(), CryptoError> {
+    use ferrocrypt::ProgressEvent;
+    use std::sync::Mutex;
+
+    let test_dir = setup_test_dir("recipient_encrypt_no_kdf_events");
+    let keys_dir = test_dir.join("keys");
+    let encrypt_dir = test_dir.join("encrypted");
+    fs::create_dir_all(&keys_dir)?;
+    fs::create_dir_all(&encrypt_dir)?;
+
+    let passphrase = SecretString::from("pass".to_string());
+    generate_key_pair(&passphrase, &keys_dir, |_| {})?;
+
+    let input_file = test_dir.join("data.txt");
+    create_test_file(&input_file, "x25519 encrypt no kdf events");
+
+    let public_key_path = keys_dir.join("public.key");
+    let events: Mutex<Vec<ProgressEvent>> = Mutex::new(Vec::new());
+    recipient_auto(
+        &input_file,
+        &encrypt_dir,
+        &public_key_path,
+        &passphrase,
+        None,
+        None,
+        |ev| events.lock().unwrap().push(*ev),
+    )?;
+
+    let events = events.into_inner().unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, ProgressEvent::DerivingPassphraseWrapKey)),
+        "X25519 encrypt must not emit DerivingPassphraseWrapKey; events: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, ProgressEvent::UnlockingPrivateKey)),
+        "X25519 encrypt must not emit UnlockingPrivateKey; events: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ProgressEvent::Encrypting)),
+        "X25519 encrypt must emit Encrypting; events: {events:?}"
     );
 
     Ok(())

@@ -670,16 +670,24 @@ Rules:
 
 ### 7.5 `archive/platform.rs`
 
-`archive/platform.rs` owns platform-specific extraction hardening.
+`archive/platform.rs` owns the unified capability-based extraction backend used on every supported OS (Linux / macOS / Windows). Built on `cap-std` plus `cap-fs-ext`.
+
+Invariant:
+
+> Any symlink — or, on Windows, any NTFS reparse point including junctions and mount points — in an extraction path is an extraction error.
 
 It contains:
 
-- Linux and macOS `openat`/`mkdirat`/`O_NOFOLLOW` behavior where available;
-- Windows fallback behavior;
-- Unix permission filtering;
-- no-follow race resistance.
+- `open_anchor` — bootstraps the trusted `cap_std::fs::Dir` for the user-supplied `output_dir`; the caller's chosen path IS the trust boundary so no no-follow check applies to it;
+- `ensure_dir`, `mkdir_strict`, `walk_to_parent`, `open_dir_at_rel` — every directory open routed through `cap_fs_ext::DirExt::open_dir_nofollow`;
+- `finalize_dir_open` — Windows-only `FILE_ATTRIBUTE_REPARSE_POINT` post-check called after every successful directory open, so junctions / mount points fail closed (cap-fs-ext alone refuses entries where `is_symlink()` is true, but `is_symlink()` returns `false` for junctions — the bitmask post-check is what catches them);
+- `create_file_at` — `OpenOptions::create_new(true)` plus `OpenOptionsFollowExt::follow(FollowSymlinks::No)` for atomic O_EXCL-style create that refuses every leaf symlink, dangling or live;
+- `chmod_file_handle`, `chmod_dir_handle` — handle-based permission application; never path-based, so a substituted symlink between extract and chmod cannot redirect the operation. Special bits are stripped via `super::PERMISSION_BITS_MASK`;
+- `INITIAL_FILE_CREATE_MODE` — restrictive `0o600` initial mode applied at create time on Unix; the tar-stored mode is applied after the payload is written. Effective on Unix only; ignored on Windows.
 
 Path validation and filesystem writes remain separate so race-hardening logic is auditable.
+
+The backend uses `cap-std` and `cap-fs-ext` from the Bytecode Alliance — the same crates that back wasmtime's WASI sandbox. ferrocrypt itself contains no `unsafe`; all direct syscall surface lives in those audited dependencies. cap-std layers on `rustix` (Linux/macOS) and `windows-sys` (Windows) internally.
 
 ---
 
@@ -782,7 +790,7 @@ Every per-cap `if value > cap { return Err(...) }` lives in **one** method on th
 | `header_fixed` structural rules (`header_flags == 0`, `1 <= recipient_count <= MAX`, `ext_len <= MAX`, `entries_len + ext_len + HEADER_FIXED_SIZE == header_len`) | `format::check_*` private helpers + `format::EXT_LEN_MAX` / `RECIPIENT_COUNT_MAX` | `HeaderFixed::validate_structural` | `HeaderFixed::parse` (after wire-byte parse) | `container::build_encrypted_header` (after constructing the `HeaderFixed` value from typed inputs) |
 | Argon2id structural rules (`lanes ∈ [1, MAX_LANES]`, `time_cost ∈ [1, MAX_TIME_COST]`, `mem_cost ∈ [ARGON2_MIN_MEM_COST_PER_LANE × lanes, MAX_MEM_COST]`) | `KdfParams::MAX_*` constants + `crypto::kdf::ARGON2_MIN_MEM_COST_PER_LANE` | `KdfParams::validate_structural` | `KdfParams::from_bytes_structural` (after wire-byte parse) | `KdfParams::validate_for_write` (called from `Encryptor::write` and `KeyPairGenerator::write`) |
 | Argon2id `mem_cost` (resource cap, on top of structural) | `KdfParams::DEFAULT_MEM_COST` / `KdfLimit::default()` | `KdfParams::enforce_limit` | `KdfParams::from_bytes` (calls `enforce_limit` after structural parse) | `KdfParams::validate_for_write` (calls `enforce_limit` after `validate_structural`) |
-| Archive `max_entry_count`, `max_total_plaintext_bytes`, `max_path_depth` | `archive::limits::ArchiveLimits` defaults | `archive::limits::enforce_per_entry_caps`, `archive::limits::enforce_total_bytes_cap` | `archive::decode::extract_entries` (both arms) | `archive::encode::archive` (recursive walker) |
+| Archive `max_entry_count`, `max_total_plaintext_bytes`, `max_path_depth` | `archive::limits::ArchiveLimits` defaults | `archive::limits::enforce_per_entry_caps`, `archive::limits::enforce_total_bytes_cap` | `archive::decode::extract_entries` (unified) | `archive::encode::archive` (recursive walker) |
 
 Adding a new cap or wire-format rule = add the field/constant on the source-of-truth type, add one method (`enforce_*` for caps, `validate_*` for grouped structural rules), call it from both reader and writer sites. The compiler can't let you forget either side because the call sites are by name.
 

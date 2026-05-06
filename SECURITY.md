@@ -55,12 +55,16 @@ regression net, regenerated when the format intentionally changes).
   authentication, partial plaintext may remain in a sibling
   `.incomplete` working copy. The final output path is never written
   on a failed decrypt.
-- **Hardened extraction is Linux- and macOS-only.** Linux and macOS use
-  directory-fd-anchored `openat` / `mkdirat` with `O_NOFOLLOW` to
-  resist local symlink and path-component-race attacks. On Windows,
-  extraction is best-effort against local filesystem races; on shared
-  Windows machines, choose an output directory writable only by the
-  current user.
+- **Hardened extraction is unified across Linux, macOS, and Windows.**
+  Every directory open is anchored to a `cap-std` directory handle and
+  refuses any symlink at any component (via
+  `cap_fs_ext::DirExt::open_dir_nofollow`). On Windows, directory opens
+  additionally reject any NTFS reparse point — including junctions and
+  mount points — via an explicit `FILE_ATTRIBUTE_REPARSE_POINT`
+  post-check. File creation uses `OpenOptions::create_new(true)` plus
+  an explicit `FollowSymlinks::No` flag. Permissions are always set on
+  an open handle, never via a re-resolved path. The same code path
+  applies on every supported OS.
 - **Pre-v1 files are not forward-compatible.** Older FerroCrypt files
   and key pairs use a different format family. Decrypt them with the
   release that produced them and re-encrypt with the current release.

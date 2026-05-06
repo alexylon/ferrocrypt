@@ -216,7 +216,7 @@ Encrypted output is named automatically and can be changed with Save As. Key fil
 - **Public recipient strings.** Public keys can be shared as lowercase `fcr1...` recipient strings.
 - **Public key fingerprints.** SHA3-256 fingerprints provide a stable ID for independent public-key verification.
 - **Atomic output.** Encrypted files and generated key files are staged before being moved into their final location.
-- **Hardened extraction on Linux and macOS.** Extraction resists local symlink and path-component-race attacks; data cannot be redirected outside the chosen output directory.
+- **Hardened extraction on Linux, macOS, and Windows.** Every directory step is anchored to a capability handle that refuses symlinks at any path component, and on Windows additionally rejects NTFS reparse points (junctions and mount points). Extraction writes cannot be redirected outside the chosen output directory.
 - **Typed library errors.** The Rust API distinguishes wrong credentials, unsupported data, authentication failures, truncation, and resource-limit failures.
 - **Pure Rust implementation.** The cryptographic implementation does not depend on OpenSSL. The library forbids `unsafe` code.
 
@@ -237,7 +237,7 @@ Limitations:
 - Single files inside an encrypted folder are limited to about 8 GiB (the largest value the standard ustar size field can carry, exactly 8,589,934,591 bytes); larger inputs are rejected up front. Archives can hold many such files up to the total-bytes cap below.
 - Default archive limits are enforced during encryption and decryption: at most 250,000 entries, 64 GiB of total regular-file content, and 64 path components per entry.
 - Failed decryptions do not write to the final output path. Partial plaintext may remain in a sibling `.incomplete` working copy when corruption is detected after some chunks have already authenticated.
-- Hardened extraction is available only on Linux and macOS. On Windows, extraction is best-effort against local filesystem races; on shared Windows machines, choose an output directory writable only by the current user.
+- Hardened extraction is unified across Linux, macOS, and Windows: every directory open uses `cap-std` plus `cap-fs-ext` no-follow primitives, with an additional `FILE_ATTRIBUTE_REPARSE_POINT` rejection on Windows so junctions and mount points are refused alongside symlinks. The same code path applies on every supported OS.
 
 ## Decryption errors
 

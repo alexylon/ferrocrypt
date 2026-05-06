@@ -33,6 +33,24 @@ user-id = 6743 # Ed Page (epage)
 start = "2023-03-08"
 end = "2027-04-17"
 
+[[trusted.cap-fs-ext]]
+criteria = "safe-to-deploy"
+user-id = 6825 # Dan Gohman (sunfishcode)
+start = "2020-12-11"
+end = "2027-05-06"
+
+[[trusted.cap-primitives]]
+criteria = "safe-to-deploy"
+user-id = 6825 # Dan Gohman (sunfishcode)
+start = "2020-08-07"
+end = "2027-05-06"
+
+[[trusted.cap-std]]
+criteria = "safe-to-deploy"
+user-id = 6825 # Dan Gohman (sunfishcode)
+start = "2020-06-25"
+end = "2027-05-06"
+
 [[trusted.clap]]
 criteria = "safe-to-deploy"
 user-id = 6743 # Ed Page (epage)
@@ -74,6 +92,24 @@ criteria = "safe-to-deploy"
 user-id = 1 # Alex Crichton (alexcrichton)
 start = "2019-04-23"
 end = "2027-04-17"
+
+[[trusted.fs-set-times]]
+criteria = "safe-to-deploy"
+user-id = 6825 # Dan Gohman (sunfishcode)
+start = "2020-09-15"
+end = "2027-05-06"
+
+[[trusted.io-extras]]
+criteria = "safe-to-deploy"
+user-id = 6825 # Dan Gohman (sunfishcode)
+start = "2021-11-09"
+end = "2027-05-06"
+
+[[trusted.io-lifetimes]]
+criteria = "safe-to-deploy"
+user-id = 6825 # Dan Gohman (sunfishcode)
+start = "2021-06-12"
+end = "2027-05-06"
 
 [[trusted.is_terminal_polyfill]]
 criteria = "safe-to-deploy"
@@ -230,3 +266,9 @@ criteria = "safe-to-deploy"
 user-id = 64539 # Kenny Kerr (kennykerr)
 start = "2021-10-27"
 end = "2027-04-17"
+
+[[trusted.winx]]
+criteria = "safe-to-deploy"
+user-id = 6825 # Dan Gohman (sunfishcode)
+start = "2019-08-20"
+end = "2027-05-06"

@@ -6,11 +6,11 @@
 //! root to its final name only after the whole archive validates.
 //!
 //! Per-entry validation runs before any filesystem write — see
-//! [`validate_ustar_entry`] (`FORMAT.md` §9). On Linux and macOS,
-//! `extract_entries` anchors every operation to a directory file
-//! descriptor opened by [`super::platform::open_anchor`] and uses
-//! `openat`/`mkdirat` with `O_NOFOLLOW`; on other platforms the path-
-//! based fallback documents its narrower threat model inline.
+//! [`validate_ustar_entry`] (`FORMAT.md` §9). `extract_entries` uses
+//! the unified [`super::platform`] backend: every operation is rooted
+//! in a `cap_std::fs::Dir`, every directory component is opened with
+//! `cap_fs_ext::DirExt::open_dir_nofollow`, and Windows directory
+//! opens also reject NTFS reparse points.
 
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
@@ -25,21 +25,11 @@ use crate::fs::paths::INCOMPLETE_SUFFIX;
 use super::limits::{ArchiveLimits, enforce_per_entry_caps, enforce_total_bytes_cap};
 use super::path::{UstarEntryKind, ustar, validate_archive_path_components};
 
-/// Initial mode for newly-created regular-file extraction outputs
-/// (rw-------). Restrictive on purpose: the tar-stored mode is applied
-/// via a follow-up `fchmod` (or `set_permissions` on the path-based
-/// arm) only AFTER the payload has been written, so a wider mode is
-/// never briefly visible to other local users while the file holds
-/// plaintext.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-const INITIAL_FILE_CREATE_MODE: u32 = 0o600;
-
-/// Decrypt-side per-iteration accounting bundled into one struct so the
-/// shared `pre_validate_entry` method runs identical resource-cap +
-/// duplicate-detection logic in both `extract_entries` arms (the
-/// Linux/macOS NOFOLLOW path and the path-based fallback). `entry_count`
-/// is checked before the entry is added to `seen_paths`; `total_bytes`
-/// is checked before any `io::copy` so an attacker-declared 1 PiB size
+/// Decrypt-side per-iteration accounting bundled into one struct so
+/// `pre_validate_entry` runs identical resource-cap + duplicate-
+/// detection logic on every entry. `entry_count` is checked before
+/// the entry is added to `seen_paths`; `total_bytes` is checked
+/// before any `io::copy` so an attacker-declared 1 PiB size
 /// cannot start a partial write.
 #[derive(Default)]
 struct ExtractCounters {
@@ -328,15 +318,16 @@ fn incomplete_working_name(root_name: &OsStr) -> OsString {
     name
 }
 
-/// Per-iteration root tracking shared by both `extract_entries` arms.
+/// Per-iteration root tracking for the unified hardened extractor.
 /// Extracts the first path component, rejects a second top-level root,
-/// pre-checks the final output name for collisions (`symlink_metadata`
-/// catches dangling symlinks too), and on the path-based fallback arm
-/// also pre-checks the `.incomplete` working name. Both pre-checks run
-/// BEFORE `first_entry_root` and `checked_roots` are mutated, so a
-/// rejection leaves the caller's tracking state untouched. Idempotent
-/// for already-registered roots (returns the same `root_name` without
-/// re-running any check).
+/// and pre-checks the final output name for collisions (`symlink_metadata`
+/// catches dangling symlinks too). The `.incomplete` working name is
+/// checked at first touch by `mkdir_strict` / `create_file_at`, which
+/// fail closed if anything already exists there. The final-name
+/// pre-check runs BEFORE `first_entry_root` and `checked_roots` are
+/// mutated, so a rejection leaves the caller's tracking state
+/// untouched. Idempotent for already-registered roots (returns the
+/// same `root_name` without re-running any check).
 fn extract_and_register_root(
     output_dir: &Path,
     path: &Path,
@@ -377,26 +368,12 @@ fn extract_and_register_root(
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(CryptoError::Io(e)),
     }
-    // Path-based fallback: also pre-check `{root}.incomplete` so a
-    // pre-placed working entry doesn't get partially overwritten before
-    // being detected by the per-entry filesystem syscalls. The
-    // hardened Linux/macOS arm doesn't need this — `mkdirat_strict`
-    // and `create_file_at` use `O_EXCL` / `O_NOFOLLOW` and fail with
-    // `AlreadyExists` if anything is already at that name.
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        let incomplete_path = output_dir.join(incomplete_working_name(&root_name));
-        match fs::symlink_metadata(&incomplete_path) {
-            Ok(_) => {
-                return Err(CryptoError::InvalidInput(format!(
-                    "Previous .incomplete exists: {}",
-                    incomplete_path.display()
-                )));
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(CryptoError::Io(e)),
-        }
-    }
+    // Pre-check on `{root}.incomplete` is no longer needed — the
+    // hardened extractor's `mkdir_strict` / `create_file_at` use
+    // `O_EXCL` / `create_new` (and on Windows the reparse-point post-
+    // check) so anything pre-placed at that name fails with
+    // `AlreadyExists` at first touch. Same diagnostic, one fewer
+    // syscall on the happy path.
     if first_entry_root.is_none() {
         *first_entry_root = Some(final_path);
     }
@@ -404,15 +381,20 @@ fn extract_and_register_root(
     Ok(root_name)
 }
 
-/// Hardened extraction for Linux and macOS. Every filesystem operation
-/// inside the `.incomplete` working entry is rooted at a dirfd and goes
-/// through `openat`/`mkdirat` with `O_NOFOLLOW`, so a concurrent local
+/// Hardened extraction. Every filesystem operation inside the
+/// `.incomplete` working entry is anchored to a `cap_std::fs::Dir`
+/// handle and traversed component by component via
+/// `cap_fs_ext::DirExt::open_dir_nofollow`, so a concurrent local
 /// attacker cannot race a directory component into a symlink and
 /// redirect writes outside the destination tree. File creation uses
-/// `O_CREAT | O_EXCL | O_NOFOLLOW`, and directory permissions are
-/// applied via `fchmod` on the still-open fd so path resolution never
-/// happens at chmod time.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+/// `OpenOptions::create_new(true)` plus
+/// `OpenOptionsFollowExt::follow(FollowSymlinks::No)`. Permissions
+/// are applied via [`super::platform::chmod_file_handle`] /
+/// [`super::platform::chmod_dir_handle`] on open handles so path
+/// resolution never happens at chmod time. On Windows, every
+/// successful directory open is post-checked against
+/// `FILE_ATTRIBUTE_REPARSE_POINT` so junctions and mount points are
+/// rejected alongside std-recognised symlinks.
 fn extract_entries<R: Read>(
     archive: &mut tar::Archive<R>,
     output_dir: &Path,
@@ -421,21 +403,37 @@ fn extract_entries<R: Read>(
     limits: &ArchiveLimits,
 ) -> Result<(), CryptoError> {
     use std::collections::HashMap;
-    use std::fs::File;
-    use std::os::fd::{AsFd, OwnedFd};
+
+    use cap_std::fs::Dir;
 
     use super::platform;
 
     /// Per-root state. A tar root can be either a directory (the usual
     /// multi-entry case) or a regular file (single-file archives where
-    /// the root component IS the file). Directories keep an open dirfd
-    /// so subsequent child entries resolve under it.
+    /// the root component IS the file). Directories keep an open
+    /// `Dir` handle so subsequent child entries resolve under it.
     enum RootKind {
-        Directory(OwnedFd),
+        Directory(Dir),
         SingleFile,
     }
 
     fn map_incomplete_create_err(
+        e: CryptoError,
+        output_dir: &Path,
+        incomplete_name: &OsStr,
+    ) -> CryptoError {
+        if let CryptoError::Io(io_err) = &e {
+            if io_err.kind() == io::ErrorKind::AlreadyExists {
+                return CryptoError::InvalidInput(format!(
+                    "Previous .incomplete exists: {}",
+                    output_dir.join(incomplete_name).display()
+                ));
+            }
+        }
+        e
+    }
+
+    fn map_create_file_err(
         e: io::Error,
         output_dir: &Path,
         incomplete_name: &OsStr,
@@ -450,19 +448,20 @@ fn extract_entries<R: Read>(
         }
     }
 
-    /// Ensures `roots` has a `Directory` entry for `root_name`, lazily
-    /// creating its `.incomplete` working directory under `output_fd` on
-    /// first occurrence. Rejects with the canonical "mixes file and
-    /// directory" error if a `SingleFile` root has already been recorded
-    /// under the same name. Returns a borrow of the registered dirfd.
+    /// Ensures `roots` has a `Directory` entry for `root_name`,
+    /// lazily creating its `.incomplete` working directory under
+    /// `output_handle` on first occurrence. Rejects with the
+    /// canonical "mixes file and directory" error if a `SingleFile`
+    /// root has already been recorded under the same name. Returns
+    /// a borrow of the registered `Dir` handle.
     fn ensure_root_directory<'a>(
         roots: &'a mut HashMap<OsString, RootKind>,
         root_name: &OsString,
-        output_fd: &OwnedFd,
+        output_handle: &Dir,
         output_dir: &Path,
         incomplete_name: &OsStr,
         path: &Path,
-    ) -> Result<&'a OwnedFd, CryptoError> {
+    ) -> Result<&'a Dir, CryptoError> {
         use std::collections::hash_map::Entry;
         match roots.entry(root_name.clone()) {
             Entry::Occupied(occ) => match occ.into_mut() {
@@ -470,37 +469,38 @@ fn extract_entries<R: Read>(
                     "Archive mixes file and directory at root: {}",
                     path.display()
                 ))),
-                RootKind::Directory(fd) => Ok(fd),
+                RootKind::Directory(dir) => Ok(dir),
             },
             Entry::Vacant(vac) => {
-                let fd = platform::mkdirat_strict(output_fd, incomplete_name)
+                let dir = platform::mkdir_strict(output_handle, incomplete_name)
                     .map_err(|e| map_incomplete_create_err(e, output_dir, incomplete_name))?;
-                match vac.insert(RootKind::Directory(fd)) {
-                    RootKind::Directory(fd) => Ok(fd),
+                match vac.insert(RootKind::Directory(dir)) {
+                    RootKind::Directory(dir) => Ok(dir),
                     RootKind::SingleFile => unreachable!("just inserted Directory variant"),
                 }
             }
         }
     }
 
-    /// Streams the entry's payload into the just-created `outfile`, then
-    /// applies the tar-stored mode via `fchmod` on the still-open fd.
-    /// `outfile` is consumed (and dropped at scope exit) so the file is
-    /// closed before this returns. The two file-extraction sites (Case A
-    /// single-file root and Case B descendant) share this exact
-    /// sequence; `platform::fchmod` strips the special bits internally.
+    /// Streams the entry's payload into the just-created `outfile`,
+    /// then applies the tar-stored mode via the file's open handle.
+    /// `outfile` is consumed (and dropped at scope exit) so the file
+    /// is closed before this returns. Used by both the single-file-
+    /// root case and the descendant-file case so the on-disk shape
+    /// (permissive initial mode → write payload → chmod via handle)
+    /// is identical.
     fn copy_payload_and_apply_mode<R: Read>(
-        mut outfile: File,
+        mut outfile: cap_std::fs::File,
         entry: &mut tar::Entry<'_, R>,
     ) -> Result<(), CryptoError> {
         io::copy(entry, &mut outfile)?;
         if let Ok(mode) = entry.header().mode() {
-            platform::fchmod(outfile.as_fd(), mode)?;
+            platform::chmod_file_handle(&outfile, mode)?;
         }
         Ok(())
     }
 
-    let output_fd = platform::open_anchor(output_dir)?;
+    let output_handle = platform::open_anchor(output_dir)?;
     let mut roots: HashMap<OsString, RootKind> = HashMap::new();
     // Deferred directory permissions: (root name, rel path under root, mode).
     // `rel` is empty for the root directory itself.
@@ -539,7 +539,7 @@ fn extract_entries<R: Read>(
                     ensure_root_directory(
                         &mut roots,
                         &root_name,
-                        &output_fd,
+                        &output_handle,
                         output_dir,
                         &incomplete_name,
                         &path,
@@ -556,11 +556,11 @@ fn extract_entries<R: Read>(
                         )));
                     }
                     let outfile = platform::create_file_at(
-                        &output_fd,
+                        &output_handle,
                         &incomplete_name,
-                        INITIAL_FILE_CREATE_MODE,
+                        platform::INITIAL_FILE_CREATE_MODE,
                     )
-                    .map_err(|e| map_incomplete_create_err(e, output_dir, &incomplete_name))?;
+                    .map_err(|e| map_create_file_err(e, output_dir, &incomplete_name))?;
                     copy_payload_and_apply_mode(outfile, &mut entry)?;
                     roots.insert(root_name.clone(), RootKind::SingleFile);
                 }
@@ -572,186 +572,61 @@ fn extract_entries<R: Read>(
         // directory; `ensure_root_directory` lazily creates
         // `{root}.incomplete` if no explicit root-level directory entry
         // has been seen yet.
-        let root_fd = ensure_root_directory(
+        let root_handle = ensure_root_directory(
             &mut roots,
             &root_name,
-            &output_fd,
+            &output_handle,
             output_dir,
             &incomplete_name,
             &path,
         )?;
-        let (parent_fd, final_name) = platform::walk_to_parent(root_fd, &rel)?;
+        let (parent_handle, final_name) = platform::walk_to_parent(root_handle, &rel)?;
         match kind {
             UstarEntryKind::Directory => {
-                let _dir_fd = platform::ensure_dir(&parent_fd, &final_name)?;
+                let _dir = platform::ensure_dir(&parent_handle, &final_name)?;
                 if let Ok(mode) = entry.header().mode() {
                     dir_permissions.push((root_name.clone(), rel, mode));
                 }
             }
             UstarEntryKind::File => {
-                let outfile =
-                    platform::create_file_at(&parent_fd, &final_name, INITIAL_FILE_CREATE_MODE)?;
+                let outfile = platform::create_file_at(
+                    &parent_handle,
+                    &final_name,
+                    platform::INITIAL_FILE_CREATE_MODE,
+                )?;
                 copy_payload_and_apply_mode(outfile, &mut entry)?;
             }
         }
     }
 
-    // Apply deferred directory permissions. Each chmod happens on a fresh
-    // NOFOLLOW-opened fd, so a restrictive parent mode does not block the
-    // operation and order does not matter. `open_dir_at_rel` folds the
-    // root-vs-descendant case naturally — see its doc-comment for the
-    // empty-`rel` contract.
+    // Apply deferred directory permissions deepest-first. Each chmod
+    // happens on a fresh no-follow-opened handle; applying descendants
+    // before ancestors prevents a restrictive parent mode without
+    // execute/search permission (for example 0o400) from blocking the
+    // later reopen of a child directory.
+    // `open_dir_at_rel` folds the root-vs-descendant case naturally —
+    // see its doc-comment for the empty-`rel` contract.
+    dir_permissions.sort_by_key(|(_, rel, _)| std::cmp::Reverse(rel.components().count()));
     for (root_name, rel, mode) in &dir_permissions {
-        let Some(RootKind::Directory(root_fd)) = roots.get(root_name) else {
+        let Some(RootKind::Directory(root_handle)) = roots.get(root_name) else {
             return Err(CryptoError::InternalInvariant(
-                "Internal error: root dirfd missing at dir-perm stage",
+                "Internal error: root handle missing at dir-perm stage",
             ));
         };
-        let dir_fd = platform::open_dir_at_rel(root_fd, rel)?;
-        platform::fchmod(&dir_fd, *mode)?;
+        let dir_handle = platform::open_dir_at_rel(root_handle, rel)?;
+        platform::chmod_dir_handle(dir_handle, *mode)?;
     }
 
     Ok(())
 }
 
-/// Path-based extraction for platforms where rustix is not pulled in
-/// (currently Windows and non-Linux/non-macOS Unix targets).
-///
-/// **Hardening note (Windows / non-Unix):** unlike the Linux/macOS path,
-/// this arm walks plain `&Path` via `fs::create_dir_all`,
-/// `OpenOptions::create_new`, and `fs::set_permissions`. There is no
-/// `openat`-anchored dirfd, so a local attacker who can write inside
-/// `output_dir` can race a directory component into a symlink between
-/// the `mkdir` step and the `create_new` step and redirect plaintext
-/// outside the destination tree. The Linux/macOS path closes this with
-/// `O_NOFOLLOW` on every component; Windows would require
-/// `NtCreateFile` with relative-`OBJECT_ATTRIBUTES` (or equivalent
-/// winapi work) to match, which the crate does not currently take on
-/// because of its zero-`unsafe` stance (`fs/atomic.rs` documents
-/// the same trade-off for the rename helper).
-///
-/// Partial mitigations that DO apply on this path:
-///
-/// - `create_new(true)` rejects with `AlreadyExists` when a regular
-///   file (or a symlink whose target already exists) is pre-placed at
-///   the leaf entry path. It does NOT block writing through a
-///   pre-placed symlink whose target is missing — Windows
-///   `CreateFileW(CREATE_NEW)` follows symlinks/reparse points by
-///   default — and it does NOT block races on intermediate directory
-///   components.
-/// - The canonical-path `seen_paths` set rejects in-archive duplicates,
-///   so the loop never tries to overwrite its own outputs.
-/// - The post-extract `rename_no_clobber` promotion refuses to clobber
-///   a pre-existing final-name target (Windows uses `try_exists()` +
-///   `fs::rename`, which is itself best-effort no-clobber).
-/// - The caller-driven trust boundary on `output_dir` itself: the
-///   directory the user picked is trusted.
-///
-/// **Operator guidance:** when extracting attacker-influenced archives
-/// on Windows, choose an `output_dir` not writable by other local
-/// users (e.g. a fresh subdirectory under `%LOCALAPPDATA%`).
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn extract_entries<R: Read>(
-    archive: &mut tar::Archive<R>,
-    output_dir: &Path,
-    first_entry_root: &mut Option<PathBuf>,
-    checked_roots: &mut Vec<OsString>,
-    limits: &ArchiveLimits,
-) -> Result<(), CryptoError> {
-    // Directory permissions are applied after all entries are extracted,
-    // deepest first, so that a restrictive parent mode (e.g. 0o500) does
-    // not block creation of child entries.
-    let mut dir_permissions: Vec<(PathBuf, u32)> = Vec::new();
-    let mut counters = ExtractCounters::default();
-
-    // `raw(true)` disables tar-rs's merge preprocessing so PAX / GNU
-    // extension records surface as their own entries with the wire
-    // typeflag intact, where `validate_ustar_entry` rejects them.
-    // Without raw mode, a PAX `'x'` record overriding only mtime /
-    // uid/gid / mode would slip through silently into the merged
-    // entry's metadata. See `FORMAT.md` §9.
-    for entry_result in archive.entries()?.raw(true) {
-        let mut entry = entry_result?;
-        let NormalizedEntry {
-            canonical_path: path,
-            kind,
-        } = counters.pre_validate_entry(&mut entry, limits)?;
-
-        let root_name =
-            extract_and_register_root(output_dir, &path, first_entry_root, checked_roots)?;
-
-        // Rewrite the entry path: replace the root component with {root}.incomplete
-        let working_path = incomplete_entry_path(output_dir, &root_name, &path);
-
-        match kind {
-            UstarEntryKind::Directory => {
-                fs::create_dir_all(&working_path)?;
-                if let Ok(mode) = entry.header().mode() {
-                    dir_permissions.push((working_path, mode));
-                }
-            }
-            UstarEntryKind::File => {
-                if let Some(parent) = working_path.parent() {
-                    if !parent.exists() {
-                        fs::create_dir_all(parent)?;
-                    }
-                }
-                // `create_new(true)` is now defense-in-depth — the
-                // canonical-path `seen_paths` set above already rejects
-                // duplicates per `FORMAT.md` §9, before any file is
-                // created. The `create_new` guard remains so a TOCTOU
-                // race or future refactor cannot silently overwrite.
-                let mut outfile = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&working_path)?;
-                io::copy(&mut entry, &mut outfile)?;
-                drop(outfile);
-                if let Ok(mode) = entry.header().mode() {
-                    restore_permissions_from_mode(mode, &working_path)?;
-                }
-            }
-        }
-    }
-
-    // Apply directory permissions deepest-first so that restricting a parent
-    // does not prevent setting permissions on its children.
-    dir_permissions.sort_by_key(|entry| std::cmp::Reverse(entry.0.components().count()));
-    for (path, mode) in &dir_permissions {
-        restore_permissions_from_mode(*mode, path)?;
-    }
-
-    Ok(())
-}
-
-/// Rewrites a TAR entry path so the root component has an `.incomplete` suffix.
-///
-/// - Single file `hello.txt` → `output_dir/hello.txt.incomplete`
-/// - Directory entry `mydir/sub/file.txt` → `output_dir/mydir.incomplete/sub/file.txt`
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn incomplete_entry_path(output_dir: &Path, root_name: &OsStr, entry_path: &Path) -> PathBuf {
-    let base = output_dir.join(incomplete_working_name(root_name));
-    match entry_path.strip_prefix(root_name) {
-        Ok(rest) if !rest.as_os_str().is_empty() => base.join(rest),
-        _ => base,
-    }
-}
-
-/// Applies a stored mode to a path on the path-based extraction path.
-/// The Linux/macOS hardened path uses `fchmod` on an open dirfd instead
-/// and does not call this helper.
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
-fn restore_permissions_from_mode(mode: u32, path: &Path) -> Result<(), CryptoError> {
-    use std::os::unix::fs::PermissionsExt;
-    let safe_mode = mode & super::PERMISSION_BITS_MASK;
-    fs::set_permissions(path, std::fs::Permissions::from_mode(safe_mode))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn restore_permissions_from_mode(_mode: u32, _path: &Path) -> Result<(), CryptoError> {
-    Ok(())
-}
+// The previous path-based fallback (gated to `not(any(linux, macos))`)
+// has been replaced by the unified cap-std + cap-fs-ext extractor
+// above. There is no longer a "fallback" code path — the hardened
+// extractor runs uniformly on every supported OS, with Windows
+// reparse-point rejection layered on top via
+// `super::platform::reject_reparse_point` (Windows-only, called from
+// `finalize_dir_open`).
 
 #[cfg(test)]
 mod tests {
@@ -1028,6 +903,72 @@ mod tests {
         assert_eq!(
             dir_mode, 0o755,
             "directory setuid should be stripped: expected 0o755, got 0o{dir_mode:o}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_applies_directory_permissions_deepest_first() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extract_dir = tmp.path().join("extracted");
+        fs::create_dir_all(&extract_dir).unwrap();
+
+        let mut buf = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut buf);
+
+            let mut header = tar::Header::new_ustar();
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_size(0);
+            header.set_mode(0o400); // no execute/search bit on the parent
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "locked/", &[] as &[u8])
+                .unwrap();
+
+            let mut header = tar::Header::new_ustar();
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_size(0);
+            header.set_mode(0o700);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "locked/child/", &[] as &[u8])
+                .unwrap();
+
+            let data = b"secret";
+            let mut header = tar::Header::new_ustar();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o600);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "locked/child/secret.txt", &data[..])
+                .unwrap();
+
+            builder.finish().unwrap();
+        }
+
+        unarchive(Cursor::new(buf), &extract_dir, ArchiveLimits::default()).unwrap();
+
+        let root = extract_dir.join("locked");
+        let root_mode = fs::metadata(&root).unwrap().permissions().mode() & 0o777;
+        assert_eq!(root_mode, 0o400, "expected 0o400, got 0o{root_mode:o}");
+
+        // Restore search permission so the test can inspect descendants
+        // and TempDir cleanup can remove them. If deferred chmod ran
+        // parent-first, unarchive would already have failed before this.
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let child_mode = fs::metadata(root.join("child"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(child_mode, 0o700, "expected 0o700, got 0o{child_mode:o}");
+        assert_eq!(
+            fs::read_to_string(root.join("child/secret.txt")).unwrap(),
+            "secret"
         );
     }
 
@@ -1758,7 +1699,7 @@ mod tests {
 
     /// Resource cap: when an entry's path component count exceeds
     /// `ArchiveLimits::max_path_depth`, extraction must reject
-    /// before the per-component openat walk runs. Catches deeply
+    /// before the per-component capability walk runs. Catches deeply
     /// nested but byte-economical paths that pass the
     /// `PATH_REPRESENTABLE_MAX` byte-length check.
     #[test]

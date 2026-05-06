@@ -29,6 +29,15 @@ jobs:
         run: cargo build --verbose
 
       - name: Run workspace tests
+        # Strict-mode flag for Windows: fail closed if symlink_dir /
+        # symlink_file privilege is missing instead of silently
+        # skipping the hardened-extractor symlink/junction tests in
+        # `archive/platform.rs::tests`. github-hosted windows-latest
+        # runners ship Developer Mode enabled, so these tests run
+        # unconditionally there. `mklink /J` (junction creation) does
+        # not require any privilege flag — runs on any account.
+        env:
+          FERROCRYPT_REQUIRE_WINDOWS_SYMLINK_TESTS: "1"
         run: cargo test --verbose -- --test-threads=1
 
   msrv:

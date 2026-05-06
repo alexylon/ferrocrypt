@@ -289,18 +289,14 @@ pub(crate) fn unarchive<R: Read>(
     // mapped to the same user-facing message as the pre-check; everything
     // else surfaces as a generic I/O error.
     //
-    // Each root has already been chmodded by `extract_entries` to
-    // `tar_mode | 0o500` — group/other bits identical to the
-    // tar-stored mode, owner read+search bits added so:
-    //   - macOS 14 (Sonoma) `renameatx_np` accepts the rename (it
-    //     rejects sources whose mode lacks the search bit), AND
-    //   - non-owner local users see no greater access through the
-    //     final name than they would at the tar-stored mode.
-    // No `Dir` handle to the source remains open here: `roots` was
-    // dropped at `extract_entries` return, so neither Windows
-    // (which refuses to rename a directory with an open handle) nor
-    // macOS 14 (which has descendant-access quirks if the source fd
-    // is held during `renameatx_np`) has a contested rename target.
+    // Root-directory deferred chmods are applied AFTER this rename
+    // (see below). macOS `renameatx_np` can reject renaming a source
+    // directory whose mode lacks search permission with EACCES, so
+    // root `.incomplete` directories remain at the owner-private
+    // initial 0o700 mode until promotion. Descendant directories have
+    // already had their final modes applied deepest-first, and all
+    // extraction `Dir` handles are dropped before this rename returns
+    // control here.
     for root_name in &checked_roots {
         let working_path = output_dir.join(incomplete_working_name(root_name));
         let final_path = output_dir.join(root_name);
@@ -632,45 +628,26 @@ fn extract_entries<R: Read>(
     // without execute/search permission (for example 0o400) cannot
     // block the later reopen of a child directory.
     //
-    // Root-level entries (`rel == ""`) are split across two chmods
-    // (one here, one applied by the caller after rename). The pre-
-    // rename chmod here sets the root to `tar_mode | 0o500`:
-    //
-    //   - group/other bits identical to the tar-stored mode, so a
-    //     non-owner local user observing the `.incomplete` directory
-    //     just before rename or the final name just after rename
-    //     sees no greater access than the tar-stored mode permits.
-    //   - owner read+search bits set, so macOS 14 (Sonoma)
-    //     `renameatx_np` accepts the rename (it rejects sources
-    //     whose mode lacks the search bit with EACCES, even though
-    //     POSIX `rename` and earlier macOS versions accept it).
-    //
-    // The chmod runs against a clone of the live `Dir` handle which
-    // is consumed in the call and dropped immediately. No `Dir`
-    // handle to the source survives past the end of this function:
-    // when `extract_entries` returns, `roots` is dropped and every
-    // open fd to a `.incomplete` subtree closes, so neither
-    // Windows (which refuses to rename a directory with an open
-    // handle) nor macOS 14 (which has descendant-access quirks if
-    // the source fd is held through `renameatx_np`) has a
-    // contested rename target. The caller re-opens each renamed
-    // root via `open_dir_at_rel` for the final chmod to the exact
-    // tar-stored mode.
-    const PRE_RENAME_OWNER_RX_MASK: u32 = 0o500;
+    // Root-level chmods (`rel == ""`) are NOT applied here. They are
+    // deferred until after `unarchive` renames `{root}.incomplete` to
+    // the final root name, so macOS `renameatx_np` never sees a source
+    // directory that has already been made unsearchable (for example
+    // 0o400 or 0o000). This does not widen staged access: newly-created
+    // extraction directories start at owner-private 0o700, and descendant
+    // chmods still run here deepest-first via open handles before the
+    // rename.
     dir_permissions.sort_by_key(|(_, rel, _)| std::cmp::Reverse(rel.components().count()));
     let mut root_chmods: Vec<(OsString, u32)> = Vec::new();
     for (root_name, rel, mode) in dir_permissions {
+        if rel.as_os_str().is_empty() {
+            root_chmods.push((root_name, mode));
+            continue;
+        }
         let Some(RootKind::Directory(root_handle)) = roots.get(&root_name) else {
             return Err(CryptoError::InternalInvariant(
                 "Internal error: root handle missing at dir-perm stage",
             ));
         };
-        if rel.as_os_str().is_empty() {
-            let pre_rename = root_handle.try_clone().map_err(CryptoError::Io)?;
-            platform::chmod_dir_handle(pre_rename, mode | PRE_RENAME_OWNER_RX_MASK)?;
-            root_chmods.push((root_name, mode));
-            continue;
-        }
         let dir_handle = platform::open_dir_at_rel(root_handle, &rel)?;
         platform::chmod_dir_handle(dir_handle, mode)?;
     }

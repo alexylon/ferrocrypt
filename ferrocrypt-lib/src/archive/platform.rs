@@ -37,12 +37,16 @@ use cap_std::fs::{Dir, File, OpenOptions};
 use crate::CryptoError;
 
 /// Default mode passed to `mkdir` when creating a fresh extraction
-/// directory (rwxr-xr-x). The tar-stored directory mode is applied
+/// directory (rwx------). The tar-stored directory mode is applied
 /// later via a handle-based chmod so a restrictive parent (e.g. 0o500)
 /// declared higher up in the archive doesn't block creation of its
-/// children. Unix-only — Windows ignores the mode arg.
+/// children. The temporary mode is owner-private on purpose: root
+/// directory chmods are deferred until after the `.incomplete` → final
+/// rename for macOS compatibility, so the working tree must not expose
+/// plaintext or wider group/other access while it is still staged.
+/// Unix-only — Windows ignores the mode arg.
 #[cfg(unix)]
-const DIR_CREATE_MODE: u32 = 0o755;
+const DIR_CREATE_MODE: u32 = 0o700;
 
 /// Initial mode for newly-created regular-file extraction outputs
 /// (rw-------). Restrictive on purpose: the tar-stored mode is applied
@@ -149,9 +153,9 @@ pub(crate) fn mkdir_strict(parent: &Dir, name: &OsStr) -> Result<Dir, CryptoErro
 
 /// Internal: creates `name`, re-opens it with no-follow + the
 /// Windows reparse-point post-check, then applies the initial
-/// permissive directory mode via the open handle. This keeps the
-/// old "create directories as 0o755 initially, apply tar-stored mode
-/// later" behavior without ever chmod-ing through a re-resolved path.
+/// owner-private directory mode via the open handle. This keeps the
+/// "create with a safe temporary mode, apply tar-stored mode later"
+/// behavior without ever chmod-ing through a re-resolved path.
 fn create_dir_with_default_mode(parent: &Dir, name: &OsStr) -> Result<Dir, CryptoError> {
     parent.create_dir(name).map_err(CryptoError::Io)?;
 
@@ -596,6 +600,27 @@ mod tests {
             err.to_string().to_lowercase().contains("exist"),
             "expected AlreadyExists-style rejection, got: {err}"
         );
+    }
+
+    /// Fresh extraction directories start owner-private so root-level
+    /// permission restoration can be deferred until after promotion
+    /// without exposing staged plaintext to group/other users.
+    #[cfg(unix)]
+    #[test]
+    fn mkdir_strict_initial_mode_is_owner_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let parent = open_anchor(tmp.path()).unwrap();
+
+        let _d = mkdir_strict(&parent, OsStr::new("private")).unwrap();
+
+        let mode = fs::metadata(tmp.path().join("private"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "expected initial mode 0o700, got 0o{mode:o}");
     }
 
     /// `open_dir_at_rel` with empty `rel` returns a fresh clone of

@@ -45,7 +45,7 @@ use crate::format::{
     read_exact_or_truncated,
 };
 use crate::fs::atomic;
-use crate::fs::paths::{INCOMPLETE_SUFFIX, parent_or_cwd};
+use crate::fs::paths::{INCOMPLETE_SUFFIX, parent_or_cwd, reject_occupied};
 use crate::recipient::{self, RecipientEntry};
 
 /// Tempfile name prefix for the in-flight `.fcr` write. Combined with
@@ -457,7 +457,7 @@ pub(crate) fn build_encrypted_header(
 /// Resolves the destination path for an encrypted file. If `output_file`
 /// is supplied, it's used verbatim; otherwise the file is written under
 /// `output_dir` as `<base_name>.<ENCRYPTED_EXTENSION>`.
-fn resolve_encrypted_output_path(
+pub(crate) fn resolve_encrypted_output_path(
     output_dir: &Path,
     output_file: Option<&Path>,
     base_name: &str,
@@ -494,12 +494,7 @@ pub(crate) fn write_encrypted_file(
     archive_limits: archive::ArchiveLimits,
 ) -> Result<PathBuf, CryptoError> {
     let output_path = resolve_encrypted_output_path(output_dir, output_file, base_name);
-    if output_path.exists() {
-        return Err(CryptoError::InvalidInput(format!(
-            "Output already exists: {}",
-            output_path.display()
-        )));
-    }
+    reject_occupied(&output_path, "Output")?;
 
     let mut tmp = tempfile::Builder::new()
         .prefix(TEMP_FILE_PREFIX)

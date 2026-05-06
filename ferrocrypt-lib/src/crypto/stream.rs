@@ -346,6 +346,15 @@ impl<R: Read> DecryptReader<R> {
 
 impl<R: Read> Read for DecryptReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        // `Read::read(&mut [])` must return `Ok(0)` immediately without
+        // performing I/O or AEAD work. Skipping this guard would let a
+        // zero-length read drive `fill_buffer()`, which can block, decrypt,
+        // or surface a tampered-payload error on a caller that asked for
+        // nothing.
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
         if self.pos >= self.chunk.len() {
             if self.done {
                 return Ok(0);
@@ -590,6 +599,37 @@ mod tests {
             out.is_empty(),
             "no plaintext should be served on empty input"
         );
+    }
+
+    /// `Read::read(&mut [])` must be a no-op: per the trait contract it
+    /// returns `Ok(0)` immediately without performing I/O or AEAD work.
+    /// The two cases below pin both halves of that contract.
+    ///
+    /// Case A: a fresh reader fed an empty ciphertext stream. Without
+    /// the zero-length guard this would call `fill_buffer()` and surface
+    /// a `PayloadTruncated` error instead of `Ok(0)`.
+    #[test]
+    fn streaming_aead_zero_len_read_is_noop_on_empty_input() {
+        let mut reader = payload_decryptor(&test_key(), &TEST_NONCE, &[][..]);
+        let mut empty: [u8; 0] = [];
+        assert_eq!(reader.read(&mut empty).unwrap(), 0);
+    }
+
+    /// Case B: a fresh reader fed valid ciphertext. A zero-length read
+    /// must not consume any plaintext, and the next read with a real
+    /// buffer must still see the complete payload.
+    #[test]
+    fn streaming_aead_zero_len_read_does_not_consume_input() {
+        let plaintext = b"hello, ferrocrypt";
+        let ciphertext = encrypt_to_vec(plaintext);
+
+        let mut reader = payload_decryptor(&test_key(), &TEST_NONCE, ciphertext.as_slice());
+        let mut empty: [u8; 0] = [];
+        assert_eq!(reader.read(&mut empty).unwrap(), 0);
+
+        let mut recovered = Vec::new();
+        reader.read_to_end(&mut recovered).unwrap();
+        assert_eq!(recovered, plaintext);
     }
 
     /// Truncating a multi-chunk stream at an exact chunk boundary

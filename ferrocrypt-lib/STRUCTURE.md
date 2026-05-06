@@ -720,6 +720,7 @@ It contains:
 - encrypted filename derivation;
 - base-name extraction;
 - user-path error mapping;
+- occupied-path / dangling-symlink rejection (`path_occupied`, `reject_occupied`) — `lstat`-based "is anything here?" preflight used by encrypt and keygen output prechecks so a stale symlink rejects in milliseconds instead of after Argon2id;
 - general path normalization required outside archive semantics.
 
 It does not enforce TAR archive path rules. Archive path rules belong only to `archive/path.rs`.

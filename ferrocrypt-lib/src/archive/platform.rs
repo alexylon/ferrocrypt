@@ -361,7 +361,7 @@ mod tests {
         );
     }
 
-    // ── in-sandbox symlink scenarios (the Sofos audit cases) ────────
+    // ── in-sandbox symlink scenarios ────────
 
     /// In-sandbox relative symlink: hardened helper must reject.
     /// Plain `Dir::open_dir` would FOLLOW this (capability-confined
@@ -500,7 +500,7 @@ mod tests {
 
     // ── deferred chmod scenarios ────────────────────────────────────
 
-    /// **Sofos audit case C.** Deferred chmod where an attacker has
+    /// Deferred chmod where an attacker has
     /// substituted the freshly-extracted directory with a symlink
     /// between extraction and chmod. The handle-based chmod path
     /// catches this because it re-opens via `open_dir_nofollow`
@@ -779,7 +779,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&target).unwrap(), "original");
     }
 
-    /// **Sofos audit case D (Windows).** NTFS junction at a directory
+    /// NTFS junction at a directory
     /// name. Junctions are reparse points whose `is_symlink()` is
     /// FALSE, so cap-fs-ext's `open_dir_nofollow` does NOT reject them
     /// on its own — the explicit `FILE_ATTRIBUTE_REPARSE_POINT`

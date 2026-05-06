@@ -165,12 +165,25 @@ pub fn decode_recipient_string(
     s: &str,
     local_max_chars: usize,
 ) -> Result<DecodedRecipient, CryptoError> {
-    if s.len() > local_max_chars {
+    // Bech32 (BIP 173) is an ASCII-only grammar, so reject non-ASCII
+    // input up front. This also makes the cap check below honest:
+    // `RecipientStringCapExceeded` advertises `input_chars`, but
+    // `str::len()` returns bytes — only after the ASCII check are the
+    // two equal. Without this, a 600-character non-ASCII string whose
+    // UTF-8 byte length exceeds the cap would misclassify as a cap
+    // exceedance instead of an invalid-input error.
+    if !s.is_ascii() {
+        return Err(CryptoError::InvalidInput(
+            "Recipient string must be ASCII Bech32".to_string(),
+        ));
+    }
+    let char_count = s.len(); // bytes == chars after the ASCII check
+    if char_count > local_max_chars {
         // Saturating cast: pathological gigabyte-plus inputs report
         // `u32::MAX` for `input_chars`, but the cap rejection itself
         // is correct (the bare comparison ran on usize).
         return Err(CryptoError::RecipientStringCapExceeded {
-            input_chars: u32::try_from(s.len()).unwrap_or(u32::MAX),
+            input_chars: u32::try_from(char_count).unwrap_or(u32::MAX),
             local_cap: u32::try_from(local_max_chars).unwrap_or(u32::MAX),
         });
     }
@@ -631,6 +644,53 @@ mod tests {
                 assert_eq!(local_cap, 10);
             }
             other => panic!("expected RecipientStringCapExceeded, got {other:?}"),
+        }
+    }
+
+    /// `decode_recipient_string` advertises `input_chars` in its cap
+    /// diagnostics, but `str::len()` is bytes. For a non-ASCII string
+    /// long enough to exceed the cap by bytes but not by chars, that
+    /// mismatch used to misclassify the rejection as a cap exceedance.
+    /// Bech32 is ASCII-only, so the fix rejects non-ASCII input up
+    /// front with a typed `InvalidInput` and only counts chars
+    /// (== bytes after the ASCII check) against the cap. Pinned for
+    /// BUG_REVIEW #8.
+    #[test]
+    fn decode_rejects_non_ascii_before_cap_check() {
+        // A small non-ASCII string that is well under any reasonable
+        // cap. Without the ASCII pre-check this still fails decoding
+        // later, but on the wrong path (Bech32 grammar). The point of
+        // the regression is the failure *class*: this must surface as
+        // `InvalidInput("…ASCII Bech32")`, not `RecipientStringCapExceeded`.
+        let s = "fcr1日本語";
+        match decode_recipient_string(s, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT) {
+            Err(CryptoError::InvalidInput(msg)) => {
+                assert!(msg.contains("ASCII Bech32"), "unexpected message: {msg}");
+            }
+            other => panic!("expected InvalidInput(ASCII Bech32), got {other:?}"),
+        }
+    }
+
+    /// Boundary case for the same fix: a non-ASCII string whose UTF-8
+    /// byte length exceeds the supplied cap but whose char count does
+    /// not. The pre-fix code would have rejected via
+    /// `RecipientStringCapExceeded` because it compared `str::len()`
+    /// (bytes) against the char-count cap. The post-fix code rejects
+    /// via the ASCII check first, so the cap variant never fires here.
+    #[test]
+    fn decode_rejects_non_ascii_with_byte_length_above_cap_as_invalid_input() {
+        // 8 chars × 3 bytes each = 24 bytes. Cap of 10 chars would let
+        // 8 chars through if we counted chars, but the byte length is
+        // 24 > 10. Either way the answer must be `InvalidInput`, never
+        // `RecipientStringCapExceeded`, because the input is not ASCII.
+        let s = "日本語日本語日本";
+        assert_eq!(s.chars().count(), 8);
+        assert_eq!(s.len(), 24);
+        match decode_recipient_string(s, 10) {
+            Err(CryptoError::InvalidInput(msg)) => {
+                assert!(msg.contains("ASCII Bech32"), "unexpected message: {msg}");
+            }
+            other => panic!("expected InvalidInput(ASCII Bech32), got {other:?}"),
         }
     }
 

@@ -42,14 +42,15 @@ use std::path::{Path, PathBuf};
 
 use crate::archive::{ArchiveLimits, unarchive};
 use crate::container::{
-    HeaderReadLimits, build_encrypted_header, read_encrypted_header, write_encrypted_file,
+    HeaderReadLimits, build_encrypted_header, read_encrypted_header, resolve_encrypted_output_path,
+    write_encrypted_file,
 };
 use crate::crypto::keys::{DerivedSubkeys, FileKey, derive_subkeys, random_bytes};
 use crate::crypto::stream::{STREAM_NONCE_SIZE, payload_decryptor};
 use crate::crypto::tlv::validate_tlv;
 use crate::error::CryptoError;
 use crate::format;
-use crate::fs::paths::encryption_base_name;
+use crate::fs::paths::{encryption_base_name, reject_occupied};
 use crate::recipient::entry::{RecipientBody, RecipientEntry};
 #[cfg(test)]
 use crate::recipient::policy::MixingPolicy;
@@ -150,6 +151,18 @@ pub(crate) fn encrypt<R: RecipientScheme>(
         });
     }
 
+    // Resolve the destination path and reject a pre-existing output
+    // BEFORE any expensive key work runs. In passphrase mode this saves
+    // a multi-second Argon2id derivation when the user re-runs encrypt
+    // against a populated directory. The atomic no-clobber rename in
+    // `write_encrypted_file` is still the load-bearing guarantee that
+    // we never overwrite an unrelated file; this preflight is a
+    // user-experience win that also defends against dangling-symlink
+    // outputs (via `reject_occupied` → `symlink_metadata`).
+    let base_name = encryption_base_name(input_path)?;
+    let output_path = resolve_encrypted_output_path(output_dir, output_file, &base_name);
+    reject_occupied(&output_path, "Output")?;
+
     on_event(&ProgressEvent::DerivingKey);
 
     // Generate per-file random material first so the rest of the build
@@ -185,7 +198,6 @@ pub(crate) fn encrypt<R: RecipientScheme>(
     )?;
     drop(header_key);
 
-    let base_name = encryption_base_name(input_path)?;
     on_event(&ProgressEvent::Encrypting);
 
     write_encrypted_file(
@@ -429,24 +441,17 @@ pub(crate) fn generate_key_pair(
 
     // Existence pre-check BEFORE Argon2id so re-running `keygen` against
     // a populated directory returns a helpful error in milliseconds
-    // instead of after ~1 GiB / multi-second KDF work. The atomic
-    // no-clobber rename at `finalize_file` below is still what actually
-    // guarantees we never overwrite an existing key; this check is just
-    // a fast-path user-experience win.
+    // instead of after ~1 GiB / multi-second KDF work. Uses
+    // `symlink_metadata` (via `reject_occupied`) so a dangling
+    // `private.key` / `public.key` symlink also rejects up front
+    // rather than slipping past `Path::exists()` and surviving until
+    // the atomic no-clobber rename at `finalize_file` below — which is
+    // still the load-bearing guarantee that we never overwrite an
+    // existing key.
     let private_key_path = output_dir.join(PRIVATE_KEY_FILENAME);
     let public_key_path = output_dir.join(PUBLIC_KEY_FILENAME);
-    if private_key_path.exists() {
-        return Err(CryptoError::InvalidInput(format!(
-            "Key file already exists: {}",
-            private_key_path.display()
-        )));
-    }
-    if public_key_path.exists() {
-        return Err(CryptoError::InvalidInput(format!(
-            "Key file already exists: {}",
-            public_key_path.display()
-        )));
-    }
+    reject_occupied(&private_key_path, "Key file")?;
+    reject_occupied(&public_key_path, "Key file")?;
 
     on_event(&ProgressEvent::GeneratingKeyPair);
 

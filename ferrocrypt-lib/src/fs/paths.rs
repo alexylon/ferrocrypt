@@ -53,6 +53,35 @@ pub fn encryption_base_name(path: impl AsRef<Path>) -> Result<String, CryptoErro
     }
 }
 
+/// Returns `true` if anything occupies `path`, including a dangling
+/// symlink. Uses `symlink_metadata` (lstat) so a symlink whose target
+/// is missing is reported as occupied — `Path::exists()` would follow
+/// the link and return `false`, letting an output preflight pass even
+/// though the final no-clobber rename would later refuse to overwrite
+/// the dangling link. Used by the encrypt / keygen output-precheck
+/// sites so a stale symlink rejects in milliseconds instead of after
+/// Argon2id / file-key wrapping.
+pub(crate) fn path_occupied(path: &Path) -> Result<bool, CryptoError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(CryptoError::Io(e)),
+    }
+}
+
+/// Returns `Err(InvalidInput)` if `path` is occupied (real file, real
+/// directory, or dangling symlink). `label` is used as the message
+/// prefix so callers can tailor the wording (`"Output"`, `"Key file"`).
+pub(crate) fn reject_occupied(path: &Path, label: &str) -> Result<(), CryptoError> {
+    if path_occupied(path)? {
+        return Err(CryptoError::InvalidInput(format!(
+            "{label} already exists: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 /// Returns the parent directory of `path`, or `Path::new(".")` when the
 /// parent is empty or absent. Centralises the "directory in which to
 /// create the staging tempfile / open a dirfd for `sync_all`" lookup
@@ -113,5 +142,39 @@ mod tests {
         // the empty path; both must collapse to ".".
         assert_eq!(parent_or_cwd(Path::new("file.txt")), Path::new("."));
         assert_eq!(parent_or_cwd(Path::new("")), Path::new("."));
+    }
+
+    #[test]
+    fn path_occupied_returns_false_for_missing_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let absent = tmp.path().join("does-not-exist");
+        assert!(!path_occupied(&absent).unwrap());
+    }
+
+    #[test]
+    fn path_occupied_returns_true_for_real_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let file = tmp.path().join("real");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(path_occupied(&file).unwrap());
+    }
+
+    /// A dangling symlink (target missing) must be reported as occupied
+    /// so encrypt / keygen output prechecks reject it before any
+    /// expensive KDF / wrapping work runs. `Path::exists()` follows the
+    /// link and would return `false`, masking the conflict until the
+    /// atomic no-clobber rename. Unix-only because Windows symlink
+    /// creation requires elevated privileges and the platform-level
+    /// hardening tests already cover that surface.
+    #[cfg(unix)]
+    #[test]
+    fn path_occupied_returns_true_for_dangling_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let link = tmp.path().join("dangling");
+        symlink(tmp.path().join("absent-target"), &link).unwrap();
+        assert!(!link.exists(), "sanity: target really is missing");
+        assert!(path_occupied(&link).unwrap());
     }
 }

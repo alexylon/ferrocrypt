@@ -231,4 +231,4 @@ recipient_entry = type_name_len(2) || recipient_flags(2) || body_len(4)
 - Before finishing, review the change with adversarial thinking and future-proofing in mind.
 - Never commit or stage changes with Git.
 - Never manually bump `version` in any `Cargo.toml`. Versioning is automated; see `RELEASE.md`.
-- After each final modification, suggest a clear one-line commit message.
+- After each final modification, provide a clear, human-readable one-line commit message.

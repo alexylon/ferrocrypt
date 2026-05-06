@@ -84,6 +84,8 @@ All notable changes to FerroCrypt are documented in this file.
 - **Missing key-file paths** surface as a typed input-path error instead of leaking a raw OS error string.
 - **`InvalidKdfParams` Display wording.** "File has invalid decrypt settings" → "File has invalid KDF settings": neutral across the encrypt/decrypt split.
 - Output-conflict wording unified to "Output already exists: `path`". Symlink-race wording unified to "Input is a symlink: `path`".
+- **Re-running encrypt against an existing output now fails immediately**, before any Argon2id derivation runs. Previously a populated destination cost a multi-second KDF in passphrase mode before the conflict surfaced. The atomic no-clobber rename remains the load-bearing race-proof guarantee. The same preflight catches dangling symlinks at the destination — earlier versions used `Path::exists()`, which follows the link and returned `false` for a missing target, letting the KDF run before the rename eventually refused to overwrite.
+- **Recipient strings with non-ASCII characters now reject with a clear `InvalidInput("Recipient string must be ASCII Bech32")`** instead of misclassifying as a length-cap exceedance. Bech32 (BIP 173) is an ASCII-only grammar.
 - Crash on truncated, corrupted, or maliciously crafted `.fcr` files replaced with structured format errors.
 - Default encrypted output naming for directories with dots (e.g. `photos.v1/`) preserves the full directory name (`photos.v1.fcr` instead of `photos.fcr`).
 - Nonexistent input paths no longer silently produce empty encrypted files.

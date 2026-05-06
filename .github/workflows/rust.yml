@@ -38,6 +38,7 @@ jobs:
         # not require any privilege flag — runs on any account.
         env:
           FERROCRYPT_REQUIRE_WINDOWS_SYMLINK_TESTS: "1"
+          RUST_BACKTRACE: "1"
         run: cargo test --verbose -- --test-threads=1
 
   msrv:

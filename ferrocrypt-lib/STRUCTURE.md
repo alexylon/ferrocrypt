@@ -44,7 +44,7 @@ The core structural rules are:
    Reusable key types, KDF validation, HKDF, HMAC, AEAD, payload streaming, and TLV parsing live under `crypto/`.
 
 5. **Archive handling is isolated from encryption logic.**
-   TAR encoding, TAR decoding, archive limits, path validation, and platform-specific extraction hardening live under `archive/`.
+   FerroCrypt Archive (FCA) wire format, manifest serialization, path-grammar validation, tree-shape validation, archive limits, encode / decode, and platform-specific extraction hardening live under `archive_v1/`.
 
 6. **Filesystem mechanics are separate from archive semantics.**
    Atomic output, staging, and general path helpers live under `fs/`.
@@ -91,10 +91,13 @@ ferrocrypt-lib/src/
 │   ├── private.rs
 │   └── files.rs
 │
-├── archive/
+├── archive_v1/
 │   ├── mod.rs
+│   ├── format.rs
+│   ├── model.rs
 │   ├── limits.rs
 │   ├── path.rs
+│   ├── tree.rs
 │   ├── encode.rs
 │   ├── decode.rs
 │   └── platform.rs
@@ -286,7 +289,7 @@ It is not part of the stable public API. It must not become an alternate impleme
 
 `crypto/` owns reusable cryptographic building blocks and typed secrets. It contains primitives and key types that are shared by the protocol, recipient schemes, key formats, and payload stream handling.
 
-`crypto/` does not depend on `protocol.rs`, `archive/`, or `fs/`.
+`crypto/` does not depend on `protocol.rs`, `archive_v1/`, or `fs/`.
 
 ### 4.1 `crypto/keys.rs`
 
@@ -609,77 +612,141 @@ Key-file staging uses filesystem helpers from `fs/` and does not duplicate atomi
 
 ---
 
-## 7. `archive/`
+## 7. `archive_v1/`
 
-`archive/` owns the safe TAR subset and directory/file payload semantics.
+`archive_v1/` owns the FerroCrypt Archive (FCA) v1 wire format and directory/file payload semantics. The byte-level FCA spec lives in `ferrocrypt-lib/FORMAT.md` §9.
 
-Archive handling is security-critical. Path validation, resource limits, encoding, decoding, and platform-specific extraction hardening are separated so each review surface is explicit.
+Archive handling is security-critical. Wire-format constants, model types, resource limits, path-grammar validation, tree-shape validation, encoding, decoding, and platform-specific extraction hardening are separated so each review surface is explicit.
 
-### 7.1 `archive/limits.rs`
+> **Note on the legacy `archive/` directory.** The pre-FCA `archive/` directory still exists on disk but is **not** mounted by `lib.rs` — the compiler does not see it. It is kept as historical source for reference and may be deleted in a follow-up commit. All active archive logic is under `archive_v1/`.
 
-`archive/limits.rs` owns `ArchiveLimits` and archive resource-cap checks.
+### 7.1 `archive_v1/format.rs`
 
-It contains limits for:
+`archive_v1/format.rs` owns the FCA wire format.
+
+It contains:
+
+- wire-format constants (`FCA_MAGIC = b"FCA\0"`, `FCA_VERSION = 0x01`, `FCA_HEADER_SIZE = 23`, `FCA_ENTRY_FIXED_SIZE = 14`, `KIND_FILE = 0x01`, `KIND_DIR = 0x02`, `PERMISSION_BITS_MASK = 0o777`);
+- big-endian integer helpers used by both header and manifest serialization;
+- header parse/build (`parse_fca_header` / `write_fca_header`);
+- manifest serialize/parse (`checked_manifest_len` / `serialize_manifest` / `parse_manifest_bytes`);
+- `copy_exact_n`, the shared exact-size byte copier used by both encode (source file → encrypted stream) and decode (encrypted stream → output file).
+
+`checked_manifest_len` runs BEFORE allocation: an over-cap manifest is rejected without growing a `Vec` first. `parse_manifest_bytes` calls `validate_fca_path` and `validate_manifest_tree` so a successfully-parsed `Manifest` is fully validated.
+
+### 7.2 `archive_v1/model.rs`
+
+`archive_v1/model.rs` owns the FCA model types.
+
+It contains:
+
+- `FcaHeader` — parsed header summary (`entry_count`, `manifest_len`, `total_file_bytes`);
+- `ArchiveEntryKind` — `File` / `Directory` enum;
+- `ArchiveEntry` — `path_utf8`, `mode`, `size`, plus a writer-only `source_path: Option<PathBuf>` set by the metadata pass so the content pass can reopen no-follow;
+- `Manifest` — `entries`, `total_file_bytes`, `root_name`, `root_is_file`.
+
+Readers leave `source_path` as `None`; writers set it.
+
+### 7.3 `archive_v1/limits.rs`
+
+`archive_v1/limits.rs` owns `ArchiveLimits` and archive resource-cap helpers.
+
+`ArchiveLimits` covers:
 
 - maximum entry count;
-- maximum total file content;
-- maximum archive depth;
-- writer-side preflight;
-- reader-side enforcement.
+- maximum total regular-file content;
+- maximum path depth;
+- maximum per-path UTF-8 byte length (capped by `u16::MAX` because the on-disk `path_len` field is `u16`);
+- maximum serialized manifest byte length.
 
-Encrypt-side preflight and decrypt-side enforcement must agree. The encrypt side must not produce archives that the decrypt side rejects under default limits.
+Cap helpers (`enforce_per_entry_caps`, `enforce_total_bytes_cap`) are shared by encrypt-side preflight and decrypt-side enforcement. Encrypt-side preflight and decrypt-side enforcement must agree: the encrypt side must not produce archives that the decrypt side rejects under default limits.
 
-### 7.2 `archive/path.rs`
+### 7.4 `archive_v1/path.rs`
 
-`archive/path.rs` owns per-path canonicalization and rejection.
+`archive_v1/path.rs` owns the FCA path grammar — the **single shared writer/reader validator** (the spec §19.3 symmetry guarantee).
 
 It rejects:
 
-- absolute paths;
-- `.` components;
-- `..` components;
-- repeated separators;
-- backslashes;
-- non-UTF-8 paths;
-- malformed directory trailing-slash usage.
+- empty path;
+- absolute path / leading `/`;
+- trailing `/`;
+- repeated `/`;
+- NUL byte;
+- backslash;
+- `.` and `..` components, and any host `Component` that is not `Normal`;
+- ASCII control bytes (`0x00..=0x1F`);
+- Windows-reserved characters (`<`, `>`, `:`, `"`, `|`, `?`, `*`);
+- trailing dot or trailing space in any component;
+- Windows-reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `CLOCK$`, `COM1..9`, `LPT1..9`), including in extension stems (`CON.txt`, `LPT9.bin`), under ASCII-case-insensitive comparison;
+- byte-length cap exceeded;
+- depth cap exceeded.
+
+`ascii_case_collision_key` lowercases ASCII A–Z (not locale-sensitive) for tree-side duplicate detection in `tree.rs`.
 
 This is one of the most security-sensitive modules. It must be heavily tested, including adversarial path cases.
 
-### 7.3 `archive/encode.rs`
+### 7.5 `archive_v1/tree.rs`
 
-`archive/encode.rs` owns plaintext file and directory traversal and safe TAR writing.
+`archive_v1/tree.rs` owns FCA manifest tree-shape validation.
+
+`validate_manifest_tree` enforces:
+
+- non-empty entry list;
+- single top-level root;
+- if root is a file, exactly one entry;
+- if root is a directory, the root entry MUST be present and every non-root entry's parent MUST be present as a directory entry;
+- no entry under a file path;
+- no exact-duplicate paths;
+- no ASCII-case-insensitive duplicate paths;
+- declared `total_file_bytes` within `max_total_plaintext_bytes`.
+
+Order-independent (HashMap-based parent lookup), so non-canonical manifest orders satisfying the tree shape are accepted per spec §10.
+
+### 7.6 `archive_v1/encode.rs`
+
+`archive_v1/encode.rs` owns the FCA writer: source-tree traversal (metadata pass) and content-streaming pass.
 
 It rejects:
 
-- symlinks;
-- device nodes;
-- sockets;
-- FIFOs;
-- unsupported metadata;
-- paths not representable in the v1 safe ustar subset;
-- regular-file inputs whose size exceeds `FILE_SIZE_REPRESENTABLE_MAX` (8 GiB minus one byte, the largest value the ustar octal `size` field can carry); the `tar` crate would otherwise silently emit a GNU binary-size header that the v1 reader rejects.
+- input symlinks (live or dangling);
+- inputs that are not regular files or directories;
+- symlinks, FIFOs, sockets, devices, Windows reparse points encountered during directory traversal;
+- paths violating the FCA grammar (`validate_fca_path`);
+- trees that exceed `ArchiveLimits` caps;
+- source files whose size or type changes between the metadata pass and the content pass.
 
-Archive encoding performs all required preflight checks before producing encrypted output.
+The writer is two-pass:
 
-### 7.4 `archive/decode.rs`
+1. **Metadata pass** — recursive `fs::read_dir` walk that builds a `Manifest` with FCA-canonical paths, modes, sizes, and source paths. Caps (entry count, total bytes, depth, path-bytes, manifest-size) apply progressively. The result is sorted by `(component_count, path_utf8)` per spec §10 for deterministic output.
+2. **Content pass** — for each file entry in canonical manifest order, reopens the source file with `O_NOFOLLOW` (Unix) or `symlink_metadata` + `File::open` (non-Unix), refreshes metadata from the open handle, requires the source is still a regular file with `len() == manifest size`, and streams exactly the declared size via `copy_exact_n`. Source mutation between passes is handled per spec §15.5.
 
-`archive/decode.rs` owns TAR reading and output reconstruction.
+Hardlinks are archived as independent regular-file contents (no link identity is stored). Setuid/setgid/sticky bits are stripped on write via `PERMISSION_BITS_MASK`.
 
-Rules:
+### 7.7 `archive_v1/decode.rs`
 
-- TAR iteration runs in `tar::Entries::raw(true)` mode so PAX (`'x'`, `'g'`) and GNU (`'L'`, `'K'`, `'S'`, `'M'`, `'D'`, `'V'`, `'N'`) and Solaris (`'X'`) extension records surface as their own entries with the wire typeflag intact, where the typeflag match in `validate_ustar_entry` rejects them. Without raw mode, the `tar` crate would silently merge these records into the next entry's metadata.
-- Every archive path is validated through `archive/path.rs` before any filesystem write.
-- Duplicate paths are detected on canonical archive paths before extraction.
-- Single-top-level-root enforcement rejects an archive with multiple distinct roots before the second root's output is written.
-- Both 512-byte trailing zero blocks (`FORMAT.md` §9) are required: the `tar` raw iterator consumes only the first, so `read_required_zero_block` reads the second explicitly (`UnexpectedEof` → `"Missing TAR end-of-archive zero block"`). Any further trailing bytes are then drained through `drain_and_verify_zero_padding`, which rejects any non-zero byte.
-- Resource limits are enforced while reading.
-- Extraction preserves the order: validate first, then create or write.
-- Decode logic does not bypass platform extraction hardening.
-- `unarchive` accepts an [`IncompleteOutputPolicy`] from the caller. The default ([`IncompleteOutputPolicy::DeleteOnError`]) best-effort removes the staged `.incomplete` working tree on any decrypt failure; [`IncompleteOutputPolicy::RetainOnError`] preserves it. Cleanup tracks only roots THIS run created — `mkdir_strict` / `create_file_at` push `created_incomplete_roots` only when they actually created the working name, so a pre-existing `.incomplete` from a prior failed run rejects with `Previous .incomplete exists` and is preserved across the retry. Cleanup helper `cleanup_incomplete_path` routes by `symlink_metadata` (symlinks removed as symlinks; directories via `remove_dir_all`, which since Rust 1.71 is TOCTOU-hardened on Unix and does not follow descendant symlinks) and swallows all I/O errors so the original `CryptoError` is the value the caller sees.
+`archive_v1/decode.rs` owns the FCA reader: header + manifest parse with full validation, then content extraction via the hardened cap-std platform backend.
 
-### 7.5 `archive/platform.rs`
+The reader pipeline matches spec §16.1 (steps 1–5 MUST complete before any filesystem output):
 
-`archive/platform.rs` owns the unified capability-based extraction backend used on every supported OS (Linux / macOS / Windows). Built on `cap-std` plus `cap-fs-ext`.
+1. parse and validate the header;
+2. read exactly `manifest_len` bytes;
+3. parse the manifest with full per-entry shape + path-grammar validation;
+4. validate the manifest tree shape (single root, parents present, duplicates rejected, total bytes match);
+5. pre-check the final output name with `symlink_metadata` (so a dangling symlink at the final name counts as occupied);
+6. open `output_dir` as a `cap-std` directory handle;
+7. create `{root}.incomplete` (file or directory);
+8. pre-create all descendant directories under `.incomplete` (parent-before-child);
+9. stream file contents in manifest order via `copy_exact_n`;
+10. verify archive EOF (no trailing bytes);
+11. apply descendant directory modes deepest-first;
+12. promote `{root}.incomplete` to `{root}` via no-clobber rename;
+13. apply the root directory's stored mode AFTER promotion (macOS compatibility — see spec §16.3).
+
+`unarchive` accepts an [`IncompleteOutputPolicy`] from the caller. The default ([`IncompleteOutputPolicy::DeleteOnError`]) best-effort removes the staged `.incomplete` working tree on any decrypt failure; [`IncompleteOutputPolicy::RetainOnError`] preserves it. Cleanup tracks only roots THIS run created — `mkdir_strict` / `create_file_at` push `created_incomplete_roots` only when they actually created the working name, so a pre-existing `.incomplete` from a prior failed run rejects with `Previous .incomplete exists` and is preserved across the retry. Cleanup helper `cleanup_incomplete_path` routes by `symlink_metadata` (symlinks removed as symlinks; directories via `remove_dir_all`, which since Rust 1.71 is TOCTOU-hardened on Unix and does not follow descendant symlinks) and swallows all I/O errors so the original `CryptoError` is the value the caller sees.
+
+### 7.8 `archive_v1/platform.rs`
+
+`archive_v1/platform.rs` owns the unified capability-based extraction backend used on every supported OS (Linux / macOS / Windows). Built on `cap-std` plus `cap-fs-ext`.
 
 Invariant:
 
@@ -692,7 +759,7 @@ It contains:
 - `finalize_dir_open` — Windows-only `FILE_ATTRIBUTE_REPARSE_POINT` post-check called after every successful directory open, so junctions / mount points fail closed (cap-fs-ext alone refuses entries where `is_symlink()` is true, but `is_symlink()` returns `false` for junctions — the bitmask post-check is what catches them);
 - `create_file_at` — `OpenOptions::create_new(true)` plus `OpenOptionsFollowExt::follow(FollowSymlinks::No)` for atomic O_EXCL-style create that refuses every leaf symlink, dangling or live;
 - `chmod_file_handle`, `chmod_dir_handle` — handle-based permission application; never path-based, so a substituted symlink between extract and chmod cannot redirect the operation. Special bits are stripped via `super::PERMISSION_BITS_MASK`;
-- `INITIAL_FILE_CREATE_MODE` — restrictive `0o600` initial mode applied at create time on Unix; the tar-stored mode is applied after the payload is written. Effective on Unix only; ignored on Windows.
+- `INITIAL_FILE_CREATE_MODE` — restrictive `0o600` initial mode applied at create time on Unix; the manifest-stored mode is applied after the payload is written. Effective on Unix only; ignored on Windows.
 
 Path validation and filesystem writes remain separate so race-hardening logic is auditable.
 
@@ -702,9 +769,9 @@ The backend uses `cap-std` and `cap-fs-ext` from the Bytecode Alliance — the s
 
 ## 8. `fs/`
 
-`fs/` owns local filesystem mechanics unrelated to TAR semantics.
+`fs/` owns local filesystem mechanics unrelated to archive-payload semantics.
 
-Archive-specific path rules live in `archive/path.rs`; general output-path and staging mechanics live in `fs/`.
+Archive-specific path rules live in `archive_v1/path.rs`; general output-path and staging mechanics live in `fs/`.
 
 ### 8.1 `fs/atomic.rs`
 
@@ -732,7 +799,7 @@ It contains:
 - occupied-path / dangling-symlink rejection (`path_occupied`, `reject_occupied`) — `lstat`-based "is anything here?" preflight used by encrypt and keygen output prechecks so a stale symlink rejects in milliseconds instead of after Argon2id;
 - general path normalization required outside archive semantics.
 
-It does not enforce TAR archive path rules. Archive path rules belong only to `archive/path.rs`.
+It does not enforce FCA archive path rules. Archive path rules belong only to `archive_v1/path.rs`.
 
 ---
 

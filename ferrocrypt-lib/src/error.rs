@@ -90,9 +90,9 @@ impl std::fmt::Display for DisplayableTypeName<'_> {
 /// a path or short token that has to be echoed back to the user.
 /// Concretely it covers:
 ///
-/// - **tar-archive layer**: "symlink entry `foo/bar`", "unsafe path in
-///   archive `../escape.txt`", "archive mixes file and directory at
-///   root `mydir`", etc. A malformed or attacker-crafted `.fcr` can
+/// - **archive layer (FCA)**: "symlink in archive source `foo/bar`",
+///   "unsafe path in archive `../escape.txt`", "archive has multiple
+///   top-level roots", etc. A malformed or attacker-crafted `.fcr` can
 ///   hold thousands of entries; without the entry path embedded in the
 ///   error, a developer debugging a failing extraction would see only
 ///   "something in this archive is bad" and be unable to locate it.

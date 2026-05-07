@@ -775,15 +775,14 @@ run_test "sym: filename with spaces" sym_roundtrip_file "$WORKDIR/file with spac
 echo "dots test" > "$WORKDIR/file.multiple.dots.here.txt"
 run_test "sym: filename with multiple dots" sym_roundtrip_file "$WORKDIR/file.multiple.dots.here.txt" "dots"
 
-# Long filename (99 bytes, just under the v1 ustar `name(100)` field cap).
-# v1 forbids GNU long-name extension records, so a single-component name
-# above 100 bytes cannot be represented in the on-disk archive subset
-# (see ferrocrypt-lib/FORMAT.md §9). Splitting across a directory works
-# up to NAME_SIZE(100) + '/' + PREFIX_SIZE(155) = 256 bytes total —
-# tested separately by the deeply-nested directory cases below.
+# Long filename (99 bytes). FCA's `path_len` is u16 with default
+# max_path_bytes = 4096, so single-component names up to ~4 KiB are
+# representable; this case tests a comfortable mid-range value where
+# the legacy ustar subset's 100-byte name-field cap would have rejected.
+# (See ferrocrypt-lib/FORMAT.md §9 for the FCA path grammar.)
 LONGNAME=$(python3 -c "print('a' * 95 + '.txt')")
 echo "long name test" > "$WORKDIR/$LONGNAME"
-run_test "sym: long filename (99 bytes, ustar name-field cap)" sym_roundtrip_file "$WORKDIR/$LONGNAME" "longname"
+run_test "sym: long filename (99 bytes)" sym_roundtrip_file "$WORKDIR/$LONGNAME" "longname"
 
 # Directory with spaces
 SPACEDIR="$WORKDIR/dir with spaces/sub dir"

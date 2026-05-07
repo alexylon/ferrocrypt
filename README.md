@@ -221,7 +221,7 @@ Encrypted output is named automatically and can be changed with Save As. Key fil
 - **Mode detection from file contents.** Encrypted files are recognized from their internal header, not from the file extension.
 - **Authenticated metadata.** File headers are authenticated before any plaintext is produced.
 - **Streaming encryption.** File data is processed in chunks, so large inputs do not need to be held entirely in memory.
-- **Directory support.** Directories are stored as a restricted internal archive and encrypted as part of the payload.
+- **Directory support.** Directories are stored as a FerroCrypt Archive (FCA) — a small native archive format for one output root with regular files, directories, Unix permissions, and a portable safe path subset — and encrypted as part of the payload.
 - **Public recipient strings.** Public keys can be shared as lowercase `fcr1...` recipient strings.
 - **Public key fingerprints.** SHA3-256 fingerprints provide a stable ID for independent public-key verification.
 - **Atomic output.** Encrypted files and generated key files are staged before being moved into their final location.
@@ -241,9 +241,9 @@ Limitations:
 
 - Pre-v1 FerroCrypt files and key pairs are not compatible with the current v1 format. Older data must be decrypted with the release that created it and then re-encrypted with the current release.
 - Directory encryption preserves file contents, directory structure, and Unix file permissions. It does not preserve ownership, timestamps, ACLs, extended attributes, hardlink identity, setuid/setgid/sticky bits, or platform-specific metadata.
-- Symlinks, hardlink archive entries, device files, FIFOs, sockets, unsafe paths, duplicate output paths, archives with more than one top-level root, and any PAX or GNU TAR extension record are rejected during archive processing.
+- Symlinks, hardlink archive entries, device files, FIFOs, sockets, archives with more than one top-level root, and exact or ASCII-case-insensitive duplicate paths are rejected during archive processing.
+- Archive paths must conform to a portable safe subset: no Windows-reserved characters (`< > : " | ? *`), no Windows-reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `CLOCK$`, `COM1..9`, `LPT1..9`) — including in extension stems (e.g. `CON.txt`), no ASCII control bytes (`0x00..=0x1F`), no trailing dot or space, no leading or trailing `/`, no `\`. Rejection happens at encrypt and at decrypt; the same rules apply on every supported OS.
 - Filesystem hardlinks encountered during encryption are stored as independent regular files.
-- Single files inside an encrypted folder are limited to about 8 GiB (the largest value the standard ustar size field can carry, exactly 8,589,934,591 bytes); larger inputs are rejected up front. Archives can hold many such files up to the total-bytes cap below.
 - Default archive limits are enforced during encryption and decryption: at most 250,000 entries, 64 GiB of total regular-file content, and 64 path components per entry.
 - Failed decryptions do not write to the final output path. By default the staged `.incomplete` working copy is removed before the error returns, so a failed decrypt leaves no plaintext residue under the output directory. Pass `decrypt --keep-partial` (CLI) or `IncompleteOutputPolicy::RetainOnError` (library) to keep the staged copy for backup-recovery or forensic inspection; retained partials may represent an attacker-chosen prefix of the original because the per-chunk authentication only detects truncation when the final chunk arrives.
 - Hardened extraction is unified across Linux, macOS, and Windows: every directory open uses `cap-std` plus `cap-fs-ext` no-follow primitives, with an additional `FILE_ATTRIBUTE_REPARSE_POINT` rejection on Windows so junctions and mount points are refused alongside symlinks. The same code path applies on every supported OS.

@@ -922,65 +922,334 @@ local implementation.
 
 ---
 
-## 9. Archive payload
+## 9. Archive payload — FerroCrypt Archive (FCA) v1
 
-The decrypted payload is a TAR stream using a safe POSIX ustar subset.
+The decrypted payload is a **FerroCrypt Archive (FCA) v1** stream: a small native
+archive format with a manifest-first design. FCA replaces the restricted POSIX
+ustar subset that earlier FerroCrypt versions carried; the wire-version bump in
+§3.1 (`0x01` → `0x02`) is what signals FCA is in use.
 
-Writers MUST emit only:
+FCA is intentionally narrower than TAR: it represents only what FerroCrypt
+preserves through encrypt/decrypt round-trips, with a portable safe path subset
+that works the same on Linux, macOS, and Windows. Symlinks, hardlinks, devices,
+FIFOs, sockets, sparse files, owners/groups, timestamps, ACLs, extended
+attributes, alternate data streams, reparse points, resource forks, and any
+extension-record concept are **unrepresentable** in FCA — they cannot be encoded
+in the wire format at all, so there is no extension-record audit surface to
+harden against.
 
-- relative UTF-8 paths;
-- `/` separators;
-- regular-file entries;
-- directory entries;
-- POSIX ustar headers (magic `"ustar\0"`, version `"00"` at offsets 257..265).
+### 9.1 Layout
 
-Writers MUST NOT emit absolute paths, `..` components, symlinks, hardlinks,
-devices, FIFOs, sockets, sparse files, pax headers (typeflag `'x'` or `'g'`), GNU
-extension records (typeflag `'L'`, `'K'`, `'S'`, `'M'`, `'D'`, `'V'`, or `'N'`),
-Solaris extended records (typeflag `'X'`), or other special entry types. Writers
-MUST NOT use the GNU binary-size numeric extension (high bit set on the ustar
-`size` field's first byte).
+An FCA payload is exactly:
 
-Archive paths MUST be canonical relative UTF-8 paths. Readers MUST reject empty
-paths, absolute paths, paths containing `.` or `..` components, repeated `/`
-separators, `\` bytes, NUL bytes, or invalid UTF-8. File entry paths MUST NOT end
-with `/`. Directory entry paths MUST end with `/`. Duplicate detection is
-performed after removing exactly one trailing `/` from directory entry paths.
+```
+fca_payload = fca_header || manifest || file_contents
+```
 
-If source paths cannot be represented in the ustar subset, writers MUST reject
-the input. Regular-file entry sizes MUST fit the 11-octal-digit ustar `size`
-field (`8_589_934_591` bytes, i.e. one byte short of 8 GiB); writers MUST reject
-larger inputs rather than fall back to the GNU binary-size encoding. Filesystem
-hardlinks MAY be archived as independent regular files; hardlink TAR entries
-MUST NOT be emitted.
+There is no padding, no archive-level checksum, no compression, and no extension
+records in FCA v1. Integrity and authenticity are provided by the outer
+encrypted payload stream (§5).
 
-Readers MUST reject unsafe paths, unsupported entry types, pax/GNU/Solaris
-extension typeflags, duplicate output paths, entries that collide with existing
-top-level output paths, and archives with more than one top-level root. Readers
-MUST surface every header block independently (raw iteration) so an extension
-record cannot be silently merged into the next entry's metadata; the rejection
-fires on the extension record itself, before any merge could happen. Readers
-MUST reject any header whose `size` field uses the GNU binary numeric encoding
-(high bit set on the first byte of the field), so that writer and reader agree
-on the same `8_589_934_591`-byte ceiling. The top-level root is the first path
-component after directory trailing-slash canonicalization; all entries in an
-archive MUST have the same top-level root.
+### 9.2 FCA fixed header (23 bytes)
 
-Writers MUST terminate the TAR stream with the standard two 512-byte zero blocks.
-Readers MUST reject malformed ustar headers, invalid header checksums, file data
-that runs past the archive, archives whose end-of-archive marker is absent or
-incomplete (the two trailing 512-byte zero blocks MUST both be present), and
-non-zero data after the end-of-archive marker.
+```
+fca_header:
+  magic              4 bytes   b"FCA\0" (0x46 0x43 0x41 0x00)
+  version            u8        0x01     (FCA wire version, distinct from §3 outer version)
+  flags              u16       MUST be 0
+  entry_count        u32       number of manifest entries  (1..=limits.max_entry_count)
+  manifest_len       u32       byte length of manifest     (1..=limits.max_manifest_bytes)
+  total_file_bytes   u64       sum of all regular-file sizes (<=limits.max_total_plaintext_bytes)
+```
 
-Readers MUST treat TAR metadata outside path, entry type, size, and file contents
-as non-authoritative. Readers MUST NOT restore ownership and MUST NOT apply
-setuid, setgid, sticky, device, or special-file semantics. Implementations SHOULD
-extract with conservative platform-appropriate permissions.
+All multi-byte integers are unsigned big-endian.
 
-v1 preserves file contents and directory structure. It does not guarantee
-cross-implementation preservation of ownership, timestamps, platform-specific
-permission bits, ACLs, extended attributes, hardlink identity, or symlink
-relationships.
+Readers MUST reject: short header, bad magic, unsupported version, non-zero
+flags, zero `entry_count`, `entry_count > limits.max_entry_count`,
+`manifest_len == 0`, `manifest_len > limits.max_manifest_bytes`, `manifest_len`
+not representable as `usize`, `total_file_bytes > limits.max_total_plaintext_bytes`.
+
+After parsing the manifest, readers MUST recompute the actual entry count and
+total file bytes and require **exact equality** with the header values.
+
+### 9.3 Manifest
+
+The manifest is exactly `manifest_len` bytes and contains exactly `entry_count`
+entries. Each entry is:
+
+```
+manifest_entry:
+  kind          u8        0x01 = file, 0x02 = directory
+  entry_flags   u8        MUST be 0
+  mode          u16       Unix rwx bits only, 0o000..0o777
+  path_len      u16       byte length of path (1..=limits.max_path_bytes)
+  size          u64       file size, or 0 for directories
+  path          path_len bytes, UTF-8 FCA path
+```
+
+The fixed part of each entry is exactly 14 bytes. Directory entries have
+`size == 0` and consume no bytes in the file-content region. File entries MAY
+have `size == 0`. Unknown `kind` values MUST be rejected. Non-zero `entry_flags`
+MUST be rejected (reserved for future incompatible formats). `mode > 0o777`
+MUST be rejected.
+
+### 9.4 Path grammar (portable safe subset)
+
+FCA paths are UTF-8 byte strings using `/` as the only separator. The grammar is
+intentionally more restrictive than generic host paths so a path that survives
+validation behaves predictably on Linux, macOS, and Windows.
+
+A valid FCA path MUST satisfy ALL whole-path rules:
+
+- not empty;
+- valid UTF-8;
+- relative only (no leading `/`);
+- no trailing `/`;
+- no repeated `/`;
+- no NUL byte;
+- no backslash byte (`\`);
+- byte length `<= limits.max_path_bytes`;
+- component count `<= limits.max_path_depth`;
+- after conversion to a host `Path`, no `RootDir`, `Prefix`, `CurDir`, or
+  `ParentDir` component.
+
+Each path component MUST satisfy ALL component rules:
+
+- not empty;
+- not `.` or `..`;
+- no ASCII control bytes (`0x00..=0x1F`);
+- no Windows-reserved characters: `<`, `>`, `:`, `"`, `|`, `?`, `*`;
+- does not end with a space or a `.`;
+- is not a Windows-reserved device name under ASCII-case-insensitive
+  comparison: `CON`, `PRN`, `AUX`, `NUL`, `CLOCK$`, `COM1..9`, `LPT1..9`;
+- does not have a Windows-reserved device stem before an extension under
+  ASCII-case-insensitive comparison: `CON.txt`, `AUX.backup`, `COM1.log`,
+  `LPT9.bin`.
+
+The reserved-device check is **ASCII-case-insensitive only**; locale-sensitive
+case folding (which would mishandle Turkish dotted I, etc.) MUST NOT be used.
+
+Directory paths do not carry a trailing slash. Files and directories share one
+canonical path namespace.
+
+### 9.5 Collision policy
+
+Readers MUST reject:
+
+- exact duplicate paths;
+- paths colliding under ASCII-case-insensitive comparison (mapping ASCII A–Z to
+  a–z, leaving every other byte unchanged) — this prevents collisions on
+  case-insensitive filesystems (HFS+, default-config NTFS) before
+  `create_new(true)` would discover them at extraction time.
+
+Filesystem-specific collisions not caught by this rule (Unicode normalization
+on macOS HFS+, etc.) MUST fail closed during extraction through
+`create_new(true)` or no-clobber final promotion under `.incomplete`.
+
+### 9.6 Tree-shape rules
+
+FCA preserves FerroCrypt's one-output-root behavior:
+
+1. Every path has a first component called the top-level root.
+2. All entries MUST have the same top-level root.
+3. If the top-level root is a file, the archive MUST contain exactly one entry.
+4. If the top-level root is a directory:
+   - the root directory entry MUST be present;
+   - every non-root entry's parent directory MUST be present as a directory
+     entry;
+   - no child may appear under a file path.
+
+### 9.7 Entry ordering
+
+Manifest order defines the order of file contents in the file-content region.
+Writers SHOULD emit deterministic order: sort by `(component_count,
+path_utf8_bytes)`, with the root directory naturally first. Readers MUST accept
+any order that satisfies the manifest and tree-shape rules.
+
+### 9.8 File-content region
+
+Immediately after the manifest, the file-content region contains the bytes of
+regular-file entries in **manifest order**:
+
+```
+for entry in manifest.entries:
+    if entry.kind == file:
+        read exactly entry.size bytes
+    if entry.kind == directory:
+        read zero bytes
+```
+
+The archive ends exactly after the final declared file byte. Readers MUST
+reject:
+
+- file content shorter than declared;
+- any trailing byte after the final declared file byte.
+
+When an underlying `io::Error` carries a FerroCrypt stream marker (truncation,
+authentication failure, extra-data), the reader MUST preserve the typed
+FerroCrypt error rather than converting it into a generic archive error.
+
+### 9.9 Writer obligations
+
+Writers MUST apply the same path grammar as readers — encryption MUST fail
+before any encrypted output is finalized if a source path cannot be represented
+in FCA v1. FerroCrypt MUST NOT write archives its own default reader will
+reject.
+
+Writers MUST reject:
+
+- missing input;
+- input root symlink, dangling symlink, or Windows reparse point;
+- input root that is not a regular file or directory;
+- symlinks, FIFOs, sockets, devices, junctions, mount points encountered during
+  directory traversal.
+
+On Unix, regular-file opens SHOULD use `O_NOFOLLOW`. On Windows, the writer
+MUST check `FILE_ATTRIBUTE_REPARSE_POINT` for the input root, every traversed
+directory, and every file to be opened.
+
+Writers MUST NOT store setuid, setgid, sticky, or platform-specific mode bits.
+On Unix, mode is the source file's `permissions().mode() & 0o777`; on non-Unix
+platforms, regular-file entries get `0o644` and directory entries get `0o755`.
+
+A source tree may change between the metadata pass and the content-streaming
+pass. When streaming each file the writer MUST: (1) reopen the source no-follow
+where supported, (2) fetch fresh metadata from the open handle, (3) require
+that it is still a regular file with `len() == manifest size`, (4) copy exactly
+the manifest size. Shrink, type change, pre-copy growth, or inaccessibility
+MUST fail. Growth during the copy after the fresh metadata check is bounded by
+the writer copying exactly the declared size — the archive remains
+self-consistent.
+
+### 9.10 Reader obligations
+
+Readers MUST:
+
+1. read and validate the FCA header;
+2. allocate and read exactly `manifest_len` bytes;
+3. parse manifest entries and validate the complete manifest BEFORE creating
+   any output (entry count, total file bytes, path grammar, exact and
+   ASCII-case-insensitive duplicate detection, single top-level root,
+   parent presence, no-child-under-file, resource caps);
+4. pre-check the final output name with `symlink_metadata` (so dangling
+   symlinks count as occupied);
+5. create directories under `{root}.incomplete` with the hardened
+   capability-based filesystem backend;
+6. stream file bytes using exact-size copy (never unbounded `io::copy`);
+7. apply file modes by handle where supported;
+8. verify archive EOF immediately after the last declared file byte;
+9. apply deferred directory modes deepest-first;
+10. promote `{root}.incomplete` to the final output name with no-clobber
+    semantics;
+11. apply the root directory's stored mode AFTER promotion (macOS-compatible
+    behavior when the root mode lacks search permission);
+12. return the final output path.
+
+A conforming reader MUST keep the existing extraction invariants: output
+operations rooted in a trusted destination directory handle, component-by-
+component traversal, no-follow directory and file opens, `create_new(true)`
+exclusive file creation, `FILE_ATTRIBUTE_REPARSE_POINT` rejection for symlinks
+/ junctions / mount points / other reparse points on Windows, restrictive
+initial modes for newly created files and directories, handle-based chmod where
+supported, deferred directory permissions, `.incomplete` staging, and final
+no-clobber promotion. FCA simplifies the archive parser; it MUST NOT simplify
+filesystem extraction.
+
+### 9.11 Resource caps
+
+`ArchiveLimits` covers all FCA resource caps. Defaults:
+
+- `max_entry_count = 250_000`;
+- `max_total_plaintext_bytes = 64 GiB`;
+- `max_path_depth = 64`;
+- `max_path_bytes = 4096` (must be `<= u16::MAX` because the on-disk `path_len`
+  field is `u16`);
+- `max_manifest_bytes = 64 MiB`.
+
+Readers MUST apply caps before allocation: `max_entry_count` before allocating
+per-entry state beyond the declared cap, `max_manifest_bytes` before allocating
+the manifest buffer, `max_path_bytes` before allocating an entry path,
+`max_path_depth` before filesystem traversal, and `max_total_plaintext_bytes`
+before file-content copying. Writers MUST apply the same caps before emitting
+the archive and MUST pre-compute the serialized manifest length with checked
+arithmetic before allocating the manifest buffer.
+
+### 9.12 What FCA preserves and what it does not
+
+FCA v1 preserves file contents, directory structure, and Unix-style `0o000..0o777`
+permission bits. It does not represent ownership, timestamps, ACLs, extended
+attributes, hardlink identity, symlink relationships, alternate data streams,
+reparse points, resource forks, or compression. Filesystem hardlinks
+encountered during encryption are stored as independent regular files.
+
+### 9.13 Design rationale
+
+The choice to define a native archive format rather than continue with a
+restricted ustar subset is summarised here so a first-time reviewer of the wire
+format can evaluate the trade-off without reading commit history.
+
+**The restricted ustar subset was a hardening burden.** TAR was designed for
+1979 magnetic tapes and accumulated decades of extensions: PAX (`'x'` per-entry,
+`'g'` global), GNU long-name / long-link / sparse / multi-volume / dumpdir /
+volume-header / legacy-long-name records, Solaris extended records, the GNU
+binary-size encoding for files above 8 GiB. FerroCrypt's previous archive layer
+spent most of its code rejecting these — a parser whose job is "accept ustar,
+reject everything that isn't ustar" must continually prove negatives against an
+expanding family of extensions, against silent fallback paths in upstream `tar`
+parsing libraries (e.g. the `tar` crate's auto-merge of PAX records into the
+following entry), and against the shape mismatch between TAR's per-entry
+streaming model and FerroCrypt's manifest-first validation goal.
+
+**FCA makes unsupported semantics unrepresentable.** Symlinks, hardlinks,
+devices, FIFOs, sockets, ownership, timestamps, ACLs, xattrs, sparse files,
+extension records, the binary-size encoding, multi-volume — none of these can
+be expressed in FCA's wire format at all. There is no parser arm to harden
+against an attacker smuggling them in.
+
+**Manifest-first validation matches the security model.** TAR's per-entry
+streaming layout meant the reader had to make trust decisions per-entry as the
+stream arrived: by the time entry `Y` reveals the archive is malformed, entries
+`X-1`, `X-2`, ... have already been written to disk. FCA puts the full manifest
+at the front of the payload, so every per-entry shape check, the path grammar,
+the duplicate detection, the tree-shape validation, and the total-bytes
+accounting all complete BEFORE any filesystem write. Spec §9.10 codifies this
+ordering.
+
+**The filesystem security boundary is preserved unchanged.** FCA changes the
+parser, not the extraction backend. The capability-based extractor built on
+`cap-std` + `cap-fs-ext` — directory opens routed through `open_dir_nofollow`,
+Windows reparse-point post-checks, exclusive file creation via
+`create_new(true)`, handle-based chmod, restrictive initial modes, deferred
+directory permissions, `.incomplete` staging, no-clobber final promotion —
+applies to FCA verbatim. A small FCA parser plus a hardened
+capability-based filesystem backend is the architecture; a small FCA parser
+plus path-based extraction would be a security regression and is forbidden.
+
+**No archive-tool interop was lost.** The plaintext FCA payload only ever
+exists inside the encryption trust boundary; it is never exposed to a third-
+party tool. The only consumer of the plaintext is FerroCrypt's own extractor.
+Choosing TAR for interop with `tar -xf` would have required keeping a strict
+TAR subset definition compatible with at least one external tool, which is
+exactly the audit burden the migration was meant to retire.
+
+**Why the manifest is buffered while file content still streams.** A streaming
+entry-by-entry reader has to commit to creating output `X` before it can know
+whether entry `Y` is malicious — that contradicts the §9.10 "validate before
+any filesystem write" rule that is the main security argument for FCA. So the
+manifest is read into one bounded allocation (capped by
+`max_manifest_bytes`, default 64 MiB) before extraction begins; the file
+content (the dominant byte cost in real workloads) still streams in 64 KiB
+chunks via `copy_exact_n`. Removing the manifest buffer would forfeit the
+security improvement that justifies the migration.
+
+**The trade-offs that remain.** FCA is FerroCrypt's responsibility to maintain
+forever; there is no third-party implementation to act as a bug oracle. The
+manifest spec is small (~2,000 lines including reference snippets and tests)
+and the active in-tree implementation is roughly 1,500–2,000 lines, so the
+ongoing cost is bounded. Other formats (custom CBOR / msgpack / flat
+tag-prefixed records) were considered and rejected — they added grammar
+complexity without a clear security or simplicity win over the chosen
+fixed-width-integer / single-bounded-allocation / exact-size-copy layout.
 
 ---
 

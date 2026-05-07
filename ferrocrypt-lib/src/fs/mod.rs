@@ -1,4 +1,4 @@
-//! Local filesystem mechanics unrelated to TAR semantics.
+//! Local filesystem mechanics unrelated to archive-payload semantics.
 //!
 //! Owns:
 //!

@@ -170,10 +170,6 @@ criteria = "safe-to-deploy"
 version = "0.2.177"
 criteria = "safe-to-deploy"
 
-[[exemptions.libredox]]
-version = "0.1.15"
-criteria = "safe-to-deploy"
-
 [[exemptions.maybe-owned]]
 version = "0.3.4"
 criteria = "safe-to-deploy"
@@ -195,10 +191,6 @@ criteria = "safe-to-deploy"
 version = "0.5.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.plain]]
-version = "0.2.3"
-criteria = "safe-to-deploy"
-
 [[exemptions.poly1305]]
 version = "0.8.0"
 criteria = "safe-to-deploy"
@@ -209,10 +201,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.radix_trie]]
 version = "0.2.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.redox_syscall]]
-version = "0.7.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.rpassword]]

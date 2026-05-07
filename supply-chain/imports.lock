@@ -99,13 +99,6 @@ user-id = 6825
 user-login = "sunfishcode"
 user-name = "Dan Gohman"
 
-[[publisher.filetime]]
-version = "0.2.27"
-when = "2026-01-18"
-user-id = 1
-user-login = "alexcrichton"
-user-name = "Alex Crichton"
-
 [[publisher.fs-set-times]]
 version = "0.20.3"
 when = "2025-03-10"
@@ -196,13 +189,6 @@ when = "2025-11-23"
 user-id = 3618
 user-login = "dtolnay"
 user-name = "David Tolnay"
-
-[[publisher.tar]]
-version = "0.4.45"
-when = "2026-03-19"
-user-id = 1
-user-login = "alexcrichton"
-user-name = "Alex Crichton"
 
 [[publisher.thiserror]]
 version = "2.0.17"

@@ -31,7 +31,6 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 zeroize = "1"
 secrecy = "0.10"
 thiserror = "2"
-tar = { version = "0.4.45", default-features = false }
 chacha20poly1305 = { version = "0.10", features = ["std", "stream"] }
 argon2 = { version = "0.5", features = ["std"] }
 sha3 = "0.11"
@@ -41,7 +40,7 @@ constant_time_eq = "0.4"
 bech32 = "0.11"
 tempfile = "3"
 # Capability-based filesystem primitives for the unified hardened
-# extractor (`archive/platform.rs`). Used on every target — the
+# extractor (`archive_v1/platform.rs`). Used on every target — the
 # extractor is no longer cfg-gated. cap-std provides directory-handle-
 # rooted operations on Linux / macOS / Windows; cap-fs-ext adds the
 # `open_dir_nofollow` and `OpenOptionsFollowExt::follow(FollowSymlinks::No)`
@@ -63,4 +62,3 @@ rustix = { version = "1", features = ["fs"] }
 [dev-dependencies]
 ferrocrypt-test-support = { path = "../ferrocrypt-test-support" }
 ctor = "0.8"
-tar = { version = "0.4.45", default-features = false }

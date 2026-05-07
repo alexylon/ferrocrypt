@@ -21,7 +21,8 @@ use std::ffi::OsString;
 
 use crate::CryptoError;
 
-use super::limits::ArchiveLimits;
+use super::format::empty_archive_error;
+use super::limits::{ArchiveLimits, entry_count_cap_error, total_bytes_cap_error};
 use super::model::{ArchiveEntry, ArchiveEntryKind};
 use super::path::ascii_case_collision_key;
 
@@ -42,6 +43,17 @@ fn first_component(path: &str) -> &str {
     }
 }
 
+/// Builds the "parent directory is missing" rejection used both when
+/// `parent_path_utf8` returns `None` (top-level orphan) and when the
+/// computed parent string is absent from the kinds map (intermediate
+/// orphan). Same diagnostic for callers either way.
+fn parent_missing(entry: &ArchiveEntry) -> CryptoError {
+    CryptoError::InvalidInput(format!(
+        "Archive entry parent directory is missing: {}",
+        entry.path_utf8,
+    ))
+}
+
 /// Validates the tree shape of a parsed manifest. Returns
 /// `(root_name, root_is_file)` on success.
 ///
@@ -54,16 +66,18 @@ pub(super) fn validate_manifest_tree(
     limits: ArchiveLimits,
 ) -> Result<(OsString, bool), CryptoError> {
     if entries.is_empty() {
-        return Err(CryptoError::InvalidInput("Empty archive".to_string()));
+        return Err(empty_archive_error());
     }
     if entries.len() > limits.max_entry_count as usize {
-        return Err(CryptoError::InvalidInput(
-            "Archive entry-count cap exceeded".to_string(),
+        return Err(entry_count_cap_error(
+            u32::try_from(entries.len()).unwrap_or(u32::MAX),
+            limits.max_entry_count,
         ));
     }
     if total_file_bytes > limits.max_total_plaintext_bytes {
-        return Err(CryptoError::InvalidInput(
-            "Archive total-bytes cap exceeded".to_string(),
+        return Err(total_bytes_cap_error(
+            total_file_bytes,
+            limits.max_total_plaintext_bytes,
         ));
     }
 
@@ -116,12 +130,8 @@ pub(super) fn validate_manifest_tree(
                 if entry.path_utf8 == root {
                     continue;
                 }
-                let parent = parent_path_utf8(&entry.path_utf8).ok_or_else(|| {
-                    CryptoError::InvalidInput(format!(
-                        "Archive entry parent directory is missing: {}",
-                        entry.path_utf8,
-                    ))
-                })?;
+                let parent =
+                    parent_path_utf8(&entry.path_utf8).ok_or_else(|| parent_missing(entry))?;
                 match kinds.get(parent) {
                     Some(ArchiveEntryKind::Directory) => {}
                     Some(ArchiveEntryKind::File) => {
@@ -130,12 +140,7 @@ pub(super) fn validate_manifest_tree(
                             entry.path_utf8,
                         )));
                     }
-                    None => {
-                        return Err(CryptoError::InvalidInput(format!(
-                            "Archive entry parent directory is missing: {}",
-                            entry.path_utf8,
-                        )));
-                    }
+                    None => return Err(parent_missing(entry)),
                 }
             }
             false

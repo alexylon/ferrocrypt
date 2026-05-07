@@ -9,7 +9,10 @@ use std::io::{self, Cursor, Read, Write};
 
 use crate::CryptoError;
 
-use super::limits::ArchiveLimits;
+use super::limits::{
+    ARCHIVE_ENTRY_MODE_UNSUPPORTED, ArchiveLimits, entry_count_cap_error, manifest_len_cap_error,
+    path_bytes_cap_error, total_bytes_cap_error,
+};
 use super::model::{ArchiveEntry, ArchiveEntryKind, FcaHeader, Manifest};
 use super::path::validate_fca_path;
 use super::tree::validate_manifest_tree;
@@ -32,6 +35,37 @@ pub(crate) const KIND_DIR: u8 = 0x02;
 pub(crate) const FCA_FLAGS_V1: u16 = 0;
 pub(crate) const FCA_ENTRY_FLAGS_V1: u8 = 0;
 pub(crate) const PERMISSION_BITS_MASK: u32 = 0o777;
+
+/// Streaming buffer size for [`copy_exact_n`] (64 KiB). Aligned with
+/// [`crate::crypto::stream::BUFFER_SIZE`] — matching the AEAD chunk
+/// size avoids stalling the encrypt/decrypt pipeline on internal
+/// re-buffering, but the constants are separate because the archive
+/// layer does not depend on crypto/stream.
+const COPY_BUFFER_SIZE: usize = 64 * 1024;
+
+/// Single source of truth for the "Malformed archive manifest"
+/// rejection. Used by every `parse_manifest_bytes` arm whose only
+/// useful diagnostic is "the bytes don't match what `header` declared"
+/// (truncated entry header, slice overflow on a path region,
+/// trailing bytes after the last declared entry).
+fn malformed_manifest() -> CryptoError {
+    CryptoError::InvalidInput("Malformed archive manifest".to_string())
+}
+
+/// Single source of truth for the "Empty archive" rejection. Used by
+/// the writer's pre-emit `entry_count == 0` check, the reader's
+/// header `entry_count == 0` arm, and the tree validator's
+/// `entries.is_empty()` check.
+pub(super) fn empty_archive_error() -> CryptoError {
+    CryptoError::InvalidInput("Empty archive".to_string())
+}
+
+/// Initial capacity hint for the parsed-entries `Vec` in
+/// [`parse_manifest_bytes`]. Caps the allocation so an
+/// adversary-controlled `header.entry_count` cannot drive a
+/// multi-megabyte pre-allocation; small archives still fit in one
+/// allocation, larger ones grow the `Vec` organically.
+const MANIFEST_PARSE_INITIAL_CAPACITY: usize = 1024;
 
 pub(super) fn read_u8<R: Read>(r: &mut R) -> io::Result<u8> {
     let mut b = [0u8; 1];
@@ -80,7 +114,7 @@ pub(super) fn copy_exact_n<R: Read, W: Write>(
     writer: &mut W,
     size: u64,
 ) -> Result<(), CryptoError> {
-    let mut buf = [0u8; 64 * 1024];
+    let mut buf = [0u8; COPY_BUFFER_SIZE];
     let mut remaining = size;
     while remaining > 0 {
         // Buffer is 64 KiB which fits any usize on supported targets;
@@ -120,7 +154,7 @@ pub(crate) fn write_fca_header<W: Write>(
     total_file_bytes: u64,
 ) -> Result<W, CryptoError> {
     if entry_count == 0 {
-        return Err(CryptoError::InvalidInput("Empty archive".to_string()));
+        return Err(empty_archive_error());
     }
 
     w.write_all(FCA_MAGIC).map_err(CryptoError::Io)?;
@@ -168,24 +202,19 @@ pub fn parse_fca_header<R: Read>(
     let total_file_bytes = read_u64_be(reader)?;
 
     if entry_count == 0 {
-        return Err(CryptoError::InvalidInput("Empty archive".to_string()));
+        return Err(empty_archive_error());
     }
     if entry_count > limits.max_entry_count {
-        return Err(CryptoError::InvalidInput(format!(
-            "Archive entry-count cap exceeded ({entry_count} entries, cap {})",
-            limits.max_entry_count
-        )));
+        return Err(entry_count_cap_error(entry_count, limits.max_entry_count));
     }
     if manifest_len == 0 {
-        return Err(CryptoError::InvalidInput(
-            "Malformed archive manifest".to_string(),
-        ));
+        return Err(malformed_manifest());
     }
     if manifest_len > limits.max_manifest_bytes {
-        return Err(CryptoError::InvalidInput(format!(
-            "Archive manifest length cap exceeded ({manifest_len} bytes, cap {})",
-            limits.max_manifest_bytes
-        )));
+        return Err(manifest_len_cap_error(
+            u64::from(manifest_len),
+            limits.max_manifest_bytes,
+        ));
     }
     if usize::try_from(manifest_len).is_err() {
         return Err(CryptoError::InvalidInput(
@@ -193,10 +222,10 @@ pub fn parse_fca_header<R: Read>(
         ));
     }
     if total_file_bytes > limits.max_total_plaintext_bytes {
-        return Err(CryptoError::InvalidInput(format!(
-            "Archive total-bytes cap exceeded ({total_file_bytes} bytes, cap {})",
-            limits.max_total_plaintext_bytes
-        )));
+        return Err(total_bytes_cap_error(
+            total_file_bytes,
+            limits.max_total_plaintext_bytes,
+        ));
     }
 
     Ok(FcaHeader {
@@ -221,15 +250,16 @@ pub(crate) fn checked_manifest_len(
     for entry in entries {
         if entry.mode > PERMISSION_BITS_MASK {
             return Err(CryptoError::InvalidInput(
-                "Archive entry mode contains unsupported bits".to_string(),
+                ARCHIVE_ENTRY_MODE_UNSUPPORTED.to_string(),
             ));
         }
         let path_len = entry.path_utf8.len();
         if path_len == 0 || path_len > limits.max_path_bytes as usize {
-            return Err(CryptoError::InvalidInput(format!(
-                "Archive path byte-length cap exceeded: {}",
-                entry.path_utf8,
-            )));
+            return Err(path_bytes_cap_error(
+                u32::try_from(path_len).unwrap_or(u32::MAX),
+                limits.max_path_bytes,
+                Some(&entry.path_utf8),
+            ));
         }
         if path_len > u16::MAX as usize {
             return Err(CryptoError::InvalidInput(
@@ -245,10 +275,10 @@ pub(crate) fn checked_manifest_len(
             })?;
 
         if len > limits.max_manifest_bytes as usize {
-            return Err(CryptoError::InvalidInput(format!(
-                "Archive manifest length cap exceeded ({len} bytes, cap {})",
+            return Err(manifest_len_cap_error(
+                len as u64,
                 limits.max_manifest_bytes,
-            )));
+            ));
         }
     }
 
@@ -310,21 +340,15 @@ pub fn parse_manifest_bytes(
     let limits = limits.validate()?;
 
     let mut cursor = Cursor::new(bytes);
-    // Pre-allocate up to 1024 entries so small archives don't grow
-    // the Vec on every push, but cap the hint so an adversary-
-    // controlled `header.entry_count` cannot cause a multi-megabyte
-    // pre-allocation. Vec grows organically beyond 1024.
     let entry_count_usize = usize::try_from(header.entry_count).unwrap_or(usize::MAX);
-    let mut entries = Vec::with_capacity(entry_count_usize.min(1024));
+    let mut entries = Vec::with_capacity(entry_count_usize.min(MANIFEST_PARSE_INITIAL_CAPACITY));
     let mut total_file_bytes: u64 = 0;
 
     for _ in 0..header.entry_count {
         let pos = cursor.position() as usize;
         let remaining = bytes.len().saturating_sub(pos);
         if remaining < FCA_ENTRY_FIXED_SIZE {
-            return Err(CryptoError::InvalidInput(
-                "Malformed archive manifest".to_string(),
-            ));
+            return Err(malformed_manifest());
         }
 
         let kind_byte = read_u8(&mut cursor)?;
@@ -340,7 +364,7 @@ pub fn parse_manifest_bytes(
         }
         if u32::from(mode) > PERMISSION_BITS_MASK {
             return Err(CryptoError::InvalidInput(
-                "Archive entry mode contains unsupported bits".to_string(),
+                ARCHIVE_ENTRY_MODE_UNSUPPORTED.to_string(),
             ));
         }
         if path_len == 0 {
@@ -349,19 +373,19 @@ pub fn parse_manifest_bytes(
             ));
         }
         if u32::from(path_len) > limits.max_path_bytes {
-            return Err(CryptoError::InvalidInput(
-                "Archive path byte-length cap exceeded".to_string(),
+            return Err(path_bytes_cap_error(
+                u32::from(path_len),
+                limits.max_path_bytes,
+                None,
             ));
         }
 
         let start = cursor.position() as usize;
         let end = start
             .checked_add(path_len as usize)
-            .ok_or_else(|| CryptoError::InvalidInput("Malformed archive manifest".to_string()))?;
+            .ok_or_else(malformed_manifest)?;
         if end > bytes.len() {
-            return Err(CryptoError::InvalidInput(
-                "Malformed archive manifest".to_string(),
-            ));
+            return Err(malformed_manifest());
         }
 
         let path_bytes = &bytes[start..end];
@@ -405,9 +429,7 @@ pub fn parse_manifest_bytes(
     }
 
     if cursor.position() as usize != bytes.len() {
-        return Err(CryptoError::InvalidInput(
-            "Malformed archive manifest".to_string(),
-        ));
+        return Err(malformed_manifest());
     }
 
     if total_file_bytes != header.total_file_bytes {
@@ -416,8 +438,9 @@ pub fn parse_manifest_bytes(
         ));
     }
     if total_file_bytes > limits.max_total_plaintext_bytes {
-        return Err(CryptoError::InvalidInput(
-            "Archive total-bytes cap exceeded".to_string(),
+        return Err(total_bytes_cap_error(
+            total_file_bytes,
+            limits.max_total_plaintext_bytes,
         ));
     }
 

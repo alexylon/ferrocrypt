@@ -44,6 +44,7 @@ use super::IncompleteOutputPolicy;
 use super::format::{copy_exact_n, parse_fca_header, parse_manifest_bytes};
 use super::limits::ArchiveLimits;
 use super::model::{ArchiveEntry, ArchiveEntryKind, Manifest};
+use super::path::canonical_path_order;
 use super::platform;
 
 /// Public entry point. Parses an FCA payload from `reader`, fully
@@ -78,31 +79,29 @@ fn unarchive_inner<R: Read>(
     limits: ArchiveLimits,
     created_incomplete_roots: &mut Vec<OsString>,
 ) -> Result<PathBuf, CryptoError> {
-    // §16.1 step 1: parse and validate header.
+    // §16.1 step 1.
     let header = parse_fca_header(&mut reader, limits)?;
 
-    // §16.1 step 2: read exactly manifest_len bytes.
+    // §16.1 step 2.
     let manifest_len = usize::try_from(header.manifest_len).map_err(|_| {
         CryptoError::InvalidInput("Archive manifest length cannot fit in memory".to_string())
     })?;
     let mut manifest_bytes = vec![0u8; manifest_len];
     reader.read_exact(&mut manifest_bytes)?;
 
-    // §16.1 steps 3–4: parse manifest with full per-entry shape
-    // validation, path-grammar validation, and tree-shape validation.
+    // §16.1 steps 3–4.
     let manifest = parse_manifest_bytes(&manifest_bytes, header, limits)?;
 
-    // §16.1 step 5: pre-check the final output name. Uses
-    // `symlink_metadata` (via `reject_occupied`) so a dangling symlink
-    // at the final name is treated as occupied.
+    // §16.1 step 5: `symlink_metadata` (via `reject_occupied`) so a
+    // dangling symlink at the final name is treated as occupied.
     let final_path = output_dir.join(&manifest.root_name);
     reject_occupied(&final_path, "Output")?;
 
-    // §16.1 step 6: open output_dir as a hardened anchor.
+    // §16.1 step 6.
     let output_handle = platform::open_anchor(output_dir)?;
     let incomplete_name = incomplete_working_name(&manifest.root_name);
 
-    // §16.1 steps 7–9: stage extraction under {root}.incomplete.
+    // §16.1 steps 7–9.
     if manifest.root_is_file {
         extract_single_file_root(
             &mut reader,
@@ -137,11 +136,7 @@ fn unarchive_inner<R: Read>(
     // the step-5 pre-check and now is rejected here.
     let working_path = output_dir.join(&incomplete_name);
     rename_no_clobber(&working_path, &final_path).map_err(|e| {
-        if e.kind() == io::ErrorKind::AlreadyExists {
-            CryptoError::InvalidInput(format!("Output already exists: {}", final_path.display()))
-        } else {
-            CryptoError::Io(e)
-        }
+        map_already_exists(CryptoError::Io(e), "Output already exists", &final_path)
     })?;
 
     // §16.1 step 13: apply root directory mode AFTER promotion. macOS
@@ -176,7 +171,13 @@ fn extract_single_file_root<R: Read>(
         incomplete_name,
         platform::INITIAL_FILE_CREATE_MODE,
     )
-    .map_err(|e| map_pre_existing_incomplete(CryptoError::Io(e), output_dir, incomplete_name))?;
+    .map_err(|e| {
+        map_already_exists(
+            CryptoError::Io(e),
+            "Previous .incomplete exists",
+            &output_dir.join(incomplete_name),
+        )
+    })?;
     // create_file_at succeeded — this run owns the staging file.
     created_incomplete_roots.push(manifest.root_name.clone());
 
@@ -195,8 +196,13 @@ fn extract_directory_root<R: Read>(
 ) -> Result<(), CryptoError> {
     let root_name_str = manifest_root_name_str(manifest)?;
 
-    let root_dir = platform::mkdir_strict(output_handle, incomplete_name)
-        .map_err(|e| map_pre_existing_incomplete(e, output_dir, incomplete_name))?;
+    let root_dir = platform::mkdir_strict(output_handle, incomplete_name).map_err(|e| {
+        map_already_exists(
+            e,
+            "Previous .incomplete exists",
+            &output_dir.join(incomplete_name),
+        )
+    })?;
     // mkdir_strict succeeded — this run owns the staging directory.
     created_incomplete_roots.push(manifest.root_name.clone());
 
@@ -208,14 +214,10 @@ fn extract_directory_root<R: Read>(
         .iter()
         .filter(|e| e.kind == ArchiveEntryKind::Directory && e.path_utf8 != root_name_str)
         .collect();
-    dir_entries.sort_by(|a, b| {
-        component_count(&a.path_utf8)
-            .cmp(&component_count(&b.path_utf8))
-            .then_with(|| a.path_utf8.cmp(&b.path_utf8))
-    });
+    dir_entries.sort_by(|a, b| canonical_path_order(&a.path_utf8, &b.path_utf8));
     for dir_entry in &dir_entries {
         let rel = strip_root_prefix(&dir_entry.path_utf8, root_name_str)?;
-        let (parent_dir, dir_name) = platform::walk_to_parent(&root_dir, Path::new(rel))?;
+        let (parent_dir, dir_name) = platform::walk_to_parent(&root_dir, rel)?;
         let _new_dir = platform::mkdir_strict(&parent_dir, &dir_name)?;
     }
 
@@ -227,7 +229,7 @@ fn extract_directory_root<R: Read>(
             continue;
         }
         let rel = strip_root_prefix(&entry.path_utf8, root_name_str)?;
-        let (parent_dir, file_name) = platform::walk_to_parent(&root_dir, Path::new(rel))?;
+        let (parent_dir, file_name) = platform::walk_to_parent(&root_dir, rel)?;
         let mut outfile =
             platform::create_file_at(&parent_dir, &file_name, platform::INITIAL_FILE_CREATE_MODE)?;
         copy_exact_n(reader, &mut outfile, entry.size)?;
@@ -238,15 +240,11 @@ fn extract_directory_root<R: Read>(
     // §16.3: restrictive parent modes would block child creation, so
     // chmod must run AFTER child writes complete. Root directory mode
     // is applied AFTER the rename (see `apply_root_directory_mode`).
-    let mut deferred = dir_entries;
-    deferred.sort_by(|a, b| {
-        component_count(&b.path_utf8)
-            .cmp(&component_count(&a.path_utf8))
-            .then_with(|| b.path_utf8.cmp(&a.path_utf8))
-    });
-    for dir_entry in &deferred {
+    // dir_entries is already sorted ascending by Pass 1; iterating
+    // in reverse yields the depth-descending order Pass 3 needs.
+    for dir_entry in dir_entries.iter().rev() {
         let rel = strip_root_prefix(&dir_entry.path_utf8, root_name_str)?;
-        let dir_handle = platform::open_dir_at_rel(&root_dir, Path::new(rel))?;
+        let dir_handle = platform::open_dir_at_rel(&root_dir, rel)?;
         platform::chmod_dir_handle(dir_handle, dir_entry.mode)?;
     }
 
@@ -312,22 +310,19 @@ fn cleanup_incomplete_path(path: &Path) {
     }
 }
 
-/// Maps `AlreadyExists` from a first-touch `mkdir_strict` /
-/// `create_file_at` into the canonical "Previous .incomplete exists"
-/// diagnostic so a stale `.incomplete` from a prior failed run gives
-/// a recognisable error and is preserved (the cleanup path tracks only
-/// roots THIS run created).
-fn map_pre_existing_incomplete(
-    e: CryptoError,
-    output_dir: &Path,
-    incomplete_name: &OsStr,
-) -> CryptoError {
+/// Maps `io::ErrorKind::AlreadyExists` to a typed
+/// `CryptoError::InvalidInput("<label>: <path>")` and otherwise
+/// preserves the underlying error. Used at both staging boundaries
+/// — first-touch `mkdir_strict` / `create_file_at` rejects a stale
+/// `.incomplete` from a prior failed run with a recognisable
+/// diagnostic AND preserves it (the cleanup path tracks only roots
+/// THIS run created), and the final-rename promotion rejects a
+/// racing actor that creates the final name between the step-5
+/// pre-check and the rename.
+fn map_already_exists(e: CryptoError, label: &str, path: &Path) -> CryptoError {
     if let CryptoError::Io(io_err) = &e {
         if io_err.kind() == io::ErrorKind::AlreadyExists {
-            return CryptoError::InvalidInput(format!(
-                "Previous .incomplete exists: {}",
-                output_dir.join(incomplete_name).display()
-            ));
+            return CryptoError::InvalidInput(format!("{}: {}", label, path.display()));
         }
     }
     e
@@ -342,20 +337,21 @@ fn manifest_root_name_str(manifest: &Manifest) -> Result<&str, CryptoError> {
         ))
 }
 
-/// Strips the `{root_name}/` prefix from an entry path. Validation has
-/// already verified every non-root entry begins with `{root_name}/`,
-/// so a missing prefix here is an internal invariant violation.
-fn strip_root_prefix<'a>(path_utf8: &'a str, root_name: &str) -> Result<&'a str, CryptoError> {
+/// Strips the `{root_name}/` prefix from an entry path and returns
+/// the rel-to-root path ready for the platform helpers. Validation
+/// has already verified every non-root entry begins with
+/// `{root_name}/`, so a missing prefix here is an internal invariant
+/// violation. Returning `&Path` directly saves every call site from
+/// wrapping the result with `Path::new(rel)` before passing to
+/// `walk_to_parent` / `open_dir_at_rel`.
+fn strip_root_prefix<'a>(path_utf8: &'a str, root_name: &str) -> Result<&'a Path, CryptoError> {
     path_utf8
         .strip_prefix(root_name)
         .and_then(|rest| rest.strip_prefix('/'))
+        .map(Path::new)
         .ok_or(CryptoError::InternalInvariant(
             "Manifest entry missing expected root prefix",
         ))
-}
-
-fn component_count(path: &str) -> usize {
-    path.split('/').count()
 }
 
 #[cfg(test)]
@@ -376,12 +372,11 @@ mod tests {
         }
     }
 
-    /// Builds a complete FCA archive byte sequence: header + serialized
-    /// manifest + file contents in manifest order. `file_contents` maps
-    /// path → bytes; every file entry in the manifest must have a
-    /// corresponding entry. Total bytes must match the manifest's
-    /// `total_file_bytes`.
-    fn build_archive(manifest: &Manifest, file_contents: &[(&str, &[u8])]) -> Vec<u8> {
+    /// Serializes the FCA header + manifest bytes into a fresh
+    /// `Vec<u8>`, ready for the caller to append a file-content
+    /// region (full per `build_archive`, partial per
+    /// `build_partial_archive`).
+    fn build_archive_prefix(manifest: &Manifest) -> Vec<u8> {
         let manifest_bytes = serialize_manifest(manifest, ArchiveLimits::default()).unwrap();
         let entry_count = u32::try_from(manifest.entries.len()).unwrap();
         let manifest_len = u32::try_from(manifest_bytes.len()).unwrap();
@@ -395,6 +390,16 @@ mod tests {
         )
         .unwrap();
         archive.extend_from_slice(&manifest_bytes);
+        archive
+    }
+
+    /// Builds a complete FCA archive byte sequence: header + serialized
+    /// manifest + file contents in manifest order. `file_contents` maps
+    /// path → bytes; every file entry in the manifest must have a
+    /// corresponding entry. Total bytes must match the manifest's
+    /// `total_file_bytes`.
+    fn build_archive(manifest: &Manifest, file_contents: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut archive = build_archive_prefix(manifest);
 
         let contents: std::collections::HashMap<&str, &[u8]> =
             file_contents.iter().copied().collect();
@@ -412,6 +417,16 @@ mod tests {
         archive
     }
 
+    /// Builds an archive whose declared file-content region is shorter
+    /// than `manifest.total_file_bytes`. Used by tests that drive
+    /// `unarchive` through the truncation path — the reader rejects
+    /// partway and the caller asserts on the staged-output state.
+    fn build_partial_archive(manifest: &Manifest, content_bytes: &[u8]) -> Vec<u8> {
+        let mut archive = build_archive_prefix(manifest);
+        archive.extend_from_slice(content_bytes);
+        archive
+    }
+
     fn single_file_manifest(path: &str, content: &[u8]) -> Manifest {
         Manifest {
             entries: vec![make_entry(
@@ -426,6 +441,39 @@ mod tests {
         }
     }
 
+    /// Manifest used by both `IncompleteOutputPolicy` tests: a `root/`
+    /// dir holding a 100-byte `a.bin`. Paired with
+    /// `build_partial_archive(&manifest, b"short")` to drive a
+    /// truncation that the reader rejects partway through extraction.
+    fn dir_with_one_undersized_file_manifest() -> Manifest {
+        Manifest {
+            entries: vec![
+                make_entry("root", ArchiveEntryKind::Directory, 0, 0o755),
+                make_entry("root/a.bin", ArchiveEntryKind::File, 100, 0o644),
+            ],
+            total_file_bytes: 100,
+            root_name: OsString::from("root"),
+            root_is_file: false,
+        }
+    }
+
+    /// Wraps `unarchive` with the test-default limits and the supplied
+    /// policy so each test reads as one expressive line instead of a
+    /// six-line constructor.
+    fn unarchive_with_policy(
+        archive: Vec<u8>,
+        tmp: &Path,
+        policy: IncompleteOutputPolicy,
+    ) -> Result<PathBuf, CryptoError> {
+        unarchive(Cursor::new(archive), tmp, ArchiveLimits::default(), policy)
+    }
+
+    /// `unarchive_with_policy` specialised to the default
+    /// [`IncompleteOutputPolicy::DeleteOnError`].
+    fn unarchive_default(archive: Vec<u8>, tmp: &Path) -> Result<PathBuf, CryptoError> {
+        unarchive_with_policy(archive, tmp, IncompleteOutputPolicy::DeleteOnError)
+    }
+
     // -- Positive round-trip tests (§19.1) ---------------------------------
 
     #[test]
@@ -434,13 +482,7 @@ mod tests {
         let manifest = single_file_manifest("hello.txt", b"Hello, world!");
         let archive = build_archive(&manifest, &[("hello.txt", b"Hello, world!")]);
 
-        let final_path = unarchive(
-            Cursor::new(archive),
-            tmp.path(),
-            ArchiveLimits::default(),
-            IncompleteOutputPolicy::DeleteOnError,
-        )
-        .unwrap();
+        let final_path = unarchive_default(archive, tmp.path()).unwrap();
 
         assert_eq!(final_path, tmp.path().join("hello.txt"));
         assert_eq!(fs::read(&final_path).unwrap(), b"Hello, world!");
@@ -452,13 +494,7 @@ mod tests {
         let manifest = single_file_manifest("empty.txt", b"");
         let archive = build_archive(&manifest, &[("empty.txt", b"")]);
 
-        let final_path = unarchive(
-            Cursor::new(archive),
-            tmp.path(),
-            ArchiveLimits::default(),
-            IncompleteOutputPolicy::DeleteOnError,
-        )
-        .unwrap();
+        let final_path = unarchive_default(archive, tmp.path()).unwrap();
         assert_eq!(fs::read(&final_path).unwrap(), b"");
     }
 
@@ -483,13 +519,7 @@ mod tests {
             ],
         );
 
-        let final_path = unarchive(
-            Cursor::new(archive),
-            tmp.path(),
-            ArchiveLimits::default(),
-            IncompleteOutputPolicy::DeleteOnError,
-        )
-        .unwrap();
+        let final_path = unarchive_default(archive, tmp.path()).unwrap();
 
         assert!(final_path.is_dir());
         assert_eq!(fs::read(final_path.join("index.txt")).unwrap(), b"hello");
@@ -512,13 +542,7 @@ mod tests {
         };
         let archive = build_archive(&manifest, &[]);
 
-        let final_path = unarchive(
-            Cursor::new(archive),
-            tmp.path(),
-            ArchiveLimits::default(),
-            IncompleteOutputPolicy::DeleteOnError,
-        )
-        .unwrap();
+        let final_path = unarchive_default(archive, tmp.path()).unwrap();
         assert!(final_path.is_dir());
         assert_eq!(fs::read_dir(&final_path).unwrap().count(), 0);
     }
@@ -539,13 +563,7 @@ mod tests {
         };
         let archive = build_archive(&manifest, &[("root/a/b/leaf.txt", b"deep")]);
 
-        let final_path = unarchive(
-            Cursor::new(archive),
-            tmp.path(),
-            ArchiveLimits::default(),
-            IncompleteOutputPolicy::DeleteOnError,
-        )
-        .unwrap();
+        let final_path = unarchive_default(archive, tmp.path()).unwrap();
         assert_eq!(
             fs::read(final_path.join("a").join("b").join("leaf.txt")).unwrap(),
             b"deep"
@@ -574,13 +592,7 @@ mod tests {
         };
         let archive = build_archive(&manifest, &[("root/a/b/leaf.txt", b"deep")]);
 
-        let final_path = unarchive(
-            Cursor::new(archive),
-            tmp.path(),
-            ArchiveLimits::default(),
-            IncompleteOutputPolicy::DeleteOnError,
-        )
-        .unwrap();
+        let final_path = unarchive_default(archive, tmp.path()).unwrap();
         assert_eq!(
             fs::read(final_path.join("a").join("b").join("leaf.txt")).unwrap(),
             b"deep"
@@ -610,13 +622,7 @@ mod tests {
             ],
         );
 
-        let final_path = unarchive(
-            Cursor::new(archive),
-            tmp.path(),
-            ArchiveLimits::default(),
-            IncompleteOutputPolicy::DeleteOnError,
-        )
-        .unwrap();
+        let final_path = unarchive_default(archive, tmp.path()).unwrap();
         assert_eq!(fs::read(final_path.join("a.bin")).unwrap(), b"AAAAAAAAAA");
         assert_eq!(fs::read(final_path.join("b.bin")).unwrap(), b"");
         assert_eq!(fs::read(final_path.join("c.bin")).unwrap(), b"CCCCC");
@@ -628,20 +634,9 @@ mod tests {
     fn rejects_short_file_content() {
         let tmp = tempfile::TempDir::new().unwrap();
         let manifest = single_file_manifest("hello.txt", b"Hello, world!");
-        let manifest_bytes = serialize_manifest(&manifest, ArchiveLimits::default()).unwrap();
+        let archive = build_partial_archive(&manifest, b"short");
 
-        let mut archive = Vec::new();
-        let _ = write_fca_header(&mut archive, 1, manifest_bytes.len() as u32, 13).unwrap();
-        archive.extend_from_slice(&manifest_bytes);
-        archive.extend_from_slice(b"short"); // only 5 bytes, manifest declares 13
-
-        let err = unarchive(
-            Cursor::new(archive),
-            tmp.path(),
-            ArchiveLimits::default(),
-            IncompleteOutputPolicy::DeleteOnError,
-        )
-        .unwrap_err();
+        let err = unarchive_default(archive, tmp.path()).unwrap_err();
 
         let s = format!("{err}");
         assert!(
@@ -657,13 +652,7 @@ mod tests {
         let mut archive = build_archive(&manifest, &[("hello.txt", b"Hello, world!")]);
         archive.push(0xAA);
 
-        let err = unarchive(
-            Cursor::new(archive),
-            tmp.path(),
-            ArchiveLimits::default(),
-            IncompleteOutputPolicy::DeleteOnError,
-        )
-        .unwrap_err();
+        let err = unarchive_default(archive, tmp.path()).unwrap_err();
         assert!(format!("{err}").contains("Trailing data"));
     }
 
@@ -674,31 +663,12 @@ mod tests {
     #[test]
     fn delete_on_error_removes_incomplete() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let manifest = Manifest {
-            entries: vec![
-                make_entry("root", ArchiveEntryKind::Directory, 0, 0o755),
-                make_entry("root/a.bin", ArchiveEntryKind::File, 100, 0o644),
-            ],
-            total_file_bytes: 100,
-            root_name: OsString::from("root"),
-            root_is_file: false,
-        };
-        let manifest_bytes = serialize_manifest(&manifest, ArchiveLimits::default()).unwrap();
+        let archive = build_partial_archive(&dir_with_one_undersized_file_manifest(), b"short");
 
-        let mut archive = Vec::new();
-        let _ = write_fca_header(&mut archive, 2, manifest_bytes.len() as u32, 100).unwrap();
-        archive.extend_from_slice(&manifest_bytes);
-        archive.extend_from_slice(b"short"); // manifest declares 100, only 5 bytes
-
-        let result = unarchive(
-            Cursor::new(archive),
-            tmp.path(),
-            ArchiveLimits::default(),
-            IncompleteOutputPolicy::DeleteOnError,
-        );
+        let result =
+            unarchive_with_policy(archive, tmp.path(), IncompleteOutputPolicy::DeleteOnError);
         assert!(result.is_err());
 
-        // No `.incomplete` should remain.
         let count = fs::read_dir(tmp.path()).unwrap().count();
         assert_eq!(count, 0, "DeleteOnError must clean up .incomplete");
     }
@@ -707,28 +677,10 @@ mod tests {
     #[test]
     fn retain_on_error_keeps_incomplete() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let manifest = Manifest {
-            entries: vec![
-                make_entry("root", ArchiveEntryKind::Directory, 0, 0o755),
-                make_entry("root/a.bin", ArchiveEntryKind::File, 100, 0o644),
-            ],
-            total_file_bytes: 100,
-            root_name: OsString::from("root"),
-            root_is_file: false,
-        };
-        let manifest_bytes = serialize_manifest(&manifest, ArchiveLimits::default()).unwrap();
+        let archive = build_partial_archive(&dir_with_one_undersized_file_manifest(), b"short");
 
-        let mut archive = Vec::new();
-        let _ = write_fca_header(&mut archive, 2, manifest_bytes.len() as u32, 100).unwrap();
-        archive.extend_from_slice(&manifest_bytes);
-        archive.extend_from_slice(b"short");
-
-        let result = unarchive(
-            Cursor::new(archive),
-            tmp.path(),
-            ArchiveLimits::default(),
-            IncompleteOutputPolicy::RetainOnError,
-        );
+        let result =
+            unarchive_with_policy(archive, tmp.path(), IncompleteOutputPolicy::RetainOnError);
         assert!(result.is_err());
 
         let incomplete = tmp.path().join("root.incomplete");
@@ -748,13 +700,7 @@ mod tests {
         let manifest = single_file_manifest("hello.txt", b"Hello, world!");
         let archive = build_archive(&manifest, &[("hello.txt", b"Hello, world!")]);
 
-        let err = unarchive(
-            Cursor::new(archive),
-            tmp.path(),
-            ArchiveLimits::default(),
-            IncompleteOutputPolicy::DeleteOnError,
-        )
-        .unwrap_err();
+        let err = unarchive_default(archive, tmp.path()).unwrap_err();
         assert!(format!("{err}").contains("Output already exists"));
     }
 
@@ -770,13 +716,7 @@ mod tests {
         let manifest = single_file_manifest("hello.txt", b"Hello, world!");
         let archive = build_archive(&manifest, &[("hello.txt", b"Hello, world!")]);
 
-        let err = unarchive(
-            Cursor::new(archive),
-            tmp.path(),
-            ArchiveLimits::default(),
-            IncompleteOutputPolicy::DeleteOnError,
-        )
-        .unwrap_err();
+        let err = unarchive_default(archive, tmp.path()).unwrap_err();
         assert!(format!("{err}").contains("Previous .incomplete exists"));
         assert!(
             stale_path.exists(),
@@ -802,19 +742,9 @@ mod tests {
             root_name: OsString::from("a.txt"),
             root_is_file: true,
         };
-        let manifest_bytes = serialize_manifest(&manifest, ArchiveLimits::default()).unwrap();
-        let mut archive = Vec::new();
-        let _ = write_fca_header(&mut archive, 2, manifest_bytes.len() as u32, 2).unwrap();
-        archive.extend_from_slice(&manifest_bytes);
-        archive.extend_from_slice(b"AB");
+        let archive = build_partial_archive(&manifest, b"AB");
 
-        let err = unarchive(
-            Cursor::new(archive),
-            tmp.path(),
-            ArchiveLimits::default(),
-            IncompleteOutputPolicy::DeleteOnError,
-        )
-        .unwrap_err();
+        let err = unarchive_default(archive, tmp.path()).unwrap_err();
         // Either the multi-root rejection from validate_manifest_tree
         // or any earlier rejection fires before any output is created.
         assert!(
@@ -857,13 +787,7 @@ mod tests {
         let manifest = single_file_manifest("hello.txt", b"Hello, world!");
         let archive = build_archive(&manifest, &[("hello.txt", b"Hello, world!")]);
 
-        let err = unarchive(
-            Cursor::new(archive),
-            tmp.path(),
-            ArchiveLimits::default(),
-            IncompleteOutputPolicy::DeleteOnError,
-        )
-        .unwrap_err();
+        let err = unarchive_default(archive, tmp.path()).unwrap_err();
         assert!(format!("{err}").contains("Output already exists"));
 
         // Dangling symlink must still be there — extraction was rejected
@@ -918,13 +842,7 @@ mod tests {
         };
         let archive = build_archive(&manifest, &[("locked/child/secret.txt", b"secret")]);
 
-        let final_path = unarchive(
-            Cursor::new(archive),
-            tmp.path(),
-            ArchiveLimits::default(),
-            IncompleteOutputPolicy::DeleteOnError,
-        )
-        .unwrap();
+        let final_path = unarchive_default(archive, tmp.path()).unwrap();
 
         let root_mode = fs::metadata(&final_path).unwrap().permissions().mode() & 0o7777;
         assert_eq!(

@@ -42,9 +42,12 @@ use crate::fs::paths::file_stem;
 #[cfg(unix)]
 use super::format::PERMISSION_BITS_MASK;
 use super::format::{copy_exact_n, serialize_manifest, write_fca_header};
-use super::limits::{ArchiveLimits, enforce_per_entry_caps, enforce_total_bytes_cap};
+use super::limits::{
+    ArchiveLimits, enforce_per_entry_caps, enforce_total_bytes_cap, entry_count_cap_error,
+    manifest_len_cap_error,
+};
 use super::model::{ArchiveEntry, ArchiveEntryKind, Manifest};
-use super::path::validate_fca_path;
+use super::path::{canonical_path_order, validate_fca_path};
 use super::tree::validate_manifest_tree;
 
 /// Default file mode for non-Unix platforms (rw-r--r--). FCA stores a
@@ -67,37 +70,31 @@ fn metadata_perm_mode(metadata: &fs::Metadata) -> u32 {
     metadata.permissions().mode() & PERMISSION_BITS_MASK
 }
 
-/// Mode to store for a regular file. On Unix the rwx bits of the
-/// source file (special bits stripped); on non-Unix targets the
-/// fixed default.
+/// Mode to store for a regular file: Unix returns the rwx bits of
+/// the source file (special bits stripped via `metadata_perm_mode`);
+/// non-Unix targets have no rwx semantic and return the fixed default.
+#[cfg(unix)]
 fn archive_file_mode(metadata: &fs::Metadata) -> u32 {
-    #[cfg(unix)]
-    {
-        metadata_perm_mode(metadata)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = metadata;
-        DEFAULT_FILE_MODE
-    }
+    metadata_perm_mode(metadata)
+}
+#[cfg(not(unix))]
+fn archive_file_mode(_metadata: &fs::Metadata) -> u32 {
+    DEFAULT_FILE_MODE
 }
 
-/// Mode to store for a directory. Reads `src_path` metadata fresh on
-/// Unix; on non-Unix returns the fixed default without touching the
+/// Mode to store for a directory. Unix reads `src_path` metadata
+/// fresh; non-Unix returns the fixed default without touching the
 /// filesystem (no rwx semantic to read, and skipping the syscall
 /// avoids a stray failure mode where a concurrent removal between
 /// `read_dir` and `archive_dir_mode` would otherwise abort the
 /// archive).
+#[cfg(unix)]
 fn archive_dir_mode(src_path: &Path) -> Result<u32, CryptoError> {
-    #[cfg(unix)]
-    {
-        Ok(metadata_perm_mode(&fs::metadata(src_path)?))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = src_path;
-        Ok(DEFAULT_DIR_MODE)
-    }
+    Ok(metadata_perm_mode(&fs::metadata(src_path)?))
+}
+#[cfg(not(unix))]
+fn archive_dir_mode(_src_path: &Path) -> Result<u32, CryptoError> {
+    Ok(DEFAULT_DIR_MODE)
 }
 
 /// Opens a regular file for reading without following symlinks. On
@@ -121,7 +118,7 @@ fn open_no_follow(path: &Path) -> Result<File, CryptoError> {
         .open(path)
         .map_err(|e| {
             if e.raw_os_error() == Some(libc::ELOOP) {
-                CryptoError::InvalidInput(format!("Input is a symlink: {}", path.display()))
+                input_is_symlink_error(path)
             } else {
                 CryptoError::Io(e)
             }
@@ -131,13 +128,27 @@ fn open_no_follow(path: &Path) -> Result<File, CryptoError> {
 #[cfg(not(unix))]
 fn open_no_follow(path: &Path) -> Result<File, CryptoError> {
     let metadata = fs::symlink_metadata(path)?;
+    require_regular_file(&metadata, "Input", path)?;
+    Ok(File::open(path)?)
+}
+
+/// Defense-in-depth at every open / re-open boundary: rejects a
+/// non-regular file (symlink, FIFO, device) with a labelled
+/// `CryptoError::InvalidInput`. The `label` is the role of `path`
+/// in the failing context — `"Input"` at the outermost open,
+/// `"Source"` at the per-entry content-stream re-open.
+fn require_regular_file(
+    metadata: &fs::Metadata,
+    label: &str,
+    path: &Path,
+) -> Result<(), CryptoError> {
     if !metadata.file_type().is_file() {
         return Err(CryptoError::InvalidInput(format!(
-            "Input is no longer a regular file: {}",
+            "{label} is no longer a regular file: {}",
             path.display()
         )));
     }
-    Ok(File::open(path)?)
+    Ok(())
 }
 
 /// Rejects inputs the archiver will not accept: symlinks (live or
@@ -153,10 +164,7 @@ fn open_no_follow(path: &Path) -> Result<File, CryptoError> {
 /// generic `InputPath` not-found.
 pub(crate) fn validate_encrypt_input(input_path: &Path) -> Result<(), CryptoError> {
     if input_path.is_symlink() {
-        return Err(CryptoError::InvalidInput(format!(
-            "Input is a symlink: {}",
-            input_path.display()
-        )));
+        return Err(input_is_symlink_error(input_path));
     }
     if !input_path.exists() {
         return Err(CryptoError::InputPath);
@@ -178,6 +186,38 @@ struct ArchiveCounters {
     total_bytes: u64,
 }
 
+/// Shared per-entry recording: increments the entry count, applies
+/// every cap [`enforce_per_entry_caps`] covers, optionally sums into
+/// the total-bytes cap (for file entries), and runs
+/// [`validate_fca_path`]. Used by both branches of the metadata-pass
+/// walk so the file-entry and directory-entry call sites have one
+/// canonical sequence of checks.
+fn record_entry(
+    counters: &mut ArchiveCounters,
+    fca_path_utf8: &str,
+    file_size: Option<u64>,
+    limits: &ArchiveLimits,
+) -> Result<(), CryptoError> {
+    counters.entry_count = counters
+        .entry_count
+        .checked_add(1)
+        .ok_or_else(|| CryptoError::InvalidInput("Archive entry-count overflow".to_string()))?;
+    enforce_per_entry_caps(counters.entry_count, fca_path_utf8, limits)?;
+    if let Some(size) = file_size {
+        enforce_total_bytes_cap(size, &mut counters.total_bytes, limits)?;
+    }
+    validate_fca_path(fca_path_utf8, *limits)?;
+    Ok(())
+}
+
+/// Single source of truth for the "Input is a symlink: <path>"
+/// rejection. Used by `validate_encrypt_input`, `build_manifest`'s
+/// input-root symlink check, and the Unix `open_no_follow`
+/// `ELOOP` arm.
+fn input_is_symlink_error(path: &Path) -> CryptoError {
+    CryptoError::InvalidInput(format!("Input is a symlink: {}", path.display()))
+}
+
 /// Builds a fully validated [`Manifest`] from the source tree under
 /// `input_path`. Single-file inputs produce a one-entry manifest with
 /// `root_is_file = true`; directory inputs produce a multi-entry
@@ -186,10 +226,7 @@ fn build_manifest(input_path: &Path, limits: &ArchiveLimits) -> Result<Manifest,
     let metadata = fs::symlink_metadata(input_path)?;
     let file_type = metadata.file_type();
     if file_type.is_symlink() {
-        return Err(CryptoError::InvalidInput(format!(
-            "Input is a symlink: {}",
-            input_path.display()
-        )));
+        return Err(input_is_symlink_error(input_path));
     }
 
     let name = input_path
@@ -205,17 +242,16 @@ fn build_manifest(input_path: &Path, limits: &ArchiveLimits) -> Result<Manifest,
         })?
         .to_string();
 
+    // Path grammar applies to the root regardless of kind; validate
+    // once before the file/dir dispatch.
+    validate_fca_path(&name_str, *limits)?;
+
     if file_type.is_file() {
         let mode = archive_file_mode(&metadata);
         let size = metadata.len();
 
-        if size > limits.max_total_plaintext_bytes {
-            return Err(CryptoError::InvalidInput(format!(
-                "Archive total-bytes cap exceeded ({size} bytes, cap {})",
-                limits.max_total_plaintext_bytes,
-            )));
-        }
-        validate_fca_path(&name_str, *limits)?;
+        let mut total_bytes = 0u64;
+        enforce_total_bytes_cap(size, &mut total_bytes, limits)?;
 
         let entry = ArchiveEntry {
             kind: ArchiveEntryKind::File,
@@ -233,7 +269,6 @@ fn build_manifest(input_path: &Path, limits: &ArchiveLimits) -> Result<Manifest,
         })
     } else if file_type.is_dir() {
         let root_mode = archive_dir_mode(input_path)?;
-        validate_fca_path(&name_str, *limits)?;
 
         let mut entries = vec![ArchiveEntry {
             kind: ArchiveEntryKind::Directory,
@@ -302,12 +337,7 @@ fn walk_directory(
             let mode = archive_file_mode(&metadata);
             let size = metadata.len();
 
-            counters.entry_count = counters.entry_count.checked_add(1).ok_or_else(|| {
-                CryptoError::InvalidInput("Archive entry-count overflow".to_string())
-            })?;
-            enforce_per_entry_caps(counters.entry_count, &fca_path_utf8, limits)?;
-            enforce_total_bytes_cap(size, &mut counters.total_bytes, limits)?;
-            validate_fca_path(&fca_path_utf8, *limits)?;
+            record_entry(counters, &fca_path_utf8, Some(size), limits)?;
 
             entries.push(ArchiveEntry {
                 kind: ArchiveEntryKind::File,
@@ -319,11 +349,7 @@ fn walk_directory(
         } else if file_type.is_dir() {
             let mode = archive_dir_mode(&full_path)?;
 
-            counters.entry_count = counters.entry_count.checked_add(1).ok_or_else(|| {
-                CryptoError::InvalidInput("Archive entry-count overflow".to_string())
-            })?;
-            enforce_per_entry_caps(counters.entry_count, &fca_path_utf8, limits)?;
-            validate_fca_path(&fca_path_utf8, *limits)?;
+            record_entry(counters, &fca_path_utf8, None, limits)?;
 
             entries.push(ArchiveEntry {
                 kind: ArchiveEntryKind::Directory,
@@ -348,15 +374,7 @@ fn walk_directory(
 /// The root directory sorts first by construction (smallest component
 /// count plus shortest path among any entry sharing the root).
 fn sort_entries_canonically(entries: &mut [ArchiveEntry]) {
-    entries.sort_by(|a, b| {
-        component_count(&a.path_utf8)
-            .cmp(&component_count(&b.path_utf8))
-            .then_with(|| a.path_utf8.cmp(&b.path_utf8))
-    });
-}
-
-fn component_count(path: &str) -> usize {
-    path.split('/').count()
+    entries.sort_by(|a, b| canonical_path_order(&a.path_utf8, &b.path_utf8));
 }
 
 /// Streams one file entry's contents into `writer`. Reopens the source
@@ -377,12 +395,7 @@ fn stream_source_file<W: Write>(entry: &ArchiveEntry, writer: &mut W) -> Result<
 
     let mut file = open_no_follow(source)?;
     let metadata = file.metadata().map_err(CryptoError::Io)?;
-    if !metadata.file_type().is_file() {
-        return Err(CryptoError::InvalidInput(format!(
-            "Source is no longer a regular file: {}",
-            source.display()
-        )));
-    }
+    require_regular_file(&metadata, "Source", source)?;
     if metadata.len() != entry.size {
         return Err(CryptoError::InvalidInput(format!(
             "Source file size changed during archive ({} → {}): {}",
@@ -413,29 +426,24 @@ pub(crate) fn archive<W: Write>(
     // get re-validated here.
     validate_encrypt_input(input_path)?;
 
-    // Pass 1: build the metadata-only manifest, including FCA path
-    // validation and progressive cap enforcement.
+    // Pass 1: metadata-only manifest.
     let manifest = build_manifest(input_path, &limits)?;
 
-    // Defense-in-depth: validate_manifest_tree confirms the tree shape
-    // we just built is internally consistent. A bug in walk_directory
-    // would surface here rather than producing a malformed archive.
+    // Defense-in-depth: a bug in walk_directory would surface here
+    // rather than producing a malformed archive.
     let _ = validate_manifest_tree(&manifest.entries, manifest.total_file_bytes, limits)?;
 
-    // Serialize manifest bytes into a checked-length buffer.
     let manifest_bytes = serialize_manifest(&manifest, limits)?;
     let entry_count = u32::try_from(manifest.entries.len())
-        .map_err(|_| CryptoError::InvalidInput("Archive entry-count cap exceeded".to_string()))?;
+        .map_err(|_| entry_count_cap_error(u32::MAX, limits.max_entry_count))?;
     let manifest_len = u32::try_from(manifest_bytes.len()).map_err(|_| {
-        CryptoError::InvalidInput("Archive manifest length cap exceeded".to_string())
+        manifest_len_cap_error(manifest_bytes.len() as u64, limits.max_manifest_bytes)
     })?;
 
-    // Emit header + serialized manifest.
     writer = write_fca_header(writer, entry_count, manifest_len, manifest.total_file_bytes)?;
     writer.write_all(&manifest_bytes).map_err(CryptoError::Io)?;
 
-    // Pass 2: stream file contents in canonical manifest order. Each
-    // file is reopened no-follow with a fresh metadata check.
+    // Pass 2: stream file contents in canonical manifest order.
     for entry in &manifest.entries {
         if entry.kind == ArchiveEntryKind::File {
             stream_source_file(entry, &mut writer)?;

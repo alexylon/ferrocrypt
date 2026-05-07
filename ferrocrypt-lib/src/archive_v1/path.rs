@@ -207,6 +207,26 @@ pub fn ascii_case_collision_key(path: &str) -> Vec<u8> {
     path.bytes().map(ascii_lower_byte).collect()
 }
 
+/// Counts the `/`-separated components of an FCA path. The path is
+/// guaranteed by [`validate_fca_path`] to use single `/` separators
+/// with no leading/trailing slash, so `split('/').count()` matches
+/// the `max_path_depth` cap exactly. Shared by the writer's
+/// canonical sort (`encode::sort_entries_canonically`) and the
+/// reader's directory pre-creation pass (`decode::extract_directory_root`).
+pub(super) fn component_count(path: &str) -> usize {
+    path.split('/').count()
+}
+
+/// Spec §10 canonical sort key: depth ascending, then path bytes
+/// ascending. Used by the writer's full-manifest sort and the
+/// reader's directory pre-creation pass so the two sites cannot
+/// drift on what "canonical order" means.
+pub(super) fn canonical_path_order(a: &str, b: &str) -> std::cmp::Ordering {
+    component_count(a)
+        .cmp(&component_count(b))
+        .then_with(|| a.cmp(b))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

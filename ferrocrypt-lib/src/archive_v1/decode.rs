@@ -833,4 +833,124 @@ mod tests {
     fn result_is_format_error(err: &CryptoError) -> bool {
         matches!(err, CryptoError::InvalidInput(_))
     }
+
+    // -- §19.7 filesystem hardening ----------------------------------------
+
+    /// Spec §16.1 step 5: pre-check uses `symlink_metadata`, so a
+    /// dangling symlink at the final output name is treated as
+    /// occupied. `Path::exists()` would follow the link and report
+    /// false, masking the conflict; we MUST reject before any
+    /// extraction work runs.
+    #[cfg(unix)]
+    #[test]
+    fn rejects_dangling_symlink_at_final_output() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = tmp.path().join("absent-target");
+        let link = tmp.path().join("hello.txt");
+        symlink(&target, &link).unwrap();
+        assert!(
+            !link.exists(),
+            "test setup: symlink target must be absent (dangling)"
+        );
+
+        let manifest = single_file_manifest("hello.txt", b"Hello, world!");
+        let archive = build_archive(&manifest, &[("hello.txt", b"Hello, world!")]);
+
+        let err = unarchive(
+            Cursor::new(archive),
+            tmp.path(),
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::DeleteOnError,
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("Output already exists"));
+
+        // Dangling symlink must still be there — extraction was rejected
+        // BEFORE any output was created, including overwriting the link.
+        assert!(
+            fs::symlink_metadata(&link).is_ok(),
+            "dangling symlink must be preserved across rejected extraction",
+        );
+    }
+
+    /// Spec §16.3: directory chmod runs deepest-first AFTER all child
+    /// entries are created, AND the root directory's stored mode is
+    /// applied AFTER `.incomplete` → final rename. This single test
+    /// pins both properties at once: a root dir with mode 0o400
+    /// (no execute / no search) is created with restrictive permissions
+    /// only after children land. If chmod-before-children leaked, this
+    /// would fail on file creation. If root-mode-before-rename leaked,
+    /// this would fail on rename (macOS) or set the wrong mode.
+    #[cfg(unix)]
+    #[test]
+    fn extracts_with_restrictive_root_and_parent_modes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let manifest = Manifest {
+            entries: vec![
+                ArchiveEntry {
+                    kind: ArchiveEntryKind::Directory,
+                    path_utf8: "locked".to_string(),
+                    path: PathBuf::from("locked"),
+                    mode: 0o400, // r-- on root: no execute/search/write
+                    size: 0,
+                    source_path: None,
+                },
+                ArchiveEntry {
+                    kind: ArchiveEntryKind::Directory,
+                    path_utf8: "locked/child".to_string(),
+                    path: PathBuf::from("locked/child"),
+                    mode: 0o700,
+                    size: 0,
+                    source_path: None,
+                },
+                ArchiveEntry {
+                    kind: ArchiveEntryKind::File,
+                    path_utf8: "locked/child/secret.txt".to_string(),
+                    path: PathBuf::from("locked/child/secret.txt"),
+                    mode: 0o600,
+                    size: 6,
+                    source_path: None,
+                },
+            ],
+            total_file_bytes: 6,
+            root_name: OsString::from("locked"),
+            root_is_file: false,
+        };
+        let archive = build_archive(&manifest, &[("locked/child/secret.txt", b"secret")]);
+
+        let final_path = unarchive(
+            Cursor::new(archive),
+            tmp.path(),
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::DeleteOnError,
+        )
+        .unwrap();
+
+        let root_mode = fs::metadata(&final_path).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(
+            root_mode, 0o400,
+            "root mode 0o400 must be applied (post-rename), got 0o{root_mode:o}",
+        );
+
+        // Restore search permission so we can inspect descendants
+        // and tempdir cleanup can remove them. If chmod-deepest-first
+        // ordering had been wrong, the unarchive call would have
+        // failed before we got here.
+        fs::set_permissions(&final_path, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let child_mode = fs::metadata(final_path.join("child"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(child_mode, 0o700);
+        assert_eq!(
+            fs::read(final_path.join("child").join("secret.txt")).unwrap(),
+            b"secret",
+        );
+    }
 }

@@ -689,6 +689,106 @@ mod tests {
         assert!(format!("{err}").contains("Windows-reserved device"));
     }
 
+    // -- §19.1 positive round-trips (extra coverage) -----------------------
+
+    /// Bytes 0x00..=0xFF cycled to 1 KiB. Pins that the writer does
+    /// not assume printable / text content and the reader does not
+    /// silently transform any byte.
+    #[test]
+    fn round_trip_binary_file() {
+        let src = tempfile::TempDir::new().unwrap();
+        let out = tempfile::TempDir::new().unwrap();
+        let content: Vec<u8> = (0..=255u8).cycle().take(1024).collect();
+        let src_file = src.path().join("binary.bin");
+        fs::write(&src_file, &content).unwrap();
+
+        let final_path = round_trip(&src_file, out.path());
+        assert_eq!(fs::read(&final_path).unwrap(), content);
+    }
+
+    /// Empty subdirectories nested 3 levels deep round-trip to disk
+    /// with the same shape. Pins that directory pre-creation in the
+    /// reader's Pass 1 walks all the way down even when no file
+    /// content is emitted.
+    #[test]
+    fn round_trip_nested_empty_directories() {
+        let src = tempfile::TempDir::new().unwrap();
+        let out = tempfile::TempDir::new().unwrap();
+        let dir = src.path().join("root");
+        fs::create_dir(&dir).unwrap();
+        fs::create_dir(dir.join("a")).unwrap();
+        fs::create_dir(dir.join("a").join("b")).unwrap();
+        fs::create_dir(dir.join("a").join("b").join("c")).unwrap();
+
+        let final_path = round_trip(&dir, out.path());
+        assert!(final_path.is_dir());
+        assert!(final_path.join("a").is_dir());
+        assert!(final_path.join("a").join("b").is_dir());
+        assert!(final_path.join("a").join("b").join("c").is_dir());
+    }
+
+    // -- §19.1 / §19.7 Unix mode preservation ------------------------------
+
+    /// Source file mode round-trips through the archive intact (rwx
+    /// bits only — special bits stripped per §15.4). Pins
+    /// `archive_file_mode` on the writer side and
+    /// `chmod_file_handle` post-copy on the reader side.
+    #[cfg(unix)]
+    #[test]
+    fn round_trip_preserves_file_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let src = tempfile::TempDir::new().unwrap();
+        let out = tempfile::TempDir::new().unwrap();
+        let src_file = src.path().join("hello.txt");
+        fs::write(&src_file, b"x").unwrap();
+        fs::set_permissions(&src_file, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let final_path = round_trip(&src_file, out.path());
+        let mode = fs::metadata(&final_path).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o600, "file mode lost in round trip");
+    }
+
+    /// Source directory mode round-trips intact via the writer's
+    /// `archive_dir_mode` and the reader's post-rename root-chmod
+    /// (spec §16.3). Validates "root chmod after rename" indirectly:
+    /// if the reader applied root mode pre-rename and the mode lacked
+    /// search permission, the rename itself would fail on macOS.
+    #[cfg(unix)]
+    #[test]
+    fn round_trip_preserves_directory_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let src = tempfile::TempDir::new().unwrap();
+        let out = tempfile::TempDir::new().unwrap();
+        let dir = src.path().join("root");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let final_path = round_trip(&dir, out.path());
+        let mode = fs::metadata(&final_path).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o700, "directory mode lost in round trip");
+    }
+
+    /// Spec §15.4: writers MUST NOT store setuid, setgid, or sticky
+    /// bits. Pin the strip on the WRITER side: a source file with
+    /// 0o4644 (setuid + rw-r--r--) extracts as 0o644.
+    #[cfg(unix)]
+    #[test]
+    fn round_trip_strips_setuid_bit_from_source() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let src = tempfile::TempDir::new().unwrap();
+        let out = tempfile::TempDir::new().unwrap();
+        let src_file = src.path().join("hello.txt");
+        fs::write(&src_file, b"x").unwrap();
+        fs::set_permissions(&src_file, fs::Permissions::from_mode(0o4644)).unwrap();
+
+        let final_path = round_trip(&src_file, out.path());
+        let mode = fs::metadata(&final_path).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o644, "setuid bit must be stripped, got 0o{mode:o}",);
+    }
+
     // -- Source mutation between passes (§15.5) ----------------------------
 
     /// Spec §15.5: a source file shrinking between metadata pass and

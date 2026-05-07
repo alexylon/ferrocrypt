@@ -29,7 +29,9 @@ the integration targets.
 | `fuzz_private_key_header` | v1 90-byte `private.key` cleartext header and total-size shape checks |
 | `fuzz_tlv` | `validate_tlv` extension-region grammar: canonical ordering, reserved tags, critical-tag rejection |
 | `fuzz_kdf_params` | `KdfParams::from_bytes` structural and local-resource bounds |
-| `fuzz_archive_path` | `validate_archive_path_components` tar-entry path guard |
+| `fuzz_archive_path` | `validate_fca_path` — the FCA archive path-grammar gate (writer/reader symmetric, takes UTF-8 `&str`) |
+| `fuzz_fca_header` | `parse_fca_header` — 23-byte FCA fixed header parser; asserts returned values are inside `ArchiveLimits` on success |
+| `fuzz_fca_manifest` | Full FCA manifest pipeline: header → manifest bytes → `parse_manifest_bytes` → tree-shape validation; asserts spec §20 manifest invariants on success |
 | `fuzz_recipient_decode` | Bech32 `fcr1…` recipient string parser and internal SHA3-256 checksum |
 | `fuzz_detect_mode` | `detect_encryption_mode` top-level parser entry, end-to-end via a real temp file |
 

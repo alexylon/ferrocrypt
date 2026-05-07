@@ -27,7 +27,7 @@ const WINDOWS_RESERVED_CHARS: &[u8] = b"<>:\"|?*";
 ///
 /// Caller has already passed `limits` through
 /// [`ArchiveLimits::validate`]; we don't re-run that check here.
-pub(crate) fn validate_fca_path(path: &str, limits: ArchiveLimits) -> Result<(), CryptoError> {
+pub fn validate_fca_path(path: &str, limits: ArchiveLimits) -> Result<(), CryptoError> {
     if path.is_empty() {
         return Err(CryptoError::InvalidInput(
             "Empty archive entry path".to_string(),
@@ -203,7 +203,7 @@ fn is_windows_reserved_device_component(component: &str) -> bool {
 /// `Foo.txt` vs `FOO.TXT` that would collide on a case-insensitive
 /// filesystem before the platform backend's `create_new(true)` check
 /// could surface the conflict.
-pub(super) fn ascii_case_collision_key(path: &str) -> Vec<u8> {
+pub fn ascii_case_collision_key(path: &str) -> Vec<u8> {
     path.bytes().map(ascii_lower_byte).collect()
 }
 

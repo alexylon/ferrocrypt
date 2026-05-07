@@ -58,6 +58,16 @@ path = "fuzz_targets/fuzz_archive_path.rs"
 doc = false
 
 [[bin]]
+name = "fuzz_fca_header"
+path = "fuzz_targets/fuzz_fca_header.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_fca_manifest"
+path = "fuzz_targets/fuzz_fca_manifest.rs"
+doc = false
+
+[[bin]]
 name = "fuzz_recipient_decode"
 path = "fuzz_targets/fuzz_recipient_decode.rs"
 doc = false

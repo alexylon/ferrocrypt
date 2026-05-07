@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 
 use secrecy::{ExposeSecret as _, SecretString};
 
-use crate::archive_v1::{self as archive, ArchiveLimits, IncompleteOutputPolicy};
+use crate::archive::{self, ArchiveLimits, IncompleteOutputPolicy};
 use crate::container::{self, HeaderReadLimits};
 use crate::crypto::kdf::{KdfLimit, KdfParams};
 use crate::error::FormatDefect;

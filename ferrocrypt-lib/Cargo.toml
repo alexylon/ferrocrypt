@@ -40,7 +40,7 @@ constant_time_eq = "0.4"
 bech32 = "0.11"
 tempfile = "3"
 # Capability-based filesystem primitives for the unified hardened
-# extractor (`archive_v1/platform.rs`). Used on every target — the
+# extractor (`archive/platform.rs`). Used on every target — the
 # extractor is no longer cfg-gated. cap-std provides directory-handle-
 # rooted operations on Linux / macOS / Windows; cap-fs-ext adds the
 # `open_dir_nofollow` and `OpenOptionsFollowExt::follow(FollowSymlinks::No)`

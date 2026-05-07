@@ -37,7 +37,7 @@ use cap_std::fs::{Dir, File, OpenOptions};
 use crate::CryptoError;
 
 /// Default mode passed to `mkdir` when creating a fresh extraction
-/// directory (rwx------). The tar-stored directory mode is applied
+/// directory (rwx------). The manifest-stored directory mode is applied
 /// later via a handle-based chmod so a restrictive parent (e.g. 0o500)
 /// declared higher up in the archive doesn't block creation of its
 /// children. The temporary mode is owner-private on purpose: root
@@ -49,7 +49,7 @@ use crate::CryptoError;
 const DIR_CREATE_MODE: u32 = 0o700;
 
 /// Initial mode for newly-created regular-file extraction outputs
-/// (rw-------). Restrictive on purpose: the tar-stored mode is applied
+/// (rw-------). Restrictive on purpose: the manifest-stored mode is applied
 /// via a follow-up handle-based chmod only AFTER the payload has been
 /// written, so a wider mode is never briefly visible to other local
 /// users while the file holds plaintext. Effective on Unix only;
@@ -154,7 +154,7 @@ pub(crate) fn mkdir_strict(parent: &Dir, name: &OsStr) -> Result<Dir, CryptoErro
 /// Internal: creates `name`, re-opens it with no-follow + the
 /// Windows reparse-point post-check, then applies the initial
 /// owner-private directory mode via the open handle. This keeps the
-/// "create with a safe temporary mode, apply tar-stored mode later"
+/// "create with a safe temporary mode, apply manifest-stored mode later"
 /// behavior without ever chmod-ing through a re-resolved path.
 fn create_dir_with_default_mode(parent: &Dir, name: &OsStr) -> Result<Dir, CryptoError> {
     parent.create_dir(name).map_err(CryptoError::Io)?;
@@ -269,9 +269,9 @@ fn normal_component<'a>(component: Component<'a>, full: &Path) -> Result<&'a OsS
 /// existing entry — including a symlink whose target exists, a
 /// dangling symlink, or (on Windows) a reparse point — causes
 /// `AlreadyExists`. The initial permission word is restrictive
-/// (`0o600` on Unix, default on Windows); callers apply the tar-
-/// stored mode via [`chmod_file_handle`] after writing so plaintext
-/// is never briefly visible to unintended users.
+/// (`0o600` on Unix, default on Windows); callers apply the
+/// manifest-stored mode via [`chmod_file_handle`] after writing so
+/// plaintext is never briefly visible to unintended users.
 ///
 /// `OpenOptionsFollowExt::follow(FollowSymlinks::No)` is set
 /// alongside `create_new(true)` for defense in depth — both prevent
@@ -295,10 +295,10 @@ pub(crate) fn create_file_at(
 
 /// Sets the rwx permission bits on an already-open file handle.
 /// Special bits (setuid/setgid/sticky) are stripped — extraction never
-/// honors a tar-stored special bit, so callers can pass the raw header
+/// honors a manifest-stored special bit, so callers can pass the raw header
 /// mode without pre-masking. Handle-based, so a substituted symlink
 /// after the open cannot redirect the chmod. Unix-only; on Windows
-/// the operation is a no-op (tar-stored Unix modes don't apply).
+/// the operation is a no-op (manifest-stored Unix modes don't apply).
 #[cfg(unix)]
 pub(crate) fn chmod_file_handle(file: &File, mode: u32) -> Result<(), CryptoError> {
     use std::os::unix::fs::PermissionsExt;

@@ -1,44 +1,25 @@
-//! TAR archive subset and directory/file payload semantics.
+//! FerroCrypt Archive (FCA) v1 — native archive payload format.
 //!
-//! Owns:
-//!
-//! - [`limits`] — [`ArchiveLimits`] and resource-cap helpers shared by
-//!   the encrypt-side preflight and the decrypt-side extraction loop.
-//! - [`path`] — archive path canonicalization and rejection
-//!   ([`validate_archive_path_components`]), the POSIX ustar wire-format constants
-//!   used by both writer and reader, and the [`UstarEntryKind`]
-//!   classification.
-//! - [`encode`] — encrypt-side traversal: [`validate_encrypt_input`],
-//!   [`archive`], TAR header emission, the `open_no_follow` symlink
-//!   guard, and the encrypt-side mode helpers.
-//! - [`decode`] — decrypt-side TAR reading and output reconstruction:
-//!   [`unarchive`], unified hardened `extract_entries`, TAR-subset
-//!   validation, and trailing zero-block enforcement.
-//! - [`platform`] — capability-based extraction primitives built on
-//!   cap-std + cap-fs-ext, universal across Linux / macOS / Windows.
-//!   Anchors every operation to a directory handle, refuses every
-//!   symlink in the extraction path, and on Windows also rejects
-//!   NTFS reparse points (junctions, mount points) via the
-//!   `FILE_ATTRIBUTE_REPARSE_POINT` post-check.
-//!
-//! [`ArchiveLimits`]: crate::ArchiveLimits
-//! [`validate_archive_path_components`]: crate::archive::validate_archive_path_components
-//! [`validate_encrypt_input`]: crate::archive::validate_encrypt_input
-//! [`archive`]: crate::archive::archive
-//! [`unarchive`]: crate::archive::unarchive
-//! [`UstarEntryKind`]: crate::archive::path::UstarEntryKind
+//! Replaces the restricted POSIX ustar archive layer that used to live
+//! under [`crate::archive`]. The full wire-format spec is in
+//! `notes/archive_format/ARCHIVE_FORMAT.md`; the migration plan is in
+//! `notes/archive_format/MIGRATION_PLAN.md`.
 
 pub(crate) mod decode;
 pub(crate) mod encode;
+pub(crate) mod format;
 pub(crate) mod limits;
+pub(crate) mod model;
 pub(crate) mod path;
-
 pub(crate) mod platform;
+pub(crate) mod tree;
 
 pub use limits::ArchiveLimits;
 
 pub(crate) use decode::unarchive;
 pub(crate) use encode::{archive, validate_encrypt_input};
+#[cfg(unix)]
+pub(crate) use format::PERMISSION_BITS_MASK;
 
 /// Policy for the `.incomplete` working tree when decrypt fails.
 ///
@@ -48,8 +29,9 @@ pub(crate) use encode::{archive, validate_encrypt_input};
 /// validation check has passed. This policy controls what happens to
 /// the staged tree when a decrypt error occurs *before* that rename:
 /// payload AEAD failure on a later chunk, archive structural reject
-/// (PAX/GNU extension, duplicate path, traversal), trailing zero-block
-/// reject, or a final-name collision discovered at promotion time.
+/// (manifest tree-shape failure, path-grammar reject, duplicate
+/// detection), trailing-bytes reject, or a final-name collision
+/// discovered at promotion time.
 ///
 /// [`Self::DeleteOnError`] is the default. It matches the typical user
 /// expectation that "decrypt failed → no plaintext on disk" and avoids
@@ -88,10 +70,3 @@ pub enum IncompleteOutputPolicy {
     /// corruption.
     RetainOnError,
 }
-
-/// Mask that keeps only owner/group/other rwx bits, stripping
-/// setuid, setgid, and sticky bits from tar-stored permissions.
-/// Shared by the encrypt-side `metadata_perm_mode` reader and the
-/// unified cap-std extraction platform's handle-based chmod helpers.
-#[cfg(unix)]
-pub(crate) const PERMISSION_BITS_MASK: u32 = 0o777;

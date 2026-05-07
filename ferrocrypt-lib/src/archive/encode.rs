@@ -1,19 +1,59 @@
-//! Encrypt-side TAR construction: validates the input, walks the
-//! source tree (rejecting symlinks and unsupported file types), and
-//! emits canonical POSIX ustar headers verbatim — no GNU long-name or
-//! PAX extension records.
+//! FCA archive writer: source-tree traversal (metadata pass) and
+//! content-streaming pass.
+//!
+//! See `notes/archive_format/ARCHIVE_FORMAT.md` §10 (entry ordering),
+//! §11 (limits), §12 (internal API), §13 (module layout),
+//! §14.13 (writer entry-point skeleton), §15 (writer requirements),
+//! §17 (platform requirements), §19.6 (writer-side rejection list).
+//!
+//! The writer is two-pass:
+//!
+//! 1. **Metadata pass** — recursively walks the source tree via
+//!    `std::fs::read_dir`, building a [`Manifest`] of [`ArchiveEntry`]s
+//!    with FCA-canonical paths, modes, sizes, and source paths.
+//!    Symlinks, FIFOs, sockets, devices, and Windows reparse points are
+//!    rejected inline. Entry-count, total-bytes, depth, path-byte, and
+//!    manifest-size caps are applied progressively, and every path is
+//!    routed through [`validate_fca_path`] so the writer never emits
+//!    a path its own reader would refuse.
+//!
+//! 2. **Content pass** — for each file entry in canonical manifest
+//!    order, reopens the source file with `O_NOFOLLOW` (Unix) or
+//!    `symlink_metadata` + `File::open` (non-Unix), refreshes metadata
+//!    from the open handle, requires the source is still a regular
+//!    file with `len() == manifest size`, and streams exactly the
+//!    declared size via [`copy_exact_n`].
+//!
+//! Between the two passes the source tree may change. Spec §15.5
+//! defines the response: shrink / type change / inaccessible →
+//! encryption MUST fail; growth before the fresh metadata check →
+//! reject; growth during the copy after the fresh metadata check →
+//! the writer copies exactly the declared size, keeping the archive
+//! self-consistent.
 
+use std::ffi::OsString;
 use std::fs::{self, File};
-use std::io::{self, Write};
-use std::path::{Component, Path, PathBuf};
+use std::io::Write;
+use std::path::Path;
 
 use crate::CryptoError;
 use crate::fs::paths::file_stem;
 
-use super::limits::{ArchiveLimits, enforce_per_entry_caps, enforce_total_bytes_cap};
-use super::path::{UstarEntryKind, ustar};
+#[cfg(unix)]
+use super::format::PERMISSION_BITS_MASK;
+use super::format::{copy_exact_n, serialize_manifest, write_fca_header};
+use super::limits::{
+    ArchiveLimits, enforce_per_entry_caps, enforce_total_bytes_cap, entry_count_cap_error,
+    manifest_len_cap_error,
+};
+use super::model::{ArchiveEntry, ArchiveEntryKind, Manifest};
+use super::path::{canonical_path_order, validate_fca_path};
+use super::tree::validate_manifest_tree;
 
-/// Default file mode for non-Unix platforms (rw-r--r--).
+/// Default file mode for non-Unix platforms (rw-r--r--). FCA stores a
+/// Unix-style permission word; on Windows there is no rwx semantic to
+/// read so a fixed default is used and round-trip extraction applies
+/// it as a no-op (Windows chmod is a no-op in the platform backend).
 #[cfg(not(unix))]
 const DEFAULT_FILE_MODE: u32 = 0o644;
 
@@ -22,127 +62,109 @@ const DEFAULT_FILE_MODE: u32 = 0o644;
 const DEFAULT_DIR_MODE: u32 = 0o755;
 
 /// Reads the rwx-only Unix permission word from `metadata`, stripping
-/// setuid/setgid/sticky. Used by the encrypt-side header builders to
-/// fold the `cfg(unix)`-gated `PermissionsExt` import into one place.
+/// setuid/setgid/sticky. Folds the `cfg(unix)`-gated `PermissionsExt`
+/// import into one place.
 #[cfg(unix)]
 fn metadata_perm_mode(metadata: &fs::Metadata) -> u32 {
     use std::os::unix::fs::PermissionsExt;
-    metadata.permissions().mode() & super::PERMISSION_BITS_MASK
+    metadata.permissions().mode() & PERMISSION_BITS_MASK
 }
 
-/// Mode to store in a TAR header for a regular file. On Unix the rwx
-/// bits of the source file (special bits stripped); on non-Unix targets
-/// a fixed default since Unix permission semantics don't apply. Folds
-/// the per-platform `cfg` dance out of `append_file`.
+/// Mode to store for a regular file: Unix returns the rwx bits of
+/// the source file (special bits stripped via `metadata_perm_mode`);
+/// non-Unix targets have no rwx semantic and return the fixed default.
+#[cfg(unix)]
 fn archive_file_mode(metadata: &fs::Metadata) -> u32 {
-    #[cfg(unix)]
-    {
-        metadata_perm_mode(metadata)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = metadata;
-        DEFAULT_FILE_MODE
-    }
+    metadata_perm_mode(metadata)
+}
+#[cfg(not(unix))]
+fn archive_file_mode(_metadata: &fs::Metadata) -> u32 {
+    DEFAULT_FILE_MODE
 }
 
-/// Mode to store in a TAR header for a directory. Reads `src_path`
-/// metadata fresh on Unix; on non-Unix returns the fixed default
-/// without touching the filesystem (Windows has no rwx perms to read,
-/// and skipping the syscall avoids a fresh failure mode where a
-/// concurrent removal between `read_dir` and `append_dir_entry` would
-/// otherwise abort the archive).
+/// Mode to store for a directory. Unix reads `src_path` metadata
+/// fresh; non-Unix returns the fixed default without touching the
+/// filesystem (no rwx semantic to read, and skipping the syscall
+/// avoids a stray failure mode where a concurrent removal between
+/// `read_dir` and `archive_dir_mode` would otherwise abort the
+/// archive).
+#[cfg(unix)]
 fn archive_dir_mode(src_path: &Path) -> Result<u32, CryptoError> {
-    #[cfg(unix)]
-    {
-        Ok(metadata_perm_mode(&fs::metadata(src_path)?))
+    Ok(metadata_perm_mode(&fs::metadata(src_path)?))
+}
+#[cfg(not(unix))]
+fn archive_dir_mode(_src_path: &Path) -> Result<u32, CryptoError> {
+    Ok(DEFAULT_DIR_MODE)
+}
+
+/// Opens a regular file for reading without following symlinks. On
+/// Unix uses `O_NOFOLLOW` so the open itself is atomic; on non-Unix
+/// falls back to a `symlink_metadata` pre-check followed by
+/// `File::open`. The non-Unix branch has a small TOCTOU window between
+/// the pre-check and the open; closing it requires `NtCreateFile` with
+/// `OBJECT_ATTRIBUTES`, which the crate does not currently take on
+/// because of its zero-`unsafe` stance. The pre-archive
+/// [`validate_encrypt_input`] rejects symlinks at the outermost input
+/// path and the per-entry recursive walker re-applies symlink rejection,
+/// so an attacker's window is the per-open syscall gap, not the entire
+/// archive run.
+#[cfg(unix)]
+fn open_no_follow(path: &Path) -> Result<File, CryptoError> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|e| {
+            if e.raw_os_error() == Some(libc::ELOOP) {
+                input_is_symlink_error(path)
+            } else {
+                CryptoError::Io(e)
+            }
+        })
+}
+
+#[cfg(not(unix))]
+fn open_no_follow(path: &Path) -> Result<File, CryptoError> {
+    let metadata = fs::symlink_metadata(path)?;
+    require_regular_file(&metadata, "Input", path)?;
+    Ok(File::open(path)?)
+}
+
+/// Defense-in-depth at every open / re-open boundary: rejects a
+/// non-regular file (symlink, FIFO, device) with a labelled
+/// `CryptoError::InvalidInput`. The `label` is the role of `path`
+/// in the failing context — `"Input"` at the outermost open,
+/// `"Source"` at the per-entry content-stream re-open.
+fn require_regular_file(
+    metadata: &fs::Metadata,
+    label: &str,
+    path: &Path,
+) -> Result<(), CryptoError> {
+    if !metadata.file_type().is_file() {
+        return Err(CryptoError::InvalidInput(format!(
+            "{label} is no longer a regular file: {}",
+            path.display()
+        )));
     }
-    #[cfg(not(unix))]
-    {
-        let _ = src_path;
-        Ok(DEFAULT_DIR_MODE)
-    }
+    Ok(())
 }
 
-/// Running totals threaded through the recursive archive walk so the
-/// encrypt-side preflight (`archive` → `archive_directory` →
-/// `append_file` / `append_dir_entry`) can enforce [`ArchiveLimits`]
-/// across the entire tree, not just per-call.
-#[derive(Debug, Default)]
-struct ArchiveCounters {
-    entry_count: u32,
-    total_bytes: u64,
-}
-
-/// Archives a file or directory into a TAR stream written to `writer`.
-/// Returns a tuple of the file stem (base name without extension for files,
-/// directory name for directories) and the writer, so the caller can finalize it.
+/// Rejects inputs the archiver will not accept: symlinks (live or
+/// dangling) and anything that isn't a regular file or directory.
+/// Called at the top of every encrypt entry point in `api.rs` so the
+/// rejection fires before any KDF / cipher work runs (up to a gigabyte
+/// of RAM and several seconds of CPU on default Argon2id), not only at
+/// archive time. The archive-time call below remains as defense-in-
+/// depth against TOCTOU and direct callers.
 ///
-/// For directories, uses a manual recursive walk instead of `append_dir_all`
-/// to give per-entry control: symlinks and special entries (sockets, FIFOs,
-/// devices) are rejected with a clear error. Hardlinks are archived as regular
-/// file contents without preserving link identity.
-pub(crate) fn archive<W: Write>(
-    input_path: impl AsRef<Path>,
-    writer: W,
-    limits: ArchiveLimits,
-) -> Result<(String, W), CryptoError> {
-    let input_path = input_path.as_ref();
-    validate_encrypt_input(input_path)?;
-    let mut builder = tar::Builder::new(writer);
-    let mut counters = ArchiveCounters::default();
-
-    let stem = if input_path.is_file() {
-        let file_name = input_path
-            .file_name()
-            .ok_or_else(|| CryptoError::InvalidInput("Cannot get file name".to_string()))?;
-
-        append_file(
-            &mut builder,
-            input_path,
-            Path::new(file_name),
-            &mut counters,
-            &limits,
-        )?;
-
-        file_stem(input_path)?.to_string_lossy().into_owned()
-    } else {
-        let dir_name = input_path
-            .file_name()
-            .ok_or_else(|| CryptoError::InvalidInput("Cannot get directory name".to_string()))?;
-
-        let archive_root = PathBuf::from(dir_name);
-        archive_directory(
-            &mut builder,
-            input_path,
-            &archive_root,
-            &mut counters,
-            &limits,
-        )?;
-        dir_name.to_string_lossy().into_owned()
-    };
-
-    let writer = builder.into_inner()?;
-    Ok((stem, writer))
-}
-
-/// Rejects inputs the archiver will not accept: symlinks (live or dangling)
-/// and anything that isn't a regular file or directory. Defined here because
-/// these are the archiver's per-entry rules; `lib.rs` also calls this at the
-/// top of every encrypt entry point so that the rejection fires before any
-/// Argon2id or cipher work runs (up to a gigabyte of RAM and several seconds
-/// of CPU on default settings), not only at archive time. The archive-time
-/// call remains as defense-in-depth against TOCTOU and direct callers.
-///
-/// The `is_symlink` check runs before the existence check so that dangling
-/// symlinks fail with a clear "Input is a symlink" message instead of a
+/// The `is_symlink` check runs before the existence check so a
+/// dangling symlink fails with "Input is a symlink" rather than a
 /// generic `InputPath` not-found.
 pub(crate) fn validate_encrypt_input(input_path: &Path) -> Result<(), CryptoError> {
     if input_path.is_symlink() {
-        return Err(CryptoError::InvalidInput(format!(
-            "Input is a symlink: {}",
-            input_path.display()
-        )));
+        return Err(input_is_symlink_error(input_path));
     }
     if !input_path.exists() {
         return Err(CryptoError::InputPath);
@@ -156,685 +178,647 @@ pub(crate) fn validate_encrypt_input(input_path: &Path) -> Result<(), CryptoErro
     Ok(())
 }
 
-/// Translates a relative `archive_path` (any platform) into the
-/// canonical UTF-8 `/`-separated form required by the v1 archive
-/// subset and rejects inputs that cannot be represented in raw POSIX
-/// ustar (`name(100) || prefix(155)`). Directory paths get a single
-/// trailing `/`; file paths must not end with one.
-///
-/// `Builder::append_data` would silently fall back to a GNU long-name
-/// extension record for paths above the ustar limit; v1 forbids those,
-/// so the rejection has to happen here, before any header bytes are
-/// emitted.
-fn ustar_archive_path_string(
-    archive_path: &Path,
-    kind: UstarEntryKind,
-) -> Result<String, CryptoError> {
-    let mut joined = String::new();
-    let mut iter = archive_path.components().peekable();
-    while let Some(component) = iter.next() {
-        let part = match component {
-            Component::Normal(s) => s.to_str().ok_or_else(|| {
-                CryptoError::InvalidInput(format!(
-                    "Archive path is not valid UTF-8: {}",
-                    archive_path.display()
-                ))
-            })?,
-            _ => {
-                return Err(CryptoError::InvalidInput(format!(
-                    "Archive path has forbidden component: {}",
-                    archive_path.display()
-                )));
-            }
+/// Running totals threaded through the recursive metadata-pass walk
+/// so caps can fire across the entire tree, not just per-call.
+#[derive(Debug, Default)]
+struct ArchiveCounters {
+    entry_count: u32,
+    total_bytes: u64,
+}
+
+/// Shared per-entry recording: increments the entry count, applies
+/// every cap [`enforce_per_entry_caps`] covers, optionally sums into
+/// the total-bytes cap (for file entries), and runs
+/// [`validate_fca_path`]. Used by both branches of the metadata-pass
+/// walk so the file-entry and directory-entry call sites have one
+/// canonical sequence of checks.
+fn record_entry(
+    counters: &mut ArchiveCounters,
+    fca_path_utf8: &str,
+    file_size: Option<u64>,
+    limits: &ArchiveLimits,
+) -> Result<(), CryptoError> {
+    counters.entry_count = counters
+        .entry_count
+        .checked_add(1)
+        .ok_or_else(|| CryptoError::InvalidInput("Archive entry-count overflow".to_string()))?;
+    enforce_per_entry_caps(counters.entry_count, fca_path_utf8, limits)?;
+    if let Some(size) = file_size {
+        enforce_total_bytes_cap(size, &mut counters.total_bytes, limits)?;
+    }
+    validate_fca_path(fca_path_utf8, *limits)?;
+    Ok(())
+}
+
+/// Single source of truth for the "Input is a symlink: <path>"
+/// rejection. Used by `validate_encrypt_input`, `build_manifest`'s
+/// input-root symlink check, and the Unix `open_no_follow`
+/// `ELOOP` arm.
+fn input_is_symlink_error(path: &Path) -> CryptoError {
+    CryptoError::InvalidInput(format!("Input is a symlink: {}", path.display()))
+}
+
+/// Builds a fully validated [`Manifest`] from the source tree under
+/// `input_path`. Single-file inputs produce a one-entry manifest with
+/// `root_is_file = true`; directory inputs produce a multi-entry
+/// manifest with `root_is_file = false`.
+fn build_manifest(input_path: &Path, limits: &ArchiveLimits) -> Result<Manifest, CryptoError> {
+    let metadata = fs::symlink_metadata(input_path)?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Err(input_is_symlink_error(input_path));
+    }
+
+    let name = input_path
+        .file_name()
+        .ok_or_else(|| CryptoError::InvalidInput("Cannot get input file name".to_string()))?;
+    let name_str = name
+        .to_str()
+        .ok_or_else(|| {
+            CryptoError::InvalidInput(format!(
+                "Input name is not valid UTF-8: {}",
+                input_path.display()
+            ))
+        })?
+        .to_string();
+
+    // Path grammar applies to the root regardless of kind; validate
+    // once before the file/dir dispatch.
+    validate_fca_path(&name_str, *limits)?;
+
+    if file_type.is_file() {
+        let mode = archive_file_mode(&metadata);
+        let size = metadata.len();
+
+        let mut total_bytes = 0u64;
+        enforce_total_bytes_cap(size, &mut total_bytes, limits)?;
+
+        let entry = ArchiveEntry {
+            kind: ArchiveEntryKind::File,
+            path_utf8: name_str.clone(),
+            mode,
+            size,
+            source_path: Some(input_path.to_path_buf()),
         };
-        // Symmetric with the reader's `validate_ustar_entry` raw-byte
-        // checks: a Unix filename containing `\` or NUL is technically
-        // legal at the kernel level but produces an archive that v1
-        // readers MUST reject (`FORMAT.md` §9). Rejecting here keeps
-        // the writer round-trip-safe rather than emitting bytes our
-        // own reader will refuse to decrypt.
-        if part.contains('\\') || part.contains('\0') {
-            return Err(CryptoError::InvalidInput(format!(
-                "Archive path component contains forbidden byte (`\\` or NUL): {}",
-                archive_path.display()
-            )));
-        }
-        joined.push_str(part);
-        if iter.peek().is_some() {
-            joined.push('/');
-        }
-    }
-    if joined.is_empty() {
-        return Err(CryptoError::InvalidInput(
-            "Empty archive entry path".to_string(),
-        ));
-    }
-    if matches!(kind, UstarEntryKind::Directory) {
-        joined.push('/');
-    }
-    if joined.len() > ustar::PATH_REPRESENTABLE_MAX {
-        return Err(CryptoError::InvalidInput(format!(
-            "Archive path cannot be represented in POSIX ustar: {}",
-            archive_path.display()
-        )));
-    }
-    Ok(joined)
-}
 
-/// Builds a v1-conforming ustar header for one archive entry. Pulled
-/// out so `append_file` and `append_dir_entry` share the
-/// path-normalization → `new_ustar` → `set_path` → `set_entry_type` →
-/// `set_mode` → `set_cksum` sequence and the same error-message
-/// translation for paths that don't fit the ustar `name + prefix`
-/// split. `Header::set_path` would otherwise let `Builder::append_data`
-/// silently fall back to a GNU long-name extension; we use
-/// `Builder::append` at the call sites so this header is written
-/// verbatim, with no auto-extension path.
-///
-/// File entries with `size > FILE_SIZE_REPRESENTABLE_MAX` are rejected
-/// here because `tar::Header::set_size` would otherwise switch to the
-/// GNU binary-size encoding (high-bit flag on the first byte) for any
-/// value ≥ 2^33; v1 forbids that encoding, so the resulting `.fcr`
-/// would be unreadable by a conforming reader. Directory entries
-/// always carry size 0 and skip the cap.
-fn build_ustar_header(
-    archive_path: &Path,
-    kind: UstarEntryKind,
-    size: u64,
-    mode: u32,
-) -> Result<tar::Header, CryptoError> {
-    let path_str = ustar_archive_path_string(archive_path, kind)?;
-    let mut header = tar::Header::new_ustar();
-    header.set_path(&path_str).map_err(|_| {
-        CryptoError::InvalidInput(format!(
-            "Archive path cannot be represented in POSIX ustar: {}",
-            archive_path.display()
-        ))
-    })?;
-    header.set_entry_type(match kind {
-        UstarEntryKind::File => tar::EntryType::Regular,
-        UstarEntryKind::Directory => tar::EntryType::Directory,
-    });
-    if matches!(kind, UstarEntryKind::File) && size > ustar::FILE_SIZE_REPRESENTABLE_MAX {
-        return Err(CryptoError::InvalidInput(format!(
-            "File exceeds POSIX ustar representable size ({} bytes max): {}",
-            ustar::FILE_SIZE_REPRESENTABLE_MAX,
-            archive_path.display()
-        )));
-    }
-    header.set_size(size);
-    header.set_mode(mode);
-    header.set_cksum();
-    Ok(header)
-}
-
-fn append_file<W: Write>(
-    builder: &mut tar::Builder<W>,
-    src_path: &Path,
-    archive_path: &Path,
-    counters: &mut ArchiveCounters,
-    limits: &ArchiveLimits,
-) -> Result<(), CryptoError> {
-    counters.entry_count = counters.entry_count.saturating_add(1);
-    enforce_per_entry_caps(counters.entry_count, archive_path, limits)?;
-
-    let mut file = open_no_follow(src_path)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() {
-        return Err(CryptoError::InvalidInput(format!(
-            "Input is no longer a regular file: {}",
-            src_path.display()
-        )));
-    }
-
-    enforce_total_bytes_cap(metadata.len(), &mut counters.total_bytes, limits)?;
-
-    let mode = archive_file_mode(&metadata);
-    let header = build_ustar_header(archive_path, UstarEntryKind::File, metadata.len(), mode)?;
-    builder.append(&header, &mut file)?;
-    Ok(())
-}
-
-fn append_dir_entry<W: Write>(
-    builder: &mut tar::Builder<W>,
-    src_path: &Path,
-    archive_path: &Path,
-    counters: &mut ArchiveCounters,
-    limits: &ArchiveLimits,
-) -> Result<(), CryptoError> {
-    counters.entry_count = counters.entry_count.saturating_add(1);
-    enforce_per_entry_caps(counters.entry_count, archive_path, limits)?;
-
-    let mode = archive_dir_mode(src_path)?;
-    let header = build_ustar_header(archive_path, UstarEntryKind::Directory, 0, mode)?;
-    builder.append(&header, io::empty())?;
-    Ok(())
-}
-
-/// Opens a file refusing to follow symlinks.
-/// On Unix, uses `O_NOFOLLOW` so the open itself is atomic.
-/// On other platforms, falls back to a symlink_metadata check before opening.
-#[cfg(unix)]
-fn open_no_follow(path: &Path) -> Result<File, CryptoError> {
-    use std::fs::OpenOptions;
-    use std::os::unix::fs::OpenOptionsExt;
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-        .map_err(|e| {
-            if e.raw_os_error() == Some(libc::ELOOP) {
-                CryptoError::InvalidInput(format!("Input is a symlink: {}", path.display()))
-            } else {
-                CryptoError::Io(e)
-            }
+        Ok(Manifest {
+            entries: vec![entry],
+            total_file_bytes: size,
+            root_name: OsString::from(&name_str),
+            root_is_file: true,
         })
-}
+    } else if file_type.is_dir() {
+        let root_mode = archive_dir_mode(input_path)?;
 
-/// Best-effort no-follow open for Windows / non-Unix targets.
-///
-/// **Hardening note (Windows / non-Unix):** unlike the Unix branch
-/// above, this implementation has a TOCTOU window between
-/// `symlink_metadata` and `File::open`: a local attacker who can
-/// rename the input path between the two syscalls can swap a regular
-/// file for a symlink and have the open follow it. Closing the gap
-/// requires `NtCreateFile` with `OBJECT_ATTRIBUTES` (or equivalent
-/// winapi work), which the crate does not currently take on because
-/// of its zero-`unsafe` stance. The pre-archive
-/// [`validate_encrypt_input`] still rejects symlinks at the *outermost*
-/// input path, and the per-entry recursive walker re-applies symlink
-/// rejection — so an attacker's window is the syscall gap on each
-/// open, not the entire archive run.
-#[cfg(not(unix))]
-fn open_no_follow(path: &Path) -> Result<File, CryptoError> {
-    let metadata = fs::symlink_metadata(path)?;
-    if !metadata.file_type().is_file() {
-        return Err(CryptoError::InvalidInput(format!(
-            "Input is no longer a regular file: {}",
-            path.display()
-        )));
+        let mut entries = vec![ArchiveEntry {
+            kind: ArchiveEntryKind::Directory,
+            path_utf8: name_str.clone(),
+            mode: root_mode,
+            size: 0,
+            source_path: Some(input_path.to_path_buf()),
+        }];
+        let mut counters = ArchiveCounters {
+            entry_count: 1,
+            total_bytes: 0,
+        };
+
+        walk_directory(input_path, &name_str, &mut entries, &mut counters, limits)?;
+
+        sort_entries_canonically(&mut entries);
+
+        Ok(Manifest {
+            entries,
+            total_file_bytes: counters.total_bytes,
+            root_name: OsString::from(&name_str),
+            root_is_file: false,
+        })
+    } else {
+        Err(CryptoError::InvalidInput(format!(
+            "Unsupported file type: {}",
+            input_path.display()
+        )))
     }
-    Ok(File::open(path)?)
 }
 
-/// Recursively archives a directory. Uses `entry.file_type()` (lstat-based)
-/// to classify entries without following symlinks. Per-entry resource
-/// caps from `limits` are enforced inside `append_file` /
-/// `append_dir_entry` before each TAR header is emitted.
-fn archive_directory<W: Write>(
-    builder: &mut tar::Builder<W>,
-    dir_path: &Path,
-    archive_prefix: &Path,
+/// Recursively walks `src_dir`, appending entries to `entries` with
+/// FCA paths rooted at `fca_prefix`. Symlinks, devices, FIFOs, sockets,
+/// reparse points (via the file-type classification) are rejected.
+fn walk_directory(
+    src_dir: &Path,
+    fca_prefix: &str,
+    entries: &mut Vec<ArchiveEntry>,
     counters: &mut ArchiveCounters,
     limits: &ArchiveLimits,
 ) -> Result<(), CryptoError> {
-    append_dir_entry(builder, dir_path, archive_prefix, counters, limits)?;
+    for read_dir_entry in fs::read_dir(src_dir)? {
+        let dir_entry = read_dir_entry?;
+        let metadata = dir_entry.metadata()?;
+        let file_type = metadata.file_type();
 
-    for entry in fs::read_dir(dir_path)? {
-        let entry = entry?;
-        let src_path = entry.path();
-        let ft = entry.file_type()?;
-        let entry_archive_path = archive_prefix.join(entry.file_name());
-
-        if ft.is_symlink() {
+        if file_type.is_symlink() {
             return Err(CryptoError::InvalidInput(format!(
-                "Directory contains a symlink: {}",
-                src_path.display()
+                "Symlink in archive source: {}",
+                dir_entry.path().display()
             )));
-        } else if ft.is_dir() {
-            archive_directory(builder, &src_path, &entry_archive_path, counters, limits)?;
-        } else if ft.is_file() {
-            append_file(builder, &src_path, &entry_archive_path, counters, limits)?;
+        }
+
+        let name = dir_entry.file_name();
+        let name_str = name.to_str().ok_or_else(|| {
+            CryptoError::InvalidInput(format!(
+                "Source filename is not valid UTF-8: {}",
+                dir_entry.path().display()
+            ))
+        })?;
+
+        let fca_path_utf8 = format!("{fca_prefix}/{name_str}");
+        let full_path = dir_entry.path();
+
+        if file_type.is_file() {
+            let mode = archive_file_mode(&metadata);
+            let size = metadata.len();
+
+            record_entry(counters, &fca_path_utf8, Some(size), limits)?;
+
+            entries.push(ArchiveEntry {
+                kind: ArchiveEntryKind::File,
+                path_utf8: fca_path_utf8.clone(),
+                mode,
+                size,
+                source_path: Some(full_path),
+            });
+        } else if file_type.is_dir() {
+            let mode = archive_dir_mode(&full_path)?;
+
+            record_entry(counters, &fca_path_utf8, None, limits)?;
+
+            entries.push(ArchiveEntry {
+                kind: ArchiveEntryKind::Directory,
+                path_utf8: fca_path_utf8.clone(),
+                mode,
+                size: 0,
+                source_path: Some(full_path.clone()),
+            });
+
+            walk_directory(&full_path, &fca_path_utf8, entries, counters, limits)?;
         } else {
             return Err(CryptoError::InvalidInput(format!(
-                "Unsupported file type in directory: {}",
-                src_path.display()
+                "Unsupported file type in archive: {}",
+                full_path.display()
             )));
         }
     }
     Ok(())
+}
+
+/// Sorts entries by `(component_count, path_utf8_bytes)` per spec §10.
+/// The root directory sorts first by construction (smallest component
+/// count plus shortest path among any entry sharing the root).
+fn sort_entries_canonically(entries: &mut [ArchiveEntry]) {
+    entries.sort_by(|a, b| canonical_path_order(&a.path_utf8, &b.path_utf8));
+}
+
+/// Streams one file entry's contents into `writer`. Reopens the source
+/// no-follow, refreshes metadata from the open handle, requires the
+/// source is still a regular file with `len() == entry.size`, then
+/// copies exactly `entry.size` bytes.
+///
+/// Spec §15.5: on shrink, type change, or pre-copy growth — fail. On
+/// growth during the copy after the fresh metadata check — copy
+/// exactly the declared size, keeping the archive self-consistent.
+fn stream_source_file<W: Write>(entry: &ArchiveEntry, writer: &mut W) -> Result<(), CryptoError> {
+    let source = entry
+        .source_path
+        .as_ref()
+        .ok_or(CryptoError::InternalInvariant(
+            "Manifest entry missing source_path during content streaming",
+        ))?;
+
+    let mut file = open_no_follow(source)?;
+    let metadata = file.metadata().map_err(CryptoError::Io)?;
+    require_regular_file(&metadata, "Source", source)?;
+    if metadata.len() != entry.size {
+        return Err(CryptoError::InvalidInput(format!(
+            "Source file size changed during archive ({} → {}): {}",
+            entry.size,
+            metadata.len(),
+            source.display(),
+        )));
+    }
+
+    copy_exact_n(&mut file, writer, entry.size)
+}
+
+/// Archives a file or directory into the FCA wire format. Returns the
+/// output stem (file stem for file inputs, directory name for
+/// directory inputs) plus the writer for the caller to finalize.
+///
+/// Matches the existing internal API per spec §12.
+pub(crate) fn archive<W: Write>(
+    input_path: impl AsRef<Path>,
+    mut writer: W,
+    limits: ArchiveLimits,
+) -> Result<(String, W), CryptoError> {
+    let input_path = input_path.as_ref();
+    let limits = limits.validate()?;
+
+    // Defense-in-depth: api.rs runs validate_encrypt_input up-front, but
+    // direct callers and any TOCTOU shift between that check and now
+    // get re-validated here.
+    validate_encrypt_input(input_path)?;
+
+    // Pass 1: metadata-only manifest.
+    let manifest = build_manifest(input_path, &limits)?;
+
+    // Defense-in-depth: a bug in walk_directory would surface here
+    // rather than producing a malformed archive.
+    let _ = validate_manifest_tree(&manifest.entries, manifest.total_file_bytes, limits)?;
+
+    let manifest_bytes = serialize_manifest(&manifest, limits)?;
+    let entry_count = u32::try_from(manifest.entries.len())
+        .map_err(|_| entry_count_cap_error(u32::MAX, limits.max_entry_count))?;
+    let manifest_len = u32::try_from(manifest_bytes.len()).map_err(|_| {
+        manifest_len_cap_error(manifest_bytes.len() as u64, limits.max_manifest_bytes)
+    })?;
+
+    writer = write_fca_header(writer, entry_count, manifest_len, manifest.total_file_bytes)?;
+    writer.write_all(&manifest_bytes).map_err(CryptoError::Io)?;
+
+    // Pass 2: stream file contents in canonical manifest order.
+    for entry in &manifest.entries {
+        if entry.kind == ArchiveEntryKind::File {
+            stream_source_file(entry, &mut writer)?;
+        }
+    }
+
+    let stem = output_stem(input_path)?;
+    Ok((stem, writer))
+}
+
+/// Returns the output stem used to name the encrypted output file.
+/// For file inputs, the file stem (no extension); for directory
+/// inputs, the full directory name (preserving any dots).
+fn output_stem(input_path: &Path) -> Result<String, CryptoError> {
+    if input_path.is_dir() {
+        let name = input_path
+            .file_name()
+            .ok_or_else(|| CryptoError::InvalidInput("Cannot get directory name".to_string()))?;
+        Ok(name.to_string_lossy().into_owned())
+    } else {
+        Ok(file_stem(input_path)?.to_string_lossy().into_owned())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::IncompleteOutputPolicy;
-    use super::super::limits::ArchiveLimits;
-    use super::super::path::UstarEntryKind;
-    use super::super::path::ustar;
-    use super::super::{archive, unarchive};
-    use super::ustar_archive_path_string;
-
-    use std::fs;
+    use super::super::decode::unarchive;
+    use super::*;
     use std::io::Cursor;
     use std::path::PathBuf;
 
-    #[test]
-    fn archive_and_unarchive_file() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let input_file = tmp.path().join("hello.txt");
-        let extract_dir = tmp.path().join("extracted");
-        fs::create_dir_all(&extract_dir).unwrap();
-        fs::write(&input_file, "file content here").unwrap();
-
+    /// End-to-end round-trip: archive → unarchive on the same tempdir
+    /// (different output dir so the source isn't overwritten).
+    fn round_trip(src_root: &Path, out_root: &Path) -> PathBuf {
         let mut buf = Vec::new();
-        let (stem, _) = archive(&input_file, &mut buf, ArchiveLimits::default()).unwrap();
+        let _ = archive(src_root, &mut buf, ArchiveLimits::default()).unwrap();
+        unarchive(
+            Cursor::new(buf),
+            out_root,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::DeleteOnError,
+        )
+        .unwrap()
+    }
+
+    // -- Positive round-trip tests -----------------------------------------
+
+    #[test]
+    fn round_trip_single_file() {
+        let src = tempfile::TempDir::new().unwrap();
+        let out = tempfile::TempDir::new().unwrap();
+        let src_file = src.path().join("hello.txt");
+        fs::write(&src_file, b"Hello, world!").unwrap();
+
+        let final_path = round_trip(&src_file, out.path());
+        assert_eq!(final_path, out.path().join("hello.txt"));
+        assert_eq!(fs::read(&final_path).unwrap(), b"Hello, world!");
+    }
+
+    #[test]
+    fn round_trip_empty_file() {
+        let src = tempfile::TempDir::new().unwrap();
+        let out = tempfile::TempDir::new().unwrap();
+        let src_file = src.path().join("empty.bin");
+        fs::write(&src_file, b"").unwrap();
+
+        let final_path = round_trip(&src_file, out.path());
+        assert_eq!(fs::read(&final_path).unwrap(), b"");
+    }
+
+    #[test]
+    fn round_trip_directory_tree() {
+        let src = tempfile::TempDir::new().unwrap();
+        let out = tempfile::TempDir::new().unwrap();
+        let dir = src.path().join("photos");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("index.txt"), b"hello").unwrap();
+        fs::write(dir.join("cover.jpg"), b"jpegjpe").unwrap();
+        fs::create_dir(dir.join("raw")).unwrap();
+        fs::write(dir.join("raw").join("a.dng"), b"raw_data").unwrap();
+
+        let final_path = round_trip(&dir, out.path());
+        assert!(final_path.is_dir());
+        assert_eq!(fs::read(final_path.join("index.txt")).unwrap(), b"hello");
+        assert_eq!(fs::read(final_path.join("cover.jpg")).unwrap(), b"jpegjpe");
+        assert_eq!(
+            fs::read(final_path.join("raw").join("a.dng")).unwrap(),
+            b"raw_data",
+        );
+    }
+
+    #[test]
+    fn round_trip_empty_directory() {
+        let src = tempfile::TempDir::new().unwrap();
+        let out = tempfile::TempDir::new().unwrap();
+        let dir = src.path().join("emptydir");
+        fs::create_dir(&dir).unwrap();
+
+        let final_path = round_trip(&dir, out.path());
+        assert!(final_path.is_dir());
+        assert_eq!(fs::read_dir(&final_path).unwrap().count(), 0);
+    }
+
+    /// Manifest determinism end-to-end: two encrypts of the same tree
+    /// produce byte-identical archive bytes. Pinned because the
+    /// metadata-pass walk uses `fs::read_dir` which has filesystem-
+    /// dependent order — without `sort_entries_canonically` this would
+    /// fail.
+    #[test]
+    fn archive_output_is_deterministic() {
+        let src = tempfile::TempDir::new().unwrap();
+        let dir = src.path().join("d");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("z.txt"), b"zzz").unwrap();
+        fs::write(dir.join("a.txt"), b"aaa").unwrap();
+        fs::write(dir.join("m.txt"), b"mmm").unwrap();
+
+        let mut buf1 = Vec::new();
+        let _ = archive(&dir, &mut buf1, ArchiveLimits::default()).unwrap();
+        let mut buf2 = Vec::new();
+        let _ = archive(&dir, &mut buf2, ArchiveLimits::default()).unwrap();
+
+        assert_eq!(buf1, buf2);
+    }
+
+    /// The output stem returned by `archive` follows the existing
+    /// internal API per spec §12: file stem for files, dir name for
+    /// directories.
+    #[test]
+    fn returns_correct_output_stem() {
+        let src = tempfile::TempDir::new().unwrap();
+        let mut buf = Vec::new();
+
+        let file = src.path().join("hello.txt");
+        fs::write(&file, b"x").unwrap();
+        let (stem, _) = archive(&file, &mut buf, ArchiveLimits::default()).unwrap();
         assert_eq!(stem, "hello");
 
-        let output = unarchive(
-            Cursor::new(buf),
-            &extract_dir,
-            ArchiveLimits::default(),
-            IncompleteOutputPolicy::RetainOnError,
-        )
-        .unwrap();
-        assert!(output.exists());
-
-        let restored = fs::read_to_string(extract_dir.join("hello.txt")).unwrap();
-        assert_eq!(restored, "file content here");
+        buf.clear();
+        let dotfile = src.path().join("photos.v1");
+        fs::create_dir(&dotfile).unwrap();
+        let (stem, _) = archive(&dotfile, &mut buf, ArchiveLimits::default()).unwrap();
+        assert_eq!(stem, "photos.v1");
     }
 
-    #[test]
-    fn archive_and_unarchive_directory() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let input_dir = tmp.path().join("mydir");
-        let sub_dir = input_dir.join("sub");
-        let extract_dir = tmp.path().join("extracted");
-        fs::create_dir_all(&sub_dir).unwrap();
-        fs::create_dir_all(&extract_dir).unwrap();
+    // -- Writer-side rejections (§19.6) ------------------------------------
 
-        fs::write(input_dir.join("a.txt"), "file a").unwrap();
-        fs::write(sub_dir.join("b.txt"), "file b").unwrap();
+    #[cfg(unix)]
+    #[test]
+    fn rejects_root_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = tmp.path().join("real.txt");
+        fs::write(&target, b"data").unwrap();
+        let link = tmp.path().join("link.txt");
+        symlink(&target, &link).unwrap();
 
         let mut buf = Vec::new();
-        let (stem, _) = archive(&input_dir, &mut buf, ArchiveLimits::default()).unwrap();
-        assert_eq!(stem, "mydir");
-
-        let output = unarchive(
-            Cursor::new(buf),
-            &extract_dir,
-            ArchiveLimits::default(),
-            IncompleteOutputPolicy::RetainOnError,
-        )
-        .unwrap();
-        assert!(output.exists());
-
-        let restored_a = fs::read_to_string(extract_dir.join("mydir/a.txt")).unwrap();
-        assert_eq!(restored_a, "file a");
-        let restored_b = fs::read_to_string(extract_dir.join("mydir/sub/b.txt")).unwrap();
-        assert_eq!(restored_b, "file b");
+        let err = archive(&link, &mut buf, ArchiveLimits::default()).unwrap_err();
+        assert!(format!("{err}").contains("Input is a symlink"));
     }
 
     #[cfg(unix)]
     #[test]
-    fn archive_rejects_directory_with_symlink() {
+    fn rejects_dangling_symlink() {
+        use std::os::unix::fs::symlink;
+
         let tmp = tempfile::TempDir::new().unwrap();
-        let input_dir = tmp.path().join("mydir");
-        fs::create_dir_all(&input_dir).unwrap();
-        fs::write(input_dir.join("real.txt"), "content").unwrap();
-        std::os::unix::fs::symlink("/etc/passwd", input_dir.join("link.txt")).unwrap();
+        let link = tmp.path().join("dangling");
+        symlink(tmp.path().join("absent-target"), &link).unwrap();
 
         let mut buf = Vec::new();
-        let err = archive(&input_dir, &mut buf, ArchiveLimits::default()).unwrap_err();
-        assert!(
-            err.to_string().contains("symlink"),
-            "expected symlink error, got: {err}"
-        );
-    }
-
-    #[test]
-    fn archive_empty_file() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let input_file = tmp.path().join("empty.txt");
-        let extract_dir = tmp.path().join("extracted");
-        fs::create_dir_all(&extract_dir).unwrap();
-        fs::write(&input_file, "").unwrap();
-
-        let mut buf = Vec::new();
-        let (stem, _) = archive(&input_file, &mut buf, ArchiveLimits::default()).unwrap();
-        assert_eq!(stem, "empty");
-
-        unarchive(
-            Cursor::new(buf),
-            &extract_dir,
-            ArchiveLimits::default(),
-            IncompleteOutputPolicy::RetainOnError,
-        )
-        .unwrap();
-        let restored = fs::read_to_string(extract_dir.join("empty.txt")).unwrap();
-        assert_eq!(restored, "");
-    }
-
-    #[test]
-    fn archive_binary_content() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let input_file = tmp.path().join("data.bin");
-        let extract_dir = tmp.path().join("extracted");
-        fs::create_dir_all(&extract_dir).unwrap();
-
-        let binary_data: Vec<u8> = (0..=255).collect();
-        fs::write(&input_file, &binary_data).unwrap();
-
-        let mut buf = Vec::new();
-        let (_, _) = archive(&input_file, &mut buf, ArchiveLimits::default()).unwrap();
-
-        unarchive(
-            Cursor::new(buf),
-            &extract_dir,
-            ArchiveLimits::default(),
-            IncompleteOutputPolicy::RetainOnError,
-        )
-        .unwrap();
-
-        let restored = fs::read(extract_dir.join("data.bin")).unwrap();
-        assert_eq!(restored, binary_data);
+        let err = archive(&link, &mut buf, ArchiveLimits::default()).unwrap_err();
+        assert!(format!("{err}").contains("symlink"));
     }
 
     #[cfg(unix)]
     #[test]
-    fn archive_preserves_file_permissions() {
-        use std::os::unix::fs::PermissionsExt;
+    fn rejects_symlink_inside_directory_tree() {
+        use std::os::unix::fs::symlink;
 
-        let tmp = tempfile::TempDir::new().unwrap();
-        let input_file = tmp.path().join("script.sh");
-        let extract_dir = tmp.path().join("extracted");
-        fs::create_dir_all(&extract_dir).unwrap();
-        fs::write(&input_file, "#!/bin/sh\necho hi").unwrap();
-        fs::set_permissions(&input_file, fs::Permissions::from_mode(0o755)).unwrap();
-
-        let mut buf = Vec::new();
-        let (_, _) = archive(&input_file, &mut buf, ArchiveLimits::default()).unwrap();
-
-        unarchive(
-            Cursor::new(buf),
-            &extract_dir,
-            ArchiveLimits::default(),
-            IncompleteOutputPolicy::RetainOnError,
-        )
-        .unwrap();
-
-        let restored = extract_dir.join("script.sh");
-        let mode = fs::metadata(&restored).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o755, "expected 0o755, got 0o{mode:o}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn archive_preserves_directory_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let tmp = tempfile::TempDir::new().unwrap();
-        let input_dir = tmp.path().join("mydir");
-        let sub_dir = input_dir.join("restricted");
-        let extract_dir = tmp.path().join("extracted");
-        fs::create_dir_all(&sub_dir).unwrap();
-        fs::create_dir_all(&extract_dir).unwrap();
-        fs::write(sub_dir.join("secret.txt"), "data").unwrap();
-        fs::set_permissions(&sub_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let src = tempfile::TempDir::new().unwrap();
+        let dir = src.path().join("d");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("real.txt"), b"data").unwrap();
+        symlink("real.txt", dir.join("link.txt")).unwrap();
 
         let mut buf = Vec::new();
-        let (_, _) = archive(&input_dir, &mut buf, ArchiveLimits::default()).unwrap();
-
-        unarchive(
-            Cursor::new(buf),
-            &extract_dir,
-            ArchiveLimits::default(),
-            IncompleteOutputPolicy::RetainOnError,
-        )
-        .unwrap();
-
-        let restored_sub = extract_dir.join("mydir/restricted");
-        let mode = fs::metadata(&restored_sub).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o700, "expected 0o700, got 0o{mode:o}");
+        let err = archive(&dir, &mut buf, ArchiveLimits::default()).unwrap_err();
+        assert!(format!("{err}").contains("Symlink in archive source"));
     }
 
-    #[cfg(unix)]
     #[test]
-    fn archive_restrictive_dir_does_not_block_children() {
-        use std::os::unix::fs::PermissionsExt;
-
+    fn rejects_missing_input() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let input_dir = tmp.path().join("mydir");
-        let sub_dir = input_dir.join("readonly");
-        let extract_dir = tmp.path().join("extracted");
-        fs::create_dir_all(&sub_dir).unwrap();
-        fs::create_dir_all(&extract_dir).unwrap();
-        fs::write(sub_dir.join("inner.txt"), "hello").unwrap();
-        // r-x------ : no write permission
-        fs::set_permissions(&sub_dir, fs::Permissions::from_mode(0o500)).unwrap();
-
+        let absent = tmp.path().join("does-not-exist");
         let mut buf = Vec::new();
-        let (_, _) = archive(&input_dir, &mut buf, ArchiveLimits::default()).unwrap();
-
-        // Must not fail with "Permission denied" when extracting inner.txt
-        unarchive(
-            Cursor::new(buf),
-            &extract_dir,
-            ArchiveLimits::default(),
-            IncompleteOutputPolicy::RetainOnError,
-        )
-        .unwrap();
-
-        let restored_file = extract_dir.join("mydir/readonly/inner.txt");
-        assert_eq!(fs::read_to_string(&restored_file).unwrap(), "hello");
-
-        let dir_mode = fs::metadata(extract_dir.join("mydir/readonly"))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(dir_mode, 0o500, "expected 0o500, got 0o{dir_mode:o}");
+        let err = archive(&absent, &mut buf, ArchiveLimits::default()).unwrap_err();
+        assert!(matches!(err, CryptoError::InputPath));
     }
 
-    #[cfg(unix)]
+    /// Per-entry caps fire during the metadata pass — catch-cap before
+    /// any header bytes are emitted.
     #[test]
-    fn archive_strips_special_bits_on_archive_side() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let tmp = tempfile::TempDir::new().unwrap();
-        let input_file = tmp.path().join("script.sh");
-        fs::write(&input_file, "#!/bin/sh").unwrap();
-        fs::set_permissions(&input_file, fs::Permissions::from_mode(0o4755)).unwrap();
-
-        let mut buf = Vec::new();
-        let (_, _) = archive(&input_file, &mut buf, ArchiveLimits::default()).unwrap();
-
-        // Read the mode stored in the tar header directly.
-        let mut tar_archive = tar::Archive::new(Cursor::new(buf));
-        let entry = tar_archive.entries().unwrap().next().unwrap().unwrap();
-        let stored_mode = entry.header().mode().unwrap();
-        assert_eq!(
-            stored_mode & 0o7000,
-            0,
-            "special bits should not be stored in archive: mode 0o{stored_mode:o}"
-        );
-        assert_eq!(
-            stored_mode & 0o777,
-            0o755,
-            "rwx bits should be preserved: mode 0o{stored_mode:o}"
-        );
-    }
-
-    /// `FORMAT.md` §9 requires every emitted header to use the POSIX
-    /// ustar magic (`"ustar\0" + "00"` at offsets 257..265) and forbids
-    /// GNU magic. Pin the writer's per-entry magic + version bytes so a
-    /// future regression that switches back to `new_gnu()` (or to a
-    /// helper that auto-promotes overlong paths to a long-name
-    /// extension) fails this test loudly.
-    #[test]
-    fn archive_emits_posix_ustar_headers() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let input = tmp.path().join("hello.txt");
-        fs::write(&input, "hello").unwrap();
-
-        let mut buf = Vec::new();
-        let (_, _) = archive(&input, &mut buf, ArchiveLimits::default()).unwrap();
-
-        let mut ar = tar::Archive::new(Cursor::new(buf));
-        let mut entries = ar.entries().unwrap();
-        let entry = entries.next().expect("one entry").unwrap();
-        let raw = entry.header().as_bytes();
-
-        assert_eq!(&raw[257..263], b"ustar\0", "expected POSIX ustar magic");
-        assert_eq!(&raw[263..265], b"00", "expected ustar version 00");
-        assert_eq!(raw[156], b'0', "expected typeflag '0' for regular file");
-    }
-
-    /// `FORMAT.md` §9 forbids GNU long-name records and the writer
-    /// must reject overlong paths up-front rather than silently
-    /// promoting them to an extension. The exact ustar limit is
-    /// `name(100) + '/' + prefix(155)`; any path over that surfaces
-    /// as a typed `InvalidInput` rejection.
-    ///
-    /// We drive the writer-side ustar path normalizer directly rather
-    /// than going through `archive()` because some host filesystems
-    /// (notably macOS APFS) reject single components ≥255 chars
-    /// before our code sees them; the helper is the canonical
-    /// rejection point used by both `append_file` and
-    /// `append_dir_entry`.
-    #[test]
-    fn archive_rejects_path_that_cannot_fit_ustar() {
-        let too_long: String = "a".repeat(ustar::PATH_REPRESENTABLE_MAX + 4);
-        let path = PathBuf::from(too_long);
-        let err = ustar_archive_path_string(&path, UstarEntryKind::File).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("POSIX ustar"),
-            "expected POSIX ustar rejection, got: {msg}"
-        );
-    }
-
-    /// Writer-side symmetry with the reader's `\` / NUL rejection
-    /// (`FORMAT.md` §9). Unix kernels permit `\` in filenames, so a
-    /// naive walker could emit an archive whose paths the reader
-    /// would refuse to decrypt. Gated to `#[cfg(unix)]` because on
-    /// Windows the `Path` API treats `\` as a separator, so a single
-    /// `Normal` component can never contain a literal `\` byte and
-    /// the bug doesn't apply.
-    #[cfg(unix)]
-    #[test]
-    fn archive_rejects_backslash_in_path_component() {
-        let weird = PathBuf::from("weird\\file.txt");
-        let err = ustar_archive_path_string(&weird, UstarEntryKind::File).unwrap_err();
-        assert!(
-            err.to_string().contains("forbidden byte"),
-            "expected backslash rejection, got: {err}"
-        );
-    }
-
-    /// Encrypt-side preflight: a directory whose entry count would
-    /// exceed `ArchiveLimits::max_entry_count` must be rejected by
-    /// `archive` BEFORE TAR bytes are emitted, so the writer never
-    /// produces an archive that the default-config decrypt would
-    /// refuse. Mirrors the decrypt-side `entry-count cap` test.
-    #[test]
-    fn archive_rejects_input_above_entry_count_cap() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let input_dir = tmp.path().join("myroot");
-        fs::create_dir_all(&input_dir).unwrap();
-        // 1 directory entry (the root) + 5 files = 6 entries.
+    fn rejects_tree_above_entry_count_cap() {
+        let src = tempfile::TempDir::new().unwrap();
+        let dir = src.path().join("d");
+        fs::create_dir(&dir).unwrap();
         for i in 0..5 {
-            fs::write(input_dir.join(format!("file_{i}")), b"x").unwrap();
+            fs::write(dir.join(format!("f{i}.txt")), b"x").unwrap();
         }
 
-        let limits = ArchiveLimits {
-            max_entry_count: 3,
-            ..ArchiveLimits::default()
-        };
+        let limits = ArchiveLimits::default().with_max_entry_count(3);
         let mut buf = Vec::new();
-        let err = archive(&input_dir, &mut buf, limits).unwrap_err();
-        assert!(
-            err.to_string().contains("entry-count cap"),
-            "expected entry-count cap rejection, got: {err}"
-        );
+        let err = archive(&dir, &mut buf, limits).unwrap_err();
+        assert!(format!("{err}").contains("entry-count cap exceeded"));
+        // No header bytes should have been emitted.
+        assert!(buf.is_empty(), "writer must not emit bytes when caps fail");
     }
 
-    /// Encrypt-side preflight: an input file whose size exceeds
-    /// `ArchiveLimits::max_total_plaintext_bytes` must be rejected by
-    /// `archive` BEFORE the TAR header for the entry is emitted.
     #[test]
-    fn archive_rejects_input_above_total_bytes_cap() {
+    fn rejects_tree_above_total_bytes_cap() {
+        let src = tempfile::TempDir::new().unwrap();
+        let dir = src.path().join("d");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("big.bin"), vec![0u8; 1000]).unwrap();
+
+        let limits = ArchiveLimits::default().with_max_total_plaintext_bytes(100);
+        let mut buf = Vec::new();
+        let err = archive(&dir, &mut buf, limits).unwrap_err();
+        assert!(format!("{err}").contains("total-bytes cap exceeded"));
+    }
+
+    /// Spec §8.2: a Windows-reserved device name in the source tree
+    /// MUST reject during the metadata pass — otherwise the writer
+    /// would emit a path its own reader rejects.
+    #[cfg(unix)]
+    #[test]
+    fn rejects_windows_reserved_device_name_in_source() {
+        let src = tempfile::TempDir::new().unwrap();
+        let dir = src.path().join("d");
+        fs::create_dir(&dir).unwrap();
+        // "CON" is fine on Unix as a filename, but FCA rejects it.
+        fs::write(dir.join("CON"), b"x").unwrap();
+
+        let mut buf = Vec::new();
+        let err = archive(&dir, &mut buf, ArchiveLimits::default()).unwrap_err();
+        assert!(format!("{err}").contains("Windows-reserved device"));
+    }
+
+    // -- §19.1 positive round-trips (extra coverage) -----------------------
+
+    /// Bytes 0x00..=0xFF cycled to 1 KiB. Pins that the writer does
+    /// not assume printable / text content and the reader does not
+    /// silently transform any byte.
+    #[test]
+    fn round_trip_binary_file() {
+        let src = tempfile::TempDir::new().unwrap();
+        let out = tempfile::TempDir::new().unwrap();
+        let content: Vec<u8> = (0..=255u8).cycle().take(1024).collect();
+        let src_file = src.path().join("binary.bin");
+        fs::write(&src_file, &content).unwrap();
+
+        let final_path = round_trip(&src_file, out.path());
+        assert_eq!(fs::read(&final_path).unwrap(), content);
+    }
+
+    /// Empty subdirectories nested 3 levels deep round-trip to disk
+    /// with the same shape. Pins that directory pre-creation in the
+    /// reader's Pass 1 walks all the way down even when no file
+    /// content is emitted.
+    #[test]
+    fn round_trip_nested_empty_directories() {
+        let src = tempfile::TempDir::new().unwrap();
+        let out = tempfile::TempDir::new().unwrap();
+        let dir = src.path().join("root");
+        fs::create_dir(&dir).unwrap();
+        fs::create_dir(dir.join("a")).unwrap();
+        fs::create_dir(dir.join("a").join("b")).unwrap();
+        fs::create_dir(dir.join("a").join("b").join("c")).unwrap();
+
+        let final_path = round_trip(&dir, out.path());
+        assert!(final_path.is_dir());
+        assert!(final_path.join("a").is_dir());
+        assert!(final_path.join("a").join("b").is_dir());
+        assert!(final_path.join("a").join("b").join("c").is_dir());
+    }
+
+    // -- §19.1 / §19.7 Unix mode preservation ------------------------------
+
+    /// Source file mode round-trips through the archive intact (rwx
+    /// bits only — special bits stripped per §15.4). Pins
+    /// `archive_file_mode` on the writer side and
+    /// `chmod_file_handle` post-copy on the reader side.
+    #[cfg(unix)]
+    #[test]
+    fn round_trip_preserves_file_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let src = tempfile::TempDir::new().unwrap();
+        let out = tempfile::TempDir::new().unwrap();
+        let src_file = src.path().join("hello.txt");
+        fs::write(&src_file, b"x").unwrap();
+        fs::set_permissions(&src_file, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let final_path = round_trip(&src_file, out.path());
+        let mode = fs::metadata(&final_path).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o600, "file mode lost in round trip");
+    }
+
+    /// Source directory mode round-trips intact via the writer's
+    /// `archive_dir_mode` and the reader's post-rename root-chmod
+    /// (spec §16.3). Validates "root chmod after rename" indirectly:
+    /// if the reader applied root mode pre-rename and the mode lacked
+    /// search permission, the rename itself would fail on macOS.
+    #[cfg(unix)]
+    #[test]
+    fn round_trip_preserves_directory_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let src = tempfile::TempDir::new().unwrap();
+        let out = tempfile::TempDir::new().unwrap();
+        let dir = src.path().join("root");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let final_path = round_trip(&dir, out.path());
+        let mode = fs::metadata(&final_path).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o700, "directory mode lost in round trip");
+    }
+
+    /// Spec §15.4: writers MUST NOT store setuid, setgid, or sticky
+    /// bits. Pin the strip on the WRITER side: a source file with
+    /// 0o4644 (setuid + rw-r--r--) extracts as 0o644.
+    #[cfg(unix)]
+    #[test]
+    fn round_trip_strips_setuid_bit_from_source() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let src = tempfile::TempDir::new().unwrap();
+        let out = tempfile::TempDir::new().unwrap();
+        let src_file = src.path().join("hello.txt");
+        fs::write(&src_file, b"x").unwrap();
+        fs::set_permissions(&src_file, fs::Permissions::from_mode(0o4644)).unwrap();
+
+        let final_path = round_trip(&src_file, out.path());
+        let mode = fs::metadata(&final_path).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o644, "setuid bit must be stripped, got 0o{mode:o}",);
+    }
+
+    // -- Source mutation between passes (§15.5) ----------------------------
+
+    /// Spec §15.5: a source file shrinking between metadata pass and
+    /// content pass MUST fail. We can't shrink a real file mid-archive
+    /// race-free, so this test exercises the size-check directly via
+    /// `stream_source_file` with a pre-built `ArchiveEntry` whose
+    /// recorded size doesn't match the file on disk.
+    #[test]
+    fn stream_source_file_rejects_size_mismatch() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let input_file = tmp.path().join("big.bin");
-        fs::write(&input_file, vec![0u8; 1000]).unwrap();
+        let path = tmp.path().join("real.txt");
+        fs::write(&path, b"actual content").unwrap();
 
-        let limits = ArchiveLimits {
-            max_total_plaintext_bytes: 100,
-            ..ArchiveLimits::default()
+        let entry = ArchiveEntry {
+            kind: ArchiveEntryKind::File,
+            path_utf8: "real.txt".to_string(),
+            mode: 0o644,
+            size: 9999, // not the real size
+            source_path: Some(path),
         };
+
         let mut buf = Vec::new();
-        let err = archive(&input_file, &mut buf, limits).unwrap_err();
-        assert!(
-            err.to_string().contains("total-bytes cap"),
-            "expected total-bytes cap rejection, got: {err}"
-        );
-    }
-
-    /// `FORMAT.md` §9: a regular-file entry whose size exceeds
-    /// `FILE_SIZE_REPRESENTABLE_MAX` (8 GiB minus one byte, the
-    /// largest value the ustar octal `size` field can carry) must be
-    /// rejected at header-build time. Without this guard,
-    /// `tar::Header::set_size` would silently switch to the GNU
-    /// binary-size encoding for any value ≥ 2^33, producing an
-    /// archive that no v1 reader would accept.
-    ///
-    /// Driven through `build_ustar_header` rather than `archive()`
-    /// because allocating an 8 GiB file in a unit test is impractical;
-    /// the helper is the canonical rejection point.
-    #[test]
-    fn archive_rejects_file_above_ustar_size_max() {
-        use super::build_ustar_header;
-        let path = PathBuf::from("big.bin");
-        let err = build_ustar_header(
-            &path,
-            UstarEntryKind::File,
-            ustar::FILE_SIZE_REPRESENTABLE_MAX + 1,
-            0o644,
-        )
-        .unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("POSIX ustar representable size"),
-            "expected ustar size-cap rejection, got: {msg}"
-        );
-    }
-
-    /// Boundary: a file whose size equals `FILE_SIZE_REPRESENTABLE_MAX`
-    /// exactly must still build a valid header — the cap is inclusive
-    /// of `2^33 - 1`, exclusive of `2^33`.
-    #[test]
-    fn archive_accepts_file_at_ustar_size_max() {
-        use super::build_ustar_header;
-        let path = PathBuf::from("big.bin");
-        build_ustar_header(
-            &path,
-            UstarEntryKind::File,
-            ustar::FILE_SIZE_REPRESENTABLE_MAX,
-            0o644,
-        )
-        .expect("file at the ustar size cap should build a valid header");
-    }
-
-    /// Encrypt-side preflight: a directory whose entry path depth
-    /// exceeds `ArchiveLimits::max_path_depth` must be rejected by
-    /// `archive` before the deep entry's TAR header is emitted.
-    #[test]
-    fn archive_rejects_input_above_path_depth_cap() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        // Root-relative depth 7: myroot/a/b/c/d/e/file.txt.
-        let input_dir = tmp.path().join("myroot");
-        let deep_parent = input_dir.join("a/b/c/d/e");
-        fs::create_dir_all(&deep_parent).unwrap();
-        fs::write(deep_parent.join("file.txt"), b"x").unwrap();
-
-        let limits = ArchiveLimits {
-            max_path_depth: 4,
-            ..ArchiveLimits::default()
-        };
-        let mut buf = Vec::new();
-        let err = archive(&input_dir, &mut buf, limits).unwrap_err();
-        assert!(
-            err.to_string().contains("path depth cap"),
-            "expected path depth cap rejection, got: {err}"
-        );
+        let err = stream_source_file(&entry, &mut buf).unwrap_err();
+        assert!(format!("{err}").contains("size changed"));
     }
 }

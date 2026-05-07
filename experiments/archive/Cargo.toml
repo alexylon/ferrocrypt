@@ -1,0 +1,33 @@
+[package]
+name = "ferrocrypt-archive-legacy-experiment"
+version = "0.0.1"
+edition = "2021"
+publish = false
+description = "Parked POSIX ustar (TAR-subset) archive payload lifted out of ferrocrypt-lib when the FerroCrypt Archive (FCA) v1 format superseded it. Reference snapshot only — depends on ferrocrypt-lib internal modules (crate::CryptoError, crate::fs::atomic, crate::fs::paths, crate::error::StreamError) and does not compile standalone in this layout. The Cargo.toml below records the external crate deps the legacy archive used so a future re-vendoring exercise has a starting point."
+
+[lib]
+path = "mod.rs"
+
+[dependencies]
+# POSIX ustar wire format builder/reader. Replaced by the native FCA
+# format in ferrocrypt-lib/src/archive/format.rs.
+tar = "0.4"
+
+# Capability-based filesystem primitives for the hardened cap-std
+# extractor (`platform.rs`). Used on every target — the same module
+# runs on Linux / macOS / Windows.
+cap-std = "4"
+cap-fs-ext = "4"
+
+# Safe Rust wrapper around `renameat_with(NOREPLACE)` for atomic
+# no-clobber renames on Linux and macOS (used by the vendored
+# `fs::atomic::rename_no_clobber`).
+rustix = { version = "1", features = ["fs"] }
+
+[target.'cfg(unix)'.dependencies]
+# `O_NOFOLLOW` and `ELOOP` from `encode.rs`, plus the Unix
+# `PermissionsExt` mode reads on the writer side.
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

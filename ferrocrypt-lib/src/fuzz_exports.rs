@@ -14,9 +14,9 @@
 
 #![allow(missing_docs)]
 
-pub use crate::archive_v1::format::{parse_fca_header, parse_manifest_bytes};
-pub use crate::archive_v1::model::{ArchiveEntry, ArchiveEntryKind, FcaHeader, Manifest};
-pub use crate::archive_v1::path::{ascii_case_collision_key, validate_fca_path};
+pub use crate::archive::format::{parse_fca_header, parse_manifest_bytes};
+pub use crate::archive::model::{ArchiveEntry, ArchiveEntryKind, FcaHeader, Manifest};
+pub use crate::archive::path::{ascii_case_collision_key, validate_fca_path};
 pub use crate::crypto::kdf::{KDF_PARAMS_SIZE, KdfParams};
 pub use crate::crypto::tlv::validate_tlv;
 pub use crate::key::private::PrivateKeyHeader;

@@ -1,189 +1,505 @@
-//! Archive path canonicalization, rejection, and POSIX ustar wire-format
-//! shared between writer and reader.
+//! FCA path grammar — the single shared writer/reader validator.
 //!
-//! [`validate_archive_path_components`] is the path-traversal guard run on every
-//! decrypt-side entry and re-exported via `fuzz_exports`. The [`ustar`]
-//! submodule pins the raw POSIX ustar header offsets so the writer
-//! emits and the reader strict-validates the same byte layout.
+//! See `notes/archive_format/ARCHIVE_FORMAT.md` §8 (path grammar),
+//! §14.8 (path validation reference), §19.3 (path-rejection corpus).
 //!
-//! ## Path-subset enforcement (writer ↔ reader)
-//!
-//! The v1 archive subset's path rules — no NUL or `\` byte, no
-//! `.`/`..`/empty components, length ≤ [`ustar::PATH_REPRESENTABLE_MAX`],
-//! no path traversal, valid UTF-8, single trailing `/` only on directory
-//! entries — are enforced on **both** sides by two complementary helpers
-//! that operate on different input shapes:
-//!
-//! - **Writer** (`archive::encode::ustar_archive_path_string`) walks
-//!   [`std::path::Component`] values and refuses anything but
-//!   [`Component::Normal`], then byte-checks each component for NUL /
-//!   `\`. Repeated `//`, `.`/`..`/empty components are structurally
-//!   impossible because the writer joins single-`/` between Normal
-//!   components only.
-//! - **Reader** (`archive::decode::validate_ustar_entry` plus
-//!   [`validate_archive_path_components`]) operates on raw byte slices
-//!   (the on-disk header field), so every check is explicit: empty,
-//!   length, NUL, `\`, `//`, UTF-8, trailing `/`, per-component
-//!   `.`/`..`/empty, and the [`Component`]-level path-traversal subset
-//!   on the parsed `&Path`.
-//!
-//! The two helpers reach the same conclusion via different code paths
-//! rather than sharing one function because their inputs are different
-//! shapes (typed `&Path` vs raw byte slice). Both sides reference the
-//! shared constants in [`ustar`] so structural drift is impossible; a
-//! change to one side's rules MUST be mirrored in the other.
+//! The "writer/reader symmetry" guarantee from spec §19.3 last bullet
+//! is satisfied by having a single function — [`validate_fca_path`] —
+//! called from both encode and decode paths. There is no separate
+//! writer-side and reader-side validator to drift apart.
 
 use std::path::{Component, Path};
 
 use crate::CryptoError;
 
-/// Raw POSIX ustar header constants (`FORMAT.md` §9). Used by both the
-/// writer (canonical emission) and the reader (per-entry strict
-/// subset validation).
-pub(crate) mod ustar {
-    /// POSIX ustar fixed block size — every header is one block, every
-    /// entry's data is rounded up to a whole number of blocks, and the
-    /// archive ends with two consecutive zero blocks. Used by
-    /// `archive::decode::read_required_zero_block` to enforce the
-    /// second of those two trailing blocks (`FORMAT.md` §9), and by
-    /// hand-crafted test fixtures that build archives at the raw byte
-    /// level. Production header reads use `tar::Header::as_bytes()` and
-    /// do not reference this constant directly.
-    pub(crate) const BLOCK_SIZE: usize = 512;
+use super::limits::ArchiveLimits;
 
-    pub(crate) const TYPEFLAG_OFFSET: usize = 156;
-    pub(crate) const MAGIC_OFFSET: usize = 257;
-    pub(crate) const MAGIC: &[u8; 6] = b"ustar\0";
-    pub(crate) const VERSION_OFFSET: usize = 263;
-    pub(crate) const VERSION: &[u8; 2] = b"00";
+/// Bytes that cannot appear in any FCA path component on any platform
+/// FerroCrypt targets. The Windows-reserved set per spec §8.2; rejecting
+/// these on every platform makes a valid FCA path representable
+/// everywhere FerroCrypt runs.
+const WINDOWS_RESERVED_CHARS: &[u8] = b"<>:\"|?*";
 
-    /// Offset of the `size` field in the ustar header. v1 forbids the
-    /// GNU binary numeric extension (high bit set on the first byte of
-    /// a numeric field), and the size field is the only one realistic
-    /// implementations would extend to binary; mode/uid/gid/mtime fit
-    /// the octal allotment for any sane value.
-    pub(crate) const SIZE_FIELD_OFFSET: usize = 124;
-    /// High bit on the first byte of a numeric field marks the GNU
-    /// binary numeric extension. Forbidden by `FORMAT.md` §9.
-    pub(crate) const NUMERIC_BINARY_FLAG_BIT: u8 = 0x80;
-
-    pub(crate) const NAME_SIZE: usize = 100;
-    pub(crate) const PREFIX_SIZE: usize = 155;
-    /// Maximum path length representable purely via the ustar
-    /// `name` + `/` + `prefix` fields; anything longer requires a GNU
-    /// long-name or PAX extension record, which v1 forbids.
-    pub(crate) const PATH_REPRESENTABLE_MAX: usize = NAME_SIZE + 1 + PREFIX_SIZE;
-
-    /// Maximum file size representable in the ustar `size` field
-    /// (11 octal digits + NUL = 33 bits = 8,589,934,591 bytes, one
-    /// byte short of 8 GiB). v1 forbids both the GNU binary-size and
-    /// PAX `x_size` extensions, so any file beyond this cap must be
-    /// rejected on encrypt; otherwise `tar::Header::set_size` would
-    /// silently fall back to the GNU binary-size encoding and the
-    /// resulting `.fcr` would be unreadable by a conforming reader.
-    pub(crate) const FILE_SIZE_REPRESENTABLE_MAX: u64 = 0o77_777_777_777;
-
-    pub(crate) const TYPEFLAG_REGULAR_NUL: u8 = b'\0';
-    pub(crate) const TYPEFLAG_REGULAR_ZERO: u8 = b'0';
-    pub(crate) const TYPEFLAG_DIRECTORY: u8 = b'5';
-
-    /// Forbidden typeflags surfaced by `tar::Entries::raw(true)`. v1
-    /// forbids both PAX (`'x'` per-entry, `'g'` global) and the GNU
-    /// extension family (`'L'` long-name, `'K'` long-link, `'S'`
-    /// sparse, `'M'` multi-volume continuation, `'D'` GNU dumpdir,
-    /// `'V'` GNU volume-header, `'N'` legacy long-name, `'X'` Solaris
-    /// extended). Any of these reaching the typeflag match in the
-    /// reader is a v1 conformance violation regardless of payload —
-    /// see `FORMAT.md` §9.
-    pub(crate) const TYPEFLAG_PAX_EXTENDED: u8 = b'x';
-    pub(crate) const TYPEFLAG_PAX_GLOBAL: u8 = b'g';
-    pub(crate) const TYPEFLAG_GNU_LONG_NAME: u8 = b'L';
-    pub(crate) const TYPEFLAG_GNU_LONG_LINK: u8 = b'K';
-    pub(crate) const TYPEFLAG_GNU_SPARSE: u8 = b'S';
-    pub(crate) const TYPEFLAG_GNU_MULTI_VOLUME: u8 = b'M';
-    pub(crate) const TYPEFLAG_GNU_DUMPDIR: u8 = b'D';
-    pub(crate) const TYPEFLAG_GNU_VOLUME_HEADER: u8 = b'V';
-    pub(crate) const TYPEFLAG_GNU_NAMES: u8 = b'N';
-    pub(crate) const TYPEFLAG_SOLARIS_EXTENDED: u8 = b'X';
-}
-
-/// `FORMAT.md` §9 archive subset classification for a successfully
-/// validated entry: ferrocrypt v1 recognises only regular files and
-/// directories.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum UstarEntryKind {
-    File,
-    Directory,
-}
-
-/// Rejects paths that could escape the output directory (path traversal)
-/// or confuse the root-aware extraction logic. `Component::CurDir`
-/// (leading `./`) is rejected because ferrocrypt's own archiver never
-/// produces it and it turns `root_name` into `.`, which then conflicts
-/// with the final rename step.
+/// Validates an FCA archive path against the spec §8 grammar. Same
+/// function called by encode-side metadata-pass and decode-side
+/// manifest-parse — the single shared implementation IS the writer /
+/// reader symmetry guarantee from spec §19.3.
 ///
-/// An empty path (no components) is permissively accepted: the loop is
-/// a no-op and the function returns `Ok(())`. The main decode flow
-/// never reaches here with an empty path — `validate_ustar_entry`
-/// rejects empty paths up-front — but the function is `pub` and
-/// reachable via the `fuzz_exports` surface, so the permissive empty-
-/// path contract is intentional and pinned by
-/// [`tests::validate_accepts_empty_path`].
-pub fn validate_archive_path_components(path: &Path) -> Result<(), CryptoError> {
-    for component in path.components() {
+/// Caller has already passed `limits` through
+/// [`ArchiveLimits::validate`]; we don't re-run that check here.
+pub fn validate_fca_path(path: &str, limits: ArchiveLimits) -> Result<(), CryptoError> {
+    if path.is_empty() {
+        return Err(CryptoError::InvalidInput(
+            "Empty archive entry path".to_string(),
+        ));
+    }
+    if path.len() > limits.max_path_bytes as usize {
+        return Err(CryptoError::InvalidInput(
+            "Archive path byte-length cap exceeded".to_string(),
+        ));
+    }
+    let bytes = path.as_bytes();
+    if bytes[0] == b'/' {
+        return Err(CryptoError::InvalidInput(
+            "Archive path is absolute".to_string(),
+        ));
+    }
+    if bytes[bytes.len() - 1] == b'/' {
+        return Err(CryptoError::InvalidInput(
+            "Archive path has trailing slash".to_string(),
+        ));
+    }
+    if bytes.contains(&0) {
+        return Err(CryptoError::InvalidInput(
+            "Archive path contains NUL byte".to_string(),
+        ));
+    }
+    if bytes.contains(&b'\\') {
+        return Err(CryptoError::InvalidInput(
+            "Archive path contains backslash".to_string(),
+        ));
+    }
+    if bytes.windows(2).any(|w| w == b"//") {
+        return Err(CryptoError::InvalidInput(
+            "Archive path contains repeated slash separators".to_string(),
+        ));
+    }
+
+    let component_count = path.split('/').count();
+    if component_count > limits.max_path_depth as usize {
+        return Err(CryptoError::InvalidInput(
+            "Archive path depth cap exceeded".to_string(),
+        ));
+    }
+
+    for component in path.split('/') {
+        validate_fca_component(component)?;
+    }
+
+    // Defense-in-depth: walk the host `Path::components()` and reject
+    // any kind that is not `Normal`. The `/`-split component checks
+    // above already cover `.` and `..`, but a future host-`Path`
+    // tweak (e.g., a Windows `Prefix` parsed from a path that snuck
+    // past the byte-level checks) would still surface here.
+    for component in Path::new(path).components() {
         match component {
-            Component::ParentDir
-            | Component::RootDir
+            Component::Normal(_) => {}
+            Component::RootDir
             | Component::Prefix(_)
-            | Component::CurDir => {
+            | Component::CurDir
+            | Component::ParentDir => {
                 return Err(CryptoError::InvalidInput(format!(
-                    "Unsafe path in archive: {}",
-                    path.display()
+                    "Unsafe path in archive: {path}"
                 )));
             }
-            Component::Normal(_) => {}
         }
+    }
+
+    Ok(())
+}
+
+/// Validates a single `/`-delimited path component per spec §8.2.
+fn validate_fca_component(component: &str) -> Result<(), CryptoError> {
+    if component.is_empty() || component == "." || component == ".." {
+        return Err(CryptoError::InvalidInput(
+            "Archive path has forbidden component".to_string(),
+        ));
+    }
+
+    let b = component.as_bytes();
+    if b.iter().any(|&c| c <= 0x1f) {
+        return Err(CryptoError::InvalidInput(
+            "Archive path contains ASCII control byte".to_string(),
+        ));
+    }
+    if b.iter().any(|c| WINDOWS_RESERVED_CHARS.contains(c)) {
+        return Err(CryptoError::InvalidInput(
+            "Archive path contains a Windows-reserved character".to_string(),
+        ));
+    }
+    if b.last() == Some(&b' ') {
+        return Err(CryptoError::InvalidInput(
+            "Archive path component ends with space".to_string(),
+        ));
+    }
+    if b.last() == Some(&b'.') {
+        return Err(CryptoError::InvalidInput(
+            "Archive path component ends with dot".to_string(),
+        ));
+    }
+    if is_windows_reserved_device_component(component) {
+        return Err(CryptoError::InvalidInput(
+            "Archive path contains a Windows-reserved device name".to_string(),
+        ));
     }
     Ok(())
 }
 
+/// ASCII-only lowercase. Multi-byte UTF-8 bytes (anything `>= 0x80`)
+/// pass through unchanged, which is intentional per spec §8.2: the
+/// reserved-device check is ASCII-only, not Unicode-folded.
+fn ascii_lower_byte(b: u8) -> u8 {
+    if b.is_ascii_uppercase() { b + 32 } else { b }
+}
+
+/// Returns `true` if the component's pre-extension stem matches a
+/// Windows reserved device name under ASCII-case-insensitive
+/// comparison. The stem is the substring before the first `.`; if there
+/// is no `.`, the whole component is the stem. This catches both bare
+/// names (`CON`) and stems-with-extension (`CON.txt`, `LPT9.bin`).
+fn is_windows_reserved_device_component(component: &str) -> bool {
+    let stem = component
+        .split_once('.')
+        .map_or(component, |(stem, _)| stem);
+    let stem_bytes = stem.as_bytes();
+
+    // All reserved device-name stems are 3..=6 ASCII bytes; longer
+    // stems cannot match. The early return also keeps the stack
+    // buffer sizing exact.
+    if stem_bytes.is_empty() || stem_bytes.len() > 6 {
+        return false;
+    }
+
+    // Stack buffer avoids an allocation per component check on the
+    // common no-match path. Reserved names are all ASCII, so byte-wise
+    // ascii_lower_byte is the correct (and sufficient) case fold.
+    let mut buf = [0u8; 6];
+    for (i, &b) in stem_bytes.iter().enumerate() {
+        buf[i] = ascii_lower_byte(b);
+    }
+    let lower = &buf[..stem_bytes.len()];
+
+    matches!(
+        lower,
+        b"con"
+            | b"prn"
+            | b"aux"
+            | b"nul"
+            | b"clock$"
+            | b"com1"
+            | b"com2"
+            | b"com3"
+            | b"com4"
+            | b"com5"
+            | b"com6"
+            | b"com7"
+            | b"com8"
+            | b"com9"
+            | b"lpt1"
+            | b"lpt2"
+            | b"lpt3"
+            | b"lpt4"
+            | b"lpt5"
+            | b"lpt6"
+            | b"lpt7"
+            | b"lpt8"
+            | b"lpt9"
+    )
+}
+
+/// ASCII-case-insensitive collision key per spec §8.3. Maps `A..Z` to
+/// `a..z`; everything else (digits, punctuation, multi-byte UTF-8)
+/// passes through unchanged. Used by tree.rs to detect paths like
+/// `Foo.txt` vs `FOO.TXT` that would collide on a case-insensitive
+/// filesystem before the platform backend's `create_new(true)` check
+/// could surface the conflict.
+pub fn ascii_case_collision_key(path: &str) -> Vec<u8> {
+    path.bytes().map(ascii_lower_byte).collect()
+}
+
+/// Counts the `/`-separated components of an FCA path. The path is
+/// guaranteed by [`validate_fca_path`] to use single `/` separators
+/// with no leading/trailing slash, so `split('/').count()` matches
+/// the `max_path_depth` cap exactly. Shared by the writer's
+/// canonical sort (`encode::sort_entries_canonically`) and the
+/// reader's directory pre-creation pass (`decode::extract_directory_root`).
+pub(super) fn component_count(path: &str) -> usize {
+    path.split('/').count()
+}
+
+/// Spec §10 canonical sort key: depth ascending, then path bytes
+/// ascending. Used by the writer's full-manifest sort and the
+/// reader's directory pre-creation pass so the two sites cannot
+/// drift on what "canonical order" means.
+pub(super) fn canonical_path_order(a: &str, b: &str) -> std::cmp::Ordering {
+    component_count(a)
+        .cmp(&component_count(b))
+        .then_with(|| a.cmp(b))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::validate_archive_path_components;
-    use std::path::Path;
+    use super::*;
 
-    #[test]
-    fn validate_rejects_path_traversal() {
-        assert!(validate_archive_path_components(Path::new("safe.txt")).is_ok());
-        assert!(validate_archive_path_components(Path::new("dir/file.txt")).is_ok());
-        assert!(validate_archive_path_components(Path::new("../escape.txt")).is_err());
-        assert!(validate_archive_path_components(Path::new("dir/../../escape.txt")).is_err());
-        assert!(validate_archive_path_components(Path::new("/etc/passwd")).is_err());
-        // Leading `./` turns root_name into `.` and breaks the final
-        // rename, so reject it early. Ferrocrypt's own archiver never
-        // produces such paths.
-        assert!(validate_archive_path_components(Path::new("./foo/bar")).is_err());
-        assert!(validate_archive_path_components(Path::new(".")).is_err());
+    fn limits() -> ArchiveLimits {
+        ArchiveLimits::default()
     }
 
-    /// A bare `..` is a single `Component::ParentDir`. The mid-path case
-    /// is covered by `validate_rejects_path_traversal`; this pins the
-    /// standalone form so a future change to the component match arms
-    /// can't accidentally let it through.
+    // -- Positive cases -----------------------------------------------------
+
     #[test]
-    fn validate_rejects_bare_parent_dir() {
-        assert!(validate_archive_path_components(Path::new("..")).is_err());
+    fn accepts_simple_file() {
+        assert!(validate_fca_path("file.txt", limits()).is_ok());
     }
 
-    /// An empty path has no components, so the loop is a no-op and the
-    /// validator returns `Ok(())`. The main decode flow never reaches
-    /// here with an empty path (`validate_ustar_entry` rejects empty
-    /// paths up front), but the function is `pub` and reachable via the
-    /// `fuzz_exports` surface, so pin the permissive empty-path
-    /// contract explicitly — a future "reject empty" change is a
-    /// behavior break that should be caught here, not in fuzzers.
     #[test]
-    fn validate_accepts_empty_path() {
-        assert!(validate_archive_path_components(Path::new("")).is_ok());
+    fn accepts_nested_path() {
+        assert!(validate_fca_path("dir/sub/file.txt", limits()).is_ok());
+    }
+
+    #[test]
+    fn accepts_mixed_case() {
+        assert!(validate_fca_path("Some/Mixed/Case.TXT", limits()).is_ok());
+    }
+
+    #[test]
+    fn accepts_non_ascii() {
+        assert!(validate_fca_path("naïve.txt", limits()).is_ok());
+        assert!(validate_fca_path("résumé/notes.md", limits()).is_ok());
+    }
+
+    #[test]
+    fn accepts_emoji() {
+        assert!(validate_fca_path("🎉.txt", limits()).is_ok());
+    }
+
+    /// `.foo` (hidden file on Unix) has empty stem — empty stem is
+    /// not a reserved device name, so accepted.
+    #[test]
+    fn accepts_dotfile() {
+        assert!(validate_fca_path(".gitignore", limits()).is_ok());
+        assert!(validate_fca_path(".env", limits()).is_ok());
+    }
+
+    /// `auxiliary.txt` shares a prefix with `aux` but the stem is
+    /// 9 bytes — over the 6-byte fast-path cap, so it cannot match.
+    #[test]
+    fn accepts_long_stem_that_starts_with_reserved_prefix() {
+        assert!(validate_fca_path("auxiliary.txt", limits()).is_ok());
+        assert!(validate_fca_path("conditional.md", limits()).is_ok());
+    }
+
+    // -- Whole-path rejections (§8.1, §19.3) -------------------------------
+
+    #[test]
+    fn rejects_empty() {
+        let err = validate_fca_path("", limits()).unwrap_err();
+        assert!(format!("{err}").contains("Empty"));
+    }
+
+    #[test]
+    fn rejects_leading_slash() {
+        let err = validate_fca_path("/etc/passwd", limits()).unwrap_err();
+        assert!(format!("{err}").contains("absolute"));
+    }
+
+    #[test]
+    fn rejects_trailing_slash() {
+        let err = validate_fca_path("dir/", limits()).unwrap_err();
+        assert!(format!("{err}").contains("trailing slash"));
+    }
+
+    #[test]
+    fn rejects_double_slash() {
+        let err = validate_fca_path("a//b", limits()).unwrap_err();
+        assert!(format!("{err}").contains("repeated slash"));
+    }
+
+    #[test]
+    fn rejects_nul_byte() {
+        let err = validate_fca_path("a\0b", limits()).unwrap_err();
+        assert!(format!("{err}").contains("NUL byte"));
+    }
+
+    #[test]
+    fn rejects_backslash() {
+        let err = validate_fca_path("a\\b", limits()).unwrap_err();
+        assert!(format!("{err}").contains("backslash"));
+    }
+
+    #[test]
+    fn rejects_oversize_path() {
+        let l = ArchiveLimits::default().with_max_path_bytes(10);
+        let err = validate_fca_path("this_is_too_long.txt", l).unwrap_err();
+        assert!(format!("{err}").contains("byte-length cap"));
+    }
+
+    #[test]
+    fn rejects_oversize_depth() {
+        let l = ArchiveLimits::default().with_max_path_depth(3);
+        let err = validate_fca_path("a/b/c/d", l).unwrap_err();
+        assert!(format!("{err}").contains("depth cap"));
+    }
+
+    /// Boundary check: depth exactly at cap is admissible, cap+1
+    /// rejected. Same `>` vs `>=` regression guard as the limits
+    /// helpers carry on the encode side.
+    #[test]
+    fn depth_at_cap_admissible() {
+        let l = ArchiveLimits::default().with_max_path_depth(3);
+        assert!(validate_fca_path("a/b/c", l).is_ok());
+    }
+
+    // -- Component rejections (§8.2) ---------------------------------------
+
+    #[test]
+    fn rejects_control_byte_tab() {
+        let err = validate_fca_path("a\tb", limits()).unwrap_err();
+        assert!(format!("{err}").contains("control byte"));
+    }
+
+    #[test]
+    fn rejects_control_byte_low() {
+        let err = validate_fca_path("a\x01b", limits()).unwrap_err();
+        assert!(format!("{err}").contains("control byte"));
+    }
+
+    /// Every byte in the spec's Windows-reserved set rejects when
+    /// embedded in a component. Loop-over-set keeps the test honest
+    /// against accidental drift from the spec literal.
+    #[test]
+    fn rejects_each_windows_reserved_char() {
+        for &c in WINDOWS_RESERVED_CHARS {
+            let path = format!("a{}b.txt", c as char);
+            let err = validate_fca_path(&path, limits()).unwrap_err();
+            assert!(
+                format!("{err}").contains("Windows-reserved character"),
+                "char {:?} should reject",
+                c as char,
+            );
+        }
+    }
+
+    /// `:` is in the reserved set — pin separately because it's the
+    /// alternate-data-stream attack vector on NTFS, the most
+    /// security-relevant case in this set.
+    #[test]
+    fn rejects_colon_for_alternate_data_stream() {
+        let err = validate_fca_path("file:stream", limits()).unwrap_err();
+        assert!(format!("{err}").contains("Windows-reserved character"));
+    }
+
+    #[test]
+    fn rejects_trailing_space_in_component() {
+        let err = validate_fca_path("file ", limits()).unwrap_err();
+        assert!(format!("{err}").contains("ends with space"));
+
+        let err = validate_fca_path("dir /file", limits()).unwrap_err();
+        assert!(format!("{err}").contains("ends with space"));
+    }
+
+    #[test]
+    fn rejects_trailing_dot_in_component() {
+        let err = validate_fca_path("file.", limits()).unwrap_err();
+        assert!(format!("{err}").contains("ends with dot"));
+
+        let err = validate_fca_path("dir./file", limits()).unwrap_err();
+        assert!(format!("{err}").contains("ends with dot"));
+    }
+
+    #[test]
+    fn rejects_dot_components() {
+        assert!(validate_fca_path(".", limits()).is_err());
+        assert!(validate_fca_path("./file", limits()).is_err());
+        assert!(validate_fca_path("a/./b", limits()).is_err());
+    }
+
+    #[test]
+    fn rejects_double_dot_components() {
+        assert!(validate_fca_path("..", limits()).is_err());
+        assert!(validate_fca_path("../escape", limits()).is_err());
+        assert!(validate_fca_path("a/..", limits()).is_err());
+        assert!(validate_fca_path("a/../b", limits()).is_err());
+    }
+
+    // -- Reserved device names (§8.2) --------------------------------------
+
+    /// All 23 reserved device names from spec §8.2 reject. Loop-over
+    /// pin keeps the test honest against future spec changes that
+    /// add or remove an entry.
+    #[test]
+    fn rejects_every_reserved_device_name() {
+        let names = [
+            "CON", "PRN", "AUX", "NUL", "CLOCK$", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6",
+            "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8",
+            "LPT9",
+        ];
+        for name in &names {
+            let err = validate_fca_path(name, limits()).unwrap_err();
+            assert!(
+                format!("{err}").contains("Windows-reserved device"),
+                "name {name} should reject",
+            );
+        }
+    }
+
+    /// Reserved-stem-with-extension form per spec §8.2. The stem
+    /// is checked before the first `.`, so `CON.txt` matches `con`
+    /// and rejects.
+    #[test]
+    fn rejects_reserved_stems_with_extension() {
+        for stem in &[
+            "CON.txt",
+            "PRN.bak",
+            "AUX.bin",
+            "NUL.log",
+            "CLOCK$.dat",
+            "COM1.log",
+            "LPT9.bin",
+        ] {
+            let err = validate_fca_path(stem, limits()).unwrap_err();
+            assert!(
+                format!("{err}").contains("Windows-reserved device"),
+                "stem {stem} should reject",
+            );
+        }
+    }
+
+    /// Spec §8.2: "ASCII-case-insensitive only". Same reserved name
+    /// in any case combination rejects; locale-sensitive folding is
+    /// explicitly NOT used (would be wrong for e.g. Turkish dotted
+    /// `İ`/`ı`).
+    #[test]
+    fn reserved_check_is_ascii_case_insensitive() {
+        for name in &["con", "Con", "CON", "cOn", "lpt9", "Lpt9", "LPT9"] {
+            let err = validate_fca_path(name, limits()).unwrap_err();
+            assert!(
+                format!("{err}").contains("Windows-reserved device"),
+                "name {name} should reject",
+            );
+        }
+    }
+
+    /// `.foo` has empty stem (text before the first dot is empty),
+    /// so it is NOT a reserved-device collision. Pin this to catch
+    /// a future refactor that conflates "no dot" and "empty stem".
+    #[test]
+    fn empty_stem_is_not_reserved() {
+        assert!(validate_fca_path(".foo", limits()).is_ok());
+        assert!(!is_windows_reserved_device_component(".foo"));
+    }
+
+    // -- Collision key (§8.3) ----------------------------------------------
+
+    #[test]
+    fn collision_key_lowercases_ascii() {
+        assert_eq!(ascii_case_collision_key("Foo.TXT"), b"foo.txt");
+        assert_eq!(ascii_case_collision_key("ABCdef"), b"abcdef");
+        assert_eq!(ascii_case_collision_key(""), Vec::<u8>::new());
+    }
+
+    /// Multi-byte UTF-8 bytes pass through unchanged. The check is
+    /// intentionally NOT Unicode-aware per spec §8.3; filesystem-
+    /// specific Unicode collisions fall through to `create_new(true)`
+    /// at extraction time.
+    #[test]
+    fn collision_key_passes_through_non_ascii() {
+        let input = "naïve";
+        assert_eq!(ascii_case_collision_key(input), input.as_bytes());
+
+        // Capital N gets lowercased; ï (multi-byte) stays.
+        let key = ascii_case_collision_key("Naïve");
+        assert_eq!(key.first(), Some(&b'n'));
+        assert_eq!(&key[1..], "aïve".as_bytes());
     }
 }

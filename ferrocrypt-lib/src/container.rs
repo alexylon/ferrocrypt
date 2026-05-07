@@ -36,7 +36,7 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::archive_v1 as archive;
+use crate::archive;
 use crate::crypto::keys::{HeaderKey, PayloadKey};
 use crate::crypto::stream::{STREAM_NONCE_SIZE, payload_encryptor};
 use crate::error::{CryptoError, FormatDefect};

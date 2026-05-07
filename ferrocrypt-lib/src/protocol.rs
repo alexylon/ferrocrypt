@@ -40,7 +40,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::archive_v1::{ArchiveLimits, IncompleteOutputPolicy, unarchive};
+use crate::archive::{ArchiveLimits, IncompleteOutputPolicy, unarchive};
 use crate::container::{
     HeaderReadLimits, build_encrypted_header, read_encrypted_header, resolve_encrypted_output_path,
     write_encrypted_file,
@@ -608,13 +608,13 @@ mod tests {
 
         // Encrypt a single-file FCA payload into a buffer. Constructs
         // the FCA header + manifest + content for one entry named
-        // "data.txt"; matches what `archive_v1::archive` would emit
+        // "data.txt"; matches what `archive::archive` would emit
         // for that input.
         let mut payload_buf: Vec<u8> = Vec::new();
         {
-            use crate::archive_v1::ArchiveLimits;
-            use crate::archive_v1::format::{serialize_manifest, write_fca_header};
-            use crate::archive_v1::model::{ArchiveEntry, ArchiveEntryKind, Manifest};
+            use crate::archive::ArchiveLimits;
+            use crate::archive::format::{serialize_manifest, write_fca_header};
+            use crate::archive::model::{ArchiveEntry, ArchiveEntryKind, Manifest};
             use std::ffi::OsString;
             use std::io::Write;
 

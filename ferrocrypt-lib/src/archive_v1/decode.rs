@@ -42,7 +42,7 @@ use crate::archive::platform;
 use crate::fs::atomic::rename_no_clobber;
 use crate::fs::paths::{INCOMPLETE_SUFFIX, reject_occupied};
 
-use super::format::{parse_fca_header, parse_manifest_bytes};
+use super::format::{copy_exact_n, parse_fca_header, parse_manifest_bytes};
 use super::limits::ArchiveLimits;
 use super::model::{ArchiveEntry, ArchiveEntryKind, Manifest};
 
@@ -267,32 +267,6 @@ fn apply_root_directory_mode(output_dir: &Path, manifest: &Manifest) -> Result<(
     let output_handle = platform::open_anchor(output_dir)?;
     let root_dir = platform::open_dir_at_rel(&output_handle, Path::new(root_name_str))?;
     platform::chmod_dir_handle(root_dir, root_entry.mode)
-}
-
-/// Reads exactly `size` bytes from `reader`, writing them to `writer`.
-/// Spec §14.10: archive content bytes MUST NOT use unbounded `io::copy`,
-/// which would happily keep reading past `size` on a misbehaving reader.
-fn copy_exact_n<R: Read, W: Write>(
-    reader: &mut R,
-    writer: &mut W,
-    size: u64,
-) -> Result<(), CryptoError> {
-    let mut buf = [0u8; 64 * 1024];
-    let mut remaining = size;
-    while remaining > 0 {
-        // Buffer is 64 KiB which fits any usize on supported targets;
-        // the `min` ensures the cast is bounded by the smaller side.
-        let want = std::cmp::min(buf.len() as u64, remaining) as usize;
-        let n = reader.read(&mut buf[..want])?;
-        if n == 0 {
-            return Err(CryptoError::InvalidInput(
-                "Archive file content is shorter than declared size".to_string(),
-            ));
-        }
-        writer.write_all(&buf[..n]).map_err(CryptoError::Io)?;
-        remaining -= n as u64;
-    }
-    Ok(())
 }
 
 /// Spec §14.11: rejects any non-EOF byte after the last declared file

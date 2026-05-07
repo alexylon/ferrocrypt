@@ -55,6 +55,43 @@ pub(super) fn write_u8<W: Write>(w: &mut W, n: u8) -> io::Result<()> {
     w.write_all(&[n])
 }
 
+/// Reads exactly `size` bytes from `reader` and writes them to `writer`.
+/// Used by both the encrypt-side content pass (source file → encrypted
+/// stream) and the decrypt-side content extraction (encrypted stream →
+/// output file). Spec §14.10: archive content bytes MUST NOT use
+/// unbounded `io::copy`, which would happily keep reading past `size`
+/// on a misbehaving reader.
+///
+/// On a short read (reader returns `Ok(0)` while bytes are still
+/// expected), returns [`CryptoError::InvalidInput`] with the
+/// "shorter than declared size" diagnostic. The `?` on `read` threads
+/// `StreamError` markers from the underlying decrypt stream through
+/// `From<io::Error> for CryptoError` so authentication / truncation /
+/// extra-data signals surface as the typed `CryptoError::Payload*`
+/// variant rather than as a generic archive error.
+pub(super) fn copy_exact_n<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    size: u64,
+) -> Result<(), CryptoError> {
+    let mut buf = [0u8; 64 * 1024];
+    let mut remaining = size;
+    while remaining > 0 {
+        // Buffer is 64 KiB which fits any usize on supported targets;
+        // the `min` ensures the cast is bounded by the smaller side.
+        let want = std::cmp::min(buf.len() as u64, remaining) as usize;
+        let n = reader.read(&mut buf[..want])?;
+        if n == 0 {
+            return Err(CryptoError::InvalidInput(
+                "Archive file content is shorter than declared size".to_string(),
+            ));
+        }
+        writer.write_all(&buf[..n]).map_err(CryptoError::Io)?;
+        remaining -= n as u64;
+    }
+    Ok(())
+}
+
 pub(super) fn write_u16_be<W: Write>(w: &mut W, n: u16) -> io::Result<()> {
     w.write_all(&n.to_be_bytes())
 }

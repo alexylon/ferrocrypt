@@ -1,2 +1,718 @@
-//! FCA writer: source-tree traversal (metadata pass) and content-streaming
-//! pass. Filled in Phase 7.
+//! FCA archive writer: source-tree traversal (metadata pass) and
+//! content-streaming pass.
+//!
+//! See `notes/archive_format/ARCHIVE_FORMAT.md` §10 (entry ordering),
+//! §11 (limits), §12 (internal API), §13 (module layout),
+//! §14.13 (writer entry-point skeleton), §15 (writer requirements),
+//! §17 (platform requirements), §19.6 (writer-side rejection list).
+//!
+//! The writer is two-pass:
+//!
+//! 1. **Metadata pass** — recursively walks the source tree via
+//!    `std::fs::read_dir`, building a [`Manifest`] of [`ArchiveEntry`]s
+//!    with FCA-canonical paths, modes, sizes, and source paths.
+//!    Symlinks, FIFOs, sockets, devices, and Windows reparse points are
+//!    rejected inline. Entry-count, total-bytes, depth, path-byte, and
+//!    manifest-size caps are applied progressively, and every path is
+//!    routed through [`validate_fca_path`] so the writer never emits
+//!    a path its own reader would refuse.
+//!
+//! 2. **Content pass** — for each file entry in canonical manifest
+//!    order, reopens the source file with `O_NOFOLLOW` (Unix) or
+//!    `symlink_metadata` + `File::open` (non-Unix), refreshes metadata
+//!    from the open handle, requires the source is still a regular
+//!    file with `len() == manifest size`, and streams exactly the
+//!    declared size via [`copy_exact_n`].
+//!
+//! Between the two passes the source tree may change. Spec §15.5
+//! defines the response: shrink / type change / inaccessible →
+//! encryption MUST fail; growth before the fresh metadata check →
+//! reject; growth during the copy after the fresh metadata check →
+//! the writer copies exactly the declared size, keeping the archive
+//! self-consistent.
+
+use std::ffi::OsString;
+use std::fs::{self, File};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use crate::CryptoError;
+use crate::fs::paths::file_stem;
+
+use super::format::{PERMISSION_BITS_MASK, copy_exact_n, serialize_manifest, write_fca_header};
+use super::limits::{ArchiveLimits, enforce_per_entry_caps, enforce_total_bytes_cap};
+use super::model::{ArchiveEntry, ArchiveEntryKind, Manifest};
+use super::path::validate_fca_path;
+use super::tree::validate_manifest_tree;
+
+/// Default file mode for non-Unix platforms (rw-r--r--). FCA stores a
+/// Unix-style permission word; on Windows there is no rwx semantic to
+/// read so a fixed default is used and round-trip extraction applies
+/// it as a no-op (Windows chmod is a no-op in the platform backend).
+#[cfg(not(unix))]
+const DEFAULT_FILE_MODE: u32 = 0o644;
+
+/// Default directory mode for non-Unix platforms (rwxr-xr-x).
+#[cfg(not(unix))]
+const DEFAULT_DIR_MODE: u32 = 0o755;
+
+/// Reads the rwx-only Unix permission word from `metadata`, stripping
+/// setuid/setgid/sticky. Folds the `cfg(unix)`-gated `PermissionsExt`
+/// import into one place.
+#[cfg(unix)]
+fn metadata_perm_mode(metadata: &fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & PERMISSION_BITS_MASK
+}
+
+/// Mode to store for a regular file. On Unix the rwx bits of the
+/// source file (special bits stripped); on non-Unix targets the
+/// fixed default.
+fn archive_file_mode(metadata: &fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        metadata_perm_mode(metadata)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        DEFAULT_FILE_MODE
+    }
+}
+
+/// Mode to store for a directory. Reads `src_path` metadata fresh on
+/// Unix; on non-Unix returns the fixed default without touching the
+/// filesystem (no rwx semantic to read, and skipping the syscall
+/// avoids a stray failure mode where a concurrent removal between
+/// `read_dir` and `archive_dir_mode` would otherwise abort the
+/// archive).
+fn archive_dir_mode(src_path: &Path) -> Result<u32, CryptoError> {
+    #[cfg(unix)]
+    {
+        Ok(metadata_perm_mode(&fs::metadata(src_path)?))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = src_path;
+        Ok(DEFAULT_DIR_MODE)
+    }
+}
+
+/// Opens a regular file for reading without following symlinks. On
+/// Unix uses `O_NOFOLLOW` so the open itself is atomic; on non-Unix
+/// falls back to a `symlink_metadata` pre-check followed by
+/// `File::open`. The non-Unix branch has a small TOCTOU window between
+/// the pre-check and the open; closing it requires `NtCreateFile` with
+/// `OBJECT_ATTRIBUTES`, which the crate does not currently take on
+/// because of its zero-`unsafe` stance. The pre-archive
+/// [`validate_encrypt_input`] rejects symlinks at the outermost input
+/// path and the per-entry recursive walker re-applies symlink rejection,
+/// so an attacker's window is the per-open syscall gap, not the entire
+/// archive run.
+#[cfg(unix)]
+fn open_no_follow(path: &Path) -> Result<File, CryptoError> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|e| {
+            if e.raw_os_error() == Some(libc::ELOOP) {
+                CryptoError::InvalidInput(format!("Input is a symlink: {}", path.display()))
+            } else {
+                CryptoError::Io(e)
+            }
+        })
+}
+
+#[cfg(not(unix))]
+fn open_no_follow(path: &Path) -> Result<File, CryptoError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() {
+        return Err(CryptoError::InvalidInput(format!(
+            "Input is no longer a regular file: {}",
+            path.display()
+        )));
+    }
+    Ok(File::open(path)?)
+}
+
+/// Rejects inputs the archiver will not accept: symlinks (live or
+/// dangling) and anything that isn't a regular file or directory.
+/// Called at the top of every encrypt entry point in `api.rs` so the
+/// rejection fires before any KDF / cipher work runs (up to a gigabyte
+/// of RAM and several seconds of CPU on default Argon2id), not only at
+/// archive time. The archive-time call below remains as defense-in-
+/// depth against TOCTOU and direct callers.
+///
+/// The `is_symlink` check runs before the existence check so a
+/// dangling symlink fails with "Input is a symlink" rather than a
+/// generic `InputPath` not-found.
+pub(crate) fn validate_encrypt_input(input_path: &Path) -> Result<(), CryptoError> {
+    if input_path.is_symlink() {
+        return Err(CryptoError::InvalidInput(format!(
+            "Input is a symlink: {}",
+            input_path.display()
+        )));
+    }
+    if !input_path.exists() {
+        return Err(CryptoError::InputPath);
+    }
+    if !input_path.is_file() && !input_path.is_dir() {
+        return Err(CryptoError::InvalidInput(format!(
+            "Unsupported file type: {}",
+            input_path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Running totals threaded through the recursive metadata-pass walk
+/// so caps can fire across the entire tree, not just per-call.
+#[derive(Debug, Default)]
+struct ArchiveCounters {
+    entry_count: u32,
+    total_bytes: u64,
+}
+
+/// Builds a fully validated [`Manifest`] from the source tree under
+/// `input_path`. Single-file inputs produce a one-entry manifest with
+/// `root_is_file = true`; directory inputs produce a multi-entry
+/// manifest with `root_is_file = false`.
+fn build_manifest(input_path: &Path, limits: &ArchiveLimits) -> Result<Manifest, CryptoError> {
+    let metadata = fs::symlink_metadata(input_path)?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Err(CryptoError::InvalidInput(format!(
+            "Input is a symlink: {}",
+            input_path.display()
+        )));
+    }
+
+    let name = input_path
+        .file_name()
+        .ok_or_else(|| CryptoError::InvalidInput("Cannot get input file name".to_string()))?;
+    let name_str = name
+        .to_str()
+        .ok_or_else(|| {
+            CryptoError::InvalidInput(format!(
+                "Input name is not valid UTF-8: {}",
+                input_path.display()
+            ))
+        })?
+        .to_string();
+
+    if file_type.is_file() {
+        let mode = archive_file_mode(&metadata);
+        let size = metadata.len();
+
+        if size > limits.max_total_plaintext_bytes {
+            return Err(CryptoError::InvalidInput(format!(
+                "Archive total-bytes cap exceeded ({size} bytes, cap {})",
+                limits.max_total_plaintext_bytes,
+            )));
+        }
+        validate_fca_path(&name_str, *limits)?;
+
+        let entry = ArchiveEntry {
+            kind: ArchiveEntryKind::File,
+            path_utf8: name_str.clone(),
+            path: PathBuf::from(&name_str),
+            mode,
+            size,
+            source_path: Some(input_path.to_path_buf()),
+        };
+
+        Ok(Manifest {
+            entries: vec![entry],
+            total_file_bytes: size,
+            root_name: OsString::from(&name_str),
+            root_is_file: true,
+        })
+    } else if file_type.is_dir() {
+        let root_mode = archive_dir_mode(input_path)?;
+        validate_fca_path(&name_str, *limits)?;
+
+        let mut entries = vec![ArchiveEntry {
+            kind: ArchiveEntryKind::Directory,
+            path_utf8: name_str.clone(),
+            path: PathBuf::from(&name_str),
+            mode: root_mode,
+            size: 0,
+            source_path: Some(input_path.to_path_buf()),
+        }];
+        let mut counters = ArchiveCounters {
+            entry_count: 1,
+            total_bytes: 0,
+        };
+
+        walk_directory(input_path, &name_str, &mut entries, &mut counters, limits)?;
+
+        sort_entries_canonically(&mut entries);
+
+        Ok(Manifest {
+            entries,
+            total_file_bytes: counters.total_bytes,
+            root_name: OsString::from(&name_str),
+            root_is_file: false,
+        })
+    } else {
+        Err(CryptoError::InvalidInput(format!(
+            "Unsupported file type: {}",
+            input_path.display()
+        )))
+    }
+}
+
+/// Recursively walks `src_dir`, appending entries to `entries` with
+/// FCA paths rooted at `fca_prefix`. Symlinks, devices, FIFOs, sockets,
+/// reparse points (via the file-type classification) are rejected.
+fn walk_directory(
+    src_dir: &Path,
+    fca_prefix: &str,
+    entries: &mut Vec<ArchiveEntry>,
+    counters: &mut ArchiveCounters,
+    limits: &ArchiveLimits,
+) -> Result<(), CryptoError> {
+    for read_dir_entry in fs::read_dir(src_dir)? {
+        let dir_entry = read_dir_entry?;
+        let metadata = dir_entry.metadata()?;
+        let file_type = metadata.file_type();
+
+        if file_type.is_symlink() {
+            return Err(CryptoError::InvalidInput(format!(
+                "Symlink in archive source: {}",
+                dir_entry.path().display()
+            )));
+        }
+
+        let name = dir_entry.file_name();
+        let name_str = name.to_str().ok_or_else(|| {
+            CryptoError::InvalidInput(format!(
+                "Source filename is not valid UTF-8: {}",
+                dir_entry.path().display()
+            ))
+        })?;
+
+        let fca_path_utf8 = format!("{fca_prefix}/{name_str}");
+        let full_path = dir_entry.path();
+
+        if file_type.is_file() {
+            let mode = archive_file_mode(&metadata);
+            let size = metadata.len();
+
+            counters.entry_count = counters.entry_count.checked_add(1).ok_or_else(|| {
+                CryptoError::InvalidInput("Archive entry-count overflow".to_string())
+            })?;
+            enforce_per_entry_caps(counters.entry_count, &fca_path_utf8, limits)?;
+            enforce_total_bytes_cap(size, &mut counters.total_bytes, limits)?;
+            validate_fca_path(&fca_path_utf8, *limits)?;
+
+            entries.push(ArchiveEntry {
+                kind: ArchiveEntryKind::File,
+                path_utf8: fca_path_utf8.clone(),
+                path: PathBuf::from(&fca_path_utf8),
+                mode,
+                size,
+                source_path: Some(full_path),
+            });
+        } else if file_type.is_dir() {
+            let mode = archive_dir_mode(&full_path)?;
+
+            counters.entry_count = counters.entry_count.checked_add(1).ok_or_else(|| {
+                CryptoError::InvalidInput("Archive entry-count overflow".to_string())
+            })?;
+            enforce_per_entry_caps(counters.entry_count, &fca_path_utf8, limits)?;
+            validate_fca_path(&fca_path_utf8, *limits)?;
+
+            entries.push(ArchiveEntry {
+                kind: ArchiveEntryKind::Directory,
+                path_utf8: fca_path_utf8.clone(),
+                path: PathBuf::from(&fca_path_utf8),
+                mode,
+                size: 0,
+                source_path: Some(full_path.clone()),
+            });
+
+            walk_directory(&full_path, &fca_path_utf8, entries, counters, limits)?;
+        } else {
+            return Err(CryptoError::InvalidInput(format!(
+                "Unsupported file type in archive: {}",
+                full_path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Sorts entries by `(component_count, path_utf8_bytes)` per spec §10.
+/// The root directory sorts first by construction (smallest component
+/// count plus shortest path among any entry sharing the root).
+fn sort_entries_canonically(entries: &mut [ArchiveEntry]) {
+    entries.sort_by(|a, b| {
+        component_count(&a.path_utf8)
+            .cmp(&component_count(&b.path_utf8))
+            .then_with(|| a.path_utf8.cmp(&b.path_utf8))
+    });
+}
+
+fn component_count(path: &str) -> usize {
+    path.split('/').count()
+}
+
+/// Streams one file entry's contents into `writer`. Reopens the source
+/// no-follow, refreshes metadata from the open handle, requires the
+/// source is still a regular file with `len() == entry.size`, then
+/// copies exactly `entry.size` bytes.
+///
+/// Spec §15.5: on shrink, type change, or pre-copy growth — fail. On
+/// growth during the copy after the fresh metadata check — copy
+/// exactly the declared size, keeping the archive self-consistent.
+fn stream_source_file<W: Write>(entry: &ArchiveEntry, writer: &mut W) -> Result<(), CryptoError> {
+    let source = entry
+        .source_path
+        .as_ref()
+        .ok_or(CryptoError::InternalInvariant(
+            "Manifest entry missing source_path during content streaming",
+        ))?;
+
+    let mut file = open_no_follow(source)?;
+    let metadata = file.metadata().map_err(CryptoError::Io)?;
+    if !metadata.file_type().is_file() {
+        return Err(CryptoError::InvalidInput(format!(
+            "Source is no longer a regular file: {}",
+            source.display()
+        )));
+    }
+    if metadata.len() != entry.size {
+        return Err(CryptoError::InvalidInput(format!(
+            "Source file size changed during archive ({} → {}): {}",
+            entry.size,
+            metadata.len(),
+            source.display(),
+        )));
+    }
+
+    copy_exact_n(&mut file, writer, entry.size)
+}
+
+/// Archives a file or directory into the FCA wire format. Returns the
+/// output stem (file stem for file inputs, directory name for
+/// directory inputs) plus the writer for the caller to finalize.
+///
+/// Matches the existing internal API per spec §12.
+pub(crate) fn archive<W: Write>(
+    input_path: impl AsRef<Path>,
+    mut writer: W,
+    limits: ArchiveLimits,
+) -> Result<(String, W), CryptoError> {
+    let input_path = input_path.as_ref();
+    let limits = limits.validate()?;
+
+    // Defense-in-depth: api.rs runs validate_encrypt_input up-front, but
+    // direct callers and any TOCTOU shift between that check and now
+    // get re-validated here.
+    validate_encrypt_input(input_path)?;
+
+    // Pass 1: build the metadata-only manifest, including FCA path
+    // validation and progressive cap enforcement.
+    let manifest = build_manifest(input_path, &limits)?;
+
+    // Defense-in-depth: validate_manifest_tree confirms the tree shape
+    // we just built is internally consistent. A bug in walk_directory
+    // would surface here rather than producing a malformed archive.
+    let _ = validate_manifest_tree(&manifest.entries, manifest.total_file_bytes, limits)?;
+
+    // Serialize manifest bytes into a checked-length buffer.
+    let manifest_bytes = serialize_manifest(&manifest, limits)?;
+    let entry_count = u32::try_from(manifest.entries.len())
+        .map_err(|_| CryptoError::InvalidInput("Archive entry-count cap exceeded".to_string()))?;
+    let manifest_len = u32::try_from(manifest_bytes.len()).map_err(|_| {
+        CryptoError::InvalidInput("Archive manifest length cap exceeded".to_string())
+    })?;
+
+    // Emit header + serialized manifest.
+    writer = write_fca_header(writer, entry_count, manifest_len, manifest.total_file_bytes)?;
+    writer.write_all(&manifest_bytes).map_err(CryptoError::Io)?;
+
+    // Pass 2: stream file contents in canonical manifest order. Each
+    // file is reopened no-follow with a fresh metadata check.
+    for entry in &manifest.entries {
+        if entry.kind == ArchiveEntryKind::File {
+            stream_source_file(entry, &mut writer)?;
+        }
+    }
+
+    let stem = output_stem(input_path)?;
+    Ok((stem, writer))
+}
+
+/// Returns the output stem used to name the encrypted output file.
+/// For file inputs, the file stem (no extension); for directory
+/// inputs, the full directory name (preserving any dots).
+fn output_stem(input_path: &Path) -> Result<String, CryptoError> {
+    if input_path.is_dir() {
+        let name = input_path
+            .file_name()
+            .ok_or_else(|| CryptoError::InvalidInput("Cannot get directory name".to_string()))?;
+        Ok(name.to_string_lossy().into_owned())
+    } else {
+        Ok(file_stem(input_path)?.to_string_lossy().into_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::archive::IncompleteOutputPolicy;
+    use crate::archive_v1::decode::unarchive;
+    use std::io::Cursor;
+
+    /// End-to-end round-trip: archive → unarchive on the same tempdir
+    /// (different output dir so the source isn't overwritten).
+    fn round_trip(src_root: &Path, out_root: &Path) -> PathBuf {
+        let mut buf = Vec::new();
+        let _ = archive(src_root, &mut buf, ArchiveLimits::default()).unwrap();
+        unarchive(
+            Cursor::new(buf),
+            out_root,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::DeleteOnError,
+        )
+        .unwrap()
+    }
+
+    // -- Positive round-trip tests -----------------------------------------
+
+    #[test]
+    fn round_trip_single_file() {
+        let src = tempfile::TempDir::new().unwrap();
+        let out = tempfile::TempDir::new().unwrap();
+        let src_file = src.path().join("hello.txt");
+        fs::write(&src_file, b"Hello, world!").unwrap();
+
+        let final_path = round_trip(&src_file, out.path());
+        assert_eq!(final_path, out.path().join("hello.txt"));
+        assert_eq!(fs::read(&final_path).unwrap(), b"Hello, world!");
+    }
+
+    #[test]
+    fn round_trip_empty_file() {
+        let src = tempfile::TempDir::new().unwrap();
+        let out = tempfile::TempDir::new().unwrap();
+        let src_file = src.path().join("empty.bin");
+        fs::write(&src_file, b"").unwrap();
+
+        let final_path = round_trip(&src_file, out.path());
+        assert_eq!(fs::read(&final_path).unwrap(), b"");
+    }
+
+    #[test]
+    fn round_trip_directory_tree() {
+        let src = tempfile::TempDir::new().unwrap();
+        let out = tempfile::TempDir::new().unwrap();
+        let dir = src.path().join("photos");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("index.txt"), b"hello").unwrap();
+        fs::write(dir.join("cover.jpg"), b"jpegjpe").unwrap();
+        fs::create_dir(dir.join("raw")).unwrap();
+        fs::write(dir.join("raw").join("a.dng"), b"raw_data").unwrap();
+
+        let final_path = round_trip(&dir, out.path());
+        assert!(final_path.is_dir());
+        assert_eq!(fs::read(final_path.join("index.txt")).unwrap(), b"hello");
+        assert_eq!(fs::read(final_path.join("cover.jpg")).unwrap(), b"jpegjpe");
+        assert_eq!(
+            fs::read(final_path.join("raw").join("a.dng")).unwrap(),
+            b"raw_data",
+        );
+    }
+
+    #[test]
+    fn round_trip_empty_directory() {
+        let src = tempfile::TempDir::new().unwrap();
+        let out = tempfile::TempDir::new().unwrap();
+        let dir = src.path().join("emptydir");
+        fs::create_dir(&dir).unwrap();
+
+        let final_path = round_trip(&dir, out.path());
+        assert!(final_path.is_dir());
+        assert_eq!(fs::read_dir(&final_path).unwrap().count(), 0);
+    }
+
+    /// Manifest determinism end-to-end: two encrypts of the same tree
+    /// produce byte-identical archive bytes. Pinned because the
+    /// metadata-pass walk uses `fs::read_dir` which has filesystem-
+    /// dependent order — without `sort_entries_canonically` this would
+    /// fail.
+    #[test]
+    fn archive_output_is_deterministic() {
+        let src = tempfile::TempDir::new().unwrap();
+        let dir = src.path().join("d");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("z.txt"), b"zzz").unwrap();
+        fs::write(dir.join("a.txt"), b"aaa").unwrap();
+        fs::write(dir.join("m.txt"), b"mmm").unwrap();
+
+        let mut buf1 = Vec::new();
+        let _ = archive(&dir, &mut buf1, ArchiveLimits::default()).unwrap();
+        let mut buf2 = Vec::new();
+        let _ = archive(&dir, &mut buf2, ArchiveLimits::default()).unwrap();
+
+        assert_eq!(buf1, buf2);
+    }
+
+    /// The output stem returned by `archive` follows the existing
+    /// internal API per spec §12: file stem for files, dir name for
+    /// directories.
+    #[test]
+    fn returns_correct_output_stem() {
+        let src = tempfile::TempDir::new().unwrap();
+        let mut buf = Vec::new();
+
+        let file = src.path().join("hello.txt");
+        fs::write(&file, b"x").unwrap();
+        let (stem, _) = archive(&file, &mut buf, ArchiveLimits::default()).unwrap();
+        assert_eq!(stem, "hello");
+
+        buf.clear();
+        let dotfile = src.path().join("photos.v1");
+        fs::create_dir(&dotfile).unwrap();
+        let (stem, _) = archive(&dotfile, &mut buf, ArchiveLimits::default()).unwrap();
+        assert_eq!(stem, "photos.v1");
+    }
+
+    // -- Writer-side rejections (§19.6) ------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_root_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = tmp.path().join("real.txt");
+        fs::write(&target, b"data").unwrap();
+        let link = tmp.path().join("link.txt");
+        symlink(&target, &link).unwrap();
+
+        let mut buf = Vec::new();
+        let err = archive(&link, &mut buf, ArchiveLimits::default()).unwrap_err();
+        assert!(format!("{err}").contains("Input is a symlink"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_dangling_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let link = tmp.path().join("dangling");
+        symlink(tmp.path().join("absent-target"), &link).unwrap();
+
+        let mut buf = Vec::new();
+        let err = archive(&link, &mut buf, ArchiveLimits::default()).unwrap_err();
+        assert!(format!("{err}").contains("symlink"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_inside_directory_tree() {
+        use std::os::unix::fs::symlink;
+
+        let src = tempfile::TempDir::new().unwrap();
+        let dir = src.path().join("d");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("real.txt"), b"data").unwrap();
+        symlink("real.txt", dir.join("link.txt")).unwrap();
+
+        let mut buf = Vec::new();
+        let err = archive(&dir, &mut buf, ArchiveLimits::default()).unwrap_err();
+        assert!(format!("{err}").contains("Symlink in archive source"));
+    }
+
+    #[test]
+    fn rejects_missing_input() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let absent = tmp.path().join("does-not-exist");
+        let mut buf = Vec::new();
+        let err = archive(&absent, &mut buf, ArchiveLimits::default()).unwrap_err();
+        assert!(matches!(err, CryptoError::InputPath));
+    }
+
+    /// Per-entry caps fire during the metadata pass — catch-cap before
+    /// any header bytes are emitted.
+    #[test]
+    fn rejects_tree_above_entry_count_cap() {
+        let src = tempfile::TempDir::new().unwrap();
+        let dir = src.path().join("d");
+        fs::create_dir(&dir).unwrap();
+        for i in 0..5 {
+            fs::write(dir.join(format!("f{i}.txt")), b"x").unwrap();
+        }
+
+        let limits = ArchiveLimits::default().with_max_entry_count(3);
+        let mut buf = Vec::new();
+        let err = archive(&dir, &mut buf, limits).unwrap_err();
+        assert!(format!("{err}").contains("entry-count cap exceeded"));
+        // No header bytes should have been emitted.
+        assert!(buf.is_empty(), "writer must not emit bytes when caps fail");
+    }
+
+    #[test]
+    fn rejects_tree_above_total_bytes_cap() {
+        let src = tempfile::TempDir::new().unwrap();
+        let dir = src.path().join("d");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("big.bin"), vec![0u8; 1000]).unwrap();
+
+        let limits = ArchiveLimits::default().with_max_total_plaintext_bytes(100);
+        let mut buf = Vec::new();
+        let err = archive(&dir, &mut buf, limits).unwrap_err();
+        assert!(format!("{err}").contains("total-bytes cap exceeded"));
+    }
+
+    /// Spec §8.2: a Windows-reserved device name in the source tree
+    /// MUST reject during the metadata pass — otherwise the writer
+    /// would emit a path its own reader rejects.
+    #[cfg(unix)]
+    #[test]
+    fn rejects_windows_reserved_device_name_in_source() {
+        let src = tempfile::TempDir::new().unwrap();
+        let dir = src.path().join("d");
+        fs::create_dir(&dir).unwrap();
+        // "CON" is fine on Unix as a filename, but FCA rejects it.
+        fs::write(dir.join("CON"), b"x").unwrap();
+
+        let mut buf = Vec::new();
+        let err = archive(&dir, &mut buf, ArchiveLimits::default()).unwrap_err();
+        assert!(format!("{err}").contains("Windows-reserved device"));
+    }
+
+    // -- Source mutation between passes (§15.5) ----------------------------
+
+    /// Spec §15.5: a source file shrinking between metadata pass and
+    /// content pass MUST fail. We can't shrink a real file mid-archive
+    /// race-free, so this test exercises the size-check directly via
+    /// `stream_source_file` with a pre-built `ArchiveEntry` whose
+    /// recorded size doesn't match the file on disk.
+    #[test]
+    fn stream_source_file_rejects_size_mismatch() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("real.txt");
+        fs::write(&path, b"actual content").unwrap();
+
+        let entry = ArchiveEntry {
+            kind: ArchiveEntryKind::File,
+            path_utf8: "real.txt".to_string(),
+            path: PathBuf::from("real.txt"),
+            mode: 0o644,
+            size: 9999, // not the real size
+            source_path: Some(path),
+        };
+
+        let mut buf = Vec::new();
+        let err = stream_source_file(&entry, &mut buf).unwrap_err();
+        assert!(format!("{err}").contains("size changed"));
+    }
+}

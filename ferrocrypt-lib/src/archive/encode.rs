@@ -97,17 +97,48 @@ fn archive_dir_mode(_src_path: &Path) -> Result<u32, CryptoError> {
     Ok(DEFAULT_DIR_MODE)
 }
 
+/// Windows-only rejection for any NTFS reparse point in the archive
+/// source tree. `file_type().is_symlink()` is not enough on Windows:
+/// junctions and mount points are reparse points but may not classify
+/// as symlinks. FCA v1 stores no reparse-point semantics, so writer
+/// input rejects them before they can redirect traversal or content
+/// reads.
+#[cfg(windows)]
+fn reject_windows_reparse_point(
+    metadata: &fs::Metadata,
+    label: &str,
+    path: &Path,
+) -> Result<(), CryptoError> {
+    use std::os::windows::fs::MetadataExt;
+
+    // From WinNT.h. Stable Win32 ABI bit for all reparse-point tags
+    // including symlinks, junctions, mount points, and future tags.
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(CryptoError::InvalidInput(format!(
+            "{label} is a Windows reparse point: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn reject_windows_reparse_point(
+    _metadata: &fs::Metadata,
+    _label: &str,
+    _path: &Path,
+) -> Result<(), CryptoError> {
+    Ok(())
+}
+
 /// Opens a regular file for reading without following symlinks. On
-/// Unix uses `O_NOFOLLOW` so the open itself is atomic; on non-Unix
-/// falls back to a `symlink_metadata` pre-check followed by
-/// `File::open`. The non-Unix branch has a small TOCTOU window between
-/// the pre-check and the open; closing it requires `NtCreateFile` with
-/// `OBJECT_ATTRIBUTES`, which the crate does not currently take on
-/// because of its zero-`unsafe` stance. The pre-archive
-/// [`validate_encrypt_input`] rejects symlinks at the outermost input
-/// path and the per-entry recursive walker re-applies symlink rejection,
-/// so an attacker's window is the per-open syscall gap, not the entire
-/// archive run.
+/// Unix uses `O_NOFOLLOW` so the open itself is atomic; on Windows uses
+/// `FILE_FLAG_OPEN_REPARSE_POINT` plus a metadata post-check so a racing
+/// symlink/junction replacement is rejected instead of followed. Other
+/// non-Unix targets fall back to a `symlink_metadata` pre-check followed
+/// by `File::open`.
 #[cfg(unix)]
 fn open_no_follow(path: &Path) -> Result<File, CryptoError> {
     use std::fs::OpenOptions;
@@ -125,7 +156,30 @@ fn open_no_follow(path: &Path) -> Result<File, CryptoError> {
         })
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn open_no_follow(path: &Path) -> Result<File, CryptoError> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    // From WinBase.h. Opening with this flag prevents Windows from
+    // transparently following a reparse point if one is substituted
+    // between the pre-check and the open.
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    let metadata = fs::symlink_metadata(path)?;
+    reject_windows_reparse_point(&metadata, "Input", path)?;
+    require_regular_file(&metadata, "Input", path)?;
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let opened_metadata = file.metadata().map_err(CryptoError::Io)?;
+    reject_windows_reparse_point(&opened_metadata, "Input", path)?;
+    require_regular_file(&opened_metadata, "Input", path)?;
+    Ok(file)
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn open_no_follow(path: &Path) -> Result<File, CryptoError> {
     let metadata = fs::symlink_metadata(path)?;
     require_regular_file(&metadata, "Input", path)?;
@@ -166,10 +220,15 @@ pub(crate) fn validate_encrypt_input(input_path: &Path) -> Result<(), CryptoErro
     if input_path.is_symlink() {
         return Err(input_is_symlink_error(input_path));
     }
-    if !input_path.exists() {
-        return Err(CryptoError::InputPath);
-    }
-    if !input_path.is_file() && !input_path.is_dir() {
+
+    let metadata = match fs::symlink_metadata(input_path) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(CryptoError::InputPath),
+        Err(e) => return Err(CryptoError::Io(e)),
+    };
+    reject_windows_reparse_point(&metadata, "Input", input_path)?;
+    let file_type = metadata.file_type();
+    if !file_type.is_file() && !file_type.is_dir() {
         return Err(CryptoError::InvalidInput(format!(
             "Unsupported file type: {}",
             input_path.display()
@@ -228,6 +287,7 @@ fn build_manifest(input_path: &Path, limits: &ArchiveLimits) -> Result<Manifest,
     if file_type.is_symlink() {
         return Err(input_is_symlink_error(input_path));
     }
+    reject_windows_reparse_point(&metadata, "Input", input_path)?;
 
     let name = input_path
         .file_name()
@@ -310,17 +370,28 @@ fn walk_directory(
     counters: &mut ArchiveCounters,
     limits: &ArchiveLimits,
 ) -> Result<(), CryptoError> {
+    let src_dir_metadata = fs::symlink_metadata(src_dir)?;
+    if src_dir_metadata.file_type().is_symlink() {
+        return Err(CryptoError::InvalidInput(format!(
+            "Symlink in archive source: {}",
+            src_dir.display()
+        )));
+    }
+    reject_windows_reparse_point(&src_dir_metadata, "Source directory", src_dir)?;
+
     for read_dir_entry in fs::read_dir(src_dir)? {
         let dir_entry = read_dir_entry?;
-        let metadata = dir_entry.metadata()?;
+        let full_path = dir_entry.path();
+        let metadata = fs::symlink_metadata(&full_path)?;
         let file_type = metadata.file_type();
 
         if file_type.is_symlink() {
             return Err(CryptoError::InvalidInput(format!(
                 "Symlink in archive source: {}",
-                dir_entry.path().display()
+                full_path.display()
             )));
         }
+        reject_windows_reparse_point(&metadata, "Source entry", &full_path)?;
 
         let name = dir_entry.file_name();
         let name_str = name.to_str().ok_or_else(|| {
@@ -331,7 +402,6 @@ fn walk_directory(
         })?;
 
         let fca_path_utf8 = format!("{fca_prefix}/{name_str}");
-        let full_path = dir_entry.path();
 
         if file_type.is_file() {
             let mode = archive_file_mode(&metadata);
@@ -395,6 +465,7 @@ fn stream_source_file<W: Write>(entry: &ArchiveEntry, writer: &mut W) -> Result<
 
     let mut file = open_no_follow(source)?;
     let metadata = file.metadata().map_err(CryptoError::Io)?;
+    reject_windows_reparse_point(&metadata, "Source", source)?;
     require_regular_file(&metadata, "Source", source)?;
     if metadata.len() != entry.size {
         return Err(CryptoError::InvalidInput(format!(
@@ -474,6 +545,8 @@ mod tests {
     use super::super::decode::unarchive;
     use super::*;
     use std::io::Cursor;
+    #[cfg(windows)]
+    use std::path::Path;
     use std::path::PathBuf;
 
     /// End-to-end round-trip: archive → unarchive on the same tempdir
@@ -636,6 +709,52 @@ mod tests {
         let mut buf = Vec::new();
         let err = archive(&dir, &mut buf, ArchiveLimits::default()).unwrap_err();
         assert!(format!("{err}").contains("Symlink in archive source"));
+    }
+
+    #[cfg(windows)]
+    fn try_make_junction(target: &Path, junction: &Path) -> std::io::Result<()> {
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(junction)
+            .arg(target)
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(format!(
+                "mklink /J failed with exit code {status}"
+            )))
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_root_windows_junction() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = tmp.path().join("target");
+        fs::create_dir_all(&target).unwrap();
+        let junction = tmp.path().join("junction");
+        try_make_junction(&target, &junction).unwrap();
+
+        let mut buf = Vec::new();
+        let err = archive(&junction, &mut buf, ArchiveLimits::default()).unwrap_err();
+        assert!(format!("{err}").contains("Windows reparse point"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_windows_junction_inside_directory_tree() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("d");
+        fs::create_dir(&dir).unwrap();
+        let target = tmp.path().join("target");
+        fs::create_dir_all(&target).unwrap();
+        let junction = dir.join("junction");
+        try_make_junction(&target, &junction).unwrap();
+
+        let mut buf = Vec::new();
+        let err = archive(&dir, &mut buf, ArchiveLimits::default()).unwrap_err();
+        assert!(format!("{err}").contains("Windows reparse point"));
     }
 
     #[test]

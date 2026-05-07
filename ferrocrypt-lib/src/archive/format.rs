@@ -156,6 +156,9 @@ pub(crate) fn write_fca_header<W: Write>(
     if entry_count == 0 {
         return Err(empty_archive_error());
     }
+    if manifest_len == 0 {
+        return Err(malformed_manifest());
+    }
 
     w.write_all(FCA_MAGIC).map_err(CryptoError::Io)?;
     write_u8(&mut w, FCA_VERSION).map_err(CryptoError::Io)?;
@@ -338,6 +341,14 @@ pub fn parse_manifest_bytes(
     limits: ArchiveLimits,
 ) -> Result<Manifest, CryptoError> {
     let limits = limits.validate()?;
+
+    if bytes.len()
+        != usize::try_from(header.manifest_len).map_err(|_| {
+            CryptoError::InvalidInput("Archive manifest length cannot fit in memory".to_string())
+        })?
+    {
+        return Err(malformed_manifest());
+    }
 
     let mut cursor = Cursor::new(bytes);
     let entry_count_usize = usize::try_from(header.entry_count).unwrap_or(usize::MAX);
@@ -622,6 +633,19 @@ mod tests {
         let mut buf = Vec::new();
         let err = write_fca_header(&mut buf, 0, 100, 1024).unwrap_err();
         assert!(format!("{err}").contains("Empty archive"));
+        assert!(
+            buf.is_empty(),
+            "writer must not emit bytes for invalid params"
+        );
+    }
+
+    /// `manifest_len == 0` is invalid for every non-empty archive and
+    /// the writer must refuse it before emitting a partial header.
+    #[test]
+    fn write_rejects_zero_manifest_len_before_emitting_bytes() {
+        let mut buf = Vec::new();
+        let err = write_fca_header(&mut buf, 1, 0, 0).unwrap_err();
+        assert!(format!("{err}").contains("Malformed archive manifest"));
         assert!(
             buf.is_empty(),
             "writer must not emit bytes for invalid params"
@@ -925,6 +949,18 @@ mod tests {
         let mut bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 4, 10, b"file");
         bytes.push(0xAA);
         let err = parse_with_header(&bytes, 1, 10).unwrap_err();
+        assert!(format!("{err}").contains("Malformed archive manifest"));
+    }
+
+    #[test]
+    fn parse_rejects_manifest_len_mismatch() {
+        let bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 4, 10, b"file");
+        let header = FcaHeader {
+            entry_count: 1,
+            manifest_len: bytes.len() as u32 + 1,
+            total_file_bytes: 10,
+        };
+        let err = parse_manifest_bytes(&bytes, header, ArchiveLimits::default()).unwrap_err();
         assert!(format!("{err}").contains("Malformed archive manifest"));
     }
 

@@ -114,22 +114,24 @@ pub(crate) fn enforce_per_entry_caps(
 }
 
 /// Per-file-entry total-bytes cap check shared by encrypt-side preflight
-/// and decrypt-side extraction. Updates `total_bytes` in place
-/// (saturating to `u64::MAX`) BEFORE the cap comparison so an overflow
-/// cannot underflow the rejection — the cap value is bounded by `u64`,
-/// so the saturated sum always exceeds it.
+/// and decrypt-side extraction. Updates `total_bytes` in place using
+/// checked arithmetic so an overflow is rejected even when callers raise
+/// `max_total_plaintext_bytes` to `u64::MAX`.
 pub(crate) fn enforce_total_bytes_cap(
     entry_size: u64,
     total_bytes: &mut u64,
     limits: &ArchiveLimits,
 ) -> Result<(), CryptoError> {
-    *total_bytes = total_bytes.saturating_add(entry_size);
-    if *total_bytes > limits.max_total_plaintext_bytes {
+    let next = total_bytes.checked_add(entry_size).ok_or_else(|| {
+        CryptoError::InvalidInput("Archive total file bytes overflow".to_string())
+    })?;
+    if next > limits.max_total_plaintext_bytes {
         return Err(total_bytes_cap_error(
-            *total_bytes,
+            next,
             limits.max_total_plaintext_bytes,
         ));
     }
+    *total_bytes = next;
     Ok(())
 }
 
@@ -270,18 +272,21 @@ mod tests {
         assert!(enforce_per_entry_caps(1, "a/b/c/d", &limits).is_err());
     }
 
-    /// Security property: an overflow of the running total cannot
-    /// underflow the cap rejection. `saturating_add` pins the sum at
-    /// `u64::MAX`, which exceeds any cap value, so the rejection still
-    /// fires. A future refactor swapping in `wrapping_add` would be
-    /// caught here.
+    /// Security property: total-byte overflow is rejected even when
+    /// the caller raises the cap to `u64::MAX`. The running total is
+    /// left unchanged on overflow so callers cannot accidentally keep
+    /// using a saturated value as if it were a valid sum.
     #[test]
-    fn enforce_total_bytes_cap_saturates_on_overflow() {
-        let limits = ArchiveLimits::default();
+    fn enforce_total_bytes_cap_rejects_overflow() {
+        let limits = ArchiveLimits::default().with_max_total_plaintext_bytes(u64::MAX);
         let mut total = u64::MAX - 100;
         let result = enforce_total_bytes_cap(200, &mut total, &limits);
         assert!(result.is_err());
-        assert_eq!(total, u64::MAX, "total_bytes must saturate, not wrap");
+        assert_eq!(
+            total,
+            u64::MAX - 100,
+            "total_bytes must not wrap or saturate"
+        );
     }
 
     /// Cap boundary on the bytes side: a running total exactly at the
@@ -294,6 +299,6 @@ mod tests {
         assert!(enforce_total_bytes_cap(100, &mut total, &limits).is_ok());
         assert_eq!(total, 100);
         assert!(enforce_total_bytes_cap(1, &mut total, &limits).is_err());
-        assert_eq!(total, 101);
+        assert_eq!(total, 100);
     }
 }

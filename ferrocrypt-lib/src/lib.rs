@@ -269,6 +269,7 @@ pub struct KeyGenOutcome {
 
 mod api;
 mod archive;
+mod archive_v1;
 mod container;
 mod crypto;
 mod error;

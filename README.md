@@ -26,6 +26,15 @@ FerroCrypt is a pure Rust library, CLI, and desktop application for encrypting a
   <img src="/assets/screenshot-3.png" width="400" alt="FerroCrypt">
 </div>
 
+> **Status:** `main` is the in-development branch for the upcoming **v0.3.0** release.
+> The crates published on crates.io (`0.2.5`) use the previous on-disk format and
+> CLI; everything below describes the v0.3.0 line. Until v0.3.0 ships, files
+> produced by `main` are not interchangeable with `0.2.5`, **further breaking
+> changes (wire format, public API, CLI) may land before the final v0.3.0 cut**,
+> and any pre-release `main` artefact should be treated as unstable. See the
+> [`[Unreleased]` section of `CHANGELOG.md`](CHANGELOG.md#unreleased) for the
+> full list of breaking changes so far.
+
 ## Overview
 
 FerroCrypt encrypts a file or directory into a single `.fcr` file. Each file carries one or more typed recipients — any one of them can unlock the same encrypted payload:

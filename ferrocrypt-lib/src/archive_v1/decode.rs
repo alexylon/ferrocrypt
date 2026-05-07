@@ -101,7 +101,9 @@ fn unarchive_inner<R: Read>(
     let output_handle = platform::open_anchor(output_dir)?;
     let incomplete_name = incomplete_working_name(&manifest.root_name);
 
-    // §16.1 steps 7–9.
+    // §16.1 steps 7–11. Each `extract_*_root` runs `verify_archive_eof`
+    // (step 10) between content streaming (step 9) and descendant
+    // chmod (step 11) so the spec's literal ordering is preserved.
     if manifest.root_is_file {
         extract_single_file_root(
             &mut reader,
@@ -121,10 +123,6 @@ fn unarchive_inner<R: Read>(
             output_dir,
         )?;
     }
-
-    // §16.1 step 10: verify archive EOF — no byte may follow the last
-    // declared file content.
-    verify_archive_eof(&mut reader)?;
 
     // Drop the cap-std handles before the path-based rename. The
     // `output_handle` borrow ends here; descendant `Dir`/`File` handles
@@ -183,7 +181,11 @@ fn extract_single_file_root<R: Read>(
 
     copy_exact_n(reader, &mut outfile, entry.size)?;
     platform::chmod_file_handle(&outfile, entry.mode)?;
-    Ok(())
+
+    // §16.1 step 10: verify archive EOF — no byte may follow the last
+    // declared file content. Single-file root has no descendant chmod
+    // pass, so this directly precedes the caller's rename (step 12).
+    verify_archive_eof(reader)
 }
 
 fn extract_directory_root<R: Read>(
@@ -236,12 +238,18 @@ fn extract_directory_root<R: Read>(
         platform::chmod_file_handle(&outfile, entry.mode)?;
     }
 
-    // Pass 3: apply descendant directory modes deepest-first. Spec
-    // §16.3: restrictive parent modes would block child creation, so
-    // chmod must run AFTER child writes complete. Root directory mode
-    // is applied AFTER the rename (see `apply_root_directory_mode`).
-    // dir_entries is already sorted ascending by Pass 1; iterating
-    // in reverse yields the depth-descending order Pass 3 needs.
+    // §16.1 step 10: verify archive EOF — no byte may follow the last
+    // declared file content. Runs BEFORE Pass 3 (descendant chmod) per
+    // the spec's literal step ordering.
+    verify_archive_eof(reader)?;
+
+    // Pass 3 / §16.1 step 11: apply descendant directory modes
+    // deepest-first. Spec §16.3: restrictive parent modes would block
+    // child creation, so chmod must run AFTER child writes complete.
+    // Root directory mode is applied AFTER the rename (see
+    // `apply_root_directory_mode`). `dir_entries` is already sorted
+    // ascending by Pass 1; iterating in reverse yields the
+    // depth-descending order Pass 3 needs.
     for dir_entry in dir_entries.iter().rev() {
         let rel = strip_root_prefix(&dir_entry.path_utf8, root_name_str)?;
         let dir_handle = platform::open_dir_at_rel(&root_dir, rel)?;

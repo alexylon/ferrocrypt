@@ -6,7 +6,6 @@
 //! §14.5 (header reader).
 
 use std::io::{self, Cursor, Read, Write};
-use std::path::PathBuf;
 
 use crate::CryptoError;
 
@@ -17,6 +16,13 @@ use super::tree::validate_manifest_tree;
 
 pub(crate) const FCA_MAGIC: &[u8; 4] = b"FCA\0";
 pub(crate) const FCA_VERSION: u8 = 0x01;
+/// Size of the fixed FCA header in bytes: `magic(4) || version(1) ||
+/// flags(2) || entry_count(4) || manifest_len(4) || total_file_bytes(8)`
+/// (spec §5.1). Documented as a spec constant for callers that need it
+/// for byte-level inspection or fixture construction; the parser
+/// reads each field individually and does not use this constant
+/// directly.
+#[allow(dead_code)]
 pub(crate) const FCA_HEADER_SIZE: usize = 23;
 pub(crate) const FCA_ENTRY_FIXED_SIZE: usize = 14;
 
@@ -129,7 +135,7 @@ pub(crate) fn write_fca_header<W: Write>(
 /// Parses and structurally validates the 23-byte FCA fixed header.
 /// All resource caps are applied here so downstream allocations
 /// (manifest buffer, entry vector) are bounded by the time they fire.
-pub(crate) fn parse_fca_header<R: Read>(
+pub fn parse_fca_header<R: Read>(
     reader: &mut R,
     limits: ArchiveLimits,
 ) -> Result<FcaHeader, CryptoError> {
@@ -296,7 +302,7 @@ pub(crate) fn serialize_manifest(
 ///
 /// The caller MUST have already trimmed `bytes` to exactly
 /// `header.manifest_len` bytes.
-pub(crate) fn parse_manifest_bytes(
+pub fn parse_manifest_bytes(
     bytes: &[u8],
     header: FcaHeader,
     limits: ArchiveLimits,
@@ -389,11 +395,9 @@ pub(crate) fn parse_manifest_bytes(
             }
         };
 
-        let path = PathBuf::from(&path_utf8);
         entries.push(ArchiveEntry {
             kind,
             path_utf8,
-            path,
             mode: u32::from(mode),
             size,
             source_path: None,
@@ -619,7 +623,6 @@ mod tests {
         ArchiveEntry {
             kind,
             path_utf8: path.to_string(),
-            path: PathBuf::from(path),
             mode,
             size,
             source_path: None,

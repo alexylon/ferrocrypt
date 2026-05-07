@@ -10,7 +10,7 @@ use std::path::PathBuf;
 /// already been applied; the consumer can use these counts/lengths to
 /// drive bounded allocations.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct FcaHeader {
+pub struct FcaHeader {
     pub entry_count: u32,
     pub manifest_len: u32,
     pub total_file_bytes: u64,
@@ -19,31 +19,32 @@ pub(crate) struct FcaHeader {
 /// Archive entry classification per FCA `kind` byte: regular file or
 /// directory. v1 has no other kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ArchiveEntryKind {
+pub enum ArchiveEntryKind {
     File,
     Directory,
 }
 
-/// One manifest entry plus the cached `PathBuf` and (writer-only)
-/// source-file path used by later passes.
+/// One manifest entry plus the (writer-only) source-file path used by
+/// the content pass. The FCA path is always stored as `path_utf8`;
+/// downstream code that needs a `Path` constructs one on demand.
 #[derive(Debug, Clone)]
-pub(crate) struct ArchiveEntry {
+pub struct ArchiveEntry {
     pub kind: ArchiveEntryKind,
     pub path_utf8: String,
-    pub path: PathBuf,
     pub mode: u32,
     pub size: u64,
     /// Set by the writer's metadata pass so the content pass can reopen
     /// the source file no-follow. Readers leave this `None`; the reader
-    /// walks the manifest's `path` component-by-component through the
-    /// hardened platform backend, never opening by absolute source path.
+    /// walks the manifest's `path_utf8` component-by-component through
+    /// the hardened platform backend, never opening by absolute source
+    /// path.
     pub source_path: Option<PathBuf>,
 }
 
 /// Fully validated FCA manifest, ready to drive extraction (reader)
 /// or content streaming (writer).
 #[derive(Debug, Clone)]
-pub(crate) struct Manifest {
+pub struct Manifest {
     pub entries: Vec<ArchiveEntry>,
     pub total_file_bytes: u64,
     pub root_name: OsString,

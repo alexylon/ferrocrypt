@@ -40,7 +40,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::archive::{ArchiveLimits, IncompleteOutputPolicy, unarchive};
+use crate::archive_v1::{ArchiveLimits, IncompleteOutputPolicy, unarchive};
 use crate::container::{
     HeaderReadLimits, build_encrypted_header, read_encrypted_header, resolve_encrypted_output_path,
     write_encrypted_file,
@@ -606,23 +606,42 @@ mod tests {
 
         let built = build_encrypted_header(entries, b"", stream_nonce, payload_key, &header_key)?;
 
-        // Encrypt the TAR payload into a buffer.
+        // Encrypt a single-file FCA payload into a buffer. Constructs
+        // the FCA header + manifest + content for one entry named
+        // "data.txt"; matches what `archive_v1::archive` would emit
+        // for that input.
         let mut payload_buf: Vec<u8> = Vec::new();
         {
-            let writer =
+            use crate::archive_v1::ArchiveLimits;
+            use crate::archive_v1::format::{serialize_manifest, write_fca_header};
+            use crate::archive_v1::model::{ArchiveEntry, ArchiveEntryKind, Manifest};
+            use std::ffi::OsString;
+            use std::io::Write;
+
+            let manifest = Manifest {
+                entries: vec![ArchiveEntry {
+                    kind: ArchiveEntryKind::File,
+                    path_utf8: "data.txt".to_string(),
+                    mode: 0o644,
+                    size: plaintext.len() as u64,
+                    source_path: None,
+                }],
+                total_file_bytes: plaintext.len() as u64,
+                root_name: OsString::from("data.txt"),
+                root_is_file: true,
+            };
+            let manifest_bytes = serialize_manifest(&manifest, ArchiveLimits::default())?;
+
+            let mut writer =
                 payload_encryptor(&built.payload_key, &built.stream_nonce, &mut payload_buf);
-            let mut tar_builder = tar::Builder::new(writer);
-            let mut header = tar::Header::new_ustar();
-            header.set_path("data.txt").map_err(CryptoError::Io)?;
-            header.set_size(plaintext.len() as u64);
-            header.set_mode(0o644);
-            header.set_mtime(0);
-            header.set_cksum();
-            tar_builder
-                .append(&header, plaintext)
-                .map_err(CryptoError::Io)?;
-            tar_builder.finish().map_err(CryptoError::Io)?;
-            let writer = tar_builder.into_inner().map_err(CryptoError::Io)?;
+            writer = write_fca_header(
+                writer,
+                1,
+                manifest_bytes.len() as u32,
+                plaintext.len() as u64,
+            )?;
+            writer.write_all(&manifest_bytes).map_err(CryptoError::Io)?;
+            writer.write_all(plaintext).map_err(CryptoError::Io)?;
             let _ = writer.finish()?;
         }
 

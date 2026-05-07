@@ -34,12 +34,14 @@
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::CryptoError;
 use crate::fs::paths::file_stem;
 
-use super::format::{PERMISSION_BITS_MASK, copy_exact_n, serialize_manifest, write_fca_header};
+#[cfg(unix)]
+use super::format::PERMISSION_BITS_MASK;
+use super::format::{copy_exact_n, serialize_manifest, write_fca_header};
 use super::limits::{ArchiveLimits, enforce_per_entry_caps, enforce_total_bytes_cap};
 use super::model::{ArchiveEntry, ArchiveEntryKind, Manifest};
 use super::path::validate_fca_path;
@@ -218,7 +220,6 @@ fn build_manifest(input_path: &Path, limits: &ArchiveLimits) -> Result<Manifest,
         let entry = ArchiveEntry {
             kind: ArchiveEntryKind::File,
             path_utf8: name_str.clone(),
-            path: PathBuf::from(&name_str),
             mode,
             size,
             source_path: Some(input_path.to_path_buf()),
@@ -237,7 +238,6 @@ fn build_manifest(input_path: &Path, limits: &ArchiveLimits) -> Result<Manifest,
         let mut entries = vec![ArchiveEntry {
             kind: ArchiveEntryKind::Directory,
             path_utf8: name_str.clone(),
-            path: PathBuf::from(&name_str),
             mode: root_mode,
             size: 0,
             source_path: Some(input_path.to_path_buf()),
@@ -312,7 +312,6 @@ fn walk_directory(
             entries.push(ArchiveEntry {
                 kind: ArchiveEntryKind::File,
                 path_utf8: fca_path_utf8.clone(),
-                path: PathBuf::from(&fca_path_utf8),
                 mode,
                 size,
                 source_path: Some(full_path),
@@ -329,7 +328,6 @@ fn walk_directory(
             entries.push(ArchiveEntry {
                 kind: ArchiveEntryKind::Directory,
                 path_utf8: fca_path_utf8.clone(),
-                path: PathBuf::from(&fca_path_utf8),
                 mode,
                 size: 0,
                 source_path: Some(full_path.clone()),
@@ -464,10 +462,11 @@ fn output_stem(input_path: &Path) -> Result<String, CryptoError> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::IncompleteOutputPolicy;
+    use super::super::decode::unarchive;
     use super::*;
-    use crate::archive::IncompleteOutputPolicy;
-    use crate::archive_v1::decode::unarchive;
     use std::io::Cursor;
+    use std::path::PathBuf;
 
     /// End-to-end round-trip: archive → unarchive on the same tempdir
     /// (different output dir so the source isn't overwritten).
@@ -805,7 +804,6 @@ mod tests {
         let entry = ArchiveEntry {
             kind: ArchiveEntryKind::File,
             path_utf8: "real.txt".to_string(),
-            path: PathBuf::from("real.txt"),
             mode: 0o644,
             size: 9999, // not the real size
             source_path: Some(path),

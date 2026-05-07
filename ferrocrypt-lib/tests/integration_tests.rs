@@ -2971,7 +2971,7 @@ fn test_detect_corrupted_fcr_not_silently_encrypted() {
     // closed — rather than the helper treating it as plaintext and
     // re-encrypting it (which would produce a path collision and
     // mask the structural failure).
-    let mut prefix = vec![b'F', b'C', b'R', 0, 0x01]; // magic + version
+    let mut prefix = vec![b'F', b'C', b'R', 0, 0x02]; // magic + current wire version
     prefix.push(b'E'); // KIND_ENCRYPTED
     prefix.extend_from_slice(&0u16.to_be_bytes()); // prefix_flags = 0
     prefix.extend_from_slice(&0u32.to_be_bytes()); // header_len = 0 (truncated)

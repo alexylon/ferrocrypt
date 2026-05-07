@@ -36,7 +36,7 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::archive;
+use crate::archive_v1 as archive;
 use crate::crypto::keys::{HeaderKey, PayloadKey};
 use crate::crypto::stream::{STREAM_NONCE_SIZE, payload_encryptor};
 use crate::error::{CryptoError, FormatDefect};
@@ -476,8 +476,8 @@ pub(crate) fn resolve_encrypted_output_path(
 /// nonce all live in `built` so that they cannot be paired with material
 /// from a different `file_key`/`stream_nonce`. The payload is
 /// XChaCha20-Poly1305 STREAM-BE32 keyed by `built.payload_key` over the
-/// TAR archive of `input_path`. No plaintext intermediate files touch
-/// disk: the TAR stream is piped directly through [`EncryptWriter`].
+/// FCA archive of `input_path`. No plaintext intermediate files touch
+/// disk: the FCA stream is piped directly through [`EncryptWriter`].
 ///
 /// Atomicity: the file is written under a `.ferrocrypt-*.incomplete`
 /// tempfile in the destination's parent directory, then renamed via

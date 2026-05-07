@@ -644,10 +644,10 @@ mod tests {
         }
 
         let mut bad_version = original.clone();
-        bad_version[VERSION_OFFSET] = 2;
+        bad_version[VERSION_OFFSET] = 3;
         match open_private_key(&bad_version, &pass, None, cap, &|_| {}) {
-            Err(CryptoError::UnsupportedVersion(UnsupportedVersion::NewerKey { version: 2 })) => {}
-            other => panic!("expected NewerKey(2) for version tamper, got {other:?}"),
+            Err(CryptoError::UnsupportedVersion(UnsupportedVersion::NewerKey { version: 3 })) => {}
+            other => panic!("expected NewerKey(3) for version tamper, got {other:?}"),
         }
 
         let mut bad_kind = original.clone();
@@ -680,10 +680,10 @@ mod tests {
     #[test]
     fn parse_rejects_wrong_version() {
         let mut bytes = sample_header_bytes();
-        bytes[VERSION_OFFSET] = 2;
+        bytes[VERSION_OFFSET] = 3;
         match PrivateKeyHeader::parse(&bytes) {
-            Err(CryptoError::UnsupportedVersion(UnsupportedVersion::NewerKey { version: 2 })) => {}
-            other => panic!("expected NewerKey(2), got {other:?}"),
+            Err(CryptoError::UnsupportedVersion(UnsupportedVersion::NewerKey { version: 3 })) => {}
+            other => panic!("expected NewerKey(3), got {other:?}"),
         }
     }
 

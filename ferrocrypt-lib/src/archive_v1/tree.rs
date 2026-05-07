@@ -153,7 +153,6 @@ pub(super) fn validate_manifest_tree(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn limits() -> ArchiveLimits {
         ArchiveLimits::default()
@@ -163,7 +162,6 @@ mod tests {
         ArchiveEntry {
             kind,
             path_utf8: path.to_string(),
-            path: PathBuf::from(path),
             mode: 0o644,
             size,
             source_path: None,

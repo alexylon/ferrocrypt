@@ -97,7 +97,7 @@ pub const MAGIC: [u8; 4] = [b'F', b'C', b'R', 0];
 pub const MAGIC_SIZE: usize = MAGIC.len();
 
 /// Version byte for both `.fcr` and `private.key` artefacts.
-pub const VERSION: u8 = 0x01;
+pub const VERSION: u8 = 0x02;
 
 /// `.fcr` encrypted-file kind byte (`Kind::Encrypted` on the wire).
 pub const KIND_ENCRYPTED: u8 = 0x45; // 'E'
@@ -585,10 +585,10 @@ mod tests {
     #[test]
     fn prefix_rejects_unsupported_version() {
         let mut bytes = Prefix::build_encrypted(200).unwrap();
-        bytes[4] = 2;
+        bytes[4] = 3;
         match Prefix::parse(&bytes, Kind::Encrypted) {
-            Err(CryptoError::UnsupportedVersion(UnsupportedVersion::NewerFile { version: 2 })) => {}
-            other => panic!("expected NewerFile(2), got {other:?}"),
+            Err(CryptoError::UnsupportedVersion(UnsupportedVersion::NewerFile { version: 3 })) => {}
+            other => panic!("expected NewerFile(3), got {other:?}"),
         }
     }
 
@@ -692,11 +692,11 @@ mod tests {
         // surface UnsupportedVersion (actionable: "upgrade FerroCrypt")
         // rather than WrongKind (which would imply a known v1 kind).
         let mut bytes = Prefix::build_encrypted(HEADER_FIXED_SIZE as u32).unwrap();
-        bytes[4] = 2; // future version
+        bytes[4] = 3; // future version
         bytes[5] = 0x99; // unknown kind
         match Prefix::parse(&bytes, Kind::Encrypted) {
-            Err(CryptoError::UnsupportedVersion(UnsupportedVersion::NewerFile { version: 2 })) => {}
-            other => panic!("expected NewerFile(2) before WrongKind, got {other:?}"),
+            Err(CryptoError::UnsupportedVersion(UnsupportedVersion::NewerFile { version: 3 })) => {}
+            other => panic!("expected NewerFile(3) before WrongKind, got {other:?}"),
         }
     }
 
@@ -903,9 +903,9 @@ mod tests {
             other => panic!("expected OlderKey(0), got {other:?}"),
         }
         // Newer-key path (version > VERSION).
-        match unsupported_key_version_error(2) {
-            CryptoError::UnsupportedVersion(UnsupportedVersion::NewerKey { version: 2 }) => {}
-            other => panic!("expected NewerKey(2), got {other:?}"),
+        match unsupported_key_version_error(3) {
+            CryptoError::UnsupportedVersion(UnsupportedVersion::NewerKey { version: 3 }) => {}
+            other => panic!("expected NewerKey(3), got {other:?}"),
         }
     }
 

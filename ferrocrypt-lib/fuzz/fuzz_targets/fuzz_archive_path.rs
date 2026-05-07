@@ -1,37 +1,21 @@
 #![no_main]
 
-//! Fuzzes `validate_archive_path_components` — the tar-entry path guard that
-//! rejects `..`, `/`, drive prefixes, and leading `.` components before
-//! any filesystem work happens.
+//! Fuzzes `validate_fca_path` — the FCA archive-path grammar gate
+//! shared by writer (encode-side metadata pass) and reader
+//! (manifest-parse).
 //!
-//! On Unix, the real extraction path builds `Path` values directly from
-//! the raw bytes of tar entries (via `OsStr::from_bytes`), so the
-//! target must also accept arbitrary byte sequences to match the
-//! actual attack surface. On non-Unix, `Path` requires valid UTF-16
-//! (which our tar reader already enforces), so the non-UTF-8 branch
-//! is a no-op — kept only so `cargo check` builds the target on those
-//! targets.
+//! The validator takes `&str`, so the harness rejects non-UTF-8 input
+//! up-front. Manifest bytes that survive UTF-8 decoding by the parser
+//! are exactly what reaches `validate_fca_path` in production, so this
+//! is the right input shape — not raw bytes via `OsStr::from_bytes`
+//! (which would test a code path that doesn't exist for FCA).
 
-use std::path::Path;
-
-use ferrocrypt::fuzz_exports::validate_archive_path_components;
+use ferrocrypt::ArchiveLimits;
+use ferrocrypt::fuzz_exports::validate_fca_path;
 use libfuzzer_sys::fuzz_target;
 
-#[cfg(unix)]
-fn to_path(data: &[u8]) -> &Path {
-    use std::ffi::OsStr;
-    use std::os::unix::ffi::OsStrExt;
-    Path::new(OsStr::from_bytes(data))
-}
-
-#[cfg(not(unix))]
-fn to_path(data: &[u8]) -> &Path {
-    match std::str::from_utf8(data) {
-        Ok(s) => Path::new(s),
-        Err(_) => Path::new(""),
-    }
-}
-
 fuzz_target!(|data: &[u8]| {
-    let _ = validate_archive_path_components(to_path(data));
+    if let Ok(s) = std::str::from_utf8(data) {
+        let _ = validate_fca_path(s, ArchiveLimits::default());
+    }
 });

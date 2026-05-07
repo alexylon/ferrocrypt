@@ -31,20 +31,20 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use cap_std::fs::Dir;
 
 use crate::CryptoError;
-use crate::archive::IncompleteOutputPolicy;
-use crate::archive::platform;
 use crate::fs::atomic::rename_no_clobber;
 use crate::fs::paths::{INCOMPLETE_SUFFIX, reject_occupied};
 
+use super::IncompleteOutputPolicy;
 use super::format::{copy_exact_n, parse_fca_header, parse_manifest_bytes};
 use super::limits::ArchiveLimits;
 use super::model::{ArchiveEntry, ArchiveEntryKind, Manifest};
+use super::platform;
 
 /// Public entry point. Parses an FCA payload from `reader`, fully
 /// validates it before any output is created, and extracts the archive
@@ -370,7 +370,6 @@ mod tests {
         ArchiveEntry {
             kind,
             path_utf8: path.to_string(),
-            path: PathBuf::from(path),
             mode,
             size,
             source_path: None,
@@ -894,7 +893,6 @@ mod tests {
                 ArchiveEntry {
                     kind: ArchiveEntryKind::Directory,
                     path_utf8: "locked".to_string(),
-                    path: PathBuf::from("locked"),
                     mode: 0o400, // r-- on root: no execute/search/write
                     size: 0,
                     source_path: None,
@@ -902,7 +900,6 @@ mod tests {
                 ArchiveEntry {
                     kind: ArchiveEntryKind::Directory,
                     path_utf8: "locked/child".to_string(),
-                    path: PathBuf::from("locked/child"),
                     mode: 0o700,
                     size: 0,
                     source_path: None,
@@ -910,7 +907,6 @@ mod tests {
                 ArchiveEntry {
                     kind: ArchiveEntryKind::File,
                     path_utf8: "locked/child/secret.txt".to_string(),
-                    path: PathBuf::from("locked/child/secret.txt"),
                     mode: 0o600,
                     size: 6,
                     source_path: None,

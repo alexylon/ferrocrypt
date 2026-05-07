@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 
 use secrecy::{ExposeSecret as _, SecretString};
 
-use crate::archive::{self, ArchiveLimits, IncompleteOutputPolicy};
+use crate::archive_v1::{self as archive, ArchiveLimits, IncompleteOutputPolicy};
 use crate::container::{self, HeaderReadLimits};
 use crate::crypto::kdf::{KdfLimit, KdfParams};
 use crate::error::FormatDefect;
@@ -61,8 +61,8 @@ use crate::{
 /// Then optionally set an explicit output path
 /// ([`Encryptor::save_as`]) or override archive resource caps
 /// ([`Encryptor::archive_limits`]). Finalize with
-/// [`Encryptor::write`], which streams plaintext through TAR + STREAM
-/// directly to disk.
+/// [`Encryptor::write`], which streams plaintext through the FCA
+/// archive layer + XChaCha20-Poly1305 STREAM-BE32 directly to disk.
 ///
 /// ## Examples
 ///
@@ -294,7 +294,7 @@ impl Encryptor {
     /// Encrypts `input` and writes the resulting `.fcr` file.
     ///
     /// `input` may be a regular file or a directory. Directory inputs are
-    /// encoded as FerroCrypt's safe ustar subset before payload encryption.
+    /// encoded as a FerroCrypt Archive (FCA) payload before payload encryption.
     /// The default destination is `{output_dir}/{stem}.fcr`; use
     /// [`Encryptor::save_as`] to supply an explicit output file path.
     ///

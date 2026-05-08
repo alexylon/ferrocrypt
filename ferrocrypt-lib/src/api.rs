@@ -64,7 +64,7 @@ use crate::{
 /// [`Encryptor::write`], which streams plaintext through the FCA
 /// archive layer + XChaCha20-Poly1305 STREAM-BE32 directly to disk.
 ///
-/// ## Examples
+/// # Examples
 ///
 /// Passphrase:
 ///
@@ -298,9 +298,13 @@ impl Encryptor {
     /// The default destination is `{output_dir}/{stem}.fcr`; use
     /// [`Encryptor::save_as`] to supply an explicit output file path.
     ///
-    /// Errors include invalid inputs, output conflicts, unsupported archive
-    /// entries, passphrase validation failure, key wrapping failure, archive
-    /// resource-cap failure, and I/O errors.
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::InvalidInput`] for invalid input paths, output
+    /// conflicts, unsupported archive entries, empty passphrases, archive cap
+    /// violations, or invalid KDF settings. Returns [`CryptoError::Io`] for
+    /// filesystem failures. Returns authentication or internal crypto errors if
+    /// key wrapping or payload streaming fails.
     pub fn write(
         self,
         input: impl AsRef<Path>,
@@ -445,6 +449,11 @@ impl Decryptor {
     /// returned variant so the second header read inside
     /// [`PassphraseDecryptor::decrypt`] / [`RecipientDecryptor::decrypt`]
     /// uses them too — callers do not need to set them twice.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Decryptor::open`], but applies the supplied
+    /// [`HeaderReadLimits`] during structural header parsing.
     pub fn open_with_limits(
         input: impl AsRef<Path>,
         header_read_limits: HeaderReadLimits,
@@ -549,6 +558,17 @@ impl PassphraseDecryptor {
     /// accepted only after the header MAC verifies. On success, the decrypted
     /// file or directory is promoted into `output_dir` and returned in
     /// [`DecryptOutcome::output_path`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::InvalidInput`] for an empty passphrase, archive
+    /// cap violations, output conflicts, or unsafe archived paths. Returns
+    /// [`CryptoError::KeyDerivation`] or [`CryptoError::KdfResourceCapExceeded`]
+    /// for Argon2id failures or rejected KDF costs. Returns authentication
+    /// errors such as [`CryptoError::RecipientUnwrapFailed`],
+    /// [`CryptoError::HeaderTampered`], [`CryptoError::PayloadTampered`], or
+    /// [`CryptoError::PayloadTruncated`] when credentials are wrong or the file
+    /// is modified. Returns [`CryptoError::Io`] for filesystem failures.
     pub fn decrypt(
         self,
         passphrase: SecretString,
@@ -648,6 +668,16 @@ impl RecipientDecryptor {
     /// that verifies the header MAC. On success, the decrypted file or directory
     /// is promoted into `output_dir` and returned in
     /// [`DecryptOutcome::output_path`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::InvalidInput`] for an empty key passphrase,
+    /// archive cap violations, output conflicts, or unsafe archived paths.
+    /// Returns [`CryptoError::InvalidFormat`] or
+    /// [`CryptoError::KeyFileUnlockFailed`] if the private key is malformed,
+    /// the wrong kind, tampered, or protected by a different passphrase.
+    /// Returns recipient, header-MAC, payload-authentication, truncation, or
+    /// I/O errors when the `.fcr` cannot be authenticated or extracted.
     pub fn decrypt(
         self,
         identity: PrivateKey,
@@ -761,6 +791,14 @@ impl KeyPairGenerator {
 
     /// Generates the X25519 key pair and writes `private.key` +
     /// `public.key` into `output_dir`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::InvalidInput`] if the passphrase is empty, KDF
+    /// parameters are outside the accepted writer policy, or either key file
+    /// already exists. Returns [`CryptoError::Io`] for filesystem failures and
+    /// [`CryptoError::KeyDerivation`] for Argon2id failures while sealing the
+    /// private key.
     pub fn write(
         self,
         output_dir: impl AsRef<Path>,
@@ -801,7 +839,11 @@ impl KeyPairGenerator {
 /// need to override Argon2id parameters should use the builder directly:
 /// `KeyPairGenerator::with_passphrase(pass).kdf_params(p).write(dir, ev)`.
 ///
-/// ## Examples
+/// # Errors
+///
+/// Returns the same errors as [`KeyPairGenerator::write`].
+///
+/// # Examples
 ///
 /// ```no_run
 /// use ferrocrypt::{generate_key_pair, secrecy::SecretString};
@@ -847,7 +889,13 @@ pub fn generate_key_pair(
 /// structurally valid but cannot be classified: unknown critical recipients,
 /// illegal passphrase mixing, or no supported native recipient.
 ///
-/// Returns [`CryptoError::Io`] if the file cannot be opened or read.
+/// # Errors
+///
+/// Returns [`CryptoError::Io`] if the file cannot be opened or read. Returns
+/// [`CryptoError::InvalidFormat`] when the magic matches but the prefix,
+/// header, recipient entries, or recipient mixing policy are malformed or
+/// unsupported. Returns cap-exceeded variants when the declared header shape
+/// exceeds [`HeaderReadLimits::default`].
 ///
 /// **Detection is structural, not cryptographic.** No recipient
 /// unwrap runs (no Argon2id, no X25519 ECDH, no private-key
@@ -870,6 +918,11 @@ pub fn detect_encryption_mode(
 /// caps (forward-compatibility with future fat-recipient native types).
 /// All other behavior — directory short-circuit, magic-byte fast path,
 /// typed-error surface — is identical.
+///
+/// # Errors
+///
+/// Returns the same errors as [`detect_encryption_mode`], but applies the
+/// supplied [`HeaderReadLimits`] instead of the default caps.
 pub fn detect_encryption_mode_with_limits(
     file_path: impl AsRef<Path>,
     limits: HeaderReadLimits,
@@ -928,9 +981,15 @@ pub fn detect_encryption_mode_with_limits(
 
 // ─── Filename + key-file helpers ────────────────────────────────────────────
 
-/// Returns the default encrypted filename for a given input path
-/// (e.g. `"secrets.fcr"`). For files, uses the stem (without
-/// extension); for directories, uses the full name.
+/// Returns the default encrypted filename for a given input path.
+///
+/// For example, a regular file named `secrets.txt` maps to `secrets.fcr`; a
+/// directory named `secrets` maps to `secrets.fcr`.
+///
+/// # Errors
+///
+/// Returns [`CryptoError::InvalidInput`] if the path has no usable file name or
+/// contains a non-UTF-8 file name.
 pub fn default_encrypted_filename(input_path: impl AsRef<Path>) -> Result<String, CryptoError> {
     let base_name = paths::encryption_base_name(input_path)?;
     Ok(format!("{}.{}", base_name, ENCRYPTED_EXTENSION))
@@ -944,6 +1003,12 @@ pub fn default_encrypted_filename(input_path: impl AsRef<Path>) -> Result<String
 /// require a passphrase. If the caller accidentally points this at a text
 /// `public.key`, [`FormatDefect::WrongKeyFileType`] is returned instead of a
 /// generic key-file parse error.
+///
+/// # Errors
+///
+/// Returns [`CryptoError::Io`] if the file cannot be read. Returns
+/// [`CryptoError::InvalidFormat`] or [`CryptoError::UnsupportedVersion`] if the
+/// file is not a v1 private key, is malformed, or is a public key.
 pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError> {
     let data = fs::read(key_file.as_ref()).map_err(paths::map_user_path_io_error)?;
     if matches!(KeyFileKind::classify(&data), KeyFileKind::Public) {
@@ -963,6 +1028,14 @@ pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), Crypt
 /// returned instead of a UTF-8 decode error.
 ///
 /// Companion to [`validate_private_key_file`].
+///
+/// # Errors
+///
+/// Returns [`CryptoError::Io`] if the file cannot be read. Returns
+/// [`CryptoError::InvalidFormat`], [`CryptoError::InvalidInput`], or
+/// [`CryptoError::RecipientStringCapExceeded`] if the text file or recipient
+/// string is malformed, unsupported, too large for local policy, or is a private
+/// key.
 pub fn validate_public_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError> {
     PublicKey::from_key_file(key_file).validate()
 }
@@ -1028,9 +1101,8 @@ fn preflight_header_write_limits(
 }
 
 /// Rejects empty passphrases. Shared by every API entry point that
-/// takes a passphrase so the CLI / desktop see the same error class
-/// regardless of whether they call the deprecated free functions or
-/// the new `Encryptor` / `Decryptor` builders.
+/// takes a passphrase so the CLI, desktop, and library callers see the
+/// same error class.
 pub(crate) fn validate_passphrase(passphrase: &SecretString) -> Result<(), CryptoError> {
     if passphrase.expose_secret().is_empty() {
         return Err(CryptoError::InvalidInput(

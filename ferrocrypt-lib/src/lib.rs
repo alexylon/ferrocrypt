@@ -127,6 +127,9 @@
 //! Licensed under GPL-3.0-only. See the LICENSE file in the repository.
 
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
+#![warn(rustdoc::broken_intra_doc_links)]
+#![warn(rustdoc::bare_urls)]
 
 use std::path::PathBuf;
 
@@ -255,7 +258,8 @@ pub struct DecryptOutcome {
     pub output_path: PathBuf,
 }
 
-/// Successful outcome of [`generate_key_pair`].
+/// Successful outcome of [`generate_key_pair`] or
+/// [`KeyPairGenerator::write`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct KeyGenOutcome {
@@ -293,6 +297,15 @@ pub mod fuzz_exports;
 /// [`PublicKey::from_recipient_string`] or
 /// `"fcr1…".parse::<PublicKey>()`, which wrap this function and yield
 /// a typed [`PublicKey`].
+///
+/// # Errors
+///
+/// Returns [`CryptoError::InvalidInput`] for non-ASCII, uppercase, invalid
+/// Bech32, or wrong-HRP strings. Returns [`CryptoError::InvalidFormat`] for
+/// malformed typed payloads, checksum mismatches, unsupported recipient types,
+/// or all-zero X25519 public keys. Returns
+/// [`CryptoError::RecipientStringCapExceeded`] when the input exceeds the local
+/// recipient-string cap.
 pub fn decode_recipient(recipient: &str) -> Result<[u8; 32], CryptoError> {
     key::public::decode_x25519_recipient(recipient)
 }

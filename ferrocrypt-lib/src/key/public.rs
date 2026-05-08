@@ -469,6 +469,12 @@ impl PublicKey {
     /// ECDH site by `wrap` / `unwrap`'s shared-secret check; this
     /// ingress check just stops the most common attack from
     /// constructing a `PublicKey` value at all.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::InvalidFormat`] with
+    /// [`FormatDefect::MalformedPublicKey`](crate::FormatDefect::MalformedPublicKey)
+    /// if `bytes` is the all-zero X25519 public key.
     pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, CryptoError> {
         if crate::recipient::x25519::is_zero_public_key(&bytes) {
             return Err(malformed_public_key());
@@ -486,6 +492,13 @@ impl PublicKey {
     /// structural fields, type-name grammar, and (for v1 X25519
     /// recipients) the recipient `type_name == "x25519"` and 32-byte
     /// key-material length.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::InvalidInput`] for invalid Bech32 text,
+    /// [`CryptoError::InvalidFormat`] for malformed payloads or unsupported
+    /// recipient types, and [`CryptoError::RecipientStringCapExceeded`] when
+    /// the input exceeds the local recipient-string cap.
     pub fn from_recipient_string(recipient: &str) -> Result<Self, CryptoError> {
         Self::from_bytes(decode_x25519_recipient(recipient)?)
     }
@@ -498,6 +511,11 @@ impl PublicKey {
     /// domain-separate the fingerprint by recipient kind, so future
     /// native types (post-quantum, hybrid KEMs) cannot collide with this
     /// namespace. Matches the `ferrocrypt fingerprint` subcommand.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`PublicKey::to_bytes`] when this key source
+    /// must be read from disk or decoded from a key file.
     pub fn fingerprint(&self) -> Result<String, CryptoError> {
         let bytes = self.resolve()?;
         Ok(fingerprint_hex(crate::recipient::x25519::TYPE_NAME, &bytes))
@@ -507,13 +525,29 @@ impl PublicKey {
     /// recipient string.
     ///
     /// Performs filesystem I/O if this `PublicKey` references a key file.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`PublicKey::to_bytes`] when this key source
+    /// must be read from disk or decoded from a key file. Returns
+    /// [`CryptoError::InternalInvariant`] only if canonical Bech32 encoding fails
+    /// for already-validated X25519 bytes.
     pub fn to_recipient_string(&self) -> Result<String, CryptoError> {
         let bytes = self.resolve()?;
         encode_recipient_string(crate::recipient::x25519::TYPE_NAME, &bytes)
     }
 
     /// Returns the raw 32-byte X25519 public-key material as an owned
-    /// array. Performs filesystem I/O for the key-file source.
+    /// array.
+    ///
+    /// Performs filesystem I/O for the key-file source.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::Io`] if a referenced key file cannot be read.
+    /// Returns [`CryptoError::InvalidFormat`], [`CryptoError::InvalidInput`], or
+    /// [`CryptoError::RecipientStringCapExceeded`] if a referenced key file is
+    /// not a valid v1 `public.key` file.
     pub fn to_bytes(&self) -> Result<[u8; 32], CryptoError> {
         self.resolve()
     }
@@ -526,6 +560,11 @@ impl PublicKey {
     /// structural rejection of degenerate keys (e.g. all-zero) already
     /// happens inside [`PublicKey::from_bytes`], so a constructed
     /// `PublicKey` cannot wrap a value that fails this check.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`PublicKey::to_bytes`] when this key source
+    /// must be read from disk or decoded from a key file.
     pub fn validate(&self) -> Result<(), CryptoError> {
         self.resolve().map(|_| ())
     }

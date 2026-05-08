@@ -48,6 +48,8 @@ impl KdfLimit {
 
     /// Builds a limit from MiB.
     ///
+    /// # Errors
+    ///
     /// Returns [`CryptoError::InvalidInput`] if `mib * 1024` overflows `u32`.
     pub fn from_mib(mib: u32) -> Result<Self, CryptoError> {
         let kib = mib.checked_mul(1024).ok_or_else(|| {
@@ -70,16 +72,23 @@ impl Default for KdfLimit {
     }
 }
 
-/// KDF parameters stored in file headers and key files so that decryption
-/// uses the same cost parameters that were used during encryption.
+/// KDF parameters stored in file headers and key files.
+///
+/// These values are serialized in v1 `argon2id` recipient bodies and
+/// `private.key` cleartext headers so decryption repeats the same work factor
+/// used during encryption. See `FORMAT.md` §4.1 and §8.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KdfParams {
+    /// Argon2id memory cost in KiB.
     pub mem_cost: u32,
+    /// Argon2id iteration count.
     pub time_cost: u32,
+    /// Argon2id parallelism lane count.
     pub lanes: u32,
 }
 
-pub const KDF_PARAMS_SIZE: usize = 12; // 3 × u32 big-endian
+/// Serialized size of [`KdfParams`] in bytes (3 × `u32` big-endian).
+pub const KDF_PARAMS_SIZE: usize = 12;
 
 const KDF_MEM_COST_OFFSET: usize = 0;
 const KDF_TIME_COST_OFFSET: usize = KDF_MEM_COST_OFFSET + size_of::<u32>();
@@ -97,6 +106,7 @@ impl KdfParams {
     const DEFAULT_TIME_COST: u32 = 4;
     const DEFAULT_LANES: u32 = 4;
 
+    /// Serializes these parameters to the v1 big-endian wire encoding.
     pub fn to_bytes(self) -> [u8; KDF_PARAMS_SIZE] {
         let mut buf = [0u8; KDF_PARAMS_SIZE];
         write_u32_be(&mut buf, KDF_MEM_COST_OFFSET, self.mem_cost);
@@ -179,6 +189,18 @@ impl KdfParams {
         Ok(self)
     }
 
+    /// Parses v1 KDF parameter bytes and enforces the caller's memory cap.
+    ///
+    /// `limit = None` still applies the library default ceiling so untrusted
+    /// headers cannot force the structural 2 GiB maximum unless the caller opts
+    /// in with [`KdfLimit`]. See `FORMAT.md` §4.1 and §8 for the serialized
+    /// locations.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::InvalidKdfParams`] when the fields violate v1
+    /// structural bounds. Returns [`CryptoError::KdfResourceCapExceeded`] when
+    /// `mem_cost` is structurally valid but exceeds `limit` or the default cap.
     pub fn from_bytes(
         bytes: &[u8; KDF_PARAMS_SIZE],
         limit: Option<&KdfLimit>,
@@ -200,6 +222,25 @@ impl KdfParams {
         self.enforce_limit(limit)
     }
 
+    /// Derives a fixed-size Argon2id output for the supplied passphrase and salt.
+    ///
+    /// The returned buffer zeroizes on drop. The high-level
+    /// [`Encryptor`](crate::Encryptor),
+    /// [`PassphraseDecryptor`](crate::PassphraseDecryptor), and
+    /// [`KeyPairGenerator`](crate::KeyPairGenerator) APIs invoke this internally
+    /// — most callers should not call it directly.
+    ///
+    /// # Security
+    ///
+    /// Pair every passphrase with a fresh, cryptographically random salt of
+    /// [`ARGON2_SALT_SIZE`] bytes. Do not log or persist the derived output
+    /// except as input to the FerroCrypt wrapping steps defined in
+    /// `FORMAT.md`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::KeyDerivation`] if the Argon2 implementation
+    /// rejects the parameters or the supplied salt.
     pub fn hash_passphrase(
         &self,
         passphrase: &[u8],

@@ -162,7 +162,9 @@ pub enum CryptoError {
     /// spend.
     #[error("KDF resource cap exceeded ({mem_cost_kib} KiB, cap {local_cap_kib})")]
     KdfResourceCapExceeded {
+        /// Memory cost requested by the untrusted header, in KiB.
         mem_cost_kib: u32,
+        /// Maximum memory cost accepted by the caller's local policy, in KiB.
         local_cap_kib: u32,
     },
     /// `header_len` exceeds the caller-configured local cap. The
@@ -172,7 +174,12 @@ pub enum CryptoError {
     /// [`FormatDefect::OversizedHeader`] (above structural max) per
     /// `FORMAT.md` §3.2.
     #[error("Header length cap exceeded ({header_len} bytes, cap {local_cap})")]
-    HeaderLenCapExceeded { header_len: u32, local_cap: u32 },
+    HeaderLenCapExceeded {
+        /// Header length declared by the `.fcr` prefix, in bytes.
+        header_len: u32,
+        /// Maximum header length accepted by local policy, in bytes.
+        local_cap: u32,
+    },
     /// `recipient_count` exceeds the caller-configured local cap. The
     /// structural range (`1..=4096` per `FORMAT.md` §3.2) is much
     /// wider; this fires when the count would exceed the caller's
@@ -180,7 +187,12 @@ pub enum CryptoError {
     /// [`FormatDefect::RecipientCountOutOfRange`] (above structural
     /// max).
     #[error("Recipient count cap exceeded ({count} entries, cap {local_cap})")]
-    RecipientCountCapExceeded { count: u16, local_cap: u16 },
+    RecipientCountCapExceeded {
+        /// Recipient count declared by the header or requested by the writer.
+        count: u16,
+        /// Maximum recipient count accepted by local policy.
+        local_cap: u16,
+    },
     /// A recipient entry's `body_len` exceeds the local resource cap.
     /// The structural max (`BODY_LEN_MAX = 16 MiB` per `FORMAT.md`
     /// §3.3) is much higher; this fires when the body would exceed the
@@ -190,7 +202,12 @@ pub enum CryptoError {
     /// structurally valid; the reader's resource policy is the
     /// constraint, and callers MAY raise the cap for trusted input.
     #[error("Recipient body cap exceeded ({body_len} bytes, cap {local_cap})")]
-    RecipientBodyCapExceeded { body_len: u32, local_cap: u32 },
+    RecipientBodyCapExceeded {
+        /// Recipient body length declared by the entry, in bytes.
+        body_len: u32,
+        /// Maximum per-recipient body length accepted by local policy, in bytes.
+        local_cap: u32,
+    },
     /// Bech32 recipient string exceeds the caller-configured local
     /// length cap.
     ///
@@ -201,7 +218,12 @@ pub enum CryptoError {
     /// strings, byte length and character count are the same because the
     /// encoding is ASCII.
     #[error("Recipient string cap exceeded ({input_chars} chars, cap {local_cap})")]
-    RecipientStringCapExceeded { input_chars: u32, local_cap: u32 },
+    RecipientStringCapExceeded {
+        /// Number of characters in the supplied recipient string.
+        input_chars: u32,
+        /// Maximum recipient-string length accepted by local policy.
+        local_cap: u32,
+    },
 
     // ─── Authentication failures ─────────────────────────────────────────
     /// Unlocking the `private.key` file failed AEAD authentication. The
@@ -238,7 +260,10 @@ pub enum CryptoError {
         "Decryption failed: recipient `{}` MAC mismatch",
         DisplayableTypeName(type_name)
     )]
-    HeaderMacFailedAfterUnwrap { type_name: String },
+    HeaderMacFailedAfterUnwrap {
+        /// Recipient type name whose candidate key failed header-MAC verification.
+        type_name: String,
+    },
     /// A supported recipient entry's body failed to unwrap.
     ///
     /// The `type_name` distinguishes which recipient kind raised it (for
@@ -249,7 +274,10 @@ pub enum CryptoError {
         "Decryption failed: recipient `{}` unwrap failed",
         DisplayableTypeName(type_name)
     )]
-    RecipientUnwrapFailed { type_name: String },
+    RecipientUnwrapFailed {
+        /// Recipient type name whose body failed to unwrap.
+        type_name: String,
+    },
     /// The recipient list contains a `recipient_flags.critical = 1`
     /// entry whose `type_name` is unknown to this implementation. Per
     /// `FORMAT.md` §3.4 unknown critical entries MUST cause file
@@ -258,7 +286,10 @@ pub enum CryptoError {
         "Unknown critical recipient: `{}`. Upgrade FerroCrypt.",
         DisplayableTypeName(type_name)
     )]
-    UnknownCriticalRecipient { type_name: String },
+    UnknownCriticalRecipient {
+        /// Unknown recipient type name that carried the critical flag.
+        type_name: String,
+    },
     /// The recipient list was iterated to exhaustion without any
     /// supported recipient yielding a `file_key` that verified the
     /// header MAC. Distinct from [`Self::RecipientUnwrapFailed`] (which is
@@ -284,7 +315,9 @@ pub enum CryptoError {
     /// not "I'm the wrong tool for this file."
     #[error("Decryptor expects {expected} file, got {found}")]
     DecryptorModeMismatch {
+        /// Decryptor mode selected by the caller.
         expected: EncryptionMode,
+        /// Recipient mode classified from the `.fcr` header.
         found: EncryptionMode,
     },
     /// The caller provided no encryption recipients.
@@ -316,7 +349,9 @@ pub enum CryptoError {
         DisplayableTypeName(type_name)
     )]
     IncompatibleRecipients {
+        /// Recipient type name whose mixing policy rejected the list.
         type_name: String,
+        /// Mixing policy associated with the offending recipient type.
         policy: MixingPolicy,
     },
     /// An encrypted payload chunk failed AEAD authentication during
@@ -370,7 +405,10 @@ pub enum FormatDefect {
     /// exceeds the reader's structural cap (`EXT_LEN_MAX`, 64 KiB).
     /// Carried as `u32` because the cap is `65_536`, which exceeds
     /// `u16::MAX`.
-    ExtTooLarge { len: u32 },
+    ExtTooLarge {
+        /// Declared extension-region length, in bytes.
+        len: u32,
+    },
     /// A TLV entry in the extension region is malformed: bad ordering,
     /// duplicate tag, or `len` extends past the end of the region.
     /// `FORMAT.md` §6.
@@ -378,7 +416,10 @@ pub enum FormatDefect {
     /// A TLV tag in the critical range (`0x8001..=0xFFFF`) is not
     /// recognised by this release. Per `FORMAT.md` §6, unknown
     /// critical TLV tags MUST cause file rejection.
-    UnknownCriticalTag { tag: u16 },
+    UnknownCriticalTag {
+        /// Unknown critical TLV tag value.
+        tag: u16,
+    },
     /// Leading magic bytes do not match `"FCR\0"` — not a FerroCrypt
     /// key file. Key-file analogue of [`FormatDefect::BadMagic`].
     NotAKeyFile,
@@ -396,7 +437,10 @@ pub enum FormatDefect {
     /// `.fcr` `kind` byte does not match the expected value for this
     /// operation (e.g. caller asked for `.fcr` but got a `private.key`,
     /// or vice versa). `FORMAT.md` §3.1.
-    WrongKind { kind: u8 },
+    WrongKind {
+        /// Raw `kind` byte from the file prefix.
+        kind: u8,
+    },
     /// Structural defect in the header_fixed layout (non-zero
     /// `header_flags`, `ext_len` over the structural cap, or length
     /// fields that don't sum to `header_len`). Distinct from
@@ -409,12 +453,18 @@ pub enum FormatDefect {
     /// [`CryptoError::HeaderLenCapExceeded`] which fires on the
     /// caller-configured local cap (resource policy, not format
     /// violation).
-    OversizedHeader { header_len: u32 },
+    OversizedHeader {
+        /// Header length declared by the `.fcr` prefix, in bytes.
+        header_len: u32,
+    },
     /// `recipient_count` is outside the structural range `1..=4096`
     /// (`FORMAT.md` §3.2). Distinct from
     /// [`CryptoError::RecipientCountCapExceeded`] which fires on the
     /// caller-configured local cap.
-    RecipientCountOutOfRange { count: u16 },
+    RecipientCountOutOfRange {
+        /// Recipient count declared by `header_fixed`.
+        count: u16,
+    },
     /// Recipient `type_name` does not satisfy the grammar in
     /// `FORMAT.md` §3.3 (lowercase ASCII, allowed character set, no
     /// leading/trailing punctuation, no `..` or `//`).
@@ -441,7 +491,10 @@ pub enum FormatDefect {
     /// the encrypted payload after the outer container is accepted, so
     /// it is a structural defect of the inner archive grammar (FCA),
     /// not of the outer FerroCrypt file. Per `FORMAT.md` §9 / §12.
-    UnsupportedArchiveVersion { version: u8 },
+    UnsupportedArchiveVersion {
+        /// FCA archive version byte from the encrypted payload.
+        version: u8,
+    },
 }
 
 impl std::fmt::Display for FormatDefect {
@@ -490,13 +543,25 @@ impl std::fmt::Display for FormatDefect {
 #[non_exhaustive]
 pub enum UnsupportedVersion {
     /// Encrypted file version is older than the current release supports.
-    OlderFile { version: u8 },
+    OlderFile {
+        /// Version byte read from the encrypted-file prefix.
+        version: u8,
+    },
     /// Encrypted file version is newer than the current release supports.
-    NewerFile { version: u8 },
+    NewerFile {
+        /// Version byte read from the encrypted-file prefix.
+        version: u8,
+    },
     /// Key file version is older than the current release supports.
-    OlderKey { version: u8 },
+    OlderKey {
+        /// Version byte read from the key-file prefix.
+        version: u8,
+    },
     /// Key file version is newer than the current release supports.
-    NewerKey { version: u8 },
+    NewerKey {
+        /// Version byte read from the key-file prefix.
+        version: u8,
+    },
 }
 
 impl std::fmt::Display for UnsupportedVersion {

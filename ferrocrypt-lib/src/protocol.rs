@@ -614,18 +614,17 @@ mod tests {
         {
             use crate::archive::ArchiveLimits;
             use crate::archive::format::{serialize_manifest, write_fca_header};
-            use crate::archive::model::{ArchiveEntry, ArchiveEntryKind, Manifest};
+            use crate::archive::model::{ArchiveEntryKind, Manifest, make_entry};
             use std::ffi::OsString;
             use std::io::Write;
 
             let manifest = Manifest {
-                entries: vec![ArchiveEntry {
-                    kind: ArchiveEntryKind::File,
-                    path_utf8: "data.txt".to_string(),
-                    mode: 0o644,
-                    size: plaintext.len() as u64,
-                    source_path: None,
-                }],
+                entries: vec![make_entry(
+                    "data.txt",
+                    ArchiveEntryKind::File,
+                    plaintext.len() as u64,
+                    0o644,
+                )],
                 total_file_bytes: plaintext.len() as u64,
                 root_name: OsString::from("data.txt"),
                 root_is_file: true,
@@ -637,6 +636,7 @@ mod tests {
             writer = write_fca_header(
                 writer,
                 1,
+                0,
                 manifest_bytes.len() as u32,
                 plaintext.len() as u64,
             )?;

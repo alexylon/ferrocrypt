@@ -1,30 +1,35 @@
-//! FCA archive reader: header + manifest parse, full validation, then
-//! content extraction via the hardened cap-std platform backend.
+//! FCA archive reader: header + `archive_ext` + manifest parse, full
+//! validation, then content extraction via the hardened cap-std
+//! platform backend.
 //!
-//! See `notes/archive_format/ARCHIVE_FORMAT.md` §7 (file-content region),
-//! §14.10 (`copy_exact_n`), §14.11 (trailing-data check), §14.12
-//! (reader entry-point skeleton), §16 (reader/extractor requirements),
-//! §17 (platform requirements).
+//! See `FORMAT.md` §9 (FCA wire format), §9.11 (reader/extractor
+//! sequence), §9.14 (extensibility rules).
 //!
-//! The extraction pipeline is the spec §16.1 sequence:
-//! 1. parse and validate the header
-//! 2. read exactly `manifest_len` bytes
-//! 3. parse the manifest with full per-entry shape + path grammar checks
-//! 4. validate the manifest tree shape (single root, parents present,
-//!    duplicates rejected, total bytes match)
-//! 5. pre-check the final output name with `symlink_metadata`
-//! 6. open `output_dir` as a `cap-std` directory handle
-//! 7. create `{root}.incomplete` (file or directory)
-//! 8. pre-create all descendant directories under `.incomplete`
-//!    (parent before child)
-//! 9. stream file contents in manifest order via `copy_exact_n`
-//! 10. verify archive EOF (no trailing bytes)
-//! 11. apply descendant directory modes deepest-first
-//! 12. promote `{root}.incomplete` to `{root}` via no-clobber rename
-//! 13. apply the root directory's stored mode AFTER promotion (macOS
-//!     compatibility — see spec §16.3)
+//! The extraction pipeline follows FORMAT.md §9.11:
+//! 1. parse and validate the FCA fixed header
+//! 2. read exactly `archive_ext_len` bytes
+//! 3. validate the archive-level TLV region (no-known-critical policy)
+//! 4. read exactly `manifest_len` bytes
+//! 5. parse manifest entries (each `entry_ext` region scanned and
+//!    validated under the same no-known-critical policy)
+//! 6. validate every per-entry TLV region
+//! 7. validate the complete manifest (entry count, total bytes, paths,
+//!    duplicates, tree shape, parents present, resource caps, critical
+//!    extension support)
+//! 8. pre-check the final output name with `symlink_metadata`
+//! 9. reject pre-existing `.incomplete` at first create
+//! 10. create `{root}.incomplete` (file or directory) under the
+//!     hardened cap-std backend
+//! 11. stream file contents in manifest order via `copy_exact_n`
+//! 12. apply file modes by handle where supported
+//! 13. verify archive EOF (no trailing bytes)
+//! 14. apply descendant directory modes deepest-first
+//! 15. promote `{root}.incomplete` to `{root}` via no-clobber rename
+//! 16. apply the root directory's stored mode AFTER promotion (macOS
+//!     compatibility — see FORMAT.md §9.11)
+//! 17. return the final output path
 //!
-//! Steps 1–5 MUST complete before any filesystem output is created.
+//! Steps 1–8 MUST complete before any filesystem output is created.
 //! On error before promotion, the [`IncompleteOutputPolicy`] selects
 //! whether the staged `.incomplete` working tree is removed
 //! (`DeleteOnError`, default) or retained (`RetainOnError`).
@@ -37,11 +42,12 @@ use std::path::{Path, PathBuf};
 use cap_std::fs::Dir;
 
 use crate::CryptoError;
+use crate::crypto::tlv::validate_no_known_critical;
 use crate::fs::atomic::rename_no_clobber;
 use crate::fs::paths::{INCOMPLETE_SUFFIX, reject_occupied};
 
 use super::IncompleteOutputPolicy;
-use super::format::{copy_exact_n, parse_fca_header, parse_manifest_bytes};
+use super::format::{copy_exact_n, parse_fca_header, parse_manifest_bytes, require_fits_usize};
 use super::limits::ArchiveLimits;
 use super::model::{ArchiveEntry, ArchiveEntryKind, Manifest};
 use super::path::canonical_path_order;
@@ -79,17 +85,34 @@ fn unarchive_inner<R: Read>(
     limits: ArchiveLimits,
     created_incomplete_roots: &mut Vec<OsString>,
 ) -> Result<PathBuf, CryptoError> {
-    // §16.1 step 1.
+    // FORMAT.md §9.11 step 1: parse + structurally validate the header.
+    // `parse_fca_header` already enforces all caps for `archive_ext_len`,
+    // `manifest_len`, and `total_file_bytes`.
     let header = parse_fca_header(&mut reader, limits)?;
 
-    // §16.1 step 2.
-    let manifest_len = usize::try_from(header.manifest_len).map_err(|_| {
-        CryptoError::InvalidInput("Archive manifest length cannot fit in memory".to_string())
-    })?;
+    // §9.11 steps 2–3: read exactly `archive_ext_len` bytes and validate
+    // the archive-level TLV region under the no-known-critical policy.
+    // v1 defines no archive-level TLV tags; v1 writers emit
+    // `archive_ext_len = 0`, so this is normally a zero-length read,
+    // but a v1.x writer may legitimately emit ignorable tags.
+    let archive_ext_len = require_fits_usize(header.archive_ext_len, "Archive extension length")?;
+    let mut archive_ext_bytes = vec![0u8; archive_ext_len];
+    reader.read_exact(&mut archive_ext_bytes)?;
+    validate_no_known_critical(
+        &archive_ext_bytes,
+        limits.max_archive_ext_bytes,
+        limits.max_tlv_value_bytes,
+    )?;
+
+    // §9.11 step 4: read exactly `manifest_len` bytes.
+    let manifest_len = require_fits_usize(header.manifest_len, "Archive manifest length")?;
     let mut manifest_bytes = vec![0u8; manifest_len];
     reader.read_exact(&mut manifest_bytes)?;
 
-    // §16.1 steps 3–4.
+    // §9.11 steps 5–7: parse manifest entries (including each
+    // `entry_ext` region; `parse_manifest_bytes` validates every
+    // per-entry TLV under the no-known-critical policy) and validate
+    // the manifest tree shape.
     let manifest = parse_manifest_bytes(&manifest_bytes, header, limits)?;
 
     // §16.1 step 5: `symlink_metadata` (via `reject_occupied`) so a
@@ -370,33 +393,37 @@ mod tests {
 
     // -- Test fixtures -----------------------------------------------------
 
-    fn make_entry(path: &str, kind: ArchiveEntryKind, size: u64, mode: u32) -> ArchiveEntry {
-        ArchiveEntry {
-            kind,
-            path_utf8: path.to_string(),
-            mode,
-            size,
-            source_path: None,
-        }
-    }
+    use crate::archive::model::make_entry;
+    use crate::crypto::tlv::tlv_bytes;
 
     /// Serializes the FCA header + manifest bytes into a fresh
     /// `Vec<u8>`, ready for the caller to append a file-content
     /// region (full per `build_archive`, partial per
     /// `build_partial_archive`).
     fn build_archive_prefix(manifest: &Manifest) -> Vec<u8> {
+        build_archive_prefix_with_archive_ext(manifest, &[])
+    }
+
+    /// Same as [`build_archive_prefix`] but lets a test inject a
+    /// synthetic `archive_ext` region between the fixed header and
+    /// the manifest. Used by adversarial-input tests that exercise
+    /// the archive-level TLV validation path.
+    fn build_archive_prefix_with_archive_ext(manifest: &Manifest, archive_ext: &[u8]) -> Vec<u8> {
         let manifest_bytes = serialize_manifest(manifest, ArchiveLimits::default()).unwrap();
         let entry_count = u32::try_from(manifest.entries.len()).unwrap();
+        let archive_ext_len = u32::try_from(archive_ext.len()).unwrap();
         let manifest_len = u32::try_from(manifest_bytes.len()).unwrap();
 
         let mut archive = Vec::new();
         let _ = write_fca_header(
             &mut archive,
             entry_count,
+            archive_ext_len,
             manifest_len,
             manifest.total_file_bytes,
         )
         .unwrap();
+        archive.extend_from_slice(archive_ext);
         archive.extend_from_slice(&manifest_bytes);
         archive
     }
@@ -636,6 +663,60 @@ mod tests {
         assert_eq!(fs::read(final_path.join("c.bin")).unwrap(), b"CCCCC");
     }
 
+    // -- Archive-level TLV rejections (FORMAT.md §9.3) ---------------------
+
+    /// `archive_ext` accepts a non-empty ignorable TLV region: the
+    /// reader skips the bytes after canonicality checks and
+    /// extraction proceeds normally. Pin so a future refactor that
+    /// over-tightens the no-known-critical wrapper doesn't reject
+    /// ignorable v1.x metadata.
+    #[test]
+    fn round_trip_with_ignorable_archive_ext() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let manifest = single_file_manifest("hello.txt", b"Hello, world!");
+        let ignorable = tlv_bytes(0x0001, b"meta");
+        let mut archive = build_archive_prefix_with_archive_ext(&manifest, &ignorable);
+        archive.extend_from_slice(b"Hello, world!");
+
+        let final_path = unarchive_default(archive, tmp.path()).unwrap();
+        assert_eq!(fs::read(&final_path).unwrap(), b"Hello, world!");
+    }
+
+    /// An unknown critical TLV (`0x8001..=0xFFFF`) in `archive_ext`
+    /// rejects with `UnknownCriticalTag` BEFORE any filesystem output
+    /// is created. v1 defines no archive-level critical tags.
+    #[test]
+    fn rejects_unknown_critical_archive_ext_tag() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let manifest = single_file_manifest("hello.txt", b"Hello, world!");
+        let critical = tlv_bytes(0x8001, &[]);
+        let mut archive = build_archive_prefix_with_archive_ext(&manifest, &critical);
+        archive.extend_from_slice(b"Hello, world!");
+
+        let err = unarchive_default(archive, tmp.path()).unwrap_err();
+        assert!(format!("{err:?}").contains("UnknownCriticalTag"));
+        // No filesystem output was created.
+        let count = fs::read_dir(tmp.path()).unwrap().count();
+        assert_eq!(count, 0);
+    }
+
+    /// A malformed `archive_ext` TLV (truncated entry header) rejects
+    /// via `MalformedTlv` from the shared scanner. Five raw bytes —
+    /// one short of the six-byte `tag(u16) || len(u32)` minimum, so
+    /// the scanner exits its bounds check before parsing the tag.
+    #[test]
+    fn rejects_malformed_archive_ext_tlv() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let manifest = single_file_manifest("hello.txt", b"Hello, world!");
+        let mut truncated = tlv_bytes(0x0001, &[]);
+        truncated.pop();
+        let mut archive = build_archive_prefix_with_archive_ext(&manifest, &truncated);
+        archive.extend_from_slice(b"Hello, world!");
+
+        let err = unarchive_default(archive, tmp.path()).unwrap_err();
+        assert!(format!("{err:?}").contains("MalformedTlv"));
+    }
+
     // -- Content-region rejections (§19.5) ---------------------------------
 
     #[test]
@@ -822,27 +903,11 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let manifest = Manifest {
             entries: vec![
-                ArchiveEntry {
-                    kind: ArchiveEntryKind::Directory,
-                    path_utf8: "locked".to_string(),
-                    mode: 0o400, // r-- on root: no execute/search/write
-                    size: 0,
-                    source_path: None,
-                },
-                ArchiveEntry {
-                    kind: ArchiveEntryKind::Directory,
-                    path_utf8: "locked/child".to_string(),
-                    mode: 0o700,
-                    size: 0,
-                    source_path: None,
-                },
-                ArchiveEntry {
-                    kind: ArchiveEntryKind::File,
-                    path_utf8: "locked/child/secret.txt".to_string(),
-                    mode: 0o600,
-                    size: 6,
-                    source_path: None,
-                },
+                // 0o400 root: no execute/search/write — exercises the
+                // post-rename root-chmod path on macOS.
+                make_entry("locked", ArchiveEntryKind::Directory, 0, 0o400),
+                make_entry("locked/child", ArchiveEntryKind::Directory, 0, 0o700),
+                make_entry("locked/child/secret.txt", ArchiveEntryKind::File, 6, 0o600),
             ],
             total_file_bytes: 6,
             root_name: OsString::from("locked"),

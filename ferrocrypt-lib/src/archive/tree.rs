@@ -163,14 +163,10 @@ mod tests {
         ArchiveLimits::default()
     }
 
+    use crate::archive::model::make_entry;
+
     fn entry(path: &str, kind: ArchiveEntryKind, size: u64) -> ArchiveEntry {
-        ArchiveEntry {
-            kind,
-            path_utf8: path.to_string(),
-            mode: 0o644,
-            size,
-            source_path: None,
-        }
+        make_entry(path, kind, size, 0o644)
     }
 
     #[test]

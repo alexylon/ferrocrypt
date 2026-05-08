@@ -34,7 +34,7 @@
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::CryptoError;
 use crate::fs::paths::file_stem;
@@ -247,6 +247,29 @@ struct ArchiveCounters {
     total_bytes: u64,
 }
 
+/// Single source of truth for the writer's [`ArchiveEntry`]
+/// construction during the metadata pass. Every `entry_ext` is empty
+/// because v1 native writers emit no per-entry TLV bytes (FORMAT.md
+/// §9.13). Used by both branches of [`build_manifest`] and both
+/// branches of [`walk_directory`] so the field set stays consistent
+/// across all four call sites.
+fn writer_entry(
+    kind: ArchiveEntryKind,
+    path_utf8: String,
+    mode: u32,
+    size: u64,
+    source_path: PathBuf,
+) -> ArchiveEntry {
+    ArchiveEntry {
+        kind,
+        path_utf8,
+        mode,
+        size,
+        source_path: Some(source_path),
+        entry_ext: Vec::new(),
+    }
+}
+
 /// Shared per-entry recording: increments the entry count, applies
 /// every cap [`enforce_per_entry_caps`] covers, optionally sums into
 /// the total-bytes cap (for file entries), and runs
@@ -315,13 +338,13 @@ fn build_manifest(input_path: &Path, limits: &ArchiveLimits) -> Result<Manifest,
         let mut total_bytes = 0u64;
         enforce_total_bytes_cap(size, &mut total_bytes, limits)?;
 
-        let entry = ArchiveEntry {
-            kind: ArchiveEntryKind::File,
-            path_utf8: name_str.clone(),
+        let entry = writer_entry(
+            ArchiveEntryKind::File,
+            name_str.clone(),
             mode,
             size,
-            source_path: Some(input_path.to_path_buf()),
-        };
+            input_path.to_path_buf(),
+        );
 
         Ok(Manifest {
             entries: vec![entry],
@@ -332,13 +355,13 @@ fn build_manifest(input_path: &Path, limits: &ArchiveLimits) -> Result<Manifest,
     } else if file_type.is_dir() {
         let root_mode = archive_dir_mode(input_path)?;
 
-        let mut entries = vec![ArchiveEntry {
-            kind: ArchiveEntryKind::Directory,
-            path_utf8: name_str.clone(),
-            mode: root_mode,
-            size: 0,
-            source_path: Some(input_path.to_path_buf()),
-        }];
+        let mut entries = vec![writer_entry(
+            ArchiveEntryKind::Directory,
+            name_str.clone(),
+            root_mode,
+            0,
+            input_path.to_path_buf(),
+        )];
         let mut counters = ArchiveCounters {
             entry_count: 1,
             total_bytes: 0,
@@ -411,25 +434,25 @@ fn walk_directory(
 
             record_entry(counters, &fca_path_utf8, Some(size), limits)?;
 
-            entries.push(ArchiveEntry {
-                kind: ArchiveEntryKind::File,
-                path_utf8: fca_path_utf8.clone(),
+            entries.push(writer_entry(
+                ArchiveEntryKind::File,
+                fca_path_utf8.clone(),
                 mode,
                 size,
-                source_path: Some(full_path),
-            });
+                full_path,
+            ));
         } else if file_type.is_dir() {
             let mode = archive_dir_mode(&full_path)?;
 
             record_entry(counters, &fca_path_utf8, None, limits)?;
 
-            entries.push(ArchiveEntry {
-                kind: ArchiveEntryKind::Directory,
-                path_utf8: fca_path_utf8.clone(),
+            entries.push(writer_entry(
+                ArchiveEntryKind::Directory,
+                fca_path_utf8.clone(),
                 mode,
-                size: 0,
-                source_path: Some(full_path.clone()),
-            });
+                0,
+                full_path.clone(),
+            ));
 
             walk_directory(&full_path, &fca_path_utf8, entries, counters, limits)?;
         } else {
@@ -513,7 +536,16 @@ pub(crate) fn archive<W: Write>(
         manifest_len_cap_error(manifest_bytes.len() as u64, limits.max_manifest_bytes)
     })?;
 
-    writer = write_fca_header(writer, entry_count, manifest_len, manifest.total_file_bytes)?;
+    // FCA v1 writers always emit `archive_ext_len = 0`; the archive-
+    // level TLV region exists in the wire layout but defines no v1
+    // tags, so writers MUST NOT emit any bytes there.
+    writer = write_fca_header(
+        writer,
+        entry_count,
+        0,
+        manifest_len,
+        manifest.total_file_bytes,
+    )?;
     writer.write_all(&manifest_bytes).map_err(CryptoError::Io)?;
 
     // Pass 2: stream file contents in canonical manifest order.
@@ -545,6 +577,7 @@ fn output_stem(input_path: &Path) -> Result<String, CryptoError> {
 mod tests {
     use super::super::IncompleteOutputPolicy;
     use super::super::decode::unarchive;
+    use super::super::model::make_entry;
     use super::*;
     use std::io::Cursor;
     #[cfg(windows)]
@@ -930,13 +963,9 @@ mod tests {
         let path = tmp.path().join("real.txt");
         fs::write(&path, b"actual content").unwrap();
 
-        let entry = ArchiveEntry {
-            kind: ArchiveEntryKind::File,
-            path_utf8: "real.txt".to_string(),
-            mode: 0o644,
-            size: 9999, // not the real size
-            source_path: Some(path),
-        };
+        // 9999 ≠ actual file size → exercises the size-mismatch arm.
+        let mut entry = make_entry("real.txt", ArchiveEntryKind::File, 9999, 0o644);
+        entry.source_path = Some(path);
 
         let mut buf = Vec::new();
         let err = stream_source_file(&entry, &mut buf).unwrap_err();

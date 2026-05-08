@@ -515,7 +515,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().join("root");
         fs::create_dir_all(root.join("real")).unwrap();
-        fs::set_permissions(root.join("real"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(root.join("real"), fs::Permissions::from_mode(0o755)).unwrap();
         unix_fs::symlink("real", root.join("extracted")).unwrap();
 
         let parent = open_anchor(&root).unwrap();

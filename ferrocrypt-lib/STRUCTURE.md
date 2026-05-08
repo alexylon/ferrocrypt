@@ -382,12 +382,20 @@ Payload streaming uses `PayloadKey`. It does not know about recipient schemes, k
 
 ### 4.7 `crypto/tlv.rs`
 
-`crypto/tlv.rs` owns authenticated TLV parsing and validation.
+`crypto/tlv.rs` owns the shared TLV grammar for every FerroCrypt extension region: `.fcr` header `ext_bytes`, `private.key` `ext_bytes`, FCA `archive_ext`, and FCA per-entry `entry_ext`.
+
+The module exposes:
+
+- `scan_tlv_region(bytes, max_region_len, max_value_len) -> Vec<RawTlv>` — the parsing primitive. Validates structural framing (each entry header fits, declared `len` fits in the region and `<= max_value_len`), strict ascending tag order, reserved-tag rejection. Returns parsed entries with cached `TlvClass`. Does not enforce a critical-tag policy.
+- `reject_unknown_critical(tlvs) -> Result<()>` — the v1.0 policy wrapper. Rejects any `TlvClass::Critical` entry as `UnknownCriticalTag` because v1.0 defines no known critical tags in any region. Future versions that define known criticals will iterate the scanned TLVs against a registry instead.
+- `validate_no_known_critical(bytes, max_region_len, max_value_len) -> Result<()>` — the v1.0 single-call helper. Combines `scan_tlv_region` and `reject_unknown_critical` for callers that don't need the parsed entries. Used by every v1.0 caller (FCR header, `private.key`, FCA `archive_ext`, FCA `entry_ext`).
+- `classify_tlv_tag(tag) -> Result<TlvClass>` — pure tag classification, rejects the two reserved values.
+- `validate_tlv(ext_bytes)` — public convenience function. Calls `validate_no_known_critical` with `EXT_LEN_MAX` for both region and value caps. Used by `.fcr` header and `private.key` callers.
 
 Rules:
 
-- Encrypted-file TLV namespaces and private-key TLV namespaces are distinct at the caller level.
-- TLV validation occurs only after the appropriate authentication succeeds.
+- Each containing region (FCR header, private-key, FCA archive-level, FCA per-entry) has its own tag namespace; the structural rules are shared.
+- TLV validation occurs only after the appropriate authentication succeeds (header MAC for `.fcr`, AEAD-AAD for `private.key`, outer `.fcr` payload AEAD for FCA).
 - Unknown critical TLVs reject after authentication.
 - Code must not act on unauthenticated TLV metadata.
 
@@ -624,7 +632,7 @@ Archive handling is security-critical. Wire-format constants, model types, resou
 
 It contains:
 
-- wire-format constants (`FCA_MAGIC = b"FCA\0"`, `FCA_VERSION = 0x01`, `FCA_HEADER_SIZE = 23`, `FCA_ENTRY_FIXED_SIZE = 14`, `KIND_FILE = 0x01`, `KIND_DIR = 0x02`, `PERMISSION_BITS_MASK = 0o777`);
+- wire-format constants (`FCA_MAGIC = b"FCA\0"`, `FCA_VERSION = 0x01`, `FCA_HEADER_SIZE = 27` (includes the `archive_ext_len` field), `FCA_ENTRY_FIXED_SIZE = 18` (includes the per-entry `entry_ext_len` field), `KIND_FILE = 0x01`, `KIND_DIR = 0x02`, `PERMISSION_BITS_MASK = 0o777`);
 - big-endian integer helpers used by both header and manifest serialization;
 - header parse/build (`parse_fca_header` / `write_fca_header`);
 - manifest serialize/parse (`checked_manifest_len` / `serialize_manifest` / `parse_manifest_bytes`);
@@ -638,9 +646,9 @@ It contains:
 
 It contains:
 
-- `FcaHeader` — parsed header summary (`entry_count`, `manifest_len`, `total_file_bytes`);
+- `FcaHeader` — parsed header summary (`entry_count`, `archive_ext_len`, `manifest_len`, `total_file_bytes`);
 - `ArchiveEntryKind` — `File` / `Directory` enum;
-- `ArchiveEntry` — `path_utf8`, `mode`, `size`, plus a writer-only `source_path: Option<PathBuf>` set by the metadata pass so the content pass can reopen no-follow;
+- `ArchiveEntry` — `path_utf8`, `mode`, `size`, opaque `entry_ext: Vec<u8>` carrying the per-entry TLV region (empty for v1 writers, populated by the parser for v1.x readers), plus a writer-only `source_path: Option<PathBuf>` set by the metadata pass so the content pass can reopen no-follow;
 - `Manifest` — `entries`, `total_file_bytes`, `root_name`, `root_is_file`.
 
 Readers leave `source_path` as `None`; writers set it.
@@ -652,10 +660,14 @@ Readers leave `source_path` as `None`; writers set it.
 `ArchiveLimits` covers:
 
 - maximum entry count;
-- maximum total regular-file content;
+- maximum total regular-file content (logical sum);
 - maximum path depth;
 - maximum per-path UTF-8 byte length (capped by `u16::MAX` because the on-disk `path_len` field is `u16`);
-- maximum serialized manifest byte length.
+- maximum serialized manifest byte length (includes per-entry TLV regions);
+- maximum `archive_ext` byte length (default 64 KiB);
+- maximum `entry_ext` byte length per entry (default 64 KiB);
+- maximum cumulative per-entry TLV bytes (default 64 MiB);
+- maximum single TLV value byte length (default 16 MiB).
 
 Cap helpers (`enforce_per_entry_caps`, `enforce_total_bytes_cap`) are shared by encrypt-side preflight and decrypt-side enforcement. Encrypt-side preflight and decrypt-side enforcement must agree: the encrypt side must not produce archives that the decrypt side rejects under default limits.
 

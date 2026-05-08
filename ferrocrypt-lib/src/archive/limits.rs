@@ -14,24 +14,44 @@ use crate::CryptoError;
 
 /// Resource caps for FCA archive encoding and extraction.
 ///
-/// See `notes/archive_format/ARCHIVE_FORMAT.md` §11. Defaults: 250,000
-/// entries, 64 GiB total regular-file content, 64 path components per
-/// entry, 4096 UTF-8 bytes per path, 64 MiB serialized manifest.
+/// See `FORMAT.md` §9.12. Defaults: 250,000 entries, 64 GiB cumulative
+/// logical regular-file bytes, 64 path components per entry, 4096
+/// UTF-8 bytes per path, 64 MiB serialized manifest, 64 KiB per
+/// archive- and entry-level TLV region, 64 MiB total per-entry TLV
+/// bytes, 16 MiB per individual TLV value.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct ArchiveLimits {
     /// Maximum number of manifest entries (regular files plus directories).
     pub max_entry_count: u32,
-    /// Maximum cumulative declared bytes across regular-file entries.
-    /// Directory entries do not contribute.
+    /// Maximum cumulative declared logical bytes across regular-file
+    /// entries. Directory entries do not contribute.
     pub max_total_plaintext_bytes: u64,
     /// Maximum path component count for any single archive entry.
     pub max_path_depth: u32,
     /// Maximum UTF-8 byte length of any single archive path.
     /// MUST be `<= u16::MAX` because the on-disk `path_len` field is `u16`.
     pub max_path_bytes: u32,
-    /// Maximum byte length of the serialized manifest.
+    /// Maximum byte length of the serialized manifest, including the
+    /// per-entry TLV regions that live inside it.
     pub max_manifest_bytes: u32,
+    /// Maximum byte length of the FCA archive-level TLV region
+    /// (`archive_ext`). The FCA fixed header's `archive_ext_len` field
+    /// is rejected before allocation if it exceeds this cap.
+    pub max_archive_ext_bytes: u32,
+    /// Maximum byte length of any single per-entry TLV region
+    /// (`entry_ext`).
+    pub max_entry_ext_bytes: u32,
+    /// Maximum cumulative byte length of all per-entry TLV regions in
+    /// one manifest. Bounds memory used by extension metadata across
+    /// the archive even when individual entries fit under
+    /// `max_entry_ext_bytes`.
+    pub max_total_entry_ext_bytes: u64,
+    /// Maximum byte length of any single TLV value inside an FCA
+    /// archive- or entry-level TLV region. Defense-in-depth: the
+    /// containing region cap will fire first for v1, but a future
+    /// region with a larger cap still bounds individual values.
+    pub max_tlv_value_bytes: u32,
 }
 
 impl ArchiveLimits {
@@ -65,6 +85,30 @@ impl ArchiveLimits {
         self
     }
 
+    /// Replaces [`ArchiveLimits::max_archive_ext_bytes`].
+    pub fn with_max_archive_ext_bytes(mut self, n: u32) -> Self {
+        self.max_archive_ext_bytes = n;
+        self
+    }
+
+    /// Replaces [`ArchiveLimits::max_entry_ext_bytes`].
+    pub fn with_max_entry_ext_bytes(mut self, n: u32) -> Self {
+        self.max_entry_ext_bytes = n;
+        self
+    }
+
+    /// Replaces [`ArchiveLimits::max_total_entry_ext_bytes`].
+    pub fn with_max_total_entry_ext_bytes(mut self, n: u64) -> Self {
+        self.max_total_entry_ext_bytes = n;
+        self
+    }
+
+    /// Replaces [`ArchiveLimits::max_tlv_value_bytes`].
+    pub fn with_max_tlv_value_bytes(mut self, n: u32) -> Self {
+        self.max_tlv_value_bytes = n;
+        self
+    }
+
     /// Enforces the structural invariant that `max_path_bytes` fits in
     /// the on-disk `u16` path-length field. Other fields are not
     /// otherwise constrained — callers may pick any `u32`/`u64` value.
@@ -86,6 +130,10 @@ impl Default for ArchiveLimits {
             max_path_depth: 64,
             max_path_bytes: 4096,
             max_manifest_bytes: 64 * 1024 * 1024,
+            max_archive_ext_bytes: 64 * 1024,
+            max_entry_ext_bytes: 64 * 1024,
+            max_total_entry_ext_bytes: 64 * 1024 * 1024,
+            max_tlv_value_bytes: 16 * 1024 * 1024,
         }
     }
 }
@@ -173,6 +221,27 @@ pub(super) fn path_depth_cap_error(depth: u32, cap: u32, path_utf8: &str) -> Cry
     ))
 }
 
+pub(super) fn archive_ext_cap_error(declared_len: u64, cap: u32) -> CryptoError {
+    CryptoError::InvalidInput(format!(
+        "Archive extension length cap exceeded ({declared_len} bytes, cap {cap})"
+    ))
+}
+
+pub(super) fn entry_ext_cap_error(declared_len: u64, cap: u32, path: Option<&str>) -> CryptoError {
+    let head =
+        format!("Archive entry extension length cap exceeded ({declared_len} bytes, cap {cap})");
+    CryptoError::InvalidInput(match path {
+        Some(p) => format!("{head}: {p}"),
+        None => head,
+    })
+}
+
+pub(super) fn total_entry_ext_cap_error(total: u64, cap: u64) -> CryptoError {
+    CryptoError::InvalidInput(format!(
+        "Archive total entry-extension bytes cap exceeded ({total} bytes, cap {cap})"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ArchiveLimits, enforce_per_entry_caps, enforce_total_bytes_cap};
@@ -185,6 +254,10 @@ mod tests {
         assert_eq!(l.max_path_depth, 64);
         assert_eq!(l.max_path_bytes, 4096);
         assert_eq!(l.max_manifest_bytes, 64 * 1024 * 1024);
+        assert_eq!(l.max_archive_ext_bytes, 64 * 1024);
+        assert_eq!(l.max_entry_ext_bytes, 64 * 1024);
+        assert_eq!(l.max_total_entry_ext_bytes, 64 * 1024 * 1024);
+        assert_eq!(l.max_tlv_value_bytes, 16 * 1024 * 1024);
     }
 
     #[test]
@@ -250,6 +323,22 @@ mod tests {
         assert_eq!(l.max_path_depth, base.max_path_depth);
         assert_eq!(l.max_path_bytes, base.max_path_bytes);
         assert_eq!(l.max_manifest_bytes, 42);
+
+        let l = base.with_max_archive_ext_bytes(1234);
+        assert_eq!(l.max_archive_ext_bytes, 1234);
+        assert_eq!(l.max_entry_ext_bytes, base.max_entry_ext_bytes);
+
+        let l = base.with_max_entry_ext_bytes(5678);
+        assert_eq!(l.max_archive_ext_bytes, base.max_archive_ext_bytes);
+        assert_eq!(l.max_entry_ext_bytes, 5678);
+
+        let l = base.with_max_total_entry_ext_bytes(999);
+        assert_eq!(l.max_total_entry_ext_bytes, 999);
+        assert_eq!(l.max_tlv_value_bytes, base.max_tlv_value_bytes);
+
+        let l = base.with_max_tlv_value_bytes(321);
+        assert_eq!(l.max_total_entry_ext_bytes, base.max_total_entry_ext_bytes);
+        assert_eq!(l.max_tlv_value_bytes, 321);
     }
 
     /// `entry_count > limits.max_entry_count` is `>`, not `>=`. Boundary

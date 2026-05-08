@@ -8,10 +8,12 @@
 use std::io::{self, Cursor, Read, Write};
 
 use crate::CryptoError;
+use crate::crypto::tlv::validate_no_known_critical;
 
 use super::limits::{
-    ARCHIVE_ENTRY_MODE_UNSUPPORTED, ArchiveLimits, entry_count_cap_error, manifest_len_cap_error,
-    path_bytes_cap_error, total_bytes_cap_error,
+    ARCHIVE_ENTRY_MODE_UNSUPPORTED, ArchiveLimits, archive_ext_cap_error, entry_count_cap_error,
+    entry_ext_cap_error, manifest_len_cap_error, path_bytes_cap_error, total_bytes_cap_error,
+    total_entry_ext_cap_error,
 };
 use super::model::{ArchiveEntry, ArchiveEntryKind, FcaHeader, Manifest};
 use super::path::validate_fca_path;
@@ -20,14 +22,14 @@ use super::tree::validate_manifest_tree;
 pub(crate) const FCA_MAGIC: &[u8; 4] = b"FCA\0";
 pub(crate) const FCA_VERSION: u8 = 0x01;
 /// Size of the fixed FCA header in bytes: `magic(4) || version(1) ||
-/// flags(2) || entry_count(4) || manifest_len(4) || total_file_bytes(8)`
-/// (spec §5.1). Documented as a spec constant for callers that need it
-/// for byte-level inspection or fixture construction; the parser
-/// reads each field individually and does not use this constant
-/// directly.
+/// flags(2) || entry_count(4) || archive_ext_len(4) || manifest_len(4)
+/// || total_file_bytes(8)` (FORMAT.md §9.2). Documented as a spec
+/// constant for callers that need it for byte-level inspection or
+/// fixture construction; the parser reads each field individually and
+/// does not use this constant directly.
 #[allow(dead_code)]
-pub(crate) const FCA_HEADER_SIZE: usize = 23;
-pub(crate) const FCA_ENTRY_FIXED_SIZE: usize = 14;
+pub(crate) const FCA_HEADER_SIZE: usize = 27;
+pub(crate) const FCA_ENTRY_FIXED_SIZE: usize = 18;
 
 pub(crate) const KIND_FILE: u8 = 0x01;
 pub(crate) const KIND_DIR: u8 = 0x02;
@@ -66,6 +68,18 @@ pub(super) fn empty_archive_error() -> CryptoError {
 /// multi-megabyte pre-allocation; small archives still fit in one
 /// allocation, larger ones grow the `Vec` organically.
 const MANIFEST_PARSE_INITIAL_CAPACITY: usize = 1024;
+
+/// Converts a `u32` wire-format length field to `usize` for allocation
+/// or slicing. Rejects with [`CryptoError::InvalidInput`] if the value
+/// won't fit in the current platform's `usize`. On every supported
+/// target `usize` is at least as wide as `u32`, so this only fires
+/// under a hypothetical narrower-`usize` platform — but the check is
+/// defense-in-depth so a regression in a structural cap is caught at
+/// the conversion boundary, not inside an `as usize` cast.
+pub(super) fn require_fits_usize(value: u32, label: &str) -> Result<usize, CryptoError> {
+    usize::try_from(value)
+        .map_err(|_| CryptoError::InvalidInput(format!("{label} cannot fit in memory")))
+}
 
 pub(super) fn read_u8<R: Read>(r: &mut R) -> io::Result<u8> {
     let mut b = [0u8; 1];
@@ -144,12 +158,14 @@ pub(super) fn write_u64_be<W: Write>(w: &mut W, n: u64) -> io::Result<()> {
     w.write_all(&n.to_be_bytes())
 }
 
-/// Writes the 23-byte FCA fixed header. Returns the writer on success
-/// so the caller can chain manifest + content writes. Refuses
-/// `entry_count == 0` before emitting any bytes.
+/// Writes the 27-byte FCA fixed header. Returns the writer on success
+/// so the caller can chain `archive_ext` + manifest + content writes.
+/// Refuses `entry_count == 0` and `manifest_len == 0` before emitting
+/// any bytes.
 pub(crate) fn write_fca_header<W: Write>(
     mut w: W,
     entry_count: u32,
+    archive_ext_len: u32,
     manifest_len: u32,
     total_file_bytes: u64,
 ) -> Result<W, CryptoError> {
@@ -164,14 +180,16 @@ pub(crate) fn write_fca_header<W: Write>(
     write_u8(&mut w, FCA_VERSION).map_err(CryptoError::Io)?;
     write_u16_be(&mut w, FCA_FLAGS_V1).map_err(CryptoError::Io)?;
     write_u32_be(&mut w, entry_count).map_err(CryptoError::Io)?;
+    write_u32_be(&mut w, archive_ext_len).map_err(CryptoError::Io)?;
     write_u32_be(&mut w, manifest_len).map_err(CryptoError::Io)?;
     write_u64_be(&mut w, total_file_bytes).map_err(CryptoError::Io)?;
     Ok(w)
 }
 
-/// Parses and structurally validates the 23-byte FCA fixed header.
+/// Parses and structurally validates the 27-byte FCA fixed header.
 /// All resource caps are applied here so downstream allocations
-/// (manifest buffer, entry vector) are bounded by the time they fire.
+/// (`archive_ext` buffer, manifest buffer, entry vector) are bounded
+/// by the time they fire.
 pub fn parse_fca_header<R: Read>(
     reader: &mut R,
     limits: ArchiveLimits,
@@ -201,6 +219,7 @@ pub fn parse_fca_header<R: Read>(
     }
 
     let entry_count = read_u32_be(reader)?;
+    let archive_ext_len = read_u32_be(reader)?;
     let manifest_len = read_u32_be(reader)?;
     let total_file_bytes = read_u64_be(reader)?;
 
@@ -210,6 +229,13 @@ pub fn parse_fca_header<R: Read>(
     if entry_count > limits.max_entry_count {
         return Err(entry_count_cap_error(entry_count, limits.max_entry_count));
     }
+    if archive_ext_len > limits.max_archive_ext_bytes {
+        return Err(archive_ext_cap_error(
+            u64::from(archive_ext_len),
+            limits.max_archive_ext_bytes,
+        ));
+    }
+    let _ = require_fits_usize(archive_ext_len, "Archive extension length")?;
     if manifest_len == 0 {
         return Err(malformed_manifest());
     }
@@ -219,11 +245,7 @@ pub fn parse_fca_header<R: Read>(
             limits.max_manifest_bytes,
         ));
     }
-    if usize::try_from(manifest_len).is_err() {
-        return Err(CryptoError::InvalidInput(
-            "Archive manifest length cannot fit in memory".to_string(),
-        ));
-    }
+    let _ = require_fits_usize(manifest_len, "Archive manifest length")?;
     if total_file_bytes > limits.max_total_plaintext_bytes {
         return Err(total_bytes_cap_error(
             total_file_bytes,
@@ -233,6 +255,7 @@ pub fn parse_fca_header<R: Read>(
 
     Ok(FcaHeader {
         entry_count,
+        archive_ext_len,
         manifest_len,
         total_file_bytes,
     })
@@ -250,6 +273,7 @@ pub(crate) fn checked_manifest_len(
     let limits = limits.validate()?;
 
     let mut len: usize = 0;
+    let mut total_entry_ext_bytes: u64 = 0;
     for entry in entries {
         if entry.mode > PERMISSION_BITS_MASK {
             return Err(CryptoError::InvalidInput(
@@ -270,9 +294,51 @@ pub(crate) fn checked_manifest_len(
             ));
         }
 
+        let entry_ext_len = entry.entry_ext.len();
+        if entry_ext_len > limits.max_entry_ext_bytes as usize {
+            return Err(entry_ext_cap_error(
+                entry_ext_len as u64,
+                limits.max_entry_ext_bytes,
+                Some(&entry.path_utf8),
+            ));
+        }
+        if u32::try_from(entry_ext_len).is_err() {
+            return Err(CryptoError::InvalidInput(
+                "Archive entry extension length cannot fit in u32".to_string(),
+            ));
+        }
+
+        total_entry_ext_bytes = total_entry_ext_bytes
+            .checked_add(entry_ext_len as u64)
+            .ok_or_else(|| {
+                CryptoError::InvalidInput(
+                    "Archive total entry-extension bytes overflow".to_string(),
+                )
+            })?;
+        if total_entry_ext_bytes > limits.max_total_entry_ext_bytes {
+            return Err(total_entry_ext_cap_error(
+                total_entry_ext_bytes,
+                limits.max_total_entry_ext_bytes,
+            ));
+        }
+
+        // FORMAT.md §9.10: writers MUST apply the same TLV canonicality
+        // rules as readers before emitting. v1 writers normally pass
+        // `entry_ext = Vec::new()`, but a future v1.x caller that
+        // constructs an `ArchiveEntry` directly with malformed
+        // `entry_ext` bytes is rejected here, preserving the
+        // "FerroCrypt MUST NOT write archives its own default reader
+        // will reject" invariant.
+        validate_no_known_critical(
+            &entry.entry_ext,
+            limits.max_entry_ext_bytes,
+            limits.max_tlv_value_bytes,
+        )?;
+
         len = len
             .checked_add(FCA_ENTRY_FIXED_SIZE)
             .and_then(|n| n.checked_add(path_len))
+            .and_then(|n| n.checked_add(entry_ext_len))
             .ok_or_else(|| {
                 CryptoError::InvalidInput("Archive manifest length overflow".to_string())
             })?;
@@ -305,6 +371,13 @@ pub(crate) fn serialize_manifest(
         let path_len = u16::try_from(path_bytes.len()).map_err(|_| {
             CryptoError::InvalidInput("Archive path exceeds FCA u16 length".to_string())
         })?;
+        // entry_ext_len fits in u32 because checked_manifest_len
+        // rejected larger values.
+        let entry_ext_len = u32::try_from(entry.entry_ext.len()).map_err(|_| {
+            CryptoError::InvalidInput(
+                "Archive entry extension length cannot fit in u32".to_string(),
+            )
+        })?;
 
         let kind = match entry.kind {
             ArchiveEntryKind::File => KIND_FILE,
@@ -320,8 +393,10 @@ pub(crate) fn serialize_manifest(
         })?;
         write_u16_be(&mut out, mode_u16).map_err(CryptoError::Io)?;
         write_u16_be(&mut out, path_len).map_err(CryptoError::Io)?;
+        write_u32_be(&mut out, entry_ext_len).map_err(CryptoError::Io)?;
         write_u64_be(&mut out, entry.size).map_err(CryptoError::Io)?;
         out.extend_from_slice(path_bytes);
+        out.extend_from_slice(&entry.entry_ext);
     }
 
     debug_assert_eq!(out.len(), expected_len);
@@ -342,11 +417,7 @@ pub fn parse_manifest_bytes(
 ) -> Result<Manifest, CryptoError> {
     let limits = limits.validate()?;
 
-    if bytes.len()
-        != usize::try_from(header.manifest_len).map_err(|_| {
-            CryptoError::InvalidInput("Archive manifest length cannot fit in memory".to_string())
-        })?
-    {
+    if bytes.len() != require_fits_usize(header.manifest_len, "Archive manifest length")? {
         return Err(malformed_manifest());
     }
 
@@ -354,6 +425,7 @@ pub fn parse_manifest_bytes(
     let entry_count_usize = usize::try_from(header.entry_count).unwrap_or(usize::MAX);
     let mut entries = Vec::with_capacity(entry_count_usize.min(MANIFEST_PARSE_INITIAL_CAPACITY));
     let mut total_file_bytes: u64 = 0;
+    let mut total_entry_ext_bytes: u64 = 0;
 
     for _ in 0..header.entry_count {
         let pos = cursor.position() as usize;
@@ -366,6 +438,7 @@ pub fn parse_manifest_bytes(
         let entry_flags = read_u8(&mut cursor)?;
         let mode = read_u16_be(&mut cursor)?;
         let path_len = read_u16_be(&mut cursor)?;
+        let entry_ext_len = read_u32_be(&mut cursor)?;
         let size = read_u64_be(&mut cursor)?;
 
         if entry_flags != 0 {
@@ -390,23 +463,64 @@ pub fn parse_manifest_bytes(
                 None,
             ));
         }
+        if entry_ext_len > limits.max_entry_ext_bytes {
+            return Err(entry_ext_cap_error(
+                u64::from(entry_ext_len),
+                limits.max_entry_ext_bytes,
+                None,
+            ));
+        }
+        total_entry_ext_bytes = total_entry_ext_bytes
+            .checked_add(u64::from(entry_ext_len))
+            .ok_or_else(|| {
+                CryptoError::InvalidInput(
+                    "Archive total entry-extension bytes overflow".to_string(),
+                )
+            })?;
+        if total_entry_ext_bytes > limits.max_total_entry_ext_bytes {
+            return Err(total_entry_ext_cap_error(
+                total_entry_ext_bytes,
+                limits.max_total_entry_ext_bytes,
+            ));
+        }
 
-        let start = cursor.position() as usize;
-        let end = start
+        let path_start = cursor.position() as usize;
+        let path_end = path_start
             .checked_add(path_len as usize)
             .ok_or_else(malformed_manifest)?;
-        if end > bytes.len() {
+        if path_end > bytes.len() {
             return Err(malformed_manifest());
         }
 
-        let path_bytes = &bytes[start..end];
-        cursor.set_position(end as u64);
+        let path_bytes = &bytes[path_start..path_end];
+        cursor.set_position(path_end as u64);
 
         let path_utf8 = std::str::from_utf8(path_bytes)
             .map_err(|_| CryptoError::InvalidInput("Archive path is not valid UTF-8".to_string()))?
             .to_owned();
 
         validate_fca_path(&path_utf8, limits)?;
+
+        let ext_start = cursor.position() as usize;
+        let ext_end = ext_start
+            .checked_add(entry_ext_len as usize)
+            .ok_or_else(malformed_manifest)?;
+        if ext_end > bytes.len() {
+            return Err(malformed_manifest());
+        }
+        let entry_ext_bytes = bytes[ext_start..ext_end].to_vec();
+        cursor.set_position(ext_end as u64);
+
+        // Per FORMAT.md §9.5: every per-entry TLV region is parsed +
+        // canonicality-validated under the no-known-critical policy.
+        // v1 defines no per-entry TLV tags, so any tag present is
+        // either ignorable (skip after canonicality) or critical
+        // (reject as `UnknownCriticalTag`).
+        validate_no_known_critical(
+            &entry_ext_bytes,
+            limits.max_entry_ext_bytes,
+            limits.max_tlv_value_bytes,
+        )?;
 
         let kind = match kind_byte {
             KIND_FILE => {
@@ -436,6 +550,7 @@ pub fn parse_manifest_bytes(
             mode: u32::from(mode),
             size,
             source_path: None,
+            entry_ext: entry_ext_bytes,
         });
     }
 
@@ -478,6 +593,7 @@ mod tests {
         version: u8,
         flags: u16,
         entry_count: u32,
+        archive_ext_len: u32,
         manifest_len: u32,
         total_file_bytes: u64,
     ) -> Vec<u8> {
@@ -486,6 +602,7 @@ mod tests {
         buf.push(version);
         buf.extend_from_slice(&flags.to_be_bytes());
         buf.extend_from_slice(&entry_count.to_be_bytes());
+        buf.extend_from_slice(&archive_ext_len.to_be_bytes());
         buf.extend_from_slice(&manifest_len.to_be_bytes());
         buf.extend_from_slice(&total_file_bytes.to_be_bytes());
         debug_assert_eq!(buf.len(), FCA_HEADER_SIZE);
@@ -495,27 +612,150 @@ mod tests {
     #[test]
     fn header_round_trip() {
         let mut buf = Vec::new();
-        let _ = write_fca_header(&mut buf, 7, 200, 4096).expect("valid params write");
+        let _ = write_fca_header(&mut buf, 7, 0, 200, 4096).expect("valid params write");
         assert_eq!(buf.len(), FCA_HEADER_SIZE);
 
         let mut cur = Cursor::new(&buf);
         let parsed = parse_fca_header(&mut cur, ArchiveLimits::default()).expect("valid parse");
         assert_eq!(parsed.entry_count, 7);
+        assert_eq!(parsed.archive_ext_len, 0);
         assert_eq!(parsed.manifest_len, 200);
         assert_eq!(parsed.total_file_bytes, 4096);
     }
 
+    /// Non-zero `archive_ext_len` round-trips through the writer and
+    /// parser. v1 writers emit zero, but the parser MUST accept any
+    /// caller-provided value within the cap.
     #[test]
-    fn header_size_is_exactly_23_bytes() {
+    fn header_round_trip_with_archive_ext_len() {
         let mut buf = Vec::new();
-        let _ = write_fca_header(&mut buf, 1, 1, 0).expect("valid");
-        assert_eq!(buf.len(), 23);
+        let _ = write_fca_header(&mut buf, 1, 32, 200, 0).expect("valid params write");
+
+        let mut cur = Cursor::new(&buf);
+        let parsed = parse_fca_header(&mut cur, ArchiveLimits::default()).expect("valid parse");
+        assert_eq!(parsed.archive_ext_len, 32);
+    }
+
+    #[test]
+    fn rejects_oversize_archive_ext_len() {
+        let limits = ArchiveLimits::default();
+        let bytes = raw_header_bytes(
+            FCA_VERSION,
+            0,
+            5,
+            limits.max_archive_ext_bytes + 1,
+            100,
+            1024,
+        );
+        let mut cur = Cursor::new(&bytes);
+        let err = parse_fca_header(&mut cur, limits).unwrap_err();
+        assert!(format!("{err}").contains("Archive extension length cap exceeded"));
+    }
+
+    /// `entry_ext_len` above the per-entry cap rejects via
+    /// `parse_manifest_bytes`. Pin so a future refactor that loosens
+    /// the per-entry path doesn't silently widen the resource budget.
+    #[test]
+    fn parse_rejects_oversize_entry_ext_len() {
+        let limits = ArchiveLimits::default().with_max_entry_ext_bytes(8);
+        let bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 4, 9, 10, b"file", &[0u8; 9]);
+        let header = FcaHeader {
+            entry_count: 1,
+            archive_ext_len: 0,
+            manifest_len: bytes.len() as u32,
+            total_file_bytes: 10,
+        };
+        let err = parse_manifest_bytes(&bytes, header, limits).unwrap_err();
+        assert!(format!("{err}").contains("Archive entry extension length cap exceeded"));
+    }
+
+    /// Sum of per-entry TLV bytes above
+    /// `max_total_entry_ext_bytes` rejects, even when each individual
+    /// entry's `entry_ext_len` is under `max_entry_ext_bytes`. The
+    /// per-entry TLV regions are valid ignorable TLVs so the cap
+    /// fires before the scanner does.
+    #[test]
+    fn parse_rejects_total_entry_ext_above_cap() {
+        let limits = ArchiveLimits::default()
+            .with_max_entry_ext_bytes(8)
+            .with_max_total_entry_ext_bytes(10);
+        let one_tlv = tlv_bytes(0x0001, &[0xAA, 0xBB]);
+        let mut bytes = Vec::new();
+        bytes.extend(raw_entry_bytes(
+            KIND_FILE, 0, 0o644, 1, 8, 5, b"a", &one_tlv,
+        ));
+        bytes.extend(raw_entry_bytes(
+            KIND_FILE, 0, 0o644, 1, 8, 5, b"b", &one_tlv,
+        ));
+        let header = FcaHeader {
+            entry_count: 2,
+            archive_ext_len: 0,
+            manifest_len: bytes.len() as u32,
+            total_file_bytes: 10,
+        };
+        let err = parse_manifest_bytes(&bytes, header, limits).unwrap_err();
+        assert!(format!("{err}").contains("total entry-extension bytes cap exceeded"));
+    }
+
+    /// A malformed TLV inside `entry_ext` rejects via the shared
+    /// scanner. v1 defines no per-entry tags, so any structurally
+    /// invalid TLV trips `MalformedTlv` from `scan_tlv_region`. Five
+    /// bytes — one short of the six-byte `tag(u16) || len(u32)`
+    /// minimum, so the scanner exits its bounds check before parsing
+    /// the tag.
+    #[test]
+    fn parse_rejects_malformed_entry_ext_tlv() {
+        let mut truncated = tlv_bytes(0x0001, &[]);
+        truncated.pop();
+        let bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 4, 5, 10, b"file", &truncated);
+        let err = parse_with_header(&bytes, 1, 10).unwrap_err();
+        assert!(format!("{err:?}").contains("MalformedTlv"));
+    }
+
+    /// An unknown critical tag (`0x8001..=0xFFFF`) inside `entry_ext`
+    /// rejects with `UnknownCriticalTag`. v1 defines no critical tags,
+    /// so any critical-range tag is an upgrade-required signal.
+    #[test]
+    fn parse_rejects_unknown_critical_entry_ext_tag() {
+        let critical = tlv_bytes(0x8001, &[]);
+        let bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 4, 6, 10, b"file", &critical);
+        let err = parse_with_header(&bytes, 1, 10).unwrap_err();
+        assert!(format!("{err:?}").contains("UnknownCriticalTag"));
+    }
+
+    /// Reserved tag `0x0000` inside `entry_ext` rejects via
+    /// `MalformedTlv`. Symmetric coverage with the FCR header TLV
+    /// reserved-tag rejection in `crypto::tlv::tests`.
+    #[test]
+    fn parse_rejects_reserved_entry_ext_tag() {
+        let reserved = tlv_bytes(0x0000, &[]);
+        let bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 4, 6, 10, b"file", &reserved);
+        let err = parse_with_header(&bytes, 1, 10).unwrap_err();
+        assert!(format!("{err:?}").contains("MalformedTlv"));
+    }
+
+    /// A non-empty ignorable TLV in `entry_ext` round-trips through
+    /// the parser unchanged: the scanner accepts it, the entry's
+    /// `entry_ext` field is the same bytes after parsing.
+    #[test]
+    fn parse_accepts_ignorable_entry_ext_tlv() {
+        let ignorable = tlv_bytes(0x0001, b"meta");
+        let bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 4, 10, 0, b"file", &ignorable);
+        let parsed = parse_with_header(&bytes, 1, 0).unwrap();
+        assert_eq!(parsed.entries[0].entry_ext, ignorable);
+    }
+
+    #[test]
+    fn header_size_is_exactly_27_bytes() {
+        let mut buf = Vec::new();
+        let _ = write_fca_header(&mut buf, 1, 0, 1, 0).expect("valid");
+        assert_eq!(buf.len(), 27);
         assert_eq!(buf.len(), FCA_HEADER_SIZE);
     }
 
     #[test]
     fn rejects_bad_magic() {
-        let mut bytes = raw_header_bytes(FCA_VERSION, 0, 5, 100, 1024);
+        let mut bytes = raw_header_bytes(FCA_VERSION, 0, 5, 0, 100, 1024);
         bytes[0] = b'X';
         let mut cur = Cursor::new(&bytes);
         let err = parse_fca_header(&mut cur, ArchiveLimits::default()).unwrap_err();
@@ -524,7 +764,7 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_version() {
-        let bytes = raw_header_bytes(0xFF, 0, 5, 100, 1024);
+        let bytes = raw_header_bytes(0xFF, 0, 5, 0, 100, 1024);
         let mut cur = Cursor::new(&bytes);
         let err = parse_fca_header(&mut cur, ArchiveLimits::default()).unwrap_err();
         assert!(format!("{err}").contains("Unsupported"));
@@ -532,7 +772,7 @@ mod tests {
 
     #[test]
     fn rejects_nonzero_flags() {
-        let bytes = raw_header_bytes(FCA_VERSION, 1, 5, 100, 1024);
+        let bytes = raw_header_bytes(FCA_VERSION, 1, 5, 0, 100, 1024);
         let mut cur = Cursor::new(&bytes);
         let err = parse_fca_header(&mut cur, ArchiveLimits::default()).unwrap_err();
         assert!(format!("{err}").contains("non-zero flags"));
@@ -540,7 +780,7 @@ mod tests {
 
     #[test]
     fn rejects_zero_entry_count() {
-        let bytes = raw_header_bytes(FCA_VERSION, 0, 0, 100, 1024);
+        let bytes = raw_header_bytes(FCA_VERSION, 0, 0, 0, 100, 1024);
         let mut cur = Cursor::new(&bytes);
         let err = parse_fca_header(&mut cur, ArchiveLimits::default()).unwrap_err();
         assert!(format!("{err}").contains("Empty archive"));
@@ -549,7 +789,7 @@ mod tests {
     #[test]
     fn rejects_oversize_entry_count() {
         let limits = ArchiveLimits::default();
-        let bytes = raw_header_bytes(FCA_VERSION, 0, limits.max_entry_count + 1, 100, 1024);
+        let bytes = raw_header_bytes(FCA_VERSION, 0, limits.max_entry_count + 1, 0, 100, 1024);
         let mut cur = Cursor::new(&bytes);
         let err = parse_fca_header(&mut cur, limits).unwrap_err();
         assert!(format!("{err}").contains("entry-count cap exceeded"));
@@ -557,7 +797,7 @@ mod tests {
 
     #[test]
     fn rejects_zero_manifest_len() {
-        let bytes = raw_header_bytes(FCA_VERSION, 0, 5, 0, 1024);
+        let bytes = raw_header_bytes(FCA_VERSION, 0, 5, 0, 0, 1024);
         let mut cur = Cursor::new(&bytes);
         let err = parse_fca_header(&mut cur, ArchiveLimits::default()).unwrap_err();
         assert!(format!("{err}").contains("Malformed archive manifest"));
@@ -566,7 +806,7 @@ mod tests {
     #[test]
     fn rejects_oversize_manifest_len() {
         let limits = ArchiveLimits::default();
-        let bytes = raw_header_bytes(FCA_VERSION, 0, 5, limits.max_manifest_bytes + 1, 1024);
+        let bytes = raw_header_bytes(FCA_VERSION, 0, 5, 0, limits.max_manifest_bytes + 1, 1024);
         let mut cur = Cursor::new(&bytes);
         let err = parse_fca_header(&mut cur, limits).unwrap_err();
         assert!(format!("{err}").contains("manifest length cap exceeded"));
@@ -575,7 +815,14 @@ mod tests {
     #[test]
     fn rejects_oversize_total_file_bytes() {
         let limits = ArchiveLimits::default();
-        let bytes = raw_header_bytes(FCA_VERSION, 0, 5, 100, limits.max_total_plaintext_bytes + 1);
+        let bytes = raw_header_bytes(
+            FCA_VERSION,
+            0,
+            5,
+            0,
+            100,
+            limits.max_total_plaintext_bytes + 1,
+        );
         let mut cur = Cursor::new(&bytes);
         let err = parse_fca_header(&mut cur, limits).unwrap_err();
         assert!(format!("{err}").contains("total-bytes cap exceeded"));
@@ -587,7 +834,7 @@ mod tests {
     #[test]
     fn entry_count_at_cap_admissible() {
         let limits = ArchiveLimits::default().with_max_entry_count(10);
-        let bytes = raw_header_bytes(FCA_VERSION, 0, 10, 100, 1024);
+        let bytes = raw_header_bytes(FCA_VERSION, 0, 10, 0, 100, 1024);
         let mut cur = Cursor::new(&bytes);
         let parsed = parse_fca_header(&mut cur, limits).expect("at-cap is admissible");
         assert_eq!(parsed.entry_count, 10);
@@ -631,7 +878,7 @@ mod tests {
     #[test]
     fn write_rejects_zero_entry_count_before_emitting_bytes() {
         let mut buf = Vec::new();
-        let err = write_fca_header(&mut buf, 0, 100, 1024).unwrap_err();
+        let err = write_fca_header(&mut buf, 0, 0, 100, 1024).unwrap_err();
         assert!(format!("{err}").contains("Empty archive"));
         assert!(
             buf.is_empty(),
@@ -644,7 +891,7 @@ mod tests {
     #[test]
     fn write_rejects_zero_manifest_len_before_emitting_bytes() {
         let mut buf = Vec::new();
-        let err = write_fca_header(&mut buf, 1, 0, 0).unwrap_err();
+        let err = write_fca_header(&mut buf, 1, 0, 0, 0).unwrap_err();
         assert!(format!("{err}").contains("Malformed archive manifest"));
         assert!(
             buf.is_empty(),
@@ -666,15 +913,8 @@ mod tests {
 
     // -- Manifest serialize / parse ----------------------------------------
 
-    fn make_entry(path: &str, kind: ArchiveEntryKind, size: u64, mode: u32) -> ArchiveEntry {
-        ArchiveEntry {
-            kind,
-            path_utf8: path.to_string(),
-            mode,
-            size,
-            source_path: None,
-        }
-    }
+    use super::super::model::make_entry;
+    use crate::crypto::tlv::tlv_bytes;
 
     fn make_single_file_manifest() -> Manifest {
         Manifest {
@@ -707,6 +947,7 @@ mod tests {
 
         let header = FcaHeader {
             entry_count: 1,
+            archive_ext_len: 0,
             manifest_len: bytes.len() as u32,
             total_file_bytes: manifest.total_file_bytes,
         };
@@ -729,6 +970,7 @@ mod tests {
 
         let header = FcaHeader {
             entry_count: 3,
+            archive_ext_len: 0,
             manifest_len: bytes.len() as u32,
             total_file_bytes: manifest.total_file_bytes,
         };
@@ -752,6 +994,7 @@ mod tests {
 
         let header = FcaHeader {
             entry_count: 1,
+            archive_ext_len: 0,
             manifest_len: bytes.len() as u32,
             total_file_bytes: 0,
         };
@@ -791,9 +1034,9 @@ mod tests {
         let limits = ArchiveLimits::default().with_max_total_plaintext_bytes(u64::MAX);
         let bytes = serialize_manifest(&m, limits).unwrap();
 
-        // Entry layout: kind(1) flags(1) mode(2) path_len(2) size(8)
-        // → size starts at offset 6.
-        let size_field = &bytes[6..14];
+        // Entry layout: kind(1) flags(1) mode(2) path_len(2)
+        // entry_ext_len(4) size(8) → size starts at offset 10.
+        let size_field = &bytes[10..18];
         assert_eq!(size_field, &u64::MAX.to_be_bytes());
     }
 
@@ -835,6 +1078,56 @@ mod tests {
         assert!(format!("{err}").contains("byte-length cap exceeded"));
     }
 
+    /// FORMAT.md §9.10: writer-side TLV canonicality is enforced
+    /// before emission. A caller that hand-rolls an `ArchiveEntry`
+    /// with an unknown critical tag in `entry_ext` is rejected by
+    /// `checked_manifest_len`, mirroring the reader's
+    /// `parse_manifest_bytes` rejection path. v1 native writers never
+    /// hit this path (they pass `entry_ext: Vec::new()`); the test
+    /// pins the symmetry guarantee for v1.x writers that emit known
+    /// tags.
+    #[test]
+    fn checked_manifest_len_rejects_unknown_critical_entry_ext() {
+        let mut entry = make_entry("file", ArchiveEntryKind::File, 0, 0o644);
+        entry.entry_ext = tlv_bytes(0x8001, &[]);
+        let err = checked_manifest_len(&[entry], ArchiveLimits::default()).unwrap_err();
+        assert!(format!("{err:?}").contains("UnknownCriticalTag"));
+    }
+
+    /// Symmetric coverage: malformed `entry_ext` bytes (truncated TLV
+    /// header) are rejected by the writer-side validation before any
+    /// allocation, not after. Five bytes — one short of the six-byte
+    /// `tag(u16) || len(u32)` minimum.
+    #[test]
+    fn checked_manifest_len_rejects_malformed_entry_ext() {
+        let mut entry = make_entry("file", ArchiveEntryKind::File, 0, 0o644);
+        entry.entry_ext = tlv_bytes(0x0001, &[]);
+        entry.entry_ext.pop();
+        let err = checked_manifest_len(&[entry], ArchiveLimits::default()).unwrap_err();
+        assert!(format!("{err:?}").contains("MalformedTlv"));
+    }
+
+    /// Writer-side and reader-side serialize / parse round-trip with
+    /// a non-empty ignorable per-entry TLV. Pin so a future regression
+    /// in either path fails this test rather than mysteriously
+    /// dropping bytes.
+    #[test]
+    fn manifest_round_trip_with_ignorable_entry_ext() {
+        let mut entry = make_entry("hello.txt", ArchiveEntryKind::File, 0, 0o644);
+        entry.entry_ext = tlv_bytes(0x0001, b"meta");
+
+        let manifest = Manifest {
+            entries: vec![entry.clone()],
+            total_file_bytes: 0,
+            root_name: OsString::from("hello.txt"),
+            root_is_file: true,
+        };
+        let bytes = serialize_manifest(&manifest, ArchiveLimits::default()).unwrap();
+
+        let parsed = parse_with_header(&bytes, 1, 0).unwrap();
+        assert_eq!(parsed.entries[0].entry_ext, entry.entry_ext);
+    }
+
     #[test]
     fn checked_manifest_len_rejects_above_manifest_cap() {
         let l = ArchiveLimits::default().with_max_manifest_bytes(20);
@@ -851,22 +1144,28 @@ mod tests {
 
     /// Helper that constructs raw manifest bytes for one synthetic
     /// entry, allowing each field to be set independently to test
-    /// rejection cases.
+    /// rejection cases. v1 callers pass `entry_ext = &[]`; tests that
+    /// drive the per-entry TLV path supply non-empty values.
+    #[allow(clippy::too_many_arguments)]
     fn raw_entry_bytes(
         kind: u8,
         flags: u8,
         mode: u16,
         path_len: u16,
+        entry_ext_len: u32,
         size: u64,
         path: &[u8],
+        entry_ext: &[u8],
     ) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(FCA_ENTRY_FIXED_SIZE + path.len());
+        let mut buf = Vec::with_capacity(FCA_ENTRY_FIXED_SIZE + path.len() + entry_ext.len());
         buf.push(kind);
         buf.push(flags);
         buf.extend_from_slice(&mode.to_be_bytes());
         buf.extend_from_slice(&path_len.to_be_bytes());
+        buf.extend_from_slice(&entry_ext_len.to_be_bytes());
         buf.extend_from_slice(&size.to_be_bytes());
         buf.extend_from_slice(path);
+        buf.extend_from_slice(entry_ext);
         buf
     }
 
@@ -877,6 +1176,7 @@ mod tests {
     ) -> Result<Manifest, CryptoError> {
         let header = FcaHeader {
             entry_count,
+            archive_ext_len: 0,
             manifest_len: bytes.len() as u32,
             total_file_bytes,
         };
@@ -885,35 +1185,35 @@ mod tests {
 
     #[test]
     fn parse_rejects_unknown_entry_kind() {
-        let bytes = raw_entry_bytes(0xFF, 0, 0o644, 4, 10, b"fake");
+        let bytes = raw_entry_bytes(0xFF, 0, 0o644, 4, 0, 10, b"fake", &[]);
         let err = parse_with_header(&bytes, 1, 10).unwrap_err();
         assert!(format!("{err}").contains("Unsupported archive entry kind"));
     }
 
     #[test]
     fn parse_rejects_nonzero_entry_flags() {
-        let bytes = raw_entry_bytes(KIND_FILE, 0x01, 0o644, 4, 10, b"file");
+        let bytes = raw_entry_bytes(KIND_FILE, 0x01, 0o644, 4, 0, 10, b"file", &[]);
         let err = parse_with_header(&bytes, 1, 10).unwrap_err();
         assert!(format!("{err}").contains("non-zero reserved flags"));
     }
 
     #[test]
     fn parse_rejects_invalid_mode() {
-        let bytes = raw_entry_bytes(KIND_FILE, 0, 0o7777, 4, 10, b"file");
+        let bytes = raw_entry_bytes(KIND_FILE, 0, 0o7777, 4, 0, 10, b"file", &[]);
         let err = parse_with_header(&bytes, 1, 10).unwrap_err();
         assert!(format!("{err}").contains("mode contains unsupported bits"));
     }
 
     #[test]
     fn parse_rejects_directory_with_nonzero_size() {
-        let bytes = raw_entry_bytes(KIND_DIR, 0, 0o755, 3, 100, b"dir");
+        let bytes = raw_entry_bytes(KIND_DIR, 0, 0o755, 3, 0, 100, b"dir", &[]);
         let err = parse_with_header(&bytes, 1, 0).unwrap_err();
         assert!(format!("{err}").contains("Directory archive entry has non-zero size"));
     }
 
     #[test]
     fn parse_rejects_zero_path_len() {
-        let bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 0, 10, b"");
+        let bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 0, 0, 10, b"", &[]);
         let err = parse_with_header(&bytes, 1, 10).unwrap_err();
         assert!(format!("{err}").contains("Empty archive entry path"));
     }
@@ -921,7 +1221,7 @@ mod tests {
     #[test]
     fn parse_rejects_invalid_utf8() {
         // 0xFF is not a valid UTF-8 start byte.
-        let bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 1, 10, &[0xFF]);
+        let bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 1, 0, 10, &[0xFF], &[]);
         let err = parse_with_header(&bytes, 1, 10).unwrap_err();
         assert!(format!("{err}").contains("not valid UTF-8"));
     }
@@ -938,7 +1238,7 @@ mod tests {
     fn parse_rejects_path_running_past_manifest() {
         // Fixed entry header says path_len = 100 but only 4 path bytes
         // are present.
-        let bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 100, 10, b"path");
+        let bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 100, 0, 10, b"path", &[]);
         let err = parse_with_header(&bytes, 1, 10).unwrap_err();
         assert!(format!("{err}").contains("Malformed archive manifest"));
     }
@@ -946,7 +1246,7 @@ mod tests {
     #[test]
     fn parse_rejects_trailing_bytes_after_last_entry() {
         // One full entry + one extra byte after it.
-        let mut bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 4, 10, b"file");
+        let mut bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 4, 0, 10, b"file", &[]);
         bytes.push(0xAA);
         let err = parse_with_header(&bytes, 1, 10).unwrap_err();
         assert!(format!("{err}").contains("Malformed archive manifest"));
@@ -954,9 +1254,10 @@ mod tests {
 
     #[test]
     fn parse_rejects_manifest_len_mismatch() {
-        let bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 4, 10, b"file");
+        let bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 4, 0, 10, b"file", &[]);
         let header = FcaHeader {
             entry_count: 1,
+            archive_ext_len: 0,
             manifest_len: bytes.len() as u32 + 1,
             total_file_bytes: 10,
         };
@@ -967,7 +1268,7 @@ mod tests {
     #[test]
     fn parse_rejects_total_bytes_mismatch() {
         // One file entry of size 10; declared total is 99.
-        let bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 4, 10, b"file");
+        let bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 4, 0, 10, b"file", &[]);
         let err = parse_with_header(&bytes, 1, 99).unwrap_err();
         assert!(format!("{err}").contains("total-bytes mismatch"));
     }
@@ -977,12 +1278,22 @@ mod tests {
     #[test]
     fn parse_rejects_total_bytes_overflow_during_sum() {
         let mut bytes = Vec::new();
-        bytes.extend(raw_entry_bytes(KIND_FILE, 0, 0o644, 1, u64::MAX, b"a"));
-        bytes.extend(raw_entry_bytes(KIND_FILE, 0, 0o644, 1, 1, b"b"));
+        bytes.extend(raw_entry_bytes(
+            KIND_FILE,
+            0,
+            0o644,
+            1,
+            0,
+            u64::MAX,
+            b"a",
+            &[],
+        ));
+        bytes.extend(raw_entry_bytes(KIND_FILE, 0, 0o644, 1, 0, 1, b"b", &[]));
         // Header `total_file_bytes` doesn't matter — the overflow
         // fires first.
         let header = FcaHeader {
             entry_count: 2,
+            archive_ext_len: 0,
             manifest_len: bytes.len() as u32,
             total_file_bytes: 0,
         };
@@ -994,10 +1305,11 @@ mod tests {
     /// "no remnant ustar 8 GiB cap" on the parse side.
     #[test]
     fn parse_accepts_size_u64_max() {
-        let bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 4, u64::MAX, b"huge");
+        let bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 4, 0, u64::MAX, b"huge", &[]);
         let limits = ArchiveLimits::default().with_max_total_plaintext_bytes(u64::MAX);
         let header = FcaHeader {
             entry_count: 1,
+            archive_ext_len: 0,
             manifest_len: bytes.len() as u32,
             total_file_bytes: u64::MAX,
         };
@@ -1010,7 +1322,7 @@ mod tests {
     /// parser. Use `..` as the grammar trip-wire.
     #[test]
     fn parse_runs_path_grammar() {
-        let bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 2, 10, b"..");
+        let bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 2, 0, 10, b"..", &[]);
         let err = parse_with_header(&bytes, 1, 10).unwrap_err();
         // Either a path-grammar error or a tree-shape error. The
         // grammar should fire first.
@@ -1027,8 +1339,8 @@ mod tests {
     fn parse_runs_tree_validation() {
         // Two files at top level (different roots).
         let mut bytes = Vec::new();
-        bytes.extend(raw_entry_bytes(KIND_FILE, 0, 0o644, 1, 10, b"a"));
-        bytes.extend(raw_entry_bytes(KIND_FILE, 0, 0o644, 1, 10, b"b"));
+        bytes.extend(raw_entry_bytes(KIND_FILE, 0, 0o644, 1, 0, 10, b"a", &[]));
+        bytes.extend(raw_entry_bytes(KIND_FILE, 0, 0o644, 1, 0, 10, b"b", &[]));
         let err = parse_with_header(&bytes, 2, 20).unwrap_err();
         assert!(format!("{err}").contains("multiple top-level roots"));
     }

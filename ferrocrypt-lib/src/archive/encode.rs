@@ -213,20 +213,22 @@ fn require_regular_file(
 /// archive time. The archive-time call below remains as defense-in-
 /// depth against TOCTOU and direct callers.
 ///
-/// The `is_symlink` check runs before the existence check so a
-/// dangling symlink fails with "Input is a symlink" rather than a
-/// generic `InputPath` not-found.
+/// The `symlink_metadata` call runs before classification so dangling symlinks
+/// can still be identified from the link itself. Windows reparse points are
+/// rejected before the generic symlink branch so junctions, mount points, and
+/// Windows symlinks report the explicit reparse-point diagnostic.
 pub(crate) fn validate_encrypt_input(input_path: &Path) -> Result<(), CryptoError> {
-    if input_path.is_symlink() {
-        return Err(input_is_symlink_error(input_path));
-    }
-
     let metadata = match fs::symlink_metadata(input_path) {
         Ok(metadata) => metadata,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(CryptoError::InputPath),
         Err(e) => return Err(CryptoError::Io(e)),
     };
     reject_windows_reparse_point(&metadata, "Input", input_path)?;
+
+    if metadata.file_type().is_symlink() {
+        return Err(input_is_symlink_error(input_path));
+    }
+
     let file_type = metadata.file_type();
     if !file_type.is_file() && !file_type.is_dir() {
         return Err(CryptoError::InvalidInput(format!(
@@ -283,11 +285,11 @@ fn input_is_symlink_error(path: &Path) -> CryptoError {
 /// manifest with `root_is_file = false`.
 fn build_manifest(input_path: &Path, limits: &ArchiveLimits) -> Result<Manifest, CryptoError> {
     let metadata = fs::symlink_metadata(input_path)?;
+    reject_windows_reparse_point(&metadata, "Input", input_path)?;
     let file_type = metadata.file_type();
     if file_type.is_symlink() {
         return Err(input_is_symlink_error(input_path));
     }
-    reject_windows_reparse_point(&metadata, "Input", input_path)?;
 
     let name = input_path
         .file_name()
@@ -371,18 +373,19 @@ fn walk_directory(
     limits: &ArchiveLimits,
 ) -> Result<(), CryptoError> {
     let src_dir_metadata = fs::symlink_metadata(src_dir)?;
+    reject_windows_reparse_point(&src_dir_metadata, "Source directory", src_dir)?;
     if src_dir_metadata.file_type().is_symlink() {
         return Err(CryptoError::InvalidInput(format!(
             "Symlink in archive source: {}",
             src_dir.display()
         )));
     }
-    reject_windows_reparse_point(&src_dir_metadata, "Source directory", src_dir)?;
 
     for read_dir_entry in fs::read_dir(src_dir)? {
         let dir_entry = read_dir_entry?;
         let full_path = dir_entry.path();
         let metadata = fs::symlink_metadata(&full_path)?;
+        reject_windows_reparse_point(&metadata, "Source entry", &full_path)?;
         let file_type = metadata.file_type();
 
         if file_type.is_symlink() {
@@ -391,7 +394,6 @@ fn walk_directory(
                 full_path.display()
             )));
         }
-        reject_windows_reparse_point(&metadata, "Source entry", &full_path)?;
 
         let name = dir_entry.file_name();
         let name_str = name.to_str().ok_or_else(|| {

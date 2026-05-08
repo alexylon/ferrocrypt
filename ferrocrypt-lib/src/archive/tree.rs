@@ -1,7 +1,7 @@
 //! FCA manifest tree-shape validation.
 //!
-//! See `notes/archive_format/ARCHIVE_FORMAT.md` §9 (tree-shape rules),
-//! §10 (entry ordering), §14.9 (manifest tree validation).
+//! See `ferrocrypt-lib/FORMAT.md` §9.7 (duplicate / collision policy)
+//! and §9.8 (tree shape and canonical entry ordering).
 //!
 //! Each entry's `path_utf8` MUST already have passed
 //! [`super::path::validate_fca_path`]; this module does not re-run the
@@ -22,7 +22,7 @@ use std::ffi::OsString;
 use crate::CryptoError;
 
 use super::format::empty_archive_error;
-use super::limits::{ArchiveLimits, entry_count_cap_error, total_bytes_cap_error};
+use super::limits::{ArchiveLimits, enforce_entry_count_cap, enforce_total_plaintext_bytes_cap};
 use super::model::{ArchiveEntry, ArchiveEntryKind};
 use super::path::ascii_case_collision_key;
 
@@ -68,18 +68,8 @@ pub(super) fn validate_manifest_tree(
     if entries.is_empty() {
         return Err(empty_archive_error());
     }
-    if entries.len() > limits.max_entry_count as usize {
-        return Err(entry_count_cap_error(
-            u32::try_from(entries.len()).unwrap_or(u32::MAX),
-            limits.max_entry_count,
-        ));
-    }
-    if total_file_bytes > limits.max_total_plaintext_bytes {
-        return Err(total_bytes_cap_error(
-            total_file_bytes,
-            limits.max_total_plaintext_bytes,
-        ));
-    }
+    enforce_entry_count_cap(u32::try_from(entries.len()).unwrap_or(u32::MAX), &limits)?;
+    enforce_total_plaintext_bytes_cap(total_file_bytes, &limits)?;
 
     // Root is the top-level component of the first entry. All other
     // entries MUST share this root. Capturing from `entries[0]`

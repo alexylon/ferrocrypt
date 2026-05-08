@@ -1,10 +1,9 @@
 //! FCA archive writer: source-tree traversal (metadata pass) and
 //! content-streaming pass.
 //!
-//! See `notes/archive_format/ARCHIVE_FORMAT.md` §10 (entry ordering),
-//! §11 (limits), §12 (internal API), §13 (module layout),
-//! §14.13 (writer entry-point skeleton), §15 (writer requirements),
-//! §17 (platform requirements), §19.6 (writer-side rejection list).
+//! See `ferrocrypt-lib/FORMAT.md` §9.8 (canonical entry ordering),
+//! §9.10 (writer obligations), §9.12 (resource caps), §9.13 (platform
+//! metadata and preservation).
 //!
 //! The writer is two-pass:
 //!
@@ -43,8 +42,8 @@ use crate::fs::paths::file_stem;
 use super::format::PERMISSION_BITS_MASK;
 use super::format::{copy_exact_n, serialize_manifest, write_fca_header};
 use super::limits::{
-    ArchiveLimits, enforce_per_entry_caps, enforce_total_bytes_cap, entry_count_cap_error,
-    manifest_len_cap_error,
+    ArchiveLimits, enforce_entry_count_cap, enforce_manifest_len_cap, enforce_per_entry_caps,
+    enforce_total_bytes_cap, entry_count_cap_error, manifest_len_cap_error,
 };
 use super::model::{ArchiveEntry, ArchiveEntryKind, Manifest};
 use super::path::{canonical_path_order, validate_fca_path};
@@ -530,11 +529,20 @@ pub(crate) fn archive<W: Write>(
     let _ = validate_manifest_tree(&manifest.entries, manifest.total_file_bytes, limits)?;
 
     let manifest_bytes = serialize_manifest(&manifest, limits)?;
+    // The wire-format `entry_count` and `manifest_len` are u32. Convert
+    // first (so a usize > u32::MAX surfaces immediately as a cap-style
+    // error), then run the cap helpers as the single source of truth
+    // for the cap rule itself. Caps were already enforced earlier in
+    // the pipeline (`build_manifest` and `checked_manifest_len`); the
+    // re-checks here keep encode.rs from inlining its own `> cap`
+    // comparison.
     let entry_count = u32::try_from(manifest.entries.len())
         .map_err(|_| entry_count_cap_error(u32::MAX, limits.max_entry_count))?;
+    enforce_entry_count_cap(entry_count, &limits)?;
     let manifest_len = u32::try_from(manifest_bytes.len()).map_err(|_| {
         manifest_len_cap_error(manifest_bytes.len() as u64, limits.max_manifest_bytes)
     })?;
+    enforce_manifest_len_cap(u64::from(manifest_len), &limits)?;
 
     // FCA v1 writers always emit `archive_ext_len = 0`; the archive-
     // level TLV region exists in the wire layout but defines no v1

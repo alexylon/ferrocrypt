@@ -2,8 +2,7 @@
 //!
 //! Replaces the restricted POSIX ustar archive layer that used to live
 //! under [`crate::archive`]. The full wire-format spec is in
-//! `notes/archive_format/ARCHIVE_FORMAT.md`; the migration plan is in
-//! `notes/archive_format/MIGRATION_PLAN.md`.
+//! `ferrocrypt-lib/FORMAT.md` §9.
 
 pub(crate) mod decode;
 pub(crate) mod encode;

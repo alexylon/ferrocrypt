@@ -1,9 +1,9 @@
 #![no_main]
 
 //! Fuzzes the full FCA manifest pipeline: header parse →
-//! `archive_ext` skip → manifest bytes read → `parse_manifest_bytes`
-//! (per-entry validation including each `entry_ext` TLV region + path
-//! grammar + tree-shape validation).
+//! `archive_ext` read + TLV validation → manifest bytes read →
+//! `parse_manifest_bytes` (per-entry validation including each
+//! `entry_ext` TLV region + path grammar + tree-shape validation).
 //!
 //! Manifest invariants — on a successful parse, the returned
 //! [`Manifest`] MUST satisfy ALL of:
@@ -28,7 +28,7 @@ use std::collections::HashSet;
 use ferrocrypt::ArchiveLimits;
 use ferrocrypt::fuzz_exports::{
     ArchiveEntryKind, ascii_case_collision_key, parse_fca_header, parse_manifest_bytes,
-    validate_fca_path,
+    validate_fca_path, validate_no_known_critical,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -40,9 +40,10 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
 
-    // Skip exactly `archive_ext_len` bytes, then read exactly
-    // `manifest_len` bytes from the cursor, mirroring what
-    // `unarchive_inner` does at runtime. The cap on
+    // Read exactly `archive_ext_len` bytes and validate them under
+    // the same no-known-critical TLV policy production uses, then
+    // read exactly `manifest_len` bytes from the cursor. Mirrors
+    // `unarchive_inner` end-to-end. The cap on
     // `header.archive_ext_len` was already enforced inside
     // `parse_fca_header`, so the pointer arithmetic here cannot
     // overflow under default limits.
@@ -53,6 +54,18 @@ fuzz_target!(|data: &[u8]| {
     let Some(after_archive_ext) = pos.checked_add(archive_ext_len) else {
         return;
     };
+    let Some(archive_ext_bytes) = bytes.get(pos..after_archive_ext) else {
+        return;
+    };
+    if validate_no_known_critical(
+        archive_ext_bytes,
+        limits.max_archive_ext_bytes,
+        limits.max_tlv_value_bytes,
+    )
+    .is_err()
+    {
+        return;
+    }
     let Some(manifest_bytes) = bytes
         .get(after_archive_ext..)
         .and_then(|tail| tail.get(..manifest_len))

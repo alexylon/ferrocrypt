@@ -5,7 +5,7 @@
 //! ```text
 //! [fixed_header (90 bytes)]
 //!   magic(4)              = "FCR\0"
-//!   version(1)            = 0x01
+//!   version(1)            = 0x02
 //!   kind(1)               = 0x4B 'K'
 //!   key_flags(2)          = 0
 //!   type_name_len(2)

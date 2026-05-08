@@ -34,3 +34,16 @@ pub fn read_encrypted_header<R: std::io::Read>(
 ) -> Result<(), crate::CryptoError> {
     crate::container::read_encrypted_header(reader, limits).map(|_| ())
 }
+
+/// Wraps the crate-internal `validate_no_known_critical` so fuzz
+/// targets can drive the TLV scanner over FCA `archive_ext` /
+/// `entry_ext` regions without paying the cost of a full archive
+/// extraction. Mirrors the policy production callers use: scan +
+/// reject any critical-range tag.
+pub fn validate_no_known_critical(
+    bytes: &[u8],
+    max_region_len: u32,
+    max_value_len: u32,
+) -> Result<(), crate::CryptoError> {
+    crate::crypto::tlv::validate_no_known_critical(bytes, max_region_len, max_value_len)
+}

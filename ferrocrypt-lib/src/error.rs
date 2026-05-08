@@ -435,6 +435,13 @@ pub enum FormatDefect {
     /// file size, or trailing bytes after the wrapped secret. Per
     /// `FORMAT.md` §8.
     MalformedPrivateKey,
+    /// Inner FCA archive `version` byte is not one this release can
+    /// read. Distinct from the outer `.fcr` / `private.key` version
+    /// rejection in [`UnsupportedVersion`]: this variant fires inside
+    /// the encrypted payload after the outer container is accepted, so
+    /// it is a structural defect of the inner archive grammar (FCA),
+    /// not of the outer FerroCrypt file. Per `FORMAT.md` §9 / §12.
+    UnsupportedArchiveVersion { version: u8 },
 }
 
 impl std::fmt::Display for FormatDefect {
@@ -467,6 +474,12 @@ impl std::fmt::Display for FormatDefect {
             Self::MalformedRecipientEntry => f.write_str("Recipient entry is malformed"),
             Self::RecipientFlagsReserved => f.write_str("Recipient entry uses reserved flag bits"),
             Self::MalformedPrivateKey => f.write_str("Private key is malformed"),
+            Self::UnsupportedArchiveVersion { version } => {
+                write!(
+                    f,
+                    "Unsupported archive version (v{version}). Upgrade FerroCrypt."
+                )
+            }
         }
     }
 }
@@ -832,6 +845,10 @@ mod tests {
             "Private key is malformed"
         );
         assert_eq!(
+            FormatDefect::UnsupportedArchiveVersion { version: 0xFF }.to_string(),
+            "Unsupported archive version (v255). Upgrade FerroCrypt."
+        );
+        assert_eq!(
             FormatDefect::RecipientCountOutOfRange { count: 5000 }.to_string(),
             "Recipient count out of range (5000)"
         );
@@ -1101,6 +1118,10 @@ mod tests {
                 FormatDefect::RecipientFlagsReserved,
             ),
             ("MalformedPrivateKey", FormatDefect::MalformedPrivateKey),
+            (
+                "UnsupportedArchiveVersion(max)",
+                FormatDefect::UnsupportedArchiveVersion { version: u8::MAX },
+            ),
         ];
         for (label, d) in defects {
             check(label, &d.to_string());

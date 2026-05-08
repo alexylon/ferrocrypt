@@ -42,12 +42,14 @@ use std::path::{Path, PathBuf};
 use cap_std::fs::Dir;
 
 use crate::CryptoError;
-use crate::crypto::tlv::validate_no_known_critical;
 use crate::fs::atomic::rename_no_clobber;
 use crate::fs::paths::{INCOMPLETE_SUFFIX, reject_occupied};
 
 use super::IncompleteOutputPolicy;
-use super::format::{copy_exact_n, parse_fca_header, parse_manifest_bytes, require_fits_usize};
+use super::format::{
+    copy_exact_n, parse_fca_header, parse_manifest_bytes, require_fits_usize,
+    validate_archive_ext_tlv,
+};
 use super::limits::ArchiveLimits;
 use super::model::{ArchiveEntry, ArchiveEntryKind, Manifest};
 use super::path::canonical_path_order;
@@ -98,11 +100,7 @@ fn unarchive_inner<R: Read>(
     let archive_ext_len = require_fits_usize(header.archive_ext_len, "Archive extension length")?;
     let mut archive_ext_bytes = vec![0u8; archive_ext_len];
     reader.read_exact(&mut archive_ext_bytes)?;
-    validate_no_known_critical(
-        &archive_ext_bytes,
-        limits.max_archive_ext_bytes,
-        limits.max_tlv_value_bytes,
-    )?;
+    validate_archive_ext_tlv(&archive_ext_bytes, &limits)?;
 
     // §9.11 step 4: read exactly `manifest_len` bytes.
     let manifest_len = require_fits_usize(header.manifest_len, "Archive manifest length")?;

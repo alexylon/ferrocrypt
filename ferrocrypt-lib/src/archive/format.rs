@@ -1,19 +1,20 @@
 //! FCA wire-format constants and primitives: header parse/build,
 //! manifest serialize/parse, and big-endian integer helpers.
 //!
-//! See `notes/archive_format/ARCHIVE_FORMAT.md` §5 (header), §6 (manifest),
-//! §14.1 (constants), §14.3 (BE helpers), §14.4 (header writer),
-//! §14.5 (header reader).
+//! See `ferrocrypt-lib/FORMAT.md` §9 — §9.2 (fixed header), §9.3
+//! (manifest layout), §9.4 (per-entry prefix), §9.10 (writer
+//! obligations), §9.11 (reader pipeline).
 
 use std::io::{self, Cursor, Read, Write};
 
 use crate::CryptoError;
 use crate::crypto::tlv::validate_no_known_critical;
+use crate::error::FormatDefect;
 
 use super::limits::{
-    ARCHIVE_ENTRY_MODE_UNSUPPORTED, ArchiveLimits, archive_ext_cap_error, entry_count_cap_error,
-    entry_ext_cap_error, manifest_len_cap_error, path_bytes_cap_error, total_bytes_cap_error,
-    total_entry_ext_cap_error,
+    ARCHIVE_ENTRY_MODE_UNSUPPORTED, ArchiveLimits, enforce_archive_ext_cap,
+    enforce_entry_count_cap, enforce_entry_ext_cap, enforce_manifest_len_cap,
+    enforce_path_bytes_cap, enforce_total_entry_ext_cap, enforce_total_plaintext_bytes_cap,
 };
 use super::model::{ArchiveEntry, ArchiveEntryKind, FcaHeader, Manifest};
 use super::path::validate_fca_path;
@@ -79,6 +80,80 @@ const MANIFEST_PARSE_INITIAL_CAPACITY: usize = 1024;
 pub(super) fn require_fits_usize(value: u32, label: &str) -> Result<usize, CryptoError> {
     usize::try_from(value)
         .map_err(|_| CryptoError::InvalidInput(format!("{label} cannot fit in memory")))
+}
+
+/// FCA archive-level TLV validator: scans `archive_ext` under the v1.0
+/// no-known-critical policy, capped by [`ArchiveLimits::max_archive_ext_bytes`]
+/// (region) and [`ArchiveLimits::max_tlv_value_bytes`] (per-value). Used
+/// by the reader (post-`parse_fca_header`) and any future archive-level
+/// TLV emitter on the writer side. Single source of truth for the cap
+/// pair so callers can't drift the policy.
+pub(crate) fn validate_archive_ext_tlv(
+    bytes: &[u8],
+    limits: &ArchiveLimits,
+) -> Result<(), CryptoError> {
+    validate_no_known_critical(
+        bytes,
+        limits.max_archive_ext_bytes,
+        limits.max_tlv_value_bytes,
+    )
+}
+
+/// FCA per-entry TLV validator: scans `entry_ext` under the v1.0
+/// no-known-critical policy, capped by [`ArchiveLimits::max_entry_ext_bytes`]
+/// (region) and [`ArchiveLimits::max_tlv_value_bytes`] (per-value). Used
+/// symmetrically by writer-side `checked_manifest_len` (FORMAT.md §9.10
+/// writer obligation) and reader-side `parse_manifest_bytes`. Single
+/// source of truth for the cap pair.
+pub(crate) fn validate_entry_ext_tlv(
+    bytes: &[u8],
+    limits: &ArchiveLimits,
+) -> Result<(), CryptoError> {
+    validate_no_known_critical(
+        bytes,
+        limits.max_entry_ext_bytes,
+        limits.max_tlv_value_bytes,
+    )
+}
+
+/// Single source of truth for the per-manifest-entry cap-and-shape
+/// sequence shared by writer and reader.
+///
+/// Writer ([`checked_manifest_len`]) and reader
+/// ([`parse_manifest_bytes`]) MUST run these checks in the same order
+/// so a future change to per-entry validation (new cap, reordered
+/// rejection priority) lands in one place. The entry-flags check is
+/// reader-only (writer always emits zero) so it stays inline at the
+/// reader. Per-entry TLV scanning ([`validate_entry_ext_tlv`]) is also
+/// separate because the bytes become available at different points
+/// (writer: from `entry.entry_ext`; reader: from the resolved slice
+/// after the path has been parsed).
+///
+/// `path` is `Some(&entry.path_utf8)` on the writer side and `None` on
+/// the reader's pre-allocation guard (the path bytes haven't been
+/// resolved yet).
+pub(crate) fn enforce_manifest_entry_caps(
+    mode: u32,
+    path_len: u32,
+    path: Option<&str>,
+    entry_ext_len: u64,
+    total_entry_ext_bytes: &mut u64,
+    limits: &ArchiveLimits,
+) -> Result<(), CryptoError> {
+    if mode > PERMISSION_BITS_MASK {
+        return Err(CryptoError::InvalidInput(
+            ARCHIVE_ENTRY_MODE_UNSUPPORTED.to_string(),
+        ));
+    }
+    if path_len == 0 {
+        return Err(CryptoError::InvalidInput(
+            "Empty archive entry path".to_string(),
+        ));
+    }
+    enforce_path_bytes_cap(path_len, path, limits)?;
+    enforce_entry_ext_cap(entry_ext_len, path, limits)?;
+    enforce_total_entry_ext_cap(entry_ext_len, total_entry_ext_bytes, limits)?;
+    Ok(())
 }
 
 pub(super) fn read_u8<R: Read>(r: &mut R) -> io::Result<u8> {
@@ -162,6 +237,17 @@ pub(super) fn write_u64_be<W: Write>(w: &mut W, n: u64) -> io::Result<()> {
 /// so the caller can chain `archive_ext` + manifest + content writes.
 /// Refuses `entry_count == 0` and `manifest_len == 0` before emitting
 /// any bytes.
+///
+/// **Caller contract** — this is a raw byte writer. It does NOT enforce
+/// `ArchiveLimits` against `archive_ext_len`, `manifest_len`,
+/// `entry_count`, or `total_file_bytes`; it only rejects two structural
+/// "must be non-zero" cases. Production callers preflight all caps in
+/// the metadata pass ([`checked_manifest_len`], the `archive::encode`
+/// resource-cap loop, and `parse_fca_header`'s own caps on the read
+/// side) and then call this helper. Any future emitter that supplies a
+/// non-zero `archive_ext_len` MUST cap it against
+/// [`crate::ArchiveLimits::max_archive_ext_bytes`] and TLV-validate the
+/// region (per `FORMAT.md` §9.10) before calling this function.
 pub(crate) fn write_fca_header<W: Write>(
     mut w: W,
     entry_count: u32,
@@ -206,8 +292,8 @@ pub fn parse_fca_header<R: Read>(
 
     let version = read_u8(reader)?;
     if version != FCA_VERSION {
-        return Err(CryptoError::InvalidInput(
-            "Unsupported FerroCrypt archive version".to_string(),
+        return Err(CryptoError::InvalidFormat(
+            FormatDefect::UnsupportedArchiveVersion { version },
         ));
     }
 
@@ -226,32 +312,15 @@ pub fn parse_fca_header<R: Read>(
     if entry_count == 0 {
         return Err(empty_archive_error());
     }
-    if entry_count > limits.max_entry_count {
-        return Err(entry_count_cap_error(entry_count, limits.max_entry_count));
-    }
-    if archive_ext_len > limits.max_archive_ext_bytes {
-        return Err(archive_ext_cap_error(
-            u64::from(archive_ext_len),
-            limits.max_archive_ext_bytes,
-        ));
-    }
+    enforce_entry_count_cap(entry_count, &limits)?;
+    enforce_archive_ext_cap(u64::from(archive_ext_len), &limits)?;
     let _ = require_fits_usize(archive_ext_len, "Archive extension length")?;
     if manifest_len == 0 {
         return Err(malformed_manifest());
     }
-    if manifest_len > limits.max_manifest_bytes {
-        return Err(manifest_len_cap_error(
-            u64::from(manifest_len),
-            limits.max_manifest_bytes,
-        ));
-    }
+    enforce_manifest_len_cap(u64::from(manifest_len), &limits)?;
     let _ = require_fits_usize(manifest_len, "Archive manifest length")?;
-    if total_file_bytes > limits.max_total_plaintext_bytes {
-        return Err(total_bytes_cap_error(
-            total_file_bytes,
-            limits.max_total_plaintext_bytes,
-        ));
-    }
+    enforce_total_plaintext_bytes_cap(total_file_bytes, &limits)?;
 
     Ok(FcaHeader {
         entry_count,
@@ -275,52 +344,16 @@ pub(crate) fn checked_manifest_len(
     let mut len: usize = 0;
     let mut total_entry_ext_bytes: u64 = 0;
     for entry in entries {
-        if entry.mode > PERMISSION_BITS_MASK {
-            return Err(CryptoError::InvalidInput(
-                ARCHIVE_ENTRY_MODE_UNSUPPORTED.to_string(),
-            ));
-        }
         let path_len = entry.path_utf8.len();
-        if path_len == 0 || path_len > limits.max_path_bytes as usize {
-            return Err(path_bytes_cap_error(
-                u32::try_from(path_len).unwrap_or(u32::MAX),
-                limits.max_path_bytes,
-                Some(&entry.path_utf8),
-            ));
-        }
-        if path_len > u16::MAX as usize {
-            return Err(CryptoError::InvalidInput(
-                "Archive path exceeds FCA u16 length".to_string(),
-            ));
-        }
-
         let entry_ext_len = entry.entry_ext.len();
-        if entry_ext_len > limits.max_entry_ext_bytes as usize {
-            return Err(entry_ext_cap_error(
-                entry_ext_len as u64,
-                limits.max_entry_ext_bytes,
-                Some(&entry.path_utf8),
-            ));
-        }
-        if u32::try_from(entry_ext_len).is_err() {
-            return Err(CryptoError::InvalidInput(
-                "Archive entry extension length cannot fit in u32".to_string(),
-            ));
-        }
-
-        total_entry_ext_bytes = total_entry_ext_bytes
-            .checked_add(entry_ext_len as u64)
-            .ok_or_else(|| {
-                CryptoError::InvalidInput(
-                    "Archive total entry-extension bytes overflow".to_string(),
-                )
-            })?;
-        if total_entry_ext_bytes > limits.max_total_entry_ext_bytes {
-            return Err(total_entry_ext_cap_error(
-                total_entry_ext_bytes,
-                limits.max_total_entry_ext_bytes,
-            ));
-        }
+        enforce_manifest_entry_caps(
+            entry.mode,
+            u32::try_from(path_len).unwrap_or(u32::MAX),
+            Some(&entry.path_utf8),
+            entry_ext_len as u64,
+            &mut total_entry_ext_bytes,
+            &limits,
+        )?;
 
         // FORMAT.md §9.10: writers MUST apply the same TLV canonicality
         // rules as readers before emitting. v1 writers normally pass
@@ -329,11 +362,7 @@ pub(crate) fn checked_manifest_len(
         // `entry_ext` bytes is rejected here, preserving the
         // "FerroCrypt MUST NOT write archives its own default reader
         // will reject" invariant.
-        validate_no_known_critical(
-            &entry.entry_ext,
-            limits.max_entry_ext_bytes,
-            limits.max_tlv_value_bytes,
-        )?;
+        validate_entry_ext_tlv(&entry.entry_ext, &limits)?;
 
         len = len
             .checked_add(FCA_ENTRY_FIXED_SIZE)
@@ -343,12 +372,7 @@ pub(crate) fn checked_manifest_len(
                 CryptoError::InvalidInput("Archive manifest length overflow".to_string())
             })?;
 
-        if len > limits.max_manifest_bytes as usize {
-            return Err(manifest_len_cap_error(
-                len as u64,
-                limits.max_manifest_bytes,
-            ));
-        }
+        enforce_manifest_len_cap(len as u64, &limits)?;
     }
 
     Ok(len)
@@ -446,43 +470,14 @@ pub fn parse_manifest_bytes(
                 "Archive entry has non-zero reserved flags".to_string(),
             ));
         }
-        if u32::from(mode) > PERMISSION_BITS_MASK {
-            return Err(CryptoError::InvalidInput(
-                ARCHIVE_ENTRY_MODE_UNSUPPORTED.to_string(),
-            ));
-        }
-        if path_len == 0 {
-            return Err(CryptoError::InvalidInput(
-                "Empty archive entry path".to_string(),
-            ));
-        }
-        if u32::from(path_len) > limits.max_path_bytes {
-            return Err(path_bytes_cap_error(
-                u32::from(path_len),
-                limits.max_path_bytes,
-                None,
-            ));
-        }
-        if entry_ext_len > limits.max_entry_ext_bytes {
-            return Err(entry_ext_cap_error(
-                u64::from(entry_ext_len),
-                limits.max_entry_ext_bytes,
-                None,
-            ));
-        }
-        total_entry_ext_bytes = total_entry_ext_bytes
-            .checked_add(u64::from(entry_ext_len))
-            .ok_or_else(|| {
-                CryptoError::InvalidInput(
-                    "Archive total entry-extension bytes overflow".to_string(),
-                )
-            })?;
-        if total_entry_ext_bytes > limits.max_total_entry_ext_bytes {
-            return Err(total_entry_ext_cap_error(
-                total_entry_ext_bytes,
-                limits.max_total_entry_ext_bytes,
-            ));
-        }
+        enforce_manifest_entry_caps(
+            u32::from(mode),
+            u32::from(path_len),
+            None,
+            u64::from(entry_ext_len),
+            &mut total_entry_ext_bytes,
+            &limits,
+        )?;
 
         let path_start = cursor.position() as usize;
         let path_end = path_start
@@ -508,19 +503,18 @@ pub fn parse_manifest_bytes(
         if ext_end > bytes.len() {
             return Err(malformed_manifest());
         }
-        let entry_ext_bytes = bytes[ext_start..ext_end].to_vec();
-        cursor.set_position(ext_end as u64);
 
         // Per FORMAT.md §9.5: every per-entry TLV region is parsed +
         // canonicality-validated under the no-known-critical policy.
         // v1 defines no per-entry TLV tags, so any tag present is
         // either ignorable (skip after canonicality) or critical
-        // (reject as `UnknownCriticalTag`).
-        validate_no_known_critical(
-            &entry_ext_bytes,
-            limits.max_entry_ext_bytes,
-            limits.max_tlv_value_bytes,
-        )?;
+        // (reject as `UnknownCriticalTag`). Scan on the borrowed slice
+        // first so a malformed or unknown-critical region is rejected
+        // before any allocation.
+        let entry_ext_slice = &bytes[ext_start..ext_end];
+        validate_entry_ext_tlv(entry_ext_slice, &limits)?;
+        let entry_ext_bytes = entry_ext_slice.to_vec();
+        cursor.set_position(ext_end as u64);
 
         let kind = match kind_byte {
             KIND_FILE => {
@@ -563,12 +557,7 @@ pub fn parse_manifest_bytes(
             "Archive total-bytes mismatch".to_string(),
         ));
     }
-    if total_file_bytes > limits.max_total_plaintext_bytes {
-        return Err(total_bytes_cap_error(
-            total_file_bytes,
-            limits.max_total_plaintext_bytes,
-        ));
-    }
+    enforce_total_plaintext_bytes_cap(total_file_bytes, &limits)?;
 
     let (root_name, root_is_file) = validate_manifest_tree(&entries, total_file_bytes, limits)?;
 
@@ -767,7 +756,12 @@ mod tests {
         let bytes = raw_header_bytes(0xFF, 0, 5, 0, 100, 1024);
         let mut cur = Cursor::new(&bytes);
         let err = parse_fca_header(&mut cur, ArchiveLimits::default()).unwrap_err();
-        assert!(format!("{err}").contains("Unsupported"));
+        match err {
+            CryptoError::InvalidFormat(FormatDefect::UnsupportedArchiveVersion {
+                version: 0xFF,
+            }) => {}
+            other => panic!("expected UnsupportedArchiveVersion(0xFF), got {other:?}"),
+        }
     }
 
     #[test]
@@ -1052,7 +1046,7 @@ mod tests {
     fn checked_manifest_len_one_entry() {
         let entries = [make_entry("hi", ArchiveEntryKind::File, 5, 0o644)];
         let len = checked_manifest_len(&entries, ArchiveLimits::default()).unwrap();
-        // 14 fixed + 2 path bytes
+        // 18 fixed + 2 path bytes
         assert_eq!(len, FCA_ENTRY_FIXED_SIZE + 2);
     }
 
@@ -1075,7 +1069,7 @@ mod tests {
     fn checked_manifest_len_rejects_empty_path() {
         let entries = [make_entry("", ArchiveEntryKind::File, 0, 0o644)];
         let err = checked_manifest_len(&entries, ArchiveLimits::default()).unwrap_err();
-        assert!(format!("{err}").contains("byte-length cap exceeded"));
+        assert!(format!("{err}").contains("Empty archive entry path"));
     }
 
     /// FORMAT.md §9.10: writer-side TLV canonicality is enforced
@@ -1131,7 +1125,7 @@ mod tests {
     #[test]
     fn checked_manifest_len_rejects_above_manifest_cap() {
         let l = ArchiveLimits::default().with_max_manifest_bytes(20);
-        // Two entries, each 14 + 5 = 19 bytes → total 38 > cap 20.
+        // Two entries, each 18 + 5 = 23 bytes → total 46 > cap 20.
         let entries = [
             make_entry("file1", ArchiveEntryKind::File, 0, 0o644),
             make_entry("file2", ArchiveEntryKind::File, 0, 0o644),
@@ -1229,7 +1223,7 @@ mod tests {
     #[test]
     fn parse_rejects_truncated_manifest() {
         // Header claims 1 entry but bytes are short.
-        let bytes = vec![KIND_FILE, 0, 0, 0]; // only 4 bytes — fixed header is 14
+        let bytes = vec![KIND_FILE, 0, 0, 0]; // only 4 bytes — fixed header is 18
         let err = parse_with_header(&bytes, 1, 0).unwrap_err();
         assert!(format!("{err}").contains("Malformed archive manifest"));
     }

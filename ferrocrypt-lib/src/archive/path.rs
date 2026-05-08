@@ -1,18 +1,18 @@
 //! FCA path grammar — the single shared writer/reader validator.
 //!
-//! See `notes/archive_format/ARCHIVE_FORMAT.md` §8 (path grammar),
-//! §14.8 (path validation reference), §19.3 (path-rejection corpus).
+//! See `ferrocrypt-lib/FORMAT.md` §9.6 (path grammar) and §9.10
+//! (writer obligations — same TLV / path canonicality on both sides).
 //!
-//! The "writer/reader symmetry" guarantee from spec §19.3 last bullet
-//! is satisfied by having a single function — [`validate_fca_path`] —
-//! called from both encode and decode paths. There is no separate
-//! writer-side and reader-side validator to drift apart.
+//! The writer/reader symmetry guarantee is satisfied by having a
+//! single function — [`validate_fca_path`] — called from both encode
+//! and decode paths. There is no separate writer-side and reader-side
+//! validator to drift apart.
 
 use std::path::{Component, Path};
 
 use crate::CryptoError;
 
-use super::limits::ArchiveLimits;
+use super::limits::{ArchiveLimits, enforce_path_bytes_cap, enforce_path_depth_cap};
 
 /// Bytes that cannot appear in any FCA path component on any platform
 /// FerroCrypt targets. The Windows-reserved set per spec §8.2; rejecting
@@ -33,11 +33,11 @@ pub fn validate_fca_path(path: &str, limits: ArchiveLimits) -> Result<(), Crypto
             "Empty archive entry path".to_string(),
         ));
     }
-    if path.len() > limits.max_path_bytes as usize {
-        return Err(CryptoError::InvalidInput(
-            "Archive path byte-length cap exceeded".to_string(),
-        ));
-    }
+    enforce_path_bytes_cap(
+        u32::try_from(path.len()).unwrap_or(u32::MAX),
+        Some(path),
+        &limits,
+    )?;
     let bytes = path.as_bytes();
     if bytes[0] == b'/' {
         return Err(CryptoError::InvalidInput(
@@ -65,12 +65,7 @@ pub fn validate_fca_path(path: &str, limits: ArchiveLimits) -> Result<(), Crypto
         ));
     }
 
-    let component_count = path.split('/').count();
-    if component_count > limits.max_path_depth as usize {
-        return Err(CryptoError::InvalidInput(
-            "Archive path depth cap exceeded".to_string(),
-        ));
-    }
+    enforce_path_depth_cap(path, &limits)?;
 
     for component in path.split('/') {
         validate_fca_component(component)?;

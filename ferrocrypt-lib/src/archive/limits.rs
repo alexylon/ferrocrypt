@@ -1,8 +1,9 @@
 //! Resource caps for FCA archive encoding and extraction.
 //!
 //! `ArchiveLimits` bounds entry count, total plaintext bytes, path depth,
-//! per-path UTF-8 byte length, and serialized manifest byte length.
-//! See `notes/archive_format/ARCHIVE_FORMAT.md` §11.
+//! per-path UTF-8 byte length, serialized manifest byte length, and the
+//! per-region / total / per-value caps that bound the FCA forward-compat
+//! TLV regions. See `ferrocrypt-lib/FORMAT.md` §9.12.
 //!
 //! Both writer and reader apply these caps before allocation or filesystem
 //! work — readers structurally during header / manifest parse, writers
@@ -140,22 +141,117 @@ impl Default for ArchiveLimits {
 
 /// Per-entry resource-cap check shared by encrypt-side preflight and
 /// decrypt-side extraction. Caller has already incremented `entry_count`
-/// for the current entry. Path-depth is computed by counting `/`-split
-/// components on the FCA UTF-8 path.
+/// for the current entry. Delegates to the per-cap helpers so the rule
+/// for each cap lives in exactly one place.
 pub(crate) fn enforce_per_entry_caps(
     entry_count: u32,
     path_utf8: &str,
     limits: &ArchiveLimits,
 ) -> Result<(), CryptoError> {
+    enforce_entry_count_cap(entry_count, limits)?;
+    enforce_path_depth_cap(path_utf8, limits)?;
+    Ok(())
+}
+
+/// Single source of truth for `entry_count > max_entry_count`. Used by
+/// the writer's metadata-pass per-entry check
+/// ([`enforce_per_entry_caps`]), the reader's [`parse_fca_header`]
+/// header-field check, and the post-parse manifest-tree validator.
+pub(crate) fn enforce_entry_count_cap(
+    entry_count: u32,
+    limits: &ArchiveLimits,
+) -> Result<(), CryptoError> {
     if entry_count > limits.max_entry_count {
         return Err(entry_count_cap_error(entry_count, limits.max_entry_count));
     }
+    Ok(())
+}
+
+/// Single source of truth for path-depth cap enforcement. Computes the
+/// depth from the FCA UTF-8 path (count of `/`-separated components)
+/// so callers don't reimplement the split. Used by [`validate_fca_path`]
+/// (path grammar) and [`enforce_per_entry_caps`] (writer metadata pass).
+pub(crate) fn enforce_path_depth_cap(
+    path_utf8: &str,
+    limits: &ArchiveLimits,
+) -> Result<(), CryptoError> {
     let depth = u32::try_from(path_utf8.split('/').count()).unwrap_or(u32::MAX);
     if depth > limits.max_path_depth {
         return Err(path_depth_cap_error(
             depth,
             limits.max_path_depth,
             path_utf8,
+        ));
+    }
+    Ok(())
+}
+
+/// Single source of truth for the per-entry path-byte cap. Used by:
+/// the writer's [`crate::archive::format::checked_manifest_len`] (with
+/// the entry path), the reader's
+/// [`crate::archive::format::parse_manifest_bytes`] pre-allocation
+/// guard (without a path yet), and [`validate_fca_path`] (after the
+/// path string has been resolved).
+pub(crate) fn enforce_path_bytes_cap(
+    path_len: u32,
+    path: Option<&str>,
+    limits: &ArchiveLimits,
+) -> Result<(), CryptoError> {
+    if path_len > limits.max_path_bytes {
+        return Err(path_bytes_cap_error(path_len, limits.max_path_bytes, path));
+    }
+    Ok(())
+}
+
+/// Single source of truth for `manifest_len > max_manifest_bytes`. Used
+/// by the reader's [`parse_fca_header`] (header field check) and the
+/// writer's [`crate::archive::format::checked_manifest_len`] running
+/// total. Takes `u64` so a `u32` wire field and a `usize` running total
+/// both fit.
+pub(crate) fn enforce_manifest_len_cap(
+    manifest_len: u64,
+    limits: &ArchiveLimits,
+) -> Result<(), CryptoError> {
+    if manifest_len > u64::from(limits.max_manifest_bytes) {
+        return Err(manifest_len_cap_error(
+            manifest_len,
+            limits.max_manifest_bytes,
+        ));
+    }
+    Ok(())
+}
+
+/// Single source of truth for `archive_ext_len > max_archive_ext_bytes`.
+/// Used by [`parse_fca_header`] (only call site today; v1 writers emit
+/// `archive_ext_len = 0` so the writer-side check is implicit, but a
+/// future writer that emits a non-zero region would call this).
+pub(crate) fn enforce_archive_ext_cap(
+    archive_ext_len: u64,
+    limits: &ArchiveLimits,
+) -> Result<(), CryptoError> {
+    if archive_ext_len > u64::from(limits.max_archive_ext_bytes) {
+        return Err(archive_ext_cap_error(
+            archive_ext_len,
+            limits.max_archive_ext_bytes,
+        ));
+    }
+    Ok(())
+}
+
+/// One-shot total-bytes cap check (no running mutator). Used by the
+/// reader's [`parse_fca_header`] (header field), reader's
+/// [`crate::archive::format::parse_manifest_bytes`] post-sum
+/// re-validation, and the manifest-tree validator. The writer's
+/// metadata pass uses [`enforce_total_bytes_cap`] (running mutator)
+/// instead.
+pub(crate) fn enforce_total_plaintext_bytes_cap(
+    total_file_bytes: u64,
+    limits: &ArchiveLimits,
+) -> Result<(), CryptoError> {
+    if total_file_bytes > limits.max_total_plaintext_bytes {
+        return Err(total_bytes_cap_error(
+            total_file_bytes,
+            limits.max_total_plaintext_bytes,
         ));
     }
     Ok(())
@@ -180,6 +276,49 @@ pub(crate) fn enforce_total_bytes_cap(
         ));
     }
     *total_bytes = next;
+    Ok(())
+}
+
+/// Per-entry `entry_ext` cap check, shared by writer-side
+/// `checked_manifest_len` (which knows the entry path) and reader-side
+/// `parse_manifest_bytes` (which has only parsed the length so far).
+/// Single source of truth for the `entry_ext_len > max_entry_ext_bytes`
+/// rejection so a future cap rename only touches one place.
+pub(crate) fn enforce_entry_ext_cap(
+    entry_ext_len: u64,
+    path: Option<&str>,
+    limits: &ArchiveLimits,
+) -> Result<(), CryptoError> {
+    if entry_ext_len > u64::from(limits.max_entry_ext_bytes) {
+        return Err(entry_ext_cap_error(
+            entry_ext_len,
+            limits.max_entry_ext_bytes,
+            path,
+        ));
+    }
+    Ok(())
+}
+
+/// Per-entry TLV-region total cap, shared by writer-side
+/// `checked_manifest_len` and reader-side `parse_manifest_bytes`.
+/// Mirrors [`enforce_total_bytes_cap`]: checked-add + cap, with the
+/// same `&mut u64` running-total convention so overflow is rejected
+/// even at `max_total_entry_ext_bytes = u64::MAX`.
+pub(crate) fn enforce_total_entry_ext_cap(
+    entry_ext_len: u64,
+    total: &mut u64,
+    limits: &ArchiveLimits,
+) -> Result<(), CryptoError> {
+    let next = total.checked_add(entry_ext_len).ok_or_else(|| {
+        CryptoError::InvalidInput("Archive total entry-extension bytes overflow".to_string())
+    })?;
+    if next > limits.max_total_entry_ext_bytes {
+        return Err(total_entry_ext_cap_error(
+            next,
+            limits.max_total_entry_ext_bytes,
+        ));
+    }
+    *total = next;
     Ok(())
 }
 

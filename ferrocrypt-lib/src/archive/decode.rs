@@ -113,18 +113,19 @@ fn unarchive_inner<R: Read>(
     // the manifest tree shape.
     let manifest = parse_manifest_bytes(&manifest_bytes, header, limits)?;
 
-    // §16.1 step 5: `symlink_metadata` (via `reject_occupied`) so a
-    // dangling symlink at the final name is treated as occupied.
+    // FORMAT.md §9.11 step 8: `symlink_metadata` (via `reject_occupied`)
+    // so a dangling symlink at the final name is treated as occupied.
     let final_path = output_dir.join(&manifest.root_name);
     reject_occupied(&final_path, "Output")?;
 
-    // §16.1 step 6.
+    // FORMAT.md §9.11 step 9: reject pre-existing `.incomplete`.
     let output_handle = platform::open_anchor(output_dir)?;
     let incomplete_name = incomplete_working_name(&manifest.root_name);
 
-    // §16.1 steps 7–11. Each `extract_*_root` runs `verify_archive_eof`
-    // (step 10) between content streaming (step 9) and descendant
-    // chmod (step 11) so the spec's literal ordering is preserved.
+    // FORMAT.md §9.11 steps 10–14. Each `extract_*_root` runs
+    // `verify_archive_eof` (step 13) between content streaming (step 11)
+    // and descendant chmod (step 14) so the spec's literal ordering is
+    // preserved.
     if manifest.root_is_file {
         extract_single_file_root(
             &mut reader,
@@ -150,15 +151,15 @@ fn unarchive_inner<R: Read>(
     // were already dropped at scope exit inside `extract_*_root`.
     drop(output_handle);
 
-    // §16.1 step 12: promote {root}.incomplete → {root} with no-clobber
-    // semantics. A racing attacker who creates the final name between
-    // the step-5 pre-check and now is rejected here.
+    // FORMAT.md §9.11 step 15: promote {root}.incomplete → {root} with
+    // no-clobber semantics. A racing attacker who creates the final name
+    // between the step-8 pre-check and now is rejected here.
     let working_path = output_dir.join(&incomplete_name);
     rename_no_clobber(&working_path, &final_path).map_err(|e| {
         map_already_exists(CryptoError::Io(e), "Output already exists", &final_path)
     })?;
 
-    // §16.1 step 13: apply root directory mode AFTER promotion. macOS
+    // FORMAT.md §9.11 step 16: apply root directory mode AFTER promotion. macOS
     // can refuse to rename a directory whose mode lacks search
     // permission, so the root .incomplete stayed at the initial 0o700
     // (search-permitted owner-only) mode through extraction. Re-anchor
@@ -203,9 +204,9 @@ fn extract_single_file_root<R: Read>(
     copy_exact_n(reader, &mut outfile, entry.size)?;
     platform::chmod_file_handle(&outfile, entry.mode)?;
 
-    // §16.1 step 10: verify archive EOF — no byte may follow the last
-    // declared file content. Single-file root has no descendant chmod
-    // pass, so this directly precedes the caller's rename (step 12).
+    // FORMAT.md §9.11 step 13: verify archive EOF — no byte may follow
+    // the last declared file content. Single-file root has no descendant
+    // chmod pass, so this directly precedes the caller's rename (step 15).
     verify_archive_eof(reader)
 }
 
@@ -230,8 +231,9 @@ fn extract_directory_root<R: Read>(
     created_incomplete_roots.push(manifest.root_name.clone());
 
     // Pass 1: pre-create all descendant directories sorted by depth
-    // ascending (parent before child). Spec §16.3 SHOULD; we MUST do
-    // this to support content streaming under any manifest order.
+    // ascending (parent before child). FORMAT.md §9.11 step 10
+    // SHOULD; we MUST do this to support content streaming under any
+    // manifest order.
     let mut dir_entries: Vec<&ArchiveEntry> = manifest
         .entries
         .iter()
@@ -259,15 +261,15 @@ fn extract_directory_root<R: Read>(
         platform::chmod_file_handle(&outfile, entry.mode)?;
     }
 
-    // §16.1 step 10: verify archive EOF — no byte may follow the last
-    // declared file content. Runs BEFORE Pass 3 (descendant chmod) per
-    // the spec's literal step ordering.
+    // FORMAT.md §9.11 step 13: verify archive EOF — no byte may follow
+    // the last declared file content. Runs BEFORE Pass 3 (descendant
+    // chmod) per the spec's literal step ordering.
     verify_archive_eof(reader)?;
 
-    // Pass 3 / §16.1 step 11: apply descendant directory modes
-    // deepest-first. Spec §16.3: restrictive parent modes would block
-    // child creation, so chmod must run AFTER child writes complete.
-    // Root directory mode is applied AFTER the rename (see
+    // Pass 3 / FORMAT.md §9.11 step 14: apply descendant directory modes
+    // deepest-first. Restrictive parent modes would block child
+    // creation, so chmod must run AFTER child writes complete. Root
+    // directory mode is applied AFTER the rename (see
     // `apply_root_directory_mode`). `dir_entries` is already sorted
     // ascending by Pass 1; iterating in reverse yields the
     // depth-descending order Pass 3 needs.
@@ -296,9 +298,9 @@ fn apply_root_directory_mode(output_dir: &Path, manifest: &Manifest) -> Result<(
     platform::chmod_dir_handle(root_dir, root_entry.mode)
 }
 
-/// Spec §14.11: rejects any non-EOF byte after the last declared file
-/// content. The `?` on `read` threads `StreamError` markers from the
-/// underlying decrypt stream through `From<io::Error> for CryptoError`
+/// FORMAT.md §9.9: rejects any non-EOF byte after the last declared
+/// file content. The `?` on `read` threads `StreamError` markers from
+/// the underlying decrypt stream through `From<io::Error> for CryptoError`
 /// so an authentication / truncation / extra-data signal surfaces as
 /// the typed `CryptoError::Payload*` variant rather than as a generic
 /// archive error.
@@ -507,7 +509,7 @@ mod tests {
         unarchive_with_policy(archive, tmp, IncompleteOutputPolicy::DeleteOnError)
     }
 
-    // -- Positive round-trip tests (§19.1) ---------------------------------
+    // -- Positive round-trip tests -----------------------------------------
 
     #[test]
     fn round_trip_single_file() {
@@ -603,12 +605,12 @@ mod tests {
         );
     }
 
-    /// Spec §10: readers MUST accept any manifest order satisfying the
-    /// tree shape. Pin order-independence by listing children before
-    /// parents in the manifest. The content region is still in
-    /// manifest order, so the reader's two-pass extraction (pre-create
-    /// dirs by depth, then stream files in manifest order) handles
-    /// this correctly.
+    /// FORMAT.md §9.8: readers MUST accept any manifest order
+    /// satisfying the tree shape. Pin order-independence by listing
+    /// children before parents in the manifest. The content region is
+    /// still in manifest order, so the reader's two-pass extraction
+    /// (pre-create dirs by depth, then stream files in manifest order)
+    /// handles this correctly.
     #[test]
     fn round_trip_non_canonical_manifest_order() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -715,7 +717,7 @@ mod tests {
         assert!(format!("{err:?}").contains("MalformedTlv"));
     }
 
-    // -- Content-region rejections (§19.5) ---------------------------------
+    // -- Content-region rejections -----------------------------------------
 
     #[test]
     fn rejects_short_file_content() {
@@ -813,8 +815,8 @@ mod tests {
 
     // -- Security invariant ------------------------------------------------
 
-    /// Spec §16.1 steps 1–5 MUST complete before any filesystem output
-    /// is created. Pin this by feeding a manifest that fails tree
+    /// FORMAT.md §9.11 steps 1–8 MUST complete before any filesystem
+    /// output is created. Pin this by feeding a manifest that fails tree
     /// validation (multiple top-level roots) and asserting the output
     /// directory is untouched.
     #[test]
@@ -850,9 +852,9 @@ mod tests {
         matches!(err, CryptoError::InvalidInput(_))
     }
 
-    // -- §19.7 filesystem hardening ----------------------------------------
+    // -- Filesystem hardening ----------------------------------------------
 
-    /// Spec §16.1 step 5: pre-check uses `symlink_metadata`, so a
+    /// FORMAT.md §9.11 step 8: pre-check uses `symlink_metadata`, so a
     /// dangling symlink at the final output name is treated as
     /// occupied. `Path::exists()` would follow the link and report
     /// false, masking the conflict; we MUST reject before any
@@ -885,10 +887,10 @@ mod tests {
         );
     }
 
-    /// Spec §16.3: directory chmod runs deepest-first AFTER all child
-    /// entries are created, AND the root directory's stored mode is
-    /// applied AFTER `.incomplete` → final rename. This single test
-    /// pins both properties at once: a root dir with mode 0o400
+    /// FORMAT.md §9.11 steps 14 + 16: directory chmod runs deepest-first
+    /// AFTER all child entries are created, AND the root directory's
+    /// stored mode is applied AFTER `.incomplete` → final rename. This
+    /// single test pins both properties at once: a root dir with mode 0o400
     /// (no execute / no search) is created with restrictive permissions
     /// only after children land. If chmod-before-children leaked, this
     /// would fail on file creation. If root-mode-before-rename leaked,

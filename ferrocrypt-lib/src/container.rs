@@ -824,10 +824,9 @@ mod tests {
     /// (`RECIPIENT_COUNT_LOCAL_CAP_DEFAULT = 64`) but below the
     /// structural max (`RECIPIENT_COUNT_MAX = 4096`) is rejected by
     /// default and accepted when the caller raises the cap via
-    /// [`HeaderReadLimits::max_recipient_count`]. Confirms the
-    /// audit-flagged Low 2 finding is closed: a caller can opt into
-    /// reading a structurally valid file the conservative defaults
-    /// would refuse.
+    /// [`HeaderReadLimits::max_recipient_count`]. Pins that a caller
+    /// can opt into reading a structurally valid file the conservative
+    /// defaults would refuse.
     #[test]
     fn read_accepts_when_caller_raises_recipient_count_cap() {
         let DerivedSubkeys {

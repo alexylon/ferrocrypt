@@ -933,10 +933,9 @@ mod tests {
 
     /// Pins the work-boundary contract for `open_private_key` when the
     /// stored `kdf_params` exceed the caller's `KdfLimit`: NO event
-    /// fires, because the resource-cap check runs before Argon2id.
-    /// Pre-#7 the orchestrator would have already emitted
-    /// `DerivingKey` from `RecipientDecryptor::decrypt`; the new
-    /// emission point is inside the function and gated on cap success.
+    /// fires, because the resource-cap check runs before Argon2id. The
+    /// emission point is inside the function and gated on cap success,
+    /// not at the orchestrator entry where the cap is not yet known.
     #[test]
     fn open_emits_no_event_when_kdf_params_exceed_resource_cap() {
         use std::cell::RefCell;

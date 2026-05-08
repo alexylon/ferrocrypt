@@ -65,8 +65,7 @@ pub struct Manifest {
 /// `source_path` (the reader's view, plus most parser-side test
 /// fixtures). Single source of truth for the `kind / path_utf8 /
 /// mode / size / source_path: None / entry_ext: empty` boilerplate
-/// shared by every in-tree archive test that previously hand-rolled
-/// the struct literal.
+/// shared by in-tree archive tests.
 #[cfg(test)]
 pub(crate) fn make_entry(path: &str, kind: ArchiveEntryKind, size: u64, mode: u32) -> ArchiveEntry {
     ArchiveEntry {

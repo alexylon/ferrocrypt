@@ -15,15 +15,15 @@ use crate::CryptoError;
 use super::limits::{ArchiveLimits, enforce_path_bytes_cap, enforce_path_depth_cap};
 
 /// Bytes that cannot appear in any FCA path component on any platform
-/// FerroCrypt targets. The Windows-reserved set per spec §8.2; rejecting
+/// FerroCrypt targets. The Windows-reserved set per FORMAT.md §9.6; rejecting
 /// these on every platform makes a valid FCA path representable
 /// everywhere FerroCrypt runs.
 const WINDOWS_RESERVED_CHARS: &[u8] = b"<>:\"|?*";
 
-/// Validates an FCA archive path against the spec §8 grammar. Same
-/// function called by encode-side metadata-pass and decode-side
+/// Validates an FCA archive path against the FORMAT.md §9.6 grammar.
+/// Same function called by encode-side metadata-pass and decode-side
 /// manifest-parse — the single shared implementation IS the writer /
-/// reader symmetry guarantee from spec §19.3.
+/// reader symmetry guarantee.
 ///
 /// Caller has already passed `limits` through
 /// [`ArchiveLimits::validate`]; we don't re-run that check here.
@@ -93,7 +93,7 @@ pub fn validate_fca_path(path: &str, limits: ArchiveLimits) -> Result<(), Crypto
     Ok(())
 }
 
-/// Validates a single `/`-delimited path component per spec §8.2.
+/// Validates a single `/`-delimited path component per FORMAT.md §9.6.
 fn validate_fca_component(component: &str) -> Result<(), CryptoError> {
     if component.is_empty() || component == "." || component == ".." {
         return Err(CryptoError::InvalidInput(
@@ -131,7 +131,7 @@ fn validate_fca_component(component: &str) -> Result<(), CryptoError> {
 }
 
 /// ASCII-only lowercase. Multi-byte UTF-8 bytes (anything `>= 0x80`)
-/// pass through unchanged, which is intentional per spec §8.2: the
+/// pass through unchanged, which is intentional per FORMAT.md §9.6: the
 /// reserved-device check is ASCII-only, not Unicode-folded.
 fn ascii_lower_byte(b: u8) -> u8 {
     if b.is_ascii_uppercase() { b + 32 } else { b }
@@ -192,7 +192,7 @@ fn is_windows_reserved_device_component(component: &str) -> bool {
     )
 }
 
-/// ASCII-case-insensitive collision key per spec §8.3. Maps `A..Z` to
+/// ASCII-case-insensitive collision key per FORMAT.md §9.7. Maps `A..Z` to
 /// `a..z`; everything else (digits, punctuation, multi-byte UTF-8)
 /// passes through unchanged. Used by tree.rs to detect paths like
 /// `Foo.txt` vs `FOO.TXT` that would collide on a case-insensitive
@@ -212,8 +212,8 @@ pub(super) fn component_count(path: &str) -> usize {
     path.split('/').count()
 }
 
-/// Spec §10 canonical sort key: depth ascending, then path bytes
-/// ascending. Used by the writer's full-manifest sort and the
+/// FORMAT.md §9.8 canonical sort key: depth ascending, then path
+/// bytes ascending. Used by the writer's full-manifest sort and the
 /// reader's directory pre-creation pass so the two sites cannot
 /// drift on what "canonical order" means.
 pub(super) fn canonical_path_order(a: &str, b: &str) -> std::cmp::Ordering {
@@ -274,7 +274,7 @@ mod tests {
         assert!(validate_fca_path("conditional.md", limits()).is_ok());
     }
 
-    // -- Whole-path rejections (§8.1, §19.3) -------------------------------
+    // -- Whole-path rejections (FORMAT.md §9.6) ----------------------------
 
     #[test]
     fn rejects_empty() {
@@ -409,7 +409,7 @@ mod tests {
 
     // -- Reserved device names (§8.2) --------------------------------------
 
-    /// All 23 reserved device names from spec §8.2 reject. Loop-over
+    /// All 23 reserved device names from FORMAT.md §9.6 reject. Loop-over
     /// pin keeps the test honest against future spec changes that
     /// add or remove an entry.
     #[test]
@@ -428,7 +428,7 @@ mod tests {
         }
     }
 
-    /// Reserved-stem-with-extension form per spec §8.2. The stem
+    /// Reserved-stem-with-extension form per FORMAT.md §9.6. The stem
     /// is checked before the first `.`, so `CON.txt` matches `con`
     /// and rejects.
     #[test]
@@ -484,7 +484,7 @@ mod tests {
     }
 
     /// Multi-byte UTF-8 bytes pass through unchanged. The check is
-    /// intentionally NOT Unicode-aware per spec §8.3; filesystem-
+    /// intentionally NOT Unicode-aware per FORMAT.md §9.7; filesystem-
     /// specific Unicode collisions fall through to `create_new(true)`
     /// at extraction time.
     #[test]

@@ -12,7 +12,7 @@
 //!
 //! The validator is order-independent: HashMap-based parent lookup
 //! means a manifest with children listed before parents validates the
-//! same as canonically-ordered manifests, per spec §10
+//! same as canonically-ordered manifests, per FORMAT.md §9.8
 //! ("Readers MUST accept any order that satisfies the manifest and
 //! tree-shape rules").
 
@@ -211,8 +211,8 @@ mod tests {
         assert!(!is_file);
     }
 
-    /// Spec §10: "Readers MUST accept any order that satisfies the
-    /// manifest and tree-shape rules." Pin order-independence by
+    /// FORMAT.md §9.8: "Readers MUST accept any order that satisfies
+    /// the manifest and tree-shape rules." Pin order-independence by
     /// listing children before parents.
     #[test]
     fn accepts_non_canonical_order() {
@@ -227,7 +227,7 @@ mod tests {
         assert!(!is_file);
     }
 
-    // -- Tree-shape rejections (§19.4) -------------------------------------
+    // -- Tree-shape rejections (FORMAT.md §9.8) ----------------------------
 
     #[test]
     fn rejects_empty_entries() {

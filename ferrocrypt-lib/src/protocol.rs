@@ -183,8 +183,8 @@ pub(crate) fn encrypt<R: RecipientScheme>(
     let output_path = resolve_encrypted_output_path(output_dir, output_file, &base_name);
     reject_occupied(&output_path, "Output")?;
 
-    // No `DerivingKey` here. Each recipient scheme emits its own
-    // work-boundary event from inside `wrap_file_key`. For the
+    // No early progress event here. Each recipient scheme emits its
+    // own work-boundary event from inside `wrap_file_key`. For the
     // passphrase-only case, that's exactly one
     // `DerivingPassphraseWrapKey` immediately before Argon2id; for
     // pure X25519 wrapping (sub-millisecond), no event fires until
@@ -295,7 +295,7 @@ pub(crate) fn decrypt<I: IdentityScheme>(
     // it exists for internal callers and any future plugin-style API.
     check_mode_matches_scheme::<I>(mode)?;
 
-    // No early `DerivingKey` here. Progress events fire at the actual
+    // No early progress event here. Progress events fire at the actual
     // KDF call boundary inside each scheme's `unwrap_file_key`. For the
     // passphrase mode, that means the slot-loop Argon2id emission lives
     // inside `recipient::native::argon2id::unwrap`, which fires

@@ -187,7 +187,7 @@ pub(super) fn write_u8<W: Write>(w: &mut W, n: u8) -> io::Result<()> {
 /// Reads exactly `size` bytes from `reader` and writes them to `writer`.
 /// Used by both the encrypt-side content pass (source file → encrypted
 /// stream) and the decrypt-side content extraction (encrypted stream →
-/// output file). Spec §14.10: archive content bytes MUST NOT use
+/// output file). FORMAT.md §9.9: archive content bytes MUST NOT use
 /// unbounded `io::copy`, which would happily keep reading past `size`
 /// on a misbehaving reader.
 ///
@@ -1007,9 +1007,9 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    /// Spec §6.1: file `size` is `u64`. Confirm there is no remnant
-    /// ustar 8 GiB cap by encoding `u64::MAX` and inspecting the
-    /// raw bytes.
+    /// FORMAT.md §9.4: manifest entry `size` is `u64`. Confirm there is
+    /// no remnant ustar 8 GiB cap by encoding `u64::MAX` and inspecting
+    /// the raw bytes.
     #[test]
     fn serialize_supports_size_u64_max() {
         let m = Manifest {
@@ -1134,7 +1134,7 @@ mod tests {
         assert!(format!("{err}").contains("manifest length cap exceeded"));
     }
 
-    // -- Manifest parser rejection cases (§19.2) ---------------------------
+    // -- Manifest parser rejection cases -----------------------------------
 
     /// Helper that constructs raw manifest bytes for one synthetic
     /// entry, allowing each field to be set independently to test
@@ -1296,7 +1296,7 @@ mod tests {
     }
 
     /// Single file entry with `size = u64::MAX` round-trips. Pin
-    /// "no remnant ustar 8 GiB cap" on the parse side.
+    /// "no remnant ustar 8 GiB cap" on the parse side (FORMAT.md §9.4).
     #[test]
     fn parse_accepts_size_u64_max() {
         let bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 4, 0, u64::MAX, b"huge", &[]);

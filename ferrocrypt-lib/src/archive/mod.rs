@@ -1,8 +1,6 @@
 //! FerroCrypt Archive (FCA) v1 — native archive payload format.
 //!
-//! Replaces the restricted POSIX ustar archive layer that used to live
-//! under [`crate::archive`]. The full wire-format spec is in
-//! `ferrocrypt-lib/FORMAT.md` §9.
+//! Full wire-format spec: `ferrocrypt-lib/FORMAT.md` §9.
 
 pub(crate) mod decode;
 pub(crate) mod encode;

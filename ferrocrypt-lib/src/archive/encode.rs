@@ -23,7 +23,7 @@
 //!    file with `len() == manifest size`, and streams exactly the
 //!    declared size via [`copy_exact_n`].
 //!
-//! Between the two passes the source tree may change. Spec §15.5
+//! Between the two passes the source tree may change. FORMAT.md §9.10
 //! defines the response: shrink / type change / inaccessible →
 //! encryption MUST fail; growth before the fresh metadata check →
 //! reject; growth during the copy after the fresh metadata check →
@@ -464,9 +464,10 @@ fn walk_directory(
     Ok(())
 }
 
-/// Sorts entries by `(component_count, path_utf8_bytes)` per spec §10.
-/// The root directory sorts first by construction (smallest component
-/// count plus shortest path among any entry sharing the root).
+/// Sorts entries by `(component_count, path_utf8_bytes)` per
+/// FORMAT.md §9.8. The root directory sorts first by construction
+/// (smallest component count plus shortest path among any entry
+/// sharing the root).
 fn sort_entries_canonically(entries: &mut [ArchiveEntry]) {
     entries.sort_by(|a, b| canonical_path_order(&a.path_utf8, &b.path_utf8));
 }
@@ -476,7 +477,7 @@ fn sort_entries_canonically(entries: &mut [ArchiveEntry]) {
 /// source is still a regular file with `len() == entry.size`, then
 /// copies exactly `entry.size` bytes.
 ///
-/// Spec §15.5: on shrink, type change, or pre-copy growth — fail. On
+/// FORMAT.md §9.10: on shrink, type change, or pre-copy growth — fail. On
 /// growth during the copy after the fresh metadata check — copy
 /// exactly the declared size, keeping the archive self-consistent.
 fn stream_source_file<W: Write>(entry: &ArchiveEntry, writer: &mut W) -> Result<(), CryptoError> {
@@ -506,8 +507,6 @@ fn stream_source_file<W: Write>(entry: &ArchiveEntry, writer: &mut W) -> Result<
 /// Archives a file or directory into the FCA wire format. Returns the
 /// output stem (file stem for file inputs, directory name for
 /// directory inputs) plus the writer for the caller to finalize.
-///
-/// Matches the existing internal API per spec §12.
 pub(crate) fn archive<W: Write>(
     input_path: impl AsRef<Path>,
     mut writer: W,
@@ -687,8 +686,7 @@ mod tests {
     }
 
     /// The output stem returned by `archive` follows the existing
-    /// internal API per spec §12: file stem for files, dir name for
-    /// directories.
+    /// internal API: file stem for files, dir name for directories.
     #[test]
     fn returns_correct_output_stem() {
         let src = tempfile::TempDir::new().unwrap();
@@ -706,7 +704,7 @@ mod tests {
         assert_eq!(stem, "photos.v1");
     }
 
-    // -- Writer-side rejections (§19.6) ------------------------------------
+    // -- Writer-side rejections --------------------------------------------
 
     #[cfg(unix)]
     #[test]
@@ -858,7 +856,7 @@ mod tests {
         assert!(format!("{err}").contains("Windows-reserved device"));
     }
 
-    // -- §19.1 positive round-trips (extra coverage) -----------------------
+    // -- Positive round-trips (extra coverage) -----------------------------
 
     /// Bytes 0x00..=0xFF cycled to 1 KiB. Pins that the writer does
     /// not assume printable / text content and the reader does not
@@ -896,10 +894,10 @@ mod tests {
         assert!(final_path.join("a").join("b").join("c").is_dir());
     }
 
-    // -- §19.1 / §19.7 Unix mode preservation ------------------------------
+    // -- Unix mode preservation --------------------------------------------
 
     /// Source file mode round-trips through the archive intact (rwx
-    /// bits only — special bits stripped per §15.4). Pins
+    /// bits only — special bits stripped per FORMAT.md §9.10). Pins
     /// `archive_file_mode` on the writer side and
     /// `chmod_file_handle` post-copy on the reader side.
     #[cfg(unix)]
@@ -920,9 +918,10 @@ mod tests {
 
     /// Source directory mode round-trips intact via the writer's
     /// `archive_dir_mode` and the reader's post-rename root-chmod
-    /// (spec §16.3). Validates "root chmod after rename" indirectly:
-    /// if the reader applied root mode pre-rename and the mode lacked
-    /// search permission, the rename itself would fail on macOS.
+    /// (FORMAT.md §9.11 step 16). Validates "root chmod after rename"
+    /// indirectly: if the reader applied root mode pre-rename and the
+    /// mode lacked search permission, the rename itself would fail on
+    /// macOS.
     #[cfg(unix)]
     #[test]
     fn round_trip_preserves_directory_mode() {
@@ -939,9 +938,9 @@ mod tests {
         assert_eq!(mode, 0o700, "directory mode lost in round trip");
     }
 
-    /// Spec §15.4: writers MUST NOT store setuid, setgid, or sticky
-    /// bits. Pin the strip on the WRITER side: a source file with
-    /// 0o4644 (setuid + rw-r--r--) extracts as 0o644.
+    /// FORMAT.md §9.10: writers MUST NOT store setuid, setgid, or
+    /// sticky bits. Pin the strip on the WRITER side: a source file
+    /// with 0o4644 (setuid + rw-r--r--) extracts as 0o644.
     #[cfg(unix)]
     #[test]
     fn round_trip_strips_setuid_bit_from_source() {
@@ -958,10 +957,10 @@ mod tests {
         assert_eq!(mode, 0o644, "setuid bit must be stripped, got 0o{mode:o}",);
     }
 
-    // -- Source mutation between passes (§15.5) ----------------------------
+    // -- Source mutation between passes ------------------------------------
 
-    /// Spec §15.5: a source file shrinking between metadata pass and
-    /// content pass MUST fail. We can't shrink a real file mid-archive
+    /// FORMAT.md §9.10: a source file shrinking between metadata pass
+    /// and content pass MUST fail. We can't shrink a real file mid-archive
     /// race-free, so this test exercises the size-check directly via
     /// `stream_source_file` with a pre-built `ArchiveEntry` whose
     /// recorded size doesn't match the file on disk.

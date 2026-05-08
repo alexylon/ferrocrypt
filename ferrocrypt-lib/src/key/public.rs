@@ -689,11 +689,10 @@ mod tests {
     /// `decode_recipient_string` advertises `input_chars` in its cap
     /// diagnostics, but `str::len()` is bytes. For a non-ASCII string
     /// long enough to exceed the cap by bytes but not by chars, that
-    /// mismatch used to misclassify the rejection as a cap exceedance.
-    /// Bech32 is ASCII-only, so the fix rejects non-ASCII input up
-    /// front with a typed `InvalidInput` and only counts chars
-    /// (== bytes after the ASCII check) against the cap. Pinned for
-    /// BUG_REVIEW #8.
+    /// mismatch could misclassify the rejection as a cap exceedance.
+    /// Bech32 is ASCII-only, so the parser rejects non-ASCII input up
+    /// front with a typed `InvalidInput` and only counts chars (==
+    /// bytes after the ASCII check) against the cap.
     #[test]
     fn decode_rejects_non_ascii_before_cap_check() {
         // A small non-ASCII string that is well under any reasonable
@@ -760,14 +759,14 @@ mod tests {
 
     #[test]
     fn decode_rejects_bech32m_strings() {
-        // The migration plan explicitly mandates strict Bech32 (BIP 173)
-        // and rejection of Bech32m. Without this test, a regression
-        // that swapped `CheckedHrpstring::new::<Bech32V1>` for the
-        // variant-permissive `bech32::decode` would silently accept
-        // Bech32m strings — Bech32 (TARGET_RESIDUE = 1) and Bech32m
-        // (TARGET_RESIDUE = 0x2bc830a3) are mutually distinguishable,
-        // and confusing them downstream is exactly the variant-
-        // confusion bug `Bech32V1` is here to prevent.
+        // FORMAT.md §7 mandates strict Bech32 (BIP 173) and rejects
+        // Bech32m. Without this test, a regression that swapped
+        // `CheckedHrpstring::new::<Bech32V1>` for the variant-permissive
+        // `bech32::decode` would silently accept Bech32m strings —
+        // Bech32 (TARGET_RESIDUE = 1) and Bech32m (TARGET_RESIDUE =
+        // 0x2bc830a3) are mutually distinguishable, and confusing them
+        // downstream is exactly the variant-confusion bug `Bech32V1` is
+        // here to prevent.
         let key = x25519_key();
         let cs = compute_checksum("x25519", &key);
         let mut data = Vec::new();

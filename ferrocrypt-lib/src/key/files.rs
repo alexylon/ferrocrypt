@@ -36,7 +36,7 @@ pub(crate) enum KeyFileKind {
     /// strict parser in `read_public_key` enforces canonical
     /// whitespace separately).
     Public,
-    /// Bytes carry the v1 `private.key` signature: at least 9
+    /// Bytes carry the v1 `private.key` signature: at least 6
     /// bytes of `FCR\0 || ?? || 'K'`. Magic + type byte is
     /// sufficient regardless of `version`, so a future v2
     /// `private.key` still classifies as `Private` and surfaces

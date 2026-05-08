@@ -9,10 +9,8 @@
 //! `OpenOptionsFollowExt::follow(FollowSymlinks::No)`. Permissions are
 //! always set on an open handle, never via a re-resolved path.
 //!
-//! Universal across Linux / macOS / Windows. Replaces the previous
-//! rustix-based Linux/macOS-only walker and the path-based non-Linux/
-//! macOS fallback. Same code path on every target makes the threat
-//! model uniform — the invariant
+//! Universal across Linux / macOS / Windows. The same code path runs
+//! on every target so the threat model stays uniform — the invariant
 //!
 //! > Any symlink, or on Windows any NTFS reparse point including
 //! > junctions, in an extraction path is an extraction error

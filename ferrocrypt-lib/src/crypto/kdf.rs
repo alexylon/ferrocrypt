@@ -410,11 +410,11 @@ mod tests {
         assert!(KdfParams::from_bytes(&bytes, Some(&limit)).is_ok());
     }
 
-    /// M-2 regression: `KdfLimit::default()` caps accepted `mem_cost` at the
-    /// writer's default (1 GiB). A structurally-valid header requesting the
-    /// hard maximum (2 GiB) must be rejected with `KdfResourceCapExceeded`
-    /// when the caller does not opt into a wider limit explicitly. Locks
-    /// in the post-audit tightening so it cannot silently regress.
+    /// `KdfLimit::default()` caps accepted `mem_cost` at the writer's
+    /// default (1 GiB). A structurally-valid header requesting the hard
+    /// maximum (2 GiB) must be rejected with `KdfResourceCapExceeded`
+    /// when the caller does not opt into a wider limit explicitly. Pins
+    /// the default-decrypt resource ceiling so it cannot silently regress.
     #[test]
     fn test_kdf_limit_default_rejects_max_mem_cost_header() {
         let bytes = KdfParams {

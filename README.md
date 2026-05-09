@@ -16,14 +16,12 @@ FerroCrypt is a pure Rust library, CLI, and desktop application for encrypting a
 
 <div align="center">
   <img src="/assets/screenshot-1.png" width="400" alt="FerroCrypt">&nbsp;&nbsp;
+  <img src="/assets/screenshot-2.png" width="400" alt="FerroCrypt">
 </div>
 
 <div align="center">
-  <img src="/assets/screenshot-2.png" width="400" alt="FerroCrypt">&nbsp;&nbsp;
-</div>
-
-<div align="center">
-  <img src="/assets/screenshot-3.png" width="400" alt="FerroCrypt">
+  <img src="/assets/screenshot-3.png" width="400" alt="FerroCrypt">&nbsp;&nbsp;
+  <img src="/assets/screenshot-4.png" width="400" alt="FerroCrypt">
 </div>
 
 > **Status:** `main` is the in-development branch for the upcoming **v0.3.0** release.

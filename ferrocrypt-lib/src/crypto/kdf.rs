@@ -16,7 +16,7 @@ use crate::format::{read_u32_be, write_u32_be};
 /// Argon2id salt size in bytes. Stored alongside `KdfParams` in any
 /// header that consumes a passphrase (argon2id recipient body,
 /// `private.key` cleartext header).
-pub const ARGON2_SALT_SIZE: usize = 32;
+pub(crate) const ARGON2_SALT_SIZE: usize = 32;
 
 /// Local policy limit for Argon2id work accepted during decryption.
 ///

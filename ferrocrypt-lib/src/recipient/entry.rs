@@ -21,7 +21,7 @@ use crate::recipient::policy::NativeRecipientType;
 
 /// On-wire size of a recipient-entry header (`type_name_len:u16 ||
 /// recipient_flags:u16 || body_len:u32`), per `FORMAT.md` §3.3.
-pub const ENTRY_HEADER_SIZE: usize = 8;
+pub(crate) const ENTRY_HEADER_SIZE: usize = 8;
 
 const ENTRY_TYPE_NAME_LEN_OFFSET: usize = 0;
 const ENTRY_RECIPIENT_FLAGS_OFFSET: usize = ENTRY_TYPE_NAME_LEN_OFFSET + size_of::<u16>();
@@ -31,12 +31,12 @@ const _: () = assert!(ENTRY_BODY_LEN_OFFSET + size_of::<u32>() == ENTRY_HEADER_S
 /// Bit 0 of `recipient_flags`. When set, an unknown recipient type
 /// MUST cause file rejection (`FORMAT.md` §3.4); when clear, an unknown
 /// recipient is skipped.
-pub const RECIPIENT_FLAG_CRITICAL: u16 = 1 << 0;
+pub(crate) const RECIPIENT_FLAG_CRITICAL: u16 = 1 << 0;
 
 /// Mask of all `recipient_flags` bits other than
 /// [`RECIPIENT_FLAG_CRITICAL`]. Per `FORMAT.md` §3.5, these MUST be
 /// zero on the wire; readers reject any entry with a reserved bit set.
-pub const RECIPIENT_FLAGS_RESERVED_MASK: u16 = !RECIPIENT_FLAG_CRITICAL;
+pub(crate) const RECIPIENT_FLAGS_RESERVED_MASK: u16 = !RECIPIENT_FLAG_CRITICAL;
 
 /// Recipient body bytes plus their declared scheme `type_name`. The
 /// type produced by [`crate::protocol::RecipientScheme::wrap_file_key`]

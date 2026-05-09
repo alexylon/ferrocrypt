@@ -25,25 +25,25 @@ use crate::crypto::kdf::{ARGON2_SALT_SIZE, KdfParams};
 use crate::crypto::mac::HMAC_KEY_SIZE;
 
 /// XChaCha20-Poly1305 key size in bytes.
-pub const ENCRYPTION_KEY_SIZE: usize = 32;
+pub(crate) const ENCRYPTION_KEY_SIZE: usize = 32;
 
 /// Size of the per-file random key that every `.fcr` wraps via its
 /// recipient entries. Post-unwrap subkey derivation keys off this
 /// value; see [`derive_subkeys`].
-pub const FILE_KEY_SIZE: usize = 32;
+pub(crate) const FILE_KEY_SIZE: usize = 32;
 
 /// HKDF info for the per-file payload AEAD key, derived from
 /// `file_key` with `stream_nonce` as HKDF salt.
-pub const HKDF_INFO_PAYLOAD: &[u8] = b"ferrocrypt/v1/payload";
+pub(crate) const HKDF_INFO_PAYLOAD: &[u8] = b"ferrocrypt/v1/payload";
 
 /// HKDF info for the per-file header HMAC key, derived from `file_key`
 /// with an empty HKDF salt.
-pub const HKDF_INFO_HEADER: &[u8] = b"ferrocrypt/v1/header";
+pub(crate) const HKDF_INFO_HEADER: &[u8] = b"ferrocrypt/v1/header";
 
 /// Fill a fresh stack-allocated `[u8; N]` from the OS CSPRNG. Use this
 /// for **non-secret** random material (salts, nonces, ephemeral-public
 /// scratch) where zero-on-drop provides no security benefit.
-pub fn random_bytes<const N: usize>() -> [u8; N] {
+pub(crate) fn random_bytes<const N: usize>() -> [u8; N] {
     let mut buf = [0u8; N];
     OsRng.fill_bytes(&mut buf);
     buf
@@ -52,7 +52,7 @@ pub fn random_bytes<const N: usize>() -> [u8; N] {
 /// Fill a fresh `Zeroizing<[u8; N]>` from the OS CSPRNG. Use this for
 /// **secret** random material (file keys, ephemeral secret keys) where
 /// drop-time clearing is the right default.
-pub fn random_secret<const N: usize>() -> Zeroizing<[u8; N]> {
+pub(crate) fn random_secret<const N: usize>() -> Zeroizing<[u8; N]> {
     let mut buf = Zeroizing::new([0u8; N]);
     OsRng.fill_bytes(buf.as_mut());
     buf
@@ -181,7 +181,7 @@ impl HeaderKey {
 ///
 /// `argon2_salt` doubles as the Argon2id salt AND the HKDF salt.
 /// Saves storing two distinct salts on disk.
-pub fn derive_passphrase_wrap_key(
+pub(crate) fn derive_passphrase_wrap_key(
     passphrase: &SecretString,
     argon2_salt: &[u8; ARGON2_SALT_SIZE],
     kdf_params: &KdfParams,

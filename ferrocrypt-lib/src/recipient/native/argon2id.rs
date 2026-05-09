@@ -29,14 +29,14 @@ use crate::crypto::kdf::{ARGON2_SALT_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams}
 use crate::crypto::keys::{FileKey, derive_passphrase_wrap_key, random_bytes};
 
 /// Wire-format `type_name` for this recipient.
-pub const TYPE_NAME: &str = "argon2id";
+pub(crate) const TYPE_NAME: &str = "argon2id";
 
 /// Recipient body length in bytes (`FORMAT.md` §4.1).
-pub const BODY_LENGTH: usize =
+pub(crate) const BODY_LENGTH: usize =
     ARGON2_SALT_SIZE + KDF_PARAMS_SIZE + WRAP_NONCE_SIZE + WRAPPED_FILE_KEY_SIZE;
 
 /// HKDF-SHA3-256 `info` for the passphrase-derived wrap key.
-pub const HKDF_INFO_WRAP: &[u8] = b"ferrocrypt/v1/recipient/argon2id/wrap";
+pub(crate) const HKDF_INFO_WRAP: &[u8] = b"ferrocrypt/v1/recipient/argon2id/wrap";
 
 const SALT_OFFSET: usize = 0;
 const KDF_PARAMS_OFFSET: usize = SALT_OFFSET + ARGON2_SALT_SIZE;

@@ -30,10 +30,10 @@ use crate::error::StreamError;
 /// Non-final chunks produce `BUFFER_SIZE + TAG_SIZE` ciphertext bytes; the
 /// final chunk may be shorter. Part of the `.fcr` on-disk format — changing
 /// this shifts every chunk boundary and breaks existing files.
-pub const BUFFER_SIZE: usize = 65536;
+pub(crate) const BUFFER_SIZE: usize = 65536;
 
 /// STREAM nonce size: XChaCha20's 24-byte nonce minus 5 bytes for counter and last-block flag.
-pub const STREAM_NONCE_SIZE: usize = 19;
+pub(crate) const STREAM_NONCE_SIZE: usize = 19;
 
 /// Wraps a [`StreamError`] as an [`io::Error`] with the given kind so that
 /// the typed marker can traverse [`Read`]/[`Write`] trait boundaries and
@@ -67,14 +67,14 @@ fn stream_io_error(kind: io::ErrorKind, err: StreamError) -> io::Error {
 /// appends the authentication tag without growing the underlying
 /// allocation), and is zeroized between chunks and on drop. There are
 /// no per-chunk plaintext `Vec`s left to the allocator.
-pub struct EncryptWriter<W: Write> {
+pub(crate) struct EncryptWriter<W: Write> {
     encryptor: Option<stream::EncryptorBE32<XChaCha20Poly1305>>,
     chunk: Vec<u8>,
     output: Option<W>,
 }
 
 impl<W: Write> EncryptWriter<W> {
-    pub fn new(encryptor: stream::EncryptorBE32<XChaCha20Poly1305>, output: W) -> Self {
+    pub(crate) fn new(encryptor: stream::EncryptorBE32<XChaCha20Poly1305>, output: W) -> Self {
         Self {
             encryptor: Some(encryptor),
             // Pre-allocate plaintext-plus-tag capacity so the in-place AEAD
@@ -93,7 +93,7 @@ impl<W: Write> EncryptWriter<W> {
     /// MUST be called exactly once after all plaintext has been
     /// written. Returns the inner writer so the caller can finalize
     /// it (e.g. `sync_all`).
-    pub fn finish(mut self) -> Result<W, CryptoError> {
+    pub(crate) fn finish(mut self) -> Result<W, CryptoError> {
         let encryptor = self.encryptor.take().ok_or(CryptoError::InternalInvariant(
             "Internal error: encrypt writer already finished",
         ))?;
@@ -194,7 +194,7 @@ impl<W: Write> Drop for EncryptWriter<W> {
 /// in-place AEAD truncates the authentication tag during decryption),
 /// and is zeroized before each refill and on drop. There are no
 /// per-chunk `Vec`s left to the allocator.
-pub struct DecryptReader<R: Read> {
+pub(crate) struct DecryptReader<R: Read> {
     decryptor: Option<stream::DecryptorBE32<XChaCha20Poly1305>>,
     input: R,
     chunk: Vec<u8>,
@@ -209,7 +209,7 @@ pub struct DecryptReader<R: Read> {
 }
 
 impl<R: Read> DecryptReader<R> {
-    pub fn new(decryptor: stream::DecryptorBE32<XChaCha20Poly1305>, input: R) -> Self {
+    pub(crate) fn new(decryptor: stream::DecryptorBE32<XChaCha20Poly1305>, input: R) -> Self {
         Self {
             decryptor: Some(decryptor),
             input,

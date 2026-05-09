@@ -33,12 +33,12 @@
 //! types. The stable public API does not expose a third-party recipient plugin
 //! registration surface.
 
-pub mod entry;
-pub mod name;
-pub mod native;
-pub mod policy;
+pub(crate) mod entry;
+pub(crate) mod name;
+pub(crate) mod native;
+pub(crate) mod policy;
 
-pub use entry::{RecipientEntry, parse_recipient_entries};
-pub use name::{TYPE_NAME_MAX_LEN, validate_type_name_grammar};
-pub use native::{argon2id, x25519};
-pub use policy::classify_encryption_mode;
+pub(crate) use entry::{RecipientEntry, parse_recipient_entries};
+pub(crate) use name::{TYPE_NAME_MAX_LEN, validate_type_name_grammar};
+pub(crate) use native::{argon2id, x25519};
+pub(crate) use policy::classify_encryption_mode;

@@ -59,26 +59,26 @@ pub const PRIVATE_KEY_VERSION: u8 = WRITER_KEYPAIR_SUITE.private_key_version();
 pub(crate) const HKDF_INFO_PRIVATE_KEY_WRAP: &[u8] = b"ferrocrypt/v1/private-key/wrap";
 
 /// Size of the cleartext fixed-header section, in bytes.
-pub const PRIVATE_KEY_HEADER_FIXED_SIZE: usize = 90;
+pub(crate) const PRIVATE_KEY_HEADER_FIXED_SIZE: usize = 90;
 
 /// Structural maximum for `public_len` (`FORMAT.md` §8).
-pub const PRIVATE_KEY_PUBLIC_LEN_MAX: u32 = 12_288;
+pub(crate) const PRIVATE_KEY_PUBLIC_LEN_MAX: u32 = 12_288;
 
 /// Structural maximum for `ext_len` in `private.key` (`FORMAT.md` §8).
-pub const PRIVATE_KEY_EXT_LEN_MAX: u32 = 65_536;
+pub(crate) const PRIVATE_KEY_EXT_LEN_MAX: u32 = 65_536;
 
 /// Structural minimum for `wrapped_secret_len` — the Poly1305 tag is 16
 /// bytes, so a zero-length plaintext still produces 16 ciphertext bytes.
-pub const PRIVATE_KEY_WRAPPED_SECRET_LEN_MIN: u32 = TAG_SIZE as u32;
+pub(crate) const PRIVATE_KEY_WRAPPED_SECRET_LEN_MIN: u32 = TAG_SIZE as u32;
 
 /// Structural maximum for `wrapped_secret_len` (`FORMAT.md` §8).
-pub const PRIVATE_KEY_WRAPPED_SECRET_LEN_MAX: u32 = 16_777_216;
+pub(crate) const PRIVATE_KEY_WRAPPED_SECRET_LEN_MAX: u32 = 16_777_216;
 
 /// Recommended local cap on `wrapped_secret_len` for untrusted input.
 /// X25519 needs only 48 bytes (32-byte secret + 16-byte tag); 4 KiB
 /// leaves headroom for future native key types without forcing every
 /// caller to raise the cap.
-pub const PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT: u32 = 4_096;
+pub(crate) const PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT: u32 = 4_096;
 
 const VERSION_OFFSET: usize = MAGIC_SIZE;
 const KIND_OFFSET: usize = VERSION_OFFSET + 1;
@@ -271,7 +271,7 @@ pub(crate) fn ensure_private_key_suite_supported(suite: KeypairSuite) -> Result<
 /// drop. `Debug` is implemented manually to redact the secret — auto-
 /// deriving would forward through `Zeroizing`'s `Deref` and print the
 /// raw bytes.
-pub struct OpenedPrivateKey {
+pub(crate) struct OpenedPrivateKey {
     pub type_name: String,
     pub public_material: Vec<u8>,
     pub ext_bytes: Vec<u8>,
@@ -295,7 +295,7 @@ impl std::fmt::Debug for OpenedPrivateKey {
 /// AEAD-encrypts with the cleartext (header + type_name +
 /// public_material + ext_bytes) as AAD. Returns the full on-disk file
 /// ready for atomic write.
-pub fn seal_private_key(
+pub(crate) fn seal_private_key(
     secret_material: &[u8],
     type_name: &str,
     public_material: &[u8],
@@ -377,7 +377,7 @@ pub fn seal_private_key(
 /// type-name grammar validation have all passed. A structurally
 /// malformed key file or one that exceeds either cap is rejected with
 /// no event emitted.
-pub fn open_private_key(
+pub(crate) fn open_private_key(
     bytes: &[u8],
     passphrase: &SecretString,
     kdf_limit: Option<&KdfLimit>,

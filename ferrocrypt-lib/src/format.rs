@@ -94,7 +94,7 @@ pub(crate) fn read_exact_or_truncated(
 pub const MAGIC: [u8; 4] = [b'F', b'C', b'R', 0];
 
 /// Length of [`MAGIC`] in bytes (`4`).
-pub const MAGIC_SIZE: usize = MAGIC.len();
+pub(crate) const MAGIC_SIZE: usize = MAGIC.len();
 
 /// Version byte for the `.fcr` outer encrypted file (`FORMAT.md` §3.1).
 ///
@@ -110,9 +110,9 @@ pub const MAGIC_SIZE: usize = MAGIC.len();
 pub const FCR_FILE_VERSION: u8 = 0x01;
 
 /// `.fcr` encrypted-file kind byte (`Kind::Encrypted` on the wire).
-pub const KIND_ENCRYPTED: u8 = 0x45; // 'E'
+pub(crate) const KIND_ENCRYPTED: u8 = 0x45; // 'E'
 /// `private.key` kind byte (`Kind::PrivateKey` on the wire).
-pub const KIND_PRIVATE_KEY: u8 = 0x4B; // 'K'
+pub(crate) const KIND_PRIVATE_KEY: u8 = 0x4B; // 'K'
 
 /// Default file extension for encrypted FerroCrypt payload files.
 pub const ENCRYPTED_EXTENSION: &str = "fcr";
@@ -120,44 +120,44 @@ pub const ENCRYPTED_EXTENSION: &str = "fcr";
 // ─── Encrypted file format (.fcr) — v1 ─────────────────────────────────────
 
 /// Plain 12-byte prefix at file offset 0 (no replication, no padding).
-pub const PREFIX_SIZE: usize = 12;
+pub(crate) const PREFIX_SIZE: usize = 12;
 
 /// Maximum `header_len` accepted by readers (structural limit per
 /// `FORMAT.md` §3.1).
-pub const HEADER_LEN_MAX: u32 = 16_777_216; // 16 MiB
+pub(crate) const HEADER_LEN_MAX: u32 = 16_777_216; // 16 MiB
 
 /// Recommended local cap on `header_len` for untrusted input
 /// (`FORMAT.md` §3.2). Implementations MUST allow callers to raise
 /// this for specific use cases.
-pub const HEADER_LEN_LOCAL_CAP_DEFAULT: u32 = 1_048_576; // 1 MiB
+pub(crate) const HEADER_LEN_LOCAL_CAP_DEFAULT: u32 = 1_048_576; // 1 MiB
 
 /// `header_fixed` size in bytes (`FORMAT.md` §3.2).
-pub const HEADER_FIXED_SIZE: usize = 31;
+pub(crate) const HEADER_FIXED_SIZE: usize = 31;
 
 /// `stream_nonce` size in bytes — stored inside `header_fixed` as the
 /// XChaCha20-Poly1305 STREAM base nonce.
-pub const STREAM_NONCE_SIZE: usize = 19;
+pub(crate) const STREAM_NONCE_SIZE: usize = 19;
 
 /// Maximum number of recipient entries in a single `.fcr` file
 /// (structural limit, `FORMAT.md` §3.2).
-pub const RECIPIENT_COUNT_MAX: u16 = 4096;
+pub(crate) const RECIPIENT_COUNT_MAX: u16 = 4096;
 
 /// Recommended local cap on `recipient_count` for untrusted input.
-pub const RECIPIENT_COUNT_LOCAL_CAP_DEFAULT: u16 = 64;
+pub(crate) const RECIPIENT_COUNT_LOCAL_CAP_DEFAULT: u16 = 64;
 
 /// Maximum `ext_len` accepted by readers (`FORMAT.md` §3.2 + §6).
-pub const EXT_LEN_MAX: u32 = 65_536;
+pub(crate) const EXT_LEN_MAX: u32 = 65_536;
 
 /// Maximum per-recipient `body_len` (structural limit, `FORMAT.md` §3.3).
-pub const BODY_LEN_MAX: u32 = 16_777_216;
+pub(crate) const BODY_LEN_MAX: u32 = 16_777_216;
 
 /// Recommended local cap on `body_len` for untrusted input.
-pub const BODY_LEN_LOCAL_CAP_DEFAULT: u32 = 8_192;
+pub(crate) const BODY_LEN_LOCAL_CAP_DEFAULT: u32 = 8_192;
 
 /// Size of the v1 header MAC tag (`HMAC-SHA3-256`), in bytes. Per
 /// `FORMAT.md` §3.6, the tag immediately follows `header` and precedes
 /// the encrypted payload.
-pub const HEADER_MAC_SIZE: usize = HMAC_TAG_SIZE;
+pub(crate) const HEADER_MAC_SIZE: usize = HMAC_TAG_SIZE;
 
 // ─── Kind (artefact-type byte) ─────────────────────────────────────────────
 
@@ -167,7 +167,7 @@ pub const HEADER_MAC_SIZE: usize = HMAC_TAG_SIZE;
 /// [`Kind`] becomes a compile error until the new variant is handled,
 /// which is the point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind {
+pub(crate) enum Kind {
     /// `.fcr` encrypted file. Wire byte: [`KIND_ENCRYPTED`].
     Encrypted,
     /// `private.key` passphrase-wrapped private key. Wire byte:
@@ -177,7 +177,7 @@ pub enum Kind {
 
 impl Kind {
     /// Wire-format byte for this variant.
-    pub const fn byte(self) -> u8 {
+    pub(crate) const fn byte(self) -> u8 {
         match self {
             Self::Encrypted => KIND_ENCRYPTED,
             Self::PrivateKey => KIND_PRIVATE_KEY,
@@ -187,7 +187,7 @@ impl Kind {
     /// Decodes a wire-format `kind` byte. `None` for any byte that is
     /// not a recognised v1 artefact kind; callers surface
     /// [`FormatDefect::WrongKind`] for that case.
-    pub const fn from_byte(byte: u8) -> Option<Self> {
+    pub(crate) const fn from_byte(byte: u8) -> Option<Self> {
         match byte {
             KIND_ENCRYPTED => Some(Self::Encrypted),
             KIND_PRIVATE_KEY => Some(Self::PrivateKey),
@@ -235,7 +235,7 @@ impl KeypairSuite {
     /// translation; surfaced through
     /// [`crate::error::UnsupportedVersion::OlderPublicKey`] /
     /// `NewerPublicKey` for unsupported bytes.
-    pub const fn public_key_version(self) -> u8 {
+    pub(crate) const fn public_key_version(self) -> u8 {
         match self {
             Self::V1 => 0x01,
         }
@@ -244,7 +244,7 @@ impl KeypairSuite {
     /// Wire-version byte written to the `private.key` fixed header
     /// (`FORMAT.md` §8). Mirrored back to the suite on read by the
     /// private-key parser's wire-version-to-suite translation.
-    pub const fn private_key_version(self) -> u8 {
+    pub(crate) const fn private_key_version(self) -> u8 {
         match self {
             Self::V1 => 0x01,
         }
@@ -395,18 +395,18 @@ const _: () = assert!(PREFIX_HEADER_LEN_OFFSET + size_of::<u32>() == PREFIX_SIZE
 /// surface; structural validation lives in [`Prefix::validate`] and is
 /// called from both sides so the two paths cannot drift.
 #[derive(Debug, Clone, Copy)]
-pub struct Prefix {
-    pub version: u8,
-    pub kind: Kind,
-    pub prefix_flags: u16,
-    pub header_len: u32,
+pub(crate) struct Prefix {
+    pub(crate) version: u8,
+    pub(crate) kind: Kind,
+    pub(crate) prefix_flags: u16,
+    pub(crate) header_len: u32,
 }
 
 impl Prefix {
     /// Constructs the prefix for an encrypted `.fcr` file with the given
     /// `header_len`. Does not validate; use [`Self::build_encrypted`]
     /// for the validate-and-serialise convenience.
-    pub const fn for_encrypted(header_len: u32) -> Self {
+    pub(crate) const fn for_encrypted(header_len: u32) -> Self {
         Self {
             version: FCR_FILE_VERSION,
             kind: Kind::Encrypted,
@@ -422,7 +422,7 @@ impl Prefix {
     /// Magic is implicit (a `Prefix` value cannot exist without it),
     /// and `kind` is type-checked by the [`Kind`] enum, so neither
     /// appears here.
-    pub fn validate(&self) -> Result<(), CryptoError> {
+    pub(crate) fn validate(&self) -> Result<(), CryptoError> {
         check_version(self.version)?;
         check_prefix_flags(self.prefix_flags)?;
         check_header_len(self.header_len)?;
@@ -432,7 +432,7 @@ impl Prefix {
     /// Serialises the 12-byte on-disk prefix. Does not validate; call
     /// [`Self::validate`] first if the prefix may have been
     /// constructed with caller-supplied values.
-    pub fn to_bytes(self) -> [u8; PREFIX_SIZE] {
+    pub(crate) fn to_bytes(self) -> [u8; PREFIX_SIZE] {
         let mut out = [0u8; PREFIX_SIZE];
         out[..MAGIC_SIZE].copy_from_slice(&MAGIC);
         out[PREFIX_VERSION_OFFSET] = self.version;
@@ -447,7 +447,10 @@ impl Prefix {
     /// kind → flags → header_len. Failures surface as the precise
     /// structural diagnostic (`BadMagic`, `UnsupportedVersion`,
     /// `WrongKind`, `MalformedHeader`, `OversizedHeader`).
-    pub fn parse(bytes: &[u8; PREFIX_SIZE], expected_kind: Kind) -> Result<Self, CryptoError> {
+    pub(crate) fn parse(
+        bytes: &[u8; PREFIX_SIZE],
+        expected_kind: Kind,
+    ) -> Result<Self, CryptoError> {
         if bytes[..MAGIC_SIZE] != MAGIC {
             return Err(CryptoError::InvalidFormat(FormatDefect::BadMagic));
         }
@@ -473,7 +476,7 @@ impl Prefix {
 
     /// Validates and serialises an encrypted-file prefix in one call.
     /// Convenience for encrypt paths that just need the bytes.
-    pub fn build_encrypted(header_len: u32) -> Result<[u8; PREFIX_SIZE], CryptoError> {
+    pub(crate) fn build_encrypted(header_len: u32) -> Result<[u8; PREFIX_SIZE], CryptoError> {
         let prefix = Self::for_encrypted(header_len);
         prefix.validate()?;
         Ok(prefix.to_bytes())
@@ -518,7 +521,7 @@ fn check_header_len(header_len: u32) -> Result<(), CryptoError> {
 /// [`FormatDefect::Truncated`]; other I/O errors surface as
 /// [`CryptoError::Io`] so downstream callers can distinguish "the file
 /// is malformed" from "we couldn't read it."
-pub fn read_prefix_from_reader(
+pub(crate) fn read_prefix_from_reader(
     reader: &mut impl Read,
     expected_kind: Kind,
 ) -> Result<([u8; PREFIX_SIZE], Prefix), CryptoError> {
@@ -547,17 +550,17 @@ const _: () = assert!(HEADER_FIXED_STREAM_NONCE_OFFSET + STREAM_NONCE_SIZE == HE
 
 /// Parsed `header_fixed` (31-byte fixed section at the start of `header`).
 #[derive(Debug, Clone, Copy)]
-pub struct HeaderFixed {
-    pub header_flags: u16,
-    pub recipient_count: u16,
-    pub recipient_entries_len: u32,
-    pub ext_len: u32,
-    pub stream_nonce: [u8; STREAM_NONCE_SIZE],
+pub(crate) struct HeaderFixed {
+    pub(crate) header_flags: u16,
+    pub(crate) recipient_count: u16,
+    pub(crate) recipient_entries_len: u32,
+    pub(crate) ext_len: u32,
+    pub(crate) stream_nonce: [u8; STREAM_NONCE_SIZE],
 }
 
 impl HeaderFixed {
     /// Serialises the 31-byte fixed-header section.
-    pub fn to_bytes(self) -> [u8; HEADER_FIXED_SIZE] {
+    pub(crate) fn to_bytes(self) -> [u8; HEADER_FIXED_SIZE] {
         let mut out = [0u8; HEADER_FIXED_SIZE];
         write_u16_be(&mut out, HEADER_FIXED_FLAGS_OFFSET, self.header_flags);
         write_u16_be(
@@ -580,7 +583,10 @@ impl HeaderFixed {
     ///
     /// Validates per `FORMAT.md` §3.2 structural limits via
     /// [`Self::validate_structural`].
-    pub fn parse(bytes: &[u8; HEADER_FIXED_SIZE], header_len: u32) -> Result<Self, CryptoError> {
+    pub(crate) fn parse(
+        bytes: &[u8; HEADER_FIXED_SIZE],
+        header_len: u32,
+    ) -> Result<Self, CryptoError> {
         let mut stream_nonce = [0u8; STREAM_NONCE_SIZE];
         stream_nonce.copy_from_slice(&bytes[HEADER_FIXED_STREAM_NONCE_OFFSET..HEADER_FIXED_SIZE]);
         let parsed = Self {
@@ -702,7 +708,7 @@ pub(crate) fn verify_header_mac(
 
 /// Classifies a rejected `.fcr` version as older-than or newer-than the
 /// version this release supports.
-pub fn unsupported_file_version_error(version: u8) -> CryptoError {
+pub(crate) fn unsupported_file_version_error(version: u8) -> CryptoError {
     if version < FCR_FILE_VERSION {
         CryptoError::UnsupportedVersion(UnsupportedVersion::OlderFile { version })
     } else {

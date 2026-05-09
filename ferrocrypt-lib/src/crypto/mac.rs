@@ -12,10 +12,10 @@ use sha3::Sha3_256;
 use crate::CryptoError;
 
 /// HMAC-SHA3-256 key size in bytes.
-pub const HMAC_KEY_SIZE: usize = 32;
+pub(crate) const HMAC_KEY_SIZE: usize = 32;
 
 /// HMAC-SHA3-256 output size in bytes (distinct from [`HMAC_KEY_SIZE`]).
-pub const HMAC_TAG_SIZE: usize = 32;
+pub(crate) const HMAC_TAG_SIZE: usize = 32;
 
 type HmacSha3_256 = Hmac<Sha3_256>;
 
@@ -23,7 +23,7 @@ type HmacSha3_256 = Hmac<Sha3_256>;
 /// order with no separator. Equivalent to MAC'ing the concatenation
 /// of `parts` but does not allocate. Used by the v1 header MAC, which
 /// covers `prefix(12) || header(header_len)` per `FORMAT.md` §3.6.
-pub fn hmac_sha3_256_parts(key: &[u8], parts: &[&[u8]]) -> Result<[u8; 32], CryptoError> {
+pub(crate) fn hmac_sha3_256_parts(key: &[u8], parts: &[&[u8]]) -> Result<[u8; 32], CryptoError> {
     Ok(hmac_state_for_parts(key, parts)?
         .finalize()
         .into_bytes()
@@ -33,7 +33,7 @@ pub fn hmac_sha3_256_parts(key: &[u8], parts: &[&[u8]]) -> Result<[u8; 32], Cryp
 /// Constant-time HMAC-SHA3-256 verification over a sequence of byte
 /// parts. Returns [`CryptoError::HeaderTampered`] on tag mismatch.
 /// See [`hmac_sha3_256_parts`] for the input layout.
-pub fn hmac_sha3_256_parts_verify(
+pub(crate) fn hmac_sha3_256_parts_verify(
     key: &[u8],
     parts: &[&[u8]],
     tag: &[u8],
@@ -57,7 +57,7 @@ fn hmac_state_for_parts(key: &[u8], parts: &[&[u8]]) -> Result<HmacSha3_256, Cry
 }
 
 /// Compares two 256-bit byte strings in constant time.
-pub fn ct_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
+pub(crate) fn ct_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
     constant_time_eq_32(a, b)
 }
 

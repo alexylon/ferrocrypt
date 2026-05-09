@@ -24,7 +24,7 @@ use crate::error::FormatDefect;
 
 /// Maximum byte length of a recipient `type_name`
 /// (`FORMAT.md` §3.3, `type_name_len:u16` constrained to `1..=255`).
-pub const TYPE_NAME_MAX_LEN: usize = 255;
+pub(crate) const TYPE_NAME_MAX_LEN: usize = 255;
 
 /// Native-name prefixes reserved by the FerroCrypt specification for
 /// future FerroCrypt-defined recipient types (`FORMAT.md` §3.3.1).
@@ -49,7 +49,7 @@ const RESERVED_NATIVE_SUFFIX: &str = "tag";
 /// [`validate_external_type_name`].
 ///
 /// On failure surfaces [`crate::error::FormatDefect::MalformedTypeName`].
-pub fn validate_type_name_grammar(name: &str) -> Result<(), CryptoError> {
+pub(crate) fn validate_type_name_grammar(name: &str) -> Result<(), CryptoError> {
     let malformed = || CryptoError::InvalidFormat(FormatDefect::MalformedTypeName);
     let bytes = name.as_bytes();
     if bytes.is_empty() || bytes.len() > TYPE_NAME_MAX_LEN {

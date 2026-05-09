@@ -60,19 +60,19 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 /// Bech32 HRP for FerroCrypt recipient strings.
-pub const RECIPIENT_HRP: Hrp = Hrp::parse_unchecked("fcr");
+pub(crate) const RECIPIENT_HRP: Hrp = Hrp::parse_unchecked("fcr");
 
 /// Domain separator for the internal SHA3-256 recipient-payload
 /// checksum. Distinct from any other v1 hash input so a future
 /// extension cannot accidentally collide with this digest.
-pub const PUBLIC_KEY_CHECKSUM_DOMAIN: &[u8] = b"ferrocrypt/v1/public-key/checksum";
+pub(crate) const PUBLIC_KEY_CHECKSUM_DOMAIN: &[u8] = b"ferrocrypt/v1/public-key/checksum";
 
 /// Truncated SHA3-256 checksum size in the typed payload, in bytes.
-pub const PUBLIC_KEY_CHECKSUM_SIZE: usize = 16;
+pub(crate) const PUBLIC_KEY_CHECKSUM_SIZE: usize = 16;
 
 /// Total size of the typed-payload header (`public_key_version(1) ||
 /// type_name_len(2) || key_material_len(4)`), in bytes.
-pub const PAYLOAD_HEADER_SIZE: usize = 1 + size_of::<u16>() + size_of::<u32>();
+pub(crate) const PAYLOAD_HEADER_SIZE: usize = 1 + size_of::<u16>() + size_of::<u32>();
 
 const PAYLOAD_VERSION_OFFSET: usize = 0;
 const PAYLOAD_TYPE_NAME_LEN_OFFSET: usize = PAYLOAD_VERSION_OFFSET + 1;
@@ -82,7 +82,7 @@ const _: () = assert!(PAYLOAD_KEY_MATERIAL_LEN_OFFSET + size_of::<u32>() == PAYL
 /// Spec maximum for the recipient string length in ASCII characters
 /// (`FORMAT.md` §7.1). [`KEY_MATERIAL_LEN_MAX`] derives from this
 /// ceiling so the worst-case payload still encodes within it.
-pub const RECIPIENT_STRING_LEN_MAX: usize = 20_000;
+pub(crate) const RECIPIENT_STRING_LEN_MAX: usize = 20_000;
 
 /// Recommended local cap on recipient-string length for untrusted
 /// input. X25519 produces ~106 ASCII chars; 1 KiB leaves headroom for
@@ -101,7 +101,7 @@ const RECIPIENT_STRING_OVERHEAD_CHARS: usize = 3 + 1 + 6;
 /// proportionally more headroom; the decoder accepts any
 /// `key_material_len` up to this structural cap regardless of the
 /// particular type_name length in the payload.
-pub const KEY_MATERIAL_LEN_MAX: u32 = max_key_material_len();
+pub(crate) const KEY_MATERIAL_LEN_MAX: u32 = max_key_material_len();
 
 const fn max_key_material_len() -> u32 {
     // Each Bech32 data char encodes 5 bits.
@@ -156,7 +156,7 @@ pub struct DecodedRecipient {
 /// string or key file, route through
 /// [`encode_recipient_string_for_suite`] with the resolved suite so
 /// the original wire-version byte is preserved.
-pub fn encode_recipient_string(
+pub(crate) fn encode_recipient_string(
     type_name: &str,
     key_material: &[u8],
 ) -> Result<String, CryptoError> {
@@ -512,12 +512,12 @@ fn malformed_public_key() -> CryptoError {
 /// pair, not over the encoding-checksum domain. The version byte is
 /// also absent: bumping the wire-version of an existing keypair MUST
 /// NOT change its user-visible identity.
-pub fn fingerprint_bytes(type_name: &str, key_material: &[u8]) -> [u8; 32] {
+pub(crate) fn fingerprint_bytes(type_name: &str, key_material: &[u8]) -> [u8; 32] {
     public_key_hash(&[], type_name, key_material)
 }
 
 /// 64-character lowercase hex of [`fingerprint_bytes`].
-pub fn fingerprint_hex(type_name: &str, key_material: &[u8]) -> String {
+pub(crate) fn fingerprint_hex(type_name: &str, key_material: &[u8]) -> String {
     hex_encode(&fingerprint_bytes(type_name, key_material))
 }
 
@@ -542,7 +542,7 @@ pub fn fingerprint_hex(type_name: &str, key_material: &[u8]) -> String {
 /// recipient-string wire-version byte is preserved on the returned
 /// [`ResolvedPublicKey`] so callers (in particular [`PublicKey::resolve`])
 /// can re-emit the original suite rather than the current writer's.
-pub fn read_public_key(path: &std::path::Path) -> Result<ResolvedPublicKey, CryptoError> {
+pub(crate) fn read_public_key(path: &std::path::Path) -> Result<ResolvedPublicKey, CryptoError> {
     let bytes = std::fs::read(path).map_err(crate::fs::paths::map_user_path_io_error)?;
     if matches!(
         crate::key::files::KeyFileKind::classify(&bytes),

@@ -28,7 +28,7 @@ use crate::recipient::native::{argon2id, x25519};
 
 /// Registered native recipient types supported by this implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NativeRecipientType {
+pub(crate) enum NativeRecipientType {
     /// Passphrase recipient. See [`crate::recipient::native::argon2id`].
     Argon2id,
     /// X25519 public-key recipient. See [`crate::recipient::native::x25519`].
@@ -41,7 +41,7 @@ impl NativeRecipientType {
     /// Returns `None` for unrecognised names. Per `FORMAT.md` §3.4,
     /// non-critical unknown recipients are skipped by callers; critical
     /// unknown recipients cause file rejection.
-    pub fn from_type_name(name: &str) -> Option<Self> {
+    pub(crate) fn from_type_name(name: &str) -> Option<Self> {
         match name {
             argon2id::TYPE_NAME => Some(Self::Argon2id),
             x25519::TYPE_NAME => Some(Self::X25519),
@@ -50,7 +50,7 @@ impl NativeRecipientType {
     }
 
     /// Wire-format type name for this variant.
-    pub const fn type_name(self) -> &'static str {
+    pub(crate) const fn type_name(self) -> &'static str {
         match self {
             Self::Argon2id => argon2id::TYPE_NAME,
             Self::X25519 => x25519::TYPE_NAME,
@@ -58,7 +58,7 @@ impl NativeRecipientType {
     }
 
     /// Recipient body length (in bytes) for this variant.
-    pub const fn body_len(self) -> usize {
+    pub(crate) const fn body_len(self) -> usize {
         match self {
             Self::Argon2id => argon2id::BODY_LENGTH,
             Self::X25519 => x25519::BODY_LENGTH,
@@ -253,7 +253,9 @@ impl NativeMixingRule {
 /// [`MixingPolicy::Custom`] variant additionally carries the offending
 /// rule's compatibility-class string so programmatic consumers can
 /// distinguish, for example, post-quantum from any future custom class.
-pub fn enforce_recipient_mixing_policy(entries: &[RecipientEntry]) -> Result<(), CryptoError> {
+pub(crate) fn enforce_recipient_mixing_policy(
+    entries: &[RecipientEntry],
+) -> Result<(), CryptoError> {
     // The mixing-rule table on `NativeRecipientType::mixing_rule` is the
     // single source of truth. Adding a new native type means adding one
     // arm there; this function does not need to be edited.

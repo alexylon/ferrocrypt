@@ -48,19 +48,19 @@ use crate::crypto::mac::ct_eq_32;
 use crate::error::FormatDefect;
 
 /// Wire-format `type_name` for this recipient.
-pub const TYPE_NAME: &str = "x25519";
+pub(crate) const TYPE_NAME: &str = "x25519";
 
 /// X25519 public-key length in bytes.
-pub const PUBKEY_SIZE: usize = 32;
+pub(crate) const PUBKEY_SIZE: usize = 32;
 
 /// X25519 private-key (scalar input) length in bytes.
-pub const PRIVATE_KEY_SIZE: usize = 32;
+pub(crate) const PRIVATE_KEY_SIZE: usize = 32;
 
 /// Recipient body length in bytes (`FORMAT.md` §4.2).
-pub const BODY_LENGTH: usize = PUBKEY_SIZE + WRAP_NONCE_SIZE + WRAPPED_FILE_KEY_SIZE;
+pub(crate) const BODY_LENGTH: usize = PUBKEY_SIZE + WRAP_NONCE_SIZE + WRAPPED_FILE_KEY_SIZE;
 
 /// HKDF-SHA3-256 `info` for the X25519 ECDH-derived wrap key.
-pub const HKDF_INFO_WRAP: &[u8] = b"ferrocrypt/v1/recipient/x25519/wrap";
+pub(crate) const HKDF_INFO_WRAP: &[u8] = b"ferrocrypt/v1/recipient/x25519/wrap";
 
 const EPHEMERAL_PUBKEY_OFFSET: usize = 0;
 const WRAP_NONCE_OFFSET: usize = EPHEMERAL_PUBKEY_OFFSET + PUBKEY_SIZE;

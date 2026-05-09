@@ -18,7 +18,7 @@ use crate::CryptoError;
 /// rename-into-place pattern.
 pub(crate) const INCOMPLETE_SUFFIX: &str = ".incomplete";
 
-pub fn file_stem(filename: &Path) -> Result<&OsStr, CryptoError> {
+pub(crate) fn file_stem(filename: &Path) -> Result<&OsStr, CryptoError> {
     filename
         .file_stem()
         .ok_or_else(|| CryptoError::InvalidInput("Cannot get file stem".to_string()))
@@ -37,7 +37,7 @@ pub fn file_stem(filename: &Path) -> Result<&OsStr, CryptoError> {
 /// classification honest. Falls back to the file branch when
 /// `symlink_metadata` fails (e.g. NotFound after a race), letting
 /// the subsequent `file_stem` surface the real error.
-pub fn encryption_base_name(path: impl AsRef<Path>) -> Result<String, CryptoError> {
+pub(crate) fn encryption_base_name(path: impl AsRef<Path>) -> Result<String, CryptoError> {
     let path = path.as_ref();
     let is_real_dir = std::fs::symlink_metadata(path)
         .map(|m| m.file_type().is_dir())

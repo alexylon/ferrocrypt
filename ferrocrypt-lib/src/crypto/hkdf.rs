@@ -12,7 +12,7 @@ use zeroize::Zeroizing;
 use crate::CryptoError;
 
 /// HKDF-SHA3-256 expansion to a 32-byte key.
-pub fn hkdf_expand_sha3_256(
+pub(crate) fn hkdf_expand_sha3_256(
     salt: Option<&[u8]>,
     ikm: &[u8],
     info: &[u8],

@@ -553,6 +553,13 @@ pub(crate) fn read_public_key(path: &std::path::Path) -> Result<ResolvedPublicKe
     let bytes = crate::fs::paths::read_file_capped(path, PUBLIC_KEY_FILE_READ_CAP_BYTES, || {
         CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)
     })?;
+    if bytes.is_empty() {
+        // An empty file would otherwise propagate as a Bech32-decode
+        // failure; surface the structural defect at its true source so
+        // the caller's diagnostic matches user intuition ("empty key
+        // file"), not the downstream parser's error.
+        return Err(malformed_public_key());
+    }
     if matches!(
         crate::key::files::KeyFileKind::classify(&bytes),
         crate::key::files::KeyFileKind::Private

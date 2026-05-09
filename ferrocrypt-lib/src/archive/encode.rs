@@ -350,6 +350,7 @@ fn build_manifest(input_path: &Path, limits: &ArchiveLimits) -> Result<Manifest,
             total_file_bytes: size,
             root_name: OsString::from(&name_str),
             root_is_file: true,
+            root_mode: mode,
         })
     } else if file_type.is_dir() {
         let root_mode = archive_dir_mode(input_path)?;
@@ -375,6 +376,7 @@ fn build_manifest(input_path: &Path, limits: &ArchiveLimits) -> Result<Manifest,
             total_file_bytes: counters.total_bytes,
             root_name: OsString::from(&name_str),
             root_is_file: false,
+            root_mode,
         })
     } else {
         Err(CryptoError::InvalidInput(format!(

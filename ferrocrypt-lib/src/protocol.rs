@@ -628,6 +628,7 @@ mod tests {
                 total_file_bytes: plaintext.len() as u64,
                 root_name: OsString::from("data.txt"),
                 root_is_file: true,
+                root_mode: 0o644,
             };
             let manifest_bytes = serialize_manifest(&manifest, ArchiveLimits::default())?;
 

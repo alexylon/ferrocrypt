@@ -60,14 +60,17 @@ pub(crate) fn file_stem(filename: &Path) -> Result<&OsStr, CryptoError> {
 /// followed to a directory and silently change the chosen output
 /// name. The downstream `open_no_follow` would still abort the
 /// archive step, but defending here keeps the directory-vs-file
-/// classification honest. Falls back to the file branch when
-/// `symlink_metadata` fails (e.g. NotFound after a race), letting
-/// the subsequent `file_stem` surface the real error.
+/// classification honest. `NotFound` falls through to the file branch
+/// (race against deletion); other I/O errors propagate so a
+/// `PermissionDenied` is not silently misclassified as "not a
+/// directory" and downgraded into a confusing later failure.
 pub(crate) fn encryption_base_name(path: impl AsRef<Path>) -> Result<String, CryptoError> {
     let path = path.as_ref();
-    let is_real_dir = std::fs::symlink_metadata(path)
-        .map(|m| m.file_type().is_dir())
-        .unwrap_or(false);
+    let is_real_dir = match std::fs::symlink_metadata(path) {
+        Ok(m) => m.file_type().is_dir(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => false,
+        Err(e) => return Err(CryptoError::Io(e)),
+    };
     if is_real_dir {
         Ok(path
             .file_name()
@@ -168,6 +171,18 @@ mod tests {
         // the empty path; both must collapse to ".".
         assert_eq!(parent_or_cwd(Path::new("file.txt")), Path::new("."));
         assert_eq!(parent_or_cwd(Path::new("")), Path::new("."));
+    }
+
+    /// Filesystem-root inputs are unreachable in production (no caller
+    /// stages a tempfile at `/`), but the fallback semantic ("parent of
+    /// `/` is the current working directory") would silently mis-route
+    /// such a stage. Pinning the existing behaviour with a test so a
+    /// future caller that tries this hits a clear contract rather than
+    /// a surprise.
+    #[cfg(unix)]
+    #[test]
+    fn parent_or_cwd_root_path_falls_back_to_cwd() {
+        assert_eq!(parent_or_cwd(Path::new("/")), Path::new("."));
     }
 
     #[test]

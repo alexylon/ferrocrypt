@@ -496,10 +496,20 @@ pub(crate) fn write_encrypted_file(
     let output_path = resolve_encrypted_output_path(output_dir, output_file, base_name);
     reject_occupied(&output_path, "Output")?;
 
-    let mut tmp = tempfile::Builder::new()
-        .prefix(TEMP_FILE_PREFIX)
-        .suffix(INCOMPLETE_SUFFIX)
-        .tempfile_in(parent_or_cwd(&output_path))?;
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(TEMP_FILE_PREFIX).suffix(INCOMPLETE_SUFFIX);
+    // Pin the on-disk mode at owner-only read/write so the `.fcr`
+    // file's permissions cannot drift if `tempfile`'s default changes
+    // in a future release. AEAD-protected ciphertext does not need to
+    // be unreadable on disk for confidentiality, but the conservative
+    // default mirrors the `private.key` writer (`protocol.rs` keygen)
+    // and matches what users expect for a freshly-written secret.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o600));
+    }
+    let mut tmp = builder.tempfile_in(parent_or_cwd(&output_path))?;
 
     tmp.as_file_mut().write_all(&built.prefix_bytes)?;
     tmp.as_file_mut().write_all(&built.header_bytes)?;

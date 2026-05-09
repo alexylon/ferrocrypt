@@ -51,10 +51,10 @@ const WRAPPED_FILE_KEY_OFFSET: usize = WRAP_NONCE_OFFSET + WRAP_NONCE_SIZE;
 /// 116-byte recipient body.
 ///
 /// Emits [`ProgressEvent::DerivingPassphraseWrapKey`] immediately before
-/// the Argon2id call. The encrypt path has no preflight that can fail
-/// between fn entry and the KDF, so the event always fires exactly once
-/// for a successful wrap; in the unlikely event the OS CSPRNG fails to
-/// produce salt bytes, no event fires.
+/// the Argon2id call. `random_bytes` is infallible — a CSPRNG failure
+/// surfaces as a panic from `OsRng::fill_bytes`, not as an `Err`
+/// return — so the event fires exactly once on every wrap that
+/// reaches the KDF.
 pub(crate) fn wrap(
     file_key: &FileKey,
     passphrase: &SecretString,

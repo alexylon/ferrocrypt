@@ -286,16 +286,9 @@ fn extract_directory_root<R: Read>(
 
 fn apply_root_directory_mode(output_dir: &Path, manifest: &Manifest) -> Result<(), CryptoError> {
     let root_name_str = manifest_root_name_str(manifest)?;
-    let root_entry = manifest
-        .entries
-        .iter()
-        .find(|e| e.path_utf8 == root_name_str)
-        .ok_or(CryptoError::InternalInvariant(
-            "Root entry missing from validated manifest",
-        ))?;
     let output_handle = platform::open_anchor(output_dir)?;
     let root_dir = platform::open_dir_at_rel(&output_handle, Path::new(root_name_str))?;
-    platform::chmod_dir_handle(root_dir, root_entry.mode)
+    platform::chmod_dir_handle(root_dir, manifest.root_mode)
 }
 
 /// FORMAT.md §9.9: rejects any non-EOF byte after the last declared
@@ -473,6 +466,7 @@ mod tests {
             total_file_bytes: content.len() as u64,
             root_name: OsString::from(path),
             root_is_file: true,
+            root_mode: 0o644,
         }
     }
 
@@ -489,6 +483,7 @@ mod tests {
             total_file_bytes: 100,
             root_name: OsString::from("root"),
             root_is_file: false,
+            root_mode: 0o755,
         }
     }
 
@@ -545,6 +540,7 @@ mod tests {
             total_file_bytes: 12,
             root_name: OsString::from("photos"),
             root_is_file: false,
+            root_mode: 0o755,
         };
         let archive = build_archive(
             &manifest,
@@ -574,6 +570,7 @@ mod tests {
             total_file_bytes: 0,
             root_name: OsString::from("emptydir"),
             root_is_file: false,
+            root_mode: 0o755,
         };
         let archive = build_archive(&manifest, &[]);
 
@@ -595,6 +592,7 @@ mod tests {
             total_file_bytes: 4,
             root_name: OsString::from("root"),
             root_is_file: false,
+            root_mode: 0o755,
         };
         let archive = build_archive(&manifest, &[("root/a/b/leaf.txt", b"deep")]);
 
@@ -624,6 +622,7 @@ mod tests {
             total_file_bytes: 4,
             root_name: OsString::from("root"),
             root_is_file: false,
+            root_mode: 0o755,
         };
         let archive = build_archive(&manifest, &[("root/a/b/leaf.txt", b"deep")]);
 
@@ -647,6 +646,7 @@ mod tests {
             total_file_bytes: 15,
             root_name: OsString::from("d"),
             root_is_file: false,
+            root_mode: 0o755,
         };
         let archive = build_archive(
             &manifest,
@@ -830,6 +830,7 @@ mod tests {
             total_file_bytes: 2,
             root_name: OsString::from("a.txt"),
             root_is_file: true,
+            root_mode: 0o644,
         };
         let archive = build_partial_archive(&manifest, b"AB");
 
@@ -912,6 +913,7 @@ mod tests {
             total_file_bytes: 6,
             root_name: OsString::from("locked"),
             root_is_file: false,
+            root_mode: 0o755,
         };
         let archive = build_archive(&manifest, &[("locked/child/secret.txt", b"secret")]);
 

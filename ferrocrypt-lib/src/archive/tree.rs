@@ -64,7 +64,7 @@ pub(super) fn validate_manifest_tree(
     entries: &[ArchiveEntry],
     total_file_bytes: u64,
     limits: ArchiveLimits,
-) -> Result<(OsString, bool), CryptoError> {
+) -> Result<(OsString, bool, u32), CryptoError> {
     if entries.is_empty() {
         return Err(empty_archive_error());
     }
@@ -81,6 +81,9 @@ pub(super) fn validate_manifest_tree(
     let mut exact: HashSet<&str> = HashSet::with_capacity(entries.len());
     let mut ascii_ci: HashSet<Vec<u8>> = HashSet::with_capacity(entries.len());
     let mut kinds: HashMap<&str, ArchiveEntryKind> = HashMap::with_capacity(entries.len());
+    // Captured during the validation walk so the post-extraction
+    // chmod step does not re-scan `entries` on every unarchive.
+    let mut root_mode: Option<u32> = None;
 
     for entry in entries {
         if first_component(&entry.path_utf8) != root {
@@ -102,6 +105,9 @@ pub(super) fn validate_manifest_tree(
             )));
         }
         kinds.insert(&entry.path_utf8, entry.kind);
+        if entry.path_utf8 == root {
+            root_mode = Some(entry.mode);
+        }
     }
 
     let root_kind = kinds.get(root).copied();
@@ -142,7 +148,11 @@ pub(super) fn validate_manifest_tree(
         }
     };
 
-    Ok((OsString::from(root), root_is_file))
+    let root_mode = root_mode.ok_or(CryptoError::InternalInvariant(
+        "Root entry mode missing from validated manifest",
+    ))?;
+
+    Ok((OsString::from(root), root_is_file, root_mode))
 }
 
 #[cfg(test)]
@@ -172,7 +182,7 @@ mod tests {
     #[test]
     fn accepts_single_file_root() {
         let entries = vec![entry("hello.txt", ArchiveEntryKind::File, 100)];
-        let (root, is_file) = validate_manifest_tree(&entries, 100, limits()).unwrap();
+        let (root, is_file, _root_mode) = validate_manifest_tree(&entries, 100, limits()).unwrap();
         assert_eq!(root, OsString::from("hello.txt"));
         assert!(is_file);
     }
@@ -181,7 +191,7 @@ mod tests {
     #[test]
     fn accepts_root_directory_only() {
         let entries = vec![entry("emptydir", ArchiveEntryKind::Directory, 0)];
-        let (root, is_file) = validate_manifest_tree(&entries, 0, limits()).unwrap();
+        let (root, is_file, _root_mode) = validate_manifest_tree(&entries, 0, limits()).unwrap();
         assert_eq!(root, OsString::from("emptydir"));
         assert!(!is_file);
     }
@@ -193,7 +203,7 @@ mod tests {
             entry("photos/index.txt", ArchiveEntryKind::File, 50),
             entry("photos/cover.jpg", ArchiveEntryKind::File, 1024),
         ];
-        let (root, is_file) = validate_manifest_tree(&entries, 1074, limits()).unwrap();
+        let (root, is_file, _root_mode) = validate_manifest_tree(&entries, 1074, limits()).unwrap();
         assert_eq!(root, OsString::from("photos"));
         assert!(!is_file);
     }
@@ -206,7 +216,7 @@ mod tests {
             entry("root/a/b", ArchiveEntryKind::Directory, 0),
             entry("root/a/b/leaf.txt", ArchiveEntryKind::File, 42),
         ];
-        let (root, is_file) = validate_manifest_tree(&entries, 42, limits()).unwrap();
+        let (root, is_file, _root_mode) = validate_manifest_tree(&entries, 42, limits()).unwrap();
         assert_eq!(root, OsString::from("root"));
         assert!(!is_file);
     }
@@ -222,7 +232,7 @@ mod tests {
             entry("root/a", ArchiveEntryKind::Directory, 0),
             entry("root", ArchiveEntryKind::Directory, 0),
         ];
-        let (root, is_file) = validate_manifest_tree(&entries, 42, limits()).unwrap();
+        let (root, is_file, _root_mode) = validate_manifest_tree(&entries, 42, limits()).unwrap();
         assert_eq!(root, OsString::from("root"));
         assert!(!is_file);
     }

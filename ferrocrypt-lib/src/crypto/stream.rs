@@ -72,6 +72,7 @@ fn stream_io_error(kind: io::ErrorKind, err: StreamError) -> io::Error {
 /// appends the authentication tag without growing the underlying
 /// allocation), and is zeroized between chunks and on drop. There are
 /// no per-chunk plaintext `Vec`s left to the allocator.
+#[must_use = "EncryptWriter must be finalized via finish() — drop without finish produces an unverifiable stream"]
 pub(crate) struct EncryptWriter<W: Write> {
     encryptor: Option<stream::EncryptorBE32<XChaCha20Poly1305>>,
     chunk: Vec<u8>,
@@ -172,6 +173,12 @@ impl<W: Write> Write for EncryptWriter<W> {
         Ok(buf.len())
     }
 
+    /// Forwards `flush` to the inner writer **without** finalising the
+    /// AEAD stream: any deferred plaintext chunk stays buffered, and
+    /// dropping the [`EncryptWriter`] without calling
+    /// [`Self::finish`] leaves the on-disk ciphertext missing its
+    /// final-flag chunk. Callers MUST call [`Self::finish`] before
+    /// drop.
     fn flush(&mut self) -> io::Result<()> {
         match self.output.as_mut() {
             Some(output) => output.flush(),

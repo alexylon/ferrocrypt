@@ -447,7 +447,7 @@ pub fn parse_manifest_bytes(
     }
 
     let mut cursor = Cursor::new(bytes);
-    let entry_count_usize = usize::try_from(header.entry_count).unwrap_or(usize::MAX);
+    let entry_count_usize = require_fits_usize(header.entry_count, "Archive entry count")?;
     let mut entries = Vec::with_capacity(entry_count_usize.min(MANIFEST_PARSE_INITIAL_CAPACITY));
     let mut total_file_bytes: u64 = 0;
     let mut total_entry_ext_bytes: u64 = 0;
@@ -560,13 +560,15 @@ pub fn parse_manifest_bytes(
     }
     enforce_total_plaintext_bytes_cap(total_file_bytes, &limits)?;
 
-    let (root_name, root_is_file) = validate_manifest_tree(&entries, total_file_bytes, limits)?;
+    let (root_name, root_is_file, root_mode) =
+        validate_manifest_tree(&entries, total_file_bytes, limits)?;
 
     Ok(Manifest {
         entries,
         total_file_bytes,
         root_name,
         root_is_file,
+        root_mode,
     })
 }
 
@@ -917,6 +919,7 @@ mod tests {
             total_file_bytes: 13,
             root_name: OsString::from("hello.txt"),
             root_is_file: true,
+            root_mode: 0o644,
         }
     }
 
@@ -930,6 +933,7 @@ mod tests {
             total_file_bytes: 1074,
             root_name: OsString::from("photos"),
             root_is_file: false,
+            root_mode: 0o755,
         }
     }
 
@@ -984,6 +988,7 @@ mod tests {
             total_file_bytes: 0,
             root_name: OsString::from("empty.txt"),
             root_is_file: true,
+            root_mode: 0o644,
         };
         let bytes = serialize_manifest(&manifest, ArchiveLimits::default()).unwrap();
 
@@ -1023,6 +1028,7 @@ mod tests {
             total_file_bytes: u64::MAX,
             root_name: OsString::from("huge.bin"),
             root_is_file: true,
+            root_mode: 0o644,
         };
         // Defaults' max_total_plaintext_bytes is 64 GiB; bump it for
         // this synthetic test only.
@@ -1116,6 +1122,7 @@ mod tests {
             total_file_bytes: 0,
             root_name: OsString::from("hello.txt"),
             root_is_file: true,
+            root_mode: 0o644,
         };
         let bytes = serialize_manifest(&manifest, ArchiveLimits::default()).unwrap();
 

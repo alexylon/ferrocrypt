@@ -74,6 +74,10 @@ pub struct Manifest {
     /// `true` when the manifest's single entry is a regular file at the
     /// root; `false` for directory roots with one or more children.
     pub root_is_file: bool,
+    /// Cached `mode` of the root entry. Captured during
+    /// `validate_manifest_tree` so the directory-mode apply step does
+    /// not re-scan up to 250k entries on every extraction.
+    pub root_mode: u32,
 }
 
 /// Test-only constructor for an [`ArchiveEntry`] without a writer

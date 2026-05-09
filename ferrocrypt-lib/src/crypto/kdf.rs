@@ -18,6 +18,16 @@ use crate::format::{read_u32_be, write_u32_be};
 /// `private.key` cleartext header).
 pub(crate) const ARGON2_SALT_SIZE: usize = 32;
 
+/// Structural cap on passphrase byte length. Argon2id itself accepts
+/// arbitrarily long inputs, but library-direct callers can otherwise
+/// hand a multi-gigabyte buffer to [`KdfParams::hash_passphrase`] and
+/// pay that allocation cost upstream of the KDF resource policy.
+/// 4 KiB is far above any human-typed passphrase yet small enough that
+/// an attacker-shaped input cannot DoS the host. Frontends already cap
+/// their input fields well below this; the cap exists for direct
+/// callers and as defense-in-depth.
+pub(crate) const MAX_PASSPHRASE_LEN_BYTES: usize = 4_096;
+
 /// Local policy limit for Argon2id work accepted during decryption.
 ///
 /// A v1 file or `private.key` stores its Argon2id parameters in the cleartext
@@ -246,6 +256,11 @@ impl KdfParams {
         passphrase: &[u8],
         salt: &[u8],
     ) -> Result<Zeroizing<[u8; ENCRYPTION_KEY_SIZE]>, CryptoError> {
+        if passphrase.len() > MAX_PASSPHRASE_LEN_BYTES {
+            return Err(CryptoError::InvalidInput(format!(
+                "Passphrase exceeds {MAX_PASSPHRASE_LEN_BYTES}-byte structural cap"
+            )));
+        }
         let params = argon2::Params::new(
             self.mem_cost,
             self.time_cost,

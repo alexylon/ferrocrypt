@@ -710,8 +710,14 @@ pub(crate) fn verify_header_mac(
 // ─── Errors ─────────────────────────────────────────────────────────────────
 
 /// Classifies a rejected `.fcr` version as older-than or newer-than the
-/// version this release supports.
+/// version this release supports. Byte `0x00` is reserved across every
+/// FerroCrypt version domain (`FORMAT.md` §11) and has never been a
+/// valid `.fcr` writer output, so it surfaces as a structural defect
+/// rather than as a misleading "older release" hint.
 pub(crate) fn unsupported_file_version_error(version: u8) -> CryptoError {
+    if version == 0 {
+        return CryptoError::InvalidFormat(FormatDefect::MalformedHeader);
+    }
     if version < FCR_FILE_VERSION {
         CryptoError::UnsupportedVersion(UnsupportedVersion::OlderFile { version })
     } else {
@@ -1186,12 +1192,12 @@ mod tests {
     }
 
     #[test]
-    fn prefix_rejects_older_version_with_older_file_diagnostic() {
+    fn prefix_rejects_reserved_zero_version_as_malformed() {
         let mut bytes = Prefix::build_encrypted(HEADER_FIXED_SIZE as u32).unwrap();
         bytes[4] = 0;
         match Prefix::parse(&bytes, Kind::Encrypted) {
-            Err(CryptoError::UnsupportedVersion(UnsupportedVersion::OlderFile { version: 0 })) => {}
-            other => panic!("expected OlderFile(0), got {other:?}"),
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedHeader)) => {}
+            other => panic!("expected MalformedHeader for reserved 0x00, got {other:?}"),
         }
     }
 

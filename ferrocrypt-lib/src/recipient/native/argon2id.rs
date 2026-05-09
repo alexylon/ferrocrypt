@@ -51,21 +51,20 @@ const WRAPPED_FILE_KEY_OFFSET: usize = WRAP_NONCE_OFFSET + WRAP_NONCE_SIZE;
 /// 116-byte recipient body.
 ///
 /// Emits [`ProgressEvent::DerivingPassphraseWrapKey`] immediately before
-/// the Argon2id call. `random_bytes` is infallible — a CSPRNG failure
-/// surfaces as a panic from `OsRng::fill_bytes`, not as an `Err`
-/// return — so the event fires exactly once on every wrap that
-/// reaches the KDF.
+/// the Argon2id call. The CSPRNG read for `argon2_salt` happens first;
+/// on the rare event it fails, the event is not emitted and
+/// [`CryptoError::InternalCryptoFailure`] is returned.
 pub(crate) fn wrap(
     file_key: &FileKey,
     passphrase: &SecretString,
     kdf_params: &KdfParams,
     on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<[u8; BODY_LENGTH], CryptoError> {
-    let argon2_salt = random_bytes::<ARGON2_SALT_SIZE>();
+    let argon2_salt = random_bytes::<ARGON2_SALT_SIZE>()?;
     on_event(&ProgressEvent::DerivingPassphraseWrapKey);
     let wrap_key =
         derive_passphrase_wrap_key(passphrase, &argon2_salt, kdf_params, HKDF_INFO_WRAP)?;
-    let wrap_nonce = random_bytes::<WRAP_NONCE_SIZE>();
+    let wrap_nonce = random_bytes::<WRAP_NONCE_SIZE>()?;
     let wrapped_file_key = seal_file_key(&wrap_key, &wrap_nonce, file_key)?;
 
     let mut body = [0u8; BODY_LENGTH];

@@ -380,7 +380,7 @@ pub(crate) fn read_encrypted_header<R: Read>(
 /// per-file `file_key`.
 ///
 /// The caller is responsible for:
-/// - generating `stream_nonce` (typically `random_bytes::<STREAM_NONCE_SIZE>()`);
+/// - generating `stream_nonce` (typically `random_bytes::<STREAM_NONCE_SIZE>()?`);
 /// - deriving `payload_key` and `header_key` from the freshly generated
 ///   `file_key` via `crypto::keys::derive_subkeys` (or equivalent);
 /// - constructing `recipient_entries` via the per-recipient `wrap`

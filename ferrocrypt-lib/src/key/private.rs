@@ -348,8 +348,8 @@ pub(crate) fn seal_private_key(
         u32::try_from(wrapped_secret_len_usize).map_err(|_| malformed_private_key())?;
     check_wrapped_secret_len(wrapped_secret_len)?;
 
-    let argon2_salt = random_bytes::<ARGON2_SALT_SIZE>();
-    let wrap_nonce = random_bytes::<WRAP_NONCE_SIZE>();
+    let argon2_salt = random_bytes::<ARGON2_SALT_SIZE>()?;
+    let wrap_nonce = random_bytes::<WRAP_NONCE_SIZE>()?;
 
     let header = PrivateKeyHeader {
         key_flags: 0,

@@ -196,8 +196,8 @@ pub(crate) fn encrypt<R: RecipientScheme>(
     // is a pure function of (file_key, recipient input, stream_nonce,
     // input bytes). file_key is held in `Zeroizing` inside the typed
     // newtype, so an early return wipes it.
-    let file_key = FileKey::generate();
-    let stream_nonce = random_bytes::<STREAM_NONCE_SIZE>();
+    let file_key = FileKey::generate()?;
+    let stream_nonce = random_bytes::<STREAM_NONCE_SIZE>()?;
     let DerivedSubkeys {
         payload_key,
         header_key,
@@ -492,7 +492,7 @@ pub(crate) fn generate_key_pair(
     // material is returned in `Zeroizing` so it's wiped from memory
     // when this stack frame unwinds, regardless of whether the
     // subsequent seal/write succeeds.
-    let (secret_material, public_material) = x25519::generate_keypair();
+    let (secret_material, public_material) = x25519::generate_keypair()?;
 
     // Hand off all `private.key` byte-layout, AEAD, and AAD scope to
     // `key/private.rs` — the single source of truth.
@@ -603,7 +603,7 @@ mod tests {
         plaintext: &[u8],
         path: &Path,
     ) -> Result<(), CryptoError> {
-        let stream_nonce = random_bytes::<STREAM_NONCE_SIZE>();
+        let stream_nonce = random_bytes::<STREAM_NONCE_SIZE>()?;
         let DerivedSubkeys {
             payload_key,
             header_key,
@@ -713,7 +713,7 @@ mod tests {
         let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
         let (pub_b, priv_b, pass_b) = keypair_fixture(&keys_dir, "bob", "bob-pass")?;
 
-        let file_key = FileKey::generate();
+        let file_key = FileKey::generate().unwrap();
         let body_a = x25519::wrap(&file_key, &pub_a)?;
         let body_b = x25519::wrap(&file_key, &pub_b)?;
         let entries = [
@@ -747,7 +747,7 @@ mod tests {
         let keys_dir = tmp.path().join("keys");
         let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
 
-        let file_key = FileKey::generate();
+        let file_key = FileKey::generate().unwrap();
         let body_a = x25519::wrap(&file_key, &pub_a)?;
         let valid_slot = RecipientEntry::native(NativeRecipientType::X25519, body_a.to_vec())?;
         // Bypass `RecipientEntry::native`'s body-length validation —
@@ -788,7 +788,7 @@ mod tests {
         let keys_dir = tmp.path().join("keys");
         let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
 
-        let file_key = FileKey::generate();
+        let file_key = FileKey::generate().unwrap();
         let body_a = x25519::wrap(&file_key, &pub_a)?;
         let valid_slot = RecipientEntry::native(NativeRecipientType::X25519, body_a.to_vec())?;
 
@@ -824,7 +824,7 @@ mod tests {
         let keys_dir = tmp.path().join("keys");
         let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
 
-        let file_key = FileKey::generate();
+        let file_key = FileKey::generate().unwrap();
         let body_a = x25519::wrap(&file_key, &pub_a)?;
         let valid_slot = RecipientEntry::native(NativeRecipientType::X25519, body_a.to_vec())?;
 
@@ -853,7 +853,7 @@ mod tests {
         let keys_dir = tmp.path().join("keys");
         let (_pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
 
-        let file_key = FileKey::generate();
+        let file_key = FileKey::generate().unwrap();
         let mut malformed_body = vec![0u8; x25519::BODY_LENGTH];
         malformed_body[x25519::BODY_LENGTH - 1] = 0xAB;
         let entries = [RecipientEntry::native(
@@ -882,7 +882,7 @@ mod tests {
         let keys_dir = tmp.path().join("keys");
         let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
 
-        let file_key = FileKey::generate();
+        let file_key = FileKey::generate().unwrap();
         let body_a = x25519::wrap(&file_key, &pub_a)?;
         let unknown_entry = RecipientEntry {
             type_name: "example.com/unknown".to_string(),
@@ -916,7 +916,7 @@ mod tests {
         let keys_dir = tmp.path().join("keys");
         let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
 
-        let file_key = FileKey::generate();
+        let file_key = FileKey::generate().unwrap();
         let body_a = x25519::wrap(&file_key, &pub_a)?;
         let unknown_critical = RecipientEntry {
             type_name: "example.com/critical".to_string(),
@@ -954,7 +954,7 @@ mod tests {
         let keys_dir = tmp.path().join("keys");
         let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
 
-        let file_key = FileKey::generate();
+        let file_key = FileKey::generate().unwrap();
         let body_x = x25519::wrap(&file_key, &pub_a)?;
         let synthetic_argon2id = RecipientEntry {
             type_name: argon2id::TYPE_NAME.to_string(),
@@ -990,7 +990,7 @@ mod tests {
         let keys_dir = tmp.path().join("keys");
         let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
 
-        let file_key = FileKey::generate();
+        let file_key = FileKey::generate().unwrap();
         let body_a = x25519::wrap(&file_key, &pub_a)?;
         let unknown_at_cap = RecipientEntry {
             type_name: "example.com/at-cap".to_string(),
@@ -1024,8 +1024,8 @@ mod tests {
         let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
         let (pub_b, _priv_b, _pass_b) = keypair_fixture(&keys_dir, "bob", "bob-pass")?;
 
-        let real_file_key = FileKey::generate();
-        let decoy_file_key = FileKey::generate();
+        let real_file_key = FileKey::generate().unwrap();
+        let decoy_file_key = FileKey::generate().unwrap();
 
         let body_a = x25519::wrap(&decoy_file_key, &pub_a)?;
         let body_b = x25519::wrap(&decoy_file_key, &pub_b)?;
@@ -1114,7 +1114,7 @@ mod tests {
             NativeRecipientType::Argon2id,
             vec![0u8; argon2id::BODY_LENGTH],
         )?;
-        let file_key = FileKey::generate();
+        let file_key = FileKey::generate().unwrap();
         let fcr = tmp.path().join("passphrase.fcr");
         build_multi_recipient_fcr(&[synthetic], &file_key, b"x", &fcr)?;
 
@@ -1141,7 +1141,7 @@ mod tests {
         let keys_dir = tmp.path().join("keys");
         let (pub_a, _priv_a, _pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
 
-        let file_key = FileKey::generate();
+        let file_key = FileKey::generate().unwrap();
         let body_a = x25519::wrap(&file_key, &pub_a)?;
         let entries = [RecipientEntry::native(
             NativeRecipientType::X25519,

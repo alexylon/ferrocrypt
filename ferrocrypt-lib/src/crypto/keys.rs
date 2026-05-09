@@ -24,6 +24,9 @@ use crate::crypto::hkdf::hkdf_expand_sha3_256;
 use crate::crypto::kdf::{ARGON2_SALT_SIZE, KdfParams};
 use crate::crypto::mac::HMAC_KEY_SIZE;
 
+const CSPRNG_FAILURE: CryptoError =
+    CryptoError::InternalCryptoFailure("Internal error: CSPRNG read failed");
+
 /// XChaCha20-Poly1305 key size in bytes.
 pub(crate) const ENCRYPTION_KEY_SIZE: usize = 32;
 
@@ -42,20 +45,26 @@ pub(crate) const HKDF_INFO_HEADER: &[u8] = b"ferrocrypt/v1/header";
 
 /// Fill a fresh stack-allocated `[u8; N]` from the OS CSPRNG. Use this
 /// for **non-secret** random material (salts, nonces, ephemeral-public
-/// scratch) where zero-on-drop provides no security benefit.
-pub(crate) fn random_bytes<const N: usize>() -> [u8; N] {
+/// scratch) where zero-on-drop provides no security benefit. Returns
+/// [`CryptoError::InternalCryptoFailure`] on the rare event the OS
+/// CSPRNG read fails.
+pub(crate) fn random_bytes<const N: usize>() -> Result<[u8; N], CryptoError> {
     let mut buf = [0u8; N];
-    OsRng.fill_bytes(&mut buf);
-    buf
+    OsRng.try_fill_bytes(&mut buf).map_err(|_| CSPRNG_FAILURE)?;
+    Ok(buf)
 }
 
 /// Fill a fresh `Zeroizing<[u8; N]>` from the OS CSPRNG. Use this for
 /// **secret** random material (file keys, ephemeral secret keys) where
-/// drop-time clearing is the right default.
-pub(crate) fn random_secret<const N: usize>() -> Zeroizing<[u8; N]> {
+/// drop-time clearing is the right default. Returns
+/// [`CryptoError::InternalCryptoFailure`] on the rare event the OS
+/// CSPRNG read fails.
+pub(crate) fn random_secret<const N: usize>() -> Result<Zeroizing<[u8; N]>, CryptoError> {
     let mut buf = Zeroizing::new([0u8; N]);
-    OsRng.fill_bytes(buf.as_mut());
-    buf
+    OsRng
+        .try_fill_bytes(buf.as_mut())
+        .map_err(|_| CSPRNG_FAILURE)?;
+    Ok(buf)
 }
 
 /// Per-file random key. Every `.fcr` produces one of these regardless
@@ -83,9 +92,11 @@ impl std::fmt::Debug for FileKey {
 }
 
 impl FileKey {
-    /// Generates a fresh `FileKey` from the OS CSPRNG.
-    pub(crate) fn generate() -> Self {
-        Self(random_secret::<FILE_KEY_SIZE>())
+    /// Generates a fresh `FileKey` from the OS CSPRNG. Returns
+    /// [`CryptoError::InternalCryptoFailure`] on the rare event the OS
+    /// CSPRNG read fails.
+    pub(crate) fn generate() -> Result<Self, CryptoError> {
+        Ok(Self(random_secret::<FILE_KEY_SIZE>()?))
     }
 
     /// Wraps existing zeroizing bytes (typically from a successful
@@ -240,14 +251,14 @@ mod tests {
 
     #[test]
     fn file_key_generate_has_correct_size() {
-        let key = FileKey::generate();
+        let key = FileKey::generate().unwrap();
         assert_eq!(key.expose().len(), FILE_KEY_SIZE);
     }
 
     #[test]
     fn file_key_generate_is_random() {
-        let a = FileKey::generate();
-        let b = FileKey::generate();
+        let a = FileKey::generate().unwrap();
+        let b = FileKey::generate().unwrap();
         assert_ne!(
             a.expose(),
             b.expose(),
@@ -297,15 +308,15 @@ mod tests {
 
     #[test]
     fn random_bytes_produces_different_outputs() {
-        let a = random_bytes::<32>();
-        let b = random_bytes::<32>();
+        let a = random_bytes::<32>().unwrap();
+        let b = random_bytes::<32>().unwrap();
         assert_ne!(a, b);
     }
 
     #[test]
     fn random_secret_has_correct_size_and_is_random() {
-        let a = random_secret::<24>();
-        let b = random_secret::<24>();
+        let a = random_secret::<24>().unwrap();
+        let b = random_secret::<24>().unwrap();
         assert_eq!(a.len(), 24);
         assert_ne!(*a, *b);
     }

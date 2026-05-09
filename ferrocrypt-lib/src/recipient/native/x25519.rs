@@ -36,14 +36,13 @@
 //! [`X25519Identity`] adapter propagates the error rather than
 //! collapsing it to the slot-skip channel reserved for AEAD failures.
 
-use chacha20poly1305::aead::OsRng;
-use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
+use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
 use crate::CryptoError;
 use crate::crypto::aead::{WRAP_NONCE_SIZE, WRAPPED_FILE_KEY_SIZE, open_file_key, seal_file_key};
 use crate::crypto::hkdf::hkdf_expand_sha3_256;
-use crate::crypto::keys::{FileKey, random_bytes};
+use crate::crypto::keys::{FileKey, random_bytes, random_secret};
 use crate::crypto::mac::ct_eq_32;
 use crate::error::FormatDefect;
 
@@ -97,7 +96,8 @@ pub(crate) fn wrap(
     file_key: &FileKey,
     recipient_pubkey: &[u8; PUBKEY_SIZE],
 ) -> Result<[u8; BODY_LENGTH], CryptoError> {
-    let ephemeral_secret = EphemeralSecret::random_from_rng(OsRng);
+    let ephemeral_raw = random_secret::<PRIVATE_KEY_SIZE>()?;
+    let ephemeral_secret = StaticSecret::from(*ephemeral_raw);
     let ephemeral_pubkey = PublicKey::from(&ephemeral_secret);
     let recipient_public = PublicKey::from(*recipient_pubkey);
     let shared = ephemeral_secret.diffie_hellman(&recipient_public);
@@ -111,7 +111,7 @@ pub(crate) fn wrap(
         recipient_public.as_bytes(),
         shared.as_bytes(),
     )?;
-    let wrap_nonce = random_bytes::<WRAP_NONCE_SIZE>();
+    let wrap_nonce = random_bytes::<WRAP_NONCE_SIZE>()?;
     let wrapped_file_key = seal_file_key(&wrap_key, &wrap_nonce, file_key)?;
 
     let mut body = [0u8; BODY_LENGTH];
@@ -269,17 +269,21 @@ impl crate::protocol::IdentityScheme for X25519Identity {
 /// Generates a fresh X25519 key pair via the OS CSPRNG. Returns
 /// `(secret_material, public_material)` where the secret bytes live in
 /// `Zeroizing` so they're wiped from memory when the caller drops them.
+/// Returns [`CryptoError::InternalCryptoFailure`] on the rare event the
+/// OS CSPRNG read fails.
 ///
 /// Used by [`crate::generate_key_pair`] for the X25519-specific portion;
 /// orchestration (file naming, `private.key` sealing, `public.key`
 /// encoding, atomic finalize) lives in the higher-level entry point.
-pub(crate) fn generate_keypair() -> (Zeroizing<[u8; PRIVATE_KEY_SIZE]>, [u8; PUBKEY_SIZE]) {
-    let secret = StaticSecret::random_from_rng(OsRng);
+pub(crate) fn generate_keypair()
+-> Result<(Zeroizing<[u8; PRIVATE_KEY_SIZE]>, [u8; PUBKEY_SIZE]), CryptoError> {
+    let raw = random_secret::<PRIVATE_KEY_SIZE>()?;
+    let secret = StaticSecret::from(*raw);
     let public = PublicKey::from(&secret);
     let secret_material = Zeroizing::new(secret.to_bytes());
     drop(secret);
     let public_material = *public.as_bytes();
-    (secret_material, public_material)
+    Ok((secret_material, public_material))
 }
 
 // ─── private.key reader (X25519-specific glue) ─────────────────────────────
@@ -458,6 +462,7 @@ mod tests {
     use crate::crypto::keys::FILE_KEY_SIZE;
     use crate::error::FormatDefect;
     use crate::key::private::seal_private_key;
+    use chacha20poly1305::aead::OsRng;
     use secrecy::SecretString;
     use std::fs;
 

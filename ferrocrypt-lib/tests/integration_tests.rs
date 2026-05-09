@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
-    CryptoError, ENCRYPTED_EXTENSION, PublicKey, decode_recipient, detect_encryption_mode,
+    CryptoError, ENCRYPTED_EXTENSION, PublicKey, decode_recipient, probe_recipient_mode,
     validate_private_key_file,
 };
 
@@ -2872,57 +2872,60 @@ fn test_private_key_ext_len_tamper_rejected() -> Result<(), CryptoError> {
     Ok(())
 }
 
-// ─── detect_encryption_mode: fail-closed on malformed headers ────────────
+// ─── probe_recipient_mode: fail-closed on malformed headers ──────────────
 
 #[test]
-fn test_detect_plaintext_file_returns_none() -> Result<(), CryptoError> {
-    let dir = setup_test_dir("detect_plaintext");
+fn test_probe_plaintext_file_returns_none() -> Result<(), CryptoError> {
+    let dir = setup_test_dir("probe_plaintext");
     let path = dir.join("hello.txt");
     fs::write(&path, "just plain text")?;
-    assert!(detect_encryption_mode(&path)?.is_none());
+    assert!(probe_recipient_mode(&path)?.is_none());
     Ok(())
 }
 
 #[test]
-fn test_detect_empty_file_returns_none() -> Result<(), CryptoError> {
-    let dir = setup_test_dir("detect_empty");
+fn test_probe_empty_file_returns_none() -> Result<(), CryptoError> {
+    let dir = setup_test_dir("probe_empty");
     let path = dir.join("empty.bin");
     fs::write(&path, b"")?;
-    assert!(detect_encryption_mode(&path)?.is_none());
+    assert!(probe_recipient_mode(&path)?.is_none());
     Ok(())
 }
 
 /// A directory is unambiguously "not an encrypted file." Unix lets us open a
 /// directory fd and only fails at `read()` with `IsADirectory`; Windows'
 /// `CreateFile` rejects directories outright with `ERROR_ACCESS_DENIED`.
-/// Regardless of platform, `detect_encryption_mode` must classify a directory
+/// Regardless of platform, `probe_recipient_mode` must classify a directory
 /// as `Ok(None)` so that auto-routing wrappers take the encrypt branch rather
 /// than surfacing a permission error. Covers both populated and empty roots.
 #[test]
-fn test_detect_directory_returns_none() -> Result<(), CryptoError> {
-    let dir = setup_test_dir("detect_directory");
+fn test_probe_directory_returns_none() -> Result<(), CryptoError> {
+    let dir = setup_test_dir("probe_directory");
 
     let populated = dir.join("populated");
     fs::create_dir_all(&populated)?;
     create_test_file(&populated.join("inside.txt"), "content");
-    assert!(detect_encryption_mode(&populated)?.is_none());
+    assert!(probe_recipient_mode(&populated)?.is_none());
 
     let empty = dir.join("empty");
     fs::create_dir_all(&empty)?;
-    assert!(detect_encryption_mode(&empty)?.is_none());
+    assert!(probe_recipient_mode(&empty)?.is_none());
 
     Ok(())
 }
 
 #[test]
-fn test_detect_valid_passphrase_file() -> Result<(), CryptoError> {
-    let dir = setup_test_dir("detect_passphrase");
+fn test_probe_valid_passphrase_file() -> Result<(), CryptoError> {
+    let dir = setup_test_dir("probe_passphrase");
     let input = dir.join("data.txt");
     fs::write(&input, "payload")?;
     let pass = SecretString::from("pw".to_string());
     let encrypted = passphrase_auto(&input, &dir, &pass, None, None, |_| {})?;
-    let mode = detect_encryption_mode(&encrypted)?;
-    assert_eq!(mode, Some(ferrocrypt::EncryptionMode::Passphrase));
+    let mode = probe_recipient_mode(&encrypted)?;
+    assert_eq!(
+        mode,
+        Some(ferrocrypt::UnauthenticatedRecipientMode::Passphrase)
+    );
     Ok(())
 }
 
@@ -2932,29 +2935,29 @@ fn test_detect_valid_passphrase_file() -> Result<(), CryptoError> {
 /// within the read-in region before voting, so a file shorter than 20
 /// bytes returns `Ok(None)` regardless of which bytes happen to match.
 #[test]
-fn test_detect_short_file_with_two_magic_bytes_returns_none() {
-    let dir = setup_test_dir("detect_two_magic_coincidence");
+fn test_probe_short_file_with_two_magic_bytes_returns_none() {
+    let dir = setup_test_dir("probe_two_magic_coincidence");
     let path = dir.join("coincidence.bin");
     let mut data = vec![0u8; 15];
     data[3] = 0xFC;
     data[11] = 0xFC;
     fs::write(&path, &data).unwrap();
     assert!(
-        detect_encryption_mode(&path).unwrap().is_none(),
+        probe_recipient_mode(&path).unwrap().is_none(),
         "a sub-20-byte file cannot be classified as a truncated `.fcr`"
     );
 }
 
 #[test]
-fn test_detect_short_file_with_single_magic_byte_returns_none() {
-    let dir = setup_test_dir("detect_single_magic");
+fn test_probe_short_file_with_single_magic_byte_returns_none() {
+    let dir = setup_test_dir("probe_single_magic");
     let path = dir.join("coincidence.bin");
     // A short file with 0xFC at position 3 by coincidence — only one copy
     // position matches, so majority vote says "not ferrocrypt."
     let mut data = vec![0u8; 10];
     data[3] = 0xFC;
     fs::write(&path, &data).unwrap();
-    let result = detect_encryption_mode(&path);
+    let result = probe_recipient_mode(&path);
     assert!(
         result.unwrap().is_none(),
         "single magic byte should not trigger false positive"

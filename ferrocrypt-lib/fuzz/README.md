@@ -33,7 +33,7 @@ the integration targets.
 | `fuzz_fca_header` | `parse_fca_header` — 23-byte FCA fixed header parser; asserts returned values are inside `ArchiveLimits` on success |
 | `fuzz_fca_manifest` | Full FCA manifest pipeline: header → manifest bytes → `parse_manifest_bytes` → tree-shape validation; asserts spec §20 manifest invariants on success |
 | `fuzz_recipient_decode` | Bech32 `fcr1…` recipient string parser and internal SHA3-256 checksum |
-| `fuzz_detect_mode` | `detect_encryption_mode` top-level parser entry, end-to-end via a real temp file |
+| `fuzz_probe_mode` | `probe_recipient_mode` top-level parser entry, end-to-end via a real temp file |
 
 ### Integration (secondary)
 

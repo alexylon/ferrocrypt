@@ -5,9 +5,9 @@ slint::include_modules!();
 
 use ferrocrypt::secrecy::{ExposeSecret, SecretString};
 use ferrocrypt::{
-    CryptoError, Decryptor, EncryptionMode, Encryptor, PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME,
-    PrivateKey, ProgressEvent, PublicKey, default_encrypted_filename, detect_encryption_mode,
-    generate_key_pair, validate_private_key_file,
+    CryptoError, Decryptor, Encryptor, PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME, PrivateKey,
+    ProgressEvent, PublicKey, UnauthenticatedRecipientMode, default_encrypted_filename,
+    generate_key_pair, probe_recipient_mode, validate_private_key_file,
 };
 use std::path::{Path, PathBuf};
 
@@ -606,9 +606,9 @@ fn validate_selected_key(app: &AppWindow, key_path: &str) {
 }
 
 fn detect_mode_from_path(path: &str) -> Result<Option<i32>, ferrocrypt::CryptoError> {
-    match detect_encryption_mode(Path::new(path))? {
-        Some(EncryptionMode::Passphrase) => Ok(Some(MODE_PASSPHRASE_DECRYPT)),
-        Some(EncryptionMode::Recipient) => Ok(Some(MODE_RECIPIENT_DECRYPT)),
+    match probe_recipient_mode(Path::new(path))? {
+        Some(UnauthenticatedRecipientMode::Passphrase) => Ok(Some(MODE_PASSPHRASE_DECRYPT)),
+        Some(UnauthenticatedRecipientMode::PublicKey) => Ok(Some(MODE_RECIPIENT_DECRYPT)),
         Some(_) => Ok(None),
         None => Ok(None),
     }

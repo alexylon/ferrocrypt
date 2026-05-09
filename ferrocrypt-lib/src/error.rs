@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::EncryptionMode;
+use crate::UnauthenticatedRecipientMode;
 use crate::recipient::policy::MixingPolicy;
 
 /// Maximum number of `chars` (counting an inserted ellipsis as one) a
@@ -313,9 +313,9 @@ pub enum CryptoError {
     #[error("Decryptor expects {expected} file, got {found}")]
     DecryptorModeMismatch {
         /// Decryptor mode selected by the caller.
-        expected: EncryptionMode,
+        expected: UnauthenticatedRecipientMode,
         /// Recipient mode classified from the `.fcr` header.
-        found: EncryptionMode,
+        found: UnauthenticatedRecipientMode,
     },
     /// The caller provided no encryption recipients.
     ///
@@ -788,19 +788,19 @@ mod tests {
         );
         assert_eq!(
             CryptoError::DecryptorModeMismatch {
-                expected: EncryptionMode::Passphrase,
-                found: EncryptionMode::Recipient,
+                expected: UnauthenticatedRecipientMode::Passphrase,
+                found: UnauthenticatedRecipientMode::PublicKey,
             }
             .to_string(),
-            "Decryptor expects passphrase file, got recipient"
+            "Decryptor expects passphrase file, got public-key"
         );
         assert_eq!(
             CryptoError::DecryptorModeMismatch {
-                expected: EncryptionMode::Recipient,
-                found: EncryptionMode::Passphrase,
+                expected: UnauthenticatedRecipientMode::PublicKey,
+                found: UnauthenticatedRecipientMode::Passphrase,
             }
             .to_string(),
-            "Decryptor expects recipient file, got passphrase"
+            "Decryptor expects public-key file, got passphrase"
         );
         assert_eq!(
             CryptoError::EmptyRecipientList.to_string(),
@@ -1070,18 +1070,18 @@ mod tests {
             &CryptoError::NoSupportedRecipient.to_string(),
         );
         check(
-            "DecryptorModeMismatch(passphrase, recipient)",
+            "DecryptorModeMismatch(passphrase, public-key)",
             &CryptoError::DecryptorModeMismatch {
-                expected: EncryptionMode::Passphrase,
-                found: EncryptionMode::Recipient,
+                expected: UnauthenticatedRecipientMode::Passphrase,
+                found: UnauthenticatedRecipientMode::PublicKey,
             }
             .to_string(),
         );
         check(
-            "DecryptorModeMismatch(recipient, passphrase)",
+            "DecryptorModeMismatch(public-key, passphrase)",
             &CryptoError::DecryptorModeMismatch {
-                expected: EncryptionMode::Recipient,
-                found: EncryptionMode::Passphrase,
+                expected: UnauthenticatedRecipientMode::PublicKey,
+                found: UnauthenticatedRecipientMode::Passphrase,
             }
             .to_string(),
         );

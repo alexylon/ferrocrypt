@@ -234,7 +234,8 @@ pub(crate) struct X25519Identity {
 
 impl crate::protocol::IdentityScheme for X25519Identity {
     const TYPE_NAME: &'static str = TYPE_NAME;
-    const EXPECTED_MODE: crate::EncryptionMode = crate::EncryptionMode::Recipient;
+    const EXPECTED_MODE: crate::UnauthenticatedRecipientMode =
+        crate::UnauthenticatedRecipientMode::PublicKey;
 
     fn unwrap_file_key(
         &self,

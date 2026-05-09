@@ -125,7 +125,7 @@ mod tests {
 
         // Magic but type byte is 'S' (a symmetric .fcr) → Unknown,
         // not Private. The `.fcr` mix-up heuristic lives elsewhere
-        // (`detect_encryption_mode`); a key-file path should not
+        // (`probe_recipient_mode`); a key-file path should not
         // claim it.
         let fcr_symmetric = b"FCR\0\x01Sxx\x00\x00";
         assert_eq!(KeyFileKind::classify(fcr_symmetric), KeyFileKind::Unknown);

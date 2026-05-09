@@ -47,8 +47,8 @@ use crate::protocol;
 use crate::recipient;
 use crate::recipient::policy::NativeRecipientType;
 use crate::{
-    CryptoError, DecryptOutcome, ENCRYPTED_EXTENSION, EncryptOutcome, EncryptionMode,
-    KeyGenOutcome, ProgressEvent,
+    AuthenticatedRecipientMode, CryptoError, DecryptOutcome, ENCRYPTED_EXTENSION, EncryptOutcome,
+    KeyGenOutcome, ProgressEvent, UnauthenticatedRecipientMode,
 };
 
 // ─── Encryptor ─────────────────────────────────────────────────────────────
@@ -474,17 +474,17 @@ impl Decryptor {
             )));
         }
         let mode =
-            detect_encryption_mode_with_limits(&input, header_read_limits.unwrap_or_default())?
+            probe_recipient_mode_with_limits(&input, header_read_limits.unwrap_or_default())?
                 .ok_or(CryptoError::InvalidFormat(FormatDefect::BadMagic))?;
         match mode {
-            EncryptionMode::Passphrase => Ok(Self::Passphrase(PassphraseDecryptor {
+            UnauthenticatedRecipientMode::Passphrase => Ok(Self::Passphrase(PassphraseDecryptor {
                 input,
                 kdf_limit: None,
                 archive_limits: None,
                 header_read_limits,
                 incomplete_output_policy: None,
             })),
-            EncryptionMode::Recipient => Ok(Self::Recipient(RecipientDecryptor {
+            UnauthenticatedRecipientMode::PublicKey => Ok(Self::Recipient(RecipientDecryptor {
                 input,
                 kdf_limit: None,
                 archive_limits: None,
@@ -497,7 +497,7 @@ impl Decryptor {
 
 /// Decryptor for password-sealed `.fcr` files. Returned from
 /// [`Decryptor::open`] when the file's recipient list classifies as
-/// [`EncryptionMode::Passphrase`].
+/// [`UnauthenticatedRecipientMode::Passphrase`].
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct PassphraseDecryptor {
@@ -599,13 +599,16 @@ impl PassphraseDecryptor {
             incomplete_output_policy,
             &on_event,
         )?;
-        Ok(DecryptOutcome { output_path })
+        Ok(DecryptOutcome {
+            output_path,
+            recipient_mode: AuthenticatedRecipientMode::passphrase(),
+        })
     }
 }
 
 /// Decryptor for public-key-sealed `.fcr` files. Returned from
 /// [`Decryptor::open`] when the file's recipient list classifies as
-/// [`EncryptionMode::Recipient`].
+/// [`UnauthenticatedRecipientMode::PublicKey`].
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct RecipientDecryptor {
@@ -711,7 +714,10 @@ impl RecipientDecryptor {
             incomplete_output_policy,
             &on_event,
         )?;
-        Ok(DecryptOutcome { output_path })
+        Ok(DecryptOutcome {
+            output_path,
+            recipient_mode: AuthenticatedRecipientMode::public_key(),
+        })
     }
 }
 
@@ -857,30 +863,41 @@ pub fn generate_key_pair(
     KeyPairGenerator::with_passphrase(passphrase).write(output_dir, on_event)
 }
 
-// ─── Mode detection ─────────────────────────────────────────────────────────
+// ─── Recipient-mode probe ───────────────────────────────────────────────────
 
-/// Reads the structural header of an `.fcr` file and classifies its
-/// encryption mode from the recipient list.
+/// Cheap structural probe of an `.fcr` file's recipient list. **Not a
+/// security claim.**
 ///
-/// Returns `Ok(None)` if the path is a directory, the file is empty,
-/// or the first 4 bytes are not the FerroCrypt magic. These cases
-/// mean "this isn't a FerroCrypt file at all" — callers route to
-/// plaintext encrypt.
+/// Performs a single bounded header parse on one file handle (no path reopen
+/// between magic check and header read). No KDF, no private-key operation,
+/// no credential prompt, no header-MAC verification, no payload decryption.
+/// Capped allocation.
 ///
-/// Returns `Ok(Some(EncryptionMode))` when the prefix matches and the
-/// header parses and classifies cleanly. The mode is derived from the
-/// recipient list: exactly one native `argon2id` recipient maps to
-/// [`EncryptionMode::Passphrase`], and one or more supported `x25519`
-/// recipients with no `argon2id` recipient map to
-/// [`EncryptionMode::Recipient`].
+/// A positive result is **not** evidence that the file is authentic,
+/// decryptable, untampered, or well-formed beyond the structural shape
+/// required to classify it. A canonical header that would later fail
+/// recipient unwrap or MAC verify still returns `Ok(Some(_))` here — those
+/// checks require running the full decrypt. Use only for UI / routing hints;
+/// for an authenticated mode value see [`AuthenticatedRecipientMode`] on
+/// [`DecryptOutcome`].
+///
+/// Returns `Ok(None)` if the path is a directory, the file is empty, or the
+/// first 4 bytes are not the FerroCrypt magic. These cases mean "this isn't
+/// a FerroCrypt file at all" — callers route to plaintext encrypt.
+///
+/// Returns `Ok(Some(UnauthenticatedRecipientMode))` when the prefix matches
+/// and the header parses and classifies cleanly. The mode is derived from
+/// the recipient list: exactly one native `argon2id` recipient maps to
+/// [`UnauthenticatedRecipientMode::Passphrase`], and one or more supported
+/// `x25519` recipients with no `argon2id` recipient map to
+/// [`UnauthenticatedRecipientMode::PublicKey`].
 ///
 /// Returns [`CryptoError::InvalidFormat`] when the magic matches but the
-/// prefix or header is malformed (bad version / kind / flags,
-/// oversized `header_len`, malformed recipient entries, etc.). The
-/// detection pre-check therefore enforces the same structural
-/// invariants the decrypt path would, so bit-rotten or
-/// attacker-tampered files surface their specific diagnostic at
-/// detection time.
+/// prefix or header is malformed (bad version / kind / flags, oversized
+/// `header_len`, malformed recipient entries, etc.). The probe therefore
+/// enforces the same structural invariants the decrypt path would, so
+/// bit-rotten or attacker-tampered files surface their specific diagnostic
+/// at probe time.
 ///
 /// Returns typed recipient-classification errors when the recipient list is
 /// structurally valid but cannot be classified: unknown critical recipients,
@@ -893,37 +910,30 @@ pub fn generate_key_pair(
 /// header, recipient entries, or recipient mixing policy are malformed or
 /// unsupported. Returns cap-exceeded variants when the declared header shape
 /// exceeds [`HeaderReadLimits::default`].
-///
-/// **Detection is structural, not cryptographic.** No recipient
-/// unwrap runs (no Argon2id, no X25519 ECDH, no private-key
-/// operations), no header MAC is verified, and no payload bytes are
-/// decrypted. A canonical header that would later fail recipient
-/// unwrap or MAC verify still returns `Ok(Some(_))` here — those
-/// checks require running the full decrypt.
-pub fn detect_encryption_mode(
+pub fn probe_recipient_mode(
     file_path: impl AsRef<Path>,
-) -> Result<Option<EncryptionMode>, CryptoError> {
-    detect_encryption_mode_with_limits(file_path, HeaderReadLimits::default())
+) -> Result<Option<UnauthenticatedRecipientMode>, CryptoError> {
+    probe_recipient_mode_with_limits(file_path, HeaderReadLimits::default())
 }
 
-/// Same as [`detect_encryption_mode`] but uses the supplied
+/// Same as [`probe_recipient_mode`] but uses the supplied
 /// [`HeaderReadLimits`] for the structural header read instead of the
 /// conservative defaults.
 ///
-/// Use this when classifying files whose recipient strings, recipient
-/// counts, or header lengths legitimately exceed the default local
-/// caps (forward-compatibility with future fat-recipient native types).
-/// All other behavior — directory short-circuit, magic-byte fast path,
-/// typed-error surface — is identical.
+/// Use this when probing files whose recipient strings, recipient counts,
+/// or header lengths legitimately exceed the default local caps
+/// (forward-compatibility with future fat-recipient native types). All
+/// other behavior — directory short-circuit, magic-byte fast path,
+/// typed-error surface, "not a security claim" semantics — is identical.
 ///
 /// # Errors
 ///
-/// Returns the same errors as [`detect_encryption_mode`], but applies the
+/// Returns the same errors as [`probe_recipient_mode`], but applies the
 /// supplied [`HeaderReadLimits`] instead of the default caps.
-pub fn detect_encryption_mode_with_limits(
+pub fn probe_recipient_mode_with_limits(
     file_path: impl AsRef<Path>,
     limits: HeaderReadLimits,
-) -> Result<Option<EncryptionMode>, CryptoError> {
+) -> Result<Option<UnauthenticatedRecipientMode>, CryptoError> {
     use std::io::{Read, Seek, SeekFrom};
     let path = file_path.as_ref();
 
@@ -970,9 +980,9 @@ pub fn detect_encryption_mode_with_limits(
     file.seek(SeekFrom::Start(0))?;
     let parsed = container::read_encrypted_header(&mut file, limits)?;
 
-    // Structural classification only. `classify_encryption_mode`
+    // Structural classification only. `classify_recipient_mode`
     // does not verify the header MAC or run any recipient unwrap.
-    let mode = recipient::classify_encryption_mode(&parsed.recipient_entries)?;
+    let mode = recipient::classify_recipient_mode(&parsed.recipient_entries)?;
     Ok(Some(mode))
 }
 

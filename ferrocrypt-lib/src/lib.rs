@@ -135,8 +135,8 @@ use std::path::PathBuf;
 
 pub use crate::api::{
     Decryptor, Encryptor, KeyPairGenerator, PassphraseDecryptor, RecipientDecryptor,
-    default_encrypted_filename, detect_encryption_mode, detect_encryption_mode_with_limits,
-    generate_key_pair, validate_private_key_file, validate_public_key_file,
+    default_encrypted_filename, generate_key_pair, probe_recipient_mode,
+    probe_recipient_mode_with_limits, validate_private_key_file, validate_public_key_file,
 };
 pub use crate::archive::{ArchiveLimits, IncompleteOutputPolicy};
 pub use crate::container::HeaderReadLimits;
@@ -150,29 +150,113 @@ pub use crate::recipient::policy::MixingPolicy;
 
 pub use secrecy;
 
-/// Public classification of the native recipients in an `.fcr` file.
+/// Result of a cheap structural probe of an `.fcr` file's recipient list.
 ///
-/// This is derived from the recipient list by structural inspection only. No
-/// passphrase derivation, private-key operation, header MAC verification, or
-/// payload decryption is performed during classification.
+/// **Not a security claim.** [`probe_recipient_mode`] performs no KDF, no
+/// private-key operation, no credential prompt, no header-MAC verification,
+/// and no payload decryption. A positive result is not evidence that the file
+/// is authentic, decryptable, untampered, or well-formed beyond the structural
+/// shape required to classify it. Use only for UI / routing hints.
+///
+/// For an authenticated mode value — produced only after a recipient unwraps
+/// and the header MAC verifies — see [`AuthenticatedRecipientMode`] on
+/// [`DecryptOutcome`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum EncryptionMode {
+pub enum UnauthenticatedRecipientMode {
     /// File contains exactly one native `argon2id` recipient and is decrypted
     /// with a passphrase.
     Passphrase,
     /// File contains one or more native `x25519` public-key recipients and is
     /// decrypted with a matching [`PrivateKey`].
-    Recipient,
+    PublicKey,
 }
 
-impl std::fmt::Display for EncryptionMode {
+impl std::fmt::Display for UnauthenticatedRecipientMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let label = match self {
             Self::Passphrase => "passphrase",
-            Self::Recipient => "recipient",
+            Self::PublicKey => "public-key",
         };
         f.write_str(label)
+    }
+}
+
+/// Recipient mode established by a successful authenticated decrypt.
+///
+/// Constructed only inside the decrypt path after a recipient unwraps **and**
+/// the header MAC verifies. Cannot be forged from an
+/// [`UnauthenticatedRecipientMode`]: the wrapping struct has a private field
+/// and a `pub(crate)` constructor, so external callers can match on the
+/// exposed [`AuthenticatedRecipientModeKind`] but cannot manufacture a value
+/// that claims to be authenticated.
+///
+/// Surfaced on [`DecryptOutcome::recipient_mode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthenticatedRecipientMode {
+    kind: AuthenticatedRecipientModeKind,
+}
+
+/// Public, forward-compatible discriminant for
+/// [`AuthenticatedRecipientMode`]. The variant carries no authentication
+/// authority on its own — only an [`AuthenticatedRecipientMode`] value does,
+/// and that wrapper is unforgeable outside the crate.
+///
+/// `#[non_exhaustive]` keeps the door open for future native recipient kinds
+/// (post-quantum, hardware-backed) without breaking downstream `match`
+/// arms; callers must include a `_` wildcard arm. This is match
+/// ergonomics, not exhaustive matching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AuthenticatedRecipientModeKind {
+    /// File was sealed with a passphrase recipient (`argon2id`).
+    Passphrase,
+    /// File was sealed to one or more public-key recipients (`x25519`).
+    PublicKey,
+}
+
+impl AuthenticatedRecipientMode {
+    pub(crate) const fn passphrase() -> Self {
+        Self {
+            kind: AuthenticatedRecipientModeKind::Passphrase,
+        }
+    }
+
+    pub(crate) const fn public_key() -> Self {
+        Self {
+            kind: AuthenticatedRecipientModeKind::PublicKey,
+        }
+    }
+
+    /// Returns the public discriminant for `match` ergonomics.
+    pub const fn kind(&self) -> AuthenticatedRecipientModeKind {
+        self.kind
+    }
+
+    /// `true` if the file authenticated as a passphrase recipient.
+    pub const fn is_passphrase(&self) -> bool {
+        matches!(self.kind, AuthenticatedRecipientModeKind::Passphrase)
+    }
+
+    /// `true` if the file authenticated as a public-key recipient.
+    pub const fn is_public_key(&self) -> bool {
+        matches!(self.kind, AuthenticatedRecipientModeKind::PublicKey)
+    }
+}
+
+impl std::fmt::Display for AuthenticatedRecipientModeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = match self {
+            Self::Passphrase => "passphrase",
+            Self::PublicKey => "public-key",
+        };
+        f.write_str(label)
+    }
+}
+
+impl std::fmt::Display for AuthenticatedRecipientMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.kind.fmt(f)
     }
 }
 
@@ -258,6 +342,12 @@ pub struct EncryptOutcome {
 pub struct DecryptOutcome {
     /// Path to the extracted file or directory.
     pub output_path: PathBuf,
+    /// Recipient mode the file was sealed under, established by a successful
+    /// authenticated decrypt (recipient unwrap + header MAC verify). Forge-proof
+    /// — only the decrypt path can construct it. Distinct from the cheap
+    /// pre-auth [`UnauthenticatedRecipientMode`] returned by
+    /// [`probe_recipient_mode`].
+    pub recipient_mode: AuthenticatedRecipientMode,
 }
 
 /// Successful outcome of [`generate_key_pair`] or
@@ -317,12 +407,12 @@ mod tests {
     use super::*;
 
     /// Routes a `.fcr` file with a single `argon2id` recipient as
-    /// `EncryptionMode::Passphrase`, mirroring v1's "exactly one
+    /// `UnauthenticatedRecipientMode::Passphrase`, mirroring v1's "exactly one
     /// argon2id => Passphrase" classification rule. Builds the file
     /// via `container::build_encrypted_header` so the test exercises
     /// the same byte path the real encrypt would write.
     #[test]
-    fn detect_encryption_mode_routes_argon2id_recipient_as_passphrase() {
+    fn probe_recipient_mode_routes_argon2id_recipient_as_passphrase() {
         let header_key =
             crypto::keys::HeaderKey::from_bytes_for_tests([0x42u8; crypto::mac::HMAC_KEY_SIZE]);
         let payload_key = crypto::keys::PayloadKey::from_bytes_for_tests(
@@ -351,15 +441,15 @@ mod tests {
         std::fs::write(tmp.path(), &bytes).unwrap();
 
         assert_eq!(
-            detect_encryption_mode(tmp.path()).unwrap(),
-            Some(EncryptionMode::Passphrase)
+            probe_recipient_mode(tmp.path()).unwrap(),
+            Some(UnauthenticatedRecipientMode::Passphrase)
         );
     }
 
     /// Routes a `.fcr` file with one `x25519` recipient as
-    /// `EncryptionMode::Recipient`.
+    /// `UnauthenticatedRecipientMode::PublicKey`.
     #[test]
-    fn detect_encryption_mode_routes_x25519_recipient_as_recipient() {
+    fn probe_recipient_mode_routes_x25519_recipient_as_public_key() {
         let header_key =
             crypto::keys::HeaderKey::from_bytes_for_tests([0x42u8; crypto::mac::HMAC_KEY_SIZE]);
         let payload_key = crypto::keys::PayloadKey::from_bytes_for_tests(
@@ -388,8 +478,8 @@ mod tests {
         std::fs::write(tmp.path(), &bytes).unwrap();
 
         assert_eq!(
-            detect_encryption_mode(tmp.path()).unwrap(),
-            Some(EncryptionMode::Recipient)
+            probe_recipient_mode(tmp.path()).unwrap(),
+            Some(UnauthenticatedRecipientMode::PublicKey)
         );
     }
 
@@ -398,20 +488,20 @@ mod tests {
     /// plaintext. The strict-detection refactor must not regress
     /// this.
     #[test]
-    fn detect_encryption_mode_returns_none_for_non_fcr_file() {
+    fn probe_recipient_mode_returns_none_for_non_fcr_file() {
         let plaintext = b"this is just a regular text file with no magic at all";
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), plaintext).unwrap();
-        assert_eq!(detect_encryption_mode(tmp.path()).unwrap(), None);
+        assert_eq!(probe_recipient_mode(tmp.path()).unwrap(), None);
     }
 
     /// An empty file must route to `Ok(None)` (0 bytes < 4 magic
     /// bytes; the magic test fails and detection returns None).
     #[test]
-    fn detect_encryption_mode_returns_none_for_empty_file() {
+    fn probe_recipient_mode_returns_none_for_empty_file() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), b"").unwrap();
-        assert_eq!(detect_encryption_mode(tmp.path()).unwrap(), None);
+        assert_eq!(probe_recipient_mode(tmp.path()).unwrap(), None);
     }
 
     /// Lock in the exact user-facing Display text for every `ProgressEvent`
@@ -472,18 +562,72 @@ mod tests {
         }
     }
 
-    /// Pin `EncryptionMode`'s rendered strings at the type's home so a
-    /// future variant rename or label tweak surfaces here, not only via
-    /// the indirect `DecryptorModeMismatch` Display test in `error.rs`.
-    /// `#[non_exhaustive]` is irrelevant inside the defining crate —
-    /// adding a new variant produces a compile error here until the
-    /// test handles it.
+    /// Pin `UnauthenticatedRecipientMode`'s rendered strings at the type's
+    /// home so a future variant rename or label tweak surfaces here, not only
+    /// via the indirect `DecryptorModeMismatch` Display test in `error.rs`.
+    /// `#[non_exhaustive]` is irrelevant inside the defining crate — adding a
+    /// new variant produces a compile error here until the test handles it.
     #[test]
-    fn encryption_mode_display_pinned_strings() {
-        assert_eq!(EncryptionMode::Passphrase.to_string(), "passphrase");
-        assert_eq!(EncryptionMode::Recipient.to_string(), "recipient");
-        match EncryptionMode::Passphrase {
-            EncryptionMode::Passphrase | EncryptionMode::Recipient => {}
+    fn unauthenticated_recipient_mode_display_pinned_strings() {
+        assert_eq!(
+            UnauthenticatedRecipientMode::Passphrase.to_string(),
+            "passphrase"
+        );
+        assert_eq!(
+            UnauthenticatedRecipientMode::PublicKey.to_string(),
+            "public-key"
+        );
+        match UnauthenticatedRecipientMode::Passphrase {
+            UnauthenticatedRecipientMode::Passphrase | UnauthenticatedRecipientMode::PublicKey => {}
         }
+    }
+
+    /// Mirror the `UnauthenticatedRecipientMode` Display pin for the
+    /// authenticated kind discriminant. The strings are deliberately
+    /// identical to the unauthenticated side so downstream rendering
+    /// (logs, audit trails) does not need to branch on authentication
+    /// state. The two enums (`UnauthenticatedRecipientMode` and
+    /// `AuthenticatedRecipientModeKind`) keep separate Display impls so
+    /// either side can drift without dragging the other; the wrapper
+    /// `AuthenticatedRecipientMode::Display` delegates to its `kind`, so
+    /// the wrapper inherits whatever the discriminant prints.
+    #[test]
+    fn authenticated_recipient_mode_display_pinned_strings() {
+        assert_eq!(
+            AuthenticatedRecipientModeKind::Passphrase.to_string(),
+            "passphrase"
+        );
+        assert_eq!(
+            AuthenticatedRecipientModeKind::PublicKey.to_string(),
+            "public-key"
+        );
+        // Wrapper delegates to its kind.
+        assert_eq!(
+            AuthenticatedRecipientMode::passphrase().to_string(),
+            "passphrase"
+        );
+        assert_eq!(
+            AuthenticatedRecipientMode::public_key().to_string(),
+            "public-key"
+        );
+    }
+
+    /// Lock in the kind discriminator so the public exhaustive-match surface
+    /// stays a stable shape: callers use `kind()` to switch on the variant
+    /// without touching the sealed wrapper.
+    #[test]
+    fn authenticated_recipient_mode_kind_round_trips() {
+        assert_eq!(
+            AuthenticatedRecipientMode::passphrase().kind(),
+            AuthenticatedRecipientModeKind::Passphrase
+        );
+        assert_eq!(
+            AuthenticatedRecipientMode::public_key().kind(),
+            AuthenticatedRecipientModeKind::PublicKey
+        );
+        assert!(AuthenticatedRecipientMode::passphrase().is_passphrase());
+        assert!(!AuthenticatedRecipientMode::passphrase().is_public_key());
+        assert!(AuthenticatedRecipientMode::public_key().is_public_key());
+        assert!(!AuthenticatedRecipientMode::public_key().is_passphrase());
     }
 }

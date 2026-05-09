@@ -77,14 +77,14 @@ impl NativeRecipientType {
         }
     }
 
-    /// Native [`crate::EncryptionMode`] for this type. Used by
-    /// [`classify_encryption_mode`] to pick the file's mode without a
+    /// Native [`crate::UnauthenticatedRecipientMode`] for this type. Used by
+    /// [`classify_recipient_mode`] to pick the file's mode without a
     /// second closed list of `has_*` booleans. Adding a new native type
     /// means adding one arm here.
-    pub(crate) const fn encryption_mode(self) -> crate::EncryptionMode {
+    pub(crate) const fn recipient_mode(self) -> crate::UnauthenticatedRecipientMode {
         match self {
-            Self::Argon2id => crate::EncryptionMode::Passphrase,
-            Self::X25519 => crate::EncryptionMode::Recipient,
+            Self::Argon2id => crate::UnauthenticatedRecipientMode::Passphrase,
+            Self::X25519 => crate::UnauthenticatedRecipientMode::PublicKey,
         }
     }
 }
@@ -243,7 +243,7 @@ impl NativeMixingRule {
 ///    Unknown non-critical entries are skipped for the class
 ///    comparison (they are forward-compatibility filler, not
 ///    enforcement subjects). Unknown critical entries are rejected
-///    upstream by [`classify_encryption_mode`] before this function
+///    upstream by [`classify_recipient_mode`] before this function
 ///    can matter.
 ///
 /// On a class clash the reported `(type_name, policy)` favours the
@@ -263,7 +263,7 @@ pub(crate) fn enforce_recipient_mixing_policy(
     for entry in entries {
         let Some(ty) = NativeRecipientType::from_type_name(&entry.type_name) else {
             // Unknown non-critical entries are skipped here. Critical
-            // unknowns were rejected by `classify_encryption_mode`
+            // unknowns were rejected by `classify_recipient_mode`
             // before this function ran.
             continue;
         };
@@ -320,8 +320,8 @@ pub(crate) fn enforce_recipient_mixing_policy(
 }
 
 /// Classifies a parsed recipient list into the file's
-/// [`crate::EncryptionMode`]. Returns an error for any list that does
-/// not yield a unique mode.
+/// [`crate::UnauthenticatedRecipientMode`]. Returns an error for any list
+/// that does not yield a unique mode.
 ///
 /// This scans the **entire** list rather than only the first entry —
 /// future valid files may place unknown non-critical recipients before
@@ -340,7 +340,7 @@ pub(crate) fn enforce_recipient_mixing_policy(
 ///    bit 0 (critical) can be set among the flags.
 /// 2. Run [`enforce_recipient_mixing_policy`] (cardinality + class).
 /// 3. For each supported native entry, look up
-///    [`NativeRecipientType::encryption_mode`]; the file's mode is the
+///    [`NativeRecipientType::recipient_mode`]; the file's mode is the
 ///    common value across all supported entries.
 /// 4. If two supported native entries declare different modes the file
 ///    is rejected (currently unreachable — the cardinality check on
@@ -353,9 +353,9 @@ pub(crate) fn enforce_recipient_mixing_policy(
 /// This is structural classification only. The caller still has to
 /// run the appropriate per-recipient unwrap and the header MAC verify
 /// before accepting any candidate `file_key`.
-pub fn classify_encryption_mode(
+pub fn classify_recipient_mode(
     entries: &[RecipientEntry],
-) -> Result<crate::EncryptionMode, CryptoError> {
+) -> Result<crate::UnauthenticatedRecipientMode, CryptoError> {
     // Step 1: per-entry flag rejection. A reader MUST refuse to process
     // a file that either declares an unknown entry it cannot skip, or
     // tags a known native entry with a non-zero flag. Both checks ride
@@ -383,14 +383,14 @@ pub fn classify_encryption_mode(
     enforce_recipient_mixing_policy(entries)?;
 
     // Step 3 / 4: registry-driven mode classification. Walk the entry
-    // list once, look up `encryption_mode()` per supported native type,
+    // list once, look up `recipient_mode()` per supported native type,
     // and confirm every supported entry agrees on a single mode.
-    let mut mode: Option<crate::EncryptionMode> = None;
+    let mut mode: Option<crate::UnauthenticatedRecipientMode> = None;
     for entry in entries {
         let Some(ty) = NativeRecipientType::from_type_name(&entry.type_name) else {
             continue;
         };
-        let entry_mode = ty.encryption_mode();
+        let entry_mode = ty.recipient_mode();
         match mode {
             None => mode = Some(entry_mode),
             Some(existing) if existing == entry_mode => {}
@@ -499,20 +499,20 @@ mod tests {
         );
     }
 
-    /// Native registry's [`NativeRecipientType::encryption_mode`]
-    /// must agree with what `classify_encryption_mode` emits for
+    /// Native registry's [`NativeRecipientType::recipient_mode`]
+    /// must agree with what `classify_recipient_mode` emits for
     /// single-recipient lists. Locks in the registry as the single
     /// source of truth for mode classification (the classifier no
     /// longer hard-codes `argon2id` / `x25519` type-name strings).
     #[test]
-    fn encryption_mode_per_native_type() {
+    fn recipient_mode_per_native_type() {
         assert_eq!(
-            NativeRecipientType::Argon2id.encryption_mode(),
-            crate::EncryptionMode::Passphrase
+            NativeRecipientType::Argon2id.recipient_mode(),
+            crate::UnauthenticatedRecipientMode::Passphrase
         );
         assert_eq!(
-            NativeRecipientType::X25519.encryption_mode(),
-            crate::EncryptionMode::Recipient
+            NativeRecipientType::X25519.recipient_mode(),
+            crate::UnauthenticatedRecipientMode::PublicKey
         );
     }
 
@@ -606,7 +606,7 @@ mod tests {
 
     #[test]
     fn classify_rejects_two_argon2ids() {
-        let err = classify_encryption_mode(&[argon2id_entry(), argon2id_entry()]).unwrap_err();
+        let err = classify_recipient_mode(&[argon2id_entry(), argon2id_entry()]).unwrap_err();
         assert_argon2id_mixing_violation(err);
     }
 
@@ -624,20 +624,20 @@ mod tests {
 
     #[test]
     fn classify_returns_passphrase_for_lone_argon2id() {
-        let mode = classify_encryption_mode(&[argon2id_entry()]).unwrap();
-        assert_eq!(mode, crate::EncryptionMode::Passphrase);
+        let mode = classify_recipient_mode(&[argon2id_entry()]).unwrap();
+        assert_eq!(mode, crate::UnauthenticatedRecipientMode::Passphrase);
     }
 
     #[test]
-    fn classify_returns_recipient_for_x25519() {
-        let mode = classify_encryption_mode(&[x25519_entry()]).unwrap();
-        assert_eq!(mode, crate::EncryptionMode::Recipient);
+    fn classify_returns_public_key_for_x25519() {
+        let mode = classify_recipient_mode(&[x25519_entry()]).unwrap();
+        assert_eq!(mode, crate::UnauthenticatedRecipientMode::PublicKey);
     }
 
     #[test]
-    fn classify_returns_recipient_for_multiple_x25519() {
-        let mode = classify_encryption_mode(&[x25519_entry(), x25519_entry()]).unwrap();
-        assert_eq!(mode, crate::EncryptionMode::Recipient);
+    fn classify_returns_public_key_for_multiple_x25519() {
+        let mode = classify_recipient_mode(&[x25519_entry(), x25519_entry()]).unwrap();
+        assert_eq!(mode, crate::UnauthenticatedRecipientMode::PublicKey);
     }
 
     #[test]
@@ -645,17 +645,15 @@ mod tests {
         // Forward-compat: a future file may put unknown non-critical
         // entries before a supported native entry. Classification must
         // not look only at the first slot.
-        let mode =
-            classify_encryption_mode(&[unknown_entry("future-thing", false), x25519_entry()])
-                .unwrap();
-        assert_eq!(mode, crate::EncryptionMode::Recipient);
+        let mode = classify_recipient_mode(&[unknown_entry("future-thing", false), x25519_entry()])
+            .unwrap();
+        assert_eq!(mode, crate::UnauthenticatedRecipientMode::PublicKey);
     }
 
     #[test]
     fn classify_rejects_unknown_critical() {
-        let err =
-            classify_encryption_mode(&[unknown_entry("must-handle-me", true), x25519_entry()])
-                .unwrap_err();
+        let err = classify_recipient_mode(&[unknown_entry("must-handle-me", true), x25519_entry()])
+            .unwrap_err();
         match err {
             CryptoError::UnknownCriticalRecipient { type_name } => {
                 assert_eq!(type_name, "must-handle-me");
@@ -666,13 +664,13 @@ mod tests {
 
     #[test]
     fn classify_rejects_argon2id_mixed_via_incompatible_recipients() {
-        let err = classify_encryption_mode(&[argon2id_entry(), x25519_entry()]).unwrap_err();
+        let err = classify_recipient_mode(&[argon2id_entry(), x25519_entry()]).unwrap_err();
         assert_argon2id_mixing_violation(err);
     }
 
     #[test]
     fn classify_rejects_only_unknown_non_critical_with_no_supported_recipient() {
-        let err = classify_encryption_mode(&[unknown_entry("future-thing", false)]).unwrap_err();
+        let err = classify_recipient_mode(&[unknown_entry("future-thing", false)]).unwrap_err();
         assert!(matches!(err, CryptoError::NoSupportedRecipient));
     }
 
@@ -682,7 +680,7 @@ mod tests {
         // (HeaderFixed validates recipient_count >= 1), but the
         // classifier must still answer something sensible if called
         // with an empty slice. NoSupportedRecipient is the right class.
-        let err = classify_encryption_mode(&[]).unwrap_err();
+        let err = classify_recipient_mode(&[]).unwrap_err();
         assert!(matches!(err, CryptoError::NoSupportedRecipient));
     }
 
@@ -690,7 +688,7 @@ mod tests {
     /// `argon2id` and `x25519` entries. A native entry with the
     /// critical bit set is structurally malformed and must be rejected
     /// at classify time — not just inside `protocol::decrypt`'s slot
-    /// loop — so `detect_encryption_mode` and the cross-mode mismatch
+    /// loop — so `probe_recipient_mode` and the cross-mode mismatch
     /// path both surface the typed `MalformedRecipientEntry` rather
     /// than misroute the file.
     #[test]
@@ -700,7 +698,7 @@ mod tests {
             recipient_flags: RECIPIENT_FLAG_CRITICAL,
             body: vec![0u8; argon2id::BODY_LENGTH],
         };
-        let err = classify_encryption_mode(&[bad]).unwrap_err();
+        let err = classify_recipient_mode(&[bad]).unwrap_err();
         match err {
             CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry) => {}
             other => {
@@ -720,7 +718,7 @@ mod tests {
             recipient_flags: RECIPIENT_FLAG_CRITICAL,
             body: vec![0u8; x25519::BODY_LENGTH],
         };
-        let err = classify_encryption_mode(&[bad]).unwrap_err();
+        let err = classify_recipient_mode(&[bad]).unwrap_err();
         match err {
             CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry) => {}
             other => {
@@ -744,7 +742,7 @@ mod tests {
             body: vec![0u8; x25519::BODY_LENGTH],
         };
         let unknown_crit = unknown_entry("future-critical", true);
-        let err = classify_encryption_mode(&[bad_native, unknown_crit]).unwrap_err();
+        let err = classify_recipient_mode(&[bad_native, unknown_crit]).unwrap_err();
         match err {
             CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)
             | CryptoError::UnknownCriticalRecipient { .. } => {}

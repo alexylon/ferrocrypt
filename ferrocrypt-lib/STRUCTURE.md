@@ -146,7 +146,7 @@ It contains:
 
 - public `Encryptor` and `Decryptor` constructors or re-exports;
 - `generate_key_pair`;
-- `detect_encryption_mode`;
+- `probe_recipient_mode` (cheap structural probe; **not** a security claim);
 - `default_encrypted_filename`;
 - `validate_public_key_file`;
 - `validate_private_key_file`;
@@ -200,7 +200,7 @@ pub(crate) trait RecipientScheme {
 
 pub(crate) trait IdentityScheme {
     const TYPE_NAME: &'static str;
-    const EXPECTED_MODE: EncryptionMode;
+    const EXPECTED_MODE: UnauthenticatedRecipientMode;
 
     fn unwrap_file_key(
         &self,
@@ -501,7 +501,7 @@ Responsibilities:
 - defining the public `MixingPolicy` diagnostic projection;
 - enforcing mixing rules before expensive operations (cardinality bit + compatibility-class equality, both before any KDF or private-key work);
 - mapping type names to supported native scheme metadata;
-- declaring each native type's `EncryptionMode` via `NativeRecipientType::encryption_mode` so `classify_encryption_mode` is registry-driven (no hard-coded `argon2id` / `x25519` switches in the classifier);
+- declaring each native type's `UnauthenticatedRecipientMode` via `NativeRecipientType::recipient_mode` so `classify_recipient_mode` is registry-driven (no hard-coded `argon2id` / `x25519` switches in the classifier);
 - classifying parsed headers as passphrase, public-recipient, unsupported, or mixed;
 - preserving unknown non-critical entries as opaque authenticated data.
 
@@ -512,7 +512,7 @@ Rules:
 - Native PQ recipients (e.g. the upcoming `x25519-mlkem768`) declare `NativeMixingRule::Class { name: POST_QUANTUM_CLASS }` and project to `MixingPolicy::Custom { compatibility_class: "postquantum" }`.
 - Unknown non-critical recipients are ignored for class comparison but still count wherever the format says they count, including exclusive passphrase recipient checks.
 - Mixing rules are enforced before expensive KDF or private-key operations.
-- Native-scheme classification and mixing enforcement are kept together because every native scheme addition requires coordinated changes to both (`mixing_rule` + `encryption_mode` arms on `NativeRecipientType`).
+- Native-scheme classification and mixing enforcement are kept together because every native scheme addition requires coordinated changes to both (`mixing_rule` + `recipient_mode` arms on `NativeRecipientType`).
 
 A separate recipient registry module is introduced only when a reviewed public plugin-registration API exists.
 
@@ -1022,25 +1022,37 @@ Ownership split:
 
 `KeyPairGenerator` mirrors `Encryptor`'s reader-aligned cap rule for the passphrase that seals `private.key`: `kdf_params.mem_cost <= kdf_limit.max_mem_cost_kib` (default 1 GiB) is enforced at `write` time before Argon2id runs. Above-default `mem_cost` rejects with `CryptoError::KdfResourceCapExceeded`; the unlocking [`RecipientDecryptor`] must be configured via [`RecipientDecryptor::kdf_limit`] with a matching [`KdfLimit`].
 
-### 9.5 Mode detection
+### 9.5 Recipient-mode probe
 
 ```rust
-pub fn detect_encryption_mode(
+pub fn probe_recipient_mode(
     path: impl AsRef<Path>,
-) -> Result<Option<EncryptionMode>, CryptoError>;
+) -> Result<Option<UnauthenticatedRecipientMode>, CryptoError>;
 ```
 
 The canonical concepts are:
 
 ```rust
 #[non_exhaustive]
-pub enum EncryptionMode {
+pub enum UnauthenticatedRecipientMode {
     Passphrase,
-    Recipient,
+    PublicKey,
+}
+
+pub struct AuthenticatedRecipientMode { /* sealed */ }
+
+#[non_exhaustive]
+pub enum AuthenticatedRecipientModeKind {
+    Passphrase,
+    PublicKey,
 }
 ```
 
-Compatibility names may exist in the public API, but internal structure and documentation use passphrase and recipient terminology.
+`probe_recipient_mode` performs a single bounded header parse on one file handle (no path reopen between magic check and header read). It runs no KDF, no private-key operation, no header-MAC verification, and no payload decryption. Its output is **not** a security claim; it is suitable only for UI / routing hints.
+
+`AuthenticatedRecipientMode` is the post-decrypt counterpart: it is constructed only inside the decrypt path after a recipient unwraps and the header MAC verifies, and surfaces on `DecryptOutcome::recipient_mode`. The wrapping struct's field is private and there is no `From<UnauthenticatedRecipientMode>` impl, so external callers cannot fabricate a value that claims authentication. Callers switch on the variant via `kind()` (or the `is_passphrase` / `is_public_key` accessors).
+
+Compatibility names may exist in the public API, but internal structure and documentation use passphrase and public-key (recipient) terminology.
 
 ---
 

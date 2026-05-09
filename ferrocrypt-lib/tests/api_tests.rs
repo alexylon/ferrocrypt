@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
     CryptoError, Decryptor, Encryptor, FormatDefect, HeaderReadLimits, InvalidKdfParams, KdfLimit,
-    KdfParams, KeyPairGenerator, PrivateKey, PublicKey, detect_encryption_mode,
-    detect_encryption_mode_with_limits,
+    KdfParams, KeyPairGenerator, PrivateKey, PublicKey, probe_recipient_mode,
+    probe_recipient_mode_with_limits,
 };
 use ferrocrypt_test_support::{
     TEST_FAST_KDF_MEM_COST, fast_keypair_generator, fast_passphrase_encryptor,
@@ -250,19 +250,82 @@ fn encryptor_debug_does_not_leak_passphrase() {
 }
 
 #[test]
-fn detect_encryption_mode_round_trips_via_encryptor() {
-    let work = fresh_workspace("detect_round_trip");
+fn probe_recipient_mode_round_trips_via_encryptor() {
+    let work = fresh_workspace("probe_round_trip");
     let input = work.join("data.txt");
     fs::write(&input, b"x").unwrap();
     let outcome = fast_passphrase_encryptor(pass())
         .write(&input, &work, |_| {})
         .expect("encrypt");
     assert!(
-        detect_encryption_mode(&outcome.output_path)
+        probe_recipient_mode(&outcome.output_path)
             .unwrap()
             .is_some(),
         "encrypt output must classify as a known FerroCrypt mode"
     );
+}
+
+/// Regression: verifies that `DecryptOutcome::recipient_mode` is populated
+/// with the mode that actually authenticated the file, not the other one.
+/// Without this test, swapping the two `AuthenticatedRecipientMode::*()`
+/// constructors between `PassphraseDecryptor::decrypt` and
+/// `RecipientDecryptor::decrypt` would silently compile and pass every
+/// other test — those check `output_path` but not which mode authenticated.
+#[test]
+fn decrypt_outcome_carries_authenticated_passphrase_mode() {
+    let work = fresh_workspace("outcome_mode_passphrase");
+    let input = work.join("data.txt");
+    fs::write(&input, b"plaintext").unwrap();
+    let encrypted = fast_passphrase_encryptor(pass())
+        .write(&input, &work, |_| {})
+        .expect("encrypt");
+
+    let restore = work.join("restored");
+    fs::create_dir_all(&restore).unwrap();
+    let outcome = match Decryptor::open(&encrypted.output_path).expect("open") {
+        Decryptor::Passphrase(d) => d.decrypt(pass(), &restore, |_| {}).expect("decrypt"),
+        other => panic!("expected passphrase decryptor, got {other:?}"),
+    };
+    assert!(
+        outcome.recipient_mode.is_passphrase(),
+        "passphrase decrypt must report passphrase mode, got {}",
+        outcome.recipient_mode
+    );
+    assert!(!outcome.recipient_mode.is_public_key());
+}
+
+/// Companion regression for the recipient (X25519) decrypt path.
+#[test]
+fn decrypt_outcome_carries_authenticated_public_key_mode() {
+    let work = fresh_workspace("outcome_mode_public_key");
+    let keys = work.join("keys");
+    fs::create_dir_all(&keys).unwrap();
+    let kg = generate_key_pair(&keys, pass(), |_| {}).expect("keygen");
+    let input = work.join("data.txt");
+    fs::write(&input, b"plaintext").unwrap();
+    let encrypted = Encryptor::with_recipient(PublicKey::from_key_file(&kg.public_key_path))
+        .write(&input, &work, |_| {})
+        .expect("encrypt");
+
+    let restore = work.join("restored");
+    fs::create_dir_all(&restore).unwrap();
+    let outcome = match Decryptor::open(&encrypted.output_path).expect("open") {
+        Decryptor::Recipient(d) => d
+            .decrypt(
+                PrivateKey::from_key_file(&kg.private_key_path),
+                pass(),
+                &restore,
+                |_| {},
+            )
+            .expect("decrypt"),
+        other => panic!("expected recipient decryptor, got {other:?}"),
+    };
+    assert!(
+        outcome.recipient_mode.is_public_key(),
+        "recipient decrypt must report public-key mode, got {}",
+        outcome.recipient_mode
+    );
+    assert!(!outcome.recipient_mode.is_passphrase());
 }
 
 /// Exercises the new `archive_limits()` builder on
@@ -547,16 +610,16 @@ fn decryptor_open_with_limits_accepts_recipient_count_above_default() {
     );
 }
 
-/// `detect_encryption_mode_with_limits` honors the elevated cap when
+/// `probe_recipient_mode_with_limits` honors the elevated cap when
 /// classifying a file the default-limited variant refuses. Companion
 /// to [`decryptor_open_with_limits_accepts_recipient_count_above_default`]
-/// for the detection-only path used by callers that want to classify
+/// for the probe-only path used by callers that want to classify
 /// without going through `Decryptor::open`.
 #[test]
-fn detect_encryption_mode_with_limits_accepts_above_default() {
-    use ferrocrypt::EncryptionMode;
+fn probe_recipient_mode_with_limits_accepts_above_default() {
+    use ferrocrypt::UnauthenticatedRecipientMode;
 
-    let work = fresh_workspace("detect_with_limits");
+    let work = fresh_workspace("probe_with_limits");
     let keys = work.join("keys");
     fs::create_dir_all(&keys).unwrap();
     let kg = generate_key_pair(&keys, pass(), |_| {}).expect("keygen");
@@ -569,7 +632,7 @@ fn detect_encryption_mode_with_limits_accepts_above_default() {
         .map(|_| PublicKey::from_key_file(&kg.public_key_path))
         .collect();
     // Writer must opt into the raised recipient-count cap; the
-    // detection-only path below confirms the same opt-in is required
+    // probe-only path below confirms the same opt-in is required
     // on the read side.
     let writer_limits = HeaderReadLimits::default().max_recipient_count(128);
     let outcome = Encryptor::with_recipients(recipients)
@@ -578,17 +641,17 @@ fn detect_encryption_mode_with_limits_accepts_above_default() {
         .write(&input, &out_dir, |_| {})
         .expect("encrypt");
 
-    // Default detect: rejected.
-    match detect_encryption_mode(&outcome.output_path) {
+    // Default probe: rejected.
+    match probe_recipient_mode(&outcome.output_path) {
         Err(CryptoError::RecipientCountCapExceeded { .. }) => {}
-        other => panic!("expected RecipientCountCapExceeded with default detect, got {other:?}"),
+        other => panic!("expected RecipientCountCapExceeded with default probe, got {other:?}"),
     }
 
-    // Raised detect: classifies cleanly.
+    // Raised probe: classifies cleanly.
     let raised = HeaderReadLimits::default().max_recipient_count(128);
-    match detect_encryption_mode_with_limits(&outcome.output_path, raised) {
-        Ok(Some(EncryptionMode::Recipient)) => {}
-        other => panic!("expected Ok(Some(Recipient)) under raised cap, got {other:?}"),
+    match probe_recipient_mode_with_limits(&outcome.output_path, raised) {
+        Ok(Some(UnauthenticatedRecipientMode::PublicKey)) => {}
+        other => panic!("expected Ok(Some(PublicKey)) under raised cap, got {other:?}"),
     }
 }
 

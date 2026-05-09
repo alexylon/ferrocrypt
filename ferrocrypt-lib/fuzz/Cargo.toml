@@ -73,6 +73,6 @@ path = "fuzz_targets/fuzz_recipient_decode.rs"
 doc = false
 
 [[bin]]
-name = "fuzz_detect_mode"
-path = "fuzz_targets/fuzz_detect_mode.rs"
+name = "fuzz_probe_mode"
+path = "fuzz_targets/fuzz_probe_mode.rs"
 doc = false

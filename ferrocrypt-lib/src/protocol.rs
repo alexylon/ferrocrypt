@@ -54,8 +54,8 @@ use crate::fs::paths::{encryption_base_name, reject_occupied};
 use crate::recipient::entry::{RecipientBody, RecipientEntry};
 #[cfg(test)]
 use crate::recipient::policy::MixingPolicy;
-use crate::recipient::policy::{NativeMixingRule, NativeRecipientType, classify_encryption_mode};
-use crate::{EncryptionMode, ProgressEvent};
+use crate::recipient::policy::{NativeMixingRule, NativeRecipientType, classify_recipient_mode};
+use crate::{ProgressEvent, UnauthenticatedRecipientMode};
 
 /// Encrypt-side scheme: turn a [`FileKey`] into a recipient body of
 /// scheme-specific bytes.
@@ -109,7 +109,7 @@ pub(crate) trait IdentityScheme {
     /// orchestrator to surface a typed
     /// [`CryptoError::DecryptorModeMismatch`] when a caller drives
     /// `decrypt` with the wrong identity for the file's recipient list.
-    const EXPECTED_MODE: EncryptionMode;
+    const EXPECTED_MODE: UnauthenticatedRecipientMode;
 
     fn unwrap_file_key(
         &self,
@@ -279,11 +279,11 @@ pub(crate) fn decrypt<I: IdentityScheme>(
     let parsed = read_encrypted_header(&mut encrypted_file, header_read_limits)?;
 
     // 5. Reject illegal mixing and unknown critical recipients before
-    //    any expensive recipient work. `classify_encryption_mode`
+    //    any expensive recipient work. `classify_recipient_mode`
     //    runs `enforce_recipient_mixing_policy` internally, so the
     //    mixing-policy check happens here even though it isn't called
     //    by name.
-    let mode = classify_encryption_mode(&parsed.recipient_entries)?;
+    let mode = classify_recipient_mode(&parsed.recipient_entries)?;
 
     // Cross-mode mismatch: caller invoked the passphrase decrypt path
     // on a recipient-only file (or vice versa). The classified mode
@@ -401,7 +401,9 @@ pub(crate) fn decrypt<I: IdentityScheme>(
 /// declared [`IdentityScheme::EXPECTED_MODE`]. On mismatch, returns a
 /// typed [`CryptoError::DecryptorModeMismatch`] carrying both modes so
 /// the caller can pattern-match without comparing strings.
-fn check_mode_matches_scheme<I: IdentityScheme>(mode: EncryptionMode) -> Result<(), CryptoError> {
+fn check_mode_matches_scheme<I: IdentityScheme>(
+    mode: UnauthenticatedRecipientMode,
+) -> Result<(), CryptoError> {
     if mode == I::EXPECTED_MODE {
         return Ok(());
     }
@@ -416,15 +418,19 @@ fn check_mode_matches_scheme<I: IdentityScheme>(mode: EncryptionMode) -> Result<
 /// emitting bare `HeaderTampered` (single recipient, no slot identity
 /// to attach) while the recipient path emits the per-candidate
 /// `HeaderMacFailedAfterUnwrap { type_name }` variant.
-fn failure_for(mode: EncryptionMode, type_name: &'static str, had_unwrap: bool) -> CryptoError {
+fn failure_for(
+    mode: UnauthenticatedRecipientMode,
+    type_name: &'static str,
+    had_unwrap: bool,
+) -> CryptoError {
     if !had_unwrap {
         return CryptoError::RecipientUnwrapFailed {
             type_name: type_name.to_string(),
         };
     }
     match mode {
-        EncryptionMode::Passphrase => CryptoError::HeaderTampered,
-        EncryptionMode::Recipient => CryptoError::HeaderMacFailedAfterUnwrap {
+        UnauthenticatedRecipientMode::Passphrase => CryptoError::HeaderTampered,
+        UnauthenticatedRecipientMode::PublicKey => CryptoError::HeaderMacFailedAfterUnwrap {
             type_name: type_name.to_string(),
         },
     }
@@ -1108,7 +1114,7 @@ mod tests {
 
         // Single argon2id recipient with a synthetic body. The
         // cross-mode check fires before any AEAD/KDF runs, so the body
-        // contents are irrelevant — `classify_encryption_mode` only
+        // contents are irrelevant — `classify_recipient_mode` only
         // looks at type_name.
         let synthetic = RecipientEntry::native(
             NativeRecipientType::Argon2id,
@@ -1122,12 +1128,13 @@ mod tests {
         fs::create_dir_all(&dec_dir)?;
         match recipient_decrypt(&fcr, &dec_dir, &priv_a, &pass_a) {
             Err(CryptoError::DecryptorModeMismatch { expected, found })
-                if expected == EncryptionMode::Recipient && found == EncryptionMode::Passphrase =>
+                if expected == UnauthenticatedRecipientMode::PublicKey
+                    && found == UnauthenticatedRecipientMode::Passphrase =>
             {
                 Ok(())
             }
             other => panic!(
-                "expected DecryptorModeMismatch(expected=Recipient, found=Passphrase), got {other:?}"
+                "expected DecryptorModeMismatch(expected=PublicKey, found=Passphrase), got {other:?}"
             ),
         }
     }
@@ -1169,12 +1176,13 @@ mod tests {
         .unwrap_err();
         match err {
             CryptoError::DecryptorModeMismatch { expected, found }
-                if expected == EncryptionMode::Passphrase && found == EncryptionMode::Recipient =>
+                if expected == UnauthenticatedRecipientMode::Passphrase
+                    && found == UnauthenticatedRecipientMode::PublicKey =>
             {
                 Ok(())
             }
             other => panic!(
-                "expected DecryptorModeMismatch(expected=Passphrase, found=Recipient), got {other:?}"
+                "expected DecryptorModeMismatch(expected=Passphrase, found=PublicKey), got {other:?}"
             ),
         }
     }

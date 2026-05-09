@@ -1,11 +1,11 @@
 //! Test support helpers for `integration_tests.rs`.
 //!
 //! `passphrase_auto` and `recipient_auto` wrap the public [`Encryptor`] /
-//! [`Decryptor`] API with magic-byte direction detection (encrypt if the
-//! input is plaintext, decrypt if it starts with the FerroCrypt magic)
-//! and inject the test-fast Argon2id parameters from
-//! `ferrocrypt-test-support` so the test suite doesn't burn seconds per
-//! derivation. `generate_key_pair` is the matching keygen wrapper.
+//! [`Decryptor`] API with magic-byte direction detection (via
+//! `probe_recipient_mode`: encrypt if the input is plaintext, decrypt if it
+//! starts with the FerroCrypt magic) and inject the test-fast Argon2id
+//! parameters from `ferrocrypt-test-support` so the test suite doesn't burn
+//! seconds per derivation. `generate_key_pair` is the matching keygen wrapper.
 //!
 //! Each integration-test binary compiles this module separately; when a
 //! binary only imports a subset of the helpers the rest would trip
@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
     CryptoError, Decryptor, Encryptor, KdfLimit, KeyGenOutcome, PrivateKey, ProgressEvent,
-    PublicKey, detect_encryption_mode,
+    PublicKey, probe_recipient_mode,
 };
 use ferrocrypt_test_support::{fast_keypair_generator, fast_passphrase_encryptor};
 
@@ -36,7 +36,7 @@ pub fn passphrase_auto(
     if !input.exists() {
         return Err(CryptoError::InputPath);
     }
-    if detect_encryption_mode(input)?.is_some() {
+    if probe_recipient_mode(input)?.is_some() {
         match Decryptor::open(input)? {
             Decryptor::Passphrase(mut d) => {
                 if let Some(limit) = kdf_limit {
@@ -74,7 +74,7 @@ pub fn recipient_auto(
     if !input.exists() {
         return Err(CryptoError::InputPath);
     }
-    if detect_encryption_mode(input)?.is_some() {
+    if probe_recipient_mode(input)?.is_some() {
         match Decryptor::open(input)? {
             Decryptor::Recipient(mut d) => {
                 if let Some(limit) = kdf_limit {

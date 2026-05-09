@@ -218,6 +218,7 @@ recipient_entry = type_name_len(2) || recipient_flags(2) || body_len(4)
 - Keep parsing, validation, crypto, and I/O separated.
 - Add or update important tests and keep them self-contained.
 - Add regression tests for security-sensitive and format bugs.
+- Prefer fixing issues directly rather than merely documenting them.
 - After each important change, but only when we are ready to commit, update if relevant:
     - `README.md`
     - `CHANGELOG.md` under `[Unreleased]` — user-relevant changes only (functionality, security behavior, public API, supported platforms, major technical decisions). Keep CI/build/tooling entries to one-liners; skip entirely if not user-visible. When an entry would describe both a user-visible fact (e.g. a removed public Cargo feature) and the internal mechanics that replaced it (e.g. `#[cfg(test)]` test helpers, workspace-internal `publish = false` crates, debug-only env-var overrides, release-mode test gating), keep only the user-visible fact and the migration path; cut the internal mechanics — they belong in code comments and the audit doc, not in CHANGELOG.

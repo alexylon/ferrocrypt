@@ -229,14 +229,20 @@ fn malformed_private_key() -> CryptoError {
 /// gate [`keypair_suite_is_supported`] and never against the wire
 /// encoding directly.
 ///
-/// Older / newer classification mirrors the `.fcr` outer file pattern
-/// for diagnostic symmetry: bytes below the canonical v1 byte surface as
-/// [`UnsupportedVersion::OlderKey`], anything above as
-/// [`UnsupportedVersion::NewerKey`].
+/// `0x00` is reserved (no FerroCrypt release has ever emitted it as a
+/// `private.key` version byte) and surfaces as
+/// [`FormatDefect::MalformedPrivateKey`] — symmetric with
+/// [`crate::key::public::public_key_wire_version_to_suite`]'s rejection of
+/// the same byte. `0x01` maps to [`KeypairSuite::V1`]. Bytes above
+/// [`PRIVATE_KEY_VERSION`] surface as [`UnsupportedVersion::NewerKey`];
+/// bytes below it but above `0x00` surface as
+/// [`UnsupportedVersion::OlderKey`]. The "Older" arm only becomes
+/// reachable once a future suite advances `PRIVATE_KEY_VERSION`.
 pub(crate) fn private_key_wire_version_to_suite(version: u8) -> Result<KeypairSuite, CryptoError> {
     match version {
         PRIVATE_KEY_V1_VERSION => Ok(KeypairSuite::V1),
-        v if v < PRIVATE_KEY_V1_VERSION => Err(CryptoError::UnsupportedVersion(
+        0 => Err(malformed_private_key()),
+        v if v < PRIVATE_KEY_VERSION => Err(CryptoError::UnsupportedVersion(
             UnsupportedVersion::OlderKey { version: v },
         )),
         v => Err(CryptoError::UnsupportedVersion(
@@ -525,10 +531,11 @@ mod tests {
     }
 
     /// Boundary test for the wire-version-to-suite classifier. Pins
-    /// `Older` for bytes below v1, `Ok(V1)` at the canonical byte, and
-    /// `Newer` everywhere above. Replaces the equivalent coverage that
-    /// `format::unsupported_key_version_error_classifies_older_and_newer`
-    /// used to provide before the helper moved here.
+    /// `MalformedPrivateKey` at `0x00` (reserved, symmetric with the
+    /// public-key parser), `Ok(V1)` at the canonical byte, and `Newer`
+    /// for bytes above. The `Older` arm is unreachable today (`V1` is
+    /// the lowest defined suite) and only becomes testable once a future
+    /// suite advances `PRIVATE_KEY_VERSION`.
     #[test]
     fn private_key_wire_version_to_suite_classifies_v1_and_neighbours() {
         assert_eq!(
@@ -536,8 +543,8 @@ mod tests {
             KeypairSuite::V1,
         );
         match private_key_wire_version_to_suite(0x00) {
-            Err(CryptoError::UnsupportedVersion(UnsupportedVersion::OlderKey { version: 0 })) => {}
-            other => panic!("expected OlderKey(0), got {other:?}"),
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => {}
+            other => panic!("expected MalformedPrivateKey for 0x00, got {other:?}"),
         }
         match private_key_wire_version_to_suite(PRIVATE_KEY_V1_VERSION + 1) {
             Err(CryptoError::UnsupportedVersion(UnsupportedVersion::NewerKey { version }))

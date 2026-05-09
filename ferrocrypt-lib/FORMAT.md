@@ -15,6 +15,62 @@
 
 ---
 
+## Table of contents
+
+1. [Scope and notation](#1-scope-and-notation)
+2. [Cryptographic primitives](#2-cryptographic-primitives)
+   - [2.1 Randomness](#21-randomness)
+   - [2.2 Argon2id](#22-argon2id)
+   - [2.3 HKDF domain separation](#23-hkdf-domain-separation)
+   - [2.4 X25519](#24-x25519)
+3. [Encrypted file format (`.fcr`)](#3-encrypted-file-format-fcr)
+   - [3.1 Prefix](#31-prefix)
+   - [3.2 Header](#32-header)
+   - [3.3 Recipient entry framing](#33-recipient-entry-framing)
+     - [3.3.1 Recipient type-name registry](#331-recipient-type-name-registry)
+   - [3.4 Recipient flags](#34-recipient-flags)
+   - [3.5 Recipient model](#35-recipient-model)
+   - [3.6 Header MAC](#36-header-mac)
+   - [3.7 Decryption order](#37-decryption-order)
+4. [Native recipient types](#4-native-recipient-types)
+   - [4.1 `argon2id`](#41-argon2id)
+   - [4.2 `x25519`](#42-x25519)
+   - [4.3 Future recipient types](#43-future-recipient-types)
+5. [Payload stream](#5-payload-stream)
+6. [TLV extension regions](#6-tlv-extension-regions)
+7. [Public recipient keys](#7-public-recipient-keys)
+   - [7.1 `public.key` file form](#71-publickey-file-form)
+   - [7.2 Fingerprint](#72-fingerprint)
+8. [Private key format (`private.key`)](#8-private-key-format-privatekey)
+9. [Archive payload — FerroCrypt Archive (FCA) v1](#9-archive-payload--ferrocrypt-archive-fca-v1)
+   - [9.1 Layout](#91-layout)
+   - [9.2 FCA fixed header](#92-fca-fixed-header)
+   - [9.3 Archive extension region](#93-archive-extension-region)
+   - [9.4 Manifest](#94-manifest)
+   - [9.5 Per-entry extension regions](#95-per-entry-extension-regions)
+   - [9.6 Path grammar](#96-path-grammar)
+   - [9.7 Duplicate and collision policy](#97-duplicate-and-collision-policy)
+   - [9.8 Tree shape and entry ordering](#98-tree-shape-and-entry-ordering)
+   - [9.9 File-content region](#99-file-content-region)
+   - [9.10 Writer obligations](#910-writer-obligations)
+   - [9.11 Reader and extractor obligations](#911-reader-and-extractor-obligations)
+   - [9.12 Resource caps](#912-resource-caps)
+   - [9.13 Platform metadata and preservation](#913-platform-metadata-and-preservation)
+   - [9.14 FCA extensibility rules](#914-fca-extensibility-rules)
+   - [9.15 Design rationale and benefits](#915-design-rationale-and-benefits)
+10. [ASCII armor](#10-ascii-armor)
+11. [Versioning and compatibility](#11-versioning-and-compatibility)
+12. [Diagnostics and conformance](#12-diagnostics-and-conformance)
+13. [Quick reference](#13-quick-reference)
+    - [13.1 Encrypted-file prefix](#131-encrypted-file-prefix)
+    - [13.2 Header fixed section](#132-header-fixed-section)
+    - [13.3 Recipient entry](#133-recipient-entry)
+    - [13.4 Recipient namespace summary](#134-recipient-namespace-summary)
+    - [13.5 Native recipient types](#135-native-recipient-types)
+    - [13.6 FCA v1 payload](#136-fca-v1-payload)
+
+---
+
 ## 1. Scope and notation
 
 This specification defines:

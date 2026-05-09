@@ -215,6 +215,7 @@ recipient_entry = type_name_len(2) || recipient_flags(2) || body_len(4)
 - Use strong types where possible.
 - Prefer concise user-facing messages; desktop UI space is limited.
 - Keep explanations concise and written for humans: plain language, short, clear, no needless jargon. Use analogies when they help, skip ceremony, do not pad with restated context.
+- Use international English. Avoid regional idioms (whether American or British), clever shorthand, and compressed phrases; prefer wording that a non-native English reader can understand on the first read. This applies to chat replies, commit messages, code comments, documentation, and error messages.
 - Keep parsing, validation, crypto, and I/O separated.
 - Add or update important tests and keep them self-contained.
 - Add regression tests for security-sensitive and format bugs.

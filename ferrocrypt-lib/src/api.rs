@@ -136,9 +136,9 @@ impl Encryptor {
     ///
     /// This is a convenience wrapper around [`Encryptor::with_public_keys`]
     /// for the common single-recipient case.
-    pub fn with_public_key(recipient: PublicKey) -> Self {
+    pub fn with_public_key(public_key: PublicKey) -> Self {
         Self {
-            state: EncryptorState::Recipients(vec![recipient]),
+            state: EncryptorState::Recipients(vec![public_key]),
             save_as: None,
             archive_limits: None,
             kdf_params: None,
@@ -155,7 +155,7 @@ impl Encryptor {
     ///
     /// # Default-decrypt round-trip
     ///
-    /// By default the writer caps `recipients.len()` at the same
+    /// By default the writer caps `public_keys.len()` at the same
     /// [`HeaderReadLimits::RECIPIENT_COUNT_DEFAULT`] (64) the reader
     /// applies via [`HeaderReadLimits::default`], so a default-configured
     /// [`Decryptor::open`] can read every file the default
@@ -173,17 +173,17 @@ impl Encryptor {
     /// All public keys in the current v1 implementation are X25519 recipients;
     /// future key kinds may add additional mixing-policy checks.
     pub fn with_public_keys(
-        recipients: impl IntoIterator<Item = PublicKey>,
+        public_keys: impl IntoIterator<Item = PublicKey>,
     ) -> Result<Self, CryptoError> {
-        let recipients: Vec<PublicKey> = recipients.into_iter().collect();
-        if recipients.is_empty() {
+        let public_keys: Vec<PublicKey> = public_keys.into_iter().collect();
+        if public_keys.is_empty() {
             return Err(CryptoError::EmptyRecipientList);
         }
         // v1 PublicKey is always X25519 (PublicKeyMixable). When future
         // PublicKey variants carry different mixing policies, the check
         // expands here; protocol::encrypt re-checks as defense-in-depth.
         Ok(Self {
-            state: EncryptorState::Recipients(recipients),
+            state: EncryptorState::Recipients(public_keys),
             save_as: None,
             archive_limits: None,
             kdf_params: None,

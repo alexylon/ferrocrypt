@@ -1,5 +1,14 @@
 // FerroCrypt Slint GUI — Dark Security Theme
 
+// Mode codes shared with the Rust side (see MODE_* constants in main.rs).
+global Mode {
+    out property <int> passphrase-encrypt: 0;
+    out property <int> passphrase-decrypt: 1;
+    out property <int> recipient-encrypt: 2;
+    out property <int> recipient-decrypt: 3;
+    out property <int> keygen: 4;
+}
+
 global Theme {
     // Backgrounds
     out property <color> bg: #0a0f1a;
@@ -102,8 +111,7 @@ export component AppWindow inherits Window {
     in property <string> app-version;
 
     // ── State ───────────────────────────────────────────────────────────
-    // Mode: 0=SE  1=SD  2=HE  3=HD  4=GK
-    in-out property <int> mode: 0;
+    in-out property <int> mode: Mode.passphrase-encrypt;
     in-out property <string> input-path;
     in-out property <string> input-path-display;
     in-out property <string> output-path;
@@ -125,28 +133,28 @@ export component AppWindow inherits Window {
     in-out property <bool> key-invalid: false;
 
     // ── Derived ─────────────────────────────────────────────────────────
-    property <bool> require-password: mode != 2;
+    property <bool> require-password: mode != Mode.recipient-encrypt;
     property <bool> require-password-repeated:
-        (mode == 0 || mode == 4) && hide-password;
-    property <bool> require-key: mode == 2 || mode == 3;
+        (mode == Mode.passphrase-encrypt || mode == Mode.keygen) && hide-password;
+    property <bool> require-key: mode == Mode.recipient-encrypt || mode == Mode.recipient-decrypt;
     property <bool> password-match: password == password-repeated;
     property <bool> disable-start: is-working
-        || (mode == 0 && (input-path == "" || password == ""
+        || (mode == Mode.passphrase-encrypt && (input-path == "" || password == ""
             || (require-password-repeated && !password-match)))
-        || (mode == 1 && (input-path == "" || password == ""))
-        || (mode == 2 && (input-path == "" || key-path == "" || key-invalid))
-        || (mode == 3 && (input-path == "" || password == "" || key-path == "" || key-invalid))
-        || (mode == 4 && (keygen-output-dir == "" || password == ""
+        || (mode == Mode.passphrase-decrypt && (input-path == "" || password == ""))
+        || (mode == Mode.recipient-encrypt && (input-path == "" || key-path == "" || key-invalid))
+        || (mode == Mode.recipient-decrypt && (input-path == "" || password == "" || key-path == "" || key-invalid))
+        || (mode == Mode.keygen && (keygen-output-dir == "" || password == ""
             || (require-password-repeated && !password-match)));
-    property <bool> is-encrypt-mode: mode == 0 || mode == 2 || mode == 4;
+    property <bool> is-encrypt-mode: mode == Mode.passphrase-encrypt || mode == Mode.recipient-encrypt || mode == Mode.keygen;
     property <bool> form-is-clean:
-        (mode == 0 || mode == 2) && hide-password
+        (mode == Mode.passphrase-encrypt || mode == Mode.recipient-encrypt) && hide-password
         && input-path == "" && output-path == "" && password == ""
         && password-repeated == "" && key-path == "" && keygen-output-dir == ""
         && conflict-warning == "" && status-ok == "" && status-err == "";
     property <string> button-text:
-        mode == 0 || mode == 2 ? "Encrypt" :
-        mode == 1 || mode == 3 ? "Decrypt" : "Generate key pair";
+        mode == Mode.passphrase-encrypt || mode == Mode.recipient-encrypt ? "Encrypt" :
+        mode == Mode.passphrase-decrypt || mode == Mode.recipient-decrypt ? "Decrypt" : "Generate key pair";
     property <color> strength-color:
         password-strength <= 1 ? Theme.error :
         password-strength == 2 ? Theme.warning :
@@ -218,7 +226,7 @@ export component AppWindow inherits Window {
 
                 // ── Password ──
                 Rectangle {
-                    property <bool> active: mode == 0 || mode == 1;
+                    property <bool> active: mode == Mode.passphrase-encrypt || mode == Mode.passphrase-decrypt;
                     horizontal-stretch: 1;
                     border-radius: 5px;
                     background: active ? Theme.accent-muted :
@@ -227,11 +235,11 @@ export component AppWindow inherits Window {
                     animate background { duration: 150ms; }
 
                     sym-ta := TouchArea {
-                        enabled: mode != 3 && !is-working;
+                        enabled: mode != Mode.recipient-decrypt && !is-working;
                         mouse-cursor: self.enabled ? pointer : default;
                         clicked => {
                             root.password-strength = 0;
-                            root.mode = 0; root.mode-changed();
+                            root.mode = Mode.passphrase-encrypt; root.mode-changed();
                         }
                     }
                     Text {
@@ -249,7 +257,7 @@ export component AppWindow inherits Window {
 
                 // ── Key pair ──
                 Rectangle {
-                    property <bool> active: mode == 2 || mode == 3 || mode == 4;
+                    property <bool> active: mode == Mode.recipient-encrypt || mode == Mode.recipient-decrypt || mode == Mode.keygen;
                     horizontal-stretch: 1;
                     border-radius: 5px;
                     background: active ? Theme.accent-muted :
@@ -258,11 +266,11 @@ export component AppWindow inherits Window {
                     animate background { duration: 150ms; }
 
                     hyb-ta := TouchArea {
-                        enabled: mode != 1 && !is-working;
+                        enabled: mode != Mode.passphrase-decrypt && !is-working;
                         mouse-cursor: self.enabled ? pointer : default;
                         clicked => {
                             root.password-strength = 0;
-                            root.mode = 2; root.mode-changed();
+                            root.mode = Mode.recipient-encrypt; root.mode-changed();
                         }
                     }
                     Text {
@@ -281,8 +289,8 @@ export component AppWindow inherits Window {
 
         Rectangle { height: 6px; }
         Text {
-            text: mode == 0 || mode == 1 ? "Encrypt and decrypt with a password" :
-                  mode == 4 ? "Generate a key pair" :
+            text: mode == Mode.passphrase-encrypt || mode == Mode.passphrase-decrypt ? "Encrypt and decrypt with a password" :
+                  mode == Mode.keygen ? "Generate a key pair" :
                   "Encrypt with a public key, decrypt with a private key";
             color: Theme.text-dim;
             font-size: 11.5px;
@@ -429,7 +437,7 @@ export component AppWindow inherits Window {
         }
 
         // ═══════════ KEY PAIR SECTION ═══════════
-        if mode == 2 || mode == 4 : VerticalLayout {
+        if mode == Mode.recipient-encrypt || mode == Mode.keygen : VerticalLayout {
             spacing: 0px;
             Rectangle { height: Theme.field-gap; }
 
@@ -454,7 +462,7 @@ export component AppWindow inherits Window {
                     Rectangle {
                         horizontal-stretch: 1;
                         border-radius: 4px;
-                        background: mode == 2 ? Theme.accent-muted :
+                        background: mode == Mode.recipient-encrypt ? Theme.accent-muted :
                                     (ek-ta.has-hover && ek-ta.enabled) ? Theme.surface-hover
                                     : transparent;
                         animate background { duration: 150ms; }
@@ -464,12 +472,12 @@ export component AppWindow inherits Window {
                             mouse-cursor: self.enabled ? pointer : default;
                             clicked => {
                                 root.password-strength = 0;
-                                root.mode = 2; root.mode-changed();
+                                root.mode = Mode.recipient-encrypt; root.mode-changed();
                             }
                         }
                         Text {
                             text: "Use existing public key";
-                            color: mode == 2 ? Theme.text : Theme.text-secondary;
+                            color: mode == Mode.recipient-encrypt ? Theme.text : Theme.text-secondary;
                             font-size: 11px;
                             horizontal-alignment: center;
                             vertical-alignment: center;
@@ -481,7 +489,7 @@ export component AppWindow inherits Window {
                     Rectangle {
                         horizontal-stretch: 1;
                         border-radius: 4px;
-                        background: mode == 4 ? Theme.accent-muted :
+                        background: mode == Mode.keygen ? Theme.accent-muted :
                                     (nk-ta.has-hover && nk-ta.enabled) ? Theme.surface-hover
                                     : transparent;
                         animate background { duration: 150ms; }
@@ -491,12 +499,12 @@ export component AppWindow inherits Window {
                             mouse-cursor: self.enabled ? pointer : default;
                             clicked => {
                                 root.password-strength = 0;
-                                root.mode = 4; root.mode-changed();
+                                root.mode = Mode.keygen; root.mode-changed();
                             }
                         }
                         Text {
                             text: "Create key pair";
-                            color: mode == 4 ? Theme.text : Theme.text-secondary;
+                            color: mode == Mode.keygen ? Theme.text : Theme.text-secondary;
                             font-size: 11px;
                             horizontal-alignment: center;
                             vertical-alignment: center;
@@ -512,7 +520,7 @@ export component AppWindow inherits Window {
             Rectangle { height: Theme.field-gap; }
 
             Text {
-                text: mode == 3 || mode == 4 ? "Private key password" : "Password";
+                text: mode == Mode.recipient-decrypt || mode == Mode.keygen ? "Private key password" : "Password";
                 color: Theme.text-secondary;
                 font-size: Theme.label-size;
             }
@@ -556,7 +564,7 @@ export component AppWindow inherits Window {
                 if password == "" && !pwd-ti.has-focus : Text {
                     x: Theme.field-pad;
                     y: (parent.height - self.preferred-height) / 2;
-                    text: mode == 3 || mode == 4 ? "Enter private key password" : "Enter password";
+                    text: mode == Mode.recipient-decrypt || mode == Mode.keygen ? "Enter private key password" : "Enter password";
                     color: Theme.text-disabled;
                     font-size: Theme.input-text-size;
                 }
@@ -610,7 +618,7 @@ export component AppWindow inherits Window {
             }
 
             // Password strength indicator (encrypt/keygen only)
-            if mode == 0 || mode == 4 : HorizontalLayout {
+            if mode == Mode.passphrase-encrypt || mode == Mode.keygen : HorizontalLayout {
                 spacing: 4px;
                 height: 14px;
 
@@ -665,7 +673,7 @@ export component AppWindow inherits Window {
             Rectangle { height: 8px; }
 
             Text {
-                text: mode == 4 ? "Confirm private key password" : "Confirm password";
+                text: mode == Mode.keygen ? "Confirm private key password" : "Confirm password";
                 color: Theme.text-secondary;
                 font-size: Theme.label-size;
             }
@@ -709,7 +717,7 @@ export component AppWindow inherits Window {
                 if password-repeated == "" && !rpwd-ti.has-focus : Text {
                     x: Theme.field-pad;
                     y: (parent.height - self.preferred-height) / 2;
-                    text: mode == 4 ? "Re-enter private key password" : "Re-enter password";
+                    text: mode == Mode.keygen ? "Re-enter private key password" : "Re-enter password";
                     color: Theme.text-disabled;
                     font-size: Theme.input-text-size;
                 }
@@ -733,7 +741,7 @@ export component AppWindow inherits Window {
             Rectangle { height: Theme.field-gap; }
 
             Text {
-                text: mode == 2 ? "Public key" : "Private key";
+                text: mode == Mode.recipient-encrypt ? "Public key" : "Private key";
                 color: Theme.text-secondary;
                 font-size: Theme.label-size;
             }
@@ -765,7 +773,7 @@ export component AppWindow inherits Window {
                         width: parent.width - 2 * Theme.field-pad;
                         vertical-alignment: center;
                         text: key-path != "" ? key-path-display :
-                              (mode == 2 ? "No public key selected" :
+                              (mode == Mode.recipient-encrypt ? "No public key selected" :
                                "No private key selected");
                         color: key-path != "" ? Theme.text : Theme.text-disabled;
                         font-size: Theme.field-text-size;
@@ -781,7 +789,7 @@ export component AppWindow inherits Window {
                 }
             }
 
-            if mode == 2 && key-fingerprint != "" : VerticalLayout {
+            if mode == Mode.recipient-encrypt && key-fingerprint != "" : VerticalLayout {
                 property <bool> fp-copied: false;
                 spacing: 0px;
                 Rectangle { height: Theme.field-gap; }
@@ -855,7 +863,7 @@ export component AppWindow inherits Window {
         }
 
         // ═══════════ KEY PAIR OUTPUT DIR (GK only) ═══════════
-        if mode == 4 : VerticalLayout {
+        if mode == Mode.keygen : VerticalLayout {
             spacing: 0px;
             Rectangle { height: require-password-repeated ? 18px : 8px; }
 

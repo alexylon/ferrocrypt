@@ -239,11 +239,20 @@ pub(crate) fn validate_encrypt_input(input_path: &Path) -> Result<(), CryptoErro
 }
 
 /// Running totals threaded through the recursive metadata-pass walk
-/// so caps can fire across the entire tree, not just per-call.
+/// so caps can fire across the entire tree, not just per-call. The
+/// `seen_inodes` set on Unix detects directory hardlinks (HFS+ and
+/// some network filesystems permit them) so the writer rejects a
+/// pathological cycle instead of silently archiving the same content
+/// under multiple paths until one of the entry-count / total-bytes
+/// caps fires.
 #[derive(Debug, Default)]
 struct ArchiveCounters {
     entry_count: u32,
     total_bytes: u64,
+    /// `(dev, ino)` of every directory visited so far. Unix-only
+    /// because Windows does not expose stable directory inodes.
+    #[cfg(unix)]
+    seen_dirs: std::collections::HashSet<(u64, u64)>,
 }
 
 /// Single source of truth for the writer's [`ArchiveEntry`]
@@ -365,6 +374,8 @@ fn build_manifest(input_path: &Path, limits: &ArchiveLimits) -> Result<Manifest,
         let mut counters = ArchiveCounters {
             entry_count: 1,
             total_bytes: 0,
+            #[cfg(unix)]
+            seen_dirs: std::collections::HashSet::new(),
         };
 
         walk_directory(input_path, &name_str, &mut entries, &mut counters, limits)?;
@@ -403,6 +414,22 @@ fn walk_directory(
             "Symlink in archive source: {}",
             src_dir.display()
         )));
+    }
+
+    // Reject directory cycles (HFS+ directory hardlinks, certain
+    // network filesystems) before they consume the entry-count or
+    // total-bytes caps. A repeat `(dev, ino)` means we have already
+    // walked this physical directory under another path.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let key = (src_dir_metadata.dev(), src_dir_metadata.ino());
+        if !counters.seen_dirs.insert(key) {
+            return Err(CryptoError::InvalidInput(format!(
+                "Directory cycle in archive source: {}",
+                src_dir.display()
+            )));
+        }
     }
 
     for read_dir_entry in fs::read_dir(src_dir)? {
@@ -495,6 +522,24 @@ fn sort_entries_canonically(entries: &mut [ArchiveEntry]) {
 /// FORMAT.md §9.10: on shrink, type change, or pre-copy growth — fail. On
 /// growth during the copy after the fresh metadata check — copy
 /// exactly the declared size, keeping the archive self-consistent.
+///
+/// **Writer-side TOCTOU surface (deliberate trade-off).** On Unix,
+/// `open_no_follow` uses `O_NOFOLLOW` which only constrains the
+/// *final* path component; intermediate directories on the absolute
+/// `source` path are still resolved by the kernel through whatever
+/// symlinks exist at reopen time. The metadata pass rejects symlinks
+/// at every component via `symlink_metadata`, but it does not retain
+/// a `cap_std::Dir` handle. An attacker who can race a directory
+/// replacement on the source tree between the metadata pass and the
+/// per-entry reopen can substitute an intermediate directory with a
+/// symlink and redirect content reads. The size-mismatch guard
+/// (`metadata.len() != entry.size`) catches the common case but not
+/// attacker-controlled same-size substitutions. The reader side
+/// closes this gap by walking through `cap_fs_ext::open_dir_nofollow`
+/// for every component (`platform::walk_to_parent`,
+/// `platform::open_dir_at_rel`); the writer's looser model is
+/// acknowledged here so a future cap-std-handle threading refactor
+/// has an explicit signpost rather than assumed parity.
 fn stream_source_file<W: Write>(entry: &ArchiveEntry, writer: &mut W) -> Result<(), CryptoError> {
     let source = entry
         .source_path

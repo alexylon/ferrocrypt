@@ -465,13 +465,13 @@ pub(crate) fn generate_key_pair(
     kdf_params: &crate::crypto::kdf::KdfParams,
     output_dir: &Path,
     on_event: &dyn Fn(&ProgressEvent),
-) -> Result<(PathBuf, PathBuf), CryptoError> {
+) -> Result<(PathBuf, PathBuf, String), CryptoError> {
     use std::io::Write as _;
 
     use crate::fs::atomic;
     use crate::key::files::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};
     use crate::key::private::seal_private_key;
-    use crate::key::public::encode_recipient_string;
+    use crate::key::public::{encode_recipient_string, fingerprint_hex};
     use crate::recipient::native::x25519;
 
     fs::create_dir_all(output_dir)?;
@@ -557,7 +557,16 @@ pub(crate) fn generate_key_pair(
         return Err(e);
     }
 
-    Ok((private_key_path, public_key_path))
+    // Compute the fingerprint from the in-memory `public_material`
+    // rather than re-reading and re-decoding `public.key` from disk.
+    // The bytes here are the same ones the recipient string just
+    // encoded, so the fingerprint matches what
+    // `PublicKey::from_key_file(...).fingerprint()` would produce —
+    // without paying the extra disk read + Bech32 decode + SHA3 in
+    // the API layer.
+    let fingerprint = fingerprint_hex(x25519::TYPE_NAME, &public_material);
+
+    Ok((private_key_path, public_key_path, fingerprint))
 }
 
 #[cfg(test)]
@@ -665,7 +674,7 @@ mod tests {
         let pass = SecretString::from(pass.to_string());
         let dir = keys_dir.join(label);
         fs::create_dir_all(&dir)?;
-        let (privkey_path, pubkey_path) = generate_key_pair(
+        let (privkey_path, pubkey_path, _fingerprint) = generate_key_pair(
             &pass,
             &crate::crypto::kdf::KdfParams::test_fast_default(),
             &dir,

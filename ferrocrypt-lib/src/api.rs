@@ -813,13 +813,12 @@ impl KeyPairGenerator {
         // `RecipientDecryptor::decrypt`. To go above default, the
         // caller raises both sides explicitly.
         kdf_params.validate_for_write(Some(&kdf_limit))?;
-        let (private_key_path, public_key_path) = protocol::generate_key_pair(
+        let (private_key_path, public_key_path, fingerprint) = protocol::generate_key_pair(
             &self.passphrase,
             &kdf_params,
             output_dir.as_ref(),
             &on_event,
         )?;
-        let fingerprint = PublicKey::from_key_file(&public_key_path).fingerprint()?;
         Ok(KeyGenOutcome {
             private_key_path,
             public_key_path,

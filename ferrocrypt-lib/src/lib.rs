@@ -471,4 +471,19 @@ mod tests {
             other => panic!("expected MalformedPublicKey, got {other:?}"),
         }
     }
+
+    /// Pin `EncryptionMode`'s rendered strings at the type's home so a
+    /// future variant rename or label tweak surfaces here, not only via
+    /// the indirect `DecryptorModeMismatch` Display test in `error.rs`.
+    /// `#[non_exhaustive]` is irrelevant inside the defining crate —
+    /// adding a new variant produces a compile error here until the
+    /// test handles it.
+    #[test]
+    fn encryption_mode_display_pinned_strings() {
+        assert_eq!(EncryptionMode::Passphrase.to_string(), "passphrase");
+        assert_eq!(EncryptionMode::Recipient.to_string(), "recipient");
+        match EncryptionMode::Passphrase {
+            EncryptionMode::Passphrase | EncryptionMode::Recipient => {}
+        }
+    }
 }

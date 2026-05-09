@@ -106,7 +106,7 @@ mod tests {
         // Real public.key text → Public.
         let tmp = tempfile::TempDir::new().unwrap();
         let pass = SecretString::from("kp".to_string());
-        let (privkey_path, pubkey_path) = crate::protocol::generate_key_pair(
+        let (privkey_path, pubkey_path, _fingerprint) = crate::protocol::generate_key_pair(
             &pass,
             &crate::crypto::kdf::KdfParams::test_fast_default(),
             tmp.path(),

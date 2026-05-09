@@ -767,6 +767,21 @@ mod tests {
         }
     }
 
+    /// `FORMAT.md` §11 reserves `0x00` across every version domain.
+    /// Pin the FCA path's rejection symmetric with the existing
+    /// `0xFF` test so a future writer bug that emits `0x00` cannot
+    /// regress to "OlderArchive 0" framing.
+    #[test]
+    fn rejects_reserved_zero_version() {
+        let bytes = raw_header_bytes(0x00, 0, 5, 0, 100, 1024);
+        let mut cur = Cursor::new(&bytes);
+        let err = parse_fca_header(&mut cur, ArchiveLimits::default()).unwrap_err();
+        match err {
+            CryptoError::InvalidFormat(FormatDefect::UnsupportedArchiveVersion { version: 0 }) => {}
+            other => panic!("expected UnsupportedArchiveVersion(0), got {other:?}"),
+        }
+    }
+
     #[test]
     fn rejects_nonzero_flags() {
         let bytes = raw_header_bytes(FCA_VERSION, 1, 5, 0, 100, 1024);
@@ -1188,6 +1203,17 @@ mod tests {
     #[test]
     fn parse_rejects_unknown_entry_kind() {
         let bytes = raw_entry_bytes(0xFF, 0, 0o644, 4, 0, 10, b"fake", &[]);
+        let err = parse_with_header(&bytes, 1, 10).unwrap_err();
+        assert!(format!("{err}").contains("Unsupported archive entry kind"));
+    }
+
+    /// `0x00` is reserved across every kind/version byte in the spec
+    /// (`FORMAT.md` §11). Symmetric with `parse_rejects_unknown_entry_kind`'s
+    /// `0xFF` case so neither sentinel can regress to a silent
+    /// accept-as-some-future-kind path.
+    #[test]
+    fn parse_rejects_reserved_zero_entry_kind() {
+        let bytes = raw_entry_bytes(0x00, 0, 0o644, 4, 0, 10, b"fake", &[]);
         let err = parse_with_header(&bytes, 1, 10).unwrap_err();
         assert!(format!("{err}").contains("Unsupported archive entry kind"));
     }

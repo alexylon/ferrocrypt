@@ -205,4 +205,21 @@ mod tests {
         assert_eq!(fs::read_to_string(&to).unwrap(), "payload");
         assert_eq!(fs::read_to_string(&from).unwrap(), "second");
     }
+
+    /// `sync_parent_dir` is a best-effort durability hint — it MUST
+    /// swallow every failure so a callsite (`finalize_file`,
+    /// `rename_no_clobber`) returning success is not retroactively
+    /// flipped to an error after the final path is already visible.
+    /// Pin the swallow with a missing parent: opening the parent dirfd
+    /// fails, but the helper still returns `()` so finalization stays
+    /// successful.
+    #[test]
+    fn sync_parent_dir_swallows_missing_parent() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let phantom_parent = tmp_dir.path().join("does-not-exist");
+        let phantom_child = phantom_parent.join("child.txt");
+        // No `unwrap` — `sync_parent_dir` returns `()` even though
+        // `parent_or_cwd(phantom_child) = phantom_parent` is missing.
+        sync_parent_dir(&phantom_child);
+    }
 }

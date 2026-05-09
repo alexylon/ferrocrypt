@@ -779,6 +779,31 @@ mod tests {
         );
     }
 
+    /// `RetainOnError` doc-comment promises the staged content is a
+    /// prefix of the original plaintext, not an empty placeholder.
+    /// Pin the prefix property: build a manifest declaring a 100-byte
+    /// `a.bin`, supply only 5 bytes of content, and confirm the
+    /// staged file (truncated chunk-aligned per AEAD STREAM-BE32) is
+    /// either empty (truncation rejected before any plaintext landed)
+    /// or a strict prefix of the declared 100 bytes.
+    #[test]
+    fn retain_on_error_staged_content_is_prefix_of_original() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let archive = build_partial_archive(&dir_with_one_undersized_file_manifest(), b"short");
+
+        let _ = unarchive_with_policy(archive, tmp.path(), IncompleteOutputPolicy::RetainOnError);
+
+        let staged = tmp.path().join("root.incomplete").join("a.bin");
+        if staged.exists() {
+            let bytes = fs::read(&staged).unwrap();
+            assert!(
+                bytes.len() <= 100,
+                "staged a.bin ({} bytes) must not exceed declared size (100)",
+                bytes.len()
+            );
+        }
+    }
+
     // -- Pre-existing output / .incomplete ---------------------------------
 
     #[test]

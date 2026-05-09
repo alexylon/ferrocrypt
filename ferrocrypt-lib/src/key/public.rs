@@ -147,14 +147,36 @@ pub struct DecodedRecipient {
 }
 
 /// Encodes a public-key recipient string in canonical lowercase
-/// Bech32 (BIP 173). Emits the writer's [`PUBLIC_KEY_VERSION`] byte at
-/// offset 0, validates `type_name` against the §3.3 grammar, and
-/// computes the internal SHA3-256 checksum (with the version byte mixed
-/// into the hash input) so a corrupt copy fails closed at the decoder.
+/// Bech32 (BIP 173) for the current writer's keypair suite. Thin
+/// wrapper over [`encode_recipient_string_for_suite`] that pins the
+/// suite to `WRITER_KEYPAIR_SUITE` (crate-internal); use this when
+/// emitting a recipient string for a freshly generated keypair (which
+/// is, by definition, in the writer suite). When re-encoding a
+/// `PublicKey` whose suite was recovered from an existing recipient
+/// string or key file, route through
+/// [`encode_recipient_string_for_suite`] with the resolved suite so
+/// the original wire-version byte is preserved.
 pub fn encode_recipient_string(
     type_name: &str,
     key_material: &[u8],
 ) -> Result<String, CryptoError> {
+    encode_recipient_string_for_suite(WRITER_KEYPAIR_SUITE, type_name, key_material)
+}
+
+/// Suite-explicit variant of [`encode_recipient_string`]. Emits the
+/// supplied `suite`'s wire-version byte at offset 0 of the typed
+/// payload, validates `type_name` against the §3.3 grammar, and
+/// computes the internal SHA3-256 checksum (with the version byte
+/// mixed into the hash input) so a corrupt copy fails closed at the
+/// decoder. Crate-internal because the suite type is itself
+/// crate-internal — external callers go through the writer-suite
+/// wrapper.
+pub(crate) fn encode_recipient_string_for_suite(
+    suite: KeypairSuite,
+    type_name: &str,
+    key_material: &[u8],
+) -> Result<String, CryptoError> {
+    let version = suite.public_key_version();
     validate_type_name_grammar(type_name)?;
     let type_name_bytes = type_name.as_bytes();
     let type_name_len = u16::try_from(type_name_bytes.len())
@@ -162,12 +184,12 @@ pub fn encode_recipient_string(
     let key_material_len = u32::try_from(key_material.len()).map_err(|_| malformed_public_key())?;
     check_key_material_len(key_material_len)?;
 
-    let cs = compute_checksum(PUBLIC_KEY_VERSION, type_name, key_material);
+    let cs = compute_checksum(version, type_name, key_material);
 
     let total_data =
         PAYLOAD_HEADER_SIZE + type_name_bytes.len() + key_material.len() + PUBLIC_KEY_CHECKSUM_SIZE;
     let mut data = Vec::with_capacity(total_data);
-    data.push(PUBLIC_KEY_VERSION);
+    data.push(version);
     data.extend_from_slice(&type_name_len.to_be_bytes());
     data.extend_from_slice(&key_material_len.to_be_bytes());
     data.extend_from_slice(type_name_bytes);
@@ -325,18 +347,35 @@ fn ensure_public_key_suite_supported(suite: KeypairSuite) -> Result<(), CryptoEr
 
 /// Canonical X25519-typed Bech32 decoder. Single source of truth for
 /// "given a `fcr1…` recipient string, return raw 32-byte X25519 key
-/// material." Both [`crate::decode_recipient`] (the public free
-/// function) and [`PublicKey::from_recipient_string`] route through
-/// here so a future cap-policy or type-name change cannot drift between
-/// the two public entry points.
+/// material." [`crate::decode_recipient`] (the public free function)
+/// routes through here so a future cap-policy or type-name change
+/// cannot drift between the public entry points.
+///
+/// Suite-discarding wrapper around [`decode_x25519_recipient_resolved`]:
+/// callers who only need the bytes (the public `decode_recipient` API)
+/// drop the suite, while in-tree callers that need to preserve the
+/// suite on a resulting `PublicKey` use the resolved variant.
 ///
 /// Validates HRP, BIP 173 checksum, internal SHA3-256 checksum, the
 /// recipient `type_name == "x25519"` constraint, and the 32-byte
 /// key-material length. Applies [`RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT`]
 /// as the structural cap.
 pub(crate) fn decode_x25519_recipient(recipient: &str) -> Result<[u8; 32], CryptoError> {
+    Ok(decode_x25519_recipient_resolved(recipient)?.bytes)
+}
+
+/// Suite-preserving X25519-typed Bech32 decoder. Returns a
+/// [`ResolvedPublicKey`] so [`PublicKey::from_recipient_string`] can
+/// store the recovered keypair suite on the value rather than discard
+/// it and re-tag it with the current writer suite. Same validation as
+/// [`decode_x25519_recipient`].
+pub(crate) fn decode_x25519_recipient_resolved(
+    recipient: &str,
+) -> Result<ResolvedPublicKey, CryptoError> {
     let decoded = decode_recipient_string(recipient, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT)?;
-    decoded_x25519_bytes(decoded, malformed_public_key)
+    let suite = decoded.keypair_suite;
+    let bytes = decoded_x25519_bytes(decoded, malformed_public_key)?;
+    Ok(ResolvedPublicKey { suite, bytes })
 }
 
 /// Once a recipient string has been decoded, verify it carries v1
@@ -484,10 +523,10 @@ pub fn fingerprint_hex(type_name: &str, key_material: &[u8]) -> String {
 
 // ─── public.key text reader ────────────────────────────────────────────────
 
-/// Reads a v1 `public.key` text file and returns the raw 32-byte
-/// X25519 public key. The file content MUST be the canonical
-/// lowercase `fcr1…` recipient string, optionally followed by
-/// exactly one trailing `\n` (FORMAT.md §7). Anything else
+/// Reads a v1 `public.key` text file and returns the resolved X25519
+/// public key (suite + 32 bytes). The file content MUST be the
+/// canonical lowercase `fcr1…` recipient string, optionally followed
+/// by exactly one trailing `\n` (FORMAT.md §7). Anything else
 /// — leading whitespace, CRLF line endings, extra blank lines,
 /// trailing spaces or tabs, internal whitespace — is rejected as
 /// [`FormatDefect::MalformedPublicKey`].
@@ -499,8 +538,11 @@ pub fn fingerprint_hex(type_name: &str, key_material: &[u8]) -> String {
 ///
 /// Decoding delegates to [`decode_recipient_string`], the single
 /// source of truth for the Bech32 grammar, internal SHA3-256
-/// checksum, and resource caps.
-pub fn read_public_key(path: &std::path::Path) -> Result<[u8; 32], CryptoError> {
+/// checksum, and resource caps. The keypair suite recovered from the
+/// recipient-string wire-version byte is preserved on the returned
+/// [`ResolvedPublicKey`] so callers (in particular [`PublicKey::resolve`])
+/// can re-emit the original suite rather than the current writer's.
+pub fn read_public_key(path: &std::path::Path) -> Result<ResolvedPublicKey, CryptoError> {
     let bytes = std::fs::read(path).map_err(crate::fs::paths::map_user_path_io_error)?;
     if matches!(
         crate::key::files::KeyFileKind::classify(&bytes),
@@ -518,9 +560,11 @@ pub fn read_public_key(path: &std::path::Path) -> Result<[u8; 32], CryptoError> 
         return Err(malformed_public_key());
     }
     let decoded = decode_recipient_string(recipient, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT)?;
-    decoded_x25519_bytes(decoded, || {
+    let suite = decoded.keypair_suite;
+    let bytes = decoded_x25519_bytes(decoded, || {
         CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)
-    })
+    })?;
+    Ok(ResolvedPublicKey { suite, bytes })
 }
 
 // ─── Public-recipient wrapper ──────────────────────────────────────────────
@@ -551,7 +595,24 @@ pub struct PublicKey {
 #[derive(Debug, Clone)]
 enum PublicKeySource {
     KeyFile(std::path::PathBuf),
-    Bytes([u8; 32]),
+    X25519 {
+        suite: KeypairSuite,
+        bytes: [u8; 32],
+    },
+}
+
+/// Internal "fully resolved" public key: the X25519 bytes plus the
+/// [`KeypairSuite`] (crate-internal) the bytes belong to. All three
+/// `PublicKey` ingress paths (`from_bytes`, `from_recipient_string`,
+/// `from_key_file` via `read_public_key`) materialise this shape so a
+/// caller of [`PublicKey::resolve`] always sees the suite alongside the
+/// key material — every byte that reaches the encryption pipeline or
+/// the recipient-string encoder is paired with the suite it belongs to,
+/// not silently re-tagged with the current writer suite.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ResolvedPublicKey {
+    pub suite: KeypairSuite,
+    pub bytes: [u8; 32],
 }
 
 impl PublicKey {
@@ -568,6 +629,17 @@ impl PublicKey {
     }
 
     /// Wraps raw 32-byte X25519 public-key material directly.
+    ///
+    /// The resulting `PublicKey` is tagged with this build's writer
+    /// keypair suite (`WRITER_KEYPAIR_SUITE`, crate-internal). Raw
+    /// bytes carry no suite marker, so this constructor cannot be used
+    /// to resurrect a public key from a different suite: a future
+    /// release that drops support for an older suite will tag every
+    /// `from_bytes` value with the current writer suite, ensuring the
+    /// matching private-key suite is also still supported. Callers who
+    /// need to load a non-writer-suite public key MUST go through
+    /// [`PublicKey::from_recipient_string`] or [`PublicKey::from_key_file`],
+    /// where the wire-version byte selects the suite explicitly.
     ///
     /// Rejects the all-zero point structurally — the only small-order
     /// X25519 public key we can pre-screen without an explicit
@@ -586,7 +658,10 @@ impl PublicKey {
             return Err(malformed_public_key());
         }
         Ok(Self {
-            source: PublicKeySource::Bytes(bytes),
+            source: PublicKeySource::X25519 {
+                suite: WRITER_KEYPAIR_SUITE,
+                bytes,
+            },
         })
     }
 
@@ -599,6 +674,13 @@ impl PublicKey {
     /// recipients) the recipient `type_name == "x25519"` and 32-byte
     /// key-material length.
     ///
+    /// The keypair suite recovered from the wire-version byte is
+    /// preserved on the resulting `PublicKey`. Re-encoding via
+    /// [`PublicKey::to_recipient_string`] uses the parsed suite, not
+    /// the current writer suite, so a recipient string round-trips
+    /// byte-identically as long as the original suite is still
+    /// supported by this build.
+    ///
     /// # Errors
     ///
     /// Returns [`CryptoError::InvalidInput`] for invalid Bech32 text,
@@ -606,7 +688,13 @@ impl PublicKey {
     /// recipient types, and [`CryptoError::RecipientStringCapExceeded`] when
     /// the input exceeds the local recipient-string cap.
     pub fn from_recipient_string(recipient: &str) -> Result<Self, CryptoError> {
-        Self::from_bytes(decode_x25519_recipient(recipient)?)
+        let resolved = decode_x25519_recipient_resolved(recipient)?;
+        Ok(Self {
+            source: PublicKeySource::X25519 {
+                suite: resolved.suite,
+                bytes: resolved.bytes,
+            },
+        })
     }
 
     /// Computes the public-recipient fingerprint.
@@ -623,12 +711,19 @@ impl PublicKey {
     /// Returns the same errors as [`PublicKey::to_bytes`] when this key source
     /// must be read from disk or decoded from a key file.
     pub fn fingerprint(&self) -> Result<String, CryptoError> {
-        let bytes = self.resolve()?;
-        Ok(fingerprint_hex(X25519_TYPE_NAME, &bytes))
+        let resolved = self.resolve()?;
+        Ok(fingerprint_hex(X25519_TYPE_NAME, &resolved.bytes))
     }
 
     /// Encodes the key as the canonical lowercase Bech32 `fcr1…`
     /// recipient string.
+    ///
+    /// Re-encodes using the keypair suite the key was originally
+    /// constructed with (preserved on every `PublicKey` ingress path),
+    /// not the current writer suite. A `PublicKey` parsed from a
+    /// `fcr1…` string round-trips byte-identically; a `PublicKey`
+    /// built from raw bytes via [`PublicKey::from_bytes`] re-encodes
+    /// using the writer suite (the suite `from_bytes` pins).
     ///
     /// Performs filesystem I/O if this `PublicKey` references a key file.
     ///
@@ -639,8 +734,8 @@ impl PublicKey {
     /// [`CryptoError::InternalInvariant`] only if canonical Bech32 encoding fails
     /// for already-validated X25519 bytes.
     pub fn to_recipient_string(&self) -> Result<String, CryptoError> {
-        let bytes = self.resolve()?;
-        encode_recipient_string(X25519_TYPE_NAME, &bytes)
+        let resolved = self.resolve()?;
+        encode_recipient_string_for_suite(resolved.suite, X25519_TYPE_NAME, &resolved.bytes)
     }
 
     /// Returns the raw 32-byte X25519 public-key material as an owned
@@ -655,7 +750,7 @@ impl PublicKey {
     /// [`CryptoError::RecipientStringCapExceeded`] if a referenced key file is
     /// not a valid v1 `public.key` file.
     pub fn to_bytes(&self) -> Result<[u8; 32], CryptoError> {
-        self.resolve()
+        self.resolve().map(|resolved| resolved.bytes)
     }
 
     /// Validates that the key source is well-formed without exposing the
@@ -675,12 +770,18 @@ impl PublicKey {
         self.resolve().map(|_| ())
     }
 
-    /// Resolves the key to raw 32-byte material, reading the key file
-    /// from disk if the source is a path.
-    fn resolve(&self) -> Result<[u8; 32], CryptoError> {
+    /// Resolves the key to its [`ResolvedPublicKey`] (suite + 32-byte
+    /// material), reading the key file from disk if the source is a
+    /// path. Every `PublicKey` ingress path stores or recovers the
+    /// keypair suite, so the resolved value always carries an
+    /// already-supported [`KeypairSuite`].
+    fn resolve(&self) -> Result<ResolvedPublicKey, CryptoError> {
         match &self.source {
             PublicKeySource::KeyFile(path) => read_public_key(path),
-            PublicKeySource::Bytes(bytes) => Ok(*bytes),
+            PublicKeySource::X25519 { suite, bytes } => Ok(ResolvedPublicKey {
+                suite: *suite,
+                bytes: *bytes,
+            }),
         }
     }
 }
@@ -1243,5 +1344,95 @@ mod tests {
                 panic!("expected MalformedPublicKey for all-zero on-disk public key, got {other:?}")
             }
         }
+    }
+
+    /// `PublicKey::from_bytes` carries no suite marker on the input, so
+    /// it MUST tag the resulting value with the current writer suite
+    /// (`WRITER_KEYPAIR_SUITE`, crate-internal). This is the
+    /// closing-the-stale-public-key-trap pin for audit finding 2: a
+    /// future build that drops an older suite cannot use raw bytes to
+    /// resurrect a `PublicKey` for the dropped suite — every
+    /// `from_bytes` value tags as the writer.
+    #[test]
+    fn from_bytes_pins_writer_keypair_suite() {
+        let pk = PublicKey::from_bytes(x25519_key()).unwrap();
+        let resolved = pk.resolve().unwrap();
+        assert_eq!(resolved.suite, WRITER_KEYPAIR_SUITE);
+        assert_eq!(resolved.bytes, x25519_key());
+    }
+
+    /// `PublicKey::from_recipient_string` recovers the keypair suite
+    /// from the wire-version byte of the input string and stores it on
+    /// the resulting value. Re-encoding via
+    /// `PublicKey::to_recipient_string` emits the original suite's
+    /// wire-version byte — today V1 == writer so the round-trip is
+    /// byte-identical, but the structural pin guarantees a future V2
+    /// build that still supports V1 will not silently reserialize V1
+    /// strings as V2. Closes audit finding 3.
+    ///
+    /// Sources the input via `encode_recipient_string_for_suite` with
+    /// an explicit `KeypairSuite::V1` so the test pins V1-round-trips-V1
+    /// regardless of which suite is `WRITER_KEYPAIR_SUITE` in a future
+    /// build. Sourcing from the writer-default `encode_recipient_string`
+    /// would collapse to "writer-round-trips-writer" today and fail
+    /// with a misleading assertion in a V2 build that still supports V1.
+    #[test]
+    fn from_recipient_string_preserves_suite_in_round_trip() {
+        let key = x25519_key();
+        let original =
+            encode_recipient_string_for_suite(KeypairSuite::V1, X25519_TYPE_NAME, &key).unwrap();
+        let pk = PublicKey::from_recipient_string(&original).unwrap();
+        let resolved = pk.resolve().unwrap();
+        assert_eq!(resolved.suite, KeypairSuite::V1);
+        assert_eq!(resolved.bytes, key);
+        let re_encoded = pk.to_recipient_string().unwrap();
+        assert_eq!(re_encoded, original);
+    }
+
+    /// `read_public_key` (the on-disk reader behind
+    /// `PublicKey::from_key_file`) preserves the recovered keypair
+    /// suite alongside the 32 bytes, mirroring
+    /// `from_recipient_string`'s suite-preservation rule for the file
+    /// surface. Closes audit finding 3 for the on-disk path. Sources
+    /// the on-disk string via the suite-explicit encoder for the same
+    /// future-build robustness as
+    /// `from_recipient_string_preserves_suite_in_round_trip`.
+    #[test]
+    fn read_public_key_preserves_keypair_suite() {
+        let key = x25519_key();
+        let s =
+            encode_recipient_string_for_suite(KeypairSuite::V1, X25519_TYPE_NAME, &key).unwrap();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), s.as_bytes()).unwrap();
+        let resolved = read_public_key(tmp.path()).unwrap();
+        assert_eq!(resolved.suite, KeypairSuite::V1);
+        assert_eq!(resolved.bytes, key);
+    }
+
+    /// `to_recipient_string` for a `from_bytes`-built `PublicKey`
+    /// emits the writer suite's wire-version byte at offset 0. Pairs
+    /// with `from_bytes_pins_writer_keypair_suite` to lock in the rule
+    /// that raw-bytes ingress always re-emits as the current writer.
+    #[test]
+    fn from_bytes_to_recipient_string_uses_writer_suite_wire_byte() {
+        let pk = PublicKey::from_bytes(x25519_key()).unwrap();
+        let s = pk.to_recipient_string().unwrap();
+        let decoded = decode_recipient_string(&s, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT).unwrap();
+        assert_eq!(decoded.keypair_suite, WRITER_KEYPAIR_SUITE);
+    }
+
+    /// Cross-suite encode pin: `encode_recipient_string_for_suite`
+    /// emits the supplied suite's wire-version byte at offset 0, not
+    /// the current writer's. Today both arms collapse to V1, but the
+    /// structural pin guards against a future regression that quietly
+    /// hard-codes `WRITER_KEYPAIR_SUITE` inside the suite-explicit
+    /// helper.
+    #[test]
+    fn encode_recipient_string_for_suite_emits_supplied_suite() {
+        let key = x25519_key();
+        let s =
+            encode_recipient_string_for_suite(KeypairSuite::V1, X25519_TYPE_NAME, &key).unwrap();
+        let decoded = decode_recipient_string(&s, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT).unwrap();
+        assert_eq!(decoded.keypair_suite, KeypairSuite::V1);
     }
 }

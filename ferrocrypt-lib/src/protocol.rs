@@ -670,7 +670,7 @@ mod tests {
             &dir,
             &|_| {},
         )?;
-        let pub_bytes = read_public_key(&pubkey_path)?;
+        let pub_bytes = read_public_key(&pubkey_path)?.bytes;
         Ok((pub_bytes, privkey_path, pass))
     }
 

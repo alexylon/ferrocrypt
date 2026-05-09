@@ -251,10 +251,9 @@ impl KdfParams {
     ///
     /// Returns [`CryptoError::InvalidInput`] if the passphrase exceeds the
     /// 4 KiB structural cap. Argon2id itself is unreachable for valid
-    /// input (callers preflight via [`KdfParams::validate_for_write`] or
-    /// [`KdfParams::from_bytes_structural`], both of which enforce the
-    /// same structural bounds the Argon2id primitive accepts), so any
-    /// Argon2 failure surfaces as [`CryptoError::InternalCryptoFailure`].
+    /// input — the crate validates `KdfParams` against the same structural
+    /// bounds the Argon2id primitive accepts before reaching this method —
+    /// so any Argon2 failure surfaces as [`CryptoError::InternalCryptoFailure`].
     pub fn hash_passphrase(
         &self,
         passphrase: &[u8],

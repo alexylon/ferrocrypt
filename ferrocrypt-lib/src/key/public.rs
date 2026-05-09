@@ -38,7 +38,8 @@ use sha3::{Digest, Sha3_256};
 use crate::CryptoError;
 use crate::error::{FormatDefect, UnsupportedVersion};
 use crate::format::{
-    KeypairSuite, WRITER_KEYPAIR_SUITE, keypair_suite_is_supported, read_u16_be, read_u32_be,
+    KeypairSuite, KeypairVersionRejection, WRITER_KEYPAIR_SUITE,
+    keypair_suite_from_public_key_version, keypair_suite_is_supported, read_u16_be, read_u32_be,
 };
 use crate::recipient::native::x25519::TYPE_NAME as X25519_TYPE_NAME;
 use crate::recipient::{TYPE_NAME_MAX_LEN, validate_type_name_grammar};
@@ -279,30 +280,30 @@ pub fn decode_recipient_string(
 }
 
 /// Translates a `public.key` wire-version byte into a logical
-/// [`KeypairSuite`]. Symmetric counterpart of
-/// [`crate::key::private::private_key_wire_version_to_suite`]; both
-/// translate their on-disk encoding into the shared keypair-suite
-/// domain before any support decision runs.
+/// [`KeypairSuite`]. Thin domain-specific translation layer over
+/// [`keypair_suite_from_public_key_version`] — the centralised reverse
+/// mapper in `format.rs` decides "which suite is this byte / why is it
+/// rejected", and this function wraps the rejection in the
+/// public-key-flavoured diagnostics:
+/// [`FormatDefect::MalformedPublicKey`] for the reserved `0x00` byte,
+/// [`UnsupportedVersion::OlderPublicKey`] / [`UnsupportedVersion::NewerPublicKey`]
+/// for the older / newer arms.
 ///
-/// `0x00` is reserved (a writer that forgets to set the version byte
-/// fails closed here as [`FormatDefect::MalformedPublicKey`] — `0x00`
-/// is not a real version, so `OlderPublicKey { version: 0 }` would be
-/// misleading). `0x01` maps to [`KeypairSuite::V1`]. Bytes above
-/// [`PUBLIC_KEY_VERSION`] surface as [`UnsupportedVersion::NewerPublicKey`];
-/// bytes below it but above `0x00` surface as
-/// [`UnsupportedVersion::OlderPublicKey`]. The "Older" arm only becomes
-/// reachable once a future suite advances `PUBLIC_KEY_VERSION`.
+/// Symmetric counterpart of
+/// [`crate::key::private::private_key_wire_version_to_suite`]; both
+/// route through the same centralised mapper. Adding a future suite
+/// only requires updating the mapper's literal-byte arm in `format.rs`,
+/// not this translation layer.
 fn public_key_wire_version_to_suite(version: u8) -> Result<KeypairSuite, CryptoError> {
-    match version {
-        PUBLIC_KEY_V1_VERSION => Ok(KeypairSuite::V1),
-        0 => Err(malformed_public_key()),
-        v if v < PUBLIC_KEY_VERSION => Err(CryptoError::UnsupportedVersion(
-            UnsupportedVersion::OlderPublicKey { version: v },
-        )),
-        v => Err(CryptoError::UnsupportedVersion(
-            UnsupportedVersion::NewerPublicKey { version: v },
-        )),
-    }
+    keypair_suite_from_public_key_version(version).map_err(|r| match r {
+        KeypairVersionRejection::Reserved => malformed_public_key(),
+        KeypairVersionRejection::Older { version: v } => {
+            CryptoError::UnsupportedVersion(UnsupportedVersion::OlderPublicKey { version: v })
+        }
+        KeypairVersionRejection::Newer { version: v } => {
+            CryptoError::UnsupportedVersion(UnsupportedVersion::NewerPublicKey { version: v })
+        }
+    })
 }
 
 /// Asserts the suite is in this build's support list. The wire-version

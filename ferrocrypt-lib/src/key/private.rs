@@ -39,8 +39,9 @@ use crate::crypto::kdf::{ARGON2_SALT_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams}
 use crate::crypto::keys::{derive_passphrase_wrap_key, random_bytes};
 use crate::error::{FormatDefect, UnsupportedVersion};
 use crate::format::{
-    KIND_PRIVATE_KEY, KeypairSuite, MAGIC, MAGIC_SIZE, WRITER_KEYPAIR_SUITE,
-    keypair_suite_is_supported, read_u16_be, read_u32_be, write_u16_be, write_u32_be,
+    KIND_PRIVATE_KEY, KeypairSuite, KeypairVersionRejection, MAGIC, MAGIC_SIZE,
+    WRITER_KEYPAIR_SUITE, keypair_suite_from_private_key_version, keypair_suite_is_supported,
+    read_u16_be, read_u32_be, write_u16_be, write_u32_be,
 };
 use crate::recipient::{TYPE_NAME_MAX_LEN, validate_type_name_grammar};
 
@@ -223,32 +224,30 @@ fn malformed_private_key() -> CryptoError {
 }
 
 /// Translates an on-disk `private.key` wire-version byte into a logical
-/// [`KeypairSuite`]. The reader's only entry point into the keypair-
-/// compatibility domain (`FORMAT.md` §8 / §11): once a wire byte is
-/// mapped to a suite, support is decided through the single shared
-/// gate [`keypair_suite_is_supported`] and never against the wire
-/// encoding directly.
+/// [`KeypairSuite`]. Thin domain-specific translation layer over
+/// [`keypair_suite_from_private_key_version`] — the centralised reverse
+/// mapper in `format.rs` decides "which suite is this byte / why is it
+/// rejected", and this function wraps the rejection in the
+/// private-key-flavoured diagnostics:
+/// [`FormatDefect::MalformedPrivateKey`] for the reserved `0x00` byte,
+/// [`UnsupportedVersion::OlderKey`] / [`UnsupportedVersion::NewerKey`]
+/// for the older / newer arms.
 ///
-/// `0x00` is reserved (no FerroCrypt release has ever emitted it as a
-/// `private.key` version byte) and surfaces as
-/// [`FormatDefect::MalformedPrivateKey`] — symmetric with
-/// [`crate::key::public::public_key_wire_version_to_suite`]'s rejection of
-/// the same byte. `0x01` maps to [`KeypairSuite::V1`]. Bytes above
-/// [`PRIVATE_KEY_VERSION`] surface as [`UnsupportedVersion::NewerKey`];
-/// bytes below it but above `0x00` surface as
-/// [`UnsupportedVersion::OlderKey`]. The "Older" arm only becomes
-/// reachable once a future suite advances `PRIVATE_KEY_VERSION`.
+/// Symmetric counterpart of
+/// [`crate::key::public::public_key_wire_version_to_suite`]; both route
+/// through the same centralised mapper. Adding a future suite only
+/// requires updating the mapper's literal-byte arm in `format.rs`, not
+/// this translation layer.
 pub(crate) fn private_key_wire_version_to_suite(version: u8) -> Result<KeypairSuite, CryptoError> {
-    match version {
-        PRIVATE_KEY_V1_VERSION => Ok(KeypairSuite::V1),
-        0 => Err(malformed_private_key()),
-        v if v < PRIVATE_KEY_VERSION => Err(CryptoError::UnsupportedVersion(
-            UnsupportedVersion::OlderKey { version: v },
-        )),
-        v => Err(CryptoError::UnsupportedVersion(
-            UnsupportedVersion::NewerKey { version: v },
-        )),
-    }
+    keypair_suite_from_private_key_version(version).map_err(|r| match r {
+        KeypairVersionRejection::Reserved => malformed_private_key(),
+        KeypairVersionRejection::Older { version: v } => {
+            CryptoError::UnsupportedVersion(UnsupportedVersion::OlderKey { version: v })
+        }
+        KeypairVersionRejection::Newer { version: v } => {
+            CryptoError::UnsupportedVersion(UnsupportedVersion::NewerKey { version: v })
+        }
+    })
 }
 
 /// Asserts the suite is in this build's support list. The wire version

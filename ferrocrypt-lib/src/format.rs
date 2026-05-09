@@ -268,6 +268,110 @@ pub const fn keypair_suite_is_supported(suite: KeypairSuite) -> bool {
     }
 }
 
+/// Outcome of mapping a key-file wire-version byte back to a logical
+/// [`KeypairSuite`]. Public/private parsers translate this into their
+/// domain-specific error variants ([`crate::error::UnsupportedVersion::OlderKey`]
+/// vs `OlderPublicKey`, [`crate::error::FormatDefect::MalformedPrivateKey`]
+/// vs `MalformedPublicKey`) at the call site so the diagnostic surface
+/// stays per-artefact while the structural mapping stays centralised
+/// here. Crate-internal — callers translate before any error reaches
+/// public API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeypairVersionRejection {
+    /// Wire byte was `0x00`. Reserved on every key artefact and
+    /// surfaces in the consumer as the domain's `Malformed*` defect
+    /// rather than as an "older" version (no FerroCrypt release has
+    /// ever emitted `0x00` for either artefact).
+    Reserved,
+    /// Wire byte is below [`WRITER_KEYPAIR_SUITE`]'s wire byte for this
+    /// artefact and not in this build's accepted-suite list. Unreachable
+    /// today (V1 is the only suite, `0x00` is caught by `Reserved`, and
+    /// every other below-writer byte would be caught by the explicit V1
+    /// `Ok` arm). Becomes reachable only once an older suite is dropped
+    /// from the explicit `Ok` arms in
+    /// [`keypair_suite_from_wire_version_with`] — i.e. when the build
+    /// stops accepting that suite for decryption (and, by the symmetry
+    /// rule, encryption).
+    Older { version: u8 },
+    /// Wire byte is above [`WRITER_KEYPAIR_SUITE`]'s wire byte for this
+    /// artefact. The "writer is older than the file" case.
+    Newer { version: u8 },
+}
+
+/// Centralised reverse mapping for both `public.key` and `private.key`
+/// wire-version bytes. Parameterised by `suite_byte`, which the caller
+/// supplies as either [`KeypairSuite::public_key_version`] or
+/// [`KeypairSuite::private_key_version`] — that single function pointer
+/// switches the helper between the two artefact domains without
+/// duplicating the rejection logic.
+///
+/// **Adding a new suite (e.g. `KeypairSuite::V2`):** add a new
+/// `v if v == suite_byte(KeypairSuite::V2) => Ok(KeypairSuite::V2)` arm
+/// **immediately after the V1 arm** (and before the `Older` /
+/// catch-all arms; placed any later it would be shadowed by the
+/// older/newer fallbacks and never fire). The same single arm covers
+/// both public and private reverse mappings: the entry points
+/// [`keypair_suite_from_public_key_version`] and
+/// [`keypair_suite_from_private_key_version`] inherit V2 acceptance for
+/// free through the `suite_byte` function pointer. The forward
+/// direction in [`KeypairSuite::public_key_version`] /
+/// [`KeypairSuite::private_key_version`] and the support gate
+/// [`keypair_suite_is_supported`] are compile-forced exhaustive matches
+/// over the enum, so a missing arm in either direction surfaces as a
+/// build failure rather than a silent misclassification. The two
+/// writer-byte round-trip tests in `format::tests`
+/// (`writer_public_key_version_maps_to_writer_suite` /
+/// `writer_private_key_version_maps_to_writer_suite`) catch the
+/// remaining gap — forgetting to add the V2 arm here while moving
+/// `WRITER_KEYPAIR_SUITE` to V2.
+fn keypair_suite_from_wire_version_with(
+    byte: u8,
+    suite_byte: impl Fn(KeypairSuite) -> u8,
+) -> Result<KeypairSuite, KeypairVersionRejection> {
+    match byte {
+        0 => Err(KeypairVersionRejection::Reserved),
+        v if v == suite_byte(KeypairSuite::V1) => Ok(KeypairSuite::V1),
+        // Future-suite Ok arms go here, between the V1 arm and the
+        // `Older` guard. See the doc comment above for the exact shape.
+        v if v < suite_byte(WRITER_KEYPAIR_SUITE) => {
+            Err(KeypairVersionRejection::Older { version: v })
+        }
+        v => Err(KeypairVersionRejection::Newer { version: v }),
+    }
+}
+
+/// Reverse direction of [`KeypairSuite::public_key_version`]: maps the
+/// `public.key` wire-version byte at offset 0 of a recipient payload
+/// (FORMAT.md §7) back to a logical suite or to a structural rejection.
+///
+/// Single source of truth for the public-key reverse mapping. The
+/// public-key parser translates the [`KeypairVersionRejection`] into
+/// [`crate::error::CryptoError::UnsupportedVersion`] (with the
+/// `OlderPublicKey` / `NewerPublicKey` variants) or
+/// [`crate::error::FormatDefect::MalformedPublicKey`] for the reserved
+/// `0x00` byte at the call site.
+pub(crate) fn keypair_suite_from_public_key_version(
+    byte: u8,
+) -> Result<KeypairSuite, KeypairVersionRejection> {
+    keypair_suite_from_wire_version_with(byte, KeypairSuite::public_key_version)
+}
+
+/// Reverse direction of [`KeypairSuite::private_key_version`]: maps a
+/// `private.key` cleartext-header version byte (FORMAT.md §8) back to a
+/// logical suite or to a structural rejection.
+///
+/// Single source of truth for the private-key reverse mapping. The
+/// private-key parser translates the [`KeypairVersionRejection`] into
+/// [`crate::error::CryptoError::UnsupportedVersion`] (with the
+/// `OlderKey` / `NewerKey` variants) or
+/// [`crate::error::FormatDefect::MalformedPrivateKey`] for the reserved
+/// `0x00` byte at the call site.
+pub(crate) fn keypair_suite_from_private_key_version(
+    byte: u8,
+) -> Result<KeypairSuite, KeypairVersionRejection> {
+    keypair_suite_from_wire_version_with(byte, KeypairSuite::private_key_version)
+}
+
 // ─── Prefix ─────────────────────────────────────────────────────────────────
 
 const PREFIX_VERSION_OFFSET: usize = MAGIC_SIZE;
@@ -626,6 +730,86 @@ mod tests {
         // path) and private-key parsers (decrypt path) both route through
         // this; the test pins symmetry at the gate.
         assert!(keypair_suite_is_supported(KeypairSuite::V1));
+    }
+
+    /// Forward-compat insurance for the public-key reverse mapper. The
+    /// writer's current wire byte MUST round-trip through
+    /// [`keypair_suite_from_public_key_version`] back to
+    /// [`WRITER_KEYPAIR_SUITE`]. If a future change advances
+    /// [`WRITER_KEYPAIR_SUITE`] (say to `V2`) without adding the
+    /// corresponding `v == V2.public_key_version() => Ok(V2)` arm in
+    /// [`keypair_suite_from_wire_version_with`], the writer will emit
+    /// the new byte but the reader will classify it as
+    /// [`KeypairVersionRejection::Newer`] and fail to decode its own
+    /// public keys. This test fails the moment that drift happens.
+    #[test]
+    fn writer_public_key_version_maps_to_writer_suite() {
+        assert_eq!(
+            keypair_suite_from_public_key_version(WRITER_KEYPAIR_SUITE.public_key_version())
+                .unwrap(),
+            WRITER_KEYPAIR_SUITE,
+        );
+    }
+
+    /// Forward-compat insurance for the private-key reverse mapper.
+    /// Symmetric with [`writer_public_key_version_maps_to_writer_suite`]
+    /// for the `private.key` artefact. Locks in the same writer-byte →
+    /// writer-suite round-trip on the private side so a suite bump that
+    /// updated the public reverse mapper but forgot the private one
+    /// fails loudly here.
+    #[test]
+    fn writer_private_key_version_maps_to_writer_suite() {
+        assert_eq!(
+            keypair_suite_from_private_key_version(WRITER_KEYPAIR_SUITE.private_key_version())
+                .unwrap(),
+            WRITER_KEYPAIR_SUITE,
+        );
+    }
+
+    /// Pins the structural rejections that both reverse mappers MUST
+    /// produce for the reserved byte (`0x00`) and an above-writer byte.
+    /// The domain-specific consumers (public.rs / private.rs) translate
+    /// `Reserved` into their `MalformedPublicKey` / `MalformedPrivateKey`
+    /// variants and `Newer` into `NewerPublicKey` / `NewerKey`; the
+    /// boundary tests in those files cover the translated error classes.
+    /// This test is the structural pin at the centralised layer.
+    ///
+    /// `above_writer_*` is computed independently per artefact because
+    /// the suite's public and private wire bytes are allowed to diverge
+    /// in future suites (the [`KeypairSuite`] enum exposes the two via
+    /// distinct methods); a single shared sample byte would have
+    /// hard-coded the V1-era assumption that both sides emit the same
+    /// number.
+    #[test]
+    fn keypair_reverse_mappers_share_structural_rejection_classes() {
+        assert_eq!(
+            keypair_suite_from_public_key_version(0x00),
+            Err(KeypairVersionRejection::Reserved),
+        );
+        assert_eq!(
+            keypair_suite_from_private_key_version(0x00),
+            Err(KeypairVersionRejection::Reserved),
+        );
+        let above_writer_public = WRITER_KEYPAIR_SUITE
+            .public_key_version()
+            .checked_add(1)
+            .expect("writer public-key byte cannot be 0xFF in v1");
+        assert_eq!(
+            keypair_suite_from_public_key_version(above_writer_public),
+            Err(KeypairVersionRejection::Newer {
+                version: above_writer_public,
+            }),
+        );
+        let above_writer_private = WRITER_KEYPAIR_SUITE
+            .private_key_version()
+            .checked_add(1)
+            .expect("writer private-key byte cannot be 0xFF in v1");
+        assert_eq!(
+            keypair_suite_from_private_key_version(above_writer_private),
+            Err(KeypairVersionRejection::Newer {
+                version: above_writer_private,
+            }),
+        );
     }
 
     #[test]

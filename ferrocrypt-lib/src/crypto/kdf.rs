@@ -233,7 +233,7 @@ impl KdfParams {
     /// # Security
     ///
     /// Pair every passphrase with a fresh, cryptographically random salt of
-    /// [`ARGON2_SALT_SIZE`] bytes. Do not log or persist the derived output
+    /// `ARGON2_SALT_SIZE` bytes. Do not log or persist the derived output
     /// except as input to the FerroCrypt wrapping steps defined in
     /// `FORMAT.md`.
     ///

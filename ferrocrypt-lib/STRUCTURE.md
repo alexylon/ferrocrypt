@@ -228,10 +228,21 @@ It contains:
 - magic bytes;
 - the `.fcr` outer file version byte (`FCR_FILE_VERSION`);
 - the `KeypairSuite` enum and the single shared support gate
-  (`keypair_suite_is_supported`) — the wire-version-to-suite translation
-  used by both `key/private.rs` and `key/public.rs`, so encryption-time
-  recipient acceptance and decryption-time identity acceptance are decided
-  by one predicate and cannot drift (`FORMAT.md` §11);
+  (`keypair_suite_is_supported`) — the forward direction (suite → wire byte)
+  is defined here on `KeypairSuite::public_key_version` /
+  `KeypairSuite::private_key_version`, both compile-forced exhaustive
+  matches; the reverse direction (wire byte → suite) is also centralised
+  here as `keypair_suite_from_public_key_version` and
+  `keypair_suite_from_private_key_version` (both `pub(crate)`), backed by
+  the parameterised inner helper `keypair_suite_from_wire_version_with`
+  so adding a new suite is a single match arm covering both artefact
+  domains. The two reverse mappers return a small crate-internal
+  `KeypairVersionRejection` (`Reserved` / `Older` / `Newer`) that the
+  consumers in `key/public.rs` and `key/private.rs` translate into their
+  domain-specific `CryptoError` variants — encryption-time recipient
+  acceptance and decryption-time identity acceptance are therefore
+  decided by one predicate and one mapping table and cannot drift
+  (`FORMAT.md` §11);
 - the writer's logical suite (`WRITER_KEYPAIR_SUITE`);
 - kind bytes;
 - field sizes;
@@ -579,7 +590,7 @@ It contains:
 - Bech32 recipient string encoding;
 - Bech32 recipient string decoding;
 - HRP validation;
-- public-key wire-version-byte (`PUBLIC_KEY_VERSION`, `PUBLIC_KEY_V1_VERSION`) and the wire-version-to-`KeypairSuite` translation that flows through the shared support gate in `format.rs` (`FORMAT.md` §7);
+- public-key wire-version-byte (`PUBLIC_KEY_VERSION`, `PUBLIC_KEY_V1_VERSION`) and the public-flavoured wire-version-to-suite translation, which is now a thin `map_err` wrapper over the centralised `keypair_suite_from_public_key_version` in `format.rs` — this layer picks the public-key error variants (`MalformedPublicKey`, `OlderPublicKey`, `NewerPublicKey`) and routes the suite through the shared support gate in `format.rs` (`FORMAT.md` §7);
 - the writer's current logical version (`PUBLIC_KEY_VERSION`, derived from `WRITER_KEYPAIR_SUITE`);
 - internal SHA3-256 checksum handling;
 - canonical lowercase enforcement;
@@ -602,7 +613,7 @@ It contains:
 It contains:
 
 - `private.key` binary layout;
-- the private-key wire-version constants (`PRIVATE_KEY_VERSION` derived from `WRITER_KEYPAIR_SUITE`; `PRIVATE_KEY_V1_VERSION` derived from `KeypairSuite::V1`) and the wire-version-to-`KeypairSuite` translation that flows through the shared support gate in `format.rs` (`FORMAT.md` §8);
+- the private-key wire-version constants (`PRIVATE_KEY_VERSION` derived from `WRITER_KEYPAIR_SUITE`; `PRIVATE_KEY_V1_VERSION` derived from `KeypairSuite::V1`) and the private-flavoured wire-version-to-suite translation, which is now a thin `map_err` wrapper over the centralised `keypair_suite_from_private_key_version` in `format.rs` — this layer picks the private-key error variants (`MalformedPrivateKey`, `OlderKey`, `NewerKey`) and routes the suite through the shared support gate in `format.rs` (`FORMAT.md` §8);
 - cleartext private-key header parsing;
 - passphrase-wrapped secret encryption;
 - passphrase-wrapped secret decryption;
@@ -1029,6 +1040,7 @@ Each security-sensitive concern has exactly one owner.
 |---|---|
 | Wire constants and fixed structs | `format.rs` |
 | Keypair compatibility suite (`KeypairSuite`, `WRITER_KEYPAIR_SUITE`, `keypair_suite_is_supported`) — single shared support gate for both `public.key` and `private.key` parsers | `format.rs` |
+| Keypair wire-version reverse mapping (`keypair_suite_from_public_key_version`, `keypair_suite_from_private_key_version`, returning `KeypairVersionRejection`) — single source of truth for `0x00` reserved-byte rejection and writer-relative older/newer classification across both artefact domains; consumers in `key/public.rs` and `key/private.rs` translate the rejection into their domain-specific error variants | `format.rs` |
 | `.fcr` header/container assembly | `container.rs` |
 | File-key generation | `crypto/keys.rs` |
 | Payload/header subkey derivation | `crypto/keys.rs` |

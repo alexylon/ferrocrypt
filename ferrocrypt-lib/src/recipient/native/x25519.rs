@@ -238,7 +238,7 @@ impl crate::protocol::IdentityScheme for X25519Identity {
 
     fn unwrap_file_key(
         &self,
-        body: &crate::recipient::entry::RecipientBody,
+        body: &[u8],
         // X25519 unwrap is one ECDH + one HKDF + one AEAD —
         // sub-millisecond. The parameter is intentionally ignored
         // (per the `IdentityScheme::unwrap_file_key` contract); the
@@ -247,8 +247,6 @@ impl crate::protocol::IdentityScheme for X25519Identity {
         _on_event: &dyn Fn(&crate::ProgressEvent),
     ) -> Result<Option<FileKey>, CryptoError> {
         let body_array: &[u8; BODY_LENGTH] = body
-            .bytes
-            .as_slice()
             .try_into()
             .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry))?;
         // Per [`unwrap`]'s contract, wrong-recipient-key and tampered-body
@@ -654,7 +652,6 @@ mod tests {
     #[test]
     fn identity_adapter_propagates_all_zero_shared_secret() {
         use crate::protocol::IdentityScheme;
-        use crate::recipient::entry::RecipientBody;
 
         let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let (sk, pk) = keypair();
@@ -664,11 +661,7 @@ mod tests {
         let identity = X25519Identity {
             recipient_secret: Zeroizing::new(sk),
         };
-        let body = RecipientBody {
-            type_name: TYPE_NAME,
-            bytes: body_bytes.to_vec(),
-        };
-        match identity.unwrap_file_key(&body, &|_| {}) {
+        match identity.unwrap_file_key(&body_bytes, &|_| {}) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)) => {}
             other => panic!(
                 "adapter must propagate all-zero shared as MalformedRecipientEntry, got {other:?}"

@@ -146,9 +146,6 @@ pub enum CryptoError {
     UnsupportedVersion(UnsupportedVersion),
 
     // ─── Key derivation & work limits ────────────────────────────────────
-    /// Argon2 key-derivation failed.
-    #[error(transparent)]
-    KeyDerivation(#[from] argon2::Error),
     /// KDF parameters read from an untrusted header are outside safe
     /// structural bounds.
     #[error("{0}")]
@@ -157,8 +154,7 @@ pub enum CryptoError {
     /// local resource cap. Per `FORMAT.md` §3.2, exceeding a local cap
     /// produces a distinct resource-cap error rather than a generic
     /// malformed-file error. Distinct from
-    /// [`InvalidKdfParams`] (structurally invalid params) and
-    /// [`Self::KeyDerivation`] (Argon2id itself failed): here the params
+    /// [`InvalidKdfParams`] (structurally invalid params): here the params
     /// are well-formed but cost more than the caller is willing to
     /// spend.
     #[error("KDF resource cap exceeded ({mem_cost_kib} KiB, cap {local_cap_kib})")]

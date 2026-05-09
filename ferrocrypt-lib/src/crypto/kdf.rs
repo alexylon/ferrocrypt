@@ -249,8 +249,12 @@ impl KdfParams {
     ///
     /// # Errors
     ///
-    /// Returns [`CryptoError::KeyDerivation`] if the Argon2 implementation
-    /// rejects the parameters or the supplied salt.
+    /// Returns [`CryptoError::InvalidInput`] if the passphrase exceeds the
+    /// 4 KiB structural cap. Argon2id itself is unreachable for valid
+    /// input (callers preflight via [`KdfParams::validate_for_write`] or
+    /// [`KdfParams::from_bytes_structural`], both of which enforce the
+    /// same structural bounds the Argon2id primitive accepts), so any
+    /// Argon2 failure surfaces as [`CryptoError::InternalCryptoFailure`].
     pub fn hash_passphrase(
         &self,
         passphrase: &[u8],
@@ -266,11 +270,18 @@ impl KdfParams {
             self.time_cost,
             self.lanes,
             Some(ENCRYPTION_KEY_SIZE),
-        )?;
+        )
+        .map_err(|_| {
+            CryptoError::InternalCryptoFailure("Internal error: Argon2id parameter rejected")
+        })?;
         let hasher =
             argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
         let mut output = Zeroizing::new([0u8; ENCRYPTION_KEY_SIZE]);
-        hasher.hash_password_into(passphrase, salt, output.as_mut())?;
+        hasher
+            .hash_password_into(passphrase, salt, output.as_mut())
+            .map_err(|_| {
+                CryptoError::InternalCryptoFailure("Internal error: Argon2id derivation failed")
+            })?;
         Ok(output)
     }
 }

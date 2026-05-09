@@ -20,7 +20,7 @@ pub use crate::archive::path::{ascii_case_collision_key, validate_fca_path};
 pub use crate::crypto::kdf::{KDF_PARAMS_SIZE, KdfParams};
 pub use crate::crypto::tlv::validate_tlv;
 pub use crate::key::private::PrivateKeyHeader;
-pub use crate::key::public::{RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT, decode_recipient_string};
+pub use crate::key::public::RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT;
 pub use crate::recipient::native::x25519::validate_private_key_shape;
 
 // `HeaderReadLimits` is part of the stable public API; re-export the
@@ -46,4 +46,13 @@ pub fn validate_no_known_critical(
     max_value_len: u32,
 ) -> Result<(), crate::CryptoError> {
     crate::crypto::tlv::validate_no_known_critical(bytes, max_region_len, max_value_len)
+}
+
+/// Drives `decode_recipient_string` for fuzz targets without leaking
+/// the parsed [`crate::key::public::DecodedRecipient`] type (which
+/// carries a crate-internal `KeypairSuite` enum). Discards the result
+/// so the fuzzer exercises the parser surface without touching
+/// internal types.
+pub fn decode_recipient_string(s: &str, local_max_chars: usize) -> Result<(), crate::CryptoError> {
+    crate::key::public::decode_recipient_string(s, local_max_chars).map(|_| ())
 }

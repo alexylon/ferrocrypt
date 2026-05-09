@@ -113,7 +113,7 @@ pub(crate) trait IdentityScheme {
 
     fn unwrap_file_key(
         &self,
-        body: &RecipientBody,
+        body: &[u8],
         on_event: &dyn Fn(&ProgressEvent),
     ) -> Result<Option<FileKey>, CryptoError>;
 }
@@ -328,11 +328,7 @@ pub(crate) fn decrypt<I: IdentityScheme>(
                 crate::error::FormatDefect::MalformedRecipientEntry,
             ));
         }
-        let body = RecipientBody {
-            type_name: I::TYPE_NAME,
-            bytes: entry.body.clone(),
-        };
-        let file_key = match identity.unwrap_file_key(&body, on_event)? {
+        let file_key = match identity.unwrap_file_key(&entry.body, on_event)? {
             Some(k) => k,
             None => continue,
         };

@@ -563,8 +563,8 @@ impl PassphraseDecryptor {
     ///
     /// Returns [`CryptoError::InvalidInput`] for an empty passphrase, archive
     /// cap violations, output conflicts, or unsafe archived paths. Returns
-    /// [`CryptoError::KeyDerivation`] or [`CryptoError::KdfResourceCapExceeded`]
-    /// for Argon2id failures or rejected KDF costs. Returns authentication
+    /// [`CryptoError::KdfResourceCapExceeded`] for rejected KDF costs.
+    /// Returns authentication
     /// errors such as [`CryptoError::RecipientUnwrapFailed`],
     /// [`CryptoError::HeaderTampered`], [`CryptoError::PayloadTampered`], or
     /// [`CryptoError::PayloadTruncated`] when credentials are wrong or the file
@@ -796,9 +796,7 @@ impl KeyPairGenerator {
     ///
     /// Returns [`CryptoError::InvalidInput`] if the passphrase is empty, KDF
     /// parameters are outside the accepted writer policy, or either key file
-    /// already exists. Returns [`CryptoError::Io`] for filesystem failures and
-    /// [`CryptoError::KeyDerivation`] for Argon2id failures while sealing the
-    /// private key.
+    /// already exists. Returns [`CryptoError::Io`] for filesystem failures.
     pub fn write(
         self,
         output_dir: impl AsRef<Path>,

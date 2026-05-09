@@ -165,10 +165,10 @@ impl<'a> crate::protocol::IdentityScheme for PassphraseIdentity<'a> {
 
     fn unwrap_file_key(
         &self,
-        body: &crate::recipient::entry::RecipientBody,
+        body: &[u8],
         on_event: &dyn Fn(&ProgressEvent),
     ) -> Result<Option<FileKey>, CryptoError> {
-        let body_array: &[u8; BODY_LENGTH] = body.bytes.as_slice().try_into().map_err(|_| {
+        let body_array: &[u8; BODY_LENGTH] = body.try_into().map_err(|_| {
             CryptoError::InvalidFormat(crate::error::FormatDefect::MalformedRecipientEntry)
         })?;
         // KDF cap and structural KDF-param validation happen inside

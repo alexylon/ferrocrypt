@@ -204,7 +204,7 @@ pub(crate) trait IdentityScheme {
 
     fn unwrap_file_key(
         &self,
-        body: &RecipientBody,
+        body: &[u8],
         on_event: &dyn Fn(&ProgressEvent),
     ) -> Result<Option<FileKey>, CryptoError>;
 }

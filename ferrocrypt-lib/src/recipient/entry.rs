@@ -15,7 +15,7 @@
 
 use crate::CryptoError;
 use crate::error::FormatDefect;
-use crate::format::{BODY_LEN_MAX, read_u16_be, read_u32_be};
+use crate::format::{BODY_LEN_MAX, RECIPIENT_COUNT_MAX, read_u16_be, read_u32_be};
 use crate::recipient::name::{TYPE_NAME_MAX_LEN, validate_type_name_grammar};
 use crate::recipient::policy::NativeRecipientType;
 
@@ -129,9 +129,9 @@ impl RecipientEntry {
         if bytes.len() < ENTRY_HEADER_SIZE {
             return Err(malformed());
         }
-        let type_name_len = read_u16_be(bytes, ENTRY_TYPE_NAME_LEN_OFFSET);
-        let recipient_flags = read_u16_be(bytes, ENTRY_RECIPIENT_FLAGS_OFFSET);
-        let body_len = read_u32_be(bytes, ENTRY_BODY_LEN_OFFSET);
+        let type_name_len = read_u16_be(bytes, ENTRY_TYPE_NAME_LEN_OFFSET)?;
+        let recipient_flags = read_u16_be(bytes, ENTRY_RECIPIENT_FLAGS_OFFSET)?;
+        let body_len = read_u32_be(bytes, ENTRY_BODY_LEN_OFFSET)?;
 
         if type_name_len == 0 || type_name_len as usize > TYPE_NAME_MAX_LEN {
             return Err(malformed());
@@ -193,6 +193,9 @@ pub fn parse_recipient_entries(
     expected_count: u16,
     local_body_cap: u32,
 ) -> Result<Vec<RecipientEntry>, CryptoError> {
+    if expected_count == 0 || expected_count > RECIPIENT_COUNT_MAX {
+        return Err(CryptoError::InvalidFormat(FormatDefect::MalformedHeader));
+    }
     let mut entries = Vec::with_capacity(expected_count as usize);
     let mut offset = 0usize;
     for _ in 0..expected_count {
@@ -419,18 +422,29 @@ mod tests {
         assert_eq!(parsed, entry);
     }
 
+    /// `FORMAT.md` §3.2 caps `recipient_count` at `1..=RECIPIENT_COUNT_MAX`.
+    /// `parse_recipient_entries` enforces the lower bound itself, in
+    /// addition to the upstream `HeaderFixed::parse` check, so a future
+    /// caller that forgets the upstream validation cannot smuggle a
+    /// zero-count region past this layer.
     #[test]
-    fn parse_recipient_entries_handles_zero_count_empty_region() {
-        let parsed = parse_recipient_entries(&[], 0, BODY_LEN_LOCAL_CAP_DEFAULT).unwrap();
-        assert!(parsed.is_empty());
+    fn parse_recipient_entries_rejects_zero_count() {
+        match parse_recipient_entries(&[], 0, BODY_LEN_LOCAL_CAP_DEFAULT) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedHeader)) => {}
+            other => panic!("expected MalformedHeader, got {other:?}"),
+        }
+        let bytes = [0u8; 4];
+        match parse_recipient_entries(&bytes, 0, BODY_LEN_LOCAL_CAP_DEFAULT) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedHeader)) => {}
+            other => panic!("expected MalformedHeader, got {other:?}"),
+        }
     }
 
     #[test]
-    fn parse_recipient_entries_rejects_zero_count_with_trailing_bytes() {
-        let bytes = [0u8; 4];
-        match parse_recipient_entries(&bytes, 0, BODY_LEN_LOCAL_CAP_DEFAULT) {
-            Err(CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)) => {}
-            other => panic!("expected MalformedRecipientEntry, got {other:?}"),
+    fn parse_recipient_entries_rejects_over_cap_count() {
+        match parse_recipient_entries(&[], RECIPIENT_COUNT_MAX + 1, BODY_LEN_LOCAL_CAP_DEFAULT) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedHeader)) => {}
+            other => panic!("expected MalformedHeader, got {other:?}"),
         }
     }
 

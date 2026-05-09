@@ -26,7 +26,7 @@ const WINDOWS_RESERVED_CHARS: &[u8] = b"<>:\"|?*";
 /// reader symmetry guarantee.
 ///
 /// Caller has already passed `limits` through
-/// [`ArchiveLimits::validate`]; we don't re-run that check here.
+/// `ArchiveLimits::validate`; we don't re-run that check here.
 pub fn validate_fca_path(path: &str, limits: ArchiveLimits) -> Result<(), CryptoError> {
     if path.is_empty() {
         return Err(CryptoError::InvalidInput(

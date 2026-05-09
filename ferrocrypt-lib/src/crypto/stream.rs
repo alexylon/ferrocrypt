@@ -35,6 +35,11 @@ pub(crate) const BUFFER_SIZE: usize = 65536;
 /// STREAM nonce size: XChaCha20's 24-byte nonce minus 5 bytes for counter and last-block flag.
 pub(crate) const STREAM_NONCE_SIZE: usize = 19;
 
+/// `FORMAT.md` §5: writers MUST NOT emit, and readers MUST reject,
+/// streams with more than `2^32` chunks. Tracked here as a `u64` so
+/// the cap comparison cannot itself overflow.
+const STREAM_CHUNK_COUNT_MAX: u64 = 1u64 << 32;
+
 /// Wraps a [`StreamError`] as an [`io::Error`] with the given kind so that
 /// the typed marker can traverse [`Read`]/[`Write`] trait boundaries and
 /// later be downcast by `From<io::Error> for CryptoError`.
@@ -71,6 +76,10 @@ pub(crate) struct EncryptWriter<W: Write> {
     encryptor: Option<stream::EncryptorBE32<XChaCha20Poly1305>>,
     chunk: Vec<u8>,
     output: Option<W>,
+    /// Number of AEAD chunks already committed to `output` (both `next`
+    /// and `last`). Held as `u64` so the cap check `>= 2^32` cannot
+    /// itself overflow when the next increment lands.
+    chunk_count: u64,
 }
 
 impl<W: Write> EncryptWriter<W> {
@@ -83,6 +92,7 @@ impl<W: Write> EncryptWriter<W> {
             // without zeroizing).
             chunk: Vec::with_capacity(BUFFER_SIZE + TAG_SIZE),
             output: Some(output),
+            chunk_count: 0,
         }
     }
 
@@ -100,11 +110,15 @@ impl<W: Write> EncryptWriter<W> {
         let mut output = self.output.take().ok_or(CryptoError::InternalInvariant(
             "Internal error: encrypt writer already finished",
         ))?;
+        if self.chunk_count >= STREAM_CHUNK_COUNT_MAX {
+            return Err(CryptoError::PayloadChunkCountExceeded);
+        }
         encryptor
             .encrypt_last_in_place(b"", &mut self.chunk)
             .map_err(|_| {
                 CryptoError::InternalCryptoFailure("Internal error: payload encryption failed")
             })?;
+        self.chunk_count += 1;
         output.write_all(&self.chunk)?;
         output.flush()?;
         self.chunk.zeroize();
@@ -126,12 +140,19 @@ impl<W: Write> Write for EncryptWriter<W> {
             // plaintext ends with a full-size FINAL chunk rather than
             // a stray empty trailing chunk.
             if self.chunk.len() == BUFFER_SIZE {
+                if self.chunk_count >= STREAM_CHUNK_COUNT_MAX {
+                    return Err(stream_io_error(
+                        io::ErrorKind::InvalidData,
+                        StreamError::ChunkCountExceeded,
+                    ));
+                }
                 let encryptor = self.encryptor.as_mut().ok_or_else(|| {
                     stream_io_error(io::ErrorKind::Other, StreamError::StateExhausted)
                 })?;
                 encryptor
                     .encrypt_next_in_place(b"", &mut self.chunk)
                     .map_err(|_| stream_io_error(io::ErrorKind::Other, StreamError::EncryptAead))?;
+                self.chunk_count += 1;
                 let output = self.output.as_mut().ok_or_else(|| {
                     stream_io_error(io::ErrorKind::Other, StreamError::StateExhausted)
                 })?;
@@ -206,6 +227,10 @@ pub(crate) struct DecryptReader<R: Read> {
     /// means no peek byte is held (initial state, or after the final
     /// chunk has been consumed).
     lookahead: Option<u8>,
+    /// Number of AEAD chunks already authenticated and exposed as
+    /// plaintext. `u64` for cap-comparison hygiene, same as
+    /// [`EncryptWriter::chunk_count`].
+    chunk_count: u64,
 }
 
 impl<R: Read> DecryptReader<R> {
@@ -219,6 +244,7 @@ impl<R: Read> DecryptReader<R> {
             chunk: Vec::with_capacity(BUFFER_SIZE + TAG_SIZE),
             pos: 0,
             done: false,
+            chunk_count: 0,
             lookahead: None,
         }
     }
@@ -256,6 +282,25 @@ impl<R: Read> DecryptReader<R> {
     /// reader still surfaces [`StreamError::ExtraData`] →
     /// [`CryptoError::ExtraDataAfterPayload`].
     fn fill_buffer(&mut self) -> io::Result<()> {
+        // Wrap the refill in an inner result so every error path —
+        // explicit `return Err` and `?`-propagated alike — funnels
+        // through a single zeroize-and-park step before bubbling out.
+        // Without this, a caller that retries `read()` after an `Err`
+        // could observe successfully-decrypted plaintext still
+        // sitting in `self.chunk` (single-chunk streams + a reader
+        // that returns Ok(0) and then more bytes is the trip-wire).
+        let result = self.fill_buffer_inner();
+        if result.is_err() {
+            self.chunk.zeroize();
+            // Park `pos` past the (now-empty) chunk so a retry-after-Err
+            // read takes the `pos >= chunk.len()` branch and returns
+            // Ok(0) rather than copying stale bytes.
+            self.pos = self.chunk.len();
+        }
+        result
+    }
+
+    fn fill_buffer_inner(&mut self) -> io::Result<()> {
         const ENCRYPTED_CHUNK_SIZE: usize = BUFFER_SIZE + TAG_SIZE;
 
         // Zeroize the previous chunk (plaintext from the last call) before
@@ -302,6 +347,13 @@ impl<R: Read> DecryptReader<R> {
             0
         };
 
+        if self.chunk_count >= STREAM_CHUNK_COUNT_MAX {
+            return Err(stream_io_error(
+                io::ErrorKind::InvalidData,
+                StreamError::ChunkCountExceeded,
+            ));
+        }
+
         if filled == ENCRYPTED_CHUNK_SIZE && probe_n > 0 {
             // Non-final chunk: stash the peek byte for the next refill.
             self.lookahead = Some(probe[0]);
@@ -313,6 +365,7 @@ impl<R: Read> DecryptReader<R> {
                 .map_err(|_| {
                     stream_io_error(io::ErrorKind::InvalidData, StreamError::DecryptAead)
                 })?;
+            self.chunk_count += 1;
         } else {
             // Final chunk: short read OR exact-`ENCRYPTED_CHUNK_SIZE` with EOF.
             let decryptor = self.decryptor.take().ok_or_else(|| {
@@ -323,6 +376,7 @@ impl<R: Read> DecryptReader<R> {
                 .map_err(|_| {
                     stream_io_error(io::ErrorKind::InvalidData, StreamError::DecryptAead)
                 })?;
+            self.chunk_count += 1;
             self.done = true;
 
             // Defense-in-depth trailing-data probe. With the peek-ahead
@@ -855,5 +909,124 @@ mod tests {
         // 500 authenticated plaintext bytes are dropped on the Err path —
         // that's the correct fail-closed outcome for a tainted stream.
         assert_eq!(out.as_slice(), &plaintext[..BUFFER_SIZE]);
+    }
+
+    /// Regression: single-chunk plaintext + a pathological reader that
+    /// triggers `ExtraData` MUST NOT serve any plaintext bytes if the
+    /// caller retries `read()` after the error. Pre-fix, `fill_buffer`
+    /// returned `Err` while leaving the decrypted plaintext in
+    /// `self.chunk` and `self.pos = 0` — a caller that retried would
+    /// observe the authenticated but tainted plaintext. Post-fix, every
+    /// error path zeroizes the chunk and parks `pos` past the end so
+    /// the retry returns `Ok(0)`.
+    #[test]
+    fn streaming_aead_no_plaintext_after_err_retry() {
+        // 500 bytes is well under BUFFER_SIZE, so the whole plaintext
+        // lands in a single short final chunk — exactly the leak
+        // window the regression covers.
+        let plaintext: Vec<u8> = (0..500).map(|i| (i % 251) as u8).collect();
+        let ciphertext = encrypt_to_vec(&plaintext);
+        let trailing = b"trailing";
+
+        let reader_wrapper = LegitThenExtraReader::new(&ciphertext, trailing);
+        let mut reader = payload_decryptor(&test_key(), &TEST_NONCE, reader_wrapper);
+        let mut scratch = [0u8; 4096];
+
+        // First call: triggers fill_buffer, decrypt_last succeeds, probe
+        // fires, returns Err. No bytes were copied into `scratch`.
+        let first = reader.read(&mut scratch);
+        let err = first.expect_err("expected ExtraData error on first read");
+        let marker = err
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<StreamError>())
+            .expect("expected StreamError marker");
+        assert!(
+            matches!(marker, StreamError::ExtraData),
+            "expected StreamError::ExtraData, got {marker:?}"
+        );
+
+        // Retry after Err: the buffer must already be parked past the
+        // (now-zeroized) chunk so the retry returns Ok(0) instead of
+        // copying plaintext.
+        let retry = reader.read(&mut scratch);
+        assert_eq!(
+            retry.expect("retry-after-Err must not surface a new I/O error"),
+            0,
+            "no plaintext should leak after Err return"
+        );
+    }
+
+    /// Regression: encrypt-side chunk-count cap MUST fire before the
+    /// upstream STREAM-BE32 counter overflows. Fast-forwards the
+    /// writer's chunk counter to the cap and confirms the next
+    /// `encrypt_next` call rejects with `ChunkCountExceeded` rather
+    /// than producing a chunk.
+    #[test]
+    fn streaming_aead_writer_chunk_count_cap_rejects() {
+        let mut ciphertext: Vec<u8> = Vec::new();
+        let mut writer = payload_encryptor(&test_key(), &TEST_NONCE, &mut ciphertext);
+        writer.chunk_count = STREAM_CHUNK_COUNT_MAX;
+
+        // Write `BUFFER_SIZE + 1` bytes: the first BUFFER_SIZE bytes
+        // fill the deferred chunk, the +1 forces the cap check to
+        // run before `encrypt_next_in_place`.
+        let plaintext = vec![0u8; BUFFER_SIZE + 1];
+        let err = writer
+            .write_all(&plaintext)
+            .expect_err("expected cap rejection from EncryptWriter::write");
+        let marker = err
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<StreamError>())
+            .expect("expected StreamError marker");
+        assert!(
+            matches!(marker, StreamError::ChunkCountExceeded),
+            "expected StreamError::ChunkCountExceeded, got {marker:?}"
+        );
+    }
+
+    /// Regression: encrypt-side `finish()` cap MUST fire when the
+    /// final chunk would push `chunk_count` past the cap.
+    #[test]
+    fn streaming_aead_writer_finish_chunk_count_cap_rejects() {
+        let mut ciphertext: Vec<u8> = Vec::new();
+        let mut writer = payload_encryptor(&test_key(), &TEST_NONCE, &mut ciphertext);
+        writer.chunk_count = STREAM_CHUNK_COUNT_MAX;
+
+        let err = writer
+            .finish()
+            .expect_err("expected cap rejection from EncryptWriter::finish");
+        assert!(
+            matches!(err, CryptoError::PayloadChunkCountExceeded),
+            "expected PayloadChunkCountExceeded, got {err:?}"
+        );
+    }
+
+    /// Regression: decrypt-side chunk-count cap MUST fire before
+    /// `decrypt_next_in_place` runs on a stream past the cap.
+    #[test]
+    fn streaming_aead_reader_chunk_count_cap_rejects() {
+        // Two-chunk plaintext so the second `fill_buffer` call has a
+        // chance to trip the cap. The first chunk decrypts cleanly;
+        // the second is rejected by the cap before any AEAD work runs.
+        let plaintext: Vec<u8> = (0..(BUFFER_SIZE * 2)).map(|i| (i % 251) as u8).collect();
+        let ciphertext = encrypt_to_vec(&plaintext);
+        let mut reader = payload_decryptor(&test_key(), &TEST_NONCE, ciphertext.as_slice());
+        reader.chunk_count = STREAM_CHUNK_COUNT_MAX;
+
+        let (out, err) = drain_decrypt_reader(&mut reader);
+        let err = err.expect("expected cap rejection from DecryptReader");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let marker = err
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<StreamError>())
+            .expect("expected StreamError marker");
+        assert!(
+            matches!(marker, StreamError::ChunkCountExceeded),
+            "expected StreamError::ChunkCountExceeded, got {marker:?}"
+        );
+        assert!(
+            out.is_empty(),
+            "no plaintext should leak when the chunk-count cap fires on the first chunk"
+        );
     }
 }

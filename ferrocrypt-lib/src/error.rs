@@ -10,6 +10,7 @@ use crate::recipient::policy::MixingPolicy;
 /// 64-char desktop status-line budget enforced by
 /// [`tests::user_facing_messages_fit_status_line_budget`].
 const TYPE_NAME_DISPLAY_MAX: usize = 13;
+const _: () = assert!(TYPE_NAME_DISPLAY_MAX >= 1);
 
 /// Wraps a `type_name` so its `Display` rendering truncates to
 /// [`TYPE_NAME_DISPLAY_MAX`] chars, replacing the tail with `…` when
@@ -367,6 +368,12 @@ pub enum CryptoError {
     /// decrypted. The file has unexpected trailing data.
     #[error("Encrypted file has unexpected trailing data")]
     ExtraDataAfterPayload,
+    /// The encrypted payload exceeds the `2^32`-chunk cap mandated by
+    /// `FORMAT.md` §5. Surfaces from the writer-side cap (refuses to
+    /// emit the over-cap chunk) and the reader-side cap (refuses to
+    /// consume one).
+    #[error("Encrypted payload exceeds chunk-count cap")]
+    PayloadChunkCountExceeded,
 
     // ─── Internal invariants ─────────────────────────────────────────────
     /// A non-cryptographic invariant that should hold by construction did
@@ -685,6 +692,11 @@ pub(crate) enum StreamError {
     ExtraData,
     /// Writer or reader state was already consumed (programmer bug).
     StateExhausted,
+    /// `FORMAT.md` §5: writers MUST NOT emit more than `2^32` chunks
+    /// and readers MUST reject streams that exceed that count. Surfaced
+    /// when ferrocrypt's own counter trips before the upstream
+    /// STREAM-BE32 primitive's counter overflow does.
+    ChunkCountExceeded,
 }
 
 impl std::fmt::Display for StreamError {
@@ -695,6 +707,7 @@ impl std::fmt::Display for StreamError {
             StreamError::Truncated => "Encrypted stream truncated",
             StreamError::ExtraData => "Encrypted stream has trailing data",
             StreamError::StateExhausted => "Internal error: stream state already finalized",
+            StreamError::ChunkCountExceeded => "Encrypted stream exceeds chunk-count cap",
         };
         f.write_str(msg)
     }
@@ -718,6 +731,7 @@ impl From<std::io::Error> for CryptoError {
                 StreamError::DecryptAead => CryptoError::PayloadTampered,
                 StreamError::Truncated => CryptoError::PayloadTruncated,
                 StreamError::ExtraData => CryptoError::ExtraDataAfterPayload,
+                StreamError::ChunkCountExceeded => CryptoError::PayloadChunkCountExceeded,
                 StreamError::EncryptAead => {
                     CryptoError::InternalCryptoFailure("Internal error: payload encryption failed")
                 }

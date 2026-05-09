@@ -6,7 +6,9 @@
 //! crypto or container module.
 
 use std::ffi::OsStr;
+use std::fs::File;
 use std::io;
+use std::io::Read;
 use std::path::Path;
 
 use crate::CryptoError;
@@ -17,6 +19,30 @@ use crate::CryptoError;
 /// `.fcr` tempfile and by `archive::decode::unarchive` for the per-root
 /// rename-into-place pattern.
 pub(crate) const INCOMPLETE_SUFFIX: &str = ".incomplete";
+
+/// Reads `path` into memory, refusing files whose byte length exceeds
+/// `cap`. Bounds the allocation at `cap + 1` bytes so a caller pointed
+/// at a multi-gigabyte file rejects in-flight rather than after the
+/// kernel page-faults the whole thing in. The `over_cap_error` closure
+/// supplies the typed rejection so each caller can route the failure
+/// to the right diagnostic class (`MalformedPublicKey` / `MalformedPrivateKey`).
+pub(crate) fn read_file_capped(
+    path: &Path,
+    cap: usize,
+    over_cap_error: impl FnOnce() -> CryptoError,
+) -> Result<Vec<u8>, CryptoError> {
+    let mut file = File::open(path).map_err(map_user_path_io_error)?;
+    let mut buf = Vec::with_capacity(cap.saturating_add(1).min(64 * 1024));
+    let read = file
+        .by_ref()
+        .take(cap as u64 + 1)
+        .read_to_end(&mut buf)
+        .map_err(CryptoError::Io)?;
+    if read > cap {
+        return Err(over_cap_error());
+    }
+    Ok(buf)
+}
 
 pub(crate) fn file_stem(filename: &Path) -> Result<&OsStr, CryptoError> {
     filename

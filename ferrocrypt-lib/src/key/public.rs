@@ -84,6 +84,13 @@ const _: () = assert!(PAYLOAD_KEY_MATERIAL_LEN_OFFSET + size_of::<u32>() == PAYL
 /// ceiling so the worst-case payload still encodes within it.
 pub(crate) const RECIPIENT_STRING_LEN_MAX: usize = 20_000;
 
+/// File-read cap for `public.key`: [`RECIPIENT_STRING_LEN_MAX`] ASCII
+/// chars plus one optional trailing `LF`. Anything larger cannot
+/// possibly be a valid v1 public-key file, so the reader rejects
+/// in-flight rather than allocating a multi-gigabyte buffer for an
+/// adversarial input.
+pub(crate) const PUBLIC_KEY_FILE_READ_CAP_BYTES: usize = RECIPIENT_STRING_LEN_MAX + 1;
+
 /// Recommended local cap on recipient-string length for untrusted
 /// input. X25519 produces ~106 ASCII chars; 1 KiB leaves headroom for
 /// future native key types without forcing every caller to raise the
@@ -209,7 +216,7 @@ pub(crate) fn encode_recipient_string_for_suite(
 /// SHA3-256 checksum.
 ///
 /// `local_max_chars` is a local policy cap checked before decode work runs.
-/// The v1 structural ceiling is [`RECIPIENT_STRING_LEN_MAX`] (20,000 ASCII
+/// The v1 structural ceiling is `RECIPIENT_STRING_LEN_MAX` (20,000 ASCII
 /// characters); callers should normally pass the smaller
 /// [`RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT`] for untrusted input unless they
 /// intentionally accept larger future recipient strings.
@@ -267,9 +274,9 @@ pub fn decode_recipient_string(
     let suite = public_key_wire_version_to_suite(wire_version)?;
     ensure_public_key_suite_supported(suite)?;
 
-    let type_name_len = read_u16_be(&data, PAYLOAD_TYPE_NAME_LEN_OFFSET);
+    let type_name_len = read_u16_be(&data, PAYLOAD_TYPE_NAME_LEN_OFFSET)?;
     check_type_name_len(type_name_len)?;
-    let key_material_len = read_u32_be(&data, PAYLOAD_KEY_MATERIAL_LEN_OFFSET);
+    let key_material_len = read_u32_be(&data, PAYLOAD_KEY_MATERIAL_LEN_OFFSET)?;
     check_key_material_len(key_material_len)?;
     check_total_payload_size(data.len(), type_name_len, key_material_len)?;
 
@@ -543,7 +550,9 @@ pub(crate) fn fingerprint_hex(type_name: &str, key_material: &[u8]) -> String {
 /// [`ResolvedPublicKey`] so callers (in particular [`PublicKey::resolve`])
 /// can re-emit the original suite rather than the current writer's.
 pub(crate) fn read_public_key(path: &std::path::Path) -> Result<ResolvedPublicKey, CryptoError> {
-    let bytes = std::fs::read(path).map_err(crate::fs::paths::map_user_path_io_error)?;
+    let bytes = crate::fs::paths::read_file_capped(path, PUBLIC_KEY_FILE_READ_CAP_BYTES, || {
+        CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)
+    })?;
     if matches!(
         crate::key::files::KeyFileKind::classify(&bytes),
         crate::key::files::KeyFileKind::Private

@@ -47,17 +47,20 @@ use crate::error::{FormatDefect, UnsupportedVersion};
 // `key::private::PrivateKeyHeader`, `KdfParams`). Taking the buffer plus an
 // offset lets callers use named offset constants directly.
 
-pub(crate) fn read_u16_be(bytes: &[u8], offset: usize) -> u16 {
-    u16::from_be_bytes([bytes[offset], bytes[offset + 1]])
+pub(crate) fn read_u16_be(bytes: &[u8], offset: usize) -> Result<u16, CryptoError> {
+    let chunk: &[u8; 2] = bytes
+        .get(offset..offset + size_of::<u16>())
+        .and_then(|s| s.try_into().ok())
+        .ok_or(CryptoError::InvalidFormat(FormatDefect::MalformedHeader))?;
+    Ok(u16::from_be_bytes(*chunk))
 }
 
-pub(crate) fn read_u32_be(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_be_bytes([
-        bytes[offset],
-        bytes[offset + 1],
-        bytes[offset + 2],
-        bytes[offset + 3],
-    ])
+pub(crate) fn read_u32_be(bytes: &[u8], offset: usize) -> Result<u32, CryptoError> {
+    let chunk: &[u8; 4] = bytes
+        .get(offset..offset + size_of::<u32>())
+        .and_then(|s| s.try_into().ok())
+        .ok_or(CryptoError::InvalidFormat(FormatDefect::MalformedHeader))?;
+    Ok(u32::from_be_bytes(*chunk))
 }
 
 pub(crate) fn write_u16_be(bytes: &mut [u8], offset: usize, value: u16) {
@@ -462,9 +465,9 @@ impl Prefix {
             .ok_or(CryptoError::InvalidFormat(FormatDefect::WrongKind {
                 kind: kind_byte,
             }))?;
-        let prefix_flags = read_u16_be(bytes, PREFIX_FLAGS_OFFSET);
+        let prefix_flags = read_u16_be(bytes, PREFIX_FLAGS_OFFSET)?;
         check_prefix_flags(prefix_flags)?;
-        let header_len = read_u32_be(bytes, PREFIX_HEADER_LEN_OFFSET);
+        let header_len = read_u32_be(bytes, PREFIX_HEADER_LEN_OFFSET)?;
         check_header_len(header_len)?;
         Ok(Self {
             version,
@@ -590,10 +593,10 @@ impl HeaderFixed {
         let mut stream_nonce = [0u8; STREAM_NONCE_SIZE];
         stream_nonce.copy_from_slice(&bytes[HEADER_FIXED_STREAM_NONCE_OFFSET..HEADER_FIXED_SIZE]);
         let parsed = Self {
-            header_flags: read_u16_be(bytes, HEADER_FIXED_FLAGS_OFFSET),
-            recipient_count: read_u16_be(bytes, HEADER_FIXED_RECIPIENT_COUNT_OFFSET),
-            recipient_entries_len: read_u32_be(bytes, HEADER_FIXED_RECIPIENT_ENTRIES_LEN_OFFSET),
-            ext_len: read_u32_be(bytes, HEADER_FIXED_EXT_LEN_OFFSET),
+            header_flags: read_u16_be(bytes, HEADER_FIXED_FLAGS_OFFSET)?,
+            recipient_count: read_u16_be(bytes, HEADER_FIXED_RECIPIENT_COUNT_OFFSET)?,
+            recipient_entries_len: read_u32_be(bytes, HEADER_FIXED_RECIPIENT_ENTRIES_LEN_OFFSET)?,
+            ext_len: read_u32_be(bytes, HEADER_FIXED_EXT_LEN_OFFSET)?,
             stream_nonce,
         };
         parsed.validate_structural(header_len)?;

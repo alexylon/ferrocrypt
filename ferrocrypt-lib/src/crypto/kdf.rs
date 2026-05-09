@@ -160,9 +160,9 @@ impl KdfParams {
         bytes: &[u8; KDF_PARAMS_SIZE],
     ) -> Result<Self, CryptoError> {
         let params = Self {
-            mem_cost: read_u32_be(bytes, KDF_MEM_COST_OFFSET),
-            time_cost: read_u32_be(bytes, KDF_TIME_COST_OFFSET),
-            lanes: read_u32_be(bytes, KDF_LANES_OFFSET),
+            mem_cost: read_u32_be(bytes, KDF_MEM_COST_OFFSET)?,
+            time_cost: read_u32_be(bytes, KDF_TIME_COST_OFFSET)?,
+            lanes: read_u32_be(bytes, KDF_LANES_OFFSET)?,
         };
         params.validate_structural()?;
         Ok(params)

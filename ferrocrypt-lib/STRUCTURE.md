@@ -838,6 +838,7 @@ It contains:
 - base-name extraction;
 - user-path error mapping;
 - occupied-path / dangling-symlink rejection (`path_occupied`, `reject_occupied`) — `lstat`-based "is anything here?" preflight used by encrypt and keygen output prechecks so a stale symlink rejects in milliseconds instead of after Argon2id;
+- bounded file reads (`read_file_capped`) — `Read::take(cap + 1)` then over-cap rejection, used by `key/public.rs::read_public_key`, `recipient/native/x25519.rs::open_x25519_private_key`, and `api::validate_private_key_file` to refuse multi-gigabyte attacker-controlled key files before any allocation;
 - general path normalization required outside archive semantics.
 
 It does not enforce FCA archive path rules. Archive path rules belong only to `archive/path.rs`.

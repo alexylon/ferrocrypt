@@ -86,11 +86,21 @@ fn rename_no_clobber_impl(from: &Path, to: &Path) -> io::Result<()> {
 
 #[cfg(target_os = "windows")]
 fn rename_no_clobber_impl(from: &Path, to: &Path) -> io::Result<()> {
-    if to.try_exists()? {
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "Target already exists",
-        ));
+    // `symlink_metadata` does not follow links, so a dangling symlink
+    // at `to` reports `Ok(_)` and rejects here instead of falling
+    // through `Path::try_exists()` (which follows the link to a
+    // missing target and returns `Ok(false)`). Closes the gap that
+    // `MoveFileExW(..., MOVEFILE_REPLACE_EXISTING)` would otherwise
+    // exploit by replacing the dangling link with the staged file.
+    match std::fs::symlink_metadata(to) {
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Target already exists",
+            ));
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
     }
     std::fs::rename(from, to)
 }

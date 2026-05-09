@@ -425,6 +425,19 @@ fn walk_directory(
             ))
         })?;
 
+        // Defense-in-depth against custom filesystems that smuggle
+        // path separators inside a single `file_name()` entry. POSIX
+        // and NTFS forbid these bytes natively, but a FUSE / network
+        // mount with permissive semantics could let one slip through
+        // and silently mint a multi-component FCA path from what was
+        // meant to be a single source filename.
+        if name_str.bytes().any(|b| b == b'/' || b == b'\\') {
+            return Err(CryptoError::InvalidInput(format!(
+                "Source filename contains path separator: {}",
+                dir_entry.path().display()
+            )));
+        }
+
         let fca_path_utf8 = format!("{fca_prefix}/{name_str}");
 
         if file_type.is_file() {

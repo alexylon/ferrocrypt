@@ -80,6 +80,18 @@ pub(crate) const PRIVATE_KEY_WRAPPED_SECRET_LEN_MAX: u32 = 16_777_216;
 /// caller to raise the cap.
 pub(crate) const PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT: u32 = 4_096;
 
+/// File-read cap for `private.key`: header + every field at its
+/// structural maximum. A file beyond this cannot decode regardless of
+/// content, so the reader rejects in-flight rather than allocating
+/// multi-gigabytes for an adversarial input. `TYPE_NAME_MAX_LEN` is
+/// the widest possible `type_name`; the rest are the spec's `*_MAX`
+/// constants.
+pub(crate) const PRIVATE_KEY_FILE_READ_CAP_BYTES: usize = PRIVATE_KEY_HEADER_FIXED_SIZE
+    + crate::recipient::name::TYPE_NAME_MAX_LEN
+    + PRIVATE_KEY_PUBLIC_LEN_MAX as usize
+    + PRIVATE_KEY_EXT_LEN_MAX as usize
+    + PRIVATE_KEY_WRAPPED_SECRET_LEN_MAX as usize;
+
 const VERSION_OFFSET: usize = MAGIC_SIZE;
 const KIND_OFFSET: usize = VERSION_OFFSET + 1;
 const KEY_FLAGS_OFFSET: usize = KIND_OFFSET + 1;
@@ -95,13 +107,23 @@ const _: () = assert!(WRAP_NONCE_OFFSET + WRAP_NONCE_SIZE == PRIVATE_KEY_HEADER_
 /// Cleartext fixed-header section of a v1 `private.key`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrivateKeyHeader {
+    /// Reserved bit-flags field (`FORMAT.md` §8). MUST be `0` in v1.
     pub key_flags: u16,
+    /// Byte length of the recipient `type_name` that follows the header.
     pub type_name_len: u16,
+    /// Byte length of the cleartext `public_material` that follows the
+    /// `type_name`.
     pub public_len: u32,
+    /// Byte length of the cleartext `ext` TLV region.
     pub ext_len: u32,
+    /// Byte length of the AEAD-wrapped `secret_material` (plaintext +
+    /// 16-byte Poly1305 tag).
     pub wrapped_secret_len: u32,
+    /// Argon2id salt used to derive the wrap key from the passphrase.
     pub argon2_salt: [u8; ARGON2_SALT_SIZE],
+    /// Argon2id parameters (mem / time / lanes) used to derive the wrap key.
     pub kdf_params: KdfParams,
+    /// XChaCha20-Poly1305 nonce used to seal `secret_material`.
     pub wrap_nonce: [u8; WRAP_NONCE_SIZE],
 }
 
@@ -130,7 +152,7 @@ impl PrivateKeyHeader {
     /// Validates magic → version → kind → key_flags → length-field
     /// structural caps → kdf_params structural ranges. Length-field
     /// consistency against the on-disk file size is checked at the
-    /// [`open_private_key`] layer.
+    /// `open_private_key` layer.
     pub fn parse(bytes: &[u8; PRIVATE_KEY_HEADER_FIXED_SIZE]) -> Result<Self, CryptoError> {
         if bytes[..MAGIC_SIZE] != MAGIC {
             return Err(CryptoError::InvalidFormat(FormatDefect::NotAKeyFile));
@@ -142,15 +164,15 @@ impl PrivateKeyHeader {
         if kind_byte != KIND_PRIVATE_KEY {
             return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
         }
-        let key_flags = read_u16_be(bytes, KEY_FLAGS_OFFSET);
+        let key_flags = read_u16_be(bytes, KEY_FLAGS_OFFSET)?;
         check_key_flags(key_flags)?;
-        let type_name_len = read_u16_be(bytes, TYPE_NAME_LEN_OFFSET);
+        let type_name_len = read_u16_be(bytes, TYPE_NAME_LEN_OFFSET)?;
         check_type_name_len(type_name_len)?;
-        let public_len = read_u32_be(bytes, PUBLIC_LEN_OFFSET);
+        let public_len = read_u32_be(bytes, PUBLIC_LEN_OFFSET)?;
         check_public_len(public_len)?;
-        let ext_len = read_u32_be(bytes, EXT_LEN_OFFSET);
+        let ext_len = read_u32_be(bytes, EXT_LEN_OFFSET)?;
         check_ext_len(ext_len)?;
-        let wrapped_secret_len = read_u32_be(bytes, WRAPPED_SECRET_LEN_OFFSET);
+        let wrapped_secret_len = read_u32_be(bytes, WRAPPED_SECRET_LEN_OFFSET)?;
         check_wrapped_secret_len(wrapped_secret_len)?;
         let mut argon2_salt = [0u8; ARGON2_SALT_SIZE];
         argon2_salt
@@ -303,6 +325,12 @@ pub(crate) fn seal_private_key(
     passphrase: &SecretString,
     kdf_params: &KdfParams,
 ) -> Result<Vec<u8>, CryptoError> {
+    // Pin writer/reader symmetry: every byte the writer commits to disk
+    // must satisfy the rules the reader's parser will later enforce.
+    // Without this, a future caller could omit `validate_for_write` and
+    // produce a structurally-invalid `private.key` whose Argon2id work
+    // is wasted because no reader will accept it.
+    (*kdf_params).validate_for_write(None)?;
     validate_type_name_grammar(type_name)?;
 
     let type_name_bytes = type_name.as_bytes();

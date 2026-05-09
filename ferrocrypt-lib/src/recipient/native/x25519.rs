@@ -313,11 +313,16 @@ pub(crate) fn open_x25519_private_key(
 ) -> Result<Zeroizing<[u8; PRIVATE_KEY_SIZE]>, CryptoError> {
     use crate::crypto::tlv::validate_tlv;
     use crate::error::FormatDefect;
-    use crate::fs::paths::map_user_path_io_error;
+    use crate::fs::paths::read_file_capped;
     use crate::key::files::KeyFileKind;
-    use crate::key::private::{PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT, open_private_key};
+    use crate::key::private::{
+        PRIVATE_KEY_FILE_READ_CAP_BYTES, PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT,
+        open_private_key,
+    };
 
-    let bytes = std::fs::read(path).map_err(map_user_path_io_error)?;
+    let bytes = read_file_capped(path, PRIVATE_KEY_FILE_READ_CAP_BYTES, || {
+        CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)
+    })?;
 
     // Friendly diagnostic for the cross-mix-up: a user pointing the
     // private-key reader at a `public.key` text file gets

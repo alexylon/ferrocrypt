@@ -430,7 +430,8 @@ pub(crate) fn serialize_manifest(
 /// Parses the manifest byte sequence into a [`Manifest`]. Validates
 /// per-entry shape, UTF-8 path grammar (via [`validate_fca_path`]),
 /// total-bytes equality against `header.total_file_bytes`, no-trailing-
-/// bytes, and the manifest tree shape (via [`validate_manifest_tree`]).
+/// bytes, and the manifest tree shape (via the crate-internal
+/// `validate_manifest_tree`).
 ///
 /// The caller MUST have already trimmed `bytes` to exactly
 /// `header.manifest_len` bytes.

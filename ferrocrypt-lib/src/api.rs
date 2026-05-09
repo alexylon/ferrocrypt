@@ -1010,7 +1010,11 @@ pub fn default_encrypted_filename(input_path: impl AsRef<Path>) -> Result<String
 /// [`CryptoError::InvalidFormat`] or [`CryptoError::UnsupportedVersion`] if the
 /// file is not a v1 private key, is malformed, or is a public key.
 pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError> {
-    let data = fs::read(key_file.as_ref()).map_err(paths::map_user_path_io_error)?;
+    let data = paths::read_file_capped(
+        key_file.as_ref(),
+        crate::key::private::PRIVATE_KEY_FILE_READ_CAP_BYTES,
+        || CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey),
+    )?;
     if matches!(KeyFileKind::classify(&data), KeyFileKind::Public) {
         return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
     }

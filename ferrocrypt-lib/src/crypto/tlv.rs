@@ -86,8 +86,8 @@ pub(crate) fn scan_tlv_region<'a>(
         if bytes.len() - cursor < ENTRY_HEADER_SIZE {
             return Err(CryptoError::InvalidFormat(FormatDefect::MalformedTlv));
         }
-        let tag = read_u16_be(bytes, cursor);
-        let len = read_u32_be(bytes, cursor + size_of::<u16>());
+        let tag = read_u16_be(bytes, cursor)?;
+        let len = read_u32_be(bytes, cursor + size_of::<u16>())?;
         cursor += ENTRY_HEADER_SIZE;
 
         let class = classify_tlv_tag(tag)?;
@@ -161,8 +161,8 @@ pub(crate) fn validate_no_known_critical(
 /// defines no known criticals).
 ///
 /// Used by FCR header `ext_bytes` and `private.key` `ext_bytes`.
-/// FCA archive- and entry-level extension regions call
-/// [`validate_no_known_critical`] with their own caps.
+/// FCA archive- and entry-level extension regions call the
+/// crate-internal `validate_no_known_critical` with their own caps.
 pub fn validate_tlv(ext_bytes: &[u8]) -> Result<(), CryptoError> {
     validate_no_known_critical(ext_bytes, EXT_LEN_MAX, EXT_LEN_MAX)
 }

@@ -11,13 +11,16 @@ use std::path::PathBuf;
 /// drive bounded allocations.
 #[derive(Debug, Clone, Copy)]
 pub struct FcaHeader {
+    /// Number of manifest entries (`FORMAT.md` §9).
     pub entry_count: u32,
     /// Byte length of the FCA archive-level TLV region (`archive_ext`)
     /// that immediately follows the fixed header. v1 writers emit
     /// zero; v1.x readers parse + validate any non-zero region under
     /// the no-known-critical policy.
     pub archive_ext_len: u32,
+    /// Byte length of the serialised manifest that follows `archive_ext`.
     pub manifest_len: u32,
+    /// Sum of `size` across every file entry in the manifest.
     pub total_file_bytes: u64,
 }
 
@@ -25,7 +28,9 @@ pub struct FcaHeader {
 /// directory. v1 has no other kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchiveEntryKind {
+    /// Regular file; `size` is the cleartext byte length.
     File,
+    /// Directory; `size` MUST be `0`.
     Directory,
 }
 
@@ -34,9 +39,13 @@ pub enum ArchiveEntryKind {
 /// downstream code that needs a `Path` constructs one on demand.
 #[derive(Debug, Clone)]
 pub struct ArchiveEntry {
+    /// File or directory classification.
     pub kind: ArchiveEntryKind,
+    /// Forward-slash-separated archive path (`FORMAT.md` §9.6 grammar).
     pub path_utf8: String,
+    /// POSIX-style mode bits the reader applies to the extracted entry.
     pub mode: u32,
+    /// Cleartext byte length for files; `0` for directories.
     pub size: u64,
     /// Set by the writer's metadata pass so the content pass can reopen
     /// the source file no-follow. Readers leave this `None`; the reader
@@ -55,9 +64,15 @@ pub struct ArchiveEntry {
 /// or content streaming (writer).
 #[derive(Debug, Clone)]
 pub struct Manifest {
+    /// Manifest entries in writer-canonical order.
     pub entries: Vec<ArchiveEntry>,
+    /// Sum of `size` across every file entry; matches the header's
+    /// `total_file_bytes` after parse-time validation.
     pub total_file_bytes: u64,
+    /// Top-level component shared by every entry's `path_utf8`.
     pub root_name: OsString,
+    /// `true` when the manifest's single entry is a regular file at the
+    /// root; `false` for directory roots with one or more children.
     pub root_is_file: bool,
 }
 

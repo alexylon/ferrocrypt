@@ -142,8 +142,13 @@ pub use crate::archive::{ArchiveLimits, IncompleteOutputPolicy};
 pub use crate::container::HeaderReadLimits;
 pub use crate::crypto::kdf::{KdfLimit, KdfParams};
 pub use crate::error::{CryptoError, FormatDefect, InvalidKdfParams, UnsupportedVersion};
-pub use crate::format::{ENCRYPTED_EXTENSION, MAGIC};
+pub use crate::format::{
+    ENCRYPTED_EXTENSION, FCR_FILE_VERSION, KeypairSuite, MAGIC, WRITER_KEYPAIR_SUITE,
+    keypair_suite_is_supported,
+};
 pub use crate::key::files::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};
+pub use crate::key::private::{PRIVATE_KEY_V1_VERSION, PRIVATE_KEY_VERSION};
+pub use crate::key::public::{PUBLIC_KEY_V1_VERSION, PUBLIC_KEY_VERSION};
 pub use crate::recipient::policy::MixingPolicy;
 
 pub use secrecy;

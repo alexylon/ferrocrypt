@@ -5,7 +5,7 @@
 //! ```text
 //! [fixed_header (90 bytes)]
 //!   magic(4)              = "FCR\0"
-//!   version(1)            = 0x02
+//!   version(1)            = 0x01 (canonical v1 private-key version)
 //!   kind(1)               = 0x4B 'K'
 //!   key_flags(2)          = 0
 //!   type_name_len(2)
@@ -37,12 +37,21 @@ use crate::CryptoError;
 use crate::crypto::aead::{TAG_SIZE, WRAP_NONCE_SIZE, open_with_aad, seal_with_aad};
 use crate::crypto::kdf::{ARGON2_SALT_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams};
 use crate::crypto::keys::{derive_passphrase_wrap_key, random_bytes};
-use crate::error::FormatDefect;
+use crate::error::{FormatDefect, UnsupportedVersion};
 use crate::format::{
-    KIND_PRIVATE_KEY, MAGIC, MAGIC_SIZE, VERSION, read_u16_be, read_u32_be,
-    unsupported_key_version_error, write_u16_be, write_u32_be,
+    KIND_PRIVATE_KEY, KeypairSuite, MAGIC, MAGIC_SIZE, WRITER_KEYPAIR_SUITE,
+    keypair_suite_is_supported, read_u16_be, read_u32_be, write_u16_be, write_u32_be,
 };
 use crate::recipient::{TYPE_NAME_MAX_LEN, validate_type_name_grammar};
+
+/// Canonical v1 `private.key` wire-version byte. Mirrors the suite
+/// constant from [`KeypairSuite::V1`] so bumping the keypair suite
+/// flows through this constant automatically.
+pub const PRIVATE_KEY_V1_VERSION: u8 = KeypairSuite::V1.private_key_version();
+
+/// Wire-version byte the current writer emits in `private.key` headers.
+/// Derived from [`WRITER_KEYPAIR_SUITE`]; not an independent support list.
+pub const PRIVATE_KEY_VERSION: u8 = WRITER_KEYPAIR_SUITE.private_key_version();
 
 /// HKDF info for deriving the `private.key` wrap key from Argon2id.
 pub(crate) const HKDF_INFO_PRIVATE_KEY_WRAP: &[u8] = b"ferrocrypt/v1/private-key/wrap";
@@ -99,7 +108,7 @@ impl PrivateKeyHeader {
     pub fn to_bytes(&self) -> [u8; PRIVATE_KEY_HEADER_FIXED_SIZE] {
         let mut out = [0u8; PRIVATE_KEY_HEADER_FIXED_SIZE];
         out[..MAGIC_SIZE].copy_from_slice(&MAGIC);
-        out[VERSION_OFFSET] = VERSION;
+        out[VERSION_OFFSET] = PRIVATE_KEY_VERSION;
         out[KIND_OFFSET] = KIND_PRIVATE_KEY;
         write_u16_be(&mut out, KEY_FLAGS_OFFSET, self.key_flags);
         write_u16_be(&mut out, TYPE_NAME_LEN_OFFSET, self.type_name_len);
@@ -124,10 +133,9 @@ impl PrivateKeyHeader {
         if bytes[..MAGIC_SIZE] != MAGIC {
             return Err(CryptoError::InvalidFormat(FormatDefect::NotAKeyFile));
         }
-        let version = bytes[VERSION_OFFSET];
-        if version != VERSION {
-            return Err(unsupported_key_version_error(version));
-        }
+        let wire_version = bytes[VERSION_OFFSET];
+        let suite = private_key_wire_version_to_suite(wire_version)?;
+        ensure_private_key_suite_supported(suite)?;
         let kind_byte = bytes[KIND_OFFSET];
         if kind_byte != KIND_PRIVATE_KEY {
             return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
@@ -212,6 +220,44 @@ fn check_wrapped_secret_len(len: u32) -> Result<(), CryptoError> {
 
 fn malformed_private_key() -> CryptoError {
     CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)
+}
+
+/// Translates an on-disk `private.key` wire-version byte into a logical
+/// [`KeypairSuite`]. The reader's only entry point into the keypair-
+/// compatibility domain (`FORMAT.md` §8 / §11): once a wire byte is
+/// mapped to a suite, support is decided through the single shared
+/// gate [`keypair_suite_is_supported`] and never against the wire
+/// encoding directly.
+///
+/// Older / newer classification mirrors the `.fcr` outer file pattern
+/// for diagnostic symmetry: bytes below the canonical v1 byte surface as
+/// [`UnsupportedVersion::OlderKey`], anything above as
+/// [`UnsupportedVersion::NewerKey`].
+pub(crate) fn private_key_wire_version_to_suite(version: u8) -> Result<KeypairSuite, CryptoError> {
+    match version {
+        PRIVATE_KEY_V1_VERSION => Ok(KeypairSuite::V1),
+        v if v < PRIVATE_KEY_V1_VERSION => Err(CryptoError::UnsupportedVersion(
+            UnsupportedVersion::OlderKey { version: v },
+        )),
+        v => Err(CryptoError::UnsupportedVersion(
+            UnsupportedVersion::NewerKey { version: v },
+        )),
+    }
+}
+
+/// Asserts the suite is in this build's support list. The wire version
+/// byte is derived from `suite` for the diagnostic so callers cannot
+/// drift the on-disk byte and the reported number out of sync.
+pub(crate) fn ensure_private_key_suite_supported(suite: KeypairSuite) -> Result<(), CryptoError> {
+    if keypair_suite_is_supported(suite) {
+        Ok(())
+    } else {
+        Err(CryptoError::UnsupportedVersion(
+            UnsupportedVersion::OlderKey {
+                version: suite.private_key_version(),
+            },
+        ))
+    }
 }
 
 /// Decrypted contents of a v1 `private.key`. The unwrapped
@@ -461,6 +507,85 @@ mod tests {
         );
     }
 
+    /// Regression for the `format::VERSION` shared-constant bug:
+    /// [`PRIVATE_KEY_VERSION`] MUST derive from [`WRITER_KEYPAIR_SUITE`],
+    /// never from [`crate::format::FCR_FILE_VERSION`]. Today both
+    /// constants happen to equal `0x01`; bumping `FCR_FILE_VERSION`
+    /// must not change the private-key wire byte.
+    #[test]
+    fn private_key_version_derives_from_keypair_suite_not_fcr_file_version() {
+        assert_eq!(
+            PRIVATE_KEY_VERSION,
+            WRITER_KEYPAIR_SUITE.private_key_version(),
+        );
+        assert_eq!(
+            PRIVATE_KEY_V1_VERSION,
+            KeypairSuite::V1.private_key_version()
+        );
+    }
+
+    /// Boundary test for the wire-version-to-suite classifier. Pins
+    /// `Older` for bytes below v1, `Ok(V1)` at the canonical byte, and
+    /// `Newer` everywhere above. Replaces the equivalent coverage that
+    /// `format::unsupported_key_version_error_classifies_older_and_newer`
+    /// used to provide before the helper moved here.
+    #[test]
+    fn private_key_wire_version_to_suite_classifies_v1_and_neighbours() {
+        assert_eq!(
+            private_key_wire_version_to_suite(PRIVATE_KEY_V1_VERSION).unwrap(),
+            KeypairSuite::V1,
+        );
+        match private_key_wire_version_to_suite(0x00) {
+            Err(CryptoError::UnsupportedVersion(UnsupportedVersion::OlderKey { version: 0 })) => {}
+            other => panic!("expected OlderKey(0), got {other:?}"),
+        }
+        match private_key_wire_version_to_suite(PRIVATE_KEY_V1_VERSION + 1) {
+            Err(CryptoError::UnsupportedVersion(UnsupportedVersion::NewerKey { version }))
+                if version == PRIVATE_KEY_V1_VERSION + 1 => {}
+            other => panic!("expected NewerKey, got {other:?}"),
+        }
+        match private_key_wire_version_to_suite(0xFF) {
+            Err(CryptoError::UnsupportedVersion(UnsupportedVersion::NewerKey {
+                version: 0xFF,
+            })) => {}
+            other => panic!("expected NewerKey(0xFF), got {other:?}"),
+        }
+    }
+
+    /// Pins the support gate: today every defined `KeypairSuite` variant
+    /// is supported. A future variant added to the enum must update
+    /// `keypair_suite_is_supported` (its `matches!` arm) before this
+    /// test starts evaluating it; an unsupported V2 would surface as
+    /// `OlderKey { version: 2 }` here.
+    #[test]
+    fn ensure_private_key_suite_supported_accepts_v1() {
+        ensure_private_key_suite_supported(KeypairSuite::V1).unwrap();
+    }
+
+    /// Round-trip regression for the original asymmetry: a v1
+    /// `private.key` MUST still open under the current build, regardless
+    /// of where `FCR_FILE_VERSION` happens to sit. The two constants are
+    /// independent domains; bumping the outer file version must not
+    /// break private-key unlock.
+    #[test]
+    fn v1_private_key_opens_independently_of_fcr_file_version() {
+        let (secret, public) = x25519_shaped();
+        let pass = test_passphrase("pw");
+        let kdf = KdfParams::test_fast_default();
+        let bytes = seal_private_key(&secret, "x25519", &public, &[], &pass, &kdf).unwrap();
+        // The seal/open round-trip is the structural assertion; the
+        // separate constant-derivation test above pins the *why*.
+        let opened = open_private_key(
+            &bytes,
+            &pass,
+            None,
+            PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT,
+            &|_| {},
+        )
+        .unwrap();
+        assert_eq!(opened.type_name, "x25519");
+    }
+
     fn test_passphrase(s: &str) -> SecretString {
         SecretString::from(s.to_string())
     }
@@ -668,7 +793,7 @@ mod tests {
     #[test]
     fn parse_rejects_bad_magic_with_not_a_key_file() {
         let mut bytes = [0u8; PRIVATE_KEY_HEADER_FIXED_SIZE];
-        bytes[VERSION_OFFSET] = VERSION;
+        bytes[VERSION_OFFSET] = PRIVATE_KEY_V1_VERSION;
         bytes[KIND_OFFSET] = KIND_PRIVATE_KEY;
         // Magic remains [0,0,0,0].
         match PrivateKeyHeader::parse(&bytes) {

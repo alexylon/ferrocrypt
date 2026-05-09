@@ -6,8 +6,8 @@
 > encrypted `.fcr` outer file version is `0x01`.
 >
 > Key-pair compatibility is a separate domain. v1 key pairs use canonical
-> `private.key` version `0x01`; matching legacy `public.key` recipient payloads
-> are unversioned and map to the same v1 key-pair suite.
+> `private.key` version `0x01`; matching `public.key` recipient payloads carry
+> public-key version `0x01` and map to the same v1 key-pair suite.
 >
 > This v1 specification uses the v1 key-pair suite and defines an explicit,
 > modular, namespaced, independently specified, and independently tested
@@ -771,53 +771,33 @@ revision.
 A public recipient is a lowercase Bech32 string with HRP `fcr`.
 
 Public-recipient payload versions identify key-pair compatibility suites, not
-`.fcr` file versions. Decoders MUST classify the payload version, map it to the
-shared key-pair suite for `public.key` and `private.key`, and reject unsupported
-suites before a public recipient is used for encryption. A release MUST NOT
-accept a public key for encryption unless the same key-pair suite remains
-supported for private-key decryption.
+`.fcr` file versions. Decoders MUST read the payload version at offset 0, map it
+to the shared key-pair suite for `public.key` and `private.key`, and reject
+unsupported suites before a public recipient is used for encryption. A release
+MUST NOT accept a public key for encryption unless the same key-pair suite
+remains supported for private-key decryption.
 
-Legacy v1 logical payload:
+Public-recipient payloads are always versioned:
 
 ```text
-legacy_recipient_payload_v1 = type_name_len:u16
-                              key_material_len:u32
-                              type_name:type_name_len bytes
-                              key_material:key_material_len bytes
-                              checksum:16 bytes
+recipient_payload = public_key_version:u8
+                    type_name_len:u16
+                    key_material_len:u32
+                    type_name:type_name_len bytes
+                    key_material:key_material_len bytes
+                    checksum:16 bytes
 ```
 
-```text
-checksum_v1 = first_16_bytes(SHA3-256(
-    "ferrocrypt/v1/public-key/checksum" || type_name || 0x00 || key_material
-))
-```
+`public_key_version` MUST be in `0x01..=0xFF`. `0x00` is reserved and MUST be
+rejected. v1 public-recipient payloads use `public_key_version = 0x01` and map to
+key-pair suite v1.
 
-Legacy v1 recipient strings have no explicit payload version. Because
-`type_name_len <= 255`, the first payload byte is always `0x00`; that byte is
-reserved as the legacy-v1 discriminator.
-
-Future public-recipient payloads MUST use a leading nonzero version byte:
+All public-recipient payloads use the same checksum scheme, with the version byte
+mixed into the hash input:
 
 ```text
-versioned_recipient_payload = public_key_version:u8
-                              type_name_len:u16
-                              key_material_len:u32
-                              type_name:type_name_len bytes
-                              key_material:key_material_len bytes
-                              checksum:16 bytes
-```
-
-`public_key_version = 0x00` MUST NOT be used as an explicit version; it is
-reserved for legacy-v1 detection. The first future versioned public-recipient
-payload uses `public_key_version = 0x02` and maps to the next key-pair suite.
-
-All versioned public-recipient payloads (`public_key_version >= 0x02`) use the
-same checksum scheme, with the version byte mixed into the hash input:
-
-```text
-checksum_v2 = first_16_bytes(SHA3-256(
-    "ferrocrypt/v2/public-key/checksum"
+checksum = first_16_bytes(SHA3-256(
+    "ferrocrypt/v1/public-key/checksum"
  || public_key_version
  || type_name
  || 0x00
@@ -825,16 +805,16 @@ checksum_v2 = first_16_bytes(SHA3-256(
 ))
 ```
 
-The `v2` in the domain string names the second-generation checksum scheme, not
-a specific key-pair suite. A future v3, v4, … key-pair suite uses the same
-domain string with its own `public_key_version` byte mixed in. Only a checksum
-schema change would require a new domain string, such as
-`ferrocrypt/v3/public-key/checksum`.
+The `v1` in the checksum domain string names the checksum scheme defined by this
+specification, not a specific key-pair suite. A future v2, v3, … key-pair suite
+uses the same domain string with its own `public_key_version` byte mixed in. Only
+a checksum scheme change would require a new domain string.
 
 Rules:
 
-- Legacy v1 payloads map to key-pair suite v1.
-- Versioned payloads MUST be classified before interpreting length fields.
+- Current v1 writers MUST emit `public_key_version = 0x01`.
+- Readers MUST reject any other public-key version byte and MUST map
+  `public_key_version = 0x01` to key-pair suite v1 before deciding support.
 - `type_name` follows §3.3 and §3.3.1.
 - `key_material_len` MUST be `<= 12,288` unless a recipient spec defines a
   smaller bound.
@@ -845,8 +825,6 @@ Rules:
 - Decoders convert 5-to-8 with padding disabled and reject non-canonical padding.
 - Mixed-case and uppercase encodings MUST be rejected.
 - The internal checksum MUST verify.
-- Current v1 writers MUST emit the legacy v1 payload while using key-pair suite
-  v1.
 - Generic public-recipient decoders MAY decode unsupported type names after the
   key-pair suite itself is supported. A public recipient MUST be supported by the
   implementation or by an available plugin before use as an encryption
@@ -1681,14 +1659,14 @@ schedule:
 - FCA inner archive version byte = `0x01`.
 - `private.key` header version byte = `0x01` (canonical v1 private-key
   encoding).
-- `public.key` recipient payload = legacy unversioned (logical v1).
+- `public.key` recipient payload version byte = `0x01`.
 
 Key-pair compatibility is a separate domain from `.fcr` file compatibility.
-`private.key` header versions and `public.key` recipient payload versions are
-wire-level encodings that MUST map to a shared key-pair suite before support is
-decided. Legacy v1 `public.key` recipient payloads are unversioned and map to
-key-pair suite v1; future versioned public-recipient payloads use a leading
-nonzero `public_key_version`, with `0x00` reserved for legacy-v1 detection.
+`private.key` header versions and `public.key` recipient payload version bytes
+are wire-level encodings that MUST map to a shared key-pair suite before support
+is decided. v1 `public.key` recipient payloads carry `public_key_version = 0x01`
+and map to key-pair suite v1. `public_key_version = 0x00` is reserved and MUST
+be rejected.
 
 Readers MUST reject unsupported outer file versions, unsupported inner FCA
 archive versions, unsupported private-key versions, and unsupported public-key
@@ -1739,11 +1717,10 @@ The next incompatible outer `.fcr` file version SHOULD use `version = 0x02` and
 SHOULD preserve the initial `FCR\0` magic and version byte long enough for
 current readers to report an unsupported version rather than unrecognized data.
 The next incompatible `private.key` format SHOULD use private-key version
-`0x02`. The next versioned `public.key` recipient payload SHOULD use
-`public_key_version = 0x02`; any nonzero byte distinguishes the versioned layout
-from legacy v1, and `0x02` is the conventional first bump. The three "next"
-numbers coincide at `0x02` only because none of the four domains has been bumped
-before; future bumps in any domain are independent and will diverge.
+`0x02`. The next incompatible `public.key` recipient payload SHOULD use
+`public_key_version = 0x02`. The three "next" numbers coincide at `0x02` only
+because none of the four domains has been bumped before; future bumps in any
+domain are independent and will diverge.
 
 ---
 

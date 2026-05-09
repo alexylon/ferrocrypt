@@ -277,11 +277,16 @@ fn test_cli_keygen() {
     // Bech32 grammar per §7) shows up as a test failure alongside the
     // spec update. private.key with `ext_len = 0`:
     // header_fixed(90) + type_name("x25519" = 6) + public(32)
-    //   + ext(0) + wrapped_secret(32 + 16 tag) = 176.
+    //   + ext(0) + wrapped_secret(32 + 16 tag) = 176. public.key is
+    // a Bech32 fcr1… string + one trailing LF; the typed payload is
+    // version(1) + type_name_len(2) + key_material_len(4) + "x25519"(6)
+    // + key_material(32) + checksum(16) = 61 bytes → 98 Bech32 data
+    // chars + 4-char Bech32 envelope ("fcr1") + 6-char Bech32 checksum
+    // + 1 LF = 109 bytes.
     let private_key_size = fs::metadata(keys_dir.join("private.key")).unwrap().len();
     let public_key_size = fs::metadata(keys_dir.join("public.key")).unwrap().len();
     assert_eq!(private_key_size, 176, "v1 X25519 private.key size");
-    assert_eq!(public_key_size, 107, "v1 X25519 public.key text size");
+    assert_eq!(public_key_size, 109, "v1 X25519 public.key text size");
 }
 
 #[test]

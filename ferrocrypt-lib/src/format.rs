@@ -16,7 +16,7 @@
 //! | Offset | Size | Field          | Value / meaning                   |
 //! |-------:|-----:|----------------|-----------------------------------|
 //! | 0–3    | 4    | `magic`        | `"FCR\0"` = `0x46 0x43 0x52 0x00` |
-//! | 4      | 1    | `version`      | `0x02`                            |
+//! | 4      | 1    | `version`      | `0x01` (`.fcr` outer file version)|
 //! | 5      | 1    | `kind`         | `0x45 'E'` for `.fcr`             |
 //! | 6–7    | 2    | `prefix_flags` | `u16 BE`; MUST be zero            |
 //! | 8–11   | 4    | `header_len`   | `u32 BE`; ≤ 16,777,216            |
@@ -96,8 +96,18 @@ pub const MAGIC: [u8; 4] = [b'F', b'C', b'R', 0];
 /// Length of [`MAGIC`] in bytes (`4`).
 pub const MAGIC_SIZE: usize = MAGIC.len();
 
-/// Version byte for both `.fcr` and `private.key` artefacts.
-pub const VERSION: u8 = 0x02;
+/// Version byte for the `.fcr` outer encrypted file (`FORMAT.md` §3.1).
+///
+/// This is the **outer file** version domain only. It is independent of:
+/// - the `private.key` wire-version byte (see [`crate::key::private::PRIVATE_KEY_VERSION`]);
+/// - the `public.key` recipient-payload version (see
+///   [`crate::key::public::PUBLIC_KEY_VERSION`]);
+/// - the inner FCA archive version (see `archive::format::FCA_VERSION`).
+///
+/// The four version domains coincide at `0x01` today only because none has
+/// been bumped before; future bumps in any one domain are independent
+/// (`FORMAT.md` §11).
+pub const FCR_FILE_VERSION: u8 = 0x01;
 
 /// `.fcr` encrypted-file kind byte (`Kind::Encrypted` on the wire).
 pub const KIND_ENCRYPTED: u8 = 0x45; // 'E'
@@ -186,6 +196,78 @@ impl Kind {
     }
 }
 
+// ─── Keypair compatibility suite ───────────────────────────────────────────
+
+/// Logical generation of matching `public.key` and `private.key` material
+/// (`FORMAT.md` §11). Keypair compatibility is a domain separate from
+/// `.fcr` outer-file compatibility: a `.fcr` payload bump does not by
+/// itself bump the keypair suite, and a keypair bump does not require an
+/// outer file bump.
+///
+/// Both `public.key` and `private.key` parsers translate their on-disk
+/// version encodings into [`KeypairSuite`] before any support decision —
+/// the single shared gate is [`keypair_suite_is_supported`]. That makes
+/// the encrypt/decrypt symmetry rule structural: a release MUST NOT
+/// accept a public key for encryption unless the same suite remains
+/// supported for private-key decryption.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeypairSuite {
+    /// Generation v1: `public.key` recipient payload version byte `0x01`
+    /// + binary `private.key` header version byte `0x01`.
+    V1,
+    // V2, V3, … added only when public + private compatibility changes
+    // together. The enum drives the wire-version mapping in
+    // [`Self::public_key_version`] / [`Self::private_key_version`] and
+    // the support gate in [`keypair_suite_is_supported`]; adding a
+    // variant is a deliberate breaking change inside the crate.
+}
+
+impl KeypairSuite {
+    /// Wire-version byte written at offset 0 of every `public.key`
+    /// recipient payload (`FORMAT.md` §7). Mirrored back to the suite
+    /// on read by the public-key parser's wire-version-to-suite
+    /// translation; surfaced through
+    /// [`crate::error::UnsupportedVersion::OlderPublicKey`] /
+    /// `NewerPublicKey` for unsupported bytes.
+    pub const fn public_key_version(self) -> u8 {
+        match self {
+            Self::V1 => 0x01,
+        }
+    }
+
+    /// Wire-version byte written to the `private.key` fixed header
+    /// (`FORMAT.md` §8). Mirrored back to the suite on read by the
+    /// private-key parser's wire-version-to-suite translation.
+    pub const fn private_key_version(self) -> u8 {
+        match self {
+            Self::V1 => 0x01,
+        }
+    }
+}
+
+/// Keypair suite written by current writers. Both `public.key` and
+/// `private.key` writers derive their on-disk version encodings from
+/// this single source so the two artefacts are always emitted at the
+/// same logical generation.
+pub const WRITER_KEYPAIR_SUITE: KeypairSuite = KeypairSuite::V1;
+
+/// Single shared support predicate for keypair compatibility — the only
+/// place that decides "this build accepts keys from suite X". Both the
+/// public-key parser (encryption-time recipient acceptance) and the
+/// private-key parser (decryption-time identity acceptance) call this
+/// after translating their on-disk version encodings into
+/// [`KeypairSuite`]. That symmetry is structural: there is no second
+/// list to forget to update.
+///
+/// The `match` is intentionally exhaustive (no wildcard arm) so adding
+/// a new [`KeypairSuite`] variant forces a compile error here until the
+/// maintainer makes a deliberate accept-or-reject decision for it.
+pub const fn keypair_suite_is_supported(suite: KeypairSuite) -> bool {
+    match suite {
+        KeypairSuite::V1 => true,
+    }
+}
+
 // ─── Prefix ─────────────────────────────────────────────────────────────────
 
 const PREFIX_VERSION_OFFSET: usize = MAGIC_SIZE;
@@ -212,7 +294,7 @@ impl Prefix {
     /// for the validate-and-serialise convenience.
     pub const fn for_encrypted(header_len: u32) -> Self {
         Self {
-            version: VERSION,
+            version: FCR_FILE_VERSION,
             kind: Kind::Encrypted,
             prefix_flags: 0,
             header_len,
@@ -288,7 +370,7 @@ impl Prefix {
 // reader path) and [`Prefix::validate`] (writer path / sanity check).
 
 fn check_version(version: u8) -> Result<(), CryptoError> {
-    if version != VERSION {
+    if version != FCR_FILE_VERSION {
         return Err(unsupported_file_version_error(version));
     }
     Ok(())
@@ -507,20 +589,10 @@ pub(crate) fn verify_header_mac(
 /// Classifies a rejected `.fcr` version as older-than or newer-than the
 /// version this release supports.
 pub fn unsupported_file_version_error(version: u8) -> CryptoError {
-    if version < VERSION {
+    if version < FCR_FILE_VERSION {
         CryptoError::UnsupportedVersion(UnsupportedVersion::OlderFile { version })
     } else {
         CryptoError::UnsupportedVersion(UnsupportedVersion::NewerFile { version })
-    }
-}
-
-/// Classifies a rejected key-file version as older-than or newer-than
-/// the version this release supports.
-pub fn unsupported_key_version_error(version: u8) -> CryptoError {
-    if version < VERSION {
-        CryptoError::UnsupportedVersion(UnsupportedVersion::OlderKey { version })
-    } else {
-        CryptoError::UnsupportedVersion(UnsupportedVersion::NewerKey { version })
     }
 }
 
@@ -530,6 +602,31 @@ pub fn unsupported_key_version_error(version: u8) -> CryptoError {
 mod tests {
     use super::*;
     use crate::crypto::mac::HMAC_KEY_SIZE;
+
+    #[test]
+    fn keypair_suite_v1_maps_to_canonical_wire_bytes() {
+        // Pin the on-disk bytes for the v1 suite so a future suite bump
+        // cannot silently shift them. Both `public.key` and `private.key`
+        // emit byte `0x01` for v1.
+        assert_eq!(KeypairSuite::V1.private_key_version(), 0x01);
+        assert_eq!(KeypairSuite::V1.public_key_version(), 0x01);
+    }
+
+    #[test]
+    fn writer_keypair_suite_is_v1() {
+        // Single source of truth for the suite both writers emit. If a
+        // future change opts the writer into a newer suite, this assert
+        // must move alongside it.
+        assert_eq!(WRITER_KEYPAIR_SUITE, KeypairSuite::V1);
+    }
+
+    #[test]
+    fn keypair_suite_support_gate_accepts_v1() {
+        // The single shared support predicate. Public-key parsers (encrypt
+        // path) and private-key parsers (decrypt path) both route through
+        // this; the test pins symmetry at the gate.
+        assert!(keypair_suite_is_supported(KeypairSuite::V1));
+    }
 
     #[test]
     fn kind_round_trips_through_byte() {
@@ -552,7 +649,7 @@ mod tests {
         let prefix = Prefix::for_encrypted(200);
         let bytes = prefix.to_bytes();
         let parsed = Prefix::parse(&bytes, Kind::Encrypted).unwrap();
-        assert_eq!(parsed.version, VERSION);
+        assert_eq!(parsed.version, FCR_FILE_VERSION);
         assert_eq!(parsed.kind, Kind::Encrypted);
         assert_eq!(parsed.prefix_flags, 0);
         assert_eq!(parsed.header_len, 200);
@@ -566,7 +663,7 @@ mod tests {
         };
         let bytes = prefix.to_bytes();
         assert_eq!(&bytes[0..4], b"FCR\0");
-        assert_eq!(bytes[4], VERSION);
+        assert_eq!(bytes[4], FCR_FILE_VERSION);
         assert_eq!(bytes[5], KIND_ENCRYPTED);
         assert_eq!(&bytes[6..8], &[0, 0]);
         assert_eq!(&bytes[8..12], &[0xAA, 0xBB, 0xCC, 0xDD]);
@@ -815,7 +912,7 @@ mod tests {
     fn read_prefix_distinguishes_eof_as_truncated() {
         // Short read (only 5 bytes) → UnexpectedEof from read_exact →
         // Truncated diagnostic.
-        let truncated: &[u8] = &[b'F', b'C', b'R', 0, VERSION];
+        let truncated: &[u8] = &[b'F', b'C', b'R', 0, FCR_FILE_VERSION];
         let mut cur = std::io::Cursor::new(truncated);
         match read_prefix_from_reader(&mut cur, Kind::Encrypted) {
             Err(CryptoError::InvalidFormat(FormatDefect::Truncated)) => {}
@@ -892,20 +989,6 @@ mod tests {
         match Prefix::parse(&bytes, Kind::Encrypted) {
             Err(CryptoError::UnsupportedVersion(UnsupportedVersion::OlderFile { version: 0 })) => {}
             other => panic!("expected OlderFile(0), got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn unsupported_key_version_error_classifies_older_and_newer() {
-        // Older-key path (version < VERSION).
-        match unsupported_key_version_error(0) {
-            CryptoError::UnsupportedVersion(UnsupportedVersion::OlderKey { version: 0 }) => {}
-            other => panic!("expected OlderKey(0), got {other:?}"),
-        }
-        // Newer-key path (version > VERSION).
-        match unsupported_key_version_error(3) {
-            CryptoError::UnsupportedVersion(UnsupportedVersion::NewerKey { version: 3 }) => {}
-            other => panic!("expected NewerKey(3), got {other:?}"),
         }
     }
 

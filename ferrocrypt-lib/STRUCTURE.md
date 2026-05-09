@@ -226,7 +226,13 @@ Rules:
 It contains:
 
 - magic bytes;
-- version byte;
+- the `.fcr` outer file version byte (`FCR_FILE_VERSION`);
+- the `KeypairSuite` enum and the single shared support gate
+  (`keypair_suite_is_supported`) — the wire-version-to-suite translation
+  used by both `key/private.rs` and `key/public.rs`, so encryption-time
+  recipient acceptance and decryption-time identity acceptance are decided
+  by one predicate and cannot drift (`FORMAT.md` §11);
+- the writer's logical suite (`WRITER_KEYPAIR_SUITE`);
 - kind bytes;
 - field sizes;
 - maximum structural sizes;
@@ -573,6 +579,8 @@ It contains:
 - Bech32 recipient string encoding;
 - Bech32 recipient string decoding;
 - HRP validation;
+- public-key wire-version-byte (`PUBLIC_KEY_VERSION`, `PUBLIC_KEY_V1_VERSION`) and the wire-version-to-`KeypairSuite` translation that flows through the shared support gate in `format.rs` (`FORMAT.md` §7);
+- the writer's current logical version (`PUBLIC_KEY_VERSION`, derived from `WRITER_KEYPAIR_SUITE`);
 - internal SHA3-256 checksum handling;
 - canonical lowercase enforcement;
 - public recipient fingerprinting;
@@ -594,6 +602,7 @@ It contains:
 It contains:
 
 - `private.key` binary layout;
+- the private-key wire-version constants (`PRIVATE_KEY_VERSION` derived from `WRITER_KEYPAIR_SUITE`; `PRIVATE_KEY_V1_VERSION` derived from `KeypairSuite::V1`) and the wire-version-to-`KeypairSuite` translation that flows through the shared support gate in `format.rs` (`FORMAT.md` §8);
 - cleartext private-key header parsing;
 - passphrase-wrapped secret encryption;
 - passphrase-wrapped secret decryption;
@@ -1019,6 +1028,7 @@ Each security-sensitive concern has exactly one owner.
 | Concern | Owner |
 |---|---|
 | Wire constants and fixed structs | `format.rs` |
+| Keypair compatibility suite (`KeypairSuite`, `WRITER_KEYPAIR_SUITE`, `keypair_suite_is_supported`) — single shared support gate for both `public.key` and `private.key` parsers | `format.rs` |
 | `.fcr` header/container assembly | `container.rs` |
 | File-key generation | `crypto/keys.rs` |
 | Payload/header subkey derivation | `crypto/keys.rs` |

@@ -3,13 +3,17 @@
 //! Recipient string Bech32 typed payload:
 //!
 //! ```text
-//! data = type_name_len:u16  || key_material_len:u32
-//!     || type_name:N        || key_material:M
+//! data = public_key_version:u8 || type_name_len:u16 || key_material_len:u32
+//!     || type_name:N           || key_material:M
 //!     || checksum:16
 //! ```
 //!
-//! `checksum = first 16 bytes of`
-//! `SHA3-256("ferrocrypt/v1/public-key/checksum" || type_name || 0x00 || key_material)`.
+//! `checksum = first 16 bytes of SHA3-256(`
+//! `"ferrocrypt/v1/public-key/checksum" || public_key_version || type_name || 0x00 || key_material)`.
+//!
+//! Every recipient payload carries an explicit `public_key_version` byte at
+//! offset 0. v1 byte = `0x01`; `0x00` is reserved (a writer that forgets to
+//! set the version byte fails closed at the reader).
 //!
 //! The recipient string itself is **strict Bech32 (BIP 173, not
 //! Bech32m)** with HRP `"fcr"` and the lowercase data part. Mixed-case
@@ -32,9 +36,23 @@ use bech32::{Bech32, Checksum, Hrp};
 use sha3::{Digest, Sha3_256};
 
 use crate::CryptoError;
-use crate::error::FormatDefect;
-use crate::format::{read_u16_be, read_u32_be};
+use crate::error::{FormatDefect, UnsupportedVersion};
+use crate::format::{
+    KeypairSuite, WRITER_KEYPAIR_SUITE, keypair_suite_is_supported, read_u16_be, read_u32_be,
+};
+use crate::recipient::native::x25519::TYPE_NAME as X25519_TYPE_NAME;
 use crate::recipient::{TYPE_NAME_MAX_LEN, validate_type_name_grammar};
+
+/// Wire-version byte the current writer emits at offset 0 of every
+/// `public.key` recipient payload. Derived from [`WRITER_KEYPAIR_SUITE`];
+/// mirrors [`crate::key::private::PRIVATE_KEY_VERSION`] so a future suite
+/// bump flows through both writers in lockstep.
+pub const PUBLIC_KEY_VERSION: u8 = WRITER_KEYPAIR_SUITE.public_key_version();
+
+/// Canonical v1 wire-version byte for `public.key` recipient payloads.
+/// Mirrors the suite constant from [`KeypairSuite::V1`] so bumping the
+/// keypair suite flows through this constant automatically.
+pub const PUBLIC_KEY_V1_VERSION: u8 = KeypairSuite::V1.public_key_version();
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
@@ -51,11 +69,12 @@ pub const PUBLIC_KEY_CHECKSUM_DOMAIN: &[u8] = b"ferrocrypt/v1/public-key/checksu
 /// Truncated SHA3-256 checksum size in the typed payload, in bytes.
 pub const PUBLIC_KEY_CHECKSUM_SIZE: usize = 16;
 
-/// Total size of the typed-payload header (`type_name_len(2) ||
-/// key_material_len(4)`), in bytes.
-pub const PAYLOAD_HEADER_SIZE: usize = size_of::<u16>() + size_of::<u32>();
+/// Total size of the typed-payload header (`public_key_version(1) ||
+/// type_name_len(2) || key_material_len(4)`), in bytes.
+pub const PAYLOAD_HEADER_SIZE: usize = 1 + size_of::<u16>() + size_of::<u32>();
 
-const PAYLOAD_TYPE_NAME_LEN_OFFSET: usize = 0;
+const PAYLOAD_VERSION_OFFSET: usize = 0;
+const PAYLOAD_TYPE_NAME_LEN_OFFSET: usize = PAYLOAD_VERSION_OFFSET + 1;
 const PAYLOAD_KEY_MATERIAL_LEN_OFFSET: usize = PAYLOAD_TYPE_NAME_LEN_OFFSET + size_of::<u16>();
 const _: () = assert!(PAYLOAD_KEY_MATERIAL_LEN_OFFSET + size_of::<u32>() == PAYLOAD_HEADER_SIZE);
 
@@ -112,16 +131,25 @@ impl Checksum for Bech32V1 {
 
 /// Decoded payload of a recipient string. Owned values so the caller
 /// can route them independently of the input string's lifetime.
+///
+/// The `keypair_suite` field carries the **logical compatibility class**
+/// recovered from the wire-version byte. Both `public.key` and
+/// `private.key` parsers translate their on-disk version byte into a
+/// [`KeypairSuite`] before any support decision; a release MUST reject a
+/// public recipient whenever the same suite would be rejected for
+/// private-key decryption (`FORMAT.md` §7, §11).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedRecipient {
+    pub keypair_suite: KeypairSuite,
     pub type_name: String,
     pub key_material: Vec<u8>,
 }
 
 /// Encodes a public-key recipient string in canonical lowercase
-/// Bech32 (BIP 173). Validates `type_name` against the §3.3 grammar
-/// and computes the internal SHA3-256 checksum so a corrupt copy fails
-/// closed at the decoder.
+/// Bech32 (BIP 173). Emits the writer's [`PUBLIC_KEY_VERSION`] byte at
+/// offset 0, validates `type_name` against the §3.3 grammar, and
+/// computes the internal SHA3-256 checksum (with the version byte mixed
+/// into the hash input) so a corrupt copy fails closed at the decoder.
 pub fn encode_recipient_string(
     type_name: &str,
     key_material: &[u8],
@@ -133,11 +161,12 @@ pub fn encode_recipient_string(
     let key_material_len = u32::try_from(key_material.len()).map_err(|_| malformed_public_key())?;
     check_key_material_len(key_material_len)?;
 
-    let cs = compute_checksum(type_name, key_material);
+    let cs = compute_checksum(PUBLIC_KEY_VERSION, type_name, key_material);
 
     let total_data =
         PAYLOAD_HEADER_SIZE + type_name_bytes.len() + key_material.len() + PUBLIC_KEY_CHECKSUM_SIZE;
     let mut data = Vec::with_capacity(total_data);
+    data.push(PUBLIC_KEY_VERSION);
     data.extend_from_slice(&type_name_len.to_be_bytes());
     data.extend_from_slice(&key_material_len.to_be_bytes());
     data.extend_from_slice(type_name_bytes);
@@ -211,6 +240,10 @@ pub fn decode_recipient_string(
 
     check_payload_data_len(data.len())?;
 
+    let wire_version = data[PAYLOAD_VERSION_OFFSET];
+    let suite = public_key_wire_version_to_suite(wire_version)?;
+    ensure_public_key_suite_supported(suite)?;
+
     let type_name_len = read_u16_be(&data, PAYLOAD_TYPE_NAME_LEN_OFFSET);
     check_type_name_len(type_name_len)?;
     let key_material_len = read_u32_be(&data, PAYLOAD_KEY_MATERIAL_LEN_OFFSET);
@@ -230,7 +263,7 @@ pub fn decode_recipient_string(
     let key_material = data[type_name_end..key_material_end].to_vec();
     let stored_checksum = &data[key_material_end..checksum_end];
 
-    let computed_checksum = compute_checksum(type_name, &key_material);
+    let computed_checksum = compute_checksum(wire_version, type_name, &key_material);
     // The recipient string is public, the checksum is for typo
     // detection rather than secret-comparison; ordinary `!=` is fine
     // and timing-safety is not required here.
@@ -239,9 +272,54 @@ pub fn decode_recipient_string(
     }
 
     Ok(DecodedRecipient {
+        keypair_suite: suite,
         type_name: type_name.to_owned(),
         key_material,
     })
+}
+
+/// Translates a `public.key` wire-version byte into a logical
+/// [`KeypairSuite`]. Symmetric counterpart of
+/// [`crate::key::private::private_key_wire_version_to_suite`]; both
+/// translate their on-disk encoding into the shared keypair-suite
+/// domain before any support decision runs.
+///
+/// `0x00` is reserved (a writer that forgets to set the version byte
+/// fails closed here as [`FormatDefect::MalformedPublicKey`] — `0x00`
+/// is not a real version, so `OlderPublicKey { version: 0 }` would be
+/// misleading). `0x01` maps to [`KeypairSuite::V1`]. Bytes above
+/// [`PUBLIC_KEY_VERSION`] surface as [`UnsupportedVersion::NewerPublicKey`];
+/// bytes below it but above `0x00` surface as
+/// [`UnsupportedVersion::OlderPublicKey`]. The "Older" arm only becomes
+/// reachable once a future suite advances `PUBLIC_KEY_VERSION`.
+fn public_key_wire_version_to_suite(version: u8) -> Result<KeypairSuite, CryptoError> {
+    match version {
+        PUBLIC_KEY_V1_VERSION => Ok(KeypairSuite::V1),
+        0 => Err(malformed_public_key()),
+        v if v < PUBLIC_KEY_VERSION => Err(CryptoError::UnsupportedVersion(
+            UnsupportedVersion::OlderPublicKey { version: v },
+        )),
+        v => Err(CryptoError::UnsupportedVersion(
+            UnsupportedVersion::NewerPublicKey { version: v },
+        )),
+    }
+}
+
+/// Asserts the suite is in this build's support list. The wire-version
+/// byte for the diagnostic is derived from `suite` so the on-disk byte
+/// and the reported number cannot drift apart. Used at encryption-time
+/// recipient acceptance — the same gate the private-key parser uses for
+/// decryption-time identity acceptance.
+fn ensure_public_key_suite_supported(suite: KeypairSuite) -> Result<(), CryptoError> {
+    if keypair_suite_is_supported(suite) {
+        Ok(())
+    } else {
+        Err(CryptoError::UnsupportedVersion(
+            UnsupportedVersion::OlderPublicKey {
+                version: suite.public_key_version(),
+            },
+        ))
+    }
 }
 
 /// Canonical X25519-typed Bech32 decoder. Single source of truth for
@@ -257,14 +335,31 @@ pub fn decode_recipient_string(
 /// as the structural cap.
 pub(crate) fn decode_x25519_recipient(recipient: &str) -> Result<[u8; 32], CryptoError> {
     let decoded = decode_recipient_string(recipient, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT)?;
-    if decoded.type_name != crate::recipient::x25519::TYPE_NAME {
-        return Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey));
+    decoded_x25519_bytes(decoded, malformed_public_key)
+}
+
+/// Once a recipient string has been decoded, verify it carries v1
+/// X25519 material and extract the raw 32-byte key.
+///
+/// Shared between [`decode_x25519_recipient`] (a Bech32 string surface
+/// where the wrong type_name is just another malformed payload) and
+/// [`read_public_key`] (a file boundary where the wrong type_name means
+/// the user pointed us at a different kind of file). The
+/// `wrong_type_error` callback lets each caller pick its own error
+/// class for that single divergent path; the byte-extraction and
+/// zero-key reject are identical.
+fn decoded_x25519_bytes(
+    decoded: DecodedRecipient,
+    wrong_type_error: impl FnOnce() -> CryptoError,
+) -> Result<[u8; 32], CryptoError> {
+    if decoded.type_name != X25519_TYPE_NAME {
+        return Err(wrong_type_error());
     }
     let bytes: [u8; 32] = decoded
         .key_material
         .as_slice()
         .try_into()
-        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey))?;
+        .map_err(|_| malformed_public_key())?;
     if crate::recipient::x25519::is_zero_public_key(&bytes) {
         return Err(malformed_public_key());
     }
@@ -317,34 +412,51 @@ fn check_total_payload_size(
     Ok(())
 }
 
-/// SHA3-256-based internal checksum, truncated to
-/// [`PUBLIC_KEY_CHECKSUM_SIZE`] bytes. Detects typed-payload
-/// corruption that the outer Bech32 checksum can't catch (e.g. a
-/// hand-edited recipient string with a coincidentally-valid Bech32
-/// checksum but mismatched inner data).
-fn compute_checksum(type_name: &str, key_material: &[u8]) -> [u8; PUBLIC_KEY_CHECKSUM_SIZE] {
-    let full = domain_keyed_hash(PUBLIC_KEY_CHECKSUM_DOMAIN, type_name, key_material);
-    let mut truncated = [0u8; PUBLIC_KEY_CHECKSUM_SIZE];
-    truncated.copy_from_slice(&full[..PUBLIC_KEY_CHECKSUM_SIZE]);
-    truncated
-}
-
-/// Canonical SHA3-256 hash of `domain || type_name || 0x00 ||
-/// key_material`. Single source of truth for the pre-image shape used
-/// by both the recipient-string internal checksum (with
-/// [`PUBLIC_KEY_CHECKSUM_DOMAIN`]) and the user-visible fingerprint
-/// (with an empty domain). Centralising the structure keeps the two
-/// hashes from silently diverging if the pre-image is ever extended.
+/// SHA3-256 over a `prefix || type_name || 0x00 || key_material`
+/// pre-image. Single source of truth for the recipient-payload tail
+/// shape shared by [`compute_checksum`] (with the
+/// [`PUBLIC_KEY_CHECKSUM_DOMAIN`] domain + version byte as prefix) and
+/// [`fingerprint_bytes`] (with an empty prefix). If the tail shape ever
+/// extends, both hashes pick up the change automatically.
 ///
-/// `0x00` is unambiguous as a separator because the §3.3 type_name
-/// grammar disallows the null byte.
-fn domain_keyed_hash(domain: &[u8], type_name: &str, key_material: &[u8]) -> [u8; 32] {
+/// `0x00` between `type_name` and `key_material` is unambiguous as a
+/// separator because the §3.3 `type_name` grammar disallows the null
+/// byte.
+fn public_key_hash(prefix: &[&[u8]], type_name: &str, key_material: &[u8]) -> [u8; 32] {
     let mut hasher = Sha3_256::new();
-    hasher.update(domain);
+    for chunk in prefix {
+        hasher.update(chunk);
+    }
     hasher.update(type_name.as_bytes());
     hasher.update([0x00]);
     hasher.update(key_material);
     hasher.finalize().into()
+}
+
+/// SHA3-256-based internal checksum, truncated to
+/// [`PUBLIC_KEY_CHECKSUM_SIZE`] bytes (`FORMAT.md` §7).
+///
+/// Pre-image: `PUBLIC_KEY_CHECKSUM_DOMAIN || version || type_name ||
+/// 0x00 || key_material`. Mixing the version byte into the hash binds
+/// the typed payload to its declared version and rules out
+/// cross-version transplant accidents — a payload with the right inner
+/// fields but a different version byte fails this check. Detects
+/// typed-payload corruption that the outer Bech32 checksum can't catch
+/// (e.g. a hand-edited recipient string with a coincidentally-valid
+/// Bech32 checksum but mismatched inner data).
+fn compute_checksum(
+    version: u8,
+    type_name: &str,
+    key_material: &[u8],
+) -> [u8; PUBLIC_KEY_CHECKSUM_SIZE] {
+    let full = public_key_hash(
+        &[PUBLIC_KEY_CHECKSUM_DOMAIN, &[version]],
+        type_name,
+        key_material,
+    );
+    let mut truncated = [0u8; PUBLIC_KEY_CHECKSUM_SIZE];
+    truncated.copy_from_slice(&full[..PUBLIC_KEY_CHECKSUM_SIZE]);
+    truncated
 }
 
 fn malformed_public_key() -> CryptoError {
@@ -355,11 +467,13 @@ fn malformed_public_key() -> CryptoError {
 
 /// Canonical fingerprint hash of `type_name || 0x00 || key_material`
 /// as a 32-byte SHA3-256 digest. The domain separator used in
-/// [`PUBLIC_KEY_CHECKSUM_DOMAIN`] is intentionally absent so the
+/// [`PUBLIC_KEY_CHECKSUM_DOMAIN`] is intentionally absent — the
 /// fingerprint is a stable identity over the (type_name, key_material)
-/// pair, not over the encoding-checksum domain.
+/// pair, not over the encoding-checksum domain. The version byte is
+/// also absent: bumping the wire-version of an existing keypair MUST
+/// NOT change its user-visible identity.
 pub fn fingerprint_bytes(type_name: &str, key_material: &[u8]) -> [u8; 32] {
-    domain_keyed_hash(b"", type_name, key_material)
+    public_key_hash(&[], type_name, key_material)
 }
 
 /// 64-character lowercase hex of [`fingerprint_bytes`].
@@ -400,21 +514,12 @@ pub fn read_public_key(path: &std::path::Path) -> Result<[u8; 32], CryptoError> 
     // whitespace grammar deserves its own bucket.
     let recipient = contents.strip_suffix('\n').unwrap_or(&contents);
     if recipient.bytes().any(|b| b.is_ascii_whitespace()) {
-        return Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey));
-    }
-    let decoded = decode_recipient_string(recipient, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT)?;
-    if decoded.type_name != crate::recipient::x25519::TYPE_NAME {
-        return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
-    }
-    let bytes: [u8; 32] = decoded
-        .key_material
-        .as_slice()
-        .try_into()
-        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey))?;
-    if crate::recipient::x25519::is_zero_public_key(&bytes) {
         return Err(malformed_public_key());
     }
-    Ok(bytes)
+    let decoded = decode_recipient_string(recipient, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT)?;
+    decoded_x25519_bytes(decoded, || {
+        CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)
+    })
 }
 
 // ─── Public-recipient wrapper ──────────────────────────────────────────────
@@ -518,7 +623,7 @@ impl PublicKey {
     /// must be read from disk or decoded from a key file.
     pub fn fingerprint(&self) -> Result<String, CryptoError> {
         let bytes = self.resolve()?;
-        Ok(fingerprint_hex(crate::recipient::x25519::TYPE_NAME, &bytes))
+        Ok(fingerprint_hex(X25519_TYPE_NAME, &bytes))
     }
 
     /// Encodes the key as the canonical lowercase Bech32 `fcr1…`
@@ -534,7 +639,7 @@ impl PublicKey {
     /// for already-validated X25519 bytes.
     pub fn to_recipient_string(&self) -> Result<String, CryptoError> {
         let bytes = self.resolve()?;
-        encode_recipient_string(crate::recipient::x25519::TYPE_NAME, &bytes)
+        encode_recipient_string(X25519_TYPE_NAME, &bytes)
     }
 
     /// Returns the raw 32-byte X25519 public-key material as an owned
@@ -598,6 +703,78 @@ mod tests {
     /// public_key encoding is type_name-agnostic.
     fn x25519_key() -> [u8; 32] {
         [0x33u8; 32]
+    }
+
+    /// Pins the wire-version-to-suite mapping. Boundary cases:
+    /// - `0x00`: reserved — rejected as malformed (not a real version).
+    /// - `0x01` (= [`PUBLIC_KEY_V1_VERSION`]): maps to V1 (the only
+    ///   supported suite today).
+    /// - `0x02..=0xFF`: "newer" today; the `Older` arm is only reachable
+    ///   once `PUBLIC_KEY_VERSION` advances past `0x01`.
+    ///
+    /// Mirrors `private.rs::private_key_wire_version_to_suite_classifies_v1_and_neighbours`:
+    /// the two helpers must classify analogously so the encrypt/decrypt
+    /// symmetry rule (`FORMAT.md` §11) cannot drift.
+    #[test]
+    fn public_key_wire_version_to_suite_classifies_v1_and_neighbours() {
+        assert_eq!(
+            public_key_wire_version_to_suite(PUBLIC_KEY_V1_VERSION).unwrap(),
+            KeypairSuite::V1,
+        );
+        match public_key_wire_version_to_suite(0x00) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
+            other => panic!("expected MalformedPublicKey for 0x00, got {other:?}"),
+        }
+        match public_key_wire_version_to_suite(0x02) {
+            Err(CryptoError::UnsupportedVersion(UnsupportedVersion::NewerPublicKey {
+                version: 0x02,
+            })) => {}
+            other => panic!("expected NewerPublicKey(0x02), got {other:?}"),
+        }
+        match public_key_wire_version_to_suite(0x7F) {
+            Err(CryptoError::UnsupportedVersion(UnsupportedVersion::NewerPublicKey {
+                version: 0x7F,
+            })) => {}
+            other => panic!("expected NewerPublicKey(0x7F), got {other:?}"),
+        }
+    }
+
+    /// `DecodedRecipient` carries the logical [`KeypairSuite`] alongside
+    /// the typed payload fields. v1 recipient strings (wire byte `0x01`)
+    /// MUST decode to `KeypairSuite::V1` — symmetric with private-key
+    /// parsing's mapping of the `0x01` wire byte to `KeypairSuite::V1`.
+    #[test]
+    fn v1_recipient_string_decodes_with_keypair_suite_v1() {
+        let s = encode_recipient_string("x25519", &x25519_key()).unwrap();
+        let decoded = decode_recipient_string(&s, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT).unwrap();
+        assert_eq!(decoded.keypair_suite, KeypairSuite::V1);
+    }
+
+    /// Cross-domain symmetry pin: both `public.key` and `private.key`
+    /// parsers translate their wire-level encoding into the same
+    /// [`KeypairSuite`] gate. For the v1 wire encoding (byte `0x01` on
+    /// both sides) both paths converge on `KeypairSuite::V1`. Without
+    /// this, a future refactor that picked up a private-only or
+    /// public-only suite-mapping helper could reintroduce the original
+    /// asymmetry bug.
+    #[test]
+    fn public_and_private_v1_wire_encodings_share_keypair_suite() {
+        use crate::key::private::{PRIVATE_KEY_V1_VERSION, private_key_wire_version_to_suite};
+        let public_suite = public_key_wire_version_to_suite(PUBLIC_KEY_V1_VERSION).unwrap();
+        let private_suite = private_key_wire_version_to_suite(PRIVATE_KEY_V1_VERSION).unwrap();
+        assert_eq!(public_suite, private_suite);
+        assert_eq!(public_suite, KeypairSuite::V1);
+    }
+
+    /// Mirror of `private_key_version_derives_from_keypair_suite_not_fcr_file_version`
+    /// for the public-key side. [`PUBLIC_KEY_VERSION`] MUST flow through
+    /// [`WRITER_KEYPAIR_SUITE`], not through any independent constant.
+    #[test]
+    fn public_key_version_derives_from_keypair_suite() {
+        assert_eq!(
+            PUBLIC_KEY_VERSION,
+            WRITER_KEYPAIR_SUITE.public_key_version()
+        );
     }
 
     #[test]
@@ -768,8 +945,9 @@ mod tests {
         // downstream is exactly the variant-confusion bug `Bech32V1` is
         // here to prevent.
         let key = x25519_key();
-        let cs = compute_checksum("x25519", &key);
+        let cs = compute_checksum(PUBLIC_KEY_VERSION, "x25519", &key);
         let mut data = Vec::new();
+        data.push(PUBLIC_KEY_VERSION);
         data.extend_from_slice(&6u16.to_be_bytes());
         data.extend_from_slice(&32u32.to_be_bytes());
         data.extend_from_slice(b"x25519");
@@ -790,6 +968,7 @@ mod tests {
         // via `std::str::from_utf8`, not silently flow into
         // `validate_type_name_grammar` (which expects `&str`).
         let mut data = Vec::new();
+        data.push(PUBLIC_KEY_VERSION);
         data.extend_from_slice(&6u16.to_be_bytes());
         data.extend_from_slice(&0u32.to_be_bytes());
         data.extend_from_slice(&[0xFFu8; 6]); // non-UTF-8 type_name region
@@ -813,8 +992,9 @@ mod tests {
         let original = encode_recipient_string("x25519", &key).unwrap();
         let checked = CheckedHrpstring::new::<Bech32>(&original).unwrap();
         let mut data: Vec<u8> = checked.byte_iter().collect();
-        // type_name starts at offset PAYLOAD_HEADER_SIZE (= 6).
-        // Original byte is 'x' (0x78). Flip bit 0 to get 'y' (0x79).
+        // type_name starts at offset PAYLOAD_HEADER_SIZE (= 7 = version
+        // byte + type_name_len + key_material_len). Original byte is 'x'
+        // (0x78). Flip bit 0 to get 'y' (0x79).
         data[PAYLOAD_HEADER_SIZE] ^= 0x01;
         let tampered = bech32::encode::<Bech32>(RECIPIENT_HRP, &data).unwrap();
         match decode_recipient_string(&tampered, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT) {
@@ -841,6 +1021,7 @@ mod tests {
     #[test]
     fn decode_rejects_zero_type_name_len() {
         let mut data = Vec::new();
+        data.push(PUBLIC_KEY_VERSION);
         data.extend_from_slice(&0u16.to_be_bytes()); // type_name_len = 0
         data.extend_from_slice(&0u32.to_be_bytes()); // key_material_len = 0
         data.extend_from_slice(&[0u8; PUBLIC_KEY_CHECKSUM_SIZE]);
@@ -851,9 +1032,12 @@ mod tests {
         }
     }
 
+    /// `type_name_len > TYPE_NAME_MAX_LEN` is rejected by the structural
+    /// length check before any UTF-8 / grammar work.
     #[test]
     fn decode_rejects_overlong_type_name_len() {
         let mut data = Vec::new();
+        data.push(PUBLIC_KEY_VERSION);
         data.extend_from_slice(&((TYPE_NAME_MAX_LEN as u16) + 1).to_be_bytes());
         data.extend_from_slice(&0u32.to_be_bytes());
         data.extend_from_slice(&[0u8; PUBLIC_KEY_CHECKSUM_SIZE]);
@@ -867,6 +1051,7 @@ mod tests {
     #[test]
     fn decode_rejects_oversized_key_material_len() {
         let mut data = Vec::new();
+        data.push(PUBLIC_KEY_VERSION);
         data.extend_from_slice(&6u16.to_be_bytes());
         data.extend_from_slice(&(KEY_MATERIAL_LEN_MAX + 1).to_be_bytes());
         data.extend_from_slice(b"x25519");
@@ -881,9 +1066,9 @@ mod tests {
     #[test]
     fn decode_rejects_total_size_mismatch() {
         // Header claims type_name_len=6, key_material_len=32 →
-        // expected total = 6 + 32 + 6 + 16 = 60. Provide a payload
-        // of size 60 + 1.
+        // expected total = 7 + 6 + 32 + 16 = 61. Provide 61 + 1 bytes.
         let mut data = Vec::new();
+        data.push(PUBLIC_KEY_VERSION);
         data.extend_from_slice(&6u16.to_be_bytes());
         data.extend_from_slice(&32u32.to_be_bytes());
         data.extend_from_slice(b"x25519");
@@ -903,8 +1088,9 @@ mod tests {
         // validate_type_name_grammar (uppercase). Compute the inner checksum
         // for "X25519" first so the only thing left to fail is grammar.
         let key = x25519_key();
-        let cs = compute_checksum("X25519", &key);
+        let cs = compute_checksum(PUBLIC_KEY_VERSION, "X25519", &key);
         let mut data = Vec::new();
+        data.push(PUBLIC_KEY_VERSION);
         data.extend_from_slice(&6u16.to_be_bytes());
         data.extend_from_slice(&32u32.to_be_bytes());
         data.extend_from_slice(b"X25519");
@@ -1023,7 +1209,7 @@ mod tests {
 
     #[test]
     fn public_key_from_recipient_string_rejects_all_zero() {
-        let s = encode_recipient_string(crate::recipient::x25519::TYPE_NAME, &[0u8; 32]).unwrap();
+        let s = encode_recipient_string(X25519_TYPE_NAME, &[0u8; 32]).unwrap();
         match PublicKey::from_recipient_string(&s) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
             other => {
@@ -1034,7 +1220,7 @@ mod tests {
 
     #[test]
     fn read_public_key_rejects_all_zero_on_disk() {
-        let s = encode_recipient_string(crate::recipient::x25519::TYPE_NAME, &[0u8; 32]).unwrap();
+        let s = encode_recipient_string(X25519_TYPE_NAME, &[0u8; 32]).unwrap();
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), s.as_bytes()).unwrap();
         match read_public_key(tmp.path()) {

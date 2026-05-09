@@ -539,6 +539,20 @@ impl std::fmt::Display for FormatDefect {
 
 /// File-format or key-file version rejection. Carries the raw version
 /// byte so callers can inspect it without parsing a formatted string.
+///
+/// The four variant pairs cover FerroCrypt's three independent on-disk
+/// version domains:
+///
+/// - `OlderFile` / `NewerFile` — `.fcr` outer-file version (`FORMAT.md` §3.1);
+/// - `OlderKey` / `NewerKey` — `private.key` wire-version byte
+///   (`FORMAT.md` §8). "Key" rather than "PrivateKey" for backwards
+///   compatibility with v0.x callers that pattern-match on the variant
+///   names;
+/// - `OlderPublicKey` / `NewerPublicKey` — `public.key` recipient-payload
+///   version (`FORMAT.md` §7). Distinct from the `Key` pair because the
+///   private-key wire encoding and the public-key payload encoding are
+///   different on-disk shapes that may produce the same logical
+///   keypair-suite v from different bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum UnsupportedVersion {
@@ -552,14 +566,34 @@ pub enum UnsupportedVersion {
         /// Version byte read from the encrypted-file prefix.
         version: u8,
     },
-    /// Key file version is older than the current release supports.
+    /// `private.key` wire version is older than the current release
+    /// accepts.
     OlderKey {
-        /// Version byte read from the key-file prefix.
+        /// Wire-version byte read from the `private.key` fixed header.
         version: u8,
     },
-    /// Key file version is newer than the current release supports.
+    /// `private.key` wire version is newer than the current release
+    /// accepts.
     NewerKey {
-        /// Version byte read from the key-file prefix.
+        /// Wire-version byte read from the `private.key` fixed header.
+        version: u8,
+    },
+    /// `public.key` recipient-payload version is older than the current
+    /// release accepts. Surfaced when a public recipient (Bech32 string
+    /// or `public.key` file) is offered for encryption but its key-pair
+    /// suite is no longer supported by this build. Per `FORMAT.md` §7
+    /// and the symmetry rule in §11, a release MUST NOT accept a public
+    /// key for encryption unless the same key-pair suite remains
+    /// supported for private-key decryption.
+    OlderPublicKey {
+        /// Wire-version byte read from the recipient payload.
+        version: u8,
+    },
+    /// `public.key` recipient-payload version is newer than the current
+    /// release accepts. Carries the leading version byte read from the
+    /// recipient payload's offset 0.
+    NewerPublicKey {
+        /// Wire-version byte from the recipient payload.
         version: u8,
     },
 }
@@ -578,6 +612,18 @@ impl std::fmt::Display for UnsupportedVersion {
             }
             Self::NewerKey { version } => {
                 write!(f, "Newer key format (v{version}). Upgrade FerroCrypt.")
+            }
+            Self::OlderPublicKey { version } => {
+                write!(
+                    f,
+                    "Older public-key format (v{version}). Generate a new key pair."
+                )
+            }
+            Self::NewerPublicKey { version } => {
+                write!(
+                    f,
+                    "Newer public-key format (v{version}). Upgrade FerroCrypt."
+                )
             }
         }
     }
@@ -934,6 +980,14 @@ mod tests {
             "Older key format (v1). Use a previous release."
         );
         assert_eq!(
+            UnsupportedVersion::OlderPublicKey { version: 1 }.to_string(),
+            "Older public-key format (v1). Generate a new key pair."
+        );
+        assert_eq!(
+            UnsupportedVersion::NewerPublicKey { version: 9 }.to_string(),
+            "Newer public-key format (v9). Upgrade FerroCrypt."
+        );
+        assert_eq!(
             InvalidKdfParams::Parallelism(9999).to_string(),
             "File has invalid KDF settings (parallelism 9999)"
         );
@@ -1210,6 +1264,14 @@ mod tests {
             (
                 "NewerKey(max)",
                 UnsupportedVersion::NewerKey { version: u8::MAX },
+            ),
+            (
+                "OlderPublicKey(max)",
+                UnsupportedVersion::OlderPublicKey { version: u8::MAX },
+            ),
+            (
+                "NewerPublicKey(max)",
+                UnsupportedVersion::NewerPublicKey { version: u8::MAX },
             ),
         ];
         for (label, v) in versions {

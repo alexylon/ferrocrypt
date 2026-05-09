@@ -310,7 +310,7 @@ pub enum CryptoError {
     /// list. Distinct from [`Self::NoSupportedRecipient`], which means
     /// "the file's recipient list contains no entry I can unlock,"
     /// not "I'm the wrong tool for this file."
-    #[error("Decryptor expects {expected} file, got {found}")]
+    #[error("File is {found} encrypted; use {}", found.credential_name())]
     DecryptorModeMismatch {
         /// Decryptor mode selected by the caller.
         expected: UnauthenticatedRecipientMode,
@@ -319,7 +319,7 @@ pub enum CryptoError {
     },
     /// The caller provided no encryption recipients.
     ///
-    /// `Encryptor::with_recipients` requires at least one public recipient;
+    /// `Encryptor::with_public_keys` requires at least one public recipient;
     /// otherwise there is no recipient entry to wrap the per-file `file_key`.
     #[error("Recipient list cannot be empty")]
     EmptyRecipientList,
@@ -792,7 +792,7 @@ mod tests {
                 found: UnauthenticatedRecipientMode::PublicKey,
             }
             .to_string(),
-            "Decryptor expects passphrase file, got public-key"
+            "File is public-key encrypted; use a private key"
         );
         assert_eq!(
             CryptoError::DecryptorModeMismatch {
@@ -800,7 +800,7 @@ mod tests {
                 found: UnauthenticatedRecipientMode::Passphrase,
             }
             .to_string(),
-            "Decryptor expects public-key file, got passphrase"
+            "File is passphrase encrypted; use a passphrase"
         );
         assert_eq!(
             CryptoError::EmptyRecipientList.to_string(),

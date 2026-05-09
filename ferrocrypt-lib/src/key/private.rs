@@ -484,11 +484,11 @@ pub(crate) fn open_private_key(
 
 // ─── Private-key wrapper ───────────────────────────────────────────────────
 
-/// Private identity source for public-key-recipient decryption.
+/// Private key for public-key-recipient decryption.
 ///
 /// In v1, the only supported source is a passphrase-protected FerroCrypt
 /// `private.key` file containing X25519 secret material. The file is unlocked
-/// during [`crate::RecipientDecryptor::decrypt`] with the passphrase supplied to
+/// during [`crate::PrivateKeyDecryptor::decrypt`] with the passphrase supplied to
 /// that operation.
 ///
 /// Construct with [`PrivateKey::from_key_file`].
@@ -507,7 +507,7 @@ impl PrivateKey {
     /// References a passphrase-protected FerroCrypt `private.key` file.
     ///
     /// The file is not opened until the private key is used by
-    /// [`crate::RecipientDecryptor::decrypt`].
+    /// [`crate::PrivateKeyDecryptor::decrypt`].
     pub fn from_key_file(path: impl AsRef<std::path::Path>) -> Self {
         Self {
             source: PrivateKeySource::KeyFile(path.as_ref().to_path_buf()),

@@ -15,7 +15,7 @@
 //! - **Path-based file workflows**: archiving, streaming encryption, staging,
 //!   and output naming are handled by the library.
 //! - **Typed routing**: [`Decryptor::open`] inspects the recipient list and
-//!   returns a passphrase or public-recipient decryptor variant.
+//!   returns a passphrase or private-key decryptor variant.
 //! - **Typed diagnostics**: operations return [`CryptoError`] values with
 //!   structured format, KDF, recipient, authentication, and I/O failures.
 //!
@@ -34,8 +34,8 @@
 //! // Decrypt
 //! let restored = match Decryptor::open(&encrypted.output_path)? {
 //!     Decryptor::Passphrase(d) => d.decrypt(passphrase, "./restored", |ev| eprintln!("{ev}"))?,
-//!     Decryptor::Recipient(_) => unreachable!("we just encrypted with a passphrase"),
-//!     _ => unreachable!("Decryptor is non_exhaustive; v1 has only Passphrase + Recipient"),
+//!     Decryptor::PrivateKey(_) => unreachable!("we just encrypted with a passphrase"),
+//!     _ => unreachable!("Decryptor is non_exhaustive; v1 has only Passphrase + PrivateKey"),
 //! };
 //! println!("Decrypted to {}", restored.output_path.display());
 //! # Ok(()) }
@@ -56,19 +56,19 @@
 //! println!("Fingerprint: {}", keys.fingerprint);
 //!
 //! // 2) Encrypt with the recipient's public key (no passphrase required)
-//! let encrypted = Encryptor::with_recipient(PublicKey::from_key_file(&keys.public_key_path))
+//! let encrypted = Encryptor::with_public_key(PublicKey::from_key_file(&keys.public_key_path))
 //!     .write("./payload", "./out", |ev| eprintln!("{ev}"))?;
 //!
 //! // 3) Decrypt with the recipient's private key + passphrase
 //! let restored = match Decryptor::open(&encrypted.output_path)? {
-//!     Decryptor::Recipient(d) => d.decrypt(
+//!     Decryptor::PrivateKey(d) => d.decrypt(
 //!         PrivateKey::from_key_file(&keys.private_key_path),
 //!         passphrase,
 //!         "./restored",
 //!         |ev| eprintln!("{ev}"),
 //!     )?,
 //!     Decryptor::Passphrase(_) => unreachable!("we just encrypted to a public key"),
-//!     _ => unreachable!("Decryptor is non_exhaustive; v1 has only Passphrase + Recipient"),
+//!     _ => unreachable!("Decryptor is non_exhaustive; v1 has only Passphrase + PrivateKey"),
 //! };
 //! println!("Decrypted to {}", restored.output_path.display());
 //! # Ok(()) }
@@ -80,8 +80,8 @@
 //! - **Passphrase recipient**: use [`Encryptor::with_passphrase`] when the
 //!   same passphrase should encrypt and decrypt the file. The resulting `.fcr`
 //!   contains exactly one native `argon2id` recipient.
-//! - **Public-key recipient**: use [`Encryptor::with_recipient`] or
-//!   [`Encryptor::with_recipients`] when the sender should encrypt to one or
+//! - **Public-key recipient**: use [`Encryptor::with_public_key`] or
+//!   [`Encryptor::with_public_keys`] when the sender should encrypt to one or
 //!   more public recipient keys. Decryption requires a matching [`PrivateKey`]
 //!   file and that key file's passphrase. This does not authenticate the sender.
 //!
@@ -134,7 +134,7 @@
 use std::path::PathBuf;
 
 pub use crate::api::{
-    Decryptor, Encryptor, KeyPairGenerator, PassphraseDecryptor, RecipientDecryptor,
+    Decryptor, Encryptor, KeyPairGenerator, PassphraseDecryptor, PrivateKeyDecryptor,
     default_encrypted_filename, generate_key_pair, probe_recipient_mode,
     probe_recipient_mode_with_limits, validate_private_key_file, validate_public_key_file,
 };
@@ -179,6 +179,19 @@ impl std::fmt::Display for UnauthenticatedRecipientMode {
             Self::PublicKey => "public-key",
         };
         f.write_str(label)
+    }
+}
+
+impl UnauthenticatedRecipientMode {
+    /// Name of the credential the caller must supply to decrypt a file in
+    /// this mode. Used by the `DecryptorModeMismatch` error wording so the
+    /// message tells the caller which credential to switch to instead of
+    /// leaving them to infer it from the recipient kind.
+    pub(crate) const fn credential_name(self) -> &'static str {
+        match self {
+            Self::Passphrase => "a passphrase",
+            Self::PublicKey => "a private key",
+        }
     }
 }
 
@@ -280,7 +293,7 @@ pub enum ProgressEvent {
     /// an `argon2id` recipient. Emitted at the work boundary inside the
     /// recipient module — after structural validation and resource-cap
     /// checks, immediately before the KDF call. Fires zero times for a
-    /// pure-recipient (X25519) `.fcr` and zero times when a malformed
+    /// pure public-key (X25519) `.fcr` and zero times when a malformed
     /// `.fcr` is rejected before any KDF runs. May block for multiple
     /// seconds.
     DerivingPassphraseWrapKey,
@@ -317,16 +330,6 @@ impl std::fmt::Display for ProgressEvent {
 pub use crate::key::private::PrivateKey;
 pub use crate::key::public::PublicKey;
 
-/// Alternative name for [`PublicKey`] using the `FORMAT.md` recipient
-/// vocabulary. Identical type — choose whichever name reads more
-/// naturally at the call site.
-pub type RecipientKey = PublicKey;
-
-/// Alternative name for [`PrivateKey`] using the `FORMAT.md` identity
-/// vocabulary. Identical type — choose whichever name reads more
-/// naturally at the call site.
-pub type IdentityKey = PrivateKey;
-
 /// Successful outcome of an [`Encryptor::write`] call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -336,7 +339,7 @@ pub struct EncryptOutcome {
 }
 
 /// Successful outcome of [`PassphraseDecryptor::decrypt`] or
-/// [`RecipientDecryptor::decrypt`].
+/// [`PrivateKeyDecryptor::decrypt`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DecryptOutcome {
@@ -398,8 +401,8 @@ pub mod fuzz_exports;
 /// or all-zero X25519 public keys. Returns
 /// [`CryptoError::RecipientStringCapExceeded`] when the input exceeds the local
 /// recipient-string cap.
-pub fn decode_recipient(recipient: &str) -> Result<[u8; 32], CryptoError> {
-    key::public::decode_x25519_recipient(recipient)
+pub fn decode_recipient_string(recipient_string: &str) -> Result<[u8; 32], CryptoError> {
+    key::public::decode_x25519_recipient(recipient_string)
 }
 
 #[cfg(test)]
@@ -528,7 +531,7 @@ mod tests {
         );
     }
 
-    /// `decode_recipient`'s docstring inlines the recipient-string
+    /// `decode_recipient_string`'s docstring inlines the recipient-string
     /// local cap as the literal "1,024" because the underlying
     /// constant lives in a private module and rustdoc cannot resolve
     /// an intra-doc link across the privacy boundary. Pin the literal
@@ -540,13 +543,13 @@ mod tests {
         assert_eq!(
             key::public::RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT,
             1_024,
-            "decode_recipient docstring inlines the cap value; \
-             update both lib.rs:decode_recipient and this test in \
+            "decode_recipient_string docstring inlines the cap value; \
+             update both lib.rs:decode_recipient_string and this test in \
              the same commit if the cap changes"
         );
     }
 
-    /// `decode_recipient` shares the canonical `decode_x25519_recipient`
+    /// `decode_recipient_string` shares the canonical `decode_x25519_recipient`
     /// path with `PublicKey::from_recipient_string`, so it must inherit
     /// the all-zero ingress reject. Pin the contract directly at the
     /// free-function entry so a future refactor that bypasses the
@@ -556,7 +559,7 @@ mod tests {
     fn decode_recipient_rejects_all_zero_pubkey() {
         let s =
             key::public::encode_recipient_string(recipient::x25519::TYPE_NAME, &[0u8; 32]).unwrap();
-        match decode_recipient(&s) {
+        match decode_recipient_string(&s) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
             other => panic!("expected MalformedPublicKey, got {other:?}"),
         }

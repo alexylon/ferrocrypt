@@ -339,7 +339,7 @@ fn public_key_wire_version_to_suite(version: u8) -> Result<KeypairSuite, CryptoE
 /// byte for the diagnostic is derived from `suite` so the on-disk byte
 /// and the reported number cannot drift apart. Used at encryption-time
 /// recipient acceptance — the same gate the private-key parser uses for
-/// decryption-time identity acceptance.
+/// decryption-time private-key acceptance.
 fn ensure_public_key_suite_supported(suite: KeypairSuite) -> Result<(), CryptoError> {
     if keypair_suite_is_supported(suite) {
         Ok(())
@@ -354,12 +354,12 @@ fn ensure_public_key_suite_supported(suite: KeypairSuite) -> Result<(), CryptoEr
 
 /// Canonical X25519-typed Bech32 decoder. Single source of truth for
 /// "given a `fcr1…` recipient string, return raw 32-byte X25519 key
-/// material." [`crate::decode_recipient`] (the public free function)
+/// material." [`crate::decode_recipient_string`] (the public free function)
 /// routes through here so a future cap-policy or type-name change
 /// cannot drift between the public entry points.
 ///
 /// Suite-discarding wrapper around [`decode_x25519_recipient_resolved`]:
-/// callers who only need the bytes (the public `decode_recipient` API)
+/// callers who only need the bytes (the public `decode_recipient_string` API)
 /// drop the suite, while in-tree callers that need to preserve the
 /// suite on a resulting `PublicKey` use the resolved variant.
 ///
@@ -594,8 +594,8 @@ pub(crate) fn read_public_key(path: &std::path::Path) -> Result<ResolvedPublicKe
 ///
 /// Once constructed, a `PublicKey` can be:
 ///
-/// - passed to [`crate::Encryptor::with_recipient`] or
-///   [`crate::Encryptor::with_recipients`];
+/// - passed to [`crate::Encryptor::with_public_key`] or
+///   [`crate::Encryptor::with_public_keys`];
 /// - rendered as a Bech32 `fcr1…` recipient string with
 ///   [`PublicKey::to_recipient_string`];
 /// - fingerprinted with [`PublicKey::fingerprint`].
@@ -713,7 +713,7 @@ impl PublicKey {
         })
     }
 
-    /// Computes the public-recipient fingerprint.
+    /// Computes the public-key fingerprint.
     ///
     /// Returns 64 lowercase hexadecimal characters: SHA3-256 over
     /// `type_name || 0x00 || key_material`, using the v1 `"x25519"` type

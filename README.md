@@ -200,7 +200,7 @@ The interactive prompt exits on `quit`, `exit`, or Ctrl-D. Ctrl-C cancels the cu
 | `-p, --passphrase` | `encrypt` | Encrypt with a passphrase (default when no recipient is given) |
 | `-r, --recipient` | `encrypt` | Public recipient string (`fcr1...`); repeatable |
 | `-k, --public-key` | `encrypt` | Public key file; repeatable |
-| `-K, --private-key` | `decrypt` | Private key file (required for public-recipient files) |
+| `-K, --private-key` | `decrypt` | Private key file (required for public-key files) |
 | `--allow-double-encrypt` | `encrypt` | Permit encrypting an input that already looks like a `.fcr` file |
 | `--max-kdf-memory` | `decrypt` | Maximum Argon2id memory cost accepted during decryption |
 | `--keep-partial` | `decrypt` | Keep the staged `.incomplete` working copy on failure for forensic or recovery use |

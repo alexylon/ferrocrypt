@@ -183,7 +183,7 @@ pub enum CliCommand {
             short = 'K',
             long = "private-key",
             value_name = "PRIVATE_KEY_FILE",
-            help = "Private key file (required for public-recipient files)"
+            help = "Private key file (required for public-key files)"
         )]
         private_key: Option<PathBuf>,
 
@@ -491,7 +491,7 @@ fn run_encrypt(
                 println!("Encrypting to: {fp}");
             }
         }
-        Encryptor::with_recipients(recipients)?
+        Encryptor::with_public_keys(recipients)?
     };
 
     if let Some(save_as_path) = save_as.as_deref() {
@@ -542,7 +542,7 @@ fn run_decrypt(
                 .decrypt(passphrase, &output_dir, |ev| eprintln!("{ev}"))?
                 .output_path
         }
-        Decryptor::Recipient(mut decryptor) => {
+        Decryptor::PrivateKey(mut decryptor) => {
             let private_key = private_key.ok_or_else(|| {
                 CryptoError::InvalidInput(
                     "this file is sealed to public-key recipients; --private-key is required"

@@ -1,7 +1,7 @@
 #![no_main]
 //! End-to-end fuzz target for the recipient (X25519) decrypt pipeline.
 //! Drives arbitrary bytes through `Decryptor::open` +
-//! `RecipientDecryptor::decrypt` so coverage stays on the full
+//! `PrivateKeyDecryptor::decrypt` so coverage stays on the full
 //! wire-format → MAC → AEAD path. The harness ignores all errors —
 //! rejection is the expected outcome for almost every input; we only
 //! care that the library never panics.
@@ -39,7 +39,7 @@ fuzz_target!(|data: &[u8]| {
     f.write_all(data).unwrap();
     drop(f);
 
-    if let Ok(Decryptor::Recipient(d)) = Decryptor::open(&input_path) {
+    if let Ok(Decryptor::PrivateKey(d)) = Decryptor::open(&input_path) {
         let passphrase = SecretString::from("fuzz_key".to_string());
         let _ = d.decrypt(
             PrivateKey::from_key_file(&priv_key),

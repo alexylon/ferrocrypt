@@ -38,7 +38,7 @@
    - [4.3 Future recipient types](#43-future-recipient-types)
 5. [Payload stream](#5-payload-stream)
 6. [TLV extension regions](#6-tlv-extension-regions)
-7. [Public recipient keys](#7-public-recipient-keys)
+7. [Public-key recipients](#7-public-key-recipients)
    - [7.1 `public.key` file form](#71-publickey-file-form)
    - [7.2 Fingerprint](#72-fingerprint)
 8. [Private key format (`private.key`)](#8-private-key-format-privatekey)
@@ -822,7 +822,7 @@ revision.
 
 ---
 
-## 7. Public recipient keys
+## 7. Public-key recipients
 
 A public recipient is a lowercase Bech32 string with HRP `fcr`.
 
@@ -845,10 +845,10 @@ recipient_payload = public_key_version:u8
 ```
 
 `public_key_version` MUST be in `0x01..=0xFF`. `0x00` is reserved and MUST be
-rejected. v1 public-recipient payloads use `public_key_version = 0x01` and map to
+rejected. v1 public-key recipient payloads use `public_key_version = 0x01` and map to
 key-pair suite v1.
 
-All public-recipient payloads use the same checksum scheme, with the version byte
+All public-key recipient payloads use the same checksum scheme, with the version byte
 mixed into the hash input:
 
 ```text
@@ -886,7 +886,7 @@ Rules:
 - Decoders convert 5-to-8 with padding disabled and reject non-canonical padding.
 - Mixed-case and uppercase encodings MUST be rejected.
 - The internal checksum MUST verify.
-- Generic public-recipient decoders MAY decode unsupported type names after the
+- Generic public-key recipient decoders MAY decode unsupported type names after the
   key-pair suite itself is supported. A public recipient MUST be supported by the
   implementation or by an available plugin before use as an encryption
   recipient.

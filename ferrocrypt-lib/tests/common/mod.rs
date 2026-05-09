@@ -45,7 +45,7 @@ pub fn passphrase_auto(
                 d.decrypt(passphrase.clone(), output_dir, on_event)
                     .map(|o| o.output_path)
             }
-            Decryptor::Recipient(_) => Err(CryptoError::NoSupportedRecipient),
+            Decryptor::PrivateKey(_) => Err(CryptoError::NoSupportedRecipient),
             _ => Err(CryptoError::NoSupportedRecipient),
         }
     } else {
@@ -76,7 +76,7 @@ pub fn recipient_auto(
     }
     if probe_recipient_mode(input)?.is_some() {
         match Decryptor::open(input)? {
-            Decryptor::Recipient(mut d) => {
+            Decryptor::PrivateKey(mut d) => {
                 if let Some(limit) = kdf_limit {
                     d = d.kdf_limit(*limit);
                 }
@@ -92,7 +92,7 @@ pub fn recipient_auto(
             _ => Err(CryptoError::NoSupportedRecipient),
         }
     } else {
-        let mut encryptor = Encryptor::with_recipient(PublicKey::from_key_file(key_file));
+        let mut encryptor = Encryptor::with_public_key(PublicKey::from_key_file(key_file));
         if let Some(s) = save_as {
             encryptor = encryptor.save_as(s);
         }

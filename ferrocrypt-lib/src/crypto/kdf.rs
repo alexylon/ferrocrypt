@@ -40,7 +40,7 @@ pub(crate) const MAX_PASSPHRASE_LEN_BYTES: usize = 4_096;
 ///
 /// Construct with [`KdfLimit::new`] for KiB or [`KdfLimit::from_mib`] for MiB,
 /// then pass it to [`crate::PassphraseDecryptor::kdf_limit`] or
-/// [`crate::RecipientDecryptor::kdf_limit`]. The struct is `#[non_exhaustive]`
+/// [`crate::PrivateKeyDecryptor::kdf_limit`]. The struct is `#[non_exhaustive]`
 /// so future releases can add additional limit dimensions without a breaking
 /// change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

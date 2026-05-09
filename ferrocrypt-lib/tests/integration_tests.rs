@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
-    CryptoError, ENCRYPTED_EXTENSION, PublicKey, decode_recipient, probe_recipient_mode,
+    CryptoError, ENCRYPTED_EXTENSION, PublicKey, decode_recipient_string, probe_recipient_mode,
     validate_private_key_file,
 };
 
@@ -451,7 +451,7 @@ fn test_recipient_keygen_rejects_empty_passphrase() {
     );
 }
 
-/// M-3 regression: `RecipientDecryptor::decrypt` must reject an empty
+/// M-3 regression: `PrivateKeyDecryptor::decrypt` must reject an empty
 /// passphrase at the top of the function, before `open_x25519_private_key`
 /// and any KDF work runs. Pre-restructure the hybrid path was a
 /// consistency gap that let an empty passphrase burn an Argon2id cycle
@@ -467,7 +467,7 @@ fn test_recipient_decrypt_rejects_empty_passphrase_before_kdf() {
     fs::create_dir_all(&keys_dir).unwrap();
 
     // Build a real recipient `.fcr` so `Decryptor::open` returns the
-    // `Recipient` variant. Setup events fire here, before we install
+    // `PrivateKey` variant. Setup events fire here, before we install
     // the observing closure.
     let setup_pass = SecretString::from("setup-pass".to_string());
     let kg = fast_keypair_generator(setup_pass)
@@ -477,7 +477,7 @@ fn test_recipient_decrypt_rejects_empty_passphrase_before_kdf() {
     fs::write(&input, b"x").unwrap();
     let encrypted_dir = test_dir.join("encrypted");
     fs::create_dir_all(&encrypted_dir).unwrap();
-    let outcome = Encryptor::with_recipient(PublicKey::from_key_file(&kg.public_key_path))
+    let outcome = Encryptor::with_public_key(PublicKey::from_key_file(&kg.public_key_path))
         .write(&input, &encrypted_dir, |_| {})
         .expect("encrypt fixture file");
 
@@ -485,7 +485,7 @@ fn test_recipient_decrypt_rejects_empty_passphrase_before_kdf() {
     fs::create_dir_all(&restore_dir).unwrap();
     let saw_kdf_event = Cell::new(false);
     let err = match Decryptor::open(&outcome.output_path).expect("open") {
-        Decryptor::Recipient(d) => d
+        Decryptor::PrivateKey(d) => d
             .decrypt(
                 PrivateKey::from_key_file(&kg.private_key_path),
                 SecretString::from(String::new()),
@@ -501,7 +501,7 @@ fn test_recipient_decrypt_rejects_empty_passphrase_before_kdf() {
                 },
             )
             .unwrap_err(),
-        other => panic!("expected Recipient decryptor, got {other:?}"),
+        other => panic!("expected PrivateKey decryptor, got {other:?}"),
     };
 
     assert!(
@@ -560,7 +560,7 @@ fn test_passphrase_encrypt_rejects_symlink_before_kdf() {
     );
 }
 
-/// L-2 regression: on a successful recipient decrypt, `UnlockingPrivateKey`
+/// L-2 regression: on a successful public-key decrypt, `UnlockingPrivateKey`
 /// fires before the private-key Argon2id runs and `Decrypting` fires only after
 /// the envelope/HMAC checks pass (just before streaming unarchive). Pre-audit
 /// the path emitted `Decrypting` immediately at the top of `hybrid::decrypt_file`
@@ -617,8 +617,8 @@ fn test_recipient_decrypt_progress_events_in_order() -> Result<(), CryptoError> 
     let decrypting_at = events
         .iter()
         .position(|e| matches!(e, ProgressEvent::Decrypting));
-    let unlocking_at = unlocking_at.expect("UnlockingPrivateKey must fire on recipient decrypt");
-    let decrypting_at = decrypting_at.expect("Decrypting must fire on recipient decrypt");
+    let unlocking_at = unlocking_at.expect("UnlockingPrivateKey must fire on public-key decrypt");
+    let decrypting_at = decrypting_at.expect("Decrypting must fire on public-key decrypt");
     assert!(
         unlocking_at < decrypting_at,
         "UnlockingPrivateKey ({unlocking_at}) must fire before Decrypting ({decrypting_at}); events: {events:?}"
@@ -630,7 +630,7 @@ fn test_recipient_decrypt_progress_events_in_order() -> Result<(), CryptoError> 
         !events
             .iter()
             .any(|e| matches!(e, ProgressEvent::DerivingPassphraseWrapKey)),
-        "recipient decrypt must not emit DerivingPassphraseWrapKey; events: {events:?}"
+        "public-key decrypt must not emit DerivingPassphraseWrapKey; events: {events:?}"
     );
 
     Ok(())
@@ -1781,7 +1781,7 @@ fn test_wrong_format_type_recipient_as_passphrase() -> Result<(), CryptoError> {
 
     // v1 has no per-file mode byte: a file's mode is derived from its
     // recipient list (one `argon2id` => `Passphrase`; one or more
-    // `x25519` => `Recipient`). Asking `passphrase_auto` to decrypt a
+    // `x25519` => `PrivateKey`). Asking `passphrase_auto` to decrypt a
     // recipient file therefore fails because the recipient list
     // contains no `argon2id` slot the passphrase path could unwrap.
     // Per `FORMAT.md` §3.4 / §3.5 the canonical surfaced error is
@@ -3000,7 +3000,7 @@ fn test_recipient_round_trip() -> Result<(), CryptoError> {
     let encoded = PublicKey::from_key_file(keys_dir.join("public.key")).to_recipient_string()?;
     assert!(encoded.starts_with("fcr1"));
 
-    let decoded = decode_recipient(&encoded)?;
+    let decoded = decode_recipient_string(&encoded)?;
     let re_encoded = PublicKey::from_bytes(decoded)?.to_recipient_string()?;
     assert_eq!(encoded, re_encoded);
 
@@ -3009,7 +3009,7 @@ fn test_recipient_round_trip() -> Result<(), CryptoError> {
 
 #[test]
 fn test_recipient_malformed_bech32_rejected() {
-    let result = decode_recipient("fcr1not-valid-bech32!!!");
+    let result = decode_recipient_string("fcr1not-valid-bech32!!!");
     assert!(result.is_err());
 }
 
@@ -3023,7 +3023,7 @@ fn test_recipient_uppercase_rejected() -> Result<(), CryptoError> {
     let encoded = PublicKey::from_key_file(keys_dir.join("public.key")).to_recipient_string()?;
     let uppercased = encoded.to_uppercase();
     assert!(
-        decode_recipient(&uppercased).is_err(),
+        decode_recipient_string(&uppercased).is_err(),
         "uppercase-only recipient strings are non-canonical and must be rejected"
     );
 

@@ -12,7 +12,7 @@
 //!
 //! - `Encryptor::with_passphrase` — exactly one `argon2id` recipient
 //!   (`MixingPolicy::Exclusive`).
-//! - `Encryptor::with_recipient` / `with_recipients` — one or more
+//! - `Encryptor::with_public_key` / `with_public_keys` — one or more
 //!   `x25519` recipients (`MixingPolicy::PublicKeyMixable`). Empty
 //!   lists reject as [`CryptoError::EmptyRecipientList`]; lists that
 //!   mix incompatible scheme policies (impossible in v1, where every
@@ -23,7 +23,7 @@
 //!
 //! [`Decryptor::open`] inspects the file's recipient list (no crypto)
 //! and returns a typed variant: [`Decryptor::Passphrase`] for files
-//! sealed with a passphrase, [`Decryptor::Recipient`] for files sealed
+//! sealed with a passphrase, [`Decryptor::PrivateKey`] for files sealed
 //! to public keys. Each variant's `decrypt` method accepts only the
 //! credentials that variant can actually use, so a mismatched-credential
 //! call — e.g. passing a [`PrivateKey`] to a passphrase-sealed file — is
@@ -57,7 +57,7 @@ use crate::{
 ///
 /// Pick the recipient kind via the constructor — passphrase
 /// ([`Encryptor::with_passphrase`]) or one or more public keys
-/// ([`Encryptor::with_recipient`], [`Encryptor::with_recipients`]).
+/// ([`Encryptor::with_public_key`], [`Encryptor::with_public_keys`]).
 /// Then optionally set an explicit output path
 /// ([`Encryptor::save_as`]) or override archive resource caps
 /// ([`Encryptor::archive_limits`]). Finalize with
@@ -82,7 +82,7 @@ use crate::{
 /// ```no_run
 /// use ferrocrypt::{Encryptor, PublicKey};
 /// let pk = PublicKey::from_key_file("./keys/public.key");
-/// let outcome = Encryptor::with_recipient(pk)
+/// let outcome = Encryptor::with_public_key(pk)
 ///     .write("./payload", "./out", |ev| eprintln!("{ev}"))?;
 /// # Ok::<(), ferrocrypt::CryptoError>(())
 /// ```
@@ -93,7 +93,7 @@ use crate::{
 /// use ferrocrypt::{Encryptor, PublicKey};
 /// let alice = PublicKey::from_key_file("./alice/public.key");
 /// let bob = PublicKey::from_key_file("./bob/public.key");
-/// let outcome = Encryptor::with_recipients([alice, bob])?
+/// let outcome = Encryptor::with_public_keys([alice, bob])?
 ///     .write("./payload", "./out", |ev| eprintln!("{ev}"))?;
 /// # Ok::<(), ferrocrypt::CryptoError>(())
 /// ```
@@ -134,9 +134,9 @@ impl Encryptor {
 
     /// Configures encryption to one public-key recipient.
     ///
-    /// This is a convenience wrapper around [`Encryptor::with_recipients`]
+    /// This is a convenience wrapper around [`Encryptor::with_public_keys`]
     /// for the common single-recipient case.
-    pub fn with_recipient(recipient: PublicKey) -> Self {
+    pub fn with_public_key(recipient: PublicKey) -> Self {
         Self {
             state: EncryptorState::Recipients(vec![recipient]),
             save_as: None,
@@ -172,7 +172,7 @@ impl Encryptor {
     /// Returns [`CryptoError::EmptyRecipientList`] if the iterator is empty.
     /// All public keys in the current v1 implementation are X25519 recipients;
     /// future key kinds may add additional mixing-policy checks.
-    pub fn with_recipients(
+    pub fn with_public_keys(
         recipients: impl IntoIterator<Item = PublicKey>,
     ) -> Result<Self, CryptoError> {
         let recipients: Vec<PublicKey> = recipients.into_iter().collect();
@@ -210,10 +210,10 @@ impl Encryptor {
     /// Raising `archive_limits` above [`ArchiveLimits::default`] can
     /// produce a `.fcr` whose archive payload exceeds what a
     /// default-configured [`PassphraseDecryptor`] /
-    /// [`RecipientDecryptor`] will extract. The receiving decryptor
+    /// [`PrivateKeyDecryptor`] will extract. The receiving decryptor
     /// MUST be configured via
     /// [`PassphraseDecryptor::archive_limits`] /
-    /// [`RecipientDecryptor::archive_limits`] with limits that match
+    /// [`PrivateKeyDecryptor::archive_limits`] with limits that match
     /// (or exceed) the file's actual content. Lowering
     /// `archive_limits` only tightens what the encrypt-side preflight
     /// accepts and never breaks default round-trip.
@@ -224,7 +224,7 @@ impl Encryptor {
 
     /// Overrides the Argon2id parameters used by the passphrase recipient
     /// (`Encryptor::with_passphrase`). Has no effect on public-key
-    /// (`Encryptor::with_recipient` / `with_recipients`) flows, which use
+    /// (`Encryptor::with_public_key` / `with_public_keys`) flows, which use
     /// X25519 ECDH and never run Argon2id during encryption.
     ///
     /// If unset, the writer uses [`KdfParams::default`] (1 GiB memory,
@@ -283,8 +283,8 @@ impl Encryptor {
     /// [`PassphraseDecryptor::kdf_limit`] with a matching
     /// [`KdfLimit`].
     ///
-    /// Has no effect on public-key (`Encryptor::with_recipient` /
-    /// `with_recipients`) flows, which never run Argon2id during
+    /// Has no effect on public-key (`Encryptor::with_public_key` /
+    /// `with_public_keys`) flows, which never run Argon2id during
     /// encryption.
     pub fn kdf_limit(mut self, limit: KdfLimit) -> Self {
         self.kdf_limit = Some(limit);
@@ -403,7 +403,7 @@ impl Encryptor {
 /// takes only the credentials it can use:
 ///
 /// - [`Decryptor::Passphrase`] takes a passphrase.
-/// - [`Decryptor::Recipient`] takes a [`PrivateKey`] plus its unlock
+/// - [`Decryptor::PrivateKey`] takes a [`PrivateKey`] plus its unlock
 ///   passphrase.
 ///
 /// A mismatched-credential call — e.g. trying to decrypt a passphrase-sealed
@@ -416,8 +416,8 @@ pub enum Decryptor {
     /// [`PassphraseDecryptor::decrypt`].
     Passphrase(PassphraseDecryptor),
     /// File is sealed to one or more public-key recipients. Decrypt
-    /// via [`RecipientDecryptor::decrypt`].
-    Recipient(RecipientDecryptor),
+    /// via [`PrivateKeyDecryptor::decrypt`].
+    PrivateKey(PrivateKeyDecryptor),
 }
 
 impl Decryptor {
@@ -447,7 +447,7 @@ impl Decryptor {
     /// types) should construct a `HeaderReadLimits` via the builder
     /// methods and pass it here. The same limits are stashed on the
     /// returned variant so the second header read inside
-    /// [`PassphraseDecryptor::decrypt`] / [`RecipientDecryptor::decrypt`]
+    /// [`PassphraseDecryptor::decrypt`] / [`PrivateKeyDecryptor::decrypt`]
     /// uses them too — callers do not need to set them twice.
     ///
     /// # Errors
@@ -484,7 +484,7 @@ impl Decryptor {
                 header_read_limits,
                 incomplete_output_policy: None,
             })),
-            UnauthenticatedRecipientMode::PublicKey => Ok(Self::Recipient(RecipientDecryptor {
+            UnauthenticatedRecipientMode::PublicKey => Ok(Self::PrivateKey(PrivateKeyDecryptor {
                 input,
                 kdf_limit: None,
                 archive_limits: None,
@@ -495,7 +495,7 @@ impl Decryptor {
     }
 }
 
-/// Decryptor for password-sealed `.fcr` files. Returned from
+/// Decryptor for passphrase-sealed `.fcr` files. Returned from
 /// [`Decryptor::open`] when the file's recipient list classifies as
 /// [`UnauthenticatedRecipientMode::Passphrase`].
 #[derive(Debug)]
@@ -611,7 +611,7 @@ impl PassphraseDecryptor {
 /// [`UnauthenticatedRecipientMode::PublicKey`].
 #[derive(Debug)]
 #[non_exhaustive]
-pub struct RecipientDecryptor {
+pub struct PrivateKeyDecryptor {
     input: PathBuf,
     kdf_limit: Option<KdfLimit>,
     archive_limits: Option<ArchiveLimits>,
@@ -619,7 +619,7 @@ pub struct RecipientDecryptor {
     incomplete_output_policy: Option<IncompleteOutputPolicy>,
 }
 
-impl RecipientDecryptor {
+impl PrivateKeyDecryptor {
     /// Sets the maximum Argon2id memory cost accepted when unlocking
     /// `private.key`.
     ///
@@ -665,30 +665,36 @@ impl RecipientDecryptor {
 
     /// Decrypts this public-key-recipient `.fcr` into `output_dir`.
     ///
-    /// `identity` must reference a FerroCrypt `private.key` file. The private
-    /// key is unlocked with `identity_passphrase`, then the decryptor tries the
-    /// supported `x25519` recipient slots until one yields a candidate file key
-    /// that verifies the header MAC. On success, the decrypted file or directory
-    /// is promoted into `output_dir` and returned in
-    /// [`DecryptOutcome::output_path`].
+    /// `private_key` must reference a FerroCrypt `private.key` file. The
+    /// private key is unlocked with `private_key_passphrase`, then the
+    /// decryptor tries the supported `x25519` recipient slots until one yields
+    /// a candidate file key that verifies the header MAC. On success, the
+    /// decrypted file or directory is promoted into `output_dir` and returned
+    /// in [`DecryptOutcome::output_path`].
     ///
     /// # Errors
     ///
-    /// Returns [`CryptoError::InvalidInput`] for an empty key passphrase,
+    /// Returns [`CryptoError::InvalidInput`] for an empty `private_key_passphrase`,
     /// archive cap violations, output conflicts, or unsafe archived paths.
     /// Returns [`CryptoError::InvalidFormat`] or
     /// [`CryptoError::KeyFileUnlockFailed`] if the private key is malformed,
     /// the wrong kind, tampered, or protected by a different passphrase.
-    /// Returns recipient, header-MAC, payload-authentication, truncation, or
-    /// I/O errors when the `.fcr` cannot be authenticated or extracted.
+    /// Returns [`CryptoError::KdfResourceCapExceeded`] for rejected
+    /// `private.key` KDF costs. Returns authentication errors such as
+    /// [`CryptoError::RecipientUnwrapFailed`],
+    /// [`CryptoError::HeaderMacFailedAfterUnwrap`],
+    /// [`CryptoError::NoSupportedRecipient`], [`CryptoError::PayloadTampered`],
+    /// or [`CryptoError::PayloadTruncated`] when no recipient unlocks the file
+    /// or the file is modified. Returns [`CryptoError::Io`] for filesystem
+    /// failures.
     pub fn decrypt(
         self,
-        identity: PrivateKey,
-        identity_passphrase: SecretString,
+        private_key: PrivateKey,
+        private_key_passphrase: SecretString,
         output_dir: impl AsRef<Path>,
         on_event: impl Fn(&ProgressEvent),
     ) -> Result<DecryptOutcome, CryptoError> {
-        validate_passphrase(&identity_passphrase)?;
+        validate_passphrase(&private_key_passphrase)?;
         // No early progress event here. `open_x25519_private_key` reads
         // and structurally validates `private.key` first; only when it
         // is about to run Argon2id does it emit
@@ -696,8 +702,8 @@ impl RecipientDecryptor {
         // `key::private::open_private_key`. A malformed or wrong-type
         // key file is rejected with no event fired.
         let recipient_secret = recipient::native::x25519::open_x25519_private_key(
-            identity.key_file_path(),
-            &identity_passphrase,
+            private_key.key_file_path(),
+            &private_key_passphrase,
             self.kdf_limit.as_ref(),
             &on_event,
         )?;
@@ -774,8 +780,8 @@ impl KeyPairGenerator {
     /// `private.key` with `mem_cost` above 1 GiB, the caller MUST opt
     /// in via [`KeyPairGenerator::kdf_limit`] with a matching
     /// [`KdfLimit`]; the unlocking
-    /// [`RecipientDecryptor`] MUST also be configured the same way via
-    /// [`RecipientDecryptor::kdf_limit`].
+    /// [`PrivateKeyDecryptor`] MUST also be configured the same way via
+    /// [`PrivateKeyDecryptor::kdf_limit`].
     pub fn kdf_params(mut self, params: KdfParams) -> Self {
         self.kdf_params = Some(params);
         self
@@ -785,11 +791,11 @@ impl KeyPairGenerator {
     ///
     /// By default the generator requires
     /// `kdf_params.mem_cost <= KdfLimit::default().max_mem_cost_kib`
-    /// (1 GiB) so a default [`RecipientDecryptor`] can unlock the
+    /// (1 GiB) so a default [`PrivateKeyDecryptor`] can unlock the
     /// produced `private.key`. Use this builder together with
     /// [`KeyPairGenerator::kdf_params`] to raise the ceiling; the
-    /// receiving recipient decryptor MUST be configured via
-    /// [`RecipientDecryptor::kdf_limit`] with a matching [`KdfLimit`].
+    /// receiving [`PrivateKeyDecryptor`] MUST be configured via
+    /// [`PrivateKeyDecryptor::kdf_limit`] with a matching [`KdfLimit`].
     pub fn kdf_limit(mut self, limit: KdfLimit) -> Self {
         self.kdf_limit = Some(limit);
         self
@@ -814,7 +820,7 @@ impl KeyPairGenerator {
         // Writer caps mirror reader defaults via the same structural +
         // resource KDF validation the reader uses, so a `private.key`
         // produced here is unlocked by a default
-        // `RecipientDecryptor::decrypt`. To go above default, the
+        // `PrivateKeyDecryptor::decrypt`. To go above default, the
         // caller raises both sides explicitly.
         kdf_params.validate_for_write(Some(&kdf_limit))?;
         let (private_key_path, public_key_path, fingerprint) = protocol::generate_key_pair(

@@ -44,7 +44,7 @@ catch interaction bugs the parser-surface targets cannot see.
 | Target | What it exercises |
 |---|---|
 | `fuzz_symmetric_decrypt` | Drives arbitrary bytes through `Decryptor::open` and `PassphraseDecryptor::decrypt` (passphrase recipient mode) |
-| `fuzz_hybrid_decrypt` | Drives arbitrary bytes through `Decryptor::open` and `RecipientDecryptor::decrypt` (X25519 recipient mode), using a one-time generated keypair |
+| `fuzz_hybrid_decrypt` | Drives arbitrary bytes through `Decryptor::open` and `PrivateKeyDecryptor::decrypt` (X25519 recipient mode), using a one-time generated keypair |
 
 ## Running
 

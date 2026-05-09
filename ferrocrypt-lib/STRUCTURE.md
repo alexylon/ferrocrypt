@@ -15,7 +15,7 @@ one encrypted payload
 one or more typed recipient entries that wrap the same file_key
 ```
 
-The library is therefore recipient-oriented rather than mode-oriented. Passphrase encryption and public-recipient encryption are different recipient schemes over the same protocol pipeline, not separate encrypted-file formats or independent orchestration paths.
+The library is therefore recipient-oriented rather than mode-oriented. Passphrase encryption and public-key encryption are different recipient schemes over the same protocol pipeline, not separate encrypted-file formats or independent orchestration paths.
 
 The architecture has these primary layers:
 
@@ -32,10 +32,10 @@ format constants + cryptographic primitives
 The core structural rules are:
 
 1. **There is one encrypt/decrypt orchestration path.**
-   `protocol.rs` owns the high-level operation flow for both passphrase and public-recipient encryption.
+   `protocol.rs` owns the high-level operation flow for both passphrase and public-key encryption.
 
 2. **Recipient schemes are first-class components.**
-   Passphrase Argon2id and X25519 public-recipient support are implemented as native recipient schemes under `recipient/native/`.
+   Passphrase Argon2id and X25519 public-key support are implemented as native recipient schemes under `recipient/native/`.
 
 3. **The encrypted file container is separate from cryptographic algorithms.**
    `container.rs` owns the `.fcr` container layout around the encrypted header, header MAC, and encrypted payload. It does not implement scheme-specific cryptography.
@@ -244,7 +244,7 @@ It contains:
   `KeypairVersionRejection` (`Reserved` / `Older` / `Newer`) that the
   consumers in `key/public.rs` and `key/private.rs` translate into their
   domain-specific `CryptoError` variants — encryption-time recipient
-  acceptance and decryption-time identity acceptance are therefore
+  acceptance and decryption-time private-key acceptance are therefore
   decided by one predicate and one mapping table and cannot drift
   (`FORMAT.md` §11);
 - the writer's logical suite (`WRITER_KEYPAIR_SUITE`);
@@ -502,7 +502,7 @@ Responsibilities:
 - enforcing mixing rules before expensive operations (cardinality bit + compatibility-class equality, both before any KDF or private-key work);
 - mapping type names to supported native scheme metadata;
 - declaring each native type's `UnauthenticatedRecipientMode` via `NativeRecipientType::recipient_mode` so `classify_recipient_mode` is registry-driven (no hard-coded `argon2id` / `x25519` switches in the classifier);
-- classifying parsed headers as passphrase, public-recipient, unsupported, or mixed;
+- classifying parsed headers as passphrase, public-key, unsupported, or mixed;
 - preserving unknown non-critical entries as opaque authenticated data.
 
 Rules:
@@ -544,7 +544,7 @@ It does not:
 
 ### 5.5 `recipient/native/x25519.rs`
 
-`recipient/native/x25519.rs` owns the native X25519 public-recipient scheme.
+`recipient/native/x25519.rs` owns the native X25519 public-key scheme.
 
 It contains:
 
@@ -555,8 +555,8 @@ It contains:
 - wrap-key derivation;
 - file-key seal/open logic;
 - X25519 key-pair generation logic;
-- public-recipient conversion for X25519;
-- identity/private-key unlock glue for X25519 (`open_x25519_private_key`), which threads `&dyn Fn(&ProgressEvent)` into `key::private::open_private_key` so the `UnlockingPrivateKey` event fires at the actual Argon2id boundary, not at this wrapper;
+- public-key recipient conversion for X25519;
+- private-key unlock glue for X25519 (`open_x25519_private_key`), which threads `&dyn Fn(&ProgressEvent)` into `key::private::open_private_key` so the `UnlockingPrivateKey` event fires at the actual Argon2id boundary, not at this wrapper;
 - `RecipientScheme` implementation (ignores the progress callback — X25519 wrap is sub-millisecond);
 - `IdentityScheme` implementation (ignores the progress callback — X25519 unwrap is sub-millisecond, and the expensive `private.key` Argon2id ran before the slot loop in `open_x25519_private_key`);
 - tests and vectors for the native X25519 scheme.
@@ -572,18 +572,11 @@ It does not own the generic `private.key` binary layout. Generic private-key fil
 The canonical public value types are:
 
 ```rust
-pub struct PublicKey  { /* opaque typed public recipient */ }
-pub struct PrivateKey { /* opaque typed private identity source */ }
+pub struct PublicKey  { /* opaque typed public key */ }
+pub struct PrivateKey { /* opaque typed private key */ }
 ```
 
-These names follow Rust cryptographic convention. In FerroCrypt documentation and method names, `PublicKey` represents a public recipient key and `PrivateKey` represents a private identity source.
-
-Format-oriented aliases are available for callers that prefer recipient/identity terminology:
-
-```rust
-pub type RecipientKey = PublicKey;
-pub type IdentityKey  = PrivateKey;
-```
+These names follow Rust cryptographic convention.
 
 ### 6.1 `key/public.rs`
 
@@ -857,9 +850,9 @@ pub struct Encryptor { /* opaque */ }
 impl Encryptor {
     pub fn with_passphrase(passphrase: SecretString) -> Self;
 
-    pub fn with_recipient(recipient: PublicKey) -> Self;
+    pub fn with_public_key(recipient: PublicKey) -> Self;
 
-    pub fn with_recipients(
+    pub fn with_public_keys(
         recipients: impl IntoIterator<Item = PublicKey>,
     ) -> Result<Self, CryptoError>;
 
@@ -885,15 +878,15 @@ impl Encryptor {
 Rules:
 
 - `with_passphrase` creates exactly one `argon2id` recipient.
-- `with_recipient` is a convenience wrapper around `with_recipients` for one public recipient.
-- `with_recipients` supports the multi-recipient file format directly.
+- `with_public_key` is a convenience wrapper around `with_public_keys` for one public recipient.
+- `with_public_keys` supports the multi-recipient file format directly.
 - Recipient mixing is checked during construction.
 - Empty recipient lists reject immediately.
 - The API remains path-based because FerroCrypt security guarantees depend on archive preflight, streaming encryption, staging, and atomic finalization.
 - **Writer caps mirror reader defaults.** A default-configured `Encryptor` produces `.fcr` files a default-configured `Decryptor` can read. `write` enforces this via the same helpers the reader uses (single source of truth per rule — see "Centralized cap enforcement" below):
   - `api::preflight_header_write_limits` checks all three axes of `HeaderReadLimits` against the exact header the writer will emit: `recipient_count`, per-entry `body_len` (canonical native value from `NativeRecipientType::body_len()`), and the computed `header_len`. Tightening any axis below the writer's natural output rejects with the corresponding typed `*CapExceeded` variant.
   - For the passphrase path, `KdfParams::validate_for_write` runs the same `validate_structural` the reader runs (`lanes`, `time_cost`, `mem_cost` against v1 absolute bounds + the Argon2 `mem_cost ≥ ARGON2_MIN_MEM_COST_PER_LANE × lanes` floor) and then `enforce_limit` against `KdfLimit`. Above-structural params reject with `InvalidKdfParams::*`; above-resource-cap reject with `KdfResourceCapExceeded`. The same rule chain applies to `KeyPairGenerator::write` for the passphrase that seals `private.key`.
-  - The X25519 path never runs Argon2id during encrypt, so `kdf_limit` has no effect on `with_recipient` / `with_recipients` flows.
+  - The X25519 path never runs Argon2id during encrypt, so `kdf_limit` has no effect on `with_public_key` / `with_public_keys` flows.
   - To go above any default, the caller raises both sides explicitly: `Encryptor::header_read_limits` / `Encryptor::kdf_limit` / `KeyPairGenerator::kdf_limit` on the writer; `Decryptor::open_with_limits` plus `*::header_read_limits` / `*::kdf_limit` on the reader.
   - All checks fire after `validate_passphrase` and before any filesystem syscall or Argon2id work, so misconfiguration surfaces fast.
 
@@ -919,7 +912,7 @@ Adding a new cap or wire-format rule = add the field/constant on the source-of-t
 #[non_exhaustive]
 pub enum Decryptor {
     Passphrase(PassphraseDecryptor),
-    Recipient(RecipientDecryptor),
+    Recipient(PrivateKeyDecryptor),
 }
 
 impl Decryptor {
@@ -945,9 +938,9 @@ impl PassphraseDecryptor {
     ) -> Result<DecryptOutcome, CryptoError>;
 }
 
-pub struct RecipientDecryptor { /* opaque */ }
+pub struct PrivateKeyDecryptor { /* opaque */ }
 
-impl RecipientDecryptor {
+impl PrivateKeyDecryptor {
     pub fn kdf_limit(self, limit: KdfLimit) -> Self;
 
     pub fn archive_limits(self, limits: ArchiveLimits) -> Self;
@@ -958,8 +951,8 @@ impl RecipientDecryptor {
 
     pub fn decrypt(
         self,
-        identity: PrivateKey,
-        identity_passphrase: SecretString,
+        private_key: PrivateKey,
+        private_key_passphrase: SecretString,
         output_dir: impl AsRef<Path>,
         on_event: impl Fn(&ProgressEvent),
     ) -> Result<DecryptOutcome, CryptoError>;
@@ -1020,7 +1013,7 @@ Ownership split:
 - Key serialization lives in `key/`.
 - Key-file staging lives in `key/files.rs` and `fs/`.
 
-`KeyPairGenerator` mirrors `Encryptor`'s reader-aligned cap rule for the passphrase that seals `private.key`: `kdf_params.mem_cost <= kdf_limit.max_mem_cost_kib` (default 1 GiB) is enforced at `write` time before Argon2id runs. Above-default `mem_cost` rejects with `CryptoError::KdfResourceCapExceeded`; the unlocking [`RecipientDecryptor`] must be configured via [`RecipientDecryptor::kdf_limit`] with a matching [`KdfLimit`].
+`KeyPairGenerator` mirrors `Encryptor`'s reader-aligned cap rule for the passphrase that seals `private.key`: `kdf_params.mem_cost <= kdf_limit.max_mem_cost_kib` (default 1 GiB) is enforced at `write` time before Argon2id runs. Above-default `mem_cost` rejects with `CryptoError::KdfResourceCapExceeded`; the unlocking [`PrivateKeyDecryptor`] must be configured via [`PrivateKeyDecryptor::kdf_limit`] with a matching [`KdfLimit`].
 
 ### 9.5 Recipient-mode probe
 

@@ -10,7 +10,7 @@
 //! - [`private`] — `private.key` binary layout, cleartext header
 //!   parsing, passphrase-wrapped secret encryption/decryption,
 //!   private-key TLV validation after authentication, and the
-//!   [`PrivateKey`] wrapper for the recipient decrypt path.
+//!   [`PrivateKey`] wrapper for the public-key decrypt path.
 //! - [`files`] — filesystem-level key helpers: the canonical
 //!   `public.key` / `private.key` default filenames and the
 //!   `KeyFileKind` heuristic that classifies a path as a public or

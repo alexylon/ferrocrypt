@@ -70,8 +70,8 @@ fn encryptor_passphrase_round_trip() {
     fs::create_dir_all(&restore).unwrap();
     let decrypted = match Decryptor::open(&outcome.output_path).expect("open") {
         Decryptor::Passphrase(d) => d.decrypt(pass(), &restore, |_| {}).expect("decrypt"),
-        Decryptor::Recipient(_) => panic!("expected passphrase decryptor"),
-        _ => unreachable!("Decryptor is non_exhaustive; v1 has only Passphrase + Recipient"),
+        Decryptor::PrivateKey(_) => panic!("expected passphrase decryptor"),
+        _ => unreachable!("Decryptor is non_exhaustive; v1 has only Passphrase + PrivateKey"),
     };
     let restored_bytes = fs::read(decrypted.output_path).unwrap();
     assert_eq!(restored_bytes, b"hello passphrase api");
@@ -88,14 +88,14 @@ fn encryptor_recipient_round_trip() {
     let out_dir = work.join("out");
     fs::create_dir_all(&out_dir).unwrap();
 
-    let outcome = Encryptor::with_recipient(PublicKey::from_key_file(&kg.public_key_path))
+    let outcome = Encryptor::with_public_key(PublicKey::from_key_file(&kg.public_key_path))
         .write(&input, &out_dir, |_| {})
         .expect("encrypt");
 
     let restore = work.join("restored");
     fs::create_dir_all(&restore).unwrap();
     let decrypted = match Decryptor::open(&outcome.output_path).expect("open") {
-        Decryptor::Recipient(d) => d
+        Decryptor::PrivateKey(d) => d
             .decrypt(
                 PrivateKey::from_key_file(&kg.private_key_path),
                 pass(),
@@ -103,8 +103,8 @@ fn encryptor_recipient_round_trip() {
                 |_| {},
             )
             .expect("decrypt"),
-        Decryptor::Passphrase(_) => panic!("expected recipient decryptor"),
-        _ => unreachable!("Decryptor is non_exhaustive; v1 has only Passphrase + Recipient"),
+        Decryptor::Passphrase(_) => panic!("expected private-key decryptor"),
+        _ => unreachable!("Decryptor is non_exhaustive; v1 has only Passphrase + PrivateKey"),
     };
     let restored_bytes = fs::read(decrypted.output_path).unwrap();
     assert_eq!(restored_bytes, b"hello recipient api");
@@ -124,11 +124,11 @@ fn encryptor_with_recipients_each_can_decrypt() {
     let out_dir = work.join("out");
     fs::create_dir_all(&out_dir).unwrap();
 
-    let outcome = Encryptor::with_recipients([
+    let outcome = Encryptor::with_public_keys([
         PublicKey::from_key_file(&kg_a.public_key_path),
         PublicKey::from_key_file(&kg_b.public_key_path),
     ])
-    .expect("with_recipients")
+    .expect("with_public_keys")
     .write(&input, &out_dir, |_| {})
     .expect("encrypt");
 
@@ -136,7 +136,7 @@ fn encryptor_with_recipients_each_can_decrypt() {
         let restore = work.join(format!("restored-{label}"));
         fs::create_dir_all(&restore).unwrap();
         let decrypted = match Decryptor::open(&outcome.output_path).expect("open") {
-            Decryptor::Recipient(d) => d
+            Decryptor::PrivateKey(d) => d
                 .decrypt(
                     PrivateKey::from_key_file(&kg.private_key_path),
                     pass(),
@@ -144,7 +144,7 @@ fn encryptor_with_recipients_each_can_decrypt() {
                     |_| {},
                 )
                 .expect("decrypt"),
-            Decryptor::Passphrase(_) => panic!("expected recipient decryptor"),
+            Decryptor::Passphrase(_) => panic!("expected private-key decryptor"),
             _ => unreachable!("Decryptor is non_exhaustive"),
         };
         let restored_bytes = fs::read(decrypted.output_path).unwrap();
@@ -157,7 +157,7 @@ fn encryptor_with_recipients_each_can_decrypt() {
 
 #[test]
 fn encryptor_with_recipients_rejects_empty() {
-    let err = Encryptor::with_recipients(std::iter::empty::<PublicKey>()).unwrap_err();
+    let err = Encryptor::with_public_keys(std::iter::empty::<PublicKey>()).unwrap_err();
     assert!(
         matches!(err, CryptoError::EmptyRecipientList),
         "expected EmptyRecipientList, got {err:?}"
@@ -269,7 +269,7 @@ fn probe_recipient_mode_round_trips_via_encryptor() {
 /// with the mode that actually authenticated the file, not the other one.
 /// Without this test, swapping the two `AuthenticatedRecipientMode::*()`
 /// constructors between `PassphraseDecryptor::decrypt` and
-/// `RecipientDecryptor::decrypt` would silently compile and pass every
+/// `PrivateKeyDecryptor::decrypt` would silently compile and pass every
 /// other test — those check `output_path` but not which mode authenticated.
 #[test]
 fn decrypt_outcome_carries_authenticated_passphrase_mode() {
@@ -303,14 +303,14 @@ fn decrypt_outcome_carries_authenticated_public_key_mode() {
     let kg = generate_key_pair(&keys, pass(), |_| {}).expect("keygen");
     let input = work.join("data.txt");
     fs::write(&input, b"plaintext").unwrap();
-    let encrypted = Encryptor::with_recipient(PublicKey::from_key_file(&kg.public_key_path))
+    let encrypted = Encryptor::with_public_key(PublicKey::from_key_file(&kg.public_key_path))
         .write(&input, &work, |_| {})
         .expect("encrypt");
 
     let restore = work.join("restored");
     fs::create_dir_all(&restore).unwrap();
     let outcome = match Decryptor::open(&encrypted.output_path).expect("open") {
-        Decryptor::Recipient(d) => d
+        Decryptor::PrivateKey(d) => d
             .decrypt(
                 PrivateKey::from_key_file(&kg.private_key_path),
                 pass(),
@@ -318,11 +318,11 @@ fn decrypt_outcome_carries_authenticated_public_key_mode() {
                 |_| {},
             )
             .expect("decrypt"),
-        other => panic!("expected recipient decryptor, got {other:?}"),
+        other => panic!("expected private-key decryptor, got {other:?}"),
     };
     assert!(
         outcome.recipient_mode.is_public_key(),
-        "recipient decrypt must report public-key mode, got {}",
+        "public-key decrypt must report public-key mode, got {}",
         outcome.recipient_mode
     );
     assert!(!outcome.recipient_mode.is_passphrase());
@@ -370,8 +370,8 @@ fn passphrase_decryptor_archive_limits_constrains_extraction() {
 }
 
 /// Mirrors `passphrase_decryptor_archive_limits_constrains_extraction`
-/// for [`RecipientDecryptor`]: the `archive_limits()` builder must
-/// reach `unarchive` on the recipient decrypt path too.
+/// for [`PrivateKeyDecryptor`]: the `archive_limits()` builder must
+/// reach `unarchive` on the public-key decrypt path too.
 #[test]
 fn recipient_decryptor_archive_limits_constrains_extraction() {
     use ferrocrypt::ArchiveLimits;
@@ -388,7 +388,7 @@ fn recipient_decryptor_archive_limits_constrains_extraction() {
     let out_dir = work.join("out");
     fs::create_dir_all(&out_dir).unwrap();
 
-    let outcome = Encryptor::with_recipient(PublicKey::from_key_file(&kg.public_key_path))
+    let outcome = Encryptor::with_public_key(PublicKey::from_key_file(&kg.public_key_path))
         .write(&dir, &out_dir, |_| {})
         .expect("encrypt");
 
@@ -396,13 +396,13 @@ fn recipient_decryptor_archive_limits_constrains_extraction() {
     fs::create_dir_all(&restore).unwrap();
     let tight = ArchiveLimits::default().with_max_entry_count(1);
     let result = match Decryptor::open(&outcome.output_path).expect("open") {
-        Decryptor::Recipient(d) => d.archive_limits(tight).decrypt(
+        Decryptor::PrivateKey(d) => d.archive_limits(tight).decrypt(
             PrivateKey::from_key_file(&kg.private_key_path),
             pass(),
             &restore,
             |_| {},
         ),
-        _ => panic!("expected recipient decryptor"),
+        _ => panic!("expected private-key decryptor"),
     };
     match result {
         Err(CryptoError::InvalidInput(msg)) => {
@@ -423,7 +423,7 @@ fn recipient_decryptor_archive_limits_constrains_extraction() {
 /// `archive_limits` to match the writer.
 ///
 /// Pins the documented asymmetry on
-/// [`PassphraseDecryptor::archive_limits`] / [`RecipientDecryptor::archive_limits`]
+/// [`PassphraseDecryptor::archive_limits`] / [`PrivateKeyDecryptor::archive_limits`]
 /// ("Must match (or exceed) the limits the writer used") as
 /// intentional behavior rather than implicit. `max_path_depth` is
 /// used because it is the only `ArchiveLimits` axis whose default cap
@@ -569,8 +569,8 @@ fn decryptor_open_with_limits_accepts_recipient_count_above_default() {
     // raises `Encryptor::header_read_limits` explicitly. The decryptor
     // must mirror the raise via `Decryptor::open_with_limits`.
     let writer_limits = HeaderReadLimits::default().max_recipient_count(128);
-    let outcome = Encryptor::with_recipients(recipients)
-        .expect("with_recipients")
+    let outcome = Encryptor::with_public_keys(recipients)
+        .expect("with_public_keys")
         .header_read_limits(writer_limits)
         .write(&input, &out_dir, |_| {})
         .expect("encrypt");
@@ -594,7 +594,7 @@ fn decryptor_open_with_limits_accepts_recipient_count_above_default() {
     let decrypted = match Decryptor::open_with_limits(&outcome.output_path, raised)
         .expect("open_with_limits")
     {
-        Decryptor::Recipient(d) => d
+        Decryptor::PrivateKey(d) => d
             .decrypt(
                 PrivateKey::from_key_file(&kg.private_key_path),
                 pass(),
@@ -602,7 +602,7 @@ fn decryptor_open_with_limits_accepts_recipient_count_above_default() {
                 |_| {},
             )
             .expect("decrypt"),
-        _ => panic!("expected recipient decryptor"),
+        _ => panic!("expected private-key decryptor"),
     };
     assert_eq!(
         fs::read(decrypted.output_path).unwrap(),
@@ -635,8 +635,8 @@ fn probe_recipient_mode_with_limits_accepts_above_default() {
     // probe-only path below confirms the same opt-in is required
     // on the read side.
     let writer_limits = HeaderReadLimits::default().max_recipient_count(128);
-    let outcome = Encryptor::with_recipients(recipients)
-        .expect("with_recipients")
+    let outcome = Encryptor::with_public_keys(recipients)
+        .expect("with_public_keys")
         .header_read_limits(writer_limits)
         .write(&input, &out_dir, |_| {})
         .expect("encrypt");
@@ -659,12 +659,12 @@ fn probe_recipient_mode_with_limits_accepts_above_default() {
 //
 // Pin the contract that a default-configured `Encryptor` /
 // `KeyPairGenerator` produces files a default-configured `Decryptor`
-// (or `RecipientDecryptor` `private.key` unlock) can read. Going
+// (or `PrivateKeyDecryptor` `private.key` unlock) can read. Going
 // above default requires the caller to opt in on BOTH sides; the
 // tests below pin both the rejection (no opt-in) and the acceptance
 // (opt-in matches) directions.
 
-/// Default `Encryptor::with_recipients(N>64)` rejects at write time
+/// Default `Encryptor::with_public_keys(N>64)` rejects at write time
 /// with [`CryptoError::RecipientCountCapExceeded`] before any X25519
 /// ECDH or key wrapping runs. Pins the writer-side half of the
 /// recipient-count contract; the matching reader-side rejection /
@@ -687,8 +687,8 @@ fn encryptor_with_recipients_above_default_rejects_without_opt_in() {
     let recipients: Vec<PublicKey> = (0..(cap as usize + 1))
         .map(|_| PublicKey::from_key_file(&kg.public_key_path))
         .collect();
-    let result = Encryptor::with_recipients(recipients)
-        .expect("with_recipients")
+    let result = Encryptor::with_public_keys(recipients)
+        .expect("with_public_keys")
         .write(&input, &out_dir, |_| {});
     match result {
         Err(CryptoError::RecipientCountCapExceeded { count, local_cap }) => {
@@ -705,15 +705,15 @@ fn encryptor_with_recipients_above_default_rejects_without_opt_in() {
         .collect();
     let at_cap_out = out_dir.join("at_cap");
     fs::create_dir_all(&at_cap_out).unwrap();
-    let outcome = Encryptor::with_recipients(at_cap)
-        .expect("with_recipients at cap")
+    let outcome = Encryptor::with_public_keys(at_cap)
+        .expect("with_public_keys at cap")
         .write(&input, &at_cap_out, |_| {})
         .expect("encrypt at exactly the default cap must succeed");
     assert!(outcome.output_path.exists());
 }
 
 /// Writer-side `HeaderReadLimits` preflight applies to passphrase files
-/// too, not just public-recipient files. Tightening recipient_count
+/// too, not just public-key files. Tightening recipient_count
 /// below the one canonical `argon2id` slot rejects before Argon2id runs,
 /// preventing a file that the same limits would reject on decrypt.
 #[test]
@@ -780,7 +780,7 @@ fn encryptor_recipient_header_limits_reject_tight_header_len() {
     fs::create_dir_all(&out_dir).unwrap();
 
     let tight = HeaderReadLimits::default().max_header_len(32);
-    let result = Encryptor::with_recipient(PublicKey::from_key_file(&kg.public_key_path))
+    let result = Encryptor::with_public_key(PublicKey::from_key_file(&kg.public_key_path))
         .header_read_limits(tight)
         .write(&input, &out_dir, |_| {});
     match result {
@@ -979,7 +979,7 @@ fn keypair_generator_kdf_params_above_default_rejects_with_default_kdf_limit() {
 
 /// `KeyPairGenerator::kdf_params(P).kdf_limit(L)` with
 /// `P.mem_cost <= L` produces a `private.key` whose unlock under a
-/// matching `RecipientDecryptor::kdf_limit(L)` succeeds.
+/// matching `PrivateKeyDecryptor::kdf_limit(L)` succeeds.
 #[test]
 fn keypair_generator_kdf_params_at_kdf_limit_succeeds() {
     let work = fresh_workspace("keypair_kdf_at_limit_succeeds");
@@ -994,20 +994,20 @@ fn keypair_generator_kdf_params_at_kdf_limit_succeeds() {
 
     // Encrypt to that key with default Encryptor (X25519 path
     // doesn't run Argon2id), then decrypt with the matching
-    // RecipientDecryptor::kdf_limit so the private.key unlock
+    // PrivateKeyDecryptor::kdf_limit so the private.key unlock
     // accepts the elevated mem_cost authenticated in the cleartext.
     let input = work.join("data.txt");
     fs::write(&input, b"x25519 round-trip via raised kdf").unwrap();
     let out_dir = work.join("out");
     fs::create_dir_all(&out_dir).unwrap();
-    let outcome = Encryptor::with_recipient(PublicKey::from_key_file(&kg.public_key_path))
+    let outcome = Encryptor::with_public_key(PublicKey::from_key_file(&kg.public_key_path))
         .write(&input, &out_dir, |_| {})
         .expect("encrypt");
 
     let restore = work.join("restored");
     fs::create_dir_all(&restore).unwrap();
     let decrypted = match Decryptor::open(&outcome.output_path).expect("open") {
-        Decryptor::Recipient(d) => d
+        Decryptor::PrivateKey(d) => d
             .kdf_limit(exact)
             .decrypt(
                 PrivateKey::from_key_file(&kg.private_key_path),
@@ -1016,7 +1016,7 @@ fn keypair_generator_kdf_params_at_kdf_limit_succeeds() {
                 |_| {},
             )
             .expect("decrypt"),
-        _ => panic!("expected recipient decryptor"),
+        _ => panic!("expected private-key decryptor"),
     };
     assert_eq!(
         fs::read(decrypted.output_path).unwrap(),

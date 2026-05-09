@@ -302,7 +302,7 @@ pub(crate) fn decrypt<I: IdentityScheme>(
     // `DerivingPassphraseWrapKey` only after the per-slot structural /
     // resource-cap checks have passed. For the recipient (X25519) mode,
     // the heaviest KDF (the `private.key` Argon2id unlock) already ran
-    // *before* this function was entered — `RecipientDecryptor::decrypt`
+    // *before* this function was entered — `PrivateKeyDecryptor::decrypt`
     // calls `open_x25519_private_key` first, and that call emits
     // `UnlockingPrivateKey` at its own work boundary inside
     // `key::private::open_private_key`.
@@ -415,8 +415,8 @@ fn check_mode_matches_scheme<I: IdentityScheme>(
 
 /// Decrypt-time error wording when no slot produced a MAC-verified
 /// candidate. Differentiates by mode so the passphrase path keeps
-/// emitting bare `HeaderTampered` (single recipient, no slot identity
-/// to attach) while the recipient path emits the per-candidate
+/// emitting bare `HeaderTampered` (single recipient, no slot type_name
+/// to attach) while the public-key path emits the per-candidate
 /// `HeaderMacFailedAfterUnwrap { type_name }` variant.
 fn failure_for(
     mode: UnauthenticatedRecipientMode,
@@ -461,7 +461,7 @@ fn failure_for(
 ///
 /// Any new in-crate caller MUST run those preflight steps first
 /// (or accept the resulting symmetry break with the default reader's
-/// `RecipientDecryptor::decrypt`).
+/// `PrivateKeyDecryptor::decrypt`).
 pub(crate) fn generate_key_pair(
     passphrase: &secrecy::SecretString,
     kdf_params: &crate::crypto::kdf::KdfParams,
@@ -688,7 +688,7 @@ mod tests {
 
     /// Decrypt helper: opens the X25519 `private.key`, builds an
     /// `X25519Identity`, and runs the orchestrator's slot loop directly
-    /// (mirrors what `RecipientDecryptor::decrypt` does in `api.rs` but
+    /// (mirrors what `PrivateKeyDecryptor::decrypt` does in `api.rs` but
     /// preserves raw error variants for assertion).
     fn recipient_decrypt(
         fcr: &Path,
@@ -1100,7 +1100,7 @@ mod tests {
 
     /// Cross-mode mismatch: a passphrase-only file is opened with an
     /// `X25519Identity`. The orchestrator must surface
-    /// `DecryptorModeMismatch { expected: Recipient, found: Passphrase }`
+    /// `DecryptorModeMismatch { expected: PublicKey, found: Passphrase }`
     /// before any slot loop runs — never the legacy
     /// `NoSupportedRecipient`, which would imply "the loop iterated and
     /// found nothing." The public Decryptor::open routes by mode and so
@@ -1189,7 +1189,7 @@ mod tests {
 
     /// Defense-in-depth: empty recipient list rejected before any
     /// allocation or KDF. The public API gates this at construction
-    /// time (`with_recipients` returns `EmptyRecipientList`), but the
+    /// time (`with_public_keys` returns `EmptyRecipientList`), but the
     /// orchestrator re-checks so a callable internal short-circuit
     /// can't bypass the contract.
     #[test]

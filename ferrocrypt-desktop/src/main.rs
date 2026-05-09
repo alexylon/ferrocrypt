@@ -239,7 +239,7 @@ fn main() {
                             Ok(Decryptor::Passphrase(d)) => d
                                 .decrypt(pwd, output_dir_path, &on_event)
                                 .map(|o| o.output_path),
-                            Ok(Decryptor::Recipient(_)) => Err(CryptoError::InvalidInput(
+                            Ok(Decryptor::PrivateKey(_)) => Err(CryptoError::InvalidInput(
                                 "This file is sealed for public-key recipients; switch to the 'Key pair' tab"
                                     .to_string(),
                             )),
@@ -250,7 +250,7 @@ fn main() {
                             Err(e) => Err(e),
                         },
                         MODE_RECIPIENT_ENCRYPT => {
-                            let mut encryptor = Encryptor::with_recipient(
+                            let mut encryptor = Encryptor::with_public_key(
                                 PublicKey::from_key_file(Path::new(&keypath)),
                             );
                             if let Some(s) = save_as {
@@ -261,7 +261,7 @@ fn main() {
                                 .map(|o| o.output_path)
                         }
                         MODE_RECIPIENT_DECRYPT => match Decryptor::open(inpath) {
-                            Ok(Decryptor::Recipient(d)) => d
+                            Ok(Decryptor::PrivateKey(d)) => d
                                 .decrypt(
                                     PrivateKey::from_key_file(Path::new(&keypath)),
                                     pwd,

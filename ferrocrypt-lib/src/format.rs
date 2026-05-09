@@ -263,7 +263,7 @@ pub(crate) const WRITER_KEYPAIR_SUITE: KeypairSuite = KeypairSuite::V1;
 /// Single shared support predicate for keypair compatibility — the only
 /// place that decides "this build accepts keys from suite X". Both the
 /// public-key parser (encryption-time recipient acceptance) and the
-/// private-key parser (decryption-time identity acceptance) call this
+/// private-key parser (decryption-time private-key acceptance) call this
 /// after translating their on-disk version encodings into
 /// [`KeypairSuite`]. That symmetry is structural: there is no second
 /// list to forget to update.

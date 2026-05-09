@@ -872,8 +872,13 @@ Rules:
 - Readers MUST reject any other public-key version byte and MUST map
   `public_key_version = 0x01` to key-pair suite v1 before deciding support.
 - `type_name` follows §3.3 and §3.3.1.
-- `key_material_len` MUST be `<= 12,288` unless a recipient spec defines a
-  smaller bound.
+- `key_material_len` MUST be `<= 12,215` unless a recipient spec defines a
+  smaller bound. This worst-case cap is derived so that a maximum-length
+  255-byte `type_name`, the 7-byte typed-payload header, and the 16-byte
+  internal checksum still fit alongside `key_material` under the
+  20,000-character recipient-string ceiling, letting implementations
+  enforce the cap structurally without a separate post-encode
+  length check.
 - The full Bech32 string MUST be `<= 20,000` ASCII characters.
 - The Bech32 checksum algorithm is the original BIP 173 Bech32 algorithm, not
   Bech32m. FerroCrypt does not use BIP 173's 90-character length limit.

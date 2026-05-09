@@ -228,8 +228,12 @@ It contains:
 - magic bytes;
 - the `.fcr` outer file version byte (`FCR_FILE_VERSION`);
 - the `KeypairSuite` enum and the single shared support gate
-  (`keypair_suite_is_supported`) — the forward direction (suite → wire byte)
-  is defined here on `KeypairSuite::public_key_version` /
+  (`keypair_suite_is_supported`), both `pub(crate)` — internal compatibility
+  machinery whose shape may change across releases. External observers
+  depend on the stable version constants (`FCR_FILE_VERSION`,
+  `PUBLIC_KEY_VERSION`, `PRIVATE_KEY_VERSION`, `*_V1_VERSION`) and the
+  typed `UnsupportedVersion` diagnostics. The forward direction
+  (suite → wire byte) is defined here on `KeypairSuite::public_key_version` /
   `KeypairSuite::private_key_version`, both compile-forced exhaustive
   matches; the reverse direction (wire byte → suite) is also centralised
   here as `keypair_suite_from_public_key_version` and

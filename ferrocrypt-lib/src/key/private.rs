@@ -46,12 +46,13 @@ use crate::format::{
 use crate::recipient::{TYPE_NAME_MAX_LEN, validate_type_name_grammar};
 
 /// Canonical v1 `private.key` wire-version byte. Mirrors the suite
-/// constant from [`KeypairSuite::V1`] so bumping the keypair suite
-/// flows through this constant automatically.
+/// constant from `KeypairSuite::V1` (crate-internal) so bumping the
+/// keypair suite flows through this constant automatically.
 pub const PRIVATE_KEY_V1_VERSION: u8 = KeypairSuite::V1.private_key_version();
 
 /// Wire-version byte the current writer emits in `private.key` headers.
-/// Derived from [`WRITER_KEYPAIR_SUITE`]; not an independent support list.
+/// Derived from `WRITER_KEYPAIR_SUITE` (crate-internal); not an
+/// independent support list.
 pub const PRIVATE_KEY_VERSION: u8 = WRITER_KEYPAIR_SUITE.private_key_version();
 
 /// HKDF info for deriving the `private.key` wrap key from Argon2id.

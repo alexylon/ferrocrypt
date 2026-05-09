@@ -210,8 +210,14 @@ impl Kind {
 /// the encrypt/decrypt symmetry rule structural: a release MUST NOT
 /// accept a public key for encryption unless the same suite remains
 /// supported for private-key decryption.
+///
+/// Crate-internal: external observers should depend on the stable
+/// version constants ([`crate::PUBLIC_KEY_VERSION`],
+/// [`crate::PRIVATE_KEY_VERSION`], etc.) and the typed
+/// [`crate::error::UnsupportedVersion`] diagnostics rather than on this
+/// support machinery, which may change shape across releases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KeypairSuite {
+pub(crate) enum KeypairSuite {
     /// Generation v1: `public.key` recipient payload version byte `0x01`
     /// + binary `private.key` header version byte `0x01`.
     V1,
@@ -248,8 +254,8 @@ impl KeypairSuite {
 /// Keypair suite written by current writers. Both `public.key` and
 /// `private.key` writers derive their on-disk version encodings from
 /// this single source so the two artefacts are always emitted at the
-/// same logical generation.
-pub const WRITER_KEYPAIR_SUITE: KeypairSuite = KeypairSuite::V1;
+/// same logical generation. Crate-internal — see [`KeypairSuite`].
+pub(crate) const WRITER_KEYPAIR_SUITE: KeypairSuite = KeypairSuite::V1;
 
 /// Single shared support predicate for keypair compatibility — the only
 /// place that decides "this build accepts keys from suite X". Both the
@@ -262,7 +268,11 @@ pub const WRITER_KEYPAIR_SUITE: KeypairSuite = KeypairSuite::V1;
 /// The `match` is intentionally exhaustive (no wildcard arm) so adding
 /// a new [`KeypairSuite`] variant forces a compile error here until the
 /// maintainer makes a deliberate accept-or-reject decision for it.
-pub const fn keypair_suite_is_supported(suite: KeypairSuite) -> bool {
+///
+/// Crate-internal — see [`KeypairSuite`]. External observers should rely
+/// on the typed [`crate::error::UnsupportedVersion`] diagnostics rather
+/// than on this predicate, which may change shape across releases.
+pub(crate) const fn keypair_suite_is_supported(suite: KeypairSuite) -> bool {
     match suite {
         KeypairSuite::V1 => true,
     }

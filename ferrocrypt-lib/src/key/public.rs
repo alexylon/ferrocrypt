@@ -45,14 +45,14 @@ use crate::recipient::native::x25519::TYPE_NAME as X25519_TYPE_NAME;
 use crate::recipient::{TYPE_NAME_MAX_LEN, validate_type_name_grammar};
 
 /// Wire-version byte the current writer emits at offset 0 of every
-/// `public.key` recipient payload. Derived from [`WRITER_KEYPAIR_SUITE`];
-/// mirrors [`crate::key::private::PRIVATE_KEY_VERSION`] so a future suite
-/// bump flows through both writers in lockstep.
+/// `public.key` recipient payload. Derived from `WRITER_KEYPAIR_SUITE`
+/// (crate-internal); mirrors [`crate::key::private::PRIVATE_KEY_VERSION`]
+/// so a future suite bump flows through both writers in lockstep.
 pub const PUBLIC_KEY_VERSION: u8 = WRITER_KEYPAIR_SUITE.public_key_version();
 
 /// Canonical v1 wire-version byte for `public.key` recipient payloads.
-/// Mirrors the suite constant from [`KeypairSuite::V1`] so bumping the
-/// keypair suite flows through this constant automatically.
+/// Mirrors the suite constant from `KeypairSuite::V1` (crate-internal)
+/// so bumping the keypair suite flows through this constant automatically.
 pub const PUBLIC_KEY_V1_VERSION: u8 = KeypairSuite::V1.public_key_version();
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -1191,6 +1191,19 @@ mod tests {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
             other => panic!("expected MalformedPublicKey for key_material > cap, got {other:?}"),
         }
+    }
+
+    /// Spec/code agreement pin: `FORMAT.md` §7 specifies the structural
+    /// `key_material_len` cap as `12,215`, derived from the 20,000-char
+    /// recipient-string ceiling, the 7-byte typed-payload header, the
+    /// 16-byte internal checksum, and the 255-byte max `type_name`. If
+    /// any upstream constant moves and the const-fn derivation changes,
+    /// either FORMAT.md §7 must be updated alongside it or this test
+    /// fails — preventing silent drift between the spec text and the
+    /// implementation's enforced cap.
+    #[test]
+    fn key_material_len_max_matches_spec_text() {
+        assert_eq!(KEY_MATERIAL_LEN_MAX, 12_215);
     }
 
     /// Pin the structural ingress reject for the all-zero X25519 public

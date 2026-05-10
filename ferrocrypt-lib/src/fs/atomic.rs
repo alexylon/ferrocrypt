@@ -58,20 +58,20 @@ pub(crate) fn finalize_file(tmp: NamedTempFile, final_path: &Path) -> io::Result
     Ok(())
 }
 
-/// No-clobber rename of a filesystem entry. Works for both regular files
-/// and directories — the underlying primitives (`renameat_with` on Linux
-/// and macOS, `rename` on Windows) treat them uniformly. Fails with
-/// [`io::ErrorKind::AlreadyExists`] if `to` already exists.
+/// Renames `from` to `to`, refusing if `to` already exists. Works for
+/// files and directories.
 ///
-/// Platform strategy (ferrocrypt targets Linux / macOS / Windows desktops):
-///
-/// - Linux / macOS: `rustix::fs::renameat_with` with `RenameFlags::NOREPLACE`
-///   — strict atomic no-clobber via a safe Rust wrapper.
-/// - Windows: best-effort via `try_exists()` pre-check + `std::fs::rename`.
-///   This keeps ferrocrypt zero-unsafe, but it leaves a small TOCTOU window.
-/// - Other targets: unsupported in this helper rather than silently applying
-///   desktop-target assumptions to platforms ferrocrypt does not currently aim
-///   to support here.
+/// - **Linux / macOS:** atomic — `renameat2(RENAME_NOREPLACE)` /
+///   `renameat(RENAME_EXCL)` via `rustix`.
+/// - **Windows:** best-effort. Checks `to` first, then calls
+///   `std::fs::rename`. A small race window exists between the two: a
+///   process that creates `to` in that window has its file silently
+///   overwritten by ours. Plaintext is never redirected (Windows
+///   renames replace the directory entry, not the link target), so the
+///   failure mode is integrity, not confidentiality. Closing this
+///   fully needs Win32 FFI, which the zero-`unsafe` invariant rules
+///   out. See `SECURITY.md`.
+/// - **Other targets:** unsupported.
 pub(crate) fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
     rename_no_clobber_impl(from, to)?;
     sync_parent_dir(to);

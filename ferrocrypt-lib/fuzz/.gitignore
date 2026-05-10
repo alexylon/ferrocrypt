@@ -1,3 +1,12 @@
 target/
 corpus/
 artifacts/
+# libFuzzer dumps a `slow-unit-<sha1>` file when an iteration crosses
+# the `-report_slow_units` threshold (10s by default). Tiny inputs
+# rarely exceed that, but the `fuzz_fca_full_pipeline` target does
+# per-iteration tempdir + unarchive + cleanup, which is sensitive to
+# transient host slowdowns (cold caches, AV scanners, Spotlight). The
+# resulting files are environmental noise rather than diagnostic
+# evidence — gitignore so they don't accumulate or accidentally land
+# in a commit.
+slow-unit-*

@@ -11,3 +11,4 @@ license = "GPL-3.0-only"
 
 [dependencies]
 ferrocrypt = { path = "../ferrocrypt-lib" }
+tempfile = "3"

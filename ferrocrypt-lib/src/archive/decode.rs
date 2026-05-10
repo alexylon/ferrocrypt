@@ -1282,21 +1282,28 @@ mod tests {
 
     /// Unicode-collision safety net (NFC vs NFD `naïve`): when the
     /// underlying filesystem merges two distinct UTF-8 byte sequences
-    /// (HFS+, case-insensitive APFS), the ASCII-only collision key
+    /// (HFS+ normalises to NFD on disk; APFS normalises lookups
+    /// regardless of case-sensitivity), the ASCII-only collision key
     /// can't catch the duplicate, so the fallback is `create_file_at`'s
     /// `create_new(true)` rejecting at extraction time.
     ///
-    /// **FS-dependent — ignored by default.** Modern APFS preserves
-    /// distinct Unicode forms and would NOT merge these, so the test
-    /// can only run on a normalizing volume (HFS+, case-insensitive
-    /// APFS, or a synthetic mount). Documented and ignored so future
-    /// work on the FS-matrix CI lane (Batch 5) can opt in by removing
-    /// the `#[ignore]` under the right cfg.
+    /// **FS-dependent — ignored by default.** Runs meaningfully only
+    /// on a normalising volume; on a non-normalising filesystem (e.g.
+    /// most Linux ext4/btrfs) both files would extract distinctly and
+    /// the test's `unwrap_err()` would panic. The FS-matrix CI lanes
+    /// in `.github/workflows/rust.yml` deliberately do NOT include
+    /// this test in their command list — they target round-trip
+    /// behaviour on the smoke set instead. To run this test against a
+    /// specific filesystem, mount it manually, export
+    /// `FERROCRYPT_FS_MATRIX_DIR=/path/to/mount`, and invoke
+    /// `cargo test -p ferrocrypt --lib unicode_collision -- --ignored`.
+    /// The tempdir is sourced from `fs_matrix_tempdir()` so the
+    /// whole test lives on the mount.
     #[cfg(target_os = "macos")]
     #[test]
-    #[ignore = "needs Unicode-normalizing or case-insensitive volume; default APFS preserves form"]
+    #[ignore = "fs-matrix: needs Unicode-normalizing or case-insensitive volume; default APFS preserves form"]
     fn unicode_collision_falls_through_to_create_new() {
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = ferrocrypt_test_support::fs_matrix_tempdir().unwrap();
 
         // NFC `naïve`: U+00EF (precomposed). NFD: U+0069 + U+0308.
         let nfc = "na\u{00EF}ve.txt";

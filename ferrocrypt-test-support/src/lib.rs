@@ -84,3 +84,23 @@ pub fn fast_passphrase_encryptor(passphrase: SecretString) -> Encryptor {
 pub fn fast_keypair_generator(passphrase: SecretString) -> KeyPairGenerator {
     KeyPairGenerator::with_passphrase(passphrase).kdf_params(fast_kdf_params())
 }
+
+/// Creates a `TempDir` rooted at the filesystem-matrix mount when
+/// `FERROCRYPT_FS_MATRIX_DIR` is set to a non-empty value, falling
+/// back to the system temp dir otherwise. The matrix CI lane mounts a
+/// non-default filesystem (case-sensitive APFS, btrfs, exFAT, …) and
+/// points this env var at the mount point, so tests opted in to the
+/// matrix lane (via `#[ignore = "fs-matrix"]` plus an explicit
+/// `--ignored` invocation) exercise the archive layer against the
+/// target filesystem instead of the runner's default.
+///
+/// Tests outside the matrix lane call this with the env var unset and
+/// behave identically to a plain `TempDir::new()`. An empty env var
+/// is treated as unset so a stray `export FERROCRYPT_FS_MATRIX_DIR=""`
+/// does not silently land tempdirs in the current working directory.
+pub fn fs_matrix_tempdir() -> std::io::Result<tempfile::TempDir> {
+    match std::env::var_os("FERROCRYPT_FS_MATRIX_DIR") {
+        Some(root) if !root.is_empty() => tempfile::TempDir::new_in(root),
+        _ => tempfile::TempDir::new(),
+    }
+}

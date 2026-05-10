@@ -188,3 +188,113 @@ jobs:
     uses: ./.github/workflows/fuzz.yml
     with:
       max_total_time: 60
+
+  # Filesystem-matrix smoke tests. Each lane mounts a non-default
+  # filesystem, points FERROCRYPT_FS_MATRIX_DIR at the mount, and runs
+  # the small set of `#[ignore = "fs-matrix"]` tests in
+  # `ferrocrypt-lib/tests/archive_fs_matrix.rs`. The default 3-platform
+  # matrix above already covers the common-case filesystems
+  # (ext4/APFS-CI/NTFS); these lanes catch regressions on filesystems
+  # FerroCrypt advertises support for but doesn't otherwise exercise.
+  fs_matrix:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Case-sensitive APFS: distinct case-only-different filenames
+          # are no longer the same file. Catches regressions in
+          # extraction's ASCII-case-insensitive dedup that a default
+          # macOS runner can't reach.
+          - name: macos-apfs-cs
+            os: macos-latest
+            mount_setup: |
+              hdiutil create -size 200m -fs "Case-sensitive APFS" -volname FCAFsMatrix /tmp/fsmatrix.dmg
+              hdiutil attach /tmp/fsmatrix.dmg
+              echo "FERROCRYPT_FS_MATRIX_DIR=/Volumes/FCAFsMatrix" >> "$GITHUB_ENV"
+            mount_teardown: hdiutil detach /Volumes/FCAFsMatrix || true
+          # Linux btrfs: copy-on-write semantics, snapshot-aware.
+          # Different inode allocator and rename behavior than ext4.
+          - name: linux-btrfs
+            os: ubuntu-latest
+            mount_setup: |
+              sudo apt-get update
+              sudo apt-get install -y --no-install-recommends btrfs-progs
+              dd if=/dev/zero of=/tmp/fsmatrix.img bs=1M count=200
+              sudo mkfs.btrfs /tmp/fsmatrix.img
+              sudo mkdir -p /mnt/fsmatrix
+              sudo mount -o loop /tmp/fsmatrix.img /mnt/fsmatrix
+              sudo chown "$(whoami)" /mnt/fsmatrix
+              echo "FERROCRYPT_FS_MATRIX_DIR=/mnt/fsmatrix" >> "$GITHUB_ENV"
+            mount_teardown: sudo umount /mnt/fsmatrix || true
+          # Linux exFAT: no Unix permission semantics. Validates that
+          # extraction (which chmods every file) doesn't error on a
+          # filesystem where the chmod is structurally a no-op.
+          - name: linux-exfat
+            os: ubuntu-latest
+            mount_setup: |
+              sudo apt-get update
+              sudo apt-get install -y --no-install-recommends exfatprogs
+              dd if=/dev/zero of=/tmp/fsmatrix.img bs=1M count=200
+              sudo mkfs.exfat /tmp/fsmatrix.img
+              sudo mkdir -p /mnt/fsmatrix
+              sudo mount -o loop,uid="$(id -u)",gid="$(id -g)" /tmp/fsmatrix.img /mnt/fsmatrix
+              echo "FERROCRYPT_FS_MATRIX_DIR=/mnt/fsmatrix" >> "$GITHUB_ENV"
+            mount_teardown: sudo umount /mnt/fsmatrix || true
+          # Windows NTFS: the default Windows filesystem. Somewhat
+          # redundant with `build.windows-latest` (which already runs
+          # the full lib + integration suite on NTFS) but kept in the
+          # matrix for symmetry — one job listing every supported
+          # filesystem is easier to audit. The lane creates a fresh
+          # NTFS-backed directory rather than reusing %TEMP% so the
+          # path the test exercises is unambiguous.
+          #
+          # Both Windows lanes assume the default shell for `run:` on
+          # `windows-latest` (pwsh, i.e. PowerShell 7+). Do NOT switch
+          # them to Windows PowerShell 5.1 via `shell: powershell` —
+          # PS 5.1's `Out-File -Encoding utf8` writes a UTF-8 BOM,
+          # which lands in `$GITHUB_ENV` and breaks subsequent env
+          # reads. pwsh 7+ writes BOM-less UTF-8.
+          - name: windows-ntfs
+            os: windows-latest
+            mount_setup: |
+              New-Item -Path C:\fsmatrix-ntfs -ItemType Directory -Force | Out-Null
+              "FERROCRYPT_FS_MATRIX_DIR=C:\fsmatrix-ntfs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            mount_teardown: Remove-Item -Recurse -Force C:\fsmatrix-ntfs -ErrorAction SilentlyContinue
+          # Windows exFAT: distinct kernel driver from the Linux exfat
+          # driver. Real users exercise this code path when extracting
+          # an archive onto a USB stick formatted on a Windows box.
+          # Hyper-V cmdlets create a 200 MB VHD, format it exFAT, and
+          # assign a drive letter automatically.
+          - name: windows-exfat
+            os: windows-latest
+            mount_setup: |
+              $ErrorActionPreference = "Stop"
+              $vhdPath = "C:\fsmatrix.vhd"
+              New-VHD -Path $vhdPath -SizeBytes 200MB -Dynamic | Out-Null
+              $vhd = Mount-VHD -Path $vhdPath -Passthru
+              $disk = Get-Disk -Number $vhd.DiskNumber
+              Initialize-Disk -Number $disk.Number -PartitionStyle MBR
+              $part = New-Partition -DiskNumber $disk.Number -UseMaximumSize -AssignDriveLetter
+              Format-Volume -DriveLetter $part.DriveLetter -FileSystem exFAT -Confirm:$false | Out-Null
+              "FERROCRYPT_FS_MATRIX_DIR=$($part.DriveLetter):\" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            mount_teardown: Dismount-VHD -Path C:\fsmatrix.vhd -ErrorAction SilentlyContinue
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Mount target filesystem
+        run: ${{ matrix.mount_setup }}
+
+      - name: Run fs-matrix smoke tests
+        run: cargo test -p ferrocrypt --test archive_fs_matrix -- --ignored --test-threads=1
+
+      - name: Unmount target filesystem
+        if: always()
+        run: ${{ matrix.mount_teardown }}

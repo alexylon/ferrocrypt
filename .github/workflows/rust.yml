@@ -229,15 +229,24 @@ jobs:
           # Linux exFAT: no Unix permission semantics. Validates that
           # extraction (which chmods every file) doesn't error on a
           # filesystem where the chmod is structurally a no-op.
+          #
+          # The mount uses the kernel exfat driver (mainline since
+          # Linux 5.4, present on GH Actions ubuntu-latest). The
+          # driver is shipped as a module that isn't auto-loaded, so
+          # modprobe is explicit. `linux-modules-extra-$(uname -r)`
+          # is installed best-effort in case a future runner image
+          # ships a kernel without the module built in.
           - name: linux-exfat
             os: ubuntu-latest
             mount_setup: |
               sudo apt-get update
               sudo apt-get install -y --no-install-recommends exfatprogs
+              sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)" || true
+              sudo modprobe exfat
               dd if=/dev/zero of=/tmp/fsmatrix.img bs=1M count=200
               sudo mkfs.exfat /tmp/fsmatrix.img
               sudo mkdir -p /mnt/fsmatrix
-              sudo mount -o loop,uid="$(id -u)",gid="$(id -g)" /tmp/fsmatrix.img /mnt/fsmatrix
+              sudo mount -t exfat -o loop,uid="$(id -u)",gid="$(id -g)" /tmp/fsmatrix.img /mnt/fsmatrix
               echo "FERROCRYPT_FS_MATRIX_DIR=/mnt/fsmatrix" >> "$GITHUB_ENV"
             mount_teardown: sudo umount /mnt/fsmatrix || true
           # Windows NTFS: the default Windows filesystem. Somewhat

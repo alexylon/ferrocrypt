@@ -54,6 +54,26 @@ const DIR_CREATE_MODE: u32 = 0o700;
 /// Windows ignores the mode argument to `create_file_at`.
 pub(crate) const INITIAL_FILE_CREATE_MODE: u32 = 0o600;
 
+/// `FILE_ATTRIBUTE_REPARSE_POINT` from `WinNT.h`. Stable Win32 ABI
+/// bit set on EVERY reparse point regardless of tag — symlinks,
+/// junctions, mount points, and any future tag. Single source of
+/// truth for the value so encode-side and decode-side reparse-point
+/// checks can't drift. Hardcoded so the crate doesn't pull
+/// `windows-sys` for a single constant.
+#[cfg(windows)]
+pub(super) const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+
+/// Diagnostic label prefix for symlink rejections on the decode side
+/// (extraction). Single source of truth for the wording so a future
+/// rename catches all call sites. See [`classify_open_failure`].
+const SYMLINK_IN_EXTRACTION_PATH: &str = "Symlink in extraction path";
+
+/// Diagnostic label prefix for symlink rejections on the encode side
+/// (source-tree walk). Same shape as [`SYMLINK_IN_EXTRACTION_PATH`]
+/// but role-specific so the caller can tell at a glance whether the
+/// rejection came from archiving or extracting.
+pub(super) const SYMLINK_IN_ARCHIVE_SOURCE: &str = "Symlink in archive source";
+
 /// Opens the user-supplied output directory as the trusted anchor.
 /// `output_dir` is chosen by the caller (CLI args / GUI picker); the
 /// caller's choice IS the trust boundary, so no NOFOLLOW or reparse
@@ -78,10 +98,6 @@ pub(crate) fn open_anchor(path: &Path) -> Result<Dir, CryptoError> {
 fn reject_reparse_point(dir: &Dir, name: &OsStr) -> Result<(), CryptoError> {
     use cap_std::fs::MetadataExt;
 
-    // From WinNT.h. Hardcoded so the crate doesn't pull `windows-sys`
-    // for a single constant. The value is a stable Win32 ABI bit.
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
-
     let meta = dir.dir_metadata().map_err(CryptoError::Io)?;
     if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(CryptoError::InvalidInput(format!(
@@ -103,20 +119,31 @@ fn finalize_dir_open(dir: Dir, _name: &OsStr) -> Result<Dir, CryptoError> {
 }
 
 /// Maps an `open_dir_nofollow` failure to a typed error. When the
-/// backing entry is in fact a symlink we surface the canonical
-/// `"Symlink in extraction path: <name>"` diagnostic; otherwise the
-/// underlying `io::Error` is propagated unchanged. The post-mortem
+/// backing entry is in fact a symlink we surface a labelled symlink
+/// diagnostic (`"<label>: <diagnostic>"`); otherwise the underlying
+/// `io::Error` is propagated unchanged. The post-mortem
 /// `symlink_metadata` probe is a diagnostic hint only — under TOCTOU
 /// it might race the original failure — but it never affects the
 /// rejection (the open already failed) and matches the rustix-era
 /// taxonomy whenever it observes the same state.
-fn classify_open_failure(parent: &Dir, name: &OsStr, e: io::Error) -> CryptoError {
+///
+/// `label` lets encode-side ("Symlink in archive source") and
+/// decode-side ("Symlink in extraction path") share one helper while
+/// still emitting the role-specific diagnostic. `diagnostic` is the
+/// path string the caller wants surfaced (typically the leaf name
+/// for decode-side path walks, or the full archive-relative path
+/// for encode-side `walk_directory` so the operator sees which
+/// manifest entry is implicated, not just the failing leaf).
+pub(super) fn classify_open_failure(
+    parent: &Dir,
+    name: &OsStr,
+    e: io::Error,
+    label: &str,
+    diagnostic: &str,
+) -> CryptoError {
     if let Ok(meta) = parent.symlink_metadata(name) {
         if meta.file_type().is_symlink() {
-            return CryptoError::InvalidInput(format!(
-                "Symlink in extraction path: {}",
-                Path::new(name).display()
-            ));
+            return CryptoError::InvalidInput(format!("{label}: {diagnostic}"));
         }
     }
     CryptoError::Io(e)
@@ -137,7 +164,13 @@ pub(crate) fn ensure_dir(parent: &Dir, name: &OsStr) -> Result<Dir, CryptoError>
             // symlink/reparse point, the helper fails closed.
             create_dir_with_default_mode(parent, name)
         }
-        Err(e) => Err(classify_open_failure(parent, name, e)),
+        Err(e) => Err(classify_open_failure(
+            parent,
+            name,
+            e,
+            SYMLINK_IN_EXTRACTION_PATH,
+            &Path::new(name).display().to_string(),
+        )),
     }
 }
 
@@ -157,9 +190,15 @@ pub(crate) fn mkdir_strict(parent: &Dir, name: &OsStr) -> Result<Dir, CryptoErro
 fn create_dir_with_default_mode(parent: &Dir, name: &OsStr) -> Result<Dir, CryptoError> {
     parent.create_dir(name).map_err(CryptoError::Io)?;
 
-    let dir = parent
-        .open_dir_nofollow(name)
-        .map_err(|e| classify_open_failure(parent, name, e))?;
+    let dir = parent.open_dir_nofollow(name).map_err(|e| {
+        classify_open_failure(
+            parent,
+            name,
+            e,
+            SYMLINK_IN_EXTRACTION_PATH,
+            &Path::new(name).display().to_string(),
+        )
+    })?;
     let dir = finalize_dir_open(dir, name)?;
 
     set_initial_dir_mode(&dir)?;
@@ -224,6 +263,42 @@ pub(crate) fn walk_to_parent(root: &Dir, rel: &Path) -> Result<(Dir, OsString), 
     Ok((cur, final_name))
 }
 
+/// Walks `rel` under `root` opening existing dirs only — returns the
+/// final component's parent handle and the final component's name.
+/// Read-only counterpart to [`walk_to_parent`] (which creates
+/// intermediate dirs); used by the encode-side per-entry content
+/// reopen so the writer's source walk gets the same per-component
+/// no-follow + reparse-check guarantee the reader has.
+///
+/// `rel` MUST have at least one component; an empty path is treated
+/// as an internal invariant violation, mirroring [`walk_to_parent`].
+pub(crate) fn walk_to_parent_readonly(
+    root: &Dir,
+    rel: &Path,
+) -> Result<(Dir, OsString), CryptoError> {
+    let mut components: Vec<Component<'_>> = rel.components().collect();
+    let last = components.pop().ok_or(CryptoError::InternalInvariant(
+        "Internal error: archive entry resolved to empty path",
+    ))?;
+    let final_name = normal_component(last, rel)?.to_os_string();
+
+    let mut cur = root.try_clone().map_err(CryptoError::Io)?;
+    for component in components {
+        let name = normal_component(component, rel)?;
+        let opened = cur.open_dir_nofollow(name).map_err(|e| {
+            classify_open_failure(
+                &cur,
+                name,
+                e,
+                SYMLINK_IN_ARCHIVE_SOURCE,
+                &Path::new(name).display().to_string(),
+            )
+        })?;
+        cur = finalize_dir_open(opened, name)?;
+    }
+    Ok((cur, final_name))
+}
+
 /// Walks `rel` under `root` opening existing dirs only — never
 /// creates anything. Used at chmod time so deferred directory
 /// permissions can be applied against a fresh handle instead of a
@@ -246,7 +321,13 @@ pub(crate) fn open_dir_at_rel(root: &Dir, rel: &Path) -> Result<Dir, CryptoError
         let opened = cur.open_dir_nofollow(name).map_err(|e| {
             // `cur` is the parent at this step; we reuse it for the
             // diagnostic post-mortem.
-            classify_open_failure(&cur, name, e)
+            classify_open_failure(
+                &cur,
+                name,
+                e,
+                SYMLINK_IN_EXTRACTION_PATH,
+                &Path::new(name).display().to_string(),
+            )
         })?;
         cur = finalize_dir_open(opened, name)?;
     }

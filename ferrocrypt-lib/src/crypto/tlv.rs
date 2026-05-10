@@ -45,11 +45,20 @@ pub(crate) struct RawTlv<'a> {
 
 /// Classifies a TLV tag and rejects the two reserved values
 /// (`0x0000`, `0x8000`). Pure function; no allocation.
+///
+/// Written as an if/else ladder rather than a `match` because
+/// rust-analyzer's match-exhaustiveness checker mis-flags the
+/// equivalent `match tag { 0x0000 | 0x8000 => …, 0x0001..=0x7FFF
+/// => …, 0x8001..=0xFFFF => … }` form as non-exhaustive (rustc
+/// accepts it, but rust-analyzer surfaces a false-positive E0004).
+/// The ladder is functionally identical and lints clean in both.
 pub(crate) fn classify_tlv_tag(tag: u16) -> Result<TlvClass, CryptoError> {
-    match tag {
-        0x0000 | 0x8000 => Err(CryptoError::InvalidFormat(FormatDefect::MalformedTlv)),
-        0x0001..=0x7FFF => Ok(TlvClass::Ignorable),
-        0x8001..=0xFFFF => Ok(TlvClass::Critical),
+    if tag == 0x0000 || tag == 0x8000 {
+        Err(CryptoError::InvalidFormat(FormatDefect::MalformedTlv))
+    } else if tag < 0x8000 {
+        Ok(TlvClass::Ignorable)
+    } else {
+        Ok(TlvClass::Critical)
     }
 }
 
@@ -66,11 +75,11 @@ const ENTRY_HEADER_SIZE: usize = 6;
 /// `max_region_len` and `max_value_len` are passed by the caller so
 /// each containing region (FCR header `ext_bytes`, FCA `archive_ext`,
 /// FCA `entry_ext`, etc.) can apply its own caps.
-pub(crate) fn scan_tlv_region<'a>(
-    bytes: &'a [u8],
+pub(crate) fn scan_tlv_region(
+    bytes: &[u8],
     max_region_len: u32,
     max_value_len: u32,
-) -> Result<Vec<RawTlv<'a>>, CryptoError> {
+) -> Result<Vec<RawTlv<'_>>, CryptoError> {
     let region_len = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
     if region_len > max_region_len {
         return Err(CryptoError::InvalidFormat(FormatDefect::ExtTooLarge {
@@ -381,6 +390,41 @@ mod tests {
         match scan_tlv_region(&region, 1024, 100) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedTlv)) => {}
             other => panic!("expected MalformedTlv for value-over-cap, got {other:?}"),
+        }
+    }
+
+    /// `>` vs `>=` regression guard on the per-value cap. A TLV
+    /// declaring `len == max_value_len` is admissible; `cap + 1`
+    /// rejects. Mirrors the limits-side at-cap admissibility tests.
+    #[test]
+    fn scan_tlv_region_value_at_cap_admissible() {
+        let region = tlv(0x0001, &[0xAA; 100]);
+        let tlvs = scan_tlv_region(&region, 1024, 100).unwrap();
+        assert_eq!(tlvs.len(), 1);
+        assert_eq!(tlvs[0].value.len(), 100);
+
+        let oversize = tlv(0x0001, &[0xBB; 101]);
+        assert!(scan_tlv_region(&oversize, 1024, 100).is_err());
+    }
+
+    /// `>` vs `>=` regression guard on the region cap. A region of
+    /// exactly `max_region_len` is admissible; one byte over rejects
+    /// with `ExtTooLarge`.
+    #[test]
+    fn scan_tlv_region_region_at_cap_admissible() {
+        // Build a region of exactly 100 bytes: 6-byte TLV header +
+        // 94-byte value.
+        let region = tlv(0x0001, &[0xAA; 94]);
+        assert_eq!(region.len(), 100);
+        let tlvs = scan_tlv_region(&region, 100, 100).unwrap();
+        assert_eq!(tlvs.len(), 1);
+
+        // 101-byte region rejects.
+        let mut oversize = region.clone();
+        oversize.push(0);
+        match scan_tlv_region(&oversize, 100, 100) {
+            Err(CryptoError::InvalidFormat(FormatDefect::ExtTooLarge { .. })) => {}
+            other => panic!("expected ExtTooLarge, got {other:?}"),
         }
     }
 

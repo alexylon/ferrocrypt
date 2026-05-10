@@ -40,9 +40,14 @@ pub(crate) use format::PERMISSION_BITS_MASK;
 /// plaintext.
 ///
 /// Note: this policy only governs cleanup of the `.incomplete` working
-/// tree. Process termination (crash, SIGKILL, power loss) bypasses
-/// cleanup entirely, so a `.incomplete` left by a killed process is
-/// available for recovery regardless of the policy.
+/// tree on a normal `Err` return. Process termination (crash, SIGKILL,
+/// power loss) AND panic-unwind bypass cleanup entirely, so a
+/// `.incomplete` left by a killed or panicking process is available
+/// for recovery regardless of the policy. The library does not wrap
+/// extraction in `catch_unwind`; if a panic propagates out of
+/// `unarchive`, treat the working tree as if the process had been
+/// killed: it may contain authenticated-but-incomplete plaintext that
+/// the caller must inspect or remove explicitly.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum IncompleteOutputPolicy {

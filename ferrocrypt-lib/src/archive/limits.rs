@@ -383,7 +383,11 @@ pub(super) fn total_entry_ext_cap_error(total: u64, cap: u64) -> CryptoError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArchiveLimits, enforce_per_entry_caps, enforce_total_bytes_cap};
+    use super::{
+        ArchiveLimits, enforce_archive_ext_cap, enforce_entry_ext_cap, enforce_manifest_len_cap,
+        enforce_path_bytes_cap, enforce_per_entry_caps, enforce_total_bytes_cap,
+        enforce_total_entry_ext_cap,
+    };
 
     #[test]
     fn defaults_match_spec_values() {
@@ -527,6 +531,55 @@ mod tests {
         assert!(enforce_total_bytes_cap(100, &mut total, &limits).is_ok());
         assert_eq!(total, 100);
         assert!(enforce_total_bytes_cap(1, &mut total, &limits).is_err());
+        assert_eq!(total, 100);
+    }
+
+    /// `>` vs `>=` regression guard for `enforce_path_bytes_cap`.
+    /// Path length exactly at cap admissible; cap+1 rejects.
+    #[test]
+    fn enforce_path_bytes_cap_boundary() {
+        let limits = ArchiveLimits::default().with_max_path_bytes(10);
+        assert!(enforce_path_bytes_cap(10, None, &limits).is_ok());
+        assert!(enforce_path_bytes_cap(11, None, &limits).is_err());
+    }
+
+    /// `>` vs `>=` regression guard for `enforce_manifest_len_cap`.
+    /// Manifest length exactly at cap admissible; cap+1 rejects.
+    #[test]
+    fn enforce_manifest_len_cap_boundary() {
+        let limits = ArchiveLimits::default().with_max_manifest_bytes(100);
+        assert!(enforce_manifest_len_cap(100, &limits).is_ok());
+        assert!(enforce_manifest_len_cap(101, &limits).is_err());
+    }
+
+    /// `>` vs `>=` regression guard for `enforce_archive_ext_cap`.
+    /// Archive ext length exactly at cap admissible; cap+1 rejects.
+    #[test]
+    fn enforce_archive_ext_cap_boundary() {
+        let limits = ArchiveLimits::default().with_max_archive_ext_bytes(100);
+        assert!(enforce_archive_ext_cap(100, &limits).is_ok());
+        assert!(enforce_archive_ext_cap(101, &limits).is_err());
+    }
+
+    /// `>` vs `>=` regression guard for `enforce_entry_ext_cap`.
+    /// Entry ext length exactly at cap admissible; cap+1 rejects.
+    #[test]
+    fn enforce_entry_ext_cap_boundary() {
+        let limits = ArchiveLimits::default().with_max_entry_ext_bytes(100);
+        assert!(enforce_entry_ext_cap(100, None, &limits).is_ok());
+        assert!(enforce_entry_ext_cap(101, None, &limits).is_err());
+    }
+
+    /// `>` vs `>=` regression guard for `enforce_total_entry_ext_cap`.
+    /// Running total exactly at cap admissible; cap+1 rejects, total
+    /// unchanged on overflow.
+    #[test]
+    fn enforce_total_entry_ext_cap_boundary() {
+        let limits = ArchiveLimits::default().with_max_total_entry_ext_bytes(100);
+        let mut total = 0;
+        assert!(enforce_total_entry_ext_cap(100, &mut total, &limits).is_ok());
+        assert_eq!(total, 100);
+        assert!(enforce_total_entry_ext_cap(1, &mut total, &limits).is_err());
         assert_eq!(total, 100);
     }
 }

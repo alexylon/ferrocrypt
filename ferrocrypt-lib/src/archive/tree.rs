@@ -324,6 +324,37 @@ mod tests {
         assert!(format!("{err}").contains("ASCII case-insensitive"));
     }
 
+    /// Symmetric coverage of `rejects_ascii_ci_duplicate` for
+    /// directories: `Sub` and `SUB` under the same root collide via
+    /// the ASCII-case-insensitive key. Pinned because the existing
+    /// test only covers files.
+    #[test]
+    fn rejects_ascii_ci_duplicate_directories() {
+        let entries = vec![
+            entry("root", ArchiveEntryKind::Directory, 0),
+            entry("root/Sub", ArchiveEntryKind::Directory, 0),
+            entry("root/SUB", ArchiveEntryKind::Directory, 0),
+        ];
+        let err = validate_manifest_tree(&entries, 0, limits()).unwrap_err();
+        assert!(format!("{err}").contains("ASCII case-insensitive"));
+    }
+
+    /// File-vs-directory ASCII-case collision: `root/Foo` (file) and
+    /// `root/foo` (directory) collide via the ASCII-CI key even though
+    /// the kinds differ. Pinned because the existing
+    /// `rejects_file_directory_collision` only covers EXACT same-path
+    /// collisions; this is the case-fold variant.
+    #[test]
+    fn rejects_ascii_ci_file_vs_directory_collision() {
+        let entries = vec![
+            entry("root", ArchiveEntryKind::Directory, 0),
+            entry("root/Foo", ArchiveEntryKind::File, 5),
+            entry("root/foo", ArchiveEntryKind::Directory, 0),
+        ];
+        let err = validate_manifest_tree(&entries, 5, limits()).unwrap_err();
+        assert!(format!("{err}").contains("ASCII case-insensitive"));
+    }
+
     /// File and directory at the same path (a less-obvious collision
     /// shape than a plain duplicate). Should reject as a duplicate.
     #[test]

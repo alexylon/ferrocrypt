@@ -717,6 +717,39 @@ mod tests {
         assert!(format!("{err:?}").contains("MalformedTlv"));
     }
 
+    /// Reserved tag `0x0000` in `archive_ext` rejects with
+    /// `MalformedTlv` via the shared scanner. Pin because the existing
+    /// reserved-tag tests only cover `entry_ext`; the archive-level
+    /// region uses the same scanner and the same policy, so the
+    /// rejection MUST fire identically here.
+    #[test]
+    fn rejects_reserved_zero_archive_ext_tag() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let manifest = single_file_manifest("hello.txt", b"Hello, world!");
+        let reserved = tlv_bytes(0x0000, &[]);
+        let mut archive = build_archive_prefix_with_archive_ext(&manifest, &reserved);
+        archive.extend_from_slice(b"Hello, world!");
+
+        let err = unarchive_default(archive, tmp.path()).unwrap_err();
+        assert!(format!("{err:?}").contains("MalformedTlv"));
+    }
+
+    /// Reserved tag `0x8000` in `archive_ext` rejects with
+    /// `MalformedTlv`. Symmetric coverage with the `0x0000` case
+    /// above; both reserved values must fail through the same
+    /// scanner path.
+    #[test]
+    fn rejects_reserved_8000_archive_ext_tag() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let manifest = single_file_manifest("hello.txt", b"Hello, world!");
+        let reserved = tlv_bytes(0x8000, &[]);
+        let mut archive = build_archive_prefix_with_archive_ext(&manifest, &reserved);
+        archive.extend_from_slice(b"Hello, world!");
+
+        let err = unarchive_default(archive, tmp.path()).unwrap_err();
+        assert!(format!("{err:?}").contains("MalformedTlv"));
+    }
+
     // -- Content-region rejections -----------------------------------------
 
     #[test]
@@ -743,6 +776,89 @@ mod tests {
 
         let err = unarchive_default(archive, tmp.path()).unwrap_err();
         assert!(format!("{err}").contains("Trailing data"));
+    }
+
+    /// Truncation right after the manifest, zero content bytes (the
+    /// manifest declares file content but the payload region is empty).
+    /// Pins that "shorter than declared" fires on the very first read
+    /// of the content phase, not silently producing an empty file.
+    #[test]
+    fn rejects_truncation_at_zero_content_bytes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let manifest = single_file_manifest("hello.txt", b"Hello, world!");
+        // Empty content region — manifest declares 13 bytes, payload
+        // delivers 0.
+        let archive = build_partial_archive(&manifest, b"");
+
+        let err = unarchive_default(archive, tmp.path()).unwrap_err();
+        let s = format!("{err}");
+        assert!(
+            s.contains("shorter than declared") || matches!(err, CryptoError::Io(_)),
+            "got: {s}",
+        );
+    }
+
+    /// Truncation during a LATER file in a multi-file archive: after
+    /// file 1's content fully streams to disk, the payload is cut
+    /// 2 bytes into file 2. Pins that the rejection fires inside the
+    /// later file's `copy_exact_n` rather than passing structural
+    /// checks because file 1 happened to be complete.
+    #[test]
+    fn rejects_truncation_during_later_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let manifest = Manifest {
+            entries: vec![
+                make_entry("d", ArchiveEntryKind::Directory, 0, 0o755),
+                make_entry("d/a.bin", ArchiveEntryKind::File, 5, 0o644),
+                make_entry("d/b.bin", ArchiveEntryKind::File, 10, 0o644),
+            ],
+            total_file_bytes: 15,
+            root_name: OsString::from("d"),
+            root_is_file: false,
+            root_mode: 0o755,
+        };
+        // Deliver all of file 1 (5 bytes) plus 2 bytes of file 2,
+        // leaving file 2 short by 8 bytes.
+        let mut content = Vec::new();
+        content.extend_from_slice(b"AAAAA");
+        content.extend_from_slice(b"BB");
+        let archive = build_partial_archive(&manifest, &content);
+
+        let err = unarchive_default(archive, tmp.path()).unwrap_err();
+        let s = format!("{err}");
+        assert!(
+            s.contains("shorter than declared") || matches!(err, CryptoError::Io(_)),
+            "got: {s}",
+        );
+    }
+
+    /// Truncation EXACTLY at file boundary: file 1 fully streams,
+    /// then EOF hits before file 2's first content byte. Pins that
+    /// the rejection fires immediately on the first read of file 2,
+    /// not silently treating the missing file as empty.
+    #[test]
+    fn rejects_truncation_exactly_at_file_boundary() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let manifest = Manifest {
+            entries: vec![
+                make_entry("d", ArchiveEntryKind::Directory, 0, 0o755),
+                make_entry("d/a.bin", ArchiveEntryKind::File, 5, 0o644),
+                make_entry("d/b.bin", ArchiveEntryKind::File, 10, 0o644),
+            ],
+            total_file_bytes: 15,
+            root_name: OsString::from("d"),
+            root_is_file: false,
+            root_mode: 0o755,
+        };
+        // Deliver only file 1's content (5 bytes); cut between files.
+        let archive = build_partial_archive(&manifest, b"AAAAA");
+
+        let err = unarchive_default(archive, tmp.path()).unwrap_err();
+        let s = format!("{err}");
+        assert!(
+            s.contains("shorter than declared") || matches!(err, CryptoError::Io(_)),
+            "got: {s}",
+        );
     }
 
     // -- IncompleteOutputPolicy semantics ----------------------------------
@@ -778,6 +894,222 @@ mod tests {
             "RetainOnError must preserve .incomplete"
         );
     }
+
+    /// `IncompleteOutputPolicy` doc-comment promises that panic-unwind
+    /// (like SIGKILL or power loss) bypasses cleanup entirely:
+    /// `.incomplete` survives regardless of policy. The cleanup loop
+    /// in `unarchive` runs only after `unarchive_inner` returns
+    /// `Err`; an unwind propagates past it without firing.
+    ///
+    /// Pin the property: drive `unarchive` with a `Read` impl that
+    /// panics partway through content streaming (after `.incomplete`
+    /// has been created via `create_file_at`), `catch_unwind` the
+    /// panic, and assert the staged file is still on disk despite
+    /// `DeleteOnError`. Without this guarantee a panicking process
+    /// would silently lose authenticated-but-incomplete plaintext
+    /// the caller may need for forensic recovery.
+    #[test]
+    fn panic_during_extraction_preserves_incomplete_under_delete_on_error() {
+        use std::panic::AssertUnwindSafe;
+
+        struct PanicAfterN<R: Read> {
+            inner: R,
+            bytes_read: u64,
+            panic_at: u64,
+        }
+
+        impl<R: Read> Read for PanicAfterN<R> {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if self.bytes_read >= self.panic_at {
+                    panic!("test-induced panic at byte {}", self.bytes_read);
+                }
+                let remaining = (self.panic_at - self.bytes_read) as usize;
+                let n_target = buf.len().min(remaining);
+                let n = self.inner.read(&mut buf[..n_target])?;
+                self.bytes_read += n as u64;
+                Ok(n)
+            }
+        }
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let manifest = single_file_manifest("hello.txt", b"Hello, world!");
+        let archive = build_archive(&manifest, &[("hello.txt", b"Hello, world!")]);
+
+        // Set the panic point one byte before EOF so the panic fires
+        // deep inside `copy_exact_n`'s content loop — well after
+        // `create_file_at` has staged `hello.txt.incomplete`.
+        let panic_at = archive.len() as u64 - 1;
+        let panicking_reader = PanicAfterN {
+            inner: Cursor::new(archive),
+            bytes_read: 0,
+            panic_at,
+        };
+
+        let tmp_path = tmp.path().to_path_buf();
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            unarchive(
+                panicking_reader,
+                &tmp_path,
+                ArchiveLimits::default(),
+                IncompleteOutputPolicy::DeleteOnError,
+            )
+        }));
+
+        assert!(
+            result.is_err(),
+            "expected panic to propagate out of unarchive"
+        );
+
+        let incomplete = tmp_path.join("hello.txt.incomplete");
+        assert!(
+            incomplete.exists(),
+            ".incomplete must survive panic regardless of policy",
+        );
+    }
+
+    // -- Fault-injection harness (Batch 3) --------------------------------
+
+    /// `Read` wrapper that delivers `panic_at` bytes from `inner`,
+    /// then returns a chosen `io::Error` on the next read. Models a
+    /// mid-payload failure (AEAD authentication, truncation, transient
+    /// I/O) so the cleanup behavior of `DeleteOnError` /
+    /// `RetainOnError` is testable without bringing up the full
+    /// encryption pipeline.
+    struct FailAfterN<R: Read> {
+        inner: R,
+        bytes_read: u64,
+        fail_at: u64,
+        error_kind: io::ErrorKind,
+        error_msg: &'static str,
+    }
+
+    impl<R: Read> Read for FailAfterN<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.bytes_read >= self.fail_at {
+                return Err(io::Error::new(self.error_kind, self.error_msg));
+            }
+            let remaining = (self.fail_at - self.bytes_read) as usize;
+            let n_target = buf.len().min(remaining);
+            let n = self.inner.read(&mut buf[..n_target])?;
+            self.bytes_read += n as u64;
+            Ok(n)
+        }
+    }
+
+    /// Mid-payload fault under `DeleteOnError`: the staged
+    /// `.incomplete` MUST be cleaned up. Pinned via `FailAfterN`
+    /// so the test exercises the archive-layer cleanup path
+    /// directly, independent of the AEAD stream layer above.
+    #[test]
+    fn fail_after_n_during_payload_cleans_up_under_delete_on_error() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let manifest = single_file_manifest("hello.txt", b"Hello, world!");
+        let archive = build_archive(&manifest, &[("hello.txt", b"Hello, world!")]);
+        // Fail one byte before EOF so the failure fires deep in
+        // `copy_exact_n` after `.incomplete` has been created and
+        // some content has been written.
+        let fail_at = archive.len() as u64 - 1;
+        let reader = FailAfterN {
+            inner: Cursor::new(archive),
+            bytes_read: 0,
+            fail_at,
+            error_kind: io::ErrorKind::Other,
+            error_msg: "test-induced AEAD fail",
+        };
+
+        let result = unarchive(
+            reader,
+            tmp.path(),
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::DeleteOnError,
+        );
+        assert!(result.is_err());
+
+        // No staged `.incomplete` left under DeleteOnError.
+        let count = fs::read_dir(tmp.path()).unwrap().count();
+        assert_eq!(count, 0, "DeleteOnError must clean up after fault");
+    }
+
+    /// Mid-payload fault under `RetainOnError`: the staged
+    /// `.incomplete` MUST survive for inspection. Symmetric with the
+    /// `DeleteOnError` test above.
+    #[test]
+    fn fail_after_n_during_payload_preserves_under_retain_on_error() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let manifest = single_file_manifest("hello.txt", b"Hello, world!");
+        let archive = build_archive(&manifest, &[("hello.txt", b"Hello, world!")]);
+        let fail_at = archive.len() as u64 - 1;
+        let reader = FailAfterN {
+            inner: Cursor::new(archive),
+            bytes_read: 0,
+            fail_at,
+            error_kind: io::ErrorKind::Other,
+            error_msg: "test-induced AEAD fail",
+        };
+
+        let result = unarchive(
+            reader,
+            tmp.path(),
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::RetainOnError,
+        );
+        assert!(result.is_err());
+
+        let incomplete = tmp.path().join("hello.txt.incomplete");
+        assert!(
+            incomplete.exists(),
+            "RetainOnError must keep .incomplete after fault"
+        );
+    }
+
+    /// Read-only `output_dir` (mode `0o500`): `unarchive` MUST fail
+    /// at the first cap-std write attempt (mkdir/create_file), and
+    /// `DeleteOnError` MUST not leave anything behind. Pin the §11
+    /// "Output dir is read-only" case.
+    #[cfg(unix)]
+    #[test]
+    fn read_only_output_dir_fails_with_no_leak() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let out = tmp.path().join("out");
+        fs::create_dir(&out).unwrap();
+        fs::set_permissions(&out, fs::Permissions::from_mode(0o500)).unwrap();
+
+        let manifest = single_file_manifest("hello.txt", b"Hello, world!");
+        let archive = build_archive(&manifest, &[("hello.txt", b"Hello, world!")]);
+
+        let result = unarchive(
+            Cursor::new(archive),
+            &out,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::DeleteOnError,
+        );
+        assert!(
+            result.is_err(),
+            "expected creation failure on read-only dir"
+        );
+
+        // Restore write so tempdir cleanup can remove the dir AND
+        // assert nothing leaked under it.
+        fs::set_permissions(&out, fs::Permissions::from_mode(0o700)).unwrap();
+        let count = fs::read_dir(&out).unwrap().count();
+        assert_eq!(
+            count, 0,
+            "no .incomplete or final output may exist when output_dir is read-only",
+        );
+    }
+
+    // Note: race-based fault tests (output_dir deleted/replaced
+    // mid-extraction, dir-perm change during traversal, rename-
+    // failure mid-flight) are deliberately omitted from this batch.
+    // Deterministic injection between specific extraction steps
+    // requires test-side hooks the production code does not expose;
+    // the cap-std capability handles, the no-clobber rename, and
+    // the cleanup loop are all exercised by the deterministic
+    // tests above (read-only output_dir, FailAfterN, panic_during,
+    // pre-existing final output) which together cover the cleanup
+    // semantics each race scenario would also exercise.
 
     /// `RetainOnError` doc-comment promises the staged content is a
     /// prefix of the original plaintext, not an empty placeholder.
@@ -816,6 +1148,192 @@ mod tests {
 
         let err = unarchive_default(archive, tmp.path()).unwrap_err();
         assert!(format!("{err}").contains("Output already exists"));
+    }
+
+    /// Mode 0o000 round-trips through the decode side: a manifest
+    /// entry stored with `mode = 0` gets `chmod_file_handle(0)` called
+    /// on its open file handle, leaving the extracted file at 0o000.
+    /// Covers the §4 "File mode 0" / §13 "Unix file mode 0o000" cases
+    /// — the encode side can't easily round-trip because a source
+    /// file with mode 0o000 isn't readable by its owner on Unix, so
+    /// the property is pinned at decode time using a hand-built
+    /// manifest.
+    #[cfg(unix)]
+    #[test]
+    fn extract_applies_mode_0o000_to_output_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let manifest = single_file_manifest("hello.txt", b"x");
+        let mut manifest = manifest;
+        manifest.entries[0].mode = 0o000;
+        manifest.root_mode = 0o000;
+        let archive = build_archive(&manifest, &[("hello.txt", b"x")]);
+
+        let final_path = unarchive_default(archive, tmp.path()).unwrap();
+        let mode = fs::metadata(&final_path).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o000, "expected 0o000, got 0o{mode:o}");
+
+        // Make readable so tempdir cleanup can remove it.
+        fs::set_permissions(&final_path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    /// Hardlink at the extraction file leaf: pre-create a file then
+    /// hardlink it at the destination name. `create_file_at`'s
+    /// `create_new(true)` MUST reject with `AlreadyExists` (mapped to
+    /// "Output already exists"), and the attacker-controlled hardlink
+    /// target MUST remain unchanged. Closes the §12 "attacker
+    /// replaces final file path with hardlink" case.
+    #[cfg(unix)]
+    #[test]
+    fn rejects_hardlink_at_extraction_file_leaf() {
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        // Attacker target outside the prospective output path.
+        let attacker_target = tmp.path().join("attacker_target.bin");
+        fs::write(&attacker_target, b"attacker controlled").unwrap();
+
+        // Hardlink at the final extraction name. Since both names
+        // refer to the same inode, `create_new(true)` rejects on
+        // "any existing entry" — including hardlinks.
+        fs::hard_link(&attacker_target, tmp.path().join("hello.txt")).unwrap();
+
+        let manifest = single_file_manifest("hello.txt", b"Hello, world!");
+        let archive = build_archive(&manifest, &[("hello.txt", b"Hello, world!")]);
+
+        let err = unarchive_default(archive, tmp.path()).unwrap_err();
+        assert!(format!("{err}").contains("Output already exists"));
+
+        // Attacker target unchanged.
+        assert_eq!(fs::read(&attacker_target).unwrap(), b"attacker controlled");
+    }
+
+    /// Symlink at the renamed root between `rename_no_clobber` and
+    /// `apply_root_directory_mode`: the chmod step MUST reject via
+    /// `open_dir_at_rel`'s per-component no-follow walk. We inject
+    /// the post-rename state directly (a deterministic test of the
+    /// same race the multithreaded path would observe).
+    ///
+    /// Closes the §12 "attacker replaces staged root with symlink"
+    /// case at the apply-root-mode site specifically.
+    #[cfg(unix)]
+    #[test]
+    fn apply_root_directory_mode_rejects_symlink_at_renamed_root() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let real = tmp.path().join("real_dir");
+        fs::create_dir(&real).unwrap();
+
+        // Symlink at the position the renamed root would have.
+        symlink(&real, tmp.path().join("root")).unwrap();
+
+        let manifest = Manifest {
+            entries: vec![make_entry("root", ArchiveEntryKind::Directory, 0, 0o755)],
+            total_file_bytes: 0,
+            root_name: OsString::from("root"),
+            root_is_file: false,
+            root_mode: 0o755,
+        };
+
+        let err = apply_root_directory_mode(tmp.path(), &manifest).unwrap_err();
+        assert!(
+            format!("{err}").contains("Symlink in extraction path"),
+            "expected symlink rejection, got: {err}",
+        );
+    }
+
+    /// `RetainOnError` keeps the staging-default root mode (0o700),
+    /// NOT the manifest's `root_mode`. Pin that root chmod is
+    /// strictly a post-rename step: a failed extraction (no rename)
+    /// leaves the staged root at the initial owner-private mode
+    /// regardless of what the manifest declared.
+    #[cfg(unix)]
+    #[test]
+    fn retain_on_error_staged_root_keeps_default_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Manifest declares an unusual `root_mode` so 0o700 vs the
+        // declared mode are clearly distinguishable.
+        let manifest = Manifest {
+            entries: vec![
+                make_entry("root", ArchiveEntryKind::Directory, 0, 0o500),
+                make_entry("root/a.bin", ArchiveEntryKind::File, 100, 0o644),
+            ],
+            total_file_bytes: 100,
+            root_name: OsString::from("root"),
+            root_is_file: false,
+            root_mode: 0o500,
+        };
+        let archive = build_partial_archive(&manifest, b"short");
+
+        let _ = unarchive_with_policy(archive, tmp.path(), IncompleteOutputPolicy::RetainOnError);
+
+        let staged_root = tmp.path().join("root.incomplete");
+        assert!(staged_root.exists());
+        let mode = fs::metadata(&staged_root).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "retained .incomplete must keep staging default 0o700, not manifest 0o{:o}",
+            manifest.root_mode,
+        );
+    }
+
+    /// Unicode-collision safety net (NFC vs NFD `naïve`): when the
+    /// underlying filesystem merges two distinct UTF-8 byte sequences
+    /// (HFS+, case-insensitive APFS), the ASCII-only collision key
+    /// can't catch the duplicate, so the fallback is `create_file_at`'s
+    /// `create_new(true)` rejecting at extraction time.
+    ///
+    /// **FS-dependent — ignored by default.** Modern APFS preserves
+    /// distinct Unicode forms and would NOT merge these, so the test
+    /// can only run on a normalizing volume (HFS+, case-insensitive
+    /// APFS, or a synthetic mount). Documented and ignored so future
+    /// work on the FS-matrix CI lane (Batch 5) can opt in by removing
+    /// the `#[ignore]` under the right cfg.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs Unicode-normalizing or case-insensitive volume; default APFS preserves form"]
+    fn unicode_collision_falls_through_to_create_new() {
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        // NFC `naïve`: U+00EF (precomposed). NFD: U+0069 + U+0308.
+        let nfc = "na\u{00EF}ve.txt";
+        let nfd = "na\u{0069}\u{0308}ve.txt";
+        assert_ne!(nfc.as_bytes(), nfd.as_bytes(), "test sanity");
+
+        let manifest = Manifest {
+            entries: vec![
+                make_entry("root", ArchiveEntryKind::Directory, 0, 0o755),
+                make_entry(&format!("root/{nfc}"), ArchiveEntryKind::File, 5, 0o644),
+                make_entry(&format!("root/{nfd}"), ArchiveEntryKind::File, 5, 0o644),
+            ],
+            total_file_bytes: 10,
+            root_name: OsString::from("root"),
+            root_is_file: false,
+            root_mode: 0o755,
+        };
+        let archive = build_archive(
+            &manifest,
+            &[
+                (&format!("root/{nfc}"), b"AAAAA"),
+                (&format!("root/{nfd}"), b"BBBBB"),
+            ],
+        );
+
+        let err = unarchive_default(archive, tmp.path()).unwrap_err();
+        // On a normalizing FS the second `create_new` rejects with
+        // `AlreadyExists` (mapped) or surfaces an Io error.
+        let s = format!("{err}");
+        assert!(
+            s.contains("already exists") || matches!(err, CryptoError::Io(_)),
+            "got: {s}",
+        );
+
+        // DeleteOnError cleans up the staged `.incomplete`.
+        let count = fs::read_dir(tmp.path()).unwrap().count();
+        assert_eq!(count, 0);
     }
 
     /// A pre-existing `.incomplete` from a previous failed run MUST

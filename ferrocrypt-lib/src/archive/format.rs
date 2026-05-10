@@ -872,6 +872,57 @@ mod tests {
         );
     }
 
+    /// Loop pin: a truncated header at every byte boundary 0..27
+    /// rejects. Pre-magic truncation (0..4 bytes) surfaces as
+    /// `CryptoError::Io` from the magic read; magic-then-truncated
+    /// (4 bytes — version absent) hits the next read; etc. The full
+    /// 27-byte valid header is the only admissible case at this size.
+    /// Pinned because the existing single-slice test (`rejects_short_header`)
+    /// only exercises one byte boundary.
+    #[test]
+    fn rejects_truncated_header_at_every_byte() {
+        let full = raw_header_bytes(FCA_VERSION, 0, 5, 0, 100, 1024);
+        assert_eq!(full.len(), FCA_HEADER_SIZE);
+
+        for cut in 0..FCA_HEADER_SIZE {
+            let truncated = &full[..cut];
+            let mut cur = Cursor::new(truncated);
+            let result = parse_fca_header(&mut cur, ArchiveLimits::default());
+            assert!(
+                result.is_err(),
+                "truncated to {cut} bytes must reject (got {:?})",
+                result.map(|h| h.entry_count),
+            );
+        }
+
+        // Sanity: the full 27-byte header parses successfully.
+        let mut cur = Cursor::new(&full);
+        let parsed = parse_fca_header(&mut cur, ArchiveLimits::default()).unwrap();
+        assert_eq!(parsed.entry_count, 5);
+    }
+
+    /// Manifest-len declared SHORTER than the real manifest bytes:
+    /// the parser reads exactly `manifest_len` bytes, then either
+    /// the truncated bytes parse (with leftover bytes flowing into
+    /// the content region) or fail structurally. Either way the
+    /// rejection is well-defined and the typed `manifest_len` mismatch
+    /// path is exercised via `parse_manifest_bytes`.
+    #[test]
+    fn parse_rejects_manifest_len_shorter_than_real_bytes() {
+        let bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 4, 0, 10, b"file", &[]);
+        // Declare manifest_len = real - 5 (slice off the last 5 bytes).
+        let header = FcaHeader {
+            entry_count: 1,
+            archive_ext_len: 0,
+            manifest_len: bytes.len() as u32 - 5,
+            total_file_bytes: 10,
+        };
+        let err = parse_manifest_bytes(&bytes, header, ArchiveLimits::default()).unwrap_err();
+        // The byte slice is longer than declared `manifest_len` →
+        // `parse_manifest_bytes` rejects via the length-mismatch arm.
+        assert!(format!("{err}").contains("Malformed archive manifest"));
+    }
+
     /// Completely empty input fails at the first `read_exact` for
     /// magic, surfaces as `CryptoError::Io`. Pinned because an empty
     /// stream is a common adversarial probe.
@@ -1371,5 +1422,55 @@ mod tests {
         bytes.extend(raw_entry_bytes(KIND_FILE, 0, 0o644, 1, 0, 10, b"b", &[]));
         let err = parse_with_header(&bytes, 2, 20).unwrap_err();
         assert!(format!("{err}").contains("multiple top-level roots"));
+    }
+
+    /// Near-cap stress (Batch 2.6): a manifest with `max_entry_count`
+    /// directory entries serializes, parses, and round-trips in
+    /// reasonable time and memory. Covers §3 "very large manifest"
+    /// and §15 "many tiny entries near 250,000 cap" without paying the
+    /// filesystem-op cost of actually creating 250k files.
+    ///
+    /// Constructs entries directly in memory and drives the serialize
+    /// → parse pipeline. Uses zero-byte directory entries so the
+    /// total bytes stays at zero (no `total_file_bytes` interaction).
+    /// One root + 249,999 descendant dirs at depth 2.
+    #[test]
+    fn manifest_round_trip_near_entry_count_cap() {
+        let limits = ArchiveLimits::default();
+        let cap = limits.max_entry_count;
+
+        let mut entries = Vec::with_capacity(cap as usize);
+        entries.push(make_entry("root", ArchiveEntryKind::Directory, 0, 0o755));
+        for i in 1..cap {
+            entries.push(make_entry(
+                &format!("root/d{i:07}"),
+                ArchiveEntryKind::Directory,
+                0,
+                0o755,
+            ));
+        }
+        assert_eq!(entries.len(), cap as usize);
+
+        let manifest = Manifest {
+            entries,
+            total_file_bytes: 0,
+            root_name: OsString::from("root"),
+            root_is_file: false,
+            root_mode: 0o755,
+        };
+
+        let bytes = serialize_manifest(&manifest, limits).unwrap();
+        // Sanity: the serialized manifest fits in the manifest cap.
+        assert!(bytes.len() as u64 <= u64::from(limits.max_manifest_bytes));
+
+        let header = FcaHeader {
+            entry_count: cap,
+            archive_ext_len: 0,
+            manifest_len: bytes.len() as u32,
+            total_file_bytes: 0,
+        };
+        let parsed = parse_manifest_bytes(&bytes, header, limits).unwrap();
+        assert_eq!(parsed.entries.len(), cap as usize);
+        assert_eq!(parsed.root_name, OsString::from("root"));
     }
 }

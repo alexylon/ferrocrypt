@@ -56,3 +56,30 @@ pub fn validate_no_known_critical(
 pub fn decode_recipient_string(s: &str, local_max_chars: usize) -> Result<(), crate::CryptoError> {
     crate::key::public::decode_recipient_string(s, local_max_chars).map(|_| ())
 }
+
+pub use crate::archive::IncompleteOutputPolicy;
+
+/// Drives the full FCA reader pipeline (`archive::unarchive`) on
+/// arbitrary bytes for the `fuzz_fca_full_pipeline` target: header
+/// parse, archive-ext TLV validation, manifest parse, tree
+/// validation, content streaming, atomic promotion. Wraps the
+/// generic-`R` underlying function so the fuzz target can call
+/// through a concrete signature.
+///
+/// `output_dir` is the per-iteration tempdir the fuzz harness creates;
+/// the policy is fixed to `DeleteOnError` so partial extractions are
+/// cleaned up before the tempdir drops, keeping per-iteration disk
+/// pressure bounded.
+pub fn unarchive_for_fuzz(
+    bytes: &[u8],
+    output_dir: &std::path::Path,
+    limits: crate::ArchiveLimits,
+) -> Result<std::path::PathBuf, crate::CryptoError> {
+    use std::io::Cursor;
+    crate::archive::unarchive(
+        Cursor::new(bytes),
+        output_dir,
+        limits,
+        IncompleteOutputPolicy::DeleteOnError,
+    )
+}

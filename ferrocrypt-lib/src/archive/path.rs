@@ -497,4 +497,86 @@ mod tests {
         assert_eq!(key.first(), Some(&b'n'));
         assert_eq!(&key[1..], "aïve".as_bytes());
     }
+
+    // -- Pin-by-name coverage for platform-specific path attempts ---------
+
+    /// Windows drive-letter paths reject by name. Currently transitive
+    /// via the colon-rejection (`<>:"|?*`) and backslash rejection,
+    /// but pinning by name keeps coverage explicit so a future split
+    /// of the validators doesn't drop the case.
+    #[test]
+    fn rejects_windows_drive_path_with_backslash() {
+        let err = validate_fca_path("C:\\x", limits()).unwrap_err();
+        let s = format!("{err}");
+        assert!(
+            s.contains("backslash") || s.contains("Windows-reserved character"),
+            "got: {s}",
+        );
+    }
+
+    #[test]
+    fn rejects_windows_drive_path_with_forward_slash() {
+        // `C:/x` is an absolute path attempt without backslash. Hits
+        // the `:` Windows-reserved-character rejection on the first
+        // component.
+        let err = validate_fca_path("C:/x", limits()).unwrap_err();
+        assert!(format!("{err}").contains("Windows-reserved character"));
+    }
+
+    #[test]
+    fn rejects_unc_path_attempt() {
+        // `\\server\share` UNC attempt. Backslash rejection fires.
+        let err = validate_fca_path("\\\\server\\share", limits()).unwrap_err();
+        assert!(format!("{err}").contains("backslash"));
+    }
+
+    #[test]
+    fn rejects_double_forward_slash_unc_like() {
+        // `//server/share` — POSIX double-slash, would be UNC-equivalent
+        // on Windows. Hits the leading-slash rejection.
+        let err = validate_fca_path("//server/share", limits()).unwrap_err();
+        assert!(format!("{err}").contains("absolute"));
+    }
+
+    /// Tar-rs `extracting_malicious_tarball` corpus (CVE-2001-1267
+    /// et al. — see `tests/all.rs:768` in tar-rs). Tar's reaction is
+    /// to silently strip leading slashes and skip `..` entries; FCA's
+    /// posture is fail-closed — every entry MUST reject with a typed
+    /// `CryptoError::InvalidInput`. Loop-pin against the full byte set
+    /// so a future relaxation of the rejection is caught.
+    ///
+    /// See `notes/tar_rs_crosscheck.md` §5 for the cross-check finding.
+    #[test]
+    fn rejects_every_tar_rs_malicious_path() {
+        let corpus: &[&str] = &[
+            "/tmp/abs_evil.txt",
+            "//tmp/abs_evil2.txt",
+            "///tmp/abs_evil3.txt",
+            "/./tmp/abs_evil4.txt",
+            "//./tmp/abs_evil5.txt",
+            "///./tmp/abs_evil6.txt",
+            "/../tmp/rel_evil.txt",
+            "../rel_evil2.txt",
+            "./../rel_evil3.txt",
+            "some/../../rel_evil4.txt",
+            "",
+            "././//./..",
+            "..",
+            "/////////..",
+            "/////////",
+        ];
+        for path in corpus {
+            let result = validate_fca_path(path, limits());
+            assert!(
+                result.is_err(),
+                "tar-rs malicious path {path:?} MUST reject (FCA fails closed; tar silently strips)",
+            );
+            // Confirm it's a typed `InvalidInput`, not a panic or
+            // unrelated error class.
+            assert!(
+                matches!(result.unwrap_err(), CryptoError::InvalidInput(_)),
+                "tar-rs malicious path {path:?} must reject as InvalidInput",
+            );
+        }
+    }
 }

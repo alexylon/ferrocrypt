@@ -67,6 +67,13 @@ name = "fuzz_fca_manifest"
 path = "fuzz_targets/fuzz_fca_manifest.rs"
 doc = false
 
+# ─── Full-pipeline target (slower; covers post-parse extraction) ────────
+
+[[bin]]
+name = "fuzz_fca_full_pipeline"
+path = "fuzz_targets/fuzz_fca_full_pipeline.rs"
+doc = false
+
 [[bin]]
 name = "fuzz_recipient_decode"
 path = "fuzz_targets/fuzz_recipient_decode.rs"

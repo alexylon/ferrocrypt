@@ -832,7 +832,7 @@ The reader pipeline matches spec §16.1 (steps 1–5 MUST complete before any fi
 10. verify archive EOF (no trailing bytes);
 11. apply descendant directory modes deepest-first;
 12. promote `{root}.incomplete` to `{root}` via no-clobber rename;
-13. apply the root directory's stored mode AFTER promotion (macOS compatibility — see spec §16.3).
+13. apply the root entry's stored mode AFTER promotion. For directory roots this is macOS compatibility (a non-search-permitted root mode would block the rename); for regular-file roots this prevents a permissive manifest mode (e.g. `0o644`) from being briefly visible at the staged or final name while the file still holds plaintext.
 
 `unarchive` accepts an [`IncompleteOutputPolicy`] from the caller. The default ([`IncompleteOutputPolicy::DeleteOnError`]) best-effort removes the staged `.incomplete` working tree on any decrypt failure; [`IncompleteOutputPolicy::RetainOnError`] preserves it. Cleanup tracks only roots THIS run created — `mkdir_strict` / `create_file_at` push `created_incomplete_roots` only when they actually created the working name, so a pre-existing `.incomplete` from a prior failed run rejects with `Previous .incomplete exists` and is preserved across the retry. Cleanup helper `cleanup_incomplete_path` routes by `symlink_metadata` (symlinks removed as symlinks; directories via `remove_dir_all`, which since Rust 1.71 is TOCTOU-hardened on Unix and does not follow descendant symlinks) and swallows all I/O errors so the original `CryptoError` is the value the caller sees.
 
@@ -851,7 +851,7 @@ It contains:
 - `finalize_dir_open` — Windows-only `FILE_ATTRIBUTE_REPARSE_POINT` post-check called after every successful directory open, so junctions / mount points fail closed (cap-fs-ext alone refuses entries where `is_symlink()` is true, but `is_symlink()` returns `false` for junctions — the bitmask post-check is what catches them);
 - `create_file_at` — `OpenOptions::create_new(true)` plus `OpenOptionsFollowExt::follow(FollowSymlinks::No)` for atomic O_EXCL-style create that refuses every leaf symlink, dangling or live;
 - `chmod_file_handle`, `chmod_dir_handle` — handle-based permission application; never path-based, so a substituted symlink between extract and chmod cannot redirect the operation. Special bits are stripped via `super::PERMISSION_BITS_MASK`;
-- `INITIAL_FILE_CREATE_MODE` — restrictive `0o600` initial mode applied at create time on Unix; the manifest-stored mode is applied after the payload is written. Effective on Unix only; ignored on Windows.
+- `INITIAL_FILE_CREATE_MODE` — restrictive `0o600` initial mode applied at create time on Unix. Descendant files are chmod'd to the manifest mode after the payload is written (inside the 0o700 staged root). Single-file roots stay at `0o600` throughout staging and across the rename, with the manifest mode applied post-rename via `decode::apply_root_file_mode` so a wider final mode is never briefly visible. Effective on Unix only; ignored on Windows.
 
 Path validation and filesystem writes remain separate so race-hardening logic is auditable.
 

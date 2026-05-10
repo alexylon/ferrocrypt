@@ -35,23 +35,37 @@ use cap_std::fs::{Dir, File, OpenOptions};
 use crate::CryptoError;
 
 /// Default mode passed to `mkdir` when creating a fresh extraction
-/// directory (rwx------). The manifest-stored directory mode is applied
-/// later via a handle-based chmod so a restrictive parent (e.g. 0o500)
-/// declared higher up in the archive doesn't block creation of its
-/// children. The temporary mode is owner-private on purpose: root
-/// directory chmods are deferred until after the `.incomplete` → final
-/// rename for macOS compatibility, so the working tree must not expose
-/// plaintext or wider group/other access while it is still staged.
-/// Unix-only — Windows ignores the mode arg.
+/// directory (rwx------). Applied atomically at create time on Unix via
+/// `cap_std::fs::DirBuilderExt::mode`, so the directory is never briefly
+/// world-traversable under a permissive process umask. The manifest-stored
+/// directory mode is applied later via a handle-based chmod so a
+/// restrictive parent (e.g. 0o500) declared higher up in the archive
+/// doesn't block creation of its children. The temporary mode is
+/// owner-private on purpose: root directory chmods are deferred until
+/// after the `.incomplete` → final rename for macOS compatibility, so
+/// the working tree must not expose plaintext or wider group/other
+/// access while it is still staged. Unix-only — Windows ignores the
+/// mode arg.
 #[cfg(unix)]
 const DIR_CREATE_MODE: u32 = 0o700;
 
 /// Initial mode for newly-created regular-file extraction outputs
-/// (rw-------). Restrictive on purpose: the manifest-stored mode is applied
-/// via a follow-up handle-based chmod only AFTER the payload has been
-/// written, so a wider mode is never briefly visible to other local
-/// users while the file holds plaintext. Effective on Unix only;
-/// Windows ignores the mode argument to `create_file_at`.
+/// (rw-------). Restrictive on purpose:
+///
+/// - **Descendant files** (inside a directory root) are chmod'd to the
+///   manifest-stored mode after the content write. They sit inside the
+///   0o700 staged root, so the wider final mode is never visible to
+///   other local users while the file holds plaintext.
+/// - **Single-file roots** stay at 0o600 throughout staging AND across
+///   the `.incomplete` → final rename. The manifest-stored mode is
+///   applied via a handle-based chmod AFTER the rename completes (see
+///   `decode::apply_root_file_mode`), so the file is never briefly
+///   visible to other local users at a wider mode. There is no
+///   protective parent directory in this case, hence the post-rename
+///   deferral.
+///
+/// Effective on Unix only; Windows ignores the mode argument to
+/// `create_file_at`.
 pub(crate) const INITIAL_FILE_CREATE_MODE: u32 = 0o600;
 
 /// `FILE_ATTRIBUTE_REPARSE_POINT` from `WinNT.h`. Stable Win32 ABI
@@ -97,11 +111,21 @@ pub(crate) fn open_anchor(path: &Path) -> Result<Dir, CryptoError> {
 #[cfg(windows)]
 fn reject_reparse_point(dir: &Dir, name: &OsStr) -> Result<(), CryptoError> {
     use cap_std::fs::MetadataExt;
-
     let meta = dir.dir_metadata().map_err(CryptoError::Io)?;
-    if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+    reject_reparse_attributes(meta.file_attributes(), name)
+}
+
+/// Single source of truth for the "is this entry a reparse point?"
+/// check shared by [`reject_reparse_point`] (directory handles) and
+/// [`finalize_file_open`] (regular-file handles). Takes the already-
+/// extracted `file_attributes` word so the helper stays type-agnostic
+/// — `cap_std::fs::Dir` and `cap_std::fs::File` expose attributes
+/// through different methods (`dir_metadata` vs `metadata`).
+#[cfg(windows)]
+fn reject_reparse_attributes(file_attributes: u32, name: &OsStr) -> Result<(), CryptoError> {
+    if file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(CryptoError::InvalidInput(format!(
-            "Symlink in extraction path: {}",
+            "{SYMLINK_IN_EXTRACTION_PATH}: {}",
             Path::new(name).display()
         )));
     }
@@ -182,13 +206,16 @@ pub(crate) fn mkdir_strict(parent: &Dir, name: &OsStr) -> Result<Dir, CryptoErro
     create_dir_with_default_mode(parent, name)
 }
 
-/// Internal: creates `name`, re-opens it with no-follow + the
-/// Windows reparse-point post-check, then applies the initial
-/// owner-private directory mode via the open handle. This keeps the
-/// "create with a safe temporary mode, apply manifest-stored mode later"
-/// behavior without ever chmod-ing through a re-resolved path.
+/// Internal: creates `name` with the initial owner-private directory
+/// mode applied atomically (Unix: `mkdir(0o700)` via cap-std's
+/// `DirBuilderExt::mode`, so a permissive process umask cannot leave
+/// the directory briefly world-traversable; Windows: ignored), then
+/// re-opens it with no-follow + the Windows reparse-point post-check.
+/// Keeps the "create with a safe temporary mode, apply manifest-stored
+/// mode later" behavior without ever chmod-ing through a re-resolved
+/// path.
 fn create_dir_with_default_mode(parent: &Dir, name: &OsStr) -> Result<Dir, CryptoError> {
-    parent.create_dir(name).map_err(CryptoError::Io)?;
+    create_dir_initial_mode(parent, name)?;
 
     let dir = parent.open_dir_nofollow(name).map_err(|e| {
         classify_open_failure(
@@ -199,20 +226,26 @@ fn create_dir_with_default_mode(parent: &Dir, name: &OsStr) -> Result<Dir, Crypt
             &Path::new(name).display().to_string(),
         )
     })?;
-    let dir = finalize_dir_open(dir, name)?;
-
-    set_initial_dir_mode(&dir)?;
-    Ok(dir)
+    finalize_dir_open(dir, name)
 }
 
+/// Atomic mkdir-with-mode on Unix; plain mkdir on non-Unix targets.
+/// Pinning the mode at create time (rather than mkdir + chmod) closes
+/// the umask race where a permissive `0o022` umask would briefly leave
+/// a fresh `.incomplete` directory at `0o755`.
 #[cfg(unix)]
-fn set_initial_dir_mode(dir: &Dir) -> Result<(), CryptoError> {
-    chmod_dir_via_self_path(dir, DIR_CREATE_MODE)
+fn create_dir_initial_mode(parent: &Dir, name: &OsStr) -> Result<(), CryptoError> {
+    use cap_std::fs::{DirBuilder, DirBuilderExt};
+    let mut builder = DirBuilder::new();
+    builder.mode(DIR_CREATE_MODE);
+    parent
+        .create_dir_with(name, &builder)
+        .map_err(CryptoError::Io)
 }
 
 #[cfg(not(unix))]
-fn set_initial_dir_mode(_dir: &Dir) -> Result<(), CryptoError> {
-    Ok(())
+fn create_dir_initial_mode(parent: &Dir, name: &OsStr) -> Result<(), CryptoError> {
+    parent.create_dir(name).map_err(CryptoError::Io)
 }
 
 /// Internal helper: applies a Unix mode to the directory `dir` refers to.
@@ -332,6 +365,48 @@ pub(crate) fn open_dir_at_rel(root: &Dir, rel: &Path) -> Result<Dir, CryptoError
         cur = finalize_dir_open(opened, name)?;
     }
     Ok(cur)
+}
+
+/// Opens an existing regular file under `parent` with no-follow + the
+/// Windows reparse-point post-check. File-side parallel of
+/// [`open_dir_at_rel`]; used by the post-rename root-file chmod
+/// (`decode::apply_root_file_mode`) so the chmod runs against a
+/// freshly-opened handle rather than through a re-resolved path. A
+/// symlink at that name aborts with the typed "Symlink in extraction
+/// path" diagnostic; on Windows, a reparse point at the name fails the
+/// same way via the post-check.
+pub(crate) fn open_file_nofollow(parent: &Dir, name: &OsStr) -> Result<File, CryptoError> {
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let file = parent.open_with(name, &options).map_err(|e| {
+        classify_open_failure(
+            parent,
+            name,
+            e,
+            SYMLINK_IN_EXTRACTION_PATH,
+            &Path::new(name).display().to_string(),
+        )
+    })?;
+    finalize_file_open(file, name)
+}
+
+/// Post-open finalize for a regular-file handle. On Windows, rejects
+/// reparse points (cap-fs-ext's `FollowSymlinks::No` translates to
+/// `FILE_FLAG_OPEN_REPARSE_POINT`, which would otherwise let an
+/// attacker-substituted symlink at the path open as a regular-file
+/// handle and have its bits flipped). No-op on Unix where the kernel's
+/// `O_NOFOLLOW` semantics already give the equivalent invariant.
+#[cfg(windows)]
+fn finalize_file_open(file: File, name: &OsStr) -> Result<File, CryptoError> {
+    use cap_std::fs::MetadataExt;
+    let meta = file.metadata().map_err(CryptoError::Io)?;
+    reject_reparse_attributes(meta.file_attributes(), name)?;
+    Ok(file)
+}
+
+#[cfg(not(windows))]
+fn finalize_file_open(file: File, _name: &OsStr) -> Result<File, CryptoError> {
+    Ok(file)
 }
 
 fn normal_component<'a>(component: Component<'a>, full: &Path) -> Result<&'a OsStr, CryptoError> {

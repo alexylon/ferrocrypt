@@ -1429,12 +1429,16 @@ Readers MUST process FCA archives in this order:
 10. create the staged root and directories under `{root}.incomplete` with the
     hardened filesystem backend;
 11. stream file bytes using exact-size copying;
-12. apply file modes by handle where supported;
+12. apply descendant file modes by handle where supported (the root entry's
+    mode is deferred to step 16);
 13. verify archive EOF immediately after the last encoded content byte;
 14. apply deferred directory modes deepest-first, except the root directory;
 15. promote `{root}.incomplete` to the final output name with no-clobber
     semantics;
-16. apply the root directory mode after promotion if needed;
+16. apply the root entry's mode after promotion. For directory roots this is a
+    macOS-compatibility requirement; for regular-file roots this prevents the
+    staged file from being briefly visible at a wider mode under either the
+    `.incomplete` name or the final name while it still holds plaintext;
 17. return the final output path.
 
 Steps 1 through 8 MUST complete before any filesystem output is created.
@@ -1540,8 +1544,10 @@ fail closed when required support is absent.
 
 On Unix, implementations SHOULD restore regular-file modes by handle where
 supported and SHOULD apply directory modes after child creation. Directory modes
-are applied deepest-first, and the root directory mode is applied after final
-promotion to preserve behavior when the root mode lacks search permission.
+are applied deepest-first. The root entry's mode is applied after final
+promotion: for directory roots this preserves behavior when the root mode lacks
+search permission, and for regular-file roots this prevents the staged file
+from being briefly visible at a wider mode while it still holds plaintext.
 
 On Windows, Unix permission restoration is a no-op or best-effort compatibility
 operation. Windows implementations MUST preserve the path and reparse-point

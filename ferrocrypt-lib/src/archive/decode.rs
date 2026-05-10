@@ -21,12 +21,17 @@
 //! 10. create `{root}.incomplete` (file or directory) under the
 //!     hardened cap-std backend
 //! 11. stream file contents in manifest order via `copy_exact_n`
-//! 12. apply file modes by handle where supported
+//! 12. apply descendant file modes by handle where supported (root
+//!     file mode is deferred to step 16 — see below)
 //! 13. verify archive EOF (no trailing bytes)
 //! 14. apply descendant directory modes deepest-first
 //! 15. promote `{root}.incomplete` to `{root}` via no-clobber rename
-//! 16. apply the root directory's stored mode AFTER promotion (macOS
-//!     compatibility — see FORMAT.md §9.11)
+//! 16. apply the root entry's stored mode AFTER promotion. For
+//!     directory roots: macOS compatibility (a non-search-permitted
+//!     root mode would block the rename). For file roots: keep the
+//!     staged file at `INITIAL_FILE_CREATE_MODE` throughout staging
+//!     so a permissive manifest mode is never briefly visible to
+//!     other local users while the file holds plaintext.
 //! 17. return the final output path
 //!
 //! Steps 1–8 MUST complete before any filesystem output is created.
@@ -159,15 +164,29 @@ fn unarchive_inner<R: Read>(
         map_already_exists(CryptoError::Io(e), "Output already exists", &final_path)
     })?;
 
-    // FORMAT.md §9.11 step 16: apply root directory mode AFTER promotion. macOS
-    // can refuse to rename a directory whose mode lacks search
-    // permission, so the root .incomplete stayed at the initial 0o700
-    // (search-permitted owner-only) mode through extraction. Re-anchor
-    // at output_dir and walk to the renamed root via `open_dir_at_rel`,
-    // which routes through `open_dir_nofollow` + Windows reparse-point
-    // post-check — a symlink substituted at the final name between
-    // rename and chmod is rejected here.
-    if !manifest.root_is_file {
+    // FORMAT.md §9.11 step 16: apply root entry mode AFTER promotion.
+    //
+    // Directory roots: macOS can refuse to rename a directory whose
+    // mode lacks search permission, so the root `.incomplete` stayed
+    // at the initial 0o700 (search-permitted owner-only) mode through
+    // extraction. Re-anchor at `output_dir` and walk to the renamed
+    // root via `open_dir_at_rel`, which routes through
+    // `open_dir_nofollow` + Windows reparse-point post-check — a
+    // symlink substituted at the final name between rename and chmod
+    // is rejected here.
+    //
+    // File roots: the staged `.incomplete` file stayed at
+    // `INITIAL_FILE_CREATE_MODE` (0o600) throughout content streaming
+    // and across the rename, so a permissive manifest mode (e.g.
+    // 0o644) is never briefly visible to other local users while the
+    // file holds plaintext under either the `.incomplete` name or
+    // (post-rename, pre-chmod) the final name. The post-rename
+    // re-open uses `open_file_nofollow` so a symlink substituted at
+    // the final name between rename and chmod is rejected the same
+    // way as for directory roots.
+    if manifest.root_is_file {
+        apply_root_file_mode(output_dir, &manifest)?;
+    } else {
         apply_root_directory_mode(output_dir, &manifest)?;
     }
 
@@ -202,11 +221,13 @@ fn extract_single_file_root<R: Read>(
     created_incomplete_roots.push(manifest.root_name.clone());
 
     copy_exact_n(reader, &mut outfile, entry.size)?;
-    platform::chmod_file_handle(&outfile, entry.mode)?;
 
     // FORMAT.md §9.11 step 13: verify archive EOF — no byte may follow
     // the last declared file content. Single-file root has no descendant
-    // chmod pass, so this directly precedes the caller's rename (step 15).
+    // chmod pass, and the manifest-stored mode is applied post-rename
+    // by `apply_root_file_mode` (FORMAT.md §9.11 step 16), so the
+    // staged file stays at `INITIAL_FILE_CREATE_MODE` through this
+    // EOF check and across the rename.
     verify_archive_eof(reader)
 }
 
@@ -289,6 +310,20 @@ fn apply_root_directory_mode(output_dir: &Path, manifest: &Manifest) -> Result<(
     let output_handle = platform::open_anchor(output_dir)?;
     let root_dir = platform::open_dir_at_rel(&output_handle, Path::new(root_name_str))?;
     platform::chmod_dir_handle(root_dir, manifest.root_mode)
+}
+
+/// File-root parallel of [`apply_root_directory_mode`]. Re-anchors at
+/// `output_dir`, opens the renamed root file via `open_file_nofollow`
+/// (no-follow + Windows reparse-point post-check), and applies the
+/// manifest-stored mode through the open handle. Runs only after
+/// `rename_no_clobber` succeeds, so the staged file held
+/// `INITIAL_FILE_CREATE_MODE` (0o600) throughout extraction; a
+/// permissive manifest mode is never briefly visible to other local
+/// users while the file holds plaintext.
+fn apply_root_file_mode(output_dir: &Path, manifest: &Manifest) -> Result<(), CryptoError> {
+    let output_handle = platform::open_anchor(output_dir)?;
+    let file = platform::open_file_nofollow(&output_handle, &manifest.root_name)?;
+    platform::chmod_file_handle(&file, manifest.root_mode)
 }
 
 /// FORMAT.md §9.9: rejects any non-EOF byte after the last declared
@@ -1243,6 +1278,32 @@ mod tests {
         );
     }
 
+    /// File-root parallel of [`apply_root_directory_mode_rejects_symlink_at_renamed_root`].
+    /// Symlink substituted at the renamed root between `rename_no_clobber`
+    /// and `apply_root_file_mode`: the chmod step MUST reject via
+    /// `open_file_nofollow`'s no-follow open. Inject the post-rename
+    /// state directly (deterministic test of the same race the
+    /// multithreaded path would observe).
+    #[cfg(unix)]
+    #[test]
+    fn apply_root_file_mode_rejects_symlink_at_renamed_root() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let real = tmp.path().join("real_file");
+        fs::write(&real, b"victim").unwrap();
+
+        // Symlink at the position the renamed root would have.
+        symlink(&real, tmp.path().join("hello.txt")).unwrap();
+
+        let manifest = single_file_manifest("hello.txt", b"x");
+        let err = apply_root_file_mode(tmp.path(), &manifest).unwrap_err();
+        assert!(
+            format!("{err}").contains("Symlink in extraction path"),
+            "expected symlink rejection, got: {err}",
+        );
+    }
+
     /// `RetainOnError` keeps the staging-default root mode (0o700),
     /// NOT the manifest's `root_mode`. Pin that root chmod is
     /// strictly a post-rename step: a failed extraction (no rename)
@@ -1277,6 +1338,51 @@ mod tests {
             mode, 0o700,
             "retained .incomplete must keep staging default 0o700, not manifest 0o{:o}",
             manifest.root_mode,
+        );
+    }
+
+    /// Single-file root parallel of [`retain_on_error_staged_root_keeps_default_mode`].
+    /// Pin that the staged `.incomplete` FILE is held at
+    /// `INITIAL_FILE_CREATE_MODE` (0o600) until AFTER promotion — a
+    /// failed extraction (no rename) MUST NOT leak a permissive
+    /// manifest mode onto the staged plaintext.
+    ///
+    /// The trigger is "successful content streaming followed by
+    /// trailing data": old buggy ordering ran `chmod_file_handle`
+    /// between the streaming success and the EOF check, so the
+    /// staged `.incomplete` file ended up at the manifest mode
+    /// (0o644 below) before the EOF check tripped. Post-fix the
+    /// chmod is deferred to `apply_root_file_mode` after rename, so
+    /// the staged file stays at 0o600 across this failure.
+    #[cfg(unix)]
+    #[test]
+    fn retain_on_error_staged_file_keeps_default_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Manifest declares 0o644 so the staged 0o600 vs the manifest
+        // mode are clearly distinguishable.
+        let manifest = single_file_manifest("hello.txt", b"payload");
+        let mut archive = build_archive(&manifest, &[("hello.txt", b"payload")]);
+        // Append a byte so `verify_archive_eof` fails AFTER content
+        // streaming completes — the exact ordering window the
+        // pre-fix bug exposed.
+        archive.push(0xFFu8);
+
+        let err = unarchive_with_policy(archive, tmp.path(), IncompleteOutputPolicy::RetainOnError)
+            .unwrap_err();
+        assert!(format!("{err}").contains("Trailing data"));
+
+        let staged = tmp.path().join("hello.txt.incomplete");
+        assert!(
+            staged.exists(),
+            "RetainOnError must keep staged .incomplete"
+        );
+        let mode = fs::metadata(&staged).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "retained .incomplete must keep staging default 0o600, not manifest 0o{:o}",
+            manifest.entries[0].mode,
         );
     }
 

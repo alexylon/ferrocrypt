@@ -1205,8 +1205,11 @@ mod tests {
 
     /// Source file mode round-trips through the archive intact (rwx
     /// bits only — special bits stripped per FORMAT.md §9.10). Pins
-    /// `archive_file_mode` on the writer side and
-    /// `chmod_file_handle` post-copy on the reader side.
+    /// `archive_file_mode` on the writer side and `chmod_file_handle`
+    /// on the reader side. For a single-file root the reader-side
+    /// chmod runs post-rename via `apply_root_file_mode` (FORMAT.md
+    /// §9.11 step 16); descendant-file chmods run post-copy inside
+    /// the staged 0o700 root.
     #[cfg(unix)]
     #[test]
     fn round_trip_preserves_file_mode() {

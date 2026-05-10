@@ -256,7 +256,7 @@ pub(crate) trait RecipientScheme {
     ) -> Result<RecipientBody, CryptoError>;
 }
 
-pub(crate) trait IdentityScheme {
+pub(crate) trait DecryptionCredential {
     const TYPE_NAME: &'static str;
     const EXPECTED_MODE: UnauthenticatedRecipientMode;
 
@@ -351,7 +351,7 @@ Diagnostic rules:
 
 - A passphrase recipient open failure means “wrong passphrase or recipient entry tampered,” not definitely “incorrect passphrase”.
 - A private-key unlock failure means “wrong passphrase or private key file tampered,” not definitely one or the other.
-- An X25519 recipient failure means “no matching identity, wrong key, or recipient entry tampered,” unless a later authenticated step proves a more specific class.
+- An X25519 recipient failure means “no matching credential, wrong key, or recipient entry tampered,” unless a later authenticated step proves a more specific class.
 - A header MAC failure after recovering a candidate `FileKey` means the recovered key did not authenticate the header. It does not by itself prove whether the credential, recipient body, or header bytes were modified.
 
 Public error names may be compatibility-oriented, but their display text must preserve this ambiguity.
@@ -588,7 +588,7 @@ It contains:
 - scheme-specific validation;
 - emission of `ProgressEvent::DerivingPassphraseWrapKey` at the actual Argon2id call boundary (after structural validation and `KdfLimit` resource-cap checks have passed, immediately before `derive_passphrase_wrap_key`);
 - `RecipientScheme` implementation;
-- `IdentityScheme` implementation for a passphrase identity;
+- `DecryptionCredential` implementation for a passphrase credential;
 - tests and vectors for the native passphrase scheme.
 
 It does not:
@@ -609,14 +609,14 @@ It contains:
 - X25519 recipient body layout;
 - X25519 recipient body length validation;
 - ephemeral key handling;
-- all-zero shared-secret rejection (file-fatal `InvalidFormat(MalformedRecipientEntry)` on the decrypt side per `FORMAT.md` §2.4 / §4.2; the identity adapter propagates it instead of collapsing to the slot-skip channel reserved for AEAD failures);
+- all-zero shared-secret rejection (file-fatal `InvalidFormat(MalformedRecipientEntry)` on the decrypt side per `FORMAT.md` §2.4 / §4.2; the credential adapter propagates it instead of collapsing to the slot-skip channel reserved for AEAD failures);
 - wrap-key derivation;
 - file-key seal/open logic;
 - X25519 key-pair generation logic;
 - public-key recipient conversion for X25519;
 - private-key unlock glue for X25519 (`open_x25519_private_key`), which threads `&dyn Fn(&ProgressEvent)` into `key::private::open_private_key` so the `UnlockingPrivateKey` event fires at the actual Argon2id boundary, not at this wrapper;
 - `RecipientScheme` implementation (ignores the progress callback — X25519 wrap is sub-millisecond);
-- `IdentityScheme` implementation (ignores the progress callback — X25519 unwrap is sub-millisecond, and the expensive `private.key` Argon2id ran before the slot loop in `open_x25519_private_key`);
+- `DecryptionCredential` implementation (ignores the progress callback — X25519 unwrap is sub-millisecond, and the expensive `private.key` Argon2id ran before the slot loop in `open_x25519_private_key`);
 - tests and vectors for the native X25519 scheme.
 
 It does not own the generic `private.key` binary layout. Generic private-key file structure belongs to `key/private.rs`.
@@ -970,7 +970,7 @@ Adding a new cap or wire-format rule = add the field/constant on the source-of-t
 #[non_exhaustive]
 pub enum Decryptor {
     Passphrase(PassphraseDecryptor),
-    Recipient(PrivateKeyDecryptor),
+    PrivateKey(PrivateKeyDecryptor),
 }
 
 impl Decryptor {
@@ -1205,7 +1205,7 @@ Use wording such as:
 
 - “wrong passphrase or tampered recipient entry”;
 - “private key passphrase is wrong or the private key file was tampered with”;
-- “no matching identity or recipient entry was modified”;
+- “no matching credential or recipient entry was modified”;
 - “header authenticated by a recovered file key failed verification”.
 
 Do not use names or display messages that imply FerroCrypt can distinguish wrong credentials from tampering when the AEAD or HMAC result cannot prove that distinction.

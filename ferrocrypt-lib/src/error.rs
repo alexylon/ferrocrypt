@@ -303,9 +303,9 @@ pub enum CryptoError {
     /// so callers using the public surface cannot reach this error. It is
     /// reserved for internal callers and any future plugin-style API
     /// where a caller drives `protocol::decrypt` directly with a chosen
-    /// identity scheme.
+    /// credential scheme.
     ///
-    /// `expected` is the mode the decryptor expected (its identity-scheme
+    /// `expected` is the mode the decryptor expected (its credential-scheme
     /// mode); `found` is the mode classified from the file's recipient
     /// list. Distinct from [`Self::NoSupportedRecipient`], which means
     /// "the file's recipient list contains no entry I can unlock,"

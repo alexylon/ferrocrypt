@@ -228,8 +228,8 @@ generate it as 32 random bytes. The X25519 operation applies RFC 7748 clamping
 when computing public keys or shared secrets.
 
 ```text
-recipient_pubkey = X25519(private_key_material, basepoint)
-shared           = X25519(private_or_ephemeral_scalar, peer_public_key)
+recipient_public_key_bytes = X25519(private_key_material, basepoint)
+shared                     = X25519(private_or_ephemeral_scalar, peer_public_key)
 ```
 
 X25519 recipient creation and opening MUST reject an all-zero `shared` value.
@@ -589,7 +589,7 @@ Body length: exactly 104 bytes.
 
 | Offset | Size | Field |
 |---:|---:|---|
-| 0 | 32 | `ephemeral_pubkey` |
+| 0 | 32 | `ephemeral_public_key_bytes` |
 | 32 | 24 | `wrap_nonce` |
 | 56 | 48 | `wrapped_file_key` |
 
@@ -597,15 +597,15 @@ Wrapping:
 
 ```text
 ephemeral_secret = random 32-byte X25519 scalar input
-ephemeral_pubkey = X25519(ephemeral_secret, basepoint)
-shared           = X25519(ephemeral_secret, recipient_pubkey)
+ephemeral_public_key_bytes = X25519(ephemeral_secret, basepoint)
+shared           = X25519(ephemeral_secret, recipient_public_key_bytes)
 ```
 
 If `shared` is all zero bytes, writers MUST reject and retry or fail.
 
 ```text
 wrap_key = HKDF-SHA3-256(
-    salt = ephemeral_pubkey || recipient_pubkey,
+    salt = ephemeral_public_key_bytes || recipient_public_key_bytes,
     ikm  = shared,
     info = "ferrocrypt/v1/recipient/x25519/wrap",
     L    = 32,
@@ -622,17 +622,17 @@ wrapped_file_key = XChaCha20-Poly1305-Seal(
 Opening:
 
 ```text
-shared = X25519(recipient_secret, ephemeral_pubkey)
+shared = X25519(private_key_bytes, ephemeral_public_key_bytes)
 ```
 
 Readers MUST reject this recipient if `shared` is all zero bytes. Readers derive
-the same `wrap_key` using the public key corresponding to `recipient_secret`:
+the same `wrap_key` using the public key corresponding to `private_key_bytes`:
 
 ```text
-recipient_pubkey = X25519(recipient_secret, basepoint)
+recipient_public_key_bytes = X25519(private_key_bytes, basepoint)
 
 wrap_key = HKDF-SHA3-256(
-    salt = ephemeral_pubkey || recipient_pubkey,
+    salt = ephemeral_public_key_bytes || recipient_public_key_bytes,
     ikm  = shared,
     info = "ferrocrypt/v1/recipient/x25519/wrap",
     L    = 32,
@@ -896,7 +896,7 @@ Native X25519 public recipients:
 ```text
 type_name        = "x25519"
 key_material_len = 32
-key_material     = recipient_pubkey
+key_material     = recipient_public_key_bytes
 ```
 
 Readers MUST reject X25519 public recipients whose key material length is not

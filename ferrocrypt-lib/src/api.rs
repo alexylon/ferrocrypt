@@ -369,14 +369,14 @@ impl Encryptor {
                 // Resolve each PublicKey to its 32-byte material once.
                 // The local Vec owns the bytes; X25519Recipient borrows
                 // from it for the lifetime of this match arm.
-                let pubkey_bytes_vec: Vec<[u8; 32]> = public_keys
+                let public_key_bytes_vec: Vec<[u8; 32]> = public_keys
                     .iter()
                     .map(|pk| pk.to_bytes())
                     .collect::<Result<_, _>>()?;
-                let recipients: Vec<recipient::x25519::X25519Recipient> = pubkey_bytes_vec
+                let recipients: Vec<recipient::x25519::X25519Recipient> = public_key_bytes_vec
                     .iter()
                     .map(|bytes| recipient::x25519::X25519Recipient {
-                        recipient_pubkey: bytes,
+                        recipient_public_key_bytes: bytes,
                     })
                     .collect();
                 protocol::encrypt(
@@ -576,7 +576,7 @@ impl PassphraseDecryptor {
         on_event: impl Fn(&ProgressEvent),
     ) -> Result<DecryptOutcome, CryptoError> {
         validate_passphrase(&passphrase)?;
-        let identity = recipient::argon2id::PassphraseIdentity {
+        let credential = recipient::argon2id::PassphraseCredential {
             passphrase: &passphrase,
             kdf_limit: self.kdf_limit.as_ref(),
         };
@@ -591,7 +591,7 @@ impl PassphraseDecryptor {
         // valid `argon2id` body whose `kdf_params` are within the
         // resource cap — i.e. immediately before Argon2id actually runs.
         let output_path = protocol::decrypt(
-            &identity,
+            &credential,
             &self.input,
             output_dir.as_ref(),
             archive_limits,
@@ -701,18 +701,18 @@ impl PrivateKeyDecryptor {
         // `UnlockingPrivateKey` from inside
         // `key::private::open_private_key`. A malformed or wrong-type
         // key file is rejected with no event fired.
-        let recipient_secret = recipient::native::x25519::open_x25519_private_key(
+        let private_key_bytes = recipient::native::x25519::open_x25519_private_key(
             private_key.key_file_path(),
             &private_key_passphrase,
             self.kdf_limit.as_ref(),
             &on_event,
         )?;
-        let identity_scheme = recipient::x25519::X25519Identity { recipient_secret };
+        let decryption_credential = recipient::x25519::X25519Credential { private_key_bytes };
         let archive_limits = self.archive_limits.unwrap_or_default();
         let header_read_limits = self.header_read_limits.unwrap_or_default();
         let incomplete_output_policy = self.incomplete_output_policy.unwrap_or_default();
         let output_path = protocol::decrypt(
-            &identity_scheme,
+            &decryption_credential,
             &self.input,
             output_dir.as_ref(),
             archive_limits,

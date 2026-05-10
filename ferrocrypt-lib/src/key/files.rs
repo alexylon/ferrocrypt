@@ -106,17 +106,17 @@ mod tests {
         // Real public.key text → Public.
         let tmp = tempfile::TempDir::new().unwrap();
         let pass = SecretString::from("kp".to_string());
-        let (privkey_path, pubkey_path, _fingerprint) = crate::protocol::generate_key_pair(
+        let (private_key_path, public_key_path, _fingerprint) = crate::protocol::generate_key_pair(
             &pass,
             &crate::crypto::kdf::KdfParams::test_fast_default(),
             tmp.path(),
             &|_| {},
         )?;
-        let pub_bytes = fs::read(&pubkey_path)?;
+        let pub_bytes = fs::read(&public_key_path)?;
         assert_eq!(KeyFileKind::classify(&pub_bytes), KeyFileKind::Public);
 
         // Real private.key binary → Private.
-        let priv_bytes = fs::read(&privkey_path)?;
+        let priv_bytes = fs::read(&private_key_path)?;
         assert_eq!(KeyFileKind::classify(&priv_bytes), KeyFileKind::Private);
 
         // Magic + future version + type K (a v2 private.key) → Private.

@@ -556,7 +556,7 @@ mod tests {
     /// canonical decoder (e.g. inlining the bech32 path) cannot let a
     /// degenerate value through this surface.
     #[test]
-    fn decode_recipient_rejects_all_zero_pubkey() {
+    fn decode_recipient_rejects_all_zero_public_key() {
         let s =
             key::public::encode_recipient_string(recipient::x25519::TYPE_NAME, &[0u8; 32]).unwrap();
         match decode_recipient_string(&s) {

@@ -12,7 +12,7 @@
 //! 8. emitting progress events.
 //!
 //! Algorithm-specific logic plugs in via the [`RecipientScheme`] /
-//! [`IdentityScheme`] traits — both `pub(crate)`. Recipient modules
+//! [`DecryptionCredential`] traits — both `pub(crate)`. Recipient modules
 //! produce / consume opaque [`RecipientBody`] bytes; only this module
 //! constructs full headers or verifies the header MAC.
 //!
@@ -85,7 +85,7 @@ pub(crate) trait RecipientScheme {
 
 /// Decrypt-side scheme: try to unwrap a candidate [`FileKey`] from a
 /// recipient body whose `type_name` already matched
-/// `IdentityScheme::TYPE_NAME` — the orchestrator pre-filters slots
+/// `DecryptionCredential::TYPE_NAME` — the orchestrator pre-filters slots
 /// before calling this.
 ///
 /// Return shape:
@@ -103,12 +103,12 @@ pub(crate) trait RecipientScheme {
 /// `argon2id`) emit [`ProgressEvent::DerivingPassphraseWrapKey`] at the
 /// actual KDF call site. Schemes whose unwrap is cheap (X25519: one
 /// scalar mult + one HKDF, sub-millisecond) MUST ignore the parameter.
-pub(crate) trait IdentityScheme {
+pub(crate) trait DecryptionCredential {
     const TYPE_NAME: &'static str;
-    /// File mode this identity scheme can decrypt. Used by the
+    /// File mode this credential scheme can decrypt. Used by the
     /// orchestrator to surface a typed
     /// [`CryptoError::DecryptorModeMismatch`] when a caller drives
-    /// `decrypt` with the wrong identity for the file's recipient list.
+    /// `decrypt` with the wrong credential for the file's recipient list.
     const EXPECTED_MODE: UnauthenticatedRecipientMode;
 
     fn unwrap_file_key(
@@ -253,7 +253,7 @@ fn build_native_entry(
 
 // ─── Decrypt ───────────────────────────────────────────────────────────────
 
-/// Decrypts `input_path` using the supplied identity scheme.
+/// Decrypts `input_path` using the supplied credential scheme.
 ///
 /// Iterates every supported recipient slot in declared order before
 /// emitting a final verdict. The slot loop is identical for the
@@ -263,8 +263,8 @@ fn build_native_entry(
 /// match, makes wall-clock cost a function of `recipient_count`
 /// (capped by `HeaderReadLimits`) rather than of which slot matched,
 /// per the `FORMAT.md` §3.7 SHOULD-level mitigation.
-pub(crate) fn decrypt<I: IdentityScheme>(
-    identity: &I,
+pub(crate) fn decrypt<I: DecryptionCredential>(
+    credential: &I,
     input_path: &Path,
     output_dir: &Path,
     archive_limits: ArchiveLimits,
@@ -287,7 +287,7 @@ pub(crate) fn decrypt<I: IdentityScheme>(
 
     // Cross-mode mismatch: caller invoked the passphrase decrypt path
     // on a recipient-only file (or vice versa). The classified mode
-    // does not match the identity's scheme. Surfaces as a typed
+    // does not match the credential's scheme. Surfaces as a typed
     // `DecryptorModeMismatch` rather than `NoSupportedRecipient`, which
     // would imply "the loop iterated and found nothing" — misleading
     // when the real cause is "wrong tool for this file." The public
@@ -328,7 +328,7 @@ pub(crate) fn decrypt<I: IdentityScheme>(
                 crate::error::FormatDefect::MalformedRecipientEntry,
             ));
         }
-        let file_key = match identity.unwrap_file_key(&entry.body, on_event)? {
+        let file_key = match credential.unwrap_file_key(&entry.body, on_event)? {
             Some(k) => k,
             None => continue,
         };
@@ -397,11 +397,11 @@ pub(crate) fn decrypt<I: IdentityScheme>(
     )
 }
 
-/// Verifies that the classified file mode matches the identity scheme's
-/// declared [`IdentityScheme::EXPECTED_MODE`]. On mismatch, returns a
+/// Verifies that the classified file mode matches the credential scheme's
+/// declared [`DecryptionCredential::EXPECTED_MODE`]. On mismatch, returns a
 /// typed [`CryptoError::DecryptorModeMismatch`] carrying both modes so
 /// the caller can pattern-match without comparing strings.
-fn check_mode_matches_scheme<I: IdentityScheme>(
+fn check_mode_matches_scheme<I: DecryptionCredential>(
     mode: UnauthenticatedRecipientMode,
 ) -> Result<(), CryptoError> {
     if mode == I::EXPECTED_MODE {
@@ -520,7 +520,9 @@ pub(crate) fn generate_key_pair(
     // Write public.key (text file, `fcr1…\n`). Public key isn't secret
     // so permissions relax to 0o644 on Unix.
     let mut public_builder = tempfile::Builder::new();
-    public_builder.prefix(".ferrocrypt-pubkey-").suffix(".tmp");
+    public_builder
+        .prefix(".ferrocrypt-public_key-")
+        .suffix(".tmp");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -540,7 +542,7 @@ pub(crate) fn generate_key_pair(
     let private_write: Result<(), CryptoError> = (|| {
         let mut private_builder = tempfile::Builder::new();
         private_builder
-            .prefix(".ferrocrypt-privkey-")
+            .prefix(".ferrocrypt-private_key-")
             .suffix(".tmp");
         #[cfg(unix)]
         {
@@ -676,30 +678,31 @@ mod tests {
         let pass = SecretString::from(pass.to_string());
         let dir = keys_dir.join(label);
         fs::create_dir_all(&dir)?;
-        let (privkey_path, pubkey_path, _fingerprint) = generate_key_pair(
+        let (private_key_path, public_key_path, _fingerprint) = generate_key_pair(
             &pass,
             &crate::crypto::kdf::KdfParams::test_fast_default(),
             &dir,
             &|_| {},
         )?;
-        let pub_bytes = read_public_key(&pubkey_path)?.bytes;
-        Ok((pub_bytes, privkey_path, pass))
+        let pub_bytes = read_public_key(&public_key_path)?.bytes;
+        Ok((pub_bytes, private_key_path, pass))
     }
 
     /// Decrypt helper: opens the X25519 `private.key`, builds an
-    /// `X25519Identity`, and runs the orchestrator's slot loop directly
+    /// `X25519Credential`, and runs the orchestrator's slot loop directly
     /// (mirrors what `PrivateKeyDecryptor::decrypt` does in `api.rs` but
     /// preserves raw error variants for assertion).
     fn recipient_decrypt(
         fcr: &Path,
         dec_dir: &Path,
-        privkey_path: &Path,
+        private_key_path: &Path,
         pass: &SecretString,
     ) -> Result<PathBuf, CryptoError> {
-        let recipient_secret = x25519::open_x25519_private_key(privkey_path, pass, None, &|_| {})?;
-        let identity = x25519::X25519Identity { recipient_secret };
+        let private_key_bytes =
+            x25519::open_x25519_private_key(private_key_path, pass, None, &|_| {})?;
+        let credential = x25519::X25519Credential { private_key_bytes };
         decrypt(
-            &identity,
+            &credential,
             fcr,
             dec_dir,
             ArchiveLimits::default(),
@@ -731,10 +734,10 @@ mod tests {
         let fcr = tmp.path().join("multi.fcr");
         build_multi_recipient_fcr(&entries, &file_key, payload, &fcr)?;
 
-        for (label, privkey, pass) in [("alice", &priv_a, &pass_a), ("bob", &priv_b, &pass_b)] {
+        for (label, private_key, pass) in [("alice", &priv_a, &pass_a), ("bob", &priv_b, &pass_b)] {
             let dec_dir = tmp.path().join(format!("decrypted-{label}"));
             fs::create_dir_all(&dec_dir)?;
-            recipient_decrypt(&fcr, &dec_dir, privkey, pass)?;
+            recipient_decrypt(&fcr, &dec_dir, private_key, pass)?;
             let restored = fs::read(dec_dir.join("data.txt"))?;
             assert_eq!(
                 restored, payload,
@@ -783,7 +786,7 @@ mod tests {
 
     /// FORMAT.md §2.4 / §4.2: an `x25519` recipient slot whose ECDH
     /// shared secret is all-zero MUST cause file-fatal rejection, not
-    /// slot-skip — the all-zero shared is identity-independent
+    /// slot-skip — the all-zero shared is credential-independent
     /// (every decryptor observes the same value), so it cannot be
     /// confused with "this slot was for someone else." The decrypt
     /// loop must reject the whole file even when an earlier valid
@@ -799,7 +802,7 @@ mod tests {
         let valid_slot = RecipientEntry::native(NativeRecipientType::X25519, body_a.to_vec())?;
 
         // Hand-craft a malformed `x25519` body: literal all-zero
-        // ephemeral pubkey forces an all-zero ECDH shared secret per
+        // ephemeral public_key forces an all-zero ECDH shared secret per
         // RFC 7748 regardless of the recipient's private key. The rest
         // of the body is filler — the rejection fires before AEAD.
         let mut malformed_body = vec![0u8; x25519::BODY_LENGTH];
@@ -1021,7 +1024,7 @@ mod tests {
     /// MAC and payload are keyed off a *different* real `file_key`.
     /// Alice's private key unwraps slot A successfully (yielding the
     /// decoy), but the resulting `header_key` does not verify the MAC.
-    /// Slot B targets bob, so alice's privkey fails to unwrap it. The
+    /// Slot B targets bob, so alice's private_key fails to unwrap it. The
     /// decrypt loop must surface `HeaderMacFailedAfterUnwrap`.
     #[test]
     fn multi_x25519_decoy_unwrap_returns_mac_failed_after_unwrap() -> Result<(), CryptoError> {
@@ -1099,7 +1102,7 @@ mod tests {
     }
 
     /// Cross-mode mismatch: a passphrase-only file is opened with an
-    /// `X25519Identity`. The orchestrator must surface
+    /// `X25519Credential`. The orchestrator must surface
     /// `DecryptorModeMismatch { expected: PublicKey, found: Passphrase }`
     /// before any slot loop runs — never the legacy
     /// `NoSupportedRecipient`, which would imply "the loop iterated and
@@ -1107,7 +1110,7 @@ mod tests {
     /// can't reach this branch; the test invokes `protocol::decrypt`
     /// directly to lock in the wording for internal/plugin callers.
     #[test]
-    fn decrypt_rejects_passphrase_file_with_x25519_identity() -> Result<(), CryptoError> {
+    fn decrypt_rejects_passphrase_file_with_x25519_credential() -> Result<(), CryptoError> {
         let tmp = tempfile::TempDir::new().unwrap();
         let keys_dir = tmp.path().join("keys");
         let (_pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
@@ -1140,10 +1143,10 @@ mod tests {
     }
 
     /// Cross-mode mismatch in the reverse direction: a recipient-sealed
-    /// file opened with a `PassphraseIdentity`. Symmetric assertion to
-    /// [`decrypt_rejects_passphrase_file_with_x25519_identity`].
+    /// file opened with a `PassphraseCredential`. Symmetric assertion to
+    /// [`decrypt_rejects_passphrase_file_with_x25519_credential`].
     #[test]
-    fn decrypt_rejects_recipient_file_with_passphrase_identity() -> Result<(), CryptoError> {
+    fn decrypt_rejects_recipient_file_with_passphrase_credential() -> Result<(), CryptoError> {
         let tmp = tempfile::TempDir::new().unwrap();
         let keys_dir = tmp.path().join("keys");
         let (pub_a, _priv_a, _pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
@@ -1160,12 +1163,12 @@ mod tests {
         let dec_dir = tmp.path().join("decrypted");
         fs::create_dir_all(&dec_dir)?;
         let pass = SecretString::from("doesn't-matter".to_string());
-        let identity = argon2id::PassphraseIdentity {
+        let credential = argon2id::PassphraseCredential {
             passphrase: &pass,
             kdf_limit: None,
         };
         let err = decrypt(
-            &identity,
+            &credential,
             &fcr,
             &dec_dir,
             ArchiveLimits::default(),

@@ -2473,7 +2473,7 @@ fn test_different_keys_different_fingerprints() -> Result<(), CryptoError> {
 /// error (not a panic) when pointed at a file that does not exist.
 #[test]
 fn test_public_key_validate() -> Result<(), CryptoError> {
-    let test_dir = setup_test_dir("pubkey_validate");
+    let test_dir = setup_test_dir("public_key_validate");
     let keys_dir = test_dir.join("keys");
     fs::create_dir_all(&keys_dir)?;
 
@@ -2510,7 +2510,7 @@ fn test_public_key_validate() -> Result<(), CryptoError> {
 /// reject Bech32 with the wrong HRP.
 #[test]
 fn test_public_key_from_str_round_trip() -> Result<(), CryptoError> {
-    let test_dir = setup_test_dir("pubkey_from_str");
+    let test_dir = setup_test_dir("public_key_from_str");
     let keys_dir = test_dir.join("keys");
     fs::create_dir_all(&keys_dir)?;
 
@@ -2784,7 +2784,7 @@ fn test_keygen_no_partial_state_on_existing_key() -> Result<(), CryptoError> {
 
 /// Flipping a byte in the cleartext salt region of a v1 `private.key`
 /// file must cause decryption to fail. v1 binds every cleartext byte
-/// before `wrapped_privkey` (header + argon2_salt + kdf_params +
+/// before `wrapped_private_key` (header + argon2_salt + kdf_params +
 /// wrap_nonce + ext_bytes) as AEAD associated data, so any header or
 /// body tamper fails authentication on unlock.
 #[test]
@@ -2814,7 +2814,7 @@ fn test_private_key_salt_tamper_rejected() -> Result<(), CryptoError> {
     )?;
 
     // Flip one byte inside the 32-byte Argon2 salt region. v1 body layout:
-    //   [argon2_salt(32)][kdf_params(12)][wrap_nonce(24)][ext_bytes(0)][wrapped_privkey(48)]
+    //   [argon2_salt(32)][kdf_params(12)][wrap_nonce(24)][ext_bytes(0)][wrapped_private_key(48)]
     // The salt region starts directly after the 9-byte cleartext header.
     let private_key_path = keys_dir.join("private.key");
     let mut key_data = fs::read(&private_key_path)?;

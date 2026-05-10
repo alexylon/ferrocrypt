@@ -1334,7 +1334,7 @@ mod tests {
     fn public_key_from_bytes_rejects_all_zero() {
         match PublicKey::from_bytes([0u8; 32]) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
-            other => panic!("expected MalformedPublicKey for all-zero pubkey, got {other:?}"),
+            other => panic!("expected MalformedPublicKey for all-zero public_key, got {other:?}"),
         }
     }
 

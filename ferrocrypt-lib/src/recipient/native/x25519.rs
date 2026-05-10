@@ -4,12 +4,12 @@
 //!
 //! ```text
 //! ephemeral_secret = random 32-byte X25519 scalar
-//! ephemeral_pubkey = X25519(ephemeral_secret, basepoint)
-//! shared           = X25519(ephemeral_secret, recipient_pubkey)
-//! wrap_key         = HKDF-SHA3-256(salt = ephemeral_pubkey || recipient_pubkey,
+//! ephemeral_public_key_bytes = X25519(ephemeral_secret, basepoint)
+//! shared           = X25519(ephemeral_secret, recipient_public_key_bytes)
+//! wrap_key         = HKDF-SHA3-256(salt = ephemeral_public_key_bytes || recipient_public_key_bytes,
 //!                                  ikm  = shared,
 //!                                  info = "ferrocrypt/v1/recipient/x25519/wrap")
-//! body             = ephemeral_pubkey(32) || wrap_nonce(24) || wrapped_file_key(48)
+//! body             = ephemeral_public_key_bytes(32) || wrap_nonce(24) || wrapped_file_key(48)
 //! ```
 //!
 //! `wrapped_file_key` is XChaCha20-Poly1305 with empty AAD; the
@@ -30,10 +30,10 @@
 //! recipient key combination; the check uses constant-time compare.
 //!
 //! On the decrypt side the rejection is **file-fatal**, not
-//! slot-skippable: an all-zero shared secret is identity-independent
+//! slot-skippable: an all-zero shared secret is credential-independent
 //! (any decryptor would compute the same value), so [`unwrap`] surfaces
 //! it as `InvalidFormat(MalformedRecipientEntry)` and the
-//! [`X25519Identity`] adapter propagates the error rather than
+//! [`X25519Credential`] adapter propagates the error rather than
 //! collapsing it to the slot-skip channel reserved for AEAD failures.
 
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -50,19 +50,19 @@ use crate::error::FormatDefect;
 pub(crate) const TYPE_NAME: &str = "x25519";
 
 /// X25519 public-key length in bytes.
-pub(crate) const PUBKEY_SIZE: usize = 32;
+pub(crate) const PUBLIC_KEY_SIZE: usize = 32;
 
 /// X25519 private-key (scalar input) length in bytes.
 pub(crate) const PRIVATE_KEY_SIZE: usize = 32;
 
 /// Recipient body length in bytes (`FORMAT.md` §4.2).
-pub(crate) const BODY_LENGTH: usize = PUBKEY_SIZE + WRAP_NONCE_SIZE + WRAPPED_FILE_KEY_SIZE;
+pub(crate) const BODY_LENGTH: usize = PUBLIC_KEY_SIZE + WRAP_NONCE_SIZE + WRAPPED_FILE_KEY_SIZE;
 
 /// HKDF-SHA3-256 `info` for the X25519 ECDH-derived wrap key.
 pub(crate) const HKDF_INFO_WRAP: &[u8] = b"ferrocrypt/v1/recipient/x25519/wrap";
 
-const EPHEMERAL_PUBKEY_OFFSET: usize = 0;
-const WRAP_NONCE_OFFSET: usize = EPHEMERAL_PUBKEY_OFFSET + PUBKEY_SIZE;
+const EPHEMERAL_PUBLIC_KEY_OFFSET: usize = 0;
+const WRAP_NONCE_OFFSET: usize = EPHEMERAL_PUBLIC_KEY_OFFSET + PUBLIC_KEY_SIZE;
 const WRAPPED_FILE_KEY_OFFSET: usize = WRAP_NONCE_OFFSET + WRAP_NONCE_SIZE;
 
 /// Structurally rejects the all-zero X25519 public key — the only
@@ -75,14 +75,14 @@ const WRAPPED_FILE_KEY_OFFSET: usize = WRAP_NONCE_OFFSET + WRAP_NONCE_SIZE;
 ///
 /// Constant-time compare so timing of structural rejection cannot leak
 /// the input bytes.
-pub(crate) fn is_zero_public_key(bytes: &[u8; PUBKEY_SIZE]) -> bool {
-    ct_eq_32(bytes, &[0u8; PUBKEY_SIZE])
+pub(crate) fn is_zero_public_key(bytes: &[u8; PUBLIC_KEY_SIZE]) -> bool {
+    ct_eq_32(bytes, &[0u8; PUBLIC_KEY_SIZE])
 }
 
 /// Wraps `file_key` for an X25519 recipient.
 ///
 /// Generates a fresh ephemeral X25519 keypair, performs ECDH against
-/// `recipient_pubkey`, and rejects an all-zero shared secret. Derives
+/// `recipient_public_key_bytes`, and rejects an all-zero shared secret. Derives
 /// the wrap key via HKDF-SHA3-256 with a salt binding both ephemeral
 /// and recipient public keys, then seals `file_key` via
 /// XChaCha20-Poly1305 with empty AAD. Returns the canonical 104-byte
@@ -94,29 +94,29 @@ pub(crate) fn is_zero_public_key(bytes: &[u8; PUBKEY_SIZE]) -> bool {
 /// caller-supplied recipient public key is degenerate).
 pub(crate) fn wrap(
     file_key: &FileKey,
-    recipient_pubkey: &[u8; PUBKEY_SIZE],
+    recipient_public_key_bytes: &[u8; PUBLIC_KEY_SIZE],
 ) -> Result<[u8; BODY_LENGTH], CryptoError> {
     let ephemeral_raw = random_secret::<PRIVATE_KEY_SIZE>()?;
     let ephemeral_secret = StaticSecret::from(*ephemeral_raw);
-    let ephemeral_pubkey = PublicKey::from(&ephemeral_secret);
-    let recipient_public = PublicKey::from(*recipient_pubkey);
-    let shared = ephemeral_secret.diffie_hellman(&recipient_public);
-    if ct_eq_32(shared.as_bytes(), &[0u8; PUBKEY_SIZE]) {
+    let ephemeral_public_key = PublicKey::from(&ephemeral_secret);
+    let recipient_public_key = PublicKey::from(*recipient_public_key_bytes);
+    let shared = ephemeral_secret.diffie_hellman(&recipient_public_key);
+    if ct_eq_32(shared.as_bytes(), &[0u8; PUBLIC_KEY_SIZE]) {
         return Err(CryptoError::InvalidInput(
             "Invalid recipient public key".to_string(),
         ));
     }
     let wrap_key = derive_wrap_key(
-        ephemeral_pubkey.as_bytes(),
-        recipient_public.as_bytes(),
+        ephemeral_public_key.as_bytes(),
+        recipient_public_key.as_bytes(),
         shared.as_bytes(),
     )?;
     let wrap_nonce = random_bytes::<WRAP_NONCE_SIZE>()?;
     let wrapped_file_key = seal_file_key(&wrap_key, &wrap_nonce, file_key)?;
 
     let mut body = [0u8; BODY_LENGTH];
-    body[EPHEMERAL_PUBKEY_OFFSET..EPHEMERAL_PUBKEY_OFFSET + PUBKEY_SIZE]
-        .copy_from_slice(ephemeral_pubkey.as_bytes());
+    body[EPHEMERAL_PUBLIC_KEY_OFFSET..EPHEMERAL_PUBLIC_KEY_OFFSET + PUBLIC_KEY_SIZE]
+        .copy_from_slice(ephemeral_public_key.as_bytes());
     body[WRAP_NONCE_OFFSET..WRAP_NONCE_OFFSET + WRAP_NONCE_SIZE].copy_from_slice(&wrap_nonce);
     body[WRAPPED_FILE_KEY_OFFSET..].copy_from_slice(&wrapped_file_key);
     Ok(body)
@@ -130,14 +130,14 @@ pub(crate) fn wrap(
 /// - **Structural malformation:** an all-zero ECDH shared secret per
 ///   `FORMAT.md` §2.4 / §4.2 — surfaces as
 ///   `CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)`.
-///   Identity-independent: any decryptor would observe the same all-zero
+///   Credential-independent: any decryptor would observe the same all-zero
 ///   value, so the spec mandates file-fatal rejection. The
-///   [`X25519Identity`] adapter propagates this error rather than
+///   [`X25519Credential`] adapter propagates this error rather than
 ///   collapsing it to `Ok(None)`.
 /// - **AEAD authentication failure:** wrong recipient private key or
 ///   tampered wrapped envelope — both surface as
 ///   [`CryptoError::RecipientUnwrapFailed`] with `type_name = "x25519"`.
-///   Indistinguishable at the AEAD layer and identity-dependent (a
+///   Indistinguishable at the AEAD layer and credential-dependent (a
 ///   different key holder might still unwrap a sibling slot), so the
 ///   adapter collapses these into the slot-skip channel.
 ///
@@ -145,11 +145,12 @@ pub(crate) fn wrap(
 /// final until the header MAC also verifies.
 pub(crate) fn unwrap(
     body: &[u8; BODY_LENGTH],
-    recipient_secret_bytes: &[u8; PRIVATE_KEY_SIZE],
+    private_key_bytes: &[u8; PRIVATE_KEY_SIZE],
 ) -> Result<FileKey, CryptoError> {
-    let mut ephemeral_pubkey_bytes = [0u8; PUBKEY_SIZE];
-    ephemeral_pubkey_bytes
-        .copy_from_slice(&body[EPHEMERAL_PUBKEY_OFFSET..EPHEMERAL_PUBKEY_OFFSET + PUBKEY_SIZE]);
+    let mut ephemeral_public_key_bytes = [0u8; PUBLIC_KEY_SIZE];
+    ephemeral_public_key_bytes.copy_from_slice(
+        &body[EPHEMERAL_PUBLIC_KEY_OFFSET..EPHEMERAL_PUBLIC_KEY_OFFSET + PUBLIC_KEY_SIZE],
+    );
 
     let mut wrap_nonce = [0u8; WRAP_NONCE_SIZE];
     wrap_nonce.copy_from_slice(&body[WRAP_NONCE_OFFSET..WRAP_NONCE_OFFSET + WRAP_NONCE_SIZE]);
@@ -157,18 +158,18 @@ pub(crate) fn unwrap(
     let mut wrapped_file_key = [0u8; WRAPPED_FILE_KEY_SIZE];
     wrapped_file_key.copy_from_slice(&body[WRAPPED_FILE_KEY_OFFSET..]);
 
-    let recipient_secret = StaticSecret::from(*recipient_secret_bytes);
-    let recipient_public = PublicKey::from(&recipient_secret);
-    let ephemeral_public = PublicKey::from(ephemeral_pubkey_bytes);
-    let shared = recipient_secret.diffie_hellman(&ephemeral_public);
-    if ct_eq_32(shared.as_bytes(), &[0u8; PUBKEY_SIZE]) {
+    let x25519_private_key = StaticSecret::from(*private_key_bytes);
+    let recipient_public_key = PublicKey::from(&x25519_private_key);
+    let ephemeral_public_key = PublicKey::from(ephemeral_public_key_bytes);
+    let shared = x25519_private_key.diffie_hellman(&ephemeral_public_key);
+    if ct_eq_32(shared.as_bytes(), &[0u8; PUBLIC_KEY_SIZE]) {
         return Err(CryptoError::InvalidFormat(
             FormatDefect::MalformedRecipientEntry,
         ));
     }
     let wrap_key = derive_wrap_key(
-        &ephemeral_pubkey_bytes,
-        recipient_public.as_bytes(),
+        &ephemeral_public_key_bytes,
+        recipient_public_key.as_bytes(),
         shared.as_bytes(),
     )?;
     open_file_key(&wrap_key, &wrap_nonce, &wrapped_file_key, || {
@@ -181,13 +182,13 @@ pub(crate) fn unwrap(
 /// Derives the X25519 wrap key. Salt binds both public keys so the
 /// wrap key is unique per `(ephemeral, recipient)` exchange.
 fn derive_wrap_key(
-    ephemeral_pubkey: &[u8; PUBKEY_SIZE],
-    recipient_pubkey: &[u8; PUBKEY_SIZE],
-    shared_secret: &[u8; PUBKEY_SIZE],
+    ephemeral_public_key_bytes: &[u8; PUBLIC_KEY_SIZE],
+    recipient_public_key_bytes: &[u8; PUBLIC_KEY_SIZE],
+    shared_secret: &[u8; PUBLIC_KEY_SIZE],
 ) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
-    let mut salt = [0u8; 2 * PUBKEY_SIZE];
-    salt[..PUBKEY_SIZE].copy_from_slice(ephemeral_pubkey);
-    salt[PUBKEY_SIZE..].copy_from_slice(recipient_pubkey);
+    let mut salt = [0u8; 2 * PUBLIC_KEY_SIZE];
+    salt[..PUBLIC_KEY_SIZE].copy_from_slice(ephemeral_public_key_bytes);
+    salt[PUBLIC_KEY_SIZE..].copy_from_slice(recipient_public_key_bytes);
     hkdf_expand_sha3_256(Some(&salt), shared_secret, HKDF_INFO_WRAP)
 }
 
@@ -196,7 +197,7 @@ fn derive_wrap_key(
 /// Encrypt-side handle for the `x25519` recipient: borrows a 32-byte
 /// recipient public key.
 pub(crate) struct X25519Recipient<'a> {
-    pub recipient_pubkey: &'a [u8; PUBKEY_SIZE],
+    pub recipient_public_key_bytes: &'a [u8; PUBLIC_KEY_SIZE],
 }
 
 impl<'a> crate::protocol::RecipientScheme for X25519Recipient<'a> {
@@ -218,7 +219,7 @@ impl<'a> crate::protocol::RecipientScheme for X25519Recipient<'a> {
         // `RecipientScheme::wrap_file_key` contract).
         _on_event: &dyn Fn(&crate::ProgressEvent),
     ) -> Result<crate::recipient::entry::RecipientBody, CryptoError> {
-        let bytes = wrap(file_key, self.recipient_pubkey)?;
+        let bytes = wrap(file_key, self.recipient_public_key_bytes)?;
         Ok(crate::recipient::entry::RecipientBody {
             type_name: TYPE_NAME,
             bytes: bytes.to_vec(),
@@ -228,11 +229,11 @@ impl<'a> crate::protocol::RecipientScheme for X25519Recipient<'a> {
 
 /// Decrypt-side handle for the `x25519` recipient. Owns the 32-byte
 /// recipient secret in `Zeroizing` so it's wiped on drop.
-pub(crate) struct X25519Identity {
-    pub recipient_secret: Zeroizing<[u8; PRIVATE_KEY_SIZE]>,
+pub(crate) struct X25519Credential {
+    pub private_key_bytes: Zeroizing<[u8; PRIVATE_KEY_SIZE]>,
 }
 
-impl crate::protocol::IdentityScheme for X25519Identity {
+impl crate::protocol::DecryptionCredential for X25519Credential {
     const TYPE_NAME: &'static str = TYPE_NAME;
     const EXPECTED_MODE: crate::UnauthenticatedRecipientMode =
         crate::UnauthenticatedRecipientMode::PublicKey;
@@ -242,7 +243,7 @@ impl crate::protocol::IdentityScheme for X25519Identity {
         body: &[u8],
         // X25519 unwrap is one ECDH + one HKDF + one AEAD —
         // sub-millisecond. The parameter is intentionally ignored
-        // (per the `IdentityScheme::unwrap_file_key` contract); the
+        // (per the `DecryptionCredential::unwrap_file_key` contract); the
         // expensive `private.key` Argon2id step happens before the
         // slot loop, in `recipient::native::x25519::open_x25519_private_key`.
         _on_event: &dyn Fn(&crate::ProgressEvent),
@@ -251,13 +252,13 @@ impl crate::protocol::IdentityScheme for X25519Identity {
             .try_into()
             .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry))?;
         // Per [`unwrap`]'s contract, wrong-recipient-key and tampered-body
-        // surface as `RecipientUnwrapFailed` (identity-dependent: collapse
+        // surface as `RecipientUnwrapFailed` (credential-dependent: collapse
         // to `Ok(None)` so the slot loop tries the next supported entry).
         // An all-zero ECDH shared secret surfaces as
-        // `InvalidFormat(MalformedRecipientEntry)` (identity-independent
+        // `InvalidFormat(MalformedRecipientEntry)` (credential-independent
         // structural defect per FORMAT.md §2.4 / §4.2: propagate so the
         // entire file is rejected).
-        match unwrap(body_array, &self.recipient_secret) {
+        match unwrap(body_array, &self.private_key_bytes) {
             Ok(file_key) => Ok(Some(file_key)),
             Err(CryptoError::RecipientUnwrapFailed { .. }) => Ok(None),
             Err(other) => Err(other),
@@ -277,7 +278,7 @@ impl crate::protocol::IdentityScheme for X25519Identity {
 /// orchestration (file naming, `private.key` sealing, `public.key`
 /// encoding, atomic finalize) lives in the higher-level entry point.
 pub(crate) fn generate_keypair()
--> Result<(Zeroizing<[u8; PRIVATE_KEY_SIZE]>, [u8; PUBKEY_SIZE]), CryptoError> {
+-> Result<(Zeroizing<[u8; PRIVATE_KEY_SIZE]>, [u8; PUBLIC_KEY_SIZE]), CryptoError> {
     let raw = random_secret::<PRIVATE_KEY_SIZE>()?;
     let secret = StaticSecret::from(*raw);
     let public = PublicKey::from(&secret);
@@ -347,7 +348,7 @@ pub(crate) fn open_x25519_private_key(
         return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
     }
 
-    let public_material: [u8; PUBKEY_SIZE] = opened
+    let public_material: [u8; PUBLIC_KEY_SIZE] = opened
         .public_material
         .as_slice()
         .try_into()
@@ -432,7 +433,7 @@ pub fn validate_private_key_shape(data: &[u8]) -> Result<(), CryptoError> {
         return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
     }
 
-    if header.public_len != PUBKEY_SIZE as u32 {
+    if header.public_len != PUBLIC_KEY_SIZE as u32 {
         return Err(CryptoError::InvalidFormat(
             FormatDefect::MalformedPrivateKey,
         ));
@@ -516,7 +517,7 @@ mod tests {
 
         let secret = StaticSecret::random_from_rng(OsRng);
         let secret_material = secret.to_bytes();
-        let malformed_public = [0u8; PUBKEY_SIZE - 1];
+        let malformed_public = [0u8; PUBLIC_KEY_SIZE - 1];
 
         let bytes = seal_private_key(
             &secret_material,
@@ -534,7 +535,7 @@ mod tests {
         }
     }
 
-    fn keypair() -> ([u8; PRIVATE_KEY_SIZE], [u8; PUBKEY_SIZE]) {
+    fn keypair() -> ([u8; PRIVATE_KEY_SIZE], [u8; PUBLIC_KEY_SIZE]) {
         let secret = StaticSecret::random_from_rng(OsRng);
         let public = PublicKey::from(&secret);
         (secret.to_bytes(), *public.as_bytes())
@@ -544,7 +545,7 @@ mod tests {
     fn body_length_matches_field_sum() {
         assert_eq!(
             BODY_LENGTH,
-            PUBKEY_SIZE + WRAP_NONCE_SIZE + WRAPPED_FILE_KEY_SIZE
+            PUBLIC_KEY_SIZE + WRAP_NONCE_SIZE + WRAPPED_FILE_KEY_SIZE
         );
         assert_eq!(BODY_LENGTH, 104);
     }
@@ -600,11 +601,11 @@ mod tests {
     }
 
     #[test]
-    fn unwrap_with_tampered_ephemeral_pubkey_fails_with_recipient_unwrap_failed() {
+    fn unwrap_with_tampered_ephemeral_public_key_fails_with_recipient_unwrap_failed() {
         let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let (sk, pk) = keypair();
         let mut body = wrap(&file_key, &pk).unwrap();
-        body[EPHEMERAL_PUBKEY_OFFSET] ^= 0x01;
+        body[EPHEMERAL_PUBLIC_KEY_OFFSET] ^= 0x01;
         match unwrap(&body, &sk) {
             Err(CryptoError::RecipientUnwrapFailed { type_name }) => {
                 assert_eq!(type_name, TYPE_NAME);
@@ -629,18 +630,18 @@ mod tests {
 
     #[test]
     fn unwrap_rejects_small_order_ephemeral_via_all_zero_shared() {
-        // An all-zero ephemeral pubkey is a known X25519 small-order
-        // point: X25519(any_secret, all_zero_pubkey) = all_zero_shared.
+        // An all-zero ephemeral public_key is a known X25519 small-order
+        // point: X25519(any_secret, all_zero_public_key) = all_zero_shared.
         // Per `FORMAT.md` §2.4 / §4.2 this MUST be rejected by readers
         // before deriving the wrap key, and the rejection is
-        // identity-independent — readers MUST surface it as a structural
+        // credential-independent — readers MUST surface it as a structural
         // defect (file-fatal) rather than as a slot-skippable AEAD
-        // failure, so the [`X25519Identity`] adapter propagates the
+        // failure, so the [`X25519Credential`] adapter propagates the
         // error instead of collapsing to `Ok(None)`.
         let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let (sk, pk) = keypair();
         let mut body = wrap(&file_key, &pk).unwrap();
-        body[EPHEMERAL_PUBKEY_OFFSET..EPHEMERAL_PUBKEY_OFFSET + PUBKEY_SIZE].fill(0);
+        body[EPHEMERAL_PUBLIC_KEY_OFFSET..EPHEMERAL_PUBLIC_KEY_OFFSET + PUBLIC_KEY_SIZE].fill(0);
         match unwrap(&body, &sk) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)) => {}
             other => {
@@ -649,25 +650,26 @@ mod tests {
         }
     }
 
-    /// Identity-adapter contract: an all-zero shared secret must NOT be
+    /// Credential-adapter contract: an all-zero shared secret must NOT be
     /// collapsed into the slot-skip channel. The adapter propagates
     /// `InvalidFormat(MalformedRecipientEntry)` so the surrounding
     /// decrypt loop rejects the whole file (FORMAT.md §2.4 / §4.2).
     /// Wrong-key AEAD failures keep their existing `Ok(None)` mapping —
     /// covered by the dedicated wrong-key test above.
     #[test]
-    fn identity_adapter_propagates_all_zero_shared_secret() {
-        use crate::protocol::IdentityScheme;
+    fn credential_adapter_propagates_all_zero_shared_secret() {
+        use crate::protocol::DecryptionCredential;
 
         let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let (sk, pk) = keypair();
         let mut body_bytes = wrap(&file_key, &pk).unwrap();
-        body_bytes[EPHEMERAL_PUBKEY_OFFSET..EPHEMERAL_PUBKEY_OFFSET + PUBKEY_SIZE].fill(0);
+        body_bytes[EPHEMERAL_PUBLIC_KEY_OFFSET..EPHEMERAL_PUBLIC_KEY_OFFSET + PUBLIC_KEY_SIZE]
+            .fill(0);
 
-        let identity = X25519Identity {
-            recipient_secret: Zeroizing::new(sk),
+        let credential = X25519Credential {
+            private_key_bytes: Zeroizing::new(sk),
         };
-        match identity.unwrap_file_key(&body_bytes, &|_| {}) {
+        match credential.unwrap_file_key(&body_bytes, &|_| {}) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)) => {}
             other => panic!(
                 "adapter must propagate all-zero shared as MalformedRecipientEntry, got {other:?}"
@@ -676,27 +678,27 @@ mod tests {
     }
 
     #[test]
-    fn wrap_rejects_all_zero_recipient_pubkey() {
+    fn wrap_rejects_all_zero_recipient_public_key() {
         let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
-        let zero_pk = [0u8; PUBKEY_SIZE];
+        let zero_pk = [0u8; PUBLIC_KEY_SIZE];
         match wrap(&file_key, &zero_pk) {
             Err(CryptoError::InvalidInput(msg)) => {
                 assert!(msg.contains("Invalid recipient"));
             }
-            other => panic!("expected InvalidInput for all-zero pubkey, got {other:?}"),
+            other => panic!("expected InvalidInput for all-zero public_key, got {other:?}"),
         }
     }
 
     #[test]
     fn body_field_offsets_are_correct() {
         // Wire-format regression: the body layout MUST be exactly
-        // ephemeral_pubkey(32) || wrap_nonce(24) || wrapped(48). A
+        // ephemeral_public_key(32) || wrap_nonce(24) || wrapped(48). A
         // reordering would produce a body that this reader rejects
         // and that conforming readers reject the same way.
         let file_key = FileKey::from_bytes_for_tests([0x11u8; FILE_KEY_SIZE]);
         let (_, pk) = keypair();
         let body = wrap(&file_key, &pk).unwrap();
-        assert_eq!(EPHEMERAL_PUBKEY_OFFSET, 0);
+        assert_eq!(EPHEMERAL_PUBLIC_KEY_OFFSET, 0);
         assert_eq!(WRAP_NONCE_OFFSET, 32);
         assert_eq!(WRAPPED_FILE_KEY_OFFSET, 56);
         assert_eq!(body.len(), 104);

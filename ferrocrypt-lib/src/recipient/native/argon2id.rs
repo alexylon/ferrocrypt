@@ -153,12 +153,12 @@ impl<'a> crate::protocol::RecipientScheme for PassphraseRecipient<'a> {
 }
 
 /// Decrypt-side handle for the `argon2id` recipient.
-pub(crate) struct PassphraseIdentity<'a> {
+pub(crate) struct PassphraseCredential<'a> {
     pub passphrase: &'a SecretString,
     pub kdf_limit: Option<&'a KdfLimit>,
 }
 
-impl<'a> crate::protocol::IdentityScheme for PassphraseIdentity<'a> {
+impl<'a> crate::protocol::DecryptionCredential for PassphraseCredential<'a> {
     const TYPE_NAME: &'static str = TYPE_NAME;
     const EXPECTED_MODE: crate::UnauthenticatedRecipientMode =
         crate::UnauthenticatedRecipientMode::Passphrase;
@@ -174,7 +174,7 @@ impl<'a> crate::protocol::IdentityScheme for PassphraseIdentity<'a> {
         // KDF cap and structural KDF-param validation happen inside
         // `unwrap` BEFORE Argon2id runs. Wrong passphrase / tampered
         // body surface as `RecipientUnwrapFailed` from `unwrap`; per
-        // `IdentityScheme` semantics we collapse those into `Ok(None)`
+        // `DecryptionCredential` semantics we collapse those into `Ok(None)`
         // and propagate everything else (including the cap-exceeded
         // error) as `Err`. The progress event is emitted inside
         // `unwrap` only after structural / cap checks have already

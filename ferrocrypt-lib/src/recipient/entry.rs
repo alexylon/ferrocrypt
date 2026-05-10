@@ -40,7 +40,7 @@ pub(crate) const RECIPIENT_FLAGS_RESERVED_MASK: u16 = !RECIPIENT_FLAG_CRITICAL;
 
 /// Recipient body bytes plus their declared scheme `type_name`. The
 /// type produced by [`crate::protocol::RecipientScheme::wrap_file_key`]
-/// and consumed by [`crate::protocol::IdentityScheme::unwrap_file_key`]
+/// and consumed by [`crate::protocol::DecryptionCredential::unwrap_file_key`]
 /// — schemes never construct or parse full recipient entries; that is
 /// `protocol.rs`'s responsibility.
 #[derive(Debug, Clone)]

@@ -36,9 +36,19 @@ jobs:
         # runners ship Developer Mode enabled, so these tests run
         # unconditionally there. `mklink /J` (junction creation) does
         # not require any privilege flag — runs on any account.
+        #
+        # `--include-ignored` runs the `#[ignore = "fs-matrix"]` smoke
+        # tests on the default filesystem too, so the build job has
+        # the same coverage the fs_matrix lanes have on alternative
+        # filesystems. `--skip regenerate_fixtures` excludes the one
+        # ignored test that's a destructive maintenance utility — it
+        # deletes and rewrites `tests/fixtures/encrypted/` and
+        # `tests/fixtures/keys/`, racing against the four
+        # `decrypt_*_fixture_matches_source` tests when run alongside
+        # them.
         env:
           FERROCRYPT_REQUIRE_WINDOWS_SYMLINK_TESTS: "1"
-        run: cargo test --verbose -- --test-threads=1
+        run: cargo test --verbose -- --test-threads=1 --include-ignored --skip regenerate_fixtures
 
   msrv:
     runs-on: ubuntu-latest

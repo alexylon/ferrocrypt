@@ -187,7 +187,11 @@ jobs:
   fuzz:
     uses: ./.github/workflows/fuzz.yml
     with:
-      max_total_time: 60
+      # 20s/target on PR. libfuzzer-mutator's discovery curve flattens
+      # after the first ~10s, so the marginal coverage from running
+      # longer is small. The release-gate in `release.yml` calls the
+      # same reusable workflow with 60s for a tougher pre-ship check.
+      max_total_time: 20
 
   # Filesystem-matrix smoke tests. Each lane mounts a non-default
   # filesystem, points FERROCRYPT_FS_MATRIX_DIR at the mount, and runs

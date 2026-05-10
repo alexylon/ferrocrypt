@@ -63,11 +63,17 @@ cargo +nightly fuzz run fuzz_kdf_params -- -max_total_time=60
 
 ## CI
 
-The `fuzz` job in `.github/workflows/rust.yml` runs on every push and
-pull request. It installs the nightly toolchain + `cargo-fuzz`, builds
-**every** target (catches API drift when a library refactor breaks a
-fuzz target), and then runs each parser-surface target for 10 seconds
-as a smoke check. Crashes surface as a failing CI run.
+The `fuzz` job is a reusable workflow at `.github/workflows/fuzz.yml`,
+called from both `rust.yml` (every push and pull request) and
+`release.yml` (every tag push, as a release-gate — `build` declares
+`needs: fuzz`). It installs the nightly toolchain + `cargo-fuzz`,
+builds **every** target (catches API drift when a library refactor
+breaks a fuzz target), and then runs each parser-surface target for
+60 seconds. The two integration-level targets (`fuzz_symmetric_decrypt`,
+`fuzz_hybrid_decrypt`) are built but skipped from the per-run loop
+because each iteration runs a full Argon2id derivation. Crashes
+surface as a failing CI run, and a tag push cannot publish artifacts
+unless fuzz passes.
 
 Corpus files and crash artifacts are saved under `fuzz/corpus/` and
 `fuzz/artifacts/` respectively (both gitignored).

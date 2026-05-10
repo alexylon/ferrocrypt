@@ -41,6 +41,7 @@ use cap_std::fs::{Dir, OpenOptions};
 use crate::CryptoError;
 use crate::fs::paths::file_stem;
 
+#[cfg(unix)]
 use super::format::PERMISSION_BITS_MASK;
 use super::format::{copy_exact_n, serialize_manifest, write_fca_header};
 use super::limits::{
@@ -579,16 +580,27 @@ fn walk_directory(
         let file_type = metadata.file_type();
         let name_os = dir_entry.file_name();
 
-        // Reject symlinks via the lstat-semantics file_type. The
+        // On Windows, reject any reparse point (symlinks, junctions,
+        // mount points) with the explicit reparse-point diagnostic
+        // before the generic symlink check below. The
+        // FILE_ATTRIBUTE_REPARSE_POINT bit is set on every variant —
+        // including the ones cap_primitives reports as
+        // `is_symlink() == true` (NTFS junctions are
+        // reparse-tag-name-surrogate, so std and cap-std both flag
+        // them as symlinks). Running this first means a junction
+        // surfaces as "Windows reparse point" rather than the less
+        // accurate "Symlink in archive source". No-op on Unix.
+        reject_windows_reparse_point_cap(&metadata, "Source entry", &name_os)?;
+
+        // Reject Unix symlinks via the lstat-semantics file_type. The
         // diagnostic includes the FCA-relative path (parent prefix +
         // leaf) so the operator sees which manifest entry is
-        // implicated, not just the failing leaf component.
+        // implicated, not just the failing leaf component. On
+        // Windows, the reparse-point check above already caught
+        // anything `is_symlink()` would flag.
         if file_type.is_symlink() {
             return Err(symlink_in_archive_source_error(fca_prefix, &name_os));
         }
-        // Reject Windows reparse points that don't classify as
-        // symlinks (junctions, mount points). No-op on Unix.
-        reject_windows_reparse_point_cap(&metadata, "Source entry", &name_os)?;
 
         let name_str = name_os.to_str().ok_or_else(|| {
             CryptoError::InvalidInput(format!(

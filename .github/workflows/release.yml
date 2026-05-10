@@ -12,7 +12,16 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Release gate: a tag push cannot publish artifacts unless the fuzz
+  # parser-surface targets pass. Builds on every release, so any newly-
+  # discovered crash blocks shipping.
+  fuzz:
+    uses: ./.github/workflows/fuzz.yml
+    with:
+      max_total_time: 60
+
   build:
+    needs: fuzz
     strategy:
       matrix:
         include:

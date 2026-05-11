@@ -4,6 +4,8 @@ All notable changes to FerroCrypt are documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0-beta.1] - 2026-05-11
+
 ### Added
 - **FCA archive forward-compatibility hooks.** The FCA payload format now reserves an archive-level extension region (`archive_ext`) and per-entry extension regions (`entry_ext`) for future opt-in metadata (timestamps, xattrs, ACLs, symlinks, hardlinks, sparse files). v1 writers emit zero-length regions; v1 readers reject any unknown critical TLV (`0x8001..=0xFFFF`) and skip any unknown ignorable TLV (`0x0001..=0x7FFF`) under the same canonicality rules already used for `.fcr` header `ext_bytes`. The wire-format change is one-time: FCA fixed header grows from 23 to 27 bytes (adds `archive_ext_len: u32`); each manifest entry's fixed prefix grows from 14 to 18 bytes (adds `entry_ext_len: u32`). New `ArchiveLimits` caps — `max_archive_ext_bytes` (default 64 KiB), `max_entry_ext_bytes` (default 64 KiB), `max_total_entry_ext_bytes` (default 64 MiB), `max_tlv_value_bytes` (default 16 MiB) — bound extension allocations before any output. See `FORMAT.md` §9 and `notes/archive_format/FCA_FORWARD_COMPAT.md`.
 

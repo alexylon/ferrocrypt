@@ -1,6 +1,6 @@
 [package]
 name = "ferrocrypt-desktop"
-version = "0.2.5"
+version = "0.3.0-beta.1"
 edition = "2021"
 publish = false
 

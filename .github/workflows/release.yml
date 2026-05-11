@@ -65,6 +65,18 @@ jobs:
         working-directory: ferrocrypt-desktop
         run: cargo bundle --release --target ${{ matrix.target }}
 
+      # cargo bundle leaves the .app with a linker-injected ad-hoc signature
+      # whose CodeDirectory claims to seal bundle resources but doesn't, so
+      # macOS refuses it with "damaged" instead of the usual "unidentified
+      # developer" prompt. Re-sign ad-hoc to seal resources properly; users
+      # then get the standard Open Anyway flow via Privacy & Security.
+      # Proper Developer ID + notarization is the longer-term fix.
+      - name: Re-sign Desktop (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          codesign --force --deep --sign - \
+            ferrocrypt-desktop/target/${{ matrix.target }}/release/bundle/osx/FerroCrypt.app
+
       # ── Package ─────────────────────────────────────────────────────────
 
       - name: Package CLI (unix)

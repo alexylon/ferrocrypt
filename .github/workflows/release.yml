@@ -56,11 +56,10 @@ jobs:
 
       # ── Desktop app (excluded from workspace) ──────────────────────────
 
-      # cargo-bundle's Windows MSI backend is experimental and currently fails
-      # on the resource-collection step. Skip Windows desktop bundling for now;
-      # Windows users still get the CLI archive and can build the desktop app
-      # from source.
-      - name: Bundle Desktop
+      # macOS / Linux desktop bundling via cargo-bundle (.app / .deb).
+      # cargo-bundle's Windows MSI backend is unimplemented, so Windows uses
+      # cargo-wix instead (separate step below).
+      - name: Bundle Desktop (macOS/Linux)
         if: runner.os != 'Windows'
         working-directory: ferrocrypt-desktop
         run: cargo bundle --release --target ${{ matrix.target }}
@@ -76,6 +75,19 @@ jobs:
         run: |
           codesign --force --deep --sign - \
             ferrocrypt-desktop/target/${{ matrix.target }}/release/bundle/osx/FerroCrypt.app
+
+      # Windows desktop bundling via cargo-wix (uses the WiX Toolset 3 that's
+      # pre-installed on GitHub windows-latest runners). The WiX project lives
+      # at ferrocrypt-desktop/wix/main.wxs and was generated with `cargo wix
+      # init`.
+      - name: Install cargo-wix (Windows)
+        if: runner.os == 'Windows'
+        run: cargo install cargo-wix --locked
+
+      - name: Bundle Desktop (Windows MSI)
+        if: runner.os == 'Windows'
+        working-directory: ferrocrypt-desktop
+        run: cargo wix --target ${{ matrix.target }} --nocapture
 
       # ── Package ─────────────────────────────────────────────────────────
 
@@ -101,6 +113,11 @@ jobs:
       - name: Package Desktop (linux)
         if: runner.os == 'Linux'
         run: cp ferrocrypt-desktop/target/${{ matrix.target }}/release/bundle/deb/*.deb FerroCrypt-${{ matrix.target }}.deb
+
+      - name: Package Desktop (windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: cp ferrocrypt-desktop/target/wix/*.msi FerroCrypt-${{ matrix.target }}.msi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

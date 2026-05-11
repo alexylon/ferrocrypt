@@ -2,6 +2,9 @@
 name = "ferrocrypt-desktop"
 version = "0.3.0-beta.1"
 edition = "2021"
+description = "Desktop application for FerroCrypt — passphrase and public-key file/directory encryption."
+authors = ["Alexander Alexandrov"]
+license = "GPL-3.0-only"
 publish = false
 
 [dependencies]
@@ -13,6 +16,12 @@ arboard = "3"
 
 [build-dependencies]
 slint-build = "1"
+
+# cargo-wix is used for the Windows MSI build (cargo-bundle's MSI backend is
+# unimplemented). Suppress the EULA dialog (license-screen) for the installer;
+# the GPL-3.0 text is shipped with the binary, not as an installer screen.
+[package.metadata.wix]
+eula = false
 
 [package.metadata.bundle]
 name = "FerroCrypt"

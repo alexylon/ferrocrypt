@@ -77,9 +77,9 @@ Pre-built CLI binaries and desktop packages are published on the [GitHub Release
 Available release artifacts include:
 
 - CLI binaries for macOS, Linux, and Windows
-- Desktop packages for macOS and Debian/Ubuntu (Windows desktop is not currently packaged — build from source)
+- Desktop packages for macOS, Debian/Ubuntu, and Windows
 
-> **macOS:** On first run, macOS may block the app. After the block, open System Settings → Privacy & Security and scroll to the *Security* section. A line will appear there saying *"FerroCrypt" was blocked to protect your Mac*, with an *Open Anyway* button next to it — click that button. The button is only available for about an hour after the first blocked launch attempt.
+> **macOS:** On first run, macOS may block the app. When the warning dialog appears, click *Done*. Then open System Settings → Privacy & Security and scroll to the *Security* section. A line will appear there saying *"FerroCrypt" was blocked to protect your Mac*, with an *Open Anyway* button next to it — click that button. The button is only available for about an hour after the first blocked launch attempt.
 
 ### Rust library
 

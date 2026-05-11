@@ -24,12 +24,16 @@ FerroCrypt is a pure Rust library, CLI, and desktop application for encrypting a
   <img src="/assets/screenshot-4.png" width="400" alt="FerroCrypt">
 </div>
 
-> **Status:** `main` is the in-development branch for the upcoming **v0.3.0** release.
-> The crates published on crates.io (`0.2.5`) use the previous on-disk format and
-> CLI; everything below describes the v0.3.0 line. Until v0.3.0 ships, files
-> produced by `main` are not interchangeable with `0.2.5`, **further breaking
-> changes (wire format, public API, CLI) may land before the final v0.3.0 cut**,
-> and any pre-release `main` artefact should be treated as unstable. See the
+> **Status:** This repository is preparing the **v0.3.0** release. The latest
+> stable release on crates.io is `0.2.5`, which uses the previous on-disk format
+> and CLI; everything below describes the v0.3.0 line. Pre-releases of v0.3.0
+> (`0.3.0-alpha.N`, `0.3.0-beta.N`, `0.3.0-rc.N`) may be published to crates.io
+> and GitHub Releases. They are opt-in — `cargo add ferrocrypt` will not select
+> them automatically; the exact version must be pinned in `Cargo.toml`.
+> **Further breaking changes (wire format, public API, CLI) may land between
+> pre-releases and before the final v0.3.0 cut.** Files produced by any
+> pre-release or by `main` are not interchangeable with `0.2.5`, and any
+> pre-release artefact should be treated as unstable until v0.3.0 ships. See the
 > [`[Unreleased]` section of `CHANGELOG.md`](CHANGELOG.md#unreleased) for the
 > full list of breaking changes so far.
 
@@ -56,7 +60,11 @@ Available release artifacts include:
 ### Rust library
 
 ```bash
+# Latest stable (currently 0.2.5 — previous on-disk format and API)
 cargo add ferrocrypt
+
+# Pre-release of v0.3.0 (opt-in; required to use the v0.3.0 features documented below)
+cargo add ferrocrypt@0.3.0-beta.1
 ```
 
 API documentation is available on [docs.rs](https://docs.rs/ferrocrypt/latest/ferrocrypt/).
@@ -66,7 +74,11 @@ API documentation is available on [docs.rs](https://docs.rs/ferrocrypt/latest/fe
 Install from crates.io:
 
 ```bash
+# Latest stable (currently 0.2.5)
 cargo install ferrocrypt-cli
+
+# Pre-release of v0.3.0 (opt-in; required to use the v0.3.0 CLI documented below)
+cargo install ferrocrypt-cli --version 0.3.0-beta.1
 ```
 
 Or build from source:

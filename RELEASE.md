@@ -59,16 +59,37 @@ cargo release minor --execute
 cargo release major --execute
 ```
 
-**Note:** Always specify a version level (patch/minor/major). Running `cargo release` without a level will try to re-release the current version.
+**Note:** Always pass either a version level (`patch` / `minor` / `major` / `alpha` / `beta` / `rc` / `release`) or an explicit version string (e.g., `0.3.0-beta.1`). Running `cargo release` without an argument will try to re-release the current version.
 
-### 4. Release Without Publishing to crates.io
+### 4. Pre-release (alpha / beta / rc)
+For shipping a pre-release version (e.g., `0.3.0-beta.1`) before the final `0.3.0`:
+
+```bash
+# First pre-release — specify the exact version
+cargo release 0.3.0-beta.1 --execute
+
+# Subsequent pre-releases — bumps the suffix automatically
+cargo release beta --execute     # 0.3.0-beta.1 → 0.3.0-beta.2
+
+# Promote to final release — drops the pre-release suffix
+cargo release release --execute  # 0.3.0-beta.N → 0.3.0
+```
+
+The same workflow applies with `alpha` or `rc` identifiers (`0.3.0-alpha.1`, `0.3.0-rc.1`).
+
+**Notes:**
+- The Git tag includes the suffix: `v0.3.0-beta.1`.
+- Cargo does not auto-select pre-releases. Consumers must opt in by writing the exact version in their `Cargo.toml` (e.g., `ferrocrypt = "0.3.0-beta.1"`).
+- Breaking changes are allowed between pre-releases and before the final release (semver treats pre-release versions as unstable by design).
+
+### 5. Release Without Publishing to crates.io
 If you want to skip publishing:
 
 ```bash
 cargo release patch --execute --no-publish
 ```
 
-### 5. Release Without Pushing to Git
+### 6. Release Without Pushing to Git
 For testing/staging:
 
 ```bash

@@ -56,7 +56,12 @@ jobs:
 
       # ── Desktop app (excluded from workspace) ──────────────────────────
 
+      # cargo-bundle's Windows MSI backend is experimental and currently fails
+      # on the resource-collection step. Skip Windows desktop bundling for now;
+      # Windows users still get the CLI archive and can build the desktop app
+      # from source.
       - name: Bundle Desktop
+        if: runner.os != 'Windows'
         working-directory: ferrocrypt-desktop
         run: cargo bundle --release --target ${{ matrix.target }}
 
@@ -84,11 +89,6 @@ jobs:
       - name: Package Desktop (linux)
         if: runner.os == 'Linux'
         run: cp ferrocrypt-desktop/target/${{ matrix.target }}/release/bundle/deb/*.deb FerroCrypt-${{ matrix.target }}.deb
-
-      - name: Package Desktop (windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: cp ferrocrypt-desktop/target/${{ matrix.target }}/release/bundle/msi/*.msi FerroCrypt-${{ matrix.target }}.msi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

@@ -37,6 +37,28 @@ FerroCrypt is a pure Rust library, CLI, and desktop application for encrypting a
 > [`[Unreleased]` section of `CHANGELOG.md`](CHANGELOG.md#unreleased) for the
 > full list of breaking changes so far.
 
+## Table of contents
+
+- [Overview](#overview)
+- [Installation](#installation)
+  - [Rust library](#rust-library)
+  - [Command-line interface](#command-line-interface)
+  - [Desktop application](#desktop-application)
+- [Command-line usage](#command-line-usage)
+  - [Password-based encryption](#password-based-encryption)
+  - [Public-key encryption](#public-key-encryption)
+  - [Interactive mode](#interactive-mode)
+  - [Subcommands](#subcommands)
+  - [Common options](#common-options)
+- [Desktop application](#desktop-application-1)
+- [Main properties](#main-properties)
+- [Security and limitations](#security-and-limitations)
+- [Decryption errors](#decryption-errors)
+- [Technical reference](#technical-reference)
+- [Rust version support](#rust-version-support)
+- [License](#license)
+- [Acknowledgments](#acknowledgments)
+
 ## Overview
 
 FerroCrypt encrypts a file or directory into a single `.fcr` file. Each file carries one or more typed recipients — any one of them can unlock the same encrypted payload:
@@ -56,6 +78,8 @@ Available release artifacts include:
 
 - CLI binaries for macOS, Linux, and Windows
 - Desktop packages for macOS, Debian/Ubuntu, Fedora/RHEL, and Windows
+
+> **macOS:** On first run, macOS may block the app. After the block, open System Settings → Privacy & Security and scroll to the *Security* section. A line will appear there saying *"FerroCrypt" was blocked to protect your Mac*, with an *Open Anyway* button next to it — click that button. The button is only available for about an hour after the first blocked launch attempt.
 
 ### Rust library
 

@@ -83,19 +83,19 @@ jobs:
       - name: Package Desktop (macOS)
         if: runner.os == 'macOS'
         run: |
-          cd target/${{ matrix.target }}/release/bundle/osx
-          zip -r ../../../../../FerroCrypt-${{ matrix.target }}.zip FerroCrypt.app
+          cd ferrocrypt-desktop/target/${{ matrix.target }}/release/bundle/osx
+          zip -r "$GITHUB_WORKSPACE/FerroCrypt-${{ matrix.target }}.zip" FerroCrypt.app
 
       - name: Package Desktop (linux)
         if: runner.os == 'Linux'
         run: |
-          cp target/${{ matrix.target }}/release/bundle/deb/*.deb FerroCrypt-${{ matrix.target }}.deb
-          cp target/${{ matrix.target }}/release/bundle/rpm/*.rpm FerroCrypt-${{ matrix.target }}.rpm
+          cp ferrocrypt-desktop/target/${{ matrix.target }}/release/bundle/deb/*.deb FerroCrypt-${{ matrix.target }}.deb
+          cp ferrocrypt-desktop/target/${{ matrix.target }}/release/bundle/rpm/*.rpm FerroCrypt-${{ matrix.target }}.rpm
 
       - name: Package Desktop (windows)
         if: runner.os == 'Windows'
         shell: bash
-        run: cp target/${{ matrix.target }}/release/bundle/msi/*.msi FerroCrypt-${{ matrix.target }}.msi
+        run: cp ferrocrypt-desktop/target/${{ matrix.target }}/release/bundle/msi/*.msi FerroCrypt-${{ matrix.target }}.msi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

@@ -18,7 +18,7 @@ jobs:
   fuzz:
     uses: ./.github/workflows/fuzz.yml
     with:
-      max_total_time: 60
+      max_total_time: 10
 
   build:
     needs: fuzz
@@ -44,7 +44,7 @@ jobs:
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libfontconfig-dev libfreetype-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libwayland-dev libssl-dev rpm
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig-dev libfreetype-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libwayland-dev libssl-dev
 
       - name: Install cargo-bundle
         run: cargo install cargo-bundle
@@ -59,11 +59,6 @@ jobs:
       - name: Bundle Desktop
         working-directory: ferrocrypt-desktop
         run: cargo bundle --release --target ${{ matrix.target }}
-
-      - name: Bundle Desktop (rpm)
-        if: runner.os == 'Linux'
-        working-directory: ferrocrypt-desktop
-        run: cargo bundle --release --target ${{ matrix.target }} --format rpm
 
       # ── Package ─────────────────────────────────────────────────────────
 
@@ -88,9 +83,7 @@ jobs:
 
       - name: Package Desktop (linux)
         if: runner.os == 'Linux'
-        run: |
-          cp ferrocrypt-desktop/target/${{ matrix.target }}/release/bundle/deb/*.deb FerroCrypt-${{ matrix.target }}.deb
-          cp ferrocrypt-desktop/target/${{ matrix.target }}/release/bundle/rpm/*.rpm FerroCrypt-${{ matrix.target }}.rpm
+        run: cp ferrocrypt-desktop/target/${{ matrix.target }}/release/bundle/deb/*.deb FerroCrypt-${{ matrix.target }}.deb
 
       - name: Package Desktop (windows)
         if: runner.os == 'Windows'

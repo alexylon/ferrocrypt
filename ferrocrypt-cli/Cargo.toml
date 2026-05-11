@@ -27,7 +27,7 @@ rpassword = "7"
 rustyline = "17"
 shell-words = "1"
 subtle = "2"
-ferrocrypt = { path = "../ferrocrypt-lib", version = "0.2" }
+ferrocrypt = { path = "../ferrocrypt-lib", version = "0.3.0-beta.1" }
 
 [dev-dependencies]
 ctor = "0.2"

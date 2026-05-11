@@ -1,7 +1,15 @@
 
 # cargo-vet audits file
 
-[audits]
+[[audits.ferrocrypt]]
+who = "Alexander Alexandrov <git@alexo.io>"
+criteria = "safe-to-deploy"
+version = "0.3.0-beta.1"
+
+[[audits.ferrocrypt-cli]]
+who = "Alexander Alexandrov <git@alexo.io>"
+criteria = "safe-to-deploy"
+version = "0.3.0-beta.1"
 
 [[trusted.anstream]]
 criteria = "safe-to-deploy"

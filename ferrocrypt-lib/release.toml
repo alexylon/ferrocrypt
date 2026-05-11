@@ -1,5 +1,8 @@
-# Package-specific release config for ferrocrypt (lib)
-# CHANGELOG lives at workspace root, so path is relative to this package dir
+# Package-specific release config for ferrocrypt (lib).
+# Paths in [[pre-release-replacements]] are relative to this package directory.
+# CHANGELOG lives at the workspace root; ferrocrypt-desktop is excluded from
+# the workspace and therefore not handled by shared-version, so its version is
+# synced here.
 
 [[pre-release-replacements]]
 file = "../CHANGELOG.md"
@@ -9,3 +12,9 @@ replace = """## [Unreleased]
 ## [{{version}}] - {{date}}
 
 """
+
+[[pre-release-replacements]]
+file = "../ferrocrypt-desktop/Cargo.toml"
+search = '^version = ".*"'
+replace = 'version = "{{version}}"'
+exactly = 1

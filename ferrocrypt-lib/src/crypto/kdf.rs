@@ -249,16 +249,18 @@ impl KdfParams {
     ///
     /// # Errors
     ///
-    /// Returns [`CryptoError::InvalidInput`] if the passphrase exceeds the
-    /// 4 KiB structural cap. Argon2id itself is unreachable for valid
-    /// input — the crate validates `KdfParams` against the same structural
-    /// bounds the Argon2id primitive accepts before reaching this method —
-    /// so any Argon2 failure surfaces as [`CryptoError::InternalCryptoFailure`].
+    /// Returns [`CryptoError::InvalidKdfParams`] if `mem_cost`, `time_cost`,
+    /// or `lanes` are outside the v1 structural bounds, and
+    /// [`CryptoError::InvalidInput`] if the passphrase exceeds the 4 KiB
+    /// structural cap. Both are checked before Argon2id runs, so any Argon2
+    /// failure on the validated input surfaces as
+    /// [`CryptoError::InternalCryptoFailure`].
     pub fn hash_passphrase(
         &self,
         passphrase: &[u8],
         salt: &[u8],
     ) -> Result<Zeroizing<[u8; ENCRYPTION_KEY_SIZE]>, CryptoError> {
+        self.validate_structural()?;
         if passphrase.len() > MAX_PASSPHRASE_LEN_BYTES {
             return Err(CryptoError::InvalidInput(format!(
                 "Passphrase exceeds {MAX_PASSPHRASE_LEN_BYTES}-byte structural cap"
@@ -485,5 +487,25 @@ mod tests {
             Err(other) => panic!("expected KdfResourceCapExceeded, got: {other}"),
             Ok(_) => panic!("None limit must apply default ceiling"),
         }
+    }
+
+    /// `hash_passphrase` is `pub`, so a direct caller can hand it a
+    /// `KdfParams` with out-of-policy fields. A `time_cost` above the v1
+    /// maximum — which `argon2::Params::new` itself would accept — must
+    /// reject as `InvalidKdfParams` before Argon2id runs.
+    #[test]
+    fn hash_passphrase_rejects_structurally_invalid_params() {
+        let params = KdfParams {
+            mem_cost: 8,
+            time_cost: KdfParams::MAX_TIME_COST + 1,
+            lanes: 1,
+        };
+        let err = params
+            .hash_passphrase(b"pw", &[0u8; ARGON2_SALT_SIZE])
+            .unwrap_err();
+        assert!(
+            matches!(err, CryptoError::InvalidKdfParams(_)),
+            "expected InvalidKdfParams, got {err:?}"
+        );
     }
 }

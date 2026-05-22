@@ -56,9 +56,11 @@ pub(crate) fn open_file_key(
 ) -> Result<FileKey, CryptoError> {
     let cipher = XChaCha20Poly1305::new(wrap_key.into());
     let nonce = XNonce::from_slice(wrap_nonce);
-    let plaintext = cipher
-        .decrypt(nonce, wrapped.as_ref())
-        .map_err(|_| on_fail())?;
+    let plaintext = Zeroizing::new(
+        cipher
+            .decrypt(nonce, wrapped.as_ref())
+            .map_err(|_| on_fail())?,
+    );
     let mut out = Zeroizing::new([0u8; FILE_KEY_SIZE]);
     if plaintext.len() != FILE_KEY_SIZE {
         return Err(CryptoError::InternalInvariant(

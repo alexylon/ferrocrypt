@@ -1163,7 +1163,7 @@ protocol.rs
 
 Dependency rules:
 
-- `format.rs` depends on no FerroCrypt-specific modules except errors.
+- `format.rs` depends only on `error.rs` and the `crypto/` primitive layer (`crypto/mac` and `crypto/keys`), the latter for the typed `compute_header_mac` / `verify_header_mac` wrappers; it does not depend on any higher-layer module.
 - `crypto/*` does not depend on `protocol.rs`, `archive/*`, or `fs/*`.
 - `recipient/native/*` does not call `container.rs` or `archive/*`.
 - `archive/*` does not know about recipients, keys, or encrypted-header structure.

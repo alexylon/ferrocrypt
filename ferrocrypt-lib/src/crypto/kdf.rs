@@ -134,12 +134,12 @@ impl KdfParams {
     /// Field-level structural validation against v1 absolute bounds
     /// (`MAX_LANES`, `MAX_TIME_COST`, `MAX_MEM_COST`, plus the Argon2
     /// `mem_cost >= ARGON2_MIN_MEM_COST_PER_LANE * lanes` floor).
-    /// Shared by [`from_bytes_structural`](Self::from_bytes_structural)
-    /// (after parsing wire bytes) and
-    /// [`validate_for_write`](Self::validate_for_write) (against
-    /// caller-supplied params); single source of truth for the rule
-    /// set. Does **not** apply any caller resource policy.
-    fn validate_structural(&self) -> Result<(), CryptoError> {
+    /// Single source of truth for the rule set, called by
+    /// [`from_bytes_structural`](Self::from_bytes_structural) (reader),
+    /// [`validate_for_write`](Self::validate_for_write) (writer preflight),
+    /// and `key::private::seal_private_key` (writer-side structural
+    /// re-check). Does **not** apply any caller resource policy.
+    pub(crate) fn validate_structural(&self) -> Result<(), CryptoError> {
         if self.lanes == 0 || self.lanes > Self::MAX_LANES {
             return Err(CryptoError::InvalidKdfParams(
                 InvalidKdfParams::Parallelism(self.lanes),
@@ -507,5 +507,27 @@ mod tests {
             matches!(err, CryptoError::InvalidKdfParams(_)),
             "expected InvalidKdfParams, got {err:?}"
         );
+    }
+
+    /// B6-01 regression: a writer whose resource policy is applied
+    /// upstream (e.g. `KeyPairGenerator::write`) must re-check KDF
+    /// params with `validate_structural`, not `validate_for_write(None)`.
+    /// A `mem_cost` between the 1 GiB default and the 2 GiB structural
+    /// max is structurally valid; `validate_for_write(None)` rejects it
+    /// by re-imposing the default ceiling.
+    #[test]
+    fn above_default_mem_cost_passes_structural_but_validate_for_write_none_rejects() {
+        let params = KdfParams {
+            mem_cost: KdfParams::DEFAULT_MEM_COST + 1,
+            time_cost: 4,
+            lanes: 4,
+        };
+        params
+            .validate_structural()
+            .expect("1-2 GiB band is structurally valid");
+        match params.validate_for_write(None) {
+            Err(CryptoError::KdfResourceCapExceeded { .. }) => {}
+            other => panic!("expected KdfResourceCapExceeded, got {other:?}"),
+        }
     }
 }

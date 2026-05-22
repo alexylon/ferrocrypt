@@ -325,12 +325,12 @@ pub(crate) fn seal_private_key(
     passphrase: &SecretString,
     kdf_params: &KdfParams,
 ) -> Result<Vec<u8>, CryptoError> {
-    // Pin writer/reader symmetry: every byte the writer commits to disk
-    // must satisfy the rules the reader's parser will later enforce.
-    // Without this, a future caller could omit `validate_for_write` and
-    // produce a structurally-invalid `private.key` whose Argon2id work
-    // is wasted because no reader will accept it.
-    (*kdf_params).validate_for_write(None)?;
+    // Writer/reader symmetry: structural validation only — the same
+    // check the reader's parser applies. The resource cap (`KdfLimit`)
+    // is api-layer policy, already enforced before this function runs;
+    // re-applying it here (e.g. `validate_for_write`) would re-impose
+    // the 1 GiB default and reject a caller-raised `kdf_limit`.
+    kdf_params.validate_structural()?;
     validate_type_name_grammar(type_name)?;
 
     let type_name_bytes = type_name.as_bytes();

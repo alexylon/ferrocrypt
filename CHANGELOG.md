@@ -4,6 +4,9 @@ All notable changes to FerroCrypt are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **`KeyPairGenerator` now honors a `kdf_limit` raised above the 1 GiB default.** Generating a key pair with `kdf_params.mem_cost` above 1 GiB together with a matching `KeyPairGenerator::kdf_limit` was wrongly rejected with `KdfResourceCapExceeded`; the private-key writer no longer re-imposes the default memory ceiling.
+
 ## [0.3.0-beta.1] - 2026-05-11
 
 ### Added

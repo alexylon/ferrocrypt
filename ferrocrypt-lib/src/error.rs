@@ -1036,6 +1036,10 @@ mod tests {
             StreamError::StateExhausted.to_string(),
             "Internal error: stream state already finalized"
         );
+        assert_eq!(
+            StreamError::ChunkCountExceeded.to_string(),
+            "Encrypted stream exceeds chunk-count cap"
+        );
     }
 
     /// Budget: every static user-facing `CryptoError` message — plus
@@ -1321,6 +1325,10 @@ mod tests {
             "StreamError::StateExhausted",
             &StreamError::StateExhausted.to_string(),
         );
+        check(
+            "StreamError::ChunkCountExceeded",
+            &StreamError::ChunkCountExceeded.to_string(),
+        );
     }
 
     /// `StreamError` markers must downcast back into their typed
@@ -1345,6 +1353,10 @@ mod tests {
         assert!(matches!(
             from_marker(StreamError::ExtraData),
             CryptoError::ExtraDataAfterPayload
+        ));
+        assert!(matches!(
+            from_marker(StreamError::ChunkCountExceeded),
+            CryptoError::PayloadChunkCountExceeded
         ));
         match from_marker(StreamError::EncryptAead) {
             CryptoError::InternalCryptoFailure(msg) => {

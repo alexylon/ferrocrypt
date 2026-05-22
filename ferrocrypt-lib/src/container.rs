@@ -309,15 +309,19 @@ impl std::fmt::Debug for BuiltEncryptedHeader {
 ///    UnsupportedVersion / MalformedHeader / OversizedHeader);
 /// 2. enforce `prefix.header_len <= limits.max_header_len`;
 /// 3. read the entire `header_len`-byte `header` region into one buffer;
-/// 4. parse the leading 31 bytes as `header_fixed` → [`HeaderFixed::parse`]
+/// 4. read the 32-byte header MAC tag into a fixed-size buffer. Steps 3
+///    and 4 are the container's framing reads and complete before any
+///    structural parse: per `FORMAT.md` §3.7 step 3, early EOF in either
+///    surfaces as [`FormatDefect::Truncated`] rather than a downstream
+///    structural defect;
+/// 5. parse the leading 31 bytes as `header_fixed` → [`HeaderFixed::parse`]
 ///    (header_flags == 0, recipient_count in range, ext_len in range,
 ///    region lengths self-consistent);
-/// 5. enforce `recipient_count <= limits.max_recipient_count`;
-/// 6. parse the recipient list from `header[31..31+recipient_entries_len]`,
+/// 6. enforce `recipient_count <= limits.max_recipient_count`;
+/// 7. parse the recipient list from `header[31..31+recipient_entries_len]`,
 ///    enforcing `body_len <= limits.max_recipient_body_len` per entry;
-/// 7. capture the trailing `ext_bytes` slice (TLV validation deferred
+/// 8. capture the trailing `ext_bytes` slice (TLV validation deferred
 ///    to AFTER MAC verification — see `FORMAT.md` §3.7);
-/// 8. read the 32-byte header MAC tag;
 /// 9. return the parsed header. **MAC is not yet verified.**
 pub(crate) fn read_encrypted_header<R: Read>(
     reader: &mut R,
@@ -331,6 +335,14 @@ pub(crate) fn read_encrypted_header<R: Read>(
     let header_len = prefix.header_len as usize;
     let mut header_bytes = vec![0u8; header_len];
     read_exact_or_truncated(reader, &mut header_bytes)?;
+
+    // Per `FORMAT.md` §3.7 step 3, the MAC-tag read is a framing read:
+    // it MUST complete (or fail as `Truncated`) before any structural
+    // parse runs. Otherwise a file that omits the MAC bytes could
+    // surface as `MalformedHeader` first and mask the simpler
+    // "file is truncated" diagnostic.
+    let mut header_mac = [0u8; HEADER_MAC_SIZE];
+    read_exact_or_truncated(reader, &mut header_mac)?;
 
     // `header_len >= HEADER_FIXED_SIZE` was already enforced by
     // `Prefix::parse` via `check_header_len`, so `first_chunk` is
@@ -361,9 +373,6 @@ pub(crate) fn read_encrypted_header<R: Read>(
     )?;
 
     let ext_bytes = header_bytes[entries_end..ext_end].to_vec();
-
-    let mut header_mac = [0u8; HEADER_MAC_SIZE];
-    read_exact_or_truncated(reader, &mut header_mac)?;
 
     Ok(ParsedEncryptedHeader {
         prefix_bytes,
@@ -961,6 +970,71 @@ mod tests {
             } if body_len as usize == oversize_body_len && local_cap == local_body_cap => {}
             other => panic!(
                 "expected RecipientBodyCapExceeded({oversize_body_len}, {local_body_cap}), got {other:?}"
+            ),
+        }
+    }
+
+    /// A file that carries a complete, well-formed `header` region but
+    /// stops before the 32-byte MAC tag MUST reject as
+    /// `InvalidFormat(Truncated)`. Pins the framing-vs-structural-parse
+    /// ordering required by `FORMAT.md` §3.7 step 3: both the `header`
+    /// and `header_mac` reads are framing reads and complete before any
+    /// structural parse runs.
+    #[test]
+    fn read_rejects_missing_mac_tag_as_truncated() {
+        let DerivedSubkeys {
+            payload_key,
+            header_key,
+        } = dummy_subkeys();
+        let stream_nonce = [0x07u8; STREAM_NONCE_SIZE];
+        let entry = dummy_entry(argon2id::TYPE_NAME, argon2id::BODY_LENGTH);
+        let built =
+            build_encrypted_header(&[entry], b"", stream_nonce, payload_key, &header_key).unwrap();
+
+        // Prefix + header, but the 32-byte MAC tag is missing.
+        let mut bytes = Vec::with_capacity(built.prefix_bytes.len() + built.header_bytes.len());
+        bytes.extend_from_slice(&built.prefix_bytes);
+        bytes.extend_from_slice(&built.header_bytes);
+
+        match read_encrypted_header(&mut bytes.as_slice(), HeaderReadLimits::default()) {
+            Err(CryptoError::InvalidFormat(FormatDefect::Truncated)) => {}
+            other => panic!("expected InvalidFormat(Truncated), got {other:?}"),
+        }
+    }
+
+    /// If a file's `header` region is structurally malformed AND the
+    /// MAC tag is missing, the framing-level `Truncated` diagnostic MUST
+    /// fire before the structural `MalformedHeader` defect. Otherwise the
+    /// reader would surface the downstream parse error and hide the
+    /// simpler "file is truncated" cause, contradicting `FORMAT.md`
+    /// §3.7 step 3.
+    #[test]
+    fn read_returns_truncated_before_structural_error_when_mac_missing() {
+        let DerivedSubkeys {
+            payload_key,
+            header_key,
+        } = dummy_subkeys();
+        let stream_nonce = [0x07u8; STREAM_NONCE_SIZE];
+        let entry = dummy_entry(argon2id::TYPE_NAME, argon2id::BODY_LENGTH);
+        let built =
+            build_encrypted_header(&[entry], b"", stream_nonce, payload_key, &header_key).unwrap();
+
+        // Tamper the high byte of `header_flags` (offset 0 inside
+        // `header_fixed`) so a non-zero value is read. If the structural
+        // parse ever ran, this would surface as
+        // `InvalidFormat(MalformedHeader)` via `check_header_flags`.
+        let mut header_bytes = built.header_bytes.clone();
+        header_bytes[0] = 0x01;
+
+        let mut bytes = Vec::with_capacity(built.prefix_bytes.len() + header_bytes.len());
+        bytes.extend_from_slice(&built.prefix_bytes);
+        bytes.extend_from_slice(&header_bytes);
+        // No MAC tag appended.
+
+        match read_encrypted_header(&mut bytes.as_slice(), HeaderReadLimits::default()) {
+            Err(CryptoError::InvalidFormat(FormatDefect::Truncated)) => {}
+            other => panic!(
+                "expected InvalidFormat(Truncated) (framing precedes structural parse), got {other:?}"
             ),
         }
     }

@@ -6,6 +6,7 @@ All notable changes to FerroCrypt are documented in this file.
 
 ### Fixed
 - **`KeyPairGenerator` now honors a `kdf_limit` raised above the 1 GiB default.** Generating a key pair with `kdf_params.mem_cost` above 1 GiB together with a matching `KeyPairGenerator::kdf_limit` was wrongly rejected with `KdfResourceCapExceeded`; the private-key writer no longer re-imposes the default memory ceiling.
+- **`.fcr` files missing the 32-byte header MAC tag are now always reported as truncated.** A file that was both structurally malformed and missing its MAC tag could previously surface `InvalidFormat(MalformedHeader)` ("File header is malformed") instead of `InvalidFormat(Truncated)` ("File is truncated or corrupted"). The header parser now reads the MAC tag immediately after the header region, before any structural parse — matching the decryption order in `FORMAT.md` §3.7.
 
 ## [0.3.0-beta.1] - 2026-05-11
 

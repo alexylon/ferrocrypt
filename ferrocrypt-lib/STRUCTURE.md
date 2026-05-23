@@ -820,21 +820,25 @@ Hardlinks are archived as independent regular-file contents (no link identity is
 
 `archive/decode.rs` owns the FCA reader: header + manifest parse with full validation, then content extraction via the hardened cap-std platform backend.
 
-The reader pipeline matches spec §16.1 (steps 1–5 MUST complete before any filesystem output):
+The reader pipeline matches `FORMAT.md` §9.11. Steps 1–8 MUST complete before any filesystem output:
 
-1. parse and validate the header;
-2. read exactly `manifest_len` bytes;
-3. parse the manifest with full per-entry shape + path-grammar validation;
-4. validate the manifest tree shape (single root, parents present, duplicates rejected, total bytes match);
-5. pre-check the final output name with `symlink_metadata` (so a dangling symlink at the final name counts as occupied);
-6. open `output_dir` as a `cap-std` directory handle;
-7. create `{root}.incomplete` (file or directory);
-8. pre-create all descendant directories under `.incomplete` (parent-before-child);
-9. stream file contents in manifest order via `copy_exact_n`;
-10. verify archive EOF (no trailing bytes);
-11. apply descendant directory modes deepest-first;
-12. promote `{root}.incomplete` to `{root}` via no-clobber rename;
-13. apply the root entry's stored mode AFTER promotion. For directory roots this is macOS compatibility (a non-search-permitted root mode would block the rename); for regular-file roots this prevents a permissive manifest mode (e.g. `0o644`) from being briefly visible at the staged or final name while the file still holds plaintext.
+1. parse and validate the FCA fixed header;
+2. read exactly `archive_ext_len` bytes;
+3. validate the archive-level TLV region;
+4. read exactly `manifest_len` bytes;
+5. parse the manifest, including each per-entry extension region;
+6. validate every per-entry TLV region;
+7. validate the complete manifest (entry count, total bytes, paths, duplicates, tree shape, parents present, resource caps, critical extension support);
+8. pre-check the final output name with `symlink_metadata` (so a dangling symlink at the final name counts as occupied);
+9. open `output_dir` as a `cap-std` directory handle;
+10. reject pre-existing `.incomplete` output at first create;
+11. create `{root}.incomplete` (file or directory);
+12. stream file contents in manifest order via `copy_exact_n`;
+13. verify archive EOF (no trailing bytes);
+14. apply descendant directory modes deepest-first;
+15. promote `{root}.incomplete` to `{root}` via no-clobber rename;
+16. apply the root entry's stored mode AFTER promotion. For directory roots this is macOS compatibility (a non-search-permitted root mode would block the rename); for regular-file roots this prevents a permissive manifest mode (e.g. `0o644`) from being briefly visible at the staged or final name while the file still holds plaintext;
+17. return the final output path.
 
 `unarchive` accepts an [`IncompleteOutputPolicy`] from the caller. The default ([`IncompleteOutputPolicy::DeleteOnError`]) best-effort removes the staged `.incomplete` working tree on any decrypt failure; [`IncompleteOutputPolicy::RetainOnError`] preserves it. Cleanup tracks only roots THIS run created — `mkdir_strict` / `create_file_at` push `created_incomplete_roots` only when they actually created the working name, so a pre-existing `.incomplete` from a prior failed run rejects with `Previous .incomplete exists` and is preserved across the retry. Cleanup helper `cleanup_incomplete_via_handle` routes by `symlink_metadata` on the SAME `cap_std::fs::Dir` handle opened for extraction (symlinks removed as symlinks; directories via `remove_dir_all`, which since Rust 1.71 is TOCTOU-hardened on Unix and does not follow descendant symlinks). Anchoring to the capability handle rather than re-resolving `output_dir` by path means a path swap of `output_dir` between failed extraction and cleanup cannot redirect `remove_*` to a different directory. All I/O errors are swallowed so the original `CryptoError` is the value the caller sees.
 
@@ -874,7 +878,16 @@ Archive-specific path rules live in `archive/path.rs`; general output-path and s
 It contains:
 
 - temporary output name generation;
-- no-clobber finalization;
+- no-clobber finalization, split by root shape:
+  - **file roots** (encryption output, key generation, single-file
+    decrypt promotion) go through `tempfile::*::persist_noclobber` —
+    atomic no-replace on every supported platform, Windows included;
+  - **directory roots** (decrypt promotion when the archive root is a
+    directory) go through `rename_no_clobber` — atomic via
+    `rustix::renameat_with(..., RenameFlags::NOREPLACE)` on Linux and
+    macOS, best-effort `symlink_metadata` + `std::fs::rename` on
+    Windows because no safe atomic no-replace directory rename is
+    available there under `#![forbid(unsafe_code)]`;
 - same-directory staging;
 - cleanup on encryption failure;
 - `.incomplete` behavior on decryption failure.

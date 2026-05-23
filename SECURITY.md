@@ -65,22 +65,29 @@ regression net, regenerated when the format intentionally changes).
   an explicit `FollowSymlinks::No` flag. Permissions are always set on
   an open handle, never via a re-resolved path. The same code path
   applies on every supported OS.
-- **Windows final-rename has a tiny race window.** When decryption
-  finishes, FerroCrypt renames the working `.incomplete` file to its
-  final name. On Linux and macOS, the operating system refuses this
-  rename if the final name is already taken — there is no window for
-  another process to interfere. On Windows, the same step is "check,
-  then rename": there is a brief moment in between where another
-  process could create the final name, in which case our rename
-  silently overwrites it. The decrypted file still lands where you
-  asked — Windows renames don't follow symbolic links, so plaintext is
-  never redirected somewhere unexpected. The worst case is that
-  someone else's planted file in your output folder gets destroyed
+- **Windows final-rename is atomic no-clobber for single-file
+  decrypts; directory decrypts still have a tiny race window.** When
+  decryption finishes, FerroCrypt renames the working `.incomplete`
+  entry to its final name. On Linux and macOS, the operating system
+  refuses this rename atomically if the final name is already taken —
+  no window for another process to interfere. On Windows:
+  **single-file** decrypts now route through the kernel's atomic
+  no-replace move (`MoveFileExW` without the replace flag, via the
+  `tempfile` crate), so the kernel performs the existence check and the
+  rename together as a single operation and no race window exists.
+  **Directory** decrypts on Windows still use the older "check, then
+  rename" sequence: a process that creates the final directory name in
+  the brief window between the check and the rename has its entry
+  silently overwritten by ours. The decrypted
+  contents still land where you asked — Windows renames don't follow
+  symbolic links, so plaintext is never redirected somewhere
+  unexpected — and the worst case for the directory path is that
+  someone else's planted entry in your output folder is destroyed
   (integrity, not confidentiality). This matters only when an
   untrusted local process can write to your output folder; typical
-  per-user folders are not reachable. Closing the window fully would
-  require unsafe Windows API code, which the crate currently forbids
-  (`#![forbid(unsafe_code)]`).
+  per-user folders are not reachable. Closing the directory window
+  fully would require unsafe Windows API code, which the crate
+  currently forbids (`#![forbid(unsafe_code)]`).
 - **Pre-v1 files are not forward-compatible.** Older FerroCrypt files
   and key pairs use a different format family. Decrypt them with the
   release that produced them and re-encrypt with the current release.

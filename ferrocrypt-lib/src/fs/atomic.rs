@@ -4,20 +4,29 @@
 //! final name only on success" pattern used throughout the crate for
 //! encrypted-file output, key files, and decrypted directory extraction.
 //!
-//! Two primitives are provided:
+//! Three primitives are provided:
 //!
 //! - [`finalize_file`] — promote a [`tempfile::NamedTempFile`] to its final
 //!   path with atomic no-clobber semantics. Used by encryption output and
 //!   key generation.
+//! - [`promote_single_file_no_clobber`] — promote a staged single-file
+//!   `.incomplete` path to its final name with atomic no-clobber semantics
+//!   on every supported platform, Windows included. Used by archive
+//!   extraction for single-file roots.
 //! - [`rename_no_clobber`] — rename a staged `.incomplete` entry (directory
 //!   or regular file) to its final name with no-clobber semantics. Used by
-//!   archive extraction for both directory roots and single-file roots.
+//!   archive extraction for directory roots, which have no equivalent
+//!   safe atomic primitive on Windows.
 //!
-//! **Zero in-repo unsafe.** The file case delegates entirely to
-//! `tempfile`; the Linux and macOS rename case delegates to `rustix`'s safe
-//! `renameat_with` wrapper; the Windows rename case uses `try_exists()` +
-//! `std::fs::rename`, which keeps the crate zero-unsafe but offers a
-//! somewhat narrower best-effort no-clobber guarantee on that target.
+//! **Zero in-repo unsafe.** The file cases delegate entirely to
+//! `tempfile`, which is atomic-no-replace on Windows (`MoveFileExW`
+//! without the replace flag) and uses
+//! `rustix::renameat_with(..., RenameFlags::NOREPLACE)` on Linux and
+//! macOS. The directory rename case in [`rename_no_clobber`] delegates
+//! to `rustix` directly on Linux and macOS, and on Windows uses
+//! `symlink_metadata()` + `std::fs::rename`, which keeps the crate
+//! zero-unsafe but offers a narrower best-effort no-clobber guarantee
+//! for directory promotion on that target.
 
 use std::io;
 use std::path::Path;
@@ -58,20 +67,68 @@ pub(crate) fn finalize_file(tmp: NamedTempFile, final_path: &Path) -> io::Result
     Ok(())
 }
 
+/// Promotes a staged single-file path `from` to the final name `to`
+/// with atomic no-clobber semantics on every supported platform.
+/// Fails with [`io::ErrorKind::AlreadyExists`] if `to` is already taken.
+///
+/// The underlying primitive is `tempfile::TempPath::persist_noclobber`,
+/// which dispatches to:
+///
+/// - **Windows:** `MoveFileExW(from, to, 0)` — the kernel performs the
+///   test-and-set in one call, closing the check-then-rename race that
+///   [`rename_no_clobber`] still has on this target for the directory
+///   case.
+/// - **Linux / macOS / iOS / Android:**
+///   `rustix::renameat_with(..., RenameFlags::NOREPLACE)`, falling back
+///   to `hard_link` + `unlink` if the kernel or filesystem rejects the
+///   flag (very old Linux, some FUSE / NFS). The fallback preserves
+///   no-clobber (`hard_link` itself refuses an existing target); only
+///   atomicity is briefly relaxed.
+///
+/// Intended for **single-file** promotions only. Directory promotion on
+/// Windows still goes through [`rename_no_clobber`] because no
+/// equivalent safe atomic primitive is available there for directories.
+///
+/// On failure, `from` is left in place so the
+/// `IncompleteOutputPolicy::RetainOnError` contract — "keep the staged
+/// `.incomplete` on disk after a failed decrypt" — continues to hold
+/// when promotion itself is what failed.
+pub(crate) fn promote_single_file_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
+    let temp_path = tempfile::TempPath::from_path(from);
+    match temp_path.persist_noclobber(to) {
+        Ok(()) => {
+            sync_parent_dir(to);
+            Ok(())
+        }
+        Err(e) => {
+            // Recover the staging file: disable cleanup on the
+            // returned TempPath so its destructor does not `remove_file`
+            // it when this match arm ends. RetainOnError relies on
+            // `from` still being on disk after a refused promotion.
+            let mut recovered = e.path;
+            recovered.disable_cleanup(true);
+            Err(e.error)
+        }
+    }
+}
+
 /// Renames `from` to `to`, refusing if `to` already exists. Works for
 /// files and directories.
 ///
-/// - **Linux / macOS:** atomic — `renameat2(RENAME_NOREPLACE)` /
-///   `renameat(RENAME_EXCL)` via `rustix`.
-/// - **Windows:** best-effort. Checks `to` first, then calls
-///   `std::fs::rename`. A small race window exists between the two: a
-///   process that creates `to` in that window has its file silently
-///   overwritten by ours. Plaintext is never redirected (Windows
-///   renames replace the directory entry, not the link target), so the
-///   failure mode is integrity, not confidentiality. Closing this
-///   fully needs Win32 FFI, which the zero-`unsafe` invariant rules
-///   out. See `SECURITY.md`.
+/// - **Linux / macOS:** atomic —
+///   `rustix::renameat_with(..., RenameFlags::NOREPLACE)`.
+/// - **Windows:** best-effort. `symlink_metadata()` + `std::fs::rename`.
+///   A small race window exists between the two: a process that
+///   creates `to` in that window has its file silently overwritten by
+///   ours. Plaintext is never redirected (Windows renames replace the
+///   directory entry, not the link target), so the failure mode is
+///   integrity, not confidentiality. Closing this fully needs Win32
+///   FFI, which the zero-`unsafe` invariant rules out. See
+///   `SECURITY.md`.
 /// - **Other targets:** unsupported.
+///
+/// Single-file promotions should prefer [`promote_single_file_no_clobber`],
+/// which is atomic no-clobber on Windows too.
 pub(crate) fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
     rename_no_clobber_impl(from, to)?;
     sync_parent_dir(to);
@@ -204,6 +261,53 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(fs::read_to_string(&to).unwrap(), "payload");
         assert_eq!(fs::read_to_string(&from).unwrap(), "second");
+    }
+
+    #[test]
+    fn promote_single_file_succeeds_when_target_missing() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let from = tmp_dir.path().join("staged.txt");
+        let to = tmp_dir.path().join("final.txt");
+        fs::write(&from, "payload").unwrap();
+
+        promote_single_file_no_clobber(&from, &to).unwrap();
+        assert!(!from.exists(), "Source should have been moved");
+        assert_eq!(fs::read_to_string(&to).unwrap(), "payload");
+    }
+
+    #[test]
+    fn promote_single_file_refuses_existing_target() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let from = tmp_dir.path().join("staged.txt");
+        let to = tmp_dir.path().join("final.txt");
+        fs::write(&from, "new").unwrap();
+        fs::write(&to, "existing").unwrap();
+
+        let err = promote_single_file_no_clobber(&from, &to).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(&to).unwrap(), "existing");
+    }
+
+    /// Pins the RetainOnError contract at the helper level: when the
+    /// kernel refuses promotion (final name already taken), the staging
+    /// file `from` MUST remain on disk. Regression-protects the
+    /// `disable_cleanup` step inside `promote_single_file_no_clobber`
+    /// against an inadvertent revert that would let `TempPath`'s
+    /// destructor `remove_file(from)` after the failure path returns.
+    #[test]
+    fn promote_single_file_leaves_source_in_place_after_refusal() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let from = tmp_dir.path().join("staged.txt");
+        let to = tmp_dir.path().join("final.txt");
+        fs::write(&from, "new").unwrap();
+        fs::write(&to, "existing").unwrap();
+
+        let _ = promote_single_file_no_clobber(&from, &to).unwrap_err();
+        assert!(
+            from.exists(),
+            "RetainOnError contract: source must remain after refused promotion"
+        );
+        assert_eq!(fs::read_to_string(&from).unwrap(), "new");
     }
 
     /// `sync_parent_dir` is a best-effort durability hint — it MUST

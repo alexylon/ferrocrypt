@@ -48,7 +48,7 @@ use std::path::{Path, PathBuf};
 use cap_std::fs::Dir;
 
 use crate::CryptoError;
-use crate::fs::atomic::rename_no_clobber;
+use crate::fs::atomic::{promote_single_file_no_clobber, rename_no_clobber};
 use crate::fs::paths::{INCOMPLETE_SUFFIX, reject_occupied};
 
 use super::IncompleteOutputPolicy;
@@ -149,10 +149,19 @@ fn unarchive_inner<R: Read>(
         }
 
         // FORMAT.md §9.11 step 15: promote {root}.incomplete → {root}
-        // with no-clobber. A race that creates the final name between
-        // the step-8 pre-check and here is rejected.
+        // with no-clobber. Single-file roots use
+        // `promote_single_file_no_clobber`, which rejects a final-name
+        // race atomically on every supported platform, Windows included.
+        // Directory roots stay on `rename_no_clobber`: atomic on Linux
+        // and macOS, best-effort on Windows because no safe atomic
+        // directory rename is available there. See `SECURITY.md`.
         let working_path = output_dir.join(&incomplete_name);
-        rename_no_clobber(&working_path, &final_path).map_err(|e| {
+        let promote_result = if manifest.root_is_file {
+            promote_single_file_no_clobber(&working_path, &final_path)
+        } else {
+            rename_no_clobber(&working_path, &final_path)
+        };
+        promote_result.map_err(|e| {
             map_already_exists(CryptoError::Io(e), "Output already exists", &final_path)
         })?;
 

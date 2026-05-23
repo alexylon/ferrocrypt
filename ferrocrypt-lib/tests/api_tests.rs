@@ -1112,3 +1112,58 @@ fn encryptor_passphrase_rejects_dangling_symlink_at_output_before_kdf() {
         "Argon2id ran before the dangling-symlink preflight"
     );
 }
+
+/// `PrivateKeyDecryptor::decrypt` re-probes the input before the
+/// `private.key` unlock. A file replacement between `Decryptor::open`
+/// and `.decrypt` must not trigger the Argon2id unlock or its
+/// `UnlockingPrivateKey` event.
+#[test]
+fn private_key_decrypt_re_probes_input_before_unlock() {
+    let work = fresh_workspace("private_key_decrypt_re_probe");
+    let keys = work.join("keys");
+    fs::create_dir_all(&keys).unwrap();
+    let kg = generate_key_pair(&keys, pass(), |_| {}).expect("keygen");
+    let input = work.join("data.txt");
+    fs::write(&input, b"payload").unwrap();
+    let out_dir = work.join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+
+    let outcome = Encryptor::with_public_key(PublicKey::from_key_file(&kg.public_key_path))
+        .write(&input, &out_dir, |_| {})
+        .expect("encrypt");
+
+    let decryptor = match Decryptor::open(&outcome.output_path).expect("open") {
+        Decryptor::PrivateKey(d) => d,
+        other => panic!("expected private-key decryptor, got {other:?}"),
+    };
+
+    // Simulate a hostile path swap between `open` and `decrypt`:
+    // replace the .fcr bytes with something that fails the magic check.
+    fs::write(&outcome.output_path, b"NOT-AN-FCR-FILE").unwrap();
+
+    let unlock_event_count = std::cell::Cell::new(0u32);
+    let restore = work.join("restored");
+    fs::create_dir_all(&restore).unwrap();
+    let err = decryptor
+        .decrypt(
+            PrivateKey::from_key_file(&kg.private_key_path),
+            pass(),
+            &restore,
+            |evt| {
+                if matches!(evt, ferrocrypt::ProgressEvent::UnlockingPrivateKey) {
+                    unlock_event_count.set(unlock_event_count.get() + 1);
+                }
+            },
+        )
+        .expect_err("expected rejection of swapped .fcr");
+
+    match err {
+        CryptoError::InvalidFormat(FormatDefect::BadMagic) => {}
+        other => panic!("expected BadMagic from re-probe, got {other:?}"),
+    }
+    assert_eq!(
+        unlock_event_count.get(),
+        0,
+        "Argon2id unlock ran before the re-probe rejection",
+    );
+}

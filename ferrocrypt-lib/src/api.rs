@@ -695,6 +695,23 @@ impl PrivateKeyDecryptor {
         on_event: impl Fn(&ProgressEvent),
     ) -> Result<DecryptOutcome, CryptoError> {
         validate_passphrase(&private_key_passphrase)?;
+        let archive_limits = self.archive_limits.unwrap_or_default();
+        let header_read_limits = self.header_read_limits.unwrap_or_default();
+        let incomplete_output_policy = self.incomplete_output_policy.unwrap_or_default();
+
+        // Re-probe before the private-key unlock: a path race between
+        // `Decryptor::open` and `decrypt` could swap in a malformed or
+        // passphrase-mode file, and `STRUCTURE.md` §12 / `FORMAT.md`
+        // §3.7 require structural rejection before any KDF work fires.
+        let probe = probe_recipient_mode_with_limits(&self.input, header_read_limits)?
+            .ok_or(CryptoError::InvalidFormat(FormatDefect::BadMagic))?;
+        if probe != UnauthenticatedRecipientMode::PublicKey {
+            return Err(CryptoError::DecryptorModeMismatch {
+                expected: UnauthenticatedRecipientMode::PublicKey,
+                found: probe,
+            });
+        }
+
         // No early progress event here. `open_x25519_private_key` reads
         // and structurally validates `private.key` first; only when it
         // is about to run Argon2id does it emit
@@ -708,9 +725,6 @@ impl PrivateKeyDecryptor {
             &on_event,
         )?;
         let decryption_credential = recipient::x25519::X25519Credential { private_key_bytes };
-        let archive_limits = self.archive_limits.unwrap_or_default();
-        let header_read_limits = self.header_read_limits.unwrap_or_default();
-        let incomplete_output_policy = self.incomplete_output_policy.unwrap_or_default();
         let output_path = protocol::decrypt(
             &decryption_credential,
             &self.input,

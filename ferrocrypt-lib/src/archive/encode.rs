@@ -546,12 +546,18 @@ fn build_manifest(
     }
 }
 
-/// Recursively walks `parent_dir` via `cap_std::Dir::read_dir`,
+/// Walks `parent_dir` iteratively via `cap_std::Dir::read_dir`,
 /// appending entries to `entries` with FCA paths rooted at
 /// `fca_prefix` and rel-paths rooted at `rel_prefix` (relative to
 /// the source root). Symlinks, devices, FIFOs, sockets, and
 /// reparse points are rejected via the lstat-semantics
 /// `DirEntry::metadata` plus a Windows reparse-point bit check.
+///
+/// Iterative on purpose: a deeply-nested source tree under raised
+/// `ArchiveLimits` (`max_path_depth` well beyond the default 64)
+/// must not consume O(depth) of process stack. Each child directory
+/// is opened, then pushed onto an explicit `PendingDir` stack so
+/// the traversal stack lives on the heap.
 ///
 /// The capability handle is the writer-side parity of
 /// `archive/decode.rs` + `archive/platform.rs::walk_to_parent`:
@@ -567,142 +573,159 @@ fn walk_directory(
     counters: &mut ArchiveCounters,
     limits: &ArchiveLimits,
 ) -> Result<(), CryptoError> {
-    // `parent_dir` was opened via `open_anchor` (root) or
-    // `open_dir_nofollow` (descendant), both of which reject symlinks
-    // at open time, so the directory itself is already known good.
-    // The cycle-detection seed/insert happens at the call site that
-    // OPENED the dir so an empty directory still consumes the
-    // dev/ino slot.
+    struct PendingDir {
+        dir: Dir,
+        fca_prefix: String,
+        rel_prefix: PathBuf,
+    }
 
-    for read_dir_entry in parent_dir.entries().map_err(CryptoError::Io)? {
-        let dir_entry = read_dir_entry.map_err(CryptoError::Io)?;
-        let metadata = dir_entry.metadata().map_err(CryptoError::Io)?;
-        let file_type = metadata.file_type();
-        let name_os = dir_entry.file_name();
+    let mut stack = vec![PendingDir {
+        // `try_clone` gives the stack its own owned `Dir` (fresh fd,
+        // not a refcount) so the borrowed `parent_dir` is unaffected.
+        dir: parent_dir.try_clone().map_err(CryptoError::Io)?,
+        fca_prefix: fca_prefix.to_owned(),
+        rel_prefix: rel_prefix.to_path_buf(),
+    }];
 
-        // On Windows, reject any reparse point (symlinks, junctions,
-        // mount points) with the explicit reparse-point diagnostic
-        // before the generic symlink check below. The
-        // FILE_ATTRIBUTE_REPARSE_POINT bit is set on every variant —
-        // including the ones cap_primitives reports as
-        // `is_symlink() == true` (NTFS junctions are
-        // reparse-tag-name-surrogate, so std and cap-std both flag
-        // them as symlinks). Running this first means a junction
-        // surfaces as "Windows reparse point" rather than the less
-        // accurate "Symlink in archive source". No-op on Unix.
-        reject_windows_reparse_point_cap(&metadata, "Source entry", &name_os)?;
+    // Each popped `PendingDir` was opened via `open_anchor` (root)
+    // or `open_dir_nofollow` (descendant), both of which reject
+    // symlinks at open time, so the directory itself is already
+    // known good. The cycle-detection seed/insert happens at the
+    // call site that OPENED the dir so an empty directory still
+    // consumes the dev/ino slot.
+    while let Some(PendingDir {
+        dir,
+        fca_prefix,
+        rel_prefix,
+    }) = stack.pop()
+    {
+        for read_dir_entry in dir.entries().map_err(CryptoError::Io)? {
+            let dir_entry = read_dir_entry.map_err(CryptoError::Io)?;
+            let metadata = dir_entry.metadata().map_err(CryptoError::Io)?;
+            let file_type = metadata.file_type();
+            let name_os = dir_entry.file_name();
 
-        // Reject Unix symlinks via the lstat-semantics file_type. The
-        // diagnostic includes the FCA-relative path (parent prefix +
-        // leaf) so the operator sees which manifest entry is
-        // implicated, not just the failing leaf component. On
-        // Windows, the reparse-point check above already caught
-        // anything `is_symlink()` would flag.
-        if file_type.is_symlink() {
-            return Err(symlink_in_archive_source_error(fca_prefix, &name_os));
-        }
+            // On Windows, reject any reparse point (symlinks, junctions,
+            // mount points) with the explicit reparse-point diagnostic
+            // before the generic symlink check below. The
+            // FILE_ATTRIBUTE_REPARSE_POINT bit is set on every variant —
+            // including the ones cap_primitives reports as
+            // `is_symlink() == true` (NTFS junctions are
+            // reparse-tag-name-surrogate, so std and cap-std both flag
+            // them as symlinks). Running this first means a junction
+            // surfaces as "Windows reparse point" rather than the less
+            // accurate "Symlink in archive source". No-op on Unix.
+            reject_windows_reparse_point_cap(&metadata, "Source entry", &name_os)?;
 
-        let name_str = name_os.to_str().ok_or_else(|| {
-            CryptoError::InvalidInput(format!(
-                "Source filename is not valid UTF-8: {fca_prefix}/{}",
-                Path::new(&name_os).display()
-            ))
-        })?;
-
-        // Defense-in-depth against custom filesystems that smuggle
-        // path separators inside a single `file_name()` entry. POSIX
-        // and NTFS forbid these bytes natively, but a FUSE / network
-        // mount with permissive semantics could let one slip through
-        // and silently mint a multi-component FCA path from what was
-        // meant to be a single source filename.
-        if name_str.bytes().any(|b| b == b'/' || b == b'\\') {
-            return Err(CryptoError::InvalidInput(format!(
-                "Source filename contains path separator: {fca_prefix}/{name_str}"
-            )));
-        }
-
-        let fca_path_utf8 = format!("{fca_prefix}/{name_str}");
-        let mut child_rel = rel_prefix.to_path_buf();
-        child_rel.push(&name_os);
-
-        if file_type.is_file() {
-            let mode = archive_file_mode_cap(&metadata);
-            let size = metadata.len();
-
-            record_entry(counters, &fca_path_utf8, Some(size), limits)?;
-
-            entries.push(writer_entry(
-                ArchiveEntryKind::File,
-                fca_path_utf8,
-                mode,
-                size,
-                child_rel,
-            ));
-        } else if file_type.is_dir() {
-            // Open the child directory through `open_dir_nofollow` —
-            // identical primitive to the reader's per-component walk.
-            // A symlink substituted here between `read_dir` and now
-            // fails closed via the shared `classify_open_failure`
-            // helper, with the encode-side label and the FCA path as
-            // diagnostic context (matches the leaf-arm symlink message).
-            let child_dir = parent_dir.open_dir_nofollow(&name_os).map_err(|e| {
-                platform::classify_open_failure(
-                    parent_dir,
-                    &name_os,
-                    e,
-                    platform::SYMLINK_IN_ARCHIVE_SOURCE,
-                    &fca_path_utf8,
-                )
-            })?;
-
-            // One `dir_metadata` call amortised across the
-            // Windows reparse-point post-check, the Unix
-            // (dev, ino) cycle-detection seed, and the mode read.
-            // Atomic with the `open_dir_nofollow` above — no race
-            // window between the open and the metadata read.
-            let child_meta = child_dir.dir_metadata().map_err(CryptoError::Io)?;
-
-            // Windows reparse-point post-check on the opened handle:
-            // catches a junction or mount point that wasn't classified
-            // as a symlink by `read_dir`.
-            reject_windows_reparse_point_cap(&child_meta, "Source directory", &name_os)?;
-
-            // Cycle detection on Unix using (dev, ino).
-            #[cfg(unix)]
-            {
-                use cap_std::fs::MetadataExt;
-                let key = (child_meta.dev(), child_meta.ino());
-                if !counters.seen_dirs.insert(key) {
-                    return Err(CryptoError::InvalidInput(format!(
-                        "Directory cycle in archive source: {fca_path_utf8}"
-                    )));
-                }
+            // Reject Unix symlinks via the lstat-semantics file_type. The
+            // diagnostic includes the FCA-relative path (parent prefix +
+            // leaf) so the operator sees which manifest entry is
+            // implicated, not just the failing leaf component. On
+            // Windows, the reparse-point check above already caught
+            // anything `is_symlink()` would flag.
+            if file_type.is_symlink() {
+                return Err(symlink_in_archive_source_error(&fca_prefix, &name_os));
             }
 
-            let mode = archive_dir_mode_cap(&child_meta);
+            let name_str = name_os.to_str().ok_or_else(|| {
+                CryptoError::InvalidInput(format!(
+                    "Source filename is not valid UTF-8: {fca_prefix}/{}",
+                    Path::new(&name_os).display()
+                ))
+            })?;
 
-            record_entry(counters, &fca_path_utf8, None, limits)?;
+            // Defense-in-depth against custom filesystems that smuggle
+            // path separators inside a single `file_name()` entry. POSIX
+            // and NTFS forbid these bytes natively, but a FUSE / network
+            // mount with permissive semantics could let one slip through
+            // and silently mint a multi-component FCA path from what was
+            // meant to be a single source filename.
+            if name_str.bytes().any(|b| b == b'/' || b == b'\\') {
+                return Err(CryptoError::InvalidInput(format!(
+                    "Source filename contains path separator: {fca_prefix}/{name_str}"
+                )));
+            }
 
-            entries.push(writer_entry(
-                ArchiveEntryKind::Directory,
-                fca_path_utf8.clone(),
-                mode,
-                0,
-                child_rel.clone(),
-            ));
+            let fca_path_utf8 = format!("{fca_prefix}/{name_str}");
+            let mut child_rel = rel_prefix.clone();
+            child_rel.push(&name_os);
 
-            walk_directory(
-                &child_dir,
-                &fca_path_utf8,
-                &child_rel,
-                entries,
-                counters,
-                limits,
-            )?;
-        } else {
-            return Err(CryptoError::InvalidInput(format!(
-                "Unsupported file type in archive: {fca_path_utf8}"
-            )));
+            if file_type.is_file() {
+                let mode = archive_file_mode_cap(&metadata);
+                let size = metadata.len();
+
+                record_entry(counters, &fca_path_utf8, Some(size), limits)?;
+
+                entries.push(writer_entry(
+                    ArchiveEntryKind::File,
+                    fca_path_utf8,
+                    mode,
+                    size,
+                    child_rel,
+                ));
+            } else if file_type.is_dir() {
+                // Open the child directory through `open_dir_nofollow` —
+                // identical primitive to the reader's per-component walk.
+                // A symlink substituted here between `read_dir` and now
+                // fails closed via the shared `classify_open_failure`
+                // helper, with the encode-side label and the FCA path as
+                // diagnostic context (matches the leaf-arm symlink message).
+                let child_dir = dir.open_dir_nofollow(&name_os).map_err(|e| {
+                    platform::classify_open_failure(
+                        &dir,
+                        &name_os,
+                        e,
+                        platform::SYMLINK_IN_ARCHIVE_SOURCE,
+                        &fca_path_utf8,
+                    )
+                })?;
+
+                // One `dir_metadata` call amortised across the
+                // Windows reparse-point post-check, the Unix
+                // (dev, ino) cycle-detection seed, and the mode read.
+                // Atomic with the `open_dir_nofollow` above — no race
+                // window between the open and the metadata read.
+                let child_meta = child_dir.dir_metadata().map_err(CryptoError::Io)?;
+
+                // Windows reparse-point post-check on the opened handle:
+                // catches a junction or mount point that wasn't classified
+                // as a symlink by `read_dir`.
+                reject_windows_reparse_point_cap(&child_meta, "Source directory", &name_os)?;
+
+                // Cycle detection on Unix using (dev, ino).
+                #[cfg(unix)]
+                {
+                    use cap_std::fs::MetadataExt;
+                    let key = (child_meta.dev(), child_meta.ino());
+                    if !counters.seen_dirs.insert(key) {
+                        return Err(CryptoError::InvalidInput(format!(
+                            "Directory cycle in archive source: {fca_path_utf8}"
+                        )));
+                    }
+                }
+
+                let mode = archive_dir_mode_cap(&child_meta);
+
+                record_entry(counters, &fca_path_utf8, None, limits)?;
+
+                entries.push(writer_entry(
+                    ArchiveEntryKind::Directory,
+                    fca_path_utf8.clone(),
+                    mode,
+                    0,
+                    child_rel.clone(),
+                ));
+
+                stack.push(PendingDir {
+                    dir: child_dir,
+                    fca_prefix: fca_path_utf8,
+                    rel_prefix: child_rel,
+                });
+            } else {
+                return Err(CryptoError::InvalidInput(format!(
+                    "Unsupported file type in archive: {fca_path_utf8}"
+                )));
+            }
         }
     }
     Ok(())
@@ -1405,6 +1428,62 @@ mod tests {
         let final_path = round_trip(&root, out.path());
         let mut q = final_path.clone();
         for _ in 0..intermediate_dirs {
+            q = q.join("a");
+        }
+        assert_eq!(fs::read(q.join("leaf.txt")).unwrap(), b"deep");
+    }
+
+    /// The source-tree walker must not consume O(depth) of process
+    /// stack. Builds a deep tree under raised `ArchiveLimits` and
+    /// runs the writer on a 128 KiB-stack thread: a recursive walker
+    /// overflows here; the iterative one succeeds.
+    #[test]
+    fn deep_source_tree_does_not_stack_overflow() {
+        use std::thread;
+
+        let src = tempfile::TempDir::new().unwrap();
+        let out = tempfile::TempDir::new().unwrap();
+
+        // Single-byte components keep the absolute path under macOS
+        // `PATH_MAX = 1024`. `fs::create_dir_all` hits that ceiling
+        // before the walker does.
+        let depth: usize = 400;
+        let root = src.path().join("root");
+        let mut p = root.clone();
+        for _ in 0..depth {
+            p = p.join("a");
+        }
+        fs::create_dir_all(&p).unwrap();
+        fs::write(p.join("leaf.txt"), b"deep").unwrap();
+
+        let limits = ArchiveLimits::default()
+            .with_max_path_depth((depth + 8) as u32)
+            .with_max_path_bytes(((depth * 2) + 64) as u32);
+        let src_root = root;
+        let out_root = out.path().to_path_buf();
+
+        // 128 KiB stack: too small for `depth` recursive frames, so a
+        // regression to recursion fails this test as a stack overflow
+        // instead of passing silently. The iterative walker uses a
+        // heap-backed `PendingDir` stack.
+        let handle = thread::Builder::new()
+            .stack_size(128 * 1024)
+            .spawn(move || {
+                let mut buf = Vec::new();
+                archive(&src_root, &mut buf, limits).expect("archive deep tree");
+                unarchive(
+                    Cursor::new(buf),
+                    &out_root,
+                    limits,
+                    IncompleteOutputPolicy::DeleteOnError,
+                )
+                .expect("unarchive deep tree")
+            })
+            .expect("spawn small-stack thread");
+        let final_path = handle.join().expect("small-stack worker panicked");
+
+        let mut q = final_path;
+        for _ in 0..depth {
             q = q.join("a");
         }
         assert_eq!(fs::read(q.join("leaf.txt")).unwrap(), b"deep");

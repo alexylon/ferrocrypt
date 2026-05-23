@@ -40,6 +40,7 @@
 //! (`DeleteOnError`, default) or retained (`RetainOnError`).
 
 use std::ffi::{OsStr, OsString};
+#[cfg(test)]
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -72,25 +73,14 @@ pub(crate) fn unarchive<R: Read>(
     limits: ArchiveLimits,
     policy: IncompleteOutputPolicy,
 ) -> Result<PathBuf, CryptoError> {
-    let mut created_incomplete_roots: Vec<OsString> = Vec::new();
-
-    let result = unarchive_inner(reader, output_dir, limits, &mut created_incomplete_roots);
-
-    if result.is_err() && matches!(policy, IncompleteOutputPolicy::DeleteOnError) {
-        for root_name in &created_incomplete_roots {
-            let working_path = output_dir.join(incomplete_working_name(root_name));
-            cleanup_incomplete_path(&working_path);
-        }
-    }
-
-    result
+    unarchive_inner(reader, output_dir, limits, policy)
 }
 
 fn unarchive_inner<R: Read>(
     mut reader: R,
     output_dir: &Path,
     limits: ArchiveLimits,
-    created_incomplete_roots: &mut Vec<OsString>,
+    policy: IncompleteOutputPolicy,
 ) -> Result<PathBuf, CryptoError> {
     // FORMAT.md §9.11 step 1: parse + structurally validate the header.
     // `parse_fca_header` already enforces all caps for `archive_ext_len`,
@@ -123,74 +113,86 @@ fn unarchive_inner<R: Read>(
     let final_path = output_dir.join(&manifest.root_name);
     reject_occupied(&final_path, "Output")?;
 
-    // FORMAT.md §9.11 step 9: reject pre-existing `.incomplete`.
+    // FORMAT.md §9.11 step 9. Open the output anchor up-front and
+    // keep it alive across extraction + promotion so a `DeleteOnError`
+    // cleanup runs handle-relative — a path swap of `output_dir`
+    // cannot redirect the `remove_*` calls.
     let output_handle = platform::open_anchor(output_dir)?;
     let incomplete_name = incomplete_working_name(&manifest.root_name);
+    let mut created_incomplete_roots: Vec<OsString> = Vec::new();
 
-    // FORMAT.md §9.11 steps 10–14. Each `extract_*_root` runs
-    // `verify_archive_eof` (step 13) between content streaming (step 11)
-    // and descendant chmod (step 14) so the spec's literal ordering is
-    // preserved.
-    if manifest.root_is_file {
-        extract_single_file_root(
-            &mut reader,
-            &output_handle,
-            &incomplete_name,
-            &manifest,
-            created_incomplete_roots,
-            output_dir,
-        )?;
-    } else {
-        extract_directory_root(
-            &mut reader,
-            &output_handle,
-            &incomplete_name,
-            &manifest,
-            created_incomplete_roots,
-            output_dir,
-        )?;
+    // Steps 10–16 wrapped so the cleanup loop below sees
+    // `output_handle` still alive on every error path.
+    let outcome: Result<PathBuf, CryptoError> = (|| {
+        // §9.11 steps 10–14. Each `extract_*_root` runs
+        // `verify_archive_eof` (step 13) between content streaming
+        // (step 11) and descendant chmod (step 14) so the spec's
+        // literal ordering is preserved.
+        if manifest.root_is_file {
+            extract_single_file_root(
+                &mut reader,
+                &output_handle,
+                &incomplete_name,
+                &manifest,
+                &mut created_incomplete_roots,
+                output_dir,
+            )?;
+        } else {
+            extract_directory_root(
+                &mut reader,
+                &output_handle,
+                &incomplete_name,
+                &manifest,
+                &mut created_incomplete_roots,
+                output_dir,
+            )?;
+        }
+
+        // FORMAT.md §9.11 step 15: promote {root}.incomplete → {root}
+        // with no-clobber. A race that creates the final name between
+        // the step-8 pre-check and here is rejected.
+        let working_path = output_dir.join(&incomplete_name);
+        rename_no_clobber(&working_path, &final_path).map_err(|e| {
+            map_already_exists(CryptoError::Io(e), "Output already exists", &final_path)
+        })?;
+
+        // FORMAT.md §9.11 step 16: apply root entry mode AFTER promotion.
+        //
+        // Directory roots: macOS can refuse to rename a directory whose
+        // mode lacks search permission, so the root `.incomplete` stayed
+        // at the initial 0o700 (search-permitted owner-only) mode through
+        // extraction. Re-anchor at `output_dir` and walk to the renamed
+        // root via `open_dir_at_rel`, which routes through
+        // `open_dir_nofollow` + Windows reparse-point post-check — a
+        // symlink substituted at the final name between rename and chmod
+        // is rejected here.
+        //
+        // File roots: the staged `.incomplete` file stayed at
+        // `INITIAL_FILE_CREATE_MODE` (0o600) throughout content streaming
+        // and across the rename, so a permissive manifest mode (e.g.
+        // 0o644) is never briefly visible to other local users while the
+        // file holds plaintext under either the `.incomplete` name or
+        // (post-rename, pre-chmod) the final name. The post-rename
+        // re-open uses `open_file_nofollow` so a symlink substituted at
+        // the final name between rename and chmod is rejected the same
+        // way as for directory roots.
+        if manifest.root_is_file {
+            apply_root_file_mode(output_dir, &manifest)?;
+        } else {
+            apply_root_directory_mode(output_dir, &manifest)?;
+        }
+
+        Ok(final_path.clone())
+    })();
+
+    if outcome.is_err() && matches!(policy, IncompleteOutputPolicy::DeleteOnError) {
+        for root_name in &created_incomplete_roots {
+            cleanup_incomplete_via_handle(&output_handle, &incomplete_working_name(root_name));
+        }
     }
 
-    // Drop the cap-std handles before the path-based rename. The
-    // `output_handle` borrow ends here; descendant `Dir`/`File` handles
-    // were already dropped at scope exit inside `extract_*_root`.
     drop(output_handle);
-
-    // FORMAT.md §9.11 step 15: promote {root}.incomplete → {root} with
-    // no-clobber semantics. A racing attacker who creates the final name
-    // between the step-8 pre-check and now is rejected here.
-    let working_path = output_dir.join(&incomplete_name);
-    rename_no_clobber(&working_path, &final_path).map_err(|e| {
-        map_already_exists(CryptoError::Io(e), "Output already exists", &final_path)
-    })?;
-
-    // FORMAT.md §9.11 step 16: apply root entry mode AFTER promotion.
-    //
-    // Directory roots: macOS can refuse to rename a directory whose
-    // mode lacks search permission, so the root `.incomplete` stayed
-    // at the initial 0o700 (search-permitted owner-only) mode through
-    // extraction. Re-anchor at `output_dir` and walk to the renamed
-    // root via `open_dir_at_rel`, which routes through
-    // `open_dir_nofollow` + Windows reparse-point post-check — a
-    // symlink substituted at the final name between rename and chmod
-    // is rejected here.
-    //
-    // File roots: the staged `.incomplete` file stayed at
-    // `INITIAL_FILE_CREATE_MODE` (0o600) throughout content streaming
-    // and across the rename, so a permissive manifest mode (e.g.
-    // 0o644) is never briefly visible to other local users while the
-    // file holds plaintext under either the `.incomplete` name or
-    // (post-rename, pre-chmod) the final name. The post-rename
-    // re-open uses `open_file_nofollow` so a symlink substituted at
-    // the final name between rename and chmod is rejected the same
-    // way as for directory roots.
-    if manifest.root_is_file {
-        apply_root_file_mode(output_dir, &manifest)?;
-    } else {
-        apply_root_directory_mode(output_dir, &manifest)?;
-    }
-
-    Ok(final_path)
+    outcome
 }
 
 fn extract_single_file_root<R: Read>(
@@ -352,20 +354,23 @@ fn incomplete_working_name(root_name: &OsStr) -> OsString {
     name
 }
 
-/// Best-effort removal of an `.incomplete` working path. Errors at any
-/// step are swallowed so the caller surfaces the original failure
-/// rather than a cleanup-related I/O error.
-fn cleanup_incomplete_path(path: &Path) {
-    let meta = match fs::symlink_metadata(path) {
+/// Best-effort removal of an `.incomplete` leaf via the capability
+/// handle that staged it. Anchoring to the same `Dir` used during
+/// extraction means a path swap of `output_dir` between failed
+/// extraction and cleanup cannot redirect `remove_*` to a different
+/// directory. Errors are swallowed so the original `CryptoError` is
+/// what the caller sees.
+fn cleanup_incomplete_via_handle(output_handle: &Dir, working_name: &OsStr) {
+    let meta = match output_handle.symlink_metadata(working_name) {
         Ok(m) => m,
         Err(_) => return,
     };
     if meta.file_type().is_symlink() {
-        let _ = fs::remove_file(path);
+        let _ = output_handle.remove_file(working_name);
     } else if meta.is_dir() {
-        let _ = fs::remove_dir_all(path);
+        let _ = output_handle.remove_dir_all(working_name);
     } else {
-        let _ = fs::remove_file(path);
+        let _ = output_handle.remove_file(working_name);
     }
 }
 
@@ -913,6 +918,44 @@ mod tests {
 
         let count = fs::read_dir(tmp.path()).unwrap().count();
         assert_eq!(count, 0, "DeleteOnError must clean up .incomplete");
+    }
+
+    /// `cleanup_incomplete_via_handle` removes entries relative to
+    /// the capability handle, NOT to a re-resolved path. Opens a
+    /// handle, renames the directory aside, mints a replacement,
+    /// and confirms the cleanup follows the original inode.
+    ///
+    /// Unix-only because Windows directory rename with an open
+    /// handle has platform-specific semantics.
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_via_handle_follows_handle_inode_not_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let original = tmp.path().join("orig");
+        fs::create_dir(&original).unwrap();
+        let staged = original.join("root.incomplete");
+        fs::write(&staged, b"staged plaintext").unwrap();
+
+        let handle = platform::open_anchor(&original).unwrap();
+
+        // Swap: rename the directory aside, then mint a fresh empty
+        // dir at the original path. The handle keeps pointing to the
+        // moved inode; a path-based cleanup would look at the empty
+        // replacement.
+        let moved = tmp.path().join("moved");
+        fs::rename(&original, &moved).unwrap();
+        fs::create_dir(&original).unwrap();
+
+        cleanup_incomplete_via_handle(&handle, OsStr::new("root.incomplete"));
+
+        assert!(
+            !moved.join("root.incomplete").exists(),
+            "handle-relative cleanup should have removed the staged file from the moved dir",
+        );
+        assert!(
+            original.read_dir().unwrap().next().is_none(),
+            "the replacement dir at the original path must be untouched",
+        );
     }
 
     /// `RetainOnError` keeps the staged `.incomplete` for inspection.

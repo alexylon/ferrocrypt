@@ -10,8 +10,10 @@ All notable changes to FerroCrypt are documented in this file.
 - **Public-key decryption with an unrelated private key now returns `CryptoError::NoSupportedRecipient`** instead of `RecipientUnwrapFailed { type_name: "x25519" }`. Callers that pattern-match on the old per-candidate variant for the wrong-key case should switch to `NoSupportedRecipient`. The passphrase wrong-passphrase case still returns `RecipientUnwrapFailed { type_name: "argon2id" }`.
 
 ### Security
-- **STREAM payload writer rejects the reserved final-chunk counter `2^32 - 1` if it would land on a non-final chunk.** `FORMAT.md` §5 reserves that counter for the FINAL chunk; the writer previously emitted the spec-invalid non-final chunk before rejecting on the next operation. The reader gains the same check before exposing plaintext. Default `ArchiveLimits` cap encrypted plaintext at 64 GiB so this edge is only reachable when a caller raises the cap to ~281 TB.
-- **`private.key` `ext_bytes` TLV grammar is validated on both seal and open.** The writer refuses to seal an `ext_bytes` that is malformed or carries an unknown critical tag; the reader applies the same check after AEAD-AAD success. v1 normal keygen emits empty `ext_bytes` and is unaffected.
+- **Encryption refuses to write a stream that would exceed the `FORMAT.md` §5 chunk-counter cap.** The writer could previously emit a spec-invalid chunk before rejecting on the next operation; the matching reader gains the same early rejection. Default `ArchiveLimits` cap plaintext at 64 GiB, so this only matters for callers who raise the cap toward the spec ceiling (~281 TB).
+- **`private.key` files with malformed or unknown-critical extension TLVs are refused on both write and read.** v1 key generation emits empty extension bytes and is unaffected; this only matters for hand-crafted or future-version key files.
+- **`PrivateKeyDecryptor::decrypt` re-checks the input file before unlocking `private.key`.** A file replacement between `Decryptor::open` and `.decrypt` no longer triggers the Argon2id `private.key` unlock or its `UnlockingPrivateKey` progress event for a file the decrypt path would refuse anyway.
+- **`DeleteOnError` cleanup follows the output directory chosen at the start of decryption.** A local process that renamed the destination between a failed decrypt and the automatic `.incomplete` cleanup could previously redirect the cleanup to a different directory; that race is now closed.
 
 ## [0.3.0-beta.1] - 2026-05-11
 

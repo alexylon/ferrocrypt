@@ -408,7 +408,7 @@ pub(crate) fn build_encrypted_header(
 ) -> Result<BuiltEncryptedHeader, CryptoError> {
     let mut entries_bytes = Vec::new();
     for entry in recipient_entries {
-        entries_bytes.extend_from_slice(&entry.to_bytes());
+        entries_bytes.extend_from_slice(&entry.to_bytes_checked()?);
     }
     // Saturating casts: structural-range rejections (`count > MAX`,
     // `ext_len > MAX`, `count == 0`) are emitted by
@@ -663,6 +663,60 @@ mod tests {
         match err {
             CryptoError::InvalidFormat(FormatDefect::RecipientCountOutOfRange { count: 0 }) => {}
             other => panic!("expected RecipientCountOutOfRange(0), got {other:?}"),
+        }
+    }
+
+    /// `build_encrypted_header` propagates `to_bytes_checked`'s
+    /// `type_name` grammar rejection.
+    #[test]
+    fn build_rejects_entry_with_invalid_type_name_grammar() {
+        let DerivedSubkeys {
+            payload_key,
+            header_key,
+        } = dummy_subkeys();
+        let bad_entry = RecipientEntry {
+            type_name: "X25519".to_owned(),
+            recipient_flags: 0,
+            body: vec![0u8; crate::recipient::native::x25519::BODY_LENGTH],
+        };
+        let err = build_encrypted_header(
+            &[bad_entry],
+            b"",
+            [0u8; STREAM_NONCE_SIZE],
+            payload_key,
+            &header_key,
+        )
+        .unwrap_err();
+        match err {
+            CryptoError::InvalidFormat(FormatDefect::MalformedTypeName) => {}
+            other => panic!("expected MalformedTypeName, got {other:?}"),
+        }
+    }
+
+    /// `build_encrypted_header` propagates `to_bytes_checked`'s
+    /// reserved-flag-bit rejection.
+    #[test]
+    fn build_rejects_entry_with_reserved_recipient_flags() {
+        let DerivedSubkeys {
+            payload_key,
+            header_key,
+        } = dummy_subkeys();
+        let bad_entry = RecipientEntry {
+            type_name: crate::recipient::native::x25519::TYPE_NAME.to_owned(),
+            recipient_flags: 1u16 << 5,
+            body: vec![0u8; crate::recipient::native::x25519::BODY_LENGTH],
+        };
+        let err = build_encrypted_header(
+            &[bad_entry],
+            b"",
+            [0u8; STREAM_NONCE_SIZE],
+            payload_key,
+            &header_key,
+        )
+        .unwrap_err();
+        match err {
+            CryptoError::InvalidFormat(FormatDefect::RecipientFlagsReserved) => {}
+            other => panic!("expected RecipientFlagsReserved, got {other:?}"),
         }
     }
 

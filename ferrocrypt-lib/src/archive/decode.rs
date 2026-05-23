@@ -416,7 +416,7 @@ fn strip_root_prefix<'a>(path_utf8: &'a str, root_name: &str) -> Result<&'a Path
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::archive::format::{serialize_manifest, write_fca_header};
+    use crate::archive::format::{serialize_manifest_unchecked, write_fca_header};
     use std::io::Cursor;
 
     // -- Test fixtures -----------------------------------------------------
@@ -434,10 +434,12 @@ mod tests {
 
     /// Same as [`build_archive_prefix`] but lets a test inject a
     /// synthetic `archive_ext` region between the fixed header and
-    /// the manifest. Used by adversarial-input tests that exercise
-    /// the archive-level TLV validation path.
+    /// the manifest. Uses [`serialize_manifest_unchecked`] so
+    /// reader-rejection tests can hand-build invalid manifests the
+    /// production writer would refuse.
     fn build_archive_prefix_with_archive_ext(manifest: &Manifest, archive_ext: &[u8]) -> Vec<u8> {
-        let manifest_bytes = serialize_manifest(manifest, ArchiveLimits::default()).unwrap();
+        let manifest_bytes =
+            serialize_manifest_unchecked(manifest, ArchiveLimits::default()).unwrap();
         let entry_count = u32::try_from(manifest.entries.len()).unwrap();
         let archive_ext_len = u32::try_from(archive_ext.len()).unwrap();
         let manifest_len = u32::try_from(manifest_bytes.len()).unwrap();

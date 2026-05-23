@@ -378,10 +378,75 @@ pub(crate) fn checked_manifest_len(
     Ok(len)
 }
 
+/// Writer-side gate run before any manifest byte is emitted. Mirrors
+/// every cross-entry invariant `parse_manifest_bytes` enforces: FCA
+/// path grammar per entry, `Directory` `size == 0`,
+/// `manifest.total_file_bytes` equal to the sum of `File` entry sizes,
+/// and `validate_manifest_tree` shape rules. Pairs with
+/// `checked_manifest_len` (which covers per-entry mode / byte caps and
+/// TLV canonicality).
+fn validate_manifest_for_write(
+    manifest: &Manifest,
+    limits: ArchiveLimits,
+) -> Result<(), CryptoError> {
+    let limits = limits.validate()?;
+    let mut computed_total: u64 = 0;
+    for entry in &manifest.entries {
+        validate_fca_path(&entry.path_utf8, limits)?;
+        match entry.kind {
+            ArchiveEntryKind::Directory => {
+                if entry.size != 0 {
+                    return Err(CryptoError::InvalidInput(
+                        "Directory archive entry has non-zero size".to_string(),
+                    ));
+                }
+            }
+            ArchiveEntryKind::File => {
+                computed_total = computed_total.checked_add(entry.size).ok_or_else(|| {
+                    CryptoError::InvalidInput("Archive total file bytes overflow".to_string())
+                })?;
+            }
+        }
+    }
+    // The reader recomputes this sum and rejects with "Archive
+    // total-bytes mismatch" if it differs from the header's
+    // `total_file_bytes`; mirror that here.
+    if computed_total != manifest.total_file_bytes {
+        return Err(CryptoError::InvalidInput(
+            "Archive total-bytes mismatch".to_string(),
+        ));
+    }
+    let _ = validate_manifest_tree(&manifest.entries, manifest.total_file_bytes, limits)?;
+    Ok(())
+}
+
 /// Serializes a [`Manifest`] into the FCA manifest byte sequence.
-/// The total byte length matches [`checked_manifest_len`] exactly,
-/// asserted via `debug_assert_eq!` post-condition.
+/// Runs [`validate_manifest_for_write`] first so a [`Manifest`] the
+/// matching reader would reject cannot leak out as bytes. The total
+/// byte length matches [`checked_manifest_len`] exactly, asserted via
+/// `debug_assert_eq!` post-condition.
 pub(crate) fn serialize_manifest(
+    manifest: &Manifest,
+    limits: ArchiveLimits,
+) -> Result<Vec<u8>, CryptoError> {
+    validate_manifest_for_write(manifest, limits)?;
+    serialize_manifest_inner(manifest, limits)
+}
+
+/// Test-only: serialises a [`Manifest`] skipping the writer-side
+/// gate, so reader-rejection tests can build synthetic FCA bytes
+/// (multi-root, missing parent, …). Never reachable from production.
+#[cfg(test)]
+pub(crate) fn serialize_manifest_unchecked(
+    manifest: &Manifest,
+    limits: ArchiveLimits,
+) -> Result<Vec<u8>, CryptoError> {
+    serialize_manifest_inner(manifest, limits)
+}
+
+/// Shared body of [`serialize_manifest`] and its test-only unchecked
+/// counterpart.
+fn serialize_manifest_inner(
     manifest: &Manifest,
     limits: ArchiveLimits,
 ) -> Result<Vec<u8>, CryptoError> {
@@ -1105,6 +1170,138 @@ mod tests {
         // entry_ext_len(4) size(8) → size starts at offset 10.
         let size_field = &bytes[10..18];
         assert_eq!(size_field, &u64::MAX.to_be_bytes());
+    }
+
+    // -- validate_manifest_for_write (Manifest write gate) -----------------
+
+    /// `serialize_manifest` rejects a path that violates the §9.6
+    /// FCA grammar (absolute here).
+    #[test]
+    fn serialize_manifest_rejects_invalid_fca_path() {
+        let manifest = Manifest {
+            entries: vec![make_entry("/etc/passwd", ArchiveEntryKind::File, 0, 0o644)],
+            total_file_bytes: 0,
+            root_name: OsString::from("/etc/passwd"),
+            root_is_file: true,
+            root_mode: 0o644,
+        };
+        let err = serialize_manifest(&manifest, ArchiveLimits::default()).unwrap_err();
+        assert!(
+            format!("{err}").contains("absolute"),
+            "expected absolute-path error, got {err}"
+        );
+    }
+
+    /// `serialize_manifest` rejects a `Directory` entry with non-zero
+    /// `size` (wire format reserves directory `size` as zero).
+    #[test]
+    fn serialize_manifest_rejects_directory_with_non_zero_size() {
+        let manifest = Manifest {
+            entries: vec![
+                make_entry("root", ArchiveEntryKind::Directory, 7, 0o755),
+                make_entry("root/file.txt", ArchiveEntryKind::File, 0, 0o644),
+            ],
+            total_file_bytes: 0,
+            root_name: OsString::from("root"),
+            root_is_file: false,
+            root_mode: 0o755,
+        };
+        let err = serialize_manifest(&manifest, ArchiveLimits::default()).unwrap_err();
+        match err {
+            CryptoError::InvalidInput(msg) => {
+                assert!(
+                    msg.contains("Directory archive entry has non-zero size"),
+                    "unexpected message: {msg}"
+                );
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    /// `serialize_manifest` rejects a deeper descendant whose
+    /// intermediate parent directory is missing.
+    #[test]
+    fn serialize_manifest_rejects_missing_parent_directory() {
+        let manifest = Manifest {
+            entries: vec![
+                make_entry("root", ArchiveEntryKind::Directory, 0, 0o755),
+                // `root/sub/file.txt` has no `root/sub` directory entry.
+                make_entry("root/sub/file.txt", ArchiveEntryKind::File, 0, 0o644),
+            ],
+            total_file_bytes: 0,
+            root_name: OsString::from("root"),
+            root_is_file: false,
+            root_mode: 0o755,
+        };
+        let err = serialize_manifest(&manifest, ArchiveLimits::default()).unwrap_err();
+        assert!(
+            format!("{err}").contains("parent"),
+            "expected missing-parent error, got {err}"
+        );
+    }
+
+    /// `serialize_manifest` rejects a `Manifest` whose declared
+    /// `total_file_bytes` does not equal the sum of `File` entry
+    /// sizes (the reader mirrors this with "Archive total-bytes
+    /// mismatch").
+    #[test]
+    fn serialize_manifest_rejects_total_file_bytes_mismatch() {
+        let manifest = Manifest {
+            entries: vec![make_entry("hello.txt", ArchiveEntryKind::File, 13, 0o644)],
+            // Drift: declared total is 99 but the only file is 13 bytes.
+            total_file_bytes: 99,
+            root_name: OsString::from("hello.txt"),
+            root_is_file: true,
+            root_mode: 0o644,
+        };
+        let err = serialize_manifest(&manifest, ArchiveLimits::default()).unwrap_err();
+        match err {
+            CryptoError::InvalidInput(msg) => {
+                assert!(
+                    msg.contains("Archive total-bytes mismatch"),
+                    "unexpected message: {msg}"
+                );
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    /// `serialize_manifest` rejects a `Manifest` whose `File` entry
+    /// sizes overflow `u64` when summed.
+    #[test]
+    fn serialize_manifest_rejects_total_file_bytes_overflow() {
+        let manifest = Manifest {
+            entries: vec![
+                make_entry("a.bin", ArchiveEntryKind::File, u64::MAX - 1, 0o644),
+                make_entry("b.bin", ArchiveEntryKind::File, 2, 0o644),
+            ],
+            total_file_bytes: 0,
+            root_name: OsString::from("a.bin"),
+            root_is_file: false,
+            root_mode: 0o755,
+        };
+        let err = serialize_manifest(&manifest, ArchiveLimits::default()).unwrap_err();
+        assert!(
+            format!("{err}").contains("overflow"),
+            "expected overflow error, got {err}"
+        );
+    }
+
+    /// `serialize_manifest` rejects an empty `Manifest`.
+    #[test]
+    fn serialize_manifest_rejects_empty_manifest() {
+        let manifest = Manifest {
+            entries: Vec::new(),
+            total_file_bytes: 0,
+            root_name: OsString::from("anything"),
+            root_is_file: false,
+            root_mode: 0o755,
+        };
+        let err = serialize_manifest(&manifest, ArchiveLimits::default()).unwrap_err();
+        assert!(
+            format!("{err}").contains("Empty archive"),
+            "expected Empty archive, got {err}"
+        );
     }
 
     // -- checked_manifest_len ----------------------------------------------

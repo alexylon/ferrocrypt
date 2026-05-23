@@ -98,12 +98,11 @@ impl RecipientEntry {
         (self.recipient_flags & RECIPIENT_FLAG_CRITICAL) != 0
     }
 
-    /// Serialises this entry as `type_name_len(2) || recipient_flags(2)
-    /// || body_len(4) || type_name || body`. Casts assume the entry was
-    /// constructed from a valid native call site (`type_name.len() <=
-    /// TYPE_NAME_MAX_LEN`, `body.len() <= BODY_LEN_MAX as usize`),
-    /// which holds for every native call path in this crate.
-    pub fn to_bytes(&self) -> Vec<u8> {
+    /// Infallibly serialises this entry. Test-only; production code
+    /// MUST use [`Self::to_bytes_checked`]. Kept for tests that
+    /// intentionally produce out-of-spec bytes.
+    #[cfg(test)]
+    pub(crate) fn to_bytes(&self) -> Vec<u8> {
         let type_name_len = self.type_name.len();
         let body_len = self.body.len();
         let mut out = Vec::with_capacity(ENTRY_HEADER_SIZE + type_name_len + body_len);
@@ -113,6 +112,38 @@ impl RecipientEntry {
         out.extend_from_slice(self.type_name.as_bytes());
         out.extend_from_slice(&self.body);
         out
+    }
+
+    /// Writer-side checked counterpart of [`Self::parse_one`]: runs
+    /// every shape rule the reader enforces — `type_name` grammar,
+    /// reserved flag bits, `body.len() <= BODY_LEN_MAX` — and returns
+    /// the same `FormatDefect` the reader would emit. Used by
+    /// `build_encrypted_header`.
+    pub(crate) fn to_bytes_checked(&self) -> Result<Vec<u8>, CryptoError> {
+        validate_type_name_grammar(&self.type_name)?;
+        if (self.recipient_flags & RECIPIENT_FLAGS_RESERVED_MASK) != 0 {
+            return Err(CryptoError::InvalidFormat(
+                FormatDefect::RecipientFlagsReserved,
+            ));
+        }
+        if self.body.len() > BODY_LEN_MAX as usize {
+            return Err(CryptoError::InvalidFormat(
+                FormatDefect::MalformedRecipientEntry,
+            ));
+        }
+        // Casts are safe: `validate_type_name_grammar` bounds the
+        // name at 255 bytes; the body cap above bounds the body at
+        // `BODY_LEN_MAX < u32::MAX`.
+        let type_name_len = self.type_name.len() as u16;
+        let body_len = self.body.len() as u32;
+        let mut out =
+            Vec::with_capacity(ENTRY_HEADER_SIZE + self.type_name.len() + self.body.len());
+        out.extend_from_slice(&type_name_len.to_be_bytes());
+        out.extend_from_slice(&self.recipient_flags.to_be_bytes());
+        out.extend_from_slice(&body_len.to_be_bytes());
+        out.extend_from_slice(self.type_name.as_bytes());
+        out.extend_from_slice(&self.body);
+        Ok(out)
     }
 
     /// Parses one recipient entry from the start of `bytes`. Returns
@@ -253,6 +284,70 @@ mod tests {
         let (parsed, _) = RecipientEntry::parse_one(&bytes, BODY_LEN_LOCAL_CAP_DEFAULT).unwrap();
         assert_eq!(parsed, entry);
         assert!(parsed.is_critical());
+    }
+
+    /// A valid entry round-trips through `to_bytes_checked` and
+    /// `parse_one`, producing the same bytes as the infallible
+    /// `to_bytes`.
+    #[test]
+    fn to_bytes_checked_round_trips_valid_entry() {
+        let entry = RecipientEntry {
+            type_name: x25519::TYPE_NAME.to_owned(),
+            recipient_flags: 0,
+            body: vec![0xEF; x25519::BODY_LENGTH],
+        };
+        let checked = entry.to_bytes_checked().unwrap();
+        assert_eq!(checked, entry.to_bytes());
+        let (parsed, _) = RecipientEntry::parse_one(&checked, BODY_LEN_LOCAL_CAP_DEFAULT).unwrap();
+        assert_eq!(parsed, entry);
+    }
+
+    /// `to_bytes_checked` rejects a `type_name` violating the §3.3
+    /// grammar (uppercase here) with the same diagnostic the reader emits.
+    #[test]
+    fn to_bytes_checked_rejects_invalid_type_name_grammar() {
+        let entry = RecipientEntry {
+            type_name: "X25519".to_owned(),
+            recipient_flags: 0,
+            body: vec![0u8; x25519::BODY_LENGTH],
+        };
+        match entry.to_bytes_checked() {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedTypeName)) => {}
+            other => panic!("expected MalformedTypeName, got {other:?}"),
+        }
+    }
+
+    /// `to_bytes_checked` rejects each reserved `recipient_flags`
+    /// bit individually.
+    #[test]
+    fn to_bytes_checked_rejects_reserved_flag_bits() {
+        for bit in 1..16 {
+            let entry = RecipientEntry {
+                type_name: x25519::TYPE_NAME.to_owned(),
+                recipient_flags: 1u16 << bit,
+                body: vec![0u8; x25519::BODY_LENGTH],
+            };
+            match entry.to_bytes_checked() {
+                Err(CryptoError::InvalidFormat(FormatDefect::RecipientFlagsReserved)) => {}
+                other => {
+                    panic!("expected RecipientFlagsReserved for bit {bit}, got {other:?}")
+                }
+            }
+        }
+    }
+
+    /// `to_bytes_checked` accepts a zero-length body (framing-layer
+    /// permits it; per-recipient modules enforce their own body sizes).
+    #[test]
+    fn to_bytes_checked_accepts_zero_body_len() {
+        let entry = RecipientEntry {
+            type_name: "x25519".to_owned(),
+            recipient_flags: 0,
+            body: Vec::new(),
+        };
+        let bytes = entry.to_bytes_checked().unwrap();
+        let (parsed, _) = RecipientEntry::parse_one(&bytes, BODY_LEN_LOCAL_CAP_DEFAULT).unwrap();
+        assert_eq!(parsed, entry);
     }
 
     #[test]

@@ -502,7 +502,7 @@ It contains:
 
 - `RecipientEntry` for parsed entries;
 - `RecipientBody` for scheme body bytes plus type name;
-- canonical recipient-entry serialization;
+- canonical recipient-entry serialization. Production code uses `RecipientEntry::to_bytes_checked`, which runs every rule `parse_one` enforces (`validate_type_name_grammar`, reserved-flag bits, `body.len() <= BODY_LEN_MAX`) before emitting bytes. `container::build_encrypted_header` routes through it so an entry the matching reader would reject cannot be serialised. The infallible `to_bytes` is gated `#[cfg(test)]` and used only by tests that intentionally produce out-of-spec bytes.
 - strict framing parsing;
 - unknown-body opacity.
 
@@ -721,6 +721,8 @@ It contains:
 - `copy_exact_n`, the shared exact-size byte copier used by both encode (source file → encrypted stream) and decode (encrypted stream → output file).
 
 `checked_manifest_len` runs BEFORE allocation: an over-cap manifest is rejected without growing a `Vec` first. `parse_manifest_bytes` calls `validate_fca_path` and `validate_manifest_tree` so a successfully-parsed `Manifest` is fully validated.
+
+`serialize_manifest` runs the writer-side `validate_manifest_for_write` gate before emitting any bytes — `validate_fca_path` per entry, the `Directory` entries have `size == 0` invariant, the `manifest.total_file_bytes` equals `checked_add` sum of `File` entry sizes invariant (mirroring the reader's "Archive total-bytes mismatch" rejection), and the same `validate_manifest_tree` the reader runs. A `Manifest` the matching reader would reject cannot leak out as bytes. Adversarial reader-side tests use the test-only `serialize_manifest_unchecked` to construct synthetic FCA bytes (multi-root, missing parent, etc.).
 
 ### 7.2 `archive/model.rs`
 

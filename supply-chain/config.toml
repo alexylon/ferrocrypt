@@ -173,7 +173,7 @@ version = "0.2.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.libc]]
-version = "0.2.177"
+version = "0.2.186"
 criteria = "safe-to-deploy"
 
 [[exemptions.maybe-owned]]
@@ -230,7 +230,7 @@ version = "0.11.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.tempfile]]
-version = "3.23.0"
+version = "3.27.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.typenum]]

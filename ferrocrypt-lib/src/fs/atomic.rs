@@ -94,7 +94,7 @@ pub(crate) fn finalize_file(tmp: NamedTempFile, final_path: &Path) -> io::Result
 /// `.incomplete` on disk after a failed decrypt" — continues to hold
 /// when promotion itself is what failed.
 pub(crate) fn promote_single_file_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
-    let temp_path = tempfile::TempPath::from_path(from);
+    let temp_path = tempfile::TempPath::try_from_path(from)?;
     match temp_path.persist_noclobber(to) {
         Ok(()) => {
             sync_parent_dir(to);

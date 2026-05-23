@@ -1,4 +1,4 @@
-<div align="center"><img src="ferrocrypt-desktop/assets/app_icon.png" style="width: 85px;" alt="FerroCrypt"></div>
+<div align="center"><img src="https://raw.githubusercontent.com/alexylon/ferrocrypt/main/ferrocrypt-desktop/assets/app_icon.png" style="width: 85px;" alt="FerroCrypt"></div>
 
 <h1 align="center"><code>FerroCrypt</code></h1>
 
@@ -14,14 +14,16 @@
 
 FerroCrypt is a pure Rust library, CLI, and desktop application for encrypting and decrypting files and directories using password-based or key-pair-based encryption.
 
+## Desktop app (screenshots)
+
 <div align="center">
-  <img src="/assets/screenshot-1.png" width="400" alt="FerroCrypt">&nbsp;&nbsp;
-  <img src="/assets/screenshot-2.png" width="400" alt="FerroCrypt">
+  <img src="https://raw.githubusercontent.com/alexylon/ferrocrypt/main/assets/screenshot-1.png" width="400" alt="FerroCrypt">&nbsp;&nbsp;
+  <img src="https://raw.githubusercontent.com/alexylon/ferrocrypt/main/assets/screenshot-2.png" width="400" alt="FerroCrypt">
 </div>
 
 <div align="center">
-  <img src="/assets/screenshot-3.png" width="400" alt="FerroCrypt">&nbsp;&nbsp;
-  <img src="/assets/screenshot-4.png" width="400" alt="FerroCrypt">
+  <img src="https://raw.githubusercontent.com/alexylon/ferrocrypt/main/assets/screenshot-3.png" width="400" alt="FerroCrypt">&nbsp;&nbsp;
+  <img src="https://raw.githubusercontent.com/alexylon/ferrocrypt/main/assets/screenshot-4.png" width="400" alt="FerroCrypt">
 </div>
 
 > **Status:** This repository is preparing the **v0.3.0** release. The latest

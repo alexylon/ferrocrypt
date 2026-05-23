@@ -372,12 +372,8 @@ pub(crate) fn decrypt<I: DecryptionCredential>(
     }
 
     let Some(payload_key) = selected_payload_key else {
-        // No slot produced a candidate that MAC-verified. The error
-        // wording depends on (a) whether any slot AEAD-unwrapped at
-        // all, and (b) which mode the file is in — passphrase
-        // single-recipient files surface bare `HeaderTampered` (no
-        // slot identity is meaningful), recipient multi-slot files
-        // surface the per-candidate `HeaderMacFailedAfterUnwrap`.
+        // No slot MAC-verified. [`failure_for`]'s `(mode × had_unwrap)`
+        // matrix picks the surfaced variant.
         return Err(failure_for(mode, I::TYPE_NAME, had_successful_unwrap));
     };
 
@@ -413,26 +409,36 @@ fn check_mode_matches_scheme<I: DecryptionCredential>(
     })
 }
 
-/// Decrypt-time error wording when no slot produced a MAC-verified
-/// candidate. Differentiates by mode so the passphrase path keeps
-/// emitting bare `HeaderTampered` (single recipient, no slot type_name
-/// to attach) while the public-key path emits the per-candidate
-/// `HeaderMacFailedAfterUnwrap { type_name }` variant.
+/// Decrypt-time error wording when no slot MAC-verified. Indexed by
+/// `(mode × had_unwrap)`:
+///
+/// | mode       | had_unwrap | error                                       |
+/// |------------|-----------:|---------------------------------------------|
+/// | Passphrase | false      | `RecipientUnwrapFailed { type_name }`       |
+/// | Passphrase | true       | `HeaderTampered`                            |
+/// | PublicKey  | false      | `NoSupportedRecipient` (list-exhaustion)    |
+/// | PublicKey  | true       | `HeaderMacFailedAfterUnwrap { type_name }`  |
+///
+/// `(Passphrase, false)` keeps the per-candidate variant because a
+/// passphrase file has exactly one supported candidate and the
+/// wrong-passphrase / tampered-body ambiguity is the more accurate
+/// diagnostic.
 fn failure_for(
     mode: UnauthenticatedRecipientMode,
     type_name: &'static str,
     had_unwrap: bool,
 ) -> CryptoError {
-    if !had_unwrap {
-        return CryptoError::RecipientUnwrapFailed {
-            type_name: type_name.to_string(),
-        };
-    }
-    match mode {
-        UnauthenticatedRecipientMode::Passphrase => CryptoError::HeaderTampered,
-        UnauthenticatedRecipientMode::PublicKey => CryptoError::HeaderMacFailedAfterUnwrap {
+    match (mode, had_unwrap) {
+        (UnauthenticatedRecipientMode::Passphrase, false) => CryptoError::RecipientUnwrapFailed {
             type_name: type_name.to_string(),
         },
+        (UnauthenticatedRecipientMode::Passphrase, true) => CryptoError::HeaderTampered,
+        (UnauthenticatedRecipientMode::PublicKey, false) => CryptoError::NoSupportedRecipient,
+        (UnauthenticatedRecipientMode::PublicKey, true) => {
+            CryptoError::HeaderMacFailedAfterUnwrap {
+                type_name: type_name.to_string(),
+            }
+        }
     }
 }
 
@@ -1018,6 +1024,36 @@ mod tests {
         fs::create_dir_all(&dec_dir)?;
         recipient_decrypt(&fcr, &dec_dir, &priv_a, &pass_a)?;
         Ok(())
+    }
+
+    /// A public-key `.fcr` with no slot the caller's private key can
+    /// AEAD-unwrap surfaces as `NoSupportedRecipient`, not
+    /// per-candidate `RecipientUnwrapFailed`. File targets alice;
+    /// decrypt with bob.
+    #[test]
+    fn multi_x25519_no_matching_recipient_surfaces_no_supported_recipient()
+    -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let keys_dir = tmp.path().join("keys");
+        let (pub_a, _priv_a, _pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
+        let (_pub_b, priv_b, pass_b) = keypair_fixture(&keys_dir, "bob", "bob-pass")?;
+
+        let file_key = FileKey::generate().unwrap();
+        let body_a = x25519::wrap(&file_key, &pub_a)?;
+        let entries = [RecipientEntry::native(
+            NativeRecipientType::X25519,
+            body_a.to_vec(),
+        )?];
+
+        let fcr = tmp.path().join("alice-only.fcr");
+        build_multi_recipient_fcr(&entries, &file_key, b"payload", &fcr)?;
+
+        let dec_dir = tmp.path().join("decrypted");
+        fs::create_dir_all(&dec_dir)?;
+        match recipient_decrypt(&fcr, &dec_dir, &priv_b, &pass_b) {
+            Err(CryptoError::NoSupportedRecipient) => Ok(()),
+            other => panic!("expected NoSupportedRecipient, got {other:?}"),
+        }
     }
 
     /// Decoy-unwrap test: slot A wraps a *decoy* `file_key`; the file's

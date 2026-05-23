@@ -1296,11 +1296,10 @@ fn test_recipient_wrong_key_pair() -> Result<(), CryptoError> {
         |_| {},
     )?;
 
-    // Try to decrypt with key pair B's private key — the passphrase is
-    // correct for key pair B (so private.key unlocks fine), but the
-    // ECDH was performed against recipient A's public key, so the
-    // x25519 recipient body's AEAD fails and the decryption must
-    // surface as `RecipientUnwrapFailed { type_name: "x25519" }`.
+    // Decrypt with key pair B's private key. private.key unlocks fine
+    // (right passphrase), but every x25519 slot AEAD-fails because
+    // ECDH was performed against A's public key. List exhaustion
+    // surfaces as `NoSupportedRecipient`.
     let private_key_b = keys_b.join("private.key");
 
     let result = recipient_auto(
@@ -1314,11 +1313,8 @@ fn test_recipient_wrong_key_pair() -> Result<(), CryptoError> {
     );
 
     match result {
-        Err(CryptoError::RecipientUnwrapFailed { ref type_name }) if type_name == "x25519" => {}
-        other => panic!(
-            "Expected RecipientUnwrapFailed {{ type_name: \"x25519\" }}, got {:?}",
-            other
-        ),
+        Err(CryptoError::NoSupportedRecipient) => {}
+        other => panic!("Expected NoSupportedRecipient, got {:?}", other),
     }
 
     Ok(())

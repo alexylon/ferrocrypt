@@ -679,7 +679,7 @@ It contains:
 - cleartext private-key header parsing;
 - passphrase-wrapped secret encryption;
 - passphrase-wrapped secret decryption;
-- private-key TLV validation after authentication;
+- writer-side and reader-side `ext_bytes` TLV validation. `seal_private_key` runs `validate_tlv` on `ext_bytes` after the structural length cap and before AEAD work, so a sealed `private.key` is one the matching reader will accept. `open_private_key` runs the same check after `open_with_aad` succeeds, so the validator always operates on authenticated bytes. Recipient-specific adapters (e.g. `recipient/native/x25519`) no longer re-validate;
 - generic typed secret material returned to recipient schemes;
 - construction and loading support for `PrivateKey`;
 - emission of `ProgressEvent::UnlockingPrivateKey` at the actual Argon2id call boundary inside `open_private_key` (after structural header parsing, the caller's `KdfLimit` resource-cap check, the wrapped-secret-length cap, the total-length check, and type-name grammar validation have all passed). A structurally malformed key file or one that exceeds either cap is rejected with no event emitted. `seal_private_key` is silent: keygen owns its own outer `GeneratingKeyPair` event.

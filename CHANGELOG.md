@@ -8,6 +8,10 @@ All notable changes to FerroCrypt are documented in this file.
 - **`KeyPairGenerator` now honors a `kdf_limit` raised above the 1 GiB default.** Generating a key pair with `kdf_params.mem_cost` above 1 GiB together with a matching `KeyPairGenerator::kdf_limit` was wrongly rejected with `KdfResourceCapExceeded`; the private-key writer no longer re-imposes the default memory ceiling.
 - **`.fcr` files missing the 32-byte header MAC tag are now always reported as truncated.** A file that was both structurally malformed and missing its MAC tag could previously surface `InvalidFormat(MalformedHeader)` ("File header is malformed") instead of `InvalidFormat(Truncated)` ("File is truncated or corrupted"). The header parser now reads the MAC tag immediately after the header region, before any structural parse — matching the decryption order in `FORMAT.md` §3.7.
 
+### Security
+- **STREAM payload writer rejects the reserved final-chunk counter `2^32 - 1` if it would land on a non-final chunk.** `FORMAT.md` §5 reserves that counter for the FINAL chunk; the writer previously emitted the spec-invalid non-final chunk before rejecting on the next operation. The reader gains the same check before exposing plaintext. Default `ArchiveLimits` cap encrypted plaintext at 64 GiB so this edge is only reachable when a caller raises the cap to ~281 TB.
+- **`private.key` `ext_bytes` TLV grammar is validated on both seal and open.** The writer refuses to seal an `ext_bytes` that is malformed or carries an unknown critical tag; the reader applies the same check after AEAD-AAD success. v1 normal keygen emits empty `ext_bytes` and is unaffected.
+
 ## [0.3.0-beta.1] - 2026-05-11
 
 ### Added

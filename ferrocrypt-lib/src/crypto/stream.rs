@@ -141,7 +141,9 @@ impl<W: Write> Write for EncryptWriter<W> {
             // plaintext ends with a full-size FINAL chunk rather than
             // a stray empty trailing chunk.
             if self.chunk.len() == BUFFER_SIZE {
-                if self.chunk_count >= STREAM_CHUNK_COUNT_MAX {
+                // §5 reserves counter `2^32 - 1` for the FINAL chunk.
+                // `finish()` keeps the looser `>= MAX` check.
+                if self.chunk_count >= STREAM_CHUNK_COUNT_MAX - 1 {
                     return Err(stream_io_error(
                         io::ErrorKind::InvalidData,
                         StreamError::ChunkCountExceeded,
@@ -362,7 +364,15 @@ impl<R: Read> DecryptReader<R> {
         }
 
         if filled == ENCRYPTED_CHUNK_SIZE && probe_n > 0 {
-            // Non-final chunk: stash the peek byte for the next refill.
+            // §5 reserves counter `2^32 - 1` for the FINAL chunk; the
+            // probe just proved another chunk follows. Final branch
+            // keeps `>= MAX`.
+            if self.chunk_count >= STREAM_CHUNK_COUNT_MAX - 1 {
+                return Err(stream_io_error(
+                    io::ErrorKind::InvalidData,
+                    StreamError::ChunkCountExceeded,
+                ));
+            }
             self.lookahead = Some(probe[0]);
             let decryptor = self.decryptor.as_mut().ok_or_else(|| {
                 stream_io_error(io::ErrorKind::Other, StreamError::StateExhausted)
@@ -1005,6 +1015,82 @@ mod tests {
         assert!(
             matches!(err, CryptoError::PayloadChunkCountExceeded),
             "expected PayloadChunkCountExceeded, got {err:?}"
+        );
+    }
+
+    /// §5: counter `2^32 - 1` is reserved for the FINAL chunk. With
+    /// more plaintext arriving at `chunk_count = MAX - 1`, the writer
+    /// MUST reject before AEAD runs and before any byte is committed.
+    #[test]
+    fn streaming_aead_writer_rejects_max_counter_as_non_final() {
+        let mut ciphertext: Vec<u8> = Vec::new();
+        let mut writer = payload_encryptor(&test_key(), &TEST_NONCE, &mut ciphertext);
+        writer.chunk_count = STREAM_CHUNK_COUNT_MAX - 1;
+
+        let plaintext = vec![0u8; BUFFER_SIZE + 1];
+        let err = writer
+            .write_all(&plaintext)
+            .expect_err("expected non-final max-counter rejection");
+        let marker = err
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<StreamError>())
+            .expect("expected StreamError marker");
+        assert!(
+            matches!(marker, StreamError::ChunkCountExceeded),
+            "expected StreamError::ChunkCountExceeded, got {marker:?}"
+        );
+        drop(writer);
+        assert!(
+            ciphertext.is_empty(),
+            "no ciphertext should be committed once the non-final cap fires"
+        );
+    }
+
+    /// Counter `2^32 - 1` is legal for the FINAL chunk: pins the
+    /// asymmetry that the tighter `>= MAX - 1` cap is only in the
+    /// non-final path. `finish()` at `MAX - 1` emits one short final
+    /// chunk and succeeds.
+    #[test]
+    fn streaming_aead_writer_accepts_max_counter_as_final() {
+        let mut ciphertext: Vec<u8> = Vec::new();
+        let mut writer = payload_encryptor(&test_key(), &TEST_NONCE, &mut ciphertext);
+        writer.chunk_count = STREAM_CHUNK_COUNT_MAX - 1;
+
+        writer.write_all(b"hello").unwrap();
+        let _ = writer
+            .finish()
+            .expect("final chunk at counter 2^32-1 is legal per FORMAT.md §5");
+        assert_eq!(
+            ciphertext.len(),
+            b"hello".len() + TAG_SIZE,
+            "expected exactly one short final chunk"
+        );
+    }
+
+    /// Reader counterpart: with the probe proving another chunk
+    /// follows at `chunk_count = MAX - 1`, no plaintext from the
+    /// max-counter chunk may be exposed.
+    #[test]
+    fn streaming_aead_reader_rejects_max_counter_as_non_final() {
+        let plaintext: Vec<u8> = (0..(BUFFER_SIZE * 2)).map(|i| (i % 251) as u8).collect();
+        let ciphertext = encrypt_to_vec(&plaintext);
+        let mut reader = payload_decryptor(&test_key(), &TEST_NONCE, ciphertext.as_slice());
+        reader.chunk_count = STREAM_CHUNK_COUNT_MAX - 1;
+
+        let (out, err) = drain_decrypt_reader(&mut reader);
+        let err = err.expect("expected non-final max-counter rejection");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let marker = err
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<StreamError>())
+            .expect("expected StreamError marker");
+        assert!(
+            matches!(marker, StreamError::ChunkCountExceeded),
+            "expected StreamError::ChunkCountExceeded, got {marker:?}"
+        );
+        assert!(
+            out.is_empty(),
+            "no plaintext should leak before the non-final cap fires"
         );
     }
 

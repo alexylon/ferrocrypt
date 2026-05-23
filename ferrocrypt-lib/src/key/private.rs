@@ -37,6 +37,7 @@ use crate::CryptoError;
 use crate::crypto::aead::{TAG_SIZE, WRAP_NONCE_SIZE, open_with_aad, seal_with_aad};
 use crate::crypto::kdf::{ARGON2_SALT_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams};
 use crate::crypto::keys::{derive_passphrase_wrap_key, random_bytes};
+use crate::crypto::tlv::validate_tlv;
 use crate::error::{FormatDefect, UnsupportedVersion};
 use crate::format::{
     KIND_PRIVATE_KEY, KeypairSuite, KeypairVersionRejection, MAGIC, MAGIC_SIZE,
@@ -313,10 +314,14 @@ impl std::fmt::Debug for OpenedPrivateKey {
 
 /// Seals `secret_material` for the given recipient type into a v1
 /// `private.key` byte sequence. Generates fresh `argon2_salt` and
-/// `wrap_nonce`, derives the wrap key via Argon2id + HKDF-SHA3-256, and
-/// AEAD-encrypts with the cleartext (header + type_name +
+/// `wrap_nonce`, derives the wrap key via Argon2id + HKDF-SHA3-256,
+/// and AEAD-encrypts with the cleartext (header + type_name +
 /// public_material + ext_bytes) as AAD. Returns the full on-disk file
 /// ready for atomic write.
+///
+/// Validates `ext_bytes` against the v1 TLV grammar AFTER the
+/// structural length caps so an oversize region still surfaces as
+/// `MalformedPrivateKey`.
 pub(crate) fn seal_private_key(
     secret_material: &[u8],
     type_name: &str,
@@ -325,11 +330,65 @@ pub(crate) fn seal_private_key(
     passphrase: &SecretString,
     kdf_params: &KdfParams,
 ) -> Result<Vec<u8>, CryptoError> {
-    // Writer/reader symmetry: structural validation only — the same
-    // check the reader's parser applies. The resource cap (`KdfLimit`)
-    // is api-layer policy, already enforced before this function runs;
-    // re-applying it here (e.g. `validate_for_write`) would re-impose
-    // the 1 GiB default and reject a caller-raised `kdf_limit`.
+    seal_private_key_inner(
+        secret_material,
+        type_name,
+        public_material,
+        ext_bytes,
+        passphrase,
+        kdf_params,
+        ExtBytesValidation::Validate,
+    )
+}
+
+/// Test-only: seals a `private.key` skipping the writer-side
+/// `validate_tlv` gate, so reader-rejection tests can build
+/// authenticated files with intentionally malformed `ext_bytes`. Never
+/// reachable from production code.
+#[cfg(test)]
+pub(crate) fn seal_private_key_unchecked_tlv(
+    secret_material: &[u8],
+    type_name: &str,
+    public_material: &[u8],
+    ext_bytes: &[u8],
+    passphrase: &SecretString,
+    kdf_params: &KdfParams,
+) -> Result<Vec<u8>, CryptoError> {
+    seal_private_key_inner(
+        secret_material,
+        type_name,
+        public_material,
+        ext_bytes,
+        passphrase,
+        kdf_params,
+        ExtBytesValidation::Skip,
+    )
+}
+
+/// Whether `seal_private_key_inner` runs the `ext_bytes` TLV gate.
+/// Production paths use [`Self::Validate`]; the test-only
+/// `seal_private_key_unchecked_tlv` uses [`Self::Skip`].
+#[derive(Clone, Copy)]
+enum ExtBytesValidation {
+    Validate,
+    #[cfg(test)]
+    Skip,
+}
+
+/// Shared body of [`seal_private_key`] and its test-only unchecked
+/// counterpart.
+fn seal_private_key_inner(
+    secret_material: &[u8],
+    type_name: &str,
+    public_material: &[u8],
+    ext_bytes: &[u8],
+    passphrase: &SecretString,
+    kdf_params: &KdfParams,
+    validation: ExtBytesValidation,
+) -> Result<Vec<u8>, CryptoError> {
+    // Structural validation only — `KdfLimit` policy is enforced
+    // upstream and re-applying it here would re-impose the 1 GiB
+    // default and reject a caller-raised `kdf_limit`.
     kdf_params.validate_structural()?;
     validate_type_name_grammar(type_name)?;
 
@@ -340,6 +399,11 @@ pub(crate) fn seal_private_key(
     check_public_len(public_len)?;
     let ext_len = u32::try_from(ext_bytes.len()).map_err(|_| malformed_private_key())?;
     check_ext_len(ext_len)?;
+    if matches!(validation, ExtBytesValidation::Validate) {
+        // After the length cap so an oversize region still surfaces
+        // as `MalformedPrivateKey` rather than a TLV-layer error.
+        validate_tlv(ext_bytes)?;
+    }
     let wrapped_secret_len_usize = secret_material
         .len()
         .checked_add(TAG_SIZE)
@@ -473,6 +537,10 @@ pub(crate) fn open_private_key(
         cleartext,
         || CryptoError::KeyFileUnlockFailed,
     )?;
+
+    // Authenticated bytes only: runs after `open_with_aad` so
+    // downstream callers never see authenticated-but-invalid `ext_bytes`.
+    validate_tlv(&ext_bytes_slice)?;
 
     Ok(OpenedPrivateKey {
         type_name: type_name.to_owned(),
@@ -659,7 +727,8 @@ mod tests {
         let (secret, public) = x25519_shaped();
         let pass = test_passphrase("pw");
         let kdf = KdfParams::test_fast_default();
-        let ext = vec![0xDEu8, 0xAD, 0xBE, 0xEF];
+        // Ignorable TLV entry (tag 0x0001).
+        let ext = crate::crypto::tlv::tlv_bytes(0x0001, &[0xDE, 0xAD, 0xBE, 0xEF]);
         let bytes = seal_private_key(&secret, "x25519", &public, &ext, &pass, &kdf).unwrap();
         let opened = open_private_key(
             &bytes,
@@ -670,6 +739,47 @@ mod tests {
         )
         .unwrap();
         assert_eq!(opened.ext_bytes, ext);
+    }
+
+    /// Writer-side: a `private.key` with a critical-tag TLV in
+    /// `ext_bytes` (no known v1 criticals) MUST reject before AEAD.
+    /// Pairs with [`open_rejects_unknown_critical_ext_after_unlock`].
+    #[test]
+    fn seal_rejects_unknown_critical_ext_bytes() {
+        let (secret, public) = x25519_shaped();
+        let pass = test_passphrase("pw");
+        let kdf = KdfParams::test_fast_default();
+        let ext = crate::crypto::tlv::tlv_bytes(0x8001, b"future");
+        match seal_private_key(&secret, "x25519", &public, &ext, &pass, &kdf) {
+            Err(CryptoError::InvalidFormat(FormatDefect::UnknownCriticalTag { tag: 0x8001 })) => {}
+            other => panic!("expected UnknownCriticalTag for critical ext_bytes, got {other:?}"),
+        }
+    }
+
+    /// Reader-side: an authenticated `ext_bytes` carrying a critical
+    /// tag MUST reject after AEAD success. Built via the test-only
+    /// bypass so AEAD authenticates the same bytes the TLV validator
+    /// rejects.
+    #[test]
+    fn open_rejects_unknown_critical_ext_after_unlock() {
+        let (secret, public) = x25519_shaped();
+        let pass = test_passphrase("pw");
+        let kdf = KdfParams::test_fast_default();
+        let critical_ext = crate::crypto::tlv::tlv_bytes(0x8001, b"x");
+        let attacker_bytes =
+            seal_private_key_unchecked_tlv(&secret, "x25519", &public, &critical_ext, &pass, &kdf)
+                .unwrap();
+
+        match open_private_key(
+            &attacker_bytes,
+            &pass,
+            None,
+            PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT,
+            &|_| {},
+        ) {
+            Err(CryptoError::InvalidFormat(FormatDefect::UnknownCriticalTag { tag: 0x8001 })) => {}
+            other => panic!("expected UnknownCriticalTag after AEAD, got {other:?}"),
+        }
     }
 
     /// `seal_private_key` MUST reject `public_material` whose length
@@ -735,7 +845,8 @@ mod tests {
         let (secret, public) = x25519_shaped();
         let pass = test_passphrase("pw");
         let kdf = KdfParams::test_fast_default();
-        let ext = vec![0xA5u8; 8];
+        // Ignorable TLV — AEAD-AAD is the probe target here.
+        let ext = crate::crypto::tlv::tlv_bytes(0x0001, b"ad");
         let original = seal_private_key(&secret, "x25519", &public, &ext, &pass, &kdf).unwrap();
         let cleartext_end =
             PRIVATE_KEY_HEADER_FIXED_SIZE + "x25519".len() + public.len() + ext.len();

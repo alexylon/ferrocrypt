@@ -315,7 +315,6 @@ pub(crate) fn open_x25519_private_key(
     kdf_limit: Option<&crate::crypto::kdf::KdfLimit>,
     on_event: &dyn Fn(&crate::ProgressEvent),
 ) -> Result<Zeroizing<[u8; PRIVATE_KEY_SIZE]>, CryptoError> {
-    use crate::crypto::tlv::validate_tlv;
     use crate::error::FormatDefect;
     use crate::fs::paths::read_file_capped;
     use crate::key::files::KeyFileKind;
@@ -359,11 +358,6 @@ pub(crate) fn open_x25519_private_key(
             FormatDefect::MalformedPrivateKey,
         ));
     }
-
-    // TLV validation is safe to run after AEAD-AAD authentication
-    // succeeded — `key::private::open_private_key` only returns Ok
-    // after the AEAD pass that bound `ext_bytes` as AAD.
-    validate_tlv(&opened.ext_bytes)?;
 
     let mut secret = Zeroizing::new([0u8; PRIVATE_KEY_SIZE]);
     secret.copy_from_slice(&opened.secret_material);

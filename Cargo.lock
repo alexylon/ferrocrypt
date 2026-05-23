@@ -502,7 +502,7 @@ dependencies = [
 
 [[package]]
 name = "ferrocrypt-test-support"
-version = "0.0.0"
+version = "0.3.0-beta.2"
 dependencies = [
  "ferrocrypt",
  "tempfile",

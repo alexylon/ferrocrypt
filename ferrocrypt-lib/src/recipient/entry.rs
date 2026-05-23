@@ -350,6 +350,22 @@ mod tests {
         assert_eq!(parsed, entry);
     }
 
+    /// `to_bytes_checked` rejects a body whose length exceeds
+    /// `BODY_LEN_MAX`. Pairs with `parse_one_rejects_body_above_structural_max`
+    /// on the reader side.
+    #[test]
+    fn to_bytes_checked_rejects_body_above_structural_max() {
+        let entry = RecipientEntry {
+            type_name: "x25519".to_owned(),
+            recipient_flags: 0,
+            body: vec![0u8; (BODY_LEN_MAX as usize) + 1],
+        };
+        match entry.to_bytes_checked() {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)) => {}
+            other => panic!("expected MalformedRecipientEntry for over-cap body, got {other:?}"),
+        }
+    }
+
     #[test]
     fn recipient_entry_to_bytes_layout_matches_spec() {
         let entry = RecipientEntry {

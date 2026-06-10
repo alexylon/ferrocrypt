@@ -47,6 +47,10 @@ criteria = "safe-to-deploy"
 version = "0.11.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.bitflags]]
+version = "2.13.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.blake2]]
 version = "0.10.6"
 criteria = "safe-to-deploy"
@@ -92,11 +96,11 @@ version = "0.2.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.ctor]]
-version = "0.8.0"
+version = "0.9.1"
 criteria = "safe-to-run"
 
 [[exemptions.ctor-proc-macro]]
-version = "0.0.7"
+version = "0.0.12"
 criteria = "safe-to-run"
 
 [[exemptions.ctutils]]
@@ -120,15 +124,15 @@ version = "0.11.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.dtor]]
-version = "0.3.0"
+version = "0.6.0"
 criteria = "safe-to-run"
 
 [[exemptions.dtor-proc-macro]]
-version = "0.0.6"
+version = "0.0.12"
 criteria = "safe-to-run"
 
 [[exemptions.endian-type]]
-version = "0.1.2"
+version = "0.2.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.error-code]]
@@ -176,6 +180,14 @@ criteria = "safe-to-deploy"
 version = "0.2.186"
 criteria = "safe-to-deploy"
 
+[[exemptions.link-section]]
+version = "0.0.12"
+criteria = "safe-to-run"
+
+[[exemptions.log]]
+version = "0.4.32"
+criteria = "safe-to-deploy"
+
 [[exemptions.maybe-owned]]
 version = "0.3.4"
 criteria = "safe-to-deploy"
@@ -186,7 +198,7 @@ version = "0.1.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.nix]]
-version = "0.30.1"
+version = "0.31.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.once_cell]]
@@ -206,7 +218,7 @@ version = "5.3.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.radix_trie]]
-version = "0.2.1"
+version = "0.3.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.rpassword]]
@@ -218,7 +230,7 @@ version = "0.0.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustyline]]
-version = "17.0.2"
+version = "18.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.secrecy]]

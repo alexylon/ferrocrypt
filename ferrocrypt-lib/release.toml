@@ -1,8 +1,14 @@
 # Package-specific release config for ferrocrypt (lib).
 # Paths in [[pre-release-replacements]] are relative to this package directory.
-# CHANGELOG lives at the workspace root; ferrocrypt-desktop is excluded from
-# the workspace and therefore not handled by shared-version, so its version is
-# synced here.
+#
+# The CHANGELOG (at the workspace root) is rewritten here, during the lib's
+# release step.
+#
+# ferrocrypt-desktop is excluded from the workspace, so shared-version does not
+# bump it. The desktop-version rewrite below is duplicated in every released
+# crate's release.toml (lib, cli, test-support) so it runs during whichever
+# release step executes; the rewrite is idempotent, and the CI release guard
+# fails the build if the desktop version is ever missed.
 
 [[pre-release-replacements]]
 file = "../CHANGELOG.md"

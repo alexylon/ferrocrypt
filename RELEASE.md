@@ -102,11 +102,30 @@ cargo release patch --execute --no-push
 - **ferrocrypt-lib/Cargo.toml**: Version number
 - **ferrocrypt-cli/Cargo.toml**: Version number + dependency version
 - **CHANGELOG.md**: New release section with date
+- **ferrocrypt-desktop/Cargo.toml**: Version number (see "Desktop app version" below)
 - **Git**: Creates commit and annotated tag
 
 ### Publish Order
 1. `ferrocrypt` (library) — published first since CLI depends on it
 2. `ferrocrypt-cli` — published after the lib is available on crates.io
+
+### Desktop app version
+
+`ferrocrypt-desktop` is excluded from the Cargo workspace, so cargo-release's
+shared-version does not bump it automatically. Two things keep it correct:
+
+- **Its `Cargo.toml` version** — used for the macOS / Linux / Windows installer
+  metadata — is rewritten by a `[[pre-release-replacements]]` rule that lives in
+  every released crate's `release.toml` (lib, cli, test-support), so it runs no
+  matter which release step executes.
+- **The version shown in the app window** is read from the library at runtime
+  (`ferrocrypt::VERSION`), so it always matches the released version even if the
+  manifest rewrite is somehow skipped.
+
+As a backstop, the `desktop-version` job in `.github/workflows/release.yml` fails
+the release if `ferrocrypt-desktop/Cargo.toml` does not match the pushed tag. If
+that happens, bump `ferrocrypt-desktop/Cargo.toml` to the tag version, then
+delete and re-push the tag.
 
 ## Before Release
 

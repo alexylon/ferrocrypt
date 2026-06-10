@@ -133,6 +133,13 @@
 
 use std::path::PathBuf;
 
+/// The version of this crate, captured from `Cargo.toml` at compile time.
+///
+/// Exposed as a single source of truth so dependents — notably the FerroCrypt
+/// desktop app — can show the version that the release process actually bumps,
+/// rather than each crate carrying its own copy that can drift.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub use crate::api::{
     Decryptor, Encryptor, KeyPairGenerator, PassphraseDecryptor, PrivateKeyDecryptor,
     default_encrypted_filename, generate_key_pair, probe_recipient_mode,

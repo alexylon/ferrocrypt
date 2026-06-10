@@ -20,8 +20,26 @@ jobs:
     with:
       max_total_time: 10
 
+  # Release gate: the desktop app is excluded from the workspace, so its version
+  # is not kept in lockstep by cargo-release's shared-version. Verify it matches
+  # the pushed tag and fail the release on drift, instead of silently shipping an
+  # app whose displayed version is stale.
+  desktop-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify desktop version matches the release tag
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          manifest="$(grep -m1 '^version = ' ferrocrypt-desktop/Cargo.toml | sed -E 's/^version = "(.*)"$/\1/')"
+          if [ "$tag" != "$manifest" ]; then
+            echo "::error::ferrocrypt-desktop version ($manifest) does not match release tag ($tag). Bump ferrocrypt-desktop/Cargo.toml before tagging."
+            exit 1
+          fi
+          echo "ferrocrypt-desktop version $manifest matches tag $tag."
+
   build:
-    needs: fuzz
+    needs: [fuzz, desktop-version]
     strategy:
       matrix:
         include:

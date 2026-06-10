@@ -1,6 +1,6 @@
 [package]
 name = "ferrocrypt-desktop"
-version = "0.3.0-beta.1"
+version = "0.3.0-beta.2"
 edition = "2021"
 description = "Desktop application for FerroCrypt — passphrase and public-key file/directory encryption."
 authors = ["Alexander Alexandrov"]

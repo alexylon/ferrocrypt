@@ -43,7 +43,9 @@ fn pick_file_or_folder() -> Option<PathBuf> {
 fn main() {
     let app = AppWindow::new().unwrap();
 
-    app.set_app_version(env!("CARGO_PKG_VERSION").into());
+    // Show the library version (the one cargo-release bumps) rather than this
+    // crate's own, so the displayed version can't silently drift from a release.
+    app.set_app_version(ferrocrypt::VERSION.into());
     app.set_combined_picker(cfg!(target_os = "macos"));
 
     app.on_mode_changed({

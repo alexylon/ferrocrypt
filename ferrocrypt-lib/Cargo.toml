@@ -33,9 +33,11 @@ secrecy = "0.10"
 thiserror = "2"
 chacha20poly1305 = { version = "0.10", features = ["std", "stream"] }
 argon2 = { version = "0.5", features = ["std", "zeroize"] }
+# hmac 0.13 and hkdf 0.13 require sha3 0.11
 sha3 = "0.11"
 hmac = "0.13"
 hkdf = "0.13"
+# constant_time_eq requires MSRV 1.95
 constant_time_eq = "0.4"
 bech32 = "0.11"
 tempfile = "3"
@@ -61,7 +63,7 @@ rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
 ferrocrypt-test-support = { path = "../ferrocrypt-test-support" }
-ctor = "0.8"
+ctor = "0.9"
 
 # `process` enables the safe get/setrlimit wrappers used by the
 # wide-tree fd-limit regression test in `archive/encode.rs`.

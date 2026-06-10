@@ -24,10 +24,10 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 rpassword = "7"
-rustyline = "17"
+rustyline = "18"
 shell-words = "1"
 subtle = "2"
 ferrocrypt = { path = "../ferrocrypt-lib", version = "0.3.0-beta.2" }
 
 [dev-dependencies]
-ctor = "0.2"
+ctor = "0.9"

@@ -8,9 +8,15 @@
 use std::fs;
 use std::io::Write;
 
-use ferrocrypt::Decryptor;
 use ferrocrypt::secrecy::SecretString;
+use ferrocrypt::{Decryptor, KdfLimit};
 use libfuzzer_sys::fuzz_target;
+
+/// Argon2id budget for the harness: a fuzzer-crafted but structurally
+/// valid `argon2id` header may demand up to the 1 GiB default reader
+/// ceiling per iteration, stalling the fuzzer. 8 MiB keeps real KDF
+/// runs reachable while the cap-rejection arm stays covered.
+const FUZZ_KDF_MEM_KIB: u32 = 8 * 1024;
 
 fuzz_target!(|data: &[u8]| {
     let tmp_dir = tempfile::tempdir().unwrap();
@@ -24,6 +30,8 @@ fuzz_target!(|data: &[u8]| {
 
     if let Ok(Decryptor::Passphrase(d)) = Decryptor::open(&input_path) {
         let passphrase = SecretString::from("fuzz".to_string());
-        let _ = d.decrypt(passphrase, &output_dir, |_| {});
+        let _ =
+            d.kdf_limit(KdfLimit::new(FUZZ_KDF_MEM_KIB))
+                .decrypt(passphrase, &output_dir, |_| {});
     }
 });

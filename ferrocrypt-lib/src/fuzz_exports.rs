@@ -57,6 +57,72 @@ pub fn decode_recipient_string(s: &str, local_max_chars: usize) -> Result<(), cr
     crate::key::public::decode_recipient_string(s, local_max_chars).map(|_| ())
 }
 
+/// Writer-side counterpart for the `fuzz_fca_manifest` round-trip
+/// assert: serialises a parsed [`Manifest`] through the production
+/// writer gate. Per the encrypt/decrypt symmetry rule, a manifest the
+/// reader accepted must pass this gate and serialize byte-identically.
+pub fn serialize_manifest(
+    manifest: &Manifest,
+    limits: crate::ArchiveLimits,
+) -> Result<Vec<u8>, crate::CryptoError> {
+    crate::archive::format::serialize_manifest(manifest, limits)
+}
+
+/// Drives the production FCA writer for corpus-seed generation
+/// (`fuzz/examples/gen_seeds.rs`): archives `input_path` into plain
+/// FCA bytes under default limits.
+pub fn archive_for_fuzz(input_path: &std::path::Path) -> Result<Vec<u8>, crate::CryptoError> {
+    crate::archive::archive(input_path, Vec::new(), crate::ArchiveLimits::default())
+        .map(|(_root_name, bytes)| bytes)
+}
+
+/// Fixed key and nonce for the STREAM fuzz harness. Deterministic on
+/// purpose: libfuzzer crash reproduction requires identical behavior
+/// for identical input bytes, and corpus seeds built by
+/// [`encrypt_stream_for_fuzz`] must stay decryptable across runs.
+fn fuzz_payload_key() -> crate::crypto::keys::PayloadKey {
+    crate::crypto::keys::PayloadKey::from_bytes_for_tests(
+        [0x42; crate::crypto::keys::ENCRYPTION_KEY_SIZE],
+    )
+}
+
+const FUZZ_STREAM_NONCE: [u8; crate::crypto::stream::STREAM_NONCE_SIZE] =
+    [0x24; crate::crypto::stream::STREAM_NONCE_SIZE];
+
+/// Drives the STREAM-BE32 `DecryptReader` state machine over arbitrary
+/// ciphertext for the `fuzz_stream_decrypt` target: chunk refill, the
+/// exact-chunk one-byte peek, truncation / tamper / trailing-data
+/// classification, and the zeroize-and-park error path. The MAC-gated
+/// end-to-end decrypt targets can never reach this layer with
+/// attacker-shaped bytes; this helper feeds the cipher layer directly.
+pub fn decrypt_stream_for_fuzz(ciphertext: &[u8]) -> Result<Vec<u8>, crate::CryptoError> {
+    use std::io::Read as _;
+    let mut reader = crate::crypto::stream::payload_decryptor(
+        &fuzz_payload_key(),
+        &FUZZ_STREAM_NONCE,
+        ciphertext,
+    );
+    let mut plaintext = Vec::new();
+    reader.read_to_end(&mut plaintext)?;
+    Ok(plaintext)
+}
+
+/// Encrypt counterpart of [`decrypt_stream_for_fuzz`] under the same
+/// fixed key and nonce. Used to generate valid corpus seeds and as the
+/// round-trip oracle inside the target: STREAM is deterministic, so
+/// any accepted ciphertext must re-encrypt byte-identically from its
+/// recovered plaintext.
+pub fn encrypt_stream_for_fuzz(plaintext: &[u8]) -> Result<Vec<u8>, crate::CryptoError> {
+    use std::io::Write as _;
+    let mut writer = crate::crypto::stream::payload_encryptor(
+        &fuzz_payload_key(),
+        &FUZZ_STREAM_NONCE,
+        Vec::new(),
+    );
+    writer.write_all(plaintext)?;
+    writer.finish()
+}
+
 pub use crate::archive::IncompleteOutputPolicy;
 
 /// Drives the full FCA reader pipeline (`archive::unarchive`) on

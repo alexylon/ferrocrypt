@@ -145,10 +145,11 @@ impl PayloadKey {
         &self.0
     }
 
-    /// Test-only constructor for deterministic fixed-byte payload keys.
-    /// Production code receives a `PayloadKey` only from
-    /// [`derive_subkeys`].
-    #[cfg(test)]
+    /// Test- and fuzz-only constructor for deterministic fixed-byte
+    /// payload keys (the STREAM fuzz harness needs a reproducible key;
+    /// see `fuzz_exports`). Production code receives a `PayloadKey`
+    /// only from [`derive_subkeys`].
+    #[cfg(any(test, feature = "fuzzing"))]
     pub(crate) fn from_bytes_for_tests(bytes: [u8; ENCRYPTION_KEY_SIZE]) -> Self {
         Self::from_zeroizing(Zeroizing::new(bytes))
     }

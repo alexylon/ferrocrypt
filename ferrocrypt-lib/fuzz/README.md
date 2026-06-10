@@ -31,7 +31,9 @@ the integration targets.
 | `fuzz_kdf_params` | `KdfParams::from_bytes` structural and local-resource bounds |
 | `fuzz_archive_path` | `validate_fca_path` — the FCA archive path-grammar gate (writer/reader symmetric, takes UTF-8 `&str`) |
 | `fuzz_fca_header` | `parse_fca_header` — 23-byte FCA fixed header parser; asserts returned values are inside `ArchiveLimits` on success |
-| `fuzz_fca_manifest` | Full FCA manifest pipeline: header → manifest bytes → `parse_manifest_bytes` → tree-shape validation; asserts spec §20 manifest invariants on success |
+| `fuzz_fca_manifest` | Full FCA manifest pipeline: header → manifest bytes → `parse_manifest_bytes` → tree-shape validation; asserts spec §20 manifest invariants on success, then re-serializes through the writer gate and asserts byte-identity (writer/reader symmetry) |
+| `fuzz_stream_decrypt` | STREAM-BE32 `DecryptReader` on raw ciphertext under a fixed key/nonce: chunk refill, exact-chunk one-byte peek, truncation / tamper / trailing-data classification; when an input decrypts, asserts deterministic re-encryption is byte-identical |
+| `fuzz_recipient_string_decode` | Generic typed-payload recipient-string decoder (two-argument form with a fuzzed length cap): arbitrary type names and key-material lengths, plus the canonical-padding re-encode check |
 | `fuzz_recipient_decode` | Bech32 `fcr1…` recipient string parser and internal SHA3-256 checksum |
 | `fuzz_probe_mode` | `probe_recipient_mode` top-level parser entry, end-to-end via a real temp file |
 
@@ -43,8 +45,26 @@ catch interaction bugs the parser-surface targets cannot see.
 
 | Target | What it exercises |
 |---|---|
-| `fuzz_symmetric_decrypt` | Drives arbitrary bytes through `Decryptor::open` and `PassphraseDecryptor::decrypt` (passphrase recipient mode) |
-| `fuzz_hybrid_decrypt` | Drives arbitrary bytes through `Decryptor::open` and `PrivateKeyDecryptor::decrypt` (X25519 recipient mode), using a one-time generated keypair |
+| `fuzz_symmetric_decrypt` | Drives arbitrary bytes through `Decryptor::open` and `PassphraseDecryptor::decrypt` (passphrase recipient mode); Argon2id capped at 8 MiB via `kdf_limit` so a crafted header cannot stall iterations |
+| `fuzz_hybrid_decrypt` | Drives arbitrary bytes through `Decryptor::open` and `PrivateKeyDecryptor::decrypt` (X25519 recipient mode), using a one-time keypair sealed at 8 MiB Argon2id with a matching `kdf_limit`, so the per-iteration `private.key` unlock stays cheap |
+
+## Seed corpora
+
+`seeds/<target>/` holds small checked-in inputs that make the deep
+paths of the slower targets reachable from the first iteration —
+`corpus/` is gitignored, so it starts empty on CI and fresh checkouts.
+Regenerate after any wire-format change:
+
+```bash
+cargo run --example gen_seeds
+```
+
+Every seed is produced by the production writer (or patched from its
+output) and validated through the production reader during
+generation, so format drift fails regeneration instead of silently
+rotting the seeds. CI passes `seeds/<target>` as an extra corpus
+directory; locally, `gen_seeds` also copies each seed into
+`corpus/<target>` so a plain `cargo fuzz run <target>` picks it up.
 
 ## Running
 

@@ -10,8 +10,14 @@ use std::fs;
 use std::io::Write;
 
 use ferrocrypt::secrecy::SecretString;
-use ferrocrypt::{Decryptor, PrivateKey, generate_key_pair};
+use ferrocrypt::{Decryptor, KdfLimit, KdfParams, KeyPairGenerator, PrivateKey};
 use libfuzzer_sys::fuzz_target;
+
+/// Argon2id budget for the harness: the per-iteration `private.key`
+/// unlock at the 1 GiB production default dominated fuzz wall-clock.
+/// The fixture key is sealed at 8 MiB and the reader limit below
+/// matches, so the unlock always succeeds and stays cheap.
+const FUZZ_KDF_MEM_KIB: u32 = 8 * 1024;
 
 /// Generates a keypair once per process into a persistent temp directory.
 fn key_dir() -> &'static std::path::Path {
@@ -20,7 +26,14 @@ fn key_dir() -> &'static std::path::Path {
     DIR.get_or_init(|| {
         let dir = tempfile::tempdir().unwrap();
         let pass = SecretString::from("fuzz_key".to_string());
-        generate_key_pair(dir.path(), pass, |_| {}).unwrap();
+        KeyPairGenerator::with_passphrase(pass)
+            .kdf_params(KdfParams {
+                mem_cost: FUZZ_KDF_MEM_KIB,
+                time_cost: 1,
+                lanes: 4,
+            })
+            .write(dir.path(), |_| {})
+            .unwrap();
         dir
     })
     .path()
@@ -41,7 +54,7 @@ fuzz_target!(|data: &[u8]| {
 
     if let Ok(Decryptor::PrivateKey(d)) = Decryptor::open(&input_path) {
         let passphrase = SecretString::from("fuzz_key".to_string());
-        let _ = d.decrypt(
+        let _ = d.kdf_limit(KdfLimit::new(FUZZ_KDF_MEM_KIB)).decrypt(
             PrivateKey::from_key_file(&priv_key),
             passphrase,
             &output_dir,

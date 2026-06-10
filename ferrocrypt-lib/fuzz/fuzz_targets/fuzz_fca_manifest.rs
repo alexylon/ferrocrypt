@@ -19,7 +19,11 @@
 //! - every directory entry has `size == 0`;
 //! - every entry's `entry_ext` byte length is `<= max_entry_ext_bytes`;
 //! - the sum of every entry's `entry_ext` byte length is
-//!   `<= max_total_entry_ext_bytes`.
+//!   `<= max_total_entry_ext_bytes`;
+//! - re-serializing through the production writer gate
+//!   (`serialize_manifest`) succeeds and is byte-identical — the
+//!   mechanical form of the encrypt/decrypt symmetry rule, and the
+//!   only coverage the writer side gets from fuzzing.
 //!
 //! A regression in any of these arms surfaces here as a panic.
 
@@ -28,7 +32,7 @@ use std::collections::HashSet;
 use ferrocrypt::ArchiveLimits;
 use ferrocrypt::fuzz_exports::{
     ArchiveEntryKind, ascii_case_collision_key, parse_fca_header, parse_manifest_bytes,
-    validate_fca_path, validate_no_known_critical,
+    serialize_manifest, validate_fca_path, validate_no_known_critical,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -109,5 +113,15 @@ fuzz_target!(|data: &[u8]| {
     assert!(
         total_entry_ext <= limits.max_total_entry_ext_bytes,
         "sum of entry_ext over total cap: {total_entry_ext} bytes"
+    );
+
+    // Writer/reader symmetry oracle: a manifest the reader accepted
+    // must pass the writer gate and serialize byte-identically (parse
+    // preserves wire order and every field verbatim).
+    let reserialized = serialize_manifest(&manifest, limits)
+        .expect("manifest accepted by the reader must pass the writer gate");
+    assert_eq!(
+        reserialized, manifest_bytes,
+        "manifest re-serialization must be byte-identical"
     );
 });

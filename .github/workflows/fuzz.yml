@@ -51,10 +51,11 @@ jobs:
           MAX_TOTAL_TIME: ${{ inputs.max_total_time }}
         run: |
           set -euo pipefail
-          # Every target except the two integration-level ones that run
-          # a full Argon2id derivation per iteration — those are too
-          # slow for a per-PR time budget. They're still built above, so
-          # API drift still fails the job.
+          # The two integration-level targets stay out of the per-PR
+          # budget: even with their Argon2id work bounded to 8 MiB they
+          # iterate an order of magnitude slower than the parser-surface
+          # targets. They're still built above, so API drift still
+          # fails the job.
           skip='^(fuzz_symmetric_decrypt|fuzz_hybrid_decrypt)$'
           # Capture to a variable so `set -e` trips if `fuzz list` fails.
           # Command substitution inside a `for ... in $(...)` word list
@@ -70,7 +71,14 @@ jobs:
               continue
             fi
             echo "=== $target ==="
-            cargo +nightly fuzz run "$target" -- -max_total_time="$MAX_TOTAL_TIME"
+            # Explicit corpus dirs must exist before libfuzzer starts;
+            # corpus/ is gitignored so it is always absent on CI.
+            mkdir -p "corpus/$target"
+            args=("corpus/$target")
+            if [[ -d "seeds/$target" ]]; then
+              args+=("seeds/$target")
+            fi
+            cargo +nightly fuzz run "$target" "${args[@]}" -- -max_total_time="$MAX_TOTAL_TIME"
           done
 
       - name: Upload fuzz crash artifacts on failure

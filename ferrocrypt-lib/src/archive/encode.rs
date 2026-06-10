@@ -486,9 +486,28 @@ fn build_manifest(
         // not refuse reparse points by default. The user-supplied path
         // might resolve through a junction or mount point; reject here
         // so the writer never archives content reached through one.
-        // Unix `open_anchor` uses `O_DIRECTORY | O_NOFOLLOW` so a
-        // symlink at the root path fails the open itself.
         reject_windows_reparse_point_cap(&source_root_meta, "Input", name)?;
+
+        // On Unix, `open_anchor` follows symlinks (`open_ambient_dir`
+        // sets no `O_NOFOLLOW`), so the lstat pre-check above is not
+        // enough on its own: a symlink swapped in between that check
+        // and the open is followed silently. Comparing the opened
+        // handle's (dev, ino) against the pre-check closes the race —
+        // any swap, symlink or real directory, changes the identity
+        // pair. FORMAT.md §9.10 lists the input-root symlink as a
+        // MUST-reject.
+        #[cfg(unix)]
+        {
+            use cap_std::fs::MetadataExt as _;
+            use std::os::unix::fs::MetadataExt as _;
+            if (source_root_meta.dev(), source_root_meta.ino()) != (metadata.dev(), metadata.ino())
+            {
+                return Err(CryptoError::InvalidInput(format!(
+                    "Input directory changed during archive: {}",
+                    input_path.display()
+                )));
+            }
+        }
 
         let root_mode = archive_dir_mode_cap(&source_root_meta);
 

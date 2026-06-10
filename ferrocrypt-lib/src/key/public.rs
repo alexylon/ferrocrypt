@@ -255,7 +255,9 @@ pub fn decode_recipient_string(
     // Strict Bech32 (BIP 173 polynomial via `Bech32V1`, which also
     // accepts strings up to v1's 20 000-char spec cap rather than the
     // crate's default 1023). `CheckedHrpstring` rejects Bech32m
-    // strings, mixed case, and non-canonical 5-to-8 padding.
+    // strings and mixed case, but NOT non-canonical 5-to-8 padding:
+    // in `bech32` that check runs only on the segwit decode path, and
+    // `byte_iter` silently drops the trailing bits. Enforced below.
     let checked = CheckedHrpstring::new::<Bech32V1>(s)
         .map_err(|_| CryptoError::InvalidInput(format!("Invalid recipient string: {s}")))?;
     let hrp = checked.hrp();
@@ -269,6 +271,17 @@ pub fn decode_recipient_string(
     let data: Vec<u8> = checked.byte_iter().collect();
 
     check_payload_data_len(data.len())?;
+
+    // `FORMAT.md` §7: reject non-canonical 5-to-8 padding. The dropped
+    // padding bits are covered by neither checksum, so two distinct
+    // strings could otherwise decode to the same accepted payload. A
+    // canonical re-encode must reproduce the input byte-for-byte
+    // (lowercase was already enforced above, so no legal input fails).
+    let canonical =
+        bech32::encode::<Bech32V1>(RECIPIENT_HRP, &data).map_err(|_| malformed_public_key())?;
+    if canonical != s {
+        return Err(malformed_public_key());
+    }
 
     let wire_version = data[PAYLOAD_VERSION_OFFSET];
     let suite = public_key_wire_version_to_suite(wire_version)?;
@@ -903,6 +916,50 @@ mod tests {
         let decoded = decode_recipient_string(&s, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT).unwrap();
         assert_eq!(decoded.type_name, "x25519");
         assert_eq!(decoded.key_material, key);
+    }
+
+    /// `FORMAT.md` §7 requires decoders to reject non-canonical 5-to-8
+    /// padding. Builds a second, distinct `fcr1…` string for the same
+    /// payload by setting the lowest padding bit of the final data
+    /// character and recomputing the BIP 173 checksum. The dropped
+    /// padding bits are covered by neither checksum, so without the
+    /// canonical re-encode check this string is accepted.
+    #[test]
+    fn decode_rejects_non_canonical_bech32_padding() {
+        use bech32::Fe32;
+        use bech32::primitives::iter::{ByteIterExt, Fe32IterExt};
+
+        let canonical = encode_recipient_string("x25519", &x25519_key()).unwrap();
+        decode_recipient_string(&canonical, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT)
+            .expect("canonical string must decode");
+
+        let payload: Vec<u8> = CheckedHrpstring::new::<Bech32V1>(&canonical)
+            .unwrap()
+            .byte_iter()
+            .collect();
+        let pad_bits = (5 - (payload.len() * 8) % 5) % 5;
+        assert!(
+            pad_bits > 0,
+            "payload length leaves no padding bits; vary key_material length"
+        );
+
+        let mut fes: Vec<Fe32> = payload.iter().copied().bytes_to_fes().collect();
+        let last = fes.pop().expect("payload is non-empty");
+        let tweaked = Fe32::try_from(last.to_u8() | 0x01).unwrap();
+        assert_ne!(last, tweaked, "lowest padding bit must start unset");
+        fes.push(tweaked);
+        let non_canonical: String = fes
+            .iter()
+            .copied()
+            .with_checksum::<Bech32V1>(&RECIPIENT_HRP)
+            .chars()
+            .collect();
+        assert_ne!(non_canonical, canonical);
+
+        match decode_recipient_string(&non_canonical, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
+            other => panic!("expected MalformedPublicKey, got {other:?}"),
+        }
     }
 
     #[test]

@@ -20,18 +20,57 @@ use crate::CryptoError;
 /// rename-into-place pattern.
 pub(crate) const INCOMPLETE_SUFFIX: &str = ".incomplete";
 
+/// Opens `path` read-only for header probing, decryption, or key-file
+/// reading, refusing FIFOs, sockets, and device nodes.
+///
+/// On Unix the open itself uses `O_NONBLOCK`, so an attacker-placed
+/// FIFO cannot block the process inside `open(2)` (without that flag,
+/// opening a FIFO read-only blocks until a writer appears). The file
+/// type is then checked on the open handle, leaving no window between
+/// check and use; `O_NONBLOCK` has no effect on regular-file reads.
+/// Directories pass through deliberately — each caller keeps its
+/// established directory handling (probe short-circuits them, decrypt
+/// surfaces the platform's directory-read error).
+///
+/// `map_open_error` translates an `open` failure so each caller keeps
+/// its established mapping ([`map_user_path_io_error`] for key files,
+/// `CryptoError::Io` for probe / decrypt).
+pub(crate) fn open_input_file(
+    path: &Path,
+    map_open_error: impl FnOnce(io::Error) -> CryptoError,
+) -> Result<File, CryptoError> {
+    let mut options = File::options();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path).map_err(map_open_error)?;
+    let file_type = file.metadata().map_err(CryptoError::Io)?.file_type();
+    if !file_type.is_file() && !file_type.is_dir() {
+        return Err(CryptoError::InvalidInput(format!(
+            "Unsupported file type: {}",
+            path.display()
+        )));
+    }
+    Ok(file)
+}
+
 /// Reads `path` into memory, refusing files whose byte length exceeds
 /// `cap`. Bounds the allocation at `cap + 1` bytes so a caller pointed
 /// at a multi-gigabyte file rejects in-flight rather than after the
 /// kernel page-faults the whole thing in. The `over_cap_error` closure
 /// supplies the typed rejection so each caller can route the failure
 /// to the right diagnostic class (`MalformedPublicKey` / `MalformedPrivateKey`).
+/// Opens via [`open_input_file`], so FIFOs, sockets, and device nodes
+/// are refused without blocking.
 pub(crate) fn read_file_capped(
     path: &Path,
     cap: usize,
     over_cap_error: impl FnOnce() -> CryptoError,
 ) -> Result<Vec<u8>, CryptoError> {
-    let mut file = File::open(path).map_err(map_user_path_io_error)?;
+    let mut file = open_input_file(path, map_user_path_io_error)?;
     let mut buf = Vec::with_capacity(cap.saturating_add(1).min(64 * 1024));
     let read = file
         .by_ref()
@@ -183,6 +222,62 @@ mod tests {
     #[test]
     fn parent_or_cwd_root_path_falls_back_to_cwd() {
         assert_eq!(parent_or_cwd(Path::new("/")), Path::new("."));
+    }
+
+    /// FIFO-input regressions. Unix-only — Windows has no FIFO file
+    /// type in the filesystem namespace. Before the `open_input_file`
+    /// guard, pointing any read path at a FIFO hung the process inside
+    /// `open(2)` until a writer appeared.
+    #[cfg(unix)]
+    mod special_file_inputs {
+        use super::*;
+
+        /// Creates a FIFO via the POSIX `mkfifo` utility. A subprocess
+        /// keeps the crate free of an `unsafe` `libc::mkfifo` call
+        /// (`rustix` exposes no FIFO creation on Apple targets).
+        fn make_fifo(path: &Path) {
+            let status = std::process::Command::new("mkfifo")
+                .arg(path)
+                .status()
+                .expect("spawn mkfifo");
+            assert!(status.success(), "mkfifo failed for {}", path.display());
+        }
+
+        #[test]
+        fn open_input_file_rejects_fifo_without_blocking() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let fifo = tmp.path().join("pipe.fcr");
+            make_fifo(&fifo);
+            match open_input_file(&fifo, CryptoError::Io) {
+                Err(CryptoError::InvalidInput(msg)) => {
+                    assert!(msg.contains("Unsupported file type"), "got: {msg}");
+                }
+                other => panic!("expected InvalidInput, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn read_file_capped_rejects_fifo() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let fifo = tmp.path().join("private.key");
+            make_fifo(&fifo);
+            match read_file_capped(&fifo, 1024, || {
+                CryptoError::InvalidInput("over cap".to_string())
+            }) {
+                Err(CryptoError::InvalidInput(msg)) => {
+                    assert!(msg.contains("Unsupported file type"), "got: {msg}");
+                }
+                other => panic!("expected InvalidInput, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn open_input_file_accepts_regular_file() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let file = tmp.path().join("regular");
+            std::fs::write(&file, b"bytes").unwrap();
+            open_input_file(&file, CryptoError::Io).expect("regular file must open");
+        }
     }
 
     #[test]

@@ -47,6 +47,23 @@ fn stream_io_error(kind: io::ErrorKind, err: StreamError) -> io::Error {
     io::Error::new(kind, err)
 }
 
+/// Reads from `input`, retrying on [`io::ErrorKind::Interrupted`].
+///
+/// Single source of truth for EINTR handling in the streaming copy
+/// loops ([`DecryptReader`] here and `archive::format::copy_exact_n`).
+/// An `Interrupted` error that escapes a stateful loop cannot be
+/// retried from outside: the caller does not know how many bytes the
+/// loop already consumed, so a contract-conforming retry re-enters the
+/// stream misaligned and surfaces a false tamper or corruption verdict.
+pub(crate) fn read_uninterrupted<R: Read>(input: &mut R, buf: &mut [u8]) -> io::Result<usize> {
+    loop {
+        match input.read(buf) {
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            other => return other,
+        }
+    }
+}
+
 /// Streaming encryption writer: buffers plaintext writes into
 /// `BUFFER_SIZE` chunks and emits AEAD-encrypted chunks per
 /// `FORMAT.md` §5.
@@ -106,10 +123,10 @@ impl<W: Write> EncryptWriter<W> {
     /// it (e.g. `sync_all`).
     pub(crate) fn finish(mut self) -> Result<W, CryptoError> {
         let encryptor = self.encryptor.take().ok_or(CryptoError::InternalInvariant(
-            "Internal error: encrypt writer already finished",
+            "Internal error: encrypt writer already finished or failed",
         ))?;
         let mut output = self.output.take().ok_or(CryptoError::InternalInvariant(
-            "Internal error: encrypt writer already finished",
+            "Internal error: encrypt writer already finished or failed",
         ))?;
         if self.chunk_count >= STREAM_CHUNK_COUNT_MAX {
             return Err(CryptoError::PayloadChunkCountExceeded);
@@ -129,6 +146,14 @@ impl<W: Write> EncryptWriter<W> {
 
 impl<W: Write> Write for EncryptWriter<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // A prior output failure poisoned this writer (state cleared,
+        // buffer zeroized); refuse to buffer more plaintext.
+        if self.encryptor.is_none() || self.output.is_none() {
+            return Err(stream_io_error(
+                io::ErrorKind::Other,
+                StreamError::StateExhausted,
+            ));
+        }
         let mut written = 0;
         while written < buf.len() {
             // If the buffer already holds a full chunk, the previous
@@ -159,7 +184,16 @@ impl<W: Write> Write for EncryptWriter<W> {
                 let output = self.output.as_mut().ok_or_else(|| {
                     stream_io_error(io::ErrorKind::Other, StreamError::StateExhausted)
                 })?;
-                output.write_all(&self.chunk)?;
+                if let Err(e) = output.write_all(&self.chunk) {
+                    // The chunk now holds ciphertext + tag, longer than
+                    // `BUFFER_SIZE`; a later `write` would underflow the
+                    // `BUFFER_SIZE - len` space computation. Zeroize and
+                    // poison so reuse after this error fails closed.
+                    self.chunk.zeroize();
+                    self.encryptor = None;
+                    self.output = None;
+                    return Err(e);
+                }
                 // Zeroize the chunk (plaintext + tag) before refilling
                 // for the next chunk. `zeroize` resets length to 0 and
                 // preserves capacity, so the next `extend_from_slice`
@@ -324,7 +358,7 @@ impl<R: Read> DecryptReader<R> {
             filled = 1;
         }
         while filled < ENCRYPTED_CHUNK_SIZE {
-            let n = self.input.read(&mut self.chunk[filled..])?;
+            let n = read_uninterrupted(&mut self.input, &mut self.chunk[filled..])?;
             if n == 0 {
                 break;
             }
@@ -351,7 +385,7 @@ impl<R: Read> DecryptReader<R> {
         // signalled EOF inside the loop, so it's the final chunk.
         let mut probe = [0u8; 1];
         let probe_n = if filled == ENCRYPTED_CHUNK_SIZE {
-            self.input.read(&mut probe)?
+            read_uninterrupted(&mut self.input, &mut probe)?
         } else {
             0
         };
@@ -401,7 +435,7 @@ impl<R: Read> DecryptReader<R> {
             // earlier and then later produced more bytes; well-behaved
             // readers never trigger it.
             let mut probe2 = [0u8; 1];
-            let n = self.input.read(&mut probe2)?;
+            let n = read_uninterrupted(&mut self.input, &mut probe2)?;
             if n > 0 {
                 return Err(stream_io_error(
                     io::ErrorKind::InvalidData,
@@ -624,6 +658,87 @@ mod tests {
             decrypted.extend_from_slice(&tiny_buf[..n]);
         }
         assert_eq!(decrypted, plaintext);
+    }
+
+    /// Reader that injects [`io::ErrorKind::Interrupted`] before every
+    /// other real read, exercising EINTR retry at every read position
+    /// (chunk refill, boundary peek, trailing-data probe).
+    struct InterruptingReader<R> {
+        inner: R,
+        next_interrupts: bool,
+    }
+
+    impl<R: Read> Read for InterruptingReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.next_interrupts {
+                self.next_interrupts = false;
+                return Err(io::Error::from(io::ErrorKind::Interrupted));
+            }
+            self.next_interrupts = true;
+            self.inner.read(buf)
+        }
+    }
+
+    /// EINTR regression: `Interrupted` from the underlying reader must
+    /// be retried inside the refill. Before the shared
+    /// `read_uninterrupted` helper it escaped after bytes had already
+    /// been consumed; the error path then discarded the partial chunk
+    /// and lookahead, so a contract-conforming caller retry re-entered
+    /// misaligned and reported a false `PayloadTampered`.
+    #[test]
+    fn streaming_aead_decrypt_retries_interrupted_reads() {
+        let plaintext: Vec<u8> = (0..(BUFFER_SIZE * 2 + 1234))
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let ciphertext = encrypt_to_vec(&plaintext);
+        let interrupting = InterruptingReader {
+            inner: ciphertext.as_slice(),
+            next_interrupts: true,
+        };
+        let mut reader = payload_decryptor(&test_key(), &TEST_NONCE, interrupting);
+        let mut out = Vec::new();
+        reader.read_to_end(&mut out).unwrap();
+        assert_eq!(out, plaintext);
+    }
+
+    /// Writer that fails every `write` with a non-`Interrupted` error.
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("sink failed"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Output-failure regression: when the deferred-chunk flush fails,
+    /// the chunk holds ciphertext + tag (longer than `BUFFER_SIZE`).
+    /// Without the zeroize-and-poison step, the next `write` computed
+    /// `BUFFER_SIZE - chunk.len()`, underflowing in overflow-checked
+    /// builds. Reuse after the error must fail closed instead.
+    #[test]
+    fn encrypt_writer_write_after_output_error_fails_closed() {
+        let mut writer = payload_encryptor(&test_key(), &TEST_NONCE, FailingWriter);
+        // Exactly one chunk: stays deferred, the failing sink is untouched.
+        writer.write_all(&vec![0u8; BUFFER_SIZE]).unwrap();
+        // More plaintext forces the deferred flush into the failing sink.
+        let err = writer.write(&[0u8; 1]).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert!(
+            err.get_ref()
+                .is_some_and(|inner| inner.downcast_ref::<StreamError>().is_none())
+        );
+        // Poisoned: further writes fail closed (no underflow, no buffering).
+        let err2 = writer.write(&[0u8; 1]).unwrap_err();
+        let marker = err2
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<StreamError>());
+        assert!(
+            matches!(marker, Some(StreamError::StateExhausted)),
+            "expected StateExhausted from a poisoned writer, got {marker:?}"
+        );
     }
 
     /// Drains a `DecryptReader` through `Read::read` directly until either

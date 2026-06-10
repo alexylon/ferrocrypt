@@ -140,7 +140,7 @@ pub use crate::api::{
 };
 pub use crate::archive::{ArchiveLimits, IncompleteOutputPolicy};
 pub use crate::container::HeaderReadLimits;
-pub use crate::crypto::kdf::{KdfLimit, KdfParams};
+pub use crate::crypto::kdf::{ARGON2_SALT_SIZE, KdfLimit, KdfParams};
 pub use crate::error::{CryptoError, FormatDefect, InvalidKdfParams, UnsupportedVersion};
 pub use crate::format::{ENCRYPTED_EXTENSION, FCR_FILE_VERSION, MAGIC};
 pub use crate::key::files::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};

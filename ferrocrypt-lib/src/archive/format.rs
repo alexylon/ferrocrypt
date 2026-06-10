@@ -8,6 +8,7 @@
 use std::io::{self, Cursor, Read, Write};
 
 use crate::CryptoError;
+use crate::crypto::stream::read_uninterrupted;
 use crate::crypto::tlv::validate_no_known_critical;
 use crate::error::FormatDefect;
 
@@ -42,8 +43,9 @@ pub(crate) const PERMISSION_BITS_MASK: u32 = 0o777;
 /// Streaming buffer size for [`copy_exact_n`] (64 KiB). Aligned with
 /// [`crate::crypto::stream::BUFFER_SIZE`] — matching the AEAD chunk
 /// size avoids stalling the encrypt/decrypt pipeline on internal
-/// re-buffering, but the constants are separate because the archive
-/// layer does not depend on crypto/stream.
+/// re-buffering, but the constants stay separate: the AEAD chunk size
+/// is an on-disk format constant, while this is only an internal
+/// buffer size.
 const COPY_BUFFER_SIZE: usize = 64 * 1024;
 
 /// Single source of truth for the "Malformed archive manifest"
@@ -193,11 +195,13 @@ pub(super) fn write_u8<W: Write>(w: &mut W, n: u8) -> io::Result<()> {
 ///
 /// On a short read (reader returns `Ok(0)` while bytes are still
 /// expected), returns [`CryptoError::InvalidInput`] with the
-/// "shorter than declared size" diagnostic. The `?` on `read` threads
+/// "shorter than declared size" diagnostic. The `?` on the read threads
 /// `StreamError` markers from the underlying decrypt stream through
 /// `From<io::Error> for CryptoError` so authentication / truncation /
 /// extra-data signals surface as the typed `CryptoError::Payload*`
-/// variant rather than as a generic archive error.
+/// variant rather than as a generic archive error. Reads retry on
+/// `Interrupted` via [`read_uninterrupted`] — a transient signal must
+/// not abort a multi-gigabyte stream.
 pub(super) fn copy_exact_n<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
@@ -209,7 +213,7 @@ pub(super) fn copy_exact_n<R: Read, W: Write>(
         // Buffer is 64 KiB which fits any usize on supported targets;
         // the `min` ensures the cast is bounded by the smaller side.
         let want = std::cmp::min(buf.len() as u64, remaining) as usize;
-        let n = reader.read(&mut buf[..want])?;
+        let n = read_uninterrupted(reader, &mut buf[..want])?;
         if n == 0 {
             return Err(CryptoError::InvalidInput(
                 "Archive file content is shorter than declared size".to_string(),
@@ -642,6 +646,42 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
     use std::io::Cursor;
+
+    /// Reader that injects [`io::ErrorKind::Interrupted`] before every
+    /// other real read.
+    struct InterruptingReader<R> {
+        inner: R,
+        next_interrupts: bool,
+    }
+
+    impl<R: Read> Read for InterruptingReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.next_interrupts {
+                self.next_interrupts = false;
+                return Err(io::Error::from(io::ErrorKind::Interrupted));
+            }
+            self.next_interrupts = true;
+            self.inner.read(buf)
+        }
+    }
+
+    /// EINTR regression: `copy_exact_n` is the bulk-content loop for
+    /// both encode and decode, so a transient `Interrupted` from the
+    /// source must be retried, not surfaced as a fatal I/O error that
+    /// aborts the whole encrypt/decrypt.
+    #[test]
+    fn copy_exact_n_retries_interrupted_reads() {
+        let content: Vec<u8> = (0..(COPY_BUFFER_SIZE * 2 + 17))
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let mut reader = InterruptingReader {
+            inner: content.as_slice(),
+            next_interrupts: true,
+        };
+        let mut out = Vec::new();
+        copy_exact_n(&mut reader, &mut out, content.len() as u64).unwrap();
+        assert_eq!(out, content);
+    }
 
     /// Constructs raw header bytes from explicit field values for
     /// testing rejections that the writer would otherwise refuse to

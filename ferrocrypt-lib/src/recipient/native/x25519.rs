@@ -40,7 +40,9 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
 use crate::CryptoError;
-use crate::crypto::aead::{WRAP_NONCE_SIZE, WRAPPED_FILE_KEY_SIZE, open_file_key, seal_file_key};
+use crate::crypto::aead::{
+    TAG_SIZE, WRAP_NONCE_SIZE, WRAPPED_FILE_KEY_SIZE, open_file_key, seal_file_key,
+};
 use crate::crypto::hkdf::hkdf_expand_sha3_256;
 use crate::crypto::keys::{FileKey, random_bytes, random_secret};
 use crate::crypto::mac::ct_eq_32;
@@ -393,6 +395,8 @@ pub(crate) fn open_x25519_private_key(
 ///   structural ranges);
 /// - `type_name` is `"x25519"` (the only v1 native key kind);
 /// - `public_len` equals the X25519 public-key size (32);
+/// - `wrapped_secret_len` equals the native X25519 wrapped-secret size
+///   (32-byte secret + 16-byte AEAD tag = 48, `FORMAT.md` §8);
 /// - the file's total length matches `90 + type_name_len + public_len
 ///   + ext_len + wrapped_secret_len`.
 ///
@@ -428,6 +432,16 @@ pub fn validate_private_key_shape(data: &[u8]) -> Result<(), CryptoError> {
     }
 
     if header.public_len != PUBLIC_KEY_SIZE as u32 {
+        return Err(CryptoError::InvalidFormat(
+            FormatDefect::MalformedPrivateKey,
+        ));
+    }
+
+    // FORMAT.md §8: a native X25519 wrapped secret is exactly the
+    // 32-byte scalar plus the 16-byte AEAD tag. The unlock path
+    // re-rejects any other length after decryption; enforcing it here
+    // keeps this validator's verdict aligned with what can unlock.
+    if header.wrapped_secret_len != (PRIVATE_KEY_SIZE + TAG_SIZE) as u32 {
         return Err(CryptoError::InvalidFormat(
             FormatDefect::MalformedPrivateKey,
         ));
@@ -696,5 +710,48 @@ mod tests {
         assert_eq!(WRAP_NONCE_OFFSET, 32);
         assert_eq!(WRAPPED_FILE_KEY_OFFSET, 56);
         assert_eq!(body.len(), 104);
+    }
+
+    /// `FORMAT.md` §8 fixes the native X25519 `wrapped_secret_len` at
+    /// 48 (32-byte scalar + 16-byte tag). A header declaring any other
+    /// length — with a consistent total file length, so the generic
+    /// checks pass — must fail shape validation, because the unlock
+    /// path can never accept it and a "well-formed" verdict would be
+    /// misleading.
+    #[test]
+    fn validate_private_key_shape_rejects_wrong_wrapped_secret_len() {
+        use crate::crypto::kdf::ARGON2_SALT_SIZE;
+        use crate::key::private::PrivateKeyHeader;
+
+        let build = |wrapped_secret_len: u32| {
+            let header = PrivateKeyHeader {
+                key_flags: 0,
+                type_name_len: TYPE_NAME.len() as u16,
+                public_len: PUBLIC_KEY_SIZE as u32,
+                ext_len: 0,
+                wrapped_secret_len,
+                argon2_salt: [0u8; ARGON2_SALT_SIZE],
+                kdf_params: KdfParams::test_fast_default(),
+                wrap_nonce: [0u8; WRAP_NONCE_SIZE],
+            };
+            let mut data = header.to_bytes().to_vec();
+            data.extend_from_slice(TYPE_NAME.as_bytes());
+            data.extend_from_slice(&[0x07u8; PUBLIC_KEY_SIZE]);
+            data.extend_from_slice(&vec![0u8; wrapped_secret_len as usize]);
+            data
+        };
+
+        let expected = (PRIVATE_KEY_SIZE + TAG_SIZE) as u32;
+        validate_private_key_shape(&build(expected)).expect("canonical length must pass");
+        for wrong in [expected - 1, expected + 1] {
+            match validate_private_key_shape(&build(wrong)) {
+                Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => {}
+                other => {
+                    panic!(
+                        "expected MalformedPrivateKey for wrapped_secret_len {wrong}, got {other:?}"
+                    )
+                }
+            }
+        }
     }
 }

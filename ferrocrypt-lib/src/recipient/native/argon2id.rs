@@ -20,12 +20,14 @@
 //! enforcement is a header-level concern and lives in the recipient
 //! list parser, not here.
 
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 
 use crate::CryptoError;
 use crate::ProgressEvent;
 use crate::crypto::aead::{WRAP_NONCE_SIZE, WRAPPED_FILE_KEY_SIZE, open_file_key, seal_file_key};
-use crate::crypto::kdf::{ARGON2_SALT_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams};
+use crate::crypto::kdf::{
+    ARGON2_SALT_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams, check_passphrase_len,
+};
 use crate::crypto::keys::{FileKey, derive_passphrase_wrap_key, random_bytes};
 
 /// Wire-format `type_name` for this recipient.
@@ -51,15 +53,16 @@ const WRAPPED_FILE_KEY_OFFSET: usize = WRAP_NONCE_OFFSET + WRAP_NONCE_SIZE;
 /// 116-byte recipient body.
 ///
 /// Emits [`ProgressEvent::DerivingPassphraseWrapKey`] immediately before
-/// the Argon2id call. The CSPRNG read for `argon2_salt` happens first;
-/// on the rare event it fails, the event is not emitted and
-/// [`CryptoError::InternalCryptoFailure`] is returned.
+/// the Argon2id call. The passphrase-length cap and the CSPRNG read for
+/// `argon2_salt` run first; if either fails, the event is not emitted
+/// and the typed error is returned.
 pub(crate) fn wrap(
     file_key: &FileKey,
     passphrase: &SecretString,
     kdf_params: &KdfParams,
     on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<[u8; BODY_LENGTH], CryptoError> {
+    check_passphrase_len(passphrase.expose_secret().as_bytes())?;
     let argon2_salt = random_bytes::<ARGON2_SALT_SIZE>()?;
     on_event(&ProgressEvent::DerivingPassphraseWrapKey);
     let wrap_key =
@@ -88,16 +91,18 @@ pub(crate) fn wrap(
 /// final until the header MAC also verifies.
 ///
 /// Emits [`ProgressEvent::DerivingPassphraseWrapKey`] immediately before
-/// the Argon2id call — that is, **after** structural KDF-parameter
-/// validation and the resource-cap check have already passed. A
-/// malformed body or a body whose `kdf_params` exceed the caller's
-/// `kdf_limit` is rejected with no event emitted.
+/// the Argon2id call — that is, **after** the passphrase-length cap,
+/// structural KDF-parameter validation, and the resource-cap check have
+/// already passed. An over-cap passphrase, a malformed body, or a body
+/// whose `kdf_params` exceed the caller's `kdf_limit` is rejected with
+/// no event emitted.
 pub(crate) fn unwrap(
     body: &[u8; BODY_LENGTH],
     passphrase: &SecretString,
     kdf_limit: Option<&KdfLimit>,
     on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<FileKey, CryptoError> {
+    check_passphrase_len(passphrase.expose_secret().as_bytes())?;
     let mut argon2_salt = [0u8; ARGON2_SALT_SIZE];
     argon2_salt.copy_from_slice(&body[SALT_OFFSET..SALT_OFFSET + ARGON2_SALT_SIZE]);
 
@@ -470,6 +475,82 @@ mod tests {
         assert!(
             events.borrow().is_empty(),
             "no event should fire before resource-cap check passes; got {:?}",
+            events.borrow()
+        );
+    }
+
+    /// Pins the work-boundary contract for an over-cap passphrase on
+    /// `wrap`: rejected as `InvalidInput` with NO event, because
+    /// Argon2id never runs.
+    #[test]
+    fn wrap_emits_no_event_when_passphrase_exceeds_cap() {
+        use crate::crypto::kdf::MAX_PASSPHRASE_LEN_BYTES;
+        let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
+        let long = passphrase(&"a".repeat(MAX_PASSPHRASE_LEN_BYTES + 1));
+        let kdf = KdfParams::test_fast_default();
+        let (sink, events) = recording();
+        match wrap(&file_key, &long, &kdf, &sink) {
+            Err(CryptoError::InvalidInput(_)) => {}
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+        assert!(
+            events.borrow().is_empty(),
+            "no event should fire for an over-cap passphrase; got {:?}",
+            events.borrow()
+        );
+    }
+
+    /// Same contract for `unwrap`: the passphrase cap is checked before
+    /// the event, so a valid body unwrapped with an over-cap passphrase
+    /// produces `InvalidInput` and zero events.
+    #[test]
+    fn unwrap_emits_no_event_when_passphrase_exceeds_cap() {
+        use crate::crypto::kdf::MAX_PASSPHRASE_LEN_BYTES;
+        let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
+        let pass = passphrase("p");
+        let kdf = KdfParams::test_fast_default();
+        let body = wrap(&file_key, &pass, &kdf, &noop()).unwrap();
+        let long = passphrase(&"a".repeat(MAX_PASSPHRASE_LEN_BYTES + 1));
+        let (sink, events) = recording();
+        match unwrap(&body, &long, None, &sink) {
+            Err(CryptoError::InvalidInput(_)) => {}
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+        assert!(
+            events.borrow().is_empty(),
+            "no event should fire for an over-cap passphrase; got {:?}",
+            events.borrow()
+        );
+    }
+
+    /// `FORMAT.md` §4.1 requires the test suite to include an
+    /// invalid-length vector. A recipient body that is not exactly
+    /// [`BODY_LENGTH`] bytes must be rejected as
+    /// `MalformedRecipientEntry` before any KDF work — the length gate
+    /// is the only check protecting the fixed-offset field copies from
+    /// a wrong-length body.
+    #[test]
+    fn credential_adapter_rejects_wrong_length_body() {
+        use crate::error::FormatDefect;
+        use crate::protocol::DecryptionCredential;
+        let pass = passphrase("p");
+        let credential = PassphraseCredential {
+            passphrase: &pass,
+            kdf_limit: None,
+        };
+        let (sink, events) = recording();
+        for len in [BODY_LENGTH - 1, BODY_LENGTH + 1] {
+            let body = vec![0u8; len];
+            match credential.unwrap_file_key(&body, &sink) {
+                Err(CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)) => {}
+                other => {
+                    panic!("expected MalformedRecipientEntry for {len}-byte body, got {other:?}")
+                }
+            }
+        }
+        assert!(
+            events.borrow().is_empty(),
+            "no event should fire before body-length validation passes; got {:?}",
             events.borrow()
         );
     }

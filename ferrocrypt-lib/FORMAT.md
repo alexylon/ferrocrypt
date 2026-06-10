@@ -1438,7 +1438,10 @@ Readers MUST process FCA archives in this order:
 16. apply the root entry's mode after promotion. For directory roots this is a
     macOS-compatibility requirement; for regular-file roots this prevents the
     staged file from being briefly visible at a wider mode under either the
-    `.incomplete` name or the final name while it still holds plaintext;
+    `.incomplete` name or the final name while it still holds plaintext.
+    A failure to apply the root mode MUST NOT fail the extraction: the output
+    is already complete at its final name, where `DeleteOnError` cleanup
+    cannot remove it, and it remains at its restrictive initial mode;
 17. return the final output path.
 
 Steps 1 through 8 MUST complete before any filesystem output is created.

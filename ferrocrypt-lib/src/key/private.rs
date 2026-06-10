@@ -30,12 +30,14 @@
 //! [`CryptoError::KeyFileUnlockFailed`] — wrong passphrase and
 //! cleartext-tamper are indistinguishable at the AEAD layer.
 
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use zeroize::Zeroizing;
 
 use crate::CryptoError;
 use crate::crypto::aead::{TAG_SIZE, WRAP_NONCE_SIZE, open_with_aad, seal_with_aad};
-use crate::crypto::kdf::{ARGON2_SALT_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams};
+use crate::crypto::kdf::{
+    ARGON2_SALT_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams, check_passphrase_len,
+};
 use crate::crypto::keys::{derive_passphrase_wrap_key, random_bytes};
 use crate::crypto::tlv::validate_tlv;
 use crate::error::{FormatDefect, UnsupportedVersion};
@@ -465,10 +467,10 @@ fn seal_private_key_inner(
 /// Emits [`crate::ProgressEvent::UnlockingPrivateKey`] immediately
 /// before the Argon2id call — that is, **after** structural header
 /// parsing, the caller-supplied `KdfLimit` resource cap, the
-/// `local_wrapped_secret_cap` cap, the total-length check, and
-/// type-name grammar validation have all passed. A structurally
-/// malformed key file or one that exceeds either cap is rejected with
-/// no event emitted.
+/// `local_wrapped_secret_cap` cap, the total-length check, type-name
+/// grammar validation, and the passphrase-length cap have all passed.
+/// A structurally malformed key file, one that exceeds either cap, or
+/// an over-cap passphrase is rejected with no event emitted.
 pub(crate) fn open_private_key(
     bytes: &[u8],
     passphrase: &SecretString,
@@ -520,6 +522,7 @@ pub(crate) fn open_private_key(
     let wrapped_secret = &bytes[ext_end..wrapped_secret_end];
     let cleartext = &bytes[..ext_end];
 
+    check_passphrase_len(passphrase.expose_secret().as_bytes())?;
     on_event(&crate::ProgressEvent::UnlockingPrivateKey);
     let wrap_key = derive_passphrase_wrap_key(
         passphrase,
@@ -687,6 +690,36 @@ mod tests {
         )
         .unwrap();
         assert_eq!(opened.type_name, "x25519");
+    }
+
+    /// Pins the work-boundary contract for an over-cap passphrase: the
+    /// cap is checked before `UnlockingPrivateKey` fires, so the unlock
+    /// rejects as `InvalidInput` with zero events and no Argon2id work.
+    #[test]
+    fn open_emits_no_event_when_passphrase_exceeds_cap() {
+        use crate::crypto::kdf::MAX_PASSPHRASE_LEN_BYTES;
+        let (secret, public) = x25519_shaped();
+        let pass = test_passphrase("pw");
+        let kdf = KdfParams::test_fast_default();
+        let bytes = seal_private_key(&secret, "x25519", &public, &[], &pass, &kdf).unwrap();
+        let long = test_passphrase(&"a".repeat(MAX_PASSPHRASE_LEN_BYTES + 1));
+        let events = std::cell::RefCell::new(Vec::new());
+        let sink = |e: &crate::ProgressEvent| events.borrow_mut().push(*e);
+        match open_private_key(
+            &bytes,
+            &long,
+            None,
+            PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT,
+            &sink,
+        ) {
+            Err(CryptoError::InvalidInput(_)) => {}
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+        assert!(
+            events.borrow().is_empty(),
+            "no event should fire for an over-cap passphrase; got {:?}",
+            events.borrow()
+        );
     }
 
     fn test_passphrase(s: &str) -> SecretString {

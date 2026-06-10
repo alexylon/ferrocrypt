@@ -99,6 +99,20 @@ user-id = 6825
 user-login = "sunfishcode"
 user-name = "Dan Gohman"
 
+[[publisher.ferrocrypt]]
+version = "0.3.0-beta.2"
+when = "2026-05-23"
+user-id = 374681
+user-login = "alexylon"
+user-name = "Alexander Alexandrov"
+
+[[publisher.ferrocrypt-cli]]
+version = "0.3.0-beta.2"
+when = "2026-05-23"
+user-id = 374681
+user-login = "alexylon"
+user-name = "Alexander Alexandrov"
+
 [[publisher.fs-set-times]]
 version = "0.20.3"
 when = "2025-03-10"

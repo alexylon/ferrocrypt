@@ -29,7 +29,6 @@
 //! call — e.g. passing a [`PrivateKey`] to a passphrase-sealed file — is
 //! a compile error rather than a runtime "no supported recipient" failure.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use secrecy::{ExposeSecret as _, SecretString};
@@ -926,10 +925,12 @@ pub fn generate_key_pair(
 /// # Errors
 ///
 /// Returns [`CryptoError::Io`] if the file cannot be opened or read. Returns
-/// [`CryptoError::InvalidFormat`] when the magic matches but the prefix,
-/// header, recipient entries, or recipient mixing policy are malformed or
-/// unsupported. Returns cap-exceeded variants when the declared header shape
-/// exceeds [`HeaderReadLimits::default`].
+/// [`CryptoError::InvalidInput`] if the path is not a regular file (for
+/// example a FIFO or device node) — such inputs are refused without
+/// blocking. Returns [`CryptoError::InvalidFormat`] when the magic matches
+/// but the prefix, header, recipient entries, or recipient mixing policy are
+/// malformed or unsupported. Returns cap-exceeded variants when the declared
+/// header shape exceeds [`HeaderReadLimits::default`].
 pub fn probe_recipient_mode(
     file_path: impl AsRef<Path>,
 ) -> Result<Option<UnauthenticatedRecipientMode>, CryptoError> {
@@ -967,7 +968,10 @@ pub fn probe_recipient_mode_with_limits(
         return Ok(None);
     }
 
-    let mut file = fs::File::open(path)?;
+    // `open_input_file` refuses FIFOs, sockets, and device nodes
+    // without blocking — `File::open` on an attacker-placed FIFO would
+    // otherwise block the probe inside `open(2)` indefinitely.
+    let mut file = paths::open_input_file(path, CryptoError::Io)?;
 
     // Peek the 4-byte magic. Anything that doesn't claim to be a
     // FerroCrypt file (empty, too short, wrong magic) routes to

@@ -50,7 +50,7 @@ use crate::crypto::stream::{STREAM_NONCE_SIZE, payload_decryptor};
 use crate::crypto::tlv::validate_tlv;
 use crate::error::CryptoError;
 use crate::format;
-use crate::fs::paths::{encryption_base_name, reject_occupied};
+use crate::fs::paths::{encryption_base_name, open_input_file, reject_occupied};
 use crate::recipient::entry::{RecipientBody, RecipientEntry};
 #[cfg(test)]
 use crate::recipient::policy::MixingPolicy;
@@ -272,7 +272,10 @@ pub(crate) fn decrypt<I: DecryptionCredential>(
     incomplete_output_policy: IncompleteOutputPolicy,
     on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<PathBuf, CryptoError> {
-    let mut encrypted_file = fs::File::open(input_path)?;
+    // `open_input_file` refuses FIFOs, sockets, and device nodes
+    // without blocking; the encrypt side rejects the same input class
+    // in `validate_encrypt_input`.
+    let mut encrypted_file = open_input_file(input_path, CryptoError::Io)?;
 
     // 1-4. Structural read + parse. Performs zero crypto; enforces
     //      local caps before any allocation.

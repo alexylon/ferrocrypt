@@ -66,7 +66,11 @@ use super::platform;
 /// under `output_dir`. Returns the final output path on success.
 ///
 /// On error before final promotion, applies `policy` to the staged
-/// `.incomplete` working tree.
+/// `.incomplete` working tree. Promotion (`FORMAT.md` §9.11 step 15) is
+/// the commit point: the post-promotion root-mode application (step 16)
+/// is best-effort, so on a platform refusing that final chmod the call
+/// still succeeds and the output keeps its restrictive staging mode
+/// (`0o600` for a file root, `0o700` for a directory root).
 pub(crate) fn unarchive<R: Read>(
     reader: R,
     output_dir: &Path,
@@ -185,11 +189,21 @@ fn unarchive_inner<R: Read>(
         // re-open uses `open_file_nofollow` so a symlink substituted at
         // the final name between rename and chmod is rejected the same
         // way as for directory roots.
-        if manifest.root_is_file {
-            apply_root_file_mode(output_dir, &manifest)?;
+        // Step 16 runs after the step-15 commit point: the output
+        // already holds the complete plaintext, and the `.incomplete`
+        // working name is gone, so `DeleteOnError` cleanup can no
+        // longer reach it. A chmod failure here must not fail the
+        // extraction — returning `Err` would tell a `DeleteOnError`
+        // caller nothing was written while a finished output sits on
+        // disk. Best-effort is safe: the staged mode (`0o600`/`0o700`)
+        // is always at least as restrictive as the manifest mode, and
+        // the no-follow re-open inside `apply_root_*_mode` still
+        // refuses to chmod through a substituted symlink.
+        let _ = if manifest.root_is_file {
+            apply_root_file_mode(output_dir, &manifest)
         } else {
-            apply_root_directory_mode(output_dir, &manifest)?;
-        }
+            apply_root_directory_mode(output_dir, &manifest)
+        };
 
         Ok(final_path.clone())
     })();

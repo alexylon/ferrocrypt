@@ -13,10 +13,11 @@ use crate::crypto::keys::ENCRYPTION_KEY_SIZE;
 use crate::error::InvalidKdfParams;
 use crate::format::{read_u32_be, write_u32_be};
 
-/// Argon2id salt size in bytes. Stored alongside `KdfParams` in any
+/// Argon2id salt size in bytes. Stored alongside [`KdfParams`] in any
 /// header that consumes a passphrase (argon2id recipient body,
-/// `private.key` cleartext header).
-pub(crate) const ARGON2_SALT_SIZE: usize = 32;
+/// `private.key` cleartext header). [`KdfParams::hash_passphrase`]
+/// takes its salt as `&[u8; ARGON2_SALT_SIZE]`.
+pub const ARGON2_SALT_SIZE: usize = 32;
 
 /// Structural cap on passphrase byte length. Argon2id itself accepts
 /// arbitrarily long inputs, but library-direct callers can otherwise
@@ -27,6 +28,21 @@ pub(crate) const ARGON2_SALT_SIZE: usize = 32;
 /// their input fields well below this; the cap exists for direct
 /// callers and as defense-in-depth.
 pub(crate) const MAX_PASSPHRASE_LEN_BYTES: usize = 4_096;
+
+/// Enforces [`MAX_PASSPHRASE_LEN_BYTES`] on caller-supplied passphrase
+/// bytes. Single source of truth for the cap: the progress-event call
+/// sites run it before emitting their KDF event (an over-cap
+/// passphrase must produce no event, because Argon2id never runs), and
+/// [`KdfParams::hash_passphrase`] keeps it as the backstop for direct
+/// callers.
+pub(crate) fn check_passphrase_len(passphrase: &[u8]) -> Result<(), CryptoError> {
+    if passphrase.len() > MAX_PASSPHRASE_LEN_BYTES {
+        return Err(CryptoError::InvalidInput(format!(
+            "Passphrase exceeds {MAX_PASSPHRASE_LEN_BYTES}-byte structural cap"
+        )));
+    }
+    Ok(())
+}
 
 /// Local policy limit for Argon2id work accepted during decryption.
 ///
@@ -234,7 +250,9 @@ impl KdfParams {
 
     /// Derives a fixed-size Argon2id output for the supplied passphrase and salt.
     ///
-    /// The returned buffer zeroizes on drop. The high-level
+    /// The returned buffer zeroizes on drop, and the Argon2id working
+    /// memory (`mem_cost` KiB of blocks) is allocated by this function
+    /// and zeroized when the derivation completes. The high-level
     /// [`Encryptor`](crate::Encryptor),
     /// [`PassphraseDecryptor`](crate::PassphraseDecryptor), and
     /// [`KeyPairGenerator`](crate::KeyPairGenerator) APIs invoke this internally
@@ -258,14 +276,10 @@ impl KdfParams {
     pub fn hash_passphrase(
         &self,
         passphrase: &[u8],
-        salt: &[u8],
+        salt: &[u8; ARGON2_SALT_SIZE],
     ) -> Result<Zeroizing<[u8; ENCRYPTION_KEY_SIZE]>, CryptoError> {
         self.validate_structural()?;
-        if passphrase.len() > MAX_PASSPHRASE_LEN_BYTES {
-            return Err(CryptoError::InvalidInput(format!(
-                "Passphrase exceeds {MAX_PASSPHRASE_LEN_BYTES}-byte structural cap"
-            )));
-        }
+        check_passphrase_len(passphrase)?;
         let params = argon2::Params::new(
             self.mem_cost,
             self.time_cost,
@@ -275,11 +289,22 @@ impl KdfParams {
         .map_err(|_| {
             CryptoError::InternalCryptoFailure("Internal error: Argon2id parameter rejected")
         })?;
+        // Own the Argon2id working memory instead of letting
+        // `hash_password_into` allocate it: the crate frees its block
+        // buffer without scrubbing, and the final blocks hold material
+        // from which the derived key can be recomputed. `Zeroizing`
+        // wipes all `mem_cost` KiB on drop, error paths included.
+        let mut blocks = Zeroizing::new(vec![argon2::Block::default(); params.block_count()]);
         let hasher =
             argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
         let mut output = Zeroizing::new([0u8; ENCRYPTION_KEY_SIZE]);
         hasher
-            .hash_password_into(passphrase, salt, output.as_mut())
+            .hash_password_into_with_memory(
+                passphrase,
+                salt,
+                output.as_mut(),
+                blocks.as_mut_slice(),
+            )
             .map_err(|_| {
                 CryptoError::InternalCryptoFailure("Internal error: Argon2id derivation failed")
             })?;

@@ -62,3 +62,8 @@ rustix = { version = "1", features = ["fs"] }
 [dev-dependencies]
 ferrocrypt-test-support = { path = "../ferrocrypt-test-support" }
 ctor = "0.8"
+
+# `process` enables the safe get/setrlimit wrappers used by the
+# wide-tree fd-limit regression test in `archive/encode.rs`.
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
+rustix = { version = "1", features = ["process"] }

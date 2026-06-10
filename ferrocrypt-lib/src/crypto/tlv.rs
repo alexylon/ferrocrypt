@@ -80,7 +80,12 @@ pub(crate) fn scan_tlv_region(
     max_region_len: u32,
     max_value_len: u32,
 ) -> Result<Vec<RawTlv<'_>>, CryptoError> {
-    let region_len = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+    // Checked conversion keeps the cap unconditional: a saturating
+    // clamp would pass an over-4-GiB slice whenever the caller's cap
+    // is exactly `u32::MAX`. Such a region always exceeds any v1 cap;
+    // `u32::MAX` is the closest representable length for the diagnostic.
+    let region_len = u32::try_from(bytes.len())
+        .map_err(|_| CryptoError::InvalidFormat(FormatDefect::ExtTooLarge { len: u32::MAX }))?;
     if region_len > max_region_len {
         return Err(CryptoError::InvalidFormat(FormatDefect::ExtTooLarge {
             len: region_len,

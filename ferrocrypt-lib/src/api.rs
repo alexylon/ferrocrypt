@@ -315,6 +315,9 @@ impl Encryptor {
         let archive_limits = self.archive_limits.unwrap_or_default();
         let header_read_limits = self.header_read_limits.unwrap_or_default();
         let kdf_limit = self.kdf_limit.unwrap_or_default();
+        // Resolved once: the value the preflight validates below is by
+        // construction the value serialized into the recipient body.
+        let kdf_params = self.kdf_params.unwrap_or_default();
         let save_as = self.save_as.as_deref();
 
         // Cheap caller-supplied invariant first so an empty passphrase
@@ -342,7 +345,6 @@ impl Encryptor {
                     1,
                     NativeRecipientType::Argon2id,
                 )?;
-                let kdf_params = self.kdf_params.unwrap_or_default();
                 kdf_params.validate_for_write(Some(&kdf_limit))?;
             }
         }
@@ -353,7 +355,7 @@ impl Encryptor {
             EncryptorState::Passphrase(passphrase) => {
                 let recipient = recipient::argon2id::PassphraseRecipient {
                     passphrase: &passphrase,
-                    kdf_params: self.kdf_params.unwrap_or_default(),
+                    kdf_params,
                 };
                 protocol::encrypt(
                     std::slice::from_ref(&recipient),

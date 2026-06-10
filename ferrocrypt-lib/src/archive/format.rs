@@ -567,8 +567,9 @@ pub fn parse_manifest_bytes(
         validate_fca_path(&path_utf8, limits)?;
 
         let ext_start = cursor.position() as usize;
+        let ext_len = require_fits_usize(entry_ext_len, "Archive entry extension length")?;
         let ext_end = ext_start
-            .checked_add(entry_ext_len as usize)
+            .checked_add(ext_len)
             .ok_or_else(malformed_manifest)?;
         if ext_end > bytes.len() {
             return Err(malformed_manifest());

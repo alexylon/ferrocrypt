@@ -33,12 +33,19 @@ use crate::error::StreamError;
 pub(crate) const BUFFER_SIZE: usize = 65536;
 
 /// STREAM nonce size: XChaCha20's 24-byte nonce minus 5 bytes for counter and last-block flag.
+/// Also the width of the `header_fixed.stream_nonce` field (`FORMAT.md` §3.2);
+/// `format.rs` imports it from here.
 pub(crate) const STREAM_NONCE_SIZE: usize = 19;
 
 /// `FORMAT.md` §5: writers MUST NOT emit, and readers MUST reject,
 /// streams with more than `2^32` chunks. Tracked here as a `u64` so
 /// the cap comparison cannot itself overflow.
 const STREAM_CHUNK_COUNT_MAX: u64 = 1u64 << 32;
+
+/// Ciphertext chunk size on the wire: one [`BUFFER_SIZE`] plaintext
+/// chunk plus its Poly1305 tag. Shared by the writer's and reader's
+/// buffer pre-allocation and the reader's refill loop.
+const ENCRYPTED_CHUNK_SIZE: usize = BUFFER_SIZE + TAG_SIZE;
 
 /// Wraps a [`StreamError`] as an [`io::Error`] with the given kind so that
 /// the typed marker can traverse [`Read`]/[`Write`] trait boundaries and
@@ -108,7 +115,7 @@ impl<W: Write> EncryptWriter<W> {
             // tag append never triggers a `Vec` reallocation (which would
             // copy old bytes to a new allocation and free the old one
             // without zeroizing).
-            chunk: Vec::with_capacity(BUFFER_SIZE + TAG_SIZE),
+            chunk: Vec::with_capacity(ENCRYPTED_CHUNK_SIZE),
             output: Some(output),
             chunk_count: 0,
         }
@@ -284,7 +291,7 @@ impl<R: Read> DecryptReader<R> {
             // Pre-allocate the worst-case chunk size so neither the read
             // refill nor the in-place AEAD ever triggers a `Vec`
             // reallocation.
-            chunk: Vec::with_capacity(BUFFER_SIZE + TAG_SIZE),
+            chunk: Vec::with_capacity(ENCRYPTED_CHUNK_SIZE),
             pos: 0,
             done: false,
             chunk_count: 0,
@@ -344,8 +351,6 @@ impl<R: Read> DecryptReader<R> {
     }
 
     fn fill_buffer_inner(&mut self) -> io::Result<()> {
-        const ENCRYPTED_CHUNK_SIZE: usize = BUFFER_SIZE + TAG_SIZE;
-
         // Zeroize the previous chunk (plaintext from the last call) before
         // refilling. `zeroize` sets length to 0 and preserves capacity.
         self.chunk.zeroize();

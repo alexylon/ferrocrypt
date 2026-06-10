@@ -53,7 +53,7 @@ pub(crate) struct RecipientBody {
 /// `type_name` (validated against the §3.3 grammar) and `body` (opaque
 /// to the framing layer; per-recipient modules parse the body).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecipientEntry {
+pub(crate) struct RecipientEntry {
     /// Canonical recipient `type_name`, e.g. `"argon2id"` or `"x25519"`.
     pub type_name: String,
     /// `recipient_flags` field as stored on the wire. The only defined
@@ -115,11 +115,20 @@ impl RecipientEntry {
     }
 
     /// Writer-side checked counterpart of [`Self::parse_one`]: runs
-    /// every shape rule the reader enforces — `type_name` grammar,
-    /// reserved flag bits, `body.len() <= BODY_LEN_MAX` — and returns
-    /// the same `FormatDefect` the reader would emit. Used by
+    /// every shape rule the reader enforces — `type_name` length and
+    /// grammar, reserved flag bits, `body.len() <= BODY_LEN_MAX` — and
+    /// returns the same `FormatDefect` the reader would emit. Used by
     /// `build_encrypted_header`.
     pub(crate) fn to_bytes_checked(&self) -> Result<Vec<u8>, CryptoError> {
+        // Length before grammar, mirroring `parse_one`: the reader
+        // rejects an empty or over-255-byte name as a framing defect
+        // before the grammar runs, and this writer must emit the same
+        // defect for the same input.
+        if self.type_name.is_empty() || self.type_name.len() > TYPE_NAME_MAX_LEN {
+            return Err(CryptoError::InvalidFormat(
+                FormatDefect::MalformedRecipientEntry,
+            ));
+        }
         validate_type_name_grammar(&self.type_name)?;
         if (self.recipient_flags & RECIPIENT_FLAGS_RESERVED_MASK) != 0 {
             return Err(CryptoError::InvalidFormat(
@@ -155,7 +164,10 @@ impl RecipientEntry {
     /// flag bits are zero, body is within the local resource cap, the
     /// declared total fits in `bytes`, and the `type_name` satisfies
     /// the §3.3 grammar.
-    pub fn parse_one(bytes: &[u8], local_body_cap: u32) -> Result<(Self, usize), CryptoError> {
+    pub(crate) fn parse_one(
+        bytes: &[u8],
+        local_body_cap: u32,
+    ) -> Result<(Self, usize), CryptoError> {
         let malformed = || CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry);
         if bytes.len() < ENTRY_HEADER_SIZE {
             return Err(malformed());
@@ -219,7 +231,7 @@ impl RecipientEntry {
 /// call. Per `FORMAT.md` §3.2, the local cap applies to every entry,
 /// including unknown entries that will later be skipped, so an
 /// attacker-supplied unknown entry cannot DoS a reader that "skips" it.
-pub fn parse_recipient_entries(
+pub(crate) fn parse_recipient_entries(
     region: &[u8],
     expected_count: u16,
     local_body_cap: u32,
@@ -247,6 +259,25 @@ mod tests {
     use super::*;
     use crate::format::BODY_LEN_LOCAL_CAP_DEFAULT;
     use crate::recipient::native::{argon2id, x25519};
+
+    /// Writer/reader variant parity: an empty or over-255-byte
+    /// `type_name` is a framing defect (`MalformedRecipientEntry`) on
+    /// both sides, never a grammar defect — `to_bytes_checked`
+    /// documents that it returns the same defect the reader would emit.
+    #[test]
+    fn to_bytes_checked_rejects_bad_name_length_as_framing_defect() {
+        for name in [String::new(), "a".repeat(TYPE_NAME_MAX_LEN + 1)] {
+            let entry = RecipientEntry {
+                type_name: name,
+                recipient_flags: 0,
+                body: vec![0u8; 4],
+            };
+            match entry.to_bytes_checked() {
+                Err(CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)) => {}
+                other => panic!("expected MalformedRecipientEntry, got {other:?}"),
+            }
+        }
+    }
 
     /// Builds a raw 8-byte entry header so tests can inject arbitrary
     /// out-of-spec values without going through `RecipientEntry::to_bytes`.

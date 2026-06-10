@@ -233,26 +233,29 @@ pub enum CryptoError {
     /// error by design. The Display wording reflects both causes.
     #[error("Private key unlock failed: wrong passphrase or tampered file")]
     KeyFileUnlockFailed,
-    /// The single-recipient header MAC failed after a recipient
-    /// unwrapped a candidate `file_key`.
+    /// The header MAC failed after the passphrase recipient unwrapped
+    /// a candidate `file_key`.
     ///
-    /// Per `FORMAT.md` §3.7, recipient unwrap is not accepted until the
-    /// candidate key verifies the header MAC. This failure does not by
-    /// itself prove whether the credential, recipient body, or header bytes
-    /// were modified. In a multi-recipient file the per-candidate MAC failure
-    /// surfaces as [`Self::HeaderMacFailedAfterUnwrap`] so the decrypt loop can
-    /// continue; this variant is the final error for the single-recipient case.
-    #[error("Decryption failed: header tampered after unlock")]
+    /// Per `FORMAT.md` §3.7, a recipient unwrap is not accepted until
+    /// the candidate key verifies the header MAC. The failed MAC shows
+    /// the MAC-covered bytes changed after the file was written, but
+    /// cannot distinguish deliberate tampering from storage corruption.
+    /// This variant is the passphrase-mode verdict; the public-key
+    /// decrypt path reports the same condition as
+    /// [`Self::HeaderMacFailedAfterUnwrap`], whatever the recipient
+    /// count.
+    #[error("Decryption failed: header tampered or corrupted after unlock")]
     HeaderTampered,
-    /// In a multi-recipient decrypt loop, a recipient candidate
-    /// unwrapped a `file_key`, but the resulting `header_key` did not
-    /// verify the header MAC.
+    /// In a public-key decrypt, a recipient slot unwrapped a
+    /// `file_key`, but the resulting `header_key` did not verify the
+    /// header MAC.
     ///
-    /// The unwrap is not final until the MAC verifies. The decrypt loop may
-    /// catch this variant and continue to the next supported recipient entry.
-    /// Distinct from [`Self::HeaderTampered`], which is the final error when no
-    /// further recipient slot remains. The `type_name` identifies which
-    /// recipient type produced the failed candidate.
+    /// The unwrap is not final until the MAC verifies. The decrypt loop
+    /// still visits every supported slot; when at least one slot
+    /// unwrapped and none verified, this variant is the final verdict —
+    /// including for a single-recipient public-key file. The passphrase
+    /// counterpart is [`Self::HeaderTampered`]. The `type_name`
+    /// identifies which recipient type produced the failed candidate.
     #[error(
         "Decryption failed: recipient `{}` MAC mismatch",
         DisplayableTypeName(type_name)
@@ -404,8 +407,8 @@ pub enum FormatDefect {
     Truncated,
     /// Leading magic bytes do not match `"FCR\0"`.
     BadMagic,
-    /// `ext_len` (in a `.fcr` prefix or `private.key` header)
-    /// exceeds the reader's structural cap (`EXT_LEN_MAX`, 64 KiB).
+    /// `ext_len` (in a `.fcr` header's fixed section or a `private.key`
+    /// header) exceeds the reader's structural cap (`EXT_LEN_MAX`, 64 KiB).
     /// Carried as `u32` because the cap is `65_536`, which exceeds
     /// `u16::MAX`.
     ExtTooLarge {
@@ -762,7 +765,7 @@ mod tests {
         );
         assert_eq!(
             CryptoError::HeaderTampered.to_string(),
-            "Decryption failed: header tampered after unlock"
+            "Decryption failed: header tampered or corrupted after unlock"
         );
         assert_eq!(
             CryptoError::HeaderMacFailedAfterUnwrap {

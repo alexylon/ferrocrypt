@@ -40,6 +40,7 @@ use std::io::Read;
 
 use crate::CryptoError;
 use crate::crypto::mac::{HMAC_TAG_SIZE, hmac_sha3_256_parts, hmac_sha3_256_parts_verify};
+use crate::crypto::stream::STREAM_NONCE_SIZE;
 use crate::error::{FormatDefect, UnsupportedVersion};
 
 // Big-endian read/write helpers used by `to_bytes` / `parse` for the on-disk
@@ -136,10 +137,6 @@ pub(crate) const HEADER_LEN_LOCAL_CAP_DEFAULT: u32 = 1_048_576; // 1 MiB
 
 /// `header_fixed` size in bytes (`FORMAT.md` §3.2).
 pub(crate) const HEADER_FIXED_SIZE: usize = 31;
-
-/// `stream_nonce` size in bytes — stored inside `header_fixed` as the
-/// XChaCha20-Poly1305 STREAM base nonce.
-pub(crate) const STREAM_NONCE_SIZE: usize = 19;
 
 /// Maximum number of recipient entries in a single `.fcr` file
 /// (structural limit, `FORMAT.md` §3.2).
@@ -393,10 +390,13 @@ const PREFIX_FLAGS_OFFSET: usize = PREFIX_KIND_OFFSET + 1;
 const PREFIX_HEADER_LEN_OFFSET: usize = PREFIX_FLAGS_OFFSET + size_of::<u16>();
 const _: () = assert!(PREFIX_HEADER_LEN_OFFSET + size_of::<u32>() == PREFIX_SIZE);
 
-/// Parsed `.fcr` / `private.key` 12-byte prefix. Round-trips through
-/// [`Prefix::to_bytes`] and [`Prefix::parse`] are the writer/reader
-/// surface; structural validation lives in [`Prefix::validate`] and is
-/// called from both sides so the two paths cannot drift.
+/// Parsed `.fcr` 12-byte prefix. (`private.key` has its own 90-byte
+/// fixed header in `key/private.rs`; only the first 6 bytes —
+/// `magic || version || kind` — are layout-compatible.) Round-trips
+/// through [`Prefix::to_bytes`] and [`Prefix::parse`] are the
+/// writer/reader surface; structural validation lives in
+/// [`Prefix::validate`] and is called from both sides so the two paths
+/// cannot drift.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Prefix {
     pub(crate) version: u8,
@@ -529,13 +529,7 @@ pub(crate) fn read_prefix_from_reader(
     expected_kind: Kind,
 ) -> Result<([u8; PREFIX_SIZE], Prefix), CryptoError> {
     let mut bytes = [0u8; PREFIX_SIZE];
-    reader.read_exact(&mut bytes).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::UnexpectedEof {
-            CryptoError::InvalidFormat(FormatDefect::Truncated)
-        } else {
-            CryptoError::Io(e)
-        }
-    })?;
+    read_exact_or_truncated(reader, &mut bytes)?;
     let prefix = Prefix::parse(&bytes, expected_kind)?;
     Ok((bytes, prefix))
 }

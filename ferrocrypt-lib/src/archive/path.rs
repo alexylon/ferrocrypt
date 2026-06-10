@@ -335,7 +335,7 @@ mod tests {
         assert!(validate_fca_path("a/b/c", l).is_ok());
     }
 
-    // -- Component rejections (§8.2) ---------------------------------------
+    // -- Component rejections (§9.6) ---------------------------------------
 
     #[test]
     fn rejects_control_byte_tab() {
@@ -407,7 +407,7 @@ mod tests {
         assert!(validate_fca_path("a/../b", limits()).is_err());
     }
 
-    // -- Reserved device names (§8.2) --------------------------------------
+    // -- Reserved device names (§9.6) --------------------------------------
 
     /// All 23 reserved device names from FORMAT.md §9.6 reject. Loop-over
     /// pin keeps the test honest against future spec changes that
@@ -450,7 +450,7 @@ mod tests {
         }
     }
 
-    /// Spec §8.2: "ASCII-case-insensitive only". Same reserved name
+    /// Spec §9.6: "ASCII-case-insensitive only". Same reserved name
     /// in any case combination rejects; locale-sensitive folding is
     /// explicitly NOT used (would be wrong for e.g. Turkish dotted
     /// `İ`/`ı`).
@@ -474,7 +474,7 @@ mod tests {
         assert!(!is_windows_reserved_device_component(".foo"));
     }
 
-    // -- Collision key (§8.3) ----------------------------------------------
+    // -- Collision key (§9.7) ----------------------------------------------
 
     #[test]
     fn collision_key_lowercases_ascii() {

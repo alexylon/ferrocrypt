@@ -219,7 +219,6 @@ impl HeaderReadLimits {
 /// The byte buffers ([`prefix_bytes`](Self::prefix_bytes),
 /// [`header_bytes`](Self::header_bytes)) are kept verbatim because the MAC
 /// is computed over the on-disk encoding, not over the parsed structs.
-#[derive(Debug)]
 pub(crate) struct ParsedEncryptedHeader {
     /// Raw 12-byte prefix as read from disk (input to MAC).
     pub prefix_bytes: [u8; PREFIX_SIZE],
@@ -294,6 +293,24 @@ impl std::fmt::Debug for BuiltEncryptedHeader {
             .field("header_mac", &HexBytes(&self.header_mac))
             .field("stream_nonce", &HexBytes(&self.stream_nonce))
             .field("payload_key", &"<redacted>")
+            .finish()
+    }
+}
+
+// Manual `Debug` mirrors `BuiltEncryptedHeader`: `header_bytes` can be
+// up to ~1 MiB (`HEADER_LEN_MAX`) and `ext_bytes` up to 64 KiB, so a
+// derive would dump megabytes of byte noise into any panic or log line
+// that renders a parsed header. No secret material here — all fields
+// are on-disk bytes — so this is log hygiene only.
+impl std::fmt::Debug for ParsedEncryptedHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParsedEncryptedHeader")
+            .field("prefix_bytes", &HexBytes(&self.prefix_bytes))
+            .field("fixed", &self.fixed)
+            .field("header_bytes_len", &self.header_bytes.len())
+            .field("recipient_entry_count", &self.recipient_entries.len())
+            .field("ext_bytes_len", &self.ext_bytes.len())
+            .field("header_mac", &HexBytes(&self.header_mac))
             .finish()
     }
 }

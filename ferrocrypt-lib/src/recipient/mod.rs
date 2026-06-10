@@ -1,6 +1,6 @@
 //! FerroCrypt v1 recipient layer.
 //!
-//! Per `FORMAT.md` §3.3, a recipient entry is an independently framed
+//! Per `FORMAT.md` §3.5, a recipient entry is an independently framed
 //! method for recovering the per-file `file_key`. Two native v1
 //! recipient types are defined:
 //!

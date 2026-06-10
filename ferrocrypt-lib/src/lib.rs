@@ -140,7 +140,7 @@ pub use crate::api::{
 };
 pub use crate::archive::{ArchiveLimits, IncompleteOutputPolicy};
 pub use crate::container::HeaderReadLimits;
-pub use crate::crypto::kdf::{ARGON2_SALT_SIZE, KdfLimit, KdfParams};
+pub use crate::crypto::kdf::{ARGON2_SALT_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams};
 pub use crate::error::{CryptoError, FormatDefect, InvalidKdfParams, UnsupportedVersion};
 pub use crate::format::{ENCRYPTED_EXTENSION, FCR_FILE_VERSION, MAGIC};
 pub use crate::key::files::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};
@@ -421,7 +421,7 @@ mod tests {
         let payload_key = crypto::keys::PayloadKey::from_bytes_for_tests(
             [0u8; crypto::keys::ENCRYPTION_KEY_SIZE],
         );
-        let stream_nonce = [0x07u8; format::STREAM_NONCE_SIZE];
+        let stream_nonce = [0x07u8; crypto::stream::STREAM_NONCE_SIZE];
         let entry = recipient::RecipientEntry::native(
             recipient::policy::NativeRecipientType::Argon2id,
             vec![0u8; recipient::argon2id::BODY_LENGTH],
@@ -458,7 +458,7 @@ mod tests {
         let payload_key = crypto::keys::PayloadKey::from_bytes_for_tests(
             [0u8; crypto::keys::ENCRYPTION_KEY_SIZE],
         );
-        let stream_nonce = [0x07u8; format::STREAM_NONCE_SIZE];
+        let stream_nonce = [0x07u8; crypto::stream::STREAM_NONCE_SIZE];
         let entry = recipient::RecipientEntry::native(
             recipient::policy::NativeRecipientType::X25519,
             vec![0u8; recipient::x25519::BODY_LENGTH],

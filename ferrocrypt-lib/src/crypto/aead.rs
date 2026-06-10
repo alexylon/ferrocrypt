@@ -35,9 +35,9 @@ pub(crate) fn seal_file_key(
     file_key: &FileKey,
 ) -> Result<[u8; WRAPPED_FILE_KEY_SIZE], CryptoError> {
     let cipher = XChaCha20Poly1305::new(wrap_key.into());
-    let nonce = XNonce::from_slice(wrap_nonce);
+    let nonce = XNonce::from(*wrap_nonce);
     let ciphertext = cipher
-        .encrypt(nonce, file_key.expose().as_ref())
+        .encrypt(&nonce, file_key.expose().as_ref())
         .map_err(|_| CryptoError::InternalCryptoFailure("Internal error: envelope seal failed"))?;
     ciphertext.as_slice().try_into().map_err(|_| {
         CryptoError::InternalInvariant("Internal error: envelope ciphertext size mismatch")
@@ -55,10 +55,10 @@ pub(crate) fn open_file_key(
     on_fail: impl FnOnce() -> CryptoError,
 ) -> Result<FileKey, CryptoError> {
     let cipher = XChaCha20Poly1305::new(wrap_key.into());
-    let nonce = XNonce::from_slice(wrap_nonce);
+    let nonce = XNonce::from(*wrap_nonce);
     let plaintext = Zeroizing::new(
         cipher
-            .decrypt(nonce, wrapped.as_ref())
+            .decrypt(&nonce, wrapped.as_ref())
             .map_err(|_| on_fail())?,
     );
     let mut out = Zeroizing::new([0u8; FILE_KEY_SIZE]);
@@ -87,10 +87,10 @@ pub(crate) fn seal_with_aad(
     on_fail: impl FnOnce() -> CryptoError,
 ) -> Result<Vec<u8>, CryptoError> {
     let cipher = XChaCha20Poly1305::new(wrap_key.into());
-    let nonce = XNonce::from_slice(wrap_nonce);
+    let nonce = XNonce::from(*wrap_nonce);
     cipher
         .encrypt(
-            nonce,
+            &nonce,
             Payload {
                 msg: plaintext,
                 aad,
@@ -115,11 +115,11 @@ pub(crate) fn open_with_aad(
     on_fail: impl FnOnce() -> CryptoError,
 ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
     let cipher = XChaCha20Poly1305::new(wrap_key.into());
-    let nonce = XNonce::from_slice(wrap_nonce);
+    let nonce = XNonce::from(*wrap_nonce);
     Ok(Zeroizing::new(
         cipher
             .decrypt(
-                nonce,
+                &nonce,
                 Payload {
                     msg: ciphertext,
                     aad,
@@ -127,4 +127,86 @@ pub(crate) fn open_with_aad(
             )
             .map_err(|_| on_fail())?,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_inputs() -> ([u8; 32], [u8; WRAP_NONCE_SIZE], FileKey) {
+        (
+            [0x42u8; 32],
+            [0x24u8; WRAP_NONCE_SIZE],
+            FileKey::from_bytes_for_tests([0x11u8; FILE_KEY_SIZE]),
+        )
+    }
+
+    /// Pins the on-wire wrapped-file-key width (`FORMAT.md` §4.1 /
+    /// §4.2): 32-byte ciphertext plus 16-byte Poly1305 tag.
+    #[test]
+    fn wrapped_file_key_size_is_48() {
+        assert_eq!(WRAPPED_FILE_KEY_SIZE, 48);
+    }
+
+    #[test]
+    fn seal_open_round_trip() {
+        let (wrap_key, wrap_nonce, file_key) = test_inputs();
+        let wrapped = seal_file_key(&wrap_key, &wrap_nonce, &file_key).unwrap();
+        let opened = open_file_key(&wrap_key, &wrap_nonce, &wrapped, || {
+            CryptoError::KeyFileUnlockFailed
+        })
+        .unwrap();
+        assert_eq!(opened.expose(), file_key.expose());
+    }
+
+    /// A flipped ciphertext byte, tag byte, or nonce byte must surface
+    /// the caller-supplied `on_fail` error, never a successful unwrap.
+    #[test]
+    fn open_rejects_tampered_inputs() {
+        let (wrap_key, wrap_nonce, file_key) = test_inputs();
+        let wrapped = seal_file_key(&wrap_key, &wrap_nonce, &file_key).unwrap();
+
+        for index in [0, WRAPPED_FILE_KEY_SIZE - 1] {
+            let mut tampered = wrapped;
+            tampered[index] ^= 0x01;
+            match open_file_key(&wrap_key, &wrap_nonce, &tampered, || {
+                CryptoError::KeyFileUnlockFailed
+            }) {
+                Err(CryptoError::KeyFileUnlockFailed) => {}
+                other => panic!("expected KeyFileUnlockFailed for byte {index}, got {other:?}"),
+            }
+        }
+
+        let mut wrong_nonce = wrap_nonce;
+        wrong_nonce[0] ^= 0x01;
+        assert!(
+            open_file_key(&wrap_key, &wrong_nonce, &wrapped, || {
+                CryptoError::KeyFileUnlockFailed
+            })
+            .is_err()
+        );
+    }
+
+    /// AAD is bound by the construction: the sealed bytes open only
+    /// under the identical AAD.
+    #[test]
+    fn aad_round_trip_and_tamper() {
+        let (wrap_key, wrap_nonce, _) = test_inputs();
+        let sealed = seal_with_aad(&wrap_key, &wrap_nonce, b"secret", b"aad-bytes", || {
+            CryptoError::KeyFileUnlockFailed
+        })
+        .unwrap();
+        let opened = open_with_aad(&wrap_key, &wrap_nonce, &sealed, b"aad-bytes", || {
+            CryptoError::KeyFileUnlockFailed
+        })
+        .unwrap();
+        assert_eq!(opened.as_slice(), b"secret");
+
+        match open_with_aad(&wrap_key, &wrap_nonce, &sealed, b"AAD-bytes", || {
+            CryptoError::KeyFileUnlockFailed
+        }) {
+            Err(CryptoError::KeyFileUnlockFailed) => {}
+            other => panic!("expected KeyFileUnlockFailed on AAD tamper, got {other:?}"),
+        }
+    }
 }

@@ -2,8 +2,11 @@
 //!
 //! The header MAC covers `prefix(12) || header(header_len)` per
 //! `FORMAT.md` §3.6 and is computed/verified through these helpers.
-//! Constant-time comparison stays here so AEAD-tag and MAC-tag checks
-//! both share the same primitive.
+//! Tag verification is constant-time inside the `hmac` crate
+//! (`verify_slice`); AEAD tags are checked inside `chacha20poly1305`.
+//! [`ct_eq_32`] is the shared constant-time comparison for fixed
+//! 32-byte values outside tag verification, such as the X25519
+//! all-zero shared-secret checks.
 
 use constant_time_eq::constant_time_eq_32;
 use hmac::{Hmac, KeyInit, Mac};

@@ -301,6 +301,18 @@ pub(crate) fn generate_keypair()
 /// - [`CryptoError::Io`] for other read errors
 /// - [`CryptoError::KeyFileUnlockFailed`] for wrong passphrase or
 ///   tampered cleartext (AEAD cannot distinguish)
+/// - [`CryptoError::InvalidInput`] for a passphrase exceeding the
+///   4 KiB structural cap
+/// - [`CryptoError::InvalidKdfParams`] for header KDF fields outside
+///   the v1 structural bounds
+/// - [`CryptoError::KdfResourceCapExceeded`] when the header's
+///   `mem_cost` exceeds `kdf_limit` (or the library default ceiling)
+/// - [`CryptoError::UnsupportedVersion`] for a key file from an
+///   unsupported keypair suite
+/// - [`crate::error::FormatDefect::NotAKeyFile`] when the magic or kind
+///   bytes do not identify a `private.key`
+/// - [`crate::error::FormatDefect::MalformedTypeName`] when the stored
+///   `type_name` violates the `FORMAT.md` §3.3 grammar
 /// - [`crate::error::FormatDefect::WrongKeyFileType`] for a private.key that wraps a
 ///   non-X25519 secret (e.g. a future native key kind)
 /// - [`crate::error::FormatDefect::MalformedPrivateKey`] for a structurally valid
@@ -337,6 +349,13 @@ pub(crate) fn open_x25519_private_key(
         return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
     }
 
+    // Deliberate order: the full unlock runs before the type-name
+    // check, so the wrong-type verdict below is made on
+    // AEAD-authenticated bytes. Checking the cleartext type name first
+    // (via `validate_private_key_shape`) would skip one Argon2id run
+    // when the user picks a wrong-type key file by mistake, but would
+    // let a tampered cleartext name move the failure out of the
+    // ambiguity-preserving `KeyFileUnlockFailed` class.
     let opened = open_private_key(
         &bytes,
         passphrase,

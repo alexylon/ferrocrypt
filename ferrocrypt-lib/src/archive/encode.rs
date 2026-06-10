@@ -137,11 +137,7 @@ fn reject_windows_reparse_point(
 ) -> Result<(), CryptoError> {
     use std::os::windows::fs::MetadataExt;
 
-    // From WinNT.h. Stable Win32 ABI bit for all reparse-point tags
-    // including symlinks, junctions, mount points, and future tags.
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
-
-    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+    if metadata.file_attributes() & platform::FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(CryptoError::InvalidInput(format!(
             "{label} is a Windows reparse point: {}",
             path.display()
@@ -1188,7 +1184,7 @@ mod tests {
         assert!(format!("{err}").contains("total-bytes cap exceeded"));
     }
 
-    /// Spec §8.2: a Windows-reserved device name in the source tree
+    /// Spec §9.6: a Windows-reserved device name in the source tree
     /// MUST reject during the metadata pass — otherwise the writer
     /// would emit a path its own reader rejects.
     #[cfg(unix)]

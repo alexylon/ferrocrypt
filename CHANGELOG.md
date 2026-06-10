@@ -4,7 +4,11 @@ All notable changes to FerroCrypt are documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **`KDF_PARAMS_SIZE` is now re-exported** so callers working with `KdfParams::to_bytes` / `KdfParams::from_bytes` can name the 12-byte serialized length instead of hard-coding it.
+
 ### Changed
+- **`HeaderTampered` now reads "Decryption failed: header tampered or corrupted after unlock".** The previous wording asserted tampering, but a failed header MAC cannot distinguish deliberate modification from storage corruption. The payload and truncation errors already say "or corrupted"; this message now matches them.
 - **`KdfParams::hash_passphrase` now takes its salt as `&[u8; ARGON2_SALT_SIZE]`** (the constant is re-exported as `ferrocrypt::ARGON2_SALT_SIZE`). A wrong-sized salt was previously misreported at runtime as an internal Argon2id failure; it is now a compile error. Callers already passing a 32-byte array are unaffected; callers holding a slice must convert with `try_into()`.
 
 ### Fixed

@@ -733,7 +733,7 @@ It contains:
 - `FcaHeader` — parsed header summary (`entry_count`, `archive_ext_len`, `manifest_len`, `total_file_bytes`);
 - `ArchiveEntryKind` — `File` / `Directory` enum;
 - `ArchiveEntry` — `path_utf8`, `mode`, `size`, opaque `entry_ext: Vec<u8>` carrying the per-entry TLV region (empty for v1 writers, populated by the parser for v1.x readers), plus a writer-only `source_path: Option<PathBuf>` set by the metadata pass so the content pass can reopen no-follow;
-- `Manifest` — `entries`, `total_file_bytes`, `root_name`, `root_is_file`.
+- `Manifest` — `entries`, `total_file_bytes`, `root_name`, `root_is_file`, `root_mode`.
 
 Readers leave `source_path` as `None`; writers set it.
 
@@ -753,7 +753,7 @@ Readers leave `source_path` as `None`; writers set it.
 - maximum cumulative per-entry TLV bytes (default 64 MiB);
 - maximum single TLV value byte length (default 16 MiB).
 
-Cap helpers (`enforce_per_entry_caps`, `enforce_total_bytes_cap`) are shared by encrypt-side preflight and decrypt-side enforcement. Encrypt-side preflight and decrypt-side enforcement must agree: the encrypt side must not produce archives that the decrypt side rejects under default limits.
+The wrapper helpers `enforce_per_entry_caps` and `enforce_total_bytes_cap` are used only by the encrypt-side preflight; the decode side runs the same underlying per-cap helpers directly during manifest parsing and tree validation, so each cap rule has exactly one owner. Encrypt-side preflight and decrypt-side enforcement must agree: the encrypt side must not produce archives that the decrypt side rejects under default limits.
 
 ### 7.4 `archive/path.rs`
 

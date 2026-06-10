@@ -139,10 +139,12 @@ impl Default for ArchiveLimits {
     }
 }
 
-/// Per-entry resource-cap check shared by encrypt-side preflight and
-/// decrypt-side extraction. Caller has already incremented `entry_count`
-/// for the current entry. Delegates to the per-cap helpers so the rule
-/// for each cap lives in exactly one place.
+/// Per-entry resource-cap check for the encrypt-side preflight
+/// (`archive::encode`). The decode side does not call this wrapper —
+/// manifest parsing and tree validation run the same underlying
+/// per-cap helpers directly — so each cap rule still lives in exactly
+/// one place. Caller has already incremented `entry_count` for the
+/// current entry.
 pub(crate) fn enforce_per_entry_caps(
     entry_count: u32,
     path_utf8: &str,
@@ -257,10 +259,12 @@ pub(crate) fn enforce_total_plaintext_bytes_cap(
     Ok(())
 }
 
-/// Per-file-entry total-bytes cap check shared by encrypt-side preflight
-/// and decrypt-side extraction. Updates `total_bytes` in place using
-/// checked arithmetic so an overflow is rejected even when callers raise
-/// `max_total_plaintext_bytes` to `u64::MAX`.
+/// Per-file-entry total-bytes accumulator for the encrypt-side
+/// preflight (`archive::encode`). The decode side keeps its own checked
+/// running sum and applies the same `enforce_total_plaintext_bytes_cap`
+/// rule during manifest tree validation. Updates `total_bytes` in place
+/// using checked arithmetic so an overflow is rejected even when
+/// callers raise `max_total_plaintext_bytes` to `u64::MAX`.
 pub(crate) fn enforce_total_bytes_cap(
     entry_size: u64,
     total_bytes: &mut u64,

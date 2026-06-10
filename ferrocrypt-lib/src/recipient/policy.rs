@@ -310,7 +310,7 @@ pub(crate) fn enforce_recipient_mixing_policy(
                 // accepting silently.
                 (NativeMixingRule::SingleEntry, _) | (_, NativeMixingRule::SingleEntry) => {
                     return Err(CryptoError::InternalInvariant(
-                        "single-entry rule reached class comparison",
+                        "Single-entry rule reached class comparison",
                     ));
                 }
             },
@@ -353,7 +353,7 @@ pub(crate) fn enforce_recipient_mixing_policy(
 /// This is structural classification only. The caller still has to
 /// run the appropriate per-recipient unwrap and the header MAC verify
 /// before accepting any candidate `file_key`.
-pub fn classify_recipient_mode(
+pub(crate) fn classify_recipient_mode(
     entries: &[RecipientEntry],
 ) -> Result<crate::UnauthenticatedRecipientMode, CryptoError> {
     // Step 1: per-entry flag rejection. A reader MUST refuse to process

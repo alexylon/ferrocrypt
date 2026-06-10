@@ -55,7 +55,7 @@ fn parent_missing(entry: &ArchiveEntry) -> CryptoError {
 }
 
 /// Validates the tree shape of a parsed manifest. Returns
-/// `(root_name, root_is_file)` on success.
+/// `(root_name, root_is_file, root_mode)` on success.
 ///
 /// Caller has already validated each entry's `path_utf8` via
 /// [`super::path::validate_fca_path`]; this function does not re-run
@@ -310,7 +310,7 @@ mod tests {
         assert!(format!("{err}").contains("Duplicate archive entry"));
     }
 
-    /// Spec §8.3: paths colliding under ASCII-case-insensitive
+    /// Spec §9.7: paths colliding under ASCII-case-insensitive
     /// comparison are rejected at validation, not deferred to
     /// `create_new(true)` at extraction time.
     #[test]

@@ -4,6 +4,8 @@ All notable changes to FerroCrypt are documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0-beta.3] - 2026-06-11
+
 ### Added
 - **`KDF_PARAMS_SIZE` is now re-exported** so callers working with `KdfParams::to_bytes` / `KdfParams::from_bytes` can name the 12-byte serialized length instead of hard-coding it.
 

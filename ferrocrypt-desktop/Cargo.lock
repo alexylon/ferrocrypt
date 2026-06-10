@@ -1627,7 +1627,7 @@ dependencies = [
 
 [[package]]
 name = "ferrocrypt"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "argon2",
  "bech32",
@@ -1649,7 +1649,7 @@ dependencies = [
 
 [[package]]
 name = "ferrocrypt-desktop"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "arboard",
  "ferrocrypt",

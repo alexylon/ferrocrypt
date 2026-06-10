@@ -1,14 +1,14 @@
-# Package-specific release config for ferrocrypt (lib).
-# Paths in [[pre-release-replacements]] are relative to this package directory.
+# Release config for the ferrocrypt (lib) crate.
 #
-# The CHANGELOG (at the workspace root) is rewritten here, during the lib's
-# release step.
+# `prerelease = true` is REQUIRED on both rules: cargo-release does not apply
+# pre-release-replacements on pre-release versions (0.3.0-beta.3, 1.0.0-rc.1, …)
+# unless it is set. Both rules run during the lib's release step; the lib is
+# always part of a shared-version release.
 #
-# ferrocrypt-desktop is excluded from the workspace, so shared-version does not
-# bump it. The desktop-version rewrite below is duplicated in every released
-# crate's release.toml (lib, cli, test-support) so it runs during whichever
-# release step executes; the rewrite is idempotent, and the CI release guard
-# fails the build if the desktop version is ever missed.
+# Paths are relative to this directory (ferrocrypt-lib/):
+#   - ../CHANGELOG.md            workspace-root changelog; gets a dated section.
+#   - ../ferrocrypt-desktop/...  excluded from the workspace, so shared-version
+#                                does not bump it; its version is synced here.
 
 [[pre-release-replacements]]
 file = "../CHANGELOG.md"
@@ -18,9 +18,11 @@ replace = """## [Unreleased]
 ## [{{version}}] - {{date}}
 
 """
+prerelease = true
 
 [[pre-release-replacements]]
 file = "../ferrocrypt-desktop/Cargo.toml"
 search = '^version = ".*"'
 replace = 'version = "{{version}}"'
 exactly = 1
+prerelease = true

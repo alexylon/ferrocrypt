@@ -115,9 +115,9 @@ cargo release patch --execute --no-push
 shared-version does not bump it automatically. Two things keep it correct:
 
 - **Its `Cargo.toml` version** — used for the macOS / Linux / Windows installer
-  metadata — is rewritten by a `[[pre-release-replacements]]` rule that lives in
-  every released crate's `release.toml` (lib, cli, test-support), so it runs no
-  matter which release step executes.
+  metadata — is rewritten by a `[[pre-release-replacements]]` rule in
+  `ferrocrypt-lib/release.toml`, which sets `prerelease = true` (without that,
+  cargo-release silently skips the rewrite on `-beta` / `-rc` releases).
 - **The version shown in the app window** is read from the library at runtime
   (`ferrocrypt::VERSION`), so it always matches the released version even if the
   manifest rewrite is somehow skipped.

@@ -49,6 +49,7 @@ use cap_std::fs::Dir;
 
 use crate::CryptoError;
 use crate::crypto::stream::read_uninterrupted;
+use crate::error::sanitize_for_display;
 use crate::fs::atomic::{promote_single_file_no_clobber, rename_no_clobber};
 use crate::fs::paths::{INCOMPLETE_SUFFIX, reject_occupied};
 
@@ -246,7 +247,7 @@ fn extract_single_file_root<R: Read>(
     // create_file_at succeeded — this run owns the staging file.
     created_incomplete_roots.push(manifest.root_name.clone());
 
-    copy_exact_n(reader, &mut outfile, entry.size)?;
+    copy_exact_n(reader, &mut outfile, entry.size, archive_content_truncated)?;
 
     // FORMAT.md §9.11 step 13: verify archive EOF — no byte may follow
     // the last declared file content. Single-file root has no descendant
@@ -304,7 +305,7 @@ fn extract_directory_root<R: Read>(
         let (parent_dir, file_name) = platform::walk_to_parent(&root_dir, rel)?;
         let mut outfile =
             platform::create_file_at(&parent_dir, &file_name, platform::INITIAL_FILE_CREATE_MODE)?;
-        copy_exact_n(reader, &mut outfile, entry.size)?;
+        copy_exact_n(reader, &mut outfile, entry.size, archive_content_truncated)?;
         platform::chmod_file_handle(&outfile, entry.mode)?;
     }
 
@@ -352,6 +353,15 @@ fn apply_root_file_mode(output_dir: &Path, manifest: &Manifest) -> Result<(), Cr
     platform::chmod_file_handle(&file, manifest.root_mode)
 }
 
+/// Error for an entry whose content ended before its manifest-declared
+/// size: the archive stream is truncated relative to its own manifest.
+/// FORMAT.md §9.9.
+fn archive_content_truncated() -> CryptoError {
+    CryptoError::MalformedArchive {
+        reason: "file content shorter than the declared size",
+    }
+}
+
 /// FORMAT.md §9.9: rejects any non-EOF byte after the last declared
 /// file content. Reads via [`read_uninterrupted`] so a signal landing
 /// on this final probe cannot fail an otherwise fully-extracted
@@ -364,9 +374,9 @@ fn verify_archive_eof<R: Read>(reader: &mut R) -> Result<(), CryptoError> {
     let mut b = [0u8; 1];
     match read_uninterrupted(reader, &mut b) {
         Ok(0) => Ok(()),
-        Ok(_) => Err(CryptoError::InvalidInput(
-            "Trailing data after archive file contents".to_string(),
-        )),
+        Ok(_) => Err(CryptoError::MalformedArchive {
+            reason: "trailing data after the file contents",
+        }),
         Err(e) => Err(CryptoError::from(e)),
     }
 }
@@ -412,7 +422,14 @@ fn cleanup_incomplete_via_handle(output_handle: &Dir, working_name: &OsStr) {
 fn map_already_exists(e: CryptoError, label: &str, path: &Path) -> CryptoError {
     if let CryptoError::Io(io_err) = &e {
         if io_err.kind() == io::ErrorKind::AlreadyExists {
-            return CryptoError::InvalidInput(format!("{}: {}", label, path.display()));
+            // The path mixes the caller's output directory with
+            // archive-derived names; sanitize so a hostile name cannot
+            // smuggle look-alike characters into the message.
+            return CryptoError::InvalidInput(format!(
+                "{}: {}",
+                label,
+                sanitize_for_display(&path.display().to_string())
+            ));
         }
     }
     e
@@ -850,10 +867,14 @@ mod tests {
 
         let err = unarchive_default(archive, tmp.path()).unwrap_err();
 
-        let s = format!("{err}");
         assert!(
-            s.contains("shorter than declared") || matches!(err, CryptoError::Io(_)),
-            "got: {s}",
+            matches!(
+                err,
+                CryptoError::MalformedArchive {
+                    reason: "file content shorter than the declared size"
+                } | CryptoError::Io(_)
+            ),
+            "got: {err}",
         );
     }
 
@@ -865,7 +886,12 @@ mod tests {
         archive.push(0xAA);
 
         let err = unarchive_default(archive, tmp.path()).unwrap_err();
-        assert!(format!("{err}").contains("Trailing data"));
+        assert!(matches!(
+            err,
+            CryptoError::MalformedArchive {
+                reason: "trailing data after the file contents"
+            }
+        ));
     }
 
     /// Truncation right after the manifest, zero content bytes (the
@@ -881,10 +907,14 @@ mod tests {
         let archive = build_partial_archive(&manifest, b"");
 
         let err = unarchive_default(archive, tmp.path()).unwrap_err();
-        let s = format!("{err}");
         assert!(
-            s.contains("shorter than declared") || matches!(err, CryptoError::Io(_)),
-            "got: {s}",
+            matches!(
+                err,
+                CryptoError::MalformedArchive {
+                    reason: "file content shorter than the declared size"
+                } | CryptoError::Io(_)
+            ),
+            "got: {err}",
         );
     }
 
@@ -915,10 +945,14 @@ mod tests {
         let archive = build_partial_archive(&manifest, &content);
 
         let err = unarchive_default(archive, tmp.path()).unwrap_err();
-        let s = format!("{err}");
         assert!(
-            s.contains("shorter than declared") || matches!(err, CryptoError::Io(_)),
-            "got: {s}",
+            matches!(
+                err,
+                CryptoError::MalformedArchive {
+                    reason: "file content shorter than the declared size"
+                } | CryptoError::Io(_)
+            ),
+            "got: {err}",
         );
     }
 
@@ -944,10 +978,14 @@ mod tests {
         let archive = build_partial_archive(&manifest, b"AAAAA");
 
         let err = unarchive_default(archive, tmp.path()).unwrap_err();
-        let s = format!("{err}");
         assert!(
-            s.contains("shorter than declared") || matches!(err, CryptoError::Io(_)),
-            "got: {s}",
+            matches!(
+                err,
+                CryptoError::MalformedArchive {
+                    reason: "file content shorter than the declared size"
+                } | CryptoError::Io(_)
+            ),
+            "got: {err}",
         );
     }
 
@@ -1464,7 +1502,12 @@ mod tests {
 
         let err = unarchive_with_policy(archive, tmp.path(), IncompleteOutputPolicy::RetainOnError)
             .unwrap_err();
-        assert!(format!("{err}").contains("Trailing data"));
+        assert!(matches!(
+            err,
+            CryptoError::MalformedArchive {
+                reason: "trailing data after the file contents"
+            }
+        ));
 
         let staged = tmp.path().join("hello.txt.incomplete");
         assert!(

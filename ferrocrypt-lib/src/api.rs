@@ -1149,12 +1149,17 @@ pub(crate) fn validate_passphrase(passphrase: &SecretString) -> Result<(), Crypt
     Ok(())
 }
 
-/// Rejects non-existent input paths early with a typed error
+/// Rejects missing input paths early with a typed error
 /// ([`CryptoError::InputPath`]) instead of letting the first I/O syscall
-/// surface a less informative `Io(NotFound)`.
+/// surface a less informative `Io(NotFound)`. Any other metadata
+/// failure — for example `PermissionDenied` on a parent directory —
+/// propagates as [`CryptoError::Io`] so it is not misreported as a
+/// missing file. Follows symlinks, so a dangling symlink classifies as
+/// missing, exactly as the downstream open would treat it.
 pub(crate) fn validate_input_path(input_path: &Path) -> Result<(), CryptoError> {
-    if !input_path.exists() {
-        return Err(CryptoError::InputPath);
+    match std::fs::metadata(input_path) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(CryptoError::InputPath),
+        Err(e) => Err(CryptoError::Io(e)),
     }
-    Ok(())
 }

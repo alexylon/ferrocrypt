@@ -20,6 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 
 use crate::CryptoError;
+use crate::error::sanitize_for_display;
 
 use super::format::empty_archive_error;
 use super::limits::{ArchiveLimits, enforce_entry_count_cap, enforce_total_plaintext_bytes_cap};
@@ -43,15 +44,22 @@ fn first_component(path: &str) -> &str {
     }
 }
 
+/// Builds the [`CryptoError::InvalidArchiveTree`] rejection with the
+/// exposing entry path sanitized for display. Single construction
+/// point so every tree-shape arm embeds the path the same way.
+fn tree_error(path: &str, reason: &'static str) -> CryptoError {
+    CryptoError::InvalidArchiveTree {
+        path: sanitize_for_display(path),
+        reason,
+    }
+}
+
 /// Builds the "parent directory is missing" rejection used both when
 /// `parent_path_utf8` returns `None` (top-level orphan) and when the
 /// computed parent string is absent from the kinds map (intermediate
 /// orphan). Same diagnostic for callers either way.
 fn parent_missing(entry: &ArchiveEntry) -> CryptoError {
-    CryptoError::InvalidInput(format!(
-        "Archive entry parent directory is missing: {}",
-        entry.path_utf8,
-    ))
+    tree_error(&entry.path_utf8, "parent directory is missing")
 }
 
 /// Validates the tree shape of a parsed manifest. Returns
@@ -87,22 +95,17 @@ pub(super) fn validate_manifest_tree(
 
     for entry in entries {
         if first_component(&entry.path_utf8) != root {
-            return Err(CryptoError::InvalidInput(
-                "Archive has multiple top-level roots".to_string(),
-            ));
+            return Err(tree_error(&entry.path_utf8, "multiple top-level roots"));
         }
 
         if !exact.insert(&entry.path_utf8) {
-            return Err(CryptoError::InvalidInput(format!(
-                "Duplicate archive entry: {}",
-                entry.path_utf8,
-            )));
+            return Err(tree_error(&entry.path_utf8, "duplicate entry"));
         }
         if !ascii_ci.insert(ascii_case_collision_key(&entry.path_utf8)) {
-            return Err(CryptoError::InvalidInput(format!(
-                "Duplicate archive entry under ASCII case-insensitive comparison: {}",
-                entry.path_utf8,
-            )));
+            return Err(tree_error(
+                &entry.path_utf8,
+                "duplicate entry under ASCII case-insensitive comparison",
+            ));
         }
         kinds.insert(&entry.path_utf8, entry.kind);
         if entry.path_utf8 == root {
@@ -115,9 +118,7 @@ pub(super) fn validate_manifest_tree(
     let root_is_file = match root_kind {
         Some(ArchiveEntryKind::File) => {
             if entries.len() != 1 {
-                return Err(CryptoError::InvalidInput(
-                    "Archive root file has child entries".to_string(),
-                ));
+                return Err(tree_error(root, "root file has child entries"));
             }
             true
         }
@@ -131,10 +132,7 @@ pub(super) fn validate_manifest_tree(
                 match kinds.get(parent) {
                     Some(ArchiveEntryKind::Directory) => {}
                     Some(ArchiveEntryKind::File) => {
-                        return Err(CryptoError::InvalidInput(format!(
-                            "Archive entry has child under file path: {}",
-                            entry.path_utf8,
-                        )));
+                        return Err(tree_error(&entry.path_utf8, "child under a file path"));
                     }
                     None => return Err(parent_missing(entry)),
                 }
@@ -142,9 +140,7 @@ pub(super) fn validate_manifest_tree(
             false
         }
         None => {
-            return Err(CryptoError::InvalidInput(
-                "Archive directory root entry is missing".to_string(),
-            ));
+            return Err(tree_error(root, "root entry is missing"));
         }
     };
 
@@ -167,6 +163,14 @@ mod tests {
 
     fn entry(path: &str, kind: ArchiveEntryKind, size: u64) -> ArchiveEntry {
         make_entry(path, kind, size, 0o644)
+    }
+
+    /// Asserts `err` is the typed tree rejection carrying `want_reason`.
+    fn assert_tree_error(err: &CryptoError, want_reason: &str) {
+        match err {
+            CryptoError::InvalidArchiveTree { reason, .. } => assert_eq!(*reason, want_reason),
+            other => panic!("expected InvalidArchiveTree({want_reason:?}), got {other:?}"),
+        }
     }
 
     #[test]
@@ -243,7 +247,12 @@ mod tests {
     fn rejects_empty_entries() {
         let entries: Vec<ArchiveEntry> = vec![];
         let err = validate_manifest_tree(&entries, 0, limits()).unwrap_err();
-        assert!(format!("{err}").contains("Empty archive"));
+        assert!(matches!(
+            err,
+            CryptoError::MalformedArchive {
+                reason: "no entries declared"
+            }
+        ));
     }
 
     #[test]
@@ -253,7 +262,7 @@ mod tests {
             entry("b.txt", ArchiveEntryKind::File, 1),
         ];
         let err = validate_manifest_tree(&entries, 2, limits()).unwrap_err();
-        assert!(format!("{err}").contains("multiple top-level roots"));
+        assert_tree_error(&err, "multiple top-level roots");
     }
 
     #[test]
@@ -263,7 +272,7 @@ mod tests {
             entry("root/child.txt", ArchiveEntryKind::File, 5),
         ];
         let err = validate_manifest_tree(&entries, 15, limits()).unwrap_err();
-        assert!(format!("{err}").contains("root file has child entries"));
+        assert_tree_error(&err, "root file has child entries");
     }
 
     /// Directory root entry missing: the archive contains
@@ -272,7 +281,7 @@ mod tests {
     fn rejects_missing_directory_root_entry() {
         let entries = vec![entry("root/child.txt", ArchiveEntryKind::File, 10)];
         let err = validate_manifest_tree(&entries, 10, limits()).unwrap_err();
-        assert!(format!("{err}").contains("directory root entry is missing"));
+        assert_tree_error(&err, "root entry is missing");
     }
 
     /// Intermediate parent directory missing: `root` and
@@ -284,7 +293,7 @@ mod tests {
             entry("root/a/b.txt", ArchiveEntryKind::File, 10),
         ];
         let err = validate_manifest_tree(&entries, 10, limits()).unwrap_err();
-        assert!(format!("{err}").contains("parent directory is missing"));
+        assert_tree_error(&err, "parent directory is missing");
     }
 
     /// Child appearing under a file-typed parent.
@@ -296,7 +305,7 @@ mod tests {
             entry("root/leaf/illegal", ArchiveEntryKind::File, 1),
         ];
         let err = validate_manifest_tree(&entries, 6, limits()).unwrap_err();
-        assert!(format!("{err}").contains("child under file path"));
+        assert_tree_error(&err, "child under a file path");
     }
 
     #[test]
@@ -307,7 +316,7 @@ mod tests {
             entry("root/file.txt", ArchiveEntryKind::File, 10),
         ];
         let err = validate_manifest_tree(&entries, 20, limits()).unwrap_err();
-        assert!(format!("{err}").contains("Duplicate archive entry"));
+        assert_tree_error(&err, "duplicate entry");
     }
 
     /// Spec §9.7: paths colliding under ASCII-case-insensitive
@@ -321,7 +330,10 @@ mod tests {
             entry("root/FOO.TXT", ArchiveEntryKind::File, 10),
         ];
         let err = validate_manifest_tree(&entries, 20, limits()).unwrap_err();
-        assert!(format!("{err}").contains("ASCII case-insensitive"));
+        assert_tree_error(
+            &err,
+            "duplicate entry under ASCII case-insensitive comparison",
+        );
     }
 
     /// Symmetric coverage of `rejects_ascii_ci_duplicate` for
@@ -336,7 +348,10 @@ mod tests {
             entry("root/SUB", ArchiveEntryKind::Directory, 0),
         ];
         let err = validate_manifest_tree(&entries, 0, limits()).unwrap_err();
-        assert!(format!("{err}").contains("ASCII case-insensitive"));
+        assert_tree_error(
+            &err,
+            "duplicate entry under ASCII case-insensitive comparison",
+        );
     }
 
     /// File-vs-directory ASCII-case collision: `root/Foo` (file) and
@@ -352,7 +367,10 @@ mod tests {
             entry("root/foo", ArchiveEntryKind::Directory, 0),
         ];
         let err = validate_manifest_tree(&entries, 5, limits()).unwrap_err();
-        assert!(format!("{err}").contains("ASCII case-insensitive"));
+        assert_tree_error(
+            &err,
+            "duplicate entry under ASCII case-insensitive comparison",
+        );
     }
 
     /// File and directory at the same path (a less-obvious collision
@@ -365,7 +383,7 @@ mod tests {
             entry("root/x", ArchiveEntryKind::Directory, 0),
         ];
         let err = validate_manifest_tree(&entries, 10, limits()).unwrap_err();
-        assert!(format!("{err}").contains("Duplicate"));
+        assert_tree_error(&err, "duplicate entry");
     }
 
     #[test]
@@ -373,7 +391,10 @@ mod tests {
         let l = ArchiveLimits::default().with_max_total_plaintext_bytes(100);
         let entries = vec![entry("file.txt", ArchiveEntryKind::File, 50)];
         let err = validate_manifest_tree(&entries, 200, l).unwrap_err();
-        assert!(format!("{err}").contains("total-bytes cap exceeded"));
+        assert!(matches!(
+            err,
+            CryptoError::ArchiveTotalBytesCapExceeded { .. }
+        ));
     }
 
     #[test]
@@ -384,6 +405,9 @@ mod tests {
             entry("root/a.txt", ArchiveEntryKind::File, 10),
         ];
         let err = validate_manifest_tree(&entries, 10, l).unwrap_err();
-        assert!(format!("{err}").contains("entry-count cap exceeded"));
+        assert!(matches!(
+            err,
+            CryptoError::ArchiveEntryCountCapExceeded { .. }
+        ));
     }
 }

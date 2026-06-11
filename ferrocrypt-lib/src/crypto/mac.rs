@@ -34,16 +34,19 @@ pub(crate) fn hmac_sha3_256_parts(key: &[u8], parts: &[&[u8]]) -> Result<[u8; 32
 }
 
 /// Constant-time HMAC-SHA3-256 verification over a sequence of byte
-/// parts. Returns [`CryptoError::HeaderTampered`] on tag mismatch.
-/// See [`hmac_sha3_256_parts`] for the input layout.
+/// parts. On tag mismatch returns the caller-supplied `on_fail` error,
+/// so this generic layer never hard-codes a use-site-specific failure
+/// class (mirroring `crypto::aead`'s `open_*` helpers). See
+/// [`hmac_sha3_256_parts`] for the input layout.
 pub(crate) fn hmac_sha3_256_parts_verify(
     key: &[u8],
     parts: &[&[u8]],
     tag: &[u8],
+    on_fail: impl FnOnce() -> CryptoError,
 ) -> Result<(), CryptoError> {
     hmac_state_for_parts(key, parts)?
         .verify_slice(tag)
-        .map_err(|_| CryptoError::HeaderTampered)
+        .map_err(|_| on_fail())
 }
 
 // Internal helper: builds a fresh HMAC-SHA3-256 state and updates it

@@ -700,7 +700,12 @@ pub(crate) fn verify_header_mac(
     header_key: &crate::crypto::keys::HeaderKey,
     tag: &[u8; HEADER_MAC_SIZE],
 ) -> Result<(), CryptoError> {
-    hmac_sha3_256_parts_verify(header_key.expose(), &[prefix_bytes, header_bytes], tag)
+    hmac_sha3_256_parts_verify(
+        header_key.expose(),
+        &[prefix_bytes, header_bytes],
+        tag,
+        || CryptoError::HeaderTampered,
+    )
 }
 
 // ─── Errors ─────────────────────────────────────────────────────────────────

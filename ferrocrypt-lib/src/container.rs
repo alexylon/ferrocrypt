@@ -449,10 +449,17 @@ pub(crate) fn build_encrypted_header(
         .checked_add(recipient_entries_len as u64)
         .and_then(|v| v.checked_add(ext_len as u64))
         .ok_or(CryptoError::InvalidFormat(FormatDefect::MalformedHeader))?;
+    // Compare against the structural max while the value is still u64,
+    // so the rejection reports the real computed length; only an
+    // unrepresentable above-`u32` total saturates the reported value.
+    // `validate_structural` re-checks the narrowed value below.
+    if header_len_u64 > u64::from(format::HEADER_LEN_MAX) {
+        return Err(CryptoError::InvalidFormat(FormatDefect::OversizedHeader {
+            header_len: u32::try_from(header_len_u64).unwrap_or(u32::MAX),
+        }));
+    }
     let header_len: u32 = header_len_u64.try_into().map_err(|_| {
-        CryptoError::InvalidFormat(FormatDefect::OversizedHeader {
-            header_len: u32::MAX,
-        })
+        CryptoError::InternalInvariant("Header length narrowing failed after structural check")
     })?;
 
     let fixed = HeaderFixed {
@@ -717,6 +724,37 @@ mod tests {
                 assert_eq!(usize::from(count), over);
             }
             other => panic!("expected RecipientCountOutOfRange, got {other:?}"),
+        }
+    }
+
+    /// A computed header length above the 16 MiB structural max is
+    /// rejected with the real computed value, not a sentinel.
+    #[test]
+    fn build_rejects_oversized_header_with_computed_length() {
+        let DerivedSubkeys {
+            payload_key,
+            header_key,
+        } = dummy_subkeys();
+        let entry = dummy_entry(argon2id::TYPE_NAME, argon2id::BODY_LENGTH);
+        let big_ext = vec![0u8; format::HEADER_LEN_MAX as usize];
+        let err = build_encrypted_header(
+            &[entry],
+            &big_ext,
+            [0u8; STREAM_NONCE_SIZE],
+            payload_key,
+            &header_key,
+        )
+        .unwrap_err();
+        let expected_len = HEADER_FIXED_SIZE as u32
+            + (crate::recipient::entry::ENTRY_HEADER_SIZE
+                + argon2id::TYPE_NAME.len()
+                + argon2id::BODY_LENGTH) as u32
+            + format::HEADER_LEN_MAX;
+        match err {
+            CryptoError::InvalidFormat(FormatDefect::OversizedHeader { header_len }) => {
+                assert_eq!(header_len, expected_len);
+            }
+            other => panic!("expected OversizedHeader with the computed length, got {other:?}"),
         }
     }
 

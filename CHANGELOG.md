@@ -4,7 +4,13 @@ All notable changes to FerroCrypt are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- **Archive rejections are now typed errors instead of message strings.** A hostile or corrupt archive inside a `.fcr` previously surfaced as `CryptoError::InvalidInput` with prose, distinguishable only by reading the message. Structural defects now surface as `MalformedArchive`, `UnsafeArchivePath`, or `InvalidArchiveTree` (each naming the violated rule), and every archive resource cap has its own variant carrying the offending value and the configured cap (`ArchiveEntryCountCapExceeded`, `ArchivePathDepthCapExceeded`, and the rest of the `Archive*CapExceeded` family). Callers that matched on `InvalidInput` for these cases should match the new variants; message text has changed accordingly.
+- **A `private.key` whose wrapped secret exceeds the local cap is now reported as `PrivateKeyWrappedSecretCapExceeded`** instead of "Private key is malformed". The file may be structurally valid for a future key type; the reader's resource policy is the actual constraint.
+- **`Decryptor::open` on a path inside an unreadable directory now reports the permission error** instead of "Input file or folder missing", so a permissions problem is no longer mistaken for a missing file.
+
 ### Security
+- **Error messages can no longer carry attacker-chosen control characters or look-alike Unicode.** Text an attacker may have picked — archive entry paths, source-tree file names, and the echoed input of a rejected recipient string — is now escaped and truncated before it is embedded in an error message, so terminal-bound errors cannot smuggle escape sequences or visually reordered names.
 - **A FIFO swapped in for a source file can no longer stall encryption.** Encryption reads each source file twice (a scan pass and a content pass); replacing a scanned file with a FIFO before the content pass previously blocked the process indefinitely inside the open call on Unix. The content-pass open is now non-blocking and the substituted entry is rejected, matching the guard that decryption, probing, and key-file reading already apply.
 - **HMAC and HKDF working state is now wiped from memory when dropped.** The internal hash state these computations derive from per-file keys was previously freed without wiping after each header authentication or key derivation, the same memory-residue class as the Argon2id fix in 0.3.0-beta.3. That state is now zeroized when each computation is dropped.
 

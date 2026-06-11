@@ -12,6 +12,7 @@
 //! be encrypted in the first place.
 
 use crate::CryptoError;
+use crate::error::sanitize_for_display;
 
 /// Resource caps for FCA archive encoding and extraction.
 ///
@@ -270,9 +271,11 @@ pub(crate) fn enforce_total_bytes_cap(
     total_bytes: &mut u64,
     limits: &ArchiveLimits,
 ) -> Result<(), CryptoError> {
-    let next = total_bytes.checked_add(entry_size).ok_or_else(|| {
-        CryptoError::InvalidInput("Archive total file bytes overflow".to_string())
-    })?;
+    let next = total_bytes
+        .checked_add(entry_size)
+        .ok_or(CryptoError::MalformedArchive {
+            reason: ARCHIVE_TOTAL_BYTES_OVERFLOW,
+        })?;
     if next > limits.max_total_plaintext_bytes {
         return Err(total_bytes_cap_error(
             next,
@@ -313,9 +316,11 @@ pub(crate) fn enforce_total_entry_ext_cap(
     total: &mut u64,
     limits: &ArchiveLimits,
 ) -> Result<(), CryptoError> {
-    let next = total.checked_add(entry_ext_len).ok_or_else(|| {
-        CryptoError::InvalidInput("Archive total entry-extension bytes overflow".to_string())
-    })?;
+    let next = total
+        .checked_add(entry_ext_len)
+        .ok_or(CryptoError::MalformedArchive {
+            reason: "total entry-extension bytes overflow",
+        })?;
     if next > limits.max_total_entry_ext_bytes {
         return Err(total_entry_ext_cap_error(
             next,
@@ -329,60 +334,76 @@ pub(crate) fn enforce_total_entry_ext_cap(
 /// Single source of truth for the "entry mode contains unsupported
 /// bits" diagnostic — emitted on both writer and reader sides when an
 /// `ArchiveEntry::mode` carries bits outside [`PERMISSION_BITS_MASK`].
-pub(super) const ARCHIVE_ENTRY_MODE_UNSUPPORTED: &str =
-    "Archive entry mode contains unsupported bits";
+pub(super) const ARCHIVE_ENTRY_MODE_UNSUPPORTED: &str = "entry mode contains unsupported bits";
+
+/// Reason text for the running plaintext-total `u64` overflow
+/// rejection, shared by the writer's accumulator
+/// ([`enforce_total_bytes_cap`]) and both manifest-summing sites in
+/// `archive::format` so the three arms cannot drift apart.
+pub(super) const ARCHIVE_TOTAL_BYTES_OVERFLOW: &str = "total file bytes overflow";
+
+/// Reason text for the empty-entry-path rejection, shared by the
+/// declared-length check in `archive::format` and the path grammar in
+/// `archive::path`.
+pub(super) const ARCHIVE_PATH_EMPTY: &str = "entry path is empty";
 
 pub(super) fn entry_count_cap_error(entry_count: u32, cap: u32) -> CryptoError {
-    CryptoError::InvalidInput(format!(
-        "Archive entry-count cap exceeded ({entry_count} entries, cap {cap})"
-    ))
+    CryptoError::ArchiveEntryCountCapExceeded {
+        entry_count,
+        local_cap: cap,
+    }
 }
 
 pub(super) fn total_bytes_cap_error(total: u64, cap: u64) -> CryptoError {
-    CryptoError::InvalidInput(format!(
-        "Archive total-bytes cap exceeded ({total} bytes, cap {cap})"
-    ))
+    CryptoError::ArchiveTotalBytesCapExceeded {
+        total_bytes: total,
+        local_cap: cap,
+    }
 }
 
 pub(super) fn manifest_len_cap_error(len: u64, cap: u32) -> CryptoError {
-    CryptoError::InvalidInput(format!(
-        "Archive manifest length cap exceeded ({len} bytes, cap {cap})"
-    ))
+    CryptoError::ArchiveManifestLenCapExceeded {
+        manifest_len: len,
+        local_cap: cap,
+    }
 }
 
 pub(super) fn path_bytes_cap_error(declared_len: u32, cap: u32, path: Option<&str>) -> CryptoError {
-    let head = format!("Archive path byte-length cap exceeded ({declared_len} bytes, cap {cap})");
-    CryptoError::InvalidInput(match path {
-        Some(p) => format!("{head}: {p}"),
-        None => head,
-    })
+    CryptoError::ArchivePathBytesCapExceeded {
+        path_bytes: declared_len,
+        local_cap: cap,
+        path: path.map(sanitize_for_display),
+    }
 }
 
 pub(super) fn path_depth_cap_error(depth: u32, cap: u32, path_utf8: &str) -> CryptoError {
-    CryptoError::InvalidInput(format!(
-        "Archive path depth cap exceeded ({depth} components, cap {cap}): {path_utf8}"
-    ))
+    CryptoError::ArchivePathDepthCapExceeded {
+        depth,
+        local_cap: cap,
+        path: sanitize_for_display(path_utf8),
+    }
 }
 
 pub(super) fn archive_ext_cap_error(declared_len: u64, cap: u32) -> CryptoError {
-    CryptoError::InvalidInput(format!(
-        "Archive extension length cap exceeded ({declared_len} bytes, cap {cap})"
-    ))
+    CryptoError::ArchiveExtLenCapExceeded {
+        ext_len: declared_len,
+        local_cap: cap,
+    }
 }
 
 pub(super) fn entry_ext_cap_error(declared_len: u64, cap: u32, path: Option<&str>) -> CryptoError {
-    let head =
-        format!("Archive entry extension length cap exceeded ({declared_len} bytes, cap {cap})");
-    CryptoError::InvalidInput(match path {
-        Some(p) => format!("{head}: {p}"),
-        None => head,
-    })
+    CryptoError::ArchiveEntryExtLenCapExceeded {
+        ext_len: declared_len,
+        local_cap: cap,
+        path: path.map(sanitize_for_display),
+    }
 }
 
 pub(super) fn total_entry_ext_cap_error(total: u64, cap: u64) -> CryptoError {
-    CryptoError::InvalidInput(format!(
-        "Archive total entry-extension bytes cap exceeded ({total} bytes, cap {cap})"
-    ))
+    CryptoError::ArchiveTotalEntryExtCapExceeded {
+        total_ext_bytes: total,
+        local_cap: cap,
+    }
 }
 
 #[cfg(test)]

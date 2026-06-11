@@ -33,6 +33,7 @@ use cap_std::ambient_authority;
 use cap_std::fs::{Dir, File, OpenOptions};
 
 use crate::CryptoError;
+use crate::error::sanitize_for_display;
 
 /// Default mode passed to `mkdir` when creating a fresh extraction
 /// directory (rwx------). Applied atomically at create time on Unix via
@@ -126,7 +127,7 @@ fn reject_reparse_attributes(file_attributes: u32, name: &OsStr) -> Result<(), C
     if file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(CryptoError::InvalidInput(format!(
             "{SYMLINK_IN_EXTRACTION_PATH}: {}",
-            Path::new(name).display()
+            sanitize_for_display(&name.to_string_lossy())
         )));
     }
     Ok(())
@@ -167,7 +168,10 @@ pub(super) fn classify_open_failure(
 ) -> CryptoError {
     if let Ok(meta) = parent.symlink_metadata(name) {
         if meta.file_type().is_symlink() {
-            return CryptoError::InvalidInput(format!("{label}: {diagnostic}"));
+            return CryptoError::InvalidInput(format!(
+                "{label}: {}",
+                sanitize_for_display(diagnostic)
+            ));
         }
     }
     CryptoError::Io(e)
@@ -414,7 +418,7 @@ fn normal_component<'a>(component: Component<'a>, full: &Path) -> Result<&'a OsS
         Component::Normal(s) => Ok(s),
         _ => Err(CryptoError::InvalidInput(format!(
             "Invalid component in archive entry: {}",
-            full.display()
+            sanitize_for_display(&full.display().to_string())
         ))),
     }
 }

@@ -13,9 +13,10 @@ use crate::crypto::tlv::validate_no_known_critical;
 use crate::error::FormatDefect;
 
 use super::limits::{
-    ARCHIVE_ENTRY_MODE_UNSUPPORTED, ArchiveLimits, enforce_archive_ext_cap,
-    enforce_entry_count_cap, enforce_entry_ext_cap, enforce_manifest_len_cap,
-    enforce_path_bytes_cap, enforce_total_entry_ext_cap, enforce_total_plaintext_bytes_cap,
+    ARCHIVE_ENTRY_MODE_UNSUPPORTED, ARCHIVE_PATH_EMPTY, ARCHIVE_TOTAL_BYTES_OVERFLOW,
+    ArchiveLimits, enforce_archive_ext_cap, enforce_entry_count_cap, enforce_entry_ext_cap,
+    enforce_manifest_len_cap, enforce_path_bytes_cap, enforce_total_entry_ext_cap,
+    enforce_total_plaintext_bytes_cap,
 };
 use super::model::{ArchiveEntry, ArchiveEntryKind, FcaHeader, Manifest};
 use super::path::validate_fca_path;
@@ -48,22 +49,35 @@ pub(crate) const PERMISSION_BITS_MASK: u32 = 0o777;
 /// buffer size.
 const COPY_BUFFER_SIZE: usize = 64 * 1024;
 
-/// Single source of truth for the "Malformed archive manifest"
-/// rejection. Used by every `parse_manifest_bytes` arm whose only
-/// useful diagnostic is "the bytes don't match what `header` declared"
-/// (truncated entry header, slice overflow on a path region,
-/// trailing bytes after the last declared entry).
+/// Single source of truth for the malformed-manifest rejection. Used
+/// by every `parse_manifest_bytes` arm whose only useful diagnostic is
+/// "the bytes don't match what `header` declared" (truncated entry
+/// header, slice overflow on a path region, trailing bytes after the
+/// last declared entry, a zero `manifest_len`).
 fn malformed_manifest() -> CryptoError {
-    CryptoError::InvalidInput("Malformed archive manifest".to_string())
+    CryptoError::MalformedArchive {
+        reason: "manifest bytes do not match the declared layout",
+    }
 }
 
-/// Single source of truth for the "Empty archive" rejection. Used by
+/// Single source of truth for the empty-archive rejection. Used by
 /// the writer's pre-emit `entry_count == 0` check, the reader's
 /// header `entry_count == 0` arm, and the tree validator's
 /// `entries.is_empty()` check.
 pub(super) fn empty_archive_error() -> CryptoError {
-    CryptoError::InvalidInput("Empty archive".to_string())
+    CryptoError::MalformedArchive {
+        reason: "no entries declared",
+    }
 }
+
+/// Reason text for the header-vs-entries total mismatch, shared by
+/// the reader's recomputed-sum check and the writer gate's mirror of
+/// it so the two arms cannot drift apart.
+const ARCHIVE_TOTAL_BYTES_MISMATCH: &str = "declared total does not match the entry sizes";
+
+/// Reason text for a directory entry declaring a non-zero size,
+/// shared by the reader's kind dispatch and the writer gate.
+const ARCHIVE_DIR_SIZE_NONZERO: &str = "directory entry has non-zero size";
 
 /// Initial capacity hint for the parsed-entries `Vec` in
 /// [`parse_manifest_bytes`]. Caps the allocation so an
@@ -143,14 +157,14 @@ pub(crate) fn enforce_manifest_entry_caps(
     limits: &ArchiveLimits,
 ) -> Result<(), CryptoError> {
     if mode > PERMISSION_BITS_MASK {
-        return Err(CryptoError::InvalidInput(
-            ARCHIVE_ENTRY_MODE_UNSUPPORTED.to_string(),
-        ));
+        return Err(CryptoError::MalformedArchive {
+            reason: ARCHIVE_ENTRY_MODE_UNSUPPORTED,
+        });
     }
     if path_len == 0 {
-        return Err(CryptoError::InvalidInput(
-            "Empty archive entry path".to_string(),
-        ));
+        return Err(CryptoError::MalformedArchive {
+            reason: ARCHIVE_PATH_EMPTY,
+        });
     }
     enforce_path_bytes_cap(path_len, path, limits)?;
     enforce_entry_ext_cap(entry_ext_len, path, limits)?;
@@ -194,9 +208,11 @@ pub(super) fn write_u8<W: Write>(w: &mut W, n: u8) -> io::Result<()> {
 /// on a misbehaving reader.
 ///
 /// On a short read (reader returns `Ok(0)` while bytes are still
-/// expected), returns [`CryptoError::InvalidInput`] with the
-/// "shorter than declared size" diagnostic. The `?` on the read threads
-/// `StreamError` markers from the underlying decrypt stream through
+/// expected), returns the caller-supplied `on_short` error: the same
+/// short read means "archive content truncated" on the decrypt side
+/// but "source file shrank mid-copy" on the encrypt side, and only the
+/// caller knows which. The `?` on the read threads `StreamError`
+/// markers from the underlying decrypt stream through
 /// `From<io::Error> for CryptoError` so authentication / truncation /
 /// extra-data signals surface as the typed `CryptoError::Payload*`
 /// variant rather than as a generic archive error. Reads retry on
@@ -206,6 +222,7 @@ pub(super) fn copy_exact_n<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
     size: u64,
+    on_short: impl FnOnce() -> CryptoError,
 ) -> Result<(), CryptoError> {
     let mut buf = [0u8; COPY_BUFFER_SIZE];
     let mut remaining = size;
@@ -215,9 +232,7 @@ pub(super) fn copy_exact_n<R: Read, W: Write>(
         let want = std::cmp::min(buf.len() as u64, remaining) as usize;
         let n = read_uninterrupted(reader, &mut buf[..want])?;
         if n == 0 {
-            return Err(CryptoError::InvalidInput(
-                "Archive file content is shorter than declared size".to_string(),
-            ));
+            return Err(on_short());
         }
         writer.write_all(&buf[..n]).map_err(CryptoError::Io)?;
         remaining -= n as u64;
@@ -289,9 +304,9 @@ pub fn parse_fca_header<R: Read>(
     let mut magic = [0u8; 4];
     reader.read_exact(&mut magic)?;
     if &magic != FCA_MAGIC {
-        return Err(CryptoError::InvalidInput(
-            "Bad FerroCrypt archive magic".to_string(),
-        ));
+        return Err(CryptoError::MalformedArchive {
+            reason: "bad magic",
+        });
     }
 
     let version = read_u8(reader)?;
@@ -303,9 +318,9 @@ pub fn parse_fca_header<R: Read>(
 
     let flags = read_u16_be(reader)?;
     if flags != 0 {
-        return Err(CryptoError::InvalidInput(
-            "FerroCrypt archive header has non-zero flags".to_string(),
-        ));
+        return Err(CryptoError::MalformedArchive {
+            reason: "header has non-zero flags",
+        });
     }
 
     let entry_count = read_u32_be(reader)?;
@@ -337,8 +352,8 @@ pub fn parse_fca_header<R: Read>(
 /// Pre-computes the serialized manifest length with checked
 /// arithmetic before any allocation, validating per-entry mode and
 /// path-byte caps along the way. Caller invokes this BEFORE
-/// allocating the manifest buffer; if it returns
-/// [`CryptoError::InvalidInput`], no allocation has happened.
+/// allocating the manifest buffer; if it returns an error, no
+/// allocation has happened.
 pub(crate) fn checked_manifest_len(
     entries: &[ArchiveEntry],
     limits: ArchiveLimits,
@@ -372,8 +387,8 @@ pub(crate) fn checked_manifest_len(
             .checked_add(FCA_ENTRY_FIXED_SIZE)
             .and_then(|n| n.checked_add(path_len))
             .and_then(|n| n.checked_add(entry_ext_len))
-            .ok_or_else(|| {
-                CryptoError::InvalidInput("Archive manifest length overflow".to_string())
+            .ok_or(CryptoError::MalformedArchive {
+                reason: "manifest length overflow",
             })?;
 
         enforce_manifest_len_cap(len as u64, &limits)?;
@@ -400,25 +415,27 @@ fn validate_manifest_for_write(
         match entry.kind {
             ArchiveEntryKind::Directory => {
                 if entry.size != 0 {
-                    return Err(CryptoError::InvalidInput(
-                        "Directory archive entry has non-zero size".to_string(),
-                    ));
+                    return Err(CryptoError::MalformedArchive {
+                        reason: ARCHIVE_DIR_SIZE_NONZERO,
+                    });
                 }
             }
             ArchiveEntryKind::File => {
-                computed_total = computed_total.checked_add(entry.size).ok_or_else(|| {
-                    CryptoError::InvalidInput("Archive total file bytes overflow".to_string())
-                })?;
+                computed_total = computed_total.checked_add(entry.size).ok_or(
+                    CryptoError::MalformedArchive {
+                        reason: ARCHIVE_TOTAL_BYTES_OVERFLOW,
+                    },
+                )?;
             }
         }
     }
-    // The reader recomputes this sum and rejects with "Archive
-    // total-bytes mismatch" if it differs from the header's
+    // The reader recomputes this sum and rejects with the same
+    // total-mismatch reason if it differs from the header's
     // `total_file_bytes`; mirror that here.
     if computed_total != manifest.total_file_bytes {
-        return Err(CryptoError::InvalidInput(
-            "Archive total-bytes mismatch".to_string(),
-        ));
+        return Err(CryptoError::MalformedArchive {
+            reason: ARCHIVE_TOTAL_BYTES_MISMATCH,
+        });
     }
     let _ = validate_manifest_tree(&manifest.entries, manifest.total_file_bytes, limits)?;
     Ok(())
@@ -461,16 +478,16 @@ fn serialize_manifest_inner(
         let path_bytes = entry.path_utf8.as_bytes();
         // path_len fits in u16 because checked_manifest_len rejected
         // path_len > u16::MAX.
-        let path_len = u16::try_from(path_bytes.len()).map_err(|_| {
-            CryptoError::InvalidInput("Archive path exceeds FCA u16 length".to_string())
-        })?;
+        let path_len =
+            u16::try_from(path_bytes.len()).map_err(|_| CryptoError::MalformedArchive {
+                reason: "entry path exceeds the u16 wire field",
+            })?;
         // entry_ext_len fits in u32 because checked_manifest_len
         // rejected larger values.
-        let entry_ext_len = u32::try_from(entry.entry_ext.len()).map_err(|_| {
-            CryptoError::InvalidInput(
-                "Archive entry extension length cannot fit in u32".to_string(),
-            )
-        })?;
+        let entry_ext_len =
+            u32::try_from(entry.entry_ext.len()).map_err(|_| CryptoError::MalformedArchive {
+                reason: "entry extension length exceeds the u32 wire field",
+            })?;
 
         let kind = match entry.kind {
             ArchiveEntryKind::File => KIND_FILE,
@@ -481,8 +498,8 @@ fn serialize_manifest_inner(
         write_u8(&mut out, FCA_ENTRY_FLAGS_V1).map_err(CryptoError::Io)?;
         // mode fits in u16 because checked_manifest_len rejected
         // mode > 0o777.
-        let mode_u16 = u16::try_from(entry.mode).map_err(|_| {
-            CryptoError::InvalidInput("Archive entry mode does not fit in u16".to_string())
+        let mode_u16 = u16::try_from(entry.mode).map_err(|_| CryptoError::MalformedArchive {
+            reason: "entry mode exceeds the u16 wire field",
         })?;
         write_u16_be(&mut out, mode_u16).map_err(CryptoError::Io)?;
         write_u16_be(&mut out, path_len).map_err(CryptoError::Io)?;
@@ -536,9 +553,9 @@ pub fn parse_manifest_bytes(
         let size = read_u64_be(&mut cursor)?;
 
         if entry_flags != 0 {
-            return Err(CryptoError::InvalidInput(
-                "Archive entry has non-zero reserved flags".to_string(),
-            ));
+            return Err(CryptoError::MalformedArchive {
+                reason: "entry has non-zero reserved flags",
+            });
         }
         enforce_manifest_entry_caps(
             u32::from(mode),
@@ -561,7 +578,9 @@ pub fn parse_manifest_bytes(
         cursor.set_position(path_end as u64);
 
         let path_utf8 = std::str::from_utf8(path_bytes)
-            .map_err(|_| CryptoError::InvalidInput("Archive path is not valid UTF-8".to_string()))?
+            .map_err(|_| CryptoError::MalformedArchive {
+                reason: "entry path is not valid UTF-8",
+            })?
             .to_owned();
 
         validate_fca_path(&path_utf8, limits)?;
@@ -589,23 +608,26 @@ pub fn parse_manifest_bytes(
 
         let kind = match kind_byte {
             KIND_FILE => {
-                total_file_bytes = total_file_bytes.checked_add(size).ok_or_else(|| {
-                    CryptoError::InvalidInput("Archive total file bytes overflow".to_string())
-                })?;
+                total_file_bytes =
+                    total_file_bytes
+                        .checked_add(size)
+                        .ok_or(CryptoError::MalformedArchive {
+                            reason: ARCHIVE_TOTAL_BYTES_OVERFLOW,
+                        })?;
                 ArchiveEntryKind::File
             }
             KIND_DIR => {
                 if size != 0 {
-                    return Err(CryptoError::InvalidInput(
-                        "Directory archive entry has non-zero size".to_string(),
-                    ));
+                    return Err(CryptoError::MalformedArchive {
+                        reason: ARCHIVE_DIR_SIZE_NONZERO,
+                    });
                 }
                 ArchiveEntryKind::Directory
             }
             _ => {
-                return Err(CryptoError::InvalidInput(
-                    "Unsupported archive entry kind".to_string(),
-                ));
+                return Err(CryptoError::MalformedArchive {
+                    reason: "unsupported entry kind",
+                });
             }
         };
 
@@ -624,9 +646,9 @@ pub fn parse_manifest_bytes(
     }
 
     if total_file_bytes != header.total_file_bytes {
-        return Err(CryptoError::InvalidInput(
-            "Archive total-bytes mismatch".to_string(),
-        ));
+        return Err(CryptoError::MalformedArchive {
+            reason: ARCHIVE_TOTAL_BYTES_MISMATCH,
+        });
     }
     enforce_total_plaintext_bytes_cap(total_file_bytes, &limits)?;
 
@@ -680,7 +702,10 @@ mod tests {
             next_interrupts: true,
         };
         let mut out = Vec::new();
-        copy_exact_n(&mut reader, &mut out, content.len() as u64).unwrap();
+        copy_exact_n(&mut reader, &mut out, content.len() as u64, || {
+            CryptoError::InternalInvariant("unexpected short read")
+        })
+        .unwrap();
         assert_eq!(out, content);
     }
 
@@ -747,7 +772,7 @@ mod tests {
         );
         let mut cur = Cursor::new(&bytes);
         let err = parse_fca_header(&mut cur, limits).unwrap_err();
-        assert!(format!("{err}").contains("Archive extension length cap exceeded"));
+        assert!(matches!(err, CryptoError::ArchiveExtLenCapExceeded { .. }));
     }
 
     /// `entry_ext_len` above the per-entry cap rejects via
@@ -764,7 +789,10 @@ mod tests {
             total_file_bytes: 10,
         };
         let err = parse_manifest_bytes(&bytes, header, limits).unwrap_err();
-        assert!(format!("{err}").contains("Archive entry extension length cap exceeded"));
+        assert!(matches!(
+            err,
+            CryptoError::ArchiveEntryExtLenCapExceeded { .. }
+        ));
     }
 
     /// Sum of per-entry TLV bytes above
@@ -792,7 +820,10 @@ mod tests {
             total_file_bytes: 10,
         };
         let err = parse_manifest_bytes(&bytes, header, limits).unwrap_err();
-        assert!(format!("{err}").contains("total entry-extension bytes cap exceeded"));
+        assert!(matches!(
+            err,
+            CryptoError::ArchiveTotalEntryExtCapExceeded { .. }
+        ));
     }
 
     /// A malformed TLV inside `entry_ext` rejects via the shared
@@ -857,7 +888,12 @@ mod tests {
         bytes[0] = b'X';
         let mut cur = Cursor::new(&bytes);
         let err = parse_fca_header(&mut cur, ArchiveLimits::default()).unwrap_err();
-        assert!(format!("{err}").contains("Bad FerroCrypt archive magic"));
+        assert!(matches!(
+            err,
+            CryptoError::MalformedArchive {
+                reason: "bad magic"
+            }
+        ));
     }
 
     #[test]
@@ -893,7 +929,12 @@ mod tests {
         let bytes = raw_header_bytes(FCA_VERSION, 1, 5, 0, 100, 1024);
         let mut cur = Cursor::new(&bytes);
         let err = parse_fca_header(&mut cur, ArchiveLimits::default()).unwrap_err();
-        assert!(format!("{err}").contains("non-zero flags"));
+        assert!(matches!(
+            err,
+            CryptoError::MalformedArchive {
+                reason: "header has non-zero flags"
+            }
+        ));
     }
 
     #[test]
@@ -901,7 +942,12 @@ mod tests {
         let bytes = raw_header_bytes(FCA_VERSION, 0, 0, 0, 100, 1024);
         let mut cur = Cursor::new(&bytes);
         let err = parse_fca_header(&mut cur, ArchiveLimits::default()).unwrap_err();
-        assert!(format!("{err}").contains("Empty archive"));
+        assert!(matches!(
+            err,
+            CryptoError::MalformedArchive {
+                reason: "no entries declared"
+            }
+        ));
     }
 
     #[test]
@@ -910,7 +956,10 @@ mod tests {
         let bytes = raw_header_bytes(FCA_VERSION, 0, limits.max_entry_count + 1, 0, 100, 1024);
         let mut cur = Cursor::new(&bytes);
         let err = parse_fca_header(&mut cur, limits).unwrap_err();
-        assert!(format!("{err}").contains("entry-count cap exceeded"));
+        assert!(matches!(
+            err,
+            CryptoError::ArchiveEntryCountCapExceeded { .. }
+        ));
     }
 
     #[test]
@@ -918,7 +967,12 @@ mod tests {
         let bytes = raw_header_bytes(FCA_VERSION, 0, 5, 0, 0, 1024);
         let mut cur = Cursor::new(&bytes);
         let err = parse_fca_header(&mut cur, ArchiveLimits::default()).unwrap_err();
-        assert!(format!("{err}").contains("Malformed archive manifest"));
+        assert!(matches!(
+            err,
+            CryptoError::MalformedArchive {
+                reason: "manifest bytes do not match the declared layout"
+            }
+        ));
     }
 
     #[test]
@@ -927,7 +981,10 @@ mod tests {
         let bytes = raw_header_bytes(FCA_VERSION, 0, 5, 0, limits.max_manifest_bytes + 1, 1024);
         let mut cur = Cursor::new(&bytes);
         let err = parse_fca_header(&mut cur, limits).unwrap_err();
-        assert!(format!("{err}").contains("manifest length cap exceeded"));
+        assert!(matches!(
+            err,
+            CryptoError::ArchiveManifestLenCapExceeded { .. }
+        ));
     }
 
     #[test]
@@ -943,7 +1000,10 @@ mod tests {
         );
         let mut cur = Cursor::new(&bytes);
         let err = parse_fca_header(&mut cur, limits).unwrap_err();
-        assert!(format!("{err}").contains("total-bytes cap exceeded"));
+        assert!(matches!(
+            err,
+            CryptoError::ArchiveTotalBytesCapExceeded { .. }
+        ));
     }
 
     /// Boundary check: `max_entry_count` exactly is admissible,
@@ -1026,7 +1086,12 @@ mod tests {
         let err = parse_manifest_bytes(&bytes, header, ArchiveLimits::default()).unwrap_err();
         // The byte slice is longer than declared `manifest_len` →
         // `parse_manifest_bytes` rejects via the length-mismatch arm.
-        assert!(format!("{err}").contains("Malformed archive manifest"));
+        assert!(matches!(
+            err,
+            CryptoError::MalformedArchive {
+                reason: "manifest bytes do not match the declared layout"
+            }
+        ));
     }
 
     /// Completely empty input fails at the first `read_exact` for
@@ -1048,7 +1113,12 @@ mod tests {
     fn write_rejects_zero_entry_count_before_emitting_bytes() {
         let mut buf = Vec::new();
         let err = write_fca_header(&mut buf, 0, 0, 100, 1024).unwrap_err();
-        assert!(format!("{err}").contains("Empty archive"));
+        assert!(matches!(
+            err,
+            CryptoError::MalformedArchive {
+                reason: "no entries declared"
+            }
+        ));
         assert!(
             buf.is_empty(),
             "writer must not emit bytes for invalid params"
@@ -1061,7 +1131,12 @@ mod tests {
     fn write_rejects_zero_manifest_len_before_emitting_bytes() {
         let mut buf = Vec::new();
         let err = write_fca_header(&mut buf, 1, 0, 0, 0).unwrap_err();
-        assert!(format!("{err}").contains("Malformed archive manifest"));
+        assert!(matches!(
+            err,
+            CryptoError::MalformedArchive {
+                reason: "manifest bytes do not match the declared layout"
+            }
+        ));
         assert!(
             buf.is_empty(),
             "writer must not emit bytes for invalid params"
@@ -1228,7 +1303,13 @@ mod tests {
         };
         let err = serialize_manifest(&manifest, ArchiveLimits::default()).unwrap_err();
         assert!(
-            format!("{err}").contains("absolute"),
+            matches!(
+                err,
+                CryptoError::UnsafeArchivePath {
+                    reason: "absolute",
+                    ..
+                }
+            ),
             "expected absolute-path error, got {err}"
         );
     }
@@ -1248,15 +1329,12 @@ mod tests {
             root_mode: 0o755,
         };
         let err = serialize_manifest(&manifest, ArchiveLimits::default()).unwrap_err();
-        match err {
-            CryptoError::InvalidInput(msg) => {
-                assert!(
-                    msg.contains("Directory archive entry has non-zero size"),
-                    "unexpected message: {msg}"
-                );
+        assert!(matches!(
+            err,
+            CryptoError::MalformedArchive {
+                reason: ARCHIVE_DIR_SIZE_NONZERO
             }
-            other => panic!("expected InvalidInput, got {other:?}"),
-        }
+        ));
     }
 
     /// `serialize_manifest` rejects a deeper descendant whose
@@ -1276,7 +1354,13 @@ mod tests {
         };
         let err = serialize_manifest(&manifest, ArchiveLimits::default()).unwrap_err();
         assert!(
-            format!("{err}").contains("parent"),
+            matches!(
+                err,
+                CryptoError::InvalidArchiveTree {
+                    reason: "parent directory is missing",
+                    ..
+                }
+            ),
             "expected missing-parent error, got {err}"
         );
     }
@@ -1296,15 +1380,12 @@ mod tests {
             root_mode: 0o644,
         };
         let err = serialize_manifest(&manifest, ArchiveLimits::default()).unwrap_err();
-        match err {
-            CryptoError::InvalidInput(msg) => {
-                assert!(
-                    msg.contains("Archive total-bytes mismatch"),
-                    "unexpected message: {msg}"
-                );
+        assert!(matches!(
+            err,
+            CryptoError::MalformedArchive {
+                reason: ARCHIVE_TOTAL_BYTES_MISMATCH
             }
-            other => panic!("expected InvalidInput, got {other:?}"),
-        }
+        ));
     }
 
     /// `serialize_manifest` rejects a `Manifest` whose `File` entry
@@ -1323,7 +1404,12 @@ mod tests {
         };
         let err = serialize_manifest(&manifest, ArchiveLimits::default()).unwrap_err();
         assert!(
-            format!("{err}").contains("overflow"),
+            matches!(
+                err,
+                CryptoError::MalformedArchive {
+                    reason: ARCHIVE_TOTAL_BYTES_OVERFLOW
+                }
+            ),
             "expected overflow error, got {err}"
         );
     }
@@ -1340,7 +1426,12 @@ mod tests {
         };
         let err = serialize_manifest(&manifest, ArchiveLimits::default()).unwrap_err();
         assert!(
-            format!("{err}").contains("Empty archive"),
+            matches!(
+                err,
+                CryptoError::MalformedArchive {
+                    reason: "no entries declared"
+                }
+            ),
             "expected Empty archive, got {err}"
         );
     }
@@ -1365,7 +1456,12 @@ mod tests {
     fn checked_manifest_len_rejects_oversize_mode() {
         let entries = [make_entry("file", ArchiveEntryKind::File, 0, 0o7777)];
         let err = checked_manifest_len(&entries, ArchiveLimits::default()).unwrap_err();
-        assert!(format!("{err}").contains("mode contains unsupported bits"));
+        assert!(matches!(
+            err,
+            CryptoError::MalformedArchive {
+                reason: ARCHIVE_ENTRY_MODE_UNSUPPORTED
+            }
+        ));
     }
 
     #[test]
@@ -1373,14 +1469,22 @@ mod tests {
         let l = ArchiveLimits::default().with_max_path_bytes(5);
         let entries = [make_entry("toolong.txt", ArchiveEntryKind::File, 0, 0o644)];
         let err = checked_manifest_len(&entries, l).unwrap_err();
-        assert!(format!("{err}").contains("byte-length cap exceeded"));
+        assert!(matches!(
+            err,
+            CryptoError::ArchivePathBytesCapExceeded { .. }
+        ));
     }
 
     #[test]
     fn checked_manifest_len_rejects_empty_path() {
         let entries = [make_entry("", ArchiveEntryKind::File, 0, 0o644)];
         let err = checked_manifest_len(&entries, ArchiveLimits::default()).unwrap_err();
-        assert!(format!("{err}").contains("Empty archive entry path"));
+        assert!(matches!(
+            err,
+            CryptoError::MalformedArchive {
+                reason: ARCHIVE_PATH_EMPTY
+            }
+        ));
     }
 
     /// FORMAT.md §9.10: writer-side TLV canonicality is enforced
@@ -1443,7 +1547,10 @@ mod tests {
             make_entry("file2", ArchiveEntryKind::File, 0, 0o644),
         ];
         let err = checked_manifest_len(&entries, l).unwrap_err();
-        assert!(format!("{err}").contains("manifest length cap exceeded"));
+        assert!(matches!(
+            err,
+            CryptoError::ArchiveManifestLenCapExceeded { .. }
+        ));
     }
 
     // -- Manifest parser rejection cases -----------------------------------
@@ -1493,7 +1600,12 @@ mod tests {
     fn parse_rejects_unknown_entry_kind() {
         let bytes = raw_entry_bytes(0xFF, 0, 0o644, 4, 0, 10, b"fake", &[]);
         let err = parse_with_header(&bytes, 1, 10).unwrap_err();
-        assert!(format!("{err}").contains("Unsupported archive entry kind"));
+        assert!(matches!(
+            err,
+            CryptoError::MalformedArchive {
+                reason: "unsupported entry kind"
+            }
+        ));
     }
 
     /// `0x00` is reserved across every kind/version byte in the spec
@@ -1504,35 +1616,60 @@ mod tests {
     fn parse_rejects_reserved_zero_entry_kind() {
         let bytes = raw_entry_bytes(0x00, 0, 0o644, 4, 0, 10, b"fake", &[]);
         let err = parse_with_header(&bytes, 1, 10).unwrap_err();
-        assert!(format!("{err}").contains("Unsupported archive entry kind"));
+        assert!(matches!(
+            err,
+            CryptoError::MalformedArchive {
+                reason: "unsupported entry kind"
+            }
+        ));
     }
 
     #[test]
     fn parse_rejects_nonzero_entry_flags() {
         let bytes = raw_entry_bytes(KIND_FILE, 0x01, 0o644, 4, 0, 10, b"file", &[]);
         let err = parse_with_header(&bytes, 1, 10).unwrap_err();
-        assert!(format!("{err}").contains("non-zero reserved flags"));
+        assert!(matches!(
+            err,
+            CryptoError::MalformedArchive {
+                reason: "entry has non-zero reserved flags"
+            }
+        ));
     }
 
     #[test]
     fn parse_rejects_invalid_mode() {
         let bytes = raw_entry_bytes(KIND_FILE, 0, 0o7777, 4, 0, 10, b"file", &[]);
         let err = parse_with_header(&bytes, 1, 10).unwrap_err();
-        assert!(format!("{err}").contains("mode contains unsupported bits"));
+        assert!(matches!(
+            err,
+            CryptoError::MalformedArchive {
+                reason: ARCHIVE_ENTRY_MODE_UNSUPPORTED
+            }
+        ));
     }
 
     #[test]
     fn parse_rejects_directory_with_nonzero_size() {
         let bytes = raw_entry_bytes(KIND_DIR, 0, 0o755, 3, 0, 100, b"dir", &[]);
         let err = parse_with_header(&bytes, 1, 0).unwrap_err();
-        assert!(format!("{err}").contains("Directory archive entry has non-zero size"));
+        assert!(matches!(
+            err,
+            CryptoError::MalformedArchive {
+                reason: ARCHIVE_DIR_SIZE_NONZERO
+            }
+        ));
     }
 
     #[test]
     fn parse_rejects_zero_path_len() {
         let bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 0, 0, 10, b"", &[]);
         let err = parse_with_header(&bytes, 1, 10).unwrap_err();
-        assert!(format!("{err}").contains("Empty archive entry path"));
+        assert!(matches!(
+            err,
+            CryptoError::MalformedArchive {
+                reason: ARCHIVE_PATH_EMPTY
+            }
+        ));
     }
 
     #[test]
@@ -1540,7 +1677,12 @@ mod tests {
         // 0xFF is not a valid UTF-8 start byte.
         let bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 1, 0, 10, &[0xFF], &[]);
         let err = parse_with_header(&bytes, 1, 10).unwrap_err();
-        assert!(format!("{err}").contains("not valid UTF-8"));
+        assert!(matches!(
+            err,
+            CryptoError::MalformedArchive {
+                reason: "entry path is not valid UTF-8"
+            }
+        ));
     }
 
     #[test]
@@ -1548,7 +1690,12 @@ mod tests {
         // Header claims 1 entry but bytes are short.
         let bytes = vec![KIND_FILE, 0, 0, 0]; // only 4 bytes — fixed header is 18
         let err = parse_with_header(&bytes, 1, 0).unwrap_err();
-        assert!(format!("{err}").contains("Malformed archive manifest"));
+        assert!(matches!(
+            err,
+            CryptoError::MalformedArchive {
+                reason: "manifest bytes do not match the declared layout"
+            }
+        ));
     }
 
     #[test]
@@ -1557,7 +1704,12 @@ mod tests {
         // are present.
         let bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 100, 0, 10, b"path", &[]);
         let err = parse_with_header(&bytes, 1, 10).unwrap_err();
-        assert!(format!("{err}").contains("Malformed archive manifest"));
+        assert!(matches!(
+            err,
+            CryptoError::MalformedArchive {
+                reason: "manifest bytes do not match the declared layout"
+            }
+        ));
     }
 
     #[test]
@@ -1566,7 +1718,12 @@ mod tests {
         let mut bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 4, 0, 10, b"file", &[]);
         bytes.push(0xAA);
         let err = parse_with_header(&bytes, 1, 10).unwrap_err();
-        assert!(format!("{err}").contains("Malformed archive manifest"));
+        assert!(matches!(
+            err,
+            CryptoError::MalformedArchive {
+                reason: "manifest bytes do not match the declared layout"
+            }
+        ));
     }
 
     #[test]
@@ -1579,7 +1736,12 @@ mod tests {
             total_file_bytes: 10,
         };
         let err = parse_manifest_bytes(&bytes, header, ArchiveLimits::default()).unwrap_err();
-        assert!(format!("{err}").contains("Malformed archive manifest"));
+        assert!(matches!(
+            err,
+            CryptoError::MalformedArchive {
+                reason: "manifest bytes do not match the declared layout"
+            }
+        ));
     }
 
     #[test]
@@ -1587,7 +1749,12 @@ mod tests {
         // One file entry of size 10; declared total is 99.
         let bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 4, 0, 10, b"file", &[]);
         let err = parse_with_header(&bytes, 1, 99).unwrap_err();
-        assert!(format!("{err}").contains("total-bytes mismatch"));
+        assert!(matches!(
+            err,
+            CryptoError::MalformedArchive {
+                reason: ARCHIVE_TOTAL_BYTES_MISMATCH
+            }
+        ));
     }
 
     /// `total_file_bytes` overflow during summation: two files each
@@ -1615,7 +1782,12 @@ mod tests {
             total_file_bytes: 0,
         };
         let err = parse_manifest_bytes(&bytes, header, ArchiveLimits::default()).unwrap_err();
-        assert!(format!("{err}").contains("total file bytes overflow"));
+        assert!(matches!(
+            err,
+            CryptoError::MalformedArchive {
+                reason: ARCHIVE_TOTAL_BYTES_OVERFLOW
+            }
+        ));
     }
 
     /// Single file entry with `size = u64::MAX` round-trips. Pin
@@ -1643,10 +1815,15 @@ mod tests {
         let err = parse_with_header(&bytes, 1, 10).unwrap_err();
         // Either a path-grammar error or a tree-shape error. The
         // grammar should fire first.
-        let s = format!("{err}");
         assert!(
-            s.contains("forbidden component") || s.contains("Unsafe path"),
-            "got: {s}",
+            matches!(
+                err,
+                CryptoError::UnsafeArchivePath {
+                    reason: "forbidden component",
+                    ..
+                }
+            ),
+            "got: {err}",
         );
     }
 
@@ -1659,7 +1836,13 @@ mod tests {
         bytes.extend(raw_entry_bytes(KIND_FILE, 0, 0o644, 1, 0, 10, b"a", &[]));
         bytes.extend(raw_entry_bytes(KIND_FILE, 0, 0o644, 1, 0, 10, b"b", &[]));
         let err = parse_with_header(&bytes, 2, 20).unwrap_err();
-        assert!(format!("{err}").contains("multiple top-level roots"));
+        assert!(matches!(
+            err,
+            CryptoError::InvalidArchiveTree {
+                reason: "multiple top-level roots",
+                ..
+            }
+        ));
     }
 
     /// Near-cap stress (Batch 2.6): a manifest with `max_entry_count`

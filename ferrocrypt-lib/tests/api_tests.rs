@@ -359,13 +359,8 @@ fn passphrase_decryptor_archive_limits_constrains_extraction() {
         _ => panic!("expected passphrase decryptor"),
     };
     match result {
-        Err(CryptoError::InvalidInput(msg)) => {
-            assert!(
-                msg.contains("entry-count cap exceeded"),
-                "expected entry-count cap error, got: {msg}"
-            );
-        }
-        other => panic!("expected InvalidInput cap error, got {other:?}"),
+        Err(CryptoError::ArchiveEntryCountCapExceeded { local_cap: 1, .. }) => {}
+        other => panic!("expected the typed entry-count cap error, got {other:?}"),
     }
 }
 
@@ -405,13 +400,8 @@ fn recipient_decryptor_archive_limits_constrains_extraction() {
         _ => panic!("expected private-key decryptor"),
     };
     match result {
-        Err(CryptoError::InvalidInput(msg)) => {
-            assert!(
-                msg.contains("entry-count cap exceeded"),
-                "expected entry-count cap error, got: {msg}"
-            );
-        }
-        other => panic!("expected InvalidInput cap error, got {other:?}"),
+        Err(CryptoError::ArchiveEntryCountCapExceeded { local_cap: 1, .. }) => {}
+        other => panic!("expected the typed entry-count cap error, got {other:?}"),
     }
 }
 
@@ -462,8 +452,7 @@ fn archive_limits_writer_raised_default_reader_rejects_path_depth() {
         .expect("encrypt");
 
     // Default reader: rejects on extract with the typed path-depth
-    // diagnostic. Surfaces from `enforce_per_entry_caps` as
-    // `CryptoError::InvalidInput(_)`.
+    // cap error from `enforce_per_entry_caps`.
     let restore = work.join("restored");
     fs::create_dir_all(&restore).unwrap();
     let default_decrypt = match Decryptor::open(&outcome.output_path).expect("open") {
@@ -471,10 +460,7 @@ fn archive_limits_writer_raised_default_reader_rejects_path_depth() {
         _ => panic!("expected passphrase decryptor"),
     };
     match default_decrypt {
-        Err(CryptoError::InvalidInput(msg)) => assert!(
-            msg.contains("path depth cap"),
-            "expected path-depth cap rejection from default reader, got: {msg}"
-        ),
+        Err(CryptoError::ArchivePathDepthCapExceeded { local_cap: 64, .. }) => {}
         other => panic!("expected default reader to reject deep file, got {other:?}"),
     }
 
@@ -1166,4 +1152,37 @@ fn private_key_decrypt_re_probes_input_before_unlock() {
         0,
         "Argon2id unlock ran before the re-probe rejection",
     );
+}
+
+/// An input under an unreadable directory is a permission problem, not
+/// a missing file: `Decryptor::open` must surface `Io(PermissionDenied)`
+/// rather than collapsing the failure into `InputPath`.
+#[cfg(unix)]
+#[test]
+fn decryptor_open_reports_permission_error_not_missing_input() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let work = fresh_workspace("open_permission_error");
+    let blocked_dir = work.join("blocked");
+    fs::create_dir_all(&blocked_dir).unwrap();
+    let input = blocked_dir.join("file.fcr");
+    fs::write(&input, b"irrelevant").unwrap();
+
+    fs::set_permissions(&blocked_dir, fs::Permissions::from_mode(0o000)).unwrap();
+    // Root bypasses directory permissions; the scenario cannot be
+    // produced there, so the assertion would be meaningless.
+    if fs::symlink_metadata(&input).is_ok() {
+        fs::set_permissions(&blocked_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        return;
+    }
+
+    let result = Decryptor::open(&input);
+    fs::set_permissions(&blocked_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+    match result {
+        Err(CryptoError::Io(e)) => {
+            assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "got: {e}");
+        }
+        other => panic!("expected Io(PermissionDenied), got {other:?}"),
+    }
 }

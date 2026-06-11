@@ -493,7 +493,10 @@ pub(crate) fn open_private_key(
     header.kdf_params.enforce_limit(kdf_limit)?;
 
     if header.wrapped_secret_len > local_wrapped_secret_cap {
-        return Err(malformed_private_key());
+        return Err(CryptoError::PrivateKeyWrappedSecretCapExceeded {
+            wrapped_secret_len: header.wrapped_secret_len,
+            local_cap: local_wrapped_secret_cap,
+        });
     }
 
     let total = (PRIVATE_KEY_HEADER_FIXED_SIZE as u64)
@@ -1160,8 +1163,11 @@ mod tests {
         let bytes = seal_private_key(&secret, "x25519", &public, &[], &pass, &kdf).unwrap();
         // Local cap below the actual 48-byte wrapped secret.
         match open_private_key(&bytes, &pass, None, 32, &|_| {}) {
-            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => {}
-            other => panic!("expected MalformedPrivateKey for cap exceeded, got {other:?}"),
+            Err(CryptoError::PrivateKeyWrappedSecretCapExceeded {
+                wrapped_secret_len: 48,
+                local_cap: 32,
+            }) => {}
+            other => panic!("expected the typed wrapped-secret cap rejection, got {other:?}"),
         }
     }
 

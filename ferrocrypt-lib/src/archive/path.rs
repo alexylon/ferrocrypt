@@ -11,8 +11,11 @@
 use std::path::{Component, Path};
 
 use crate::CryptoError;
+use crate::error::sanitize_for_display;
 
-use super::limits::{ArchiveLimits, enforce_path_bytes_cap, enforce_path_depth_cap};
+use super::limits::{
+    ARCHIVE_PATH_EMPTY, ArchiveLimits, enforce_path_bytes_cap, enforce_path_depth_cap,
+};
 
 /// Bytes that cannot appear in any FCA path component on any platform
 /// FerroCrypt targets. The Windows-reserved set per FORMAT.md §9.6; rejecting
@@ -29,9 +32,9 @@ const WINDOWS_RESERVED_CHARS: &[u8] = b"<>:\"|?*";
 /// `ArchiveLimits::validate`; we don't re-run that check here.
 pub fn validate_fca_path(path: &str, limits: ArchiveLimits) -> Result<(), CryptoError> {
     if path.is_empty() {
-        return Err(CryptoError::InvalidInput(
-            "Empty archive entry path".to_string(),
-        ));
+        return Err(CryptoError::MalformedArchive {
+            reason: ARCHIVE_PATH_EMPTY,
+        });
     }
     enforce_path_bytes_cap(
         u32::try_from(path.len()).unwrap_or(u32::MAX),
@@ -40,35 +43,25 @@ pub fn validate_fca_path(path: &str, limits: ArchiveLimits) -> Result<(), Crypto
     )?;
     let bytes = path.as_bytes();
     if bytes[0] == b'/' {
-        return Err(CryptoError::InvalidInput(
-            "Archive path is absolute".to_string(),
-        ));
+        return Err(unsafe_path(path, "absolute"));
     }
     if bytes[bytes.len() - 1] == b'/' {
-        return Err(CryptoError::InvalidInput(
-            "Archive path has trailing slash".to_string(),
-        ));
+        return Err(unsafe_path(path, "trailing slash"));
     }
     if bytes.contains(&0) {
-        return Err(CryptoError::InvalidInput(
-            "Archive path contains NUL byte".to_string(),
-        ));
+        return Err(unsafe_path(path, "contains NUL byte"));
     }
     if bytes.contains(&b'\\') {
-        return Err(CryptoError::InvalidInput(
-            "Archive path contains backslash".to_string(),
-        ));
+        return Err(unsafe_path(path, "contains backslash"));
     }
     if bytes.windows(2).any(|w| w == b"//") {
-        return Err(CryptoError::InvalidInput(
-            "Archive path contains repeated slash separators".to_string(),
-        ));
+        return Err(unsafe_path(path, "repeated slash separators"));
     }
 
     enforce_path_depth_cap(path, &limits)?;
 
     for component in path.split('/') {
-        validate_fca_component(component)?;
+        validate_fca_component(component, path)?;
     }
 
     // Defense-in-depth: walk the host `Path::components()` and reject
@@ -83,9 +76,7 @@ pub fn validate_fca_path(path: &str, limits: ArchiveLimits) -> Result<(), Crypto
             | Component::Prefix(_)
             | Component::CurDir
             | Component::ParentDir => {
-                return Err(CryptoError::InvalidInput(format!(
-                    "Unsafe path in archive: {path}"
-                )));
+                return Err(unsafe_path(path, "non-normal host path component"));
             }
         }
     }
@@ -93,39 +84,39 @@ pub fn validate_fca_path(path: &str, limits: ArchiveLimits) -> Result<(), Crypto
     Ok(())
 }
 
+/// Builds the [`CryptoError::UnsafeArchivePath`] rejection with the
+/// offending path sanitized for display. Single construction point so
+/// every grammar arm embeds the path the same way.
+fn unsafe_path(path: &str, reason: &'static str) -> CryptoError {
+    CryptoError::UnsafeArchivePath {
+        path: sanitize_for_display(path),
+        reason,
+    }
+}
+
 /// Validates a single `/`-delimited path component per FORMAT.md §9.6.
-fn validate_fca_component(component: &str) -> Result<(), CryptoError> {
+/// `path` is the full entry path, threaded through for the rejection
+/// payload only.
+fn validate_fca_component(component: &str, path: &str) -> Result<(), CryptoError> {
     if component.is_empty() || component == "." || component == ".." {
-        return Err(CryptoError::InvalidInput(
-            "Archive path has forbidden component".to_string(),
-        ));
+        return Err(unsafe_path(path, "forbidden component"));
     }
 
     let b = component.as_bytes();
     if b.iter().any(|&c| c <= 0x1f) {
-        return Err(CryptoError::InvalidInput(
-            "Archive path contains ASCII control byte".to_string(),
-        ));
+        return Err(unsafe_path(path, "contains ASCII control byte"));
     }
     if b.iter().any(|c| WINDOWS_RESERVED_CHARS.contains(c)) {
-        return Err(CryptoError::InvalidInput(
-            "Archive path contains a Windows-reserved character".to_string(),
-        ));
+        return Err(unsafe_path(path, "contains a Windows-reserved character"));
     }
     if b.last() == Some(&b' ') {
-        return Err(CryptoError::InvalidInput(
-            "Archive path component ends with space".to_string(),
-        ));
+        return Err(unsafe_path(path, "component ends with space"));
     }
     if b.last() == Some(&b'.') {
-        return Err(CryptoError::InvalidInput(
-            "Archive path component ends with dot".to_string(),
-        ));
+        return Err(unsafe_path(path, "component ends with dot"));
     }
     if is_windows_reserved_device_component(component) {
-        return Err(CryptoError::InvalidInput(
-            "Archive path contains a Windows-reserved device name".to_string(),
-        ));
+        return Err(unsafe_path(path, "Windows-reserved device name"));
     }
     Ok(())
 }
@@ -279,51 +270,110 @@ mod tests {
     #[test]
     fn rejects_empty() {
         let err = validate_fca_path("", limits()).unwrap_err();
-        assert!(format!("{err}").contains("Empty"));
+        assert!(matches!(
+            err,
+            CryptoError::MalformedArchive {
+                reason: ARCHIVE_PATH_EMPTY
+            }
+        ));
     }
 
     #[test]
     fn rejects_leading_slash() {
         let err = validate_fca_path("/etc/passwd", limits()).unwrap_err();
-        assert!(format!("{err}").contains("absolute"));
+        assert!(matches!(
+            err,
+            CryptoError::UnsafeArchivePath {
+                reason: "absolute",
+                ..
+            }
+        ));
     }
 
     #[test]
     fn rejects_trailing_slash() {
         let err = validate_fca_path("dir/", limits()).unwrap_err();
-        assert!(format!("{err}").contains("trailing slash"));
+        assert!(matches!(
+            err,
+            CryptoError::UnsafeArchivePath {
+                reason: "trailing slash",
+                ..
+            }
+        ));
     }
 
     #[test]
     fn rejects_double_slash() {
         let err = validate_fca_path("a//b", limits()).unwrap_err();
-        assert!(format!("{err}").contains("repeated slash"));
+        assert!(matches!(
+            err,
+            CryptoError::UnsafeArchivePath {
+                reason: "repeated slash separators",
+                ..
+            }
+        ));
     }
 
     #[test]
     fn rejects_nul_byte() {
         let err = validate_fca_path("a\0b", limits()).unwrap_err();
-        assert!(format!("{err}").contains("NUL byte"));
+        assert!(matches!(
+            err,
+            CryptoError::UnsafeArchivePath {
+                reason: "contains NUL byte",
+                ..
+            }
+        ));
     }
 
     #[test]
     fn rejects_backslash() {
         let err = validate_fca_path("a\\b", limits()).unwrap_err();
-        assert!(format!("{err}").contains("backslash"));
+        assert!(matches!(
+            err,
+            CryptoError::UnsafeArchivePath {
+                reason: "contains backslash",
+                ..
+            }
+        ));
+    }
+
+    /// Rejection payloads carry the offending path sanitized: control
+    /// bytes and direction-override characters render as escapes, so
+    /// the error text cannot smuggle terminal sequences or visually
+    /// reordered names.
+    #[test]
+    fn rejection_payload_is_sanitized() {
+        let err = validate_fca_path("dir/\u{202e}gpj.\u{1b}txt", limits()).unwrap_err();
+        match err {
+            CryptoError::UnsafeArchivePath { path, .. } => {
+                assert!(!path.contains('\u{202e}'), "raw bidi override: {path:?}");
+                assert!(!path.contains('\u{1b}'), "raw ESC: {path:?}");
+                assert!(path.contains("\\u{202e}"), "got: {path}");
+                assert!(path.contains("\\u{1b}"), "got: {path}");
+            }
+            other => panic!("expected UnsafeArchivePath, got {other:?}"),
+        }
     }
 
     #[test]
     fn rejects_oversize_path() {
         let l = ArchiveLimits::default().with_max_path_bytes(10);
         let err = validate_fca_path("this_is_too_long.txt", l).unwrap_err();
-        assert!(format!("{err}").contains("byte-length cap"));
+        assert!(matches!(
+            err,
+            CryptoError::ArchivePathBytesCapExceeded { .. }
+        ));
     }
 
     #[test]
     fn rejects_oversize_depth() {
         let l = ArchiveLimits::default().with_max_path_depth(3);
         let err = validate_fca_path("a/b/c/d", l).unwrap_err();
-        assert!(format!("{err}").contains("depth cap"));
+        assert!(matches!(
+            err,
+            CryptoError::ArchivePathDepthCapExceeded { .. }
+        ));
     }
 
     /// Boundary check: depth exactly at cap is admissible, cap+1
@@ -340,13 +390,25 @@ mod tests {
     #[test]
     fn rejects_control_byte_tab() {
         let err = validate_fca_path("a\tb", limits()).unwrap_err();
-        assert!(format!("{err}").contains("control byte"));
+        assert!(matches!(
+            err,
+            CryptoError::UnsafeArchivePath {
+                reason: "contains ASCII control byte",
+                ..
+            }
+        ));
     }
 
     #[test]
     fn rejects_control_byte_low() {
         let err = validate_fca_path("a\x01b", limits()).unwrap_err();
-        assert!(format!("{err}").contains("control byte"));
+        assert!(matches!(
+            err,
+            CryptoError::UnsafeArchivePath {
+                reason: "contains ASCII control byte",
+                ..
+            }
+        ));
     }
 
     /// Every byte in the spec's Windows-reserved set rejects when
@@ -358,7 +420,13 @@ mod tests {
             let path = format!("a{}b.txt", c as char);
             let err = validate_fca_path(&path, limits()).unwrap_err();
             assert!(
-                format!("{err}").contains("Windows-reserved character"),
+                matches!(
+                    err,
+                    CryptoError::UnsafeArchivePath {
+                        reason: "contains a Windows-reserved character",
+                        ..
+                    }
+                ),
                 "char {:?} should reject",
                 c as char,
             );
@@ -371,25 +439,55 @@ mod tests {
     #[test]
     fn rejects_colon_for_alternate_data_stream() {
         let err = validate_fca_path("file:stream", limits()).unwrap_err();
-        assert!(format!("{err}").contains("Windows-reserved character"));
+        assert!(matches!(
+            err,
+            CryptoError::UnsafeArchivePath {
+                reason: "contains a Windows-reserved character",
+                ..
+            }
+        ));
     }
 
     #[test]
     fn rejects_trailing_space_in_component() {
         let err = validate_fca_path("file ", limits()).unwrap_err();
-        assert!(format!("{err}").contains("ends with space"));
+        assert!(matches!(
+            err,
+            CryptoError::UnsafeArchivePath {
+                reason: "component ends with space",
+                ..
+            }
+        ));
 
         let err = validate_fca_path("dir /file", limits()).unwrap_err();
-        assert!(format!("{err}").contains("ends with space"));
+        assert!(matches!(
+            err,
+            CryptoError::UnsafeArchivePath {
+                reason: "component ends with space",
+                ..
+            }
+        ));
     }
 
     #[test]
     fn rejects_trailing_dot_in_component() {
         let err = validate_fca_path("file.", limits()).unwrap_err();
-        assert!(format!("{err}").contains("ends with dot"));
+        assert!(matches!(
+            err,
+            CryptoError::UnsafeArchivePath {
+                reason: "component ends with dot",
+                ..
+            }
+        ));
 
         let err = validate_fca_path("dir./file", limits()).unwrap_err();
-        assert!(format!("{err}").contains("ends with dot"));
+        assert!(matches!(
+            err,
+            CryptoError::UnsafeArchivePath {
+                reason: "component ends with dot",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -422,7 +520,13 @@ mod tests {
         for name in &names {
             let err = validate_fca_path(name, limits()).unwrap_err();
             assert!(
-                format!("{err}").contains("Windows-reserved device"),
+                matches!(
+                    err,
+                    CryptoError::UnsafeArchivePath {
+                        reason: "Windows-reserved device name",
+                        ..
+                    }
+                ),
                 "name {name} should reject",
             );
         }
@@ -444,7 +548,13 @@ mod tests {
         ] {
             let err = validate_fca_path(stem, limits()).unwrap_err();
             assert!(
-                format!("{err}").contains("Windows-reserved device"),
+                matches!(
+                    err,
+                    CryptoError::UnsafeArchivePath {
+                        reason: "Windows-reserved device name",
+                        ..
+                    }
+                ),
                 "stem {stem} should reject",
             );
         }
@@ -459,7 +569,13 @@ mod tests {
         for name in &["con", "Con", "CON", "cOn", "lpt9", "Lpt9", "LPT9"] {
             let err = validate_fca_path(name, limits()).unwrap_err();
             assert!(
-                format!("{err}").contains("Windows-reserved device"),
+                matches!(
+                    err,
+                    CryptoError::UnsafeArchivePath {
+                        reason: "Windows-reserved device name",
+                        ..
+                    }
+                ),
                 "name {name} should reject",
             );
         }
@@ -507,10 +623,9 @@ mod tests {
     #[test]
     fn rejects_windows_drive_path_with_backslash() {
         let err = validate_fca_path("C:\\x", limits()).unwrap_err();
-        let s = format!("{err}");
         assert!(
-            s.contains("backslash") || s.contains("Windows-reserved character"),
-            "got: {s}",
+            matches!(err, CryptoError::UnsafeArchivePath { .. }),
+            "got: {err}",
         );
     }
 
@@ -520,14 +635,26 @@ mod tests {
         // the `:` Windows-reserved-character rejection on the first
         // component.
         let err = validate_fca_path("C:/x", limits()).unwrap_err();
-        assert!(format!("{err}").contains("Windows-reserved character"));
+        assert!(matches!(
+            err,
+            CryptoError::UnsafeArchivePath {
+                reason: "contains a Windows-reserved character",
+                ..
+            }
+        ));
     }
 
     #[test]
     fn rejects_unc_path_attempt() {
         // `\\server\share` UNC attempt. Backslash rejection fires.
         let err = validate_fca_path("\\\\server\\share", limits()).unwrap_err();
-        assert!(format!("{err}").contains("backslash"));
+        assert!(matches!(
+            err,
+            CryptoError::UnsafeArchivePath {
+                reason: "contains backslash",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -535,14 +662,20 @@ mod tests {
         // `//server/share` — POSIX double-slash, would be UNC-equivalent
         // on Windows. Hits the leading-slash rejection.
         let err = validate_fca_path("//server/share", limits()).unwrap_err();
-        assert!(format!("{err}").contains("absolute"));
+        assert!(matches!(
+            err,
+            CryptoError::UnsafeArchivePath {
+                reason: "absolute",
+                ..
+            }
+        ));
     }
 
     /// Tar-rs `extracting_malicious_tarball` corpus (CVE-2001-1267
     /// et al. — see `tests/all.rs:768` in tar-rs). Tar's reaction is
     /// to silently strip leading slashes and skip `..` entries; FCA's
-    /// posture is fail-closed — every entry MUST reject with a typed
-    /// `CryptoError::InvalidInput`. Loop-pin against the full byte set
+    /// posture is fail-closed — every entry MUST reject with the typed
+    /// path or archive defect. Loop-pin against the full byte set
     /// so a future relaxation of the rejection is caught.
     ///
     /// See `notes/tar_rs_crosscheck.md` §5 for the cross-check finding.
@@ -571,11 +704,14 @@ mod tests {
                 result.is_err(),
                 "tar-rs malicious path {path:?} MUST reject (FCA fails closed; tar silently strips)",
             );
-            // Confirm it's a typed `InvalidInput`, not a panic or
-            // unrelated error class.
+            // Confirm it's the typed path/archive rejection, not a
+            // panic or unrelated error class.
             assert!(
-                matches!(result.unwrap_err(), CryptoError::InvalidInput(_)),
-                "tar-rs malicious path {path:?} must reject as InvalidInput",
+                matches!(
+                    result.unwrap_err(),
+                    CryptoError::UnsafeArchivePath { .. } | CryptoError::MalformedArchive { .. }
+                ),
+                "tar-rs malicious path {path:?} must reject as a typed archive defect",
             );
         }
     }

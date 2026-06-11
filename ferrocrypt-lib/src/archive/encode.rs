@@ -40,6 +40,7 @@ use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions};
 
 use crate::CryptoError;
+use crate::error::sanitize_for_display;
 
 #[cfg(unix)]
 use super::format::PERMISSION_BITS_MASK;
@@ -171,7 +172,7 @@ fn reject_windows_reparse_point_cap(
     if metadata.file_attributes() & platform::FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(CryptoError::InvalidInput(format!(
             "{label} is a Windows reparse point: {}",
-            Path::new(name).display()
+            sanitize_for_display(&name.to_string_lossy())
         )));
     }
     Ok(())
@@ -381,9 +382,9 @@ fn input_is_symlink_error(path: &Path) -> CryptoError {
 /// `Path::display`'s replacement-character semantics.
 fn symlink_in_archive_source_error(fca_prefix: &str, name: &OsStr) -> CryptoError {
     CryptoError::InvalidInput(format!(
-        "{}: {fca_prefix}/{}",
+        "{}: {}",
         platform::SYMLINK_IN_ARCHIVE_SOURCE,
-        Path::new(name).display()
+        sanitize_for_display(&format!("{fca_prefix}/{}", name.to_string_lossy()))
     ))
 }
 
@@ -393,13 +394,9 @@ fn symlink_in_archive_source_error(fca_prefix: &str, name: &OsStr) -> CryptoErro
 /// and [`stream_directory_descendant`] (directory descendants,
 /// cap-std metadata). Stable wording so downstream callers parsing
 /// the message see the same shape regardless of input kind.
-fn size_changed_error(
-    expected: u64,
-    observed: u64,
-    display: std::path::Display<'_>,
-) -> CryptoError {
+fn size_changed_error(expected: u64, observed: u64, path_text: &str) -> CryptoError {
     CryptoError::InvalidInput(format!(
-        "Source file size changed during archive ({expected} → {observed}): {display}"
+        "Source file size changed during archive ({expected} → {observed}): {path_text}"
     ))
 }
 
@@ -664,7 +661,8 @@ fn walk_directory(
             let key = (child_meta.dev(), child_meta.ino());
             if !counters.seen_dirs.insert(key) {
                 return Err(CryptoError::InvalidInput(format!(
-                    "Directory cycle in archive source: {fca_path}"
+                    "Directory cycle in archive source: {}",
+                    sanitize_for_display(&fca_path)
                 )));
             }
         }
@@ -733,8 +731,8 @@ fn scan_directory(
 
         let name_str = name_os.to_str().ok_or_else(|| {
             CryptoError::InvalidInput(format!(
-                "Source filename is not valid UTF-8: {fca_prefix}/{}",
-                Path::new(&name_os).display()
+                "Source filename is not valid UTF-8: {}",
+                sanitize_for_display(&format!("{fca_prefix}/{}", name_os.to_string_lossy()))
             ))
         })?;
 
@@ -746,7 +744,8 @@ fn scan_directory(
         // meant to be a single source filename.
         if name_str.bytes().any(|b| b == b'/' || b == b'\\') {
             return Err(CryptoError::InvalidInput(format!(
-                "Source filename contains path separator: {fca_prefix}/{name_str}"
+                "Source filename contains path separator: {}",
+                sanitize_for_display(&format!("{fca_prefix}/{name_str}"))
             )));
         }
 
@@ -782,7 +781,8 @@ fn scan_directory(
             });
         } else {
             return Err(CryptoError::InvalidInput(format!(
-                "Unsupported file type in archive: {fca_path_utf8}"
+                "Unsupported file type in archive: {}",
+                sanitize_for_display(&fca_path_utf8)
             )));
         }
     }
@@ -839,11 +839,18 @@ fn stream_single_file_root<W: Write>(
         return Err(size_changed_error(
             entry.size,
             metadata.len(),
-            source.display(),
+            &source.display().to_string(),
         ));
     }
 
-    copy_exact_n(&mut file, writer, entry.size)
+    copy_exact_n(&mut file, writer, entry.size, source_shrank_error)
+}
+
+/// Error for a source file that hit EOF before its manifest-declared
+/// size during the content pass: the file shrank after the fresh
+/// metadata check, and FORMAT.md §9.10 requires encryption to fail.
+fn source_shrank_error() -> CryptoError {
+    CryptoError::InvalidInput("Source file shrank during archiving".to_string())
 }
 
 /// Directory-descendant content stream: walks `rel` under `source_root`
@@ -880,18 +887,18 @@ fn stream_directory_descendant<W: Write>(
     if !metadata.is_file() {
         return Err(CryptoError::InvalidInput(format!(
             "Source is no longer a regular file: {}",
-            Path::new(&file_name).display()
+            sanitize_for_display(&file_name.to_string_lossy())
         )));
     }
     if metadata.len() != entry.size {
         return Err(size_changed_error(
             entry.size,
             metadata.len(),
-            Path::new(&file_name).display(),
+            &sanitize_for_display(&file_name.to_string_lossy()),
         ));
     }
 
-    copy_exact_n(&mut file, writer, entry.size)
+    copy_exact_n(&mut file, writer, entry.size, source_shrank_error)
 }
 
 /// Archives a file or directory into the FCA wire format. Returns the
@@ -1229,7 +1236,10 @@ mod tests {
         let limits = ArchiveLimits::default().with_max_entry_count(3);
         let mut buf = Vec::new();
         let err = archive(&dir, &mut buf, limits).unwrap_err();
-        assert!(format!("{err}").contains("entry-count cap exceeded"));
+        assert!(matches!(
+            err,
+            CryptoError::ArchiveEntryCountCapExceeded { .. }
+        ));
         // No header bytes should have been emitted.
         assert!(buf.is_empty(), "writer must not emit bytes when caps fail");
     }
@@ -1244,7 +1254,10 @@ mod tests {
         let limits = ArchiveLimits::default().with_max_total_plaintext_bytes(100);
         let mut buf = Vec::new();
         let err = archive(&dir, &mut buf, limits).unwrap_err();
-        assert!(format!("{err}").contains("total-bytes cap exceeded"));
+        assert!(matches!(
+            err,
+            CryptoError::ArchiveTotalBytesCapExceeded { .. }
+        ));
     }
 
     /// Spec §9.6: a Windows-reserved device name in the source tree
@@ -1261,7 +1274,13 @@ mod tests {
 
         let mut buf = Vec::new();
         let err = archive(&dir, &mut buf, ArchiveLimits::default()).unwrap_err();
-        assert!(format!("{err}").contains("Windows-reserved device"));
+        assert!(matches!(
+            err,
+            CryptoError::UnsafeArchivePath {
+                reason: "Windows-reserved device name",
+                ..
+            }
+        ));
     }
 
     // -- Positive round-trips (extra coverage) -----------------------------

@@ -345,7 +345,9 @@ It contains:
 
 Errors remain centralized because they form a coherent diagnostic namespace. Public errors must be precise, stable, and careful not to overstate what cryptographic verification can prove.
 
-Error variants that carry data carry typed structured data, such as `FormatDefect`, `UnsupportedVersion`, `InvalidKdfParams`, the `MixingPolicy` diagnostic projection (with a structured `Custom { compatibility_class }` payload for non-shorthand classes), named integer fields for resource caps, and owned `type_name` strings for per-recipient diagnostics. Consumers can pattern-match on error shapes without substring comparisons.
+Error variants that carry data carry typed structured data, such as `FormatDefect`, `UnsupportedVersion`, `InvalidKdfParams`, the `MixingPolicy` diagnostic projection (with a structured `Custom { compatibility_class }` payload for non-shorthand classes), named integer fields for resource caps, and owned `type_name` strings for per-recipient diagnostics. Inner-archive (FCA) failures follow the same split: structural defects surface as `MalformedArchive` / `UnsafeArchivePath` / `InvalidArchiveTree` with a static `reason`, and every `FORMAT.md` §9.12 resource cap has its own `Archive*CapExceeded` variant with named integer fields. Consumers can pattern-match on error shapes without substring comparisons.
+
+Untrusted text embedded in an error message — archive entry paths, source-tree file names, the recipient-string parser's input echo — is sanitized before it is stored or rendered: ASCII control bytes and all non-ASCII characters (including direction-override and zero-width code points) become backslash escapes, and long input is truncated. Terminal-bound error text can therefore never carry escape sequences or visually spoofed names. `error.rs::sanitize_for_display` is the single implementation.
 
 Diagnostic rules:
 

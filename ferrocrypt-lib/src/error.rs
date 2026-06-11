@@ -45,6 +45,54 @@ impl std::fmt::Display for DisplayableTypeName<'_> {
     }
 }
 
+/// Maximum number of `chars` of untrusted text [`sanitize_for_display`]
+/// keeps before truncating with `…`. Long enough to locate an entry in
+/// a large archive, short enough that one hostile path cannot flood a
+/// terminal or log line.
+const UNTRUSTED_TEXT_DISPLAY_MAX: usize = 64;
+
+/// Renders untrusted text for embedding in an error message.
+///
+/// Printable ASCII passes through unchanged; every other character —
+/// ASCII control bytes, and all non-ASCII including direction-override
+/// and zero-width code points — is rendered as a backslash escape
+/// (`\n`, `\u{202e}`, …), so terminal-bound error text cannot carry
+/// escape sequences and cannot be visually reordered or spoofed. Input
+/// longer than [`UNTRUSTED_TEXT_DISPLAY_MAX`] chars is truncated with a
+/// trailing `…`. Used wherever an error message embeds text an attacker
+/// may have chosen: archive entry paths, source-tree file names, and
+/// the recipient-string parser's input echo.
+pub(crate) fn sanitize_for_display(text: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in text.chars().enumerate() {
+        if i >= UNTRUSTED_TEXT_DISPLAY_MAX {
+            out.push('…');
+            break;
+        }
+        if c.is_ascii_graphic() || c == ' ' {
+            out.push(c);
+        } else {
+            out.extend(c.escape_default());
+        }
+    }
+    out
+}
+
+/// Renders `: {path}` when an optional sanitized path is present, and
+/// nothing otherwise, so one `#[error]` string serves both the
+/// "path known" and "path not yet parsed" construction sites of the
+/// archive cap variants.
+struct PathSuffix<'a>(&'a Option<String>);
+
+impl std::fmt::Display for PathSuffix<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(path) => write!(f, ": {path}"),
+            None => Ok(()),
+        }
+    }
+}
+
 /// Errors that can occur during key generation, encryption, or decryption.
 ///
 /// All `Display` messages are short, user-facing, and free of internal
@@ -70,10 +118,20 @@ impl std::fmt::Display for DisplayableTypeName<'_> {
 ///   [`CryptoError::RecipientCountCapExceeded`],
 ///   [`CryptoError::RecipientBodyCapExceeded`],
 ///   [`CryptoError::RecipientStringCapExceeded`],
-///   [`CryptoError::KdfResourceCapExceeded`]) each carry the offending
-///   value plus the configured local cap as named integer fields,
-///   matching the "distinct resource-cap error" classes that
-///   `FORMAT.md` §3.2 / §12 enumerate
+///   [`CryptoError::KdfResourceCapExceeded`],
+///   [`CryptoError::PrivateKeyWrappedSecretCapExceeded`], and the
+///   `Archive*CapExceeded` family for the `FORMAT.md` §9.12 caps) each
+///   carry the offending value plus the configured local cap as named
+///   integer fields, matching the "distinct resource-cap error" classes
+///   that `FORMAT.md` §3.2 / §12 enumerate
+/// - The archive defect variants ([`CryptoError::MalformedArchive`],
+///   [`CryptoError::UnsafeArchivePath`],
+///   [`CryptoError::InvalidArchiveTree`]) carry a static `reason`
+///   describing the violated rule; the path-carrying ones also carry
+///   the offending entry path, sanitized for display (control and
+///   non-ASCII characters escaped, long paths truncated), because an
+///   attacker-crafted archive can hold thousands of entries and the
+///   path is the only way to locate the bad one
 /// - The multi-recipient diagnostics ([`CryptoError::RecipientUnwrapFailed`],
 ///   [`CryptoError::HeaderMacFailedAfterUnwrap`],
 ///   [`CryptoError::UnknownCriticalRecipient`],
@@ -91,20 +149,20 @@ impl std::fmt::Display for DisplayableTypeName<'_> {
 /// a path or short token that has to be echoed back to the user.
 /// Concretely it covers:
 ///
-/// - **archive layer (FCA)**: "symlink in archive source `foo/bar`",
-///   "unsafe path in archive `../escape.txt`", "archive has multiple
-///   top-level roots", etc. A malformed or attacker-crafted `.fcr` can
-///   hold thousands of entries; without the entry path embedded in the
-///   error, a developer debugging a failing extraction would see only
-///   "something in this archive is bad" and be unable to locate it.
+/// - **encrypt-side source-tree problems**: "Input is a symlink:
+///   `path`", "Source is no longer a regular file: `name`",
+///   "Unsupported file type: `path`". The source tree belongs to the
+///   caller's environment, so these are caller-input rejections, not
+///   format defects; names discovered while walking the tree are
+///   sanitized before embedding.
 /// - **Bech32 recipient parser**: reports the offending recipient
 ///   string ("Invalid recipient string: `fcr1…`", "Unexpected recipient
 ///   prefix…", "Recipient string must be lowercase"). Callers pass
 ///   recipient strings through as opaque values, so the parser has to
-///   echo the input back for the user to spot a typo.
+///   echo the input back (sanitized and truncated) for the user to
+///   spot a typo.
 /// - **Caller-invocation path conflicts and shape rejections**:
 ///   "Output already exists: `path`", "Key file already exists:
-///   `path`", "Input is a symlink: `path`", "Unsupported file type:
 ///   `path`", "Invalid recipient public key". These surface *which*
 ///   user-supplied path or value triggered the rejection so
 ///   operators can fix it without extra debugging.
@@ -112,10 +170,12 @@ impl std::fmt::Display for DisplayableTypeName<'_> {
 ///   "KDF memory limit overflow: `N` MiB", "Passphrase must not be
 ///   empty".
 ///
-/// Typing these via structured variants would require dozens of new
-/// variants each carrying a `PathBuf` or `String`, which reintroduces
-/// the exact "library carries per-operation context" problem the rest
-/// of the type deliberately avoids.
+/// Rejections of a *parsed archive payload* — a hostile or corrupt
+/// FCA inside the decrypted stream — are **not** `InvalidInput`: they
+/// surface as [`CryptoError::MalformedArchive`],
+/// [`CryptoError::UnsafeArchivePath`],
+/// [`CryptoError::InvalidArchiveTree`], or the `Archive*CapExceeded`
+/// family, because they describe the file, not the caller.
 ///
 /// Library consumers treat `InvalidInput` as an opaque string and
 /// surface it via `Display`; the CLI and desktop frontends do exactly
@@ -219,6 +279,23 @@ pub enum CryptoError {
         /// Number of characters in the supplied recipient string.
         input_chars: u32,
         /// Maximum recipient-string length accepted by local policy.
+        local_cap: u32,
+    },
+    /// A `private.key` file's `wrapped_secret_len` exceeds the local
+    /// resource cap. The structural max (16 MiB per `FORMAT.md` §8) is
+    /// much higher; this fires when the wrapped secret would exceed the
+    /// reader's resource policy (4 KiB by default — every v1 native key
+    /// type needs only 48 bytes). Distinct from
+    /// [`FormatDefect::MalformedPrivateKey`]: the file may be
+    /// structurally valid for a future key type; the local policy is
+    /// the constraint.
+    #[error(
+        "Private key wrapped-secret cap exceeded ({wrapped_secret_len} bytes, cap {local_cap})"
+    )]
+    PrivateKeyWrappedSecretCapExceeded {
+        /// Wrapped-secret length declared by the `private.key` header, in bytes.
+        wrapped_secret_len: u32,
+        /// Maximum wrapped-secret length accepted by local policy, in bytes.
         local_cap: u32,
     },
 
@@ -373,6 +450,146 @@ pub enum CryptoError {
     /// consume one).
     #[error("Encrypted payload exceeds chunk-count cap")]
     PayloadChunkCountExceeded,
+
+    // ─── Archive payload (FCA) ───────────────────────────────────────────
+    /// Inner FCA archive header or manifest is structurally invalid:
+    /// bad magic, reserved flags set, no entries declared, truncated or
+    /// over-declared regions, a length-field overflow, trailing
+    /// manifest or content bytes, an unknown entry kind, a directory
+    /// entry declaring a size, an out-of-range mode word, a non-UTF-8
+    /// or empty entry path, or a declared total that does not match the
+    /// entry sizes. Fires inside the encrypted payload after the outer
+    /// container is accepted, and from the writer gate when a caller
+    /// hands the archive writer data it could never read back. The
+    /// `reason` names the violated rule. Per `FORMAT.md` §9.
+    #[error("Malformed archive: {reason}")]
+    MalformedArchive {
+        /// The specific `FORMAT.md` §9 rule the payload violated.
+        reason: &'static str,
+    },
+    /// An archive entry path violates the `FORMAT.md` §9.6 grammar
+    /// (absolute, traversal, separator abuse, control bytes,
+    /// Windows-reserved names, …). Fires on read for a hostile or
+    /// corrupt archive and on write for a source tree whose names FCA
+    /// cannot represent.
+    #[error("Unsafe archive path ({reason}): {path}")]
+    UnsafeArchivePath {
+        /// Offending entry path, sanitized for display (control and
+        /// non-ASCII characters escaped, long input truncated).
+        path: String,
+        /// The specific `FORMAT.md` §9.6 rule the path violated.
+        reason: &'static str,
+    },
+    /// The archive manifest violates the `FORMAT.md` §9.7/§9.8 tree
+    /// rules: duplicate entries (exact or ASCII-case-insensitive),
+    /// multiple top-level roots, a missing parent or root entry, or a
+    /// child under a file path.
+    #[error("Invalid archive tree ({reason}): {path}")]
+    InvalidArchiveTree {
+        /// Entry path that exposed the violation, sanitized for display.
+        path: String,
+        /// The specific tree rule the manifest violated.
+        reason: &'static str,
+    },
+    /// Archive entry count exceeds the configured
+    /// [`ArchiveLimits::max_entry_count`](crate::ArchiveLimits) cap
+    /// (`FORMAT.md` §9.12). Like every `Archive*CapExceeded` variant,
+    /// this is a resource-policy rejection, not a format defect, and is
+    /// enforced identically on encrypt and decrypt.
+    #[error("Archive entry-count cap exceeded ({entry_count} entries, cap {local_cap})")]
+    ArchiveEntryCountCapExceeded {
+        /// Entry count declared by the archive or discovered by the writer.
+        entry_count: u32,
+        /// Maximum entry count accepted by local policy.
+        local_cap: u32,
+    },
+    /// Total plaintext bytes exceed the configured
+    /// [`ArchiveLimits::max_total_plaintext_bytes`](crate::ArchiveLimits)
+    /// cap (`FORMAT.md` §9.12).
+    #[error("Archive total-bytes cap exceeded ({total_bytes} bytes, cap {local_cap})")]
+    ArchiveTotalBytesCapExceeded {
+        /// Running plaintext total that crossed the cap, in bytes.
+        total_bytes: u64,
+        /// Maximum total plaintext accepted by local policy, in bytes.
+        local_cap: u64,
+    },
+    /// Serialized manifest length exceeds the configured
+    /// [`ArchiveLimits::max_manifest_bytes`](crate::ArchiveLimits) cap
+    /// (`FORMAT.md` §9.12).
+    #[error("Archive manifest length cap exceeded ({manifest_len} bytes, cap {local_cap})")]
+    ArchiveManifestLenCapExceeded {
+        /// Manifest length declared by the archive header or computed
+        /// by the writer, in bytes.
+        manifest_len: u64,
+        /// Maximum manifest length accepted by local policy, in bytes.
+        local_cap: u32,
+    },
+    /// An entry path's UTF-8 byte length exceeds the configured
+    /// [`ArchiveLimits::max_path_bytes`](crate::ArchiveLimits) cap
+    /// (`FORMAT.md` §9.12). `path` is `None` when the cap fires on the
+    /// declared length before the path bytes have been parsed.
+    #[error(
+        "Archive path byte-length cap exceeded ({path_bytes} bytes, cap {local_cap}){}",
+        PathSuffix(path)
+    )]
+    ArchivePathBytesCapExceeded {
+        /// Declared or measured path length, in bytes.
+        path_bytes: u32,
+        /// Maximum path length accepted by local policy, in bytes.
+        local_cap: u32,
+        /// Offending entry path, sanitized for display, when available.
+        path: Option<String>,
+    },
+    /// An entry path's component depth exceeds the configured
+    /// [`ArchiveLimits::max_path_depth`](crate::ArchiveLimits) cap
+    /// (`FORMAT.md` §9.12).
+    #[error("Archive path depth cap exceeded ({depth} components, cap {local_cap}): {path}")]
+    ArchivePathDepthCapExceeded {
+        /// Component count of the offending path.
+        depth: u32,
+        /// Maximum path depth accepted by local policy.
+        local_cap: u32,
+        /// Offending entry path, sanitized for display.
+        path: String,
+    },
+    /// The archive-level extension region exceeds the configured
+    /// [`ArchiveLimits::max_archive_ext_bytes`](crate::ArchiveLimits)
+    /// cap (`FORMAT.md` §9.12).
+    #[error("Archive extension length cap exceeded ({ext_len} bytes, cap {local_cap})")]
+    ArchiveExtLenCapExceeded {
+        /// Declared archive-extension length, in bytes.
+        ext_len: u64,
+        /// Maximum archive-extension length accepted by local policy, in bytes.
+        local_cap: u32,
+    },
+    /// A per-entry extension region exceeds the configured
+    /// [`ArchiveLimits::max_entry_ext_bytes`](crate::ArchiveLimits) cap
+    /// (`FORMAT.md` §9.12). `path` is `None` when the cap fires on the
+    /// declared length before the entry's path has been parsed.
+    #[error(
+        "Archive entry extension length cap exceeded ({ext_len} bytes, cap {local_cap}){}",
+        PathSuffix(path)
+    )]
+    ArchiveEntryExtLenCapExceeded {
+        /// Declared entry-extension length, in bytes.
+        ext_len: u64,
+        /// Maximum per-entry extension length accepted by local policy, in bytes.
+        local_cap: u32,
+        /// Offending entry path, sanitized for display, when available.
+        path: Option<String>,
+    },
+    /// The summed per-entry extension regions exceed the configured
+    /// [`ArchiveLimits::max_total_entry_ext_bytes`](crate::ArchiveLimits)
+    /// cap (`FORMAT.md` §9.12).
+    #[error(
+        "Archive total entry-extension bytes cap exceeded ({total_ext_bytes} bytes, cap {local_cap})"
+    )]
+    ArchiveTotalEntryExtCapExceeded {
+        /// Running entry-extension total that crossed the cap, in bytes.
+        total_ext_bytes: u64,
+        /// Maximum summed entry-extension bytes accepted by local policy.
+        local_cap: u64,
+    },
 
     // ─── Internal invariants ─────────────────────────────────────────────
     /// A non-cryptographic invariant that should hold by construction did
@@ -1042,6 +1259,159 @@ mod tests {
         assert_eq!(
             StreamError::ChunkCountExceeded.to_string(),
             "Encrypted stream exceeds chunk-count cap"
+        );
+    }
+
+    /// Lock in the Display text of the archive defect and cap variants.
+    /// The path-carrying variants are deliberately not part of the
+    /// 64-char status-line budget: they exist to locate one bad entry
+    /// in a large archive, so the (sanitized, truncated) path is the
+    /// payload.
+    #[test]
+    fn archive_errors_display_exact_strings() {
+        assert_eq!(
+            CryptoError::MalformedArchive {
+                reason: "bad magic"
+            }
+            .to_string(),
+            "Malformed archive: bad magic"
+        );
+        assert_eq!(
+            CryptoError::UnsafeArchivePath {
+                path: "../etc/passwd".to_owned(),
+                reason: "forbidden component",
+            }
+            .to_string(),
+            "Unsafe archive path (forbidden component): ../etc/passwd"
+        );
+        assert_eq!(
+            CryptoError::InvalidArchiveTree {
+                path: "root/a.txt".to_owned(),
+                reason: "duplicate entry",
+            }
+            .to_string(),
+            "Invalid archive tree (duplicate entry): root/a.txt"
+        );
+        assert_eq!(
+            CryptoError::ArchiveEntryCountCapExceeded {
+                entry_count: 250_001,
+                local_cap: 250_000,
+            }
+            .to_string(),
+            "Archive entry-count cap exceeded (250001 entries, cap 250000)"
+        );
+        assert_eq!(
+            CryptoError::ArchiveTotalBytesCapExceeded {
+                total_bytes: 100,
+                local_cap: 99,
+            }
+            .to_string(),
+            "Archive total-bytes cap exceeded (100 bytes, cap 99)"
+        );
+        assert_eq!(
+            CryptoError::ArchiveManifestLenCapExceeded {
+                manifest_len: 100,
+                local_cap: 99,
+            }
+            .to_string(),
+            "Archive manifest length cap exceeded (100 bytes, cap 99)"
+        );
+        assert_eq!(
+            CryptoError::ArchivePathBytesCapExceeded {
+                path_bytes: 100,
+                local_cap: 99,
+                path: None,
+            }
+            .to_string(),
+            "Archive path byte-length cap exceeded (100 bytes, cap 99)"
+        );
+        assert_eq!(
+            CryptoError::ArchivePathBytesCapExceeded {
+                path_bytes: 100,
+                local_cap: 99,
+                path: Some("root/long".to_owned()),
+            }
+            .to_string(),
+            "Archive path byte-length cap exceeded (100 bytes, cap 99): root/long"
+        );
+        assert_eq!(
+            CryptoError::ArchivePathDepthCapExceeded {
+                depth: 65,
+                local_cap: 64,
+                path: "a/b".to_owned(),
+            }
+            .to_string(),
+            "Archive path depth cap exceeded (65 components, cap 64): a/b"
+        );
+        assert_eq!(
+            CryptoError::ArchiveExtLenCapExceeded {
+                ext_len: 100,
+                local_cap: 99,
+            }
+            .to_string(),
+            "Archive extension length cap exceeded (100 bytes, cap 99)"
+        );
+        assert_eq!(
+            CryptoError::ArchiveEntryExtLenCapExceeded {
+                ext_len: 100,
+                local_cap: 99,
+                path: None,
+            }
+            .to_string(),
+            "Archive entry extension length cap exceeded (100 bytes, cap 99)"
+        );
+        assert_eq!(
+            CryptoError::ArchiveTotalEntryExtCapExceeded {
+                total_ext_bytes: 100,
+                local_cap: 99,
+            }
+            .to_string(),
+            "Archive total entry-extension bytes cap exceeded (100 bytes, cap 99)"
+        );
+        assert_eq!(
+            CryptoError::PrivateKeyWrappedSecretCapExceeded {
+                wrapped_secret_len: 5000,
+                local_cap: 4096,
+            }
+            .to_string(),
+            "Private key wrapped-secret cap exceeded (5000 bytes, cap 4096)"
+        );
+    }
+
+    /// The display sanitizer passes printable ASCII through, escapes
+    /// control bytes and every non-ASCII character (including
+    /// direction-override code points), and truncates long input.
+    #[test]
+    fn sanitize_for_display_escapes_and_truncates() {
+        assert_eq!(
+            sanitize_for_display("plain path/file.txt"),
+            "plain path/file.txt"
+        );
+        assert_eq!(
+            sanitize_for_display("a\x1b]0;pwned\x07b"),
+            "a\\u{1b}]0;pwned\\u{7}b"
+        );
+        assert_eq!(sanitize_for_display("nul\0byte"), "nul\\u{0}byte");
+        assert_eq!(
+            sanitize_for_display("bidi\u{202e}gpj.txt"),
+            "bidi\\u{202e}gpj.txt"
+        );
+        assert_eq!(sanitize_for_display("caf\u{e9}"), "caf\\u{e9}");
+
+        let long: String = "x".repeat(UNTRUSTED_TEXT_DISPLAY_MAX + 10);
+        let rendered = sanitize_for_display(&long);
+        assert_eq!(
+            rendered.chars().count(),
+            UNTRUSTED_TEXT_DISPLAY_MAX + 1,
+            "64 kept chars plus the ellipsis"
+        );
+        assert!(rendered.ends_with('…'));
+
+        let exact: String = "y".repeat(UNTRUSTED_TEXT_DISPLAY_MAX);
+        assert_eq!(
+            sanitize_for_display(&exact),
+            exact,
+            "at-cap input is untouched"
         );
     }
 

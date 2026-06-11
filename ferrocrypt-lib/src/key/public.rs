@@ -36,7 +36,7 @@ use bech32::{Bech32, Checksum, Hrp};
 use sha3::{Digest, Sha3_256};
 
 use crate::CryptoError;
-use crate::error::{FormatDefect, UnsupportedVersion};
+use crate::error::{FormatDefect, UnsupportedVersion, sanitize_for_display};
 use crate::format::{
     KeypairSuite, KeypairVersionRejection, WRITER_KEYPAIR_SUITE,
     keypair_suite_from_public_key_version, keypair_suite_is_supported, read_u16_be, read_u32_be,
@@ -258,8 +258,16 @@ pub fn decode_recipient_string(
     // strings and mixed case, but NOT non-canonical 5-to-8 padding:
     // in `bech32` that check runs only on the segwit decode path, and
     // `byte_iter` silently drops the trailing bits. Enforced below.
-    let checked = CheckedHrpstring::new::<Bech32V1>(s)
-        .map_err(|_| CryptoError::InvalidInput(format!("Invalid recipient string: {s}")))?;
+    let checked = CheckedHrpstring::new::<Bech32V1>(s).map_err(|_| {
+        // The echo helps the user spot a typo, but the input is
+        // attacker-suppliable ("encrypt to me") and terminal-bound:
+        // sanitize so it cannot carry control bytes, and truncate so
+        // one bad string cannot flood the message.
+        CryptoError::InvalidInput(format!(
+            "Invalid recipient string: {}",
+            sanitize_for_display(s)
+        ))
+    })?;
     let hrp = checked.hrp();
     if hrp != RECIPIENT_HRP {
         return Err(CryptoError::InvalidInput(format!(
@@ -834,6 +842,25 @@ mod tests {
     /// public_key encoding is type_name-agnostic.
     fn x25519_key() -> [u8; 32] {
         [0x33u8; 32]
+    }
+
+    /// The rejected-input echo is sanitized: ASCII control bytes are
+    /// escaped and never reach the message raw, so a hostile recipient
+    /// string cannot carry terminal escape sequences.
+    #[test]
+    fn invalid_recipient_string_echo_is_sanitized() {
+        let err = decode_recipient_string(
+            "fcr1\u{1b}]0;spoof\u{7}",
+            RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT,
+        )
+        .unwrap_err();
+        match err {
+            CryptoError::InvalidInput(msg) => {
+                assert!(!msg.contains('\u{1b}'), "raw ESC must not appear: {msg:?}");
+                assert!(msg.contains("\\u{1b}"), "got: {msg}");
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
     }
 
     /// Pins the wire-version-to-suite mapping. Boundary cases:

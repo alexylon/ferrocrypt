@@ -358,9 +358,13 @@ fn writer_entry(
 /// Shared per-entry recording: increments the entry count, applies
 /// every cap [`enforce_per_entry_caps`] covers, sums into the
 /// manifest-length cap, optionally sums into the total-bytes cap (for
-/// file entries), and runs [`validate_fca_path`]. Used by the root
-/// entry and by both branches of the metadata-pass walk so every
-/// entry goes through one canonical sequence of checks.
+/// file entries), and runs [`validate_fca_path`]. Used for the
+/// directory-root entry and for every entry the directory walk
+/// discovers, so the whole directory tree shares one sequence of
+/// checks. A single-file root records its one entry inline (it has no
+/// walk); the writer-side [`serialize_manifest`] gate re-applies every
+/// cap before any byte is emitted, so a per-entry rule added here that
+/// a single-file root must also obey belongs in that gate too.
 fn record_entry(
     counters: &mut ArchiveCounters,
     fca_path_utf8: &str,

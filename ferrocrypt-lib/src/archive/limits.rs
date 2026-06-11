@@ -342,6 +342,11 @@ pub(super) const ARCHIVE_ENTRY_MODE_UNSUPPORTED: &str = "entry mode contains uns
 /// `archive::format` so the three arms cannot drift apart.
 pub(super) const ARCHIVE_TOTAL_BYTES_OVERFLOW: &str = "total file bytes overflow";
 
+/// Reason text for a serialized-manifest-length overflow, shared by
+/// the writer's running total in `archive::encode::record_entry` and
+/// the pre-allocation sum in `archive::format::checked_manifest_len`.
+pub(super) const ARCHIVE_MANIFEST_LEN_OVERFLOW: &str = "manifest length overflow";
+
 /// Reason text for the empty-entry-path rejection, shared by the
 /// declared-length check in `archive::format` and the path grammar in
 /// `archive::path`.

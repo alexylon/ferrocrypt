@@ -7,31 +7,33 @@
 //!
 //! The writer is two-pass:
 //!
-//! 1. **Metadata pass** — iteratively walks the source tree over
+//! 1. **Metadata pass** — opens the source root once. A single-file
+//!    root is opened with a no-follow, non-blocking open and its mode
+//!    and size are read from that handle. A directory root is opened
+//!    through its parent directory via `open_dir_nofollow` (with the
+//!    Windows reparse-point post-check), then walked iteratively over
 //!    `cap_std::fs::Dir::entries`, driven by a heap-backed stack of
 //!    pending directories with deferred child opens (live handles
 //!    track the depth of the tree, not its width, and deep nesting
-//!    cannot overflow the process stack). Builds a [`Manifest`] of
-//!    [`ArchiveEntry`]s with FCA-canonical paths, modes, sizes, and
-//!    source paths. Symlinks, FIFOs, sockets, devices, and Windows
-//!    reparse points are rejected inline. Entry-count, total-bytes,
-//!    depth, path-byte, and manifest-size caps are applied
-//!    progressively, and every path is routed through
-//!    [`validate_fca_path`] so the writer never emits a path its own
-//!    reader would refuse.
+//!    cannot overflow the process stack). The walk builds a
+//!    [`Manifest`] of [`ArchiveEntry`]s with FCA-canonical paths,
+//!    modes, sizes, and source paths. Symlinks, FIFOs, sockets,
+//!    devices, and Windows reparse points are rejected inline.
+//!    Entry-count, total-bytes, depth, path-byte, and manifest-size
+//!    caps are applied while the tree is walked, so an over-cap tree
+//!    is rejected without first holding every scanned entry in
+//!    memory, and every path is routed through [`validate_fca_path`]
+//!    so the writer never emits a path its own reader would refuse.
 //!
 //! 2. **Content pass** — for each file entry in canonical manifest
-//!    order, re-opens the source without following symlinks and
-//!    without blocking on a substituted FIFO: directory descendants
-//!    re-anchor through the directory capability held since the
-//!    metadata pass, then take a no-follow non-blocking leaf open;
-//!    single-file roots use a leaf-only `O_NOFOLLOW | O_NONBLOCK`
-//!    open on Unix, `FILE_FLAG_OPEN_REPARSE_POINT` plus a metadata
-//!    post-check on Windows, and a `symlink_metadata` + `File::open`
-//!    fallback on other targets. Then refreshes metadata from the
-//!    open handle, requires the source is still a regular file with
-//!    `len() == manifest size`, and streams exactly the declared
-//!    size via [`copy_exact_n`].
+//!    order, refreshes metadata from an open handle, requires the
+//!    source is still a regular file with `len() == manifest size`,
+//!    and streams exactly the declared size via [`copy_exact_n`]. A
+//!    single-file root streams from the handle held since the
+//!    metadata pass, so no component of the user-supplied path is
+//!    resolved a second time. Directory descendants re-anchor through
+//!    the directory capability held since the metadata pass, then
+//!    take a no-follow non-blocking leaf open.
 //!
 //! Between the two passes the source tree may change. FORMAT.md §9.10
 //! defines the response: shrink / type change / inaccessible →
@@ -51,18 +53,27 @@ use cap_std::fs::{Dir, OpenOptions};
 
 use crate::CryptoError;
 use crate::error::sanitize_for_display;
+use crate::fs::paths::parent_or_cwd;
 
 #[cfg(unix)]
 use super::format::PERMISSION_BITS_MASK;
-use super::format::{copy_exact_n, serialize_manifest, write_fca_header};
+use super::format::{checked_entry_wire_len, copy_exact_n, serialize_manifest, write_fca_header};
 use super::limits::{
-    ArchiveLimits, enforce_entry_count_cap, enforce_manifest_len_cap, enforce_per_entry_caps,
-    enforce_total_bytes_cap, entry_count_cap_error, manifest_len_cap_error,
+    ARCHIVE_MANIFEST_LEN_OVERFLOW, ArchiveLimits, enforce_entry_count_cap,
+    enforce_manifest_len_cap, enforce_per_entry_caps, enforce_total_bytes_cap,
+    entry_count_cap_error, manifest_len_cap_error,
 };
 use super::model::{ArchiveEntry, ArchiveEntryKind, Manifest};
 use super::path::{canonical_path_order, validate_fca_path};
 use super::platform;
 use super::tree::validate_manifest_tree;
+
+// The walker's safety nets are platform-specific: Unix has `(dev, ino)`
+// directory-cycle detection, Windows has reparse-point rejection. Any
+// other target would walk a cyclic source tree until a resource cap
+// fires, so refuse it at build time.
+#[cfg(not(any(unix, windows)))]
+compile_error!("The FCA archive writer supports only Unix and Windows targets");
 
 /// Default file mode for non-Unix platforms (rw-r--r--). FCA stores a
 /// Unix-style permission word; on Windows there is no rwx semantic to
@@ -204,8 +215,7 @@ fn reject_windows_reparse_point_cap(
 /// rejects it, and the flag has no effect on regular-file reads. On
 /// Windows uses `FILE_FLAG_OPEN_REPARSE_POINT` plus a metadata
 /// post-check so a racing symlink/junction replacement is rejected
-/// instead of followed. Other non-Unix targets fall back to a
-/// `symlink_metadata` pre-check followed by `File::open`.
+/// instead of followed.
 #[cfg(unix)]
 fn open_no_follow(path: &Path) -> Result<File, CryptoError> {
     use std::fs::OpenOptions;
@@ -244,13 +254,6 @@ fn open_no_follow(path: &Path) -> Result<File, CryptoError> {
     reject_windows_reparse_point(&opened_metadata, "Input", path)?;
     require_regular_file(&opened_metadata, "Input", path)?;
     Ok(file)
-}
-
-#[cfg(all(not(unix), not(windows)))]
-fn open_no_follow(path: &Path) -> Result<File, CryptoError> {
-    let metadata = fs::symlink_metadata(path)?;
-    require_regular_file(&metadata, "Input", path)?;
-    Ok(File::open(path)?)
 }
 
 /// Defense-in-depth at every open / re-open boundary: rejects a
@@ -306,17 +309,22 @@ pub(crate) fn validate_encrypt_input(input_path: &Path) -> Result<(), CryptoErro
     Ok(())
 }
 
-/// Running totals threaded through the recursive metadata-pass walk
-/// so caps can fire across the entire tree, not just per-call. The
-/// `seen_inodes` set on Unix detects directory hardlinks (HFS+ and
-/// some network filesystems permit them) so the writer rejects a
-/// pathological cycle instead of silently archiving the same content
-/// under multiple paths until one of the entry-count / total-bytes
-/// caps fires.
+/// Running totals threaded through the metadata-pass walk so caps can
+/// fire across the entire tree, not just per-call. The `seen_dirs`
+/// set on Unix detects directory hardlinks (HFS+ and some network
+/// filesystems permit them) so the writer rejects a pathological
+/// cycle instead of silently archiving the same content under
+/// multiple paths until one of the entry-count / total-bytes caps
+/// fires.
 #[derive(Debug, Default)]
 struct ArchiveCounters {
     entry_count: u32,
     total_bytes: u64,
+    /// Running serialized length of the manifest built so far. Checked
+    /// against `max_manifest_bytes` per entry so an over-cap tree is
+    /// rejected during the walk, before every scanned entry is
+    /// resident in memory.
+    manifest_len: u64,
     /// `(dev, ino)` of every directory visited so far. Unix-only
     /// because Windows does not expose stable directory inodes.
     #[cfg(unix)]
@@ -347,11 +355,11 @@ fn writer_entry(
 }
 
 /// Shared per-entry recording: increments the entry count, applies
-/// every cap [`enforce_per_entry_caps`] covers, optionally sums into
-/// the total-bytes cap (for file entries), and runs
-/// [`validate_fca_path`]. Used by both branches of the metadata-pass
-/// walk so the file-entry and directory-entry call sites have one
-/// canonical sequence of checks.
+/// every cap [`enforce_per_entry_caps`] covers, sums into the
+/// manifest-length cap, optionally sums into the total-bytes cap (for
+/// file entries), and runs [`validate_fca_path`]. Used by the root
+/// entry and by both branches of the metadata-pass walk so every
+/// entry goes through one canonical sequence of checks.
 fn record_entry(
     counters: &mut ArchiveCounters,
     fca_path_utf8: &str,
@@ -363,6 +371,18 @@ fn record_entry(
         .checked_add(1)
         .ok_or_else(|| CryptoError::InvalidInput("Archive entry-count overflow".to_string()))?;
     enforce_per_entry_caps(counters.entry_count, fca_path_utf8, limits)?;
+
+    // Writer entries carry no per-entry TLV bytes (FORMAT.md §9.13),
+    // so this entry's serialized length is the fixed size plus the
+    // path bytes. `serialize_manifest` re-checks the final sum through
+    // the same `enforce_manifest_len_cap` before any byte is emitted.
+    counters.manifest_len = checked_entry_wire_len(fca_path_utf8.len(), 0)
+        .and_then(|entry_len| counters.manifest_len.checked_add(entry_len as u64))
+        .ok_or(CryptoError::MalformedArchive {
+            reason: ARCHIVE_MANIFEST_LEN_OVERFLOW,
+        })?;
+    enforce_manifest_len_cap(counters.manifest_len, limits)?;
+
     if let Some(size) = file_size {
         enforce_total_bytes_cap(size, &mut counters.total_bytes, limits)?;
     }
@@ -410,14 +430,30 @@ fn size_changed_error(expected: u64, observed: u64, path_text: &str) -> CryptoEr
     ))
 }
 
+/// Source access captured by the metadata pass and reused by the
+/// content pass. Holding it across both passes is what makes the
+/// content pass immune to path swaps: a single-file root streams from
+/// the very handle its metadata came from, and directory descendants
+/// re-anchor through the directory capability instead of resolving
+/// the user-supplied path a second time.
+enum ArchiveSource {
+    /// Single-file root: the handle the metadata pass opened with
+    /// no-follow.
+    RootFile(File),
+    /// Directory root: the capability handle every per-entry re-open
+    /// walks from.
+    RootDir(Dir),
+}
+
 /// Builds a fully validated [`Manifest`] from the source tree under
-/// `input_path`. Single-file inputs produce a one-entry manifest with
+/// `input_path`, together with the [`ArchiveSource`] the content pass
+/// streams from. Single-file inputs produce a one-entry manifest with
 /// `root_is_file = true`; directory inputs produce a multi-entry
 /// manifest with `root_is_file = false`.
 fn build_manifest(
     input_path: &Path,
     limits: &ArchiveLimits,
-) -> Result<(Manifest, Option<Dir>), CryptoError> {
+) -> Result<(Manifest, ArchiveSource), CryptoError> {
     let metadata = fs::symlink_metadata(input_path)?;
     reject_windows_reparse_point(&metadata, "Input", input_path)?;
     let file_type = metadata.file_type();
@@ -443,12 +479,18 @@ fn build_manifest(
     validate_fca_path(&name_str, *limits)?;
 
     if file_type.is_file() {
-        // Single-file root: keeps the `std::fs` + `O_NOFOLLOW`-on-leaf
-        // path. A single-component input has no intermediate-directory
-        // TOCTOU surface to protect, so threading a cap-std capability
-        // here would be ceremony without value.
-        let mode = archive_file_mode(&metadata);
-        let size = metadata.len();
+        // Single-file root: open once and keep the handle for the
+        // content pass, so no component of the user-supplied path is
+        // resolved a second time and a leaf or ancestor swap between
+        // the passes cannot substitute the source. `open_no_follow`
+        // refuses a symlink leaf atomically; the type re-check below
+        // catches a FIFO swapped in after the lstat above.
+        let source = open_no_follow(input_path)?;
+        let handle_meta = source.metadata().map_err(CryptoError::Io)?;
+        require_regular_file(&handle_meta, "Input", input_path)?;
+
+        let mode = archive_file_mode(&handle_meta);
+        let size = handle_meta.len();
 
         let mut total_bytes = 0u64;
         enforce_total_bytes_cap(size, &mut total_bytes, limits)?;
@@ -468,40 +510,33 @@ fn build_manifest(
             root_is_file: true,
             root_mode: mode,
         };
-        Ok((manifest, None))
+        Ok((manifest, ArchiveSource::RootFile(source)))
     } else if file_type.is_dir() {
-        // Directory root: open the source tree through `cap_std::Dir`
-        // so every subsequent metadata read, file open, and directory
-        // descent is anchored to a capability handle. Intermediate
-        // directories cannot be replaced with symlinks between the
-        // metadata pass and the content pass — `walk_to_parent_readonly`
-        // re-walks each component via `open_dir_nofollow`. Closes the
-        // FORMAT.md §9.10 same-size-substitution surface that the
-        // old absolute-path open path explicitly documented.
-        let source_root = platform::open_anchor(input_path)?;
+        // Directory root: anchor the parent directory, then open the
+        // root itself with `open_dir_nofollow` plus the Windows
+        // reparse-point post-check. A symlink or junction swapped in
+        // at `input_path` after the lstat above fails this open
+        // instead of being followed (FORMAT.md §9.10 lists the
+        // input-root symlink and reparse point as MUST-reject). Every
+        // subsequent metadata read, file open, and directory descent
+        // is anchored to the returned capability handle, so no
+        // intermediate component can be replaced between the metadata
+        // pass and the content pass either.
+        let parent_anchor = platform::open_anchor(parent_or_cwd(input_path))?;
+        let source_root = platform::open_child_dir_nofollow(
+            &parent_anchor,
+            name,
+            platform::SYMLINK_IN_ARCHIVE_SOURCE,
+        )?;
 
-        // One `dir_metadata` syscall amortised across the reparse-point
-        // check (Windows), the mode read, and the cycle-detection
-        // seed (Unix). `dir_metadata` reads through the open `Dir`
-        // capability, so the result is atomic with the `open_anchor`
-        // — no race window between the path's stat and the capability
-        // we just acquired.
+        // One `dir_metadata` call reused for the Unix identity
+        // re-check, the cycle-detection seed, and the mode read.
         let source_root_meta = source_root.dir_metadata().map_err(CryptoError::Io)?;
 
-        // Defense-in-depth on Windows: `Dir::open_ambient_dir` does
-        // not refuse reparse points by default. The user-supplied path
-        // might resolve through a junction or mount point; reject here
-        // so the writer never archives content reached through one.
-        reject_windows_reparse_point_cap(&source_root_meta, "Input", name)?;
-
-        // On Unix, `open_anchor` follows symlinks (`open_ambient_dir`
-        // sets no `O_NOFOLLOW`), so the lstat pre-check above is not
-        // enough on its own: a symlink swapped in between that check
-        // and the open is followed silently. Comparing the opened
-        // handle's (dev, ino) against the pre-check closes the race —
-        // any swap, symlink or real directory, changes the identity
-        // pair. FORMAT.md §9.10 lists the input-root symlink as a
-        // MUST-reject.
+        // Defense-in-depth on Unix: the no-follow open already refuses
+        // a symlink at the leaf, but a real directory swapped in after
+        // the lstat pre-check still opens. Comparing the opened
+        // handle's (dev, ino) against the pre-check rejects any swap.
         #[cfg(unix)]
         {
             use cap_std::fs::MetadataExt as _;
@@ -517,6 +552,8 @@ fn build_manifest(
 
         let root_mode = archive_dir_mode_cap(&source_root_meta);
 
+        let mut counters = ArchiveCounters::default();
+        record_entry(&mut counters, &name_str, None, limits)?;
         let mut entries = vec![writer_entry(
             ArchiveEntryKind::Directory,
             name_str.clone(),
@@ -527,12 +564,6 @@ fn build_manifest(
             // never read; populated for shape consistency.
             PathBuf::new(),
         )];
-        let mut counters = ArchiveCounters {
-            entry_count: 1,
-            total_bytes: 0,
-            #[cfg(unix)]
-            seen_dirs: std::collections::HashSet::new(),
-        };
 
         // Seed cycle detection with the source root's own (dev, ino)
         // so a hardlinked subdirectory pointing back to it is rejected.
@@ -562,7 +593,7 @@ fn build_manifest(
             root_is_file: false,
             root_mode,
         };
-        Ok((manifest, Some(source_root)))
+        Ok((manifest, ArchiveSource::RootDir(source_root)))
     } else {
         Err(CryptoError::InvalidInput(format!(
             "Unsupported file type: {}",
@@ -807,43 +838,46 @@ fn sort_entries_canonically(entries: &mut [ArchiveEntry]) {
     entries.sort_by(|a, b| canonical_path_order(&a.path_utf8, &b.path_utf8));
 }
 
-/// Streams one file entry's contents into `writer`. Dispatches based
-/// on whether `source_root` was captured (directory input) or not
-/// (single-file input).
+/// Streams one file entry's contents into `writer`. Dispatches on the
+/// [`ArchiveSource`] kind captured by the metadata pass.
 ///
 /// FORMAT.md §9.10: on shrink, type change, or pre-copy growth — fail.
 /// On growth during the copy after the fresh metadata check — copy
 /// exactly the declared size, keeping the archive self-consistent.
 fn stream_source_file<W: Write>(
     entry: &ArchiveEntry,
-    source_root: Option<&Dir>,
+    source: &ArchiveSource,
     writer: &mut W,
 ) -> Result<(), CryptoError> {
-    let source = entry
+    let source_path = entry
         .source_path
         .as_ref()
         .ok_or(CryptoError::InternalInvariant(
             "Manifest entry missing source_path during content streaming",
         ))?;
 
-    match source_root {
-        None => stream_single_file_root(entry, source, writer),
-        Some(root) => stream_directory_descendant(root, entry, source, writer),
+    match source {
+        ArchiveSource::RootFile(file) => stream_single_file_root(entry, file, source_path, writer),
+        ArchiveSource::RootDir(root) => {
+            stream_directory_descendant(root, entry, source_path, writer)
+        }
     }
 }
 
-/// Single-file root content stream: opens the absolute source path
-/// with leaf-only `O_NOFOLLOW` on Unix or `FILE_FLAG_OPEN_REPARSE_POINT`
-/// plus a post-check on Windows. A single-component input has no
-/// intermediate-directory TOCTOU surface to protect.
+/// Single-file root content stream: reads from the handle held since
+/// the metadata pass, so no path is resolved again and a leaf or
+/// ancestor swap between the passes cannot substitute the source. The
+/// only mutation still reachable is through the file itself (same
+/// inode); the fresh length check below catches it. The type re-check
+/// is defense-in-depth at this re-use boundary. `source` is the
+/// original input path, used for diagnostics only.
 fn stream_single_file_root<W: Write>(
     entry: &ArchiveEntry,
+    file: &File,
     source: &Path,
     writer: &mut W,
 ) -> Result<(), CryptoError> {
-    let mut file = open_no_follow(source)?;
     let metadata = file.metadata().map_err(CryptoError::Io)?;
-    reject_windows_reparse_point(&metadata, "Source", source)?;
     require_regular_file(&metadata, "Source", source)?;
     if metadata.len() != entry.size {
         return Err(size_changed_error(
@@ -853,7 +887,8 @@ fn stream_single_file_root<W: Write>(
         ));
     }
 
-    copy_exact_n(&mut file, writer, entry.size, source_shrank_error)
+    let mut reader = file;
+    copy_exact_n(&mut reader, writer, entry.size, source_shrank_error)
 }
 
 /// Error for a source file that hit EOF before its manifest-declared
@@ -928,11 +963,11 @@ pub(crate) fn archive<W: Write>(
     // get re-validated here.
     validate_encrypt_input(input_path)?;
 
-    // Pass 1: metadata-only manifest. For directory inputs the
-    // returned `Dir` capability handle is held across both passes
-    // so the content pass can re-anchor each per-entry open without
-    // resolving the source path through the kernel a second time.
-    let (manifest, source_root) = build_manifest(input_path, &limits)?;
+    // Pass 1: metadata-only manifest. The returned `ArchiveSource`
+    // (open file handle or directory capability) is held across both
+    // passes so the content pass never resolves the source path
+    // through the kernel a second time.
+    let (manifest, source) = build_manifest(input_path, &limits)?;
 
     // Defense-in-depth: a bug in walk_directory would surface here
     // rather than producing a malformed archive.
@@ -966,13 +1001,11 @@ pub(crate) fn archive<W: Write>(
     )?;
     writer.write_all(&manifest_bytes).map_err(CryptoError::Io)?;
 
-    // Pass 2: stream file contents in canonical manifest order.
-    // `source_root` is `Some` for directory inputs (cap-std anchored
-    // re-open per entry) and `None` for single-file inputs (leaf-only
-    // `O_NOFOLLOW` open suffices — no intermediate directory surface).
+    // Pass 2: stream file contents in canonical manifest order, from
+    // the handle or capability captured by pass 1.
     for entry in &manifest.entries {
         if entry.kind == ArchiveEntryKind::File {
-            stream_source_file(entry, source_root.as_ref(), &mut writer)?;
+            stream_source_file(entry, &source, &mut writer)?;
         }
     }
 
@@ -1030,7 +1063,7 @@ mod tests {
         )
         .expect("lower the NOFILE soft limit");
 
-        let (manifest, _source_root) =
+        let (manifest, _source) =
             build_manifest(&root, &ArchiveLimits::default()).expect("wide tree must walk");
         assert_eq!(manifest.entries.len(), 201, "root + 200 subdirectories");
     }
@@ -1740,6 +1773,38 @@ mod tests {
         assert!(format!("{err}").contains("Input is a symlink"));
     }
 
+    /// A symlinked directory given with a trailing slash (`link/`)
+    /// rejects. With the trailing slash, `lstat` follows the link and
+    /// reports a directory, so the pre-checks pass — the no-follow
+    /// source-root open is what refuses it.
+    #[cfg(unix)]
+    #[test]
+    fn rejects_root_symlink_to_directory_with_trailing_slash() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = tmp.path().join("real_dir");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("inside.txt"), b"data").unwrap();
+        let link = tmp.path().join("link_dir");
+        symlink(&target, &link).unwrap();
+
+        let mut link_with_slash = link.into_os_string();
+        link_with_slash.push("/");
+
+        let mut buf = Vec::new();
+        let err = archive(
+            Path::new(&link_with_slash),
+            &mut buf,
+            ArchiveLimits::default(),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err}").contains(platform::SYMLINK_IN_ARCHIVE_SOURCE),
+            "expected symlink rejection, got: {err}",
+        );
+    }
+
     /// Source filename with non-UTF-8 bytes (built via raw `OsString`
     /// from invalid UTF-8 byte sequence) rejects with the typed
     /// "not valid UTF-8" diagnostic. Covers the §16 "Non-UTF-8 host
@@ -1774,11 +1839,9 @@ mod tests {
     }
 
     /// FORMAT.md §9.10: a source file shrinking between metadata pass
-    /// and content pass MUST fail. We can't shrink a real file mid-archive
-    /// race-free, so this test exercises the size-check directly via
-    /// `stream_source_file` with a pre-built `ArchiveEntry` whose
-    /// recorded size doesn't match the file on disk. Single-file root
-    /// path (`source_root = None`).
+    /// and content pass MUST fail. The single-file content pass reads
+    /// from the held handle, so the mismatch is injected by recording
+    /// a wrong size in the entry rather than by racing the file.
     #[test]
     fn stream_source_file_rejects_size_mismatch() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1787,10 +1850,11 @@ mod tests {
 
         // 9999 ≠ actual file size → exercises the size-mismatch arm.
         let mut entry = make_entry("real.txt", ArchiveEntryKind::File, 9999, 0o644);
-        entry.source_path = Some(path);
+        entry.source_path = Some(path.clone());
+        let source = ArchiveSource::RootFile(open_no_follow(&path).unwrap());
 
         let mut buf = Vec::new();
-        let err = stream_source_file(&entry, None, &mut buf).unwrap_err();
+        let err = stream_source_file(&entry, &source, &mut buf).unwrap_err();
         assert!(format!("{err}").contains("size changed"));
     }
 
@@ -1821,7 +1885,7 @@ mod tests {
         // Open the source root capability BEFORE the swap so the
         // capability is the same one a real archive() invocation
         // would hold across the metadata and content passes.
-        let source_root = platform::open_anchor(&src_root).unwrap();
+        let source = ArchiveSource::RootDir(platform::open_anchor(&src_root).unwrap());
 
         // Build the entry pointing at the original (good) location.
         let mut entry = make_entry("source/a/b/file.txt", ArchiveEntryKind::File, 7, 0o644);
@@ -1839,7 +1903,7 @@ mod tests {
         symlink(&attacker, src_root.join("a").join("b")).unwrap();
 
         let mut buf = Vec::new();
-        let err = stream_source_file(&entry, Some(&source_root), &mut buf).unwrap_err();
+        let err = stream_source_file(&entry, &source, &mut buf).unwrap_err();
         // Encode-side symlink rejection from `walk_to_parent_readonly`
         // routes through `platform::classify_open_failure` with the
         // `SYMLINK_IN_ARCHIVE_SOURCE` label.
@@ -1863,16 +1927,17 @@ mod tests {
     }
 
     /// A FIFO swapped in for a single-file root between the metadata
-    /// and content passes is rejected by the post-open type check.
-    /// Without `O_NONBLOCK` on the content-pass re-open, this test
-    /// would hang inside `open(2)` waiting for a FIFO writer.
+    /// and content passes has no effect: the content pass reads from
+    /// the handle held since the metadata pass, never from the path
+    /// the FIFO now occupies.
     #[cfg(unix)]
     #[test]
-    fn stream_source_file_rejects_fifo_swapped_for_file_root() {
+    fn held_handle_ignores_fifo_swapped_for_file_root() {
         let tmp = tempfile::TempDir::new().unwrap();
         let file = tmp.path().join("data.bin");
         fs::write(&file, b"trusted").unwrap();
 
+        let source = ArchiveSource::RootFile(open_no_follow(&file).unwrap());
         let mut entry = make_entry("data.bin", ArchiveEntryKind::File, 7, 0o644);
         entry.source_path = Some(file.clone());
 
@@ -1880,10 +1945,62 @@ mod tests {
         make_fifo(&file);
 
         let mut buf = Vec::new();
-        let err = stream_source_file(&entry, None, &mut buf).unwrap_err();
+        stream_source_file(&entry, &source, &mut buf).unwrap();
+        assert_eq!(buf, b"trusted");
+    }
+
+    /// Single-file mirror of
+    /// [`stream_source_file_rejects_intermediate_symlink_substitution`]:
+    /// replacing an ancestor directory of the input path with a
+    /// symlink to an attacker-controlled tree between the passes must
+    /// not change what is archived. The held handle keeps the content
+    /// pass on the original file, so the same-size attacker copy — a
+    /// swap no size check can catch — is never read.
+    #[cfg(unix)]
+    #[test]
+    fn held_handle_streams_original_after_ancestor_swap() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src_root = tmp.path().join("source");
+        fs::create_dir_all(src_root.join("a").join("b")).unwrap();
+        let input = src_root.join("a").join("b").join("file.txt");
+        fs::write(&input, b"trusted").unwrap();
+
+        // Metadata pass: open and hold the handle.
+        let source = ArchiveSource::RootFile(open_no_follow(&input).unwrap());
+        let mut entry = make_entry("file.txt", ArchiveEntryKind::File, 7, 0o644);
+        entry.source_path = Some(input.clone());
+
+        // Swap `a/b` for a symlink to a sibling holding a same-size
+        // attacker file. A path-based re-open would resolve through
+        // the symlink and pass the size check.
+        let attacker = tmp.path().join("attacker");
+        fs::create_dir(&attacker).unwrap();
+        fs::write(attacker.join("file.txt"), b"hostile").unwrap();
+        fs::remove_dir_all(src_root.join("a").join("b")).unwrap();
+        symlink(&attacker, src_root.join("a").join("b")).unwrap();
+
+        let mut buf = Vec::new();
+        stream_source_file(&entry, &source, &mut buf).unwrap();
+        assert_eq!(buf, b"trusted", "content must come from the held handle");
+    }
+
+    /// A FIFO as the encrypt input is rejected up front, before any
+    /// archive bytes are produced. The lstat-based check never opens
+    /// the FIFO, so nothing can block.
+    #[cfg(unix)]
+    #[test]
+    fn rejects_fifo_input_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let fifo = tmp.path().join("pipe.bin");
+        make_fifo(&fifo);
+
+        let mut buf = Vec::new();
+        let err = archive(&fifo, &mut buf, ArchiveLimits::default()).unwrap_err();
         assert!(
-            format!("{err}").contains("no longer a regular file"),
-            "expected regular-file rejection, got: {err}"
+            format!("{err}").contains("Unsupported file type"),
+            "expected unsupported-type rejection, got: {err}"
         );
     }
 
@@ -1898,7 +2015,7 @@ mod tests {
         fs::create_dir_all(&src_root).unwrap();
         fs::write(src_root.join("file.txt"), b"trusted").unwrap();
 
-        let source_root = platform::open_anchor(&src_root).unwrap();
+        let source = ArchiveSource::RootDir(platform::open_anchor(&src_root).unwrap());
 
         let mut entry = make_entry("source/file.txt", ArchiveEntryKind::File, 7, 0o644);
         entry.source_path = Some(PathBuf::from("file.txt"));
@@ -1907,10 +2024,63 @@ mod tests {
         make_fifo(&src_root.join("file.txt"));
 
         let mut buf = Vec::new();
-        let err = stream_source_file(&entry, Some(&source_root), &mut buf).unwrap_err();
+        let err = stream_source_file(&entry, &source, &mut buf).unwrap_err();
         assert!(
             format!("{err}").contains("no longer a regular file"),
             "expected regular-file rejection, got: {err}"
         );
+    }
+
+    // -- Manifest-size cap during the walk ---------------------------------
+
+    /// The manifest-size cap fires while the tree is walked: an entry
+    /// recorded after the running serialized length crosses the cap is
+    /// rejected, so writer memory is bounded near the cap instead of
+    /// by the whole tree.
+    #[test]
+    fn record_entry_enforces_manifest_len_cap_during_walk() {
+        use crate::archive::format::FCA_ENTRY_FIXED_SIZE;
+
+        // Cap sized for exactly two single-byte-path entries.
+        let one_entry = (FCA_ENTRY_FIXED_SIZE + 1) as u32;
+        let limits = ArchiveLimits::default().with_max_manifest_bytes(2 * one_entry);
+
+        let mut counters = ArchiveCounters::default();
+        record_entry(&mut counters, "a", None, &limits).unwrap();
+        record_entry(&mut counters, "b", None, &limits).unwrap();
+        let err = record_entry(&mut counters, "c", None, &limits).unwrap_err();
+        assert!(matches!(
+            err,
+            CryptoError::ArchiveManifestLenCapExceeded { .. }
+        ));
+    }
+
+    /// End-to-end: a tree whose manifest would exceed the cap rejects
+    /// with the typed cap error and emits no archive bytes.
+    #[test]
+    fn rejects_tree_above_manifest_len_cap() {
+        use crate::archive::format::FCA_ENTRY_FIXED_SIZE;
+
+        let src = tempfile::TempDir::new().unwrap();
+        let dir = src.path().join("d");
+        fs::create_dir(&dir).unwrap();
+        for i in 0..4 {
+            fs::write(dir.join(format!("f{i}.txt")), b"x").unwrap();
+        }
+
+        // Room for the root entry and two children; the third child
+        // crosses the cap mid-walk.
+        let root_entry = FCA_ENTRY_FIXED_SIZE + "d".len();
+        let child_entry = FCA_ENTRY_FIXED_SIZE + "d/f0.txt".len();
+        let cap = (root_entry + 2 * child_entry) as u32;
+        let limits = ArchiveLimits::default().with_max_manifest_bytes(cap);
+
+        let mut buf = Vec::new();
+        let err = archive(&dir, &mut buf, limits).unwrap_err();
+        assert!(matches!(
+            err,
+            CryptoError::ArchiveManifestLenCapExceeded { .. }
+        ));
+        assert!(buf.is_empty(), "writer must not emit bytes when caps fail");
     }
 }

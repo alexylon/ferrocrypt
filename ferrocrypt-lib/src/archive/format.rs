@@ -13,10 +13,10 @@ use crate::crypto::tlv::validate_no_known_critical;
 use crate::error::FormatDefect;
 
 use super::limits::{
-    ARCHIVE_ENTRY_MODE_UNSUPPORTED, ARCHIVE_PATH_EMPTY, ARCHIVE_TOTAL_BYTES_OVERFLOW,
-    ArchiveLimits, enforce_archive_ext_cap, enforce_entry_count_cap, enforce_entry_ext_cap,
-    enforce_manifest_len_cap, enforce_path_bytes_cap, enforce_total_entry_ext_cap,
-    enforce_total_plaintext_bytes_cap,
+    ARCHIVE_ENTRY_MODE_UNSUPPORTED, ARCHIVE_MANIFEST_LEN_OVERFLOW, ARCHIVE_PATH_EMPTY,
+    ARCHIVE_TOTAL_BYTES_OVERFLOW, ArchiveLimits, enforce_archive_ext_cap, enforce_entry_count_cap,
+    enforce_entry_ext_cap, enforce_manifest_len_cap, enforce_path_bytes_cap,
+    enforce_total_entry_ext_cap, enforce_total_plaintext_bytes_cap,
 };
 use super::model::{ArchiveEntry, ArchiveEntryKind, FcaHeader, Manifest};
 use super::path::validate_fca_path;
@@ -349,6 +349,17 @@ pub fn parse_fca_header<R: Read>(
     })
 }
 
+/// Serialized byte length of one manifest entry: the fixed entry
+/// header plus the path bytes plus the per-entry TLV region. Returns
+/// `None` on arithmetic overflow. Shared by the writer's running
+/// total in `encode::record_entry` and by [`checked_manifest_len`]
+/// so the two sites cannot disagree on the formula.
+pub(super) fn checked_entry_wire_len(path_len: usize, entry_ext_len: usize) -> Option<usize> {
+    FCA_ENTRY_FIXED_SIZE
+        .checked_add(path_len)?
+        .checked_add(entry_ext_len)
+}
+
 /// Pre-computes the serialized manifest length with checked
 /// arithmetic before any allocation, validating per-entry mode and
 /// path-byte caps along the way. Caller invokes this BEFORE
@@ -383,12 +394,10 @@ pub(crate) fn checked_manifest_len(
         // will reject" invariant.
         validate_entry_ext_tlv(&entry.entry_ext, &limits)?;
 
-        len = len
-            .checked_add(FCA_ENTRY_FIXED_SIZE)
-            .and_then(|n| n.checked_add(path_len))
-            .and_then(|n| n.checked_add(entry_ext_len))
+        len = checked_entry_wire_len(path_len, entry_ext_len)
+            .and_then(|entry_len| len.checked_add(entry_len))
             .ok_or(CryptoError::MalformedArchive {
-                reason: "manifest length overflow",
+                reason: ARCHIVE_MANIFEST_LEN_OVERFLOW,
             })?;
 
         enforce_manifest_len_cap(len as u64, &limits)?;

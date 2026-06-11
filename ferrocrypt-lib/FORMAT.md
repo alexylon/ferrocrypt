@@ -1398,8 +1398,9 @@ On Unix, the stored mode is `metadata.permissions().mode() & 0o777`. On non-Unix
 platforms, regular-file entries use `0o644` and directory entries use `0o755`.
 
 A source tree may change between the metadata pass and the content-streaming
-pass. When streaming each file, the writer MUST reopen the source
-no-follow/reparse-safe where supported, fetch fresh metadata from the open
+pass. When streaming each file, the writer MUST either stream from a handle held
+open since the metadata pass or reopen the source no-follow/reparse-safe where
+supported. In both cases the writer MUST fetch fresh metadata from the open
 handle, require that the object is still a regular file, require that its current
 length equals the manifest size, and copy exactly the manifest size. Shrink,
 type change, pre-copy growth, or inaccessibility MUST fail. If a source file

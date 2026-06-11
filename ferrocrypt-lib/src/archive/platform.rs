@@ -97,23 +97,24 @@ pub(crate) fn open_anchor(path: &Path) -> Result<Dir, CryptoError> {
     Dir::open_ambient_dir(path, ambient_authority()).map_err(CryptoError::Io)
 }
 
-/// Windows-only post-condition for a successful directory open inside
-/// the extraction sandbox. cap-fs-ext's `open_dir_nofollow` uses
+/// Windows-only post-condition for a successful directory open.
+/// cap-fs-ext's `open_dir_nofollow` uses
 /// `FILE_FLAG_OPEN_REPARSE_POINT` and then rejects entries whose
 /// `is_symlink()` is true — but `is_symlink()` returns `false` for
 /// NTFS junctions / mount points (`IO_REPARSE_TAG_MOUNT_POINT`).
 /// Without this post-check, an attacker who plants a junction inside
-/// `.incomplete/` would redirect extraction writes through it.
+/// `.incomplete/` (or inside the writer's source tree) would redirect
+/// the operation through it.
 ///
 /// `FILE_ATTRIBUTE_REPARSE_POINT` (0x400, defined in `WinNT.h`) is
 /// set on EVERY reparse point regardless of tag, so the bitmask check
 /// rejects symlinks, junctions, mount points, and any future tag
 /// uniformly.
 #[cfg(windows)]
-fn reject_reparse_point(dir: &Dir, name: &OsStr) -> Result<(), CryptoError> {
+fn reject_reparse_point(dir: &Dir, name: &OsStr, label: &str) -> Result<(), CryptoError> {
     use cap_std::fs::MetadataExt;
     let meta = dir.dir_metadata().map_err(CryptoError::Io)?;
-    reject_reparse_attributes(meta.file_attributes(), name)
+    reject_reparse_attributes(meta.file_attributes(), name, label)
 }
 
 /// Single source of truth for the "is this entry a reparse point?"
@@ -121,12 +122,18 @@ fn reject_reparse_point(dir: &Dir, name: &OsStr) -> Result<(), CryptoError> {
 /// [`finalize_file_open`] (regular-file handles). Takes the already-
 /// extracted `file_attributes` word so the helper stays type-agnostic
 /// — `cap_std::fs::Dir` and `cap_std::fs::File` expose attributes
-/// through different methods (`dir_metadata` vs `metadata`).
+/// through different methods (`dir_metadata` vs `metadata`). `label`
+/// is the caller's side ([`SYMLINK_IN_EXTRACTION_PATH`] or
+/// [`SYMLINK_IN_ARCHIVE_SOURCE`]).
 #[cfg(windows)]
-fn reject_reparse_attributes(file_attributes: u32, name: &OsStr) -> Result<(), CryptoError> {
+fn reject_reparse_attributes(
+    file_attributes: u32,
+    name: &OsStr,
+    label: &str,
+) -> Result<(), CryptoError> {
     if file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(CryptoError::InvalidInput(format!(
-            "{SYMLINK_IN_EXTRACTION_PATH}: {}",
+            "{label}: {}",
             sanitize_for_display(&name.to_string_lossy())
         )));
     }
@@ -134,12 +141,13 @@ fn reject_reparse_attributes(file_attributes: u32, name: &OsStr) -> Result<(), C
 }
 
 /// Post-open finalize step. On Windows runs the reparse-point bitmask
-/// check; on Unix is a no-op (cap-fs-ext's `open_dir_nofollow` plus
-/// the kernel's symlink semantics already give the equivalent
-/// invariant — there's no separate "reparse point" concept).
-fn finalize_dir_open(dir: Dir, _name: &OsStr) -> Result<Dir, CryptoError> {
+/// check with the caller's diagnostic label; on Unix is a no-op
+/// (cap-fs-ext's `open_dir_nofollow` plus the kernel's symlink
+/// semantics already give the equivalent invariant — there's no
+/// separate "reparse point" concept).
+fn finalize_dir_open(dir: Dir, _name: &OsStr, _label: &str) -> Result<Dir, CryptoError> {
     #[cfg(windows)]
-    reject_reparse_point(&dir, _name)?;
+    reject_reparse_point(&dir, _name, _label)?;
     Ok(dir)
 }
 
@@ -177,6 +185,29 @@ pub(super) fn classify_open_failure(
     CryptoError::Io(e)
 }
 
+/// Opens an existing directory `name` under `parent` with no-follow
+/// plus the Windows reparse-point post-check. The single open step
+/// shared by the per-component walks ([`walk_to_parent_readonly`],
+/// [`open_dir_at_rel`]) and the writer's source-root open. A symlink
+/// at `name` fails with the labelled diagnostic; on Windows a
+/// junction or mount point fails via [`finalize_dir_open`].
+pub(crate) fn open_child_dir_nofollow(
+    parent: &Dir,
+    name: &OsStr,
+    label: &str,
+) -> Result<Dir, CryptoError> {
+    let dir = parent.open_dir_nofollow(name).map_err(|e| {
+        classify_open_failure(
+            parent,
+            name,
+            e,
+            label,
+            &Path::new(name).display().to_string(),
+        )
+    })?;
+    finalize_dir_open(dir, name, label)
+}
+
 /// Ensures `name` exists as a directory under `parent`, returning a
 /// fresh handle to it. Opens with no-follow first; on `NotFound`
 /// creates and re-opens. A symlink at that name aborts with the typed
@@ -184,7 +215,7 @@ pub(super) fn classify_open_failure(
 /// the name fails the same way via [`finalize_dir_open`].
 pub(crate) fn ensure_dir(parent: &Dir, name: &OsStr) -> Result<Dir, CryptoError> {
     match parent.open_dir_nofollow(name) {
-        Ok(dir) => finalize_dir_open(dir, name),
+        Ok(dir) => finalize_dir_open(dir, name, SYMLINK_IN_EXTRACTION_PATH),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             // Create, re-open via no-follow as a TOCTOU race detector,
             // and apply the initial permissive mode by handle. If
@@ -230,7 +261,7 @@ fn create_dir_with_default_mode(parent: &Dir, name: &OsStr) -> Result<Dir, Crypt
             &Path::new(name).display().to_string(),
         )
     })?;
-    finalize_dir_open(dir, name)
+    finalize_dir_open(dir, name, SYMLINK_IN_EXTRACTION_PATH)
 }
 
 /// Atomic mkdir-with-mode on Unix; plain mkdir on non-Unix targets.
@@ -322,16 +353,7 @@ pub(crate) fn walk_to_parent_readonly(
     let mut cur = root.try_clone().map_err(CryptoError::Io)?;
     for component in components {
         let name = normal_component(component, rel)?;
-        let opened = cur.open_dir_nofollow(name).map_err(|e| {
-            classify_open_failure(
-                &cur,
-                name,
-                e,
-                SYMLINK_IN_ARCHIVE_SOURCE,
-                &Path::new(name).display().to_string(),
-            )
-        })?;
-        cur = finalize_dir_open(opened, name)?;
+        cur = open_child_dir_nofollow(&cur, name, SYMLINK_IN_ARCHIVE_SOURCE)?;
     }
     Ok((cur, final_name))
 }
@@ -355,18 +377,7 @@ pub(crate) fn open_dir_at_rel(root: &Dir, rel: &Path) -> Result<Dir, CryptoError
     let mut cur = root.try_clone().map_err(CryptoError::Io)?;
     for component in rel.components() {
         let name = normal_component(component, rel)?;
-        let opened = cur.open_dir_nofollow(name).map_err(|e| {
-            // `cur` is the parent at this step; we reuse it for the
-            // diagnostic post-mortem.
-            classify_open_failure(
-                &cur,
-                name,
-                e,
-                SYMLINK_IN_EXTRACTION_PATH,
-                &Path::new(name).display().to_string(),
-            )
-        })?;
-        cur = finalize_dir_open(opened, name)?;
+        cur = open_child_dir_nofollow(&cur, name, SYMLINK_IN_EXTRACTION_PATH)?;
     }
     Ok(cur)
 }
@@ -404,7 +415,7 @@ pub(crate) fn open_file_nofollow(parent: &Dir, name: &OsStr) -> Result<File, Cry
 fn finalize_file_open(file: File, name: &OsStr) -> Result<File, CryptoError> {
     use cap_std::fs::MetadataExt;
     let meta = file.metadata().map_err(CryptoError::Io)?;
-    reject_reparse_attributes(meta.file_attributes(), name)?;
+    reject_reparse_attributes(meta.file_attributes(), name, SYMLINK_IN_EXTRACTION_PATH)?;
     Ok(file)
 }
 
@@ -520,6 +531,26 @@ mod tests {
     }
 
     // ── in-sandbox symlink scenarios ────────
+
+    /// `open_child_dir_nofollow` is also the open step the writer uses
+    /// for its source root. A symlink at the name must reject with the
+    /// caller-supplied encode-side label rather than being followed.
+    #[cfg(unix)]
+    #[test]
+    fn open_child_dir_nofollow_rejects_symlink_with_archive_label() {
+        use std::os::unix::fs as unix_fs;
+        let tmp = tempfile::TempDir::new().unwrap();
+        fs::create_dir(tmp.path().join("real")).unwrap();
+        unix_fs::symlink("real", tmp.path().join("link")).unwrap();
+
+        let parent = open_anchor(tmp.path()).unwrap();
+        let err = open_child_dir_nofollow(&parent, OsStr::new("link"), SYMLINK_IN_ARCHIVE_SOURCE)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Symlink in archive source"),
+            "expected encode-side symlink diagnostic, got: {err}"
+        );
+    }
 
     /// In-sandbox relative symlink: hardened helper must reject.
     /// Plain `Dir::open_dir` would FOLLOW this (capability-confined

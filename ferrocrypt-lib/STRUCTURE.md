@@ -836,7 +836,7 @@ The reader pipeline matches `FORMAT.md` §9.11. Steps 1–8 MUST complete before
 9. open `output_dir` as a `cap-std` directory handle;
 10. reject pre-existing `.incomplete` output at first create;
 11. create `{root}.incomplete` (file or directory);
-12. stream file contents in manifest order via `copy_exact_n`;
+12. stream file contents in manifest order via `copy_exact_n`, syncing each staged file to stable storage so promotion never makes unsynced content visible under the final name;
 13. verify archive EOF (no trailing bytes);
 14. apply descendant directory modes deepest-first;
 15. promote `{root}.incomplete` to `{root}` via no-clobber rename;

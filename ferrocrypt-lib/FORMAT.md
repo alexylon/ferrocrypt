@@ -1457,6 +1457,11 @@ Readers MUST process FCA archives in this order:
 
 Steps 1 through 8 MUST complete before any filesystem output is created.
 
+Readers SHOULD sync staged file contents to stable storage before step 15.
+After promotion the output exists under its final name with no `.incomplete`
+marker, so content that was never flushed could otherwise surface truncated
+after a crash while appearing complete.
+
 Extraction uses staged output:
 
 ```text

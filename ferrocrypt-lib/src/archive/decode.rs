@@ -35,8 +35,10 @@
 //! 17. return the final output path
 //!
 //! Steps 1–8 MUST complete before any filesystem output is created.
-//! On error before promotion, the [`IncompleteOutputPolicy`] selects
-//! whether the staged `.incomplete` working tree is removed
+//! Staged file contents are synced to stable storage before step 15,
+//! so promotion never makes unsynced content visible under the final
+//! name. On error before promotion, the [`IncompleteOutputPolicy`]
+//! selects whether the staged `.incomplete` working tree is removed
 //! (`DeleteOnError`, default) or retained (`RetainOnError`).
 
 use std::ffi::{OsStr, OsString};
@@ -51,7 +53,7 @@ use crate::CryptoError;
 use crate::crypto::stream::read_uninterrupted;
 use crate::error::sanitize_for_display;
 use crate::fs::atomic::{promote_single_file_no_clobber, rename_no_clobber};
-use crate::fs::paths::{INCOMPLETE_SUFFIX, reject_occupied};
+use crate::fs::paths::{INCOMPLETE_SUFFIX, path_occupied};
 
 use super::IncompleteOutputPolicy;
 use super::format::{
@@ -114,10 +116,15 @@ fn unarchive_inner<R: Read>(
     // the manifest tree shape.
     let manifest = parse_manifest_bytes(&manifest_bytes, header, limits)?;
 
-    // FORMAT.md §9.11 step 8: `symlink_metadata` (via `reject_occupied`)
+    // FORMAT.md §9.11 step 8: `symlink_metadata` (via `path_occupied`)
     // so a dangling symlink at the final name is treated as occupied.
+    // The message embeds the archive-chosen root name, so it is built
+    // here with sanitization rather than through `reject_occupied`,
+    // whose other callers display operator-chosen paths raw.
     let final_path = output_dir.join(&manifest.root_name);
-    reject_occupied(&final_path, "Output")?;
+    if path_occupied(&final_path)? {
+        return Err(output_already_exists(&final_path));
+    }
 
     // FORMAT.md §9.11 step 9. Open the output anchor up-front and
     // keep it alive across extraction + promotion so a `DeleteOnError`
@@ -168,7 +175,11 @@ fn unarchive_inner<R: Read>(
             rename_no_clobber(&working_path, &final_path)
         };
         promote_result.map_err(|e| {
-            map_already_exists(CryptoError::Io(e), "Output already exists", &final_path)
+            if e.kind() == io::ErrorKind::AlreadyExists {
+                output_already_exists(&final_path)
+            } else {
+                CryptoError::Io(e)
+            }
         })?;
 
         // FORMAT.md §9.11 step 16: apply root entry mode AFTER promotion.
@@ -176,11 +187,12 @@ fn unarchive_inner<R: Read>(
         // Directory roots: macOS can refuse to rename a directory whose
         // mode lacks search permission, so the root `.incomplete` stayed
         // at the initial 0o700 (search-permitted owner-only) mode through
-        // extraction. Re-anchor at `output_dir` and walk to the renamed
+        // extraction. Walk from the held `output_handle` to the renamed
         // root via `open_dir_at_rel`, which routes through
         // `open_dir_nofollow` + Windows reparse-point post-check — a
         // symlink substituted at the final name between rename and chmod
-        // is rejected here.
+        // is rejected here, and a swap of `output_dir` itself cannot
+        // redirect the chmod because no path is re-resolved.
         //
         // File roots: the staged `.incomplete` file stayed at
         // `INITIAL_FILE_CREATE_MODE` (0o600) throughout content streaming
@@ -202,9 +214,9 @@ fn unarchive_inner<R: Read>(
         // the no-follow re-open inside `apply_root_*_mode` still
         // refuses to chmod through a substituted symlink.
         let _ = if manifest.root_is_file {
-            apply_root_file_mode(output_dir, &manifest)
+            apply_root_file_mode(&output_handle, &manifest)
         } else {
-            apply_root_directory_mode(output_dir, &manifest)
+            apply_root_directory_mode(&output_handle, &manifest)
         };
 
         Ok(final_path.clone())
@@ -248,6 +260,10 @@ fn extract_single_file_root<R: Read>(
     created_incomplete_roots.push(manifest.root_name.clone());
 
     copy_exact_n(reader, &mut outfile, entry.size, archive_content_truncated)?;
+
+    // Synced before promotion, so a crash after the rename cannot
+    // surface incompletely written content under the final name.
+    outfile.sync_all().map_err(CryptoError::Io)?;
 
     // FORMAT.md §9.11 step 13: verify archive EOF — no byte may follow
     // the last declared file content. Single-file root has no descendant
@@ -307,6 +323,9 @@ fn extract_directory_root<R: Read>(
             platform::create_file_at(&parent_dir, &file_name, platform::INITIAL_FILE_CREATE_MODE)?;
         copy_exact_n(reader, &mut outfile, entry.size, archive_content_truncated)?;
         platform::chmod_file_handle(&outfile, entry.mode)?;
+        // Synced before promotion, so a crash after the rename cannot
+        // surface incompletely written content under the final name.
+        outfile.sync_all().map_err(CryptoError::Io)?;
     }
 
     // FORMAT.md §9.11 step 13: verify archive EOF — no byte may follow
@@ -332,24 +351,28 @@ fn extract_directory_root<R: Read>(
     Ok(())
 }
 
-fn apply_root_directory_mode(output_dir: &Path, manifest: &Manifest) -> Result<(), CryptoError> {
+/// Applies the manifest-stored root directory mode after promotion,
+/// walking from the same `output_handle` extraction used — never a
+/// re-resolved `output_dir` path. `open_dir_at_rel` routes through
+/// `open_dir_nofollow` + the Windows reparse-point post-check, so a
+/// symlink substituted at the final name between rename and chmod is
+/// rejected.
+fn apply_root_directory_mode(output_handle: &Dir, manifest: &Manifest) -> Result<(), CryptoError> {
     let root_name_str = manifest_root_name_str(manifest)?;
-    let output_handle = platform::open_anchor(output_dir)?;
-    let root_dir = platform::open_dir_at_rel(&output_handle, Path::new(root_name_str))?;
+    let root_dir = platform::open_dir_at_rel(output_handle, Path::new(root_name_str))?;
     platform::chmod_dir_handle(root_dir, manifest.root_mode)
 }
 
-/// File-root parallel of [`apply_root_directory_mode`]. Re-anchors at
-/// `output_dir`, opens the renamed root file via `open_file_nofollow`
-/// (no-follow + Windows reparse-point post-check), and applies the
-/// manifest-stored mode through the open handle. Runs only after
-/// `rename_no_clobber` succeeds, so the staged file held
-/// `INITIAL_FILE_CREATE_MODE` (0o600) throughout extraction; a
+/// File-root parallel of [`apply_root_directory_mode`]. Opens the
+/// renamed root file from the same `output_handle` extraction used,
+/// via `open_file_nofollow` (no-follow + Windows reparse-point
+/// post-check), and applies the manifest-stored mode through the open
+/// handle. Runs only after promotion succeeds, so the staged file
+/// held `INITIAL_FILE_CREATE_MODE` (0o600) throughout extraction; a
 /// permissive manifest mode is never briefly visible to other local
 /// users while the file holds plaintext.
-fn apply_root_file_mode(output_dir: &Path, manifest: &Manifest) -> Result<(), CryptoError> {
-    let output_handle = platform::open_anchor(output_dir)?;
-    let file = platform::open_file_nofollow(&output_handle, &manifest.root_name)?;
+fn apply_root_file_mode(output_handle: &Dir, manifest: &Manifest) -> Result<(), CryptoError> {
+    let file = platform::open_file_nofollow(output_handle, &manifest.root_name)?;
     platform::chmod_file_handle(&file, manifest.root_mode)
 }
 
@@ -410,15 +433,25 @@ fn cleanup_incomplete_via_handle(output_handle: &Dir, working_name: &OsStr) {
     }
 }
 
+/// Builds the "Output already exists: <path>" rejection with the path
+/// sanitized: it mixes the caller's output directory with the
+/// archive-chosen root name, so a hostile name cannot smuggle control
+/// or look-alike characters into the message. Used by the step-8
+/// occupancy pre-check and the step-15 promotion failure.
+fn output_already_exists(path: &Path) -> CryptoError {
+    CryptoError::InvalidInput(format!(
+        "Output already exists: {}",
+        sanitize_for_display(&path.display().to_string())
+    ))
+}
+
 /// Maps `io::ErrorKind::AlreadyExists` to a typed
 /// `CryptoError::InvalidInput("<label>: <path>")` and otherwise
-/// preserves the underlying error. Used at both staging boundaries
-/// — first-touch `mkdir_strict` / `create_file_at` rejects a stale
+/// preserves the underlying error. Used at the first-touch staging
+/// boundary: `mkdir_strict` / `create_file_at` reject a stale
 /// `.incomplete` from a prior failed run with a recognisable
-/// diagnostic AND preserves it (the cleanup path tracks only roots
-/// THIS run created), and the final-rename promotion rejects a
-/// racing actor that creates the final name between the step-5
-/// pre-check and the rename.
+/// diagnostic AND preserve it (the cleanup path tracks only roots
+/// THIS run created).
 fn map_already_exists(e: CryptoError, label: &str, path: &Path) -> CryptoError {
     if let CryptoError::Io(io_err) = &e {
         if io_err.kind() == io::ErrorKind::AlreadyExists {
@@ -1402,7 +1435,8 @@ mod tests {
             root_mode: 0o755,
         };
 
-        let err = apply_root_directory_mode(tmp.path(), &manifest).unwrap_err();
+        let handle = platform::open_anchor(tmp.path()).unwrap();
+        let err = apply_root_directory_mode(&handle, &manifest).unwrap_err();
         assert!(
             format!("{err}").contains("Symlink in extraction path"),
             "expected symlink rejection, got: {err}",
@@ -1428,10 +1462,141 @@ mod tests {
         symlink(&real, tmp.path().join("hello.txt")).unwrap();
 
         let manifest = single_file_manifest("hello.txt", b"x");
-        let err = apply_root_file_mode(tmp.path(), &manifest).unwrap_err();
+        let handle = platform::open_anchor(tmp.path()).unwrap();
+        let err = apply_root_file_mode(&handle, &manifest).unwrap_err();
         assert!(
             format!("{err}").contains("Symlink in extraction path"),
             "expected symlink rejection, got: {err}",
+        );
+    }
+
+    /// Step 16 must chmod through the SAME handle extraction used, not
+    /// a re-resolved `output_dir` path. Swap the output directory
+    /// aside after extraction and mint a same-named victim at the
+    /// original path: the chmod must land in the moved directory and
+    /// leave the victim untouched. Success-direction mirror of
+    /// [`cleanup_via_handle_follows_handle_inode_not_path`].
+    #[cfg(unix)]
+    #[test]
+    fn apply_root_directory_mode_follows_handle_inode_not_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let orig = tmp.path().join("orig");
+        fs::create_dir(&orig).unwrap();
+        fs::create_dir(orig.join("root")).unwrap();
+
+        let handle = platform::open_anchor(&orig).unwrap();
+
+        // Swap: move the extraction directory aside and mint a
+        // replacement holding a same-named victim.
+        let moved = tmp.path().join("moved");
+        fs::rename(&orig, &moved).unwrap();
+        fs::create_dir(&orig).unwrap();
+        fs::create_dir(orig.join("root")).unwrap();
+        fs::set_permissions(orig.join("root"), fs::Permissions::from_mode(0o755)).unwrap();
+
+        let manifest = Manifest {
+            entries: vec![make_entry("root", ArchiveEntryKind::Directory, 0, 0o500)],
+            total_file_bytes: 0,
+            root_name: OsString::from("root"),
+            root_is_file: false,
+            root_mode: 0o500,
+        };
+        apply_root_directory_mode(&handle, &manifest).unwrap();
+
+        let moved_mode = fs::metadata(moved.join("root"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(moved_mode, 0o500, "chmod must land in the handle's dir");
+        let victim_mode = fs::metadata(orig.join("root"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            victim_mode, 0o755,
+            "victim at the swapped path must be untouched"
+        );
+    }
+
+    /// File-root parallel of
+    /// [`apply_root_directory_mode_follows_handle_inode_not_path`].
+    #[cfg(unix)]
+    #[test]
+    fn apply_root_file_mode_follows_handle_inode_not_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let orig = tmp.path().join("orig");
+        fs::create_dir(&orig).unwrap();
+        fs::write(orig.join("hello.txt"), b"extracted").unwrap();
+
+        let handle = platform::open_anchor(&orig).unwrap();
+
+        let moved = tmp.path().join("moved");
+        fs::rename(&orig, &moved).unwrap();
+        fs::create_dir(&orig).unwrap();
+        fs::write(orig.join("hello.txt"), b"victim").unwrap();
+        fs::set_permissions(orig.join("hello.txt"), fs::Permissions::from_mode(0o644)).unwrap();
+
+        let mut manifest = single_file_manifest("hello.txt", b"extracted");
+        manifest.entries[0].mode = 0o400;
+        manifest.root_mode = 0o400;
+
+        apply_root_file_mode(&handle, &manifest).unwrap();
+
+        let moved_mode = fs::metadata(moved.join("hello.txt"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(moved_mode, 0o400, "chmod must land in the handle's dir");
+        let victim_mode = fs::metadata(orig.join("hello.txt"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            victim_mode, 0o644,
+            "victim at the swapped path must be untouched"
+        );
+    }
+
+    /// The occupied-output rejection embeds the archive-chosen root
+    /// name; control and direction-override characters in it must be
+    /// escaped. Mirrors the path grammar's sanitization pin
+    /// (`rejection_payload_is_sanitized`) at this call site.
+    #[test]
+    fn occupied_output_error_escapes_hostile_root_name() {
+        // Constructor check on a short path: the escaped form appears.
+        let err = output_already_exists(Path::new("evil\u{202e}name"));
+        let msg = format!("{err}");
+        assert!(msg.contains("Output already exists"), "got: {msg}");
+        assert!(
+            msg.contains("\\u{202e}"),
+            "expected escaped form, got: {msg}"
+        );
+
+        // End-to-end through unarchive: the raw character must never
+        // reach the message. (The sanitizer also truncates long text,
+        // and the tempdir prefix can consume the display budget before
+        // the escape — so only the absence is pinned here.)
+        let tmp = tempfile::TempDir::new().unwrap();
+        let name = "evil\u{202e}name";
+        fs::write(tmp.path().join(name), b"existing").unwrap();
+
+        let manifest = single_file_manifest(name, b"x");
+        let archive = build_archive(&manifest, &[(name, b"x")]);
+
+        let err = unarchive_default(archive, tmp.path()).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("Output already exists"), "got: {msg}");
+        assert!(
+            !msg.contains('\u{202e}'),
+            "raw direction-override character leaked: {msg:?}"
         );
     }
 

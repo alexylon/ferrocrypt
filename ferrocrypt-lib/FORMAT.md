@@ -1242,6 +1242,7 @@ Each path component MUST satisfy all component rules:
 - not empty;
 - not `.`;
 - not `..`;
+- at most 244 bytes long;
 - does not contain `/`, `\`, or NUL;
 - does not contain ASCII control bytes `0x00..=0x1F`;
 - does not contain any Windows-reserved character: `<`, `>`, `:`, `"`, `|`,
@@ -1249,13 +1250,22 @@ Each path component MUST satisfy all component rules:
 - does not end with a space;
 - does not end with a dot;
 - is not a Windows reserved device name, ASCII-case-insensitive: `CON`, `PRN`,
-  `AUX`, `NUL`, `CLOCK$`, `COM1` through `COM9`, or `LPT1` through `LPT9`;
+  `AUX`, `NUL`, `CLOCK$`, `CONIN$`, `CONOUT$`, `COM0` through `COM9`, `COM¹`,
+  `COM²`, `COM³`, `LPT0` through `LPT9`, `LPT¹`, `LPT²`, or `LPT³`;
 - does not have a Windows reserved device stem before an extension, also
   ASCII-case-insensitive, such as `CON.txt`, `AUX.backup`, `COM1.log`, or
   `LPT9.bin`.
 
+The 244-byte component cap is the 255-byte filename limit shared by ext4, XFS,
+APFS, and NTFS, minus the 11-byte `.incomplete` staging suffix that extraction
+appends to the root component (§9.11). Without the reserve, a near-limit name
+would archive successfully and then fail to extract because its working name
+exceeds what the filesystem can create.
+
 The reserved-device check is ASCII-case-insensitive only. Implementations MUST
-NOT use locale-sensitive case conversion.
+NOT use locale-sensitive case conversion. The superscript names (`COM¹` through
+`COM³`, `LPT¹` through `LPT³`) are matched on their exact UTF-8 bytes; the
+superscript digits have no ASCII case.
 
 ### 9.7 Duplicate and collision policy
 

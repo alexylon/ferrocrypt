@@ -1645,6 +1645,30 @@ mod tests {
         matches!(err, CryptoError::InvalidInput(_))
     }
 
+    /// FORMAT.md §9.6: a manifest component longer than the
+    /// per-component byte cap rejects during validation, before any
+    /// filesystem work — a typed grammar rejection instead of a raw
+    /// `ENAMETOOLONG` I/O error from the staging create.
+    #[test]
+    fn rejects_over_long_component_before_filesystem_output() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let name = "n".repeat(250);
+        let manifest = single_file_manifest(&name, b"x");
+        let archive = build_archive(&manifest, &[(name.as_str(), b"x")]);
+
+        let err = unarchive_default(archive, tmp.path()).unwrap_err();
+        assert!(matches!(
+            err,
+            CryptoError::UnsafeArchivePath {
+                reason: crate::archive::path::COMPONENT_TOO_LONG,
+                ..
+            }
+        ));
+
+        let count = fs::read_dir(tmp.path()).unwrap().count();
+        assert_eq!(count, 0, "rejection must precede any filesystem output");
+    }
+
     // -- Filesystem hardening ----------------------------------------------
 
     /// FORMAT.md §9.11 step 8: pre-check uses `symlink_metadata`, so a

@@ -12,6 +12,7 @@ use std::path::{Component, Path};
 
 use crate::CryptoError;
 use crate::error::sanitize_for_display;
+use crate::fs::paths::INCOMPLETE_SUFFIX;
 
 use super::limits::{
     ARCHIVE_PATH_EMPTY, ArchiveLimits, enforce_path_bytes_cap, enforce_path_depth_cap,
@@ -22,6 +23,24 @@ use super::limits::{
 /// these on every platform makes a valid FCA path representable
 /// everywhere FerroCrypt runs.
 const WINDOWS_RESERVED_CHARS: &[u8] = b"<>:\"|?*";
+
+/// The 255-byte filename limit shared by the filesystems FerroCrypt
+/// targets (ext4, XFS, APFS, NTFS).
+const FILESYSTEM_NAME_MAX_BYTES: usize = 255;
+
+/// Maximum UTF-8 byte length of a single FCA path component per
+/// FORMAT.md §9.6: the filesystem name limit minus room for the
+/// `.incomplete` staging suffix extraction appends to the root
+/// component (§9.11 step 10). Without the reserve, a near-limit root
+/// name would archive fine and then fail to extract because its
+/// working name exceeds what the filesystem can create.
+pub(crate) const FCA_COMPONENT_MAX_BYTES: usize =
+    FILESYSTEM_NAME_MAX_BYTES - INCOMPLETE_SUFFIX.len();
+
+/// Rejection reason for an over-long component. Kept next to
+/// [`FCA_COMPONENT_MAX_BYTES`]; a unit test pins the embedded number
+/// to the constant so the two cannot drift.
+pub(super) const COMPONENT_TOO_LONG: &str = "component exceeds 244 bytes";
 
 /// Validates an FCA archive path against the FORMAT.md §9.6 grammar.
 /// Same function called by encode-side metadata-pass and decode-side
@@ -101,6 +120,9 @@ fn validate_fca_component(component: &str, path: &str) -> Result<(), CryptoError
     if component.is_empty() || component == "." || component == ".." {
         return Err(unsafe_path(path, "forbidden component"));
     }
+    if component.len() > FCA_COMPONENT_MAX_BYTES {
+        return Err(unsafe_path(path, COMPONENT_TOO_LONG));
+    }
 
     let b = component.as_bytes();
     if b.iter().any(|&c| c <= 0x1f) {
@@ -133,23 +155,29 @@ fn ascii_lower_byte(b: u8) -> u8 {
 /// comparison. The stem is the substring before the first `.`; if there
 /// is no `.`, the whole component is the stem. This catches both bare
 /// names (`CON`) and stems-with-extension (`CON.txt`, `LPT9.bin`).
+///
+/// The superscript forms (`COM¹`, `LPT²`, …) are matched on their
+/// exact UTF-8 bytes: `¹ ² ³` have no ASCII case and pass through
+/// [`ascii_lower_byte`] unchanged, so byte comparison is exact per
+/// FORMAT.md §9.6.
 fn is_windows_reserved_device_component(component: &str) -> bool {
     let stem = component
         .split_once('.')
         .map_or(component, |(stem, _)| stem);
     let stem_bytes = stem.as_bytes();
 
-    // All reserved device-name stems are 3..=6 ASCII bytes; longer
-    // stems cannot match. The early return also keeps the stack
-    // buffer sizing exact.
-    if stem_bytes.is_empty() || stem_bytes.len() > 6 {
+    // All reserved device-name stems are 3..=7 bytes (`CONOUT$` is
+    // the longest; the superscript forms are 5 bytes as UTF-8);
+    // longer stems cannot match. The early return also keeps the
+    // stack buffer sizing exact.
+    if stem_bytes.is_empty() || stem_bytes.len() > 7 {
         return false;
     }
 
     // Stack buffer avoids an allocation per component check on the
-    // common no-match path. Reserved names are all ASCII, so byte-wise
-    // ascii_lower_byte is the correct (and sufficient) case fold.
-    let mut buf = [0u8; 6];
+    // common no-match path. ascii_lower_byte folds the ASCII letters
+    // and leaves the superscript UTF-8 bytes unchanged.
+    let mut buf = [0u8; 7];
     for (i, &b) in stem_bytes.iter().enumerate() {
         buf[i] = ascii_lower_byte(b);
     }
@@ -162,6 +190,9 @@ fn is_windows_reserved_device_component(component: &str) -> bool {
             | b"aux"
             | b"nul"
             | b"clock$"
+            | b"conin$"
+            | b"conout$"
+            | b"com0"
             | b"com1"
             | b"com2"
             | b"com3"
@@ -171,6 +202,10 @@ fn is_windows_reserved_device_component(component: &str) -> bool {
             | b"com7"
             | b"com8"
             | b"com9"
+            | b"com\xc2\xb9" // COM¹
+            | b"com\xc2\xb2" // COM²
+            | b"com\xc2\xb3" // COM³
+            | b"lpt0"
             | b"lpt1"
             | b"lpt2"
             | b"lpt3"
@@ -180,6 +215,9 @@ fn is_windows_reserved_device_component(component: &str) -> bool {
             | b"lpt7"
             | b"lpt8"
             | b"lpt9"
+            | b"lpt\xc2\xb9" // LPT¹
+            | b"lpt\xc2\xb2" // LPT²
+            | b"lpt\xc2\xb3" // LPT³
     )
 }
 
@@ -507,16 +545,47 @@ mod tests {
 
     // -- Reserved device names (§9.6) --------------------------------------
 
-    /// All 23 reserved device names from FORMAT.md §9.6 reject. Loop-over
+    /// All 33 reserved device names from FORMAT.md §9.6 reject. Loop-over
     /// pin keeps the test honest against future spec changes that
     /// add or remove an entry.
     #[test]
     fn rejects_every_reserved_device_name() {
         let names = [
-            "CON", "PRN", "AUX", "NUL", "CLOCK$", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6",
-            "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8",
+            "CON",
+            "PRN",
+            "AUX",
+            "NUL",
+            "CLOCK$",
+            "CONIN$",
+            "CONOUT$",
+            "COM0",
+            "COM1",
+            "COM2",
+            "COM3",
+            "COM4",
+            "COM5",
+            "COM6",
+            "COM7",
+            "COM8",
+            "COM9",
+            "COM\u{b9}",
+            "COM\u{b2}",
+            "COM\u{b3}",
+            "LPT0",
+            "LPT1",
+            "LPT2",
+            "LPT3",
+            "LPT4",
+            "LPT5",
+            "LPT6",
+            "LPT7",
+            "LPT8",
             "LPT9",
+            "LPT\u{b9}",
+            "LPT\u{b2}",
+            "LPT\u{b3}",
         ];
+        assert_eq!(names.len(), 33);
         for name in &names {
             let err = validate_fca_path(name, limits()).unwrap_err();
             assert!(
@@ -543,8 +612,14 @@ mod tests {
             "AUX.bin",
             "NUL.log",
             "CLOCK$.dat",
+            "CONIN$.txt",
+            "CONOUT$.log",
+            "COM0.dat",
             "COM1.log",
+            "COM\u{b9}.txt",
+            "LPT0.bak",
             "LPT9.bin",
+            "LPT\u{b3}.log",
         ] {
             let err = validate_fca_path(stem, limits()).unwrap_err();
             assert!(
@@ -566,7 +641,23 @@ mod tests {
     /// `İ`/`ı`).
     #[test]
     fn reserved_check_is_ascii_case_insensitive() {
-        for name in &["con", "Con", "CON", "cOn", "lpt9", "Lpt9", "LPT9"] {
+        for name in &[
+            "con",
+            "Con",
+            "CON",
+            "cOn",
+            "lpt9",
+            "Lpt9",
+            "LPT9",
+            "conin$",
+            "CONIN$",
+            "conout$",
+            "ConOut$",
+            "com\u{b9}",
+            "Com\u{b9}",
+            "lpt\u{b2}",
+            "Lpt\u{b2}",
+        ] {
             let err = validate_fca_path(name, limits()).unwrap_err();
             assert!(
                 matches!(
@@ -588,6 +679,63 @@ mod tests {
     fn empty_stem_is_not_reserved() {
         assert!(validate_fca_path(".foo", limits()).is_ok());
         assert!(!is_windows_reserved_device_component(".foo"));
+    }
+
+    // -- Component byte cap (§9.6) ------------------------------------------
+
+    /// Boundary check: a component exactly at [`FCA_COMPONENT_MAX_BYTES`]
+    /// is admissible, one byte over rejects. The cap leaves room for
+    /// the `.incomplete` staging suffix next to the 255-byte filesystem
+    /// name limit, so "encrypt succeeds, decrypt fails" cannot happen
+    /// for a near-limit name.
+    #[test]
+    fn component_at_byte_cap_admissible_one_over_rejects() {
+        let at_cap = "a".repeat(FCA_COMPONENT_MAX_BYTES);
+        assert!(validate_fca_path(&at_cap, limits()).is_ok());
+
+        let over_cap = "a".repeat(FCA_COMPONENT_MAX_BYTES + 1);
+        let err = validate_fca_path(&over_cap, limits()).unwrap_err();
+        assert!(matches!(
+            err,
+            CryptoError::UnsafeArchivePath {
+                reason: COMPONENT_TOO_LONG,
+                ..
+            }
+        ));
+    }
+
+    /// The component cap applies to every component, not only the
+    /// root: an over-long component nested inside an otherwise valid
+    /// path rejects even though the whole path is under the path-byte
+    /// cap.
+    #[test]
+    fn rejects_over_long_nested_component() {
+        let long = "b".repeat(FCA_COMPONENT_MAX_BYTES + 1);
+        let path = format!("root/{long}/leaf.txt");
+        let err = validate_fca_path(&path, limits()).unwrap_err();
+        assert!(matches!(
+            err,
+            CryptoError::UnsafeArchivePath {
+                reason: COMPONENT_TOO_LONG,
+                ..
+            }
+        ));
+    }
+
+    /// The byte count embedded in the rejection text must equal the
+    /// constant, and the constant must leave exactly the suffix room
+    /// it promises. Locks the human-readable message and the derived
+    /// value together so neither can drift alone.
+    #[test]
+    fn component_cap_reason_matches_constant() {
+        assert_eq!(
+            COMPONENT_TOO_LONG,
+            format!("component exceeds {FCA_COMPONENT_MAX_BYTES} bytes"),
+        );
+        assert_eq!(
+            FCA_COMPONENT_MAX_BYTES + INCOMPLETE_SUFFIX.len(),
+            FILESYSTEM_NAME_MAX_BYTES,
+        );
     }
 
     // -- Collision key (§9.7) ----------------------------------------------

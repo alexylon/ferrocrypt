@@ -1270,6 +1270,50 @@ mod tests {
         ));
     }
 
+    /// Spec §9.6: a source name longer than the per-component byte cap
+    /// MUST reject during the metadata pass — without the cap, the
+    /// writer would emit an archive whose `.incomplete` working name
+    /// exceeds the 255-byte filesystem limit at extraction time.
+    /// Unix-only: a 250-byte filename near the Windows `MAX_PATH`
+    /// ceiling cannot be reliably created in a tempdir there.
+    #[cfg(unix)]
+    #[test]
+    fn rejects_over_long_component_in_source() {
+        let src = tempfile::TempDir::new().unwrap();
+        let dir = src.path().join("d");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("n".repeat(250)), b"x").unwrap();
+
+        let mut buf = Vec::new();
+        let err = archive(&dir, &mut buf, ArchiveLimits::default()).unwrap_err();
+        assert!(matches!(
+            err,
+            CryptoError::UnsafeArchivePath {
+                reason: crate::archive::path::COMPONENT_TOO_LONG,
+                ..
+            }
+        ));
+        assert!(buf.is_empty(), "writer must not emit bytes when caps fail");
+    }
+
+    /// A root name exactly at the per-component byte cap round-trips:
+    /// its 255-byte `.incomplete` working name is still creatable on
+    /// every supported filesystem. Unix-only for the same `MAX_PATH`
+    /// reason as the rejection test above.
+    #[cfg(unix)]
+    #[test]
+    fn round_trip_component_at_byte_cap() {
+        let src = tempfile::TempDir::new().unwrap();
+        let out = tempfile::TempDir::new().unwrap();
+        let name = "n".repeat(244);
+        let src_file = src.path().join(&name);
+        fs::write(&src_file, b"payload").unwrap();
+
+        let final_path = round_trip(&src_file, out.path());
+        assert_eq!(final_path, out.path().join(&name));
+        assert_eq!(fs::read(&final_path).unwrap(), b"payload");
+    }
+
     /// Spec §9.6: a Windows-reserved device name in the source tree
     /// MUST reject during the metadata pass — otherwise the writer
     /// would emit a path its own reader rejects.

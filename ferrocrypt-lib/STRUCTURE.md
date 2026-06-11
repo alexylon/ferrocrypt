@@ -768,10 +768,11 @@ It rejects:
 - NUL byte;
 - backslash;
 - `.` and `..` components, and any host `Component` that is not `Normal`;
+- components longer than 244 bytes (`FCA_COMPONENT_MAX_BYTES` — the 255-byte filesystem name limit minus the `.incomplete` staging suffix);
 - ASCII control bytes (`0x00..=0x1F`);
 - Windows-reserved characters (`<`, `>`, `:`, `"`, `|`, `?`, `*`);
 - trailing dot or trailing space in any component;
-- Windows-reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `CLOCK$`, `COM1..9`, `LPT1..9`), including in extension stems (`CON.txt`, `LPT9.bin`), under ASCII-case-insensitive comparison;
+- Windows-reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `CLOCK$`, `CONIN$`, `CONOUT$`, `COM0..9`, `COM¹`/`COM²`/`COM³`, `LPT0..9`, `LPT¹`/`LPT²`/`LPT³`), including in extension stems (`CON.txt`, `LPT9.bin`), under ASCII-case-insensitive comparison (the superscript forms are matched on exact UTF-8 bytes);
 - byte-length cap exceeded;
 - depth cap exceeded.
 

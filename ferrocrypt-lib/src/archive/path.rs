@@ -674,9 +674,10 @@ mod tests {
     /// Tar-rs `extracting_malicious_tarball` corpus (CVE-2001-1267
     /// et al. — see `tests/all.rs:768` in tar-rs). Tar's reaction is
     /// to silently strip leading slashes and skip `..` entries; FCA's
-    /// posture is fail-closed — every entry MUST reject with the typed
-    /// path or archive defect. Loop-pin against the full byte set
-    /// so a future relaxation of the rejection is caught.
+    /// posture is fail-closed — every entry MUST reject with a typed
+    /// defect (`UnsafeArchivePath` or `MalformedArchive`). Loop-pin
+    /// against the full byte set so a future relaxation of the
+    /// rejection is caught.
     ///
     /// See `notes/done/tar_rs_crosscheck.md` §5 for the cross-check finding.
     #[test]

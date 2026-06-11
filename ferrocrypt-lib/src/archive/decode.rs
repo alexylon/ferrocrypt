@@ -126,10 +126,11 @@ fn unarchive_inner<R: Read>(
         return Err(output_already_exists(&final_path));
     }
 
-    // FORMAT.md §9.11 step 9. Open the output anchor up-front and
-    // keep it alive across extraction + promotion so a `DeleteOnError`
-    // cleanup runs handle-relative — a path swap of `output_dir`
-    // cannot redirect the `remove_*` calls.
+    // Open the output anchor up-front (between FORMAT.md §9.11 steps
+    // 8 and 9; the open itself is not a numbered step) and keep it
+    // alive across extraction + promotion so a `DeleteOnError` cleanup
+    // runs handle-relative — a path swap of `output_dir` cannot
+    // redirect the `remove_*` calls.
     let output_handle = platform::open_anchor(output_dir)?;
     let incomplete_name = incomplete_working_name(&manifest.root_name);
     let mut created_incomplete_roots: Vec<OsString> = Vec::new();
@@ -294,10 +295,11 @@ fn extract_directory_root<R: Read>(
     // mkdir_strict succeeded — this run owns the staging directory.
     created_incomplete_roots.push(manifest.root_name.clone());
 
-    // Pass 1: pre-create all descendant directories sorted by depth
-    // ascending (parent before child). FORMAT.md §9.11 step 10
-    // SHOULD; we MUST do this to support content streaming under any
-    // manifest order.
+    // Pass 1 (FORMAT.md §9.11 step 10): pre-create all descendant
+    // directories sorted by depth ascending (parent before child), so
+    // content streaming works for any manifest order the tree-shape
+    // rules admit — §9.8 forbids readers from requiring a specific
+    // order.
     let mut dir_entries: Vec<&ArchiveEntry> = manifest
         .entries
         .iter()

@@ -823,7 +823,7 @@ Targets that are neither Unix nor Windows are rejected at compile time: the walk
 
 `archive/decode.rs` owns the FCA reader: header + manifest parse with full validation, then content extraction via the hardened cap-std platform backend.
 
-The reader pipeline matches `FORMAT.md` §9.11. Steps 1–8 MUST complete before any filesystem output:
+The reader pipeline matches `FORMAT.md` §9.11, and the step numbers below are FORMAT.md's — they are cross-referenced from code comments and the audit trail, so the two documents must not drift. Steps 1–8 MUST complete before any filesystem output. The `output_dir` capability handle is opened between steps 8 and 9 and held through step 16, so staged writes, failure-path cleanup, promotion, and the final mode application all anchor to the same directory identity.
 
 1. parse and validate the FCA fixed header;
 2. read exactly `archive_ext_len` bytes;
@@ -833,10 +833,10 @@ The reader pipeline matches `FORMAT.md` §9.11. Steps 1–8 MUST complete before
 6. validate every per-entry TLV region;
 7. validate the complete manifest (entry count, total bytes, paths, duplicates, tree shape, parents present, resource caps, critical extension support);
 8. pre-check the final output name with `symlink_metadata` (so a dangling symlink at the final name counts as occupied);
-9. open `output_dir` as a `cap-std` directory handle;
-10. reject pre-existing `.incomplete` output at first create;
-11. create `{root}.incomplete` (file or directory);
-12. stream file contents in manifest order via `copy_exact_n`, syncing each staged file to stable storage so promotion never makes unsynced content visible under the final name;
+9. reject pre-existing `.incomplete` output at first create;
+10. create `{root}.incomplete` (file or directory) and pre-create its descendant directories;
+11. stream file contents in manifest order via `copy_exact_n`, syncing each staged file to stable storage so promotion never makes unsynced content visible under the final name;
+12. apply descendant file modes by handle, interleaved per file with step 11 as §9.11 permits (the root entry's mode is deferred to step 16);
 13. verify archive EOF (no trailing bytes);
 14. apply descendant directory modes deepest-first;
 15. promote `{root}.incomplete` to `{root}` via no-clobber rename;

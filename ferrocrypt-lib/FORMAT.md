@@ -1258,9 +1258,8 @@ Each path component MUST satisfy all component rules:
 
 The 244-byte component cap is the 255-byte filename limit shared by ext4, XFS,
 APFS, and NTFS, minus the 11-byte `.incomplete` staging suffix that extraction
-appends to the root component (§9.11). Without the reserve, a near-limit name
-would archive successfully and then fail to extract because its working name
-exceeds what the filesystem can create.
+appends to the root component (§9.11). Without this reserve, a component near
+the filesystem limit would be archivable but not extractable.
 
 The reserved-device check is ASCII-case-insensitive only. Implementations MUST
 NOT use locale-sensitive case conversion. The superscript names (`COM¹` through
@@ -1456,6 +1455,11 @@ Readers MUST process FCA archives in this order:
 17. return the final output path.
 
 Steps 1 through 8 MUST complete before any filesystem output is created.
+
+Steps 11 and 12 MAY be interleaved per entry: applying a file's mode to its
+open handle immediately after its content is written is equivalent to a
+separate pass, because every descendant file sits inside the restrictive
+staged root until promotion.
 
 Readers SHOULD sync staged file contents to stable storage before step 15.
 After promotion the output exists under its final name with no `.incomplete`

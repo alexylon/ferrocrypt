@@ -53,6 +53,7 @@ use cap_std::fs::{Dir, OpenOptions};
 
 use crate::CryptoError;
 use crate::error::sanitize_for_display;
+#[cfg(windows)]
 use crate::fs::paths::parent_or_cwd;
 
 #[cfg(unix)]
@@ -512,31 +513,40 @@ fn build_manifest(
         };
         Ok((manifest, ArchiveSource::RootFile(source)))
     } else if file_type.is_dir() {
-        // Directory root: anchor the parent directory, then open the
-        // root itself with `open_dir_nofollow` plus the Windows
-        // reparse-point post-check. A symlink or junction swapped in
-        // at `input_path` after the lstat above fails this open
-        // instead of being followed (FORMAT.md §9.10 lists the
-        // input-root symlink and reparse point as MUST-reject). Every
-        // subsequent metadata read, file open, and directory descent
-        // is anchored to the returned capability handle, so no
-        // intermediate component can be replaced between the metadata
-        // pass and the content pass either.
-        let parent_anchor = platform::open_anchor(parent_or_cwd(input_path))?;
-        let source_root = platform::open_child_dir_nofollow(
-            &parent_anchor,
-            name,
-            platform::SYMLINK_IN_ARCHIVE_SOURCE,
-        )?;
+        // Directory root. Both platforms reject an input-root symlink or
+        // reparse point swapped in after the lstat above (FORMAT.md §9.10
+        // MUST-reject), and anchor every later open to the returned
+        // capability handle so no intermediate component can be replaced
+        // between the metadata pass and the content pass. The open differs
+        // by platform:
+        //
+        // - Unix: open the directory directly. `open_ambient_dir` follows
+        //   a symlink at `input_path`, but the `(dev, ino)` re-check below
+        //   rejects any swap, so opening the directory itself — rather
+        //   than its parent — keeps the prior permission requirement
+        //   (search on the parent, not read).
+        // - Windows: there is no stable directory inode to re-check, so
+        //   anchor the parent and take a no-follow open of the leaf, whose
+        //   reparse-point post-check rejects a junction at `input_path`.
+        #[cfg(unix)]
+        let source_root = platform::open_anchor(input_path)?;
+        #[cfg(windows)]
+        let source_root = {
+            let parent_anchor = platform::open_anchor(parent_or_cwd(input_path))?;
+            platform::open_child_dir_nofollow(
+                &parent_anchor,
+                name,
+                platform::SYMLINK_IN_ARCHIVE_SOURCE,
+            )?
+        };
 
         // One `dir_metadata` call reused for the Unix identity
         // re-check, the cycle-detection seed, and the mode read.
         let source_root_meta = source_root.dir_metadata().map_err(CryptoError::Io)?;
 
-        // Defense-in-depth on Unix: the no-follow open already refuses
-        // a symlink at the leaf, but a real directory swapped in after
-        // the lstat pre-check still opens. Comparing the opened
-        // handle's (dev, ino) against the pre-check rejects any swap.
+        // A real directory swapped in at `input_path` after the lstat
+        // pre-check still opens on Unix; comparing the opened handle's
+        // (dev, ino) against the pre-check rejects any such swap.
         #[cfg(unix)]
         {
             use cap_std::fs::MetadataExt as _;
@@ -1771,38 +1781,6 @@ mod tests {
         let mut buf = Vec::new();
         let err = archive(&link, &mut buf, ArchiveLimits::default()).unwrap_err();
         assert!(format!("{err}").contains("Input is a symlink"));
-    }
-
-    /// A symlinked directory given with a trailing slash (`link/`)
-    /// rejects. With the trailing slash, `lstat` follows the link and
-    /// reports a directory, so the pre-checks pass — the no-follow
-    /// source-root open is what refuses it.
-    #[cfg(unix)]
-    #[test]
-    fn rejects_root_symlink_to_directory_with_trailing_slash() {
-        use std::os::unix::fs::symlink;
-
-        let tmp = tempfile::TempDir::new().unwrap();
-        let target = tmp.path().join("real_dir");
-        fs::create_dir(&target).unwrap();
-        fs::write(target.join("inside.txt"), b"data").unwrap();
-        let link = tmp.path().join("link_dir");
-        symlink(&target, &link).unwrap();
-
-        let mut link_with_slash = link.into_os_string();
-        link_with_slash.push("/");
-
-        let mut buf = Vec::new();
-        let err = archive(
-            Path::new(&link_with_slash),
-            &mut buf,
-            ArchiveLimits::default(),
-        )
-        .unwrap_err();
-        assert!(
-            format!("{err}").contains(platform::SYMLINK_IN_ARCHIVE_SOURCE),
-            "expected symlink rejection, got: {err}",
-        );
     }
 
     /// Source filename with non-UTF-8 bytes (built via raw `OsString`

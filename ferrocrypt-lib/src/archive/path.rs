@@ -160,9 +160,14 @@ fn ascii_lower_byte(b: u8) -> u8 {
 /// [`ascii_lower_byte`] unchanged, so byte comparison is exact per
 /// FORMAT.md §9.6.
 fn is_windows_reserved_device_component(component: &str) -> bool {
+    // Windows resolves a name to a device by taking the text before the
+    // first `.` and then stripping trailing spaces, so `AUX .txt` is the
+    // AUX device. Match that: cut at the first `.`, then drop trailing
+    // spaces before comparing.
     let stem = component
         .split_once('.')
-        .map_or(component, |(stem, _)| stem);
+        .map_or(component, |(stem, _)| stem)
+        .trim_end_matches(' ');
     let stem_bytes = stem.as_bytes();
 
     // All reserved device-name stems are 3..=7 bytes (`CONOUT$` is
@@ -678,6 +683,37 @@ mod tests {
     fn empty_stem_is_not_reserved() {
         assert!(validate_fca_path(".foo", limits()).is_ok());
         assert!(!is_windows_reserved_device_component(".foo"));
+    }
+
+    /// Windows strips trailing spaces from a name's stem before
+    /// resolving it to a device, so `AUX .txt` is the AUX device even
+    /// though the stem is not byte-equal to `aux`. The whole-component
+    /// trailing-space rule does not fire here (the component ends in
+    /// `t`), so the device matcher must do the trimming itself.
+    #[test]
+    fn rejects_space_padded_reserved_stems() {
+        for name in &[
+            "aux .txt",
+            "con  .log",
+            "com1 .bin",
+            "CONIN$ .dat",
+            "lpt9   .x",
+        ] {
+            let err = validate_fca_path(name, limits()).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    CryptoError::UnsafeArchivePath {
+                        reason: "Windows-reserved device name",
+                        ..
+                    }
+                ),
+                "name {name:?} should reject as a reserved device",
+            );
+        }
+
+        // A trailing space next to a non-reserved stem stays valid.
+        assert!(validate_fca_path("notes .txt", limits()).is_ok());
     }
 
     // -- Component byte cap (§9.6) ------------------------------------------

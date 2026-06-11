@@ -123,7 +123,7 @@ fn unarchive_inner<R: Read>(
     // whose other callers display operator-chosen paths raw.
     let final_path = output_dir.join(&manifest.root_name);
     if path_occupied(&final_path)? {
-        return Err(output_already_exists(&final_path));
+        return Err(output_already_exists(output_dir, &manifest.root_name));
     }
 
     // Open the output anchor up-front (between FORMAT.md §9.11 steps
@@ -177,7 +177,7 @@ fn unarchive_inner<R: Read>(
         };
         promote_result.map_err(|e| {
             if e.kind() == io::ErrorKind::AlreadyExists {
-                output_already_exists(&final_path)
+                output_already_exists(output_dir, &manifest.root_name)
             } else {
                 CryptoError::Io(e)
             }
@@ -435,15 +435,17 @@ fn cleanup_incomplete_via_handle(output_handle: &Dir, working_name: &OsStr) {
     }
 }
 
-/// Builds the "Output already exists: <path>" rejection with the path
-/// sanitized: it mixes the caller's output directory with the
-/// archive-chosen root name, so a hostile name cannot smuggle control
-/// or look-alike characters into the message. Used by the step-8
-/// occupancy pre-check and the step-15 promotion failure.
-fn output_already_exists(path: &Path) -> CryptoError {
+/// Builds the "Output already exists: <dir>/<root>" rejection. Only
+/// `root_name` comes from the archive, so only it is sanitized; the
+/// operator-chosen `output_dir` is shown raw, the same posture as the
+/// other `reject_occupied` call sites, and is not truncated away. Used
+/// by the step-8 occupancy pre-check and the step-15 promotion failure.
+fn output_already_exists(output_dir: &Path, root_name: &OsStr) -> CryptoError {
     CryptoError::InvalidInput(format!(
-        "Output already exists: {}",
-        sanitize_for_display(&path.display().to_string())
+        "Output already exists: {}{}{}",
+        output_dir.display(),
+        std::path::MAIN_SEPARATOR,
+        sanitize_for_display(&root_name.to_string_lossy())
     ))
 }
 
@@ -1573,19 +1575,30 @@ mod tests {
     /// (`rejection_payload_is_sanitized`) at this call site.
     #[test]
     fn occupied_output_error_escapes_hostile_root_name() {
-        // Constructor check on a short path: the escaped form appears.
-        let err = output_already_exists(Path::new("evil\u{202e}name"));
+        // The archive-chosen root name is escaped; the operator-chosen
+        // output directory is shown raw and is never truncated away,
+        // even when it is long or carries non-ASCII characters.
+        let err = output_already_exists(
+            Path::new("/home/operator/Données/very-long-output-directory-name"),
+            OsStr::new("evil\u{202e}name"),
+        );
         let msg = format!("{err}");
         assert!(msg.contains("Output already exists"), "got: {msg}");
         assert!(
-            msg.contains("\\u{202e}"),
-            "expected escaped form, got: {msg}"
+            msg.contains("Données"),
+            "operator path must stay raw: {msg}"
+        );
+        assert!(
+            msg.contains("evil\\u{202e}name"),
+            "hostile root name must be escaped: {msg}"
+        );
+        assert!(
+            !msg.contains('\u{202e}'),
+            "raw direction-override character leaked: {msg:?}"
         );
 
-        // End-to-end through unarchive: the raw character must never
-        // reach the message. (The sanitizer also truncates long text,
-        // and the tempdir prefix can consume the display budget before
-        // the escape — so only the absence is pinned here.)
+        // End-to-end through unarchive: the raw character never reaches
+        // the message, and the colliding name is present in full.
         let tmp = tempfile::TempDir::new().unwrap();
         let name = "evil\u{202e}name";
         fs::write(tmp.path().join(name), b"existing").unwrap();
@@ -1596,6 +1609,10 @@ mod tests {
         let err = unarchive_default(archive, tmp.path()).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("Output already exists"), "got: {msg}");
+        assert!(
+            msg.contains("evil\\u{202e}name"),
+            "colliding name must appear escaped and in full: {msg}"
+        );
         assert!(
             !msg.contains('\u{202e}'),
             "raw direction-override character leaked: {msg:?}"

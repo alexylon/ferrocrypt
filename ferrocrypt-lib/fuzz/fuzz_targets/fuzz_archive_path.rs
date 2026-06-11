@@ -86,8 +86,12 @@ fn assert_accepted_path_invariants(path: &str, limits: &ArchiveLimits) {
         );
 
         // The spec's reserved-device check is ASCII-case-insensitive
-        // only, so the oracle folds the same way.
-        let stem = component.split('.').next().unwrap_or(component);
+        // only, and Windows strips trailing spaces from the stem before
+        // resolving it, so the oracle folds and trims the same way.
+        let stem = component
+            .split_once('.')
+            .map_or(component, |(stem, _)| stem)
+            .trim_end_matches(' ');
         let stem_lower = stem.to_ascii_lowercase();
         assert!(
             !RESERVED_DEVICE_NAMES.contains(&stem_lower.as_str()),

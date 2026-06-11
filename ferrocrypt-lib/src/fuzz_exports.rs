@@ -16,9 +16,12 @@
 
 pub use crate::archive::format::{parse_fca_header, parse_manifest_bytes};
 pub use crate::archive::model::{ArchiveEntry, ArchiveEntryKind, FcaHeader, Manifest};
-pub use crate::archive::path::{ascii_case_collision_key, validate_fca_path};
+pub use crate::archive::path::{
+    FCA_COMPONENT_MAX_BYTES, ascii_case_collision_key, validate_fca_path,
+};
 pub use crate::crypto::kdf::{KDF_PARAMS_SIZE, KdfParams};
 pub use crate::crypto::tlv::validate_tlv;
+pub use crate::fs::paths::INCOMPLETE_SUFFIX;
 pub use crate::key::private::PrivateKeyHeader;
 pub use crate::key::public::RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT;
 pub use crate::recipient::native::x25519::validate_private_key_shape;

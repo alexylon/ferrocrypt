@@ -9,13 +9,105 @@
 //! are exactly what reaches `validate_fca_path` in production, so this
 //! is the right input shape — not raw bytes via `OsStr::from_bytes`
 //! (which would test a code path that doesn't exist for FCA).
+//!
+//! On `Ok`, the target asserts every property the FORMAT.md §9.6
+//! grammar promises, so a regression that starts ACCEPTING hostile
+//! paths — the security-relevant failure direction for a validator —
+//! crashes the fuzzer instead of passing silently.
 
 use ferrocrypt::ArchiveLimits;
-use ferrocrypt::fuzz_exports::validate_fca_path;
+use ferrocrypt::fuzz_exports::{FCA_COMPONENT_MAX_BYTES, validate_fca_path};
 use libfuzzer_sys::fuzz_target;
+
+/// FORMAT.md §9.6 reserved device names, restated independently of
+/// the production table on purpose: an oracle that read the same
+/// constant would be true by construction.
+const RESERVED_DEVICE_NAMES: &[&str] = &[
+    "con",
+    "prn",
+    "aux",
+    "nul",
+    "clock$",
+    "conin$",
+    "conout$",
+    "com0",
+    "com1",
+    "com2",
+    "com3",
+    "com4",
+    "com5",
+    "com6",
+    "com7",
+    "com8",
+    "com9",
+    "com\u{b9}",
+    "com\u{b2}",
+    "com\u{b3}",
+    "lpt0",
+    "lpt1",
+    "lpt2",
+    "lpt3",
+    "lpt4",
+    "lpt5",
+    "lpt6",
+    "lpt7",
+    "lpt8",
+    "lpt9",
+    "lpt\u{b9}",
+    "lpt\u{b2}",
+    "lpt\u{b3}",
+];
+
+/// Asserts the FORMAT.md §9.6 grammar promises on a path the
+/// validator accepted.
+fn assert_accepted_path_invariants(path: &str, limits: &ArchiveLimits) {
+    assert!(!path.is_empty());
+    assert!(path.len() <= limits.max_path_bytes as usize);
+    assert!(!path.starts_with('/') && !path.ends_with('/'), "{path:?}");
+    assert!(!path.contains("//"), "{path:?}");
+    assert!(!path.contains('\0'), "{path:?}");
+    assert!(!path.contains('\\'), "{path:?}");
+
+    let components: Vec<&str> = path.split('/').collect();
+    assert!(components.len() <= limits.max_path_depth as usize);
+    for component in components {
+        assert!(!component.is_empty(), "{path:?}");
+        assert_ne!(component, ".");
+        assert_ne!(component, "..");
+        assert!(component.len() <= FCA_COMPONENT_MAX_BYTES, "{component:?}");
+        assert!(!component.bytes().any(|b| b <= 0x1f), "{component:?}");
+        assert!(
+            !component.bytes().any(|b| b"<>:\"|?*".contains(&b)),
+            "{component:?}"
+        );
+        assert!(
+            !component.ends_with(' ') && !component.ends_with('.'),
+            "{component:?}"
+        );
+
+        // The spec's reserved-device check is ASCII-case-insensitive
+        // only, so the oracle folds the same way.
+        let stem = component.split('.').next().unwrap_or(component);
+        let stem_lower = stem.to_ascii_lowercase();
+        assert!(
+            !RESERVED_DEVICE_NAMES.contains(&stem_lower.as_str()),
+            "reserved device name accepted: {component:?}"
+        );
+    }
+
+    for component in std::path::Path::new(path).components() {
+        assert!(
+            matches!(component, std::path::Component::Normal(_)),
+            "non-normal host component accepted: {path:?}"
+        );
+    }
+}
 
 fuzz_target!(|data: &[u8]| {
     if let Ok(s) = std::str::from_utf8(data) {
-        let _ = validate_fca_path(s, ArchiveLimits::default());
+        let limits = ArchiveLimits::default();
+        if validate_fca_path(s, limits).is_ok() {
+            assert_accepted_path_invariants(s, &limits);
+        }
     }
 });

@@ -34,8 +34,7 @@ const FILESYSTEM_NAME_MAX_BYTES: usize = 255;
 /// component (§9.11 step 10). Without the reserve, a near-limit root
 /// name would archive fine and then fail to extract because its
 /// working name exceeds what the filesystem can create.
-pub(crate) const FCA_COMPONENT_MAX_BYTES: usize =
-    FILESYSTEM_NAME_MAX_BYTES - INCOMPLETE_SUFFIX.len();
+pub const FCA_COMPONENT_MAX_BYTES: usize = FILESYSTEM_NAME_MAX_BYTES - INCOMPLETE_SUFFIX.len();
 
 /// Rejection reason for an over-long component. Kept next to
 /// [`FCA_COMPONENT_MAX_BYTES`]; a unit test pins the embedded number

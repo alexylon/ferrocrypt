@@ -17,8 +17,9 @@ use crate::CryptoError;
 /// not-yet-finalised output) is never visible under the final name.
 /// Used by `container::write_encrypted_file` for the streaming
 /// `.fcr` tempfile and by `archive::decode::unarchive` for the per-root
-/// rename-into-place pattern.
-pub(crate) const INCOMPLETE_SUFFIX: &str = ".incomplete";
+/// rename-into-place pattern. `pub` (in a private module) so
+/// `fuzz_exports` can re-export it for the full-pipeline fuzz oracle.
+pub const INCOMPLETE_SUFFIX: &str = ".incomplete";
 
 /// Opens `path` read-only for header probing, decryption, or key-file
 /// reading, refusing FIFOs, sockets, and device nodes.

@@ -123,12 +123,12 @@ mod tests {
         let v2_priv = b"FCR\0\x02K\x01\x00\x00";
         assert_eq!(KeyFileKind::classify(v2_priv), KeyFileKind::Private);
 
-        // Magic but type byte is 'S' (a symmetric .fcr) → Unknown,
+        // Magic but kind byte 'E' (an encrypted .fcr) → Unknown,
         // not Private. The `.fcr` mix-up heuristic lives elsewhere
         // (`probe_recipient_mode`); a key-file path should not
         // claim it.
-        let fcr_symmetric = b"FCR\0\x01Sxx\x00\x00";
-        assert_eq!(KeyFileKind::classify(fcr_symmetric), KeyFileKind::Unknown);
+        let fcr_encrypted = b"FCR\0\x01Exx\x00\x00";
+        assert_eq!(KeyFileKind::classify(fcr_encrypted), KeyFileKind::Unknown);
 
         // Bare magic, too short for the signature → Unknown.
         assert_eq!(KeyFileKind::classify(b"FCR\0"), KeyFileKind::Unknown);

@@ -7,21 +7,31 @@
 //!
 //! The writer is two-pass:
 //!
-//! 1. **Metadata pass** — recursively walks the source tree via
-//!    `std::fs::read_dir`, building a [`Manifest`] of [`ArchiveEntry`]s
-//!    with FCA-canonical paths, modes, sizes, and source paths.
-//!    Symlinks, FIFOs, sockets, devices, and Windows reparse points are
-//!    rejected inline. Entry-count, total-bytes, depth, path-byte, and
-//!    manifest-size caps are applied progressively, and every path is
-//!    routed through [`validate_fca_path`] so the writer never emits
-//!    a path its own reader would refuse.
+//! 1. **Metadata pass** — iteratively walks the source tree over
+//!    `cap_std::fs::Dir::entries`, driven by a heap-backed stack of
+//!    pending directories with deferred child opens (live handles
+//!    track the depth of the tree, not its width, and deep nesting
+//!    cannot overflow the process stack). Builds a [`Manifest`] of
+//!    [`ArchiveEntry`]s with FCA-canonical paths, modes, sizes, and
+//!    source paths. Symlinks, FIFOs, sockets, devices, and Windows
+//!    reparse points are rejected inline. Entry-count, total-bytes,
+//!    depth, path-byte, and manifest-size caps are applied
+//!    progressively, and every path is routed through
+//!    [`validate_fca_path`] so the writer never emits a path its own
+//!    reader would refuse.
 //!
 //! 2. **Content pass** — for each file entry in canonical manifest
-//!    order, reopens the source file with `O_NOFOLLOW` (Unix) or
-//!    `symlink_metadata` + `File::open` (non-Unix), refreshes metadata
-//!    from the open handle, requires the source is still a regular
-//!    file with `len() == manifest size`, and streams exactly the
-//!    declared size via [`copy_exact_n`].
+//!    order, re-opens the source without following symlinks and
+//!    without blocking on a substituted FIFO: directory descendants
+//!    re-anchor through the directory capability held since the
+//!    metadata pass, then take a no-follow non-blocking leaf open;
+//!    single-file roots use a leaf-only `O_NOFOLLOW | O_NONBLOCK`
+//!    open on Unix, `FILE_FLAG_OPEN_REPARSE_POINT` plus a metadata
+//!    post-check on Windows, and a `symlink_metadata` + `File::open`
+//!    fallback on other targets. Then refreshes metadata from the
+//!    open handle, requires the source is still a regular file with
+//!    `len() == manifest size`, and streams exactly the declared
+//!    size via [`copy_exact_n`].
 //!
 //! Between the two passes the source tree may change. FORMAT.md §9.10
 //! defines the response: shrink / type change / inaccessible →

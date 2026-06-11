@@ -678,7 +678,7 @@ mod tests {
     /// path or archive defect. Loop-pin against the full byte set
     /// so a future relaxation of the rejection is caught.
     ///
-    /// See `notes/tar_rs_crosscheck.md` §5 for the cross-check finding.
+    /// See `notes/done/tar_rs_crosscheck.md` §5 for the cross-check finding.
     #[test]
     fn rejects_every_tar_rs_malicious_path() {
         let corpus: &[&str] = &[

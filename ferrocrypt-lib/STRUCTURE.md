@@ -183,7 +183,8 @@ It contains:
 - crate-level documentation;
 - public re-exports;
 - feature gates;
-- public constants re-exported from their owning modules.
+- public constants re-exported from their owning modules;
+- the definitions of the shared public vocabulary types — `UnauthenticatedRecipientMode`, the sealed `AuthenticatedRecipientMode` and its kind enum, `ProgressEvent`, and the outcome structs. These live in the crate root because lower layers (`recipient/policy.rs`, `protocol.rs`) reference them; defining them in `api.rs` would invert the §11 dependency direction, so the crate root is the only cycle-free home shared by the façade and the layers below it.
 
 It does not contain:
 
@@ -695,12 +696,9 @@ It does not contain X25519-specific recipient policy. The X25519 recipient modul
 It contains:
 
 - default filenames `public.key` and `private.key`;
-- key-file classification;
-- key-file read wrappers;
-- key-file write wrappers;
-- staging for generated key files.
+- key-file classification (`KeyFileKind`).
 
-Key-file staging uses filesystem helpers from `fs/` and does not duplicate atomic-output behavior.
+Key-file reads go through `fs/paths.rs::read_file_capped`, called directly by the readers in `key/public.rs` and `recipient/native/x25519.rs`. Write staging for generated key files is owned by `protocol.rs` key generation through the atomic-output helpers in `fs/atomic.rs`; nothing duplicates that behavior.
 
 ---
 
@@ -759,7 +757,7 @@ The wrapper helpers `enforce_per_entry_caps` and `enforce_total_bytes_cap` are u
 
 ### 7.4 `archive/path.rs`
 
-`archive/path.rs` owns the FCA path grammar — the **single shared writer/reader validator** (the spec §19.3 symmetry guarantee).
+`archive/path.rs` owns the FCA path grammar — the **single shared writer/reader validator** (the spec §9.6/§9.10 symmetry guarantee).
 
 It rejects:
 
@@ -796,7 +794,7 @@ This is one of the most security-sensitive modules. It must be heavily tested, i
 - no ASCII-case-insensitive duplicate paths;
 - declared `total_file_bytes` within `max_total_plaintext_bytes`.
 
-Order-independent (HashMap-based parent lookup), so non-canonical manifest orders satisfying the tree shape are accepted per spec §10.
+Order-independent (HashMap-based parent lookup), so non-canonical manifest orders satisfying the tree shape are accepted per spec §9.8.
 
 ### 7.6 `archive/encode.rs`
 
@@ -813,8 +811,8 @@ It rejects:
 
 The writer is two-pass:
 
-1. **Metadata pass** — recursive `fs::read_dir` walk that builds a `Manifest` with FCA-canonical paths, modes, sizes, and source paths. Caps (entry count, total bytes, depth, path-bytes, manifest-size) apply progressively. The result is sorted by `(component_count, path_utf8)` per spec §10 for deterministic output.
-2. **Content pass** — for each file entry in canonical manifest order, reopens the source file with `O_NOFOLLOW` (Unix) or `symlink_metadata` + `File::open` (non-Unix), refreshes metadata from the open handle, requires the source is still a regular file with `len() == manifest size`, and streams exactly the declared size via `copy_exact_n`. Source mutation between passes is handled per spec §15.5.
+1. **Metadata pass** — iterative walk of the source tree over `cap_std::fs::Dir::entries`, driven by a heap-backed stack of pending directories with deferred child opens (live handles track the depth of the tree, not its width, and deep nesting cannot overflow the process stack). Builds a `Manifest` with FCA-canonical paths, modes, sizes, and source paths. Caps (entry count, total bytes, depth, path-bytes, manifest-size) apply progressively. The result is sorted by `(component_count, path_utf8)` per spec §9.8 for deterministic output.
+2. **Content pass** — for each file entry in canonical manifest order, re-opens the source without following symlinks and without blocking on a substituted FIFO: directory descendants re-anchor through the directory capability held since the metadata pass (per-component no-follow walk, then a no-follow non-blocking leaf open); single-file roots use a leaf-only `O_NOFOLLOW | O_NONBLOCK` open on Unix, `FILE_FLAG_OPEN_REPARSE_POINT` plus a metadata post-check on Windows, and a `symlink_metadata` + `File::open` fallback on other targets. Then refreshes metadata from the open handle, requires the source is still a regular file with `len() == manifest size`, and streams exactly the declared size via `copy_exact_n`. Source mutation between passes is handled per spec §9.10.
 
 Hardlinks are archived as independent regular-file contents (no link identity is stored). Setuid/setgid/sticky bits are stripped on write via `PERMISSION_BITS_MASK`.
 
@@ -1087,7 +1085,7 @@ Ownership split:
 
 - X25519 key generation lives in `recipient/native/x25519.rs`.
 - Key serialization lives in `key/`.
-- Key-file staging lives in `key/files.rs` and `fs/`.
+- Key-file staging lives in `protocol.rs` key generation, through the atomic-output helpers in `fs/`.
 
 `KeyPairGenerator` mirrors `Encryptor`'s reader-aligned cap rule for the passphrase that seals `private.key`: `kdf_params.mem_cost <= kdf_limit.max_mem_cost_kib` (default 1 GiB) is enforced at `write` time before Argon2id runs. Above-default `mem_cost` rejects with `CryptoError::KdfResourceCapExceeded`; the unlocking [`PrivateKeyDecryptor`] must be configured via [`PrivateKeyDecryptor::kdf_limit`] with a matching [`KdfLimit`].
 
@@ -1181,7 +1179,7 @@ protocol.rs
 
 Dependency rules:
 
-- `format.rs` depends only on `error.rs` and the `crypto/` primitive layer (`crypto/mac` and `crypto/keys`), the latter for the typed `compute_header_mac` / `verify_header_mac` wrappers; it does not depend on any higher-layer module.
+- `format.rs` depends only on `error.rs` and the `crypto/` primitive layer (`crypto/mac` and `crypto/keys` for the typed `compute_header_mac` / `verify_header_mac` wrappers, plus the `STREAM_NONCE_SIZE` constant from `crypto/stream`); it does not depend on any higher-layer module.
 - `crypto/*` does not depend on `protocol.rs`, `archive/*`, or `fs/*`.
 - `recipient/native/*` does not call `container.rs` or `archive/*`.
 - `archive/*` does not know about recipients, keys, or encrypted-header structure.

@@ -33,9 +33,12 @@ secrecy = "0.10"
 thiserror = "2"
 chacha20poly1305 = { version = "0.10", features = ["std", "stream"] }
 argon2 = { version = "0.5", features = ["std", "zeroize"] }
-# hmac 0.13 and hkdf 0.13 require sha3 0.11
-sha3 = "0.11"
-hmac = "0.13"
+# hmac 0.13 and hkdf 0.13 require sha3 0.11. The `zeroize` features wipe
+# the SHA3 sponge state and the HMAC input buffer on drop; hkdf has no
+# feature of its own, but it holds an `Hmac` internally, so the same
+# features cover its PRK state.
+sha3 = { version = "0.11", features = ["zeroize"] }
+hmac = { version = "0.13", features = ["zeroize"] }
 hkdf = "0.13"
 # constant_time_eq requires MSRV 1.95
 constant_time_eq = "0.4"

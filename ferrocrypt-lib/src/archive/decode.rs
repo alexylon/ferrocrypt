@@ -48,6 +48,7 @@ use std::path::{Path, PathBuf};
 use cap_std::fs::Dir;
 
 use crate::CryptoError;
+use crate::crypto::stream::read_uninterrupted;
 use crate::fs::atomic::{promote_single_file_no_clobber, rename_no_clobber};
 use crate::fs::paths::{INCOMPLETE_SUFFIX, reject_occupied};
 
@@ -352,14 +353,16 @@ fn apply_root_file_mode(output_dir: &Path, manifest: &Manifest) -> Result<(), Cr
 }
 
 /// FORMAT.md §9.9: rejects any non-EOF byte after the last declared
-/// file content. The `?` on `read` threads `StreamError` markers from
-/// the underlying decrypt stream through `From<io::Error> for CryptoError`
+/// file content. Reads via [`read_uninterrupted`] so a signal landing
+/// on this final probe cannot fail an otherwise fully-extracted
+/// archive. Other read errors thread `StreamError` markers from the
+/// underlying decrypt stream through `From<io::Error> for CryptoError`
 /// so an authentication / truncation / extra-data signal surfaces as
 /// the typed `CryptoError::Payload*` variant rather than as a generic
 /// archive error.
 fn verify_archive_eof<R: Read>(reader: &mut R) -> Result<(), CryptoError> {
     let mut b = [0u8; 1];
-    match reader.read(&mut b) {
+    match read_uninterrupted(reader, &mut b) {
         Ok(0) => Ok(()),
         Ok(_) => Err(CryptoError::InvalidInput(
             "Trailing data after archive file contents".to_string(),
@@ -446,6 +449,28 @@ mod tests {
     use super::*;
     use crate::archive::format::{serialize_manifest_unchecked, write_fca_header};
     use std::io::Cursor;
+
+    /// An `Interrupted` read at the end-of-payload probe is retried
+    /// like every other read in the extraction pipeline, instead of
+    /// failing an already fully-streamed archive.
+    #[test]
+    fn verify_archive_eof_retries_interrupted() {
+        struct EintrThenEof {
+            fired: bool,
+        }
+        impl Read for EintrThenEof {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                if self.fired {
+                    Ok(0)
+                } else {
+                    self.fired = true;
+                    Err(io::Error::new(io::ErrorKind::Interrupted, "eintr"))
+                }
+            }
+        }
+        verify_archive_eof(&mut EintrThenEof { fired: false })
+            .expect("EINTR followed by EOF must verify");
+    }
 
     // -- Test fixtures -----------------------------------------------------
 

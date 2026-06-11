@@ -4,6 +4,10 @@ All notable changes to FerroCrypt are documented in this file.
 
 ## [Unreleased]
 
+### Security
+- **A FIFO swapped in for a source file can no longer stall encryption.** Encryption reads each source file twice (a scan pass and a content pass); replacing a scanned file with a FIFO before the content pass previously blocked the process indefinitely inside the open call on Unix. The content-pass open is now non-blocking and the substituted entry is rejected, matching the guard that decryption, probing, and key-file reading already apply.
+- **HMAC and HKDF working state is now wiped from memory when dropped.** The internal hash state these computations derive from per-file keys was previously freed without wiping after each header authentication or key derivation, the same memory-residue class as the Argon2id fix in 0.3.0-beta.3. That state is now zeroized when each computation is dropped.
+
 ## [0.3.0-beta.3] - 2026-06-11
 
 ### Added

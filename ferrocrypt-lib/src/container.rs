@@ -42,7 +42,7 @@ use crate::crypto::stream::{STREAM_NONCE_SIZE, payload_encryptor};
 use crate::error::{CryptoError, FormatDefect};
 use crate::format::{
     self, HEADER_FIXED_SIZE, HEADER_MAC_SIZE, HeaderFixed, Kind, PREFIX_SIZE, Prefix,
-    read_exact_or_truncated,
+    check_recipient_count, read_exact_or_truncated,
 };
 use crate::fs::atomic;
 use crate::fs::paths::{INCOMPLETE_SUFFIX, parent_or_cwd, reject_occupied};
@@ -423,17 +423,25 @@ pub(crate) fn build_encrypted_header(
     payload_key: PayloadKey,
     header_key: &HeaderKey,
 ) -> Result<BuiltEncryptedHeader, CryptoError> {
+    // Count cap before the serialization loop, so an oversized entry
+    // list is rejected before the entries buffer is built (caps before
+    // allocation), independent of the caller's preflight. The
+    // saturating cast is honest: a count at `u16::MAX` always trips
+    // `check_recipient_count`. `validate_structural` re-checks the
+    // count on the assembled header below.
+    let recipient_count: u16 = recipient_entries.len().try_into().unwrap_or(u16::MAX);
+    check_recipient_count(recipient_count)?;
+
     let mut entries_bytes = Vec::new();
     for entry in recipient_entries {
         entries_bytes.extend_from_slice(&entry.to_bytes_checked()?);
     }
-    // Saturating casts: structural-range rejections (`count > MAX`,
-    // `ext_len > MAX`, `count == 0`) are emitted by
-    // `HeaderFixed::validate_structural` below. Casts at u32::MAX /
-    // u16::MAX always trip the corresponding `check_*` helper, so the
+    // Saturating casts: structural-range rejections (`ext_len > MAX`,
+    // section-length consistency) are emitted by
+    // `HeaderFixed::validate_structural` below. Casts at u32::MAX
+    // always trip the corresponding `check_*` helper, so the
     // saturating fallback is honest about "too big to represent" while
     // still surfacing the typed cap-exceeded variant.
-    let recipient_count: u16 = recipient_entries.len().try_into().unwrap_or(u16::MAX);
     let recipient_entries_len: u32 = entries_bytes.len().try_into().unwrap_or(u32::MAX);
     let ext_len: u32 = ext_bytes.len().try_into().unwrap_or(u32::MAX);
 
@@ -542,7 +550,7 @@ pub(crate) fn write_encrypted_file(
     tmp.as_file_mut().write_all(&built.header_mac)?;
 
     let encrypt_writer = payload_encryptor(&built.payload_key, &built.stream_nonce, tmp);
-    let (_, encrypt_writer) = archive::archive(input_path, encrypt_writer, archive_limits)?;
+    let encrypt_writer = archive::archive(input_path, encrypt_writer, archive_limits)?;
     let tmp = encrypt_writer.finish()?;
     tmp.as_file().sync_all()?;
 
@@ -680,6 +688,35 @@ mod tests {
         match err {
             CryptoError::InvalidFormat(FormatDefect::RecipientCountOutOfRange { count: 0 }) => {}
             other => panic!("expected RecipientCountOutOfRange(0), got {other:?}"),
+        }
+    }
+
+    /// An entry list longer than the structural maximum is rejected
+    /// before any entry is serialized, independent of the caller's
+    /// preflight.
+    #[test]
+    fn build_rejects_recipient_count_above_structural_max() {
+        let DerivedSubkeys {
+            payload_key,
+            header_key,
+        } = dummy_subkeys();
+        let over = usize::from(HeaderReadLimits::RECIPIENT_COUNT_STRUCTURAL_MAX) + 1;
+        let entries: Vec<_> = (0..over)
+            .map(|_| dummy_entry(argon2id::TYPE_NAME, argon2id::BODY_LENGTH))
+            .collect();
+        let err = build_encrypted_header(
+            &entries,
+            b"",
+            [0u8; STREAM_NONCE_SIZE],
+            payload_key,
+            &header_key,
+        )
+        .unwrap_err();
+        match err {
+            CryptoError::InvalidFormat(FormatDefect::RecipientCountOutOfRange { count }) => {
+                assert_eq!(usize::from(count), over);
+            }
+            other => panic!("expected RecipientCountOutOfRange, got {other:?}"),
         }
     }
 

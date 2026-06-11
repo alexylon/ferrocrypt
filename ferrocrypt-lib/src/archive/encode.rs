@@ -40,7 +40,6 @@ use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions};
 
 use crate::CryptoError;
-use crate::fs::paths::file_stem;
 
 #[cfg(unix)]
 use super::format::PERMISSION_BITS_MASK;
@@ -188,18 +187,21 @@ fn reject_windows_reparse_point_cap(
 }
 
 /// Opens a regular file for reading without following symlinks. On
-/// Unix uses `O_NOFOLLOW` so the open itself is atomic; on Windows uses
-/// `FILE_FLAG_OPEN_REPARSE_POINT` plus a metadata post-check so a racing
-/// symlink/junction replacement is rejected instead of followed. Other
-/// non-Unix targets fall back to a `symlink_metadata` pre-check followed
-/// by `File::open`.
+/// Unix uses `O_NOFOLLOW` so the open itself is atomic, plus
+/// `O_NONBLOCK` so a FIFO substituted for the source cannot block the
+/// process inside `open(2)` — the caller's post-open type check
+/// rejects it, and the flag has no effect on regular-file reads. On
+/// Windows uses `FILE_FLAG_OPEN_REPARSE_POINT` plus a metadata
+/// post-check so a racing symlink/junction replacement is rejected
+/// instead of followed. Other non-Unix targets fall back to a
+/// `symlink_metadata` pre-check followed by `File::open`.
 #[cfg(unix)]
 fn open_no_follow(path: &Path) -> Result<File, CryptoError> {
     use std::fs::OpenOptions;
     use std::os::unix::fs::OpenOptionsExt;
     OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
         .map_err(|e| {
             if e.raw_os_error() == Some(libc::ELOOP) {
@@ -861,6 +863,14 @@ fn stream_directory_descendant<W: Write>(
 
     let mut options = OpenOptions::new();
     options.read(true).follow(FollowSymlinks::No);
+    // O_NONBLOCK so a FIFO substituted for the source file cannot
+    // block the open; the type check below rejects it. No effect on
+    // regular-file reads.
+    #[cfg(unix)]
+    {
+        use cap_fs_ext::OpenOptionsSyncExt;
+        options.nonblock(true);
+    }
     let mut file = parent
         .open_with(&file_name, &options)
         .map_err(CryptoError::Io)?;
@@ -885,13 +895,14 @@ fn stream_directory_descendant<W: Write>(
 }
 
 /// Archives a file or directory into the FCA wire format. Returns the
-/// output stem (file stem for file inputs, directory name for
-/// directory inputs) plus the writer for the caller to finalize.
+/// writer for the caller to finalize. The encrypted output's filename
+/// is owned by `fs::paths::encryption_base_name`, resolved by the
+/// orchestrator before archiving starts.
 pub(crate) fn archive<W: Write>(
     input_path: impl AsRef<Path>,
     mut writer: W,
     limits: ArchiveLimits,
-) -> Result<(String, W), CryptoError> {
+) -> Result<W, CryptoError> {
     let input_path = input_path.as_ref();
     let limits = limits.validate()?;
 
@@ -948,22 +959,7 @@ pub(crate) fn archive<W: Write>(
         }
     }
 
-    let stem = output_stem(input_path)?;
-    Ok((stem, writer))
-}
-
-/// Returns the output stem used to name the encrypted output file.
-/// For file inputs, the file stem (no extension); for directory
-/// inputs, the full directory name (preserving any dots).
-fn output_stem(input_path: &Path) -> Result<String, CryptoError> {
-    if input_path.is_dir() {
-        let name = input_path
-            .file_name()
-            .ok_or_else(|| CryptoError::InvalidInput("Cannot get directory name".to_string()))?;
-        Ok(name.to_string_lossy().into_owned())
-    } else {
-        Ok(file_stem(input_path)?.to_string_lossy().into_owned())
-    }
+    Ok(writer)
 }
 
 #[cfg(test)]
@@ -1114,25 +1110,6 @@ mod tests {
         let _ = archive(&dir, &mut buf2, ArchiveLimits::default()).unwrap();
 
         assert_eq!(buf1, buf2);
-    }
-
-    /// The output stem returned by `archive` follows the existing
-    /// internal API: file stem for files, dir name for directories.
-    #[test]
-    fn returns_correct_output_stem() {
-        let src = tempfile::TempDir::new().unwrap();
-        let mut buf = Vec::new();
-
-        let file = src.path().join("hello.txt");
-        fs::write(&file, b"x").unwrap();
-        let (stem, _) = archive(&file, &mut buf, ArchiveLimits::default()).unwrap();
-        assert_eq!(stem, "hello");
-
-        buf.clear();
-        let dotfile = src.path().join("photos.v1");
-        fs::create_dir(&dotfile).unwrap();
-        let (stem, _) = archive(&dotfile, &mut buf, ArchiveLimits::default()).unwrap();
-        assert_eq!(stem, "photos.v1");
     }
 
     // -- Writer-side rejections --------------------------------------------
@@ -1797,6 +1774,70 @@ mod tests {
             format!("{err}").contains(platform::SYMLINK_IN_ARCHIVE_SOURCE),
             "expected `{}` rejection, got: {err}",
             platform::SYMLINK_IN_ARCHIVE_SOURCE,
+        );
+    }
+
+    /// Creates a FIFO via the POSIX `mkfifo` utility. A subprocess
+    /// keeps the crate free of an `unsafe` `libc::mkfifo` call
+    /// (`rustix` exposes no FIFO creation on Apple targets).
+    #[cfg(unix)]
+    fn make_fifo(path: &Path) {
+        let status = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .expect("spawn mkfifo");
+        assert!(status.success(), "mkfifo failed for {}", path.display());
+    }
+
+    /// A FIFO swapped in for a single-file root between the metadata
+    /// and content passes is rejected by the post-open type check.
+    /// Without `O_NONBLOCK` on the content-pass re-open, this test
+    /// would hang inside `open(2)` waiting for a FIFO writer.
+    #[cfg(unix)]
+    #[test]
+    fn stream_source_file_rejects_fifo_swapped_for_file_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let file = tmp.path().join("data.bin");
+        fs::write(&file, b"trusted").unwrap();
+
+        let mut entry = make_entry("data.bin", ArchiveEntryKind::File, 7, 0o644);
+        entry.source_path = Some(file.clone());
+
+        fs::remove_file(&file).unwrap();
+        make_fifo(&file);
+
+        let mut buf = Vec::new();
+        let err = stream_source_file(&entry, None, &mut buf).unwrap_err();
+        assert!(
+            format!("{err}").contains("no longer a regular file"),
+            "expected regular-file rejection, got: {err}"
+        );
+    }
+
+    /// The same FIFO swap aimed at a directory descendant: the
+    /// capability-anchored content-pass re-open must reject it
+    /// without blocking.
+    #[cfg(unix)]
+    #[test]
+    fn stream_source_file_rejects_fifo_swapped_for_descendant() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src_root = tmp.path().join("source");
+        fs::create_dir_all(&src_root).unwrap();
+        fs::write(src_root.join("file.txt"), b"trusted").unwrap();
+
+        let source_root = platform::open_anchor(&src_root).unwrap();
+
+        let mut entry = make_entry("source/file.txt", ArchiveEntryKind::File, 7, 0o644);
+        entry.source_path = Some(PathBuf::from("file.txt"));
+
+        fs::remove_file(src_root.join("file.txt")).unwrap();
+        make_fifo(&src_root.join("file.txt"));
+
+        let mut buf = Vec::new();
+        let err = stream_source_file(&entry, Some(&source_root), &mut buf).unwrap_err();
+        assert!(
+            format!("{err}").contains("no longer a regular file"),
+            "expected regular-file rejection, got: {err}"
         );
     }
 }

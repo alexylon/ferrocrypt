@@ -73,7 +73,6 @@ pub fn serialize_manifest(
 /// FCA bytes under default limits.
 pub fn archive_for_fuzz(input_path: &std::path::Path) -> Result<Vec<u8>, crate::CryptoError> {
     crate::archive::archive(input_path, Vec::new(), crate::ArchiveLimits::default())
-        .map(|(_root_name, bytes)| bytes)
 }
 
 /// Fixed key and nonce for the STREAM fuzz harness. Deterministic on

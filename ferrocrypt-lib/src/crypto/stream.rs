@@ -56,8 +56,9 @@ fn stream_io_error(kind: io::ErrorKind, err: StreamError) -> io::Error {
 
 /// Reads from `input`, retrying on [`io::ErrorKind::Interrupted`].
 ///
-/// Single source of truth for EINTR handling in the streaming copy
-/// loops ([`DecryptReader`] here and `archive::format::copy_exact_n`).
+/// Single source of truth for EINTR handling on the streaming read
+/// paths ([`DecryptReader`] here, `archive::format::copy_exact_n`, and
+/// the archive reader's end-of-payload probe).
 /// An `Interrupted` error that escapes a stateful loop cannot be
 /// retried from outside: the caller does not know how many bytes the
 /// loop already consumed, so a contract-conforming retry re-enters the
@@ -184,9 +185,21 @@ impl<W: Write> Write for EncryptWriter<W> {
                 let encryptor = self.encryptor.as_mut().ok_or_else(|| {
                     stream_io_error(io::ErrorKind::Other, StreamError::StateExhausted)
                 })?;
-                encryptor
+                if encryptor
                     .encrypt_next_in_place(b"", &mut self.chunk)
-                    .map_err(|_| stream_io_error(io::ErrorKind::Other, StreamError::EncryptAead))?;
+                    .is_err()
+                {
+                    // The chunk still holds plaintext. Zeroize and
+                    // poison so reuse after this error fails closed,
+                    // exactly as the sink-failure arm below.
+                    self.chunk.zeroize();
+                    self.encryptor = None;
+                    self.output = None;
+                    return Err(stream_io_error(
+                        io::ErrorKind::Other,
+                        StreamError::EncryptAead,
+                    ));
+                }
                 self.chunk_count += 1;
                 let output = self.output.as_mut().ok_or_else(|| {
                     stream_io_error(io::ErrorKind::Other, StreamError::StateExhausted)

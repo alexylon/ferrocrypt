@@ -628,7 +628,9 @@ fn check_header_flags(flags: u16) -> Result<(), CryptoError> {
     Ok(())
 }
 
-fn check_recipient_count(count: u16) -> Result<(), CryptoError> {
+// `pub(crate)` so the header writer can cap the entry count before
+// serializing; the reader path reaches it via `validate_structural`.
+pub(crate) fn check_recipient_count(count: u16) -> Result<(), CryptoError> {
     if count == 0 || count > RECIPIENT_COUNT_MAX {
         return Err(CryptoError::InvalidFormat(
             FormatDefect::RecipientCountOutOfRange { count },

@@ -259,10 +259,11 @@ pub fn decode_recipient_string(
     // in `bech32` that check runs only on the segwit decode path, and
     // `byte_iter` silently drops the trailing bits. Enforced below.
     let checked = CheckedHrpstring::new::<Bech32V1>(s).map_err(|_| {
-        // The echo helps the user spot a typo, but the input is
-        // attacker-suppliable ("encrypt to me") and terminal-bound:
-        // sanitize so it cannot carry control bytes, and truncate so
-        // one bad string cannot flood the message.
+        // The echo helps the user spot a typo. A recipient string is
+        // often received from someone else, so treat it as text an
+        // attacker may have chosen: sanitize away control bytes and
+        // truncate so one bad string cannot flood the terminal-bound
+        // message.
         CryptoError::InvalidInput(format!(
             "Invalid recipient string: {}",
             sanitize_for_display(s)

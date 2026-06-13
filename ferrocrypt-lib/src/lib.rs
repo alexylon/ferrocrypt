@@ -88,10 +88,16 @@
 //! ## Format compatibility
 //!
 //! The current on-disk format is FerroCrypt v1 for `.fcr`, `public.key`, and
-//! `private.key`. Files written by any release that produces format v1 will
-//! decrypt under any later release that supports format v1. If a future release
-//! introduces format v2, format v1 reading will be maintained for compatibility
-//! with older files.
+//! `private.key`. The compatibility guarantee starts with the first stable
+//! `0.3.0` release. During the `0.3.0` pre-release series (`-alpha.N`,
+//! `-beta.N`, `-rc.N`), the format is not yet frozen: files written by a
+//! pre-release or by `main` carry no cross-version guarantee and may fail to
+//! decrypt under a later pre-release.
+//!
+//! Once the format is frozen, files written by any release that produces
+//! format v1 will decrypt under any later release that supports format v1. If a
+//! future release introduces format v2, format v1 reading will be maintained for
+//! compatibility with older files.
 //!
 //! Older pre-v1 files and key pairs use a different format family and, for
 //! historical hybrid encryption, a different key-agreement stack. To migrate
@@ -100,7 +106,8 @@
 //!
 //! ## API stability
 //!
-//! The on-disk format is stable and versioned independently from the crate.
+//! The on-disk format is versioned independently from the crate; see
+//! *Format compatibility* above for its stability guarantee.
 //! The public Rust API ([`Encryptor`], [`Decryptor`], [`PublicKey`],
 //! [`PrivateKey`], the error types) is pre-1.0; it may change in minor releases
 //! (0.x → 0.y), while patch releases (0.x.y → 0.x.z) preserve it. See the
@@ -115,6 +122,13 @@
 //!   can decrypt, not who encrypted.
 //! - Ciphertext integrity is enforced; modification or wrong keys yield
 //!   [`CryptoError`] results rather than corrupted plaintext.
+//! - FerroCrypt authenticates each file as written, but it does not detect
+//!   replay or rollback to an older valid `.fcr`; use external versioning or a
+//!   freshness check if that matters.
+//! - FerroCrypt encrypts file contents and, for directory inputs, internal
+//!   names, tree structure, and per-file sizes. It does not hide the total
+//!   ciphertext length (an approximate plaintext-size signal), recipient count,
+//!   or that the file is a FerroCrypt `.fcr` container.
 //! - This crate is **not** third-party audited and is not advertised as
 //!   compliance-certified.
 //!

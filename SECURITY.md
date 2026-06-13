@@ -45,6 +45,16 @@ regression net, regenerated when the format intentionally changes).
 - **No sender authentication.** Public-key encryption controls who can
   decrypt a file, not who created it. Sender authentication requires a
   separate signing layer.
+- **No freshness or replay protection.** FerroCrypt authenticates each
+  file as written, but it does not know whether that file is the newest
+  version. A captured valid `.fcr` can be restored or replayed later
+  without detection. Use external versioning or a freshness check if
+  rollback/replay matters.
+- **Not fully metadata-hiding.** FerroCrypt encrypts file contents and,
+  for directory inputs, the internal names, tree structure, and
+  per-file sizes. It does not hide the total ciphertext length (an
+  approximate plaintext-size signal), the recipient count, or the fact
+  that the file is a FerroCrypt `.fcr` container.
 - **Not a backup or archive metadata format.** Directory encryption
   preserves file contents, directory structure, and Unix file
   permissions only. Ownership, timestamps, ACLs, extended attributes,

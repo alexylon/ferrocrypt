@@ -134,7 +134,8 @@ impl Encryptor {
     /// Configures encryption to one public-key recipient.
     ///
     /// This is a convenience wrapper around [`Encryptor::with_public_keys`]
-    /// for the common single-recipient case.
+    /// for the common single-recipient case. As with that constructor,
+    /// public-key encryption does not authenticate the sender.
     pub fn with_public_key(public_key: PublicKey) -> Self {
         Self {
             state: EncryptorState::Recipients(vec![public_key]),
@@ -151,6 +152,13 @@ impl Encryptor {
     /// Each recipient entry wraps the same per-file `file_key`
     /// independently, so any listed recipient can decrypt the resulting
     /// `.fcr` with their matching private key.
+    ///
+    /// # Security
+    ///
+    /// Public-key encryption controls who can decrypt the file, not who
+    /// created it. Anyone with a recipient's public key can produce a file
+    /// for that recipient. Use a separate signing layer if recipients must
+    /// verify sender identity.
     ///
     /// # Default-decrypt round-trip
     ///

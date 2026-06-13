@@ -122,6 +122,11 @@
 //!   can decrypt, not who encrypted.
 //! - Ciphertext integrity is enforced; modification or wrong keys yield
 //!   [`CryptoError`] results rather than corrupted plaintext.
+//! - Passphrase and key-pair writing reject Argon2id memory below a fixed
+//!   19 MiB floor with [`CryptoError::KdfBelowWriteFloor`], so a `.fcr` or
+//!   `private.key` cannot be sealed with a weak passphrase work factor by
+//!   accident. The floor applies only when writing; decryption accepts any
+//!   structurally valid file.
 //! - FerroCrypt authenticates each file as written, but it does not detect
 //!   replay or rollback to an older valid `.fcr`; use external versioning or a
 //!   freshness check if that matters.

@@ -2,7 +2,7 @@
 //!
 //! ## Release-profile gating
 //!
-//! The cli binary's `select_kdf_params` reads
+//! The cli binary's `test_fast_kdf_override` reads
 //! `FERROCRYPT_INTERNAL_TEST_FAST_KDF=1` (set by [`cli_command`] below)
 //! ONLY inside its `#[cfg(debug_assertions)]` block. In `cargo test`
 //! (default debug profile) the override fires and KDF-heavy paths run

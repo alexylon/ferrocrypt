@@ -52,10 +52,11 @@ jobs:
         run: |
           set -euo pipefail
           # The two integration-level targets stay out of the per-PR
-          # budget: even with their Argon2id work bounded to 8 MiB they
-          # iterate an order of magnitude slower than the parser-surface
-          # targets. They're still built above, so API drift still
-          # fails the job.
+          # budget: their Argon2id work is bounded (8 MiB for the
+          # passphrase-decrypt target, 19 MiB for the private-key
+          # unlock target), but they still iterate an order of magnitude
+          # slower than the parser-surface targets. They're still built
+          # above, so API drift still fails the job.
           skip='^(fuzz_symmetric_decrypt|fuzz_hybrid_decrypt)$'
           # Capture to a variable so `set -e` trips if `fuzz list` fails.
           # Command substitution inside a `for ... in $(...)` word list

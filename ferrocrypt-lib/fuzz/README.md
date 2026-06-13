@@ -47,7 +47,7 @@ catch interaction bugs the parser-surface targets cannot see.
 | Target | What it exercises |
 |---|---|
 | `fuzz_symmetric_decrypt` | Drives arbitrary bytes through `Decryptor::open` and `PassphraseDecryptor::decrypt` (passphrase recipient mode); Argon2id capped at 8 MiB via `kdf_limit` so a crafted header cannot stall iterations |
-| `fuzz_hybrid_decrypt` | Drives arbitrary bytes through `Decryptor::open` and `PrivateKeyDecryptor::decrypt` (X25519 recipient mode), using a one-time keypair sealed at 8 MiB Argon2id with a matching `kdf_limit`, so the per-iteration `private.key` unlock stays cheap |
+| `fuzz_hybrid_decrypt` | Drives arbitrary bytes through `Decryptor::open` and `PrivateKeyDecryptor::decrypt` (X25519 recipient mode), using a one-time keypair sealed at the 19 MiB writer floor with a matching `kdf_limit`, so the per-iteration `private.key` unlock stays cheap |
 
 ## Seed corpora
 

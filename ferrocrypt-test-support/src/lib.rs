@@ -7,10 +7,12 @@
 //!
 //! The published `ferrocrypt` crate has no Cargo feature touching crypto
 //! strength, no doc-hidden test constructors, and no runtime override
-//! path. Callers who genuinely need to construct weak Argon2id parameters
-//! (e.g. tests in this workspace) do so by depending on this internal
-//! crate as a `[dev-dependencies]` entry and explicitly threading
-//! [`fast_kdf_params`] through the encrypt and keygen builders.
+//! path. Tests in this workspace get fast Argon2id parameters by
+//! depending on this internal crate as a `[dev-dependencies]` entry and
+//! explicitly threading [`fast_kdf_params`] through the encrypt and
+//! keygen builders' `kdf_params(...)` methods. Those parameters sit at
+//! the writer's production memory floor, so they pass `validate_for_write`
+//! directly.
 //!
 //! Production code MUST NOT call into this crate.
 //!
@@ -23,7 +25,9 @@
 //! with weak KDF parameters). The audit findings F-01 and F-05 were
 //! resolved by removing the feature entirely and replacing it with this
 //! workspace-internal crate plus explicit `kdf_params(...)` builder
-//! methods on `Encryptor` and `KeyPairGenerator`.
+//! methods on `Encryptor` and `KeyPairGenerator`. Those builders later
+//! gained a production memory floor; this crate's fast parameters sit at
+//! that floor, so they pass through the ordinary `kdf_params(...)` path.
 
 #![forbid(unsafe_code)]
 
@@ -31,6 +35,10 @@ use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{Encryptor, KdfParams, KeyPairGenerator};
 
 /// Argon2id memory cost (KiB) for workspace-internal test-fast runs.
+/// Set to ferrocrypt's 19 MiB production write floor
+/// (`KdfParams::MIN_WRITE_MEM_COST`), so artifacts produced through the
+/// public `Encryptor::write` / `KeyPairGenerator::write` path pass
+/// `validate_for_write` via the ordinary `kdf_params(...)` builder.
 /// Single source of truth for the lib's `cfg(test) test_fast_default`
 /// helper and this crate's own [`fast_kdf_params`] function. The cli's
 /// debug-only override has its own local copy because `ferrocrypt-cli`
@@ -39,19 +47,17 @@ use ferrocrypt::{Encryptor, KdfParams, KeyPairGenerator};
 /// this one. `pub` visibility here is reachable only from workspace
 /// members that take this crate as a dev-dep (currently `ferrocrypt-lib`)
 /// — never on crates.io, since this whole crate is unpublishable.
-pub const TEST_FAST_KDF_MEM_COST: u32 = 8192;
+pub const TEST_FAST_KDF_MEM_COST: u32 = 19 * 1024;
 pub const TEST_FAST_KDF_TIME_COST: u32 = 1;
 pub const TEST_FAST_KDF_LANES: u32 = 4;
 
 /// Returns Argon2id parameters tuned for fast test execution
-/// (8 MiB memory, time_cost 1, parallelism 4).
+/// (19 MiB memory, time_cost 1, parallelism 4).
 ///
-/// Structurally valid — passes `KdfParams::from_bytes` and the writer-side
-/// `enforce_limit` against `KdfLimit::default()` — but well below the
-/// security floor used by `KdfParams::default()` (1 GiB memory,
-/// time_cost 4). Threads through `Encryptor::kdf_params(...)` and
-/// `KeyPairGenerator::kdf_params(...)` to make passphrase-based tests
-/// run in milliseconds instead of seconds.
+/// Memory sits at the writer's production floor, so these parameters pass
+/// `validate_for_write` through the ordinary floored `kdf_params(...)`
+/// builder while keeping passphrase-based tests in the tens of
+/// milliseconds — versus the seconds a 1 GiB default would cost.
 ///
 /// # Caller obligations
 ///

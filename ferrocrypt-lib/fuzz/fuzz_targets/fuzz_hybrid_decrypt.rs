@@ -13,11 +13,11 @@ use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{Decryptor, KdfLimit, KdfParams, KeyPairGenerator, PrivateKey};
 use libfuzzer_sys::fuzz_target;
 
-/// Argon2id budget for the harness: the per-iteration `private.key`
-/// unlock at the 1 GiB production default dominated fuzz wall-clock.
-/// The fixture key is sealed at 8 MiB and the reader limit below
-/// matches, so the unlock always succeeds and stays cheap.
-const FUZZ_KDF_MEM_KIB: u32 = 8 * 1024;
+/// Argon2id budget for the harness. The fixture `private.key` is sealed
+/// at 19 MiB — the writer floor — and the reader limit below matches it,
+/// so the per-iteration unlock always succeeds and stays cheap. At the
+/// 1 GiB production default that unlock would dominate fuzz wall-clock.
+const FUZZ_KDF_MEM_KIB: u32 = 19 * 1024;
 
 /// Generates a keypair once per process into a persistent temp directory.
 fn key_dir() -> &'static std::path::Path {

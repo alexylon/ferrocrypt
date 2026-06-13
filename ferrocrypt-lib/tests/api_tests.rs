@@ -34,6 +34,12 @@ fn generate_key_pair(
 const PASSPHRASE: &str = "api-test-passphrase";
 const TEST_WORKSPACE: &str = "tests/workspace_api";
 
+/// A structurally valid Argon2id memory cost below the writer's 19 MiB
+/// production floor, used by the floor-rejection tests. Kept separate
+/// from `TEST_FAST_KDF_MEM_COST` (which sits at the floor) so the fast
+/// test params and the below-floor sentinel cannot drift together.
+const BELOW_FLOOR_KDF_MEM: u32 = 8 * 1024;
+
 #[ctor::dtor]
 fn cleanup() {
     if Path::new(TEST_WORKSPACE).exists() {
@@ -806,6 +812,65 @@ fn encryptor_kdf_params_rejects_structural_time_cost() {
     }
 }
 
+/// The floored `Encryptor::kdf_params` rejects a structurally valid but
+/// below-floor `mem_cost` at write time with `KdfBelowWriteFloor`, so a
+/// downstream caller cannot accidentally seal a `.fcr` with weak Argon2id
+/// memory. No `.fcr` is produced.
+#[test]
+fn encryptor_kdf_params_rejects_below_floor() {
+    let work = fresh_workspace("kdf_below_floor_rejects");
+    let input = work.join("data.txt");
+    fs::write(&input, b"x").unwrap();
+    let out_dir = work.join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+
+    let weak = KdfParams {
+        mem_cost: BELOW_FLOOR_KDF_MEM, // 8 MiB, below the 19 MiB floor
+        time_cost: 4,
+        lanes: 4,
+    };
+    let result =
+        Encryptor::with_passphrase(pass())
+            .kdf_params(weak)
+            .write(&input, &out_dir, |_| {});
+    match result {
+        Err(CryptoError::KdfBelowWriteFloor {
+            mem_cost_kib,
+            floor_kib,
+        }) => {
+            assert_eq!(mem_cost_kib, BELOW_FLOOR_KDF_MEM);
+            assert!(floor_kib > BELOW_FLOOR_KDF_MEM);
+        }
+        other => panic!("expected KdfBelowWriteFloor, got {other:?}"),
+    }
+    assert_eq!(fs::read_dir(&out_dir).unwrap().count(), 0);
+}
+
+/// `KeyPairGenerator::kdf_params` applies the same floor as the
+/// passphrase path, so a below-floor `mem_cost` cannot accidentally seal
+/// a weak `private.key`.
+#[test]
+fn keypair_generator_kdf_params_rejects_below_floor() {
+    let work = fresh_workspace("keypair_kdf_below_floor_rejects");
+    let keys = work.join("keys");
+    fs::create_dir_all(&keys).unwrap();
+
+    let weak = KdfParams {
+        mem_cost: BELOW_FLOOR_KDF_MEM,
+        time_cost: 4,
+        lanes: 4,
+    };
+    let result = KeyPairGenerator::with_passphrase(pass())
+        .kdf_params(weak)
+        .write(&keys, |_| {});
+    match result {
+        Err(CryptoError::KdfBelowWriteFloor { mem_cost_kib, .. }) => {
+            assert_eq!(mem_cost_kib, BELOW_FLOOR_KDF_MEM);
+        }
+        other => panic!("expected KdfBelowWriteFloor, got {other:?}"),
+    }
+}
+
 /// Even with an explicitly raised writer-side `KdfLimit`, structural
 /// `mem_cost` above FerroCrypt's v1 maximum must reject before Argon2id
 /// runs. This prevents the resource-limit opt-in from bypassing the
@@ -899,10 +964,10 @@ fn encryptor_kdf_params_above_default_rejects_with_default_kdf_limit() {
 /// matching reader-side `kdf_limit`, and the cap check uses `>`
 /// (boundary inclusive) — `mem_cost == max_mem_cost_kib` succeeds.
 ///
-/// The test deliberately uses `TEST_FAST_KDF_MEM_COST` (8 MiB) so the
-/// real Argon2id run inside the assertion stays fast; the same
-/// boundary semantics apply at any `mem_cost` the writer might
-/// configure.
+/// The test deliberately uses `TEST_FAST_KDF_MEM_COST` (19 MiB, the
+/// writer floor) so the real Argon2id run inside the assertion stays
+/// fast; the same boundary semantics apply at any `mem_cost` the writer
+/// might configure.
 #[test]
 fn encryptor_kdf_params_at_kdf_limit_succeeds() {
     let work = fresh_workspace("kdf_at_limit_succeeds");

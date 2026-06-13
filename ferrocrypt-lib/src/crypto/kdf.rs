@@ -147,6 +147,17 @@ impl KdfParams {
     const MAX_TIME_COST: u32 = 12;
     const MAX_LANES: u32 = 8;
 
+    /// Minimum Argon2id memory cost (KiB) the writer accepts. 19 MiB is
+    /// the OWASP Argon2id minimum-memory recommendation; below it,
+    /// passphrase and `private.key` protection is too weak, so the writer
+    /// refuses to seal such an artefact. The floor is hard — there is no
+    /// caller opt-in below it. Enforced by
+    /// [`validate_for_write`](Self::validate_for_write) only, never on the
+    /// read path, so a file written before the floor existed still
+    /// decrypts. The structural floor (`ARGON2_MIN_MEM_COST_PER_LANE *
+    /// lanes`) is far lower; this is the security-policy floor on top of it.
+    pub(crate) const MIN_WRITE_MEM_COST: u32 = 19 * 1024; // 19 MiB (OWASP Argon2id minimum)
+
     /// Field-level structural validation against v1 absolute bounds
     /// (`MAX_LANES`, `MAX_TIME_COST`, `MAX_MEM_COST`, plus the Argon2
     /// `mem_cost >= ARGON2_MIN_MEM_COST_PER_LANE * lanes` floor).
@@ -235,17 +246,39 @@ impl KdfParams {
     }
 
     /// Validates caller-supplied writer parameters against the same v1
-    /// structural bounds the reader enforces, then applies the caller's
-    /// resource policy cap. This is the writer-side counterpart to
-    /// [`from_bytes`](Self::from_bytes): public builders accept a raw
-    /// [`KdfParams`] value, so they must run the same structural rules
-    /// before serialising it into an `argon2id` recipient body or
-    /// `private.key` header. Otherwise a caller could produce an artefact
-    /// whose KDF fields Argon2 itself accepts but the FerroCrypt reader
-    /// rejects before attempting unlock.
+    /// structural bounds the reader enforces, applies the production
+    /// memory floor, then applies the caller's resource policy cap. This
+    /// is the writer-side counterpart to [`from_bytes`](Self::from_bytes):
+    /// public builders accept a raw [`KdfParams`] value, so they must run
+    /// the same structural rules before serialising it into an `argon2id`
+    /// recipient body or `private.key` header. Otherwise a caller could
+    /// produce an artefact whose KDF fields Argon2 itself accepts but the
+    /// FerroCrypt reader rejects before attempting unlock.
+    ///
+    /// The checks run in order — structural bounds, then the floor, then
+    /// the cap — so a structurally invalid value (e.g. `time_cost` above
+    /// the maximum) is reported as [`CryptoError::InvalidKdfParams`] even
+    /// when its memory cost is also below the floor. The floor is hard:
+    /// there is no caller opt-in below it.
     pub(crate) fn validate_for_write(self, limit: Option<&KdfLimit>) -> Result<Self, CryptoError> {
         self.validate_structural()?;
+        self.enforce_write_floor()?;
         self.enforce_limit(limit)
+    }
+
+    /// Rejects writer parameters whose memory cost is below
+    /// [`MIN_WRITE_MEM_COST`](Self::MIN_WRITE_MEM_COST). Applied by
+    /// [`validate_for_write`](Self::validate_for_write) on every write,
+    /// and never on the read path, so a file written before the floor
+    /// existed still decrypts.
+    fn enforce_write_floor(&self) -> Result<(), CryptoError> {
+        if self.mem_cost < Self::MIN_WRITE_MEM_COST {
+            return Err(CryptoError::KdfBelowWriteFloor {
+                mem_cost_kib: self.mem_cost,
+                floor_kib: Self::MIN_WRITE_MEM_COST,
+            });
+        }
+        Ok(())
     }
 
     /// Derives a fixed-size Argon2id output for the supplied passphrase and salt.
@@ -324,15 +357,17 @@ impl Default for KdfParams {
 
 #[cfg(test)]
 impl KdfParams {
-    /// In-crate test helper: low-cost Argon2id parameters (8 MiB memory,
-    /// time_cost 1, parallelism 4) for the lib's own `mod tests`. Reads
-    /// the values from `ferrocrypt-test-support` (a `publish = false`
-    /// workspace dev-dep) so the workspace has a single source of truth
-    /// for the test-fast-KDF triple. The dev-dep cycle through
-    /// `ferrocrypt` is fine here because the constants are plain `u32`
-    /// — only typed `KdfParams` values from test-support hit the
-    /// "multiple different versions of crate ferrocrypt" trap, which is
-    /// why this helper constructs a fresh `Self` rather than calling
+    /// In-crate test helper: low-cost Argon2id parameters (19 MiB memory,
+    /// time_cost 1, parallelism 4) for the lib's own `mod tests`. The
+    /// memory cost sits at the writer's production floor, keeping test
+    /// writes on the ordinary floored path while avoiding the 1 GiB
+    /// production default. Reads the values from `ferrocrypt-test-support`
+    /// (a `publish = false` workspace dev-dep) so the workspace has a
+    /// single source of truth for the test-fast-KDF triple. The dev-dep
+    /// cycle through `ferrocrypt` is fine here because the constants are
+    /// plain `u32` — only typed `KdfParams` values from test-support hit
+    /// the "multiple different versions of crate ferrocrypt" trap, which
+    /// is why this helper constructs a fresh `Self` rather than calling
     /// `ferrocrypt_test_support::fast_kdf_params()` directly.
     pub(crate) fn test_fast_default() -> Self {
         Self {
@@ -538,8 +573,9 @@ mod tests {
     /// upstream (e.g. `KeyPairGenerator::write`) must re-check KDF
     /// params with `validate_structural`, not `validate_for_write(None)`.
     /// A `mem_cost` between the 1 GiB default and the 2 GiB structural
-    /// max is structurally valid; `validate_for_write(None)` rejects it
-    /// by re-imposing the default ceiling.
+    /// max is structurally valid and above the write floor;
+    /// `validate_for_write(None)` rejects it by re-imposing the
+    /// default ceiling.
     #[test]
     fn above_default_mem_cost_passes_structural_but_validate_for_write_none_rejects() {
         let params = KdfParams {
@@ -553,6 +589,49 @@ mod tests {
         match params.validate_for_write(None) {
             Err(CryptoError::KdfResourceCapExceeded { .. }) => {}
             other => panic!("expected KdfResourceCapExceeded, got {other:?}"),
+        }
+    }
+
+    /// The floored `kdf_params` path rejects a structurally valid but
+    /// below-floor `mem_cost` with the typed `KdfBelowWriteFloor`,
+    /// carrying the offending value and the floor. Protects against a
+    /// downstream caller accidentally sealing weak Argon2id parameters
+    /// through `Encryptor::kdf_params`.
+    #[test]
+    fn validate_for_write_rejects_below_floor() {
+        let weak = KdfParams {
+            mem_cost: KdfParams::MIN_WRITE_MEM_COST - 1,
+            time_cost: 4,
+            lanes: 4,
+        };
+        weak.validate_structural()
+            .expect("below-floor value is still structurally valid");
+        match weak.validate_for_write(None) {
+            Err(CryptoError::KdfBelowWriteFloor {
+                mem_cost_kib,
+                floor_kib,
+            }) => {
+                assert_eq!(mem_cost_kib, KdfParams::MIN_WRITE_MEM_COST - 1);
+                assert_eq!(floor_kib, KdfParams::MIN_WRITE_MEM_COST);
+            }
+            other => panic!("expected KdfBelowWriteFloor, got {other:?}"),
+        }
+    }
+
+    /// Ordering guarantee: a structurally invalid value that is also
+    /// below the floor is reported as `InvalidKdfParams`, not
+    /// `KdfBelowWriteFloor` — structural validation runs first, so the
+    /// rejection-path tests in `api_tests` keep their expected variants.
+    #[test]
+    fn validate_for_write_reports_structural_before_floor() {
+        let weak_and_invalid = KdfParams {
+            mem_cost: 8192,                          // structurally valid, below floor
+            time_cost: KdfParams::MAX_TIME_COST + 1, // structurally invalid
+            lanes: 4,
+        };
+        match weak_and_invalid.validate_for_write(None) {
+            Err(CryptoError::InvalidKdfParams(InvalidKdfParams::TimeCost(_))) => {}
+            other => panic!("expected InvalidKdfParams::TimeCost, got {other:?}"),
         }
     }
 }

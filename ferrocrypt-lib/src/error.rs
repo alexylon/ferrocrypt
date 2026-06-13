@@ -224,6 +224,19 @@ pub enum CryptoError {
         /// Maximum memory cost accepted by the caller's local policy, in KiB.
         local_cap_kib: u32,
     },
+    /// Writer-side Argon2id memory cost is below the production floor.
+    /// Raised only when writing a `.fcr` or `private.key` (passphrase
+    /// encryption / key sealing), so a caller cannot accidentally seal an
+    /// artefact with weak Argon2id memory. The floor is a writer policy
+    /// only: readers accept any structurally valid, within-cap parameters,
+    /// so a file written before the floor existed always decrypts.
+    #[error("KDF memory cost {mem_cost_kib} KiB below {floor_kib} KiB write floor")]
+    KdfBelowWriteFloor {
+        /// Memory cost the caller requested, in KiB.
+        mem_cost_kib: u32,
+        /// Minimum memory cost the writer accepts, in KiB.
+        floor_kib: u32,
+    },
     /// `header_len` exceeds the caller-configured local cap. The
     /// structural max (`HEADER_LEN_MAX = 16 MiB` per `FORMAT.md` §3.1)
     /// is much higher; this fires when the header would exceed the
@@ -1525,6 +1538,14 @@ mod tests {
             &CryptoError::KdfResourceCapExceeded {
                 mem_cost_kib: u32::MAX,
                 local_cap_kib: u32::MAX,
+            }
+            .to_string(),
+        );
+        check(
+            "KdfBelowWriteFloor(max)",
+            &CryptoError::KdfBelowWriteFloor {
+                mem_cost_kib: u32::MAX,
+                floor_kib: u32::MAX,
             }
             .to_string(),
         );

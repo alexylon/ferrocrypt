@@ -235,15 +235,14 @@ impl Encryptor {
     /// X25519 ECDH and never run Argon2id during encryption.
     ///
     /// If unset, the writer uses [`KdfParams::default`] (1 GiB memory,
-    /// time_cost 4, parallelism 4). Callers MUST NOT lower these
-    /// parameters in production code paths — the override exists for
-    /// callers with specific tuning needs (e.g. lower-spec embedded
-    /// targets) and for in-tree tests via the workspace-internal
-    /// `ferrocrypt-test-support` crate.
+    /// time_cost 4, parallelism 4). A `params.mem_cost` below the 19 MiB
+    /// production memory floor rejects at [`Encryptor::write`] time with
+    /// [`CryptoError::KdfBelowWriteFloor`], so a caller cannot seal a `.fcr`
+    /// with weak Argon2id memory; the floor is hard and has no override.
     ///
     /// # Default-decrypt round-trip
     ///
-    /// `kdf_params.mem_cost` is checked at [`Encryptor::write`] time
+    /// `kdf_params.mem_cost` is also checked at [`Encryptor::write`] time
     /// against the writer's [`KdfLimit`] ceiling (defaults to
     /// [`KdfLimit::default`] = 1 GiB, matching [`KdfParams::default`]).
     /// `params` whose `mem_cost` exceeds that ceiling reject with
@@ -787,15 +786,16 @@ impl KeyPairGenerator {
     /// If unset, the generator uses [`KdfParams::default`] (1 GiB memory,
     /// time_cost 4, parallelism 4).
     ///
-    /// Same misuse caveat as [`Encryptor::kdf_params`]: callers MUST NOT
-    /// lower these parameters in production code paths. The override
-    /// exists for callers with specific tuning needs (e.g. lower-spec
-    /// embedded targets) and for in-tree tests via the workspace-internal
-    /// `ferrocrypt-test-support` crate.
+    /// Same production memory floor as [`Encryptor::kdf_params`]: a
+    /// `params.mem_cost` below the 19 MiB production memory floor rejects
+    /// at [`KeyPairGenerator::write`] time with
+    /// [`CryptoError::KdfBelowWriteFloor`], so a caller cannot seal a
+    /// `private.key` with weak Argon2id memory; the floor is hard and has
+    /// no override.
     ///
     /// # Default-decrypt round-trip
     ///
-    /// `kdf_params.mem_cost` is checked at [`KeyPairGenerator::write`]
+    /// `kdf_params.mem_cost` is also checked at [`KeyPairGenerator::write`]
     /// time against the writer's [`KdfLimit`] ceiling (defaults to
     /// [`KdfLimit::default`] = 1 GiB, matching [`KdfParams::default`]).
     /// `params` whose `mem_cost` exceeds that ceiling reject with

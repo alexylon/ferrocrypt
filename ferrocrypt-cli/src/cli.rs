@@ -15,20 +15,21 @@ use subtle::ConstantTimeEq;
 
 const PASSPHRASE_ENV: &str = "FERROCRYPT_PASSPHRASE";
 
-/// Picks the Argon2id parameters used by the CLI's `encrypt` (passphrase
-/// path) and `keygen` subcommands. Returns [`KdfParams::default`] in all
-/// release builds. In debug builds, honors the
-/// `FERROCRYPT_INTERNAL_TEST_FAST_KDF` env var as an explicit test-only
-/// escape hatch; the env var has no effect in release builds because the
-/// `cfg(debug_assertions)` branch is compiled out entirely. Production
-/// code MUST NOT set the env var.
+/// Returns the debug-only test-fast Argon2id override for the CLI's
+/// `encrypt` (passphrase path) and `keygen` subcommands when the
+/// `FERROCRYPT_INTERNAL_TEST_FAST_KDF` env var requests it, otherwise
+/// `None` so the caller uses the floored [`KdfParams::default`]. The
+/// override sits at the writer's production memory floor, so the caller
+/// applies it through the ordinary `kdf_params` builder.
 ///
 /// All override-related state — env-var name, activation value, and the
-/// fast Argon2id triple — lives inside the `cfg(debug_assertions)` scope
-/// so release-profile compilation has no live references to it. Aligned
-/// with `ferrocrypt-test-support::fast_kdf_params` and the lib's
-/// internal `KdfParams::test_fast_default` (values 8 MiB / 1 / 4).
-fn select_kdf_params() -> KdfParams {
+/// fast Argon2id triple — lives inside the `cfg(debug_assertions)` scope,
+/// so release builds compile the branch out entirely: the env var has no
+/// effect there and there is no live reference to the fast triple.
+/// Production code MUST NOT set the env var. Aligned with
+/// `ferrocrypt-test-support::fast_kdf_params` and the lib's internal
+/// `KdfParams::test_fast_default` (values 19 MiB / 1 / 4).
+fn test_fast_kdf_override() -> Option<KdfParams> {
     #[cfg(debug_assertions)]
     {
         const INTERNAL_TEST_FAST_KDF_ENV: &str = "FERROCRYPT_INTERNAL_TEST_FAST_KDF";
@@ -40,7 +41,7 @@ fn select_kdf_params() -> KdfParams {
         // workspace member. `ferrocrypt-cli` is `publish = true`, so it
         // cannot take a regular dep on `ferrocrypt-test-support`. Keep
         // these aligned with `ferrocrypt-test-support::TEST_FAST_KDF_*`.
-        const TEST_FAST_KDF_MEM_COST: u32 = 8192;
+        const TEST_FAST_KDF_MEM_COST: u32 = 19 * 1024;
         const TEST_FAST_KDF_TIME_COST: u32 = 1;
         const TEST_FAST_KDF_LANES: u32 = 4;
 
@@ -51,14 +52,14 @@ fn select_kdf_params() -> KdfParams {
                  Argon2id parameters. This is for in-tree CLI tests only and \
                  has no effect in release builds. Do not use this in production."
             );
-            return KdfParams {
+            return Some(KdfParams {
                 mem_cost: TEST_FAST_KDF_MEM_COST,
                 time_cost: TEST_FAST_KDF_TIME_COST,
                 lanes: TEST_FAST_KDF_LANES,
-            };
+            });
         }
     }
-    KdfParams::default()
+    None
 }
 
 const BINARY_NAME: &str = env!("CARGO_BIN_NAME");
@@ -484,7 +485,11 @@ fn run_encrypt(
 
     let mut encryptor = if recipients.is_empty() {
         let passphrase = read_passphrase(true)?;
-        Encryptor::with_passphrase(passphrase).kdf_params(select_kdf_params())
+        let enc = Encryptor::with_passphrase(passphrase);
+        match test_fast_kdf_override() {
+            Some(fast) => enc.kdf_params(fast),
+            None => enc,
+        }
     } else {
         for r in &recipients {
             if let Ok(fp) = r.fingerprint() {
@@ -578,9 +583,12 @@ fn run_decrypt(
 fn run_keygen(output_dir: PathBuf) -> Result<(), CryptoError> {
     check_keygen_conflict(&output_dir)?;
     let passphrase = read_passphrase(true)?;
-    let outcome = KeyPairGenerator::with_passphrase(passphrase)
-        .kdf_params(select_kdf_params())
-        .write(&output_dir, |ev| eprintln!("{ev}"))?;
+    let generator = KeyPairGenerator::with_passphrase(passphrase);
+    let generator = match test_fast_kdf_override() {
+        Some(fast) => generator.kdf_params(fast),
+        None => generator,
+    };
+    let outcome = generator.write(&output_dir, |ev| eprintln!("{ev}"))?;
     let recipient = PublicKey::from_key_file(&outcome.public_key_path).to_recipient_string()?;
     println!("\nGenerated key pair in {}\n", output_dir.display());
     println!("Public key fingerprint: {}", outcome.fingerprint);

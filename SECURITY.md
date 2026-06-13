@@ -73,8 +73,12 @@ regression net, regenerated when the format intentionally changes).
   mount points — via an explicit `FILE_ATTRIBUTE_REPARSE_POINT`
   post-check. File creation uses `OpenOptions::create_new(true)` plus
   an explicit `FollowSymlinks::No` flag. Permissions are always set on
-  an open handle, never via a re-resolved path. The same code path
-  applies on every supported OS.
+  an open handle, never via a re-resolved path. This symlink and
+  reparse-point hardening is the same code path on every supported OS.
+  On Linux and macOS the final rename that commits the staged output to
+  its requested name is anchored to that same handle as well, so a swap
+  of the output directory during the run cannot redirect the commit; on
+  Windows that final rename is path-based (see the next item).
 - **Windows final-rename is atomic no-clobber for single-file
   decrypts; directory decrypts still have a tiny race window.** When
   decryption finishes, FerroCrypt renames the working `.incomplete`

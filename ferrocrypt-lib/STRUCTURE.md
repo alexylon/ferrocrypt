@@ -823,7 +823,7 @@ Targets that are neither Unix nor Windows are rejected at compile time: the walk
 
 `archive/decode.rs` owns the FCA reader: header + manifest parse with full validation, then content extraction via the hardened cap-std platform backend.
 
-The reader pipeline matches `FORMAT.md` §9.11, and the step numbers below are FORMAT.md's — they are cross-referenced from code comments and the audit trail, so the two documents must not drift. Steps 1–8 MUST complete before any filesystem output. The `output_dir` capability handle is opened between steps 8 and 9 and held through step 16, so staged writes, failure-path cleanup, promotion, and the final mode application all anchor to the same directory identity.
+The reader pipeline matches `FORMAT.md` §9.11, and the step numbers below are FORMAT.md's — they are cross-referenced from code comments and the audit trail, so the two documents must not drift. Steps 1–8 MUST complete before any filesystem output. The `output_dir` capability handle is opened between steps 8 and 9 and held through step 16, so staged writes, failure-path cleanup, and the final mode application all anchor to the same directory identity — as does the promotion itself on Linux and macOS (handle-relative via `archive/platform.rs::rename_at_no_clobber`). The Windows promotion is path-based in `fs/atomic.rs`.
 
 1. parse and validate the FCA fixed header;
 2. read exactly `archive_ext_len` bytes;
@@ -860,6 +860,7 @@ It contains:
 - `finalize_dir_open` — Windows-only `FILE_ATTRIBUTE_REPARSE_POINT` post-check called after every successful directory open, so junctions / mount points fail closed (cap-fs-ext alone refuses entries where `is_symlink()` is true, but `is_symlink()` returns `false` for junctions — the bitmask post-check is what catches them);
 - `create_file_at` — `OpenOptions::create_new(true)` plus `OpenOptionsFollowExt::follow(FollowSymlinks::No)` for atomic O_EXCL-style create that refuses every leaf symlink, dangling or live;
 - `chmod_file_handle`, `chmod_dir_handle` — handle-based permission application; never path-based, so a substituted symlink between extract and chmod cannot redirect the operation. Special bits are stripped via `super::PERMISSION_BITS_MASK`;
+- `rename_at_no_clobber` (Linux/macOS) — handle-relative `renameat(dir, …, dir, …, RENAME_NOREPLACE)` via `rustix`, used by the decrypt promotion (`FORMAT.md` §9.11 step 15) so the `{root}.incomplete` → final-name commit is anchored to the same `output_dir` handle as extraction; a swap of the `output_dir` path mid-run cannot redirect it. Windows and other-target promotion stays path-based in `fs/atomic.rs`, because a handle-relative no-replace rename on Windows needs an `unsafe` Win32 call the crate forbids;
 - `INITIAL_FILE_CREATE_MODE` — restrictive `0o600` initial mode applied at create time on Unix. Descendant files are chmod'd to the manifest mode after the payload is written (inside the 0o700 staged root). Single-file roots stay at `0o600` throughout staging and across the rename, with the manifest mode applied post-rename via `decode::apply_root_file_mode` so a wider final mode is never briefly visible. Effective on Unix only; ignored on Windows.
 
 Path validation and filesystem writes remain separate so race-hardening logic is auditable.
@@ -881,16 +882,22 @@ Archive-specific path rules live in `archive/path.rs`; general output-path and s
 It contains:
 
 - temporary output name generation;
-- no-clobber finalization, split by root shape:
-  - **file roots** (encryption output, key generation, single-file
-    decrypt promotion) go through `tempfile::*::persist_noclobber` —
-    atomic no-replace on every supported platform, Windows included;
-  - **directory roots** (decrypt promotion when the archive root is a
-    directory) go through `rename_no_clobber` — atomic via
-    `rustix::renameat_with(..., RenameFlags::NOREPLACE)` on Linux and
-    macOS, best-effort `symlink_metadata` + `std::fs::rename` on
-    Windows because no safe atomic no-replace directory rename is
-    available there under `#![forbid(unsafe_code)]`;
+- no-clobber finalization:
+  - **encryption output and key generation** (file roots, every
+    platform) go through `tempfile::*::persist_noclobber` — atomic
+    no-replace on every supported platform, Windows included;
+  - **decrypt promotion on Windows and other non-Linux/macOS targets**:
+    single-file roots through `promote_single_file_no_clobber` (the same
+    `tempfile` atomic no-replace, Windows `MoveFileExW` included),
+    directory roots through `rename_no_clobber` — best-effort
+    `symlink_metadata` + `std::fs::rename` on Windows because no safe
+    atomic no-replace directory rename is available there under
+    `#![forbid(unsafe_code)]`;
+  - **decrypt promotion on Linux and macOS** does NOT pass through this
+    module: it is handle-relative and owned by
+    `archive/platform.rs::rename_at_no_clobber`, anchored to the
+    extraction `output_dir` handle so a path swap mid-run cannot
+    redirect the commit;
 - same-directory staging;
 - cleanup on encryption failure;
 - `.incomplete` behavior on decryption failure.
@@ -1154,7 +1161,8 @@ Each security-sensitive concern has exactly one owner.
 | Archive encoding | `archive/encode.rs` |
 | Archive decoding | `archive/decode.rs` |
 | Platform extraction hardening | `archive/platform.rs` |
-| Atomic output | `fs/atomic.rs` |
+| Atomic output (encryption and key-file finalize; Windows/other-target decrypt promotion) | `fs/atomic.rs` |
+| Handle-relative decrypt promotion (Linux/macOS) | `archive/platform.rs` |
 | General filesystem path helpers | `fs/paths.rs` |
 | Public API translation | `api.rs` |
 | End-to-end operation flow | `protocol.rs` |

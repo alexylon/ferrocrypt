@@ -1466,6 +1466,15 @@ After promotion the output exists under its final name with no `.incomplete`
 marker, so content that was never flushed could otherwise surface truncated
 after a crash while appearing complete.
 
+On platforms where FerroCrypt has a safe handle-relative no-clobber rename
+backend (Linux and macOS), step 15 MUST resolve both the staged source name and
+the final target name through the same trusted destination directory handle used
+for extraction. A rename or replacement of the ambient `output_dir` path during
+the run then cannot redirect the commit. On Windows, the zero-unsafe
+implementation keeps the documented path-based final rename: single-file roots
+use a kernel atomic no-replace move, while directory roots use the best-effort
+check-then-rename sequence described in `SECURITY.md`.
+
 Extraction uses staged output:
 
 ```text

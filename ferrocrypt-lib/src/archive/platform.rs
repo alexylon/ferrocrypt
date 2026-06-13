@@ -97,6 +97,53 @@ pub(crate) fn open_anchor(path: &Path) -> Result<Dir, CryptoError> {
     Dir::open_ambient_dir(path, ambient_authority()).map_err(CryptoError::Io)
 }
 
+/// Handle-relative no-clobber rename used to promote a staged
+/// `{root}.incomplete` to its final `{root}` name (FORMAT.md §9.11
+/// step 15) without re-resolving the ambient `output_dir` path.
+///
+/// Both endpoints resolve through `dir` — the extraction-directory
+/// handle `open_anchor` returned — via
+/// `renameat(dir, from, dir, to, RENAME_NOREPLACE)`. A rename or
+/// replacement of the `output_dir` path between staging and this commit
+/// therefore cannot redirect the promotion to a different directory: it
+/// lands in the exact directory the contents were written to, and the
+/// kernel still refuses an existing `to` atomically
+/// (`io::ErrorKind::AlreadyExists`). A best-effort directory `fsync`
+/// follows so the rename is durable, mirroring the parent-directory
+/// sync the path-based `fs::atomic` helpers perform.
+///
+/// Linux and macOS only. `RENAME_NOREPLACE` maps to `renameat2` on
+/// Linux and `renameatx_np(RENAME_EXCL)` on macOS, both through
+/// `rustix`. Windows keeps the path-based promotion in `fs::atomic`,
+/// because a handle-relative no-replace rename there needs an `unsafe`
+/// Win32 call the crate forbids; see `SECURITY.md`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn rename_at_no_clobber(dir: &Dir, from: &OsStr, to: &OsStr) -> io::Result<()> {
+    use std::os::fd::AsFd;
+
+    use rustix::fs::{Mode, OFlags, RenameFlags, fsync, openat, renameat_with};
+
+    renameat_with(dir.as_fd(), from, dir.as_fd(), to, RenameFlags::NOREPLACE)
+        .map_err(io::Error::from)?;
+    // Best-effort durability: flush the directory so the rename survives
+    // a crash. cap-std may hold `dir` as an `O_PATH` handle on Linux, on
+    // which `fsync` fails with `EBADF` (the same reason
+    // `chmod_dir_via_self_path` cannot `fchmod` the fd). Sync through a
+    // fresh read-only handle to the same directory — opened relative to
+    // `dir`, so no path is re-resolved — which works whether or not `dir`
+    // is `O_PATH`. Any failure is discarded: it must not unwind a
+    // completed promotion.
+    if let Ok(sync_fd) = openat(
+        dir.as_fd(),
+        ".",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        let _ = fsync(&sync_fd);
+    }
+    Ok(())
+}
+
 /// Windows-only post-condition for a successful directory open.
 /// cap-fs-ext's `open_dir_nofollow` uses
 /// `FILE_FLAG_OPEN_REPARSE_POINT` and then rejects entries whose
@@ -831,6 +878,64 @@ mod tests {
         // created under it must appear at the root's path.
         let _f = create_file_at(&cloned, OsStr::new("via_clone.txt"), 0o600).unwrap();
         assert!(root.join("via_clone.txt").exists());
+    }
+
+    // ── handle-relative promotion (FORMAT.md §9.11 step 15) ─────────
+
+    /// `rename_at_no_clobber` resolves both endpoints through the open
+    /// `dir` handle, so a swap of the ambient `output_dir` path after the
+    /// anchor is opened but before promotion cannot redirect the rename.
+    /// Pins review-3's promotion-race fix: the staged content is promoted
+    /// in the directory the handle actually refers to, and a decoy
+    /// `.incomplete` planted in the swapped-in replacement directory is
+    /// never promoted.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn rename_at_no_clobber_anchors_to_handle_across_path_swap() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let out = tmp.path().join("out");
+        fs::create_dir(&out).unwrap();
+        fs::write(out.join("root.incomplete"), b"real").unwrap();
+
+        // Open the anchor, THEN swap the path: move the real directory
+        // aside (the handle follows the inode) and drop a decoy in its
+        // place with an attacker-controlled staged file.
+        let handle = open_anchor(&out).unwrap();
+        let moved = tmp.path().join("out.moved");
+        fs::rename(&out, &moved).unwrap();
+        fs::create_dir(&out).unwrap();
+        fs::write(out.join("root.incomplete"), b"attacker").unwrap();
+
+        rename_at_no_clobber(&handle, OsStr::new("root.incomplete"), OsStr::new("root")).unwrap();
+
+        // Promotion landed in the handle's directory (now `moved`), not
+        // the swapped-in decoy.
+        assert_eq!(fs::read(moved.join("root")).unwrap(), b"real");
+        assert!(!moved.join("root.incomplete").exists());
+        // The decoy's planted `.incomplete` was never promoted.
+        assert!(!out.join("root").exists());
+        assert_eq!(fs::read(out.join("root.incomplete")).unwrap(), b"attacker");
+    }
+
+    /// `rename_at_no_clobber` keeps no-clobber semantics: an existing
+    /// final name is refused atomically with `AlreadyExists`, and both
+    /// the staged source and the existing target are left untouched.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn rename_at_no_clobber_refuses_existing_target() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let out = tmp.path().join("out");
+        fs::create_dir(&out).unwrap();
+        fs::write(out.join("root.incomplete"), b"new").unwrap();
+        fs::write(out.join("root"), b"existing").unwrap();
+
+        let handle = open_anchor(&out).unwrap();
+        let err = rename_at_no_clobber(&handle, OsStr::new("root.incomplete"), OsStr::new("root"))
+            .unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(out.join("root")).unwrap(), b"existing");
+        assert_eq!(fs::read(out.join("root.incomplete")).unwrap(), b"new");
     }
 
     // ── Windows reparse-point / symlink rejection ───────────────────

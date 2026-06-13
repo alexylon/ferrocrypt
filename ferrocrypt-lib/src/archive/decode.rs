@@ -52,7 +52,6 @@ use cap_std::fs::Dir;
 use crate::CryptoError;
 use crate::crypto::stream::read_uninterrupted;
 use crate::error::sanitize_for_display;
-use crate::fs::atomic::{promote_single_file_no_clobber, rename_no_clobber};
 use crate::fs::paths::{INCOMPLETE_SUFFIX, path_occupied};
 
 use super::IncompleteOutputPolicy;
@@ -163,18 +162,23 @@ fn unarchive_inner<R: Read>(
         }
 
         // FORMAT.md §9.11 step 15: promote {root}.incomplete → {root}
-        // with no-clobber. Single-file roots use
-        // `promote_single_file_no_clobber`, which rejects a final-name
-        // race atomically on every supported platform, Windows included.
-        // Directory roots stay on `rename_no_clobber`: atomic on Linux
-        // and macOS, best-effort on Windows because no safe atomic
-        // directory rename is available there. See `SECURITY.md`.
-        let working_path = output_dir.join(&incomplete_name);
-        let promote_result = if manifest.root_is_file {
-            promote_single_file_no_clobber(&working_path, &final_path)
-        } else {
-            rename_no_clobber(&working_path, &final_path)
-        };
+        // with no-clobber. On Linux and macOS the rename is anchored to
+        // `output_handle` (the same capability handle extraction wrote
+        // through), so a swap of the ambient `output_dir` path between
+        // staging and this commit cannot redirect the promotion, and the
+        // kernel still refuses an occupied final name atomically. On
+        // Windows it is path-based — single-file roots get a kernel
+        // atomic no-replace move, directory roots a best-effort
+        // check-then-rename — because a handle-relative no-replace rename
+        // there needs an `unsafe` Win32 call the crate forbids. See
+        // `promote_root` and `SECURITY.md`.
+        let promote_result = promote_root(
+            &output_handle,
+            output_dir,
+            &incomplete_name,
+            &manifest.root_name,
+            manifest.root_is_file,
+        );
         promote_result.map_err(|e| {
             if e.kind() == io::ErrorKind::AlreadyExists {
                 output_already_exists(output_dir, &manifest.root_name)
@@ -348,8 +352,10 @@ fn extract_directory_root<R: Read>(
         platform::chmod_dir_handle(dir_handle, dir_entry.mode)?;
     }
 
-    // root_dir is dropped here, closing the cap-std handle so the
-    // path-based rename in the caller can proceed.
+    // root_dir is dropped here, closing the staged-directory handle
+    // before promotion: on Windows an open directory handle blocks the
+    // path-based rename, and on Unix the handle-relative promotion runs
+    // against `output_handle` rather than this one.
     Ok(())
 }
 
@@ -376,6 +382,50 @@ fn apply_root_directory_mode(output_handle: &Dir, manifest: &Manifest) -> Result
 fn apply_root_file_mode(output_handle: &Dir, manifest: &Manifest) -> Result<(), CryptoError> {
     let file = platform::open_file_nofollow(output_handle, &manifest.root_name)?;
     platform::chmod_file_handle(&file, manifest.root_mode)
+}
+
+/// Promotes the staged `{root}.incomplete` to its final `{root}` name
+/// with no-clobber semantics (FORMAT.md §9.11 step 15), choosing the
+/// platform-appropriate primitive.
+///
+/// On Linux and macOS the promotion is anchored to `output_handle` via
+/// `platform::rename_at_no_clobber`, so a rename or replacement of the
+/// ambient `output_dir` path between staging and the commit cannot
+/// redirect it: the plaintext lands in the directory the contents were
+/// written to, and a `{root}.incomplete` planted in a swapped-in
+/// replacement directory is never promoted. `root_is_file` is irrelevant
+/// there because `renameat` promotes files and directories alike.
+///
+/// On Windows (and any other target) the promotion is path-based:
+/// single-file roots take the kernel atomic no-replace move via
+/// `promote_single_file_no_clobber`, directory roots the best-effort
+/// `rename_no_clobber`. A handle-relative no-replace rename on Windows
+/// needs an `unsafe` Win32 call the crate forbids; see `SECURITY.md`.
+fn promote_root(
+    output_handle: &Dir,
+    output_dir: &Path,
+    incomplete_name: &OsStr,
+    final_name: &OsStr,
+    root_is_file: bool,
+) -> io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let _ = (output_dir, root_is_file);
+        platform::rename_at_no_clobber(output_handle, incomplete_name, final_name)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        use crate::fs::atomic::{promote_single_file_no_clobber, rename_no_clobber};
+
+        let _ = output_handle;
+        let working_path = output_dir.join(incomplete_name);
+        let final_path = output_dir.join(final_name);
+        if root_is_file {
+            promote_single_file_no_clobber(&working_path, &final_path)
+        } else {
+            rename_no_clobber(&working_path, &final_path)
+        }
+    }
 }
 
 /// Error for an entry whose content ended before its manifest-declared
@@ -805,6 +855,109 @@ mod tests {
         assert_eq!(fs::read(final_path.join("a.bin")).unwrap(), b"AAAAAAAAAA");
         assert_eq!(fs::read(final_path.join("b.bin")).unwrap(), b"");
         assert_eq!(fs::read(final_path.join("c.bin")).unwrap(), b"CCCCC");
+    }
+
+    // -- Promotion anchoring (FORMAT.md §9.11 step 15) --------------------
+
+    /// Promotion is the commit point and is anchored to the
+    /// `output_handle` opened at extraction time. A swap of the ambient
+    /// `output_dir` path between staging and promotion must NOT redirect
+    /// the commit: the decrypted plaintext lands in the directory the
+    /// contents were written to, and an attacker-planted
+    /// `{root}.incomplete` in a swapped-in replacement directory is never
+    /// promoted. Drives the real `unarchive` path with the swap injected
+    /// on the end-of-archive read — which `verify_archive_eof` issues
+    /// AFTER all content is staged and synced and immediately BEFORE
+    /// promotion. Linux/macOS only: the handle-relative rename needs
+    /// `renameat`+`RENAME_NOREPLACE`; Windows keeps the documented
+    /// path-based promotion.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn promotion_is_anchored_to_handle_across_output_dir_swap() {
+        // Reader that performs `swap` exactly once, on its first EOF
+        // read. `unarchive` issues that read in `verify_archive_eof`,
+        // after the staged `.incomplete` is fully written and synced
+        // under `output_handle` and just before the promotion rename.
+        struct SwapOnEof<F: FnMut()> {
+            data: Vec<u8>,
+            pos: usize,
+            swapped: bool,
+            swap: F,
+        }
+        impl<F: FnMut()> Read for SwapOnEof<F> {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if self.pos >= self.data.len() {
+                    if !self.swapped {
+                        self.swapped = true;
+                        (self.swap)();
+                    }
+                    return Ok(0);
+                }
+                let n = (self.data.len() - self.pos).min(buf.len());
+                buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+                self.pos += n;
+                Ok(n)
+            }
+        }
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let out = tmp.path().join("out");
+        fs::create_dir(&out).unwrap();
+
+        let manifest = Manifest {
+            entries: vec![
+                make_entry("d", ArchiveEntryKind::Directory, 0, 0o755),
+                make_entry("d/a.txt", ArchiveEntryKind::File, 4, 0o644),
+            ],
+            total_file_bytes: 4,
+            root_name: OsString::from("d"),
+            root_is_file: false,
+            root_mode: 0o755,
+        };
+        let archive = build_archive(&manifest, &[("d/a.txt", b"real")]);
+
+        let out_for_swap = out.clone();
+        let moved = tmp.path().join("out.moved");
+        let moved_for_swap = moved.clone();
+        let reader = SwapOnEof {
+            data: archive,
+            pos: 0,
+            swapped: false,
+            swap: move || {
+                // Move the real (handle-backed) directory aside, then
+                // plant a decoy directory holding an attacker
+                // `{root}.incomplete` at the original output path.
+                fs::rename(&out_for_swap, &moved_for_swap).unwrap();
+                fs::create_dir(&out_for_swap).unwrap();
+                fs::create_dir(out_for_swap.join("d.incomplete")).unwrap();
+                fs::write(out_for_swap.join("d.incomplete").join("a.txt"), b"attacker").unwrap();
+            },
+        };
+
+        let returned = unarchive(
+            reader,
+            &out,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::DeleteOnError,
+        )
+        .unwrap();
+
+        // The real plaintext was committed in the handle's directory
+        // (now at `moved`): the promotion did not follow the path swap.
+        assert_eq!(fs::read(moved.join("d").join("a.txt")).unwrap(), b"real");
+        assert!(!moved.join("d.incomplete").exists());
+        // The attacker's decoy `.incomplete` in the swapped-in directory
+        // was never promoted to the final name.
+        assert!(!out.join("d").exists());
+        assert_eq!(
+            fs::read(out.join("d.incomplete").join("a.txt")).unwrap(),
+            b"attacker"
+        );
+        // The returned path is the ambient `output_dir/root` computed
+        // before the swap; because promotion is anchored to the handle it
+        // does not resolve to attacker content (the decoy has no `d`).
+        assert_eq!(returned, out.join("d"));
+        assert!(!returned.exists());
     }
 
     // -- Archive-level TLV rejections (FORMAT.md §9.3) ---------------------
@@ -1411,7 +1564,7 @@ mod tests {
         assert_eq!(fs::read(&attacker_target).unwrap(), b"attacker controlled");
     }
 
-    /// Symlink at the renamed root between `rename_no_clobber` and
+    /// Symlink at the renamed root between the promotion rename and
     /// `apply_root_directory_mode`: the chmod step MUST reject via
     /// `open_dir_at_rel`'s per-component no-follow walk. We inject
     /// the post-rename state directly (a deterministic test of the
@@ -1448,7 +1601,7 @@ mod tests {
     }
 
     /// File-root parallel of [`apply_root_directory_mode_rejects_symlink_at_renamed_root`].
-    /// Symlink substituted at the renamed root between `rename_no_clobber`
+    /// Symlink substituted at the renamed root between the promotion rename
     /// and `apply_root_file_mode`: the chmod step MUST reject via
     /// `open_file_nofollow`'s no-follow open. Inject the post-rename
     /// state directly (deterministic test of the same race the

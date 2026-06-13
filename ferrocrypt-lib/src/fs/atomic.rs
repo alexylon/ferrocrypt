@@ -1,8 +1,14 @@
 //! Atomic output finalization helpers.
 //!
-//! This module centralizes the "write under a temp name, promote to the
-//! final name only on success" pattern used throughout the crate for
-//! encrypted-file output, key files, and decrypted directory extraction.
+//! This module centralizes the path-based "write under a temp name,
+//! promote to the final name only on success" pattern used throughout
+//! the crate for encrypted-file output, generated key files, and the
+//! Windows / other-target decrypt-promotion fallback.
+//!
+//! Linux and macOS archive decrypt promotion is deliberately not owned
+//! here: `archive::platform::rename_at_no_clobber` performs that commit
+//! handle-relative to the extraction directory, so a mid-run path swap
+//! cannot redirect it.
 //!
 //! Three primitives are provided:
 //!
@@ -12,11 +18,13 @@
 //! - [`promote_single_file_no_clobber`] — promote a staged single-file
 //!   `.incomplete` path to its final name with atomic no-clobber semantics
 //!   on every supported platform, Windows included. Used by archive
-//!   extraction for single-file roots.
-//! - [`rename_no_clobber`] — rename a staged `.incomplete` entry (directory
-//!   or regular file) to its final name with no-clobber semantics. Used by
-//!   archive extraction for directory roots, which have no equivalent
-//!   safe atomic primitive on Windows.
+//!   extraction only on Windows / other non-Linux/macOS targets; Linux and
+//!   macOS use `archive::platform::rename_at_no_clobber` instead.
+//! - [`rename_no_clobber`] — path-based rename of a staged `.incomplete`
+//!   entry (directory or regular file) to its final name with no-clobber
+//!   semantics. Used by archive extraction for directory roots only on
+//!   Windows / other non-Linux/macOS targets; Linux and macOS decrypt
+//!   promotion is handle-relative in `archive::platform`.
 //!
 //! **Zero in-repo unsafe.** The file cases delegate entirely to
 //! `tempfile`, which is atomic-no-replace on Windows (`MoveFileExW`
@@ -93,6 +101,14 @@ pub(crate) fn finalize_file(tmp: NamedTempFile, final_path: &Path) -> io::Result
 /// `IncompleteOutputPolicy::RetainOnError` contract — "keep the staged
 /// `.incomplete` on disk after a failed decrypt" — continues to hold
 /// when promotion itself is what failed.
+///
+/// Archive promotion calls this on Windows and other non-Linux/macOS
+/// targets; on Linux and macOS the archive layer promotes
+/// handle-relative via `archive::platform::rename_at_no_clobber`, so the
+/// production caller here is `cfg`'d away and the dead-code check fires
+/// in a non-test build on those targets. The `allow` keeps the helper
+/// (and its cross-platform tests) compiled everywhere.
+#[cfg_attr(any(target_os = "linux", target_os = "macos"), allow(dead_code))]
 pub(crate) fn promote_single_file_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
     let temp_path = tempfile::TempPath::try_from_path(from)?;
     match temp_path.persist_noclobber(to) {
@@ -129,13 +145,22 @@ pub(crate) fn promote_single_file_no_clobber(from: &Path, to: &Path) -> io::Resu
 ///
 /// Single-file promotions should prefer [`promote_single_file_no_clobber`],
 /// which is atomic no-clobber on Windows too.
+///
+/// Build-time-unused on Linux and macOS for the same reason as
+/// [`promote_single_file_no_clobber`]: archive promotion there is
+/// handle-relative. The `allow` keeps it (and its tests) compiled on
+/// every platform.
+#[cfg_attr(any(target_os = "linux", target_os = "macos"), allow(dead_code))]
 pub(crate) fn rename_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
     rename_no_clobber_impl(from, to)?;
     sync_parent_dir(to);
     Ok(())
 }
 
+// Reached only through `rename_no_clobber`, which is itself build-time-
+// unused on Linux/macOS (archive promotion is handle-relative there).
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)]
 fn rename_no_clobber_impl(from: &Path, to: &Path) -> io::Result<()> {
     use rustix::fs::{CWD, RenameFlags, renameat_with};
     renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE).map_err(io::Error::from)
@@ -243,9 +268,11 @@ mod tests {
 
     #[test]
     fn rename_no_clobber_handles_regular_file() {
-        // The helper is used for both directory roots and single-file
-        // roots during archive extraction; prove the file case works
-        // with both the success path and the refuse-to-overwrite path.
+        // The helper supports both directory entries and regular files;
+        // prove the file case works with both the success path and the
+        // refuse-to-overwrite path even though archive single-file
+        // promotion prefers `promote_single_file_no_clobber` on the
+        // targets that still route through this module.
         let tmp_dir = tempfile::TempDir::new().unwrap();
         let from = tmp_dir.path().join("staged.txt");
         let to = tmp_dir.path().join("final.txt");

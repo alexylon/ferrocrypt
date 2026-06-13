@@ -56,10 +56,11 @@ cap-fs-ext = "4"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# rustix is the safe-Rust syscall wrapper used by `fs/atomic.rs` for
-# `renameat_with(NOREPLACE)` on Linux / macOS. Not used by the
-# extractor any more, but kept as a direct dep for atomic.rs's strict
-# no-clobber rename. cap-std also pulls rustix transitively, so the
+# rustix is the safe-Rust syscall wrapper used by `archive/platform.rs`
+# for handle-relative decrypt promotion on Linux / macOS. It also keeps
+# `fs/atomic.rs`'s path-based `rename_no_clobber` implementation compiled
+# for tests even though archive decrypt promotion no longer calls that
+# helper on these targets. cap-std also pulls rustix transitively, so the
 # version constraint is shared.
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 rustix = { version = "1", features = ["fs"] }

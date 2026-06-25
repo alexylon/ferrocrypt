@@ -2,7 +2,7 @@
 name = "ferrocrypt-cli"
 version = "0.3.0-beta.3"
 edition = "2021"
-rust-version = "1.87"
+rust-version = "1.88"
 
 description = "Command-line interface for FerroCrypt (installs the 'ferrocrypt' binary)."
 authors = ["Alexander Alexandrov"]

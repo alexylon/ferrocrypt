@@ -90,7 +90,7 @@ Available release artifacts include:
 cargo add ferrocrypt
 
 # Pre-release of v0.3.0 (opt-in; required to use the v0.3.0 features documented below)
-cargo add ferrocrypt@0.3.0-beta.1
+cargo add ferrocrypt@0.3.0-beta.3
 ```
 
 API documentation is available on [docs.rs](https://docs.rs/ferrocrypt/latest/ferrocrypt/).
@@ -104,7 +104,7 @@ Install from crates.io:
 cargo install ferrocrypt-cli
 
 # Pre-release of v0.3.0 (opt-in; required to use the v0.3.0 CLI documented below)
-cargo install ferrocrypt-cli --version 0.3.0-beta.1
+cargo install ferrocrypt-cli --version 0.3.0-beta.3
 ```
 
 Or build from source:
@@ -279,7 +279,7 @@ Limitations:
 - Pre-v1 FerroCrypt files and key pairs are not compatible with the current v1 format. Older data must be decrypted with the release that created it and then re-encrypted with the current release.
 - Directory encryption preserves file contents, directory structure, and Unix file permissions. It does not preserve ownership, timestamps, ACLs, extended attributes, hardlink identity, setuid/setgid/sticky bits, or platform-specific metadata.
 - Symlinks, hardlink archive entries, device files, FIFOs, sockets, archives with more than one top-level root, and exact or ASCII-case-insensitive duplicate paths are rejected during archive processing.
-- Archive paths must conform to a portable safe subset: no Windows-reserved characters (`< > : " | ? *`), no Windows-reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `CLOCK$`, `COM1..9`, `LPT1..9`) — including in extension stems (e.g. `CON.txt`), no ASCII control bytes (`0x00..=0x1F`), no trailing dot or space, no leading or trailing `/`, no `\`. Rejection happens at encrypt and at decrypt; the same rules apply on every supported OS.
+- Archive paths must conform to a portable safe subset: no Windows-reserved characters (`< > : " | ? *`), no Windows-reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `CLOCK$`, `CONIN$`, `CONOUT$`, `COM0..9`, `COM¹`/`COM²`/`COM³`, `LPT0..9`, `LPT¹`/`LPT²`/`LPT³`) — including in extension stems (e.g. `CON.txt`), no ASCII control bytes (`0x00..=0x1F`), no trailing dot or space, no leading or trailing `/`, no `\`. Rejection happens at encrypt and at decrypt; the same rules apply on every supported OS.
 - Filesystem hardlinks encountered during encryption are stored as independent regular files.
 - Default archive limits are enforced during encryption and decryption: at most 250,000 entries, 64 GiB of total regular-file content, and 64 path components per entry.
 - Failed decryptions do not write to the final output path. By default the staged `.incomplete` working copy is removed before the error returns, so a failed decrypt leaves no plaintext residue under the output directory. Pass `decrypt --keep-partial` (CLI) or `IncompleteOutputPolicy::RetainOnError` (library) to keep the staged copy for backup-recovery or forensic inspection; retained partials may represent an attacker-chosen prefix of the original because the per-chunk authentication only detects truncation when the final chunk arrives.
@@ -299,7 +299,7 @@ Common failure categories include:
 - **Decryption failed: recipient `x25519` unwrap failed** — the supplied private key does not unlock the file, or the recipient metadata has been modified.
 - **Decryption failed: recipient `x25519` MAC mismatch** (multi-recipient) — a recipient unwrapped a candidate file key, but the authenticated header did not verify. Decryption continues with the next recipient in the file.
 - **Decryption failed: no recipient could unlock the file** — none of the supported recipients in the file could unlock the file key.
-- **Decryption failed: header tampered after unlock** — a candidate file key was found, but the authenticated header did not verify.
+- **Decryption failed: header tampered or corrupted after unlock** — a candidate file key was found, but the authenticated header did not verify.
 - **Payload authentication failed: data tampered or corrupted** — the header verified, but the encrypted payload was corrupted or modified.
 - **Encrypted file is truncated** — the encrypted stream ended before its final authenticated chunk.
 - **Encrypted file has unexpected trailing data** — extra data was found after the authenticated encrypted stream.

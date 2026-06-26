@@ -116,9 +116,12 @@ impl RecipientEntry {
 
     /// Writer-side checked counterpart of [`Self::parse_one`]: runs
     /// every shape rule the reader enforces — `type_name` length and
-    /// grammar, reserved flag bits, `body.len() <= BODY_LEN_MAX` — and
-    /// returns the same `FormatDefect` the reader would emit. Used by
-    /// `build_encrypted_header`.
+    /// grammar, reserved flag bits, `body.len() <= BODY_LEN_MAX` — so
+    /// the writer rejects the same out-of-spec entries the reader
+    /// rejects. For entries with more than one defect, the exact
+    /// `FormatDefect` label may differ because the writer validates
+    /// from typed fields while the reader validates from wire bytes.
+    /// Used by `build_encrypted_header`.
     pub(crate) fn to_bytes_checked(&self) -> Result<Vec<u8>, CryptoError> {
         // Length before grammar, mirroring `parse_one`: the reader
         // rejects an empty or over-255-byte name as a framing defect
@@ -262,8 +265,8 @@ mod tests {
 
     /// Writer/reader variant parity: an empty or over-255-byte
     /// `type_name` is a framing defect (`MalformedRecipientEntry`) on
-    /// both sides, never a grammar defect — `to_bytes_checked`
-    /// documents that it returns the same defect the reader would emit.
+    /// both sides, never a grammar defect. This pins the exact
+    /// diagnostic for single-defect name-length failures.
     #[test]
     fn to_bytes_checked_rejects_bad_name_length_as_framing_defect() {
         for name in [String::new(), "a".repeat(TYPE_NAME_MAX_LEN + 1)] {

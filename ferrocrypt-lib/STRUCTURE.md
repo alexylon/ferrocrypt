@@ -1182,9 +1182,11 @@ lib.rs
 api.rs
   ↓
 protocol.rs
-  ├── container.rs → format.rs
+  ├── container.rs → format.rs + archive/*
   ├── recipient/* → crypto/*
+  │   └── recipient/native/x25519.rs → key/private.rs
   ├── key/* → crypto/* + recipient/name.rs
+  │   └── key/public.rs → recipient/native/x25519.rs
   ├── archive/*
   └── fs/*
 ```

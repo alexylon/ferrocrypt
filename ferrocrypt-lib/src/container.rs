@@ -282,7 +282,7 @@ impl std::fmt::Debug for HexBytes<'_> {
 // The non-secret byte fields (`prefix_bytes`, `header_mac`,
 // `stream_nonce`) render as lowercase hex via `HexBytes` — easier to
 // read in panic / log lines than a raw decimal byte array.
-// `header_bytes` shows only its length: it can be up to ~1 MiB
+// `header_bytes` shows only its length: it can be up to ~16 MiB
 // (`HEADER_LEN_MAX`), so dumping its content in every debug print
 // would be hostile.
 impl std::fmt::Debug for BuiltEncryptedHeader {
@@ -298,7 +298,7 @@ impl std::fmt::Debug for BuiltEncryptedHeader {
 }
 
 // Manual `Debug` mirrors `BuiltEncryptedHeader`: `header_bytes` can be
-// up to ~1 MiB (`HEADER_LEN_MAX`) and `ext_bytes` up to 64 KiB, so a
+// up to ~16 MiB (`HEADER_LEN_MAX`) and `ext_bytes` up to 64 KiB, so a
 // derive would dump megabytes of byte noise into any panic or log line
 // that renders a parsed header. No secret material here — all fields
 // are on-disk bytes — so this is log hygiene only.

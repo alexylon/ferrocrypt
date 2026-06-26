@@ -10,8 +10,10 @@
 //! 1. **Metadata pass** — opens the source root once. A single-file
 //!    root is opened with a no-follow, non-blocking open and its mode
 //!    and size are read from that handle. A directory root is opened
-//!    through its parent directory via `open_dir_nofollow` (with the
-//!    Windows reparse-point post-check), then walked iteratively over
+//!    directly on Unix via `open_anchor` and verified with a `(dev, ino)`
+//!    re-check; on Windows it is opened through its parent directory via
+//!    `open_child_dir_nofollow` with the reparse-point post-check. The
+//!    directory is then walked iteratively over
 //!    `cap_std::fs::Dir::entries`, driven by a heap-backed stack of
 //!    pending directories with deferred child opens (live handles
 //!    track the depth of the tree, not its width, and deep nesting

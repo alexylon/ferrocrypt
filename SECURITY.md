@@ -33,6 +33,12 @@ FerroCrypt has not undergone an independent third-party security audit.
 The [`chacha20poly1305`](https://crates.io/crates/chacha20poly1305) AEAD
 crate that handles payload encryption was [audited by NCC Group](https://research.nccgroup.com/2020/02/26/public-report-rustcrypto-aes-gcm-and-chacha20poly1305-implementation-review/).
 
+Dependency review is tracked with `cargo vet`. Several core crypto crates
+are covered by imported audits or maintainer-approved exemptions rather than
+first-party audits by this project, so a passing `cargo vet` run means the
+configured supply-chain policy is satisfied; it is not an independent audit
+of each cryptographic dependency by the FerroCrypt project.
+
 The current on-disk format is FerroCrypt v1 (wire-version byte `0x01`).
 Public conformance test vectors are deferred to the v1.0 release. Until
 then, the canonical references are

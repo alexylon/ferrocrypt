@@ -1403,6 +1403,102 @@ fn test_cli_encrypt_rejects_max_kdf_memory_flag() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
+fn test_cli_decrypt_rejects_tightened_max_kdf_lanes() {
+    let test_dir = setup_test_dir("cli_decrypt_kdf_lanes_reject");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    fs::create_dir_all(&decrypt_dir).unwrap();
+    create_test_file(&input_file, "kdf lanes reject test");
+
+    let binary = get_binary_path();
+    let enc = cli_command(&binary)
+        .arg("encrypt")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("encrypt");
+    assert!(enc.status.success());
+
+    // The file's Argon2id lane count is 4 (both the fast-KDF test override
+    // and the production default use 4 lanes); a tightened cap of 2 must
+    // reject it before Argon2id runs, so the decrypt fails.
+    let dec = cli_command(&binary)
+        .arg("decrypt")
+        .arg("-i")
+        .arg(encrypt_dir.join("data.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir)
+        .arg("--max-kdf-lanes")
+        .arg("2")
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("decrypt with --max-kdf-lanes");
+    assert!(
+        !dec.status.success(),
+        "decrypt should fail when --max-kdf-lanes is below the file's lane count"
+    );
+    let stderr = String::from_utf8_lossy(&dec.stderr);
+    assert!(
+        stderr.contains("lane count cap exceeded"),
+        "expected a lane-cap error, got: {stderr}"
+    );
+}
+
+#[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
+fn test_cli_decrypt_rejects_tightened_max_kdf_time_cost() {
+    let test_dir = setup_test_dir("cli_decrypt_kdf_time_reject");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    fs::create_dir_all(&decrypt_dir).unwrap();
+    create_test_file(&input_file, "kdf time reject test");
+
+    let binary = get_binary_path();
+    let enc = cli_command(&binary)
+        .arg("encrypt")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("encrypt");
+    assert!(enc.status.success());
+
+    // Every valid file has time_cost >= 1, so a cap of 0 rejects any of them.
+    // This confirms --max-kdf-time-cost tightens the decrypt-side limit
+    // regardless of the file's exact iteration count.
+    let dec = cli_command(&binary)
+        .arg("decrypt")
+        .arg("-i")
+        .arg(encrypt_dir.join("data.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir)
+        .arg("--max-kdf-time-cost")
+        .arg("0")
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("decrypt with --max-kdf-time-cost");
+    assert!(
+        !dec.status.success(),
+        "decrypt should fail when --max-kdf-time-cost is below the file's time cost"
+    );
+    let stderr = String::from_utf8_lossy(&dec.stderr);
+    assert!(
+        stderr.contains("time cost cap exceeded"),
+        "expected a time-cost-cap error, got: {stderr}"
+    );
+}
+
+#[test]
 fn test_cli_decrypt_rejects_save_as_flag() {
     // -s is encrypt-only; clap rejects it on `decrypt`.
     let test_dir = setup_test_dir("cli_decrypt_rejects_s");

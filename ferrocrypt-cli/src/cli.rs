@@ -196,6 +196,20 @@ pub enum CliCommand {
         max_kdf_memory: Option<u32>,
 
         #[arg(
+            long,
+            value_name = "ITERATIONS",
+            help = "Maximum Argon2id time cost (iteration count) to accept"
+        )]
+        max_kdf_time_cost: Option<u32>,
+
+        #[arg(
+            long,
+            value_name = "LANES",
+            help = "Maximum Argon2id lane count (parallelism) to accept"
+        )]
+        max_kdf_lanes: Option<u32>,
+
+        #[arg(
             long = "keep-partial",
             help = "Keep the .incomplete staged plaintext on decrypt failure (forensic / recovery use)"
         )]
@@ -461,8 +475,18 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
             output_dir,
             private_key,
             max_kdf_memory,
+            max_kdf_time_cost,
+            max_kdf_lanes,
             keep_partial,
-        } => run_decrypt(input, output_dir, private_key, max_kdf_memory, keep_partial),
+        } => run_decrypt(
+            input,
+            output_dir,
+            private_key,
+            max_kdf_memory,
+            max_kdf_time_cost,
+            max_kdf_lanes,
+            keep_partial,
+        ),
 
         CliCommand::Keygen { output_dir } => run_keygen(output_dir),
         CliCommand::Fingerprint { public_key_file } => run_fingerprint(public_key_file),
@@ -515,15 +539,44 @@ fn run_encrypt(
     Ok(())
 }
 
+/// Builds the decrypt-side [`KdfLimit`] from the optional `--max-kdf-*`
+/// flags. Returns `None` when no flag is set, so the library default
+/// applies. When any flag is set, memory starts from `--max-kdf-memory`
+/// (or the 1 GiB default) and `--max-kdf-time-cost` / `--max-kdf-lanes`
+/// tighten the time-cost and lane caps; an unset cap stays at the v1
+/// format maximum, which rejects nothing the structural check would not.
+fn build_kdf_limit(
+    max_kdf_memory: Option<u32>,
+    max_kdf_time_cost: Option<u32>,
+    max_kdf_lanes: Option<u32>,
+) -> Result<Option<KdfLimit>, CryptoError> {
+    if max_kdf_memory.is_none() && max_kdf_time_cost.is_none() && max_kdf_lanes.is_none() {
+        return Ok(None);
+    }
+    let mut limit = match max_kdf_memory {
+        Some(mib) => KdfLimit::from_mib(mib)?,
+        None => KdfLimit::default(),
+    };
+    if let Some(time_cost) = max_kdf_time_cost {
+        limit = limit.with_max_time_cost(time_cost);
+    }
+    if let Some(lanes) = max_kdf_lanes {
+        limit = limit.with_max_lanes(lanes);
+    }
+    Ok(Some(limit))
+}
+
 fn run_decrypt(
     input: PathBuf,
     output_dir: PathBuf,
     private_key: Option<PathBuf>,
     max_kdf_memory: Option<u32>,
+    max_kdf_time_cost: Option<u32>,
+    max_kdf_lanes: Option<u32>,
     keep_partial: bool,
 ) -> Result<(), CryptoError> {
     let start = std::time::Instant::now();
-    let limit = max_kdf_memory.map(KdfLimit::from_mib).transpose()?;
+    let limit = build_kdf_limit(max_kdf_memory, max_kdf_time_cost, max_kdf_lanes)?;
     let policy = if keep_partial {
         IncompleteOutputPolicy::RetainOnError
     } else {
@@ -721,6 +774,39 @@ fn interactive_mode() -> Result<(), CryptoError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `build_kdf_limit` maps the optional `--max-kdf-*` flags onto a single
+    /// `KdfLimit`: no flag yields `None` (library default applies), and any
+    /// flag fills the unset dimensions from the default so only the named
+    /// caps are tightened.
+    #[test]
+    fn build_kdf_limit_maps_flags_onto_one_limit() {
+        assert_eq!(build_kdf_limit(None, None, None).unwrap(), None);
+
+        let default = KdfLimit::default();
+
+        let mem_only = build_kdf_limit(Some(512), None, None).unwrap().unwrap();
+        assert_eq!(mem_only.max_mem_cost_kib, 512 * 1024);
+        assert_eq!(mem_only.max_time_cost, default.max_time_cost);
+        assert_eq!(mem_only.max_lanes, default.max_lanes);
+
+        let time_only = build_kdf_limit(None, Some(3), None).unwrap().unwrap();
+        assert_eq!(time_only.max_mem_cost_kib, default.max_mem_cost_kib);
+        assert_eq!(time_only.max_time_cost, 3);
+        assert_eq!(time_only.max_lanes, default.max_lanes);
+
+        let lanes_only = build_kdf_limit(None, None, Some(2)).unwrap().unwrap();
+        assert_eq!(lanes_only.max_mem_cost_kib, default.max_mem_cost_kib);
+        assert_eq!(lanes_only.max_time_cost, default.max_time_cost);
+        assert_eq!(lanes_only.max_lanes, 2);
+
+        let all = build_kdf_limit(Some(256), Some(2), Some(1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(all.max_mem_cost_kib, 256 * 1024);
+        assert_eq!(all.max_time_cost, 2);
+        assert_eq!(all.max_lanes, 1);
+    }
 
     #[test]
     fn exit_recognized_case_insensitively_and_with_whitespace() {

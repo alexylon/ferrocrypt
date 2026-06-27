@@ -241,6 +241,8 @@ The interactive prompt exits on `quit`, `exit`, or Ctrl-D. Ctrl-C cancels the cu
 | `-K, --private-key` | `decrypt` | Private key file (required for public-key files) |
 | `--allow-double-encrypt` | `encrypt` | Permit encrypting an input that already looks like a `.fcr` file |
 | `--max-kdf-memory` | `decrypt` | Maximum Argon2id memory cost accepted during decryption |
+| `--max-kdf-time-cost` | `decrypt` | Maximum Argon2id time cost (iteration count) accepted during decryption |
+| `--max-kdf-lanes` | `decrypt` | Maximum Argon2id lane count (parallelism) accepted during decryption |
 | `--keep-partial` | `decrypt` | Keep the staged `.incomplete` working copy on failure for forensic or recovery use |
 
 ## Desktop application

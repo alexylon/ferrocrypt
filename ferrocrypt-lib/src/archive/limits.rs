@@ -170,6 +170,15 @@ pub(crate) fn enforce_entry_count_cap(
     Ok(())
 }
 
+/// Counts the `/`-separated components of an FCA path. `validate_fca_path`
+/// (in `archive::path`) guarantees single `/` separators with no leading
+/// or trailing slash, so this count matches the `max_path_depth` cap
+/// exactly. The single source of truth for the split, shared by
+/// [`enforce_path_depth_cap`] here and `archive::path::canonical_path_order`.
+pub(super) fn component_count(path: &str) -> usize {
+    path.split('/').count()
+}
+
 /// Single source of truth for path-depth cap enforcement. Computes the
 /// depth from the FCA UTF-8 path (count of `/`-separated components)
 /// so callers don't reimplement the split. Used by [`validate_fca_path`]
@@ -178,7 +187,7 @@ pub(crate) fn enforce_path_depth_cap(
     path_utf8: &str,
     limits: &ArchiveLimits,
 ) -> Result<(), CryptoError> {
-    let depth = u32::try_from(path_utf8.split('/').count()).unwrap_or(u32::MAX);
+    let depth = u32::try_from(component_count(path_utf8)).unwrap_or(u32::MAX);
     if depth > limits.max_path_depth {
         return Err(path_depth_cap_error(
             depth,

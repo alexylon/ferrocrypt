@@ -15,7 +15,8 @@ use crate::error::sanitize_for_display;
 use crate::fs::paths::INCOMPLETE_SUFFIX;
 
 use super::limits::{
-    ARCHIVE_PATH_EMPTY, ArchiveLimits, enforce_path_bytes_cap, enforce_path_depth_cap,
+    ARCHIVE_PATH_EMPTY, ArchiveLimits, component_count, enforce_path_bytes_cap,
+    enforce_path_depth_cap,
 };
 
 /// Bytes that cannot appear in any FCA path component on any platform
@@ -233,16 +234,6 @@ fn is_windows_reserved_device_component(component: &str) -> bool {
 /// could surface the conflict.
 pub fn ascii_case_collision_key(path: &str) -> Vec<u8> {
     path.bytes().map(ascii_lower_byte).collect()
-}
-
-/// Counts the `/`-separated components of an FCA path. The path is
-/// guaranteed by [`validate_fca_path`] to use single `/` separators
-/// with no leading/trailing slash, so `split('/').count()` matches
-/// the `max_path_depth` cap exactly. Shared by the writer's
-/// canonical sort (`encode::sort_entries_canonically`) and the
-/// reader's directory pre-creation pass (`decode::extract_directory_root`).
-pub(super) fn component_count(path: &str) -> usize {
-    path.split('/').count()
 }
 
 /// FORMAT.md §9.8 canonical sort key: depth ascending, then path

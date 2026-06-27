@@ -12,12 +12,15 @@ use crate::recipient::policy::MixingPolicy;
 const TYPE_NAME_DISPLAY_MAX: usize = 13;
 const _: () = assert!(TYPE_NAME_DISPLAY_MAX >= 1);
 
-/// Wraps a `type_name` so its `Display` rendering truncates to
-/// [`TYPE_NAME_DISPLAY_MAX`] chars, replacing the tail with `…` when
-/// truncation actually occurs. Operates on `chars()` so a name that
-/// happens to contain non-ASCII (the FORMAT.md §3.3 grammar rejects it,
-/// but a `CryptoError::*` variant can be hand-constructed from any
-/// string) does not split a UTF-8 code point.
+/// Wraps a `type_name` so its `Display` rendering escapes non-printable
+/// characters and truncates to [`TYPE_NAME_DISPLAY_MAX`] chars, replacing
+/// the tail with `…` when truncation actually occurs. The FORMAT.md §3.3
+/// grammar already limits a parsed `type_name` to printable lowercase
+/// ASCII, but a `CryptoError::*` variant can be hand-constructed from any
+/// string, so the escape (shared with `sanitize_for_display` via
+/// `write_sanitized_char`) stops a non-grammar name from smuggling a
+/// terminal escape sequence into an error message. Operates on `chars()`
+/// so truncation never splits a UTF-8 code point.
 struct DisplayableTypeName<'a>(&'a str);
 
 impl std::fmt::Display for DisplayableTypeName<'_> {
@@ -25,7 +28,7 @@ impl std::fmt::Display for DisplayableTypeName<'_> {
         let mut iter = self.0.chars();
         for _ in 0..TYPE_NAME_DISPLAY_MAX - 1 {
             match iter.next() {
-                Some(ch) => write!(f, "{ch}")?,
+                Some(ch) => write_sanitized_char(f, ch)?,
                 None => return Ok(()),
             }
         }
@@ -38,7 +41,7 @@ impl std::fmt::Display for DisplayableTypeName<'_> {
                 if iter.next().is_some() {
                     f.write_str("…")
                 } else {
-                    write!(f, "{last}")
+                    write_sanitized_char(f, last)
                 }
             }
         }
@@ -50,6 +53,20 @@ impl std::fmt::Display for DisplayableTypeName<'_> {
 /// a large archive, short enough that one hostile path cannot flood a
 /// terminal or log line.
 const UNTRUSTED_TEXT_DISPLAY_MAX: usize = 64;
+
+/// Appends `c` to `w`, passing printable ASCII (and the space character)
+/// through unchanged and rendering every other character as a backslash
+/// escape (`\n`, `\u{202e}`, …). The one definition of the per-character
+/// escape rule, shared by `sanitize_for_display` and `DisplayableTypeName`
+/// so neither can let a hostile character carry a terminal escape
+/// sequence or visually reorder the surrounding text.
+fn write_sanitized_char<W: std::fmt::Write>(w: &mut W, c: char) -> std::fmt::Result {
+    if c.is_ascii_graphic() || c == ' ' {
+        w.write_char(c)
+    } else {
+        write!(w, "{}", c.escape_default())
+    }
+}
 
 /// Renders untrusted text for embedding in an error message.
 ///
@@ -69,11 +86,7 @@ pub(crate) fn sanitize_for_display(text: &str) -> String {
             out.push('…');
             break;
         }
-        if c.is_ascii_graphic() || c == ' ' {
-            out.push(c);
-        } else {
-            out.extend(c.escape_default());
-        }
+        let _ = write_sanitized_char(&mut out, c);
     }
     out
 }
@@ -1425,6 +1438,22 @@ mod tests {
             sanitize_for_display(&exact),
             exact,
             "at-cap input is untouched"
+        );
+    }
+
+    /// Defense-in-depth: a `type_name` carrying terminal-escape or
+    /// direction-override bytes — only reachable via a hand-constructed
+    /// `CryptoError`, since the FORMAT.md §3.3 grammar rejects such names —
+    /// is escaped in the rendered message, never emitted raw. Guards the
+    /// `write_sanitized_char` path through `DisplayableTypeName`.
+    #[test]
+    fn type_name_in_error_is_escaped_not_emitted_raw() {
+        assert_eq!(
+            CryptoError::RecipientUnwrapFailed {
+                type_name: "\u{1b}\u{202e}".to_owned(),
+            }
+            .to_string(),
+            "Decryption failed: recipient `\\u{1b}\\u{202e}` unwrap failed",
         );
     }
 

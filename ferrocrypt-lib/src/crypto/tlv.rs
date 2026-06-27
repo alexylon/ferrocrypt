@@ -100,8 +100,14 @@ pub(crate) fn scan_tlv_region(
         if bytes.len() - cursor < ENTRY_HEADER_SIZE {
             return Err(CryptoError::InvalidFormat(FormatDefect::MalformedTlv));
         }
-        let tag = read_u16_be(bytes, cursor)?;
-        let len = read_u32_be(bytes, cursor + size_of::<u16>())?;
+        // The pre-check above guarantees ENTRY_HEADER_SIZE bytes remain,
+        // so these reads cannot fail; map the unreachable error into the
+        // TLV family so a future change can never surface the
+        // header-shaped `MalformedHeader` the byte readers default to.
+        let tag = read_u16_be(bytes, cursor)
+            .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedTlv))?;
+        let len = read_u32_be(bytes, cursor + size_of::<u16>())
+            .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedTlv))?;
         cursor += ENTRY_HEADER_SIZE;
 
         let class = classify_tlv_tag(tag)?;

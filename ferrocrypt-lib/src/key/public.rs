@@ -56,7 +56,12 @@ pub const PUBLIC_KEY_VERSION: u8 = WRITER_KEYPAIR_SUITE.public_key_version();
 pub const PUBLIC_KEY_V1_VERSION: u8 = KeypairSuite::V1.public_key_version();
 
 fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
 }
 
 /// Bech32 HRP for FerroCrypt recipient strings.

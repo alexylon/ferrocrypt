@@ -2,6 +2,8 @@
 
 <h1 align="center"><code>FerroCrypt</code></h1>
 
+<p align="center"><a href="https://www.ferrocrypt.app"><b>www.ferrocrypt.app</b></a></p>
+
 ![](https://github.com/alexylon/ferrocrypt/actions/workflows/rust.yml/badge.svg)
 &nbsp;
 [![crate: ferrocrypt](https://img.shields.io/crates/v/ferrocrypt.svg?label=crate%3A%20ferrocrypt&color=blue)](https://crates.io/crates/ferrocrypt)
@@ -26,18 +28,20 @@ FerroCrypt is a pure Rust library, CLI, and desktop application for encrypting a
   <img src="https://raw.githubusercontent.com/alexylon/ferrocrypt/main/assets/screenshot-4.png" width="400" alt="FerroCrypt">
 </div>
 
-> **Status:** This repository is preparing the **v0.3.0** release. The latest
-> stable release on crates.io is `0.2.5`, which uses the previous on-disk format
-> and CLI; everything below describes the v0.3.0 line. Pre-releases of v0.3.0
-> (`0.3.0-alpha.N`, `0.3.0-beta.N`, `0.3.0-rc.N`) may be published to crates.io
-> and GitHub Releases. They are opt-in — `cargo add ferrocrypt` will not select
-> them automatically; the exact version must be pinned in `Cargo.toml`.
-> **Further breaking changes (wire format, public API, CLI) may land between
-> pre-releases and before the final v0.3.0 cut.** Files produced by any
-> pre-release or by `main` are not interchangeable with `0.2.5`, and any
-> pre-release artefact should be treated as unstable until v0.3.0 ships. See the
-> [`[Unreleased]` section of `CHANGELOG.md`](CHANGELOG.md#unreleased) for the
-> full list of breaking changes so far.
+> **Status:** This repository is preparing the **v0.3.0** release and is now at
+> the **release-candidate** stage (`0.3.0-rc.N`). The latest stable release on
+> crates.io is `0.2.5`, which uses the previous on-disk format and CLI;
+> everything below describes the v0.3.0 line. Pre-releases of v0.3.0
+> (`0.3.0-alpha.N`, `0.3.0-beta.N`, `0.3.0-rc.N`) are published to crates.io and
+> GitHub Releases. They are opt-in — `cargo add ferrocrypt` will not select them
+> automatically; the exact version must be pinned in `Cargo.toml`. **The wire
+> format, public API, and CLI are now considered final for v0.3.0; a breaking
+> change before the final cut would only land to fix a critical issue found
+> during the release-candidate period.** Files produced by any pre-release or by
+> `main` are not interchangeable with `0.2.5`, and any pre-release artefact
+> should be treated as unstable until v0.3.0 ships. See the [`[Unreleased]`
+> section of `CHANGELOG.md`](CHANGELOG.md#unreleased) for the full list of
+> breaking changes so far.
 
 ## Table of contents
 
@@ -90,7 +94,7 @@ Available release artifacts include:
 cargo add ferrocrypt
 
 # Pre-release of v0.3.0 (opt-in; required to use the v0.3.0 features documented below)
-cargo add ferrocrypt@0.3.0-beta.3
+cargo add ferrocrypt@0.3.0-rc.1
 ```
 
 API documentation is available on [docs.rs](https://docs.rs/ferrocrypt/latest/ferrocrypt/).
@@ -104,7 +108,7 @@ Install from crates.io:
 cargo install ferrocrypt-cli
 
 # Pre-release of v0.3.0 (opt-in; required to use the v0.3.0 CLI documented below)
-cargo install ferrocrypt-cli --version 0.3.0-beta.3
+cargo install ferrocrypt-cli --version 0.3.0-rc.1
 ```
 
 Or build from source:

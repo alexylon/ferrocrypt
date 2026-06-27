@@ -323,7 +323,7 @@ fn main() {
                             }
                             Err(e) => {
                                 app.set_status_ok("".into());
-                                app.set_status_err(elide_result_path(&e.to_string()).into());
+                                app.set_status_err(elide_error_for_status(&e.to_string()).into());
                             }
                         }
                     });
@@ -389,7 +389,7 @@ fn apply_input_path(weak: &slint::Weak<AppWindow>, path: PathBuf) {
     let detected_mode = match detected_mode {
         Ok(mode) => mode,
         Err(e) => {
-            app.set_status_err(e.to_string().into());
+            app.set_status_err(elide_error_for_status(&e.to_string()).into());
             return;
         }
     };
@@ -575,6 +575,20 @@ fn elide_result_path(msg: &str) -> String {
     msg.to_string()
 }
 
+/// Bounds an error message to the status line. Known result/conflict prefixes
+/// keep their leading text and left-elide the path (via [`elide_result_path`]);
+/// any message still longer than [`ELIDE`] — typically a long OS error string
+/// or archive path — is truncated with a trailing `…`. This is UI-only: the
+/// library keeps the full message for CLI and library callers.
+fn elide_error_for_status(msg: &str) -> String {
+    let elided = elide_result_path(msg);
+    if elided.chars().count() <= ELIDE {
+        return elided;
+    }
+    let kept: String = elided.chars().take(ELIDE - 1).collect();
+    format!("{kept}\u{2026}")
+}
+
 fn validate_selected_key(app: &AppWindow, key_path: &str) {
     let key_path = Path::new(key_path);
     match app.get_mode() {
@@ -587,14 +601,14 @@ fn validate_selected_key(app: &AppWindow, key_path: &str) {
             Err(e) => {
                 app.set_key_fingerprint(Default::default());
                 app.set_key_invalid(true);
-                app.set_status_err(e.to_string().into());
+                app.set_status_err(elide_error_for_status(&e.to_string()).into());
             }
         },
         MODE_RECIPIENT_DECRYPT => {
             app.set_key_fingerprint(Default::default());
             if let Err(e) = validate_private_key_file(key_path) {
                 app.set_key_invalid(true);
-                app.set_status_err(e.to_string().into());
+                app.set_status_err(elide_error_for_status(&e.to_string()).into());
             } else {
                 app.set_key_invalid(false);
                 app.set_status_err(Default::default());
@@ -885,6 +899,30 @@ mod tests {
     #[test]
     fn elide_result_path_trims_whitespace() {
         assert_eq!(elide_result_path("  Short message  "), "Short message");
+    }
+
+    #[test]
+    fn elide_error_for_status_passes_messages_within_budget() {
+        let msg = "Decryption failed: wrong passphrase or modified file";
+        assert!(msg.chars().count() <= ELIDE);
+        assert_eq!(elide_error_for_status(msg), msg);
+    }
+
+    #[test]
+    fn elide_error_for_status_truncates_long_unknown_messages() {
+        let long = format!("Unsafe archive path (traversal): /tmp/{}", "d".repeat(200));
+        let out = elide_error_for_status(&long);
+        assert!(out.chars().count() <= ELIDE);
+        assert!(out.ends_with('\u{2026}'));
+        assert!(out.starts_with("Unsafe archive path"));
+    }
+
+    #[test]
+    fn elide_error_for_status_bounds_known_prefix_messages() {
+        let long = format!("Output already exists: /tmp/{}", "e".repeat(200));
+        let out = elide_error_for_status(&long);
+        assert!(out.chars().count() <= ELIDE);
+        assert!(out.contains('\u{2026}'));
     }
 
     #[test]

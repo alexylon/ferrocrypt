@@ -414,7 +414,7 @@ fn recipient_decryptor_archive_limits_constrains_extraction() {
 /// Encrypt-side `archive_limits` raised above the default while the
 /// reader uses [`ArchiveLimits::default`]: a file containing a path
 /// deeper than the reader's default `max_path_depth` (64) is rejected
-/// at extract time with the typed `path depth cap exceeded` message,
+/// at extract time with the typed `path too deep` message,
 /// and the same file decrypts successfully when the reader raises
 /// `archive_limits` to match the writer.
 ///

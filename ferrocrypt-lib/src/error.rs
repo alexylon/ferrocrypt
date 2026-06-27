@@ -255,7 +255,7 @@ pub enum CryptoError {
     /// [`InvalidKdfParams`] (structurally invalid params): here the params
     /// are well-formed but cost more than the caller is willing to
     /// spend.
-    #[error("KDF resource cap exceeded ({mem_cost_kib} KiB, cap {local_cap_kib})")]
+    #[error("Passphrase memory over limit ({mem_cost_kib} KiB, limit {local_cap_kib})")]
     KdfResourceCapExceeded {
         /// Memory cost requested by the untrusted header, in KiB.
         mem_cost_kib: u32,
@@ -268,7 +268,7 @@ pub enum CryptoError {
     /// (within the v1 maximum) but asks for more iterations than the policy
     /// allows. The default cap is the v1 maximum, so this variant is returned
     /// only when a caller tightens `KdfLimit` below that maximum.
-    #[error("KDF time cost cap exceeded ({time_cost}, cap {local_cap})")]
+    #[error("Passphrase time over limit ({time_cost}, limit {local_cap})")]
     KdfTimeCostCapExceeded {
         /// Time cost (iteration count) requested by the untrusted header.
         time_cost: u32,
@@ -280,7 +280,7 @@ pub enum CryptoError {
     /// [`Self::KdfResourceCapExceeded`]; like [`Self::KdfTimeCostCapExceeded`],
     /// the default cap is the v1 maximum, so this variant is returned only when
     /// a caller tightens `KdfLimit` below that maximum.
-    #[error("KDF lane count cap exceeded ({lanes}, cap {local_cap})")]
+    #[error("Passphrase parallelism over limit ({lanes}, limit {local_cap})")]
     KdfLanesCapExceeded {
         /// Lane count (parallelism) requested by the untrusted header.
         lanes: u32,
@@ -293,7 +293,7 @@ pub enum CryptoError {
     /// artefact with weak Argon2id memory. The floor is a writer policy
     /// only: readers accept any structurally valid, within-cap parameters,
     /// so a file written before the floor existed always decrypts.
-    #[error("KDF memory cost {mem_cost_kib} KiB below {floor_kib} KiB write floor")]
+    #[error("Passphrase memory too low ({mem_cost_kib} KiB, needs {floor_kib} KiB)")]
     KdfBelowWriteFloor {
         /// Memory cost the caller requested, in KiB.
         mem_cost_kib: u32,
@@ -306,7 +306,7 @@ pub enum CryptoError {
     /// caller's resource policy. Distinct from
     /// [`FormatDefect::OversizedHeader`] (above structural max) per
     /// `FORMAT.md` §3.2.
-    #[error("Header length cap exceeded ({header_len} bytes, cap {local_cap})")]
+    #[error("Header too large ({header_len} bytes, limit {local_cap})")]
     HeaderLenCapExceeded {
         /// Header length declared by the `.fcr` prefix, in bytes.
         header_len: u32,
@@ -319,7 +319,7 @@ pub enum CryptoError {
     /// resource policy. Distinct from
     /// [`FormatDefect::RecipientCountOutOfRange`] (above structural
     /// max).
-    #[error("Recipient count cap exceeded ({count} entries, cap {local_cap})")]
+    #[error("Too many recipients ({count} entries, limit {local_cap})")]
     RecipientCountCapExceeded {
         /// Recipient count declared by the header or requested by the writer.
         count: u16,
@@ -334,7 +334,7 @@ pub enum CryptoError {
     /// [`FormatDefect::MalformedRecipientEntry`]: the file is
     /// structurally valid; the reader's resource policy is the
     /// constraint, and callers MAY raise the cap for trusted input.
-    #[error("Recipient body cap exceeded ({body_len} bytes, cap {local_cap})")]
+    #[error("Recipient data too large ({body_len} bytes, limit {local_cap})")]
     RecipientBodyCapExceeded {
         /// Recipient body length declared by the entry, in bytes.
         body_len: u32,
@@ -350,7 +350,7 @@ pub enum CryptoError {
     /// §7); the recommended local default is smaller. For valid recipient
     /// strings, byte length and character count are the same because the
     /// encoding is ASCII.
-    #[error("Recipient string cap exceeded ({input_chars} chars, cap {local_cap})")]
+    #[error("Recipient string too long ({input_chars} chars, limit {local_cap})")]
     RecipientStringCapExceeded {
         /// Number of characters in the supplied recipient string.
         input_chars: u32,
@@ -365,9 +365,7 @@ pub enum CryptoError {
     /// [`FormatDefect::MalformedPrivateKey`]: the file may be
     /// structurally valid for a future key type; the local policy is
     /// the constraint.
-    #[error(
-        "Private key wrapped-secret cap exceeded ({wrapped_secret_len} bytes, cap {local_cap})"
-    )]
+    #[error("Private key data too large ({wrapped_secret_len} bytes, limit {local_cap})")]
     PrivateKeyWrappedSecretCapExceeded {
         /// Wrapped-secret length declared by the `private.key` header, in bytes.
         wrapped_secret_len: u32,
@@ -436,7 +434,7 @@ pub enum CryptoError {
     /// `FORMAT.md` §3.4 unknown critical entries MUST cause file
     /// rejection (vs unknown non-critical, which are skipped).
     #[error(
-        "Unknown critical recipient: `{}`. Upgrade FerroCrypt.",
+        "Unsupported recipient `{}`. Upgrade FerroCrypt.",
         DisplayableTypeName(type_name)
     )]
     UnknownCriticalRecipient {
@@ -524,7 +522,7 @@ pub enum CryptoError {
     /// `FORMAT.md` §5. Surfaces from the writer-side cap (refuses to
     /// emit the over-cap chunk) and the reader-side cap (refuses to
     /// consume one).
-    #[error("Encrypted payload exceeds chunk-count cap")]
+    #[error("Encrypted file exceeds supported data size")]
     PayloadChunkCountExceeded,
 
     // ─── Archive payload (FCA) ───────────────────────────────────────────
@@ -572,7 +570,7 @@ pub enum CryptoError {
     /// (`FORMAT.md` §9.12). Like every `Archive*CapExceeded` variant,
     /// this is a resource-policy rejection, not a format defect, and is
     /// enforced identically on encrypt and decrypt.
-    #[error("Archive entry-count cap exceeded ({entry_count} entries, cap {local_cap})")]
+    #[error("Too many archive entries ({entry_count}, limit {local_cap})")]
     ArchiveEntryCountCapExceeded {
         /// Entry count declared by the archive or discovered by the writer.
         entry_count: u32,
@@ -582,7 +580,7 @@ pub enum CryptoError {
     /// Total plaintext bytes exceed the configured
     /// [`ArchiveLimits::max_total_plaintext_bytes`](crate::ArchiveLimits)
     /// cap (`FORMAT.md` §9.12).
-    #[error("Archive total-bytes cap exceeded ({total_bytes} bytes, cap {local_cap})")]
+    #[error("Archive is too large (limit {local_cap} bytes)")]
     ArchiveTotalBytesCapExceeded {
         /// Running plaintext total that crossed the cap, in bytes.
         total_bytes: u64,
@@ -592,7 +590,7 @@ pub enum CryptoError {
     /// Serialized manifest length exceeds the configured
     /// [`ArchiveLimits::max_manifest_bytes`](crate::ArchiveLimits) cap
     /// (`FORMAT.md` §9.12).
-    #[error("Archive manifest length cap exceeded ({manifest_len} bytes, cap {local_cap})")]
+    #[error("Archive manifest is too large (limit {local_cap} bytes)")]
     ArchiveManifestLenCapExceeded {
         /// Manifest length declared by the archive header or computed
         /// by the writer, in bytes.
@@ -605,7 +603,7 @@ pub enum CryptoError {
     /// (`FORMAT.md` §9.12). `path` is `None` when the cap fires on the
     /// declared length before the path bytes have been parsed.
     #[error(
-        "Archive path byte-length cap exceeded ({path_bytes} bytes, cap {local_cap}){}",
+        "Archive path too long ({path_bytes} bytes, limit {local_cap}){}",
         PathSuffix(path)
     )]
     ArchivePathBytesCapExceeded {
@@ -619,7 +617,7 @@ pub enum CryptoError {
     /// An entry path's component depth exceeds the configured
     /// [`ArchiveLimits::max_path_depth`](crate::ArchiveLimits) cap
     /// (`FORMAT.md` §9.12).
-    #[error("Archive path depth cap exceeded ({depth} components, cap {local_cap}): {path}")]
+    #[error("Archive path too deep ({depth} components, limit {local_cap}): {path}")]
     ArchivePathDepthCapExceeded {
         /// Component count of the offending path.
         depth: u32,
@@ -631,7 +629,7 @@ pub enum CryptoError {
     /// The archive-level extension region exceeds the configured
     /// [`ArchiveLimits::max_archive_ext_bytes`](crate::ArchiveLimits)
     /// cap (`FORMAT.md` §9.12).
-    #[error("Archive extension length cap exceeded ({ext_len} bytes, cap {local_cap})")]
+    #[error("Archive extension is too large (limit {local_cap} bytes)")]
     ArchiveExtLenCapExceeded {
         /// Declared archive-extension length, in bytes.
         ext_len: u64,
@@ -643,7 +641,7 @@ pub enum CryptoError {
     /// (`FORMAT.md` §9.12). `path` is `None` when the cap fires on the
     /// declared length before the entry's path has been parsed.
     #[error(
-        "Archive entry extension length cap exceeded ({ext_len} bytes, cap {local_cap}){}",
+        "Archive entry extension is too large (limit {local_cap} bytes){}",
         PathSuffix(path)
     )]
     ArchiveEntryExtLenCapExceeded {
@@ -657,9 +655,7 @@ pub enum CryptoError {
     /// The summed per-entry extension regions exceed the configured
     /// [`ArchiveLimits::max_total_entry_ext_bytes`](crate::ArchiveLimits)
     /// cap (`FORMAT.md` §9.12).
-    #[error(
-        "Archive total entry-extension bytes cap exceeded ({total_ext_bytes} bytes, cap {local_cap})"
-    )]
+    #[error("Archive entry extensions too large (limit {local_cap})")]
     ArchiveTotalEntryExtCapExceeded {
         /// Running entry-extension total that crossed the cap, in bytes.
         total_ext_bytes: u64,
@@ -999,7 +995,7 @@ impl std::fmt::Display for StreamError {
             StreamError::Truncated => "Encrypted stream truncated",
             StreamError::ExtraData => "Encrypted stream has trailing data",
             StreamError::StateExhausted => "Internal error: stream state already finalized",
-            StreamError::ChunkCountExceeded => "Encrypted stream exceeds chunk-count cap",
+            StreamError::ChunkCountExceeded => "Encrypted stream exceeds supported data size",
         };
         f.write_str(msg)
     }
@@ -1076,7 +1072,7 @@ mod tests {
                 type_name: "mlkem768x25519".to_owned()
             }
             .to_string(),
-            "Unknown critical recipient: `mlkem768x255…`. Upgrade FerroCrypt."
+            "Unsupported recipient `mlkem768x255…`. Upgrade FerroCrypt."
         );
         assert_eq!(
             CryptoError::NoSupportedRecipient.to_string(),
@@ -1169,7 +1165,7 @@ mod tests {
                 local_cap: 8_192
             }
             .to_string(),
-            "Recipient body cap exceeded (10000 bytes, cap 8192)"
+            "Recipient data too large (10000 bytes, limit 8192)"
         );
         assert_eq!(
             CryptoError::RecipientStringCapExceeded {
@@ -1177,7 +1173,7 @@ mod tests {
                 local_cap: 1_024,
             }
             .to_string(),
-            "Recipient string cap exceeded (5000 chars, cap 1024)"
+            "Recipient string too long (5000 chars, limit 1024)"
         );
         assert_eq!(
             CryptoError::HeaderLenCapExceeded {
@@ -1185,7 +1181,7 @@ mod tests {
                 local_cap: 1_048_576,
             }
             .to_string(),
-            "Header length cap exceeded (2000000 bytes, cap 1048576)"
+            "Header too large (2000000 bytes, limit 1048576)"
         );
         assert_eq!(
             CryptoError::RecipientCountCapExceeded {
@@ -1193,7 +1189,7 @@ mod tests {
                 local_cap: 64,
             }
             .to_string(),
-            "Recipient count cap exceeded (100 entries, cap 64)"
+            "Too many recipients (100 entries, limit 64)"
         );
         assert_eq!(
             CryptoError::KdfResourceCapExceeded {
@@ -1201,7 +1197,7 @@ mod tests {
                 local_cap_kib: 524_288,
             }
             .to_string(),
-            "KDF resource cap exceeded (1048576 KiB, cap 524288)"
+            "Passphrase memory over limit (1048576 KiB, limit 524288)"
         );
         assert_eq!(
             CryptoError::KdfTimeCostCapExceeded {
@@ -1209,7 +1205,7 @@ mod tests {
                 local_cap: 6,
             }
             .to_string(),
-            "KDF time cost cap exceeded (8, cap 6)"
+            "Passphrase time over limit (8, limit 6)"
         );
         assert_eq!(
             CryptoError::KdfLanesCapExceeded {
@@ -1217,7 +1213,7 @@ mod tests {
                 local_cap: 2,
             }
             .to_string(),
-            "KDF lane count cap exceeded (4, cap 2)"
+            "Passphrase parallelism over limit (4, limit 2)"
         );
     }
 
@@ -1359,7 +1355,7 @@ mod tests {
         );
         assert_eq!(
             StreamError::ChunkCountExceeded.to_string(),
-            "Encrypted stream exceeds chunk-count cap"
+            "Encrypted stream exceeds supported data size"
         );
     }
 
@@ -1399,7 +1395,7 @@ mod tests {
                 local_cap: 250_000,
             }
             .to_string(),
-            "Archive entry-count cap exceeded (250001 entries, cap 250000)"
+            "Too many archive entries (250001, limit 250000)"
         );
         assert_eq!(
             CryptoError::ArchiveTotalBytesCapExceeded {
@@ -1407,7 +1403,7 @@ mod tests {
                 local_cap: 99,
             }
             .to_string(),
-            "Archive total-bytes cap exceeded (100 bytes, cap 99)"
+            "Archive is too large (limit 99 bytes)"
         );
         assert_eq!(
             CryptoError::ArchiveManifestLenCapExceeded {
@@ -1415,7 +1411,7 @@ mod tests {
                 local_cap: 99,
             }
             .to_string(),
-            "Archive manifest length cap exceeded (100 bytes, cap 99)"
+            "Archive manifest is too large (limit 99 bytes)"
         );
         assert_eq!(
             CryptoError::ArchivePathBytesCapExceeded {
@@ -1424,7 +1420,7 @@ mod tests {
                 path: None,
             }
             .to_string(),
-            "Archive path byte-length cap exceeded (100 bytes, cap 99)"
+            "Archive path too long (100 bytes, limit 99)"
         );
         assert_eq!(
             CryptoError::ArchivePathBytesCapExceeded {
@@ -1433,7 +1429,7 @@ mod tests {
                 path: Some("root/long".to_owned()),
             }
             .to_string(),
-            "Archive path byte-length cap exceeded (100 bytes, cap 99): root/long"
+            "Archive path too long (100 bytes, limit 99): root/long"
         );
         assert_eq!(
             CryptoError::ArchivePathDepthCapExceeded {
@@ -1442,7 +1438,7 @@ mod tests {
                 path: "a/b".to_owned(),
             }
             .to_string(),
-            "Archive path depth cap exceeded (65 components, cap 64): a/b"
+            "Archive path too deep (65 components, limit 64): a/b"
         );
         assert_eq!(
             CryptoError::ArchiveExtLenCapExceeded {
@@ -1450,7 +1446,7 @@ mod tests {
                 local_cap: 99,
             }
             .to_string(),
-            "Archive extension length cap exceeded (100 bytes, cap 99)"
+            "Archive extension is too large (limit 99 bytes)"
         );
         assert_eq!(
             CryptoError::ArchiveEntryExtLenCapExceeded {
@@ -1459,7 +1455,7 @@ mod tests {
                 path: None,
             }
             .to_string(),
-            "Archive entry extension length cap exceeded (100 bytes, cap 99)"
+            "Archive entry extension is too large (limit 99 bytes)"
         );
         assert_eq!(
             CryptoError::ArchiveTotalEntryExtCapExceeded {
@@ -1467,7 +1463,7 @@ mod tests {
                 local_cap: 99,
             }
             .to_string(),
-            "Archive total entry-extension bytes cap exceeded (100 bytes, cap 99)"
+            "Archive entry extensions too large (limit 99)"
         );
         assert_eq!(
             CryptoError::PrivateKeyWrappedSecretCapExceeded {
@@ -1475,7 +1471,7 @@ mod tests {
                 local_cap: 4096,
             }
             .to_string(),
-            "Private key wrapped-secret cap exceeded (5000 bytes, cap 4096)"
+            "Private key data too large (5000 bytes, limit 4096)"
         );
     }
 
@@ -1721,6 +1717,70 @@ mod tests {
             &CryptoError::RecipientStringCapExceeded {
                 input_chars: u32::MAX,
                 local_cap: u32::MAX,
+            }
+            .to_string(),
+        );
+
+        // Archive limit messages at worst-case field widths. The
+        // path-bearing variants are checked without a path (the path is
+        // variable text the desktop elides, not budgeted);
+        // `ArchivePathDepthCapExceeded` always carries a path, so it is
+        // not budget-checked.
+        check(
+            "ArchiveEntryCountCapExceeded(max)",
+            &CryptoError::ArchiveEntryCountCapExceeded {
+                entry_count: u32::MAX,
+                local_cap: u32::MAX,
+            }
+            .to_string(),
+        );
+        check(
+            "ArchiveTotalBytesCapExceeded(max)",
+            &CryptoError::ArchiveTotalBytesCapExceeded {
+                total_bytes: u64::MAX,
+                local_cap: u64::MAX,
+            }
+            .to_string(),
+        );
+        check(
+            "ArchiveManifestLenCapExceeded(max)",
+            &CryptoError::ArchiveManifestLenCapExceeded {
+                manifest_len: u64::MAX,
+                local_cap: u32::MAX,
+            }
+            .to_string(),
+        );
+        check(
+            "ArchivePathBytesCapExceeded(max, no path)",
+            &CryptoError::ArchivePathBytesCapExceeded {
+                path_bytes: u32::MAX,
+                local_cap: u32::MAX,
+                path: None,
+            }
+            .to_string(),
+        );
+        check(
+            "ArchiveExtLenCapExceeded(max)",
+            &CryptoError::ArchiveExtLenCapExceeded {
+                ext_len: u64::MAX,
+                local_cap: u32::MAX,
+            }
+            .to_string(),
+        );
+        check(
+            "ArchiveEntryExtLenCapExceeded(max, no path)",
+            &CryptoError::ArchiveEntryExtLenCapExceeded {
+                ext_len: u64::MAX,
+                local_cap: u32::MAX,
+                path: None,
+            }
+            .to_string(),
+        );
+        check(
+            "ArchiveTotalEntryExtCapExceeded(max)",
+            &CryptoError::ArchiveTotalEntryExtCapExceeded {
+                total_ext_bytes: u64::MAX,
+                local_cap: u64::MAX,
             }
             .to_string(),
         );

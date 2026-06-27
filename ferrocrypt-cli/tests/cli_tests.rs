@@ -1445,8 +1445,8 @@ fn test_cli_decrypt_rejects_tightened_max_kdf_lanes() {
     );
     let stderr = String::from_utf8_lossy(&dec.stderr);
     assert!(
-        stderr.contains("lane count cap exceeded"),
-        "expected a lane-cap error, got: {stderr}"
+        stderr.contains("parallelism over limit"),
+        "expected a lane/parallelism-limit error, got: {stderr}"
     );
 }
 
@@ -1493,8 +1493,8 @@ fn test_cli_decrypt_rejects_tightened_max_kdf_time_cost() {
     );
     let stderr = String::from_utf8_lossy(&dec.stderr);
     assert!(
-        stderr.contains("time cost cap exceeded"),
-        "expected a time-cost-cap error, got: {stderr}"
+        stderr.contains("time over limit"),
+        "expected a time-limit error, got: {stderr}"
     );
 }
 

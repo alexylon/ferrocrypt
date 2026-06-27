@@ -296,17 +296,16 @@ FerroCrypt reports decryption failures according to the stage that failed. This 
 
 Common failure categories include:
 
-- **Private key unlock failed: wrong passphrase or tampered file** — the private key passphrase is wrong, or the encrypted private key file has been modified.
-- **Decryption failed: recipient `argon2id` unwrap failed** — the supplied passphrase does not unlock the file, or the recipient metadata has been modified.
-- **Decryption failed: recipient `x25519` unwrap failed** — the supplied private key does not unlock the file, or the recipient metadata has been modified.
-- **Decryption failed: recipient `x25519` MAC mismatch** (multi-recipient) — a recipient unwrapped a candidate file key, but the authenticated header did not verify. Decryption continues with the next recipient in the file.
-- **Decryption failed: no recipient could unlock the file** — none of the supported recipients in the file could unlock the file key.
-- **Decryption failed: header tampered or corrupted after unlock** — a candidate file key was found, but the authenticated header did not verify.
-- **Payload authentication failed: data tampered or corrupted** — the header verified, but the encrypted payload was corrupted or modified.
+- **Private key unlock failed: wrong passphrase or modified key file** — the private key passphrase is wrong, or the encrypted private key file has been modified.
+- **Decryption failed: wrong passphrase or modified file** — the supplied passphrase does not unlock the file, or the file has been modified.
+- **Decryption failed: wrong private key or modified file** — the supplied private key does not unlock the file, or the file has been modified.
+- **Decryption failed: file header was modified or corrupted** — a candidate file key was recovered (from a passphrase or a recipient key), but the authenticated header did not verify.
+- **Decryption failed: no matching key or passphrase** — none of the file's recipients could be unlocked with the supplied passphrase or key.
+- **Decryption failed: file data was modified or corrupted** — the header verified, but the encrypted payload was modified or corrupted.
 - **Encrypted file is truncated** — the encrypted stream ended before its final authenticated chunk.
 - **Encrypted file has unexpected trailing data** — extra data was found after the authenticated encrypted stream.
-- **KDF resource cap exceeded** — the file requests more Argon2id memory than the configured limit permits. The default cap is 1 GiB; raise it with `--max-kdf-memory` if the source is trusted.
-- **Unknown critical recipient: `<type>`. Upgrade FerroCrypt.** — the file uses a recipient type marked as required that this release does not support.
+- **Passphrase memory over limit** — the file requests more Argon2id memory than the configured limit permits. The default limit is 1 GiB; raise it with `--max-kdf-memory` if the source is trusted.
+- **Unsupported recipient `<type>`. Upgrade FerroCrypt.** — the file uses a recipient type marked as required that this release does not support.
 
 No failed decryption produces a completed output at the requested final path. The default behavior removes any staged `.incomplete` working copy before the error returns; `--keep-partial` keeps it for inspection. A leftover `.incomplete` from a previous failed run is preserved across a retry that fails with `Previous .incomplete exists`, so the prior partial is not silently overwritten.
 

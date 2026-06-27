@@ -1233,10 +1233,10 @@ Public errors must be precise without claiming certainty that cryptographic veri
 
 Use wording such as:
 
-- “wrong passphrase or tampered recipient entry”;
-- “private key passphrase is wrong or the private key file was tampered with”;
-- “no matching credential or recipient entry was modified”;
-- “header authenticated by a recovered file key failed verification”.
+- “wrong passphrase or modified file”;
+- “wrong private key or modified file”;
+- “no matching key or passphrase”;
+- “file header was modified or corrupted”.
 
 Do not use names or display messages that imply FerroCrypt can distinguish wrong credentials from tampering when the AEAD or HMAC result cannot prove that distinction.
 

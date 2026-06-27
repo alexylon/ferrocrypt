@@ -236,8 +236,8 @@ fn test_cli_passphrase_wrong_password() {
     assert!(!decrypt_output.status.success());
     let stderr = String::from_utf8_lossy(&decrypt_output.stderr);
     assert!(
-        stderr.contains("recipient `argon2id` unwrap failed"),
-        "expected typed argon2id-recipient unwrap-failure message on stderr, got: {stderr}"
+        stderr.contains("wrong passphrase or modified file"),
+        "expected the plain wrong-passphrase message on stderr, got: {stderr}"
     );
     assert!(
         !stderr.contains("aead::Error"),
@@ -409,7 +409,7 @@ fn test_cli_passphrase_payload_tamper_message() {
     assert!(!decrypt_output.status.success());
     let stderr = String::from_utf8_lossy(&decrypt_output.stderr);
     assert!(
-        stderr.contains("Payload authentication failed: data tampered or corrupted"),
+        stderr.contains("Decryption failed: file data was modified or corrupted"),
         "expected typed payload-auth message on stderr, got: {stderr}"
     );
     assert!(
@@ -471,7 +471,7 @@ fn test_cli_recipient_wrong_key_passphrase() {
     assert!(!decrypt_output.status.success());
     let stderr = String::from_utf8_lossy(&decrypt_output.stderr);
     assert!(
-        stderr.contains("Private key unlock failed: wrong passphrase or tampered file"),
+        stderr.contains("Private key unlock failed: wrong passphrase or modified key file"),
         "expected typed key-unlock message on stderr, got: {stderr}"
     );
     assert!(

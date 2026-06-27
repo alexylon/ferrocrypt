@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 use crate::UnauthenticatedRecipientMode;
+use crate::recipient::argon2id;
 use crate::recipient::policy::MixingPolicy;
 
 /// Maximum number of `chars` (counting an inserted ellipsis as one) a
@@ -47,6 +48,28 @@ impl std::fmt::Display for DisplayableTypeName<'_> {
         }
     }
 }
+
+/// User-facing message for [`CryptoError::RecipientUnwrapFailed`].
+///
+/// The passphrase recipient (`argon2id`) names a wrong passphrase as the
+/// likely cause; any other (public-key) recipient names a wrong private key.
+/// Both keep the credential-or-modification ambiguity, matching
+/// [`CryptoError::KeyFileUnlockFailed`] in tone. The `type_name` stays in the
+/// variant payload for inspection and is never shown, so the message carries
+/// no attacker-chosen text.
+fn recipient_unwrap_message(type_name: &str) -> &'static str {
+    if type_name == argon2id::TYPE_NAME {
+        "Decryption failed: wrong passphrase or modified file"
+    } else {
+        "Decryption failed: wrong private key or modified file"
+    }
+}
+
+/// Shared Display text for the two header-authentication failures —
+/// [`CryptoError::HeaderTampered`] (passphrase mode) and
+/// [`CryptoError::HeaderMacFailedAfterUnwrap`] (public-key mode). They are the
+/// same condition and must read identically, so both render this one string.
+const HEADER_CORRUPTED_MESSAGE: &str = "Decryption failed: file header was modified or corrupted";
 
 /// Maximum number of `chars` of untrusted text [`sanitize_for_display`]
 /// keeps before truncating with `…`. Long enough to locate an entry in
@@ -361,7 +384,7 @@ pub enum CryptoError {
     /// binding introduced in the v1 `private.key` format catches tampering
     /// cryptographically, but both failure modes surface as the same
     /// error by design. The Display wording reflects both causes.
-    #[error("Private key unlock failed: wrong passphrase or tampered file")]
+    #[error("Private key unlock failed: wrong passphrase or modified key file")]
     KeyFileUnlockFailed,
     /// The header MAC failed after the passphrase recipient unwrapped
     /// a candidate `file_key`.
@@ -374,7 +397,7 @@ pub enum CryptoError {
     /// decrypt path reports the same condition as
     /// [`Self::HeaderMacFailedAfterUnwrap`], whatever the recipient
     /// count.
-    #[error("Decryption failed: header tampered or corrupted after unlock")]
+    #[error("{}", HEADER_CORRUPTED_MESSAGE)]
     HeaderTampered,
     /// In a public-key decrypt, a recipient slot unwrapped a
     /// `file_key`, but the resulting `header_key` did not verify the
@@ -384,12 +407,10 @@ pub enum CryptoError {
     /// still visits every supported slot; when at least one slot
     /// unwrapped and none verified, this variant is the final verdict —
     /// including for a single-recipient public-key file. The passphrase
-    /// counterpart is [`Self::HeaderTampered`]. The `type_name`
-    /// identifies which recipient type produced the failed candidate.
-    #[error(
-        "Decryption failed: recipient `{}` MAC mismatch",
-        DisplayableTypeName(type_name)
-    )]
+    /// counterpart is [`Self::HeaderTampered`], and both render the same
+    /// message. The `type_name` field records which recipient type produced
+    /// the failed candidate; it is not shown in the message.
+    #[error("{}", HEADER_CORRUPTED_MESSAGE)]
     HeaderMacFailedAfterUnwrap {
         /// Recipient type name whose candidate key failed header-MAC verification.
         type_name: String,
@@ -400,10 +421,12 @@ pub enum CryptoError {
     /// example, `"argon2id"` or `"x25519"`). Wrong passphrase, wrong key, and
     /// recipient-body tampering are indistinguishable at this layer. Recipient
     /// unwrap is not considered final until the header MAC also verifies.
-    #[error(
-        "Decryption failed: recipient `{}` unwrap failed",
-        DisplayableTypeName(type_name)
-    )]
+    ///
+    /// The passphrase recipient (`argon2id`) renders a wrong-passphrase
+    /// message and any other (public-key) recipient a wrong-private-key
+    /// message, matching [`Self::KeyFileUnlockFailed`] in tone. The
+    /// `type_name` stays in the payload for inspection and is not shown.
+    #[error("{}", recipient_unwrap_message(type_name))]
     RecipientUnwrapFailed {
         /// Recipient type name whose body failed to unwrap.
         type_name: String,
@@ -425,7 +448,7 @@ pub enum CryptoError {
     /// header MAC. Distinct from [`Self::RecipientUnwrapFailed`] (which is
     /// per-candidate during iteration) and [`Self::HeaderTampered`] (which is
     /// the final single-recipient error). Per `FORMAT.md` §12.
-    #[error("Decryption failed: no recipient could unlock the file")]
+    #[error("Decryption failed: no matching key or passphrase")]
     NoSupportedRecipient,
     /// The decryptor variant the caller chose does not match the file's
     /// recipient mode (e.g. a passphrase decryptor invoked against a file
@@ -485,9 +508,9 @@ pub enum CryptoError {
         policy: MixingPolicy,
     },
     /// An encrypted payload chunk failed AEAD authentication during
-    /// streaming decryption. The ciphertext has been tampered with or
-    /// corrupted after the header was authenticated.
-    #[error("Payload authentication failed: data tampered or corrupted")]
+    /// streaming decryption. The ciphertext was modified or corrupted
+    /// after the header was authenticated.
+    #[error("Decryption failed: file data was modified or corrupted")]
     PayloadTampered,
     /// The encrypted stream ends before the final-flag chunk.
     /// Usually caused by a truncated file or an aborted download.
@@ -1031,18 +1054,18 @@ mod tests {
         );
         assert_eq!(
             CryptoError::KeyFileUnlockFailed.to_string(),
-            "Private key unlock failed: wrong passphrase or tampered file"
+            "Private key unlock failed: wrong passphrase or modified key file"
         );
         assert_eq!(
             CryptoError::HeaderTampered.to_string(),
-            "Decryption failed: header tampered or corrupted after unlock"
+            "Decryption failed: file header was modified or corrupted"
         );
         assert_eq!(
             CryptoError::HeaderMacFailedAfterUnwrap {
                 type_name: "x25519".to_owned()
             }
             .to_string(),
-            "Decryption failed: recipient `x25519` MAC mismatch"
+            "Decryption failed: file header was modified or corrupted"
         );
         // `type_name` is intentionally over `TYPE_NAME_DISPLAY_MAX` to
         // exercise truncation: a 14-char input renders as 12 chars +
@@ -1057,7 +1080,7 @@ mod tests {
         );
         assert_eq!(
             CryptoError::NoSupportedRecipient.to_string(),
-            "Decryption failed: no recipient could unlock the file"
+            "Decryption failed: no matching key or passphrase"
         );
         assert_eq!(
             CryptoError::DecryptorModeMismatch {
@@ -1114,7 +1137,7 @@ mod tests {
         );
         assert_eq!(
             CryptoError::PayloadTampered.to_string(),
-            "Payload authentication failed: data tampered or corrupted"
+            "Decryption failed: file data was modified or corrupted"
         );
         assert_eq!(
             CryptoError::PayloadTruncated.to_string(),
@@ -1124,12 +1147,21 @@ mod tests {
             CryptoError::ExtraDataAfterPayload.to_string(),
             "Encrypted file has unexpected trailing data"
         );
+        // Public-key recipients name a wrong private key; the passphrase
+        // recipient names a wrong passphrase. The `type_name` is not shown.
         assert_eq!(
             CryptoError::RecipientUnwrapFailed {
                 type_name: "x25519".to_owned()
             }
             .to_string(),
-            "Decryption failed: recipient `x25519` unwrap failed"
+            "Decryption failed: wrong private key or modified file"
+        );
+        assert_eq!(
+            CryptoError::RecipientUnwrapFailed {
+                type_name: "argon2id".to_owned()
+            }
+            .to_string(),
+            "Decryption failed: wrong passphrase or modified file"
         );
         assert_eq!(
             CryptoError::RecipientBodyCapExceeded {
@@ -1488,15 +1520,17 @@ mod tests {
     /// direction-override bytes — only reachable via a hand-constructed
     /// `CryptoError`, since the FORMAT.md §3.3 grammar rejects such names —
     /// is escaped in the rendered message, never emitted raw. Guards the
-    /// `write_sanitized_char` path through `DisplayableTypeName`.
+    /// `write_sanitized_char` path through `DisplayableTypeName`, exercised
+    /// here via a variant that still renders `type_name`.
     #[test]
     fn type_name_in_error_is_escaped_not_emitted_raw() {
         assert_eq!(
-            CryptoError::RecipientUnwrapFailed {
+            CryptoError::IncompatibleRecipients {
                 type_name: "\u{1b}\u{202e}".to_owned(),
+                policy: MixingPolicy::Exclusive,
             }
             .to_string(),
-            "Decryption failed: recipient `\\u{1b}\\u{202e}` unwrap failed",
+            "Recipient `\\u{1b}\\u{202e}` mixed with another recipient",
         );
     }
 
@@ -1527,6 +1561,13 @@ mod tests {
             &CryptoError::KeyFileUnlockFailed.to_string(),
         );
         check("HeaderTampered", &CryptoError::HeaderTampered.to_string());
+        check(
+            "HeaderMacFailedAfterUnwrap",
+            &CryptoError::HeaderMacFailedAfterUnwrap {
+                type_name: "x25519".to_owned(),
+            }
+            .to_string(),
+        );
         check(
             "NoSupportedRecipient",
             &CryptoError::NoSupportedRecipient.to_string(),
@@ -1594,6 +1635,20 @@ mod tests {
             .to_string(),
         );
         check("PayloadTampered", &CryptoError::PayloadTampered.to_string());
+        check(
+            "RecipientUnwrapFailed(passphrase)",
+            &CryptoError::RecipientUnwrapFailed {
+                type_name: "argon2id".to_owned(),
+            }
+            .to_string(),
+        );
+        check(
+            "RecipientUnwrapFailed(public-key)",
+            &CryptoError::RecipientUnwrapFailed {
+                type_name: "x25519".to_owned(),
+            }
+            .to_string(),
+        );
         check(
             "PayloadTruncated",
             &CryptoError::PayloadTruncated.to_string(),
@@ -1670,26 +1725,12 @@ mod tests {
             .to_string(),
         );
 
-        // The three `type_name`-bearing variants must fit the budget
-        // even when handed a worst-case 255-byte name (FORMAT.md §3.3
-        // upper bound). The `DisplayableTypeName` wrapper truncates the
-        // interpolated name, but this check pins that the truncation
-        // actually keeps the full message in budget.
+        // `UnknownCriticalRecipient` still interpolates `type_name`; pin
+        // that a worst-case 255-byte name (FORMAT.md §3.3 upper bound) stays
+        // in budget after `DisplayableTypeName` truncates it. Recipient
+        // unwrap and header-MAC failures no longer show `type_name`, and
+        // `IncompatibleRecipients` is covered above.
         let max_name = "x".repeat(u8::MAX as usize);
-        check(
-            "RecipientUnwrapFailed(max-name)",
-            &CryptoError::RecipientUnwrapFailed {
-                type_name: max_name.clone(),
-            }
-            .to_string(),
-        );
-        check(
-            "HeaderMacFailedAfterUnwrap(max-name)",
-            &CryptoError::HeaderMacFailedAfterUnwrap {
-                type_name: max_name.clone(),
-            }
-            .to_string(),
-        );
         check(
             "UnknownCriticalRecipient(max-name)",
             &CryptoError::UnknownCriticalRecipient {

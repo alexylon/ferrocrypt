@@ -117,7 +117,7 @@ impl ArchiveLimits {
     pub(crate) fn validate(self) -> Result<Self, CryptoError> {
         if self.max_path_bytes > u16::MAX as u32 {
             return Err(CryptoError::InvalidInput(
-                "Archive path byte cap exceeds FCA u16 path length".to_string(),
+                "Archive path byte limit exceeds FCA u16 path length".to_string(),
             ));
         }
         Ok(self)

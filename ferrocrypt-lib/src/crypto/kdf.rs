@@ -38,7 +38,7 @@ pub(crate) const MAX_PASSPHRASE_LEN_BYTES: usize = 4_096;
 pub(crate) fn check_passphrase_len(passphrase: &[u8]) -> Result<(), CryptoError> {
     if passphrase.len() > MAX_PASSPHRASE_LEN_BYTES {
         return Err(CryptoError::InvalidInput(format!(
-            "Passphrase exceeds {MAX_PASSPHRASE_LEN_BYTES}-byte structural cap"
+            "Passphrase is too long (limit {MAX_PASSPHRASE_LEN_BYTES} bytes)"
         )));
     }
     Ok(())

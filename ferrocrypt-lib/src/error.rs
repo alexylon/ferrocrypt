@@ -132,6 +132,8 @@ impl std::fmt::Display for PathSuffix<'_> {
 ///   [`CryptoError::RecipientBodyCapExceeded`],
 ///   [`CryptoError::RecipientStringCapExceeded`],
 ///   [`CryptoError::KdfResourceCapExceeded`],
+///   [`CryptoError::KdfTimeCostCapExceeded`],
+///   [`CryptoError::KdfLanesCapExceeded`],
 ///   [`CryptoError::PrivateKeyWrappedSecretCapExceeded`], and the
 ///   `Archive*CapExceeded` family for the `FORMAT.md` §9.12 caps) each
 ///   carry the offending value plus the configured local cap as named
@@ -236,6 +238,31 @@ pub enum CryptoError {
         mem_cost_kib: u32,
         /// Maximum memory cost accepted by the caller's local policy, in KiB.
         local_cap_kib: u32,
+    },
+    /// Argon2id time cost (iteration count) from a header exceeds the
+    /// caller-configured local cap. The time-dimension counterpart of
+    /// [`Self::KdfResourceCapExceeded`]: the value is structurally valid
+    /// (within the v1 maximum) but asks for more iterations than the policy
+    /// allows. The default cap is the v1 maximum, so this variant is returned
+    /// only when a caller tightens `KdfLimit` below that maximum.
+    #[error("KDF time cost cap exceeded ({time_cost}, cap {local_cap})")]
+    KdfTimeCostCapExceeded {
+        /// Time cost (iteration count) requested by the untrusted header.
+        time_cost: u32,
+        /// Maximum time cost accepted by the caller's local policy.
+        local_cap: u32,
+    },
+    /// Argon2id lane count (parallelism) from a header exceeds the
+    /// caller-configured local cap. The parallelism-dimension counterpart of
+    /// [`Self::KdfResourceCapExceeded`]; like [`Self::KdfTimeCostCapExceeded`],
+    /// the default cap is the v1 maximum, so this variant is returned only when
+    /// a caller tightens `KdfLimit` below that maximum.
+    #[error("KDF lane count cap exceeded ({lanes}, cap {local_cap})")]
+    KdfLanesCapExceeded {
+        /// Lane count (parallelism) requested by the untrusted header.
+        lanes: u32,
+        /// Maximum lane count accepted by the caller's local policy.
+        local_cap: u32,
     },
     /// Writer-side Argon2id memory cost is below the production floor.
     /// Raised only when writing a `.fcr` or `private.key` (passphrase
@@ -1144,6 +1171,22 @@ mod tests {
             .to_string(),
             "KDF resource cap exceeded (1048576 KiB, cap 524288)"
         );
+        assert_eq!(
+            CryptoError::KdfTimeCostCapExceeded {
+                time_cost: 8,
+                local_cap: 6,
+            }
+            .to_string(),
+            "KDF time cost cap exceeded (8, cap 6)"
+        );
+        assert_eq!(
+            CryptoError::KdfLanesCapExceeded {
+                lanes: 4,
+                local_cap: 2,
+            }
+            .to_string(),
+            "KDF lane count cap exceeded (4, cap 2)"
+        );
     }
 
     /// Lock in the Display text of the typed `FormatDefect`,
@@ -1575,6 +1618,22 @@ mod tests {
             &CryptoError::KdfBelowWriteFloor {
                 mem_cost_kib: u32::MAX,
                 floor_kib: u32::MAX,
+            }
+            .to_string(),
+        );
+        check(
+            "KdfTimeCostCapExceeded(max)",
+            &CryptoError::KdfTimeCostCapExceeded {
+                time_cost: u32::MAX,
+                local_cap: u32::MAX,
+            }
+            .to_string(),
+        );
+        check(
+            "KdfLanesCapExceeded(max)",
+            &CryptoError::KdfLanesCapExceeded {
+                lanes: u32::MAX,
+                local_cap: u32::MAX,
             }
             .to_string(),
         );

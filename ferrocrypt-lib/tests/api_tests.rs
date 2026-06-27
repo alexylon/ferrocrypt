@@ -924,6 +924,79 @@ fn keypair_generator_kdf_params_rejects_structural_lanes() {
     }
 }
 
+/// Public API: a tightened `KdfLimit::with_max_time_cost` on `Encryptor`
+/// rejects a structurally valid `kdf_params` value before Argon2id runs or any
+/// `.fcr` is produced. Pins the public builder path, not only the internal
+/// `KdfParams` gate.
+#[test]
+fn encryptor_kdf_limit_rejects_time_cost_above_tightened_cap() {
+    let work = fresh_workspace("kdf_tightened_time_cost_rejects");
+    let input = work.join("data.txt");
+    fs::write(&input, b"x").unwrap();
+    let out_dir = work.join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+
+    // `time_cost` is structurally valid (<= 12) and `mem_cost` sits at the
+    // write floor, so the value reaches the resource-policy check and is
+    // rejected by the tightened time-cost cap.
+    let params = KdfParams {
+        mem_cost: TEST_FAST_KDF_MEM_COST,
+        time_cost: 8,
+        lanes: 4,
+    };
+    let result = Encryptor::with_passphrase(pass())
+        .kdf_params(params)
+        .kdf_limit(KdfLimit::default().with_max_time_cost(6))
+        .write(&input, &out_dir, |_| {});
+    match result {
+        Err(CryptoError::KdfTimeCostCapExceeded {
+            time_cost,
+            local_cap,
+        }) => {
+            assert_eq!(time_cost, 8);
+            assert_eq!(local_cap, 6);
+        }
+        other => panic!("expected KdfTimeCostCapExceeded, got {other:?}"),
+    }
+    assert_eq!(
+        fs::read_dir(&out_dir).unwrap().count(),
+        0,
+        "no .fcr should be produced when the writer rejects the params"
+    );
+}
+
+/// Public API: a tightened `KdfLimit::with_max_lanes` on `KeyPairGenerator`
+/// rejects a structurally valid `kdf_params` value before `private.key` is
+/// written. Pins the lane-count cap through the public builder path.
+#[test]
+fn keypair_generator_kdf_limit_rejects_lanes_above_tightened_cap() {
+    let work = fresh_workspace("keypair_kdf_tightened_lanes_rejects");
+    let keys = work.join("keys");
+    fs::create_dir_all(&keys).unwrap();
+
+    let params = KdfParams {
+        mem_cost: TEST_FAST_KDF_MEM_COST,
+        time_cost: 4,
+        lanes: 4,
+    };
+    let result = KeyPairGenerator::with_passphrase(pass())
+        .kdf_params(params)
+        .kdf_limit(KdfLimit::default().with_max_lanes(2))
+        .write(&keys, |_| {});
+    match result {
+        Err(CryptoError::KdfLanesCapExceeded { lanes, local_cap }) => {
+            assert_eq!(lanes, 4);
+            assert_eq!(local_cap, 2);
+        }
+        other => panic!("expected KdfLanesCapExceeded, got {other:?}"),
+    }
+    assert_eq!(
+        fs::read_dir(&keys).unwrap().count(),
+        0,
+        "no private.key should be produced when the generator rejects the params"
+    );
+}
+
 /// Default `Encryptor::kdf_params(P)` with `P.mem_cost > KdfLimit::default()`
 /// rejects at write time before Argon2id runs. The matching opt-in
 /// path is pinned by [`encryptor_kdf_params_at_kdf_limit_succeeds`].

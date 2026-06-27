@@ -483,13 +483,12 @@ pub(crate) fn open_private_key(
         .ok_or_else(malformed_private_key)?;
     let header = PrivateKeyHeader::parse(header_bytes)?;
 
-    // Apply the caller's resource policy. `parse` only enforces the
-    // v1 absolute structural ceiling (2 GiB mem); this surfaces the
-    // caller's `KdfLimit` (or the library default of 1 GiB when the
-    // caller passed `None`) as `KdfResourceCapExceeded` before any
-    // Argon2id work runs. Without this split, a structurally valid
-    // header in the 1–2 GiB band could not be unlocked even when the
-    // caller explicitly opted into a higher limit.
+    // Apply the caller's resource policy. `parse` only enforces the v1
+    // absolute structural bounds; this check applies the local KDF caps
+    // (or `KdfLimit::default` when the caller passed `None`) before any
+    // Argon2id work runs. Keeping structural parsing separate lets a
+    // caller opt into a higher memory cap, while still rejecting any
+    // parameter above the effective memory, time-cost, or lane policy.
     header.kdf_params.enforce_limit(kdf_limit)?;
 
     if header.wrapped_secret_len > local_wrapped_secret_cap {

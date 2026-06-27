@@ -242,14 +242,14 @@ impl Encryptor {
     ///
     /// # Default-decrypt round-trip
     ///
-    /// `kdf_params.mem_cost` is also checked at [`Encryptor::write`] time
-    /// against the writer's [`KdfLimit`] ceiling (defaults to
-    /// [`KdfLimit::default`] = 1 GiB, matching [`KdfParams::default`]).
-    /// `params` whose `mem_cost` exceeds that ceiling reject with
-    /// [`CryptoError::KdfResourceCapExceeded`]. To produce a `.fcr` with
-    /// `mem_cost` above 1 GiB, the caller MUST opt in via
-    /// [`Encryptor::kdf_limit`] with a matching [`KdfLimit`]; the
-    /// decryptor MUST be configured the same way via
+    /// `kdf_params` is also checked at [`Encryptor::write`] time against
+    /// the writer's [`KdfLimit`] policy. By default, memory is capped at
+    /// 1 GiB while time cost and lanes are capped at the v1 format maximum,
+    /// so [`KdfParams::default`] is accepted. A value above the effective
+    /// policy rejects with the matching typed cap error. To write a `.fcr`
+    /// with memory above 1 GiB, or to use a deliberately tightened time-cost
+    /// or lane policy, configure [`Encryptor::kdf_limit`] and configure the
+    /// receiving [`PassphraseDecryptor`] with a compatible
     /// [`PassphraseDecryptor::kdf_limit`] before calling
     /// [`PassphraseDecryptor::decrypt`].
     pub fn kdf_params(mut self, params: KdfParams) -> Self {
@@ -278,16 +278,19 @@ impl Encryptor {
         self
     }
 
-    /// Sets the writer-side ceiling for accepted `kdf_params.mem_cost`.
+    /// Sets the writer-side KDF resource policy for passphrase encryption.
     ///
-    /// By default the writer requires
-    /// `kdf_params.mem_cost <= KdfLimit::default().max_mem_cost_kib`
-    /// (1 GiB) so a default [`PassphraseDecryptor`] can unwrap the
-    /// produced `.fcr`. Use this builder together with
-    /// [`Encryptor::kdf_params`] to raise the ceiling; the receiving
+    /// The policy caps Argon2id memory cost, time cost, and lane count before
+    /// any encryption work begins. The default policy accepts
+    /// [`KdfParams::default`] and rejects memory above 1 GiB unless the caller
+    /// opts into a higher memory cap. Time cost and lanes default to the v1
+    /// format maximum, so they only reject when the caller tightens them.
+    ///
+    /// Use this builder together with [`Encryptor::kdf_params`] to raise the
+    /// memory ceiling or to tighten time cost or lanes. The receiving
     /// passphrase decryptor MUST be configured via
-    /// [`PassphraseDecryptor::kdf_limit`] with a matching
-    /// [`KdfLimit`].
+    /// [`PassphraseDecryptor::kdf_limit`] with a policy that accepts the same
+    /// parameters.
     ///
     /// Has no effect on public-key (`Encryptor::with_public_key` /
     /// `with_public_keys`) flows, which never run Argon2id during
@@ -795,30 +798,34 @@ impl KeyPairGenerator {
     ///
     /// # Default-decrypt round-trip
     ///
-    /// `kdf_params.mem_cost` is also checked at [`KeyPairGenerator::write`]
-    /// time against the writer's [`KdfLimit`] ceiling (defaults to
-    /// [`KdfLimit::default`] = 1 GiB, matching [`KdfParams::default`]).
-    /// `params` whose `mem_cost` exceeds that ceiling reject with
-    /// [`CryptoError::KdfResourceCapExceeded`]. To produce a
-    /// `private.key` with `mem_cost` above 1 GiB, the caller MUST opt
-    /// in via [`KeyPairGenerator::kdf_limit`] with a matching
-    /// [`KdfLimit`]; the unlocking
-    /// [`PrivateKeyDecryptor`] MUST also be configured the same way via
+    /// `kdf_params` is also checked at [`KeyPairGenerator::write`] time
+    /// against the writer's [`KdfLimit`] policy. By default, memory is capped
+    /// at 1 GiB while time cost and lanes are capped at the v1 format maximum,
+    /// so [`KdfParams::default`] is accepted. A value above the effective
+    /// policy rejects with the matching typed cap error. To write a
+    /// `private.key` with memory above 1 GiB, or to use a deliberately
+    /// tightened time-cost or lane policy, configure
+    /// [`KeyPairGenerator::kdf_limit`] and configure the unlocking
+    /// [`PrivateKeyDecryptor`] with a compatible
     /// [`PrivateKeyDecryptor::kdf_limit`].
     pub fn kdf_params(mut self, params: KdfParams) -> Self {
         self.kdf_params = Some(params);
         self
     }
 
-    /// Sets the writer-side ceiling for accepted `kdf_params.mem_cost`.
+    /// Sets the writer-side KDF resource policy for sealing `private.key`.
     ///
-    /// By default the generator requires
-    /// `kdf_params.mem_cost <= KdfLimit::default().max_mem_cost_kib`
-    /// (1 GiB) so a default [`PrivateKeyDecryptor`] can unlock the
-    /// produced `private.key`. Use this builder together with
-    /// [`KeyPairGenerator::kdf_params`] to raise the ceiling; the
-    /// receiving [`PrivateKeyDecryptor`] MUST be configured via
-    /// [`PrivateKeyDecryptor::kdf_limit`] with a matching [`KdfLimit`].
+    /// The policy caps Argon2id memory cost, time cost, and lane count before
+    /// key generation begins. The default policy accepts [`KdfParams::default`]
+    /// and rejects memory above 1 GiB unless the caller opts into a higher
+    /// memory cap. Time cost and lanes default to the v1 format maximum, so
+    /// they only reject when the caller tightens them.
+    ///
+    /// Use this builder together with [`KeyPairGenerator::kdf_params`] to raise
+    /// the memory ceiling or to tighten time cost or lanes. The receiving
+    /// [`PrivateKeyDecryptor`] MUST be configured via
+    /// [`PrivateKeyDecryptor::kdf_limit`] with a policy that accepts the same
+    /// parameters.
     pub fn kdf_limit(mut self, limit: KdfLimit) -> Self {
         self.kdf_limit = Some(limit);
         self

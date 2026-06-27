@@ -80,9 +80,10 @@ pub(crate) fn wrap(
 }
 
 /// Opens an `argon2id` recipient body and recovers a candidate
-/// `file_key`. Caller-supplied `kdf_limit` caps `mem_kib` for untrusted
-/// input; KDF parameter structural bounds are validated **before**
-/// Argon2id runs so a hostile file cannot force unbounded work.
+/// `file_key`. Caller-supplied `kdf_limit` caps memory cost, time cost,
+/// and lanes for untrusted input; KDF parameter structural bounds are
+/// validated **before** Argon2id runs so a hostile file cannot force
+/// unbounded work.
 ///
 /// Wrong passphrase and tampered envelope are indistinguishable at the
 /// AEAD layer; both surface as

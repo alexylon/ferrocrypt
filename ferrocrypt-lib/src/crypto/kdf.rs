@@ -49,30 +49,49 @@ pub(crate) fn check_passphrase_len(passphrase: &[u8]) -> Result<(), CryptoError>
 /// A v1 file or `private.key` stores its Argon2id parameters in the cleartext
 /// header. When processing untrusted input, `KdfLimit` prevents a malicious
 /// header from forcing arbitrarily expensive key derivation: any structurally
-/// valid input whose memory cost exceeds the configured cap is rejected
-/// before Argon2id runs. If no limit is configured on a decryptor, the
-/// library applies [`KdfLimit::default`], which matches the writer's default
-/// memory cost.
+/// valid input whose memory cost, time cost, or lane count exceeds the
+/// configured cap is rejected before Argon2id runs. If no limit is configured
+/// on a decryptor, the library applies [`KdfLimit::default`]: memory is capped
+/// at the writer's default (1 GiB), while time cost and lanes are capped at the
+/// v1 format maximum, so those two reject nothing the structural check would
+/// not already reject.
 ///
 /// Construct with [`KdfLimit::new`] for KiB or [`KdfLimit::from_mib`] for MiB,
-/// then pass it to [`crate::PassphraseDecryptor::kdf_limit`] or
+/// optionally tighten time cost or lanes with [`KdfLimit::with_max_time_cost`]
+/// / [`KdfLimit::with_max_lanes`], then pass the result to
+/// [`crate::PassphraseDecryptor::kdf_limit`] or
 /// [`crate::PrivateKeyDecryptor::kdf_limit`]. The struct is `#[non_exhaustive]`
-/// so future releases can add additional limit dimensions without a breaking
+/// so future releases can add further limit dimensions without a breaking
 /// change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct KdfLimit {
     /// Maximum accepted memory cost in KiB.
     pub max_mem_cost_kib: u32,
+    /// Maximum accepted time cost (Argon2id iteration count). Defaults to the
+    /// v1 format maximum, so it rejects nothing the structural check accepts
+    /// unless tightened with [`KdfLimit::with_max_time_cost`].
+    pub max_time_cost: u32,
+    /// Maximum accepted lane count (Argon2id parallelism). Defaults to the v1
+    /// format maximum, so it rejects nothing the structural check accepts
+    /// unless tightened with [`KdfLimit::with_max_lanes`].
+    pub max_lanes: u32,
 }
 
 impl KdfLimit {
-    /// Builds a limit directly from a KiB value.
+    /// Builds a limit from a KiB memory value, leaving the time-cost and lane
+    /// caps at their defaults (the v1 format maximum). Only memory is
+    /// constrained unless [`with_max_time_cost`](Self::with_max_time_cost) or
+    /// [`with_max_lanes`](Self::with_max_lanes) tightens the others.
     pub fn new(max_mem_cost_kib: u32) -> Self {
-        Self { max_mem_cost_kib }
+        Self {
+            max_mem_cost_kib,
+            ..Self::default()
+        }
     }
 
-    /// Builds a limit from MiB.
+    /// Builds a limit from MiB, leaving the time-cost and lane caps at their
+    /// defaults (the v1 format maximum).
     ///
     /// # Errors
     ///
@@ -83,17 +102,43 @@ impl KdfLimit {
         })?;
         Ok(Self::new(kib))
     }
+
+    /// Sets the accepted Argon2id time-cost cap. Values at or above the v1
+    /// format maximum are equivalent to the structural maximum, because the
+    /// structural check already rejects anything higher. Lower values make
+    /// decryption refuse an otherwise-valid header whose iteration count
+    /// exceeds the cap.
+    pub fn with_max_time_cost(mut self, max_time_cost: u32) -> Self {
+        self.max_time_cost = max_time_cost;
+        self
+    }
+
+    /// Sets the accepted Argon2id lane-count cap. Values at or above the v1
+    /// format maximum are equivalent to the structural maximum; lower values
+    /// make decryption refuse an otherwise-valid header whose lane count
+    /// exceeds the cap.
+    pub fn with_max_lanes(mut self, max_lanes: u32) -> Self {
+        self.max_lanes = max_lanes;
+        self
+    }
 }
 
 impl Default for KdfLimit {
     fn default() -> Self {
-        // Matches the writer's `KdfParams::DEFAULT_MEM_COST`: any file
-        // produced with the library's own default KDF settings decrypts
-        // under the default ceiling, but an attacker-controlled header
-        // cannot force more than 1 GiB of Argon2id memory unless the
-        // caller opts into a higher `KdfLimit` explicitly.
+        // Memory matches the writer's `KdfParams::DEFAULT_MEM_COST` (1 GiB),
+        // below the 2 GiB structural maximum, so a file produced with the
+        // library's own default settings decrypts under the default ceiling,
+        // but an attacker-controlled header cannot force more than 1 GiB of
+        // Argon2id memory unless the caller raises `KdfLimit`.
+        //
+        // Time cost and lanes default to the v1 format maximum
+        // (`MAX_TIME_COST` / `MAX_LANES`). The structural check already
+        // enforces those bounds, so the default caps reject nothing new; they
+        // exist only so a caller can tighten either dimension.
         Self {
             max_mem_cost_kib: KdfParams::DEFAULT_MEM_COST,
+            max_time_cost: KdfParams::MAX_TIME_COST,
+            max_lanes: KdfParams::MAX_LANES,
         }
     }
 }
@@ -205,28 +250,41 @@ impl KdfParams {
         Ok(params)
     }
 
-    /// Applies the caller-supplied resource cap on top of structurally
-    /// valid params. `None` means "no explicit caller limit", but the
-    /// library still applies its own default ceiling
-    /// (`DEFAULT_MEM_COST`, 1 GiB) so callers cannot be silently exposed
-    /// to attacker-controlled 2 GiB allocations just because they did
-    /// not set `.kdf_limit(...)` on their config. `pub(crate)`
-    /// deliberately: pairs with [`from_bytes_structural`] and is not
-    /// part of the stable public API.
+    /// Applies the caller-supplied resource caps (memory, time cost, lanes)
+    /// on top of structurally valid params. `None` means "no explicit caller
+    /// limit", but the library still applies [`KdfLimit::default`] so callers
+    /// cannot be silently exposed to attacker-controlled 2 GiB allocations
+    /// just because they did not set `.kdf_limit(...)` on their config.
+    /// Memory is checked first, then time cost, then lanes. `pub(crate)`
+    /// deliberately: pairs with [`from_bytes_structural`] and is not part of
+    /// the stable public API. Both the reader ([`from_bytes`](Self::from_bytes))
+    /// and the writer ([`validate_for_write`](Self::validate_for_write)) run
+    /// this same gate, so under one `KdfLimit` they accept the same params —
+    /// anything the writer emits is decryptable.
     pub(crate) fn enforce_limit(self, limit: Option<&KdfLimit>) -> Result<Self, CryptoError> {
-        let effective_max = limit
-            .map(|l| l.max_mem_cost_kib)
-            .unwrap_or(Self::DEFAULT_MEM_COST);
-        if self.mem_cost > effective_max {
+        let limit = limit.copied().unwrap_or_default();
+        if self.mem_cost > limit.max_mem_cost_kib {
             return Err(CryptoError::KdfResourceCapExceeded {
                 mem_cost_kib: self.mem_cost,
-                local_cap_kib: effective_max,
+                local_cap_kib: limit.max_mem_cost_kib,
+            });
+        }
+        if self.time_cost > limit.max_time_cost {
+            return Err(CryptoError::KdfTimeCostCapExceeded {
+                time_cost: self.time_cost,
+                local_cap: limit.max_time_cost,
+            });
+        }
+        if self.lanes > limit.max_lanes {
+            return Err(CryptoError::KdfLanesCapExceeded {
+                lanes: self.lanes,
+                local_cap: limit.max_lanes,
             });
         }
         Ok(self)
     }
 
-    /// Parses v1 KDF parameter bytes and enforces the caller's memory cap.
+    /// Parses v1 KDF parameter bytes and enforces the caller's resource caps.
     ///
     /// `limit = None` still applies the library default ceiling so untrusted
     /// headers cannot force the structural 2 GiB maximum unless the caller opts
@@ -236,8 +294,10 @@ impl KdfParams {
     /// # Errors
     ///
     /// Returns [`CryptoError::InvalidKdfParams`] when the fields violate v1
-    /// structural bounds. Returns [`CryptoError::KdfResourceCapExceeded`] when
-    /// `mem_cost` is structurally valid but exceeds `limit` or the default cap.
+    /// structural bounds. Returns [`CryptoError::KdfResourceCapExceeded`],
+    /// [`CryptoError::KdfTimeCostCapExceeded`], or
+    /// [`CryptoError::KdfLanesCapExceeded`] when the corresponding field is
+    /// structurally valid but exceeds `limit` or the default cap.
     pub fn from_bytes(
         bytes: &[u8; KDF_PARAMS_SIZE],
         limit: Option<&KdfLimit>,
@@ -488,6 +548,98 @@ mod tests {
         .to_bytes();
         let limit = KdfLimit::new(2 * 1024 * 1024); // 2 GiB
         assert!(KdfParams::from_bytes(&bytes, Some(&limit)).is_ok());
+    }
+
+    #[test]
+    fn test_kdf_limit_rejects_excessive_time_cost() {
+        let bytes = KdfParams {
+            mem_cost: KdfParams::DEFAULT_MEM_COST,
+            time_cost: 8,
+            lanes: KdfParams::DEFAULT_LANES,
+        }
+        .to_bytes();
+        let limit = KdfLimit::new(KdfParams::DEFAULT_MEM_COST).with_max_time_cost(6);
+        match KdfParams::from_bytes(&bytes, Some(&limit)) {
+            Err(CryptoError::KdfTimeCostCapExceeded {
+                time_cost: 8,
+                local_cap: 6,
+            }) => {}
+            other => panic!("expected KdfTimeCostCapExceeded, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_kdf_limit_rejects_excessive_lanes() {
+        let bytes = KdfParams {
+            mem_cost: KdfParams::DEFAULT_MEM_COST,
+            time_cost: KdfParams::DEFAULT_TIME_COST,
+            lanes: 4,
+        }
+        .to_bytes();
+        let limit = KdfLimit::new(KdfParams::DEFAULT_MEM_COST).with_max_lanes(2);
+        match KdfParams::from_bytes(&bytes, Some(&limit)) {
+            Err(CryptoError::KdfLanesCapExceeded {
+                lanes: 4,
+                local_cap: 2,
+            }) => {}
+            other => panic!("expected KdfLanesCapExceeded, got: {other:?}"),
+        }
+    }
+
+    /// The default and `new`-built limits leave the time-cost and lane caps at
+    /// the v1 format maximum, so a header at those maxima is still accepted —
+    /// the new dimensions reject nothing unless a caller tightens them.
+    #[test]
+    fn test_kdf_limit_default_accepts_max_time_cost_and_lanes() {
+        let bytes = KdfParams {
+            mem_cost: KdfParams::DEFAULT_MEM_COST,
+            time_cost: KdfParams::MAX_TIME_COST,
+            lanes: KdfParams::MAX_LANES,
+        }
+        .to_bytes();
+        assert!(KdfParams::from_bytes(&bytes, Some(&KdfLimit::default())).is_ok());
+        assert!(KdfParams::from_bytes(&bytes, None).is_ok());
+        let new_limit = KdfLimit::new(KdfParams::DEFAULT_MEM_COST);
+        assert!(KdfParams::from_bytes(&bytes, Some(&new_limit)).is_ok());
+    }
+
+    /// Writer/reader symmetry across all three caps. Both the writer
+    /// (`validate_for_write`) and the reader (`from_bytes`) run the same
+    /// `enforce_limit`, so under one `KdfLimit` they agree: whatever the
+    /// writer emits the reader accepts, and whatever the writer refuses the
+    /// reader refuses too. A written file is therefore always decryptable
+    /// under the same limit.
+    #[test]
+    fn test_kdf_limit_writer_reader_symmetry() {
+        // Format-max params under the default limit: accepted by both sides.
+        let at_max = KdfParams {
+            mem_cost: KdfParams::DEFAULT_MEM_COST,
+            time_cost: KdfParams::MAX_TIME_COST,
+            lanes: KdfParams::MAX_LANES,
+        };
+        let limit = KdfLimit::default();
+        at_max
+            .validate_for_write(Some(&limit))
+            .expect("writer accepts format-max params under the default limit");
+        KdfParams::from_bytes(&at_max.to_bytes(), Some(&limit))
+            .expect("reader accepts the same params under the same limit");
+
+        // A tightened time-cost limit: the writer refuses (so no unreadable
+        // file is produced) and the reader refuses the same bytes.
+        let tight = KdfLimit::default().with_max_time_cost(6);
+        let over = KdfParams {
+            mem_cost: KdfParams::DEFAULT_MEM_COST,
+            time_cost: 8,
+            lanes: KdfParams::DEFAULT_LANES,
+        };
+        assert!(
+            over.validate_for_write(Some(&tight)).is_err(),
+            "writer must refuse params above a tightened cap"
+        );
+        assert!(
+            KdfParams::from_bytes(&over.to_bytes(), Some(&tight)).is_err(),
+            "reader must refuse the same params under the same limit"
+        );
     }
 
     #[test]

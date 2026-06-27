@@ -69,6 +69,29 @@ jobs:
       - name: Test ferrocrypt-lib on MSRV
         run: cargo test -p ferrocrypt --verbose
 
+  # ferrocrypt-cli's MSRV is 1.89: rustyline 18 uses the `file_lock` std
+  # feature, stable since 1.89 (home 0.5.12 needs only 1.88; the higher bound
+  # wins). The library's MSRV is 1.87, so the CLI gets its own lane on its own
+  # toolchain — the `msrv` job above builds only the library on 1.87.
+  msrv-cli:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.89.0
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.89.0
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build ferrocrypt-cli on MSRV
+        run: cargo build -p ferrocrypt-cli --verbose
+
+      - name: Test ferrocrypt-cli on MSRV
+        run: cargo test -p ferrocrypt-cli --verbose
+
   fmt:
     runs-on: ubuntu-latest
     steps:

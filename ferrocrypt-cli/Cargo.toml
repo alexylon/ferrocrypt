@@ -2,7 +2,10 @@
 name = "ferrocrypt-cli"
 version = "0.3.0-beta.3"
 edition = "2021"
-rust-version = "1.88"
+# rustyline 18 uses the `file_lock` std feature, stable since Rust 1.89, so the
+# CLI's real floor is 1.89 (above home 0.5.12's 1.88). Verified by the
+# `msrv-cli` CI lane. The library crate stays at 1.87.
+rust-version = "1.89"
 
 description = "Command-line interface for FerroCrypt (installs the 'ferrocrypt' binary)."
 authors = ["Alexander Alexandrov"]

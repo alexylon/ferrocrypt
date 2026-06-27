@@ -40,8 +40,8 @@ argon2 = { version = "0.5", features = ["std", "zeroize"] }
 sha3 = { version = "0.11", features = ["zeroize"] }
 hmac = { version = "0.13", features = ["zeroize"] }
 hkdf = "0.13"
-# constant_time_eq 0.5 requires MSRV 1.95 (pinned to 0.4.x)
-constant_time_eq = "0.4"
+# Pin to the 0.4.2 floor (MSRV 1.85) and exclude 0.5 (MSRV 1.95) so the crate's 1.87 MSRV holds.
+constant_time_eq = ">=0.4.2, <0.5"
 bech32 = "0.11"
 tempfile = "3"
 # Capability-based filesystem primitives for the unified hardened

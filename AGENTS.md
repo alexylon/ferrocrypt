@@ -125,7 +125,7 @@ Decryption reverses (`FORMAT.md` §3.7 acceptance order):
 4. validate TLV `ext_bytes` (`common::validate_tlv`) AFTER MAC verify, so the validator operates on authenticated bytes.
 5. `DecryptReader` streams ciphertext through XChaCha20-Poly1305 STREAM-BE32, peek-ahead resolves "exact-N final chunk" vs "exact-N then more data"; `archive::unarchive` parses the FCA header, reads `manifest_len` bytes for the manifest, fully validates it (per-entry shape, path grammar, tree shape, total-bytes equality), then streams file content via `copy_exact_n` and verifies archive EOF.
 
-A single-recipient MAC failure surfaces as `HeaderTampered` (the loop has no further candidates); list-exhaustion without success surfaces as `NoSupportedRecipient`.
+A candidate that unwraps but fails the header MAC surfaces as `HeaderTampered` (passphrase) or `HeaderMacFailedAfterUnwrap` (public-key); a credential that opens no supported slot surfaces as `RecipientUnwrapFailed`, and `NoSupportedRecipient` is reserved for a file with no supported recipient type.
 
 ### Desktop App Structure
 

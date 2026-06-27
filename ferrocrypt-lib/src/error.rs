@@ -82,17 +82,16 @@ impl std::fmt::Display for DisplayableMarker<'_> {
 
 /// User-facing message for [`CryptoError::RecipientUnwrapFailed`].
 ///
-/// The passphrase recipient (`argon2id`) names a wrong passphrase as the
-/// likely cause; any other (public-key) recipient names a wrong private key.
-/// Both keep the credential-or-modification ambiguity, matching
-/// [`CryptoError::KeyFileUnlockFailed`] in tone. The `type_name` stays in the
-/// variant payload for inspection and is never shown, so the message carries
-/// no attacker-chosen text.
+/// Passphrase recipients render the wrong-passphrase-or-modified-file
+/// message. Public-key recipients render a message that says no recipient
+/// matched, or the file was modified. The `type_name` stays in the variant
+/// payload for inspection and is never shown, so the message carries no
+/// attacker-chosen text.
 fn recipient_unwrap_message(type_name: &str) -> &'static str {
     if type_name == argon2id::TYPE_NAME {
         "Decryption failed: wrong passphrase or modified file"
     } else {
-        "Decryption failed: wrong private key or modified file"
+        "Decryption failed: no matching recipient or modified file"
     }
 }
 
@@ -444,17 +443,16 @@ pub enum CryptoError {
         /// Recipient type name whose candidate key failed header-MAC verification.
         type_name: String,
     },
-    /// A supported recipient entry's body failed to unwrap.
+    /// No supported recipient slot opened with the supplied credential.
+    /// This means the credential is wrong or a recipient body was modified;
+    /// the AEAD result cannot distinguish those cases. This is the
+    /// `FORMAT.md` §12 wrong-passphrase/key class, separate from
+    /// [`Self::NoSupportedRecipient`] (a file with no supported recipient
+    /// type at all). An opened slot is not final until the header MAC verifies.
     ///
-    /// The `type_name` distinguishes which recipient kind raised it (for
-    /// example, `"argon2id"` or `"x25519"`). Wrong passphrase, wrong key, and
-    /// recipient-body tampering are indistinguishable at this layer. Recipient
-    /// unwrap is not considered final until the header MAC also verifies.
-    ///
-    /// The passphrase recipient (`argon2id`) renders a wrong-passphrase
-    /// message and any other (public-key) recipient a wrong-private-key
-    /// message, matching [`Self::KeyFileUnlockFailed`] in tone. The
-    /// `type_name` stays in the payload for inspection and is not shown.
+    /// The rendered message follows `type_name`: wrong passphrase for
+    /// `argon2id`; for public-key recipients, no matching recipient or a
+    /// modified file. The `type_name` is not shown.
     #[error("{}", recipient_unwrap_message(type_name))]
     RecipientUnwrapFailed {
         /// Recipient type name whose body failed to unwrap.
@@ -472,12 +470,12 @@ pub enum CryptoError {
         /// Unknown recipient type name that carried the critical flag.
         type_name: String,
     },
-    /// The recipient list was iterated to exhaustion without any
-    /// supported recipient yielding a `file_key` that verified the
-    /// header MAC. Distinct from [`Self::RecipientUnwrapFailed`] (which is
-    /// per-candidate during iteration) and [`Self::HeaderTampered`] (which is
-    /// the final single-recipient error). Per `FORMAT.md` §12.
-    #[error("Decryption failed: no matching key or passphrase")]
+    /// The file holds no recipient of a type this build can process — only
+    /// unknown non-critical entries. Detected while classifying the recipient
+    /// list, before any unwrap. A *supported* recipient whose unwrap fails is
+    /// [`Self::RecipientUnwrapFailed`] instead; `FORMAT.md` §12 lists the two
+    /// as separate failure classes.
+    #[error("Decryption failed: no supported recipient")]
     NoSupportedRecipient,
     /// The decryptor variant the caller chose does not match the file's
     /// recipient mode (e.g. a passphrase decryptor invoked against a file
@@ -1107,7 +1105,7 @@ mod tests {
         );
         assert_eq!(
             CryptoError::NoSupportedRecipient.to_string(),
-            "Decryption failed: no matching key or passphrase"
+            "Decryption failed: no supported recipient"
         );
         assert_eq!(
             CryptoError::DecryptorModeMismatch {
@@ -1174,14 +1172,15 @@ mod tests {
             CryptoError::ExtraDataAfterPayload.to_string(),
             "Encrypted file has unexpected trailing data"
         );
-        // Public-key recipients name a wrong private key; the passphrase
-        // recipient names a wrong passphrase. The `type_name` is not shown.
+        // A public-key recipient keeps the no-match-or-modified-file
+        // ambiguity; the passphrase recipient reports a wrong passphrase or
+        // modified file. `type_name` is not shown.
         assert_eq!(
             CryptoError::RecipientUnwrapFailed {
                 type_name: "x25519".to_owned()
             }
             .to_string(),
-            "Decryption failed: wrong private key or modified file"
+            "Decryption failed: no matching recipient or modified file"
         );
         assert_eq!(
             CryptoError::RecipientUnwrapFailed {

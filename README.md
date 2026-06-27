@@ -302,9 +302,9 @@ Common failure categories include:
 
 - **Private key unlock failed: wrong passphrase or modified key file** — the private key passphrase is wrong, or the encrypted private key file has been modified.
 - **Decryption failed: wrong passphrase or modified file** — the supplied passphrase does not unlock the file, or the file has been modified.
-- **Decryption failed: wrong private key or modified file** — the supplied private key does not unlock the file, or the file has been modified.
+- **Decryption failed: no matching recipient or modified file** — the supplied private key does not match any supported recipient slot, or the recipient data has been modified.
 - **Decryption failed: file header was modified or corrupted** — a candidate file key was recovered (from a passphrase or a recipient key), but the authenticated header did not verify.
-- **Decryption failed: no matching key or passphrase** — none of the file's recipients could be unlocked with the supplied passphrase or key.
+- **Decryption failed: no supported recipient** — the file uses a recipient type this release does not support.
 - **Decryption failed: file data was modified or corrupted** — the header verified, but the encrypted payload was modified or corrupted.
 - **Encrypted file is truncated** — the encrypted stream ended before its final authenticated chunk.
 - **Encrypted file has unexpected trailing data** — extra data was found after the authenticated encrypted stream.

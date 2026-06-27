@@ -1365,8 +1365,8 @@ fn test_recipient_wrong_key_pair() -> Result<(), CryptoError> {
 
     // Decrypt with key pair B's private key. private.key unlocks fine
     // (right passphrase), but every x25519 slot AEAD-fails because
-    // ECDH was performed against A's public key. List exhaustion
-    // surfaces as `NoSupportedRecipient`.
+    // ECDH was performed against A's public key. This is the supported-
+    // recipient wrong-key case, surfaced as `RecipientUnwrapFailed`.
     let private_key_b = keys_b.join("private.key");
 
     let result = recipient_auto(
@@ -1380,8 +1380,8 @@ fn test_recipient_wrong_key_pair() -> Result<(), CryptoError> {
     );
 
     match result {
-        Err(CryptoError::NoSupportedRecipient) => {}
-        other => panic!("Expected NoSupportedRecipient, got {:?}", other),
+        Err(CryptoError::RecipientUnwrapFailed { ref type_name }) if type_name == "x25519" => {}
+        other => panic!("Expected RecipientUnwrapFailed(x25519), got {:?}", other),
     }
 
     Ok(())
@@ -1706,6 +1706,7 @@ fn test_recipient_header_tamper_detection() -> Result<(), CryptoError> {
         }
         Err(CryptoError::HeaderTampered) => {}
         Err(CryptoError::NoSupportedRecipient) => {}
+        Err(CryptoError::RecipientUnwrapFailed { .. }) => {}
         other => {
             panic!("expected HeaderMacFailedAfterUnwrap(x25519) or HeaderTampered, got {other:?}")
         }

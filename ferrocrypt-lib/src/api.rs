@@ -695,8 +695,10 @@ impl PrivateKeyDecryptor {
     /// [`CryptoError::RecipientUnwrapFailed`],
     /// [`CryptoError::HeaderMacFailedAfterUnwrap`],
     /// [`CryptoError::NoSupportedRecipient`], [`CryptoError::PayloadTampered`],
-    /// or [`CryptoError::PayloadTruncated`] when no recipient unlocks the file
-    /// or the file is modified. Returns [`CryptoError::Io`] for filesystem
+    /// or [`CryptoError::PayloadTruncated`]. `RecipientUnwrapFailed` means the
+    /// private key matched no supported recipient slot, or a recipient body was
+    /// modified; `NoSupportedRecipient` means the file contains no recipient
+    /// type this build can process. Returns [`CryptoError::Io`] for filesystem
     /// failures.
     pub fn decrypt(
         self,

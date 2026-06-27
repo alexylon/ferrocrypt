@@ -412,31 +412,33 @@ fn check_mode_matches_scheme<I: DecryptionCredential>(
     })
 }
 
-/// Decrypt-time error wording when no slot MAC-verified. Indexed by
-/// `(mode × had_unwrap)`:
+/// No slot MAC-verified. Indexed by `(mode × had_unwrap)`:
 ///
 /// | mode       | had_unwrap | error                                       |
 /// |------------|-----------:|---------------------------------------------|
-/// | Passphrase | false      | `RecipientUnwrapFailed { type_name }`       |
+/// | any        | false      | `RecipientUnwrapFailed { type_name }`       |
 /// | Passphrase | true       | `HeaderTampered`                            |
-/// | PublicKey  | false      | `NoSupportedRecipient` (list-exhaustion)    |
 /// | PublicKey  | true       | `HeaderMacFailedAfterUnwrap { type_name }`  |
 ///
-/// `(Passphrase, false)` keeps the per-candidate variant because a
-/// passphrase file has exactly one supported candidate and the
-/// wrong-passphrase / tampered-body ambiguity is the more accurate
-/// diagnostic.
+/// `had_unwrap == false` means the file has at least one supported slot, but
+/// none opened with this credential. That is the `FORMAT.md` §12
+/// wrong-passphrase/key class (`RecipientUnwrapFailed`), not
+/// `NoSupportedRecipient` (no supported recipient type in the file). The
+/// rendered message keeps the credential-or-modified-file ambiguity for the
+/// recipient type involved.
 fn failure_for(
     mode: UnauthenticatedRecipientMode,
     type_name: &'static str,
     had_unwrap: bool,
 ) -> CryptoError {
     match (mode, had_unwrap) {
-        (UnauthenticatedRecipientMode::Passphrase, false) => CryptoError::RecipientUnwrapFailed {
+        // No slot opened, yet classification proved that the file has a
+        // supported recipient. This is the wrong-credential-or-modified-body
+        // class, not `NoSupportedRecipient`.
+        (_, false) => CryptoError::RecipientUnwrapFailed {
             type_name: type_name.to_string(),
         },
         (UnauthenticatedRecipientMode::Passphrase, true) => CryptoError::HeaderTampered,
-        (UnauthenticatedRecipientMode::PublicKey, false) => CryptoError::NoSupportedRecipient,
         (UnauthenticatedRecipientMode::PublicKey, true) => {
             CryptoError::HeaderMacFailedAfterUnwrap {
                 type_name: type_name.to_string(),
@@ -1029,12 +1031,12 @@ mod tests {
         Ok(())
     }
 
-    /// A public-key `.fcr` with no slot the caller's private key can
-    /// AEAD-unwrap surfaces as `NoSupportedRecipient`, not
-    /// per-candidate `RecipientUnwrapFailed`. File targets alice;
-    /// decrypt with bob.
+    /// When the caller's private key AEAD-unwraps no slot of a public-key
+    /// `.fcr`, the error is `RecipientUnwrapFailed`, not
+    /// `NoSupportedRecipient` (reserved for a file with no supported recipient
+    /// type). File targets alice; decrypt with bob.
     #[test]
-    fn multi_x25519_no_matching_recipient_surfaces_no_supported_recipient()
+    fn multi_x25519_no_matching_recipient_surfaces_recipient_unwrap_failed()
     -> Result<(), CryptoError> {
         let tmp = tempfile::TempDir::new().unwrap();
         let keys_dir = tmp.path().join("keys");
@@ -1054,8 +1056,12 @@ mod tests {
         let dec_dir = tmp.path().join("decrypted");
         fs::create_dir_all(&dec_dir)?;
         match recipient_decrypt(&fcr, &dec_dir, &priv_b, &pass_b) {
-            Err(CryptoError::NoSupportedRecipient) => Ok(()),
-            other => panic!("expected NoSupportedRecipient, got {other:?}"),
+            Err(CryptoError::RecipientUnwrapFailed { ref type_name })
+                if type_name == x25519::TYPE_NAME =>
+            {
+                Ok(())
+            }
+            other => panic!("expected RecipientUnwrapFailed(x25519), got {other:?}"),
         }
     }
 

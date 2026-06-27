@@ -1466,6 +1466,12 @@ After promotion the output exists under its final name with no `.incomplete`
 marker, so content that was never flushed could otherwise surface truncated
 after a crash while appearing complete.
 
+For a directory root, readers SHOULD also sync each staged directory — the
+descendant subdirectories and the staged root — before step 15. Flushing a file
+does not by itself make the containing directory entry durable; without a
+directory sync, a crash can leave the final output present while nested entries
+are missing or empty.
+
 On platforms where FerroCrypt has a safe handle-relative no-clobber rename
 backend (Linux and macOS), step 15 MUST resolve both the staged source name and
 the final target name through the same trusted destination directory handle used

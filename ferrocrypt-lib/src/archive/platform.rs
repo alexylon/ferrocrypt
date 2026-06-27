@@ -121,18 +121,40 @@ pub(crate) fn open_anchor(path: &Path) -> Result<Dir, CryptoError> {
 pub(crate) fn rename_at_no_clobber(dir: &Dir, from: &OsStr, to: &OsStr) -> io::Result<()> {
     use std::os::fd::AsFd;
 
-    use rustix::fs::{Mode, OFlags, RenameFlags, fsync, openat, renameat_with};
+    use rustix::fs::{RenameFlags, renameat_with};
 
     renameat_with(dir.as_fd(), from, dir.as_fd(), to, RenameFlags::NOREPLACE)
         .map_err(io::Error::from)?;
     // Best-effort durability: flush the directory so the rename survives
-    // a crash. cap-std may hold `dir` as an `O_PATH` handle on Linux, on
-    // which `fsync` fails with `EBADF` (the same reason
-    // `chmod_dir_via_self_path` cannot `fchmod` the fd). Sync through a
-    // fresh read-only handle to the same directory — opened relative to
-    // `dir`, so no path is re-resolved — which works whether or not `dir`
-    // is `O_PATH`. Any failure is discarded: it must not unwind a
-    // completed promotion.
+    // a crash, mirroring the parent-directory sync the path-based
+    // `fs::atomic` helpers perform.
+    sync_dir_handle(dir);
+    Ok(())
+}
+
+/// Best-effort `fsync` of the directory `dir` refers to. This flushes
+/// the directory entries — the links to its child files and
+/// subdirectories — to stable storage.
+///
+/// The extractor uses this before promoting a directory root, so a
+/// crash after the `.incomplete` → final rename cannot leave the final
+/// output present while nested entries are missing on filesystems where
+/// file `fsync` does not imply directory durability. The promotion path
+/// also uses it after a handle-relative rename to make the rename
+/// durable.
+///
+/// cap-std may hold `dir` as an `O_PATH` handle on Linux, where
+/// `fsync` fails with `EBADF`. The helper therefore opens `.` relative
+/// to `dir` and syncs that fresh read-only handle. This avoids ambient
+/// path resolution and works whether or not `dir` itself is `O_PATH`.
+/// Failures are ignored because this durability hint must not turn a
+/// completed operation into an error.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn sync_dir_handle(dir: &Dir) {
+    use std::os::fd::AsFd;
+
+    use rustix::fs::{Mode, OFlags, fsync, openat};
+
     if let Ok(sync_fd) = openat(
         dir.as_fd(),
         ".",
@@ -141,8 +163,12 @@ pub(crate) fn rename_at_no_clobber(dir: &Dir, from: &OsStr, to: &OsStr) -> io::R
     ) {
         let _ = fsync(&sync_fd);
     }
-    Ok(())
 }
+
+/// No-op on targets without this `openat`/`fsync` directory-sync path.
+/// Windows promotion uses the path-based `fs::atomic` helpers instead.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn sync_dir_handle(_dir: &Dir) {}
 
 /// Windows-only post-condition for a successful directory open.
 /// cap-fs-ext's `open_dir_nofollow` uses

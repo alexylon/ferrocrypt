@@ -136,6 +136,73 @@ fn test_passphrase_encrypt_decrypt_directory() -> Result<(), CryptoError> {
     Ok(())
 }
 
+/// Regression guard for directory-root durability syncs (`FORMAT.md`
+/// §9.11). A stored subdirectory mode of `0o500` must not prevent
+/// extraction: the reader writes children while the staged directory is
+/// still `0o700`, syncs the directory, then applies the stored mode.
+/// The test verifies both the extracted content and the final mode.
+#[cfg(unix)]
+#[test]
+fn test_decrypt_directory_with_read_only_subdir() -> Result<(), CryptoError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let test_dir = setup_test_dir("dir_readonly_subdir");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&encrypt_dir)?;
+    fs::create_dir_all(&decrypt_dir)?;
+
+    // Tighten the subdirectory mode after writing its file. The source
+    // keeps read and search permissions, so the archive writer can walk it.
+    let source = test_dir.join("ro_folder");
+    let subdir = source.join("locked");
+    fs::create_dir_all(&subdir)?;
+    create_test_file(&source.join("top.txt"), "top-level content");
+    create_test_file(&subdir.join("inside.txt"), "nested content");
+    fs::set_permissions(&subdir, fs::Permissions::from_mode(0o500))?;
+
+    let passphrase = SecretString::from("ro-subdir-password".to_string());
+    let encrypt_result = passphrase_auto(&source, &encrypt_dir, &passphrase, None, None, |_| {});
+    // Restore write on the source subdirectory even if encryption
+    // fails, so workspace cleanup can remove it.
+    let _ = fs::set_permissions(&subdir, fs::Permissions::from_mode(0o700));
+    encrypt_result?;
+
+    passphrase_auto(
+        encrypt_dir.join("ro_folder.fcr"),
+        &decrypt_dir,
+        &passphrase,
+        None,
+        None,
+        |_| {},
+    )?;
+
+    // Restore write before assertions so a failed assertion cannot leave
+    // a 0o500 directory that prevents later cleanup.
+    let out = decrypt_dir.join("ro_folder");
+    let out_subdir = out.join("locked");
+    let top_exists = out.join("top.txt").exists();
+    let inside_content = fs::read_to_string(out_subdir.join("inside.txt")).ok();
+    let subdir_mode = fs::metadata(&out_subdir)
+        .map(|m| m.permissions().mode() & 0o777)
+        .ok();
+    let _ = fs::set_permissions(&out_subdir, fs::Permissions::from_mode(0o700));
+
+    assert!(top_exists, "top-level file must extract");
+    assert_eq!(
+        inside_content.as_deref(),
+        Some("nested content"),
+        "file under the read-only subdirectory must extract with its content"
+    );
+    assert_eq!(
+        subdir_mode,
+        Some(0o500),
+        "subdirectory mode must round-trip"
+    );
+
+    Ok(())
+}
+
 #[test]
 fn test_passphrase_wrong_password() -> Result<(), CryptoError> {
     let test_dir = setup_test_dir("passphrase_wrong_password");

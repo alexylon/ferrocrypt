@@ -35,11 +35,13 @@
 //! 17. return the final output path
 //!
 //! Steps 1–8 MUST complete before any filesystem output is created.
-//! Staged file contents are synced to stable storage before step 15,
-//! so promotion never makes unsynced content visible under the final
-//! name. On error before promotion, the [`IncompleteOutputPolicy`]
-//! selects whether the staged `.incomplete` working tree is removed
-//! (`DeleteOnError`, default) or retained (`RetainOnError`).
+//! Staged file contents — and, for directory roots, the staged
+//! directories that link them — are synced to stable storage before
+//! step 15, so promotion does not make unsynced content or a partially
+//! linked tree visible under the final name. On error before promotion,
+//! the [`IncompleteOutputPolicy`] selects whether the staged
+//! `.incomplete` working tree is removed (`DeleteOnError`, default) or
+//! retained (`RetainOnError`).
 
 use std::ffi::{OsStr, OsString};
 #[cfg(test)]
@@ -349,8 +351,17 @@ fn extract_directory_root<R: Read>(
     for dir_entry in dir_entries.iter().rev() {
         let rel = strip_root_prefix(&dir_entry.path_utf8, root_name_str)?;
         let dir_handle = platform::open_dir_at_rel(&root_dir, rel)?;
+        // Sync before chmod: the helper re-opens "." read-only, so it
+        // needs the staging directory's current read permission. The
+        // later chmod changes only the mode, not the entries flushed here.
+        platform::sync_dir_handle(&dir_handle);
         platform::chmod_dir_handle(dir_handle, dir_entry.mode)?;
     }
+
+    // Flush the staged root after all descendant directories have been
+    // flushed. File contents were synced in Pass 2; these directory
+    // syncs make the links to those files durable before promotion.
+    platform::sync_dir_handle(&root_dir);
 
     // root_dir is dropped here, closing the staged-directory handle
     // before promotion: on Windows an open directory handle blocks the

@@ -209,7 +209,7 @@ pub(crate) fn encode_recipient_string_for_suite(
     data.extend_from_slice(&cs);
 
     bech32::encode::<Bech32V1>(RECIPIENT_HRP, &data)
-        .map_err(|_| CryptoError::InternalInvariant("Internal error: Bech32 encode failed"))
+        .map_err(|_| CryptoError::InternalInvariant("Bech32 encode failed"))
 }
 
 /// Decodes a canonical lowercase Bech32 recipient string into the

@@ -38,10 +38,11 @@ pub(crate) fn seal_file_key(
     let nonce = XNonce::from(*wrap_nonce);
     let ciphertext = cipher
         .encrypt(&nonce, file_key.expose().as_ref())
-        .map_err(|_| CryptoError::InternalCryptoFailure("Internal error: envelope seal failed"))?;
-    ciphertext.as_slice().try_into().map_err(|_| {
-        CryptoError::InternalInvariant("Internal error: envelope ciphertext size mismatch")
-    })
+        .map_err(|_| CryptoError::InternalCryptoFailure("envelope seal failed"))?;
+    ciphertext
+        .as_slice()
+        .try_into()
+        .map_err(|_| CryptoError::InternalInvariant("envelope ciphertext size mismatch"))
 }
 
 /// Opens an AEAD-wrapped file key. `on_fail` is called on AEAD-tag
@@ -64,7 +65,7 @@ pub(crate) fn open_file_key(
     let mut out = Zeroizing::new([0u8; FILE_KEY_SIZE]);
     if plaintext.len() != FILE_KEY_SIZE {
         return Err(CryptoError::InternalInvariant(
-            "Internal error: unwrapped file key size mismatch",
+            "unwrapped file key size mismatch",
         ));
     }
     out.copy_from_slice(&plaintext);

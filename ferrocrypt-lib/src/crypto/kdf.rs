@@ -379,9 +379,7 @@ impl KdfParams {
             self.lanes,
             Some(ENCRYPTION_KEY_SIZE),
         )
-        .map_err(|_| {
-            CryptoError::InternalCryptoFailure("Internal error: Argon2id parameter rejected")
-        })?;
+        .map_err(|_| CryptoError::InternalCryptoFailure("Argon2id parameter rejected"))?;
         // Own the Argon2id working memory instead of letting
         // `hash_password_into` allocate it: the crate frees its block
         // buffer without scrubbing, and the final blocks hold material
@@ -398,9 +396,7 @@ impl KdfParams {
                 output.as_mut(),
                 blocks.as_mut_slice(),
             )
-            .map_err(|_| {
-                CryptoError::InternalCryptoFailure("Internal error: Argon2id derivation failed")
-            })?;
+            .map_err(|_| CryptoError::InternalCryptoFailure("Argon2id derivation failed"))?;
         Ok(output)
     }
 }

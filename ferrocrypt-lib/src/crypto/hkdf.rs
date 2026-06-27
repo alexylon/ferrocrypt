@@ -20,7 +20,7 @@ pub(crate) fn hkdf_expand_sha3_256(
     let hkdf = Hkdf::<Sha3_256>::new(salt, ikm);
     let mut out = Zeroizing::new([0u8; 32]);
     hkdf.expand(info, out.as_mut())
-        .map_err(|_| CryptoError::InternalCryptoFailure("Internal error: HKDF expand failed"))?;
+        .map_err(|_| CryptoError::InternalCryptoFailure("HKDF expand failed"))?;
     Ok(out)
 }
 

@@ -131,19 +131,17 @@ impl<W: Write> EncryptWriter<W> {
     /// it (e.g. `sync_all`).
     pub(crate) fn finish(mut self) -> Result<W, CryptoError> {
         let encryptor = self.encryptor.take().ok_or(CryptoError::InternalInvariant(
-            "Internal error: encrypt writer already finished or failed",
+            "encrypt writer already finished or failed",
         ))?;
         let mut output = self.output.take().ok_or(CryptoError::InternalInvariant(
-            "Internal error: encrypt writer already finished or failed",
+            "encrypt writer already finished or failed",
         ))?;
         if self.chunk_count >= STREAM_CHUNK_COUNT_MAX {
             return Err(CryptoError::PayloadChunkCountExceeded);
         }
         encryptor
             .encrypt_last_in_place(b"", &mut self.chunk)
-            .map_err(|_| {
-                CryptoError::InternalCryptoFailure("Internal error: payload encryption failed")
-            })?;
+            .map_err(|_| CryptoError::InternalCryptoFailure("payload encryption failed"))?;
         self.chunk_count += 1;
         output.write_all(&self.chunk)?;
         output.flush()?;

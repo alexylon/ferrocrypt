@@ -13,6 +13,37 @@ use crate::recipient::policy::MixingPolicy;
 const TYPE_NAME_DISPLAY_MAX: usize = 13;
 const _: () = assert!(TYPE_NAME_DISPLAY_MAX >= 1);
 
+/// Writes `s` to `f`, escaping each character via [`write_sanitized_char`]
+/// and bounding the output to `max` display columns: up to `max - 1` escaped
+/// chars, then either the final char (input exactly at the cap) or a single
+/// `…` (input longer). Operates on `chars()` so truncation never splits a
+/// UTF-8 code point. Shared by [`DisplayableTypeName`] and [`DisplayableMarker`].
+fn write_truncated_sanitized(
+    f: &mut std::fmt::Formatter<'_>,
+    s: &str,
+    max: usize,
+) -> std::fmt::Result {
+    let mut iter = s.chars();
+    for _ in 0..max - 1 {
+        match iter.next() {
+            Some(ch) => write_sanitized_char(f, ch)?,
+            None => return Ok(()),
+        }
+    }
+    // `max - 1` chars written. One char left → emit it (input at the cap,
+    // no truncation); more left → emit `…` to signal truncation.
+    match iter.next() {
+        None => Ok(()),
+        Some(last) => {
+            if iter.next().is_some() {
+                f.write_str("…")
+            } else {
+                write_sanitized_char(f, last)
+            }
+        }
+    }
+}
+
 /// Wraps a `type_name` so its `Display` rendering escapes non-printable
 /// characters and truncates to [`TYPE_NAME_DISPLAY_MAX`] chars, replacing
 /// the tail with `…` when truncation actually occurs. The FORMAT.md §3.3
@@ -26,26 +57,27 @@ struct DisplayableTypeName<'a>(&'a str);
 
 impl std::fmt::Display for DisplayableTypeName<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut iter = self.0.chars();
-        for _ in 0..TYPE_NAME_DISPLAY_MAX - 1 {
-            match iter.next() {
-                Some(ch) => write_sanitized_char(f, ch)?,
-                None => return Ok(()),
-            }
-        }
-        // We've written `MAX - 1` chars. If exactly one char remains,
-        // emit it (the input is at the cap, no truncation needed). If
-        // more remain, emit `…` to signal truncation.
-        match iter.next() {
-            None => Ok(()),
-            Some(last) => {
-                if iter.next().is_some() {
-                    f.write_str("…")
-                } else {
-                    write_sanitized_char(f, last)
-                }
-            }
-        }
+        write_truncated_sanitized(f, self.0, TYPE_NAME_DISPLAY_MAX)
+    }
+}
+
+/// Largest number of display columns an internal-error marker may occupy after
+/// its fixed prefix. Set to the 64-column status-line budget minus the longer
+/// prefix `"Internal crypto error: "`, so both internal messages stay within
+/// budget for any marker.
+const INTERNAL_MARKER_DISPLAY_MAX: usize = 64 - "Internal crypto error: ".len();
+const _: () = assert!(INTERNAL_MARKER_DISPLAY_MAX >= 1);
+
+/// Wraps an internal-error marker so its `Display` escapes non-printable
+/// characters and bounds the output to [`INTERNAL_MARKER_DISPLAY_MAX`] columns.
+/// The markers are fixed `&'static str`s this crate controls, so the escape is
+/// defense-in-depth; the bound keeps `Internal error: {marker}` and
+/// `Internal crypto error: {marker}` within the status-line budget.
+struct DisplayableMarker<'a>(&'a str);
+
+impl std::fmt::Display for DisplayableMarker<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write_truncated_sanitized(f, self.0, INTERNAL_MARKER_DISPLAY_MAX)
     }
 }
 
@@ -668,13 +700,13 @@ pub enum CryptoError {
     /// not hold. Triggered by state-machine misuse (e.g. using a stream
     /// after it was finalized), impossible-size checks, or internal
     /// encoding failures. If this fires, it indicates a library bug.
-    #[error("{0}")]
+    #[error("Internal error: {}", DisplayableMarker(.0))]
     InternalInvariant(&'static str),
     /// A cryptographic primitive (AEAD encryption, HKDF expansion) returned
     /// an error even though the inputs were well-formed. Unreachable in
     /// practice for valid data; indicates either a library bug or a very
     /// rare underlying-crate failure.
-    #[error("{0}")]
+    #[error("Internal crypto error: {}", DisplayableMarker(.0))]
     InternalCryptoFailure(&'static str),
 }
 
@@ -991,10 +1023,10 @@ impl std::fmt::Display for StreamError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let msg = match self {
             StreamError::DecryptAead => "Payload authentication failed",
-            StreamError::EncryptAead => "Internal error: payload encryption failed",
+            StreamError::EncryptAead => "payload encryption failed",
             StreamError::Truncated => "Encrypted stream truncated",
             StreamError::ExtraData => "Encrypted stream has trailing data",
-            StreamError::StateExhausted => "Internal error: stream state already finalized",
+            StreamError::StateExhausted => "stream state already finalized",
             StreamError::ChunkCountExceeded => "Encrypted stream exceeds supported data size",
         };
         f.write_str(msg)
@@ -1008,9 +1040,9 @@ impl From<std::io::Error> for CryptoError {
         // If the io::Error carries one of our typed stream markers,
         // convert it back into the appropriate CryptoError variant
         // instead of wrapping it as an opaque Io. The `EncryptAead` and
-        // `StateExhausted` branches pick static literals that match
-        // `StreamError`'s Display text, so the user-facing wording is
-        // still defined by this module.
+        // `StateExhausted` branches pass the same bare marker as
+        // `StreamError`'s Display text; the `InternalCryptoFailure` /
+        // `InternalInvariant` Display adds the `Internal …:` prefix.
         if let Some(stream_err) = e
             .get_ref()
             .and_then(|inner| inner.downcast_ref::<StreamError>())
@@ -1021,10 +1053,10 @@ impl From<std::io::Error> for CryptoError {
                 StreamError::ExtraData => CryptoError::ExtraDataAfterPayload,
                 StreamError::ChunkCountExceeded => CryptoError::PayloadChunkCountExceeded,
                 StreamError::EncryptAead => {
-                    CryptoError::InternalCryptoFailure("Internal error: payload encryption failed")
+                    CryptoError::InternalCryptoFailure("payload encryption failed")
                 }
                 StreamError::StateExhausted => {
-                    CryptoError::InternalInvariant("Internal error: stream state already finalized")
+                    CryptoError::InternalInvariant("stream state already finalized")
                 }
             };
         }
@@ -1339,7 +1371,7 @@ mod tests {
         );
         assert_eq!(
             StreamError::EncryptAead.to_string(),
-            "Internal error: payload encryption failed"
+            "payload encryption failed"
         );
         assert_eq!(
             StreamError::Truncated.to_string(),
@@ -1351,7 +1383,7 @@ mod tests {
         );
         assert_eq!(
             StreamError::StateExhausted.to_string(),
-            "Internal error: stream state already finalized"
+            "stream state already finalized"
         );
         assert_eq!(
             StreamError::ChunkCountExceeded.to_string(),
@@ -1472,6 +1504,16 @@ mod tests {
             }
             .to_string(),
             "Private key data too large (5000 bytes, limit 4096)"
+        );
+        // Internal errors prefix a bounded marker; the marker stays in the
+        // variant payload for bug reports.
+        assert_eq!(
+            CryptoError::InternalInvariant("envelope ciphertext size mismatch").to_string(),
+            "Internal error: envelope ciphertext size mismatch"
+        );
+        assert_eq!(
+            CryptoError::InternalCryptoFailure("payload encryption failed").to_string(),
+            "Internal crypto error: payload encryption failed"
         );
     }
 
@@ -1799,6 +1841,23 @@ mod tests {
             .to_string(),
         );
 
+        // Internal markers are bounded by `INTERNAL_MARKER_DISPLAY_MAX`, so
+        // even an over-long marker stays within budget after the prefix.
+        check(
+            "InternalInvariant(long marker)",
+            &CryptoError::InternalInvariant(
+                "Manifest entry missing source_path during content streaming",
+            )
+            .to_string(),
+        );
+        check(
+            "InternalCryptoFailure(long marker)",
+            &CryptoError::InternalCryptoFailure(
+                "Argon2id key derivation failed inside an overlong internal marker",
+            )
+            .to_string(),
+        );
+
         // FormatDefect — every variant at its worst-case payload.
         let defects: &[(&str, FormatDefect)] = &[
             ("Truncated", FormatDefect::Truncated),
@@ -1943,14 +2002,14 @@ mod tests {
         ));
         match from_marker(StreamError::EncryptAead) {
             CryptoError::InternalCryptoFailure(msg) => {
-                assert_eq!(msg, "Internal error: payload encryption failed");
+                assert_eq!(msg, "payload encryption failed");
                 assert_eq!(msg, StreamError::EncryptAead.to_string());
             }
             other => panic!("expected InternalCryptoFailure, got {other:?}"),
         }
         match from_marker(StreamError::StateExhausted) {
             CryptoError::InternalInvariant(msg) => {
-                assert_eq!(msg, "Internal error: stream state already finalized");
+                assert_eq!(msg, "stream state already finalized");
                 assert_eq!(msg, StreamError::StateExhausted.to_string());
             }
             other => panic!("expected InternalInvariant, got {other:?}"),

@@ -55,17 +55,54 @@ global Theme {
     out property <color> info-bg: #0a1420;
     out property <color> info-border: #152a3b;
 
-    // Layout
-    out property <length> field-height: 34px;
-    out property <length> field-radius: 6px;
-    out property <length> field-gap: 18px;
+    // Font sizes
+    out property <length> font-title: 20px;
+    out property <length> font-action: 14px;
+    out property <length> font-body: 12.5px;
+    out property <length> font-caption: 10.5px;
+
+    // Font weights
+    out property <int> weight-normal: 400;
+    out property <int> weight-medium: 600;
+    out property <int> weight-bold: 700;
+
+    // Corner radii (outer to inner)
+    out property <length> radius-lg: 6px;
+    out property <length> radius-md: 5px;
+    out property <length> radius-sm: 4px;
+
+    // Border
+    out property <length> hairline: 1px;
+
+    // Animation durations
+    out property <duration> dur-fast: 120ms;
+    out property <duration> dur-base: 150ms;
+    out property <duration> dur-slow: 200ms;
+
+    // Spacing
+    out property <length> gap-2xs: 2px;
+    out property <length> gap-xs: 3px;
+    out property <length> gap-sm: 4px;
     out property <length> label-gap: 5px;
-    out property <length> label-size: 12px;
-    out property <length> field-text-size: 12.5px;
-    out property <length> input-text-size: 13px;
-    out property <length> field-pad: 10px;
-    out property <length> btn-width: 56px;
     out property <length> row-spacing: 6px;
+    out property <length> gap-md: 8px;
+    out property <length> field-pad: 10px;
+    out property <length> gap-lg: 13px;
+    out property <length> gap-xl: 14px;
+    out property <length> field-gap: 18px;
+    out property <length> gap-2xl: 22px;
+    out property <length> gap-3xl: 28px;
+
+    // Dimensions
+    out property <length> field-height: 34px;
+    out property <length> ctl-height: 30px;
+    out property <length> mode-height: 38px;
+    out property <length> action-height: 40px;
+    out property <length> reset-width: 54px;
+    out property <length> btn-width: 56px;
+    out property <length> icon-btn: 22px;
+    out property <length> window-w: 450px;
+    out property <length> window-h: 700px;
 }
 
 // ---------------------------------------------------------------------------
@@ -77,11 +114,11 @@ component SmallButton inherits Rectangle {
     callback clicked();
 
     height: Theme.field-height;
-    border-radius: Theme.field-radius;
+    border-radius: Theme.radius-lg;
     background: !root.enabled ? Theme.surface : ta.has-hover ? Theme.surface-hover : Theme.surface;
-    border-width: 1px;
+    border-width: Theme.hairline;
     border-color: Theme.border;
-    animate background { duration: 120ms; }
+    animate background { duration: Theme.dur-fast; }
 
     ta := TouchArea {
         enabled: root.enabled;
@@ -94,7 +131,7 @@ component SmallButton inherits Rectangle {
     Text {
         text: root.label;
         color: root.enabled ? Theme.text-secondary : Theme.text-disabled;
-        font-size: Theme.label-size;
+        font-size: Theme.font-body;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
@@ -106,8 +143,8 @@ component SmallButton inherits Rectangle {
 export component AppWindow inherits Window {
     title: app-version != "" ? "FerroCrypt v" + app-version : "FerroCrypt";
     background: Theme.bg;
-    width: 450px;
-    height: 700px;
+    width: Theme.window-w;
+    height: Theme.window-h;
 
     in property <string> app-version;
 
@@ -171,10 +208,10 @@ export component AppWindow inherits Window {
 
     // ── Main layout ─────────────────────────────────────────────────────
     VerticalLayout {
-        padding-left: 22px;
-        padding-right: 22px;
-        padding-top: 28px;
-        padding-bottom: 14px;
+        padding-left: Theme.gap-2xl;
+        padding-right: Theme.gap-2xl;
+        padding-top: Theme.gap-3xl;
+        padding-bottom: Theme.gap-xl;
         spacing: 0px;
 
         // ── Top section: packs tightly at the top ──
@@ -186,45 +223,45 @@ export component AppWindow inherits Window {
             Text {
                 text: "FerroCrypt";
                 color: Theme.text;
-                font-size: 20px;
-                font-weight: 700;
+                font-size: Theme.font-title;
+                font-weight: Theme.weight-bold;
                 horizontal-alignment: center;
             }
 
             Rectangle {
-                height: 4px;
+                height: Theme.gap-sm;
             }
 
             Text {
                 text: "Secure File Encryption";
                 color: Theme.text-dim;
-                font-size: 12px;
+                font-size: Theme.font-body;
                 horizontal-alignment: center;
             }
 
             Rectangle {
-                height: 22px;
+                height: Theme.gap-2xl;
             }
 
             // ═══════════ MODE SELECTOR ═══════════
             Rectangle {
-                height: 38px;
-                border-radius: 6px;
+                height: Theme.mode-height;
+                border-radius: Theme.radius-lg;
                 background: Theme.input-bg;
-                border-width: 1px;
+                border-width: Theme.hairline;
                 border-color: Theme.border;
 
                 HorizontalLayout {
-                    padding: 3px;
-                    spacing: 2px;
+                    padding: Theme.gap-xs;
+                    spacing: Theme.gap-2xs;
 
                     // ── Password ──
                     Rectangle {
                         property <bool> active: mode == Mode.passphrase-encrypt || mode == Mode.passphrase-decrypt;
                         horizontal-stretch: 1;
-                        border-radius: 5px;
+                        border-radius: Theme.radius-md;
                         background: active ? Theme.accent-muted : (sym-ta.has-hover && sym-ta.enabled) ? Theme.surface-hover : transparent;
-                        animate background { duration: 150ms; }
+                        animate background { duration: Theme.dur-base; }
 
                         sym-ta := TouchArea {
                             enabled: mode != Mode.recipient-decrypt && !is-working;
@@ -239,15 +276,15 @@ export component AppWindow inherits Window {
                         Text {
                             text: "Password";
                             color: parent.active ? Theme.text : !sym-ta.enabled ? Theme.text-off : Theme.text-secondary;
-                            font-size: Theme.field-text-size;
-                            font-weight: parent.active ? 600 : 400;
+                            font-size: Theme.font-body;
+                            font-weight: parent.active ? Theme.weight-medium : Theme.weight-normal;
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
                     }
 
                     Rectangle {
-                        width: 1px;
+                        width: Theme.hairline;
                         background: Theme.border;
                     }
 
@@ -255,9 +292,9 @@ export component AppWindow inherits Window {
                     Rectangle {
                         property <bool> active: mode == Mode.recipient-encrypt || mode == Mode.recipient-decrypt || mode == Mode.keygen;
                         horizontal-stretch: 1;
-                        border-radius: 5px;
+                        border-radius: Theme.radius-md;
                         background: active ? Theme.accent-muted : (hyb-ta.has-hover && hyb-ta.enabled) ? Theme.surface-hover : transparent;
-                        animate background { duration: 150ms; }
+                        animate background { duration: Theme.dur-base; }
 
                         hyb-ta := TouchArea {
                             enabled: mode != Mode.passphrase-decrypt && !is-working;
@@ -272,8 +309,8 @@ export component AppWindow inherits Window {
                         Text {
                             text: "Key pair";
                             color: parent.active ? Theme.text : !hyb-ta.enabled ? Theme.text-off : Theme.text-secondary;
-                            font-size: Theme.field-text-size;
-                            font-weight: parent.active ? 600 : 400;
+                            font-size: Theme.font-body;
+                            font-weight: parent.active ? Theme.weight-medium : Theme.weight-normal;
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
@@ -282,15 +319,15 @@ export component AppWindow inherits Window {
             }
 
             Rectangle {
-                height: 6px;
+                height: Theme.row-spacing;
             }
 
             Text {
                 text: mode == Mode.passphrase-encrypt || mode == Mode.passphrase-decrypt ? "Encrypt and decrypt with a password" : mode == Mode.keygen ? "Generate a key pair" : "Encrypt with a public key, decrypt with a private key";
                 color: Theme.text-dim;
-                font-size: 11.5px;
+                font-size: Theme.font-body;
                 horizontal-alignment: center;
-                animate color { duration: 150ms; }
+                animate color { duration: Theme.dur-base; }
             }
 
             // ═══════════ INPUT FILE / FOLDER ═══════════
@@ -303,7 +340,7 @@ export component AppWindow inherits Window {
                 Text {
                     text: "Source file or folder";
                     color: Theme.text-secondary;
-                    font-size: Theme.label-size;
+                    font-size: Theme.font-body;
                 }
 
                 Rectangle {
@@ -316,13 +353,13 @@ export component AppWindow inherits Window {
                     Rectangle {
                         horizontal-stretch: 1;
                         height: Theme.field-height;
-                        border-radius: Theme.field-radius;
+                        border-radius: Theme.radius-lg;
                         background: is-working ? Theme.input-bg-disabled : Theme.input-bg;
-                        border-width: 1px;
+                        border-width: Theme.hairline;
                         border-color: !is-working && input-path-ta.has-hover ? Theme.border-hover : Theme.border;
                         clip: true;
-                        animate background { duration: 150ms; }
-                        animate border-color { duration: 150ms; }
+                        animate background { duration: Theme.dur-base; }
+                        animate border-color { duration: Theme.dur-base; }
 
                         input-path-ta := TouchArea {
                             enabled: !is-working;
@@ -338,7 +375,7 @@ export component AppWindow inherits Window {
                             vertical-alignment: center;
                             text: input-path != "" ? input-path-display : "No file or folder selected";
                             color: input-path != "" ? Theme.text : Theme.text-disabled;
-                            font-size: Theme.field-text-size;
+                            font-size: Theme.font-body;
                             overflow: elide;
                         }
                     }
@@ -380,7 +417,7 @@ export component AppWindow inherits Window {
                 Text {
                     text: is-encrypt-mode ? "Encrypted file" : "Output location";
                     color: Theme.text-secondary;
-                    font-size: Theme.label-size;
+                    font-size: Theme.font-body;
                 }
 
                 Rectangle {
@@ -394,13 +431,13 @@ export component AppWindow inherits Window {
                         property <bool> field-enabled: !is-working && !(is-encrypt-mode && input-path == "");
                         horizontal-stretch: 1;
                         height: Theme.field-height;
-                        border-radius: Theme.field-radius;
+                        border-radius: Theme.radius-lg;
                         background: !field-enabled ? Theme.input-bg-disabled : Theme.input-bg;
-                        border-width: 1px;
+                        border-width: Theme.hairline;
                         border-color: field-enabled && out-ta.has-hover ? Theme.border-hover : Theme.border;
                         clip: true;
-                        animate background { duration: 150ms; }
-                        animate border-color { duration: 150ms; }
+                        animate background { duration: Theme.dur-base; }
+                        animate border-color { duration: Theme.dur-base; }
 
                         out-ta := TouchArea {
                             enabled: parent.field-enabled;
@@ -420,7 +457,7 @@ export component AppWindow inherits Window {
                             vertical-alignment: center;
                             text: output-path != "" ? output-path-display : "No destination selected";
                             color: output-path != "" ? Theme.text : Theme.text-disabled;
-                            font-size: Theme.field-text-size;
+                            font-size: Theme.font-body;
                             overflow: elide;
                         }
                     }
@@ -444,11 +481,11 @@ export component AppWindow inherits Window {
             VerticalLayout {
                 spacing: 0px;
                 Rectangle {
-                    height: 22px;
+                    height: Theme.gap-2xl;
                 }
 
                 Rectangle {
-                    height: 1px;
+                    height: Theme.hairline;
                     background: Theme.border;
                 }
             }
@@ -463,7 +500,7 @@ export component AppWindow inherits Window {
                 Text {
                     text: "Key source";
                     color: Theme.text-secondary;
-                    font-size: Theme.label-size;
+                    font-size: Theme.font-body;
                 }
 
                 Rectangle {
@@ -471,21 +508,21 @@ export component AppWindow inherits Window {
                 }
 
                 Rectangle {
-                    height: 30px;
-                    border-radius: 5px;
+                    height: Theme.ctl-height;
+                    border-radius: Theme.radius-md;
                     background: Theme.surface;
-                    border-width: 1px;
+                    border-width: Theme.hairline;
                     border-color: Theme.border;
 
                     HorizontalLayout {
-                        padding: 2px;
-                        spacing: 2px;
+                        padding: Theme.gap-2xs;
+                        spacing: Theme.gap-2xs;
 
                         Rectangle {
                             horizontal-stretch: 1;
-                            border-radius: 4px;
+                            border-radius: Theme.radius-sm;
                             background: mode == Mode.recipient-encrypt ? Theme.accent-muted : (ek-ta.has-hover && ek-ta.enabled) ? Theme.surface-hover : transparent;
-                            animate background { duration: 150ms; }
+                            animate background { duration: Theme.dur-base; }
 
                             ek-ta := TouchArea {
                                 enabled: !is-working;
@@ -500,22 +537,22 @@ export component AppWindow inherits Window {
                             Text {
                                 text: "Use existing public key";
                                 color: mode == Mode.recipient-encrypt ? Theme.text : Theme.text-secondary;
-                                font-size: 11px;
+                                font-size: Theme.font-body;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
                             }
                         }
 
                         Rectangle {
-                            width: 1px;
+                            width: Theme.hairline;
                             background: Theme.border;
                         }
 
                         Rectangle {
                             horizontal-stretch: 1;
-                            border-radius: 4px;
+                            border-radius: Theme.radius-sm;
                             background: mode == Mode.keygen ? Theme.accent-muted : (nk-ta.has-hover && nk-ta.enabled) ? Theme.surface-hover : transparent;
-                            animate background { duration: 150ms; }
+                            animate background { duration: Theme.dur-base; }
 
                             nk-ta := TouchArea {
                                 enabled: !is-working;
@@ -530,7 +567,7 @@ export component AppWindow inherits Window {
                             Text {
                                 text: "Create key pair";
                                 color: mode == Mode.keygen ? Theme.text : Theme.text-secondary;
-                                font-size: 11px;
+                                font-size: Theme.font-body;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
                             }
@@ -549,7 +586,7 @@ export component AppWindow inherits Window {
                 Text {
                     text: mode == Mode.recipient-encrypt ? "Public key" : "Private key";
                     color: Theme.text-secondary;
-                    font-size: Theme.label-size;
+                    font-size: Theme.font-body;
                 }
 
                 Rectangle {
@@ -562,13 +599,13 @@ export component AppWindow inherits Window {
                     Rectangle {
                         horizontal-stretch: 1;
                         height: Theme.field-height;
-                        border-radius: Theme.field-radius;
+                        border-radius: Theme.radius-lg;
                         background: is-working ? Theme.input-bg-disabled : Theme.input-bg;
-                        border-width: 1px;
+                        border-width: Theme.hairline;
                         border-color: !is-working && key-ta.has-hover ? Theme.border-hover : Theme.border;
                         clip: true;
-                        animate background { duration: 150ms; }
-                        animate border-color { duration: 150ms; }
+                        animate background { duration: Theme.dur-base; }
+                        animate border-color { duration: Theme.dur-base; }
 
                         key-ta := TouchArea {
                             enabled: !is-working;
@@ -584,7 +621,7 @@ export component AppWindow inherits Window {
                             vertical-alignment: center;
                             text: key-path != "" ? key-path-display : (mode == Mode.recipient-encrypt ? "No public key selected" : "No private key selected");
                             color: key-path != "" ? Theme.text : Theme.text-disabled;
-                            font-size: Theme.field-text-size;
+                            font-size: Theme.font-body;
                             overflow: elide;
                         }
                     }
@@ -609,7 +646,7 @@ export component AppWindow inherits Window {
                     Text {
                         text: "Fingerprint";
                         color: Theme.text-secondary;
-                        font-size: Theme.label-size;
+                        font-size: Theme.font-body;
                     }
 
                     Rectangle {
@@ -617,33 +654,33 @@ export component AppWindow inherits Window {
                     }
 
                     Rectangle {
-                        height: 30px;
-                        border-radius: 6px;
+                        height: Theme.ctl-height;
+                        border-radius: Theme.radius-lg;
                         background: Theme.info-bg;
-                        border-width: 1px;
+                        border-width: Theme.hairline;
                         border-color: Theme.info-border;
 
                         HorizontalLayout {
                             padding-left: Theme.field-pad;
-                            padding-right: 4px;
-                            spacing: 4px;
+                            padding-right: Theme.gap-sm;
+                            spacing: Theme.gap-sm;
 
                             Text {
                                 text: key-fingerprint;
                                 color: Theme.text-dim;
-                                font-size: 10.5px;
+                                font-size: Theme.font-caption;
                                 vertical-alignment: center;
                                 overflow: elide;
                                 horizontal-stretch: 1;
                             }
 
                             Rectangle {
-                                width: 22px;
-                                height: 22px;
+                                width: Theme.icon-btn;
+                                height: Theme.icon-btn;
                                 y: (parent.height - self.height) / 2;
-                                border-radius: 4px;
+                                border-radius: Theme.radius-sm;
                                 background: fp-copy-ta.has-hover ? Theme.surface-hover : transparent;
-                                animate background { duration: 120ms; }
+                                animate background { duration: Theme.dur-fast; }
 
                                 fp-copy-ta := TouchArea {
                                     mouse-cursor: pointer;
@@ -666,10 +703,10 @@ export component AppWindow inherits Window {
                                 Text {
                                     text: fp-copied ? "\u{2713}" : "\u{2398}";
                                     color: fp-copied ? Theme.success : Theme.text-dim;
-                                    font-size: 12px;
+                                    font-size: Theme.font-body;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
-                                    animate color { duration: 200ms; }
+                                    animate color { duration: Theme.dur-slow; }
                                 }
                             }
                         }
@@ -687,7 +724,7 @@ export component AppWindow inherits Window {
                 Text {
                     text: "Key pair folder";
                     color: Theme.text-secondary;
-                    font-size: Theme.label-size;
+                    font-size: Theme.font-body;
                 }
 
                 Rectangle {
@@ -700,13 +737,13 @@ export component AppWindow inherits Window {
                     Rectangle {
                         horizontal-stretch: 1;
                         height: Theme.field-height;
-                        border-radius: Theme.field-radius;
+                        border-radius: Theme.radius-lg;
                         background: is-working ? Theme.input-bg-disabled : Theme.input-bg;
-                        border-width: 1px;
+                        border-width: Theme.hairline;
                         border-color: !is-working && kgout-ta.has-hover ? Theme.border-hover : Theme.border;
                         clip: true;
-                        animate background { duration: 150ms; }
-                        animate border-color { duration: 150ms; }
+                        animate background { duration: Theme.dur-base; }
+                        animate border-color { duration: Theme.dur-base; }
 
                         kgout-ta := TouchArea {
                             enabled: !is-working;
@@ -722,7 +759,7 @@ export component AppWindow inherits Window {
                             vertical-alignment: center;
                             text: keygen-output-dir != "" ? keygen-output-dir-display : "No folder selected";
                             color: keygen-output-dir != "" ? Theme.text : Theme.text-disabled;
-                            font-size: Theme.field-text-size;
+                            font-size: Theme.font-body;
                             overflow: elide;
                         }
                     }
@@ -748,7 +785,7 @@ export component AppWindow inherits Window {
                 Text {
                     text: mode == Mode.recipient-decrypt || mode == Mode.keygen ? "Private key password" : "Password";
                     color: Theme.text-secondary;
-                    font-size: Theme.label-size;
+                    font-size: Theme.font-body;
                 }
 
                 Rectangle {
@@ -757,12 +794,12 @@ export component AppWindow inherits Window {
 
                 Rectangle {
                     height: Theme.field-height;
-                    border-radius: Theme.field-radius;
+                    border-radius: Theme.radius-lg;
                     background: is-working ? Theme.input-bg-disabled : Theme.input-bg;
-                    border-width: 1px;
+                    border-width: Theme.hairline;
                     border-color: pwd-ti.has-focus ? Theme.border-focus : pwd-hover.has-hover && !is-working ? Theme.border-hover : Theme.border;
-                    animate background { duration: 150ms; }
-                    animate border-color { duration: 150ms; }
+                    animate background { duration: Theme.dur-base; }
+                    animate border-color { duration: Theme.dur-base; }
 
                     pwd-hover := TouchArea {
                         enabled: !is-working;
@@ -777,7 +814,7 @@ export component AppWindow inherits Window {
                         width: parent.width - 40px;
                         y: (parent.height - self.preferred-height) / 2;
                         color: Theme.text;
-                        font-size: Theme.input-text-size;
+                        font-size: Theme.font-body;
                         text-cursor-width: 2px;
                         selection-background-color: Theme.accent;
                         input-type: hide-password ? InputType.password : InputType.text;
@@ -799,7 +836,7 @@ export component AppWindow inherits Window {
                         y: (parent.height - self.preferred-height) / 2;
                         text: mode == Mode.recipient-decrypt || mode == Mode.keygen ? "Enter private key password" : "Enter password";
                         color: Theme.text-disabled;
-                        font-size: Theme.input-text-size;
+                        font-size: Theme.font-body;
                     }
 
                     // Eye icon (toggle password visibility)
@@ -815,7 +852,7 @@ export component AppWindow inherits Window {
                             height: 10px;
                             x: 2px;
                             y: 2px;
-                            border-radius: 5px;
+                            border-radius: Theme.radius-md;
                             border-width: 1.5px;
                             border-color: Theme.text-dim;
                             background: transparent;
@@ -854,15 +891,15 @@ export component AppWindow inherits Window {
 
                 // Password strength indicator (encrypt/keygen only)
                 if mode == Mode.passphrase-encrypt || mode == Mode.keygen: HorizontalLayout {
-                    spacing: 4px;
+                    spacing: Theme.gap-sm;
                     height: 14px;
 
                     property <bool> active: password != "";
 
                     HorizontalLayout {
-                        spacing: 2px;
+                        spacing: Theme.gap-2xs;
                         horizontal-stretch: 1;
-                        padding-top: 5px;
+                        padding-top: Theme.label-gap;
 
                         Rectangle {
                             horizontal-stretch: 1;
@@ -890,14 +927,14 @@ export component AppWindow inherits Window {
                             height: 2px;
                             border-radius: 1px;
                             background: active && password-strength >= 4 ? strength-color : Theme.surface;
-                            animate background { duration: 200ms; }
+                            animate background { duration: Theme.dur-slow; }
                         }
                     }
 
                     Text {
                         text: active ? (password-strength == 1 ? "Weak" : password-strength == 2 ? "Fair" : password-strength == 3 ? "Good" : "Strong") : "";
                         color: strength-color;
-                        font-size: 10px;
+                        font-size: Theme.font-caption;
                         vertical-alignment: center;
                     }
                 }
@@ -907,13 +944,13 @@ export component AppWindow inherits Window {
             if require-password-repeated: VerticalLayout {
                 spacing: 0px;
                 Rectangle {
-                    height: 8px;
+                    height: Theme.gap-md;
                 }
 
                 Text {
                     text: mode == Mode.keygen ? "Confirm private key password" : "Confirm password";
                     color: Theme.text-secondary;
-                    font-size: Theme.label-size;
+                    font-size: Theme.font-body;
                 }
 
                 Rectangle {
@@ -923,12 +960,12 @@ export component AppWindow inherits Window {
                 Rectangle {
                     property <bool> field-enabled: !is-working && password != "";
                     height: Theme.field-height;
-                    border-radius: Theme.field-radius;
+                    border-radius: Theme.radius-lg;
                     background: !field-enabled ? Theme.input-bg-disabled : Theme.input-bg;
-                    border-width: 1px;
+                    border-width: Theme.hairline;
                     border-color: rpwd-ti.has-focus ? Theme.border-focus : rpwd-hover.has-hover && field-enabled ? Theme.border-hover : Theme.border;
-                    animate background { duration: 150ms; }
-                    animate border-color { duration: 150ms; }
+                    animate background { duration: Theme.dur-base; }
+                    animate border-color { duration: Theme.dur-base; }
 
                     rpwd-hover := TouchArea {
                         enabled: parent.field-enabled;
@@ -943,7 +980,7 @@ export component AppWindow inherits Window {
                         width: parent.width - 36px;
                         y: (parent.height - self.preferred-height) / 2;
                         color: Theme.text;
-                        font-size: Theme.input-text-size;
+                        font-size: Theme.font-body;
                         text-cursor-width: 2px;
                         selection-background-color: Theme.accent;
                         input-type: InputType.password;
@@ -962,7 +999,7 @@ export component AppWindow inherits Window {
                         y: (parent.height - self.preferred-height) / 2;
                         text: mode == Mode.keygen ? "Re-enter private key password" : "Re-enter password";
                         color: Theme.text-disabled;
-                        font-size: Theme.input-text-size;
+                        font-size: Theme.font-body;
                     }
 
                     // Match dot (inside field, right edge)
@@ -971,9 +1008,9 @@ export component AppWindow inherits Window {
                         y: (parent.height - 10px) / 2;
                         width: 10px;
                         height: 10px;
-                        border-radius: 5px;
+                        border-radius: Theme.radius-md;
                         background: password-match ? Theme.success : Theme.error;
-                        animate background { duration: 200ms; }
+                        animate background { duration: Theme.dur-slow; }
                     }
                 }
             }
@@ -990,13 +1027,13 @@ export component AppWindow inherits Window {
         // Priority: error > warning > success/progress > "Ready". Only one shown at a time.
         Rectangle {
             property <bool> show-ready: !is-working && status-err == "" && conflict-warning == "" && status-ok == "";
-            height: 30px;
-            border-radius: 6px;
+            height: Theme.ctl-height;
+            border-radius: Theme.radius-lg;
             background: status-err != "" ? Theme.notify-error-bg : conflict-warning != "" ? Theme.notify-warning-bg : (status-ok != "" || show-ready) ? Theme.notify-success-bg : transparent;
-            border-width: (status-err != "" || conflict-warning != "" || status-ok != "" || show-ready) ? 1px : 0px;
+            border-width: (status-err != "" || conflict-warning != "" || status-ok != "" || show-ready) ? Theme.hairline : 0px;
             border-color: status-err != "" ? Theme.notify-error-border : conflict-warning != "" ? Theme.notify-warning-border : (status-ok != "" || show-ready) ? Theme.notify-success-border : transparent;
-            animate background { duration: 200ms; }
-            animate border-color { duration: 200ms; }
+            animate background { duration: Theme.dur-slow; }
+            animate border-color { duration: Theme.dur-slow; }
 
             Text {
                 x: Theme.field-pad;
@@ -1004,28 +1041,28 @@ export component AppWindow inherits Window {
                 vertical-alignment: center;
                 text: status-err != "" ? status-err : conflict-warning != "" ? conflict-warning : status-ok != "" ? status-ok : show-ready ? "Ready" : "";
                 color: status-err != "" ? Theme.error : conflict-warning != "" ? Theme.warning : Theme.success;
-                font-size: 11.5px;
+                font-size: Theme.font-body;
                 overflow: elide;
             }
         }
 
         Rectangle {
-            height: 12px;
+            height: Theme.gap-lg;
         }
 
         // ═══════════ ACTION ROW ═══════════
         HorizontalLayout {
-            spacing: 8px;
+            spacing: Theme.gap-md;
 
             Rectangle {
-                width: 54px;
-                height: 40px;
-                border-radius: 6px;
+                width: Theme.reset-width;
+                height: Theme.action-height;
+                border-radius: Theme.radius-lg;
                 background: form-is-clean || is-working ? transparent : reset-ta.has-hover ? Theme.surface-hover : transparent;
-                border-width: form-is-clean || is-working ? 0px : 1px;
+                border-width: form-is-clean || is-working ? 0px : Theme.hairline;
                 border-color: Theme.border;
-                animate background { duration: 120ms; }
-                animate border-width { duration: 120ms; }
+                animate background { duration: Theme.dur-fast; }
+                animate border-width { duration: Theme.dur-fast; }
 
                 reset-ta := TouchArea {
                     enabled: !form-is-clean && !is-working;
@@ -1038,7 +1075,7 @@ export component AppWindow inherits Window {
                 Text {
                     text: "Reset";
                     color: form-is-clean || is-working ? Theme.text-off : Theme.text-dim;
-                    font-size: 11.5px;
+                    font-size: Theme.font-body;
                     horizontal-alignment: center;
                     vertical-alignment: center;
                 }
@@ -1046,10 +1083,10 @@ export component AppWindow inherits Window {
 
             Rectangle {
                 horizontal-stretch: 1;
-                height: 40px;
-                border-radius: 6px;
+                height: Theme.action-height;
+                border-radius: Theme.radius-lg;
                 background: disable-start ? Theme.surface : start-ta.has-hover ? Theme.accent-btn-hover : Theme.accent-btn;
-                animate background { duration: 120ms; }
+                animate background { duration: Theme.dur-fast; }
 
                 start-ta := TouchArea {
                     enabled: !disable-start;
@@ -1062,8 +1099,8 @@ export component AppWindow inherits Window {
                 Text {
                     text: button-text;
                     color: disable-start ? Theme.text-disabled : Theme.text;
-                    font-size: 14px;
-                    font-weight: 600;
+                    font-size: Theme.font-action;
+                    font-weight: Theme.weight-medium;
                     horizontal-alignment: center;
                     vertical-alignment: center;
                 }
@@ -1071,7 +1108,7 @@ export component AppWindow inherits Window {
         }
 
         Rectangle {
-            height: 10px;
+            height: Theme.field-pad;
         }
     }
 }

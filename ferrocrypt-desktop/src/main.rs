@@ -474,7 +474,7 @@ fn compute_conflict_warning(
     pub_exists: bool,
 ) -> String {
     if is_encrypt_mode(mode) && !outpath.is_empty() && out_exists {
-        return format!("Already exists: {}", elide_left(outpath, ELIDE));
+        return elide_path_message("Already exists: ", outpath, "");
     }
     if mode == MODE_KEYGEN && !keygen_dir.is_empty() {
         return match (secret_exists, pub_exists) {
@@ -545,31 +545,50 @@ fn format_duration(action: &str, path: &Path, seconds: f64) -> String {
     }
 }
 
-/// Left-elides a path, keeping the rightmost `max` characters visible.
-/// Uses char boundaries to avoid panicking on non-ASCII paths.
-fn elide_left(path: &str, max: usize) -> String {
-    if path.len() <= max {
-        return path.to_string();
+/// Left-elides text to at most `max` chars, keeping the right edge visible.
+/// Uses character indices so non-ASCII paths stay valid UTF-8.
+fn elide_left(text: &str, max: usize) -> String {
+    let char_count = text.chars().count();
+    if char_count <= max {
+        return text.to_string();
     }
-    let start = path.len() - max;
-    // Walk forward to the nearest char boundary
-    let start = path.ceil_char_boundary(start);
-    format!("\u{2026}{}", &path[start..])
+    if max == 0 {
+        return String::new();
+    }
+    if max == 1 {
+        return "\u{2026}".to_string();
+    }
+
+    let keep = max - 1;
+    let start = text
+        .char_indices()
+        .nth(char_count - keep)
+        .map(|(idx, _)| idx)
+        .unwrap_or(0);
+    format!("\u{2026}{}", &text[start..])
 }
 
-/// Shortens the path inside library result messages like "Encrypted to /long/path in 1.23 sec".
+fn elide_path_message(prefix: &str, path: &str, suffix: &str) -> String {
+    let path_budget = ELIDE.saturating_sub(prefix.chars().count() + suffix.chars().count());
+    format!("{prefix}{}{suffix}", elide_left(path, path_budget))
+}
+
+/// Shortens the path inside status messages such as
+/// "Encrypted to /long/path in 1.23 sec" while keeping the whole message within
+/// the status-line budget.
 fn elide_result_path(msg: &str) -> String {
     let msg = msg.trim();
     for prefix in ["Encrypted to ", "Decrypted to "] {
         if let Some(rest) = msg.strip_prefix(prefix) {
             if let Some((path, duration)) = rest.rsplit_once(" in ") {
-                return format!("{prefix}{} in {duration}", elide_left(path, ELIDE - 5));
+                let suffix = format!(" in {duration}");
+                return elide_path_message(prefix, path, &suffix);
             }
         }
     }
     for prefix in ["Output file already exists: ", "Output already exists: "] {
         if let Some(path) = msg.strip_prefix(prefix) {
-            return format!("{prefix}{}", elide_left(path, ELIDE - 5));
+            return elide_path_message(prefix, path, "");
         }
     }
     msg.to_string()
@@ -798,6 +817,7 @@ mod tests {
         let long = format!("/tmp/{}", "a".repeat(80));
         let w = compute_conflict_warning(MODE_PASSPHRASE_ENCRYPT, &long, "", true, false, false);
         assert!(w.starts_with("Already exists: \u{2026}"), "got: {}", w);
+        assert!(w.chars().count() <= ELIDE, "got: {w}");
     }
 
     #[test]
@@ -839,22 +859,25 @@ mod tests {
         let s = "a".repeat(60);
         let out = elide_left(&s, 52);
         assert!(out.starts_with('\u{2026}'));
-        // 52 'a's preserved + one ellipsis char (3 UTF-8 bytes) prefix.
-        assert_eq!(out.chars().filter(|c| *c == 'a').count(), 52);
+        assert_eq!(out.chars().count(), 52);
+        // 51 'a's preserved + one ellipsis char.
+        assert_eq!(out.chars().filter(|c| *c == 'a').count(), 51);
     }
 
     #[test]
     fn elide_left_respects_multibyte_boundaries() {
-        // 60 'é' glyphs (2 bytes each) => 120 bytes. Must not panic and must
-        // still produce a valid UTF-8 string.
         let s = "é".repeat(60);
         let out = elide_left(&s, 52);
         assert!(out.is_char_boundary(out.len()));
         assert!(out.starts_with('\u{2026}'));
-        // ceil_char_boundary may skip one byte to land on a boundary, so we
-        // get either 26 or 25 'é' glyphs — both are acceptable.
-        let count = out.chars().filter(|c| *c == 'é').count();
-        assert!((25..=26).contains(&count), "got {count} é glyphs");
+        assert_eq!(out.chars().count(), 52);
+        assert_eq!(out.chars().filter(|c| *c == 'é').count(), 51);
+    }
+
+    #[test]
+    fn elide_left_handles_tiny_budgets() {
+        assert_eq!(elide_left("abcdef", 0), "");
+        assert_eq!(elide_left("abcdef", 1), "\u{2026}");
     }
 
     #[test]
@@ -865,6 +888,7 @@ mod tests {
         assert!(out.starts_with("Encrypted to "));
         assert!(out.ends_with(" in 1.23 sec"));
         assert!(out.contains('\u{2026}'));
+        assert!(out.chars().count() <= ELIDE, "got: {out}");
     }
 
     #[test]
@@ -875,6 +899,7 @@ mod tests {
         assert!(out.starts_with("Decrypted to "));
         assert!(out.ends_with(" in 0.50 sec"));
         assert!(out.contains('\u{2026}'));
+        assert!(out.chars().count() <= ELIDE, "got: {out}");
     }
 
     #[test]
@@ -885,6 +910,7 @@ mod tests {
             let out = elide_result_path(&msg);
             assert!(out.starts_with(prefix));
             assert!(out.contains('\u{2026}'));
+            assert!(out.chars().count() <= ELIDE, "got: {out}");
         }
     }
 

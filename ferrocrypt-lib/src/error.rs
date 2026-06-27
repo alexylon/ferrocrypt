@@ -4,55 +4,54 @@ use crate::UnauthenticatedRecipientMode;
 use crate::recipient::argon2id;
 use crate::recipient::policy::MixingPolicy;
 
-/// Maximum number of `chars` (counting an inserted ellipsis as one) a
-/// `type_name` is allowed to occupy when interpolated into a user-facing
-/// error message. Sized to keep the longest interpolating message
+/// Maximum number of rendered `chars` (counting an inserted ellipsis as one)
+/// a `type_name` may occupy when interpolated into a user-facing error
+/// message. Sized to keep the longest interpolating message
 /// (`UnknownCriticalRecipient`, fixed wording = 51 chars) within the
 /// 64-char desktop status-line budget enforced by
 /// [`tests::user_facing_messages_fit_status_line_budget`].
 const TYPE_NAME_DISPLAY_MAX: usize = 13;
 const _: () = assert!(TYPE_NAME_DISPLAY_MAX >= 1);
 
-/// Writes `s` to `f`, escaping each character via [`write_sanitized_char`]
-/// and bounding the output to `max` display columns: up to `max - 1` escaped
-/// chars, then either the final char (input exactly at the cap) or a single
-/// `…` (input longer). Operates on `chars()` so truncation never splits a
-/// UTF-8 code point. Shared by [`DisplayableTypeName`] and [`DisplayableMarker`].
+/// Writes `s` to `f`, escaping each character via [`write_sanitized_char`] and
+/// bounding the escaped output to `max` rendered chars, including a trailing
+/// `…` when truncation occurs. The function never splits a UTF-8 code point or
+/// a backslash escape sequence; if the next escaped character would not fit, it
+/// emits `…` instead. Shared by [`DisplayableTypeName`] and
+/// [`DisplayableMarker`].
 fn write_truncated_sanitized(
     f: &mut std::fmt::Formatter<'_>,
     s: &str,
     max: usize,
 ) -> std::fmt::Result {
-    let mut iter = s.chars();
-    for _ in 0..max - 1 {
-        match iter.next() {
-            Some(ch) => write_sanitized_char(f, ch)?,
-            None => return Ok(()),
-        }
-    }
-    // `max - 1` chars written. One char left → emit it (input at the cap,
-    // no truncation); more left → emit `…` to signal truncation.
-    match iter.next() {
-        None => Ok(()),
-        Some(last) => {
-            if iter.next().is_some() {
-                f.write_str("…")
-            } else {
-                write_sanitized_char(f, last)
+    let mut written = 0;
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        let mut escaped = String::new();
+        write_sanitized_char(&mut escaped, ch)?;
+        let escaped_len = escaped.chars().count();
+        let ellipsis_reserve = usize::from(chars.peek().is_some());
+        if written + escaped_len + ellipsis_reserve <= max {
+            f.write_str(&escaped)?;
+            written += escaped_len;
+        } else {
+            if written < max {
+                f.write_str("…")?;
             }
+            return Ok(());
         }
     }
+    Ok(())
 }
 
 /// Wraps a `type_name` so its `Display` rendering escapes non-printable
-/// characters and truncates to [`TYPE_NAME_DISPLAY_MAX`] chars, replacing
-/// the tail with `…` when truncation actually occurs. The FORMAT.md §3.3
-/// grammar already limits a parsed `type_name` to printable lowercase
-/// ASCII, but a `CryptoError::*` variant can be hand-constructed from any
-/// string, so the escape (shared with `sanitize_for_display` via
-/// `write_sanitized_char`) stops a non-grammar name from smuggling a
-/// terminal escape sequence into an error message. Operates on `chars()`
-/// so truncation never splits a UTF-8 code point.
+/// characters and truncates the escaped output to [`TYPE_NAME_DISPLAY_MAX`]
+/// chars, replacing the tail with `…` when truncation actually occurs. The
+/// FORMAT.md §3.3 grammar already limits a parsed `type_name` to printable
+/// lowercase ASCII, but a `CryptoError::*` variant can be hand-constructed
+/// from any string, so the escape (shared with `sanitize_for_display` via
+/// `write_sanitized_char`) stops a non-grammar name from smuggling a terminal
+/// escape sequence into an error message.
 struct DisplayableTypeName<'a>(&'a str);
 
 impl std::fmt::Display for DisplayableTypeName<'_> {
@@ -1557,19 +1556,33 @@ mod tests {
     /// Defense-in-depth: a `type_name` carrying terminal-escape or
     /// direction-override bytes — only reachable via a hand-constructed
     /// `CryptoError`, since the FORMAT.md §3.3 grammar rejects such names —
-    /// is escaped in the rendered message, never emitted raw. Guards the
-    /// `write_sanitized_char` path through `DisplayableTypeName`, exercised
-    /// here via a variant that still renders `type_name`.
+    /// is escaped and bounded in the rendered message, never emitted raw.
+    /// Guards the `write_sanitized_char` path through `DisplayableTypeName`,
+    /// exercised here via a variant that still renders `type_name`.
     #[test]
     fn type_name_in_error_is_escaped_not_emitted_raw() {
-        assert_eq!(
-            CryptoError::IncompatibleRecipients {
-                type_name: "\u{1b}\u{202e}".to_owned(),
-                policy: MixingPolicy::Exclusive,
-            }
-            .to_string(),
-            "Recipient `\\u{1b}\\u{202e}` mixed with another recipient",
+        let msg = CryptoError::IncompatibleRecipients {
+            type_name: "\u{1b}\u{202e}".to_owned(),
+            policy: MixingPolicy::Exclusive,
+        }
+        .to_string();
+        assert_eq!(msg, "Recipient `\\u{1b}…` mixed with another recipient");
+        assert!(!msg.contains('\u{1b}'), "raw ESC must not appear: {msg:?}");
+        assert!(msg.chars().count() <= 64, "message over budget: {msg}");
+    }
+
+    #[test]
+    fn type_name_escape_truncation_keeps_status_budget() {
+        let msg = CryptoError::UnknownCriticalRecipient {
+            type_name: "\u{202e}".repeat(20),
+        }
+        .to_string();
+        assert!(
+            !msg.contains('\u{202e}'),
+            "raw bidi char must not appear: {msg:?}"
         );
+        assert!(msg.contains('…'), "hostile name should be truncated: {msg}");
+        assert!(msg.chars().count() <= 64, "message over budget: {msg}");
     }
 
     /// Budget: every static user-facing `CryptoError` message — plus

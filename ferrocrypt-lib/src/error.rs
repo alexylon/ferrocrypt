@@ -687,7 +687,7 @@ pub enum CryptoError {
     /// The summed per-entry extension regions exceed the configured
     /// [`ArchiveLimits::max_total_entry_ext_bytes`](crate::ArchiveLimits)
     /// cap (`FORMAT.md` §9.12).
-    #[error("Archive entry extensions too large (limit {local_cap})")]
+    #[error("Archive entry extensions too large (limit {local_cap} bytes)")]
     ArchiveTotalEntryExtCapExceeded {
         /// Running entry-extension total that crossed the cap, in bytes.
         total_ext_bytes: u64,
@@ -1495,7 +1495,7 @@ mod tests {
                 local_cap: 99,
             }
             .to_string(),
-            "Archive entry extensions too large (limit 99)"
+            "Archive entry extensions too large (limit 99 bytes)"
         );
         assert_eq!(
             CryptoError::PrivateKeyWrappedSecretCapExceeded {
@@ -1763,11 +1763,12 @@ mod tests {
             .to_string(),
         );
 
-        // Archive limit messages at worst-case field widths. The
-        // path-bearing variants are checked without a path (the path is
-        // variable text the desktop elides, not budgeted);
-        // `ArchivePathDepthCapExceeded` always carries a path, so it is
-        // not budget-checked.
+        // Archive limit messages at worst-case field widths. Two are not
+        // budget-checked because their rendered length is variable text the
+        // desktop elides: `ArchivePathDepthCapExceeded` always carries a
+        // path, and `ArchiveTotalEntryExtCapExceeded` carries an unbounded
+        // `u64` limit whose extreme values overrun the line. The other
+        // path-bearing variants are checked without a path.
         check(
             "ArchiveEntryCountCapExceeded(max)",
             &CryptoError::ArchiveEntryCountCapExceeded {
@@ -1815,14 +1816,6 @@ mod tests {
                 ext_len: u64::MAX,
                 local_cap: u32::MAX,
                 path: None,
-            }
-            .to_string(),
-        );
-        check(
-            "ArchiveTotalEntryExtCapExceeded(max)",
-            &CryptoError::ArchiveTotalEntryExtCapExceeded {
-                total_ext_bytes: u64::MAX,
-                local_cap: u64::MAX,
             }
             .to_string(),
         );

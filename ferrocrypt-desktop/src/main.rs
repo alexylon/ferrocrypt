@@ -13,7 +13,11 @@ use std::path::{Path, PathBuf};
 
 mod password_scorer;
 
-const ELIDE: usize = 52;
+/// Width budget for a path shown in a form field (narrower: a picker button shares the row).
+const ELIDE: usize = 44;
+
+/// Width budget for the status line (wider, no button); matches the library's 64-char budget.
+const STATUS_LINE_MAX: usize = 66;
 
 // Slint app modes — must match the `mode` property values in app.slint
 const MODE_PASSPHRASE_ENCRYPT: i32 = 0;
@@ -569,7 +573,8 @@ fn elide_left(text: &str, max: usize) -> String {
 }
 
 fn elide_path_message(prefix: &str, path: &str, suffix: &str) -> String {
-    let path_budget = ELIDE.saturating_sub(prefix.chars().count() + suffix.chars().count());
+    let path_budget =
+        STATUS_LINE_MAX.saturating_sub(prefix.chars().count() + suffix.chars().count());
     format!("{prefix}{}{suffix}", elide_left(path, path_budget))
 }
 
@@ -596,15 +601,15 @@ fn elide_result_path(msg: &str) -> String {
 
 /// Bounds an error message to the status line. Known result/conflict prefixes
 /// keep their leading text and left-elide the path (via [`elide_result_path`]);
-/// any message still longer than [`ELIDE`] — typically a long OS error string
+/// any message still longer than [`STATUS_LINE_MAX`] — typically a long OS error string
 /// or archive path — is truncated with a trailing `…`. This is UI-only: the
 /// library keeps the full message for CLI and library callers.
 fn elide_error_for_status(msg: &str) -> String {
     let elided = elide_result_path(msg);
-    if elided.chars().count() <= ELIDE {
+    if elided.chars().count() <= STATUS_LINE_MAX {
         return elided;
     }
-    let kept: String = elided.chars().take(ELIDE - 1).collect();
+    let kept: String = elided.chars().take(STATUS_LINE_MAX - 1).collect();
     format!("{kept}\u{2026}")
 }
 
@@ -817,7 +822,7 @@ mod tests {
         let long = format!("/tmp/{}", "a".repeat(80));
         let w = compute_conflict_warning(MODE_PASSPHRASE_ENCRYPT, &long, "", true, false, false);
         assert!(w.starts_with("Already exists: \u{2026}"), "got: {}", w);
-        assert!(w.chars().count() <= ELIDE, "got: {w}");
+        assert!(w.chars().count() <= STATUS_LINE_MAX, "got: {w}");
     }
 
     #[test]
@@ -888,7 +893,7 @@ mod tests {
         assert!(out.starts_with("Encrypted to "));
         assert!(out.ends_with(" in 1.23 sec"));
         assert!(out.contains('\u{2026}'));
-        assert!(out.chars().count() <= ELIDE, "got: {out}");
+        assert!(out.chars().count() <= STATUS_LINE_MAX, "got: {out}");
     }
 
     #[test]
@@ -899,7 +904,7 @@ mod tests {
         assert!(out.starts_with("Decrypted to "));
         assert!(out.ends_with(" in 0.50 sec"));
         assert!(out.contains('\u{2026}'));
-        assert!(out.chars().count() <= ELIDE, "got: {out}");
+        assert!(out.chars().count() <= STATUS_LINE_MAX, "got: {out}");
     }
 
     #[test]
@@ -910,7 +915,7 @@ mod tests {
             let out = elide_result_path(&msg);
             assert!(out.starts_with(prefix));
             assert!(out.contains('\u{2026}'));
-            assert!(out.chars().count() <= ELIDE, "got: {out}");
+            assert!(out.chars().count() <= STATUS_LINE_MAX, "got: {out}");
         }
     }
 
@@ -930,7 +935,14 @@ mod tests {
     #[test]
     fn elide_error_for_status_passes_messages_within_budget() {
         let msg = "Decryption failed: wrong passphrase or modified file";
-        assert!(msg.chars().count() <= ELIDE);
+        assert!(msg.chars().count() <= STATUS_LINE_MAX);
+        assert_eq!(elide_error_for_status(msg), msg);
+    }
+
+    #[test]
+    fn elide_error_for_status_keeps_full_64_char_message() {
+        let msg = "Private key unlock failed: wrong passphrase or modified key file";
+        assert_eq!(msg.chars().count(), 64);
         assert_eq!(elide_error_for_status(msg), msg);
     }
 
@@ -938,7 +950,7 @@ mod tests {
     fn elide_error_for_status_truncates_long_unknown_messages() {
         let long = format!("Unsafe archive path (traversal): /tmp/{}", "d".repeat(200));
         let out = elide_error_for_status(&long);
-        assert!(out.chars().count() <= ELIDE);
+        assert!(out.chars().count() <= STATUS_LINE_MAX);
         assert!(out.ends_with('\u{2026}'));
         assert!(out.starts_with("Unsafe archive path"));
     }
@@ -947,7 +959,7 @@ mod tests {
     fn elide_error_for_status_bounds_known_prefix_messages() {
         let long = format!("Output already exists: /tmp/{}", "e".repeat(200));
         let out = elide_error_for_status(&long);
-        assert!(out.chars().count() <= ELIDE);
+        assert!(out.chars().count() <= STATUS_LINE_MAX);
         assert!(out.contains('\u{2026}'));
     }
 

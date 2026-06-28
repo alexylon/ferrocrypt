@@ -23,12 +23,15 @@ const PASSPHRASE_ENV: &str = "FERROCRYPT_PASSPHRASE";
 /// applies it through the ordinary `kdf_params` builder.
 ///
 /// All override-related state — env-var name, activation value, and the
-/// fast Argon2id triple — lives inside the `cfg(debug_assertions)` scope,
-/// so release builds compile the branch out entirely: the env var has no
-/// effect there and there is no live reference to the fast triple.
-/// Production code MUST NOT set the env var. Aligned with
-/// `ferrocrypt-test-support::fast_kdf_params` and the lib's internal
-/// `KdfParams::test_fast_default` (values 19 MiB / 1 / 4).
+/// fast Argon2id triple — lives inside the `cfg(debug_assertions)` scope, so
+/// a standard release build, which leaves `debug_assertions` at its
+/// release-profile default of off, compiles the branch out entirely: the env
+/// var has no effect there and there is no live reference to the fast triple.
+/// The boundary is `debug_assertions`, not the profile name, so a non-default
+/// `[profile.release] debug-assertions = true` would keep the branch;
+/// production builds MUST use the default release profile and MUST NOT set the
+/// env var. Aligned with `ferrocrypt-test-support::fast_kdf_params` and the
+/// lib's internal `KdfParams::test_fast_default` (values 19 MiB / 1 / 4).
 fn test_fast_kdf_override() -> Option<KdfParams> {
     #[cfg(debug_assertions)]
     {

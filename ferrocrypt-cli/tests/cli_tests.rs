@@ -1073,28 +1073,16 @@ fn test_cli_encrypt_passphrase_conflicts_with_recipient_flag() {
 }
 
 #[test]
-#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_encrypt_passphrase_conflicts_with_public_key_flag() {
     let test_dir = setup_test_dir("cli_encrypt_p_conflicts_k");
-    let keys_dir = test_dir.join("keys");
     let input_file = test_dir.join("secret.txt");
     let encrypt_dir = test_dir.join("encrypted");
-    fs::create_dir_all(&keys_dir).unwrap();
     fs::create_dir_all(&encrypt_dir).unwrap();
     create_test_file(&input_file, "conflict");
 
-    let binary = get_binary_path();
-
-    let kg = cli_command(&binary)
-        .arg("keygen")
-        .arg("-o")
-        .arg(&keys_dir)
-        .env("FERROCRYPT_PASSPHRASE", "kp")
-        .output()
-        .expect("keygen");
-    assert!(kg.status.success());
-
-    let output = cli_command(&binary)
+    // `-p` conflicts with `-k` at clap parse time, before the key file is
+    // read, so an uncreated key path is enough and no Argon2id runs.
+    let output = cli_command(&get_binary_path())
         .arg("encrypt")
         .arg("-i")
         .arg(&input_file)
@@ -1102,7 +1090,7 @@ fn test_cli_encrypt_passphrase_conflicts_with_public_key_flag() {
         .arg(&encrypt_dir)
         .arg("-p")
         .arg("-k")
-        .arg(keys_dir.join("public.key"))
+        .arg(test_dir.join("nonexistent-public.key"))
         .output()
         .expect("encrypt -p -k");
     assert!(!output.status.success());
@@ -2353,32 +2341,15 @@ fn test_encrypt_without_output_dir_or_save_as_fails() {
 }
 
 #[test]
-#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_decrypt_without_output_dir_fails() {
     let test_dir = setup_test_dir("decrypt_no_out");
-    let input_file = test_dir.join("data.txt");
-    let encrypt_dir = test_dir.join("encrypted");
-    fs::create_dir_all(&encrypt_dir).unwrap();
-    create_test_file(&input_file, "payload");
 
-    let binary = get_binary_path();
-
-    let enc = cli_command(&binary)
-        .arg("encrypt")
-        .arg("-i")
-        .arg(&input_file)
-        .arg("-o")
-        .arg(&encrypt_dir)
-        .env("FERROCRYPT_PASSPHRASE", "pass")
-        .output()
-        .expect("encrypt");
-    assert!(enc.status.success());
-
-    let dec = cli_command(&binary)
+    // `decrypt` requires `-o` at clap parse time, before the input is read,
+    // so an uncreated input path is enough and no Argon2id runs.
+    let dec = cli_command(&get_binary_path())
         .arg("decrypt")
         .arg("-i")
-        .arg(encrypt_dir.join("data.fcr"))
-        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .arg(test_dir.join("nonexistent.fcr"))
         .output()
         .expect("decrypt without -o");
     assert!(!dec.status.success());
@@ -2654,6 +2625,9 @@ fn test_cli_subcommand_help_decrypt() {
         "--output-dir",
         "--private-key",
         "--max-kdf-memory",
+        "--max-kdf-time-cost",
+        "--max-kdf-lanes",
+        "--keep-partial",
     ] {
         assert!(stdout.contains(token), "missing {token} in:\n{stdout}");
     }

@@ -727,6 +727,53 @@ fn test_cli_fingerprint() {
 }
 
 #[test]
+#[cfg(unix)]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
+fn test_cli_fingerprint_survives_closed_stdout_pipe() {
+    use std::process::Stdio;
+
+    let test_dir = setup_test_dir("cli_fingerprint_closed_pipe");
+    let keys_dir = test_dir.join("keys");
+    fs::create_dir_all(&keys_dir).unwrap();
+
+    let binary = get_binary_path();
+    let keygen = cli_command(&binary)
+        .arg("keygen")
+        .arg("-o")
+        .arg(&keys_dir)
+        .env("FERROCRYPT_PASSPHRASE", "fp_pass")
+        .output()
+        .expect("keygen");
+    assert!(keygen.status.success());
+
+    // Spawn `fingerprint` with stdout piped, then close the read end without
+    // reading. The command reads the key file and computes the fingerprint
+    // before it writes, so by write time the reader is gone and the write hits
+    // a broken pipe. The CLI must finish cleanly instead of panicking, which
+    // would surface as exit code 101 and a panic message on stderr.
+    let mut child = cli_command(&binary)
+        .arg("fingerprint")
+        .arg(keys_dir.join("public.key"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn fingerprint");
+    drop(child.stdout.take());
+    let output = child.wait_with_output().expect("wait fingerprint");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "broken stdout pipe must not crash fingerprint; code={:?}, stderr={stderr}",
+        output.status.code()
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "fingerprint panicked on a broken pipe: {stderr}"
+    );
+}
+
+#[test]
 #[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
 fn test_cli_keygen_prints_fingerprint() {
     let test_dir = setup_test_dir("cli_keygen_fp");

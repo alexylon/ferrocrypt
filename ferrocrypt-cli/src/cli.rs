@@ -74,6 +74,32 @@ const SUBCOMMAND_HELP: &str = "encrypt (enc), decrypt (dec), keygen (gen), finge
 const DOUBLE_ENCRYPT_REFUSAL: &str = "Refusing to encrypt an existing FerroCrypt file; \
      pass --allow-double-encrypt to confirm";
 
+/// Writes a line to stdout, tolerating a reader that has closed the pipe.
+///
+/// `println!` panics when a write to stdout fails, and Rust's runtime leaves
+/// `SIGPIPE` ignored, so piping a command into a reader that exits early — for
+/// example `ferrocrypt fingerprint key.pub | head` — would otherwise abort
+/// with a panic. A closed reader is a normal outcome, not a failure: a
+/// `BrokenPipe` write is dropped so the command still runs to completion and
+/// exits on its own status. Any other stdout error keeps `println!`'s loud
+/// behavior, since it signals a genuine problem worth surfacing.
+fn print_stdout_line(args: std::fmt::Arguments) {
+    let mut stdout = io::stdout().lock();
+    if let Err(e) = writeln!(stdout, "{args}") {
+        if e.kind() != io::ErrorKind::BrokenPipe {
+            panic!("failed printing to stdout: {e}");
+        }
+    }
+}
+
+/// `println!` for stdout that does not panic when the reader has closed the
+/// pipe. Routes every line through [`print_stdout_line`] so the broken-pipe
+/// handling lives in one place; use it for all stdout output.
+macro_rules! outln {
+    () => { print_stdout_line(format_args!("")) };
+    ($($arg:tt)*) => { print_stdout_line(format_args!($($arg)*)) };
+}
+
 #[derive(Parser, Debug)]
 #[command(
     author,
@@ -362,7 +388,7 @@ fn print_result(is_encrypt: bool, output: &Path, elapsed: std::time::Duration) {
     } else {
         "Decrypted to"
     };
-    println!(
+    outln!(
         "\n{} {} in {}\n",
         action,
         output.display(),
@@ -538,7 +564,7 @@ fn run_encrypt(
     } else {
         for r in &recipients {
             if let Ok(fp) = r.fingerprint() {
-                println!("Encrypting to: {fp}");
+                outln!("Encrypting to: {fp}");
             }
         }
         Encryptor::with_public_keys(recipients)?
@@ -667,15 +693,15 @@ fn run_keygen(output_dir: PathBuf) -> Result<(), CryptoError> {
     };
     let outcome = generator.write(&output_dir, |ev| eprintln!("{ev}"))?;
     let recipient = PublicKey::from_key_file(&outcome.public_key_path).to_recipient_string()?;
-    println!("\nGenerated key pair in {}\n", output_dir.display());
-    println!("Public key fingerprint: {}", outcome.fingerprint);
-    println!("Public key recipient:   {}", recipient);
+    outln!("\nGenerated key pair in {}\n", output_dir.display());
+    outln!("Public key fingerprint: {}", outcome.fingerprint);
+    outln!("Public key recipient:   {}", recipient);
     Ok(())
 }
 
 fn run_fingerprint(public_key_file: PathBuf) -> Result<(), CryptoError> {
     let fp = PublicKey::from_key_file(&public_key_file).fingerprint()?;
-    println!("{}", fp);
+    outln!("{}", fp);
     Ok(())
 }
 
@@ -747,8 +773,8 @@ fn dispatch_repl_line(line: &str) -> ReplOutcome {
 }
 
 fn interactive_mode() -> Result<(), CryptoError> {
-    println!("\nFerroCrypt interactive mode\n");
-    println!("Commands: {SUBCOMMAND_HELP}, quit\n");
+    outln!("\nFerroCrypt interactive mode\n");
+    outln!("Commands: {SUBCOMMAND_HELP}, quit\n");
 
     let mut rl = match DefaultEditor::new() {
         Ok(editor) => editor,
@@ -786,11 +812,11 @@ fn interactive_mode() -> Result<(), CryptoError> {
             }
 
             Err(ReadlineError::Interrupted) => {
-                println!("^C");
+                outln!("^C");
                 continue;
             }
             Err(ReadlineError::Eof) => {
-                println!();
+                outln!();
                 break;
             }
             Err(err) => {

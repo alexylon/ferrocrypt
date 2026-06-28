@@ -29,6 +29,7 @@ All notable changes to FerroCrypt are documented in this file.
 - **The desktop status line no longer overflows on a long error.** A long OS error string or archive path could previously run past the one-line status width. The desktop now elides an over-long error to fit — keeping the leading text and eliding the path — while the library and CLI still return the full message. This is a desktop UI change only; no library behavior changed.
 
 ### Fixed
+- **The CLI no longer crashes when the program reading its output closes the pipe early.** Piping the CLI into a reader that exits first — for example `ferrocrypt fingerprint key.pub | head` — could previously end in a panic with exit code 101 instead of stopping cleanly. A closed output pipe is now treated as a normal end of output.
 - **The CLI now exits with a non-zero status when its interactive line editor cannot start.** It previously printed the error but exited as success, so a script could not detect the failure.
 
 ### Security

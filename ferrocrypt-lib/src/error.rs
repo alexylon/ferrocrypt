@@ -1172,6 +1172,10 @@ mod tests {
             CryptoError::ExtraDataAfterPayload.to_string(),
             "Encrypted file has unexpected trailing data"
         );
+        assert_eq!(
+            CryptoError::PayloadChunkCountExceeded.to_string(),
+            "Encrypted file exceeds supported data size"
+        );
         // A public-key recipient keeps the no-match-or-modified-file
         // ambiguity; the passphrase recipient reports a wrong passphrase or
         // modified file. `type_name` is not shown.
@@ -1244,6 +1248,14 @@ mod tests {
             }
             .to_string(),
             "Passphrase parallelism over limit (4, limit 2)"
+        );
+        assert_eq!(
+            CryptoError::KdfBelowWriteFloor {
+                mem_cost_kib: 8_192,
+                floor_kib: 19_456,
+            }
+            .to_string(),
+            "Passphrase memory too low (8192 KiB, needs 19456 KiB)"
         );
     }
 
@@ -1706,6 +1718,10 @@ mod tests {
         check(
             "ExtraDataAfterPayload",
             &CryptoError::ExtraDataAfterPayload.to_string(),
+        );
+        check(
+            "PayloadChunkCountExceeded",
+            &CryptoError::PayloadChunkCountExceeded.to_string(),
         );
         // Cap-exceeded variants at worst-case integer payloads — the
         // budget assertion has to hold even when both fields render at

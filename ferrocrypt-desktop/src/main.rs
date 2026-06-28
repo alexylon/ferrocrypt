@@ -16,7 +16,9 @@ mod password_scorer;
 /// Width budget for a path shown in a form field (narrower: a picker button shares the row).
 const ELIDE: usize = 44;
 
-/// Width budget for the status line (wider, no button); matches the library's 64-char budget.
+/// Width budget for the status line (wider, no button): two chars above the
+/// library's 64-char message budget, so a full-length library message always
+/// renders verbatim and only longer variable text (OS errors, paths) is elided.
 const STATUS_LINE_MAX: usize = 66;
 
 // Slint app modes — must match the `mode` property values in app.slint

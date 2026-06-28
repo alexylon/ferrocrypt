@@ -263,6 +263,12 @@ fn validate_non_empty_passphrase(raw: String) -> Result<SecretString, CryptoErro
 /// (cron, systemd, Docker without `-t`, CI, piped scripts) fail fast instead
 /// of blocking on a hidden console.
 ///
+/// The variable is read but not unset, so it stays readable by other local
+/// processes of the same user (for example via `ps eww` or
+/// `/proc/<pid>/environ`) for the process lifetime — the usual tradeoff of
+/// passing a secret through the environment. Prefer the interactive prompt
+/// when that visibility matters.
+///
 /// When `confirm` is `true` (encryption), the user is prompted twice and the
 /// inputs are compared in constant time.
 fn read_passphrase(confirm: bool) -> Result<SecretString, CryptoError> {
@@ -311,6 +317,15 @@ fn format_duration(d: std::time::Duration) -> String {
     }
 }
 
+/// Reports whether a directory entry already exists at `path`, treating a
+/// symlink — including a dangling one — as occupied. Unlike [`Path::exists`],
+/// this does not follow the link, so a broken symlink at an intended output
+/// path is caught here as a conflict, failing fast before any passphrase
+/// prompt, rather than slipping past to the library's no-clobber guard.
+fn path_occupied(path: &Path) -> bool {
+    path.symlink_metadata().is_ok()
+}
+
 fn check_encrypt_conflict(
     input_path: &Path,
     output_dir: Option<&Path>,
@@ -329,7 +344,7 @@ fn check_encrypt_conflict(
             dir.join(default_encrypted_filename(input_path)?)
         }
     };
-    if target.exists() {
+    if path_occupied(&target) {
         return Err(CryptoError::InvalidInput(format!(
             "Already exists: {}",
             target.display()
@@ -353,8 +368,8 @@ fn print_result(is_encrypt: bool, output: &Path, elapsed: std::time::Duration) {
 }
 
 fn check_keygen_conflict(output_dir: &Path) -> Result<(), CryptoError> {
-    let private_exists = output_dir.join(PRIVATE_KEY_FILENAME).exists();
-    let public_exists = output_dir.join(PUBLIC_KEY_FILENAME).exists();
+    let private_exists = path_occupied(&output_dir.join(PRIVATE_KEY_FILENAME));
+    let public_exists = path_occupied(&output_dir.join(PUBLIC_KEY_FILENAME));
     match (private_exists, public_exists) {
         (true, true) => Err(CryptoError::InvalidInput(
             "Key pair already exists in output folder".into(),
@@ -672,8 +687,10 @@ enum ReplOutcome {
     /// Empty or whitespace-only input. Loop should continue silently.
     Empty,
     /// Parse succeeded but no subcommand was given. Unreachable through
-    /// normal trimmed input; kept as a defensive fallback in case shell-word
-    /// split or the clap parser ever accepts a bare flag-only invocation.
+    /// normal input — a line that shell-word-splits to nothing (blank or a
+    /// `#` comment) returns [`ReplOutcome::Empty`] first — but kept as a
+    /// defensive fallback in case the clap parser ever accepts an invocation
+    /// with no subcommand.
     NoCommand,
     /// Shell-word split failed (unclosed quote, etc).
     ShellError(shell_words::ParseError),
@@ -706,6 +723,11 @@ fn dispatch_repl_line(line: &str) -> ReplOutcome {
         Ok(v) => v,
         Err(e) => return ReplOutcome::ShellError(e),
     };
+    // A line that is entirely a `#` comment splits to nothing; ignore it like
+    // a blank line rather than reporting a missing command.
+    if parts.is_empty() {
+        return ReplOutcome::Empty;
+    }
 
     let args = std::iter::once(BINARY_NAME.to_string()).chain(parts);
 
@@ -838,6 +860,16 @@ mod tests {
     #[test]
     fn empty_or_whitespace_is_empty() {
         for input in ["", "   ", "\t", "\n", "\r\n", " \t\n "] {
+            assert!(
+                matches!(dispatch_repl_line(input), ReplOutcome::Empty),
+                "input {input:?} should be Empty"
+            );
+        }
+    }
+
+    #[test]
+    fn comment_only_line_is_empty() {
+        for input in ["#", "# a comment", "   # indented", "## still a comment"] {
             assert!(
                 matches!(dispatch_repl_line(input), ReplOutcome::Empty),
                 "input {input:?} should be Empty"

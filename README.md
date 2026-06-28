@@ -202,7 +202,7 @@ ferrocrypt encrypt -i secret.txt -o ./encrypted -r fcr1...
 
 The shorter aliases `enc`, `dec`, `gen`, and `fp` may be used in place of the full subcommand names.
 
-Passphrases are not accepted as command-line arguments. The CLI prompts for them with hidden input. For scripts and CI environments, the `FERROCRYPT_PASSPHRASE` environment variable may be used.
+Passphrases are not accepted as command-line arguments. The CLI prompts for them with hidden input. For scripts and CI environments, the `FERROCRYPT_PASSPHRASE` environment variable may be used; note that an environment variable is readable by other processes running as the same user, so prefer the interactive prompt where that exposure matters.
 
 If `encrypt` is given an input that already begins with the FerroCrypt magic bytes, it warns and prompts for confirmation on an interactive shell, refuses with exit code 1 on a non-interactive shell, or proceeds when `--allow-double-encrypt` is set.
 

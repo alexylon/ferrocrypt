@@ -2009,6 +2009,45 @@ fn test_passphrase_encrypt_conflict_detected() {
 }
 
 #[test]
+#[cfg(unix)]
+fn test_encrypt_conflict_detects_dangling_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let test_dir = setup_test_dir("encrypt_conflict_dangling_symlink");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    create_test_file(&input_file, "payload");
+
+    // A dangling symlink at the would-be output path: `Path::exists` follows
+    // it and reports nothing there, but the entry still blocks the output.
+    // The conflict check must catch it before any passphrase is requested, so
+    // the run fails with the conflict message rather than the missing-passphrase
+    // one (no passphrase env, no terminal).
+    symlink("nonexistent-target", encrypt_dir.join("data.fcr")).unwrap();
+
+    let out = cli_command(&get_binary_path())
+        .arg("encrypt")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .env_remove("FERROCRYPT_PASSPHRASE")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("encrypt with dangling-symlink output");
+    assert!(
+        !out.status.success(),
+        "should fail on the dangling-symlink conflict"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Already exists"),
+        "expected fail-fast conflict before the passphrase prompt, got: {stderr}"
+    );
+}
+
+#[test]
 fn test_passphrase_encrypt_conflict_with_save_as() {
     let test_dir = setup_test_dir("passphrase_save_as_conflict");
     let input_file = test_dir.join("data.txt");

@@ -1,6 +1,6 @@
 [package]
 name = "ferrocrypt-cli"
-version = "0.3.0-beta.3"
+version = "0.3.0-rc.1"
 edition = "2021"
 # rustyline 18 uses the `file_lock` std feature, stable since Rust 1.89, so the
 # CLI's real floor is 1.89 (above home 0.5.12's 1.88). Verified by the

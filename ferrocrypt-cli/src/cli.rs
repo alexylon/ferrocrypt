@@ -66,6 +66,11 @@ const BINARY_NAME: &str = env!("CARGO_BIN_NAME");
 const INTERACTIVE_PROMPT: &str = concat!(env!("CARGO_BIN_NAME"), "> ");
 const SUBCOMMAND_HELP: &str = "encrypt (enc), decrypt (dec), keygen (gen), fingerprint (fp)";
 
+// Shared by both double-encrypt refusal paths (no TTY and interactive decline)
+// so they report the same wording and the same override hint.
+const DOUBLE_ENCRYPT_REFUSAL: &str = "Refusing to encrypt an existing FerroCrypt file; \
+     pass --allow-double-encrypt to confirm";
+
 #[derive(Parser, Debug)]
 #[command(
     author,
@@ -191,21 +196,21 @@ pub enum CliCommand {
         #[arg(
             long,
             value_name = "MIB",
-            help = "Maximum Argon2id memory cost to accept (MiB)"
+            help = "Maximum Argon2id memory cost to accept (MiB). When omitted, the limit is 1 GiB; 0 rejects every file"
         )]
         max_kdf_memory: Option<u32>,
 
         #[arg(
             long,
             value_name = "ITERATIONS",
-            help = "Maximum Argon2id time cost (iteration count) to accept"
+            help = "Maximum Argon2id time cost (iteration count) to accept. When omitted, the limit is the format maximum; 0 rejects every file"
         )]
         max_kdf_time_cost: Option<u32>,
 
         #[arg(
             long,
             value_name = "LANES",
-            help = "Maximum Argon2id lane count (parallelism) to accept"
+            help = "Maximum Argon2id lane count (parallelism) to accept. When omitted, the limit is the format maximum; 0 rejects every file"
         )]
         max_kdf_lanes: Option<u32>,
 
@@ -399,9 +404,7 @@ fn confirm_or_reject_double_encrypt(
 
     if !stdin().is_terminal() {
         return Err(CryptoError::InvalidInput(
-            "Refusing to encrypt an existing FerroCrypt file; \
-             pass --allow-double-encrypt to confirm"
-                .to_string(),
+            DOUBLE_ENCRYPT_REFUSAL.to_string(),
         ));
     }
 
@@ -414,11 +417,11 @@ fn confirm_or_reject_double_encrypt(
         .read_line(&mut answer)
         .map_err(CryptoError::Io)?;
     let trimmed = answer.trim();
-    if matches!(trimmed, "y" | "Y") {
+    if trimmed.eq_ignore_ascii_case("y") || trimmed.eq_ignore_ascii_case("yes") {
         Ok(())
     } else {
         Err(CryptoError::InvalidInput(
-            "Aborted: refusing to encrypt an existing FerroCrypt file".to_string(),
+            DOUBLE_ENCRYPT_REFUSAL.to_string(),
         ))
     }
 }

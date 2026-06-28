@@ -4,6 +4,8 @@ All notable changes to FerroCrypt are documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0-rc.1] - 2026-06-28
+
 ### Added
 - **`KdfLimit` can now cap Argon2id time cost and lane count, not just memory.** New builder methods `KdfLimit::with_max_time_cost` and `KdfLimit::with_max_lanes` let a decryptor refuse a file whose key-derivation parameters demand more iterations or parallelism than you allow. By default both sit at the format's maximum, so nothing that decrypts today is affected; tighten them only if you want stricter limits on untrusted files. A header above a tightened cap is reported as the new `CryptoError::KdfTimeCostCapExceeded` or `CryptoError::KdfLanesCapExceeded`, mirroring the existing `KdfResourceCapExceeded` for memory.
 - **The `decrypt` command gains `--max-kdf-time-cost` and `--max-kdf-lanes` flags**, alongside the existing `--max-kdf-memory`. They tighten the Argon2id time-cost and lane-count limits accepted from an untrusted file. Each is optional and defaults to the format maximum, so normal decryption is unaffected; set them only to refuse a file that demands more iterations or parallelism than you want to spend.

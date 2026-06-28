@@ -1499,6 +1499,194 @@ fn test_cli_decrypt_rejects_tightened_max_kdf_time_cost() {
 }
 
 #[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
+fn test_cli_decrypt_rejects_tightened_max_kdf_memory() {
+    let test_dir = setup_test_dir("cli_decrypt_kdf_memory_reject");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    fs::create_dir_all(&decrypt_dir).unwrap();
+    create_test_file(&input_file, "kdf memory reject test");
+
+    let binary = get_binary_path();
+    let enc = cli_command(&binary)
+        .arg("encrypt")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("encrypt");
+    assert!(enc.status.success());
+
+    // The file's Argon2id memory cost is at least 19 MiB (the fast-KDF test
+    // override; the production default is 1 GiB); a cap of 1 MiB is far below
+    // it, so the file is rejected before Argon2id runs.
+    let dec = cli_command(&binary)
+        .arg("decrypt")
+        .arg("-i")
+        .arg(encrypt_dir.join("data.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir)
+        .arg("--max-kdf-memory")
+        .arg("1")
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("decrypt with --max-kdf-memory");
+    assert!(
+        !dec.status.success(),
+        "decrypt should fail when --max-kdf-memory is below the file's memory cost"
+    );
+    let stderr = String::from_utf8_lossy(&dec.stderr);
+    assert!(
+        stderr.contains("memory over limit"),
+        "expected a memory-limit error, got: {stderr}"
+    );
+}
+
+#[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
+fn test_cli_decrypt_rejects_tightened_max_kdf_lanes_private_key_mode() {
+    let test_dir = setup_test_dir("cli_decrypt_kdf_lanes_reject_private");
+    let keys_dir = test_dir.join("keys");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&keys_dir).unwrap();
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    fs::create_dir_all(&decrypt_dir).unwrap();
+    create_test_file(&input_file, "kdf lanes reject private-key test");
+
+    let binary = get_binary_path();
+    let kg = cli_command(&binary)
+        .arg("keygen")
+        .arg("-o")
+        .arg(&keys_dir)
+        .env("FERROCRYPT_PASSPHRASE", "kp")
+        .output()
+        .expect("keygen");
+    assert!(kg.status.success());
+
+    let enc = cli_command(&binary)
+        .arg("encrypt")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .arg("-k")
+        .arg(keys_dir.join("public.key"))
+        .output()
+        .expect("encrypt");
+    assert!(enc.status.success());
+
+    // The `private.key` is sealed with 4 Argon2id lanes (both the fast-KDF
+    // test override and the production default use 4). The cap applies to the
+    // private-key unlock, so a tightened cap of 2 rejects it before Argon2id
+    // runs and the decrypt fails.
+    let dec = cli_command(&binary)
+        .arg("decrypt")
+        .arg("-i")
+        .arg(encrypt_dir.join("data.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir)
+        .arg("-K")
+        .arg(keys_dir.join("private.key"))
+        .arg("--max-kdf-lanes")
+        .arg("2")
+        .env("FERROCRYPT_PASSPHRASE", "kp")
+        .output()
+        .expect("decrypt with --max-kdf-lanes");
+    assert!(
+        !dec.status.success(),
+        "decrypt should fail when --max-kdf-lanes is below the private key's lane count"
+    );
+    let stderr = String::from_utf8_lossy(&dec.stderr);
+    assert!(
+        stderr.contains("parallelism over limit"),
+        "expected a lane/parallelism-limit error, got: {stderr}"
+    );
+}
+
+#[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
+fn test_cli_decrypt_keep_partial_retains_incomplete_on_failure() {
+    let test_dir = setup_test_dir("cli_decrypt_keep_partial");
+    let input_file = test_dir.join("payload.bin");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_default = test_dir.join("decrypted_default");
+    let decrypt_keep = test_dir.join("decrypted_keep");
+    for d in [&encrypt_dir, &decrypt_default, &decrypt_keep] {
+        fs::create_dir_all(d).unwrap();
+    }
+
+    // Multi-chunk plaintext so a byte flipped at the file's midpoint lands
+    // inside a non-first STREAM payload chunk: the earlier chunk decrypts and
+    // streams into `.incomplete`, then the tampered chunk fails, leaving a
+    // partially written staged output for the policy to act on.
+    let big_data: Vec<u8> = (0..200_000u32).map(|i| (i % 256) as u8).collect();
+    fs::write(&input_file, &big_data).unwrap();
+
+    let binary = get_binary_path();
+    let enc = cli_command(&binary)
+        .arg("encrypt")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("encrypt");
+    assert!(enc.status.success());
+
+    let encrypted_path = encrypt_dir.join("payload.fcr");
+    let mut ct = fs::read(&encrypted_path).unwrap();
+    let flip_offset = ct.len() / 2;
+    ct[flip_offset] ^= 0xFF;
+    fs::write(&encrypted_path, &ct).unwrap();
+
+    // Without --keep-partial the staged `.incomplete` is removed on failure.
+    let dec = cli_command(&binary)
+        .arg("decrypt")
+        .arg("-i")
+        .arg(&encrypted_path)
+        .arg("-o")
+        .arg(&decrypt_default)
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("decrypt without --keep-partial");
+    assert!(
+        !dec.status.success(),
+        "tampered payload must fail to decrypt"
+    );
+    assert!(
+        !decrypt_default.join("payload.bin.incomplete").exists(),
+        "default policy must remove the .incomplete staged output"
+    );
+
+    // With --keep-partial the staged `.incomplete` survives for recovery.
+    let dec_keep = cli_command(&binary)
+        .arg("decrypt")
+        .arg("-i")
+        .arg(&encrypted_path)
+        .arg("-o")
+        .arg(&decrypt_keep)
+        .arg("--keep-partial")
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("decrypt with --keep-partial");
+    assert!(
+        !dec_keep.status.success(),
+        "tampered payload must fail to decrypt even with --keep-partial"
+    );
+    assert!(
+        decrypt_keep.join("payload.bin.incomplete").exists(),
+        "--keep-partial must retain the .incomplete staged output"
+    );
+}
+
+#[test]
 fn test_cli_decrypt_rejects_save_as_flag() {
     // -s is encrypt-only; clap rejects it on `decrypt`.
     let test_dir = setup_test_dir("cli_decrypt_rejects_s");

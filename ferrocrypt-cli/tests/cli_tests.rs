@@ -2198,7 +2198,7 @@ fn test_encrypt_double_encrypt_no_tty_refuses() {
     assert!(!again.status.success(), "should refuse without flag/TTY");
     let stderr = String::from_utf8_lossy(&again.stderr);
     assert!(
-        stderr.contains("refusing to encrypt an existing FerroCrypt file"),
+        stderr.contains("Refusing to encrypt an existing FerroCrypt file"),
         "expected double-encrypt refusal, got: {stderr}"
     );
 }
@@ -2335,7 +2335,7 @@ fn test_encrypt_output_conflict_wins_over_double_encrypt_gate() {
         "conflict check should fire first; got: {stderr}"
     );
     assert!(
-        !stderr.contains("refusing to encrypt an existing FerroCrypt file"),
+        !stderr.contains("Refusing to encrypt an existing FerroCrypt file"),
         "double-encrypt gate should not have fired before the conflict check; got: {stderr}"
     );
 }

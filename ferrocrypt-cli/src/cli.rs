@@ -399,7 +399,7 @@ fn confirm_or_reject_double_encrypt(
 
     if !stdin().is_terminal() {
         return Err(CryptoError::InvalidInput(
-            "refusing to encrypt an existing FerroCrypt file; \
+            "Refusing to encrypt an existing FerroCrypt file; \
              pass --allow-double-encrypt to confirm"
                 .to_string(),
         ));
@@ -418,7 +418,7 @@ fn confirm_or_reject_double_encrypt(
         Ok(())
     } else {
         Err(CryptoError::InvalidInput(
-            "aborted: refusing to encrypt an existing FerroCrypt file".to_string(),
+            "Aborted: refusing to encrypt an existing FerroCrypt file".to_string(),
         ))
     }
 }
@@ -543,8 +543,11 @@ fn run_encrypt(
 /// flags. Returns `None` when no flag is set, so the library default
 /// applies. When any flag is set, memory starts from `--max-kdf-memory`
 /// (or the 1 GiB default) and `--max-kdf-time-cost` / `--max-kdf-lanes`
-/// tighten the time-cost and lane caps; an unset cap stays at the v1
-/// format maximum, which rejects nothing the structural check would not.
+/// tighten the time-cost and lane caps. An unset time-cost or lane cap
+/// stays at the v1 format maximum and so rejects nothing the structural
+/// check would not; an unset memory cap stays at the 1 GiB default, below
+/// the 2 GiB structural maximum, so it still rejects a header that asks
+/// for more than 1 GiB.
 fn build_kdf_limit(
     max_kdf_memory: Option<u32>,
     max_kdf_time_cost: Option<u32>,
@@ -587,7 +590,7 @@ fn run_decrypt(
         Decryptor::Passphrase(mut decryptor) => {
             if private_key.is_some() {
                 return Err(CryptoError::InvalidInput(
-                    "this file is sealed with a passphrase; --private-key is not applicable"
+                    "This file is sealed with a passphrase; --private-key is not applicable"
                         .to_string(),
                 ));
             }
@@ -603,7 +606,7 @@ fn run_decrypt(
         Decryptor::PrivateKey(mut decryptor) => {
             let private_key = private_key.ok_or_else(|| {
                 CryptoError::InvalidInput(
-                    "this file is sealed to public-key recipients; --private-key is required"
+                    "This file is sealed to public-key recipients; --private-key is required"
                         .to_string(),
                 )
             })?;
@@ -624,7 +627,7 @@ fn run_decrypt(
         }
         _ => {
             return Err(CryptoError::InvalidInput(
-                "unsupported FerroCrypt encryption mode".to_string(),
+                "Unsupported FerroCrypt encryption mode".to_string(),
             ));
         }
     };
@@ -722,8 +725,9 @@ fn interactive_mode() -> Result<(), CryptoError> {
     let mut rl = match DefaultEditor::new() {
         Ok(editor) => editor,
         Err(e) => {
-            eprintln!("Failed to initialize line editor: {e}");
-            return Ok(());
+            return Err(CryptoError::Io(io::Error::other(format!(
+                "Failed to initialize line editor: {e}"
+            ))));
         }
     };
 

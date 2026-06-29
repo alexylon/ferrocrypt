@@ -6,13 +6,13 @@
 
 ![](https://github.com/alexylon/ferrocrypt/actions/workflows/rust.yml/badge.svg)
 &nbsp;
-[![crate: ferrocrypt](https://img.shields.io/crates/v/ferrocrypt.svg?label=crate%3A%20ferrocrypt&color=blue)](https://crates.io/crates/ferrocrypt)
+[![crate: ferrocrypt](https://img.shields.io/crates/v/ferrocrypt.svg?label=crate%3A%20ferrocrypt&color=blue)](https://crates.io/crates/ferrocrypt/0.3.0-rc.1)
 &nbsp;
-[![docs.rs](https://img.shields.io/docsrs/ferrocrypt/latest?color=2e7d32)](https://docs.rs/ferrocrypt/latest)
+[![docs.rs](https://img.shields.io/docsrs/ferrocrypt/latest?color=2e7d32)](https://docs.rs/ferrocrypt/0.3.0-rc.1)
 &nbsp;
 ![MSRV](https://img.shields.io/badge/MSRV-1.87-blue)
 &nbsp;
-[![crate: ferrocrypt-cli](https://img.shields.io/crates/v/ferrocrypt-cli.svg?label=crate%3A%20ferrocrypt-cli&color=blue)](https://crates.io/crates/ferrocrypt-cli)
+[![crate: ferrocrypt-cli](https://img.shields.io/crates/v/ferrocrypt-cli.svg?label=crate%3A%20ferrocrypt-cli&color=blue)](https://crates.io/crates/ferrocrypt-cli/0.3.0-rc.1)
 
 FerroCrypt is a pure Rust library, CLI, and desktop application for encrypting and decrypting files and directories using password-based or key-pair-based encryption.
 
@@ -29,19 +29,18 @@ FerroCrypt is a pure Rust library, CLI, and desktop application for encrypting a
 </div>
 
 > **Status:** This repository is preparing the **v0.3.0** release and is now at
-> the **release-candidate** stage (`0.3.0-rc.N`). The latest stable release on
-> crates.io is `0.2.5`, which uses the previous on-disk format and CLI;
-> everything below describes the v0.3.0 line. Pre-releases of v0.3.0
-> (`0.3.0-alpha.N`, `0.3.0-beta.N`, `0.3.0-rc.N`) are published to crates.io and
-> GitHub Releases. They are opt-in — `cargo add ferrocrypt` will not select them
-> automatically; the exact version must be pinned in `Cargo.toml`. **The wire
-> format, public API, and CLI are now considered final for v0.3.0; a breaking
-> change before the final cut would only land to fix a critical issue found
-> during the release-candidate period.** Files produced by any pre-release or by
-> `main` are not interchangeable with `0.2.5`, and any pre-release artefact
-> should be treated as unstable until v0.3.0 ships. See the [`[Unreleased]`
-> section of `CHANGELOG.md`](CHANGELOG.md#unreleased) for the full list of
-> breaking changes so far.
+> the **release-candidate** stage (`0.3.0-rc.N`). The previous `0.2.5` line
+> uses a different on-disk format, public API, and CLI, and is not compatible
+> with v0.3.0; everything below describes the v0.3.0 line. Pre-releases of
+> v0.3.0 (`0.3.0-alpha.N`, `0.3.0-beta.N`, `0.3.0-rc.N`) are published to
+> crates.io and GitHub Releases. They are opt-in — `cargo add ferrocrypt` will
+> not select them automatically; the exact version must be pinned in
+> `Cargo.toml`. **The wire format, public API, and CLI are now considered final
+> for v0.3.0; a breaking change before the final cut would only land to fix a
+> critical issue found during the release-candidate period.** Files produced by
+> any v0.3.0 pre-release or by `main` are not interchangeable with `0.2.5`. See
+> `CHANGELOG.md`](CHANGELOG.md#unreleased) for the full list of breaking changes
+> so far.
 
 ## Table of contents
 
@@ -90,10 +89,7 @@ Available release artifacts include:
 ### Rust library
 
 ```bash
-# Latest stable (currently 0.2.5 — previous on-disk format and API)
-cargo add ferrocrypt
-
-# Pre-release of v0.3.0 (opt-in; required to use the v0.3.0 features documented below)
+# Current v0.3.0 release candidate
 cargo add ferrocrypt@0.3.0-rc.1
 ```
 
@@ -104,9 +100,6 @@ API documentation is available on [docs.rs](https://docs.rs/ferrocrypt/latest/fe
 Install from crates.io:
 
 ```bash
-# Latest stable (currently 0.2.5)
-cargo install ferrocrypt-cli
-
 # Pre-release of v0.3.0 (opt-in; required to use the v0.3.0 CLI documented below)
 cargo install ferrocrypt-cli --version 0.3.0-rc.1
 ```
@@ -266,7 +259,7 @@ Encrypted output is named automatically and can be changed with Save As. Key fil
 - **Streaming encryption.** File data is processed in chunks, so large inputs do not need to be held entirely in memory.
 - **Directory support.** Directories are stored as a FerroCrypt Archive (FCA) — a small native archive format for one output root with regular files, directories, Unix permissions, and a portable safe path subset — and encrypted as part of the payload.
 - **Public recipient strings.** Public keys can be shared as lowercase `fcr1...` recipient strings.
-- **Public key fingerprints.** SHA3-256 fingerprints provide a stable ID for independent public-key verification.
+- **Public key fingerprints.** SHA3-256 fingerprints provide a persistent ID for independent public-key verification.
 - **Atomic output.** Encrypted files and generated key files are staged before being moved into their final location.
 - **Hardened extraction on Linux, macOS, and Windows.** Every directory step is anchored to a capability handle that refuses symlinks at any path component, and on Windows additionally rejects NTFS reparse points (junctions and mount points). Extraction writes cannot be redirected outside the chosen output directory.
 - **Typed library errors.** The Rust API distinguishes wrong credentials, unsupported data, authentication failures, truncation, and resource-limit failures.

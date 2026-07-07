@@ -109,7 +109,7 @@ pub(crate) fn read_file_capped(
     let mut buf = Vec::with_capacity(cap.saturating_add(1).min(64 * 1024));
     let read = file
         .by_ref()
-        .take(cap as u64 + 1)
+        .take((cap as u64).saturating_add(1))
         .read_to_end(&mut buf)
         .map_err(CryptoError::Io)?;
     if read > cap {

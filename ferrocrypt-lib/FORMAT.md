@@ -1262,9 +1262,12 @@ appends to the root component (§9.11). Without this reserve, a component near
 the filesystem limit would be archivable but not extractable.
 
 The reserved-device check is ASCII-case-insensitive only. Implementations MUST
-NOT use locale-sensitive case conversion. The superscript names (`COM¹` through
-`COM³`, `LPT¹` through `LPT³`) are matched on their exact UTF-8 bytes; the
-superscript digits have no ASCII case.
+NOT use locale-sensitive case conversion. The reserved stem is the component
+bytes before the first `.`, with trailing spaces then removed, matching Windows
+device-name resolution; a component such as `AUX .txt` therefore resolves to the
+`AUX` device and MUST be rejected. The superscript names (`COM¹` through `COM³`,
+`LPT¹` through `LPT³`) are matched on their exact UTF-8 bytes; the superscript
+digits have no ASCII case.
 
 ### 9.7 Duplicate and collision policy
 

@@ -2,11 +2,11 @@
 //! classification.
 //!
 //! `KeyFileKind` is a cheap, non-authenticating heuristic used to
-//! surface the friendly `WrongKeyFileType` diagnostic when a user
+//! surface the more specific `WrongKeyFileType` diagnostic when a user
 //! hands the wrong kind of key file to a reader. The strict parse —
 //! Bech32 + algorithm + length for public, magic + version + type +
-//! algorithm + size + AEAD for private — runs downstream in each
-//! reader against the actual unlock or extract path.
+//! algorithm + size + AEAD for private — runs later in each reader
+//! against the actual unlock or extraction path.
 
 use crate::format;
 use crate::key::public::{RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT, decode_recipient_string};
@@ -17,13 +17,12 @@ pub const PUBLIC_KEY_FILENAME: &str = "public.key";
 /// Default filename for the private key file (binary, wrapped).
 pub const PRIVATE_KEY_FILENAME: &str = "private.key";
 
-/// Heuristic classification of key-file bytes. Cheap, non-
-/// authenticating: callers use it to surface the friendly
-/// `WrongKeyFileType` diagnostic when a user hands the wrong
-/// kind of key file to a reader. The strict parse — Bech32 +
-/// algorithm + length for public, magic + version + type +
-/// algorithm + size + AEAD for private — runs downstream in
-/// each reader against the actual unlock or extract path.
+/// Heuristic classification of key-file bytes. Cheap and non-authenticating:
+/// callers use it to surface the more specific `WrongKeyFileType` diagnostic
+/// when a user hands the wrong kind of key file to a reader. The strict
+/// parse — Bech32 + algorithm + length for public, magic + version +
+/// type + algorithm + size + AEAD for private — runs later in each
+/// reader against the actual unlock or extraction path.
 ///
 /// Adding a new variant is a deliberate breaking change inside
 /// the crate: every `match` over a `KeyFileKind` becomes a
@@ -40,7 +39,7 @@ pub(crate) enum KeyFileKind {
     /// bytes of `FCR\0 || ?? || 'K'`. Magic + type byte is
     /// sufficient regardless of `version`, so a future v2
     /// `private.key` still classifies as `Private` and surfaces
-    /// the friendly diagnostic instead of `NotAKeyFile`.
+    /// the more specific diagnostic instead of `NotAKeyFile`.
     Private,
     /// Neither signature matches.
     Unknown,
@@ -55,7 +54,7 @@ impl KeyFileKind {
     /// The binary signature is `magic(4) || version(1) || kind(1)
     /// = 'K'`. The version byte is intentionally not constrained,
     /// so a future v2 `private.key` still classifies as `Private`
-    /// and surfaces the friendly diagnostic instead of `NotAKeyFile`.
+    /// and surfaces the more specific diagnostic instead of `NotAKeyFile`.
     ///
     /// Adversarial inputs that do NOT match either signature
     /// (a `.fcr` encrypted file whose `kind` byte is `'E'`,

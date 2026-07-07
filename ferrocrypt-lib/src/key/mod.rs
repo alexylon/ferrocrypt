@@ -14,7 +14,7 @@
 //! - [`files`] — filesystem-level key helpers: the canonical
 //!   `public.key` / `private.key` default filenames and the
 //!   `KeyFileKind` heuristic that classifies a path as a public or
-//!   private key file from a cheap byte sniff.
+//!   private key file from a small byte prefix.
 //!
 //! [`PublicKey`]: crate::PublicKey
 //! [`PrivateKey`]: crate::PrivateKey

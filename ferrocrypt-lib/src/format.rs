@@ -131,7 +131,7 @@ pub(crate) const PREFIX_SIZE: usize = 12;
 pub(crate) const HEADER_LEN_MAX: u32 = 16_777_216; // 16 MiB
 
 /// Recommended local cap on `header_len` for untrusted input
-/// (`FORMAT.md` §3.2). Implementations MUST allow callers to raise
+/// (`FORMAT.md` §3.2). Implementations must allow callers to raise
 /// this for specific use cases.
 pub(crate) const HEADER_LEN_LOCAL_CAP_DEFAULT: u32 = 1_048_576; // 1 MiB
 
@@ -207,7 +207,7 @@ impl Kind {
 /// Both `public.key` and `private.key` parsers translate their on-disk
 /// version encodings into [`KeypairSuite`] before any support decision —
 /// the single shared gate is [`keypair_suite_is_supported`]. That makes
-/// the encrypt/decrypt symmetry rule structural: a release MUST NOT
+/// the encrypt/decrypt symmetry rule structural: a release must not
 /// accept a public key for encryption unless the same suite remains
 /// supported for private-key decryption.
 ///
@@ -759,7 +759,7 @@ mod tests {
     }
 
     /// Forward-compat insurance for the public-key reverse mapper. The
-    /// writer's current wire byte MUST round-trip through
+    /// writer's current wire byte must round-trip through
     /// [`keypair_suite_from_public_key_version`] back to
     /// [`WRITER_KEYPAIR_SUITE`]. If a future change advances
     /// [`WRITER_KEYPAIR_SUITE`] (say to `V2`) without adding the
@@ -792,7 +792,7 @@ mod tests {
         );
     }
 
-    /// Pins the structural rejections that both reverse mappers MUST
+    /// Pins the structural rejections that both reverse mappers must
     /// produce for the reserved byte (`0x00`) and an above-writer byte.
     /// The domain-specific consumers (public.rs / private.rs) translate
     /// `Reserved` into their `MalformedPublicKey` / `MalformedPrivateKey`

@@ -345,7 +345,7 @@ mod tests {
 
     /// Pins the RetainOnError contract at the helper level: when the
     /// kernel refuses promotion (final name already taken), the staging
-    /// file `from` MUST remain on disk. Regression-protects the
+    /// file `from` must remain on disk. Regression-protects the
     /// `disable_cleanup` step inside `promote_single_file_no_clobber`
     /// against an inadvertent revert that would let `TempPath`'s
     /// destructor `remove_file(from)` after the failure path returns.
@@ -365,7 +365,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&from).unwrap(), "new");
     }
 
-    /// `sync_parent_dir` is a best-effort durability hint — it MUST
+    /// `sync_parent_dir` is a best-effort durability hint — it must
     /// swallow every failure so a callsite (`finalize_file`,
     /// `rename_no_clobber`) returning success is not retroactively
     /// flipped to an error after the final path is already visible.

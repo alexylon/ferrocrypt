@@ -136,7 +136,7 @@ pub(crate) fn validate_entry_ext_tlv(
 /// sequence shared by writer and reader.
 ///
 /// Writer ([`checked_manifest_len`]) and reader
-/// ([`parse_manifest_bytes`]) MUST run these checks in the same order
+/// ([`parse_manifest_bytes`]) must run these checks in the same order
 /// so a future change to per-entry validation (new cap, reordered
 /// rejection priority) lands in one place. The entry-flags check is
 /// reader-only (writer always emits zero) so it stays inline at the
@@ -203,7 +203,7 @@ pub(super) fn write_u8<W: Write>(w: &mut W, n: u8) -> io::Result<()> {
 /// Reads exactly `size` bytes from `reader` and writes them to `writer`.
 /// Used by both the encrypt-side content pass (source file → encrypted
 /// stream) and the decrypt-side content extraction (encrypted stream →
-/// output file). FORMAT.md §9.9: archive content bytes MUST NOT use
+/// output file). FORMAT.md §9.9: archive content bytes must not use
 /// unbounded `io::copy`, which would happily keep reading past `size`
 /// on a misbehaving reader.
 ///
@@ -264,7 +264,7 @@ pub(super) fn write_u64_be<W: Write>(w: &mut W, n: u64) -> io::Result<()> {
 /// the metadata pass ([`checked_manifest_len`], the `archive::encode`
 /// resource-cap loop, and `parse_fca_header`'s own caps on the read
 /// side) and then call this helper. Any future emitter that supplies a
-/// non-zero `archive_ext_len` MUST cap it against
+/// non-zero `archive_ext_len` must cap it against
 /// [`crate::ArchiveLimits::max_archive_ext_bytes`] and TLV-validate the
 /// region (per `FORMAT.md` §9.10) before calling this function.
 pub(crate) fn write_fca_header<W: Write>(
@@ -387,7 +387,7 @@ pub(crate) fn checked_manifest_len(
             &limits,
         )?;
 
-        // FORMAT.md §9.10: writers MUST apply the same TLV canonicality
+        // FORMAT.md §9.10: writers must apply the same TLV canonicality
         // rules as readers before emitting. v1 writers normally pass
         // `entry_ext = Vec::new()`, but a future v1.x caller that
         // constructs an `ArchiveEntry` directly with malformed
@@ -530,7 +530,7 @@ fn serialize_manifest_inner(
 /// bytes, and the manifest tree shape (via the crate-internal
 /// `validate_manifest_tree`).
 ///
-/// The caller MUST have already trimmed `bytes` to exactly
+/// The caller must have already trimmed `bytes` to exactly
 /// `header.manifest_len` bytes.
 pub fn parse_manifest_bytes(
     bytes: &[u8],
@@ -805,7 +805,7 @@ mod tests {
     }
 
     /// Non-zero `archive_ext_len` round-trips through the writer and
-    /// parser. v1 writers emit zero, but the parser MUST accept any
+    /// parser. v1 writers emit zero, but the parser must accept any
     /// caller-provided value within the cap.
     #[test]
     fn header_round_trip_with_archive_ext_len() {
@@ -1163,7 +1163,7 @@ mod tests {
         assert!(matches!(err, CryptoError::Io(_)));
     }
 
-    /// `write_fca_header` MUST refuse `entry_count == 0` before any
+    /// `write_fca_header` must refuse `entry_count == 0` before any
     /// byte is emitted. Pin both the rejection and the "no bytes
     /// written" property — a partial header on disk would be worse
     /// than a clean error.

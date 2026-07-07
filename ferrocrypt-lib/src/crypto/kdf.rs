@@ -20,13 +20,12 @@ use crate::format::{read_u32_be, write_u32_be};
 pub const ARGON2_SALT_SIZE: usize = 32;
 
 /// Structural cap on passphrase byte length. Argon2id itself accepts
-/// arbitrarily long inputs, but library-direct callers can otherwise
+/// arbitrarily long inputs, but direct library callers could otherwise
 /// hand a multi-gigabyte buffer to [`KdfParams::hash_passphrase`] and
-/// pay that allocation cost upstream of the KDF resource policy.
-/// 4 KiB is far above any human-typed passphrase yet small enough that
-/// an attacker-shaped input cannot DoS the host. Frontends already cap
-/// their input fields well below this; the cap exists for direct
-/// callers and as defense-in-depth.
+/// force that allocation before KDF resource policy applies. 4 KiB is far
+/// above any human-typed passphrase yet small enough that malicious input
+/// cannot force excessive host work. Frontends already cap their input fields
+/// well below this; the cap exists for direct callers and as defense-in-depth.
 pub(crate) const MAX_PASSPHRASE_LEN_BYTES: usize = 4_096;
 
 /// Enforces [`MAX_PASSPHRASE_LEN_BYTES`] on caller-supplied passphrase
@@ -381,10 +380,10 @@ impl KdfParams {
         )
         .map_err(|_| CryptoError::InternalCryptoFailure("Argon2id parameter rejected"))?;
         // Own the Argon2id working memory instead of letting
-        // `hash_password_into` allocate it: the crate frees its block
+        // `hash_password_into` allocate it: that path frees its block
         // buffer without scrubbing, and the final blocks hold material
         // from which the derived key can be recomputed. `Zeroizing`
-        // wipes all `mem_cost` KiB on drop, error paths included.
+        // wipes all `mem_cost` KiB on drop, including error paths.
         let mut blocks = Zeroizing::new(vec![argon2::Block::default(); params.block_count()]);
         let hasher =
             argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);

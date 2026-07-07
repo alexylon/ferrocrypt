@@ -147,7 +147,7 @@ pub(crate) enum NativeMixingRule {
     /// definition cannot coexist with anything. Currently: `argon2id`.
     SingleEntry,
     /// The recipient type may coexist with other entries declaring the
-    /// same compatibility class. Two `Class` rules are compatible iff
+    /// same compatibility class. Two `Class` rules are compatible when
     /// their `name` fields are exactly equal. Currently: `x25519`
     /// declares `Class { name: PUBLIC_KEY_CLASS }`; the upcoming
     /// `x25519-mlkem768` would declare
@@ -160,7 +160,7 @@ pub(crate) enum NativeMixingRule {
 }
 
 impl NativeMixingRule {
-    /// Class for ordinary public-key recipients that share an
+    /// Class for standard public-key recipients that share an
     /// unconstrained compatibility group.
     pub(crate) const PUBLIC_KEY_CLASS: &'static str = "public-key";
 
@@ -176,7 +176,7 @@ impl NativeMixingRule {
         Self::SingleEntry
     }
 
-    /// `x25519`-style rule: ordinary public-key compatibility class,
+    /// `x25519`-style rule: standard public-key compatibility class,
     /// no cardinality constraint. Diagnostic projection is
     /// [`MixingPolicy::PublicKeyMixable`].
     pub(crate) const fn public_key_mixable() -> Self {
@@ -195,7 +195,7 @@ impl NativeMixingRule {
         }
     }
 
-    /// `true` iff this rule requires the recipient to be the only
+    /// `true` when this rule requires the recipient to be the only
     /// entry in the file.
     pub(crate) const fn requires_single_entry(self) -> bool {
         matches!(self, Self::SingleEntry)
@@ -232,14 +232,14 @@ impl NativeMixingRule {
 /// Rules:
 ///
 /// 1. Cardinality. Any entry whose native rule is
-///    [`NativeMixingRule::SingleEntry`] (today only `argon2id`) MUST
+///    [`NativeMixingRule::SingleEntry`] (today only `argon2id`) must
 ///    appear as the only entry in the file — counting unknown
 ///    non-critical entries too, per `FORMAT.md` §4.1. A second
 ///    same-type entry, a different native entry, or any unknown
 ///    non-critical entry alongside it is a violation.
 ///
 /// 2. Compatibility class. Two supported [`NativeMixingRule::Class`]
-///    rules are compatible iff their `name` fields are exactly equal.
+///    rules are compatible when their `name` fields are exactly equal.
 ///    Unknown non-critical entries are skipped for the class
 ///    comparison (they are forward-compatibility filler, not
 ///    enforcement subjects). Unknown critical entries are rejected
@@ -356,7 +356,7 @@ pub(crate) fn enforce_recipient_mixing_policy(
 pub(crate) fn classify_recipient_mode(
     entries: &[RecipientEntry],
 ) -> Result<crate::UnauthenticatedRecipientMode, CryptoError> {
-    // Step 1: per-entry flag rejection. A reader MUST refuse to process
+    // Step 1: per-entry flag rejection. A reader must refuse to process
     // a file that either declares an unknown entry it cannot skip, or
     // tags a known native entry with a non-zero flag. Both checks ride
     // the same iteration so the rejection fires before any KDF.

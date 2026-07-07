@@ -39,7 +39,7 @@
 //!
 //! Between the two passes the source tree may change. FORMAT.md §9.10
 //! defines the response: shrink / type change / inaccessible →
-//! encryption MUST fail; growth before the fresh metadata check →
+//! encryption must fail; growth before the fresh metadata check →
 //! reject; growth during the copy after the fresh metadata check →
 //! the writer copies exactly the declared size, keeping the archive
 //! self-consistent.
@@ -1008,7 +1008,7 @@ pub(crate) fn archive<W: Write>(
 
     // FCA v1 writers always emit `archive_ext_len = 0`; the archive-
     // level TLV region exists in the wire layout but defines no v1
-    // tags, so writers MUST NOT emit any bytes there.
+    // tags, so writers must not emit any bytes there.
     writer = write_fca_header(
         writer,
         entry_count,
@@ -1338,7 +1338,7 @@ mod tests {
     }
 
     /// Spec §9.6: a source name longer than the per-component byte cap
-    /// MUST reject during the metadata pass — without the cap, the
+    /// must reject during the metadata pass — without the cap, the
     /// writer would emit an archive whose `.incomplete` working name
     /// exceeds the 255-byte filesystem limit at extraction time.
     /// Unix-only: a 250-byte filename near the Windows `MAX_PATH`
@@ -1382,7 +1382,7 @@ mod tests {
     }
 
     /// Spec §9.6: a Windows-reserved device name in the source tree
-    /// MUST reject during the metadata pass — otherwise the writer
+    /// must reject during the metadata pass — otherwise the writer
     /// would emit a path its own reader rejects.
     #[cfg(unix)]
     #[test]
@@ -1489,7 +1489,7 @@ mod tests {
         assert_eq!(mode, 0o700, "directory mode lost in round trip");
     }
 
-    /// FORMAT.md §9.10: writers MUST NOT store setuid, setgid, or
+    /// FORMAT.md §9.10: writers must not store setuid, setgid, or
     /// sticky bits. Pin the strip on the WRITER side: a source file
     /// with 0o4644 (setuid + rw-r--r--) extracts as 0o644.
     #[cfg(unix)]
@@ -1576,7 +1576,7 @@ mod tests {
     }
 
     /// Directory mode 0o500 round-trips. Restrictive enough that
-    /// the apply-modes pass MUST run after children are created.
+    /// the apply-modes pass must run after children are created.
     #[cfg(unix)]
     #[test]
     fn round_trip_directory_mode_0o500() {
@@ -1841,7 +1841,7 @@ mod tests {
     }
 
     /// FORMAT.md §9.10: a source file shrinking between metadata pass
-    /// and content pass MUST fail. The single-file content pass reads
+    /// and content pass must fail. The single-file content pass reads
     /// from the held handle, so the mismatch is injected by recording
     /// a wrong size in the entry rather than by racing the file.
     #[test]
@@ -1862,7 +1862,7 @@ mod tests {
 
     /// Cap-std parity test: an attacker who replaces an intermediate
     /// directory with a symlink between the metadata pass and the
-    /// content pass MUST be rejected. Drives `stream_source_file` with
+    /// content pass must be rejected. Drives `stream_source_file` with
     /// `source_root = Some(...)` so the cap-std walker is exercised.
     /// Pre-builds a manifest entry with `rel = "a/b/file.txt"`,
     /// then replaces `a/b` with a symlink and asserts the per-entry

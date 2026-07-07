@@ -2,13 +2,13 @@
 //!
 //! `ArchiveLimits` bounds entry count, total plaintext bytes, path depth,
 //! per-path UTF-8 byte length, serialized manifest byte length, and the
-//! per-region / total / per-value caps that bound the FCA forward-compat
+//! per-region, total, and per-value caps that bound FCA forward-compatibility
 //! TLV regions. See `ferrocrypt-lib/FORMAT.md` §9.12.
 //!
 //! Both writer and reader apply these caps before allocation or filesystem
 //! work — readers structurally during header / manifest parse, writers
 //! progressively during the metadata pass. The same struct is reused on
-//! both sides so a tree the default-config decrypt would refuse cannot
+//! both sides so a tree the default-configured decryptor would refuse cannot
 //! be encrypted in the first place.
 
 use crate::CryptoError;
@@ -32,7 +32,7 @@ pub struct ArchiveLimits {
     /// Maximum path component count for any single archive entry.
     pub max_path_depth: u32,
     /// Maximum UTF-8 byte length of any single archive path.
-    /// MUST be `<= u16::MAX` because the on-disk `path_len` field is `u16`.
+    /// Must be `<= u16::MAX` because the on-disk `path_len` field is `u16`.
     pub max_path_bytes: u32,
     /// Maximum byte length of the serialized manifest, including the
     /// per-entry TLV regions that live inside it.

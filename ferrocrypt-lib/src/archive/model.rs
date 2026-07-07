@@ -30,7 +30,7 @@ pub struct FcaHeader {
 pub enum ArchiveEntryKind {
     /// Regular file; `size` is the cleartext byte length.
     File,
-    /// Directory; `size` MUST be `0`.
+    /// Directory; `size` must be `0`.
     Directory,
 }
 

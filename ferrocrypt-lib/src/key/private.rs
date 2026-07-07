@@ -83,12 +83,11 @@ pub(crate) const PRIVATE_KEY_WRAPPED_SECRET_LEN_MAX: u32 = 16_777_216;
 /// caller to raise the cap.
 pub(crate) const PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT: u32 = 4_096;
 
-/// File-read cap for `private.key`: header + every field at its
-/// structural maximum. A file beyond this cannot decode regardless of
-/// content, so the reader rejects in-flight rather than allocating
-/// multi-gigabytes for an adversarial input. `TYPE_NAME_MAX_LEN` is
-/// the widest possible `type_name`; the rest are the spec's `*_MAX`
-/// constants.
+/// File-read cap for `private.key`: header plus every field at its
+/// structural maximum. A larger file cannot decode regardless of content,
+/// so the reader rejects before allocating multiple gigabytes for adversarial
+/// input. `TYPE_NAME_MAX_LEN` is the widest possible `type_name`; the rest are
+/// the spec's `*_MAX` constants.
 pub(crate) const PRIVATE_KEY_FILE_READ_CAP_BYTES: usize = PRIVATE_KEY_HEADER_FIXED_SIZE
     + crate::recipient::name::TYPE_NAME_MAX_LEN
     + PRIVATE_KEY_PUBLIC_LEN_MAX as usize
@@ -110,7 +109,7 @@ const _: () = assert!(WRAP_NONCE_OFFSET + WRAP_NONCE_SIZE == PRIVATE_KEY_HEADER_
 /// Cleartext fixed-header section of a v1 `private.key`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrivateKeyHeader {
-    /// Reserved bit-flags field (`FORMAT.md` §8). MUST be `0` in v1.
+    /// Reserved bit-flags field (`FORMAT.md` §8). Must be `0` in v1.
     pub key_flags: u16,
     /// Byte length of the recipient `type_name` that follows the header.
     pub type_name_len: u16,
@@ -293,8 +292,8 @@ pub(crate) fn ensure_private_key_suite_supported(suite: KeypairSuite) -> Result<
 
 /// Decrypted contents of a v1 `private.key`. The unwrapped
 /// `secret_material` is held in a [`Zeroizing`] buffer so it clears on
-/// drop. `Debug` is implemented manually to redact the secret — auto-
-/// deriving would forward through `Zeroizing`'s `Deref` and print the
+/// drop. `Debug` is implemented manually to redact the secret; a derived
+/// implementation would forward through `Zeroizing`'s `Deref` and print the
 /// raw bytes.
 pub(crate) struct OpenedPrivateKey {
     pub type_name: String,
@@ -321,8 +320,8 @@ impl std::fmt::Debug for OpenedPrivateKey {
 /// public_material + ext_bytes) as AAD. Returns the full on-disk file
 /// ready for atomic write.
 ///
-/// Validates `ext_bytes` against the v1 TLV grammar AFTER the
-/// structural length caps so an oversize region still surfaces as
+/// Validates `ext_bytes` against the v1 TLV grammar after the
+/// structural length caps so an oversized region still surfaces as
 /// `MalformedPrivateKey`.
 pub(crate) fn seal_private_key(
     secret_material: &[u8],
@@ -388,9 +387,9 @@ fn seal_private_key_inner(
     kdf_params: &KdfParams,
     validation: ExtBytesValidation,
 ) -> Result<Vec<u8>, CryptoError> {
-    // Structural validation only — `KdfLimit` policy is enforced
-    // upstream and re-applying it here would re-impose the 1 GiB
-    // default and reject a caller-raised `kdf_limit`.
+    // Structural validation only. The caller has already applied the
+    // `KdfLimit` policy; applying it again here would re-impose the
+    // 1 GiB default and reject a caller-raised `kdf_limit`.
     kdf_params.validate_structural()?;
     validate_type_name_grammar(type_name)?;
 
@@ -543,8 +542,8 @@ pub(crate) fn open_private_key(
         || CryptoError::KeyFileUnlockFailed,
     )?;
 
-    // Authenticated bytes only: runs after `open_with_aad` so
-    // downstream callers never see authenticated-but-invalid `ext_bytes`.
+    // Authenticated bytes only: runs after `open_with_aad` so callers
+    // never see authenticated but invalid `ext_bytes`.
     validate_tlv(&ext_bytes_slice)?;
 
     Ok(OpenedPrivateKey {
@@ -615,7 +614,7 @@ mod tests {
     }
 
     /// Regression for the `format::VERSION` shared-constant bug:
-    /// [`PRIVATE_KEY_VERSION`] MUST derive from [`WRITER_KEYPAIR_SUITE`],
+    /// [`PRIVATE_KEY_VERSION`] must derive from [`WRITER_KEYPAIR_SUITE`],
     /// never from [`crate::format::FCR_FILE_VERSION`]. Today both
     /// constants happen to equal `0x01`; bumping `FCR_FILE_VERSION`
     /// must not change the private-key wire byte.
@@ -671,7 +670,7 @@ mod tests {
     }
 
     /// Round-trip regression for the original asymmetry: a v1
-    /// `private.key` MUST still open under the current build, regardless
+    /// `private.key` must still open under the current build, regardless
     /// of where `FCR_FILE_VERSION` happens to sit. The two constants are
     /// independent domains; bumping the outer file version must not
     /// break private-key unlock.
@@ -777,7 +776,7 @@ mod tests {
     }
 
     /// Writer-side: a `private.key` with a critical-tag TLV in
-    /// `ext_bytes` (no known v1 criticals) MUST reject before AEAD.
+    /// `ext_bytes` (no known v1 criticals) must reject before AEAD.
     /// Pairs with [`open_rejects_unknown_critical_ext_after_unlock`].
     #[test]
     fn seal_rejects_unknown_critical_ext_bytes() {
@@ -792,7 +791,7 @@ mod tests {
     }
 
     /// Reader-side: an authenticated `ext_bytes` carrying a critical
-    /// tag MUST reject after AEAD success. Built via the test-only
+    /// tag must reject after AEAD success. Built via the test-only
     /// bypass so AEAD authenticates the same bytes the TLV validator
     /// rejects.
     #[test]
@@ -817,7 +816,7 @@ mod tests {
         }
     }
 
-    /// `seal_private_key` MUST reject `public_material` whose length
+    /// `seal_private_key` must reject `public_material` whose length
     /// would push `public_len` past the structural cap, with the same
     /// `MalformedPrivateKey` diagnostic that `PrivateKeyHeader::parse`
     /// uses on the read side. Locks in the writer/reader cap symmetry
@@ -870,7 +869,7 @@ mod tests {
 
     /// AAD-bound regions: every byte in argon2_salt, wrap_nonce, the
     /// variable cleartext sections (type_name, public_material,
-    /// ext_bytes), and the wrapped_secret AEAD ciphertext+tag MUST fail
+    /// ext_bytes), and the wrapped_secret AEAD ciphertext+tag must fail
     /// open with [`CryptoError::KeyFileUnlockFailed`] specifically. A
     /// regression that, for instance, dropped public_material from the
     /// AAD would still pass a "fails to open" assertion; pinning the
@@ -1056,7 +1055,7 @@ mod tests {
 
     /// `parse` performs structural validation only: a `mem_cost` above
     /// the library's default policy ceiling (1 GiB) but within the v1
-    /// structural maximum (2 GiB) MUST parse cleanly. The caller-
+    /// structural maximum (2 GiB) must parse cleanly. The caller-
     /// supplied resource policy is applied separately in
     /// `open_private_key` so a caller that opts into a higher
     /// `KdfLimit` is not silently overridden by the library default at
@@ -1285,7 +1284,7 @@ mod tests {
     }
 
     /// Companion of the above: a structurally malformed key file
-    /// (truncated below the fixed header) MUST be rejected before any
+    /// (truncated below the fixed header) must be rejected before any
     /// event fires.
     #[test]
     fn open_emits_no_event_when_truncated_below_header() {

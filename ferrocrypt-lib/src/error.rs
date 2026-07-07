@@ -103,16 +103,16 @@ const HEADER_CORRUPTED_MESSAGE: &str = "Decryption failed: file header was modif
 
 /// Maximum number of `chars` of untrusted text [`sanitize_for_display`]
 /// keeps before truncating with `…`. Long enough to locate an entry in
-/// a large archive, short enough that one hostile path cannot flood a
+/// a large archive, short enough that one malicious path cannot flood a
 /// terminal or log line.
 const UNTRUSTED_TEXT_DISPLAY_MAX: usize = 64;
 
 /// Appends `c` to `w`, passing printable ASCII (and the space character)
 /// through unchanged and rendering every other character as a backslash
 /// escape (`\n`, `\u{202e}`, …). The one definition of the per-character
-/// escape rule, shared by `sanitize_for_display` and `DisplayableTypeName`
-/// so neither can let a hostile character carry a terminal escape
-/// sequence or visually reorder the surrounding text.
+/// escape rule, shared by `sanitize_for_display` and `DisplayableTypeName`,
+/// so neither can let a malicious character carry a terminal escape sequence
+/// or visually reorder the surrounding text.
 fn write_sanitized_char<W: std::fmt::Write>(w: &mut W, c: char) -> std::fmt::Result {
     if c.is_ascii_graphic() || c == ' ' {
         w.write_char(c)
@@ -238,12 +238,10 @@ impl std::fmt::Display for PathSuffix<'_> {
 ///   top-level paths included — is sanitized via
 ///   `sanitize_for_display` / `sanitize_path_for_display` before
 ///   embedding.
-/// - **Bech32 recipient parser**: reports the offending recipient
-///   string ("Invalid recipient string: `fcr1…`", "Unexpected recipient
-///   prefix…", "Recipient string must be lowercase"). Callers pass
-///   recipient strings through as opaque values, so the parser has to
-///   echo the input back (sanitized and truncated) for the user to
-///   spot a typo.
+/// - **Bech32 recipient parser**: reports a malformed recipient string,
+///   unexpected recipient prefix, or uppercase input. Callers pass recipient
+///   strings through as opaque values, so the parser echoes sanitized,
+///   truncated input to help the user spot a typo.
 /// - **Caller-invocation path conflicts and shape rejections**:
 ///   "Output already exists: `path`", "Key file already exists:
 ///   `path`", "Invalid recipient public key". These surface *which*
@@ -256,7 +254,7 @@ impl std::fmt::Display for PathSuffix<'_> {
 ///   "KDF memory limit overflow: `N` MiB", "Passphrase must not be
 ///   empty".
 ///
-/// Rejections of a *parsed archive payload* — a hostile or corrupt
+/// Rejections of a *parsed archive payload* — a malicious or corrupt
 /// FCA inside the decrypted stream — are **not** `InvalidInput`: they
 /// surface as [`CryptoError::MalformedArchive`],
 /// [`CryptoError::UnsafeArchivePath`],
@@ -381,7 +379,7 @@ pub enum CryptoError {
     /// for untrusted input). Distinct from
     /// [`FormatDefect::MalformedRecipientEntry`]: the file is
     /// structurally valid; the reader's resource policy is the
-    /// constraint, and callers MAY raise the cap for trusted input.
+    /// constraint, and callers may raise the cap for trusted input.
     #[error("Recipient data too large ({body_len} bytes, limit {local_cap})")]
     RecipientBodyCapExceeded {
         /// Recipient body length declared by the entry, in bytes.
@@ -478,7 +476,7 @@ pub enum CryptoError {
     },
     /// The recipient list contains a `recipient_flags.critical = 1`
     /// entry whose `type_name` is unknown to this implementation. Per
-    /// `FORMAT.md` §3.4 unknown critical entries MUST cause file
+    /// `FORMAT.md` §3.4 unknown critical entries must cause file
     /// rejection (vs unknown non-critical, which are skipped).
     #[error(
         "Unsupported recipient `{}`. Upgrade FerroCrypt.",
@@ -525,10 +523,10 @@ pub enum CryptoError {
     #[error("Recipient list cannot be empty")]
     EmptyRecipientList,
     /// The recipient list contains an entry whose mixing rule forbids
-    /// the company it is in. The most common v1 trigger is an
+    /// the combination. The most common v1 trigger is an
     /// [`MixingPolicy::Exclusive`] native type (today only `argon2id`)
     /// sharing a file with any other entry — per `FORMAT.md` §4.1 such
-    /// types MUST appear alone, and readers MUST reject the mix
+    /// types must appear alone, and readers must reject the mix
     /// structurally before running any KDF.
     ///
     /// `type_name` identifies which entry triggered the rejection;
@@ -590,9 +588,9 @@ pub enum CryptoError {
     },
     /// An archive entry path violates the `FORMAT.md` §9.6 grammar
     /// (absolute, traversal, separator abuse, control bytes,
-    /// Windows-reserved names, …). Fires on read for a hostile or
-    /// corrupt archive and on write for a source tree whose names FCA
-    /// cannot represent.
+    /// Windows-reserved names, and similar path-safety violations).
+    /// Fires on read for a malicious or corrupt archive and on write for a
+    /// source tree whose names FCA cannot represent.
     #[error("Unsafe archive path ({reason}): {path}")]
     UnsafeArchivePath {
         /// Offending entry path, sanitized for display (control and
@@ -757,7 +755,7 @@ pub enum FormatDefect {
     MalformedTlv,
     /// A TLV tag in the critical range (`0x8001..=0xFFFF`) is not
     /// recognised by this release. Per `FORMAT.md` §6, unknown
-    /// critical TLV tags MUST cause file rejection.
+    /// critical TLV tags must cause file rejection.
     UnknownCriticalTag {
         /// Unknown critical TLV tag value.
         tag: u16,
@@ -768,7 +766,7 @@ pub enum FormatDefect {
     /// Key file is the wrong kind for this operation (public vs private).
     WrongKeyFileType,
     /// `public.key` text file violates the canonical grammar
-    /// (`FORMAT.md` §7.1): the file MUST contain the lowercase `fcr1…`
+    /// (`FORMAT.md` §7.1): the file must contain the lowercase `fcr1…`
     /// recipient string optionally followed by exactly one trailing
     /// `\n`, OR the typed payload itself is structurally invalid.
     /// Leading/trailing whitespace other than a single final LF, CRLF
@@ -819,7 +817,7 @@ pub enum FormatDefect {
     MalformedRecipientEntry,
     /// Recipient entry has reserved bits set in `recipient_flags`. Per
     /// `FORMAT.md` §3.4, only bit 0 (the `critical` flag) is defined in
-    /// v1; all other bits MUST be zero on the wire.
+    /// v1; all other bits must be zero on the wire.
     RecipientFlagsReserved,
     /// `private.key` cleartext header is structurally invalid: bad
     /// magic-after-prefix-checks, non-zero `key_flags`, length fields
@@ -924,7 +922,7 @@ pub enum UnsupportedVersion {
     /// release accepts. Surfaced when a public recipient (Bech32 string
     /// or `public.key` file) is offered for encryption but its key-pair
     /// suite is no longer supported by this build. Per `FORMAT.md` §7
-    /// and the symmetry rule in §11, a release MUST NOT accept a public
+    /// and the symmetry rule in §11, a release must not accept a public
     /// key for encryption unless the same key-pair suite remains
     /// supported for private-key decryption.
     OlderPublicKey {
@@ -1027,8 +1025,8 @@ pub(crate) enum StreamError {
     ExtraData,
     /// Writer or reader state was already consumed (programmer bug).
     StateExhausted,
-    /// `FORMAT.md` §5: writers MUST NOT emit more than `2^32` chunks
-    /// and readers MUST reject streams that exceed that count. Surfaced
+    /// `FORMAT.md` §5: writers must not emit more than `2^32` chunks
+    /// and readers must reject streams that exceed that count. Surfaced
     /// when ferrocrypt's own counter trips before the upstream
     /// STREAM-BE32 primitive's counter overflow does.
     ChunkCountExceeded,

@@ -16,7 +16,7 @@
 //! ## Mixing rule
 //!
 //! `argon2id` is **exclusive**: a file containing an `argon2id` entry
-//! MUST contain exactly one recipient entry. The mixing-rule
+//! must contain exactly one recipient entry. The mixing-rule
 //! enforcement is a header-level concern and lives in the recipient
 //! list parser, not here.
 
@@ -82,7 +82,7 @@ pub(crate) fn wrap(
 /// Opens an `argon2id` recipient body and recovers a candidate
 /// `file_key`. Caller-supplied `kdf_limit` caps memory cost, time cost,
 /// and lanes for untrusted input; KDF parameter structural bounds are
-/// validated **before** Argon2id runs so a hostile file cannot force
+/// validated **before** Argon2id runs so a malicious file cannot force
 /// unbounded work.
 ///
 /// Wrong passphrase and tampered envelope are indistinguishable at the
@@ -339,7 +339,7 @@ mod tests {
     #[test]
     fn unwrap_with_malformed_kdf_params_fails_before_argon2id_runs() {
         // Set `lanes = 0` (out of structural bounds 1..=8). Per
-        // `FORMAT.md` §2.2 this MUST be rejected before Argon2id runs.
+        // `FORMAT.md` §2.2 this must be rejected before Argon2id runs.
         let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let pass = passphrase("p");
         let kdf = KdfParams::test_fast_default();
@@ -356,7 +356,7 @@ mod tests {
     fn unwrap_rejects_kdf_params_above_resource_cap() {
         // Construct a body with mem_cost = 2 GiB (the structural max),
         // then unwrap with a kdf_limit of 64 KiB. The resource cap
-        // MUST surface as KdfResourceCapExceeded before Argon2id runs.
+        // must surface as KdfResourceCapExceeded before Argon2id runs.
         let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let pass = passphrase("p");
         let high_mem_kdf = KdfParams {
@@ -385,7 +385,7 @@ mod tests {
 
     #[test]
     fn unwrap_field_offsets_are_correct() {
-        // Wire-format regression: the body layout MUST be exactly
+        // Wire-format regression: the body layout must be exactly
         // salt(32) || kdf_params(12) || wrap_nonce(24) || wrapped(48).
         // A reordering would produce a body that this reader rejects
         // and that conforming readers reject the same way.

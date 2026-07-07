@@ -25,7 +25,7 @@ pub const INCOMPLETE_SUFFIX: &str = ".incomplete";
 /// Conflict-message label for the encrypted-file or extracted output
 /// artefact ("Output already exists: …"). The occupancy pre-check
 /// ([`reject_occupied`]) and the no-clobber commit
-/// (`fs::atomic::finalize_file`) for the same operation MUST pass the
+/// (`fs::atomic::finalize_file`) for the same operation must pass the
 /// same label so their two messages read identically; a shared
 /// constant makes that structural rather than a per-site literal.
 pub(crate) const OUTPUT_LABEL: &str = "Output";
@@ -94,10 +94,10 @@ pub(crate) fn open_input_file(
 
 /// Reads `path` into memory, refusing files whose byte length exceeds
 /// `cap`. Bounds the allocation at `cap + 1` bytes so a caller pointed
-/// at a multi-gigabyte file rejects in-flight rather than after the
-/// kernel page-faults the whole thing in. The `over_cap_error` closure
-/// supplies the typed rejection so each caller can route the failure
-/// to the right diagnostic class (`MalformedPublicKey` / `MalformedPrivateKey`).
+/// at a multi-gigabyte file rejects before the kernel pages the whole file
+/// into memory. The `over_cap_error` closure supplies the typed rejection so
+/// each caller can route the failure to the right diagnostic class
+/// (`MalformedPublicKey` / `MalformedPrivateKey`).
 /// Opens via [`open_input_file`], so FIFOs, sockets, and device nodes
 /// are refused without blocking.
 pub(crate) fn read_file_capped(
@@ -134,15 +134,14 @@ pub(crate) fn file_stem(filename: &Path) -> Result<&OsStr, CryptoError> {
 /// collapse two distinct on-disk names into the same output name.
 ///
 /// Uses `symlink_metadata` (lstat) rather than `Path::is_dir` so a
-/// symlink that races into place between the upstream
+/// symlink that races into place between the earlier
 /// `validate_encrypt_input` symlink check and this lookup cannot be
 /// followed to a directory and silently change the chosen output
-/// name. The downstream `open_no_follow` would still abort the
-/// archive step, but defending here keeps the directory-vs-file
-/// classification honest. `NotFound` falls through to the file branch
-/// (race against deletion); other I/O errors propagate so a
-/// `PermissionDenied` is not silently misclassified as "not a
-/// directory" and downgraded into a confusing later failure.
+/// name. The later `open_no_follow` would still abort the archive step,
+/// but defending here keeps the directory-vs-file classification honest.
+/// `NotFound` falls through to the file branch (race against deletion);
+/// other I/O errors propagate so `PermissionDenied` is not misreported as
+/// "not a directory" and downgraded into a confusing later failure.
 pub(crate) fn encryption_base_name(path: impl AsRef<Path>) -> Result<String, CryptoError> {
     let path = path.as_ref();
     let is_real_dir = match std::fs::symlink_metadata(path) {
@@ -211,7 +210,7 @@ pub(crate) fn already_exists_error(label: &str, path: &Path) -> CryptoError {
 /// Returns `Err(InvalidInput)` if `path` is occupied (real file, real
 /// directory, or dangling symlink). `label` is the artefact name in the
 /// message prefix; callers pass [`OUTPUT_LABEL`] or [`KEY_FILE_LABEL`]
-/// and MUST reuse the same value at the paired
+/// and must reuse the same value at the paired
 /// `fs::atomic::finalize_file` commit so both messages match.
 pub(crate) fn reject_occupied(path: &Path, label: &str) -> Result<(), CryptoError> {
     if path_occupied(path)? {
@@ -291,7 +290,7 @@ mod tests {
 
     /// Fallback arm of the conflict-message renderer: a path with no
     /// directory prefix (a bare file name, as `save_as` can supply)
-    /// sanitizes the whole path, so hostile bytes in a bare name are
+    /// sanitizes the whole path, so malicious bytes in a bare name are
     /// escaped the same way as in a name under a directory.
     #[test]
     fn already_exists_error_escapes_bare_hostile_name() {
@@ -306,7 +305,7 @@ mod tests {
     /// Fast arm with a multibyte directory prefix: the split between
     /// "keep raw" and "escape" lands on a UTF-8 boundary (the byte
     /// slice must not panic), the non-ASCII directory name stays raw so
-    /// the operator can read it, and the hostile leaf is escaped.
+    /// the operator can read it, and the malicious leaf is escaped.
     #[test]
     fn already_exists_error_keeps_multibyte_dir_raw_escapes_name() {
         match already_exists_error("Key file", Path::new("Données/evil\u{202e}.key")) {
@@ -317,7 +316,7 @@ mod tests {
         }
     }
 
-    /// A hostile file name at an occupied output path renders escaped:
+    /// A malicious file name at an occupied output path renders escaped:
     /// the rejection message must never carry raw control bytes to a
     /// terminal. The parent directory stays raw so the operator can
     /// locate the conflict; the file name has its own display budget,
@@ -404,8 +403,8 @@ mod tests {
             }
         }
 
-        /// The unsupported-file-type rejection escapes a hostile input
-        /// name — the message must never carry raw control bytes.
+        /// The unsupported-file-type rejection escapes a malicious input
+        /// name; the message must never carry raw control bytes.
         #[test]
         fn open_input_file_escapes_hostile_fifo_name() {
             let tmp = tempfile::TempDir::new().unwrap();

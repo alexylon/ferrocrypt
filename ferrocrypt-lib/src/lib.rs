@@ -335,7 +335,7 @@ pub enum ProgressEvent {
     Decrypting,
     /// Generating an X25519 key pair. Covers the entire generation flow,
     /// including the Argon2id-driven sealing of `private.key`. The library
-    /// does NOT emit a nested [`Self::DerivingPassphraseWrapKey`] inside
+    /// does not emit a nested [`Self::DerivingPassphraseWrapKey`] inside
     /// keygen; this event already signals the long pause.
     GeneratingKeyPair,
 }
@@ -371,10 +371,10 @@ pub struct EncryptOutcome {
 pub struct DecryptOutcome {
     /// Path to the extracted file or directory.
     pub output_path: PathBuf,
-    /// Recipient mode the file was sealed under, established by a successful
-    /// authenticated decrypt (recipient unwrap + header MAC verify). Forge-proof
-    /// — only the decrypt path can construct it. Distinct from the cheap
-    /// pre-auth [`UnauthenticatedRecipientMode`] returned by
+    /// Recipient mode established by the authenticated decrypt: recipient
+    /// unwrap plus header MAC verification. This value is unforgeable by
+    /// callers; only the decrypt path can construct it. Distinct from the
+    /// cheap pre-authentication [`UnauthenticatedRecipientMode`] returned by
     /// [`probe_recipient_mode`].
     pub recipient_mode: AuthenticatedRecipientMode,
 }
@@ -577,10 +577,9 @@ mod tests {
 
     /// `decode_recipient_string` shares the canonical `decode_x25519_recipient`
     /// path with `PublicKey::from_recipient_string`, so it must inherit
-    /// the all-zero ingress reject. Pin the contract directly at the
+    /// the all-zero input rejection. Pin the contract directly at the
     /// free-function entry so a future refactor that bypasses the
-    /// canonical decoder (e.g. inlining the bech32 path) cannot let a
-    /// degenerate value through this surface.
+    /// canonical decoder cannot let a degenerate value through this surface.
     #[test]
     fn decode_recipient_rejects_all_zero_public_key() {
         let s =

@@ -28,7 +28,7 @@
 //! independent of the checksum-domain string. Canonical display is 64
 //! lowercase hex chars; short display is the first 16 of those; the
 //! grouped form (per `FORMAT.md` §7.2) renders as four-character
-//! lowercase hex groups joined by `:` for voice or out-of-band
+//! lowercase hex groups joined by `:` for spoken or out-of-band
 //! verification.
 
 use bech32::primitives::decode::CheckedHrpstring;
@@ -91,9 +91,8 @@ pub(crate) const RECIPIENT_STRING_LEN_MAX: usize = 20_000;
 
 /// File-read cap for `public.key`: [`RECIPIENT_STRING_LEN_MAX`] ASCII
 /// chars plus one optional trailing `LF`. Anything larger cannot
-/// possibly be a valid v1 public-key file, so the reader rejects
-/// in-flight rather than allocating a multi-gigabyte buffer for an
-/// adversarial input.
+/// be a valid v1 public-key file, so the reader rejects before allocating
+/// a multi-gigabyte buffer for adversarial input.
 pub(crate) const PUBLIC_KEY_FILE_READ_CAP_BYTES: usize = RECIPIENT_STRING_LEN_MAX + 1;
 
 /// Recommended local cap on recipient-string length for untrusted
@@ -127,10 +126,9 @@ const fn max_key_material_len() -> u32 {
 /// BIP 173 Bech32 with v1's lifted code-length cap. The crate's
 /// built-in [`bech32::Bech32`] type fixes `CODE_LENGTH = 1023`, below
 /// v1's 20,000-char spec ceiling and below the largest payload that
-/// [`KEY_MATERIAL_LEN_MAX`] permits. We forward every other Checksum
-/// constant from `bech32::Bech32` so the on-the-wire checksum
-/// polynomial is byte-identical to BIP 173; only the length tolerance
-/// differs.
+/// [`KEY_MATERIAL_LEN_MAX`] permits. All other [`Checksum`] constants are
+/// forwarded from `bech32::Bech32`, so the on-wire checksum polynomial is
+/// byte-identical to BIP 173; only the length tolerance differs.
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum Bech32V1 {}
 
@@ -148,7 +146,7 @@ impl Checksum for Bech32V1 {
 /// The `keypair_suite` field carries the **logical compatibility class**
 /// recovered from the wire-version byte. Both `public.key` and
 /// `private.key` parsers translate their on-disk version byte into a
-/// [`KeypairSuite`] before any support decision; a release MUST reject a
+/// [`KeypairSuite`] before any support decision; a release must reject a
 /// public recipient whenever the same suite would be rejected for
 /// private-key decryption (`FORMAT.md` §7, §11).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -264,11 +262,10 @@ pub fn decode_recipient_string(
     // in `bech32` that check runs only on the segwit decode path, and
     // `byte_iter` silently drops the trailing bits. Enforced below.
     let checked = CheckedHrpstring::new::<Bech32V1>(s).map_err(|_| {
-        // The echo helps the user spot a typo. A recipient string is
-        // often received from someone else, so treat it as text an
-        // attacker may have chosen: sanitize away control bytes and
-        // truncate so one bad string cannot flood the terminal-bound
-        // message.
+        // A failed decode echoes the input to help the user spot a typo.
+        // Recipient strings are often received from someone else, so the
+        // echoed text is sanitized and truncated before it reaches the
+        // terminal-bound error message.
         CryptoError::InvalidInput(format!(
             "Invalid recipient string: {}",
             sanitize_for_display(s)
@@ -514,10 +511,10 @@ fn public_key_hash(prefix: &[&[u8]], type_name: &str, key_material: &[u8]) -> [u
 /// 0x00 || key_material`. Mixing the version byte into the hash binds
 /// the typed payload to its declared version and rules out
 /// cross-version transplant accidents — a payload with the right inner
-/// fields but a different version byte fails this check. Detects
-/// typed-payload corruption that the outer Bech32 checksum can't catch
-/// (e.g. a hand-edited recipient string with a coincidentally-valid
-/// Bech32 checksum but mismatched inner data).
+/// fields but a different version byte fails this check. Detects typed-payload
+/// corruption that the outer Bech32 checksum cannot catch (for example, a
+/// hand-edited recipient string with a valid Bech32 checksum but mismatched
+/// inner data).
 fn compute_checksum(
     version: u8,
     type_name: &str,
@@ -542,10 +539,10 @@ fn malformed_public_key() -> CryptoError {
 /// Canonical fingerprint hash of `type_name || 0x00 || key_material`
 /// as a 32-byte SHA3-256 digest. The domain separator used in
 /// [`PUBLIC_KEY_CHECKSUM_DOMAIN`] is intentionally absent — the
-/// fingerprint is a stable identity over the (type_name, key_material)
+/// fingerprint is a stable identity over the `(type_name, key_material)`
 /// pair, not over the encoding-checksum domain. The version byte is
-/// also absent: bumping the wire-version of an existing keypair MUST
-/// NOT change its user-visible identity.
+/// also absent: bumping the wire version of an existing key pair must
+/// not change its user-visible identity.
 pub(crate) fn fingerprint_bytes(type_name: &str, key_material: &[u8]) -> [u8; 32] {
     public_key_hash(&[], type_name, key_material)
 }
@@ -558,16 +555,16 @@ pub(crate) fn fingerprint_hex(type_name: &str, key_material: &[u8]) -> String {
 // ─── public.key text reader ────────────────────────────────────────────────
 
 /// Reads a v1 `public.key` text file and returns the resolved X25519
-/// public key (suite + 32 bytes). The file content MUST be the
+/// public key (suite + 32 bytes). The file content must be the
 /// canonical lowercase `fcr1…` recipient string, optionally followed
-/// by exactly one trailing `\n` (FORMAT.md §7). Anything else
-/// — leading whitespace, CRLF line endings, extra blank lines,
-/// trailing spaces or tabs, internal whitespace — is rejected as
+/// by exactly one trailing `\n` (`FORMAT.md` §7). Anything else —
+/// leading whitespace, CRLF line endings, extra blank lines, trailing
+/// spaces or tabs, or internal whitespace — is rejected as
 /// [`FormatDefect::MalformedPublicKey`].
 ///
 /// If the caller accidentally points this at a binary `private.key`
 /// (magic `FCR\0`), the reader surfaces
-/// [`FormatDefect::WrongKeyFileType`] instead of a cryptic UTF-8
+/// [`FormatDefect::WrongKeyFileType`] instead of a less useful UTF-8
 /// decode error.
 ///
 /// Decoding delegates to [`decode_recipient_string`], the single
@@ -644,13 +641,13 @@ enum PublicKeySource {
     },
 }
 
-/// Internal "fully resolved" public key: the X25519 bytes plus the
+/// Internal resolved public-key form: X25519 bytes plus the
 /// [`KeypairSuite`] (crate-internal) the bytes belong to. All three
-/// `PublicKey` ingress paths (`from_bytes`, `from_recipient_string`,
+/// `PublicKey` construction paths (`from_bytes`, `from_recipient_string`,
 /// `from_key_file` via `read_public_key`) materialise this shape so a
 /// caller of [`PublicKey::resolve`] always sees the suite alongside the
-/// key material — every byte that reaches the encryption pipeline or
-/// the recipient-string encoder is paired with the suite it belongs to,
+/// key material. Every byte that reaches the encryption pipeline or the
+/// recipient-string encoder is paired with the suite it belongs to,
 /// not silently re-tagged with the current writer suite.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ResolvedPublicKey {
@@ -675,21 +672,21 @@ impl PublicKey {
     ///
     /// The resulting `PublicKey` is tagged with this build's writer
     /// keypair suite (`WRITER_KEYPAIR_SUITE`, crate-internal). Raw
-    /// bytes carry no suite marker, so this constructor cannot be used
-    /// to resurrect a public key from a different suite: a future
-    /// release that drops support for an older suite will tag every
-    /// `from_bytes` value with the current writer suite, ensuring the
-    /// matching private-key suite is also still supported. Callers who
-    /// need to load a non-writer-suite public key MUST go through
-    /// [`PublicKey::from_recipient_string`] or [`PublicKey::from_key_file`],
-    /// where the wire-version byte selects the suite explicitly.
+    /// bytes carry no suite marker, so this constructor cannot represent a
+    /// public key from a different suite. A future release that drops support
+    /// for an older suite will tag every `from_bytes` value with the current
+    /// writer suite, ensuring the matching private-key suite is also still
+    /// supported. Callers who need to load a non-writer-suite public key must
+    /// go through [`PublicKey::from_recipient_string`] or
+    /// [`PublicKey::from_key_file`], where the wire-version byte selects the
+    /// suite explicitly.
     ///
     /// Rejects the all-zero point structurally — the only small-order
     /// X25519 public key we can pre-screen without an explicit
     /// RFC 7748 §6.1 list. Other degenerate inputs are caught at the
     /// ECDH site by `wrap` / `unwrap`'s shared-secret check; this
-    /// ingress check just stops the most common attack from
-    /// constructing a `PublicKey` value at all.
+    /// constructor check stops the most common invalid value from
+    /// becoming a `PublicKey` at all.
     ///
     /// # Errors
     ///
@@ -709,13 +706,12 @@ impl PublicKey {
     }
 
     /// Decodes a canonical lowercase Bech32 `fcr1…` recipient string
-    /// (as produced by [`PublicKey::to_recipient_string`] or read directly
-    /// from a `public.key` file, which is itself the canonical text)
-    /// into a `PublicKey`. Validates
-    /// HRP, BIP 173 checksum, internal SHA3-256 checksum, payload
-    /// structural fields, type-name grammar, and (for v1 X25519
-    /// recipients) the recipient `type_name == "x25519"` and 32-byte
-    /// key-material length.
+    /// into a `PublicKey`. The accepted grammar is the string produced by
+    /// [`PublicKey::to_recipient_string`], which is also the content of a
+    /// `public.key` file without the optional trailing newline. Validates
+    /// HRP, BIP 173 checksum, internal SHA3-256 checksum, payload structural
+    /// fields, type-name grammar, and, for v1 X25519 recipients,
+    /// `type_name == "x25519"` with exactly 32 bytes of key material.
     ///
     /// The keypair suite recovered from the wire-version byte is
     /// preserved on the resulting `PublicKey`. Re-encoding via
@@ -851,7 +847,7 @@ mod tests {
     }
 
     /// The rejected-input echo is sanitized: ASCII control bytes are
-    /// escaped and never reach the message raw, so a hostile recipient
+    /// escaped and never reach the message raw, so a malicious recipient
     /// string cannot carry terminal escape sequences.
     #[test]
     fn invalid_recipient_string_echo_is_sanitized() {
@@ -905,7 +901,7 @@ mod tests {
 
     /// `DecodedRecipient` carries the logical [`KeypairSuite`] alongside
     /// the typed payload fields. v1 recipient strings (wire byte `0x01`)
-    /// MUST decode to `KeypairSuite::V1` — symmetric with private-key
+    /// must decode to `KeypairSuite::V1` — symmetric with private-key
     /// parsing's mapping of the `0x01` wire byte to `KeypairSuite::V1`.
     #[test]
     fn v1_recipient_string_decodes_with_keypair_suite_v1() {
@@ -931,7 +927,7 @@ mod tests {
     }
 
     /// Mirror of `private_key_version_derives_from_keypair_suite_not_fcr_file_version`
-    /// for the public-key side. [`PUBLIC_KEY_VERSION`] MUST flow through
+    /// for the public-key side. [`PUBLIC_KEY_VERSION`] must flow through
     /// [`WRITER_KEYPAIR_SUITE`], not through any independent constant.
     #[test]
     fn public_key_version_derives_from_keypair_suite() {
@@ -1051,7 +1047,7 @@ mod tests {
 
     #[test]
     fn decode_rejects_local_cap_with_typed_variant() {
-        // Per `FORMAT.md` §3.2, a local-cap exceedance MUST surface
+        // Per `FORMAT.md` §3.2, a local-cap exceedance must surface
         // as a distinct resource-cap error rather than a generic
         // malformed-file error or a string-tagged generic.
         // `RecipientStringCapExceeded` is the typed counterpart of
@@ -1172,7 +1168,7 @@ mod tests {
     fn decode_rejects_non_utf8_type_name_bytes() {
         // The Bech32 alphabet is ASCII, but data bytes inside the typed
         // payload (after the 5-to-8 expansion) can be arbitrary.
-        // Non-UTF-8 type_name bytes MUST surface as `MalformedTypeName`
+        // Non-UTF-8 type_name bytes must surface as `MalformedTypeName`
         // via `std::str::from_utf8`, not silently flow into
         // `validate_type_name_grammar` (which expects `&str`).
         let mut data = Vec::new();
@@ -1323,7 +1319,7 @@ mod tests {
 
     #[test]
     fn fingerprint_separates_type_name_namespace() {
-        // Same key bytes under different type_names MUST produce
+        // Same key bytes under different type_names must produce
         // different fingerprints. Catches a regression where the
         // type_name input is silently ignored.
         let key = x25519_key();
@@ -1334,7 +1330,7 @@ mod tests {
 
     #[test]
     fn fingerprint_is_independent_of_checksum_domain() {
-        // The fingerprint hash MUST NOT include the checksum domain
+        // The fingerprint hash must not include the checksum domain
         // string (fingerprint identity vs internal checksum are
         // distinct concerns). Asserting the exact bytes here guards
         // against an accidental drift where the fingerprint helper
@@ -1376,7 +1372,7 @@ mod tests {
 
     #[test]
     fn key_material_len_max_fits_within_spec_ceiling() {
-        // The derived `KEY_MATERIAL_LEN_MAX` MUST be such that a
+        // The derived `KEY_MATERIAL_LEN_MAX` must be such that a
         // worst-case payload (max-length type_name + max-length
         // key_material) encodes within the 20,000-char spec ceiling.
         // Locks in the const-fn derivation so a future bump of
@@ -1391,7 +1387,7 @@ mod tests {
             s.len(),
             RECIPIENT_STRING_LEN_MAX
         );
-        // And one byte more on the key MUST be rejected at our
+        // And one byte more on the key must be rejected at our
         // structural layer (before bech32 ever runs).
         let one_too_big = vec![0u8; (KEY_MATERIAL_LEN_MAX as usize) + 1];
         match encode_recipient_string(&big_type_name, &one_too_big) {
@@ -1453,12 +1449,11 @@ mod tests {
     }
 
     /// `PublicKey::from_bytes` carries no suite marker on the input, so
-    /// it MUST tag the resulting value with the current writer suite
-    /// (`WRITER_KEYPAIR_SUITE`, crate-internal). This is the
-    /// closing-the-stale-public-key-trap pin for audit finding 2: a
-    /// future build that drops an older suite cannot use raw bytes to
-    /// resurrect a `PublicKey` for the dropped suite — every
-    /// `from_bytes` value tags as the writer.
+    /// it must tag the resulting value with the current writer suite
+    /// (`WRITER_KEYPAIR_SUITE`, crate-internal). This pins audit finding 2:
+    /// a future build that drops an older suite cannot use raw bytes to create
+    /// a `PublicKey` for the dropped suite; every `from_bytes` value tags as
+    /// the writer.
     #[test]
     fn from_bytes_pins_writer_keypair_suite() {
         let pk = PublicKey::from_bytes(x25519_key()).unwrap();

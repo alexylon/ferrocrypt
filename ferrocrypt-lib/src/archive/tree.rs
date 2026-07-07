@@ -3,7 +3,7 @@
 //! See `ferrocrypt-lib/FORMAT.md` §9.7 (duplicate / collision policy)
 //! and §9.8 (tree shape and canonical entry ordering).
 //!
-//! Each entry's `path_utf8` MUST already have passed
+//! Each entry's `path_utf8` must already have passed
 //! [`super::path::validate_fca_path`]; this module does not re-run the
 //! path grammar. It checks the COLLECTIVE tree-shape invariants — single
 //! top-level root, root file vs root directory shape, every non-root
@@ -80,7 +80,7 @@ pub(super) fn validate_manifest_tree(
     enforce_total_plaintext_bytes_cap(total_file_bytes, &limits)?;
 
     // Root is the top-level component of the first entry. All other
-    // entries MUST share this root. Capturing from `entries[0]`
+    // entries must share this root. Capturing from `entries[0]`
     // up-front avoids an `Option<&str>` and an associated unwrap /
     // expect / unreachable on the loop's "non-empty by construction"
     // post-condition.

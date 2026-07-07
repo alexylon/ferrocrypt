@@ -34,7 +34,7 @@
 //!     other local users while the file holds plaintext.
 //! 17. return the final output path
 //!
-//! Steps 1–8 MUST complete before any filesystem output is created.
+//! Steps 1–8 must complete before any filesystem output is created.
 //! Staged file contents — and, for directory roots, the staged
 //! directories that link them — are synced to stable storage before
 //! step 15, so promotion does not make unsynced content or a partially
@@ -323,7 +323,7 @@ fn extract_directory_root<R: Read>(
     }
 
     // Pass 2: stream file contents in MANIFEST ORDER. The content
-    // region is laid out in manifest order, so this pass MUST visit
+    // region is laid out in manifest order, so this pass must visit
     // file entries in the same order as the writer emitted them.
     for entry in &manifest.entries {
         if entry.kind != ArchiveEntryKind::File {
@@ -537,9 +537,9 @@ fn output_already_exists(output_dir: &Path, root_name: &OsStr) -> CryptoError {
 fn map_already_exists(e: CryptoError, label: &str, path: &Path) -> CryptoError {
     if let CryptoError::Io(io_err) = &e {
         if io_err.kind() == io::ErrorKind::AlreadyExists {
-            // The path mixes the caller's output directory with
-            // archive-derived names; sanitize so a hostile name cannot
-            // smuggle look-alike characters into the message.
+            // The path mixes the caller's output directory with archive-derived
+            // names; sanitize it so a malicious name cannot smuggle look-alike
+            // characters into the message.
             return CryptoError::InvalidInput(format!(
                 "{label}: {}",
                 sanitize_path_for_display(path)
@@ -837,7 +837,7 @@ mod tests {
         );
     }
 
-    /// FORMAT.md §9.8: readers MUST accept any manifest order
+    /// FORMAT.md §9.8: readers must accept any manifest order
     /// satisfying the tree shape. Pin order-independence by listing
     /// children before parents in the manifest. The content region is
     /// still in manifest order, so the reader's two-pass extraction
@@ -901,7 +901,7 @@ mod tests {
 
     /// Promotion is the commit point and is anchored to the
     /// `output_handle` opened at extraction time. A swap of the ambient
-    /// `output_dir` path between staging and promotion must NOT redirect
+    /// `output_dir` path between staging and promotion must not redirect
     /// the commit: the decrypted plaintext lands in the directory the
     /// contents were written to, and an attacker-planted
     /// `{root}.incomplete` in a swapped-in replacement directory is never
@@ -1058,7 +1058,7 @@ mod tests {
     /// `MalformedTlv` via the shared scanner. Pin because the existing
     /// reserved-tag tests only cover `entry_ext`; the archive-level
     /// region uses the same scanner and the same policy, so the
-    /// rejection MUST fire identically here.
+    /// rejection must fire identically here.
     #[test]
     fn rejects_reserved_zero_archive_ext_tag() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1393,7 +1393,7 @@ mod tests {
     }
 
     /// Mid-payload fault under `DeleteOnError`: the staged
-    /// `.incomplete` MUST be cleaned up. Pinned via `FailAfterN`
+    /// `.incomplete` must be cleaned up. Pinned via `FailAfterN`
     /// so the test exercises the archive-layer cleanup path
     /// directly, independent of the AEAD stream layer above.
     #[test]
@@ -1427,7 +1427,7 @@ mod tests {
     }
 
     /// Mid-payload fault under `RetainOnError`: the staged
-    /// `.incomplete` MUST survive for inspection. Symmetric with the
+    /// `.incomplete` must survive for inspection. Symmetric with the
     /// `DeleteOnError` test above.
     #[test]
     fn fail_after_n_during_payload_preserves_under_retain_on_error() {
@@ -1458,9 +1458,9 @@ mod tests {
         );
     }
 
-    /// Read-only `output_dir` (mode `0o500`): `unarchive` MUST fail
+    /// Read-only `output_dir` (mode `0o500`): `unarchive` must fail
     /// at the first cap-std write attempt (mkdir/create_file), and
-    /// `DeleteOnError` MUST not leave anything behind. Pin the §11
+    /// `DeleteOnError` must not leave anything behind. Pin the §11
     /// "Output dir is read-only" case.
     #[cfg(unix)]
     #[test]
@@ -1576,9 +1576,9 @@ mod tests {
 
     /// Hardlink at the extraction file leaf: pre-create a file then
     /// hardlink it at the destination name. `create_file_at`'s
-    /// `create_new(true)` MUST reject with `AlreadyExists` (mapped to
+    /// `create_new(true)` must reject with `AlreadyExists` (mapped to
     /// "Output already exists"), and the attacker-controlled hardlink
-    /// target MUST remain unchanged. Closes the §12 "attacker
+    /// target must remain unchanged. Closes the §12 "attacker
     /// replaces final file path with hardlink" case.
     #[cfg(unix)]
     #[test]
@@ -1605,7 +1605,7 @@ mod tests {
     }
 
     /// Symlink at the renamed root between the promotion rename and
-    /// `apply_root_directory_mode`: the chmod step MUST reject via
+    /// `apply_root_directory_mode`: the chmod step must reject via
     /// `open_dir_at_rel`'s per-component no-follow walk. We inject
     /// the post-rename state directly (a deterministic test of the
     /// same race the multithreaded path would observe).
@@ -1642,7 +1642,7 @@ mod tests {
 
     /// File-root parallel of [`apply_root_directory_mode_rejects_symlink_at_renamed_root`].
     /// Symlink substituted at the renamed root between the promotion rename
-    /// and `apply_root_file_mode`: the chmod step MUST reject via
+    /// and `apply_root_file_mode`: the chmod step must reject via
     /// `open_file_nofollow`'s no-follow open. Inject the post-rename
     /// state directly (deterministic test of the same race the
     /// multithreaded path would observe).
@@ -1852,7 +1852,7 @@ mod tests {
     /// Single-file root parallel of [`retain_on_error_staged_root_keeps_default_mode`].
     /// Pin that the staged `.incomplete` FILE is held at
     /// `INITIAL_FILE_CREATE_MODE` (0o600) until AFTER promotion — a
-    /// failed extraction (no rename) MUST NOT leak a permissive
+    /// failed extraction (no rename) must not leak a permissive
     /// manifest mode onto the staged plaintext.
     ///
     /// The trigger is "successful content streaming followed by
@@ -1962,8 +1962,8 @@ mod tests {
         assert_eq!(count, 0);
     }
 
-    /// A pre-existing `.incomplete` from a previous failed run MUST
-    /// reject AND MUST be preserved (not cleaned up by DeleteOnError),
+    /// A pre-existing `.incomplete` from a previous failed run must
+    /// reject and must be preserved (not cleaned up by DeleteOnError),
     /// because this run did not create it.
     #[test]
     fn rejects_pre_existing_incomplete_and_preserves_it() {
@@ -1984,7 +1984,7 @@ mod tests {
 
     // -- Security invariant ------------------------------------------------
 
-    /// FORMAT.md §9.11 steps 1–8 MUST complete before any filesystem
+    /// FORMAT.md §9.11 steps 1–8 must complete before any filesystem
     /// output is created. Pin this by feeding a manifest that fails tree
     /// validation (multiple top-level roots) and asserting the output
     /// directory is untouched.
@@ -2051,7 +2051,7 @@ mod tests {
     /// FORMAT.md §9.11 step 8: pre-check uses `symlink_metadata`, so a
     /// dangling symlink at the final output name is treated as
     /// occupied. `Path::exists()` would follow the link and report
-    /// false, masking the conflict; we MUST reject before any
+    /// false, masking the conflict; we must reject before any
     /// extraction work runs.
     #[cfg(unix)]
     #[test]

@@ -9,10 +9,10 @@
 //!   native recipient type (e.g. `mlkem768`) without breaking
 //!   forward-compatible parsing in older readers.
 //! * [`validate_external_type_name`] enforces the §3.3.1 plugin
-//!   namespace policy on top of the grammar: the name MUST contain `/`
-//!   and MUST NOT impersonate a reserved native shape. It is the entry
+//!   namespace policy on top of the grammar: the name must contain `/`
+//!   and must not impersonate a reserved native shape. It is the entry
 //!   point any future plugin / third-party recipient registration API
-//!   MUST call before accepting a caller-supplied `type_name`.
+//!   must call before accepting a caller-supplied `type_name`.
 //!
 //! Native-name prefixes `mlkem`, `pq`, `hpke`, `tag`, `xwing`, `kem`
 //! and any name ending in `tag` are reserved by the FerroCrypt
@@ -45,7 +45,7 @@ const RESERVED_NATIVE_SUFFIX: &str = "tag";
 ///
 /// This validator is deliberately namespace-agnostic so that wire-format
 /// readers can parse-and-skip future native short names. Callers that
-/// accept third-party-supplied names MUST additionally route through
+/// accept third-party-supplied names must additionally route through
 /// [`validate_external_type_name`].
 ///
 /// On failure surfaces [`crate::error::FormatDefect::MalformedTypeName`].
@@ -96,8 +96,8 @@ pub(crate) fn is_reserved_native_name(name: &str) -> bool {
 /// Validates a `type_name` supplied by a third-party / plugin caller
 /// against the §3.3 grammar **and** the §3.3.1 namespace policy:
 ///
-/// - it MUST contain `/` (no native-namespace squatting); and
-/// - it MUST NOT impersonate a reserved FerroCrypt native shape (which
+/// - it must contain `/` (no native-namespace squatting); and
+/// - it must not impersonate a reserved FerroCrypt native shape (which
 ///   is structurally implied by the `/` requirement, but checked
 ///   explicitly so future spec changes that loosen the `/` rule cannot
 ///   silently re-open the reserved range).

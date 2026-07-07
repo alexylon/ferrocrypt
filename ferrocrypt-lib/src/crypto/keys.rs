@@ -288,7 +288,7 @@ mod tests {
             b.payload_key.expose(),
             "payload key depends on stream_nonce"
         );
-        // Header key uses empty salt so stream_nonce must NOT affect it.
+        // Header key uses empty salt so stream_nonce must not affect it.
         assert_eq!(
             a.header_key.expose(),
             b.header_key.expose(),

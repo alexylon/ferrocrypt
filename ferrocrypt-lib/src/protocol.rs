@@ -64,14 +64,14 @@ use crate::{ProgressEvent, UnauthenticatedRecipientMode};
 ///
 /// `TYPE_NAME` and `MIXING_RULE` are associated constants so the
 /// multi-recipient `encrypt` orchestrator can enforce the mixing rule
-/// before any KDF runs. Implementations must NOT build full
+/// before any KDF runs. Implementations must not build full
 /// [`RecipientEntry`] framing or compute the header MAC — those
 /// concerns live in this module.
 ///
 /// `on_event` lets schemes whose wrap step is expensive (today only
 /// `argon2id`) emit [`ProgressEvent::DerivingPassphraseWrapKey`] at the
 /// actual KDF call site. Schemes whose wrap is cheap (X25519: one
-/// scalar mult + one HKDF, sub-millisecond) MUST ignore the parameter
+/// scalar mult + one HKDF, sub-millisecond) must ignore the parameter
 /// — emitting from them would lie about a long pause that never
 /// happens.
 pub(crate) trait RecipientScheme {
@@ -93,7 +93,7 @@ pub(crate) trait RecipientScheme {
 /// Return shape:
 ///
 /// - `Ok(Some(file_key))` — AEAD authentication succeeded; the caller
-///   now MUST verify the header MAC under the derived `header_key`
+///   now must verify the header MAC under the derived `header_key`
 ///   before accepting the candidate (`FORMAT.md` §3.7 step 8).
 /// - `Ok(None)` — AEAD authentication failed on a structurally-valid
 ///   body. Caller skips this slot and tries the next supported one.
@@ -104,7 +104,7 @@ pub(crate) trait RecipientScheme {
 /// `on_event` lets schemes whose unwrap step is expensive (today only
 /// `argon2id`) emit [`ProgressEvent::DerivingPassphraseWrapKey`] at the
 /// actual KDF call site. Schemes whose unwrap is cheap (X25519: one
-/// scalar mult + one HKDF, sub-millisecond) MUST ignore the parameter.
+/// scalar mult + one HKDF, sub-millisecond) must ignore the parameter.
 pub(crate) trait DecryptionCredential {
     const TYPE_NAME: &'static str;
     /// File mode this credential scheme can decrypt. Used by the
@@ -129,10 +129,10 @@ pub(crate) trait DecryptionCredential {
 ///
 /// Defense-in-depth checks (run by this function regardless of caller):
 ///
-/// - `recipients` MUST be non-empty (the public API enforces this at
+/// - `recipients` must be non-empty (the public API enforces this at
 ///   construction time; the orchestrator double-checks).
 /// - If `R::MIXING_RULE.requires_single_entry()` then `recipients.len()`
-///   MUST be exactly 1. The public API can only reach this code with a
+///   must be exactly 1. The public API can only reach this code with a
 ///   single passphrase, but the assertion stops a future caller bypass
 ///   from emitting an `argon2id` file with two bodies (`FORMAT.md` §4.1
 ///   forbids it).
@@ -150,7 +150,7 @@ pub(crate) trait DecryptionCredential {
 /// [`crate::KdfParams::validate_for_write`]. The same applies to the
 /// non-empty-passphrase check in [`crate::api::validate_passphrase`].
 ///
-/// Any new in-crate caller of `protocol::encrypt` MUST run those
+/// Any new in-crate caller of `protocol::encrypt` must run those
 /// preflight steps first (or accept the resulting symmetry break with
 /// the default reader). Tests in `protocol.rs::tests` deliberately
 /// bypass them to construct forward-compat fixtures; production
@@ -472,7 +472,7 @@ fn failure_for(
 /// [`crate::KdfParams::validate_for_write`]. The same applies to the
 /// non-empty-passphrase check in [`crate::api::validate_passphrase`].
 ///
-/// Any new in-crate caller MUST run those preflight steps first
+/// Any new in-crate caller must run those preflight steps first
 /// (or accept the resulting symmetry break with the default reader's
 /// `PrivateKeyDecryptor::decrypt`).
 pub(crate) fn generate_key_pair(
@@ -549,9 +549,9 @@ pub(crate) fn generate_key_pair(
     public_tmp.as_file().sync_all()?;
     atomic::finalize_file(public_tmp, &public_key_path, KEY_FILE_LABEL)?;
 
-    // Write private.key. If this fails, clean up the public.key we
-    // just wrote (public keys are not secret, but leaving orphaned
-    // output is unfriendly).
+    // Write private.key. If this fails, clean up the public.key we just wrote.
+    // Public keys are not secret, but leaving an orphaned output file would
+    // make the failed key-generation result ambiguous for the caller.
     let private_write: Result<(), CryptoError> = (|| {
         let mut private_builder = tempfile::Builder::new();
         private_builder
@@ -616,7 +616,7 @@ mod tests {
     /// Build a complete `.fcr` byte sequence with the given recipient
     /// entries and plaintext. The caller has already wrapped `file_key`
     /// for each entry that actually needs to unwrap; entries with
-    /// arbitrary bodies (synthetic unknown types, hostile mixes) are
+    /// arbitrary bodies (synthetic unknown types, invalid mixes) are
     /// kept verbatim.
     fn build_multi_recipient_fcr(
         entries: &[RecipientEntry],
@@ -798,7 +798,7 @@ mod tests {
     }
 
     /// FORMAT.md §2.4 / §4.2: an `x25519` recipient slot whose ECDH
-    /// shared secret is all-zero MUST cause file-fatal rejection, not
+    /// shared secret is all-zero must cause file-fatal rejection, not
     /// slot-skip — the all-zero shared is credential-independent
     /// (every decryptor observes the same value), so it cannot be
     /// confused with "this slot was for someone else." The decrypt
@@ -929,7 +929,7 @@ mod tests {
     }
 
     /// One supported `x25519` recipient plus one unknown CRITICAL
-    /// recipient: the file MUST be rejected as
+    /// recipient: the file must be rejected as
     /// `UnknownCriticalRecipient` before any recipient unwrap or KDF
     /// runs.
     #[test]
@@ -967,7 +967,7 @@ mod tests {
         }
     }
 
-    /// Mixing `argon2id` with any other recipient (here `x25519`) MUST
+    /// Mixing `argon2id` with any other recipient (here `x25519`) must
     /// be rejected as `IncompatibleRecipients { type_name: "argon2id", .. }`
     /// BEFORE Argon2id runs.
     #[test]
@@ -1106,9 +1106,9 @@ mod tests {
     }
 
     /// FORMAT.md §3.7 step 13 — "If HMAC verification fails, continue
-    /// trying other candidate recipients." Slot 1 wraps a DECOY file key
+    /// trying other candidate recipients." Slot 1 wraps a decoy file key
     /// (alice unwraps it, but the derived header key does not verify the
-    /// MAC); slot 2 wraps the REAL file key for alice. Decrypt MUST NOT
+    /// MAC); slot 2 wraps the real file key for alice. Decrypt must not
     /// stop at slot 1's MAC failure — it must reach slot 2 and succeed. A
     /// "fail fast on first MAC failure" regression turns this into an error.
     #[test]
@@ -1146,7 +1146,7 @@ mod tests {
     /// Order mirror of
     /// [`multi_x25519_continues_past_mac_failure_to_later_slot`]: the REAL
     /// slot is first and the decoy second. The first slot MAC-verifies, so
-    /// decrypt succeeds via it; the later decoy slot's MAC failure MUST NOT
+    /// decrypt succeeds via it; the later decoy slot's MAC failure must not
     /// undo that success.
     #[test]
     fn multi_x25519_later_mac_failure_does_not_undo_earlier_success() -> Result<(), CryptoError> {
@@ -1175,7 +1175,7 @@ mod tests {
         Ok(())
     }
 
-    /// Defense-in-depth: an exclusive scheme (`argon2id`) MUST not be
+    /// Defense-in-depth: an exclusive scheme (`argon2id`) must not be
     /// emitted with more than one recipient. The public API has no path
     /// to construct that, but a future caller bypass would break the
     /// `FORMAT.md` §4.1 mixing rule before any output bytes are

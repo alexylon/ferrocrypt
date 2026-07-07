@@ -40,14 +40,13 @@ pub(crate) use format::PERMISSION_BITS_MASK;
 /// plaintext.
 ///
 /// Note: this policy only governs cleanup of the `.incomplete` working
-/// tree on a normal `Err` return. Process termination (crash, SIGKILL,
-/// power loss) AND panic-unwind bypass cleanup entirely, so a
-/// `.incomplete` left by a killed or panicking process is available
-/// for recovery regardless of the policy. The library does not wrap
-/// extraction in `catch_unwind`; if a panic propagates out of
-/// `unarchive`, treat the working tree as if the process had been
-/// killed: it may contain authenticated-but-incomplete plaintext that
-/// the caller must inspect or remove explicitly.
+/// tree after a normal `Err` return. Process termination (crash, SIGKILL,
+/// power loss) and panic unwinding bypass cleanup entirely, so a killed
+/// or panicking process can leave `.incomplete` output regardless of the
+/// policy. The library does not wrap extraction in `catch_unwind`; if a
+/// panic propagates out of `unarchive`, treat the working tree as if the
+/// process had been killed. It may contain authenticated but incomplete
+/// plaintext that the caller must inspect or remove explicitly.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum IncompleteOutputPolicy {
@@ -64,11 +63,10 @@ pub enum IncompleteOutputPolicy {
     /// XChaCha20-Poly1305 STREAM-BE32, which authenticates each 64 KiB
     /// chunk individually but does not detect truncation until the
     /// final chunk's `last_flag` arrives. An attacker who can truncate
-    /// the ciphertext at any chunk boundary can therefore choose what
-    /// authenticated-prefix the recovered plaintext contains. Callers
-    /// who opt in to retention and act on partial output MUST treat the
-    /// staged plaintext as a potentially attacker-chosen subset of the
-    /// original, not as the full original truncated by honest
-    /// corruption.
+    /// the ciphertext at a chunk boundary can therefore choose which
+    /// authenticated plaintext prefix is retained. Callers who opt in
+    /// to retention and act on partial output must treat the staged
+    /// plaintext as a potentially attacker-chosen subset of the original,
+    /// not as the full original truncated by storage failure.
     RetainOnError,
 }

@@ -29,12 +29,12 @@ const ENTRY_BODY_LEN_OFFSET: usize = ENTRY_RECIPIENT_FLAGS_OFFSET + size_of::<u1
 const _: () = assert!(ENTRY_BODY_LEN_OFFSET + size_of::<u32>() == ENTRY_HEADER_SIZE);
 
 /// Bit 0 of `recipient_flags`. When set, an unknown recipient type
-/// MUST cause file rejection (`FORMAT.md` §3.4); when clear, an unknown
+/// must cause file rejection (`FORMAT.md` §3.4); when clear, an unknown
 /// recipient is skipped.
 pub(crate) const RECIPIENT_FLAG_CRITICAL: u16 = 1 << 0;
 
 /// Mask of all `recipient_flags` bits other than
-/// [`RECIPIENT_FLAG_CRITICAL`]. Per `FORMAT.md` §3.5, these MUST be
+/// [`RECIPIENT_FLAG_CRITICAL`]. Per `FORMAT.md` §3.5, these must be
 /// zero on the wire; readers reject any entry with a reserved bit set.
 pub(crate) const RECIPIENT_FLAGS_RESERVED_MASK: u16 = !RECIPIENT_FLAG_CRITICAL;
 
@@ -92,14 +92,14 @@ impl RecipientEntry {
     }
 
     /// Returns `true` if [`RECIPIENT_FLAG_CRITICAL`] is set. Per
-    /// `FORMAT.md` §3.4, unknown critical entries MUST cause file
+    /// `FORMAT.md` §3.4, unknown critical entries must cause file
     /// rejection; unknown non-critical entries are skipped.
     pub const fn is_critical(&self) -> bool {
         (self.recipient_flags & RECIPIENT_FLAG_CRITICAL) != 0
     }
 
     /// Infallibly serialises this entry. Test-only; production code
-    /// MUST use [`Self::to_bytes_checked`]. Kept for tests that
+    /// must use [`Self::to_bytes_checked`]. Kept for tests that
     /// intentionally produce out-of-spec bytes.
     #[cfg(test)]
     pub(crate) fn to_bytes(&self) -> Vec<u8> {
@@ -226,14 +226,15 @@ impl RecipientEntry {
 }
 
 /// Parses a contiguous `recipient_entries` region containing exactly
-/// `expected_count` entries. The region length MUST equal the sum of
+/// `expected_count` entries. The region length must equal the sum of
 /// per-entry sizes — trailing or unaccounted bytes surface as
 /// [`FormatDefect::MalformedRecipientEntry`].
 ///
 /// `local_body_cap` is forwarded to each [`RecipientEntry::parse_one`]
 /// call. Per `FORMAT.md` §3.2, the local cap applies to every entry,
 /// including unknown entries that will later be skipped, so an
-/// attacker-supplied unknown entry cannot DoS a reader that "skips" it.
+/// attacker-supplied unknown entry cannot force excessive allocation in
+/// a reader that skips it.
 pub(crate) fn parse_recipient_entries(
     region: &[u8],
     expected_count: u16,
@@ -690,7 +691,7 @@ mod tests {
     #[test]
     fn parse_recipient_entries_propagates_structural_error_from_inner_entry() {
         // First entry parses cleanly; second has a reserved flag bit set.
-        // The multi-entry parser MUST surface the inner error rather than
+        // The multi-entry parser must surface the inner error rather than
         // silently masking it as MalformedRecipientEntry.
         let e1 = RecipientEntry {
             type_name: x25519::TYPE_NAME.to_owned(),

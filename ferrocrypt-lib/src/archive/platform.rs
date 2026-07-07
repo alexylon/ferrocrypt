@@ -426,7 +426,7 @@ pub(crate) fn walk_to_parent(root: &Dir, rel: &Path) -> Result<(Dir, OsString), 
 /// reopen so the writer's source walk gets the same per-component
 /// no-follow + reparse-check guarantee the reader has.
 ///
-/// `rel` MUST have at least one component; an empty path is treated
+/// `rel` must have at least one component; an empty path is treated
 /// as an internal invariant violation, mirroring [`walk_to_parent`].
 pub(crate) fn walk_to_parent_readonly(
     root: &Dir,

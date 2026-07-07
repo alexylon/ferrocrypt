@@ -21,13 +21,13 @@
 //!
 //! ## Decryptor type-safety
 //!
-//! [`Decryptor::open`] inspects the file's recipient list (no crypto)
-//! and returns a typed variant: [`Decryptor::Passphrase`] for files
-//! sealed with a passphrase, [`Decryptor::PrivateKey`] for files sealed
-//! to public keys. Each variant's `decrypt` method accepts only the
-//! credentials that variant can actually use, so a mismatched-credential
-//! call — e.g. passing a [`PrivateKey`] to a passphrase-sealed file — is
-//! a compile error rather than a runtime "no supported recipient" failure.
+//! [`Decryptor::open`] inspects the file's recipient list without
+//! cryptographic work and returns a typed variant: [`Decryptor::Passphrase`]
+//! for files sealed with a passphrase, [`Decryptor::PrivateKey`] for files
+//! sealed to public keys. Each variant's `decrypt` method accepts only the
+//! credentials that variant can use, so a mismatched-credential call — for
+//! example, passing a [`PrivateKey`] to a passphrase-sealed file — is a compile
+//! error rather than a runtime "no supported recipient" failure.
 
 use std::path::{Path, PathBuf};
 
@@ -169,9 +169,9 @@ impl Encryptor {
     /// `Encryptor` produces. Lists above the default reject with
     /// [`CryptoError::RecipientCountCapExceeded`] at
     /// [`Encryptor::write`] time. To produce a file with more
-    /// recipients, the caller MUST opt in via
+    /// recipients, the caller must opt in via
     /// [`Encryptor::header_read_limits`] with a raised
-    /// recipient-count limit; the receiving decryptor MUST be opened
+    /// recipient-count limit; the receiving decryptor must be opened
     /// via [`Decryptor::open_with_limits`] with matching limits.
     ///
     /// # Errors
@@ -218,7 +218,7 @@ impl Encryptor {
     /// produce a `.fcr` whose archive payload exceeds what a
     /// default-configured [`PassphraseDecryptor`] /
     /// [`PrivateKeyDecryptor`] will extract. The receiving decryptor
-    /// MUST be configured via
+    /// must be configured via
     /// [`PassphraseDecryptor::archive_limits`] /
     /// [`PrivateKeyDecryptor::archive_limits`] with limits that match
     /// (or exceed) the file's actual content. Lowering
@@ -248,10 +248,9 @@ impl Encryptor {
     /// so [`KdfParams::default`] is accepted. A value above the effective
     /// policy rejects with the matching typed cap error. To write a `.fcr`
     /// with memory above 1 GiB, or to use a deliberately tightened time-cost
-    /// or lane policy, configure [`Encryptor::kdf_limit`] and configure the
-    /// receiving [`PassphraseDecryptor`] with a compatible
-    /// [`PassphraseDecryptor::kdf_limit`] before calling
-    /// [`PassphraseDecryptor::decrypt`].
+    /// or lane policy, configure [`Encryptor::kdf_limit`] and set a compatible
+    /// [`PassphraseDecryptor::kdf_limit`] on the receiving decryptor before
+    /// calling [`PassphraseDecryptor::decrypt`].
     pub fn kdf_params(mut self, params: KdfParams) -> Self {
         self.kdf_params = Some(params);
         self
@@ -263,7 +262,7 @@ impl Encryptor {
     /// [`HeaderReadLimits`] values the default reader uses, so a default
     /// [`Decryptor::open`] can read every file the default `Encryptor`
     /// produces. This builder raises or tightens those writer-side caps;
-    /// the receiving decryptor MUST be opened via
+    /// the receiving decryptor must be opened via
     /// [`Decryptor::open_with_limits`] with limits that are at least as
     /// permissive.
     ///
@@ -288,7 +287,7 @@ impl Encryptor {
     ///
     /// Use this builder together with [`Encryptor::kdf_params`] to raise the
     /// memory ceiling or to tighten time cost or lanes. The receiving
-    /// passphrase decryptor MUST be configured via
+    /// passphrase decryptor must be configured via
     /// [`PassphraseDecryptor::kdf_limit`] with a policy that accepts the same
     /// parameters.
     ///
@@ -330,9 +329,8 @@ impl Encryptor {
         let kdf_params = self.kdf_params.unwrap_or_default();
         let save_as = self.save_as.as_deref();
 
-        // Cheap caller-supplied invariant first so an empty passphrase
-        // surfaces before any filesystem syscall — fail fast on the
-        // O(1) check before the kernel-side syscall.
+        // Check the passphrase before filesystem work. An empty value is a
+        // caller error, and reporting it first avoids unnecessary syscalls.
         if let EncryptorState::Passphrase(p) = &self.state {
             validate_passphrase(p)?;
         }
@@ -409,8 +407,8 @@ impl Encryptor {
 
 /// Type-safe entry point for decryption.
 ///
-/// [`Decryptor::open`] reads the `.fcr` header (no crypto) and returns
-/// the variant that matches the file's recipient kind. Each variant
+/// [`Decryptor::open`] reads the `.fcr` header without cryptographic work and
+/// returns the variant that matches the file's recipient kind. Each variant
 /// takes only the credentials it can use:
 ///
 /// - [`Decryptor::Passphrase`] takes a passphrase.
@@ -454,8 +452,8 @@ impl Decryptor {
     ///
     /// Callers handling files whose recipient strings, recipient
     /// counts, or header lengths legitimately exceed the defaults
-    /// (e.g. forward-compatibility with future fat-recipient native
-    /// types) should construct a `HeaderReadLimits` via the builder
+    /// (for example, forward-compatible files with larger future recipient
+    /// bodies) should construct a `HeaderReadLimits` via the builder
     /// methods and pass it here. The same limits are stashed on the
     /// returned variant so the second header read inside
     /// [`PassphraseDecryptor::decrypt`] / [`PrivateKeyDecryptor::decrypt`]
@@ -555,7 +553,7 @@ impl PassphraseDecryptor {
     /// [`IncompleteOutputPolicy::RetainOnError`] for backup-recovery
     /// or forensic flows where partial output is more useful than no
     /// output. See [`IncompleteOutputPolicy::RetainOnError`] for the
-    /// truncation-prefix caveat callers MUST acknowledge before acting
+    /// truncation-prefix caveat callers must understand before acting
     /// on a retained partial.
     pub fn incomplete_output_policy(mut self, policy: IncompleteOutputPolicy) -> Self {
         self.incomplete_output_policy = Some(policy);
@@ -667,7 +665,7 @@ impl PrivateKeyDecryptor {
     /// [`IncompleteOutputPolicy::RetainOnError`] for backup-recovery
     /// or forensic flows where partial output is more useful than no
     /// output. See [`IncompleteOutputPolicy::RetainOnError`] for the
-    /// truncation-prefix caveat callers MUST acknowledge before acting
+    /// truncation-prefix caveat callers must understand before acting
     /// on a retained partial.
     pub fn incomplete_output_policy(mut self, policy: IncompleteOutputPolicy) -> Self {
         self.incomplete_output_policy = Some(policy);
@@ -825,7 +823,7 @@ impl KeyPairGenerator {
     ///
     /// Use this builder together with [`KeyPairGenerator::kdf_params`] to raise
     /// the memory ceiling or to tighten time cost or lanes. The receiving
-    /// [`PrivateKeyDecryptor`] MUST be configured via
+    /// [`PrivateKeyDecryptor`] must be configured via
     /// [`PrivateKeyDecryptor::kdf_limit`] with a policy that accepts the same
     /// parameters.
     pub fn kdf_limit(mut self, limit: KdfLimit) -> Self {
@@ -907,9 +905,9 @@ pub fn generate_key_pair(
 /// security claim.**
 ///
 /// Performs a single bounded header parse on one file handle (no path reopen
-/// between magic check and header read). No KDF, no private-key operation,
-/// no credential prompt, no header-MAC verification, no payload decryption.
-/// Capped allocation.
+/// between magic check and header read). It does not run a KDF, perform a
+/// private-key operation, prompt for credentials, verify the header MAC, or
+/// decrypt payload bytes. Allocations are bounded by [`HeaderReadLimits`].
 ///
 /// A positive result is **not** evidence that the file is authentic,
 /// decryptable, untampered, or well-formed beyond the structural shape
@@ -934,7 +932,7 @@ pub fn generate_key_pair(
 /// prefix or header is malformed (bad version / kind / flags, oversized
 /// `header_len`, malformed recipient entries, etc.). The probe therefore
 /// enforces the same structural invariants the decrypt path would, so
-/// bit-rotten or attacker-tampered files surface their specific diagnostic
+/// corrupt or attacker-modified files surface their specific diagnostic
 /// at probe time.
 ///
 /// Returns typed recipient-classification errors when the recipient list is
@@ -961,10 +959,10 @@ pub fn probe_recipient_mode(
 /// conservative defaults.
 ///
 /// Use this when probing files whose recipient strings, recipient counts,
-/// or header lengths legitimately exceed the default local caps
-/// (forward-compatibility with future fat-recipient native types). All
-/// other behavior — directory short-circuit, magic-byte fast path,
-/// typed-error surface, "not a security claim" semantics — is identical.
+/// or header lengths legitimately exceed the default local caps (for example,
+/// forward-compatible files with larger future recipient bodies). All other
+/// behavior — directory short-circuit, magic-byte fast path, typed-error
+/// surface, and "not a security claim" semantics — is identical.
 ///
 /// # Errors
 ///
@@ -977,12 +975,10 @@ pub fn probe_recipient_mode_with_limits(
     use std::io::{Read, Seek, SeekFrom};
     let path = file_path.as_ref();
 
-    // Short-circuit directories up-front so the behavior is uniform across
-    // platforms. Without this pre-check, Unix lets us open a directory and
-    // only fails at `read()` with `IsADirectory`, while Windows' `CreateFile`
-    // refuses to open directories outright (requires `FILE_FLAG_BACKUP_SEMANTICS`)
-    // and surfaces as `ERROR_ACCESS_DENIED` — indistinguishable from a real
-    // permission error. One explicit check, one answer, on every platform.
+    // Handle directories before opening the path so all platforms return the
+    // same result. Unix may open a directory and fail later at `read()` with
+    // `IsADirectory`; Windows refuses the open up front and reports access
+    // denied, which is indistinguishable from a real permission error here.
     if path.is_dir() {
         return Ok(None);
     }
@@ -1077,9 +1073,9 @@ pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), Crypt
 /// Checks the canonical `fcr1…` recipient string grammar, including
 /// Bech32 checksum, HRP, typed payload lengths, type name, key-material
 /// length, and internal SHA3-256 checksum. Does **not** require a
-/// passphrase. If the caller accidentally
-/// points this at a binary `private.key`, [`FormatDefect::WrongKeyFileType`] is
-/// returned instead of a UTF-8 decode error.
+/// passphrase. If the caller accidentally points this at a binary
+/// `private.key`, [`FormatDefect::WrongKeyFileType`] is returned instead of a
+/// UTF-8 decode error.
 ///
 /// Companion to [`validate_private_key_file`].
 ///

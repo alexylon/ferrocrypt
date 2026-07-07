@@ -26,7 +26,7 @@
 //! ## Type-name namespace
 //!
 //! Per `FORMAT.md` §3.3.1, native recipient type names are short names
-//! without `/`. Plugin and third-party types MUST use a fully qualified
+//! without `/`. Plugin and third-party types must use a fully qualified
 //! name containing `/` (e.g. `example.com/enigma`). Native-name
 //! prefixes `mlkem`, `pq`, `hpke`, `tag`, `xwing`, `kem` and any name
 //! ending in `tag` are reserved for future FerroCrypt-defined recipient

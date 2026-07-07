@@ -58,8 +58,8 @@ const TEMP_FILE_PREFIX: &str = ".ferrocrypt-";
 /// Local resource caps applied while reading an encrypted-file header.
 ///
 /// The defaults mirror `format::*_LOCAL_CAP_DEFAULT` and apply to every
-/// reader path. Callers MAY raise individual caps for trusted input
-/// (e.g. files from a known origin that legitimately use more
+/// reader path. Callers may raise individual caps for trusted input
+/// (for example, files from a known origin that legitimately use more
 /// recipient slots, larger recipient bodies, or a larger header than
 /// the conservative defaults allow) by calling the `max_*` builder
 /// methods. Each builder clamps at the structural maximum for that
@@ -71,7 +71,7 @@ const TEMP_FILE_PREFIX: &str = ".ferrocrypt-";
 /// parser would accept anyway.
 ///
 /// Caps are enforced **before** any cryptographic operation runs. Per
-/// `FORMAT.md` §1 and §3.2, hostile input must not be able to force
+/// `FORMAT.md` §1 and §3.2, malicious input must not be able to force
 /// unbounded work, and exceeding a local cap surfaces as a distinct
 /// `*CapExceeded` error rather than as a generic format defect.
 #[derive(Debug, Clone, Copy)]
@@ -83,7 +83,7 @@ pub struct HeaderReadLimits {
     pub(crate) max_recipient_count: u16,
     /// Hard cap on each individual recipient entry's `body_len`. Applies
     /// to known and unknown entries alike, so an unknown-recipient slot
-    /// cannot DoS a reader that would have skipped it.
+    /// cannot force excessive allocation in a reader that would skip it.
     pub(crate) max_recipient_body_len: u32,
 }
 
@@ -154,7 +154,7 @@ impl HeaderReadLimits {
     /// Single source of truth for the `header_len` cap check. Used by
     /// the reader's `read_encrypted_header` against the header declared
     /// in the prefix; available to writer-side preflight when a future
-    /// fat-header recipient list could exceed
+    /// large-header recipient list could exceed
     /// [`Self::HEADER_LEN_DEFAULT`].
     pub(crate) fn enforce_header_len(&self, header_len: u32) -> Result<(), CryptoError> {
         if header_len > self.max_header_len {
@@ -198,18 +198,17 @@ impl HeaderReadLimits {
     }
 }
 
-// Reader-side `max_recipient_body_len` enforcement is inline inside
-// `RecipientEntry::parse_one`: that module sits below `container` in
-// the dependency graph and cannot import [`HeaderReadLimits`] without
-// a cycle, so the cap is plumbed through as a `u32` parameter and the
-// typed [`CryptoError::RecipientBodyCapExceeded`] is constructed
-// there. Writer-side preflight calls
-// [`HeaderReadLimits::enforce_recipient_body_len`] directly against the
-// canonical native body lengths before any wrapping/KDF work runs. The
-// cap value still has a single source of truth
+// The reader enforces `max_recipient_body_len` inside
+// `RecipientEntry::parse_one`: that module sits below `container` in the
+// dependency graph and cannot import [`HeaderReadLimits`] without a cycle. The
+// cap is therefore passed as a `u32`, and `recipient/entry.rs` constructs the
+// typed [`CryptoError::RecipientBodyCapExceeded`] error. Writer-side preflight
+// calls [`HeaderReadLimits::enforce_recipient_body_len`] directly against the
+// canonical native body lengths before any wrapping or KDF work runs. The cap
+// value still has a single source of truth
 // ([`HeaderReadLimits::max_recipient_body_len`] +
-// [`HeaderReadLimits::RECIPIENT_BODY_LEN_DEFAULT`]); only the
-// reader-side check site is in `recipient/entry.rs`.
+// [`HeaderReadLimits::RECIPIENT_BODY_LEN_DEFAULT`]); only the reader-side check
+// site lives in `recipient/entry.rs`.
 
 /// A structurally parsed `.fcr` header. Authenticity has NOT been checked;
 /// the caller must call [`format::verify_header_mac`] with a `header_key`
@@ -231,10 +230,10 @@ pub(crate) struct ParsedEncryptedHeader {
     /// Parsed recipient entries, in declared order. Length matches
     /// `fixed.recipient_count`.
     pub recipient_entries: Vec<RecipientEntry>,
-    /// Authenticated extension TLV region. Caller MUST run
-    /// `crypto::tlv::validate_tlv` on this AFTER MAC verification.
+    /// Authenticated extension TLV region. Caller must run
+    /// `crypto::tlv::validate_tlv` on this after MAC verification.
     pub ext_bytes: Vec<u8>,
-    /// On-disk header MAC tag. Caller MUST verify against
+    /// On-disk header MAC tag. Caller must verify against
     /// `format::compute_header_mac(prefix_bytes, header_bytes, header_key)`.
     pub header_mac: [u8; HEADER_MAC_SIZE],
 }
@@ -282,9 +281,9 @@ impl std::fmt::Debug for HexBytes<'_> {
 // The non-secret byte fields (`prefix_bytes`, `header_mac`,
 // `stream_nonce`) render as lowercase hex via `HexBytes` — easier to
 // read in panic / log lines than a raw decimal byte array.
-// `header_bytes` shows only its length: it can be up to ~16 MiB
+// `header_bytes` shows only its length: it can be up to about 16 MiB
 // (`HEADER_LEN_MAX`), so dumping its content in every debug print
-// would be hostile.
+// would be noisy and expensive.
 impl std::fmt::Debug for BuiltEncryptedHeader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BuiltEncryptedHeader")
@@ -298,10 +297,10 @@ impl std::fmt::Debug for BuiltEncryptedHeader {
 }
 
 // Manual `Debug` mirrors `BuiltEncryptedHeader`: `header_bytes` can be
-// up to ~16 MiB (`HEADER_LEN_MAX`) and `ext_bytes` up to 64 KiB, so a
-// derive would dump megabytes of byte noise into any panic or log line
-// that renders a parsed header. No secret material here — all fields
-// are on-disk bytes — so this is log hygiene only.
+// up to about 16 MiB (`HEADER_LEN_MAX`) and `ext_bytes` up to 64 KiB, so a
+// derived implementation would dump megabytes of byte noise into any panic or
+// log line that renders a parsed header. No secret material here; all fields
+// are on-disk bytes, so this is log hygiene only.
 impl std::fmt::Debug for ParsedEncryptedHeader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ParsedEncryptedHeader")
@@ -354,17 +353,16 @@ pub(crate) fn read_encrypted_header<R: Read>(
     read_exact_or_truncated(reader, &mut header_bytes)?;
 
     // Per `FORMAT.md` §3.7 step 3, the MAC-tag read is a framing read:
-    // it MUST complete (or fail as `Truncated`) before any structural
-    // parse runs. Otherwise a file that omits the MAC bytes could
-    // surface as `MalformedHeader` first and mask the simpler
-    // "file is truncated" diagnostic.
+    // it must complete, or fail as `Truncated`, before structural parsing
+    // starts. Otherwise a file that omits the MAC bytes could surface as
+    // `MalformedHeader` and hide the simpler "file is truncated" diagnostic.
     let mut header_mac = [0u8; HEADER_MAC_SIZE];
     read_exact_or_truncated(reader, &mut header_mac)?;
 
     // `header_len >= HEADER_FIXED_SIZE` was already enforced by
     // `Prefix::parse` via `check_header_len`, so `first_chunk` is
     // structurally guaranteed to return `Some`; the `ok_or` is a
-    // belt-and-braces guard so an upstream regression cannot panic here.
+    // defensive guard against future changes in that validation path.
     let fixed_bytes: &[u8; HEADER_FIXED_SIZE] = header_bytes
         .first_chunk()
         .ok_or(CryptoError::InvalidFormat(FormatDefect::MalformedHeader))?;
@@ -496,7 +494,7 @@ pub(crate) fn build_encrypted_header(
 }
 
 /// Resolves the destination path for an encrypted file. If `output_file`
-/// is supplied, it's used verbatim; otherwise the file is written under
+/// is supplied, it is used verbatim; otherwise the file is written under
 /// `output_dir` as `<base_name>.<ENCRYPTED_EXTENSION>`.
 pub(crate) fn resolve_encrypted_output_path(
     output_dir: &Path,
@@ -523,7 +521,7 @@ pub(crate) fn resolve_encrypted_output_path(
 /// Atomicity: the file is written under a `.ferrocrypt-*.incomplete`
 /// tempfile in the destination's parent directory, then renamed via
 /// [`atomic::finalize_file`] only after `sync_all`. A pre-existing
-/// output path rejects with `CryptoError::InvalidInput` BEFORE any
+/// output path rejects with `CryptoError::InvalidInput` before any
 /// tempfile is created, so an unrelated file at the destination is
 /// never touched.
 pub(crate) fn write_encrypted_file(
@@ -864,7 +862,7 @@ mod tests {
     }
 
     /// Direct boundary unit on [`HeaderReadLimits::enforce_header_len`]:
-    /// the comparison MUST be `>`, not `>=`, so a `header_len` exactly
+    /// the comparison must be `>`, not `>=`, so a `header_len` exactly
     /// at the cap is admissible and only `cap + 1` rejects.
     #[test]
     fn enforce_header_len_boundary() {
@@ -943,11 +941,11 @@ mod tests {
     /// [`HeaderReadLimits::HEADER_LEN_DEFAULT`]) plus the structural
     /// maxima [`EXT_LEN_MAX`] / [`HEADER_FIXED_SIZE`] /
     /// [`crate::recipient::entry::ENTRY_HEADER_SIZE`] /
-    /// [`crate::recipient::name::TYPE_NAME_MAX_LEN`] MUST stay mutually
+    /// [`crate::recipient::name::TYPE_NAME_MAX_LEN`] must stay mutually
     /// consistent: the worst-case `header_len` a default-cap reader
     /// would still accept entry-by-entry (every recipient slot at the
     /// per-entry body cap, every type-name at the grammar ceiling,
-    /// `ext_bytes` at its structural max) MUST fit inside the
+    /// `ext_bytes` at its structural max) must fit inside the
     /// `HEADER_LEN_DEFAULT` envelope. Otherwise the three caps would
     /// silently refuse files the per-cap rules individually allow.
     ///
@@ -1121,7 +1119,7 @@ mod tests {
     }
 
     /// A file that carries a complete, well-formed `header` region but
-    /// stops before the 32-byte MAC tag MUST reject as
+    /// stops before the 32-byte MAC tag must reject as
     /// `InvalidFormat(Truncated)`. Pins the framing-vs-structural-parse
     /// ordering required by `FORMAT.md` §3.7 step 3: both the `header`
     /// and `header_mac` reads are framing reads and complete before any
@@ -1149,7 +1147,7 @@ mod tests {
     }
 
     /// If a file's `header` region is structurally malformed AND the
-    /// MAC tag is missing, the framing-level `Truncated` diagnostic MUST
+    /// MAC tag is missing, the framing-level `Truncated` diagnostic must
     /// fire before the structural `MalformedHeader` defect. Otherwise the
     /// reader would surface the downstream parse error and hide the
     /// simpler "file is truncated" cause, contradicting `FORMAT.md`

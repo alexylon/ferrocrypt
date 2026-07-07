@@ -1,7 +1,7 @@
 //! STREAM-BE32 payload encryptor/decryptor adapters.
 //!
 //! Per `FORMAT.md` §5, payload AEAD is XChaCha20-Poly1305 STREAM-BE32 over
-//! 64 KiB plaintext chunks. Writers MUST NOT emit an empty trailing chunk
+//! 64 KiB plaintext chunks. Writers must not emit an empty trailing chunk
 //! after non-empty plaintext that ends on a [`BUFFER_SIZE`] boundary; the
 //! final non-empty chunk uses `last_flag = 1`. Empty plaintext is encoded
 //! as a single tag-only `last` chunk.
@@ -37,7 +37,7 @@ pub(crate) const BUFFER_SIZE: usize = 65536;
 /// `format.rs` imports it from here.
 pub(crate) const STREAM_NONCE_SIZE: usize = 19;
 
-/// `FORMAT.md` §5: writers MUST NOT emit, and readers MUST reject,
+/// `FORMAT.md` §5: writers must not emit, and readers must reject,
 /// streams with more than `2^32` chunks. Tracked here as a `u64` so
 /// the cap comparison cannot itself overflow.
 const STREAM_CHUNK_COUNT_MAX: u64 = 1u64 << 32;
@@ -77,8 +77,8 @@ pub(crate) fn read_uninterrupted<R: Read>(input: &mut R, buf: &mut [u8]) -> io::
 /// `FORMAT.md` §5.
 ///
 /// Per `FORMAT.md` §5, a non-empty plaintext whose length is an exact
-/// multiple of `BUFFER_SIZE` MUST end with a full-size **final** chunk
-/// (`last_flag = 1`) — writers MUST NOT append an extra empty final
+/// multiple of `BUFFER_SIZE` must end with a full-size **final** chunk
+/// (`last_flag = 1`) — writers must not append an extra empty final
 /// chunk. To satisfy this rule, this writer cannot eagerly call
 /// `encrypt_next_in_place` the moment the buffer fills, because the
 /// fill might be the last data the caller ever writes. Instead, when
@@ -126,7 +126,7 @@ impl<W: Write> EncryptWriter<W> {
     /// `0` for empty plaintext or `BUFFER_SIZE` for an exact-multiple
     /// boundary) as the AEAD final chunk and flushes.
     ///
-    /// MUST be called exactly once after all plaintext has been
+    /// Must be called exactly once after all plaintext has been
     /// written. Returns the inner writer so the caller can finalize
     /// it (e.g. `sync_all`).
     pub(crate) fn finish(mut self) -> Result<W, CryptoError> {
@@ -231,7 +231,7 @@ impl<W: Write> Write for EncryptWriter<W> {
     /// AEAD stream: any deferred plaintext chunk stays buffered, and
     /// dropping the [`EncryptWriter`] without calling
     /// [`Self::finish`] leaves the on-disk ciphertext missing its
-    /// final-flag chunk. Callers MUST call [`Self::finish`] before
+    /// final-flag chunk. Callers must call [`Self::finish`] before
     /// drop.
     fn flush(&mut self) -> io::Result<()> {
         match self.output.as_mut() {
@@ -509,7 +509,7 @@ impl<R: Read> Drop for DecryptReader<R> {
 /// passphrase, recipient, and forward-compat test paths share a single
 /// source of truth for the payload-streaming constructor.
 ///
-/// `payload_key` and `stream_nonce` MUST come from the same successful
+/// `payload_key` and `stream_nonce` must come from the same successful
 /// subkey derivation (see [`crate::crypto::keys::derive_subkeys`]) —
 /// pairing them with material from a different derivation produces
 /// ciphertext that no reader will accept.
@@ -526,7 +526,7 @@ pub(crate) fn payload_encryptor<W: Write>(
 /// Constructs a [`DecryptReader`] for the per-file payload pipeline.
 ///
 /// The decrypt counterpart of [`payload_encryptor`]. `payload_key` and
-/// `stream_nonce` MUST come from a header whose MAC has been verified
+/// `stream_nonce` must come from a header whose MAC has been verified
 /// (see `format::verify_header_mac`); per `FORMAT.md` §3.7 a candidate
 /// `file_key` is not final until the header MAC also verifies, so this
 /// helper does not authenticate either input on its own.
@@ -577,7 +577,7 @@ mod tests {
     }
 
     /// Plaintext exactly equal to one chunk: per `FORMAT.md` §5,
-    /// writers MUST NOT append an extra empty final chunk after
+    /// writers must not append an extra empty final chunk after
     /// non-empty plaintext whose length is a multiple of `BUFFER_SIZE`.
     /// The writer therefore defers the full `BUFFER_SIZE` chunk
     /// until `finish()` and emits it as a single full-size **final**
@@ -1060,7 +1060,7 @@ mod tests {
     }
 
     /// Regression: single-chunk plaintext + a pathological reader that
-    /// triggers `ExtraData` MUST NOT serve any plaintext bytes if the
+    /// triggers `ExtraData` must not serve any plaintext bytes if the
     /// caller retries `read()` after the error. Pre-fix, `fill_buffer`
     /// returned `Err` while leaving the decrypted plaintext in
     /// `self.chunk` and `self.pos = 0` — a caller that retried would
@@ -1104,7 +1104,7 @@ mod tests {
         );
     }
 
-    /// Regression: encrypt-side chunk-count cap MUST fire before the
+    /// Regression: encrypt-side chunk-count cap must fire before the
     /// upstream STREAM-BE32 counter overflows. Fast-forwards the
     /// writer's chunk counter to the cap and confirms the next
     /// `encrypt_next` call rejects with `ChunkCountExceeded` rather
@@ -1132,7 +1132,7 @@ mod tests {
         );
     }
 
-    /// Regression: encrypt-side `finish()` cap MUST fire when the
+    /// Regression: encrypt-side `finish()` cap must fire when the
     /// final chunk would push `chunk_count` past the cap.
     #[test]
     fn streaming_aead_writer_finish_chunk_count_cap_rejects() {
@@ -1151,7 +1151,7 @@ mod tests {
 
     /// §5: counter `2^32 - 1` is reserved for the FINAL chunk. With
     /// more plaintext arriving at `chunk_count = MAX - 1`, the writer
-    /// MUST reject before AEAD runs and before any byte is committed.
+    /// must reject before AEAD runs and before any byte is committed.
     #[test]
     fn streaming_aead_writer_rejects_max_counter_as_non_final() {
         let mut ciphertext: Vec<u8> = Vec::new();
@@ -1225,7 +1225,7 @@ mod tests {
         );
     }
 
-    /// Regression: decrypt-side chunk-count cap MUST fire before
+    /// Regression: decrypt-side chunk-count cap must fire before
     /// `decrypt_next_in_place` runs on a stream past the cap.
     #[test]
     fn streaming_aead_reader_chunk_count_cap_rejects() {

@@ -383,7 +383,7 @@ pub(crate) fn open_x25519_private_key(
     let mut secret = Zeroizing::new([0u8; PRIVATE_KEY_SIZE]);
     secret.copy_from_slice(&opened.secret_material);
 
-    // FORMAT.md §8: native X25519 readers MUST compute
+    // FORMAT.md §8: native X25519 readers must compute
     // X25519(secret_material, basepoint) and reject unless the result
     // exactly equals the authenticated `public_material`. AEAD-AAD
     // already authenticated `public_material` against tampering, but a
@@ -533,7 +533,7 @@ mod tests {
 
     /// A `private.key` whose `public_len` is a structurally valid value
     /// other than 32 (the X25519 size) decodes through the generic
-    /// private-key reader, but the X25519 adapter MUST reject it: the
+    /// private-key reader, but the X25519 adapter must reject it: the
     /// stored public material cannot represent an X25519 point at any
     /// length other than 32. Surfaces as `MalformedPrivateKey`.
     #[test]
@@ -659,9 +659,9 @@ mod tests {
     fn unwrap_rejects_small_order_ephemeral_via_all_zero_shared() {
         // An all-zero ephemeral public_key is a known X25519 small-order
         // point: X25519(any_secret, all_zero_public_key) = all_zero_shared.
-        // Per `FORMAT.md` §2.4 / §4.2 this MUST be rejected by readers
+        // Per `FORMAT.md` §2.4 / §4.2 this must be rejected by readers
         // before deriving the wrap key, and the rejection is
-        // credential-independent — readers MUST surface it as a structural
+        // credential-independent — readers must surface it as a structural
         // defect (file-fatal) rather than as a slot-skippable AEAD
         // failure, so the [`X25519Credential`] adapter propagates the
         // error instead of collapsing to `Ok(None)`.
@@ -677,7 +677,7 @@ mod tests {
         }
     }
 
-    /// Credential-adapter contract: an all-zero shared secret must NOT be
+    /// Credential-adapter contract: an all-zero shared secret must not be
     /// collapsed into the slot-skip channel. The adapter propagates
     /// `InvalidFormat(MalformedRecipientEntry)` so the surrounding
     /// decrypt loop rejects the whole file (FORMAT.md §2.4 / §4.2).
@@ -718,7 +718,7 @@ mod tests {
 
     #[test]
     fn body_field_offsets_are_correct() {
-        // Wire-format regression: the body layout MUST be exactly
+        // Wire-format regression: the body layout must be exactly
         // ephemeral_public_key(32) || wrap_nonce(24) || wrapped(48). A
         // reordering would produce a body that this reader rejects
         // and that conforming readers reject the same way.

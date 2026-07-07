@@ -117,9 +117,8 @@ fn unarchive_inner<R: Read>(
     // the manifest tree shape.
     let manifest = parse_manifest_bytes(&manifest_bytes, header, limits)?;
 
-    // Reject a directory root up-front on targets without a safe
-    // directory-promotion primitive, before any output is staged, rather
-    // than extracting the whole tree and failing at the promotion step.
+    // Before any output is staged, so an unsupported directory root fails
+    // up front instead of after writing the whole tree.
     reject_unsupported_directory_root(&manifest)?;
 
     // FORMAT.md §9.11 step 8: `symlink_metadata` (via `path_occupied`)

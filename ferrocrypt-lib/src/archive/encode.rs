@@ -307,10 +307,9 @@ pub(crate) fn validate_encrypt_input(input_path: &Path) -> Result<(), CryptoErro
     if !file_type.is_file() && !file_type.is_dir() {
         return Err(unsupported_file_type_error(input_path));
     }
-    // Symmetric with the extractor's `decode::reject_unsupported_directory_root`:
-    // a target without a safe directory-promotion backend cannot extract a
-    // directory root, so the writer must not produce one either. Single-file
-    // inputs work on every target.
+    // The extractor refuses a directory root on targets without a
+    // promotion backend; the writer refuses the same input so it never
+    // produces an archive it cannot read back (encrypt/decrypt symmetry).
     if file_type.is_dir() && !platform::DIRECTORY_PROMOTION_SUPPORTED {
         return Err(CryptoError::InvalidInput(
             "Encrypting a directory is not supported on this target".to_string(),

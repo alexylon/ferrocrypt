@@ -1389,12 +1389,11 @@ mod tests {
 
         // StreamError Display text. The four user-facing markers
         // (DecryptAead, Truncated, ExtraData, ChunkCountExceeded) start
-        // capitalized like the rest of the error surface; the two
-        // internal-bug markers (EncryptAead, StateExhausted) are
-        // deliberately lowercase because they only ever render after an
+        // capitalized; the two internal-bug markers (EncryptAead,
+        // StateExhausted) are lowercase because they only render after an
         // "Internal ...:" prefix. This is the only place the user-facing
-        // markers' wording is locked in — they downcast to typed
-        // CryptoError variants that carry their own Display.
+        // markers' text is pinned — they carry no CryptoError payload of
+        // their own.
         assert_eq!(
             StreamError::DecryptAead.to_string(),
             "Payload authentication failed"

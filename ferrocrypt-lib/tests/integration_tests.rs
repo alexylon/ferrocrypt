@@ -2830,12 +2830,10 @@ fn test_keygen_no_partial_state_on_existing_key() -> Result<(), CryptoError> {
     let test_dir = setup_test_dir("keygen_no_partial");
     let passphrase = SecretString::from("atomic_pass".to_string());
 
-    // First keygen succeeds.
     generate_key_pair(&passphrase, &test_dir, |_| {})?;
     let private_before = fs::read(test_dir.join("private.key"))?;
     let public_before = fs::read(test_dir.join("public.key"))?;
 
-    // Second keygen to the same dir fails — the keys already exist.
     let result = generate_key_pair(&passphrase, &test_dir, |_| {});
     assert!(
         result.is_err(),

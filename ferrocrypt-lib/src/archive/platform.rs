@@ -33,7 +33,7 @@ use cap_std::ambient_authority;
 use cap_std::fs::{Dir, File, OpenOptions};
 
 use crate::CryptoError;
-use crate::error::sanitize_for_display;
+use crate::error::{sanitize_for_display, sanitize_path_for_display};
 
 /// Default mode passed to `mkdir` when creating a fresh extraction
 /// directory (rwx------). Applied atomically at create time on Unix via
@@ -502,7 +502,7 @@ fn normal_component<'a>(component: Component<'a>, full: &Path) -> Result<&'a OsS
         Component::Normal(s) => Ok(s),
         _ => Err(CryptoError::InvalidInput(format!(
             "Invalid component in archive entry: {}",
-            sanitize_for_display(&full.display().to_string())
+            sanitize_path_for_display(full)
         ))),
     }
 }

@@ -12,6 +12,7 @@ use std::io::Read;
 use std::path::Path;
 
 use crate::CryptoError;
+use crate::error::{sanitize_for_display, sanitize_path_for_display};
 
 /// Suffix appended to atomic-write working names so plaintext (or any
 /// not-yet-finalised output) is never visible under the final name.
@@ -20,6 +21,42 @@ use crate::CryptoError;
 /// rename-into-place pattern. `pub` (in a private module) so
 /// `fuzz_exports` can re-export it for the full-pipeline fuzz oracle.
 pub const INCOMPLETE_SUFFIX: &str = ".incomplete";
+
+/// Conflict-message label for the encrypted-file or extracted output
+/// artefact ("Output already exists: …"). The occupancy pre-check
+/// ([`reject_occupied`]) and the no-clobber commit
+/// (`fs::atomic::finalize_file`) for the same operation MUST pass the
+/// same label so their two messages read identically; a shared
+/// constant makes that structural rather than a per-site literal.
+pub(crate) const OUTPUT_LABEL: &str = "Output";
+
+/// Conflict-message label for a generated key file ("Key file already
+/// exists: …"). Paired between the keygen pre-check and its no-clobber
+/// commit the same way as [`OUTPUT_LABEL`].
+pub(crate) const KEY_FILE_LABEL: &str = "Key file";
+
+/// Builds the "Input name is not valid UTF-8: `<path>`" rejection.
+/// FCA paths are UTF-8 (`FORMAT.md` §9.6), so a non-UTF-8 input name
+/// can never encrypt. Shared by the default-output-name path
+/// ([`encryption_base_name`]) and the archive writer's root-name check
+/// so both surfaces of the same rejection read identically.
+pub(crate) fn input_name_not_utf8_error(path: &Path) -> CryptoError {
+    CryptoError::InvalidInput(format!(
+        "Input name is not valid UTF-8: {}",
+        sanitize_path_for_display(path)
+    ))
+}
+
+/// Builds the "Unsupported file type: `<path>`" rejection for an input
+/// that is neither a regular file nor a directory (a FIFO, socket, or
+/// device node). Shared by [`open_input_file`] and the archive
+/// writer's input-root checks.
+pub(crate) fn unsupported_file_type_error(path: &Path) -> CryptoError {
+    CryptoError::InvalidInput(format!(
+        "Unsupported file type: {}",
+        sanitize_path_for_display(path)
+    ))
+}
 
 /// Opens `path` read-only for header probing, decryption, or key-file
 /// reading, refusing FIFOs, sockets, and device nodes.
@@ -50,10 +87,7 @@ pub(crate) fn open_input_file(
     let file = options.open(path).map_err(map_open_error)?;
     let file_type = file.metadata().map_err(CryptoError::Io)?.file_type();
     if !file_type.is_file() && !file_type.is_dir() {
-        return Err(CryptoError::InvalidInput(format!(
-            "Unsupported file type: {}",
-            path.display()
-        )));
+        return Err(unsupported_file_type_error(path));
     }
     Ok(file)
 }
@@ -94,6 +128,11 @@ pub(crate) fn file_stem(filename: &Path) -> Result<&OsStr, CryptoError> {
 /// For regular files, returns the file stem (without extension).
 /// For directories, returns the full directory name (preserving dots like `photos.v1`).
 ///
+/// Returns [`CryptoError::InvalidInput`] when the name is not valid
+/// UTF-8: FCA paths are UTF-8 (`FORMAT.md` §9.6), so such an input can
+/// never encrypt anyway, and a lossy replacement could silently
+/// collapse two distinct on-disk names into the same output name.
+///
 /// Uses `symlink_metadata` (lstat) rather than `Path::is_dir` so a
 /// symlink that races into place between the upstream
 /// `validate_encrypt_input` symlink check and this lookup cannot be
@@ -111,15 +150,15 @@ pub(crate) fn encryption_base_name(path: impl AsRef<Path>) -> Result<String, Cry
         Err(e) if e.kind() == io::ErrorKind::NotFound => false,
         Err(e) => return Err(CryptoError::Io(e)),
     };
-    if is_real_dir {
-        Ok(path
-            .file_name()
+    let name = if is_real_dir {
+        path.file_name()
             .ok_or_else(|| CryptoError::InvalidInput("Cannot get directory name".to_string()))?
-            .to_string_lossy()
-            .into_owned())
     } else {
-        Ok(file_stem(path)?.to_string_lossy().into_owned())
-    }
+        file_stem(path)?
+    };
+    name.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| input_name_not_utf8_error(path))
 }
 
 /// Returns `true` if anything occupies `path`, including a dangling
@@ -138,15 +177,45 @@ pub(crate) fn path_occupied(path: &Path) -> Result<bool, CryptoError> {
     }
 }
 
+/// Builds the "`<label>` already exists: `<path>`" rejection. Shared by
+/// [`reject_occupied`] (pre-write occupancy check),
+/// `fs::atomic::finalize_file` (no-clobber rename refusal), and the
+/// archive extractor's occupied-output rejection, so every surface of
+/// the same conflict renders identically.
+///
+/// The parent directory is the caller's trust boundary: shown raw and
+/// never truncated, so the operator can always locate the conflict.
+/// The final component can be attacker-influenced (an input-derived
+/// file stem, an archive-chosen root name), so it is escaped and
+/// length-bounded.
+pub(crate) fn already_exists_error(label: &str, path: &Path) -> CryptoError {
+    let full = path.display().to_string();
+    let rendered = match path.file_name().map(|n| n.to_string_lossy()) {
+        // The rendered path ends with the rendered file name by
+        // construction; keep the directory prefix (with its original
+        // separator) raw and escape only the name.
+        Some(name) if name.len() < full.len() && full.ends_with(name.as_ref()) => {
+            format!(
+                "{}{}",
+                &full[..full.len() - name.len()],
+                sanitize_for_display(&name)
+            )
+        }
+        // No directory prefix to keep (bare file name, filesystem
+        // root, or a `..` tail): sanitize the whole path.
+        _ => sanitize_for_display(&full),
+    };
+    CryptoError::InvalidInput(format!("{label} already exists: {rendered}"))
+}
+
 /// Returns `Err(InvalidInput)` if `path` is occupied (real file, real
-/// directory, or dangling symlink). `label` is used as the message
-/// prefix so callers can tailor the wording (`"Output"`, `"Key file"`).
+/// directory, or dangling symlink). `label` is the artefact name in the
+/// message prefix; callers pass [`OUTPUT_LABEL`] or [`KEY_FILE_LABEL`]
+/// and MUST reuse the same value at the paired
+/// `fs::atomic::finalize_file` commit so both messages match.
 pub(crate) fn reject_occupied(path: &Path, label: &str) -> Result<(), CryptoError> {
     if path_occupied(path)? {
-        return Err(CryptoError::InvalidInput(format!(
-            "{label} already exists: {}",
-            path.display()
-        )));
+        return Err(already_exists_error(label, path));
     }
     Ok(())
 }
@@ -197,6 +266,84 @@ mod tests {
         std::fs::create_dir(&dotted_dir).unwrap();
         let name = encryption_base_name(&dotted_dir).unwrap();
         assert_eq!(name, "photos.v1");
+    }
+
+    /// A non-UTF-8 input name rejects with a typed error instead of
+    /// lossy-replacing the invalid bytes: two distinct on-disk names
+    /// could otherwise collapse to the same computed output name, and
+    /// the FCA layer would refuse the name later anyway. Unix-only —
+    /// Windows file names are always valid Unicode at this API level.
+    #[cfg(unix)]
+    #[test]
+    fn encryption_base_name_rejects_non_utf8_name() {
+        use std::os::unix::ffi::OsStrExt;
+        let name = OsStr::from_bytes(b"bad\xFFname.txt");
+        match encryption_base_name(Path::new(name)) {
+            Err(CryptoError::InvalidInput(msg)) => {
+                assert!(
+                    msg.starts_with("Input name is not valid UTF-8: "),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidInput for non-UTF-8 name, got {other:?}"),
+        }
+    }
+
+    /// Fallback arm of the conflict-message renderer: a path with no
+    /// directory prefix (a bare file name, as `save_as` can supply)
+    /// sanitizes the whole path, so hostile bytes in a bare name are
+    /// escaped the same way as in a name under a directory.
+    #[test]
+    fn already_exists_error_escapes_bare_hostile_name() {
+        match already_exists_error("Output", Path::new("evil\u{1b}.fcr")) {
+            CryptoError::InvalidInput(msg) => {
+                assert_eq!(msg, "Output already exists: evil\\u{1b}.fcr");
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    /// Fast arm with a multibyte directory prefix: the split between
+    /// "keep raw" and "escape" lands on a UTF-8 boundary (the byte
+    /// slice must not panic), the non-ASCII directory name stays raw so
+    /// the operator can read it, and the hostile leaf is escaped.
+    #[test]
+    fn already_exists_error_keeps_multibyte_dir_raw_escapes_name() {
+        match already_exists_error("Key file", Path::new("Données/evil\u{202e}.key")) {
+            CryptoError::InvalidInput(msg) => {
+                assert_eq!(msg, "Key file already exists: Données/evil\\u{202e}.key");
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    /// A hostile file name at an occupied output path renders escaped:
+    /// the rejection message must never carry raw control bytes to a
+    /// terminal. The parent directory stays raw so the operator can
+    /// locate the conflict; the file name has its own display budget,
+    /// so the escaped form appears in full regardless of how long the
+    /// directory prefix is. Unix-only — Windows refuses control bytes
+    /// in file names at creation time.
+    #[cfg(unix)]
+    #[test]
+    fn reject_occupied_escapes_hostile_file_name() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let hostile = tmp.path().join("evil\u{1b}]0;pwned\u{7}.txt");
+        std::fs::write(&hostile, b"x").unwrap();
+        match reject_occupied(&hostile, "Output") {
+            Err(CryptoError::InvalidInput(msg)) => {
+                assert!(msg.starts_with("Output already exists: "), "got: {msg}");
+                assert!(
+                    msg.contains("evil\\u{1b}]0;pwned\\u{7}.txt"),
+                    "escaped file name must appear in full: {msg}"
+                );
+                assert!(
+                    !msg.chars().any(char::is_control),
+                    "raw control character leaked: {msg:?}"
+                );
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
     }
 
     #[test]
@@ -252,6 +399,25 @@ mod tests {
             match open_input_file(&fifo, CryptoError::Io) {
                 Err(CryptoError::InvalidInput(msg)) => {
                     assert!(msg.contains("Unsupported file type"), "got: {msg}");
+                }
+                other => panic!("expected InvalidInput, got {other:?}"),
+            }
+        }
+
+        /// The unsupported-file-type rejection escapes a hostile input
+        /// name — the message must never carry raw control bytes.
+        #[test]
+        fn open_input_file_escapes_hostile_fifo_name() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let fifo = tmp.path().join("pipe\u{1b}[2K.fcr");
+            make_fifo(&fifo);
+            match open_input_file(&fifo, CryptoError::Io) {
+                Err(CryptoError::InvalidInput(msg)) => {
+                    assert!(msg.starts_with("Unsupported file type: "), "got: {msg}");
+                    assert!(
+                        !msg.chars().any(char::is_control),
+                        "raw control character leaked: {msg:?}"
+                    );
                 }
                 other => panic!("expected InvalidInput, got {other:?}"),
             }

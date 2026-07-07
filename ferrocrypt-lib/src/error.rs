@@ -144,6 +144,19 @@ pub(crate) fn sanitize_for_display(text: &str) -> String {
     out
 }
 
+/// Renders a filesystem path for embedding in an error message:
+/// [`sanitize_for_display`] over `Path::display`. Used for
+/// caller-supplied input paths and other whole-path embeddings — such
+/// paths often come from shell glob expansion or a file-picker dialog,
+/// so every component, including intermediate directories, can be as
+/// attacker-chosen as a name found inside an archive. The "already
+/// exists" conflict messages instead route through
+/// `fs::paths::already_exists_error`, which keeps the trusted parent
+/// directory raw and escapes only the final component.
+pub(crate) fn sanitize_path_for_display(path: &std::path::Path) -> String {
+    sanitize_for_display(&path.display().to_string())
+}
+
 /// Renders `: {path}` when an optional sanitized path is present, and
 /// nothing otherwise, so one `#[error]` string serves both the
 /// "path known" and "path not yet parsed" construction sites of the
@@ -221,8 +234,10 @@ impl std::fmt::Display for PathSuffix<'_> {
 ///   `path`", "Source is no longer a regular file: `name`",
 ///   "Unsupported file type: `path`". The source tree belongs to the
 ///   caller's environment, so these are caller-input rejections, not
-///   format defects; names discovered while walking the tree are
-///   sanitized before embedding.
+///   format defects. Every embedded path or name — caller-supplied
+///   top-level paths included — is sanitized via
+///   `sanitize_for_display` / `sanitize_path_for_display` before
+///   embedding.
 /// - **Bech32 recipient parser**: reports the offending recipient
 ///   string ("Invalid recipient string: `fcr1…`", "Unexpected recipient
 ///   prefix…", "Recipient string must be lowercase"). Callers pass
@@ -233,7 +248,10 @@ impl std::fmt::Display for PathSuffix<'_> {
 ///   "Output already exists: `path`", "Key file already exists:
 ///   `path`", "Invalid recipient public key". These surface *which*
 ///   user-supplied path or value triggered the rejection so
-///   operators can fix it without extra debugging.
+///   operators can fix it without extra debugging. The conflict
+///   messages render the parent directory raw (it is the caller's
+///   trust boundary) and escape the final component, which can be
+///   attacker-influenced.
 /// - **Caller-supplied config values** outside the valid range:
 ///   "KDF memory limit overflow: `N` MiB", "Passphrase must not be
 ///   empty".
@@ -1562,6 +1580,20 @@ mod tests {
             exact,
             "at-cap input is untouched"
         );
+    }
+
+    /// The path wrapper applies the same escaping as
+    /// [`sanitize_for_display`], so a caller-supplied path whose file
+    /// name carries terminal-escape bytes renders escaped, never raw.
+    #[test]
+    fn sanitize_path_for_display_escapes_hostile_name() {
+        let path = std::path::Path::new("dir/evil\u{1b}]0;pwned\u{7}.txt");
+        let rendered = sanitize_path_for_display(path);
+        assert!(
+            !rendered.chars().any(char::is_control),
+            "raw control character leaked: {rendered:?}"
+        );
+        assert_eq!(rendered, "dir/evil\\u{1b}]0;pwned\\u{7}.txt");
     }
 
     /// Defense-in-depth: a `type_name` carrying terminal-escape or

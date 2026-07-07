@@ -4,6 +4,12 @@ All notable changes to FerroCrypt are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **Error messages now escape file names taken from the command line or a file picker.** Names discovered inside an archive were already escaped; a caller-supplied input path whose name carried terminal control bytes could still reach the terminal raw through a rejection message (for example "Unsupported file type: …" or "Input is a symlink: …"). Input paths embedded in an error are now escaped and length-bounded the same way as archive-internal names, and the "already exists" conflict messages escape the file name while keeping the directory part readable, so a hostile file name cannot inject terminal escape sequences through an error.
+- **Encrypting a file or folder whose name is not valid UTF-8 now fails up front with "Input name is not valid UTF-8"** instead of building the default output name from a lossy replacement, matching what the `default_encrypted_filename` documentation already promised. Two distinct on-disk names could previously collapse to the same computed output name before the archive layer rejected the input anyway.
+- **An output or key file that appears while encryption or key generation is writing is now reported as "already exists".** The conflict was already caught safely, but a path created in the short window between the pre-check and the final rename surfaced as a raw I/O error instead of the documented "Output already exists" / "Key file already exists" message.
+- **The payload chunk-count limit now reports "Encrypted file exceeds supported data size" when it trips during encryption.** Previously that limit — reachable only for payloads near 256 TiB under raised archive limits — surfaced as a plain I/O error on the encrypt side, while the same condition on the decrypt side already produced the typed error.
+
 ## [0.3.0-rc.1] - 2026-06-28
 
 ### Added

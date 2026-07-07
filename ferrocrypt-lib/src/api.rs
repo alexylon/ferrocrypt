@@ -36,7 +36,7 @@ use secrecy::{ExposeSecret as _, SecretString};
 use crate::archive::{self, ArchiveLimits, IncompleteOutputPolicy};
 use crate::container::{self, HeaderReadLimits};
 use crate::crypto::kdf::{KdfLimit, KdfParams};
-use crate::error::FormatDefect;
+use crate::error::{FormatDefect, sanitize_path_for_display};
 use crate::format;
 use crate::fs::paths;
 use crate::key::files::KeyFileKind;
@@ -481,7 +481,7 @@ impl Decryptor {
         if input.is_dir() {
             return Err(CryptoError::InvalidInput(format!(
                 "Cannot decrypt a directory: {}",
-                input.display()
+                sanitize_path_for_display(&input)
             )));
         }
         let mode =

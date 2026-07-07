@@ -41,6 +41,9 @@ use std::path::Path;
 
 use tempfile::NamedTempFile;
 
+use crate::CryptoError;
+use crate::fs::paths::already_exists_error;
+
 /// Best-effort parent-directory sync used after a successful file persist or
 /// directory rename. This slightly improves durability on Unix-like systems
 /// after the final path becomes visible.
@@ -61,16 +64,30 @@ fn sync_parent_dir(path: &Path) {
 fn sync_parent_dir(_path: &Path) {}
 
 /// Promotes a `NamedTempFile` to its final path with atomic no-clobber
-/// semantics. Fails with [`io::ErrorKind::AlreadyExists`] if the final
-/// path already exists.
+/// semantics. An occupied final path rejects with the same typed
+/// `InvalidInput("<label> already exists: …")` message the pre-write
+/// occupancy check emits, so a path that becomes occupied between the
+/// preflight and this rename reports the same error class. Other
+/// failures surface as [`CryptoError::Io`]. The temp file is removed
+/// on every failure path.
 ///
 /// Callers are expected to have already flushed and synced the temp file
 /// before calling this function. The temp file and the final path must
 /// live on the same filesystem (this is why the temp file should be
 /// created inside the destination directory via
 /// `tempfile::Builder::tempfile_in`).
-pub(crate) fn finalize_file(tmp: NamedTempFile, final_path: &Path) -> io::Result<()> {
-    tmp.persist_noclobber(final_path).map_err(|e| e.error)?;
+pub(crate) fn finalize_file(
+    tmp: NamedTempFile,
+    final_path: &Path,
+    label: &str,
+) -> Result<(), CryptoError> {
+    tmp.persist_noclobber(final_path).map_err(|e| {
+        if e.error.kind() == io::ErrorKind::AlreadyExists {
+            already_exists_error(label, final_path)
+        } else {
+            CryptoError::Io(e.error)
+        }
+    })?;
     sync_parent_dir(final_path);
     Ok(())
 }
@@ -202,6 +219,11 @@ mod tests {
 
     use super::*;
 
+    /// An occupied final path rejects with the same typed message the
+    /// pre-write occupancy check emits, so a conflict that appears in
+    /// the window between the preflight and this rename reports the
+    /// same error class. The destination stays untouched and the temp
+    /// file is removed.
     #[test]
     fn finalize_file_refuses_to_overwrite() {
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -212,10 +234,16 @@ mod tests {
             .tempfile_in(tmp_dir.path())
             .unwrap();
         tmp.write_all(b"new").unwrap();
+        let tmp_path = tmp.path().to_path_buf();
 
-        let err = finalize_file(tmp, &final_path).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        match finalize_file(tmp, &final_path, "Output") {
+            Err(CryptoError::InvalidInput(msg)) => {
+                assert!(msg.starts_with("Output already exists: "), "got: {msg}");
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
         assert_eq!(fs::read_to_string(&final_path).unwrap(), "existing");
+        assert!(!tmp_path.exists(), "temp file must be removed on failure");
     }
 
     #[test]
@@ -228,7 +256,7 @@ mod tests {
             .unwrap();
         tmp.write_all(b"payload").unwrap();
 
-        finalize_file(tmp, &final_path).unwrap();
+        finalize_file(tmp, &final_path, "Output").unwrap();
         assert_eq!(fs::read_to_string(&final_path).unwrap(), "payload");
     }
 

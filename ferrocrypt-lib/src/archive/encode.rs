@@ -54,9 +54,10 @@ use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions};
 
 use crate::CryptoError;
-use crate::error::sanitize_for_display;
+use crate::error::{sanitize_for_display, sanitize_path_for_display};
 #[cfg(windows)]
 use crate::fs::paths::parent_or_cwd;
+use crate::fs::paths::{input_name_not_utf8_error, unsupported_file_type_error};
 
 #[cfg(unix)]
 use super::format::PERMISSION_BITS_MASK;
@@ -165,7 +166,7 @@ fn reject_windows_reparse_point(
     if metadata.file_attributes() & platform::FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(CryptoError::InvalidInput(format!(
             "{label} is a Windows reparse point: {}",
-            path.display()
+            sanitize_path_for_display(path)
         )));
     }
     Ok(())
@@ -272,7 +273,7 @@ fn require_regular_file(
     if !metadata.file_type().is_file() {
         return Err(CryptoError::InvalidInput(format!(
             "{label} is no longer a regular file: {}",
-            path.display()
+            sanitize_path_for_display(path)
         )));
     }
     Ok(())
@@ -304,10 +305,7 @@ pub(crate) fn validate_encrypt_input(input_path: &Path) -> Result<(), CryptoErro
 
     let file_type = metadata.file_type();
     if !file_type.is_file() && !file_type.is_dir() {
-        return Err(CryptoError::InvalidInput(format!(
-            "Unsupported file type: {}",
-            input_path.display()
-        )));
+        return Err(unsupported_file_type_error(input_path));
     }
     Ok(())
 }
@@ -402,7 +400,10 @@ fn record_entry(
 /// input-root symlink check, and the Unix `open_no_follow`
 /// `ELOOP` arm.
 fn input_is_symlink_error(path: &Path) -> CryptoError {
-    CryptoError::InvalidInput(format!("Input is a symlink: {}", path.display()))
+    CryptoError::InvalidInput(format!(
+        "Input is a symlink: {}",
+        sanitize_path_for_display(path)
+    ))
 }
 
 /// Single source of truth for the "Symlink in archive source"
@@ -473,12 +474,7 @@ fn build_manifest(
         .ok_or_else(|| CryptoError::InvalidInput("Cannot get input file name".to_string()))?;
     let name_str = name
         .to_str()
-        .ok_or_else(|| {
-            CryptoError::InvalidInput(format!(
-                "Input name is not valid UTF-8: {}",
-                input_path.display()
-            ))
-        })?
+        .ok_or_else(|| input_name_not_utf8_error(input_path))?
         .to_string();
 
     // Path grammar applies to the root regardless of kind; validate
@@ -561,7 +557,7 @@ fn build_manifest(
             {
                 return Err(CryptoError::InvalidInput(format!(
                     "Input directory changed during archive: {}",
-                    input_path.display()
+                    sanitize_path_for_display(input_path)
                 )));
             }
         }
@@ -611,10 +607,7 @@ fn build_manifest(
         };
         Ok((manifest, ArchiveSource::RootDir(source_root)))
     } else {
-        Err(CryptoError::InvalidInput(format!(
-            "Unsupported file type: {}",
-            input_path.display()
-        )))
+        Err(unsupported_file_type_error(input_path))
     }
 }
 
@@ -899,7 +892,7 @@ fn stream_single_file_root<W: Write>(
         return Err(size_changed_error(
             entry.size,
             metadata.len(),
-            &source.display().to_string(),
+            &sanitize_path_for_display(source),
         ));
     }
 
@@ -1015,7 +1008,9 @@ pub(crate) fn archive<W: Write>(
         manifest_len,
         manifest.total_file_bytes,
     )?;
-    writer.write_all(&manifest_bytes).map_err(CryptoError::Io)?;
+    // Plain `?` so a `StreamError` marker from the encrypt stream
+    // converts to its typed variant via `From<io::Error>`.
+    writer.write_all(&manifest_bytes)?;
 
     // Pass 2: stream file contents in canonical manifest order, from
     // the handle or capability captured by pass 1.

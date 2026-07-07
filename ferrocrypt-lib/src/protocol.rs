@@ -50,7 +50,9 @@ use crate::crypto::stream::{STREAM_NONCE_SIZE, payload_decryptor};
 use crate::crypto::tlv::validate_tlv;
 use crate::error::CryptoError;
 use crate::format;
-use crate::fs::paths::{encryption_base_name, open_input_file, reject_occupied};
+use crate::fs::paths::{
+    KEY_FILE_LABEL, OUTPUT_LABEL, encryption_base_name, open_input_file, reject_occupied,
+};
 use crate::recipient::entry::{RecipientBody, RecipientEntry};
 #[cfg(test)]
 use crate::recipient::policy::MixingPolicy;
@@ -181,7 +183,7 @@ pub(crate) fn encrypt<R: RecipientScheme>(
     // outputs (via `reject_occupied` → `symlink_metadata`).
     let base_name = encryption_base_name(input_path)?;
     let output_path = resolve_encrypted_output_path(output_dir, output_file, &base_name);
-    reject_occupied(&output_path, "Output")?;
+    reject_occupied(&output_path, OUTPUT_LABEL)?;
 
     // No early progress event here. Each recipient scheme emits its
     // own work-boundary event from inside `wrap_file_key`. For the
@@ -500,8 +502,8 @@ pub(crate) fn generate_key_pair(
     // existing key.
     let private_key_path = output_dir.join(PRIVATE_KEY_FILENAME);
     let public_key_path = output_dir.join(PUBLIC_KEY_FILENAME);
-    reject_occupied(&private_key_path, "Key file")?;
-    reject_occupied(&public_key_path, "Key file")?;
+    reject_occupied(&private_key_path, KEY_FILE_LABEL)?;
+    reject_occupied(&public_key_path, KEY_FILE_LABEL)?;
 
     on_event(&ProgressEvent::GeneratingKeyPair);
 
@@ -545,7 +547,7 @@ pub(crate) fn generate_key_pair(
         .write_all(recipient_string.as_bytes())?;
     public_tmp.as_file_mut().write_all(b"\n")?;
     public_tmp.as_file().sync_all()?;
-    atomic::finalize_file(public_tmp, &public_key_path)?;
+    atomic::finalize_file(public_tmp, &public_key_path, KEY_FILE_LABEL)?;
 
     // Write private.key. If this fails, clean up the public.key we
     // just wrote (public keys are not secret, but leaving orphaned
@@ -563,7 +565,7 @@ pub(crate) fn generate_key_pair(
         let mut private_tmp = private_builder.tempfile_in(output_dir)?;
         private_tmp.as_file_mut().write_all(&private_key_bytes)?;
         private_tmp.as_file().sync_all()?;
-        atomic::finalize_file(private_tmp, &private_key_path)?;
+        atomic::finalize_file(private_tmp, &private_key_path, KEY_FILE_LABEL)?;
         Ok(())
     })();
 

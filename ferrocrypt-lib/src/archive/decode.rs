@@ -53,8 +53,8 @@ use cap_std::fs::Dir;
 
 use crate::CryptoError;
 use crate::crypto::stream::read_uninterrupted;
-use crate::error::sanitize_for_display;
-use crate::fs::paths::{INCOMPLETE_SUFFIX, path_occupied};
+use crate::error::sanitize_path_for_display;
+use crate::fs::paths::{INCOMPLETE_SUFFIX, OUTPUT_LABEL, already_exists_error, path_occupied};
 
 use super::IncompleteOutputPolicy;
 use super::format::{
@@ -119,9 +119,9 @@ fn unarchive_inner<R: Read>(
 
     // FORMAT.md §9.11 step 8: `symlink_metadata` (via `path_occupied`)
     // so a dangling symlink at the final name is treated as occupied.
-    // The message embeds the archive-chosen root name, so it is built
-    // here with sanitization rather than through `reject_occupied`,
-    // whose other callers display operator-chosen paths raw.
+    // Built through `output_already_exists` rather than
+    // `reject_occupied` because the same rejection is also raised at
+    // the step-15 promotion failure below.
     let final_path = output_dir.join(&manifest.root_name);
     if path_occupied(&final_path)? {
         return Err(output_already_exists(output_dir, &manifest.root_name));
@@ -496,18 +496,13 @@ fn cleanup_incomplete_via_handle(output_handle: &Dir, working_name: &OsStr) {
     }
 }
 
-/// Builds the "Output already exists: <dir>/<root>" rejection. Only
-/// `root_name` comes from the archive, so only it is sanitized; the
-/// operator-chosen `output_dir` is shown raw, the same posture as the
-/// other `reject_occupied` call sites, and is not truncated away. Used
-/// by the step-8 occupancy pre-check and the step-15 promotion failure.
+/// Builds the "Output already exists: <dir>/<root>" rejection via the
+/// shared constructor: the operator-chosen output directory renders
+/// raw and untruncated, and the archive-chosen root name — the final
+/// component — is escaped and bounded. Used by the step-8 occupancy
+/// pre-check and the step-15 promotion failure.
 fn output_already_exists(output_dir: &Path, root_name: &OsStr) -> CryptoError {
-    CryptoError::InvalidInput(format!(
-        "Output already exists: {}{}{}",
-        output_dir.display(),
-        std::path::MAIN_SEPARATOR,
-        sanitize_for_display(&root_name.to_string_lossy())
-    ))
+    already_exists_error(OUTPUT_LABEL, &output_dir.join(root_name))
 }
 
 /// Maps `io::ErrorKind::AlreadyExists` to a typed
@@ -524,9 +519,8 @@ fn map_already_exists(e: CryptoError, label: &str, path: &Path) -> CryptoError {
             // archive-derived names; sanitize so a hostile name cannot
             // smuggle look-alike characters into the message.
             return CryptoError::InvalidInput(format!(
-                "{}: {}",
-                label,
-                sanitize_for_display(&path.display().to_string())
+                "{label}: {}",
+                sanitize_path_for_display(path)
             ));
         }
     }

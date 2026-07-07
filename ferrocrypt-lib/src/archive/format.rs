@@ -211,13 +211,13 @@ pub(super) fn write_u8<W: Write>(w: &mut W, n: u8) -> io::Result<()> {
 /// expected), returns the caller-supplied `on_short` error: the same
 /// short read means "archive content truncated" on the decrypt side
 /// but "source file shrank mid-copy" on the encrypt side, and only the
-/// caller knows which. The `?` on the read threads `StreamError`
-/// markers from the underlying decrypt stream through
-/// `From<io::Error> for CryptoError` so authentication / truncation /
-/// extra-data signals surface as the typed `CryptoError::Payload*`
-/// variant rather than as a generic archive error. Reads retry on
-/// `Interrupted` via [`read_uninterrupted`] — a transient signal must
-/// not abort a multi-gigabyte stream.
+/// caller knows which. The `?` on both the read and the write threads
+/// `StreamError` markers through `From<io::Error> for CryptoError`, so
+/// a decrypt-side authentication / truncation / extra-data signal and
+/// an encrypt-side chunk-count-cap signal each surface as their typed
+/// `CryptoError::Payload*` variant rather than as a generic error.
+/// Reads retry on `Interrupted` via [`read_uninterrupted`] — a
+/// transient signal must not abort a multi-gigabyte stream.
 pub(super) fn copy_exact_n<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
@@ -234,7 +234,7 @@ pub(super) fn copy_exact_n<R: Read, W: Write>(
         if n == 0 {
             return Err(on_short());
         }
-        writer.write_all(&buf[..n]).map_err(CryptoError::Io)?;
+        writer.write_all(&buf[..n])?;
         remaining -= n as u64;
     }
     Ok(())
@@ -281,13 +281,15 @@ pub(crate) fn write_fca_header<W: Write>(
         return Err(malformed_manifest());
     }
 
-    w.write_all(FCA_MAGIC).map_err(CryptoError::Io)?;
-    write_u8(&mut w, FCA_VERSION).map_err(CryptoError::Io)?;
-    write_u16_be(&mut w, FCA_FLAGS_V1).map_err(CryptoError::Io)?;
-    write_u32_be(&mut w, entry_count).map_err(CryptoError::Io)?;
-    write_u32_be(&mut w, archive_ext_len).map_err(CryptoError::Io)?;
-    write_u32_be(&mut w, manifest_len).map_err(CryptoError::Io)?;
-    write_u64_be(&mut w, total_file_bytes).map_err(CryptoError::Io)?;
+    // Plain `?` so a `StreamError` marker from the encrypt stream
+    // converts to its typed variant via `From<io::Error>`.
+    w.write_all(FCA_MAGIC)?;
+    write_u8(&mut w, FCA_VERSION)?;
+    write_u16_be(&mut w, FCA_FLAGS_V1)?;
+    write_u32_be(&mut w, entry_count)?;
+    write_u32_be(&mut w, archive_ext_len)?;
+    write_u32_be(&mut w, manifest_len)?;
+    write_u64_be(&mut w, total_file_bytes)?;
     Ok(w)
 }
 
@@ -716,6 +718,53 @@ mod tests {
         })
         .unwrap();
         assert_eq!(out, content);
+    }
+
+    /// Writer that fails every `write` with an `io::Error` carrying the
+    /// chunk-count `StreamError` marker, as `EncryptWriter` emits when
+    /// its FORMAT.md §5 cap trips mid-stream.
+    #[derive(Debug)]
+    struct ChunkCapMarkerWriter;
+
+    impl Write for ChunkCapMarkerWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                crate::error::StreamError::ChunkCountExceeded,
+            ))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The write arm of `copy_exact_n` converts `StreamError` markers
+    /// from the destination into typed variants, so the encrypt-side
+    /// chunk-count cap surfaces as `PayloadChunkCountExceeded`, not as
+    /// an opaque `Io`.
+    #[test]
+    fn copy_exact_n_preserves_writer_stream_markers() {
+        let mut reader: &[u8] = &[0u8; 8];
+        let err = copy_exact_n(&mut reader, &mut ChunkCapMarkerWriter, 8, || {
+            CryptoError::InternalInvariant("unexpected short read")
+        })
+        .unwrap_err();
+        assert!(
+            matches!(err, CryptoError::PayloadChunkCountExceeded),
+            "expected PayloadChunkCountExceeded, got {err:?}"
+        );
+    }
+
+    /// `write_fca_header` gives its destination errors the same
+    /// treatment as the content loop: a `StreamError` marker converts
+    /// to its typed variant.
+    #[test]
+    fn write_fca_header_preserves_writer_stream_markers() {
+        let err = write_fca_header(ChunkCapMarkerWriter, 1, 0, 1, 0).unwrap_err();
+        assert!(
+            matches!(err, CryptoError::PayloadChunkCountExceeded),
+            "expected PayloadChunkCountExceeded, got {err:?}"
+        );
     }
 
     /// Constructs raw header bytes from explicit field values for

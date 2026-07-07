@@ -45,7 +45,7 @@ use crate::format::{
     check_recipient_count, read_exact_or_truncated,
 };
 use crate::fs::atomic;
-use crate::fs::paths::{INCOMPLETE_SUFFIX, parent_or_cwd, reject_occupied};
+use crate::fs::paths::{INCOMPLETE_SUFFIX, OUTPUT_LABEL, parent_or_cwd, reject_occupied};
 use crate::recipient::{self, RecipientEntry};
 
 /// Tempfile name prefix for the in-flight `.fcr` write. Combined with
@@ -535,7 +535,7 @@ pub(crate) fn write_encrypted_file(
     archive_limits: archive::ArchiveLimits,
 ) -> Result<PathBuf, CryptoError> {
     let output_path = resolve_encrypted_output_path(output_dir, output_file, base_name);
-    reject_occupied(&output_path, "Output")?;
+    reject_occupied(&output_path, OUTPUT_LABEL)?;
 
     let mut builder = tempfile::Builder::new();
     builder.prefix(TEMP_FILE_PREFIX).suffix(INCOMPLETE_SUFFIX);
@@ -561,7 +561,7 @@ pub(crate) fn write_encrypted_file(
     let tmp = encrypt_writer.finish()?;
     tmp.as_file().sync_all()?;
 
-    atomic::finalize_file(tmp, &output_path)?;
+    atomic::finalize_file(tmp, &output_path, OUTPUT_LABEL)?;
     Ok(output_path)
 }
 

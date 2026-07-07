@@ -117,6 +117,11 @@ fn unarchive_inner<R: Read>(
     // the manifest tree shape.
     let manifest = parse_manifest_bytes(&manifest_bytes, header, limits)?;
 
+    // Reject a directory root up-front on targets without a safe
+    // directory-promotion primitive, before any output is staged, rather
+    // than extracting the whole tree and failing at the promotion step.
+    reject_unsupported_directory_root(&manifest)?;
+
     // FORMAT.md §9.11 step 8: `symlink_metadata` (via `path_occupied`)
     // so a dangling symlink at the final name is treated as occupied.
     // Built through `output_already_exists` rather than
@@ -439,6 +444,33 @@ fn promote_root(
     }
 }
 
+/// Directory-root extraction commits with a no-clobber rename that only
+/// Linux, macOS, and Windows provide (`FORMAT.md` §9.11 step 15); other
+/// targets have no safe directory-promotion primitive. Reject a directory
+/// root before any output is staged so extraction fails cleanly up front
+/// instead of after writing the whole tree. Single-file roots are
+/// unaffected — they promote through `tempfile` on every target. The
+/// error class matches the late promotion failure this replaces
+/// (`io::ErrorKind::Unsupported`).
+///
+/// The platform test is a `cfg!` value rather than a `#[cfg]` gate so the
+/// whole body type-checks on every target, not only the ones a supported
+/// build compiles.
+fn reject_unsupported_directory_root(manifest: &Manifest) -> Result<(), CryptoError> {
+    let directory_promotion_supported = cfg!(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "windows"
+    ));
+    if !directory_promotion_supported && !manifest.root_is_file {
+        return Err(CryptoError::Io(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Directory extraction is not supported on this target",
+        )));
+    }
+    Ok(())
+}
+
 /// Error for an entry whose content ended before its manifest-declared
 /// size: the archive stream is truncated relative to its own manifest.
 /// FORMAT.md §9.9.
@@ -684,6 +716,19 @@ mod tests {
             root_is_file: false,
             root_mode: 0o755,
         }
+    }
+
+    /// On the supported platforms (Linux, macOS, Windows — the CI matrix)
+    /// a directory root passes the platform guard so extraction proceeds.
+    /// The rejection path fires only on other targets and cannot run here,
+    /// but this pins that the guard does not spuriously reject if the
+    /// `cfg!` condition is ever inverted.
+    #[test]
+    fn directory_root_allowed_on_supported_platform() {
+        let manifest = dir_with_one_undersized_file_manifest();
+        assert!(!manifest.root_is_file);
+        reject_unsupported_directory_root(&manifest)
+            .expect("a directory root must be allowed on a supported platform");
     }
 
     /// Wraps `unarchive` with the test-default limits and the supplied

@@ -291,7 +291,8 @@ mod tests {
     }
 
     /// `auxiliary.txt` shares a prefix with `aux` but the stem is
-    /// 9 bytes — over the 6-byte fast-path cap, so it cannot match.
+    /// 9 bytes — over the 7-byte stem cap (`CONOUT$`, the longest
+    /// reserved stem, is 7 bytes), so it cannot match.
     #[test]
     fn accepts_long_stem_that_starts_with_reserved_prefix() {
         assert!(validate_fca_path("auxiliary.txt", limits()).is_ok());

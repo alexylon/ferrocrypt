@@ -1387,12 +1387,14 @@ mod tests {
             "File has invalid KDF settings (time cost 7)"
         );
 
-        // StreamError — every variant stringifies to a capitalized
-        // sentence start, matching the rest of the error surface. The
-        // three non-internal markers (DecryptAead / Truncated /
-        // ExtraData) have no CryptoError payload carrying their text
-        // (they downcast to typed variants with their own Display),
-        // so this is the only place their wording is locked in.
+        // StreamError Display text. The four user-facing markers
+        // (DecryptAead, Truncated, ExtraData, ChunkCountExceeded) start
+        // capitalized like the rest of the error surface; the two
+        // internal-bug markers (EncryptAead, StateExhausted) are
+        // deliberately lowercase because they only ever render after an
+        // "Internal ...:" prefix. This is the only place the user-facing
+        // markers' wording is locked in — they downcast to typed
+        // CryptoError variants that carry their own Display.
         assert_eq!(
             StreamError::DecryptAead.to_string(),
             "Payload authentication failed"

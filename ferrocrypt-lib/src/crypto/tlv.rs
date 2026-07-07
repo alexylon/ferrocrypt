@@ -304,11 +304,12 @@ mod tests {
     }
 
     #[test]
-    fn validate_tlv_rejects_len_above_region_cap() {
-        // tag=0x0001, len=u32::MAX. Even though the on-disk region
-        // is sized within `EXT_LEN_MAX`, a per-entry `len` field that
-        // exceeds the cap must be rejected before integer
-        // conversion to `usize`.
+    fn validate_tlv_rejects_len_above_value_cap() {
+        // tag=0x0001, len=u32::MAX. `validate_tlv` passes `EXT_LEN_MAX`
+        // as the per-value cap, so a declared `len` above it is rejected
+        // before the integer conversion to `usize`, even though the
+        // on-disk region itself is within the region cap. The region-cap
+        // path has its own test (`validate_tlv_rejects_region_over_cap`).
         let mut region = Vec::new();
         region.extend_from_slice(&0x0001u16.to_be_bytes());
         region.extend_from_slice(&u32::MAX.to_be_bytes());

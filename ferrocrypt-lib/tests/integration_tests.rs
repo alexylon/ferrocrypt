@@ -1533,7 +1533,8 @@ fn test_truncated_passphrase_file() -> Result<(), CryptoError> {
     let encrypted_path = encrypt_dir.join("data.fcr");
     let data = fs::read(&encrypted_path)?;
 
-    // Keep only 30 bytes: enough for the 27-byte encoded prefix but not a full header
+    // Keep only 30 bytes: the 12-byte prefix plus part of the header,
+    // enough for magic detection but not a complete header.
     let truncated = &data[..30];
     fs::write(&encrypted_path, truncated)?;
 
@@ -1701,15 +1702,15 @@ fn test_recipient_header_tamper_detection() -> Result<(), CryptoError> {
         |_| {},
     );
 
+    // Single x25519 recipient, one flipped `stream_nonce` byte: the wrap
+    // key derivation does not involve `stream_nonce`, so the slot unwraps
+    // and yields the real file key, but the header MAC over the tampered
+    // bytes no longer verifies. The one reachable verdict is
+    // `HeaderMacFailedAfterUnwrap { type_name: "x25519" }`.
     match result {
         Err(CryptoError::HeaderMacFailedAfterUnwrap { ref type_name }) if type_name == "x25519" => {
         }
-        Err(CryptoError::HeaderTampered) => {}
-        Err(CryptoError::NoSupportedRecipient) => {}
-        Err(CryptoError::RecipientUnwrapFailed { .. }) => {}
-        other => {
-            panic!("expected HeaderMacFailedAfterUnwrap(x25519) or HeaderTampered, got {other:?}")
-        }
+        other => panic!("expected HeaderMacFailedAfterUnwrap(x25519), got {other:?}"),
     }
 
     Ok(())
@@ -1843,22 +1844,17 @@ fn test_wrong_format_type_recipient_as_passphrase() -> Result<(), CryptoError> {
         |_| {},
     );
 
-    // v1 has no per-file mode byte: a file's mode is derived from its
-    // recipient list (one `argon2id` => `Passphrase`; one or more
-    // `x25519` => `PrivateKey`). Asking `passphrase_auto` to decrypt a
-    // recipient file therefore fails because the recipient list
-    // contains no `argon2id` slot the passphrase path could unwrap.
-    // Per `FORMAT.md` §3.4 / §3.5 the canonical surfaced error is
-    // `NoSupportedRecipient`, but `RecipientUnwrapFailed` /
-    // `IncompatibleRecipients` are also acceptable depending on the
-    // implementation's iteration order.
-    assert!(result.is_err());
-    match &result {
-        Err(CryptoError::NoSupportedRecipient)
-        | Err(CryptoError::IncompatibleRecipients { .. })
-        | Err(CryptoError::RecipientUnwrapFailed { .. })
-        | Err(CryptoError::InvalidFormat(_)) => {}
-        other => panic!("Expected mode-mismatch rejection, got {:?}", other),
+    // `passphrase_auto` classifies the file via `Decryptor::open`, which
+    // routes a recipient (`x25519`) file to the `PrivateKey` variant; the
+    // shim then refuses to drive it through the passphrase path and
+    // returns `NoSupportedRecipient`. This pins the auto-routing shim's
+    // refusal, not the library's own mode-mismatch handling — that is
+    // covered directly by
+    // `protocol::tests::decrypt_rejects_recipient_file_with_passphrase_credential`,
+    // which asserts `DecryptorModeMismatch`.
+    match result {
+        Err(CryptoError::NoSupportedRecipient) => {}
+        other => panic!("expected NoSupportedRecipient from the passphrase shim, got {other:?}"),
     }
 
     Ok(())
@@ -2078,7 +2074,8 @@ fn test_passphrase_empty_file_rejected() -> Result<(), CryptoError> {
     let encrypted_path = encrypt_dir.join("data.fcr");
     let data = fs::read(&encrypted_path)?;
 
-    // Keep only the 27-byte encoded prefix — enough for detection, no payload
+    // Keep only 27 bytes: the 12-byte prefix plus part of the header —
+    // enough for magic detection, but the header is incomplete.
     let prefix_only = &data[..27];
     fs::write(&encrypted_path, prefix_only)?;
 
@@ -2161,8 +2158,8 @@ fn test_passphrase_truncated_mid_header() -> Result<(), CryptoError> {
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let data = fs::read(&encrypted_path)?;
 
-    // Truncate after the 27-byte encoded prefix (enough for magic-byte detection)
-    // but before the header ends — in the middle of the salt field
+    // Keep 30 bytes: the 12-byte prefix plus part of the header, so magic
+    // detection succeeds but the header ends mid-field.
     let truncated = &data[..30];
     fs::write(&encrypted_path, truncated)?;
 
@@ -2192,28 +2189,27 @@ fn test_passphrase_oversized_ext_len() -> Result<(), CryptoError> {
 
     passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
-    // Set ext_len to 0xFFFF in all 3 replicated copies of the prefix.
-    // Encoded prefix: [pad(3)] [copy0(8)] [copy1(8)] [copy2(8)]
-    // ext_len lives at offsets 6..=7 inside each 8-byte copy.
+    // `ext_len` is the u32 at file offset 20: prefix(12) + header_flags(2)
+    // + recipient_count(2) + recipient_entries_len(4). Raising it above
+    // EXT_LEN_MAX (65,536) makes the structural header parse reject with
+    // `ExtTooLarge` before any recipient work runs.
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
-    const EXT_HI: usize = 6;
-    const EXT_LO: usize = 7;
-    for copy_start in [3, 11, 19] {
-        data[copy_start + EXT_HI] = 0xFF;
-        data[copy_start + EXT_LO] = 0xFF;
-    }
+    const EXT_LEN_OFFSET: usize = 20;
+    data[EXT_LEN_OFFSET..EXT_LEN_OFFSET + 4].copy_from_slice(&u32::MAX.to_be_bytes());
     fs::write(&encrypted_path, &data)?;
 
-    let result = passphrase_auto(
+    match passphrase_auto(
         &encrypted_path,
         &decrypt_dir,
         &passphrase,
         None,
         None,
         |_| {},
-    );
-    assert!(result.is_err());
+    ) {
+        Err(CryptoError::InvalidFormat(ferrocrypt::FormatDefect::ExtTooLarge { .. })) => {}
+        other => panic!("expected ExtTooLarge for oversized ext_len, got {other:?}"),
+    }
     Ok(())
 }
 
@@ -2250,8 +2246,8 @@ fn test_recipient_truncated_mid_header() -> Result<(), CryptoError> {
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let data = fs::read(&encrypted_path)?;
 
-    // Truncate after the 27-byte encoded prefix (enough for magic-byte detection)
-    // but before the header ends — in the middle of the envelope field
+    // Keep 30 bytes: the 12-byte prefix plus part of the header, so magic
+    // detection succeeds but the header ends mid-field.
     let truncated = &data[..30];
     fs::write(&encrypted_path, truncated)?;
 
@@ -2299,19 +2295,17 @@ fn test_recipient_oversized_ext_len() -> Result<(), CryptoError> {
         |_| {},
     )?;
 
-    // Set ext_len to 0xFFFF in all 3 replicated copies of the prefix.
-    // ext_len lives at offsets 6..=7 inside each 8-byte copy.
+    // `ext_len` is the u32 at file offset 20: prefix(12) + header_flags(2)
+    // + recipient_count(2) + recipient_entries_len(4). Raising it above
+    // EXT_LEN_MAX (65,536) makes the structural header parse reject with
+    // `ExtTooLarge` before any recipient work runs.
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
-    const EXT_HI: usize = 6;
-    const EXT_LO: usize = 7;
-    for copy_start in [3, 11, 19] {
-        data[copy_start + EXT_HI] = 0xFF;
-        data[copy_start + EXT_LO] = 0xFF;
-    }
+    const EXT_LEN_OFFSET: usize = 20;
+    data[EXT_LEN_OFFSET..EXT_LEN_OFFSET + 4].copy_from_slice(&u32::MAX.to_be_bytes());
     fs::write(&encrypted_path, &data)?;
 
-    let result = recipient_auto(
+    match recipient_auto(
         &encrypted_path,
         &decrypt_dir,
         &private_key_path,
@@ -2319,8 +2313,10 @@ fn test_recipient_oversized_ext_len() -> Result<(), CryptoError> {
         None,
         None,
         |_| {},
-    );
-    assert!(result.is_err());
+    ) {
+        Err(CryptoError::InvalidFormat(ferrocrypt::FormatDefect::ExtTooLarge { .. })) => {}
+        other => panic!("expected ExtTooLarge for oversized ext_len, got {other:?}"),
+    }
 
     Ok(())
 }
@@ -2834,14 +2830,31 @@ fn test_keygen_no_partial_state_on_existing_key() -> Result<(), CryptoError> {
     let test_dir = setup_test_dir("keygen_no_partial");
     let passphrase = SecretString::from("atomic_pass".to_string());
 
-    // First keygen succeeds
+    // First keygen succeeds.
     generate_key_pair(&passphrase, &test_dir, |_| {})?;
-    assert!(test_dir.join("private.key").exists());
-    assert!(test_dir.join("public.key").exists());
+    let private_before = fs::read(test_dir.join("private.key"))?;
+    let public_before = fs::read(test_dir.join("public.key"))?;
 
-    // Second keygen to the same dir fails — keys already exist
+    // Second keygen to the same dir fails — the keys already exist.
     let result = generate_key_pair(&passphrase, &test_dir, |_| {});
-    assert!(result.is_err());
+    assert!(
+        result.is_err(),
+        "keygen must refuse to overwrite existing keys"
+    );
+
+    // No partial state: the pre-existing keys are byte-for-byte intact and
+    // no `.ferrocrypt-*` staging tempfile is left behind.
+    assert_eq!(fs::read(test_dir.join("private.key"))?, private_before);
+    assert_eq!(fs::read(test_dir.join("public.key"))?, public_before);
+    let leftover: Vec<String> = fs::read_dir(&test_dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(".ferrocrypt-"))
+        .collect();
+    assert!(
+        leftover.is_empty(),
+        "no staging tempfile should remain after a failed keygen: {leftover:?}"
+    );
 
     Ok(())
 }
@@ -2877,16 +2890,19 @@ fn test_private_key_salt_tamper_rejected() -> Result<(), CryptoError> {
         |_| {},
     )?;
 
-    // Flip one byte inside the 32-byte Argon2 salt region. v1 body layout:
-    //   [argon2_salt(32)][kdf_params(12)][wrap_nonce(24)][ext_bytes(0)][wrapped_private_key(48)]
-    // The salt region starts directly after the 9-byte cleartext header.
+    // The 32-byte Argon2 salt sits at offset 22 in the private.key
+    // cleartext header, after magic(4), version(1), kind(1), key_flags(2),
+    // and the four length fields (16). It is bound as AEAD associated data
+    // and doubles as the Argon2/HKDF salt, so flipping one byte both derives
+    // the wrong wrap key and fails AAD authentication — surfacing as the
+    // ambiguity-preserving `KeyFileUnlockFailed`.
     let private_key_path = keys_dir.join("private.key");
     let mut key_data = fs::read(&private_key_path)?;
-    let salt_offset = 9;
-    key_data[salt_offset] ^= 0x01;
+    const SALT_OFFSET: usize = 22;
+    key_data[SALT_OFFSET] ^= 0x01;
     fs::write(&private_key_path, &key_data)?;
 
-    let result = recipient_auto(
+    match recipient_auto(
         encrypt_dir.join("data.fcr"),
         &decrypt_dir,
         &private_key_path,
@@ -2894,20 +2910,20 @@ fn test_private_key_salt_tamper_rejected() -> Result<(), CryptoError> {
         None,
         None,
         |_| {},
-    );
-    assert!(
-        result.is_err(),
-        "tampered salt must not decrypt even with the correct passphrase"
-    );
+    ) {
+        Err(CryptoError::KeyFileUnlockFailed) => {}
+        other => panic!("tampered salt must fail key-file unlock, got {other:?}"),
+    }
 
     Ok(())
 }
 
-/// Setting a reserved key-file flag bit must be rejected by the
-/// structural validator before the KDF is even attempted. The flags
-/// field is also part of the AEAD AAD on decrypt — even if the
-/// validator were bypassed, AEAD authentication would also reject the
-/// tampered file — but the cheap structural check comes first.
+/// Tampering the `ext_len` field of a `private.key` cleartext header
+/// makes the declared length no longer match the on-disk body, so the
+/// structural validator rejects it as `MalformedPrivateKey` before the
+/// KDF is attempted. `ext_len` is also part of the AEAD AAD, so a tamper
+/// that somehow passed the length check would still fail authentication
+/// on unlock — but the cheap structural check comes first.
 #[test]
 fn test_private_key_ext_len_tamper_rejected() -> Result<(), CryptoError> {
     let test_dir = setup_test_dir("private_key_ext_len_tamper");
@@ -2993,11 +3009,10 @@ fn test_probe_valid_passphrase_file() -> Result<(), CryptoError> {
     Ok(())
 }
 
-/// L-4 regression: a short random file with `0xFC` at bytes 3 and 11 (the
-/// first two replication-copy positions) must not be misclassified as a
-/// truncated `.fcr`. The detector requires every copy position to be
-/// within the read-in region before voting, so a file shorter than 20
-/// bytes returns `Ok(None)` regardless of which bytes happen to match.
+/// A short file whose first four bytes are not the `FCR\0` magic must not
+/// be misclassified as an encrypted `.fcr`. The probe reads the 4-byte
+/// magic at offset 0; here `0xFC` sits at bytes 3 and 11 — never as the
+/// magic at offset 0 — so the probe returns `Ok(None)`.
 #[test]
 fn test_probe_short_file_with_two_magic_bytes_returns_none() {
     let dir = setup_test_dir("probe_two_magic_coincidence");
@@ -3008,7 +3023,7 @@ fn test_probe_short_file_with_two_magic_bytes_returns_none() {
     fs::write(&path, &data).unwrap();
     assert!(
         probe_recipient_mode(&path).unwrap().is_none(),
-        "a sub-20-byte file cannot be classified as a truncated `.fcr`"
+        "a file without the FCR\\0 magic cannot be classified as a `.fcr`"
     );
 }
 
@@ -3016,15 +3031,15 @@ fn test_probe_short_file_with_two_magic_bytes_returns_none() {
 fn test_probe_short_file_with_single_magic_byte_returns_none() {
     let dir = setup_test_dir("probe_single_magic");
     let path = dir.join("coincidence.bin");
-    // A short file with 0xFC at position 3 by coincidence — only one copy
-    // position matches, so majority vote says "not ferrocrypt."
+    // A short file with a single stray `0xFC` at byte 3: the first four
+    // bytes are not `FCR\0`, so the probe returns `Ok(None)`.
     let mut data = vec![0u8; 10];
     data[3] = 0xFC;
     fs::write(&path, &data).unwrap();
     let result = probe_recipient_mode(&path);
     assert!(
         result.unwrap().is_none(),
-        "single magic byte should not trigger false positive"
+        "a stray byte must not trigger a false `.fcr` classification"
     );
 }
 

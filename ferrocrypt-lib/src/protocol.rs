@@ -1105,6 +1105,76 @@ mod tests {
         }
     }
 
+    /// FORMAT.md §3.7 step 13 — "If HMAC verification fails, continue
+    /// trying other candidate recipients." Slot 1 wraps a DECOY file key
+    /// (alice unwraps it, but the derived header key does not verify the
+    /// MAC); slot 2 wraps the REAL file key for alice. Decrypt MUST NOT
+    /// stop at slot 1's MAC failure — it must reach slot 2 and succeed. A
+    /// "fail fast on first MAC failure" regression turns this into an error.
+    #[test]
+    fn multi_x25519_continues_past_mac_failure_to_later_slot() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let keys_dir = tmp.path().join("keys");
+        let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
+
+        let real_file_key = FileKey::generate().unwrap();
+        let decoy_file_key = FileKey::generate().unwrap();
+
+        // Both slots target alice, but slot 1 seals the decoy key.
+        let body_decoy = x25519::wrap(&decoy_file_key, &pub_a)?;
+        let body_real = x25519::wrap(&real_file_key, &pub_a)?;
+        let entries = [
+            RecipientEntry::native(NativeRecipientType::X25519, body_decoy.to_vec())?,
+            RecipientEntry::native(NativeRecipientType::X25519, body_real.to_vec())?,
+        ];
+
+        let payload = b"decrypt must reach slot 2";
+        let fcr = tmp.path().join("mac-fail-then-ok.fcr");
+        build_multi_recipient_fcr(&entries, &real_file_key, payload, &fcr)?;
+
+        let dec_dir = tmp.path().join("decrypted");
+        fs::create_dir_all(&dec_dir)?;
+        recipient_decrypt(&fcr, &dec_dir, &priv_a, &pass_a)?;
+        assert_eq!(
+            fs::read(dec_dir.join("data.txt"))?,
+            payload,
+            "slot 2 must decrypt after slot 1's MAC failure"
+        );
+        Ok(())
+    }
+
+    /// Order mirror of
+    /// [`multi_x25519_continues_past_mac_failure_to_later_slot`]: the REAL
+    /// slot is first and the decoy second. The first slot MAC-verifies, so
+    /// decrypt succeeds via it; the later decoy slot's MAC failure MUST NOT
+    /// undo that success.
+    #[test]
+    fn multi_x25519_later_mac_failure_does_not_undo_earlier_success() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let keys_dir = tmp.path().join("keys");
+        let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
+
+        let real_file_key = FileKey::generate().unwrap();
+        let decoy_file_key = FileKey::generate().unwrap();
+
+        let body_real = x25519::wrap(&real_file_key, &pub_a)?;
+        let body_decoy = x25519::wrap(&decoy_file_key, &pub_a)?;
+        let entries = [
+            RecipientEntry::native(NativeRecipientType::X25519, body_real.to_vec())?,
+            RecipientEntry::native(NativeRecipientType::X25519, body_decoy.to_vec())?,
+        ];
+
+        let payload = b"first slot wins";
+        let fcr = tmp.path().join("ok-then-mac-fail.fcr");
+        build_multi_recipient_fcr(&entries, &real_file_key, payload, &fcr)?;
+
+        let dec_dir = tmp.path().join("decrypted");
+        fs::create_dir_all(&dec_dir)?;
+        recipient_decrypt(&fcr, &dec_dir, &priv_a, &pass_a)?;
+        assert_eq!(fs::read(dec_dir.join("data.txt"))?, payload);
+        Ok(())
+    }
+
     /// Defense-in-depth: an exclusive scheme (`argon2id`) MUST not be
     /// emitted with more than one recipient. The public API has no path
     /// to construct that, but a future caller bypass would break the

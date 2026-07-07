@@ -69,6 +69,21 @@ const DIR_CREATE_MODE: u32 = 0o700;
 /// `create_file_at`.
 pub(crate) const INITIAL_FILE_CREATE_MODE: u32 = 0o600;
 
+/// Whether this target has a safe no-clobber directory-promotion
+/// backend for committing a directory-root extraction (`FORMAT.md`
+/// §9.11 step 15): Linux and macOS via the handle-relative
+/// `rename_at_no_clobber`, Windows via the path-based `rename_no_clobber`.
+/// No other target has one, so both the archive writer and the extractor
+/// refuse a directory root there — keeping "wrote it" symmetric with
+/// "can read it back." Single source of truth for the supported set so
+/// the two sides cannot drift. A `cfg!` value (not a `#[cfg]` gate) so
+/// every caller type-checks on every target.
+pub(crate) const DIRECTORY_PROMOTION_SUPPORTED: bool = cfg!(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows"
+));
+
 /// `FILE_ATTRIBUTE_REPARSE_POINT` from `WinNT.h`. Stable Win32 ABI
 /// bit set on EVERY reparse point regardless of tag — symlinks,
 /// junctions, mount points, and any future tag. Single source of

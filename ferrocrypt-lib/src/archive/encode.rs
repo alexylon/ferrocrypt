@@ -307,6 +307,15 @@ pub(crate) fn validate_encrypt_input(input_path: &Path) -> Result<(), CryptoErro
     if !file_type.is_file() && !file_type.is_dir() {
         return Err(unsupported_file_type_error(input_path));
     }
+    // Symmetric with the extractor's `decode::reject_unsupported_directory_root`:
+    // a target without a safe directory-promotion backend cannot extract a
+    // directory root, so the writer must not produce one either. Single-file
+    // inputs work on every target.
+    if file_type.is_dir() && !platform::DIRECTORY_PROMOTION_SUPPORTED {
+        return Err(CryptoError::InvalidInput(
+            "Encrypting a directory is not supported on this target".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -1149,6 +1158,21 @@ mod tests {
         let final_path = round_trip(&dir, out.path());
         assert!(final_path.is_dir());
         assert_eq!(fs::read_dir(&final_path).unwrap().count(), 0);
+    }
+
+    /// On the supported platforms (Linux, macOS, Windows — the CI matrix)
+    /// a directory input passes `validate_encrypt_input`, mirroring the
+    /// extractor's `decode::tests::directory_root_allowed_on_supported_platform`.
+    /// The rejection fires only on other targets and cannot run here, but
+    /// this pins that the guard does not spuriously reject if
+    /// `DIRECTORY_PROMOTION_SUPPORTED` is ever inverted.
+    #[test]
+    fn directory_input_allowed_on_supported_platform() {
+        let src = tempfile::TempDir::new().unwrap();
+        let dir = src.path().join("d");
+        fs::create_dir(&dir).unwrap();
+        validate_encrypt_input(&dir)
+            .expect("a directory input must be allowed on a supported platform");
     }
 
     /// Manifest determinism end-to-end: two encrypts of the same tree

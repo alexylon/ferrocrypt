@@ -444,25 +444,16 @@ fn promote_root(
     }
 }
 
-/// Directory-root extraction commits with a no-clobber rename that only
-/// Linux, macOS, and Windows provide (`FORMAT.md` §9.11 step 15); other
-/// targets have no safe directory-promotion primitive. Reject a directory
-/// root before any output is staged so extraction fails cleanly up front
-/// instead of after writing the whole tree. Single-file roots are
-/// unaffected — they promote through `tempfile` on every target. The
-/// error class matches the late promotion failure this replaces
-/// (`io::ErrorKind::Unsupported`).
-///
-/// The platform test is a `cfg!` value rather than a `#[cfg]` gate so the
-/// whole body type-checks on every target, not only the ones a supported
-/// build compiles.
+/// Rejects a directory root on targets without a safe directory-promotion
+/// backend ([`platform::DIRECTORY_PROMOTION_SUPPORTED`]), before any output
+/// is staged, so extraction fails cleanly up front instead of after writing
+/// the whole tree. Single-file roots are unaffected — they promote through
+/// `tempfile` on every target. The writer refuses the same directory input
+/// (`encode::validate_encrypt_input`), so this is not a "wrote it but cannot
+/// read it back" asymmetry. The error class matches the late promotion
+/// failure this replaces (`io::ErrorKind::Unsupported`).
 fn reject_unsupported_directory_root(manifest: &Manifest) -> Result<(), CryptoError> {
-    let directory_promotion_supported = cfg!(any(
-        target_os = "linux",
-        target_os = "macos",
-        target_os = "windows"
-    ));
-    if !directory_promotion_supported && !manifest.root_is_file {
+    if !platform::DIRECTORY_PROMOTION_SUPPORTED && !manifest.root_is_file {
         return Err(CryptoError::Io(io::Error::new(
             io::ErrorKind::Unsupported,
             "Directory extraction is not supported on this target",

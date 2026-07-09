@@ -784,8 +784,9 @@ impl PublicKey {
     ///
     /// # Errors
     ///
-    /// Returns [`CryptoError::Io`] if a referenced key file cannot be read.
-    /// Returns [`CryptoError::InvalidFormat`], [`CryptoError::InvalidInput`], or
+    /// Returns [`CryptoError::InputPath`] if a referenced key file does not
+    /// exist, and [`CryptoError::Io`] for other read failures. Returns
+    /// [`CryptoError::InvalidFormat`], [`CryptoError::InvalidInput`], or
     /// [`CryptoError::RecipientStringCapExceeded`] if a referenced key file is
     /// not a valid v1 `public.key` file.
     pub fn to_bytes(&self) -> Result<[u8; 32], CryptoError> {

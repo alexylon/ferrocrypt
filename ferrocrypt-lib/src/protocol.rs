@@ -277,7 +277,7 @@ pub(crate) fn decrypt<I: DecryptionCredential>(
     // `open_input_file` refuses FIFOs, sockets, and device nodes
     // without blocking; the encrypt side rejects the same input class
     // in `validate_encrypt_input`.
-    let mut encrypted_file = open_input_file(input_path, CryptoError::Io)?;
+    let mut encrypted_file = open_input_file(input_path)?;
 
     // 1-4. Structural read + parse. Performs zero crypto; enforces
     //      local caps before any allocation.

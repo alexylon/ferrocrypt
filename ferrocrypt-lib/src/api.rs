@@ -475,7 +475,6 @@ impl Decryptor {
         header_read_limits: Option<HeaderReadLimits>,
     ) -> Result<Self, CryptoError> {
         let input = input.to_path_buf();
-        validate_input_path(&input)?;
         if input.is_dir() {
             return Err(CryptoError::InvalidInput(format!(
                 "Cannot decrypt a directory: {}",
@@ -577,7 +576,9 @@ impl PassphraseDecryptor {
     /// errors such as [`CryptoError::RecipientUnwrapFailed`],
     /// [`CryptoError::HeaderTampered`], [`CryptoError::PayloadTampered`], or
     /// [`CryptoError::PayloadTruncated`] when credentials are wrong or the file
-    /// is modified. Returns [`CryptoError::Io`] for filesystem failures.
+    /// is modified. Returns [`CryptoError::InputPath`] if the encrypted file
+    /// no longer exists, and [`CryptoError::Io`] for other filesystem
+    /// failures.
     pub fn decrypt(
         self,
         passphrase: SecretString,
@@ -696,8 +697,9 @@ impl PrivateKeyDecryptor {
     /// or [`CryptoError::PayloadTruncated`]. `RecipientUnwrapFailed` means the
     /// private key matched no supported recipient slot, or a recipient body was
     /// modified; `NoSupportedRecipient` means the file contains no recipient
-    /// type this build can process. Returns [`CryptoError::Io`] for filesystem
-    /// failures.
+    /// type this build can process. Returns [`CryptoError::InputPath`] if the
+    /// encrypted file or the private key file does not exist, and
+    /// [`CryptoError::Io`] for other filesystem failures.
     pub fn decrypt(
         self,
         private_key: PrivateKey,
@@ -941,7 +943,8 @@ pub fn generate_key_pair(
 ///
 /// # Errors
 ///
-/// Returns [`CryptoError::Io`] if the file cannot be opened or read. Returns
+/// Returns [`CryptoError::InputPath`] if the file does not exist, and
+/// [`CryptoError::Io`] for other open or read failures. Returns
 /// [`CryptoError::InvalidInput`] if the path is not a regular file (for
 /// example a FIFO or device node) — such inputs are refused without
 /// blocking. Returns [`CryptoError::InvalidFormat`] when the magic matches
@@ -986,7 +989,7 @@ pub fn probe_recipient_mode_with_limits(
     // `open_input_file` refuses FIFOs, sockets, and device nodes
     // without blocking — `File::open` on an attacker-placed FIFO would
     // otherwise block the probe inside `open(2)` indefinitely.
-    let mut file = paths::open_input_file(path, CryptoError::Io)?;
+    let mut file = paths::open_input_file(path)?;
 
     // Peek the 4-byte magic. Anything that doesn't claim to be a
     // FerroCrypt file (empty, too short, wrong magic) routes to
@@ -1052,7 +1055,8 @@ pub fn default_encrypted_filename(input_path: impl AsRef<Path>) -> Result<String
 ///
 /// # Errors
 ///
-/// Returns [`CryptoError::Io`] if the file cannot be read. Returns
+/// Returns [`CryptoError::InputPath`] if the file does not exist, and
+/// [`CryptoError::Io`] for other read failures. Returns
 /// [`CryptoError::InvalidFormat`] or [`CryptoError::UnsupportedVersion`] if the
 /// file is not a v1 private key, is malformed, or is a public key.
 pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError> {
@@ -1081,7 +1085,8 @@ pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), Crypt
 ///
 /// # Errors
 ///
-/// Returns [`CryptoError::Io`] if the file cannot be read. Returns
+/// Returns [`CryptoError::InputPath`] if the file does not exist, and
+/// [`CryptoError::Io`] for other read failures. Returns
 /// [`CryptoError::InvalidFormat`], [`CryptoError::InvalidInput`], or
 /// [`CryptoError::RecipientStringCapExceeded`] if the text file or recipient
 /// string is malformed, unsupported, too large for local policy, or is a private
@@ -1160,19 +1165,4 @@ pub(crate) fn validate_passphrase(passphrase: &SecretString) -> Result<(), Crypt
         ));
     }
     Ok(())
-}
-
-/// Rejects missing input paths early with a typed error
-/// ([`CryptoError::InputPath`]) instead of letting the first I/O syscall
-/// surface a less informative `Io(NotFound)`. Any other metadata
-/// failure — for example `PermissionDenied` on a parent directory —
-/// propagates as [`CryptoError::Io`] so it is not misreported as a
-/// missing file. Follows symlinks, so a dangling symlink classifies as
-/// missing, exactly as the downstream open would treat it.
-pub(crate) fn validate_input_path(input_path: &Path) -> Result<(), CryptoError> {
-    match std::fs::metadata(input_path) {
-        Ok(_) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(CryptoError::InputPath),
-        Err(e) => Err(CryptoError::Io(e)),
-    }
 }

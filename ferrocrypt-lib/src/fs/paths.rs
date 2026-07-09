@@ -70,13 +70,11 @@ pub(crate) fn unsupported_file_type_error(path: &Path) -> CryptoError {
 /// established directory handling (probe short-circuits them, decrypt
 /// surfaces the platform's directory-read error).
 ///
-/// `map_open_error` translates an `open` failure so each caller keeps
-/// its established mapping ([`map_user_path_io_error`] for key files,
-/// `CryptoError::Io` for probe / decrypt).
-pub(crate) fn open_input_file(
-    path: &Path,
-    map_open_error: impl FnOnce(io::Error) -> CryptoError,
-) -> Result<File, CryptoError> {
+/// A missing path maps to the typed [`CryptoError::InputPath`] via
+/// [`map_user_path_io_error`], so every caller reports a missing input
+/// with the same typed error. Other open failures surface as
+/// [`CryptoError::Io`].
+pub(crate) fn open_input_file(path: &Path) -> Result<File, CryptoError> {
     let mut options = File::options();
     options.read(true);
     #[cfg(unix)]
@@ -84,7 +82,7 @@ pub(crate) fn open_input_file(
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NONBLOCK);
     }
-    let file = options.open(path).map_err(map_open_error)?;
+    let file = options.open(path).map_err(map_user_path_io_error)?;
     let file_type = file.metadata().map_err(CryptoError::Io)?.file_type();
     if !file_type.is_file() && !file_type.is_dir() {
         return Err(unsupported_file_type_error(path));
@@ -105,7 +103,7 @@ pub(crate) fn read_file_capped(
     cap: usize,
     over_cap_error: impl FnOnce() -> CryptoError,
 ) -> Result<Vec<u8>, CryptoError> {
-    let mut file = open_input_file(path, map_user_path_io_error)?;
+    let mut file = open_input_file(path)?;
     let mut buf = Vec::with_capacity(cap.saturating_add(1).min(64 * 1024));
     let read = file
         .by_ref()
@@ -229,11 +227,10 @@ pub(crate) fn parent_or_cwd(path: &Path) -> &Path {
         .unwrap_or_else(|| Path::new("."))
 }
 
-/// Converts an [`io::Error`] from a user-provided path read into a
+/// Converts an [`io::Error`] from a user-supplied path read into a
 /// typed [`CryptoError`]. `NotFound` maps to [`CryptoError::InputPath`]
-/// so "file does not exist" gives the same pretty message here as it
-/// does from the upfront `validate_input_path` check. Everything else
-/// falls through to [`CryptoError::Io`].
+/// so a missing input reports the same typed error from every caller.
+/// Everything else falls through to [`CryptoError::Io`].
 pub(crate) fn map_user_path_io_error(e: io::Error) -> CryptoError {
     if e.kind() == io::ErrorKind::NotFound {
         CryptoError::InputPath
@@ -395,7 +392,7 @@ mod tests {
             let tmp = tempfile::TempDir::new().unwrap();
             let fifo = tmp.path().join("pipe.fcr");
             make_fifo(&fifo);
-            match open_input_file(&fifo, CryptoError::Io) {
+            match open_input_file(&fifo) {
                 Err(CryptoError::InvalidInput(msg)) => {
                     assert!(msg.contains("Unsupported file type"), "got: {msg}");
                 }
@@ -410,7 +407,7 @@ mod tests {
             let tmp = tempfile::TempDir::new().unwrap();
             let fifo = tmp.path().join("pipe\u{1b}[2K.fcr");
             make_fifo(&fifo);
-            match open_input_file(&fifo, CryptoError::Io) {
+            match open_input_file(&fifo) {
                 Err(CryptoError::InvalidInput(msg)) => {
                     assert!(msg.starts_with("Unsupported file type: "), "got: {msg}");
                     assert!(
@@ -442,7 +439,19 @@ mod tests {
             let tmp = tempfile::TempDir::new().unwrap();
             let file = tmp.path().join("regular");
             std::fs::write(&file, b"bytes").unwrap();
-            open_input_file(&file, CryptoError::Io).expect("regular file must open");
+            open_input_file(&file).expect("regular file must open");
+        }
+    }
+
+    /// A missing path maps to the typed `InputPath`, not a raw
+    /// `Io(NotFound)`.
+    #[test]
+    fn open_input_file_maps_missing_path_to_input_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let missing = tmp.path().join("absent.fcr");
+        match open_input_file(&missing) {
+            Err(CryptoError::InputPath) => {}
+            other => panic!("expected InputPath, got {other:?}"),
         }
     }
 

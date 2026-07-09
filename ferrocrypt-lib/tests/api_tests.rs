@@ -219,6 +219,86 @@ fn decryptor_open_rejects_missing_input() {
     );
 }
 
+#[test]
+fn probe_recipient_mode_reports_input_path_for_missing_file() {
+    let err = probe_recipient_mode("/nonexistent/never/exists.fcr").unwrap_err();
+    assert!(
+        matches!(err, CryptoError::InputPath),
+        "expected InputPath, got {err:?}"
+    );
+}
+
+/// A `.fcr` that disappears between `Decryptor::open` and `decrypt` must
+/// surface the same typed `InputPath` the open itself reports for a
+/// missing input, not a raw I/O error.
+#[test]
+fn passphrase_decrypt_reports_input_path_when_file_vanishes() {
+    let work = fresh_workspace("decrypt_vanished_input");
+    let input = work.join("data.txt");
+    fs::write(&input, b"x").unwrap();
+    let outcome = fast_passphrase_encryptor(pass())
+        .write(&input, &work, |_| {})
+        .expect("encrypt");
+
+    let decryptor = match Decryptor::open(&outcome.output_path).expect("open") {
+        Decryptor::Passphrase(d) => d,
+        other => panic!("expected passphrase decryptor, got {other:?}"),
+    };
+    fs::remove_file(&outcome.output_path).unwrap();
+
+    let err = decryptor.decrypt(pass(), &work, |_| {}).unwrap_err();
+    assert!(
+        matches!(err, CryptoError::InputPath),
+        "expected InputPath, got {err:?}"
+    );
+}
+
+/// Private-key variant of the vanished-input race: the structural
+/// re-probe inside `PrivateKeyDecryptor::decrypt` runs before the
+/// `private.key` unlock, so the missing file must surface as
+/// `InputPath` with no Argon2id work.
+#[test]
+fn private_key_decrypt_reports_input_path_when_file_vanishes() {
+    let work = fresh_workspace("pk_decrypt_vanished_input");
+    let keys = work.join("keys");
+    fs::create_dir_all(&keys).unwrap();
+    let kg = generate_key_pair(&keys, pass(), |_| {}).expect("keygen");
+    let input = work.join("data.txt");
+    fs::write(&input, b"x").unwrap();
+    let outcome = Encryptor::with_public_key(PublicKey::from_key_file(&kg.public_key_path))
+        .write(&input, &work, |_| {})
+        .expect("encrypt");
+
+    let decryptor = match Decryptor::open(&outcome.output_path).expect("open") {
+        Decryptor::PrivateKey(d) => d,
+        other => panic!("expected private-key decryptor, got {other:?}"),
+    };
+    fs::remove_file(&outcome.output_path).unwrap();
+
+    let unlock_event_count = std::cell::Cell::new(0u32);
+    let err = decryptor
+        .decrypt(
+            PrivateKey::from_key_file(&kg.private_key_path),
+            pass(),
+            &work,
+            |evt| {
+                if matches!(evt, ferrocrypt::ProgressEvent::UnlockingPrivateKey) {
+                    unlock_event_count.set(unlock_event_count.get() + 1);
+                }
+            },
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, CryptoError::InputPath),
+        "expected InputPath, got {err:?}"
+    );
+    assert_eq!(
+        unlock_event_count.get(),
+        0,
+        "Argon2id unlock ran before the vanished-input rejection",
+    );
+}
+
 /// `fast_passphrase_encryptor("")` must reject the empty passphrase
 /// at the top of `write`, before the input-existence check fires. Pins
 /// the cheap-caller-input-first ordering matching the deprecated

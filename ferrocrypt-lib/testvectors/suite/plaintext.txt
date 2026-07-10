@@ -1,0 +1,1 @@
+FerroCrypt v1 test-vector suite plaintext.

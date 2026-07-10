@@ -1,0 +1,40 @@
+# FerroCrypt v1 edge-case test-vector manifest.
+# Columns (tab-separated): file, action, credential, expect, error_class, error_message.
+# action: decrypt (open the .fcr and decrypt with the credential) or read-public-key.
+# credential: passphrase:<literal>, private-key:<path>,unlock=<literal>, or -.
+# expect ok: decryption must succeed and reproduce plaintext.txt byte-for-byte.
+# expect error: the attempt must fail; error_class names the typed CryptoError
+# variant and error_message is the exact user-facing message.
+cases/argon2id-valid.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	ok	-	-
+cases/x25519-valid.fcr	decrypt	private-key:keys/recipient-a.private.key,unlock=suite-passphrase-not-secret-do-not-reuse	ok	-	-
+cases/x25519-multi-valid.fcr	decrypt	private-key:keys/recipient-a.private.key,unlock=suite-passphrase-not-secret-do-not-reuse	ok	-	-
+cases/x25519-multi-valid.fcr	decrypt	private-key:keys/recipient-b.private.key,unlock=suite-passphrase-not-secret-do-not-reuse	ok	-	-
+cases/argon2id-valid.fcr	decrypt	passphrase:wrong-passphrase	error	RecipientUnwrapFailed(argon2id)	Decryption failed: wrong passphrase or modified file
+cases/x25519-valid.fcr	decrypt	private-key:keys/recipient-b.private.key,unlock=suite-passphrase-not-secret-do-not-reuse	error	RecipientUnwrapFailed(x25519)	Decryption failed: no matching recipient or modified file
+cases/prefix-bad-magic.fcr	decrypt	-	error	InvalidFormat(BadMagic)	Not a FerroCrypt file
+cases/prefix-newer-version.fcr	decrypt	-	error	UnsupportedVersion(NewerFile)	Newer file format (v2). Upgrade FerroCrypt.
+cases/prefix-wrong-kind.fcr	decrypt	-	error	InvalidFormat(WrongKind)	Wrong file kind: 0x4B
+cases/prefix-nonzero-flags.fcr	decrypt	-	error	InvalidFormat(MalformedHeader)	File header is malformed
+cases/prefix-oversized-header-len.fcr	decrypt	-	error	InvalidFormat(OversizedHeader)	File header is too large (16777217 bytes)
+cases/header-truncated.fcr	decrypt	-	error	InvalidFormat(Truncated)	File is truncated or corrupted
+cases/header-mac-tampered-passphrase.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	HeaderTampered	Decryption failed: file header was modified or corrupted
+cases/header-mac-tampered-x25519.fcr	decrypt	private-key:keys/recipient-a.private.key,unlock=suite-passphrase-not-secret-do-not-reuse	error	HeaderMacFailedAfterUnwrap(x25519)	Decryption failed: file header was modified or corrupted
+cases/payload-truncated.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	PayloadTruncated	Encrypted file is truncated
+cases/payload-tampered.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	PayloadTampered	Decryption failed: file data was modified or corrupted
+cases/payload-trailing-data.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	PayloadTampered	Decryption failed: file data was modified or corrupted
+cases/x25519-zero-ephemeral.fcr	decrypt	private-key:keys/recipient-a.private.key,unlock=suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(MalformedRecipientEntry)	Recipient entry is malformed
+cases/tlv-bad-order.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(MalformedTlv)	Extension region is malformed
+cases/tlv-duplicate-tag.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(MalformedTlv)	Extension region is malformed
+cases/tlv-len-past-end.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(MalformedTlv)	Extension region is malformed
+cases/tlv-unknown-critical.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(UnknownCriticalTag)	Unknown required file feature (tag 0x8001). Upgrade FerroCrypt.
+cases/tlv-unknown-ignorable.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	ok	-	-
+cases/kdf-mem-over-max.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidKdfParams(MemoryCost)	File has invalid KDF settings (2097153 KiB memory)
+cases/kdf-lanes-zero.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidKdfParams(Parallelism)	File has invalid KDF settings (parallelism 0)
+cases/kdf-time-over-max.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidKdfParams(TimeCost)	File has invalid KDF settings (time cost 13)
+cases/recipient-unknown-critical.fcr	decrypt	-	error	UnknownCriticalRecipient(mlkem768)	Unsupported recipient `mlkem768`. Upgrade FerroCrypt.
+cases/recipient-unknown-only.fcr	decrypt	-	error	NoSupportedRecipient	Decryption failed: no supported recipient
+cases/recipient-mixed-exclusive.fcr	decrypt	-	error	IncompatibleRecipients(argon2id)	Recipient `argon2id` mixed with another recipient
+cases/recipient-unknown-skipped.fcr	decrypt	private-key:keys/recipient-a.private.key,unlock=suite-passphrase-not-secret-do-not-reuse	ok	-	-
+cases/public-key-uppercase.key	read-public-key	-	error	InvalidInput	Recipient string must be lowercase
+cases/public-key-bad-bech32.key	read-public-key	-	error	InvalidInput	Invalid recipient string: fcr1qyqqvqqqqqs8sv34x5cnjz4jeajmc5ehhkjwwkf0jzr3ktnwfz0zgmswltcx…
+cases/public-key-bad-checksum.key	read-public-key	-	error	InvalidFormat(MalformedPublicKey)	Public key is malformed

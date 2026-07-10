@@ -165,7 +165,8 @@ ferrocrypt-lib/src/
 │   ├── atomic.rs
 │   └── paths.rs
 │
-└── fuzz_exports.rs
+├── fuzz_exports.rs
+└── suite_vector_gen.rs   (test-only)
 ```
 
 Each file represents a stable responsibility boundary. File size is not the organizing principle; ownership, auditability, and prevention of duplicated security logic are the organizing principles.
@@ -364,6 +365,12 @@ Public error names may be compatibility-oriented, but their display text must pr
 `fuzz_exports.rs` exposes internal parser and validation entry points needed by fuzz targets.
 
 It is not part of the stable public API. It must not become an alternate implementation path for parsing, validation, cryptography, or archive handling.
+
+### 3.8 `suite_vector_gen.rs`
+
+`suite_vector_gen.rs` is a `#[cfg(test)]`-only module holding the ignored generator test for the committed `testvectors/suite/` edge-case corpus. It needs crate internals (`container::build_encrypted_header`, recipient `wrap` helpers, TLV byte building) to craft fixtures the public writer refuses to produce; the corpus itself is verified through the public API by `tests/testvector_suite.rs` on every test run.
+
+It is compiled only for tests and must not grow non-generation logic.
 
 ---
 

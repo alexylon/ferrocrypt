@@ -4,6 +4,9 @@ All notable changes to FerroCrypt are documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **A committed edge-case test-vector corpus now ships in the repository under `ferrocrypt-lib/testvectors/suite/`.** Each fixture is a real encrypted file or key file carrying exactly one defect — corrupted prefix, malformed extension region, out-of-range key-derivation parameters, truncated or modified payload, wrong credential, tampered header, unknown or illegally mixed recipients, malformed public key — plus a manifest naming the attempted operation and the exact error the reader must produce (and a few files that must decrypt). Independent implementations can verify against these files without reading FerroCrypt's test code; FerroCrypt's own test suite replays the full manifest on every run.
+
 ### Fixed
 - **A `.fcr` that disappears before decryption or probing starts is now reported as "Input file or folder missing".** `Decryptor::open` already reported a missing input this way; a file deleted between that open and the decrypt call — or handed directly to `probe_recipient_mode` — surfaced as a raw I/O error instead of the typed `InputPath`.
 - **Error messages now escape file names taken from the command line or a file picker.** Names discovered inside an archive were already escaped; a caller-supplied input path whose name carried terminal control bytes could still reach the terminal raw through a rejection message (for example "Unsupported file type: …" or "Input is a symlink: …"). Input paths embedded in an error are now escaped and length-bounded the same way as archive-internal names, and the "already exists" conflict messages escape the file name while keeping the directory part readable, so a hostile file name cannot inject terminal escape sequences through an error.

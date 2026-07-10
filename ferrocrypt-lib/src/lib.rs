@@ -406,6 +406,9 @@ mod recipient;
 #[cfg(feature = "fuzzing")]
 pub mod fuzz_exports;
 
+#[cfg(test)]
+mod suite_vector_gen;
+
 /// Decodes a Bech32 recipient string (`fcr1…`) into raw X25519 public-key
 /// material.
 ///

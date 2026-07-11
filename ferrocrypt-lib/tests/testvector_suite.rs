@@ -30,9 +30,7 @@ fn suite_dir() -> PathBuf {
 
 #[ctor::dtor]
 fn cleanup() {
-    if Path::new(TEST_WORKSPACE).exists() {
-        let _ = fs::remove_dir_all(TEST_WORKSPACE);
-    }
+    ferrocrypt_test_support::remove_per_process_workspace(TEST_WORKSPACE);
 }
 
 /// One parsed `manifest.tsv` row.
@@ -207,7 +205,10 @@ fn suite_manifest_holds() {
 
     let mut failures = Vec::new();
     for (index, row) in rows.iter().enumerate() {
-        let out = Path::new(TEST_WORKSPACE).join(format!("row-{index}"));
+        // Per-process subtree, so a concurrent `cargo test` invocation
+        // of this binary cannot delete files this run is using.
+        let out = ferrocrypt_test_support::per_process_workspace(TEST_WORKSPACE)
+            .join(format!("row-{index}"));
         if out.exists() {
             fs::remove_dir_all(&out).expect("clean row output dir");
         }

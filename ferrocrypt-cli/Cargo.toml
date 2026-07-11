@@ -34,3 +34,4 @@ ferrocrypt = { path = "../ferrocrypt-lib", version = "0.3.0-rc.1" }
 
 [dev-dependencies]
 ctor = "0.9"
+ferrocrypt-test-support = { path = "../ferrocrypt-test-support" }

@@ -40,15 +40,18 @@ jobs:
         # `--include-ignored` runs the `#[ignore = "fs-matrix"]` smoke
         # tests on the default filesystem too, so the build job has
         # the same coverage the fs_matrix lanes have on alternative
-        # filesystems. `--skip regenerate_fixtures` excludes the one
-        # ignored test that's a destructive maintenance utility — it
-        # deletes and rewrites `tests/fixtures/encrypted/` and
-        # `tests/fixtures/keys/`, racing against the four
+        # filesystems. The two `--skip`s exclude the ignored tests
+        # that are destructive maintenance utilities:
+        # `regenerate_fixtures` deletes and rewrites
+        # `tests/fixtures/`, racing against the four
         # `decrypt_*_fixture_matches_source` tests when run alongside
-        # them.
+        # them, and `regenerate_suite_vectors` rewrites
+        # `testvectors/suite/` — running it here would make
+        # `testvector_suite` replay the freshly generated corpus
+        # instead of the committed one the corpus exists to pin.
         env:
           FERROCRYPT_REQUIRE_WINDOWS_SYMLINK_TESTS: "1"
-        run: cargo test --verbose -- --test-threads=1 --include-ignored --skip regenerate_fixtures
+        run: cargo test --verbose -- --test-threads=1 --include-ignored --skip regenerate_fixtures --skip regenerate_suite_vectors
 
   msrv:
     runs-on: ubuntu-latest
@@ -249,6 +252,24 @@ jobs:
               hdiutil attach /tmp/fsmatrix.dmg
               echo "FERROCRYPT_FS_MATRIX_DIR=/Volumes/FCAFsMatrix" >> "$GITHUB_ENV"
             mount_teardown: hdiutil detach /Volumes/FCAFsMatrix || true
+          # macOS exFAT: the Apple exFAT driver has no
+          # renameatx_np(RENAME_EXCL), so decrypt promotion and encrypt
+          # finalization take the claim-then-rename fallback here. This
+          # is the "decrypt onto a USB stick on a Mac" scenario; the
+          # Linux and Windows exFAT lanes use different kernel drivers
+          # that never reach the fallback.
+          # The volume name MUST stay at 11 characters or fewer: exFAT
+          # labels are capped there, and macOS silently drops a longer
+          # label and mounts the volume at "/Volumes/NO NAME", so the
+          # lane would point FERROCRYPT_FS_MATRIX_DIR at a nonexistent
+          # path.
+          - name: macos-exfat
+            os: macos-latest
+            mount_setup: |
+              hdiutil create -size 200m -fs ExFAT -volname FCAFSMEXFAT /tmp/fsmatrix-exfat.dmg
+              hdiutil attach /tmp/fsmatrix-exfat.dmg
+              echo "FERROCRYPT_FS_MATRIX_DIR=/Volumes/FCAFSMEXFAT" >> "$GITHUB_ENV"
+            mount_teardown: hdiutil detach /Volumes/FCAFSMEXFAT || true
           # Linux btrfs: copy-on-write semantics, snapshot-aware.
           # Different inode allocator and rename behavior than ext4.
           - name: linux-btrfs

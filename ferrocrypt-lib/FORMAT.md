@@ -1479,10 +1479,23 @@ On platforms where FerroCrypt has a safe handle-relative no-clobber rename
 backend (Linux and macOS), step 15 MUST resolve both the staged source name and
 the final target name through the same trusted destination directory handle used
 for extraction. A rename or replacement of the ambient `output_dir` path during
-the run then cannot redirect the commit. On Windows, the zero-unsafe
-implementation keeps the documented path-based final rename: single-file roots
-use a kernel atomic no-replace move, while directory roots use the best-effort
-check-then-rename sequence described in `SECURITY.md`.
+the run then cannot redirect the commit.
+
+The step-15 commit SHOULD be a single atomic no-replace rename. On a filesystem
+whose driver cannot perform one (the macOS exFAT driver among them), readers
+MAY commit in two steps: atomically claim the final name — exclusive-create for
+a file root, `mkdir` for a directory root — then rename the staged root over
+the claim, because the exclusive claim preserves the no-clobber guarantee (an
+entry that predates the commit is never replaced) and the rename lands content
+at the final name whole. Both steps MUST resolve through the same trusted
+directory handle where the platform backend is handle-relative. A crash between
+the two steps leaves an empty claimed entry alongside the staged
+`.incomplete` root.
+
+On Windows, the zero-unsafe implementation keeps the documented path-based
+final rename: single-file roots use a kernel atomic no-replace move, while
+directory roots use the best-effort check-then-rename sequence described in
+`SECURITY.md`.
 
 Extraction uses staged output:
 

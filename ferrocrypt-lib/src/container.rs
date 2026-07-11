@@ -520,7 +520,8 @@ pub(crate) fn resolve_encrypted_output_path(
 ///
 /// Atomicity: the file is written under a `.ferrocrypt-*.incomplete`
 /// tempfile in the destination's parent directory, then renamed via
-/// [`atomic::finalize_file`] only after `sync_all`. A pre-existing
+/// [`atomic::finalize_file`] only after [`atomic::sync_file_durable`]
+/// has flushed it to stable storage. A pre-existing
 /// output path rejects with `CryptoError::InvalidInput` before any
 /// tempfile is created, so an unrelated file at the destination is
 /// never touched.
@@ -557,7 +558,7 @@ pub(crate) fn write_encrypted_file(
     let encrypt_writer = payload_encryptor(&built.payload_key, &built.stream_nonce, tmp);
     let encrypt_writer = archive::archive(input_path, encrypt_writer, archive_limits)?;
     let tmp = encrypt_writer.finish()?;
-    tmp.as_file().sync_all()?;
+    atomic::sync_file_durable(tmp.as_file())?;
 
     atomic::finalize_file(tmp, &output_path, OUTPUT_LABEL)?;
     Ok(output_path)

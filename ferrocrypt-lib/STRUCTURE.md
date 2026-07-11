@@ -867,7 +867,7 @@ It contains:
 - `finalize_dir_open` — Windows-only `FILE_ATTRIBUTE_REPARSE_POINT` post-check called after every successful directory open, so junctions / mount points fail closed (cap-fs-ext alone refuses entries where `is_symlink()` is true, but `is_symlink()` returns `false` for junctions — the bitmask post-check is what catches them);
 - `create_file_at` — `OpenOptions::create_new(true)` plus `OpenOptionsFollowExt::follow(FollowSymlinks::No)` for atomic O_EXCL-style create that refuses every leaf symlink, dangling or live;
 - `chmod_file_handle`, `chmod_dir_handle` — handle-based permission application; never path-based, so a substituted symlink between extract and chmod cannot redirect the operation. Special bits are stripped via `super::PERMISSION_BITS_MASK`;
-- `rename_at_no_clobber` (Linux/macOS) — handle-relative `renameat(dir, …, dir, …, RENAME_NOREPLACE)` via `rustix`, used by the decrypt promotion (`FORMAT.md` §9.11 step 15) so the `{root}.incomplete` → final-name commit is anchored to the same `output_dir` handle as extraction; a swap of the `output_dir` path mid-run cannot redirect it. Windows and other-target promotion stays path-based in `fs/atomic.rs`, because a handle-relative no-replace rename on Windows needs an `unsafe` Win32 call the crate forbids;
+- `rename_at_no_clobber` (Linux/macOS) — handle-relative `renameat(dir, …, dir, …, RENAME_NOREPLACE)` via `rustix`, used by the decrypt promotion (`FORMAT.md` §9.11 step 15) so the `{root}.incomplete` → final-name commit is anchored to the same `output_dir` handle as extraction; a swap of the `output_dir` path mid-run cannot redirect it. On a filesystem whose driver refuses the no-replace flag outright (`fs/atomic.rs::no_replace_rename_unsupported`; the macOS exFAT driver among them) it dispatches to `rename_at_no_clobber_via_claim`, which atomically claims the final name through the same handle (`create_file_at` for a file root, owner-only `mkdir` for a directory root) and renames the staged root over its own claim — no-clobber against pre-existing entries stays unconditional, and both steps stay handle-relative. Windows and other-target promotion stays path-based in `fs/atomic.rs`, because a handle-relative no-replace rename on Windows needs an `unsafe` Win32 call the crate forbids;
 - `INITIAL_FILE_CREATE_MODE` — restrictive `0o600` initial mode applied at create time on Unix. Descendant files are chmod'd to the manifest mode after the payload is written (inside the 0o700 staged root). Single-file roots stay at `0o600` throughout staging and across the rename, with the manifest mode applied post-rename via `decode::apply_root_file_mode` so a wider final mode is never briefly visible. Effective on Unix only; ignored on Windows.
 - `DIRECTORY_PROMOTION_SUPPORTED` — single source of truth for the set of targets with a safe no-clobber directory-promotion backend (Linux, macOS, Windows). A directory-root extraction cannot be committed elsewhere, so both the extractor (`decode::reject_unsupported_directory_root`) and the writer (`encode::validate_encrypt_input`) refuse a directory root on any other target — the writer refusing whatever the reader refuses keeps encrypt/decrypt symmetric. A `cfg!` value, not a `#[cfg]` gate, so both call sites type-check on every target. Single-file roots promote through `tempfile` everywhere and are unaffected.
 
@@ -893,7 +893,13 @@ It contains:
 - no-clobber finalization:
   - **encryption output and key generation** (file roots, every
     platform) go through `tempfile::*::persist_noclobber` — atomic
-    no-replace on every supported platform, Windows included;
+    no-replace on every supported platform, Windows included. On a
+    Unix filesystem whose driver refuses the no-replace rename
+    (`no_replace_rename_unsupported`; the macOS exFAT driver among
+    them), `finalize_file` falls back to `finalize_file_via_claim`:
+    exclusive-create the final name, then rename the temp file over
+    that claim — no-clobber against pre-existing entries stays
+    unconditional;
   - **decrypt promotion on Windows and other non-Linux/macOS targets**:
     single-file roots through `promote_single_file_no_clobber` (the same
     `tempfile` atomic no-replace, Windows `MoveFileExW` included),
@@ -907,6 +913,12 @@ It contains:
     extraction `output_dir` handle so a path swap mid-run cannot
     redirect the commit;
 - same-directory staging;
+- pre-promotion file durability: `sync_file_durable` flushes a staged
+  `std::fs::File` with `sync_all` and falls back to plain `fsync(2)`
+  where the filesystem reports the full flush as unsupported
+  (`errno_not_supported`; macOS smbfs among them). The extraction-side
+  twin for `cap_std::fs::File` handles lives in `archive/platform.rs`;
+  the two share the fallback condition;
 - cleanup on encryption failure;
 - `.incomplete` behavior on decryption failure.
 

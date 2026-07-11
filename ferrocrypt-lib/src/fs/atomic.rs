@@ -63,13 +63,19 @@ fn sync_parent_dir(path: &Path) {
 #[cfg(not(unix))]
 fn sync_parent_dir(_path: &Path) {}
 
-/// Promotes a `NamedTempFile` to its final path with atomic no-clobber
+/// Promotes a `NamedTempFile` to its final path with no-clobber
 /// semantics. An occupied final path rejects with the same typed
 /// `InvalidInput("<label> already exists: …")` message the pre-write
 /// occupancy check emits, so a path that becomes occupied between the
 /// preflight and this rename reports the same error class. Other
 /// failures surface as [`CryptoError::Io`]. The temp file is removed
 /// on every failure path.
+///
+/// The promotion is a single atomic no-replace rename wherever the
+/// filesystem supports one. Where it does not (see
+/// [`no_replace_rename_unsupported`]), the Unix fallback
+/// [`finalize_file_via_claim`] commits in two steps while keeping the
+/// no-clobber guarantee unconditional.
 ///
 /// Callers are expected to have already flushed and synced the temp file
 /// before calling this function. The temp file and the final path must
@@ -81,15 +87,166 @@ pub(crate) fn finalize_file(
     final_path: &Path,
     label: &str,
 ) -> Result<(), CryptoError> {
-    tmp.persist_noclobber(final_path).map_err(|e| {
-        if e.error.kind() == io::ErrorKind::AlreadyExists {
-            already_exists_error(label, final_path)
-        } else {
-            CryptoError::Io(e.error)
+    match tmp.persist_noclobber(final_path) {
+        Ok(_) => {
+            sync_parent_dir(final_path);
+            Ok(())
         }
-    })?;
-    sync_parent_dir(final_path);
-    Ok(())
+        Err(e) => finalize_persist_failure(e, final_path, label),
+    }
+}
+
+/// Failure arm of [`finalize_file`]. On Unix, a filesystem that cannot
+/// perform an atomic no-replace rename retries through
+/// [`finalize_file_via_claim`]; every other failure maps to the
+/// caller-visible error taxonomy. Dropping the `PersistError` removes
+/// the temp file on the non-retry paths.
+#[cfg(unix)]
+fn finalize_persist_failure(
+    e: tempfile::PersistError,
+    final_path: &Path,
+    label: &str,
+) -> Result<(), CryptoError> {
+    if no_replace_rename_unsupported(&e.error) {
+        return finalize_file_via_claim(e.file, final_path, label);
+    }
+    Err(map_persist_error(e.error, final_path, label))
+}
+
+#[cfg(not(unix))]
+fn finalize_persist_failure(
+    e: tempfile::PersistError,
+    final_path: &Path,
+    label: &str,
+) -> Result<(), CryptoError> {
+    Err(map_persist_error(e.error, final_path, label))
+}
+
+/// Maps a failed promotion to the caller-visible error: an occupied
+/// final path becomes the typed already-exists message, everything
+/// else passes through as [`CryptoError::Io`].
+fn map_persist_error(error: io::Error, final_path: &Path, label: &str) -> CryptoError {
+    if error.kind() == io::ErrorKind::AlreadyExists {
+        already_exists_error(label, final_path)
+    } else {
+        CryptoError::Io(error)
+    }
+}
+
+/// Whether an operation failed because the kernel or filesystem does
+/// not support it at all, as opposed to an ordinary failure of a
+/// supported operation.
+///
+/// The raw errno values are matched, not just [`io::ErrorKind`],
+/// because the std mapping does not cover them on every platform —
+/// macOS `ENOTSUP` (45), the error its exFAT and smbfs drivers return
+/// for unsupported operations, surfaces as an uncategorized kind.
+/// `ENOTSUP` and `EOPNOTSUPP` share a value on Linux but differ on
+/// macOS; both are listed and the duplicate arm collapses where equal.
+/// [`io::ErrorKind::Unsupported`] covers `ENOSYS` (kernels without the
+/// syscall) and synthesized non-OS errors of that kind.
+#[cfg(unix)]
+pub(crate) fn errno_not_supported(e: &io::Error) -> bool {
+    if e.kind() == io::ErrorKind::Unsupported {
+        return true;
+    }
+    matches!(
+        e.raw_os_error(),
+        Some(code) if code == libc::ENOTSUP || code == libc::EOPNOTSUPP
+    )
+}
+
+/// Whether a failed no-replace rename means the kernel or filesystem
+/// cannot perform one at all, as opposed to an ordinary failure of a
+/// supported rename.
+///
+/// Beyond [`errno_not_supported`] (macOS `renameatx_np(RENAME_EXCL)`
+/// on filesystems without the operation — exFAT and smbfs among them —
+/// and `hard_link`-based emulation on filesystems without hard links),
+/// raw `EINVAL` is included: Linux `renameat2` reports an unsupported
+/// `RENAME_NOREPLACE` flag on some filesystems (network and FUSE
+/// mounts) as an invalid-flag error. A genuine invalid-argument
+/// failure that slips through simply fails again inside the fallback,
+/// so the wide trigger cannot weaken the no-clobber guarantee.
+#[cfg(unix)]
+pub(crate) fn no_replace_rename_unsupported(e: &io::Error) -> bool {
+    errno_not_supported(e) || e.raw_os_error() == Some(libc::EINVAL)
+}
+
+/// Flushes `file` to stable storage with the strongest primitive the
+/// filesystem supports. `File::sync_all` is the primary (on macOS it
+/// issues `F_FULLFSYNC`); a filesystem that reports the full flush as
+/// unsupported — macOS smbfs among them — falls back to plain
+/// `fsync(2)`, which such filesystems do honor. Genuine sync failures
+/// surface unchanged; only the capability gap downgrades.
+///
+/// The extraction-side twin for capability-anchored handles is
+/// `archive::platform::sync_file_durable`; keep their fallback
+/// condition in step.
+pub(crate) fn sync_file_durable(file: &std::fs::File) -> io::Result<()> {
+    match file.sync_all() {
+        Ok(()) => Ok(()),
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        Err(e) if errno_not_supported(&e) => rustix::fs::fsync(file).map_err(io::Error::from),
+        Err(e) => Err(e),
+    }
+}
+
+/// Mode bits for the zero-byte placeholder that claims the final name
+/// in [`finalize_file_via_claim`]. Owner-only, matching the mode
+/// `tempfile` gives the staged temp file; the placeholder is replaced
+/// by the staged file's rename, so this mode governs only the claim
+/// window.
+#[cfg(unix)]
+const FINAL_NAME_CLAIM_MODE: u32 = 0o600;
+
+/// Commits `tmp` to `final_path` on filesystems without an atomic
+/// no-replace rename, keeping the no-clobber guarantee unconditional:
+///
+/// 1. claim the final name with `create_new(true)` — an atomic
+///    test-and-create on every filesystem, refusing any pre-existing
+///    entry including a dangling symlink;
+/// 2. rename the staged temp file over the placeholder just created.
+///    The plain rename replaces the placeholder in one step, so no
+///    reader ever observes partial content at the final name.
+///
+/// Only the entry step 1 itself created is ever replaced; a
+/// pre-existing final path rejects in step 1 with the same typed
+/// message as the atomic path. Process interruption between the two
+/// steps leaves an empty placeholder at the final name next to the
+/// temp file. On step-2 failure the placeholder is removed best-effort
+/// and the temp file is removed by its destructor, matching the
+/// [`finalize_file`] contract.
+#[cfg(unix)]
+fn finalize_file_via_claim(
+    tmp: NamedTempFile,
+    final_path: &Path,
+    label: &str,
+) -> Result<(), CryptoError> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(FINAL_NAME_CLAIM_MODE)
+        .open(final_path)
+    {
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(already_exists_error(label, final_path));
+        }
+        Err(e) => return Err(CryptoError::Io(e)),
+    }
+    match tmp.persist(final_path) {
+        Ok(_) => {
+            sync_parent_dir(final_path);
+            Ok(())
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(final_path);
+            Err(CryptoError::Io(e.error))
+        }
+    }
 }
 
 /// Promotes a staged single-file path `from` to the final name `to`
@@ -258,6 +415,138 @@ mod tests {
 
         finalize_file(tmp, &final_path, "Output").unwrap();
         assert_eq!(fs::read_to_string(&final_path).unwrap(), "payload");
+    }
+
+    /// The fallback trigger fires only for "the filesystem cannot do a
+    /// no-replace rename" errors, never for ordinary failures such as
+    /// an occupied target.
+    #[cfg(unix)]
+    #[test]
+    fn no_replace_rename_unsupported_matches_capability_errors_only() {
+        // Raw ENOTSUP is the exact shape the macOS exFAT driver
+        // produces; it must match even though std leaves its kind
+        // uncategorized on macOS.
+        assert!(no_replace_rename_unsupported(
+            &io::Error::from_raw_os_error(libc::ENOTSUP)
+        ));
+        assert!(no_replace_rename_unsupported(
+            &io::Error::from_raw_os_error(libc::EOPNOTSUPP)
+        ));
+        assert!(no_replace_rename_unsupported(
+            &io::Error::from_raw_os_error(libc::EINVAL)
+        ));
+        assert!(no_replace_rename_unsupported(&io::Error::new(
+            io::ErrorKind::Unsupported,
+            "flag not supported",
+        )));
+        assert!(!no_replace_rename_unsupported(
+            &io::Error::from_raw_os_error(libc::EEXIST)
+        ));
+        assert!(!no_replace_rename_unsupported(&io::Error::new(
+            io::ErrorKind::NotFound,
+            "missing",
+        )));
+    }
+
+    /// `EINVAL` means "flag not supported" only for the flagged rename;
+    /// the shared not-supported predicate must not treat it as a
+    /// capability gap (a plain `fsync` that fails with `EINVAL` is a
+    /// real error, not a missing feature).
+    #[cfg(unix)]
+    #[test]
+    fn errno_not_supported_excludes_einval() {
+        assert!(errno_not_supported(&io::Error::from_raw_os_error(
+            libc::ENOTSUP
+        )));
+        assert!(!errno_not_supported(&io::Error::from_raw_os_error(
+            libc::EINVAL
+        )));
+    }
+
+    /// On a filesystem with full sync support the durable-sync helper
+    /// is just `sync_all`.
+    #[test]
+    fn sync_file_durable_succeeds_on_regular_file() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let path = tmp_dir.path().join("synced.txt");
+        fs::write(&path, b"bytes").unwrap();
+        let file = fs::File::open(&path).unwrap();
+        sync_file_durable(&file).unwrap();
+    }
+
+    // The claim path cannot be reached through `finalize_file` on the
+    // filesystems that host `cargo test` (they support the atomic
+    // no-replace rename), so it is exercised directly. The fs-matrix
+    // exFAT lane covers the errno-driven dispatch end to end.
+
+    /// Claim fallback commits the temp file when the final name is
+    /// free; no placeholder survives.
+    #[cfg(unix)]
+    #[test]
+    fn finalize_via_claim_succeeds_when_target_missing() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let final_path = tmp_dir.path().join("out.txt");
+
+        let mut tmp = tempfile::Builder::new()
+            .tempfile_in(tmp_dir.path())
+            .unwrap();
+        tmp.write_all(b"payload").unwrap();
+        let tmp_path = tmp.path().to_path_buf();
+
+        finalize_file_via_claim(tmp, &final_path, "Output").unwrap();
+        assert_eq!(fs::read_to_string(&final_path).unwrap(), "payload");
+        assert!(!tmp_path.exists());
+    }
+
+    /// Claim fallback refuses an occupied final path with the same
+    /// typed message as the atomic path, leaves the existing content
+    /// untouched, and removes the temp file.
+    #[cfg(unix)]
+    #[test]
+    fn finalize_via_claim_refuses_to_overwrite() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let final_path = tmp_dir.path().join("out.txt");
+        fs::write(&final_path, "existing").unwrap();
+
+        let mut tmp = tempfile::Builder::new()
+            .tempfile_in(tmp_dir.path())
+            .unwrap();
+        tmp.write_all(b"new").unwrap();
+        let tmp_path = tmp.path().to_path_buf();
+
+        match finalize_file_via_claim(tmp, &final_path, "Output") {
+            Err(CryptoError::InvalidInput(msg)) => {
+                assert!(msg.starts_with("Output already exists: "), "got: {msg}");
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+        assert_eq!(fs::read_to_string(&final_path).unwrap(), "existing");
+        assert!(!tmp_path.exists(), "temp file must be removed on failure");
+    }
+
+    /// A dangling symlink at the final path counts as occupied for the
+    /// claim (`create_new` refuses to follow or replace it), matching
+    /// the no-clobber contract of the atomic path.
+    #[cfg(unix)]
+    #[test]
+    fn finalize_via_claim_refuses_dangling_symlink_at_target() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let final_path = tmp_dir.path().join("out.txt");
+        std::os::unix::fs::symlink(tmp_dir.path().join("nowhere"), &final_path).unwrap();
+
+        let mut tmp = tempfile::Builder::new()
+            .tempfile_in(tmp_dir.path())
+            .unwrap();
+        tmp.write_all(b"new").unwrap();
+
+        match finalize_file_via_claim(tmp, &final_path, "Output") {
+            Err(CryptoError::InvalidInput(msg)) => {
+                assert!(msg.starts_with("Output already exists: "), "got: {msg}");
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+        let meta = fs::symlink_metadata(&final_path).unwrap();
+        assert!(meta.file_type().is_symlink(), "symlink must be left as-is");
     }
 
     #[test]

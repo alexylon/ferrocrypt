@@ -42,13 +42,13 @@ const BELOW_FLOOR_KDF_MEM: u32 = 8 * 1024;
 
 #[ctor::dtor]
 fn cleanup() {
-    if Path::new(TEST_WORKSPACE).exists() {
-        let _ = fs::remove_dir_all(TEST_WORKSPACE);
-    }
+    ferrocrypt_test_support::remove_per_process_workspace(TEST_WORKSPACE);
 }
 
 fn fresh_workspace(name: &str) -> PathBuf {
-    let dir = Path::new(TEST_WORKSPACE).join(name);
+    // Per-process subtree, so a concurrent `cargo test` invocation of
+    // this binary cannot delete files this run is using.
+    let dir = ferrocrypt_test_support::per_process_workspace(TEST_WORKSPACE).join(name);
     if dir.exists() {
         fs::remove_dir_all(&dir).expect("clean api workspace");
     }

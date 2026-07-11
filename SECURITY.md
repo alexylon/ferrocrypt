@@ -90,7 +90,19 @@ regression net, regenerated when the format intentionally changes).
   decryption finishes, FerroCrypt renames the working `.incomplete`
   entry to its final name. On Linux and macOS, the operating system
   refuses this rename atomically if the final name is already taken —
-  no window for another process to interfere. On Windows:
+  no window for another process to interfere. On filesystems whose
+  driver cannot do that in one step (Apple's exFAT driver, some network
+  filesystems), FerroCrypt instead claims the final name by creating it
+  — creation refuses an existing entry atomically — and then renames
+  the finished output over its own claim. An entry that existed before
+  the commit is still never replaced. The remaining differences: a
+  process killed between the two steps can leave an empty placeholder
+  at the final name next to the `.incomplete` entry, and a local
+  process with write access to your output folder that deletes the
+  claim and plants its own entry inside that brief window has its
+  planted entry replaced by ours — the same "someone else's planted
+  entry may be destroyed" bound, and the same trust assumption, as the
+  Windows directory case below. On Windows:
   **single-file** decrypts now route through the kernel's atomic
   no-replace move (`MoveFileExW` without the replace flag, via the
   `tempfile` crate), so the kernel performs the existence check and the

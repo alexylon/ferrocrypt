@@ -129,22 +129,92 @@ pub(crate) fn open_anchor(path: &Path) -> Result<Dir, CryptoError> {
 ///
 /// Linux and macOS only. `RENAME_NOREPLACE` maps to `renameat2` on
 /// Linux and `renameatx_np(RENAME_EXCL)` on macOS, both through
-/// `rustix`. Windows keeps the path-based promotion in `fs::atomic`,
-/// because a handle-relative no-replace rename there needs an `unsafe`
-/// Win32 call the crate forbids; see `SECURITY.md`.
+/// `rustix`. Filesystems that cannot perform a flagged rename at all
+/// (macOS exFAT among them; see
+/// [`crate::fs::atomic::no_replace_rename_unsupported`]) fall back to
+/// [`rename_at_no_clobber_via_claim`], which keeps both the no-clobber
+/// guarantee and the handle-relative anchoring. `root_is_file` selects
+/// the fallback's claim strategy; the flagged rename itself promotes
+/// files and directories alike. Windows keeps the path-based promotion
+/// in `fs::atomic`, because a handle-relative no-replace rename there
+/// needs an `unsafe` Win32 call the crate forbids; see `SECURITY.md`.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) fn rename_at_no_clobber(dir: &Dir, from: &OsStr, to: &OsStr) -> io::Result<()> {
+pub(crate) fn rename_at_no_clobber(
+    dir: &Dir,
+    from: &OsStr,
+    to: &OsStr,
+    root_is_file: bool,
+) -> io::Result<()> {
     use std::os::fd::AsFd;
 
     use rustix::fs::{RenameFlags, renameat_with};
 
-    renameat_with(dir.as_fd(), from, dir.as_fd(), to, RenameFlags::NOREPLACE)
-        .map_err(io::Error::from)?;
+    if let Err(e) = renameat_with(dir.as_fd(), from, dir.as_fd(), to, RenameFlags::NOREPLACE) {
+        let error = io::Error::from(e);
+        if !crate::fs::atomic::no_replace_rename_unsupported(&error) {
+            return Err(error);
+        }
+        return rename_at_no_clobber_via_claim(dir, from, to, root_is_file);
+    }
     // Best-effort durability: flush the directory so the rename survives
     // a crash, mirroring the parent-directory sync the path-based
     // `fs::atomic` helpers perform.
     sync_dir_handle(dir);
     Ok(())
+}
+
+/// Claim-then-rename fallback for filesystems where the kernel refuses
+/// the no-replace rename flag outright:
+///
+/// 1. atomically claim the final name through `dir` — `create_new` for
+///    a file root, owner-only `mkdir` for a directory root — refusing
+///    any pre-existing entry with `AlreadyExists`, the same error the
+///    flagged rename reports;
+/// 2. plain handle-relative rename of the staged entry over the claim.
+///    Renaming onto the placeholder replaces it in a single step (an
+///    empty directory target is replaced under POSIX rename rules), so
+///    content appears at the final name whole, never partially.
+///
+/// Both steps resolve through `dir`, preserving the redirect-proofing
+/// of the flagged path. Only the entry created in step 1 can be
+/// replaced, so the no-clobber guarantee against pre-existing entries
+/// is unconditional. The owner-only claim modes
+/// ([`INITIAL_FILE_CREATE_MODE`] file / [`DIR_CREATE_MODE`] directory)
+/// keep other local users from writing into the claimed name where
+/// the filesystem enforces modes; on a permissionless filesystem
+/// (exFAT) a concurrent local write into a directory claim makes
+/// step 2 fail closed with a non-empty-target error instead.
+///
+/// If step 2 fails, the claim is removed best-effort and the staged
+/// entry stays in place for the caller's retain-on-error handling.
+/// Process interruption between the steps leaves an empty placeholder
+/// at the final name next to the staged `.incomplete` entry.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn rename_at_no_clobber_via_claim(
+    dir: &Dir,
+    from: &OsStr,
+    to: &OsStr,
+    root_is_file: bool,
+) -> io::Result<()> {
+    if root_is_file {
+        create_file_at(dir, to, INITIAL_FILE_CREATE_MODE)?;
+    } else {
+        create_dir_initial_mode(dir, to)?;
+    }
+    match dir.rename(from, dir, to) {
+        Ok(()) => {
+            sync_dir_handle(dir);
+            Ok(())
+        }
+        Err(e) => {
+            if root_is_file {
+                let _ = dir.remove_file(to);
+            } else {
+                let _ = dir.remove_dir(to);
+            }
+            Err(e)
+        }
+    }
 }
 
 /// Best-effort `fsync` of the directory `dir` refers to. This flushes
@@ -338,7 +408,7 @@ pub(crate) fn mkdir_strict(parent: &Dir, name: &OsStr) -> Result<Dir, CryptoErro
 /// mode later" behavior without ever chmod-ing through a re-resolved
 /// path.
 fn create_dir_with_default_mode(parent: &Dir, name: &OsStr) -> Result<Dir, CryptoError> {
-    create_dir_initial_mode(parent, name)?;
+    create_dir_initial_mode(parent, name).map_err(CryptoError::Io)?;
 
     let dir = parent.open_dir_nofollow(name).map_err(|e| {
         classify_open_failure(
@@ -357,18 +427,16 @@ fn create_dir_with_default_mode(parent: &Dir, name: &OsStr) -> Result<Dir, Crypt
 /// the umask race where a permissive `0o022` umask would briefly leave
 /// a fresh `.incomplete` directory at `0o755`.
 #[cfg(unix)]
-fn create_dir_initial_mode(parent: &Dir, name: &OsStr) -> Result<(), CryptoError> {
+fn create_dir_initial_mode(parent: &Dir, name: &OsStr) -> io::Result<()> {
     use cap_std::fs::{DirBuilder, DirBuilderExt};
     let mut builder = DirBuilder::new();
     builder.mode(DIR_CREATE_MODE);
-    parent
-        .create_dir_with(name, &builder)
-        .map_err(CryptoError::Io)
+    parent.create_dir_with(name, &builder)
 }
 
 #[cfg(not(unix))]
-fn create_dir_initial_mode(parent: &Dir, name: &OsStr) -> Result<(), CryptoError> {
-    parent.create_dir(name).map_err(CryptoError::Io)
+fn create_dir_initial_mode(parent: &Dir, name: &OsStr) -> io::Result<()> {
+    parent.create_dir(name)
 }
 
 /// Internal helper: applies a Unix mode to the directory `dir` refers to.
@@ -548,6 +616,26 @@ pub(crate) fn create_file_at(
         options.mode(create_mode & super::PERMISSION_BITS_MASK);
     }
     parent.open_with(name, &options)
+}
+
+/// Flushes an extraction-side file handle to stable storage with the
+/// strongest primitive the filesystem supports: `sync_all` first (on
+/// macOS this issues `F_FULLFSYNC`), plain `fsync(2)` when the
+/// filesystem reports the full flush as unsupported — macOS smbfs
+/// among them. Genuine sync failures surface unchanged; only the
+/// capability gap downgrades.
+///
+/// Twin of [`crate::fs::atomic::sync_file_durable`] for
+/// `cap_std::fs::File` handles; keep their fallback condition in step.
+pub(crate) fn sync_file_durable(file: &File) -> io::Result<()> {
+    match file.sync_all() {
+        Ok(()) => Ok(()),
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        Err(e) if crate::fs::atomic::errno_not_supported(&e) => {
+            rustix::fs::fsync(file).map_err(io::Error::from)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Sets the rwx permission bits on an already-open file handle.
@@ -947,7 +1035,13 @@ mod tests {
         fs::create_dir(&out).unwrap();
         fs::write(out.join("root.incomplete"), b"attacker").unwrap();
 
-        rename_at_no_clobber(&handle, OsStr::new("root.incomplete"), OsStr::new("root")).unwrap();
+        rename_at_no_clobber(
+            &handle,
+            OsStr::new("root.incomplete"),
+            OsStr::new("root"),
+            true,
+        )
+        .unwrap();
 
         // Promotion landed in the handle's directory (now `moved`), not
         // the swapped-in decoy.
@@ -971,12 +1065,164 @@ mod tests {
         fs::write(out.join("root"), b"existing").unwrap();
 
         let handle = open_anchor(&out).unwrap();
-        let err = rename_at_no_clobber(&handle, OsStr::new("root.incomplete"), OsStr::new("root"))
-            .unwrap_err();
+        let err = rename_at_no_clobber(
+            &handle,
+            OsStr::new("root.incomplete"),
+            OsStr::new("root"),
+            true,
+        )
+        .unwrap_err();
 
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(fs::read(out.join("root")).unwrap(), b"existing");
         assert_eq!(fs::read(out.join("root.incomplete")).unwrap(), b"new");
+    }
+
+    // ── claim-then-rename fallback (filesystems without RENAME_EXCL) ─
+    //
+    // The fallback cannot be triggered through `rename_at_no_clobber`
+    // on the filesystems that host `cargo test` (they support the
+    // flagged rename), so these tests exercise
+    // `rename_at_no_clobber_via_claim` directly. The fs-matrix exFAT
+    // lane exercises the full errno-driven dispatch end to end.
+
+    /// File-root fallback promotes the staged file when the final name
+    /// is free, and the placeholder claim never survives as a separate
+    /// entry.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn via_claim_promotes_file_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        fs::write(tmp.path().join("root.incomplete"), b"payload").unwrap();
+
+        let handle = open_anchor(tmp.path()).unwrap();
+        rename_at_no_clobber_via_claim(
+            &handle,
+            OsStr::new("root.incomplete"),
+            OsStr::new("root"),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(tmp.path().join("root")).unwrap(), b"payload");
+        assert!(!tmp.path().join("root.incomplete").exists());
+    }
+
+    /// Directory-root fallback promotes the staged tree over the
+    /// claimed empty directory, contents intact.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn via_claim_promotes_directory_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let staged = tmp.path().join("root.incomplete");
+        fs::create_dir(&staged).unwrap();
+        fs::write(staged.join("inner.txt"), b"alpha").unwrap();
+
+        let handle = open_anchor(tmp.path()).unwrap();
+        rename_at_no_clobber_via_claim(
+            &handle,
+            OsStr::new("root.incomplete"),
+            OsStr::new("root"),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read(tmp.path().join("root").join("inner.txt")).unwrap(),
+            b"alpha"
+        );
+        assert!(!staged.exists());
+    }
+
+    /// The claim step refuses a pre-existing entry of either kind with
+    /// `AlreadyExists`, leaving the existing entry and the staged
+    /// source untouched — the same contract as the flagged rename.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn via_claim_refuses_existing_target() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        fs::write(tmp.path().join("staged-file"), b"new").unwrap();
+        fs::create_dir(tmp.path().join("staged-dir")).unwrap();
+        fs::write(tmp.path().join("taken-file"), b"existing").unwrap();
+        fs::create_dir(tmp.path().join("taken-dir")).unwrap();
+
+        let handle = open_anchor(tmp.path()).unwrap();
+        // Every kind combination must refuse: the claim is create_new /
+        // mkdir, both of which fail on ANY existing entry.
+        for (from, to, is_file) in [
+            ("staged-file", "taken-file", true),
+            ("staged-file", "taken-dir", true),
+            ("staged-dir", "taken-file", false),
+            ("staged-dir", "taken-dir", false),
+        ] {
+            let err =
+                rename_at_no_clobber_via_claim(&handle, OsStr::new(from), OsStr::new(to), is_file)
+                    .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::AlreadyExists, "{from} -> {to}");
+        }
+        assert_eq!(
+            fs::read(tmp.path().join("taken-file")).unwrap(),
+            b"existing"
+        );
+        assert_eq!(fs::read(tmp.path().join("staged-file")).unwrap(), b"new");
+        assert!(tmp.path().join("staged-dir").is_dir());
+    }
+
+    /// A failed rename step removes the placeholder claim and leaves
+    /// the staged entry in place, so retain-on-error semantics and
+    /// retry-ability hold. Forced by staging nothing: the claim
+    /// succeeds, then the rename fails with `NotFound`.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn via_claim_removes_claim_when_rename_fails() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let handle = open_anchor(tmp.path()).unwrap();
+
+        for is_file in [true, false] {
+            let err = rename_at_no_clobber_via_claim(
+                &handle,
+                OsStr::new("missing.incomplete"),
+                OsStr::new("root"),
+                is_file,
+            )
+            .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::NotFound);
+            assert!(
+                !tmp.path().join("root").exists(),
+                "claim must not survive a failed promotion (is_file={is_file})"
+            );
+        }
+    }
+
+    /// The fallback resolves the claim and the rename through the open
+    /// handle, so a swap of the ambient path cannot redirect the
+    /// promotion — the same anchoring contract as the flagged rename.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn via_claim_anchors_to_handle_across_path_swap() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let out = tmp.path().join("out");
+        fs::create_dir(&out).unwrap();
+        fs::write(out.join("root.incomplete"), b"real").unwrap();
+
+        let handle = open_anchor(&out).unwrap();
+        let moved = tmp.path().join("out.moved");
+        fs::rename(&out, &moved).unwrap();
+        fs::create_dir(&out).unwrap();
+        fs::write(out.join("root.incomplete"), b"attacker").unwrap();
+
+        rename_at_no_clobber_via_claim(
+            &handle,
+            OsStr::new("root.incomplete"),
+            OsStr::new("root"),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(moved.join("root")).unwrap(), b"real");
+        assert!(!moved.join("root.incomplete").exists());
+        assert!(!out.join("root").exists());
+        assert_eq!(fs::read(out.join("root.incomplete")).unwrap(), b"attacker");
     }
 
     // ── Windows reparse-point / symlink rejection ───────────────────

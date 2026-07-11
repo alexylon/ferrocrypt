@@ -274,7 +274,7 @@ fn extract_single_file_root<R: Read>(
 
     // Synced before promotion, so a crash after the rename cannot
     // surface incompletely written content under the final name.
-    outfile.sync_all().map_err(CryptoError::Io)?;
+    platform::sync_file_durable(&outfile).map_err(CryptoError::Io)?;
 
     // FORMAT.md §9.11 step 13: verify archive EOF — no byte may follow
     // the last declared file content. Single-file root has no descendant
@@ -337,7 +337,7 @@ fn extract_directory_root<R: Read>(
         platform::chmod_file_handle(&outfile, entry.mode)?;
         // Synced before promotion, so a crash after the rename cannot
         // surface incompletely written content under the final name.
-        outfile.sync_all().map_err(CryptoError::Io)?;
+        platform::sync_file_durable(&outfile).map_err(CryptoError::Io)?;
     }
 
     // FORMAT.md §9.11 step 13: verify archive EOF — no byte may follow
@@ -408,8 +408,10 @@ fn apply_root_file_mode(output_handle: &Dir, manifest: &Manifest) -> Result<(), 
 /// ambient `output_dir` path between staging and the commit cannot
 /// redirect it: the plaintext lands in the directory the contents were
 /// written to, and a `{root}.incomplete` planted in a swapped-in
-/// replacement directory is never promoted. `root_is_file` is irrelevant
-/// there because `renameat` promotes files and directories alike.
+/// replacement directory is never promoted. `root_is_file` selects the
+/// claim strategy of that helper's fallback for filesystems without an
+/// atomic no-replace rename; the flagged rename itself promotes files
+/// and directories alike.
 ///
 /// On Windows (and any other target) the promotion is path-based:
 /// single-file roots take the kernel atomic no-replace move via
@@ -425,8 +427,8 @@ fn promote_root(
 ) -> io::Result<()> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        let _ = (output_dir, root_is_file);
-        platform::rename_at_no_clobber(output_handle, incomplete_name, final_name)
+        let _ = output_dir;
+        platform::rename_at_no_clobber(output_handle, incomplete_name, final_name, root_is_file)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {

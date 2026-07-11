@@ -110,3 +110,32 @@ pub fn fs_matrix_tempdir() -> std::io::Result<tempfile::TempDir> {
         _ => tempfile::TempDir::new(),
     }
 }
+
+/// Per-process staging area under a test binary's fixed workspace
+/// root: `<root>/run-<pid>`.
+///
+/// Integration-test binaries stage their scratch files under a fixed
+/// relative root (for example `tests/workspace`). Two concurrent
+/// `cargo test` invocations of the same binary — a debug run next to a
+/// release run, or two terminals — would share that root and delete
+/// each other's staged files mid-test. Routing every path through this
+/// helper keeps each process in its own subtree, so concurrent
+/// invocations cannot interfere. Pair with
+/// [`remove_per_process_workspace`] in the binary's exit hook.
+pub fn per_process_workspace(root: &str) -> std::path::PathBuf {
+    std::path::Path::new(root).join(format!("run-{}", std::process::id()))
+}
+
+/// Removes this process's [`per_process_workspace`] subtree, then
+/// prunes the shared `root` itself if no other run is using it.
+/// Both steps are best-effort: cleanup runs in an exit hook where a
+/// failure must not turn a finished test run into an error, and a
+/// still-populated root simply refuses the non-recursive removal —
+/// exactly right while a concurrent run is active.
+pub fn remove_per_process_workspace(root: &str) {
+    let own = per_process_workspace(root);
+    if own.exists() {
+        let _ = std::fs::remove_dir_all(&own);
+    }
+    let _ = std::fs::remove_dir(root);
+}

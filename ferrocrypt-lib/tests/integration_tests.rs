@@ -15,7 +15,9 @@ use common::{generate_key_pair, passphrase_auto, recipient_auto};
 const TEST_WORKSPACE: &str = "tests/workspace";
 
 fn setup_test_dir(test_name: &str) -> PathBuf {
-    let test_dir = PathBuf::from(TEST_WORKSPACE).join(test_name);
+    // Per-process subtree, so a concurrent `cargo test` invocation of
+    // this binary cannot delete files this run is using.
+    let test_dir = ferrocrypt_test_support::per_process_workspace(TEST_WORKSPACE).join(test_name);
     if test_dir.exists() {
         fs::remove_dir_all(&test_dir).expect("Failed to clean test directory");
     }
@@ -43,9 +45,7 @@ fn create_test_directory(base: &Path) -> PathBuf {
 }
 
 fn cleanup_test_workspace() {
-    if Path::new(TEST_WORKSPACE).exists() {
-        let _ = fs::remove_dir_all(TEST_WORKSPACE);
-    }
+    ferrocrypt_test_support::remove_per_process_workspace(TEST_WORKSPACE);
 }
 
 #[test]

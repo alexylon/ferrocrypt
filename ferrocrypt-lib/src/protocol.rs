@@ -546,7 +546,7 @@ pub(crate) fn generate_key_pair(
         .as_file_mut()
         .write_all(recipient_string.as_bytes())?;
     public_tmp.as_file_mut().write_all(b"\n")?;
-    public_tmp.as_file().sync_all()?;
+    atomic::sync_file_durable(public_tmp.as_file())?;
     atomic::finalize_file(public_tmp, &public_key_path, KEY_FILE_LABEL)?;
 
     // Write private.key. If this fails, clean up the public.key we just wrote.
@@ -564,7 +564,7 @@ pub(crate) fn generate_key_pair(
         }
         let mut private_tmp = private_builder.tempfile_in(output_dir)?;
         private_tmp.as_file_mut().write_all(&private_key_bytes)?;
-        private_tmp.as_file().sync_all()?;
+        atomic::sync_file_durable(private_tmp.as_file())?;
         atomic::finalize_file(private_tmp, &private_key_path, KEY_FILE_LABEL)?;
         Ok(())
     })();

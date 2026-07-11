@@ -10,7 +10,7 @@ fn main() {
     let output_path = Path::new(&out_dir).join("common_passwords.rs");
     let mut output_file = File::create(output_path).expect("could not create common_passwords.rs");
     output_file
-        .write_all(b"const COMMON_PASSWORDS: &[&str] = &[")
+        .write_all(b"pub(crate) const COMMON_PASSWORDS: &[&str] = &[")
         .unwrap();
     let input_file = BufReader::new(File::open("passwords.txt").expect("passwords.txt not found"));
     for line in input_file.lines() {

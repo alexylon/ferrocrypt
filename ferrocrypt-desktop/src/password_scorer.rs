@@ -396,7 +396,7 @@ fn analyze(password: &str) -> AnalyzedPassword {
         }
     }
 
-    for (_, &a) in count_map.iter() {
+    for &a in count_map.values() {
         if a > 1 {
             non_consecutive_count += a;
         }

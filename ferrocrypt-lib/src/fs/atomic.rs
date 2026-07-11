@@ -463,14 +463,14 @@ mod tests {
         )));
     }
 
-    /// On a filesystem with full sync support the durable-sync helper
-    /// is just `sync_all`.
+    /// On a filesystem with full sync support a writable regular file
+    /// can be durably synced.
     #[test]
     fn sync_file_durable_succeeds_on_regular_file() {
         let tmp_dir = tempfile::TempDir::new().unwrap();
         let path = tmp_dir.path().join("synced.txt");
         fs::write(&path, b"bytes").unwrap();
-        let file = fs::File::open(&path).unwrap();
+        let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
         sync_file_durable(&file).unwrap();
     }
 

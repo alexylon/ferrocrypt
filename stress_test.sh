@@ -96,9 +96,11 @@ run_test "keygen: generate second key pair" \
 run_test "keygen: verify keys exist" \
     test -f "$KEYS/public.key" -a -f "$KEYS/private.key"
 
+# private.key: 90-byte fixed header + "x25519"(6) + public(32) + wrapped secret(48) = 176.
+# public.key: 108-char Bech32 recipient string (61-byte typed payload) + one LF = 109.
 run_test "keygen: verify key file sizes" \
     test "$(stat -f%z "$KEYS/private.key" 2>/dev/null || stat -c%s "$KEYS/private.key" 2>/dev/null)" -eq 176 -a \
-         "$(stat -f%z "$KEYS/public.key" 2>/dev/null || stat -c%s "$KEYS/public.key" 2>/dev/null)" -eq 107
+         "$(stat -f%z "$KEYS/public.key" 2>/dev/null || stat -c%s "$KEYS/public.key" 2>/dev/null)" -eq 109
 
 PUB="$KEYS/public.key"
 SECRET_KEY="$KEYS/private.key"

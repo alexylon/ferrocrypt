@@ -3,3 +3,4 @@
 # files. Git's autocrlf on Windows would otherwise rewrite .txt fixtures to
 # CRLF on checkout, breaking the round-trip comparison.
 ferrocrypt-lib/tests/fixtures/** -text
+ferrocrypt-lib/testvectors/** -text

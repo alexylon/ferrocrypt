@@ -1,0 +1,19 @@
+version: 2
+updates:
+  # Keep the SHA-pinned GitHub Actions current. Without this, pinning to a
+  # commit freezes the actions forever, so a pin eventually points at a
+  # version with a known bug or vulnerability. Dependabot bumps each SHA to
+  # the newest release of the same action and updates the trailing `# vX.Y.Z`
+  # comment to match.
+  #
+  # dtolnay/rust-toolchain is not bumped here: it publishes no release tags
+  # (only the stable/nightly/master branches), so there is no version for
+  # Dependabot to compare against. Those pins are reviewed by hand.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"

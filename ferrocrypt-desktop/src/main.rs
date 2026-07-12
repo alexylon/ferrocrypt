@@ -490,7 +490,7 @@ fn apply_input_path(weak: &slint::Weak<AppWindow>, path: PathBuf) {
     let inpath_elide = if app.get_combined_picker() {
         ELIDE
     } else {
-        ELIDE - 12
+        ELIDE - 8
     };
     app.set_input_path_display(elide_left(&selected, inpath_elide).into());
     app.set_input_path(selected.clone().into());

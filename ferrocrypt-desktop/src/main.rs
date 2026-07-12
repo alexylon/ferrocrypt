@@ -5,9 +5,9 @@ slint::include_modules!();
 
 use ferrocrypt::secrecy::{ExposeSecret, SecretString};
 use ferrocrypt::{
-    CryptoError, Decryptor, Encryptor, PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME, PrivateKey,
-    ProgressEvent, PublicKey, UnauthenticatedRecipientMode, default_encrypted_filename,
-    generate_key_pair, probe_recipient_mode, validate_private_key_file,
+    CryptoError, Decryptor, Encryptor, KdfParams, KeyPairGenerator, PRIVATE_KEY_FILENAME,
+    PUBLIC_KEY_FILENAME, PrivateKey, ProgressEvent, PublicKey, UnauthenticatedRecipientMode,
+    default_encrypted_filename, generate_key_pair, probe_recipient_mode, validate_private_key_file,
 };
 use std::path::{Path, PathBuf};
 
@@ -34,6 +34,107 @@ fn is_encrypt_mode(mode: i32) -> bool {
 
 fn is_decrypt_mode(mode: i32) -> bool {
     matches!(mode, MODE_PASSPHRASE_DECRYPT | MODE_RECIPIENT_DECRYPT)
+}
+
+/// The inputs the worker thread needs to run one crypto operation. Grouping
+/// them keeps [`run_operation`] to a few arguments and lets a test describe an
+/// operation in a single value.
+struct Operation<'a> {
+    mode: i32,
+    input: &'a Path,
+    output_dir: &'a Path,
+    /// Exact output file path; when `None` the name is derived under `output_dir`.
+    save_as: Option<&'a Path>,
+    /// Public or private key file; used only by the recipient modes.
+    key_path: &'a Path,
+    /// Argon2id override for the passphrase-encrypt and key-generation paths;
+    /// `None` uses the library default. It has no effect on decrypt (whose cost
+    /// is fixed by the input file) or on recipient encrypt (no Argon2id). Tests
+    /// pass fast parameters here; production passes `None`.
+    kdf_params: Option<KdfParams>,
+}
+
+/// Runs the crypto operation described by `op` and returns the resulting path
+/// (the encrypted file, the decrypted output, or the generated public key).
+/// The worker thread drives this single dispatch point; keeping it a free
+/// function makes the mode routing and the cross-mode rejection messages
+/// testable without the UI event loop.
+fn run_operation(
+    op: Operation<'_>,
+    passphrase: SecretString,
+    on_event: &dyn Fn(&ProgressEvent),
+) -> Result<PathBuf, CryptoError> {
+    let Operation {
+        mode,
+        input,
+        output_dir,
+        save_as,
+        key_path,
+        kdf_params,
+    } = op;
+    match mode {
+        MODE_PASSPHRASE_ENCRYPT => {
+            let mut encryptor = Encryptor::with_passphrase(passphrase);
+            if let Some(params) = kdf_params {
+                encryptor = encryptor.kdf_params(params);
+            }
+            if let Some(s) = save_as {
+                encryptor = encryptor.save_as(s);
+            }
+            encryptor
+                .write(input, output_dir, on_event)
+                .map(|o| o.output_path)
+        }
+        MODE_PASSPHRASE_DECRYPT => match Decryptor::open(input) {
+            Ok(Decryptor::Passphrase(d)) => d
+                .decrypt(passphrase, output_dir, on_event)
+                .map(|o| o.output_path),
+            Ok(Decryptor::PrivateKey(_)) => Err(CryptoError::InvalidInput(
+                "This file is sealed for public-key recipients; switch to the 'Key pair' tab"
+                    .to_string(),
+            )),
+            Ok(_) => Err(CryptoError::InvalidInput(
+                "Unsupported FerroCrypt encryption mode for the 'Password' tab".to_string(),
+            )),
+            Err(e) => Err(e),
+        },
+        MODE_RECIPIENT_ENCRYPT => {
+            let mut encryptor = Encryptor::with_public_key(PublicKey::from_key_file(key_path));
+            if let Some(s) = save_as {
+                encryptor = encryptor.save_as(s);
+            }
+            encryptor
+                .write(input, output_dir, on_event)
+                .map(|o| o.output_path)
+        }
+        MODE_RECIPIENT_DECRYPT => match Decryptor::open(input) {
+            Ok(Decryptor::PrivateKey(d)) => d
+                .decrypt(
+                    PrivateKey::from_key_file(key_path),
+                    passphrase,
+                    output_dir,
+                    on_event,
+                )
+                .map(|o| o.output_path),
+            Ok(Decryptor::Passphrase(_)) => Err(CryptoError::InvalidInput(
+                "This file is sealed with a passphrase; switch to the 'Password' tab".to_string(),
+            )),
+            Ok(_) => Err(CryptoError::InvalidInput(
+                "Unsupported FerroCrypt encryption mode for the 'Key pair' tab".to_string(),
+            )),
+            Err(e) => Err(e),
+        },
+        MODE_KEYGEN => {
+            let outcome = match kdf_params {
+                Some(params) => KeyPairGenerator::with_passphrase(passphrase)
+                    .kdf_params(params)
+                    .write(output_dir, on_event),
+                None => generate_key_pair(output_dir, passphrase, on_event),
+            };
+            outcome.map(|o| o.public_key_path)
+        }
+        _ => unreachable!(),
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -233,64 +334,18 @@ fn main() {
 
                     let is_decrypt = is_decrypt_mode(mode);
                     let start = std::time::Instant::now();
-                    let result: Result<PathBuf, _> = match mode {
-                        MODE_PASSPHRASE_ENCRYPT => {
-                            let mut encryptor = Encryptor::with_passphrase(pwd);
-                            if let Some(s) = save_as {
-                                encryptor = encryptor.save_as(s);
-                            }
-                            encryptor
-                                .write(inpath, output_dir_path, &on_event)
-                                .map(|o| o.output_path)
-                        }
-                        MODE_PASSPHRASE_DECRYPT => match Decryptor::open(inpath) {
-                            Ok(Decryptor::Passphrase(d)) => d
-                                .decrypt(pwd, output_dir_path, &on_event)
-                                .map(|o| o.output_path),
-                            Ok(Decryptor::PrivateKey(_)) => Err(CryptoError::InvalidInput(
-                                "This file is sealed for public-key recipients; switch to the 'Key pair' tab"
-                                    .to_string(),
-                            )),
-                            Ok(_) => Err(CryptoError::InvalidInput(
-                                "Unsupported FerroCrypt encryption mode for the 'Password' tab"
-                                    .to_string(),
-                            )),
-                            Err(e) => Err(e),
+                    let result = run_operation(
+                        Operation {
+                            mode,
+                            input: inpath,
+                            output_dir: output_dir_path,
+                            save_as,
+                            key_path: Path::new(&keypath),
+                            kdf_params: None,
                         },
-                        MODE_RECIPIENT_ENCRYPT => {
-                            let mut encryptor = Encryptor::with_public_key(
-                                PublicKey::from_key_file(Path::new(&keypath)),
-                            );
-                            if let Some(s) = save_as {
-                                encryptor = encryptor.save_as(s);
-                            }
-                            encryptor
-                                .write(inpath, output_dir_path, &on_event)
-                                .map(|o| o.output_path)
-                        }
-                        MODE_RECIPIENT_DECRYPT => match Decryptor::open(inpath) {
-                            Ok(Decryptor::PrivateKey(d)) => d
-                                .decrypt(
-                                    PrivateKey::from_key_file(Path::new(&keypath)),
-                                    pwd,
-                                    output_dir_path,
-                                    &on_event,
-                                )
-                                .map(|o| o.output_path),
-                            Ok(Decryptor::Passphrase(_)) => Err(CryptoError::InvalidInput(
-                                "This file is sealed with a passphrase; switch to the 'Password' tab"
-                                    .to_string(),
-                            )),
-                            Ok(_) => Err(CryptoError::InvalidInput(
-                                "Unsupported FerroCrypt encryption mode for the 'Key pair' tab"
-                                    .to_string(),
-                            )),
-                            Err(e) => Err(e),
-                        },
-                        MODE_KEYGEN => generate_key_pair(output_dir_path, pwd, &on_event)
-                            .map(|o| o.public_key_path),
-                        _ => unreachable!(),
-                    };
+                        pwd,
+                        &on_event,
+                    );
                     let elapsed = start.elapsed().as_secs_f64();
 
                     let _ = slint::invoke_from_event_loop(move || {
@@ -688,6 +743,90 @@ fn snap_back_mode(mode: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ferrocrypt_test_support::{fast_kdf_params, fs_matrix_tempdir};
+    use std::fs;
+
+    /// Drives `run_operation` through all five modes plus the two cross-mode
+    /// rejections, so the mode routing and its tab-specific messages are
+    /// covered without the UI event loop. Fast Argon2id keeps it quick.
+    #[test]
+    fn run_operation_routes_every_mode() {
+        let noop = |_: &ProgressEvent| {};
+        let pass = SecretString::from("desktop-dispatch-test-passphrase".to_string());
+        let dir = fs_matrix_tempdir().expect("tempdir");
+        let root = dir.path();
+        let payload: &[u8] = b"desktop dispatch payload";
+        let input = root.join("secret.txt");
+        fs::write(&input, payload).unwrap();
+        let dummy_key = Path::new("");
+
+        // Run one operation with fast Argon2id and no explicit save-as path.
+        let run = |mode: i32, src: &Path, out: &Path, key: &Path| {
+            run_operation(
+                Operation {
+                    mode,
+                    input: src,
+                    output_dir: out,
+                    save_as: None,
+                    key_path: key,
+                    kdf_params: Some(fast_kdf_params()),
+                },
+                pass.clone(),
+                &noop,
+            )
+        };
+
+        // Passphrase encrypt -> decrypt round-trip.
+        let pw_out = root.join("pw_out");
+        fs::create_dir_all(&pw_out).unwrap();
+        let pw_fcr =
+            run(MODE_PASSPHRASE_ENCRYPT, &input, &pw_out, dummy_key).expect("passphrase encrypt");
+        let pw_dec = root.join("pw_dec");
+        fs::create_dir_all(&pw_dec).unwrap();
+        let pw_plain =
+            run(MODE_PASSPHRASE_DECRYPT, &pw_fcr, &pw_dec, dummy_key).expect("passphrase decrypt");
+        assert_eq!(fs::read(&pw_plain).unwrap(), payload);
+
+        // Key generation writes both key files.
+        let keys = root.join("keys");
+        fs::create_dir_all(&keys).unwrap();
+        let pub_key = run(MODE_KEYGEN, dummy_key, &keys, dummy_key).expect("keygen");
+        let priv_key = keys.join(PRIVATE_KEY_FILENAME);
+        assert!(pub_key.exists(), "public key not written");
+        assert!(priv_key.exists(), "private key not written");
+
+        // Recipient encrypt -> decrypt round-trip.
+        let rc_out = root.join("rc_out");
+        fs::create_dir_all(&rc_out).unwrap();
+        let rc_fcr =
+            run(MODE_RECIPIENT_ENCRYPT, &input, &rc_out, &pub_key).expect("recipient encrypt");
+        let rc_dec = root.join("rc_dec");
+        fs::create_dir_all(&rc_dec).unwrap();
+        let rc_plain =
+            run(MODE_RECIPIENT_DECRYPT, &rc_fcr, &rc_dec, &priv_key).expect("recipient decrypt");
+        assert_eq!(fs::read(&rc_plain).unwrap(), payload);
+
+        // Cross-mode routing: a recipient-sealed file is rejected on the
+        // passphrase path, and a passphrase-sealed file on the recipient path,
+        // each with its tab-specific message.
+        let x1 = root.join("x1");
+        fs::create_dir_all(&x1).unwrap();
+        let e1 = run(MODE_PASSPHRASE_DECRYPT, &rc_fcr, &x1, dummy_key)
+            .expect_err("passphrase path must reject a recipient file");
+        assert!(
+            matches!(&e1, CryptoError::InvalidInput(m) if m.contains("public-key recipients")),
+            "unexpected error: {e1:?}"
+        );
+
+        let x2 = root.join("x2");
+        fs::create_dir_all(&x2).unwrap();
+        let e2 = run(MODE_RECIPIENT_DECRYPT, &pw_fcr, &x2, &priv_key)
+            .expect_err("recipient path must reject a passphrase file");
+        assert!(
+            matches!(&e2, CryptoError::InvalidInput(m) if m.contains("sealed with a passphrase")),
+            "unexpected error: {e2:?}"
+        );
+    }
 
     #[test]
     fn encrypt_decrypt_mode_predicates() {

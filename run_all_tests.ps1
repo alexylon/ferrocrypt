@@ -44,6 +44,9 @@ $TestWorkspaceRoots = @(
     (Join-Path $PSScriptRoot "ferrocrypt-lib\tests\workspace_api"),
     (Join-Path $PSScriptRoot "ferrocrypt-lib\tests\workspace_fixture_stability"),
     (Join-Path $PSScriptRoot "ferrocrypt-lib\tests\workspace_testvector_suite"),
+    (Join-Path $PSScriptRoot "ferrocrypt-lib\tests\workspace_concurrency"),
+    (Join-Path $PSScriptRoot "ferrocrypt-lib\tests\workspace_memory_bounds"),
+    (Join-Path $PSScriptRoot "ferrocrypt-lib\tests\workspace_roundtrip_randomized"),
     (Join-Path $PSScriptRoot "ferrocrypt-cli\tests\cli_workspace")
 )
 

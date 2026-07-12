@@ -14,6 +14,11 @@ rfd = "0.17"
 regex-lite = "0.1"
 arboard = "3"
 
+# Test-only fast Argon2id parameters (19 MiB floor) so the dispatch test does
+# not pay the 1 GiB production KDF. Not published (this crate is publish = false).
+[dev-dependencies]
+ferrocrypt-test-support = { path = "../ferrocrypt-test-support" }
+
 [build-dependencies]
 slint-build = "1"
 

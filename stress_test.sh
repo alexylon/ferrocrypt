@@ -68,6 +68,21 @@ assert_dirs_identical() {
     diff -rq "$1" "$2" >/dev/null 2>&1
 }
 
+# Read the low permission bits of a path in octal (e.g. 600, 755). macOS uses
+# `stat -f %Lp`; GNU/Linux uses `stat -c %a`.
+perm_mode() {
+    stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null
+}
+
+# True when the platform preserves Unix permission bits and supports the
+# symlink / FIFO tests below.
+is_unix_perms() {
+    case "$(uname -s)" in
+        Linux|Darwin|*BSD) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 echo "=========================================="
 echo "FerroCrypt Stress Test Suite"
 echo "Working directory: $WORKDIR"
@@ -865,6 +880,491 @@ if $rapid_ok; then
 else
     echo "FAIL (at iteration $i)"
     FAILED=$((FAILED + 1))
+fi
+
+echo ""
+
+# ──────────────────────────────────────────────
+# PHASE 16: Multi-recipient Encryption
+# ──────────────────────────────────────────────
+echo "--- Phase 16: Multi-recipient Encryption ---"
+
+# One file sealed to two public keys; each private key opens it independently.
+multi_enc="$WORKDIR/multi_enc"
+mkdir -p "$multi_enc"
+$FC encrypt -i "$WORKDIR/small.txt" -o "$multi_enc" -k "$PUB" -k "$PUB2" 2>/dev/null
+MULTI_FCR=$(ls "$multi_enc"/*.fcr 2>/dev/null | head -1)
+
+multi_dec_a() {
+    local d="$WORKDIR/multi_dec_a"; mkdir -p "$d"
+    env FERROCRYPT_PASSPHRASE="$PASS" $FC decrypt -i "$MULTI_FCR" -o "$d" -K "$SECRET_KEY" && \
+    assert_identical "$WORKDIR/small.txt" "$d/small.txt"
+}
+run_test "multi: recipient A (key1) decrypts 2-recipient file" multi_dec_a
+
+multi_dec_b() {
+    local d="$WORKDIR/multi_dec_b"; mkdir -p "$d"
+    env FERROCRYPT_PASSPHRASE="$PASS2" $FC decrypt -i "$MULTI_FCR" -o "$d" -K "$SECRET_KEY2" && \
+    assert_identical "$WORKDIR/small.txt" "$d/small.txt"
+}
+run_test "multi: recipient B (key2) decrypts same file" multi_dec_b
+
+# Two recipient strings via repeated -r; the second key decrypts.
+multi_r() {
+    local e="$WORKDIR/multi_r_enc" d="$WORKDIR/multi_r_dec"
+    mkdir -p "$e" "$d"
+    local R1 R2
+    R1=$(tr -d '\n' < "$PUB"); R2=$(tr -d '\n' < "$PUB2")
+    $FC encrypt -i "$WORKDIR/small.txt" -o "$e" -r "$R1" -r "$R2" && \
+    env FERROCRYPT_PASSPHRASE="$PASS2" $FC decrypt -i "$e"/*.fcr -o "$d" -K "$SECRET_KEY2" && \
+    assert_identical "$WORKDIR/small.txt" "$d/small.txt"
+}
+run_test "multi: two recipient strings, second key decrypts" multi_r
+
+# A private key that is not among the recipients is rejected.
+multi_wrong_enc="$WORKDIR/multi_wrong_enc"
+mkdir -p "$multi_wrong_enc" "$WORKDIR/multi_wrong_dec"
+$FC encrypt -i "$WORKDIR/small.txt" -o "$multi_wrong_enc" -k "$PUB" 2>/dev/null
+run_test_expect_fail "multi: non-recipient key rejected" \
+    env FERROCRYPT_PASSPHRASE="$PASS2" $FC decrypt -i "$multi_wrong_enc"/small.fcr -o "$WORKDIR/multi_wrong_dec" -K "$SECRET_KEY2"
+
+echo ""
+
+# ──────────────────────────────────────────────
+# PHASE 17: KDF Resource Caps (decrypt-side DoS guard)
+# ──────────────────────────────────────────────
+echo "--- Phase 17: KDF Resource Caps (decrypt-side DoS guard) ---"
+
+kdf_enc="$WORKDIR/kdf_enc"
+mkdir -p "$kdf_enc"
+$FC encrypt -i "$WORKDIR/small.txt" -o "$kdf_enc" 2>/dev/null
+KDF_FCR="$kdf_enc/small.fcr"
+
+# A memory cap of 0 rejects every file; a cap below the file's cost rejects
+# before Argon2id runs; a cap at or above the cost decrypts normally.
+mkdir -p "$WORKDIR/kdf_dec0"
+run_test_expect_fail "kdf: --max-kdf-memory 0 rejects" \
+    $FC decrypt -i "$KDF_FCR" -o "$WORKDIR/kdf_dec0" --max-kdf-memory 0
+mkdir -p "$WORKDIR/kdf_dec_low"
+run_test_expect_fail "kdf: cap below file's memory cost rejects" \
+    $FC decrypt -i "$KDF_FCR" -o "$WORKDIR/kdf_dec_low" --max-kdf-memory 1
+kdf_ok() {
+    local d="$WORKDIR/kdf_dec_ok"; mkdir -p "$d"
+    $FC decrypt -i "$KDF_FCR" -o "$d" --max-kdf-memory 2048 && \
+    assert_identical "$WORKDIR/small.txt" "$d/small.txt"
+}
+run_test "kdf: cap above file's memory cost succeeds" kdf_ok
+mkdir -p "$WORKDIR/kdf_dect0"
+run_test_expect_fail "kdf: --max-kdf-time-cost 0 rejects" \
+    $FC decrypt -i "$KDF_FCR" -o "$WORKDIR/kdf_dect0" --max-kdf-time-cost 0
+
+echo ""
+
+# ──────────────────────────────────────────────
+# PHASE 18: keep-partial (incomplete-output policy)
+# ──────────────────────────────────────────────
+echo "--- Phase 18: keep-partial (incomplete-output policy) ---"
+
+# Corrupt a byte at ~90% so early payload chunks stage under .incomplete
+# before the tampered chunk fails authentication.
+kp_enc="$WORKDIR/kp_enc"
+mkdir -p "$kp_enc"
+$FC encrypt -i "$WORKDIR/1mb.bin" -o "$kp_enc" 2>/dev/null
+KP_FCR="$kp_enc/1mb.fcr"
+KP_SIZE=$(stat -f%z "$KP_FCR" 2>/dev/null || stat -c%s "$KP_FCR" 2>/dev/null)
+KP_OFF=$(( KP_SIZE * 9 / 10 ))
+python3 -c "
+data = bytearray(open('$KP_FCR','rb').read())
+data[$KP_OFF] ^= 0xFF
+open('$KP_FCR','wb').write(data)
+"
+
+# Default policy: a failed decrypt leaves no .incomplete behind.
+kp_default() {
+    local d="$WORKDIR/kp_default"; mkdir -p "$d"
+    if $FC decrypt -i "$KP_FCR" -o "$d" 2>/dev/null; then return 1; fi
+    ! ls -d "$d"/*.incomplete >/dev/null 2>&1
+}
+run_test "keep-partial: default removes .incomplete on failure" kp_default
+
+# --keep-partial: a failed decrypt retains the staged .incomplete.
+kp_keep() {
+    local d="$WORKDIR/kp_keep"; mkdir -p "$d"
+    if $FC decrypt -i "$KP_FCR" -o "$d" --keep-partial 2>/dev/null; then return 1; fi
+    ls -d "$d"/*.incomplete >/dev/null 2>&1
+}
+run_test "keep-partial: --keep-partial retains .incomplete on failure" kp_keep
+
+echo ""
+
+# ──────────────────────────────────────────────
+# PHASE 19: Symlink & Special-file Rejection
+# ──────────────────────────────────────────────
+echo "--- Phase 19: Symlink & Special-file Rejection ---"
+
+if is_unix_perms; then
+    # Symlink as the input root.
+    ln -s "$WORKDIR/small.txt" "$WORKDIR/rootlink.txt"
+    mkdir -p "$WORKDIR/syml_enc1"
+    run_test_expect_fail "symlink: root symlink input rejected" \
+        $FC encrypt -i "$WORKDIR/rootlink.txt" -o "$WORKDIR/syml_enc1" -k "$PUB"
+
+    # Symlink inside a directory tree.
+    symdir="$WORKDIR/symdir"
+    mkdir -p "$symdir"
+    echo "real" > "$symdir/real.txt"
+    ln -s real.txt "$symdir/link.txt"
+    mkdir -p "$WORKDIR/syml_enc2"
+    run_test_expect_fail "symlink: symlink inside directory rejected" \
+        $FC encrypt -i "$symdir" -o "$WORKDIR/syml_enc2" -k "$PUB"
+
+    # FIFO inside a directory tree.
+    fifodir="$WORKDIR/fifodir"
+    mkdir -p "$fifodir"
+    echo "ok" > "$fifodir/plain.txt"
+    if mkfifo "$fifodir/pipe" 2>/dev/null; then
+        mkdir -p "$WORKDIR/fifo_enc"
+        run_test_expect_fail "special: FIFO inside directory rejected" \
+            $FC encrypt -i "$fifodir" -o "$WORKDIR/fifo_enc" -k "$PUB"
+    fi
+else
+    echo "[skip] symlink/special-file rejection (non-Unix)"
+fi
+
+echo ""
+
+# ──────────────────────────────────────────────
+# PHASE 20: Unix Permission-bit Preservation
+# ──────────────────────────────────────────────
+echo "--- Phase 20: Unix Permission-bit Preservation ---"
+
+if is_unix_perms; then
+    permdir="$WORKDIR/permdir"
+    mkdir -p "$permdir/sub"
+    echo "a" > "$permdir/f600.txt"; chmod 600 "$permdir/f600.txt"
+    echo "b" > "$permdir/f640.txt"; chmod 640 "$permdir/f640.txt"
+    echo "c" > "$permdir/f755.sh";  chmod 755 "$permdir/f755.sh"
+    echo "d" > "$permdir/sub/inner.txt"; chmod 644 "$permdir/sub/inner.txt"
+    chmod 700 "$permdir/sub"
+
+    perm_roundtrip() {
+        local e="$WORKDIR/perm_enc" d="$WORKDIR/perm_dec"
+        mkdir -p "$e" "$d"
+        $FC encrypt -i "$permdir" -o "$e" -k "$PUB" 2>/dev/null || return 1
+        env FERROCRYPT_PASSPHRASE="$PASS" $FC decrypt -i "$e"/*.fcr -o "$d" -K "$SECRET_KEY" 2>/dev/null || return 1
+        local base="$d/permdir"
+        [ "$(perm_mode "$base/f600.txt")" = "600" ] && \
+        [ "$(perm_mode "$base/f640.txt")" = "640" ] && \
+        [ "$(perm_mode "$base/f755.sh")"  = "755" ] && \
+        [ "$(perm_mode "$base/sub")"      = "700" ] && \
+        [ "$(perm_mode "$base/sub/inner.txt")" = "644" ]
+    }
+    run_test "perms: file & directory modes preserved through round-trip" perm_roundtrip
+else
+    echo "[skip] permission preservation (non-Unix)"
+fi
+
+echo ""
+
+# ──────────────────────────────────────────────
+# PHASE 21: Fingerprint Subcommand
+# ──────────────────────────────────────────────
+echo "--- Phase 21: Fingerprint Subcommand ---"
+
+run_test "fingerprint: prints fingerprint for valid public key" \
+    $FC fingerprint "$PUB"
+run_test "fingerprint: 'fp' alias works" \
+    $FC fp "$PUB2"
+run_test_expect_fail "fingerprint: rejects non-public-key file" \
+    $FC fingerprint "$WORKDIR/small.txt"
+
+echo ""
+
+# ──────────────────────────────────────────────
+# PHASE 22: Atomic Crash Safety (SIGKILL mid-operation)
+# ──────────────────────────────────────────────
+echo "--- Phase 22: Atomic Crash Safety (SIGKILL mid-operation) ---"
+
+# Iteration count and payload size are overridable so the phase can be dialed
+# down on slow machines. Hybrid mode keeps the 1 GiB Argon2id off the encrypt
+# path so kills land in the streaming window, not the KDF.
+CRASH_ITERS="${FERROCRYPT_STRESS_CRASH_ITERS:-12}"
+CRASH_MIB="${FERROCRYPT_STRESS_CRASH_MIB:-250}"
+dd if=/dev/urandom of="$WORKDIR/crash_src.bin" bs=1048576 count="$CRASH_MIB" 2>/dev/null
+
+# Encrypt-crash: the committed .fcr is never a partial file. After each SIGKILL
+# it is either absent (killed before the atomic rename) or a complete file that
+# decrypts back to the original.
+echo -n "[$((TOTAL + 1))] crash: SIGKILL during encrypt never commits a partial .fcr ... "
+TOTAL=$((TOTAL + 1))
+set +e
+crash_enc_ok=true
+crash_enc_committed=0
+for i in $(seq 1 "$CRASH_ITERS"); do
+    cdir="$WORKDIR/crash_enc"
+    rm -rf "$cdir"; mkdir -p "$cdir"
+    $FC encrypt -i "$WORKDIR/crash_src.bin" -o "$cdir" -k "$PUB" >/dev/null 2>&1 &
+    cpid=$!
+    sleep "0.$(printf '%02d' $(( (RANDOM % 50) + 1 )))"
+    kill -9 "$cpid" 2>/dev/null
+    wait "$cpid" 2>/dev/null
+    committed="$cdir/crash_src.fcr"
+    if [ -f "$committed" ]; then
+        crash_enc_committed=$((crash_enc_committed + 1))
+        vdir="$WORKDIR/crash_enc_verify"
+        rm -rf "$vdir"; mkdir -p "$vdir"
+        if ! env FERROCRYPT_PASSPHRASE="$PASS" $FC decrypt -i "$committed" -o "$vdir" -K "$SECRET_KEY" >/dev/null 2>&1 \
+             || ! assert_identical "$WORKDIR/crash_src.bin" "$vdir/crash_src.bin"; then
+            crash_enc_ok=false
+            break
+        fi
+    fi
+done
+set -e
+if $crash_enc_ok; then
+    echo "PASS (${crash_enc_committed}/${CRASH_ITERS} completed & verified)"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAIL (committed .fcr was partial/corrupt)"
+    FAILED=$((FAILED + 1))
+fi
+
+# Decrypt-crash: pre-encrypt cleanly, then SIGKILL the instant extraction
+# begins (the .incomplete staging entry appears only after the KDF unlock, so
+# this deterministically lands mid-extraction). The committed output is never a
+# partial file, and a fresh decrypt still recovers the plaintext.
+clean_enc="$WORKDIR/crash_clean_enc"
+mkdir -p "$clean_enc"
+$FC encrypt -i "$WORKDIR/crash_src.bin" -o "$clean_enc" -k "$PUB" 2>/dev/null
+CLEAN_FCR="$clean_enc/crash_src.fcr"
+
+echo -n "[$((TOTAL + 1))] crash: SIGKILL during decrypt extraction never commits a partial output ... "
+TOTAL=$((TOTAL + 1))
+set +e
+crash_dec_ok=true
+crash_dec_caught=0
+for i in $(seq 1 "$CRASH_ITERS"); do
+    ddir="$WORKDIR/crash_dec"
+    rm -rf "$ddir"; mkdir -p "$ddir"
+    env FERROCRYPT_PASSPHRASE="$PASS" $FC decrypt -i "$CLEAN_FCR" -o "$ddir" -K "$SECRET_KEY" >/dev/null 2>&1 &
+    dpid=$!
+    while kill -0 "$dpid" 2>/dev/null; do
+        if ls -d "$ddir"/*.incomplete >/dev/null 2>&1; then
+            kill -9 "$dpid" 2>/dev/null
+            crash_dec_caught=$((crash_dec_caught + 1))
+            break
+        fi
+        sleep 0.005
+    done
+    wait "$dpid" 2>/dev/null
+    committed="$ddir/crash_src.bin"
+    if [ -f "$committed" ] && ! assert_identical "$WORKDIR/crash_src.bin" "$committed"; then
+        crash_dec_ok=false
+        break
+    fi
+done
+rdir="$WORKDIR/crash_dec_recover"; mkdir -p "$rdir"
+if ! env FERROCRYPT_PASSPHRASE="$PASS" $FC decrypt -i "$CLEAN_FCR" -o "$rdir" -K "$SECRET_KEY" >/dev/null 2>&1 \
+     || ! assert_identical "$WORKDIR/crash_src.bin" "$rdir/crash_src.bin"; then
+    crash_dec_ok=false
+fi
+set -e
+if $crash_dec_ok; then
+    echo "PASS (${crash_dec_caught}/${CRASH_ITERS} killed mid-extraction, recovery OK)"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAIL (committed output partial, or recovery failed)"
+    FAILED=$((FAILED + 1))
+fi
+rm -f "$WORKDIR/crash_src.bin"
+
+echo ""
+
+# ──────────────────────────────────────────────
+# PHASE 23: Concurrent Same-path No-clobber Race
+# ──────────────────────────────────────────────
+echo "--- Phase 23: Concurrent Same-path No-clobber Race ---"
+
+# Several writers race for the same --save-as path. Atomic no-clobber
+# finalization means exactly one commits and the output is a valid file, never
+# an interleaved blend of two encryptions.
+echo -n "[$((TOTAL + 1))] race: concurrent encrypts to one --save-as path stay no-clobber ... "
+TOTAL=$((TOTAL + 1))
+racedir="$WORKDIR/race"
+rm -rf "$racedir"; mkdir -p "$racedir"
+RACE_TARGET="$racedir/same.fcr"
+set +e
+race_pids=()
+for i in $(seq 1 6); do
+    $FC encrypt -i "$WORKDIR/1mb.bin" -s "$RACE_TARGET" -k "$PUB" >/dev/null 2>&1 &
+    race_pids+=($!)
+done
+race_success=0
+for pid in "${race_pids[@]}"; do
+    if wait "$pid"; then race_success=$((race_success + 1)); fi
+done
+set -e
+race_valid=false
+if [ -f "$RACE_TARGET" ]; then
+    rdec="$WORKDIR/race_dec"; mkdir -p "$rdec"
+    if env FERROCRYPT_PASSPHRASE="$PASS" $FC decrypt -i "$RACE_TARGET" -o "$rdec" -K "$SECRET_KEY" >/dev/null 2>&1 \
+       && assert_identical "$WORKDIR/1mb.bin" "$rdec/1mb.bin"; then
+        race_valid=true
+    fi
+fi
+if $race_valid && [ "$race_success" -eq 1 ]; then
+    echo "PASS (1/6 committed, output valid)"
+    PASSED=$((PASSED + 1))
+elif $race_valid && [ "$race_success" -gt 1 ]; then
+    echo "FAIL (clobber: $race_success writers committed)"
+    FAILED=$((FAILED + 1))
+else
+    echo "FAIL (success=$race_success, output valid=$race_valid)"
+    FAILED=$((FAILED + 1))
+fi
+
+echo ""
+
+# ──────────────────────────────────────────────
+# PHASE 24: Bounded Memory on Large Input (streaming)
+# ──────────────────────────────────────────────
+echo "--- Phase 24: Bounded Memory on Large Input (streaming) ---"
+
+# A streaming encryptor must not load the whole file. Hybrid mode is used so the
+# 1 GiB Argon2id does not dominate resident memory. Peak RSS well under the file
+# size proves streaming; a whole-file load would blow past the limit.
+MEM_MIB="${FERROCRYPT_STRESS_MEM_MIB:-2048}"
+MEM_LIMIT_MIB="${FERROCRYPT_STRESS_MEM_LIMIT_MIB:-512}"
+if [ ! -x /usr/bin/time ]; then
+    echo "[skip] memory ceiling (/usr/bin/time not available)"
+else
+    echo -n "[$((TOTAL + 1))] mem: ${MEM_MIB}MiB hybrid encrypt stays under ${MEM_LIMIT_MIB}MiB RSS ... "
+    TOTAL=$((TOTAL + 1))
+    dd if=/dev/urandom of="$WORKDIR/mem_src.bin" bs=1048576 count="$MEM_MIB" 2>/dev/null
+    mem_enc="$WORKDIR/mem_enc"; mkdir -p "$mem_enc"
+    TIMELOG="$WORKDIR/mem_time.log"
+    set +e
+    case "$(uname -s)" in
+        Darwin)
+            /usr/bin/time -l $FC encrypt -i "$WORKDIR/mem_src.bin" -o "$mem_enc" -k "$PUB" >/dev/null 2>"$TIMELOG"
+            rss_bytes=$(awk '/maximum resident set size/ {print $1}' "$TIMELOG" | head -1)
+            ;;
+        *)
+            /usr/bin/time -v $FC encrypt -i "$WORKDIR/mem_src.bin" -o "$mem_enc" -k "$PUB" >/dev/null 2>"$TIMELOG"
+            rss_kib=$(awk -F': ' '/Maximum resident set size/ {print $2}' "$TIMELOG" | head -1)
+            rss_bytes=$(( ${rss_kib:-0} * 1024 ))
+            ;;
+    esac
+    set -e
+    rm -f "$WORKDIR/mem_src.bin"
+    case "${rss_bytes:-}" in
+        ''|*[!0-9]*)
+            echo "[skip] (could not read RSS from /usr/bin/time)"
+            TOTAL=$((TOTAL - 1))
+            ;;
+        *)
+            rss_mib=$(( rss_bytes / 1048576 ))
+            if [ "$rss_mib" -lt "$MEM_LIMIT_MIB" ]; then
+                echo "PASS (peak RSS ${rss_mib}MiB)"
+                PASSED=$((PASSED + 1))
+            else
+                echo "FAIL (peak RSS ${rss_mib}MiB >= ${MEM_LIMIT_MIB}MiB — not streaming?)"
+                FAILED=$((FAILED + 1))
+            fi
+            ;;
+    esac
+fi
+
+echo ""
+
+# ──────────────────────────────────────────────
+# PHASE 25: Soak (repeated operations, no staging litter)
+# ──────────────────────────────────────────────
+echo "--- Phase 25: Soak (repeated operations, no staging litter) ---"
+
+# Many encrypt cycles exercise staging and no-clobber finalization repeatedly;
+# a sparse decrypt confirms integrity without paying the KDF on every loop. No
+# .incomplete or temp staging file may accumulate.
+SOAK_ITERS="${FERROCRYPT_STRESS_SOAK_ITERS:-200}"
+echo -n "[$((TOTAL + 1))] soak: ${SOAK_ITERS} encrypt cycles, sparse verify, no litter ... "
+TOTAL=$((TOTAL + 1))
+soakdir="$WORKDIR/soak"
+rm -rf "$soakdir"; mkdir -p "$soakdir/enc" "$soakdir/dec"
+soak_ok=true
+for i in $(seq 1 "$SOAK_ITERS"); do
+    src="$soakdir/src.bin"
+    head -c "$(( (RANDOM % 4096) + 1 ))" /dev/urandom > "$src"
+    tgt="$soakdir/enc/src_$i.fcr"
+    if ! $FC encrypt -i "$src" -s "$tgt" -k "$PUB" >/dev/null 2>&1; then
+        soak_ok=false; break
+    fi
+    if [ "$(( i % 50 ))" -eq 0 ]; then
+        rm -f "$soakdir/dec/src.bin"
+        if ! env FERROCRYPT_PASSPHRASE="$PASS" $FC decrypt -i "$tgt" -o "$soakdir/dec" -K "$SECRET_KEY" >/dev/null 2>&1 \
+             || ! assert_identical "$src" "$soakdir/dec/src.bin"; then
+            soak_ok=false; break
+        fi
+    fi
+done
+litter=$(find "$soakdir" \( -name '*.incomplete' -o -name '.tmp*' \) 2>/dev/null | wc -l | tr -d ' ')
+if $soak_ok && [ "$litter" -eq 0 ]; then
+    echo "PASS"
+    PASSED=$((PASSED + 1))
+else
+    echo "FAIL (all-ok=$soak_ok, staging litter=$litter)"
+    FAILED=$((FAILED + 1))
+fi
+
+echo ""
+
+# ──────────────────────────────────────────────
+# PHASE 26: Disk-full (ENOSPC) atomicity
+# ──────────────────────────────────────────────
+echo "--- Phase 26: Disk-full (ENOSPC) atomicity ---"
+
+# Needs a small, fillable filesystem. macOS gets one from hdiutil with no root;
+# elsewhere point FERROCRYPT_STRESS_ENOSPC_DIR at a small pre-mounted volume.
+enospc_supported=false
+ENOSPC_MNT=""
+ENOSPC_IMG=""
+if [ -n "${FERROCRYPT_STRESS_ENOSPC_DIR:-}" ]; then
+    ENOSPC_MNT="$FERROCRYPT_STRESS_ENOSPC_DIR"
+    enospc_supported=true
+elif [ "$(uname -s)" = "Darwin" ]; then
+    ENOSPC_IMG="$WORKDIR/enospc.dmg"
+    if hdiutil create -size 24m -fs APFS -volname fcenospc -quiet "$ENOSPC_IMG" 2>/dev/null; then
+        ATTACH_OUT=$(hdiutil attach "$ENOSPC_IMG" -nobrowse 2>/dev/null)
+        ENOSPC_MNT=$(echo "$ATTACH_OUT" | awk '{for(i=1;i<=NF;i++) if($i ~ /^\/Volumes\//){print $i; exit}}')
+        [ -z "$ENOSPC_MNT" ] && ENOSPC_MNT="/Volumes/fcenospc"
+        [ -d "$ENOSPC_MNT" ] && enospc_supported=true
+    fi
+fi
+
+if $enospc_supported; then
+    echo -n "[$((TOTAL + 1))] enospc: encrypt into a full filesystem commits no partial .fcr ... "
+    TOTAL=$((TOTAL + 1))
+    set +e
+    # Fill the volume, then try to write an output larger than the whole
+    # volume so it cannot fit regardless of filesystem overhead.
+    dd if=/dev/zero of="$ENOSPC_MNT/filler.bin" bs=1048576 2>/dev/null
+    dd if=/dev/urandom of="$WORKDIR/enospc_src.bin" bs=1048576 count=32 2>/dev/null
+    $FC encrypt -i "$WORKDIR/enospc_src.bin" -s "$ENOSPC_MNT/out.fcr" -k "$PUB" >/dev/null 2>&1
+    enc_rc=$?
+    set -e
+    if [ "$enc_rc" -ne 0 ] && [ ! -f "$ENOSPC_MNT/out.fcr" ]; then
+        echo "PASS (failed cleanly, no committed output)"
+        PASSED=$((PASSED + 1))
+    else
+        present=$( [ -f "$ENOSPC_MNT/out.fcr" ] && echo yes || echo no )
+        echo "FAIL (rc=$enc_rc, committed out.fcr present=$present)"
+        FAILED=$((FAILED + 1))
+    fi
+    rm -f "$ENOSPC_MNT/filler.bin" "$ENOSPC_MNT/out.fcr" 2>/dev/null
+    if [ -n "$ENOSPC_IMG" ]; then
+        hdiutil detach "$ENOSPC_MNT" -quiet 2>/dev/null || hdiutil detach "$ENOSPC_MNT" -force 2>/dev/null
+    fi
+else
+    echo "[skip] ENOSPC atomicity (needs macOS hdiutil or FERROCRYPT_STRESS_ENOSPC_DIR)"
 fi
 
 echo ""

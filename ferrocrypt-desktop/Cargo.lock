@@ -1655,10 +1655,19 @@ version = "0.3.0-rc.1"
 dependencies = [
  "arboard",
  "ferrocrypt",
+ "ferrocrypt-test-support",
  "regex-lite",
  "rfd",
  "slint",
  "slint-build",
+]
+
+[[package]]
+name = "ferrocrypt-test-support"
+version = "0.3.0-rc.1"
+dependencies = [
+ "ferrocrypt",
+ "tempfile",
 ]
 
 [[package]]

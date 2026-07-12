@@ -68,6 +68,7 @@ rustix = { version = "1", features = ["fs"] }
 [dev-dependencies]
 ferrocrypt-test-support = { path = "../ferrocrypt-test-support" }
 ctor = "0.9"
+stats_alloc = "0.1.10"
 
 # `process` enables the safe get/setrlimit wrappers used by the
 # wide-tree fd-limit regression test in `archive/encode.rs`.

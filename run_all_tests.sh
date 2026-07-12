@@ -54,6 +54,9 @@ TEST_WORKSPACE_ROOTS=(
     ferrocrypt-lib/tests/workspace_api
     ferrocrypt-lib/tests/workspace_fixture_stability
     ferrocrypt-lib/tests/workspace_testvector_suite
+    ferrocrypt-lib/tests/workspace_concurrency
+    ferrocrypt-lib/tests/workspace_memory_bounds
+    ferrocrypt-lib/tests/workspace_roundtrip_randomized
     ferrocrypt-cli/tests/cli_workspace
 )
 

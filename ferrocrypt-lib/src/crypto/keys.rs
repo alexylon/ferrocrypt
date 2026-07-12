@@ -42,6 +42,65 @@ pub(crate) const HKDF_INFO_PAYLOAD: &[u8] = b"ferrocrypt/v1/payload";
 /// with an empty HKDF salt.
 pub(crate) const HKDF_INFO_HEADER: &[u8] = b"ferrocrypt/v1/header";
 
+/// Runs `f` with every [`random_bytes`] / [`random_secret`] draw coming from
+/// a deterministic seeded stream instead of the OS CSPRNG, then restores the
+/// previous state. This lets the `testvectors/suite/` fixture generator
+/// produce byte-stable output, so regenerating the committed corpus is a clean
+/// diff rather than a full re-randomization.
+///
+/// Test-only, and the whole seam is compiled out of every non-test build, so
+/// the production RNG is `OsRng` and only `OsRng`. The stream is deliberately
+/// NOT cryptographic; the fixtures it produces are explicitly non-secret.
+#[cfg(test)]
+pub(crate) use deterministic_rng::with_seed as with_deterministic_rng;
+
+// Opt-in deterministic RNG override. See [`with_deterministic_rng`].
+#[cfg(test)]
+mod deterministic_rng {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static STATE: RefCell<Option<u64>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn with_seed<R>(seed: u64, f: impl FnOnce() -> R) -> R {
+        // Restore the previous state on drop, so a panic inside `f` cannot
+        // leave the seeded stream active and poison a later test that shares
+        // this harness thread.
+        struct Restore(Option<u64>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                STATE.with(|s| *s.borrow_mut() = self.0);
+            }
+        }
+        let _restore = Restore(STATE.with(|s| s.replace(Some(seed))));
+        f()
+    }
+
+    /// If the deterministic stream is active, fills `buf` from it and returns
+    /// `true`; otherwise leaves `buf` untouched and returns `false`, so the
+    /// caller falls through to `OsRng`.
+    pub(crate) fn try_fill(buf: &mut [u8]) -> bool {
+        STATE.with(|s| {
+            let mut guard = s.borrow_mut();
+            let Some(state) = guard.as_mut() else {
+                return false;
+            };
+            for chunk in buf.chunks_mut(8) {
+                // splitmix64 step.
+                *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = *state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                let bytes = z.to_le_bytes();
+                chunk.copy_from_slice(&bytes[..chunk.len()]);
+            }
+            true
+        })
+    }
+}
+
 /// Fill a fresh stack-allocated `[u8; N]` from the OS CSPRNG. Use this
 /// for **non-secret** random material (salts, nonces, ephemeral-public
 /// scratch) where zero-on-drop provides no security benefit. Returns
@@ -49,6 +108,12 @@ pub(crate) const HKDF_INFO_HEADER: &[u8] = b"ferrocrypt/v1/header";
 /// CSPRNG read fails.
 pub(crate) fn random_bytes<const N: usize>() -> Result<[u8; N], CryptoError> {
     let mut buf = [0u8; N];
+    #[cfg(test)]
+    {
+        if deterministic_rng::try_fill(&mut buf) {
+            return Ok(buf);
+        }
+    }
     OsRng.try_fill_bytes(&mut buf).map_err(|_| CSPRNG_FAILURE)?;
     Ok(buf)
 }
@@ -60,6 +125,12 @@ pub(crate) fn random_bytes<const N: usize>() -> Result<[u8; N], CryptoError> {
 /// CSPRNG read fails.
 pub(crate) fn random_secret<const N: usize>() -> Result<Zeroizing<[u8; N]>, CryptoError> {
     let mut buf = Zeroizing::new([0u8; N]);
+    #[cfg(test)]
+    {
+        if deterministic_rng::try_fill(buf.as_mut()) {
+            return Ok(buf);
+        }
+    }
     OsRng
         .try_fill_bytes(buf.as_mut())
         .map_err(|_| CSPRNG_FAILURE)?;
@@ -329,5 +400,36 @@ mod tests {
     fn hkdf_info_strings_are_canonical() {
         assert_eq!(HKDF_INFO_PAYLOAD, b"ferrocrypt/v1/payload");
         assert_eq!(HKDF_INFO_HEADER, b"ferrocrypt/v1/header");
+    }
+
+    /// Known-answer test against an independent reference.
+    ///
+    /// Every committed fixture is produced by this crate's own writer, so
+    /// the round-trip tests above cannot catch a derivation that was wrong
+    /// on day one — a swapped `payload`/`header` info string or a swapped
+    /// salt convention would encrypt and decrypt consistently and still
+    /// pass. The expected bytes here come from
+    /// `testvectors/kat/hkdf_hmac_oracle.py`, which recomputes the two
+    /// subkeys with the Python standard library (a different HKDF/SHA3
+    /// implementation), so this test fails if either info string, the
+    /// `salt = stream_nonce` payload convention, or the empty-salt header
+    /// convention drifts from `FORMAT.md` §3.6 / §5.
+    #[test]
+    fn derive_subkeys_matches_independent_oracle() {
+        let file_key = FileKey::from_bytes_for_tests([0x11u8; FILE_KEY_SIZE]);
+        let nonce = [0x22u8; STREAM_NONCE_SIZE];
+        let expected_payload: [u8; ENCRYPTION_KEY_SIZE] = [
+            0xd5, 0xed, 0x06, 0x0d, 0x6d, 0xf1, 0x38, 0xfd, 0x16, 0x1e, 0x0c, 0x24, 0x72, 0xf1,
+            0x2a, 0x5d, 0xc7, 0xaa, 0xb4, 0x5b, 0x1d, 0x0c, 0xc5, 0xb3, 0x23, 0x20, 0x7b, 0xf8,
+            0x2f, 0xfb, 0x2e, 0x0e,
+        ];
+        let expected_header: [u8; HMAC_KEY_SIZE] = [
+            0x2e, 0xc1, 0x4f, 0x24, 0x89, 0xc6, 0x32, 0xff, 0x34, 0x88, 0x8c, 0x20, 0x1b, 0x31,
+            0x9d, 0xf6, 0x38, 0xd6, 0x17, 0xb2, 0x52, 0x40, 0x30, 0xa6, 0x66, 0x16, 0xeb, 0x3a,
+            0x43, 0x36, 0x84, 0x34,
+        ];
+        let derived = derive_subkeys(&file_key, &nonce).unwrap();
+        assert_eq!(*derived.payload_key.expose(), expected_payload);
+        assert_eq!(*derived.header_key.expose(), expected_header);
     }
 }

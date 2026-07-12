@@ -1,6 +1,8 @@
 # FerroCrypt v1 edge-case test-vector manifest.
 # Columns (tab-separated): file, action, credential, expect, error_class, error_message.
-# action: decrypt (open the .fcr and decrypt with the credential) or read-public-key.
+# action: decrypt (open the .fcr and decrypt with the credential),
+# read-public-key (parse the public.key text file), or validate-private-key
+# (structurally validate the private.key file).
 # credential: passphrase:<literal>, private-key:<path>,unlock=<literal>, or -.
 # expect ok: decryption must succeed and reproduce plaintext.txt byte-for-byte.
 # expect error: the attempt must fail; error_class names the typed CryptoError
@@ -36,5 +38,25 @@ cases/recipient-unknown-only.fcr	decrypt	-	error	NoSupportedRecipient	Decryption
 cases/recipient-mixed-exclusive.fcr	decrypt	-	error	IncompatibleRecipients(argon2id)	Recipient `argon2id` mixed with another recipient
 cases/recipient-unknown-skipped.fcr	decrypt	private-key:keys/recipient-a.private.key,unlock=suite-passphrase-not-secret-do-not-reuse	ok	-	-
 cases/public-key-uppercase.key	read-public-key	-	error	InvalidInput	Recipient string must be lowercase
-cases/public-key-bad-bech32.key	read-public-key	-	error	InvalidInput	Invalid recipient string: fcr1qyqqvqqqqqs8sv34x5cnjz4jeajmc5ehhkjwwkf0jzr3ktnwfz0zgmswltcx…
+cases/public-key-bad-bech32.key	read-public-key	-	error	InvalidInput	Invalid recipient string: fcr1qyqqvqqqqqs8sv34x5cnnw2l4g4s2h6v55nvjta0qs9j5a3u4eksdna53n9k…
 cases/public-key-bad-checksum.key	read-public-key	-	error	InvalidFormat(MalformedPublicKey)	Public key is malformed
+cases/privatekey-bad-magic.private.key	validate-private-key	-	error	InvalidFormat(NotAKeyFile)	Not a FerroCrypt key file
+cases/privatekey-newer-version.private.key	validate-private-key	-	error	UnsupportedVersion(NewerKey)	Newer key format (v2). Upgrade FerroCrypt.
+cases/privatekey-wrong-kind.private.key	validate-private-key	-	error	InvalidFormat(WrongKeyFileType)	Wrong key file kind (public vs private)
+cases/privatekey-nonzero-flags.private.key	validate-private-key	-	error	InvalidFormat(MalformedPrivateKey)	Private key is malformed
+cases/privatekey-truncated.private.key	validate-private-key	-	error	InvalidFormat(MalformedPrivateKey)	Private key is malformed
+cases/privatekey-trailing-byte.private.key	validate-private-key	-	error	InvalidFormat(MalformedPrivateKey)	Private key is malformed
+cases/x25519-valid.fcr	decrypt	private-key:keys/recipient-a-tampered.private.key,unlock=suite-passphrase-not-secret-do-not-reuse	error	KeyFileUnlockFailed	Private key unlock failed: wrong passphrase or modified key file
+cases/fca-bad-magic.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	MalformedArchive	Malformed archive: bad magic
+cases/fca-unsupported-version.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(UnsupportedArchiveVersion)	Unsupported archive version (v2). Upgrade FerroCrypt.
+cases/fca-nonzero-flags.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	MalformedArchive	Malformed archive: header has non-zero flags
+cases/fca-zero-entry-count.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	MalformedArchive	Malformed archive: no entries declared
+cases/fca-zero-manifest-len.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	MalformedArchive	Malformed archive: manifest bytes do not match the declared layout
+cases/header-flags-nonzero.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(MalformedHeader)	File header is malformed
+cases/entry-reserved-flag.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(RecipientFlagsReserved)	Recipient entry uses reserved flag bits
+cases/entry-critical-flag.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(MalformedRecipientEntry)	Recipient entry is malformed
+cases/entry-typename-len-zero.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(MalformedRecipientEntry)	Recipient entry is malformed
+cases/argon2id-salt-tamper.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	RecipientUnwrapFailed(argon2id)	Decryption failed: wrong passphrase or modified file
+cases/argon2id-wrappedkey-tamper.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	RecipientUnwrapFailed(argon2id)	Decryption failed: wrong passphrase or modified file
+cases/x25519-ephemeral-tamper.fcr	decrypt	private-key:keys/recipient-a.private.key,unlock=suite-passphrase-not-secret-do-not-reuse	error	RecipientUnwrapFailed(x25519)	Decryption failed: no matching recipient or modified file
+cases/x25519-wrappedkey-tamper.fcr	decrypt	private-key:keys/recipient-a.private.key,unlock=suite-passphrase-not-secret-do-not-reuse	error	RecipientUnwrapFailed(x25519)	Decryption failed: no matching recipient or modified file

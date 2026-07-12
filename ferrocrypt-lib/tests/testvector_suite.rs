@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
     CryptoError, Decryptor, FormatDefect, InvalidKdfParams, PrivateKey, PublicKey,
-    UnsupportedVersion,
+    UnsupportedVersion, validate_private_key_file,
 };
 
 const TEST_WORKSPACE: &str = "tests/workspace_testvector_suite";
@@ -97,9 +97,36 @@ fn error_matches(class: &str, e: &CryptoError) -> bool {
             e,
             CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)
         ),
+        "InvalidFormat(RecipientFlagsReserved)" => matches!(
+            e,
+            CryptoError::InvalidFormat(FormatDefect::RecipientFlagsReserved)
+        ),
         "InvalidFormat(MalformedPublicKey)" => matches!(
             e,
             CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)
+        ),
+        "InvalidFormat(NotAKeyFile)" => {
+            matches!(e, CryptoError::InvalidFormat(FormatDefect::NotAKeyFile))
+        }
+        "InvalidFormat(WrongKeyFileType)" => {
+            matches!(
+                e,
+                CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)
+            )
+        }
+        "InvalidFormat(MalformedPrivateKey)" => matches!(
+            e,
+            CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)
+        ),
+        "UnsupportedVersion(NewerKey)" => matches!(
+            e,
+            CryptoError::UnsupportedVersion(UnsupportedVersion::NewerKey { .. })
+        ),
+        "KeyFileUnlockFailed" => matches!(e, CryptoError::KeyFileUnlockFailed),
+        "MalformedArchive" => matches!(e, CryptoError::MalformedArchive { .. }),
+        "InvalidFormat(UnsupportedArchiveVersion)" => matches!(
+            e,
+            CryptoError::InvalidFormat(FormatDefect::UnsupportedArchiveVersion { .. })
         ),
         "UnsupportedVersion(NewerFile)" => matches!(
             e,
@@ -190,6 +217,7 @@ fn attempt(suite: &Path, row: &Row, out: &Path) -> Result<(), CryptoError> {
             Ok(())
         }
         "read-public-key" => PublicKey::from_key_file(suite.join(&row.file)).validate(),
+        "validate-private-key" => validate_private_key_file(suite.join(&row.file)),
         other => panic!("{}: unknown manifest action `{other}`", row.file),
     }
 }

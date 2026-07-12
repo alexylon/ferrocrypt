@@ -5,10 +5,14 @@
 # Lanes (each reported PASS / FAIL / SKIP, summary at the end):
 #   1. workspace          - full workspace suite, CI build-job mirror
 #                           (--include-ignored, generators skipped).
-#                           Set FERROCRYPT_REQUIRE_WINDOWS_SYMLINK_TESTS=1
-#                           yourself to fail closed when the symlink
-#                           privilege is missing (CI does; Developer Mode
-#                           machines run those tests either way).
+#                           This script defaults
+#                           FERROCRYPT_REQUIRE_WINDOWS_SYMLINK_TESTS=1 so
+#                           a green gauntlet is trustworthy: the
+#                           symlink/junction extraction tests fail closed
+#                           when the privilege is missing, matching CI.
+#                           Set that variable to 0 before running to opt
+#                           out on a machine without the privilege and
+#                           without Developer Mode.
 #   2. testvector-cycle   - committed corpus replayed, generator run,
 #                           fresh output validated, committed corpus
 #                           restored and re-validated
@@ -47,6 +51,7 @@ $TestWorkspaceRoots = @(
     (Join-Path $PSScriptRoot "ferrocrypt-lib\tests\workspace_concurrency"),
     (Join-Path $PSScriptRoot "ferrocrypt-lib\tests\workspace_memory_bounds"),
     (Join-Path $PSScriptRoot "ferrocrypt-lib\tests\workspace_roundtrip_randomized"),
+    (Join-Path $PSScriptRoot "ferrocrypt-lib\tests\workspace_large_file"),
     (Join-Path $PSScriptRoot "ferrocrypt-cli\tests\cli_workspace")
 )
 
@@ -65,7 +70,14 @@ function Remove-StaleTestWorkspaces {
             }
         }
 
-        Remove-Item -LiteralPath $root -ErrorAction SilentlyContinue
+        # Remove the now-empty root only when it is actually empty. A bare
+        # `Remove-Item` on a non-empty directory (a live run-<pid> that
+        # survived pruning) prompts "item has children" — an interactive
+        # run blocks, and confirming would recurse into a live workspace.
+        # This mirrors bash's `rmdir`, which fails silently on non-empty.
+        if (-not (Get-ChildItem -LiteralPath $root -Force -ErrorAction SilentlyContinue)) {
+            Remove-Item -LiteralPath $root -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -82,7 +94,14 @@ function SkipLane([string]$Lane, [string]$Reason) {
 
 function Run-FsMatrix([string]$Dir) {
     $env:FERROCRYPT_FS_MATRIX_DIR = $Dir
-    cargo test -p ferrocrypt --test archive_fs_matrix -- --ignored --test-threads=1
+    # Pipe cargo's stdout to the host, not the pipeline. A native
+    # command's output inside a function joins the function's return
+    # stream, so without this the caller's `$ok = Run-FsMatrix ...` would
+    # receive every cargo line plus the boolean as an array — and binding
+    # a multi-element array to `Record`'s `[bool]$Ok` coerces to $true,
+    # recording PASS even when the tests fail. Out-Host keeps only $ok
+    # on the pipeline and shows cargo output live.
+    cargo test -p ferrocrypt --test archive_fs_matrix -- --ignored --test-threads=1 | Out-Host
     $ok = ($LASTEXITCODE -eq 0)
     Remove-Item Env:FERROCRYPT_FS_MATRIX_DIR -ErrorAction SilentlyContinue
     return $ok
@@ -99,8 +118,16 @@ $TestvectorsDirty = (git status --porcelain ferrocrypt-lib/testvectors | Measure
 $FixturesDirty = (git status --porcelain ferrocrypt-lib/tests/fixtures | Measure-Object).Count
 
 # -- 1. workspace ------------------------------------------------------
+# Fail closed on a missing Windows symlink privilege (matching CI's
+# build job) unless the caller already chose a value, so a green local
+# gauntlet means the same as a green CI run. Set the variable to 0 to
+# opt out. This applies to the whole run; only the archive/platform
+# symlink and junction tests read it, and those run in this lane.
+if (-not (Test-Path Env:FERROCRYPT_REQUIRE_WINDOWS_SYMLINK_TESTS)) {
+    $env:FERROCRYPT_REQUIRE_WINDOWS_SYMLINK_TESTS = "1"
+}
 Note "workspace"
-cargo test -- --test-threads=1 --include-ignored --skip regenerate_fixtures --skip regenerate_suite_vectors
+cargo test -- --test-threads=1 --include-ignored --skip regenerate_fixtures --skip regenerate_suite_vectors --skip round_trip_file_larger_than_4gib
 Record "workspace" ($LASTEXITCODE -eq 0)
 
 # -- 2. test-vector corpus: committed replay and generator cycle -------
@@ -174,6 +201,18 @@ if ($RamMib -ge 4096) {
     Record "release-cli" ($LASTEXITCODE -eq 0)
 } else {
     SkipLane "release-cli" "less than 4 GiB RAM for sequential 1 GiB Argon2id runs"
+}
+
+# -- large-file: >4 GiB round trip (opt in) --------------------------------
+# Excluded from lane 1 because it streams >4 GiB through real I/O to catch a
+# u32 truncation in the size/progress accounting. Opt in explicitly; needs a
+# few GiB of free disk.
+if ($env:FERROCRYPT_GAUNTLET_LARGE_FILE -eq "1") {
+    Note "large-file"
+    cargo test --release -p ferrocrypt --test large_file -- --ignored --test-threads=1
+    Record "large-file" ($LASTEXITCODE -eq 0)
+} else {
+    SkipLane "large-file" "opt in with FERROCRYPT_GAUNTLET_LARGE_FILE=1 (>4 GiB I/O, needs spare disk)"
 }
 
 # -- 6. exFAT VHD (mirrors the CI windows-exfat lane) ----------------------

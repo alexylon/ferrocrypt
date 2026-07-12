@@ -57,6 +57,7 @@ TEST_WORKSPACE_ROOTS=(
     ferrocrypt-lib/tests/workspace_concurrency
     ferrocrypt-lib/tests/workspace_memory_bounds
     ferrocrypt-lib/tests/workspace_roundtrip_randomized
+    ferrocrypt-lib/tests/workspace_large_file
     ferrocrypt-cli/tests/cli_workspace
 )
 
@@ -123,7 +124,8 @@ FIXTURES_DIRTY=$(git status --porcelain ferrocrypt-lib/tests/fixtures | wc -l | 
 
 note "workspace"
 cargo test -- --test-threads=1 --include-ignored \
-    --skip regenerate_fixtures --skip regenerate_suite_vectors
+    --skip regenerate_fixtures --skip regenerate_suite_vectors \
+    --skip round_trip_file_larger_than_4gib
 record workspace $?
 
 # ── 2. test-vector corpus: replay committed, then a generator cycle ──
@@ -166,6 +168,18 @@ if [ "$(ram_mib)" -ge 4096 ]; then
     record release-cli $?
 else
     skip release-cli "less than 4 GiB RAM for sequential 1 GiB Argon2id runs"
+fi
+
+# ── large-file: >4 GiB round trip (opt in) ───────────────────────────
+# Excluded from lane 1 because it streams >4 GiB through real I/O to catch a
+# u32 truncation in the size/progress accounting. Opt in explicitly; needs a
+# few GiB of free disk. Release profile so the payload is not debug-slow.
+if [ "${FERROCRYPT_GAUNTLET_LARGE_FILE:-0}" = 1 ]; then
+    note "large-file"
+    cargo test --release -p ferrocrypt --test large_file -- --ignored --test-threads=1
+    record large-file $?
+else
+    skip large-file "opt in with FERROCRYPT_GAUNTLET_LARGE_FILE=1 (>4 GiB I/O, needs spare disk)"
 fi
 
 # ── 6. fuzz smoke ────────────────────────────────────────────────────

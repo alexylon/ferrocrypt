@@ -26,6 +26,26 @@ pub use crate::key::private::PrivateKeyHeader;
 pub use crate::key::public::RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT;
 pub use crate::recipient::native::x25519::validate_private_key_shape;
 
+/// Drives the full `private.key` load + unlock over attacker-controlled bytes
+/// with a fixed passphrase and a tight 64 KiB Argon2id memory cap. This reaches
+/// past the shape gate that [`validate_private_key_shape`] stops at: the KDF
+/// resource cap, the wrapped-secret cap, the total-length check, type-name
+/// grammar, AEAD-AAD unlock, and the recipient's public/secret derivation
+/// check. Any file demanding more than 64 KiB of KDF memory is rejected before
+/// Argon2id runs, so every iteration stays cheap.
+pub fn open_private_key_for_fuzz(bytes: &[u8]) -> Result<(), crate::CryptoError> {
+    let passphrase = secrecy::SecretString::from("fuzz-passphrase".to_string());
+    let limit = crate::KdfLimit::new(64);
+    crate::key::private::open_private_key(
+        bytes,
+        &passphrase,
+        Some(&limit),
+        crate::key::private::PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT,
+        &|_| {},
+    )
+    .map(|_| ())
+}
+
 // `HeaderReadLimits` is part of the stable public API; re-export the
 // crate-internal `read_encrypted_header` here so fuzz targets can drive
 // the parser without paying the cost of a full Argon2id derivation.

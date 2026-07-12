@@ -93,3 +93,8 @@ doc = false
 name = "fuzz_probe_mode"
 path = "fuzz_targets/fuzz_probe_mode.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_private_key_unlock"
+path = "fuzz_targets/fuzz_private_key_unlock.rs"
+doc = false

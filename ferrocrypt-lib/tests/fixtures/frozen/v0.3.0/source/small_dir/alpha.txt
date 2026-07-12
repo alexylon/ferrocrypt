@@ -1,0 +1,1 @@
+fixture file alpha — top-level entry inside small_dir.

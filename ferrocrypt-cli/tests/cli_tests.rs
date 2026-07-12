@@ -3129,6 +3129,300 @@ fn test_cli_decrypt_wrong_key_type_rejects_before_prompt() {
     );
 }
 
+/// Substring of the warning `test_fast_kdf_override` prints when the
+/// fast-Argon2id override actually fires. Mirrors the wording in
+/// `ferrocrypt-cli/src/cli.rs`; keep in sync.
+const FAST_KDF_OVERRIDE_WARNING: &str = "using fast Argon2id parameters";
+
+/// Guards the premise the release-cli lane depends on: in a release build
+/// the `FERROCRYPT_INTERNAL_TEST_FAST_KDF` override must be compiled out,
+/// so the lane genuinely exercises production Argon2id. `cli_command`
+/// sets the env var on every invocation, so the warning appears if and
+/// only if the override branch is live. A misconfigured
+/// `[profile.release] debug-assertions = true` (the exact hazard
+/// `cli.rs` warns about) would leave the branch live in release, the
+/// warning would appear, and this test would fail — instead of the lane
+/// silently passing on fast KDF while shipped binaries honour a
+/// strength-reducing env var. The debug half also pins that the override
+/// really does fire in debug, so the fast tests are fast for the right
+/// reason.
+#[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
+fn test_fast_kdf_override_state_matches_build_profile() {
+    let test_dir = setup_test_dir("cli_fast_kdf_override_state");
+    let input_file = test_dir.join("in.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    create_test_file(&input_file, "premise-check");
+
+    let binary = get_binary_path();
+    let out = cli_command(&binary)
+        .arg("encrypt")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "b4-premise-passphrase")
+        .output()
+        .expect("Failed to execute encrypt command");
+    assert!(
+        out.status.success(),
+        "Encryption failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let warned = stderr.contains(FAST_KDF_OVERRIDE_WARNING);
+
+    if cfg!(debug_assertions) {
+        assert!(
+            warned,
+            "debug build must apply the fast-KDF override (expected the override \
+             warning on stderr, so the fast CLI tests are fast for the right \
+             reason); stderr: {stderr}"
+        );
+    } else {
+        assert!(
+            !warned,
+            "release build must NOT apply the fast-KDF override: the override \
+             branch should be compiled out, otherwise the release-cli lane is \
+             testing fast KDF, not production Argon2id. Check that \
+             `[profile.release] debug-assertions` is not enabled; stderr: {stderr}"
+        );
+    }
+}
+
+/// Param-sensitive complement to the warning check above: proves the
+/// on-disk file the release binary writes actually carries production
+/// KDF strength, not just that the warning is absent. Encrypt produces a
+/// passphrase `.fcr` whose Argon2id `mem_cost` is 19 MiB in a debug
+/// (fast-override) build and 1 GiB in a release build. Decrypt with a
+/// 128 MiB memory cap — above fast, below production — then succeeds in
+/// debug and is rejected before Argon2id in release. A release build that
+/// SUCCEEDS here wrote a fast-KDF file, meaning the override leaked into
+/// release; a debug build that is REJECTED means the override did not
+/// apply.
+#[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
+fn test_encrypted_file_kdf_strength_matches_build_profile() {
+    let test_dir = setup_test_dir("cli_kdf_strength_profile");
+    let input_file = test_dir.join("in.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    fs::create_dir_all(&decrypt_dir).unwrap();
+    create_test_file(&input_file, "kdf-strength-probe");
+
+    let binary = get_binary_path();
+    let passphrase = "b4-kdf-strength-passphrase";
+    let enc = cli_command(&binary)
+        .arg("encrypt")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", passphrase)
+        .output()
+        .expect("Failed to execute encrypt command");
+    assert!(
+        enc.status.success(),
+        "Encryption failed: {}",
+        String::from_utf8_lossy(&enc.stderr)
+    );
+
+    // 128 MiB sits between the fast override (19 MiB) and the production
+    // default (1 GiB). --max-kdf-memory is in MiB and its cap check runs
+    // before Argon2id, so the release rejection costs no KDF work.
+    let dec = cli_command(&binary)
+        .arg("decrypt")
+        .arg("-i")
+        .arg(encrypt_dir.join("in.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir)
+        .arg("--max-kdf-memory")
+        .arg("128")
+        .env("FERROCRYPT_PASSPHRASE", passphrase)
+        .output()
+        .expect("Failed to execute decrypt command");
+    let stderr = String::from_utf8_lossy(&dec.stderr);
+
+    if cfg!(debug_assertions) {
+        assert!(
+            dec.status.success(),
+            "a 19 MiB fast-KDF file must decrypt under a 128 MiB cap; stderr: {stderr}"
+        );
+    } else {
+        assert!(
+            !dec.status.success(),
+            "a production 1 GiB-KDF file must be rejected by a 128 MiB cap. If this \
+             decrypt SUCCEEDED, the release binary wrote a fast-KDF file and the \
+             release-cli lane is not testing production Argon2id."
+        );
+        assert!(
+            stderr.contains("over limit"),
+            "expected a KDF memory-cap rejection; stderr: {stderr}"
+        );
+    }
+}
+
+/// The no-subcommand interactive REPL had no end-to-end coverage. On piped
+/// (non-TTY) stdin rustyline degrades to line reading, so `exit` drives a
+/// clean shutdown. Dropping stdin also sends EOF, so the process can never
+/// hang waiting for input.
+#[test]
+fn test_cli_repl_exit_returns_success() {
+    use std::io::Write;
+    let binary = get_binary_path();
+    let mut child = cli_command(&binary)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn repl");
+    {
+        let mut stdin = child.stdin.take().expect("repl stdin");
+        stdin.write_all(b"exit\n").expect("write to repl");
+    }
+    let out = child.wait_with_output().expect("repl output");
+    assert!(
+        out.status.success(),
+        "REPL `exit` must return success; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A failing command inside the REPL prints an error but must NOT change the
+/// process exit status — the REPL keeps running and a later `exit` leaves
+/// cleanly. This pins the "command failure does not fail the process"
+/// contract that no test covered.
+#[test]
+fn test_cli_repl_command_failure_does_not_change_exit_status() {
+    use std::io::Write;
+    let binary = get_binary_path();
+    let mut child = cli_command(&binary)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn repl");
+    {
+        let mut stdin = child.stdin.take().expect("repl stdin");
+        stdin
+            .write_all(b"fingerprint /does/not/exist\nexit\n")
+            .expect("write to repl");
+    }
+    let out = child.wait_with_output().expect("repl output");
+    assert!(
+        out.status.success(),
+        "REPL must exit 0 even after a failed command; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.to_lowercase().contains("error")
+            || combined.to_lowercase().contains("missing")
+            || combined.to_lowercase().contains("not a"),
+        "the failed REPL command must surface an error; got: {combined}"
+    );
+}
+
+/// Crash safety: killing an encrypt mid-stream must never leave a partial
+/// committed `.fcr`. Ported from `stress_test.sh` phase 22 to a Rust
+/// integration test so it runs on all three OSes — Windows had no crash
+/// coverage anywhere before this. `Child::kill()` is `SIGKILL` on Unix and
+/// `TerminateProcess` on Windows, so both platforms exercise the same
+/// invariant: after each kill the output name is either absent (the process
+/// died before the atomic rename) or a complete file that decrypts back to
+/// the original — never a truncated or blended file. Public-key mode keeps
+/// Argon2id off the encrypt path so the kill lands in the streaming window,
+/// not the KDF. The pass/fail result is scheduling-independent: it holds
+/// regardless of where each kill happens to land.
+#[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
+fn test_cli_sigkill_during_encrypt_never_commits_partial() {
+    use std::thread::sleep;
+    use std::time::Duration;
+
+    let test_dir = setup_test_dir("cli_crash_encrypt");
+    let keys_dir = test_dir.join("keys");
+    fs::create_dir_all(&keys_dir).unwrap();
+    let binary = get_binary_path();
+
+    let kg = cli_command(&binary)
+        .args(["keygen", "-o"])
+        .arg(&keys_dir)
+        .env("FERROCRYPT_PASSPHRASE", "crash-test-passphrase")
+        .output()
+        .expect("keygen");
+    assert!(
+        kg.status.success(),
+        "keygen failed: {}",
+        String::from_utf8_lossy(&kg.stderr)
+    );
+    let pub_key = keys_dir.join("public.key");
+    let priv_key = keys_dir.join("private.key");
+
+    // Large enough that encryption takes long enough to interrupt in the
+    // streaming window.
+    let input = test_dir.join("big.bin");
+    let payload = vec![0xC7u8; 32 * 1024 * 1024];
+    fs::write(&input, &payload).unwrap();
+
+    for i in 0..10u64 {
+        let out_dir = test_dir.join(format!("enc_{i}"));
+        fs::create_dir_all(&out_dir).unwrap();
+        let mut child = cli_command(&binary)
+            .args(["encrypt", "-i"])
+            .arg(&input)
+            .arg("-o")
+            .arg(&out_dir)
+            .arg("-k")
+            .arg(&pub_key)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn encrypt");
+
+        // Vary the delay so the kill lands at different stream positions.
+        sleep(Duration::from_millis(2 + i * 6));
+        let _ = child.kill();
+        let _ = child.wait();
+
+        // The committed name is either absent or a complete, decryptable file.
+        // A leftover temporary staging file under `out_dir` is the expected
+        // artifact of an interrupted run and is not the committed name.
+        let committed = out_dir.join("big.fcr");
+        if committed.exists() {
+            let dec_dir = test_dir.join(format!("dec_{i}"));
+            fs::create_dir_all(&dec_dir).unwrap();
+            let dec = cli_command(&binary)
+                .args(["decrypt", "-i"])
+                .arg(&committed)
+                .arg("-o")
+                .arg(&dec_dir)
+                .arg("-K")
+                .arg(&priv_key)
+                .env("FERROCRYPT_PASSPHRASE", "crash-test-passphrase")
+                .output()
+                .expect("decrypt");
+            assert!(
+                dec.status.success(),
+                "a committed .fcr must decrypt cleanly (iteration {i}): {}",
+                String::from_utf8_lossy(&dec.stderr)
+            );
+            assert_eq!(
+                fs::read(dec_dir.join("big.bin")).unwrap(),
+                payload,
+                "committed .fcr decrypted to the wrong content (iteration {i})"
+            );
+        }
+    }
+}
+
 #[ctor::dtor]
 fn cleanup() {
     cleanup_test_workspace();

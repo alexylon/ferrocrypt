@@ -178,7 +178,7 @@ jobs:
         uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # stable
 
       - name: Install cargo-vet
-        run: cargo install --locked cargo-vet
+        run: cargo install cargo-vet
 
       - name: Run supply-chain vet
         run: cargo vet

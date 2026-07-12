@@ -137,7 +137,7 @@ jobs:
       # init`.
       - name: Install cargo-wix (Windows)
         if: runner.os == 'Windows'
-        run: cargo install cargo-wix --locked
+        run: cargo install cargo-wix
 
       - name: Bundle Desktop (Windows MSI)
         if: runner.os == 'Windows'

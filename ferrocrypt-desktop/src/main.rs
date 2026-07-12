@@ -427,6 +427,28 @@ fn main() {
         }
     });
 
+    // Re-check for a name clash every second while the window is idle, so the
+    // "already exists" note clears on its own once you delete or rename the
+    // clashing file outside the app (for example in Finder or Explorer) and
+    // switch back. The Start button is never turned off by a clash, so you can
+    // always free up the name and press Encrypt again. The timer is held for
+    // the lifetime of the window; it skips work while an operation is running.
+    let conflict_refresh = slint::Timer::default();
+    conflict_refresh.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_millis(1000),
+        {
+            let weak = app.as_weak();
+            move || {
+                if let Some(app) = weak.upgrade() {
+                    if !app.get_is_working() {
+                        check_conflicts(&app);
+                    }
+                }
+            }
+        },
+    );
+
     app.run().unwrap();
 }
 
@@ -450,7 +472,16 @@ fn apply_input_path(weak: &slint::Weak<AppWindow>, path: PathBuf) {
     let detected_mode = match detected_mode {
         Ok(mode) => mode,
         Err(e) => {
+            // The chosen file could not be read (a damaged encrypted file, or
+            // one we cannot open). Clear whatever was selected before, so a
+            // failed pick never leaves the previous file ready to run. With no
+            // input selected the Start button turns itself off.
             app.set_status_err(elide_error_for_status(&e.to_string()).into());
+            app.set_input_path(Default::default());
+            app.set_input_path_display(Default::default());
+            app.set_output_path(Default::default());
+            app.set_output_path_display(Default::default());
+            check_conflicts(&app);
             return;
         }
     };
@@ -825,6 +856,173 @@ mod tests {
         assert!(
             matches!(&e2, CryptoError::InvalidInput(m) if m.contains("sealed with a passphrase")),
             "unexpected error: {e2:?}"
+        );
+    }
+
+    /// The magic-byte auto-detection that routes a dropped/selected file to
+    /// the right decrypt tab. A swap of the two `Some(_)` arms would send
+    /// every passphrase file to the key-pair tab and vice versa — a total
+    /// workflow break that no other test catches, since the arms are pure
+    /// mapping with no round-trip. This pins each probe outcome to its UI
+    /// mode. The library's own probe classification is unit-tested; here we
+    /// pin the desktop mapping on top of it.
+    #[test]
+    fn detect_mode_from_path_maps_every_probe_outcome() {
+        let noop = |_: &ProgressEvent| {};
+        let pass = SecretString::from("desktop-detect-passphrase".to_string());
+        let dir = fs_matrix_tempdir().expect("tempdir");
+        let root = dir.path();
+        let input = root.join("secret.txt");
+        fs::write(&input, b"detect payload").unwrap();
+        let dummy_key = Path::new("");
+
+        let run = |mode: i32, src: &Path, out: &Path, key: &Path| {
+            run_operation(
+                Operation {
+                    mode,
+                    input: src,
+                    output_dir: out,
+                    save_as: None,
+                    key_path: key,
+                    kdf_params: Some(fast_kdf_params()),
+                },
+                pass.clone(),
+                &noop,
+            )
+        };
+
+        // A passphrase-sealed file routes to the passphrase-decrypt mode.
+        let pw_out = root.join("pw_out");
+        fs::create_dir_all(&pw_out).unwrap();
+        let pw_fcr = run(MODE_PASSPHRASE_ENCRYPT, &input, &pw_out, dummy_key).expect("pw encrypt");
+        assert_eq!(
+            detect_mode_from_path(pw_fcr.to_str().unwrap()).unwrap(),
+            Some(MODE_PASSPHRASE_DECRYPT)
+        );
+
+        // A recipient-sealed file routes to the recipient-decrypt mode.
+        let keys = root.join("keys");
+        fs::create_dir_all(&keys).unwrap();
+        let pub_key = run(MODE_KEYGEN, dummy_key, &keys, dummy_key).expect("keygen");
+        let rc_out = root.join("rc_out");
+        fs::create_dir_all(&rc_out).unwrap();
+        let rc_fcr = run(MODE_RECIPIENT_ENCRYPT, &input, &rc_out, &pub_key).expect("rc encrypt");
+        assert_eq!(
+            detect_mode_from_path(rc_fcr.to_str().unwrap()).unwrap(),
+            Some(MODE_RECIPIENT_DECRYPT)
+        );
+
+        // A plaintext file and an empty file are not FerroCrypt payloads, so
+        // detection returns None (the UI then treats them as encrypt input).
+        assert_eq!(
+            detect_mode_from_path(input.to_str().unwrap()).unwrap(),
+            None
+        );
+        let empty = root.join("empty.bin");
+        fs::write(&empty, b"").unwrap();
+        assert_eq!(
+            detect_mode_from_path(empty.to_str().unwrap()).unwrap(),
+            None
+        );
+
+        // A missing path is an error (the UI surfaces it rather than
+        // switching modes).
+        let missing = root.join("does-not-exist.fcr");
+        assert!(detect_mode_from_path(missing.to_str().unwrap()).is_err());
+
+        // A directory must never be classified as a decryptable file,
+        // whichever way the library reports it (error or None).
+        assert!(
+            !matches!(detect_mode_from_path(root.to_str().unwrap()), Ok(Some(_))),
+            "a directory must not be offered as a decrypt mode"
+        );
+    }
+
+    /// Both `save_as` branches of `run_operation`, which the dispatch test
+    /// never exercises (it always passes `save_as: None`). Covers the
+    /// "Choose output file" flow: a fresh path is honoured exactly, and a
+    /// pre-existing target is rejected without being overwritten. The
+    /// rejection also pins the "already exists" wording the desktop status
+    /// line relies on when it elides that message by prefix.
+    #[test]
+    fn run_operation_save_as_writes_exact_path_and_rejects_existing() {
+        let noop = |_: &ProgressEvent| {};
+        let pass = SecretString::from("desktop-save-as-passphrase".to_string());
+        let dir = fs_matrix_tempdir().expect("tempdir");
+        let root = dir.path();
+        let payload: &[u8] = b"desktop save-as payload";
+        let input = root.join("secret.txt");
+        fs::write(&input, payload).unwrap();
+        let dummy_key = Path::new("");
+        let out_dir = root.join("out");
+        fs::create_dir_all(&out_dir).unwrap();
+
+        // Fresh save_as path: the returned path is exactly the chosen one,
+        // the file exists there, and it round-trips back to the payload.
+        let target = out_dir.join("chosen-name.fcr");
+        let produced = run_operation(
+            Operation {
+                mode: MODE_PASSPHRASE_ENCRYPT,
+                input: &input,
+                output_dir: &out_dir,
+                save_as: Some(&target),
+                key_path: dummy_key,
+                kdf_params: Some(fast_kdf_params()),
+            },
+            pass.clone(),
+            &noop,
+        )
+        .expect("save_as encrypt");
+        assert_eq!(
+            produced, target,
+            "save_as must produce exactly the chosen path"
+        );
+        assert!(target.exists());
+
+        let dec_dir = root.join("dec");
+        fs::create_dir_all(&dec_dir).unwrap();
+        let plain = run_operation(
+            Operation {
+                mode: MODE_PASSPHRASE_DECRYPT,
+                input: &target,
+                output_dir: &dec_dir,
+                save_as: None,
+                key_path: dummy_key,
+                kdf_params: Some(fast_kdf_params()),
+            },
+            pass.clone(),
+            &noop,
+        )
+        .expect("decrypt save_as output");
+        assert_eq!(fs::read(&plain).unwrap(), payload);
+
+        // save_as onto an existing file: rejected no-clobber, existing file
+        // left byte-intact.
+        let occupied = out_dir.join("occupied.fcr");
+        let sentinel: &[u8] = b"pre-existing bytes";
+        fs::write(&occupied, sentinel).unwrap();
+        let err = run_operation(
+            Operation {
+                mode: MODE_PASSPHRASE_ENCRYPT,
+                input: &input,
+                output_dir: &out_dir,
+                save_as: Some(&occupied),
+                key_path: dummy_key,
+                kdf_params: Some(fast_kdf_params()),
+            },
+            pass.clone(),
+            &noop,
+        )
+        .expect_err("save_as onto an existing file must be rejected");
+        assert!(
+            err.to_string().contains("already exists"),
+            "expected an already-exists rejection (the desktop status line elides \
+             this message by its 'Output file already exists:' prefix); got: {err}"
+        );
+        assert_eq!(
+            fs::read(&occupied).unwrap(),
+            sentinel,
+            "a rejected save_as must not overwrite the existing file"
         );
     }
 

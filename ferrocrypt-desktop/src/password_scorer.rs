@@ -441,6 +441,50 @@ mod tests {
         }
     }
 
+    /// The scorer runs on every keystroke inside a Slint callback, where a
+    /// panic would take down the whole app. This exhaustively exercises the
+    /// run-detection and consecutive-sequence arithmetic (the paths with an
+    /// unchecked `usize` subtraction) across every 1-3 character combination
+    /// of a deliberately hostile alphabet — repeats, sequences, separators,
+    /// a control byte, a multibyte char, and a multi-scalar emoji — plus a
+    /// set of longer adversarial inputs, asserting only that scoring never
+    /// panics and always returns a valid level.
+    #[test]
+    fn password_strength_never_panics_and_stays_in_range() {
+        let check = |s: &str| {
+            let score = password_strength(s);
+            assert!(
+                (PW_EMPTY..=PW_STRONG).contains(&score),
+                "score {score} out of range for {s:?}"
+            );
+        };
+        let alphabet = ['a', 'b', 'c', 'A', '1', '2', '-', '_', ' ', '\t', 'é', '🔐'];
+        check("");
+        for &a in &alphabet {
+            check(&a.to_string());
+            for &b in &alphabet {
+                check(&format!("{a}{b}"));
+                for &c in &alphabet {
+                    check(&format!("{a}{b}{c}"));
+                }
+            }
+        }
+        for s in [
+            "aaaaaaaaaaaaaaaaaaaa",
+            "abcdefghijklmnopqrst",
+            "123456789012345678901234567890",
+            "aaaa1111bbbb2222cccc",
+            "correct-horse-battery-staple",
+            "\t\t\t\t\t\t\t\t",
+            "🔐🔐🔐🔐🔐🔐",
+            "éééééééééééééééééé",
+            "a-a-a-a-a-a-a-a-a-a",
+        ] {
+            check(s);
+        }
+        check(&"x".repeat(500));
+    }
+
     #[test]
     fn test_strong_passwords() {
         for pw in [

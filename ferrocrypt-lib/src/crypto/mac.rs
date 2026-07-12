@@ -91,4 +91,45 @@ mod tests {
         let data2 = [0u8; 32];
         assert!(ct_eq_32(&data1, &data2));
     }
+
+    /// The header MAC feeds `prefix` and `header` as separate parts
+    /// (`FORMAT.md` §3.6 authenticates `prefix(12) || header`). This pins
+    /// that feeding parts in order is byte-identical to MAC'ing their
+    /// concatenation — the property a reader in another language must
+    /// match. A bug that inserted a length prefix or separator between
+    /// parts would pass every round-trip test but break interop; it fails
+    /// here.
+    #[test]
+    fn hmac_sha3_256_parts_equals_concatenated_input() {
+        let key = [0x0bu8; 32];
+        let p1 = b"ferrocrypt-prefix";
+        let p2 = b"ferrocrypt-header-bytes";
+        let mut concat = Vec::new();
+        concat.extend_from_slice(p1);
+        concat.extend_from_slice(p2);
+        let split = hmac_sha3_256_parts(&key, &[p1, p2]).unwrap();
+        let whole = hmac_sha3_256_parts(&key, &[&concat]).unwrap();
+        assert_eq!(split, whole);
+    }
+
+    /// Known-answer test against an independent HMAC-SHA3-256 reference.
+    ///
+    /// The expected tag comes from `testvectors/kat/hkdf_hmac_oracle.py`,
+    /// which computes `hmac.new(key, msg, hashlib.sha3_256)` — a different
+    /// implementation than the `hmac` / `sha3` crates here. Combined with
+    /// the parts-equals-concatenated test above, this pins that the header
+    /// MAC is a correct HMAC-SHA3-256 over the concatenated input, not
+    /// merely self-consistent with FerroCrypt's own verifier.
+    #[test]
+    fn hmac_sha3_256_parts_matches_independent_oracle() {
+        let key = [0x0bu8; 32];
+        let parts: [&[u8]; 2] = [b"ferrocrypt-prefix", b"ferrocrypt-header-bytes"];
+        let expected: [u8; 32] = [
+            0x55, 0xe3, 0xcf, 0x23, 0xb9, 0x60, 0x24, 0x68, 0xc4, 0xa5, 0xd3, 0xe0, 0x62, 0x81,
+            0xf1, 0x01, 0x47, 0x32, 0x4a, 0x8e, 0xa7, 0x96, 0x57, 0x53, 0xde, 0x1f, 0xb0, 0xc1,
+            0x84, 0x11, 0xa8, 0x5a,
+        ];
+        let got = hmac_sha3_256_parts(&key, &parts).unwrap();
+        assert_eq!(got, expected);
+    }
 }

@@ -482,7 +482,17 @@ fn test_passphrase_encrypt_decrypt_multi_chunk_file() -> Result<(), CryptoError>
     fs::create_dir_all(&encrypt_dir)?;
     fs::create_dir_all(&decrypt_dir)?;
 
-    let content = "Multi chunk content. ".repeat(500);
+    // The content must span several 64 KiB payload chunks so this actually
+    // exercises multi-chunk streaming — multiple full `next` chunks plus a
+    // partial `last` chunk (FORMAT.md §5). 210,000 bytes spans four chunks;
+    // the previous 10,500-byte content fit inside a single chunk, so a
+    // multi-chunk streaming regression would have passed unnoticed.
+    let content = "Multi chunk content. ".repeat(10_000);
+    assert!(
+        content.len() > 3 * 65_536,
+        "test content must span multiple 64 KiB payload chunks (got {} bytes)",
+        content.len()
+    );
     create_test_file(&input_file, &content);
 
     let passphrase = SecretString::from("multi_chunk_password".to_string());
@@ -1172,21 +1182,17 @@ fn test_nonexistent_output_dir() {
 #[test]
 fn test_decrypt_nonexistent_fcr_file() {
     let test_dir = setup_test_dir("decrypt_nonexistent");
-    let decrypt_dir = test_dir.join("decrypted");
-    fs::create_dir_all(&decrypt_dir).unwrap();
+    let missing = test_dir.join("missing.fcr");
 
-    let passphrase = SecretString::from("test".to_string());
-
-    let result = passphrase_auto(
-        "/nonexistent/missing.fcr",
-        &decrypt_dir,
-        &passphrase,
-        None,
-        None,
-        |_| {},
+    // Call the public API directly. The `passphrase_auto` shim short-circuits
+    // on a missing path, so routing through it would test the shim, not the
+    // library. `Decryptor::open` on an absent file must report the typed
+    // `InputPath`, not a generic I/O error.
+    let result = ferrocrypt::Decryptor::open(&missing);
+    assert!(
+        matches!(result, Err(CryptoError::InputPath)),
+        "opening a missing .fcr must report InputPath, got {result:?}"
     );
-
-    assert!(result.is_err());
 }
 
 #[test]
@@ -1495,23 +1501,19 @@ fn test_nonexistent_input_path_encrypt() {
     let test_dir = setup_test_dir("nonexistent_input_encrypt");
     let encrypt_dir = test_dir.join("encrypted");
     fs::create_dir_all(&encrypt_dir).unwrap();
+    let missing = test_dir.join("does-not-exist.txt");
 
+    // Call the public encryptor directly (the `passphrase_auto` shim
+    // short-circuits on a missing path). A missing input must be reported as
+    // the typed InputPath, before any key derivation runs.
     let passphrase = SecretString::from("test".to_string());
-
-    let result = passphrase_auto(
-        "/nonexistent/path/file.txt",
-        &encrypt_dir,
-        &passphrase,
-        None,
-        None,
-        |_| {},
+    let result = ferrocrypt_test_support::fast_passphrase_encryptor(passphrase)
+        .write(&missing, &encrypt_dir, |_| {})
+        .map(|_| ());
+    assert!(
+        matches!(result, Err(CryptoError::InputPath)),
+        "encrypting a missing input must report InputPath, got {result:?}"
     );
-
-    assert!(result.is_err());
-    match result {
-        Err(CryptoError::InputPath) => {}
-        other => panic!("Expected InputPath error, got {:?}", other),
-    }
 }
 
 #[test]
@@ -2355,7 +2357,11 @@ fn test_passphrase_ciphertext_bit_flip_detected() -> Result<(), CryptoError> {
         None,
         |_| {},
     );
-    assert!(result.is_err());
+    assert!(
+        matches!(result, Err(CryptoError::PayloadTampered)),
+        "a flipped ciphertext byte must surface as PayloadTampered, not a \
+         generic error, got {result:?}"
+    );
     Ok(())
 }
 
@@ -2406,7 +2412,11 @@ fn test_recipient_ciphertext_bit_flip_detected() -> Result<(), CryptoError> {
         None,
         |_| {},
     );
-    assert!(result.is_err());
+    assert!(
+        matches!(result, Err(CryptoError::PayloadTampered)),
+        "a flipped ciphertext byte must surface as PayloadTampered, not a \
+         generic error, got {result:?}"
+    );
     Ok(())
 }
 
@@ -2441,7 +2451,18 @@ fn test_passphrase_ciphertext_truncation_detected() -> Result<(), CryptoError> {
         None,
         |_| {},
     );
-    assert!(result.is_err());
+    // A mid-stream cut leaves a partial or boundary-shifted chunk; STREAM
+    // cannot tell a shortened chunk from a modified one, so either
+    // payload-integrity variant is correct. Pinning both still rules out the
+    // regression the bare `is_err()` missed: truncation surfacing as a
+    // generic `Io` error instead of a typed payload failure (FORMAT.md §5).
+    assert!(
+        matches!(
+            result,
+            Err(CryptoError::PayloadTruncated | CryptoError::PayloadTampered)
+        ),
+        "mid-stream truncation must surface as a typed payload failure, got {result:?}"
+    );
     Ok(())
 }
 

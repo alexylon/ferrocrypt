@@ -1,11 +1,18 @@
 //! Concurrency safety for output finalization.
 //!
-//! Several threads encrypt the same input into the same output directory, so
-//! they all target one derived `.fcr` name. Atomic no-clobber finalization
-//! means exactly one writer commits and the committed file is a complete,
-//! decryptable encryption — never an interleaved blend of two runs. The
-//! invariant holds for any thread scheduling, so the test is deterministic:
-//! even if the writers serialize, the later ones fail the no-clobber check.
+//! Two races are covered, both on one shared output name:
+//! - Several threads encrypt the same input into the same output directory, so
+//!   they all target one derived `.fcr` name.
+//! - Several threads decrypt the same `.fcr` into the same output directory, so
+//!   they all target one derived output name and race the `.incomplete`
+//!   staging plus the no-clobber promotion.
+//!
+//! Atomic no-clobber finalization means exactly one thread commits and the
+//! committed output is complete and correct — never an interleaved blend of two
+//! runs — and, on the decrypt side, no loser leaves `.incomplete` staging
+//! behind (the default `DeleteOnError` policy cleans up under contention). The
+//! invariant holds for any thread scheduling, so the tests are deterministic:
+//! even if the threads serialize, the later ones fail the no-clobber check.
 
 use std::fs;
 use std::path::PathBuf;
@@ -120,5 +127,92 @@ fn concurrent_encrypts_to_same_output_stay_no_clobber() {
         restored,
         vec![PAYLOAD_BYTE; PAYLOAD_LEN],
         "committed output is not a clean encryption of the original"
+    );
+}
+
+#[test]
+fn concurrent_decrypts_to_same_output_stay_no_clobber() {
+    let work = fresh_workspace("same_decrypt_output_race");
+    let keys = work.join("keys");
+    fs::create_dir_all(&keys).unwrap();
+    let kg = fast_keypair_generator(pass())
+        .write(&keys, |_| {})
+        .expect("keygen");
+
+    // Encrypt one file to a single `.fcr` every decrypt thread will target.
+    let input = work.join("payload.bin");
+    fs::write(&input, vec![PAYLOAD_BYTE; PAYLOAD_LEN]).unwrap();
+    let enc_dir = work.join("enc");
+    fs::create_dir_all(&enc_dir).unwrap();
+    let fcr = Encryptor::with_public_key(PublicKey::from_key_file(&kg.public_key_path))
+        .write(&input, &enc_dir, |_| {})
+        .expect("encrypt")
+        .output_path;
+
+    // Every thread decrypts the same `.fcr` into one directory, so they all
+    // derive the same `payload.bin` output name and race the `.incomplete`
+    // staging plus the no-clobber promotion. Each loads its own private key so
+    // no key value is shared across threads.
+    let out_dir = work.join("dec");
+    fs::create_dir_all(&out_dir).unwrap();
+
+    let outcomes: Vec<Result<PathBuf, CryptoError>> = thread::scope(|scope| {
+        let handles: Vec<_> = (0..WRITERS)
+            .map(|_| {
+                scope.spawn(
+                    || match Decryptor::open(&fcr).expect("open committed file") {
+                        Decryptor::PrivateKey(d) => d
+                            .decrypt(
+                                PrivateKey::from_key_file(&kg.private_key_path),
+                                pass(),
+                                &out_dir,
+                                |_| {},
+                            )
+                            .map(|o| o.output_path),
+                        Decryptor::Passphrase(_) => panic!("expected private-key decryptor"),
+                        _ => unreachable!(
+                            "Decryptor is non_exhaustive; v1 has only Passphrase + PrivateKey"
+                        ),
+                    },
+                )
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("decrypt thread panicked"))
+            .collect()
+    });
+
+    let winners = outcomes.iter().filter(|r| r.is_ok()).count();
+    let losers = outcomes.len() - winners;
+    assert_eq!(
+        winners, 1,
+        "exactly one decrypt must win the no-clobber race (got {winners} winners, {losers} losers)"
+    );
+
+    // The winning output is byte-identical to the original.
+    let committed = out_dir.join("payload.bin");
+    assert!(
+        committed.exists(),
+        "the winning decrypt must leave the final output in place"
+    );
+    assert_eq!(
+        fs::read(&committed).unwrap(),
+        vec![PAYLOAD_BYTE; PAYLOAD_LEN],
+        "committed decrypt output does not match the original"
+    );
+
+    // No loser left `.incomplete` staging behind: the final output is the only
+    // entry in the directory. `thread::scope` has already joined every thread
+    // (including each loser's failure-path cleanup), so this is deterministic.
+    let entries: Vec<PathBuf> = fs::read_dir(&out_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect();
+    assert_eq!(
+        entries,
+        vec![committed],
+        "the race must leave exactly the final output, no .incomplete staging"
     );
 }

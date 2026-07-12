@@ -12,13 +12,23 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Release gate: the full CI suite (workspace lib + CLI tests on three
+  # OSes, the desktop app, clippy, fmt, docs, cargo-audit, cargo-vet,
+  # MSRV, and the filesystem matrix) must pass on the exact tagged commit
+  # before any artifact is built. rust.yml runs on branch pushes; invoking
+  # it here as a reusable workflow makes a green tag mean the suite passed
+  # on that commit, not merely on some earlier branch push.
+  verify:
+    uses: ./.github/workflows/rust.yml
+
   # Release gate: a tag push cannot publish artifacts unless the fuzz
-  # parser-surface targets pass. Builds on every release, so any newly-
-  # discovered crash blocks shipping.
+  # parser-surface targets pass. The per-target budget is 60s here — a
+  # tougher pre-ship check than the 20s branch/PR budget in rust.yml.
+  # Builds on every release, so any newly-discovered crash blocks shipping.
   fuzz:
     uses: ./.github/workflows/fuzz.yml
     with:
-      max_total_time: 10
+      max_total_time: 60
 
   # Release gate: the desktop app is excluded from the workspace, so its version
   # is not kept in lockstep by cargo-release's shared-version. Verify it matches
@@ -38,8 +48,35 @@ jobs:
           fi
           echo "ferrocrypt-desktop version $manifest matches tag $tag."
 
+  # Release gate: the >4 GiB round-trip test is too slow and disk-hungry
+  # (minutes and ~8 GiB of scratch) for every push, so it runs only here,
+  # before a tag ships. It is the only test that moves more than u32::MAX
+  # bytes through real I/O, so it is the only check that catches a u32/usize
+  # truncation in the size or progress accounting above 4 GiB. Ubuntu-only:
+  # hosted ubuntu runners have the disk headroom, and macOS/Windows runners
+  # are tighter and slower.
+  large-file:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # Reclaim ~15 GiB of preinstalled toolchains this job never uses, so the
+      # ~8 GiB payload plus the release build fit the runner disk with margin.
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+
+      - name: Run the >4 GiB round-trip test
+        run: cargo test --release -p ferrocrypt --test large_file -- --ignored --test-threads=1
+
   build:
-    needs: [fuzz, desktop-version]
+    needs: [verify, fuzz, desktop-version, large-file]
     strategy:
       matrix:
         include:

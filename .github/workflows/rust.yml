@@ -5,6 +5,9 @@ on:
     branches: ["**"]
   pull_request:
     branches: ["**"]
+  # Invoked by release.yml as a release gate so a tag build cannot
+  # publish artifacts unless this whole suite passes on the tagged commit.
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always
@@ -40,18 +43,23 @@ jobs:
         # `--include-ignored` runs the `#[ignore = "fs-matrix"]` smoke
         # tests on the default filesystem too, so the build job has
         # the same coverage the fs_matrix lanes have on alternative
-        # filesystems. The two `--skip`s exclude the ignored tests
-        # that are destructive maintenance utilities:
+        # filesystems. The `--skip`s exclude the ignored tests that are
+        # not meant for this fast, every-push lane:
         # `regenerate_fixtures` deletes and rewrites
         # `tests/fixtures/`, racing against the four
         # `decrypt_*_fixture_matches_source` tests when run alongside
-        # them, and `regenerate_suite_vectors` rewrites
+        # them; `regenerate_suite_vectors` rewrites
         # `testvectors/suite/` — running it here would make
         # `testvector_suite` replay the freshly generated corpus
-        # instead of the committed one the corpus exists to pin.
+        # instead of the committed one the corpus exists to pin; and
+        # `round_trip_file_larger_than_4gib` moves >4 GiB through real
+        # I/O (minutes and ~8 GiB of disk), so every push skips it. It runs
+        # as a release gate instead (the `large-file` job in `release.yml`),
+        # and locally via `FERROCRYPT_GAUNTLET_LARGE_FILE=1` in
+        # `run_all_tests.sh`.
         env:
           FERROCRYPT_REQUIRE_WINDOWS_SYMLINK_TESTS: "1"
-        run: cargo test --verbose -- --test-threads=1 --include-ignored --skip regenerate_fixtures --skip regenerate_suite_vectors
+        run: cargo test --verbose -- --test-threads=1 --include-ignored --skip regenerate_fixtures --skip regenerate_suite_vectors --skip round_trip_file_larger_than_4gib
 
   msrv:
     runs-on: ubuntu-latest

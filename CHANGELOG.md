@@ -4,6 +4,8 @@ All notable changes to FerroCrypt are documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0-rc.2] - 2026-07-12
+
 ### Added
 - **A committed edge-case test-vector corpus now ships in the repository under `ferrocrypt-lib/testvectors/suite/`.** Each fixture is a real encrypted file or key file carrying exactly one defect — corrupted prefix, malformed extension region, out-of-range key-derivation parameters, truncated or modified payload, wrong credential, tampered header, unknown or illegally mixed recipients, malformed public key — plus a manifest naming the attempted operation and the exact error the reader must produce (and a few files that must decrypt). Independent implementations can verify against these files without reading FerroCrypt's test code; FerroCrypt's own test suite replays the full manifest on every run.
 

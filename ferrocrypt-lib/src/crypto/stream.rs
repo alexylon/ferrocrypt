@@ -912,6 +912,44 @@ mod tests {
         assert_eq!(out.as_slice(), &plaintext[..BUFFER_SIZE]);
     }
 
+    /// Swapping two whole ciphertext chunks must be rejected. STREAM-BE32
+    /// binds each chunk's position through the counter in its per-chunk
+    /// nonce, so a chunk moved to a different slot decrypts under the wrong
+    /// counter and fails AEAD. Bit-flip and truncation tests exercise the
+    /// tag and the `last_flag`; this one exercises the counter binding, the
+    /// property that stops an attacker from reordering authenticated chunks.
+    #[test]
+    fn streaming_aead_chunk_reorder_rejected() {
+        // 3× BUFFER_SIZE plaintext → two `next` chunks + one full-size
+        // `last` chunk, each ENCRYPTED_CHUNK_SIZE bytes on the wire.
+        let plaintext: Vec<u8> = (0..(BUFFER_SIZE * 3)).map(|i| (i % 251) as u8).collect();
+        let mut ciphertext = encrypt_to_vec(&plaintext);
+        assert_eq!(ciphertext.len(), 3 * ENCRYPTED_CHUNK_SIZE, "test setup");
+
+        // Swap the first two chunks (counters 0 and 1). The bytes now at
+        // counter 0 were sealed under counter 1, so the first decrypt fails.
+        let (a, rest) = ciphertext.split_at_mut(ENCRYPTED_CHUNK_SIZE);
+        let (b, _) = rest.split_at_mut(ENCRYPTED_CHUNK_SIZE);
+        a.swap_with_slice(b);
+
+        let mut reader = payload_decryptor(&test_key(), &TEST_NONCE, ciphertext.as_slice());
+        let (out, err) = drain_decrypt_reader(&mut reader);
+        let err = err.expect("expected AEAD error on reordered chunks");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let marker = err
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<StreamError>())
+            .expect("expected StreamError marker");
+        assert!(
+            matches!(marker, StreamError::DecryptAead),
+            "expected StreamError::DecryptAead, got {marker:?}"
+        );
+        assert!(
+            out.is_empty(),
+            "no plaintext should leak when the first chunk is out of position"
+        );
+    }
+
     /// Mid-chunk truncation: the final encrypted chunk is partially present
     /// but shorter than `BUFFER_SIZE + TAG_SIZE`. `fill_buffer` treats the
     /// short buffer as the final chunk and runs `decrypt_last_in_place`,
@@ -1223,6 +1261,31 @@ mod tests {
             out.is_empty(),
             "no plaintext should leak before the non-final cap fires"
         );
+    }
+
+    /// Reader counterpart to `streaming_aead_writer_accepts_max_counter_as_final`:
+    /// a FINAL chunk sealed at counter `2^32 - 1` must decrypt. Pins the
+    /// asymmetry from the reader side — `2^32 - 1` is rejected as non-final
+    /// (test above) but accepted as final, matching FORMAT.md §5.
+    #[test]
+    fn streaming_aead_reader_accepts_max_counter_as_final() {
+        // Produce a single final chunk sealed at counter 2^32 - 1.
+        let mut ciphertext: Vec<u8> = Vec::new();
+        let mut writer = payload_encryptor(&test_key(), &TEST_NONCE, &mut ciphertext);
+        writer.chunk_count = STREAM_CHUNK_COUNT_MAX - 1;
+        writer.write_all(b"final-at-max").unwrap();
+        writer.finish().expect("write final chunk at max counter");
+
+        // A reader advanced to the same counter must accept it and return
+        // the plaintext.
+        let mut reader = payload_decryptor(&test_key(), &TEST_NONCE, ciphertext.as_slice());
+        reader.chunk_count = STREAM_CHUNK_COUNT_MAX - 1;
+        let (out, err) = drain_decrypt_reader(&mut reader);
+        assert!(
+            err.is_none(),
+            "final chunk at counter 2^32-1 must decrypt cleanly, got {err:?}"
+        );
+        assert_eq!(out, b"final-at-max");
     }
 
     /// Regression: decrypt-side chunk-count cap must fire before

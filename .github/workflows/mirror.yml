@@ -34,6 +34,12 @@ jobs:
           git clone --mirror "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" repo.git
           cd repo.git
 
-          # Push everything (all refs + deletions)
+          # GitHub auto-creates read-only refs/pull/* refs for every pull request.
+          # Codeberg (and other Gitea/Forgejo hosts) reject writes under that
+          # namespace ("deny updating a hidden ref"), so drop them before pushing.
+          # What remains is branches, tags, and notes.
+          git for-each-ref --format='delete %(refname)' refs/pull | git update-ref --stdin
+
+          # Push everything that remains (all refs + deletions)
           git push --mirror "${GITLAB_REPO_URL}"
           git push --mirror "${CODEBERG_REPO_URL}"

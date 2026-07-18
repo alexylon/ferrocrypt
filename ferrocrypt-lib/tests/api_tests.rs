@@ -363,7 +363,7 @@ fn passphrase_decrypt_reports_input_path_when_file_vanishes() {
 }
 
 /// Private-key variant of the vanished-input race: the structural
-/// re-probe inside `PrivateKeyDecryptor::decrypt` runs before the
+/// session open inside `PrivateKeyDecryptor::decrypt` runs before the
 /// `private.key` unlock, so the missing file must surface as
 /// `InputPath` with no Argon2id work.
 #[test]
@@ -405,6 +405,75 @@ fn private_key_decrypt_reports_input_path_when_file_vanishes() {
         unlock_event_count.get(),
         0,
         "Argon2id unlock ran before the vanished-input rejection",
+    );
+}
+
+/// A file swapped in at the input path after `PrivateKeyDecryptor::decrypt`
+/// has opened and validated its input — here from the
+/// `UnlockingPrivateKey` progress callback, which fires while the
+/// private key is being unlocked — must not become the file that is
+/// decrypted. The decryptor holds the originally opened handle through
+/// the unlock, so the original content is restored even though the
+/// path now names the substitute.
+#[test]
+fn private_key_decrypt_uses_the_validated_file_not_a_swapped_replacement() {
+    let work = fresh_workspace("pk_decrypt_swap_after_open");
+    let keys = work.join("keys");
+    fs::create_dir_all(&keys).unwrap();
+    let kg = generate_key_pair(&keys, pass(), |_| {}).expect("keygen");
+
+    let original = work.join("original.txt");
+    fs::write(&original, b"original plaintext").unwrap();
+    let substitute = work.join("substitute.txt");
+    fs::write(&substitute, b"substitute plaintext").unwrap();
+
+    let out_dir = work.join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+    let original_fcr = Encryptor::with_public_key(PublicKey::from_key_file(&kg.public_key_path))
+        .write(&original, &out_dir, |_| {})
+        .expect("encrypt original")
+        .output_path;
+    let substitute_fcr = Encryptor::with_public_key(PublicKey::from_key_file(&kg.public_key_path))
+        .write(&substitute, &out_dir, |_| {})
+        .expect("encrypt substitute")
+        .output_path;
+
+    let decryptor = match Decryptor::open(&original_fcr).expect("open") {
+        Decryptor::PrivateKey(d) => d,
+        other => panic!("expected private-key decryptor, got {other:?}"),
+    };
+
+    let restore = work.join("restored");
+    fs::create_dir_all(&restore).unwrap();
+    let swapped = std::cell::Cell::new(false);
+    let outcome = decryptor
+        .decrypt(
+            PrivateKey::from_key_file(&kg.private_key_path),
+            pass(),
+            &restore,
+            |evt| {
+                if matches!(evt, ferrocrypt::ProgressEvent::UnlockingPrivateKey) && !swapped.get() {
+                    swapped.set(true);
+                    fs::rename(&substitute_fcr, &original_fcr)
+                        .expect("swap the encrypted file during the unlock");
+                }
+            },
+        )
+        .expect("decrypt must succeed against the originally opened file");
+
+    assert!(
+        swapped.get(),
+        "sanity: the swap really happened during the unlock"
+    );
+    assert_eq!(
+        outcome.output_path,
+        restore.join("original.txt"),
+        "the restored name must come from the originally opened file"
+    );
+    assert_eq!(
+        fs::read(&outcome.output_path).unwrap(),
+        b"original plaintext",
+        "the restored content must come from the originally opened file"
     );
 }
 
@@ -1426,13 +1495,13 @@ fn encryptor_passphrase_rejects_dangling_symlink_at_output_before_kdf() {
     );
 }
 
-/// `PrivateKeyDecryptor::decrypt` re-probes the input before the
-/// `private.key` unlock. A file replacement between `Decryptor::open`
-/// and `.decrypt` must not trigger the Argon2id unlock or its
-/// `UnlockingPrivateKey` event.
+/// `PrivateKeyDecryptor::decrypt` opens and structurally validates the
+/// input before the `private.key` unlock. A malformed file swapped in
+/// between `Decryptor::open` and `.decrypt` must be rejected without
+/// triggering the Argon2id unlock or its `UnlockingPrivateKey` event.
 #[test]
-fn private_key_decrypt_re_probes_input_before_unlock() {
-    let work = fresh_workspace("private_key_decrypt_re_probe");
+fn private_key_decrypt_revalidates_input_before_unlock() {
+    let work = fresh_workspace("private_key_decrypt_revalidate");
     let keys = work.join("keys");
     fs::create_dir_all(&keys).unwrap();
     let kg = generate_key_pair(&keys, pass(), |_| {}).expect("keygen");
@@ -1472,12 +1541,12 @@ fn private_key_decrypt_re_probes_input_before_unlock() {
 
     match err {
         CryptoError::InvalidFormat(FormatDefect::BadMagic) => {}
-        other => panic!("expected BadMagic from re-probe, got {other:?}"),
+        other => panic!("expected BadMagic from the pre-unlock validation, got {other:?}"),
     }
     assert_eq!(
         unlock_event_count.get(),
         0,
-        "Argon2id unlock ran before the re-probe rejection",
+        "Argon2id unlock ran before the swapped-input rejection",
     );
 }
 

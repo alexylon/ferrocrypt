@@ -42,8 +42,8 @@ use std::path::{Path, PathBuf};
 
 use crate::archive::{ArchiveLimits, IncompleteOutputPolicy, prepare_archive, unarchive};
 use crate::container::{
-    HeaderReadLimits, build_encrypted_header, read_encrypted_header, resolve_encrypted_output_path,
-    write_encrypted_file,
+    HeaderReadLimits, ParsedEncryptedHeader, build_encrypted_header, read_encrypted_header,
+    resolve_encrypted_output_path, write_encrypted_file,
 };
 use crate::crypto::keys::{DerivedSubkeys, FileKey, derive_subkeys, random_bytes};
 use crate::crypto::stream::{STREAM_NONCE_SIZE, payload_decryptor};
@@ -257,16 +257,69 @@ fn build_native_entry(
 
 // ─── Decrypt ───────────────────────────────────────────────────────────────
 
-/// Decrypts `input_path` using the supplied credential scheme.
+/// An encrypted input opened for decryption: the open file handle plus
+/// its structurally parsed header and classified recipient mode.
 ///
-/// Iterates every supported recipient slot in declared order before
-/// emitting a final verdict. The slot loop is identical for the
-/// single-candidate (passphrase) and multi-candidate (X25519) cases —
-/// the passphrase path is just a slot loop of length 1. Visiting every
-/// supported slot, rather than short-circuiting on the first MAC
-/// match, makes wall-clock cost a function of `recipient_count`
-/// (capped by `HeaderReadLimits`) rather than of which slot matched,
-/// per the `FORMAT.md` §3.7 SHOULD-level mitigation.
+/// [`DecryptSession::open`] performs the pre-cryptographic part of the
+/// `FORMAT.md` §3.7 acceptance order — bounded structural read, header
+/// parse, local caps, recipient classification — and no key work. The
+/// handle is retained, positioned at the first payload byte, so the
+/// decryption in [`decrypt_session`] operates on exactly the bytes
+/// those checks approved. A caller that runs expensive credential work
+/// between the checks and the decryption (the `private.key` Argon2id
+/// unlock in `PrivateKeyDecryptor::decrypt`) holds the session across
+/// that work; a path swapped meanwhile names a file this session never
+/// reads.
+pub(crate) struct DecryptSession {
+    encrypted_file: fs::File,
+    parsed: ParsedEncryptedHeader,
+    mode: UnauthenticatedRecipientMode,
+}
+
+impl DecryptSession {
+    /// Opens `input_path` and runs the pre-cryptographic acceptance
+    /// steps: structural header read under `header_read_limits`, then
+    /// recipient classification.
+    pub(crate) fn open(
+        input_path: &Path,
+        header_read_limits: HeaderReadLimits,
+    ) -> Result<Self, CryptoError> {
+        // `open_input_file` refuses FIFOs, sockets, and device nodes
+        // without blocking; the encrypt side rejects the same input
+        // class in `validate_encrypt_input`.
+        let mut encrypted_file = open_input_file(input_path)?;
+
+        // 1-4. Structural read + parse. Performs zero crypto; enforces
+        //      local caps before any allocation.
+        let parsed = read_encrypted_header(&mut encrypted_file, header_read_limits)?;
+
+        // 5. Reject illegal mixing and unknown critical recipients
+        //    before any expensive recipient work.
+        //    `classify_recipient_mode` runs
+        //    `enforce_recipient_mixing_policy` internally, so the
+        //    mixing-policy check happens here even though it isn't
+        //    called by name.
+        let mode = classify_recipient_mode(&parsed.recipient_entries)?;
+
+        Ok(Self {
+            encrypted_file,
+            parsed,
+            mode,
+        })
+    }
+
+    /// The structurally classified recipient mode. Unauthenticated —
+    /// carries the same "classification, not a security claim"
+    /// semantics as [`UnauthenticatedRecipientMode`] itself.
+    pub(crate) fn mode(&self) -> UnauthenticatedRecipientMode {
+        self.mode
+    }
+}
+
+/// Opens `input_path` as a [`DecryptSession`] and decrypts it in one
+/// call. Callers that must run credential work between the structural
+/// checks and the decryption open the session themselves and call
+/// [`decrypt_session`] with it.
 pub(crate) fn decrypt<I: DecryptionCredential>(
     credential: &I,
     input_path: &Path,
@@ -276,30 +329,51 @@ pub(crate) fn decrypt<I: DecryptionCredential>(
     incomplete_output_policy: IncompleteOutputPolicy,
     on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<PathBuf, CryptoError> {
-    // `open_input_file` refuses FIFOs, sockets, and device nodes
-    // without blocking; the encrypt side rejects the same input class
-    // in `validate_encrypt_input`.
-    let mut encrypted_file = open_input_file(input_path)?;
+    let session = DecryptSession::open(input_path, header_read_limits)?;
+    decrypt_session(
+        credential,
+        session,
+        output_dir,
+        archive_limits,
+        incomplete_output_policy,
+        on_event,
+    )
+}
 
-    // 1-4. Structural read + parse. Performs zero crypto; enforces
-    //      local caps before any allocation.
-    let parsed = read_encrypted_header(&mut encrypted_file, header_read_limits)?;
-
-    // 5. Reject illegal mixing and unknown critical recipients before
-    //    any expensive recipient work. `classify_recipient_mode`
-    //    runs `enforce_recipient_mixing_policy` internally, so the
-    //    mixing-policy check happens here even though it isn't called
-    //    by name.
-    let mode = classify_recipient_mode(&parsed.recipient_entries)?;
+/// Decrypts an opened [`DecryptSession`] using the supplied credential
+/// scheme.
+///
+/// Iterates every supported recipient slot in declared order before
+/// emitting a final verdict. The slot loop is identical for the
+/// single-candidate (passphrase) and multi-candidate (X25519) cases —
+/// the passphrase path is just a slot loop of length 1. Visiting every
+/// supported slot, rather than short-circuiting on the first MAC
+/// match, makes wall-clock cost a function of `recipient_count`
+/// (capped by `HeaderReadLimits`) rather than of which slot matched,
+/// per the `FORMAT.md` §3.7 SHOULD-level mitigation.
+pub(crate) fn decrypt_session<I: DecryptionCredential>(
+    credential: &I,
+    session: DecryptSession,
+    output_dir: &Path,
+    archive_limits: ArchiveLimits,
+    incomplete_output_policy: IncompleteOutputPolicy,
+    on_event: &dyn Fn(&ProgressEvent),
+) -> Result<PathBuf, CryptoError> {
+    let DecryptSession {
+        encrypted_file,
+        parsed,
+        mode,
+    } = session;
 
     // Cross-mode mismatch: caller invoked the passphrase decrypt path
     // on a recipient-only file (or vice versa). The classified mode
     // does not match the credential's scheme. Surfaces as a typed
     // `DecryptorModeMismatch` rather than `NoSupportedRecipient`, which
     // would imply "the loop iterated and found nothing" — misleading
-    // when the real cause is "wrong tool for this file." The public
-    // API can't reach this branch (Decryptor::open routes by mode);
-    // it exists for internal callers and any future plugin-style API.
+    // when the real cause is "wrong tool for this file."
+    // `PrivateKeyDecryptor::decrypt` already rejects a mode-mismatched
+    // session before its private-key unlock; this check keeps the
+    // guarantee for internal callers and any future plugin-style API.
     check_mode_matches_scheme::<I>(mode)?;
 
     // No early progress event here. Progress events fire at the actual

@@ -244,6 +244,8 @@ During decryption, `protocol.rs` coordinates:
 11. staged output finalization;
 12. progress event emission.
 
+Decryption stages 1–4 are packaged as the crate-internal `DecryptSession`: one opened input handle plus its parsed header and classified recipient mode. The remaining stages consume the session and decrypt from that same handle, so the bytes that passed the structural checks are the bytes that are decrypted. `PrivateKeyDecryptor::decrypt` opens the session before the `private.key` unlock and decrypts through it afterwards, because a path re-resolved after the unlock could name a swapped file the checks never saw.
+
 `protocol.rs` defines the internal recipient-scheme abstraction boundary:
 
 ```rust

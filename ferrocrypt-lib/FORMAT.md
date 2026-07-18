@@ -489,6 +489,11 @@ Readers SHOULD either attempt unwrap of all supported recipient entries before
 returning success or randomize recipient iteration order to reduce timing leakage
 about which recipient matched.
 
+Readers SHOULD process a single opened file through all of the steps above,
+without re-resolving the file path between structural parsing and payload
+decryption, because a re-resolved path can name a swapped file whose bytes never
+passed the earlier steps.
+
 ---
 
 ## 4. Native recipient types

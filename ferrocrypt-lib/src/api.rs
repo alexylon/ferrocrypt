@@ -712,16 +712,20 @@ impl PrivateKeyDecryptor {
         let header_read_limits = self.header_read_limits.unwrap_or_default();
         let incomplete_output_policy = self.incomplete_output_policy.unwrap_or_default();
 
-        // Re-probe before the private-key unlock: a path race between
-        // `Decryptor::open` and `decrypt` could swap in a malformed or
-        // passphrase-mode file, and `STRUCTURE.md` §12 / `FORMAT.md`
-        // §3.7 require structural rejection before any KDF work fires.
-        let probe = probe_recipient_mode_with_limits(&self.input, header_read_limits)?
-            .ok_or(CryptoError::InvalidFormat(FormatDefect::BadMagic))?;
-        if probe != UnauthenticatedRecipientMode::PublicKey {
+        // Open, structurally parse, and classify the encrypted file
+        // ONCE, before the private-key unlock, and keep the session for
+        // the decryption itself. `STRUCTURE.md` §12 / `FORMAT.md` §3.7
+        // require structural rejection before any KDF work fires — a
+        // path race between `Decryptor::open` and `decrypt` could swap
+        // in a malformed or passphrase-mode file — and holding one
+        // handle ties the bytes those checks approved to the bytes
+        // that are decrypted: a file swapped in at this path while
+        // Argon2id runs is never read.
+        let session = protocol::DecryptSession::open(&self.input, header_read_limits)?;
+        if session.mode() != UnauthenticatedRecipientMode::PublicKey {
             return Err(CryptoError::DecryptorModeMismatch {
                 expected: UnauthenticatedRecipientMode::PublicKey,
-                found: probe,
+                found: session.mode(),
             });
         }
 
@@ -738,12 +742,11 @@ impl PrivateKeyDecryptor {
             &on_event,
         )?;
         let decryption_credential = recipient::x25519::X25519Credential { private_key_bytes };
-        let output_path = protocol::decrypt(
+        let output_path = protocol::decrypt_session(
             &decryption_credential,
-            &self.input,
+            session,
             output_dir.as_ref(),
             archive_limits,
-            header_read_limits,
             incomplete_output_policy,
             &on_event,
         )?;

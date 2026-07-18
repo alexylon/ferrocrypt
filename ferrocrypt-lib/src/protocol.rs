@@ -173,25 +173,18 @@ pub(crate) fn encrypt<R: RecipientScheme>(
         });
     }
 
-    // Resolve the destination path and reject a pre-existing output
-    // BEFORE any expensive key work runs. In passphrase mode this saves
-    // a multi-second Argon2id derivation when the user re-runs encrypt
-    // against a populated directory. The atomic no-clobber rename in
-    // `write_encrypted_file` is still the load-bearing guarantee that
-    // we never overwrite an unrelated file; this preflight is a
-    // user-experience win that also defends against dangling-symlink
-    // outputs (via `reject_occupied` → `symlink_metadata`).
+    // Resolve the destination and reject an existing entry before
+    // expensive key work. The final no-clobber rename still prevents
+    // replacement if the path becomes occupied after this check.
+    // `reject_occupied` also detects dangling symlinks.
     let base_name = encryption_base_name(input_path)?;
     let output_path = resolve_encrypted_output_path(output_dir, output_file, &base_name);
     reject_occupied(&output_path, OUTPUT_LABEL)?;
 
-    // Capture the complete archive manifest before any cipher work or
-    // output staging. The ordering matters twice over: archive grammar
-    // and cap rejections surface before the expensive recipient KDF
-    // runs (writer preflight precedes cipher work), and the ciphertext
-    // staging file that `write_encrypted_file` creates later cannot be
-    // discovered as source content when the resolved output path lies
-    // inside the input tree.
+    // Prepare the complete archive before cipher work or output
+    // staging. Archive validation then fails before an expensive KDF,
+    // and a staging file created inside the input tree cannot be
+    // recorded as source content.
     let prepared = prepare_archive(input_path, archive_limits)?;
 
     // No early progress event here. Each recipient scheme emits its
@@ -257,19 +250,16 @@ fn build_native_entry(
 
 // ─── Decrypt ───────────────────────────────────────────────────────────────
 
-/// An encrypted input opened for decryption: the open file handle plus
-/// its structurally parsed header and classified recipient mode.
+/// An encrypted input prepared for decryption. It contains the opened file,
+/// its structurally parsed header, and its classified recipient mode.
 ///
-/// [`DecryptSession::open`] performs the pre-cryptographic part of the
-/// `FORMAT.md` §3.7 acceptance order — bounded structural read, header
-/// parse, local caps, recipient classification — and no key work. The
-/// handle is retained, positioned at the first payload byte, so the
-/// decryption in [`decrypt_session`] operates on exactly the bytes
-/// those checks approved. A caller that runs expensive credential work
-/// between the checks and the decryption (the `private.key` Argon2id
-/// unlock in `PrivateKeyDecryptor::decrypt`) holds the session across
-/// that work; a path swapped meanwhile names a file this session never
-/// reads.
+/// [`DecryptSession::open`] performs the non-cryptographic steps from
+/// `FORMAT.md` §3.7: bounded header reading, structural parsing, resource-limit
+/// checks, and recipient classification. The file remains open at the first
+/// payload byte, so [`decrypt_session`] continues from the same file. This is
+/// important when credential work occurs between validation and decryption,
+/// such as unlocking a private key with Argon2id: replacing the path during
+/// that work cannot change the input being decrypted.
 pub(crate) struct DecryptSession {
     encrypted_file: fs::File,
     parsed: ParsedEncryptedHeader,
@@ -277,28 +267,23 @@ pub(crate) struct DecryptSession {
 }
 
 impl DecryptSession {
-    /// Opens `input_path` and runs the pre-cryptographic acceptance
-    /// steps: structural header read under `header_read_limits`, then
-    /// recipient classification.
+    /// Opens `input_path`, reads its header under `header_read_limits`, and
+    /// classifies its recipients without performing key operations.
     pub(crate) fn open(
         input_path: &Path,
         header_read_limits: HeaderReadLimits,
     ) -> Result<Self, CryptoError> {
-        // `open_input_file` refuses FIFOs, sockets, and device nodes
-        // without blocking; the encrypt side rejects the same input
-        // class in `validate_encrypt_input`.
+        // `open_input_file` rejects FIFOs, sockets, and device nodes
+        // without waiting. Encryption rejects the same input types.
         let mut encrypted_file = open_input_file(input_path)?;
 
-        // 1-4. Structural read + parse. Performs zero crypto; enforces
-        //      local caps before any allocation.
+        // Steps 1–4: read and parse the header without cryptographic
+        // work, enforcing local limits before allocation.
         let parsed = read_encrypted_header(&mut encrypted_file, header_read_limits)?;
 
-        // 5. Reject illegal mixing and unknown critical recipients
-        //    before any expensive recipient work.
-        //    `classify_recipient_mode` runs
-        //    `enforce_recipient_mixing_policy` internally, so the
-        //    mixing-policy check happens here even though it isn't
-        //    called by name.
+        // Step 5: reject unsupported critical recipients and invalid
+        // recipient combinations before any expensive recipient work.
+        // `classify_recipient_mode` applies the mixing policy.
         let mode = classify_recipient_mode(&parsed.recipient_entries)?;
 
         Ok(Self {
@@ -308,18 +293,16 @@ impl DecryptSession {
         })
     }
 
-    /// The structurally classified recipient mode. Unauthenticated —
-    /// carries the same "classification, not a security claim"
-    /// semantics as [`UnauthenticatedRecipientMode`] itself.
+    /// Returns the recipient mode derived from the unverified header. This is
+    /// structural classification only and is not an authentication result.
     pub(crate) fn mode(&self) -> UnauthenticatedRecipientMode {
         self.mode
     }
 }
 
-/// Opens `input_path` as a [`DecryptSession`] and decrypts it in one
-/// call. Callers that must run credential work between the structural
-/// checks and the decryption open the session themselves and call
-/// [`decrypt_session`] with it.
+/// Opens `input_path` as a [`DecryptSession`] and decrypts it. Callers that
+/// need to perform credential work after structural validation can open the
+/// session separately and pass it to [`decrypt_session`].
 pub(crate) fn decrypt<I: DecryptionCredential>(
     credential: &I,
     input_path: &Path,
@@ -340,8 +323,7 @@ pub(crate) fn decrypt<I: DecryptionCredential>(
     )
 }
 
-/// Decrypts an opened [`DecryptSession`] using the supplied credential
-/// scheme.
+/// Decrypts a prepared [`DecryptSession`] with the supplied credential.
 ///
 /// Iterates every supported recipient slot in declared order before
 /// emitting a final verdict. The slot loop is identical for the
@@ -365,15 +347,10 @@ pub(crate) fn decrypt_session<I: DecryptionCredential>(
         mode,
     } = session;
 
-    // Cross-mode mismatch: caller invoked the passphrase decrypt path
-    // on a recipient-only file (or vice versa). The classified mode
-    // does not match the credential's scheme. Surfaces as a typed
-    // `DecryptorModeMismatch` rather than `NoSupportedRecipient`, which
-    // would imply "the loop iterated and found nothing" — misleading
-    // when the real cause is "wrong tool for this file."
-    // `PrivateKeyDecryptor::decrypt` already rejects a mode-mismatched
-    // session before its private-key unlock; this check keeps the
-    // guarantee for internal callers and any future plugin-style API.
+    // A credential for the wrong recipient mode returns the dedicated
+    // mismatch error. `PrivateKeyDecryptor::decrypt` checks before
+    // unlocking the private key; this check also covers internal and
+    // future callers.
     check_mode_matches_scheme::<I>(mode)?;
 
     // No early progress event here. Progress events fire at the actual
@@ -538,12 +515,11 @@ fn failure_for(
 ///   `fcr1…` Bech32 recipient string. Permissions: `0o644` on Unix
 ///   (public keys are not secret).
 ///
-/// Both files are fully staged and synced before either is committed
-/// to its final name, `private.key` commits first, and the output
-/// directory's entries are flushed to stable storage after each
-/// commit, so an interruption — process death or power loss — cannot
-/// leave `public.key` on disk without its matching `private.key`
-/// (see `commit_key_pair_files`).
+/// Both files are staged and synced before either receives its final name.
+/// `private.key` is committed first, and the output directory is flushed after
+/// each commit. This prevents process interruption from leaving `public.key`
+/// without its matching `private.key`. Where directory flushing is supported,
+/// the same guarantee covers power loss.
 ///
 /// # Caller obligations
 ///
@@ -574,15 +550,10 @@ pub(crate) fn generate_key_pair(
 
     fs::create_dir_all(output_dir)?;
 
-    // Existence pre-check BEFORE Argon2id so re-running `keygen` against
-    // a populated directory returns a helpful error in milliseconds
-    // instead of after ~1 GiB / multi-second KDF work. Uses
-    // `symlink_metadata` (via `reject_occupied`) so a dangling
-    // `private.key` / `public.key` symlink also rejects up front
-    // rather than slipping past `Path::exists()` and surviving until
-    // the atomic no-clobber rename inside `commit_key_pair_files`
-    // below — which is still the load-bearing guarantee that we never
-    // overwrite an existing key.
+    // Check both final names before Argon2id so an existing entry fails
+    // immediately. `reject_occupied` uses `symlink_metadata`, so it also
+    // detects dangling symlinks. The final no-clobber renames still
+    // prevent replacement if either name becomes occupied later.
     let private_key_path = output_dir.join(PRIVATE_KEY_FILENAME);
     let public_key_path = output_dir.join(PUBLIC_KEY_FILENAME);
     reject_occupied(&private_key_path, KEY_FILE_LABEL)?;
@@ -613,10 +584,9 @@ pub(crate) fn generate_key_pair(
     // checksum, emits BIP 173 lowercase Bech32).
     let recipient_string = encode_recipient_string(x25519::TYPE_NAME, &public_material)?;
 
-    // Stage both key files completely — tempfile created, bytes
-    // written, content synced — before either appears at its final
-    // name. Any failure up to the commit step drops both tempfiles
-    // and publishes nothing.
+    // Stage and sync both key files before either receives its final
+    // name. Any failure before the commit step removes both temporary
+    // files and publishes nothing.
     let mut private_builder = tempfile::Builder::new();
     private_builder
         .prefix(".ferrocrypt-private_key-")
@@ -630,8 +600,8 @@ pub(crate) fn generate_key_pair(
     private_tmp.as_file_mut().write_all(&private_key_bytes)?;
     atomic::sync_file_durable(private_tmp.as_file())?;
 
-    // public.key text form is `fcr1…\n`. Public keys aren't secret,
-    // so permissions relax to 0o644 on Unix.
+    // `public.key` is the text form `fcr1…\n`. It is not secret, so
+    // Unix permissions are 0o644.
     let mut public_builder = tempfile::Builder::new();
     public_builder
         .prefix(".ferrocrypt-public_key-")
@@ -662,42 +632,28 @@ pub(crate) fn generate_key_pair(
     Ok((private_key_path, public_key_path, fingerprint))
 }
 
-/// Commits two fully staged key-file tempfiles to their final names
-/// with no-clobber semantics: `private.key` first, `public.key`
-/// second, with a directory-durability barrier
-/// (`fs::atomic::sync_dir_durable`) after each commit.
+/// Commits two fully staged key files without overwriting existing files.
+/// `private.key` is committed first, followed by a directory flush; then
+/// `public.key` is committed and the directory is flushed again.
 ///
-/// The commit order is a durability invariant. `public.key` is the
-/// half that attracts ciphertext — anyone holding it can encrypt to
-/// this key pair — so it must never exist at its final name unless
-/// the matching `private.key` is already durable beside it. Renaming
-/// `private.key` first covers process death; power loss is covered
-/// only by the barrier, because a filesystem may persist the second
-/// rename and lose the first unless the directory is flushed between
-/// them. The barrier after the `public.key` commit extends the
-/// guarantee to the caller: on success, both key files and the
-/// directory entries naming them are on stable storage before the
-/// recipient string is handed out. On filesystems that cannot flush
-/// a directory at all the barrier reports success without one (see
-/// `sync_dir_durable`), and the power-loss half of the guarantee
-/// narrows to process interruption.
+/// The order is required because `public.key` allows others to encrypt to the
+/// key pair. It must not become durable unless the matching `private.key` is
+/// already durable. The first directory flush establishes that order across
+/// power loss. Where directory flushing is supported, the second flush ensures
+/// that a successful return means both final names are durable. On filesystems
+/// that do not support directory flushing, the private-first order still
+/// protects against process interruption, but power-loss ordering depends on
+/// the filesystem.
 ///
-/// Failure handling keeps every reachable on-disk state safe:
+/// Failure handling preserves a safe result:
 ///
-/// - `private.key` commit fails: nothing was published; both
-///   tempfiles are removed by their destructors.
-/// - barrier after the `private.key` commit fails: the just-committed
-///   `private.key` is removed best-effort; nothing is published.
-/// - `public.key` commit fails: the just-committed `private.key` is
-///   removed best-effort; a failed generation leaves no key files
-///   behind.
-/// - barrier after the `public.key` commit fails: only `public.key`
-///   is removed. `private.key` stays deliberately: with no working
-///   flush, the two removals could persist in either order, and
-///   removing `private.key` while the `public.key` removal is lost
-///   would recreate the dangerous public-only state. A leftover
-///   `private.key` decrypts nothing that was ever announced and is
-///   safe to delete.
+/// - If the `private.key` commit fails, neither file is published.
+/// - If the first directory flush fails, `private.key` is removed best-effort.
+/// - If the `public.key` commit fails, `private.key` is removed best-effort.
+/// - If the final directory flush fails, `public.key` is removed and
+///   `private.key` is kept. Removing both without a working directory flush
+///   could leave only `public.key` after power loss. The remaining private key
+///   is safe to delete.
 fn commit_key_pair_files(
     private_tmp: tempfile::NamedTempFile,
     public_tmp: tempfile::NamedTempFile,
@@ -713,9 +669,8 @@ fn commit_key_pair_files(
     )
 }
 
-/// Implementation of [`commit_key_pair_files`] with the
-/// directory-durability barrier injectable, so tests can drive
-/// barrier failures at each boundary.
+/// Implementation of [`commit_key_pair_files`] with an injectable directory
+/// flush function so tests can fail either flush point deterministically.
 fn commit_key_pair_files_with_barrier(
     private_tmp: tempfile::NamedTempFile,
     public_tmp: tempfile::NamedTempFile,
@@ -726,8 +681,8 @@ fn commit_key_pair_files_with_barrier(
     use crate::fs::atomic;
     use crate::fs::paths::parent_or_cwd;
 
-    // Both key paths are produced by joining the same output
-    // directory, so one flushed directory covers both entries.
+    // Both final paths use the same output directory, so one directory
+    // flush covers both entries.
     let output_dir = parent_or_cwd(private_key_path);
 
     atomic::finalize_file(private_tmp, private_key_path, KEY_FILE_LABEL)?;
@@ -774,11 +729,10 @@ mod tests {
     use crate::recipient::policy::NativeRecipientType;
     use secrecy::SecretString;
 
-    /// Build a complete `.fcr` byte sequence whose authenticated
-    /// payload is exactly `payload` — no archive layer. Lets tests
-    /// craft files whose FCA plaintext violates the `FORMAT.md` §9.1
-    /// layout (for example truncated declared regions), which no
-    /// production writer emits.
+    /// Builds a complete `.fcr` file whose authenticated plaintext payload is
+    /// exactly `payload`, without adding an FCA archive. Tests use it to create
+    /// authenticated files with invalid FCA structure that production writers
+    /// cannot emit.
     fn build_fcr_with_raw_payload(
         entries: &[RecipientEntry],
         file_key: &FileKey,
@@ -810,20 +764,17 @@ mod tests {
         Ok(())
     }
 
-    /// Build a complete `.fcr` byte sequence with the given recipient
-    /// entries and plaintext. The caller has already wrapped `file_key`
-    /// for each entry that actually needs to unwrap; entries with
-    /// arbitrary bodies (synthetic unknown types, invalid mixes) are
-    /// kept verbatim.
+    /// Builds a complete `.fcr` file with the supplied recipient entries and
+    /// plaintext. The caller has already wrapped `file_key` for entries that
+    /// must decrypt; unknown or intentionally invalid entries are preserved.
     fn build_multi_recipient_fcr(
         entries: &[RecipientEntry],
         file_key: &FileKey,
         plaintext: &[u8],
         path: &Path,
     ) -> Result<(), CryptoError> {
-        // Construct the FCA header + manifest + content for one entry
-        // named "data.txt"; matches what the production archive writer
-        // would emit for that input.
+        // Construct an FCA archive containing one file named
+        // `data.txt`, matching the production writer's output.
         let fca_bytes = {
             use crate::archive::ArchiveLimits;
             use crate::archive::format::{serialize_manifest, write_fca_header};
@@ -938,16 +889,11 @@ mod tests {
         Ok(())
     }
 
-    /// End-to-end reachability for the truncated-FCA classification:
-    /// a fully authenticated `.fcr` — outer header MAC verifies, the
-    /// payload stream authenticates — whose FCA plaintext ends before
-    /// a declared region is complete must reject as `MalformedArchive`
-    /// with that region's truncation reason, never as an environmental
-    /// `Io` failure. One case per declared region (`FORMAT.md` §9.1):
-    /// inside the 27-byte fixed header, inside a declared
-    /// `archive_ext` region, and inside the declared manifest region.
-    /// No production writer emits such payloads; a buggy or
-    /// non-conforming authenticated writer can.
+    /// Verifies end-to-end classification of incomplete FCA regions. Each
+    /// `.fcr` file has a valid outer header and an authenticated payload, but
+    /// its FCA plaintext ends inside the fixed header, extension region, or
+    /// manifest. Decryption must return `MalformedArchive` with the matching
+    /// region reason rather than `Io`.
     #[test]
     fn truncated_fca_payload_rejects_as_malformed_archive() -> Result<(), CryptoError> {
         use crate::archive::format::{
@@ -966,8 +912,8 @@ mod tests {
             body.to_vec(),
         )?];
 
-        // 10 bytes: valid magic + version + flags, then the payload
-        // ends three bytes into `entry_count`.
+        // Valid prefix through the flags field, followed by only three
+        // bytes of `entry_count`.
         let short_header = {
             let mut fca = Vec::new();
             fca.extend_from_slice(FCA_MAGIC);
@@ -1593,9 +1539,7 @@ mod tests {
         }
     }
 
-    /// Stages a tempfile in `dir` holding `bytes`, shaped like the
-    /// key-file tempfiles `generate_key_pair` hands to
-    /// `commit_key_pair_files`.
+    /// Creates a staged key-file temporary file in `dir` containing `bytes`.
     fn staged_key_tempfile(dir: &Path, bytes: &[u8]) -> tempfile::NamedTempFile {
         use std::io::Write as _;
         let mut tmp = tempfile::Builder::new()
@@ -1607,8 +1551,8 @@ mod tests {
         tmp
     }
 
-    /// Names of the entries in `dir` other than `keep`. Used to prove
-    /// a failed key-pair commit leaves no staged tempfiles behind.
+    /// Returns the entry names in `dir`, excluding `keep`. Commit-failure
+    /// tests use this to verify that no temporary files remain.
     fn leftover_entries(dir: &Path, keep: &str) -> Vec<std::ffi::OsString> {
         fs::read_dir(dir)
             .unwrap()
@@ -1617,12 +1561,9 @@ mod tests {
             .collect()
     }
 
-    /// The key-pair commit publishes `private.key` first. If the
-    /// `public.key` commit then fails — its name became occupied after
-    /// the preflight — the freshly committed `private.key` is removed
-    /// again and the occupant stays untouched. A failed generation
-    /// leaves no key files, and at no point can `public.key` exist
-    /// without `private.key` beside it.
+    /// If the `public.key` commit fails after preflight, the newly committed
+    /// `private.key` is removed and the existing `public.key` entry is left
+    /// unchanged.
     #[test]
     fn keygen_public_commit_failure_removes_private_key() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1657,10 +1598,9 @@ mod tests {
         );
     }
 
-    /// If the `private.key` commit fails — its name became occupied
-    /// after the preflight — nothing is published: `public.key` never
-    /// appears, the occupant stays untouched, and no staged tempfiles
-    /// remain in the output directory.
+    /// If the `private.key` commit fails after preflight, `public.key` is not
+    /// published, the existing entry remains unchanged, and no temporary files
+    /// remain.
     #[test]
     fn keygen_private_commit_failure_publishes_nothing() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1695,9 +1635,8 @@ mod tests {
         );
     }
 
-    /// Snapshot taken by [`counting_barrier`] at one invocation: the
-    /// directory it was asked to flush, and which of the two key
-    /// files existed at their final names at that moment.
+    /// Records one directory-flush call: the directory and whether each final
+    /// key-file name existed at that time.
     #[derive(Debug, PartialEq, Eq)]
     struct BarrierCall {
         dir: PathBuf,
@@ -1705,11 +1644,8 @@ mod tests {
         public_committed: bool,
     }
 
-    /// Directory-durability barrier stub that succeeds until the
-    /// `fail_on`-th invocation (1-based), then fails with an injected
-    /// I/O error. Every invocation records a [`BarrierCall`] snapshot
-    /// into `seen`, so tests can pin the commit order at each flush
-    /// point, not only the end state.
+    /// Directory-flush test function. It records every call and optionally
+    /// returns an injected I/O error on the selected one-based call number.
     fn counting_barrier(
         fail_on: Option<u32>,
         seen: std::rc::Rc<std::cell::RefCell<Vec<BarrierCall>>>,
@@ -1728,10 +1664,9 @@ mod tests {
         }
     }
 
-    /// If the durability barrier after the `private.key` commit fails,
-    /// nothing is published: the just-committed `private.key` is
-    /// removed again, `public.key` never appears, the injected error
-    /// surfaces unchanged, and no staged tempfiles remain.
+    /// If the directory flush after committing `private.key` fails, the
+    /// private key is removed, `public.key` is never published, the original
+    /// error is returned, and no temporary files remain.
     #[test]
     fn keygen_barrier_failure_after_private_commit_publishes_nothing() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1749,23 +1684,23 @@ mod tests {
             &public_key_path,
             counting_barrier(Some(1), seen.clone()),
         )
-        .expect_err("a failed barrier after the private.key commit must fail the commit");
+        .expect_err("a failed directory flush after private.key must fail the commit");
         assert_eq!(
             err.to_string(),
             "injected directory flush failure",
-            "the barrier's own error must surface, got {err:?}"
+            "the directory flush error must surface unchanged, got {err:?}"
         );
         assert!(
             matches!(err, CryptoError::Io(_)),
-            "barrier failure must map to the I/O error class, got {err:?}"
+            "directory flush failure must map to the I/O error class, got {err:?}"
         );
         assert!(
             !private_key_path.exists(),
-            "private.key must be removed when its durability barrier failed"
+            "private.key must be removed when its directory flush failed"
         );
         assert!(
             !public_key_path.exists(),
-            "public.key must never appear when the private.key barrier failed"
+            "public.key must never appear when the private.key directory flush failed"
         );
         let leftovers = leftover_entries(dir, "");
         assert!(
@@ -1774,12 +1709,10 @@ mod tests {
         );
     }
 
-    /// If the durability barrier after the `public.key` commit fails,
-    /// only `public.key` is removed. `private.key` stays deliberately:
-    /// with no working flush, removing both could persist in either
-    /// order, and a surviving `public.key` next to a lost
-    /// `private.key` is exactly the state the commit exists to
-    /// prevent. A leftover `private.key` is harmless.
+    /// If the directory flush after committing `public.key` fails, only
+    /// `public.key` is removed. `private.key` remains because, without a
+    /// working directory flush, removing both could be persisted in an order
+    /// that leaves only `public.key`.
     #[test]
     fn keygen_barrier_failure_after_public_commit_keeps_only_private_key() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1797,19 +1730,19 @@ mod tests {
             &public_key_path,
             counting_barrier(Some(2), seen.clone()),
         )
-        .expect_err("a failed barrier after the public.key commit must fail the commit");
+        .expect_err("a failed directory flush after public.key must fail the commit");
         assert!(
             matches!(err, CryptoError::Io(_)),
-            "barrier failure must map to the I/O error class, got {err:?}"
+            "directory flush failure must map to the I/O error class, got {err:?}"
         );
         assert!(
             !public_key_path.exists(),
-            "public.key must be removed when the final durability barrier failed"
+            "public.key must be removed when the final directory flush failed"
         );
         assert_eq!(
             fs::read(&private_key_path).unwrap(),
             b"private bytes",
-            "private.key must be kept when the final durability barrier failed"
+            "private.key must be kept when the final directory flush failed"
         );
         let leftovers = leftover_entries(dir, PRIVATE_KEY_FILENAME);
         assert!(
@@ -1818,12 +1751,9 @@ mod tests {
         );
     }
 
-    /// A successful commit flushes the output directory exactly twice
-    /// — once after each key-file commit — and both key files are in
-    /// place with their staged contents. The first flush must observe
-    /// `private.key` already at its final name and `public.key` not
-    /// yet present, pinning the private-first commit order the
-    /// durability guarantee depends on.
+    /// A successful commit flushes the output directory after each key-file
+    /// commit. The first flush must observe only `private.key`; the second must
+    /// observe both files. This verifies the private-first order.
     #[test]
     fn keygen_commit_flushes_output_directory_after_each_commit() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1841,7 +1771,7 @@ mod tests {
             &public_key_path,
             counting_barrier(None, seen.clone()),
         )
-        .expect("commit must succeed with a working barrier");
+        .expect("commit must succeed when directory flushing succeeds");
         assert_eq!(
             *seen.borrow(),
             vec![

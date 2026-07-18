@@ -60,9 +60,9 @@ fn pass() -> SecretString {
     SecretString::from(PASSPHRASE.to_string())
 }
 
-/// Relative paths of every entry under `root`, sorted, `/`-separated.
-/// Used by the output-inside-input regressions to compare a restored
-/// tree against the exact pre-encryption input shape.
+/// Returns sorted, `/`-separated paths for every entry beneath `root`.
+/// Output-inside-input tests use this to compare the restored tree with the
+/// source tree recorded before encryption.
 fn tree_names(root: &Path) -> Vec<String> {
     fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
         for entry in fs::read_dir(dir).unwrap() {
@@ -109,12 +109,9 @@ fn encryptor_passphrase_round_trip() {
     assert_eq!(restored_bytes, b"hello passphrase api");
 }
 
-/// Encrypting a directory with the output written inside that same
-/// directory (default `{input}/input.fcr` destination) must archive the
-/// directory exactly as it was before the operation. The ciphertext
-/// staging file is created inside the input tree while encryption runs;
-/// the source metadata pass completes first, so neither the staging
-/// name nor the final `.fcr` may appear in the restored tree.
+/// Encrypting a directory to its default destination inside that directory
+/// must not include the ciphertext staging file or final `.fcr` file in the
+/// restored tree. Source preparation completes before either output exists.
 #[test]
 fn encrypt_directory_to_output_inside_input_tree() {
     let work = fresh_workspace("output_inside_input_default");
@@ -147,10 +144,9 @@ fn encrypt_directory_to_output_inside_input_tree() {
     );
 }
 
-/// Same guarantee for an explicit `save_as` destination in a nested
-/// subdirectory of the input, with a payload larger than one 64 KiB
-/// chunk so the encrypt stream flushes ciphertext into the staging file
-/// while source contents are still being read.
+/// Verifies the same rule for an explicit `save_as` path in a nested source
+/// directory. The payload spans several stream chunks so the staging file is
+/// written while source file contents are still being read.
 #[test]
 fn encrypt_directory_to_save_as_inside_nested_subdirectory() {
     let work = fresh_workspace("output_inside_input_save_as");
@@ -362,10 +358,9 @@ fn passphrase_decrypt_reports_input_path_when_file_vanishes() {
     );
 }
 
-/// Private-key variant of the vanished-input race: the structural
-/// session open inside `PrivateKeyDecryptor::decrypt` runs before the
-/// `private.key` unlock, so the missing file must surface as
-/// `InputPath` with no Argon2id work.
+/// Private-key variant of the missing-input test. Opening the decryption
+/// session occurs before `private.key` is unlocked, so the missing file must
+/// return `InputPath` without starting Argon2id.
 #[test]
 fn private_key_decrypt_reports_input_path_when_file_vanishes() {
     let work = fresh_workspace("pk_decrypt_vanished_input");
@@ -408,13 +403,10 @@ fn private_key_decrypt_reports_input_path_when_file_vanishes() {
     );
 }
 
-/// A file swapped in at the input path after `PrivateKeyDecryptor::decrypt`
-/// has opened and validated its input — here from the
-/// `UnlockingPrivateKey` progress callback, which fires while the
-/// private key is being unlocked — must not become the file that is
-/// decrypted. The decryptor holds the originally opened handle through
-/// the unlock, so the original content is restored even though the
-/// path now names the substitute.
+/// Replacing the encrypted-file path after `PrivateKeyDecryptor::decrypt`
+/// opens and validates it must not change the file being decrypted. The test
+/// performs the replacement from the `UnlockingPrivateKey` progress callback.
+/// Decryption must still restore the content from the originally opened file.
 #[test]
 fn private_key_decrypt_uses_the_validated_file_not_a_swapped_replacement() {
     let work = fresh_workspace("pk_decrypt_swap_after_open");
@@ -1495,10 +1487,10 @@ fn encryptor_passphrase_rejects_dangling_symlink_at_output_before_kdf() {
     );
 }
 
-/// `PrivateKeyDecryptor::decrypt` opens and structurally validates the
-/// input before the `private.key` unlock. A malformed file swapped in
-/// between `Decryptor::open` and `.decrypt` must be rejected without
-/// triggering the Argon2id unlock or its `UnlockingPrivateKey` event.
+/// `PrivateKeyDecryptor::decrypt` opens and validates the input before
+/// unlocking `private.key`. A malformed replacement installed between
+/// `Decryptor::open` and `.decrypt` must be rejected without starting
+/// Argon2id or emitting `UnlockingPrivateKey`.
 #[test]
 fn private_key_decrypt_revalidates_input_before_unlock() {
     let work = fresh_workspace("private_key_decrypt_revalidate");

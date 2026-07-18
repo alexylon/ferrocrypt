@@ -53,10 +53,9 @@ const WRAPPED_FILE_KEY_OFFSET: usize = WRAP_NONCE_OFFSET + WRAP_NONCE_SIZE;
 /// 116-byte recipient body.
 ///
 /// Emits [`ProgressEvent::DerivingPassphraseWrapKey`] immediately before
-/// the Argon2id call. The passphrase-length cap, structural
-/// KDF-parameter validation, and the CSPRNG read for `argon2_salt` run
-/// first; if any fails, the event is not emitted and the typed error is
-/// returned.
+/// Argon2id starts. The passphrase-length check, KDF parameter validation,
+/// and random salt generation run first. If any of them fails, the event is
+/// not emitted and the corresponding error is returned.
 pub(crate) fn wrap(
     file_key: &FileKey,
     passphrase: &SecretString,
@@ -64,11 +63,9 @@ pub(crate) fn wrap(
     on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<[u8; BODY_LENGTH], CryptoError> {
     check_passphrase_len(passphrase.expose_secret().as_bytes())?;
-    // The event below claims Argon2id is starting, so structurally
-    // invalid parameters must reject first — the same boundary `unwrap`
-    // enforces. The public write path already preflights via
-    // `validate_for_write`; this local check covers in-crate callers,
-    // and `hash_passphrase` keeps its own check as the final backstop.
+    // Validate before emitting the progress event. Public encryption
+    // already checks these parameters, but this function also serves
+    // crate-internal callers directly.
     kdf_params.validate_structural()?;
     let argon2_salt = random_bytes::<ARGON2_SALT_SIZE>()?;
     on_event(&ProgressEvent::DerivingPassphraseWrapKey);
@@ -487,17 +484,15 @@ mod tests {
         );
     }
 
-    /// Pins the work-boundary contract for `wrap` when the caller's
-    /// `kdf_params` are structurally invalid: rejected as
-    /// `InvalidKdfParams` with NO event, because Argon2id never runs.
-    /// The public write path rejects such parameters earlier via its
-    /// `validate_for_write` preflight; this pins the scheme function's
-    /// own boundary for in-crate callers.
+    /// Invalid KDF parameters must return `InvalidKdfParams` without
+    /// emitting a progress event, because Argon2id has not started. Public
+    /// encryption rejects the same parameters during its earlier validation;
+    /// this test covers direct crate-internal use of `wrap`.
     #[test]
     fn wrap_emits_no_event_when_kdf_params_are_structurally_invalid() {
         let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let pass = passphrase("p");
-        // `lanes = 0` is below the structural bounds (1..=8).
+        // `lanes = 0` is below the structural range of 1 through 8.
         let invalid = KdfParams {
             mem_cost: 8,
             time_cost: 1,

@@ -489,10 +489,9 @@ Readers SHOULD either attempt unwrap of all supported recipient entries before
 returning success or randomize recipient iteration order to reduce timing leakage
 about which recipient matched.
 
-Readers SHOULD process a single opened file through all of the steps above,
-without re-resolving the file path between structural parsing and payload
-decryption, because a re-resolved path can name a swapped file whose bytes never
-passed the earlier steps.
+Readers SHOULD keep one opened file for all steps above instead of resolving the
+path again between structural parsing and payload decryption. Resolving the path
+again could select a replacement file that did not pass the earlier checks.
 
 ---
 
@@ -775,10 +774,10 @@ Rules:
   `2^32 - 1` is used, that chunk MUST be final.
 - Readers MUST reject streams that exceed `2^32` chunks, fail authentication,
   reach EOF before a valid final chunk, or contain bytes after the final chunk.
-- A rejection is terminal for the whole stream: readers MUST NOT decrypt or
-  release later chunks after any chunk fails, because chunks authenticate
-  individually, so a crafted stream can follow a rejected chunk with an
-  independently valid chunk sequence of the attacker's choice.
+- Any rejection is terminal for the stream. After a chunk fails, readers MUST
+  NOT decrypt or release later chunks. Each chunk authenticates independently,
+  so later ciphertext could otherwise form a valid sequence at the unchanged
+  stream position.
 
 The payload is chunk-seekable. When seeking relative to the end, readers MUST
 locate and authenticate the final chunk before returning earlier plaintext.
@@ -1396,10 +1395,10 @@ reparse-safe open mode such as `FILE_FLAG_OPEN_REPARSE_POINT` followed by
 post-open metadata validation.
 
 The writer MUST build a metadata-only manifest before emitting the FCA header.
-If the writer stages or writes output at a location the source tree can contain,
-the metadata pass MUST complete before that output is created, because output
-captured as source content makes the archive no longer represent the source
-tree.
+If the output location can appear within the source tree, the metadata pass MUST
+finish before the writer creates any output there. Otherwise, the output could
+be recorded as source content and the archive would no longer represent the
+captured source tree.
 The metadata pass records entry kind, canonical FCA path string, source path or
 equivalent reopen information, mode, logical regular-file size, and entry
 extension bytes. The metadata pass MUST apply path validation, duplicate
@@ -1477,12 +1476,12 @@ open handle immediately after its content is written is equivalent to a
 separate pass, because every descendant file sits inside the restrictive
 staged root until promotion.
 
-A step-16 reopen of the promoted root MUST NOT follow symlinks, MUST verify
-the opened handle is a regular file (for a file root) or a directory (for a
-directory root), and MUST NOT block waiting on a substituted special file — a
-FIFO opened read-only otherwise blocks until a writer appears — because
-another local process with write access to the output directory can substitute
-the final name between steps 15 and 16.
+When step 16 reopens the promoted root, the reader MUST NOT follow symlinks. It
+MUST also verify that a file root is a regular file and a directory root is a
+directory. The open MUST NOT wait on a substituted special file; for example,
+opening a FIFO for reading can wait indefinitely for a writer. These checks
+protect the interval in which another local process can replace the final name
+between steps 15 and 16.
 
 Readers SHOULD sync staged file contents to stable storage before step 15.
 After promotion the output exists under its final name with no `.incomplete`

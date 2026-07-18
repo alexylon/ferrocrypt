@@ -1,24 +1,23 @@
 #![no_main]
 
-//! Fuzzes the STREAM-BE32 `DecryptReader` state machine directly —
-//! chunk refill, the exact-chunk one-byte peek, truncation vs tamper
-//! vs trailing-data classification, and the terminal-error poison
-//! path. The MAC-gated end-to-end decrypt targets can never reach
-//! this layer with attacker-shaped bytes (the header MAC rejects
-//! first); this target feeds the cipher layer directly under a fixed
-//! key and nonce.
+//! Fuzzes the STREAM-BE32 `DecryptReader` directly. It covers chunk
+//! refill, exact-chunk lookahead, truncation, authentication failure,
+//! trailing-data classification, and the rule that later reads fail
+//! after the first error. End-to-end decrypt targets cannot reach this
+//! layer with arbitrary ciphertext because the header MAC is verified
+//! first; this target tests the cipher layer directly with a fixed key
+//! and nonce.
 //!
-//! Corpus seeds built by `gen_seeds` are valid ciphertexts under the
-//! same fixed key/nonce, so the success branches (`decrypt_next`,
-//! final-chunk handling) stay reachable. Two oracles:
+//! Corpus seeds produced by `gen_seeds` are valid ciphertexts under the
+//! same fixed key and nonce, so successful decryption remains reachable.
+//! The target checks two properties:
 //!
-//! - **Round-trip.** STREAM is deterministic: whenever an input
-//!   decrypts, re-encrypting the recovered plaintext must reproduce
-//!   the input byte-for-byte — any divergence means the reader
-//!   accepted a non-canonical chunking the writer would never emit.
-//! - **Fail-closed.** Whenever an input is rejected, a follow-up read
-//!   must fail too: a reader that returns more bytes (or a clean EOF)
-//!   after a terminal error has resumed a rejected stream.
+//! - **Round trip.** STREAM is deterministic. Re-encrypting successfully
+//!   decrypted plaintext must reproduce the input exactly. A difference
+//!   means the reader accepted chunking that the writer does not produce.
+//! - **Terminal failure.** After any rejected input, another read must also
+//!   fail. Returning bytes or a clean end-of-file result would resume a
+//!   rejected stream.
 
 use std::io::Read as _;
 
@@ -32,9 +31,9 @@ fuzz_target!(|data: &[u8]| {
         Ok(_) => {
             let reencrypted = encrypt_stream_for_fuzz(&plaintext)
                 .expect("plaintext that decrypted must re-encrypt");
-            // Manual compare: `assert_eq!` would dump both buffers
-            // (up to ~65 KB each) into the crash log; the saved artifact
-            // already carries the input.
+            // Avoid `assert_eq!` because it would print both buffers,
+            // each up to about 65 KB. The saved fuzzing input already
+            // contains the original bytes.
             assert!(
                 reencrypted == data,
                 "STREAM round-trip diverged: re-encrypted {} bytes vs input {} bytes",

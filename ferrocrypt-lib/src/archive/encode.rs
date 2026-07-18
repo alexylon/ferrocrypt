@@ -963,18 +963,15 @@ fn stream_directory_descendant<W: Write>(
     copy_exact_n(&mut file, writer, entry.size, source_shrank_error)
 }
 
-/// A source tree captured for archiving: the fully validated manifest,
-/// its serialized bytes, and the retained [`ArchiveSource`] the content
-/// pass streams from.
+/// A validated source tree prepared for archiving. It contains the manifest,
+/// its serialized form, and the retained [`ArchiveSource`] used to read file
+/// contents.
 ///
-/// Produced by [`prepare_archive`], consumed by
-/// [`PreparedArchive::write_to`]. The split lets the orchestrator run
-/// the complete metadata pass before any cipher work and before any
-/// output staging, so the ciphertext staging file created later can
-/// never be discovered as source content when the resolved output path
-/// lies inside the input tree. Content emission reads only the entries
-/// captured here; files that appear under the source root after
-/// [`prepare_archive`] returns are not part of the archive.
+/// [`prepare_archive`] creates this value, and [`PreparedArchive::write_to`]
+/// consumes it. Separating the phases lets encryption finish source
+/// validation before cipher work and output staging begin. A staging file
+/// created inside the input tree therefore cannot become archive content.
+/// Files created after preparation are not included.
 pub(crate) struct PreparedArchive {
     manifest: Manifest,
     manifest_bytes: Vec<u8>,
@@ -983,14 +980,13 @@ pub(crate) struct PreparedArchive {
     source: ArchiveSource,
 }
 
-/// Runs the FCA metadata pass over `input_path`: input validation,
-/// source-tree walk, tree validation, manifest serialization, and every
-/// writer-side cap check. Performs no output and no cipher work.
+/// Performs the FCA metadata phase for `input_path`: input validation,
+/// source-tree traversal, tree validation, manifest serialization, and all
+/// writer-side limit checks. It creates no output and performs no cipher work.
 ///
-/// The returned [`PreparedArchive`] holds the open source handle
-/// (single-file root) or directory capability (directory root), so the
-/// later content pass never resolves the user-supplied path through
-/// the kernel a second time.
+/// The returned [`PreparedArchive`] retains the opened source file or source
+/// directory handle. The later content phase therefore does not resolve the
+/// user-supplied path again.
 pub(crate) fn prepare_archive(
     input_path: impl AsRef<Path>,
     limits: ArchiveLimits,
@@ -1039,14 +1035,13 @@ pub(crate) fn prepare_archive(
 }
 
 impl PreparedArchive {
-    /// Streams the captured archive into `writer`: FCA header,
-    /// serialized manifest, then file contents in canonical manifest
-    /// order from the retained source. Returns the writer for the
-    /// caller to finalize.
+    /// Writes the prepared archive to `writer`: FCA header, serialized
+    /// manifest, and file contents in canonical manifest order. File contents
+    /// are read from the retained source. Returns the writer for finalization.
     pub(crate) fn write_to<W: Write>(self, mut writer: W) -> Result<W, CryptoError> {
-        // FCA v1 writers always emit `archive_ext_len = 0`; the archive-
-        // level TLV region exists in the wire layout but defines no v1
-        // tags, so writers must not emit any bytes there.
+        // FCA v1 writers set `archive_ext_len` to zero. The field is
+        // reserved for later versions, but v1 defines no archive-level
+        // extension tags.
         writer = write_fca_header(
             writer,
             self.entry_count,
@@ -1054,12 +1049,12 @@ impl PreparedArchive {
             self.manifest_len,
             self.manifest.total_file_bytes,
         )?;
-        // Plain `?` so a `StreamError` marker from the encrypt stream
-        // converts to its typed variant via `From<io::Error>`.
+        // Preserve the embedded stream error so `From<io::Error>` can
+        // convert it to the corresponding `CryptoError` variant.
         writer.write_all(&self.manifest_bytes)?;
 
-        // Pass 2: stream file contents in canonical manifest order,
-        // from the handle or capability captured by pass 1.
+        // Write file contents in canonical manifest order, using the
+        // source file or directory handle retained during preparation.
         for entry in &self.manifest.entries {
             if entry.kind == ArchiveEntryKind::File {
                 stream_source_file(entry, &self.source, &mut writer)?;
@@ -1070,15 +1065,14 @@ impl PreparedArchive {
     }
 }
 
-/// Archives a file or directory into the FCA wire format in one call:
-/// [`prepare_archive`] followed by [`PreparedArchive::write_to`].
-/// Returns the writer for the caller to finalize.
+/// Archives a file or directory in one call by running [`prepare_archive`]
+/// followed by [`PreparedArchive::write_to`]. Returns the writer for
+/// finalization.
 ///
-/// The production encrypt pipeline calls the two phases separately so
-/// the metadata pass completes before the ciphertext staging file
-/// exists; this composition serves callers that own no output staging
-/// — the in-module tests and the fuzz seed generator — and is compiled
-/// only for them.
+/// Production encryption calls the phases separately so preparation finishes
+/// before the ciphertext staging file exists. This helper is limited to tests
+/// and fuzzing code, where the caller does not create output inside the source
+/// tree.
 #[cfg(any(test, feature = "fuzzing"))]
 pub(crate) fn archive<W: Write>(
     input_path: impl AsRef<Path>,
@@ -1172,11 +1166,9 @@ mod tests {
         assert_eq!(fs::read(&final_path).unwrap(), b"Hello, world!");
     }
 
-    /// The two-phase writer snapshots the source at prepare time:
-    /// entries created under the source root after `prepare_archive`
-    /// returns — such as the encrypt pipeline's own ciphertext staging
-    /// file when the output path lies inside the input tree — are not
-    /// discovered by the content pass and never enter the archive.
+    /// Files created beneath the source root after [`prepare_archive`]
+    /// returns are not included when the prepared archive is written. This
+    /// covers an encryption staging file created inside the input tree.
     #[test]
     fn prepare_then_write_excludes_files_created_after_prepare() {
         let src = tempfile::TempDir::new().unwrap();

@@ -538,18 +538,15 @@ pub(crate) fn open_dir_at_rel(root: &Dir, rel: &Path) -> Result<Dir, CryptoError
     Ok(cur)
 }
 
-/// Opens an existing regular file under `parent` with no-follow + the
-/// regular-file post-check ([`finalize_file_open`]). File-side parallel
-/// of [`open_dir_at_rel`]; used by the post-rename root-file chmod
-/// (`decode::apply_root_file_mode`) so the chmod runs against a
-/// freshly-opened handle rather than through a re-resolved path. A
-/// symlink at that name aborts with the typed "Symlink in extraction
-/// path" diagnostic; on Windows, a reparse point at the name fails the
-/// same way via the post-check. The open is non-blocking on Unix so a
-/// FIFO substituted at the name cannot block the process inside
-/// `open(2)` (opening a FIFO read-only otherwise waits until a writer
-/// appears) — the post-check then rejects it, and the flag has no
-/// effect on regular-file reads. cap-std ignores the flag on Windows.
+/// Opens an existing regular file beneath `parent` without following
+/// symlinks, then validates the opened handle through
+/// [`finalize_file_open`]. This is the file equivalent of
+/// [`open_dir_at_rel`] and is used for the final permission update after
+/// promotion.
+///
+/// On Unix the open is non-blocking, so a FIFO at the name cannot wait for a
+/// writer. The subsequent type check rejects FIFOs and other non-regular
+/// objects. On Windows the reparse-point check also applies.
 pub(crate) fn open_file_nofollow(parent: &Dir, name: &OsStr) -> Result<File, CryptoError> {
     let mut options = OpenOptions::new();
     options.read(true).follow(FollowSymlinks::No).nonblock(true);
@@ -565,16 +562,10 @@ pub(crate) fn open_file_nofollow(parent: &Dir, name: &OsStr) -> Result<File, Cry
     finalize_file_open(file, name)
 }
 
-/// Post-open finalize for a regular-file handle: fetches metadata from
-/// the opened handle and requires a regular file, so a FIFO, device
-/// node, socket, or directory substituted at the name is rejected
-/// instead of being returned as a "file" handle. On Windows the
-/// reparse-point bitmask check runs first (cap-fs-ext's
-/// `FollowSymlinks::No` translates to `FILE_FLAG_OPEN_REPARSE_POINT`,
-/// which would otherwise let an attacker-substituted symlink at the
-/// path open as a regular-file handle and have its bits flipped); on
-/// Unix the kernel's `O_NOFOLLOW` semantics already reject a symlink
-/// at open time.
+/// Validates an opened file handle. The handle must refer to a regular file;
+/// FIFOs, devices, sockets, and directories are rejected. On Windows the
+/// reparse-point check runs first because a no-follow open may return a handle
+/// to the reparse point itself. Unix rejects symlinks during the open.
 fn finalize_file_open(file: File, name: &OsStr) -> Result<File, CryptoError> {
     let metadata = file.metadata().map_err(CryptoError::Io)?;
     #[cfg(windows)]
@@ -739,9 +730,8 @@ mod tests {
         );
     }
 
-    /// The regular-file success path: `open_file_nofollow` on an
-    /// ordinary file returns a usable handle on every platform (the
-    /// non-blocking open flag must not disturb normal opens).
+    /// Opening an ordinary file returns a usable regular-file handle on every
+    /// platform. The Unix non-blocking flag must not affect this path.
     #[test]
     fn open_file_nofollow_opens_regular_file() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -752,12 +742,8 @@ mod tests {
         assert!(file.metadata().unwrap().is_file());
     }
 
-    /// A FIFO at the name must reject with the typed regular-file
-    /// diagnostic — and must not block. Without the non-blocking open
-    /// flag, `open(2)` on a FIFO waits until a writer appears, so an
-    /// attacker who wins the promotion-to-chmod race with a FIFO
-    /// substitution could hang the process; the test finishing at all
-    /// proves the open returns.
+    /// A FIFO must be rejected as non-regular without waiting for a writer.
+    /// Completion of the test also verifies that the Unix open is non-blocking.
     #[cfg(unix)]
     #[test]
     fn open_file_nofollow_rejects_fifo_without_blocking() {
@@ -773,11 +759,9 @@ mod tests {
         );
     }
 
-    /// A directory at the name must reject: `open_file_nofollow`
-    /// promises a regular-file handle. The error class differs by
-    /// platform (Unix reaches the post-open type check; Windows
-    /// refuses the directory open itself), so only the rejection is
-    /// pinned.
+    /// A directory must be rejected because the helper promises a regular
+    /// file. Unix reaches the post-open type check; Windows may reject the
+    /// open itself, so the test verifies only that the operation fails.
     #[test]
     fn open_file_nofollow_rejects_directory() {
         let tmp = tempfile::TempDir::new().unwrap();

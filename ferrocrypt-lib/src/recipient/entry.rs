@@ -114,15 +114,14 @@ impl RecipientEntry {
         out
     }
 
-    /// Validates an in-memory entry against the writer-side framing rules
-    /// and returns its exact wire length without serialising it. Aggregate
-    /// length preflights and [`Self::to_bytes_checked`] share this path, so
-    /// validation cannot drift from serialisation.
+    /// Validates an in-memory entry against the writer's framing rules and
+    /// returns its exact encoded length without serializing it. Header-length
+    /// checks and [`Self::to_bytes_checked`] share this validation path.
     ///
-    /// The checks mirror [`Self::parse_one`]: type-name length and grammar,
-    /// reserved flag bits, and `body.len() <= BODY_LEN_MAX`. When an entry
-    /// has multiple defects, the writer and reader may report different
-    /// variants because they validate different representations.
+    /// The checks match [`Self::parse_one`]: type-name length and grammar,
+    /// reserved flag bits, and `body.len() <= BODY_LEN_MAX`. If an entry has
+    /// several defects, writer and reader may report different variants
+    /// because they validate different representations.
     pub(crate) fn checked_wire_len(&self) -> Result<usize, CryptoError> {
         // Match `parse_one`: invalid framing length takes precedence over
         // type-name grammar.
@@ -145,8 +144,8 @@ impl RecipientEntry {
         Ok(ENTRY_HEADER_SIZE + self.type_name.len() + self.body.len())
     }
 
-    /// Serialises the canonical recipient-entry framing after validating it
-    /// through [`Self::checked_wire_len`].
+    /// Serializes a canonical recipient entry after validation through
+    /// [`Self::checked_wire_len`].
     pub(crate) fn to_bytes_checked(&self) -> Result<Vec<u8>, CryptoError> {
         let wire_len = self.checked_wire_len()?;
         // Safe after `checked_wire_len`: the name fits `u16` and the
@@ -325,8 +324,7 @@ mod tests {
         assert!(parsed.is_critical());
     }
 
-    /// Verifies that aggregate-length preflight and serialisation remain in
-    /// lockstep.
+    /// Verifies that the calculated encoded length matches serialization.
     #[test]
     fn checked_wire_len_matches_serialized_length() {
         let entry = RecipientEntry {

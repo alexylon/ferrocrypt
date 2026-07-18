@@ -239,11 +239,11 @@ pub(crate) fn map_user_path_io_error(e: io::Error) -> CryptoError {
     }
 }
 
-/// Test-only: creates a FIFO via the POSIX `mkfifo` utility, for the
-/// special-file regressions here, in `archive::platform`, and in
-/// `archive::decode`. A subprocess keeps the crate free of an `unsafe`
-/// `libc::mkfifo` call (`rustix` exposes no FIFO creation on Apple
-/// targets).
+/// Test helper that creates a FIFO through the POSIX `mkfifo` utility.
+/// It is shared by special-file tests in this module, `archive::platform`,
+/// and `archive::decode`. Using a subprocess avoids an unsafe
+/// `libc::mkfifo` call; `rustix` does not expose FIFO creation on Apple
+/// targets.
 #[cfg(all(test, unix))]
 pub(crate) fn make_fifo(path: &Path) {
     let status = std::process::Command::new("mkfifo")
@@ -382,10 +382,9 @@ mod tests {
         assert_eq!(parent_or_cwd(Path::new("/")), Path::new("."));
     }
 
-    /// FIFO-input regressions. Unix-only — Windows has no FIFO file
-    /// type in the filesystem namespace. Without the `open_input_file`
-    /// guard, pointing any read path at a FIFO hangs the process inside
-    /// `open(2)` until a writer appears.
+    /// FIFO input tests. Windows has no FIFO file type in the filesystem
+    /// namespace. Without the `open_input_file` check, opening a FIFO for
+    /// reading can wait indefinitely for a writer.
     #[cfg(unix)]
     mod special_file_inputs {
         use super::*;

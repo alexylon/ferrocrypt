@@ -415,9 +415,9 @@ pub(crate) fn read_encrypted_header<R: Read>(
 /// and `payload_key` for the payload streamer. Bundling these together
 /// makes a (header, payload_key, stream_nonce) mismatch unrepresentable.
 ///
-/// The aggregate header length is checked against the 16 MiB structural
-/// maximum before recipient entries are serialised. Oversized recipient
-/// lists therefore fail without allocating the aggregate entry buffer.
+/// The combined header length is checked against the 16 MiB structural
+/// maximum before the recipient buffer is allocated. Oversized recipient
+/// lists therefore fail before aggregate serialization.
 pub(crate) fn build_encrypted_header(
     recipient_entries: &[RecipientEntry],
     ext_bytes: &[u8],
@@ -431,9 +431,9 @@ pub(crate) fn build_encrypted_header(
     let recipient_count: u16 = recipient_entries.len().try_into().unwrap_or(u16::MAX);
     check_recipient_count(recipient_count)?;
 
-    // Validate each entry and compute its exact wire length before
-    // allocating the aggregate buffer. This preserves per-entry errors
-    // while enforcing the header cap before serialisation.
+    // Validate each entry and calculate the combined encoded length
+    // before allocating the recipient buffer. Per-entry validation
+    // errors are preserved, and the header limit is enforced first.
     let mut entries_len_u64: u64 = 0;
     for entry in recipient_entries {
         entries_len_u64 = entries_len_u64
@@ -525,11 +525,10 @@ pub(crate) fn resolve_encrypted_output_path(
 /// archive captured in `prepared`. No plaintext intermediate files touch
 /// disk: the FCA stream is piped directly through [`EncryptWriter`].
 ///
-/// Taking an [`archive::PreparedArchive`] rather than the input path is
-/// load-bearing: the source metadata pass already ran before this
-/// function creates the ciphertext staging tempfile, so an output path
-/// that resolves inside the input tree cannot pull the staging file
-/// into the archive as source content.
+/// Accepting [`archive::PreparedArchive`] ensures that source metadata was
+/// collected before this function creates the ciphertext staging file. An
+/// output path inside the input tree therefore cannot add the staging file to
+/// the archive.
 ///
 /// Atomicity: the file is written under a `.ferrocrypt-*.incomplete`
 /// tempfile in the destination's parent directory, then renamed via
@@ -769,8 +768,8 @@ mod tests {
         }
     }
 
-    /// Exercises the aggregate header cap through recipient bytes rather
-    /// than `ext_bytes`, and verifies the reported computed length.
+    /// Tests the header-length limit using recipient bytes rather than
+    /// `ext_bytes`, including the reported calculated length.
     #[test]
     fn build_rejects_oversized_entries_with_computed_length() {
         let DerivedSubkeys {

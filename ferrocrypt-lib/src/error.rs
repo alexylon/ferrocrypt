@@ -13,11 +13,10 @@ use crate::recipient::policy::MixingPolicy;
 const TYPE_NAME_DISPLAY_MAX: usize = 13;
 const _: () = assert!(TYPE_NAME_DISPLAY_MAX >= 1);
 
-/// Escapes `s` into `w` and limits the result to `max` rendered
+/// Escapes `s` into `w` and limits the result to `max` displayed
 /// characters, including a trailing `…` when truncated. The function
-/// never splits a code point or escape sequence. This is the shared
-/// truncation rule for [`DisplayableTypeName`], [`DisplayableMarker`],
-/// and [`sanitize_for_display`].
+/// never splits a code point or an escape sequence. `DisplayableTypeName`,
+/// `DisplayableMarker`, and `sanitize_for_display` all use this rule.
 fn write_truncated_sanitized<W: std::fmt::Write>(
     w: &mut W,
     s: &str,
@@ -100,10 +99,9 @@ fn recipient_unwrap_message(type_name: &str) -> &'static str {
 /// same condition and must read identically, so both render this one string.
 const HEADER_CORRUPTED_MESSAGE: &str = "Decryption failed: file header was modified or corrupted";
 
-/// Maximum number of rendered characters returned by
-/// [`sanitize_for_display`], including escape sequences and any trailing
-/// ellipsis. This keeps one attacker-controlled value from dominating a
-/// terminal or log line.
+/// Maximum displayed length returned by [`sanitize_for_display`], including
+/// escape sequences and a trailing ellipsis. The limit prevents one untrusted
+/// value from dominating a terminal or log line.
 const UNTRUSTED_TEXT_DISPLAY_MAX: usize = 64;
 
 /// Appends `c` to `w`, passing printable ASCII (and the space character)
@@ -122,14 +120,13 @@ fn write_sanitized_char<W: std::fmt::Write>(w: &mut W, c: char) -> std::fmt::Res
 
 /// Renders untrusted text for use in an error message.
 ///
-/// Printable ASCII is preserved. Control characters and non-ASCII code
-/// points are rendered with Rust-style escapes, preventing terminal control
-/// sequences and misleading text direction. Output is limited to
-/// [`UNTRUSTED_TEXT_DISPLAY_MAX`] rendered characters through
-/// [`write_truncated_sanitized`].
+/// Printable ASCII is preserved. Control characters and non-ASCII code points
+/// use Rust-style escapes, which prevents terminal control sequences and
+/// misleading text direction. The displayed result is limited to
+/// [`UNTRUSTED_TEXT_DISPLAY_MAX`] characters.
 ///
-/// Use this for attacker-controlled archive paths, source-tree names, and
-/// echoed recipient strings.
+/// Use this function for untrusted archive paths, source-tree names, and
+/// recipient strings included in errors.
 pub(crate) fn sanitize_for_display(text: &str) -> String {
     let mut out = String::new();
     // Writing into a `String` cannot fail.
@@ -1016,11 +1013,10 @@ pub(crate) enum StreamError {
     /// `Take`-style wrappers). Downcast to
     /// [`CryptoError::ExtraDataAfterPayload`] via `From<io::Error>`.
     ExtraData,
-    /// Writer or reader state was already consumed — the writer was
-    /// finished or poisoned by an earlier sink/AEAD failure, or the
-    /// reader was poisoned by an earlier terminal error. Surfaced when
-    /// a caller keeps writing or reading anyway (programmer bug): the
-    /// stream adapters fail closed rather than resume mid-stream.
+    /// Writer or reader state is no longer available. This occurs after a
+    /// writer finishes, after a writer returns a sink or AEAD error, or after
+    /// a reader returns any terminal error. Later operations return this
+    /// marker instead of resuming the stream.
     StateExhausted,
     /// `FORMAT.md` §5: writers must not emit more than `2^32` chunks
     /// and readers must reject streams that exceed that count. Surfaced

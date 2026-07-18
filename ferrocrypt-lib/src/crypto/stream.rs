@@ -270,15 +270,15 @@ impl<W: Write> Drop for EncryptWriter<W> {
 ///
 /// ## Terminal errors
 ///
-/// Every error returned from [`Read::read`] is terminal
-/// ([`io::ErrorKind::Interrupted`] is retried internally and never
-/// escapes). The reader poisons itself: cipher state, the lookahead
-/// byte, and the buffered chunk are dropped, and every later non-empty
-/// read returns [`StreamError::StateExhausted`] without touching the
-/// input. Resuming instead would decrypt later ciphertext at a STREAM
-/// position the failed chunk never advanced, so a crafted stream could
-/// follow a rejected chunk with an independently valid chunk sequence
-/// and have it served as plaintext.
+/// Every error returned by [`Read::read`] is terminal.
+/// [`io::ErrorKind::Interrupted`] is retried internally and does not reach the
+/// caller. After another error, the reader drops its cipher state, lookahead
+/// byte, and buffered chunk. Every later non-empty read returns
+/// [`StreamError::StateExhausted`] without reading more input.
+///
+/// Resuming would process later ciphertext at the stream position of the
+/// failed chunk. Because chunks authenticate independently, that could expose
+/// plaintext from a separate valid sequence after rejected data.
 ///
 /// ## Memory hygiene
 ///
@@ -294,10 +294,8 @@ pub(crate) struct DecryptReader<R: Read> {
     chunk: Vec<u8>,
     pos: usize,
     done: bool,
-    /// Set when a refill has failed. A failed reader serves no further
-    /// plaintext: every later non-empty read returns
-    /// [`StreamError::StateExhausted`] without touching `input` (see
-    /// the terminal-errors section on the type).
+    /// Set after a refill error. Later non-empty reads return
+    /// [`StreamError::StateExhausted`] without reading from `input`.
     failed: bool,
     /// One byte read from the inner reader past the current chunk
     /// boundary. `Some(b)` means the previous fill confirmed more
@@ -361,24 +359,19 @@ impl<R: Read> DecryptReader<R> {
     /// reader still surfaces [`StreamError::ExtraData`] →
     /// [`CryptoError::ExtraDataAfterPayload`].
     fn fill_buffer(&mut self) -> io::Result<()> {
-        // Wrap the refill in an inner result so every error path —
-        // explicit `return Err` and `?`-propagated alike — funnels
-        // through a single fail-closed step before bubbling out. Any
-        // error escaping `fill_buffer_inner` is terminal (`Interrupted`
-        // is retried inside `read_uninterrupted`): zeroize the buffered
-        // plaintext, drop the cipher state and the lookahead byte, and
-        // mark the reader failed so a later `read()` call rejects with
-        // `StateExhausted` instead of consuming further ciphertext at a
-        // STREAM position the failed chunk never advanced.
+        // Route every refill error through one terminal cleanup path.
+        // `Interrupted` is retried inside `read_uninterrupted`; any
+        // other error clears buffered plaintext, cipher state, and
+        // lookahead, then prevents later reads from consuming input.
         let result = self.fill_buffer_inner();
         if result.is_err() {
             self.failed = true;
             self.decryptor = None;
             self.lookahead = None;
             self.chunk.zeroize();
-            // Second layer behind the `failed` gate: with `pos` left at
-            // the end of the (now-empty) chunk, even a direct buffer
-            // access finds no stale bytes to copy.
+            // Keep the cursor at the end of the cleared buffer so no
+            // stale bytes can be copied even if the failed-state check
+            // is bypassed by future internal changes.
             self.pos = self.chunk.len();
         }
         result
@@ -499,10 +492,9 @@ impl<R: Read> Read for DecryptReader<R> {
             return Ok(0);
         }
 
-        // A prior refill error poisoned this reader; fail closed
-        // instead of resuming the stream. Checked before the `done`
-        // branch so a stream that failed after its final chunk (e.g.
-        // trailing data) reports the poison, not a clean EOF.
+        // After a refill error, reject before the `done` check. This
+        // ensures that an error found after the final chunk, such as
+        // trailing data, cannot become a clean end-of-file result.
         if self.failed {
             return Err(stream_io_error(
                 io::ErrorKind::Other,
@@ -1131,13 +1123,9 @@ mod tests {
         assert_eq!(out.as_slice(), &plaintext[..BUFFER_SIZE]);
     }
 
-    /// Single-chunk plaintext + a pathological reader that triggers
-    /// `ExtraData`: the chunk's authenticated plaintext sits in
-    /// `self.chunk` when the trailing-data probe fails, and `done` is
-    /// already `true`. A caller that retries `read()` must get the
-    /// poisoned-reader rejection — never the tainted plaintext, and
-    /// never a clean `Ok(0)` EOF that would let the caller treat the
-    /// bytes collected so far as a complete stream.
+    /// If a trailing-data check fails after a single final chunk was
+    /// authenticated, a later read must return `StateExhausted`. It must not
+    /// return the buffered plaintext or a clean end-of-file result.
     #[test]
     fn streaming_aead_no_plaintext_after_err_retry() {
         // 500 bytes is well under BUFFER_SIZE, so the whole plaintext
@@ -1164,38 +1152,33 @@ mod tests {
             "expected StreamError::ExtraData, got {marker:?}"
         );
 
-        // Retry after Err: the reader is poisoned — the zeroized chunk
-        // has nothing to serve, and the rejection must be an error, not
-        // a clean EOF.
+        // A later read must return an error. The cleared buffer must
+        // not expose plaintext, and the failed stream must not appear
+        // to end cleanly.
         assert_poisoned_read(&mut reader);
     }
 
-    /// Asserts `read` on a poisoned reader rejects with the
-    /// `StateExhausted` marker. Shared by the poison regressions in
-    /// this module.
+    /// Verifies that reading after a terminal error returns the
+    /// `StateExhausted` marker.
     fn assert_poisoned_read<R: Read>(reader: &mut DecryptReader<R>) {
         let mut scratch = [0u8; 64];
         let err = reader
             .read(&mut scratch)
-            .expect_err("expected poisoned-reader rejection");
+            .expect_err("expected terminal-state rejection");
         let marker = err
             .get_ref()
             .and_then(|inner| inner.downcast_ref::<StreamError>());
         assert!(
             matches!(marker, Some(StreamError::StateExhausted)),
-            "expected StateExhausted from a poisoned reader, got {marker:?}"
+            "expected StateExhausted after a terminal error, got {marker:?}"
         );
     }
 
-    /// A non-final chunk that fails AEAD must poison the reader: a
-    /// caller that retries `read()` afterwards gets the poisoned-reader
-    /// rejection, not plaintext. The input is crafted so that a reader
-    /// which resumed instead WOULD produce plaintext: one garbage
-    /// full-size chunk followed by a complete valid single-chunk stream
-    /// under the same key and nonce. Resuming consumes that tail at the
-    /// still-unadvanced counter 0, where `decrypt_last_in_place`
-    /// authenticates it — serving an attacker-arranged plaintext after
-    /// a rejected chunk.
+    /// A non-final chunk that fails authentication makes the reader
+    /// permanently unusable. The ciphertext is arranged as one invalid
+    /// full-size chunk followed by a valid single-chunk stream under the same
+    /// key and nonce. If the reader resumed at counter zero, it would accept
+    /// and return plaintext from that tail.
     #[test]
     fn streaming_aead_read_after_nonfinal_aead_error_fails_closed() {
         let tail_plaintext = b"attacker-arranged tail plaintext";
@@ -1219,7 +1202,7 @@ mod tests {
             "no plaintext should be served from the garbage chunk"
         );
 
-        // The poison must hold across repeated retries.
+        // The terminal state must remain unchanged across retries.
         assert_poisoned_read(&mut reader);
         assert_poisoned_read(&mut reader);
     }
@@ -1238,11 +1221,8 @@ mod tests {
         }
     }
 
-    /// A chunk-count rejection must poison the reader: retrying
-    /// `read()` afterwards gets the poisoned-reader rejection without
-    /// touching the input. A reader that re-entered the refill instead
-    /// would consume one further ciphertext chunk from the input per
-    /// retry.
+    /// A chunk-count failure makes the reader permanently unusable. Later
+    /// reads must return `StateExhausted` without reading more ciphertext.
     #[test]
     fn streaming_aead_read_after_cap_error_fails_closed_without_input_io() {
         let plaintext: Vec<u8> = (0..(BUFFER_SIZE * 2)).map(|i| (i % 251) as u8).collect();
@@ -1271,13 +1251,12 @@ mod tests {
         assert_poisoned_read(&mut reader);
         assert_eq!(
             reader.input.reads, reads_at_failure,
-            "a poisoned read must not touch the input"
+            "a read after a terminal error must not touch the input"
         );
     }
 
-    /// Reader that serves a fixed prefix of bytes and then fails every
-    /// further `read` with a plain (marker-free) I/O error, modeling an
-    /// input that goes bad mid-stream.
+    /// Reader that returns a fixed prefix and then fails every later read with
+    /// an unmarked I/O error. It models an input source that fails mid-stream.
     struct FailAfterPrefixReader<'a> {
         data: &'a [u8],
         pos: usize,
@@ -1296,11 +1275,10 @@ mod tests {
         }
     }
 
-    /// A plain I/O failure from the inner reader must poison the
-    /// reader the same way cryptographic rejections do: the first
-    /// `read()` surfaces the environmental error unchanged (no
-    /// `StreamError` marker), and every retry gets the poisoned-reader
-    /// rejection instead of re-entering the refill misaligned.
+    /// An I/O failure from the underlying reader is also terminal. The first
+    /// failing read returns the original unmarked error; later reads return
+    /// `StateExhausted` instead of attempting to resume at an uncertain stream
+    /// position.
     #[test]
     fn streaming_aead_read_after_io_error_fails_closed() {
         let plaintext: Vec<u8> = (0..(BUFFER_SIZE * 2)).map(|i| (i % 251) as u8).collect();
@@ -1326,8 +1304,8 @@ mod tests {
                 .is_none_or(|inner| inner.downcast_ref::<StreamError>().is_none()),
             "environmental I/O errors must propagate without a StreamError marker"
         );
-        // The first chunk authenticated cleanly and was served before
-        // the input failed inside the second chunk.
+        // The first chunk completed before the input failed while the
+        // second chunk was being read.
         assert_eq!(out.as_slice(), &plaintext[..BUFFER_SIZE]);
 
         assert_poisoned_read(&mut reader);

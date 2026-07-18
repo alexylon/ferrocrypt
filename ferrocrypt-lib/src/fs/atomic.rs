@@ -26,12 +26,11 @@
 //!   Windows / other non-Linux/macOS targets; Linux and macOS decrypt
 //!   promotion is handle-relative in `archive::platform`.
 //!
-//! Two durability helpers back these primitives: [`sync_file_durable`]
-//! flushes staged file content before promotion, and [`sync_dir_durable`]
-//! flushes a directory's entries and reports failure to the caller — the
-//! required barrier key generation runs after each of its two key-file
-//! commits. The best-effort [`sync_parent_dir`] remains for outputs whose
-//! loss is recoverable.
+//! Two durability helpers support these operations. [`sync_file_durable`]
+//! flushes staged file contents before promotion. [`sync_dir_durable`] flushes
+//! directory entries and reports failures; key generation calls it after each
+//! key-file commit. [`sync_parent_dir`] remains best-effort for outputs whose
+//! loss can be recovered.
 //!
 //! **Zero in-repo unsafe.** The file cases delegate entirely to
 //! `tempfile`, which is atomic-no-replace on Windows (`MoveFileExW`
@@ -61,8 +60,8 @@ use crate::fs::paths::already_exists_error;
 /// - returning an error after the final path is visible would be more
 ///   confusing to callers than helpful
 ///
-/// A caller whose contract depends on the flush uses
-/// [`sync_dir_durable`] instead, which reports failure.
+/// Callers that require directory-flush failures to be reported use
+/// [`sync_dir_durable`] instead.
 #[cfg(unix)]
 fn sync_parent_dir(path: &Path) {
     if let Ok(dir) = std::fs::File::open(crate::fs::paths::parent_or_cwd(path)) {
@@ -202,27 +201,23 @@ pub(crate) fn sync_file_durable(file: &std::fs::File) -> io::Result<()> {
     }
 }
 
-/// Flushes the directory entries of `dir` to stable storage and
-/// reports failure. Syncing a file makes its content durable but not
-/// the directory entry that names it; a rename or removal inside `dir`
-/// survives power loss only once the directory itself is flushed.
+/// Flushes the directory entries in `dir` to stable storage and reports
+/// failures. Flushing a file makes its contents durable, but not the directory
+/// entry that names it. A rename or removal is durable only after the
+/// directory is flushed.
 ///
-/// Unlike [`sync_parent_dir`], a genuine flush failure (an I/O error
-/// from a failing device, a vanished or replaced directory) returns
-/// `Err`, so a caller whose guarantee depends on the barrier can stop
-/// instead of continuing on an unflushed directory. Errors that mean
-/// the filesystem cannot open or flush a directory at all
-/// ([`dir_sync_unsupported`]) return `Ok`: no directory-durability
-/// barrier exists on such filesystems, and the caller's power-loss
-/// guarantee narrows to process interruption there. Key generation's
-/// key-file commit is the consumer with that contract.
+/// Unlike [`sync_parent_dir`], this function returns genuine open or flush
+/// failures so callers can stop when durability is required. If the filesystem
+/// does not support directory flushing, [`dir_sync_unsupported`] treats that
+/// condition as success because no stronger operation is available. In that
+/// case, protection from power loss depends on the filesystem; key generation
+/// still retains its private-first protection against process interruption.
 #[cfg(unix)]
 pub(crate) fn sync_dir_durable(dir: &Path) -> io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
 
-    // `O_DIRECTORY` refuses anything that is not a directory at open
-    // time, so a regular file at `dir` reports `NotADirectory` instead
-    // of being silently flushed as a file.
+    // `O_DIRECTORY` ensures that `dir` is a directory. A regular file
+    // therefore returns `NotADirectory` instead of being flushed.
     let handle = match std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY)
@@ -232,12 +227,9 @@ pub(crate) fn sync_dir_durable(dir: &Path) -> io::Result<()> {
         Err(e) if dir_sync_unsupported(&e) => return Ok(()),
         Err(e) => return Err(e),
     };
-    // Same tier order as `sync_file_durable` — `sync_all` first (on
-    // macOS it issues `F_FULLFSYNC`), plain `fsync(2)` second — but
-    // with the wider directory trigger: drivers refuse directory
-    // flushes with a wider errno set than the file case, and only
-    // when the plain `fsync` is also refused does the barrier count
-    // as unavailable.
+    // Match `sync_file_durable`: try `sync_all` first, then plain
+    // `fsync` where supported. Directory flushing has a wider set of
+    // unsupported errors than file flushing.
     match handle.sync_all() {
         Ok(()) => Ok(()),
         #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -258,12 +250,10 @@ pub(crate) fn sync_dir_durable(dir: &Path) -> io::Result<()> {
     }
 }
 
-/// Windows arm of [`sync_dir_durable`]. A directory handle needs the
-/// backup-semantics flag to open at all, and `sync_all`
-/// (`FlushFileBuffers`) requires write access, so the handle requests
-/// both. The explicit regular-directory check mirrors the `O_DIRECTORY`
-/// rejection on Unix: a non-directory at `dir` is a real error, never
-/// silently flushed as a file.
+/// Windows implementation of [`sync_dir_durable`]. Opening a directory
+/// requires the backup-semantics flag, and `FlushFileBuffers` requires write
+/// access. The metadata check rejects a non-directory path, matching the Unix
+/// `O_DIRECTORY` behavior.
 #[cfg(windows)]
 pub(crate) fn sync_dir_durable(dir: &Path) -> io::Result<()> {
     use std::os::windows::fs::OpenOptionsExt;
@@ -294,21 +284,15 @@ pub(crate) fn sync_dir_durable(dir: &Path) -> io::Result<()> {
     }
 }
 
-/// Whether a directory open-for-flush or directory flush failed
-/// because the filesystem cannot provide a directory-durability
-/// barrier at all, as opposed to a genuine failure of a supported
-/// flush.
+/// Returns whether a directory open or flush failed because the filesystem
+/// does not provide directory flushing, rather than because a supported
+/// operation failed.
 ///
-/// - [`errno_not_supported`] covers `ENOTSUP` / `EOPNOTSUPP` /
-///   `ENOSYS` and synthesized [`io::ErrorKind::Unsupported`] errors —
-///   drivers that reject directory synchronization outright.
-/// - `EINVAL` and `EBADF` are the errors POSIX-family filesystems
-///   (several network and FUSE drivers among them) return for an
-///   `fsync` on a directory descriptor they cannot flush.
-/// - `EACCES` covers write-only directories (mode `0o3xx` drop
-///   boxes): entries can be created and renamed there, but a
-///   directory can be flushed only through a read handle, which such
-///   a directory refuses to open.
+/// - [`errno_not_supported`] covers unsupported-operation errors.
+/// - `EINVAL` and `EBADF` are returned by some network and FUSE filesystems
+///   when directory `fsync` is unavailable.
+/// - `EACCES` covers write-only directories, which allow entry creation but
+///   cannot be opened for the read handle required by directory flushing.
 #[cfg(unix)]
 fn dir_sync_unsupported(e: &io::Error) -> bool {
     errno_not_supported(e)
@@ -318,12 +302,11 @@ fn dir_sync_unsupported(e: &io::Error) -> bool {
         )
 }
 
-/// Windows twin of the Unix classification. `ERROR_INVALID_FUNCTION`
-/// and `ERROR_NOT_SUPPORTED` are how non-NTFS volumes and network
-/// redirectors report a `FlushFileBuffers` the driver cannot perform;
-/// `ERROR_INVALID_PARAMETER` is the `EINVAL` analog. Permission-denied
-/// covers volumes and ACLs that refuse the write-access directory
-/// handle a flush requires.
+/// Windows equivalent of the Unix classification.
+/// `ERROR_INVALID_FUNCTION`, `ERROR_NOT_SUPPORTED`, and
+/// `ERROR_INVALID_PARAMETER` indicate that the volume or network provider
+/// cannot flush directory entries. Permission denied covers a directory that
+/// cannot be opened with the write access required by `FlushFileBuffers`.
 #[cfg(windows)]
 fn dir_sync_unsupported(e: &io::Error) -> bool {
     const ERROR_INVALID_FUNCTION: i32 = 1;
@@ -621,9 +604,8 @@ mod tests {
         sync_file_durable(&file).unwrap();
     }
 
-    /// On a filesystem with directory-sync support the barrier
-    /// succeeds on an ordinary directory, including one that just
-    /// received a new entry.
+    /// Flushing an ordinary directory succeeds when the filesystem supports
+    /// directory synchronization, including after a new entry is created.
     #[test]
     fn sync_dir_durable_succeeds_on_regular_directory() {
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -631,39 +613,38 @@ mod tests {
         sync_dir_durable(tmp_dir.path()).unwrap();
     }
 
-    /// A directory that no longer exists is a genuine failure, not a
-    /// capability gap: the barrier caller must learn that the
-    /// directory it renamed into has vanished.
+    /// A missing directory is a real failure, not an unsupported operation.
+    /// The caller must be told that the target directory has disappeared.
     #[test]
     fn sync_dir_durable_reports_missing_directory() {
         let tmp_dir = tempfile::TempDir::new().unwrap();
         let gone = tmp_dir.path().join("vanished");
-        let err = sync_dir_durable(&gone).expect_err("missing directory must fail the barrier");
+        let err =
+            sync_dir_durable(&gone).expect_err("missing directory must fail the directory flush");
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
-    /// A regular file at the directory path is a genuine failure: the
-    /// barrier must refuse to flush a non-directory as if it were the
-    /// output directory.
+    /// A regular file at the supplied path is an error. The function must not
+    /// treat it as the directory whose entries should be flushed.
     #[test]
     fn sync_dir_durable_rejects_regular_file() {
         let tmp_dir = tempfile::TempDir::new().unwrap();
         let file_path = tmp_dir.path().join("not-a-directory");
         fs::write(&file_path, b"bytes").unwrap();
-        let err = sync_dir_durable(&file_path).expect_err("regular file must fail the barrier");
+        let err =
+            sync_dir_durable(&file_path).expect_err("regular file must fail the directory flush");
         assert_eq!(err.kind(), io::ErrorKind::NotADirectory);
     }
 
-    /// The capability classification treats only cannot-flush-a-
-    /// directory errors as barrier-unavailable; everything else —
-    /// device I/O errors above all — must propagate to the caller.
+    /// Only errors that mean directory flushing is unavailable are treated as
+    /// unsupported. Device I/O errors and path errors must remain failures.
     #[cfg(unix)]
     #[test]
     fn dir_sync_unsupported_classifies_unix_errnos() {
         for unavailable in [libc::ENOTSUP, libc::EINVAL, libc::EBADF, libc::EACCES] {
             assert!(
                 dir_sync_unsupported(&io::Error::from_raw_os_error(unavailable)),
-                "errno {unavailable} must classify as barrier-unavailable"
+                "errno {unavailable} must classify as directory-flush unsupported"
             );
         }
         assert!(dir_sync_unsupported(&io::Error::new(
@@ -678,7 +659,7 @@ mod tests {
         }
     }
 
-    /// Windows twin of the errno classification test.
+    /// Windows counterpart to the Unix error-classification test.
     #[cfg(windows)]
     #[test]
     fn dir_sync_unsupported_classifies_windows_errors() {
@@ -687,7 +668,7 @@ mod tests {
         for unavailable in [1, 50, 87, 5] {
             assert!(
                 dir_sync_unsupported(&io::Error::from_raw_os_error(unavailable)),
-                "code {unavailable} must classify as barrier-unavailable"
+                "code {unavailable} must classify as directory-flush unsupported"
             );
         }
         // ERROR_FILE_NOT_FOUND and ERROR_IO_DEVICE stay genuine.

@@ -98,12 +98,10 @@ fn unarchive_inner<R: Read>(
     let header = parse_fca_header(&mut reader, limits)?;
 
     // §9.11 steps 2–3: read exactly `archive_ext_len` bytes and validate
-    // the archive-level TLV region under the no-known-critical policy.
-    // v1 defines no archive-level TLV tags; v1 writers emit
-    // `archive_ext_len = 0`, so this is normally a zero-length read,
-    // but a v1.x writer may legitimately emit ignorable tags. A payload
-    // that ends before the declared region is complete rejects through
-    // `read_exact_fca` as a malformed archive, not an I/O failure.
+    // the archive-level extension region. It is normally empty in v1, but a
+    // later compatible writer may include optional tags. If authenticated
+    // data ends before the declared region, report a malformed archive rather
+    // than an I/O error.
     let archive_ext_len = require_fits_usize(header.archive_ext_len, "Archive extension length")?;
     let mut archive_ext_bytes = vec![0u8; archive_ext_len];
     read_exact_fca(
@@ -1102,12 +1100,9 @@ mod tests {
 
     // -- Declared-region truncation (FORMAT.md §9.1) -----------------------
 
-    /// A payload that ends before the declared `archive_ext` region is
-    /// complete rejects as a malformed archive — the declared §9.1
-    /// layout was violated — never as an environmental I/O failure.
-    /// Loops every cut point inside the region and asserts the typed
-    /// reason plus the no-output invariant (the read precedes any
-    /// filesystem staging).
+    /// If the authenticated payload ends within the declared `archive_ext`
+    /// region, every cut point returns the region-specific malformed-archive
+    /// error and creates no filesystem output.
     #[test]
     fn rejects_truncated_archive_ext_region_at_every_byte() {
         use crate::archive::format::FCA_HEADER_SIZE;
@@ -1137,11 +1132,9 @@ mod tests {
         }
     }
 
-    /// Manifest-region counterpart of
-    /// [`rejects_truncated_archive_ext_region_at_every_byte`]: a
-    /// payload that ends before the declared `manifest_len` bytes are
-    /// complete rejects with the manifest-region truncation reason at
-    /// every cut point, with no filesystem output.
+    /// If the authenticated payload ends within the declared manifest region,
+    /// every cut point returns the manifest-specific malformed-archive error
+    /// and creates no filesystem output.
     #[test]
     fn rejects_truncated_manifest_region_at_every_byte() {
         use crate::archive::format::FCA_HEADER_SIZE;
@@ -1751,19 +1744,16 @@ mod tests {
         );
     }
 
-    /// FIFO substituted at the renamed root between the promotion
-    /// rename and `apply_root_file_mode`: the chmod step must reject
-    /// via `open_file_nofollow`'s regular-file post-check — and must
-    /// not block inside `open(2)` waiting for a FIFO writer (the test
-    /// finishing at all proves that). Inject the post-rename state
-    /// directly (deterministic test of the same race the multithreaded
-    /// path would observe).
+    /// A FIFO substituted at the promoted root must be rejected before the
+    /// final permission update, without waiting for a FIFO writer. The test
+    /// creates the post-promotion state directly to exercise the same open and
+    /// type checks deterministically.
     #[cfg(unix)]
     #[test]
     fn apply_root_file_mode_rejects_fifo_at_renamed_root() {
         let tmp = tempfile::TempDir::new().unwrap();
 
-        // FIFO at the position the renamed root would have.
+        // Place a FIFO where the promoted root file would be.
         crate::fs::paths::make_fifo(&tmp.path().join("hello.txt"));
 
         let manifest = single_file_manifest("hello.txt", b"x");

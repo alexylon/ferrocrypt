@@ -244,7 +244,7 @@ During decryption, `protocol.rs` coordinates:
 11. staged output finalization;
 12. progress event emission.
 
-Decryption stages 1–4 are packaged as the crate-internal `DecryptSession`: one opened input handle plus its parsed header and classified recipient mode. The remaining stages consume the session and decrypt from that same handle, so the bytes that passed the structural checks are the bytes that are decrypted. `PrivateKeyDecryptor::decrypt` opens the session before the `private.key` unlock and decrypts through it afterwards, because a path re-resolved after the unlock could name a swapped file the checks never saw.
+Decryption stages 1–4 are represented by the crate-internal `DecryptSession`, which contains one opened input file, its parsed header, and its classified recipient mode. Later stages consume the session and continue reading from the same file. `PrivateKeyDecryptor::decrypt` creates the session before unlocking `private.key`, so replacing the input path during the unlock cannot change the file being decrypted.
 
 `protocol.rs` defines the internal recipient-scheme abstraction boundary:
 
@@ -468,10 +468,9 @@ It contains:
 - payload decryptor reader/writer adapters;
 - trailing-data detection;
 - truncation detection;
-- terminal-error poisoning: any error escaping either adapter is final — the
-  adapter drops its cipher state and every later use fails closed
-  (`StateExhausted`) instead of resuming mid-stream (`FORMAT.md` §5's
-  terminal-rejection rule).
+- terminal error handling: after either adapter returns an error, it drops its
+  cipher state and every later operation returns `StateExhausted`. The adapter
+  never resumes a rejected stream (`FORMAT.md` §5).
 
 Payload streaming uses `PayloadKey`. It does not know about recipient schemes, key files, archive paths, or output finalization.
 
@@ -518,7 +517,7 @@ It contains:
 
 - `RecipientEntry` for parsed entries;
 - `RecipientBody` for scheme body bytes plus type name;
-- canonical recipient-entry serialization. Production code uses `RecipientEntry::to_bytes_checked`, whose validation half is `RecipientEntry::checked_wire_len` — the single writer-side rule set matching `parse_one` (`validate_type_name_grammar`, reserved-flag bits, `body.len() <= BODY_LEN_MAX`), which also returns the entry's exact on-wire byte length without serialising. `container::build_encrypted_header` sums `checked_wire_len` per entry to gate the aggregate header length against `HEADER_LEN_MAX` before buffering any entry bytes, then routes serialisation through `to_bytes_checked`, so an entry the matching reader would reject cannot be serialised and an over-cap entry list rejects before allocation. The infallible `to_bytes` is gated `#[cfg(test)]` and used only by tests that intentionally produce out-of-spec bytes.
+- canonical recipient-entry serialization. `RecipientEntry::checked_wire_len` applies the writer-side rules that correspond to `parse_one` (`validate_type_name_grammar`, reserved flag bits, and `body.len() <= BODY_LEN_MAX`) and returns the exact encoded length. `container::build_encrypted_header` uses these lengths to enforce `HEADER_LEN_MAX` before allocating the combined recipient buffer, then serializes each entry through `RecipientEntry::to_bytes_checked`. The test-only `to_bytes` remains available for tests that intentionally create invalid bytes.
 - strict framing parsing;
 - unknown-body opacity.
 
@@ -732,7 +731,7 @@ It contains:
 - header parse/build (`parse_fca_header` / `write_fca_header`);
 - manifest serialize/parse (`checked_manifest_len` / `serialize_manifest` / `parse_manifest_bytes`);
 - `copy_exact_n`, the shared exact-size byte copier used by both encode (source file → encrypted stream) and decode (encrypted stream → output file);
-- `read_exact_fca`, the exact-read helper for declared FCA regions: a payload that ends cleanly before a declared region is complete rejects as `MalformedArchive` naming the truncated region (`FORMAT.md` §9.1: each region is exactly its declared length), while embedded payload-stream markers and genuine I/O failures keep their own classification. Used by `parse_fca_header` for the fixed header and by `archive/decode.rs` for the `archive_ext` and manifest regions.
+- `read_exact_fca`, which reads declared FCA regions exactly. If authenticated FCA data ends before a region is complete, it returns `MalformedArchive` and names the region. Payload-stream errors and filesystem I/O errors retain their existing classifications. `parse_fca_header` uses it for the fixed header, and `archive/decode.rs` uses it for the `archive_ext` and manifest regions.
 
 `checked_manifest_len` runs BEFORE allocation: an over-cap manifest is rejected without growing a `Vec` first. `parse_manifest_bytes` calls `validate_fca_path` and `validate_manifest_tree` so a successfully-parsed `Manifest` is fully validated.
 
@@ -815,7 +814,7 @@ Order-independent (HashMap-based parent lookup), so non-canonical manifest order
 
 `archive/encode.rs` owns the FCA writer: source-tree traversal (metadata pass) and content-streaming pass.
 
-The two passes are exposed as two crate-internal phases. `prepare_archive` runs the complete metadata pass — input validation, source-tree walk, tree validation, manifest serialization, every writer-side cap — and returns a `PreparedArchive` holding the manifest, its serialized bytes, and the retained source handle. `PreparedArchive::write_to` emits the FCA header, manifest, and file contents into the payload writer. The orchestrator MUST run `prepare_archive` before any cipher work and before the ciphertext staging file is created, because output staged inside the input tree must never be discovered as source content. Entries that appear under the source root after the prepare phase are not part of the archive. The one-call `archive` composition of both phases is compiled only for tests and the `fuzzing` feature.
+The writer has two crate-internal phases. `prepare_archive` performs input validation, source-tree traversal, tree validation, manifest serialization, and all writer-side limit checks. It returns a `PreparedArchive` containing the manifest, its serialized bytes, and the retained source file or directory handle. `PreparedArchive::write_to` writes the FCA header, manifest, and file contents. The orchestrator MUST call `prepare_archive` before cipher work and before creating the ciphertext staging file, so output placed inside the input tree cannot be included as source content. Entries created after preparation are not part of the archive. The one-call `archive` helper is compiled only for tests and the `fuzzing` feature.
 
 It rejects:
 
@@ -875,7 +874,7 @@ It contains:
 - `ensure_dir`, `mkdir_strict`, `walk_to_parent`, `open_dir_at_rel`, `open_child_dir_nofollow` (the shared single-step open, also used by the writer's source-root open) — every directory open routed through `cap_fs_ext::DirExt::open_dir_nofollow`;
 - `finalize_dir_open` — Windows-only `FILE_ATTRIBUTE_REPARSE_POINT` post-check called after every successful directory open, so junctions / mount points fail closed (cap-fs-ext alone refuses entries where `is_symlink()` is true, but `is_symlink()` returns `false` for junctions — the bitmask post-check is what catches them);
 - `create_file_at` — `OpenOptions::create_new(true)` plus `OpenOptionsFollowExt::follow(FollowSymlinks::No)` for atomic O_EXCL-style create that refuses every leaf symlink, dangling or live;
-- `open_file_nofollow` + `finalize_file_open` — the no-follow regular-file reopen used by the post-promotion root-file chmod (`decode::apply_root_file_mode`, `FORMAT.md` §9.11 step 16). Opens non-blocking on Unix so a FIFO substituted at the promoted name cannot block the process inside `open(2)`, then requires a regular file on the opened handle (plus the Windows reparse-point post-check), so special-file and directory substitutions fail closed;
+- `open_file_nofollow` + `finalize_file_open` — reopens the promoted root file without following symlinks and verifies that the opened object is a regular file (`decode::apply_root_file_mode`, `FORMAT.md` §9.11 step 16). On Unix the open is non-blocking, so a substituted FIFO cannot wait for a writer. The Windows reparse-point check also applies;
 - `chmod_file_handle`, `chmod_dir_handle` — handle-based permission application; never path-based, so a substituted symlink between extract and chmod cannot redirect the operation. Special bits are stripped via `super::PERMISSION_BITS_MASK`;
 - `rename_at_no_clobber` (Linux/macOS) — handle-relative `renameat(dir, …, dir, …, RENAME_NOREPLACE)` via `rustix`, used by the decrypt promotion (`FORMAT.md` §9.11 step 15) so the `{root}.incomplete` → final-name commit is anchored to the same `output_dir` handle as extraction; a swap of the `output_dir` path mid-run cannot redirect it. On a filesystem whose driver refuses the no-replace flag outright (`fs/atomic.rs::no_replace_rename_unsupported`; the macOS exFAT driver among them) it dispatches to `rename_at_no_clobber_via_claim`, which atomically claims the final name through the same handle (`create_file_at` for a file root, owner-only `mkdir` for a directory root) and renames the staged root over its own claim — no-clobber against pre-existing entries stays unconditional, and both steps stay handle-relative. Windows and other-target promotion stays path-based in `fs/atomic.rs`, because a handle-relative no-replace rename on Windows needs an `unsafe` Win32 call the crate forbids;
 - `INITIAL_FILE_CREATE_MODE` — restrictive `0o600` initial mode applied at create time on Unix. Descendant files are chmod'd to the manifest mode after the payload is written (inside the 0o700 staged root). Single-file roots stay at `0o600` throughout staging and across the rename, with the manifest mode applied post-rename via `decode::apply_root_file_mode` so a wider final mode is never briefly visible. Effective on Unix only; ignored on Windows.
@@ -929,21 +928,7 @@ It contains:
   (`errno_not_supported`; macOS smbfs among them). The extraction-side
   twin for `cap_std::fs::File` handles lives in `archive/platform.rs`;
   the two share the fallback condition;
-- required directory-entry durability: `sync_dir_durable` opens a
-  directory (`O_DIRECTORY` read handle on Unix; backup-semantics write
-  handle on Windows, because `FlushFileBuffers` needs write access)
-  and flushes its entries with the same strongest-first tier as
-  `sync_file_durable`, but returns flush failures to the caller
-  instead of swallowing them, because syncing a file does not make the
-  directory entry naming it durable. Only errors meaning the
-  filesystem cannot open or flush a directory at all count as success
-  (`dir_sync_unsupported`: unsupported-operation errnos, the
-  `EINVAL`/`EBADF` directory-fsync refusals, and access-denied for
-  write-only directories); no barrier exists there and the caller's
-  power-loss guarantee narrows to process interruption. Key
-  generation's key-file commit is the consumer; the best-effort
-  `sync_parent_dir` remains for outputs whose loss is recoverable
-  (encryption output, decrypt promotion);
+- required directory-entry flushing: `sync_dir_durable` opens and flushes a directory, returning genuine failures to the caller. Unix uses an `O_DIRECTORY` read handle; Windows uses a backup-semantics write handle because `FlushFileBuffers` requires write access. Filesystems that cannot flush directories are treated as unsupported, which limits the caller's guarantee to process interruption. Key generation uses this helper after each key-file commit. `sync_parent_dir` remains the best-effort helper for recoverable outputs such as encrypted files and promoted decrypted outputs;
 - cleanup on encryption failure;
 - `.incomplete` behavior on decryption failure.
 
@@ -1141,7 +1126,7 @@ Ownership split:
 
 - X25519 key generation lives in `recipient/native/x25519.rs`.
 - Key serialization lives in `key/`.
-- Key-file staging lives in `protocol.rs` key generation, through the atomic-output helpers in `fs/`. Both key files are staged and synced before either is committed to its final name, `private.key` commits first, and the output directory is flushed (`fs/atomic.rs::sync_dir_durable`) after each commit, because an interruption — process death or power loss — must not leave `public.key` on disk without its matching `private.key`. A genuine flush failure aborts the commit and rolls back what was committed; after the `public.key` commit it removes `public.key` only, keeping `private.key`, because un-flushed removals may persist in either order and removing both could resurrect the orphaned-`public.key` state. On filesystems that cannot flush a directory at all the guarantee narrows to process interruption.
+- Key-file staging lives in `protocol.rs` key generation and uses the atomic-output helpers in `fs/`. Both files are staged and synced before either is committed. `private.key` is committed first, and the output directory is flushed after each commit through `fs/atomic.rs::sync_dir_durable`. A failed final directory flush removes `public.key` but keeps `private.key`, because removing both without a working directory flush could leave only `public.key` behind after power loss. Filesystems that cannot flush directories retain protection against process interruption but cannot provide the same power-loss guarantee.
 
 `KeyPairGenerator` mirrors `Encryptor`'s reader-aligned cap rule for the passphrase that seals `private.key`: `kdf_params.mem_cost <= kdf_limit.max_mem_cost_kib` (default 1 GiB) is enforced at `write` time before Argon2id runs. Above-default `mem_cost` rejects with `CryptoError::KdfResourceCapExceeded`; the unlocking [`PrivateKeyDecryptor`] must be configured via [`PrivateKeyDecryptor::kdf_limit`] with a matching [`KdfLimit`].
 

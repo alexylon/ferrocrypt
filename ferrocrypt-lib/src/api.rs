@@ -712,15 +712,11 @@ impl PrivateKeyDecryptor {
         let header_read_limits = self.header_read_limits.unwrap_or_default();
         let incomplete_output_policy = self.incomplete_output_policy.unwrap_or_default();
 
-        // Open, structurally parse, and classify the encrypted file
-        // ONCE, before the private-key unlock, and keep the session for
-        // the decryption itself. `STRUCTURE.md` §12 / `FORMAT.md` §3.7
-        // require structural rejection before any KDF work fires — a
-        // path race between `Decryptor::open` and `decrypt` could swap
-        // in a malformed or passphrase-mode file — and holding one
-        // handle ties the bytes those checks approved to the bytes
-        // that are decrypted: a file swapped in at this path while
-        // Argon2id runs is never read.
+        // Open and classify the encrypted file before unlocking the
+        // private key, then retain that open file for decryption.
+        // Structural errors must be reported before Argon2id starts.
+        // Keeping one file open also prevents a path replacement during
+        // the unlock from changing which bytes are decrypted.
         let session = protocol::DecryptSession::open(&self.input, header_read_limits)?;
         if session.mode() != UnauthenticatedRecipientMode::PublicKey {
             return Err(CryptoError::DecryptorModeMismatch {
@@ -839,30 +835,26 @@ impl KeyPairGenerator {
     /// Generates the X25519 key pair and writes `private.key` +
     /// `public.key` into `output_dir`.
     ///
-    /// Both files are fully written and synced before either appears
-    /// under its final name, `private.key` is committed first, and the
-    /// output directory is flushed to stable storage after each
-    /// commit, so an interruption (crash, kill, power loss) cannot
-    /// leave a usable `public.key` behind without its matching
-    /// `private.key`. On success, both key files and the directory
-    /// entries naming them have reached stable storage. A filesystem
-    /// that reports directory flushing as unsupported provides no such
-    /// barrier; there the power-loss half of this guarantee depends on
-    /// the filesystem's own ordering, while the process-interruption
-    /// half is unaffected.
+    /// Both files are written and synced before either receives its final
+    /// name. `private.key` is committed first, and the output directory is
+    /// flushed after each commit. This order prevents process interruption
+    /// from leaving a usable `public.key` without its matching `private.key`.
+    ///
+    /// On filesystems that support directory flushing, the same guarantee
+    /// covers power loss, and a successful return means the two files and
+    /// their directory entries have reached stable storage. Other filesystems
+    /// depend on their own ordering after power loss.
     ///
     /// # Errors
     ///
     /// Returns [`CryptoError::InvalidInput`] if the passphrase is empty, KDF
     /// parameters are outside the accepted writer policy, or either key file
     /// already exists. Returns [`CryptoError::Io`] for filesystem failures,
-    /// including a genuine directory-flush failure. A failed generation
-    /// removes the key files it already committed, with one deliberate
-    /// exception: if the flush after the `public.key` commit fails, only
-    /// `public.key` is removed, because removing `private.key` without a
-    /// durable record of the `public.key` removal could leave exactly the
-    /// orphaned-`public.key` state this ordering exists to prevent. A
-    /// leftover `private.key` is harmless and safe to delete.
+    /// including a directory flush failure. If the flush after committing
+    /// `public.key` fails, the method removes `public.key` but keeps
+    /// `private.key`. Removing both without a successful directory flush could
+    /// leave only the public key after power loss. A remaining `private.key`
+    /// is safe to delete.
     pub fn write(
         self,
         output_dir: impl AsRef<Path>,

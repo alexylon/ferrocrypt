@@ -731,7 +731,8 @@ It contains:
 - big-endian integer helpers used by both header and manifest serialization;
 - header parse/build (`parse_fca_header` / `write_fca_header`);
 - manifest serialize/parse (`checked_manifest_len` / `serialize_manifest` / `parse_manifest_bytes`);
-- `copy_exact_n`, the shared exact-size byte copier used by both encode (source file → encrypted stream) and decode (encrypted stream → output file).
+- `copy_exact_n`, the shared exact-size byte copier used by both encode (source file → encrypted stream) and decode (encrypted stream → output file);
+- `read_exact_fca`, the exact-read helper for declared FCA regions: a payload that ends cleanly before a declared region is complete rejects as `MalformedArchive` naming the truncated region (`FORMAT.md` §9.1: each region is exactly its declared length), while embedded payload-stream markers and genuine I/O failures keep their own classification. Used by `parse_fca_header` for the fixed header and by `archive/decode.rs` for the `archive_ext` and manifest regions.
 
 `checked_manifest_len` runs BEFORE allocation: an over-cap manifest is rejected without growing a `Vec` first. `parse_manifest_bytes` calls `validate_fca_path` and `validate_manifest_tree` so a successfully-parsed `Manifest` is fully validated.
 

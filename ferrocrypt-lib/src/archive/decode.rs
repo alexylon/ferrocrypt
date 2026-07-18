@@ -58,7 +58,8 @@ use crate::fs::paths::{INCOMPLETE_SUFFIX, OUTPUT_LABEL, already_exists_error, pa
 
 use super::IncompleteOutputPolicy;
 use super::format::{
-    copy_exact_n, parse_fca_header, parse_manifest_bytes, require_fits_usize,
+    ARCHIVE_EXT_REGION_TRUNCATED, ARCHIVE_MANIFEST_REGION_TRUNCATED, copy_exact_n,
+    parse_fca_header, parse_manifest_bytes, read_exact_fca, require_fits_usize,
     validate_archive_ext_tlv,
 };
 use super::limits::ArchiveLimits;
@@ -100,16 +101,26 @@ fn unarchive_inner<R: Read>(
     // the archive-level TLV region under the no-known-critical policy.
     // v1 defines no archive-level TLV tags; v1 writers emit
     // `archive_ext_len = 0`, so this is normally a zero-length read,
-    // but a v1.x writer may legitimately emit ignorable tags.
+    // but a v1.x writer may legitimately emit ignorable tags. A payload
+    // that ends before the declared region is complete rejects through
+    // `read_exact_fca` as a malformed archive, not an I/O failure.
     let archive_ext_len = require_fits_usize(header.archive_ext_len, "Archive extension length")?;
     let mut archive_ext_bytes = vec![0u8; archive_ext_len];
-    reader.read_exact(&mut archive_ext_bytes)?;
+    read_exact_fca(
+        &mut reader,
+        &mut archive_ext_bytes,
+        ARCHIVE_EXT_REGION_TRUNCATED,
+    )?;
     validate_archive_ext_tlv(&archive_ext_bytes, &limits)?;
 
     // §9.11 step 4: read exactly `manifest_len` bytes.
     let manifest_len = require_fits_usize(header.manifest_len, "Archive manifest length")?;
     let mut manifest_bytes = vec![0u8; manifest_len];
-    reader.read_exact(&mut manifest_bytes)?;
+    read_exact_fca(
+        &mut reader,
+        &mut manifest_bytes,
+        ARCHIVE_MANIFEST_REGION_TRUNCATED,
+    )?;
 
     // §9.11 steps 5–7: parse manifest entries (including each
     // `entry_ext` region; `parse_manifest_bytes` validates every
@@ -1087,6 +1098,77 @@ mod tests {
 
         let err = unarchive_default(archive, tmp.path()).unwrap_err();
         assert!(format!("{err:?}").contains("MalformedTlv"));
+    }
+
+    // -- Declared-region truncation (FORMAT.md §9.1) -----------------------
+
+    /// A payload that ends before the declared `archive_ext` region is
+    /// complete rejects as a malformed archive — the declared §9.1
+    /// layout was violated — never as an environmental I/O failure.
+    /// Loops every cut point inside the region and asserts the typed
+    /// reason plus the no-output invariant (the read precedes any
+    /// filesystem staging).
+    #[test]
+    fn rejects_truncated_archive_ext_region_at_every_byte() {
+        use crate::archive::format::FCA_HEADER_SIZE;
+
+        let manifest = single_file_manifest("hello.txt", b"Hello, world!");
+        let ignorable = tlv_bytes(0x0001, b"meta");
+        let full = build_archive_prefix_with_archive_ext(&manifest, &ignorable);
+
+        for cut in 0..ignorable.len() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let archive = full[..FCA_HEADER_SIZE + cut].to_vec();
+            let err = unarchive_default(archive, tmp.path()).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    CryptoError::MalformedArchive {
+                        reason: ARCHIVE_EXT_REGION_TRUNCATED
+                    }
+                ),
+                "archive_ext cut at {cut} bytes must reject as truncated region, got {err:?}",
+            );
+            assert_eq!(
+                fs::read_dir(tmp.path()).unwrap().count(),
+                0,
+                "no filesystem output may exist after an archive_ext truncation"
+            );
+        }
+    }
+
+    /// Manifest-region counterpart of
+    /// [`rejects_truncated_archive_ext_region_at_every_byte`]: a
+    /// payload that ends before the declared `manifest_len` bytes are
+    /// complete rejects with the manifest-region truncation reason at
+    /// every cut point, with no filesystem output.
+    #[test]
+    fn rejects_truncated_manifest_region_at_every_byte() {
+        use crate::archive::format::FCA_HEADER_SIZE;
+
+        let manifest = single_file_manifest("hello.txt", b"Hello, world!");
+        let full = build_archive_prefix(&manifest);
+        let manifest_len = full.len() - FCA_HEADER_SIZE;
+
+        for cut in 0..manifest_len {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let archive = full[..FCA_HEADER_SIZE + cut].to_vec();
+            let err = unarchive_default(archive, tmp.path()).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    CryptoError::MalformedArchive {
+                        reason: ARCHIVE_MANIFEST_REGION_TRUNCATED
+                    }
+                ),
+                "manifest cut at {cut} bytes must reject as truncated region, got {err:?}",
+            );
+            assert_eq!(
+                fs::read_dir(tmp.path()).unwrap().count(),
+                0,
+                "no filesystem output may exist after a manifest truncation"
+            );
+        }
     }
 
     // -- Content-region rejections -----------------------------------------

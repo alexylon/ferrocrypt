@@ -722,6 +722,42 @@ mod tests {
     use crate::recipient::policy::NativeRecipientType;
     use secrecy::SecretString;
 
+    /// Build a complete `.fcr` byte sequence whose authenticated
+    /// payload is exactly `payload` — no archive layer. Lets tests
+    /// craft files whose FCA plaintext violates the `FORMAT.md` §9.1
+    /// layout (for example truncated declared regions), which no
+    /// production writer emits.
+    fn build_fcr_with_raw_payload(
+        entries: &[RecipientEntry],
+        file_key: &FileKey,
+        payload: &[u8],
+        path: &Path,
+    ) -> Result<(), CryptoError> {
+        use std::io::Write;
+
+        let stream_nonce = random_bytes::<STREAM_NONCE_SIZE>()?;
+        let DerivedSubkeys {
+            payload_key,
+            header_key,
+        } = derive_subkeys(file_key, &stream_nonce)?;
+
+        let built = build_encrypted_header(entries, b"", stream_nonce, payload_key, &header_key)?;
+
+        let mut payload_buf: Vec<u8> = Vec::new();
+        let mut writer =
+            payload_encryptor(&built.payload_key, &built.stream_nonce, &mut payload_buf);
+        writer.write_all(payload).map_err(CryptoError::Io)?;
+        let _ = writer.finish()?;
+
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(&built.prefix_bytes);
+        buf.extend_from_slice(&built.header_bytes);
+        buf.extend_from_slice(&built.header_mac);
+        buf.extend_from_slice(&payload_buf);
+        fs::write(path, &buf)?;
+        Ok(())
+    }
+
     /// Build a complete `.fcr` byte sequence with the given recipient
     /// entries and plaintext. The caller has already wrapped `file_key`
     /// for each entry that actually needs to unwrap; entries with
@@ -733,25 +769,14 @@ mod tests {
         plaintext: &[u8],
         path: &Path,
     ) -> Result<(), CryptoError> {
-        let stream_nonce = random_bytes::<STREAM_NONCE_SIZE>()?;
-        let DerivedSubkeys {
-            payload_key,
-            header_key,
-        } = derive_subkeys(file_key, &stream_nonce)?;
-
-        let built = build_encrypted_header(entries, b"", stream_nonce, payload_key, &header_key)?;
-
-        // Encrypt a single-file FCA payload into a buffer. Constructs
-        // the FCA header + manifest + content for one entry named
-        // "data.txt"; matches what `archive::archive` would emit
-        // for that input.
-        let mut payload_buf: Vec<u8> = Vec::new();
-        {
+        // Construct the FCA header + manifest + content for one entry
+        // named "data.txt"; matches what the production archive writer
+        // would emit for that input.
+        let fca_bytes = {
             use crate::archive::ArchiveLimits;
             use crate::archive::format::{serialize_manifest, write_fca_header};
             use crate::archive::model::{ArchiveEntryKind, Manifest, make_entry};
             use std::ffi::OsString;
-            use std::io::Write;
 
             let manifest = Manifest {
                 entries: vec![make_entry(
@@ -767,27 +792,19 @@ mod tests {
             };
             let manifest_bytes = serialize_manifest(&manifest, ArchiveLimits::default())?;
 
-            let mut writer =
-                payload_encryptor(&built.payload_key, &built.stream_nonce, &mut payload_buf);
-            writer = write_fca_header(
-                writer,
+            let mut fca = write_fca_header(
+                Vec::new(),
                 1,
                 0,
                 manifest_bytes.len() as u32,
                 plaintext.len() as u64,
             )?;
-            writer.write_all(&manifest_bytes).map_err(CryptoError::Io)?;
-            writer.write_all(plaintext).map_err(CryptoError::Io)?;
-            let _ = writer.finish()?;
-        }
+            fca.extend_from_slice(&manifest_bytes);
+            fca.extend_from_slice(plaintext);
+            fca
+        };
 
-        let mut buf: Vec<u8> = Vec::new();
-        buf.extend_from_slice(&built.prefix_bytes);
-        buf.extend_from_slice(&built.header_bytes);
-        buf.extend_from_slice(&built.header_mac);
-        buf.extend_from_slice(&payload_buf);
-        fs::write(path, &buf)?;
-        Ok(())
+        build_fcr_with_raw_payload(entries, file_key, &fca_bytes, path)
     }
 
     /// Generates an X25519 keypair, persists a v1 `private.key` for it,
@@ -865,6 +882,85 @@ mod tests {
                 restored, payload,
                 "{label} should decrypt the same plaintext"
             );
+        }
+        Ok(())
+    }
+
+    /// End-to-end reachability for the truncated-FCA classification:
+    /// a fully authenticated `.fcr` — outer header MAC verifies, the
+    /// payload stream authenticates — whose FCA plaintext ends before
+    /// a declared region is complete must reject as `MalformedArchive`
+    /// with that region's truncation reason, never as an environmental
+    /// `Io` failure. One case per declared region (`FORMAT.md` §9.1):
+    /// inside the 27-byte fixed header, inside a declared
+    /// `archive_ext` region, and inside the declared manifest region.
+    /// No production writer emits such payloads; a buggy or
+    /// non-conforming authenticated writer can.
+    #[test]
+    fn truncated_fca_payload_rejects_as_malformed_archive() -> Result<(), CryptoError> {
+        use crate::archive::format::{
+            ARCHIVE_EXT_REGION_TRUNCATED, ARCHIVE_FIXED_HEADER_TRUNCATED,
+            ARCHIVE_MANIFEST_REGION_TRUNCATED, FCA_MAGIC, FCA_VERSION, write_fca_header,
+        };
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let keys_dir = tmp.path().join("keys");
+        let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
+
+        let file_key = FileKey::generate().unwrap();
+        let body = x25519::wrap(&file_key, &pub_a)?;
+        let entries = [RecipientEntry::native(
+            NativeRecipientType::X25519,
+            body.to_vec(),
+        )?];
+
+        // 10 bytes: valid magic + version + flags, then the payload
+        // ends three bytes into `entry_count`.
+        let short_header = {
+            let mut fca = Vec::new();
+            fca.extend_from_slice(FCA_MAGIC);
+            fca.push(FCA_VERSION);
+            fca.extend_from_slice(&0u16.to_be_bytes());
+            fca.extend_from_slice(&[0u8; 3]);
+            fca
+        };
+        // Valid header declaring an 8-byte `archive_ext` region, then
+        // the payload ends three bytes in.
+        let short_ext = {
+            let mut fca = write_fca_header(Vec::new(), 1, 8, 50, 10)?;
+            fca.extend_from_slice(&[0u8; 3]);
+            fca
+        };
+        // Valid header declaring a 50-byte manifest, then the payload
+        // ends twenty bytes in.
+        let short_manifest = {
+            let mut fca = write_fca_header(Vec::new(), 1, 0, 50, 10)?;
+            fca.extend_from_slice(&[0u8; 20]);
+            fca
+        };
+
+        let cases: [(&str, Vec<u8>, &str); 3] = [
+            ("fixed-header", short_header, ARCHIVE_FIXED_HEADER_TRUNCATED),
+            ("archive-ext", short_ext, ARCHIVE_EXT_REGION_TRUNCATED),
+            (
+                "manifest",
+                short_manifest,
+                ARCHIVE_MANIFEST_REGION_TRUNCATED,
+            ),
+        ];
+        for (label, fca_payload, want_reason) in cases {
+            let fcr = tmp.path().join(format!("{label}.fcr"));
+            build_fcr_with_raw_payload(&entries, &file_key, &fca_payload, &fcr)?;
+
+            let dec_dir = tmp.path().join(format!("decrypted-{label}"));
+            fs::create_dir_all(&dec_dir)?;
+            let err = recipient_decrypt(&fcr, &dec_dir, &priv_a, &pass_a).unwrap_err();
+            match err {
+                CryptoError::MalformedArchive { reason } => {
+                    assert_eq!(reason, want_reason, "wrong truncation reason for {label}");
+                }
+                other => panic!("{label}: expected MalformedArchive, got {other:?}"),
+            }
         }
         Ok(())
     }

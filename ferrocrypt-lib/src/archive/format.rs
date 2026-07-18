@@ -10,7 +10,7 @@ use std::io::{self, Cursor, Read, Write};
 use crate::CryptoError;
 use crate::crypto::stream::read_uninterrupted;
 use crate::crypto::tlv::validate_no_known_critical;
-use crate::error::FormatDefect;
+use crate::error::{FormatDefect, StreamError};
 
 use super::limits::{
     ARCHIVE_ENTRY_MODE_UNSUPPORTED, ARCHIVE_MANIFEST_LEN_OVERFLOW, ARCHIVE_PATH_EMPTY,
@@ -196,6 +196,58 @@ pub(super) fn read_u64_be<R: Read>(r: &mut R) -> io::Result<u64> {
     Ok(u64::from_be_bytes(b))
 }
 
+/// `MalformedArchive` reasons for a payload that ends before a
+/// declared FCA region is complete (`FORMAT.md` §9.1: each region is
+/// exactly its declared length). One constant per region so the
+/// rejection names the region that was cut short. `pub(crate)` so the
+/// end-to-end crafted-file tests in `protocol.rs` can assert the exact
+/// reason.
+pub(crate) const ARCHIVE_FIXED_HEADER_TRUNCATED: &str = "fixed header truncated";
+pub(crate) const ARCHIVE_EXT_REGION_TRUNCATED: &str = "archive extension region truncated";
+pub(crate) const ARCHIVE_MANIFEST_REGION_TRUNCATED: &str = "manifest region truncated";
+
+/// Reads exactly `buf.len()` bytes of declared FCA structure from
+/// `reader`.
+///
+/// A payload that ends cleanly before a declared FCA region is
+/// complete is a malformed archive, not an environmental I/O failure
+/// (`FORMAT.md` §9.2: readers reject short headers; §9.1: each region
+/// is exactly its declared length), so an unmarked `UnexpectedEof`
+/// from the short read maps to [`CryptoError::MalformedArchive`] with
+/// the caller's `reason`. Every other error converts through
+/// `From<io::Error>`: embedded payload-stream signals ([`StreamError`]
+/// markers, including the truncation marker that shares the
+/// `UnexpectedEof` kind) keep their typed `CryptoError::Payload*`
+/// classification, and genuine I/O failures stay [`CryptoError::Io`].
+pub(super) fn read_exact_fca<R: Read>(
+    reader: &mut R,
+    buf: &mut [u8],
+    reason: &'static str,
+) -> Result<(), CryptoError> {
+    reader.read_exact(buf).map_err(|e| {
+        let unmarked = e
+            .get_ref()
+            .is_none_or(|inner| inner.downcast_ref::<StreamError>().is_none());
+        if unmarked && e.kind() == io::ErrorKind::UnexpectedEof {
+            CryptoError::MalformedArchive { reason }
+        } else {
+            CryptoError::from(e)
+        }
+    })
+}
+
+/// Fixed-size-array form of [`read_exact_fca`], so header fields can
+/// be read as `u32::from_be_bytes(read_array_fca(...)?)` without a
+/// separate buffer binding per field.
+fn read_array_fca<const N: usize, R: Read>(
+    reader: &mut R,
+    reason: &'static str,
+) -> Result<[u8; N], CryptoError> {
+    let mut buf = [0u8; N];
+    read_exact_fca(reader, &mut buf, reason)?;
+    Ok(buf)
+}
+
 pub(super) fn write_u8<W: Write>(w: &mut W, n: u8) -> io::Result<()> {
     w.write_all(&[n])
 }
@@ -297,38 +349,47 @@ pub(crate) fn write_fca_header<W: Write>(
 /// All resource caps are applied here so downstream allocations
 /// (`archive_ext` buffer, manifest buffer, entry vector) are bounded
 /// by the time they fire.
+///
+/// Field reads go through [`read_exact_fca`], so a payload that ends
+/// before the 27th byte rejects as `MalformedArchive` ("fixed header
+/// truncated") while embedded payload-stream errors keep their typed
+/// classification. Fields are read one at a time in wire order, so
+/// each field's own rule (bad magic, unsupported version, non-zero
+/// flags) still fires without requiring the later fields to be
+/// present.
 pub fn parse_fca_header<R: Read>(
     reader: &mut R,
     limits: ArchiveLimits,
 ) -> Result<FcaHeader, CryptoError> {
     limits.validate()?;
 
-    let mut magic = [0u8; 4];
-    reader.read_exact(&mut magic)?;
+    let magic: [u8; 4] = read_array_fca(reader, ARCHIVE_FIXED_HEADER_TRUNCATED)?;
     if &magic != FCA_MAGIC {
         return Err(CryptoError::MalformedArchive {
             reason: "bad magic",
         });
     }
 
-    let version = read_u8(reader)?;
+    let [version] = read_array_fca(reader, ARCHIVE_FIXED_HEADER_TRUNCATED)?;
     if version != FCA_VERSION {
         return Err(CryptoError::InvalidFormat(
             FormatDefect::UnsupportedArchiveVersion { version },
         ));
     }
 
-    let flags = read_u16_be(reader)?;
+    let flags = u16::from_be_bytes(read_array_fca(reader, ARCHIVE_FIXED_HEADER_TRUNCATED)?);
     if flags != 0 {
         return Err(CryptoError::MalformedArchive {
             reason: "header has non-zero flags",
         });
     }
 
-    let entry_count = read_u32_be(reader)?;
-    let archive_ext_len = read_u32_be(reader)?;
-    let manifest_len = read_u32_be(reader)?;
-    let total_file_bytes = read_u64_be(reader)?;
+    let entry_count = u32::from_be_bytes(read_array_fca(reader, ARCHIVE_FIXED_HEADER_TRUNCATED)?);
+    let archive_ext_len =
+        u32::from_be_bytes(read_array_fca(reader, ARCHIVE_FIXED_HEADER_TRUNCATED)?);
+    let manifest_len = u32::from_be_bytes(read_array_fca(reader, ARCHIVE_FIXED_HEADER_TRUNCATED)?);
+    let total_file_bytes =
+        u64::from_be_bytes(read_array_fca(reader, ARCHIVE_FIXED_HEADER_TRUNCATED)?);
 
     if entry_count == 0 {
         return Err(empty_archive_error());
@@ -1078,9 +1139,9 @@ mod tests {
 
     /// Truncated mid-header (valid magic + version + flags, then the
     /// reader runs out of bytes before entry_count) surfaces as
-    /// `CryptoError::Io` (typically `UnexpectedEof`). Confirms the
-    /// parser fails closed on short input rather than reading past
-    /// end-of-stream.
+    /// `MalformedArchive` with the fixed-header truncation reason —
+    /// the payload violates the declared §9.2 layout; the read
+    /// environment did not fail.
     #[test]
     fn rejects_short_header() {
         let mut bytes = Vec::new();
@@ -1091,18 +1152,21 @@ mod tests {
         let mut cur = Cursor::new(&bytes);
         let err = parse_fca_header(&mut cur, ArchiveLimits::default()).unwrap_err();
         assert!(
-            matches!(err, CryptoError::Io(_)),
-            "short header should surface as CryptoError::Io"
+            matches!(
+                err,
+                CryptoError::MalformedArchive {
+                    reason: ARCHIVE_FIXED_HEADER_TRUNCATED
+                }
+            ),
+            "short header should reject as truncated fixed header, got {err:?}"
         );
     }
 
     /// Loop pin: a truncated header at every byte boundary 0..27
-    /// rejects. Pre-magic truncation (0..4 bytes) surfaces as
-    /// `CryptoError::Io` from the magic read; magic-then-truncated
-    /// (4 bytes — version absent) hits the next read; etc. The full
-    /// 27-byte valid header is the only admissible case at this size.
-    /// Pinned because the existing single-slice test (`rejects_short_header`)
-    /// only exercises one byte boundary.
+    /// rejects as `MalformedArchive` with the fixed-header truncation
+    /// reason. The header bytes are valid up to the cut, so no other
+    /// field rule fires first, and the full 27-byte header is the only
+    /// admissible case at this size.
     #[test]
     fn rejects_truncated_header_at_every_byte() {
         let full = raw_header_bytes(FCA_VERSION, 0, 5, 0, 100, 1024);
@@ -1111,11 +1175,15 @@ mod tests {
         for cut in 0..FCA_HEADER_SIZE {
             let truncated = &full[..cut];
             let mut cur = Cursor::new(truncated);
-            let result = parse_fca_header(&mut cur, ArchiveLimits::default());
+            let err = parse_fca_header(&mut cur, ArchiveLimits::default()).unwrap_err();
             assert!(
-                result.is_err(),
-                "truncated to {cut} bytes must reject (got {:?})",
-                result.map(|h| h.entry_count),
+                matches!(
+                    err,
+                    CryptoError::MalformedArchive {
+                        reason: ARCHIVE_FIXED_HEADER_TRUNCATED
+                    }
+                ),
+                "cut at {cut} bytes must reject as truncated fixed header, got {err:?}",
             );
         }
 
@@ -1123,6 +1191,70 @@ mod tests {
         let mut cur = Cursor::new(&full);
         let parsed = parse_fca_header(&mut cur, ArchiveLimits::default()).unwrap();
         assert_eq!(parsed.entry_count, 5);
+    }
+
+    /// Reader whose first `read` yields the marked error the payload
+    /// stream produces (a [`StreamError`] wrapped in an `io::Error`),
+    /// for pinning that `read_exact_fca` lets stream signals through.
+    struct MarkedErrorReader {
+        kind: io::ErrorKind,
+        marker: fn() -> StreamError,
+    }
+
+    impl Read for MarkedErrorReader {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::new(self.kind, (self.marker)()))
+        }
+    }
+
+    /// A *marked* `UnexpectedEof` — the payload stream's own truncation
+    /// signal — must keep its typed `PayloadTruncated` classification
+    /// and never be re-labeled as a malformed archive: the ciphertext
+    /// was cut, which says nothing about the FCA structure inside it.
+    #[test]
+    fn parse_fca_header_preserves_marked_truncation() {
+        let mut reader = MarkedErrorReader {
+            kind: io::ErrorKind::UnexpectedEof,
+            marker: || StreamError::Truncated,
+        };
+        let err = parse_fca_header(&mut reader, ArchiveLimits::default()).unwrap_err();
+        assert!(
+            matches!(err, CryptoError::PayloadTruncated),
+            "marked stream truncation must stay PayloadTruncated, got {err:?}"
+        );
+    }
+
+    /// A marked AEAD failure from the payload stream must keep its
+    /// typed `PayloadTampered` classification through the FCA reads.
+    #[test]
+    fn parse_fca_header_preserves_marked_tamper() {
+        let mut reader = MarkedErrorReader {
+            kind: io::ErrorKind::InvalidData,
+            marker: || StreamError::DecryptAead,
+        };
+        let err = parse_fca_header(&mut reader, ArchiveLimits::default()).unwrap_err();
+        assert!(
+            matches!(err, CryptoError::PayloadTampered),
+            "marked AEAD failure must stay PayloadTampered, got {err:?}"
+        );
+    }
+
+    /// An unmarked, non-EOF I/O error (a genuine environment failure)
+    /// must stay `CryptoError::Io` — only a clean short read of
+    /// declared structure means "malformed archive".
+    #[test]
+    fn parse_fca_header_preserves_plain_io_error() {
+        struct PlainIoErrorReader;
+        impl Read for PlainIoErrorReader {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("disk failed"))
+            }
+        }
+        let err = parse_fca_header(&mut PlainIoErrorReader, ArchiveLimits::default()).unwrap_err();
+        assert!(
+            matches!(err, CryptoError::Io(_)),
+            "plain I/O failure must stay CryptoError::Io, got {err:?}"
+        );
     }
 
     /// Manifest-len declared SHORTER than the real manifest bytes:
@@ -1152,15 +1284,23 @@ mod tests {
         ));
     }
 
-    /// Completely empty input fails at the first `read_exact` for
-    /// magic, surfaces as `CryptoError::Io`. Pinned because an empty
-    /// stream is a common adversarial probe.
+    /// Completely empty input fails at the magic read and rejects as a
+    /// truncated fixed header. Pinned because an empty stream is a
+    /// common adversarial probe.
     #[test]
     fn rejects_empty_input() {
         let bytes = Vec::new();
         let mut cur = Cursor::new(&bytes);
         let err = parse_fca_header(&mut cur, ArchiveLimits::default()).unwrap_err();
-        assert!(matches!(err, CryptoError::Io(_)));
+        assert!(
+            matches!(
+                err,
+                CryptoError::MalformedArchive {
+                    reason: ARCHIVE_FIXED_HEADER_TRUNCATED
+                }
+            ),
+            "empty input must reject as truncated fixed header, got {err:?}"
+        );
     }
 
     /// `write_fca_header` must refuse `entry_count == 0` before any

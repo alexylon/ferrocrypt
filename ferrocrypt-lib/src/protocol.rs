@@ -1695,16 +1695,31 @@ mod tests {
         );
     }
 
+    /// Snapshot taken by [`counting_barrier`] at one invocation: the
+    /// directory it was asked to flush, and which of the two key
+    /// files existed at their final names at that moment.
+    #[derive(Debug, PartialEq, Eq)]
+    struct BarrierCall {
+        dir: PathBuf,
+        private_committed: bool,
+        public_committed: bool,
+    }
+
     /// Directory-durability barrier stub that succeeds until the
     /// `fail_on`-th invocation (1-based), then fails with an injected
-    /// I/O error. Every invocation records the directory it was asked
-    /// to flush into `seen`.
+    /// I/O error. Every invocation records a [`BarrierCall`] snapshot
+    /// into `seen`, so tests can pin the commit order at each flush
+    /// point, not only the end state.
     fn counting_barrier(
         fail_on: Option<u32>,
-        seen: std::rc::Rc<std::cell::RefCell<Vec<PathBuf>>>,
+        seen: std::rc::Rc<std::cell::RefCell<Vec<BarrierCall>>>,
     ) -> impl Fn(&Path) -> std::io::Result<()> {
         move |dir| {
-            seen.borrow_mut().push(dir.to_path_buf());
+            seen.borrow_mut().push(BarrierCall {
+                dir: dir.to_path_buf(),
+                private_committed: dir.join(PRIVATE_KEY_FILENAME).exists(),
+                public_committed: dir.join(PUBLIC_KEY_FILENAME).exists(),
+            });
             if Some(seen.borrow().len() as u32) == fail_on {
                 Err(std::io::Error::other("injected directory flush failure"))
             } else {
@@ -1805,7 +1820,10 @@ mod tests {
 
     /// A successful commit flushes the output directory exactly twice
     /// — once after each key-file commit — and both key files are in
-    /// place with their staged contents.
+    /// place with their staged contents. The first flush must observe
+    /// `private.key` already at its final name and `public.key` not
+    /// yet present, pinning the private-first commit order the
+    /// durability guarantee depends on.
     #[test]
     fn keygen_commit_flushes_output_directory_after_each_commit() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1826,8 +1844,20 @@ mod tests {
         .expect("commit must succeed with a working barrier");
         assert_eq!(
             *seen.borrow(),
-            vec![dir.to_path_buf(), dir.to_path_buf()],
-            "the output directory must be flushed after each of the two commits"
+            vec![
+                BarrierCall {
+                    dir: dir.to_path_buf(),
+                    private_committed: true,
+                    public_committed: false,
+                },
+                BarrierCall {
+                    dir: dir.to_path_buf(),
+                    private_committed: true,
+                    public_committed: true,
+                },
+            ],
+            "the output directory must be flushed after each of the two \
+             commits, and private.key must commit before public.key"
         );
         assert_eq!(fs::read(&private_key_path).unwrap(), b"private bytes");
         assert_eq!(fs::read(&public_key_path).unwrap(), b"public bytes");

@@ -462,6 +462,11 @@ fn failure_for(
 ///   `fcr1…` Bech32 recipient string. Permissions: `0o644` on Unix
 ///   (public keys are not secret).
 ///
+/// Both files are fully staged and synced before either is committed
+/// to its final name, and `private.key` commits first, so an
+/// interruption cannot leave `public.key` on disk without its
+/// matching `private.key` (see `commit_key_pair_files`).
+///
 /// # Caller obligations
 ///
 /// This function is `pub(crate)` and **does not** validate the
@@ -497,9 +502,9 @@ pub(crate) fn generate_key_pair(
     // `symlink_metadata` (via `reject_occupied`) so a dangling
     // `private.key` / `public.key` symlink also rejects up front
     // rather than slipping past `Path::exists()` and surviving until
-    // the atomic no-clobber rename at `finalize_file` below — which is
-    // still the load-bearing guarantee that we never overwrite an
-    // existing key.
+    // the atomic no-clobber rename inside `commit_key_pair_files`
+    // below — which is still the load-bearing guarantee that we never
+    // overwrite an existing key.
     let private_key_path = output_dir.join(PRIVATE_KEY_FILENAME);
     let public_key_path = output_dir.join(PUBLIC_KEY_FILENAME);
     reject_occupied(&private_key_path, KEY_FILE_LABEL)?;
@@ -530,7 +535,24 @@ pub(crate) fn generate_key_pair(
     // checksum, emits BIP 173 lowercase Bech32).
     let recipient_string = encode_recipient_string(x25519::TYPE_NAME, &public_material)?;
 
-    // Write public.key (text file, `fcr1…\n`). Public key isn't secret
+    // Stage both key files completely — tempfile created, bytes
+    // written, content synced — before either appears at its final
+    // name. Any failure up to the commit step drops both tempfiles
+    // and publishes nothing.
+    let mut private_builder = tempfile::Builder::new();
+    private_builder
+        .prefix(".ferrocrypt-private_key-")
+        .suffix(".tmp");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        private_builder.permissions(fs::Permissions::from_mode(0o600));
+    }
+    let mut private_tmp = private_builder.tempfile_in(output_dir)?;
+    private_tmp.as_file_mut().write_all(&private_key_bytes)?;
+    atomic::sync_file_durable(private_tmp.as_file())?;
+
+    // public.key text form is `fcr1…\n`. Public keys aren't secret,
     // so permissions relax to 0o644 on Unix.
     let mut public_builder = tempfile::Builder::new();
     public_builder
@@ -547,32 +569,8 @@ pub(crate) fn generate_key_pair(
         .write_all(recipient_string.as_bytes())?;
     public_tmp.as_file_mut().write_all(b"\n")?;
     atomic::sync_file_durable(public_tmp.as_file())?;
-    atomic::finalize_file(public_tmp, &public_key_path, KEY_FILE_LABEL)?;
 
-    // Write private.key. If this fails, clean up the public.key we just wrote.
-    // Public keys are not secret, but leaving an orphaned output file would
-    // make the failed key-generation result ambiguous for the caller.
-    let private_write: Result<(), CryptoError> = (|| {
-        let mut private_builder = tempfile::Builder::new();
-        private_builder
-            .prefix(".ferrocrypt-private_key-")
-            .suffix(".tmp");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            private_builder.permissions(fs::Permissions::from_mode(0o600));
-        }
-        let mut private_tmp = private_builder.tempfile_in(output_dir)?;
-        private_tmp.as_file_mut().write_all(&private_key_bytes)?;
-        atomic::sync_file_durable(private_tmp.as_file())?;
-        atomic::finalize_file(private_tmp, &private_key_path, KEY_FILE_LABEL)?;
-        Ok(())
-    })();
-
-    if let Err(e) = private_write {
-        let _ = fs::remove_file(&public_key_path);
-        return Err(e);
-    }
+    commit_key_pair_files(private_tmp, public_tmp, &private_key_path, &public_key_path)?;
 
     // Compute the fingerprint from the in-memory `public_material`
     // rather than re-reading and re-decoding `public.key` from disk.
@@ -584,6 +582,40 @@ pub(crate) fn generate_key_pair(
     let fingerprint = fingerprint_hex(x25519::TYPE_NAME, &public_material);
 
     Ok((private_key_path, public_key_path, fingerprint))
+}
+
+/// Commits two fully staged key-file tempfiles to their final names
+/// with no-clobber semantics: `private.key` first, `public.key`
+/// second.
+///
+/// The commit order is a durability invariant. `public.key` is the
+/// half that attracts ciphertext — anyone holding it can encrypt to
+/// this key pair — so it must never exist at its final name unless
+/// the matching `private.key` is already durable beside it. An
+/// interruption between the two commits (crash, kill, power loss)
+/// leaves at worst a private-only directory, which decrypts nothing
+/// and endangers nothing.
+///
+/// Failure handling: if the `private.key` commit fails, `public_tmp`
+/// is dropped and its tempfile removed, so nothing was published. If
+/// the `public.key` commit fails, the just-committed `private.key` is
+/// removed best-effort so a failed generation leaves no key files
+/// behind. `fs::atomic::finalize_file` syncs the destination
+/// directory after each successful commit.
+fn commit_key_pair_files(
+    private_tmp: tempfile::NamedTempFile,
+    public_tmp: tempfile::NamedTempFile,
+    private_key_path: &Path,
+    public_key_path: &Path,
+) -> Result<(), CryptoError> {
+    use crate::fs::atomic;
+
+    atomic::finalize_file(private_tmp, private_key_path, KEY_FILE_LABEL)?;
+    if let Err(e) = atomic::finalize_file(public_tmp, public_key_path, KEY_FILE_LABEL) {
+        let _ = fs::remove_file(private_key_path);
+        return Err(e);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -607,6 +639,7 @@ mod tests {
     use crate::crypto::stream::payload_encryptor;
     use crate::error::FormatDefect;
     use crate::format;
+    use crate::key::files::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};
     use crate::key::public::read_public_key;
     use crate::recipient::entry::RECIPIENT_FLAG_CRITICAL;
     use crate::recipient::native::{argon2id, x25519};
@@ -1334,5 +1367,107 @@ mod tests {
             CryptoError::EmptyRecipientList => Ok(()),
             other => panic!("expected EmptyRecipientList, got {other:?}"),
         }
+    }
+
+    /// Stages a tempfile in `dir` holding `bytes`, shaped like the
+    /// key-file tempfiles `generate_key_pair` hands to
+    /// `commit_key_pair_files`.
+    fn staged_key_tempfile(dir: &Path, bytes: &[u8]) -> tempfile::NamedTempFile {
+        use std::io::Write as _;
+        let mut tmp = tempfile::Builder::new()
+            .prefix(".ferrocrypt-keygen-test-")
+            .suffix(".tmp")
+            .tempfile_in(dir)
+            .unwrap();
+        tmp.as_file_mut().write_all(bytes).unwrap();
+        tmp
+    }
+
+    /// Names of the entries in `dir` other than `keep`. Used to prove
+    /// a failed key-pair commit leaves no staged tempfiles behind.
+    fn leftover_entries(dir: &Path, keep: &str) -> Vec<std::ffi::OsString> {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|name| name != keep)
+            .collect()
+    }
+
+    /// The key-pair commit publishes `private.key` first. If the
+    /// `public.key` commit then fails — its name became occupied after
+    /// the preflight — the freshly committed `private.key` is removed
+    /// again and the occupant stays untouched. A failed generation
+    /// leaves no key files, and at no point can `public.key` exist
+    /// without `private.key` beside it.
+    #[test]
+    fn keygen_public_commit_failure_removes_private_key() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        let private_key_path = dir.join(PRIVATE_KEY_FILENAME);
+        let public_key_path = dir.join(PUBLIC_KEY_FILENAME);
+        fs::write(&public_key_path, b"occupant").unwrap();
+
+        let private_tmp = staged_key_tempfile(dir, b"private bytes");
+        let public_tmp = staged_key_tempfile(dir, b"public bytes");
+
+        let err =
+            commit_key_pair_files(private_tmp, public_tmp, &private_key_path, &public_key_path)
+                .expect_err("occupied public.key name must fail the commit");
+        assert!(
+            matches!(err, CryptoError::InvalidInput(_)),
+            "expected the typed already-exists rejection, got {err:?}"
+        );
+        assert!(
+            !private_key_path.exists(),
+            "private.key must not remain after the public.key commit failed"
+        );
+        assert_eq!(
+            fs::read(&public_key_path).unwrap(),
+            b"occupant",
+            "pre-existing occupant of the public.key name must be untouched"
+        );
+        let leftovers = leftover_entries(dir, PUBLIC_KEY_FILENAME);
+        assert!(
+            leftovers.is_empty(),
+            "no staged tempfiles may remain, found {leftovers:?}"
+        );
+    }
+
+    /// If the `private.key` commit fails — its name became occupied
+    /// after the preflight — nothing is published: `public.key` never
+    /// appears, the occupant stays untouched, and no staged tempfiles
+    /// remain in the output directory.
+    #[test]
+    fn keygen_private_commit_failure_publishes_nothing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        let private_key_path = dir.join(PRIVATE_KEY_FILENAME);
+        let public_key_path = dir.join(PUBLIC_KEY_FILENAME);
+        fs::write(&private_key_path, b"occupant").unwrap();
+
+        let private_tmp = staged_key_tempfile(dir, b"private bytes");
+        let public_tmp = staged_key_tempfile(dir, b"public bytes");
+
+        let err =
+            commit_key_pair_files(private_tmp, public_tmp, &private_key_path, &public_key_path)
+                .expect_err("occupied private.key name must fail the commit");
+        assert!(
+            matches!(err, CryptoError::InvalidInput(_)),
+            "expected the typed already-exists rejection, got {err:?}"
+        );
+        assert!(
+            !public_key_path.exists(),
+            "public.key must never appear when the private.key commit failed"
+        );
+        assert_eq!(
+            fs::read(&private_key_path).unwrap(),
+            b"occupant",
+            "pre-existing occupant of the private.key name must be untouched"
+        );
+        let leftovers = leftover_entries(dir, PRIVATE_KEY_FILENAME);
+        assert!(
+            leftovers.is_empty(),
+            "no staged tempfiles may remain, found {leftovers:?}"
+        );
     }
 }

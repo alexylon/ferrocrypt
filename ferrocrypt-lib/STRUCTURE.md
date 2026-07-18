@@ -1116,7 +1116,7 @@ Ownership split:
 
 - X25519 key generation lives in `recipient/native/x25519.rs`.
 - Key serialization lives in `key/`.
-- Key-file staging lives in `protocol.rs` key generation, through the atomic-output helpers in `fs/`.
+- Key-file staging lives in `protocol.rs` key generation, through the atomic-output helpers in `fs/`. Both key files are staged and synced before either is committed to its final name, and `private.key` commits first, because an interruption must not leave `public.key` on disk without its matching `private.key`.
 
 `KeyPairGenerator` mirrors `Encryptor`'s reader-aligned cap rule for the passphrase that seals `private.key`: `kdf_params.mem_cost <= kdf_limit.max_mem_cost_kib` (default 1 GiB) is enforced at `write` time before Argon2id runs. Above-default `mem_cost` rejects with `CryptoError::KdfResourceCapExceeded`; the unlocking [`PrivateKeyDecryptor`] must be configured via [`PrivateKeyDecryptor::kdf_limit`] with a matching [`KdfLimit`].
 

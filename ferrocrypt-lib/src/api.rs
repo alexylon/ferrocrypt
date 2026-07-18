@@ -836,6 +836,11 @@ impl KeyPairGenerator {
     /// Generates the X25519 key pair and writes `private.key` +
     /// `public.key` into `output_dir`.
     ///
+    /// Both files are fully written and synced before either appears
+    /// under its final name, and `private.key` is committed first, so
+    /// an interruption (crash, power loss) cannot leave a usable
+    /// `public.key` behind without its matching `private.key`.
+    ///
     /// # Errors
     ///
     /// Returns [`CryptoError::InvalidInput`] if the passphrase is empty, KDF

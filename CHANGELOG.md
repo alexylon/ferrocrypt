@@ -5,6 +5,7 @@ All notable changes to FerroCrypt are documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **Key generation can no longer be interrupted into a `public.key` without its matching `private.key`.** Both key files are now fully written and flushed to disk before either appears under its final name, and `private.key` is committed first. Previously `public.key` received its final name before `private.key` existed on disk, so a crash or power loss at exactly the wrong moment could leave a valid `public.key` whose private key was never saved — and anything encrypted to that orphaned key would be unrecoverable. An interruption now leaves at worst a `private.key` alone, which is harmless, and a failed generation still leaves no key files behind.
 - **Error messages that embed an attacker-chosen name now stay within the intended display length.** File names, archive paths, and echoed recipient strings are escaped before they appear in an error message, but the truncation limit previously counted the original characters rather than the escaped text — so a name built entirely from characters that need escaping could stretch an error line to about ten times the intended width. The limit now applies to the text as displayed, matching how over-long recipient type names were already bounded. Names that fit within the limit are unchanged.
 
 ## [0.3.0-rc.2] - 2026-07-12

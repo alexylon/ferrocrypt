@@ -40,7 +40,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::archive::{ArchiveLimits, IncompleteOutputPolicy, unarchive};
+use crate::archive::{ArchiveLimits, IncompleteOutputPolicy, prepare_archive, unarchive};
 use crate::container::{
     HeaderReadLimits, build_encrypted_header, read_encrypted_header, resolve_encrypted_output_path,
     write_encrypted_file,
@@ -185,6 +185,15 @@ pub(crate) fn encrypt<R: RecipientScheme>(
     let output_path = resolve_encrypted_output_path(output_dir, output_file, &base_name);
     reject_occupied(&output_path, OUTPUT_LABEL)?;
 
+    // Capture the complete archive manifest before any cipher work or
+    // output staging. The ordering matters twice over: archive grammar
+    // and cap rejections surface before the expensive recipient KDF
+    // runs (writer preflight precedes cipher work), and the ciphertext
+    // staging file that `write_encrypted_file` creates later cannot be
+    // discovered as source content when the resolved output path lies
+    // inside the input tree.
+    let prepared = prepare_archive(input_path, archive_limits)?;
+
     // No early progress event here. Each recipient scheme emits its
     // own work-boundary event from inside `wrap_file_key`. For the
     // passphrase-only case, that's exactly one
@@ -229,14 +238,7 @@ pub(crate) fn encrypt<R: RecipientScheme>(
 
     on_event(&ProgressEvent::Encrypting);
 
-    write_encrypted_file(
-        input_path,
-        output_dir,
-        output_file,
-        &base_name,
-        &built,
-        archive_limits,
-    )
+    write_encrypted_file(prepared, output_dir, output_file, &base_name, &built)
 }
 
 /// Builds a `RecipientEntry` from a scheme-produced body, validating

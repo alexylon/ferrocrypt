@@ -72,7 +72,7 @@ The "Library Module Roles" table below, plus the "Encryption Pipeline" / "File F
 | `container.rs` | Single source of truth for `.fcr` header build/parse: `HeaderReadLimits` (public, `#[non_exhaustive]`, with `max_header_len` / `max_recipient_count` / `max_recipient_body_len` builder methods that clamp at the v1 structural maxima), `ParsedEncryptedHeader`, `BuiltEncryptedHeader`, `read_encrypted_header`, `build_encrypted_header`. Header MAC is computed/verified by `format::compute_header_mac` / `verify_header_mac`; this module includes the MAC tag in the on-disk byte stream and the parsed result, but the caller is responsible for verifying it after a successful recipient unwrap. |
 | `key/private.rs` | v1 `private.key` byte layout (`PrivateKeyHeader`, `PRIVATE_KEY_HEADER_FIXED_SIZE = 90`), `seal_private_key`, `open_private_key`, `OpenedPrivateKey`. Cleartext fields are bound as AEAD AAD; AEAD cannot distinguish wrong-passphrase from tampered-cleartext, both surface as `KeyFileUnlockFailed`. |
 | `key/public.rs` | v1 `public.key` Bech32 grammar (`encode_recipient_string`, `decode_recipient_string`, `DecodedRecipient`, `RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT`), internal SHA3-256 typed-payload checksum domain-separated from the BIP 173 checksum, fingerprint helper (`fingerprint_hex` over `type_name \|\| key_material`). |
-| `archive/mod.rs` | Module entry point + `IncompleteOutputPolicy` enum (`DeleteOnError` default, `RetainOnError` opt-in for backup recovery). Re-exports the public archive API (`archive`, `unarchive`, `validate_encrypt_input`, `ArchiveLimits`, `IncompleteOutputPolicy`). |
+| `archive/mod.rs` | Module entry point + `IncompleteOutputPolicy` enum (`DeleteOnError` default, `RetainOnError` opt-in for backup recovery). Re-exports the archive API (`prepare_archive` + `PreparedArchive`, `unarchive`, `validate_encrypt_input`, `ArchiveLimits`, `IncompleteOutputPolicy`; the one-call `archive` composition is compiled only for tests and the `fuzzing` feature). |
 | `archive/format.rs` | FCA wire-format constants and primitives: header parse/build (`parse_fca_header` / `write_fca_header`), manifest serialize/parse (`serialize_manifest` / `parse_manifest_bytes` / `checked_manifest_len`), big-endian integer helpers, and the shared `copy_exact_n` exact-size byte copier used by both encode and decode. Per-entry TLV regions are validated via `crypto::tlv::validate_no_known_critical` (FCA v1 defines no per-entry TLV tags). Wire constants: `FCA_MAGIC = b"FCA\0"`, `FCA_VERSION = 0x01`, `FCA_HEADER_SIZE = 27` (includes the `archive_ext_len` field), `FCA_ENTRY_FIXED_SIZE = 18` (includes the per-entry `entry_ext_len` field), `KIND_FILE = 0x01`, `KIND_DIR = 0x02`, `PERMISSION_BITS_MASK = 0o777`. |
 | `archive/model.rs` | FCA model types: `FcaHeader` (parsed header summary including `archive_ext_len`), `ArchiveEntryKind` (File / Directory enum), `ArchiveEntry` (path_utf8, mode, size, opaque `entry_ext: Vec<u8>` carrying the per-entry TLV region, plus writer-only `source_path: Option<PathBuf>`), `Manifest` (entries + total_file_bytes + root_name + root_is_file). |
 | `archive/limits.rs` | `ArchiveLimits` (caps for FCA: entry count, total plaintext bytes, path depth, per-path UTF-8 byte length, serialized manifest byte length, plus extension caps `max_archive_ext_bytes` / `max_entry_ext_bytes` / `max_total_entry_ext_bytes` / `max_tlv_value_bytes`) plus the shared `enforce_per_entry_caps` / `enforce_total_bytes_cap` helpers — applied symmetrically on encrypt (writer-side preflight) and decrypt (extraction-time gate). |
@@ -98,6 +98,9 @@ The "Library Module Roles" table below, plus the "Encryption Pipeline" / "File F
 
 ```
 Input file/dir
+  → archive::prepare_archive() captures the FCA manifest (metadata pass,
+    tree validation, all writer-side caps) before any cipher work or
+    output staging, retaining the source handle/capability
   → generate random 32-byte file_key + 19-byte stream_nonce
   → derive payload_key + header_key from file_key (HKDF-SHA3-256)
   → for each recipient: wrap file_key into a recipient body
@@ -106,8 +109,8 @@ Input file/dir
   → build header (prefix(12) || header_fixed(31) || recipient_entries(N) || ext_bytes)
   → HMAC-SHA3-256 over (prefix || header_fixed || recipient_entries || ext_bytes)
     with header_key → header_mac(32)
-  → write prefix || header || header_mac to output .fcr file
-  → archive::archive() builds an FCA payload (header + manifest +
+  → write prefix || header || header_mac to the output .fcr staging file
+  → PreparedArchive::write_to() emits the FCA payload (header + manifest +
     file content) and streams it through EncryptWriter<File> applying
     XChaCha20-Poly1305 STREAM-BE32 directly to disk, keyed by payload_key
 ```

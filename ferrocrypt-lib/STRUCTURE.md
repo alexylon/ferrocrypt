@@ -808,6 +808,8 @@ Order-independent (HashMap-based parent lookup), so non-canonical manifest order
 
 `archive/encode.rs` owns the FCA writer: source-tree traversal (metadata pass) and content-streaming pass.
 
+The two passes are exposed as two crate-internal phases. `prepare_archive` runs the complete metadata pass — input validation, source-tree walk, tree validation, manifest serialization, every writer-side cap — and returns a `PreparedArchive` holding the manifest, its serialized bytes, and the retained source handle. `PreparedArchive::write_to` emits the FCA header, manifest, and file contents into the payload writer. The orchestrator MUST run `prepare_archive` before any cipher work and before the ciphertext staging file is created, because output staged inside the input tree must never be discovered as source content. Entries that appear under the source root after the prepare phase are not part of the archive. The one-call `archive` composition of both phases is compiled only for tests and the `fuzzing` feature.
+
 It rejects:
 
 - input symlinks (live or dangling);

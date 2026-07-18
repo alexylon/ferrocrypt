@@ -202,13 +202,13 @@ fn build_crafted_fcr(
     ext_bytes: &[u8],
 ) -> Result<(), CryptoError> {
     let built = craft_encrypted_header(file_key, entries, ext_bytes)?;
+    let prepared = crate::archive::prepare_archive(plaintext, ArchiveLimits::default())?;
     crate::container::write_encrypted_file(
-        plaintext,
+        prepared,
         cases,
         Some(&cases.join(name)),
         "suite",
         &built,
-        ArchiveLimits::default(),
     )?;
     Ok(())
 }

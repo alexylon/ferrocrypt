@@ -963,15 +963,38 @@ fn stream_directory_descendant<W: Write>(
     copy_exact_n(&mut file, writer, entry.size, source_shrank_error)
 }
 
-/// Archives a file or directory into the FCA wire format. Returns the
-/// writer for the caller to finalize. The encrypted output's filename
-/// is owned by `fs::paths::encryption_base_name`, resolved by the
-/// orchestrator before archiving starts.
-pub(crate) fn archive<W: Write>(
+/// A source tree captured for archiving: the fully validated manifest,
+/// its serialized bytes, and the retained [`ArchiveSource`] the content
+/// pass streams from.
+///
+/// Produced by [`prepare_archive`], consumed by
+/// [`PreparedArchive::write_to`]. The split lets the orchestrator run
+/// the complete metadata pass before any cipher work and before any
+/// output staging, so the ciphertext staging file created later can
+/// never be discovered as source content when the resolved output path
+/// lies inside the input tree. Content emission reads only the entries
+/// captured here; files that appear under the source root after
+/// [`prepare_archive`] returns are not part of the archive.
+pub(crate) struct PreparedArchive {
+    manifest: Manifest,
+    manifest_bytes: Vec<u8>,
+    entry_count: u32,
+    manifest_len: u32,
+    source: ArchiveSource,
+}
+
+/// Runs the FCA metadata pass over `input_path`: input validation,
+/// source-tree walk, tree validation, manifest serialization, and every
+/// writer-side cap check. Performs no output and no cipher work.
+///
+/// The returned [`PreparedArchive`] holds the open source handle
+/// (single-file root) or directory capability (directory root), so the
+/// later content pass never resolves the user-supplied path through
+/// the kernel a second time.
+pub(crate) fn prepare_archive(
     input_path: impl AsRef<Path>,
-    mut writer: W,
     limits: ArchiveLimits,
-) -> Result<W, CryptoError> {
+) -> Result<PreparedArchive, CryptoError> {
     let input_path = input_path.as_ref();
     let limits = limits.validate()?;
 
@@ -1006,29 +1029,63 @@ pub(crate) fn archive<W: Write>(
     })?;
     enforce_manifest_len_cap(u64::from(manifest_len), &limits)?;
 
-    // FCA v1 writers always emit `archive_ext_len = 0`; the archive-
-    // level TLV region exists in the wire layout but defines no v1
-    // tags, so writers must not emit any bytes there.
-    writer = write_fca_header(
-        writer,
+    Ok(PreparedArchive {
+        manifest,
+        manifest_bytes,
         entry_count,
-        0,
         manifest_len,
-        manifest.total_file_bytes,
-    )?;
-    // Plain `?` so a `StreamError` marker from the encrypt stream
-    // converts to its typed variant via `From<io::Error>`.
-    writer.write_all(&manifest_bytes)?;
+        source,
+    })
+}
 
-    // Pass 2: stream file contents in canonical manifest order, from
-    // the handle or capability captured by pass 1.
-    for entry in &manifest.entries {
-        if entry.kind == ArchiveEntryKind::File {
-            stream_source_file(entry, &source, &mut writer)?;
+impl PreparedArchive {
+    /// Streams the captured archive into `writer`: FCA header,
+    /// serialized manifest, then file contents in canonical manifest
+    /// order from the retained source. Returns the writer for the
+    /// caller to finalize.
+    pub(crate) fn write_to<W: Write>(self, mut writer: W) -> Result<W, CryptoError> {
+        // FCA v1 writers always emit `archive_ext_len = 0`; the archive-
+        // level TLV region exists in the wire layout but defines no v1
+        // tags, so writers must not emit any bytes there.
+        writer = write_fca_header(
+            writer,
+            self.entry_count,
+            0,
+            self.manifest_len,
+            self.manifest.total_file_bytes,
+        )?;
+        // Plain `?` so a `StreamError` marker from the encrypt stream
+        // converts to its typed variant via `From<io::Error>`.
+        writer.write_all(&self.manifest_bytes)?;
+
+        // Pass 2: stream file contents in canonical manifest order,
+        // from the handle or capability captured by pass 1.
+        for entry in &self.manifest.entries {
+            if entry.kind == ArchiveEntryKind::File {
+                stream_source_file(entry, &self.source, &mut writer)?;
+            }
         }
-    }
 
-    Ok(writer)
+        Ok(writer)
+    }
+}
+
+/// Archives a file or directory into the FCA wire format in one call:
+/// [`prepare_archive`] followed by [`PreparedArchive::write_to`].
+/// Returns the writer for the caller to finalize.
+///
+/// The production encrypt pipeline calls the two phases separately so
+/// the metadata pass completes before the ciphertext staging file
+/// exists; this composition serves callers that own no output staging
+/// — the in-module tests and the fuzz seed generator — and is compiled
+/// only for them.
+#[cfg(any(test, feature = "fuzzing"))]
+pub(crate) fn archive<W: Write>(
+    input_path: impl AsRef<Path>,
+    writer: W,
+    limits: ArchiveLimits,
+) -> Result<W, CryptoError> {
+    prepare_archive(input_path, limits)?.write_to(writer)
 }
 
 #[cfg(test)]
@@ -1113,6 +1170,47 @@ mod tests {
         let final_path = round_trip(&src_file, out.path());
         assert_eq!(final_path, out.path().join("hello.txt"));
         assert_eq!(fs::read(&final_path).unwrap(), b"Hello, world!");
+    }
+
+    /// The two-phase writer snapshots the source at prepare time:
+    /// entries created under the source root after `prepare_archive`
+    /// returns — such as the encrypt pipeline's own ciphertext staging
+    /// file when the output path lies inside the input tree — are not
+    /// discovered by the content pass and never enter the archive.
+    #[test]
+    fn prepare_then_write_excludes_files_created_after_prepare() {
+        let src = tempfile::TempDir::new().unwrap();
+        let out = tempfile::TempDir::new().unwrap();
+        let dir = src.path().join("docs");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("a.txt"), b"original").unwrap();
+
+        let prepared = prepare_archive(&dir, ArchiveLimits::default()).unwrap();
+        fs::write(dir.join("late.txt"), b"created after prepare").unwrap();
+
+        let buf = prepared.write_to(Vec::new()).unwrap();
+        let restored_root = unarchive(
+            Cursor::new(buf),
+            out.path(),
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::DeleteOnError,
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(restored_root.join("a.txt")).unwrap(), b"original");
+        assert!(
+            !restored_root.join("late.txt").exists(),
+            "file created after prepare must not be archived"
+        );
+        let names: Vec<_> = fs::read_dir(&restored_root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            names.len(),
+            1,
+            "restored tree must hold only a.txt, got {names:?}"
+        );
     }
 
     #[test]

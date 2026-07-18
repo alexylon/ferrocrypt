@@ -60,6 +60,32 @@ fn pass() -> SecretString {
     SecretString::from(PASSPHRASE.to_string())
 }
 
+/// Relative paths of every entry under `root`, sorted, `/`-separated.
+/// Used by the output-inside-input regressions to compare a restored
+/// tree against the exact pre-encryption input shape.
+fn tree_names(root: &Path) -> Vec<String> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let rel = path
+                .strip_prefix(root)
+                .unwrap()
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            out.push(rel);
+            if path.is_dir() {
+                walk(&path, root, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}
+
 #[test]
 fn encryptor_passphrase_round_trip() {
     let work = fresh_workspace("passphrase_round_trip");
@@ -81,6 +107,89 @@ fn encryptor_passphrase_round_trip() {
     };
     let restored_bytes = fs::read(decrypted.output_path).unwrap();
     assert_eq!(restored_bytes, b"hello passphrase api");
+}
+
+/// Encrypting a directory with the output written inside that same
+/// directory (default `{input}/input.fcr` destination) must archive the
+/// directory exactly as it was before the operation. The ciphertext
+/// staging file is created inside the input tree while encryption runs;
+/// the source metadata pass completes first, so neither the staging
+/// name nor the final `.fcr` may appear in the restored tree.
+#[test]
+fn encrypt_directory_to_output_inside_input_tree() {
+    let work = fresh_workspace("output_inside_input_default");
+    let input = work.join("input");
+    fs::create_dir_all(&input).unwrap();
+    fs::write(input.join("a.txt"), b"hello inside-output").unwrap();
+
+    let outcome = fast_passphrase_encryptor(pass())
+        .write(&input, &input, |_| {})
+        .expect("encrypt with output inside the input directory");
+    assert_eq!(outcome.output_path, input.join("input.fcr"));
+
+    let restore = work.join("restored");
+    fs::create_dir_all(&restore).unwrap();
+    let decrypted = match Decryptor::open(&outcome.output_path).expect("open") {
+        Decryptor::Passphrase(d) => d.decrypt(pass(), &restore, |_| {}).expect("decrypt"),
+        Decryptor::PrivateKey(_) => panic!("expected passphrase decryptor"),
+        _ => unreachable!("Decryptor is non_exhaustive; v1 has only Passphrase + PrivateKey"),
+    };
+
+    let names = tree_names(&decrypted.output_path);
+    assert_eq!(
+        names,
+        vec!["a.txt".to_string()],
+        "restored tree must match the pre-encryption input exactly"
+    );
+    assert_eq!(
+        fs::read(decrypted.output_path.join("a.txt")).unwrap(),
+        b"hello inside-output"
+    );
+}
+
+/// Same guarantee for an explicit `save_as` destination in a nested
+/// subdirectory of the input, with a payload larger than one 64 KiB
+/// chunk so the encrypt stream flushes ciphertext into the staging file
+/// while source contents are still being read.
+#[test]
+fn encrypt_directory_to_save_as_inside_nested_subdirectory() {
+    let work = fresh_workspace("output_inside_input_save_as");
+    let input = work.join("input");
+    let nested = input.join("sub");
+    fs::create_dir_all(&nested).unwrap();
+    let big: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+    fs::write(input.join("a.txt"), b"small").unwrap();
+    fs::write(nested.join("big.bin"), &big).unwrap();
+
+    let save_as = nested.join("out.fcr");
+    let outcome = fast_passphrase_encryptor(pass())
+        .save_as(&save_as)
+        .write(&input, &work, |_| {})
+        .expect("encrypt with save_as inside a nested input subdirectory");
+    assert_eq!(outcome.output_path, save_as);
+
+    let restore = work.join("restored");
+    fs::create_dir_all(&restore).unwrap();
+    let decrypted = match Decryptor::open(&outcome.output_path).expect("open") {
+        Decryptor::Passphrase(d) => d.decrypt(pass(), &restore, |_| {}).expect("decrypt"),
+        Decryptor::PrivateKey(_) => panic!("expected passphrase decryptor"),
+        _ => unreachable!("Decryptor is non_exhaustive; v1 has only Passphrase + PrivateKey"),
+    };
+
+    let names = tree_names(&decrypted.output_path);
+    assert_eq!(
+        names,
+        vec![
+            "a.txt".to_string(),
+            "sub".to_string(),
+            "sub/big.bin".to_string(),
+        ],
+        "restored tree must match the pre-encryption input exactly"
+    );
+    assert_eq!(
+        fs::read(decrypted.output_path.join("sub/big.bin")).unwrap(),
+        big
+    );
 }
 
 #[test]

@@ -513,16 +513,23 @@ pub(crate) fn resolve_encrypted_output_path(
     }
 }
 
-/// Streams `input_path` into an encrypted `.fcr` file at the resolved
-/// output path, using the supplied [`BuiltEncryptedHeader`] bundle.
+/// Streams a prepared FCA archive into an encrypted `.fcr` file at the
+/// resolved output path, using the supplied [`BuiltEncryptedHeader`]
+/// bundle.
 ///
 /// On-disk byte order: `prefix(12) || header(31 + entries + ext) || mac(32)
 /// || payload(STREAM)`. The header bytes, MAC, payload key, and stream
 /// nonce all live in `built` so that they cannot be paired with material
 /// from a different `file_key`/`stream_nonce`. The payload is
 /// XChaCha20-Poly1305 STREAM-BE32 keyed by `built.payload_key` over the
-/// FCA archive of `input_path`. No plaintext intermediate files touch
+/// archive captured in `prepared`. No plaintext intermediate files touch
 /// disk: the FCA stream is piped directly through [`EncryptWriter`].
+///
+/// Taking an [`archive::PreparedArchive`] rather than the input path is
+/// load-bearing: the source metadata pass already ran before this
+/// function creates the ciphertext staging tempfile, so an output path
+/// that resolves inside the input tree cannot pull the staging file
+/// into the archive as source content.
 ///
 /// Atomicity: the file is written under a `.ferrocrypt-*.incomplete`
 /// tempfile in the destination's parent directory, then renamed via
@@ -532,12 +539,11 @@ pub(crate) fn resolve_encrypted_output_path(
 /// tempfile is created, so an unrelated file at the destination is
 /// never touched.
 pub(crate) fn write_encrypted_file(
-    input_path: &Path,
+    prepared: archive::PreparedArchive,
     output_dir: &Path,
     output_file: Option<&Path>,
     base_name: &str,
     built: &BuiltEncryptedHeader,
-    archive_limits: archive::ArchiveLimits,
 ) -> Result<PathBuf, CryptoError> {
     let output_path = resolve_encrypted_output_path(output_dir, output_file, base_name);
     reject_occupied(&output_path, OUTPUT_LABEL)?;
@@ -562,7 +568,7 @@ pub(crate) fn write_encrypted_file(
     tmp.as_file_mut().write_all(&built.header_mac)?;
 
     let encrypt_writer = payload_encryptor(&built.payload_key, &built.stream_nonce, tmp);
-    let encrypt_writer = archive::archive(input_path, encrypt_writer, archive_limits)?;
+    let encrypt_writer = prepared.write_to(encrypt_writer)?;
     let tmp = encrypt_writer.finish()?;
     atomic::sync_file_durable(tmp.as_file())?;
 

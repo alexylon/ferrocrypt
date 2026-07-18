@@ -1387,6 +1387,10 @@ reparse-safe open mode such as `FILE_FLAG_OPEN_REPARSE_POINT` followed by
 post-open metadata validation.
 
 The writer MUST build a metadata-only manifest before emitting the FCA header.
+If the writer stages or writes output at a location the source tree can contain,
+the metadata pass MUST complete before that output is created, because output
+captured as source content makes the archive no longer represent the source
+tree.
 The metadata pass records entry kind, canonical FCA path string, source path or
 equivalent reopen information, mode, logical regular-file size, and entry
 extension bytes. The metadata pass MUST apply path validation, duplicate

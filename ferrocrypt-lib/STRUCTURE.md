@@ -512,7 +512,7 @@ It contains:
 
 - `RecipientEntry` for parsed entries;
 - `RecipientBody` for scheme body bytes plus type name;
-- canonical recipient-entry serialization. Production code uses `RecipientEntry::to_bytes_checked`, which runs every rule `parse_one` enforces (`validate_type_name_grammar`, reserved-flag bits, `body.len() <= BODY_LEN_MAX`) before emitting bytes. `container::build_encrypted_header` routes through it so an entry the matching reader would reject cannot be serialised. The infallible `to_bytes` is gated `#[cfg(test)]` and used only by tests that intentionally produce out-of-spec bytes.
+- canonical recipient-entry serialization. Production code uses `RecipientEntry::to_bytes_checked`, whose validation half is `RecipientEntry::checked_wire_len` — the single writer-side rule set matching `parse_one` (`validate_type_name_grammar`, reserved-flag bits, `body.len() <= BODY_LEN_MAX`), which also returns the entry's exact on-wire byte length without serialising. `container::build_encrypted_header` sums `checked_wire_len` per entry to gate the aggregate header length against `HEADER_LEN_MAX` before buffering any entry bytes, then routes serialisation through `to_bytes_checked`, so an entry the matching reader would reject cannot be serialised and an over-cap entry list rejects before allocation. The infallible `to_bytes` is gated `#[cfg(test)]` and used only by tests that intentionally produce out-of-spec bytes.
 - strict framing parsing;
 - unknown-body opacity.
 

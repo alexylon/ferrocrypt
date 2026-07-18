@@ -414,6 +414,10 @@ pub(crate) fn read_encrypted_header<R: Read>(
 /// regions to write in order (prefix, header, MAC) plus `stream_nonce`
 /// and `payload_key` for the payload streamer. Bundling these together
 /// makes a (header, payload_key, stream_nonce) mismatch unrepresentable.
+///
+/// The aggregate header length is checked against the 16 MiB structural
+/// maximum before recipient entries are serialised. Oversized recipient
+/// lists therefore fail without allocating the aggregate entry buffer.
 pub(crate) fn build_encrypted_header(
     recipient_entries: &[RecipientEntry],
     ext_bytes: &[u8],
@@ -421,31 +425,24 @@ pub(crate) fn build_encrypted_header(
     payload_key: PayloadKey,
     header_key: &HeaderKey,
 ) -> Result<BuiltEncryptedHeader, CryptoError> {
-    // Count cap before the serialization loop, so an oversized entry
-    // list is rejected before the entries buffer is built (caps before
-    // allocation), independent of the caller's preflight. The
-    // saturating cast is honest: a count at `u16::MAX` always trips
-    // `check_recipient_count`. `validate_structural` re-checks the
-    // count on the assembled header below.
+    // Reject an invalid count before per-entry validation. Saturation is
+    // safe here because `u16::MAX` always exceeds the structural cap.
+    // `HeaderFixed` revalidates the assembled fields below.
     let recipient_count: u16 = recipient_entries.len().try_into().unwrap_or(u16::MAX);
     check_recipient_count(recipient_count)?;
 
-    let mut entries_bytes = Vec::new();
+    // Validate each entry and compute its exact wire length before
+    // allocating the aggregate buffer. This preserves per-entry errors
+    // while enforcing the header cap before serialisation.
+    let mut entries_len_u64: u64 = 0;
     for entry in recipient_entries {
-        entries_bytes.extend_from_slice(&entry.to_bytes_checked()?);
+        entries_len_u64 = entries_len_u64
+            .checked_add(entry.checked_wire_len()? as u64)
+            .ok_or(CryptoError::InvalidFormat(FormatDefect::MalformedHeader))?;
     }
-    // Saturating casts: structural-range rejections (`ext_len > MAX`,
-    // section-length consistency) are emitted by
-    // `HeaderFixed::validate_structural` below. Casts at u32::MAX
-    // always trip the corresponding `check_*` helper, so the
-    // saturating fallback is honest about "too big to represent" while
-    // still surfacing the typed cap-exceeded variant.
-    let recipient_entries_len: u32 = entries_bytes.len().try_into().unwrap_or(u32::MAX);
-    let ext_len: u32 = ext_bytes.len().try_into().unwrap_or(u32::MAX);
-
     let header_len_u64 = (HEADER_FIXED_SIZE as u64)
-        .checked_add(recipient_entries_len as u64)
-        .and_then(|v| v.checked_add(ext_len as u64))
+        .checked_add(entries_len_u64)
+        .and_then(|v| v.checked_add(ext_bytes.len() as u64))
         .ok_or(CryptoError::InvalidFormat(FormatDefect::MalformedHeader))?;
     // Compare against the structural max while the value is still u64,
     // so the rejection reports the real computed length; only an
@@ -459,6 +456,15 @@ pub(crate) fn build_encrypted_header(
     let header_len: u32 = header_len_u64.try_into().map_err(|_| {
         CryptoError::InternalInvariant("Header length narrowing failed after structural check")
     })?;
+
+    // The aggregate cap above guarantees that the capacity and casts fit
+    // `u32` and `usize` on every supported target.
+    let mut entries_bytes = Vec::with_capacity(entries_len_u64 as usize);
+    for entry in recipient_entries {
+        entries_bytes.extend_from_slice(&entry.to_bytes_checked()?);
+    }
+    let recipient_entries_len: u32 = entries_bytes.len().try_into().unwrap_or(u32::MAX);
+    let ext_len: u32 = ext_bytes.len().try_into().unwrap_or(u32::MAX);
 
     let fixed = HeaderFixed {
         header_flags: 0,
@@ -749,6 +755,34 @@ mod tests {
                 + argon2id::TYPE_NAME.len()
                 + argon2id::BODY_LENGTH) as u32
             + format::HEADER_LEN_MAX;
+        match err {
+            CryptoError::InvalidFormat(FormatDefect::OversizedHeader { header_len }) => {
+                assert_eq!(header_len, expected_len);
+            }
+            other => panic!("expected OversizedHeader with the computed length, got {other:?}"),
+        }
+    }
+
+    /// Exercises the aggregate header cap through recipient bytes rather
+    /// than `ext_bytes`, and verifies the reported computed length.
+    #[test]
+    fn build_rejects_oversized_entries_with_computed_length() {
+        let DerivedSubkeys {
+            payload_key,
+            header_key,
+        } = dummy_subkeys();
+        let entry = dummy_entry(x25519::TYPE_NAME, format::BODY_LEN_MAX as usize);
+        let err = build_encrypted_header(
+            &[entry],
+            b"",
+            [0u8; STREAM_NONCE_SIZE],
+            payload_key,
+            &header_key,
+        )
+        .unwrap_err();
+        let expected_len = HEADER_FIXED_SIZE as u32
+            + (crate::recipient::entry::ENTRY_HEADER_SIZE + x25519::TYPE_NAME.len()) as u32
+            + format::BODY_LEN_MAX;
         match err {
             CryptoError::InvalidFormat(FormatDefect::OversizedHeader { header_len }) => {
                 assert_eq!(header_len, expected_len);

@@ -4,6 +4,9 @@ All notable changes to FerroCrypt are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **Error messages that embed an attacker-chosen name now stay within the intended display length.** File names, archive paths, and echoed recipient strings are escaped before they appear in an error message, but the truncation limit previously counted the original characters rather than the escaped text — so a name built entirely from characters that need escaping could stretch an error line to about ten times the intended width. The limit now applies to the text as displayed, matching how over-long recipient type names were already bounded. Names that fit within the limit are unchanged.
+
 ## [0.3.0-rc.2] - 2026-07-12
 
 ### Added

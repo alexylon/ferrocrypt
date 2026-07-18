@@ -114,19 +114,18 @@ impl RecipientEntry {
         out
     }
 
-    /// Writer-side checked counterpart of [`Self::parse_one`]: runs
-    /// every shape rule the reader enforces — `type_name` length and
-    /// grammar, reserved flag bits, `body.len() <= BODY_LEN_MAX` — so
-    /// the writer rejects the same out-of-spec entries the reader
-    /// rejects. For entries with more than one defect, the exact
-    /// `FormatDefect` label may differ because the writer validates
-    /// from typed fields while the reader validates from wire bytes.
-    /// Used by `build_encrypted_header`.
-    pub(crate) fn to_bytes_checked(&self) -> Result<Vec<u8>, CryptoError> {
-        // Length before grammar, mirroring `parse_one`: the reader
-        // rejects an empty or over-255-byte name as a framing defect
-        // before the grammar runs, and this writer must emit the same
-        // defect for the same input.
+    /// Validates an in-memory entry against the writer-side framing rules
+    /// and returns its exact wire length without serialising it. Aggregate
+    /// length preflights and [`Self::to_bytes_checked`] share this path, so
+    /// validation cannot drift from serialisation.
+    ///
+    /// The checks mirror [`Self::parse_one`]: type-name length and grammar,
+    /// reserved flag bits, and `body.len() <= BODY_LEN_MAX`. When an entry
+    /// has multiple defects, the writer and reader may report different
+    /// variants because they validate different representations.
+    pub(crate) fn checked_wire_len(&self) -> Result<usize, CryptoError> {
+        // Match `parse_one`: invalid framing length takes precedence over
+        // type-name grammar.
         if self.type_name.is_empty() || self.type_name.len() > TYPE_NAME_MAX_LEN {
             return Err(CryptoError::InvalidFormat(
                 FormatDefect::MalformedRecipientEntry,
@@ -143,13 +142,18 @@ impl RecipientEntry {
                 FormatDefect::MalformedRecipientEntry,
             ));
         }
-        // Casts are safe: `validate_type_name_grammar` bounds the
-        // name at 255 bytes; the body cap above bounds the body at
-        // `BODY_LEN_MAX < u32::MAX`.
+        Ok(ENTRY_HEADER_SIZE + self.type_name.len() + self.body.len())
+    }
+
+    /// Serialises the canonical recipient-entry framing after validating it
+    /// through [`Self::checked_wire_len`].
+    pub(crate) fn to_bytes_checked(&self) -> Result<Vec<u8>, CryptoError> {
+        let wire_len = self.checked_wire_len()?;
+        // Safe after `checked_wire_len`: the name fits `u16` and the
+        // body fits `u32`.
         let type_name_len = self.type_name.len() as u16;
         let body_len = self.body.len() as u32;
-        let mut out =
-            Vec::with_capacity(ENTRY_HEADER_SIZE + self.type_name.len() + self.body.len());
+        let mut out = Vec::with_capacity(wire_len);
         out.extend_from_slice(&type_name_len.to_be_bytes());
         out.extend_from_slice(&self.recipient_flags.to_be_bytes());
         out.extend_from_slice(&body_len.to_be_bytes());
@@ -319,6 +323,33 @@ mod tests {
         let (parsed, _) = RecipientEntry::parse_one(&bytes, BODY_LEN_LOCAL_CAP_DEFAULT).unwrap();
         assert_eq!(parsed, entry);
         assert!(parsed.is_critical());
+    }
+
+    /// Verifies that aggregate-length preflight and serialisation remain in
+    /// lockstep.
+    #[test]
+    fn checked_wire_len_matches_serialized_length() {
+        let entry = RecipientEntry {
+            type_name: x25519::TYPE_NAME.to_owned(),
+            recipient_flags: 0,
+            body: vec![0xEF; x25519::BODY_LENGTH],
+        };
+        let wire_len = entry.checked_wire_len().unwrap();
+        assert_eq!(wire_len, entry.to_bytes_checked().unwrap().len());
+        assert_eq!(
+            wire_len,
+            ENTRY_HEADER_SIZE + x25519::TYPE_NAME.len() + x25519::BODY_LENGTH
+        );
+
+        let bad = RecipientEntry {
+            type_name: "X25519".to_owned(),
+            recipient_flags: 0,
+            body: vec![0u8; x25519::BODY_LENGTH],
+        };
+        match bad.checked_wire_len() {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedTypeName)) => {}
+            other => panic!("expected MalformedTypeName, got {other:?}"),
+        }
     }
 
     /// A valid entry round-trips through `to_bytes_checked` and

@@ -13,14 +13,13 @@ use crate::recipient::policy::MixingPolicy;
 const TYPE_NAME_DISPLAY_MAX: usize = 13;
 const _: () = assert!(TYPE_NAME_DISPLAY_MAX >= 1);
 
-/// Writes `s` to `f`, escaping each character via [`write_sanitized_char`] and
-/// bounding the escaped output to `max` rendered chars, including a trailing
-/// `…` when truncation occurs. The function never splits a UTF-8 code point or
-/// a backslash escape sequence; if the next escaped character would not fit, it
-/// emits `…` instead. Shared by [`DisplayableTypeName`] and
-/// [`DisplayableMarker`].
-fn write_truncated_sanitized(
-    f: &mut std::fmt::Formatter<'_>,
+/// Escapes `s` into `w` and limits the result to `max` rendered
+/// characters, including a trailing `…` when truncated. The function
+/// never splits a code point or escape sequence. This is the shared
+/// truncation rule for [`DisplayableTypeName`], [`DisplayableMarker`],
+/// and [`sanitize_for_display`].
+fn write_truncated_sanitized<W: std::fmt::Write>(
+    w: &mut W,
     s: &str,
     max: usize,
 ) -> std::fmt::Result {
@@ -32,11 +31,11 @@ fn write_truncated_sanitized(
         let escaped_len = escaped.chars().count();
         let ellipsis_reserve = usize::from(chars.peek().is_some());
         if written + escaped_len + ellipsis_reserve <= max {
-            f.write_str(&escaped)?;
+            w.write_str(&escaped)?;
             written += escaped_len;
         } else {
             if written < max {
-                f.write_str("…")?;
+                w.write_str("…")?;
             }
             return Ok(());
         }
@@ -101,9 +100,9 @@ fn recipient_unwrap_message(type_name: &str) -> &'static str {
 /// same condition and must read identically, so both render this one string.
 const HEADER_CORRUPTED_MESSAGE: &str = "Decryption failed: file header was modified or corrupted";
 
-/// Maximum number of `chars` of untrusted text [`sanitize_for_display`]
-/// keeps before truncating with `…`. Long enough to locate an entry in
-/// a large archive, short enough that one malicious path cannot flood a
+/// Maximum number of rendered characters returned by
+/// [`sanitize_for_display`], including escape sequences and any trailing
+/// ellipsis. This keeps one attacker-controlled value from dominating a
 /// terminal or log line.
 const UNTRUSTED_TEXT_DISPLAY_MAX: usize = 64;
 
@@ -121,26 +120,20 @@ fn write_sanitized_char<W: std::fmt::Write>(w: &mut W, c: char) -> std::fmt::Res
     }
 }
 
-/// Renders untrusted text for embedding in an error message.
+/// Renders untrusted text for use in an error message.
 ///
-/// Printable ASCII passes through unchanged; every other character —
-/// ASCII control bytes, and all non-ASCII including direction-override
-/// and zero-width code points — is rendered as a backslash escape
-/// (`\n`, `\u{202e}`, …), so terminal-bound error text cannot carry
-/// escape sequences and cannot be visually reordered or spoofed. Input
-/// longer than [`UNTRUSTED_TEXT_DISPLAY_MAX`] chars is truncated with a
-/// trailing `…`. Used wherever an error message embeds text an attacker
-/// may have chosen: archive entry paths, source-tree file names, and
-/// the recipient-string parser's input echo.
+/// Printable ASCII is preserved. Control characters and non-ASCII code
+/// points are rendered with Rust-style escapes, preventing terminal control
+/// sequences and misleading text direction. Output is limited to
+/// [`UNTRUSTED_TEXT_DISPLAY_MAX`] rendered characters through
+/// [`write_truncated_sanitized`].
+///
+/// Use this for attacker-controlled archive paths, source-tree names, and
+/// echoed recipient strings.
 pub(crate) fn sanitize_for_display(text: &str) -> String {
     let mut out = String::new();
-    for (i, c) in text.chars().enumerate() {
-        if i >= UNTRUSTED_TEXT_DISPLAY_MAX {
-            out.push('…');
-            break;
-        }
-        let _ = write_sanitized_char(&mut out, c);
-    }
+    // Writing into a `String` cannot fail.
+    let _ = write_truncated_sanitized(&mut out, text, UNTRUSTED_TEXT_DISPLAY_MAX);
     out
 }
 
@@ -1568,8 +1561,8 @@ mod tests {
         let rendered = sanitize_for_display(&long);
         assert_eq!(
             rendered.chars().count(),
-            UNTRUSTED_TEXT_DISPLAY_MAX + 1,
-            "64 kept chars plus the ellipsis"
+            UNTRUSTED_TEXT_DISPLAY_MAX,
+            "63 kept chars plus the ellipsis fill the rendered budget"
         );
         assert!(rendered.ends_with('…'));
 
@@ -1578,6 +1571,24 @@ mod tests {
             sanitize_for_display(&exact),
             exact,
             "at-cap input is untouched"
+        );
+    }
+
+    /// Escaped input must remain within the rendered output budget.
+    #[test]
+    fn sanitize_for_display_bounds_rendered_chars_for_escaped_input() {
+        let hostile: String = "\u{202e}".repeat(UNTRUSTED_TEXT_DISPLAY_MAX);
+        let rendered = sanitize_for_display(&hostile);
+        assert!(
+            rendered.chars().count() <= UNTRUSTED_TEXT_DISPLAY_MAX,
+            "rendered budget exceeded: {} chars",
+            rendered.chars().count()
+        );
+        assert!(rendered.ends_with('…'));
+        assert!(rendered.starts_with("\\u{202e}"));
+        assert!(
+            !rendered.contains('\u{202e}'),
+            "raw bidi override leaked: {rendered:?}"
         );
     }
 

@@ -120,6 +120,23 @@ regression net, regenerated when the format intentionally changes).
   per-user folders are not reachable. Closing the directory window
   fully would require unsafe Windows API code, which the crate
   currently forbids (`#![forbid(unsafe_code)]`).
+- **Generated key pairs are committed crash-safely, `private.key`
+  first.** Key generation writes and flushes both key files completely
+  before either receives its final name, commits `private.key` first,
+  and flushes the output folder's records after each commit. An
+  interruption at any point — including power loss — therefore leaves
+  either no key files or a lone `private.key` (harmless: nothing can
+  be encrypted to it), never a usable `public.key` whose private key
+  was lost. A genuine flush failure stops key generation with an error
+  and removes what was already committed; in the one corner where
+  removing `private.key` could itself recreate the dangerous state —
+  the flush after the `public.key` commit fails — `private.key` is
+  deliberately left behind and is safe to delete. A few filesystems
+  (some network filesystems among them) cannot flush a folder's
+  records at all and report the flush as unsupported; on those, the
+  power-loss half of this guarantee depends on the filesystem's own
+  ordering, while protection against a killed or crashed process is
+  unaffected.
 - **Pre-v1 files are not forward-compatible.** Older FerroCrypt files
   and key pairs use a different format family. Decrypt them with the
   release that produced them and re-encrypt with the current release.

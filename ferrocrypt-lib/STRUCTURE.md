@@ -929,6 +929,21 @@ It contains:
   (`errno_not_supported`; macOS smbfs among them). The extraction-side
   twin for `cap_std::fs::File` handles lives in `archive/platform.rs`;
   the two share the fallback condition;
+- required directory-entry durability: `sync_dir_durable` opens a
+  directory (`O_DIRECTORY` read handle on Unix; backup-semantics write
+  handle on Windows, because `FlushFileBuffers` needs write access)
+  and flushes its entries with the same strongest-first tier as
+  `sync_file_durable`, but returns flush failures to the caller
+  instead of swallowing them, because syncing a file does not make the
+  directory entry naming it durable. Only errors meaning the
+  filesystem cannot open or flush a directory at all count as success
+  (`dir_sync_unsupported`: unsupported-operation errnos, the
+  `EINVAL`/`EBADF` directory-fsync refusals, and access-denied for
+  write-only directories); no barrier exists there and the caller's
+  power-loss guarantee narrows to process interruption. Key
+  generation's key-file commit is the consumer; the best-effort
+  `sync_parent_dir` remains for outputs whose loss is recoverable
+  (encryption output, decrypt promotion);
 - cleanup on encryption failure;
 - `.incomplete` behavior on decryption failure.
 
@@ -1126,7 +1141,7 @@ Ownership split:
 
 - X25519 key generation lives in `recipient/native/x25519.rs`.
 - Key serialization lives in `key/`.
-- Key-file staging lives in `protocol.rs` key generation, through the atomic-output helpers in `fs/`. Both key files are staged and synced before either is committed to its final name, and `private.key` commits first, because an interruption must not leave `public.key` on disk without its matching `private.key`.
+- Key-file staging lives in `protocol.rs` key generation, through the atomic-output helpers in `fs/`. Both key files are staged and synced before either is committed to its final name, `private.key` commits first, and the output directory is flushed (`fs/atomic.rs::sync_dir_durable`) after each commit, because an interruption — process death or power loss — must not leave `public.key` on disk without its matching `private.key`. A genuine flush failure aborts the commit and rolls back what was committed; after the `public.key` commit it removes `public.key` only, keeping `private.key`, because un-flushed removals may persist in either order and removing both could resurrect the orphaned-`public.key` state. On filesystems that cannot flush a directory at all the guarantee narrows to process interruption.
 
 `KeyPairGenerator` mirrors `Encryptor`'s reader-aligned cap rule for the passphrase that seals `private.key`: `kdf_params.mem_cost <= kdf_limit.max_mem_cost_kib` (default 1 GiB) is enforced at `write` time before Argon2id runs. Above-default `mem_cost` rejects with `CryptoError::KdfResourceCapExceeded`; the unlocking [`PrivateKeyDecryptor`] must be configured via [`PrivateKeyDecryptor::kdf_limit`] with a matching [`KdfLimit`].
 

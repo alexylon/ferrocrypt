@@ -840,15 +840,29 @@ impl KeyPairGenerator {
     /// `public.key` into `output_dir`.
     ///
     /// Both files are fully written and synced before either appears
-    /// under its final name, and `private.key` is committed first, so
-    /// an interruption (crash, power loss) cannot leave a usable
-    /// `public.key` behind without its matching `private.key`.
+    /// under its final name, `private.key` is committed first, and the
+    /// output directory is flushed to stable storage after each
+    /// commit, so an interruption (crash, kill, power loss) cannot
+    /// leave a usable `public.key` behind without its matching
+    /// `private.key`. On success, both key files and the directory
+    /// entries naming them have reached stable storage. A filesystem
+    /// that reports directory flushing as unsupported provides no such
+    /// barrier; there the power-loss half of this guarantee depends on
+    /// the filesystem's own ordering, while the process-interruption
+    /// half is unaffected.
     ///
     /// # Errors
     ///
     /// Returns [`CryptoError::InvalidInput`] if the passphrase is empty, KDF
     /// parameters are outside the accepted writer policy, or either key file
-    /// already exists. Returns [`CryptoError::Io`] for filesystem failures.
+    /// already exists. Returns [`CryptoError::Io`] for filesystem failures,
+    /// including a genuine directory-flush failure. A failed generation
+    /// removes the key files it already committed, with one deliberate
+    /// exception: if the flush after the `public.key` commit fails, only
+    /// `public.key` is removed, because removing `private.key` without a
+    /// durable record of the `public.key` removal could leave exactly the
+    /// orphaned-`public.key` state this ordering exists to prevent. A
+    /// leftover `private.key` is harmless and safe to delete.
     pub fn write(
         self,
         output_dir: impl AsRef<Path>,

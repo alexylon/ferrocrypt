@@ -539,9 +539,11 @@ fn failure_for(
 ///   (public keys are not secret).
 ///
 /// Both files are fully staged and synced before either is committed
-/// to its final name, and `private.key` commits first, so an
-/// interruption cannot leave `public.key` on disk without its
-/// matching `private.key` (see `commit_key_pair_files`).
+/// to its final name, `private.key` commits first, and the output
+/// directory's entries are flushed to stable storage after each
+/// commit, so an interruption — process death or power loss — cannot
+/// leave `public.key` on disk without its matching `private.key`
+/// (see `commit_key_pair_files`).
 ///
 /// # Caller obligations
 ///
@@ -662,34 +664,84 @@ pub(crate) fn generate_key_pair(
 
 /// Commits two fully staged key-file tempfiles to their final names
 /// with no-clobber semantics: `private.key` first, `public.key`
-/// second.
+/// second, with a directory-durability barrier
+/// (`fs::atomic::sync_dir_durable`) after each commit.
 ///
 /// The commit order is a durability invariant. `public.key` is the
 /// half that attracts ciphertext — anyone holding it can encrypt to
 /// this key pair — so it must never exist at its final name unless
-/// the matching `private.key` is already durable beside it. An
-/// interruption between the two commits (crash, kill, power loss)
-/// leaves at worst a private-only directory, which decrypts nothing
-/// and endangers nothing.
+/// the matching `private.key` is already durable beside it. Renaming
+/// `private.key` first covers process death; power loss is covered
+/// only by the barrier, because a filesystem may persist the second
+/// rename and lose the first unless the directory is flushed between
+/// them. The barrier after the `public.key` commit extends the
+/// guarantee to the caller: on success, both key files and the
+/// directory entries naming them are on stable storage before the
+/// recipient string is handed out. On filesystems that cannot flush
+/// a directory at all the barrier reports success without one (see
+/// `sync_dir_durable`), and the power-loss half of the guarantee
+/// narrows to process interruption.
 ///
-/// Failure handling: if the `private.key` commit fails, `public_tmp`
-/// is dropped and its tempfile removed, so nothing was published. If
-/// the `public.key` commit fails, the just-committed `private.key` is
-/// removed best-effort so a failed generation leaves no key files
-/// behind. `fs::atomic::finalize_file` syncs the destination
-/// directory after each successful commit.
+/// Failure handling keeps every reachable on-disk state safe:
+///
+/// - `private.key` commit fails: nothing was published; both
+///   tempfiles are removed by their destructors.
+/// - barrier after the `private.key` commit fails: the just-committed
+///   `private.key` is removed best-effort; nothing is published.
+/// - `public.key` commit fails: the just-committed `private.key` is
+///   removed best-effort; a failed generation leaves no key files
+///   behind.
+/// - barrier after the `public.key` commit fails: only `public.key`
+///   is removed. `private.key` stays deliberately: with no working
+///   flush, the two removals could persist in either order, and
+///   removing `private.key` while the `public.key` removal is lost
+///   would recreate the dangerous public-only state. A leftover
+///   `private.key` decrypts nothing that was ever announced and is
+///   safe to delete.
 fn commit_key_pair_files(
     private_tmp: tempfile::NamedTempFile,
     public_tmp: tempfile::NamedTempFile,
     private_key_path: &Path,
     public_key_path: &Path,
 ) -> Result<(), CryptoError> {
+    commit_key_pair_files_with_barrier(
+        private_tmp,
+        public_tmp,
+        private_key_path,
+        public_key_path,
+        crate::fs::atomic::sync_dir_durable,
+    )
+}
+
+/// Implementation of [`commit_key_pair_files`] with the
+/// directory-durability barrier injectable, so tests can drive
+/// barrier failures at each boundary.
+fn commit_key_pair_files_with_barrier(
+    private_tmp: tempfile::NamedTempFile,
+    public_tmp: tempfile::NamedTempFile,
+    private_key_path: &Path,
+    public_key_path: &Path,
+    sync_output_dir: impl Fn(&Path) -> std::io::Result<()>,
+) -> Result<(), CryptoError> {
     use crate::fs::atomic;
+    use crate::fs::paths::parent_or_cwd;
+
+    // Both key paths are produced by joining the same output
+    // directory, so one flushed directory covers both entries.
+    let output_dir = parent_or_cwd(private_key_path);
 
     atomic::finalize_file(private_tmp, private_key_path, KEY_FILE_LABEL)?;
+    if let Err(e) = sync_output_dir(output_dir) {
+        let _ = fs::remove_file(private_key_path);
+        return Err(CryptoError::Io(e));
+    }
     if let Err(e) = atomic::finalize_file(public_tmp, public_key_path, KEY_FILE_LABEL) {
         let _ = fs::remove_file(private_key_path);
         return Err(e);
+    }
+    if let Err(e) = sync_output_dir(output_dir) {
+        let _ = fs::remove_file(public_key_path);
+        return Err(CryptoError::Io(e));
     }
     Ok(())
 }
@@ -1641,5 +1693,143 @@ mod tests {
             leftovers.is_empty(),
             "no staged tempfiles may remain, found {leftovers:?}"
         );
+    }
+
+    /// Directory-durability barrier stub that succeeds until the
+    /// `fail_on`-th invocation (1-based), then fails with an injected
+    /// I/O error. Every invocation records the directory it was asked
+    /// to flush into `seen`.
+    fn counting_barrier(
+        fail_on: Option<u32>,
+        seen: std::rc::Rc<std::cell::RefCell<Vec<PathBuf>>>,
+    ) -> impl Fn(&Path) -> std::io::Result<()> {
+        move |dir| {
+            seen.borrow_mut().push(dir.to_path_buf());
+            if Some(seen.borrow().len() as u32) == fail_on {
+                Err(std::io::Error::other("injected directory flush failure"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// If the durability barrier after the `private.key` commit fails,
+    /// nothing is published: the just-committed `private.key` is
+    /// removed again, `public.key` never appears, the injected error
+    /// surfaces unchanged, and no staged tempfiles remain.
+    #[test]
+    fn keygen_barrier_failure_after_private_commit_publishes_nothing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        let private_key_path = dir.join(PRIVATE_KEY_FILENAME);
+        let public_key_path = dir.join(PUBLIC_KEY_FILENAME);
+        let private_tmp = staged_key_tempfile(dir, b"private bytes");
+        let public_tmp = staged_key_tempfile(dir, b"public bytes");
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+
+        let err = commit_key_pair_files_with_barrier(
+            private_tmp,
+            public_tmp,
+            &private_key_path,
+            &public_key_path,
+            counting_barrier(Some(1), seen.clone()),
+        )
+        .expect_err("a failed barrier after the private.key commit must fail the commit");
+        assert_eq!(
+            err.to_string(),
+            "injected directory flush failure",
+            "the barrier's own error must surface, got {err:?}"
+        );
+        assert!(
+            matches!(err, CryptoError::Io(_)),
+            "barrier failure must map to the I/O error class, got {err:?}"
+        );
+        assert!(
+            !private_key_path.exists(),
+            "private.key must be removed when its durability barrier failed"
+        );
+        assert!(
+            !public_key_path.exists(),
+            "public.key must never appear when the private.key barrier failed"
+        );
+        let leftovers = leftover_entries(dir, "");
+        assert!(
+            leftovers.is_empty(),
+            "no key files or staged tempfiles may remain, found {leftovers:?}"
+        );
+    }
+
+    /// If the durability barrier after the `public.key` commit fails,
+    /// only `public.key` is removed. `private.key` stays deliberately:
+    /// with no working flush, removing both could persist in either
+    /// order, and a surviving `public.key` next to a lost
+    /// `private.key` is exactly the state the commit exists to
+    /// prevent. A leftover `private.key` is harmless.
+    #[test]
+    fn keygen_barrier_failure_after_public_commit_keeps_only_private_key() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        let private_key_path = dir.join(PRIVATE_KEY_FILENAME);
+        let public_key_path = dir.join(PUBLIC_KEY_FILENAME);
+        let private_tmp = staged_key_tempfile(dir, b"private bytes");
+        let public_tmp = staged_key_tempfile(dir, b"public bytes");
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+
+        let err = commit_key_pair_files_with_barrier(
+            private_tmp,
+            public_tmp,
+            &private_key_path,
+            &public_key_path,
+            counting_barrier(Some(2), seen.clone()),
+        )
+        .expect_err("a failed barrier after the public.key commit must fail the commit");
+        assert!(
+            matches!(err, CryptoError::Io(_)),
+            "barrier failure must map to the I/O error class, got {err:?}"
+        );
+        assert!(
+            !public_key_path.exists(),
+            "public.key must be removed when the final durability barrier failed"
+        );
+        assert_eq!(
+            fs::read(&private_key_path).unwrap(),
+            b"private bytes",
+            "private.key must be kept when the final durability barrier failed"
+        );
+        let leftovers = leftover_entries(dir, PRIVATE_KEY_FILENAME);
+        assert!(
+            leftovers.is_empty(),
+            "nothing besides private.key may remain, found {leftovers:?}"
+        );
+    }
+
+    /// A successful commit flushes the output directory exactly twice
+    /// — once after each key-file commit — and both key files are in
+    /// place with their staged contents.
+    #[test]
+    fn keygen_commit_flushes_output_directory_after_each_commit() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        let private_key_path = dir.join(PRIVATE_KEY_FILENAME);
+        let public_key_path = dir.join(PUBLIC_KEY_FILENAME);
+        let private_tmp = staged_key_tempfile(dir, b"private bytes");
+        let public_tmp = staged_key_tempfile(dir, b"public bytes");
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+
+        commit_key_pair_files_with_barrier(
+            private_tmp,
+            public_tmp,
+            &private_key_path,
+            &public_key_path,
+            counting_barrier(None, seen.clone()),
+        )
+        .expect("commit must succeed with a working barrier");
+        assert_eq!(
+            *seen.borrow(),
+            vec![dir.to_path_buf(), dir.to_path_buf()],
+            "the output directory must be flushed after each of the two commits"
+        );
+        assert_eq!(fs::read(&private_key_path).unwrap(), b"private bytes");
+        assert_eq!(fs::read(&public_key_path).unwrap(), b"public bytes");
     }
 }

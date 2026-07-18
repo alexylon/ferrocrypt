@@ -15,24 +15,25 @@ use crate::format::{read_u32_be, write_u32_be};
 
 /// Argon2id salt size in bytes. Stored alongside [`KdfParams`] in any
 /// header that consumes a passphrase (argon2id recipient body,
-/// `private.key` cleartext header). [`KdfParams::hash_passphrase`]
-/// takes its salt as `&[u8; ARGON2_SALT_SIZE]`.
+/// `private.key` cleartext header); the crate's internal Argon2id
+/// derivation takes its salt at exactly this width.
 pub const ARGON2_SALT_SIZE: usize = 32;
 
 /// Structural cap on passphrase byte length. Argon2id itself accepts
-/// arbitrarily long inputs, but direct library callers could otherwise
-/// hand a multi-gigabyte buffer to [`KdfParams::hash_passphrase`] and
-/// force that allocation before KDF resource policy applies. 4 KiB is far
-/// above any human-typed passphrase yet small enough that malicious input
-/// cannot force excessive host work. Frontends already cap their input fields
-/// well below this; the cap exists for direct callers and as defense-in-depth.
+/// arbitrarily long inputs, but the public encryption, decryption, and
+/// key-generation APIs accept a caller-supplied `SecretString` of any
+/// length; without the cap, a multi-gigabyte passphrase would be
+/// buffered and processed before KDF resource policy applies. 4 KiB is
+/// far above any human-typed passphrase yet small enough that malicious
+/// input cannot force excessive host work. Frontends already cap their
+/// input fields well below this; the cap exists as defense-in-depth.
 pub(crate) const MAX_PASSPHRASE_LEN_BYTES: usize = 4_096;
 
 /// Enforces [`MAX_PASSPHRASE_LEN_BYTES`] on caller-supplied passphrase
 /// bytes. Single source of truth for the cap: the progress-event call
 /// sites run it before emitting their KDF event (an over-cap
 /// passphrase must produce no event, because Argon2id never runs), and
-/// [`KdfParams::hash_passphrase`] keeps it as the backstop for direct
+/// [`KdfParams::hash_passphrase`] keeps it as the backstop for in-crate
 /// callers.
 pub(crate) fn check_passphrase_len(passphrase: &[u8]) -> Result<(), CryptoError> {
     if passphrase.len() > MAX_PASSPHRASE_LEN_BYTES {
@@ -344,11 +345,12 @@ impl KdfParams {
     ///
     /// The returned buffer zeroizes on drop, and the Argon2id working
     /// memory (`mem_cost` KiB of blocks) is allocated by this function
-    /// and zeroized when the derivation completes. The high-level
-    /// [`Encryptor`](crate::Encryptor),
-    /// [`PassphraseDecryptor`](crate::PassphraseDecryptor), and
-    /// [`KeyPairGenerator`](crate::KeyPairGenerator) APIs invoke this internally
-    /// — most callers should not call it directly.
+    /// and zeroized when the derivation completes. Crate-internal:
+    /// production callers reach it only through
+    /// [`derive_passphrase_wrap_key`](crate::crypto::keys::derive_passphrase_wrap_key),
+    /// and the public API deliberately exposes no raw Argon2id output —
+    /// a public caller would also bypass [`KdfLimit`] resource policy,
+    /// because this method applies structural bounds only.
     ///
     /// # Security
     ///
@@ -365,7 +367,7 @@ impl KdfParams {
     /// structural cap. Both are checked before Argon2id runs, so any Argon2
     /// failure on the validated input surfaces as
     /// [`CryptoError::InternalCryptoFailure`].
-    pub fn hash_passphrase(
+    pub(crate) fn hash_passphrase(
         &self,
         passphrase: &[u8],
         salt: &[u8; ARGON2_SALT_SIZE],
@@ -696,10 +698,13 @@ mod tests {
         }
     }
 
-    /// `hash_passphrase` is `pub`, so a direct caller can hand it a
-    /// `KdfParams` with out-of-policy fields. A `time_cost` above the v1
-    /// maximum — which `argon2::Params::new` itself would accept — must
-    /// reject as `InvalidKdfParams` before Argon2id runs.
+    /// `hash_passphrase` validates structural bounds itself, as the
+    /// final backstop behind the write-path preflight and the scheme
+    /// functions' own checks: an in-crate caller that skipped both
+    /// still cannot run Argon2id with out-of-policy fields. A
+    /// `time_cost` above the v1 maximum — which `argon2::Params::new`
+    /// itself would accept — must reject as `InvalidKdfParams` before
+    /// Argon2id runs.
     #[test]
     fn hash_passphrase_rejects_structurally_invalid_params() {
         let params = KdfParams {

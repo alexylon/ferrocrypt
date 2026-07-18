@@ -53,9 +53,10 @@ const WRAPPED_FILE_KEY_OFFSET: usize = WRAP_NONCE_OFFSET + WRAP_NONCE_SIZE;
 /// 116-byte recipient body.
 ///
 /// Emits [`ProgressEvent::DerivingPassphraseWrapKey`] immediately before
-/// the Argon2id call. The passphrase-length cap and the CSPRNG read for
-/// `argon2_salt` run first; if either fails, the event is not emitted
-/// and the typed error is returned.
+/// the Argon2id call. The passphrase-length cap, structural
+/// KDF-parameter validation, and the CSPRNG read for `argon2_salt` run
+/// first; if any fails, the event is not emitted and the typed error is
+/// returned.
 pub(crate) fn wrap(
     file_key: &FileKey,
     passphrase: &SecretString,
@@ -63,6 +64,12 @@ pub(crate) fn wrap(
     on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<[u8; BODY_LENGTH], CryptoError> {
     check_passphrase_len(passphrase.expose_secret().as_bytes())?;
+    // The event below claims Argon2id is starting, so structurally
+    // invalid parameters must reject first — the same boundary `unwrap`
+    // enforces. The public write path already preflights via
+    // `validate_for_write`; this local check covers in-crate callers,
+    // and `hash_passphrase` keeps its own check as the final backstop.
+    kdf_params.validate_structural()?;
     let argon2_salt = random_bytes::<ARGON2_SALT_SIZE>()?;
     on_event(&ProgressEvent::DerivingPassphraseWrapKey);
     let wrap_key =
@@ -476,6 +483,34 @@ mod tests {
         assert!(
             events.borrow().is_empty(),
             "no event should fire before resource-cap check passes; got {:?}",
+            events.borrow()
+        );
+    }
+
+    /// Pins the work-boundary contract for `wrap` when the caller's
+    /// `kdf_params` are structurally invalid: rejected as
+    /// `InvalidKdfParams` with NO event, because Argon2id never runs.
+    /// The public write path rejects such parameters earlier via its
+    /// `validate_for_write` preflight; this pins the scheme function's
+    /// own boundary for in-crate callers.
+    #[test]
+    fn wrap_emits_no_event_when_kdf_params_are_structurally_invalid() {
+        let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
+        let pass = passphrase("p");
+        // `lanes = 0` is below the structural bounds (1..=8).
+        let invalid = KdfParams {
+            mem_cost: 8,
+            time_cost: 1,
+            lanes: 0,
+        };
+        let (sink, events) = recording();
+        match wrap(&file_key, &pass, &invalid, &sink) {
+            Err(CryptoError::InvalidKdfParams(_)) => {}
+            other => panic!("expected InvalidKdfParams, got {other:?}"),
+        }
+        assert!(
+            events.borrow().is_empty(),
+            "no event should fire before structural validation passes; got {:?}",
             events.borrow()
         );
     }

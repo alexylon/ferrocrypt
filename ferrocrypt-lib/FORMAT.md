@@ -775,6 +775,10 @@ Rules:
   `2^32 - 1` is used, that chunk MUST be final.
 - Readers MUST reject streams that exceed `2^32` chunks, fail authentication,
   reach EOF before a valid final chunk, or contain bytes after the final chunk.
+- A rejection is terminal for the whole stream: readers MUST NOT decrypt or
+  release later chunks after any chunk fails, because chunks authenticate
+  individually, so a crafted stream can follow a rejected chunk with an
+  independently valid chunk sequence of the attacker's choice.
 
 The payload is chunk-seekable. When seeking relative to the end, readers MUST
 locate and authenticate the final chunk before returning earlier plaintext.
@@ -1472,6 +1476,13 @@ Steps 11 and 12 MAY be interleaved per entry: applying a file's mode to its
 open handle immediately after its content is written is equivalent to a
 separate pass, because every descendant file sits inside the restrictive
 staged root until promotion.
+
+A step-16 reopen of the promoted root MUST NOT follow symlinks, MUST verify
+the opened handle is a regular file (for a file root) or a directory (for a
+directory root), and MUST NOT block waiting on a substituted special file — a
+FIFO opened read-only otherwise blocks until a writer appears — because
+another local process with write access to the output directory can substitute
+the final name between steps 15 and 16.
 
 Readers SHOULD sync staged file contents to stable storage before step 15.
 After promotion the output exists under its final name with no `.incomplete`

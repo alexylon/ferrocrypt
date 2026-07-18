@@ -28,7 +28,7 @@ use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Component, Path};
 
-use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsSyncExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, File, OpenOptions};
 
@@ -539,16 +539,20 @@ pub(crate) fn open_dir_at_rel(root: &Dir, rel: &Path) -> Result<Dir, CryptoError
 }
 
 /// Opens an existing regular file under `parent` with no-follow + the
-/// Windows reparse-point post-check. File-side parallel of
-/// [`open_dir_at_rel`]; used by the post-rename root-file chmod
+/// regular-file post-check ([`finalize_file_open`]). File-side parallel
+/// of [`open_dir_at_rel`]; used by the post-rename root-file chmod
 /// (`decode::apply_root_file_mode`) so the chmod runs against a
 /// freshly-opened handle rather than through a re-resolved path. A
 /// symlink at that name aborts with the typed "Symlink in extraction
 /// path" diagnostic; on Windows, a reparse point at the name fails the
-/// same way via the post-check.
+/// same way via the post-check. The open is non-blocking on Unix so a
+/// FIFO substituted at the name cannot block the process inside
+/// `open(2)` (opening a FIFO read-only otherwise waits until a writer
+/// appears) — the post-check then rejects it, and the flag has no
+/// effect on regular-file reads. cap-std ignores the flag on Windows.
 pub(crate) fn open_file_nofollow(parent: &Dir, name: &OsStr) -> Result<File, CryptoError> {
     let mut options = OpenOptions::new();
-    options.read(true).follow(FollowSymlinks::No);
+    options.read(true).follow(FollowSymlinks::No).nonblock(true);
     let file = parent.open_with(name, &options).map_err(|e| {
         classify_open_failure(
             parent,
@@ -561,22 +565,29 @@ pub(crate) fn open_file_nofollow(parent: &Dir, name: &OsStr) -> Result<File, Cry
     finalize_file_open(file, name)
 }
 
-/// Post-open finalize for a regular-file handle. On Windows, rejects
-/// reparse points (cap-fs-ext's `FollowSymlinks::No` translates to
-/// `FILE_FLAG_OPEN_REPARSE_POINT`, which would otherwise let an
-/// attacker-substituted symlink at the path open as a regular-file
-/// handle and have its bits flipped). No-op on Unix where the kernel's
-/// `O_NOFOLLOW` semantics already give the equivalent invariant.
-#[cfg(windows)]
+/// Post-open finalize for a regular-file handle: fetches metadata from
+/// the opened handle and requires a regular file, so a FIFO, device
+/// node, socket, or directory substituted at the name is rejected
+/// instead of being returned as a "file" handle. On Windows the
+/// reparse-point bitmask check runs first (cap-fs-ext's
+/// `FollowSymlinks::No` translates to `FILE_FLAG_OPEN_REPARSE_POINT`,
+/// which would otherwise let an attacker-substituted symlink at the
+/// path open as a regular-file handle and have its bits flipped); on
+/// Unix the kernel's `O_NOFOLLOW` semantics already reject a symlink
+/// at open time.
 fn finalize_file_open(file: File, name: &OsStr) -> Result<File, CryptoError> {
-    use cap_std::fs::MetadataExt;
-    let meta = file.metadata().map_err(CryptoError::Io)?;
-    reject_reparse_attributes(meta.file_attributes(), name, SYMLINK_IN_EXTRACTION_PATH)?;
-    Ok(file)
-}
-
-#[cfg(not(windows))]
-fn finalize_file_open(file: File, _name: &OsStr) -> Result<File, CryptoError> {
+    let metadata = file.metadata().map_err(CryptoError::Io)?;
+    #[cfg(windows)]
+    {
+        use cap_std::fs::MetadataExt;
+        reject_reparse_attributes(metadata.file_attributes(), name, SYMLINK_IN_EXTRACTION_PATH)?;
+    }
+    if !metadata.file_type().is_file() {
+        return Err(CryptoError::InvalidInput(format!(
+            "Extraction path is no longer a regular file: {}",
+            sanitize_for_display(&name.to_string_lossy())
+        )));
+    }
     Ok(file)
 }
 
@@ -726,6 +737,54 @@ mod tests {
             err.to_string().contains("Symlink in archive source"),
             "expected encode-side symlink diagnostic, got: {err}"
         );
+    }
+
+    /// The regular-file success path: `open_file_nofollow` on an
+    /// ordinary file returns a usable handle on every platform (the
+    /// non-blocking open flag must not disturb normal opens).
+    #[test]
+    fn open_file_nofollow_opens_regular_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        fs::write(tmp.path().join("plain.txt"), b"content").unwrap();
+
+        let parent = open_anchor(tmp.path()).unwrap();
+        let file = open_file_nofollow(&parent, OsStr::new("plain.txt")).unwrap();
+        assert!(file.metadata().unwrap().is_file());
+    }
+
+    /// A FIFO at the name must reject with the typed regular-file
+    /// diagnostic — and must not block. Without the non-blocking open
+    /// flag, `open(2)` on a FIFO waits until a writer appears, so an
+    /// attacker who wins the promotion-to-chmod race with a FIFO
+    /// substitution could hang the process; the test finishing at all
+    /// proves the open returns.
+    #[cfg(unix)]
+    #[test]
+    fn open_file_nofollow_rejects_fifo_without_blocking() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        crate::fs::paths::make_fifo(&tmp.path().join("swapped"));
+
+        let parent = open_anchor(tmp.path()).unwrap();
+        let err = open_file_nofollow(&parent, OsStr::new("swapped")).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Extraction path is no longer a regular file"),
+            "expected regular-file rejection, got: {err}"
+        );
+    }
+
+    /// A directory at the name must reject: `open_file_nofollow`
+    /// promises a regular-file handle. The error class differs by
+    /// platform (Unix reaches the post-open type check; Windows
+    /// refuses the directory open itself), so only the rejection is
+    /// pinned.
+    #[test]
+    fn open_file_nofollow_rejects_directory() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        fs::create_dir(tmp.path().join("subdir")).unwrap();
+
+        let parent = open_anchor(tmp.path()).unwrap();
+        assert!(open_file_nofollow(&parent, OsStr::new("subdir")).is_err());
     }
 
     /// In-sandbox relative symlink: hardened helper must reject.

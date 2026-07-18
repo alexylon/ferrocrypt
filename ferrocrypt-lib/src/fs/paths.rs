@@ -239,6 +239,20 @@ pub(crate) fn map_user_path_io_error(e: io::Error) -> CryptoError {
     }
 }
 
+/// Test-only: creates a FIFO via the POSIX `mkfifo` utility, for the
+/// special-file regressions here, in `archive::platform`, and in
+/// `archive::decode`. A subprocess keeps the crate free of an `unsafe`
+/// `libc::mkfifo` call (`rustix` exposes no FIFO creation on Apple
+/// targets).
+#[cfg(all(test, unix))]
+pub(crate) fn make_fifo(path: &Path) {
+    let status = std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .expect("spawn mkfifo");
+    assert!(status.success(), "mkfifo failed for {}", path.display());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,23 +383,12 @@ mod tests {
     }
 
     /// FIFO-input regressions. Unix-only — Windows has no FIFO file
-    /// type in the filesystem namespace. Before the `open_input_file`
-    /// guard, pointing any read path at a FIFO hung the process inside
-    /// `open(2)` until a writer appeared.
+    /// type in the filesystem namespace. Without the `open_input_file`
+    /// guard, pointing any read path at a FIFO hangs the process inside
+    /// `open(2)` until a writer appears.
     #[cfg(unix)]
     mod special_file_inputs {
         use super::*;
-
-        /// Creates a FIFO via the POSIX `mkfifo` utility. A subprocess
-        /// keeps the crate free of an `unsafe` `libc::mkfifo` call
-        /// (`rustix` exposes no FIFO creation on Apple targets).
-        fn make_fifo(path: &Path) {
-            let status = std::process::Command::new("mkfifo")
-                .arg(path)
-                .status()
-                .expect("spawn mkfifo");
-            assert!(status.success(), "mkfifo failed for {}", path.display());
-        }
 
         #[test]
         fn open_input_file_rejects_fifo_without_blocking() {

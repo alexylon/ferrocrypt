@@ -111,21 +111,24 @@ fn fuzz_payload_key() -> crate::crypto::keys::PayloadKey {
 const FUZZ_STREAM_NONCE: [u8; crate::crypto::stream::STREAM_NONCE_SIZE] =
     [0x24; crate::crypto::stream::STREAM_NONCE_SIZE];
 
-/// Drives the STREAM-BE32 `DecryptReader` state machine over arbitrary
-/// ciphertext for the `fuzz_stream_decrypt` target: chunk refill, the
-/// exact-chunk one-byte peek, truncation / tamper / trailing-data
-/// classification, and the zeroize-and-park error path. The MAC-gated
+/// Builds the STREAM-BE32 `DecryptReader` over `ciphertext` for the
+/// `fuzz_stream_decrypt` target, which drives the state machine
+/// through the returned `Read` handle: chunk refill, the exact-chunk
+/// one-byte peek, truncation / tamper / trailing-data classification,
+/// and the terminal-error poison path (the target keeps reading after
+/// an error to assert the reader stays failed). The MAC-gated
 /// end-to-end decrypt targets can never reach this layer with
 /// attacker-shaped bytes; this helper feeds the cipher layer directly.
+pub fn stream_decryptor_for_fuzz(ciphertext: &[u8]) -> impl std::io::Read + '_ {
+    crate::crypto::stream::payload_decryptor(&fuzz_payload_key(), &FUZZ_STREAM_NONCE, ciphertext)
+}
+
+/// One-call decrypt over [`stream_decryptor_for_fuzz`], for corpus-seed
+/// round-trip checks (`fuzz/examples/gen_seeds.rs`).
 pub fn decrypt_stream_for_fuzz(ciphertext: &[u8]) -> Result<Vec<u8>, crate::CryptoError> {
     use std::io::Read as _;
-    let mut reader = crate::crypto::stream::payload_decryptor(
-        &fuzz_payload_key(),
-        &FUZZ_STREAM_NONCE,
-        ciphertext,
-    );
     let mut plaintext = Vec::new();
-    reader.read_to_end(&mut plaintext)?;
+    stream_decryptor_for_fuzz(ciphertext).read_to_end(&mut plaintext)?;
     Ok(plaintext)
 }
 

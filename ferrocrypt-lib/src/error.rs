@@ -1016,7 +1016,11 @@ pub(crate) enum StreamError {
     /// `Take`-style wrappers). Downcast to
     /// [`CryptoError::ExtraDataAfterPayload`] via `From<io::Error>`.
     ExtraData,
-    /// Writer or reader state was already consumed (programmer bug).
+    /// Writer or reader state was already consumed — the writer was
+    /// finished or poisoned by an earlier sink/AEAD failure, or the
+    /// reader was poisoned by an earlier terminal error. Surfaced when
+    /// a caller keeps writing or reading anyway (programmer bug): the
+    /// stream adapters fail closed rather than resume mid-stream.
     StateExhausted,
     /// `FORMAT.md` §5: writers must not emit more than `2^32` chunks
     /// and readers must reject streams that exceed that count. Surfaced

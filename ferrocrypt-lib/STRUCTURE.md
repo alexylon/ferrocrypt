@@ -467,7 +467,11 @@ It contains:
 - payload encryptor reader/writer adapters;
 - payload decryptor reader/writer adapters;
 - trailing-data detection;
-- truncation detection.
+- truncation detection;
+- terminal-error poisoning: any error escaping either adapter is final — the
+  adapter drops its cipher state and every later use fails closed
+  (`StateExhausted`) instead of resuming mid-stream (`FORMAT.md` §5's
+  terminal-rejection rule).
 
 Payload streaming uses `PayloadKey`. It does not know about recipient schemes, key files, archive paths, or output finalization.
 
@@ -870,6 +874,7 @@ It contains:
 - `ensure_dir`, `mkdir_strict`, `walk_to_parent`, `open_dir_at_rel`, `open_child_dir_nofollow` (the shared single-step open, also used by the writer's source-root open) — every directory open routed through `cap_fs_ext::DirExt::open_dir_nofollow`;
 - `finalize_dir_open` — Windows-only `FILE_ATTRIBUTE_REPARSE_POINT` post-check called after every successful directory open, so junctions / mount points fail closed (cap-fs-ext alone refuses entries where `is_symlink()` is true, but `is_symlink()` returns `false` for junctions — the bitmask post-check is what catches them);
 - `create_file_at` — `OpenOptions::create_new(true)` plus `OpenOptionsFollowExt::follow(FollowSymlinks::No)` for atomic O_EXCL-style create that refuses every leaf symlink, dangling or live;
+- `open_file_nofollow` + `finalize_file_open` — the no-follow regular-file reopen used by the post-promotion root-file chmod (`decode::apply_root_file_mode`, `FORMAT.md` §9.11 step 16). Opens non-blocking on Unix so a FIFO substituted at the promoted name cannot block the process inside `open(2)`, then requires a regular file on the opened handle (plus the Windows reparse-point post-check), so special-file and directory substitutions fail closed;
 - `chmod_file_handle`, `chmod_dir_handle` — handle-based permission application; never path-based, so a substituted symlink between extract and chmod cannot redirect the operation. Special bits are stripped via `super::PERMISSION_BITS_MASK`;
 - `rename_at_no_clobber` (Linux/macOS) — handle-relative `renameat(dir, …, dir, …, RENAME_NOREPLACE)` via `rustix`, used by the decrypt promotion (`FORMAT.md` §9.11 step 15) so the `{root}.incomplete` → final-name commit is anchored to the same `output_dir` handle as extraction; a swap of the `output_dir` path mid-run cannot redirect it. On a filesystem whose driver refuses the no-replace flag outright (`fs/atomic.rs::no_replace_rename_unsupported`; the macOS exFAT driver among them) it dispatches to `rename_at_no_clobber_via_claim`, which atomically claims the final name through the same handle (`create_file_at` for a file root, owner-only `mkdir` for a directory root) and renames the staged root over its own claim — no-clobber against pre-existing entries stays unconditional, and both steps stay handle-relative. Windows and other-target promotion stays path-based in `fs/atomic.rs`, because a handle-relative no-replace rename on Windows needs an `unsafe` Win32 call the crate forbids;
 - `INITIAL_FILE_CREATE_MODE` — restrictive `0o600` initial mode applied at create time on Unix. Descendant files are chmod'd to the manifest mode after the payload is written (inside the 0o700 staged root). Single-file roots stay at `0o600` throughout staging and across the rename, with the manifest mode applied post-rename via `decode::apply_root_file_mode` so a wider final mode is never briefly visible. Effective on Unix only; ignored on Windows.

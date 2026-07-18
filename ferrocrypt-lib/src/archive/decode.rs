@@ -1669,6 +1669,30 @@ mod tests {
         );
     }
 
+    /// FIFO substituted at the renamed root between the promotion
+    /// rename and `apply_root_file_mode`: the chmod step must reject
+    /// via `open_file_nofollow`'s regular-file post-check — and must
+    /// not block inside `open(2)` waiting for a FIFO writer (the test
+    /// finishing at all proves that). Inject the post-rename state
+    /// directly (deterministic test of the same race the multithreaded
+    /// path would observe).
+    #[cfg(unix)]
+    #[test]
+    fn apply_root_file_mode_rejects_fifo_at_renamed_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        // FIFO at the position the renamed root would have.
+        crate::fs::paths::make_fifo(&tmp.path().join("hello.txt"));
+
+        let manifest = single_file_manifest("hello.txt", b"x");
+        let handle = platform::open_anchor(tmp.path()).unwrap();
+        let err = apply_root_file_mode(&handle, &manifest).unwrap_err();
+        assert!(
+            format!("{err}").contains("Extraction path is no longer a regular file"),
+            "expected regular-file rejection, got: {err}",
+        );
+    }
+
     /// Step 16 must chmod through the SAME handle extraction used, not
     /// a re-resolved `output_dir` path. Swap the output directory
     /// aside after extraction and mint a same-named victim at the

@@ -8,8 +8,9 @@
 //! first; this target tests the cipher layer directly with a fixed key
 //! and nonce.
 //!
-//! Corpus seeds produced by `gen_seeds` are valid ciphertexts under the
-//! same fixed key and nonce, so successful decryption remains reachable.
+//! Corpus seeds produced by `gen_seeds` include canonical ciphertexts under
+//! the same fixed key and nonce, so successful decryption remains reachable,
+//! plus authenticated must-reject shapes that mutation cannot synthesize.
 //! The target checks two properties:
 //!
 //! - **Round trip.** STREAM is deterministic. Re-encrypting successfully

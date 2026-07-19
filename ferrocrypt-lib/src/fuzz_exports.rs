@@ -147,6 +147,38 @@ pub fn encrypt_stream_for_fuzz(plaintext: &[u8]) -> Result<Vec<u8>, crate::Crypt
     writer.finish()
 }
 
+/// Builds the authenticated but non-canonical STREAM shape that
+/// `FORMAT.md` §5 requires readers to reject: one full non-final plaintext
+/// chunk followed by an empty final chunk. Kept in the fuzz-only surface so
+/// corpus generation can reach a valid-tag negative case that mutation cannot
+/// synthesize without the fixed payload key.
+pub fn empty_final_after_data_stream_for_fuzz() -> Result<Vec<u8>, crate::CryptoError> {
+    use chacha20poly1305::{
+        XChaCha20Poly1305,
+        aead::{KeyInit as _, stream},
+    };
+
+    let payload_key = fuzz_payload_key();
+    let cipher = XChaCha20Poly1305::new(payload_key.expose().into());
+    let mut encryptor = stream::EncryptorBE32::from_aead(cipher, (&FUZZ_STREAM_NONCE).into());
+    let mut ciphertext: Vec<u8> = (0..crate::crypto::stream::BUFFER_SIZE)
+        .map(|i| (i % 251) as u8)
+        .collect();
+    encryptor
+        .encrypt_next_in_place(b"", &mut ciphertext)
+        .map_err(|_| {
+            crate::CryptoError::InternalCryptoFailure("fuzz non-final encryption failed")
+        })?;
+    let mut empty_final = Vec::new();
+    encryptor
+        .encrypt_last_in_place(b"", &mut empty_final)
+        .map_err(|_| {
+            crate::CryptoError::InternalCryptoFailure("fuzz empty-final encryption failed")
+        })?;
+    ciphertext.extend_from_slice(&empty_final);
+    Ok(ciphertext)
+}
+
 pub use crate::archive::IncompleteOutputPolicy;
 
 /// Drives the full FCA reader pipeline (`archive::unarchive`) on

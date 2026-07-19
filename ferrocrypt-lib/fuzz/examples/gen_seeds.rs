@@ -16,10 +16,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ferrocrypt::ArchiveLimits;
 use ferrocrypt::fuzz_exports::{
-    archive_for_fuzz, decrypt_stream_for_fuzz, encrypt_stream_for_fuzz, unarchive_for_fuzz,
+    archive_for_fuzz, decrypt_stream_for_fuzz, empty_final_after_data_stream_for_fuzz,
+    encrypt_stream_for_fuzz, unarchive_for_fuzz,
 };
+use ferrocrypt::{ArchiveLimits, CryptoError, FormatDefect};
 
 /// FCA fixed-header layout facts needed to splice an `archive_ext`
 /// region into writer output (the v1 writer always emits a zero-length
@@ -130,6 +131,19 @@ fn write_stream_seeds(fuzz_root: &Path) {
         assert_eq!(recovered, plaintext, "seed {name} round-trip");
         persist(fuzz_root, "fuzz_stream_decrypt", name, &ciphertext);
     }
+
+    let noncanonical =
+        empty_final_after_data_stream_for_fuzz().expect("build empty-final negative seed");
+    match decrypt_stream_for_fuzz(&noncanonical) {
+        Err(CryptoError::InvalidFormat(FormatDefect::MalformedPayloadStream)) => {}
+        other => panic!("empty-final negative seed must be rejected, got {other:?}"),
+    }
+    persist(
+        fuzz_root,
+        "fuzz_stream_decrypt",
+        "empty_final_after_data.bin",
+        &noncanonical,
+    );
 }
 
 /// Writes one seed into the checked-in `seeds/<target>/` directory and

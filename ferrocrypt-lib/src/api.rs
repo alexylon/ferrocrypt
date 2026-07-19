@@ -572,8 +572,9 @@ impl PassphraseDecryptor {
     /// Returns [`CryptoError::InvalidInput`] for an empty passphrase, archive
     /// cap violations, output conflicts, or unsafe archived paths. Returns
     /// [`CryptoError::KdfResourceCapExceeded`] for rejected KDF costs.
-    /// Returns authentication
-    /// errors such as [`CryptoError::RecipientUnwrapFailed`],
+    /// Returns [`CryptoError::InvalidFormat`] if the encrypted container or
+    /// authenticated payload stream is structurally malformed. Returns
+    /// authentication errors such as [`CryptoError::RecipientUnwrapFailed`],
     /// [`CryptoError::HeaderTampered`], [`CryptoError::PayloadTampered`], or
     /// [`CryptoError::PayloadTruncated`] when credentials are wrong or the file
     /// is modified. Returns [`CryptoError::InputPath`] if the encrypted file
@@ -686,9 +687,10 @@ impl PrivateKeyDecryptor {
     ///
     /// Returns [`CryptoError::InvalidInput`] for an empty `private_key_passphrase`,
     /// archive cap violations, output conflicts, or unsafe archived paths.
-    /// Returns [`CryptoError::InvalidFormat`] or
-    /// [`CryptoError::KeyFileUnlockFailed`] if the private key is malformed,
-    /// the wrong kind, tampered, or protected by a different passphrase.
+    /// Returns [`CryptoError::InvalidFormat`] if the private key, encrypted
+    /// container, or authenticated payload stream is structurally malformed;
+    /// returns [`CryptoError::KeyFileUnlockFailed`] if the private key is
+    /// tampered or protected by a different passphrase.
     /// Returns [`CryptoError::KdfResourceCapExceeded`] for rejected
     /// `private.key` KDF costs. Returns authentication errors such as
     /// [`CryptoError::RecipientUnwrapFailed`],

@@ -23,6 +23,7 @@ cases/header-mac-tampered-passphrase.fcr	decrypt	passphrase:suite-passphrase-not
 cases/header-mac-tampered-x25519.fcr	decrypt	private-key:keys/recipient-a.private.key,unlock=suite-passphrase-not-secret-do-not-reuse	error	HeaderMacFailedAfterUnwrap(x25519)	Decryption failed: file header was modified or corrupted
 cases/payload-truncated.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	PayloadTruncated	Encrypted file is truncated
 cases/payload-tampered.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	PayloadTampered	Decryption failed: file data was modified or corrupted
+cases/payload-empty-final-after-data.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(MalformedPayloadStream)	Encrypted payload stream is malformed
 cases/payload-trailing-data.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	PayloadTampered	Decryption failed: file data was modified or corrupted
 cases/x25519-zero-ephemeral.fcr	decrypt	private-key:keys/recipient-a.private.key,unlock=suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(MalformedRecipientEntry)	Recipient entry is malformed
 cases/tlv-bad-order.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(MalformedTlv)	Extension region is malformed

@@ -10,6 +10,7 @@ All notable changes to FerroCrypt are documented in this file.
 - **On Unix systems other than Linux and macOS, decrypting a file that contains a folder now fails with "Decrypting a directory is not supported on this target".** This matches the encrypt side, which already refuses a folder there with the same kind of typed error; the rejection previously surfaced as a raw unsupported-operation I/O error. Linux, macOS, and Windows are unaffected.
 
 ### Fixed
+- **Decryption now rejects an authenticated empty final payload chunk after non-empty data, as required by `FORMAT.md` §5.** FerroCrypt writers have never produced this non-canonical encoding. A file using it now returns `InvalidFormat(FormatDefect::MalformedPayloadStream)` instead of decrypting successfully.
 - **Authenticated files with incomplete internal archive headers, extension regions, or manifests now return `MalformedArchive` with the affected region.** These structural defects previously appeared as generic I/O errors. Filesystem failures and truncated or modified encrypted payloads keep their existing error types.
 - **Decryption no longer waits indefinitely if a completed output file is replaced with a named pipe before its permissions are applied.** The final permission update now opens without blocking and accepts only a regular file.
 - **Public-key decryption now uses the same opened encrypted file for validation and decryption.** Replacing the path while the private key is being unlocked no longer changes which file is decrypted. Passphrase decryption already had this behavior.

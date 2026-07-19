@@ -778,6 +778,11 @@ pub enum FormatDefect {
     /// [`Self::RecipientCountOutOfRange`] (recipient_count outside 1..=4096).
     /// `FORMAT.md` §3.2.
     MalformedHeader,
+    /// The authenticated payload stream violates the canonical chunk grammar
+    /// in `FORMAT.md` §5. Currently this means an empty final chunk following
+    /// one or more non-final chunks; an empty final chunk is valid only when
+    /// it is the stream's sole chunk and represents empty plaintext.
+    MalformedPayloadStream,
     /// `header_len` exceeds the structural maximum (`HEADER_LEN_MAX =
     /// 16 MiB` per `FORMAT.md` §3.1). Distinct from
     /// [`CryptoError::HeaderLenCapExceeded`] which fires on the
@@ -847,6 +852,7 @@ impl std::fmt::Display for FormatDefect {
                 write!(f, "Wrong file kind: 0x{kind:02X}")
             }
             Self::MalformedHeader => f.write_str("File header is malformed"),
+            Self::MalformedPayloadStream => f.write_str("Encrypted payload stream is malformed"),
             Self::OversizedHeader { header_len } => {
                 write!(f, "File header is too large ({header_len} bytes)")
             }
@@ -1004,6 +1010,10 @@ pub(crate) enum StreamError {
     EncryptAead,
     /// Encrypted stream ended before the final-flag chunk.
     Truncated,
+    /// An authenticated empty final chunk following one or more non-final
+    /// chunks. `FORMAT.md` §5 permits an empty final chunk only as the sole
+    /// encoding of empty plaintext.
+    EmptyFinalChunk,
     /// Bytes remain after the final-flag chunk was successfully
     /// decrypted. Raised by the post-`decrypt_last_in_place` probe
     /// in [`crate::crypto::stream::DecryptReader::fill_buffer`]. Ordinary
@@ -1034,6 +1044,7 @@ impl std::fmt::Display for StreamError {
             StreamError::DecryptAead => "Payload authentication failed",
             StreamError::EncryptAead => "payload encryption failed",
             StreamError::Truncated => "Encrypted stream truncated",
+            StreamError::EmptyFinalChunk => "Encrypted stream has an invalid empty final chunk",
             StreamError::ExtraData => "Encrypted stream has trailing data",
             StreamError::StateExhausted => "stream state already finalized",
             StreamError::ChunkCountExceeded => "Encrypted stream exceeds supported data size",
@@ -1059,6 +1070,9 @@ impl From<std::io::Error> for CryptoError {
             return match stream_err {
                 StreamError::DecryptAead => CryptoError::PayloadTampered,
                 StreamError::Truncated => CryptoError::PayloadTruncated,
+                StreamError::EmptyFinalChunk => {
+                    CryptoError::InvalidFormat(FormatDefect::MalformedPayloadStream)
+                }
                 StreamError::ExtraData => CryptoError::ExtraDataAfterPayload,
                 StreamError::ChunkCountExceeded => CryptoError::PayloadChunkCountExceeded,
                 StreamError::EncryptAead => {
@@ -1314,6 +1328,10 @@ mod tests {
             "File header is malformed"
         );
         assert_eq!(
+            FormatDefect::MalformedPayloadStream.to_string(),
+            "Encrypted payload stream is malformed"
+        );
+        assert_eq!(
             FormatDefect::OversizedHeader {
                 header_len: 16_777_217
             }
@@ -1381,11 +1399,11 @@ mod tests {
             "File has invalid KDF settings (time cost 7)"
         );
 
-        // StreamError Display text. The four user-facing markers
-        // (DecryptAead, Truncated, ExtraData, ChunkCountExceeded) start
-        // capitalized; the two internal-bug markers (EncryptAead,
-        // StateExhausted) are lowercase because they only render after an
-        // "Internal ...:" prefix. This is the only place the user-facing
+        // StreamError Display text. The five user-facing markers
+        // (DecryptAead, Truncated, EmptyFinalChunk, ExtraData,
+        // ChunkCountExceeded) start capitalized; the two internal-bug markers
+        // (EncryptAead, StateExhausted) are lowercase because they only render
+        // after an "Internal ...:" prefix. This is the only place the user-facing
         // markers' text is pinned — they carry no CryptoError payload of
         // their own.
         assert_eq!(
@@ -1399,6 +1417,10 @@ mod tests {
         assert_eq!(
             StreamError::Truncated.to_string(),
             "Encrypted stream truncated"
+        );
+        assert_eq!(
+            StreamError::EmptyFinalChunk.to_string(),
+            "Encrypted stream has an invalid empty final chunk"
         );
         assert_eq!(
             StreamError::ExtraData.to_string(),
@@ -1940,6 +1962,10 @@ mod tests {
             ("WrongKind", FormatDefect::WrongKind { kind: u8::MAX }),
             ("MalformedHeader", FormatDefect::MalformedHeader),
             (
+                "MalformedPayloadStream",
+                FormatDefect::MalformedPayloadStream,
+            ),
+            (
                 "OversizedHeader(max)",
                 FormatDefect::OversizedHeader {
                     header_len: u32::MAX,
@@ -2026,6 +2052,10 @@ mod tests {
             &StreamError::Truncated.to_string(),
         );
         check(
+            "StreamError::EmptyFinalChunk",
+            &StreamError::EmptyFinalChunk.to_string(),
+        );
+        check(
             "StreamError::ExtraData",
             &StreamError::ExtraData.to_string(),
         );
@@ -2057,6 +2087,10 @@ mod tests {
         assert!(matches!(
             from_marker(StreamError::Truncated),
             CryptoError::PayloadTruncated
+        ));
+        assert!(matches!(
+            from_marker(StreamError::EmptyFinalChunk),
+            CryptoError::InvalidFormat(FormatDefect::MalformedPayloadStream)
         ));
         assert!(matches!(
             from_marker(StreamError::ExtraData),

@@ -4,7 +4,8 @@
 //! 64 KiB plaintext chunks. Writers must not emit an empty trailing chunk
 //! after non-empty plaintext that ends on a [`BUFFER_SIZE`] boundary; the
 //! final non-empty chunk uses `last_flag = 1`. Empty plaintext is encoded
-//! as a single tag-only `last` chunk.
+//! as a single tag-only `last` chunk. Readers reject a tag-only final chunk
+//! after any non-final chunk.
 //!
 //! [`EncryptWriter`] defers committing a full chunk until either more
 //! plaintext arrives (then `encrypt_next`) or `finish()` is called (then
@@ -351,8 +352,9 @@ impl<R: Read> DecryptReader<R> {
     ///   a tampered tail, and both must fail closed.
     ///
     /// **Trailing-data probe.** After `decrypt_last_in_place` succeeds
-    /// we probe the inner reader for one additional byte. With the
-    /// peek-ahead model the probe can only fire if the inner reader
+    /// the reader first rejects an empty final chunk if any non-final chunk
+    /// preceded it, then probes the inner reader for one additional byte.
+    /// With the peek-ahead model the probe can only fire if the inner reader
     /// returned `Ok(0)` and then later produced more bytes — a
     /// pathological case (non-blocking sockets, mis-implemented
     /// `Take`-style wrappers). Kept as defense-in-depth so any such
@@ -459,6 +461,12 @@ impl<R: Read> DecryptReader<R> {
                 .map_err(|_| {
                     stream_io_error(io::ErrorKind::InvalidData, StreamError::DecryptAead)
                 })?;
+            if self.chunk.is_empty() && self.chunk_count > 0 {
+                return Err(stream_io_error(
+                    io::ErrorKind::InvalidData,
+                    StreamError::EmptyFinalChunk,
+                ));
+            }
             self.chunk_count += 1;
             self.done = true;
 
@@ -674,6 +682,48 @@ mod tests {
         );
         let decrypted = decrypt_to_vec(&ciphertext);
         assert_eq!(decrypted, &[] as &[u8]);
+    }
+
+    /// An authenticated empty FINAL chunk after a full NEXT chunk is not a
+    /// tamper failure, but it is not a valid FORMAT.md §5 encoding. The same
+    /// plaintext must be encoded as one full-size FINAL chunk. The reader may
+    /// already have served the independently authenticated NEXT chunk when it
+    /// reaches this defect, but the rejection is terminal and no output is
+    /// promoted by the full decrypt pipeline.
+    #[test]
+    fn streaming_aead_rejects_empty_final_chunk_after_data() {
+        let plaintext: Vec<u8> = (0..BUFFER_SIZE).map(|i| (i % 251) as u8).collect();
+        let cipher = XChaCha20Poly1305::new(test_key().expose().into());
+        let mut encryptor = stream::EncryptorBE32::from_aead(cipher, (&TEST_NONCE).into());
+
+        let mut ciphertext = plaintext.clone();
+        encryptor
+            .encrypt_next_in_place(b"", &mut ciphertext)
+            .expect("seal full non-final chunk");
+        let mut empty_final = Vec::new();
+        encryptor
+            .encrypt_last_in_place(b"", &mut empty_final)
+            .expect("seal empty final chunk");
+        assert_eq!(empty_final.len(), TAG_SIZE, "test setup");
+        ciphertext.extend_from_slice(&empty_final);
+
+        let mut reader = payload_decryptor(&test_key(), &TEST_NONCE, ciphertext.as_slice());
+        let (out, err) = drain_decrypt_reader(&mut reader);
+        let err = err.expect("expected empty-final-chunk rejection");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let marker = err
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<StreamError>())
+            .expect("expected StreamError marker");
+        assert!(
+            matches!(marker, StreamError::EmptyFinalChunk),
+            "expected StreamError::EmptyFinalChunk, got {marker:?}"
+        );
+        assert_eq!(
+            out, plaintext,
+            "the prior independently authenticated chunk may already be served"
+        );
+        assert_poisoned_read(&mut reader);
     }
 
     /// Drain `DecryptReader` through tiny consumer buffers. The reader

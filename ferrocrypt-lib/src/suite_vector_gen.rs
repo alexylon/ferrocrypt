@@ -32,11 +32,15 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use chacha20poly1305::{
+    XChaCha20Poly1305,
+    aead::{KeyInit as AeadKeyInit, stream},
+};
 use secrecy::SecretString;
 
 use crate::crypto::kdf::{ARGON2_SALT_SIZE, KDF_PARAMS_SIZE, KdfParams};
 use crate::crypto::keys::{DerivedSubkeys, FileKey, derive_subkeys, random_bytes};
-use crate::crypto::stream::STREAM_NONCE_SIZE;
+use crate::crypto::stream::{BUFFER_SIZE, STREAM_NONCE_SIZE};
 use crate::crypto::tlv::tlv_bytes;
 use crate::error::sanitize_for_display;
 use crate::format::{HEADER_FIXED_SIZE, HEADER_LEN_MAX, HEADER_MAC_SIZE, PREFIX_SIZE};
@@ -393,6 +397,69 @@ fn build_crafted_payload_fcr(
         .map_err(|_| CryptoError::InternalInvariant("crafted payload write"))?;
     let out = writer.finish()?;
     fs::write(cases.join(name), out).expect("write crafted-payload fixture");
+    Ok(())
+}
+
+/// Builds a valid outer container and valid one-chunk FCA plaintext, then
+/// seals that plaintext as a non-final chunk followed by an authenticated
+/// empty final chunk. `FORMAT.md` §5 requires the full plaintext chunk itself
+/// to carry the final flag, so this fixture isolates the reader-side
+/// canonicality rejection without introducing an archive or authentication
+/// defect.
+fn build_empty_final_chunk_fcr(
+    cases: &Path,
+    name: &str,
+    file_key: &FileKey,
+    entries: &[RecipientEntry],
+) -> Result<(), CryptoError> {
+    const ROOT_NAME: &str = "payload.bin";
+    let archive_overhead = crate::archive::format::FCA_HEADER_SIZE
+        + crate::archive::format::FCA_ENTRY_FIXED_SIZE
+        + ROOT_NAME.len();
+    let content_len =
+        BUFFER_SIZE
+            .checked_sub(archive_overhead)
+            .ok_or(CryptoError::InternalInvariant(
+                "suite archive overhead exceeds one payload chunk",
+            ))?;
+
+    let staging = tempfile::tempdir()?;
+    let source = staging.path().join(ROOT_NAME);
+    fs::write(&source, vec![0x5A; content_len])?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&source, fs::Permissions::from_mode(PLAINTEXT_FILE_MODE))?;
+    }
+    let raw_payload =
+        crate::archive::encode::archive(&source, Vec::new(), ArchiveLimits::default())?;
+    if raw_payload.len() != BUFFER_SIZE {
+        return Err(CryptoError::InternalInvariant(
+            "suite FCA payload is not exactly one stream chunk",
+        ));
+    }
+
+    let built = craft_encrypted_header(file_key, entries, b"")?;
+    let cipher = XChaCha20Poly1305::new(built.payload_key.expose().into());
+    let mut encryptor = stream::EncryptorBE32::from_aead(cipher, (&built.stream_nonce).into());
+    let mut encrypted_payload = raw_payload;
+    encryptor
+        .encrypt_next_in_place(b"", &mut encrypted_payload)
+        .map_err(|_| {
+            CryptoError::InternalCryptoFailure("suite non-final payload encryption failed")
+        })?;
+    let mut empty_final = Vec::new();
+    encryptor
+        .encrypt_last_in_place(b"", &mut empty_final)
+        .map_err(|_| CryptoError::InternalCryptoFailure("suite empty-final encryption failed"))?;
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&built.prefix_bytes);
+    out.extend_from_slice(&built.header_bytes);
+    out.extend_from_slice(&built.header_mac);
+    out.extend_from_slice(&encrypted_payload);
+    out.extend_from_slice(&empty_final);
+    fs::write(cases.join(name), out)?;
     Ok(())
 }
 
@@ -848,7 +915,7 @@ fn regenerate_suite_vectors_inner() {
         "Decryption failed: file header was modified or corrupted",
     ));
 
-    // ── Payload truncation, tamper, and trailing data ───────────────────
+    // ── Payload truncation, tamper, non-canonical final, and trailing data ──
     // A valid stream always ends with a final-flag chunk, so a payload
     // with zero bytes is provably truncated. A partial cut inside a
     // chunk is deliberately NOT this class: STREAM cannot tell a
@@ -881,6 +948,12 @@ fn regenerate_suite_vectors_inner() {
         &right,
         "PayloadTampered",
         "Decryption failed: file data was modified or corrupted",
+    ));
+    rows.push(Case::err(
+        "cases/payload-empty-final-after-data.fcr",
+        &right,
+        "InvalidFormat(MalformedPayloadStream)",
+        "Encrypted payload stream is malformed",
     ));
     // A file-level append shifts the final-chunk boundary, so STREAM's
     // per-chunk nonce binding reports it as payload tampering. The
@@ -1107,6 +1180,20 @@ fn regenerate_suite_vectors_inner() {
 
     // ── Header-fixed / entry structural rejects + per-field tamper ──────
     rows.extend(write_header_entry_reject_cases(&cases));
+
+    // Generate this new RNG-consuming fixture after every pre-existing case so
+    // extending the suite does not change the frozen bytes of older vectors.
+    {
+        let file_key = FileKey::generate().expect("suite file key");
+        let entry = argon2id_entry(&file_key);
+        build_empty_final_chunk_fcr(
+            &cases,
+            "payload-empty-final-after-data.fcr",
+            &file_key,
+            std::slice::from_ref(&entry),
+        )
+        .expect("build empty-final payload fixture");
+    }
 
     write_manifest(&suite, &rows);
 }

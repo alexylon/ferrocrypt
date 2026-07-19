@@ -79,6 +79,10 @@ fn error_matches(class: &str, e: &CryptoError) -> bool {
         "InvalidFormat(MalformedHeader)" => {
             matches!(e, CryptoError::InvalidFormat(FormatDefect::MalformedHeader))
         }
+        "InvalidFormat(MalformedPayloadStream)" => matches!(
+            e,
+            CryptoError::InvalidFormat(FormatDefect::MalformedPayloadStream)
+        ),
         "InvalidFormat(OversizedHeader)" => matches!(
             e,
             CryptoError::InvalidFormat(FormatDefect::OversizedHeader { .. })

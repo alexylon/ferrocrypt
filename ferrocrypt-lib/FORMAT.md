@@ -769,6 +769,7 @@ Rules:
 - Non-empty plaintext whose length is a multiple of 65,536 bytes ends with a
   full-size final chunk using `last_flag = 0x01`.
 - Writers MUST NOT append an extra empty final chunk after non-empty plaintext.
+- Readers MUST reject an empty final chunk that follows any non-final chunk.
 - Writers MUST NOT emit more than `2^32` chunks.
 - The final chunk MUST use a counter value in `0..=2^32-1`. If counter
   `2^32 - 1` is used, that chunk MUST be final.
@@ -1886,7 +1887,8 @@ expose specific subclasses for clearer diagnostics:
 - malformed TLV, unknown critical TLV;
 - archive extension, manifest, entry extension, path, or plaintext resource-cap
   exceeded;
-- payload truncation, authentication failure, or trailing data;
+- payload-stream structural defects, truncation, authentication failure, or
+  trailing data;
 - malformed public key or private key;
 - unsupported public-key or private-key version;
 - private-key unlock failure;

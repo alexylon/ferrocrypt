@@ -272,7 +272,7 @@ fn extract_single_file_root<R: Read>(
     .map_err(|e| {
         map_already_exists(
             CryptoError::Io(e),
-            "Previous .incomplete exists",
+            INCOMPLETE_OUTPUT_EXISTS,
             &output_dir.join(incomplete_name),
         )
     })?;
@@ -307,7 +307,7 @@ fn extract_directory_root<R: Read>(
     let root_dir = platform::mkdir_strict(output_handle, incomplete_name).map_err(|e| {
         map_already_exists(
             e,
-            "Previous .incomplete exists",
+            INCOMPLETE_OUTPUT_EXISTS,
             &output_dir.join(incomplete_name),
         )
     })?;
@@ -460,14 +460,13 @@ fn promote_root(
 /// the whole tree. Single-file roots are unaffected — they promote through
 /// `tempfile` on every target. The writer refuses the same directory input
 /// (`encode::validate_encrypt_input`), so this is not a "wrote it but cannot
-/// read it back" asymmetry. The error class matches the late promotion
-/// failure this replaces (`io::ErrorKind::Unsupported`).
+/// read it back" asymmetry, and this rejection mirrors the writer's:
+/// the same `InvalidInput` class with parallel wording.
 fn reject_unsupported_directory_root(manifest: &Manifest) -> Result<(), CryptoError> {
     if !platform::DIRECTORY_PROMOTION_SUPPORTED && !manifest.root_is_file {
-        return Err(CryptoError::Io(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "Directory extraction is not supported on this target",
-        )));
+        return Err(CryptoError::InvalidInput(
+            "Decrypting a directory is not supported on this target".to_string(),
+        ));
     }
     Ok(())
 }
@@ -538,13 +537,20 @@ fn output_already_exists(output_dir: &Path, root_name: &OsStr) -> CryptoError {
     already_exists_error(OUTPUT_LABEL, &output_dir.join(root_name))
 }
 
+/// Label for the staging-name collision: an `.incomplete` entry
+/// already occupies the working name. It may be left over from a
+/// previous failed run or still being written by a concurrent decrypt
+/// of the same file; either way this run did not create it, so it is
+/// rejected and preserved.
+const INCOMPLETE_OUTPUT_EXISTS: &str = "Incomplete output already exists";
+
 /// Maps `io::ErrorKind::AlreadyExists` to a typed
 /// `CryptoError::InvalidInput("<label>: <path>")` and otherwise
 /// preserves the underlying error. Used at the first-touch staging
-/// boundary: `mkdir_strict` / `create_file_at` reject a stale
-/// `.incomplete` from a prior failed run with a recognisable
-/// diagnostic AND preserve it (the cleanup path tracks only roots
-/// THIS run created).
+/// boundary: `mkdir_strict` / `create_file_at` reject an `.incomplete`
+/// already at the working name ([`INCOMPLETE_OUTPUT_EXISTS`]) with a
+/// recognisable diagnostic AND preserve it (the cleanup path tracks
+/// only roots THIS run created).
 fn map_already_exists(e: CryptoError, label: &str, path: &Path) -> CryptoError {
     if let CryptoError::Io(io_err) = &e {
         if io_err.kind() == io::ErrorKind::AlreadyExists {
@@ -2073,7 +2079,7 @@ mod tests {
         let archive = build_archive(&manifest, &[("hello.txt", b"Hello, world!")]);
 
         let err = unarchive_default(archive, tmp.path()).unwrap_err();
-        assert!(format!("{err}").contains("Previous .incomplete exists"));
+        assert!(format!("{err}").contains(INCOMPLETE_OUTPUT_EXISTS));
         assert!(
             stale_path.exists(),
             "pre-existing .incomplete must be preserved across a retry",

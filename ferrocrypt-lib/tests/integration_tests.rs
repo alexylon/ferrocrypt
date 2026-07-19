@@ -2816,7 +2816,10 @@ fn test_existing_incomplete_blocks_retry() -> Result<(), CryptoError> {
     assert!(result.is_err());
     match result {
         Err(CryptoError::InvalidInput(msg)) => {
-            assert!(msg.contains("Previous .incomplete exists"), "got: {msg}");
+            assert!(
+                msg.contains("Incomplete output already exists"),
+                "got: {msg}"
+            );
         }
         other => panic!("expected InvalidInput about incomplete, got: {other:?}"),
     }

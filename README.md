@@ -304,7 +304,7 @@ Common failure categories include:
 - **Passphrase memory over limit** — the file requests more Argon2id memory than the configured limit permits. The default limit is 1 GiB; raise it with `--max-kdf-memory` if the source is trusted.
 - **Unsupported recipient `<type>`. Upgrade FerroCrypt.** — the file uses a recipient type marked as required that this release does not support.
 
-No failed decryption produces a completed output at the requested final path. The default behavior removes any staged `.incomplete` working copy before the error returns; `--keep-partial` keeps it for inspection. A leftover `.incomplete` from a previous failed run is preserved across a retry that fails with `Previous .incomplete exists`, so the prior partial is not silently overwritten.
+No failed decryption produces a completed output at the requested final path. The default behavior removes any staged `.incomplete` working copy before the error returns; `--keep-partial` keeps it for inspection. A leftover `.incomplete` from a previous failed run is preserved across a retry that fails with `Incomplete output already exists`, so the prior partial is not silently overwritten.
 
 ## Technical reference
 

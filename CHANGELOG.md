@@ -6,6 +6,8 @@ All notable changes to FerroCrypt are documented in this file.
 
 ### Changed
 - **`KdfParams::hash_passphrase` is no longer public.** Supported encryption, decryption, and key-generation workflows already perform Argon2id internally and enforce `KdfLimit`. Code that needs raw Argon2id output should use the `argon2` crate directly. All other `KdfParams` uses are unchanged.
+- **The rejection for an existing `.incomplete` working copy now reads "Incomplete output already exists".** The old wording, "Previous .incomplete exists", was wrong when the entry was still being written by another decrypt of the same file running at the same time. Behavior is unchanged: an `.incomplete` entry the current run did not create is never reused or deleted.
+- **On Unix systems other than Linux and macOS, decrypting a file that contains a folder now fails with "Decrypting a directory is not supported on this target".** This matches the encrypt side, which already refuses a folder there with the same kind of typed error; the rejection previously surfaced as a raw unsupported-operation I/O error. Linux, macOS, and Windows are unaffected.
 
 ### Fixed
 - **Authenticated files with incomplete internal archive headers, extension regions, or manifests now return `MalformedArchive` with the affected region.** These structural defects previously appeared as generic I/O errors. Filesystem failures and truncated or modified encrypted payloads keep their existing error types.

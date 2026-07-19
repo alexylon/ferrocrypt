@@ -870,8 +870,11 @@ impl std::fmt::Display for FormatDefect {
 /// File-format or key-file version rejection. Carries the raw version
 /// byte so callers can inspect it without parsing a formatted string.
 ///
-/// The four variant pairs cover FerroCrypt's three independent on-disk
-/// version domains:
+/// The three variant pairs cover three of FerroCrypt's four independent
+/// on-disk version domains (`FORMAT.md` §11); the fourth — the inner FCA
+/// archive version — is a defect of the encrypted payload rather than the
+/// outer file, so it surfaces as [`FormatDefect::UnsupportedArchiveVersion`]
+/// instead:
 ///
 /// - `OlderFile` / `NewerFile` — `.fcr` outer-file version (`FORMAT.md` §3.1);
 /// - `OlderKey` / `NewerKey` — `private.key` wire-version byte

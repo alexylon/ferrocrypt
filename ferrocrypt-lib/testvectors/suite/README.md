@@ -65,7 +65,9 @@ fixture-only — never reuse them for real data.
 - Out-of-range KDF parameters under a **valid** header MAC:
   `mem_cost > 2 GiB`, `lanes = 0`, `time_cost = 13`.
 - Payload: missing final chunk (`PayloadTruncated`), flipped byte and
-  appended bytes (both `PayloadTampered` — see below).
+  appended bytes (both `PayloadTampered`), and an empty final chunk
+  after a full data chunk (`InvalidFormat(MalformedPayloadStream)`).
+  These classifications are explained below.
 - Wrong credential: wrong passphrase, and an X25519 file decrypted with
   a non-recipient key (both `RecipientUnwrapFailed`).
 - Header MAC failure after a successful unwrap: `HeaderTampered` on a
@@ -80,7 +82,8 @@ fixture-only — never reuse them for real data.
 - `public.key` text grammar: uppercase input, corrupted Bech32
   checksum, valid Bech32 around a corrupted internal SHA3-256 checksum.
 
-Two classes deserve a note because the naive expectation is wrong:
+Three cases need further explanation because their classifications may
+be unexpected:
 
 - **Truncation vs tamper.** STREAM cannot distinguish a chunk that was
   shortened from a chunk that was modified — both fail AEAD
@@ -93,6 +96,16 @@ Two classes deserve a note because the naive expectation is wrong:
   `ExtraDataAfterPayload` class exists for stream readers that signal
   end-of-input at the chunk boundary and later yield more bytes — a
   shape a committed file cannot express.
+- **Empty final chunk after data.** A stream can encode all plaintext in
+  non-final chunks and then close with an authenticated empty final
+  chunk. This produces the same plaintext as the canonical encoding and
+  would pass a reader that checks authentication alone. FORMAT.md §5
+  forbids writers from emitting this shape and requires readers to
+  reject it, preserving a single ciphertext encoding for each plaintext
+  under a fixed key and nonce. Creating this fixture requires the
+  payload key, so the rule enforces canonical encoding rather than
+  protecting against unauthenticated modification.
+  `payload-empty-final-after-data.fcr` contains this shape.
 
 ## Regenerating
 
@@ -101,11 +114,17 @@ cargo test --package ferrocrypt --lib suite_vector_gen \
     -- --ignored --test-threads=1
 ```
 
-The generator (`ferrocrypt-lib/src/suite_vector_gen.rs`) replaces
+The generator (`ferrocrypt-lib/src/suite_vector_gen.rs`) rewrites
 `cases/`, `keys/`, `plaintext.txt`, `manifest.tsv`, and
-`SUITE-VERSION`; commit the result by hand and bump `SUITE-VERSION`
-when fixtures changed. Generation uses the OS CSPRNG, so bytes are not
-reproducible — the committed files are the contract.
+`SUITE-VERSION`; commit the regenerated files manually. Its fixed RNG
+seed makes an unchanged generator reproduce the corpus byte-for-byte,
+leaving an empty diff. Existing fixture bytes also remain stable when
+new RNG-consuming fixtures are appended without changing the earlier
+draw order.
+
+Increment `SUITE_VERSION` whenever a fixture is added, removed, or
+changed. The constant is the source of truth: regeneration writes its
+value to `SUITE-VERSION`, so do not edit the committed file directly.
 
 `tests/testvector_suite.rs` replays the full manifest through the
 public API on every `cargo test` run, so a drift between the committed

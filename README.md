@@ -301,6 +301,7 @@ Common failure categories include:
 - **Decryption failed: file data was modified or corrupted** — the header verified, but the encrypted payload was modified or corrupted.
 - **Encrypted file is truncated** — the encrypted stream ended before its final authenticated chunk.
 - **Encrypted file has unexpected trailing data** — extra data was found after the authenticated encrypted stream.
+- **Encrypted payload stream is malformed** — every payload chunk passed authentication, but the chunk sequence violates the format. FerroCrypt does not write this layout.
 - **Passphrase memory over limit** — the file requests more Argon2id memory than the configured limit permits. The default limit is 1 GiB; raise it with `--max-kdf-memory` if the source is trusted.
 - **Unsupported recipient `<type>`. Upgrade FerroCrypt.** — the file uses a recipient type marked as required that this release does not support.
 

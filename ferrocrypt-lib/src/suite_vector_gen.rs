@@ -741,6 +741,13 @@ fn write_manifest(suite: &Path, rows: &[Case]) {
 /// re-run is a clean (empty) diff. Changing it re-randomizes every fixture.
 const SUITE_SEED: u64 = 0xFECC_0000_5EED_0001;
 
+/// Corpus revision written to `SUITE-VERSION`. Independent readers may pin
+/// to a specific revision. Increment it whenever a fixture is added, removed,
+/// or changed; different corpus contents must never share a revision.
+/// Regeneration treats this constant as the source of truth and overwrites the
+/// committed file.
+const SUITE_VERSION: u32 = 2;
+
 /// Regenerates the committed suite corpus. Ignored in normal test runs;
 /// see the module docs for the invocation and the commit workflow.
 #[test]
@@ -771,7 +778,8 @@ fn regenerate_suite_vectors_inner() {
         fs::set_permissions(&plaintext, fs::Permissions::from_mode(PLAINTEXT_FILE_MODE))
             .expect("pin plaintext.txt mode");
     }
-    fs::write(suite.join("SUITE-VERSION"), "1\n").expect("write SUITE-VERSION");
+    fs::write(suite.join("SUITE-VERSION"), format!("{SUITE_VERSION}\n"))
+        .expect("write SUITE-VERSION");
 
     generate_key_pair(&keys, "a");
     generate_key_pair(&keys, "b");

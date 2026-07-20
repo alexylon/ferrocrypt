@@ -33,7 +33,7 @@ the integration targets.
 | `fuzz_fca_header` | `parse_fca_header` — 27-byte FCA fixed header parser; asserts returned values are inside `ArchiveLimits` on success |
 | `fuzz_fca_manifest` | Full FCA manifest pipeline: header → manifest bytes → `parse_manifest_bytes` → tree-shape validation; asserts spec §20 manifest invariants on success, then re-serializes through the writer gate and asserts byte-identity (writer/reader symmetry) |
 | `fuzz_fca_full_pipeline` | `archive::unarchive` end-to-end on arbitrary bytes against a fresh tempdir per iteration (header, `archive_ext` TLV, manifest, tree, content streaming, promotion, cleanup); asserts the `DeleteOnError` contract — no `.incomplete` residue on error, output present and no residue on success |
-| `fuzz_stream_decrypt` | STREAM-BE32 `DecryptReader` on raw ciphertext under a fixed key/nonce: chunk refill, exact-chunk one-byte peek, truncation / tamper / trailing-data classification; when an input decrypts, asserts deterministic re-encryption is byte-identical |
+| `fuzz_stream_decrypt` | STREAM-BE32 `DecryptReader` on raw ciphertext under a fixed key/nonce: chunk refill, exact-chunk one-byte peek, and classification of truncation, tampering, trailing data, and an empty final chunk after data; when an input decrypts, asserts deterministic re-encryption is byte-identical |
 | `fuzz_recipient_string_decode` | Generic typed-payload recipient-string decoder (two-argument form with a fuzzed length cap): arbitrary type names and key-material lengths, plus the canonical-padding re-encode check |
 | `fuzz_recipient_decode` | Bech32 `fcr1…` recipient string parser and internal SHA3-256 checksum |
 | `fuzz_probe_mode` | `probe_recipient_mode` top-level parser entry, end-to-end via a real temp file |
@@ -60,12 +60,14 @@ Regenerate after any wire-format change:
 cargo run --example gen_seeds
 ```
 
-Every seed is produced by the production writer (or patched from its
-output) and validated through the production reader during
-generation, so format drift fails regeneration instead of silently
-rotting the seeds. CI passes `seeds/<target>` as an extra corpus
-directory; locally, `gen_seeds` also copies each seed into
-`corpus/<target>` so a plain `cargo fuzz run <target>` picks it up.
+Every seed is checked through the production reader during generation,
+so format drift fails regeneration instead of silently leaving stale
+seeds. Valid seeds produced by the writer, including supported forms
+patched from writer output, must be accepted. Deliberately malformed
+seeds for shapes the writer cannot emit must fail with the expected
+error. CI passes `seeds/<target>` as an extra corpus directory; locally,
+`gen_seeds` also copies each seed into `corpus/<target>` so a plain
+`cargo fuzz run <target>` picks it up.
 
 ## Running
 

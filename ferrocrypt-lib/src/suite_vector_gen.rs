@@ -2,8 +2,8 @@
 //!
 //! The suite corpus is the public set of must-reject (and a few
 //! must-accept) fixtures required by `FORMAT.md` §12. Every fixture is
-//! committed as real bytes plus a `manifest.tsv` row naming the decrypt
-//! attempt and the exact expected outcome, so an independent reader
+//! committed as real bytes plus a `manifest.tsv` row naming the public-API
+//! action and exact expected outcome, so an independent reader
 //! implementation can consume the corpus without running this crate's
 //! test code. The `tests/testvector_suite.rs` integration test replays
 //! the manifest through the public API on every `cargo test` run.
@@ -38,7 +38,7 @@ use chacha20poly1305::{
 };
 use secrecy::SecretString;
 
-use crate::crypto::kdf::{ARGON2_SALT_SIZE, KDF_PARAMS_SIZE, KdfParams};
+use crate::crypto::kdf::{ARGON2_SALT_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams};
 use crate::crypto::keys::{DerivedSubkeys, FileKey, derive_subkeys, random_bytes};
 use crate::crypto::stream::{BUFFER_SIZE, STREAM_NONCE_SIZE};
 use crate::crypto::tlv::tlv_bytes;
@@ -56,8 +56,8 @@ const SUITE_PASSPHRASE: &str = "suite-passphrase-not-secret-do-not-reuse";
 /// Deliberately wrong passphrase used by the wrong-credential manifest row.
 const WRONG_PASSPHRASE: &str = "wrong-passphrase";
 
-/// Content of `plaintext.txt` — the source file every valid fixture
-/// encrypts and every `ok` manifest row must decrypt back to.
+/// Content of `plaintext.txt` — the source file every valid `.fcr` fixture
+/// encrypts and every `ok` decrypt row must reproduce.
 const PLAINTEXT: &str = "FerroCrypt v1 test-vector suite plaintext.\n";
 
 /// Fixed Unix mode pinned on `plaintext.txt` before it is archived. The
@@ -66,7 +66,6 @@ const PLAINTEXT: &str = "FerroCrypt v1 test-vector suite plaintext.\n";
 /// would leak into the encrypted bytes and break byte-identical
 /// regeneration. `0o644` matches the archiver's non-Unix default mode, so the
 /// corpus stays reproducible on every platform.
-#[cfg(unix)]
 const PLAINTEXT_FILE_MODE: u32 = 0o644;
 
 /// Grammar-valid but unknown recipient `type_name` used by the
@@ -123,11 +122,27 @@ impl Case {
         }
     }
 
+    fn key_ok(file: &str) -> Self {
+        Self {
+            action: "read-public-key",
+            credential: "-".to_string(),
+            ..Self::ok(file, "-")
+        }
+    }
+
     fn private_key_err(file: &str, class: &str, message: &str) -> Self {
         Self {
             action: "validate-private-key",
             credential: "-".to_string(),
             ..Self::err(file, "-", class, message)
+        }
+    }
+
+    fn private_key_ok(file: &str) -> Self {
+        Self {
+            action: "validate-private-key",
+            credential: "-".to_string(),
+            ..Self::ok(file, "-")
         }
     }
 }
@@ -260,19 +275,20 @@ fn unknown_entry(critical: bool) -> RecipientEntry {
 }
 
 /// Variant of [`build_crafted_fcr`] for a single argon2id recipient
-/// whose KDF parameter field is replaced with `bad_params` before the
-/// header MAC is computed. The MAC is valid, so the fixture isolates
-/// exactly one defect: parameters outside the v1 structural bounds.
-fn build_bad_kdf_fcr(
+/// whose KDF parameter field is replaced before the header MAC is
+/// computed. The replacement may be structurally invalid or merely
+/// above a local resource cap; in either case the MAC remains valid so
+/// the fixture isolates the KDF policy outcome.
+fn build_rewritten_kdf_fcr(
     plaintext: &Path,
     cases: &Path,
     name: &str,
-    bad_params: KdfParams,
+    replacement_params: KdfParams,
 ) -> Result<(), CryptoError> {
     let file_key = FileKey::generate()?;
     let mut entry = argon2id_entry(&file_key);
     entry.body[ARGON2_SALT_SIZE..ARGON2_SALT_SIZE + KDF_PARAMS_SIZE]
-        .copy_from_slice(&bad_params.to_bytes());
+        .copy_from_slice(&replacement_params.to_bytes());
     build_crafted_fcr(
         plaintext,
         cases,
@@ -497,7 +513,8 @@ fn crafted_fca_payloads() -> Vec<(&'static str, Vec<u8>)> {
 /// reject fixtures by mutating the valid argon2id base at frozen v1 offsets,
 /// and returns their manifest rows. Covers `FORMAT.md` §3.2 (`header_flags`),
 /// §3.4 (reserved and native-critical flag bits), §3.3 (entry framing), and
-/// §4.1 (each authenticated recipient-body field detected independently).
+/// representative §4.1/§4.2 recipient-body tampering. The completion cases
+/// below add the remaining independently authenticated body fields.
 /// argon2id byte offsets: header_flags 12; entry at 43 (type_name_len 43,
 /// recipient_flags 45, body_len 47, type_name 51, body 59 — salt 59,
 /// wrapped_file_key 127).
@@ -710,6 +727,270 @@ fn write_private_key_reject_cases(keys: &Path, cases: &Path) -> Vec<Case> {
     ]
 }
 
+/// Builds a complete one-file FCA payload with caller-supplied archive- and
+/// entry-level extension regions. This deliberately writes the small frozen
+/// wire layout directly: valid extension bytes exercise the accept path, while
+/// malformed or critical bytes must survive into the authenticated archive so
+/// the reader, rather than the fixture writer, rejects them.
+fn single_file_fca_payload(archive_ext: &[u8], entry_ext: &[u8]) -> Vec<u8> {
+    const PATH: &str = "plaintext.txt";
+
+    let manifest_len = crate::archive::format::checked_entry_wire_len(PATH.len(), entry_ext.len())
+        .expect("suite FCA manifest length");
+    let mut out = crate::archive::format::write_fca_header(
+        Vec::new(),
+        1,
+        u32::try_from(archive_ext.len()).expect("suite archive_ext length"),
+        u32::try_from(manifest_len).expect("suite manifest length"),
+        PLAINTEXT.len() as u64,
+    )
+    .expect("write suite FCA header");
+    out.extend_from_slice(archive_ext);
+
+    out.push(crate::archive::format::KIND_FILE);
+    out.push(0); // entry_flags
+    out.extend_from_slice(
+        &u16::try_from(PLAINTEXT_FILE_MODE)
+            .expect("suite file mode")
+            .to_be_bytes(),
+    );
+    out.extend_from_slice(
+        &u16::try_from(PATH.len())
+            .expect("suite path length")
+            .to_be_bytes(),
+    );
+    out.extend_from_slice(
+        &u32::try_from(entry_ext.len())
+            .expect("suite entry_ext length")
+            .to_be_bytes(),
+    );
+    out.extend_from_slice(&(PLAINTEXT.len() as u64).to_be_bytes());
+    out.extend_from_slice(PATH.as_bytes());
+    out.extend_from_slice(entry_ext);
+    out.extend_from_slice(PLAINTEXT.as_bytes());
+    out
+}
+
+/// Encrypts one crafted FCA extension payload under a valid passphrase
+/// recipient and header MAC.
+fn write_fca_extension_fixture(cases: &Path, name: &str, archive_ext: &[u8], entry_ext: &[u8]) {
+    let file_key = FileKey::generate().expect("suite file key");
+    let entry = argon2id_entry(&file_key);
+    let raw_payload = single_file_fca_payload(archive_ext, entry_ext);
+    build_crafted_payload_fcr(
+        cases,
+        name,
+        &file_key,
+        std::slice::from_ref(&entry),
+        &raw_payload,
+    )
+    .expect("build FCA extension fixture");
+}
+
+/// Appends the conformance cases added in suite revision 3. This function is
+/// called only after every revision-2 RNG draw, preserving all previously
+/// committed fixture bytes while completing the `FORMAT.md` §§4 and 12
+/// matrices.
+fn write_conformance_completion_cases(plaintext: &Path, cases: &Path, keys: &Path) -> Vec<Case> {
+    let right = passphrase_credential(SUITE_PASSPHRASE);
+    let key_a = private_key_credential("recipient-a.private.key");
+
+    // Positive key-file rows let the manifest express successful parse and
+    // validation actions, and make every committed key an exercised fixture.
+    let mut rows = vec![
+        Case::key_ok("keys/recipient-a.public.key"),
+        Case::key_ok("keys/recipient-b.public.key"),
+        Case::private_key_ok("keys/recipient-a.private.key"),
+        Case::private_key_ok("keys/recipient-b.private.key"),
+    ];
+
+    // Complete independent recipient-body field tamper coverage. These are
+    // byte mutations of the frozen valid bases and consume no RNG.
+    let argon2id_body_offset =
+        PREFIX_SIZE + HEADER_FIXED_SIZE + ENTRY_HEADER_SIZE + argon2id::TYPE_NAME.len();
+    let argon2id_kdf_time_low_byte = argon2id_body_offset + ARGON2_SALT_SIZE + 7;
+    let argon2id_wrap_nonce_offset = argon2id_body_offset + ARGON2_SALT_SIZE + KDF_PARAMS_SIZE;
+    mutated_copy(
+        cases,
+        "argon2id-valid.fcr",
+        "argon2id-kdf-tamper.fcr",
+        |bytes| bytes[argon2id_kdf_time_low_byte] ^= 0x02,
+    );
+    mutated_copy(
+        cases,
+        "argon2id-valid.fcr",
+        "argon2id-wrap-nonce-tamper.fcr",
+        |bytes| bytes[argon2id_wrap_nonce_offset] ^= 0x01,
+    );
+
+    let x25519_body_offset =
+        PREFIX_SIZE + HEADER_FIXED_SIZE + ENTRY_HEADER_SIZE + x25519::TYPE_NAME.len();
+    let x25519_wrap_nonce_offset = x25519_body_offset + x25519::PUBLIC_KEY_SIZE;
+    mutated_copy(
+        cases,
+        "x25519-valid.fcr",
+        "x25519-wrap-nonce-tamper.fcr",
+        |bytes| bytes[x25519_wrap_nonce_offset] ^= 0x01,
+    );
+
+    for file in [
+        "cases/argon2id-kdf-tamper.fcr",
+        "cases/argon2id-wrap-nonce-tamper.fcr",
+    ] {
+        rows.push(Case::err(
+            file,
+            &right,
+            "RecipientUnwrapFailed(argon2id)",
+            "Decryption failed: wrong passphrase or modified file",
+        ));
+    }
+    rows.push(Case::err(
+        "cases/x25519-wrap-nonce-tamper.fcr",
+        &key_a,
+        "RecipientUnwrapFailed(x25519)",
+        "Decryption failed: no matching recipient or modified file",
+    ));
+
+    // Structurally valid KDF parameters one KiB above the default local
+    // policy cap. The recipient was wrapped with fast parameters and the
+    // field is replaced before MAC construction, so no large Argon2id run is
+    // needed to exercise the reader's pre-KDF cap rejection.
+    let default_kdf_limit = KdfLimit::default();
+    let over_cap_mem = default_kdf_limit.max_mem_cost_kib + 1;
+    build_rewritten_kdf_fcr(
+        plaintext,
+        cases,
+        "kdf-mem-over-local-cap.fcr",
+        KdfParams {
+            mem_cost: over_cap_mem,
+            ..KdfParams::test_fast_default()
+        },
+    )
+    .expect("build KDF resource-cap fixture");
+    rows.push(Case::err(
+        "cases/kdf-mem-over-local-cap.fcr",
+        &right,
+        "KdfResourceCapExceeded",
+        &format!(
+            "Passphrase memory over limit ({over_cap_mem} KiB, limit {})",
+            default_kdf_limit.max_mem_cost_kib
+        ),
+    ));
+
+    // Native body-length and X25519 native-flag rejects carry a valid header
+    // MAC, isolating the recipient-specific shape checks.
+    {
+        let file_key = FileKey::generate().expect("suite file key");
+        let mut short = argon2id_entry(&file_key);
+        assert_eq!(short.body.len(), argon2id::BODY_LENGTH);
+        short.body.pop();
+        build_crafted_fcr(
+            plaintext,
+            cases,
+            "argon2id-invalid-length.fcr",
+            &file_key,
+            std::slice::from_ref(&short),
+            b"",
+        )
+        .expect("build argon2id invalid-length fixture");
+    }
+    {
+        let file_key = FileKey::generate().expect("suite file key");
+        let valid = x25519_entry(keys, "recipient-a.public.key", &file_key);
+
+        let mut short = valid.clone();
+        assert_eq!(short.body.len(), x25519::BODY_LENGTH);
+        short.body.pop();
+        build_crafted_fcr(
+            plaintext,
+            cases,
+            "x25519-invalid-length.fcr",
+            &file_key,
+            std::slice::from_ref(&short),
+            b"",
+        )
+        .expect("build x25519 invalid-length fixture");
+
+        let mut flagged = valid;
+        flagged.recipient_flags = RECIPIENT_FLAG_CRITICAL;
+        build_crafted_fcr(
+            plaintext,
+            cases,
+            "x25519-invalid-flag.fcr",
+            &file_key,
+            std::slice::from_ref(&flagged),
+            b"",
+        )
+        .expect("build x25519 invalid-flag fixture");
+    }
+    rows.push(Case::err(
+        "cases/argon2id-invalid-length.fcr",
+        &right,
+        "InvalidFormat(MalformedRecipientEntry)",
+        "Recipient entry is malformed",
+    ));
+    for file in [
+        "cases/x25519-invalid-length.fcr",
+        "cases/x25519-invalid-flag.fcr",
+    ] {
+        rows.push(Case::err(
+            file,
+            &key_a,
+            "InvalidFormat(MalformedRecipientEntry)",
+            "Recipient entry is malformed",
+        ));
+    }
+
+    // Each FCA extension namespace gets an ignorable success case plus
+    // malformed and unknown-critical rejections.
+    let archive_ignorable = tlv_bytes(0x0042, b"archive-metadata");
+    let entry_ignorable = tlv_bytes(0x0042, b"entry-metadata");
+    let critical = tlv_bytes(0x8001, b"required");
+    let mut malformed = tlv_bytes(0x0001, b"");
+    malformed.pop();
+
+    write_fca_extension_fixture(
+        cases,
+        "fca-archive-ext-ignorable.fcr",
+        &archive_ignorable,
+        b"",
+    );
+    write_fca_extension_fixture(cases, "fca-archive-ext-malformed.fcr", &malformed, b"");
+    write_fca_extension_fixture(cases, "fca-archive-ext-critical.fcr", &critical, b"");
+    write_fca_extension_fixture(cases, "fca-entry-ext-ignorable.fcr", b"", &entry_ignorable);
+    write_fca_extension_fixture(cases, "fca-entry-ext-malformed.fcr", b"", &malformed);
+    write_fca_extension_fixture(cases, "fca-entry-ext-critical.fcr", b"", &critical);
+
+    rows.push(Case::ok("cases/fca-archive-ext-ignorable.fcr", &right));
+    rows.push(Case::err(
+        "cases/fca-archive-ext-malformed.fcr",
+        &right,
+        "InvalidFormat(MalformedTlv)",
+        "Extension region is malformed",
+    ));
+    rows.push(Case::err(
+        "cases/fca-archive-ext-critical.fcr",
+        &right,
+        "InvalidFormat(UnknownCriticalTag)",
+        "Unknown required file feature (tag 0x8001). Upgrade FerroCrypt.",
+    ));
+    rows.push(Case::ok("cases/fca-entry-ext-ignorable.fcr", &right));
+    rows.push(Case::err(
+        "cases/fca-entry-ext-malformed.fcr",
+        &right,
+        "InvalidFormat(MalformedTlv)",
+        "Extension region is malformed",
+    ));
+    rows.push(Case::err(
+        "cases/fca-entry-ext-critical.fcr",
+        &right,
+        "InvalidFormat(UnknownCriticalTag)",
+        "Unknown required file feature (tag 0x8001). Upgrade FerroCrypt.",
+    ));
+
+    rows
+}
+
 fn write_manifest(suite: &Path, rows: &[Case]) {
     let mut out = String::new();
     out.push_str("# FerroCrypt v1 edge-case test-vector manifest.\n");
@@ -720,9 +1001,8 @@ fn write_manifest(suite: &Path, rows: &[Case]) {
     out.push_str(
         "# credential: passphrase:<literal>, private-key:<path>,unlock=<literal>, or -.\n",
     );
-    out.push_str(
-        "# expect ok: decryption must succeed and reproduce plaintext.txt byte-for-byte.\n",
-    );
+    out.push_str("# expect ok: decrypt must reproduce plaintext.txt byte-for-byte; key-file\n");
+    out.push_str("# actions must parse or validate successfully.\n");
     out.push_str(
         "# expect error: the attempt must fail; error_class names the typed CryptoError\n",
     );
@@ -746,7 +1026,7 @@ const SUITE_SEED: u64 = 0xFECC_0000_5EED_0001;
 /// or changed; different corpus contents must never share a revision.
 /// Regeneration treats this constant as the source of truth and overwrites the
 /// committed file.
-const SUITE_VERSION: u32 = 2;
+const SUITE_VERSION: u32 = 3;
 
 /// Regenerates the committed suite corpus. Ignored in normal test runs;
 /// see the module docs for the invocation and the commit workflow.
@@ -1050,7 +1330,7 @@ fn regenerate_suite_vectors_inner() {
 
     // ── Out-of-range KDF parameters under a valid header MAC ───────────
     let fast = KdfParams::test_fast_default();
-    build_bad_kdf_fcr(
+    build_rewritten_kdf_fcr(
         &plaintext,
         &cases,
         "kdf-mem-over-max.fcr",
@@ -1060,14 +1340,14 @@ fn regenerate_suite_vectors_inner() {
         },
     )
     .expect("build kdf-mem fixture");
-    build_bad_kdf_fcr(
+    build_rewritten_kdf_fcr(
         &plaintext,
         &cases,
         "kdf-lanes-zero.fcr",
         KdfParams { lanes: 0, ..fast },
     )
     .expect("build kdf-lanes fixture");
-    build_bad_kdf_fcr(
+    build_rewritten_kdf_fcr(
         &plaintext,
         &cases,
         "kdf-time-over-max.fcr",
@@ -1202,6 +1482,13 @@ fn regenerate_suite_vectors_inner() {
         )
         .expect("build empty-final payload fixture");
     }
+
+    // Revision-3 cases are deliberately last: every RNG draw used by the
+    // revision-2 corpus above stays at the same position in the deterministic
+    // stream, so all previously committed fixture bytes remain frozen.
+    rows.extend(write_conformance_completion_cases(
+        &plaintext, &cases, &keys,
+    ));
 
     write_manifest(&suite, &rows);
 }

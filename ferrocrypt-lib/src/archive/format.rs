@@ -403,10 +403,10 @@ pub fn parse_fca_header<R: Read>(
 
 /// Serialized byte length of one manifest entry: the fixed entry
 /// header plus the path bytes plus the per-entry TLV region. Returns
-/// `None` on arithmetic overflow. Shared by the writer's running
-/// total in `encode::record_entry` and by [`checked_manifest_len`]
-/// so the two sites cannot disagree on the formula.
-pub(super) fn checked_entry_wire_len(path_len: usize, entry_ext_len: usize) -> Option<usize> {
+/// `None` on arithmetic overflow. Shared by the writer's running total in
+/// `encode::record_entry`, by [`checked_manifest_len`], and by the committed
+/// suite-vector generator so those sites cannot disagree on the formula.
+pub(crate) fn checked_entry_wire_len(path_len: usize, entry_ext_len: usize) -> Option<usize> {
     FCA_ENTRY_FIXED_SIZE
         .checked_add(path_len)?
         .checked_add(entry_ext_len)

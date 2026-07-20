@@ -4,7 +4,8 @@
 # read-public-key (parse the public.key text file), or validate-private-key
 # (structurally validate the private.key file).
 # credential: passphrase:<literal>, private-key:<path>,unlock=<literal>, or -.
-# expect ok: decryption must succeed and reproduce plaintext.txt byte-for-byte.
+# expect ok: decrypt must reproduce plaintext.txt byte-for-byte; key-file
+# actions must parse or validate successfully.
 # expect error: the attempt must fail; error_class names the typed CryptoError
 # variant and error_message is the exact user-facing message.
 cases/argon2id-valid.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	ok	-	-
@@ -61,3 +62,20 @@ cases/argon2id-salt-tamper.fcr	decrypt	passphrase:suite-passphrase-not-secret-do
 cases/argon2id-wrappedkey-tamper.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	RecipientUnwrapFailed(argon2id)	Decryption failed: wrong passphrase or modified file
 cases/x25519-ephemeral-tamper.fcr	decrypt	private-key:keys/recipient-a.private.key,unlock=suite-passphrase-not-secret-do-not-reuse	error	RecipientUnwrapFailed(x25519)	Decryption failed: no matching recipient or modified file
 cases/x25519-wrappedkey-tamper.fcr	decrypt	private-key:keys/recipient-a.private.key,unlock=suite-passphrase-not-secret-do-not-reuse	error	RecipientUnwrapFailed(x25519)	Decryption failed: no matching recipient or modified file
+keys/recipient-a.public.key	read-public-key	-	ok	-	-
+keys/recipient-b.public.key	read-public-key	-	ok	-	-
+keys/recipient-a.private.key	validate-private-key	-	ok	-	-
+keys/recipient-b.private.key	validate-private-key	-	ok	-	-
+cases/argon2id-kdf-tamper.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	RecipientUnwrapFailed(argon2id)	Decryption failed: wrong passphrase or modified file
+cases/argon2id-wrap-nonce-tamper.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	RecipientUnwrapFailed(argon2id)	Decryption failed: wrong passphrase or modified file
+cases/x25519-wrap-nonce-tamper.fcr	decrypt	private-key:keys/recipient-a.private.key,unlock=suite-passphrase-not-secret-do-not-reuse	error	RecipientUnwrapFailed(x25519)	Decryption failed: no matching recipient or modified file
+cases/kdf-mem-over-local-cap.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	KdfResourceCapExceeded	Passphrase memory over limit (1048577 KiB, limit 1048576)
+cases/argon2id-invalid-length.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(MalformedRecipientEntry)	Recipient entry is malformed
+cases/x25519-invalid-length.fcr	decrypt	private-key:keys/recipient-a.private.key,unlock=suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(MalformedRecipientEntry)	Recipient entry is malformed
+cases/x25519-invalid-flag.fcr	decrypt	private-key:keys/recipient-a.private.key,unlock=suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(MalformedRecipientEntry)	Recipient entry is malformed
+cases/fca-archive-ext-ignorable.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	ok	-	-
+cases/fca-archive-ext-malformed.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(MalformedTlv)	Extension region is malformed
+cases/fca-archive-ext-critical.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(UnknownCriticalTag)	Unknown required file feature (tag 0x8001). Upgrade FerroCrypt.
+cases/fca-entry-ext-ignorable.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	ok	-	-
+cases/fca-entry-ext-malformed.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(MalformedTlv)	Extension region is malformed
+cases/fca-entry-ext-critical.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(UnknownCriticalTag)	Unknown required file feature (tag 0x8001). Upgrade FerroCrypt.

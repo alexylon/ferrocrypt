@@ -36,6 +36,7 @@ the integration targets.
 | `fuzz_stream_decrypt` | STREAM-BE32 `DecryptReader` on raw ciphertext under a fixed key/nonce: chunk refill, exact-chunk one-byte peek, and classification of truncation, tampering, trailing data, and an empty final chunk after data; when an input decrypts, asserts deterministic re-encryption is byte-identical |
 | `fuzz_recipient_string_decode` | Generic typed-payload recipient-string decoder (two-argument form with a fuzzed length cap): arbitrary type names and key-material lengths, plus the canonical-padding re-encode check |
 | `fuzz_recipient_decode` | Bech32 `fcr1…` recipient string parser and internal SHA3-256 checksum |
+| `fuzz_public_key_file` | Complete `public.key` content grammar: key-kind routing, UTF-8, the optional trailing `LF`, other ASCII whitespace, and the X25519 type and length; accepted content must re-encode byte-for-byte through the public recipient-string API |
 | `fuzz_probe_mode` | `probe_recipient_mode` top-level parser entry, end-to-end via a real temp file |
 
 ### Integration (secondary)
@@ -51,8 +52,9 @@ catch interaction bugs the parser-surface targets cannot see.
 
 ## Seed corpora
 
-`seeds/<target>/` holds small checked-in inputs that make the deep
-paths of the slower targets reachable from the first iteration —
+`seeds/<target>/` holds small checked-in inputs that reach important
+parser states on the first iteration: valid artifacts that sit behind a
+checksum or a structured encoding, plus selected rejection boundaries.
 `corpus/` is gitignored, so it starts empty on CI and fresh checkouts.
 Regenerate after any wire-format change:
 

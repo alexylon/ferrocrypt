@@ -18,9 +18,9 @@ use std::path::{Path, PathBuf};
 
 use ferrocrypt::fuzz_exports::{
     archive_for_fuzz, decrypt_stream_for_fuzz, empty_final_after_data_stream_for_fuzz,
-    encrypt_stream_for_fuzz, unarchive_for_fuzz,
+    encrypt_stream_for_fuzz, parse_public_key_file_bytes, unarchive_for_fuzz,
 };
-use ferrocrypt::{ArchiveLimits, CryptoError, FormatDefect};
+use ferrocrypt::{ArchiveLimits, CryptoError, FormatDefect, PublicKey};
 
 /// FCA fixed-header layout facts needed to splice an `archive_ext`
 /// region into writer output (the v1 writer always emits a zero-length
@@ -34,10 +34,16 @@ const FCA_HEADER_SIZE: usize = 27;
 /// range), length 2, two value bytes.
 const IGNORABLE_TLV: [u8; 8] = [0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0xAA, 0xBB];
 
+/// Six-byte `private.key` signature `magic(4) || version(1) || kind(1)
+/// = 'K'` (`FORMAT.md` §8), used to pin wrong-file-type routing in the
+/// `public.key` parser.
+const PRIVATE_KEY_SIGNATURE: [u8; 6] = [b'F', b'C', b'R', 0x00, 0x01, b'K'];
+
 fn main() {
     let fuzz_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     write_fca_seeds(&fuzz_root);
     write_stream_seeds(&fuzz_root);
+    write_public_key_seeds(&fuzz_root);
     println!("seeds regenerated and validated");
 }
 
@@ -143,6 +149,37 @@ fn write_stream_seeds(fuzz_root: &Path) {
         "fuzz_stream_decrypt",
         "empty_final_after_data.bin",
         &noncanonical,
+    );
+}
+
+/// Seeds the accepted `public.key` form written by key generation and
+/// the `private.key` signature rejected as `WrongKeyFileType`. The
+/// accepted seed reaches the grammar beyond both recipient-string
+/// checksums on the first iteration.
+fn write_public_key_seeds(fuzz_root: &Path) {
+    // Any non-zero 32-byte value satisfies public-key validation.
+    let key = PublicKey::from_bytes([0x2A; 32]).expect("non-zero key material");
+    let recipient = key
+        .to_recipient_string()
+        .expect("encode canonical recipient string");
+    let valid = format!("{recipient}\n");
+    parse_public_key_file_bytes(valid.as_bytes()).expect("valid seed must parse");
+    persist(
+        fuzz_root,
+        "fuzz_public_key_file",
+        "generated_public.key",
+        valid.as_bytes(),
+    );
+
+    match parse_public_key_file_bytes(&PRIVATE_KEY_SIGNATURE) {
+        Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)) => {}
+        other => panic!("private-key signature seed must be rejected, got {other:?}"),
+    }
+    persist(
+        fuzz_root,
+        "fuzz_public_key_file",
+        "private_key_signature.key",
+        &PRIVATE_KEY_SIGNATURE,
     );
 }
 

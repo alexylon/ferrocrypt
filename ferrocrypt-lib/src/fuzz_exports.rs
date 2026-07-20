@@ -2,11 +2,9 @@
 //!
 //! Gated behind the `fuzzing` Cargo feature so library consumers never
 //! see these items. The only crate that enables the feature is
-//! `ferrocrypt-lib/fuzz`, where each target drives a specific parser
-//! at the lowest useful layer (encrypted-file header parse, private-
-//! key header + body shape, KDF-parameter bounds, TLV grammar,
-//! recipient-string Bech32 grammar) without paying the cost of
-//! running a full Argon2id derivation.
+//! `ferrocrypt-lib/fuzz`, where each target drives a specific parser at
+//! the lowest useful layer without paying for unrelated cryptographic
+//! work.
 //!
 //! **Not a stable API.** Do not depend on this module from outside
 //! the repository. Items here may be renamed, removed, or re-shaped
@@ -78,6 +76,13 @@ pub fn validate_no_known_critical(
 /// internal types.
 pub fn decode_recipient_string(s: &str, local_max_chars: usize) -> Result<(), crate::CryptoError> {
     crate::key::public::decode_recipient_string(s, local_max_chars).map(|_| ())
+}
+
+/// Drives the `public.key` content parser over arbitrary bytes without
+/// exposing the crate-internal resolved-key type. The bounded
+/// filesystem read remains in `read_public_key`.
+pub fn parse_public_key_file_bytes(bytes: &[u8]) -> Result<(), crate::CryptoError> {
+    crate::key::public::parse_public_key_file_bytes(bytes).map(|_| ())
 }
 
 /// Writer-side counterpart for the `fuzz_fca_manifest` round-trip

@@ -31,9 +31,8 @@ pub const PRIVATE_KEY_FILENAME: &str = "private.key";
 pub(crate) enum KeyFileKind {
     /// Bytes look like a v1 `public.key`: a UTF-8 string that
     /// decodes as a canonical Bech32 `fcr1…` recipient (with
-    /// surrounding whitespace tolerated for the heuristic — the
-    /// strict parser in `read_public_key` enforces canonical
-    /// whitespace separately).
+    /// surrounding whitespace tolerated for this heuristic — the
+    /// `public.key` parser enforces canonical whitespace).
     Public,
     /// Bytes carry the v1 `private.key` signature: at least 6
     /// bytes of `FCR\0 || ?? || 'K'`. Magic + type byte is

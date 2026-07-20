@@ -412,13 +412,11 @@ pub(crate) fn decode_x25519_recipient_resolved(
 /// Once a recipient string has been decoded, verify it carries v1
 /// X25519 material and extract the raw 32-byte key.
 ///
-/// Shared between [`decode_x25519_recipient`] (a Bech32 string surface
-/// where the wrong type_name is just another malformed payload) and
-/// [`read_public_key`] (a file boundary where the wrong type_name means
-/// the user pointed us at a different kind of file). The
-/// `wrong_type_error` callback lets each caller pick its own error
-/// class for that single divergent path; the byte-extraction and
-/// zero-key reject are identical.
+/// Shared by the recipient-string and key-file parsers. A non-X25519
+/// type is malformed on the string surface but denotes the wrong file
+/// type at the key-file boundary. `wrong_type_error` preserves that
+/// distinction while keeping extraction and all-zero-key validation in
+/// one place.
 fn decoded_x25519_bytes(
     decoded: DecodedRecipient,
     wrong_type_error: impl FnOnce() -> CryptoError,
@@ -552,59 +550,68 @@ pub(crate) fn fingerprint_hex(type_name: &str, key_material: &[u8]) -> String {
     hex_encode(&fingerprint_bytes(type_name, key_material))
 }
 
-// ─── public.key text reader ────────────────────────────────────────────────
+// ─── public.key file grammar and reader ────────────────────────────────────
 
-/// Reads a v1 `public.key` text file and returns the resolved X25519
-/// public key (suite + 32 bytes). The file content must be the
-/// canonical lowercase `fcr1…` recipient string, optionally followed
-/// by exactly one trailing `\n` (`FORMAT.md` §7). Anything else —
-/// leading whitespace, CRLF line endings, extra blank lines, trailing
-/// spaces or tabs, or internal whitespace — is rejected as
-/// [`FormatDefect::MalformedPublicKey`].
+/// Parses the bytes of a v1 `public.key` file into a resolved X25519
+/// public key. [`read_public_key`] owns the bounded filesystem read;
+/// this function is the single implementation of the content grammar
+/// and provides the arbitrary-byte entry point used by fuzzing.
 ///
-/// If the caller accidentally points this at a binary `private.key`
-/// (magic `FCR\0`), the reader surfaces
-/// [`FormatDefect::WrongKeyFileType`] instead of a less useful UTF-8
-/// decode error.
+/// The content must be the canonical lowercase `fcr1…` recipient
+/// string, optionally followed by exactly one trailing `\n`
+/// (`FORMAT.md` §7). Anything else — leading whitespace, CRLF line
+/// endings, extra blank lines, trailing spaces or tabs, or internal
+/// whitespace — is rejected as [`FormatDefect::MalformedPublicKey`].
+///
+/// A binary `private.key` signature is classified before UTF-8
+/// decoding and returns [`FormatDefect::WrongKeyFileType`]. A valid
+/// recipient string for a non-X25519 type returns the same diagnostic.
 ///
 /// Decoding delegates to [`decode_recipient_string`], the single
 /// source of truth for the Bech32 grammar, internal SHA3-256
 /// checksum, and resource caps. The keypair suite recovered from the
-/// recipient-string wire-version byte is preserved on the returned
-/// [`ResolvedPublicKey`] so callers (in particular [`PublicKey::resolve`])
-/// can re-emit the original suite rather than the current writer's.
-pub(crate) fn read_public_key(path: &std::path::Path) -> Result<ResolvedPublicKey, CryptoError> {
-    let bytes = crate::fs::paths::read_file_capped(path, PUBLIC_KEY_FILE_READ_CAP_BYTES, || {
-        CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)
-    })?;
+/// recipient-string wire-version byte is preserved in the returned
+/// [`ResolvedPublicKey`].
+pub(crate) fn parse_public_key_file_bytes(bytes: &[u8]) -> Result<ResolvedPublicKey, CryptoError> {
     if bytes.is_empty() {
-        // An empty file would otherwise propagate as a Bech32-decode
-        // failure; surface the structural defect at its true source so
-        // the caller's diagnostic matches user intuition ("empty key
-        // file"), not the downstream parser's error.
+        // Reject here so an empty file reports as a malformed public
+        // key rather than as an invalid recipient string from the
+        // Bech32 decoder.
         return Err(malformed_public_key());
     }
     if matches!(
-        crate::key::files::KeyFileKind::classify(&bytes),
+        crate::key::files::KeyFileKind::classify(bytes),
         crate::key::files::KeyFileKind::Private
     ) {
         return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
     }
-    let contents = String::from_utf8(bytes)
+    let contents = std::str::from_utf8(bytes)
         .map_err(|_| CryptoError::InvalidFormat(FormatDefect::NotAKeyFile))?;
-    // Non-whitespace junk (BOM, ZWSP, non-Bech32 chars) is left for
-    // `decode_recipient_string` to reject — a format violation in the
-    // whitespace grammar deserves its own bucket.
-    let recipient = contents.strip_suffix('\n').unwrap_or(&contents);
+    // Leave non-whitespace text, such as a BOM or an invalid Bech32
+    // character, to the recipient-string decoder.
+    let recipient = contents.strip_suffix('\n').unwrap_or(contents);
     if recipient.bytes().any(|b| b.is_ascii_whitespace()) {
         return Err(malformed_public_key());
     }
     let decoded = decode_recipient_string(recipient, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT)?;
     let suite = decoded.keypair_suite;
-    let bytes = decoded_x25519_bytes(decoded, || {
+    let key = decoded_x25519_bytes(decoded, || {
         CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)
     })?;
-    Ok(ResolvedPublicKey { suite, bytes })
+    Ok(ResolvedPublicKey { suite, bytes: key })
+}
+
+/// Reads and parses a v1 `public.key` file.
+///
+/// Enforces [`PUBLIC_KEY_FILE_READ_CAP_BYTES`] before allocation, then
+/// delegates all content validation to [`parse_public_key_file_bytes`].
+pub(crate) fn read_public_key(path: &std::path::Path) -> Result<ResolvedPublicKey, CryptoError> {
+    let bytes = crate::fs::paths::read_file_capped(
+        path,
+        PUBLIC_KEY_FILE_READ_CAP_BYTES,
+        malformed_public_key,
+    )?;
+    parse_public_key_file_bytes(&bytes)
 }
 
 // ─── Public-recipient wrapper ──────────────────────────────────────────────
@@ -1489,6 +1496,90 @@ mod tests {
         assert_eq!(resolved.bytes, key);
         let re_encoded = pk.to_recipient_string().unwrap();
         assert_eq!(re_encoded, original);
+    }
+
+    /// Accepts canonical content with or without the optional trailing
+    /// `LF`, and resolves both forms identically. Key generation writes
+    /// the `LF` form, so losing either arm would make the reader reject
+    /// the writer's own output.
+    #[test]
+    fn parse_public_key_file_accepts_optional_trailing_newline() {
+        let key = x25519_key();
+        let recipient = encode_recipient_string(X25519_TYPE_NAME, &key).unwrap();
+        let bare = parse_public_key_file_bytes(recipient.as_bytes()).unwrap();
+        let with_newline =
+            parse_public_key_file_bytes(format!("{recipient}\n").as_bytes()).unwrap();
+        assert_eq!(bare.bytes, key);
+        assert_eq!(with_newline.bytes, key);
+        assert_eq!(bare.suite, with_newline.suite);
+    }
+
+    /// Rejects ASCII whitespace other than the single optional trailing
+    /// `LF`, including CRLF line endings.
+    #[test]
+    fn parse_public_key_file_rejects_non_canonical_whitespace() {
+        let recipient = encode_recipient_string(X25519_TYPE_NAME, &x25519_key()).unwrap();
+        let cases = [
+            format!(" {recipient}"),
+            format!("{recipient} "),
+            format!("{recipient}\t"),
+            format!("{recipient}\r\n"),
+            format!("{recipient}\n\n"),
+            format!("\n{recipient}\n"),
+            format!("{}\n", recipient.replace("fcr1", "fcr1 ")),
+        ];
+        for content in cases {
+            match parse_public_key_file_bytes(content.as_bytes()) {
+                Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
+                other => panic!("expected MalformedPublicKey for {content:?}, got {other:?}"),
+            }
+        }
+    }
+
+    /// Rejects empty content as a malformed public key.
+    #[test]
+    fn parse_public_key_file_rejects_empty_content() {
+        match parse_public_key_file_bytes(b"") {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
+            other => panic!("expected MalformedPublicKey for empty content, got {other:?}"),
+        }
+    }
+
+    /// Routes a binary `private.key` to the wrong-kind diagnostic
+    /// instead of the UTF-8 decode error its bytes would otherwise
+    /// produce.
+    #[test]
+    fn parse_public_key_file_rejects_private_key_bytes() {
+        let private_key = b"FCR\0\x01K\x00\x00\x00\x06";
+        match parse_public_key_file_bytes(private_key) {
+            Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)) => {}
+            other => panic!("expected WrongKeyFileType for private.key bytes, got {other:?}"),
+        }
+    }
+
+    /// Classifies unrelated non-UTF-8 bytes as not a key file.
+    #[test]
+    fn parse_public_key_file_rejects_non_utf8_content() {
+        match parse_public_key_file_bytes(&[0xFF, 0xFE, 0x00, 0x80]) {
+            Err(CryptoError::InvalidFormat(FormatDefect::NotAKeyFile)) => {}
+            other => panic!("expected NotAKeyFile for non-UTF-8 content, got {other:?}"),
+        }
+    }
+
+    /// Preserves the deliberate error split for a valid non-X25519
+    /// recipient: wrong file type on the file surface, malformed public
+    /// key on the X25519 string surface.
+    #[test]
+    fn parse_public_key_file_rejects_non_x25519_recipient() {
+        let recipient = encode_recipient_string("future", &[0x11u8; 32]).unwrap();
+        match parse_public_key_file_bytes(recipient.as_bytes()) {
+            Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)) => {}
+            other => panic!("expected WrongKeyFileType for non-X25519 type, got {other:?}"),
+        }
+        match decode_x25519_recipient(&recipient) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
+            other => panic!("expected MalformedPublicKey on the string surface, got {other:?}"),
+        }
     }
 
     /// `read_public_key` (the on-disk reader behind

@@ -77,6 +77,11 @@ name = "fuzz_recipient_string_decode"
 path = "fuzz_targets/fuzz_recipient_string_decode.rs"
 doc = false
 
+[[bin]]
+name = "fuzz_public_key_file"
+path = "fuzz_targets/fuzz_public_key_file.rs"
+doc = false
+
 # ─── Full-pipeline target (slower; covers post-parse extraction) ────────
 
 [[bin]]

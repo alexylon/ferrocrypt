@@ -390,7 +390,7 @@ fn ensure_public_key_suite_supported(suite: KeypairSuite) -> Result<(), CryptoEr
 /// Validates HRP, BIP 173 checksum, internal SHA3-256 checksum, the
 /// recipient `type_name == "x25519"` constraint, and the 32-byte
 /// key-material length. Applies [`RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT`]
-/// as the structural cap.
+/// as the local resource cap.
 pub(crate) fn decode_x25519_recipient(recipient: &str) -> Result<[u8; 32], CryptoError> {
     Ok(decode_x25519_recipient_resolved(recipient)?.bytes)
 }

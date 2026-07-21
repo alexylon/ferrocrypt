@@ -294,7 +294,8 @@ pub(crate) fn generate_keypair()
 
 /// Reads and unlocks a v1 `private.key` file, returning the raw 32-byte
 /// X25519 secret. Wraps [`crate::key::private::open_private_key`] with
-/// the X25519-specific type-name and length checks plus TLV validation.
+/// the X25519-specific type-name and length checks. Authenticated TLV
+/// validation is performed by `open_private_key` itself.
 ///
 /// Errors:
 /// - [`CryptoError::InputPath`] if the file does not exist

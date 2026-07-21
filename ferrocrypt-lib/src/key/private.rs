@@ -1041,8 +1041,9 @@ mod tests {
     #[test]
     fn parse_rejects_kdf_params_above_structural_max() {
         use crate::error::InvalidKdfParams;
-        // Set mem_cost above MAX_MEM_COST (2 GiB). KdfParams::from_bytes
-        // surfaces InvalidKdfParams::MemoryCost rather than the generic
+        // Set mem_cost above MAX_MEM_COST (2 GiB).
+        // KdfParams::from_bytes_structural surfaces
+        // InvalidKdfParams::MemoryCost rather than the generic
         // MalformedPrivateKey, preserving the precise diagnostic.
         let mut bytes = sample_header_bytes();
         let huge_mem = (3u32 * 1024 * 1024).to_be_bytes(); // 3 GiB KiB

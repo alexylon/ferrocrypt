@@ -692,7 +692,9 @@ impl PrivateKeyDecryptor {
     /// returns [`CryptoError::KeyFileUnlockFailed`] if the private key is
     /// tampered or protected by a different passphrase.
     /// Returns [`CryptoError::KdfResourceCapExceeded`] for rejected
-    /// `private.key` KDF costs. Returns authentication errors such as
+    /// `private.key` KDF costs. Returns [`CryptoError::UnsupportedKeyType`]
+    /// if the private key wraps a key type this build does not support.
+    /// Returns authentication errors such as
     /// [`CryptoError::RecipientUnwrapFailed`],
     /// [`CryptoError::HeaderMacFailedAfterUnwrap`],
     /// [`CryptoError::NoSupportedRecipient`], [`CryptoError::PayloadTampered`],
@@ -1074,7 +1076,9 @@ pub fn default_encrypted_filename(input_path: impl AsRef<Path>) -> Result<String
 /// Returns [`CryptoError::InputPath`] if the file does not exist, and
 /// [`CryptoError::Io`] for other read failures. Returns
 /// [`CryptoError::InvalidFormat`] or [`CryptoError::UnsupportedVersion`] if the
-/// file is not a v1 private key, is malformed, or is a public key.
+/// file is not a v1 private key, is malformed, or is a public key. Returns
+/// [`CryptoError::UnsupportedKeyType`] for a well-formed private key of a key
+/// type this build does not support.
 pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError> {
     let data = paths::read_file_capped(
         key_file.as_ref(),
@@ -1105,8 +1109,9 @@ pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), Crypt
 /// [`CryptoError::Io`] for other read failures. Returns
 /// [`CryptoError::InvalidFormat`], [`CryptoError::InvalidInput`], or
 /// [`CryptoError::RecipientStringCapExceeded`] if the text file or recipient
-/// string is malformed, unsupported, too large for local policy, or is a private
-/// key.
+/// string is malformed, too large for local policy, or is a private key.
+/// Returns [`CryptoError::UnsupportedKeyType`] for a valid public key of a
+/// key type this build does not support.
 pub fn validate_public_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError> {
     PublicKey::from_key_file(key_file).validate()
 }

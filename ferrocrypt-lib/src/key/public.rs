@@ -405,24 +405,22 @@ pub(crate) fn decode_x25519_recipient_resolved(
 ) -> Result<ResolvedPublicKey, CryptoError> {
     let decoded = decode_recipient_string(recipient, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT)?;
     let suite = decoded.keypair_suite;
-    let bytes = decoded_x25519_bytes(decoded, malformed_public_key)?;
+    let bytes = decoded_x25519_bytes(decoded)?;
     Ok(ResolvedPublicKey { suite, bytes })
 }
 
 /// Once a recipient string has been decoded, verify it carries v1
 /// X25519 material and extract the raw 32-byte key.
 ///
-/// Shared by the recipient-string and key-file parsers. A non-X25519
-/// type is malformed on the string surface but denotes the wrong file
-/// type at the key-file boundary. `wrong_type_error` preserves that
-/// distinction while keeping extraction and all-zero-key validation in
-/// one place.
-fn decoded_x25519_bytes(
-    decoded: DecodedRecipient,
-    wrong_type_error: impl FnOnce() -> CryptoError,
-) -> Result<[u8; 32], CryptoError> {
+/// Shared by the recipient-string and key-file parsers. A decoded
+/// non-X25519 type has passed the grammar, checksum, and suite gates,
+/// so it rejects as [`CryptoError::UnsupportedKeyType`], not as a
+/// malformed input.
+fn decoded_x25519_bytes(decoded: DecodedRecipient) -> Result<[u8; 32], CryptoError> {
     if decoded.type_name != X25519_TYPE_NAME {
-        return Err(wrong_type_error());
+        return Err(CryptoError::UnsupportedKeyType {
+            type_name: decoded.type_name,
+        });
     }
     let bytes: [u8; 32] = decoded
         .key_material
@@ -565,7 +563,8 @@ pub(crate) fn fingerprint_hex(type_name: &str, key_material: &[u8]) -> String {
 ///
 /// A binary `private.key` signature is classified before UTF-8
 /// decoding and returns [`FormatDefect::WrongKeyFileType`]. A valid
-/// recipient string for a non-X25519 type returns the same diagnostic.
+/// recipient string of a non-X25519 type returns
+/// [`CryptoError::UnsupportedKeyType`] naming the type.
 ///
 /// Decoding delegates to [`decode_recipient_string`], the single
 /// source of truth for the Bech32 grammar, internal SHA3-256
@@ -595,9 +594,7 @@ pub(crate) fn parse_public_key_file_bytes(bytes: &[u8]) -> Result<ResolvedPublic
     }
     let decoded = decode_recipient_string(recipient, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT)?;
     let suite = decoded.keypair_suite;
-    let key = decoded_x25519_bytes(decoded, || {
-        CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)
-    })?;
+    let key = decoded_x25519_bytes(decoded)?;
     Ok(ResolvedPublicKey { suite, bytes: key })
 }
 
@@ -730,9 +727,11 @@ impl PublicKey {
     /// # Errors
     ///
     /// Returns [`CryptoError::InvalidInput`] for invalid Bech32 text,
-    /// [`CryptoError::InvalidFormat`] for malformed payloads or unsupported
-    /// recipient types, and [`CryptoError::RecipientStringCapExceeded`] when
-    /// the input exceeds the local recipient-string cap.
+    /// [`CryptoError::InvalidFormat`] for malformed payloads,
+    /// [`CryptoError::UnsupportedKeyType`] for a valid recipient string
+    /// of a key type this build does not support, and
+    /// [`CryptoError::RecipientStringCapExceeded`] when the input
+    /// exceeds the local recipient-string cap.
     pub fn from_recipient_string(recipient: &str) -> Result<Self, CryptoError> {
         let resolved = decode_x25519_recipient_resolved(recipient)?;
         Ok(Self {
@@ -1566,19 +1565,24 @@ mod tests {
         }
     }
 
-    /// Preserves the deliberate error split for a valid non-X25519
-    /// recipient: wrong file type on the file surface, malformed public
-    /// key on the X25519 string surface.
+    /// A valid recipient of an unknown key type is the planned
+    /// forward-compatibility case from `FORMAT.md` §11, so the file and
+    /// string surfaces both report `UnsupportedKeyType` naming the
+    /// type, never a malformed-input class.
     #[test]
     fn parse_public_key_file_rejects_non_x25519_recipient() {
         let recipient = encode_recipient_string("future", &[0x11u8; 32]).unwrap();
         match parse_public_key_file_bytes(recipient.as_bytes()) {
-            Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)) => {}
-            other => panic!("expected WrongKeyFileType for non-X25519 type, got {other:?}"),
+            Err(CryptoError::UnsupportedKeyType { type_name }) => {
+                assert_eq!(type_name, "future");
+            }
+            other => panic!("expected UnsupportedKeyType for non-X25519 type, got {other:?}"),
         }
         match decode_x25519_recipient(&recipient) {
-            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
-            other => panic!("expected MalformedPublicKey on the string surface, got {other:?}"),
+            Err(CryptoError::UnsupportedKeyType { type_name }) => {
+                assert_eq!(type_name, "future");
+            }
+            other => panic!("expected UnsupportedKeyType on the string surface, got {other:?}"),
         }
     }
 

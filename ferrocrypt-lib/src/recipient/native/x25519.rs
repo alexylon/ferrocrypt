@@ -314,7 +314,9 @@ pub(crate) fn generate_keypair()
 ///   bytes do not identify a `private.key`
 /// - [`crate::error::FormatDefect::MalformedTypeName`] when the stored
 ///   `type_name` violates the `FORMAT.md` §3.3 grammar
-/// - [`crate::error::FormatDefect::WrongKeyFileType`] for a private.key that wraps a
+/// - [`crate::error::FormatDefect::WrongKeyFileType`] when the file is a
+///   `public.key` text file rather than a binary `private.key`
+/// - [`CryptoError::UnsupportedKeyType`] for a `private.key` that wraps a
 ///   non-X25519 secret (e.g. a future native key kind)
 /// - [`crate::error::FormatDefect::MalformedPrivateKey`] for a structurally valid
 ///   private.key whose authenticated `public_material` is not 32 bytes,
@@ -366,7 +368,9 @@ pub(crate) fn open_x25519_private_key(
     )?;
 
     if opened.type_name != TYPE_NAME {
-        return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
+        return Err(CryptoError::UnsupportedKeyType {
+            type_name: opened.type_name.clone(),
+        });
     }
 
     let public_material: [u8; PUBLIC_KEY_SIZE] = opened
@@ -413,7 +417,9 @@ pub(crate) fn open_x25519_private_key(
 /// - [`crate::key::private::PrivateKeyHeader::parse`] accepts the
 ///   header (magic, version, kind, `key_flags == 0`, length-field
 ///   structural ranges);
-/// - `type_name` is `"x25519"` (the only v1 native key kind);
+/// - `type_name` satisfies the `FORMAT.md` §3.3 grammar and is
+///   `"x25519"`; a valid non-X25519 name rejects as
+///   [`CryptoError::UnsupportedKeyType`];
 /// - `public_len` equals the X25519 public-key size (32);
 /// - `wrapped_secret_len` equals the native X25519 wrapped-secret size
 ///   (32-byte secret + 16-byte AEAD tag = 48, `FORMAT.md` §8);
@@ -447,8 +453,13 @@ pub fn validate_private_key_shape(data: &[u8]) -> Result<(), CryptoError> {
     }
     let type_name = std::str::from_utf8(&data[type_name_start..type_name_end])
         .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedTypeName))?;
+    // Same order as `open_private_key`: grammar first, so a name that
+    // violates the §3.3 grammar is malformed, not merely unsupported.
+    crate::recipient::name::validate_type_name_grammar(type_name)?;
     if type_name != TYPE_NAME {
-        return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
+        return Err(CryptoError::UnsupportedKeyType {
+            type_name: type_name.to_owned(),
+        });
     }
 
     if header.public_len != PUBLIC_KEY_SIZE as u32 {
@@ -560,6 +571,58 @@ mod tests {
         match open_x25519_private_key(&path, &pass, None, &|_| {}).map(|_| ()) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => Ok(()),
             other => panic!("expected MalformedPrivateKey for public_len mismatch, got {other:?}"),
+        }
+    }
+
+    /// A `private.key` wrapping a valid non-X25519 key kind is the
+    /// planned forward-compatibility case from `FORMAT.md` §11. The
+    /// unlock path classifies it only after AEAD authentication and
+    /// reports `UnsupportedKeyType` naming the stored type.
+    #[test]
+    fn open_private_key_rejects_unsupported_key_type() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("private.key");
+        let pass = SecretString::from("pw".to_string());
+
+        let (secret_material, public_material) = keypair();
+        let bytes = seal_private_key(
+            &secret_material,
+            "future",
+            &public_material,
+            &[],
+            &pass,
+            &KdfParams::test_fast_default(),
+        )?;
+        fs::write(&path, bytes)?;
+
+        match open_x25519_private_key(&path, &pass, None, &|_| {}).map(|_| ()) {
+            Err(CryptoError::UnsupportedKeyType { type_name }) => {
+                assert_eq!(type_name, "future");
+                Ok(())
+            }
+            other => panic!("expected UnsupportedKeyType for a future key kind, got {other:?}"),
+        }
+    }
+
+    /// The structural validator reaches the same verdict as the unlock
+    /// path for a non-X25519 key kind, without needing the passphrase.
+    #[test]
+    fn validate_private_key_shape_rejects_unsupported_key_type() -> Result<(), CryptoError> {
+        let (secret_material, public_material) = keypair();
+        let bytes = seal_private_key(
+            &secret_material,
+            "future",
+            &public_material,
+            &[],
+            &SecretString::from("pw".to_string()),
+            &KdfParams::test_fast_default(),
+        )?;
+        match validate_private_key_shape(&bytes) {
+            Err(CryptoError::UnsupportedKeyType { type_name }) => {
+                assert_eq!(type_name, "future");
+                Ok(())
+            }
+            other => panic!("expected UnsupportedKeyType from the shape validator, got {other:?}"),
         }
     }
 

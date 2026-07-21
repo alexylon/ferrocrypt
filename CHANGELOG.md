@@ -5,6 +5,7 @@ All notable changes to FerroCrypt are documented in this file.
 ## [Unreleased]
 
 ### Changed
+- **A key file or recipient string of an unsupported key type is now rejected as the new `CryptoError::UnsupportedKeyType`: "Unsupported key type `<name>`. Upgrade FerroCrypt."** Such a key — planned by `FORMAT.md` §11 for future releases — was previously reported as "Wrong key file kind (public vs private)" or "Public key is malformed". "Wrong key file kind" now always means a real public/private mix-up.
 - **`KdfParams::hash_passphrase` is no longer public.** Supported encryption, decryption, and key-generation workflows already perform Argon2id internally and enforce `KdfLimit`. Code that needs raw Argon2id output should use the `argon2` crate directly. All other `KdfParams` uses are unchanged.
 - **The rejection for an existing `.incomplete` working copy now reads "Incomplete output already exists".** The old wording, "Previous .incomplete exists", was wrong when the entry was still being written by another decrypt of the same file running at the same time. Behavior is unchanged: an `.incomplete` entry the current run did not create is never reused or deleted.
 - **On Unix systems other than Linux and macOS, decrypting a file that contains a folder now fails with "Decrypting a directory is not supported on this target".** This matches the encrypt side, which already refuses a folder there with the same kind of typed error; the rejection previously surfaced as a raw unsupported-operation I/O error. Linux, macOS, and Windows are unaffected.

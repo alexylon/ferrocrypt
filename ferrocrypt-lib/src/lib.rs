@@ -426,8 +426,9 @@ mod suite_vector_gen;
 ///
 /// Returns [`CryptoError::InvalidInput`] for non-ASCII, uppercase, invalid
 /// Bech32, or wrong-HRP strings. Returns [`CryptoError::InvalidFormat`] for
-/// malformed typed payloads, checksum mismatches, unsupported recipient types,
-/// or all-zero X25519 public keys. Returns
+/// malformed typed payloads, checksum mismatches, or all-zero X25519 public
+/// keys. Returns [`CryptoError::UnsupportedKeyType`] for a valid recipient
+/// string of a key type this build does not support. Returns
 /// [`CryptoError::RecipientStringCapExceeded`] when the input exceeds the local
 /// recipient-string cap.
 pub fn decode_recipient_string(recipient_string: &str) -> Result<[u8; 32], CryptoError> {

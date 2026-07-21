@@ -91,8 +91,11 @@ fixture-only — never reuse them for real data.
 - All-zero X25519 ephemeral key (file-fatal
   `MalformedRecipientEntry`).
 - Key files: valid `public.key` and `private.key` artifacts, plus uppercase
-  public-key text, corrupted Bech32 and internal SHA3-256 checksums, private
-  structural defects, and private-key unlock authentication failure.
+  public-key text, corrupted Bech32 and internal SHA3-256 checksums,
+  non-canonical Bech32 padding, a newer public-key payload version, CRLF and
+  leading-whitespace content, all-zero X25519 key material under a valid
+  checksum, private structural defects, out-of-range private-key KDF
+  parameters, and private-key unlock authentication failure.
 
 Three cases need further explanation because their classifications may
 be unexpected:

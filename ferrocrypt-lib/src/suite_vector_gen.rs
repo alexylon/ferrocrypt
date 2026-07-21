@@ -991,6 +991,125 @@ fn write_conformance_completion_cases(plaintext: &Path, cases: &Path, keys: &Pat
     rows
 }
 
+/// Appends the key-file conformance cases added in suite revision 4:
+/// the `public.key` rejects independent implementations are most likely
+/// to get wrong, plus a `private.key` with out-of-range `kdf_params`.
+/// Every fixture is a deterministic re-encode or byte edit of committed
+/// key material — no RNG draw — so all earlier fixture bytes stay
+/// frozen.
+fn write_key_file_completion_cases(suite: &Path, cases: &Path) -> Vec<Case> {
+    use bech32::Fe32;
+    use bech32::primitives::iter::{ByteIterExt, Fe32IterExt};
+
+    let valid = fs::read_to_string(suite.join("keys/recipient-a.public.key"))
+        .expect("read recipient A public key");
+    let recipient = valid.strip_suffix('\n').unwrap_or(&valid);
+
+    // Non-canonical 5-to-8 padding (`FORMAT.md` §7): set the lowest
+    // padding bit of the final data character and recompute the BIP 173
+    // checksum. Neither checksum covers the dropped padding bits, so
+    // only the reader's canonical re-encode check can reject this.
+    let (hrp, payload) = bech32::decode(recipient).expect("decode suite recipient string");
+    assert!(
+        (payload.len() * 8) % 5 != 0,
+        "payload length leaves no padding bits; vary key_material length"
+    );
+    let mut fes: Vec<Fe32> = payload.iter().copied().bytes_to_fes().collect();
+    let last = fes.pop().expect("payload is non-empty");
+    let tweaked = Fe32::try_from(last.to_u8() | 0x01).expect("still a 5-bit value");
+    assert_ne!(last, tweaked, "lowest padding bit must start unset");
+    fes.push(tweaked);
+    let non_canonical: String = fes
+        .iter()
+        .copied()
+        .with_checksum::<bech32::Bech32>(&hrp)
+        .chars()
+        .collect();
+    fs::write(
+        cases.join("public-key-noncanonical-padding.key"),
+        format!("{non_canonical}\n"),
+    )
+    .expect("write non-canonical padding fixture");
+
+    // Newer public-key payload version: the version gate fires before
+    // the internal checksum, so rewriting the leading payload byte is
+    // enough.
+    let mut newer_payload = payload;
+    newer_payload[0] = 0x02;
+    let newer = bech32::encode::<bech32::Bech32>(hrp, &newer_payload)
+        .expect("re-encode newer-version payload");
+    fs::write(
+        cases.join("public-key-newer-version.key"),
+        format!("{newer}\n"),
+    )
+    .expect("write newer-version fixture");
+
+    // `FORMAT.md` §7.1 byte-exact grammar: CRLF and leading whitespace.
+    fs::write(
+        cases.join("public-key-crlf.key"),
+        format!("{recipient}\r\n"),
+    )
+    .expect("write CRLF fixture");
+    fs::write(
+        cases.join("public-key-leading-space.key"),
+        format!(" {recipient}\n"),
+    )
+    .expect("write leading-space fixture");
+
+    // All-zero X25519 key material under a valid internal checksum, so
+    // only the reader's zero-key ingress check can reject it.
+    let zero = crate::key::public::encode_recipient_string(x25519::TYPE_NAME, &[0u8; 32])
+        .expect("encode all-zero recipient string");
+    fs::write(
+        cases.join("public-key-zero-material.key"),
+        format!("{zero}\n"),
+    )
+    .expect("write all-zero fixture");
+
+    // Cleartext `kdf_params` outside the structural bounds. Offsets
+    // follow the `FORMAT.md` §8 fixed header (kdf_params 54..66,
+    // mem_cost in the first four bytes).
+    let over_max_mem = KdfParams::MAX_MEM_COST + 1;
+    let mut bad_kdf =
+        fs::read(suite.join("keys/recipient-a.private.key")).expect("read recipient A private key");
+    bad_kdf[54..58].copy_from_slice(&over_max_mem.to_be_bytes());
+    fs::write(cases.join("privatekey-bad-kdf.private.key"), &bad_kdf)
+        .expect("write bad-kdf private-key fixture");
+
+    vec![
+        Case::key_err(
+            "cases/public-key-noncanonical-padding.key",
+            "InvalidFormat(MalformedPublicKey)",
+            "Public key is malformed",
+        ),
+        Case::key_err(
+            "cases/public-key-newer-version.key",
+            "UnsupportedVersion(NewerPublicKey)",
+            "Newer public-key format (v2). Upgrade FerroCrypt.",
+        ),
+        Case::key_err(
+            "cases/public-key-crlf.key",
+            "InvalidFormat(MalformedPublicKey)",
+            "Public key is malformed",
+        ),
+        Case::key_err(
+            "cases/public-key-leading-space.key",
+            "InvalidFormat(MalformedPublicKey)",
+            "Public key is malformed",
+        ),
+        Case::key_err(
+            "cases/public-key-zero-material.key",
+            "InvalidFormat(MalformedPublicKey)",
+            "Public key is malformed",
+        ),
+        Case::private_key_err(
+            "cases/privatekey-bad-kdf.private.key",
+            "InvalidKdfParams(MemoryCost)",
+            &format!("File has invalid KDF settings ({over_max_mem} KiB memory)"),
+        ),
+    ]
+}
+
 fn write_manifest(suite: &Path, rows: &[Case]) {
     let mut out = String::new();
     out.push_str("# FerroCrypt v1 edge-case test-vector manifest.\n");
@@ -1026,7 +1145,7 @@ const SUITE_SEED: u64 = 0xFECC_0000_5EED_0001;
 /// or changed; different corpus contents must never share a revision.
 /// Regeneration treats this constant as the source of truth and overwrites the
 /// committed file.
-const SUITE_VERSION: u32 = 3;
+const SUITE_VERSION: u32 = 4;
 
 /// Regenerates the committed suite corpus. Ignored in normal test runs;
 /// see the module docs for the invocation and the commit workflow.
@@ -1489,6 +1608,10 @@ fn regenerate_suite_vectors_inner() {
     rows.extend(write_conformance_completion_cases(
         &plaintext, &cases, &keys,
     ));
+
+    // Revision-4 cases draw no RNG at all, so their position cannot
+    // disturb the frozen bytes of any earlier fixture.
+    rows.extend(write_key_file_completion_cases(&suite, &cases));
 
     write_manifest(&suite, &rows);
 }

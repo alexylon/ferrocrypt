@@ -128,6 +128,10 @@ fn error_matches(class: &str, e: &CryptoError) -> bool {
             e,
             CryptoError::UnsupportedVersion(UnsupportedVersion::NewerKey { .. })
         ),
+        "UnsupportedVersion(NewerPublicKey)" => matches!(
+            e,
+            CryptoError::UnsupportedVersion(UnsupportedVersion::NewerPublicKey { .. })
+        ),
         "KeyFileUnlockFailed" => matches!(e, CryptoError::KeyFileUnlockFailed),
         "MalformedArchive" => matches!(e, CryptoError::MalformedArchive { .. }),
         "InvalidFormat(UnsupportedArchiveVersion)" => matches!(

@@ -79,3 +79,9 @@ cases/fca-archive-ext-critical.fcr	decrypt	passphrase:suite-passphrase-not-secre
 cases/fca-entry-ext-ignorable.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	ok	-	-
 cases/fca-entry-ext-malformed.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(MalformedTlv)	Extension region is malformed
 cases/fca-entry-ext-critical.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(UnknownCriticalTag)	Unknown required file feature (tag 0x8001). Upgrade FerroCrypt.
+cases/public-key-noncanonical-padding.key	read-public-key	-	error	InvalidFormat(MalformedPublicKey)	Public key is malformed
+cases/public-key-newer-version.key	read-public-key	-	error	UnsupportedVersion(NewerPublicKey)	Newer public-key format (v2). Upgrade FerroCrypt.
+cases/public-key-crlf.key	read-public-key	-	error	InvalidFormat(MalformedPublicKey)	Public key is malformed
+cases/public-key-leading-space.key	read-public-key	-	error	InvalidFormat(MalformedPublicKey)	Public key is malformed
+cases/public-key-zero-material.key	read-public-key	-	error	InvalidFormat(MalformedPublicKey)	Public key is malformed
+cases/privatekey-bad-kdf.private.key	validate-private-key	-	error	InvalidKdfParams(MemoryCost)	File has invalid KDF settings (2097153 KiB memory)

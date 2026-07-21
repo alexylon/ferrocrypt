@@ -286,40 +286,46 @@ pub(crate) fn sync_dir_durable(dir: &Path) -> io::Result<()> {
 
 /// Returns whether a directory open or flush failed because the filesystem
 /// does not provide directory flushing, rather than because a supported
-/// operation failed.
+/// operation failed or was denied.
 ///
 /// - [`errno_not_supported`] covers unsupported-operation errors.
 /// - `EINVAL` and `EBADF` are returned by some network and FUSE filesystems
 ///   when directory `fsync` is unavailable.
-/// - `EACCES` covers write-only directories, which allow entry creation but
-///   cannot be opened for the read handle required by directory flushing.
+///
+/// Permission denial (`EACCES`) is deliberately excluded. A write-only
+/// directory refuses the read handle that directory flushing needs, but that
+/// is a denied barrier, not a missing capability: key generation must fail
+/// rather than report success without making its directory entries durable.
 #[cfg(unix)]
 fn dir_sync_unsupported(e: &io::Error) -> bool {
     errno_not_supported(e)
         || matches!(
             e.raw_os_error(),
-            Some(code) if code == libc::EINVAL || code == libc::EBADF || code == libc::EACCES
+            Some(code) if code == libc::EINVAL || code == libc::EBADF
         )
 }
 
 /// Windows equivalent of the Unix classification.
 /// `ERROR_INVALID_FUNCTION`, `ERROR_NOT_SUPPORTED`, and
 /// `ERROR_INVALID_PARAMETER` indicate that the volume or network provider
-/// cannot flush directory entries. Permission denied covers a directory that
-/// cannot be opened with the write access required by `FlushFileBuffers`.
+/// cannot flush directory entries.
+///
+/// Access denial is deliberately excluded, matching the Unix treatment of
+/// `EACCES`. A directory that cannot be opened with the write access
+/// `FlushFileBuffers` needs is a denied barrier, not a missing capability, so
+/// key generation must fail rather than report success without making its
+/// directory entries durable.
 #[cfg(windows)]
 fn dir_sync_unsupported(e: &io::Error) -> bool {
     const ERROR_INVALID_FUNCTION: i32 = 1;
     const ERROR_NOT_SUPPORTED: i32 = 50;
     const ERROR_INVALID_PARAMETER: i32 = 87;
 
-    matches!(
-        e.kind(),
-        io::ErrorKind::Unsupported | io::ErrorKind::PermissionDenied
-    ) || matches!(
-        e.raw_os_error(),
-        Some(ERROR_INVALID_FUNCTION | ERROR_NOT_SUPPORTED | ERROR_INVALID_PARAMETER)
-    )
+    e.kind() == io::ErrorKind::Unsupported
+        || matches!(
+            e.raw_os_error(),
+            Some(ERROR_INVALID_FUNCTION | ERROR_NOT_SUPPORTED | ERROR_INVALID_PARAMETER)
+        )
 }
 
 /// Mode bits for the zero-byte placeholder that claims the final name
@@ -636,12 +642,45 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::NotADirectory);
     }
 
+    /// A directory with no read permission (write-and-execute only) fails the
+    /// required flush instead of being treated as unsupported: the read handle
+    /// that directory `fsync` needs is denied, and key generation must fail
+    /// rather than skip the barrier. Reproduces the audited `0o333` case.
+    /// Unix-only. A privileged process bypasses the read check, so the test
+    /// probes whether the denial actually took effect and asserts only then;
+    /// the classifier test pins the errno decision everywhere.
+    #[cfg(unix)]
+    #[test]
+    fn sync_dir_durable_reports_permission_denied_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let locked = tmp_dir.path().join("writeonly");
+        fs::create_dir(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o333)).unwrap();
+
+        // Only assert when the read open is genuinely denied. A privileged
+        // user (such as root) bypasses the check, and the barrier then
+        // legitimately succeeds.
+        let read_denied = fs::File::open(&locked).is_err();
+        let result = sync_dir_durable(&locked);
+        // Restore read permission so `TempDir` cleanup can remove the directory.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+
+        if read_denied {
+            let err = result.expect_err("a read-denied directory must fail the required flush");
+            assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        }
+    }
+
     /// Only errors that mean directory flushing is unavailable are treated as
-    /// unsupported. Device I/O errors and path errors must remain failures.
+    /// unsupported. Device I/O errors, path errors, and permission denial
+    /// (`EACCES`) must remain genuine failures so the required key-generation
+    /// barrier is never silently skipped.
     #[cfg(unix)]
     #[test]
     fn dir_sync_unsupported_classifies_unix_errnos() {
-        for unavailable in [libc::ENOTSUP, libc::EINVAL, libc::EBADF, libc::EACCES] {
+        for unavailable in [libc::ENOTSUP, libc::EINVAL, libc::EBADF] {
             assert!(
                 dir_sync_unsupported(&io::Error::from_raw_os_error(unavailable)),
                 "errno {unavailable} must classify as directory-flush unsupported"
@@ -651,7 +690,13 @@ mod tests {
             io::ErrorKind::Unsupported,
             "synthesized unsupported"
         )));
-        for genuine in [libc::EIO, libc::ENOENT, libc::ENOTDIR, libc::ENOSPC] {
+        for genuine in [
+            libc::EIO,
+            libc::ENOENT,
+            libc::ENOTDIR,
+            libc::ENOSPC,
+            libc::EACCES,
+        ] {
             assert!(
                 !dir_sync_unsupported(&io::Error::from_raw_os_error(genuine)),
                 "errno {genuine} must propagate as a genuine failure"
@@ -663,16 +708,16 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn dir_sync_unsupported_classifies_windows_errors() {
-        // ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED,
-        // ERROR_INVALID_PARAMETER, ERROR_ACCESS_DENIED.
-        for unavailable in [1, 50, 87, 5] {
+        // ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED, ERROR_INVALID_PARAMETER.
+        for unavailable in [1, 50, 87] {
             assert!(
                 dir_sync_unsupported(&io::Error::from_raw_os_error(unavailable)),
                 "code {unavailable} must classify as directory-flush unsupported"
             );
         }
-        // ERROR_FILE_NOT_FOUND and ERROR_IO_DEVICE stay genuine.
-        for genuine in [2, 1117] {
+        // ERROR_FILE_NOT_FOUND, ERROR_IO_DEVICE, and ERROR_ACCESS_DENIED (5)
+        // stay genuine: permission denial must fail the required barrier.
+        for genuine in [2, 1117, 5] {
             assert!(
                 !dir_sync_unsupported(&io::Error::from_raw_os_error(genuine)),
                 "code {genuine} must propagate as a genuine failure"

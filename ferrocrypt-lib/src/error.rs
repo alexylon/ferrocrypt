@@ -142,9 +142,53 @@ pub(crate) fn sanitize_for_display(text: &str) -> String {
 /// attacker-chosen as a name found inside an archive. The "already
 /// exists" conflict messages instead route through
 /// `fs::paths::already_exists_error`, which keeps the trusted parent
-/// directory raw and escapes only the final component.
+/// directory readable and untruncated — escaping only control and
+/// bidirectional-formatting characters in it — and routes the final
+/// component through this stricter, truncating sanitizer.
 pub(crate) fn sanitize_path_for_display(path: &std::path::Path) -> String {
     sanitize_for_display(&path.display().to_string())
+}
+
+/// Returns whether `c` is a Unicode bidirectional-formatting control.
+/// These characters (the "Trojan Source" set) can reorder how the
+/// surrounding text is displayed, so they are escaped even inside
+/// otherwise readable text such as a trusted directory prefix.
+fn is_bidi_control(c: char) -> bool {
+    // LRE/RLE/PDF/LRO/RLO, LRI/RLI/FSI/PDI, LRM/RLM, and ALM.
+    matches!(
+        c,
+        '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{200E}'
+            | '\u{200F}'
+            | '\u{061C}'
+    )
+}
+
+/// Renders a trusted path prefix — the parent directory of an
+/// "already exists" conflict — for an error message. Printable
+/// characters pass through unchanged, including readable non-ASCII such
+/// as accented Latin or CJK, so the operator can still read and locate
+/// the directory. Control and bidirectional-formatting characters are
+/// escaped so the prefix cannot inject a terminal escape sequence or
+/// visually reorder the message.
+///
+/// Unlike [`sanitize_for_display`], the result is not length-bounded:
+/// the operator uses the parent to locate the conflict, so it is kept
+/// whole. Only the final, possibly attacker-influenced component of a
+/// path is routed through the stricter, truncating
+/// [`sanitize_for_display`]; see `fs::paths::already_exists_error`.
+pub(crate) fn sanitize_prefix_for_display(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() || is_bidi_control(c) {
+            // Same escape style as `write_sanitized_char`.
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Renders `: {path}` when an optional sanitized path is present, and
@@ -237,9 +281,10 @@ impl std::fmt::Display for PathSuffix<'_> {
 ///   `path`", "Invalid recipient public key". These surface *which*
 ///   user-supplied path or value triggered the rejection so
 ///   operators can fix it without extra debugging. The conflict
-///   messages render the parent directory raw (it is the caller's
-///   trust boundary) and escape the final component, which can be
-///   attacker-influenced.
+///   messages keep the parent directory readable and untruncated (it
+///   is the caller's trust boundary) while escaping control and bidi
+///   characters in it, and escape the final component — which can be
+///   attacker-influenced — more strictly.
 /// - **Caller-supplied config values** outside the valid range:
 ///   "KDF memory limit overflow: `N` MiB", "Passphrase must not be
 ///   empty".

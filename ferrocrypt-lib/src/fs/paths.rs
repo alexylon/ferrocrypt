@@ -12,7 +12,7 @@ use std::io::Read;
 use std::path::Path;
 
 use crate::CryptoError;
-use crate::error::{sanitize_for_display, sanitize_path_for_display};
+use crate::error::{sanitize_for_display, sanitize_path_for_display, sanitize_prefix_for_display};
 
 /// Suffix appended to atomic-write working names so plaintext (or any
 /// not-yet-finalised output) is never visible under the final name.
@@ -180,21 +180,24 @@ pub(crate) fn path_occupied(path: &Path) -> Result<bool, CryptoError> {
 /// archive extractor's occupied-output rejection, so every surface of
 /// the same conflict renders identically.
 ///
-/// The parent directory is the caller's trust boundary: shown raw and
-/// never truncated, so the operator can always locate the conflict.
-/// The final component can be attacker-influenced (an input-derived
-/// file stem, an archive-chosen root name), so it is escaped and
-/// length-bounded.
+/// The parent directory is the caller's trust boundary: kept readable
+/// and never truncated so the operator can always locate the conflict,
+/// but control and bidirectional-formatting characters in it are still
+/// escaped so a hostile intermediate component cannot smuggle a terminal
+/// escape sequence into the message. The final component can be
+/// attacker-influenced (an input-derived file stem, an archive-chosen
+/// root name), so it is routed through the stricter, length-bounded
+/// sanitizer.
 pub(crate) fn already_exists_error(label: &str, path: &Path) -> CryptoError {
     let full = path.display().to_string();
     let rendered = match path.file_name().map(|n| n.to_string_lossy()) {
-        // The rendered path ends with the rendered file name by
-        // construction; keep the directory prefix (with its original
-        // separator) raw and escape only the name.
+        // The match guard confirmed `full` ends with the file name, so
+        // the bytes before it are the parent prefix: render that
+        // readable and the final component strictly.
         Some(name) if name.len() < full.len() && full.ends_with(name.as_ref()) => {
             format!(
                 "{}{}",
-                &full[..full.len() - name.len()],
+                sanitize_prefix_for_display(&full[..full.len() - name.len()]),
                 sanitize_for_display(&name)
             )
         }
@@ -313,12 +316,13 @@ mod tests {
         }
     }
 
-    /// Fast arm with a multibyte directory prefix: the split between
-    /// "keep raw" and "escape" lands on a UTF-8 boundary (the byte
-    /// slice must not panic), the non-ASCII directory name stays raw so
-    /// the operator can read it, and the malicious leaf is escaped.
+    /// Fast arm with a multibyte directory prefix: the split between the
+    /// readable prefix and the escaped leaf lands on a UTF-8 boundary
+    /// (the byte slice must not panic), the non-ASCII directory name
+    /// stays readable so the operator can read it, and the malicious
+    /// leaf is escaped.
     #[test]
-    fn already_exists_error_keeps_multibyte_dir_raw_escapes_name() {
+    fn already_exists_error_keeps_multibyte_dir_readable_escapes_name() {
         match already_exists_error("Key file", Path::new("Données/evil\u{202e}.key")) {
             CryptoError::InvalidInput(msg) => {
                 assert_eq!(msg, "Key file already exists: Données/evil\\u{202e}.key");
@@ -327,9 +331,36 @@ mod tests {
         }
     }
 
+    /// Control and bidi characters in an *intermediate* directory
+    /// component are escaped too, not only in the final component. The
+    /// parent stays whole and readable, but it must never carry a raw
+    /// terminal escape, newline, or direction-override into the message.
+    /// The direction-override assertion is separate from the control-byte
+    /// one because a bidi character is not an ASCII control byte.
+    #[test]
+    fn already_exists_error_escapes_hostile_parent_component() {
+        match already_exists_error("Output", Path::new("sa\u{202e}fe/ev\u{1b}il\ndir/file.fcr")) {
+            CryptoError::InvalidInput(msg) => {
+                assert_eq!(
+                    msg,
+                    "Output already exists: sa\\u{202e}fe/ev\\u{1b}il\\ndir/file.fcr"
+                );
+                assert!(
+                    !msg.chars().any(char::is_control),
+                    "raw control character leaked from parent: {msg:?}"
+                );
+                assert!(
+                    !msg.contains('\u{202e}'),
+                    "raw direction-override leaked from parent: {msg:?}"
+                );
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
     /// A malicious file name at an occupied output path renders escaped:
     /// the rejection message must never carry raw control bytes to a
-    /// terminal. The parent directory stays raw so the operator can
+    /// terminal. The parent directory stays readable so the operator can
     /// locate the conflict; the file name has its own display budget,
     /// so the escaped form appears in full regardless of how long the
     /// directory prefix is. Unix-only — Windows refuses control bytes

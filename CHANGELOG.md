@@ -17,6 +17,7 @@ All notable changes to FerroCrypt are documented in this file.
 - **Encrypting a directory to a destination inside that directory no longer includes FerroCrypt's staging file in the archive.** Source entries are recorded before output staging begins, so the restored tree does not contain FerroCrypt's own output. Archive-limit failures also occur before passphrase derivation begins.
 - **Key generation now commits `private.key` before `public.key` and flushes the key directory after each commit.** Process interruption cannot leave a usable `public.key` without its matching `private.key`. On filesystems that support directory flushing, the same guarantee covers power loss. Other filesystems depend on their own ordering guarantees after power loss. A genuine flush failure stops key generation with an error.
 - **Error messages containing untrusted names now apply their length limit after escaping.** Escaped file names, archive paths, and recipient strings can no longer exceed the intended display width.
+- **"Already exists" conflict messages now escape control and text-direction characters across the whole path, not only in the final name.** Such a character in an intermediate directory name was previously shown unescaped, so the message could carry a terminal escape sequence or a visually reordered name into a terminal or log. The directory portion is still shown in full and untruncated so the conflict stays easy to locate.
 
 ## [0.3.0-rc.2] - 2026-07-12
 

@@ -1873,7 +1873,7 @@ mod tests {
     #[test]
     fn occupied_output_error_escapes_hostile_root_name() {
         // The archive-chosen root name is escaped; the operator-chosen
-        // output directory is shown raw and is never truncated away,
+        // output directory stays readable and is never truncated away,
         // even when it is long or carries non-ASCII characters.
         let err = output_already_exists(
             Path::new("/home/operator/Données/very-long-output-directory-name"),
@@ -1883,7 +1883,7 @@ mod tests {
         assert!(msg.contains("Output already exists"), "got: {msg}");
         assert!(
             msg.contains("Données"),
-            "operator path must stay raw: {msg}"
+            "operator path must stay readable: {msg}"
         );
         assert!(
             msg.contains("evil\\u{202e}name"),

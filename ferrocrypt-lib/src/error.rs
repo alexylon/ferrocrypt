@@ -438,11 +438,12 @@ pub enum CryptoError {
         /// Maximum recipient-string length accepted by local policy.
         local_cap: u32,
     },
-    /// A `private.key` file's `wrapped_secret_len` exceeds the local
-    /// resource cap. The structural max (16 MiB per `FORMAT.md` §8) is
-    /// much higher; this fires when the wrapped secret would exceed the
-    /// reader's resource policy (4 KiB by default — every v1 native key
-    /// type needs only 48 bytes). Distinct from
+    /// A `private.key` `wrapped_secret_len` exceeds the local resource
+    /// cap. The structural max (16 MiB per `FORMAT.md` §8) is much
+    /// higher; this fires when the wrapped secret would exceed the
+    /// resource policy (4 KiB by default — every v1 native key type
+    /// needs only 48 bytes); the writer enforces the same cap before
+    /// sealing. Distinct from
     /// [`FormatDefect::MalformedPrivateKey`]: the file may be
     /// structurally valid for a future key type; the local policy is
     /// the constraint.

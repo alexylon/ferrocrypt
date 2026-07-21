@@ -77,10 +77,11 @@ pub(crate) const PRIVATE_KEY_WRAPPED_SECRET_LEN_MIN: u32 = TAG_SIZE as u32;
 /// Structural maximum for `wrapped_secret_len` (`FORMAT.md` §8).
 pub(crate) const PRIVATE_KEY_WRAPPED_SECRET_LEN_MAX: u32 = 16_777_216;
 
-/// Recommended local cap on `wrapped_secret_len` for untrusted input.
-/// X25519 needs only 48 bytes (32-byte secret + 16-byte tag); 4 KiB
-/// leaves headroom for future native key types without forcing every
-/// caller to raise the cap.
+/// Recommended local cap on `wrapped_secret_len` for untrusted input,
+/// also enforced by `seal_private_key` so a sealed file always opens
+/// back under default configuration. X25519 needs only 48 bytes
+/// (32-byte secret + 16-byte tag); 4 KiB leaves headroom for future
+/// native key types without forcing every caller to raise the cap.
 pub(crate) const PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT: u32 = 4_096;
 
 /// File-read cap for `private.key`: header plus every field at its
@@ -322,7 +323,9 @@ impl std::fmt::Debug for OpenedPrivateKey {
 ///
 /// Validates `ext_bytes` against the v1 TLV grammar after the
 /// structural length caps so an oversized region still surfaces as
-/// `MalformedPrivateKey`.
+/// `MalformedPrivateKey`. Rejects a wrapped secret above
+/// [`PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT`] so every sealed
+/// file opens under the default reader configuration.
 pub(crate) fn seal_private_key(
     secret_material: &[u8],
     type_name: &str,
@@ -412,6 +415,14 @@ fn seal_private_key_inner(
     let wrapped_secret_len =
         u32::try_from(wrapped_secret_len_usize).map_err(|_| malformed_private_key())?;
     check_wrapped_secret_len(wrapped_secret_len)?;
+    // Mirror of the reader's default cap in `open_private_key`: never
+    // seal a file the default configuration would refuse to open.
+    if wrapped_secret_len > PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT {
+        return Err(CryptoError::PrivateKeyWrappedSecretCapExceeded {
+            wrapped_secret_len,
+            local_cap: PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT,
+        });
+    }
 
     let argon2_salt = random_bytes::<ARGON2_SALT_SIZE>()?;
     let wrap_nonce = random_bytes::<WRAP_NONCE_SIZE>()?;
@@ -846,6 +857,34 @@ mod tests {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => {}
             other => panic!("expected MalformedPrivateKey for oversize ext, got {other:?}"),
         }
+    }
+
+    /// Companion of the caps above for the wrapped secret: the writer
+    /// enforces the reader's default cap, so a sealed `private.key`
+    /// always opens under default configuration.
+    #[test]
+    fn seal_rejects_wrapped_secret_above_default_local_cap() {
+        let public = [0x22u8; 32];
+        let pass = test_passphrase("pw");
+        let kdf = KdfParams::test_fast_default();
+        let at_cap_len = PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT as usize - TAG_SIZE;
+        let over = vec![0x11u8; at_cap_len + 1];
+        match seal_private_key(&over, "x25519", &public, &[], &pass, &kdf) {
+            Err(CryptoError::PrivateKeyWrappedSecretCapExceeded {
+                wrapped_secret_len,
+                local_cap,
+            }) => {
+                assert_eq!(
+                    wrapped_secret_len,
+                    PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT + 1
+                );
+                assert_eq!(local_cap, PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT);
+            }
+            other => panic!("expected the typed wrapped-secret cap rejection, got {other:?}"),
+        }
+        let at_cap = vec![0x11u8; at_cap_len];
+        seal_private_key(&at_cap, "x25519", &public, &[], &pass, &kdf)
+            .expect("wrapped secret exactly at the cap must seal");
     }
 
     #[test]

@@ -480,9 +480,10 @@ fn seal_private_key_inner(
 /// before the Argon2id call — that is, **after** structural header
 /// parsing, the caller-supplied `KdfLimit` resource cap, the
 /// `local_wrapped_secret_cap` cap, the total-length check, type-name
-/// grammar validation, and the passphrase-length cap have all passed.
+/// grammar validation, and the fixed v1 passphrase byte-length bound
+/// have all passed.
 /// A structurally malformed key file, one that exceeds either cap, or
-/// an over-cap passphrase is rejected with no event emitted.
+/// a passphrase outside the bound is rejected with no event emitted.
 pub(crate) fn open_private_key(
     bytes: &[u8],
     passphrase: &SecretString,
@@ -706,11 +707,12 @@ mod tests {
         assert_eq!(opened.type_name, "x25519");
     }
 
-    /// Pins the work-boundary contract for an over-cap passphrase: the
-    /// cap is checked before `UnlockingPrivateKey` fires, so the unlock
-    /// rejects as `InvalidInput` with zero events and no Argon2id work.
+    /// Pins the work-boundary contract for an over-length passphrase:
+    /// the bound is checked before `UnlockingPrivateKey` fires, so the
+    /// unlock rejects as `InvalidInput` with zero events and no Argon2id
+    /// work.
     #[test]
-    fn open_emits_no_event_when_passphrase_exceeds_cap() {
+    fn open_emits_no_event_when_passphrase_exceeds_bound() {
         use crate::crypto::kdf::MAX_PASSPHRASE_LEN_BYTES;
         let (secret, public) = x25519_shaped();
         let pass = test_passphrase("pw");
@@ -731,7 +733,7 @@ mod tests {
         }
         assert!(
             events.borrow().is_empty(),
-            "no event should fire for an over-cap passphrase; got {:?}",
+            "no event should fire for an over-length passphrase; got {:?}",
             events.borrow()
         );
     }

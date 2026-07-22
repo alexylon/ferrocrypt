@@ -148,7 +148,8 @@ pub(crate) trait DecryptionCredential {
 /// [`crate::api::Encryptor::write`] via
 /// `api::preflight_header_write_limits` and
 /// [`crate::KdfParams::validate_for_write`]. The same applies to the
-/// non-empty-passphrase check in [`crate::api::validate_passphrase`].
+/// fixed v1 passphrase byte-length check in
+/// [`crate::api::validate_passphrase`].
 ///
 /// Any new in-crate caller of `protocol::encrypt` must run those
 /// preflight steps first (or accept the resulting symmetry break with
@@ -533,7 +534,8 @@ fn failure_for(
 /// the **api-layer's** responsibility and live in
 /// [`crate::api::KeyPairGenerator::write`] via
 /// [`crate::KdfParams::validate_for_write`]. The same applies to the
-/// non-empty-passphrase check in [`crate::api::validate_passphrase`].
+/// fixed v1 passphrase byte-length check in
+/// [`crate::api::validate_passphrase`].
 ///
 /// Any new in-crate caller must run those preflight steps first
 /// (or accept the resulting symmetry break with the default reader's

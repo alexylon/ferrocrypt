@@ -117,9 +117,9 @@ impl Encryptor {
     /// Configures passphrase encryption.
     ///
     /// The resulting `.fcr` contains exactly one native `argon2id`
-    /// recipient. The passphrase is checked for non-emptiness when
-    /// [`Encryptor::write`] runs; constructing this builder is
-    /// infallible.
+    /// recipient. The passphrase is checked against the fixed v1 bound
+    /// of 1 to 4,096 bytes when [`Encryptor::write`] runs;
+    /// constructing this builder is infallible.
     pub fn with_passphrase(passphrase: SecretString) -> Self {
         Self {
             state: EncryptorState::Passphrase(passphrase),
@@ -329,8 +329,9 @@ impl Encryptor {
         let kdf_params = self.kdf_params.unwrap_or_default();
         let save_as = self.save_as.as_deref();
 
-        // Check the passphrase before filesystem work. An empty value is a
-        // caller error, and reporting it first avoids unnecessary syscalls.
+        // Check the fixed v1 passphrase byte-length bound before filesystem
+        // work. A value outside the bound is a caller error, and reporting it
+        // first avoids unnecessary syscalls.
         if let EncryptorState::Passphrase(p) = &self.state {
             validate_passphrase(p)?;
         }
@@ -561,11 +562,11 @@ impl PassphraseDecryptor {
 
     /// Decrypts this passphrase-sealed `.fcr` into `output_dir`.
     ///
-    /// The passphrase is checked for non-emptiness, then used to unwrap the
-    /// file's `argon2id` recipient. The recovered candidate file key is
-    /// accepted only after the header MAC verifies. On success, the decrypted
-    /// file or directory is promoted into `output_dir` and returned in
-    /// [`DecryptOutcome::output_path`].
+    /// The passphrase is checked against the fixed v1 bound of 1 to
+    /// 4,096 bytes, then used to unwrap the file's `argon2id` recipient. The
+    /// recovered candidate file key is accepted only after the header MAC
+    /// verifies. On success, the decrypted file or directory is promoted
+    /// into `output_dir` and returned in [`DecryptOutcome::output_path`].
     ///
     /// # Errors
     ///
@@ -783,8 +784,9 @@ pub struct KeyPairGenerator {
 impl KeyPairGenerator {
     /// Constructs a key-pair generator with the passphrase that will be
     /// used to seal the resulting `private.key`. The passphrase is
-    /// checked for non-emptiness when [`KeyPairGenerator::write`] runs;
-    /// constructing this builder is infallible.
+    /// checked against the fixed v1 bound of 1 to 4,096 bytes when
+    /// [`KeyPairGenerator::write`] runs; constructing this builder is
+    /// infallible.
     pub fn with_passphrase(passphrase: SecretString) -> Self {
         Self {
             passphrase,

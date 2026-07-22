@@ -96,11 +96,11 @@ pub(crate) fn wrap(
 /// final until the header MAC also verifies.
 ///
 /// Emits [`ProgressEvent::DerivingPassphraseWrapKey`] immediately before
-/// the Argon2id call — that is, **after** the passphrase-length cap,
-/// structural KDF-parameter validation, and the resource-cap check have
-/// already passed. An over-cap passphrase, a malformed body, or a body
-/// whose `kdf_params` exceed the caller's `kdf_limit` is rejected with
-/// no event emitted.
+/// the Argon2id call — that is, **after** the fixed v1 passphrase
+/// byte-length bound, structural KDF-parameter validation, and the
+/// resource-cap check have already passed. A passphrase outside the
+/// bound, a malformed body, or a body whose `kdf_params` exceed the
+/// caller's `kdf_limit` is rejected with no event emitted.
 pub(crate) fn unwrap(
     body: &[u8; BODY_LENGTH],
     passphrase: &SecretString,
@@ -510,11 +510,11 @@ mod tests {
         );
     }
 
-    /// Pins the work-boundary contract for an over-cap passphrase on
+    /// Pins the work-boundary contract for an over-length passphrase on
     /// `wrap`: rejected as `InvalidInput` with NO event, because
     /// Argon2id never runs.
     #[test]
-    fn wrap_emits_no_event_when_passphrase_exceeds_cap() {
+    fn wrap_emits_no_event_when_passphrase_exceeds_bound() {
         use crate::crypto::kdf::MAX_PASSPHRASE_LEN_BYTES;
         let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let long = passphrase(&"a".repeat(MAX_PASSPHRASE_LEN_BYTES + 1));
@@ -526,16 +526,16 @@ mod tests {
         }
         assert!(
             events.borrow().is_empty(),
-            "no event should fire for an over-cap passphrase; got {:?}",
+            "no event should fire for an over-length passphrase; got {:?}",
             events.borrow()
         );
     }
 
-    /// Same contract for `unwrap`: the passphrase cap is checked before
-    /// the event, so a valid body unwrapped with an over-cap passphrase
-    /// produces `InvalidInput` and zero events.
+    /// Same contract for `unwrap`: the fixed v1 passphrase byte-length
+    /// bound is checked before the event, so a valid body unwrapped with
+    /// an over-length passphrase produces `InvalidInput` and zero events.
     #[test]
-    fn unwrap_emits_no_event_when_passphrase_exceeds_cap() {
+    fn unwrap_emits_no_event_when_passphrase_exceeds_bound() {
         use crate::crypto::kdf::MAX_PASSPHRASE_LEN_BYTES;
         let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let pass = passphrase("p");
@@ -549,7 +549,7 @@ mod tests {
         }
         assert!(
             events.borrow().is_empty(),
-            "no event should fire for an over-cap passphrase; got {:?}",
+            "no event should fire for an over-length passphrase; got {:?}",
             events.borrow()
         );
     }

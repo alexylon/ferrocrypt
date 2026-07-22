@@ -281,9 +281,11 @@ impl DecryptSession {
         // work, enforcing local limits before allocation.
         let parsed = read_encrypted_header(&mut encrypted_file, header_read_limits)?;
 
-        // Step 5: reject unsupported critical recipients and invalid
-        // recipient combinations before any expensive recipient work.
-        // `classify_recipient_mode` applies the mixing policy.
+        // Steps 5-9: reject unsupported critical recipients, native
+        // entries with invalid flags or body lengths, and invalid
+        // recipient combinations before any KDF or private-key work.
+        // `classify_recipient_mode` runs the per-entry structural pass
+        // and then the mixing policy (FORMAT.md §3.7 preflight).
         let mode = classify_recipient_mode(&parsed.recipient_entries)?;
 
         Ok(Self {
@@ -963,11 +965,12 @@ mod tests {
         Ok(())
     }
 
-    /// FORMAT.md §3.7 SHOULD-level mitigation: the decrypt loop must
-    /// visit every supported `x25519` slot before deciding, not
-    /// short-circuit on the first MAC-verified one.
+    /// FORMAT.md §3.7 step 8: a wrong-length `x25519` slot hiding
+    /// behind a well-shaped slot must reject the whole file during the
+    /// structural preflight, before any slot unwrap can run — even
+    /// though the first slot alone would decrypt.
     #[test]
-    fn multi_x25519_attempt_all_visits_every_slot() -> Result<(), CryptoError> {
+    fn multi_x25519_wrong_length_second_slot_rejects_in_preflight() -> Result<(), CryptoError> {
         let tmp = tempfile::TempDir::new().unwrap();
         let keys_dir = tmp.path().join("keys");
         let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
@@ -986,7 +989,7 @@ mod tests {
         };
         let entries = [valid_slot, malformed_slot];
 
-        let fcr = tmp.path().join("multi-attempt-all.fcr");
+        let fcr = tmp.path().join("multi-wrong-length.fcr");
         build_multi_recipient_fcr(&entries, &file_key, b"x", &fcr)?;
 
         let dec_dir = tmp.path().join("decrypted");
@@ -995,7 +998,7 @@ mod tests {
         match err {
             CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry) => Ok(()),
             other => panic!(
-                "expected MalformedRecipientEntry from slot-2 inspection (proves attempt-all); got {other:?}"
+                "expected MalformedRecipientEntry from the preflight for slot 2; got {other:?}"
             ),
         }
     }

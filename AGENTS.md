@@ -119,9 +119,9 @@ No plaintext intermediate files touch disk. The FCA payload is never materialize
 Decryption reverses (`FORMAT.md` §3.7 acceptance order):
 
 1. read + structurally validate the header (`container::read_encrypted_header`); local caps enforced before any allocation.
-2. `recipient::classify_recipient_mode` — reject unknown-critical entries, enforce `argon2id` exclusivity (before any KDF).
+2. `recipient::classify_recipient_mode` — reject unknown-critical entries and native entries with non-zero flags or a wrong body length, enforce `argon2id` exclusivity (all before any KDF or private-key unlock).
 3. iterate supported recipient slots in declared order:
-    - flags-zero / body-len shape check;
+    - flags-zero / body-len backstop (the classify preflight already validated shape);
     - per-recipient `unwrap` (Argon2id for `argon2id`, ECDH for `x25519`);
     - on success, derive `payload_key + header_key` from the candidate `file_key`;
     - `format::verify_header_mac` is the FINAL acceptance gate (per-candidate failure → `HeaderMacFailedAfterUnwrap { type_name }`, loop continues).

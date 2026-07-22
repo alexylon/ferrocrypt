@@ -329,15 +329,19 @@ pub(crate) fn enforce_recipient_mixing_policy(
 /// the first entry would misclassify those.
 ///
 /// Order of checks:
-/// 1. For each entry, reject either a known native entry whose
+/// 1. For each entry, reject a known native entry whose
 ///    `recipient_flags != 0` (per `FORMAT.md` §3.4: "Native `argon2id`
-///    and `x25519` entries MUST have `recipient_flags = 0`") with
-///    [`CryptoError::InvalidFormat`] /
-///    [`FormatDefect::MalformedRecipientEntry`], or an unknown critical
+///    and `x25519` entries MUST have `recipient_flags = 0`") or whose
+///    body length is not the exact native length (`FORMAT.md` §3.7
+///    step 8) with [`CryptoError::InvalidFormat`] /
+///    [`FormatDefect::MalformedRecipientEntry`], and an unknown critical
 ///    entry with [`CryptoError::UnknownCriticalRecipient`]. Reserved
 ///    bits 1..=15 are already rejected at parse time
 ///    (`RECIPIENT_FLAGS_RESERVED_MASK`), so by the time this runs only
-///    bit 0 (critical) can be set among the flags.
+///    bit 0 (critical) can be set among the flags. This pass completes
+///    over every entry before mixing runs, so a file that is both
+///    structurally malformed and illegally mixed reports the
+///    structural defect (`FORMAT.md` §3.7 step 8 before step 9).
 /// 2. Run [`enforce_recipient_mixing_policy`] (cardinality + class).
 /// 3. For each supported native entry, look up
 ///    [`NativeRecipientType::recipient_mode`]; the file's mode is the
@@ -356,14 +360,16 @@ pub(crate) fn enforce_recipient_mixing_policy(
 pub(crate) fn classify_recipient_mode(
     entries: &[RecipientEntry],
 ) -> Result<crate::UnauthenticatedRecipientMode, CryptoError> {
-    // Step 1: per-entry flag rejection. A reader must refuse to process
-    // a file that either declares an unknown entry it cannot skip, or
-    // tags a known native entry with a non-zero flag. Both checks ride
-    // the same iteration so the rejection fires before any KDF.
+    // Step 1: per-entry structural rejection. A reader must refuse to
+    // process a file that declares an unknown entry it cannot skip, tags
+    // a known native entry with a non-zero flag, or carries a native
+    // body of the wrong length. The checks ride one iteration over every
+    // entry so the rejection fires before mixing and before any KDF or
+    // private-key work (`FORMAT.md` §3.7 steps 8-9).
     for entry in entries {
         match NativeRecipientType::from_type_name(&entry.type_name) {
-            Some(_native) => {
-                if entry.recipient_flags != 0 {
+            Some(native) => {
+                if entry.recipient_flags != 0 || entry.body.len() != native.body_len() {
                     return Err(CryptoError::InvalidFormat(
                         FormatDefect::MalformedRecipientEntry,
                     ));
@@ -724,6 +730,63 @@ mod tests {
             other => {
                 panic!("expected MalformedRecipientEntry for native x25519+critical, got {other:?}")
             }
+        }
+    }
+
+    /// FORMAT.md §3.7 step 8 fixes native body lengths as a
+    /// pre-cryptographic check: a native entry whose body is not the
+    /// exact registry length must be rejected at classify time, before
+    /// any KDF or private-key work can start.
+    #[test]
+    fn classify_rejects_native_body_with_wrong_length() {
+        for (name, good_len) in [
+            (argon2id::TYPE_NAME, argon2id::BODY_LENGTH),
+            (x25519::TYPE_NAME, x25519::BODY_LENGTH),
+        ] {
+            for wrong_len in [good_len - 1, good_len + 1] {
+                let bad = RecipientEntry {
+                    type_name: name.to_owned(),
+                    recipient_flags: 0,
+                    body: vec![0u8; wrong_len],
+                };
+                let err = classify_recipient_mode(&[bad]).unwrap_err();
+                match err {
+                    CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry) => {}
+                    other => panic!(
+                        "expected MalformedRecipientEntry for {name} body of {wrong_len}, got {other:?}"
+                    ),
+                }
+            }
+        }
+    }
+
+    /// The per-entry structural pass covers every entry, so a malformed
+    /// native body hiding behind a well-shaped entry is still caught at
+    /// classify time.
+    #[test]
+    fn classify_rejects_wrong_length_after_valid_entry() {
+        let mut short = x25519_entry();
+        short.body.pop();
+        let err = classify_recipient_mode(&[x25519_entry(), short]).unwrap_err();
+        match err {
+            CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry) => {}
+            other => panic!("expected MalformedRecipientEntry for second slot, got {other:?}"),
+        }
+    }
+
+    /// FORMAT.md §3.7 orders step 8 before step 9: when a file is both
+    /// structurally malformed and illegally mixed, the structural
+    /// rejection wins.
+    #[test]
+    fn classify_reports_structural_defect_before_illegal_mixing() {
+        let mut short = argon2id_entry();
+        short.body.pop();
+        let err = classify_recipient_mode(&[short, x25519_entry()]).unwrap_err();
+        match err {
+            CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry) => {}
+            other => panic!(
+                "expected the structural defect to take precedence over mixing, got {other:?}"
+            ),
         }
     }
 

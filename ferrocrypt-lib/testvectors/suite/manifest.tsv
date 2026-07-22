@@ -87,3 +87,4 @@ cases/public-key-crlf.key	read-public-key	-	error	InvalidFormat(MalformedPublicK
 cases/public-key-leading-space.key	read-public-key	-	error	InvalidFormat(MalformedPublicKey)	Public key is malformed
 cases/public-key-zero-material.key	read-public-key	-	error	InvalidFormat(MalformedPublicKey)	Public key is malformed
 cases/privatekey-bad-kdf.private.key	validate-private-key	-	error	InvalidKdfParams(MemoryCost)	File has invalid KDF settings (2097153 KiB memory)
+cases/x25519-invalid-length-second-slot.fcr	decrypt	-	error	InvalidFormat(MalformedRecipientEntry)	Recipient entry is malformed

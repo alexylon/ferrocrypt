@@ -306,6 +306,26 @@ fn suite_manifest_holds() {
     );
 }
 
+/// FORMAT.md §3.7 step 8: a native recipient body of the wrong length
+/// is rejected by [`Decryptor::open`] itself. No credential can be
+/// supplied at that point, so the expensive private-key unlock (and its
+/// `UnlockingPrivateKey` progress event) is unreachable for these
+/// fixtures — the regression this test pins.
+#[test]
+fn invalid_length_fixtures_reject_at_open_before_any_credential() {
+    let suite = suite_dir();
+    for fixture in [
+        "cases/x25519-invalid-length.fcr",
+        "cases/x25519-invalid-length-second-slot.fcr",
+        "cases/argon2id-invalid-length.fcr",
+    ] {
+        match Decryptor::open(suite.join(fixture)) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)) => {}
+            other => panic!("{fixture}: expected MalformedRecipientEntry at open, got {other:?}"),
+        }
+    }
+}
+
 /// Every committed case or key file must be exercised by at least one
 /// manifest row, either as the row's action target or as its private-key
 /// credential. A fixture without a row is dead weight, and a row that

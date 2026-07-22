@@ -1159,7 +1159,7 @@ const SUITE_SEED: u64 = 0xFECC_0000_5EED_0001;
 /// or changed; different corpus contents must never share a revision.
 /// Regeneration treats this constant as the source of truth and overwrites the
 /// committed file.
-const SUITE_VERSION: u32 = 5;
+const SUITE_VERSION: u32 = 6;
 
 /// Regenerates the committed suite corpus. Ignored in normal test runs;
 /// see the module docs for the invocation and the commit workflow.
@@ -1626,6 +1626,32 @@ fn regenerate_suite_vectors_inner() {
     // Revision-4 cases draw no RNG at all, so their position cannot
     // disturb the frozen bytes of any earlier fixture.
     rows.extend(write_key_file_completion_cases(&suite, &cases));
+
+    // Revision-6 case is deliberately last so every earlier fixture keeps
+    // its frozen bytes. A wrong-length supported entry behind a well-shaped
+    // entry must reject during the recipient preflight (`FORMAT.md` §3.7
+    // step 8), before any credential is consulted.
+    {
+        let file_key = FileKey::generate().expect("suite file key");
+        let valid = x25519_entry(&keys, "recipient-a.public.key", &file_key);
+        let mut short = valid.clone();
+        short.body.pop();
+        build_crafted_fcr(
+            &plaintext,
+            &cases,
+            "x25519-invalid-length-second-slot.fcr",
+            &file_key,
+            &[valid, short],
+            b"",
+        )
+        .expect("build second-slot invalid-length fixture");
+    }
+    rows.push(Case::err(
+        "cases/x25519-invalid-length-second-slot.fcr",
+        "-",
+        "InvalidFormat(MalformedRecipientEntry)",
+        "Recipient entry is malformed",
+    ));
 
     write_manifest(&suite, &rows);
 }

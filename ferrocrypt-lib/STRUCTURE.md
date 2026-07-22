@@ -573,6 +573,7 @@ Responsibilities:
 
 - defining the internal `NativeMixingRule` type and its named constructors (`exclusive`, `public_key_mixable`, `post_quantum`);
 - defining the public `MixingPolicy` diagnostic projection;
+- rejecting native entries with non-zero flags or a wrong body length, for every entry, before mixing runs (the `FORMAT.md` §3.7 step 8 preflight);
 - enforcing mixing rules before expensive operations (cardinality bit + compatibility-class equality, both before any KDF or private-key work);
 - mapping type names to supported native scheme metadata;
 - declaring each native type's `UnauthenticatedRecipientMode` via `NativeRecipientType::recipient_mode` so `classify_recipient_mode` is registry-driven (no hard-coded `argon2id` / `x25519` switches in the classifier);
@@ -1244,9 +1245,11 @@ Decryption must preserve this order:
 2. Reject bad magic, version, kind, flags, or header length.
 3. Read header and header MAC.
 4. Structurally parse header and recipient entries.
-5. Reject malformed flags, unknown critical recipients, and illegal mixing.
+5. Reject malformed flags, wrong native body lengths, and unknown critical
+   recipients for every entry, then illegal mixing.
 6. Apply local resource caps.
-7. Attempt supported recipient entries.
+7. Attempt supported recipient entries. No private-key unlock, KDF, or key
+   agreement may run before step 5 completes.
 8. Verify header MAC with each candidate `FileKey`.
 9. Validate authenticated TLV bytes only after successful header MAC verification.
 10. Derive the payload key.

@@ -407,16 +407,18 @@ pub(crate) fn decrypt_session<I: DecryptionCredential>(
         // (FORMAT.md §3.7 SHOULD-level mitigation). Slots whose AEAD
         // unwrap fails (`Ok(None)`) skip the `derive_subkeys` and the
         // `verify_header_mac` below, so a residual delta of
-        // ~one HKDF + one HMAC remains between AEAD-pass and AEAD-fail
-        // slots. That delta is informationally redundant with the
-        // overall decrypt success/failure signal — under one private
-        // key, at most one slot AEAD-passes, so the delta only reveals
-        // "some slot matched", which the success outcome already
-        // tells the observer. Crucially, the delta does NOT depend on
-        // the matching slot's position in the list, so §3.7's
-        // recipient-anonymity goal is preserved without requiring
-        // unconditional derive_subkeys + verify_header_mac on every
-        // AEAD-fail slot.
+        // ~one HKDF + one HMAC remains per AEAD-passing slot. The goal
+        // §3.7 protects is position anonymity: the delta does NOT depend
+        // on which slot matched, so wall time cannot reveal the
+        // matching recipient's place in the list. It does scale with the
+        // number of slots that pass AEAD under this private key. A file
+        // may legitimately carry the same recipient more than once
+        // (`Encryptor::with_public_keys` accepts duplicates), so that
+        // count can exceed one; the header's cleartext `recipient_count`
+        // already bounds it, and no §3.7 goal requires hiding it. Hiding
+        // the count would need unconditional derive_subkeys +
+        // verify_header_mac on every supported slot, which the format
+        // does not mandate.
         if format::verify_header_mac(
             &parsed.prefix_bytes,
             &parsed.header_bytes,

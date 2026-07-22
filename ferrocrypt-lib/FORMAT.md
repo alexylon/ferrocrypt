@@ -175,13 +175,14 @@ Settings:
   Readers and writers MUST use Argon2id version `0x13` and MUST NOT use version
   `0x10` or any other Argon2 version.
 - Password input: exact UTF-8 bytes supplied by the caller.
+- Password byte length: 1 to 4,096 bytes, inclusive.
 - No Unicode normalization is performed by the format.
 - Salt: the stored 32-byte salt.
 - Secret input: empty.
 - Associated-data input: empty.
 - Output length: 32 bytes.
 
-Structural bounds:
+Structural KDF-parameter bounds:
 
 ```text
 1 <= lanes <= 8
@@ -191,6 +192,14 @@ Structural bounds:
 
 Readers MUST reject out-of-range parameters before running Argon2id.
 
+The passphrase byte-length bound is a fixed v1 credential rule, not a
+configurable local KDF resource cap. It applies identically when creating or
+opening an `argon2id` recipient and when creating or opening a `private.key`.
+Readers and writers MUST reject a passphrase outside this bound before running
+Argon2id. Implementations MUST count the exact UTF-8 bytes supplied by the
+caller and MUST NOT normalize, trim, case-fold, truncate, or treat an embedded
+NUL as a terminator.
+
 Recommended writer default for desktop-class v1 encryption:
 
 ```text
@@ -199,9 +208,10 @@ time    = 4
 lanes   = 4
 ```
 
-Implementations MAY impose lower local resource caps for untrusted input. Local
-caps are resource policy, not format incompatibility. Implementations SHOULD make
-such caps configurable and report a distinct resource-cap error.
+Implementations MAY impose lower local KDF work caps on Argon2id parameters read
+from untrusted input. Local KDF caps are resource policy, not format
+incompatibility or passphrase-length bounds. Implementations SHOULD make such
+caps configurable and report a distinct resource-cap error.
 
 ### 2.3 HKDF domain separation
 
@@ -231,6 +241,29 @@ when computing public keys or shared secrets.
 recipient_public_key_bytes = X25519(private_key_material, basepoint)
 shared                     = X25519(private_or_ephemeral_scalar, peer_public_key)
 ```
+
+Every native X25519 public value serialized by FerroCrypt MUST use the canonical
+RFC 7748 output encoding. This includes static `recipient_public_key_bytes`,
+X25519 `public_material` in `private.key`, and `ephemeral_public_key_bytes` in an
+`x25519` recipient body. The canonical encoding is exactly 32 bytes and, when
+decoded as an unsigned little-endian integer `u`, satisfies:
+
+```text
+0 <= u < 2^255 - 19
+```
+
+Equivalently, the most significant bit of byte 31 is zero and the remaining
+255-bit integer is strictly less than the Curve25519 field prime. Writers MUST
+emit this encoding. Readers MUST reject any other encoding and MUST NOT make it
+acceptable by clearing the high bit or reducing the integer modulo the field
+prime.
+
+This is a FerroCrypt serialization rule, not a change to the X25519 primitive.
+RFC 7748 requires the primitive itself to mask the high bit of received X25519
+coordinates and accept non-canonical field encodings. FerroCrypt rejects those
+aliases at the format boundary because the serialized public bytes are also
+bound into HKDF salts, checksums, and fingerprints; accepting aliases would give
+one X25519 point multiple FerroCrypt identities and transcripts.
 
 X25519 recipient creation and opening MUST reject an all-zero `shared` value.
 
@@ -483,6 +516,16 @@ Readers MUST process `.fcr` files in this order:
 14. After HMAC success, validate `ext_bytes`.
 15. Derive the payload key and decrypt the payload stream.
 
+Steps 5 through 9 are one file-wide preflight. Readers MUST complete the
+recipient-specific step 8 checks for every supported entry before starting the
+mixing checks in step 9. Step 9 MUST NOT begin unless every step 8 check has
+succeeded; if a file has both a recipient-specific structural defect and an
+illegal recipient mix, the step 8 structural rejection takes precedence. The
+step 8 checks include the exact 116-byte `argon2id` body length and exact
+104-byte `x25519` body length. A reader MUST NOT unlock a supplied private key
+(including running its unlock KDF), perform X25519 or another KEM operation, or
+run a recipient KDF until this preflight succeeds.
+
 A recipient unwrap is not successful until the header MAC verifies.
 
 Readers SHOULD either attempt unwrap of all supported recipient entries before
@@ -605,6 +648,11 @@ ephemeral_public_key_bytes = X25519(ephemeral_secret, basepoint)
 shared           = X25519(ephemeral_secret, recipient_public_key_bytes)
 ```
 
+Before this operation, writers MUST validate that
+`recipient_public_key_bytes` uses the canonical encoding from §2.4. Writers
+MUST reject a non-canonical recipient public key rather than normalize it.
+`ephemeral_public_key_bytes` is the canonical X25519 output encoding from §2.4.
+
 If `shared` is all zero bytes, writers MUST reject and retry or fail.
 
 ```text
@@ -658,13 +706,21 @@ Readers MUST reject an `x25519` entry if:
 
 - `recipient_flags != 0`;
 - body length is not exactly 104 bytes;
+- `ephemeral_public_key_bytes` is the all-zero byte string;
+- `ephemeral_public_key_bytes` is not the canonical encoding from §2.4;
 - the X25519 shared secret is all zero;
 - the file violates the `x25519` mixing policy.
 
+The explicit all-zero and canonical-encoding checks on
+`ephemeral_public_key_bytes` are credential-independent step 8 checks and MUST
+run before any private-key unlock. The all-zero-shared-secret check remains
+mandatory during X25519 for every other preflight-valid ephemeral public key.
+
 The `x25519` recipient test suite MUST include valid single-recipient,
 valid multi-recipient, unknown-non-critical, wrong-key, all-zero-shared-secret,
-tamper covering each authenticated field independently, invalid-flag,
-invalid-length, illegal-mixing, and header-MAC-failure vectors.
+non-canonical-ephemeral-key, tamper covering each authenticated field
+independently, invalid-flag, invalid-length, illegal-mixing, and
+header-MAC-failure vectors.
 
 ### 4.3 Future recipient types
 
@@ -908,8 +964,25 @@ key_material_len = 32
 key_material     = recipient_public_key_bytes
 ```
 
-Readers MUST reject X25519 public recipients whose key material length is not
-exactly 32 bytes.
+Native X25519 `key_material` MUST use the canonical encoding from §2.4 and MUST
+NOT be the all-zero byte string. Readers MUST reject an X25519 public recipient
+whose key material is not exactly 32 bytes, is not canonical, or is all zero.
+Writers MUST apply the same checks before serializing, fingerprinting, or using
+the key for encryption.
+
+Implementations MUST enforce these rules at every native X25519 public-key
+ingress, including raw-byte APIs, recipient strings, and `public.key` files.
+After checksum verification, readers MUST reject a non-canonical encoding
+rather than normalize it. This ensures that equivalent RFC 7748 input encodings
+cannot acquire distinct FerroCrypt recipient strings or fingerprints, and that
+encryption and decryption bind the same `recipient_public_key_bytes` into the
+X25519 wrap-key salt.
+
+The native X25519 public-recipient test suite MUST include a generated canonical
+key; the same key with the most significant bit of byte 31 set; encodings of
+`u = 2^255 - 19`, `u = 2^255 - 18`, and `u = 2^255 - 1`; the all-zero value; and
+wrong-length material. Only the generated canonical key is a valid native
+X25519 public recipient.
 
 ### 7.1 `public.key` file form
 
@@ -939,6 +1012,8 @@ The canonical fingerprint is 64 lowercase hexadecimal characters. A short displa
 form MAY use the first 16 lowercase hexadecimal characters. For voice or
 out-of-band verification, implementations MAY display four-character lowercase
 hex groups separated by `:`. The unspaced 64-character form remains canonical.
+For native X25519, `key_material` MUST already have passed the canonical-encoding
+checks above; an RFC 7748 alias MUST NOT be fingerprinted as a separate key.
 
 ---
 
@@ -991,15 +1066,21 @@ For native X25519:
 type_name          = "x25519"
 public_len         = 32
 wrapped_secret_len = 48
+public_material    = recipient_public_key_bytes (canonical per §2.4)
 plaintext secret   = 32-byte X25519 scalar input
 ```
 
-For native X25519 private keys, after decrypting `secret_material`, readers MUST
-compute `X25519(secret_material, basepoint)` and reject the private key unless
-the result exactly equals `public_material`.
+For native X25519 private keys, writers MUST store the canonical X25519 output
+for `public_material`. After decrypting `secret_material`, readers MUST compute
+`X25519(secret_material, basepoint)` and reject the private key unless the result
+exactly equals `public_material`. Readers MUST NOT normalize `public_material`
+before this comparison.
 
 Let `secret_material` be the recipient-type-specific private key material to be
 wrapped.
+
+Passphrases used to create or open `private.key` use the exact input encoding and
+fixed byte-length bound from §2.2.
 
 Wrapping:
 
@@ -1879,10 +1960,12 @@ expose specific subclasses for clearer diagnostics:
   recipient, no supported recipient;
 - illegal recipient mixing;
 - recipient unwrap failure, invalid KDF parameters, wrong passphrase/key;
+- caller passphrase outside the fixed v1 byte-length bound;
 - plugin recipient failure;
 - recipient candidate key failed header MAC verification;
 - passphrase recipient mixed with any other recipient;
 - all-zero X25519 shared secret;
+- non-canonical native X25519 public encoding;
 - header MAC failure;
 - malformed TLV, unknown critical TLV;
 - archive extension, manifest, entry extension, path, or plaintext resource-cap
@@ -1976,6 +2059,10 @@ version.
 |---|---:|---|---|
 | `argon2id` | 116 | Exclusive | passphrase recipient |
 | `x25519` | 104 | Public-key-mixable | X25519 public-key recipient |
+
+Passphrases are exact UTF-8 byte strings of 1 to 4,096 bytes. Every serialized
+native X25519 public value is a canonical 32-byte little-endian field encoding
+strictly below `2^255 - 19`; readers reject aliases rather than normalize them.
 
 HKDF info strings:
 

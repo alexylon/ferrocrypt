@@ -365,8 +365,8 @@ pub(crate) fn generate_keypair()
 /// - [`CryptoError::Io`] for other read errors
 /// - [`CryptoError::KeyFileUnlockFailed`] for wrong passphrase or
 ///   tampered cleartext (AEAD cannot distinguish)
-/// - [`CryptoError::InvalidInput`] for a passphrase exceeding the
-///   4 KiB structural cap
+/// - [`CryptoError::InvalidInput`] for a passphrase outside the
+///   `FORMAT.md` §2.2 byte-length bound
 /// - [`CryptoError::InvalidKdfParams`] for header KDF fields outside
 ///   the v1 structural bounds
 /// - [`CryptoError::KdfResourceCapExceeded`] when the header's

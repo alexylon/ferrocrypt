@@ -309,8 +309,8 @@ impl Encryptor {
     /// # Errors
     ///
     /// Returns [`CryptoError::InvalidInput`] for invalid input paths, output
-    /// conflicts, unsupported archive entries, empty passphrases, archive cap
-    /// violations, or invalid KDF settings. Returns [`CryptoError::Io`] for
+    /// conflicts, unsupported archive entries, empty or too-long passphrases,
+    /// archive cap violations, or invalid KDF settings. Returns [`CryptoError::Io`] for
     /// filesystem failures. Returns authentication or internal crypto errors if
     /// key wrapping or payload streaming fails.
     pub fn write(
@@ -569,9 +569,9 @@ impl PassphraseDecryptor {
     ///
     /// # Errors
     ///
-    /// Returns [`CryptoError::InvalidInput`] for an empty passphrase, archive
-    /// cap violations, output conflicts, or unsafe archived paths. Returns
-    /// [`CryptoError::KdfResourceCapExceeded`] for rejected KDF costs.
+    /// Returns [`CryptoError::InvalidInput`] for an empty or too-long
+    /// passphrase, archive cap violations, output conflicts, or unsafe archived
+    /// paths. Returns [`CryptoError::KdfResourceCapExceeded`] for rejected KDF costs.
     /// Returns [`CryptoError::InvalidFormat`] if the encrypted container or
     /// authenticated payload stream is structurally malformed. Returns
     /// authentication errors such as [`CryptoError::RecipientUnwrapFailed`],
@@ -685,8 +685,9 @@ impl PrivateKeyDecryptor {
     ///
     /// # Errors
     ///
-    /// Returns [`CryptoError::InvalidInput`] for an empty `private_key_passphrase`,
-    /// archive cap violations, output conflicts, or unsafe archived paths.
+    /// Returns [`CryptoError::InvalidInput`] for an empty or too-long
+    /// `private_key_passphrase`, archive cap violations, output conflicts, or
+    /// unsafe archived paths.
     /// Returns [`CryptoError::InvalidFormat`] if the private key, encrypted
     /// container, or authenticated payload stream is structurally malformed;
     /// returns [`CryptoError::KeyFileUnlockFailed`] if the private key is
@@ -853,8 +854,8 @@ impl KeyPairGenerator {
     ///
     /// # Errors
     ///
-    /// Returns [`CryptoError::InvalidInput`] if the passphrase is empty, KDF
-    /// parameters are outside the accepted writer policy, or either key file
+    /// Returns [`CryptoError::InvalidInput`] if the passphrase is empty or too
+    /// long, KDF parameters are outside the accepted writer policy, or either key file
     /// already exists. Returns [`CryptoError::Io`] for filesystem failures,
     /// including a directory flush failure. If the flush after committing
     /// `public.key` fails, the method removes `public.key` but keeps
@@ -1178,14 +1179,12 @@ fn preflight_header_write_limits(
     Ok(())
 }
 
-/// Rejects empty passphrases. Shared by every API entry point that
-/// takes a passphrase so the CLI, desktop, and library callers see the
-/// same error class.
+/// Enforces the `FORMAT.md` §2.2 passphrase byte-length bound (1 to
+/// [`MAX_PASSPHRASE_LEN_BYTES`](crate::crypto::kdf::MAX_PASSPHRASE_LEN_BYTES),
+/// inclusive) at the public boundary, so an out-of-bound passphrase is
+/// rejected before any input or archive work. Shares
+/// [`crate::crypto::kdf::check_passphrase_len`] with the pre-Argon2id
+/// gates, so the boundary and the key-derivation paths cannot drift.
 pub(crate) fn validate_passphrase(passphrase: &SecretString) -> Result<(), CryptoError> {
-    if passphrase.expose_secret().is_empty() {
-        return Err(CryptoError::InvalidInput(
-            "Passphrase must not be empty".to_string(),
-        ));
-    }
-    Ok(())
+    crate::crypto::kdf::check_passphrase_len(passphrase.expose_secret().as_bytes())
 }

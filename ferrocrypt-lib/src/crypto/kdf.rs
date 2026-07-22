@@ -19,19 +19,26 @@ use crate::format::{read_u32_be, write_u32_be};
 /// derivation takes its salt at exactly this width.
 pub const ARGON2_SALT_SIZE: usize = 32;
 
-/// Structural limit on passphrase length in bytes. Argon2id accepts much
-/// larger inputs, but the public APIs accept caller-supplied `SecretString`
-/// values of any length. This limit prevents an untrusted caller from forcing
-/// excessive buffering and preprocessing before KDF resource limits apply.
-/// 4 KiB is well above a human-entered passphrase. Frontends apply smaller
-/// input limits; this remains an additional library-level safeguard.
+/// Upper end of the `FORMAT.md` §2.2 passphrase byte-length bound. The
+/// bound is a fixed v1 credential rule (`1` to this value, inclusive),
+/// not a configurable KDF resource cap: readers and writers reject a
+/// passphrase outside it before running Argon2id, and the value is not
+/// tunable per operation. 4 KiB is well above a human-entered
+/// passphrase; frontends may apply smaller input limits on top.
 pub(crate) const MAX_PASSPHRASE_LEN_BYTES: usize = 4_096;
 
-/// Enforces [`MAX_PASSPHRASE_LEN_BYTES`] for caller-supplied passphrase
-/// bytes. Progress-event call sites run this check before announcing KDF work,
-/// and [`KdfParams::hash_passphrase`] repeats it for direct crate-internal
-/// callers.
+/// Enforces the `FORMAT.md` §2.2 passphrase byte-length bound over the
+/// exact caller-supplied UTF-8 bytes: at least 1 byte and at most
+/// [`MAX_PASSPHRASE_LEN_BYTES`]. Every path that would run Argon2id
+/// calls this first, so a passphrase outside the bound is rejected with
+/// no key-derivation work. Empty and over-length inputs surface as
+/// [`CryptoError::InvalidInput`] with distinct messages.
 pub(crate) fn check_passphrase_len(passphrase: &[u8]) -> Result<(), CryptoError> {
+    if passphrase.is_empty() {
+        return Err(CryptoError::InvalidInput(
+            "Passphrase must not be empty".to_string(),
+        ));
+    }
     if passphrase.len() > MAX_PASSPHRASE_LEN_BYTES {
         return Err(CryptoError::InvalidInput(format!(
             "Passphrase is too long (limit {MAX_PASSPHRASE_LEN_BYTES} bytes)"
@@ -359,9 +366,9 @@ impl KdfParams {
     ///
     /// Returns [`CryptoError::InvalidKdfParams`] if `mem_cost`, `time_cost`,
     /// or `lanes` are outside the v1 structural bounds, and
-    /// [`CryptoError::InvalidInput`] if the passphrase exceeds the 4 KiB
-    /// structural cap. Both are checked before Argon2id runs, so any Argon2
-    /// failure on the validated input surfaces as
+    /// [`CryptoError::InvalidInput`] if the passphrase is outside the
+    /// `FORMAT.md` §2.2 byte-length bound. Both are checked before Argon2id
+    /// runs, so any Argon2 failure on the validated input surfaces as
     /// [`CryptoError::InternalCryptoFailure`].
     pub(crate) fn hash_passphrase(
         &self,
@@ -712,6 +719,26 @@ mod tests {
             matches!(err, CryptoError::InvalidKdfParams(_)),
             "expected InvalidKdfParams, got {err:?}"
         );
+    }
+
+    /// `FORMAT.md` §2.2 passphrase byte-length bound: `check_passphrase_len`
+    /// enforces both ends (1 to `MAX_PASSPHRASE_LEN_BYTES`). Empty and
+    /// over-length inputs reject with distinct messages; the boundary
+    /// values 1 byte and exactly the cap are accepted.
+    #[test]
+    fn check_passphrase_len_enforces_full_bound() {
+        match check_passphrase_len(b"") {
+            Err(CryptoError::InvalidInput(msg)) => assert!(msg.contains("must not be empty")),
+            other => panic!("expected empty rejection, got {other:?}"),
+        }
+        let over = vec![b'a'; MAX_PASSPHRASE_LEN_BYTES + 1];
+        match check_passphrase_len(&over) {
+            Err(CryptoError::InvalidInput(msg)) => assert!(msg.contains("too long")),
+            other => panic!("expected over-length rejection, got {other:?}"),
+        }
+        check_passphrase_len(b"a").expect("one byte is within the bound");
+        check_passphrase_len(&vec![b'a'; MAX_PASSPHRASE_LEN_BYTES])
+            .expect("exactly the cap is within the bound");
     }
 
     /// B6-01 regression: a writer whose resource policy is applied

@@ -310,8 +310,10 @@ pub(crate) fn generate_keypair()
 ///   `mem_cost` exceeds `kdf_limit` (or the library default ceiling)
 /// - [`CryptoError::UnsupportedVersion`] for a key file from an
 ///   unsupported keypair suite
-/// - [`crate::error::FormatDefect::NotAKeyFile`] when the magic or kind
-///   bytes do not identify a `private.key`
+/// - [`crate::error::FormatDefect::NotAKeyFile`] when the magic bytes do
+///   not identify a FerroCrypt key file
+/// - [`crate::error::FormatDefect::WrongKind`] when a binary FerroCrypt
+///   artifact's `kind` byte is not the private-key kind
 /// - [`crate::error::FormatDefect::MalformedTypeName`] when the stored
 ///   `type_name` violates the `FORMAT.md` §3.3 grammar
 /// - [`crate::error::FormatDefect::WrongKeyFileType`] when the file is a
@@ -583,6 +585,8 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("private.key");
         let pass = SecretString::from("pw".to_string());
+        let events = std::cell::RefCell::new(Vec::new());
+        let sink = |event: &crate::ProgressEvent| events.borrow_mut().push(*event);
 
         let (secret_material, public_material) = keypair();
         let bytes = seal_private_key(
@@ -595,13 +599,43 @@ mod tests {
         )?;
         fs::write(&path, bytes)?;
 
-        match open_x25519_private_key(&path, &pass, None, &|_| {}).map(|_| ()) {
+        match open_x25519_private_key(&path, &pass, None, &sink).map(|_| ()) {
             Err(CryptoError::UnsupportedKeyType { type_name }) => {
                 assert_eq!(type_name, "future");
-                Ok(())
             }
             other => panic!("expected UnsupportedKeyType for a future key kind, got {other:?}"),
         }
+        assert_eq!(
+            events.borrow().as_slice(),
+            &[crate::ProgressEvent::UnlockingPrivateKey],
+            "the type verdict requires an authenticated unlock"
+        );
+        Ok(())
+    }
+
+    /// A real public/private file crossing is classified before the
+    /// generic private-key unlock, so it keeps `WrongKeyFileType` and
+    /// emits no KDF progress event.
+    #[test]
+    fn open_private_key_rejects_public_key_file_before_progress() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("public.key");
+        let pass = SecretString::from("pw".to_string());
+        let (_, public_material) = keypair();
+        let recipient = crate::key::public::encode_recipient_string(TYPE_NAME, &public_material)?;
+        fs::write(&path, format!("{recipient}\n"))?;
+
+        let events = std::cell::RefCell::new(Vec::new());
+        let sink = |event: &crate::ProgressEvent| events.borrow_mut().push(*event);
+        match open_x25519_private_key(&path, &pass, None, &sink).map(|_| ()) {
+            Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)) => {}
+            other => panic!("expected WrongKeyFileType for public.key, got {other:?}"),
+        }
+        assert!(
+            events.borrow().is_empty(),
+            "a public/private crossing must reject before Argon2id"
+        );
+        Ok(())
     }
 
     /// The structural validator reaches the same verdict as the unlock

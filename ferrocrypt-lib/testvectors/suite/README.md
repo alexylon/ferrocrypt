@@ -94,10 +94,11 @@ fixture-only — never reuse them for real data.
   public-key text, corrupted Bech32 and internal SHA3-256 checksums,
   non-canonical Bech32 padding, a newer public-key payload version, CRLF and
   leading-whitespace content, all-zero X25519 key material under a valid
-  checksum, private structural defects, out-of-range private-key KDF
-  parameters, and private-key unlock authentication failure.
+  checksum, private structural defects, both public/private key-file
+  crossings, out-of-range private-key KDF parameters, and private-key unlock
+  authentication failure.
 
-Three cases need further explanation because their classifications may
+Four cases need further explanation because their classifications may
 be unexpected:
 
 - **Truncation vs tamper.** STREAM cannot distinguish a chunk that was
@@ -121,6 +122,13 @@ be unexpected:
   payload key, so the rule enforces canonical encoding rather than
   protecting against unauthenticated modification.
   `payload-empty-final-after-data.fcr` contains this shape.
+- **Wrong binary kind vs key-file crossing.**
+  `privatekey-wrong-kind.private.key` carries the encrypted-file kind byte
+  `0x45` where the private-key kind `0x4B` belongs, so it reports
+  `WrongKind { kind: 0x45 }`. Supplying a valid `public.key` to the private-key
+  validator, or a valid `private.key` to the public-key reader, instead reports
+  `WrongKeyFileType`; that diagnostic is reserved for those concrete
+  public/private crossings.
 
 ## Regenerating
 

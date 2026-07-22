@@ -165,7 +165,9 @@ impl PrivateKeyHeader {
         ensure_private_key_suite_supported(suite)?;
         let kind_byte = bytes[KIND_OFFSET];
         if kind_byte != KIND_PRIVATE_KEY {
-            return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
+            return Err(CryptoError::InvalidFormat(FormatDefect::WrongKind {
+                kind: kind_byte,
+            }));
         }
         let key_flags = read_u16_be(bytes, KEY_FLAGS_OFFSET)?;
         check_key_flags(key_flags)?;
@@ -997,8 +999,8 @@ mod tests {
         let mut bad_kind = original.clone();
         bad_kind[KIND_OFFSET] = 0x99;
         match open_private_key(&bad_kind, &pass, None, cap, &|_| {}) {
-            Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)) => {}
-            other => panic!("expected WrongKeyFileType for kind tamper, got {other:?}"),
+            Err(CryptoError::InvalidFormat(FormatDefect::WrongKind { kind: 0x99 })) => {}
+            other => panic!("expected WrongKind(0x99) for kind tamper, got {other:?}"),
         }
 
         let mut bad_flags = original.clone();
@@ -1036,8 +1038,8 @@ mod tests {
         let mut bytes = sample_header_bytes();
         bytes[KIND_OFFSET] = 0x99;
         match PrivateKeyHeader::parse(&bytes) {
-            Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)) => {}
-            other => panic!("expected WrongKeyFileType, got {other:?}"),
+            Err(CryptoError::InvalidFormat(FormatDefect::WrongKind { kind: 0x99 })) => {}
+            other => panic!("expected WrongKind(0x99), got {other:?}"),
         }
     }
 

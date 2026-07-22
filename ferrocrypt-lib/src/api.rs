@@ -729,12 +729,14 @@ impl PrivateKeyDecryptor {
             });
         }
 
-        // No early progress event here. `open_x25519_private_key` reads
-        // and structurally validates `private.key` first; only when it
-        // is about to run Argon2id does it emit
-        // `UnlockingPrivateKey` from inside
-        // `key::private::open_private_key`. A malformed or wrong-type
-        // key file is rejected with no event fired.
+        // No early progress event here. `open_x25519_private_key` first
+        // applies the generic binary-shape, resource-cap, type-name
+        // grammar, and passphrase-length gates. Only immediately before
+        // Argon2id does `key::private::open_private_key` emit
+        // `UnlockingPrivateKey`. Those pre-KDF failures and a concrete
+        // public/private key-file mix-up therefore emit no event. Verdicts
+        // that require authenticated bytes, including
+        // `UnsupportedKeyType`, occur after the event.
         let private_key_bytes = recipient::native::x25519::open_x25519_private_key(
             private_key.key_file_path(),
             &private_key_passphrase,

@@ -812,7 +812,10 @@ pub enum FormatDefect {
     /// Leading magic bytes do not match `"FCR\0"` — not a FerroCrypt
     /// key file. Key-file analogue of [`FormatDefect::BadMagic`].
     NotAKeyFile,
-    /// Key file is the wrong kind for this operation (public vs private).
+    /// A `public.key` was supplied to a private-key operation, or a
+    /// `private.key` was supplied to a public-key operation. Reserved for
+    /// this concrete cross-use; an unexpected binary artifact `kind` byte
+    /// is [`FormatDefect::WrongKind`].
     WrongKeyFileType,
     /// `public.key` text file violates the canonical grammar
     /// (`FORMAT.md` §7.1): the file must contain the lowercase `fcr1…`
@@ -823,11 +826,12 @@ pub enum FormatDefect {
     /// length-field violations, and internal-checksum mismatch all
     /// surface here.
     MalformedPublicKey,
-    /// `.fcr` `kind` byte does not match the expected value for this
-    /// operation (e.g. caller asked for `.fcr` but got a `private.key`,
-    /// or vice versa). `FORMAT.md` §3.1.
+    /// A binary FerroCrypt artifact's `kind` byte does not match the
+    /// expected value for this operation (e.g. a caller asked for an
+    /// encrypted `.fcr` but got a binary `private.key`, or vice versa).
+    /// `FORMAT.md` §3.1 and §8.
     WrongKind {
-        /// Raw `kind` byte from the file prefix.
+        /// Raw `kind` byte from the binary artifact header.
         kind: u8,
     },
     /// Structural defect in the header_fixed layout (non-zero

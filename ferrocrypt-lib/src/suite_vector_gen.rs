@@ -668,6 +668,8 @@ fn write_private_key_reject_cases(keys: &Path, cases: &Path) -> Vec<Case> {
 
     write_mutated("privatekey-bad-magic.private.key", &|b| b[0] ^= 0xFF);
     write_mutated("privatekey-newer-version.private.key", &|b| b[4] = 0x02);
+    // An encrypted-file `E` byte in the private-key `kind` field is a
+    // binary artifact mismatch, not a public/private key-file crossing.
     write_mutated("privatekey-wrong-kind.private.key", &|b| b[5] = 0x45);
     write_mutated("privatekey-nonzero-flags.private.key", &|b| b[6] = 0x01);
     write_mutated("privatekey-truncated.private.key", &|b| {
@@ -700,6 +702,18 @@ fn write_private_key_reject_cases(keys: &Path, cases: &Path) -> Vec<Case> {
         ),
         Case::private_key_err(
             "cases/privatekey-wrong-kind.private.key",
+            "InvalidFormat(WrongKind)",
+            "Wrong file kind: 0x45",
+        ),
+        // Suite revision 5 pins both genuine public/private crossings so
+        // `WrongKeyFileType` cannot drift back into generic kind-byte use.
+        Case::private_key_err(
+            "keys/recipient-a.public.key",
+            "InvalidFormat(WrongKeyFileType)",
+            "Wrong key file kind (public vs private)",
+        ),
+        Case::key_err(
+            "keys/recipient-a.private.key",
             "InvalidFormat(WrongKeyFileType)",
             "Wrong key file kind (public vs private)",
         ),
@@ -1145,7 +1159,7 @@ const SUITE_SEED: u64 = 0xFECC_0000_5EED_0001;
 /// or changed; different corpus contents must never share a revision.
 /// Regeneration treats this constant as the source of truth and overwrites the
 /// committed file.
-const SUITE_VERSION: u32 = 4;
+const SUITE_VERSION: u32 = 5;
 
 /// Regenerates the committed suite corpus. Ignored in normal test runs;
 /// see the module docs for the invocation and the commit workflow.

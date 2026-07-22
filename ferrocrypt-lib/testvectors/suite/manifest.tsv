@@ -44,7 +44,9 @@ cases/public-key-bad-bech32.key	read-public-key	-	error	InvalidInput	Invalid rec
 cases/public-key-bad-checksum.key	read-public-key	-	error	InvalidFormat(MalformedPublicKey)	Public key is malformed
 cases/privatekey-bad-magic.private.key	validate-private-key	-	error	InvalidFormat(NotAKeyFile)	Not a FerroCrypt key file
 cases/privatekey-newer-version.private.key	validate-private-key	-	error	UnsupportedVersion(NewerKey)	Newer key format (v2). Upgrade FerroCrypt.
-cases/privatekey-wrong-kind.private.key	validate-private-key	-	error	InvalidFormat(WrongKeyFileType)	Wrong key file kind (public vs private)
+cases/privatekey-wrong-kind.private.key	validate-private-key	-	error	InvalidFormat(WrongKind)	Wrong file kind: 0x45
+keys/recipient-a.public.key	validate-private-key	-	error	InvalidFormat(WrongKeyFileType)	Wrong key file kind (public vs private)
+keys/recipient-a.private.key	read-public-key	-	error	InvalidFormat(WrongKeyFileType)	Wrong key file kind (public vs private)
 cases/privatekey-nonzero-flags.private.key	validate-private-key	-	error	InvalidFormat(MalformedPrivateKey)	Private key is malformed
 cases/privatekey-truncated.private.key	validate-private-key	-	error	InvalidFormat(MalformedPrivateKey)	Private key is malformed
 cases/privatekey-trailing-byte.private.key	validate-private-key	-	error	InvalidFormat(MalformedPrivateKey)	Private key is malformed

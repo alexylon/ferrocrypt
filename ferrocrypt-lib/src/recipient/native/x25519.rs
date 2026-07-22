@@ -81,23 +81,86 @@ pub(crate) fn is_zero_public_key(bytes: &[u8; PUBLIC_KEY_SIZE]) -> bool {
     ct_eq_32(bytes, &[0u8; PUBLIC_KEY_SIZE])
 }
 
+/// Little-endian encoding of the Curve25519 field prime `2^255 - 19`.
+/// The canonical `FORMAT.md` §2.4 public-key encoding is strictly
+/// below this value.
+pub(crate) const FIELD_PRIME_LE: [u8; PUBLIC_KEY_SIZE] = [
+    0xED, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F,
+];
+
+/// Returns `true` when `bytes` is the canonical `FORMAT.md` §2.4
+/// encoding of an X25519 public value: read as a little-endian
+/// integer, it is strictly below the Curve25519 field prime.
+///
+/// The X25519 primitive masks the top bit and reduces modulo the
+/// prime, so several byte patterns can name the same curve point.
+/// FerroCrypt accepts exactly one of them, because the serialized
+/// bytes are also bound into HKDF salts, checksums, and fingerprints;
+/// callers reject the others rather than normalize them.
+///
+/// Branchless compare so timing of structural rejection cannot leak
+/// the input bytes.
+pub(crate) fn is_canonical_public_key_encoding(bytes: &[u8; PUBLIC_KEY_SIZE]) -> bool {
+    // Little-endian `bytes < FIELD_PRIME_LE`: scanning from the most
+    // significant byte, the first differing byte decides.
+    let mut is_below = 0u8;
+    let mut all_equal_so_far = 1u8;
+    for (byte, prime_byte) in bytes.iter().zip(FIELD_PRIME_LE.iter()).rev() {
+        is_below |= all_equal_so_far & u8::from(byte < prime_byte);
+        all_equal_so_far &= u8::from(byte == prime_byte);
+    }
+    is_below == 1
+}
+
+/// `FORMAT.md` §4.2 pre-cryptographic checks for a parsed `x25519`
+/// body: an all-zero or non-canonical `ephemeral_public_key_bytes`
+/// rejects the entry with no credential, KDF, or key agreement. The
+/// exact 104-byte length is enforced by the caller via the native
+/// registry. Small-order ephemerals other than all-zero cannot be
+/// screened here and stay covered by [`unwrap`]'s shared-secret check.
+pub(crate) fn validate_body_preflight(body: &[u8]) -> Result<(), CryptoError> {
+    let ephemeral: &[u8; PUBLIC_KEY_SIZE] = body
+        .get(EPHEMERAL_PUBLIC_KEY_OFFSET..EPHEMERAL_PUBLIC_KEY_OFFSET + PUBLIC_KEY_SIZE)
+        .and_then(|slice| slice.try_into().ok())
+        .ok_or(CryptoError::InvalidFormat(
+            FormatDefect::MalformedRecipientEntry,
+        ))?;
+    if is_zero_public_key(ephemeral) || !is_canonical_public_key_encoding(ephemeral) {
+        return Err(CryptoError::InvalidFormat(
+            FormatDefect::MalformedRecipientEntry,
+        ));
+    }
+    Ok(())
+}
+
 /// Wraps `file_key` for an X25519 recipient.
 ///
-/// Generates a fresh ephemeral X25519 keypair, performs ECDH against
+/// Rejects a non-canonical `recipient_public_key_bytes` encoding first
+/// (`FORMAT.md` §4.2: writers validate before the key agreement; every
+/// `PublicKey` ingress already enforces this, so the check here is the
+/// writer-side backstop for crate-internal callers). Then generates a
+/// fresh ephemeral X25519 keypair, performs ECDH against
 /// `recipient_public_key_bytes`, and rejects an all-zero shared secret. Derives
 /// the wrap key via HKDF-SHA3-256 with a salt binding both ephemeral
 /// and recipient public keys, then seals `file_key` via
 /// XChaCha20-Poly1305 with empty AAD. Returns the canonical 104-byte
 /// recipient body.
 ///
-/// An all-zero shared secret surfaces as
-/// [`CryptoError::InvalidInput`] with the "Invalid recipient public
-/// key" message, since this is an encrypt-time user error (the
-/// caller-supplied recipient public key is degenerate).
+/// A non-canonical recipient encoding and an all-zero shared secret
+/// both surface as [`CryptoError::InvalidInput`] with the "Invalid
+/// recipient public key" message, since either way this is an
+/// encrypt-time user error (the caller-supplied recipient public key
+/// is unusable).
 pub(crate) fn wrap(
     file_key: &FileKey,
     recipient_public_key_bytes: &[u8; PUBLIC_KEY_SIZE],
 ) -> Result<[u8; BODY_LENGTH], CryptoError> {
+    if !is_canonical_public_key_encoding(recipient_public_key_bytes) {
+        return Err(CryptoError::InvalidInput(
+            "Invalid recipient public key".to_string(),
+        ));
+    }
     let ephemeral_raw = random_secret::<PRIVATE_KEY_SIZE>()?;
     let ephemeral_secret = StaticSecret::from(*ephemeral_raw);
     let ephemeral_public_key = PublicKey::from(&ephemeral_secret);
@@ -811,6 +874,73 @@ mod tests {
                 assert!(msg.contains("Invalid recipient"));
             }
             other => panic!("expected InvalidInput for all-zero public_key, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wrap_rejects_non_canonical_recipient_public_key() {
+        // A generated key with the top bit set is an RFC 7748 alias of
+        // the same point; the writer must refuse it rather than emit a
+        // body no matching private key can open (FORMAT.md §4.2).
+        let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
+        let (_, mut pk) = keypair();
+        pk[PUBLIC_KEY_SIZE - 1] |= 0x80;
+        match wrap(&file_key, &pk) {
+            Err(CryptoError::InvalidInput(msg)) => assert!(msg.contains("Invalid recipient")),
+            other => panic!("expected InvalidInput for non-canonical public_key, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn canonical_encoding_accepts_valid_and_boundary_values() {
+        let (_, pk) = keypair();
+        assert!(is_canonical_public_key_encoding(&pk));
+        // p - 1 is the largest canonical value.
+        let mut max_canonical = FIELD_PRIME_LE;
+        max_canonical[0] -= 1;
+        assert!(is_canonical_public_key_encoding(&max_canonical));
+        // All-zero is canonical as an integer; the zero-point reject is
+        // a separate check.
+        assert!(is_canonical_public_key_encoding(&[0u8; PUBLIC_KEY_SIZE]));
+    }
+
+    #[test]
+    fn canonical_encoding_rejects_prime_and_aliases() {
+        // p, p + 1, ... 2^255 - 1 are the wrap-around aliases.
+        assert!(!is_canonical_public_key_encoding(&FIELD_PRIME_LE));
+        let mut prime_plus_one = FIELD_PRIME_LE;
+        prime_plus_one[0] += 1;
+        assert!(!is_canonical_public_key_encoding(&prime_plus_one));
+        // High-bit alias of a generated key.
+        let (_, mut pk) = keypair();
+        pk[PUBLIC_KEY_SIZE - 1] |= 0x80;
+        assert!(!is_canonical_public_key_encoding(&pk));
+        // Largest 256-bit value.
+        assert!(!is_canonical_public_key_encoding(
+            &[0xFFu8; PUBLIC_KEY_SIZE]
+        ));
+    }
+
+    #[test]
+    fn preflight_rejects_zero_and_non_canonical_ephemeral() {
+        let file_key = FileKey::from_bytes_for_tests([0x22u8; FILE_KEY_SIZE]);
+        let (_, pk) = keypair();
+        let valid = wrap(&file_key, &pk).unwrap();
+        validate_body_preflight(&valid).expect("a wrapped body must pass the preflight");
+
+        let mut zero_ephemeral = valid;
+        zero_ephemeral[EPHEMERAL_PUBLIC_KEY_OFFSET..EPHEMERAL_PUBLIC_KEY_OFFSET + PUBLIC_KEY_SIZE]
+            .fill(0);
+        match validate_body_preflight(&zero_ephemeral) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)) => {}
+            other => panic!("expected reject for all-zero ephemeral, got {other:?}"),
+        }
+
+        let mut alias_ephemeral = valid;
+        alias_ephemeral[PUBLIC_KEY_SIZE - 1] |= 0x80;
+        match validate_body_preflight(&alias_ephemeral) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)) => {}
+            other => panic!("expected reject for non-canonical ephemeral, got {other:?}"),
         }
     }
 

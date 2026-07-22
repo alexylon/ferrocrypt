@@ -415,7 +415,10 @@ pub(crate) fn decode_x25519_recipient_resolved(
 /// Shared by the recipient-string and key-file parsers. A decoded
 /// non-X25519 type has passed the grammar, checksum, and suite gates,
 /// so it rejects as [`CryptoError::UnsupportedKeyType`], not as a
-/// malformed input.
+/// malformed input. X25519 material must be exactly 32 bytes, not all
+/// zero, and the canonical `FORMAT.md` §2.4 encoding — an RFC 7748
+/// alias of a valid key is rejected, never normalized, so one curve
+/// point cannot carry two recipient strings or fingerprints.
 fn decoded_x25519_bytes(decoded: DecodedRecipient) -> Result<[u8; 32], CryptoError> {
     if decoded.type_name != X25519_TYPE_NAME {
         return Err(CryptoError::UnsupportedKeyType {
@@ -427,7 +430,9 @@ fn decoded_x25519_bytes(decoded: DecodedRecipient) -> Result<[u8; 32], CryptoErr
         .as_slice()
         .try_into()
         .map_err(|_| malformed_public_key())?;
-    if crate::recipient::x25519::is_zero_public_key(&bytes) {
+    if crate::recipient::x25519::is_zero_public_key(&bytes)
+        || !crate::recipient::x25519::is_canonical_public_key_encoding(&bytes)
+    {
         return Err(malformed_public_key());
     }
     Ok(bytes)
@@ -685,20 +690,26 @@ impl PublicKey {
     /// [`PublicKey::from_key_file`], where the wire-version byte selects the
     /// suite explicitly.
     ///
-    /// Rejects the all-zero point structurally — the only small-order
-    /// X25519 public key we can pre-screen without an explicit
-    /// RFC 7748 §6.1 list. Other degenerate inputs are caught at the
-    /// ECDH site by `wrap` / `unwrap`'s shared-secret check; this
-    /// constructor check stops the most common invalid value from
-    /// becoming a `PublicKey` at all.
+    /// Rejects the all-zero point and any non-canonical encoding
+    /// structurally. Per `FORMAT.md` §2.4 the accepted material is a
+    /// 32-byte little-endian integer strictly below the Curve25519
+    /// field prime; the X25519 math would accept an alias of a valid
+    /// key (for example with the top bit set), but the raw bytes are
+    /// bound into fingerprints, recipient strings, and the wrap-key
+    /// derivation, so an alias is rejected rather than normalized.
+    /// Other degenerate inputs are caught at the ECDH site by `wrap` /
+    /// `unwrap`'s shared-secret check.
     ///
     /// # Errors
     ///
     /// Returns [`CryptoError::InvalidFormat`] with
     /// [`FormatDefect::MalformedPublicKey`](crate::FormatDefect::MalformedPublicKey)
-    /// if `bytes` is the all-zero X25519 public key.
+    /// if `bytes` is the all-zero X25519 public key or a non-canonical
+    /// encoding.
     pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, CryptoError> {
-        if crate::recipient::x25519::is_zero_public_key(&bytes) {
+        if crate::recipient::x25519::is_zero_public_key(&bytes)
+            || !crate::recipient::x25519::is_canonical_public_key_encoding(&bytes)
+        {
             return Err(malformed_public_key());
         }
         Ok(Self {
@@ -715,7 +726,8 @@ impl PublicKey {
     /// `public.key` file without the optional trailing newline. Validates
     /// HRP, BIP 173 checksum, internal SHA3-256 checksum, payload structural
     /// fields, type-name grammar, and, for v1 X25519 recipients,
-    /// `type_name == "x25519"` with exactly 32 bytes of key material.
+    /// `type_name == "x25519"` with exactly 32 bytes of non-zero,
+    /// canonically encoded key material (`FORMAT.md` §2.4 / §7).
     ///
     /// The keypair suite recovered from the wire-version byte is
     /// preserved on the resulting `PublicKey`. Re-encoding via
@@ -1452,6 +1464,37 @@ mod tests {
             other => {
                 panic!("expected MalformedPublicKey for all-zero on-disk public key, got {other:?}")
             }
+        }
+    }
+
+    /// A high-bit alias is a non-canonical RFC 7748 encoding of a valid
+    /// key. Every ingress must reject it (`FORMAT.md` §2.4 / §7) so one
+    /// curve point cannot acquire a second recipient string or
+    /// fingerprint, and so encryption cannot bind bytes the matching
+    /// private key would never reproduce.
+    #[test]
+    fn public_key_ingress_rejects_non_canonical_alias() {
+        let mut alias = x25519_key();
+        alias[31] |= 0x80;
+
+        match PublicKey::from_bytes(alias) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
+            other => panic!("from_bytes must reject a non-canonical alias, got {other:?}"),
+        }
+
+        let s = encode_recipient_string(X25519_TYPE_NAME, &alias).unwrap();
+        match PublicKey::from_recipient_string(&s) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
+            other => {
+                panic!("from_recipient_string must reject a non-canonical alias, got {other:?}")
+            }
+        }
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), s.as_bytes()).unwrap();
+        match read_public_key(tmp.path()) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
+            other => panic!("read_public_key must reject a non-canonical alias, got {other:?}"),
         }
     }
 

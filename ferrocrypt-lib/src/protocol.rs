@@ -1003,13 +1003,10 @@ mod tests {
         }
     }
 
-    /// FORMAT.md §2.4 / §4.2: an `x25519` recipient slot whose ECDH
-    /// shared secret is all-zero must cause file-fatal rejection, not
-    /// slot-skip — the all-zero shared is credential-independent
-    /// (every decryptor observes the same value), so it cannot be
-    /// confused with "this slot was for someone else." The decrypt
-    /// loop must reject the whole file even when an earlier valid
-    /// slot has already MAC-verified.
+    /// FORMAT.md §4.2: an all-zero `ephemeral_public_key_bytes` is a
+    /// credential-independent structural defect, checked during the
+    /// step 8 preflight. Even though the earlier valid slot alone
+    /// would decrypt, the whole file is rejected before any unwrap.
     #[test]
     fn multi_x25519_all_zero_ephemeral_after_valid_is_file_fatal() -> Result<(), CryptoError> {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1020,10 +1017,9 @@ mod tests {
         let body_a = x25519::wrap(&file_key, &pub_a)?;
         let valid_slot = RecipientEntry::native(NativeRecipientType::X25519, body_a.to_vec())?;
 
-        // Hand-craft a malformed `x25519` body: literal all-zero
-        // ephemeral public_key forces an all-zero ECDH shared secret per
-        // RFC 7748 regardless of the recipient's private key. The rest
-        // of the body is filler — the rejection fires before AEAD.
+        // Hand-craft a malformed `x25519` body: an all-zero ephemeral
+        // public key. The rest of the body is filler — the preflight
+        // rejects the entry before any key work could see it.
         let mut malformed_body = vec![0u8; x25519::BODY_LENGTH];
         malformed_body[x25519::BODY_LENGTH - 1] = 0xAB;
         let malformed_slot = RecipientEntry::native(NativeRecipientType::X25519, malformed_body)?;
@@ -1036,16 +1032,58 @@ mod tests {
         fs::create_dir_all(&dec_dir)?;
         match recipient_decrypt(&fcr, &dec_dir, &priv_a, &pass_a) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)) => Ok(()),
-            other => panic!("all-zero shared secret in slot 2 must be file-fatal, got {other:?}"),
+            other => panic!("all-zero ephemeral in slot 2 must be file-fatal, got {other:?}"),
+        }
+    }
+
+    /// FORMAT.md §4.2: the all-zero-shared-secret check stays mandatory
+    /// during X25519 for a preflight-valid ephemeral. A small-order,
+    /// canonical, non-zero ephemeral public key cannot be screened
+    /// structurally, and every clamped private scalar maps it to an
+    /// all-zero shared secret, so the slot loop must reject the whole
+    /// file — even when an earlier valid slot has already MAC-verified.
+    #[test]
+    fn multi_x25519_small_order_ephemeral_after_valid_is_file_fatal() -> Result<(), CryptoError> {
+        // u-coordinate of a known small-order Curve25519 point:
+        // canonical and non-zero, so it passes the structural
+        // preflight, while X25519 with any clamped scalar yields an
+        // all-zero shared secret.
+        const SMALL_ORDER_U: [u8; x25519::PUBLIC_KEY_SIZE] = [
+            0xe0, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae, 0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f,
+            0xc4, 0x6a, 0xda, 0x09, 0x8d, 0xeb, 0x9c, 0x32, 0xb1, 0xfd, 0x86, 0x62, 0x05, 0x16,
+            0x5f, 0x49, 0xb8, 0x00,
+        ];
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let keys_dir = tmp.path().join("keys");
+        let (pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
+
+        let file_key = FileKey::generate().unwrap();
+        let body_a = x25519::wrap(&file_key, &pub_a)?;
+        let valid_slot = RecipientEntry::native(NativeRecipientType::X25519, body_a.to_vec())?;
+
+        let mut malformed_body = vec![0xABu8; x25519::BODY_LENGTH];
+        malformed_body[..x25519::PUBLIC_KEY_SIZE].copy_from_slice(&SMALL_ORDER_U);
+        let malformed_slot = RecipientEntry::native(NativeRecipientType::X25519, malformed_body)?;
+
+        let entries = [valid_slot, malformed_slot];
+        let fcr = tmp.path().join("small-order-ephemeral-after.fcr");
+        build_multi_recipient_fcr(&entries, &file_key, b"x", &fcr)?;
+
+        let dec_dir = tmp.path().join("decrypted");
+        fs::create_dir_all(&dec_dir)?;
+        match recipient_decrypt(&fcr, &dec_dir, &priv_a, &pass_a) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)) => Ok(()),
+            other => {
+                panic!("small-order ephemeral in slot 2 must be file-fatal, got {other:?}")
+            }
         }
     }
 
     /// Same property as
     /// [`multi_x25519_all_zero_ephemeral_after_valid_is_file_fatal`] but
-    /// with the malformed slot first. The decrypt loop encounters the
-    /// structural defect before reaching the valid slot; it must still
-    /// reject the whole file rather than continuing past the malformed
-    /// entry.
+    /// with the malformed slot first. The preflight walks every entry,
+    /// so slot order does not change the verdict.
     #[test]
     fn multi_x25519_all_zero_ephemeral_before_valid_is_file_fatal() -> Result<(), CryptoError> {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1074,7 +1112,7 @@ mod tests {
 
     /// Single-recipient case: an `x25519` file with a single
     /// all-zero-ephemeral slot must also be file-fatal. Confirms the
-    /// rejection path is independent of recipient cardinality.
+    /// preflight verdict is independent of recipient cardinality.
     #[test]
     fn single_x25519_all_zero_ephemeral_is_file_fatal() -> Result<(), CryptoError> {
         let tmp = tempfile::TempDir::new().unwrap();

@@ -1159,7 +1159,7 @@ const SUITE_SEED: u64 = 0xFECC_0000_5EED_0001;
 /// or changed; different corpus contents must never share a revision.
 /// Regeneration treats this constant as the source of truth and overwrites the
 /// committed file.
-const SUITE_VERSION: u32 = 6;
+const SUITE_VERSION: u32 = 7;
 
 /// Regenerates the committed suite corpus. Ignored in normal test runs;
 /// see the module docs for the invocation and the commit workflow.
@@ -1653,5 +1653,99 @@ fn regenerate_suite_vectors_inner() {
         "Recipient entry is malformed",
     ));
 
+    // Revision-7 cases follow the same append-only rule. A non-canonical
+    // ephemeral public key in an `x25519` body is a credential-independent
+    // structural defect (`FORMAT.md` §4.2), rejected during the recipient
+    // preflight before any credential is consulted.
+    {
+        let file_key = FileKey::generate().expect("suite file key");
+        let mut entry = x25519_entry(&keys, "recipient-a.public.key", &file_key);
+        // Set the high bit of the ephemeral public key's last byte: an
+        // RFC 7748 alias the canonical-encoding check must reject.
+        entry.body[x25519::PUBLIC_KEY_SIZE - 1] |= 0x80;
+        build_crafted_fcr(
+            &plaintext,
+            &cases,
+            "x25519-noncanonical-ephemeral.fcr",
+            &file_key,
+            std::slice::from_ref(&entry),
+            b"",
+        )
+        .expect("build non-canonical ephemeral fixture");
+    }
+    rows.push(Case::err(
+        "cases/x25519-noncanonical-ephemeral.fcr",
+        "-",
+        "InvalidFormat(MalformedRecipientEntry)",
+        "Recipient entry is malformed",
+    ));
+
+    // Non-canonical `public.key` material (`FORMAT.md` §2.4 / §7): a
+    // high-bit alias of a valid key, the field-prime boundary values,
+    // and wrong-length material. Each carries a valid internal
+    // checksum, so only the canonical-encoding and length ingress
+    // checks can reject them.
+    rows.extend(write_noncanonical_public_key_cases(&suite, &cases));
+
     write_manifest(&suite, &rows);
+}
+
+/// Little-endian encoding of `2^255 - 19 + delta`, used to build the
+/// `FORMAT.md` §7 field-boundary public-key vectors. `delta` is small,
+/// so only the low bytes change and no borrow reaches byte 31.
+fn field_prime_plus(delta: i16) -> [u8; x25519::PUBLIC_KEY_SIZE] {
+    let mut bytes = x25519::FIELD_PRIME_LE;
+    let low = u16::from_le_bytes([bytes[0], bytes[1]]) as i32 + delta as i32;
+    let low = u16::try_from(low).expect("delta keeps the low half in range");
+    bytes[0..2].copy_from_slice(&low.to_le_bytes());
+    bytes
+}
+
+/// Writes the `FORMAT.md` §7 non-canonical and wrong-length `public.key`
+/// fixtures: a high-bit alias of recipient A's key; the field-boundary
+/// values `2^255 - 19`, `2^255 - 18`, and `2^255 - 1`; and 33-byte
+/// material. Each rejects at ingress as
+/// [`FormatDefect::MalformedPublicKey`]. Draws no RNG.
+fn write_noncanonical_public_key_cases(suite: &Path, cases: &Path) -> Vec<Case> {
+    let valid = fs::read_to_string(suite.join("keys/recipient-a.public.key"))
+        .expect("read recipient A public key");
+    let recipient = valid.strip_suffix('\n').unwrap_or(&valid);
+    // Recipient A's key is canonical, so the reader decodes it; flipping
+    // the high bit then produces the alias the fixture needs.
+    let mut alias_material = crate::key::public::decode_x25519_recipient(recipient)
+        .expect("recipient A key decodes as canonical X25519 material");
+    alias_material[x25519::PUBLIC_KEY_SIZE - 1] |= 0x80;
+
+    // 2^255 - 1: high bit of byte 31 clear, but the integer is still
+    // above the field prime, so it exercises the value comparison
+    // rather than the high-bit fast path.
+    let mut max_255 = [0xFFu8; x25519::PUBLIC_KEY_SIZE];
+    max_255[x25519::PUBLIC_KEY_SIZE - 1] = 0x7F;
+
+    let fixtures: [(&str, &[u8]); 5] = [
+        ("public-key-high-bit-alias.key", &alias_material),
+        ("public-key-field-prime.key", &x25519::FIELD_PRIME_LE),
+        ("public-key-field-prime-plus-one.key", &field_prime_plus(1)),
+        ("public-key-field-max.key", &max_255),
+        // 33 bytes: a valid X25519 point cannot have this length.
+        (
+            "public-key-wrong-length.key",
+            &[0x11u8; x25519::PUBLIC_KEY_SIZE + 1],
+        ),
+    ];
+
+    fixtures
+        .iter()
+        .map(|(name, material)| {
+            let encoded = crate::key::public::encode_recipient_string(x25519::TYPE_NAME, material)
+                .expect("encode non-canonical recipient string");
+            fs::write(cases.join(name), format!("{encoded}\n"))
+                .expect("write non-canonical public-key fixture");
+            Case::key_err(
+                &format!("cases/{name}"),
+                "InvalidFormat(MalformedPublicKey)",
+                "Public key is malformed",
+            )
+        })
+        .collect()
 }

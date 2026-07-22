@@ -65,6 +65,19 @@ impl NativeRecipientType {
         }
     }
 
+    /// Recipient-specific pre-cryptographic body checks for this
+    /// variant (`FORMAT.md` §3.7 step 8). The caller has already
+    /// verified the exact [`Self::body_len`]; this hook rejects a body
+    /// whose content is structurally invalid, with no credential, KDF,
+    /// or key agreement. `argon2id` defines no such check; `x25519`
+    /// rejects an all-zero or non-canonical ephemeral public key.
+    pub(crate) fn validate_body(self, body: &[u8]) -> Result<(), CryptoError> {
+        match self {
+            Self::Argon2id => Ok(()),
+            Self::X25519 => x25519::validate_body_preflight(body),
+        }
+    }
+
     /// Recipient-mixing rule for this native type, per `FORMAT.md` §3.5.
     /// Used by [`enforce_recipient_mixing_policy`] before any recipient
     /// unwrap or KDF runs. Adding a new native type means adding one arm
@@ -331,9 +344,10 @@ pub(crate) fn enforce_recipient_mixing_policy(
 /// Order of checks:
 /// 1. For each entry, reject a known native entry whose
 ///    `recipient_flags != 0` (per `FORMAT.md` §3.4: "Native `argon2id`
-///    and `x25519` entries MUST have `recipient_flags = 0`") or whose
-///    body length is not the exact native length (`FORMAT.md` §3.7
-///    step 8) with [`CryptoError::InvalidFormat`] /
+///    and `x25519` entries MUST have `recipient_flags = 0`"), whose
+///    body length is not the exact native length, or whose body fails
+///    [`NativeRecipientType::validate_body`] (`FORMAT.md` §3.7 step 8)
+///    with [`CryptoError::InvalidFormat`] /
 ///    [`FormatDefect::MalformedRecipientEntry`], and an unknown critical
 ///    entry with [`CryptoError::UnknownCriticalRecipient`]. Reserved
 ///    bits 1..=15 are already rejected at parse time
@@ -363,9 +377,10 @@ pub(crate) fn classify_recipient_mode(
     // Step 1: per-entry structural rejection. A reader must refuse to
     // process a file that declares an unknown entry it cannot skip, tags
     // a known native entry with a non-zero flag, or carries a native
-    // body of the wrong length. The checks ride one iteration over every
-    // entry so the rejection fires before mixing and before any KDF or
-    // private-key work (`FORMAT.md` §3.7 steps 8-9).
+    // body of the wrong length or with invalid content. The checks ride
+    // one iteration over every entry so the rejection fires before
+    // mixing and before any KDF or private-key work (`FORMAT.md` §3.7
+    // steps 8-9).
     for entry in entries {
         match NativeRecipientType::from_type_name(&entry.type_name) {
             Some(native) => {
@@ -374,6 +389,7 @@ pub(crate) fn classify_recipient_mode(
                         FormatDefect::MalformedRecipientEntry,
                     ));
                 }
+                native.validate_body(&entry.body)?;
             }
             None => {
                 if entry.is_critical() {
@@ -531,7 +547,13 @@ mod tests {
     }
 
     fn x25519_entry() -> RecipientEntry {
-        RecipientEntry::native(NativeRecipientType::X25519, vec![0u8; x25519::BODY_LENGTH]).unwrap()
+        // 0x11 filler keeps the ephemeral-key field non-zero and
+        // canonical, so the body passes the structural preflight.
+        RecipientEntry::native(
+            NativeRecipientType::X25519,
+            vec![0x11u8; x25519::BODY_LENGTH],
+        )
+        .unwrap()
     }
 
     fn unknown_entry(name: &str, critical: bool) -> RecipientEntry {

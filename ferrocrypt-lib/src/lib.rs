@@ -415,7 +415,8 @@ mod suite_vector_gen;
 /// Validates HRP, BIP 173 checksum, internal SHA3-256 checksum,
 /// payload structural fields, type-name grammar, a 1,024-byte local
 /// recipient-string cap, and the v1 X25519 payload constraints:
-/// `type_name == "x25519"` and exactly 32 bytes of key material.
+/// `type_name == "x25519"` and exactly 32 bytes of non-zero,
+/// canonically encoded key material (`FORMAT.md` §2.4 / §7).
 ///
 /// This is the low-level primitive; most callers should prefer
 /// [`PublicKey::from_recipient_string`] or
@@ -426,8 +427,8 @@ mod suite_vector_gen;
 ///
 /// Returns [`CryptoError::InvalidInput`] for non-ASCII, uppercase, invalid
 /// Bech32, or wrong-HRP strings. Returns [`CryptoError::InvalidFormat`] for
-/// malformed typed payloads, checksum mismatches, or all-zero X25519 public
-/// keys. Returns [`CryptoError::UnsupportedKeyType`] for a valid recipient
+/// malformed typed payloads, checksum mismatches, and all-zero or
+/// non-canonical X25519 public keys. Returns [`CryptoError::UnsupportedKeyType`] for a valid recipient
 /// string of a key type this build does not support. Returns
 /// [`CryptoError::RecipientStringCapExceeded`] when the input exceeds the local
 /// recipient-string cap.
@@ -489,9 +490,11 @@ mod tests {
             [0u8; crypto::keys::ENCRYPTION_KEY_SIZE],
         );
         let stream_nonce = [0x07u8; crypto::stream::STREAM_NONCE_SIZE];
+        // 0x11 filler keeps the ephemeral-key field non-zero and
+        // canonical, so the body passes the structural preflight.
         let entry = recipient::RecipientEntry::native(
             recipient::policy::NativeRecipientType::X25519,
-            vec![0u8; recipient::x25519::BODY_LENGTH],
+            vec![0x11u8; recipient::x25519::BODY_LENGTH],
         )
         .unwrap();
         let built = container::build_encrypted_header(

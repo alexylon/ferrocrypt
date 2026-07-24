@@ -42,17 +42,23 @@ if [ "$status" -eq 1 ]; then
     exit 0
 fi
 
-hits=$(printf '%s\n' "$raw" | sed \
+filtered=$(printf '%s\n' "$raw" | sed \
     -e 's|/v1/| |g' \
     -e 's|fcr1| |g' \
     -e 's|substring `v1`| |g' \
     -e 's|photos\.v1| |g' \
     -e 's|FerroCrypt v1 test-vector suite plaintext| |g' \
-    -e 's|FerroCrypt v1 edge-case test-vector manifest| |g' \
-    | grep -E "$pattern")
+    -e 's|FerroCrypt v1 edge-case test-vector manifest| |g')
+status=$?
+if [ "$status" -ne 0 ]; then
+    echo "check_terminology.sh: filter failed (sed exit $status)" >&2
+    exit 2
+fi
+
+hits=$(printf '%s\n' "$filtered" | grep -E "$pattern")
 status=$?
 if [ "$status" -ge 2 ]; then
-    echo "check_terminology.sh: filter failed (grep exit $status)" >&2
+    echo "check_terminology.sh: filter scan failed (grep exit $status)" >&2
     exit 2
 fi
 if [ "$status" -eq 0 ]; then

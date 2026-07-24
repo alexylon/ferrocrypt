@@ -1,17 +1,16 @@
-# FerroCrypt Format v1
+# FerroCrypt Wire-Format Specification
 
-> **Status:** Canonical v1 specification.
+> **Status:** Canonical specification.
 >
-> This document is the source of truth for the FerroCrypt v1 specification. The
-> encrypted `.fcr` outer file version is `0x01`.
+> This document is the source of truth for FerroCrypt's stored formats. It is a
+> living specification for independently versioned `.fcr`, FCA, public-key, and
+> private-key encodings; it does not have one umbrella wire-format version.
 >
-> Key-pair compatibility is a separate domain. v1 key pairs use canonical
-> `private.key` version `0x01`; matching `public.key` recipient payloads carry
-> public-key version `0x01` and map to the same v1 key-pair suite.
->
-> This v1 specification uses the v1 key-pair suite and defines an explicit,
-> modular, namespaced, independently specified, and independently tested
-> recipient/plugin model.
+> FerroCrypt release `0.3.0` establishes the initial compatibility baseline.
+> The four initial stored version bytes are all `0x01`, but they are independent
+> fields and may diverge. Public-key encoding version `0x01` and private-key
+> encoding version `0x01` both map to the byte-less logical key-pair suite
+> `KPS-1`.
 
 ---
 
@@ -42,7 +41,7 @@
    - [7.1 `public.key` file form](#71-publickey-file-form)
    - [7.2 Fingerprint](#72-fingerprint)
 8. [Private key format (`private.key`)](#8-private-key-format-privatekey)
-9. [Archive payload — FerroCrypt Archive (FCA) v1](#9-archive-payload--ferrocrypt-archive-fca-v1)
+9. [Archive payload — FerroCrypt Archive (FCA)](#9-archive-payload--ferrocrypt-archive-fca)
    - [9.1 Layout](#91-layout)
    - [9.2 FCA fixed header](#92-fca-fixed-header)
    - [9.3 Archive extension region](#93-archive-extension-region)
@@ -60,14 +59,23 @@
    - [9.15 Design rationale and benefits](#915-design-rationale-and-benefits)
 10. [ASCII armor](#10-ascii-armor)
 11. [Versioning and compatibility](#11-versioning-and-compatibility)
+    - [11.1 Software releases and stored version domains](#111-software-releases-and-stored-version-domains)
+    - [11.2 Key-pair suites](#112-key-pair-suites)
+    - [11.3 Frozen cryptographic labels](#113-frozen-cryptographic-labels)
+    - [11.4 Compatibility baselines](#114-compatibility-baselines)
+    - [11.5 Version-change rules](#115-version-change-rules)
 12. [Diagnostics and conformance](#12-diagnostics-and-conformance)
+    - [12.1 Stable diagnostic taxonomy](#121-stable-diagnostic-taxonomy)
+    - [12.2 Invariant and capability-relative expectations](#122-invariant-and-capability-relative-expectations)
+    - [12.3 Frozen public conformance corpus](#123-frozen-public-conformance-corpus)
+    - [12.4 Conformance claims](#124-conformance-claims)
 13. [Quick reference](#13-quick-reference)
     - [13.1 Encrypted-file prefix](#131-encrypted-file-prefix)
     - [13.2 Header fixed section](#132-header-fixed-section)
     - [13.3 Recipient entry](#133-recipient-entry)
     - [13.4 Recipient namespace summary](#134-recipient-namespace-summary)
     - [13.5 Native recipient types](#135-native-recipient-types)
-    - [13.6 FCA v1 payload](#136-fca-v1-payload)
+    - [13.6 FCA archive version `0x01` payload](#136-fca-archive-version-0x01-payload)
 
 ---
 
@@ -84,10 +92,10 @@ This specification defines:
 - payload stream encryption;
 - public recipient keys;
 - passphrase-wrapped private keys;
-- optional ASCII armor (deferred in v1.0; see §10);
+- optional ASCII armor (not shipped by FerroCrypt release `0.3.0`; see §10);
 - the required safe FCA archive payload format.
 
-FerroCrypt v1 is built around one central abstraction:
+`.fcr` outer-container version `0x01` is built around one central abstraction:
 
 ```text
 A file has one random file_key.
@@ -192,15 +200,16 @@ Structural KDF-parameter bounds:
 
 Readers MUST reject out-of-range parameters before running Argon2id.
 
-The passphrase byte-length bound is a fixed v1 credential rule, not a
-configurable local KDF resource cap. It applies identically when creating or
-opening an `argon2id` recipient and when creating or opening a `private.key`.
+The passphrase byte-length bound is a fixed credential rule for the `argon2id`
+recipient defined under `.fcr` outer-container version `0x01` and for
+private-key encoding version `0x01`; it is not a configurable local KDF
+resource cap. It applies identically when creating or opening either artifact.
 Readers and writers MUST reject a passphrase outside this bound before running
 Argon2id. Implementations MUST count the exact UTF-8 bytes supplied by the
 caller and MUST NOT normalize, trim, case-fold, truncate, or treat an embedded
 NUL as a terminator.
 
-Recommended writer default for desktop-class v1 encryption:
+Recommended writer default for desktop-class encryption:
 
 ```text
 mem_kib = 1,048,576
@@ -215,8 +224,8 @@ caps configurable and report a distinct resource-cap error.
 
 ### 2.3 HKDF domain separation
 
-Native v1.x HKDF derivations use HKDF-SHA3-256 and produce 32 bytes unless a
-future recipient specification says otherwise.
+The native HKDF derivations defined here use HKDF-SHA3-256 and produce 32 bytes
+unless a future recipient specification says otherwise.
 
 | Purpose | HKDF `info` |
 |---|---|
@@ -287,20 +296,26 @@ The prefix is exactly 12 bytes at file offset 0:
 | Offset | Size | Field | Value |
 |---:|---:|---|---|
 | 0 | 4 | `magic` | `46 43 52 00` (`FCR\0`) |
-| 4 | 1 | `version` | `0x01` (`.fcr` outer file version) |
+| 4 | 1 | `version` | `0x01` (`.fcr` outer-container version) |
 | 5 | 1 | `kind` | `0x45` (`E`) |
 | 6 | 2 | `prefix_flags` | `u16`; MUST be zero |
 | 8 | 4 | `header_len` | `u32`; length of `header`; MUST be `<= 16,777,216` |
 
-The prefix is authenticated as part of the header MAC input (§3.6). The
-`version` field is the encrypted `.fcr` file version only; it is independent of
-key-pair compatibility (§11).
+The prefix is authenticated as part of the header MAC input (§3.6). The byte at
+file offset 4 is the `.fcr` outer-container version; magic `FCR\0` at offsets
+0..3 and kind `0x45` (`E`) at offset 5 establish that domain. It is independent
+of key-pair compatibility (§11). Version byte `0x00` is reserved and
+structurally malformed. Version bytes `0x02..=0xFF` are unsupported by a reader
+that implements only `.fcr` outer-container version `0x01`.
 
 Readers MUST reject:
 
 - input shorter than 12 bytes;
 - magic bytes other than `FCR\0`;
-- unsupported version values (anything other than `0x01`);
+- `.fcr` outer-container version byte `0x00` with diagnostic class
+  `malformed_header` (§12.1);
+- unsupported `.fcr` outer-container version bytes `0x02..=0xFF` with
+  diagnostic class `unsupported_outer_version` (§12.1);
 - `kind != 0x45` for an encrypted `.fcr` file;
 - non-zero `prefix_flags`;
 - `header_len > 16,777,216`.
@@ -493,7 +508,9 @@ order, `stream_nonce`, and `ext_bytes`.
 Readers MUST process `.fcr` files in this order:
 
 1. Read the 12-byte prefix.
-2. Reject bad magic, unsupported version, wrong kind, non-zero prefix flags, or
+2. Reject bad magic; reject `.fcr` outer-container version byte `0x00` as
+   structurally malformed; reject an unsupported nonzero outer-container
+   version, wrong kind, non-zero prefix flags, or
    `header_len > 16,777,216`.
 3. Read exactly `header_len` bytes of `header` and exactly 32 bytes of
    `header_mac`; reject if either read reaches EOF early.
@@ -724,8 +741,8 @@ header-MAC-failure vectors.
 
 ### 4.3 Future recipient types
 
-**Future types.** Future v1.x recipient types can be added without changing the
-top-level file format if they obey §3.3 and §3.4.
+**Future types.** Future recipient types can be added without changing `.fcr`
+outer-container version `0x01` if they obey §3.3 and §3.4.
 
 **Recipient specifications.** Every native or plugin recipient type MUST have a
 complete recipient specification defining: exact `type_name`, namespace, status,
@@ -735,9 +752,9 @@ parameters, randomness requirements, malformed-input rejection rules, failure
 behavior, mixing policy, privacy/security considerations, and positive,
 wrong-key, malformed, and tamper vectors.
 
-**Parser compatibility.** A recipient type specification MUST NOT require changes
-to the generic `.fcr` recipient-entry parser unless it is defining a new
-incompatible file version.
+**Parser compatibility.** A recipient type specification MUST NOT require
+changes to the generic `.fcr` recipient-entry parser unless it is defining a
+new incompatible `.fcr` outer-container version.
 
 **Mixing policy.** Every recipient type MUST define a mixing policy: exclusive,
 same-type-only, public-key-mixable, unrestricted, or custom. If any recipient
@@ -797,8 +814,7 @@ Payload encryption uses XChaCha20-Poly1305 STREAM-BE32.
 | Associated data (AAD) | empty byte string |
 
 The XChaCha20-Poly1305 associated-data input for every payload chunk MUST be
-the zero-length byte string. This rule applies identically to non-final and
-final chunks.
+the empty byte string.
 
 Each encrypted chunk is stored as:
 
@@ -886,9 +902,9 @@ Rules after the relevant containing authentication step:
 7. Unknown critical tags MUST cause rejection.
 8. Reserved tags MUST be rejected.
 
-The encrypted-file header namespace defines no v1 global TLV tags. v1 writers
-MUST emit `ext_len = 0` unless implementing a tag defined by a later v1.x
-revision.
+The `.fcr` header namespace for outer-container version `0x01` defines no TLV
+tags. Writers of that version MUST emit `ext_len = 0` unless implementing a tag
+defined by a later compatible specification.
 
 ---
 
@@ -896,12 +912,17 @@ revision.
 
 A public recipient is a lowercase Bech32 string with HRP `fcr`.
 
-Public-recipient payload versions identify key-pair compatibility suites, not
-`.fcr` file versions. Decoders MUST read the payload version at offset 0, map it
-to the shared key-pair suite for `public.key` and `private.key`, and reject
-unsupported suites before a public recipient is used for encryption. A release
-MUST NOT accept a public key for encryption unless the same key-pair suite
-remains supported for private-key decryption.
+The public-key encoding version is the first byte at offset 0 of the decoded
+Bech32 payload. It is not an offset in the UTF-8 `public.key` text file and is
+independent of the `.fcr` outer-container version. The `1` visible in a string
+beginning `fcr1...` is Bech32's separator between the HRP `fcr` and the encoded
+data; it is not a version field.
+
+Decoders MUST map the public-key encoding version to a logical key-pair suite
+shared with the corresponding private-key encoding before deciding support. An
+implementation MUST NOT accept a public key for encryption unless it also
+supports private-key decryption through at least one private-key encoding that
+maps to the same key-pair suite.
 
 Public-recipient payloads are always versioned:
 
@@ -915,11 +936,11 @@ recipient_payload = public_key_version:u8
 ```
 
 `public_key_version` MUST be in `0x01..=0xFF`. `0x00` is reserved and MUST be
-rejected. v1 public-key recipient payloads use `public_key_version = 0x01` and map to
-key-pair suite v1.
+rejected with diagnostic class `malformed_public_key` (§12.1). Public-key
+encoding version `0x01` maps to key-pair suite `KPS-1`.
 
-All public-key recipient payloads use the same checksum scheme, with the version byte
-mixed into the hash input:
+All public-key recipient payloads use the same checksum scheme, with the
+public-key encoding version byte mixed into the hash input:
 
 ```text
 checksum = first_16_bytes(SHA3-256(
@@ -931,16 +952,21 @@ checksum = first_16_bytes(SHA3-256(
 ))
 ```
 
-The `v1` in the checksum domain string names the checksum scheme defined by this
-specification, not a specific key-pair suite. A future v2, v3, … key-pair suite
-uses the same domain string with its own `public_key_version` byte mixed in. Only
-a checksum scheme change would require a new domain string.
+The substring `v1` in the checksum domain string is an opaque, frozen part of
+that ASCII byte string. It does not name a software release, stored version, or
+key-pair suite. A future key-pair suite continues to use the same domain string
+with its own `public_key_version` byte mixed in unless a future specification
+explicitly defines a different checksum scheme and label. A version-byte or
+key-pair-suite change does not alter the label automatically.
 
 Rules:
 
-- Current v1 writers MUST emit `public_key_version = 0x01`.
-- Readers MUST reject any other public-key version byte and MUST map
-  `public_key_version = 0x01` to key-pair suite v1 before deciding support.
+- Writers conforming to public-key encoding version `0x01` MUST emit
+  `public_key_version = 0x01`.
+- Readers that support only public-key encoding version `0x01` MUST map
+  `public_key_version = 0x01` to `KPS-1` before deciding support and MUST
+  reject `0x02..=0xFF` with diagnostic class
+  `unsupported_public_key_version` (§12.1).
 - `type_name` follows §3.3 and §3.3.1.
 - `key_material_len` MUST be `<= 12,215` unless a recipient spec defines a
   smaller bound. This worst-case cap is derived so that a maximum-length
@@ -1025,13 +1051,15 @@ checks above; an RFC 7748 alias MUST NOT be fingerprinted as a separate key.
 ## 8. Private key format (`private.key`)
 
 A `private.key` file stores one passphrase-wrapped private key for one recipient
-type. The `version` byte is the private-key wire version. It belongs to the
-key-pair compatibility domain, not to encrypted `.fcr` file versioning.
+type. The byte at file offset 4 is the private-key encoding version. Its domain
+is established by magic `FCR\0` at offsets 0..3 and kind `0x4B` (`K`) at offset
+5. It is independent of the `.fcr` outer-container version stored at the same
+offset under kind `0x45` (`E`).
 
 | Offset | Size | Field | Value / meaning |
 |---:|---:|---|---|
 | 0 | 4 | `magic` | `46 43 52 00` (`FCR\0`) |
-| 4 | 1 | `version` | `0x01` (canonical v1 private-key version) |
+| 4 | 1 | `version` | `0x01` (private-key encoding version) |
 | 5 | 1 | `kind` | `0x4B` (`K`) |
 | 6 | 2 | `key_flags` | `u16`; MUST be zero |
 | 8 | 2 | `type_name_len` | `u16`; 1..255 |
@@ -1046,9 +1074,12 @@ key-pair compatibility domain, not to encrypted `.fcr` file versioning.
 | ... | `ext_len` | `ext_bytes` | TLV extension region |
 | ... | `wrapped_secret_len` | `wrapped_secret` | ciphertext plus tag |
 
-Writers MUST emit private-key version `0x01`. Readers MUST reject any other
-private-key version byte and MUST map `0x01` to key-pair suite v1 before
-deciding support.
+Writers conforming to private-key encoding version `0x01` MUST emit `0x01` at
+offset 4. Private-key encoding version byte `0x00` is reserved and MUST be
+rejected with diagnostic class `malformed_private_key` (§12.1). Readers that
+support only private-key encoding version `0x01` MUST map `0x01` to `KPS-1`
+before deciding support and MUST reject `0x02..=0xFF` with diagnostic class
+`unsupported_private_key_version` (§12.1).
 
 Total size:
 
@@ -1118,60 +1149,60 @@ act on them or reject unknown critical private-key TLVs until `wrapped_secret`
 has been successfully authenticated. Unknown critical private-key TLVs MUST cause
 rejection after successful authentication.
 
-Readers MUST validate magic, private-key version and key-pair suite support,
-kind, flags, type name, lengths, total file size, KDF parameters, local resource
-caps, AEAD authentication, TLV rules, and recipient-type-specific secret/public
-material constraints.
+Readers MUST validate magic, private-key encoding version and key-pair-suite
+support, kind, flags, type name, lengths, total file size, KDF parameters, local
+resource caps, AEAD authentication, TLV rules, and recipient-type-specific
+secret/public material constraints.
 
 Unknown private-key type names MUST be rejected unless supported by a plugin or
 local implementation.
 
 ---
 
-## 9. Archive payload — FerroCrypt Archive (FCA) v1
+## 9. Archive payload — FerroCrypt Archive (FCA)
 
 The decrypted payload of an encrypted `.fcr` file is a **FerroCrypt Archive
 (FCA)** stream. The `.fcr` format defined here carries an FCA archive as its
-payload; FCA has its own inner magic and version at the start of the
-authenticated payload plaintext.
+payload; FCA has its own inner magic and FCA archive version at the start of
+the authenticated payload plaintext.
 
-Readers MUST dispatch on the FCA magic and version after payload decryption has
-made those bytes available. Unsupported FCA versions MUST be reported as
-unsupported archive versions, not as generic malformed payload bytes.
+Readers MUST dispatch on the FCA magic and archive version after payload
+decryption has made those bytes available. Unsupported FCA archive versions
+MUST be reported as such, not as generic malformed payload bytes.
 
-The `.fcr` outer file version controls the outer cryptographic container. The
-FCA version controls the inner archive grammar. `FORMAT.md` describes the `.fcr`
-payload as an FCA archive and does not bind the outer `.fcr` container to a
-single immutable FCA archive grammar. Therefore, adding or supporting inner FCA
-version dispatch for future FCA versions does not by itself require an outer
-`.fcr` version bump. An outer `.fcr` version bump is required only for
-incompatible changes to the outer cryptographic container, recipient framing,
-header authentication, payload stream, or other generic `.fcr` rules.
+The `.fcr` outer-container version controls the outer cryptographic container.
+The FCA archive version controls the inner archive grammar. `FORMAT.md`
+describes the `.fcr` payload as an FCA archive and does not bind the outer
+container to a single immutable FCA grammar. Therefore, adding or supporting a
+future FCA archive version does not by itself require a new `.fcr`
+outer-container version. A new `.fcr` outer-container version is required only
+for incompatible changes to the outer cryptographic container, recipient
+framing, header authentication, payload stream, or other generic `.fcr` rules.
 
-FCA v1 is a small native archive format with a manifest-first design and
-length-delimited extension regions. It represents the archive features
-FerroCrypt intentionally preserves by default: regular files, directories, one
-top-level output root, relative UTF-8 `/` paths, portable path safety rules,
-Unix-style `0o000..0o777` permission bits, declared regular-file sizes, and
-regular-file bytes concatenated in manifest order.
+FCA archive version `0x01` is a small native archive format with a
+manifest-first design and length-delimited extension regions. It represents the
+archive features FerroCrypt intentionally preserves by default: regular files,
+directories, one top-level output root, relative UTF-8 `/` paths, portable path
+safety rules, Unix-style `0o000..0o777` permission bits, declared regular-file
+sizes, and regular-file bytes concatenated in manifest order.
 
-FCA v1 provides archive-level and per-entry TLV extension regions so later
-specifications can add optional metadata without changing the fixed FCA v1
-framing. Unknown ignorable metadata can be skipped. Unknown critical metadata
-causes rejection before any filesystem output is created. New filesystem object
-kinds remain strict and fail closed.
+FCA archive version `0x01` provides archive-level and per-entry TLV extension
+regions so later compatible specifications can add optional metadata without
+changing its fixed framing. Unknown ignorable metadata can be skipped. Unknown
+critical metadata causes rejection before any filesystem output is created.
+New filesystem object kinds remain strict and fail closed.
 
-FCA v1 intentionally does **not** define native preservation for symlinks,
-hardlink entries, device files, FIFOs, sockets, sparse-file holes, owners or
-groups, timestamps, ACLs, extended attributes, Windows alternate data streams,
-Windows reparse points, macOS resource forks, compression,
+FCA archive version `0x01` intentionally does **not** define native preservation
+for symlinks, hardlink entries, device files, FIFOs, sockets, sparse-file holes,
+owners or groups, timestamps, ACLs, extended attributes, Windows alternate data
+streams, Windows reparse points, macOS resource forks, compression,
 TAR/PAX/GNU/ZIP/CPIO/libarchive extension records, or generic archive-tool
 compatibility. Unsupported object semantics are unrepresentable unless a later
 specification defines an explicit entry kind or critical extension for them.
 
 ### 9.1 Layout
 
-An FCA v1 payload is exactly:
+An FCA archive version `0x01` payload is exactly:
 
 ```text
 fca_payload = fca_header || archive_ext || manifest || file_contents
@@ -1214,12 +1245,18 @@ fca_header:
 
 All multi-byte integers are unsigned big-endian.
 
-Readers MUST reject short headers, bad magic, unsupported FCA header versions,
-non-zero header flags, zero `entry_count`, `entry_count` above the configured
-cap, `archive_ext_len` above the configured cap, `archive_ext_len` values not
-representable as `usize`, `manifest_len == 0`, `manifest_len` above the
-configured cap, `manifest_len` values not representable as `usize`, and declared
-`total_file_bytes` above the configured cap.
+FCA archive version byte `0x00` is reserved and MUST be rejected with diagnostic
+class `malformed_archive` (§12.1). A reader that implements only FCA archive
+version `0x01` MUST reject `0x02..=0xFF` with diagnostic class
+`unsupported_fca_version` (§12.1).
+
+Readers MUST reject short headers, bad magic, the reserved zero FCA archive
+version, unsupported nonzero FCA archive versions, non-zero header flags, zero
+`entry_count`, `entry_count` above the configured cap, `archive_ext_len` above
+the configured cap, `archive_ext_len` values not representable as `usize`,
+`manifest_len == 0`, `manifest_len` above the configured cap, `manifest_len`
+values not representable as `usize`, and declared `total_file_bytes` above the
+configured cap.
 
 After parsing the manifest, readers MUST recompute the actual entry count and
 actual logical regular-file byte count and require exact equality with the
@@ -1235,9 +1272,9 @@ critical extension changes encoded content consumption.
 grammar and canonicality rules from §6. Its tag namespace is separate from the
 `.fcr` header TLV namespace and from the per-entry FCA TLV namespace.
 
-This specification defines no FCA archive-level TLV tags. v1 writers MUST emit
-`archive_ext_len = 0` unless implementing a tag defined by a later v1.x
-specification.
+FCA archive version `0x01` defines no archive-level TLV tags. Writers of that
+version MUST emit `archive_ext_len = 0` unless implementing a tag defined by a
+later compatible specification.
 
 Readers MUST validate the complete archive-level TLV region before parsing it as
 metadata and before creating filesystem output. Unknown ignorable archive TLVs
@@ -1275,7 +1312,8 @@ manifest_entry:
 
 Directory entries have `size == 0` and consume no bytes in the file-content
 region. File entries MAY have `size == 0`. The `entry_flags` field is reserved
-for future incompatible archive formats and MUST be zero in FCA v1.
+for future incompatible FCA archive versions and MUST be zero in FCA archive
+version `0x01`.
 
 Readers MUST reject truncated fixed entry headers, `path_len == 0`, paths above
 `limits.max_path_bytes`, path bytes running past `manifest_len`, `entry_ext_len`
@@ -1293,9 +1331,9 @@ Each `entry_ext` is a per-entry TLV extension region. It uses the TLV grammar an
 canonicality rules from §6. Its tag namespace is separate from the `.fcr` header
 TLV namespace and from the FCA archive-level TLV namespace.
 
-This specification defines no FCA per-entry TLV tags. v1 writers MUST emit
-`entry_ext_len = 0` for every entry unless implementing a tag defined by a later
-v1.x specification.
+FCA archive version `0x01` defines no per-entry TLV tags. Writers of that
+version MUST emit `entry_ext_len = 0` for every entry unless implementing a tag
+defined by a later compatible specification.
 
 Readers MUST validate every per-entry TLV region before creating filesystem
 output. Unknown ignorable per-entry TLVs MUST be skipped. Unknown critical
@@ -1416,8 +1454,9 @@ sorting.
 ### 9.9 File-content region
 
 Immediately after the manifest, the file-content region contains the encoded
-content bytes of entries in manifest order. For FCA v1 as defined here, regular
-files are encoded densely and directories consume zero bytes:
+content bytes of entries in manifest order. For FCA archive version `0x01` as
+defined here, regular files are encoded densely and directories consume zero
+bytes:
 
 ```text
 for entry in manifest.entries:
@@ -1454,8 +1493,8 @@ generic archive error.
 Writers MUST apply the same path grammar, duplicate policy, tree-shape rules, TLV
 canonicality rules, extension caps, and resource caps as readers before emitting
 the archive. Encryption MUST fail before the encrypted output is finalized if a
-source path or source tree cannot be represented by FCA v1. FerroCrypt MUST NOT
-write archives its own default reader will reject.
+source path or source tree cannot be represented by FCA archive version `0x01`.
+FerroCrypt MUST NOT write archives its own default reader will reject.
 
 Writers MUST emit deterministic FCA plaintext for identical input and identical
 metadata policy. Manifest entries SHOULD use the deterministic order from §9.8.
@@ -1680,20 +1719,20 @@ reject inputs whose computed lengths exceed configured caps.
 path strings, source paths, hash sets, extension views, and sort buffers also
 consume memory.
 
-FCA v1 defines no metadata TLV tags, so this section lists no metadata-specific
-caps. Future metadata tag specifications (e.g. xattr counts, ACL entries, sparse
-extents) MUST define their own resource caps and apply them with the same
-before-allocation discipline.
+FCA archive version `0x01` defines no metadata TLV tags, so this section lists
+no metadata-specific caps. Future metadata tag specifications (e.g. xattr
+counts, ACL entries, sparse extents) MUST define their own resource caps and
+apply them with the same before-allocation discipline.
 
 ### 9.13 Platform metadata and preservation
 
-FCA v1 preserves file contents, directory structure, and Unix-style
-`0o000..0o777` permission bits. It does not preserve ownership, timestamps,
-ACLs, extended attributes, hardlink identity, symlink relationships, devices,
-FIFOs, sockets, sparse-file metadata, Windows alternate data streams, Windows
-reparse points, macOS resource forks, compression, or platform-specific mode
-bits unless a later specification defines an explicit extension and the writer
-and reader opt into that extension.
+FCA archive version `0x01` preserves file contents, directory structure, and
+Unix-style `0o000..0o777` permission bits. It does not preserve ownership,
+timestamps, ACLs, extended attributes, hardlink identity, symlink
+relationships, devices, FIFOs, sockets, sparse-file metadata, Windows alternate
+data streams, Windows reparse points, macOS resource forks, compression, or
+platform-specific mode bits unless a later specification defines an explicit
+extension and the writer and reader opt into that extension.
 
 The default writer emits no FCA metadata TLVs. A later metadata-preservation
 feature MUST be explicit policy, not silent default behavior. Where security and
@@ -1716,10 +1755,10 @@ the same way as Unix implementations.
 
 ### 9.14 FCA extensibility rules
 
-FCA v1 extension regions use the shared TLV grammar from §6. Implementations
-SHOULD share one TLV scanner and canonicality validator across `.fcr`,
-`private.key`, and FCA extension regions, with separate tag registries per
-namespace.
+FCA archive version `0x01` extension regions use the shared TLV grammar from
+§6. Implementations SHOULD share one TLV scanner and canonicality validator
+across `.fcr`, `private.key`, and FCA extension regions, with separate tag
+registries per namespace.
 
 FCA extension bytes are authenticated by the outer `.fcr` payload stream. FCA
 MUST NOT define a nested checksum, MAC, or integrity tag for normal FerroCrypt
@@ -1731,9 +1770,10 @@ extensible through TLVs. A future feature that changes object type, encoded
 content consumption, security policy, or required preservation semantics MUST use
 a critical tag or a new entry kind and MUST reject on unsupported readers.
 
-Compression is deliberately out of scope for FCA v1. Compression MUST NOT be
-introduced through an ignorable TLV. Any future compression profile requires its
-own explicit security analysis and compatibility specification.
+Compression is deliberately out of scope for FCA archive version `0x01`.
+Compression MUST NOT be introduced through an ignorable TLV. Any future
+compression profile requires its own explicit security analysis and
+compatibility specification.
 
 Manifest-first validation is a hard FCA rule. Readers MUST validate the complete
 header, archive-level TLVs, manifest, per-entry TLVs, paths, tree shape,
@@ -1825,17 +1865,18 @@ fuzzing.
 > **Parked snapshot.** The pre-FCA restricted-ustar implementation that motivated
 > this migration is preserved under `experiments/archive/` as a reference
 > snapshot. It does not ship and is not mounted by `lib.rs`; the active archive
-> code lives at `ferrocrypt-lib/src/archive/` and implements FCA v1 only.
+> code lives at `ferrocrypt-lib/src/archive/` and implements FCA archive version
+> `0x01` only.
 
 ---
 
 ## 10. ASCII armor
 
-> **Status:** deferred to a future release. The armor encoder/decoder is not
-> shipped in this version of `ferrocrypt-lib`. A reference implementation is
-> parked under `experiments/armor/` and may be reintroduced in a later version.
-> The specification below remains authoritative for that future revival; no
-> wire-format change is implied.
+> **Status:** deferred. The armor encoder/decoder is not shipped by FerroCrypt
+> release `0.3.0`. A reference implementation is parked under
+> `experiments/armor/` and may be reintroduced by a later release. The
+> specification below remains authoritative for that future revival;
+> introducing armor does not change any stored version domain.
 
 ASCII armor is an optional transport encoding around a complete binary `.fcr`
 file. It does not change the binary wire format and is not an authenticity
@@ -1869,8 +1910,8 @@ Rules:
   characters, non-canonical Base64 padding, or Base64 body lines that are not 64
   characters long except for the final Base64 line, which MUST contain 1 to 64
   characters.
-- After decoding, readers parse the bytes as a binary FerroCrypt v1-compatible
-  `.fcr` file.
+- After decoding, readers parse the bytes as a binary `.fcr` file and dispatch
+  on its outer-container version.
 
 Conventional armored extensions are `.fcr.asc` and `.fcr.pem`. Detection is by
 BEGIN line, not extension.
@@ -1879,109 +1920,651 @@ BEGIN line, not extension.
 
 ## 11. Versioning and compatibility
 
-FerroCrypt has four independent version domains. Each is bumped on its own
-schedule:
+### 11.1 Software releases and stored version domains
 
-- Encrypted `.fcr` outer file version byte = `0x01`.
-- FCA inner archive version byte = `0x01`.
-- `private.key` header version byte = `0x01` (canonical v1 private-key
-  encoding).
-- `public.key` recipient payload version byte = `0x01`.
+FerroCrypt software releases use dotted semantic versions such as `0.3.0`,
+`0.4.0`, and `1.0.0`. A release number is not stored in an artifact and has no
+automatic effect on any stored byte.
 
-Key-pair compatibility is a separate domain from `.fcr` file compatibility.
-`private.key` header versions and `public.key` recipient payload version bytes
-are wire-level encodings that MUST map to a shared key-pair suite before support
-is decided. v1 `public.key` recipient payloads carry `public_key_version = 0x01`
-and map to key-pair suite v1. `public_key_version = 0x00` is reserved and MUST
-be rejected.
+The specification has four independently stored version domains. A version
+byte is meaningful only within its exact artifact context:
 
-Readers MUST reject unsupported outer file versions, unsupported inner FCA
-archive versions, unsupported private-key versions, and unsupported public-key
-payload versions.
+| Canonical name | Artifact context | Version location | Discriminating context | Initial value |
+|---|---|---|---|---|
+| `.fcr` outer-container version | Binary encrypted `.fcr` file | File offset 4 | Offsets 0..3 are `FCR\0`; offset 5 is kind `0x45` (`E`) | `0x01` |
+| FCA archive version | Plaintext recovered from the authenticated payload stream | Recovered-payload offset 4 | Recovered-payload offsets 0..3 are `FCA\0`; there is no kind byte, and flags begin at offsets 5..6 | `0x01` |
+| Public-key encoding version | Decoded Bech32 recipient payload | Decoded-payload offset 0 | Bech32 HRP is `fcr`; `type_name` follows in the decoded payload | `0x01` |
+| Private-key encoding version | Binary `private.key` file | File offset 4 | Offsets 0..3 are `FCR\0`; offset 5 is kind `0x4B` (`K`) | `0x01` |
 
-The `.fcr` outer file version is independent from key-pair compatibility. A
-change to the FCA archive payload does not change key-pair compatibility. A
-release MUST NOT accept a public key for encryption unless the same key-pair
-suite remains supported for private-key decryption.
+The byte at file offset 4 under magic `FCR\0` is not self-describing. The kind
+byte selects its domain:
 
-Safe v1.x evolution can occur through:
+```text
+FCR\0 || 0x01 || 0x45  => .fcr outer-container version 0x01
+FCR\0 || 0x01 || 0x4B  => private-key encoding version 0x01
+```
 
-- new recipient type names;
-- new public/private key type names;
-- authenticated TLV tags in the encrypted-file header namespace;
-- authenticated FCA archive-level or per-entry TLV tags;
-- plugin recipient type names;
-- recipient-specific specifications that do not change the generic `.fcr`
-  recipient-entry parser.
+For `public.key`, offset 0 always means offset 0 of the decoded Bech32 payload,
+not byte 0 of the UTF-8 text file. The `1` in `fcr1...` is the Bech32 separator,
+not the public-key encoding version.
 
-Sender authentication is intentionally out of scope. Future v1.x
-sender-authentication mechanisms MAY be defined as critical TLV extensions;
-such extensions MUST specify a canonical signed transcript and MUST NOT change
-the generic `.fcr` container.
+All four initial values happen to be `0x01`. They are not a shared field, need
+not change together, and may diverge. Normative prose and user-facing
+diagnostics MUST identify the affected domain and render the stored byte in
+two-digit hexadecimal form, such as `0x01` or `0xFF`.
 
-A new outer `.fcr` file version is required for incompatible changes to the
-prefix layout, header layout, generic recipient-entry framing, header MAC input,
-payload stream, encrypted-file TLV canonicality, or other generic `.fcr`
-container rules. This includes future recipient mechanisms that require
-changing those generic container rules.
+### 11.2 Key-pair suites
 
-A new key-pair suite is required for incompatible changes to public-key
-recipient payload interpretation or private-key fixed-header semantics.
-Key-pair suite bumps do not by themselves require a new outer `.fcr` file
-version. When the next incompatible key-pair change occurs, public and private
-wire encodings MUST map to the same new key-pair suite, and support MUST be
-decided through one shared suite gate. Implementations MUST either keep both old
-public and private encodings supported, or reject both.
+`KPS-1` means **key-pair suite 1**. It is a logical compatibility identifier,
+not a stored byte:
 
-A new FCA archive version is required for incompatible changes to FCA fixed
-header framing, manifest-entry fixed framing, path grammar, object-kind
-semantics, file-content ordering, or any archive behavior that an FCA v1 reader
-cannot safely skip or reject through the v1 TLV and `kind` rules. A future FCA
-archive version carried inside an otherwise unchanged `.fcr` payload does not
-by itself require a new outer `.fcr` file version.
+```text
+public-key encoding version 0x01  ─┐
+                                   ├── KPS-1
+private-key encoding version 0x01 ─┘
+```
 
-The next incompatible outer `.fcr` file version SHOULD use `version = 0x02` and
-SHOULD preserve the initial `FCR\0` magic and version byte long enough for
-current readers to report an unsupported version rather than unrecognized data.
-The next incompatible `private.key` format SHOULD use private-key version
-`0x02`. The next incompatible `public.key` recipient payload SHOULD use
-`public_key_version = 0x02`. The three "next" numbers coincide at `0x02` only
-because none of the four domains has been bumped before; future bumps in any
-domain are independent and will diverge.
+Readers MUST map a supported public- or private-key encoding version to a
+key-pair suite before deciding whether the key is usable. The mapping may be
+many-to-one. A representation-only change may map a new encoding version to an
+existing suite when logical key material and recipient compatibility are
+unchanged. Conversely, future public- and private-key encoding version numbers
+that map to the same new suite need not be numerically equal.
+
+For example, a future mapping could be:
+
+```text
+public-key encoding version 0x02  ─┐
+                                   ├── KPS-2
+private-key encoding version 0x03 ─┘
+```
+
+An implementation MUST NOT accept a public-key encoding for encryption unless
+it also supports private-key decryption through at least one private-key
+encoding that maps to the same `KPS-N`.
+
+### 11.3 Frozen cryptographic labels
+
+The following values are literal ASCII byte strings used as cryptographic
+inputs:
+
+```text
+ferrocrypt/v1/recipient/argon2id/wrap
+ferrocrypt/v1/recipient/x25519/wrap
+ferrocrypt/v1/private-key/wrap
+ferrocrypt/v1/public-key/checksum
+ferrocrypt/v1/payload
+ferrocrypt/v1/header
+```
+
+The substring `v1` is an opaque, frozen part of each byte sequence. It is not a
+software release, a directory, a stored version field, a key-pair suite, or an
+instruction to substitute the current version. These labels MUST remain
+byte-for-byte unchanged for every artifact that currently uses them. A future
+specification may define a different cryptographic label only explicitly; a
+stored version change does not replace `/v1/` automatically.
+
+The string `ferrocrypt/v1/test`, where it appears in test-only material, is not
+a production protocol label and carries no stored-version meaning.
+
+### 11.4 Compatibility baselines
+
+A compatibility baseline is a release-anchored promise, not a stored field. The
+initial baseline is **the `0.3.0` compatibility baseline**, consisting of:
+
+```text
+.fcr outer-container version 0x01
+FCA archive version 0x01
+public-key encoding version 0x01 -> KPS-1
+private-key encoding version 0x01 -> KPS-1
+the native recipients and all normative semantics defined for those versions
+```
+
+FerroCrypt release `0.3.0` establishes this baseline. Every later FerroCrypt
+release MUST continue to read every valid artifact covered by it and MUST
+preserve its structural, canonicality, authentication, and security rejection
+rules.
+
+Baselines are immutable and cumulative. A later stable baseline contains every
+earlier baseline plus any newly promised formats or semantics:
+
+```text
+0.3.0 baseline = initial supported formats and semantics
+0.4.0 baseline = 0.3.0 baseline + formats or semantics first promised by 0.4.0
+```
+
+A later release MUST NOT redefine the `0.3.0` compatibility baseline. An older
+reader is not required to understand a future incompatible version; the promise
+is one-way from later readers to earlier stable artifacts. A rejection caused
+only by an unknown feature is capability-relative: a later implementation may
+accept the same feature after implementing its specification, as defined in
+§12.2.
+
+Artifacts produced by `0.3.0-alpha.N`, `0.3.0-beta.N`, `0.3.0-rc.N`, or
+untagged development revisions such as `main` are outside the cross-release
+promise until stable FerroCrypt release `0.3.0` is tagged.
+
+### 11.5 Version-change rules
+
+Changing the FerroCrypt software release does not by itself change any stored
+version. A later release may continue to write all four initial `0x01`
+encodings.
+
+The affected stored version remains unchanged when the existing specification
+provides a safe extension mechanism and older readers can follow the assigned
+skip-or-reject rule. Compatible changes include:
+
+- a new recipient type using the existing recipient-entry framing;
+- an authenticated ignorable TLV tag;
+- an authenticated critical TLV tag with explicitly specified opt-in support
+  and rejection by unsupported readers;
+- a new public- or private-key type under the existing encoding grammar; and
+- implementation, API, CLI, UI, or performance changes that do not alter
+  serialized semantics.
+
+Sender authentication remains out of scope. A future sender-authentication
+mechanism MAY use a critical TLV extension without changing the affected stored
+version only if it defines a canonical signed transcript and preserves the
+existing generic framing.
+
+A new `.fcr` outer-container version is required for an incompatible change to:
+
+- prefix, fixed-header, variable-header, or generic recipient-entry framing;
+- header-MAC key derivation or authenticated transcript;
+- payload-key derivation;
+- the STREAM algorithm, chunk grammar, nonce, counter, final-flag construction,
+  or payload AAD;
+- `.fcr` TLV canonicality; or
+- another generic outer-container rule that an existing reader cannot safely
+  skip or reject.
+
+The next such version SHOULD use `0x02` and SHOULD preserve the `FCR\0` magic
+where practical. Later releases MUST retain read support for `.fcr`
+outer-container version `0x01` (§11.4).
+
+A new FCA archive version is required for an incompatible change to:
+
+- FCA fixed-header or manifest-entry framing;
+- path grammar;
+- object-kind or archive-tree semantics;
+- file-content ordering; or
+- another archive rule that an FCA archive version `0x01` reader cannot safely
+  skip or reject.
+
+An FCA archive version `0x02` payload MAY remain inside `.fcr`
+outer-container version `0x01` when the outer cryptographic container is
+unchanged.
+
+An incompatible public recipient-payload representation requires a new
+public-key encoding version. An incompatible `private.key` representation
+requires a new private-key encoding version. Only the affected domain changes,
+and every new encoding version MUST map to its appropriate `KPS-N`.
+
+A new key-pair suite is required only when public key material, private key
+material, algorithm interpretation, or recipient compatibility changes so that
+the existing logical pairing is insufficient. A new `KPS-N` does not by itself
+require a new `.fcr` outer-container version or FCA archive version.
 
 ---
 
 ## 12. Diagnostics and conformance
 
-Implementations SHOULD preserve distinct failure classes for the following
-conditions. These classes need not be mutually exclusive; implementations MAY
-expose specific subclasses for clearer diagnostics:
+### 12.1 Stable diagnostic taxonomy
 
-- bad magic, unsupported outer file version, unsupported inner FCA archive
-  version, unsupported key-pair suite, wrong kind, malformed prefix;
-- oversized or malformed header;
-- local header, recipient, body, or KDF resource-cap exceeded;
-- malformed recipient entry, invalid recipient type name, unknown critical
-  recipient, no supported recipient;
-- illegal recipient mixing;
-- recipient unwrap failure, invalid KDF parameters, wrong passphrase/key;
-- caller passphrase outside the fixed v1 byte-length bound;
-- plugin recipient failure;
-- recipient candidate key failed header MAC verification;
-- passphrase recipient mixed with any other recipient;
-- all-zero X25519 shared secret;
-- non-canonical native X25519 public encoding;
-- header MAC failure;
-- malformed TLV, unknown critical TLV;
-- archive extension, manifest, entry extension, path, or plaintext resource-cap
-  exceeded;
-- payload-stream structural defects, truncation, authentication failure, or
-  trailing data;
-- malformed public key or private key;
-- unsupported public-key or private-key version;
-- private-key unlock failure;
-- unsafe or unsupported archive entry;
-- critical archive feature disabled by local extraction policy.
+The public conformance contract uses specification-level diagnostic class
+identifiers. It does not use Rust type or variant names, English display text,
+CLI formatting, or implementation-only subclasses.
+
+Every rejected conformance case MUST carry both:
+
+- a nonempty `condition_id` naming the exact rule exercised; and
+- one diagnostic class from the following registry.
+
+| Diagnostic class | Meaning | FerroCrypt mapping |
+|---|---|---|
+| `truncated` | Top-level `.fcr` framing ended before the prefix, declared header, or header MAC was complete | `InvalidFormat(Truncated)` |
+| `bad_magic` | The top-level `FCR\0` magic does not match | `InvalidFormat(BadMagic)` |
+| `not_a_key_file` | The input is not a recognized FerroCrypt key artifact | `InvalidFormat(NotAKeyFile)` |
+| `wrong_kind` | An `FCR\0` artifact has the wrong kind for the requested operation | `InvalidFormat(WrongKind)` |
+| `wrong_key_file_type` | A recognized key artifact is not the requested public/private key form | `InvalidFormat(WrongKeyFileType)` |
+| `unsupported_outer_version` | A nonzero `.fcr` outer-container version is unsupported | `UnsupportedVersion(OlderFile)` or `UnsupportedVersion(NewerFile)` |
+| `unsupported_fca_version` | A nonzero FCA archive version is unsupported | `InvalidFormat(UnsupportedArchiveVersion)` |
+| `unsupported_public_key_version` | A nonzero public-key encoding version is unsupported | `UnsupportedVersion(OlderPublicKey)` or `UnsupportedVersion(NewerPublicKey)` |
+| `unsupported_private_key_version` | A nonzero private-key encoding version is unsupported | `UnsupportedVersion(OlderKey)` or `UnsupportedVersion(NewerKey)` |
+| `oversized_header` | The declared `.fcr` header exceeds the structural maximum | `InvalidFormat(OversizedHeader)` |
+| `malformed_header` | The `.fcr` prefix or header violates a structural grammar or accounting rule assigned to this class | `InvalidFormat(MalformedHeader)` |
+| `extension_region_too_large` | The declared `.fcr` header extension region exceeds its structural maximum | `InvalidFormat(ExtTooLarge)` |
+| `malformed_tlv` | A TLV region violates framing or canonicality rules | `InvalidFormat(MalformedTlv)` |
+| `unknown_critical_tlv` | A well-formed critical TLV is unsupported | `InvalidFormat(UnknownCriticalTag)` |
+| `recipient_count_out_of_range` | The recipient count violates structural bounds | `InvalidFormat(RecipientCountOutOfRange)` |
+| `malformed_type_name` | A recipient type name violates §3.3 | `InvalidFormat(MalformedTypeName)` |
+| `malformed_recipient_entry` | Recipient framing or recipient-specific structural validation failed | `InvalidFormat(MalformedRecipientEntry)` |
+| `recipient_flags_reserved` | A reserved recipient flag bit is nonzero | `InvalidFormat(RecipientFlagsReserved)` |
+| `unknown_critical_recipient` | A well-formed critical recipient type is unsupported | `UnknownCriticalRecipient` |
+| `no_supported_recipient` | No supported recipient type is present | `NoSupportedRecipient` |
+| `incompatible_recipients` | The recipient set violates a mixing policy | `IncompatibleRecipients` |
+| `recipient_unwrap_failed` | No supported recipient accepted the supplied credential | `RecipientUnwrapFailed` |
+| `header_authentication_failed` | A candidate file key failed header-MAC verification | `HeaderTampered` or `HeaderMacFailedAfterUnwrap` |
+| `invalid_kdf_parameters` | Stored KDF parameters violate structural rules | Any `InvalidKdfParams` variant |
+| `resource_cap_exceeded` | Structurally valid data exceeds configured local resource policy | Relevant header, recipient, KDF, key, or archive `*CapExceeded` variant |
+| `payload_authentication_failed` | Payload-chunk authentication failed | `PayloadTampered` |
+| `payload_truncated` | The encrypted payload ended before a valid final chunk | `PayloadTruncated` |
+| `malformed_payload_stream` | The payload STREAM transcript violates structural rules | `InvalidFormat(MalformedPayloadStream)` |
+| `extra_data_after_payload` | Bytes follow the authenticated final payload chunk | `ExtraDataAfterPayload` |
+| `payload_chunk_count_exceeded` | The payload exceeds the permitted counter/chunk range | `PayloadChunkCountExceeded` |
+| `malformed_archive` | The authenticated FCA payload violates header, manifest, or content-region grammar | `MalformedArchive` |
+| `unsafe_archive_path` | An FCA path violates the portable path-safety grammar | `UnsafeArchivePath` |
+| `invalid_archive_tree` | The FCA manifest violates tree-shape or collision rules | `InvalidArchiveTree` |
+| `malformed_public_key` | A public-key artifact violates its encoding or canonicality rules | `InvalidFormat(MalformedPublicKey)` |
+| `unsupported_key_type` | A well-formed key type is unsupported | `UnsupportedKeyType` |
+| `malformed_private_key` | A private-key artifact violates its encoding or post-unlock consistency rules | `InvalidFormat(MalformedPrivateKey)` |
+| `private_key_unlock_failed` | Private-key authentication failed for the supplied passphrase or modified file | `KeyFileUnlockFailed` |
+
+Conformance case rows store only the diagnostic-class identifier. The final
+column documents FerroCrypt's structured-error mapping for replay; it does not
+make a Rust type name part of the cross-language corpus schema or authorize
+renaming a public FerroCrypt error variant.
+
+Different exact conditions may intentionally map to one class. For example, the
+credential-independent all-zero X25519 ephemeral value and a canonical nonzero
+small-order value that produces an all-zero shared secret have distinct
+`condition_id` values but both map to `malformed_recipient_entry`. The latter
+condition uses `condition_id = x25519_all_zero_shared_secret`.
+
+Validation phase is observable where it changes the class. In particular, an
+undersized declared `header_len` is not rejected during prefix parsing merely
+for being below 31. A reader first reads exactly the declared header and the
+32-byte header MAC. If the MAC bytes are incomplete, the class is `truncated`;
+if the complete framing is present and `header_fixed` cannot fit, the class is
+`malformed_header`.
+
+The initial corpus pins this boundary with:
+
+```text
+header_len = 0, no header-MAC bytes       -> truncated
+header_len = 0, all 32 header-MAC bytes   -> malformed_header
+```
+
+Implementations MAY expose more specific local subclasses, but their corpus
+replay layer MUST map structured errors to the stable class registry without
+parsing English text. Existing class identifiers and meanings MUST NOT be
+renamed or repurposed. New stable classes MAY be appended when a future
+normative distinction or shipping implementation requires one.
+
+FerroCrypt's English display strings for unsupported encodings reported with an
+upgrade recommendation MUST use these exact forms, substituting the raw byte as
+two uppercase hexadecimal digits:
+
+```text
+Unsupported .fcr outer-container version byte 0xNN. Upgrade FerroCrypt.
+Unsupported FCA archive version byte 0xNN. Upgrade FerroCrypt.
+Unsupported public-key encoding version byte 0xNN. Upgrade FerroCrypt.
+Unsupported private-key encoding version byte 0xNN. Upgrade FerroCrypt.
+```
+
+For FerroCrypt's retained older-version error variants, the English display
+strings MUST use these exact neutral forms and MUST NOT advise installing an
+older release or regenerating a key:
+
+```text
+Unsupported .fcr outer-container version byte 0xNN.
+Unsupported public-key encoding version byte 0xNN.
+Unsupported private-key encoding version byte 0xNN.
+```
+
+For the encodings defined here, zero is reserved and structurally malformed in
+all four stored version domains: `.fcr`, FCA, public-key, and private-key. Every
+defined nonzero encoding version is supported. An older-version diagnostic is
+therefore unreachable for current valid artifacts. If a later implementation
+rejects a valid artifact covered by an earlier compatibility baseline, that is
+a compatibility defect, not a reason to install an older release or regenerate
+a key.
+
+English wording is not part of the cross-language conformance contract; callers
+MUST use structured errors rather than parse display strings. The raw `u8`
+version value MUST remain available in the structured version error.
+
+### 12.2 Invariant and capability-relative expectations
+
+Structural, canonicality, authentication, and security requirements are
+invariant. A later implementation MUST NOT reclassify malformed framing,
+reserved bits, bad authentication tags, unsafe archive paths, or prohibited
+X25519 shared secrets as valid.
+
+An outcome caused only by the implementation's current feature set is
+capability-relative. Examples include an unsupported future stored version, an
+unknown critical recipient or TLV, and a grammar-valid but unsupported key
+type.
+
+The frozen corpus identifies such features with these capability-ID forms:
+
+```text
+outer_version:0xNN
+fca_version:0xNN
+public_key_version:0xNN
+private_key_version:0xNN
+recipient_type:<type_name>
+outer_tlv:0xNNNN
+private_key_tlv:0xNNNN
+fca_archive_tlv:0xNNNN
+fca_entry_tlv:0xNNNN
+key_type:<type_name>
+```
+
+In these forms, `NN` and `NNNN` denote exactly two and four uppercase
+hexadecimal digits, respectively. `<type_name>` is the exact grammar-valid type
+name from §3.3.
+
+The reserved `0x00` value in any stored version domain MUST NOT be represented
+as a capability ID. Reserved-zero cases are invariant.
+
+An invariant case MUST use `capability_id = -`. A capability-relative case MUST
+name exactly one relevant capability ID.
+
+Every replay implementation MUST declare its supported capability-ID set before
+evaluating cases. It MUST assert an invariant case unconditionally. It MUST
+assert a capability-relative case's stored outcome when the named capability is
+absent, and MUST omit only that outcome assertion when the capability is
+present. Even when the outcome assertion is omitted, the case row, bytes,
+digest, schema, and provenance remain subject to validation.
+
+Equivalently:
+
+```text
+assert_stored_outcome =
+    expectation_scope == invariant
+    OR capability_id NOT IN declared_capabilities
+```
+
+When a capability becomes supported, its behavior MUST be covered by new cases
+appended in a later corpus revision. The earlier capability-relative case
+remains immutable evidence of the earlier baseline; it is not edited or
+reinterpreted.
+
+### 12.3 Frozen public conformance corpus
+
+**Identity and schema.** The frozen public corpus is stored at:
+
+```text
+ferrocrypt-lib/testvectors/wire/
+```
+
+It is distinct from the mutable development suite at `testvectors/suite/`,
+internal regression fixtures at `tests/fixtures/`, the valid-only compatibility
+net at `tests/fixtures/frozen/v0.3.0/`, and primitive known-answer material at
+`testvectors/kat/`.
+
+For the initial stable publication:
+
+```text
+SCHEMA-VERSION  = 1
+CORPUS-REVISION = 1
+baseline_id     = 0.3.0
+```
+
+`SCHEMA-VERSION` identifies the manifest grammar, `CORPUS-REVISION` identifies
+append-only corpus content, and `baseline_id` identifies the compatibility
+promise first evidenced by a case. This publication is **the `0.3.0` frozen
+conformance corpus**.
+
+Revision 1 uses this repository layout:
+
+```text
+testvectors/wire/
+├── README.md
+├── SCHEMA-VERSION
+├── CORPUS-REVISION
+├── baselines.tsv
+├── diagnostic-classes.tsv
+├── credentials.tsv
+├── origins.tsv
+├── cases.tsv
+├── errata.tsv
+├── artifacts/
+│   ├── fcr/
+│   ├── public-key/
+│   └── private-key/
+├── expected/
+│   ├── plaintext/
+│   ├── public-key/
+│   └── private-key/
+├── kat/
+│   └── stream/
+└── tools/
+```
+
+The manifest tables use these exact columns:
+
+- `baselines.tsv`: `baseline_id`, `established_by_release`,
+  `parent_baseline_id`, `introduced_in_corpus_revision`;
+- `diagnostic-classes.tsv`: `class_id`, `description_ref`,
+  `description_sha3_256`, `introduced_in_corpus_revision`;
+- `credentials.tsv`: `credential_id`, `kind`, `primary_ref`,
+  `primary_sha3_256`, `secret_ref`, `secret_sha3_256`,
+  `introduced_in_release`, `introduced_in_corpus_revision`;
+- `origins.tsv`: `origin_id`, `origin_kind`, `anchor_case_id`,
+  `payload_key_ref`, `payload_key_sha3_256`, `stream_nonce_hex`,
+  `introduced_in_release`, `introduced_in_corpus_revision`;
+- `cases.tsv`: `case_id`, `case_type`, `artifact_ref`,
+  `artifact_sha3_256`, `first_required_by_baseline`,
+  `introduced_in_release`, `introduced_in_corpus_revision`, `construction`,
+  `parent_case_id`, `payload_transcript_kind`, `payload_origin_ids`,
+  `credential_id`, `outcome`, `expectation_scope`, `capability_id`,
+  `condition_id`, `diagnostic_class`, `expected_ref`,
+  `expected_sha3_256`;
+- `errata.tsv`: `erratum_id`, `affected_case_id`,
+  `effective_corpus_revision`, `rationale_ref`, `rationale_sha3_256`,
+  `replacement_case_id`, `introduced_in_release`.
+
+All tables MUST be UTF-8 with LF line endings, one header comment naming the
+columns, and tab-separated fields. `#` begins only a whole-line comment; `-`
+represents an inapplicable scalar; and comma-separated IDs represent a list.
+List elements MUST be separated by one comma with no surrounding whitespace.
+Fields MUST NOT contain tabs, CR, LF, `..`, absolute paths, or backslashes.
+Baseline, class, credential, origin, case, erratum, and condition IDs MUST
+match `[a-z0-9][a-z0-9._-]*`. Capability IDs instead use the structured forms
+defined in §12.2. A non-`-` digest field MUST contain exactly 64 lowercase
+hexadecimal characters. Except for the payload-key commitment defined below,
+each non-`-` `*_sha3_256` field MUST equal the SHA3-256 digest of the exact
+bytes named by its corresponding non-`-` `*_ref` field. References MUST use
+POSIX separators and be relative to `testvectors/wire/`.
+
+Each `diagnostic-classes.tsv` `description_ref` MUST identify stable explanatory
+text for the class.
+
+The corpus `README.md` MUST name the authoritative generation and reproduction
+commands and record tool provenance. Corpus-generation code is test tooling,
+not part of FerroCrypt's public library API.
+
+The initial schema permits these exact enumerated values:
+
+```text
+credentials.tsv kind:              passphrase | private_key | none
+origins.tsv origin_kind:            fcr_payload | stream_kat
+cases.tsv case_type:                fcr_decrypt | public_key_decode
+                                    | private_key_open | private_key_validate
+                                    | stream_encrypt_kat
+cases.tsv construction:             original | mutation | fabricated
+cases.tsv payload_transcript_kind:  origins | none | not_applicable
+cases.tsv outcome:                  accept | reject | transcript_equal
+cases.tsv expectation_scope:        invariant | capability_relative
+```
+
+For `payload_transcript_kind = origins`, `payload_origin_ids` MUST be a
+nonempty, duplicate-free list of existing origins in order of first
+contribution. An ordinary `.fcr` case lists one origin; a ciphertext splice
+lists every contributing origin. `none` means a `.fcr`-shaped structural case
+has no genuine encrypted payload transcript. `not_applicable` is required for
+artifacts that do not contain a `.fcr` payload stream. Every
+`case_type = fcr_decrypt` row MUST therefore use `origins` or `none`; every
+other case type MUST use `not_applicable`. `payload_origin_ids` MUST be `-` for
+`none` and `not_applicable`. `parent_case_id` is required exactly for
+mutations and MUST be `-` for other construction types. Construction lineage
+and cryptographic provenance are independent.
+
+Every rejected case MUST provide a nonempty `condition_id` and
+`diagnostic_class` and MUST NOT contain an English-message expectation. Every
+accepted or transcript-equality case MUST provide a byte-exact semantic result
+through `expected_ref` and `expected_sha3_256`. For `.fcr` acceptance this is
+the expected plaintext; for key acceptance it is a byte-exact record of decoded
+fields or key material; for transcript equality it is expected ciphertext.
+Validation success alone is not sufficient evidence. `credential_id` is
+required whenever the case action requires a credential. Non-reject outcomes
+MUST use `diagnostic_class = -`.
+
+The initial `baselines.tsv` row is:
+
+```text
+0.3.0    0.3.0    -    1
+```
+
+A later baseline names its immediate parent and MUST be a superset of every
+ancestor. For a passphrase credential, `primary_ref` identifies the byte-exact
+passphrase and `secret_ref` is `-`. For a private-key credential, `primary_ref`
+identifies `private.key` and `secret_ref` identifies its byte-exact unlock
+passphrase. A `none` credential denotes an action that needs no credential
+material. All credentials are public test material; their filenames and the
+corpus `README.md` MUST make that status explicit and warn against operational
+reuse.
+
+**Publication and contract boundary.** The stable `v0.3.0` Git tag permanently
+addresses the initial publication at:
+
+```text
+https://github.com/alexylon/ferrocrypt/tree/v0.3.0/ferrocrypt-lib/testvectors/wire
+```
+
+The compatibility baseline and frozen corpus are distinct. The baseline is the
+normative read-compatibility promise; the corpus is committed evidence that
+implementations honor it.
+
+The frozen contract comprises the manifest rows, referenced artifact and
+expected-result bytes, their digests, and their semantic expectations. It does
+not include English error prose or Rust type names. The manifests also record
+each case's credential, construction lineage, first required baseline,
+expectation scope, and capability ID where applicable.
+
+**Revision and provenance policy.** Existing manifest rows, referenced artifact
+bytes, expected results, digests, class meanings, credentials, and provenance
+records MUST NOT be edited, removed, reordered, or regenerated.
+
+`CORPUS-REVISION` increments whenever a case, origin, credential, diagnostic
+class, baseline, or erratum is appended. Corrections use append-only errata
+and, where needed, a new replacement case; an erratum MUST NOT conceal an
+implementation regression, and tagged history remains unchanged. Its rationale
+MUST state whether the error concerns generation, metadata, specification, or
+classification.
+Current-revision replay excludes an affected case only at or after the
+erratum's `effective_corpus_revision`; a replacement is a new case with its own
+bytes, digest, and provenance. `replacement_case_id` MAY be `-` when no
+replacement is appropriate. An incompatible manifest-grammar change increments
+`SCHEMA-VERSION`; consumers MUST still be able to read the earlier schema at the
+stable tag that published it. A corpus revision does not by itself change any
+of the four stored version domains; one changes only when its serialized
+semantics change incompatibly.
+
+Provenance is recorded per actual payload STREAM encryption operation, not per
+case or per accept/reject outcome. When copied, mutated, fabricated, or spliced
+containers include genuine payload ciphertext, they reference its contributing
+encryption origins in order of first contribution. Each origin is counted once
+regardless of how many cases reference it. Every origin has an immutable anchor
+case. `stream_nonce_hex` MUST be exactly 38 lowercase hexadecimal characters
+representing a 19-byte prefix. Independent origins MUST use distinct nonce
+prefixes and SHOULD use distinct payload keys. A STREAM KAT origin MUST
+reference its fixed payload key through `payload_key_ref`; a `.fcr` payload
+origin normally uses `payload_key_ref = -` and records only the
+`payload_key_sha3_256 = SHA3-256(payload_key)` commitment. The replay derives
+and verifies that commitment wherever credentials permit. All committed
+credentials, fixed keys, and nonces are public test material and MUST NOT be
+reused operationally.
+
+**Minimum revision-1 evidence.** Corpus revision 1 MUST cover at least:
+
+| Area | Required evidence |
+|---|---|
+| Valid `.fcr` files | Native `argon2id`; native X25519; multiple X25519 recipients; empty, 1-byte, exact-65,536-byte, 65,537-byte, and multi-chunk payloads |
+| Prefix and framing | Bad magic; an invariant `.fcr` outer-container version `0x00` case classified as `malformed_header`; a `.fcr` outer-container version `0x02` capability case classified as `unsupported_outer_version`; wrong kind; nonzero flags; the structural maximum; truncation at each framing boundary; and both undersized-header precedence outcomes |
+| Header | Fixed-field accounting, recipient count and range, extension length, header-MAC tamper after successful unwrap, and exact authenticated scope |
+| Recipient framing | Truncated entry headers and bodies, invalid lengths, malformed type names, reserved flags, unknown critical and ignorable recipients, no supported recipient, and illegal mixing |
+| `argon2id` recipient | Valid, wrong passphrase, every body field tampered, invalid body length, invalid and locally capped KDF parameters, and recipient flags |
+| X25519 recipient | Valid, multiple recipients, wrong private key, every body field tampered, invalid length and flags, noncanonical and all-zero ephemeral preflight, and a canonical nonzero small-order ephemeral value that produces an all-zero shared secret |
+| `.fcr` TLV | Empty region, valid unknown ignorable, unknown critical, reserved tag, duplicate and out-of-order tags, truncated header and value, and oversized region and value |
+| Payload STREAM | Independent byte-exact known-answer tests, authentication failure, truncation, forbidden empty final chunk after data, trailing data, exact-boundary finalization, and chunk-count-boundary evidence |
+| `public.key` | Canonical file; optional LF; checksum, padding, case, whitespace, and length failures; an invariant public-key encoding version `0x00` case classified as `malformed_public_key`; a public-key encoding version `0x02` capability case classified as `unsupported_public_key_version`; unsupported type; canonical X25519 material; aliases; field-prime boundaries; all zero; and wrong lengths |
+| `private.key` | Canonical valid and openable file; wrong passphrase; cleartext-AAD and wrapped-secret tamper; malformed, truncated, and trailing data; wrong kind or key-file type; an invariant private-key encoding version `0x00` case classified as `malformed_private_key`; a private-key encoding version `0x02` capability case classified as `unsupported_private_key_version`; caps; TLVs; and public/secret consistency |
+| FCA fixed header | Valid file and directory roots; bad magic; an invariant FCA archive version `0x00` case classified as `malformed_archive`; an FCA archive version `0x02` capability case classified as `unsupported_fca_version`; flags; counts; archive-extension length; manifest length; total-byte accounting; and truncation |
+| FCA manifest and tree | File and directory entries, acceptance of canonical and permitted noncanonical order, duplicate and ASCII-case-colliding paths, missing parents, child under file, multiple roots, invalid kinds, modes, sizes, and totals |
+| FCA paths | Absolute, parent, and current components; separators; NUL, control, and reserved characters; trailing dot and space; Windows device names; depth, component, and total-length limits; valid Unicode |
+| FCA extensions | Archive-level and per-entry TLV namespaces: ignorable, critical, malformed, and reserved tags; per-region, per-value, and aggregate entry-extension caps |
+| FCA content and extraction | Exact file contents, short content, trailing content, unsafe or unsupported entries, and representative extraction rejection classes without unsafe final output |
+| Resource policy | Structural maxima and configurable local caps for headers, recipients, KDFs, key files, manifests, paths, plaintext totals, and extension regions |
+
+The X25519 during-operation all-zero-shared-secret case MUST use this canonical,
+nonzero small-order ephemeral public value:
+
+```text
+e0 eb 7a 7c 3b 41 b8 ae 16 56 e3 fa f1 9f c4 6a
+da 09 8d eb 9c 32 b1 fd 86 62 05 16 5f 49 b8 00
+```
+
+It MUST pass the credential-independent canonical/nonzero preflight, reach the
+X25519 operation, produce the prohibited all-zero shared secret, and reject
+with `condition_id = x25519_all_zero_shared_secret` and diagnostic class
+`malformed_recipient_entry`.
+
+**Independent STREAM transcripts.** The corpus MUST include independent,
+byte-exact payload STREAM known-answer tests (KATs) with these minimum
+transcripts:
+
+| Case ID | Plaintext bytes | Chunk transcript | Ciphertext bytes |
+|---|---:|---|---:|
+| `stream-empty` | 0 | counter 0, final flag `0x01` | 16 |
+| `stream-exact-65536` | 65,536 | counter 0, final flag `0x01` | 65,552 |
+| `stream-two-chunk-65537` | 65,537 | counter 0, flag `0x00`; counter 1, flag `0x01` | 65,569 |
+
+The plaintext inputs MUST be deterministic and byte-exact; their committed
+bytes and SHA3-256 digests are authoritative.
+
+Each KAT MUST use its own fixed payload key and 19-byte nonce prefix. The
+expected ciphertext MUST be generated by an independent XChaCha20-Poly1305
+implementation using empty AAD and:
+
+```text
+full_nonce = stream_nonce(19) || counter:u32_be || final_flag:u8
+```
+
+The corpus validator MUST reject duplicate KAT payload keys, duplicate KAT
+nonce prefixes, duplicate effective `(payload_key, full_nonce)` pairs among KAT
+chunks, and duplicate nonce prefixes across independent corpus origins.
+Mutated and spliced cases reference existing origins and do not represent new
+encryption operations.
+
+The initial expected bytes MUST be produced by a committed PyNaCl/libsodium
+oracle that is independent of FerroCrypt's production implementation. The
+oracle MUST emit all fixed inputs and expected outputs deterministically, MUST
+import no FerroCrypt production code, MUST record the PyNaCl and libsodium
+versions used for initial generation, and MUST remain a generation and
+reproduction tool rather than a runtime dependency. It MUST be committed in the
+corpus with the KATs. Continuous integration compares FerroCrypt output with the
+committed bytes and does not install or run PyNaCl. Round-trip agreement between
+FerroCrypt's own writer and reader is not sufficient transcript evidence.
+
+**Replay requirements.** Normal conformance replay MUST parse every manifest
+table strictly; verify every referenced digest; reject duplicate IDs, invalid
+paths and list forms, and dangling references; apply effective errata without
+deleting history; exercise `.fcr`, public-key, and private-key cases through
+public interfaces where possible; apply §12.2's capability rule; compare
+successful results with their exact expected bytes or decoded fields; and map
+structured errors to the stable diagnostic taxonomy without comparing display
+text.
+
+Crate-internal replay additionally MUST encrypt and decrypt the committed
+STREAM KATs, derive payload keys for accessible `.fcr` origin anchors, verify
+their commitments and origin/nonce hygiene, and prove that the canonical
+small-order X25519 vector reaches the during-X25519 all-zero-shared-secret check
+rather than the zero-ephemeral preflight.
+
+### 12.4 Conformance claims
 
 Implementations MAY claim conformance at one of these levels:
 
@@ -1996,12 +2579,14 @@ Implementations MAY claim conformance at one of these levels:
 An implementation MUST NOT claim support for a recipient type unless it passes
 that recipient type's required test vectors.
 
-A conforming FerroCrypt v1 release MUST ship committed test vectors and publish
-frozen wire vectors at a stable HTTPS URL. Vectors MUST cover valid and invalid
-`.fcr`, `public.key`, `private.key`, payload-stream, recipient, TLV, KDF,
-prefix, and archive cases, including FCA archive-level and per-entry extension
-regions. Armor vectors are required only for releases that ship the optional
-armor transport (deferred in v1.0; see §10).
+A conforming implementation that claims the `0.3.0` compatibility baseline MUST
+pass every applicable invariant case and every asserted capability-relative
+case in corpus revision 1. A conforming FerroCrypt release MUST ship committed
+vectors and publish its frozen corpus at a stable HTTPS URL. Vectors MUST cover
+valid and invalid `.fcr`, `public.key`, `private.key`, payload STREAM,
+recipient, TLV, KDF, prefix, and FCA cases, including archive-level and
+per-entry extension regions. Armor vectors are required only for a release that
+ships the optional armor transport described in §10.
 
 Each recipient type specification MUST publish positive, wrong-key, malformed,
 and tamper vectors, including unknown-non-critical, illegal-mixing, and
@@ -2009,9 +2594,9 @@ header-MAC-failure cases where applicable. Recipient vectors SHOULD be reusable
 by independent implementations without requiring access to implementation-
 specific code.
 
-Frozen vectors MUST NOT be regenerated in a patch or minor release. If a change
-breaks a frozen v1.x fixture, that change is breaking and requires a new format
-version.
+A release MUST NOT satisfy conformance by regenerating a frozen artifact around
+changed behavior. If an implementation change breaks an invariant frozen case,
+the implementation or specification has regressed; the case is not rewritten.
 
 ---
 
@@ -2026,7 +2611,7 @@ version.
 | Field | Size | Value |
 |---|---:|---|
 | `magic` | 4 | `FCR\0` |
-| `version` | 1 | `0x01` |
+| `version` | 1 | `0x01` (`.fcr` outer-container version) |
 | `kind` | 1 | `0x45` (`E`) |
 | `prefix_flags` | 2 | zero |
 | `header_len` | 4 | `<= 16,777,216` |
@@ -2079,7 +2664,7 @@ ferrocrypt/v1/payload
 ferrocrypt/v1/header
 ```
 
-Core v1 recipient design rule:
+Core recipient design rule for `.fcr` outer-container version `0x01`:
 
 ```text
 Keep the .fcr container stable and simple.
@@ -2087,7 +2672,7 @@ Put recipient-specific cryptography in independently specified recipient types.
 Require every recipient type to be namespaced, validated, documented, and tested.
 ```
 
-### 13.6 FCA v1 payload
+### 13.6 FCA archive version `0x01` payload
 
 ```text
 fca_payload = fca_header(27) || archive_ext || manifest || file_contents
@@ -2098,7 +2683,7 @@ FCA fixed header:
 | Field | Size | Value / meaning |
 |---|---:|---|
 | `magic` | 4 | `FCA\0` |
-| `version` | 1 | `0x01` |
+| `version` | 1 | `0x01` (FCA archive version) |
 | `flags` | 2 | zero |
 | `entry_count` | 4 | manifest entry count |
 | `archive_ext_len` | 4 | archive-level TLV bytes |
@@ -2118,14 +2703,14 @@ FCA manifest entry fixed prefix:
 | `path` | `path_len` |
 | `entry_ext` | `entry_ext_len` |
 
-FCA v1 object kinds:
+FCA archive version `0x01` object kinds:
 
 | Kind | Meaning |
 |---:|---|
 | `0x01` | regular file |
 | `0x02` | directory |
 
-FCA v1 extension rule:
+FCA archive version `0x01` extension rule:
 
 ```text
 Use shared TLV grammar.

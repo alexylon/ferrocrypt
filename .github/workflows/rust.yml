@@ -24,6 +24,8 @@ jobs:
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # stable
+        with:
+          toolchain: stable
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
@@ -111,6 +113,7 @@ jobs:
       - name: Install stable toolchain with rustfmt
         uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # stable
         with:
+          toolchain: stable
           components: rustfmt
 
       - name: Check formatting
@@ -131,6 +134,8 @@ jobs:
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # stable
+        with:
+          toolchain: stable
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
@@ -152,6 +157,7 @@ jobs:
       - name: Install stable toolchain with clippy
         uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # stable
         with:
+          toolchain: stable
           components: clippy
 
       - name: Cache cargo artifacts
@@ -170,6 +176,8 @@ jobs:
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # stable
+        with:
+          toolchain: stable
 
       - name: Install cargo-audit
         run: cargo install cargo-audit
@@ -184,6 +192,8 @@ jobs:
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # stable
+        with:
+          toolchain: stable
 
       - name: Install cargo-vet
         run: cargo install cargo-vet
@@ -204,6 +214,7 @@ jobs:
       - name: Install stable toolchain with clippy
         uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # stable
         with:
+          toolchain: stable
           components: clippy
 
       - name: Cache cargo artifacts
@@ -368,6 +379,8 @@ jobs:
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # stable
+        with:
+          toolchain: stable
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1

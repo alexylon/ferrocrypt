@@ -22,6 +22,7 @@ jobs:
       - name: Install nightly toolchain with clippy
         uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # nightly
         with:
+          toolchain: nightly
           components: clippy
 
       - name: Cache cargo artifacts

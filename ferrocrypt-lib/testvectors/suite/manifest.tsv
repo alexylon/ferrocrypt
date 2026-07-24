@@ -15,7 +15,7 @@ cases/x25519-multi-valid.fcr	decrypt	private-key:keys/recipient-b.private.key,un
 cases/argon2id-valid.fcr	decrypt	passphrase:wrong-passphrase	error	RecipientUnwrapFailed(argon2id)	Decryption failed: wrong passphrase or modified file
 cases/x25519-valid.fcr	decrypt	private-key:keys/recipient-b.private.key,unlock=suite-passphrase-not-secret-do-not-reuse	error	RecipientUnwrapFailed(x25519)	Decryption failed: no matching recipient or modified file
 cases/prefix-bad-magic.fcr	decrypt	-	error	InvalidFormat(BadMagic)	Not a FerroCrypt file
-cases/prefix-newer-version.fcr	decrypt	-	error	UnsupportedVersion(NewerFile)	Newer file format (v2). Upgrade FerroCrypt.
+cases/prefix-newer-version.fcr	decrypt	-	error	UnsupportedVersion(NewerFile)	Unsupported .fcr version byte 0x02. Upgrade FerroCrypt.
 cases/prefix-wrong-kind.fcr	decrypt	-	error	InvalidFormat(WrongKind)	Wrong file kind: 0x4B
 cases/prefix-nonzero-flags.fcr	decrypt	-	error	InvalidFormat(MalformedHeader)	File header is malformed
 cases/prefix-oversized-header-len.fcr	decrypt	-	error	InvalidFormat(OversizedHeader)	File header is too large (16777217 bytes)
@@ -43,7 +43,7 @@ cases/public-key-uppercase.key	read-public-key	-	error	InvalidInput	Recipient st
 cases/public-key-bad-bech32.key	read-public-key	-	error	InvalidInput	Invalid recipient string: fcr1qyqqvqqqqqs8sv34x5cnnw2l4g4s2h6v55nvjta0qs9j5a3u4eksdna53n9…
 cases/public-key-bad-checksum.key	read-public-key	-	error	InvalidFormat(MalformedPublicKey)	Public key is malformed
 cases/privatekey-bad-magic.private.key	validate-private-key	-	error	InvalidFormat(NotAKeyFile)	Not a FerroCrypt key file
-cases/privatekey-newer-version.private.key	validate-private-key	-	error	UnsupportedVersion(NewerKey)	Newer key format (v2). Upgrade FerroCrypt.
+cases/privatekey-newer-version.private.key	validate-private-key	-	error	UnsupportedVersion(NewerKey)	Unsupported private-key version byte 0x02. Upgrade FerroCrypt.
 cases/privatekey-wrong-kind.private.key	validate-private-key	-	error	InvalidFormat(WrongKind)	Wrong file kind: 0x45
 keys/recipient-a.public.key	validate-private-key	-	error	InvalidFormat(WrongKeyFileType)	Wrong key file kind (public vs private)
 keys/recipient-a.private.key	read-public-key	-	error	InvalidFormat(WrongKeyFileType)	Wrong key file kind (public vs private)
@@ -52,7 +52,7 @@ cases/privatekey-truncated.private.key	validate-private-key	-	error	InvalidForma
 cases/privatekey-trailing-byte.private.key	validate-private-key	-	error	InvalidFormat(MalformedPrivateKey)	Private key is malformed
 cases/x25519-valid.fcr	decrypt	private-key:keys/recipient-a-tampered.private.key,unlock=suite-passphrase-not-secret-do-not-reuse	error	KeyFileUnlockFailed	Private key unlock failed: wrong passphrase or modified key file
 cases/fca-bad-magic.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	MalformedArchive	Malformed archive: bad magic
-cases/fca-unsupported-version.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(UnsupportedArchiveVersion)	Unsupported archive version (v2). Upgrade FerroCrypt.
+cases/fca-unsupported-version.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(UnsupportedArchiveVersion)	Unsupported FCA archive version byte 0x02. Upgrade FerroCrypt.
 cases/fca-nonzero-flags.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	MalformedArchive	Malformed archive: header has non-zero flags
 cases/fca-zero-entry-count.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	MalformedArchive	Malformed archive: no entries declared
 cases/fca-zero-manifest-len.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	MalformedArchive	Malformed archive: manifest bytes do not match the declared layout
@@ -82,7 +82,7 @@ cases/fca-entry-ext-ignorable.fcr	decrypt	passphrase:suite-passphrase-not-secret
 cases/fca-entry-ext-malformed.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(MalformedTlv)	Extension region is malformed
 cases/fca-entry-ext-critical.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(UnknownCriticalTag)	Unknown required file feature (tag 0x8001). Upgrade FerroCrypt.
 cases/public-key-noncanonical-padding.key	read-public-key	-	error	InvalidFormat(MalformedPublicKey)	Public key is malformed
-cases/public-key-newer-version.key	read-public-key	-	error	UnsupportedVersion(NewerPublicKey)	Newer public-key format (v2). Upgrade FerroCrypt.
+cases/public-key-newer-version.key	read-public-key	-	error	UnsupportedVersion(NewerPublicKey)	Unsupported public-key version byte 0x02. Upgrade FerroCrypt.
 cases/public-key-crlf.key	read-public-key	-	error	InvalidFormat(MalformedPublicKey)	Public key is malformed
 cases/public-key-leading-space.key	read-public-key	-	error	InvalidFormat(MalformedPublicKey)	Public key is malformed
 cases/public-key-zero-material.key	read-public-key	-	error	InvalidFormat(MalformedPublicKey)	Public key is malformed

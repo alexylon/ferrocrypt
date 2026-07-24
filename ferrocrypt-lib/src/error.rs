@@ -883,8 +883,9 @@ pub enum FormatDefect {
     /// file size, or trailing bytes after the wrapped secret. Per
     /// `FORMAT.md` §8.
     MalformedPrivateKey,
-    /// Inner FCA archive `version` byte is not one this release can
-    /// read. Distinct from the outer `.fcr` / `private.key` version
+    /// Inner FCA archive `version` byte is a nonzero value this release
+    /// cannot read (zero is reserved and rejects as malformed). Distinct
+    /// from the outer `.fcr` / `private.key` version
     /// rejection in [`UnsupportedVersion`]: this variant fires inside
     /// the encrypted payload after the outer container is accepted, so
     /// it is a structural defect of the inner archive grammar (FCA),
@@ -929,7 +930,7 @@ impl std::fmt::Display for FormatDefect {
             Self::UnsupportedArchiveVersion { version } => {
                 write!(
                     f,
-                    "Unsupported archive version (v{version}). Upgrade FerroCrypt."
+                    "Unsupported FCA archive version byte 0x{version:02X}. Upgrade FerroCrypt."
                 )
             }
         }
@@ -945,57 +946,60 @@ impl std::fmt::Display for FormatDefect {
 /// outer file, so it surfaces as [`FormatDefect::UnsupportedArchiveVersion`]
 /// instead:
 ///
-/// - `OlderFile` / `NewerFile` — `.fcr` outer-file version (`FORMAT.md` §3.1);
-/// - `OlderKey` / `NewerKey` — `private.key` wire-version byte
+/// - `OlderFile` / `NewerFile` — `.fcr` outer-container version
+///   (`FORMAT.md` §3.1);
+/// - `OlderKey` / `NewerKey` — private-key encoding version
 ///   (`FORMAT.md` §8). "Key" rather than "PrivateKey" for backwards
-///   compatibility with v0.x callers that pattern-match on the variant
-///   names;
-/// - `OlderPublicKey` / `NewerPublicKey` — `public.key` recipient-payload
-///   version (`FORMAT.md` §7). Distinct from the `Key` pair because the
-///   private-key wire encoding and the public-key payload encoding are
-///   different on-disk shapes that may produce the same logical
-///   keypair-suite v from different bytes.
+///   compatibility with earlier callers that pattern-match on the
+///   variant names;
+/// - `OlderPublicKey` / `NewerPublicKey` — public-key encoding version
+///   (`FORMAT.md` §7). Distinct from the `Key` pair because the
+///   private-key encoding and the public-key encoding are different
+///   on-disk shapes that may map to the same logical key-pair suite
+///   from different bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum UnsupportedVersion {
-    /// Encrypted file version is older than the current release supports.
+    /// `.fcr` outer-container version is older than the current release
+    /// supports.
     OlderFile {
         /// Version byte read from the encrypted-file prefix.
         version: u8,
     },
-    /// Encrypted file version is newer than the current release supports.
+    /// `.fcr` outer-container version is newer than the current release
+    /// supports.
     NewerFile {
         /// Version byte read from the encrypted-file prefix.
         version: u8,
     },
-    /// `private.key` wire version is older than the current release
+    /// Private-key encoding version is older than the current release
     /// accepts.
     OlderKey {
-        /// Wire-version byte read from the `private.key` fixed header.
+        /// Version byte read from the `private.key` fixed header.
         version: u8,
     },
-    /// `private.key` wire version is newer than the current release
+    /// Private-key encoding version is newer than the current release
     /// accepts.
     NewerKey {
-        /// Wire-version byte read from the `private.key` fixed header.
+        /// Version byte read from the `private.key` fixed header.
         version: u8,
     },
-    /// `public.key` recipient-payload version is older than the current
-    /// release accepts. Surfaced when a public recipient (Bech32 string
-    /// or `public.key` file) is offered for encryption but its key-pair
+    /// Public-key encoding version is older than the current release
+    /// accepts. Surfaced when a public recipient (Bech32 string or
+    /// `public.key` file) is offered for encryption but its key-pair
     /// suite is no longer supported by this build. Per `FORMAT.md` §7
     /// and the symmetry rule in §11, a release must not accept a public
     /// key for encryption unless the same key-pair suite remains
     /// supported for private-key decryption.
     OlderPublicKey {
-        /// Wire-version byte read from the recipient payload.
+        /// Version byte read from the decoded recipient payload.
         version: u8,
     },
-    /// `public.key` recipient-payload version is newer than the current
-    /// release accepts. Carries the leading version byte read from the
-    /// recipient payload's offset 0.
+    /// Public-key encoding version is newer than the current release
+    /// accepts. Carries the version byte read from offset 0 of the
+    /// decoded recipient payload.
     NewerPublicKey {
-        /// Wire-version byte from the recipient payload.
+        /// Version byte read from the decoded recipient payload.
         version: u8,
     },
 }
@@ -1004,27 +1008,30 @@ impl std::fmt::Display for UnsupportedVersion {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::OlderFile { version } => {
-                write!(f, "Older file format (v{version}). Use a previous release.")
+                write!(f, "Unsupported .fcr version byte 0x{version:02X}.")
             }
             Self::NewerFile { version } => {
-                write!(f, "Newer file format (v{version}). Upgrade FerroCrypt.")
-            }
-            Self::OlderKey { version } => {
-                write!(f, "Older key format (v{version}). Use a previous release.")
-            }
-            Self::NewerKey { version } => {
-                write!(f, "Newer key format (v{version}). Upgrade FerroCrypt.")
-            }
-            Self::OlderPublicKey { version } => {
                 write!(
                     f,
-                    "Older public-key format (v{version}). Generate a new key pair."
+                    "Unsupported .fcr version byte 0x{version:02X}. Upgrade FerroCrypt."
                 )
+            }
+            Self::OlderKey { version } => {
+                write!(f, "Unsupported private-key version byte 0x{version:02X}.")
+            }
+            Self::NewerKey { version } => {
+                write!(
+                    f,
+                    "Unsupported private-key version byte 0x{version:02X}. Upgrade FerroCrypt."
+                )
+            }
+            Self::OlderPublicKey { version } => {
+                write!(f, "Unsupported public-key version byte 0x{version:02X}.")
             }
             Self::NewerPublicKey { version } => {
                 write!(
                     f,
-                    "Newer public-key format (v{version}). Upgrade FerroCrypt."
+                    "Unsupported public-key version byte 0x{version:02X}. Upgrade FerroCrypt."
                 )
             }
         }
@@ -1419,7 +1426,7 @@ mod tests {
         );
         assert_eq!(
             FormatDefect::UnsupportedArchiveVersion { version: 0xFF }.to_string(),
-            "Unsupported archive version (v255). Upgrade FerroCrypt."
+            "Unsupported FCA archive version byte 0xFF. Upgrade FerroCrypt."
         );
         assert_eq!(
             FormatDefect::RecipientCountOutOfRange { count: 5000 }.to_string(),
@@ -1427,27 +1434,27 @@ mod tests {
         );
         assert_eq!(
             UnsupportedVersion::NewerFile { version: 9 }.to_string(),
-            "Newer file format (v9). Upgrade FerroCrypt."
+            "Unsupported .fcr version byte 0x09. Upgrade FerroCrypt."
         );
         assert_eq!(
             UnsupportedVersion::OlderFile { version: 1 }.to_string(),
-            "Older file format (v1). Use a previous release."
+            "Unsupported .fcr version byte 0x01."
         );
         assert_eq!(
             UnsupportedVersion::NewerKey { version: 9 }.to_string(),
-            "Newer key format (v9). Upgrade FerroCrypt."
+            "Unsupported private-key version byte 0x09. Upgrade FerroCrypt."
         );
         assert_eq!(
             UnsupportedVersion::OlderKey { version: 1 }.to_string(),
-            "Older key format (v1). Use a previous release."
+            "Unsupported private-key version byte 0x01."
         );
         assert_eq!(
             UnsupportedVersion::OlderPublicKey { version: 1 }.to_string(),
-            "Older public-key format (v1). Generate a new key pair."
+            "Unsupported public-key version byte 0x01."
         );
         assert_eq!(
             UnsupportedVersion::NewerPublicKey { version: 9 }.to_string(),
-            "Newer public-key format (v9). Upgrade FerroCrypt."
+            "Unsupported public-key version byte 0x09. Upgrade FerroCrypt."
         );
         assert_eq!(
             InvalidKdfParams::Parallelism(9999).to_string(),

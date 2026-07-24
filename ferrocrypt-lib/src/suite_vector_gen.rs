@@ -617,7 +617,7 @@ fn write_fca_reject_cases(cases: &Path) -> Vec<Case> {
         (
             "fca-unsupported-version.fcr",
             "InvalidFormat(UnsupportedArchiveVersion)",
-            "Unsupported archive version (v2). Upgrade FerroCrypt.",
+            "Unsupported FCA archive version byte 0x02. Upgrade FerroCrypt.",
         ),
         (
             "fca-nonzero-flags.fcr",
@@ -698,7 +698,7 @@ fn write_private_key_reject_cases(keys: &Path, cases: &Path) -> Vec<Case> {
         Case::private_key_err(
             "cases/privatekey-newer-version.private.key",
             "UnsupportedVersion(NewerKey)",
-            "Newer key format (v2). Upgrade FerroCrypt.",
+            "Unsupported private-key version byte 0x02. Upgrade FerroCrypt.",
         ),
         Case::private_key_err(
             "cases/privatekey-wrong-kind.private.key",
@@ -1099,7 +1099,7 @@ fn write_key_file_completion_cases(suite: &Path, cases: &Path) -> Vec<Case> {
         Case::key_err(
             "cases/public-key-newer-version.key",
             "UnsupportedVersion(NewerPublicKey)",
-            "Newer public-key format (v2). Upgrade FerroCrypt.",
+            "Unsupported public-key version byte 0x02. Upgrade FerroCrypt.",
         ),
         Case::key_err(
             "cases/public-key-crlf.key",
@@ -1159,7 +1159,7 @@ const SUITE_SEED: u64 = 0xFECC_0000_5EED_0001;
 /// or changed; different corpus contents must never share a revision.
 /// Regeneration treats this constant as the source of truth and overwrites the
 /// committed file.
-const SUITE_VERSION: u32 = 7;
+const SUITE_VERSION: u32 = 8;
 
 /// Regenerates the committed suite corpus. Ignored in normal test runs;
 /// see the module docs for the invocation and the commit workflow.
@@ -1282,7 +1282,7 @@ fn regenerate_suite_vectors_inner() {
         "cases/prefix-newer-version.fcr",
         "-",
         "UnsupportedVersion(NewerFile)",
-        "Newer file format (v2). Upgrade FerroCrypt.",
+        "Unsupported .fcr version byte 0x02. Upgrade FerroCrypt.",
     ));
     rows.push(Case::err(
         "cases/prefix-wrong-kind.fcr",

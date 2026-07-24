@@ -2196,10 +2196,10 @@ upgrade recommendation MUST use these exact forms, substituting the raw byte as
 two uppercase hexadecimal digits:
 
 ```text
-Unsupported .fcr outer-container version byte 0xNN. Upgrade FerroCrypt.
+Unsupported .fcr version byte 0xNN. Upgrade FerroCrypt.
 Unsupported FCA archive version byte 0xNN. Upgrade FerroCrypt.
-Unsupported public-key encoding version byte 0xNN. Upgrade FerroCrypt.
-Unsupported private-key encoding version byte 0xNN. Upgrade FerroCrypt.
+Unsupported public-key version byte 0xNN. Upgrade FerroCrypt.
+Unsupported private-key version byte 0xNN. Upgrade FerroCrypt.
 ```
 
 For FerroCrypt's retained older-version error variants, the English display
@@ -2207,10 +2207,14 @@ strings MUST use these exact neutral forms and MUST NOT advise installing an
 older release or regenerating a key:
 
 ```text
-Unsupported .fcr outer-container version byte 0xNN.
-Unsupported public-key encoding version byte 0xNN.
-Unsupported private-key encoding version byte 0xNN.
+Unsupported .fcr version byte 0xNN.
+Unsupported public-key version byte 0xNN.
+Unsupported private-key version byte 0xNN.
 ```
+
+The display forms use compact domain names because the full message has to fit
+FerroCrypt's status-line width. The §11.1 canonical names remain the normative
+prose vocabulary; the four compact prefixes stay mutually distinct.
 
 For the encodings defined here, zero is reserved and structurally malformed in
 all four stored version domains: `.fcr`, FCA, public-key, and private-key. Every

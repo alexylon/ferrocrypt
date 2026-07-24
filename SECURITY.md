@@ -39,7 +39,9 @@ first-party audits by this project, so a passing `cargo vet` run means the
 configured supply-chain policy is satisfied; it is not an independent audit
 of each cryptographic dependency by the FerroCrypt project.
 
-The current on-disk format is `.fcr` outer-container version `0x01`.
+The current stored formats are `.fcr` outer-container version `0x01`,
+FCA archive version `0x01`, public-key encoding version `0x01`, and
+private-key encoding version `0x01`.
 Public conformance test vectors are published with stable FerroCrypt
 release 0.3.0. The canonical references are
 [`ferrocrypt-lib/FORMAT.md`](ferrocrypt-lib/FORMAT.md) and the in-tree

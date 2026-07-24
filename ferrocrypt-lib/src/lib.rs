@@ -87,18 +87,19 @@
 //!
 //! ## Format compatibility
 //!
-//! The current stored versions are `.fcr` outer-container version `0x01`,
-//! public-key encoding version `0x01`, and private-key encoding version
-//! `0x01`. The compatibility guarantee starts with the first stable
-//! `0.3.0` release. During the `0.3.0` pre-release series (`-alpha.N`,
-//! `-beta.N`, `-rc.N`), the format is not yet frozen: files written by a
-//! pre-release or by `main` carry no cross-version guarantee and may fail to
-//! decrypt under a later pre-release.
+//! FerroCrypt stores four independent version bytes: `.fcr` outer-container
+//! version `0x01`, FCA archive version `0x01`, public-key encoding version
+//! `0x01`, and private-key encoding version `0x01`. The compatibility
+//! guarantee starts with the first stable `0.3.0` release. During the
+//! `0.3.0` pre-release series (`-alpha.N`, `-beta.N`, `-rc.N`), the format
+//! is not yet frozen: files written by a pre-release or by `main` carry no
+//! cross-version guarantee and may fail to decrypt under a later pre-release.
 //!
-//! Once the format is frozen, files written at `.fcr` outer-container version
-//! `0x01` will decrypt under any later release that supports that version. If
-//! a future release introduces `.fcr` outer-container version `0x02`, version
-//! `0x01` reading will be maintained for compatibility with older files.
+//! Stable `0.3.0` establishes the `0.3.0` compatibility baseline
+//! (`FORMAT.md` §11.4): artifacts that use only the four stored versions
+//! above stay readable under every later release. A future release may
+//! introduce a new version in any one domain; that adds support without
+//! removing baseline read support.
 //!
 //! Older pre-`0.3.0` files and key pairs use a different format family and, for
 //! historical hybrid encryption, a different key-agreement stack. To migrate

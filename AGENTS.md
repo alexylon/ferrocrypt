@@ -235,6 +235,7 @@ recipient_entry = type_name_len(2) || recipient_flags(2) || body_len(4)
     - `stress_test.sh`
 - When touching code, run the relevant checks:
     - `./fmt.sh`
+    - `./check_terminology.sh` — rejects ambiguous bare version wording in live docs and comments; use the `FORMAT.md` §11 domain vocabulary instead.
     - workspace: `cargo clippy --workspace --all-targets -- -D warnings`
     - workspace: `cargo test -- --test-threads=1`
     - lib: `RUSTDOCFLAGS="-D warnings" cargo doc --package ferrocrypt --no-deps` — catches broken intra-doc links and other rustdoc issues that `cargo clippy` does not surface.

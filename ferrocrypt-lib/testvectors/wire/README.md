@@ -1,61 +1,24 @@
-# `testvectors/wire/` — frozen v1 wire-format fixtures
+# `testvectors/wire/` — frozen conformance corpus
 
-**Status:** pre-1.0, currently empty. At the 1.0 release tag, the
-fixtures listed below MUST be populated (see `FORMAT.md` §12). Once
-shipped, they are frozen forever — any change to their bytes is a
-breaking change requiring a `version = 2` bump.
+**Status:** currently empty. The corpus is populated and published with
+stable FerroCrypt release 0.3.0. `FORMAT.md` §12.3 defines its identity,
+directory layout, manifest schema, provenance rules, and freeze policy.
 
 ## Purpose vs `tests/fixtures/`
 
-These are the public conformance contract for FerroCrypt v1. An
+This directory is the public, cross-language conformance contract. An
 independent implementer — someone writing a reader in another language
 or a separate Rust crate with no access to this codebase — should be
-able to fetch this directory and prove their implementation is
-spec-compliant by decrypting each fixture and comparing against the
-expected plaintext.
+able to fetch it and prove their implementation spec-compliant by
+replaying every case and comparing against the committed expectations.
 
 This is a different role from `tests/fixtures/`. That directory is an
 internal regression net for *this* codebase that the team regenerates
 when the wire format intentionally changes. `testvectors/wire/` is a
-one-way commitment to the outside world: once v1.0 ships, the bytes
-never change.
+one-way commitment to the outside world: once the stable release tag
+ships, committed rows and bytes are append-only and immutable;
+corrections use the errata mechanism from `FORMAT.md` §12.3.
 
-## Intended contents
-
-Each fixture is the raw bytes of a `.fcr` file or key file produced by
-the v1 writer. Accompanying `.plaintext` files contain the expected
-decryption result (where deterministic).
-
-| Fixture | Purpose |
-|---|---|
-| `argon2id-empty.fcr` | Passphrase recipient (`argon2id`) `.fcr` with 0-byte plaintext |
-| `argon2id-1byte.fcr` | Passphrase recipient (`argon2id`) `.fcr` with 1-byte plaintext |
-| `argon2id-multichunk.fcr` | Passphrase recipient (`argon2id`) `.fcr` spanning > 1 STREAM chunk |
-| `x25519-empty.fcr` | Public-key recipient (`x25519`) `.fcr` with 0-byte plaintext |
-| `x25519-1byte.fcr` | Public-key recipient (`x25519`) `.fcr` with 1-byte plaintext |
-| `x25519-multichunk.fcr` | Public-key recipient (`x25519`) `.fcr` spanning > 1 STREAM chunk |
-| `public.key` | Canonical v1 public key (text file, `fcr1…\n`) |
-| `private.key` | Matching v1 private key (binary, passphrase `test`) |
-| `passphrase.txt` | Passphrase used to wrap `private.key` and to seal the `argon2id-*.fcr` fixtures |
-
-## Policy
-
-- Fixtures are generated once and committed as binary files.
-- The v1 library MUST decrypt every fixture in this directory.
-- If a future change breaks any fixture, that change is breaking and
-  requires a `version = 2` bump.
-- Fixture generation uses real OS-CSPRNG, so envelope nonces, salts,
-  and ephemeral keys are not reproducible — but the fixtures
-  themselves remain bit-for-bit stable.
-
-## Generation
-
-Fixtures may be regenerated **only** during the initial v1 freeze. The
-generation code should live in a `cargo run --bin generate-wire-vectors`
-binary or similar so the procedure is explicit and reviewable. It is
-not part of the library's public API.
-
-Both the generator and the populated fixtures are 1.0-release
-deliverables, not deferred follow-up work. Until they land, this
-README documents the intended layout; individual fixtures land when
-the generator does.
+When the corpus lands, this README is replaced by the full document
+required by `FORMAT.md` §12.3, including the authoritative generation
+and reproduction commands.

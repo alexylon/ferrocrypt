@@ -72,6 +72,15 @@ const PLAINTEXT_FILE_MODE: u32 = 0o644;
 /// unknown-recipient fixtures.
 const UNKNOWN_TYPE_NAME: &str = "mlkem768";
 
+// u-coordinate of a known small-order Curve25519 point (`FORMAT.md`
+// §4.2): canonical and nonzero, so it passes the credential-independent
+// preflight, while X25519 with any clamped scalar yields the prohibited
+// all-zero shared secret.
+const SMALL_ORDER_EPHEMERAL: [u8; 32] = [
+    0xe0, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae, 0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f, 0xc4, 0x6a,
+    0xda, 0x09, 0x8d, 0xeb, 0x9c, 0x32, 0xb1, 0xfd, 0x86, 0x62, 0x05, 0x16, 0x5f, 0x49, 0xb8, 0x00,
+];
+
 // `.fcr` prefix field offsets per `FORMAT.md` §3.1. The layout is frozen
 // at version `0x01`, so the generator pins the byte positions directly.
 const PREFIX_MAGIC_OFFSET: usize = 0;
@@ -1159,7 +1168,7 @@ const SUITE_SEED: u64 = 0xFECC_0000_5EED_0001;
 /// or changed; different corpus contents must never share a revision.
 /// Regeneration treats this constant as the source of truth and overwrites the
 /// committed file.
-const SUITE_VERSION: u32 = 9;
+const SUITE_VERSION: u32 = 10;
 
 /// Regenerates the committed suite corpus. Ignored in normal test runs;
 /// see the module docs for the invocation and the commit workflow.
@@ -1437,6 +1446,28 @@ fn regenerate_suite_vectors_inner() {
     );
     rows.push(Case::err(
         "cases/x25519-zero-ephemeral.fcr",
+        &key_a,
+        "InvalidFormat(MalformedRecipientEntry)",
+        "Recipient entry is malformed",
+    ));
+
+    // ── Small-order X25519 ephemeral: all-zero shared secret ───────────
+    // The during-X25519 counterpart of the preflight case above: the
+    // value passes the canonical/nonzero preflight, and the prohibited
+    // all-zero shared secret then rejects the whole file (`FORMAT.md`
+    // §4.2).
+    mutated_copy(
+        &cases,
+        "x25519-valid.fcr",
+        "x25519-small-order-ephemeral.fcr",
+        |b| {
+            let body =
+                PREFIX_SIZE + HEADER_FIXED_SIZE + ENTRY_HEADER_SIZE + x25519::TYPE_NAME.len();
+            b[body..body + x25519::PUBLIC_KEY_SIZE].copy_from_slice(&SMALL_ORDER_EPHEMERAL);
+        },
+    );
+    rows.push(Case::err(
+        "cases/x25519-small-order-ephemeral.fcr",
         &key_a,
         "InvalidFormat(MalformedRecipientEntry)",
         "Recipient entry is malformed",

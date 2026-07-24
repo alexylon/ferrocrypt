@@ -29,6 +29,7 @@ cases/payload-tampered.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not
 cases/payload-empty-final-after-data.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(MalformedPayloadStream)	Encrypted payload stream is malformed
 cases/payload-trailing-data.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	PayloadTampered	Decryption failed: file data was modified or corrupted
 cases/x25519-zero-ephemeral.fcr	decrypt	private-key:keys/recipient-a.private.key,unlock=suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(MalformedRecipientEntry)	Recipient entry is malformed
+cases/x25519-small-order-ephemeral.fcr	decrypt	private-key:keys/recipient-a.private.key,unlock=suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(MalformedRecipientEntry)	Recipient entry is malformed
 cases/tlv-bad-order.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(MalformedTlv)	Extension region is malformed
 cases/tlv-duplicate-tag.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(MalformedTlv)	Extension region is malformed
 cases/tlv-len-past-end.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidFormat(MalformedTlv)	Extension region is malformed

@@ -90,8 +90,10 @@ fixture-only — never reuse them for real data.
   independently tampered; both native body lengths reject when short, and a
   non-zero X25519 native flag rejects. The existing Argon2id critical-flag
   case supplies the matching Argon2id flag coverage.
-- All-zero X25519 ephemeral key (file-fatal
-  `MalformedRecipientEntry`).
+- All-zero X25519 ephemeral key, rejected by the credential-independent
+  preflight, and a canonical nonzero small-order ephemeral key that
+  passes the preflight and produces the prohibited all-zero shared
+  secret during X25519 (both file-fatal `MalformedRecipientEntry`).
 - Key files: valid `public.key` and `private.key` artifacts, plus uppercase
   public-key text, corrupted Bech32 and internal SHA3-256 checksums,
   non-canonical Bech32 padding, a newer public-key payload version, CRLF and

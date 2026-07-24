@@ -3071,10 +3071,10 @@ fn test_probe_short_file_with_single_magic_byte_returns_none() {
 fn test_detect_corrupted_fcr_not_silently_encrypted() {
     let dir = setup_test_dir("detect_no_reencrypt");
     let input = dir.join("corrupted.fcr");
-    // Minimal v1 prefix only: magic + version + kind 'E' (encrypted)
-    // + zero prefix_flags + header_len = 0. Detection must route
-    // this file to decrypt, where the missing rest-of-header fails
-    // closed — rather than the helper treating it as plaintext and
+    // Minimal `.fcr` prefix only: magic + version + kind 'E' (encrypted)
+    // + zero prefix_flags + header_len = 0. Detection must route this
+    // file to decrypt, where the missing header MAC fails closed as
+    // `Truncated` — rather than the helper treating it as plaintext and
     // re-encrypting it (which would produce a path collision and
     // mask the structural failure).
     let mut prefix = vec![b'F', b'C', b'R', 0, ferrocrypt::FCR_FILE_VERSION]; // magic + current wire version
@@ -3085,8 +3085,13 @@ fn test_detect_corrupted_fcr_not_silently_encrypted() {
     let pass = SecretString::from("pw".to_string());
     let result = passphrase_auto(&input, &dir, &pass, None, None, |_| {});
     assert!(
-        matches!(result, Err(CryptoError::InvalidFormat(_))),
-        "corrupted .fcr should fail closed, got: {:?}",
+        matches!(
+            result,
+            Err(CryptoError::InvalidFormat(
+                ferrocrypt::FormatDefect::Truncated
+            ))
+        ),
+        "corrupted .fcr should fail closed as Truncated, got: {:?}",
         result
     );
 }

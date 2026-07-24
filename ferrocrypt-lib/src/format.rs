@@ -394,9 +394,10 @@ const _: () = assert!(PREFIX_HEADER_LEN_OFFSET + size_of::<u32>() == PREFIX_SIZE
 /// fixed header in `key/private.rs`; only the first 6 bytes —
 /// `magic || version || kind` — are layout-compatible.) Round-trips
 /// through [`Prefix::to_bytes`] and [`Prefix::parse`] are the
-/// writer/reader surface; structural validation lives in
-/// [`Prefix::validate`] and is called from both sides so the two paths
-/// cannot drift.
+/// writer/reader surface; both run the same per-field checks, except
+/// that only the writer refuses an undersized `header_len` — the
+/// reader defers that rule to `header_fixed` parsing (`FORMAT.md`
+/// §3.7).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Prefix {
     pub(crate) version: u8,
@@ -418,9 +419,10 @@ impl Prefix {
         }
     }
 
-    /// Structural validation shared between writer and reader paths.
-    /// Checks the spec rules from `FORMAT.md` §3.1 in spec order:
-    /// version → prefix_flags → header_len.
+    /// Writer-side structural validation, called from
+    /// [`Self::build_encrypted`]. Checks the `FORMAT.md` §3.1 rules in
+    /// spec order — version → prefix_flags → header_len — including
+    /// the writer-only rule that `header_len` must hold `header_fixed`.
     ///
     /// Magic is implicit (a `Prefix` value cannot exist without it),
     /// and `kind` is type-checked by the [`Kind`] enum, so neither
@@ -450,6 +452,11 @@ impl Prefix {
     /// kind → flags → header_len. Failures surface as the precise
     /// structural diagnostic (`BadMagic`, `UnsupportedVersion`,
     /// `WrongKind`, `MalformedHeader`, `OversizedHeader`).
+    ///
+    /// An undersized `header_len` is not rejected here: per `FORMAT.md`
+    /// §3.7, the reader completes the header and MAC framing reads
+    /// first, then rejects a header too small to hold `header_fixed`
+    /// as `MalformedHeader`.
     pub(crate) fn parse(
         bytes: &[u8; PREFIX_SIZE],
         expected_kind: Kind,
@@ -468,7 +475,7 @@ impl Prefix {
         let prefix_flags = read_u16_be(bytes, PREFIX_FLAGS_OFFSET)?;
         check_prefix_flags(prefix_flags)?;
         let header_len = read_u32_be(bytes, PREFIX_HEADER_LEN_OFFSET)?;
-        check_header_len(header_len)?;
+        check_header_len_max(header_len)?;
         Ok(Self {
             version,
             kind,
@@ -503,12 +510,19 @@ fn check_prefix_flags(flags: u16) -> Result<(), CryptoError> {
     Ok(())
 }
 
-fn check_header_len(header_len: u32) -> Result<(), CryptoError> {
+fn check_header_len_max(header_len: u32) -> Result<(), CryptoError> {
     if header_len > HEADER_LEN_MAX {
         return Err(CryptoError::InvalidFormat(FormatDefect::OversizedHeader {
             header_len,
         }));
     }
+    Ok(())
+}
+
+// Writer-only: the reader defers the undersized rule until the header
+// and MAC framing reads complete (`FORMAT.md` §3.7).
+fn check_header_len(header_len: u32) -> Result<(), CryptoError> {
+    check_header_len_max(header_len)?;
     if (header_len as usize) < HEADER_FIXED_SIZE {
         return Err(CryptoError::InvalidFormat(FormatDefect::MalformedHeader));
     }
@@ -967,15 +981,16 @@ mod tests {
     }
 
     #[test]
-    fn prefix_rejects_header_len_below_header_fixed_size() {
-        let too_small = Prefix {
-            header_len: (HEADER_FIXED_SIZE as u32) - 1,
-            ..Prefix::for_encrypted(0)
-        };
-        let bytes = too_small.to_bytes();
-        match Prefix::parse(&bytes, Kind::Encrypted) {
-            Err(CryptoError::InvalidFormat(FormatDefect::MalformedHeader)) => {}
-            other => panic!("expected MalformedHeader, got {other:?}"),
+    fn prefix_accepts_undersized_header_len_at_parse() {
+        // The undersized rejection happens after the framing reads
+        // (`FORMAT.md` §3.7), so the prefix stage accepts these values.
+        for header_len in [0, (HEADER_FIXED_SIZE as u32) - 1] {
+            let undersized = Prefix {
+                header_len,
+                ..Prefix::for_encrypted(0)
+            };
+            let parsed = Prefix::parse(&undersized.to_bytes(), Kind::Encrypted).unwrap();
+            assert_eq!(parsed.header_len, header_len);
         }
     }
 

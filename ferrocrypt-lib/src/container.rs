@@ -332,7 +332,9 @@ impl std::fmt::Debug for ParsedEncryptedHeader {
 ///    structural defect;
 /// 5. parse the leading 31 bytes as `header_fixed` → [`HeaderFixed::parse`]
 ///    (header_flags == 0, recipient_count in range, ext_len in range,
-///    region lengths self-consistent);
+///    region lengths self-consistent). A `header_len` too small to hold
+///    `header_fixed` rejects as `MalformedHeader` here, after the
+///    framing reads;
 /// 6. enforce `recipient_count <= limits.max_recipient_count`;
 /// 7. parse the recipient list from `header[31..31+recipient_entries_len]`,
 ///    enforcing `body_len <= limits.max_recipient_body_len` per entry;
@@ -359,10 +361,10 @@ pub(crate) fn read_encrypted_header<R: Read>(
     let mut header_mac = [0u8; HEADER_MAC_SIZE];
     read_exact_or_truncated(reader, &mut header_mac)?;
 
-    // `header_len >= HEADER_FIXED_SIZE` was already enforced by
-    // `Prefix::parse` via `check_header_len`, so `first_chunk` is
-    // structurally guaranteed to return `Some`; the `ok_or` is a
-    // defensive guard against future changes in that validation path.
+    // Undersized-header rejection point (`FORMAT.md` §3.7): the prefix
+    // stage accepts any `header_len` up to the structural maximum, so a
+    // header too small to hold `header_fixed` is caught here, after the
+    // framing reads above have completed.
     let fixed_bytes: &[u8; HEADER_FIXED_SIZE] = header_bytes
         .first_chunk()
         .ok_or(CryptoError::InvalidFormat(FormatDefect::MalformedHeader))?;
@@ -898,6 +900,42 @@ mod tests {
         match err {
             CryptoError::HeaderLenCapExceeded { local_cap: 256, .. } => {}
             other => panic!("expected HeaderLenCapExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_reports_undersized_header_without_mac_bytes_as_truncated() {
+        // `header_len = 0` and nothing after the prefix: the MAC framing
+        // read fails first, so the file is reported as truncated.
+        let bytes = Prefix::for_encrypted(0).to_bytes();
+        match read_encrypted_header(&mut bytes.as_slice(), HeaderReadLimits::default()) {
+            Err(CryptoError::InvalidFormat(FormatDefect::Truncated)) => {}
+            other => panic!("expected Truncated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_rejects_undersized_header_with_full_mac_as_malformed() {
+        // `header_len = 0` with all 32 MAC bytes present: framing is
+        // complete, so a header too small to hold `header_fixed` is
+        // the structural defect.
+        let mut bytes = Prefix::for_encrypted(0).to_bytes().to_vec();
+        bytes.extend_from_slice(&[0u8; HEADER_MAC_SIZE]);
+        match read_encrypted_header(&mut bytes.as_slice(), HeaderReadLimits::default()) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedHeader)) => {}
+            other => panic!("expected MalformedHeader, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_rejects_undersized_nonzero_header_with_full_framing_as_malformed() {
+        let header_len = (HEADER_FIXED_SIZE as u32) - 1;
+        let mut bytes = Prefix::for_encrypted(header_len).to_bytes().to_vec();
+        bytes.extend_from_slice(&vec![0u8; header_len as usize]);
+        bytes.extend_from_slice(&[0u8; HEADER_MAC_SIZE]);
+        match read_encrypted_header(&mut bytes.as_slice(), HeaderReadLimits::default()) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedHeader)) => {}
+            other => panic!("expected MalformedHeader, got {other:?}"),
         }
     }
 

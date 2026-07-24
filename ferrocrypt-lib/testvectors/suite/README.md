@@ -61,7 +61,9 @@ fixture-only — never reuse them for real data.
 ## Covered classes (FORMAT.md §12)
 
 - Corrupted prefix: magic, version, kind, `prefix_flags`, oversized
-  `header_len`; plus a header-region truncation.
+  `header_len`, and undersized `header_len` in both `FORMAT.md` §3.7
+  phases (cut short before the header MAC → truncated; full framing
+  present → malformed); plus a header-region truncation.
 - Outer `.fcr` TLV extension region: descending tags, duplicate tag, `len`
   past the region end, unknown critical tag (reject), and unknown ignorable
   tag (must decrypt).

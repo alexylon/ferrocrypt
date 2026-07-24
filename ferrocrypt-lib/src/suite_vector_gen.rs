@@ -1159,7 +1159,7 @@ const SUITE_SEED: u64 = 0xFECC_0000_5EED_0001;
 /// or changed; different corpus contents must never share a revision.
 /// Regeneration treats this constant as the source of truth and overwrites the
 /// committed file.
-const SUITE_VERSION: u32 = 8;
+const SUITE_VERSION: u32 = 9;
 
 /// Regenerates the committed suite corpus. Ignored in normal test runs;
 /// see the module docs for the invocation and the commit workflow.
@@ -1272,6 +1272,30 @@ fn regenerate_suite_vectors_inner() {
     mutated_copy(&cases, "argon2id-valid.fcr", "header-truncated.fcr", |b| {
         b.truncate(PREFIX_SIZE + 10);
     });
+    // The `FORMAT.md` §3.7 undersized-header phase boundary: with no MAC
+    // bytes the framing read fails first (truncated); with all 32 MAC
+    // bytes present, the header too small to hold `header_fixed` is the
+    // structural defect (malformed).
+    mutated_copy(
+        &cases,
+        "argon2id-valid.fcr",
+        "prefix-undersized-header-no-mac.fcr",
+        |b| {
+            b[PREFIX_HEADER_LEN_OFFSET..PREFIX_HEADER_LEN_OFFSET + 4]
+                .copy_from_slice(&0u32.to_be_bytes());
+            b.truncate(PREFIX_SIZE);
+        },
+    );
+    mutated_copy(
+        &cases,
+        "argon2id-valid.fcr",
+        "prefix-undersized-header-with-mac.fcr",
+        |b| {
+            b[PREFIX_HEADER_LEN_OFFSET..PREFIX_HEADER_LEN_OFFSET + 4]
+                .copy_from_slice(&0u32.to_be_bytes());
+            b.truncate(PREFIX_SIZE + HEADER_MAC_SIZE);
+        },
+    );
     rows.push(Case::err(
         "cases/prefix-bad-magic.fcr",
         "-",
@@ -1307,6 +1331,18 @@ fn regenerate_suite_vectors_inner() {
         "-",
         "InvalidFormat(Truncated)",
         "File is truncated or corrupted",
+    ));
+    rows.push(Case::err(
+        "cases/prefix-undersized-header-no-mac.fcr",
+        "-",
+        "InvalidFormat(Truncated)",
+        "File is truncated or corrupted",
+    ));
+    rows.push(Case::err(
+        "cases/prefix-undersized-header-with-mac.fcr",
+        "-",
+        "InvalidFormat(MalformedHeader)",
+        "File header is malformed",
     ));
 
     // ── Header MAC tamper: flip a stream_nonce byte after writing ──────

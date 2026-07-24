@@ -20,6 +20,8 @@ cases/prefix-wrong-kind.fcr	decrypt	-	error	InvalidFormat(WrongKind)	Wrong file 
 cases/prefix-nonzero-flags.fcr	decrypt	-	error	InvalidFormat(MalformedHeader)	File header is malformed
 cases/prefix-oversized-header-len.fcr	decrypt	-	error	InvalidFormat(OversizedHeader)	File header is too large (16777217 bytes)
 cases/header-truncated.fcr	decrypt	-	error	InvalidFormat(Truncated)	File is truncated or corrupted
+cases/prefix-undersized-header-no-mac.fcr	decrypt	-	error	InvalidFormat(Truncated)	File is truncated or corrupted
+cases/prefix-undersized-header-with-mac.fcr	decrypt	-	error	InvalidFormat(MalformedHeader)	File header is malformed
 cases/header-mac-tampered-passphrase.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	HeaderTampered	Decryption failed: file header was modified or corrupted
 cases/header-mac-tampered-x25519.fcr	decrypt	private-key:keys/recipient-a.private.key,unlock=suite-passphrase-not-secret-do-not-reuse	error	HeaderMacFailedAfterUnwrap(x25519)	Decryption failed: file header was modified or corrupted
 cases/payload-truncated.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	PayloadTruncated	Encrypted file is truncated

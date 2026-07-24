@@ -1,6 +1,6 @@
 //! HKDF-SHA3-256 expansion adapter.
 //!
-//! Every v1 HKDF derivation goes through this helper so the hash family
+//! Every HKDF derivation goes through this helper so the hash family
 //! and output length are fixed in one place. Recipient-specific info
 //! strings live with their recipient scheme. Header/payload/private-key
 //! labels live with the module that owns that derivation.

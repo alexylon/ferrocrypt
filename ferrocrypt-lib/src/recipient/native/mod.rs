@@ -1,4 +1,4 @@
-//! Native v1 recipient schemes.
+//! Native recipient schemes.
 //!
 //! - [`argon2id`] — passphrase recipient (`FORMAT.md` §4.1). Exclusive
 //!   mixing policy: must appear alone.

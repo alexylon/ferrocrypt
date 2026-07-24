@@ -57,7 +57,7 @@ pub(crate) struct RecipientEntry {
     /// Canonical recipient `type_name`, e.g. `"argon2id"` or `"x25519"`.
     pub type_name: String,
     /// `recipient_flags` field as stored on the wire. The only defined
-    /// bit in v1 is [`RECIPIENT_FLAG_CRITICAL`]; reserved bits are
+    /// bit is [`RECIPIENT_FLAG_CRITICAL`]; reserved bits are
     /// rejected at parse time.
     pub recipient_flags: u16,
     /// Recipient body bytes. Length matches the on-wire `body_len`
@@ -67,7 +67,7 @@ pub(crate) struct RecipientEntry {
 }
 
 impl RecipientEntry {
-    /// Constructs a `RecipientEntry` for a native v1 recipient type
+    /// Constructs a `RecipientEntry` for a native recipient type
     /// from a body produced by the corresponding per-recipient `wrap`
     /// helper (e.g. [`crate::recipient::native::argon2id::wrap`] or
     /// [`crate::recipient::native::x25519::wrap`]).
@@ -77,7 +77,7 @@ impl RecipientEntry {
     /// or off-spec name. The body length is checked against the
     /// type's expected `body_len()`. Native entries default to
     /// `recipient_flags = 0` (non-critical); critical bit is reserved
-    /// for plugin / opt-in semantics that v1 native types do not use.
+    /// for plugin / opt-in semantics that native types do not use.
     pub fn native(ty: NativeRecipientType, body: Vec<u8>) -> Result<Self, CryptoError> {
         if body.len() != ty.body_len() {
             return Err(CryptoError::InvalidFormat(

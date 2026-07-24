@@ -346,8 +346,8 @@ pub enum CryptoError {
     /// Argon2id time cost (iteration count) from a header exceeds the
     /// caller-configured local cap. The time-dimension counterpart of
     /// [`Self::KdfResourceCapExceeded`]: the value is structurally valid
-    /// (within the v1 maximum) but asks for more iterations than the policy
-    /// allows. The default cap is the v1 maximum, so this variant is returned
+    /// (within the format maximum) but asks for more iterations than the policy
+    /// allows. The default cap is the format maximum, so this variant is returned
     /// only when a caller tightens `KdfLimit` below that maximum.
     #[error("Passphrase time over limit ({time_cost}, limit {local_cap})")]
     KdfTimeCostCapExceeded {
@@ -359,7 +359,7 @@ pub enum CryptoError {
     /// Argon2id lane count (parallelism) from a header exceeds the
     /// caller-configured local cap. The parallelism-dimension counterpart of
     /// [`Self::KdfResourceCapExceeded`]; like [`Self::KdfTimeCostCapExceeded`],
-    /// the default cap is the v1 maximum, so this variant is returned only when
+    /// the default cap is the format maximum, so this variant is returned only when
     /// a caller tightens `KdfLimit` below that maximum.
     #[error("Passphrase parallelism over limit ({lanes}, limit {local_cap})")]
     KdfLanesCapExceeded {
@@ -427,7 +427,7 @@ pub enum CryptoError {
     ///
     /// Distinct from malformed public-key input: the string may be
     /// structurally valid, but the reader's resource policy rejected it.
-    /// The v1 structural ceiling is 20,000 ASCII characters (`FORMAT.md`
+    /// The structural ceiling is 20,000 ASCII characters (`FORMAT.md`
     /// §7); the recommended local default is smaller. For valid recipient
     /// strings, byte length and character count are the same because the
     /// encoding is ASCII.
@@ -441,7 +441,7 @@ pub enum CryptoError {
     /// A `private.key` `wrapped_secret_len` exceeds the local resource
     /// cap. The structural max (16 MiB per `FORMAT.md` §8) is much
     /// higher; this fires when the wrapped secret would exceed the
-    /// resource policy (4 KiB by default — every v1 native key type
+    /// resource policy (4 KiB by default — every native key type
     /// needs only 48 bytes); the writer enforces the same cap before
     /// sealing. Distinct from
     /// [`FormatDefect::MalformedPrivateKey`]: the file may be
@@ -461,7 +461,7 @@ pub enum CryptoError {
     /// passphrase does not decrypt it, or its cleartext fields have
     /// been tampered with after the file was written. The AEAD
     /// primitive cannot distinguish the two cases — the associated-data
-    /// binding introduced in the v1 `private.key` format catches tampering
+    /// binding in the `private.key` format catches tampering
     /// cryptographically, but both failure modes surface as the same
     /// error by design. The Display wording reflects both causes.
     #[error("Private key unlock failed: wrong passphrase or modified key file")]
@@ -572,7 +572,7 @@ pub enum CryptoError {
     #[error("Recipient list cannot be empty")]
     EmptyRecipientList,
     /// The recipient list contains an entry whose mixing rule forbids
-    /// the combination. The most common v1 trigger is an
+    /// the combination. The most common trigger is an
     /// [`MixingPolicy::Exclusive`] native type (today only `argon2id`)
     /// sharing a file with any other entry — per `FORMAT.md` §4.1 such
     /// types must appear alone, and readers must reject the mix
@@ -874,8 +874,8 @@ pub enum FormatDefect {
     /// `FORMAT.md` §3.3.
     MalformedRecipientEntry,
     /// Recipient entry has reserved bits set in `recipient_flags`. Per
-    /// `FORMAT.md` §3.4, only bit 0 (the `critical` flag) is defined in
-    /// v1; all other bits must be zero on the wire.
+    /// `FORMAT.md` §3.4, only bit 0 (the `critical` flag) is defined;
+    /// all other bits must be zero on the wire.
     RecipientFlagsReserved,
     /// `private.key` cleartext header is structurally invalid: bad
     /// magic-after-prefix-checks, non-zero `key_flags`, length fields

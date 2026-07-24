@@ -355,7 +355,7 @@ pub(crate) fn generate_keypair()
 
 // ─── private.key reader (X25519-specific glue) ─────────────────────────────
 
-/// Reads and unlocks a v1 `private.key` file, returning the raw 32-byte
+/// Reads and unlocks a `private.key` file, returning the raw 32-byte
 /// X25519 secret. Wraps [`crate::key::private::open_private_key`] with
 /// the X25519-specific type-name and length checks. Authenticated TLV
 /// validation is performed by `open_private_key` itself.
@@ -368,7 +368,7 @@ pub(crate) fn generate_keypair()
 /// - [`CryptoError::InvalidInput`] for a passphrase outside the
 ///   `FORMAT.md` §2.2 byte-length bound
 /// - [`CryptoError::InvalidKdfParams`] for header KDF fields outside
-///   the v1 structural bounds
+///   the structural bounds
 /// - [`CryptoError::KdfResourceCapExceeded`] when the header's
 ///   `mem_cost` exceeds `kdf_limit` (or the library default ceiling)
 /// - [`CryptoError::UnsupportedVersion`] for a key file from an
@@ -472,7 +472,7 @@ pub(crate) fn open_x25519_private_key(
 
 // ─── private.key structural validator (used by fuzz exports) ───────────────
 
-/// Validates the structural shape of a v1 `private.key` file. Does not
+/// Validates the structural shape of a `private.key` file. Does not
 /// attempt to decrypt or derive any keys. Used by
 /// [`crate::validate_private_key_file`] and re-exported via
 /// `fuzz_exports` for the fuzz harness.

@@ -96,7 +96,7 @@ pub(crate) fn wrap(
 /// final until the header MAC also verifies.
 ///
 /// Emits [`ProgressEvent::DerivingPassphraseWrapKey`] immediately before
-/// the Argon2id call — that is, **after** the fixed v1 passphrase
+/// the Argon2id call — that is, **after** the fixed passphrase
 /// byte-length bound, structural KDF-parameter validation, and the
 /// resource-cap check have already passed. A passphrase outside the
 /// bound, a malformed body, or a body whose `kdf_params` exceed the
@@ -531,7 +531,7 @@ mod tests {
         );
     }
 
-    /// Same contract for `unwrap`: the fixed v1 passphrase byte-length
+    /// Same contract for `unwrap`: the fixed passphrase byte-length
     /// bound is checked before the event, so a valid body unwrapped with
     /// an over-length passphrase produces `InvalidInput` and zero events.
     #[test]

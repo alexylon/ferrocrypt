@@ -15,7 +15,7 @@ fuzz_target!(|data: &[u8]| {
     let Some((cap_bytes, rest)) = data.split_first_chunk::<2>() else {
         return;
     };
-    // Cap in 0..=20_000 (the v1 structural ceiling) so both the
+    // Cap in 0..=20_000 (the structural ceiling) so both the
     // cap-rejection arm and full-length decodes get exercised.
     let cap = usize::from(u16::from_le_bytes(*cap_bytes)) % 20_001;
     let Ok(s) = std::str::from_utf8(rest) else {

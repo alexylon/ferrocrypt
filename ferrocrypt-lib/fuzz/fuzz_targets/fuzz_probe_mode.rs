@@ -1,7 +1,7 @@
 #![no_main]
 
 //! Fuzzes `probe_recipient_mode` — the public entry point that reads
-//! the v1 12-byte prefix and the recipient list of a candidate file
+//! the 12-byte prefix and the recipient list of a candidate file
 //! and classifies it as `UnauthenticatedRecipientMode::Passphrase`,
 //! `UnauthenticatedRecipientMode::PublicKey`, or not a FerroCrypt file
 //! at all. Written to a real temp file so the actual `File::read` path

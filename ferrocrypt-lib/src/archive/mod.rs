@@ -1,4 +1,4 @@
-//! FerroCrypt Archive (FCA) v1 — native archive payload format.
+//! FerroCrypt Archive (FCA) — native archive payload format.
 //!
 //! Full wire-format spec: `ferrocrypt-lib/FORMAT.md` §9.
 

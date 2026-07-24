@@ -14,8 +14,8 @@ pub struct FcaHeader {
     /// Number of manifest entries (`FORMAT.md` §9).
     pub entry_count: u32,
     /// Byte length of the FCA archive-level TLV region (`archive_ext`)
-    /// that immediately follows the fixed header. v1 writers emit
-    /// zero; v1.x readers parse + validate any non-zero region under
+    /// that immediately follows the fixed header. Native writers emit
+    /// zero; readers parse + validate any non-zero region under
     /// the no-known-critical policy.
     pub archive_ext_len: u32,
     /// Byte length of the serialised manifest that follows `archive_ext`.
@@ -25,7 +25,7 @@ pub struct FcaHeader {
 }
 
 /// Archive entry classification per FCA `kind` byte: regular file or
-/// directory. v1 has no other kinds.
+/// directory. FCA archive version 0x01 defines no other kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchiveEntryKind {
     /// Regular file; `size` is the cleartext byte length.
@@ -53,8 +53,8 @@ pub struct ArchiveEntry {
     /// the hardened platform backend, never opening by absolute source
     /// path.
     pub source_path: Option<PathBuf>,
-    /// Per-entry TLV extension bytes (`entry_ext`). v1 writers emit an
-    /// empty `Vec`; v1.x readers populate it with the raw bytes of the
+    /// Per-entry TLV extension bytes (`entry_ext`). Native writers emit
+    /// an empty `Vec`; readers populate it with the raw bytes of the
     /// region after structural + canonicality validation. Opaque to
     /// the model — interpretation is the caller's responsibility.
     pub entry_ext: Vec<u8>,

@@ -98,7 +98,7 @@ fn unarchive_inner<R: Read>(
     let header = parse_fca_header(&mut reader, limits)?;
 
     // §9.11 steps 2–3: read exactly `archive_ext_len` bytes and validate
-    // the archive-level extension region. It is normally empty in v1, but a
+    // the archive-level extension region. It is normally empty today, but a
     // later compatible writer may include optional tags. If authenticated
     // data ends before the declared region, report a malformed archive rather
     // than an I/O error.
@@ -1023,7 +1023,7 @@ mod tests {
     /// reader skips the bytes after canonicality checks and
     /// extraction proceeds normally. Pin so a future refactor that
     /// over-tightens the no-known-critical wrapper doesn't reject
-    /// ignorable v1.x metadata.
+    /// ignorable metadata from a later compatible writer.
     #[test]
     fn round_trip_with_ignorable_archive_ext() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1038,7 +1038,7 @@ mod tests {
 
     /// An unknown critical TLV (`0x8001..=0xFFFF`) in `archive_ext`
     /// rejects with `UnknownCriticalTag` BEFORE any filesystem output
-    /// is created. v1 defines no archive-level critical tags.
+    /// is created. FCA defines no archive-level critical tags.
     #[test]
     fn rejects_unknown_critical_archive_ext_tag() {
         let tmp = tempfile::TempDir::new().unwrap();

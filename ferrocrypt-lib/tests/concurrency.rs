@@ -120,7 +120,9 @@ fn concurrent_encrypts_to_same_output_stay_no_clobber() {
             )
             .expect("committed file must decrypt cleanly"),
         Decryptor::Passphrase(_) => panic!("expected private-key decryptor"),
-        _ => unreachable!("Decryptor is non_exhaustive; v1 has only Passphrase + PrivateKey"),
+        _ => {
+            unreachable!("Decryptor is non_exhaustive; only Passphrase and PrivateKey exist today")
+        }
     };
     let restored = fs::read(decrypted.output_path).unwrap();
     assert_eq!(
@@ -171,7 +173,7 @@ fn concurrent_decrypts_to_same_output_stay_no_clobber() {
                             .map(|o| o.output_path),
                         Decryptor::Passphrase(_) => panic!("expected private-key decryptor"),
                         _ => unreachable!(
-                            "Decryptor is non_exhaustive; v1 has only Passphrase + PrivateKey"
+                            "Decryptor is non_exhaustive; only Passphrase and PrivateKey exist today"
                         ),
                     },
                 )

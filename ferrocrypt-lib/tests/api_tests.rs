@@ -103,7 +103,9 @@ fn encryptor_passphrase_round_trip() {
     let decrypted = match Decryptor::open(&outcome.output_path).expect("open") {
         Decryptor::Passphrase(d) => d.decrypt(pass(), &restore, |_| {}).expect("decrypt"),
         Decryptor::PrivateKey(_) => panic!("expected passphrase decryptor"),
-        _ => unreachable!("Decryptor is non_exhaustive; v1 has only Passphrase + PrivateKey"),
+        _ => {
+            unreachable!("Decryptor is non_exhaustive; only Passphrase and PrivateKey exist today")
+        }
     };
     let restored_bytes = fs::read(decrypted.output_path).unwrap();
     assert_eq!(restored_bytes, b"hello passphrase api");
@@ -129,7 +131,9 @@ fn encrypt_directory_to_output_inside_input_tree() {
     let decrypted = match Decryptor::open(&outcome.output_path).expect("open") {
         Decryptor::Passphrase(d) => d.decrypt(pass(), &restore, |_| {}).expect("decrypt"),
         Decryptor::PrivateKey(_) => panic!("expected passphrase decryptor"),
-        _ => unreachable!("Decryptor is non_exhaustive; v1 has only Passphrase + PrivateKey"),
+        _ => {
+            unreachable!("Decryptor is non_exhaustive; only Passphrase and PrivateKey exist today")
+        }
     };
 
     let names = tree_names(&decrypted.output_path);
@@ -169,7 +173,9 @@ fn encrypt_directory_to_save_as_inside_nested_subdirectory() {
     let decrypted = match Decryptor::open(&outcome.output_path).expect("open") {
         Decryptor::Passphrase(d) => d.decrypt(pass(), &restore, |_| {}).expect("decrypt"),
         Decryptor::PrivateKey(_) => panic!("expected passphrase decryptor"),
-        _ => unreachable!("Decryptor is non_exhaustive; v1 has only Passphrase + PrivateKey"),
+        _ => {
+            unreachable!("Decryptor is non_exhaustive; only Passphrase and PrivateKey exist today")
+        }
     };
 
     let names = tree_names(&decrypted.output_path);
@@ -215,7 +221,9 @@ fn encryptor_recipient_round_trip() {
             )
             .expect("decrypt"),
         Decryptor::Passphrase(_) => panic!("expected private-key decryptor"),
-        _ => unreachable!("Decryptor is non_exhaustive; v1 has only Passphrase + PrivateKey"),
+        _ => {
+            unreachable!("Decryptor is non_exhaustive; only Passphrase and PrivateKey exist today")
+        }
     };
     let restored_bytes = fs::read(decrypted.output_path).unwrap();
     assert_eq!(restored_bytes, b"hello recipient api");
@@ -980,7 +988,7 @@ fn encryptor_passphrase_header_limits_reject_tight_recipient_count() {
 }
 
 /// Writer-side `HeaderReadLimits::max_recipient_body_len` is enforced
-/// against native body lengths. A caller who tightens below the v1
+/// against native body lengths. A caller who tightens below the
 /// `argon2id` body length gets the same typed cap error during encrypt
 /// that a reader would later return.
 #[test]
@@ -1008,7 +1016,7 @@ fn encryptor_passphrase_header_limits_reject_tight_body_len() {
 }
 
 /// Writer-side `HeaderReadLimits::max_header_len` is enforced against
-/// the exact v1 header length the writer will emit. Tightening below
+/// the exact header length the writer will emit. Tightening below
 /// that shape rejects before any output is written.
 #[test]
 fn encryptor_recipient_header_limits_reject_tight_header_len() {
@@ -1038,7 +1046,7 @@ fn encryptor_recipient_header_limits_reject_tight_header_len() {
 
 /// Writer-side KDF validation now mirrors reader-side structural rules,
 /// not just the local memory cap. A `time_cost` accepted by upstream
-/// Argon2 but outside FerroCrypt v1's structural range rejects at write
+/// Argon2 but outside FerroCrypt's structural range rejects at write
 /// time instead of producing an undecryptable `.fcr`.
 #[test]
 fn encryptor_kdf_params_rejects_structural_time_cost() {
@@ -1122,7 +1130,7 @@ fn keypair_generator_kdf_params_rejects_below_floor() {
 }
 
 /// Even with an explicitly raised writer-side `KdfLimit`, structural
-/// `mem_cost` above FerroCrypt's v1 maximum must reject before Argon2id
+/// `mem_cost` above FerroCrypt's maximum must reject before Argon2id
 /// runs. This prevents the resource-limit opt-in from bypassing the
 /// file-format structural ceiling.
 #[test]

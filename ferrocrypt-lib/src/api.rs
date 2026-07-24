@@ -15,7 +15,7 @@
 //! - `Encryptor::with_public_key` / `with_public_keys` — one or more
 //!   `x25519` recipients (`MixingPolicy::PublicKeyMixable`). Empty
 //!   lists reject as [`CryptoError::EmptyRecipientList`]; lists that
-//!   mix incompatible scheme policies (impossible in v1, where every
+//!   mix incompatible scheme policies (impossible today, where every
 //!   [`PublicKey`] is X25519) reject as
 //!   [`CryptoError::IncompatibleRecipients`].
 //!
@@ -117,7 +117,7 @@ impl Encryptor {
     /// Configures passphrase encryption.
     ///
     /// The resulting `.fcr` contains exactly one native `argon2id`
-    /// recipient. The passphrase is checked against the fixed v1 bound
+    /// recipient. The passphrase is checked against the fixed bound
     /// of 1 to 4,096 bytes when [`Encryptor::write`] runs;
     /// constructing this builder is infallible.
     pub fn with_passphrase(passphrase: SecretString) -> Self {
@@ -177,7 +177,7 @@ impl Encryptor {
     /// # Errors
     ///
     /// Returns [`CryptoError::EmptyRecipientList`] if the iterator is empty.
-    /// All public keys in the current v1 implementation are X25519 recipients;
+    /// All public keys in the current implementation are X25519 recipients;
     /// future key kinds may add additional mixing-policy checks.
     pub fn with_public_keys(
         public_keys: impl IntoIterator<Item = PublicKey>,
@@ -186,7 +186,7 @@ impl Encryptor {
         if public_keys.is_empty() {
             return Err(CryptoError::EmptyRecipientList);
         }
-        // v1 PublicKey is always X25519 (PublicKeyMixable). When future
+        // Today PublicKey is always X25519 (PublicKeyMixable). When future
         // PublicKey variants carry different mixing policies, the check
         // expands here; protocol::encrypt re-checks as defense-in-depth.
         Ok(Self {
@@ -244,7 +244,7 @@ impl Encryptor {
     ///
     /// `kdf_params` is also checked at [`Encryptor::write`] time against
     /// the writer's [`KdfLimit`] policy. By default, memory is capped at
-    /// 1 GiB while time cost and lanes are capped at the v1 format maximum,
+    /// 1 GiB while time cost and lanes are capped at the format maximum,
     /// so [`KdfParams::default`] is accepted. A value above the effective
     /// policy rejects with the matching typed cap error. To write a `.fcr`
     /// with memory above 1 GiB, or to use a deliberately tightened time-cost
@@ -268,7 +268,7 @@ impl Encryptor {
     ///
     /// All three axes are checked before encryption work begins:
     /// `recipient_count`, canonical native recipient `body_len`, and the
-    /// exact v1 `header_len` that the writer will emit (`ext_len = 0` for
+    /// exact `header_len` that the writer will emit (`ext_len = 0` for
     /// current writers). Tightening any axis below the emitted header shape
     /// rejects at [`Encryptor::write`] time with the same typed cap error
     /// the reader would later return.
@@ -282,7 +282,7 @@ impl Encryptor {
     /// The policy caps Argon2id memory cost, time cost, and lane count before
     /// any encryption work begins. The default policy accepts
     /// [`KdfParams::default`] and rejects memory above 1 GiB unless the caller
-    /// opts into a higher memory cap. Time cost and lanes default to the v1
+    /// opts into a higher memory cap. Time cost and lanes default to the
     /// format maximum, so they only reject when the caller tightens them.
     ///
     /// Use this builder together with [`Encryptor::kdf_params`] to raise the
@@ -329,7 +329,7 @@ impl Encryptor {
         let kdf_params = self.kdf_params.unwrap_or_default();
         let save_as = self.save_as.as_deref();
 
-        // Check the fixed v1 passphrase byte-length bound before filesystem
+        // Check the fixed passphrase byte-length bound before filesystem
         // work. A value outside the bound is a caller error, and reporting it
         // first avoids unnecessary syscalls.
         if let EncryptorState::Passphrase(p) = &self.state {
@@ -562,7 +562,7 @@ impl PassphraseDecryptor {
 
     /// Decrypts this passphrase-sealed `.fcr` into `output_dir`.
     ///
-    /// The passphrase is checked against the fixed v1 bound of 1 to
+    /// The passphrase is checked against the fixed bound of 1 to
     /// 4,096 bytes, then used to unwrap the file's `argon2id` recipient. The
     /// recovered candidate file key is accepted only after the header MAC
     /// verifies. On success, the decrypted file or directory is promoted
@@ -784,7 +784,7 @@ pub struct KeyPairGenerator {
 impl KeyPairGenerator {
     /// Constructs a key-pair generator with the passphrase that will be
     /// used to seal the resulting `private.key`. The passphrase is
-    /// checked against the fixed v1 bound of 1 to 4,096 bytes when
+    /// checked against the fixed bound of 1 to 4,096 bytes when
     /// [`KeyPairGenerator::write`] runs; constructing this builder is
     /// infallible.
     pub fn with_passphrase(passphrase: SecretString) -> Self {
@@ -810,7 +810,7 @@ impl KeyPairGenerator {
     ///
     /// `kdf_params` is also checked at [`KeyPairGenerator::write`] time
     /// against the writer's [`KdfLimit`] policy. By default, memory is capped
-    /// at 1 GiB while time cost and lanes are capped at the v1 format maximum,
+    /// at 1 GiB while time cost and lanes are capped at the format maximum,
     /// so [`KdfParams::default`] is accepted. A value above the effective
     /// policy rejects with the matching typed cap error. To write a
     /// `private.key` with memory above 1 GiB, or to use a deliberately
@@ -828,7 +828,7 @@ impl KeyPairGenerator {
     /// The policy caps Argon2id memory cost, time cost, and lane count before
     /// key generation begins. The default policy accepts [`KdfParams::default`]
     /// and rejects memory above 1 GiB unless the caller opts into a higher
-    /// memory cap. Time cost and lanes default to the v1 format maximum, so
+    /// memory cap. Time cost and lanes default to the format maximum, so
     /// they only reject when the caller tightens them.
     ///
     /// Use this builder together with [`KeyPairGenerator::kdf_params`] to raise
@@ -1069,7 +1069,7 @@ pub fn default_encrypted_filename(input_path: impl AsRef<Path>) -> Result<String
 
 /// Validates that a file is a well-formed FerroCrypt `private.key` file.
 ///
-/// Checks the cleartext v1 structure: magic bytes, version, key-file kind,
+/// Checks the cleartext structure: magic bytes, version, key-file kind,
 /// flags, length fields, X25519 type name, X25519 public-material length, and
 /// total file size. This does **not** attempt to decrypt the key and does not
 /// require a passphrase. If the caller accidentally points this at a text
@@ -1081,7 +1081,7 @@ pub fn default_encrypted_filename(input_path: impl AsRef<Path>) -> Result<String
 /// Returns [`CryptoError::InputPath`] if the file does not exist, and
 /// [`CryptoError::Io`] for other read failures. Returns
 /// [`CryptoError::InvalidFormat`] or [`CryptoError::UnsupportedVersion`] if the
-/// file is not a v1 private key, is malformed, or is a public key. Returns
+/// file is not a supported private key, is malformed, or is a public key. Returns
 /// [`CryptoError::UnsupportedKeyType`] for a well-formed private key of a key
 /// type this build does not support.
 pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError> {
@@ -1123,7 +1123,7 @@ pub fn validate_public_key_file(key_file: impl AsRef<Path>) -> Result<(), Crypto
 
 // ─── Internal validators ────────────────────────────────────────────────────
 
-/// Enforces the exact `.fcr` header shape a v1 writer will emit against
+/// Enforces the exact `.fcr` header shape the writer will emit against
 /// the caller-supplied [`HeaderReadLimits`]. Mirrors the reader-side cap
 /// checks in `container::read_encrypted_header`, but runs before any KDF,
 /// ECDH, or output-file work.
@@ -1149,7 +1149,7 @@ fn preflight_header_write_limits(
     limits.enforce_recipient_count(count_u16)?;
 
     // body_len is bounded by the canonical native `BODY_LENGTH` (≤ 116
-    // in v1), so the saturating cast cannot fire today. Defensive
+    // today), so the saturating cast cannot fire. Defensive
     // fallback for a hypothetical future plugin recipient with a body
     // above `u32::MAX`: `enforce_recipient_body_len` rejects against
     // the per-entry cap (≤ `BODY_LEN_STRUCTURAL_MAX = 16 MiB`), so
@@ -1159,7 +1159,7 @@ fn preflight_header_write_limits(
 
     // Compute the exact `header_len` the writer will emit
     // (`header_fixed + recipient_count * per_entry`, with `ext_len = 0`
-    // for v1 writers) and check it against the cap. All checked
+    // for current writers) and check it against the cap. All checked
     // arithmetic funnels into one shared overflow error.
     let overflow_err = || CryptoError::HeaderLenCapExceeded {
         header_len: u32::MAX,

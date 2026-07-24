@@ -1,7 +1,7 @@
 //! Shared `.fcr` encrypted-file header build/parse path.
 //!
-//! v1 defines **one** encrypted-file container with a typed recipient list —
-//! there is no per-mode envelope or "symmetric vs hybrid" type byte.
+//! The format defines **one** encrypted-file container with a typed recipient
+//! list — there is no per-mode envelope or "symmetric vs hybrid" type byte.
 //! Every encrypt and decrypt path therefore shares the same header
 //! arithmetic and MAC scope, and this module is the **single source of
 //! truth** for it.
@@ -63,7 +63,7 @@ const TEMP_FILE_PREFIX: &str = ".ferrocrypt-";
 /// recipient slots, larger recipient bodies, or a larger header than
 /// the conservative defaults allow) by calling the `max_*` builder
 /// methods. Each builder clamps at the structural maximum for that
-/// field — the v1 format cannot represent values above
+/// field — the `.fcr` format cannot represent values above
 /// [`HeaderReadLimits::HEADER_LEN_STRUCTURAL_MAX`],
 /// [`HeaderReadLimits::RECIPIENT_COUNT_STRUCTURAL_MAX`], or
 /// [`HeaderReadLimits::RECIPIENT_BODY_LEN_STRUCTURAL_MAX`], so callers
@@ -98,14 +98,14 @@ impl Default for HeaderReadLimits {
 }
 
 impl HeaderReadLimits {
-    /// Structural maximum for `prefix.header_len` (v1 = 16 MiB,
+    /// Structural maximum for `prefix.header_len` (16 MiB,
     /// `FORMAT.md` §3.1). Builder methods clamp at this value.
     pub const HEADER_LEN_STRUCTURAL_MAX: u32 = format::HEADER_LEN_MAX;
-    /// Structural maximum for `header_fixed.recipient_count` (v1 = 4096,
+    /// Structural maximum for `header_fixed.recipient_count` (4096,
     /// `FORMAT.md` §3.2). Builder methods clamp at this value.
     pub const RECIPIENT_COUNT_STRUCTURAL_MAX: u16 = format::RECIPIENT_COUNT_MAX;
     /// Structural maximum for each recipient entry's `body_len`
-    /// (v1 = 16 MiB, `FORMAT.md` §3.3). Builder methods clamp at this
+    /// (16 MiB, `FORMAT.md` §3.3). Builder methods clamp at this
     /// value.
     pub const RECIPIENT_BODY_LEN_STRUCTURAL_MAX: u32 = format::BODY_LEN_MAX;
 
@@ -122,7 +122,7 @@ impl HeaderReadLimits {
     pub const RECIPIENT_COUNT_DEFAULT: u16 = format::RECIPIENT_COUNT_LOCAL_CAP_DEFAULT;
     /// Default value used by [`HeaderReadLimits::default`] for
     /// `max_recipient_body_len`. Applies symmetrically on encrypt
-    /// (entries native to v1 sit well under this cap) and decrypt.
+    /// (native entries sit well under this cap) and decrypt.
     pub const RECIPIENT_BODY_LEN_DEFAULT: u32 = format::BODY_LEN_LOCAL_CAP_DEFAULT;
 
     /// Sets the maximum accepted `prefix.header_len`, clamped at
@@ -988,7 +988,7 @@ mod tests {
         assert_eq!(limits.max_recipient_body_len, 16 * 1024);
     }
 
-    /// Builder methods clamp at the v1 structural maximum so a caller
+    /// Builder methods clamp at the structural maximum so a caller
     /// cannot raise a cap above what the structural parser would
     /// accept. Locks in the security guarantee that the public API
     /// cannot be used to bypass the structural ceilings declared in

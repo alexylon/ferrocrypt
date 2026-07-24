@@ -24,7 +24,7 @@ type HmacSha3_256 = Hmac<Sha3_256>;
 
 /// HMAC-SHA3-256 over a sequence of byte parts, fed into the MAC in
 /// order with no separator. Equivalent to MAC'ing the concatenation
-/// of `parts` but does not allocate. Used by the v1 header MAC, which
+/// of `parts` but does not allocate. Used by the header MAC, which
 /// covers `prefix(12) || header(header_len)` per `FORMAT.md` §3.6.
 pub(crate) fn hmac_sha3_256_parts(key: &[u8], parts: &[&[u8]]) -> Result<[u8; 32], CryptoError> {
     Ok(hmac_state_for_parts(key, parts)?

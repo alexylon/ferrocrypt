@@ -123,7 +123,7 @@ pub(crate) trait DecryptionCredential {
 // ─── Encrypt ───────────────────────────────────────────────────────────────
 
 /// Encrypts `input_path` under one or more recipients of a single
-/// scheme. Wire format is the v1 `.fcr` container with `recipients.len()`
+/// scheme. Wire format is the `.fcr` container with `recipients.len()`
 /// entries whose type matches `R::TYPE_NAME`. Every entry seals the same
 /// per-file `file_key` for its respective recipient.
 ///
@@ -148,7 +148,7 @@ pub(crate) trait DecryptionCredential {
 /// [`crate::api::Encryptor::write`] via
 /// `api::preflight_header_write_limits` and
 /// [`crate::KdfParams::validate_for_write`]. The same applies to the
-/// fixed v1 passphrase byte-length check in
+/// fixed passphrase byte-length check in
 /// [`crate::api::validate_passphrase`].
 ///
 /// Any new in-crate caller of `protocol::encrypt` must run those
@@ -223,7 +223,7 @@ pub(crate) fn encrypt<R: RecipientScheme>(
     // its MAC scope.
     let built = build_encrypted_header(
         &entries,
-        b"", // v1.0 writers emit ext_len = 0
+        b"", // current writers emit ext_len = 0
         stream_nonce,
         payload_key,
         &header_key,
@@ -381,7 +381,7 @@ pub(crate) fn decrypt_session<I: DecryptionCredential>(
             // were rejected in step 5.
             continue;
         }
-        // Native v1 recipients do not use the critical bit — the
+        // Native recipients do not use the critical bit — the
         // reader handles them natively. A native entry with the bit
         // set is structurally malformed and aborts the whole file.
         if entry.recipient_flags != 0 {
@@ -512,7 +512,7 @@ fn failure_for(
 /// Generates an X25519 key pair and writes both files to `output_dir`.
 /// Returns `(private_key_path, public_key_path)`.
 ///
-/// - `private.key` is the v1 passphrase-wrapped binary keyfile.
+/// - `private.key` is the passphrase-wrapped binary keyfile.
 ///   `key::private::seal_private_key` owns the byte layout (cleartext
 ///   header → AEAD-AAD-bound → wrapped secret). Permissions: `0o600`
 ///   on Unix.
@@ -529,12 +529,12 @@ fn failure_for(
 /// # Caller obligations
 ///
 /// This function is `pub(crate)` and **does not** validate the
-/// caller-supplied [`crate::KdfParams`] against v1 structural bounds
+/// caller-supplied [`crate::KdfParams`] against structural bounds
 /// or against a [`crate::KdfLimit`] resource cap. Those checks are
 /// the **api-layer's** responsibility and live in
 /// [`crate::api::KeyPairGenerator::write`] via
 /// [`crate::KdfParams::validate_for_write`]. The same applies to the
-/// fixed v1 passphrase byte-length check in
+/// fixed passphrase byte-length check in
 /// [`crate::api::validate_passphrase`].
 ///
 /// Any new in-crate caller must run those preflight steps first
@@ -579,7 +579,7 @@ pub(crate) fn generate_key_pair(
         secret_material.as_ref(),
         x25519::TYPE_NAME,
         &public_material,
-        &[], // no v1 ext_bytes for the X25519 case
+        &[], // no ext_bytes for the X25519 case
         passphrase,
         kdf_params,
     )?;
@@ -816,7 +816,7 @@ mod tests {
         build_fcr_with_raw_payload(entries, file_key, &fca_bytes, path)
     }
 
-    /// Generates an X25519 keypair, persists a v1 `private.key` for it,
+    /// Generates an X25519 keypair, persists a `private.key` for it,
     /// and returns `(public_bytes, private_key_path, passphrase)`.
     fn keypair_fixture(
         keys_dir: &Path,

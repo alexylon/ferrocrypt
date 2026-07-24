@@ -65,7 +65,7 @@
 
 ## 1. Architecture overview
 
-FerroCrypt is organized around a single file-encryption protocol pipeline. The v1 file model is:
+FerroCrypt is organized around a single file-encryption protocol pipeline. The file model is:
 
 ```text
 one random file_key
@@ -333,7 +333,7 @@ It contains:
 
 It contains:
 
-- `HeaderReadLimits` (public, `#[non_exhaustive]`, builder methods clamp at the v1 structural maxima);
+- `HeaderReadLimits` (public, `#[non_exhaustive]`, builder methods clamp at the structural maxima);
 - parsed encrypted-header structures;
 - `build_encrypted_header`;
 - `read_encrypted_header`;
@@ -482,8 +482,8 @@ Payload streaming uses `PayloadKey`. It does not know about recipient schemes, k
 The module exposes:
 
 - `scan_tlv_region(bytes, max_region_len, max_value_len) -> Vec<RawTlv>` — the parsing primitive. Validates structural framing (each entry header fits, declared `len` fits in the region and `<= max_value_len`), strict ascending tag order, reserved-tag rejection. Returns parsed entries with cached `TlvClass`. Does not enforce a critical-tag policy.
-- `reject_unknown_critical(tlvs) -> Result<()>` — the v1.0 policy wrapper. Rejects any `TlvClass::Critical` entry as `UnknownCriticalTag` because v1.0 defines no known critical tags in any region. Future versions that define known criticals will iterate the scanned TLVs against a registry instead.
-- `validate_no_known_critical(bytes, max_region_len, max_value_len) -> Result<()>` — the v1.0 single-call helper. Combines `scan_tlv_region` and `reject_unknown_critical` for callers that don't need the parsed entries. Used by every v1.0 caller (FCR header, `private.key`, FCA `archive_ext`, FCA `entry_ext`).
+- `reject_unknown_critical(tlvs) -> Result<()>` — the current policy wrapper. Rejects any `TlvClass::Critical` entry as `UnknownCriticalTag` because the current specification defines no known critical tags in any region. A later specification that defines known criticals will iterate the scanned TLVs against a registry instead.
+- `validate_no_known_critical(bytes, max_region_len, max_value_len) -> Result<()>` — the single-call helper. Combines `scan_tlv_region` and `reject_unknown_critical` for callers that don't need the parsed entries. Used by every current caller (FCR header, `private.key`, FCA `archive_ext`, FCA `entry_ext`).
 - `classify_tlv_tag(tag) -> Result<TlvClass>` — pure tag classification, rejects the two reserved values.
 - `validate_tlv(ext_bytes)` — public convenience function. Calls `validate_no_known_critical` with `EXT_LEN_MAX` for both region and value caps. Used by `.fcr` header and `private.key` callers.
 
@@ -504,7 +504,7 @@ Recipient entries are authenticated header data. Unsupported recipient entries r
 
 ### 5.1 `recipient/entry.rs`
 
-`recipient/entry.rs` owns the generic v1 recipient entry framing:
+`recipient/entry.rs` owns the generic recipient entry framing:
 
 ```text
 type_name_len:u16
@@ -534,7 +534,7 @@ Rules:
 
 - `validate_type_name_grammar(name)` — the §3.3 byte-level grammar (1..=255 bytes, lowercase ASCII, allowed character set, no leading/trailing punctuation, no `..`/`//`). All in-tree wire-format readers and writers (`recipient/entry.rs`, `key/public.rs`, `key/private.rs`) call this and only this. The grammar deliberately accepts unknown short native names so a future FerroCrypt version can introduce a new native recipient type without breaking forward-compatible parsing in older readers.
 - `is_reserved_native_name(name)` — internal building block: returns `true` when `name` has the shape of a reserved FerroCrypt native type (no `/`, plus a reserved native prefix in `["mlkem", "pq", "hpke", "tag", "xwing", "kem"]` or the reserved `tag` suffix per `FORMAT.md` §3.3.1).
-- `validate_external_type_name(name)` — runs the grammar check, then enforces the §3.3.1 namespace policy: the name MUST contain `/` and MUST NOT impersonate a reserved native shape. v1 ships no public plugin / third-party recipient registration surface, so this validator currently has no in-tree caller; it exists so the §3.3.1 policy is enforceable the moment such a surface is added.
+- `validate_external_type_name(name)` — runs the grammar check, then enforces the §3.3.1 namespace policy: the name MUST contain `/` and MUST NOT impersonate a reserved native shape. No public plugin / third-party recipient registration surface ships today, so this validator currently has no in-tree caller; it exists so the §3.3.1 policy is enforceable the moment such a surface is added.
 
 `is_reserved_native_name` and `validate_external_type_name` are `pub(crate)` until a plugin-facing API needs them; only `validate_type_name_grammar` and `TYPE_NAME_MAX_LEN` are re-exported through `recipient::mod`.
 
@@ -720,7 +720,7 @@ Key-file reads go through `fs/paths.rs::read_file_capped`, called directly by th
 
 ## 7. `archive/`
 
-`archive/` owns the FerroCrypt Archive (FCA) v1 wire format and directory/file payload semantics. The byte-level FCA spec lives in `ferrocrypt-lib/FORMAT.md` §9.
+`archive/` owns the FerroCrypt Archive (FCA) wire format and directory/file payload semantics. The byte-level FCA spec lives in `ferrocrypt-lib/FORMAT.md` §9.
 
 Archive handling is security-critical. Wire-format constants, model types, resource limits, path-grammar validation, tree-shape validation, encoding, decoding, and platform-specific extraction hardening are separated so each review surface is explicit.
 
@@ -749,7 +749,7 @@ It contains:
 
 - `FcaHeader` — parsed header summary (`entry_count`, `archive_ext_len`, `manifest_len`, `total_file_bytes`);
 - `ArchiveEntryKind` — `File` / `Directory` enum;
-- `ArchiveEntry` — `path_utf8`, `mode`, `size`, opaque `entry_ext: Vec<u8>` carrying the per-entry TLV region (empty for v1 writers, populated by the parser for v1.x readers), plus a writer-only `source_path: Option<PathBuf>` set by the metadata pass so the content pass can reopen no-follow;
+- `ArchiveEntry` — `path_utf8`, `mode`, `size`, opaque `entry_ext: Vec<u8>` carrying the per-entry TLV region (empty for current writers, populated by the parser for files from a later compatible specification), plus a writer-only `source_path: Option<PathBuf>` set by the metadata pass so the content pass can reopen no-follow;
 - `Manifest` — `entries`, `total_file_bytes`, `root_name`, `root_is_file`, `root_mode`.
 
 Readers leave `source_path` as `None`; writers set it.
@@ -1003,7 +1003,7 @@ Rules:
 - The API remains path-based because FerroCrypt security guarantees depend on archive preflight, streaming encryption, staging, and atomic finalization.
 - **Writer caps mirror reader defaults.** A default-configured `Encryptor` produces `.fcr` files a default-configured `Decryptor` can read. `write` enforces this via the same helpers the reader uses (single source of truth per rule — see "Centralized cap enforcement" below):
   - `api::preflight_header_write_limits` checks all three axes of `HeaderReadLimits` against the exact header the writer will emit: `recipient_count`, per-entry `body_len` (canonical native value from `NativeRecipientType::body_len()`), and the computed `header_len`. Tightening any axis below the writer's natural output rejects with the corresponding typed `*CapExceeded` variant.
-  - For the passphrase path, `KdfParams::validate_for_write` runs the same `validate_structural` the reader runs (`lanes`, `time_cost`, `mem_cost` against v1 absolute bounds + the Argon2 `mem_cost ≥ ARGON2_MIN_MEM_COST_PER_LANE × lanes` floor), then the production memory floor `enforce_write_floor` (`mem_cost ≥ MIN_WRITE_MEM_COST`, 19 MiB), and finally `enforce_limit` against `KdfLimit`. Above-structural params reject with `InvalidKdfParams::*`; below-floor `mem_cost` rejects with `KdfBelowWriteFloor`; above-resource-cap reject with `KdfResourceCapExceeded`. The floor is hard and writer-only: the reader path never applies it, so a file written before the floor existed still decrypts. The same rule chain applies to `KeyPairGenerator::write` for the passphrase that seals `private.key`.
+  - For the passphrase path, `KdfParams::validate_for_write` runs the same `validate_structural` the reader runs (`lanes`, `time_cost`, `mem_cost` against the absolute bounds + the Argon2 `mem_cost ≥ ARGON2_MIN_MEM_COST_PER_LANE × lanes` floor), then the production memory floor `enforce_write_floor` (`mem_cost ≥ MIN_WRITE_MEM_COST`, 19 MiB), and finally `enforce_limit` against `KdfLimit`. Above-structural params reject with `InvalidKdfParams::*`; below-floor `mem_cost` rejects with `KdfBelowWriteFloor`; above-resource-cap reject with `KdfResourceCapExceeded`. The floor is hard and writer-only: the reader path never applies it, so a file written before the floor existed still decrypts. The same rule chain applies to `KeyPairGenerator::write` for the passphrase that seals `private.key`.
   - The X25519 path never runs Argon2id during encrypt, so `kdf_limit` has no effect on `with_public_key` / `with_public_keys` flows.
   - To go above any default, the caller raises both sides explicitly: `Encryptor::header_read_limits` / `Encryptor::kdf_limit` / `KeyPairGenerator::kdf_limit` on the writer; `Decryptor::open_with_limits` plus `*::header_read_limits` / `*::kdf_limit` on the reader.
   - All checks fire after `validate_passphrase` and before any filesystem syscall or Argon2id work, so misconfiguration surfaces fast.

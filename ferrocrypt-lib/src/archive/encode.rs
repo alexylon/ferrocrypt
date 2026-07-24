@@ -152,7 +152,7 @@ fn archive_dir_mode_cap(_metadata: &cap_std::fs::Metadata) -> u32 {
 /// Windows-only rejection for any NTFS reparse point in the archive
 /// source tree. `file_type().is_symlink()` is not enough on Windows:
 /// junctions and mount points are reparse points but may not classify
-/// as symlinks. FCA v1 stores no reparse-point semantics, so writer
+/// as symlinks. FCA stores no reparse-point semantics, so writer
 /// input rejects them before they can redirect traversal or content
 /// reads.
 #[cfg(windows)]
@@ -342,7 +342,7 @@ struct ArchiveCounters {
 
 /// Single source of truth for the writer's [`ArchiveEntry`]
 /// construction during the metadata pass. Every `entry_ext` is empty
-/// because v1 native writers emit no per-entry TLV bytes (FORMAT.md
+/// because native writers emit no per-entry TLV bytes (FORMAT.md
 /// §9.13). Used by both branches of [`build_manifest`] and both
 /// branches of [`walk_directory`] so the field set stays consistent
 /// across all four call sites.
@@ -1039,9 +1039,9 @@ impl PreparedArchive {
     /// manifest, and file contents in canonical manifest order. File contents
     /// are read from the retained source. Returns the writer for finalization.
     pub(crate) fn write_to<W: Write>(self, mut writer: W) -> Result<W, CryptoError> {
-        // FCA v1 writers set `archive_ext_len` to zero. The field is
-        // reserved for later versions, but v1 defines no archive-level
-        // extension tags.
+        // FCA writers set `archive_ext_len` to zero. The field is
+        // reserved for later versions, but FCA archive version 0x01
+        // defines no archive-level extension tags.
         writer = write_fca_header(
             writer,
             self.entry_count,

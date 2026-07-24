@@ -98,7 +98,7 @@ pub(super) fn require_fits_usize(value: u32, label: &str) -> Result<usize, Crypt
         .map_err(|_| CryptoError::InvalidInput(format!("{label} cannot fit in memory")))
 }
 
-/// FCA archive-level TLV validator: scans `archive_ext` under the v1.0
+/// FCA archive-level TLV validator: scans `archive_ext` under the
 /// no-known-critical policy, capped by [`ArchiveLimits::max_archive_ext_bytes`]
 /// (region) and [`ArchiveLimits::max_tlv_value_bytes`] (per-value). Used
 /// by the reader (post-`parse_fca_header`) and any future archive-level
@@ -115,7 +115,7 @@ pub(crate) fn validate_archive_ext_tlv(
     )
 }
 
-/// FCA per-entry TLV validator: scans `entry_ext` under the v1.0
+/// FCA per-entry TLV validator: scans `entry_ext` under the
 /// no-known-critical policy, capped by [`ArchiveLimits::max_entry_ext_bytes`]
 /// (region) and [`ArchiveLimits::max_tlv_value_bytes`] (per-value). Used
 /// symmetrically by writer-side `checked_manifest_len` (FORMAT.md §9.10
@@ -445,8 +445,8 @@ pub(crate) fn checked_manifest_len(
         )?;
 
         // FORMAT.md §9.10: writers must apply the same TLV canonicality
-        // rules as readers before emitting. v1 writers normally pass
-        // `entry_ext = Vec::new()`, but a future v1.x caller that
+        // rules as readers before emitting. Native writers normally
+        // pass `entry_ext = Vec::new()`, but a future caller that
         // constructs an `ArchiveEntry` directly with malformed
         // `entry_ext` bytes is rejected here, preserving the
         // "FerroCrypt MUST NOT write archives its own default reader
@@ -664,8 +664,8 @@ pub fn parse_manifest_bytes(
 
         // Per FORMAT.md §9.5: every per-entry TLV region is parsed +
         // canonicality-validated under the no-known-critical policy.
-        // v1 defines no per-entry TLV tags, so any tag present is
-        // either ignorable (skip after canonicality) or critical
+        // FCA archive version 0x01 defines no per-entry TLV tags, so
+        // any tag present is ignorable (skip after canonicality) or critical
         // (reject as `UnknownCriticalTag`). Scan on the borrowed slice
         // first so a malformed or unknown-critical region is rejected
         // before any allocation.
@@ -862,7 +862,7 @@ mod tests {
     }
 
     /// Non-zero `archive_ext_len` round-trips through the writer and
-    /// parser. v1 writers emit zero, but the parser must accept any
+    /// parser. Native writers emit zero, but the parser must accept any
     /// caller-provided value within the cap.
     #[test]
     fn header_round_trip_with_archive_ext_len() {
@@ -942,7 +942,7 @@ mod tests {
     }
 
     /// A malformed TLV inside `entry_ext` rejects via the shared
-    /// scanner. v1 defines no per-entry tags, so any structurally
+    /// scanner. FCA defines no per-entry tags, so any structurally
     /// invalid TLV trips `MalformedTlv` from `scan_tlv_region`. Five
     /// bytes — one short of the six-byte `tag(u16) || len(u32)`
     /// minimum, so the scanner exits its bounds check before parsing
@@ -957,7 +957,7 @@ mod tests {
     }
 
     /// An unknown critical tag (`0x8001..=0xFFFF`) inside `entry_ext`
-    /// rejects with `UnknownCriticalTag`. v1 defines no critical tags,
+    /// rejects with `UnknownCriticalTag`. FCA defines no critical tags,
     /// so any critical-range tag is an upgrade-required signal.
     #[test]
     fn parse_rejects_unknown_critical_entry_ext_tag() {
@@ -1679,9 +1679,9 @@ mod tests {
     /// before emission. A caller that hand-rolls an `ArchiveEntry`
     /// with an unknown critical tag in `entry_ext` is rejected by
     /// `checked_manifest_len`, mirroring the reader's
-    /// `parse_manifest_bytes` rejection path. v1 native writers never
+    /// `parse_manifest_bytes` rejection path. Native writers never
     /// hit this path (they pass `entry_ext: Vec::new()`); the test
-    /// pins the symmetry guarantee for v1.x writers that emit known
+    /// pins the symmetry guarantee for future writers that emit known
     /// tags.
     #[test]
     fn checked_manifest_len_rejects_unknown_critical_entry_ext() {
@@ -1745,7 +1745,7 @@ mod tests {
 
     /// Helper that constructs raw manifest bytes for one synthetic
     /// entry, allowing each field to be set independently to test
-    /// rejection cases. v1 callers pass `entry_ext = &[]`; tests that
+    /// rejection cases. Most callers pass `entry_ext = &[]`; tests that
     /// drive the per-entry TLV path supply non-empty values.
     #[allow(clippy::too_many_arguments)]
     fn raw_entry_bytes(

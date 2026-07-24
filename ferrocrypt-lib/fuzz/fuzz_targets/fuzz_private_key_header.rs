@@ -1,8 +1,8 @@
 #![no_main]
 
-//! Fuzzes the v1 `private.key` header parser and shape validator.
+//! Fuzzes the `private.key` header parser and shape validator.
 //!
-//! In v1 only `private.key` has a binary on-disk layout; the text-based
+//! Only `private.key` has a binary on-disk layout; the text-based
 //! `public.key` grammar has its own `fuzz_public_key_file` target. This
 //! target passes arbitrary bytes to `validate_private_key_shape`, which
 //! runs `PrivateKeyHeader::parse` (magic, version, kind, `key_flags`, and

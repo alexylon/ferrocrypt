@@ -105,7 +105,7 @@ pub(crate) fn is_reserved_native_name(name: &str) -> bool {
 /// On failure surfaces [`crate::error::FormatDefect::MalformedTypeName`].
 ///
 /// This crate ships no public plugin / third-party recipient
-/// registration surface in v1, so this validator currently has no
+/// registration surface, so this validator currently has no
 /// in-tree caller; it exists so the policy promised in `FORMAT.md`
 /// §3.3.1 is enforceable the moment such a surface is added.
 #[allow(dead_code)]

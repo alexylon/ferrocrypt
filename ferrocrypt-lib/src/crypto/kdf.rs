@@ -20,7 +20,7 @@ use crate::format::{read_u32_be, write_u32_be};
 pub const ARGON2_SALT_SIZE: usize = 32;
 
 /// Upper end of the `FORMAT.md` §2.2 passphrase byte-length bound. The
-/// bound is a fixed v1 credential rule (`1` to this value, inclusive),
+/// bound is a fixed credential rule (`1` to this value, inclusive),
 /// not a configurable KDF resource cap: readers and writers reject a
 /// passphrase outside it before running Argon2id, and the value is not
 /// tunable per operation. 4 KiB is well above a human-entered
@@ -49,14 +49,14 @@ pub(crate) fn check_passphrase_len(passphrase: &[u8]) -> Result<(), CryptoError>
 
 /// Local policy limit for Argon2id work accepted during decryption.
 ///
-/// A v1 file or `private.key` stores its Argon2id parameters in the cleartext
+/// A `.fcr` file or `private.key` stores Argon2id parameters in the cleartext
 /// header. When processing untrusted input, `KdfLimit` prevents a malicious
 /// header from forcing arbitrarily expensive key derivation: any structurally
 /// valid input whose memory cost, time cost, or lane count exceeds the
 /// configured cap is rejected before Argon2id runs. If no limit is configured
 /// on a decryptor, the library applies [`KdfLimit::default`]: memory is capped
 /// at the writer's default (1 GiB), while time cost and lanes are capped at the
-/// v1 format maximum, so those two reject nothing the structural check would
+/// format maximum, so those two reject nothing the structural check would
 /// not already reject.
 ///
 /// Construct with [`KdfLimit::new`] for KiB or [`KdfLimit::from_mib`] for MiB,
@@ -72,10 +72,10 @@ pub struct KdfLimit {
     /// Maximum accepted memory cost in KiB.
     pub max_mem_cost_kib: u32,
     /// Maximum accepted time cost (Argon2id iteration count). Defaults to the
-    /// v1 format maximum, so it rejects nothing the structural check accepts
+    /// format maximum, so it rejects nothing the structural check accepts
     /// unless tightened with [`KdfLimit::with_max_time_cost`].
     pub max_time_cost: u32,
-    /// Maximum accepted lane count (Argon2id parallelism). Defaults to the v1
+    /// Maximum accepted lane count (Argon2id parallelism). Defaults to the
     /// format maximum, so it rejects nothing the structural check accepts
     /// unless tightened with [`KdfLimit::with_max_lanes`].
     pub max_lanes: u32,
@@ -83,7 +83,7 @@ pub struct KdfLimit {
 
 impl KdfLimit {
     /// Builds a limit from a KiB memory value, leaving the time-cost and lane
-    /// caps at their defaults (the v1 format maximum). Only memory is
+    /// caps at their defaults (the format maximum). Only memory is
     /// constrained unless [`with_max_time_cost`](Self::with_max_time_cost) or
     /// [`with_max_lanes`](Self::with_max_lanes) tightens the others.
     pub fn new(max_mem_cost_kib: u32) -> Self {
@@ -94,7 +94,7 @@ impl KdfLimit {
     }
 
     /// Builds a limit from MiB, leaving the time-cost and lane caps at their
-    /// defaults (the v1 format maximum).
+    /// defaults (the format maximum).
     ///
     /// # Errors
     ///
@@ -106,7 +106,7 @@ impl KdfLimit {
         Ok(Self::new(kib))
     }
 
-    /// Sets the accepted Argon2id time-cost cap. Values at or above the v1
+    /// Sets the accepted Argon2id time-cost cap. Values at or above the
     /// format maximum are equivalent to the structural maximum, because the
     /// structural check already rejects anything higher. Lower values make
     /// decryption refuse an otherwise-valid header whose iteration count
@@ -116,7 +116,7 @@ impl KdfLimit {
         self
     }
 
-    /// Sets the accepted Argon2id lane-count cap. Values at or above the v1
+    /// Sets the accepted Argon2id lane-count cap. Values at or above the
     /// format maximum are equivalent to the structural maximum; lower values
     /// make decryption refuse an otherwise-valid header whose lane count
     /// exceeds the cap.
@@ -134,7 +134,7 @@ impl Default for KdfLimit {
         // but an attacker-controlled header cannot force more than 1 GiB of
         // Argon2id memory unless the caller raises `KdfLimit`.
         //
-        // Time cost and lanes default to the v1 format maximum
+        // Time cost and lanes default to the format maximum
         // (`MAX_TIME_COST` / `MAX_LANES`). The structural check already
         // enforces those bounds, so the default caps reject nothing new; they
         // exist only so a caller can tighten either dimension.
@@ -148,7 +148,7 @@ impl Default for KdfLimit {
 
 /// KDF parameters stored in file headers and key files.
 ///
-/// These values are serialized in v1 `argon2id` recipient bodies and
+/// These values are serialized in `argon2id` recipient bodies and
 /// `private.key` cleartext headers so decryption repeats the same work factor
 /// used during encryption. See `FORMAT.md` §4.1 and §8.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,7 +180,7 @@ impl KdfParams {
     const DEFAULT_TIME_COST: u32 = 4;
     const DEFAULT_LANES: u32 = 4;
 
-    /// Serializes these parameters to the v1 big-endian wire encoding.
+    /// Serializes these parameters to the big-endian wire encoding.
     pub fn to_bytes(self) -> [u8; KDF_PARAMS_SIZE] {
         let mut buf = [0u8; KDF_PARAMS_SIZE];
         write_u32_be(&mut buf, KDF_MEM_COST_OFFSET, self.mem_cost);
@@ -206,7 +206,7 @@ impl KdfParams {
     /// lanes`) is far lower; this is the security-policy floor on top of it.
     pub(crate) const MIN_WRITE_MEM_COST: u32 = 19 * 1024; // 19 MiB (OWASP Argon2id minimum)
 
-    /// Field-level structural validation against v1 absolute bounds
+    /// Field-level structural validation against the format's absolute bounds
     /// (`MAX_LANES`, `MAX_TIME_COST`, `MAX_MEM_COST`, plus the Argon2
     /// `mem_cost >= ARGON2_MIN_MEM_COST_PER_LANE * lanes` floor).
     /// Single source of truth for the rule set, called by
@@ -287,7 +287,7 @@ impl KdfParams {
         Ok(self)
     }
 
-    /// Parses v1 KDF parameter bytes and enforces the caller's resource caps.
+    /// Parses KDF parameter bytes and enforces the caller's resource caps.
     ///
     /// `limit = None` still applies the library default ceiling so untrusted
     /// headers cannot force the structural 2 GiB maximum unless the caller opts
@@ -296,7 +296,7 @@ impl KdfParams {
     ///
     /// # Errors
     ///
-    /// Returns [`CryptoError::InvalidKdfParams`] when the fields violate v1
+    /// Returns [`CryptoError::InvalidKdfParams`] when the fields violate the
     /// structural bounds. Returns [`CryptoError::KdfResourceCapExceeded`],
     /// [`CryptoError::KdfTimeCostCapExceeded`], or
     /// [`CryptoError::KdfLanesCapExceeded`] when the corresponding field is
@@ -308,7 +308,7 @@ impl KdfParams {
         Self::from_bytes_structural(bytes)?.enforce_limit(limit)
     }
 
-    /// Validates caller-supplied writer parameters against the same v1
+    /// Validates caller-supplied writer parameters against the same
     /// structural bounds the reader enforces, applies the production
     /// memory floor, then applies the caller's resource policy cap. This
     /// is the writer-side counterpart to [`from_bytes`](Self::from_bytes):
@@ -365,7 +365,7 @@ impl KdfParams {
     /// # Errors
     ///
     /// Returns [`CryptoError::InvalidKdfParams`] if `mem_cost`, `time_cost`,
-    /// or `lanes` are outside the v1 structural bounds, and
+    /// or `lanes` are outside the structural bounds, and
     /// [`CryptoError::InvalidInput`] if the passphrase is outside the
     /// `FORMAT.md` §2.2 byte-length bound. Both are checked before Argon2id
     /// runs, so any Argon2 failure on the validated input surfaces as
@@ -587,7 +587,7 @@ mod tests {
     }
 
     /// The default and `new`-built limits leave the time-cost and lane caps at
-    /// the v1 format maximum, so a header at those maxima is still accepted —
+    /// the format maximum, so a header at those maxima is still accepted —
     /// the new dimensions reject nothing unless a caller tightens them.
     #[test]
     fn test_kdf_limit_default_accepts_max_time_cost_and_lanes() {
@@ -703,7 +703,7 @@ mod tests {
 
     /// `hash_passphrase` performs its own structural validation so a direct
     /// crate-internal caller cannot run Argon2id with invalid parameters. A
-    /// `time_cost` above the v1 maximum must return `InvalidKdfParams` before
+    /// `time_cost` above `MAX_TIME_COST` must return `InvalidKdfParams` before
     /// Argon2id starts, even though `argon2::Params::new` would accept it.
     #[test]
     fn hash_passphrase_rejects_structurally_invalid_params() {

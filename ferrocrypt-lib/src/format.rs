@@ -1,4 +1,4 @@
-//! FerroCrypt on-disk format v1.
+//! FerroCrypt on-disk formats.
 //!
 //! Normative spec: `ferrocrypt-lib/FORMAT.md`.
 //!
@@ -16,7 +16,7 @@
 //! | Offset | Size | Field          | Value / meaning                   |
 //! |-------:|-----:|----------------|-----------------------------------|
 //! | 0–3    | 4    | `magic`        | `"FCR\0"` = `0x46 0x43 0x52 0x00` |
-//! | 4      | 1    | `version`      | `0x01` (`.fcr` outer file version)|
+//! | 4      | 1    | `version`      | `0x01` (outer-container version)  |
 //! | 5      | 1    | `kind`         | `0x45 'E'` for `.fcr`             |
 //! | 6–7    | 2    | `prefix_flags` | `u16 BE`; MUST be zero            |
 //! | 8–11   | 4    | `header_len`   | `u32 BE`; ≤ 16,777,216            |
@@ -94,17 +94,17 @@ pub(crate) fn read_exact_or_truncated(
 
 // ─── Shared constants ──────────────────────────────────────────────────────
 
-/// 4-byte ASCII magic identifying every FerroCrypt v1 artefact.
+/// 4-byte ASCII magic identifying every FerroCrypt artefact.
 pub const MAGIC: [u8; 4] = [b'F', b'C', b'R', 0];
 
 /// Length of [`MAGIC`] in bytes (`4`).
 pub(crate) const MAGIC_SIZE: usize = MAGIC.len();
 
-/// Version byte for the `.fcr` outer encrypted file (`FORMAT.md` §3.1).
+/// `.fcr` outer-container version byte (`FORMAT.md` §3.1).
 ///
-/// This is the **outer file** version domain only. It is independent of:
-/// - the `private.key` wire-version byte (see [`crate::key::private::PRIVATE_KEY_VERSION`]);
-/// - the `public.key` recipient-payload version (see
+/// This is the **outer-container** version domain only. It is independent of:
+/// - the private-key encoding version (see [`crate::key::private::PRIVATE_KEY_VERSION`]);
+/// - the public-key encoding version (see
 ///   [`crate::key::public::PUBLIC_KEY_VERSION`]);
 /// - the inner FCA archive version (see `archive::format::FCA_VERSION`).
 ///
@@ -121,7 +121,7 @@ pub(crate) const KIND_PRIVATE_KEY: u8 = 0x4B; // 'K'
 /// Default file extension for encrypted FerroCrypt payload files.
 pub const ENCRYPTED_EXTENSION: &str = "fcr";
 
-// ─── Encrypted file format (.fcr) — v1 ─────────────────────────────────────
+// ─── Encrypted file format (.fcr) ──────────────────────────────────────────
 
 /// Plain 12-byte prefix at file offset 0 (no replication, no padding).
 pub(crate) const PREFIX_SIZE: usize = 12;
@@ -154,7 +154,7 @@ pub(crate) const BODY_LEN_MAX: u32 = 16_777_216;
 /// Recommended local cap on `body_len` for untrusted input.
 pub(crate) const BODY_LEN_LOCAL_CAP_DEFAULT: u32 = 8_192;
 
-/// Size of the v1 header MAC tag (`HMAC-SHA3-256`), in bytes. Per
+/// Size of the `.fcr` header MAC tag (`HMAC-SHA3-256`), in bytes. Per
 /// `FORMAT.md` §3.6, the tag immediately follows `header` and precedes
 /// the encrypted payload.
 pub(crate) const HEADER_MAC_SIZE: usize = HMAC_TAG_SIZE;
@@ -185,7 +185,7 @@ impl Kind {
     }
 
     /// Decodes a wire-format `kind` byte. `None` for any byte that is
-    /// not a recognised v1 artefact kind; callers surface
+    /// not a recognised artefact kind; callers surface
     /// [`FormatDefect::WrongKind`] for that case.
     pub(crate) const fn from_byte(byte: u8) -> Option<Self> {
         match byte {
@@ -200,9 +200,9 @@ impl Kind {
 
 /// Logical generation of matching `public.key` and `private.key` material
 /// (`FORMAT.md` §11). Keypair compatibility is a domain separate from
-/// `.fcr` outer-file compatibility: a `.fcr` payload bump does not by
-/// itself bump the keypair suite, and a keypair bump does not require an
-/// outer file bump.
+/// `.fcr` outer-container compatibility: a `.fcr` payload bump does not
+/// by itself bump the keypair suite, and a keypair bump does not require
+/// an outer-container bump.
 ///
 /// Both `public.key` and `private.key` parsers translate their on-disk
 /// version encodings into [`KeypairSuite`] before any support decision —
@@ -218,8 +218,8 @@ impl Kind {
 /// support machinery, which may change shape across releases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KeypairSuite {
-    /// Generation v1: `public.key` recipient payload version byte `0x01`
-    /// + binary `private.key` header version byte `0x01`.
+    /// Key-pair suite KPS-1: `public.key` recipient payload version byte
+    /// `0x01` + binary `private.key` header version byte `0x01`.
     V1,
     // V2, V3, … added only when public + private compatibility changes
     // together. The enum drives the wire-version mapping in
@@ -682,7 +682,7 @@ fn check_header_section_lengths(
 
 // ─── Header MAC ─────────────────────────────────────────────────────────────
 
-/// Computes the v1 `header_mac` over `prefix(12) || header(header_len)`
+/// Computes the `header_mac` over `prefix(12) || header(header_len)`
 /// as defined in `FORMAT.md` §3.6. Inputs are streamed through HMAC
 /// without a concatenated copy, so a 16 MiB header does not allocate.
 ///
@@ -700,7 +700,7 @@ pub(crate) fn compute_header_mac(
     hmac_sha3_256_parts(header_key.expose(), &[prefix_bytes, header_bytes])
 }
 
-/// Constant-time verification of a v1 `header_mac` over `prefix(12) ||
+/// Constant-time verification of a `header_mac` over `prefix(12) ||
 /// header(header_len)`. See [`compute_header_mac`] for the MAC scope.
 ///
 /// Returns [`CryptoError::HeaderTampered`] on tag mismatch. In a
@@ -749,9 +749,9 @@ mod tests {
 
     #[test]
     fn keypair_suite_v1_maps_to_canonical_wire_bytes() {
-        // Pin the on-disk bytes for the v1 suite so a future suite bump
+        // Pin the on-disk bytes for suite KPS-1 so a future suite bump
         // cannot silently shift them. Both `public.key` and `private.key`
-        // emit byte `0x01` for v1.
+        // emit byte `0x01` for KPS-1.
         assert_eq!(KeypairSuite::V1.private_key_version(), 0x01);
         assert_eq!(KeypairSuite::V1.public_key_version(), 0x01);
     }
@@ -833,7 +833,7 @@ mod tests {
         let above_writer_public = WRITER_KEYPAIR_SUITE
             .public_key_version()
             .checked_add(1)
-            .expect("writer public-key byte cannot be 0xFF in v1");
+            .expect("writer public-key byte cannot be 0xFF");
         assert_eq!(
             keypair_suite_from_public_key_version(above_writer_public),
             Err(KeypairVersionRejection::Newer {
@@ -843,7 +843,7 @@ mod tests {
         let above_writer_private = WRITER_KEYPAIR_SUITE
             .private_key_version()
             .checked_add(1)
-            .expect("writer private-key byte cannot be 0xFF in v1");
+            .expect("writer private-key byte cannot be 0xFF");
         assert_eq!(
             keypair_suite_from_private_key_version(above_writer_private),
             Err(KeypairVersionRejection::Newer {
@@ -1012,7 +1012,7 @@ mod tests {
     fn parse_prefers_unsupported_version_over_wrong_kind() {
         // Spec UX preference: when both version and kind are wrong,
         // surface UnsupportedVersion (actionable: "upgrade FerroCrypt")
-        // rather than WrongKind (which would imply a known v1 kind).
+        // rather than WrongKind (which would imply a kind known to this release).
         let mut bytes = Prefix::build_encrypted(HEADER_FIXED_SIZE as u32).unwrap();
         bytes[4] = 3; // future version
         bytes[5] = 0x99; // unknown kind

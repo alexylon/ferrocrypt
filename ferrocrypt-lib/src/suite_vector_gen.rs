@@ -73,7 +73,7 @@ const PLAINTEXT_FILE_MODE: u32 = 0o644;
 const UNKNOWN_TYPE_NAME: &str = "mlkem768";
 
 // `.fcr` prefix field offsets per `FORMAT.md` §3.1. The layout is frozen
-// for v1, so the generator pins the byte positions directly.
+// at version `0x01`, so the generator pins the byte positions directly.
 const PREFIX_MAGIC_OFFSET: usize = 0;
 const PREFIX_VERSION_OFFSET: usize = 4;
 const PREFIX_KIND_OFFSET: usize = 5;
@@ -510,7 +510,7 @@ fn crafted_fca_payloads() -> Vec<(&'static str, Vec<u8>)> {
 }
 
 /// Writes the header-fixed / recipient-entry structural and per-field-tamper
-/// reject fixtures by mutating the valid argon2id base at frozen v1 offsets,
+/// reject fixtures by mutating the valid argon2id base at frozen byte offsets,
 /// and returns their manifest rows. Covers `FORMAT.md` §3.2 (`header_flags`),
 /// §3.4 (reserved and native-critical flag bits), §3.3 (entry framing), and
 /// representative §4.1/§4.2 recipient-body tampering. The completion cases

@@ -29,31 +29,33 @@ pub const PRIVATE_KEY_FILENAME: &str = "private.key";
 /// compile error until the new kind is handled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KeyFileKind {
-    /// Bytes look like a v1 `public.key`: a UTF-8 string that
+    /// Bytes look like a `public.key`: a UTF-8 string that
     /// decodes as a canonical Bech32 `fcr1…` recipient (with
     /// surrounding whitespace tolerated for this heuristic — the
     /// `public.key` parser enforces canonical whitespace).
     Public,
-    /// Bytes carry the v1 `private.key` signature: at least 6
+    /// Bytes carry the `private.key` signature: at least 6
     /// bytes of `FCR\0 || ?? || 'K'`. Magic + type byte is
-    /// sufficient regardless of `version`, so a future v2
-    /// `private.key` still classifies as `Private` and surfaces
-    /// the more specific diagnostic instead of `NotAKeyFile`.
+    /// sufficient regardless of `version`, so a future
+    /// `private.key` with private-key encoding version `0x02`
+    /// still classifies as `Private` and surfaces the more
+    /// specific diagnostic instead of `NotAKeyFile`.
     Private,
     /// Neither signature matches.
     Unknown,
 }
 
 impl KeyFileKind {
-    /// Classifies `data` against the two v1 key-file shapes.
+    /// Classifies `data` against the two key-file shapes.
     /// Probes the cheap binary signature first; falls back to
     /// the more expensive Bech32 decode for the public-key
     /// text shape.
     ///
     /// The binary signature is `magic(4) || version(1) || kind(1)
     /// = 'K'`. The version byte is intentionally not constrained,
-    /// so a future v2 `private.key` still classifies as `Private`
-    /// and surfaces the more specific diagnostic instead of `NotAKeyFile`.
+    /// so a future `private.key` with private-key encoding version
+    /// `0x02` still classifies as `Private` and surfaces the more
+    /// specific diagnostic instead of `NotAKeyFile`.
     ///
     /// Adversarial inputs that do NOT match either signature
     /// (a `.fcr` encrypted file whose `kind` byte is `'E'`,
@@ -117,7 +119,7 @@ mod tests {
         let priv_bytes = fs::read(&private_key_path)?;
         assert_eq!(KeyFileKind::classify(&priv_bytes), KeyFileKind::Private);
 
-        // Magic + future version + type K (a v2 private.key) → Private.
+        // Magic + future private-key encoding version 0x02 + type K → Private.
         let v2_priv = b"FCR\0\x02K\x01\x00\x00";
         assert_eq!(KeyFileKind::classify(v2_priv), KeyFileKind::Private);
 

@@ -108,7 +108,7 @@ macro_rules! outln {
     long_about = "\
 Command-line interface for FerroCrypt.
 
-File format v1 and primitives:
+File format and primitives:
   Passphrase: Argon2id -> HKDF-SHA3-256 -> XChaCha20-Poly1305
   Public-key: X25519 ECDH -> HKDF-SHA3-256 -> XChaCha20-Poly1305",
     after_help = "\
@@ -591,7 +591,7 @@ fn run_encrypt(
 /// applies. When any flag is set, memory starts from `--max-kdf-memory`
 /// (or the 1 GiB default) and `--max-kdf-time-cost` / `--max-kdf-lanes`
 /// tighten the time-cost and lane caps. An unset time-cost or lane cap
-/// stays at the v1 format maximum and so rejects nothing the structural
+/// stays at the format maximum and so rejects nothing the structural
 /// check would not; an unset memory cap stays at the 1 GiB default, below
 /// the 2 GiB structural maximum, so it still rejects a header that asks
 /// for more than 1 GiB.

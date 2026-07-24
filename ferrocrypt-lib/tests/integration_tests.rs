@@ -1738,7 +1738,7 @@ fn test_passphrase_prefix_byte_tamper_detected() -> Result<(), CryptoError> {
     passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
 
     // Flip the version byte (offset 4 in the 12-byte prefix) so the
-    // file claims an unsupported version. v1 readers must reject
+    // file claims an unsupported version. Readers must reject
     // before any recipient unwrap or KDF work runs.
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
@@ -2883,9 +2883,9 @@ fn test_keygen_no_partial_state_on_existing_key() -> Result<(), CryptoError> {
     Ok(())
 }
 
-/// Flipping a byte in the cleartext salt region of a v1 `private.key`
-/// file must cause decryption to fail. v1 binds every cleartext byte
-/// before `wrapped_private_key` (header + argon2_salt + kdf_params +
+/// Flipping a byte in the cleartext salt region of a `private.key`
+/// file must cause decryption to fail. The format binds every cleartext
+/// byte before `wrapped_private_key` (header + argon2_salt + kdf_params +
 /// wrap_nonce + ext_bytes) as AEAD associated data, so any header or
 /// body tamper fails authentication on unlock.
 #[test]

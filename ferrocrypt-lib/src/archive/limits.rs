@@ -51,7 +51,7 @@ pub struct ArchiveLimits {
     pub max_total_entry_ext_bytes: u64,
     /// Maximum byte length of any single TLV value inside an FCA
     /// archive- or entry-level TLV region. Defense-in-depth: the
-    /// containing region cap will fire first for v1, but a future
+    /// containing region cap will fire first today, but a future
     /// region with a larger cap still bounds individual values.
     pub max_tlv_value_bytes: u32,
 }
@@ -234,7 +234,7 @@ pub(crate) fn enforce_manifest_len_cap(
 }
 
 /// Single source of truth for `archive_ext_len > max_archive_ext_bytes`.
-/// Used by [`parse_fca_header`] (only call site today; v1 writers emit
+/// Used by [`parse_fca_header`] (only call site today; native writers emit
 /// `archive_ext_len = 0` so the writer-side check is implicit, but a
 /// future writer that emits a non-zero region would call this).
 pub(crate) fn enforce_archive_ext_cap(

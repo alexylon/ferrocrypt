@@ -82,7 +82,7 @@ pub(crate) fn scan_tlv_region(
 ) -> Result<Vec<RawTlv<'_>>, CryptoError> {
     // Checked conversion keeps the cap unconditional: a saturating
     // clamp would pass an over-4-GiB slice whenever the caller's cap
-    // is exactly `u32::MAX`. Such a region always exceeds any v1 cap;
+    // is exactly `u32::MAX`. Such a region always exceeds any `u32` cap;
     // `u32::MAX` is the closest representable length for the diagnostic.
     let region_len = u32::try_from(bytes.len())
         .map_err(|_| CryptoError::InvalidFormat(FormatDefect::ExtTooLarge { len: u32::MAX }))?;
@@ -144,10 +144,10 @@ pub(crate) fn scan_tlv_region(
 }
 
 /// Rejects any [`TlvClass::Critical`] entry with
-/// [`FormatDefect::UnknownCriticalTag`]. Used by every v1.0 caller
-/// because v1.0 defines no known critical tags in any region. Future
-/// versions that define known criticals will iterate the scanned TLVs
-/// against a registry instead of using this blanket helper.
+/// [`FormatDefect::UnknownCriticalTag`]. Used by every current caller
+/// because the specification defines no known critical tags in any
+/// region. Future versions that define known criticals will iterate the
+/// scanned TLVs against a registry instead of using this blanket helper.
 pub(crate) fn reject_unknown_critical(tlvs: &[RawTlv<'_>]) -> Result<(), CryptoError> {
     for tlv in tlvs {
         if matches!(tlv.class, TlvClass::Critical) {
@@ -159,11 +159,11 @@ pub(crate) fn reject_unknown_critical(tlvs: &[RawTlv<'_>]) -> Result<(), CryptoE
     Ok(())
 }
 
-/// Scans a TLV region with caller-supplied caps and applies the v1.0
+/// Scans a TLV region with caller-supplied caps and applies the current
 /// no-known-critical policy in one call: every critical-range tag is
-/// rejected. Used by every v1.0 caller (FCR header, `private.key`,
-/// FCA `archive_ext`, FCA `entry_ext`) since v1.0 defines no known
-/// critical tags in any region. Returns nothing — callers that need
+/// rejected. Used by every current caller (FCR header, `private.key`,
+/// FCA `archive_ext`, FCA `entry_ext`) since the specification defines
+/// no known critical tags in any region. Returns nothing — callers that need
 /// the parsed entries for value extraction should use
 /// [`scan_tlv_region`] directly.
 pub(crate) fn validate_no_known_critical(
@@ -177,8 +177,8 @@ pub(crate) fn validate_no_known_critical(
 
 /// Validates a TLV extension region per FORMAT.md §6 with the
 /// encrypted-file header policy: region cap = `EXT_LEN_MAX`,
-/// per-value cap = `EXT_LEN_MAX`, every critical tag rejects (v1.0
-/// defines no known criticals).
+/// per-value cap = `EXT_LEN_MAX`, every critical tag rejects (the
+/// specification defines no known criticals).
 ///
 /// Used by FCR header `ext_bytes` and `private.key` `ext_bytes`.
 /// FCA archive- and entry-level extension regions call the
@@ -350,7 +350,7 @@ mod tests {
 
     /// The scanner DOES NOT reject critical tags — it only classifies
     /// them. Critical-rejection is the caller's responsibility (via
-    /// `reject_unknown_critical` for v1, or a known-tag registry
+    /// `reject_unknown_critical` today, or a known-tag registry
     /// later). This decoupling lets future FCA writers emit known
     /// critical tags through the same scanner.
     #[test]
@@ -361,7 +361,7 @@ mod tests {
         assert_eq!(tlvs[0].class, TlvClass::Critical);
     }
 
-    /// `reject_unknown_critical` is the v1.0 policy wrapper that turns
+    /// `reject_unknown_critical` is the current policy wrapper that turns
     /// any critical tag into an `UnknownCriticalTag` error.
     #[test]
     fn reject_unknown_critical_rejects_critical_tag() {

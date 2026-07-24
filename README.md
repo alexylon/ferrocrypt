@@ -275,7 +275,7 @@ The project has not undergone an independent third-party security audit. The [`c
 
 Limitations:
 
-- Pre-v1 FerroCrypt files and key pairs are not compatible with the current v1 format. Older data must be decrypted with the release that created it and then re-encrypted with the current release.
+- FerroCrypt files and key pairs from releases before 0.3.0 are not compatible with the current format. Older data must be decrypted with the release that created it and then re-encrypted with the current release.
 - Directory encryption preserves file contents, directory structure, and Unix file permissions. It does not preserve ownership, timestamps, ACLs, extended attributes, hardlink identity, setuid/setgid/sticky bits, or platform-specific metadata.
 - Symlinks, hardlink archive entries, device files, FIFOs, sockets, archives with more than one top-level root, and exact or ASCII-case-insensitive duplicate paths are rejected during archive processing.
 - Archive paths must conform to a portable safe subset: no Windows-reserved characters (`< > : " | ? *`), no Windows-reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `CLOCK$`, `CONIN$`, `CONOUT$`, `COM0..9`, `COM¹`/`COM²`/`COM³`, `LPT0..9`, `LPT¹`/`LPT²`/`LPT³`) — including in extension stems (e.g. `CON.txt`), no ASCII control bytes (`0x00..=0x1F`), no trailing dot or space, no leading or trailing `/`, no `\`. Rejection happens at encrypt and at decrypt; the same rules apply on every supported OS.

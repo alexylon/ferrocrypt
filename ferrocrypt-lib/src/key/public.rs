@@ -1,4 +1,4 @@
-//! v1 public-key encoding (`FORMAT.md` §7).
+//! Public-key encoding (`FORMAT.md` §7).
 //!
 //! Recipient string Bech32 typed payload:
 //!
@@ -12,8 +12,9 @@
 //! `"ferrocrypt/v1/public-key/checksum" || public_key_version || type_name || 0x00 || key_material)`.
 //!
 //! Every recipient payload carries an explicit `public_key_version` byte at
-//! offset 0. v1 byte = `0x01`; `0x00` is reserved (a writer that forgets to
-//! set the version byte fails closed at the reader).
+//! offset 0. The current public-key encoding version is `0x01`; `0x00` is
+//! reserved (a writer that forgets to set the version byte fails closed at
+//! the reader).
 //!
 //! The recipient string itself is **strict Bech32 (BIP 173, not
 //! Bech32m)** with HRP `"fcr"` and the lowercase data part. Mixed-case
@@ -50,7 +51,7 @@ use crate::recipient::{TYPE_NAME_MAX_LEN, validate_type_name_grammar};
 /// so a future suite bump flows through both writers in lockstep.
 pub const PUBLIC_KEY_VERSION: u8 = WRITER_KEYPAIR_SUITE.public_key_version();
 
-/// Canonical v1 wire-version byte for `public.key` recipient payloads.
+/// Public-key encoding version byte (`0x01`) for key-pair suite KPS-1.
 /// Mirrors the suite constant from `KeypairSuite::V1` (crate-internal)
 /// so bumping the keypair suite flows through this constant automatically.
 pub const PUBLIC_KEY_V1_VERSION: u8 = KeypairSuite::V1.public_key_version();
@@ -68,7 +69,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 pub(crate) const RECIPIENT_HRP: Hrp = Hrp::parse_unchecked("fcr");
 
 /// Domain separator for the internal SHA3-256 recipient-payload
-/// checksum. Distinct from any other v1 hash input so a future
+/// checksum. Distinct from any other hash input in the format so a future
 /// extension cannot accidentally collide with this digest.
 pub(crate) const PUBLIC_KEY_CHECKSUM_DOMAIN: &[u8] = b"ferrocrypt/v1/public-key/checksum";
 
@@ -91,7 +92,7 @@ pub(crate) const RECIPIENT_STRING_LEN_MAX: usize = 20_000;
 
 /// File-read cap for `public.key`: [`RECIPIENT_STRING_LEN_MAX`] ASCII
 /// chars plus one optional trailing `LF`. Anything larger cannot
-/// be a valid v1 public-key file, so the reader rejects before allocating
+/// be a valid `public.key` file, so the reader rejects before allocating
 /// a multi-gigabyte buffer for adversarial input.
 pub(crate) const PUBLIC_KEY_FILE_READ_CAP_BYTES: usize = RECIPIENT_STRING_LEN_MAX + 1;
 
@@ -123,9 +124,9 @@ const fn max_key_material_len() -> u32 {
     max_payload as u32
 }
 
-/// BIP 173 Bech32 with v1's lifted code-length cap. The crate's
+/// BIP 173 Bech32 with the spec's lifted code-length cap. The crate's
 /// built-in [`bech32::Bech32`] type fixes `CODE_LENGTH = 1023`, below
-/// v1's 20,000-char spec ceiling and below the largest payload that
+/// the spec's 20,000-char ceiling and below the largest payload that
 /// [`KEY_MATERIAL_LEN_MAX`] permits. All other [`Checksum`] constants are
 /// forwarded from `bech32::Bech32`, so the on-wire checksum polynomial is
 /// byte-identical to BIP 173; only the length tolerance differs.
@@ -219,7 +220,7 @@ pub(crate) fn encode_recipient_string_for_suite(
 /// SHA3-256 checksum.
 ///
 /// `local_max_chars` is a local policy cap checked before decode work runs.
-/// The v1 structural ceiling is `RECIPIENT_STRING_LEN_MAX` (20,000 ASCII
+/// The structural ceiling is `RECIPIENT_STRING_LEN_MAX` (20,000 ASCII
 /// characters); callers should normally pass the smaller
 /// [`RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT`] for untrusted input unless they
 /// intentionally accept larger future recipient strings.
@@ -256,7 +257,7 @@ pub fn decode_recipient_string(
     }
 
     // Strict Bech32 (BIP 173 polynomial via `Bech32V1`, which also
-    // accepts strings up to v1's 20 000-char spec cap rather than the
+    // accepts strings up to the spec's 20 000-char cap rather than the
     // crate's default 1023). `CheckedHrpstring` rejects Bech32m
     // strings and mixed case, but NOT non-canonical 5-to-8 padding:
     // in `bech32` that check runs only on the segwit decode path, and
@@ -409,7 +410,7 @@ pub(crate) fn decode_x25519_recipient_resolved(
     Ok(ResolvedPublicKey { suite, bytes })
 }
 
-/// Once a recipient string has been decoded, verify it carries v1
+/// Once a recipient string has been decoded, verify it carries
 /// X25519 material and extract the raw 32-byte key.
 ///
 /// Shared by the recipient-string and key-file parsers. A decoded
@@ -555,7 +556,7 @@ pub(crate) fn fingerprint_hex(type_name: &str, key_material: &[u8]) -> String {
 
 // ─── public.key file grammar and reader ────────────────────────────────────
 
-/// Parses the bytes of a v1 `public.key` file into a resolved X25519
+/// Parses the bytes of a `public.key` file into a resolved X25519
 /// public key. [`read_public_key`] owns the bounded filesystem read;
 /// this function is the single implementation of the content grammar
 /// and provides the arbitrary-byte entry point used by fuzzing.
@@ -603,7 +604,7 @@ pub(crate) fn parse_public_key_file_bytes(bytes: &[u8]) -> Result<ResolvedPublic
     Ok(ResolvedPublicKey { suite, bytes: key })
 }
 
-/// Reads and parses a v1 `public.key` file.
+/// Reads and parses a `public.key` file.
 ///
 /// Enforces [`PUBLIC_KEY_FILE_READ_CAP_BYTES`] before allocation, then
 /// delegates all content validation to [`parse_public_key_file_bytes`].
@@ -620,7 +621,7 @@ pub(crate) fn read_public_key(path: &std::path::Path) -> Result<ResolvedPublicKe
 
 /// Public recipient key for FerroCrypt public-key encryption.
 ///
-/// In v1, public recipient keys are native X25519 public keys. A `PublicKey`
+/// Today, public recipient keys are native X25519 public keys. A `PublicKey`
 /// can reference a `public.key` file, hold raw 32-byte X25519 public material,
 /// or be constructed from a Bech32 `fcr1…` recipient string. Filesystem sources
 /// defer I/O until a method needs the key material.
@@ -725,7 +726,7 @@ impl PublicKey {
     /// [`PublicKey::to_recipient_string`], which is also the content of a
     /// `public.key` file without the optional trailing newline. Validates
     /// HRP, BIP 173 checksum, internal SHA3-256 checksum, payload structural
-    /// fields, type-name grammar, and, for v1 X25519 recipients,
+    /// fields, type-name grammar, and, for X25519 recipients,
     /// `type_name == "x25519"` with exactly 32 bytes of non-zero,
     /// canonically encoded key material (`FORMAT.md` §2.4 / §7).
     ///
@@ -757,7 +758,7 @@ impl PublicKey {
     /// Computes the public-key fingerprint.
     ///
     /// Returns 64 lowercase hexadecimal characters: SHA3-256 over
-    /// `type_name || 0x00 || key_material`, using the v1 `"x25519"` type
+    /// `type_name || 0x00 || key_material`, using the `"x25519"` type
     /// name. The `type_name` prefix and length-separator byte
     /// domain-separate the fingerprint by recipient kind, so future
     /// native types (post-quantum, hybrid KEMs) cannot collide with this
@@ -806,7 +807,7 @@ impl PublicKey {
     /// exist, and [`CryptoError::Io`] for other read failures. Returns
     /// [`CryptoError::InvalidFormat`], [`CryptoError::InvalidInput`], or
     /// [`CryptoError::RecipientStringCapExceeded`] if a referenced key file is
-    /// not a valid v1 `public.key` file.
+    /// not a valid `public.key` file.
     pub fn to_bytes(&self) -> Result<[u8; 32], CryptoError> {
         self.resolve().map(|resolved| resolved.bytes)
     }
@@ -919,9 +920,10 @@ mod tests {
     }
 
     /// `DecodedRecipient` carries the logical [`KeypairSuite`] alongside
-    /// the typed payload fields. v1 recipient strings (wire byte `0x01`)
-    /// must decode to `KeypairSuite::V1` — symmetric with private-key
-    /// parsing's mapping of the `0x01` wire byte to `KeypairSuite::V1`.
+    /// the typed payload fields. Recipient strings with public-key
+    /// encoding version `0x01` must decode to `KeypairSuite::V1`
+    /// (key-pair suite KPS-1) — symmetric with private-key parsing's
+    /// mapping of the `0x01` wire byte to `KeypairSuite::V1`.
     #[test]
     fn v1_recipient_string_decodes_with_keypair_suite_v1() {
         let s = encode_recipient_string("x25519", &x25519_key()).unwrap();
@@ -931,8 +933,8 @@ mod tests {
 
     /// Cross-domain symmetry pin: both `public.key` and `private.key`
     /// parsers translate their wire-level encoding into the same
-    /// [`KeypairSuite`] gate. For the v1 wire encoding (byte `0x01` on
-    /// both sides) both paths converge on `KeypairSuite::V1`. Without
+    /// [`KeypairSuite`] gate. For key-pair suite KPS-1 (wire byte `0x01`
+    /// on both sides) both paths converge on `KeypairSuite::V1`. Without
     /// this, a future refactor that picked up a private-only or
     /// public-only suite-mapping helper could reintroduce the original
     /// asymmetry bug.
@@ -1013,7 +1015,7 @@ mod tests {
     #[test]
     fn round_trip_lifts_default_bech32_code_length_cap() {
         // The bech32 crate's built-in `Bech32` type fixes
-        // `CODE_LENGTH = 1023`. A v1 recipient string for a future
+        // `CODE_LENGTH = 1023`. A recipient string for a future
         // ~1 KiB key would exceed that cap; the spec explicitly lifts
         // it to 20,000 (`FORMAT.md` §7.1). This test locks in that
         // our `Bech32V1` Checksum impl actually applies the lifted

@@ -39,9 +39,9 @@ first-party audits by this project, so a passing `cargo vet` run means the
 configured supply-chain policy is satisfied; it is not an independent audit
 of each cryptographic dependency by the FerroCrypt project.
 
-The current on-disk format is FerroCrypt v1 (wire-version byte `0x01`).
-Public conformance test vectors are deferred to the v1.0 release. Until
-then, the canonical references are
+The current on-disk format is `.fcr` outer-container version `0x01`.
+Public conformance test vectors are published with stable FerroCrypt
+release 0.3.0. The canonical references are
 [`ferrocrypt-lib/FORMAT.md`](ferrocrypt-lib/FORMAT.md) and the in-tree
 fixture suite under `ferrocrypt-lib/tests/fixtures/` (an internal
 regression net, regenerated when the format intentionally changes).
@@ -132,6 +132,7 @@ regression net, regenerated when the format intentionally changes).
   `private.key` may remain and is safe to delete. Filesystems that do
   not support directory flushing depend on their own ordering after
   power loss.
-- **Pre-v1 files are not forward-compatible.** Older FerroCrypt files
-  and key pairs use a different format family. Decrypt them with the
-  release that produced them and re-encrypt with the current release.
+- **Files from releases before 0.3.0 are not compatible.** Older
+  FerroCrypt files and key pairs use a different format family. Decrypt
+  them with the release that produced them and re-encrypt with the
+  current release.

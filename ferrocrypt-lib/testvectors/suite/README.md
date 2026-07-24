@@ -2,9 +2,9 @@
 
 **Status:** populated. `SUITE-VERSION` tracks the corpus revision so
 readers can pin to a specific one. Unlike `testvectors/wire/` (frozen
-forever once it ships at 1.0), fixtures here **may** be added,
-corrected, or extended in any release; each such change bumps
-`SUITE-VERSION`.
+forever once it ships with stable release 0.3.0), fixtures here
+**may** be added, corrected, or extended in any release; each such
+change bumps `SUITE-VERSION`.
 
 Like `testvectors/wire/`, this directory serves independent reader
 implementations — a different role from `tests/fixtures/`, which is an

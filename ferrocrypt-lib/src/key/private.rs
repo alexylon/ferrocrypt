@@ -1,11 +1,11 @@
-//! v1 `private.key` artefact (`FORMAT.md` §8).
+//! `private.key` artefact (`FORMAT.md` §8).
 //!
 //! On-disk layout:
 //!
 //! ```text
 //! [fixed_header (90 bytes)]
 //!   magic(4)              = "FCR\0"
-//!   version(1)            = 0x01 (canonical v1 private-key version)
+//!   version(1)            = 0x01 (private-key encoding version)
 //!   kind(1)               = 0x4B 'K'
 //!   key_flags(2)          = 0
 //!   type_name_len(2)
@@ -48,9 +48,9 @@ use crate::format::{
 };
 use crate::recipient::{TYPE_NAME_MAX_LEN, validate_type_name_grammar};
 
-/// Canonical v1 `private.key` wire-version byte. Mirrors the suite
-/// constant from `KeypairSuite::V1` (crate-internal) so bumping the
-/// keypair suite flows through this constant automatically.
+/// Private-key encoding version byte (`0x01`) for key-pair suite KPS-1.
+/// Mirrors the suite constant from `KeypairSuite::V1` (crate-internal)
+/// so bumping the keypair suite flows through this constant automatically.
 pub const PRIVATE_KEY_V1_VERSION: u8 = KeypairSuite::V1.private_key_version();
 
 /// Wire-version byte the current writer emits in `private.key` headers.
@@ -107,10 +107,11 @@ const KDF_PARAMS_OFFSET: usize = ARGON2_SALT_OFFSET + ARGON2_SALT_SIZE;
 const WRAP_NONCE_OFFSET: usize = KDF_PARAMS_OFFSET + KDF_PARAMS_SIZE;
 const _: () = assert!(WRAP_NONCE_OFFSET + WRAP_NONCE_SIZE == PRIVATE_KEY_HEADER_FIXED_SIZE);
 
-/// Cleartext fixed-header section of a v1 `private.key`.
+/// Cleartext fixed-header section of a `private.key`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrivateKeyHeader {
-    /// Reserved bit-flags field (`FORMAT.md` §8). Must be `0` in v1.
+    /// Reserved bit-flags field (`FORMAT.md` §8). Must be `0` in
+    /// private-key encoding version `0x01`.
     pub key_flags: u16,
     /// Byte length of the recipient `type_name` that follows the header.
     pub type_name_len: u16,
@@ -186,7 +187,7 @@ impl PrivateKeyHeader {
         kdf_params_bytes
             .copy_from_slice(&bytes[KDF_PARAMS_OFFSET..KDF_PARAMS_OFFSET + KDF_PARAMS_SIZE]);
         // Structural KDF-parameter validation only (lanes, time_cost,
-        // mem_cost against v1 absolute bounds). Caller-supplied resource
+        // mem_cost against the absolute bounds). Caller-supplied resource
         // policy is applied separately in `open_private_key` so a
         // caller's explicit higher `KdfLimit` is not silently overridden
         // by the library's default ceiling at parse time.
@@ -293,7 +294,7 @@ pub(crate) fn ensure_private_key_suite_supported(suite: KeypairSuite) -> Result<
     }
 }
 
-/// Decrypted contents of a v1 `private.key`. The unwrapped
+/// Decrypted contents of a `private.key`. The unwrapped
 /// `secret_material` is held in a [`Zeroizing`] buffer so it clears on
 /// drop. `Debug` is implemented manually to redact the secret; a derived
 /// implementation would forward through `Zeroizing`'s `Deref` and print the
@@ -316,14 +317,14 @@ impl std::fmt::Debug for OpenedPrivateKey {
     }
 }
 
-/// Seals `secret_material` for the given recipient type into a v1
+/// Seals `secret_material` for the given recipient type into a
 /// `private.key` byte sequence. Generates fresh `argon2_salt` and
 /// `wrap_nonce`, derives the wrap key via Argon2id + HKDF-SHA3-256,
 /// and AEAD-encrypts with the cleartext (header + type_name +
 /// public_material + ext_bytes) as AAD. Returns the full on-disk file
 /// ready for atomic write.
 ///
-/// Validates `ext_bytes` against the v1 TLV grammar after the
+/// Validates `ext_bytes` against the TLV grammar after the
 /// structural length caps so an oversized region still surfaces as
 /// `MalformedPrivateKey`. Rejects a wrapped secret above
 /// [`PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT`] so every sealed
@@ -466,7 +467,7 @@ fn seal_private_key_inner(
     Ok(out)
 }
 
-/// Parses and unlocks a v1 `private.key` byte sequence. Validates the
+/// Parses and unlocks a `private.key` byte sequence. Validates the
 /// cleartext header structurally, applies `local_wrapped_secret_cap` as
 /// resource policy, slices the variable-length sections, and
 /// AEAD-decrypts the wrapped secret using AAD covering all cleartext
@@ -480,7 +481,7 @@ fn seal_private_key_inner(
 /// before the Argon2id call — that is, **after** structural header
 /// parsing, the caller-supplied `KdfLimit` resource cap, the
 /// `local_wrapped_secret_cap` cap, the total-length check, type-name
-/// grammar validation, and the fixed v1 passphrase byte-length bound
+/// grammar validation, and the fixed passphrase byte-length bound
 /// have all passed.
 /// A structurally malformed key file, one that exceeds either cap, or
 /// a passphrase outside the bound is rejected with no event emitted.
@@ -496,7 +497,7 @@ pub(crate) fn open_private_key(
         .ok_or_else(malformed_private_key)?;
     let header = PrivateKeyHeader::parse(header_bytes)?;
 
-    // Apply the caller's resource policy. `parse` only enforces the v1
+    // Apply the caller's resource policy. `parse` only enforces the
     // absolute structural bounds; this check applies the local KDF caps
     // (or `KdfLimit::default` when the caller passed `None`) before any
     // Argon2id work runs. Keeping structural parsing separate lets a
@@ -572,7 +573,7 @@ pub(crate) fn open_private_key(
 
 /// Private key for public-key-recipient decryption.
 ///
-/// In v1, the only supported source is a passphrase-protected FerroCrypt
+/// Today, the only supported source is a passphrase-protected FerroCrypt
 /// `private.key` file containing X25519 secret material. The file is unlocked
 /// during [`crate::PrivateKeyDecryptor::decrypt`] with the passphrase supplied to
 /// that operation.
@@ -683,8 +684,8 @@ mod tests {
         ensure_private_key_suite_supported(KeypairSuite::V1).unwrap();
     }
 
-    /// Round-trip regression for the original asymmetry: a v1
-    /// `private.key` must still open under the current build, regardless
+    /// Round-trip regression for the original asymmetry: a `private.key`
+    /// must still open under the current build, regardless
     /// of where `FCR_FILE_VERSION` happens to sit. The two constants are
     /// independent domains; bumping the outer file version must not
     /// break private-key unlock.
@@ -791,7 +792,7 @@ mod tests {
     }
 
     /// Writer-side: a `private.key` with a critical-tag TLV in
-    /// `ext_bytes` (no known v1 criticals) must reject before AEAD.
+    /// `ext_bytes` (no known criticals defined) must reject before AEAD.
     /// Pairs with [`open_rejects_unknown_critical_ext_after_unlock`].
     #[test]
     fn seal_rejects_unknown_critical_ext_bytes() {
@@ -1098,7 +1099,7 @@ mod tests {
     }
 
     /// `parse` performs structural validation only: a `mem_cost` above
-    /// the library's default policy ceiling (1 GiB) but within the v1
+    /// the library's default policy ceiling (1 GiB) but within the
     /// structural maximum (2 GiB) must parse cleanly. The caller-
     /// supplied resource policy is applied separately in
     /// `open_private_key` so a caller that opts into a higher

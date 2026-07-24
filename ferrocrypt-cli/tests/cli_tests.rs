@@ -286,8 +286,8 @@ fn test_cli_keygen() {
     // + 1 LF = 109 bytes.
     let private_key_size = fs::metadata(keys_dir.join("private.key")).unwrap().len();
     let public_key_size = fs::metadata(keys_dir.join("public.key")).unwrap().len();
-    assert_eq!(private_key_size, 176, "v1 X25519 private.key size");
-    assert_eq!(public_key_size, 109, "v1 X25519 public.key text size");
+    assert_eq!(private_key_size, 176, "X25519 private.key size");
+    assert_eq!(public_key_size, 109, "X25519 public.key text size");
 }
 
 #[test]

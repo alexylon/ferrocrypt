@@ -1,6 +1,6 @@
 #![no_main]
 
-//! Fuzzes the v1 `public.key` content grammar over arbitrary bytes
+//! Fuzzes the `public.key` content grammar over arbitrary bytes
 //! (`FORMAT.md` §7).
 //!
 //! This target covers the file-level checks around the recipient-string

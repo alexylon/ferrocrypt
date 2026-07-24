@@ -2,7 +2,7 @@
 //!
 //! High-level file encryption for files and directories.
 //!
-//! FerroCrypt writes `.fcr` files using one recipient-oriented v1 container:
+//! FerroCrypt writes `.fcr` files using one recipient-oriented container:
 //! one random per-file key, one streamed authenticated payload, and one or more
 //! typed recipient entries that independently wrap the same file key. The public
 //! API exposes this through [`Encryptor`] and [`Decryptor`] rather than through
@@ -35,7 +35,7 @@
 //! let restored = match Decryptor::open(&encrypted.output_path)? {
 //!     Decryptor::Passphrase(d) => d.decrypt(passphrase, "./restored", |ev| eprintln!("{ev}"))?,
 //!     Decryptor::PrivateKey(_) => unreachable!("we just encrypted with a passphrase"),
-//!     _ => unreachable!("Decryptor is non_exhaustive; v1 has only Passphrase + PrivateKey"),
+//!     _ => unreachable!("Decryptor is non_exhaustive; only Passphrase and PrivateKey exist today"),
 //! };
 //! println!("Decrypted to {}", restored.output_path.display());
 //! # Ok(()) }
@@ -68,7 +68,7 @@
 //!         |ev| eprintln!("{ev}"),
 //!     )?,
 //!     Decryptor::Passphrase(_) => unreachable!("we just encrypted to a public key"),
-//!     _ => unreachable!("Decryptor is non_exhaustive; v1 has only Passphrase + PrivateKey"),
+//!     _ => unreachable!("Decryptor is non_exhaustive; only Passphrase and PrivateKey exist today"),
 //! };
 //! println!("Decrypted to {}", restored.output_path.display());
 //! # Ok(()) }
@@ -87,19 +87,20 @@
 //!
 //! ## Format compatibility
 //!
-//! The current on-disk format is FerroCrypt v1 for `.fcr`, `public.key`, and
-//! `private.key`. The compatibility guarantee starts with the first stable
+//! The current stored versions are `.fcr` outer-container version `0x01`,
+//! public-key encoding version `0x01`, and private-key encoding version
+//! `0x01`. The compatibility guarantee starts with the first stable
 //! `0.3.0` release. During the `0.3.0` pre-release series (`-alpha.N`,
 //! `-beta.N`, `-rc.N`), the format is not yet frozen: files written by a
 //! pre-release or by `main` carry no cross-version guarantee and may fail to
 //! decrypt under a later pre-release.
 //!
-//! Once the format is frozen, files written by any release that produces
-//! format v1 will decrypt under any later release that supports format v1. If a
-//! future release introduces format v2, format v1 reading will be maintained for
-//! compatibility with older files.
+//! Once the format is frozen, files written at `.fcr` outer-container version
+//! `0x01` will decrypt under any later release that supports that version. If
+//! a future release introduces `.fcr` outer-container version `0x02`, version
+//! `0x01` reading will be maintained for compatibility with older files.
 //!
-//! Older pre-v1 files and key pairs use a different format family and, for
+//! Older pre-`0.3.0` files and key pairs use a different format family and, for
 //! historical hybrid encryption, a different key-agreement stack. To migrate
 //! older data, decrypt it with the release that created it, then re-encrypt it
 //! with the current release.
@@ -414,7 +415,7 @@ mod suite_vector_gen;
 ///
 /// Validates HRP, BIP 173 checksum, internal SHA3-256 checksum,
 /// payload structural fields, type-name grammar, a 1,024-byte local
-/// recipient-string cap, and the v1 X25519 payload constraints:
+/// recipient-string cap, and the X25519 payload constraints:
 /// `type_name == "x25519"` and exactly 32 bytes of non-zero,
 /// canonically encoded key material (`FORMAT.md` §2.4 / §7).
 ///
@@ -441,7 +442,7 @@ mod tests {
     use super::*;
 
     /// Routes a `.fcr` file with a single `argon2id` recipient as
-    /// `UnauthenticatedRecipientMode::Passphrase`, mirroring v1's "exactly one
+    /// `UnauthenticatedRecipientMode::Passphrase`, mirroring the "exactly one
     /// argon2id => Passphrase" classification rule. Builds the file
     /// via `container::build_encrypted_header` so the test exercises
     /// the same byte path the real encrypt would write.

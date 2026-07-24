@@ -120,7 +120,9 @@ fn roundtrip(work: &Path, keys: &KeyPaths, source: &Path) -> PathBuf {
             .output_path
         }
         Decryptor::Passphrase(_) => panic!("expected private-key decryptor"),
-        _ => unreachable!("Decryptor is non_exhaustive; v1 has only Passphrase + PrivateKey"),
+        _ => {
+            unreachable!("Decryptor is non_exhaustive; only Passphrase and PrivateKey exist today")
+        }
     }
 }
 

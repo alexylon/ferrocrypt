@@ -794,6 +794,11 @@ Payload encryption uses XChaCha20-Poly1305 STREAM-BE32.
 | Tag size | 16 bytes |
 | Stored base nonce | 19-byte `stream_nonce` |
 | Counter size | 32-bit unsigned integer |
+| Associated data (AAD) | empty byte string |
+
+The XChaCha20-Poly1305 associated-data input for every payload chunk MUST be
+the zero-length byte string. This rule applies identically to non-final and
+final chunks.
 
 Each encrypted chunk is stored as:
 

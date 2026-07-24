@@ -360,6 +360,13 @@ pub fn parse_fca_header<R: Read>(
     }
 
     let [version] = read_array_fca(reader, ARCHIVE_FIXED_HEADER_TRUNCATED)?;
+    // `FORMAT.md` §9.2: zero is reserved and malformed in every stored
+    // version domain; only nonzero unknown versions are "unsupported".
+    if version == 0 {
+        return Err(CryptoError::MalformedArchive {
+            reason: "reserved version 0x00",
+        });
+    }
     if version != FCA_VERSION {
         return Err(CryptoError::InvalidFormat(
             FormatDefect::UnsupportedArchiveVersion { version },
@@ -1017,19 +1024,20 @@ mod tests {
         }
     }
 
-    /// `FORMAT.md` §11 reserves `0x00` across every version domain.
-    /// Pin the FCA path's rejection symmetric with the existing
-    /// `0xFF` test so a future writer bug that emits `0x00` cannot
-    /// regress to "OlderArchive 0" framing.
+    /// `FORMAT.md` §9.2 reserves FCA archive version `0x00`: it is
+    /// malformed, never an unsupported version that an upgrade could
+    /// make readable.
     #[test]
     fn rejects_reserved_zero_version() {
         let bytes = raw_header_bytes(0x00, 0, 5, 0, 100, 1024);
         let mut cur = Cursor::new(&bytes);
         let err = parse_fca_header(&mut cur, ArchiveLimits::default()).unwrap_err();
-        match err {
-            CryptoError::InvalidFormat(FormatDefect::UnsupportedArchiveVersion { version: 0 }) => {}
-            other => panic!("expected UnsupportedArchiveVersion(0), got {other:?}"),
-        }
+        assert!(matches!(
+            err,
+            CryptoError::MalformedArchive {
+                reason: "reserved version 0x00"
+            }
+        ));
     }
 
     #[test]

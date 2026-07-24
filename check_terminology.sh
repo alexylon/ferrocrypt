@@ -5,7 +5,9 @@
 # their domain and hexadecimal byte, and software releases use dotted
 # release numbers.
 #
-# Filtered as intentionally allowed:
+# Allowed token contexts are blanked out of each matched line before the
+# line is tested again, so an allowed token never hides a bare one on
+# the same line:
 # - path-shaped `/v1/` text: the frozen cryptographic labels
 #   `ferrocrypt/v1/...` and prose quoting them (FORMAT.md §11.3);
 # - `fcr1` Bech32 text (the `1` is the Bech32 separator, not a version);
@@ -16,29 +18,44 @@
 #
 # Not scanned: CHANGELOG.md (history), notes/ (local scratchpad),
 # experiments/ (parked snapshots), and test-vector data files (only
-# `.rs` and `.md` files are scanned).
+# `.rs` and `.md` files are scanned). A scan error fails the check.
 
 set -u
 
 pattern='\bv1\b|\bv2\b|\bv1\.x\b|\bv1\.0\b|\bv0\.x\b|\bat 1\.0\b'
 
-hits=$(grep -rnE "$pattern" \
+raw=$(grep -rnE "$pattern" \
     README.md SECURITY.md AGENTS.md CLAUDE.md RELEASE.md \
     ferrocrypt-lib/FORMAT.md ferrocrypt-lib/STRUCTURE.md \
     ferrocrypt-lib/src ferrocrypt-lib/tests ferrocrypt-lib/fuzz/fuzz_targets \
     ferrocrypt-lib/testvectors \
     ferrocrypt-cli/src ferrocrypt-cli/tests \
     ferrocrypt-desktop/src \
-    --include='*.rs' --include='*.md' 2>/dev/null \
-  | grep -v '/v1/' \
-  | grep -v 'fcr1' \
-  | grep -v 'substring `v1`' \
-  | grep -v 'photos\.v1' \
-  | grep -v 'FerroCrypt v1 test-vector suite plaintext' \
-  | grep -v 'FerroCrypt v1 edge-case test-vector manifest' \
-  || true)
+    --include='*.rs' --include='*.md')
+status=$?
+if [ "$status" -ge 2 ]; then
+    echo "check_terminology.sh: scan failed (grep exit $status)" >&2
+    exit 2
+fi
+if [ "$status" -eq 1 ]; then
+    echo "Terminology check passed."
+    exit 0
+fi
 
-if [ -n "$hits" ]; then
+hits=$(printf '%s\n' "$raw" | sed \
+    -e 's|/v1/| |g' \
+    -e 's|fcr1| |g' \
+    -e 's|substring `v1`| |g' \
+    -e 's|photos\.v1| |g' \
+    -e 's|FerroCrypt v1 test-vector suite plaintext| |g' \
+    -e 's|FerroCrypt v1 edge-case test-vector manifest| |g' \
+    | grep -E "$pattern")
+status=$?
+if [ "$status" -ge 2 ]; then
+    echo "check_terminology.sh: filter failed (grep exit $status)" >&2
+    exit 2
+fi
+if [ "$status" -eq 0 ]; then
     echo "Ambiguous version wording found; use the FORMAT.md §11 vocabulary" >&2
     echo "(domain + hexadecimal byte, or a dotted release number):" >&2
     echo "$hits" >&2

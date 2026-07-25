@@ -1127,7 +1127,7 @@ pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), Crypt
 ///
 /// Returns [`CryptoError::InputPath`] if the file does not exist, and
 /// [`CryptoError::Io`] for other read failures. Returns
-/// [`CryptoError::InvalidFormat`], [`CryptoError::InvalidInput`], or
+/// [`CryptoError::InvalidFormat`] or
 /// [`CryptoError::RecipientStringCapExceeded`] if the text file or recipient
 /// string is malformed, too large for local policy, or is a private key.
 /// Returns [`CryptoError::UnsupportedKeyType`] for a valid public key of a

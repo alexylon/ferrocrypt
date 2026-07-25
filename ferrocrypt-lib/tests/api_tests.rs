@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
     CryptoError, Decryptor, Encryptor, FormatDefect, HeaderReadLimits, InvalidKdfParams, KdfLimit,
-    KdfParams, KeyPairGenerator, PrivateKey, PublicKey, probe_recipient_mode,
+    KdfParams, KeyPairGenerator, KeyReadLimits, PrivateKey, PublicKey, probe_recipient_mode,
     probe_recipient_mode_with_limits,
 };
 use ferrocrypt_test_support::{
@@ -1580,5 +1580,89 @@ fn decryptor_open_reports_permission_error_not_missing_input() {
             assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "got: {e}");
         }
         other => panic!("expected Io(PermissionDenied), got {other:?}"),
+    }
+}
+
+/// `PrivateKeyDecryptor::key_read_limits` must reach the `private.key`
+/// reader. The crafted key file declares a wrapped secret above the
+/// default cap, so the default builder rejects it before Argon2id runs,
+/// while a raised cap gets as far as the AEAD unlock and fails there.
+/// Without the builder forwarding its value, both attempts would report
+/// the cap error.
+#[test]
+fn private_key_decryptor_forwards_key_read_limits() {
+    // `private.key` layout for X25519 (`FORMAT.md` §8): a 90-byte
+    // cleartext header carrying `wrapped_secret_len` at offset 18, then
+    // the 6-byte type name, 32 bytes of public material, and the
+    // 48-byte wrapped secret.
+    const WRAPPED_SECRET_LEN_OFFSET: usize = 18;
+    const CLEARTEXT_LEN: usize = 90 + 6 + 32;
+    const X25519_WRAPPED_SECRET_LEN: usize = 48;
+
+    let work = fresh_workspace("key_read_limits_forwarded");
+    let keys = work.join("keys");
+    fs::create_dir_all(&keys).unwrap();
+    let kg = generate_key_pair(&keys, pass(), |_| {}).expect("keygen");
+    let input = work.join("data.txt");
+    fs::write(&input, b"key read limits").unwrap();
+    let out_dir = work.join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+
+    let outcome = Encryptor::with_public_key(PublicKey::from_key_file(&kg.public_key_path))
+        .write(&input, &out_dir, |_| {})
+        .expect("encrypt");
+
+    // Rewrite the generated key file with a wrapped secret one byte
+    // above the default cap, keeping the declared length and the real
+    // file length consistent so every structural check still passes.
+    let genuine = fs::read(&kg.private_key_path).expect("read generated private key");
+    assert_eq!(genuine.len(), CLEARTEXT_LEN + X25519_WRAPPED_SECRET_LEN);
+    let oversized_len = KeyReadLimits::PRIVATE_KEY_WRAPPED_SECRET_LEN_DEFAULT + 1;
+    let mut crafted = genuine[..CLEARTEXT_LEN].to_vec();
+    crafted[WRAPPED_SECRET_LEN_OFFSET..WRAPPED_SECRET_LEN_OFFSET + 4]
+        .copy_from_slice(&oversized_len.to_be_bytes());
+    crafted.extend(std::iter::repeat_n(0u8, oversized_len as usize));
+    let crafted_path = keys.join("oversized.private.key");
+    fs::write(&crafted_path, &crafted).expect("write crafted private key");
+
+    let restore = work.join("restored");
+    fs::create_dir_all(&restore).unwrap();
+
+    let capped = match Decryptor::open(&outcome.output_path).expect("open") {
+        Decryptor::PrivateKey(d) => d.decrypt(
+            PrivateKey::from_key_file(&crafted_path),
+            pass(),
+            &restore,
+            |_| {},
+        ),
+        _ => panic!("expected private-key decryptor"),
+    };
+    match capped {
+        Err(CryptoError::PrivateKeyWrappedSecretCapExceeded {
+            wrapped_secret_len,
+            local_cap,
+        }) => {
+            assert_eq!(wrapped_secret_len, oversized_len);
+            assert_eq!(
+                local_cap,
+                KeyReadLimits::PRIVATE_KEY_WRAPPED_SECRET_LEN_DEFAULT
+            );
+        }
+        other => panic!("expected the default cap to reject, got {other:?}"),
+    }
+
+    let raised = KeyReadLimits::default().max_private_key_wrapped_secret_len(oversized_len);
+    let reached = match Decryptor::open(&outcome.output_path).expect("open") {
+        Decryptor::PrivateKey(d) => d.key_read_limits(raised).decrypt(
+            PrivateKey::from_key_file(&crafted_path),
+            pass(),
+            &restore,
+            |_| {},
+        ),
+        _ => panic!("expected private-key decryptor"),
+    };
+    match reached {
+        Err(CryptoError::KeyFileUnlockFailed) => {}
+        other => panic!("expected the raised cap to reach the unlock, got {other:?}"),
     }
 }

@@ -128,6 +128,41 @@ mod tests {
         assert_eq!(limits.private_key_wrapped_secret_len(), 8_192);
     }
 
+    /// Both caps must stay reachable at their structural maximum: the
+    /// bounded file reads happen before either cap is consulted, so a
+    /// file-read cap below the raised limit would make the top of the
+    /// range unusable and turn a cap rejection into a malformed-key one.
+    #[test]
+    fn structural_maxima_fit_the_key_file_read_caps() {
+        use crate::key::private::{
+            PRIVATE_KEY_EXT_LEN_MAX, PRIVATE_KEY_FILE_READ_CAP_BYTES,
+            PRIVATE_KEY_HEADER_FIXED_SIZE, PRIVATE_KEY_PUBLIC_LEN_MAX,
+        };
+        use crate::key::public::PUBLIC_KEY_FILE_READ_CAP_BYTES;
+        use crate::recipient::name::TYPE_NAME_MAX_LEN;
+
+        // A maximum-length recipient string plus its trailing LF.
+        let widest_public_key_file =
+            KeyReadLimits::RECIPIENT_STRING_CHARS_STRUCTURAL_MAX as usize + 1;
+        assert!(
+            widest_public_key_file <= PUBLIC_KEY_FILE_READ_CAP_BYTES,
+            "a {widest_public_key_file}-byte public.key must fit the \
+             {PUBLIC_KEY_FILE_READ_CAP_BYTES}-byte read cap"
+        );
+
+        // A private.key at the structural maximum in every field.
+        let widest_private_key_file = PRIVATE_KEY_HEADER_FIXED_SIZE
+            + TYPE_NAME_MAX_LEN
+            + PRIVATE_KEY_PUBLIC_LEN_MAX as usize
+            + PRIVATE_KEY_EXT_LEN_MAX as usize
+            + KeyReadLimits::PRIVATE_KEY_WRAPPED_SECRET_LEN_STRUCTURAL_MAX as usize;
+        assert!(
+            widest_private_key_file <= PRIVATE_KEY_FILE_READ_CAP_BYTES,
+            "a {widest_private_key_file}-byte private.key must fit the \
+             {PRIVATE_KEY_FILE_READ_CAP_BYTES}-byte read cap"
+        );
+    }
+
     /// A caller cannot raise a cap above what the format can represent,
     /// mirroring [`crate::HeaderReadLimits`]'s clamping.
     #[test]

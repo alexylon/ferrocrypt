@@ -1121,7 +1121,10 @@ pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), Crypt
 /// `private.key`, [`FormatDefect::WrongKeyFileType`] is returned instead of a
 /// UTF-8 decode error.
 ///
-/// Companion to [`validate_private_key_file`].
+/// Companion to [`validate_private_key_file`]. Applies
+/// [`KeyReadLimits::default`]; for a key whose recipient string exceeds the
+/// default length cap, call
+/// `PublicKey::from_key_file_with_limits(path, limits).validate()` instead.
 ///
 /// # Errors
 ///

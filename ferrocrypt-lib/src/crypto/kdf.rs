@@ -195,11 +195,12 @@ impl KdfParams {
     const MAX_TIME_COST: u32 = 12;
     const MAX_LANES: u32 = 8;
 
-    /// Minimum Argon2id memory cost (KiB) the writer accepts. 19 MiB is
-    /// the OWASP Argon2id minimum-memory recommendation; below it,
-    /// passphrase and `private.key` protection is too weak, so the writer
-    /// refuses to seal such an artefact. The floor is hard — there is no
-    /// caller opt-in below it. Enforced by
+    /// Minimum Argon2id memory cost (KiB) the writer accepts, the local
+    /// writer minimum `FORMAT.md` §2.2 permits. 19 MiB is the OWASP
+    /// Argon2id minimum-memory recommendation; below it, passphrase and
+    /// `private.key` protection is too weak, so the writer refuses to
+    /// seal such an artefact. The floor is hard — there is no caller
+    /// opt-in below it. Enforced by
     /// [`validate_for_write`](Self::validate_for_write) only, never on the
     /// read path, so a file written before the floor existed still
     /// decrypts. The structural floor (`ARGON2_MIN_MEM_COST_PER_LANE *

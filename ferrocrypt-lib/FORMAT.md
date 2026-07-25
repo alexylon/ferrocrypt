@@ -217,6 +217,13 @@ time    = 4
 lanes   = 4
 ```
 
+Writers MAY refuse to emit a `mem_kib` below a local minimum above the
+structural floor, because a passphrase-protected artifact written with too
+little memory is weak for its whole lifetime. FerroCrypt refuses `mem_kib`
+below 19,456 when creating either artifact. Such a minimum is writer policy
+only: readers MUST accept every structurally valid value, so an artifact
+written before or below a writer minimum stays readable.
+
 Implementations MAY impose lower local KDF work caps on Argon2id parameters read
 from untrusted input. Local KDF caps are resource policy, not format
 incompatibility or passphrase-length bounds. Implementations SHOULD make such

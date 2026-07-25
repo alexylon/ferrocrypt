@@ -221,12 +221,15 @@ pub(crate) fn encode_recipient_string_for_suite(
 /// length fields, `type_name` UTF-8 and grammar, and the internal
 /// SHA3-256 checksum.
 ///
-/// Every grammar failure surfaces as
-/// [`FormatDefect::MalformedPublicKey`], the `malformed_public_key`
-/// diagnostic class of `FORMAT.md` §12.1, so a caller can classify a
-/// rejected recipient string from the error type alone. The only other
-/// rejection this function raises is
-/// [`CryptoError::RecipientStringCapExceeded`] for the resource cap.
+/// String grammar, payload structure, and checksum failures all
+/// surface as [`FormatDefect::MalformedPublicKey`], the
+/// `malformed_public_key` diagnostic class of `FORMAT.md` §12.1, so a
+/// caller can classify a rejected recipient string from the error type
+/// alone. The only other rejections this function raises are
+/// [`CryptoError::RecipientStringCapExceeded`] for the resource cap,
+/// [`CryptoError::UnsupportedVersion`] for a string from an unsupported
+/// keypair suite, and [`FormatDefect::MalformedTypeName`] for a payload
+/// type name that is not valid UTF-8 or breaks the type-name grammar.
 ///
 /// `local_max_chars` is a local policy cap checked before decode work runs.
 /// The structural ceiling is `RECIPIENT_STRING_LEN_MAX` (20,000 ASCII
@@ -760,7 +763,11 @@ impl PublicKey {
     ///
     /// Returns [`CryptoError::InvalidFormat`] with
     /// [`FormatDefect::MalformedPublicKey`] for text that is not a
-    /// canonical recipient string and for a malformed payload,
+    /// canonical recipient string and for a malformed payload (an
+    /// invalid payload type name reports
+    /// [`FormatDefect::MalformedTypeName`] instead),
+    /// [`CryptoError::UnsupportedVersion`] for a recipient string from
+    /// an unsupported keypair suite,
     /// [`CryptoError::UnsupportedKeyType`] for a valid recipient string
     /// of a key type this build does not support, and
     /// [`CryptoError::RecipientStringCapExceeded`] when the input

@@ -668,7 +668,7 @@ It contains:
 - the writer's current logical version (`PUBLIC_KEY_VERSION`, derived from `WRITER_KEYPAIR_SUITE`);
 - internal SHA3-256 checksum handling;
 - canonical lowercase enforcement;
-- one rejection class for grammar failures: non-ASCII input, uppercase text, a failed BIP 173 checksum, a wrong HRP, non-canonical padding, and a malformed typed payload all surface as `MalformedPublicKey` (the `FORMAT.md` §12.1 `malformed_public_key` class);
+- one rejection class for grammar failures: non-ASCII input, uppercase text, a failed BIP 173 checksum, a wrong HRP, non-canonical padding, and a malformed typed payload all surface as `MalformedPublicKey` (the `FORMAT.md` §12.1 `malformed_public_key` class), except that an invalid payload type name reports `MalformedTypeName`;
 - public recipient fingerprinting;
 - `public.key` text validation;
 - construction and serialization support for `PublicKey`.

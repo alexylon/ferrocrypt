@@ -1133,7 +1133,9 @@ pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), Crypt
 /// [`CryptoError::InvalidFormat`] or
 /// [`CryptoError::RecipientStringCapExceeded`] if the text file or recipient
 /// string is malformed, too large for local policy, or is a private key.
-/// Returns [`CryptoError::UnsupportedKeyType`] for a valid public key of a
+/// Returns [`CryptoError::UnsupportedVersion`] for a public key from an
+/// unsupported keypair suite. Returns
+/// [`CryptoError::UnsupportedKeyType`] for a valid public key of a
 /// key type this build does not support.
 pub fn validate_public_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError> {
     PublicKey::from_key_file(key_file).validate()

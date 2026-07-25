@@ -179,7 +179,7 @@ recipient_entry = type_name_len(2) || recipient_flags(2) || body_len(4)
 
 ### Key File Format
 
-**`public.key`** is a **UTF-8 text file** containing exactly one line: the canonical lowercase `fcr1…` Bech32 recipient string, optionally followed by a single trailing LF (any other surrounding whitespace rejects as `MalformedPublicKey`). The Bech32 payload carries a typed body `type_name_len(2) || key_material_len(4) || type_name || key_material` plus an internal SHA3-256 checksum (in addition to the BIP 173 checksum), domain-separated so cross-algorithm collisions are impossible. For X25519 the file is ~107 bytes on disk. Identity verification is out-of-band via the SHA3-256 fingerprint of `type_name || key_material`.
+**`public.key`** is a **UTF-8 text file** containing exactly one line: the canonical lowercase `fcr1…` Bech32 recipient string, optionally followed by a single trailing LF (any other surrounding whitespace rejects as `MalformedPublicKey`). The Bech32 payload carries a typed body `public_key_version(1) || type_name_len(2) || key_material_len(4) || type_name || key_material` plus an internal 16-byte SHA3-256 checksum (in addition to the BIP 173 checksum), domain-separated so cross-algorithm collisions are impossible. For X25519 the file is 109 bytes on disk: 108 recipient-string characters plus the trailing LF. Identity verification is out-of-band via the SHA3-256 fingerprint of `type_name || 0x00 || key_material`.
 
 **`private.key`** (176 bytes for X25519 with `ext_len = 0`):
 - Cleartext fixed header (90 B): `magic(4) || version(1) || kind(1)=0x4B 'K' || key_flags(2) || type_name_len(2) || public_len(4) || ext_len(4) || wrapped_secret_len(4) || argon2_salt(32) || kdf_params(12) || wrap_nonce(24)`

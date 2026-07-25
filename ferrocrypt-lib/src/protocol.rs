@@ -729,6 +729,7 @@ mod tests {
     use crate::error::FormatDefect;
     use crate::format;
     use crate::key::files::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};
+    use crate::key::limits::KeyReadLimits;
     use crate::key::public::read_public_key;
     use crate::recipient::entry::RECIPIENT_FLAG_CRITICAL;
     use crate::recipient::native::{argon2id, x25519};
@@ -832,7 +833,7 @@ mod tests {
             &dir,
             &|_| {},
         )?;
-        let pub_bytes = read_public_key(&public_key_path)?.bytes;
+        let pub_bytes = read_public_key(&public_key_path, KeyReadLimits::default())?.bytes;
         Ok((pub_bytes, private_key_path, pass))
     }
 
@@ -846,8 +847,13 @@ mod tests {
         private_key_path: &Path,
         pass: &SecretString,
     ) -> Result<PathBuf, CryptoError> {
-        let private_key_bytes =
-            x25519::open_x25519_private_key(private_key_path, pass, None, &|_| {})?;
+        let private_key_bytes = x25519::open_x25519_private_key(
+            private_key_path,
+            pass,
+            None,
+            KeyReadLimits::default(),
+            &|_| {},
+        )?;
         let credential = x25519::X25519Credential { private_key_bytes };
         decrypt(
             &credential,

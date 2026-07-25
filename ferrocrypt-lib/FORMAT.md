@@ -994,6 +994,12 @@ Rules:
   implementation or by an available plugin before use as an encryption
   recipient.
 
+Implementations MAY apply a smaller local cap on recipient-string length for
+untrusted input and SHOULD let callers raise it up to the structural ceiling,
+because a future key type with larger key material needs a longer string. Such
+a cap is resource policy, not format incompatibility, and exceeding it SHOULD
+produce a distinct resource-cap error.
+
 Native X25519 public recipients:
 
 ```text
@@ -1160,6 +1166,10 @@ Readers MUST validate magic, private-key encoding version and key-pair-suite
 support, kind, flags, type name, lengths, total file size, KDF parameters, local
 resource caps, AEAD authentication, TLV rules, and recipient-type-specific
 secret/public material constraints.
+
+A local cap on `wrapped_secret_len` follows the same rule as the recipient-string
+cap in §7: implementations MAY set one below the structural maximum and SHOULD
+let callers raise it, because a future key type wraps more secret material.
 
 Unknown private-key type names MUST be rejected unless supported by a plugin or
 local implementation.

@@ -172,6 +172,7 @@ pub use crate::crypto::kdf::{ARGON2_SALT_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfPar
 pub use crate::error::{CryptoError, FormatDefect, InvalidKdfParams, UnsupportedVersion};
 pub use crate::format::{ENCRYPTED_EXTENSION, FCR_FILE_VERSION, MAGIC};
 pub use crate::key::files::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};
+pub use crate::key::limits::KeyReadLimits;
 pub use crate::key::private::{PRIVATE_KEY_V1_VERSION, PRIVATE_KEY_VERSION};
 pub use crate::key::public::{PUBLIC_KEY_V1_VERSION, PUBLIC_KEY_VERSION};
 pub use crate::recipient::policy::MixingPolicy;
@@ -415,8 +416,9 @@ mod suite_vector_gen;
 /// material.
 ///
 /// Validates HRP, BIP 173 checksum, internal SHA3-256 checksum,
-/// payload structural fields, type-name grammar, a 1,024-byte local
-/// recipient-string cap, and the X25519 payload constraints:
+/// payload structural fields, type-name grammar, the
+/// [`KeyReadLimits::RECIPIENT_STRING_CHARS_DEFAULT`] recipient-string
+/// cap, and the X25519 payload constraints:
 /// `type_name == "x25519"` and exactly 32 bytes of non-zero,
 /// canonically encoded key material (`FORMAT.md` §2.4 / §7).
 ///
@@ -563,24 +565,6 @@ mod tests {
         assert_eq!(
             ProgressEvent::GeneratingKeyPair.to_string(),
             "Generating key pair\u{2026}"
-        );
-    }
-
-    /// `decode_recipient_string`'s docstring inlines the recipient-string
-    /// local cap as the literal "1,024" because the underlying
-    /// constant lives in a private module and rustdoc cannot resolve
-    /// an intra-doc link across the privacy boundary. Pin the literal
-    /// against the constant so a future bump (e.g. wider caps for
-    /// post-quantum recipient strings) cannot silently drift the
-    /// docstring out of sync.
-    #[test]
-    fn decode_recipient_doc_cap_matches_constant() {
-        assert_eq!(
-            key::public::RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT,
-            1_024,
-            "decode_recipient_string docstring inlines the cap value; \
-             update both lib.rs:decode_recipient_string and this test in \
-             the same commit if the cap changes"
         );
     }
 

@@ -657,7 +657,7 @@ These names follow Rust cryptographic convention.
 
 ### 6.1 `key/public.rs`
 
-`key/public.rs` owns the public recipient key text format.
+`key/public.rs` owns the public recipient key text format. `key/limits.rs` owns `KeyReadLimits` (public, `#[non_exhaustive]`, builder methods clamp at the structural maxima), the caller-facing caps both key readers apply.
 
 It contains:
 
@@ -1022,6 +1022,8 @@ Every per-cap `if value > cap { return Err(...) }` lives in **one** method on th
 | Argon2id structural rules (`lanes ∈ [1, MAX_LANES]`, `time_cost ∈ [1, MAX_TIME_COST]`, `mem_cost ∈ [ARGON2_MIN_MEM_COST_PER_LANE × lanes, MAX_MEM_COST]`) | `KdfParams::MAX_*` constants + `crypto::kdf::ARGON2_MIN_MEM_COST_PER_LANE` | `KdfParams::validate_structural` | `KdfParams::from_bytes_structural` (after wire-byte parse) | `KdfParams::validate_for_write` (called from `Encryptor::write` and `KeyPairGenerator::write`) |
 | Argon2id `mem_cost` (resource cap, on top of structural) | `KdfParams::DEFAULT_MEM_COST` / `KdfLimit::default()` | `KdfParams::enforce_limit` | `KdfParams::from_bytes` (calls `enforce_limit` after structural parse) | `KdfParams::validate_for_write` (calls `enforce_limit` after `validate_structural`) |
 | Argon2id write floor (`mem_cost ≥ MIN_WRITE_MEM_COST`, 19 MiB; hard writer-only security policy) | `KdfParams::MIN_WRITE_MEM_COST` | `KdfParams::enforce_write_floor` | — (read path accepts below-floor files so existing data decrypts) | `KdfParams::validate_for_write` (calls `enforce_write_floor` on every write; from `Encryptor::write` / `KeyPairGenerator::write`) |
+| Recipient-string length (resource cap) | `KeyReadLimits::RECIPIENT_STRING_CHARS_DEFAULT` (= `key::public::RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT`) | inline check in `key::public::decode_recipient_string` (the only site that sees the string) | `decode_recipient_string`, reached from `PublicKey::from_key_file` / `from_recipient_string` and their `*_with_limits` variants | — (writers emit a canonical string whose length follows from the key material) |
+| `private.key` `wrapped_secret_len` (resource cap) | `KeyReadLimits::PRIVATE_KEY_WRAPPED_SECRET_LEN_DEFAULT` (= `key::private::PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT`) | inline check in `key::private::open_private_key` against the caller-supplied cap | `open_private_key`, reached from `open_x25519_private_key` with `PrivateKeyDecryptor::key_read_limits` | `key::private::seal_private_key_inner` (mirrors the default so a sealed file always opens under the default configuration) |
 | Archive `max_entry_count`, `max_total_plaintext_bytes`, `max_path_depth` | `archive::limits::ArchiveLimits` defaults | `archive::limits::enforce_per_entry_caps`, `archive::limits::enforce_total_bytes_cap` | `archive::decode::extract_entries` (unified) | `archive::encode::archive` (iterative walker) |
 
 Adding a new cap or wire-format rule = add the field/constant on the source-of-truth type, add one method (`enforce_*` for caps, `validate_*` for grouped structural rules), call it from both reader and writer sites. The compiler can't let you forget either side because the call sites are by name.
@@ -1062,6 +1064,8 @@ pub struct PrivateKeyDecryptor { /* opaque */ }
 
 impl PrivateKeyDecryptor {
     pub fn kdf_limit(self, limit: KdfLimit) -> Self;
+
+    pub fn key_read_limits(self, limits: KeyReadLimits) -> Self;
 
     pub fn archive_limits(self, limits: ArchiveLimits) -> Self;
 

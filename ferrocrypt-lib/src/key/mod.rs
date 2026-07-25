@@ -15,10 +15,14 @@
 //!   `public.key` / `private.key` default filenames and the
 //!   `KeyFileKind` heuristic that classifies a path as a public or
 //!   private key file from a small byte prefix.
+//! - [`limits`] — [`KeyReadLimits`], the caller-facing local caps on
+//!   recipient-string length and `private.key` wrapped-secret length.
 //!
 //! [`PublicKey`]: crate::PublicKey
 //! [`PrivateKey`]: crate::PrivateKey
+//! [`KeyReadLimits`]: crate::KeyReadLimits
 
 pub(crate) mod files;
+pub(crate) mod limits;
 pub(crate) mod private;
 pub(crate) mod public;

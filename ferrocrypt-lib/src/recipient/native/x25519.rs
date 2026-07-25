@@ -371,6 +371,8 @@ pub(crate) fn generate_keypair()
 ///   the structural bounds
 /// - [`CryptoError::KdfResourceCapExceeded`] when the header's
 ///   `mem_cost` exceeds `kdf_limit` (or the library default ceiling)
+/// - [`CryptoError::PrivateKeyWrappedSecretCapExceeded`] when the
+///   header's `wrapped_secret_len` exceeds `key_read_limits`
 /// - [`CryptoError::UnsupportedVersion`] for a key file from an
 ///   unsupported keypair suite
 /// - [`crate::error::FormatDefect::NotAKeyFile`] when the magic bytes do
@@ -395,15 +397,13 @@ pub(crate) fn open_x25519_private_key(
     path: &std::path::Path,
     passphrase: &secrecy::SecretString,
     kdf_limit: Option<&crate::crypto::kdf::KdfLimit>,
+    key_read_limits: crate::key::limits::KeyReadLimits,
     on_event: &dyn Fn(&crate::ProgressEvent),
 ) -> Result<Zeroizing<[u8; PRIVATE_KEY_SIZE]>, CryptoError> {
     use crate::error::FormatDefect;
     use crate::fs::paths::read_file_capped;
     use crate::key::files::KeyFileKind;
-    use crate::key::private::{
-        PRIVATE_KEY_FILE_READ_CAP_BYTES, PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT,
-        open_private_key,
-    };
+    use crate::key::private::{PRIVATE_KEY_FILE_READ_CAP_BYTES, open_private_key};
 
     let bytes = read_file_capped(path, PRIVATE_KEY_FILE_READ_CAP_BYTES, || {
         CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)
@@ -428,7 +428,7 @@ pub(crate) fn open_x25519_private_key(
         &bytes,
         passphrase,
         kdf_limit,
-        PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT,
+        key_read_limits.private_key_wrapped_secret_len(),
         on_event,
     )?;
 
@@ -567,6 +567,7 @@ mod tests {
     use crate::crypto::kdf::KdfParams;
     use crate::crypto::keys::FILE_KEY_SIZE;
     use crate::error::FormatDefect;
+    use crate::key::limits::KeyReadLimits;
     use crate::key::private::seal_private_key;
     use chacha20poly1305::aead::OsRng;
     use secrecy::SecretString;
@@ -600,7 +601,9 @@ mod tests {
         )?;
         fs::write(&path, bytes)?;
 
-        match open_x25519_private_key(&path, &pass, None, &|_| {}).map(|_| ()) {
+        match open_x25519_private_key(&path, &pass, None, KeyReadLimits::default(), &|_| {})
+            .map(|_| ())
+        {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => Ok(()),
             other => {
                 panic!("expected MalformedPrivateKey for public/secret mismatch, got {other:?}")
@@ -633,7 +636,9 @@ mod tests {
         )?;
         fs::write(&path, bytes)?;
 
-        match open_x25519_private_key(&path, &pass, None, &|_| {}).map(|_| ()) {
+        match open_x25519_private_key(&path, &pass, None, KeyReadLimits::default(), &|_| {})
+            .map(|_| ())
+        {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => Ok(()),
             other => panic!("expected MalformedPrivateKey for public_len mismatch, got {other:?}"),
         }
@@ -662,7 +667,9 @@ mod tests {
         )?;
         fs::write(&path, bytes)?;
 
-        match open_x25519_private_key(&path, &pass, None, &sink).map(|_| ()) {
+        match open_x25519_private_key(&path, &pass, None, KeyReadLimits::default(), &sink)
+            .map(|_| ())
+        {
             Err(CryptoError::UnsupportedKeyType { type_name }) => {
                 assert_eq!(type_name, "future");
             }
@@ -690,7 +697,9 @@ mod tests {
 
         let events = std::cell::RefCell::new(Vec::new());
         let sink = |event: &crate::ProgressEvent| events.borrow_mut().push(*event);
-        match open_x25519_private_key(&path, &pass, None, &sink).map(|_| ()) {
+        match open_x25519_private_key(&path, &pass, None, KeyReadLimits::default(), &sink)
+            .map(|_| ())
+        {
             Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)) => {}
             other => panic!("expected WrongKeyFileType for public.key, got {other:?}"),
         }
@@ -999,6 +1008,59 @@ mod tests {
                     )
                 }
             }
+        }
+    }
+
+    /// A key file whose wrapped secret exceeds the default local cap is
+    /// rejected before Argon2id runs, and a caller that raises
+    /// [`KeyReadLimits::max_private_key_wrapped_secret_len`] gets past
+    /// the cap. The oversized file's wrapped secret is zero-filled, so
+    /// the raised-cap attempt then fails AEAD authentication — which is
+    /// the proof that the cap, and only the cap, changed.
+    #[test]
+    fn key_read_limits_raise_the_wrapped_secret_cap() -> Result<(), CryptoError> {
+        use crate::crypto::kdf::ARGON2_SALT_SIZE;
+        use crate::key::private::PrivateKeyHeader;
+
+        let oversized_len = KeyReadLimits::PRIVATE_KEY_WRAPPED_SECRET_LEN_DEFAULT + 1;
+        let header = PrivateKeyHeader {
+            key_flags: 0,
+            type_name_len: TYPE_NAME.len() as u16,
+            public_len: PUBLIC_KEY_SIZE as u32,
+            ext_len: 0,
+            wrapped_secret_len: oversized_len,
+            argon2_salt: [0u8; ARGON2_SALT_SIZE],
+            kdf_params: KdfParams::test_fast_default(),
+            wrap_nonce: [0u8; WRAP_NONCE_SIZE],
+        };
+        let mut data = header.to_bytes().to_vec();
+        data.extend_from_slice(TYPE_NAME.as_bytes());
+        data.extend_from_slice(&[0x07u8; PUBLIC_KEY_SIZE]);
+        data.extend_from_slice(&vec![0u8; oversized_len as usize]);
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("private.key");
+        fs::write(&path, &data)?;
+        let pass = SecretString::from("pw".to_string());
+
+        match open_x25519_private_key(&path, &pass, None, KeyReadLimits::default(), &|_| {}) {
+            Err(CryptoError::PrivateKeyWrappedSecretCapExceeded {
+                wrapped_secret_len,
+                local_cap,
+            }) => {
+                assert_eq!(wrapped_secret_len, oversized_len);
+                assert_eq!(
+                    local_cap,
+                    KeyReadLimits::PRIVATE_KEY_WRAPPED_SECRET_LEN_DEFAULT
+                );
+            }
+            other => panic!("expected the default cap to reject, got {other:?}"),
+        }
+
+        let raised = KeyReadLimits::default().max_private_key_wrapped_secret_len(oversized_len);
+        match open_x25519_private_key(&path, &pass, None, raised, &|_| {}) {
+            Err(CryptoError::KeyFileUnlockFailed) => Ok(()),
+            other => panic!("expected the raised cap to reach the unlock, got {other:?}"),
         }
     }
 }

@@ -40,6 +40,7 @@ use crate::error::{FormatDefect, sanitize_path_for_display};
 use crate::format;
 use crate::fs::paths;
 use crate::key::files::KeyFileKind;
+use crate::key::limits::KeyReadLimits;
 use crate::key::private::PrivateKey;
 use crate::key::public::PublicKey;
 use crate::protocol;
@@ -496,6 +497,7 @@ impl Decryptor {
             UnauthenticatedRecipientMode::PublicKey => Ok(Self::PrivateKey(PrivateKeyDecryptor {
                 input,
                 kdf_limit: None,
+                key_read_limits: None,
                 archive_limits: None,
                 header_read_limits,
                 incomplete_output_policy: None,
@@ -626,6 +628,7 @@ impl PassphraseDecryptor {
 pub struct PrivateKeyDecryptor {
     input: PathBuf,
     kdf_limit: Option<KdfLimit>,
+    key_read_limits: Option<KeyReadLimits>,
     archive_limits: Option<ArchiveLimits>,
     header_read_limits: Option<HeaderReadLimits>,
     incomplete_output_policy: Option<IncompleteOutputPolicy>,
@@ -638,6 +641,17 @@ impl PrivateKeyDecryptor {
     /// If unset, the decrypt path applies [`KdfLimit::default`].
     pub fn kdf_limit(mut self, limit: KdfLimit) -> Self {
         self.kdf_limit = Some(limit);
+        self
+    }
+
+    /// Overrides the key-file caps applied while reading the supplied
+    /// `private.key`.
+    ///
+    /// If unset, the decrypt path applies [`KeyReadLimits::default`].
+    /// Raise [`KeyReadLimits::max_private_key_wrapped_secret_len`] for a
+    /// key file whose wrapped secret legitimately exceeds the default.
+    pub fn key_read_limits(mut self, limits: KeyReadLimits) -> Self {
+        self.key_read_limits = Some(limits);
         self
     }
 
@@ -743,6 +757,7 @@ impl PrivateKeyDecryptor {
             private_key.key_file_path(),
             &private_key_passphrase,
             self.kdf_limit.as_ref(),
+            self.key_read_limits.unwrap_or_default(),
             &on_event,
         )?;
         let decryption_credential = recipient::x25519::X25519Credential { private_key_bytes };

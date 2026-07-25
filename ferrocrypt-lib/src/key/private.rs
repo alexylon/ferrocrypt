@@ -78,8 +78,10 @@ pub(crate) const PRIVATE_KEY_WRAPPED_SECRET_LEN_MIN: u32 = TAG_SIZE as u32;
 pub(crate) const PRIVATE_KEY_WRAPPED_SECRET_LEN_MAX: u32 = 16_777_216;
 
 /// Recommended local cap on `wrapped_secret_len` for untrusted input,
-/// also enforced by `seal_private_key` so a sealed file always opens
-/// back under default configuration. X25519 needs only 48 bytes
+/// surfaced to callers as
+/// [`KeyReadLimits::PRIVATE_KEY_WRAPPED_SECRET_LEN_DEFAULT`](crate::KeyReadLimits::PRIVATE_KEY_WRAPPED_SECRET_LEN_DEFAULT)
+/// and also enforced by `seal_private_key` so a sealed file always
+/// opens back under default configuration. X25519 needs only 48 bytes
 /// (32-byte secret + 16-byte tag); 4 KiB leaves headroom for future
 /// native key types without forcing every caller to raise the cap.
 pub(crate) const PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT: u32 = 4_096;

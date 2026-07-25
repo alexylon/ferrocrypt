@@ -42,6 +42,7 @@ use crate::format::{
     KeypairSuite, KeypairVersionRejection, WRITER_KEYPAIR_SUITE,
     keypair_suite_from_public_key_version, keypair_suite_is_supported, read_u16_be, read_u32_be,
 };
+use crate::key::limits::KeyReadLimits;
 use crate::recipient::native::x25519::TYPE_NAME as X25519_TYPE_NAME;
 use crate::recipient::{TYPE_NAME_MAX_LEN, validate_type_name_grammar};
 
@@ -97,9 +98,10 @@ pub(crate) const RECIPIENT_STRING_LEN_MAX: usize = 20_000;
 pub(crate) const PUBLIC_KEY_FILE_READ_CAP_BYTES: usize = RECIPIENT_STRING_LEN_MAX + 1;
 
 /// Recommended local cap on recipient-string length for untrusted
-/// input. X25519 produces ~106 ASCII chars; 1 KiB leaves headroom for
-/// future native key types without forcing every caller to raise the
-/// cap.
+/// input, surfaced to callers as
+/// [`KeyReadLimits::RECIPIENT_STRING_CHARS_DEFAULT`]. X25519 produces
+/// ~108 ASCII chars; 1 KiB leaves headroom for future native key types
+/// without forcing every caller to raise the cap.
 pub const RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT: usize = 1_024;
 
 /// Bech32 envelope overhead in characters: HRP `"fcr"` (3) +
@@ -379,10 +381,10 @@ fn ensure_public_key_suite_supported(suite: KeypairSuite) -> Result<(), CryptoEr
 ///
 /// Validates HRP, BIP 173 checksum, internal SHA3-256 checksum, the
 /// recipient `type_name == "x25519"` constraint, and the 32-byte
-/// key-material length. Applies [`RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT`]
-/// as the local resource cap.
+/// key-material length. Applies [`KeyReadLimits::default`] as the local
+/// resource policy.
 pub(crate) fn decode_x25519_recipient(recipient: &str) -> Result<[u8; 32], CryptoError> {
-    Ok(decode_x25519_recipient_resolved(recipient)?.bytes)
+    Ok(decode_x25519_recipient_resolved(recipient, KeyReadLimits::default())?.bytes)
 }
 
 /// Suite-preserving X25519-typed Bech32 decoder. Returns a
@@ -392,8 +394,9 @@ pub(crate) fn decode_x25519_recipient(recipient: &str) -> Result<[u8; 32], Crypt
 /// [`decode_x25519_recipient`].
 pub(crate) fn decode_x25519_recipient_resolved(
     recipient: &str,
+    limits: KeyReadLimits,
 ) -> Result<ResolvedPublicKey, CryptoError> {
-    let decoded = decode_recipient_string(recipient, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT)?;
+    let decoded = decode_recipient_string(recipient, limits.recipient_string_chars())?;
     let suite = decoded.keypair_suite;
     let bytes = decoded_x25519_bytes(decoded)?;
     Ok(ResolvedPublicKey { suite, bytes })
@@ -563,10 +566,14 @@ pub(crate) fn fingerprint_hex(type_name: &str, key_material: &[u8]) -> String {
 ///
 /// Decoding delegates to [`decode_recipient_string`], the single
 /// source of truth for the Bech32 grammar, internal SHA3-256
-/// checksum, and resource caps. The keypair suite recovered from the
+/// checksum, and resource caps, with the recipient-string cap taken
+/// from `limits`. The keypair suite recovered from the
 /// recipient-string wire-version byte is preserved in the returned
 /// [`ResolvedPublicKey`].
-pub(crate) fn parse_public_key_file_bytes(bytes: &[u8]) -> Result<ResolvedPublicKey, CryptoError> {
+pub(crate) fn parse_public_key_file_bytes(
+    bytes: &[u8],
+    limits: KeyReadLimits,
+) -> Result<ResolvedPublicKey, CryptoError> {
     if bytes.is_empty() {
         // Reject here so an empty file reports as a malformed public
         // key rather than as an invalid recipient string from the
@@ -587,7 +594,7 @@ pub(crate) fn parse_public_key_file_bytes(bytes: &[u8]) -> Result<ResolvedPublic
     if recipient.bytes().any(|b| b.is_ascii_whitespace()) {
         return Err(malformed_public_key());
     }
-    let decoded = decode_recipient_string(recipient, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT)?;
+    let decoded = decode_recipient_string(recipient, limits.recipient_string_chars())?;
     let suite = decoded.keypair_suite;
     let key = decoded_x25519_bytes(decoded)?;
     Ok(ResolvedPublicKey { suite, bytes: key })
@@ -596,14 +603,18 @@ pub(crate) fn parse_public_key_file_bytes(bytes: &[u8]) -> Result<ResolvedPublic
 /// Reads and parses a `public.key` file.
 ///
 /// Enforces [`PUBLIC_KEY_FILE_READ_CAP_BYTES`] before allocation, then
-/// delegates all content validation to [`parse_public_key_file_bytes`].
-pub(crate) fn read_public_key(path: &std::path::Path) -> Result<ResolvedPublicKey, CryptoError> {
+/// delegates all content validation to [`parse_public_key_file_bytes`]
+/// under `limits`.
+pub(crate) fn read_public_key(
+    path: &std::path::Path,
+    limits: KeyReadLimits,
+) -> Result<ResolvedPublicKey, CryptoError> {
     let bytes = crate::fs::paths::read_file_capped(
         path,
         PUBLIC_KEY_FILE_READ_CAP_BYTES,
         malformed_public_key,
     )?;
-    parse_public_key_file_bytes(&bytes)
+    parse_public_key_file_bytes(&bytes, limits)
 }
 
 // ─── Public-recipient wrapper ──────────────────────────────────────────────
@@ -633,7 +644,10 @@ pub struct PublicKey {
 
 #[derive(Debug, Clone)]
 enum PublicKeySource {
-    KeyFile(std::path::PathBuf),
+    KeyFile {
+        path: std::path::PathBuf,
+        limits: KeyReadLimits,
+    },
     X25519 {
         suite: KeypairSuite,
         bytes: [u8; 32],
@@ -655,15 +669,31 @@ pub(crate) struct ResolvedPublicKey {
 }
 
 impl PublicKey {
-    /// References a FerroCrypt `public.key` file.
+    /// References a FerroCrypt `public.key` file, read under
+    /// [`KeyReadLimits::default`].
     ///
     /// The file is not opened until a method that needs the key material is
     /// called, such as [`fingerprint`](Self::fingerprint),
     /// [`to_recipient_string`](Self::to_recipient_string),
     /// [`to_bytes`](Self::to_bytes), or [`validate`](Self::validate).
     pub fn from_key_file(path: impl AsRef<std::path::Path>) -> Self {
+        Self::from_key_file_with_limits(path, KeyReadLimits::default())
+    }
+
+    /// References a FerroCrypt `public.key` file whose recipient string
+    /// legitimately exceeds the default local cap.
+    ///
+    /// Same deferred read as [`PublicKey::from_key_file`]; `limits`
+    /// applies when the file is finally read.
+    pub fn from_key_file_with_limits(
+        path: impl AsRef<std::path::Path>,
+        limits: KeyReadLimits,
+    ) -> Self {
         Self {
-            source: PublicKeySource::KeyFile(path.as_ref().to_path_buf()),
+            source: PublicKeySource::KeyFile {
+                path: path.as_ref().to_path_buf(),
+                limits,
+            },
         }
     }
 
@@ -734,9 +764,25 @@ impl PublicKey {
     /// [`CryptoError::UnsupportedKeyType`] for a valid recipient string
     /// of a key type this build does not support, and
     /// [`CryptoError::RecipientStringCapExceeded`] when the input
-    /// exceeds the local recipient-string cap.
+    /// exceeds the [`KeyReadLimits::default`] recipient-string cap.
     pub fn from_recipient_string(recipient: &str) -> Result<Self, CryptoError> {
-        let resolved = decode_x25519_recipient_resolved(recipient)?;
+        Self::from_recipient_string_with_limits(recipient, KeyReadLimits::default())
+    }
+
+    /// Decodes a recipient string that legitimately exceeds the default
+    /// local length cap.
+    ///
+    /// Same validation as [`PublicKey::from_recipient_string`], with the
+    /// recipient-string cap taken from `limits`.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`PublicKey::from_recipient_string`].
+    pub fn from_recipient_string_with_limits(
+        recipient: &str,
+        limits: KeyReadLimits,
+    ) -> Result<Self, CryptoError> {
+        let resolved = decode_x25519_recipient_resolved(recipient, limits)?;
         Ok(Self {
             source: PublicKeySource::X25519 {
                 suite: resolved.suite,
@@ -826,7 +872,7 @@ impl PublicKey {
     /// already-supported [`KeypairSuite`].
     fn resolve(&self) -> Result<ResolvedPublicKey, CryptoError> {
         match &self.source {
-            PublicKeySource::KeyFile(path) => read_public_key(path),
+            PublicKeySource::KeyFile { path, limits } => read_public_key(path, *limits),
             PublicKeySource::X25519 { suite, bytes } => Ok(ResolvedPublicKey {
                 suite: *suite,
                 bytes: *bytes,
@@ -1429,12 +1475,54 @@ mod tests {
         }
     }
 
+    /// A key type with larger material than X25519 produces a recipient
+    /// string above the default local cap. [`KeyReadLimits`] lets a
+    /// caller read such a key: under the default cap the length check
+    /// rejects it, and under a raised cap decoding reaches the
+    /// key-type check. Both `PublicKey` ingress paths honour the cap.
+    #[test]
+    fn key_read_limits_raise_the_recipient_string_cap() {
+        let long = encode_recipient_string("future", &[0x11u8; 1024]).unwrap();
+        assert!(long.len() > KeyReadLimits::RECIPIENT_STRING_CHARS_DEFAULT as usize);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("public.key");
+        std::fs::write(&path, format!("{long}\n")).unwrap();
+        let raised =
+            KeyReadLimits::default().max_recipient_string_chars(u32::try_from(long.len()).unwrap());
+
+        for capped in [
+            PublicKey::from_key_file(&path).validate(),
+            PublicKey::from_recipient_string(&long).map(|_| ()),
+        ] {
+            match capped {
+                Err(CryptoError::RecipientStringCapExceeded { input_chars, .. }) => {
+                    assert_eq!(input_chars as usize, long.len());
+                }
+                other => panic!("expected the default cap to reject, got {other:?}"),
+            }
+        }
+
+        for reached in [
+            PublicKey::from_key_file_with_limits(&path, raised).validate(),
+            PublicKey::from_recipient_string_with_limits(&long, raised).map(|_| ()),
+        ] {
+            match reached {
+                Err(CryptoError::UnsupportedKeyType { type_name }) => {
+                    assert_eq!(type_name, "future");
+                }
+                other => {
+                    panic!("expected the raised cap to reach the key-type check, got {other:?}")
+                }
+            }
+        }
+    }
+
     #[test]
     fn read_public_key_rejects_all_zero_on_disk() {
         let s = encode_recipient_string(X25519_TYPE_NAME, &[0u8; 32]).unwrap();
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), s.as_bytes()).unwrap();
-        match read_public_key(tmp.path()) {
+        match read_public_key(tmp.path(), KeyReadLimits::default()) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
             other => {
                 panic!("expected MalformedPublicKey for all-zero on-disk public key, got {other:?}")
@@ -1467,7 +1555,7 @@ mod tests {
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), s.as_bytes()).unwrap();
-        match read_public_key(tmp.path()) {
+        match read_public_key(tmp.path(), KeyReadLimits::default()) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
             other => panic!("read_public_key must reject a non-canonical alias, got {other:?}"),
         }
@@ -1523,9 +1611,13 @@ mod tests {
     fn parse_public_key_file_accepts_optional_trailing_newline() {
         let key = x25519_key();
         let recipient = encode_recipient_string(X25519_TYPE_NAME, &key).unwrap();
-        let bare = parse_public_key_file_bytes(recipient.as_bytes()).unwrap();
-        let with_newline =
-            parse_public_key_file_bytes(format!("{recipient}\n").as_bytes()).unwrap();
+        let bare =
+            parse_public_key_file_bytes(recipient.as_bytes(), KeyReadLimits::default()).unwrap();
+        let with_newline = parse_public_key_file_bytes(
+            format!("{recipient}\n").as_bytes(),
+            KeyReadLimits::default(),
+        )
+        .unwrap();
         assert_eq!(bare.bytes, key);
         assert_eq!(with_newline.bytes, key);
         assert_eq!(bare.suite, with_newline.suite);
@@ -1546,7 +1638,7 @@ mod tests {
             format!("{}\n", recipient.replace("fcr1", "fcr1 ")),
         ];
         for content in cases {
-            match parse_public_key_file_bytes(content.as_bytes()) {
+            match parse_public_key_file_bytes(content.as_bytes(), KeyReadLimits::default()) {
                 Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
                 other => panic!("expected MalformedPublicKey for {content:?}, got {other:?}"),
             }
@@ -1556,7 +1648,7 @@ mod tests {
     /// Rejects empty content as a malformed public key.
     #[test]
     fn parse_public_key_file_rejects_empty_content() {
-        match parse_public_key_file_bytes(b"") {
+        match parse_public_key_file_bytes(b"", KeyReadLimits::default()) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
             other => panic!("expected MalformedPublicKey for empty content, got {other:?}"),
         }
@@ -1568,7 +1660,7 @@ mod tests {
     #[test]
     fn parse_public_key_file_rejects_private_key_bytes() {
         let private_key = b"FCR\0\x01K\x00\x00\x00\x06";
-        match parse_public_key_file_bytes(private_key) {
+        match parse_public_key_file_bytes(private_key, KeyReadLimits::default()) {
             Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)) => {}
             other => panic!("expected WrongKeyFileType for private.key bytes, got {other:?}"),
         }
@@ -1577,7 +1669,7 @@ mod tests {
     /// Classifies unrelated non-UTF-8 bytes as not a key file.
     #[test]
     fn parse_public_key_file_rejects_non_utf8_content() {
-        match parse_public_key_file_bytes(&[0xFF, 0xFE, 0x00, 0x80]) {
+        match parse_public_key_file_bytes(&[0xFF, 0xFE, 0x00, 0x80], KeyReadLimits::default()) {
             Err(CryptoError::InvalidFormat(FormatDefect::NotAKeyFile)) => {}
             other => panic!("expected NotAKeyFile for non-UTF-8 content, got {other:?}"),
         }
@@ -1590,7 +1682,7 @@ mod tests {
     #[test]
     fn parse_public_key_file_rejects_non_x25519_recipient() {
         let recipient = encode_recipient_string("future", &[0x11u8; 32]).unwrap();
-        match parse_public_key_file_bytes(recipient.as_bytes()) {
+        match parse_public_key_file_bytes(recipient.as_bytes(), KeyReadLimits::default()) {
             Err(CryptoError::UnsupportedKeyType { type_name }) => {
                 assert_eq!(type_name, "future");
             }
@@ -1619,7 +1711,7 @@ mod tests {
             encode_recipient_string_for_suite(KeypairSuite::V1, X25519_TYPE_NAME, &key).unwrap();
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), s.as_bytes()).unwrap();
-        let resolved = read_public_key(tmp.path()).unwrap();
+        let resolved = read_public_key(tmp.path(), KeyReadLimits::default()).unwrap();
         assert_eq!(resolved.suite, KeypairSuite::V1);
         assert_eq!(resolved.bytes, key);
     }

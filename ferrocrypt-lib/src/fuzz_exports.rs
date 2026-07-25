@@ -38,7 +38,7 @@ pub fn open_private_key_for_fuzz(bytes: &[u8]) -> Result<(), crate::CryptoError>
         bytes,
         &passphrase,
         Some(&limit),
-        crate::key::private::PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT,
+        crate::KeyReadLimits::default().private_key_wrapped_secret_len(),
         &|_| {},
     )
     .map(|_| ())
@@ -79,10 +79,12 @@ pub fn decode_recipient_string(s: &str, local_max_chars: usize) -> Result<(), cr
 }
 
 /// Drives the `public.key` content parser over arbitrary bytes without
-/// exposing the crate-internal resolved-key type. The bounded
-/// filesystem read remains in `read_public_key`.
+/// exposing the crate-internal resolved-key type, under the default
+/// [`crate::KeyReadLimits`]. The bounded filesystem read remains in
+/// `read_public_key`.
 pub fn parse_public_key_file_bytes(bytes: &[u8]) -> Result<(), crate::CryptoError> {
-    crate::key::public::parse_public_key_file_bytes(bytes).map(|_| ())
+    crate::key::public::parse_public_key_file_bytes(bytes, crate::KeyReadLimits::default())
+        .map(|_| ())
 }
 
 /// Writer-side counterpart for the `fuzz_fca_manifest` round-trip

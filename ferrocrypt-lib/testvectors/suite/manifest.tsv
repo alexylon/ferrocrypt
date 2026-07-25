@@ -42,8 +42,8 @@ cases/recipient-unknown-critical.fcr	decrypt	-	error	UnknownCriticalRecipient(ml
 cases/recipient-unknown-only.fcr	decrypt	-	error	NoSupportedRecipient	Decryption failed: no supported recipient
 cases/recipient-mixed-exclusive.fcr	decrypt	-	error	IncompatibleRecipients(argon2id)	Recipient `argon2id` mixed with another recipient
 cases/recipient-unknown-skipped.fcr	decrypt	private-key:keys/recipient-a.private.key,unlock=suite-passphrase-not-secret-do-not-reuse	ok	-	-
-cases/public-key-uppercase.key	read-public-key	-	error	InvalidInput	Recipient string must be lowercase
-cases/public-key-bad-bech32.key	read-public-key	-	error	InvalidInput	Invalid recipient string: fcr1qyqqvqqqqqs8sv34x5cnnw2l4g4s2h6v55nvjta0qs9j5a3u4eksdna53n9…
+cases/public-key-uppercase.key	read-public-key	-	error	InvalidFormat(MalformedPublicKey)	Public key is malformed
+cases/public-key-bad-bech32.key	read-public-key	-	error	InvalidFormat(MalformedPublicKey)	Public key is malformed
 cases/public-key-bad-checksum.key	read-public-key	-	error	InvalidFormat(MalformedPublicKey)	Public key is malformed
 cases/privatekey-bad-magic.private.key	validate-private-key	-	error	InvalidFormat(NotAKeyFile)	Not a FerroCrypt key file
 cases/privatekey-newer-version.private.key	validate-private-key	-	error	UnsupportedVersion(NewerKey)	Unsupported private-key version byte 0x02. Upgrade FerroCrypt.

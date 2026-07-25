@@ -37,7 +37,7 @@ use bech32::{Bech32, Checksum, Hrp};
 use sha3::{Digest, Sha3_256};
 
 use crate::CryptoError;
-use crate::error::{FormatDefect, UnsupportedVersion, sanitize_for_display};
+use crate::error::{FormatDefect, UnsupportedVersion};
 use crate::format::{
     KeypairSuite, KeypairVersionRejection, WRITER_KEYPAIR_SUITE,
     keypair_suite_from_public_key_version, keypair_suite_is_supported, read_u16_be, read_u32_be,
@@ -219,6 +219,13 @@ pub(crate) fn encode_recipient_string_for_suite(
 /// length fields, `type_name` UTF-8 and grammar, and the internal
 /// SHA3-256 checksum.
 ///
+/// Every grammar failure surfaces as
+/// [`FormatDefect::MalformedPublicKey`], the `malformed_public_key`
+/// diagnostic class of `FORMAT.md` §12.1, so a caller can classify a
+/// rejected recipient string from the error type alone. The only other
+/// rejection this function raises is
+/// [`CryptoError::RecipientStringCapExceeded`] for the resource cap.
+///
 /// `local_max_chars` is a local policy cap checked before decode work runs.
 /// The structural ceiling is `RECIPIENT_STRING_LEN_MAX` (20,000 ASCII
 /// characters); callers should normally pass the smaller
@@ -234,11 +241,9 @@ pub fn decode_recipient_string(
     // `str::len()` returns bytes — only after the ASCII check are the
     // two equal. Without this, a 600-character non-ASCII string whose
     // UTF-8 byte length exceeds the cap would misclassify as a cap
-    // exceedance instead of an invalid-input error.
+    // exceedance instead of a malformed-key rejection.
     if !s.is_ascii() {
-        return Err(CryptoError::InvalidInput(
-            "Recipient string must be ASCII Bech32".to_string(),
-        ));
+        return Err(malformed_public_key());
     }
     let char_count = s.len(); // bytes == chars after the ASCII check
     if char_count > local_max_chars {
@@ -251,9 +256,7 @@ pub fn decode_recipient_string(
         });
     }
     if s.chars().any(|c| c.is_ascii_uppercase()) {
-        return Err(CryptoError::InvalidInput(
-            "Recipient string must be lowercase".to_string(),
-        ));
+        return Err(malformed_public_key());
     }
 
     // Strict Bech32 (BIP 173 polynomial via `Bech32V1`, which also
@@ -262,23 +265,9 @@ pub fn decode_recipient_string(
     // strings and mixed case, but NOT non-canonical 5-to-8 padding:
     // in `bech32` that check runs only on the segwit decode path, and
     // `byte_iter` silently drops the trailing bits. Enforced below.
-    let checked = CheckedHrpstring::new::<Bech32V1>(s).map_err(|_| {
-        // A failed decode echoes the input to help the user spot a typo.
-        // Recipient strings are often received from someone else, so the
-        // echoed text is sanitized and truncated before it reaches the
-        // terminal-bound error message.
-        CryptoError::InvalidInput(format!(
-            "Invalid recipient string: {}",
-            sanitize_for_display(s)
-        ))
-    })?;
-    let hrp = checked.hrp();
-    if hrp != RECIPIENT_HRP {
-        return Err(CryptoError::InvalidInput(format!(
-            "Unexpected recipient prefix (want '{}', got '{}')",
-            RECIPIENT_HRP.as_str(),
-            hrp.as_str()
-        )));
+    let checked = CheckedHrpstring::new::<Bech32V1>(s).map_err(|_| malformed_public_key())?;
+    if checked.hrp() != RECIPIENT_HRP {
+        return Err(malformed_public_key());
     }
     let data: Vec<u8> = checked.byte_iter().collect();
 
@@ -739,8 +728,9 @@ impl PublicKey {
     ///
     /// # Errors
     ///
-    /// Returns [`CryptoError::InvalidInput`] for invalid Bech32 text,
-    /// [`CryptoError::InvalidFormat`] for malformed payloads,
+    /// Returns [`CryptoError::InvalidFormat`] with
+    /// [`FormatDefect::MalformedPublicKey`] for text that is not a
+    /// canonical recipient string and for a malformed payload,
     /// [`CryptoError::UnsupportedKeyType`] for a valid recipient string
     /// of a key type this build does not support, and
     /// [`CryptoError::RecipientStringCapExceeded`] when the input
@@ -805,7 +795,7 @@ impl PublicKey {
     ///
     /// Returns [`CryptoError::InputPath`] if a referenced key file does not
     /// exist, and [`CryptoError::Io`] for other read failures. Returns
-    /// [`CryptoError::InvalidFormat`], [`CryptoError::InvalidInput`], or
+    /// [`CryptoError::InvalidFormat`] or
     /// [`CryptoError::RecipientStringCapExceeded`] if a referenced key file is
     /// not a valid `public.key` file.
     pub fn to_bytes(&self) -> Result<[u8; 32], CryptoError> {
@@ -866,23 +856,20 @@ mod tests {
         [0x33u8; 32]
     }
 
-    /// The rejected-input echo is sanitized: ASCII control bytes are
-    /// escaped and never reach the message raw, so a malicious recipient
-    /// string cannot carry terminal escape sequences.
+    /// A rejected recipient string is never echoed, so a malicious
+    /// value cannot carry terminal escape sequences into the message.
     #[test]
-    fn invalid_recipient_string_echo_is_sanitized() {
-        let err = decode_recipient_string(
-            "fcr1\u{1b}]0;spoof\u{7}",
-            RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT,
-        )
-        .unwrap_err();
-        match err {
-            CryptoError::InvalidInput(msg) => {
-                assert!(!msg.contains('\u{1b}'), "raw ESC must not appear: {msg:?}");
-                assert!(msg.contains("\\u{1b}"), "got: {msg}");
-            }
-            other => panic!("expected InvalidInput, got {other:?}"),
+    fn rejected_recipient_string_is_not_echoed() {
+        let input = "fcr1\u{1b}]0;spoof\u{7}";
+        let err =
+            decode_recipient_string(input, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT).unwrap_err();
+        match &err {
+            CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey) => {}
+            other => panic!("expected MalformedPublicKey, got {other:?}"),
         }
+        let msg = err.to_string();
+        assert!(!msg.contains('\u{1b}'), "raw ESC must not appear: {msg:?}");
+        assert!(!msg.contains("spoof"), "input must not be echoed: {msg}");
     }
 
     /// Pins the wire-version-to-suite mapping. Boundary cases:
@@ -1061,8 +1048,8 @@ mod tests {
         let s = encode_recipient_string("x25519", &x25519_key()).unwrap();
         let upper = s.to_uppercase();
         match decode_recipient_string(&upper, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT) {
-            Err(CryptoError::InvalidInput(_)) => {}
-            other => panic!("expected InvalidInput for uppercase, got {other:?}"),
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
+            other => panic!("expected MalformedPublicKey for uppercase, got {other:?}"),
         }
     }
 
@@ -1088,49 +1075,37 @@ mod tests {
         }
     }
 
-    /// `decode_recipient_string` advertises `input_chars` in its cap
-    /// diagnostics, but `str::len()` is bytes. For a non-ASCII string
-    /// long enough to exceed the cap by bytes but not by chars, that
-    /// mismatch could misclassify the rejection as a cap exceedance.
-    /// Bech32 is ASCII-only, so the parser rejects non-ASCII input up
-    /// front with a typed `InvalidInput` and only counts chars (==
-    /// bytes after the ASCII check) against the cap.
+    /// Bech32 is ASCII-only, so non-ASCII text is not a recipient
+    /// string at all and rejects as a malformed public key. The
+    /// companion test below covers why that check runs before the
+    /// length cap.
     #[test]
     fn decode_rejects_non_ascii_before_cap_check() {
-        // A small non-ASCII string that is well under any reasonable
-        // cap. Without the ASCII pre-check this still fails decoding
-        // later, but on the wrong path (Bech32 grammar). The point of
-        // the regression is the failure *class*: this must surface as
-        // `InvalidInput("…ASCII Bech32")`, not `RecipientStringCapExceeded`.
         let s = "fcr1日本語";
         match decode_recipient_string(s, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT) {
-            Err(CryptoError::InvalidInput(msg)) => {
-                assert!(msg.contains("ASCII Bech32"), "unexpected message: {msg}");
-            }
-            other => panic!("expected InvalidInput(ASCII Bech32), got {other:?}"),
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
+            other => panic!("expected MalformedPublicKey for non-ASCII, got {other:?}"),
         }
     }
 
-    /// Boundary case for the same fix: a non-ASCII string whose UTF-8
-    /// byte length exceeds the supplied cap but whose char count does
-    /// not. The pre-fix code would have rejected via
-    /// `RecipientStringCapExceeded` because it compared `str::len()`
-    /// (bytes) against the char-count cap. The post-fix code rejects
-    /// via the ASCII check first, so the cap variant never fires here.
+    /// `decode_recipient_string` advertises `input_chars` in its cap
+    /// diagnostic, but `str::len()` is bytes. A non-ASCII string whose
+    /// byte length exceeds the cap while its char count does not would
+    /// therefore be reported as `RecipientStringCapExceeded`; the ASCII
+    /// check runs first, so the cap variant never fires here.
     #[test]
-    fn decode_rejects_non_ascii_with_byte_length_above_cap_as_invalid_input() {
+    fn decode_rejects_non_ascii_with_byte_length_above_cap_as_malformed() {
         // 8 chars × 3 bytes each = 24 bytes. Cap of 10 chars would let
         // 8 chars through if we counted chars, but the byte length is
-        // 24 > 10. Either way the answer must be `InvalidInput`, never
-        // `RecipientStringCapExceeded`, because the input is not ASCII.
+        // 24 > 10. Either way the answer must be `MalformedPublicKey`,
+        // never `RecipientStringCapExceeded`, because the input is not
+        // ASCII.
         let s = "日本語日本語日本";
         assert_eq!(s.chars().count(), 8);
         assert_eq!(s.len(), 24);
         match decode_recipient_string(s, 10) {
-            Err(CryptoError::InvalidInput(msg)) => {
-                assert!(msg.contains("ASCII Bech32"), "unexpected message: {msg}");
-            }
-            other => panic!("expected InvalidInput(ASCII Bech32), got {other:?}"),
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
+            other => panic!("expected MalformedPublicKey for non-ASCII, got {other:?}"),
         }
     }
 
@@ -1141,10 +1116,8 @@ mod tests {
         let data = b"abcdefghijklmnopqrstuvwxyz0123";
         let s = bech32::encode::<Bech32>(other_hrp, data).unwrap();
         match decode_recipient_string(&s, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT) {
-            Err(CryptoError::InvalidInput(msg)) => {
-                assert!(msg.contains("Unexpected recipient prefix"), "msg: {msg}");
-            }
-            other => panic!("expected InvalidInput for HRP, got {other:?}"),
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
+            other => panic!("expected MalformedPublicKey for a wrong HRP, got {other:?}"),
         }
     }
 
@@ -1154,8 +1127,8 @@ mod tests {
             "fcr1notavalidbech32",
             RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT,
         ) {
-            Err(CryptoError::InvalidInput(_)) => {}
-            other => panic!("expected InvalidInput, got {other:?}"),
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
+            other => panic!("expected MalformedPublicKey for invalid Bech32, got {other:?}"),
         }
     }
 
@@ -1180,8 +1153,8 @@ mod tests {
         data.extend_from_slice(&cs);
         let bech32m = bech32::encode::<bech32::Bech32m>(RECIPIENT_HRP, &data).unwrap();
         match decode_recipient_string(&bech32m, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT) {
-            Err(CryptoError::InvalidInput(_)) => {}
-            other => panic!("expected InvalidInput for Bech32m, got {other:?}"),
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
+            other => panic!("expected MalformedPublicKey for Bech32m, got {other:?}"),
         }
     }
 

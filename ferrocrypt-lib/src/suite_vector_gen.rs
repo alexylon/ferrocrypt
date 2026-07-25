@@ -42,7 +42,6 @@ use crate::crypto::kdf::{ARGON2_SALT_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams}
 use crate::crypto::keys::{DerivedSubkeys, FileKey, derive_subkeys, random_bytes};
 use crate::crypto::stream::{BUFFER_SIZE, STREAM_NONCE_SIZE};
 use crate::crypto::tlv::tlv_bytes;
-use crate::error::sanitize_for_display;
 use crate::format::{HEADER_FIXED_SIZE, HEADER_LEN_MAX, HEADER_MAC_SIZE, PREFIX_SIZE};
 use crate::recipient::RecipientEntry;
 use crate::recipient::entry::{ENTRY_HEADER_SIZE, RECIPIENT_FLAG_CRITICAL};
@@ -378,16 +377,13 @@ fn write_public_key_cases(suite: &Path, cases: &Path) -> Vec<Case> {
     vec![
         Case::key_err(
             "cases/public-key-uppercase.key",
-            "InvalidInput",
-            "Recipient string must be lowercase",
+            "InvalidFormat(MalformedPublicKey)",
+            "Public key is malformed",
         ),
         Case::key_err(
             "cases/public-key-bad-bech32.key",
-            "InvalidInput",
-            &format!(
-                "Invalid recipient string: {}",
-                sanitize_for_display(&bad_bech32)
-            ),
+            "InvalidFormat(MalformedPublicKey)",
+            "Public key is malformed",
         ),
         Case::key_err(
             "cases/public-key-bad-checksum.key",

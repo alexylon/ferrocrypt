@@ -6,10 +6,10 @@ use crate::recipient::policy::MixingPolicy;
 
 /// Maximum number of rendered `chars` (counting an inserted ellipsis as one)
 /// a `type_name` may occupy when interpolated into a user-facing error
-/// message. Sized to keep the longest interpolating message
-/// (`UnknownCriticalRecipient`, fixed wording = 51 chars) within the
-/// 64-char desktop status-line budget enforced by
-/// [`tests::user_facing_messages_fit_status_line_budget`].
+/// message. The longest interpolating message
+/// (`UnknownCriticalRecipient`) has 45 chars of fixed wording, leaving 19
+/// within the 64-char desktop status-line budget enforced by
+/// [`tests::user_facing_messages_fit_status_line_budget`]; 13 are used.
 const TYPE_NAME_DISPLAY_MAX: usize = 13;
 const _: () = assert!(TYPE_NAME_DISPLAY_MAX >= 1);
 
@@ -790,10 +790,13 @@ pub enum FormatDefect {
     Truncated,
     /// Leading magic bytes do not match `"FCR\0"`.
     BadMagic,
-    /// `ext_len` (in a `.fcr` header's fixed section or a `private.key`
-    /// header) exceeds the reader's structural cap (`EXT_LEN_MAX`, 64 KiB).
-    /// Carried as `u32` because the cap is `65_536`, which exceeds
-    /// `u16::MAX`.
+    /// `ext_len` in a `.fcr` header's fixed section exceeds the reader's
+    /// structural cap (`EXT_LEN_MAX`, 64 KiB), or a TLV region exceeds
+    /// the cap its containing format gives the shared scanner — the FCA
+    /// archive-level and per-entry extension regions reach it that way.
+    /// A `private.key` `ext_len` rejects earlier, as
+    /// [`Self::MalformedPrivateKey`]. Carried as `u32` because the cap
+    /// is `65_536`, which exceeds `u16::MAX`.
     ExtTooLarge {
         /// Declared extension-region length, in bytes.
         len: u32,

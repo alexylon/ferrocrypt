@@ -180,9 +180,11 @@ pub(crate) fn validate_no_known_critical(
 /// per-value cap = `EXT_LEN_MAX`, every critical tag rejects (the
 /// specification defines no known criticals).
 ///
-/// Used by FCR header `ext_bytes` and `private.key` `ext_bytes`.
-/// FCA archive- and entry-level extension regions call the
-/// crate-internal `validate_no_known_critical` with their own caps.
+/// Used by the FCR header `ext_bytes` only. Every other TLV region has
+/// its own wrapper over `validate_no_known_critical` carrying the caps
+/// its containing format defines: `key::private::validate_private_key_ext_tlv`,
+/// `archive::format::validate_archive_ext_tlv`, and
+/// `archive::format::validate_entry_ext_tlv`.
 pub fn validate_tlv(ext_bytes: &[u8]) -> Result<(), CryptoError> {
     validate_no_known_critical(ext_bytes, EXT_LEN_MAX, EXT_LEN_MAX)
 }

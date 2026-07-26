@@ -485,7 +485,7 @@ The module exposes:
 - `reject_unknown_critical(tlvs) -> Result<()>` — the current policy wrapper. Rejects any `TlvClass::Critical` entry as `UnknownCriticalTag` because the current specification defines no known critical tags in any region. A later specification that defines known criticals will iterate the scanned TLVs against a registry instead.
 - `validate_no_known_critical(bytes, max_region_len, max_value_len) -> Result<()>` — the single-call helper. Combines `scan_tlv_region` and `reject_unknown_critical` for callers that don't need the parsed entries. Used by every current caller (FCR header, `private.key`, FCA `archive_ext`, FCA `entry_ext`).
 - `classify_tlv_tag(tag) -> Result<TlvClass>` — pure tag classification, rejects the two reserved values.
-- `validate_tlv(ext_bytes)` — public convenience function. Calls `validate_no_known_critical` with `EXT_LEN_MAX` for both region and value caps. Used by `.fcr` header and `private.key` callers.
+- `validate_tlv(ext_bytes)` — public convenience function. Calls `validate_no_known_critical` with `EXT_LEN_MAX` for both region and value caps. Used by the `.fcr` header only; every other region has its own wrapper carrying the caps its containing format defines (`key::private::validate_private_key_ext_tlv`, `archive::format::validate_archive_ext_tlv`, `archive::format::validate_entry_ext_tlv`).
 
 Rules:
 
@@ -699,7 +699,7 @@ It contains:
 - cleartext private-key header parsing;
 - passphrase-wrapped secret encryption;
 - passphrase-wrapped secret decryption;
-- writer-side and reader-side `ext_bytes` TLV validation. `seal_private_key` runs `validate_tlv` on `ext_bytes` after the structural length cap and before AEAD work, so a sealed `private.key` is one the matching reader will accept. `open_private_key` runs the same check after `open_with_aad` succeeds, so the validator always operates on authenticated bytes. Recipient-specific adapters (e.g. `recipient/native/x25519`) no longer re-validate;
+- writer-side and reader-side `ext_bytes` TLV validation. `seal_private_key` runs `validate_private_key_ext_tlv` on `ext_bytes` after the structural length cap and before AEAD work, so a sealed `private.key` is one the matching reader will accept. `open_private_key` runs the same check after `open_with_aad` succeeds, so the validator always operates on authenticated bytes. Recipient-specific adapters (e.g. `recipient/native/x25519`) no longer re-validate;
 - generic typed secret material returned to recipient schemes;
 - construction and loading support for `PrivateKey`;
 - emission of `ProgressEvent::UnlockingPrivateKey` at the actual Argon2id call boundary inside `open_private_key` (after structural header parsing, the caller's `KdfLimit` resource-cap check, the wrapped-secret-length cap, the total-length check, and type-name grammar validation have all passed). A structurally malformed key file or one that exceeds either cap is rejected with no event emitted. `seal_private_key` is silent: keygen owns its own outer `GeneratingKeyPair` event.

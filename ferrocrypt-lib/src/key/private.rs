@@ -39,7 +39,6 @@ use crate::crypto::kdf::{
     ARGON2_SALT_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams, check_passphrase_len,
 };
 use crate::crypto::keys::{derive_passphrase_wrap_key, random_bytes};
-use crate::crypto::tlv::validate_tlv;
 use crate::error::{FormatDefect, UnsupportedVersion};
 use crate::format::{
     KIND_PRIVATE_KEY, KeypairSuite, KeypairVersionRejection, MAGIC, MAGIC_SIZE,
@@ -263,6 +262,22 @@ fn malformed_private_key() -> CryptoError {
     CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)
 }
 
+/// Validates a `private.key` `ext_bytes` region under the shared
+/// `FORMAT.md` §6 TLV grammar, capped by [`PRIVATE_KEY_EXT_LEN_MAX`].
+///
+/// Single source of truth for this region's cap pair, matching the
+/// wrappers the FCA regions already have. §6 gives each containing
+/// format its own caps and §11.5 lets the stored versions move
+/// independently, so this region must not read the `.fcr` header's
+/// constant even while the two numbers agree.
+fn validate_private_key_ext_tlv(bytes: &[u8]) -> Result<(), CryptoError> {
+    crate::crypto::tlv::validate_no_known_critical(
+        bytes,
+        PRIVATE_KEY_EXT_LEN_MAX,
+        PRIVATE_KEY_EXT_LEN_MAX,
+    )
+}
+
 /// Translates an on-disk `private.key` wire-version byte into a logical
 /// [`KeypairSuite`]. Thin domain-specific translation layer over
 /// [`keypair_suite_from_private_key_version`] — the centralised reverse
@@ -420,7 +435,7 @@ fn seal_private_key_inner(
     if matches!(validation, ExtBytesValidation::Validate) {
         // After the length cap so an oversize region still surfaces
         // as `MalformedPrivateKey` rather than a TLV-layer error.
-        validate_tlv(ext_bytes)?;
+        validate_private_key_ext_tlv(ext_bytes)?;
     }
     let wrapped_secret_len_usize = secret_material
         .len()
@@ -610,7 +625,7 @@ pub(crate) fn open_private_key(
 
     // Authenticated bytes only: runs after `open_with_aad` so callers
     // never see authenticated but invalid `ext_bytes`.
-    validate_tlv(&ext_bytes_slice)?;
+    validate_private_key_ext_tlv(&ext_bytes_slice)?;
 
     Ok(OpenedPrivateKey {
         type_name: type_name.to_owned(),

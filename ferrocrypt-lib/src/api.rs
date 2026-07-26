@@ -1106,7 +1106,10 @@ pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), Crypt
         key_file.as_ref(),
         crate::key::private::PRIVATE_KEY_WRAPPED_SECRET_LEN_MAX,
     )?;
-    if matches!(KeyFileKind::classify(&data), KeyFileKind::Public) {
+    if matches!(
+        KeyFileKind::classify(&data, KeyReadLimits::default()),
+        KeyFileKind::Public
+    ) {
         return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
     }
     recipient::native::x25519::validate_private_key_shape(&data)

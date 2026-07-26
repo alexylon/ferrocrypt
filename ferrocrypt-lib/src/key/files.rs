@@ -9,7 +9,8 @@
 //! against the actual unlock or extraction path.
 
 use crate::format;
-use crate::key::public::{RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT, decode_recipient_string};
+use crate::key::limits::KeyReadLimits;
+use crate::key::public::decode_recipient_string;
 
 /// Default filename for the public key file (text form).
 pub const PUBLIC_KEY_FILENAME: &str = "public.key";
@@ -64,7 +65,12 @@ impl KeyFileKind {
     /// the caller's generic rejection path. Probability of an
     /// accidental `Private` match on truly random binary is
     /// `2^-40` (the five specific bytes in the signature).
-    pub(crate) fn classify(data: &[u8]) -> Self {
+    ///
+    /// `limits` supplies the recipient-string cap for the public-key
+    /// probe, so a caller that raised the cap for the real reader also
+    /// gets the `Public` verdict for a longer recipient string instead
+    /// of falling through to `Unknown`.
+    pub(crate) fn classify(data: &[u8], limits: KeyReadLimits) -> Self {
         // Smallest prefix needed to read the kind byte at offset 5:
         // magic(4) || version(1) || kind(1).
         const SIGNATURE_LEN: usize = 6;
@@ -81,10 +87,10 @@ impl KeyFileKind {
         // The `+ 1` ensures an at-cap valid recipient still fits while
         // an over-cap input is recognisably over-cap to the decoder
         // rather than being silently truncated into a valid prefix.
-        let probe_len = data.len().min(RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT + 1);
+        let cap = limits.recipient_string_chars();
+        let probe_len = data.len().min(cap.saturating_add(1));
         if let Ok(text) = std::str::from_utf8(&data[..probe_len]) {
-            if decode_recipient_string(text.trim(), RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT).is_ok()
-            {
+            if decode_recipient_string(text.trim(), cap).is_ok() {
                 return Self::Public;
             }
         }
@@ -98,6 +104,10 @@ mod tests {
     use crate::CryptoError;
     use secrecy::SecretString;
     use std::fs;
+
+    fn classify_default(data: &[u8]) -> KeyFileKind {
+        KeyFileKind::classify(data, KeyReadLimits::default())
+    }
 
     /// Pin every `KeyFileKind::classify` arm so a future refactor
     /// that drifts the order or weakens a branch fails loudly.
@@ -113,47 +123,47 @@ mod tests {
             &|_| {},
         )?;
         let pub_bytes = fs::read(&public_key_path)?;
-        assert_eq!(KeyFileKind::classify(&pub_bytes), KeyFileKind::Public);
+        assert_eq!(classify_default(&pub_bytes), KeyFileKind::Public);
 
         // Real private.key binary → Private.
         let priv_bytes = fs::read(&private_key_path)?;
-        assert_eq!(KeyFileKind::classify(&priv_bytes), KeyFileKind::Private);
+        assert_eq!(classify_default(&priv_bytes), KeyFileKind::Private);
 
         // Magic + future private-key encoding version 0x02 + type K → Private.
         let v2_priv = b"FCR\0\x02K\x01\x00\x00";
-        assert_eq!(KeyFileKind::classify(v2_priv), KeyFileKind::Private);
+        assert_eq!(classify_default(v2_priv), KeyFileKind::Private);
 
         // Magic but kind byte 'E' (an encrypted .fcr) → Unknown,
         // not Private. The `.fcr` mix-up heuristic lives elsewhere
         // (`probe_recipient_mode`); a key-file path should not
         // claim it.
         let fcr_encrypted = b"FCR\0\x01Exx\x00\x00";
-        assert_eq!(KeyFileKind::classify(fcr_encrypted), KeyFileKind::Unknown);
+        assert_eq!(classify_default(fcr_encrypted), KeyFileKind::Unknown);
 
         // Bare magic, too short for the signature → Unknown.
-        assert_eq!(KeyFileKind::classify(b"FCR\0"), KeyFileKind::Unknown);
+        assert_eq!(classify_default(b"FCR\0"), KeyFileKind::Unknown);
 
         // Random binary without magic → Unknown.
         assert_eq!(
-            KeyFileKind::classify(b"this isn't ours at all"),
+            classify_default(b"this isn't ours at all"),
             KeyFileKind::Unknown
         );
 
         // `fcr1`-prefixed garbage that fails Bech32 checksum →
         // Unknown (NOT Public). We don't claim ownership of files
         // we can't actually read.
-        assert_eq!(KeyFileKind::classify(b"fcr1foobar"), KeyFileKind::Unknown);
+        assert_eq!(classify_default(b"fcr1foobar"), KeyFileKind::Unknown);
 
         // Empty input → Unknown.
-        assert_eq!(KeyFileKind::classify(b""), KeyFileKind::Unknown);
+        assert_eq!(classify_default(b""), KeyFileKind::Unknown);
         Ok(())
     }
 
     /// A multi-MB blob whose first 4 bytes look like an `fcr1…` recipient
     /// must classify as `Unknown` without paying O(n) UTF-8 validation
-    /// over every byte. `classify` bounds the probe at the recipient-
-    /// string cap (1 KiB + 1), so an oversize input is recognisably
-    /// over-cap to the decoder and we return `Unknown`.
+    /// over every byte. `classify` bounds the probe at the caller's
+    /// recipient-string cap plus one byte, so an oversize input is
+    /// recognisably over-cap to the decoder and we return `Unknown`.
     #[test]
     fn classify_does_not_scan_oversize_blob() {
         let mut blob = vec![0xFFu8; 4 * 1024 * 1024];
@@ -161,6 +171,6 @@ mod tests {
         blob[1] = b'c';
         blob[2] = b'r';
         blob[3] = b'1';
-        assert_eq!(KeyFileKind::classify(&blob), KeyFileKind::Unknown);
+        assert_eq!(classify_default(&blob), KeyFileKind::Unknown);
     }
 }

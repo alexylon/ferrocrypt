@@ -422,7 +422,10 @@ pub(crate) fn open_x25519_private_key(
     // private-key reader at a `public.key` text file gets
     // `WrongKeyFileType` rather than the generic `NotAKeyFile` that
     // `open_private_key`'s magic check would surface.
-    if matches!(KeyFileKind::classify(&bytes), KeyFileKind::Public) {
+    if matches!(
+        KeyFileKind::classify(&bytes, key_read_limits),
+        KeyFileKind::Public
+    ) {
         return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
     }
 

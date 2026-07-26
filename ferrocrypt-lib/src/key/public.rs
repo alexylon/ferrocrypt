@@ -645,7 +645,7 @@ pub(crate) fn parse_public_key_file_bytes(
         return Err(malformed_public_key());
     }
     if matches!(
-        crate::key::files::KeyFileKind::classify(bytes),
+        crate::key::files::KeyFileKind::classify(bytes, limits),
         crate::key::files::KeyFileKind::Private
     ) {
         return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));

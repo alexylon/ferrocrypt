@@ -91,6 +91,10 @@ pub(crate) const PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT: u32 = 4_096;
 /// so the reader rejects before allocating multiple gigabytes for adversarial
 /// input. `TYPE_NAME_MAX_LEN` is the widest possible `type_name`; the rest are
 /// the spec's `*_MAX` constants.
+///
+/// [`read_private_key_file`] normally reads far less — only what the
+/// file's own header declares. This cap bounds the fallback path, where
+/// the head does not parse as a private-key header at all.
 pub(crate) const PRIVATE_KEY_FILE_READ_CAP_BYTES: usize = PRIVATE_KEY_HEADER_FIXED_SIZE
     + crate::recipient::name::TYPE_NAME_MAX_LEN
     + PRIVATE_KEY_PUBLIC_LEN_MAX as usize
@@ -472,6 +476,46 @@ fn seal_private_key_inner(
     let mut out = cleartext;
     out.extend_from_slice(&ciphertext);
     Ok(out)
+}
+
+/// Reads a `private.key` file, pulling in only what its own cleartext
+/// header declares rather than the structural maximum of every field.
+///
+/// `local_wrapped_secret_cap` bounds the declared remainder. A file
+/// declaring more than the cap allows is read short on purpose:
+/// [`open_private_key`] applies the same cap from the fixed header
+/// alone, before it compares the buffer length, so the caller still
+/// receives [`CryptoError::PrivateKeyWrappedSecretCapExceeded`] rather
+/// than a malformed-key rejection. Callers that apply no resource
+/// policy, such as [`crate::validate_private_key_file`], pass the
+/// structural maximum and read exactly what the file declares.
+///
+/// A head that is not a parseable private-key header falls back to the
+/// structural read cap, so a caller can still tell a `public.key` or an
+/// unrelated file from a malformed private key.
+pub(crate) fn read_private_key_file(
+    path: &std::path::Path,
+    local_wrapped_secret_cap: u32,
+) -> Result<Vec<u8>, CryptoError> {
+    crate::fs::paths::read_file_staged(
+        path,
+        PRIVATE_KEY_HEADER_FIXED_SIZE,
+        PRIVATE_KEY_FILE_READ_CAP_BYTES,
+        |head| {
+            let header = PrivateKeyHeader::parse(head.first_chunk()?).ok()?;
+            // `parse` has already bounded the other three fields, so
+            // clamping the wrapped secret keeps the total under the
+            // structural read cap.
+            let wrapped_secret_len = header.wrapped_secret_len.min(local_wrapped_secret_cap);
+            Some(
+                header.type_name_len as usize
+                    + header.public_len as usize
+                    + header.ext_len as usize
+                    + wrapped_secret_len as usize,
+            )
+        },
+        malformed_private_key,
+    )
 }
 
 /// Parses and unlocks a `private.key` byte sequence. Validates the
@@ -1437,6 +1481,47 @@ mod tests {
     }
 
     /// Builds a structurally-valid 90-byte header for tampering tests.
+    /// A header declaring the structural maximum must not pull that
+    /// many bytes into memory when the caller's cap is far lower. The
+    /// short buffer is deliberate: `open_private_key` reports the cap
+    /// from the fixed header, before it compares the buffer length.
+    #[test]
+    fn read_private_key_file_bounds_the_read_by_the_local_cap() {
+        let mut bytes = sample_header_bytes().to_vec();
+        write_u32_be(
+            &mut bytes,
+            WRAPPED_SECRET_LEN_OFFSET,
+            PRIVATE_KEY_WRAPPED_SECRET_LEN_MAX,
+        );
+        bytes.extend(std::iter::repeat_n(0u8, 256 * 1024));
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &bytes).unwrap();
+
+        let local_cap = PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT;
+        let read = read_private_key_file(tmp.path(), local_cap).unwrap();
+        // header + type_name + public + ext + the capped wrapped secret,
+        // plus the one byte that detects a file that is too long.
+        let expected = PRIVATE_KEY_HEADER_FIXED_SIZE + 6 + 32 + local_cap as usize + 1;
+        assert_eq!(read.len(), expected);
+
+        match open_private_key(
+            &read,
+            &SecretString::from("pw".to_string()),
+            None,
+            local_cap,
+            &|_| {},
+        ) {
+            Err(CryptoError::PrivateKeyWrappedSecretCapExceeded {
+                wrapped_secret_len,
+                local_cap: reported,
+            }) => {
+                assert_eq!(wrapped_secret_len, PRIVATE_KEY_WRAPPED_SECRET_LEN_MAX);
+                assert_eq!(reported, local_cap);
+            }
+            other => panic!("expected PrivateKeyWrappedSecretCapExceeded, got {other:?}"),
+        }
+    }
+
     fn sample_header_bytes() -> [u8; PRIVATE_KEY_HEADER_FIXED_SIZE] {
         PrivateKeyHeader {
             key_flags: 0,

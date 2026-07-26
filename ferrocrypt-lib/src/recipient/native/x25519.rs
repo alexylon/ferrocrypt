@@ -413,13 +413,10 @@ pub(crate) fn open_x25519_private_key(
     on_event: &dyn Fn(&crate::ProgressEvent),
 ) -> Result<Zeroizing<[u8; PRIVATE_KEY_SIZE]>, CryptoError> {
     use crate::error::FormatDefect;
-    use crate::fs::paths::read_file_capped;
     use crate::key::files::KeyFileKind;
-    use crate::key::private::{PRIVATE_KEY_FILE_READ_CAP_BYTES, open_private_key};
+    use crate::key::private::{open_private_key, read_private_key_file};
 
-    let bytes = read_file_capped(path, PRIVATE_KEY_FILE_READ_CAP_BYTES, || {
-        CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)
-    })?;
+    let bytes = read_private_key_file(path, key_read_limits.private_key_wrapped_secret_len())?;
 
     // Friendly diagnostic for the cross-mix-up: a user pointing the
     // private-key reader at a `public.key` text file gets

@@ -1100,10 +1100,11 @@ pub fn default_encrypted_filename(input_path: impl AsRef<Path>) -> Result<String
 /// [`CryptoError::UnsupportedKeyType`] for a well-formed private key of a key
 /// type this build does not support.
 pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError> {
-    let data = paths::read_file_capped(
+    // No resource policy of its own: this validates structure only, so
+    // it reads whatever a structurally valid file declares.
+    let data = crate::key::private::read_private_key_file(
         key_file.as_ref(),
-        crate::key::private::PRIVATE_KEY_FILE_READ_CAP_BYTES,
-        || CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey),
+        crate::key::private::PRIVATE_KEY_WRAPPED_SECRET_LEN_MAX,
     )?;
     if matches!(KeyFileKind::classify(&data), KeyFileKind::Public) {
         return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));

@@ -104,7 +104,7 @@ pub(crate) fn read_file_capped(
     over_cap_error: impl FnOnce() -> CryptoError,
 ) -> Result<Vec<u8>, CryptoError> {
     let mut file = open_input_file(path)?;
-    let mut buf = Vec::with_capacity(cap.saturating_add(1).min(64 * 1024));
+    let mut buf = Vec::with_capacity(initial_reserve(cap.saturating_add(1)));
     let read = file
         .by_ref()
         .take((cap as u64).saturating_add(1))
@@ -114,6 +114,68 @@ pub(crate) fn read_file_capped(
         return Err(over_cap_error());
     }
     Ok(buf)
+}
+
+/// Reads `path` in two stages so a file is never pulled into memory at
+/// its format's structural maximum when its own header declares less.
+///
+/// Reads `head_len` bytes, passes them to `remaining_len`, then reads
+/// one byte beyond whatever that returns — the extra byte lets a caller
+/// checking an exact total still see a file with trailing bytes as too
+/// long. `remaining_len` returning `None` means the head did not
+/// describe the file, and the read falls back to `cap` with
+/// `over_cap_error` exactly as [`read_file_capped`] would. A file
+/// shorter than `head_len` is returned as read, for the caller to
+/// reject.
+///
+/// `remaining_len` MUST NOT return more than `cap - head_len`, so the
+/// structural cap still bounds every read.
+pub(crate) fn read_file_staged(
+    path: &Path,
+    head_len: usize,
+    cap: usize,
+    remaining_len: impl FnOnce(&[u8]) -> Option<usize>,
+    over_cap_error: impl FnOnce() -> CryptoError,
+) -> Result<Vec<u8>, CryptoError> {
+    let mut file = open_input_file(path)?;
+    let mut buf = Vec::with_capacity(initial_reserve(head_len));
+    file.by_ref()
+        .take(head_len as u64)
+        .read_to_end(&mut buf)
+        .map_err(CryptoError::Io)?;
+    if buf.len() < head_len {
+        return Ok(buf);
+    }
+
+    let Some(remaining) = remaining_len(&buf) else {
+        let rest_cap = (cap.saturating_sub(head_len) as u64).saturating_add(1);
+        let read = file
+            .by_ref()
+            .take(rest_cap)
+            .read_to_end(&mut buf)
+            .map_err(CryptoError::Io)?;
+        if head_len.saturating_add(read) > cap {
+            return Err(over_cap_error());
+        }
+        return Ok(buf);
+    };
+
+    let rest = (remaining as u64).saturating_add(1);
+    buf.reserve(initial_reserve(remaining));
+    file.by_ref()
+        .take(rest)
+        .read_to_end(&mut buf)
+        .map_err(CryptoError::Io)?;
+    Ok(buf)
+}
+
+/// Upper bound on the buffer a bounded read reserves up front. A
+/// declared length is attacker-controlled, so the reserve grows on
+/// demand rather than trusting it in one allocation.
+const INITIAL_READ_RESERVE_BYTES: usize = 64 * 1024;
+
+fn initial_reserve(wanted: usize) -> usize {
+    wanted.min(INITIAL_READ_RESERVE_BYTES)
 }
 
 pub(crate) fn file_stem(filename: &Path) -> Result<&OsStr, CryptoError> {

@@ -715,7 +715,7 @@ It contains:
 - default filenames `public.key` and `private.key`;
 - key-file classification (`KeyFileKind`).
 
-Key-file reads go through `fs/paths.rs::read_file_capped`, called directly by the readers in `key/public.rs` and `recipient/native/x25519.rs`. Write staging for generated key files is owned by `protocol.rs` key generation through the atomic-output helpers in `fs/atomic.rs`; nothing duplicates that behavior.
+Key-file reads go through `fs/paths.rs::read_file_capped` (`public.key`) and `fs/paths.rs::read_file_staged` (`private.key`, via `key/private.rs::read_private_key_file`), called directly by the readers in `key/public.rs` and `recipient/native/x25519.rs`. Write staging for generated key files is owned by `protocol.rs` key generation through the atomic-output helpers in `fs/atomic.rs`; nothing duplicates that behavior.
 
 ---
 
@@ -950,7 +950,8 @@ It contains:
 - user-path error mapping;
 - occupied-path / dangling-symlink rejection (`path_occupied`, `reject_occupied`) — `lstat`-based "is anything here?" preflight used by encrypt and keygen output prechecks so a stale symlink rejects in milliseconds instead of after Argon2id;
 - special-file-safe input opening (`open_input_file`) — read-only open that refuses FIFOs, sockets, and device nodes; on Unix the open uses `O_NONBLOCK` so a FIFO cannot block the process inside `open(2)`, and the type check runs on the open handle (no check-to-use window). A missing path maps to the typed `InputPath` via `map_user_path_io_error`, so a vanished input reports identically across `Decryptor::open`, the probe, the decrypt open, and the key-file reads. Used by `api::probe_recipient_mode_with_limits`, `protocol::decrypt`, and `read_file_capped` — the decrypt-side counterpart of the encrypt-side `archive::encode::validate_encrypt_input` rejection;
-- bounded file reads (`read_file_capped`) — opens via `open_input_file`, then `Read::take(cap + 1)` with over-cap rejection, used by `key/public.rs::read_public_key`, `recipient/native/x25519.rs::open_x25519_private_key`, and `api::validate_private_key_file` to refuse multi-gigabyte attacker-controlled key files before any allocation;
+- bounded file reads (`read_file_capped`) — opens via `open_input_file`, then `Read::take(cap + 1)` with over-cap rejection, used by `key/public.rs::read_public_key` to refuse multi-gigabyte attacker-controlled key files before any allocation;
+- staged file reads (`read_file_staged`) — the same bounded open, but the fixed header is read first and the caller derives the remaining length from it, so a `private.key` is read at the size its own header declares rather than at the structural maximum of every field. Used through `key/private.rs::read_private_key_file` by `recipient/native/x25519.rs::open_x25519_private_key` and `api::validate_private_key_file`; a head that does not parse falls back to the structural cap;
 - general path normalization required outside archive semantics.
 
 It does not enforce FCA archive path rules. Archive path rules belong only to `archive/path.rs`.

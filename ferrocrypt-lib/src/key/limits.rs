@@ -128,10 +128,11 @@ mod tests {
         assert_eq!(limits.private_key_wrapped_secret_len(), 8_192);
     }
 
-    /// Both caps must stay reachable at their structural maximum: the
-    /// bounded file reads happen before either cap is consulted, so a
+    /// Both caps must stay reachable at their structural maximum: a
     /// file-read cap below the raised limit would make the top of the
     /// range unusable and turn a cap rejection into a malformed-key one.
+    /// `private.key` reads only what its own header declares, but the
+    /// structural cap still bounds a header that does not parse.
     #[test]
     fn structural_maxima_fit_the_key_file_read_caps() {
         use crate::key::private::{

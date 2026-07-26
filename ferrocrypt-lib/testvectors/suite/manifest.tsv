@@ -38,7 +38,7 @@ cases/tlv-unknown-ignorable.fcr	decrypt	passphrase:suite-passphrase-not-secret-d
 cases/kdf-mem-over-max.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidKdfParams(MemoryCost)	File has invalid KDF settings (2097153 KiB memory)
 cases/kdf-lanes-zero.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidKdfParams(Parallelism)	File has invalid KDF settings (parallelism 0)
 cases/kdf-time-over-max.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	InvalidKdfParams(TimeCost)	File has invalid KDF settings (time cost 13)
-cases/recipient-unknown-critical.fcr	decrypt	-	error	UnknownCriticalRecipient(mlkem768)	Unsupported recipient `mlkem768`. Upgrade FerroCrypt.
+cases/recipient-unknown-critical.fcr	decrypt	-	error	UnknownCriticalRecipient(test/unknown)	Unsupported recipient `test/unknown`. Upgrade FerroCrypt.
 cases/recipient-unknown-only.fcr	decrypt	-	error	NoSupportedRecipient	Decryption failed: no supported recipient
 cases/recipient-mixed-exclusive.fcr	decrypt	-	error	IncompatibleRecipients(argon2id)	Recipient `argon2id` mixed with another recipient
 cases/recipient-unknown-skipped.fcr	decrypt	private-key:keys/recipient-a.private.key,unlock=suite-passphrase-not-secret-do-not-reuse	ok	-	-

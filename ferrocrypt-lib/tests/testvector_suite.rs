@@ -170,10 +170,12 @@ fn error_matches(class: &str, e: &CryptoError) -> bool {
             e,
             CryptoError::RecipientUnwrapFailed { type_name } if type_name == "x25519"
         ),
-        "UnknownCriticalRecipient(mlkem768)" => matches!(
-            e,
-            CryptoError::UnknownCriticalRecipient { type_name } if type_name == "mlkem768"
-        ),
+        // The unknown recipient's name is a corpus choice, so read it
+        // from the manifest rather than repeating it here.
+        _ if class.starts_with("UnknownCriticalRecipient(") && class.ends_with(')') => {
+            let expected = &class["UnknownCriticalRecipient(".len()..class.len() - 1];
+            matches!(e, CryptoError::UnknownCriticalRecipient { type_name } if type_name == expected)
+        }
         "NoSupportedRecipient" => matches!(e, CryptoError::NoSupportedRecipient),
         "IncompatibleRecipients(argon2id)" => matches!(
             e,

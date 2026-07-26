@@ -3,10 +3,16 @@
 //! The suite corpus is the public set of must-reject (and a few
 //! must-accept) fixtures required by `FORMAT.md` §12. Every fixture is
 //! committed as real bytes plus a `manifest.tsv` row naming the public-API
-//! action and exact expected outcome, so an independent reader
-//! implementation can consume the corpus without running this crate's
-//! test code. The `tests/testvector_suite.rs` integration test replays
-//! the manifest through the public API on every `cargo test` run.
+//! action, the credential, and whether the case must be accepted or
+//! rejected. An independent implementation can replay those four columns
+//! without running this crate's test code. The remaining two columns,
+//! `error_class` and `error_message`, hold Rust variant spellings and
+//! English display text, which `FORMAT.md` §12.1 keeps out of the
+//! cross-language contract; they are FerroCrypt regression detail. The
+//! frozen `testvectors/wire/` corpus (§12.3) is what carries per-case
+//! diagnostics across implementations. The `tests/testvector_suite.rs`
+//! integration test replays the manifest through the public API on every
+//! `cargo test` run.
 //!
 //! Generation needs crate internals — `container::build_encrypted_header`
 //! writes headers with extension bytes, crafted recipient lists, and
@@ -68,8 +74,11 @@ const PLAINTEXT: &str = "FerroCrypt v1 test-vector suite plaintext.\n";
 const PLAINTEXT_FILE_MODE: u32 = 0o644;
 
 /// Grammar-valid but unknown recipient `type_name` used by the
-/// unknown-recipient fixtures.
-const UNKNOWN_TYPE_NAME: &str = "mlkem768";
+/// unknown-recipient fixtures. Plugin-namespaced on purpose: `FORMAT.md`
+/// §3.3.1 gives every name containing `/` to external implementations,
+/// so FerroCrypt can never define this one and the fixtures cannot be
+/// invalidated by a future native recipient type.
+const UNKNOWN_TYPE_NAME: &str = "test/unknown";
 
 // u-coordinate of a known small-order Curve25519 point (`FORMAT.md`
 // §4.2): canonical and nonzero, so it passes the credential-independent
@@ -1164,7 +1173,7 @@ const SUITE_SEED: u64 = 0xFECC_0000_5EED_0001;
 /// or changed; different corpus contents must never share a revision.
 /// Regeneration treats this constant as the source of truth and overwrites the
 /// committed file.
-const SUITE_VERSION: u32 = 10;
+const SUITE_VERSION: u32 = 11;
 
 /// Regenerates the committed suite corpus. Ignored in normal test runs;
 /// see the module docs for the invocation and the commit workflow.
@@ -1636,8 +1645,8 @@ fn regenerate_suite_vectors_inner() {
     rows.push(Case::err(
         "cases/recipient-unknown-critical.fcr",
         "-",
-        "UnknownCriticalRecipient(mlkem768)",
-        "Unsupported recipient `mlkem768`. Upgrade FerroCrypt.",
+        &format!("UnknownCriticalRecipient({UNKNOWN_TYPE_NAME})"),
+        &format!("Unsupported recipient `{UNKNOWN_TYPE_NAME}`. Upgrade FerroCrypt."),
     ));
     rows.push(Case::err(
         "cases/recipient-unknown-only.fcr",

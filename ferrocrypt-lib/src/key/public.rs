@@ -216,10 +216,10 @@ pub(crate) fn encode_recipient_string_for_suite(
 /// Decodes a canonical lowercase Bech32 recipient string into the
 /// typed payload.
 ///
-/// Validates, in order: local input-length cap, lowercase grammar,
-/// strict Bech32 (BIP 173, rejecting Bech32m), HRP `"fcr"`, structural
-/// length fields, `type_name` UTF-8 and grammar, and the internal
-/// SHA3-256 checksum.
+/// Validates, in order: structural length ceiling, local input-length
+/// cap, lowercase grammar, strict Bech32 (BIP 173, rejecting Bech32m),
+/// HRP `"fcr"`, structural length fields, `type_name` UTF-8 and
+/// grammar, and the internal SHA3-256 checksum.
 ///
 /// String grammar, payload structure, and checksum failures all
 /// surface as [`FormatDefect::MalformedPublicKey`], the
@@ -233,9 +233,11 @@ pub(crate) fn encode_recipient_string_for_suite(
 ///
 /// `local_max_chars` is a local policy cap checked before decode work runs.
 /// The structural ceiling is `RECIPIENT_STRING_LEN_MAX` (20,000 ASCII
-/// characters); callers should normally pass the smaller
-/// [`RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT`] for untrusted input unless they
-/// intentionally accept larger future recipient strings.
+/// characters) and is checked first, so a string longer than the format
+/// permits is malformed whatever the caller's cap is; callers should
+/// normally pass the smaller [`RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT`]
+/// for untrusted input unless they intentionally accept larger future
+/// recipient strings.
 pub fn decode_recipient_string(
     s: &str,
     local_max_chars: usize,
@@ -251,6 +253,11 @@ pub fn decode_recipient_string(
         return Err(malformed_public_key());
     }
     let char_count = s.len(); // bytes == chars after the ASCII check
+    // `FORMAT.md` §7 makes the 20,000-character ceiling structural, so it
+    // outranks the caller's resource cap.
+    if char_count > RECIPIENT_STRING_LEN_MAX {
+        return Err(malformed_public_key());
+    }
     if char_count > local_max_chars {
         // Saturating cast: pathological gigabyte-plus inputs report
         // `u32::MAX` for `input_chars`, but the cap rejection itself
@@ -1125,6 +1132,19 @@ mod tests {
                 assert_eq!(local_cap, 10);
             }
             other => panic!("expected RecipientStringCapExceeded, got {other:?}"),
+        }
+    }
+
+    /// `FORMAT.md` §7 caps a recipient string at 20,000 characters, so
+    /// a longer string is malformed rather than over a resource cap,
+    /// even when the caller raised its cap to the structural ceiling.
+    #[test]
+    fn decode_rejects_above_structural_ceiling_as_malformed() {
+        let s = format!("fcr1{}", "q".repeat(RECIPIENT_STRING_LEN_MAX));
+        assert!(s.len() > RECIPIENT_STRING_LEN_MAX);
+        match decode_recipient_string(&s, RECIPIENT_STRING_LEN_MAX) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
+            other => panic!("expected MalformedPublicKey above the ceiling, got {other:?}"),
         }
     }
 

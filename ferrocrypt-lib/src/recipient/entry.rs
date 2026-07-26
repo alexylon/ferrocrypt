@@ -167,9 +167,14 @@ impl RecipientEntry {
     ///
     /// Validates per `FORMAT.md` §3.3 and §3.4 in cheap-to-expensive order:
     /// header is large enough, length fields are in range, reserved
-    /// flag bits are zero, body is within the local resource cap, the
-    /// declared total fits in `bytes`, and the `type_name` satisfies
+    /// flag bits are zero, the declared total fits in `bytes`, the body
+    /// is within the local resource cap, and the `type_name` satisfies
     /// the §3.3 grammar.
+    ///
+    /// The local cap is applied after the fit check because §3.3 makes
+    /// fitting inside `recipient_entries_len` a structural rule: an entry
+    /// that runs past its region is malformed, not merely over a
+    /// configured limit.
     pub(crate) fn parse_one(
         bytes: &[u8],
         local_body_cap: u32,
@@ -193,12 +198,6 @@ impl RecipientEntry {
                 FormatDefect::RecipientFlagsReserved,
             ));
         }
-        if body_len > local_body_cap {
-            return Err(CryptoError::RecipientBodyCapExceeded {
-                body_len,
-                local_cap: local_body_cap,
-            });
-        }
 
         let type_name_end = ENTRY_HEADER_SIZE
             .checked_add(type_name_len as usize)
@@ -208,6 +207,12 @@ impl RecipientEntry {
             .ok_or_else(malformed)?;
         if bytes.len() < total {
             return Err(malformed());
+        }
+        if body_len > local_body_cap {
+            return Err(CryptoError::RecipientBodyCapExceeded {
+                body_len,
+                local_cap: local_body_cap,
+            });
         }
 
         let type_name_bytes = &bytes[ENTRY_HEADER_SIZE..type_name_end];
@@ -495,10 +500,14 @@ mod tests {
         }
     }
 
+    /// A body that is present in full and exceeds the local cap is a
+    /// resource-policy rejection, per `FORMAT.md` §3.2.
     #[test]
     fn parse_one_rejects_body_above_local_cap() {
         let oversized = BODY_LEN_LOCAL_CAP_DEFAULT + 1;
-        let bytes = entry_header(6, 0, oversized);
+        let mut bytes = entry_header(6, 0, oversized).to_vec();
+        bytes.extend_from_slice(x25519::TYPE_NAME.as_bytes());
+        bytes.resize(bytes.len() + oversized as usize, 0);
         match RecipientEntry::parse_one(&bytes, BODY_LEN_LOCAL_CAP_DEFAULT) {
             Err(CryptoError::RecipientBodyCapExceeded {
                 body_len,
@@ -508,6 +517,18 @@ mod tests {
                 assert_eq!(local_cap, BODY_LEN_LOCAL_CAP_DEFAULT);
             }
             other => panic!("expected RecipientBodyCapExceeded, got {other:?}"),
+        }
+    }
+
+    /// An entry whose declared body runs past the bytes it lives in
+    /// breaks the `FORMAT.md` §3.3 fit rule, so it is malformed even
+    /// when the same declaration is also above the local cap.
+    #[test]
+    fn parse_one_reports_malformed_before_cap_when_body_absent() {
+        let bytes = entry_header(6, 0, BODY_LEN_LOCAL_CAP_DEFAULT + 1);
+        match RecipientEntry::parse_one(&bytes, BODY_LEN_LOCAL_CAP_DEFAULT) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)) => {}
+            other => panic!("expected MalformedRecipientEntry for an absent body, got {other:?}"),
         }
     }
 

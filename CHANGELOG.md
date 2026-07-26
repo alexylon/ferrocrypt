@@ -5,6 +5,7 @@ All notable changes to FerroCrypt are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **`KdfLimit` now publishes the Argon2id bounds it is measured against:** `MEM_COST_KIB_STRUCTURAL_MAX`, `TIME_COST_STRUCTURAL_MAX`, `LANES_STRUCTURAL_MAX`, and `MEM_COST_KIB_DEFAULT`. Accepting every header the format allows previously meant copying `2 * 1024 * 1024` out of `FORMAT.md` §2.2 by hand. `HeaderReadLimits` and `KeyReadLimits` already published theirs; all three now match.
 - **`KeyReadLimits` lets a caller raise the local caps applied when reading key files.** The recipient-string length cap (1,024 characters) and the `private.key` wrapped-secret cap (4,096 bytes) were fixed values sized for the X25519 key pair FerroCrypt ships, so a key with larger material could not be read at all. New `PublicKey::from_key_file_with_limits`, `PublicKey::from_recipient_string_with_limits`, and `PrivateKeyDecryptor::key_read_limits` take a `KeyReadLimits`; each builder method clamps at the structural maximum from `FORMAT.md` §7 and §8, so a caller cannot ask for more than the format can represent. The defaults are unchanged, and a file above a cap still reports `RecipientStringCapExceeded` or `PrivateKeyWrappedSecretCapExceeded`.
 
 ### Changed

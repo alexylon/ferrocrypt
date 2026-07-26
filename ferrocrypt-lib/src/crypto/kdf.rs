@@ -82,6 +82,23 @@ pub struct KdfLimit {
 }
 
 impl KdfLimit {
+    /// Structural maximum for Argon2id memory cost (2 GiB in KiB,
+    /// `FORMAT.md` §2.2). A limit at this value accepts every
+    /// structurally valid header, which is what §2.2 asks a reader that
+    /// applies no policy of its own to do.
+    pub const MEM_COST_KIB_STRUCTURAL_MAX: u32 = KdfParams::MAX_MEM_COST;
+    /// Structural maximum for Argon2id time cost (`FORMAT.md` §2.2).
+    pub const TIME_COST_STRUCTURAL_MAX: u32 = KdfParams::MAX_TIME_COST;
+    /// Structural maximum for Argon2id lanes (`FORMAT.md` §2.2).
+    pub const LANES_STRUCTURAL_MAX: u32 = KdfParams::MAX_LANES;
+
+    /// Default value used by [`KdfLimit::default`] for
+    /// `max_mem_cost_kib` (1 GiB in KiB). Matches the writer's own
+    /// default memory cost, so a file this library produced always
+    /// decrypts under the default ceiling. The time-cost and lane
+    /// defaults are the structural maxima above.
+    pub const MEM_COST_KIB_DEFAULT: u32 = KdfParams::DEFAULT_MEM_COST;
+
     /// Builds a limit from a KiB memory value, leaving the time-cost and lane
     /// caps at their defaults (the format maximum). Only memory is
     /// constrained unless [`with_max_time_cost`](Self::with_max_time_cost) or
@@ -139,9 +156,9 @@ impl Default for KdfLimit {
         // enforces those bounds, so the default caps reject nothing new; they
         // exist only so a caller can tighten either dimension.
         Self {
-            max_mem_cost_kib: KdfParams::DEFAULT_MEM_COST,
-            max_time_cost: KdfParams::MAX_TIME_COST,
-            max_lanes: KdfParams::MAX_LANES,
+            max_mem_cost_kib: Self::MEM_COST_KIB_DEFAULT,
+            max_time_cost: Self::TIME_COST_STRUCTURAL_MAX,
+            max_lanes: Self::LANES_STRUCTURAL_MAX,
         }
     }
 }
@@ -505,18 +522,41 @@ mod tests {
         assert!(KdfParams::from_bytes(&bytes, None).is_err());
     }
 
+    /// A limit built from the published structural maxima must accept
+    /// every structurally valid header, as `FORMAT.md` §2.2 requires of
+    /// a reader that applies no policy of its own. Pins the constants
+    /// against the bounds the structural check actually enforces.
+    #[test]
+    fn published_structural_maxima_accept_every_valid_header() {
+        let bytes = KdfParams {
+            mem_cost: KdfLimit::MEM_COST_KIB_STRUCTURAL_MAX,
+            time_cost: KdfLimit::TIME_COST_STRUCTURAL_MAX,
+            lanes: KdfLimit::LANES_STRUCTURAL_MAX,
+        }
+        .to_bytes();
+        let widest = KdfLimit::new(KdfLimit::MEM_COST_KIB_STRUCTURAL_MAX)
+            .with_max_time_cost(KdfLimit::TIME_COST_STRUCTURAL_MAX)
+            .with_max_lanes(KdfLimit::LANES_STRUCTURAL_MAX);
+        assert!(KdfParams::from_bytes(&bytes, Some(&widest)).is_ok());
+
+        let defaults = KdfLimit::default();
+        assert_eq!(defaults.max_mem_cost_kib, KdfLimit::MEM_COST_KIB_DEFAULT);
+        assert_eq!(defaults.max_time_cost, KdfLimit::TIME_COST_STRUCTURAL_MAX);
+        assert_eq!(defaults.max_lanes, KdfLimit::LANES_STRUCTURAL_MAX);
+    }
+
     #[test]
     fn test_kdf_params_accepts_max_bounds() {
         let bytes = KdfParams {
-            mem_cost: 2 * 1024 * 1024,
-            time_cost: 12,
-            lanes: 8,
+            mem_cost: KdfLimit::MEM_COST_KIB_STRUCTURAL_MAX,
+            time_cost: KdfLimit::TIME_COST_STRUCTURAL_MAX,
+            lanes: KdfLimit::LANES_STRUCTURAL_MAX,
         }
         .to_bytes();
         // Structurally valid at the hard 2 GiB ceiling. Callers who want
         // to accept such a header opt into the matching `KdfLimit`
         // explicitly; the default 1 GiB cap is enforced elsewhere.
-        let limit = KdfLimit::new(KdfParams::MAX_MEM_COST);
+        let limit = KdfLimit::new(KdfLimit::MEM_COST_KIB_STRUCTURAL_MAX);
         assert!(KdfParams::from_bytes(&bytes, Some(&limit)).is_ok());
     }
 

@@ -93,15 +93,15 @@ user-login = "epage"
 user-name = "Ed Page"
 
 [[publisher.ferrocrypt]]
-version = "0.3.0-rc.1"
-when = "2026-06-28"
+version = "0.3.0-rc.2"
+when = "2026-07-12"
 user-id = 374681
 user-login = "alexylon"
 user-name = "Alexander Alexandrov"
 
 [[publisher.ferrocrypt-cli]]
-version = "0.3.0-rc.1"
-when = "2026-06-28"
+version = "0.3.0-rc.2"
+when = "2026-07-12"
 user-id = 374681
 user-login = "alexylon"
 user-name = "Alexander Alexandrov"

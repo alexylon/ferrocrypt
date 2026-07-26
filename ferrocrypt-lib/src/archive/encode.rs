@@ -63,13 +63,13 @@ use crate::fs::paths::{input_name_not_utf8_error, unsupported_file_type_error};
 use super::format::PERMISSION_BITS_MASK;
 use super::format::{checked_entry_wire_len, copy_exact_n, serialize_manifest, write_fca_header};
 use super::limits::{
-    ARCHIVE_MANIFEST_LEN_OVERFLOW, ArchiveLimits, enforce_entry_count_cap,
-    enforce_manifest_len_cap, enforce_per_entry_caps, enforce_total_bytes_cap,
-    entry_count_cap_error, manifest_len_cap_error,
+    ArchiveLimits, enforce_entry_count_cap, enforce_manifest_len_cap, enforce_per_entry_caps,
+    enforce_total_bytes_cap, entry_count_cap_error, manifest_len_cap_error,
 };
 use super::model::{ArchiveEntry, ArchiveEntryKind, Manifest};
 use super::path::{canonical_path_order, validate_fca_path};
 use super::platform;
+use super::reasons::MANIFEST_LEN_OVERFLOW;
 use super::tree::validate_manifest_tree;
 
 // The walker's safety nets are platform-specific: Unix has `(dev, ino)`
@@ -260,6 +260,12 @@ fn open_no_follow(path: &Path) -> Result<File, CryptoError> {
     Ok(file)
 }
 
+/// Builds the shared regular-file type-change diagnostic after the caller has
+/// sanitized the path text for its `Path` or `OsStr` source.
+fn no_longer_regular_file_error(label: &str, path_text: &str) -> CryptoError {
+    CryptoError::InvalidInput(format!("{label} is no longer a regular file: {path_text}"))
+}
+
 /// Defense-in-depth at every open / re-open boundary: rejects a
 /// non-regular file (symlink, FIFO, device) with a labelled
 /// `CryptoError::InvalidInput`. The `label` is the role of `path`
@@ -271,10 +277,10 @@ fn require_regular_file(
     path: &Path,
 ) -> Result<(), CryptoError> {
     if !metadata.file_type().is_file() {
-        return Err(CryptoError::InvalidInput(format!(
-            "{label} is no longer a regular file: {}",
-            sanitize_path_for_display(path)
-        )));
+        return Err(no_longer_regular_file_error(
+            label,
+            &sanitize_path_for_display(path),
+        ));
     }
     Ok(())
 }
@@ -394,7 +400,7 @@ fn record_entry(
     counters.manifest_len = checked_entry_wire_len(fca_path_utf8.len(), 0)
         .and_then(|entry_len| counters.manifest_len.checked_add(entry_len as u64))
         .ok_or(CryptoError::MalformedArchive {
-            reason: ARCHIVE_MANIFEST_LEN_OVERFLOW,
+            reason: MANIFEST_LEN_OVERFLOW,
         })?;
     enforce_manifest_len_cap(counters.manifest_len, limits)?;
 
@@ -436,15 +442,15 @@ fn symlink_in_archive_source_error(fca_prefix: &str, name: &OsStr) -> CryptoErro
     ))
 }
 
-/// Single source of truth for the "Source file size changed during
-/// archive (X → Y): path" diagnostic. Emitted by both
+/// Single source of truth for the "Source file size changed while
+/// archiving (X -> Y): path" diagnostic. Emitted by both
 /// [`stream_single_file_root`] (single-file inputs, std-fs metadata)
 /// and [`stream_directory_descendant`] (directory descendants,
 /// cap-std metadata). Stable wording so downstream callers parsing
 /// the message see the same shape regardless of input kind.
 fn size_changed_error(expected: u64, observed: u64, path_text: &str) -> CryptoError {
     CryptoError::InvalidInput(format!(
-        "Source file size changed during archive ({expected} → {observed}): {path_text}"
+        "Source file size changed while archiving ({expected} -> {observed}): {path_text}"
     ))
 }
 
@@ -566,7 +572,7 @@ fn build_manifest(
             if (source_root_meta.dev(), source_root_meta.ino()) != (metadata.dev(), metadata.ino())
             {
                 return Err(CryptoError::InvalidInput(format!(
-                    "Input directory changed during archive: {}",
+                    "Input directory changed while archiving: {}",
                     sanitize_path_for_display(input_path)
                 )));
             }
@@ -879,8 +885,8 @@ fn stream_source_file<W: Write>(
     let source_path = entry
         .source_path
         .as_ref()
-        .ok_or(CryptoError::InternalInvariant(
-            "Manifest entry missing source_path during content streaming",
+        .ok_or(crate::error::internal_invariant!(
+            "manifest entry missing source path"
         ))?;
 
     match source {
@@ -922,7 +928,7 @@ fn stream_single_file_root<W: Write>(
 /// size during the content pass: the file shrank after the fresh
 /// metadata check, and FORMAT.md §9.10 requires encryption to fail.
 fn source_shrank_error() -> CryptoError {
-    CryptoError::InvalidInput("Source file shrank during archiving".to_string())
+    CryptoError::InvalidInput("Source file shrank while archiving".to_string())
 }
 
 /// Directory-descendant content stream: walks `rel` under `source_root`
@@ -957,10 +963,10 @@ fn stream_directory_descendant<W: Write>(
     let metadata = file.metadata().map_err(CryptoError::Io)?;
     reject_windows_reparse_point_cap(&metadata, "Source", &file_name)?;
     if !metadata.is_file() {
-        return Err(CryptoError::InvalidInput(format!(
-            "Source is no longer a regular file: {}",
-            sanitize_for_display(&file_name.to_string_lossy())
-        )));
+        return Err(no_longer_regular_file_error(
+            "Source",
+            &sanitize_for_display(&file_name.to_string_lossy()),
+        ));
     }
     if metadata.len() != entry.size {
         return Err(size_changed_error(
@@ -1456,7 +1462,7 @@ mod tests {
         assert!(matches!(
             err,
             CryptoError::UnsafeArchivePath {
-                reason: crate::archive::path::COMPONENT_TOO_LONG,
+                reason: crate::archive::reasons::COMPONENT_TOO_LONG,
                 ..
             }
         ));

@@ -24,7 +24,7 @@ use crate::crypto::hkdf::hkdf_expand_sha3_256;
 use crate::crypto::kdf::{ARGON2_SALT_SIZE, KdfParams};
 use crate::crypto::mac::HMAC_KEY_SIZE;
 
-const CSPRNG_FAILURE: CryptoError = CryptoError::InternalCryptoFailure("CSPRNG read failed");
+const CSPRNG_FAILURE: CryptoError = crate::error::internal_crypto_failure!("CSPRNG read failed");
 
 /// XChaCha20-Poly1305 key size in bytes.
 pub(crate) const ENCRYPTION_KEY_SIZE: usize = 32;

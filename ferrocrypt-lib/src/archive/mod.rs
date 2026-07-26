@@ -9,6 +9,7 @@ pub(crate) mod limits;
 pub(crate) mod model;
 pub(crate) mod path;
 pub(crate) mod platform;
+pub(crate) mod reasons;
 pub(crate) mod tree;
 
 pub use limits::ArchiveLimits;

@@ -401,7 +401,7 @@ impl KdfParams {
             self.lanes,
             Some(ENCRYPTION_KEY_SIZE),
         )
-        .map_err(|_| CryptoError::InternalCryptoFailure("Argon2id parameter rejected"))?;
+        .map_err(|_| crate::error::internal_crypto_failure!("Argon2id parameter rejected"))?;
         // Own the Argon2id working memory instead of letting
         // `hash_password_into` allocate it: that path frees its block
         // buffer without scrubbing, and the final blocks hold material
@@ -414,9 +414,9 @@ impl KdfParams {
         // caller can report.
         let block_count = params.block_count();
         let mut blocks = Vec::new();
-        blocks
-            .try_reserve_exact(block_count)
-            .map_err(|_| CryptoError::InternalCryptoFailure("Argon2id memory allocation failed"))?;
+        blocks.try_reserve_exact(block_count).map_err(|_| {
+            crate::error::internal_crypto_failure!("Argon2id memory allocation failed")
+        })?;
         blocks.resize(block_count, argon2::Block::default());
         let mut blocks = Zeroizing::new(blocks);
         let hasher =
@@ -429,7 +429,7 @@ impl KdfParams {
                 output.as_mut(),
                 blocks.as_mut_slice(),
             )
-            .map_err(|_| CryptoError::InternalCryptoFailure("Argon2id derivation failed"))?;
+            .map_err(|_| crate::error::internal_crypto_failure!("Argon2id derivation failed"))?;
         Ok(output)
     }
 }

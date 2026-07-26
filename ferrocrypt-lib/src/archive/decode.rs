@@ -58,14 +58,17 @@ use crate::fs::paths::{INCOMPLETE_SUFFIX, OUTPUT_LABEL, already_exists_error, pa
 
 use super::IncompleteOutputPolicy;
 use super::format::{
-    ARCHIVE_EXT_REGION_TRUNCATED, ARCHIVE_MANIFEST_REGION_TRUNCATED, copy_exact_n,
-    parse_fca_header, parse_manifest_bytes, read_exact_fca, require_fits_usize,
+    copy_exact_n, parse_fca_header, parse_manifest_bytes, read_exact_fca, require_fits_usize,
     validate_archive_ext_tlv,
 };
 use super::limits::ArchiveLimits;
 use super::model::{ArchiveEntry, ArchiveEntryKind, Manifest};
 use super::path::canonical_path_order;
 use super::platform;
+use super::reasons::{
+    ARCHIVE_EXT_PLATFORM_LIMIT, ARCHIVE_EXT_REGION_TRUNCATED, FILE_CONTENT_TRUNCATED,
+    MANIFEST_PLATFORM_LIMIT, MANIFEST_REGION_TRUNCATED, TRAILING_FILE_CONTENT,
+};
 
 /// Public entry point. Parses an FCA payload from `reader`, fully
 /// validates it before any output is created, and extracts the archive
@@ -102,7 +105,7 @@ fn unarchive_inner<R: Read>(
     // later compatible writer may include optional tags. If authenticated
     // data ends before the declared region, report a malformed archive rather
     // than an I/O error.
-    let archive_ext_len = require_fits_usize(header.archive_ext_len, "Archive extension length")?;
+    let archive_ext_len = require_fits_usize(header.archive_ext_len, ARCHIVE_EXT_PLATFORM_LIMIT)?;
     let mut archive_ext_bytes = vec![0u8; archive_ext_len];
     read_exact_fca(
         &mut reader,
@@ -112,13 +115,9 @@ fn unarchive_inner<R: Read>(
     validate_archive_ext_tlv(&archive_ext_bytes, &limits)?;
 
     // §9.11 step 4: read exactly `manifest_len` bytes.
-    let manifest_len = require_fits_usize(header.manifest_len, "Archive manifest length")?;
+    let manifest_len = require_fits_usize(header.manifest_len, MANIFEST_PLATFORM_LIMIT)?;
     let mut manifest_bytes = vec![0u8; manifest_len];
-    read_exact_fca(
-        &mut reader,
-        &mut manifest_bytes,
-        ARCHIVE_MANIFEST_REGION_TRUNCATED,
-    )?;
+    read_exact_fca(&mut reader, &mut manifest_bytes, MANIFEST_REGION_TRUNCATED)?;
 
     // §9.11 steps 5–7: parse manifest entries (including each
     // `entry_ext` region; `parse_manifest_bytes` validates every
@@ -485,7 +484,7 @@ fn reject_unsupported_directory_root(manifest: &Manifest) -> Result<(), CryptoEr
 /// FORMAT.md §9.9.
 fn archive_content_truncated() -> CryptoError {
     CryptoError::MalformedArchive {
-        reason: "file content shorter than the declared size",
+        reason: FILE_CONTENT_TRUNCATED,
     }
 }
 
@@ -502,7 +501,7 @@ fn verify_archive_eof<R: Read>(reader: &mut R) -> Result<(), CryptoError> {
     match read_uninterrupted(reader, &mut b) {
         Ok(0) => Ok(()),
         Ok(_) => Err(CryptoError::MalformedArchive {
-            reason: "trailing data after the file contents",
+            reason: TRAILING_FILE_CONTENT,
         }),
         Err(e) => Err(CryptoError::from(e)),
     }
@@ -587,8 +586,8 @@ fn manifest_root_name_str(manifest: &Manifest) -> Result<&str, CryptoError> {
     manifest
         .root_name
         .to_str()
-        .ok_or(CryptoError::InternalInvariant(
-            "Manifest root_name is not valid UTF-8",
+        .ok_or(crate::error::internal_invariant!(
+            "manifest root name is not valid UTF-8"
         ))
 }
 
@@ -604,8 +603,8 @@ fn strip_root_prefix<'a>(path_utf8: &'a str, root_name: &str) -> Result<&'a Path
         .strip_prefix(root_name)
         .and_then(|rest| rest.strip_prefix('/'))
         .map(Path::new)
-        .ok_or(CryptoError::InternalInvariant(
-            "Manifest entry missing expected root prefix",
+        .ok_or(crate::error::internal_invariant!(
+            "manifest entry missing root prefix"
         ))
 }
 
@@ -1174,7 +1173,7 @@ mod tests {
                 matches!(
                     err,
                     CryptoError::MalformedArchive {
-                        reason: ARCHIVE_MANIFEST_REGION_TRUNCATED
+                        reason: MANIFEST_REGION_TRUNCATED
                     }
                 ),
                 "manifest cut at {cut} bytes must reject as truncated region, got {err:?}",
@@ -2159,7 +2158,7 @@ mod tests {
         assert!(matches!(
             err,
             CryptoError::UnsafeArchivePath {
-                reason: crate::archive::path::COMPONENT_TOO_LONG,
+                reason: crate::archive::reasons::COMPONENT_TOO_LONG,
                 ..
             }
         ));

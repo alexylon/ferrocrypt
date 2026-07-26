@@ -322,8 +322,8 @@ pub(crate) fn enforce_recipient_mixing_policy(
                 // Fail closed if the invariant ever breaks instead of
                 // accepting silently.
                 (NativeMixingRule::SingleEntry, _) | (_, NativeMixingRule::SingleEntry) => {
-                    return Err(CryptoError::InternalInvariant(
-                        "Single-entry rule reached class comparison",
+                    return Err(crate::error::internal_invariant!(
+                        "single-entry rule reached class check"
                     ));
                 }
             },

@@ -14,6 +14,8 @@
 use crate::CryptoError;
 use crate::error::sanitize_for_display;
 
+use super::reasons::{TOTAL_ENTRY_EXT_BYTES_OVERFLOW, TOTAL_FILE_BYTES_OVERFLOW};
+
 /// Resource caps for FCA archive encoding and extraction.
 ///
 /// See `FORMAT.md` §9.12. Defaults: 250,000 entries, 64 GiB cumulative
@@ -283,7 +285,7 @@ pub(crate) fn enforce_total_bytes_cap(
     let next = total_bytes
         .checked_add(entry_size)
         .ok_or(CryptoError::MalformedArchive {
-            reason: ARCHIVE_TOTAL_BYTES_OVERFLOW,
+            reason: TOTAL_FILE_BYTES_OVERFLOW,
         })?;
     if next > limits.max_total_plaintext_bytes {
         return Err(total_bytes_cap_error(
@@ -328,7 +330,7 @@ pub(crate) fn enforce_total_entry_ext_cap(
     let next = total
         .checked_add(entry_ext_len)
         .ok_or(CryptoError::MalformedArchive {
-            reason: "total entry-extension bytes overflow",
+            reason: TOTAL_ENTRY_EXT_BYTES_OVERFLOW,
         })?;
     if next > limits.max_total_entry_ext_bytes {
         return Err(total_entry_ext_cap_error(
@@ -339,27 +341,6 @@ pub(crate) fn enforce_total_entry_ext_cap(
     *total = next;
     Ok(())
 }
-
-/// Single source of truth for the "entry mode contains unsupported
-/// bits" diagnostic — emitted on both writer and reader sides when an
-/// `ArchiveEntry::mode` carries bits outside [`PERMISSION_BITS_MASK`].
-pub(super) const ARCHIVE_ENTRY_MODE_UNSUPPORTED: &str = "entry mode contains unsupported bits";
-
-/// Reason text for the running plaintext-total `u64` overflow
-/// rejection, shared by the writer's accumulator
-/// ([`enforce_total_bytes_cap`]) and both manifest-summing sites in
-/// `archive::format` so the three arms cannot drift apart.
-pub(super) const ARCHIVE_TOTAL_BYTES_OVERFLOW: &str = "total file bytes overflow";
-
-/// Reason text for a serialized-manifest-length overflow, shared by
-/// the writer's running total in `archive::encode::record_entry` and
-/// the pre-allocation sum in `archive::format::checked_manifest_len`.
-pub(super) const ARCHIVE_MANIFEST_LEN_OVERFLOW: &str = "manifest length overflow";
-
-/// Reason text for the empty-entry-path rejection, shared by the
-/// declared-length check in `archive::format` and the path grammar in
-/// `archive::path`.
-pub(super) const ARCHIVE_PATH_EMPTY: &str = "entry path is empty";
 
 pub(super) fn entry_count_cap_error(entry_count: u32, cap: u32) -> CryptoError {
     CryptoError::ArchiveEntryCountCapExceeded {

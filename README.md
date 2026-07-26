@@ -303,7 +303,7 @@ Common failure categories include:
 - **Encrypted file has unexpected trailing data** — extra data was found after the authenticated encrypted stream.
 - **Encrypted payload stream is malformed** — every payload chunk passed authentication, but the chunk sequence violates the format. FerroCrypt does not write this layout.
 - **Passphrase memory over limit** — the file requests more Argon2id memory than the configured limit permits. The default limit is 1 GiB; raise it with `--max-kdf-memory` if the source is trusted.
-- **Unsupported recipient `<type>`. Upgrade FerroCrypt.** — the file uses a recipient type marked as required that this release does not support.
+- **Unsupported recipient `<type>`** — the file uses a recipient type marked as required that this release does not support.
 
 No failed decryption produces a completed output at the requested final path. The default behavior removes any staged `.incomplete` working copy before the error returns; `--keep-partial` keeps it for inspection. A leftover `.incomplete` from a previous failed run is preserved across a retry that fails with `Incomplete output already exists`, so the prior partial is not silently overwritten.
 

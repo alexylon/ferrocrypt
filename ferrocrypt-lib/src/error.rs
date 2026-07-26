@@ -6,9 +6,9 @@ use crate::recipient::policy::MixingPolicy;
 
 /// Maximum number of rendered `chars` (counting an inserted ellipsis as one)
 /// a `type_name` may occupy when interpolated into a user-facing error
-/// message. The longest interpolating message
-/// (`UnknownCriticalRecipient`) has 45 chars of fixed wording, leaving 19
-/// within the 64-char desktop status-line budget enforced by
+/// message. The longest interpolating message (`IncompatibleRecipients`)
+/// has 41 chars of fixed wording, leaving 23 within the 64-char desktop
+/// status-line budget enforced by
 /// [`tests::user_facing_messages_fit_status_line_budget`]; 13 are used.
 const TYPE_NAME_DISPLAY_MAX: usize = 13;
 const _: () = assert!(TYPE_NAME_DISPLAY_MAX >= 1);
@@ -58,6 +58,61 @@ impl std::fmt::Display for DisplayableTypeName<'_> {
     }
 }
 
+/// Largest number of display columns a crate-owned malformed-archive reason
+/// may occupy after its fixed prefix. The reasons are registered in
+/// `archive::reasons` and validated at compile time.
+const MALFORMED_ARCHIVE_REASON_DISPLAY_MAX: usize = 64 - "Malformed archive: ".len();
+const _: () = assert!(MALFORMED_ARCHIVE_REASON_DISPLAY_MAX >= 1);
+
+/// Shared text rules for crate-owned fragments appended to a fixed error
+/// prefix: non-empty printable ASCII with no terminal punctuation. Width is
+/// checked separately, because only some prefixes have a width target.
+const fn display_fragment_text_is_valid(fragment: &str) -> bool {
+    let bytes = fragment.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    if matches!(bytes[bytes.len() - 1], b'.' | b'!' | b'?') {
+        return false;
+    }
+
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] < b' ' || bytes[index] > b'~' {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+/// Shared validator for crate-owned fragments whose complete message has a
+/// width target: the text rules plus the caller's remaining display width.
+/// Printable ASCII makes the byte length also the displayed width.
+const fn display_fragment_is_valid(fragment: &str, max: usize) -> bool {
+    fragment.len() <= max && display_fragment_text_is_valid(fragment)
+}
+
+/// Returns whether a crate-owned malformed-archive reason follows the display
+/// policy: non-empty printable ASCII, no terminal punctuation, and short
+/// enough to render without truncation after the fixed prefix. Reasons are
+/// lowercase sentence fragments; the `Malformed archive: ` prefix supplies
+/// the capitalized start of the complete message.
+pub(crate) const fn malformed_archive_reason_is_valid(reason: &str) -> bool {
+    display_fragment_is_valid(reason, MALFORMED_ARCHIVE_REASON_DISPLAY_MAX)
+}
+
+/// Returns whether a crate-owned reason for the two path-bearing archive
+/// variants — [`CryptoError::UnsafeArchivePath`] and
+/// [`CryptoError::InvalidArchiveTree`] — follows the display policy. Same
+/// text rules as [`malformed_archive_reason_is_valid`], without a width
+/// bound: those messages append an entry path of their own, so their width
+/// is never within the status-line allowance and no bound on the fragment
+/// would bring it back inside.
+pub(crate) const fn archive_path_reason_is_valid(reason: &str) -> bool {
+    display_fragment_text_is_valid(reason)
+}
+
 /// Largest number of display columns an internal-error marker may occupy after
 /// its fixed prefix. Set to the 64-column status-line budget minus the longer
 /// prefix `"Internal crypto error: "`, so both internal messages stay within
@@ -65,11 +120,40 @@ impl std::fmt::Display for DisplayableTypeName<'_> {
 const INTERNAL_MARKER_DISPLAY_MAX: usize = 64 - "Internal crypto error: ".len();
 const _: () = assert!(INTERNAL_MARKER_DISPLAY_MAX >= 1);
 
+/// Returns whether a crate-owned internal marker follows the display policy:
+/// non-empty printable ASCII, no terminal punctuation, and short enough to
+/// render without truncation. Markers begin lowercase unless their first word
+/// is a proper name or acronym. Their byte length is therefore also their
+/// displayed width.
+pub(crate) const fn internal_marker_is_valid(marker: &str) -> bool {
+    display_fragment_is_valid(marker, INTERNAL_MARKER_DISPLAY_MAX)
+}
+
+macro_rules! internal_invariant {
+    ($marker:literal) => {{
+        const _: () = assert!($crate::error::internal_marker_is_valid($marker));
+        $crate::error::CryptoError::InternalInvariant($marker)
+    }};
+}
+
+macro_rules! internal_crypto_failure {
+    ($marker:literal) => {{
+        const _: () = assert!($crate::error::internal_marker_is_valid($marker));
+        $crate::error::CryptoError::InternalCryptoFailure($marker)
+    }};
+}
+
+pub(crate) use internal_crypto_failure;
+pub(crate) use internal_invariant;
+
 /// Wraps an internal-error marker so its `Display` escapes non-printable
 /// characters and bounds the output to [`INTERNAL_MARKER_DISPLAY_MAX`] columns.
-/// The markers are fixed `&'static str`s this crate controls, so the escape is
-/// defense-in-depth; the bound keeps `Internal error: {marker}` and
-/// `Internal crypto error: {marker}` within the status-line budget.
+/// Crate-owned markers are fixed `&'static str`s, while variants constructed
+/// outside the crate may carry arbitrary static text. Crate-owned markers use
+/// `internal_invariant!` or `internal_crypto_failure!`, which reject literals
+/// that violate the marker policy at compile time. The display bound keeps
+/// `Internal error: {marker}` and `Internal crypto error: {marker}` within the
+/// status-line budget.
 struct DisplayableMarker<'a>(&'a str);
 
 impl std::fmt::Display for DisplayableMarker<'_> {
@@ -210,7 +294,11 @@ impl std::fmt::Display for PathSuffix<'_> {
 ///
 /// All `Display` messages are short, user-facing, and free of internal
 /// type names so that consumers can surface them directly without
-/// additional mapping.
+/// additional mapping. Stable library-owned messages use sentence case
+/// without terminal punctuation. Lowercase archive reasons and internal
+/// markers are fragments rendered after a capitalized prefix. Transparent
+/// operating-system errors and caller/path text may retain their own
+/// punctuation.
 ///
 /// # Design: identity-only where possible
 ///
@@ -272,10 +360,6 @@ impl std::fmt::Display for PathSuffix<'_> {
 ///   top-level paths included — is sanitized via
 ///   `sanitize_for_display` / `sanitize_path_for_display` before
 ///   embedding.
-/// - **Bech32 recipient parser**: reports a malformed recipient string,
-///   unexpected recipient prefix, or uppercase input. Callers pass recipient
-///   strings through as opaque values, so the parser echoes sanitized,
-///   truncated input to help the user spot a typo.
 /// - **Caller-invocation path conflicts and shape rejections**:
 ///   "Output already exists: `path`", "Key file already exists:
 ///   `path`", "Invalid recipient public key". These surface *which*
@@ -307,7 +391,7 @@ pub enum CryptoError {
     #[error(transparent)]
     Io(std::io::Error),
     /// Input file or directory does not exist.
-    #[error("Input file or folder missing")]
+    #[error("Input file or directory not found")]
     InputPath,
     /// Invalid caller input with a human-readable explanation. See the
     /// type-level docs for the design rationale.
@@ -514,23 +598,17 @@ pub enum CryptoError {
     /// entry whose `type_name` is unknown to this implementation. Per
     /// `FORMAT.md` §3.4 unknown critical entries must cause file
     /// rejection (vs unknown non-critical, which are skipped).
-    #[error(
-        "Unsupported recipient `{}`. Upgrade FerroCrypt.",
-        DisplayableTypeName(type_name)
-    )]
+    #[error("Unsupported recipient `{}`", DisplayableTypeName(type_name))]
     UnknownCriticalRecipient {
         /// Unknown recipient type name that carried the critical flag.
         type_name: String,
     },
     /// A key file or recipient string carries a grammar-valid `type_name`
-    /// this build does not support, in a supported key-pair suite —
-    /// typically a key generated by a newer FerroCrypt (`FORMAT.md` §11).
-    /// Distinct from [`FormatDefect::WrongKeyFileType`], the genuine
-    /// public/private mix-up.
-    #[error(
-        "Unsupported key type `{}`. Upgrade FerroCrypt.",
-        DisplayableTypeName(type_name)
-    )]
+    /// this build does not support, in a supported key-pair suite. It may
+    /// come from a newer FerroCrypt or an external implementation
+    /// (`FORMAT.md` §11). Distinct from [`FormatDefect::WrongKeyFileType`],
+    /// the genuine public/private mix-up.
+    #[error("Unsupported key type `{}`", DisplayableTypeName(type_name))]
     UnsupportedKeyType {
         /// Grammar-valid key type name this build cannot use.
         type_name: String,
@@ -539,7 +617,9 @@ pub enum CryptoError {
     /// unknown non-critical entries. Detected while classifying the recipient
     /// list, before any unwrap. A *supported* recipient whose unwrap fails is
     /// [`Self::RecipientUnwrapFailed`] instead; `FORMAT.md` §12 lists the two
-    /// as separate failure classes.
+    /// as separate failure classes. A newer release may support an unknown
+    /// recipient, but the type may instead belong to a third-party
+    /// implementation, so the message does not prescribe an upgrade.
     #[error("Decryption failed: no supported recipient")]
     NoSupportedRecipient,
     /// The decryptor variant the caller chose does not match the file's
@@ -671,6 +751,10 @@ pub enum CryptoError {
         /// Maximum entry count accepted by local policy.
         local_cap: u32,
     },
+    // Five archive size-cap variants carry `u64` offending values but omit
+    // them from Display so worst-case messages stay concise. The typed fields
+    // remain available to callers: total bytes, manifest length, archive
+    // extension length, entry extension length, and total entry extensions.
     /// Total plaintext bytes exceed the configured
     /// [`ArchiveLimits::max_total_plaintext_bytes`](crate::ArchiveLimits)
     /// cap (`FORMAT.md` §9.12).
@@ -749,7 +833,7 @@ pub enum CryptoError {
     /// The summed per-entry extension regions exceed the configured
     /// [`ArchiveLimits::max_total_entry_ext_bytes`](crate::ArchiveLimits)
     /// cap (`FORMAT.md` §9.12).
-    #[error("Archive entry extensions too large (limit {local_cap} bytes)")]
+    #[error("Archive entry extensions are too large (limit {local_cap} bytes)")]
     ArchiveTotalEntryExtCapExceeded {
         /// Running entry-extension total that crossed the cap, in bytes.
         total_ext_bytes: u64,
@@ -909,10 +993,12 @@ impl std::fmt::Display for FormatDefect {
                 write!(f, "Extension region is too large ({len} bytes)")
             }
             Self::MalformedTlv => f.write_str("Extension region is malformed"),
-            Self::UnknownCriticalTag { tag } => write!(
-                f,
-                "Unknown required file feature (tag 0x{tag:04X}). Upgrade FerroCrypt."
-            ),
+            Self::UnknownCriticalTag { tag } => {
+                write!(
+                    f,
+                    "Newer FerroCrypt is needed for file feature tag 0x{tag:04X}"
+                )
+            }
             Self::NotAKeyFile => f.write_str("Not a FerroCrypt key file"),
             Self::WrongKeyFileType => f.write_str("Wrong key file kind (public vs private)"),
             Self::MalformedPublicKey => f.write_str("Public key is malformed"),
@@ -934,7 +1020,7 @@ impl std::fmt::Display for FormatDefect {
             Self::UnsupportedArchiveVersion { version } => {
                 write!(
                     f,
-                    "Unsupported FCA archive version byte 0x{version:02X}. Upgrade FerroCrypt."
+                    "Newer FerroCrypt is needed for FCA archive version byte 0x{version:02X}"
                 )
             }
         }
@@ -1012,30 +1098,36 @@ impl std::fmt::Display for UnsupportedVersion {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::OlderFile { version } => {
-                write!(f, "Unsupported .fcr version byte 0x{version:02X}.")
+                write!(f, "Unsupported older .fcr version byte 0x{version:02X}")
             }
             Self::NewerFile { version } => {
                 write!(
                     f,
-                    "Unsupported .fcr version byte 0x{version:02X}. Upgrade FerroCrypt."
+                    "Newer FerroCrypt is needed for .fcr version byte 0x{version:02X}"
                 )
             }
             Self::OlderKey { version } => {
-                write!(f, "Unsupported private-key version byte 0x{version:02X}.")
+                write!(
+                    f,
+                    "Unsupported older private-key version byte 0x{version:02X}"
+                )
             }
             Self::NewerKey { version } => {
                 write!(
                     f,
-                    "Unsupported private-key version byte 0x{version:02X}. Upgrade FerroCrypt."
+                    "Newer FerroCrypt is needed for private-key version byte 0x{version:02X}"
                 )
             }
             Self::OlderPublicKey { version } => {
-                write!(f, "Unsupported public-key version byte 0x{version:02X}.")
+                write!(
+                    f,
+                    "Unsupported older public-key version byte 0x{version:02X}"
+                )
             }
             Self::NewerPublicKey { version } => {
                 write!(
                     f,
-                    "Unsupported public-key version byte 0x{version:02X}. Upgrade FerroCrypt."
+                    "Newer FerroCrypt is needed for public-key version byte 0x{version:02X}"
                 )
             }
         }
@@ -1064,7 +1156,7 @@ impl std::fmt::Display for InvalidKdfParams {
                 write!(f, "File has invalid KDF settings (parallelism {n})")
             }
             Self::MemoryCost(n) => {
-                write!(f, "File has invalid KDF settings ({n} KiB memory)")
+                write!(f, "File has invalid KDF settings (memory {n} KiB)")
             }
             Self::TimeCost(n) => write!(f, "File has invalid KDF settings (time cost {n})"),
         }
@@ -1150,10 +1242,10 @@ impl From<std::io::Error> for CryptoError {
                 StreamError::ExtraData => CryptoError::ExtraDataAfterPayload,
                 StreamError::ChunkCountExceeded => CryptoError::PayloadChunkCountExceeded,
                 StreamError::EncryptAead => {
-                    CryptoError::InternalCryptoFailure("payload encryption failed")
+                    internal_crypto_failure!("payload encryption failed")
                 }
                 StreamError::StateExhausted => {
-                    CryptoError::InternalInvariant("stream state already finalized")
+                    internal_invariant!("stream state already finalized")
                 }
             };
         }
@@ -1175,7 +1267,7 @@ mod tests {
     fn typed_decryption_errors_display_exact_strings() {
         assert_eq!(
             CryptoError::InputPath.to_string(),
-            "Input file or folder missing"
+            "Input file or directory not found"
         );
         assert_eq!(
             CryptoError::KeyFileUnlockFailed.to_string(),
@@ -1201,7 +1293,7 @@ mod tests {
                 type_name: "mlkem768x25519".to_owned()
             }
             .to_string(),
-            "Unsupported recipient `mlkem768x255…`. Upgrade FerroCrypt."
+            "Unsupported recipient `mlkem768x255…`"
         );
         assert_eq!(
             CryptoError::NoSupportedRecipient.to_string(),
@@ -1379,7 +1471,7 @@ mod tests {
         );
         assert_eq!(
             FormatDefect::UnknownCriticalTag { tag: 0x8001 }.to_string(),
-            "Unknown required file feature (tag 0x8001). Upgrade FerroCrypt."
+            "Newer FerroCrypt is needed for file feature tag 0x8001"
         );
         assert_eq!(
             FormatDefect::NotAKeyFile.to_string(),
@@ -1430,7 +1522,7 @@ mod tests {
         );
         assert_eq!(
             FormatDefect::UnsupportedArchiveVersion { version: 0xFF }.to_string(),
-            "Unsupported FCA archive version byte 0xFF. Upgrade FerroCrypt."
+            "Newer FerroCrypt is needed for FCA archive version byte 0xFF"
         );
         assert_eq!(
             FormatDefect::RecipientCountOutOfRange { count: 5000 }.to_string(),
@@ -1438,27 +1530,27 @@ mod tests {
         );
         assert_eq!(
             UnsupportedVersion::NewerFile { version: 9 }.to_string(),
-            "Unsupported .fcr version byte 0x09. Upgrade FerroCrypt."
+            "Newer FerroCrypt is needed for .fcr version byte 0x09"
         );
         assert_eq!(
             UnsupportedVersion::OlderFile { version: 1 }.to_string(),
-            "Unsupported .fcr version byte 0x01."
+            "Unsupported older .fcr version byte 0x01"
         );
         assert_eq!(
             UnsupportedVersion::NewerKey { version: 9 }.to_string(),
-            "Unsupported private-key version byte 0x09. Upgrade FerroCrypt."
+            "Newer FerroCrypt is needed for private-key version byte 0x09"
         );
         assert_eq!(
             UnsupportedVersion::OlderKey { version: 1 }.to_string(),
-            "Unsupported private-key version byte 0x01."
+            "Unsupported older private-key version byte 0x01"
         );
         assert_eq!(
             UnsupportedVersion::OlderPublicKey { version: 1 }.to_string(),
-            "Unsupported public-key version byte 0x01."
+            "Unsupported older public-key version byte 0x01"
         );
         assert_eq!(
             UnsupportedVersion::NewerPublicKey { version: 9 }.to_string(),
-            "Unsupported public-key version byte 0x09. Upgrade FerroCrypt."
+            "Newer FerroCrypt is needed for public-key version byte 0x09"
         );
         assert_eq!(
             InvalidKdfParams::Parallelism(9999).to_string(),
@@ -1466,7 +1558,7 @@ mod tests {
         );
         assert_eq!(
             InvalidKdfParams::MemoryCost(42).to_string(),
-            "File has invalid KDF settings (42 KiB memory)"
+            "File has invalid KDF settings (memory 42 KiB)"
         );
         assert_eq!(
             InvalidKdfParams::TimeCost(7).to_string(),
@@ -1614,7 +1706,7 @@ mod tests {
                 local_cap: 99,
             }
             .to_string(),
-            "Archive entry extensions too large (limit 99 bytes)"
+            "Archive entry extensions are too large (limit 99 bytes)"
         );
         assert_eq!(
             CryptoError::PrivateKeyWrappedSecretCapExceeded {
@@ -1634,6 +1726,57 @@ mod tests {
             CryptoError::InternalCryptoFailure("payload encryption failed").to_string(),
             "Internal crypto error: payload encryption failed"
         );
+    }
+
+    /// Every crate-owned internal marker goes through a compile-time assertion
+    /// that it follows the display policy. Pin the boundary and representative
+    /// rejection cases used by that assertion.
+    #[test]
+    fn crate_internal_markers_follow_display_policy() {
+        const BOUNDARY_MARKER: &str = "encrypt writer already finished or failed";
+        assert_eq!(BOUNDARY_MARKER.len(), INTERNAL_MARKER_DISPLAY_MAX);
+        assert!(internal_marker_is_valid(BOUNDARY_MARKER));
+        assert!(!internal_marker_is_valid(""));
+        assert!(!internal_marker_is_valid(
+            "manifest entry missing source path after content streaming"
+        ));
+        assert!(!internal_marker_is_valid("non-ASCII marker: é"));
+        assert!(!internal_marker_is_valid("payload encryption failed."));
+        assert_eq!(
+            internal_invariant!("encrypt writer already finished or failed").to_string(),
+            "Internal error: encrypt writer already finished or failed"
+        );
+        assert_eq!(
+            internal_crypto_failure!("payload encryption failed").to_string(),
+            "Internal crypto error: payload encryption failed"
+        );
+    }
+
+    /// Pin the malformed-archive fragment validator independently of the
+    /// registry sweep, including its exact 45-character boundary.
+    #[test]
+    fn malformed_archive_reasons_follow_display_policy() {
+        const BOUNDARY_REASON: &str = "declared total does not match the entry sizes";
+        assert_eq!(BOUNDARY_REASON.len(), MALFORMED_ARCHIVE_REASON_DISPLAY_MAX);
+        assert!(malformed_archive_reason_is_valid(BOUNDARY_REASON));
+        assert_eq!(
+            CryptoError::MalformedArchive {
+                reason: BOUNDARY_REASON,
+            }
+            .to_string()
+            .chars()
+            .count(),
+            64
+        );
+
+        assert!(!malformed_archive_reason_is_valid(""));
+        let overlong = "x".repeat(MALFORMED_ARCHIVE_REASON_DISPLAY_MAX + 1);
+        assert!(!malformed_archive_reason_is_valid(&overlong));
+        assert!(!malformed_archive_reason_is_valid(
+            "entry path is not valid UTF-\u{ff11}"
+        ));
+        assert!(!malformed_archive_reason_is_valid("entry path is empty."));
+        assert!(!malformed_archive_reason_is_valid("entry path\nis empty"));
     }
 
     /// The display sanitizer passes printable ASCII through, escapes
@@ -1737,16 +1880,16 @@ mod tests {
         assert!(msg.chars().count() <= 64, "message over budget: {msg}");
     }
 
-    /// Pins the `UnsupportedKeyType` user-facing wording: it names the
-    /// key type and the remedy, unlike the public/private mix-up
-    /// message of `FormatDefect::WrongKeyFileType`.
+    /// Pins the `UnsupportedKeyType` user-facing wording: it names the key
+    /// type, unlike the public/private mix-up message of
+    /// `FormatDefect::WrongKeyFileType`.
     #[test]
-    fn unsupported_key_type_message_names_type_and_remedy() {
+    fn unsupported_key_type_message_names_type() {
         let msg = CryptoError::UnsupportedKeyType {
             type_name: "mlkem768".to_owned(),
         }
         .to_string();
-        assert_eq!(msg, "Unsupported key type `mlkem768`. Upgrade FerroCrypt.");
+        assert_eq!(msg, "Unsupported key type `mlkem768`");
     }
 
     /// Budget: every static user-facing `CryptoError` message — plus
@@ -1761,7 +1904,7 @@ mod tests {
         // status-line column width, and a multi-byte glyph like the
         // truncation ellipsis (`…`, 3 bytes / 1 column) must count
         // for a single column.
-        fn check(label: &str, msg: &str) {
+        fn check_width(label: &str, msg: &str) {
             let chars = msg.chars().count();
             assert!(
                 chars <= BUDGET,
@@ -1769,8 +1912,75 @@ mod tests {
             );
         }
 
+        fn check(label: &str, msg: &str) {
+            assert!(
+                msg.chars().next().is_some_and(|c| c.is_ascii_uppercase()),
+                "message does not start with a capital [{label}]: {msg}",
+            );
+            assert!(
+                !matches!(msg.chars().last(), Some('.' | '!' | '?')),
+                "message has terminal punctuation [{label}]: {msg}",
+            );
+            check_width(label, msg);
+        }
+
         // Fixed-payload CryptoError variants.
         check("InputPath", &CryptoError::InputPath.to_string());
+
+        // Every crate-owned archive reason, swept from its registry. A
+        // fragment starts lowercase unless its first word is a proper name;
+        // `Windows-reserved device name` is the only such fragment today.
+        const PROPER_NOUN_STARTS: &[&str] = &["Windows-"];
+        let mut archive_reasons = std::collections::HashSet::new();
+        let mut check_fragment = |reason: &'static str| {
+            assert!(
+                archive_reasons.insert(reason),
+                "duplicate archive reason: {reason}"
+            );
+            assert!(
+                reason.starts_with(|c: char| c.is_ascii_lowercase())
+                    || PROPER_NOUN_STARTS.iter().any(|p| reason.starts_with(p)),
+                "archive reason is not a lowercase fragment: {reason}",
+            );
+        };
+        // `MalformedArchive` is wholly library-owned, so its complete message
+        // is width-checked too.
+        for &reason in crate::archive::reasons::MALFORMED_ALL {
+            check_fragment(reason);
+            let rendered = CryptoError::MalformedArchive { reason }.to_string();
+            assert_eq!(
+                rendered,
+                format!("Malformed archive: {reason}"),
+                "crate-owned malformed-archive reason was altered for display",
+            );
+            check(reason, &rendered);
+        }
+        // The two path-bearing variants append an entry path, so only the
+        // fragment policy applies; the desktop elides the rendered width.
+        for &reason in crate::archive::reasons::UNSAFE_PATH_ALL {
+            check_fragment(reason);
+            assert_eq!(
+                CryptoError::UnsafeArchivePath {
+                    path: "root/a.txt".to_owned(),
+                    reason,
+                }
+                .to_string(),
+                format!("Unsafe archive path ({reason}): root/a.txt"),
+                "crate-owned unsafe-path reason was altered for display",
+            );
+        }
+        for &reason in crate::archive::reasons::INVALID_TREE_ALL {
+            check_fragment(reason);
+            assert_eq!(
+                CryptoError::InvalidArchiveTree {
+                    path: "root/a.txt".to_owned(),
+                    reason,
+                }
+                .to_string(),
+                format!("Invalid archive tree ({reason}): root/a.txt"),
+                "crate-owned invalid-tree reason was altered for display",
+            );
+        }
         check(
             "KeyFileUnlockFailed",
             &CryptoError::KeyFileUnlockFailed.to_string(),
@@ -2023,8 +2233,9 @@ mod tests {
             .to_string(),
         );
 
-        // Internal markers are bounded by `INTERNAL_MARKER_DISPLAY_MAX`, so
-        // even an over-long marker stays within budget after the prefix.
+        // Variants constructed outside the crate are still bounded by
+        // `INTERNAL_MARKER_DISPLAY_MAX`; crate-owned markers are additionally
+        // checked at compile time by their construction macros.
         check(
             "InternalInvariant(long marker)",
             &CryptoError::InternalInvariant(
@@ -2133,31 +2344,31 @@ mod tests {
 
         // StreamError (internal-error markers that surface via
         // `InternalCryptoFailure` / `InternalInvariant`).
-        check(
+        check_width(
             "StreamError::DecryptAead",
             &StreamError::DecryptAead.to_string(),
         );
-        check(
+        check_width(
             "StreamError::EncryptAead",
             &StreamError::EncryptAead.to_string(),
         );
-        check(
+        check_width(
             "StreamError::Truncated",
             &StreamError::Truncated.to_string(),
         );
-        check(
+        check_width(
             "StreamError::EmptyFinalChunk",
             &StreamError::EmptyFinalChunk.to_string(),
         );
-        check(
+        check_width(
             "StreamError::ExtraData",
             &StreamError::ExtraData.to_string(),
         );
-        check(
+        check_width(
             "StreamError::StateExhausted",
             &StreamError::StateExhausted.to_string(),
         );
-        check(
+        check_width(
             "StreamError::ChunkCountExceeded",
             &StreamError::ChunkCountExceeded.to_string(),
         );

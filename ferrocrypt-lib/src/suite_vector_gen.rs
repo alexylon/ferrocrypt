@@ -424,7 +424,7 @@ fn build_crafted_payload_fcr(
         crate::crypto::stream::payload_encryptor(&built.payload_key, &built.stream_nonce, out);
     writer
         .write_all(raw_payload)
-        .map_err(|_| CryptoError::InternalInvariant("crafted payload write"))?;
+        .map_err(|_| crate::error::internal_invariant!("crafted payload write"))?;
     let out = writer.finish()?;
     fs::write(cases.join(name), out).expect("write crafted-payload fixture");
     Ok(())
@@ -449,8 +449,8 @@ fn build_empty_final_chunk_fcr(
     let content_len =
         BUFFER_SIZE
             .checked_sub(archive_overhead)
-            .ok_or(CryptoError::InternalInvariant(
-                "suite archive overhead exceeds one payload chunk",
+            .ok_or(crate::error::internal_invariant!(
+                "suite archive overhead exceeds one chunk"
             ))?;
 
     let staging = tempfile::tempdir()?;
@@ -464,8 +464,8 @@ fn build_empty_final_chunk_fcr(
     let raw_payload =
         crate::archive::encode::archive(&source, Vec::new(), ArchiveLimits::default())?;
     if raw_payload.len() != BUFFER_SIZE {
-        return Err(CryptoError::InternalInvariant(
-            "suite FCA payload is not exactly one stream chunk",
+        return Err(crate::error::internal_invariant!(
+            "suite FCA payload is not one stream chunk"
         ));
     }
 
@@ -476,12 +476,14 @@ fn build_empty_final_chunk_fcr(
     encryptor
         .encrypt_next_in_place(b"", &mut encrypted_payload)
         .map_err(|_| {
-            CryptoError::InternalCryptoFailure("suite non-final payload encryption failed")
+            crate::error::internal_crypto_failure!("suite non-final payload encryption failed")
         })?;
     let mut empty_final = Vec::new();
     encryptor
         .encrypt_last_in_place(b"", &mut empty_final)
-        .map_err(|_| CryptoError::InternalCryptoFailure("suite empty-final encryption failed"))?;
+        .map_err(|_| {
+            crate::error::internal_crypto_failure!("suite empty-final encryption failed")
+        })?;
 
     let mut out = Vec::new();
     out.extend_from_slice(&built.prefix_bytes);
@@ -631,7 +633,7 @@ fn write_fca_reject_cases(cases: &Path) -> Vec<Case> {
         (
             "fca-unsupported-version.fcr",
             "InvalidFormat(UnsupportedArchiveVersion)",
-            "Unsupported FCA archive version byte 0x02. Upgrade FerroCrypt.",
+            "Newer FerroCrypt is needed for FCA archive version byte 0x02",
         ),
         (
             "fca-nonzero-flags.fcr",
@@ -646,7 +648,7 @@ fn write_fca_reject_cases(cases: &Path) -> Vec<Case> {
         (
             "fca-zero-manifest-len.fcr",
             "MalformedArchive",
-            "Malformed archive: manifest bytes do not match the declared layout",
+            "Malformed archive: manifest length is zero",
         ),
     ];
 
@@ -712,7 +714,7 @@ fn write_private_key_reject_cases(keys: &Path, cases: &Path) -> Vec<Case> {
         Case::private_key_err(
             "cases/privatekey-newer-version.private.key",
             "UnsupportedVersion(NewerKey)",
-            "Unsupported private-key version byte 0x02. Upgrade FerroCrypt.",
+            "Newer FerroCrypt is needed for private-key version byte 0x02",
         ),
         Case::private_key_err(
             "cases/privatekey-wrong-kind.private.key",
@@ -1000,7 +1002,7 @@ fn write_conformance_completion_cases(plaintext: &Path, cases: &Path, keys: &Pat
         "cases/fca-archive-ext-critical.fcr",
         &right,
         "InvalidFormat(UnknownCriticalTag)",
-        "Unknown required file feature (tag 0x8001). Upgrade FerroCrypt.",
+        "Newer FerroCrypt is needed for file feature tag 0x8001",
     ));
     rows.push(Case::ok("cases/fca-entry-ext-ignorable.fcr", &right));
     rows.push(Case::err(
@@ -1013,7 +1015,7 @@ fn write_conformance_completion_cases(plaintext: &Path, cases: &Path, keys: &Pat
         "cases/fca-entry-ext-critical.fcr",
         &right,
         "InvalidFormat(UnknownCriticalTag)",
-        "Unknown required file feature (tag 0x8001). Upgrade FerroCrypt.",
+        "Newer FerroCrypt is needed for file feature tag 0x8001",
     ));
 
     rows
@@ -1113,7 +1115,7 @@ fn write_key_file_completion_cases(suite: &Path, cases: &Path) -> Vec<Case> {
         Case::key_err(
             "cases/public-key-newer-version.key",
             "UnsupportedVersion(NewerPublicKey)",
-            "Unsupported public-key version byte 0x02. Upgrade FerroCrypt.",
+            "Newer FerroCrypt is needed for public-key version byte 0x02",
         ),
         Case::key_err(
             "cases/public-key-crlf.key",
@@ -1133,7 +1135,7 @@ fn write_key_file_completion_cases(suite: &Path, cases: &Path) -> Vec<Case> {
         Case::private_key_err(
             "cases/privatekey-bad-kdf.private.key",
             "InvalidKdfParams(MemoryCost)",
-            &format!("File has invalid KDF settings ({over_max_mem} KiB memory)"),
+            &format!("File has invalid KDF settings (memory {over_max_mem} KiB)"),
         ),
     ]
 }
@@ -1173,7 +1175,7 @@ const SUITE_SEED: u64 = 0xFECC_0000_5EED_0001;
 /// or changed; different corpus contents must never share a revision.
 /// Regeneration treats this constant as the source of truth and overwrites the
 /// committed file.
-const SUITE_VERSION: u32 = 11;
+const SUITE_VERSION: u32 = 12;
 
 /// Regenerates the committed suite corpus. Ignored in normal test runs;
 /// see the module docs for the invocation and the commit workflow.
@@ -1320,7 +1322,7 @@ fn regenerate_suite_vectors_inner() {
         "cases/prefix-newer-version.fcr",
         "-",
         "UnsupportedVersion(NewerFile)",
-        "Unsupported .fcr version byte 0x02. Upgrade FerroCrypt.",
+        "Newer FerroCrypt is needed for .fcr version byte 0x02",
     ));
     rows.push(Case::err(
         "cases/prefix-wrong-kind.fcr",
@@ -1521,7 +1523,7 @@ fn regenerate_suite_vectors_inner() {
         (
             "tlv-unknown-critical.fcr",
             "InvalidFormat(UnknownCriticalTag)",
-            Some("Unknown required file feature (tag 0x8001). Upgrade FerroCrypt."),
+            Some("Newer FerroCrypt is needed for file feature tag 0x8001"),
         ),
     ] {
         rows.push(Case::err(
@@ -1567,7 +1569,7 @@ fn regenerate_suite_vectors_inner() {
         &right,
         "InvalidKdfParams(MemoryCost)",
         &format!(
-            "File has invalid KDF settings ({} KiB memory)",
+            "File has invalid KDF settings (memory {} KiB)",
             KdfParams::MAX_MEM_COST + 1
         ),
     ));
@@ -1646,7 +1648,7 @@ fn regenerate_suite_vectors_inner() {
         "cases/recipient-unknown-critical.fcr",
         "-",
         &format!("UnknownCriticalRecipient({UNKNOWN_TYPE_NAME})"),
-        &format!("Unsupported recipient `{UNKNOWN_TYPE_NAME}`. Upgrade FerroCrypt."),
+        &format!("Unsupported recipient `{UNKNOWN_TYPE_NAME}`"),
     ));
     rows.push(Case::err(
         "cases/recipient-unknown-only.fcr",

@@ -15,8 +15,13 @@ use crate::error::sanitize_for_display;
 use crate::fs::paths::INCOMPLETE_SUFFIX;
 
 use super::limits::{
-    ARCHIVE_PATH_EMPTY, ArchiveLimits, component_count, enforce_path_bytes_cap,
-    enforce_path_depth_cap,
+    ArchiveLimits, component_count, enforce_path_bytes_cap, enforce_path_depth_cap,
+};
+use super::reasons::{
+    COMPONENT_CONTROL_BYTE, COMPONENT_ENDS_WITH_DOT, COMPONENT_ENDS_WITH_SPACE,
+    COMPONENT_FORBIDDEN, COMPONENT_RESERVED_CHARACTER, COMPONENT_RESERVED_DEVICE_NAME,
+    COMPONENT_TOO_LONG, ENTRY_PATH_EMPTY, PATH_ABSOLUTE, PATH_CONTAINS_BACKSLASH,
+    PATH_CONTAINS_NUL, PATH_NON_NORMAL_COMPONENT, PATH_REPEATED_SLASHES, PATH_TRAILING_SLASH,
 };
 
 /// Bytes that cannot appear in any FCA path component on any platform
@@ -35,12 +40,10 @@ const FILESYSTEM_NAME_MAX_BYTES: usize = 255;
 /// component (§9.11 step 10). Without the reserve, a near-limit root
 /// name would archive fine and then fail to extract because its
 /// working name exceeds what the filesystem can create.
+///
+/// The over-long-component rejection reason embeds this number; it lives in
+/// `super::reasons`, and a unit test below pins the two together.
 pub const FCA_COMPONENT_MAX_BYTES: usize = FILESYSTEM_NAME_MAX_BYTES - INCOMPLETE_SUFFIX.len();
-
-/// Rejection reason for an over-long component. Kept next to
-/// [`FCA_COMPONENT_MAX_BYTES`]; a unit test pins the embedded number
-/// to the constant so the two cannot drift.
-pub(super) const COMPONENT_TOO_LONG: &str = "component exceeds 244 bytes";
 
 /// Validates an FCA archive path against the FORMAT.md §9.6 grammar.
 /// Same function called by encode-side metadata-pass and decode-side
@@ -52,7 +55,7 @@ pub(super) const COMPONENT_TOO_LONG: &str = "component exceeds 244 bytes";
 pub fn validate_fca_path(path: &str, limits: ArchiveLimits) -> Result<(), CryptoError> {
     if path.is_empty() {
         return Err(CryptoError::MalformedArchive {
-            reason: ARCHIVE_PATH_EMPTY,
+            reason: ENTRY_PATH_EMPTY,
         });
     }
     enforce_path_bytes_cap(
@@ -62,19 +65,19 @@ pub fn validate_fca_path(path: &str, limits: ArchiveLimits) -> Result<(), Crypto
     )?;
     let bytes = path.as_bytes();
     if bytes[0] == b'/' {
-        return Err(unsafe_path(path, "absolute"));
+        return Err(unsafe_path(path, PATH_ABSOLUTE));
     }
     if bytes[bytes.len() - 1] == b'/' {
-        return Err(unsafe_path(path, "trailing slash"));
+        return Err(unsafe_path(path, PATH_TRAILING_SLASH));
     }
     if bytes.contains(&0) {
-        return Err(unsafe_path(path, "contains NUL byte"));
+        return Err(unsafe_path(path, PATH_CONTAINS_NUL));
     }
     if bytes.contains(&b'\\') {
-        return Err(unsafe_path(path, "contains backslash"));
+        return Err(unsafe_path(path, PATH_CONTAINS_BACKSLASH));
     }
     if bytes.windows(2).any(|w| w == b"//") {
-        return Err(unsafe_path(path, "repeated slash separators"));
+        return Err(unsafe_path(path, PATH_REPEATED_SLASHES));
     }
 
     enforce_path_depth_cap(path, &limits)?;
@@ -95,7 +98,7 @@ pub fn validate_fca_path(path: &str, limits: ArchiveLimits) -> Result<(), Crypto
             | Component::Prefix(_)
             | Component::CurDir
             | Component::ParentDir => {
-                return Err(unsafe_path(path, "non-normal host path component"));
+                return Err(unsafe_path(path, PATH_NON_NORMAL_COMPONENT));
             }
         }
     }
@@ -118,7 +121,7 @@ fn unsafe_path(path: &str, reason: &'static str) -> CryptoError {
 /// payload only.
 fn validate_fca_component(component: &str, path: &str) -> Result<(), CryptoError> {
     if component.is_empty() || component == "." || component == ".." {
-        return Err(unsafe_path(path, "forbidden component"));
+        return Err(unsafe_path(path, COMPONENT_FORBIDDEN));
     }
     if component.len() > FCA_COMPONENT_MAX_BYTES {
         return Err(unsafe_path(path, COMPONENT_TOO_LONG));
@@ -126,19 +129,19 @@ fn validate_fca_component(component: &str, path: &str) -> Result<(), CryptoError
 
     let b = component.as_bytes();
     if b.iter().any(|&c| c <= 0x1f) {
-        return Err(unsafe_path(path, "contains ASCII control byte"));
+        return Err(unsafe_path(path, COMPONENT_CONTROL_BYTE));
     }
     if b.iter().any(|c| WINDOWS_RESERVED_CHARS.contains(c)) {
-        return Err(unsafe_path(path, "contains a Windows-reserved character"));
+        return Err(unsafe_path(path, COMPONENT_RESERVED_CHARACTER));
     }
     if b.last() == Some(&b' ') {
-        return Err(unsafe_path(path, "component ends with space"));
+        return Err(unsafe_path(path, COMPONENT_ENDS_WITH_SPACE));
     }
     if b.last() == Some(&b'.') {
-        return Err(unsafe_path(path, "component ends with dot"));
+        return Err(unsafe_path(path, COMPONENT_ENDS_WITH_DOT));
     }
     if is_windows_reserved_device_component(component) {
-        return Err(unsafe_path(path, "Windows-reserved device name"));
+        return Err(unsafe_path(path, COMPONENT_RESERVED_DEVICE_NAME));
     }
     Ok(())
 }
@@ -307,7 +310,7 @@ mod tests {
         assert!(matches!(
             err,
             CryptoError::MalformedArchive {
-                reason: ARCHIVE_PATH_EMPTY
+                reason: ENTRY_PATH_EMPTY
             }
         ));
     }

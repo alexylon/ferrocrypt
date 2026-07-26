@@ -26,6 +26,10 @@ use super::format::empty_archive_error;
 use super::limits::{ArchiveLimits, enforce_entry_count_cap, enforce_total_plaintext_bytes_cap};
 use super::model::{ArchiveEntry, ArchiveEntryKind};
 use super::path::ascii_case_collision_key;
+use super::reasons::{
+    TREE_CHILD_UNDER_FILE, TREE_DUPLICATE_ASCII_CASE, TREE_DUPLICATE_ENTRY, TREE_MULTIPLE_ROOTS,
+    TREE_PARENT_MISSING, TREE_ROOT_FILE_HAS_CHILDREN, TREE_ROOT_MISSING,
+};
 
 /// Returns the parent UTF-8 path string for a given entry path: the
 /// substring before the last `/`. `None` for top-level entries (no
@@ -54,12 +58,12 @@ fn tree_error(path: &str, reason: &'static str) -> CryptoError {
     }
 }
 
-/// Builds the "parent directory is missing" rejection used both when
+/// Builds the TREE_PARENT_MISSING rejection used both when
 /// `parent_path_utf8` returns `None` (top-level orphan) and when the
 /// computed parent string is absent from the kinds map (intermediate
 /// orphan). Same diagnostic for callers either way.
 fn parent_missing(entry: &ArchiveEntry) -> CryptoError {
-    tree_error(&entry.path_utf8, "parent directory is missing")
+    tree_error(&entry.path_utf8, TREE_PARENT_MISSING)
 }
 
 /// Validates the tree shape of a parsed manifest. Returns
@@ -95,17 +99,14 @@ pub(super) fn validate_manifest_tree(
 
     for entry in entries {
         if first_component(&entry.path_utf8) != root {
-            return Err(tree_error(&entry.path_utf8, "multiple top-level roots"));
+            return Err(tree_error(&entry.path_utf8, TREE_MULTIPLE_ROOTS));
         }
 
         if !exact.insert(&entry.path_utf8) {
-            return Err(tree_error(&entry.path_utf8, "duplicate entry"));
+            return Err(tree_error(&entry.path_utf8, TREE_DUPLICATE_ENTRY));
         }
         if !ascii_ci.insert(ascii_case_collision_key(&entry.path_utf8)) {
-            return Err(tree_error(
-                &entry.path_utf8,
-                "duplicate entry under ASCII case-insensitive comparison",
-            ));
+            return Err(tree_error(&entry.path_utf8, TREE_DUPLICATE_ASCII_CASE));
         }
         kinds.insert(&entry.path_utf8, entry.kind);
         if entry.path_utf8 == root {
@@ -118,7 +119,7 @@ pub(super) fn validate_manifest_tree(
     let root_is_file = match root_kind {
         Some(ArchiveEntryKind::File) => {
             if entries.len() != 1 {
-                return Err(tree_error(root, "root file has child entries"));
+                return Err(tree_error(root, TREE_ROOT_FILE_HAS_CHILDREN));
             }
             true
         }
@@ -132,7 +133,7 @@ pub(super) fn validate_manifest_tree(
                 match kinds.get(parent) {
                     Some(ArchiveEntryKind::Directory) => {}
                     Some(ArchiveEntryKind::File) => {
-                        return Err(tree_error(&entry.path_utf8, "child under a file path"));
+                        return Err(tree_error(&entry.path_utf8, TREE_CHILD_UNDER_FILE));
                     }
                     None => return Err(parent_missing(entry)),
                 }
@@ -140,12 +141,12 @@ pub(super) fn validate_manifest_tree(
             false
         }
         None => {
-            return Err(tree_error(root, "root entry is missing"));
+            return Err(tree_error(root, TREE_ROOT_MISSING));
         }
     };
 
-    let root_mode = root_mode.ok_or(CryptoError::InternalInvariant(
-        "Root entry mode missing from validated manifest",
+    let root_mode = root_mode.ok_or(crate::error::internal_invariant!(
+        "root entry mode missing after validation"
     ))?;
 
     Ok((OsString::from(root), root_is_file, root_mode))
@@ -330,10 +331,7 @@ mod tests {
             entry("root/FOO.TXT", ArchiveEntryKind::File, 10),
         ];
         let err = validate_manifest_tree(&entries, 20, limits()).unwrap_err();
-        assert_tree_error(
-            &err,
-            "duplicate entry under ASCII case-insensitive comparison",
-        );
+        assert_tree_error(&err, "duplicate entry differing only in letter case");
     }
 
     /// Symmetric coverage of `rejects_ascii_ci_duplicate` for
@@ -348,10 +346,7 @@ mod tests {
             entry("root/SUB", ArchiveEntryKind::Directory, 0),
         ];
         let err = validate_manifest_tree(&entries, 0, limits()).unwrap_err();
-        assert_tree_error(
-            &err,
-            "duplicate entry under ASCII case-insensitive comparison",
-        );
+        assert_tree_error(&err, "duplicate entry differing only in letter case");
     }
 
     /// File-vs-directory ASCII-case collision: `root/Foo` (file) and
@@ -367,10 +362,7 @@ mod tests {
             entry("root/foo", ArchiveEntryKind::Directory, 0),
         ];
         let err = validate_manifest_tree(&entries, 5, limits()).unwrap_err();
-        assert_tree_error(
-            &err,
-            "duplicate entry under ASCII case-insensitive comparison",
-        );
+        assert_tree_error(&err, "duplicate entry differing only in letter case");
     }
 
     /// File and directory at the same path (a less-obvious collision

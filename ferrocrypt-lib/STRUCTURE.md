@@ -351,7 +351,41 @@ Errors remain centralized because they form a coherent diagnostic namespace. Pub
 
 Error variants that carry data carry typed structured data, such as `FormatDefect` (including authenticated payload-stream grammar defects), `UnsupportedVersion`, `InvalidKdfParams`, the `MixingPolicy` diagnostic projection (with a structured `Custom { compatibility_class }` payload for non-shorthand classes), named integer fields for resource caps, and owned `type_name` strings for per-recipient diagnostics. Inner-archive (FCA) failures follow the same split: structural defects surface as `MalformedArchive` / `UnsafeArchivePath` / `InvalidArchiveTree` with a static `reason`, and every `FORMAT.md` §9.12 resource cap has its own `Archive*CapExceeded` variant with named integer fields. Consumers can pattern-match on error shapes without substring comparisons.
 
-Untrusted text embedded in an error message — archive entry paths, source-tree file names, caller-supplied input paths, the recipient-string parser's input echo — is sanitized before it is stored or rendered: ASCII control bytes and all non-ASCII characters (including direction-override and zero-width code points) become backslash escapes, and long input is truncated. Caller-supplied input paths get the same treatment as archive-internal names because they often come from shell glob expansion or a file-picker dialog, where an attacker with write access to a browsed directory chooses the name — including intermediate directory names. The "already exists" conflict messages keep the parent directory readable and untruncated (it is the caller's trust boundary, and the operator must be able to locate the conflict), escaping only control and bidirectional-formatting characters in it, while the final component — which can be attacker-influenced (an input-derived file stem, an archive-chosen root name) — goes through the stricter, truncating sanitizer. Terminal-bound error text can therefore never carry terminal escape sequences or bidirectional-formatting characters from any path component; printable Unicode in the trusted parent remains visible by design. `error.rs::sanitize_for_display` is the single strict implementation; `sanitize_path_for_display` is its `Path` shorthand, `sanitize_prefix_for_display` renders the trusted parent prefix, and `fs::paths::already_exists_error` is the single constructor for the conflict messages.
+Untrusted text embedded in an error message — archive entry paths, source-tree file names, and caller-supplied input paths — is sanitized before it is stored or rendered: ASCII control bytes and all non-ASCII characters (including direction-override and zero-width code points) become backslash escapes, and long input is truncated. Caller-supplied input paths get the same treatment as archive-internal names because they often come from shell glob expansion or a file-picker dialog, where an attacker with write access to a browsed directory chooses the name — including intermediate directory names. The "already exists" conflict messages keep the parent directory readable and untruncated (it is the caller's trust boundary, and the operator must be able to locate the conflict), escaping only control and bidirectional-formatting characters in it, while the final component — which can be attacker-influenced (an input-derived file stem, an archive-chosen root name) — goes through the stricter, truncating sanitizer. Terminal-bound error text can therefore never carry terminal escape sequences or bidirectional-formatting characters from any path component; printable Unicode in the trusted parent remains visible by design. `error.rs::sanitize_for_display` is the single strict implementation; `sanitize_path_for_display` is its `Path` shorthand, `sanitize_prefix_for_display` renders the trusted parent prefix, and `fs::paths::already_exists_error` is the single constructor for the conflict messages.
+
+`error.rs` also owns the display policy. Complete library-owned diagnostics use
+sentence case, begin with a capital letter, and have no terminal punctuation.
+Static reason and marker fragments begin lowercase unless their first word is
+an acronym or proper name, and likewise have no terminal punctuation; their
+owning prefix supplies the capitalized start of the complete message. Stable
+messages whose width is wholly controlled by the library must fit the desktop
+status line's 64-character display allowance. Documented exceptions are
+messages that necessarily append an unbounded caller path or operating-system
+text, plus `ArchiveTotalEntryExtCapExceeded`, whose public `u64` limit can
+render wider than the line at extreme values. The desktop performs its own
+final elision for those messages.
+
+Crate-owned internal markers must be constructed with
+`internal_invariant!` or `internal_crypto_failure!`. Those macros enforce at
+compile time that a marker is non-empty printable ASCII, has no terminal
+punctuation, and fits after the longer `Internal crypto error: ` prefix.
+`display_fragment_text_is_valid` is the shared ASCII and punctuation primitive
+behind every fragment validator, and `display_fragment_is_valid` adds a width
+bound for the fragments whose complete message has one.
+`DisplayableMarker` separately bounds hand-constructed public error variants.
+Every crate-owned archive reason is kept in one registry, grouped by the
+variant that renders it: a `MalformedArchive` reason is width-bounded because
+the library owns the whole message, while an `UnsafeArchivePath` or
+`InvalidArchiveTree` reason is not, because those messages append an entry path
+and no fragment bound would bring them inside the line. The error budget test
+iterates each group in full rather than treating one current longest reason as
+a proxy for the set.
+
+Upgrade advice follows ownership, not guesswork. A stored version newer than
+the one implemented here, or an unknown critical TLV tag defined by a later
+compatible FerroCrypt specification, says that newer FerroCrypt is needed.
+Unknown recipient and key type names stay neutral because their namespace also
+admits external implementations that a FerroCrypt upgrade may never support.
 
 Diagnostic rules:
 
@@ -724,6 +758,13 @@ Key-file reads go through `fs/paths.rs::read_file_capped` (`public.key`) and `fs
 `archive/` owns the FerroCrypt Archive (FCA) wire format and directory/file payload semantics. The byte-level FCA spec lives in `ferrocrypt-lib/FORMAT.md` §9.
 
 Archive handling is security-critical. Wire-format constants, model types, resource limits, path-grammar validation, tree-shape validation, encoding, decoding, and platform-specific extraction hardening are separated so each review surface is explicit.
+
+`archive/reasons.rs` is the single registry of crate-owned reason fragments for
+`MalformedArchive`, `UnsafeArchivePath`, and `InvalidArchiveTree`, used across
+those modules. Each registered constant is compile-time validated against
+`error.rs`'s display policy for its group, and the error-message budget test
+iterates every group. `COMPONENT_TOO_LONG` embeds `FCA_COMPONENT_MAX_BYTES`, so
+a unit test in `archive/path.rs` pins the number to that constant.
 
 ### 7.1 `archive/format.rs`
 

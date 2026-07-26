@@ -131,18 +131,21 @@ impl<W: Write> EncryptWriter<W> {
     /// written. Returns the inner writer so the caller can finalize
     /// it (e.g. `sync_all`).
     pub(crate) fn finish(mut self) -> Result<W, CryptoError> {
-        let encryptor = self.encryptor.take().ok_or(CryptoError::InternalInvariant(
-            "encrypt writer already finished or failed",
-        ))?;
-        let mut output = self.output.take().ok_or(CryptoError::InternalInvariant(
-            "encrypt writer already finished or failed",
+        let encryptor = self
+            .encryptor
+            .take()
+            .ok_or(crate::error::internal_invariant!(
+                "encrypt writer already finished or failed"
+            ))?;
+        let mut output = self.output.take().ok_or(crate::error::internal_invariant!(
+            "encrypt writer already finished or failed"
         ))?;
         if self.chunk_count >= STREAM_CHUNK_COUNT_MAX {
             return Err(CryptoError::PayloadChunkCountExceeded);
         }
         encryptor
             .encrypt_last_in_place(b"", &mut self.chunk)
-            .map_err(|_| CryptoError::InternalCryptoFailure("payload encryption failed"))?;
+            .map_err(|_| crate::error::internal_crypto_failure!("payload encryption failed"))?;
         self.chunk_count += 1;
         output.write_all(&self.chunk)?;
         output.flush()?;

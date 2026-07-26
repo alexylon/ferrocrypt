@@ -484,8 +484,8 @@ fn chmod_dir_via_self_path(dir: &Dir, mode: u32) -> Result<(), CryptoError> {
 /// extraction path" diagnostic.
 pub(crate) fn walk_to_parent(root: &Dir, rel: &Path) -> Result<(Dir, OsString), CryptoError> {
     let mut components: Vec<Component<'_>> = rel.components().collect();
-    let last = components.pop().ok_or(CryptoError::InternalInvariant(
-        "archive entry resolved to empty path",
+    let last = components.pop().ok_or(crate::error::internal_invariant!(
+        "archive entry resolved to empty path"
     ))?;
     let final_name = normal_component(last, rel)?.to_os_string();
 
@@ -511,8 +511,8 @@ pub(crate) fn walk_to_parent_readonly(
     rel: &Path,
 ) -> Result<(Dir, OsString), CryptoError> {
     let mut components: Vec<Component<'_>> = rel.components().collect();
-    let last = components.pop().ok_or(CryptoError::InternalInvariant(
-        "archive entry resolved to empty path",
+    let last = components.pop().ok_or(crate::error::internal_invariant!(
+        "archive entry resolved to empty path"
     ))?;
     let final_name = normal_component(last, rel)?.to_os_string();
 

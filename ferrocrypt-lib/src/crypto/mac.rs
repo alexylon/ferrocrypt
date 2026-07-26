@@ -55,7 +55,7 @@ pub(crate) fn hmac_sha3_256_parts_verify(
 // order, and the empty-parts behaviour cannot drift between them.
 fn hmac_state_for_parts(key: &[u8], parts: &[&[u8]]) -> Result<HmacSha3_256, CryptoError> {
     let mut mac = HmacSha3_256::new_from_slice(key)
-        .map_err(|_| CryptoError::InternalInvariant("invalid HMAC key length"))?;
+        .map_err(|_| crate::error::internal_invariant!("invalid HMAC key length"))?;
     for part in parts {
         mac.update(part);
     }

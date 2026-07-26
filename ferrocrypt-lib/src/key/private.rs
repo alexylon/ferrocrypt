@@ -485,7 +485,7 @@ fn seal_private_key_inner(
         HKDF_INFO_PRIVATE_KEY_WRAP,
     )?;
     let ciphertext = seal_with_aad(&wrap_key, &wrap_nonce, secret_material, &cleartext, || {
-        CryptoError::InternalCryptoFailure("private key seal failed")
+        crate::error::internal_crypto_failure!("private key seal failed")
     })?;
 
     let mut out = cleartext;

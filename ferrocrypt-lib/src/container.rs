@@ -455,9 +455,9 @@ pub(crate) fn build_encrypted_header(
             header_len: u32::try_from(header_len_u64).unwrap_or(u32::MAX),
         }));
     }
-    let header_len: u32 = header_len_u64.try_into().map_err(|_| {
-        CryptoError::InternalInvariant("Header length narrowing failed after structural check")
-    })?;
+    let header_len: u32 = header_len_u64
+        .try_into()
+        .map_err(|_| crate::error::internal_invariant!("header length narrowing failed"))?;
 
     // The aggregate cap above guarantees that the capacity and casts fit
     // `u32` and `usize` on every supported target.

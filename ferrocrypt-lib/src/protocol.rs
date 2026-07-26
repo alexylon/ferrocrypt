@@ -246,7 +246,7 @@ fn build_native_entry(
 ) -> Result<RecipientEntry, CryptoError> {
     debug_assert_eq!(body.type_name, type_name);
     let ty = NativeRecipientType::from_type_name(type_name)
-        .ok_or(CryptoError::InternalInvariant("Unknown native scheme"))?;
+        .ok_or(crate::error::internal_invariant!("unknown native scheme"))?;
     RecipientEntry::native(ty, body.bytes)
 }
 
@@ -909,9 +909,9 @@ mod tests {
     /// region reason rather than `Io`.
     #[test]
     fn truncated_fca_payload_rejects_as_malformed_archive() -> Result<(), CryptoError> {
-        use crate::archive::format::{
-            ARCHIVE_EXT_REGION_TRUNCATED, ARCHIVE_FIXED_HEADER_TRUNCATED,
-            ARCHIVE_MANIFEST_REGION_TRUNCATED, FCA_MAGIC, FCA_VERSION, write_fca_header,
+        use crate::archive::format::{FCA_MAGIC, FCA_VERSION, write_fca_header};
+        use crate::archive::reasons::{
+            ARCHIVE_EXT_REGION_TRUNCATED, FIXED_HEADER_TRUNCATED, MANIFEST_REGION_TRUNCATED,
         };
 
         let tmp = tempfile::TempDir::new().unwrap();
@@ -951,13 +951,9 @@ mod tests {
         };
 
         let cases: [(&str, Vec<u8>, &str); 3] = [
-            ("fixed-header", short_header, ARCHIVE_FIXED_HEADER_TRUNCATED),
+            ("fixed-header", short_header, FIXED_HEADER_TRUNCATED),
             ("archive-ext", short_ext, ARCHIVE_EXT_REGION_TRUNCATED),
-            (
-                "manifest",
-                short_manifest,
-                ARCHIVE_MANIFEST_REGION_TRUNCATED,
-            ),
+            ("manifest", short_manifest, MANIFEST_REGION_TRUNCATED),
         ];
         for (label, fca_payload, want_reason) in cases {
             let fcr = tmp.path().join(format!("{label}.fcr"));

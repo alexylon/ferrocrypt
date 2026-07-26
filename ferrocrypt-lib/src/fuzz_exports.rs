@@ -173,14 +173,12 @@ pub fn empty_final_after_data_stream_for_fuzz() -> Result<Vec<u8>, crate::Crypto
         .collect();
     encryptor
         .encrypt_next_in_place(b"", &mut ciphertext)
-        .map_err(|_| {
-            crate::CryptoError::InternalCryptoFailure("fuzz non-final encryption failed")
-        })?;
+        .map_err(|_| crate::error::internal_crypto_failure!("fuzz non-final encryption failed"))?;
     let mut empty_final = Vec::new();
     encryptor
         .encrypt_last_in_place(b"", &mut empty_final)
         .map_err(|_| {
-            crate::CryptoError::InternalCryptoFailure("fuzz empty-final encryption failed")
+            crate::error::internal_crypto_failure!("fuzz empty-final encryption failed")
         })?;
     ciphertext.extend_from_slice(&empty_final);
     Ok(ciphertext)

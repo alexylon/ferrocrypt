@@ -2219,25 +2219,35 @@ parsing English text. Existing class identifiers and meanings MUST NOT be
 renamed or repurposed. New stable classes MAY be appended when a future
 normative distinction or shipping implementation requires one.
 
-FerroCrypt's English display strings for unsupported encodings reported with an
-upgrade recommendation MUST use these exact forms, substituting the raw byte as
-two uppercase hexadecimal digits:
+FerroCrypt's stable English display strings use sentence case without terminal
+punctuation and state only what the error class proves. A newer-version class
+may say that newer FerroCrypt is needed. An unknown recipient or key type MUST
+NOT prescribe an upgrade because it may belong to an external implementation.
+An unknown critical TLV tag denotes a required feature from a later compatible
+FerroCrypt specification (§6), so it MUST use this exact form, substituting the
+tag as four uppercase hexadecimal digits:
 
 ```text
-Unsupported .fcr version byte 0xNN. Upgrade FerroCrypt.
-Unsupported FCA archive version byte 0xNN. Upgrade FerroCrypt.
-Unsupported public-key version byte 0xNN. Upgrade FerroCrypt.
-Unsupported private-key version byte 0xNN. Upgrade FerroCrypt.
+Newer FerroCrypt is needed for file feature tag 0xNNNN
+```
+
+Unsupported encoding versions MUST use these exact forms, substituting the raw
+byte as two uppercase hexadecimal digits:
+
+```text
+Newer FerroCrypt is needed for .fcr version byte 0xNN
+Newer FerroCrypt is needed for FCA archive version byte 0xNN
+Newer FerroCrypt is needed for public-key version byte 0xNN
+Newer FerroCrypt is needed for private-key version byte 0xNN
 ```
 
 For FerroCrypt's retained older-version error variants, the English display
-strings MUST use these exact neutral forms and MUST NOT advise installing an
-older release or regenerating a key:
+strings MUST use these exact forms:
 
 ```text
-Unsupported .fcr version byte 0xNN.
-Unsupported public-key version byte 0xNN.
-Unsupported private-key version byte 0xNN.
+Unsupported older .fcr version byte 0xNN
+Unsupported older public-key version byte 0xNN
+Unsupported older private-key version byte 0xNN
 ```
 
 The display forms use compact domain names because the full message has to fit

@@ -22,3 +22,20 @@ corrections use the errata mechanism from `FORMAT.md` §12.3.
 When the corpus lands, this README is replaced by the full document
 required by `FORMAT.md` §12.3, including the authoritative generation
 and reproduction commands.
+
+## Note for whoever authors the corpus
+
+`FORMAT.md` §12.3 requires payload-stream evidence covering trailing
+data. Record those cases as `payload_authentication_failed`, with a
+`condition_id` naming the appended-bytes condition — not as
+`extra_data_after_payload`.
+
+Appending bytes to a valid `.fcr` never reaches the
+`extra_data_after_payload` class in FerroCrypt. The reader fills a full
+chunk before decrypting, so appended bytes either extend the final
+frame or turn it into a non-final one; either way the AEAD rejects
+first. `extra_data_after_payload` is reserved for an inner reader that
+signals end of file and then produces more bytes, which no file-backed
+reader does. A case recorded under the wrong class would fail replay
+against this implementation, and the corpus is immutable once the
+stable release is tagged.

@@ -448,10 +448,14 @@ impl Prefix {
     }
 
     /// Parses and structurally validates a 12-byte prefix from disk.
-    /// Checks fire in `FORMAT.md` §3.1 spec order: magic → version →
-    /// kind → flags → header_len. Failures surface as the precise
-    /// structural diagnostic (`BadMagic`, `UnsupportedVersion`,
-    /// `WrongKind`, `MalformedHeader`, `OversizedHeader`).
+    /// Checks fire in `FORMAT.md` §3.1 order: magic → kind → version →
+    /// flags → header_len. Failures surface as the precise structural
+    /// diagnostic (`BadMagic`, `WrongKind`, `UnsupportedVersion`,
+    /// `MalformedHeader`, `OversizedHeader`).
+    ///
+    /// The kind byte is read first because `FORMAT.md` §11.1 makes it the
+    /// selector for the version byte's domain: a file declaring another
+    /// kind is the wrong kind whatever its version byte says.
     ///
     /// An undersized `header_len` is not rejected here: per `FORMAT.md`
     /// §3.7, the reader completes the header and MAC framing reads
@@ -464,14 +468,14 @@ impl Prefix {
         if bytes[..MAGIC_SIZE] != MAGIC {
             return Err(CryptoError::InvalidFormat(FormatDefect::BadMagic));
         }
-        let version = bytes[PREFIX_VERSION_OFFSET];
-        check_version(version)?;
         let kind_byte = bytes[PREFIX_KIND_OFFSET];
         let kind = Kind::from_byte(kind_byte)
             .filter(|k| *k == expected_kind)
             .ok_or(CryptoError::InvalidFormat(FormatDefect::WrongKind {
                 kind: kind_byte,
             }))?;
+        let version = bytes[PREFIX_VERSION_OFFSET];
+        check_version(version)?;
         let prefix_flags = read_u16_be(bytes, PREFIX_FLAGS_OFFSET)?;
         check_prefix_flags(prefix_flags)?;
         let header_len = read_u32_be(bytes, PREFIX_HEADER_LEN_OFFSET)?;
@@ -1009,16 +1013,17 @@ mod tests {
     }
 
     #[test]
-    fn parse_prefers_unsupported_version_over_wrong_kind() {
-        // Spec UX preference: when both version and kind are wrong,
-        // surface UnsupportedVersion (actionable: "upgrade FerroCrypt")
-        // rather than WrongKind (which would imply a kind known to this release).
+    fn parse_prefers_wrong_kind_over_unsupported_version() {
+        // FORMAT.md §11.1: the kind byte selects the domain the version
+        // byte belongs to, so a file of another kind is the wrong kind
+        // whatever byte sits at offset 4. Reporting an unsupported `.fcr`
+        // version would name a domain this file never claimed.
         let mut bytes = Prefix::build_encrypted(HEADER_FIXED_SIZE as u32).unwrap();
         bytes[4] = 3; // future version
         bytes[5] = 0x99; // unknown kind
         match Prefix::parse(&bytes, Kind::Encrypted) {
-            Err(CryptoError::UnsupportedVersion(UnsupportedVersion::NewerFile { version: 3 })) => {}
-            other => panic!("expected NewerFile(3) before WrongKind, got {other:?}"),
+            Err(CryptoError::InvalidFormat(FormatDefect::WrongKind { kind: 0x99 })) => {}
+            other => panic!("expected WrongKind(0x99) before NewerFile, got {other:?}"),
         }
     }
 

@@ -155,23 +155,28 @@ impl PrivateKeyHeader {
     }
 
     /// Parses and structurally validates the 90-byte cleartext header.
-    /// Validates magic → version → kind → key_flags → length-field
+    /// Validates magic → kind → version → key_flags → length-field
     /// structural caps → kdf_params structural ranges. Length-field
     /// consistency against the on-disk file size is checked at the
     /// `open_private_key` layer.
+    ///
+    /// The kind byte is read before the version byte because
+    /// `FORMAT.md` §11.1 makes it the selector for the version byte's
+    /// domain: a file declaring another kind is the wrong kind whatever
+    /// its version byte says.
     pub fn parse(bytes: &[u8; PRIVATE_KEY_HEADER_FIXED_SIZE]) -> Result<Self, CryptoError> {
         if bytes[..MAGIC_SIZE] != MAGIC {
             return Err(CryptoError::InvalidFormat(FormatDefect::NotAKeyFile));
         }
-        let wire_version = bytes[VERSION_OFFSET];
-        let suite = private_key_wire_version_to_suite(wire_version)?;
-        ensure_private_key_suite_supported(suite)?;
         let kind_byte = bytes[KIND_OFFSET];
         if kind_byte != KIND_PRIVATE_KEY {
             return Err(CryptoError::InvalidFormat(FormatDefect::WrongKind {
                 kind: kind_byte,
             }));
         }
+        let wire_version = bytes[VERSION_OFFSET];
+        let suite = private_key_wire_version_to_suite(wire_version)?;
+        ensure_private_key_suite_supported(suite)?;
         let key_flags = read_u16_be(bytes, KEY_FLAGS_OFFSET)?;
         check_key_flags(key_flags)?;
         let type_name_len = read_u16_be(bytes, TYPE_NAME_LEN_OFFSET)?;
@@ -618,6 +623,7 @@ impl PrivateKey {
 mod tests {
     use super::*;
     use crate::error::UnsupportedVersion;
+    use crate::format::KIND_ENCRYPTED;
 
     /// Pins the private-key wrap HKDF info string against silent typos.
     /// Recipient and payload/header info strings are pinned alongside
@@ -1045,6 +1051,22 @@ mod tests {
         match PrivateKeyHeader::parse(&bytes) {
             Err(CryptoError::InvalidFormat(FormatDefect::WrongKind { kind: 0x99 })) => {}
             other => panic!("expected WrongKind(0x99), got {other:?}"),
+        }
+    }
+
+    /// `FORMAT.md` §11.1: the kind byte selects the domain the version
+    /// byte belongs to, so an `.fcr` handed to the private-key reader is
+    /// the wrong kind rather than an unsupported private-key version.
+    #[test]
+    fn parse_prefers_wrong_kind_over_wrong_version() {
+        let mut bytes = sample_header_bytes();
+        bytes[VERSION_OFFSET] = 3;
+        bytes[KIND_OFFSET] = KIND_ENCRYPTED;
+        match PrivateKeyHeader::parse(&bytes) {
+            Err(CryptoError::InvalidFormat(FormatDefect::WrongKind {
+                kind: KIND_ENCRYPTED,
+            })) => {}
+            other => panic!("expected WrongKind before NewerKey, got {other:?}"),
         }
     }
 

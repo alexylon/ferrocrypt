@@ -315,17 +315,21 @@ of key-pair compatibility (§11). Version byte `0x00` is reserved and
 structurally malformed. Version bytes `0x02..=0xFF` are unsupported by a reader
 that implements only `.fcr` outer-container version `0x01`.
 
-Readers MUST reject:
+Readers MUST reject, in this order:
 
 - input shorter than 12 bytes;
 - magic bytes other than `FCR\0`;
+- `kind != 0x45` for an encrypted `.fcr` file;
 - `.fcr` outer-container version byte `0x00` with diagnostic class
   `malformed_header` (§12.1);
 - unsupported `.fcr` outer-container version bytes `0x02..=0xFF` with
   diagnostic class `unsupported_outer_version` (§12.1);
-- `kind != 0x45` for an encrypted `.fcr` file;
 - non-zero `prefix_flags`;
 - `header_len > 16,777,216`.
+
+`kind` precedes `version` because §11.1 makes the kind byte the selector for the
+version byte's domain: a file declaring another kind is `wrong_kind` (§12.1)
+whatever byte sits at offset 4.
 
 Any of these failures surface as a structural rejection before any cryptographic
 operation runs.
@@ -1162,10 +1166,13 @@ act on them or reject unknown critical private-key TLVs until `wrapped_secret`
 has been successfully authenticated. Unknown critical private-key TLVs MUST cause
 rejection after successful authentication.
 
-Readers MUST validate magic, private-key encoding version and key-pair-suite
-support, kind, flags, type name, lengths, total file size, KDF parameters, local
-resource caps, AEAD authentication, TLV rules, and recipient-type-specific
-secret/public material constraints.
+Readers MUST validate magic, kind, private-key encoding version and
+key-pair-suite support, flags, type name, lengths, total file size, KDF
+parameters, local resource caps, AEAD authentication, TLV rules, and
+recipient-type-specific secret/public material constraints, in that order.
+`kind` precedes the version byte because §11.1 makes the kind byte the selector
+for that byte's domain: a file declaring another kind is `wrong_kind` (§12.1)
+whatever byte sits at offset 4.
 
 A local cap on `wrapped_secret_len` follows the same rule as the recipient-string
 cap in §7: implementations MAY set one below the structural maximum and SHOULD

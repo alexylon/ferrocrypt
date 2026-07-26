@@ -355,23 +355,51 @@ fn path_occupied(path: &Path) -> bool {
     path.symlink_metadata().is_ok()
 }
 
-fn check_encrypt_conflict(
-    input_path: &Path,
-    output_dir: Option<&Path>,
-    save_as: Option<&Path>,
-) -> Result<(), CryptoError> {
-    let target = match save_as {
-        Some(path) => path.to_path_buf(),
-        None => {
-            // clap's `required_unless_present` guarantees output_dir is set
-            // here when save_as is None; the dispatcher relies on the same
-            // invariant when it forwards an empty PathBuf to the library
-            // for the save-as path.
-            let dir = output_dir.ok_or(CryptoError::InternalInvariant(
-                "--output-dir or --save-as required",
-            ))?;
-            dir.join(default_encrypted_filename(input_path)?)
+/// Where an `encrypt` run writes its output. `--output-dir` and `--save-as`
+/// are mutually exclusive and jointly required, so exactly one of the pair is
+/// present once arguments are parsed. Holding that in one value keeps the
+/// rest of the encrypt path from having to reason about the two combinations
+/// clap rejects.
+enum EncryptTarget {
+    /// `--output-dir`: the file name is derived from the input.
+    Dir(PathBuf),
+    /// `--save-as`: the exact output path.
+    File(PathBuf),
+}
+
+impl EncryptTarget {
+    /// Narrows the parsed pair to the single target. `--save-as` wins if both
+    /// are somehow present, and neither is a usage error — the same one clap
+    /// reports before this is reached, restated here so the guarantee is
+    /// enforced rather than assumed.
+    fn from_args(
+        output_dir: Option<PathBuf>,
+        save_as: Option<PathBuf>,
+    ) -> Result<Self, CryptoError> {
+        match (save_as, output_dir) {
+            (Some(file), _) => Ok(Self::File(file)),
+            (None, Some(dir)) => Ok(Self::Dir(dir)),
+            (None, None) => Err(CryptoError::InvalidInput(
+                "Either --output-dir or --save-as is required".to_string(),
+            )),
         }
+    }
+
+    /// Output directory to hand the library. `--save-as` supplies the whole
+    /// path through `Encryptor::save_as`, and the library ignores this value
+    /// in that case, so an empty path keeps the argument well-typed.
+    fn library_output_dir(&self) -> &Path {
+        match self {
+            Self::Dir(dir) => dir,
+            Self::File(_) => Path::new(""),
+        }
+    }
+}
+
+fn check_encrypt_conflict(input_path: &Path, target: &EncryptTarget) -> Result<(), CryptoError> {
+    let target = match target {
+        EncryptTarget::File(path) => path.clone(),
+        EncryptTarget::Dir(dir) => dir.join(default_encrypted_filename(input_path)?),
     };
     if path_occupied(&target) {
         return Err(CryptoError::InvalidInput(format!(
@@ -510,8 +538,7 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
             allow_double_encrypt,
         } => run_encrypt(
             input,
-            output_dir,
-            save_as,
+            EncryptTarget::from_args(output_dir, save_as)?,
             recipient,
             public_key,
             allow_double_encrypt,
@@ -542,13 +569,12 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
 
 fn run_encrypt(
     input: PathBuf,
-    output_dir: Option<PathBuf>,
-    save_as: Option<PathBuf>,
+    target: EncryptTarget,
     recipient: Vec<String>,
     public_key: Vec<PathBuf>,
     allow_double_encrypt: bool,
 ) -> Result<(), CryptoError> {
-    check_encrypt_conflict(&input, output_dir.as_deref(), save_as.as_deref())?;
+    check_encrypt_conflict(&input, &target)?;
     confirm_or_reject_double_encrypt(&input, allow_double_encrypt)?;
 
     let start = std::time::Instant::now();
@@ -570,16 +596,12 @@ fn run_encrypt(
         Encryptor::with_public_keys(recipients)?
     };
 
-    if let Some(save_as_path) = save_as.as_deref() {
+    if let EncryptTarget::File(save_as_path) = &target {
         encryptor = encryptor.save_as(save_as_path);
     }
 
-    // When `--save-as` is given the library ignores the output directory;
-    // pass an empty PathBuf so the value is still well-typed.
-    let library_output_dir = output_dir.unwrap_or_default();
-
     let output = encryptor
-        .write(&input, &library_output_dir, |ev| eprintln!("{ev}"))?
+        .write(&input, target.library_output_dir(), |ev| eprintln!("{ev}"))?
         .output_path;
 
     print_result(true, &output, start.elapsed());
@@ -864,6 +886,52 @@ mod tests {
         assert_eq!(all.max_mem_cost_kib, 256 * 1024);
         assert_eq!(all.max_time_cost, 2);
         assert_eq!(all.max_lanes, 1);
+    }
+
+    /// `EncryptTarget::from_args` narrows the two mutually exclusive output
+    /// flags to one target. `--save-as` wins if both reach it, and neither
+    /// present is a usage rejection — clap reports that first, so this arm is
+    /// unreachable through the command line and only a unit test can cover it.
+    #[test]
+    fn encrypt_target_narrows_the_output_flags() {
+        let dir = PathBuf::from("out");
+        let file = PathBuf::from("out/exact.fcr");
+
+        assert!(matches!(
+            EncryptTarget::from_args(Some(dir.clone()), None),
+            Ok(EncryptTarget::Dir(d)) if d == dir
+        ));
+        assert!(matches!(
+            EncryptTarget::from_args(None, Some(file.clone())),
+            Ok(EncryptTarget::File(f)) if f == file
+        ));
+        assert!(matches!(
+            EncryptTarget::from_args(Some(dir), Some(file.clone())),
+            Ok(EncryptTarget::File(f)) if f == file
+        ));
+
+        match EncryptTarget::from_args(None, None) {
+            Err(CryptoError::InvalidInput(msg)) => {
+                assert_eq!(msg, "Either --output-dir or --save-as is required");
+            }
+            Err(other) => panic!("expected InvalidInput, got {other:?}"),
+            Ok(_) => panic!("expected a rejection when neither flag is present"),
+        }
+    }
+
+    /// The library takes an output directory on both routes and ignores it
+    /// when `--save-as` supplied the whole path, so that route hands it an
+    /// empty path rather than inventing a directory.
+    #[test]
+    fn encrypt_target_supplies_the_library_output_dir() {
+        assert_eq!(
+            EncryptTarget::Dir(PathBuf::from("out")).library_output_dir(),
+            Path::new("out")
+        );
+        assert_eq!(
+            EncryptTarget::File(PathBuf::from("out/exact.fcr")).library_output_dir(),
+            Path::new("")
+        );
     }
 
     #[test]

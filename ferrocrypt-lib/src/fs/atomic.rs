@@ -187,6 +187,13 @@ pub(crate) fn errno_not_supported(e: &io::Error) -> bool {
 /// mounts) as an invalid-flag error. A genuine invalid-argument
 /// failure that slips through simply fails again inside the fallback,
 /// so the wide trigger cannot weaken the no-clobber guarantee.
+///
+/// The two callers reach different arms. [`finalize_file`] sits behind
+/// `tempfile`, which already retries `EINVAL` itself through its
+/// hard-link emulation, so only the unsupported-operation arm is
+/// reachable there. `archive::platform::rename_at_no_clobber` calls
+/// `renameat_with` directly, and the `EINVAL` arm is load-bearing only
+/// for it.
 #[cfg(unix)]
 pub(crate) fn no_replace_rename_unsupported(e: &io::Error) -> bool {
     errno_not_supported(e) || e.raw_os_error() == Some(libc::EINVAL)

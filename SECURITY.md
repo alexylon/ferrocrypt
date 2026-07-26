@@ -122,6 +122,14 @@ regression net, regenerated when the format intentionally changes).
   per-user folders are not reachable. Closing the directory window
   fully would require unsafe Windows API code, which the crate
   currently forbids (`#![forbid(unsafe_code)]`).
+- **A freshly decrypted single file on Windows starts with its archive
+  attribute cleared.** The atomic no-replace move described above clears
+  the file's attributes as part of the operation. Nothing the format
+  promises is lost — FerroCrypt's archive format does not carry Windows
+  attributes, and the file's content, name, and access rights are
+  unaffected — but incremental backup tools read a clear archive bit as
+  "already backed up" and may skip the file until it changes again. Set
+  the attribute yourself if your backup schedule depends on it.
 - **Generated key pairs publish `private.key` before `public.key`.** Key
   generation writes and flushes both files before either receives its
   final name. It then commits `private.key`, flushes the output

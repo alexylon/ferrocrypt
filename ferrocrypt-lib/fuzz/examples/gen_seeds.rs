@@ -17,18 +17,19 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use ferrocrypt::fuzz_exports::{
-    archive_for_fuzz, decrypt_stream_for_fuzz, empty_final_after_data_stream_for_fuzz,
-    encrypt_stream_for_fuzz, parse_public_key_file_bytes, unarchive_for_fuzz,
+    FCA_HEADER_SIZE, archive_for_fuzz, decrypt_stream_for_fuzz,
+    empty_final_after_data_stream_for_fuzz, encrypt_stream_for_fuzz, parse_public_key_file_bytes,
+    unarchive_for_fuzz,
 };
 use ferrocrypt::{ArchiveLimits, CryptoError, FormatDefect, PublicKey};
 
-/// FCA fixed-header layout facts needed to splice an `archive_ext`
+/// FCA fixed-header layout fact needed to splice an `archive_ext`
 /// region into writer output (the v1 writer always emits a zero-length
 /// region): `magic(4) || version(1) || flags(2) || entry_count(4)`
-/// puts `archive_ext_len` at offset 11, and the fixed header is 27
-/// bytes long (`FORMAT.md` §9.2).
+/// puts `archive_ext_len` at offset 11 (`FORMAT.md` §9.2). The header
+/// length itself comes from `FCA_HEADER_SIZE`, so the two crates cannot
+/// disagree about it.
 const FCA_ARCHIVE_EXT_LEN_OFFSET: usize = 11;
-const FCA_HEADER_SIZE: usize = 27;
 
 /// One ignorable TLV entry (`FORMAT.md` §6): tag `0x0001` (ignorable
 /// range), length 2, two value bytes.

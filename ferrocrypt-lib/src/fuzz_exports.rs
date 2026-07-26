@@ -12,7 +12,7 @@
 
 #![allow(missing_docs)]
 
-pub use crate::archive::format::{parse_fca_header, parse_manifest_bytes};
+pub use crate::archive::format::{FCA_HEADER_SIZE, parse_fca_header, parse_manifest_bytes};
 pub use crate::archive::model::{ArchiveEntry, ArchiveEntryKind, FcaHeader, Manifest};
 pub use crate::archive::path::{
     FCA_COMPONENT_MAX_BYTES, ascii_case_collision_key, validate_fca_path,

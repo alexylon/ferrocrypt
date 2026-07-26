@@ -29,9 +29,10 @@ pub(crate) const FCA_VERSION: u8 = 0x01;
 /// || total_file_bytes(8)` (FORMAT.md §9.2). Documented as a spec
 /// constant for callers that need it for byte-level inspection or
 /// fixture construction; the parser reads each field individually and
-/// does not use this constant directly.
+/// does not use this constant directly. `pub` so `fuzz_exports` can
+/// re-export it and the fuzz seed generator does not repeat the number.
 #[allow(dead_code)]
-pub(crate) const FCA_HEADER_SIZE: usize = 27;
+pub const FCA_HEADER_SIZE: usize = 27;
 pub(crate) const FCA_ENTRY_FIXED_SIZE: usize = 18;
 
 pub(crate) const KIND_FILE: u8 = 0x01;

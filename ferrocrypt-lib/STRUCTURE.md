@@ -1252,8 +1252,9 @@ Decryption must preserve this order:
 2. Reject bad magic, version, kind, flags, or header length.
 3. Read header and header MAC.
 4. Structurally parse header and recipient entries.
-5. Reject malformed flags, wrong native body lengths, and unknown critical
-   recipients for every entry, then illegal mixing.
+5. Reject unknown critical recipients for every entry, then malformed flags and
+   wrong native body lengths for every entry, then illegal mixing. Each pass
+   covers the whole recipient list before the next one starts.
 6. Apply local resource caps.
 7. Attempt supported recipient entries. No private-key unlock, KDF, or key
    agreement may run before step 5 completes.

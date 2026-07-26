@@ -342,30 +342,34 @@ pub(crate) fn enforce_recipient_mixing_policy(
 /// the first entry would misclassify those.
 ///
 /// Order of checks:
-/// 1. For each entry, reject a known native entry whose
+/// 1. Reject any unknown entry marked critical with
+///    [`CryptoError::UnknownCriticalRecipient`] (`FORMAT.md` §3.7
+///    step 6). This pass covers every entry before step 8 begins, so
+///    the diagnostic depends on what the file contains rather than on
+///    the order its entries happen to appear in.
+/// 2. For each entry, reject a known native entry whose
 ///    `recipient_flags != 0` (per `FORMAT.md` §3.4: "Native `argon2id`
 ///    and `x25519` entries MUST have `recipient_flags = 0`"), whose
 ///    body length is not the exact native length, or whose body fails
 ///    [`NativeRecipientType::validate_body`] (`FORMAT.md` §3.7 step 8)
 ///    with [`CryptoError::InvalidFormat`] /
-///    [`FormatDefect::MalformedRecipientEntry`], and an unknown critical
-///    entry with [`CryptoError::UnknownCriticalRecipient`]. Reserved
-///    bits 1..=15 are already rejected at parse time
+///    [`FormatDefect::MalformedRecipientEntry`]. Reserved bits 1..=15
+///    are already rejected at parse time
 ///    (`RECIPIENT_FLAGS_RESERVED_MASK`), so by the time this runs only
 ///    bit 0 (critical) can be set among the flags. This pass completes
 ///    over every entry before mixing runs, so a file that is both
 ///    structurally malformed and illegally mixed reports the
 ///    structural defect (`FORMAT.md` §3.7 step 8 before step 9).
-/// 2. Run [`enforce_recipient_mixing_policy`] (cardinality + class).
-/// 3. For each supported native entry, look up
+/// 3. Run [`enforce_recipient_mixing_policy`] (cardinality + class).
+/// 4. For each supported native entry, look up
 ///    [`NativeRecipientType::recipient_mode`]; the file's mode is the
 ///    common value across all supported entries.
-/// 4. If two supported native entries declare different modes the file
+/// 5. If two supported native entries declare different modes the file
 ///    is rejected (currently unreachable — the cardinality check on
 ///    `argon2id` already forbids cross-mode mixes — but the branch is
 ///    kept fail-closed in case a future native type breaks the
 ///    one-class-implies-one-mode assumption).
-/// 5. If no supported native entry is present (only unknown non-critical
+/// 6. If no supported native entry is present (only unknown non-critical
 ///    entries) → [`CryptoError::NoSupportedRecipient`].
 ///
 /// This is structural classification only. The caller still has to
@@ -374,37 +378,37 @@ pub(crate) fn enforce_recipient_mixing_policy(
 pub(crate) fn classify_recipient_mode(
     entries: &[RecipientEntry],
 ) -> Result<crate::UnauthenticatedRecipientMode, CryptoError> {
-    // Step 1: per-entry structural rejection. A reader must refuse to
-    // process a file that declares an unknown entry it cannot skip, tags
-    // a known native entry with a non-zero flag, or carries a native
-    // body of the wrong length or with invalid content. The checks ride
-    // one iteration over every entry so the rejection fires before
-    // mixing and before any KDF or private-key work (`FORMAT.md` §3.7
-    // steps 8-9).
+    // Step 1: a reader must refuse to process a file that declares an
+    // unknown entry it cannot skip. This walk covers the whole list
+    // before step 2 starts, so a file carrying both defects always
+    // reports the unknown-critical one, whichever entry comes first.
     for entry in entries {
-        match NativeRecipientType::from_type_name(&entry.type_name) {
-            Some(native) => {
-                if entry.recipient_flags != 0 || entry.body.len() != native.body_len() {
-                    return Err(CryptoError::InvalidFormat(
-                        FormatDefect::MalformedRecipientEntry,
-                    ));
-                }
-                native.validate_body(&entry.body)?;
-            }
-            None => {
-                if entry.is_critical() {
-                    return Err(CryptoError::UnknownCriticalRecipient {
-                        type_name: entry.type_name.clone(),
-                    });
-                }
-            }
+        if entry.is_critical() && NativeRecipientType::from_type_name(&entry.type_name).is_none() {
+            return Err(CryptoError::UnknownCriticalRecipient {
+                type_name: entry.type_name.clone(),
+            });
         }
     }
 
-    // Step 2: enforce mixing rules before any KDF/unwrap could run.
+    // Step 2: per-entry structural rejection for supported native types
+    // — a non-zero flag, a body of the wrong length, or invalid body
+    // content. Completes over every entry before mixing and before any
+    // KDF or private-key work (`FORMAT.md` §3.7 steps 8-9).
+    for entry in entries {
+        if let Some(native) = NativeRecipientType::from_type_name(&entry.type_name) {
+            if entry.recipient_flags != 0 || entry.body.len() != native.body_len() {
+                return Err(CryptoError::InvalidFormat(
+                    FormatDefect::MalformedRecipientEntry,
+                ));
+            }
+            native.validate_body(&entry.body)?;
+        }
+    }
+
+    // Step 3: enforce mixing rules before any KDF/unwrap could run.
     enforce_recipient_mixing_policy(entries)?;
 
-    // Step 3 / 4: registry-driven mode classification. Walk the entry
+    // Step 4 / 5: registry-driven mode classification. Walk the entry
     // list once, look up `recipient_mode()` per supported native type,
     // and confirm every supported entry agrees on a single mode.
     let mut mode: Option<crate::UnauthenticatedRecipientMode> = None;
@@ -430,7 +434,7 @@ pub(crate) fn classify_recipient_mode(
         }
     }
 
-    // Step 5: no supported native recipient. Unknown non-critical
+    // Step 6: no supported native recipient. Unknown non-critical
     // entries cannot decrypt the file on their own.
     mode.ok_or(CryptoError::NoSupportedRecipient)
 }
@@ -813,12 +817,10 @@ mod tests {
     }
 
     /// When BOTH a native-flags violation AND an unknown-critical entry
-    /// are present, the file is rejected. Either rejection is correct
-    /// per `FORMAT.md` §3.4; the test asserts only the rejection, not
-    /// which diagnostic surfaces first, so a future refactor of the
-    /// per-entry walk is not constrained by a non-spec ordering
-    /// invariant. The single-violation cases above pin the precise
-    /// diagnostic per case.
+    /// are present, `FORMAT.md` §3.7 step 6 outranks step 8, so the
+    /// unknown-critical entry is reported whichever position it holds.
+    /// The single-violation cases above pin the precise diagnostic per
+    /// case.
     #[test]
     fn classify_rejects_when_native_critical_and_unknown_critical_both_present() {
         let bad_native = RecipientEntry {
@@ -827,13 +829,17 @@ mod tests {
             body: vec![0u8; x25519::BODY_LENGTH],
         };
         let unknown_crit = unknown_entry("future-critical", true);
-        let err = classify_recipient_mode(&[bad_native, unknown_crit]).unwrap_err();
-        match err {
-            CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)
-            | CryptoError::UnknownCriticalRecipient { .. } => {}
-            other => panic!(
-                "expected MalformedRecipientEntry or UnknownCriticalRecipient when both violations present, got {other:?}"
-            ),
+        for entries in [
+            vec![bad_native.clone(), unknown_crit.clone()],
+            vec![unknown_crit.clone(), bad_native.clone()],
+        ] {
+            match classify_recipient_mode(&entries) {
+                Err(CryptoError::UnknownCriticalRecipient { type_name })
+                    if type_name == "future-critical" => {}
+                other => panic!(
+                    "expected UnknownCriticalRecipient regardless of entry order, got {other:?}"
+                ),
+            }
         }
     }
 }

@@ -544,11 +544,16 @@ Readers MUST process `.fcr` files in this order:
 14. After HMAC success, validate `ext_bytes`.
 15. Derive the payload key and decrypt the payload stream.
 
-Steps 5 through 9 are one file-wide preflight. Readers MUST complete the
-recipient-specific step 8 checks for every supported entry before starting the
-mixing checks in step 9. Step 9 MUST NOT begin unless every step 8 check has
-succeeded; if a file has both a recipient-specific structural defect and an
-illegal recipient mix, the step 8 structural rejection takes precedence. The
+Steps 5 through 9 are one file-wide preflight, and each step MUST complete over
+every recipient entry before the next step begins, so a rejected file yields one
+diagnostic class determined by its content rather than by the order its entries
+appear in (§12.3). If a file has both an unknown critical entry and a
+recipient-specific structural defect, the step 6 rejection takes precedence.
+Readers MUST complete the recipient-specific step 8 checks for every supported
+entry before starting the mixing checks in step 9. Step 9 MUST NOT begin unless
+every step 8 check has succeeded; if a file has both a recipient-specific
+structural defect and an illegal recipient mix, the step 8 structural rejection
+takes precedence. The
 step 8 checks include the exact 116-byte `argon2id` body length and exact
 104-byte `x25519` body length. A reader MUST NOT unlock a supplied private key
 (including running its unlock KDF), perform X25519 or another KEM operation, or

@@ -323,6 +323,73 @@ pub(crate) fn make_fifo(path: &Path) {
 mod tests {
     use super::*;
 
+    fn write_temp(bytes: &[u8]) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("input");
+        std::fs::write(&path, bytes).unwrap();
+        (dir, path)
+    }
+
+    fn over_cap() -> CryptoError {
+        CryptoError::InvalidInput("over cap".to_string())
+    }
+
+    /// A file exactly at the cap is accepted and one byte over is
+    /// rejected through the caller's closure, so the boundary is
+    /// inclusive and the caller keeps its own diagnostic class.
+    #[test]
+    fn read_file_capped_boundary_is_inclusive() {
+        const CAP: usize = 64;
+
+        let (_dir, at_cap) = write_temp(&[0x41; CAP]);
+        let read = read_file_capped(&at_cap, CAP, over_cap).unwrap();
+        assert_eq!(read.len(), CAP);
+
+        let (_dir, over) = write_temp(&[0x41; CAP + 1]);
+        match read_file_capped(&over, CAP, over_cap) {
+            Err(CryptoError::InvalidInput(msg)) => assert_eq!(msg, "over cap"),
+            other => panic!("expected the supplied over-cap error, got {other:?}"),
+        }
+    }
+
+    /// The staged reader falls back to the structural cap when the head
+    /// does not describe the file, and that fallback keeps the same
+    /// inclusive boundary and caller-supplied error.
+    #[test]
+    fn read_file_staged_fallback_applies_the_cap() {
+        const HEAD: usize = 4;
+        const CAP: usize = 64;
+
+        let (_dir, at_cap) = write_temp(&[0x41; CAP]);
+        let read = read_file_staged(&at_cap, HEAD, CAP, |_| None, over_cap).unwrap();
+        assert_eq!(read.len(), CAP);
+
+        let (_dir, over) = write_temp(&[0x41; CAP + 1]);
+        match read_file_staged(&over, HEAD, CAP, |_| None, over_cap) {
+            Err(CryptoError::InvalidInput(msg)) => assert_eq!(msg, "over cap"),
+            other => panic!("expected the supplied over-cap error, got {other:?}"),
+        }
+    }
+
+    /// A head shorter than `head_len` is handed back as read, so the
+    /// caller reports a truncated file rather than the cap error.
+    #[test]
+    fn read_file_staged_returns_a_short_head_as_read() {
+        let (_dir, path) = write_temp(b"ab");
+        let read = read_file_staged(&path, 8, 64, |_| Some(0), over_cap).unwrap();
+        assert_eq!(read, b"ab");
+    }
+
+    /// With a declared remainder the read stops one byte past it, which
+    /// is what lets a caller checking an exact total notice a file that
+    /// carries trailing bytes.
+    #[test]
+    fn read_file_staged_reads_one_byte_past_the_declared_length() {
+        let (_dir, path) = write_temp(&[0x41; 100]);
+        let read = read_file_staged(&path, 4, 1024, |_| Some(10), over_cap).unwrap();
+        assert_eq!(read.len(), 4 + 10 + 1);
+    }
+
     #[test]
     fn test_encryption_base_name_file() {
         let stem = encryption_base_name("path/to/file.txt").unwrap();

@@ -1635,6 +1635,21 @@ mod tests {
         }
     }
 
+    /// A `public.key` past the file-read cap is refused before the
+    /// content is parsed, and the refusal carries the same
+    /// `malformed_public_key` class as every other public-key
+    /// rejection. Pins the over-cap branch of `read_file_capped` at a
+    /// real call site.
+    #[test]
+    fn read_public_key_rejects_a_file_above_the_read_cap() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), vec![b'q'; PUBLIC_KEY_FILE_READ_CAP_BYTES + 1]).unwrap();
+        match read_public_key(tmp.path(), KeyReadLimits::default()) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
+            other => panic!("expected MalformedPublicKey above the read cap, got {other:?}"),
+        }
+    }
+
     /// A high-bit alias is a non-canonical RFC 7748 encoding of a valid
     /// key. Every ingress must reject it (`FORMAT.md` §2.4 / §7) so one
     /// curve point cannot acquire a second recipient string or

@@ -69,7 +69,17 @@ fn sync_parent_dir(path: &Path) {
     }
 }
 
-#[cfg(not(unix))]
+/// Windows arm of [`sync_parent_dir`]. Routes through
+/// [`sync_dir_durable`], which opens the directory with backup
+/// semantics and write access because `FlushFileBuffers` requires it.
+/// The result is dropped for the same reasons the Unix arm ignores its
+/// own: finalization has already succeeded by the time this runs.
+#[cfg(windows)]
+fn sync_parent_dir(path: &Path) {
+    let _ = sync_dir_durable(crate::fs::paths::parent_or_cwd(path));
+}
+
+#[cfg(not(any(unix, windows)))]
 fn sync_parent_dir(_path: &Path) {}
 
 /// Promotes a `NamedTempFile` to its final path with no-clobber

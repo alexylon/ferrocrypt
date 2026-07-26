@@ -832,7 +832,7 @@ It rejects:
 
 The writer is two-pass:
 
-1. **Metadata pass** — opens the source root once. A single-file root is opened with a no-follow, non-blocking open and the handle is kept for the content pass. A directory root is opened through its parent directory via `platform::open_child_dir_nofollow` (no-follow plus the Windows reparse-point post-check), with a `(dev, ino)` identity re-check against the lstat pre-check on Unix. The walk is iterative over `cap_std::fs::Dir::entries`, driven by a heap-backed stack of pending directories with deferred child opens (live handles track the depth of the tree, not its width, and deep nesting cannot overflow the process stack). Builds a `Manifest` with FCA-canonical paths, modes, sizes, and source paths. Caps (entry count, total bytes, depth, path-bytes, manifest-size) apply while the tree is walked, so an over-cap tree is rejected without first holding every scanned entry in memory. The result is sorted by `(component_count, path_utf8)` per spec §9.8 for deterministic output.
+1. **Metadata pass** — opens the source root once. A single-file root is opened with a no-follow, non-blocking open and the handle is kept for the content pass. A directory root is opened directly on Unix via `platform::open_anchor` and verified with a `(dev, ino)` re-check against the lstat pre-check, which rejects any directory swapped in behind the pre-check; on Windows, where no stable directory inode exists to re-check, it is opened through its parent via `platform::open_child_dir_nofollow` with the reparse-point post-check. The walk is iterative over `cap_std::fs::Dir::entries`, driven by a heap-backed stack of pending directories with deferred child opens (live handles track the depth of the tree, not its width, and deep nesting cannot overflow the process stack). Builds a `Manifest` with FCA-canonical paths, modes, sizes, and source paths. Caps (entry count, total bytes, depth, path-bytes, manifest-size) apply while the tree is walked, so an over-cap tree is rejected without first holding every scanned entry in memory. The result is sorted by `(component_count, path_utf8)` per spec §9.8 for deterministic output.
 2. **Content pass** — for each file entry in canonical manifest order, refreshes metadata from an open handle, requires the source is still a regular file with `len() == manifest size`, and streams exactly the declared size via `copy_exact_n`. Single-file roots stream from the handle held since the metadata pass, so no component of the user-supplied path is resolved a second time. Directory descendants re-anchor through the directory capability held since the metadata pass (per-component no-follow walk, then a no-follow non-blocking leaf open). Source mutation between passes is handled per spec §9.10.
 
 Hardlinks are archived as independent regular-file contents (no link identity is stored). Setuid/setgid/sticky bits are stripped on write via `PERMISSION_BITS_MASK`.
@@ -863,7 +863,7 @@ The reader pipeline matches `FORMAT.md` §9.11, and the step numbers below are F
 16. apply the root entry's stored mode AFTER promotion. For directory roots this is macOS compatibility (a non-search-permitted root mode would block the rename); for regular-file roots this prevents a permissive manifest mode (e.g. `0o644`) from being briefly visible at the staged or final name while the file still holds plaintext. Step 15 is the commit point, so this step is best-effort: a chmod failure here must not fail the extraction (a `DeleteOnError` caller would be told nothing was written while a complete output sits at the final name, beyond the reach of `.incomplete` cleanup), and the output then keeps the stricter staged mode;
 17. return the final output path.
 
-`unarchive` accepts an [`IncompleteOutputPolicy`] from the caller. The default ([`IncompleteOutputPolicy::DeleteOnError`]) best-effort removes the staged `.incomplete` working tree on any decrypt failure; [`IncompleteOutputPolicy::RetainOnError`] preserves it. Cleanup tracks only roots THIS run created — `mkdir_strict` / `create_file_at` push `created_incomplete_roots` only when they actually created the working name, so an `.incomplete` this run did not create — a prior failed run's leftover, or a concurrent run's staging — rejects with `Incomplete output already exists` and is preserved. Cleanup helper `cleanup_incomplete_via_handle` routes by `symlink_metadata` on the SAME `cap_std::fs::Dir` handle opened for extraction (symlinks removed as symlinks; directories via `remove_dir_all`, which since Rust 1.71 is TOCTOU-hardened on Unix and does not follow descendant symlinks). Anchoring to the capability handle rather than re-resolving `output_dir` by path means a path swap of `output_dir` between failed extraction and cleanup cannot redirect `remove_*` to a different directory. All I/O errors are swallowed so the original `CryptoError` is the value the caller sees.
+`unarchive` accepts an [`IncompleteOutputPolicy`] from the caller. The default ([`IncompleteOutputPolicy::DeleteOnError`]) best-effort removes the staged `.incomplete` working tree on any decrypt failure; [`IncompleteOutputPolicy::RetainOnError`] preserves it. Cleanup tracks only roots THIS run created — `mkdir_strict` / `create_file_at` push `created_incomplete_roots` only when they actually created the working name, so an `.incomplete` this run did not create — a prior failed run's leftover, or a concurrent run's staging — rejects with `Incomplete output already exists` and is preserved. Cleanup helper `cleanup_incomplete_via_handle` routes by `symlink_metadata` on the SAME `cap_std::fs::Dir` handle opened for extraction (symlinks removed as symlinks; directories via `cap_std::fs::Dir::remove_dir_all`, whose removal is anchored to the capability handle and cannot escape it). Anchoring to the capability handle rather than re-resolving `output_dir` by path means a path swap of `output_dir` between failed extraction and cleanup cannot redirect `remove_*` to a different directory. All I/O errors are swallowed so the original `CryptoError` is the value the caller sees.
 
 ### 7.8 `archive/platform.rs`
 
@@ -903,7 +903,6 @@ Archive-specific path rules live in `archive/path.rs`; general output-path and s
 
 It contains:
 
-- temporary output name generation;
 - no-clobber finalization:
   - **encryption output and key generation** (file roots, every
     platform) go through `tempfile::*::persist_noclobber` — atomic
@@ -926,7 +925,6 @@ It contains:
     `archive/platform.rs::rename_at_no_clobber`, anchored to the
     extraction `output_dir` handle so a path swap mid-run cannot
     redirect the commit;
-- same-directory staging;
 - pre-promotion file durability: `sync_file_durable` flushes a staged
   `std::fs::File` with `sync_all` and falls back to plain `fsync(2)`
   where the filesystem reports the full flush as unsupported
@@ -934,8 +932,9 @@ It contains:
   twin for `cap_std::fs::File` handles lives in `archive/platform.rs`;
   the two share the fallback condition;
 - required directory-entry flushing: `sync_dir_durable` opens and flushes a directory, returning genuine failures to the caller. Unix uses an `O_DIRECTORY` read handle; Windows uses a backup-semantics write handle because `FlushFileBuffers` requires write access. Filesystems that cannot flush directories are treated as unsupported, which limits the caller's guarantee to process interruption. Key generation uses this helper after each key-file commit. `sync_parent_dir` remains the best-effort helper for recoverable outputs such as encrypted files and promoted decrypted outputs;
-- cleanup on encryption failure;
-- `.incomplete` behavior on decryption failure.
+- keeping a staged file on disk after a refused promotion, so a rejected commit leaves the caller something to inspect.
+
+Temporary output names, same-directory staging, and cleanup on encryption failure are the callers' concern: `container.rs` and `protocol.rs` build the names and stage into the destination directory, and `NamedTempFile`'s destructor removes a staged file that was never committed. `.incomplete` behavior on decryption failure belongs to `archive/decode.rs`, which owns `cleanup_incomplete_via_handle`, the `created_incomplete_roots` ledger, and the `IncompleteOutputPolicy` dispatch.
 
 Atomic output is a library guarantee. It is not a CLI-only concern.
 

@@ -1,6 +1,7 @@
-//! General path helpers — encrypted filename derivation, base-name
-//! extraction, parent-directory resolution, and user-path I/O error
-//! mapping.
+//! General path helpers — special-file-safe input opening, bounded and
+//! staged key-file reads, occupied-path rejection, encrypted filename
+//! derivation, base-name extraction, parent-directory resolution, and
+//! user-path I/O error mapping.
 //!
 //! Centralises small filesystem-level helpers that do not belong to a single
 //! crypto or container module.

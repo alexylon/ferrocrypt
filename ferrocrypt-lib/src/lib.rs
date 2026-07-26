@@ -579,8 +579,11 @@ mod tests {
     /// canonical decoder cannot let a degenerate value through this surface.
     #[test]
     fn decode_recipient_rejects_all_zero_public_key() {
-        let s =
-            key::public::encode_recipient_string(recipient::x25519::TYPE_NAME, &[0u8; 32]).unwrap();
+        let s = key::public::encode_recipient_string_unchecked(
+            recipient::x25519::TYPE_NAME,
+            &[0u8; 32],
+        )
+        .unwrap();
         match decode_recipient_string(&s) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
             other => panic!("expected MalformedPublicKey, got {other:?}"),

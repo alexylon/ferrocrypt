@@ -625,8 +625,8 @@ It contains:
 
 - X25519 recipient body layout;
 - X25519 recipient body length validation;
-- canonical public-key encoding check (`is_canonical_public_key_encoding`, `FORMAT.md` §2.4): every public-value ingress rejects a non-canonical RFC 7748 alias rather than normalizing it, so one curve point cannot acquire two fingerprints or recipient strings;
-- the `x25519` body preflight (`validate_body_preflight`): an all-zero or non-canonical ephemeral public key rejects during `classify_recipient_mode` (`FORMAT.md` §3.7 step 8), before any private-key unlock or key agreement;
+- canonical public-key encoding check (`is_canonical_public_key_encoding`, `FORMAT.md` §2.4): every public-value ingress rejects a non-canonical RFC 7748 alias rather than normalizing it, so one curve point cannot acquire two fingerprints or recipient strings. The recipient-string encoder and the fingerprint helpers apply the same rules, so a writer cannot produce material a reader would refuse (`FORMAT.md` §7, §7.2);
+- the `x25519` body preflight (`validate_body_preflight`): an all-zero or non-canonical ephemeral public key rejects during `classify_recipient_mode` (`FORMAT.md` §3.7 step 8) and again inside `unwrap`, before any private-key unlock or key agreement;
 - ephemeral key handling;
 - all-zero shared-secret rejection (file-fatal `InvalidFormat(MalformedRecipientEntry)` on the decrypt side per `FORMAT.md` §2.4 / §4.2; the credential adapter propagates it instead of collapsing to the slot-skip channel reserved for AEAD failures);
 - wrap-key derivation;

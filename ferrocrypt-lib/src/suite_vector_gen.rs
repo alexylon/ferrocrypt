@@ -1077,7 +1077,7 @@ fn write_key_file_completion_cases(suite: &Path, cases: &Path) -> Vec<Case> {
 
     // All-zero X25519 key material under a valid internal checksum, so
     // only the reader's zero-key ingress check can reject it.
-    let zero = crate::key::public::encode_recipient_string(x25519::TYPE_NAME, &[0u8; 32])
+    let zero = crate::key::public::encode_recipient_string_unchecked(x25519::TYPE_NAME, &[0u8; 32])
         .expect("encode all-zero recipient string");
     fs::write(
         cases.join("public-key-zero-material.key"),
@@ -1800,8 +1800,9 @@ fn write_noncanonical_public_key_cases(suite: &Path, cases: &Path) -> Vec<Case> 
     fixtures
         .iter()
         .map(|(name, material)| {
-            let encoded = crate::key::public::encode_recipient_string(x25519::TYPE_NAME, material)
-                .expect("encode non-canonical recipient string");
+            let encoded =
+                crate::key::public::encode_recipient_string_unchecked(x25519::TYPE_NAME, material)
+                    .expect("encode non-canonical recipient string");
             fs::write(cases.join(name), format!("{encoded}\n"))
                 .expect("write non-canonical public-key fixture");
             Case::key_err(

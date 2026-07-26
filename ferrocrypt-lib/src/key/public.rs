@@ -189,6 +189,30 @@ pub(crate) fn encode_recipient_string_for_suite(
     type_name: &str,
     key_material: &[u8],
 ) -> Result<String, CryptoError> {
+    check_x25519_material(type_name, key_material)?;
+    encode_recipient_string_inner(suite, type_name, key_material)
+}
+
+/// Test-only: encodes a recipient string skipping the `FORMAT.md` §7
+/// X25519 ingress rules, so reader-rejection tests and the must-reject
+/// corpus can build strings carrying all-zero or aliased material.
+/// Never reachable from production code.
+#[cfg(test)]
+pub(crate) fn encode_recipient_string_unchecked(
+    type_name: &str,
+    key_material: &[u8],
+) -> Result<String, CryptoError> {
+    encode_recipient_string_inner(WRITER_KEYPAIR_SUITE, type_name, key_material)
+}
+
+/// Shared body of the two encoders. Applies the generic grammar,
+/// length, and checksum rules; the X25519 material rules are the
+/// caller's, so the test-only encoder can skip exactly those.
+fn encode_recipient_string_inner(
+    suite: KeypairSuite,
+    type_name: &str,
+    key_material: &[u8],
+) -> Result<String, CryptoError> {
     let version = suite.public_key_version();
     validate_type_name_grammar(type_name)?;
     let type_name_bytes = type_name.as_bytes();
@@ -538,6 +562,29 @@ fn malformed_public_key() -> CryptoError {
     CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)
 }
 
+/// Applies the `FORMAT.md` §7 X25519 ingress rules — exactly 32 bytes,
+/// not all zero, canonical §2.4 encoding — to material about to be
+/// serialized or fingerprinted. §7 requires writers to run the same
+/// checks readers run, so that one curve point cannot acquire a second
+/// recipient string or fingerprint through an RFC 7748 alias.
+///
+/// Other type names carry no material rules the writer can enforce, so
+/// they pass through; the generic grammar and length caps still apply.
+fn check_x25519_material(type_name: &str, key_material: &[u8]) -> Result<(), CryptoError> {
+    if type_name != X25519_TYPE_NAME {
+        return Ok(());
+    }
+    let bytes: &[u8; 32] = key_material
+        .try_into()
+        .map_err(|_| malformed_public_key())?;
+    if crate::recipient::x25519::is_zero_public_key(bytes)
+        || !crate::recipient::x25519::is_canonical_public_key_encoding(bytes)
+    {
+        return Err(malformed_public_key());
+    }
+    Ok(())
+}
+
 // ─── Fingerprint ───────────────────────────────────────────────────────────
 
 /// Canonical fingerprint hash of `type_name || 0x00 || key_material`
@@ -547,13 +594,21 @@ fn malformed_public_key() -> CryptoError {
 /// pair, not over the encoding-checksum domain. The version byte is
 /// also absent: bumping the wire version of an existing key pair must
 /// not change its user-visible identity.
-pub(crate) fn fingerprint_bytes(type_name: &str, key_material: &[u8]) -> [u8; 32] {
-    public_key_hash(&[], type_name, key_material)
+///
+/// Rejects material that fails the `FORMAT.md` §7 X25519 ingress rules
+/// with [`FormatDefect::MalformedPublicKey`], because §7.2 forbids
+/// fingerprinting an RFC 7748 alias as a separate key.
+pub(crate) fn fingerprint_bytes(
+    type_name: &str,
+    key_material: &[u8],
+) -> Result<[u8; 32], CryptoError> {
+    check_x25519_material(type_name, key_material)?;
+    Ok(public_key_hash(&[], type_name, key_material))
 }
 
 /// 64-character lowercase hex of [`fingerprint_bytes`].
-pub(crate) fn fingerprint_hex(type_name: &str, key_material: &[u8]) -> String {
-    hex_encode(&fingerprint_bytes(type_name, key_material))
+pub(crate) fn fingerprint_hex(type_name: &str, key_material: &[u8]) -> Result<String, CryptoError> {
+    Ok(hex_encode(&fingerprint_bytes(type_name, key_material)?))
 }
 
 // ─── public.key file grammar and reader ────────────────────────────────────
@@ -820,7 +875,7 @@ impl PublicKey {
     /// must be read from disk or decoded from a key file.
     pub fn fingerprint(&self) -> Result<String, CryptoError> {
         let resolved = self.resolve()?;
-        Ok(fingerprint_hex(X25519_TYPE_NAME, &resolved.bytes))
+        fingerprint_hex(X25519_TYPE_NAME, &resolved.bytes)
     }
 
     /// Encodes the key as the canonical lowercase Bech32 `fcr1…`
@@ -1376,11 +1431,35 @@ mod tests {
         }
     }
 
+    /// `FORMAT.md` §7 requires writers to apply the same X25519 checks
+    /// readers apply, so the writer cannot mint a recipient string or a
+    /// fingerprint for material a reader would refuse.
+    #[test]
+    fn writer_applies_x25519_ingress_rules() {
+        let mut alias = x25519_key();
+        alias[31] |= 0x80;
+        for material in [[0u8; 32], alias] {
+            match encode_recipient_string(X25519_TYPE_NAME, &material) {
+                Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
+                other => panic!("expected the encoder to reject the material, got {other:?}"),
+            }
+            match fingerprint_hex(X25519_TYPE_NAME, &material) {
+                Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
+                other => panic!("expected the fingerprint to reject the material, got {other:?}"),
+            }
+        }
+        // Wrong length is refused too: §7 fixes X25519 material at 32 bytes.
+        match encode_recipient_string(X25519_TYPE_NAME, &[0x33u8; 31]) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
+            other => panic!("expected the encoder to reject 31-byte material, got {other:?}"),
+        }
+    }
+
     #[test]
     fn fingerprint_is_deterministic() {
         let key = x25519_key();
-        let a = fingerprint_bytes("x25519", &key);
-        let b = fingerprint_bytes("x25519", &key);
+        let a = fingerprint_bytes("x25519", &key).unwrap();
+        let b = fingerprint_bytes("x25519", &key).unwrap();
         assert_eq!(a, b);
     }
 
@@ -1390,8 +1469,8 @@ mod tests {
         // different fingerprints. Catches a regression where the
         // type_name input is silently ignored.
         let key = x25519_key();
-        let a = fingerprint_bytes("x25519", &key);
-        let b = fingerprint_bytes("y25519", &key);
+        let a = fingerprint_bytes("x25519", &key).unwrap();
+        let b = fingerprint_bytes("y25519", &key).unwrap();
         assert_ne!(a, b);
     }
 
@@ -1408,12 +1487,12 @@ mod tests {
         hasher.update([0x00]);
         hasher.update(key);
         let expected: [u8; 32] = hasher.finalize().into();
-        assert_eq!(fingerprint_bytes("x25519", &key), expected);
+        assert_eq!(fingerprint_bytes("x25519", &key).unwrap(), expected);
     }
 
     #[test]
     fn fingerprint_hex_is_64_lowercase_chars() {
-        let hex = fingerprint_hex("x25519", &x25519_key());
+        let hex = fingerprint_hex("x25519", &x25519_key()).unwrap();
         assert_eq!(hex.len(), 64);
         assert!(
             hex.chars()
@@ -1493,7 +1572,7 @@ mod tests {
 
     #[test]
     fn public_key_from_recipient_string_rejects_all_zero() {
-        let s = encode_recipient_string(X25519_TYPE_NAME, &[0u8; 32]).unwrap();
+        let s = encode_recipient_string_unchecked(X25519_TYPE_NAME, &[0u8; 32]).unwrap();
         match PublicKey::from_recipient_string(&s) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
             other => {
@@ -1546,7 +1625,7 @@ mod tests {
 
     #[test]
     fn read_public_key_rejects_all_zero_on_disk() {
-        let s = encode_recipient_string(X25519_TYPE_NAME, &[0u8; 32]).unwrap();
+        let s = encode_recipient_string_unchecked(X25519_TYPE_NAME, &[0u8; 32]).unwrap();
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), s.as_bytes()).unwrap();
         match read_public_key(tmp.path(), KeyReadLimits::default()) {
@@ -1572,7 +1651,7 @@ mod tests {
             other => panic!("from_bytes must reject a non-canonical alias, got {other:?}"),
         }
 
-        let s = encode_recipient_string(X25519_TYPE_NAME, &alias).unwrap();
+        let s = encode_recipient_string_unchecked(X25519_TYPE_NAME, &alias).unwrap();
         match PublicKey::from_recipient_string(&s) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
             other => {

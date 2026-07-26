@@ -633,7 +633,7 @@ pub(crate) fn generate_key_pair(
     // `PublicKey::from_key_file(...).fingerprint()` would produce —
     // without paying the extra disk read + Bech32 decode + SHA3 in
     // the API layer.
-    let fingerprint = fingerprint_hex(x25519::TYPE_NAME, &public_material);
+    let fingerprint = fingerprint_hex(x25519::TYPE_NAME, &public_material)?;
 
     Ok((private_key_path, public_key_path, fingerprint))
 }

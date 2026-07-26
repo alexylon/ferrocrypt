@@ -28,17 +28,30 @@ cross-implementation check, not two copies of the same code agreeing.
 | `HKDF_RAW` | `crypto/hkdf.rs :: hkdf_expand_sha3_256_matches_independent_oracle` | §2.3 |
 | `PAYLOAD` / `HEADER` | `crypto/keys.rs :: derive_subkeys_matches_independent_oracle` | §3.6, §5 |
 | `HMAC` | `crypto/mac.rs :: hmac_sha3_256_parts_matches_independent_oracle` | §3.6 |
+| Argon2id digest | `crypto/kdf.rs :: hash_passphrase_matches_independent_oracle` | §2.2 |
 
-The X25519 shared-secret, XChaCha20-Poly1305, and Argon2id primitives are
-supplied by separately known-answer-tested crates (`x25519-dalek`,
-`chacha20poly1305`, `argon2`); the FerroCrypt-specific risk in those
-paths is the HKDF wrap-key derivation, which shares the
-`hkdf_expand_sha3_256` helper pinned here.
+The X25519 shared-secret and XChaCha20-Poly1305 primitives are supplied
+by separately known-answer-tested crates (`x25519-dalek`,
+`chacha20poly1305`); the FerroCrypt-specific risk in those paths is the
+HKDF wrap-key derivation, which shares the `hkdf_expand_sha3_256` helper
+pinned here. The Argon2id row covers the other half of that reasoning:
+the `argon2` crate is itself known-answer-tested, but FerroCrypt's
+argument order, algorithm and version selection, output length, and salt
+handling are FerroCrypt's own and are pinned against OpenSSL.
 
 ## Reproducing
 
 ```
 python3 testvectors/kat/hkdf_hmac_oracle.py
+```
+
+The Argon2id row uses OpenSSL 3.2 or newer instead, since the standard
+library has no Argon2:
+
+```
+openssl kdf -keylen 32 -kdfopt pass:ferrocrypt-kat \
+  -kdfopt hexsalt:$(printf '5a%.0s' $(seq 32)) \
+  -kdfopt iter:3 -kdfopt memcost:64 -kdfopt lanes:2 -kdfopt threads:1 ARGON2ID
 ```
 
 If the printed bytes change, either an input constant in the script

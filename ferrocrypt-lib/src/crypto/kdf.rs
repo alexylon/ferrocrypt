@@ -702,6 +702,38 @@ mod tests {
         }
     }
 
+    /// Known-answer test for FerroCrypt's *wiring into* Argon2id, not
+    /// for the primitive: the positional argument order in
+    /// `argon2::Params::new`, `Version::V0x13`, `Algorithm::Argon2id`,
+    /// the 32-byte output length, and passing the stored salt through
+    /// unmodified. Every other Argon2id test in the crate is a
+    /// FerroCrypt-to-FerroCrypt round trip, which a symmetric mistake in
+    /// any of those five would survive.
+    ///
+    /// The expected bytes come from OpenSSL's `ARGON2ID` KDF, a separate
+    /// implementation from the `argon2` crate, so agreement is a genuine
+    /// cross-implementation check. `testvectors/kat/README.md` records
+    /// the command that produces them. The three parameters are
+    /// deliberately distinct, so swapping any pair either changes the
+    /// digest or makes the parameter set invalid.
+    #[test]
+    fn hash_passphrase_matches_independent_oracle() {
+        const EXPECTED: [u8; ENCRYPTION_KEY_SIZE] = [
+            0xA3, 0xBA, 0x07, 0xA9, 0xCE, 0xEB, 0xFA, 0xD5, 0xF1, 0xDF, 0xC2, 0x4A, 0x84, 0x18,
+            0x57, 0x44, 0x70, 0xC7, 0x0C, 0xB8, 0xEB, 0x61, 0x3D, 0x10, 0x23, 0xD6, 0x29, 0xB0,
+            0x91, 0x52, 0x9F, 0xA7,
+        ];
+        let params = KdfParams {
+            mem_cost: 64,
+            time_cost: 3,
+            lanes: 2,
+        };
+        let digest = params
+            .hash_passphrase(b"ferrocrypt-kat", &[0x5A; ARGON2_SALT_SIZE])
+            .expect("the known-answer parameters must be accepted");
+        assert_eq!(digest.as_ref(), &EXPECTED);
+    }
+
     /// `hash_passphrase` performs its own structural validation so a direct
     /// crate-internal caller cannot run Argon2id with invalid parameters. A
     /// `time_cost` above `MAX_TIME_COST` must return `InvalidKdfParams` before

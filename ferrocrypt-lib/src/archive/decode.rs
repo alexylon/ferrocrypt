@@ -328,7 +328,9 @@ fn extract_directory_root<R: Read>(
     for dir_entry in &dir_entries {
         let rel = strip_root_prefix(&dir_entry.path_utf8, root_name_str)?;
         let (parent_dir, dir_name) = platform::walk_to_parent(&root_dir, rel)?;
-        let _new_dir = platform::mkdir_strict(&parent_dir, &dir_name)?;
+        let _new_dir = platform::mkdir_strict(&parent_dir, &dir_name).map_err(|e| {
+            map_already_exists(e, ARCHIVE_PATH_COLLIDES, Path::new(&dir_entry.path_utf8))
+        })?;
     }
 
     // Pass 2: stream file contents in MANIFEST ORDER. The content
@@ -341,7 +343,14 @@ fn extract_directory_root<R: Read>(
         let rel = strip_root_prefix(&entry.path_utf8, root_name_str)?;
         let (parent_dir, file_name) = platform::walk_to_parent(&root_dir, rel)?;
         let mut outfile =
-            platform::create_file_at(&parent_dir, &file_name, platform::INITIAL_FILE_CREATE_MODE)?;
+            platform::create_file_at(&parent_dir, &file_name, platform::INITIAL_FILE_CREATE_MODE)
+                .map_err(|e| {
+                map_already_exists(
+                    CryptoError::Io(e),
+                    ARCHIVE_PATH_COLLIDES,
+                    Path::new(&entry.path_utf8),
+                )
+            })?;
         copy_exact_n(reader, &mut outfile, entry.size, archive_content_truncated)?;
         platform::chmod_file_handle(&outfile, entry.mode)?;
         // Synced before promotion, so a crash after the rename cannot
@@ -543,6 +552,14 @@ fn output_already_exists(output_dir: &Path, root_name: &OsStr) -> CryptoError {
 /// of the same file; either way this run did not create it, so it is
 /// rejected and preserved.
 const INCOMPLETE_OUTPUT_EXISTS: &str = "Incomplete output already exists";
+
+/// Label for a collision between two entries of the same archive. The
+/// §9.7 duplicate key folds ASCII case only, so a filesystem that folds
+/// more than that — Unicode normalization on APFS, a case-folding
+/// volume — can still refuse the exclusive create for a manifest that
+/// validated. Naming the archive path tells the operator which entry
+/// the target filesystem could not keep apart.
+const ARCHIVE_PATH_COLLIDES: &str = "Archive path collides with an existing entry";
 
 /// Maps `io::ErrorKind::AlreadyExists` to a typed
 /// `CryptoError::InvalidInput("<label>: <path>")` and otherwise
@@ -2053,11 +2070,12 @@ mod tests {
         );
 
         let err = unarchive_default(archive, tmp.path()).unwrap_err();
-        // On a normalizing FS the second `create_new` rejects with
-        // `AlreadyExists` (mapped) or surfaces an Io error.
+        // On a normalizing filesystem the second exclusive create
+        // reports `AlreadyExists`, which maps to the typed collision
+        // rejection naming the archive path.
         let s = format!("{err}");
         assert!(
-            s.contains("already exists") || matches!(err, CryptoError::Io(_)),
+            matches!(err, CryptoError::InvalidInput(_)) && s.contains(ARCHIVE_PATH_COLLIDES),
             "got: {s}",
         );
 

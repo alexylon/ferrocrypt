@@ -336,6 +336,8 @@ struct ArchiveCounters {
     manifest_len: u64,
     /// `(dev, ino)` of every directory visited so far. Unix-only
     /// because Windows does not expose stable directory inodes.
+    /// Directories whose filesystem reports inode 0 are left out, since
+    /// that value identifies nothing.
     #[cfg(unix)]
     seen_dirs: std::collections::HashSet<(u64, u64)>,
 }
@@ -590,9 +592,10 @@ fn build_manifest(
         #[cfg(unix)]
         {
             use cap_std::fs::MetadataExt;
-            counters
-                .seen_dirs
-                .insert((source_root_meta.dev(), source_root_meta.ino()));
+            let (dev, ino) = (source_root_meta.dev(), source_root_meta.ino());
+            if ino != 0 {
+                counters.seen_dirs.insert((dev, ino));
+            }
         }
 
         walk_directory(
@@ -713,11 +716,18 @@ fn walk_directory(
         // Cycle detection on Unix using (dev, ino). The insert happens
         // here, where the dir is OPENED, so an empty directory still
         // consumes its dev/ino slot.
+        //
+        // Inode 0 means the filesystem supplies no inode number — some
+        // network mounts and overlay filesystems report it for every
+        // entry. Comparing those would reject the second subdirectory
+        // as a cycle, so they are skipped; the entry-count, depth, and
+        // total-bytes caps still bound a walk that cannot be checked
+        // this way.
         #[cfg(unix)]
         {
             use cap_std::fs::MetadataExt;
-            let key = (child_meta.dev(), child_meta.ino());
-            if !counters.seen_dirs.insert(key) {
+            let (dev, ino) = (child_meta.dev(), child_meta.ino());
+            if ino != 0 && !counters.seen_dirs.insert((dev, ino)) {
                 return Err(CryptoError::InvalidInput(format!(
                     "Directory cycle in archive source: {}",
                     sanitize_for_display(&fca_path)

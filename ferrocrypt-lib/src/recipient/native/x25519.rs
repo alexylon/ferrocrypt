@@ -70,8 +70,9 @@ const WRAP_NONCE_OFFSET: usize = EPHEMERAL_PUBLIC_KEY_OFFSET + PUBLIC_KEY_SIZE;
 const WRAPPED_FILE_KEY_OFFSET: usize = WRAP_NONCE_OFFSET + WRAP_NONCE_SIZE;
 
 /// Structurally rejects the all-zero X25519 public key — the only
-/// small-order point we can pre-screen without baking in an explicit
-/// RFC 7748 §6.1 list. Public-key ingress points (`PublicKey::from_bytes`,
+/// small-order point we can pre-screen without carrying an explicit
+/// blocklist. RFC 7748 §6.1 motivates the check but publishes no such
+/// list. Public-key ingress points (`PublicKey::from_bytes`,
 /// `decode_x25519_recipient`, `read_public_key`) call this so a
 /// degenerate key cannot construct a `PublicKey` value in the first
 /// place. Other small-order points are still backstopped by the

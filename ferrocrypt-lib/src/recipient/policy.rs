@@ -644,8 +644,8 @@ mod tests {
 
     #[test]
     fn enforce_mixing_rejects_argon2id_plus_unknown_non_critical() {
-        // Per FORMAT.md §3.4 (and the plan), even an unknown
-        // non-critical entry alongside argon2id is a mixing violation.
+        // Per FORMAT.md §4.1, even an unknown non-critical entry
+        // alongside argon2id is a mixing violation.
         let err = enforce_recipient_mixing_policy(&[
             argon2id_entry(),
             unknown_entry("future-thing", false),

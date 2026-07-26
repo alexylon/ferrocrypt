@@ -34,7 +34,7 @@ const _: () = assert!(ENTRY_BODY_LEN_OFFSET + size_of::<u32>() == ENTRY_HEADER_S
 pub(crate) const RECIPIENT_FLAG_CRITICAL: u16 = 1 << 0;
 
 /// Mask of all `recipient_flags` bits other than
-/// [`RECIPIENT_FLAG_CRITICAL`]. Per `FORMAT.md` §3.5, these must be
+/// [`RECIPIENT_FLAG_CRITICAL`]. Per `FORMAT.md` §3.4, these must be
 /// zero on the wire; readers reject any entry with a reserved bit set.
 pub(crate) const RECIPIENT_FLAGS_RESERVED_MASK: u16 = !RECIPIENT_FLAG_CRITICAL;
 
@@ -534,7 +534,7 @@ mod tests {
 
     #[test]
     fn parse_one_rejects_reserved_flag_bits() {
-        // Bit 1 is reserved per FORMAT.md §3.5.
+        // Bit 1 is reserved per FORMAT.md §3.4.
         let bytes = entry_header(6, 1u16 << 1, 0);
         match RecipientEntry::parse_one(&bytes, BODY_LEN_LOCAL_CAP_DEFAULT) {
             Err(CryptoError::InvalidFormat(FormatDefect::RecipientFlagsReserved)) => {}

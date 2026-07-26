@@ -253,11 +253,11 @@ pub(crate) fn sync_dir_handle(dir: &Dir) {
 /// No-op on targets without this `openat`/`fsync` directory-sync path.
 ///
 /// On Windows this is a real gap, not an equivalence: `FlushFileBuffers`
-/// requires a write handle, and neither `cap_std::fs::Dir` nor anything
-/// reachable from it under `#![forbid(unsafe_code)]` can produce one
-/// without resolving a path again — which is the ambient resolution the
-/// capability design exists to avoid. Staged descendant directories are
-/// therefore not flushed on Windows. The path-based
+/// requires a write handle, and the extraction `Dir` handles are opened
+/// read-only. A capability-relative reopen of `.` with write access
+/// could close the gap, but is not implemented or verified on Windows.
+/// Staged descendant directories are therefore not flushed there. The
+/// path-based
 /// `fs::atomic::sync_parent_dir` still flushes the output directory
 /// entry after promotion, and NTFS journals metadata, so the exposure is
 /// a crash between extraction and promotion. `FORMAT.md` §9.11 states

@@ -380,7 +380,7 @@ mod tests {
                 mem_cost_kib,
                 local_cap_kib,
             }) => {
-                assert_eq!(mem_cost_kib, 2 * 1024 * 1024);
+                assert_eq!(mem_cost_kib, KdfParams::MAX_MEM_COST);
                 assert_eq!(local_cap_kib, 64);
             }
             other => panic!("expected KdfResourceCapExceeded, got {other:?}"),

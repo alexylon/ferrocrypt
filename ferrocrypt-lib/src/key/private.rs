@@ -375,7 +375,7 @@ pub(crate) fn seal_private_key(
 }
 
 /// Test-only: seals a `private.key` skipping the writer-side
-/// `validate_tlv` gate, so reader-rejection tests can build
+/// `validate_private_key_ext_tlv` gate, so reader-rejection tests can build
 /// authenticated files with intentionally malformed `ext_bytes`. Never
 /// reachable from production code.
 #[cfg(test)]
@@ -1495,7 +1495,6 @@ mod tests {
         assert_eq!(parsed, header);
     }
 
-    /// Builds a structurally-valid 90-byte header for tampering tests.
     /// A header declaring the structural maximum must not pull that
     /// many bytes into memory when the caller's cap is far lower. The
     /// short buffer is deliberate: `open_private_key` reports the cap
@@ -1537,6 +1536,7 @@ mod tests {
         }
     }
 
+    /// Builds a structurally-valid 90-byte header for tampering tests.
     fn sample_header_bytes() -> [u8; PRIVATE_KEY_HEADER_FIXED_SIZE] {
         PrivateKeyHeader {
             key_flags: 0,

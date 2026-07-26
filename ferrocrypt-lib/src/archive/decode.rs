@@ -563,17 +563,17 @@ const ARCHIVE_PATH_COLLIDES: &str = "Archive path collides with an existing entr
 
 /// Maps `io::ErrorKind::AlreadyExists` to a typed
 /// `CryptoError::InvalidInput("<label>: <path>")` and otherwise
-/// preserves the underlying error. Used at the first-touch staging
-/// boundary: `mkdir_strict` / `create_file_at` reject an `.incomplete`
-/// already at the working name ([`INCOMPLETE_OUTPUT_EXISTS`]) with a
-/// recognisable diagnostic AND preserve it (the cleanup path tracks
-/// only roots THIS run created).
+/// preserves the underlying error. Serves both collision boundaries:
+/// the first-touch staging names ([`INCOMPLETE_OUTPUT_EXISTS`] — the
+/// entry is preserved, because the cleanup path tracks only roots THIS
+/// run created) and the per-entry creates inside the staged tree
+/// ([`ARCHIVE_PATH_COLLIDES`]).
 fn map_already_exists(e: CryptoError, label: &str, path: &Path) -> CryptoError {
     if let CryptoError::Io(io_err) = &e {
         if io_err.kind() == io::ErrorKind::AlreadyExists {
-            // The path mixes the caller's output directory with archive-derived
-            // names; sanitize it so a malicious name cannot smuggle look-alike
-            // characters into the message.
+            // Every rendered path contains archive-derived names; sanitize
+            // so a malicious name cannot smuggle look-alike characters
+            // into the message.
             return CryptoError::InvalidInput(format!(
                 "{label}: {}",
                 sanitize_path_for_display(path)

@@ -764,10 +764,11 @@ pub enum CryptoError {
     /// encoding failures. If this fires, it indicates a library bug.
     #[error("Internal error: {}", DisplayableMarker(.0))]
     InternalInvariant(&'static str),
-    /// A cryptographic primitive (AEAD encryption, HKDF expansion) returned
-    /// an error even though the inputs were well-formed. Unreachable in
-    /// practice for valid data; indicates either a library bug or a very
-    /// rare underlying-crate failure.
+    /// A cryptographic primitive (AEAD encryption, HKDF expansion)
+    /// returned an error even though the inputs were well-formed, or the
+    /// Argon2id working memory could not be allocated. The allocation
+    /// case is reachable on a memory-tight host; the others indicate a
+    /// library bug or a very rare underlying-crate failure.
     #[error("Internal crypto error: {}", DisplayableMarker(.0))]
     InternalCryptoFailure(&'static str),
 }
@@ -791,12 +792,12 @@ pub enum FormatDefect {
     /// Leading magic bytes do not match `"FCR\0"`.
     BadMagic,
     /// `ext_len` in a `.fcr` header's fixed section exceeds the reader's
-    /// structural cap (`EXT_LEN_MAX`, 64 KiB), or a TLV region exceeds
-    /// the cap its containing format gives the shared scanner — the FCA
-    /// archive-level and per-entry extension regions reach it that way.
-    /// A `private.key` `ext_len` rejects earlier, as
-    /// [`Self::MalformedPrivateKey`]. Carried as `u32` because the cap
-    /// is `65_536`, which exceeds `u16::MAX`.
+    /// structural cap (`EXT_LEN_MAX`, 64 KiB). The shared TLV scanner
+    /// re-checks its cap on every region it is handed, but the FCA and
+    /// `private.key` regions are capped by their containing formats
+    /// first (the latter as [`Self::MalformedPrivateKey`]), so only the
+    /// `.fcr` fixed-section check is reachable from input. Carried as
+    /// `u32` because the cap is `65_536`, which exceeds `u16::MAX`.
     ExtTooLarge {
         /// Declared extension-region length, in bytes.
         len: u32,

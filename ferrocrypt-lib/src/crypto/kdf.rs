@@ -598,7 +598,7 @@ mod tests {
             lanes: 4,
         }
         .to_bytes();
-        let limit = KdfLimit::new(2 * 1024 * 1024); // 2 GiB
+        let limit = KdfLimit::new(KdfLimit::MEM_COST_KIB_STRUCTURAL_MAX);
         assert!(KdfParams::from_bytes(&bytes, Some(&limit)).is_ok());
     }
 
@@ -757,16 +757,11 @@ mod tests {
     /// for the primitive: the positional argument order in
     /// `argon2::Params::new`, `Version::V0x13`, `Algorithm::Argon2id`,
     /// the 32-byte output length, and passing the stored salt through
-    /// unmodified. Every other Argon2id test in the crate is a
-    /// FerroCrypt-to-FerroCrypt round trip, which a symmetric mistake in
-    /// any of those five would survive.
-    ///
-    /// The expected bytes come from OpenSSL's `ARGON2ID` KDF, a separate
-    /// implementation from the `argon2` crate, so agreement is a genuine
-    /// cross-implementation check. `testvectors/kat/README.md` records
-    /// the command that produces them. The three parameters are
-    /// deliberately distinct, so swapping any pair either changes the
-    /// digest or makes the parameter set invalid.
+    /// unmodified. The expected bytes come from OpenSSL's `ARGON2ID`
+    /// KDF, a separate implementation from the `argon2` crate;
+    /// `testvectors/kat/README.md` records the producing command. The
+    /// three parameters are deliberately distinct, so swapping any pair
+    /// either changes the digest or makes the parameter set invalid.
     #[test]
     fn hash_passphrase_matches_independent_oracle() {
         const EXPECTED: [u8; ENCRYPTION_KEY_SIZE] = [

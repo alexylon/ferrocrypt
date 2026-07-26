@@ -22,7 +22,8 @@
 //! 2. Reject bad magic / version / kind / flags / header length.
 //! 3. Read header and header MAC.
 //! 4. Structurally parse header and recipient entries.
-//! 5. Reject malformed flags, unknown critical recipients, illegal
+//! 5. Reject reserved flags, then unknown critical recipients across
+//!    the whole list, then native structural defects, then illegal
 //!    mixing.
 //! 6. Apply local resource caps.
 //! 7. Iterate supported recipient slots in declared order.

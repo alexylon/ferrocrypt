@@ -553,11 +553,10 @@ Readers MUST complete the recipient-specific step 8 checks for every supported
 entry before starting the mixing checks in step 9. Step 9 MUST NOT begin unless
 every step 8 check has succeeded; if a file has both a recipient-specific
 structural defect and an illegal recipient mix, the step 8 structural rejection
-takes precedence. The
-step 8 checks include the exact 116-byte `argon2id` body length and exact
-104-byte `x25519` body length. A reader MUST NOT unlock a supplied private key
-(including running its unlock KDF), perform X25519 or another KEM operation, or
-run a recipient KDF until this preflight succeeds.
+takes precedence. The step 8 checks include the exact 116-byte `argon2id` body
+length and exact 104-byte `x25519` body length. A reader MUST NOT unlock a
+supplied private key (including running its unlock KDF), perform X25519 or
+another KEM operation, or run a recipient KDF until this preflight succeeds.
 
 A recipient unwrap is not successful until the header MAC verifies.
 
@@ -1174,7 +1173,7 @@ rejection after successful authentication.
 Readers MUST validate magic, kind, private-key encoding version and
 key-pair-suite support, flags, type name, lengths, total file size, KDF
 parameters, local resource caps, AEAD authentication, TLV rules, and
-recipient-type-specific secret/public material constraints, in that order.
+recipient-type-specific secret/public material constraints.
 `kind` precedes the version byte because §11.1 makes the kind byte the selector
 for that byte's domain: a file declaring another kind is `wrong_kind` (§12.1)
 whatever byte sits at offset 4.

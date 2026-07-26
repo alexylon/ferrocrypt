@@ -838,15 +838,16 @@ mod tests {
     }
 
     #[test]
-    fn unwrap_rejects_small_order_ephemeral_via_all_zero_shared() {
-        // An all-zero ephemeral public_key is a known X25519 small-order
-        // point: X25519(any_secret, all_zero_public_key) = all_zero_shared.
-        // Per `FORMAT.md` §2.4 / §4.2 this must be rejected by readers
-        // before deriving the wrap key, and the rejection is
-        // credential-independent — readers must surface it as a structural
-        // defect (file-fatal) rather than as a slot-skippable AEAD
-        // failure, so the [`X25519Credential`] adapter propagates the
-        // error instead of collapsing to `Ok(None)`.
+    fn unwrap_rejects_all_zero_ephemeral_at_the_preflight() {
+        // An all-zero ephemeral public key is a known X25519 small-order
+        // point; the body preflight at the head of `unwrap` rejects it
+        // before any key agreement runs. Per `FORMAT.md` §2.4 / §4.2 the
+        // rejection is credential-independent — a structural defect
+        // (file-fatal) rather than a slot-skippable AEAD failure, so the
+        // [`X25519Credential`] adapter propagates the error instead of
+        // collapsing to `Ok(None)`. The all-zero shared-secret backstop
+        // is covered at the protocol level with a canonical small-order
+        // point.
         let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
         let (sk, pk) = keypair();
         let mut body = wrap(&file_key, &pk).unwrap();

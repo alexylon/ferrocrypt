@@ -26,11 +26,10 @@
 //! `fingerprint = SHA3-256(type_name || 0x00 || key_material)`. The
 //! domain separator `"ferrocrypt/v1/public-key/checksum"` is *not*
 //! included in the fingerprint hash so the user-displayed identity is
-//! independent of the checksum-domain string. Canonical display is 64
-//! lowercase hex chars; short display is the first 16 of those; the
-//! grouped form (per `FORMAT.md` §7.2) renders as four-character
-//! lowercase hex groups joined by `:` for spoken or out-of-band
-//! verification.
+//! independent of the checksum-domain string. This module renders only
+//! the canonical form, 64 lowercase hex characters; the short and
+//! `:`-grouped forms `FORMAT.md` §7.2 permits are a presentation-layer
+//! choice this module does not implement.
 
 use bech32::primitives::decode::CheckedHrpstring;
 use bech32::{Bech32, Checksum, Hrp};

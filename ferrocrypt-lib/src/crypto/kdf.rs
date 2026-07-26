@@ -407,7 +407,18 @@ impl KdfParams {
         // buffer without scrubbing, and the final blocks hold material
         // from which the derived key can be recomputed. `Zeroizing`
         // wipes all `mem_cost` KiB on drop, including error paths.
-        let mut blocks = Zeroizing::new(vec![argon2::Block::default(); params.block_count()]);
+        //
+        // Reserved fallibly rather than with `vec![_; n]`, whose
+        // allocation failure aborts the process. At the default 1 GiB
+        // memory cost a host with less to spare must get an error the
+        // caller can report.
+        let block_count = params.block_count();
+        let mut blocks = Vec::new();
+        blocks
+            .try_reserve_exact(block_count)
+            .map_err(|_| CryptoError::InternalCryptoFailure("Argon2id memory allocation failed"))?;
+        blocks.resize(block_count, argon2::Block::default());
+        let mut blocks = Zeroizing::new(blocks);
         let hasher =
             argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
         let mut output = Zeroizing::new([0u8; ENCRYPTION_KEY_SIZE]);

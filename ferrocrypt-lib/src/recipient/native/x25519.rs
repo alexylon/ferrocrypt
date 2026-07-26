@@ -28,6 +28,8 @@
 //! Both [`wrap`] and [`unwrap`] reject an all-zero X25519 shared secret
 //! per `FORMAT.md` §2.4 / §4.2. This catches a small-order ephemeral /
 //! recipient key combination; the check uses constant-time compare.
+//! [`unwrap`] also re-applies [`validate_body_preflight`], so an
+//! all-zero or non-canonical ephemeral rejects there too.
 //!
 //! On the decrypt side the rejection is **file-fatal**, not
 //! slot-skippable: an all-zero shared secret is credential-independent
@@ -119,6 +121,10 @@ pub(crate) fn is_canonical_public_key_encoding(bytes: &[u8; PUBLIC_KEY_SIZE]) ->
 /// exact 104-byte length is enforced by the caller via the native
 /// registry. Small-order ephemerals other than all-zero cannot be
 /// screened here and stay covered by [`unwrap`]'s shared-secret check.
+///
+/// Called from the §3.7 step 8 preflight and again from [`unwrap`], so
+/// the rule holds even for a body that did not come through the
+/// preflight.
 pub(crate) fn validate_body_preflight(body: &[u8]) -> Result<(), CryptoError> {
     let ephemeral: &[u8; PUBLIC_KEY_SIZE] = body
         .get(EPHEMERAL_PUBLIC_KEY_OFFSET..EPHEMERAL_PUBLIC_KEY_OFFSET + PUBLIC_KEY_SIZE)
@@ -192,8 +198,9 @@ pub(crate) fn wrap(
 ///
 /// Two failure classes, deliberately distinguished:
 ///
-/// - **Structural malformation:** an all-zero ECDH shared secret per
-///   `FORMAT.md` §2.4 / §4.2 — surfaces as
+/// - **Structural malformation:** an all-zero or non-canonical
+///   `ephemeral_public_key_bytes`, or an all-zero ECDH shared secret,
+///   per `FORMAT.md` §2.4 / §4.2 — surfaces as
 ///   `CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)`.
 ///   Credential-independent: any decryptor would observe the same all-zero
 ///   value, so the spec mandates file-fatal rejection. The
@@ -212,6 +219,10 @@ pub(crate) fn unwrap(
     body: &[u8; BODY_LENGTH],
     private_key_bytes: &[u8; PRIVATE_KEY_SIZE],
 ) -> Result<FileKey, CryptoError> {
+    // Repeated here so the ephemeral rule holds for any caller, not only
+    // for bodies that reached this function through the §3.7 preflight.
+    validate_body_preflight(body)?;
+
     let mut ephemeral_public_key_bytes = [0u8; PUBLIC_KEY_SIZE];
     ephemeral_public_key_bytes.copy_from_slice(
         &body[EPHEMERAL_PUBLIC_KEY_OFFSET..EPHEMERAL_PUBLIC_KEY_OFFSET + PUBLIC_KEY_SIZE],
@@ -843,6 +854,28 @@ mod tests {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)) => {}
             other => {
                 panic!("expected MalformedRecipientEntry for all-zero ephemeral, got {other:?}")
+            }
+        }
+    }
+
+    /// A non-canonical `ephemeral_public_key_bytes` must reject as a
+    /// structural defect (`FORMAT.md` §4.2), not as an AEAD failure.
+    /// X25519 masks the top bit, so the key agreement still succeeds and
+    /// only the raw bytes bound into the HKDF salt differ; without the
+    /// canonicality check the entry would be reported as a wrong
+    /// credential.
+    #[test]
+    fn unwrap_rejects_non_canonical_ephemeral() {
+        let file_key = FileKey::from_bytes_for_tests([0u8; FILE_KEY_SIZE]);
+        let (sk, pk) = keypair();
+        let mut body = wrap(&file_key, &pk).unwrap();
+        body[EPHEMERAL_PUBLIC_KEY_OFFSET + PUBLIC_KEY_SIZE - 1] |= 0x80;
+        match unwrap(&body, &sk) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)) => {}
+            other => {
+                panic!(
+                    "expected MalformedRecipientEntry for non-canonical ephemeral, got {other:?}"
+                )
             }
         }
     }

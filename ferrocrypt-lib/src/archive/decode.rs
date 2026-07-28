@@ -282,7 +282,7 @@ fn extract_single_file_root<R: Read>(
 
     // Synced before promotion, so a crash after the rename cannot
     // surface incompletely written content under the final name.
-    platform::sync_file_durable(&outfile).map_err(CryptoError::Io)?;
+    platform::sync_file_crash_safe(&outfile).map_err(CryptoError::Io)?;
 
     // FORMAT.md §9.11 step 13: verify archive EOF — no byte may follow
     // the last declared file content. Single-file root has no descendant
@@ -354,7 +354,7 @@ fn extract_directory_root<R: Read>(
         platform::chmod_file_handle(&outfile, entry.mode)?;
         // Synced before promotion, so a crash after the rename cannot
         // surface incompletely written content under the final name.
-        platform::sync_file_durable(&outfile).map_err(CryptoError::Io)?;
+        platform::sync_file_crash_safe(&outfile).map_err(CryptoError::Io)?;
     }
 
     // FORMAT.md §9.11 step 13: verify archive EOF — no byte may follow

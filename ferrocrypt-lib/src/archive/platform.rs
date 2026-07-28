@@ -238,15 +238,22 @@ fn rename_at_no_clobber_via_claim(
 pub(crate) fn sync_dir_handle(dir: &Dir) {
     use std::os::fd::AsFd;
 
-    use rustix::fs::{Mode, OFlags, fsync, openat};
+    use rustix::fs::{Mode, OFlags, openat};
+    use rustix::io::retry_on_intr;
 
-    if let Ok(sync_fd) = openat(
-        dir.as_fd(),
-        ".",
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-        Mode::empty(),
-    ) {
-        let _ = fsync(&sync_fd);
+    // `rustix` reports a signal-interrupted call as `EINTR` rather than
+    // retrying, and every error here is discarded, so an interrupted
+    // open would otherwise skip the flush silently.
+    let opened = retry_on_intr(|| {
+        openat(
+            dir.as_fd(),
+            ".",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+    });
+    if let Ok(sync_fd) = opened {
+        let _ = crate::fs::atomic::fsync_uninterrupted(&sync_fd);
     }
 }
 
@@ -630,24 +637,31 @@ pub(crate) fn create_file_at(
     parent.open_with(name, &options)
 }
 
-/// Flushes an extraction-side file handle to stable storage with the
-/// strongest primitive the filesystem supports: `sync_all` first (on
-/// macOS this issues `F_FULLFSYNC`), plain `fsync(2)` when the
-/// filesystem reports the full flush as unsupported — macOS smbfs
-/// among them. Genuine sync failures surface unchanged; only the
-/// capability gap downgrades.
+/// Flushes an extraction-side file handle with plain `fsync(2)`. That
+/// makes the written bytes and the file's permission bits durable
+/// against a killed process, an application crash, and an
+/// operating-system panic, which is what `FORMAT.md` §9.11 asks this
+/// sync to cover. A power cut on a drive that keeps its own volatile
+/// write cache is not covered.
 ///
-/// Twin of [`crate::fs::atomic::sync_file_durable`] for
-/// `cap_std::fs::File` handles; keep their fallback condition in step.
-pub(crate) fn sync_file_durable(file: &File) -> io::Result<()> {
-    match file.sync_all() {
-        Ok(()) => Ok(()),
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        Err(e) if crate::fs::atomic::errno_not_supported(&e) => {
-            rustix::fs::fsync(file).map_err(io::Error::from)
-        }
-        Err(e) => Err(e),
-    }
+/// Deliberately weaker than [`crate::fs::atomic::sync_file_durable`],
+/// which issues macOS `F_FULLFSYNC` and so empties the drive's own
+/// write cache. Extraction would empty it once per extracted file
+/// rather than once for the whole operation, which on macOS costs more
+/// than all the other extraction work together. Only macOS differs,
+/// because on Linux `sync_all` is already `fsync(2)`. `fdatasync` would
+/// be cheaper still, but does not promise to make the permission bits
+/// durable.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn sync_file_crash_safe(file: &File) -> io::Result<()> {
+    crate::fs::atomic::fsync_uninterrupted(file)
+}
+
+/// On targets without the `rustix` `fsync` path, `sync_all` is the only
+/// flush available; on Windows that is `FlushFileBuffers`.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn sync_file_crash_safe(file: &File) -> io::Result<()> {
+    file.sync_all()
 }
 
 /// Sets the rwx permission bits on an already-open file handle.
@@ -750,6 +764,22 @@ mod tests {
         let parent = open_anchor(tmp.path()).unwrap();
         let file = open_file_nofollow(&parent, OsStr::new("plain.txt")).unwrap();
         assert!(file.metadata().unwrap().is_file());
+    }
+
+    /// The staged-file flush must work on the handles extraction uses, so
+    /// a target whose `fsync` rejects one fails here rather than part-way
+    /// through a real extraction.
+    #[test]
+    fn sync_file_crash_safe_succeeds_on_created_file() {
+        use std::io::Write;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let parent = open_anchor(tmp.path()).unwrap();
+
+        let mut file =
+            create_file_at(&parent, OsStr::new("staged"), INITIAL_FILE_CREATE_MODE).unwrap();
+        file.write_all(b"content").unwrap();
+        sync_file_crash_safe(&file).unwrap();
     }
 
     /// A FIFO must be rejected as non-regular without waiting for a writer.

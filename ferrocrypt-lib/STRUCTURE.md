@@ -971,9 +971,18 @@ It contains:
 - pre-promotion file durability: `sync_file_durable` flushes a staged
   `std::fs::File` with `sync_all` and falls back to plain `fsync(2)`
   where the filesystem reports the full flush as unsupported
-  (`errno_not_supported`; macOS smbfs among them). The extraction-side
-  twin for `cap_std::fs::File` handles lives in `archive/platform.rs`;
-  the two share the fallback condition;
+  (`errno_not_supported`; macOS smbfs among them). Used where one flush
+  covers a whole operation: the encrypted output and each generated key
+  file. Archive extraction flushes once per extracted file, so it uses
+  the weaker `archive/platform.rs::sync_file_crash_safe` instead (plain
+  `fsync(2)`, `sync_all` on targets without it): on macOS, emptying the
+  drive's write cache once per file costs more than all the other
+  extraction work together, and `FORMAT.md` §9.11 asks this sync to
+  cover a crash, which plain `fsync(2)` does. Both reach the syscall
+  through `fsync_uninterrupted`, the single source of truth for EINTR
+  handling on the flush paths, because `rustix` reports a
+  signal-interrupted call as `EINTR` while `File::sync_all` retries
+  internally;
 - required directory-entry flushing: `sync_dir_durable` opens and flushes a directory, returning genuine failures to the caller. Unix uses an `O_DIRECTORY` read handle; Windows uses a backup-semantics write handle because `FlushFileBuffers` requires write access. Filesystems that cannot flush directories are treated as unsupported, which limits the caller's guarantee to process interruption. Key generation uses this helper after each key-file commit. `sync_parent_dir` remains the best-effort helper for recoverable outputs such as encrypted files and promoted decrypted outputs; it flushes on Windows too, through the same `sync_dir_durable` primitive with the result dropped. Staged descendant directories during extraction are flushed on Linux and macOS only (`archive/platform.rs::sync_dir_handle`): Windows needs a write handle for `FlushFileBuffers`, and the extraction directory handles are opened read-only; a capability-relative write reopen of `.` could close the gap but is not implemented or verified on Windows;
 - keeping a staged file on disk after a refused promotion, so a rejected commit leaves the caller something to inspect.
 

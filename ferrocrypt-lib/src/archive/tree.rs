@@ -380,7 +380,7 @@ mod tests {
 
     #[test]
     fn rejects_total_bytes_above_cap() {
-        let l = ArchiveLimits::default().with_max_total_plaintext_bytes(100);
+        let l = ArchiveLimits::default().max_total_plaintext_bytes(100);
         let entries = vec![entry("file.txt", ArchiveEntryKind::File, 50)];
         let err = validate_manifest_tree(&entries, 200, l).unwrap_err();
         assert!(matches!(
@@ -391,7 +391,7 @@ mod tests {
 
     #[test]
     fn rejects_entry_count_above_cap() {
-        let l = ArchiveLimits::default().with_max_entry_count(1);
+        let l = ArchiveLimits::default().max_entry_count(1);
         let entries = vec![
             entry("root", ArchiveEntryKind::Directory, 0),
             entry("root/a.txt", ArchiveEntryKind::File, 10),

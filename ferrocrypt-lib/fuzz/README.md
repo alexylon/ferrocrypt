@@ -30,7 +30,7 @@ the integration targets.
 | `fuzz_tlv` | `validate_tlv` extension-region grammar: canonical ordering, reserved tags, critical-tag rejection |
 | `fuzz_kdf_params` | `KdfParams::from_bytes` structural and local-resource bounds |
 | `fuzz_archive_path` | `validate_fca_path` — the FCA archive path-grammar gate (writer/reader symmetric, takes UTF-8 `&str`); asserts every FORMAT.md §9.6 grammar promise on accepted paths, with the reserved-device list restated independently so an accept-direction regression crashes instead of passing |
-| `fuzz_fca_header` | `parse_fca_header` — 27-byte FCA fixed header parser; asserts returned values are inside `ArchiveLimits` on success |
+| `fuzz_fca_header` | `parse_fca_header` — 27-byte FCA fixed header parser; asserts returned values are inside the default `ArchiveLimits` on success |
 | `fuzz_fca_manifest` | Full FCA manifest pipeline: header → manifest bytes → `parse_manifest_bytes` → tree-shape validation; asserts spec §20 manifest invariants on success, then re-serializes through the writer gate and asserts byte-identity (writer/reader symmetry) |
 | `fuzz_fca_full_pipeline` | `archive::unarchive` end-to-end on arbitrary bytes against a fresh tempdir per iteration (header, `archive_ext` TLV, manifest, tree, content streaming, promotion, cleanup); asserts the `DeleteOnError` contract — no `.incomplete` residue on error, output present and no residue on success |
 | `fuzz_stream_decrypt` | STREAM-BE32 `DecryptReader` on raw ciphertext under a fixed key/nonce: chunk refill, exact-chunk one-byte peek, and classification of truncation, tampering, trailing data, and an empty final chunk after data; when an input decrypts, asserts deterministic re-encryption is byte-identical |

@@ -812,6 +812,8 @@ Readers leave `source_path` as `None`; writers set it.
 - maximum cumulative per-entry TLV bytes (default 64 MiB);
 - maximum single TLV value byte length (default 16 MiB).
 
+`ArchiveLimits` follows the same public shape as `HeaderReadLimits` (`container.rs`) and `KeyReadLimits` (`key/limits.rs`): `pub(crate)` fields, one consuming builder method per cap named after the cap it sets, and a published `*_DEFAULT` constant per cap so a caller can adjust one cap relative to the defaults without copying a number out of `FORMAT.md` §9.12. `PATH_BYTES_STRUCTURAL_MAX` is the only structural ceiling the format imposes — the on-disk `path_len` field is a `u16` — and `max_path_bytes` clamps at it, so a cap the wire format cannot express is unrepresentable rather than rejected once an operation starts. The remaining caps are resource policy alone and accept any value their type holds. A module-level `const _: () = assert!(…)` pins `PATH_BYTES_DEFAULT` inside the structural ceiling at compile time. The type therefore has no runtime `validate` step: every value it can hold is usable.
+
 The wrapper helpers `enforce_per_entry_caps` and `enforce_total_bytes_cap` are used only by the encrypt-side preflight; the decode side runs the same underlying per-cap helpers directly during manifest parsing and tree validation, so each cap rule has exactly one owner. Encrypt-side preflight and decrypt-side enforcement must agree: the encrypt side must not produce archives that the decrypt side rejects under default limits.
 
 ### 7.4 `archive/path.rs`

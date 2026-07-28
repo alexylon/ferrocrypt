@@ -617,7 +617,7 @@ fn passphrase_decryptor_archive_limits_constrains_extraction() {
 
     let restore = work.join("restored");
     fs::create_dir_all(&restore).unwrap();
-    let tight = ArchiveLimits::default().with_max_entry_count(1);
+    let tight = ArchiveLimits::default().max_entry_count(1);
     let result = match Decryptor::open(&outcome.output_path).expect("open") {
         Decryptor::Passphrase(d) => d.archive_limits(tight).decrypt(pass(), &restore, |_| {}),
         _ => panic!("expected passphrase decryptor"),
@@ -653,7 +653,7 @@ fn recipient_decryptor_archive_limits_constrains_extraction() {
 
     let restore = work.join("restored");
     fs::create_dir_all(&restore).unwrap();
-    let tight = ArchiveLimits::default().with_max_entry_count(1);
+    let tight = ArchiveLimits::default().max_entry_count(1);
     let result = match Decryptor::open(&outcome.output_path).expect("open") {
         Decryptor::PrivateKey(d) => d.archive_limits(tight).decrypt(
             PrivateKey::from_key_file(&kg.private_key_path),
@@ -709,7 +709,7 @@ fn archive_limits_writer_raised_default_reader_rejects_path_depth() {
     // Writer raises `max_path_depth` so the encrypt-side preflight
     // accepts the deep tree. Without this raise the writer's own
     // preflight would reject before any payload bytes were written.
-    let raised = ArchiveLimits::default().with_max_path_depth(80);
+    let raised = ArchiveLimits::default().max_path_depth(80);
     let outcome = fast_passphrase_encryptor(pass())
         .archive_limits(raised)
         .write(&input, &out_dir, |_| {})
@@ -764,8 +764,8 @@ fn archive_limits_raised_on_both_sides_round_trips() {
     fs::create_dir_all(&out_dir).unwrap();
 
     let raised = ArchiveLimits::default()
-        .with_max_entry_count(8)
-        .with_max_path_depth(8);
+        .max_entry_count(8)
+        .max_path_depth(8);
     let outcome = fast_passphrase_encryptor(pass())
         .archive_limits(raised)
         .write(&dir, &out_dir, |_| {})

@@ -4,6 +4,9 @@ All notable changes to FerroCrypt are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- **`ArchiveLimits` now has the same shape as the other limit types.** Each builder method is named after the cap it sets — `max_entry_count(n)` in place of `with_max_entry_count(n)`, and the same for all nine caps. Every cap has a published default (`ArchiveLimits::ENTRY_COUNT_DEFAULT` and its siblings), so raising one cap relative to the defaults no longer means copying a number out of `FORMAT.md` §9.12. `max_path_bytes` clamps at the new `ArchiveLimits::PATH_BYTES_STRUCTURAL_MAX` (65,535, the largest value the stored path length can hold) instead of accepting a larger value and failing once an operation had started; the "Archive path byte limit exceeds FCA u16 path length" error is gone. The fields are no longer public, and the type gained `PartialEq` and `Eq`. Every cap value and default is unchanged — update call sites by dropping the `with_` prefix.
+
 ## [0.3.0-rc.3] - 2026-07-26
 
 ### Added

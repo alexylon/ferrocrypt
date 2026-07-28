@@ -7,6 +7,11 @@
 //! be inside the supplied [`ArchiveLimits`]. Catches a regression in
 //! the resource-cap arms of the parser, including the `archive_ext_len`
 //! cap added with FCA's forward-compatibility hooks.
+//!
+//! The target fuzzes the default configuration, so the bounds below are
+//! the published `ArchiveLimits::*_DEFAULT` constants rather than fields
+//! read back from the value handed to the parser. Change both together
+//! if this target ever fuzzes a non-default configuration.
 
 use ferrocrypt::ArchiveLimits;
 use ferrocrypt::fuzz_exports::parse_fca_header;
@@ -17,10 +22,10 @@ fuzz_target!(|data: &[u8]| {
     let mut reader = std::io::Cursor::new(data);
     if let Ok(header) = parse_fca_header(&mut reader, limits) {
         assert!(header.entry_count >= 1);
-        assert!(header.entry_count <= limits.max_entry_count);
-        assert!(header.archive_ext_len <= limits.max_archive_ext_bytes);
+        assert!(header.entry_count <= ArchiveLimits::ENTRY_COUNT_DEFAULT);
+        assert!(header.archive_ext_len <= ArchiveLimits::ARCHIVE_EXT_BYTES_DEFAULT);
         assert!(header.manifest_len >= 1);
-        assert!(header.manifest_len <= limits.max_manifest_bytes);
-        assert!(header.total_file_bytes <= limits.max_total_plaintext_bytes);
+        assert!(header.manifest_len <= ArchiveLimits::MANIFEST_BYTES_DEFAULT);
+        assert!(header.total_file_bytes <= ArchiveLimits::TOTAL_PLAINTEXT_BYTES_DEFAULT);
     }
 });

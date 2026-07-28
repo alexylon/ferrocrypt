@@ -14,6 +14,11 @@
 //! grammar promises, so a regression that starts ACCEPTING hostile
 //! paths — the security-relevant failure direction for a validator —
 //! crashes the fuzzer instead of passing silently.
+//!
+//! The target fuzzes the default configuration, so the byte and depth
+//! bounds are the published `ArchiveLimits::*_DEFAULT` constants rather
+//! than fields read back from the value handed to the validator. Change
+//! both together if this target ever fuzzes a non-default configuration.
 
 use ferrocrypt::ArchiveLimits;
 use ferrocrypt::fuzz_exports::{FCA_COMPONENT_MAX_BYTES, validate_fca_path};
@@ -60,16 +65,16 @@ const RESERVED_DEVICE_NAMES: &[&str] = &[
 
 /// Asserts the FORMAT.md §9.6 grammar promises on a path the
 /// validator accepted.
-fn assert_accepted_path_invariants(path: &str, limits: &ArchiveLimits) {
+fn assert_accepted_path_invariants(path: &str) {
     assert!(!path.is_empty());
-    assert!(path.len() <= limits.max_path_bytes as usize);
+    assert!(path.len() <= ArchiveLimits::PATH_BYTES_DEFAULT as usize);
     assert!(!path.starts_with('/') && !path.ends_with('/'), "{path:?}");
     assert!(!path.contains("//"), "{path:?}");
     assert!(!path.contains('\0'), "{path:?}");
     assert!(!path.contains('\\'), "{path:?}");
 
     let components: Vec<&str> = path.split('/').collect();
-    assert!(components.len() <= limits.max_path_depth as usize);
+    assert!(components.len() <= ArchiveLimits::PATH_DEPTH_DEFAULT as usize);
     for component in components {
         assert!(!component.is_empty(), "{path:?}");
         assert_ne!(component, ".");
@@ -111,7 +116,7 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(s) = std::str::from_utf8(data) {
         let limits = ArchiveLimits::default();
         if validate_fca_path(s, limits).is_ok() {
-            assert_accepted_path_invariants(s, &limits);
+            assert_accepted_path_invariants(s);
         }
     }
 });

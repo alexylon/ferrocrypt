@@ -345,8 +345,6 @@ pub fn parse_fca_header<R: Read>(
     reader: &mut R,
     limits: ArchiveLimits,
 ) -> Result<FcaHeader, CryptoError> {
-    limits.validate()?;
-
     let magic: [u8; 4] = read_array_fca(reader, FIXED_HEADER_TRUNCATED)?;
     if &magic != FCA_MAGIC {
         return Err(CryptoError::MalformedArchive { reason: BAD_MAGIC });
@@ -419,8 +417,6 @@ pub(crate) fn checked_manifest_len(
     entries: &[ArchiveEntry],
     limits: ArchiveLimits,
 ) -> Result<usize, CryptoError> {
-    let limits = limits.validate()?;
-
     let mut len: usize = 0;
     let mut total_entry_ext_bytes: u64 = 0;
     for entry in entries {
@@ -467,7 +463,6 @@ fn validate_manifest_for_write(
     manifest: &Manifest,
     limits: ArchiveLimits,
 ) -> Result<(), CryptoError> {
-    let limits = limits.validate()?;
     let mut computed_total: u64 = 0;
     for entry in &manifest.entries {
         validate_fca_path(&entry.path_utf8, limits)?;
@@ -585,8 +580,6 @@ pub fn parse_manifest_bytes(
     header: FcaHeader,
     limits: ArchiveLimits,
 ) -> Result<Manifest, CryptoError> {
-    let limits = limits.validate()?;
-
     if bytes.len() != require_fits_usize(header.manifest_len, MANIFEST_PLATFORM_LIMIT)? {
         return Err(malformed_manifest());
     }
@@ -886,7 +879,7 @@ mod tests {
     /// the per-entry path doesn't silently widen the resource budget.
     #[test]
     fn parse_rejects_oversize_entry_ext_len() {
-        let limits = ArchiveLimits::default().with_max_entry_ext_bytes(8);
+        let limits = ArchiveLimits::default().max_entry_ext_bytes(8);
         let bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 4, 9, 10, b"file", &[0u8; 9]);
         let header = FcaHeader {
             entry_count: 1,
@@ -909,8 +902,8 @@ mod tests {
     #[test]
     fn parse_rejects_total_entry_ext_above_cap() {
         let limits = ArchiveLimits::default()
-            .with_max_entry_ext_bytes(8)
-            .with_max_total_entry_ext_bytes(10);
+            .max_entry_ext_bytes(8)
+            .max_total_entry_ext_bytes(10);
         let one_tlv = tlv_bytes(0x0001, &[0xAA, 0xBB]);
         let mut bytes = Vec::new();
         bytes.extend(raw_entry_bytes(
@@ -1118,7 +1111,7 @@ mod tests {
     /// guard as the limits-side enforce-helper test.
     #[test]
     fn entry_count_at_cap_admissible() {
-        let limits = ArchiveLimits::default().with_max_entry_count(10);
+        let limits = ArchiveLimits::default().max_entry_count(10);
         let bytes = raw_header_bytes(FCA_VERSION, 0, 10, 0, 100, 1024);
         let mut cur = Cursor::new(&bytes);
         let parsed = parse_fca_header(&mut cur, limits).expect("at-cap is admissible");
@@ -1458,7 +1451,7 @@ mod tests {
         };
         // Defaults' max_total_plaintext_bytes is 64 GiB; bump it for
         // this synthetic test only.
-        let limits = ArchiveLimits::default().with_max_total_plaintext_bytes(u64::MAX);
+        let limits = ArchiveLimits::default().max_total_plaintext_bytes(u64::MAX);
         let bytes = serialize_manifest(&m, limits).unwrap();
 
         // Entry layout: kind(1) flags(1) mode(2) path_len(2)
@@ -1645,7 +1638,7 @@ mod tests {
 
     #[test]
     fn checked_manifest_len_rejects_path_above_cap() {
-        let l = ArchiveLimits::default().with_max_path_bytes(5);
+        let l = ArchiveLimits::default().max_path_bytes(5);
         let entries = [make_entry("toolong.txt", ArchiveEntryKind::File, 0, 0o644)];
         let err = checked_manifest_len(&entries, l).unwrap_err();
         assert!(matches!(
@@ -1719,7 +1712,7 @@ mod tests {
 
     #[test]
     fn checked_manifest_len_rejects_above_manifest_cap() {
-        let l = ArchiveLimits::default().with_max_manifest_bytes(20);
+        let l = ArchiveLimits::default().max_manifest_bytes(20);
         // Two entries, each 18 + 5 = 23 bytes → total 46 > cap 20.
         let entries = [
             make_entry("file1", ArchiveEntryKind::File, 0, 0o644),
@@ -1974,7 +1967,7 @@ mod tests {
     #[test]
     fn parse_accepts_size_u64_max() {
         let bytes = raw_entry_bytes(KIND_FILE, 0, 0o644, 4, 0, u64::MAX, b"huge", &[]);
-        let limits = ArchiveLimits::default().with_max_total_plaintext_bytes(u64::MAX);
+        let limits = ArchiveLimits::default().max_total_plaintext_bytes(u64::MAX);
         let header = FcaHeader {
             entry_count: 1,
             archive_ext_len: 0,

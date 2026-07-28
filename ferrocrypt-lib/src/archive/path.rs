@@ -49,9 +49,6 @@ pub const FCA_COMPONENT_MAX_BYTES: usize = FILESYSTEM_NAME_MAX_BYTES - INCOMPLET
 /// Same function called by encode-side metadata-pass and decode-side
 /// manifest-parse — the single shared implementation IS the writer /
 /// reader symmetry guarantee.
-///
-/// Caller has already passed `limits` through
-/// `ArchiveLimits::validate`; we don't re-run that check here.
 pub fn validate_fca_path(path: &str, limits: ArchiveLimits) -> Result<(), CryptoError> {
     if path.is_empty() {
         return Err(CryptoError::MalformedArchive {
@@ -395,7 +392,7 @@ mod tests {
 
     #[test]
     fn rejects_oversize_path() {
-        let l = ArchiveLimits::default().with_max_path_bytes(10);
+        let l = ArchiveLimits::default().max_path_bytes(10);
         let err = validate_fca_path("this_is_too_long.txt", l).unwrap_err();
         assert!(matches!(
             err,
@@ -405,7 +402,7 @@ mod tests {
 
     #[test]
     fn rejects_oversize_depth() {
-        let l = ArchiveLimits::default().with_max_path_depth(3);
+        let l = ArchiveLimits::default().max_path_depth(3);
         let err = validate_fca_path("a/b/c/d", l).unwrap_err();
         assert!(matches!(
             err,
@@ -418,7 +415,7 @@ mod tests {
     /// helpers carry on the encode side.
     #[test]
     fn depth_at_cap_admissible() {
-        let l = ArchiveLimits::default().with_max_path_depth(3);
+        let l = ArchiveLimits::default().max_path_depth(3);
         assert!(validate_fca_path("a/b/c", l).is_ok());
     }
 

@@ -18,126 +18,188 @@ use super::reasons::{TOTAL_ENTRY_EXT_BYTES_OVERFLOW, TOTAL_FILE_BYTES_OVERFLOW};
 
 /// Resource caps for FCA archive encoding and extraction.
 ///
-/// See `FORMAT.md` §9.12. Defaults: 250,000 entries, 64 GiB cumulative
-/// logical regular-file bytes, 64 path components per entry, 4096
-/// UTF-8 bytes per path, 64 MiB serialized manifest, 64 KiB per
-/// archive- and entry-level TLV region, 64 MiB total per-entry TLV
-/// bytes, 16 MiB per individual TLV value.
-#[derive(Debug, Clone, Copy)]
+/// The defaults suit ordinary files and directory trees. Raise a cap only
+/// for input of a known origin that legitimately exceeds it, and pass the
+/// same value to both sides: an archive written under raised caps needs
+/// matching caps to be read back.
+///
+/// Every cap has a published `*_DEFAULT` constant, so adjusting one cap
+/// relative to the defaults does not mean copying a number out of
+/// `FORMAT.md` §9.12. Only [`ArchiveLimits::max_path_bytes`] has a
+/// structural ceiling — the on-disk `path_len` field is a `u16` — and its
+/// builder method clamps there, so a value the format cannot represent is
+/// unrepresentable rather than rejected once an operation starts. The other
+/// caps are resource policy alone and accept any value their type holds.
+///
+/// Caps are enforced before allocation, key derivation, or filesystem
+/// output, and exceeding one surfaces as a distinct `Archive*CapExceeded`
+/// error rather than as a malformed-archive defect (`FORMAT.md` §9.12).
+///
+/// Pass a value to [`crate::Encryptor::archive_limits`],
+/// [`crate::PassphraseDecryptor::archive_limits`], or
+/// [`crate::PrivateKeyDecryptor::archive_limits`]. The struct is
+/// `#[non_exhaustive]` so future releases can add further caps without a
+/// breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ArchiveLimits {
     /// Maximum number of manifest entries (regular files plus directories).
-    pub max_entry_count: u32,
+    pub(crate) max_entry_count: u32,
     /// Maximum cumulative declared logical bytes across regular-file
     /// entries. Directory entries do not contribute.
-    pub max_total_plaintext_bytes: u64,
+    pub(crate) max_total_plaintext_bytes: u64,
     /// Maximum path component count for any single archive entry.
-    pub max_path_depth: u32,
-    /// Maximum UTF-8 byte length of any single archive path.
-    /// Must be `<= u16::MAX` because the on-disk `path_len` field is `u16`.
-    pub max_path_bytes: u32,
+    pub(crate) max_path_depth: u32,
+    /// Maximum UTF-8 byte length of any single archive path. Never above
+    /// [`ArchiveLimits::PATH_BYTES_STRUCTURAL_MAX`], because the on-disk
+    /// `path_len` field is a `u16`.
+    pub(crate) max_path_bytes: u32,
     /// Maximum byte length of the serialized manifest, including the
     /// per-entry TLV regions that live inside it.
-    pub max_manifest_bytes: u32,
+    pub(crate) max_manifest_bytes: u32,
     /// Maximum byte length of the FCA archive-level TLV region
     /// (`archive_ext`). The FCA fixed header's `archive_ext_len` field
     /// is rejected before allocation if it exceeds this cap.
-    pub max_archive_ext_bytes: u32,
+    pub(crate) max_archive_ext_bytes: u32,
     /// Maximum byte length of any single per-entry TLV region
     /// (`entry_ext`).
-    pub max_entry_ext_bytes: u32,
+    pub(crate) max_entry_ext_bytes: u32,
     /// Maximum cumulative byte length of all per-entry TLV regions in
     /// one manifest. Bounds memory used by extension metadata across
     /// the archive even when individual entries fit under
     /// `max_entry_ext_bytes`.
-    pub max_total_entry_ext_bytes: u64,
+    pub(crate) max_total_entry_ext_bytes: u64,
     /// Maximum byte length of any single TLV value inside an FCA
     /// archive- or entry-level TLV region. Defense-in-depth: the
     /// containing region cap will fire first today, but a future
     /// region with a larger cap still bounds individual values.
-    pub max_tlv_value_bytes: u32,
+    pub(crate) max_tlv_value_bytes: u32,
 }
 
 impl ArchiveLimits {
-    /// Replaces [`ArchiveLimits::max_entry_count`].
-    pub fn with_max_entry_count(mut self, n: u32) -> Self {
-        self.max_entry_count = n;
+    /// Structural maximum for the per-path byte cap (65,535 bytes): the
+    /// on-disk `path_len` field is a `u16` (`FORMAT.md` §9.12).
+    /// [`ArchiveLimits::max_path_bytes`] clamps at this value. It is the
+    /// only cap the format itself bounds; the rest are resource policy.
+    pub const PATH_BYTES_STRUCTURAL_MAX: u32 = u16::MAX as u32;
+
+    /// Default manifest entry count (250,000 entries).
+    pub const ENTRY_COUNT_DEFAULT: u32 = 250_000;
+    /// Default cumulative logical regular-file byte count (64 GiB).
+    pub const TOTAL_PLAINTEXT_BYTES_DEFAULT: u64 = 64 * 1024 * 1024 * 1024;
+    /// Default per-path component count (64 components).
+    pub const PATH_DEPTH_DEFAULT: u32 = 64;
+    /// Default per-path UTF-8 byte length (4,096 bytes).
+    pub const PATH_BYTES_DEFAULT: u32 = 4096;
+    /// Default serialized manifest byte length (64 MiB).
+    pub const MANIFEST_BYTES_DEFAULT: u32 = 64 * 1024 * 1024;
+    /// Default archive-level TLV region byte length (64 KiB).
+    pub const ARCHIVE_EXT_BYTES_DEFAULT: u32 = 64 * 1024;
+    /// Default per-entry TLV region byte length (64 KiB).
+    pub const ENTRY_EXT_BYTES_DEFAULT: u32 = 64 * 1024;
+    /// Default cumulative per-entry TLV byte length (64 MiB).
+    pub const TOTAL_ENTRY_EXT_BYTES_DEFAULT: u64 = 64 * 1024 * 1024;
+    /// Default single-TLV value byte length (16 MiB).
+    pub const TLV_VALUE_BYTES_DEFAULT: u32 = 16 * 1024 * 1024;
+
+    /// Sets the maximum number of manifest entries. A source tree or a
+    /// manifest above the cap rejects with
+    /// [`CryptoError::ArchiveEntryCountCapExceeded`] before per-entry
+    /// state is allocated.
+    pub fn max_entry_count(mut self, value: u32) -> Self {
+        self.max_entry_count = value;
         self
     }
 
-    /// Replaces [`ArchiveLimits::max_total_plaintext_bytes`].
-    pub fn with_max_total_plaintext_bytes(mut self, n: u64) -> Self {
-        self.max_total_plaintext_bytes = n;
+    /// Sets the maximum cumulative logical byte count across regular-file
+    /// entries. A larger total rejects with
+    /// [`CryptoError::ArchiveTotalBytesCapExceeded`] before any file
+    /// content is copied.
+    pub fn max_total_plaintext_bytes(mut self, value: u64) -> Self {
+        self.max_total_plaintext_bytes = value;
         self
     }
 
-    /// Replaces [`ArchiveLimits::max_path_depth`].
-    pub fn with_max_path_depth(mut self, n: u32) -> Self {
-        self.max_path_depth = n;
+    /// Sets the maximum path component count for one archive entry. A
+    /// deeper path rejects with
+    /// [`CryptoError::ArchivePathDepthCapExceeded`] before filesystem
+    /// traversal.
+    pub fn max_path_depth(mut self, value: u32) -> Self {
+        self.max_path_depth = value;
         self
     }
 
-    /// Replaces [`ArchiveLimits::max_path_bytes`].
-    pub fn with_max_path_bytes(mut self, n: u32) -> Self {
-        self.max_path_bytes = n;
+    /// Sets the maximum UTF-8 byte length of one archive path, clamped at
+    /// [`Self::PATH_BYTES_STRUCTURAL_MAX`]. A longer path rejects with
+    /// [`CryptoError::ArchivePathBytesCapExceeded`] before the path is
+    /// allocated or converted.
+    pub fn max_path_bytes(mut self, value: u32) -> Self {
+        self.max_path_bytes = value.min(Self::PATH_BYTES_STRUCTURAL_MAX);
         self
     }
 
-    /// Replaces [`ArchiveLimits::max_manifest_bytes`].
-    pub fn with_max_manifest_bytes(mut self, n: u32) -> Self {
-        self.max_manifest_bytes = n;
+    /// Sets the maximum serialized manifest byte length, per-entry TLV
+    /// regions included. A larger manifest rejects with
+    /// [`CryptoError::ArchiveManifestLenCapExceeded`] before the manifest
+    /// buffer is allocated.
+    pub fn max_manifest_bytes(mut self, value: u32) -> Self {
+        self.max_manifest_bytes = value;
         self
     }
 
-    /// Replaces [`ArchiveLimits::max_archive_ext_bytes`].
-    pub fn with_max_archive_ext_bytes(mut self, n: u32) -> Self {
-        self.max_archive_ext_bytes = n;
+    /// Sets the maximum archive-level TLV region byte length. A larger
+    /// declared region rejects with
+    /// [`CryptoError::ArchiveExtLenCapExceeded`] before the extension
+    /// buffer is allocated.
+    pub fn max_archive_ext_bytes(mut self, value: u32) -> Self {
+        self.max_archive_ext_bytes = value;
         self
     }
 
-    /// Replaces [`ArchiveLimits::max_entry_ext_bytes`].
-    pub fn with_max_entry_ext_bytes(mut self, n: u32) -> Self {
-        self.max_entry_ext_bytes = n;
+    /// Sets the maximum byte length of one per-entry TLV region. A larger
+    /// region rejects with
+    /// [`CryptoError::ArchiveEntryExtLenCapExceeded`] before its bytes are
+    /// sliced.
+    pub fn max_entry_ext_bytes(mut self, value: u32) -> Self {
+        self.max_entry_ext_bytes = value;
         self
     }
 
-    /// Replaces [`ArchiveLimits::max_total_entry_ext_bytes`].
-    pub fn with_max_total_entry_ext_bytes(mut self, n: u64) -> Self {
-        self.max_total_entry_ext_bytes = n;
+    /// Sets the maximum cumulative byte length of every per-entry TLV
+    /// region in one manifest. A larger total rejects with
+    /// [`CryptoError::ArchiveTotalEntryExtCapExceeded`] while the manifest
+    /// is parsed.
+    pub fn max_total_entry_ext_bytes(mut self, value: u64) -> Self {
+        self.max_total_entry_ext_bytes = value;
         self
     }
 
-    /// Replaces [`ArchiveLimits::max_tlv_value_bytes`].
-    pub fn with_max_tlv_value_bytes(mut self, n: u32) -> Self {
-        self.max_tlv_value_bytes = n;
+    /// Sets the maximum byte length of one TLV value inside an FCA
+    /// archive- or entry-level region. A longer value rejects the region
+    /// as malformed while it is validated.
+    pub fn max_tlv_value_bytes(mut self, value: u32) -> Self {
+        self.max_tlv_value_bytes = value;
         self
-    }
-
-    /// Enforces the structural invariant that `max_path_bytes` fits in
-    /// the on-disk `u16` path-length field. Other fields are not
-    /// otherwise constrained — callers may pick any `u32`/`u64` value.
-    pub(crate) fn validate(self) -> Result<Self, CryptoError> {
-        if self.max_path_bytes > u16::MAX as u32 {
-            return Err(CryptoError::InvalidInput(
-                "Archive path byte limit exceeds FCA u16 path length".to_string(),
-            ));
-        }
-        Ok(self)
     }
 }
+
+/// The default path-byte cap must itself be representable on the wire, or
+/// every unconfigured operation would carry an impossible cap.
+const _: () =
+    assert!(ArchiveLimits::PATH_BYTES_DEFAULT <= ArchiveLimits::PATH_BYTES_STRUCTURAL_MAX);
 
 impl Default for ArchiveLimits {
     fn default() -> Self {
         Self {
-            max_entry_count: 250_000,
-            max_total_plaintext_bytes: 64 * 1024 * 1024 * 1024,
-            max_path_depth: 64,
-            max_path_bytes: 4096,
-            max_manifest_bytes: 64 * 1024 * 1024,
-            max_archive_ext_bytes: 64 * 1024,
-            max_entry_ext_bytes: 64 * 1024,
-            max_total_entry_ext_bytes: 64 * 1024 * 1024,
-            max_tlv_value_bytes: 16 * 1024 * 1024,
+            max_entry_count: Self::ENTRY_COUNT_DEFAULT,
+            max_total_plaintext_bytes: Self::TOTAL_PLAINTEXT_BYTES_DEFAULT,
+            max_path_depth: Self::PATH_DEPTH_DEFAULT,
+            max_path_bytes: Self::PATH_BYTES_DEFAULT,
+            max_manifest_bytes: Self::MANIFEST_BYTES_DEFAULT,
+            max_archive_ext_bytes: Self::ARCHIVE_EXT_BYTES_DEFAULT,
+            max_entry_ext_bytes: Self::ENTRY_EXT_BYTES_DEFAULT,
+            max_total_entry_ext_bytes: Self::TOTAL_ENTRY_EXT_BYTES_DEFAULT,
+            max_tlv_value_bytes: Self::TLV_VALUE_BYTES_DEFAULT,
         }
     }
 }
@@ -409,99 +471,106 @@ mod tests {
         enforce_total_entry_ext_cap,
     };
 
+    /// The `FORMAT.md` §9.12 default table, pinned against the published
+    /// constants so a caller reading `ENTRY_COUNT_DEFAULT` and a caller
+    /// calling `default()` cannot see different numbers.
     #[test]
     fn defaults_match_spec_values() {
         let l = ArchiveLimits::default();
+        assert_eq!(l.max_entry_count, ArchiveLimits::ENTRY_COUNT_DEFAULT);
         assert_eq!(l.max_entry_count, 250_000);
+        assert_eq!(
+            l.max_total_plaintext_bytes,
+            ArchiveLimits::TOTAL_PLAINTEXT_BYTES_DEFAULT
+        );
         assert_eq!(l.max_total_plaintext_bytes, 64 * 1024 * 1024 * 1024);
+        assert_eq!(l.max_path_depth, ArchiveLimits::PATH_DEPTH_DEFAULT);
         assert_eq!(l.max_path_depth, 64);
+        assert_eq!(l.max_path_bytes, ArchiveLimits::PATH_BYTES_DEFAULT);
         assert_eq!(l.max_path_bytes, 4096);
+        assert_eq!(l.max_manifest_bytes, ArchiveLimits::MANIFEST_BYTES_DEFAULT);
         assert_eq!(l.max_manifest_bytes, 64 * 1024 * 1024);
+        assert_eq!(
+            l.max_archive_ext_bytes,
+            ArchiveLimits::ARCHIVE_EXT_BYTES_DEFAULT
+        );
         assert_eq!(l.max_archive_ext_bytes, 64 * 1024);
+        assert_eq!(
+            l.max_entry_ext_bytes,
+            ArchiveLimits::ENTRY_EXT_BYTES_DEFAULT
+        );
         assert_eq!(l.max_entry_ext_bytes, 64 * 1024);
+        assert_eq!(
+            l.max_total_entry_ext_bytes,
+            ArchiveLimits::TOTAL_ENTRY_EXT_BYTES_DEFAULT
+        );
         assert_eq!(l.max_total_entry_ext_bytes, 64 * 1024 * 1024);
+        assert_eq!(
+            l.max_tlv_value_bytes,
+            ArchiveLimits::TLV_VALUE_BYTES_DEFAULT
+        );
         assert_eq!(l.max_tlv_value_bytes, 16 * 1024 * 1024);
     }
 
+    /// `path_len` is a `u16` on the wire, so the builder clamps rather
+    /// than storing a cap the format cannot express. The boundary is
+    /// exact: the structural maximum is kept, one above it clamps down.
     #[test]
-    fn validate_accepts_defaults() {
-        assert!(ArchiveLimits::default().validate().is_ok());
+    fn path_bytes_builder_clamps_at_structural_max() {
+        let at = ArchiveLimits::default().max_path_bytes(ArchiveLimits::PATH_BYTES_STRUCTURAL_MAX);
+        assert_eq!(at.max_path_bytes, ArchiveLimits::PATH_BYTES_STRUCTURAL_MAX);
+
+        let above = ArchiveLimits::default().max_path_bytes(u32::MAX);
+        assert_eq!(
+            above.max_path_bytes,
+            ArchiveLimits::PATH_BYTES_STRUCTURAL_MAX
+        );
     }
 
-    /// `path_len` is on-disk `u16`, so a cap above `u16::MAX` is
-    /// structurally invalid. The boundary is exact: `u16::MAX` admissible,
-    /// `u16::MAX + 1` rejected.
-    #[test]
-    fn validate_rejects_path_bytes_above_u16_max() {
-        let l = ArchiveLimits::default().with_max_path_bytes(u16::MAX as u32 + 1);
-        let err = l.validate().unwrap_err();
-        assert!(format!("{err}").contains("u16 path length"));
-    }
-
-    #[test]
-    fn validate_accepts_path_bytes_at_u16_max() {
-        let l = ArchiveLimits::default().with_max_path_bytes(u16::MAX as u32);
-        assert!(l.validate().is_ok());
-    }
-
-    /// Each `with_*` builder must replace exactly one field and leave
-    /// the others at the receiver's value. Catches an accidental
-    /// cross-field assignment if a future refactor reorders or copy-
-    /// pastes the builder bodies.
+    /// Each builder must replace exactly one cap and leave the others at
+    /// the receiver's value. Catches an accidental cross-field assignment
+    /// if a future refactor reorders or copy-pastes the builder bodies.
+    /// `PartialEq` makes each case a single comparison against the
+    /// expected result.
     #[test]
     fn builders_replace_only_targeted_field() {
         let base = ArchiveLimits::default();
 
-        let l = base.with_max_entry_count(7);
-        assert_eq!(l.max_entry_count, 7);
-        assert_eq!(l.max_total_plaintext_bytes, base.max_total_plaintext_bytes);
-        assert_eq!(l.max_path_depth, base.max_path_depth);
-        assert_eq!(l.max_path_bytes, base.max_path_bytes);
-        assert_eq!(l.max_manifest_bytes, base.max_manifest_bytes);
+        let mut want = base;
+        want.max_entry_count = 7;
+        assert_eq!(base.max_entry_count(7), want);
 
-        let l = base.with_max_total_plaintext_bytes(123);
-        assert_eq!(l.max_entry_count, base.max_entry_count);
-        assert_eq!(l.max_total_plaintext_bytes, 123);
-        assert_eq!(l.max_path_depth, base.max_path_depth);
-        assert_eq!(l.max_path_bytes, base.max_path_bytes);
-        assert_eq!(l.max_manifest_bytes, base.max_manifest_bytes);
+        let mut want = base;
+        want.max_total_plaintext_bytes = 123;
+        assert_eq!(base.max_total_plaintext_bytes(123), want);
 
-        let l = base.with_max_path_depth(7);
-        assert_eq!(l.max_entry_count, base.max_entry_count);
-        assert_eq!(l.max_total_plaintext_bytes, base.max_total_plaintext_bytes);
-        assert_eq!(l.max_path_depth, 7);
-        assert_eq!(l.max_path_bytes, base.max_path_bytes);
-        assert_eq!(l.max_manifest_bytes, base.max_manifest_bytes);
+        let mut want = base;
+        want.max_path_depth = 7;
+        assert_eq!(base.max_path_depth(7), want);
 
-        let l = base.with_max_path_bytes(99);
-        assert_eq!(l.max_entry_count, base.max_entry_count);
-        assert_eq!(l.max_total_plaintext_bytes, base.max_total_plaintext_bytes);
-        assert_eq!(l.max_path_depth, base.max_path_depth);
-        assert_eq!(l.max_path_bytes, 99);
-        assert_eq!(l.max_manifest_bytes, base.max_manifest_bytes);
+        let mut want = base;
+        want.max_path_bytes = 99;
+        assert_eq!(base.max_path_bytes(99), want);
 
-        let l = base.with_max_manifest_bytes(42);
-        assert_eq!(l.max_entry_count, base.max_entry_count);
-        assert_eq!(l.max_total_plaintext_bytes, base.max_total_plaintext_bytes);
-        assert_eq!(l.max_path_depth, base.max_path_depth);
-        assert_eq!(l.max_path_bytes, base.max_path_bytes);
-        assert_eq!(l.max_manifest_bytes, 42);
+        let mut want = base;
+        want.max_manifest_bytes = 42;
+        assert_eq!(base.max_manifest_bytes(42), want);
 
-        let l = base.with_max_archive_ext_bytes(1234);
-        assert_eq!(l.max_archive_ext_bytes, 1234);
-        assert_eq!(l.max_entry_ext_bytes, base.max_entry_ext_bytes);
+        let mut want = base;
+        want.max_archive_ext_bytes = 1234;
+        assert_eq!(base.max_archive_ext_bytes(1234), want);
 
-        let l = base.with_max_entry_ext_bytes(5678);
-        assert_eq!(l.max_archive_ext_bytes, base.max_archive_ext_bytes);
-        assert_eq!(l.max_entry_ext_bytes, 5678);
+        let mut want = base;
+        want.max_entry_ext_bytes = 5678;
+        assert_eq!(base.max_entry_ext_bytes(5678), want);
 
-        let l = base.with_max_total_entry_ext_bytes(999);
-        assert_eq!(l.max_total_entry_ext_bytes, 999);
-        assert_eq!(l.max_tlv_value_bytes, base.max_tlv_value_bytes);
+        let mut want = base;
+        want.max_total_entry_ext_bytes = 999;
+        assert_eq!(base.max_total_entry_ext_bytes(999), want);
 
-        let l = base.with_max_tlv_value_bytes(321);
-        assert_eq!(l.max_total_entry_ext_bytes, base.max_total_entry_ext_bytes);
-        assert_eq!(l.max_tlv_value_bytes, 321);
+        let mut want = base;
+        want.max_tlv_value_bytes = 321;
+        assert_eq!(base.max_tlv_value_bytes(321), want);
     }
 
     /// `entry_count > limits.max_entry_count` is `>`, not `>=`. Boundary
@@ -510,7 +579,7 @@ mod tests {
     /// comparison-operator regression.
     #[test]
     fn enforce_per_entry_caps_entry_count_boundary() {
-        let limits = ArchiveLimits::default().with_max_entry_count(10);
+        let limits = ArchiveLimits::default().max_entry_count(10);
         assert!(enforce_per_entry_caps(10, "a", &limits).is_ok());
         assert!(enforce_per_entry_caps(11, "a", &limits).is_err());
     }
@@ -519,7 +588,7 @@ mod tests {
     /// components is admissible; `cap + 1` rejected.
     #[test]
     fn enforce_per_entry_caps_depth_boundary() {
-        let limits = ArchiveLimits::default().with_max_path_depth(3);
+        let limits = ArchiveLimits::default().max_path_depth(3);
         assert!(enforce_per_entry_caps(1, "a/b/c", &limits).is_ok());
         assert!(enforce_per_entry_caps(1, "a/b/c/d", &limits).is_err());
     }
@@ -530,7 +599,7 @@ mod tests {
     /// using a saturated value as if it were a valid sum.
     #[test]
     fn enforce_total_bytes_cap_rejects_overflow() {
-        let limits = ArchiveLimits::default().with_max_total_plaintext_bytes(u64::MAX);
+        let limits = ArchiveLimits::default().max_total_plaintext_bytes(u64::MAX);
         let mut total = u64::MAX - 100;
         let result = enforce_total_bytes_cap(200, &mut total, &limits);
         assert!(result.is_err());
@@ -546,7 +615,7 @@ mod tests {
     /// guard symmetric with the entry-count boundary test above.
     #[test]
     fn enforce_total_bytes_cap_boundary() {
-        let limits = ArchiveLimits::default().with_max_total_plaintext_bytes(100);
+        let limits = ArchiveLimits::default().max_total_plaintext_bytes(100);
         let mut total = 0;
         assert!(enforce_total_bytes_cap(100, &mut total, &limits).is_ok());
         assert_eq!(total, 100);
@@ -558,7 +627,7 @@ mod tests {
     /// Path length exactly at cap admissible; cap+1 rejects.
     #[test]
     fn enforce_path_bytes_cap_boundary() {
-        let limits = ArchiveLimits::default().with_max_path_bytes(10);
+        let limits = ArchiveLimits::default().max_path_bytes(10);
         assert!(enforce_path_bytes_cap(10, None, &limits).is_ok());
         assert!(enforce_path_bytes_cap(11, None, &limits).is_err());
     }
@@ -567,7 +636,7 @@ mod tests {
     /// Manifest length exactly at cap admissible; cap+1 rejects.
     #[test]
     fn enforce_manifest_len_cap_boundary() {
-        let limits = ArchiveLimits::default().with_max_manifest_bytes(100);
+        let limits = ArchiveLimits::default().max_manifest_bytes(100);
         assert!(enforce_manifest_len_cap(100, &limits).is_ok());
         assert!(enforce_manifest_len_cap(101, &limits).is_err());
     }
@@ -576,7 +645,7 @@ mod tests {
     /// Archive ext length exactly at cap admissible; cap+1 rejects.
     #[test]
     fn enforce_archive_ext_cap_boundary() {
-        let limits = ArchiveLimits::default().with_max_archive_ext_bytes(100);
+        let limits = ArchiveLimits::default().max_archive_ext_bytes(100);
         assert!(enforce_archive_ext_cap(100, &limits).is_ok());
         assert!(enforce_archive_ext_cap(101, &limits).is_err());
     }
@@ -585,7 +654,7 @@ mod tests {
     /// Entry ext length exactly at cap admissible; cap+1 rejects.
     #[test]
     fn enforce_entry_ext_cap_boundary() {
-        let limits = ArchiveLimits::default().with_max_entry_ext_bytes(100);
+        let limits = ArchiveLimits::default().max_entry_ext_bytes(100);
         assert!(enforce_entry_ext_cap(100, None, &limits).is_ok());
         assert!(enforce_entry_ext_cap(101, None, &limits).is_err());
     }
@@ -595,7 +664,7 @@ mod tests {
     /// unchanged on overflow.
     #[test]
     fn enforce_total_entry_ext_cap_boundary() {
-        let limits = ArchiveLimits::default().with_max_total_entry_ext_bytes(100);
+        let limits = ArchiveLimits::default().max_total_entry_ext_bytes(100);
         let mut total = 0;
         assert!(enforce_total_entry_ext_cap(100, &mut total, &limits).is_ok());
         assert_eq!(total, 100);

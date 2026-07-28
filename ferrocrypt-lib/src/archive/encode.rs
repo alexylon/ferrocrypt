@@ -1008,7 +1008,6 @@ pub(crate) fn prepare_archive(
     limits: ArchiveLimits,
 ) -> Result<PreparedArchive, CryptoError> {
     let input_path = input_path.as_ref();
-    let limits = limits.validate()?;
 
     // Defense-in-depth: api.rs runs validate_encrypt_input up-front, but
     // direct callers and any TOCTOU shift between that check and now
@@ -1416,7 +1415,7 @@ mod tests {
             fs::write(dir.join(format!("f{i}.txt")), b"x").unwrap();
         }
 
-        let limits = ArchiveLimits::default().with_max_entry_count(3);
+        let limits = ArchiveLimits::default().max_entry_count(3);
         let mut buf = Vec::new();
         let err = archive(&dir, &mut buf, limits).unwrap_err();
         assert!(matches!(
@@ -1434,7 +1433,7 @@ mod tests {
         fs::create_dir(&dir).unwrap();
         fs::write(dir.join("big.bin"), vec![0u8; 1000]).unwrap();
 
-        let limits = ArchiveLimits::default().with_max_total_plaintext_bytes(100);
+        let limits = ArchiveLimits::default().max_total_plaintext_bytes(100);
         let mut buf = Vec::new();
         let err = archive(&dir, &mut buf, limits).unwrap_err();
         assert!(matches!(
@@ -1781,8 +1780,8 @@ mod tests {
         fs::write(p.join("leaf.txt"), b"deep").unwrap();
 
         let limits = ArchiveLimits::default()
-            .with_max_path_depth((depth + 8) as u32)
-            .with_max_path_bytes(((depth * 2) + 64) as u32);
+            .max_path_depth((depth + 8) as u32)
+            .max_path_bytes(((depth * 2) + 64) as u32);
         let src_root = root;
         let out_root = out.path().to_path_buf();
 
@@ -2151,7 +2150,7 @@ mod tests {
 
         // Cap sized for exactly two single-byte-path entries.
         let one_entry = (FCA_ENTRY_FIXED_SIZE + 1) as u32;
-        let limits = ArchiveLimits::default().with_max_manifest_bytes(2 * one_entry);
+        let limits = ArchiveLimits::default().max_manifest_bytes(2 * one_entry);
 
         let mut counters = ArchiveCounters::default();
         record_entry(&mut counters, "a", None, &limits).unwrap();
@@ -2181,7 +2180,7 @@ mod tests {
         let root_entry = FCA_ENTRY_FIXED_SIZE + "d".len();
         let child_entry = FCA_ENTRY_FIXED_SIZE + "d/f0.txt".len();
         let cap = (root_entry + 2 * child_entry) as u32;
-        let limits = ArchiveLimits::default().with_max_manifest_bytes(cap);
+        let limits = ArchiveLimits::default().max_manifest_bytes(cap);
 
         let mut buf = Vec::new();
         let err = archive(&dir, &mut buf, limits).unwrap_err();

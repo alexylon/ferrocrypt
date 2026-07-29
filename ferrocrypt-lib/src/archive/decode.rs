@@ -282,7 +282,7 @@ fn extract_single_file_root<R: Read>(
 
     // Synced before promotion, so a crash after the rename cannot
     // surface incompletely written content under the final name.
-    platform::sync_file_crash_safe(&outfile).map_err(CryptoError::Io)?;
+    platform::sync_single_file_durable(&outfile).map_err(CryptoError::Io)?;
 
     // FORMAT.md §9.11 step 13: verify archive EOF — no byte may follow
     // the last declared file content. Single-file root has no descendant
@@ -352,9 +352,10 @@ fn extract_directory_root<R: Read>(
             })?;
         copy_exact_n(reader, &mut outfile, entry.size, archive_content_truncated)?;
         platform::chmod_file_handle(&outfile, entry.mode)?;
-        // Synced before promotion, so a crash after the rename cannot
-        // surface incompletely written content under the final name.
-        platform::sync_file_crash_safe(&outfile).map_err(CryptoError::Io)?;
+        // Complete the per-file part of the durability sequence. On
+        // macOS, the operation-level drive-cache barrier below finishes
+        // that sequence before promotion.
+        platform::sync_file_standard(&outfile).map_err(CryptoError::Io)?;
     }
 
     // FORMAT.md §9.11 step 13: verify archive EOF — no byte may follow
@@ -383,6 +384,12 @@ fn extract_directory_root<R: Read>(
     // flushed. File contents were synced in Pass 2; these directory
     // syncs make the links to those files durable before promotion.
     platform::sync_dir_handle(&root_dir);
+
+    // The per-file and per-directory calls above are plain `fsync` on
+    // macOS. Complete them with one full drive-cache barrier for the
+    // staged operation, preserving the pre-A2 strongest-available
+    // durability without paying for `F_FULLFSYNC` once per file.
+    platform::sync_extraction_barrier(&root_dir).map_err(CryptoError::Io)?;
 
     // root_dir is dropped here, closing the staged-directory handle
     // before promotion: on Windows an open directory handle blocks the

@@ -898,13 +898,15 @@ The reader pipeline matches `FORMAT.md` §9.11, and the step numbers below are F
 8. pre-check the final output name with `symlink_metadata` (so a dangling symlink at the final name counts as occupied);
 9. reject pre-existing `.incomplete` output at first create;
 10. create `{root}.incomplete` (file or directory) and pre-create its descendant directories;
-11. stream file contents in manifest order via `copy_exact_n`, syncing each staged file to stable storage so promotion never makes unsynced content visible under the final name;
+11. stream file contents in manifest order via `copy_exact_n`, applying the per-file part of the platform durability sequence before the handle is dropped;
 12. apply descendant file modes by handle, interleaved per file with step 11 as §9.11 permits (the root entry's mode is deferred to step 16);
 13. verify archive EOF (no trailing bytes);
 14. apply descendant directory modes deepest-first;
 15. promote `{root}.incomplete` to `{root}` via no-clobber rename;
 16. apply the root entry's stored mode AFTER promotion. For directory roots this is macOS compatibility (a non-search-permitted root mode would block the rename); for regular-file roots this prevents a permissive manifest mode (e.g. `0o644`) from being briefly visible at the staged or final name while the file still holds plaintext. Step 15 is the commit point, so this step is best-effort: a chmod failure here must not fail the extraction (a `DeleteOnError` caller would be told nothing was written while a complete output sits at the final name, beyond the reach of `.incomplete` cleanup), and the output then keeps the stricter staged mode;
 17. return the final output path.
+
+Before step 15, directory extraction completes that durability sequence with `archive/platform.rs::sync_extraction_barrier`. On macOS, every staged file first receives plain `fsync(2)` and every staged directory has the same best-effort sync attempted; then one `F_FULLFSYNC` on the completed staged root asks the drive to commit all buffered data to persistent storage. The barrier is handle-relative and reports genuine failures before the commit point. This preserves the strongest-available pre-promotion durability while reducing full-device barriers from one per extracted file to one per directory decrypt. Single-file roots retain one strongest-available file flush. Linux needs no extra barrier because its per-file `fsync` is the same operation `sync_all` used; Windows retains `FlushFileBuffers` per extracted file.
 
 `unarchive` accepts an [`IncompleteOutputPolicy`] from the caller. The default ([`IncompleteOutputPolicy::DeleteOnError`]) best-effort removes the staged `.incomplete` working tree on any decrypt failure; [`IncompleteOutputPolicy::RetainOnError`] preserves it. Cleanup tracks only roots THIS run created — `mkdir_strict` / `create_file_at` push `created_incomplete_roots` only when they actually created the working name, so an `.incomplete` this run did not create — a prior failed run's leftover, or a concurrent run's staging — rejects with `Incomplete output already exists` and is preserved. Cleanup helper `cleanup_incomplete_via_handle` routes by `symlink_metadata` on the SAME `cap_std::fs::Dir` handle opened for extraction (symlinks removed as symlinks; directories via `cap_std::fs::Dir::remove_dir_all`, whose removal is anchored to the capability handle and cannot escape it). Anchoring to the capability handle rather than re-resolving `output_dir` by path means a path swap of `output_dir` between failed extraction and cleanup cannot redirect `remove_*` to a different directory. All I/O errors are swallowed so the original `CryptoError` is the value the caller sees.
 
@@ -973,16 +975,21 @@ It contains:
   where the filesystem reports the full flush as unsupported
   (`errno_not_supported`; macOS smbfs among them). Used where one flush
   covers a whole operation: the encrypted output and each generated key
-  file. Archive extraction flushes once per extracted file, so it uses
-  the weaker `archive/platform.rs::sync_file_crash_safe` instead (plain
-  `fsync(2)`, `sync_all` on targets without it): on macOS, emptying the
-  drive's write cache once per file costs more than all the other
-  extraction work together, and `FORMAT.md` §9.11 asks this sync to
-  cover a crash, which plain `fsync(2)` does. Both reach the syscall
-  through `fsync_uninterrupted`, the single source of truth for EINTR
-  handling on the flush paths, because `rustix` reports a
-  signal-interrupted call as `EINTR` while `File::sync_all` retries
-  internally;
+  file. A single-file archive extraction similarly uses
+  `archive/platform.rs::sync_single_file_durable`. Directory extraction
+  instead applies `sync_file_standard` (plain `fsync(2)` on Linux and
+  macOS) to each staged file, then calls `sync_extraction_barrier` once
+  on the completed staged root before promotion. On macOS that final
+  handle-relative call issues `F_FULLFSYNC`, reducing full-device
+  barriers from one per file to one per operation without relying on
+  plain `fsync` for operating-system-crash durability; a filesystem that
+  rejects the full flush falls back to standard `fsync`, matching the
+  strongest behavior it supported before. Linux already uses `fsync`
+  for `sync_all`, and Windows retains `FlushFileBuffers` per file.
+  Direct `rustix` `fsync` calls reach the syscall through
+  `fsync_uninterrupted`, the single source of truth for EINTR handling,
+  because `rustix` reports a signal-interrupted call as `EINTR` while
+  `File::sync_all` retries internally;
 - required directory-entry flushing: `sync_dir_durable` opens and flushes a directory, returning genuine failures to the caller. Unix uses an `O_DIRECTORY` read handle; Windows uses a backup-semantics write handle because `FlushFileBuffers` requires write access. Filesystems that cannot flush directories are treated as unsupported, which limits the caller's guarantee to process interruption. Key generation uses this helper after each key-file commit. `sync_parent_dir` remains the best-effort helper for recoverable outputs such as encrypted files and promoted decrypted outputs; it flushes on Windows too, through the same `sync_dir_durable` primitive with the result dropped. Staged descendant directories during extraction are flushed on Linux and macOS only (`archive/platform.rs::sync_dir_handle`): Windows needs a write handle for `FlushFileBuffers`, and the extraction directory handles are opened read-only; a capability-relative write reopen of `.` could close the gap but is not implemented or verified on Windows;
 - keeping a staged file on disk after a refused promotion, so a rejected commit leaves the caller something to inspect.
 

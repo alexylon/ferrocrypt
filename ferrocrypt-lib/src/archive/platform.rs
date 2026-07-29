@@ -236,23 +236,7 @@ fn rename_at_no_clobber_via_claim(
 /// completed operation into an error.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn sync_dir_handle(dir: &Dir) {
-    use std::os::fd::AsFd;
-
-    use rustix::fs::{Mode, OFlags, openat};
-    use rustix::io::retry_on_intr;
-
-    // `rustix` reports a signal-interrupted call as `EINTR` rather than
-    // retrying, and every error here is discarded, so an interrupted
-    // open would otherwise skip the flush silently.
-    let opened = retry_on_intr(|| {
-        openat(
-            dir.as_fd(),
-            ".",
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-    });
-    if let Ok(sync_fd) = opened {
+    if let Ok(sync_fd) = open_dir_sync_fd(dir) {
         let _ = crate::fs::atomic::fsync_uninterrupted(&sync_fd);
     }
 }
@@ -271,6 +255,75 @@ pub(crate) fn sync_dir_handle(dir: &Dir) {
 /// the directory sync as SHOULD, so this stays within the specification.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn sync_dir_handle(_dir: &Dir) {}
+
+/// Opens `.` relative to a capability directory for a subsequent sync.
+///
+/// cap-std may represent a directory with an `O_PATH` handle on Linux,
+/// which cannot itself be passed to `fsync`. Reopening `.` supplies a
+/// syncable read handle without resolving an ambient path. The open is
+/// retried on `EINTR` so callers do not silently lose or spuriously fail
+/// a durability barrier when a signal arrives.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn open_dir_sync_fd(dir: &Dir) -> io::Result<rustix::fd::OwnedFd> {
+    use std::os::fd::AsFd;
+
+    use rustix::fs::{Mode, OFlags, openat};
+
+    rustix::io::retry_on_intr(|| {
+        openat(
+            dir.as_fd(),
+            ".",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+    })
+    .map_err(io::Error::from)
+}
+
+/// Completes the extraction-side durability sequence before a staged
+/// directory is promoted.
+///
+/// Every staged regular file has already received plain `fsync(2)`, and
+/// every staged directory has had the same best-effort sync attempted.
+/// On macOS, plain `fsync` can leave those writes only in the drive's
+/// volatile cache, so one `F_FULLFSYNC` on the completed staged root asks
+/// the drive to commit all buffered data to persistent storage. This is
+/// one full-device barrier per directory decrypt, rather than one per
+/// extracted file.
+///
+/// Filesystems that do not support `F_FULLFSYNC` fall back to plain
+/// `fsync`, matching the strongest behavior available before the batched
+/// barrier. Genuine open or sync failures are returned so extraction
+/// stops before promotion. Other targets need no extra barrier: Linux
+/// `fsync` already has the semantics its `sync_all` path used, while
+/// Windows keeps `FlushFileBuffers` on every extracted file.
+#[cfg(target_os = "macos")]
+pub(crate) fn sync_extraction_barrier(dir: &Dir) -> io::Result<()> {
+    let sync_fd = match open_dir_sync_fd(dir) {
+        Ok(sync_fd) => sync_fd,
+        Err(e) if crate::fs::atomic::dir_sync_unsupported(&e) => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    match rustix::io::retry_on_intr(|| rustix::fs::fcntl_fullfsync(&sync_fd)) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let e = io::Error::from(e);
+            if !crate::fs::atomic::dir_sync_unsupported(&e) {
+                return Err(e);
+            }
+            match crate::fs::atomic::fsync_uninterrupted(&sync_fd) {
+                Ok(()) => Ok(()),
+                Err(e) if crate::fs::atomic::dir_sync_unsupported(&e) => Ok(()),
+                Err(e) => Err(e),
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn sync_extraction_barrier(_dir: &Dir) -> io::Result<()> {
+    Ok(())
+}
 
 /// Windows-only post-condition for a successful directory open.
 /// cap-fs-ext's `open_dir_nofollow` uses
@@ -637,31 +690,46 @@ pub(crate) fn create_file_at(
     parent.open_with(name, &options)
 }
 
-/// Flushes an extraction-side file handle with plain `fsync(2)`. That
-/// makes the written bytes and the file's permission bits durable
-/// against a killed process, an application crash, and an
-/// operating-system panic, which is what `FORMAT.md` §9.11 asks this
-/// sync to cover. A power cut on a drive that keeps its own volatile
-/// write cache is not covered.
+/// Applies the standard per-file flush used while extracting a directory.
+/// On Linux and macOS this is plain `fsync(2)`; on Windows and other
+/// targets it is `sync_all`.
 ///
-/// Deliberately weaker than [`crate::fs::atomic::sync_file_durable`],
-/// which issues macOS `F_FULLFSYNC` and so empties the drive's own
-/// write cache. Extraction would empty it once per extracted file
-/// rather than once for the whole operation, which on macOS costs more
-/// than all the other extraction work together. Only macOS differs,
-/// because on Linux `sync_all` is already `fsync(2)`. `fdatasync` would
-/// be cheaper still, but does not promise to make the permission bits
-/// durable.
+/// On macOS, plain `fsync` sends the file's contents and permission bits
+/// to the drive but does not force its volatile cache to persistent
+/// storage. Directory extraction therefore MUST call
+/// [`sync_extraction_barrier`] after all per-file and per-directory
+/// flushes and before promotion. That final call pays for one
+/// `F_FULLFSYNC` per operation rather than one per file. `fdatasync`
+/// cannot replace this helper because it does not promise to flush the
+/// permission bits applied immediately before it.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) fn sync_file_crash_safe(file: &File) -> io::Result<()> {
+pub(crate) fn sync_file_standard(file: &File) -> io::Result<()> {
     crate::fs::atomic::fsync_uninterrupted(file)
 }
 
 /// On targets without the `rustix` `fsync` path, `sync_all` is the only
 /// flush available; on Windows that is `FlushFileBuffers`.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub(crate) fn sync_file_crash_safe(file: &File) -> io::Result<()> {
+pub(crate) fn sync_file_standard(file: &File) -> io::Result<()> {
     file.sync_all()
+}
+
+/// Strongest available flush for a single-file extraction.
+///
+/// A single-file root has no per-entry scaling cost, so it keeps the
+/// original `sync_all` behavior: macOS `F_FULLFSYNC`, Linux `fsync`, and
+/// Windows `FlushFileBuffers`. Filesystems that reject the macOS full
+/// flush fall back to plain `fsync`, matching the encrypted-output and
+/// key-file durability policy.
+pub(crate) fn sync_single_file_durable(file: &File) -> io::Result<()> {
+    match file.sync_all() {
+        Ok(()) => Ok(()),
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        Err(e) if crate::fs::atomic::errno_not_supported(&e) => {
+            crate::fs::atomic::fsync_uninterrupted(file)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Sets the rwx permission bits on an already-open file handle.
@@ -770,16 +838,24 @@ mod tests {
     /// a target whose `fsync` rejects one fails here rather than part-way
     /// through a real extraction.
     #[test]
-    fn sync_file_crash_safe_succeeds_on_created_file() {
+    fn extraction_syncs_succeed_on_created_entries() {
         use std::io::Write;
 
         let tmp = tempfile::TempDir::new().unwrap();
         let parent = open_anchor(tmp.path()).unwrap();
 
-        let mut file =
-            create_file_at(&parent, OsStr::new("staged"), INITIAL_FILE_CREATE_MODE).unwrap();
-        file.write_all(b"content").unwrap();
-        sync_file_crash_safe(&file).unwrap();
+        let mut single =
+            create_file_at(&parent, OsStr::new("single"), INITIAL_FILE_CREATE_MODE).unwrap();
+        single.write_all(b"content").unwrap();
+        sync_single_file_durable(&single).unwrap();
+
+        let root = mkdir_strict(&parent, OsStr::new("root")).unwrap();
+        let mut child =
+            create_file_at(&root, OsStr::new("child"), INITIAL_FILE_CREATE_MODE).unwrap();
+        child.write_all(b"content").unwrap();
+        sync_file_standard(&child).unwrap();
+        sync_dir_handle(&root);
+        sync_extraction_barrier(&root).unwrap();
     }
 
     /// A FIFO must be rejected as non-regular without waiting for a writer.

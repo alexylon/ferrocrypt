@@ -204,8 +204,9 @@ pub(crate) fn no_replace_rename_unsupported(e: &io::Error) -> bool {
 ///
 /// Single source of truth for EINTR handling on the flush paths that
 /// call `fsync` directly ([`sync_file_durable`] and [`sync_dir_durable`]
-/// here, `archive::platform::sync_file_crash_safe` and
-/// `sync_dir_handle`). `File::sync_all` retries internally, but `rustix`
+/// here, `archive::platform::sync_file_standard`,
+/// `sync_extraction_barrier`, and `sync_dir_handle`). `File::sync_all`
+/// retries internally, but `rustix`
 /// reports a signal-interrupted call as `EINTR`. Without the retry, a
 /// signal arriving during the flush would fail the operation, or leave
 /// it silently unflushed where the caller discards the error.
@@ -221,10 +222,11 @@ pub(crate) fn fsync_uninterrupted<Fd: std::os::fd::AsFd>(fd: Fd) -> io::Result<(
 /// `fsync(2)`, which such filesystems do honor. Genuine sync failures
 /// surface unchanged; only the capability gap downgrades.
 ///
-/// Archive extraction deliberately does not use this helper: it flushes
-/// each staged file with `archive::platform::sync_file_crash_safe`,
-/// because emptying the drive's write cache once per extracted file
-/// would dominate the cost of extracting a large tree.
+/// Directory extraction deliberately does not use this helper per file:
+/// it applies `archive::platform::sync_file_standard` to each staged
+/// file, then pays for one operation-level full barrier through
+/// `sync_extraction_barrier`. Single-file extraction keeps the strongest
+/// flush through `archive::platform::sync_single_file_durable`.
 pub(crate) fn sync_file_durable(file: &std::fs::File) -> io::Result<()> {
     match file.sync_all() {
         Ok(()) => Ok(()),
@@ -324,7 +326,7 @@ pub(crate) fn sync_dir_durable(dir: &Path) -> io::Result<()> {
 /// is a denied barrier, not a missing capability: key generation must fail
 /// rather than report success without making its directory entries durable.
 #[cfg(unix)]
-fn dir_sync_unsupported(e: &io::Error) -> bool {
+pub(crate) fn dir_sync_unsupported(e: &io::Error) -> bool {
     errno_not_supported(e)
         || matches!(
             e.raw_os_error(),

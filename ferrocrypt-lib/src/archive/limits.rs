@@ -5,11 +5,11 @@
 //! per-region, total, and per-value caps that bound FCA forward-compatibility
 //! TLV regions. See `ferrocrypt-lib/FORMAT.md` §9.12.
 //!
-//! Both writer and reader apply these caps before allocation or filesystem
-//! work — readers structurally during header / manifest parse, writers
-//! progressively during the metadata pass. The same struct is reused on
-//! both sides so a tree the default-configured decryptor would refuse cannot
-//! be encrypted in the first place.
+//! Both writer and reader apply each cap before the allocation, content copy,
+//! or filesystem work that cap bounds — readers during header / manifest
+//! parse, writers progressively during the metadata pass. The same struct is
+//! reused on both sides so a tree the default-configured decryptor would
+//! refuse cannot be encrypted in the first place.
 
 use crate::CryptoError;
 use crate::error::sanitize_for_display;
@@ -27,13 +27,21 @@ use super::reasons::{TOTAL_ENTRY_EXT_BYTES_OVERFLOW, TOTAL_FILE_BYTES_OVERFLOW};
 /// relative to the defaults does not mean copying a number out of
 /// `FORMAT.md` §9.12. Only [`ArchiveLimits::max_path_bytes`] has a
 /// structural ceiling — the on-disk `path_len` field is a `u16` — and its
-/// builder method clamps there, so a value the format cannot represent is
-/// unrepresentable rather than rejected once an operation starts. The other
-/// caps are resource policy alone and accept any value their type holds.
+/// builder method clamps there, so safe downstream code cannot construct a
+/// cap the format cannot represent. The other caps are resource policy alone
+/// and accept any value their type holds.
 ///
-/// Caps are enforced before allocation, key derivation, or filesystem
-/// output, and exceeding one surfaces as a distinct `Archive*CapExceeded`
-/// error rather than as a malformed-archive defect (`FORMAT.md` §9.12).
+/// Archive caps are enforced at the earliest point their authenticated FCA
+/// values are available. Encryption applies them during archive preflight,
+/// before key derivation or output staging. Decryption must first authenticate
+/// and begin decrypting the FCA payload; each cap then runs before the
+/// allocation, content copy, or filesystem work that it bounds, and complete
+/// manifest validation still precedes filesystem output.
+///
+/// The archive count, size, path, and extension-region caps surface as
+/// dedicated `Archive*CapExceeded` errors. A TLV value above
+/// `max_tlv_value_bytes` is instead a TLV grammar defect and surfaces as
+/// `CryptoError::InvalidFormat(FormatDefect::MalformedTlv)`.
 ///
 /// Pass a value to [`crate::Encryptor::archive_limits`],
 /// [`crate::PassphraseDecryptor::archive_limits`], or
@@ -50,7 +58,8 @@ pub struct ArchiveLimits {
     pub(crate) max_total_plaintext_bytes: u64,
     /// Maximum path component count for any single archive entry.
     pub(crate) max_path_depth: u32,
-    /// Maximum UTF-8 byte length of any single archive path. Never above
+    /// Maximum UTF-8 byte length of any single archive path. Public
+    /// construction keeps this at or below
     /// [`ArchiveLimits::PATH_BYTES_STRUCTURAL_MAX`], because the on-disk
     /// `path_len` field is a `u16`.
     pub(crate) max_path_bytes: u32,

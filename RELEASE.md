@@ -132,9 +132,25 @@ delete and re-push the tag.
 Ensure:
 1. All changes are committed: `git status`
 2. Tests pass: `cargo test`
-3. Code is formatted: `./fmt.sh`
-4. You have push access to the remote repository
-5. crates.io credentials are configured: `cargo login`
+3. The large-file round trip passes (see below)
+4. Code is formatted: `./fmt.sh`
+5. You have push access to the remote repository
+6. crates.io credentials are configured: `cargo login`
+
+### Large-file round trip
+
+`tests/large_file.rs` moves a payload just over 4 GiB through a full encrypt
+and decrypt. It is the only coverage for size accounting above `u32::MAX`, and
+it is `#[ignore]`d by design, so the CI test lane skips it. Run it by hand
+against the candidate, on a machine with a few spare GiB of disk:
+
+```bash
+cargo test -p ferrocrypt --release --test large_file -- --ignored --test-threads=1
+```
+
+It takes under a minute. `FERROCRYPT_LARGE_FILE_BYTES` overrides the payload
+size; a small value checks the harness quickly but does not cross the boundary,
+so the release check must run at the default size.
 
 ## Rollback Release
 

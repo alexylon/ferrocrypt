@@ -998,6 +998,7 @@ It contains:
 
 - encrypted filename derivation;
 - base-name extraction;
+- input leaf-name resolution (`input_leaf_name`) — the single source of truth for naming a user-supplied input. `.` and `..` carry no final component, so only those resolve against the current directory before the name is taken; every other path keeps the name as typed. Shared by `encryption_base_name`, which names the encrypted output, and `archive::encode::build_manifest`, which names the archive root, so one input cannot be named two ways;
 - user-path error mapping;
 - occupied-path / dangling-symlink rejection (`path_occupied`, `reject_occupied`) — `lstat`-based "is anything here?" preflight used by encrypt and keygen output prechecks so a stale symlink rejects in milliseconds instead of after Argon2id;
 - special-file-safe input opening (`open_input_file`) — read-only open that refuses FIFOs, sockets, and device nodes; on Unix the open uses `O_NONBLOCK` so a FIFO cannot block the process inside `open(2)`, and the type check runs on the open handle (no check-to-use window). A missing path maps to the typed `InputPath` via `map_user_path_io_error`, so a vanished input reports identically across `Decryptor::open`, the probe, the decrypt open, and the key-file reads. Used by `api::probe_recipient_mode_with_limits`, `protocol::decrypt`, and `read_file_capped` — the decrypt-side counterpart of the encrypt-side `archive::encode::validate_encrypt_input` rejection;

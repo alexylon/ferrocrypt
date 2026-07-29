@@ -185,9 +185,54 @@ pub(crate) fn file_stem(filename: &Path) -> Result<&OsStr, CryptoError> {
         .ok_or_else(|| CryptoError::InvalidInput("Cannot get file stem".to_string()))
 }
 
+/// Returns the final component of a user-supplied input path.
+///
+/// `.` and `..` point at a directory without naming it, so they have no
+/// final component of their own. Those two, and only those two, are
+/// resolved against the current directory first, and the resolved path
+/// supplies the name. Every other path keeps the name as typed, symlinks
+/// included.
+///
+/// A path that still has no final component once resolved is the
+/// filesystem root, which has no name to encrypt under, and rejects with
+/// [`CryptoError::InvalidInput`]. A failed resolution goes through
+/// [`map_user_path_io_error`], so a missing input reports the same typed
+/// error as every other input read.
+///
+/// FCA paths are UTF-8 (`FORMAT.md` §9.6), so the name is returned as a
+/// `String` and a name that is not UTF-8 rejects here. Both rejections
+/// name the path the leaf came from, which for `.` and `..` is the
+/// resolved directory rather than the two characters the caller typed.
+///
+/// Shared by [`encryption_base_name`], which derives the default output
+/// file name, and the archive writer, which derives the archive root name,
+/// so both name an input the same way.
+pub(crate) fn input_leaf_name(path: &Path) -> Result<String, CryptoError> {
+    if let Some(name) = path.file_name() {
+        return os_str_to_utf8_name(name, path);
+    }
+    let resolved = std::fs::canonicalize(path).map_err(map_user_path_io_error)?;
+    let Some(name) = resolved.file_name() else {
+        return Err(CryptoError::InvalidInput(format!(
+            "Cannot determine the input name: {}",
+            sanitize_path_for_display(&resolved)
+        )));
+    };
+    os_str_to_utf8_name(name, &resolved)
+}
+
+/// Converts one path component to `String`, reporting `source` as the
+/// offending path when the bytes are not UTF-8.
+fn os_str_to_utf8_name(name: &OsStr, source: &Path) -> Result<String, CryptoError> {
+    name.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| input_name_not_utf8_error(source))
+}
+
 /// Returns the base name for building the default encrypted output filename.
 /// For regular files, returns the file stem (without extension).
 /// For directories, returns the full directory name (preserving dots like `photos.v1`).
+/// A directory given as `.` or `..` takes its name from [`input_leaf_name`].
 ///
 /// Returns [`CryptoError::InvalidInput`] when the name is not valid
 /// UTF-8: FCA paths are UTF-8 (`FORMAT.md` §9.6), so such an input can
@@ -210,15 +255,11 @@ pub(crate) fn encryption_base_name(path: impl AsRef<Path>) -> Result<String, Cry
         Err(e) if e.kind() == io::ErrorKind::NotFound => false,
         Err(e) => return Err(CryptoError::Io(e)),
     };
-    let name = if is_real_dir {
-        path.file_name()
-            .ok_or_else(|| CryptoError::InvalidInput("Cannot get directory name".to_string()))?
+    if is_real_dir {
+        input_leaf_name(path)
     } else {
-        file_stem(path)?
-    };
-    name.to_str()
-        .map(str::to_owned)
-        .ok_or_else(|| input_name_not_utf8_error(path))
+        os_str_to_utf8_name(file_stem(path)?, path)
+    }
 }
 
 /// Returns `true` if anything occupies `path`, including a dangling
@@ -388,6 +429,68 @@ mod tests {
         let (_dir, path) = write_temp(&[0x41; 100]);
         let read = read_file_staged(&path, 4, 1024, |_| Some(10), over_cap).unwrap();
         assert_eq!(read.len(), 4 + 10 + 1);
+    }
+
+    /// An ordinary path keeps the name the caller typed. Nothing is
+    /// resolved, so a path that does not exist still yields a name and a
+    /// symlink keeps its own name rather than its target's.
+    #[test]
+    fn input_leaf_name_keeps_a_typed_name() {
+        assert_eq!(input_leaf_name(Path::new("dir/photos")).unwrap(), "photos");
+        assert_eq!(input_leaf_name(Path::new("photos")).unwrap(), "photos");
+    }
+
+    /// `.` and `..` are natural things to type and carry no name of their
+    /// own, so both take the name of the directory they resolve to.
+    #[test]
+    fn input_leaf_name_resolves_dot_and_dot_dot() {
+        let cwd = std::fs::canonicalize(".").unwrap();
+        assert_eq!(
+            input_leaf_name(Path::new(".")).unwrap(),
+            cwd.file_name().unwrap().to_str().unwrap()
+        );
+
+        let parent = cwd.parent().unwrap();
+        assert_eq!(
+            input_leaf_name(Path::new("..")).unwrap(),
+            parent.file_name().unwrap().to_str().unwrap()
+        );
+    }
+
+    /// FCA paths are UTF-8, so a leaf that is not rejects here rather than
+    /// being lossily replaced. The rejection names the path the leaf came
+    /// from — the typed path in this branch. Unix-only because building a
+    /// non-UTF-8 name from raw bytes needs the Unix `OsStrExt`.
+    #[cfg(unix)]
+    #[test]
+    fn input_leaf_name_rejects_a_non_utf8_leaf() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = Path::new(OsStr::from_bytes(b"dir/bad\xFFname"));
+        match input_leaf_name(path) {
+            Err(CryptoError::InvalidInput(msg)) => {
+                assert!(
+                    msg.starts_with("Input name is not valid UTF-8: dir/"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidInput for a non-UTF-8 leaf, got {other:?}"),
+        }
+    }
+
+    /// The filesystem root has no name to encrypt under, and resolution
+    /// cannot invent one, so it rejects instead of falling back to a
+    /// surprising name. Unix-only because the Windows root resolves
+    /// against the current drive, so the rendered path is not fixed.
+    #[cfg(unix)]
+    #[test]
+    fn input_leaf_name_rejects_the_filesystem_root() {
+        match input_leaf_name(Path::new("/")) {
+            Err(CryptoError::InvalidInput(msg)) => {
+                assert_eq!(msg, "Cannot determine the input name: /");
+            }
+            other => panic!("expected InvalidInput for the filesystem root, got {other:?}"),
+        }
     }
 
     #[test]

@@ -3423,6 +3423,155 @@ fn test_cli_sigkill_during_encrypt_never_commits_partial() {
     }
 }
 
+/// `-i .` is a natural thing to type from inside the directory being
+/// encrypted, and `.` carries no name of its own, so the archive takes the
+/// name of the directory it resolves to. The round trip restores that
+/// directory under its real name.
+#[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
+fn test_cli_encrypt_current_directory_input() {
+    let test_dir = setup_test_dir("cli_current_dir_input");
+    let input_dir = test_dir.join("photos");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+
+    fs::create_dir_all(&input_dir).unwrap();
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    fs::create_dir_all(&decrypt_dir).unwrap();
+    create_test_file(&input_dir.join("holiday.txt"), "Sea and sun");
+
+    // The child runs with `input_dir` as its working directory, so the
+    // output paths it is given must not be relative to this process.
+    let encrypt_dir = fs::canonicalize(&encrypt_dir).unwrap();
+    let decrypt_dir = fs::canonicalize(&decrypt_dir).unwrap();
+
+    let binary = get_binary_path();
+
+    let encrypt_output = cli_command(&binary)
+        .current_dir(&input_dir)
+        .args(["encrypt", "-i", "."])
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "current_dir_password")
+        .output()
+        .expect("Failed to execute encrypt command");
+
+    assert!(
+        encrypt_output.status.success(),
+        "encrypting `.` must succeed: {}",
+        String::from_utf8_lossy(&encrypt_output.stderr)
+    );
+    assert!(encrypt_dir.join("photos.fcr").exists());
+
+    let decrypt_output = cli_command(&binary)
+        .args(["decrypt", "-i"])
+        .arg(encrypt_dir.join("photos.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "current_dir_password")
+        .output()
+        .expect("Failed to execute decrypt command");
+
+    assert!(decrypt_output.status.success());
+    assert_eq!(
+        fs::read_to_string(decrypt_dir.join("photos/holiday.txt")).unwrap(),
+        "Sea and sun"
+    );
+}
+
+/// The archive caps reach the library from both subcommands: a cap below
+/// the tree's entry count refuses the work on either side, and a matching
+/// pair of raised caps completes the round trip. Guards the wiring, not the
+/// cap rule itself, which the library tests own.
+#[test]
+#[cfg_attr(not(debug_assertions), ignore = "full Argon2id; see file-level note")]
+fn test_cli_archive_entry_cap_flag() {
+    let test_dir = setup_test_dir("cli_archive_entry_cap");
+    let input_dir = test_dir.join("tree");
+    let encrypt_dir = test_dir.join("encrypted");
+    let decrypt_dir = test_dir.join("decrypted");
+
+    fs::create_dir_all(&input_dir).unwrap();
+    fs::create_dir_all(&encrypt_dir).unwrap();
+    fs::create_dir_all(&decrypt_dir).unwrap();
+    // Three entries: the root directory and two files.
+    create_test_file(&input_dir.join("one.txt"), "1");
+    create_test_file(&input_dir.join("two.txt"), "2");
+
+    let binary = get_binary_path();
+
+    let too_low = cli_command(&binary)
+        .args(["encrypt", "-i"])
+        .arg(&input_dir)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .args(["--max-archive-entries", "2"])
+        .env("FERROCRYPT_PASSPHRASE", "entry_cap_password")
+        .output()
+        .expect("Failed to execute encrypt command");
+
+    assert!(!too_low.status.success());
+    assert!(
+        String::from_utf8_lossy(&too_low.stderr).contains("Too many archive entries"),
+        "stderr: {}",
+        String::from_utf8_lossy(&too_low.stderr)
+    );
+    assert!(!encrypt_dir.join("tree.fcr").exists());
+
+    let raised = cli_command(&binary)
+        .args(["encrypt", "-i"])
+        .arg(&input_dir)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .args(["--max-archive-entries", "3"])
+        .env("FERROCRYPT_PASSPHRASE", "entry_cap_password")
+        .output()
+        .expect("Failed to execute encrypt command");
+
+    assert!(
+        raised.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&raised.stderr)
+    );
+
+    let decrypt_too_low = cli_command(&binary)
+        .args(["decrypt", "-i"])
+        .arg(encrypt_dir.join("tree.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir)
+        .args(["--max-archive-entries", "2"])
+        .env("FERROCRYPT_PASSPHRASE", "entry_cap_password")
+        .output()
+        .expect("Failed to execute decrypt command");
+
+    assert!(!decrypt_too_low.status.success());
+    assert!(
+        String::from_utf8_lossy(&decrypt_too_low.stderr).contains("Too many archive entries"),
+        "stderr: {}",
+        String::from_utf8_lossy(&decrypt_too_low.stderr)
+    );
+
+    let decrypt_ok = cli_command(&binary)
+        .args(["decrypt", "-i"])
+        .arg(encrypt_dir.join("tree.fcr"))
+        .arg("-o")
+        .arg(&decrypt_dir)
+        .args(["--max-archive-entries", "3"])
+        .env("FERROCRYPT_PASSPHRASE", "entry_cap_password")
+        .output()
+        .expect("Failed to execute decrypt command");
+
+    assert!(
+        decrypt_ok.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&decrypt_ok.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(decrypt_dir.join("tree/one.txt")).unwrap(),
+        "1"
+    );
+}
+
 #[ctor::dtor]
 fn cleanup() {
     cleanup_test_workspace();

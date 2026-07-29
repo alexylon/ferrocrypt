@@ -1,10 +1,10 @@
 use std::io::{self, IsTerminal, Read, Write, stdin};
 use std::path::{Path, PathBuf};
 
-use clap::{ArgAction, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand};
 use ferrocrypt::secrecy::{ExposeSecret, SecretString};
 use ferrocrypt::{
-    CryptoError, Decryptor, Encryptor, IncompleteOutputPolicy, KdfLimit, KdfParams,
+    ArchiveLimits, CryptoError, Decryptor, Encryptor, IncompleteOutputPolicy, KdfLimit, KdfParams,
     KeyPairGenerator, MAGIC, PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME, PrivateKey, PublicKey,
     default_encrypted_filename, validate_private_key_file,
 };
@@ -131,6 +131,154 @@ pub struct Cli {
     pub command: Option<CliCommand>,
 }
 
+/// Bytes in one mebibyte. `--max-archive-size` and
+/// `--max-archive-manifest` are given in MiB, because the byte counts
+/// behind them are too long to type comfortably.
+const BYTES_PER_MIB: u32 = 1024 * 1024;
+
+/// Converts a MiB flag value into a byte count for a cap of type `T`,
+/// rejecting a value the cap cannot hold. Mirrors [`KdfLimit::from_mib`],
+/// so every MiB flag refuses an out-of-range number instead of quietly
+/// applying a cap the caller did not ask for. `label` names the cap in the
+/// rejection.
+fn mib_to_bytes<T: TryFrom<u64>>(label: &str, mib: u64) -> Result<T, CryptoError> {
+    mib.checked_mul(u64::from(BYTES_PER_MIB))
+        .and_then(|bytes| T::try_from(bytes).ok())
+        .ok_or_else(|| CryptoError::InvalidInput(format!("{label} limit overflow: {mib} MiB")))
+}
+
+/// Caps on the size and shape of the archive inside a `.fcr` file, set by
+/// both `encrypt` and `decrypt`.
+///
+/// Both sides apply the same caps, so a tree encrypted with a raised cap
+/// needs the same flag on the matching decrypt. Every default is read from
+/// [`ArchiveLimits`], so the value clap shows in `--help` is the library's
+/// own and cannot drift from it.
+///
+/// The remaining [`ArchiveLimits`] caps bound the extension regions
+/// reserved for future format revisions. Nothing this release writes fills
+/// them, so they stay library-only rather than becoming flags no run can
+/// reach.
+#[derive(Args, Debug, Clone, Copy)]
+// `about = None` stops clap lifting the doc comment above over the `about`
+// of whichever subcommand flattens this group.
+#[command(about = None, long_about = None, next_help_heading = "Archive limits")]
+pub struct ArchiveLimitArgs {
+    #[arg(
+        long,
+        value_name = "COUNT",
+        default_value_t = ArchiveLimits::ENTRY_COUNT_DEFAULT,
+        help = "Maximum number of files and directories in one archive"
+    )]
+    max_archive_entries: u32,
+
+    #[arg(
+        long,
+        value_name = "MIB",
+        default_value_t = ArchiveLimits::TOTAL_PLAINTEXT_BYTES_DEFAULT / u64::from(BYTES_PER_MIB),
+        help = "Maximum combined size of the files in one archive (MiB)"
+    )]
+    max_archive_size: u64,
+
+    #[arg(
+        long,
+        value_name = "COMPONENTS",
+        default_value_t = ArchiveLimits::PATH_DEPTH_DEFAULT,
+        help = "Maximum number of components in one archived path"
+    )]
+    max_archive_path_depth: u32,
+
+    #[arg(
+        long,
+        value_name = "BYTES",
+        default_value_t = ArchiveLimits::PATH_BYTES_DEFAULT,
+        help = "Maximum length of one archived path (bytes)"
+    )]
+    max_archive_path_bytes: u32,
+
+    #[arg(
+        long,
+        value_name = "MIB",
+        default_value_t = ArchiveLimits::MANIFEST_BYTES_DEFAULT / BYTES_PER_MIB,
+        help = "Maximum size of the archive manifest, the list of archived paths (MiB)"
+    )]
+    max_archive_manifest: u32,
+}
+
+impl ArchiveLimitArgs {
+    /// Builds the [`ArchiveLimits`] these flags describe, rejecting a MiB
+    /// value whose byte count the cap cannot hold.
+    fn to_limits(self) -> Result<ArchiveLimits, CryptoError> {
+        Ok(ArchiveLimits::default()
+            .max_entry_count(self.max_archive_entries)
+            .max_total_plaintext_bytes(mib_to_bytes("Archive size", self.max_archive_size)?)
+            .max_path_depth(self.max_archive_path_depth)
+            .max_path_bytes(self.max_archive_path_bytes)
+            .max_manifest_bytes(mib_to_bytes(
+                "Archive manifest",
+                u64::from(self.max_archive_manifest),
+            )?))
+    }
+}
+
+/// Caps on the Argon2id parameters `decrypt` will accept from a file.
+#[derive(Args, Debug, Clone, Copy)]
+// `about = None` for the reason given on `ArchiveLimitArgs`.
+#[command(about = None, long_about = None, next_help_heading = "Passphrase limits")]
+pub struct KdfLimitArgs {
+    #[arg(
+        long,
+        value_name = "MIB",
+        help = "Maximum Argon2id memory cost to accept (MiB). When omitted, the limit is 1 GiB; 0 rejects every file"
+    )]
+    max_kdf_memory: Option<u32>,
+
+    #[arg(
+        long,
+        value_name = "ITERATIONS",
+        help = "Maximum Argon2id time cost (iteration count) to accept. When omitted, the limit is the format maximum; 0 rejects every file"
+    )]
+    max_kdf_time_cost: Option<u32>,
+
+    #[arg(
+        long,
+        value_name = "LANES",
+        help = "Maximum Argon2id lane count (parallelism) to accept. When omitted, the limit is the format maximum; 0 rejects every file"
+    )]
+    max_kdf_lanes: Option<u32>,
+}
+
+impl KdfLimitArgs {
+    /// Builds the decrypt-side [`KdfLimit`] these flags describe. Returns
+    /// `None` when no flag is set, so the library default applies. When any
+    /// flag is set, memory starts from `--max-kdf-memory` (or the 1 GiB
+    /// default) and `--max-kdf-time-cost` / `--max-kdf-lanes` tighten the
+    /// time-cost and lane caps. An unset time-cost or lane cap stays at the
+    /// format maximum and so rejects nothing the structural check would not;
+    /// an unset memory cap stays at the 1 GiB default, below the 2 GiB
+    /// structural maximum, so it still rejects a header that asks for more
+    /// than 1 GiB.
+    fn to_limit(self) -> Result<Option<KdfLimit>, CryptoError> {
+        if self.max_kdf_memory.is_none()
+            && self.max_kdf_time_cost.is_none()
+            && self.max_kdf_lanes.is_none()
+        {
+            return Ok(None);
+        }
+        let mut limit = match self.max_kdf_memory {
+            Some(mib) => KdfLimit::from_mib(mib)?,
+            None => KdfLimit::default(),
+        };
+        if let Some(time_cost) = self.max_kdf_time_cost {
+            limit = limit.with_max_time_cost(time_cost);
+        }
+        if let Some(lanes) = self.max_kdf_lanes {
+            limit = limit.with_max_lanes(lanes);
+        }
+        Ok(Some(limit))
+    }
+}
+
 #[derive(Subcommand, Debug)]
 pub enum CliCommand {
     #[command(visible_alias = "enc", about = "Encrypt a file or directory")]
@@ -194,6 +342,9 @@ pub enum CliCommand {
             help = "Allow encrypting an input that already looks like a FerroCrypt file"
         )]
         allow_double_encrypt: bool,
+
+        #[command(flatten)]
+        archive_limits: ArchiveLimitArgs,
     },
 
     #[command(visible_alias = "dec", about = "Decrypt a .fcr file")]
@@ -223,31 +374,18 @@ pub enum CliCommand {
         private_key: Option<PathBuf>,
 
         #[arg(
-            long,
-            value_name = "MIB",
-            help = "Maximum Argon2id memory cost to accept (MiB). When omitted, the limit is 1 GiB; 0 rejects every file"
-        )]
-        max_kdf_memory: Option<u32>,
-
-        #[arg(
-            long,
-            value_name = "ITERATIONS",
-            help = "Maximum Argon2id time cost (iteration count) to accept. When omitted, the limit is the format maximum; 0 rejects every file"
-        )]
-        max_kdf_time_cost: Option<u32>,
-
-        #[arg(
-            long,
-            value_name = "LANES",
-            help = "Maximum Argon2id lane count (parallelism) to accept. When omitted, the limit is the format maximum; 0 rejects every file"
-        )]
-        max_kdf_lanes: Option<u32>,
-
-        #[arg(
             long = "keep-partial",
             help = "Keep the .incomplete staged plaintext on decrypt failure (forensic / recovery use)"
         )]
         keep_partial: bool,
+
+        // Both groups carry their own help heading, and clap applies a
+        // heading to every argument that follows it, so they come last.
+        #[command(flatten)]
+        kdf_limits: KdfLimitArgs,
+
+        #[command(flatten)]
+        archive_limits: ArchiveLimitArgs,
     },
 
     #[command(visible_alias = "gen", about = "Generate a key pair")]
@@ -536,29 +674,29 @@ fn run_command(cmd: CliCommand) -> Result<(), CryptoError> {
             recipient,
             public_key,
             allow_double_encrypt,
+            archive_limits,
         } => run_encrypt(
             input,
             EncryptTarget::from_args(output_dir, save_as)?,
             recipient,
             public_key,
             allow_double_encrypt,
+            archive_limits,
         ),
 
         CliCommand::Decrypt {
             input,
             output_dir,
             private_key,
-            max_kdf_memory,
-            max_kdf_time_cost,
-            max_kdf_lanes,
+            kdf_limits,
+            archive_limits,
             keep_partial,
         } => run_decrypt(
             input,
             output_dir,
             private_key,
-            max_kdf_memory,
-            max_kdf_time_cost,
-            max_kdf_lanes,
+            kdf_limits,
+            archive_limits,
             keep_partial,
         ),
 
@@ -573,7 +711,11 @@ fn run_encrypt(
     recipient: Vec<String>,
     public_key: Vec<PathBuf>,
     allow_double_encrypt: bool,
+    archive_limits: ArchiveLimitArgs,
 ) -> Result<(), CryptoError> {
+    // Ahead of the conflict check and the passphrase prompt: an unusable
+    // flag value is a usage error and must not cost the user either.
+    let archive_limits = archive_limits.to_limits()?;
     check_encrypt_conflict(&input, &target)?;
     confirm_or_reject_double_encrypt(&input, allow_double_encrypt)?;
 
@@ -596,6 +738,8 @@ fn run_encrypt(
         Encryptor::with_public_keys(recipients)?
     };
 
+    encryptor = encryptor.archive_limits(archive_limits);
+
     if let EncryptTarget::File(save_as_path) = &target {
         encryptor = encryptor.save_as(save_as_path);
     }
@@ -608,47 +752,17 @@ fn run_encrypt(
     Ok(())
 }
 
-/// Builds the decrypt-side [`KdfLimit`] from the optional `--max-kdf-*`
-/// flags. Returns `None` when no flag is set, so the library default
-/// applies. When any flag is set, memory starts from `--max-kdf-memory`
-/// (or the 1 GiB default) and `--max-kdf-time-cost` / `--max-kdf-lanes`
-/// tighten the time-cost and lane caps. An unset time-cost or lane cap
-/// stays at the format maximum and so rejects nothing the structural
-/// check would not; an unset memory cap stays at the 1 GiB default, below
-/// the 2 GiB structural maximum, so it still rejects a header that asks
-/// for more than 1 GiB.
-fn build_kdf_limit(
-    max_kdf_memory: Option<u32>,
-    max_kdf_time_cost: Option<u32>,
-    max_kdf_lanes: Option<u32>,
-) -> Result<Option<KdfLimit>, CryptoError> {
-    if max_kdf_memory.is_none() && max_kdf_time_cost.is_none() && max_kdf_lanes.is_none() {
-        return Ok(None);
-    }
-    let mut limit = match max_kdf_memory {
-        Some(mib) => KdfLimit::from_mib(mib)?,
-        None => KdfLimit::default(),
-    };
-    if let Some(time_cost) = max_kdf_time_cost {
-        limit = limit.with_max_time_cost(time_cost);
-    }
-    if let Some(lanes) = max_kdf_lanes {
-        limit = limit.with_max_lanes(lanes);
-    }
-    Ok(Some(limit))
-}
-
 fn run_decrypt(
     input: PathBuf,
     output_dir: PathBuf,
     private_key: Option<PathBuf>,
-    max_kdf_memory: Option<u32>,
-    max_kdf_time_cost: Option<u32>,
-    max_kdf_lanes: Option<u32>,
+    kdf_limits: KdfLimitArgs,
+    archive_limits: ArchiveLimitArgs,
     keep_partial: bool,
 ) -> Result<(), CryptoError> {
     let start = std::time::Instant::now();
-    let limit = build_kdf_limit(max_kdf_memory, max_kdf_time_cost, max_kdf_lanes)?;
+    let limit = kdf_limits.to_limit()?;
+    let archive_limits = archive_limits.to_limits()?;
     let policy = if keep_partial {
         IncompleteOutputPolicy::RetainOnError
     } else {
@@ -666,7 +780,9 @@ fn run_decrypt(
             if let Some(limit) = limit {
                 decryptor = decryptor.kdf_limit(limit);
             }
-            decryptor = decryptor.incomplete_output_policy(policy);
+            decryptor = decryptor
+                .archive_limits(archive_limits)
+                .incomplete_output_policy(policy);
             let passphrase = read_passphrase(false)?;
             decryptor
                 .decrypt(passphrase, &output_dir, |ev| eprintln!("{ev}"))?
@@ -683,7 +799,9 @@ fn run_decrypt(
             if let Some(limit) = limit {
                 decryptor = decryptor.kdf_limit(limit);
             }
-            decryptor = decryptor.incomplete_output_policy(policy);
+            decryptor = decryptor
+                .archive_limits(archive_limits)
+                .incomplete_output_policy(policy);
             let passphrase = read_passphrase(false)?;
             decryptor
                 .decrypt(
@@ -855,37 +973,144 @@ fn interactive_mode() -> Result<(), CryptoError> {
 mod tests {
     use super::*;
 
-    /// `build_kdf_limit` maps the optional `--max-kdf-*` flags onto a single
-    /// `KdfLimit`: no flag yields `None` (library default applies), and any
-    /// flag fills the unset dimensions from the default so only the named
-    /// caps are tightened.
+    fn kdf_args(
+        max_kdf_memory: Option<u32>,
+        max_kdf_time_cost: Option<u32>,
+        max_kdf_lanes: Option<u32>,
+    ) -> KdfLimitArgs {
+        KdfLimitArgs {
+            max_kdf_memory,
+            max_kdf_time_cost,
+            max_kdf_lanes,
+        }
+    }
+
+    /// `KdfLimitArgs::to_limit` maps the optional `--max-kdf-*` flags onto a
+    /// single `KdfLimit`: no flag yields `None` (library default applies),
+    /// and any flag fills the unset dimensions from the default so only the
+    /// named caps are tightened.
     #[test]
-    fn build_kdf_limit_maps_flags_onto_one_limit() {
-        assert_eq!(build_kdf_limit(None, None, None).unwrap(), None);
+    fn kdf_limit_args_map_flags_onto_one_limit() {
+        assert_eq!(kdf_args(None, None, None).to_limit().unwrap(), None);
 
         let default = KdfLimit::default();
 
-        let mem_only = build_kdf_limit(Some(512), None, None).unwrap().unwrap();
+        let mem_only = kdf_args(Some(512), None, None).to_limit().unwrap().unwrap();
         assert_eq!(mem_only.max_mem_cost_kib, 512 * 1024);
         assert_eq!(mem_only.max_time_cost, default.max_time_cost);
         assert_eq!(mem_only.max_lanes, default.max_lanes);
 
-        let time_only = build_kdf_limit(None, Some(3), None).unwrap().unwrap();
+        let time_only = kdf_args(None, Some(3), None).to_limit().unwrap().unwrap();
         assert_eq!(time_only.max_mem_cost_kib, default.max_mem_cost_kib);
         assert_eq!(time_only.max_time_cost, 3);
         assert_eq!(time_only.max_lanes, default.max_lanes);
 
-        let lanes_only = build_kdf_limit(None, None, Some(2)).unwrap().unwrap();
+        let lanes_only = kdf_args(None, None, Some(2)).to_limit().unwrap().unwrap();
         assert_eq!(lanes_only.max_mem_cost_kib, default.max_mem_cost_kib);
         assert_eq!(lanes_only.max_time_cost, default.max_time_cost);
         assert_eq!(lanes_only.max_lanes, 2);
 
-        let all = build_kdf_limit(Some(256), Some(2), Some(1))
+        let all = kdf_args(Some(256), Some(2), Some(1))
+            .to_limit()
             .unwrap()
             .unwrap();
         assert_eq!(all.max_mem_cost_kib, 256 * 1024);
         assert_eq!(all.max_time_cost, 2);
         assert_eq!(all.max_lanes, 1);
+    }
+
+    /// Parses a command line the way the binary does, so the assertions
+    /// below cover the clap defaults as well as the mapping.
+    fn archive_args(line: &str) -> ArchiveLimitArgs {
+        let args = std::iter::once(BINARY_NAME.to_string())
+            .chain(shell_words::split(line).expect("test command line must split"));
+        match Cli::try_parse_from(args).expect("test command line must parse") {
+            Cli {
+                command: Some(CliCommand::Encrypt { archive_limits, .. }),
+            } => archive_limits,
+            other => panic!("expected an encrypt command, got {other:?}"),
+        }
+    }
+
+    /// Left alone, the flags reproduce the library defaults exactly, so a
+    /// run that names none of them behaves as if the CLI never set any cap.
+    #[test]
+    fn archive_limit_args_default_to_the_library_limits() {
+        let parsed = archive_args("encrypt -i in -o out");
+        assert_eq!(parsed.to_limits().unwrap(), ArchiveLimits::default());
+    }
+
+    /// Each flag replaces exactly one cap and leaves the rest at their
+    /// defaults, and the two MiB flags are converted to bytes.
+    #[test]
+    fn archive_limit_args_map_flags_onto_one_limit() {
+        let parsed = archive_args(
+            "encrypt -i in -o out --max-archive-entries 400000 --max-archive-size 128 \
+             --max-archive-path-depth 128 --max-archive-path-bytes 8192 \
+             --max-archive-manifest 256",
+        );
+        assert_eq!(
+            parsed.to_limits().unwrap(),
+            ArchiveLimits::default()
+                .max_entry_count(400_000)
+                .max_total_plaintext_bytes(128 * 1024 * 1024)
+                .max_path_depth(128)
+                .max_path_bytes(8192)
+                .max_manifest_bytes(256 * 1024 * 1024)
+        );
+    }
+
+    /// A MiB value whose byte count the cap cannot hold is refused, like
+    /// `--max-kdf-memory` refuses one, rather than quietly applying a cap
+    /// the caller did not ask for. Both flags are checked at their exact
+    /// boundary: the largest accepted value, then one MiB more.
+    #[test]
+    fn archive_limit_args_reject_an_out_of_range_size() {
+        let size_max = u64::MAX / u64::from(BYTES_PER_MIB);
+        assert!(
+            archive_args(&format!(
+                "encrypt -i in -o out --max-archive-size {size_max}"
+            ))
+            .to_limits()
+            .is_ok()
+        );
+        match archive_args(&format!(
+            "encrypt -i in -o out --max-archive-size {}",
+            size_max + 1
+        ))
+        .to_limits()
+        {
+            Err(CryptoError::InvalidInput(msg)) => {
+                assert!(
+                    msg.starts_with("Archive size limit overflow: "),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+
+        let manifest_max = u32::MAX / BYTES_PER_MIB;
+        assert!(
+            archive_args(&format!(
+                "encrypt -i in -o out --max-archive-manifest {manifest_max}"
+            ))
+            .to_limits()
+            .is_ok()
+        );
+        match archive_args(&format!(
+            "encrypt -i in -o out --max-archive-manifest {}",
+            manifest_max + 1
+        ))
+        .to_limits()
+        {
+            Err(CryptoError::InvalidInput(msg)) => {
+                assert!(
+                    msg.starts_with("Archive manifest limit overflow: "),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
     }
 
     /// `EncryptTarget::from_args` narrows the two mutually exclusive output

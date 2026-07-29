@@ -1071,7 +1071,8 @@ pub fn probe_recipient_mode_with_limits(
 /// Returns the default encrypted filename for a given input path.
 ///
 /// For example, a regular file named `secrets.txt` maps to `secrets.fcr`; a
-/// directory named `secrets` maps to `secrets.fcr`.
+/// directory named `secrets` maps to `secrets.fcr`. An input of `.` or `..`
+/// takes the name of the directory it points at.
 ///
 /// # Errors
 ///

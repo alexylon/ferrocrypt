@@ -241,6 +241,16 @@ The interactive prompt exits on `quit`, `exit`, or Ctrl-D. Ctrl-C cancels the cu
 | `--max-kdf-time-cost` | `decrypt` | Maximum Argon2id time cost (iteration count) accepted during decryption |
 | `--max-kdf-lanes` | `decrypt` | Maximum Argon2id lane count (parallelism) accepted during decryption |
 | `--keep-partial` | `decrypt` | Keep the staged `.incomplete` working copy on failure for forensic or recovery use |
+| `--max-archive-entries` | `encrypt`, `decrypt` | Maximum number of files and directories in one archive (default 250,000) |
+| `--max-archive-size` | `encrypt`, `decrypt` | Maximum combined size of the files in one archive, in MiB (default 65,536, that is 64 GiB) |
+| `--max-archive-path-depth` | `encrypt`, `decrypt` | Maximum number of components in one archived path (default 64) |
+| `--max-archive-path-bytes` | `encrypt`, `decrypt` | Maximum length of one archived path, in bytes (default 4,096) |
+| `--max-archive-manifest` | `encrypt`, `decrypt` | Maximum size of the archive manifest, the list of archived paths, in MiB (default 64) |
+
+The `--max-archive-*` caps protect both sides against an archive that would
+consume more memory or disk than intended, so encryption and decryption apply
+them alike. Raising one for a large folder means passing the same flag to the
+matching `decrypt`; the defaults suit ordinary folders and need no flag at all.
 
 ## Desktop application
 
@@ -303,6 +313,7 @@ Common failure categories include:
 - **Encrypted file has unexpected trailing data** — extra data was found after the authenticated encrypted stream.
 - **Encrypted payload stream is malformed** — every payload chunk passed authentication, but the chunk sequence violates the format. FerroCrypt does not write this layout.
 - **Passphrase memory over limit** — the file requests more Argon2id memory than the configured limit permits. The default limit is 1 GiB; raise it with `--max-kdf-memory` if the source is trusted.
+- **Too many archive entries / Archive is too large / Archive path too deep** — the folder inside the file exceeds an archive cap. Raise the matching `--max-archive-*` flag if the source is trusted.
 - **Unsupported recipient `<type>`** — the file uses a recipient type marked as required that this release does not support.
 
 No failed decryption produces a completed output at the requested final path. The default behavior removes any staged `.incomplete` working copy before the error returns; `--keep-partial` keeps it for inspection. A leftover `.incomplete` from a previous failed run is preserved across a retry that fails with `Incomplete output already exists`, so the prior partial is not silently overwritten.

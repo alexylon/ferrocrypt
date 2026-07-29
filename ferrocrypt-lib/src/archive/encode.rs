@@ -57,7 +57,7 @@ use crate::CryptoError;
 use crate::error::{sanitize_for_display, sanitize_path_for_display};
 #[cfg(windows)]
 use crate::fs::paths::parent_or_cwd;
-use crate::fs::paths::{input_name_not_utf8_error, unsupported_file_type_error};
+use crate::fs::paths::{input_leaf_name, unsupported_file_type_error};
 
 #[cfg(unix)]
 use super::format::PERMISSION_BITS_MASK;
@@ -485,13 +485,7 @@ fn build_manifest(
         return Err(input_is_symlink_error(input_path));
     }
 
-    let name = input_path
-        .file_name()
-        .ok_or_else(|| CryptoError::InvalidInput("Cannot get input file name".to_string()))?;
-    let name_str = name
-        .to_str()
-        .ok_or_else(|| input_name_not_utf8_error(input_path))?
-        .to_string();
+    let name_str = input_leaf_name(input_path)?;
 
     // Path grammar applies to the root regardless of kind; validate
     // once before the file/dir dispatch.
@@ -549,13 +543,20 @@ fn build_manifest(
         #[cfg(unix)]
         let source_root = platform::open_anchor(input_path)?;
         #[cfg(windows)]
-        let source_root = {
-            let parent_anchor = platform::open_anchor(parent_or_cwd(input_path))?;
-            platform::open_child_dir_nofollow(
-                &parent_anchor,
-                name,
-                platform::SYMLINK_IN_ARCHIVE_SOURCE,
-            )?
+        let source_root = match input_path.file_name() {
+            Some(leaf) => {
+                let parent_anchor = platform::open_anchor(parent_or_cwd(input_path))?;
+                platform::open_child_dir_nofollow(
+                    &parent_anchor,
+                    leaf,
+                    platform::SYMLINK_IN_ARCHIVE_SOURCE,
+                )?
+            }
+            // `.` and `..` name no leaf to open through a parent. The
+            // operating system resolves both against this process's own
+            // working directory, chosen by whoever started the process, so
+            // the open is anchored there directly.
+            None => platform::open_anchor(input_path)?,
         };
 
         // One `dir_metadata` call reused for the Unix identity

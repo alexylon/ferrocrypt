@@ -152,9 +152,9 @@ fn unarchive_inner<R: Read>(
     // `output_handle` still alive on every error path.
     let outcome: Result<PathBuf, CryptoError> = (|| {
         // §9.11 steps 10–14. Each `extract_*_root` runs
-        // `verify_archive_eof` (step 13) between content streaming
-        // (step 11) and descendant chmod (step 14) so the spec's
-        // literal ordering is preserved.
+        // `verify_archive_eof` (step 13) directly after content
+        // streaming (step 11) and before every later step, so the
+        // spec's literal ordering is preserved.
         if manifest.root_is_file {
             extract_single_file_root(
                 &mut reader,
@@ -280,17 +280,18 @@ fn extract_single_file_root<R: Read>(
 
     copy_exact_n(reader, &mut outfile, entry.size, archive_content_truncated)?;
 
+    // FORMAT.md §9.11 step 13: verify archive EOF — no byte may follow
+    // the last declared file content. Checked before the flush, so a
+    // rejected archive does not trigger a full drive-cache flush for a
+    // file that is then deleted. Single-file root has no descendant chmod
+    // pass, and the manifest-stored mode is applied post-rename by
+    // `apply_root_file_mode` (FORMAT.md §9.11 step 16), so the staged
+    // file stays at `INITIAL_FILE_CREATE_MODE` throughout.
+    verify_archive_eof(reader)?;
+
     // Synced before promotion, so a crash after the rename cannot
     // surface incompletely written content under the final name.
-    platform::sync_single_file_durable(&outfile).map_err(CryptoError::Io)?;
-
-    // FORMAT.md §9.11 step 13: verify archive EOF — no byte may follow
-    // the last declared file content. Single-file root has no descendant
-    // chmod pass, and the manifest-stored mode is applied post-rename
-    // by `apply_root_file_mode` (FORMAT.md §9.11 step 16), so the
-    // staged file stays at `INITIAL_FILE_CREATE_MODE` through this
-    // EOF check and across the rename.
-    verify_archive_eof(reader)
+    platform::sync_single_file_durable(&outfile).map_err(CryptoError::Io)
 }
 
 fn extract_directory_root<R: Read>(
@@ -373,11 +374,7 @@ fn extract_directory_root<R: Read>(
     for dir_entry in dir_entries.iter().rev() {
         let rel = strip_root_prefix(&dir_entry.path_utf8, root_name_str)?;
         let dir_handle = platform::open_dir_at_rel(&root_dir, rel)?;
-        // Sync before chmod: the helper re-opens "." read-only, so it
-        // needs the staging directory's current read permission. The
-        // later chmod changes only the mode, not the entries flushed here.
-        platform::sync_dir_handle(&dir_handle);
-        platform::chmod_dir_handle(dir_handle, dir_entry.mode)?;
+        platform::chmod_dir_handle_durable(dir_handle, dir_entry.mode)?;
     }
 
     // Flush the staged root after all descendant directories have been
@@ -2262,5 +2259,46 @@ mod tests {
             fs::read(final_path.join("child").join("secret.txt")).unwrap(),
             b"secret",
         );
+    }
+
+    /// A descendant directory mode without the read bit (`0o311`) reaches
+    /// the reader only from a foreign archive: FerroCrypt's writer must
+    /// list a directory to encrypt it, so it can never record such a
+    /// mode. Extraction must still apply it, which
+    /// `platform::chmod_dir_handle_durable` does by flushing a handle it
+    /// opened before applying the mode.
+    #[cfg(unix)]
+    #[test]
+    fn extracts_descendant_directory_mode_without_read_bit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let manifest = Manifest {
+            entries: vec![
+                make_entry("root", ArchiveEntryKind::Directory, 0, 0o700),
+                make_entry("root/searchonly", ArchiveEntryKind::Directory, 0, 0o311),
+                make_entry(
+                    "root/searchonly/inner.txt",
+                    ArchiveEntryKind::File,
+                    5,
+                    0o600,
+                ),
+            ],
+            total_file_bytes: 5,
+            root_name: OsString::from("root"),
+            root_is_file: false,
+            root_mode: 0o700,
+        };
+        let archive = build_archive(&manifest, &[("root/searchonly/inner.txt", b"inner")]);
+
+        let final_path = unarchive_default(archive, tmp.path()).unwrap();
+
+        let dir = final_path.join("searchonly");
+        let mode = fs::metadata(&dir).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o311, "expected mode 0o311, got 0o{mode:o}");
+
+        // Restore read permission so tempdir cleanup can list the
+        // directory.
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
     }
 }

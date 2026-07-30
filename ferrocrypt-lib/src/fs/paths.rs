@@ -188,10 +188,10 @@ pub(crate) fn file_stem(filename: &Path) -> Result<&OsStr, CryptoError> {
 /// Returns the final component of a user-supplied input path.
 ///
 /// `.` and `..` point at a directory without naming it, so they have no
-/// final component of their own. Those two, and only those two, are
-/// resolved against the current directory first, and the resolved path
-/// supplies the name. Every other path keeps the name as typed, symlinks
-/// included.
+/// final component of their own, and neither does a path ending in one of
+/// them such as `photos/..`. A path with no final component is resolved
+/// against the current directory first, and the resolved path supplies the
+/// name. Every other path keeps the name as typed, symlinks included.
 ///
 /// A path that still has no final component once resolved is the
 /// filesystem root, which has no name to encrypt under, and rejects with
@@ -201,8 +201,8 @@ pub(crate) fn file_stem(filename: &Path) -> Result<&OsStr, CryptoError> {
 ///
 /// FCA paths are UTF-8 (`FORMAT.md` §9.6), so the name is returned as a
 /// `String` and a name that is not UTF-8 rejects here. Both rejections
-/// name the path the leaf came from, which for `.` and `..` is the
-/// resolved directory rather than the two characters the caller typed.
+/// name the path the leaf came from, which for a resolved path is the
+/// resolved directory rather than what the caller typed.
 ///
 /// Shared by [`encryption_base_name`], which derives the default output
 /// file name, and the archive writer, which derives the archive root name,

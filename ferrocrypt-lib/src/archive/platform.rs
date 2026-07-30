@@ -772,6 +772,38 @@ pub(crate) fn chmod_dir_handle(_dir: Dir, _mode: u32) -> Result<(), CryptoError>
     Ok(())
 }
 
+/// [`chmod_dir_handle`] with the new mode covered by a flush, used for
+/// staged descendant directories during extraction.
+///
+/// The handle used for the flush is opened before the chmod, while the
+/// directory still has the permissive staging mode: a stored mode without read
+/// permission (`0o311`, for example) would make a later open fail. The
+/// flush then runs after the chmod and covers the new mode as well as
+/// the directory entries, so a staged directory is as durable as a
+/// staged file, whose mode is also applied before its flush. Permission
+/// is checked when a handle is opened, not when it is used, so the
+/// restrictive mode does not affect the flush.
+///
+/// A failed flush is ignored, as in [`sync_dir_handle`]: a durability
+/// hint must not turn a completed extraction into an error. A failed
+/// chmod is returned.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn chmod_dir_handle_durable(dir: Dir, mode: u32) -> Result<(), CryptoError> {
+    let sync_fd = open_dir_sync_fd(&dir).ok();
+    chmod_dir_handle(dir, mode)?;
+    if let Some(sync_fd) = sync_fd {
+        let _ = crate::fs::atomic::fsync_uninterrupted(&sync_fd);
+    }
+    Ok(())
+}
+
+/// On targets where [`sync_dir_handle`] does nothing there is no flush to
+/// place after the chmod, so this is a plain [`chmod_dir_handle`].
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn chmod_dir_handle_durable(dir: Dir, mode: u32) -> Result<(), CryptoError> {
+    chmod_dir_handle(dir, mode)
+}
+
 #[cfg(test)]
 mod tests {
     //! Adversarial scenarios for the hardened extractor primitives.
@@ -1043,7 +1075,7 @@ mod tests {
         unix_fs::symlink("real", root.join("extracted")).unwrap();
 
         let parent = open_anchor(&root).unwrap();
-        // open_dir_at_rel + chmod_dir_handle is the chmod-time recipe.
+        // open_dir_at_rel then a handle-based chmod is the chmod-time recipe.
         let dir_result = open_dir_at_rel(&parent, Path::new("extracted"));
         assert!(
             dir_result.is_err(),
@@ -1103,6 +1135,30 @@ mod tests {
             .mode()
             & 0o7777;
         assert_eq!(mode, 0o755, "setuid bit must be stripped");
+    }
+
+    /// `chmod_dir_handle_durable` applies a mode without read permission
+    /// and still reports success: the handle it flushes is opened before
+    /// the mode is applied, so a directory that can no longer be opened
+    /// is not a problem.
+    #[cfg(unix)]
+    #[test]
+    fn chmod_dir_handle_durable_applies_unreadable_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let parent = open_anchor(tmp.path()).unwrap();
+        let dir = mkdir_strict(&parent, OsStr::new("d")).unwrap();
+
+        chmod_dir_handle_durable(dir, 0o311).unwrap(); // search-only, no read
+
+        let path = tmp.path().join("d");
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o311, "expected mode 0o311, got 0o{mode:o}");
+
+        // Restore read permission so tempdir cleanup can list the
+        // directory.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     // ── non-symlink helpers ─────────────────────────────────────────

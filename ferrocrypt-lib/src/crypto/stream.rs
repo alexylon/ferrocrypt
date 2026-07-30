@@ -236,11 +236,17 @@ impl<W: Write> Write for EncryptWriter<W> {
     /// dropping the [`EncryptWriter`] without calling
     /// [`Self::finish`] leaves the on-disk ciphertext missing its
     /// final-flag chunk. Callers must call [`Self::finish`] before
-    /// drop.
+    /// drop. After a terminal error the writer is poisoned: `flush`
+    /// fails with [`StreamError::StateExhausted`], as [`Write::write`]
+    /// does, rather than reporting success for plaintext that was
+    /// destroyed unwritten.
     fn flush(&mut self) -> io::Result<()> {
         match self.output.as_mut() {
             Some(output) => output.flush(),
-            None => Ok(()),
+            None => Err(stream_io_error(
+                io::ErrorKind::Other,
+                StreamError::StateExhausted,
+            )),
         }
     }
 }
@@ -833,6 +839,27 @@ mod tests {
         assert!(
             matches!(marker, Some(StreamError::StateExhausted)),
             "expected StateExhausted from a poisoned writer, got {marker:?}"
+        );
+    }
+
+    /// `flush` on a poisoned writer must fail closed like `write`: the
+    /// buffered plaintext was destroyed unwritten, so a successful
+    /// flush would let a caller that ignores the original write error
+    /// treat the stream as durable.
+    #[test]
+    fn encrypt_writer_flush_after_output_error_fails_closed() {
+        let mut writer = payload_encryptor(&test_key(), &TEST_NONCE, FailingWriter);
+        writer.write_all(&vec![0u8; BUFFER_SIZE]).unwrap();
+        // More plaintext forces the deferred flush into the failing
+        // sink, poisoning the writer.
+        writer.write(&[0u8; 1]).unwrap_err();
+        let err = writer.flush().unwrap_err();
+        let marker = err
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<StreamError>());
+        assert!(
+            matches!(marker, Some(StreamError::StateExhausted)),
+            "expected StateExhausted from a poisoned flush, got {marker:?}"
         );
     }
 

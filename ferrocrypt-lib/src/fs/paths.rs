@@ -129,8 +129,8 @@ pub(crate) fn read_file_capped(
 /// shorter than `head_len` is returned as read, for the caller to
 /// reject.
 ///
-/// `remaining_len` MUST NOT return more than `cap - head_len`, so the
-/// structural cap still bounds every read.
+/// A declared remainder above `cap - head_len` is clamped to it, so the
+/// read stays within `cap + 1` bytes whatever `remaining_len` returns.
 pub(crate) fn read_file_staged(
     path: &Path,
     head_len: usize,
@@ -161,6 +161,9 @@ pub(crate) fn read_file_staged(
         return Ok(buf);
     };
 
+    // `remaining_len` derives its answer from attacker-controlled header
+    // bytes, so the cap bounds the read here rather than at each call site.
+    let remaining = remaining.min(cap.saturating_sub(head_len));
     let rest = (remaining as u64).saturating_add(1);
     buf.reserve(initial_reserve(remaining));
     file.by_ref()
@@ -429,6 +432,19 @@ mod tests {
         let (_dir, path) = write_temp(&[0x41; 100]);
         let read = read_file_staged(&path, 4, 1024, |_| Some(10), over_cap).unwrap();
         assert_eq!(read.len(), 4 + 10 + 1);
+    }
+
+    /// A declared remainder larger than the cap allows cannot widen the
+    /// read: the helper clamps it, so the buffer stops at the same
+    /// `cap + 1` bytes the fallback path would read.
+    #[test]
+    fn read_file_staged_clamps_a_declared_length_above_the_cap() {
+        const HEAD: usize = 4;
+        const CAP: usize = 64;
+
+        let (_dir, path) = write_temp(&[0x41; CAP * 4]);
+        let read = read_file_staged(&path, HEAD, CAP, |_| Some(usize::MAX), over_cap).unwrap();
+        assert_eq!(read.len(), CAP + 1);
     }
 
     /// An ordinary path keeps the name the caller typed. Nothing is

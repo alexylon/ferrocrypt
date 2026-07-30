@@ -470,14 +470,6 @@ impl KdfParams {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use secrecy::SecretString;
-
-    #[test]
-    fn test_secret_string_creation() {
-        let secret = SecretString::from("my_secret_password".to_string());
-        let debug_str = format!("{:?}", secret);
-        assert!(debug_str.contains("Secret"));
-    }
 
     #[test]
     fn test_kdf_params_valid_defaults() {

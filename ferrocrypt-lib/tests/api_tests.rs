@@ -1666,3 +1666,21 @@ fn private_key_decryptor_forwards_key_read_limits() {
         other => panic!("expected the raised cap to reach the unlock, got {other:?}"),
     }
 }
+
+/// The two public builders that hold a passphrase derive `Debug`, so their
+/// output can reach a caller's log or error report. The passphrase itself
+/// must never appear there.
+#[test]
+fn passphrase_builders_keep_the_passphrase_out_of_debug_output() {
+    let encryptor = format!("{:?}", Encryptor::with_passphrase(pass()));
+    assert!(
+        !encryptor.contains(PASSPHRASE),
+        "Encryptor debug output revealed the passphrase: {encryptor}"
+    );
+
+    let generator = format!("{:?}", KeyPairGenerator::with_passphrase(pass()));
+    assert!(
+        !generator.contains(PASSPHRASE),
+        "KeyPairGenerator debug output revealed the passphrase: {generator}"
+    );
+}

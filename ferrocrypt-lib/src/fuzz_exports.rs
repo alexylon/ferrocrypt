@@ -24,13 +24,13 @@ pub use crate::key::private::PrivateKeyHeader;
 pub use crate::key::public::RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT;
 pub use crate::recipient::native::x25519::validate_private_key_shape;
 
-/// Drives the full `private.key` load + unlock over attacker-controlled bytes
-/// with a fixed passphrase and a tight 64 KiB Argon2id memory cap. This reaches
-/// past the shape gate that [`validate_private_key_shape`] stops at: the KDF
-/// resource cap, the wrapped-secret cap, the total-length check, type-name
-/// grammar, AEAD-AAD unlock, and the recipient's public/secret derivation
-/// check. Any file demanding more than 64 KiB of KDF memory is rejected before
-/// Argon2id runs, so every iteration stays cheap.
+/// Drives the generic `private.key` load + unlock over attacker-controlled
+/// bytes with a fixed passphrase and a tight 64 KiB Argon2id memory cap. This
+/// reaches past the shape gate that [`validate_private_key_shape`] stops at:
+/// the KDF resource cap, the wrapped-secret cap, the total-length check,
+/// type-name grammar, and AEAD-AAD unlock. Any file demanding more than
+/// 64 KiB of KDF memory is rejected before Argon2id runs, so every iteration
+/// stays cheap.
 pub fn open_private_key_for_fuzz(bytes: &[u8]) -> Result<(), crate::CryptoError> {
     let passphrase = secrecy::SecretString::from("fuzz-passphrase".to_string());
     let limit = crate::KdfLimit::new(64);
@@ -70,10 +70,9 @@ pub fn validate_no_known_critical(
 }
 
 /// Drives `decode_recipient_string` for fuzz targets without leaking
-/// the parsed [`crate::key::public::DecodedRecipient`] type (which
-/// carries a crate-internal `KeypairSuite` enum). Discards the result
-/// so the fuzzer exercises the parser surface without touching
-/// internal types.
+/// the parsed `DecodedRecipient` type (which carries a crate-internal
+/// `KeypairSuite` enum). Discards the result so the fuzzer exercises
+/// the parser surface without touching internal types.
 pub fn decode_recipient_string(s: &str, local_max_chars: usize) -> Result<(), crate::CryptoError> {
     crate::key::public::decode_recipient_string(s, local_max_chars).map(|_| ())
 }

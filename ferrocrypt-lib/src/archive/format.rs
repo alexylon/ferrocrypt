@@ -335,7 +335,7 @@ pub(crate) fn write_fca_header<W: Write>(
 /// (`archive_ext` buffer, manifest buffer, entry vector) are bounded
 /// by the time they fire.
 ///
-/// Field reads use [`read_exact_fca`]. If the payload ends before the full
+/// Field reads use `read_exact_fca`. If the payload ends before the full
 /// 27-byte header is available, the result is `MalformedArchive` with the
 /// fixed-header reason. Payload-stream errors retain their typed
 /// classification. Fields are read in wire order so an earlier field error,

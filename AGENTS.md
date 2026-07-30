@@ -244,7 +244,7 @@ recipient_entry = type_name_len(2) || recipient_flags(2) || body_len(4)
     - supply chain (if `Cargo.toml` / `Cargo.lock` changed): `cargo vet` — mirrors the `vet` job in `.github/workflows/rust.yml` so local runs catch failures before GitHub CI does. Requires `cargo install --locked cargo-vet` once.
     - advisory scan (if `Cargo.toml` / `Cargo.lock` changed): run `cargo audit` from the **workspace root** (`/Users/alex/git/aal/ferrocrypt`), not from inside `ferrocrypt-lib/`. The package directory has no `Cargo.lock` of its own; from there you'd need `cargo audit --file <workspace-root>/Cargo.lock`. Requires `cargo install --locked cargo-audit` once.
 - Before finishing, review the change with adversarial thinking and future-proofing in mind.
-- Never commit or stage changes with Git.
+- Never commit or stage changes with Git unless the request explicitly asks for a commit. A request to fix, change, or review code is not a request to commit it.
 - Never manually bump `version` in any `Cargo.toml`. Versioning is automated; see `RELEASE.md`.
 - After you finish cross-checking against the Non-Negotiable Rules and fixing the code, do another pass for bugs, corner cases and regressions.
 - After each final modification, provide a clear, human-readable one-line commit message.

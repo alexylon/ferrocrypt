@@ -90,6 +90,17 @@ impl KeyReadLimits {
         self
     }
 
+    /// Caps set to the structural maxima, for the one caller that applies
+    /// no resource policy of its own: [`crate::validate_private_key_file`]
+    /// reports what the format allows rather than what a default reader
+    /// would accept.
+    pub(crate) fn structural_max() -> Self {
+        Self {
+            max_recipient_string_chars: Self::RECIPIENT_STRING_CHARS_STRUCTURAL_MAX,
+            max_private_key_wrapped_secret_len: Self::PRIVATE_KEY_WRAPPED_SECRET_LEN_STRUCTURAL_MAX,
+        }
+    }
+
     /// Recipient-string cap as a `usize` for the decoder, which counts
     /// characters of an ASCII string.
     pub(crate) fn recipient_string_chars(self) -> usize {
@@ -181,5 +192,16 @@ mod tests {
             PRIVATE_KEY_WRAPPED_SECRET_LEN_MAX,
             "wrapped-secret cap must clamp at the 16 MiB ceiling"
         );
+    }
+
+    /// The structural-maxima constructor must match what the builders
+    /// clamp to, so a caller applying no resource policy and a caller
+    /// asking for the highest cap reach the same limits.
+    #[test]
+    fn structural_max_matches_the_clamped_builders() {
+        let clamped = KeyReadLimits::default()
+            .max_recipient_string_chars(u32::MAX)
+            .max_private_key_wrapped_secret_len(u32::MAX);
+        assert_eq!(KeyReadLimits::structural_max(), clamped);
     }
 }

@@ -1092,6 +1092,10 @@ pub fn default_encrypted_filename(input_path: impl AsRef<Path>) -> Result<String
 /// `public.key`, [`FormatDefect::WrongKeyFileType`] is returned instead of a
 /// generic key-file parse error.
 ///
+/// Companion to [`validate_public_key_file`]. Applies no resource caps of
+/// its own: the verdict follows what `FORMAT.md` §8 allows, not what a
+/// default reader would accept.
+///
 /// # Errors
 ///
 /// Returns [`CryptoError::InputPath`] if the file does not exist, and
@@ -1101,16 +1105,14 @@ pub fn default_encrypted_filename(input_path: impl AsRef<Path>) -> Result<String
 /// [`CryptoError::UnsupportedKeyType`] for a well-formed private key of a key
 /// type this build does not support.
 pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError> {
-    // No resource policy of its own: this validates structure only, so
-    // it reads whatever a structurally valid file declares.
+    // No resource policy of its own: this validates structure only, so the
+    // read and the public-key probe both run at the structural maxima.
+    let limits = KeyReadLimits::structural_max();
     let data = crate::key::private::read_private_key_file(
         key_file.as_ref(),
-        crate::key::private::PRIVATE_KEY_WRAPPED_SECRET_LEN_MAX,
+        limits.private_key_wrapped_secret_len(),
     )?;
-    if matches!(
-        KeyFileKind::classify(&data, KeyReadLimits::default()),
-        KeyFileKind::Public
-    ) {
+    if matches!(KeyFileKind::classify(&data, limits), KeyFileKind::Public) {
         return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
     }
     recipient::native::x25519::validate_private_key_shape(&data)

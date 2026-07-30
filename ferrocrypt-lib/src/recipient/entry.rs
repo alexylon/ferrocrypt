@@ -175,6 +175,11 @@ impl RecipientEntry {
     /// fitting inside `recipient_entries_len` a structural rule: an entry
     /// that runs past its region is malformed, not merely over a
     /// configured limit.
+    ///
+    /// When an entry has more than one defect, this check order decides
+    /// which class is reported. The order is deliberate, but `FORMAT.md`
+    /// does not pin it and must do so before a conformance case depends
+    /// on it.
     pub(crate) fn parse_one(
         bytes: &[u8],
         local_body_cap: u32,

@@ -14,16 +14,12 @@ documentation = "https://docs.rs/ferrocrypt"
 keywords = ["cryptography", "encryption", "chacha20poly1305", "argon2", "X25519"]
 categories = ["cryptography"]
 publish = true
-# Internal regression fixtures (including a non-secret fixture private.key)
-# are not part of the published crate; they exist only to drive in-tree
-# integration tests.
+# Test-only fixtures; the private.key among them is not a real secret.
 exclude = ["tests/fixtures/"]
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [features]
-# Re-exports internal parser surfaces for the in-repo fuzz targets. Not
-# part of the public API — enabled only by `ferrocrypt-lib/fuzz`.
+# Gives the fuzz targets in ferrocrypt-lib/fuzz access to internal
+# parsers. Not part of the public API.
 fuzzing = []
 
 [dependencies]
@@ -33,35 +29,33 @@ secrecy = "0.10"
 thiserror = "2"
 chacha20poly1305 = { version = "0.10", features = ["std", "stream"] }
 argon2 = { version = "0.5", features = ["std", "zeroize"] }
-# hmac 0.13 and hkdf 0.13 require sha3 0.11. The `zeroize` features wipe
-# the SHA3 sponge state and the HMAC input buffer on drop; hkdf has no
-# feature of its own, but it holds an `Hmac` internally, so the same
-# features cover its PRK state.
+# hmac 0.13 and hkdf 0.13 require sha3 0.11, so the three move together.
+# The `zeroize` features wipe internal hash state on drop; hkdf has no
+# such feature but uses hmac inside, so it is covered too.
 sha3 = { version = "0.11", features = ["zeroize"] }
 hmac = { version = "0.13", features = ["zeroize"] }
 hkdf = "0.13"
-# Pin to the 0.4.2 floor (MSRV 1.85) and exclude 0.5 (MSRV 1.95) so the crate's 1.87 MSRV holds.
+# Keeps the crate building on Rust 1.87: 0.4.2 needs 1.85, but 0.5 needs 1.95.
 constant_time_eq = ">=0.4.2, <0.5"
 bech32 = "0.11"
 tempfile = "3"
-# Capability-based filesystem primitives for the unified hardened
-# extractor (`archive/platform.rs`). Used on every target — the
-# extractor is no longer cfg-gated. cap-std provides directory-handle-
-# rooted operations on Linux / macOS / Windows; cap-fs-ext adds the
-# `open_dir_nofollow` and `OpenOptionsFollowExt::follow(FollowSymlinks::No)`
-# primitives the extractor needs to refuse symlinks at every component.
+# Filesystem layer of the hardened extractor (archive/platform.rs):
+# every open is anchored to an already-open directory handle and
+# refuses symlinks, so extraction cannot escape the output folder.
+# cap-fs-ext adds the no-follow opens that cap-std itself lacks.
 cap-std = "4"
 cap-fs-ext = "4"
+# Detects two archive paths that are the same visible name written in
+# two Unicode spellings. macOS treats such names as one name, so the
+# pair is rejected before it can enter an archive (FORMAT.md §9.7).
+unicode-normalization = "0.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# rustix is the safe-Rust syscall wrapper used by `archive/platform.rs`
-# for handle-relative decrypt promotion on Linux / macOS. It also keeps
-# `fs/atomic.rs`'s path-based `rename_no_clobber` implementation compiled
-# for tests even though archive decrypt promotion no longer calls that
-# helper on these targets. cap-std also pulls rustix transitively, so the
-# version constraint is shared.
+# Used by archive/platform.rs on Linux and macOS for the final rename
+# that refuses to overwrite an existing name. cap-std also depends on
+# rustix, so both must accept the same version.
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 rustix = { version = "1", features = ["fs"] }
 
@@ -70,7 +64,6 @@ ferrocrypt-test-support = { path = "../ferrocrypt-test-support" }
 ctor = "0.9"
 stats_alloc = "0.1.10"
 
-# `process` enables the safe get/setrlimit wrappers used by the
-# wide-tree fd-limit regression test in `archive/encode.rs`.
+# `process` is for the archive/encode.rs test that lowers the open-file limit.
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
 rustix = { version = "1", features = ["process"] }

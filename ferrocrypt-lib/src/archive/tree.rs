@@ -15,6 +15,10 @@
 //! same as canonically-ordered manifests, per FORMAT.md §9.8
 //! ("Readers MUST accept any order that satisfies the manifest and
 //! tree-shape rules").
+//!
+//! Duplicate detection runs three keys per entry: the exact path, the
+//! ASCII-case-insensitive key, and the Unicode-form (NFC) key. The
+//! reason reported is the first key that collides, in that order.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -25,10 +29,11 @@ use crate::error::sanitize_for_display;
 use super::format::empty_archive_error;
 use super::limits::{ArchiveLimits, enforce_entry_count_cap, enforce_total_plaintext_bytes_cap};
 use super::model::{ArchiveEntry, ArchiveEntryKind};
-use super::path::ascii_case_collision_key;
+use super::path::{ascii_case_collision_key, unicode_form_collision_key};
 use super::reasons::{
-    TREE_CHILD_UNDER_FILE, TREE_DUPLICATE_ASCII_CASE, TREE_DUPLICATE_ENTRY, TREE_MULTIPLE_ROOTS,
-    TREE_PARENT_MISSING, TREE_ROOT_FILE_HAS_CHILDREN, TREE_ROOT_MISSING,
+    TREE_CHILD_UNDER_FILE, TREE_DUPLICATE_ASCII_CASE, TREE_DUPLICATE_ENTRY,
+    TREE_DUPLICATE_UNICODE_FORM, TREE_MULTIPLE_ROOTS, TREE_PARENT_MISSING,
+    TREE_ROOT_FILE_HAS_CHILDREN, TREE_ROOT_MISSING,
 };
 
 /// Returns the parent UTF-8 path string for a given entry path: the
@@ -92,6 +97,7 @@ pub(super) fn validate_manifest_tree(
 
     let mut exact: HashSet<&str> = HashSet::with_capacity(entries.len());
     let mut ascii_ci: HashSet<Vec<u8>> = HashSet::with_capacity(entries.len());
+    let mut nfc_ci: HashSet<Vec<u8>> = HashSet::with_capacity(entries.len());
     let mut kinds: HashMap<&str, ArchiveEntryKind> = HashMap::with_capacity(entries.len());
     // Captured during the validation walk so the post-extraction
     // chmod step does not re-scan `entries` on every unarchive.
@@ -107,6 +113,9 @@ pub(super) fn validate_manifest_tree(
         }
         if !ascii_ci.insert(ascii_case_collision_key(&entry.path_utf8)) {
             return Err(tree_error(&entry.path_utf8, TREE_DUPLICATE_ASCII_CASE));
+        }
+        if !nfc_ci.insert(unicode_form_collision_key(&entry.path_utf8)) {
+            return Err(tree_error(&entry.path_utf8, TREE_DUPLICATE_UNICODE_FORM));
         }
         kinds.insert(&entry.path_utf8, entry.kind);
         if entry.path_utf8 == root {
@@ -363,6 +372,80 @@ mod tests {
         ];
         let err = validate_manifest_tree(&entries, 5, limits()).unwrap_err();
         assert_tree_error(&err, "duplicate entry differing only in letter case");
+    }
+
+    /// Spec §9.7: two spellings of the same visible name — `é` as one
+    /// composed character vs `e` plus a combining accent — collide via
+    /// the Unicode-form key. Such a pair can exist on a case-sensitive
+    /// filesystem but could never extract on macOS, so it is rejected
+    /// at validation on both sides.
+    #[test]
+    fn rejects_unicode_form_duplicate() {
+        let entries = vec![
+            entry("root", ArchiveEntryKind::Directory, 0),
+            entry("root/caf\u{e9}.txt", ArchiveEntryKind::File, 10),
+            entry("root/cafe\u{301}.txt", ArchiveEntryKind::File, 10),
+        ];
+        let err = validate_manifest_tree(&entries, 20, limits()).unwrap_err();
+        assert_tree_error(&err, "duplicate entry differing only in Unicode form");
+    }
+
+    /// ASCII case and Unicode form fold together: `Café` composed vs
+    /// `cafe` plus combining accent differ in both dimensions and
+    /// still collide, reported under the Unicode-form reason because
+    /// the raw bytes differ beyond ASCII case.
+    #[test]
+    fn rejects_unicode_form_duplicate_mixed_with_ascii_case() {
+        let entries = vec![
+            entry("root", ArchiveEntryKind::Directory, 0),
+            entry("root/Caf\u{e9}", ArchiveEntryKind::Directory, 0),
+            entry("root/cafe\u{301}", ArchiveEntryKind::Directory, 0),
+        ];
+        let err = validate_manifest_tree(&entries, 0, limits()).unwrap_err();
+        assert_tree_error(&err, "duplicate entry differing only in Unicode form");
+    }
+
+    /// An exact byte-duplicate in decomposed spelling reports plain
+    /// "duplicate entry" — the exact check runs before the Unicode-form
+    /// key. Pins the reason precedence.
+    #[test]
+    fn exact_decomposed_duplicate_reports_duplicate_entry() {
+        let entries = vec![
+            entry("root", ArchiveEntryKind::Directory, 0),
+            entry("root/cafe\u{301}.txt", ArchiveEntryKind::File, 10),
+            entry("root/cafe\u{301}.txt", ArchiveEntryKind::File, 10),
+        ];
+        let err = validate_manifest_tree(&entries, 20, limits()).unwrap_err();
+        assert_tree_error(&err, "duplicate entry");
+    }
+
+    /// Non-ASCII letter case is deliberately not folded: `École` and
+    /// `école` are visually distinct names that a case-sensitive
+    /// filesystem keeps apart, so the pair stays archivable. On a
+    /// filesystem that folds beyond ASCII, extraction fails closed via
+    /// `create_new(true)` instead (§9.7).
+    #[test]
+    fn accepts_non_ascii_case_pair() {
+        let entries = vec![
+            entry("root", ArchiveEntryKind::Directory, 0),
+            entry("root/\u{c9}cole.txt", ArchiveEntryKind::File, 10),
+            entry("root/\u{e9}cole.txt", ArchiveEntryKind::File, 10),
+        ];
+        validate_manifest_tree(&entries, 20, limits())
+            .expect("a non-ASCII case pair must stay archivable");
+    }
+
+    /// A lone decomposed name is not a collision: singleton NFD paths
+    /// archive and extract unchanged, byte-exact. Only the duplicate
+    /// key normalizes, never the stored path.
+    #[test]
+    fn accepts_singleton_decomposed_name() {
+        let entries = vec![
+            entry("root", ArchiveEntryKind::Directory, 0),
+            entry("root/cafe\u{301}.txt", ArchiveEntryKind::File, 10),
+        ];
+        validate_manifest_tree(&entries, 10, limits())
+            .expect("a singleton decomposed name must validate");
     }
 
     /// File and directory at the same path (a less-obvious collision

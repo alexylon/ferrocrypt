@@ -837,7 +837,7 @@ It rejects:
 - byte-length cap exceeded;
 - depth cap exceeded.
 
-`ascii_case_collision_key` lowercases ASCII A–Z (not locale-sensitive) for tree-side duplicate detection in `tree.rs`.
+`ascii_case_collision_key` lowercases ASCII A–Z (not locale-sensitive) and `unicode_form_collision_key` applies that key to the path's NFC form (equating precomposed and combining-mark spellings; non-ASCII letter case is not folded). Both serve tree-side duplicate detection in `tree.rs`.
 
 This is one of the most security-sensitive modules. It must be heavily tested, including adversarial path cases.
 
@@ -854,6 +854,7 @@ This is one of the most security-sensitive modules. It must be heavily tested, i
 - no entry under a file path;
 - no exact-duplicate paths;
 - no ASCII-case-insensitive duplicate paths;
+- no Unicode-form (NFC) duplicate paths;
 - declared `total_file_bytes` within `max_total_plaintext_bytes`.
 
 Order-independent (HashMap-based parent lookup), so non-canonical manifest orders satisfying the tree shape are accepted per spec §9.8.

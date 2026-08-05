@@ -10,6 +10,8 @@
 
 use std::path::{Component, Path};
 
+use unicode_normalization::{IsNormalized, UnicodeNormalization, is_nfc_quick};
+
 use crate::CryptoError;
 use crate::error::sanitize_for_display;
 use crate::fs::paths::INCOMPLETE_SUFFIX;
@@ -234,6 +236,23 @@ fn is_windows_reserved_device_component(component: &str) -> bool {
 /// could surface the conflict.
 pub fn ascii_case_collision_key(path: &str) -> Vec<u8> {
     path.bytes().map(ascii_lower_byte).collect()
+}
+
+/// Unicode-form collision key per FORMAT.md §9.7: the
+/// [`ascii_case_collision_key`] of the path's NFC form. Equates two
+/// paths whose bytes differ only in canonical form (`é` precomposed vs
+/// `e` plus a combining accent) — visually identical names that macOS
+/// filesystems treat as one name. Used by tree.rs alongside the ASCII
+/// key; non-ASCII letter case is intentionally NOT folded, so `É.txt`
+/// and `é.txt` stay distinct entries. A path already in NFC — every
+/// all-ASCII path included — skips the intermediate normalized copy.
+pub fn unicode_form_collision_key(path: &str) -> Vec<u8> {
+    match is_nfc_quick(path.chars()) {
+        IsNormalized::Yes => ascii_case_collision_key(path),
+        IsNormalized::No | IsNormalized::Maybe => {
+            ascii_case_collision_key(&path.nfc().collect::<String>())
+        }
+    }
 }
 
 /// FORMAT.md §9.8 canonical sort key: depth ascending, then path
@@ -774,9 +793,10 @@ mod tests {
         assert_eq!(ascii_case_collision_key(""), Vec::<u8>::new());
     }
 
-    /// Multi-byte UTF-8 bytes pass through unchanged. The check is
-    /// intentionally NOT Unicode-aware per FORMAT.md §9.7; filesystem-
-    /// specific Unicode collisions fall through to `create_new(true)`
+    /// Multi-byte UTF-8 bytes pass through unchanged. This key is
+    /// intentionally NOT Unicode-aware per FORMAT.md §9.7; canonical-
+    /// form collisions belong to [`unicode_form_collision_key`], and
+    /// anything neither key catches falls through to `create_new(true)`
     /// at extraction time.
     #[test]
     fn collision_key_passes_through_non_ascii() {
@@ -787,6 +807,50 @@ mod tests {
         let key = ascii_case_collision_key("Naïve");
         assert_eq!(key.first(), Some(&b'n'));
         assert_eq!(&key[1..], "aïve".as_bytes());
+    }
+
+    /// The two Unicode spellings of the same visible name — `é`
+    /// precomposed vs `e` plus combining acute — map to one key, and
+    /// ASCII case folds on top, so `Café` in either spelling collides
+    /// with `café` in either spelling.
+    #[test]
+    fn unicode_form_key_equates_nfc_and_nfd() {
+        let composed = "caf\u{e9}.txt";
+        let decomposed = "cafe\u{301}.txt";
+        assert_ne!(composed.as_bytes(), decomposed.as_bytes());
+        assert_eq!(
+            unicode_form_collision_key(composed),
+            unicode_form_collision_key(decomposed),
+        );
+        assert_eq!(
+            unicode_form_collision_key("Caf\u{e9}.txt"),
+            unicode_form_collision_key(decomposed),
+        );
+    }
+
+    /// On a path already in NFC — all-ASCII paths included — the
+    /// Unicode-form key equals the plain ASCII key, so the two keys
+    /// can only disagree when a combining sequence is present.
+    #[test]
+    fn unicode_form_key_matches_ascii_key_when_already_nfc() {
+        for path in ["dir/File.TXT", "na\u{ef}ve.txt", "\u{1f389}.txt"] {
+            assert_eq!(
+                unicode_form_collision_key(path),
+                ascii_case_collision_key(path),
+            );
+        }
+    }
+
+    /// Non-ASCII letter case is NOT folded: `É.txt` and `é.txt` are
+    /// distinct keys per FORMAT.md §9.7, because case-fold tables vary
+    /// by filesystem and a byte-distinct case pair stays visually
+    /// distinguishable. Pins the deliberate scope of the rule.
+    #[test]
+    fn unicode_form_key_keeps_non_ascii_case_distinct() {
+        assert_ne!(
+            unicode_form_collision_key("\u{c9}cole.txt"),
+            unicode_form_collision_key("\u{e9}cole.txt"),
+        );
     }
 
     // -- Pin-by-name coverage for platform-specific path attempts ---------

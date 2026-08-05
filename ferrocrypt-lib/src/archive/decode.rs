@@ -557,11 +557,11 @@ fn output_already_exists(output_dir: &Path, root_name: &OsStr) -> CryptoError {
 const INCOMPLETE_OUTPUT_EXISTS: &str = "Incomplete output already exists";
 
 /// Label for a collision between two entries of the same archive. The
-/// §9.7 duplicate key folds ASCII case only, so a filesystem that folds
-/// more than that — Unicode normalization on APFS, a case-folding
-/// volume — can still refuse the exclusive create for a manifest that
-/// validated. Naming the archive path tells the operator which entry
-/// the target filesystem could not keep apart.
+/// §9.7 duplicate keys fold ASCII case and Unicode canonical form, so
+/// a filesystem that folds more than that — non-ASCII letter case on
+/// a case-folding volume — can still refuse the exclusive create for
+/// a manifest that validated. Naming the archive path tells the
+/// operator which entry the target filesystem could not keep apart.
 const ARCHIVE_PATH_COLLIDES: &str = "Archive path collides with an existing entry";
 
 /// Maps `io::ErrorKind::AlreadyExists` to a typed

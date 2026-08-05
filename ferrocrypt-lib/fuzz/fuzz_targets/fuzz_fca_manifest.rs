@@ -13,6 +13,7 @@
 //! - `total_file_bytes <= ArchiveLimits::TOTAL_PLAINTEXT_BYTES_DEFAULT`;
 //! - every path is unique under exact equality;
 //! - every path is unique under ASCII-case-insensitive comparison;
+//! - every path is unique under the Unicode-form (NFC) collision key;
 //! - every entry's mode fits in `0o000..=0o777`;
 //! - every entry's path passes `validate_fca_path` (the same gate the
 //!   parser ran during construction);
@@ -38,7 +39,7 @@ use std::collections::HashSet;
 use ferrocrypt::ArchiveLimits;
 use ferrocrypt::fuzz_exports::{
     ArchiveEntryKind, ascii_case_collision_key, parse_fca_header, parse_manifest_bytes,
-    serialize_manifest, validate_fca_path, validate_no_known_critical,
+    serialize_manifest, unicode_form_collision_key, validate_fca_path, validate_no_known_critical,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -94,12 +95,17 @@ fuzz_target!(|data: &[u8]| {
 
     let mut exact: HashSet<String> = HashSet::new();
     let mut ascii_ci: HashSet<Vec<u8>> = HashSet::new();
+    let mut nfc_ci: HashSet<Vec<u8>> = HashSet::new();
     let mut total_entry_ext: u64 = 0;
     for e in &manifest.entries {
         assert!(exact.insert(e.path_utf8.clone()), "exact-duplicate path");
         assert!(
             ascii_ci.insert(ascii_case_collision_key(&e.path_utf8)),
             "ASCII-case-insensitive duplicate path"
+        );
+        assert!(
+            nfc_ci.insert(unicode_form_collision_key(&e.path_utf8)),
+            "Unicode-form duplicate path"
         );
         assert!(e.mode <= 0o777, "mode out of range: 0o{:o}", e.mode);
         validate_fca_path(&e.path_utf8, limits)

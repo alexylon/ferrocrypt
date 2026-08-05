@@ -1435,15 +1435,25 @@ digits have no ASCII case.
 Readers MUST reject exact duplicate paths before creating any output.
 
 Readers MUST also reject simple ASCII-case-insensitive duplicate paths before
-creating output. The collision key maps ASCII `A` through `Z` to `a` through `z`
-and leaves every other byte unchanged. This prevents common collisions on
-case-insensitive filesystems, including default-config NTFS and common macOS
-volumes, before extraction reaches `create_new(true)`.
+creating output. The ASCII collision key maps ASCII `A` through `Z` to `a`
+through `z` and leaves every other byte unchanged. This prevents common
+collisions on case-insensitive filesystems, including default-config NTFS and
+common macOS volumes, before extraction reaches `create_new(true)`.
 
-This collision rule intentionally does not implement full Unicode case folding or
-filesystem Unicode normalization. Filesystem-specific collisions not caught by
-this rule MUST fail closed during extraction through exclusive file creation or
-no-clobber final promotion under `.incomplete`.
+Readers MUST also reject paths that have the same NFC collision key. To
+construct this key, normalize the complete FCA path to Unicode Normalization
+Form C (NFC), then apply the ASCII `A` through `Z` mapping defined above. For
+example, a path containing precomposed `é` collides with the corresponding path
+containing `e` followed by `U+0301 COMBINING ACUTE ACCENT`, including when the
+paths also differ in ASCII case. NFC is applied only when constructing the
+collision key; the manifest retains the original path bytes, and extraction
+uses the original path rather than the key.
+
+For case comparison, the ASCII and NFC collision keys fold ASCII letters only.
+Case-equivalence rules beyond ASCII vary by filesystem and volume and are
+outside this portable preflight. Filesystem-specific collisions not caught by
+these keys MUST fail closed during extraction through exclusive file creation
+or no-clobber final promotion under `.incomplete`.
 
 ### 9.8 Tree shape and entry ordering
 
@@ -1555,8 +1565,9 @@ be recorded as source content and the archive would no longer represent the
 captured source tree.
 The metadata pass records entry kind, canonical FCA path string, source path or
 equivalent reopen information, mode, logical regular-file size, and entry
-extension bytes. The metadata pass MUST apply path validation, duplicate
-detection, ASCII-case collision detection, entry-count cap, logical
+extension bytes. The metadata pass MUST apply path validation, exact duplicate
+detection, duplicate detection under the ASCII collision key, duplicate
+detection under the NFC collision key, entry-count cap, logical
 total-file-byte cap, path-depth cap, path-byte cap, archive-extension cap,
 per-entry-extension cap, total-entry-extension cap, manifest-size cap, and
 tree-shape validation.
@@ -1595,7 +1606,8 @@ Readers MUST process FCA archives in this order:
    - encoded content byte count;
    - path grammar;
    - exact duplicate paths;
-   - ASCII-case-insensitive duplicate paths;
+   - duplicate paths under the ASCII collision key;
+   - duplicate paths under the NFC collision key;
    - one top-level root;
    - root file vs root directory shape;
    - parent directories present;

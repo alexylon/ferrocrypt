@@ -68,6 +68,23 @@ regression net, regenerated when the format intentionally changes).
   permissions only. Ownership, timestamps, ACLs, extended attributes,
   hardlink identity, setuid/setgid/sticky bits, and platform-specific
   metadata are not preserved.
+- **Decryption can fail on a filesystem that ignores letter case in
+  names beyond ASCII.** FerroCrypt refuses to create or decrypt an
+  archive that contains two paths differing only in ASCII letter case
+  (`Report.txt` and `REPORT.TXT`) or only in Unicode spelling — the
+  same visible name written as one composed character or as a base
+  letter plus a separate accent mark. What remains is letter case
+  beyond ASCII: `Ärzte.txt` and `ärzte.txt` are visibly distinct
+  names, so they stay archivable, but Windows and most Macs treat
+  them as the same name, and which names a filesystem equates this
+  way depends on its own per-volume rules, so no up-front check can
+  cover them all. Such a pair can exist — and encrypt — only on a
+  filesystem that keeps the names apart, typically on Linux.
+  Decrypting the result on a filesystem that equates them stops with
+  an error naming the colliding entry: creating the second name is
+  refused, nothing already on disk is overwritten, and the final
+  output path is never written. Decrypt on a filesystem that keeps
+  the names apart, or rename one of the pair and re-encrypt.
 - **Partial plaintext on decrypt failure.** Authenticated chunks are
   released to disk as they verify. If a later chunk fails
   authentication, partial plaintext may remain in a sibling

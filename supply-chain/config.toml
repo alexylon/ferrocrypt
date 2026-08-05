@@ -249,6 +249,10 @@ criteria = "safe-to-run"
 version = "3.27.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.tinyvec]]
+version = "1.12.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.typenum]]
 version = "1.19.0"
 criteria = "safe-to-deploy"

@@ -83,6 +83,7 @@ reasons! {
         TREE_CHILD_UNDER_FILE = "child under a file path";
         TREE_DUPLICATE_ENTRY = "duplicate entry";
         TREE_DUPLICATE_ASCII_CASE = "duplicate entry differing only in letter case";
+        TREE_DUPLICATE_UNICODE_FORM = "duplicate entry differing only in Unicode form";
         TREE_MULTIPLE_ROOTS = "multiple top-level roots";
         TREE_PARENT_MISSING = "parent directory is missing";
         TREE_ROOT_MISSING = "root entry is missing";

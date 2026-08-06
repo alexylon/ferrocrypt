@@ -201,6 +201,47 @@ jobs:
       - name: Run supply-chain vet
         run: cargo vet
 
+  # Public-API compatibility gate for the `ferrocrypt` library.
+  # Compares the in-tree public API against the latest stable release
+  # on crates.io and fails on any change the version number does not
+  # allow. Pre-release versions promise nothing, so they are never
+  # used as the baseline: while a 0.3.0-rc.x is the newest publish,
+  # the baseline stays 0.2.5 and the 0.2 -> 0.3 bump already permits
+  # intentional breaks; the day 0.3.0 ships, the baseline becomes
+  # 0.3.0 and any unannounced API break fails this job.
+  semver:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # stable
+        with:
+          toolchain: stable
+
+      - name: Install cargo-semver-checks
+        run: cargo install --locked cargo-semver-checks
+
+      - name: Resolve the latest stable release as the baseline
+        # The versions endpoint lists newest first, so the first entry
+        # that is not yanked and has no pre-release suffix is the
+        # latest stable release.
+        run: |
+          baseline="$(curl --silent --fail \
+            --header 'User-Agent: ferrocrypt-ci (github.com/alexylon/ferrocrypt)' \
+            https://crates.io/api/v1/crates/ferrocrypt/versions \
+            | jq --raw-output \
+              '[.versions[] | select(.yanked | not) | .num | select(contains("-") | not)][0]')"
+          if [ -z "$baseline" ] || [ "$baseline" = "null" ]; then
+            echo "No stable release found on crates.io to compare against." >&2
+            exit 1
+          fi
+          echo "Baseline: $baseline"
+          echo "SEMVER_BASELINE=$baseline" >> "$GITHUB_ENV"
+
+      - name: Check the public API against the baseline
+        run: cargo semver-checks --package ferrocrypt --baseline-version "$SEMVER_BASELINE"
+
   desktop:
     strategy:
       fail-fast: false
@@ -372,6 +413,38 @@ jobs:
               Format-Volume -DriveLetter $part.DriveLetter -FileSystem exFAT -Confirm:$false | Out-Null
               "FERROCRYPT_FS_MATRIX_DIR=$($part.DriveLetter):\" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
             mount_teardown: Dismount-VHD -Path C:\fsmatrix.vhd -ErrorAction SilentlyContinue
+          # macOS loopback SMB: the macOS SMB client has no
+          # renameatx_np(RENAME_EXCL), so encrypt finalization and
+          # decrypt promotion take the claim-then-rename fallback, and
+          # smbfs rejects F_FULLFSYNC and directory fsync, so the
+          # durability helpers take their documented downgrade
+          # branches. This is the "decrypt onto a NAS share from a
+          # Mac" scenario; no other lane reaches these paths. The
+          # share is served by the runner itself (impacket's Python
+          # SMB server, which needs no root) and mounted back over
+          # loopback, so no second machine is involved.
+          - name: macos-smb
+            os: macos-latest
+            mount_setup: |
+              python3 -m venv /tmp/impacket-venv
+              /tmp/impacket-venv/bin/pip install --quiet impacket
+              mkdir -p /tmp/smb-share /tmp/smb-mnt
+              /tmp/impacket-venv/bin/smbserver.py -smb2support -port 1445 \
+                -username fcr -password fcrtest SHARE /tmp/smb-share \
+                > /tmp/smbserver.log 2>&1 &
+              echo $! > /tmp/smbserver.pid
+              # Mounting before the server listens fails with a
+              # connection refusal, so wait for the port first.
+              for _ in $(seq 1 30); do
+                nc -z 127.0.0.1 1445 && break
+                sleep 1
+              done
+              mount_smbfs '//fcr:fcrtest@127.0.0.1:1445/SHARE' /tmp/smb-mnt \
+                || { cat /tmp/smbserver.log; exit 1; }
+              echo "FERROCRYPT_FS_MATRIX_DIR=/tmp/smb-mnt" >> "$GITHUB_ENV"
+            mount_teardown: |
+              umount /tmp/smb-mnt || true
+              kill "$(cat /tmp/smbserver.pid)" || true
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:

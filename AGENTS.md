@@ -243,6 +243,7 @@ recipient_entry = type_name_len(2) || recipient_flags(2) || body_len(4)
     - desktop (if touched): `cd ferrocrypt-desktop && cargo clippy --all-targets -- -D warnings`
     - supply chain (if `Cargo.toml` / `Cargo.lock` changed): `cargo vet` — mirrors the `vet` job in `.github/workflows/rust.yml` so local runs catch failures before GitHub CI does. Requires `cargo install --locked cargo-vet` once.
     - advisory scan (if `Cargo.toml` / `Cargo.lock` changed): run `cargo audit` from the **workspace root** (`/Users/alex/git/aal/ferrocrypt`), not from inside `ferrocrypt-lib/`. The package directory has no `Cargo.lock` of its own; from there you'd need `cargo audit --file <workspace-root>/Cargo.lock`. Requires `cargo install --locked cargo-audit` once.
+    - public-API compatibility (if the `pub` surface of ferrocrypt-lib changed): `cargo semver-checks --package ferrocrypt --baseline-version <latest stable on crates.io>` — mirrors the `semver` job in `.github/workflows/rust.yml`, which resolves the baseline automatically (pre-releases are never the baseline). Requires `cargo install --locked cargo-semver-checks` once.
 - Before finishing, review the change with adversarial thinking and future-proofing in mind.
 - Never commit or stage changes with Git unless the request explicitly asks for a commit. A request to fix, change, or review code is not a request to commit it.
 - Never manually bump `version` in any `Cargo.toml`. Versioning is automated; see `RELEASE.md`.

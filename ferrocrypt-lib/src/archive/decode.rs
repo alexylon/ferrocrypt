@@ -2023,41 +2023,41 @@ mod tests {
         );
     }
 
-    /// Unicode-collision safety net (NFC vs NFD `naïve`): when the
-    /// underlying filesystem merges two distinct UTF-8 byte sequences
-    /// (HFS+ normalises to NFD on disk; APFS normalises lookups
-    /// regardless of case-sensitivity), the ASCII-only collision key
-    /// can't catch the duplicate, so the fallback is `create_file_at`'s
+    /// Case-collision safety net (`École` vs `école`): the §9.7
+    /// duplicate keys fold ASCII case and Unicode canonical form but
+    /// deliberately not non-ASCII letter case, so a case-folding
+    /// volume (default APFS folds full Unicode case) merges two names
+    /// the manifest keeps apart, and the fallback is `create_file_at`'s
     /// `create_new(true)` rejecting at extraction time.
     ///
     /// **FS-dependent — ignored by default.** Runs meaningfully only
-    /// on a normalising volume; on a non-normalising filesystem (e.g.
-    /// most Linux ext4/btrfs) both files would extract distinctly and
-    /// the test's `unwrap_err()` would panic. The FS-matrix CI lanes
-    /// in `.github/workflows/rust.yml` deliberately do NOT include
-    /// this test in their command list — they target round-trip
-    /// behaviour on the smoke set instead. To run this test against a
-    /// specific filesystem, mount it manually, export
-    /// `FERROCRYPT_FS_MATRIX_DIR=/path/to/mount`, and invoke
-    /// `cargo test -p ferrocrypt --lib unicode_collision -- --ignored`.
+    /// on a case-folding volume; on a case-sensitive volume (e.g.
+    /// case-sensitive APFS, most Linux filesystems) both files would
+    /// extract distinctly and the test's `unwrap_err()` would panic.
+    /// The FS-matrix CI lanes in `.github/workflows/rust.yml`
+    /// deliberately do NOT include this test in their command list —
+    /// they target round-trip behaviour on the smoke set instead. To
+    /// run this test against a specific filesystem, mount it manually,
+    /// export `FERROCRYPT_FS_MATRIX_DIR=/path/to/mount`, and invoke
+    /// `cargo test -p ferrocrypt --lib case_collision -- --ignored`.
     /// The tempdir is sourced from `fs_matrix_tempdir()` so the
     /// whole test lives on the mount.
     #[cfg(target_os = "macos")]
     #[test]
-    #[ignore = "fs-matrix: needs Unicode-normalizing or case-insensitive volume; default APFS preserves form"]
-    fn unicode_collision_falls_through_to_create_new() {
+    #[ignore = "fs-matrix: needs a case-folding volume; case-sensitive volumes extract both names"]
+    fn non_ascii_case_collision_falls_through_to_create_new() {
         let tmp = ferrocrypt_test_support::fs_matrix_tempdir().unwrap();
 
-        // NFC `naïve`: U+00EF (precomposed). NFD: U+0069 + U+0308.
-        let nfc = "na\u{00EF}ve.txt";
-        let nfd = "na\u{0069}\u{0308}ve.txt";
-        assert_ne!(nfc.as_bytes(), nfd.as_bytes(), "test sanity");
+        // `École`: U+00C9. `école`: U+00E9. Both already NFC, distinct
+        // under every §9.7 duplicate key, so the manifest validates.
+        let upper = "\u{00C9}cole.txt";
+        let lower = "\u{00E9}cole.txt";
 
         let manifest = Manifest {
             entries: vec![
                 make_entry("root", ArchiveEntryKind::Directory, 0, 0o755),
-                make_entry(&format!("root/{nfc}"), ArchiveEntryKind::File, 5, 0o644),
-                make_entry(&format!("root/{nfd}"), ArchiveEntryKind::File, 5, 0o644),
+                make_entry(&format!("root/{upper}"), ArchiveEntryKind::File, 5, 0o644),
+                make_entry(&format!("root/{lower}"), ArchiveEntryKind::File, 5, 0o644),
             ],
             total_file_bytes: 10,
             root_name: OsString::from("root"),
@@ -2067,13 +2067,13 @@ mod tests {
         let archive = build_archive(
             &manifest,
             &[
-                (&format!("root/{nfc}"), b"AAAAA"),
-                (&format!("root/{nfd}"), b"BBBBB"),
+                (&format!("root/{upper}"), b"AAAAA"),
+                (&format!("root/{lower}"), b"BBBBB"),
             ],
         );
 
         let err = unarchive_default(archive, tmp.path()).unwrap_err();
-        // On a normalizing filesystem the second exclusive create
+        // On a case-folding filesystem the second exclusive create
         // reports `AlreadyExists`, which maps to the typed collision
         // rejection naming the archive path.
         let s = format!("{err}");

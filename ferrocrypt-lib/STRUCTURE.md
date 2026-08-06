@@ -220,14 +220,17 @@ It contains:
 
 During encryption, `protocol.rs` coordinates:
 
-1. file-key generation;
-2. stream nonce generation;
-3. recipient-scheme file-key wrapping;
-4. authenticated-header construction;
-5. archive encoding;
-6. payload stream encryption;
-7. staged output finalization;
-8. progress event emission.
+1. writer-side cap and KDF preflight (`preflight_header_write_limits` plus
+   each recipient's `validate_for_write`), before any filesystem, archive,
+   or key work;
+2. file-key generation;
+3. stream nonce generation;
+4. recipient-scheme file-key wrapping;
+5. authenticated-header construction;
+6. archive encoding;
+7. payload stream encryption;
+8. staged output finalization;
+9. progress event emission.
 
 During decryption, `protocol.rs` coordinates:
 
@@ -252,6 +255,8 @@ Decryption stages 1–4 are represented by the crate-internal `DecryptSession`, 
 pub(crate) trait RecipientScheme {
     const TYPE_NAME: &'static str;
     const MIXING_RULE: NativeMixingRule;
+
+    fn validate_for_write(&self) -> Result<(), CryptoError>;
 
     fn wrap_file_key(
         &self,
@@ -278,6 +283,7 @@ Rules:
 - They are an internal deduplication and dispatch boundary, not a stable public plugin API.
 - Scheme implementations return or accept recipient body bytes; they do not construct full headers.
 - Recipient schemes do not compute or verify header MACs.
+- `RecipientScheme::validate_for_write` is the writer-side preflight for scheme-carried parameters: `argon2id` validates its `KdfParams` against the same structural bounds, production floor, and `KdfLimit` policy the reader applies; `x25519` carries no such parameters and accepts. `protocol::encrypt` runs it on every recipient, so no in-crate caller can emit a recipient body the same-configured reader rejects. The method is required, not defaulted, so a future scheme must decide explicitly.
 - A recipient unwrap is successful only after the candidate `FileKey` verifies the authenticated header MAC.
 - The orchestrator threads a single `&dyn Fn(&ProgressEvent)` callback into each scheme. Schemes whose KDF step is expensive (Argon2id) emit `ProgressEvent::DerivingPassphraseWrapKey` from inside `wrap` / `unwrap` immediately before the KDF call — that is, **after** structural validation and resource-cap checks have passed. Schemes whose wrap / unwrap is sub-millisecond (X25519) MUST ignore the callback so cheap operations never lie about a long pause. The `private.key` Argon2id boundary is owned separately by `key::private::open_private_key`, which emits `ProgressEvent::UnlockingPrivateKey` at its own work boundary; `protocol::decrypt` does NOT emit a `DerivingKey`-style event from the orchestrator.
 
@@ -1063,9 +1069,9 @@ Rules:
 - Recipient mixing is checked during construction.
 - Empty recipient lists reject immediately.
 - The API remains path-based because FerroCrypt security guarantees depend on archive preflight, streaming encryption, staging, and atomic finalization.
-- **Writer caps mirror reader defaults.** A default-configured `Encryptor` produces `.fcr` files a default-configured `Decryptor` can read. `write` enforces this via the same helpers the reader uses (single source of truth per rule — see "Centralized cap enforcement" below):
-  - `api::preflight_header_write_limits` checks all three axes of `HeaderReadLimits` against the exact header the writer will emit: `recipient_count`, per-entry `body_len` (canonical native value from `NativeRecipientType::body_len()`), and the computed `header_len`. Tightening any axis below the writer's natural output rejects with the corresponding typed `*CapExceeded` variant.
-  - For the passphrase path, `KdfParams::validate_for_write` runs the same `validate_structural` the reader runs (`lanes`, `time_cost`, `mem_cost` against the absolute bounds + the Argon2 `mem_cost ≥ ARGON2_MIN_MEM_COST_PER_LANE × lanes` floor), then the production memory floor `enforce_write_floor` (`mem_cost ≥ MIN_WRITE_MEM_COST`, 19 MiB), and finally `enforce_limit` against `KdfLimit`. Above-structural params reject with `InvalidKdfParams::*`; below-floor `mem_cost` rejects with `KdfBelowWriteFloor`; above-resource-cap reject with `KdfResourceCapExceeded`. The floor is hard and writer-only: the reader path never applies it, so a file written before the floor existed still decrypts. The same rule chain applies to `KeyPairGenerator::write` for the passphrase that seals `private.key`.
+- **Writer caps mirror reader defaults.** A default-configured `Encryptor` produces `.fcr` files a default-configured `Decryptor` can read. The authoritative gates live in `protocol::encrypt` / `protocol::generate_key_pair`, so no in-crate caller can skip them; `Encryptor::write` / `KeyPairGenerator::write` run the same checks earlier so a misconfiguration fails before recipient key files are read (single source of truth per rule — see "Centralized cap enforcement" below):
+  - `protocol::preflight_header_write_limits` checks all three axes of `HeaderReadLimits` against the exact header the writer will emit: `recipient_count`, per-entry `body_len` (canonical native value from `NativeRecipientType::body_len()`), and the computed `header_len`. Tightening any axis below the writer's natural output rejects with the corresponding typed `*CapExceeded` variant.
+  - For the passphrase path, `KdfParams::validate_for_write` (reached through `RecipientScheme::validate_for_write` in `protocol::encrypt`, and directly in `protocol::generate_key_pair`) runs the same `validate_structural` the reader runs (`lanes`, `time_cost`, `mem_cost` against the absolute bounds + the Argon2 `mem_cost ≥ ARGON2_MIN_MEM_COST_PER_LANE × lanes` floor), then the production memory floor `enforce_write_floor` (`mem_cost ≥ MIN_WRITE_MEM_COST`, 19 MiB), and finally `enforce_limit` against `KdfLimit`. Above-structural params reject with `InvalidKdfParams::*`; below-floor `mem_cost` rejects with `KdfBelowWriteFloor`; above-resource-cap reject with `KdfResourceCapExceeded`. The floor is hard and writer-only: the reader path never applies it, so a file written before the floor existed still decrypts.
   - The X25519 path never runs Argon2id during encrypt, so `kdf_limit` has no effect on `with_public_key` / `with_public_keys` flows.
   - To go above any default, the caller raises both sides explicitly: `Encryptor::header_read_limits` / `Encryptor::kdf_limit` / `KeyPairGenerator::kdf_limit` on the writer; `Decryptor::open_with_limits` plus `*::header_read_limits` / `*::kdf_limit` on the reader.
   - All checks fire after `validate_passphrase` and before any filesystem syscall or Argon2id work, so misconfiguration surfaces fast.
@@ -1076,13 +1082,13 @@ Every per-cap `if value > cap { return Err(...) }` lives in **one** method on th
 
 | Cap / rule | Source of truth (constant) | Enforcement helper | Reader call site | Writer call site |
 |---|---|---|---|---|
-| `prefix.header_len` (resource cap) | `HeaderReadLimits::HEADER_LEN_DEFAULT` (= `format::HEADER_LEN_LOCAL_CAP_DEFAULT`) | `HeaderReadLimits::enforce_header_len` | `container::read_encrypted_header` | `api::preflight_header_write_limits` (called from `Encryptor::write`) — checks the exact `header_len` the writer will emit against the cap |
-| `header_fixed.recipient_count` (resource cap) | `HeaderReadLimits::RECIPIENT_COUNT_DEFAULT` | `HeaderReadLimits::enforce_recipient_count` | `container::read_encrypted_header` | `api::preflight_header_write_limits` |
-| Per-entry `body_len` (resource cap) | `HeaderReadLimits::RECIPIENT_BODY_LEN_DEFAULT` | `HeaderReadLimits::enforce_recipient_body_len` (writer); inline check in `RecipientEntry::parse_one` (reader; `recipient/entry.rs` sits below `container.rs` in the dep graph, so the helper can't be called from there without a cycle — same comparison, same `RecipientBodyCapExceeded` variant) | `RecipientEntry::parse_one` | `api::preflight_header_write_limits` (called against canonical `NativeRecipientType::body_len()`) |
+| `prefix.header_len` (resource cap) | `HeaderReadLimits::HEADER_LEN_DEFAULT` (= `format::HEADER_LEN_LOCAL_CAP_DEFAULT`) | `HeaderReadLimits::enforce_header_len` | `container::read_encrypted_header` | `protocol::preflight_header_write_limits` (called from `protocol::encrypt`; run early by `Encryptor::write`) — checks the exact `header_len` the writer will emit against the cap |
+| `header_fixed.recipient_count` (resource cap) | `HeaderReadLimits::RECIPIENT_COUNT_DEFAULT` | `HeaderReadLimits::enforce_recipient_count` | `container::read_encrypted_header` | `protocol::preflight_header_write_limits` |
+| Per-entry `body_len` (resource cap) | `HeaderReadLimits::RECIPIENT_BODY_LEN_DEFAULT` | `HeaderReadLimits::enforce_recipient_body_len` (writer); inline check in `RecipientEntry::parse_one` (reader; `recipient/entry.rs` sits below `container.rs` in the dep graph, so the helper can't be called from there without a cycle — same comparison, same `RecipientBodyCapExceeded` variant) | `RecipientEntry::parse_one` | `protocol::preflight_header_write_limits` (called against canonical `NativeRecipientType::body_len()`) |
 | `header_fixed` structural rules (`header_flags == 0`, `1 <= recipient_count <= MAX`, `ext_len <= MAX`, `entries_len + ext_len + HEADER_FIXED_SIZE == header_len`) | `format::check_*` private helpers + `format::EXT_LEN_MAX` / `RECIPIENT_COUNT_MAX` | `HeaderFixed::validate_structural` | `HeaderFixed::parse` (after wire-byte parse) | `container::build_encrypted_header` (after constructing the `HeaderFixed` value from typed inputs) |
-| Argon2id structural rules (`lanes ∈ [1, MAX_LANES]`, `time_cost ∈ [1, MAX_TIME_COST]`, `mem_cost ∈ [ARGON2_MIN_MEM_COST_PER_LANE × lanes, MAX_MEM_COST]`) | `KdfParams::MAX_*` constants + `crypto::kdf::ARGON2_MIN_MEM_COST_PER_LANE` | `KdfParams::validate_structural` | `KdfParams::from_bytes_structural` (after wire-byte parse) | `KdfParams::validate_for_write` (called from `Encryptor::write` and `KeyPairGenerator::write`) |
+| Argon2id structural rules (`lanes ∈ [1, MAX_LANES]`, `time_cost ∈ [1, MAX_TIME_COST]`, `mem_cost ∈ [ARGON2_MIN_MEM_COST_PER_LANE × lanes, MAX_MEM_COST]`) | `KdfParams::MAX_*` constants + `crypto::kdf::ARGON2_MIN_MEM_COST_PER_LANE` | `KdfParams::validate_structural` | `KdfParams::from_bytes_structural` (after wire-byte parse) | `KdfParams::validate_for_write` (called from `protocol::encrypt` via `RecipientScheme::validate_for_write`, and from `protocol::generate_key_pair`; run early by `Encryptor::write` / `KeyPairGenerator::write`) |
 | Argon2id `mem_cost` (resource cap, on top of structural) | `KdfLimit::MEM_COST_KIB_DEFAULT` (= `KdfParams::DEFAULT_MEM_COST`) / `KdfLimit::default()` | `KdfParams::enforce_limit` | `KdfParams::from_bytes` (calls `enforce_limit` after structural parse) | `KdfParams::validate_for_write` (calls `enforce_limit` after `validate_structural`) |
-| Argon2id write floor (`mem_cost ≥ MIN_WRITE_MEM_COST`, 19 MiB; hard writer-only security policy) | `KdfParams::MIN_WRITE_MEM_COST` | `KdfParams::enforce_write_floor` | — (read path accepts below-floor files so existing data decrypts) | `KdfParams::validate_for_write` (calls `enforce_write_floor` on every write; from `Encryptor::write` / `KeyPairGenerator::write`) |
+| Argon2id write floor (`mem_cost ≥ MIN_WRITE_MEM_COST`, 19 MiB; hard writer-only security policy) | `KdfParams::MIN_WRITE_MEM_COST` | `KdfParams::enforce_write_floor` | — (read path accepts below-floor files so existing data decrypts) | `KdfParams::validate_for_write` (calls `enforce_write_floor` on every write; from `protocol::encrypt` / `protocol::generate_key_pair`, run early by `Encryptor::write` / `KeyPairGenerator::write`) |
 | Recipient-string length (resource cap) | `KeyReadLimits::RECIPIENT_STRING_CHARS_DEFAULT` (= `key::public::RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT`) | inline check in `key::public::decode_recipient_string` (the only site that sees the string) | `decode_recipient_string`, reached from `PublicKey::from_key_file` / `from_recipient_string` and their `*_with_limits` variants | — (writers emit a canonical string whose length follows from the key material) |
 | `private.key` `wrapped_secret_len` (resource cap) | `KeyReadLimits::PRIVATE_KEY_WRAPPED_SECRET_LEN_DEFAULT` (= `key::private::PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT`) | inline check in `key::private::open_private_key` against the caller-supplied cap | `open_private_key`, reached from `open_x25519_private_key` with `PrivateKeyDecryptor::key_read_limits` | `key::private::seal_private_key_inner` (mirrors the default so a sealed file always opens under the default configuration) |
 | Archive `max_entry_count`, `max_total_plaintext_bytes`, `max_path_depth` | `archive::limits::ArchiveLimits` defaults | `archive::limits::enforce_per_entry_caps`, `archive::limits::enforce_total_bytes_cap` | `archive::decode::extract_entries` (unified) | `archive::encode::archive` (iterative walker) |

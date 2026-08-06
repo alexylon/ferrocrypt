@@ -418,6 +418,27 @@ Rules:
 - Recipient-specific validation MUST be performed by the implementation of that
   recipient type.
 
+When one entry violates more than one rule, readers MUST check in this order
+and report the first failure, so two conforming readers report the same
+diagnostic class (§12.1) for the same bytes:
+
+1. The region holds fewer than the 8 entry-header bytes —
+   `malformed_recipient_entry`.
+2. `type_name_len` outside `1..=255` — `malformed_recipient_entry`.
+3. `body_len > 16,777,216` — `malformed_recipient_entry`.
+4. A reserved `recipient_flags` bit is set (§3.4) — `recipient_flags_reserved`.
+5. The entry runs past `recipient_entries_len` — `malformed_recipient_entry`.
+6. `body_len` above the reader's local cap (§3.2) — `resource_cap_exceeded`.
+   The cap is checked after the fit check because fitting the region is a
+   structural rule; an entry that runs past its region is malformed, not
+   merely over a configured limit.
+7. `type_name` is not valid UTF-8 or violates the grammar above —
+   `malformed_type_name`.
+
+Entries are validated one at a time in declared order, each fully through the
+list above before the next entry is read, so when two entries are both invalid
+the earlier entry determines the diagnostic.
+
 Native FerroCrypt type names are short names without `/`, such as `argon2id` and
 `x25519`. Names without `/` are reserved for FerroCrypt-defined native recipient
 types. Plugin and third-party recipient types MUST use a `/`-containing name.
@@ -544,11 +565,13 @@ Readers MUST process `.fcr` files in this order:
 14. After HMAC success, validate `ext_bytes`.
 15. Derive the payload key and decrypt the payload stream.
 
-Steps 5 through 9 are one file-wide preflight, and each step MUST complete over
-every recipient entry before the next step begins, so a rejected file yields one
-diagnostic class determined by its content rather than by the order its entries
-appear in (§12.3). If a file has both an unknown critical entry and a
-recipient-specific structural defect, the step 6 rejection takes precedence.
+The step 5 rejection is applied entry-by-entry during the step 4 parse, at its
+position in the §3.3 check order. Steps 6 through 9 are one file-wide
+preflight, and each step MUST complete over every recipient entry before the
+next step begins, so a rejected file yields one diagnostic class determined by
+its content rather than by the order its entries appear in (§12.3). If a file
+has both an unknown critical entry and a recipient-specific structural defect,
+the step 6 rejection takes precedence.
 Readers MUST complete the recipient-specific step 8 checks for every supported
 entry before starting the mixing checks in step 9. Step 9 MUST NOT begin unless
 every step 8 check has succeeded; if a file has both a recipient-specific

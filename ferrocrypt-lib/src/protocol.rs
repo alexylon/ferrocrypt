@@ -2,14 +2,15 @@
 //!
 //! This is the only module that may coordinate all of:
 //!
-//! 1. generating a file key,
-//! 2. generating the stream nonce,
-//! 3. calling recipient schemes to wrap the file key,
-//! 4. building the authenticated header,
-//! 5. calling archive encoding/decoding,
-//! 6. constructing payload stream encryptors/decryptors,
-//! 7. finalising staged output,
-//! 8. emitting progress events.
+//! 1. running the writer-side cap and KDF preflight,
+//! 2. generating a file key,
+//! 3. generating the stream nonce,
+//! 4. calling recipient schemes to wrap the file key,
+//! 5. building the authenticated header,
+//! 6. calling archive encoding/decoding,
+//! 7. constructing payload stream encryptors/decryptors,
+//! 8. finalising staged output,
+//! 9. emitting progress events.
 //!
 //! Algorithm-specific logic plugs in via the [`RecipientScheme`] /
 //! [`DecryptionCredential`] traits — both `pub(crate)`. Recipient modules
@@ -79,6 +80,16 @@ pub(crate) trait RecipientScheme {
     const TYPE_NAME: &'static str;
     const MIXING_RULE: NativeMixingRule;
 
+    /// Writer-side preflight for scheme-carried parameters, run by
+    /// [`encrypt`] on every recipient before any filesystem, archive,
+    /// or key work. `argon2id` validates its caller-supplied
+    /// [`crate::KdfParams`] against the same structural bounds,
+    /// production floor, and resource policy the reader applies;
+    /// `x25519` carries no such parameters and accepts. Required
+    /// rather than defaulted so a future scheme must decide
+    /// explicitly.
+    fn validate_for_write(&self) -> Result<(), CryptoError>;
+
     fn wrap_file_key(
         &self,
         file_key: &FileKey,
@@ -138,28 +149,23 @@ pub(crate) trait DecryptionCredential {
 ///   from emitting an `argon2id` file with two bodies (`FORMAT.md` §4.1
 ///   forbids it).
 ///
-/// # Caller obligations
+/// # Writer/reader lockstep
 ///
-/// This function is `pub(crate)` and **does not** enforce
-/// [`crate::HeaderReadLimits`] caps (`max_recipient_count`,
-/// `max_recipient_body_len`, `max_header_len`) or run
-/// [`crate::KdfParams`] structural / resource-cap validation against
-/// caller-supplied passphrase parameters. Those checks are the
-/// **api-layer's** responsibility and live in
-/// [`crate::api::Encryptor::write`] via
-/// `api::preflight_header_write_limits` and
-/// [`crate::KdfParams::validate_for_write`]. The same applies to the
-/// fixed passphrase byte-length check in
-/// [`crate::api::validate_passphrase`].
-///
-/// Any new in-crate caller of `protocol::encrypt` must run those
-/// preflight steps first (or accept the resulting symmetry break with
-/// the default reader). Tests in `protocol.rs::tests` deliberately
-/// bypass them to construct forward-compat fixtures; production
-/// callers must not.
+/// The emitted header shape is checked against `header_read_limits`
+/// through [`preflight_header_write_limits`] — the same
+/// [`HeaderReadLimits`] checks the reader applies — and every recipient
+/// runs [`RecipientScheme::validate_for_write`], all before any
+/// filesystem, archive, or key work. A `.fcr` this function writes is
+/// therefore readable under the limits it was checked against; no
+/// caller can skip the gates. [`crate::Encryptor::write`] runs the same
+/// checks earlier so a misconfiguration fails before recipient key
+/// files are read. The fixed passphrase byte-length bound is enforced
+/// inside the wrap path (`crypto::kdf::check_passphrase_len`) before
+/// Argon2id runs.
 pub(crate) fn encrypt<R: RecipientScheme>(
     recipients: &[R],
     archive_limits: ArchiveLimits,
+    header_read_limits: HeaderReadLimits,
     input_path: &Path,
     output_dir: &Path,
     output_file: Option<&Path>,
@@ -173,6 +179,17 @@ pub(crate) fn encrypt<R: RecipientScheme>(
             type_name: R::TYPE_NAME.to_string(),
             policy: R::MIXING_RULE.diagnostic_policy(),
         });
+    }
+
+    // The same header-cap and KDF gates the reader applies, enforced
+    // here so no in-crate caller can emit a file the same-configured
+    // reader rejects. `api::Encryptor::write` runs them earlier too,
+    // so misconfiguration fails before recipient key files are read.
+    let native_type = NativeRecipientType::from_type_name(R::TYPE_NAME)
+        .ok_or(crate::error::internal_invariant!("unknown native scheme"))?;
+    preflight_header_write_limits(header_read_limits, recipients.len(), native_type)?;
+    for recipient in recipients {
+        recipient.validate_for_write()?;
     }
 
     // Resolve the destination and reject an existing entry before
@@ -248,6 +265,66 @@ fn build_native_entry(
     let ty = NativeRecipientType::from_type_name(type_name)
         .ok_or(crate::error::internal_invariant!("unknown native scheme"))?;
     RecipientEntry::native(ty, body.bytes)
+}
+
+/// Enforces the exact `.fcr` header shape the writer will emit against
+/// the caller-supplied [`HeaderReadLimits`]. Mirrors the reader-side cap
+/// checks in `container::read_encrypted_header`, but runs before any KDF,
+/// ECDH, or output-file work. Called by [`encrypt`] on every write, and
+/// earlier by [`crate::Encryptor::write`] so a misconfiguration fails
+/// before recipient key files are read.
+///
+/// Takes a [`NativeRecipientType`] rather than a `(type_name, body_len)`
+/// pair so the type-name / body-length pair is bound by the registry
+/// (impossible for a caller to mix `argon2id`'s name with `x25519`'s
+/// body length), and so adding a future native recipient updates the
+/// preflight automatically through the registry's accessors.
+pub(crate) fn preflight_header_write_limits(
+    limits: HeaderReadLimits,
+    recipient_count: usize,
+    native: NativeRecipientType,
+) -> Result<(), CryptoError> {
+    let type_name = native.type_name();
+    let body_len = native.body_len();
+
+    // `RECIPIENT_COUNT_MAX = 4096` fits u16; saturating cast keeps the
+    // cap diagnostic honest in the theoretical case of an in-memory
+    // list above u16::MAX, while still surfacing the cap-exceeded
+    // variant before later structural checks.
+    let count_u16: u16 = u16::try_from(recipient_count).unwrap_or(u16::MAX);
+    limits.enforce_recipient_count(count_u16)?;
+
+    // body_len is bounded by the canonical native `BODY_LENGTH` (≤ 116
+    // today), so the saturating cast cannot fire. Defensive
+    // fallback for a hypothetical future plugin recipient with a body
+    // above `u32::MAX`: `enforce_recipient_body_len` rejects against
+    // the per-entry cap (≤ `BODY_LEN_STRUCTURAL_MAX = 16 MiB`), so
+    // `u32::MAX` always trips the cap.
+    let body_len_u32: u32 = u32::try_from(body_len).unwrap_or(u32::MAX);
+    limits.enforce_recipient_body_len(body_len_u32)?;
+
+    // Compute the exact `header_len` the writer will emit
+    // (`header_fixed + recipient_count * per_entry`, with `ext_len = 0`
+    // for current writers) and check it against the cap. All checked
+    // arithmetic funnels into one shared overflow error.
+    let overflow_err = || CryptoError::HeaderLenCapExceeded {
+        header_len: u32::MAX,
+        local_cap: limits.max_header_len,
+    };
+    let per_entry = (crate::recipient::entry::ENTRY_HEADER_SIZE as u64)
+        .checked_add(type_name.len() as u64)
+        .and_then(|v| v.checked_add(body_len as u64))
+        .ok_or_else(overflow_err)?;
+    let total_entries = (recipient_count as u64)
+        .checked_mul(per_entry)
+        .ok_or_else(overflow_err)?;
+    let header_len_u64 = (format::HEADER_FIXED_SIZE as u64)
+        .checked_add(total_entries)
+        .ok_or_else(overflow_err)?;
+    let header_len = u32::try_from(header_len_u64).unwrap_or(u32::MAX);
+    limits.enforce_header_len(header_len)?;
+
+    Ok(())
 }
 
 // ─── Decrypt ───────────────────────────────────────────────────────────────
@@ -527,23 +604,20 @@ fn failure_for(
 /// without its matching `private.key`. Where directory flushing is supported,
 /// the same guarantee covers power loss.
 ///
-/// # Caller obligations
+/// # Writer/reader lockstep
 ///
-/// This function is `pub(crate)` and **does not** validate the
-/// caller-supplied [`crate::KdfParams`] against structural bounds
-/// or against a [`crate::KdfLimit`] resource cap. Those checks are
-/// the **api-layer's** responsibility and live in
-/// [`crate::api::KeyPairGenerator::write`] via
-/// [`crate::KdfParams::validate_for_write`]. The same applies to the
-/// fixed passphrase byte-length check in
-/// [`crate::api::validate_passphrase`].
-///
-/// Any new in-crate caller must run those preflight steps first
-/// (or accept the resulting symmetry break with the default reader's
-/// `PrivateKeyDecryptor::decrypt`).
+/// The caller-supplied [`crate::KdfParams`] are validated here against
+/// the same structural bounds, production floor, and
+/// [`crate::KdfLimit`] resource policy the reader applies when
+/// unlocking, so a `private.key` this function seals unlocks under the
+/// same policy; no caller can skip the gate. `kdf_limit = None`
+/// applies [`crate::KdfLimit::default`]. The fixed passphrase
+/// byte-length bound is enforced inside the sealing path
+/// (`crypto::kdf::check_passphrase_len`) before Argon2id runs.
 pub(crate) fn generate_key_pair(
     passphrase: &secrecy::SecretString,
     kdf_params: &crate::crypto::kdf::KdfParams,
+    kdf_limit: Option<&crate::crypto::kdf::KdfLimit>,
     output_dir: &Path,
     on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<(PathBuf, PathBuf, String), CryptoError> {
@@ -554,6 +628,12 @@ pub(crate) fn generate_key_pair(
     use crate::key::private::seal_private_key;
     use crate::key::public::{encode_recipient_string, fingerprint_hex};
     use crate::recipient::native::x25519;
+
+    // Writer caps mirror reader defaults via the same structural +
+    // resource KDF validation the reader uses, so the sealed
+    // `private.key` is unlocked by a default `PrivateKeyDecryptor`.
+    // To go above default, the caller raises both sides explicitly.
+    kdf_params.validate_for_write(kdf_limit)?;
 
     fs::create_dir_all(output_dir)?;
 
@@ -831,6 +911,7 @@ mod tests {
         let (private_key_path, public_key_path, _fingerprint) = generate_key_pair(
             &pass,
             &crate::crypto::kdf::KdfParams::test_fast_default(),
+            None,
             &dir,
             &|_| {},
         )?;
@@ -1438,10 +1519,12 @@ mod tests {
         let r1 = argon2id::PassphraseRecipient {
             passphrase: &pass,
             kdf_params,
+            kdf_limit: crate::crypto::kdf::KdfLimit::default(),
         };
         let r2 = argon2id::PassphraseRecipient {
             passphrase: &pass,
             kdf_params,
+            kdf_limit: crate::crypto::kdf::KdfLimit::default(),
         };
         let recipients = [r1, r2];
 
@@ -1454,6 +1537,7 @@ mod tests {
         let err = encrypt(
             &recipients,
             ArchiveLimits::default(),
+            HeaderReadLimits::default(),
             &input,
             &out_dir,
             None,
@@ -1575,6 +1659,7 @@ mod tests {
         let err = encrypt(
             &recipients,
             ArchiveLimits::default(),
+            HeaderReadLimits::default(),
             &input,
             &out_dir,
             None,
@@ -1585,6 +1670,120 @@ mod tests {
             CryptoError::EmptyRecipientList => Ok(()),
             other => panic!("expected EmptyRecipientList, got {other:?}"),
         }
+    }
+
+    /// The recipient-count cap gate lives in `encrypt` itself: a list
+    /// above the default `HeaderReadLimits` cap rejects before any
+    /// ECDH or output work, so no in-crate caller can emit a header
+    /// the default reader refuses.
+    #[test]
+    fn encrypt_rejects_recipient_count_above_local_cap() -> Result<(), CryptoError> {
+        let (_secret, public) = x25519::generate_keypair()?;
+        let over = HeaderReadLimits::RECIPIENT_COUNT_DEFAULT + 1;
+        let recipients: Vec<x25519::X25519Recipient> = (0..over)
+            .map(|_| x25519::X25519Recipient {
+                recipient_public_key_bytes: &public,
+            })
+            .collect();
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let input = tmp.path().join("data.txt");
+        fs::write(&input, b"x")?;
+        let out_dir = tmp.path().join("out");
+        fs::create_dir_all(&out_dir)?;
+
+        let err = encrypt(
+            &recipients,
+            ArchiveLimits::default(),
+            HeaderReadLimits::default(),
+            &input,
+            &out_dir,
+            None,
+            &|_| {},
+        )
+        .unwrap_err();
+        match err {
+            CryptoError::RecipientCountCapExceeded { count, local_cap } => {
+                assert_eq!(count, over);
+                assert_eq!(local_cap, HeaderReadLimits::RECIPIENT_COUNT_DEFAULT);
+                Ok(())
+            }
+            other => panic!("expected RecipientCountCapExceeded, got {other:?}"),
+        }
+    }
+
+    /// The KDF write gate lives in `encrypt` itself: passphrase
+    /// parameters above the default `KdfLimit` memory policy reject
+    /// before any Argon2id run, so no in-crate caller can emit an
+    /// `argon2id` body the default reader refuses.
+    #[test]
+    fn encrypt_rejects_kdf_memory_above_write_policy() -> Result<(), CryptoError> {
+        use crate::crypto::kdf::{KdfLimit, KdfParams};
+
+        let pass = SecretString::from("pass".to_string());
+        let recipient = argon2id::PassphraseRecipient {
+            passphrase: &pass,
+            kdf_params: KdfParams {
+                mem_cost: KdfLimit::MEM_COST_KIB_STRUCTURAL_MAX,
+                time_cost: 1,
+                lanes: 1,
+            },
+            kdf_limit: KdfLimit::default(),
+        };
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let input = tmp.path().join("data.txt");
+        fs::write(&input, b"x")?;
+        let out_dir = tmp.path().join("out");
+        fs::create_dir_all(&out_dir)?;
+
+        let err = encrypt(
+            std::slice::from_ref(&recipient),
+            ArchiveLimits::default(),
+            HeaderReadLimits::default(),
+            &input,
+            &out_dir,
+            None,
+            &|_| {},
+        )
+        .unwrap_err();
+        match err {
+            CryptoError::KdfResourceCapExceeded {
+                mem_cost_kib,
+                local_cap_kib,
+            } => {
+                assert_eq!(mem_cost_kib, KdfLimit::MEM_COST_KIB_STRUCTURAL_MAX);
+                assert_eq!(local_cap_kib, KdfLimit::MEM_COST_KIB_DEFAULT);
+                Ok(())
+            }
+            other => panic!("expected KdfResourceCapExceeded, got {other:?}"),
+        }
+    }
+
+    /// The KDF write gate lives in `generate_key_pair` itself:
+    /// below-floor memory rejects before the output directory is even
+    /// created, so no in-crate caller can seal a weak `private.key`.
+    #[test]
+    fn generate_key_pair_rejects_kdf_memory_below_write_floor() {
+        use crate::crypto::kdf::KdfParams;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let keys_dir = tmp.path().join("keys");
+        let pass = SecretString::from("pass".to_string());
+        let weak = KdfParams {
+            mem_cost: KdfParams::MIN_WRITE_MEM_COST - 1,
+            time_cost: 1,
+            lanes: 1,
+        };
+        let err = generate_key_pair(&pass, &weak, None, &keys_dir, &|_| {}).unwrap_err();
+        match err {
+            CryptoError::KdfBelowWriteFloor { .. } => {}
+            other => panic!("expected KdfBelowWriteFloor, got {other:?}"),
+        }
+        assert!(
+            !keys_dir.exists(),
+            "gate must fire before the output directory is created"
+        );
     }
 
     /// Creates a staged key-file temporary file in `dir` containing `bytes`.

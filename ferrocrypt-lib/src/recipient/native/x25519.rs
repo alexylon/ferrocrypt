@@ -286,6 +286,13 @@ impl<'a> crate::protocol::RecipientScheme for X25519Recipient<'a> {
     const MIXING_RULE: crate::recipient::policy::NativeMixingRule =
         crate::recipient::policy::NativeRecipientType::X25519.mixing_rule();
 
+    fn validate_for_write(&self) -> Result<(), CryptoError> {
+        // X25519 wrap carries no caller-supplied KDF parameters; the
+        // recipient key's §2.4 ingress rules are enforced by every
+        // `PublicKey` constructor and re-checked inside `wrap`.
+        Ok(())
+    }
+
     fn wrap_file_key(
         &self,
         file_key: &FileKey,

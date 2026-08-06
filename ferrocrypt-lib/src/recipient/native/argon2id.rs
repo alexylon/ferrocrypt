@@ -134,10 +134,12 @@ pub(crate) fn unwrap(
 // ─── Protocol-trait impls ──────────────────────────────────────────────────
 
 /// Encrypt-side handle for the `argon2id` recipient: borrows a
-/// passphrase and KDF parameters.
+/// passphrase and carries the KDF parameters plus the writer-side
+/// KDF resource policy.
 pub(crate) struct PassphraseRecipient<'a> {
     pub passphrase: &'a SecretString,
     pub kdf_params: KdfParams,
+    pub kdf_limit: KdfLimit,
 }
 
 impl<'a> crate::protocol::RecipientScheme for PassphraseRecipient<'a> {
@@ -148,6 +150,14 @@ impl<'a> crate::protocol::RecipientScheme for PassphraseRecipient<'a> {
     // for its defense-in-depth cardinality check.
     const MIXING_RULE: crate::recipient::policy::NativeMixingRule =
         crate::recipient::policy::NativeRecipientType::Argon2id.mixing_rule();
+
+    fn validate_for_write(&self) -> Result<(), CryptoError> {
+        // The same structural + floor + resource gate the reader's
+        // `KdfParams::from_bytes` pairs with, so the sealed body is
+        // decryptable under the same `KdfLimit`.
+        self.kdf_params.validate_for_write(Some(&self.kdf_limit))?;
+        Ok(())
+    }
 
     fn wrap_file_key(
         &self,

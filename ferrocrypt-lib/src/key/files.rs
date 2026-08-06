@@ -119,6 +119,7 @@ mod tests {
         let (private_key_path, public_key_path, _fingerprint) = crate::protocol::generate_key_pair(
             &pass,
             &crate::crypto::kdf::KdfParams::test_fast_default(),
+            None,
             tmp.path(),
             &|_| {},
         )?;

@@ -177,9 +177,8 @@ impl RecipientEntry {
     /// configured limit.
     ///
     /// When an entry has more than one defect, this check order decides
-    /// which class is reported. The order is deliberate, but `FORMAT.md`
-    /// does not pin it and must do so before a conformance case depends
-    /// on it.
+    /// which class is reported. §3.3 pins the same order, so every
+    /// conforming reader reports the same class for the same bytes.
     pub(crate) fn parse_one(
         bytes: &[u8],
         local_body_cap: u32,
@@ -534,6 +533,47 @@ mod tests {
         match RecipientEntry::parse_one(&bytes, BODY_LEN_LOCAL_CAP_DEFAULT) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)) => {}
             other => panic!("expected MalformedRecipientEntry for an absent body, got {other:?}"),
+        }
+    }
+
+    /// §3.3 pins the multi-defect order: an out-of-range `body_len`
+    /// (step 3) reports before a reserved flag bit (step 4).
+    #[test]
+    fn parse_one_reports_length_range_before_reserved_flags() {
+        let bytes = entry_header(6, 1u16 << 1, BODY_LEN_MAX + 1);
+        match RecipientEntry::parse_one(&bytes, u32::MAX) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)) => {}
+            other => panic!("expected MalformedRecipientEntry before flags check, got {other:?}"),
+        }
+    }
+
+    /// §3.3 pins the multi-defect order: a reserved flag bit (step 4)
+    /// reports before the local body cap (step 6).
+    #[test]
+    fn parse_one_reports_reserved_flags_before_body_cap() {
+        let oversized = BODY_LEN_LOCAL_CAP_DEFAULT + 1;
+        let mut bytes = entry_header(6, 1u16 << 1, oversized).to_vec();
+        bytes.extend_from_slice(x25519::TYPE_NAME.as_bytes());
+        bytes.resize(bytes.len() + oversized as usize, 0);
+        match RecipientEntry::parse_one(&bytes, BODY_LEN_LOCAL_CAP_DEFAULT) {
+            Err(CryptoError::InvalidFormat(FormatDefect::RecipientFlagsReserved)) => {}
+            other => panic!("expected RecipientFlagsReserved before the cap check, got {other:?}"),
+        }
+    }
+
+    /// §3.3 pins the multi-defect order: the local body cap (step 6)
+    /// reports before the type-name grammar (step 7).
+    #[test]
+    fn parse_one_reports_body_cap_before_type_name_grammar() {
+        let oversized = BODY_LEN_LOCAL_CAP_DEFAULT + 1;
+        let mut bytes = entry_header(6, 0, oversized).to_vec();
+        bytes.extend_from_slice(b"X25519");
+        bytes.resize(bytes.len() + oversized as usize, 0);
+        match RecipientEntry::parse_one(&bytes, BODY_LEN_LOCAL_CAP_DEFAULT) {
+            Err(CryptoError::RecipientBodyCapExceeded { .. }) => {}
+            other => {
+                panic!("expected RecipientBodyCapExceeded before the grammar check, got {other:?}")
+            }
         }
     }
 

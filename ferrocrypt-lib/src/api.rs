@@ -339,18 +339,20 @@ impl Encryptor {
 
         // Writer caps mirror reader defaults via the same `enforce_*`
         // helpers the reader uses, so default-encrypt and default-
-        // decrypt cannot drift. Adding a new cap = add one method on
-        // the limit type; both sides pick it up.
+        // decrypt cannot drift. Checked here so a misconfiguration
+        // fails before recipient key files are read;
+        // `protocol::encrypt` re-enforces the same gates for any
+        // other caller.
         match &self.state {
             EncryptorState::Recipients(rs) => {
-                preflight_header_write_limits(
+                protocol::preflight_header_write_limits(
                     header_read_limits,
                     rs.len(),
                     NativeRecipientType::X25519,
                 )?;
             }
             EncryptorState::Passphrase(_) => {
-                preflight_header_write_limits(
+                protocol::preflight_header_write_limits(
                     header_read_limits,
                     1,
                     NativeRecipientType::Argon2id,
@@ -366,10 +368,12 @@ impl Encryptor {
                 let recipient = recipient::argon2id::PassphraseRecipient {
                     passphrase: &passphrase,
                     kdf_params,
+                    kdf_limit,
                 };
                 protocol::encrypt(
                     std::slice::from_ref(&recipient),
                     archive_limits,
+                    header_read_limits,
                     input,
                     output_dir,
                     save_as,
@@ -393,6 +397,7 @@ impl Encryptor {
                 protocol::encrypt(
                     &recipients,
                     archive_limits,
+                    header_read_limits,
                     input,
                     output_dir,
                     save_as,
@@ -887,15 +892,10 @@ impl KeyPairGenerator {
         validate_passphrase(&self.passphrase)?;
         let kdf_params = self.kdf_params.unwrap_or_default();
         let kdf_limit = self.kdf_limit.unwrap_or_default();
-        // Writer caps mirror reader defaults via the same structural +
-        // resource KDF validation the reader uses, so a `private.key`
-        // produced here is unlocked by a default
-        // `PrivateKeyDecryptor::decrypt`. To go above default, the
-        // caller raises both sides explicitly.
-        kdf_params.validate_for_write(Some(&kdf_limit))?;
         let (private_key_path, public_key_path, fingerprint) = protocol::generate_key_pair(
             &self.passphrase,
             &kdf_params,
+            Some(&kdf_limit),
             output_dir.as_ref(),
             &on_event,
         )?;
@@ -1149,64 +1149,6 @@ pub fn validate_public_key_file(key_file: impl AsRef<Path>) -> Result<(), Crypto
 }
 
 // ─── Internal validators ────────────────────────────────────────────────────
-
-/// Enforces the exact `.fcr` header shape the writer will emit against
-/// the caller-supplied [`HeaderReadLimits`]. Mirrors the reader-side cap
-/// checks in `container::read_encrypted_header`, but runs before any KDF,
-/// ECDH, or output-file work.
-///
-/// Takes a [`NativeRecipientType`] rather than a `(type_name, body_len)`
-/// pair so the type-name / body-length pair is bound by the registry
-/// (impossible for a caller to mix `argon2id`'s name with `x25519`'s
-/// body length), and so adding a future native recipient updates the
-/// preflight automatically through the registry's accessors.
-fn preflight_header_write_limits(
-    limits: HeaderReadLimits,
-    recipient_count: usize,
-    native: NativeRecipientType,
-) -> Result<(), CryptoError> {
-    let type_name = native.type_name();
-    let body_len = native.body_len();
-
-    // `RECIPIENT_COUNT_MAX = 4096` fits u16; saturating cast keeps the
-    // cap diagnostic honest in the theoretical case of an in-memory
-    // list above u16::MAX, while still surfacing the cap-exceeded
-    // variant before later structural checks.
-    let count_u16: u16 = u16::try_from(recipient_count).unwrap_or(u16::MAX);
-    limits.enforce_recipient_count(count_u16)?;
-
-    // body_len is bounded by the canonical native `BODY_LENGTH` (≤ 116
-    // today), so the saturating cast cannot fire. Defensive
-    // fallback for a hypothetical future plugin recipient with a body
-    // above `u32::MAX`: `enforce_recipient_body_len` rejects against
-    // the per-entry cap (≤ `BODY_LEN_STRUCTURAL_MAX = 16 MiB`), so
-    // `u32::MAX` always trips the cap.
-    let body_len_u32: u32 = u32::try_from(body_len).unwrap_or(u32::MAX);
-    limits.enforce_recipient_body_len(body_len_u32)?;
-
-    // Compute the exact `header_len` the writer will emit
-    // (`header_fixed + recipient_count * per_entry`, with `ext_len = 0`
-    // for current writers) and check it against the cap. All checked
-    // arithmetic funnels into one shared overflow error.
-    let overflow_err = || CryptoError::HeaderLenCapExceeded {
-        header_len: u32::MAX,
-        local_cap: limits.max_header_len,
-    };
-    let per_entry = (recipient::entry::ENTRY_HEADER_SIZE as u64)
-        .checked_add(type_name.len() as u64)
-        .and_then(|v| v.checked_add(body_len as u64))
-        .ok_or_else(overflow_err)?;
-    let total_entries = (recipient_count as u64)
-        .checked_mul(per_entry)
-        .ok_or_else(overflow_err)?;
-    let header_len_u64 = (format::HEADER_FIXED_SIZE as u64)
-        .checked_add(total_entries)
-        .ok_or_else(overflow_err)?;
-    let header_len = u32::try_from(header_len_u64).unwrap_or(u32::MAX);
-    limits.enforce_header_len(header_len)?;
-
-    Ok(())
-}
 
 /// Enforces the `FORMAT.md` §2.2 passphrase byte-length bound (1 to
 /// [`MAX_PASSPHRASE_LEN_BYTES`](crate::crypto::kdf::MAX_PASSPHRASE_LEN_BYTES),

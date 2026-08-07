@@ -11,7 +11,6 @@ on demand when the team intentionally changes the wire format. It is
 **not** the public conformance contract — that lives in
 `testvectors/`, whose bytes ship with stable release 0.3.0.
 
-The single per-step acceptance check from `notes/RESTRUCTURE_PLAN.md`
 ("Core invariant: pure refactor → Verifying the invariant at every
 step") relies on these fixtures.
 

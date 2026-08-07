@@ -35,9 +35,9 @@ Notes:
 - The desktop crate is excluded from the workspace, so root-level `cargo test` / `cargo clippy` do not cover it locally. **CI does cover it** via a separate `desktop` job that runs clippy + build + tests on Ubuntu / macOS / Windows on every PR.
 - The Windows cross-check only type-checks (no linker), so it is sufficient for verifying `cfg(target_os = "windows")` / `cfg(not(unix))` arms compile. Use it whenever you touch `fs::atomic` or any other branch that varies by platform.
 
-## `notes/` directory
+## `.notes/` directory
 
-Gitignored scratchpad for helper files the user asks to be created there — typically markdown (current proposal/plan files, side references during a refactor, etc.). Safe to read for context; nothing in `notes/` ships with the repo.
+Gitignored scratchpad for helper files the user asks to be created there — typically markdown (current proposal/plan files, side references during a refactor, etc.). Safe to read for context; nothing in `.notes/` ships with the repo.
 
 ## Architecture
 

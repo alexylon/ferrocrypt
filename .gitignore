@@ -4,7 +4,7 @@ dest*
 .DS_Store
 .sofos/
 .claude/
-notes/
+.notes/
 
 # Test scratch workspaces created at runtime and removed by each test
 # binary's exit hook (see TEST_WORKSPACE_ROOTS in run_all_tests.sh). Ignored

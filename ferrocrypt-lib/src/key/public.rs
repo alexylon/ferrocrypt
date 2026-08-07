@@ -441,27 +441,22 @@ pub(crate) fn decode_x25519_recipient_resolved(
 /// Shared by the recipient-string and key-file parsers. A decoded
 /// non-X25519 type has passed the grammar, checksum, and suite gates,
 /// so it rejects as [`CryptoError::UnsupportedKeyType`], not as a
-/// malformed input. X25519 material must be exactly 32 bytes, not all
-/// zero, and the canonical `FORMAT.md` §2.4 encoding — an RFC 7748
-/// alias of a valid key is rejected, never normalized, so one curve
-/// point cannot carry two recipient strings or fingerprints.
+/// malformed input. The material itself must pass the shared §7
+/// ingress rules in [`check_x25519_material`] — an RFC 7748 alias of
+/// a valid key is rejected, never normalized, so one curve point
+/// cannot carry two recipient strings or fingerprints.
 fn decoded_x25519_bytes(decoded: DecodedRecipient) -> Result<[u8; 32], CryptoError> {
     if decoded.type_name != X25519_TYPE_NAME {
         return Err(CryptoError::UnsupportedKeyType {
             type_name: decoded.type_name,
         });
     }
-    let bytes: [u8; 32] = decoded
+    check_x25519_material(X25519_TYPE_NAME, &decoded.key_material)?;
+    decoded
         .key_material
         .as_slice()
         .try_into()
-        .map_err(|_| malformed_public_key())?;
-    if crate::recipient::x25519::is_zero_public_key(&bytes)
-        || !crate::recipient::x25519::is_canonical_public_key_encoding(&bytes)
-    {
-        return Err(malformed_public_key());
-    }
-    Ok(bytes)
+        .map_err(|_| malformed_public_key())
 }
 
 // Per-field structural checks. `check_key_material_len` is shared by
@@ -562,12 +557,14 @@ fn malformed_public_key() -> CryptoError {
 }
 
 /// Applies the `FORMAT.md` §7 X25519 ingress rules — exactly 32 bytes,
-/// not all zero, canonical §2.4 encoding — to material about to be
-/// serialized or fingerprinted. §7 requires writers to run the same
-/// checks readers run, so that one curve point cannot acquire a second
-/// recipient string or fingerprint through an RFC 7748 alias.
+/// not all zero, canonical §2.4 encoding. The single enforcement site
+/// for every ingress: the decoded-payload readers, the raw-byte
+/// constructor, the encoder, and the fingerprint helpers all call this
+/// (§7 requires writers to run the same checks readers run), so one
+/// curve point cannot acquire a second recipient string or fingerprint
+/// through an RFC 7748 alias.
 ///
-/// Other type names carry no material rules the writer can enforce, so
+/// Other type names carry no material rules this layer can enforce, so
 /// they pass through; the generic grammar and length caps still apply.
 fn check_x25519_material(type_name: &str, key_material: &[u8]) -> Result<(), CryptoError> {
     if type_name != X25519_TYPE_NAME {
@@ -791,11 +788,7 @@ impl PublicKey {
     /// if `bytes` is the all-zero X25519 public key or a non-canonical
     /// encoding.
     pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, CryptoError> {
-        if crate::recipient::x25519::is_zero_public_key(&bytes)
-            || !crate::recipient::x25519::is_canonical_public_key_encoding(&bytes)
-        {
-            return Err(malformed_public_key());
-        }
+        check_x25519_material(X25519_TYPE_NAME, &bytes)?;
         Ok(Self {
             source: PublicKeySource::X25519 {
                 suite: WRITER_KEYPAIR_SUITE,

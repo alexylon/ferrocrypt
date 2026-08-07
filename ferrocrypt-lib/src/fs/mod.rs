@@ -10,9 +10,9 @@
 //!   that staging happened in the destination directory.
 //! - [`paths`] — general path helpers: special-file-safe input opening,
 //!   bounded and staged key-file reads, occupied-path rejection,
-//!   encrypted filename derivation, base-name and file-stem extraction,
-//!   parent-directory resolution, the `.incomplete` suffix constant, and
-//!   user-facing path error mapping.
+//!   output base-name derivation, input leaf-name and file-stem
+//!   extraction, parent-directory resolution, the `.incomplete` suffix
+//!   constant, and user-facing path error mapping.
 
 pub(crate) mod atomic;
 pub(crate) mod paths;

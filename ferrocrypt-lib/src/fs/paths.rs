@@ -1,7 +1,7 @@
 //! General path helpers — special-file-safe input opening, bounded and
-//! staged key-file reads, occupied-path rejection, encrypted filename
-//! derivation, base-name extraction, parent-directory resolution, and
-//! user-path I/O error mapping.
+//! staged key-file reads, occupied-path rejection, output base-name
+//! derivation, parent-directory resolution, and user-path I/O error
+//! mapping.
 //!
 //! Centralises small filesystem-level helpers that do not belong to a single
 //! crypto or container module.
@@ -350,10 +350,9 @@ pub(crate) fn map_user_path_io_error(e: io::Error) -> CryptoError {
 }
 
 /// Test helper that creates a FIFO through the POSIX `mkfifo` utility.
-/// It is shared by special-file tests in this module, `archive::platform`,
-/// and `archive::decode`. Using a subprocess avoids an unsafe
-/// `libc::mkfifo` call; `rustix` does not expose FIFO creation on Apple
-/// targets.
+/// It is shared by special-file tests in this module and in the archive
+/// layer. Using a subprocess avoids an unsafe `libc::mkfifo` call;
+/// `rustix` does not expose FIFO creation on Apple targets.
 #[cfg(all(test, unix))]
 pub(crate) fn make_fifo(path: &Path) {
     let status = std::process::Command::new("mkfifo")

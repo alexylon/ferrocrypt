@@ -1104,6 +1104,8 @@ mod tests {
     use super::super::decode::unarchive;
     use super::super::model::make_entry;
     use super::*;
+    #[cfg(unix)]
+    use crate::fs::paths::make_fifo;
     use std::io::Cursor;
     #[cfg(windows)]
     use std::path::Path;
@@ -2020,18 +2022,6 @@ mod tests {
             "expected `{}` rejection, got: {err}",
             platform::SYMLINK_IN_ARCHIVE_SOURCE,
         );
-    }
-
-    /// Creates a FIFO via the POSIX `mkfifo` utility. A subprocess
-    /// keeps the crate free of an `unsafe` `libc::mkfifo` call
-    /// (`rustix` exposes no FIFO creation on Apple targets).
-    #[cfg(unix)]
-    fn make_fifo(path: &Path) {
-        let status = std::process::Command::new("mkfifo")
-            .arg(path)
-            .status()
-            .expect("spawn mkfifo");
-        assert!(status.success(), "mkfifo failed for {}", path.display());
     }
 
     /// A FIFO swapped in for a single-file root between the metadata

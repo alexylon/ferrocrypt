@@ -1008,15 +1008,13 @@ Atomic output is a library guarantee. It is not a CLI-only concern.
 
 It contains:
 
-- encrypted filename derivation;
-- base-name extraction;
+- output base-name derivation (`encryption_base_name`) — the file stem for a regular-file input, the full directory name for a directory input; the `.fcr` name itself is composed by the callers (`container.rs::resolve_encrypted_output_path`, `api.rs::default_encrypted_filename`);
 - input leaf-name resolution (`input_leaf_name`) — the single source of truth for naming a user-supplied input. `.` and `..` carry no final component, so only those resolve against the current directory before the name is taken; every other path keeps the name as typed. Shared by `encryption_base_name`, which names the encrypted output, and `archive::encode::build_manifest`, which names the archive root, so one input cannot be named two ways;
 - user-path error mapping;
 - occupied-path / dangling-symlink rejection (`path_occupied`, `reject_occupied`) — `lstat`-based "is anything here?" preflight used by encrypt and keygen output prechecks so a stale symlink rejects in milliseconds instead of after Argon2id;
 - special-file-safe input opening (`open_input_file`) — read-only open that refuses FIFOs, sockets, and device nodes; on Unix the open uses `O_NONBLOCK` so a FIFO cannot block the process inside `open(2)`, and the type check runs on the open handle (no check-to-use window). A missing path maps to the typed `InputPath` via `map_user_path_io_error`, so a vanished input reports identically across `Decryptor::open`, the probe, the decrypt open, and the key-file reads. Used by `api::probe_recipient_mode_with_limits`, `protocol::decrypt`, and `read_file_capped` — the decrypt-side counterpart of the encrypt-side `archive::encode::validate_encrypt_input` rejection;
 - bounded file reads (`read_file_capped`) — opens via `open_input_file`, then `Read::take(cap + 1)` with over-cap rejection, used by `key/public.rs::read_public_key` to refuse multi-gigabyte attacker-controlled key files before any allocation;
-- staged file reads (`read_file_staged`) — the same bounded open, but the fixed header is read first and the caller derives the remaining length from it, so a `private.key` is read at the size its own header declares rather than at the structural maximum of every field. Used through `key/private.rs::read_private_key_file` by `recipient/native/x25519.rs::open_x25519_private_key` and `api::validate_private_key_file`; a head that does not parse falls back to the structural cap, and a declared length above the cap is clamped to it;
-- general path normalization required outside archive semantics.
+- staged file reads (`read_file_staged`) — the same bounded open, but the fixed header is read first and the caller derives the remaining length from it, so a `private.key` is read at the size its own header declares rather than at the structural maximum of every field. Used through `key/private.rs::read_private_key_file` by `recipient/native/x25519.rs::open_x25519_private_key` and `api::validate_private_key_file`; a head that does not parse falls back to the structural cap, and a declared length above the cap is clamped to it.
 
 It does not enforce FCA archive path rules. Archive path rules belong only to `archive/path.rs`.
 

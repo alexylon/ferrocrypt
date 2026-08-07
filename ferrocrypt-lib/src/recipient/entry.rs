@@ -118,22 +118,17 @@ impl RecipientEntry {
     /// returns its exact encoded length without serializing it. Header-length
     /// checks and [`Self::to_bytes_checked`] share this validation path.
     ///
-    /// The checks match [`Self::parse_one`]: type-name length and grammar,
-    /// reserved flag bits, and `body.len() <= BODY_LEN_MAX`. If an entry has
-    /// several defects, writer and reader may report different variants
-    /// because they validate different representations.
+    /// The checks run in [`Self::parse_one`]'s relative order — type-name
+    /// length, structural body max, reserved flag bits, grammar — so writer
+    /// and reader report the same class for the same defects. The fit and
+    /// local-cap steps have no in-memory counterpart; the writer applies
+    /// the local body cap in the protocol-level header preflight.
     pub(crate) fn checked_wire_len(&self) -> Result<usize, CryptoError> {
-        // Match `parse_one`: invalid framing length takes precedence over
-        // type-name grammar.
+        // A wrong-length name is a framing defect, as in `parse_one`, so
+        // the grammar check below reports content defects only.
         if self.type_name.is_empty() || self.type_name.len() > TYPE_NAME_MAX_LEN {
             return Err(CryptoError::InvalidFormat(
                 FormatDefect::MalformedRecipientEntry,
-            ));
-        }
-        validate_type_name_grammar(&self.type_name)?;
-        if (self.recipient_flags & RECIPIENT_FLAGS_RESERVED_MASK) != 0 {
-            return Err(CryptoError::InvalidFormat(
-                FormatDefect::RecipientFlagsReserved,
             ));
         }
         if self.body.len() > BODY_LEN_MAX as usize {
@@ -141,6 +136,12 @@ impl RecipientEntry {
                 FormatDefect::MalformedRecipientEntry,
             ));
         }
+        if (self.recipient_flags & RECIPIENT_FLAGS_RESERVED_MASK) != 0 {
+            return Err(CryptoError::InvalidFormat(
+                FormatDefect::RecipientFlagsReserved,
+            ));
+        }
+        validate_type_name_grammar(&self.type_name)?;
         Ok(ENTRY_HEADER_SIZE + self.type_name.len() + self.body.len())
     }
 
@@ -436,6 +437,40 @@ mod tests {
         match entry.to_bytes_checked() {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)) => {}
             other => panic!("expected MalformedRecipientEntry for over-cap body, got {other:?}"),
+        }
+    }
+
+    /// Writer-side order parity with `parse_one`: an over-max body
+    /// (step 3) reports before a reserved flag bit (step 4).
+    #[test]
+    fn checked_wire_len_reports_body_max_before_reserved_flags() {
+        let entry = RecipientEntry {
+            type_name: x25519::TYPE_NAME.to_owned(),
+            recipient_flags: 1u16 << 1,
+            body: vec![0u8; (BODY_LEN_MAX as usize) + 1],
+        };
+        match entry.checked_wire_len() {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)) => {}
+            other => {
+                panic!("expected MalformedRecipientEntry before the flags check, got {other:?}")
+            }
+        }
+    }
+
+    /// Writer-side order parity with `parse_one`: a reserved flag bit
+    /// (step 4) reports before the type-name grammar (step 7).
+    #[test]
+    fn checked_wire_len_reports_reserved_flags_before_grammar() {
+        let entry = RecipientEntry {
+            type_name: "X25519".to_owned(),
+            recipient_flags: 1u16 << 1,
+            body: vec![0u8; x25519::BODY_LENGTH],
+        };
+        match entry.checked_wire_len() {
+            Err(CryptoError::InvalidFormat(FormatDefect::RecipientFlagsReserved)) => {}
+            other => {
+                panic!("expected RecipientFlagsReserved before the grammar check, got {other:?}")
+            }
         }
     }
 

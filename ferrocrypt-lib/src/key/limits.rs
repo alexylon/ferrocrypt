@@ -90,10 +90,10 @@ impl KeyReadLimits {
         self
     }
 
-    /// Caps set to the structural maxima, for the one caller that applies
-    /// no resource policy of its own: [`crate::validate_private_key_file`]
-    /// reports what the format allows rather than what a default reader
-    /// would accept.
+    /// Caps set to the structural maxima, for the callers that apply no
+    /// resource policy of their own: [`crate::validate_public_key_file`]
+    /// and [`crate::validate_private_key_file`] report what the format
+    /// allows rather than what a default reader would accept.
     pub(crate) fn structural_max() -> Self {
         Self {
             max_recipient_string_chars: Self::RECIPIENT_STRING_CHARS_STRUCTURAL_MAX,

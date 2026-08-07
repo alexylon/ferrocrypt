@@ -1128,10 +1128,9 @@ pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), Crypt
 /// `private.key`, [`FormatDefect::WrongKeyFileType`] is returned instead of a
 /// UTF-8 decode error.
 ///
-/// Companion to [`validate_private_key_file`]. Applies
-/// [`KeyReadLimits::default`]; for a key whose recipient string exceeds the
-/// default length cap, call
-/// `PublicKey::from_key_file_with_limits(path, limits).validate()` instead.
+/// Companion to [`validate_private_key_file`]. Applies no resource caps
+/// of its own: the verdict follows what `FORMAT.md` §7 allows, not what
+/// a default reader would accept.
 ///
 /// # Errors
 ///
@@ -1139,13 +1138,16 @@ pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), Crypt
 /// [`CryptoError::Io`] for other read failures. Returns
 /// [`CryptoError::InvalidFormat`] or
 /// [`CryptoError::RecipientStringCapExceeded`] if the text file or recipient
-/// string is malformed, too large for local policy, or is a private key.
+/// string is malformed, beyond the structural ceiling, or is a private key.
 /// Returns [`CryptoError::UnsupportedVersion`] for a public key from an
 /// unsupported keypair suite. Returns
 /// [`CryptoError::UnsupportedKeyType`] for a valid public key of a
 /// key type this build does not support.
 pub fn validate_public_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError> {
-    PublicKey::from_key_file(key_file).validate()
+    // No resource policy of its own: this validates structure only, so the
+    // recipient-string cap and the private-key probe both run at the
+    // structural maxima.
+    PublicKey::from_key_file_with_limits(key_file, KeyReadLimits::structural_max()).validate()
 }
 
 // ─── Internal validators ────────────────────────────────────────────────────

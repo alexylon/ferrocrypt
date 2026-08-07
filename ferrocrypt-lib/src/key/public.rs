@@ -1615,6 +1615,25 @@ mod tests {
         }
     }
 
+    /// [`crate::validate_public_key_file`] validates against the
+    /// structural maxima, like its private-key companion: a recipient
+    /// string above the default reader cap reaches the key-type check
+    /// instead of stopping at the cap.
+    #[test]
+    fn validate_public_key_file_runs_at_the_structural_maxima() {
+        let long = encode_recipient_string("future", &[0x11u8; 1024]).unwrap();
+        assert!(long.len() > KeyReadLimits::RECIPIENT_STRING_CHARS_DEFAULT as usize);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("public.key");
+        std::fs::write(&path, format!("{long}\n")).unwrap();
+        match crate::validate_public_key_file(&path) {
+            Err(CryptoError::UnsupportedKeyType { type_name }) => {
+                assert_eq!(type_name, "future");
+            }
+            other => panic!("expected UnsupportedKeyType(future), got {other:?}"),
+        }
+    }
+
     #[test]
     fn read_public_key_rejects_all_zero_on_disk() {
         let s = encode_recipient_string_unchecked(X25519_TYPE_NAME, &[0u8; 32]).unwrap();

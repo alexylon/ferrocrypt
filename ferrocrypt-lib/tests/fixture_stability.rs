@@ -2,9 +2,8 @@
 //!
 //! Decrypts checked-in `.fcr` artefacts under `tests/fixtures/encrypted/`
 //! and asserts their plaintext matches the matching `tests/fixtures/source/`
-//! files byte-for-byte. Failure here means the refactor has changed
-//! wire-format or decrypt behaviour — investigate before merging (see the
-//! "Core invariant: pure refactor" section of `notes/RESTRUCTURE_PLAN.md`).
+//! files byte-for-byte. Failure here means a change has altered
+//! wire-format or decrypt behaviour — investigate before merging.
 //!
 //! To regenerate the fixtures (only after a *deliberate*, reviewed format
 //! change has merged) run:

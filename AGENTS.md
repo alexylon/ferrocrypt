@@ -37,7 +37,7 @@ Notes:
 
 ## `.notes/` directory
 
-Gitignored scratchpad for helper files the user asks to be created there — typically markdown (current proposal/plan files, side references during a refactor, etc.). Safe to read for context; nothing in `.notes/` ships with the repo.
+Gitignored scratchpad for helper files the user asks to be created there — typically markdown (current proposal/plan files, side references during a refactor, etc.). Safe to read for context; nothing in `.notes/` ships with the repo. Never reference `.notes/` or its files from committable content (code, comments, docs, scripts): the directory does not exist in a clone, so such references are dead links — state the needed conclusion inline instead.
 
 ## Architecture
 

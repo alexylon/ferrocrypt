@@ -16,9 +16,9 @@
 #   header line in `suite_vector_gen.rs`;
 # - `photos.v1`, an example dotted directory name in `fs/paths.rs`.
 #
-# Not scanned: CHANGELOG.md (history), notes/ (local scratchpad),
-# experiments/ (parked snapshots), and test-vector data files (only
-# `.rs` and `.md` files are scanned). A scan error fails the check.
+# Not scanned: CHANGELOG.md (history), experiments/ (parked snapshots),
+# and test-vector data files (only `.rs` and `.md` files are scanned).
+# A scan error fails the check.
 
 set -u
 

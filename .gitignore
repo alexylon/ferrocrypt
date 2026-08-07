@@ -5,6 +5,7 @@ dest*
 .sofos/
 .claude/
 .notes/
+__pycache__/
 
 # Test scratch workspaces created at runtime and removed by each test
 # binary's exit hook (see TEST_WORKSPACE_ROOTS in run_all_tests.sh). Ignored

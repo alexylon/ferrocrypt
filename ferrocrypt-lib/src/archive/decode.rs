@@ -53,7 +53,7 @@ use cap_std::fs::Dir;
 
 use crate::CryptoError;
 use crate::crypto::stream::read_uninterrupted;
-use crate::error::sanitize_path_for_display;
+use crate::error::sanitize_for_display;
 use crate::fs::paths::{INCOMPLETE_SUFFIX, OUTPUT_LABEL, already_exists_error, path_occupied};
 
 use super::IncompleteOutputPolicy;
@@ -269,11 +269,9 @@ fn extract_single_file_root<R: Read>(
         platform::INITIAL_FILE_CREATE_MODE,
     )
     .map_err(|e| {
-        map_already_exists(
-            CryptoError::Io(e),
-            INCOMPLETE_OUTPUT_EXISTS,
-            &output_dir.join(incomplete_name),
-        )
+        map_already_exists(CryptoError::Io(e), || {
+            incomplete_output_exists(output_dir, incomplete_name)
+        })
     })?;
     // create_file_at succeeded — this run owns the staging file.
     created_incomplete_roots.push(manifest.root_name.clone());
@@ -305,11 +303,7 @@ fn extract_directory_root<R: Read>(
     let root_name_str = manifest_root_name_str(manifest)?;
 
     let root_dir = platform::mkdir_strict(output_handle, incomplete_name).map_err(|e| {
-        map_already_exists(
-            e,
-            INCOMPLETE_OUTPUT_EXISTS,
-            &output_dir.join(incomplete_name),
-        )
+        map_already_exists(e, || incomplete_output_exists(output_dir, incomplete_name))
     })?;
     // mkdir_strict succeeded — this run owns the staging directory.
     created_incomplete_roots.push(manifest.root_name.clone());
@@ -328,9 +322,8 @@ fn extract_directory_root<R: Read>(
     for dir_entry in &dir_entries {
         let rel = strip_root_prefix(&dir_entry.path_utf8, root_name_str)?;
         let (parent_dir, dir_name) = platform::walk_to_parent(&root_dir, rel)?;
-        let _new_dir = platform::mkdir_strict(&parent_dir, &dir_name).map_err(|e| {
-            map_already_exists(e, ARCHIVE_PATH_COLLIDES, Path::new(&dir_entry.path_utf8))
-        })?;
+        let _new_dir = platform::mkdir_strict(&parent_dir, &dir_name)
+            .map_err(|e| map_already_exists(e, || archive_path_collides(&dir_entry.path_utf8)))?;
     }
 
     // Pass 2: stream file contents in MANIFEST ORDER. The content
@@ -345,11 +338,9 @@ fn extract_directory_root<R: Read>(
         let mut outfile =
             platform::create_file_at(&parent_dir, &file_name, platform::INITIAL_FILE_CREATE_MODE)
                 .map_err(|e| {
-                map_already_exists(
-                    CryptoError::Io(e),
-                    ARCHIVE_PATH_COLLIDES,
-                    Path::new(&entry.path_utf8),
-                )
+                map_already_exists(CryptoError::Io(e), || {
+                    archive_path_collides(&entry.path_utf8)
+                })
             })?;
         copy_exact_n(reader, &mut outfile, entry.size, archive_content_truncated)?;
         platform::chmod_file_handle(&outfile, entry.mode)?;
@@ -553,8 +544,9 @@ fn output_already_exists(output_dir: &Path, root_name: &OsStr) -> CryptoError {
 /// already occupies the working name. It may be left over from a
 /// previous failed run or still being written by a concurrent decrypt
 /// of the same file; either way this run did not create it, so it is
-/// rejected and preserved.
-const INCOMPLETE_OUTPUT_EXISTS: &str = "Incomplete output already exists";
+/// rejected and preserved. [`incomplete_output_exists`] appends
+/// "already exists" via the shared constructor.
+const INCOMPLETE_OUTPUT_LABEL: &str = "Incomplete output";
 
 /// Label for a collision between two entries of the same archive. The
 /// §9.7 duplicate keys fold ASCII case and Unicode canonical form, so
@@ -564,23 +556,35 @@ const INCOMPLETE_OUTPUT_EXISTS: &str = "Incomplete output already exists";
 /// operator which entry the target filesystem could not keep apart.
 const ARCHIVE_PATH_COLLIDES: &str = "Archive path collides with an existing entry";
 
-/// Maps `io::ErrorKind::AlreadyExists` to a typed
-/// `CryptoError::InvalidInput("<label>: <path>")` and otherwise
-/// preserves the underlying error. Serves both collision boundaries:
-/// the first-touch staging names ([`INCOMPLETE_OUTPUT_EXISTS`] — the
-/// entry is preserved, because the cleanup path tracks only roots THIS
-/// run created) and the per-entry creates inside the staged tree
-/// ([`ARCHIVE_PATH_COLLIDES`]).
-fn map_already_exists(e: CryptoError, label: &str, path: &Path) -> CryptoError {
+/// Builds the "Incomplete output already exists: <dir>/<root>.incomplete"
+/// rejection via the shared constructor, the same way as
+/// [`output_already_exists`]: the operator-chosen output directory
+/// renders readable and untruncated, and the archive-chosen working
+/// name — the final component — is escaped and bounded.
+fn incomplete_output_exists(output_dir: &Path, working_name: &OsStr) -> CryptoError {
+    already_exists_error(INCOMPLETE_OUTPUT_LABEL, &output_dir.join(working_name))
+}
+
+/// Builds the "Archive path collides with an existing entry: <path>"
+/// rejection. The whole path is archive-derived, so all of it goes
+/// through the strict, truncating sanitizer.
+fn archive_path_collides(path_utf8: &str) -> CryptoError {
+    CryptoError::InvalidInput(format!(
+        "{ARCHIVE_PATH_COLLIDES}: {}",
+        sanitize_for_display(path_utf8)
+    ))
+}
+
+/// Maps `io::ErrorKind::AlreadyExists` to the collision rejection built
+/// by `on_exists` and otherwise preserves the underlying error. Serves
+/// both collision boundaries: the first-touch staging names
+/// ([`incomplete_output_exists`] — the entry is preserved, because the
+/// cleanup path tracks only roots THIS run created) and the per-entry
+/// creates inside the staged tree ([`archive_path_collides`]).
+fn map_already_exists(e: CryptoError, on_exists: impl FnOnce() -> CryptoError) -> CryptoError {
     if let CryptoError::Io(io_err) = &e {
         if io_err.kind() == io::ErrorKind::AlreadyExists {
-            // Every rendered path contains archive-derived names; sanitize
-            // so a malicious name cannot smuggle look-alike characters
-            // into the message.
-            return CryptoError::InvalidInput(format!(
-                "{label}: {}",
-                sanitize_path_for_display(path)
-            ));
+            return on_exists();
         }
     }
     e
@@ -2100,10 +2104,41 @@ mod tests {
         let archive = build_archive(&manifest, &[("hello.txt", b"Hello, world!")]);
 
         let err = unarchive_default(archive, tmp.path()).unwrap_err();
-        assert!(format!("{err}").contains(INCOMPLETE_OUTPUT_EXISTS));
+        assert!(format!("{err}").contains("Incomplete output already exists"));
         assert!(
             stale_path.exists(),
             "pre-existing .incomplete must be preserved across a retry",
+        );
+    }
+
+    /// The staging-name collision renders through the same shared
+    /// constructor as "Output already exists": the operator-chosen
+    /// output directory stays readable, and the archive-chosen working
+    /// name — the final component — is escaped. Mirrors
+    /// `occupied_output_error_escapes_hostile_root_name` at the
+    /// `.incomplete` boundary.
+    #[test]
+    fn incomplete_output_error_escapes_hostile_root_name() {
+        let err = incomplete_output_exists(
+            Path::new("/home/operator/Données"),
+            &incomplete_working_name(OsStr::new("evil\u{202e}name")),
+        );
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Incomplete output already exists"),
+            "got: {msg}"
+        );
+        assert!(
+            msg.contains("Données"),
+            "operator path must stay readable: {msg}"
+        );
+        assert!(
+            msg.contains("evil\\u{202e}name.incomplete"),
+            "hostile working name must be escaped: {msg}"
+        );
+        assert!(
+            !msg.contains('\u{202e}'),
+            "raw direction-override character leaked: {msg:?}"
         );
     }
 

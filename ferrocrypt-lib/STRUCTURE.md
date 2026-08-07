@@ -460,13 +460,12 @@ Argon2id parameter parsing and validation have exactly one source of truth. Argo
 
 ### 4.3 `crypto/hkdf.rs`
 
-`crypto/hkdf.rs` owns HKDF-SHA3-256 adapters and non-scheme-specific domain separation.
+`crypto/hkdf.rs` owns HKDF-SHA3-256 adapters.
 
 It contains:
 
-- HKDF-SHA3-256 helper functions;
-- shared HKDF wrappers;
-- domain-separated labels that are not specific to a recipient scheme.
+- HKDF-SHA3-256 expansion helpers;
+- the single place that fixes the HKDF hash family and output length.
 
 Recipient-specific HKDF info strings live with their recipient scheme. Header, payload, and private-key derivation labels live with the modules that own those derivations.
 
@@ -484,14 +483,13 @@ The primitives in `crypto/mac.rs` accept raw byte keys so they remain reusable. 
 
 ### 4.5 `crypto/aead.rs`
 
-`crypto/aead.rs` owns XChaCha20-Poly1305 helpers and nonce utilities.
+`crypto/aead.rs` owns XChaCha20-Poly1305 helpers and the shared nonce and tag sizes.
 
 It contains:
 
 - AEAD seal helpers;
 - AEAD open helpers;
-- nonce generation utilities;
-- nonce parsing and validation helpers where applicable.
+- the wrap-nonce and Poly1305 tag size constants.
 
 Common AEAD behavior is not duplicated in Argon2id recipients, X25519 recipients, private-key handling, or payload-stream code.
 

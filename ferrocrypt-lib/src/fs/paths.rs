@@ -284,8 +284,8 @@ pub(crate) fn path_occupied(path: &Path) -> Result<bool, CryptoError> {
 /// Builds the "`<label>` already exists: `<path>`" rejection. Shared by
 /// [`reject_occupied`] (pre-write occupancy check),
 /// `fs::atomic::finalize_file` (no-clobber rename refusal), and the
-/// archive extractor's occupied-output rejection, so every surface of
-/// the same conflict renders identically.
+/// archive extractor's occupied-output and occupied-staging rejections,
+/// so every surface of the same conflict renders identically.
 ///
 /// The parent directory is the caller's trust boundary: kept readable
 /// and never truncated so the operator can always locate the conflict,

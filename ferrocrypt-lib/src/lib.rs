@@ -315,7 +315,7 @@ impl std::fmt::Display for AuthenticatedRecipientMode {
 /// with stable user-facing wording. Consumers that want richer UX
 /// (localization, phase-based icons, percent progress once available)
 /// can `match` on the variants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ProgressEvent {
     /// Argon2id is about to run to derive the passphrase wrap key for

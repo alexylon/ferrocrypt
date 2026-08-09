@@ -684,7 +684,7 @@ fn test_recipient_decrypt_progress_events_in_order() -> Result<(), CryptoError> 
         &passphrase,
         None,
         None,
-        |ev| events.lock().unwrap().push(*ev),
+        |ev| events.lock().unwrap().push(ev.clone()),
     )?;
 
     let events = events.into_inner().unwrap();
@@ -738,7 +738,7 @@ fn test_passphrase_decrypt_progress_events_in_order() -> Result<(), CryptoError>
 
     let encrypt_events: Mutex<Vec<ProgressEvent>> = Mutex::new(Vec::new());
     passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |ev| {
-        encrypt_events.lock().unwrap().push(*ev)
+        encrypt_events.lock().unwrap().push(ev.clone())
     })?;
 
     let encrypted_path = encrypt_dir.join("data.fcr");
@@ -749,7 +749,7 @@ fn test_passphrase_decrypt_progress_events_in_order() -> Result<(), CryptoError>
         &passphrase,
         None,
         None,
-        |ev| decrypt_events.lock().unwrap().push(*ev),
+        |ev| decrypt_events.lock().unwrap().push(ev.clone()),
     )?;
 
     let encrypt_events = encrypt_events.into_inner().unwrap();
@@ -840,7 +840,7 @@ fn test_recipient_encrypt_emits_no_kdf_events() -> Result<(), CryptoError> {
         &passphrase,
         None,
         None,
-        |ev| events.lock().unwrap().push(*ev),
+        |ev| events.lock().unwrap().push(ev.clone()),
     )?;
 
     let events = events.into_inner().unwrap();

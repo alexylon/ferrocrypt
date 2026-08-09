@@ -673,7 +673,7 @@ mod tests {
         let path = tmp.path().join("private.key");
         let pass = SecretString::from("pw".to_string());
         let events = std::cell::RefCell::new(Vec::new());
-        let sink = |event: &crate::ProgressEvent| events.borrow_mut().push(*event);
+        let sink = |event: &crate::ProgressEvent| events.borrow_mut().push(event.clone());
 
         let (secret_material, public_material) = keypair();
         let bytes = seal_private_key(
@@ -715,7 +715,7 @@ mod tests {
         fs::write(&path, format!("{recipient}\n"))?;
 
         let events = std::cell::RefCell::new(Vec::new());
-        let sink = |event: &crate::ProgressEvent| events.borrow_mut().push(*event);
+        let sink = |event: &crate::ProgressEvent| events.borrow_mut().push(event.clone());
         match open_x25519_private_key(&path, &pass, None, KeyReadLimits::default(), &sink)
             .map(|_| ())
         {

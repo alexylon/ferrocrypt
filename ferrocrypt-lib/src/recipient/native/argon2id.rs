@@ -233,7 +233,7 @@ mod tests {
         let events = std::rc::Rc::new(RefCell::new(Vec::<ProgressEvent>::new()));
         let sink = events.clone();
         let f = move |e: &ProgressEvent| {
-            sink.borrow_mut().push(*e);
+            sink.borrow_mut().push(e.clone());
         };
         (f, events)
     }

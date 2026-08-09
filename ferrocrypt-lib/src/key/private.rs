@@ -788,7 +788,7 @@ mod tests {
         let bytes = seal_private_key(&secret, "x25519", &public, &[], &pass, &kdf).unwrap();
         let long = test_passphrase(&"a".repeat(MAX_PASSPHRASE_LEN_BYTES + 1));
         let events = std::cell::RefCell::new(Vec::new());
-        let sink = |e: &crate::ProgressEvent| events.borrow_mut().push(*e);
+        let sink = |e: &crate::ProgressEvent| events.borrow_mut().push(e.clone());
         match open_private_key(
             &bytes,
             &long,
@@ -1351,7 +1351,7 @@ mod tests {
 
         let events = RefCell::new(Vec::<crate::ProgressEvent>::new());
         let sink = |e: &crate::ProgressEvent| {
-            events.borrow_mut().push(*e);
+            events.borrow_mut().push(e.clone());
         };
         open_private_key(
             &bytes,
@@ -1395,7 +1395,7 @@ mod tests {
 
         let events = RefCell::new(Vec::<crate::ProgressEvent>::new());
         let sink = |e: &crate::ProgressEvent| {
-            events.borrow_mut().push(*e);
+            events.borrow_mut().push(e.clone());
         };
         let _ = open_private_key(
             &bytes,
@@ -1421,7 +1421,7 @@ mod tests {
         let too_short = vec![0u8; PRIVATE_KEY_HEADER_FIXED_SIZE - 1];
         let events = RefCell::new(Vec::<crate::ProgressEvent>::new());
         let sink = |e: &crate::ProgressEvent| {
-            events.borrow_mut().push(*e);
+            events.borrow_mut().push(e.clone());
         };
         let _ = open_private_key(
             &too_short,

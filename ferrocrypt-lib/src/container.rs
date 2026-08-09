@@ -74,7 +74,7 @@ const TEMP_FILE_PREFIX: &str = ".ferrocrypt-";
 /// `FORMAT.md` §1 and §3.2, malicious input must not be able to force
 /// unbounded work, and exceeding a local cap surfaces as a distinct
 /// `*CapExceeded` error rather than as a generic format defect.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct HeaderReadLimits {
     /// Hard cap on `prefix.header_len`.

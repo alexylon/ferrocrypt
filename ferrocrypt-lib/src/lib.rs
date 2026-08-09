@@ -189,6 +189,9 @@ pub use crate::recipient::policy::MixingPolicy;
 /// For an authenticated mode value — produced only after a recipient unwraps
 /// and the header MAC verifies — see [`AuthenticatedRecipientMode`] on
 /// [`DecryptOutcome`].
+///
+/// The variants are categorical and carry no data, which is what lets the
+/// enum stay `Copy`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum UnauthenticatedRecipientMode {
@@ -246,7 +249,9 @@ pub struct AuthenticatedRecipientMode {
 /// `#[non_exhaustive]` keeps the door open for future native recipient kinds
 /// (post-quantum, hardware-backed) without breaking downstream `match`
 /// arms; callers must include a `_` wildcard arm. This is match
-/// ergonomics, not exhaustive matching.
+/// ergonomics, not exhaustive matching. Those future kinds are
+/// discriminants carrying no data, which is what lets the enum stay
+/// `Copy`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AuthenticatedRecipientModeKind {
@@ -310,7 +315,10 @@ impl std::fmt::Display for AuthenticatedRecipientMode {
 /// stages) can be added without a breaking change — match arms in caller
 /// code must include a `_` wildcard. Future variant payloads stay
 /// `Eq`-comparable (progress quantities are integers, never
-/// floating-point), so the derived `PartialEq` / `Eq` are stable.
+/// floating-point), so the derived `PartialEq` / `Eq` are stable. The
+/// enum deliberately does not implement `Copy`: those future payloads
+/// are not closed to `Copy`-compatible data, and an entry path or label
+/// would carry an owned `String`.
 ///
 /// For quick rendering, `ProgressEvent` implements [`std::fmt::Display`]
 /// with stable user-facing wording. Consumers that want richer UX

@@ -29,7 +29,8 @@ use crate::key::public::{RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT, RECIPIENT_STRIN
 /// [`crate::PublicKey::from_recipient_string_with_limits`], or
 /// [`crate::PrivateKeyDecryptor::key_read_limits`]. The struct is
 /// `#[non_exhaustive]` so future releases can add further caps without a
-/// breaking change.
+/// breaking change. A cap is a numeric bound, which is what lets the
+/// struct stay `Copy`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct KeyReadLimits {

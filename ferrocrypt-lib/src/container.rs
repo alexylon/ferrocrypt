@@ -74,6 +74,10 @@ const TEMP_FILE_PREFIX: &str = ".ferrocrypt-";
 /// `FORMAT.md` §1 and §3.2, malicious input must not be able to force
 /// unbounded work, and exceeding a local cap surfaces as a distinct
 /// `*CapExceeded` error rather than as a generic format defect.
+///
+/// The struct is `#[non_exhaustive]` so future releases can add further
+/// caps without a breaking change. A cap is a numeric bound, which is
+/// what lets the struct stay `Copy`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct HeaderReadLimits {

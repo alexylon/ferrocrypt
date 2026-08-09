@@ -117,7 +117,10 @@ impl NativeRecipientType {
 /// The enum is `#[non_exhaustive]` so future native rules can be added
 /// without a breaking API change. New rule information also arrives as
 /// a new variant — the fields of the existing variants are frozen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// It deliberately does not implement `Copy`: today's class identifiers
+/// are `&'static str` only because the registry is compile-time, and
+/// `Copy` would restrict every future variant to that same shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MixingPolicy {
     /// This recipient must appear alone — not mixed with any other

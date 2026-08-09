@@ -65,7 +65,8 @@ pub(crate) fn check_passphrase_len(passphrase: &[u8]) -> Result<(), CryptoError>
 /// [`crate::PassphraseDecryptor::kdf_limit`] or
 /// [`crate::PrivateKeyDecryptor::kdf_limit`]. The struct is `#[non_exhaustive]`
 /// so future releases can add further limit dimensions without a breaking
-/// change.
+/// change. A cap is a numeric bound, which is what lets the struct stay
+/// `Copy`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct KdfLimit {

@@ -47,7 +47,8 @@ use super::reasons::{TOTAL_ENTRY_EXT_BYTES_OVERFLOW, TOTAL_FILE_BYTES_OVERFLOW};
 /// [`crate::PassphraseDecryptor::archive_limits`], or
 /// [`crate::PrivateKeyDecryptor::archive_limits`]. The struct is
 /// `#[non_exhaustive]` so future releases can add further caps without a
-/// breaking change.
+/// breaking change. A cap is a numeric bound, which is what lets the
+/// struct stay `Copy`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ArchiveLimits {

@@ -697,7 +697,10 @@ pub(crate) fn read_public_key(
 /// - fingerprinted with [`PublicKey::fingerprint`].
 ///
 /// The struct is `#[non_exhaustive]` so future sources (key servers,
-/// hardware-backed keys) can be added without a breaking change.
+/// hardware-backed keys) can be added without a breaking change. It is
+/// `Clone` but not `Copy`, because a source may hold an owned path.
+/// Public key material is bytes or a locator, so future sources stay
+/// cloneable.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct PublicKey {

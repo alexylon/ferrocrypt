@@ -868,7 +868,8 @@ pub enum CryptoError {
 /// Structural defects detected while parsing a FerroCrypt encrypted file
 /// or key file. Carried inside [`CryptoError::InvalidFormat`] so format
 /// failures can be pattern-matched without substring comparisons and
-/// without heap-allocated `String`s.
+/// without heap-allocated `String`s. That promise is also what lets the
+/// enum stay `Copy` while it remains `#[non_exhaustive]`.
 ///
 /// Each variant is the most granular structural class `FORMAT.md` §12
 /// admits. Resource-cap exceedances are *not* `FormatDefect`s — they
@@ -1055,6 +1056,9 @@ impl std::fmt::Display for FormatDefect {
 ///   private-key encoding and the public-key encoding are different
 ///   on-disk shapes that may map to the same logical key-pair suite
 ///   from different bytes.
+///
+/// Every variant carries one wire version byte and nothing else, which
+/// is what lets the enum stay `Copy`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum UnsupportedVersion {
@@ -1144,7 +1148,8 @@ impl std::fmt::Display for UnsupportedVersion {
 
 /// Which KDF parameter from an untrusted header failed its structural
 /// bound check. Carries the raw value so callers can decide whether to
-/// re-try with looser limits.
+/// re-try with looser limits. Every variant carries one number and
+/// nothing else, which is what lets the enum stay `Copy`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum InvalidKdfParams {

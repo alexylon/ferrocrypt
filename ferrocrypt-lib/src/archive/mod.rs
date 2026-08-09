@@ -42,6 +42,11 @@ pub(crate) use format::PERMISSION_BITS_MASK;
 /// forensic flows where partial plaintext is more useful than no
 /// plaintext.
 ///
+/// The enum is `#[non_exhaustive]` so future releases can add richer
+/// recovery policies. It deliberately does not implement `Copy`: such a
+/// policy is configuration, and one may need to carry owned data — a
+/// destination directory for retained partial output, for example.
+///
 /// Note: this policy only governs cleanup of the `.incomplete` working
 /// tree after a normal `Err` return. Process termination (crash, SIGKILL,
 /// power loss) and panic unwinding bypass cleanup entirely, so a killed

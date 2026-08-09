@@ -113,8 +113,7 @@ fn concurrent_encrypts_to_same_output_stay_no_clobber() {
     let decrypted = match Decryptor::open(&committed[0]).expect("open committed file") {
         Decryptor::PrivateKey(d) => d
             .decrypt(
-                PrivateKey::from_key_file(&kg.private_key_path),
-                pass(),
+                PrivateKey::from_key_file(&kg.private_key_path, pass()),
                 &restore,
                 |_| {},
             )
@@ -165,8 +164,7 @@ fn concurrent_decrypts_to_same_output_stay_no_clobber() {
                     || match Decryptor::open(&fcr).expect("open committed file") {
                         Decryptor::PrivateKey(d) => d
                             .decrypt(
-                                PrivateKey::from_key_file(&kg.private_key_path),
-                                pass(),
+                                PrivateKey::from_key_file(&kg.private_key_path, pass()),
                                 &out_dir,
                                 |_| {},
                             )

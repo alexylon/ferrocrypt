@@ -214,8 +214,7 @@ fn encryptor_recipient_round_trip() {
     let decrypted = match Decryptor::open(&outcome.output_path).expect("open") {
         Decryptor::PrivateKey(d) => d
             .decrypt(
-                PrivateKey::from_key_file(&kg.private_key_path),
-                pass(),
+                PrivateKey::from_key_file(&kg.private_key_path, pass()),
                 &restore,
                 |_| {},
             )
@@ -257,8 +256,7 @@ fn encryptor_with_recipients_each_can_decrypt() {
         let decrypted = match Decryptor::open(&outcome.output_path).expect("open") {
             Decryptor::PrivateKey(d) => d
                 .decrypt(
-                    PrivateKey::from_key_file(&kg.private_key_path),
-                    pass(),
+                    PrivateKey::from_key_file(&kg.private_key_path, pass()),
                     &restore,
                     |_| {},
                 )
@@ -390,8 +388,7 @@ fn private_key_decrypt_reports_input_path_when_file_vanishes() {
     let unlock_event_count = std::cell::Cell::new(0u32);
     let err = decryptor
         .decrypt(
-            PrivateKey::from_key_file(&kg.private_key_path),
-            pass(),
+            PrivateKey::from_key_file(&kg.private_key_path, pass()),
             &work,
             |evt| {
                 if matches!(evt, ferrocrypt::ProgressEvent::UnlockingPrivateKey) {
@@ -448,8 +445,7 @@ fn private_key_decrypt_uses_the_validated_file_not_a_swapped_replacement() {
     let swapped = std::cell::Cell::new(false);
     let outcome = decryptor
         .decrypt(
-            PrivateKey::from_key_file(&kg.private_key_path),
-            pass(),
+            PrivateKey::from_key_file(&kg.private_key_path, pass()),
             &restore,
             |evt| {
                 if matches!(evt, ferrocrypt::ProgressEvent::UnlockingPrivateKey) && !swapped.get() {
@@ -510,6 +506,19 @@ fn encryptor_debug_does_not_leak_passphrase() {
     assert!(
         !rendered.contains(SECRET),
         "Encryptor leaked passphrase into Debug output: {rendered}"
+    );
+}
+
+/// Pins the same redaction invariant on `PrivateKey`, which embeds the
+/// unlock passphrase bound by `PrivateKey::from_key_file`.
+#[test]
+fn private_key_debug_does_not_leak_passphrase() {
+    const SECRET: &str = "totally-secret-key-passphrase-7C4";
+    let key = PrivateKey::from_key_file("private.key", Passphrase::new(SECRET));
+    let rendered = format!("{key:?}");
+    assert!(
+        !rendered.contains(SECRET),
+        "PrivateKey leaked passphrase into Debug output: {rendered}"
     );
 }
 
@@ -576,8 +585,7 @@ fn decrypt_outcome_carries_authenticated_public_key_mode() {
     let outcome = match Decryptor::open(&encrypted.output_path).expect("open") {
         Decryptor::PrivateKey(d) => d
             .decrypt(
-                PrivateKey::from_key_file(&kg.private_key_path),
-                pass(),
+                PrivateKey::from_key_file(&kg.private_key_path, pass()),
                 &restore,
                 |_| {},
             )
@@ -656,8 +664,7 @@ fn recipient_decryptor_archive_limits_constrains_extraction() {
     let tight = ArchiveLimits::default().max_entry_count(1);
     let result = match Decryptor::open(&outcome.output_path).expect("open") {
         Decryptor::PrivateKey(d) => d.archive_limits(tight).decrypt(
-            PrivateKey::from_key_file(&kg.private_key_path),
-            pass(),
+            PrivateKey::from_key_file(&kg.private_key_path, pass()),
             &restore,
             |_| {},
         ),
@@ -846,8 +853,7 @@ fn decryptor_open_with_limits_accepts_recipient_count_above_default() {
     {
         Decryptor::PrivateKey(d) => d
             .decrypt(
-                PrivateKey::from_key_file(&kg.private_key_path),
-                pass(),
+                PrivateKey::from_key_file(&kg.private_key_path, pass()),
                 &restore,
                 |_| {},
             )
@@ -1390,8 +1396,7 @@ fn keypair_generator_kdf_params_at_kdf_limit_succeeds() {
         Decryptor::PrivateKey(d) => d
             .kdf_limit(exact)
             .decrypt(
-                PrivateKey::from_key_file(&kg.private_key_path),
-                pass(),
+                PrivateKey::from_key_file(&kg.private_key_path, pass()),
                 &restore,
                 |_| {},
             )
@@ -1526,8 +1531,7 @@ fn private_key_decrypt_revalidates_input_before_unlock() {
     fs::create_dir_all(&restore).unwrap();
     let err = decryptor
         .decrypt(
-            PrivateKey::from_key_file(&kg.private_key_path),
-            pass(),
+            PrivateKey::from_key_file(&kg.private_key_path, pass()),
             &restore,
             |evt| {
                 if matches!(evt, ferrocrypt::ProgressEvent::UnlockingPrivateKey) {
@@ -1628,8 +1632,7 @@ fn private_key_decryptor_forwards_key_read_limits() {
 
     let capped = match Decryptor::open(&outcome.output_path).expect("open") {
         Decryptor::PrivateKey(d) => d.decrypt(
-            PrivateKey::from_key_file(&crafted_path),
-            pass(),
+            PrivateKey::from_key_file(&crafted_path, pass()),
             &restore,
             |_| {},
         ),
@@ -1652,8 +1655,7 @@ fn private_key_decryptor_forwards_key_read_limits() {
     let raised = KeyReadLimits::default().max_private_key_wrapped_secret_len(oversized_len);
     let reached = match Decryptor::open(&outcome.output_path).expect("open") {
         Decryptor::PrivateKey(d) => d.key_read_limits(raised).decrypt(
-            PrivateKey::from_key_file(&crafted_path),
-            pass(),
+            PrivateKey::from_key_file(&crafted_path, pass()),
             &restore,
             |_| {},
         ),

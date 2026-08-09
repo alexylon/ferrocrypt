@@ -419,8 +419,8 @@ impl Encryptor {
 /// takes only the credentials it can use:
 ///
 /// - [`Decryptor::Passphrase`] takes a passphrase.
-/// - [`Decryptor::PrivateKey`] takes a [`PrivateKey`] plus its unlock
-///   passphrase.
+/// - [`Decryptor::PrivateKey`] takes a [`PrivateKey`], which carries its
+///   own unlock passphrase.
 ///
 /// A mismatched-credential call — e.g. trying to decrypt a passphrase-sealed
 /// file with a [`PrivateKey`] — is therefore a compile error rather than a
@@ -697,16 +697,17 @@ impl PrivateKeyDecryptor {
     /// Decrypts this public-key-recipient `.fcr` into `output_dir`.
     ///
     /// `private_key` must reference a FerroCrypt `private.key` file. The
-    /// private key is unlocked with `private_key_passphrase`, then the
-    /// decryptor tries the supported `x25519` recipient slots until one yields
-    /// a candidate file key that verifies the header MAC. On success, the
-    /// decrypted file or directory is promoted into `output_dir` and returned
-    /// in [`DecryptOutcome::output_path`].
+    /// private key is unlocked with the passphrase bound by
+    /// [`PrivateKey::from_key_file`], then the decryptor tries the supported
+    /// `x25519` recipient slots until one yields a candidate file key that
+    /// verifies the header MAC. On success, the decrypted file or directory
+    /// is promoted into `output_dir` and returned in
+    /// [`DecryptOutcome::output_path`].
     ///
     /// # Errors
     ///
     /// Returns [`CryptoError::InvalidInput`] for an empty or too-long
-    /// `private_key_passphrase`, archive cap violations, output conflicts, or
+    /// private-key passphrase, archive cap violations, output conflicts, or
     /// unsafe archived paths.
     /// Returns [`CryptoError::InvalidFormat`] if the private key, encrypted
     /// container, or authenticated payload stream is structurally malformed;
@@ -728,11 +729,11 @@ impl PrivateKeyDecryptor {
     pub fn decrypt(
         self,
         private_key: PrivateKey,
-        private_key_passphrase: Passphrase,
         output_dir: impl AsRef<Path>,
         on_event: impl Fn(&ProgressEvent),
     ) -> Result<DecryptOutcome, CryptoError> {
-        validate_passphrase(&private_key_passphrase)?;
+        let (key_file_path, private_key_passphrase) = private_key.key_file_parts();
+        validate_passphrase(private_key_passphrase)?;
         let archive_limits = self.archive_limits.unwrap_or_default();
         let header_read_limits = self.header_read_limits.unwrap_or_default();
         let incomplete_output_policy = self.incomplete_output_policy.unwrap_or_default();
@@ -759,8 +760,8 @@ impl PrivateKeyDecryptor {
         // that require authenticated bytes, including
         // `UnsupportedKeyType`, occur after the event.
         let private_key_bytes = recipient::native::x25519::open_x25519_private_key(
-            private_key.key_file_path(),
-            &private_key_passphrase,
+            key_file_path,
+            private_key_passphrase,
             self.kdf_limit.as_ref(),
             self.key_read_limits.unwrap_or_default(),
             &on_event,

@@ -219,8 +219,7 @@ fn attempt(suite: &Path, row: &Row, out: &Path) -> Result<(), CryptoError> {
                         .split_once(",unlock=")
                         .expect("private-key credential carries an unlock passphrase");
                     d.decrypt(
-                        PrivateKey::from_key_file(suite.join(key_path)),
-                        Passphrase::new(unlock),
+                        PrivateKey::from_key_file(suite.join(key_path), Passphrase::new(unlock)),
                         out,
                         |_| {},
                     )?;

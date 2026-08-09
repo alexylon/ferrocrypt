@@ -110,8 +110,7 @@ fn run_operation(
         MODE_RECIPIENT_DECRYPT => match Decryptor::open(input) {
             Ok(Decryptor::PrivateKey(d)) => d
                 .decrypt(
-                    PrivateKey::from_key_file(key_path),
-                    passphrase,
+                    PrivateKey::from_key_file(key_path, passphrase),
                     output_dir,
                     on_event,
                 )

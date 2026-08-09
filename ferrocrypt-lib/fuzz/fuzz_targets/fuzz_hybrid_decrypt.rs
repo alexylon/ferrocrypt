@@ -55,8 +55,7 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(Decryptor::PrivateKey(d)) = Decryptor::open(&input_path) {
         let passphrase = Passphrase::new("fuzz_key");
         let _ = d.kdf_limit(KdfLimit::new(FUZZ_KDF_MEM_KIB)).decrypt(
-            PrivateKey::from_key_file(&priv_key),
-            passphrase,
+            PrivateKey::from_key_file(&priv_key, passphrase),
             &output_dir,
             |_| {},
         );

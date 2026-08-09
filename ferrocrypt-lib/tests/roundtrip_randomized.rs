@@ -111,8 +111,7 @@ fn roundtrip(work: &Path, keys: &KeyPaths, source: &Path) -> PathBuf {
     match Decryptor::open(&outcome.output_path).expect("open") {
         Decryptor::PrivateKey(d) => {
             d.decrypt(
-                PrivateKey::from_key_file(&keys.private),
-                pass(),
+                PrivateKey::from_key_file(&keys.private, pass()),
                 &dec,
                 |_| {},
             )

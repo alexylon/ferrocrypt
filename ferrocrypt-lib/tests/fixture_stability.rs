@@ -128,8 +128,7 @@ fn recipient_decrypt(fcr: PathBuf, out: &Path) -> Result<(), CryptoError> {
     match Decryptor::open(&fcr)? {
         Decryptor::PrivateKey(d) => {
             d.decrypt(
-                PrivateKey::from_key_file(keys_dir().join(PRIVATE_KEY_FILE)),
-                fixture_passphrase(),
+                PrivateKey::from_key_file(keys_dir().join(PRIVATE_KEY_FILE), fixture_passphrase()),
                 out,
                 |_| {},
             )?;

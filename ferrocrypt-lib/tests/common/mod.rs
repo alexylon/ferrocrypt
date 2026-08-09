@@ -80,8 +80,7 @@ pub fn recipient_auto(
                     d = d.kdf_limit(*limit);
                 }
                 d.decrypt(
-                    PrivateKey::from_key_file(key_file),
-                    Passphrase::new(passphrase),
+                    PrivateKey::from_key_file(key_file, Passphrase::new(passphrase)),
                     output_dir,
                     on_event,
                 )

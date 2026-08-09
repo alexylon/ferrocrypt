@@ -563,8 +563,7 @@ fn test_recipient_decrypt_rejects_empty_passphrase_before_kdf() {
     let err = match Decryptor::open(&outcome.output_path).expect("open") {
         Decryptor::PrivateKey(d) => d
             .decrypt(
-                PrivateKey::from_key_file(&kg.private_key_path),
-                Passphrase::new(""),
+                PrivateKey::from_key_file(&kg.private_key_path, Passphrase::new("")),
                 &restore_dir,
                 |ev| {
                     if matches!(

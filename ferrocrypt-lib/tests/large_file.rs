@@ -141,8 +141,7 @@ fn round_trip_file_larger_than_4gib() {
     let out = match Decryptor::open(&fcr).expect("open") {
         Decryptor::PrivateKey(d) => {
             d.decrypt(
-                PrivateKey::from_key_file(&kg.private_key_path),
-                Passphrase::new(PASSPHRASE),
+                PrivateKey::from_key_file(&kg.private_key_path, Passphrase::new(PASSPHRASE)),
                 &dec_dir,
                 |_| {},
             )

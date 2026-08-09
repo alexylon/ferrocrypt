@@ -63,8 +63,7 @@
 //! // 3) Decrypt with the recipient's private key + its passphrase
 //! let restored = match Decryptor::open(&encrypted.output_path)? {
 //!     Decryptor::PrivateKey(d) => d.decrypt(
-//!         PrivateKey::from_key_file(&keys.private_key_path),
-//!         Passphrase::new("my-key-pass"),
+//!         PrivateKey::from_key_file(&keys.private_key_path, Passphrase::new("my-key-pass")),
 //!         "./restored",
 //!         |ev| eprintln!("{ev}"),
 //!     )?,

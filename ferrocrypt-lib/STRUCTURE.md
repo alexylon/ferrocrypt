@@ -749,7 +749,7 @@ It contains:
 - passphrase-wrapped secret decryption;
 - writer-side and reader-side `ext_bytes` TLV validation. `seal_private_key` runs `validate_private_key_ext_tlv` on `ext_bytes` after the structural length cap and before AEAD work, so a sealed `private.key` is one the matching reader will accept. `open_private_key` runs the same check after `open_with_aad` succeeds, so the validator always operates on authenticated bytes. Recipient-specific adapters (e.g. `recipient/native/x25519`) no longer re-validate;
 - generic typed secret material returned to recipient schemes;
-- construction and loading support for `PrivateKey`;
+- construction and loading support for `PrivateKey`, which binds its unlock passphrase at construction;
 - emission of `ProgressEvent::UnlockingPrivateKey` at the actual Argon2id call boundary inside `open_private_key` (after structural header parsing, the caller's `KdfLimit` resource-cap check, the wrapped-secret-length cap, the total-length check, and type-name grammar validation have all passed). A structurally malformed key file or one that exceeds either cap is rejected with no event emitted. `seal_private_key` is silent: keygen owns its own outer `GeneratingKeyPair` event.
 
 It does not contain X25519-specific recipient policy. The X25519 recipient module verifies that decrypted secret material corresponds to X25519 public material.
@@ -1149,7 +1149,6 @@ impl PrivateKeyDecryptor {
     pub fn decrypt(
         self,
         private_key: PrivateKey,
-        private_key_passphrase: Passphrase,
         output_dir: impl AsRef<Path>,
         on_event: impl Fn(&ProgressEvent),
     ) -> Result<DecryptOutcome, CryptoError>;
@@ -1174,9 +1173,11 @@ Preferred public concepts are `Passphrase` and `Recipient`. Internals are not or
 
 `PrivateKey` supports:
 
-- `from_key_file`;
+- `from_key_file(path, Passphrase)`, which binds the passphrase that unlocks the file;
 - validated private-key loading;
 - typed dispatch to its native recipient scheme after passphrase unlock.
+
+Because it holds the passphrase, `PrivateKey` is not `Clone`; build one value per decrypt.
 
 ### 9.4 Key generation
 

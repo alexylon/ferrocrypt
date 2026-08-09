@@ -50,7 +50,7 @@ pub(crate) use format::PERMISSION_BITS_MASK;
 /// panic propagates out of `unarchive`, treat the working tree as if the
 /// process had been killed. It may contain authenticated but incomplete
 /// plaintext that the caller must inspect or remove explicitly.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum IncompleteOutputPolicy {
     /// On decrypt error, best-effort remove the `.incomplete` working

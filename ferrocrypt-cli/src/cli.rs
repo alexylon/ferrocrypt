@@ -803,8 +803,7 @@ fn run_decrypt(
             let passphrase = read_passphrase(false)?;
             decryptor
                 .decrypt(
-                    PrivateKey::from_key_file(&private_key),
-                    passphrase,
+                    PrivateKey::from_key_file(&private_key, passphrase),
                     &output_dir,
                     |ev| eprintln!("{ev}"),
                 )?

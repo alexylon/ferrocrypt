@@ -640,40 +640,51 @@ pub(crate) fn open_private_key(
 /// Private key for public-key-recipient decryption.
 ///
 /// Today, the only supported source is a passphrase-protected FerroCrypt
-/// `private.key` file containing X25519 secret material. The file is unlocked
-/// during [`crate::PrivateKeyDecryptor::decrypt`] with the passphrase supplied to
-/// that operation.
+/// `private.key` file containing X25519 secret material. The value carries
+/// the passphrase that unlocks its source, so
+/// [`crate::PrivateKeyDecryptor::decrypt`] takes no separate credential and
+/// a future source that unlocks differently fits the same signature.
+///
+/// Because the value holds a [`Passphrase`], it does not implement `Clone`;
+/// build a fresh `PrivateKey` for each decrypt.
 ///
 /// Construct with [`PrivateKey::from_key_file`].
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub struct PrivateKey {
     source: PrivateKeySource,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum PrivateKeySource {
-    KeyFile(std::path::PathBuf),
+    KeyFile {
+        path: std::path::PathBuf,
+        passphrase: Passphrase,
+    },
 }
 
 impl PrivateKey {
-    /// References a passphrase-protected FerroCrypt `private.key` file.
+    /// References a passphrase-protected FerroCrypt `private.key` file and
+    /// binds the passphrase that unlocks it.
     ///
-    /// The file is not opened until the private key is used by
-    /// [`crate::PrivateKeyDecryptor::decrypt`].
-    pub fn from_key_file(path: impl AsRef<std::path::Path>) -> Self {
+    /// The file is not opened and the passphrase is not checked until the
+    /// private key is used by [`crate::PrivateKeyDecryptor::decrypt`].
+    pub fn from_key_file(path: impl AsRef<std::path::Path>, passphrase: Passphrase) -> Self {
         Self {
-            source: PrivateKeySource::KeyFile(path.as_ref().to_path_buf()),
+            source: PrivateKeySource::KeyFile {
+                path: path.as_ref().to_path_buf(),
+                passphrase,
+            },
         }
     }
 
-    /// Internal: returns the key-file path for source variants that
-    /// point at one. Every current variant does; future non-path
-    /// sources would extend this enum and the decrypt path with a
-    /// different resolution strategy.
-    pub(crate) fn key_file_path(&self) -> &std::path::Path {
+    /// Internal: returns the key-file path and unlock passphrase for
+    /// source variants built from a key file — today, all of them. A
+    /// future non-file source would extend this enum and the decrypt
+    /// path with a different resolution strategy.
+    pub(crate) fn key_file_parts(&self) -> (&std::path::Path, &Passphrase) {
         match &self.source {
-            PrivateKeySource::KeyFile(path) => path,
+            PrivateKeySource::KeyFile { path, passphrase } => (path, passphrase),
         }
     }
 }

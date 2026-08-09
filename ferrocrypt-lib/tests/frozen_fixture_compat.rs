@@ -54,8 +54,7 @@ fn recipient_decrypt(fcr: PathBuf, private_key: PathBuf, out: &Path) -> PathBuf 
     match Decryptor::open(&fcr).expect("open frozen recipient fixture") {
         Decryptor::PrivateKey(d) => {
             d.decrypt(
-                PrivateKey::from_key_file(private_key),
-                passphrase(),
+                PrivateKey::from_key_file(private_key, passphrase()),
                 out,
                 |_| {},
             )

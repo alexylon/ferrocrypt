@@ -7,7 +7,7 @@ use zeroize::Zeroizing;
 /// Every operation that takes a passphrase consumes a `Passphrase`:
 /// [`Encryptor::with_passphrase`](crate::Encryptor::with_passphrase),
 /// [`PassphraseDecryptor::decrypt`](crate::PassphraseDecryptor::decrypt),
-/// [`PrivateKeyDecryptor::decrypt`](crate::PrivateKeyDecryptor::decrypt),
+/// [`PrivateKey::from_key_file`](crate::PrivateKey::from_key_file),
 /// [`KeyPairGenerator::with_passphrase`](crate::KeyPairGenerator::with_passphrase),
 /// and [`generate_key_pair`](crate::generate_key_pair).
 ///

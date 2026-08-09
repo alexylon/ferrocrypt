@@ -102,7 +102,7 @@ impl KeyFileKind {
 mod tests {
     use super::*;
     use crate::CryptoError;
-    use secrecy::SecretString;
+    use crate::passphrase::Passphrase;
     use std::fs;
 
     fn classify_default(data: &[u8]) -> KeyFileKind {
@@ -115,7 +115,7 @@ mod tests {
     fn key_file_kind_classifies_each_shape() -> Result<(), CryptoError> {
         // Real public.key text → Public.
         let tmp = tempfile::TempDir::new().unwrap();
-        let pass = SecretString::from("kp".to_string());
+        let pass = Passphrase::new("kp");
         let (private_key_path, public_key_path, _fingerprint) = crate::protocol::generate_key_pair(
             &pass,
             &crate::crypto::kdf::KdfParams::test_fast_default(),

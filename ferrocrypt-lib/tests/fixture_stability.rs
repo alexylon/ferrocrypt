@@ -20,7 +20,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ferrocrypt::secrecy::SecretString;
+use ferrocrypt::Passphrase;
 use ferrocrypt::{CryptoError, Decryptor, Encryptor, PrivateKey, PublicKey};
 use ferrocrypt_test_support::{fast_keypair_generator, fast_passphrase_encryptor};
 
@@ -65,8 +65,8 @@ fn fresh_temp(name: &str) -> PathBuf {
     dir
 }
 
-fn fixture_passphrase() -> SecretString {
-    SecretString::from(FIXTURE_PASSPHRASE.to_string())
+fn fixture_passphrase() -> Passphrase {
+    Passphrase::new(FIXTURE_PASSPHRASE)
 }
 
 #[ctor::dtor]

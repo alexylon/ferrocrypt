@@ -335,7 +335,6 @@ dependencies = [
  "hmac",
  "libc",
  "rustix",
- "secrecy",
  "sha3",
  "tempfile",
  "thiserror",
@@ -716,15 +715,6 @@ checksum = "2fc84bf7e9aa16c4f2c758f27412dc9841341e16aa682d9c7ac308fe3ee12056"
 dependencies = [
  "once_cell",
  "rustix",
-]
-
-[[package]]
-name = "secrecy"
-version = "0.10.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e891af845473308773346dc847b2c23ee78fe442e0472ac50e22a18a93d3ae5a"
-dependencies = [
- "zeroize",
 ]
 
 [[package]]

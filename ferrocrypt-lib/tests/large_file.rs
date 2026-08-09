@@ -24,7 +24,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use ferrocrypt::secrecy::SecretString;
+use ferrocrypt::Passphrase;
 use ferrocrypt::{Decryptor, Encryptor, PrivateKey, PublicKey};
 use ferrocrypt_test_support::{
     fast_keypair_generator, per_process_workspace, remove_per_process_workspace,
@@ -111,8 +111,7 @@ fn round_trip_file_larger_than_4gib() {
 
     let keys = work.join("keys");
     fs::create_dir_all(&keys).unwrap();
-    let pass = SecretString::from(PASSPHRASE.to_string());
-    let kg = fast_keypair_generator(pass.clone())
+    let kg = fast_keypair_generator(Passphrase::new(PASSPHRASE))
         .write(&keys, |_| {})
         .expect("keygen");
 
@@ -143,7 +142,7 @@ fn round_trip_file_larger_than_4gib() {
         Decryptor::PrivateKey(d) => {
             d.decrypt(
                 PrivateKey::from_key_file(&kg.private_key_path),
-                pass,
+                Passphrase::new(PASSPHRASE),
                 &dec_dir,
                 |_| {},
             )

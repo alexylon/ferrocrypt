@@ -16,17 +16,16 @@
 
 use std::path::{Path, PathBuf};
 
-use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
-    CryptoError, Decryptor, Encryptor, KdfLimit, KeyGenOutcome, PrivateKey, ProgressEvent,
-    PublicKey, probe_recipient_mode,
+    CryptoError, Decryptor, Encryptor, KdfLimit, KeyGenOutcome, Passphrase, PrivateKey,
+    ProgressEvent, PublicKey, probe_recipient_mode,
 };
 use ferrocrypt_test_support::{fast_keypair_generator, fast_passphrase_encryptor};
 
 pub fn passphrase_auto(
     input: impl AsRef<Path>,
     output_dir: impl AsRef<Path>,
-    passphrase: &SecretString,
+    passphrase: &str,
     save_as: Option<&Path>,
     kdf_limit: Option<&KdfLimit>,
     on_event: impl Fn(&ProgressEvent),
@@ -42,14 +41,14 @@ pub fn passphrase_auto(
                 if let Some(limit) = kdf_limit {
                     d = d.kdf_limit(*limit);
                 }
-                d.decrypt(passphrase.clone(), output_dir, on_event)
+                d.decrypt(Passphrase::new(passphrase), output_dir, on_event)
                     .map(|o| o.output_path)
             }
             Decryptor::PrivateKey(_) => Err(CryptoError::NoSupportedRecipient),
             _ => Err(CryptoError::NoSupportedRecipient),
         }
     } else {
-        let mut encryptor = fast_passphrase_encryptor(passphrase.clone());
+        let mut encryptor = fast_passphrase_encryptor(Passphrase::new(passphrase));
         if let Some(s) = save_as {
             encryptor = encryptor.save_as(s);
         }
@@ -63,7 +62,7 @@ pub fn recipient_auto(
     input: impl AsRef<Path>,
     output_dir: impl AsRef<Path>,
     key_file: impl AsRef<Path>,
-    passphrase: &SecretString,
+    passphrase: &str,
     save_as: Option<&Path>,
     kdf_limit: Option<&KdfLimit>,
     on_event: impl Fn(&ProgressEvent),
@@ -82,7 +81,7 @@ pub fn recipient_auto(
                 }
                 d.decrypt(
                     PrivateKey::from_key_file(key_file),
-                    passphrase.clone(),
+                    Passphrase::new(passphrase),
                     output_dir,
                     on_event,
                 )
@@ -103,9 +102,9 @@ pub fn recipient_auto(
 }
 
 pub fn generate_key_pair(
-    passphrase: &SecretString,
+    passphrase: &str,
     output_dir: impl AsRef<Path>,
     on_event: impl Fn(&ProgressEvent),
 ) -> Result<KeyGenOutcome, CryptoError> {
-    fast_keypair_generator(passphrase.clone()).write(output_dir, on_event)
+    fast_keypair_generator(Passphrase::new(passphrase)).write(output_dir, on_event)
 }

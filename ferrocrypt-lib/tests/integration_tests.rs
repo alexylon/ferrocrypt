@@ -4,7 +4,7 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ferrocrypt::secrecy::SecretString;
+use ferrocrypt::Passphrase;
 use ferrocrypt::{
     CryptoError, ENCRYPTED_EXTENSION, PublicKey, decode_x25519_recipient_string,
     probe_recipient_mode, validate_private_key_file,
@@ -61,11 +61,11 @@ fn test_passphrase_encrypt_decrypt_single_file() -> Result<(), CryptoError> {
     let original_content = "This is a test file with sensitive data.";
     create_test_file(&input_file, original_content);
 
-    let passphrase = SecretString::from("test_password_123".to_string());
+    let passphrase = "test_password_123";
 
     // Encrypt
     let encrypt_result =
-        passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+        passphrase_auto(&input_file, &encrypt_dir, passphrase, None, None, |_| {})?;
 
     assert!(encrypt_result.exists());
     assert!(encrypt_dir.join("input.fcr").exists());
@@ -74,7 +74,7 @@ fn test_passphrase_encrypt_decrypt_single_file() -> Result<(), CryptoError> {
     let decrypt_result = passphrase_auto(
         encrypt_dir.join("input.fcr"),
         &decrypt_dir,
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -99,11 +99,10 @@ fn test_passphrase_encrypt_decrypt_directory() -> Result<(), CryptoError> {
     fs::create_dir_all(&encrypt_dir)?;
     fs::create_dir_all(&decrypt_dir)?;
 
-    let passphrase = SecretString::from("directory_password".to_string());
+    let passphrase = "directory_password";
 
     // Encrypt directory
-    let encrypt_result =
-        passphrase_auto(&input_dir, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    let encrypt_result = passphrase_auto(&input_dir, &encrypt_dir, passphrase, None, None, |_| {})?;
 
     assert!(encrypt_result.exists());
     assert!(encrypt_dir.join("test_folder.fcr").exists());
@@ -112,7 +111,7 @@ fn test_passphrase_encrypt_decrypt_directory() -> Result<(), CryptoError> {
     let decrypt_result = passphrase_auto(
         encrypt_dir.join("test_folder.fcr"),
         &decrypt_dir,
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -161,8 +160,8 @@ fn test_decrypt_directory_with_read_only_subdir() -> Result<(), CryptoError> {
     create_test_file(&subdir.join("inside.txt"), "nested content");
     fs::set_permissions(&subdir, fs::Permissions::from_mode(0o500))?;
 
-    let passphrase = SecretString::from("ro-subdir-password".to_string());
-    let encrypt_result = passphrase_auto(&source, &encrypt_dir, &passphrase, None, None, |_| {});
+    let passphrase = "ro-subdir-password";
+    let encrypt_result = passphrase_auto(&source, &encrypt_dir, passphrase, None, None, |_| {});
     // Restore write on the source subdirectory even if encryption
     // fails, so workspace cleanup can remove it.
     let _ = fs::set_permissions(&subdir, fs::Permissions::from_mode(0o700));
@@ -171,7 +170,7 @@ fn test_decrypt_directory_with_read_only_subdir() -> Result<(), CryptoError> {
     passphrase_auto(
         encrypt_dir.join("ro_folder.fcr"),
         &decrypt_dir,
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -215,17 +214,17 @@ fn test_passphrase_wrong_password() -> Result<(), CryptoError> {
 
     create_test_file(&input_file, "Secret content");
 
-    let correct_pass = SecretString::from("correct_password".to_string());
-    let wrong_pass = SecretString::from("wrong_password".to_string());
+    let correct_pass = "correct_password";
+    let wrong_pass = "wrong_password";
 
     // Encrypt with correct password
-    passphrase_auto(&input_file, &encrypt_dir, &correct_pass, None, None, |_| {})?;
+    passphrase_auto(&input_file, &encrypt_dir, correct_pass, None, None, |_| {})?;
 
     // Try to decrypt with wrong password - should fail
     let result = passphrase_auto(
         encrypt_dir.join("secret.fcr"),
         &decrypt_dir,
-        &wrong_pass,
+        wrong_pass,
         None,
         None,
         |_| {},
@@ -273,8 +272,8 @@ fn test_passphrase_appended_bytes_fail_closed_at_public_api() -> Result<(), Cryp
     let big_data: Vec<u8> = (0..200_000u32).map(|i| (i % 256) as u8).collect();
     fs::write(&input_file, &big_data)?;
 
-    let passphrase = SecretString::from("appended_pass".to_string());
-    passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    let passphrase = "appended_pass";
+    passphrase_auto(&input_file, &encrypt_dir, passphrase, None, None, |_| {})?;
 
     let encrypted_path = encrypt_dir.join("payload.fcr");
     let mut ct = fs::read(&encrypted_path)?;
@@ -284,7 +283,7 @@ fn test_passphrase_appended_bytes_fail_closed_at_public_api() -> Result<(), Cryp
     match passphrase_auto(
         &encrypted_path,
         &decrypt_dir,
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -310,8 +309,8 @@ fn test_passphrase_payload_tamper_mid_chunk() -> Result<(), CryptoError> {
     let big_data: Vec<u8> = (0..200_000u32).map(|i| (i % 256) as u8).collect();
     fs::write(&input_file, &big_data)?;
 
-    let passphrase = SecretString::from("tamper_pass".to_string());
-    passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    let passphrase = "tamper_pass";
+    passphrase_auto(&input_file, &encrypt_dir, passphrase, None, None, |_| {})?;
 
     let encrypted_path = encrypt_dir.join("payload.fcr");
     let mut ct = fs::read(&encrypted_path)?;
@@ -323,7 +322,7 @@ fn test_passphrase_payload_tamper_mid_chunk() -> Result<(), CryptoError> {
     let result = passphrase_auto(
         &encrypted_path,
         &decrypt_dir,
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -356,8 +355,8 @@ fn test_passphrase_decrypt_delete_on_error_removes_incomplete_after_payload_tamp
     let big_data: Vec<u8> = (0..200_000u32).map(|i| (i % 256) as u8).collect();
     fs::write(&input_file, &big_data)?;
 
-    let passphrase = SecretString::from("delete-pass".to_string());
-    passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    let passphrase = "delete-pass";
+    passphrase_auto(&input_file, &encrypt_dir, passphrase, None, None, |_| {})?;
 
     let encrypted_path = encrypt_dir.join("payload.fcr");
     let mut ct = fs::read(&encrypted_path)?;
@@ -370,7 +369,7 @@ fn test_passphrase_decrypt_delete_on_error_removes_incomplete_after_payload_tamp
     };
     let result = decryptor
         .incomplete_output_policy(IncompleteOutputPolicy::DeleteOnError)
-        .decrypt(passphrase, &decrypt_dir, |_| {});
+        .decrypt(Passphrase::new(passphrase), &decrypt_dir, |_| {});
     match result {
         Err(CryptoError::PayloadTampered) => {}
         other => panic!("expected PayloadTampered, got {other:?}"),
@@ -405,8 +404,8 @@ fn test_passphrase_decrypt_retain_on_error_keeps_incomplete_after_payload_tamper
     let big_data: Vec<u8> = (0..200_000u32).map(|i| (i % 256) as u8).collect();
     fs::write(&input_file, &big_data)?;
 
-    let passphrase = SecretString::from("retain-pass".to_string());
-    passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    let passphrase = "retain-pass";
+    passphrase_auto(&input_file, &encrypt_dir, passphrase, None, None, |_| {})?;
 
     let encrypted_path = encrypt_dir.join("payload.fcr");
     let mut ct = fs::read(&encrypted_path)?;
@@ -419,7 +418,7 @@ fn test_passphrase_decrypt_retain_on_error_keeps_incomplete_after_payload_tamper
     };
     let result = decryptor
         .incomplete_output_policy(IncompleteOutputPolicy::RetainOnError)
-        .decrypt(passphrase, &decrypt_dir, |_| {});
+        .decrypt(Passphrase::new(passphrase), &decrypt_dir, |_| {});
     assert!(matches!(result, Err(CryptoError::PayloadTampered)));
 
     let working_path = decrypt_dir.join("payload.bin.incomplete");
@@ -448,8 +447,8 @@ fn test_passphrase_decrypt_default_policy_removes_incomplete() -> Result<(), Cry
     let big_data: Vec<u8> = (0..200_000u32).map(|i| (i % 256) as u8).collect();
     fs::write(&input_file, &big_data)?;
 
-    let passphrase = SecretString::from("default-pass".to_string());
-    passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    let passphrase = "default-pass";
+    passphrase_auto(&input_file, &encrypt_dir, passphrase, None, None, |_| {})?;
 
     let encrypted_path = encrypt_dir.join("payload.fcr");
     let mut ct = fs::read(&encrypted_path)?;
@@ -460,7 +459,7 @@ fn test_passphrase_decrypt_default_policy_removes_incomplete() -> Result<(), Cry
     let Decryptor::Passphrase(decryptor) = Decryptor::open(&encrypted_path)? else {
         panic!("expected passphrase-sealed file");
     };
-    let result = decryptor.decrypt(passphrase, &decrypt_dir, |_| {});
+    let result = decryptor.decrypt(Passphrase::new(passphrase), &decrypt_dir, |_| {});
     assert!(matches!(result, Err(CryptoError::PayloadTampered)));
 
     let working_path = decrypt_dir.join("payload.bin.incomplete");
@@ -495,16 +494,16 @@ fn test_passphrase_encrypt_decrypt_multi_chunk_file() -> Result<(), CryptoError>
     );
     create_test_file(&input_file, &content);
 
-    let passphrase = SecretString::from("multi_chunk_password".to_string());
+    let passphrase = "multi_chunk_password";
 
-    passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    passphrase_auto(&input_file, &encrypt_dir, passphrase, None, None, |_| {})?;
 
     assert!(encrypt_dir.join("multi_chunk.fcr").exists());
 
     passphrase_auto(
         encrypt_dir.join("multi_chunk.fcr"),
         &decrypt_dir,
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -519,9 +518,9 @@ fn test_passphrase_encrypt_decrypt_multi_chunk_file() -> Result<(), CryptoError>
 #[test]
 fn test_recipient_keygen_rejects_empty_passphrase() {
     let test_dir = setup_test_dir("keygen_empty_pass");
-    let empty = SecretString::from("".to_string());
+    let empty = "";
 
-    let err = generate_key_pair(&empty, &test_dir, |_| {}).unwrap_err();
+    let err = generate_key_pair(empty, &test_dir, |_| {}).unwrap_err();
     assert!(
         err.to_string().contains("empty"),
         "expected empty-passphrase error, got: {err}"
@@ -546,8 +545,8 @@ fn test_recipient_decrypt_rejects_empty_passphrase_before_kdf() {
     // Build a real recipient `.fcr` so `Decryptor::open` returns the
     // `PrivateKey` variant. Setup events fire here, before we install
     // the observing closure.
-    let setup_pass = SecretString::from("setup-pass".to_string());
-    let kg = fast_keypair_generator(setup_pass)
+    let setup_pass = "setup-pass";
+    let kg = fast_keypair_generator(Passphrase::new(setup_pass))
         .write(&keys_dir, |_| {})
         .expect("generate fixture key pair");
     let input = test_dir.join("data.txt");
@@ -565,7 +564,7 @@ fn test_recipient_decrypt_rejects_empty_passphrase_before_kdf() {
         Decryptor::PrivateKey(d) => d
             .decrypt(
                 PrivateKey::from_key_file(&kg.private_key_path),
-                SecretString::from(String::new()),
+                Passphrase::new(""),
                 &restore_dir,
                 |ev| {
                     if matches!(
@@ -611,10 +610,10 @@ fn test_passphrase_encrypt_rejects_symlink_before_kdf() {
 
     let output_dir = test_dir.join("out");
     fs::create_dir_all(&output_dir).unwrap();
-    let passphrase = SecretString::from("pass".to_string());
+    let passphrase = "pass";
 
     let saw_kdf_event = Cell::new(false);
-    let err = Encryptor::with_passphrase(passphrase)
+    let err = Encryptor::with_passphrase(Passphrase::new(passphrase))
         .write(&link, &output_dir, |ev| {
             if matches!(ev, ProgressEvent::DerivingPassphraseWrapKey) {
                 saw_kdf_event.set(true);
@@ -658,8 +657,8 @@ fn test_recipient_decrypt_progress_events_in_order() -> Result<(), CryptoError> 
     fs::create_dir_all(&encrypt_dir)?;
     fs::create_dir_all(&decrypt_dir)?;
 
-    let passphrase = SecretString::from("pass".to_string());
-    generate_key_pair(&passphrase, &keys_dir, |_| {})?;
+    let passphrase = "pass";
+    generate_key_pair(passphrase, &keys_dir, |_| {})?;
 
     let input_file = test_dir.join("data.txt");
     create_test_file(&input_file, "hybrid progress order");
@@ -669,7 +668,7 @@ fn test_recipient_decrypt_progress_events_in_order() -> Result<(), CryptoError> 
         &input_file,
         &encrypt_dir,
         &public_key_path,
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -681,7 +680,7 @@ fn test_recipient_decrypt_progress_events_in_order() -> Result<(), CryptoError> 
         &encrypted_path,
         &decrypt_dir,
         keys_dir.join("private.key"),
-        &passphrase,
+        passphrase,
         None,
         None,
         |ev| events.lock().unwrap().push(ev.clone()),
@@ -732,12 +731,12 @@ fn test_passphrase_decrypt_progress_events_in_order() -> Result<(), CryptoError>
     fs::create_dir_all(&encrypt_dir)?;
     fs::create_dir_all(&decrypt_dir)?;
 
-    let passphrase = SecretString::from("passphrase progress order".to_string());
+    let passphrase = "passphrase progress order";
     let input_file = test_dir.join("data.txt");
     create_test_file(&input_file, "passphrase progress order");
 
     let encrypt_events: Mutex<Vec<ProgressEvent>> = Mutex::new(Vec::new());
-    passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |ev| {
+    passphrase_auto(&input_file, &encrypt_dir, passphrase, None, None, |ev| {
         encrypt_events.lock().unwrap().push(ev.clone())
     })?;
 
@@ -746,7 +745,7 @@ fn test_passphrase_decrypt_progress_events_in_order() -> Result<(), CryptoError>
     passphrase_auto(
         &encrypted_path,
         &decrypt_dir,
-        &passphrase,
+        passphrase,
         None,
         None,
         |ev| decrypt_events.lock().unwrap().push(ev.clone()),
@@ -825,8 +824,8 @@ fn test_recipient_encrypt_emits_no_kdf_events() -> Result<(), CryptoError> {
     fs::create_dir_all(&keys_dir)?;
     fs::create_dir_all(&encrypt_dir)?;
 
-    let passphrase = SecretString::from("pass".to_string());
-    generate_key_pair(&passphrase, &keys_dir, |_| {})?;
+    let passphrase = "pass";
+    generate_key_pair(passphrase, &keys_dir, |_| {})?;
 
     let input_file = test_dir.join("data.txt");
     create_test_file(&input_file, "x25519 encrypt no kdf events");
@@ -837,7 +836,7 @@ fn test_recipient_encrypt_emits_no_kdf_events() -> Result<(), CryptoError> {
         &input_file,
         &encrypt_dir,
         &public_key_path,
-        &passphrase,
+        passphrase,
         None,
         None,
         |ev| events.lock().unwrap().push(ev.clone()),
@@ -872,9 +871,9 @@ fn test_recipient_keygen_private_key_permissions() -> Result<(), CryptoError> {
     use std::os::unix::fs::PermissionsExt;
 
     let test_dir = setup_test_dir("keygen_permissions");
-    let passphrase = SecretString::from("pass".to_string());
+    let passphrase = "pass";
 
-    generate_key_pair(&passphrase, &test_dir, |_| {})?;
+    generate_key_pair(passphrase, &test_dir, |_| {})?;
 
     let private_key_path = test_dir.join("private.key");
     let pub_key = test_dir.join("public.key");
@@ -902,10 +901,10 @@ fn test_recipient_keygen_encrypt_decrypt_file() -> Result<(), CryptoError> {
     let original_content = "Hybrid encryption test data";
     create_test_file(&input_file, original_content);
 
-    let key_passphrase = SecretString::from("key_protection_password".to_string());
+    let key_passphrase = "key_protection_password";
 
     // Generate key pair
-    let keygen_result = generate_key_pair(&key_passphrase, &keys_dir, |_| {})?;
+    let keygen_result = generate_key_pair(key_passphrase, &keys_dir, |_| {})?;
 
     assert!(keygen_result.private_key_path.exists());
     assert!(keygen_result.public_key_path.exists());
@@ -913,13 +912,13 @@ fn test_recipient_keygen_encrypt_decrypt_file() -> Result<(), CryptoError> {
 
     // Encrypt with public key
     let pub_key_path = keys_dir.join("public.key");
-    let empty_pass = SecretString::from("".to_string());
+    let empty_pass = "";
 
     let encrypt_result = recipient_auto(
         &input_file,
         &encrypt_dir,
         &pub_key_path,
-        &empty_pass,
+        empty_pass,
         None,
         None,
         |_| {},
@@ -935,7 +934,7 @@ fn test_recipient_keygen_encrypt_decrypt_file() -> Result<(), CryptoError> {
         encrypt_dir.join("data.fcr"),
         &decrypt_dir,
         &private_key_path,
-        &key_passphrase,
+        key_passphrase,
         None,
         None,
         |_| {},
@@ -962,20 +961,20 @@ fn test_recipient_encrypt_decrypt_directory() -> Result<(), CryptoError> {
     fs::create_dir_all(&encrypt_dir)?;
     fs::create_dir_all(&decrypt_dir)?;
 
-    let key_passphrase = SecretString::from("hybrid_dir_key_pass".to_string());
+    let key_passphrase = "hybrid_dir_key_pass";
 
     // Generate keys
-    generate_key_pair(&key_passphrase, &keys_dir, |_| {})?;
+    generate_key_pair(key_passphrase, &keys_dir, |_| {})?;
 
     // Encrypt directory
     let pub_key_path = keys_dir.join("public.key");
-    let empty_pass = SecretString::from("".to_string());
+    let empty_pass = "";
 
     recipient_auto(
         &input_dir,
         &encrypt_dir,
         &pub_key_path,
-        &empty_pass,
+        empty_pass,
         None,
         None,
         |_| {},
@@ -990,7 +989,7 @@ fn test_recipient_encrypt_decrypt_directory() -> Result<(), CryptoError> {
         encrypt_dir.join("test_folder.fcr"),
         &decrypt_dir,
         &private_key_path,
-        &key_passphrase,
+        key_passphrase,
         None,
         None,
         |_| {},
@@ -1019,21 +1018,21 @@ fn test_recipient_wrong_key_passphrase() -> Result<(), CryptoError> {
 
     create_test_file(&input_file, "Sensitive data");
 
-    let correct_pass = SecretString::from("correct_key_pass".to_string());
-    let wrong_pass = SecretString::from("wrong_key_pass".to_string());
+    let correct_pass = "correct_key_pass";
+    let wrong_pass = "wrong_key_pass";
 
     // Generate keys with correct passphrase
-    generate_key_pair(&correct_pass, &keys_dir, |_| {})?;
+    generate_key_pair(correct_pass, &keys_dir, |_| {})?;
 
     // Encrypt
     let pub_key_path = keys_dir.join("public.key");
-    let empty_pass = SecretString::from("".to_string());
+    let empty_pass = "";
 
     recipient_auto(
         &input_file,
         &encrypt_dir,
         &pub_key_path,
-        &empty_pass,
+        empty_pass,
         None,
         None,
         |_| {},
@@ -1048,7 +1047,7 @@ fn test_recipient_wrong_key_passphrase() -> Result<(), CryptoError> {
         encrypt_dir.join("data.fcr"),
         &decrypt_dir,
         &private_key_path,
-        &wrong_pass,
+        wrong_pass,
         None,
         None,
         |_| {},
@@ -1076,16 +1075,16 @@ fn test_empty_file_encryption() -> Result<(), CryptoError> {
     // Create empty file
     create_test_file(&input_file, "");
 
-    let passphrase = SecretString::from("empty_test".to_string());
+    let passphrase = "empty_test";
 
     // Encrypt empty file
-    passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    passphrase_auto(&input_file, &encrypt_dir, passphrase, None, None, |_| {})?;
 
     // Decrypt
     passphrase_auto(
         encrypt_dir.join("empty.fcr"),
         &decrypt_dir,
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -1111,16 +1110,16 @@ fn test_unicode_content() -> Result<(), CryptoError> {
     let unicode_content = "Hello 世界! Привет мир! مرحبا بالعالم! 🔐🚀";
     create_test_file(&input_file, unicode_content);
 
-    let passphrase = SecretString::from("unicode_pass".to_string());
+    let passphrase = "unicode_pass";
 
     // Encrypt
-    passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    passphrase_auto(&input_file, &encrypt_dir, passphrase, None, None, |_| {})?;
 
     // Decrypt
     passphrase_auto(
         encrypt_dir.join("unicode.fcr"),
         &decrypt_dir,
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -1145,14 +1144,14 @@ fn test_special_characters_in_filename() -> Result<(), CryptoError> {
 
     create_test_file(&input_file, "Content with special filename");
 
-    let passphrase = SecretString::from("special_pass".to_string());
+    let passphrase = "special_pass";
 
-    passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    passphrase_auto(&input_file, &encrypt_dir, passphrase, None, None, |_| {})?;
 
     passphrase_auto(
         encrypt_dir.join("file-with_special.chars.fcr"),
         &decrypt_dir,
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -1165,12 +1164,12 @@ fn test_special_characters_in_filename() -> Result<(), CryptoError> {
 
 #[test]
 fn test_nonexistent_output_dir() {
-    let passphrase = SecretString::from("test".to_string());
+    let passphrase = "test";
 
     let result = passphrase_auto(
         "Cargo.toml",
         "/nonexistent/path/output",
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -1209,14 +1208,14 @@ fn test_binary_file_content() -> Result<(), CryptoError> {
     let binary_content: Vec<u8> = (0..=255).cycle().take(1024).collect();
     fs::write(&input_file, &binary_content)?;
 
-    let passphrase = SecretString::from("binary_pass".to_string());
+    let passphrase = "binary_pass";
 
-    passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    passphrase_auto(&input_file, &encrypt_dir, passphrase, None, None, |_| {})?;
 
     passphrase_auto(
         encrypt_dir.join("data.fcr"),
         &decrypt_dir,
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -1241,16 +1240,16 @@ fn test_passphrase_streaming_wrong_password() -> Result<(), CryptoError> {
     let content = "Large mode wrong password test. ".repeat(100);
     create_test_file(&input_file, &content);
 
-    let correct_pass = SecretString::from("correct".to_string());
-    let wrong_pass = SecretString::from("wrong".to_string());
+    let correct_pass = "correct";
+    let wrong_pass = "wrong";
 
-    passphrase_auto(&input_file, &encrypt_dir, &correct_pass, None, None, |_| {})?;
+    passphrase_auto(&input_file, &encrypt_dir, correct_pass, None, None, |_| {})?;
 
     // Decrypt with wrong password
     let result = passphrase_auto(
         encrypt_dir.join("data.fcr"),
         &decrypt_dir,
-        &wrong_pass,
+        wrong_pass,
         None,
         None,
         |_| {},
@@ -1278,16 +1277,16 @@ fn test_passphrase_encrypt_decrypt_directory_streaming() -> Result<(), CryptoErr
     fs::create_dir_all(&encrypt_dir)?;
     fs::create_dir_all(&decrypt_dir)?;
 
-    let passphrase = SecretString::from("dir_streaming_pass".to_string());
+    let passphrase = "dir_streaming_pass";
 
-    passphrase_auto(&input_dir, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    passphrase_auto(&input_dir, &encrypt_dir, passphrase, None, None, |_| {})?;
 
     assert!(encrypt_dir.join("test_folder.fcr").exists());
 
     passphrase_auto(
         encrypt_dir.join("test_folder.fcr"),
         &decrypt_dir,
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -1316,9 +1315,9 @@ fn test_passphrase_empty_password_rejected() {
     fs::create_dir_all(&encrypt_dir).unwrap();
     create_test_file(&input_file, "Protected with empty password");
 
-    let empty_pass = SecretString::from("".to_string());
+    let empty_pass = "";
 
-    let result = passphrase_auto(&input_file, &encrypt_dir, &empty_pass, None, None, |_| {});
+    let result = passphrase_auto(&input_file, &encrypt_dir, empty_pass, None, None, |_| {});
 
     assert!(result.is_err());
     match result {
@@ -1348,22 +1347,22 @@ fn test_recipient_wrong_key_pair() -> Result<(), CryptoError> {
 
     create_test_file(&input_file, "Sensitive data");
 
-    let pass_a = SecretString::from("pass_a".to_string());
-    let pass_b = SecretString::from("pass_b".to_string());
+    let pass_a = "pass_a";
+    let pass_b = "pass_b";
 
     // Generate two different key pairs
-    generate_key_pair(&pass_a, &keys_a, |_| {})?;
-    generate_key_pair(&pass_b, &keys_b, |_| {})?;
+    generate_key_pair(pass_a, &keys_a, |_| {})?;
+    generate_key_pair(pass_b, &keys_b, |_| {})?;
 
     // Encrypt with key pair A's public key
     let pub_key_a = keys_a.join("public.key");
-    let empty_pass = SecretString::from("".to_string());
+    let empty_pass = "";
 
     recipient_auto(
         &input_file,
         &encrypt_dir,
         &pub_key_a,
-        &empty_pass,
+        empty_pass,
         None,
         None,
         |_| {},
@@ -1379,7 +1378,7 @@ fn test_recipient_wrong_key_pair() -> Result<(), CryptoError> {
         encrypt_dir.join("data.fcr"),
         &decrypt_dir,
         &private_key_b,
-        &pass_b,
+        pass_b,
         None,
         None,
         |_| {},
@@ -1408,19 +1407,19 @@ fn test_recipient_key_round_trip() -> Result<(), CryptoError> {
     let original_content = "X25519 round-trip test";
     create_test_file(&input_file, original_content);
 
-    let key_passphrase = SecretString::from("keypass".to_string());
+    let key_passphrase = "keypass";
 
-    generate_key_pair(&key_passphrase, &keys_dir, |_| {})?;
+    generate_key_pair(key_passphrase, &keys_dir, |_| {})?;
 
     // Encrypt
     let pub_key_path = keys_dir.join("public.key");
-    let empty_pass = SecretString::from("".to_string());
+    let empty_pass = "";
 
     recipient_auto(
         &input_file,
         &encrypt_dir,
         &pub_key_path,
-        &empty_pass,
+        empty_pass,
         None,
         None,
         |_| {},
@@ -1435,7 +1434,7 @@ fn test_recipient_key_round_trip() -> Result<(), CryptoError> {
         encrypt_dir.join("data.fcr"),
         &decrypt_dir,
         &private_key_path,
-        &key_passphrase,
+        key_passphrase,
         None,
         None,
         |_| {},
@@ -1462,17 +1461,17 @@ fn test_recipient_binary_file() -> Result<(), CryptoError> {
     let binary_content: Vec<u8> = (0..=255).cycle().take(2048).collect();
     fs::write(&input_file, &binary_content)?;
 
-    let key_passphrase = SecretString::from("hybrid_bin_pass".to_string());
-    generate_key_pair(&key_passphrase, &keys_dir, |_| {})?;
+    let key_passphrase = "hybrid_bin_pass";
+    generate_key_pair(key_passphrase, &keys_dir, |_| {})?;
 
     let pub_key_path = keys_dir.join("public.key");
-    let empty_pass = SecretString::from("".to_string());
+    let empty_pass = "";
 
     recipient_auto(
         &input_file,
         &encrypt_dir,
         &pub_key_path,
-        &empty_pass,
+        empty_pass,
         None,
         None,
         |_| {},
@@ -1484,7 +1483,7 @@ fn test_recipient_binary_file() -> Result<(), CryptoError> {
         encrypt_dir.join("data.fcr"),
         &decrypt_dir,
         &private_key_path,
-        &key_passphrase,
+        key_passphrase,
         None,
         None,
         |_| {},
@@ -1506,8 +1505,8 @@ fn test_nonexistent_input_path_encrypt() {
     // Call the public encryptor directly (the `passphrase_auto` shim
     // short-circuits on a missing path). A missing input must be reported as
     // the typed InputPath, before any key derivation runs.
-    let passphrase = SecretString::from("test".to_string());
-    let result = ferrocrypt_test_support::fast_passphrase_encryptor(passphrase)
+    let passphrase = "test";
+    let result = ferrocrypt_test_support::fast_passphrase_encryptor(Passphrase::new(passphrase))
         .write(&missing, &encrypt_dir, |_| {})
         .map(|_| ());
     assert!(
@@ -1528,9 +1527,9 @@ fn test_truncated_passphrase_file() -> Result<(), CryptoError> {
     // (magic bytes detected) but the rest of the header is missing.
     let input_file = test_dir.join("data.txt");
     create_test_file(&input_file, "truncation test data");
-    let passphrase = SecretString::from("test".to_string());
+    let passphrase = "test";
 
-    passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    passphrase_auto(&input_file, &encrypt_dir, passphrase, None, None, |_| {})?;
 
     let encrypted_path = encrypt_dir.join("data.fcr");
     let data = fs::read(&encrypted_path)?;
@@ -1543,7 +1542,7 @@ fn test_truncated_passphrase_file() -> Result<(), CryptoError> {
     let result = passphrase_auto(
         &encrypted_path,
         &decrypt_dir,
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -1563,8 +1562,8 @@ fn test_truncated_recipient_file() -> Result<(), CryptoError> {
     fs::create_dir_all(&encrypt_dir)?;
     fs::create_dir_all(&decrypt_dir)?;
 
-    let key_passphrase = SecretString::from("pass".to_string());
-    generate_key_pair(&key_passphrase, &keys_dir, |_| {})?;
+    let key_passphrase = "pass";
+    generate_key_pair(key_passphrase, &keys_dir, |_| {})?;
 
     let public_key = keys_dir.join("public.key");
     let private_key_path = keys_dir.join("private.key");
@@ -1573,12 +1572,12 @@ fn test_truncated_recipient_file() -> Result<(), CryptoError> {
     // (magic bytes detected) but the rest of the header is missing.
     let input_file = test_dir.join("data.txt");
     create_test_file(&input_file, "truncation test");
-    let empty_pass = SecretString::from("".to_string());
+    let empty_pass = "";
     recipient_auto(
         &input_file,
         &encrypt_dir,
         &public_key,
-        &empty_pass,
+        empty_pass,
         None,
         None,
         |_| {},
@@ -1593,7 +1592,7 @@ fn test_truncated_recipient_file() -> Result<(), CryptoError> {
         &encrypted_path,
         &decrypt_dir,
         &private_key_path,
-        &key_passphrase,
+        key_passphrase,
         None,
         None,
         |_| {},
@@ -1616,9 +1615,9 @@ fn test_passphrase_header_tamper_detection() -> Result<(), CryptoError> {
 
     create_test_file(&input_file, "Tamper detection test");
 
-    let passphrase = SecretString::from("tamper_pass".to_string());
+    let passphrase = "tamper_pass";
 
-    passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    passphrase_auto(&input_file, &encrypt_dir, passphrase, None, None, |_| {})?;
 
     // Flip one byte in the authenticated stream_nonce. The recipient
     // body still unwraps, but the header MAC no longer matches, so
@@ -1635,7 +1634,7 @@ fn test_passphrase_header_tamper_detection() -> Result<(), CryptoError> {
     let result = passphrase_auto(
         &encrypted_path,
         &decrypt_dir,
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -1663,17 +1662,17 @@ fn test_recipient_header_tamper_detection() -> Result<(), CryptoError> {
 
     create_test_file(&input_file, "Hybrid tamper test");
 
-    let key_passphrase = SecretString::from("tamper_key_pass".to_string());
-    generate_key_pair(&key_passphrase, &keys_dir, |_| {})?;
+    let key_passphrase = "tamper_key_pass";
+    generate_key_pair(key_passphrase, &keys_dir, |_| {})?;
 
     let pub_key_path = keys_dir.join("public.key");
-    let empty_pass = SecretString::from("".to_string());
+    let empty_pass = "";
 
     recipient_auto(
         &input_file,
         &encrypt_dir,
         &pub_key_path,
-        &empty_pass,
+        empty_pass,
         None,
         None,
         |_| {},
@@ -1698,7 +1697,7 @@ fn test_recipient_header_tamper_detection() -> Result<(), CryptoError> {
         &encrypted_path,
         &decrypt_dir,
         &private_key_path,
-        &key_passphrase,
+        key_passphrase,
         None,
         None,
         |_| {},
@@ -1733,9 +1732,9 @@ fn test_passphrase_prefix_byte_tamper_detected() -> Result<(), CryptoError> {
 
     create_test_file(&input_file, "Prefix tamper test");
 
-    let passphrase = SecretString::from("prefix_tamper_pass".to_string());
+    let passphrase = "prefix_tamper_pass";
 
-    passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    passphrase_auto(&input_file, &encrypt_dir, passphrase, None, None, |_| {})?;
 
     // Flip the version byte (offset 4 in the 12-byte prefix) so the
     // file claims an unsupported version. Readers must reject
@@ -1748,7 +1747,7 @@ fn test_passphrase_prefix_byte_tamper_detected() -> Result<(), CryptoError> {
     let result = passphrase_auto(
         &encrypted_path,
         &decrypt_dir,
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -1778,8 +1777,8 @@ fn test_non_ferrocrypt_fcr_file_can_be_encrypted() {
     let content = b"\xFF\xD8\xFF\xE0fake jpeg data padding!!";
     fs::write(&fake_file, content).unwrap();
 
-    let passphrase = SecretString::from("test".to_string());
-    let result = passphrase_auto(&fake_file, &encrypt_dir, &passphrase, None, None, |_| {});
+    let passphrase = "test";
+    let result = passphrase_auto(&fake_file, &encrypt_dir, passphrase, None, None, |_| {});
     assert!(
         result.is_ok(),
         "Expected encryption to succeed, got: {:?}",
@@ -1793,7 +1792,7 @@ fn test_non_ferrocrypt_fcr_file_can_be_encrypted() {
     let result = passphrase_auto(
         &encrypted_path,
         &decrypt_dir,
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -1817,18 +1816,18 @@ fn test_wrong_format_type_recipient_as_passphrase() -> Result<(), CryptoError> {
     fs::create_dir_all(&decrypt_dir)?;
 
     create_test_file(&input_file, "format type test");
-    let key_passphrase = SecretString::from("pass".to_string());
-    generate_key_pair(&key_passphrase, &keys_dir, |_| {})?;
+    let key_passphrase = "pass";
+    generate_key_pair(key_passphrase, &keys_dir, |_| {})?;
 
     // Encrypt as recipient (x25519)
     let pub_key_path = keys_dir.join("public.key");
-    let empty_pass = SecretString::from("".to_string());
+    let empty_pass = "";
 
     recipient_auto(
         &input_file,
         &encrypt_dir,
         &pub_key_path,
-        &empty_pass,
+        empty_pass,
         None,
         None,
         |_| {},
@@ -1836,11 +1835,11 @@ fn test_wrong_format_type_recipient_as_passphrase() -> Result<(), CryptoError> {
 
     // Try to decrypt a recipient `.fcr` file via the passphrase path — format type mismatch
     let encrypted_path = encrypt_dir.join("data.fcr");
-    let passphrase = SecretString::from("pass".to_string());
+    let passphrase = "pass";
     let result = passphrase_auto(
         &encrypted_path,
         &decrypt_dir,
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -1875,17 +1874,17 @@ fn test_recipient_empty_file() -> Result<(), CryptoError> {
     fs::create_dir_all(&decrypt_dir)?;
 
     create_test_file(&input_file, "");
-    let key_passphrase = SecretString::from("hybrid_empty".to_string());
-    generate_key_pair(&key_passphrase, &keys_dir, |_| {})?;
+    let key_passphrase = "hybrid_empty";
+    generate_key_pair(key_passphrase, &keys_dir, |_| {})?;
 
     let pub_key = keys_dir.join("public.key");
-    let empty_pass = SecretString::from("".to_string());
+    let empty_pass = "";
 
     recipient_auto(
         &input_file,
         &encrypt_dir,
         &pub_key,
-        &empty_pass,
+        empty_pass,
         None,
         None,
         |_| {},
@@ -1897,7 +1896,7 @@ fn test_recipient_empty_file() -> Result<(), CryptoError> {
         encrypt_dir.join("empty.fcr"),
         &decrypt_dir,
         &private_key_path,
-        &key_passphrase,
+        key_passphrase,
         None,
         None,
         |_| {},
@@ -1920,11 +1919,11 @@ fn test_two_encryptions_produce_different_output() -> Result<(), CryptoError> {
     fs::create_dir_all(&encrypt_dir_b)?;
 
     create_test_file(&input_file, "Same content encrypted twice");
-    let passphrase = SecretString::from("same_pass".to_string());
+    let passphrase = "same_pass";
 
-    passphrase_auto(&input_file, &encrypt_dir_a, &passphrase, None, None, |_| {})?;
+    passphrase_auto(&input_file, &encrypt_dir_a, passphrase, None, None, |_| {})?;
 
-    passphrase_auto(&input_file, &encrypt_dir_b, &passphrase, None, None, |_| {})?;
+    passphrase_auto(&input_file, &encrypt_dir_b, passphrase, None, None, |_| {})?;
 
     let file_a = fs::read(encrypt_dir_a.join("data.fcr"))?;
     let file_b = fs::read(encrypt_dir_b.join("data.fcr"))?;
@@ -1946,13 +1945,13 @@ fn test_passphrase_output_file_override() -> Result<(), CryptoError> {
     fs::create_dir_all(&decrypt_dir)?;
 
     create_test_file(&input_file, "custom output path test");
-    let passphrase = SecretString::from("test_password_123".to_string());
+    let passphrase = "test_password_123";
 
     let custom_output = encrypt_dir.join("custom_name.fcr");
     let result = passphrase_auto(
         &input_file,
         &encrypt_dir,
-        &passphrase,
+        passphrase,
         Some(custom_output.as_path()),
         None,
         |_| {},
@@ -1964,14 +1963,8 @@ fn test_passphrase_output_file_override() -> Result<(), CryptoError> {
     assert!(!encrypt_dir.join("data.fcr").exists());
 
     // Decrypt the custom-named file
-    let decrypt_result = passphrase_auto(
-        &custom_output,
-        &decrypt_dir,
-        &passphrase,
-        None,
-        None,
-        |_| {},
-    )?;
+    let decrypt_result =
+        passphrase_auto(&custom_output, &decrypt_dir, passphrase, None, None, |_| {})?;
 
     assert!(decrypt_result.exists());
     let content = fs::read_to_string(decrypt_dir.join("data.txt"))?;
@@ -1993,20 +1986,20 @@ fn test_recipient_output_file_override() -> Result<(), CryptoError> {
     fs::create_dir_all(&decrypt_dir)?;
 
     create_test_file(&input_file, "hybrid custom output test");
-    let passphrase = SecretString::from("key_pass_123".to_string());
+    let passphrase = "key_pass_123";
 
-    generate_key_pair(&passphrase, &key_dir, |_| {})?;
+    generate_key_pair(passphrase, &key_dir, |_| {})?;
 
     let pub_key = key_dir.join("public.key");
     let private_key_path = key_dir.join("private.key");
     let custom_output = encrypt_dir.join("my_vault.fcr");
-    let empty = SecretString::from("".to_string());
+    let empty = "";
 
     let result = recipient_auto(
         &input_file,
         &encrypt_dir,
         &pub_key,
-        &empty,
+        empty,
         Some(custom_output.as_path()),
         None,
         |_| {},
@@ -2021,7 +2014,7 @@ fn test_recipient_output_file_override() -> Result<(), CryptoError> {
         &custom_output,
         &decrypt_dir,
         &private_key_path,
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -2043,9 +2036,9 @@ fn test_output_file_none_uses_default_name() -> Result<(), CryptoError> {
     fs::create_dir_all(&encrypt_dir)?;
 
     create_test_file(&input_file, "default naming test");
-    let passphrase = SecretString::from("test_password_123".to_string());
+    let passphrase = "test_password_123";
 
-    passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    passphrase_auto(&input_file, &encrypt_dir, passphrase, None, None, |_| {})?;
 
     let expected = encrypt_dir.join(format!("report.{}", ENCRYPTED_EXTENSION));
     assert!(expected.exists());
@@ -2069,9 +2062,9 @@ fn test_passphrase_empty_file_rejected() -> Result<(), CryptoError> {
     // (enough for magic-byte detection) but no actual header payload.
     let input_file = test_dir.join("data.txt");
     create_test_file(&input_file, "payload");
-    let passphrase = SecretString::from("test".to_string());
+    let passphrase = "test";
 
-    passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    passphrase_auto(&input_file, &encrypt_dir, passphrase, None, None, |_| {})?;
 
     let encrypted_path = encrypt_dir.join("data.fcr");
     let data = fs::read(&encrypted_path)?;
@@ -2084,7 +2077,7 @@ fn test_passphrase_empty_file_rejected() -> Result<(), CryptoError> {
     let result = passphrase_auto(
         &encrypted_path,
         &decrypt_dir,
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -2104,8 +2097,8 @@ fn test_recipient_empty_file_rejected() -> Result<(), CryptoError> {
     fs::create_dir_all(&encrypt_dir)?;
     fs::create_dir_all(&decrypt_dir)?;
 
-    let key_pass = SecretString::from("kp".to_string());
-    generate_key_pair(&key_pass, &keys_dir, |_| {})?;
+    let key_pass = "kp";
+    generate_key_pair(key_pass, &keys_dir, |_| {})?;
 
     let public_key = keys_dir.join("public.key");
     let private_key_path = keys_dir.join("private.key");
@@ -2114,12 +2107,12 @@ fn test_recipient_empty_file_rejected() -> Result<(), CryptoError> {
     // detection routes to decrypt, which then fails on the empty payload.
     let input_file = test_dir.join("data.txt");
     create_test_file(&input_file, "payload");
-    let empty_pass = SecretString::from("".to_string());
+    let empty_pass = "";
     recipient_auto(
         &input_file,
         &encrypt_dir,
         &public_key,
-        &empty_pass,
+        empty_pass,
         None,
         None,
         |_| {},
@@ -2134,7 +2127,7 @@ fn test_recipient_empty_file_rejected() -> Result<(), CryptoError> {
         &encrypted_path,
         &decrypt_dir,
         &private_key_path,
-        &key_pass,
+        key_pass,
         None,
         None,
         |_| {},
@@ -2153,9 +2146,9 @@ fn test_passphrase_truncated_mid_header() -> Result<(), CryptoError> {
     fs::create_dir_all(&decrypt_dir)?;
 
     create_test_file(&input_file, "Truncation mid-header test");
-    let passphrase = SecretString::from("pass".to_string());
+    let passphrase = "pass";
 
-    passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    passphrase_auto(&input_file, &encrypt_dir, passphrase, None, None, |_| {})?;
 
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let data = fs::read(&encrypted_path)?;
@@ -2168,7 +2161,7 @@ fn test_passphrase_truncated_mid_header() -> Result<(), CryptoError> {
     let result = passphrase_auto(
         &encrypted_path,
         &decrypt_dir,
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -2187,9 +2180,9 @@ fn test_passphrase_oversized_ext_len() -> Result<(), CryptoError> {
     fs::create_dir_all(&decrypt_dir)?;
 
     create_test_file(&input_file, "Oversized ext_len test");
-    let passphrase = SecretString::from("pass".to_string());
+    let passphrase = "pass";
 
-    passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    passphrase_auto(&input_file, &encrypt_dir, passphrase, None, None, |_| {})?;
 
     // `ext_len` is the u32 at file offset 20: prefix(12) + header_flags(2)
     // + recipient_count(2) + recipient_entries_len(4). Raising it above
@@ -2204,7 +2197,7 @@ fn test_passphrase_oversized_ext_len() -> Result<(), CryptoError> {
     match passphrase_auto(
         &encrypted_path,
         &decrypt_dir,
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -2226,12 +2219,12 @@ fn test_recipient_truncated_mid_header() -> Result<(), CryptoError> {
     fs::create_dir_all(&encrypt_dir)?;
     fs::create_dir_all(&decrypt_dir)?;
 
-    let key_pass = SecretString::from("kp".to_string());
-    generate_key_pair(&key_pass, &keys_dir, |_| {})?;
+    let key_pass = "kp";
+    generate_key_pair(key_pass, &keys_dir, |_| {})?;
 
     let pub_key = keys_dir.join("public.key");
     let private_key_path = keys_dir.join("private.key");
-    let empty_pass = SecretString::from("".to_string());
+    let empty_pass = "";
 
     create_test_file(&input_file, "Hybrid truncation mid-header");
 
@@ -2239,7 +2232,7 @@ fn test_recipient_truncated_mid_header() -> Result<(), CryptoError> {
         &input_file,
         &encrypt_dir,
         &pub_key,
-        &empty_pass,
+        empty_pass,
         None,
         None,
         |_| {},
@@ -2257,7 +2250,7 @@ fn test_recipient_truncated_mid_header() -> Result<(), CryptoError> {
         &encrypted_path,
         &decrypt_dir,
         &private_key_path,
-        &key_pass,
+        key_pass,
         None,
         None,
         |_| {},
@@ -2278,12 +2271,12 @@ fn test_recipient_oversized_ext_len() -> Result<(), CryptoError> {
     fs::create_dir_all(&encrypt_dir)?;
     fs::create_dir_all(&decrypt_dir)?;
 
-    let key_pass = SecretString::from("kp".to_string());
-    generate_key_pair(&key_pass, &keys_dir, |_| {})?;
+    let key_pass = "kp";
+    generate_key_pair(key_pass, &keys_dir, |_| {})?;
 
     let pub_key = keys_dir.join("public.key");
     let private_key_path = keys_dir.join("private.key");
-    let empty_pass = SecretString::from("".to_string());
+    let empty_pass = "";
 
     create_test_file(&input_file, "Hybrid oversized ext_len");
 
@@ -2291,7 +2284,7 @@ fn test_recipient_oversized_ext_len() -> Result<(), CryptoError> {
         &input_file,
         &encrypt_dir,
         &pub_key,
-        &empty_pass,
+        empty_pass,
         None,
         None,
         |_| {},
@@ -2311,7 +2304,7 @@ fn test_recipient_oversized_ext_len() -> Result<(), CryptoError> {
         &encrypted_path,
         &decrypt_dir,
         &private_key_path,
-        &key_pass,
+        key_pass,
         None,
         None,
         |_| {},
@@ -2337,9 +2330,9 @@ fn test_passphrase_ciphertext_bit_flip_detected() -> Result<(), CryptoError> {
     fs::create_dir_all(&decrypt_dir)?;
 
     create_test_file(&input_file, "AEAD ciphertext integrity test");
-    let passphrase = SecretString::from("ct_flip_pass".to_string());
+    let passphrase = "ct_flip_pass";
 
-    passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    passphrase_auto(&input_file, &encrypt_dir, passphrase, None, None, |_| {})?;
 
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
@@ -2352,7 +2345,7 @@ fn test_passphrase_ciphertext_bit_flip_detected() -> Result<(), CryptoError> {
     let result = passphrase_auto(
         &encrypted_path,
         &decrypt_dir,
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -2376,12 +2369,12 @@ fn test_recipient_ciphertext_bit_flip_detected() -> Result<(), CryptoError> {
     fs::create_dir_all(&encrypt_dir)?;
     fs::create_dir_all(&decrypt_dir)?;
 
-    let key_pass = SecretString::from("ct_flip_key".to_string());
-    generate_key_pair(&key_pass, &keys_dir, |_| {})?;
+    let key_pass = "ct_flip_key";
+    generate_key_pair(key_pass, &keys_dir, |_| {})?;
 
     let pub_key = keys_dir.join("public.key");
     let private_key_path = keys_dir.join("private.key");
-    let empty_pass = SecretString::from("".to_string());
+    let empty_pass = "";
 
     create_test_file(&input_file, "Hybrid AEAD ciphertext integrity test");
 
@@ -2389,7 +2382,7 @@ fn test_recipient_ciphertext_bit_flip_detected() -> Result<(), CryptoError> {
         &input_file,
         &encrypt_dir,
         &pub_key,
-        &empty_pass,
+        empty_pass,
         None,
         None,
         |_| {},
@@ -2407,7 +2400,7 @@ fn test_recipient_ciphertext_bit_flip_detected() -> Result<(), CryptoError> {
         &encrypted_path,
         &decrypt_dir,
         &private_key_path,
-        &key_pass,
+        key_pass,
         None,
         None,
         |_| {},
@@ -2432,9 +2425,9 @@ fn test_passphrase_ciphertext_truncation_detected() -> Result<(), CryptoError> {
     // Use enough data to span multiple 64 KiB chunks
     let content = "A".repeat(128 * 1024);
     create_test_file(&input_file, &content);
-    let passphrase = SecretString::from("trunc_pass".to_string());
+    let passphrase = "trunc_pass";
 
-    passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    passphrase_auto(&input_file, &encrypt_dir, passphrase, None, None, |_| {})?;
 
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let data = fs::read(&encrypted_path)?;
@@ -2446,7 +2439,7 @@ fn test_passphrase_ciphertext_truncation_detected() -> Result<(), CryptoError> {
     let result = passphrase_auto(
         &encrypted_path,
         &decrypt_dir,
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -2476,9 +2469,9 @@ fn test_passphrase_ciphertext_appended_bytes_detected() -> Result<(), CryptoErro
     fs::create_dir_all(&decrypt_dir)?;
 
     create_test_file(&input_file, "Append detection test");
-    let passphrase = SecretString::from("append_pass".to_string());
+    let passphrase = "append_pass";
 
-    passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    passphrase_auto(&input_file, &encrypt_dir, passphrase, None, None, |_| {})?;
 
     let encrypted_path = encrypt_dir.join("secret.fcr");
     let mut data = fs::read(&encrypted_path)?;
@@ -2490,7 +2483,7 @@ fn test_passphrase_ciphertext_appended_bytes_detected() -> Result<(), CryptoErro
     let result = passphrase_auto(
         &encrypted_path,
         &decrypt_dir,
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -2505,8 +2498,8 @@ fn test_public_key_fingerprint() -> Result<(), CryptoError> {
     let keys_dir = test_dir.join("keys");
     fs::create_dir_all(&keys_dir)?;
 
-    let passphrase = SecretString::from("fp_test_pass".to_string());
-    generate_key_pair(&passphrase, &keys_dir, |_| {})?;
+    let passphrase = "fp_test_pass";
+    generate_key_pair(passphrase, &keys_dir, |_| {})?;
 
     let pub_key = keys_dir.join("public.key");
     let fp = PublicKey::from_key_file(&pub_key).fingerprint()?;
@@ -2537,9 +2530,9 @@ fn test_different_keys_different_fingerprints() -> Result<(), CryptoError> {
     fs::create_dir_all(&keys_a)?;
     fs::create_dir_all(&keys_b)?;
 
-    let passphrase = SecretString::from("fp_diff_pass".to_string());
-    generate_key_pair(&passphrase, &keys_a, |_| {})?;
-    generate_key_pair(&passphrase, &keys_b, |_| {})?;
+    let passphrase = "fp_diff_pass";
+    generate_key_pair(passphrase, &keys_a, |_| {})?;
+    generate_key_pair(passphrase, &keys_b, |_| {})?;
 
     let fp_a = PublicKey::from_key_file(keys_a.join("public.key")).fingerprint()?;
     let fp_b = PublicKey::from_key_file(keys_b.join("public.key")).fingerprint()?;
@@ -2558,8 +2551,8 @@ fn test_public_key_validate() -> Result<(), CryptoError> {
     let keys_dir = test_dir.join("keys");
     fs::create_dir_all(&keys_dir)?;
 
-    let passphrase = SecretString::from("vp".to_string());
-    generate_key_pair(&passphrase, &keys_dir, |_| {})?;
+    let passphrase = "vp";
+    generate_key_pair(passphrase, &keys_dir, |_| {})?;
 
     // Valid file: validate passes.
     PublicKey::from_key_file(keys_dir.join("public.key")).validate()?;
@@ -2597,8 +2590,8 @@ fn test_public_key_from_str_round_trip() -> Result<(), CryptoError> {
     let keys_dir = test_dir.join("keys");
     fs::create_dir_all(&keys_dir)?;
 
-    let passphrase = SecretString::from("fs".to_string());
-    generate_key_pair(&passphrase, &keys_dir, |_| {})?;
+    let passphrase = "fs";
+    generate_key_pair(passphrase, &keys_dir, |_| {})?;
 
     let encoded = PublicKey::from_key_file(keys_dir.join("public.key")).to_recipient_string()?;
     let parsed: PublicKey = encoded
@@ -2625,8 +2618,8 @@ fn test_passphrase_encrypt_cleans_up_on_failure() -> Result<(), CryptoError> {
     create_test_file(&real_file, "target content");
     std::os::unix::fs::symlink(&real_file, &symlink_path).unwrap();
 
-    let passphrase = SecretString::from("cleanup_pass".to_string());
-    let result = passphrase_auto(&symlink_path, &encrypt_dir, &passphrase, None, None, |_| {});
+    let passphrase = "cleanup_pass";
+    let result = passphrase_auto(&symlink_path, &encrypt_dir, passphrase, None, None, |_| {});
     assert!(result.is_err());
 
     let would_be_output = encrypt_dir.join(format!("link.{}", ENCRYPTED_EXTENSION));
@@ -2651,14 +2644,14 @@ fn test_recipient_encrypt_cleans_up_on_failure() -> Result<(), CryptoError> {
     create_test_file(&real_file, "target content");
     std::os::unix::fs::symlink(&real_file, &symlink_path).unwrap();
 
-    let key_pass = SecretString::from("cleanup_key".to_string());
-    generate_key_pair(&key_pass, &keys_dir, |_| {})?;
+    let key_pass = "cleanup_key";
+    generate_key_pair(key_pass, &keys_dir, |_| {})?;
 
     let result = recipient_auto(
         &symlink_path,
         &encrypt_dir,
         keys_dir.join("public.key"),
-        &key_pass,
+        key_pass,
         None,
         None,
         |_| {},
@@ -2689,8 +2682,8 @@ fn test_passphrase_decrypt_marks_incomplete_file() -> Result<(), CryptoError> {
     let big_data: Vec<u8> = (0..204_800u32).map(|i| (i % 256) as u8).collect();
     fs::write(&input_file, &big_data)?;
 
-    let passphrase = SecretString::from("incomplete_pass".to_string());
-    passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    let passphrase = "incomplete_pass";
+    passphrase_auto(&input_file, &encrypt_dir, passphrase, None, None, |_| {})?;
 
     let encrypted_path = encrypt_dir.join("bigfile.fcr");
     let mut data = fs::read(&encrypted_path)?;
@@ -2704,7 +2697,7 @@ fn test_passphrase_decrypt_marks_incomplete_file() -> Result<(), CryptoError> {
     };
     let result = decryptor
         .incomplete_output_policy(IncompleteOutputPolicy::RetainOnError)
-        .decrypt(passphrase, &decrypt_dir, |_| {});
+        .decrypt(Passphrase::new(passphrase), &decrypt_dir, |_| {});
     assert!(result.is_err());
 
     let incomplete_path = decrypt_dir.join("bigfile.bin.incomplete");
@@ -2735,8 +2728,8 @@ fn test_passphrase_decrypt_marks_incomplete_directory() -> Result<(), CryptoErro
     let big_data: Vec<u8> = (0..204_800u32).map(|i| (i % 256) as u8).collect();
     fs::write(input_dir.join("bigfile.bin"), &big_data)?;
 
-    let passphrase = SecretString::from("incomplete_dir_pass".to_string());
-    passphrase_auto(&input_dir, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    let passphrase = "incomplete_dir_pass";
+    passphrase_auto(&input_dir, &encrypt_dir, passphrase, None, None, |_| {})?;
 
     let encrypted_path = encrypt_dir.join("mydir.fcr");
     let mut data = fs::read(&encrypted_path)?;
@@ -2749,7 +2742,7 @@ fn test_passphrase_decrypt_marks_incomplete_directory() -> Result<(), CryptoErro
     };
     let result = decryptor
         .incomplete_output_policy(IncompleteOutputPolicy::RetainOnError)
-        .decrypt(passphrase, &decrypt_dir, |_| {});
+        .decrypt(Passphrase::new(passphrase), &decrypt_dir, |_| {});
     assert!(result.is_err());
 
     let incomplete_path = decrypt_dir.join("mydir.incomplete");
@@ -2773,13 +2766,13 @@ fn test_successful_decrypt_produces_final_name_not_incomplete() -> Result<(), Cr
     fs::create_dir_all(&decrypt_dir)?;
     fs::write(&input_file, "clean decryption")?;
 
-    let passphrase = SecretString::from("final_name_pass".to_string());
-    passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    let passphrase = "final_name_pass";
+    passphrase_auto(&input_file, &encrypt_dir, passphrase, None, None, |_| {})?;
 
     let output = passphrase_auto(
         encrypt_dir.join("payload.fcr"),
         &decrypt_dir,
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -2801,8 +2794,8 @@ fn test_existing_incomplete_blocks_retry() -> Result<(), CryptoError> {
     fs::create_dir_all(&decrypt_dir)?;
     fs::write(&input_file, "some content")?;
 
-    let passphrase = SecretString::from("retry_pass".to_string());
-    passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    let passphrase = "retry_pass";
+    passphrase_auto(&input_file, &encrypt_dir, passphrase, None, None, |_| {})?;
 
     // Simulate leftover .incomplete from a previous failed attempt
     fs::write(decrypt_dir.join("data.txt.incomplete"), "stale partial")?;
@@ -2810,7 +2803,7 @@ fn test_existing_incomplete_blocks_retry() -> Result<(), CryptoError> {
     let result = passphrase_auto(
         encrypt_dir.join("data.fcr"),
         &decrypt_dir,
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -2841,8 +2834,8 @@ fn test_encrypt_produces_final_name_not_incomplete() -> Result<(), CryptoError> 
     fs::create_dir_all(&encrypt_dir)?;
     fs::write(&input_file, "secret data")?;
 
-    let passphrase = SecretString::from("enc_final".to_string());
-    let output = passphrase_auto(&input_file, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    let passphrase = "enc_final";
+    let output = passphrase_auto(&input_file, &encrypt_dir, passphrase, None, None, |_| {})?;
 
     assert!(output.exists());
     assert_eq!(output, encrypt_dir.join("secret.fcr"));
@@ -2854,13 +2847,13 @@ fn test_encrypt_produces_final_name_not_incomplete() -> Result<(), CryptoError> 
 #[test]
 fn test_keygen_no_partial_state_on_existing_key() -> Result<(), CryptoError> {
     let test_dir = setup_test_dir("keygen_no_partial");
-    let passphrase = SecretString::from("atomic_pass".to_string());
+    let passphrase = "atomic_pass";
 
-    generate_key_pair(&passphrase, &test_dir, |_| {})?;
+    generate_key_pair(passphrase, &test_dir, |_| {})?;
     let private_before = fs::read(test_dir.join("private.key"))?;
     let public_before = fs::read(test_dir.join("public.key"))?;
 
-    let result = generate_key_pair(&passphrase, &test_dir, |_| {});
+    let result = generate_key_pair(passphrase, &test_dir, |_| {});
     assert!(
         result.is_err(),
         "keygen must refuse to overwrite existing keys"
@@ -2898,17 +2891,17 @@ fn test_private_key_salt_tamper_rejected() -> Result<(), CryptoError> {
     fs::create_dir_all(&encrypt_dir)?;
     fs::create_dir_all(&decrypt_dir)?;
 
-    let passphrase = SecretString::from("aad_salt_pass".to_string());
-    generate_key_pair(&passphrase, &keys_dir, |_| {})?;
+    let passphrase = "aad_salt_pass";
+    generate_key_pair(passphrase, &keys_dir, |_| {})?;
 
     let input_file = test_dir.join("data.txt");
     create_test_file(&input_file, "confidential");
-    let empty = SecretString::from("".to_string());
+    let empty = "";
     recipient_auto(
         &input_file,
         &encrypt_dir,
         keys_dir.join("public.key"),
-        &empty,
+        empty,
         None,
         None,
         |_| {},
@@ -2930,7 +2923,7 @@ fn test_private_key_salt_tamper_rejected() -> Result<(), CryptoError> {
         encrypt_dir.join("data.fcr"),
         &decrypt_dir,
         &private_key_path,
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -2954,8 +2947,8 @@ fn test_private_key_ext_len_tamper_rejected() -> Result<(), CryptoError> {
     let keys_dir = test_dir.join("keys");
     fs::create_dir_all(&keys_dir)?;
 
-    let passphrase = SecretString::from("ext_len_pass".to_string());
-    generate_key_pair(&passphrase, &keys_dir, |_| {})?;
+    let passphrase = "ext_len_pass";
+    generate_key_pair(passphrase, &keys_dir, |_| {})?;
 
     // Flipping a bit in the `ext_len` field (u32 BE at bytes 14..=17)
     // of the `private.key` cleartext header makes the declared length
@@ -3023,8 +3016,8 @@ fn test_probe_valid_passphrase_file() -> Result<(), CryptoError> {
     let dir = setup_test_dir("probe_passphrase");
     let input = dir.join("data.txt");
     fs::write(&input, "payload")?;
-    let pass = SecretString::from("pw".to_string());
-    let encrypted = passphrase_auto(&input, &dir, &pass, None, None, |_| {})?;
+    let pass = "pw";
+    let encrypted = passphrase_auto(&input, &dir, pass, None, None, |_| {})?;
     let mode = probe_recipient_mode(&encrypted)?;
     assert_eq!(
         mode,
@@ -3082,8 +3075,8 @@ fn test_detect_corrupted_fcr_not_silently_encrypted() {
     prefix.extend_from_slice(&0u16.to_be_bytes()); // prefix_flags = 0
     prefix.extend_from_slice(&0u32.to_be_bytes()); // header_len = 0 (truncated)
     fs::write(&input, &prefix).unwrap();
-    let pass = SecretString::from("pw".to_string());
-    let result = passphrase_auto(&input, &dir, &pass, None, None, |_| {});
+    let pass = "pw";
+    let result = passphrase_auto(&input, &dir, pass, None, None, |_| {});
     assert!(
         matches!(
             result,
@@ -3102,8 +3095,8 @@ fn test_detect_corrupted_fcr_not_silently_encrypted() {
 fn test_recipient_round_trip() -> Result<(), CryptoError> {
     let test_dir = setup_test_dir("recipient_roundtrip");
     let keys_dir = test_dir.join("keys");
-    let passphrase = SecretString::from("rp".to_string());
-    generate_key_pair(&passphrase, &keys_dir, |_| {})?;
+    let passphrase = "rp";
+    generate_key_pair(passphrase, &keys_dir, |_| {})?;
 
     let encoded = PublicKey::from_key_file(keys_dir.join("public.key")).to_recipient_string()?;
     assert!(encoded.starts_with("fcr1"));
@@ -3125,8 +3118,8 @@ fn test_recipient_malformed_bech32_rejected() {
 fn test_recipient_uppercase_rejected() -> Result<(), CryptoError> {
     let test_dir = setup_test_dir("recipient_uppercase");
     let keys_dir = test_dir.join("keys");
-    let passphrase = SecretString::from("uc".to_string());
-    generate_key_pair(&passphrase, &keys_dir, |_| {})?;
+    let passphrase = "uc";
+    generate_key_pair(passphrase, &keys_dir, |_| {})?;
 
     let encoded = PublicKey::from_key_file(keys_dir.join("public.key")).to_recipient_string()?;
     let uppercased = encoded.to_uppercase();

@@ -20,7 +20,7 @@
 //! enforcement is a header-level concern and lives in the recipient
 //! list parser, not here.
 
-use secrecy::{ExposeSecret, SecretString};
+use crate::passphrase::Passphrase;
 
 use crate::CryptoError;
 use crate::ProgressEvent;
@@ -58,11 +58,11 @@ const WRAPPED_FILE_KEY_OFFSET: usize = WRAP_NONCE_OFFSET + WRAP_NONCE_SIZE;
 /// not emitted and the corresponding error is returned.
 pub(crate) fn wrap(
     file_key: &FileKey,
-    passphrase: &SecretString,
+    passphrase: &Passphrase,
     kdf_params: &KdfParams,
     on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<[u8; BODY_LENGTH], CryptoError> {
-    check_passphrase_len(passphrase.expose_secret().as_bytes())?;
+    check_passphrase_len(passphrase.expose().as_bytes())?;
     // Validate before emitting the progress event. Public encryption
     // already checks these parameters, but this function also serves
     // crate-internal callers directly.
@@ -103,11 +103,11 @@ pub(crate) fn wrap(
 /// caller's `kdf_limit` is rejected with no event emitted.
 pub(crate) fn unwrap(
     body: &[u8; BODY_LENGTH],
-    passphrase: &SecretString,
+    passphrase: &Passphrase,
     kdf_limit: Option<&KdfLimit>,
     on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<FileKey, CryptoError> {
-    check_passphrase_len(passphrase.expose_secret().as_bytes())?;
+    check_passphrase_len(passphrase.expose().as_bytes())?;
     let mut argon2_salt = [0u8; ARGON2_SALT_SIZE];
     argon2_salt.copy_from_slice(&body[SALT_OFFSET..SALT_OFFSET + ARGON2_SALT_SIZE]);
 
@@ -137,7 +137,7 @@ pub(crate) fn unwrap(
 /// passphrase and carries the KDF parameters plus the writer-side
 /// KDF resource policy.
 pub(crate) struct PassphraseRecipient<'a> {
-    pub passphrase: &'a SecretString,
+    pub passphrase: &'a Passphrase,
     pub kdf_params: KdfParams,
     pub kdf_limit: KdfLimit,
 }
@@ -174,7 +174,7 @@ impl<'a> crate::protocol::RecipientScheme for PassphraseRecipient<'a> {
 
 /// Decrypt-side handle for the `argon2id` recipient.
 pub(crate) struct PassphraseCredential<'a> {
-    pub passphrase: &'a SecretString,
+    pub passphrase: &'a Passphrase,
     pub kdf_limit: Option<&'a KdfLimit>,
 }
 
@@ -214,8 +214,8 @@ mod tests {
     use super::*;
     use crate::crypto::keys::FILE_KEY_SIZE;
 
-    fn passphrase(s: &str) -> SecretString {
-        SecretString::from(s.to_string())
+    fn passphrase(s: &str) -> Passphrase {
+        Passphrase::new(s)
     }
 
     /// No-op `on_event` for tests that aren't asserting on emission.

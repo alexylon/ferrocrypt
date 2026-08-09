@@ -16,7 +16,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ferrocrypt::secrecy::SecretString;
+use ferrocrypt::Passphrase;
 use ferrocrypt::{Decryptor, PrivateKey};
 
 /// Passphrase every frozen fixture uses (both the passphrase `.fcr` files and
@@ -35,8 +35,8 @@ fn frozen_root(version: &str) -> PathBuf {
         .join(version)
 }
 
-fn passphrase() -> SecretString {
-    SecretString::from(FIXTURE_PASSPHRASE.to_string())
+fn passphrase() -> Passphrase {
+    Passphrase::new(FIXTURE_PASSPHRASE)
 }
 
 fn passphrase_decrypt(fcr: PathBuf, out: &Path) -> PathBuf {

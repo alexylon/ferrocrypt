@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ferrocrypt::secrecy::SecretString;
+use ferrocrypt::Passphrase;
 use ferrocrypt::{Decryptor, Encryptor, PrivateKey, PublicKey};
 use ferrocrypt_test_support::{
     fast_keypair_generator, per_process_workspace, remove_per_process_workspace,
@@ -64,8 +64,8 @@ impl Rng {
     }
 }
 
-fn pass() -> SecretString {
-    SecretString::from(PASSPHRASE.to_string())
+fn pass() -> Passphrase {
+    Passphrase::new(PASSPHRASE)
 }
 
 struct KeyPaths {

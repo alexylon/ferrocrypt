@@ -10,7 +10,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ferrocrypt::secrecy::SecretString;
+use ferrocrypt::Passphrase;
 use ferrocrypt::{
     CryptoError, Decryptor, Encryptor, FormatDefect, HeaderReadLimits, InvalidKdfParams, KdfLimit,
     KdfParams, KeyPairGenerator, KeyReadLimits, PrivateKey, PublicKey, probe_recipient_mode,
@@ -25,7 +25,7 @@ use ferrocrypt_test_support::{
 /// builder so each call returns in milliseconds rather than seconds.
 fn generate_key_pair(
     output_dir: impl AsRef<Path>,
-    passphrase: SecretString,
+    passphrase: Passphrase,
     on_event: impl Fn(&ferrocrypt::ProgressEvent),
 ) -> Result<ferrocrypt::KeyGenOutcome, CryptoError> {
     fast_keypair_generator(passphrase).write(output_dir, on_event)
@@ -56,8 +56,8 @@ fn fresh_workspace(name: &str) -> PathBuf {
     dir
 }
 
-fn pass() -> SecretString {
-    SecretString::from(PASSPHRASE.to_string())
+fn pass() -> Passphrase {
+    Passphrase::new(PASSPHRASE)
 }
 
 /// Returns sorted, `/`-separated paths for every entry beneath `root`.
@@ -487,7 +487,7 @@ fn private_key_decrypt_uses_the_validated_file_not_a_swapped_replacement() {
 fn encryptor_passphrase_rejects_empty_before_input_check() {
     let work = fresh_workspace("empty_pass_before_input");
     let missing = work.join("does-not-exist.txt");
-    let err = fast_passphrase_encryptor(SecretString::from(String::new()))
+    let err = fast_passphrase_encryptor(Passphrase::new(String::new()))
         .write(&missing, &work, |_| {})
         .unwrap_err();
     match err {
@@ -499,13 +499,13 @@ fn encryptor_passphrase_rejects_empty_before_input_check() {
     }
 }
 
-/// Pins the secrecy-redaction invariant on the new API. `Encryptor`
-/// embeds a `SecretString` for the passphrase variant; this test fails
-/// fast if `SecretString` is ever swapped for a raw `String`.
+/// Pins the passphrase-redaction invariant on the new API. `Encryptor`
+/// embeds a `Passphrase` for the passphrase variant; this test fails
+/// fast if `Passphrase` is ever swapped for a raw `String`.
 #[test]
 fn encryptor_debug_does_not_leak_passphrase() {
     const SECRET: &str = "totally-secret-passphrase-9F2";
-    let encryptor = fast_passphrase_encryptor(SecretString::from(SECRET.to_string()));
+    let encryptor = fast_passphrase_encryptor(Passphrase::new(SECRET));
     let rendered = format!("{encryptor:?}");
     assert!(
         !rendered.contains(SECRET),

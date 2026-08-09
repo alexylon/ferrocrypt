@@ -38,11 +38,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::passphrase::Passphrase;
 use chacha20poly1305::{
     XChaCha20Poly1305,
     aead::{KeyInit as AeadKeyInit, stream},
 };
-use secrecy::SecretString;
 
 use crate::crypto::kdf::{ARGON2_SALT_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams};
 use crate::crypto::keys::{DerivedSubkeys, FileKey, derive_subkeys, random_bytes};
@@ -168,8 +168,8 @@ fn suite_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("testvectors/suite")
 }
 
-fn suite_passphrase() -> SecretString {
-    SecretString::from(SUITE_PASSPHRASE.to_string())
+fn suite_passphrase() -> Passphrase {
+    Passphrase::new(SUITE_PASSPHRASE)
 }
 
 fn passphrase_credential(literal: &str) -> String {

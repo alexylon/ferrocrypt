@@ -3,7 +3,7 @@
 
 slint::include_modules!();
 
-use ferrocrypt::secrecy::{ExposeSecret, SecretString};
+use ferrocrypt::Passphrase;
 use ferrocrypt::{
     CryptoError, Decryptor, Encryptor, KdfParams, KeyPairGenerator, PRIVATE_KEY_FILENAME,
     PUBLIC_KEY_FILENAME, PrivateKey, ProgressEvent, PublicKey, UnauthenticatedRecipientMode,
@@ -61,7 +61,7 @@ struct Operation<'a> {
 /// testable without the UI event loop.
 fn run_operation(
     op: Operation<'_>,
-    passphrase: SecretString,
+    passphrase: Passphrase,
     on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<PathBuf, CryptoError> {
     let Operation {
@@ -264,8 +264,9 @@ fn main() {
         let weak = app.as_weak();
         move || {
             if let Some(app) = weak.upgrade() {
-                let pwd = SecretString::from(app.get_password().to_string());
-                app.set_password_strength(password_scorer::password_strength(pwd.expose_secret()));
+                app.set_password_strength(password_scorer::password_strength(
+                    app.get_password().as_str(),
+                ));
             }
         }
     });
@@ -282,7 +283,7 @@ fn main() {
             // even on the recipient-encrypt path where the library doesn't
             // consume them, and even if the worker panics before the
             // crypto call runs.
-            let pwd = SecretString::from(app.get_password().to_string());
+            let pwd = Passphrase::new(app.get_password().to_string());
             let keypath = app.get_key_path().to_string();
             let keygen_outdir = app.get_keygen_output_dir().to_string();
 
@@ -783,7 +784,7 @@ mod tests {
     #[test]
     fn run_operation_routes_every_mode() {
         let noop = |_: &ProgressEvent| {};
-        let pass = SecretString::from("desktop-dispatch-test-passphrase".to_string());
+        let pass = "desktop-dispatch-test-passphrase";
         let dir = fs_matrix_tempdir().expect("tempdir");
         let root = dir.path();
         let payload: &[u8] = b"desktop dispatch payload";
@@ -802,7 +803,7 @@ mod tests {
                     key_path: key,
                     kdf_params: Some(fast_kdf_params()),
                 },
-                pass.clone(),
+                Passphrase::new(pass),
                 &noop,
             )
         };
@@ -869,7 +870,7 @@ mod tests {
     #[test]
     fn detect_mode_from_path_maps_every_probe_outcome() {
         let noop = |_: &ProgressEvent| {};
-        let pass = SecretString::from("desktop-detect-passphrase".to_string());
+        let pass = "desktop-detect-passphrase";
         let dir = fs_matrix_tempdir().expect("tempdir");
         let root = dir.path();
         let input = root.join("secret.txt");
@@ -886,7 +887,7 @@ mod tests {
                     key_path: key,
                     kdf_params: Some(fast_kdf_params()),
                 },
-                pass.clone(),
+                Passphrase::new(pass),
                 &noop,
             )
         };
@@ -947,7 +948,7 @@ mod tests {
     #[test]
     fn run_operation_save_as_writes_exact_path_and_rejects_existing() {
         let noop = |_: &ProgressEvent| {};
-        let pass = SecretString::from("desktop-save-as-passphrase".to_string());
+        let pass = "desktop-save-as-passphrase";
         let dir = fs_matrix_tempdir().expect("tempdir");
         let root = dir.path();
         let payload: &[u8] = b"desktop save-as payload";
@@ -969,7 +970,7 @@ mod tests {
                 key_path: dummy_key,
                 kdf_params: Some(fast_kdf_params()),
             },
-            pass.clone(),
+            Passphrase::new(pass),
             &noop,
         )
         .expect("save_as encrypt");
@@ -990,7 +991,7 @@ mod tests {
                 key_path: dummy_key,
                 kdf_params: Some(fast_kdf_params()),
             },
-            pass.clone(),
+            Passphrase::new(pass),
             &noop,
         )
         .expect("decrypt save_as output");
@@ -1010,7 +1011,7 @@ mod tests {
                 key_path: dummy_key,
                 kdf_params: Some(fast_kdf_params()),
             },
-            pass.clone(),
+            Passphrase::new(pass),
             &noop,
         )
         .expect_err("save_as onto an existing file must be rejected");

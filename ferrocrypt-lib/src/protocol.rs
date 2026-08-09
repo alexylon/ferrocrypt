@@ -615,7 +615,7 @@ fn failure_for(
 /// byte-length bound is enforced inside the sealing path
 /// (`crypto::kdf::check_passphrase_len`) before Argon2id runs.
 pub(crate) fn generate_key_pair(
-    passphrase: &secrecy::SecretString,
+    passphrase: &crate::passphrase::Passphrase,
     kdf_params: &crate::crypto::kdf::KdfParams,
     kdf_limit: Option<&crate::crypto::kdf::KdfLimit>,
     output_dir: &Path,
@@ -812,10 +812,10 @@ mod tests {
     use crate::key::files::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};
     use crate::key::limits::KeyReadLimits;
     use crate::key::public::read_public_key;
+    use crate::passphrase::Passphrase;
     use crate::recipient::entry::RECIPIENT_FLAG_CRITICAL;
     use crate::recipient::native::{argon2id, x25519};
     use crate::recipient::policy::NativeRecipientType;
-    use secrecy::SecretString;
 
     /// Builds a complete `.fcr` file whose authenticated plaintext payload is
     /// exactly `payload`, without adding an FCA archive. Tests use it to create
@@ -904,8 +904,8 @@ mod tests {
         keys_dir: &Path,
         label: &str,
         pass: &str,
-    ) -> Result<([u8; 32], PathBuf, SecretString), CryptoError> {
-        let pass = SecretString::from(pass.to_string());
+    ) -> Result<([u8; 32], PathBuf, Passphrase), CryptoError> {
+        let pass = Passphrase::new(pass);
         let dir = keys_dir.join(label);
         fs::create_dir_all(&dir)?;
         let (private_key_path, public_key_path, _fingerprint) = generate_key_pair(
@@ -927,7 +927,7 @@ mod tests {
         fcr: &Path,
         dec_dir: &Path,
         private_key_path: &Path,
-        pass: &SecretString,
+        pass: &Passphrase,
     ) -> Result<PathBuf, CryptoError> {
         let private_key_bytes = x25519::open_x25519_private_key(
             private_key_path,
@@ -1514,7 +1514,7 @@ mod tests {
     /// written. The orchestrator catches this before any KDF runs.
     #[test]
     fn encrypt_rejects_multi_passphrase_recipient_list() -> Result<(), CryptoError> {
-        let pass = SecretString::from("pass".to_string());
+        let pass = Passphrase::new("pass");
         let kdf_params = crate::crypto::kdf::KdfParams::test_fast_default();
         let r1 = argon2id::PassphraseRecipient {
             passphrase: &pass,
@@ -1614,7 +1614,7 @@ mod tests {
 
         let dec_dir = tmp.path().join("decrypted");
         fs::create_dir_all(&dec_dir)?;
-        let pass = SecretString::from("doesn't-matter".to_string());
+        let pass = Passphrase::new("doesn't-matter");
         let credential = argon2id::PassphraseCredential {
             passphrase: &pass,
             kdf_limit: None,
@@ -1720,7 +1720,7 @@ mod tests {
     fn encrypt_rejects_kdf_memory_above_write_policy() -> Result<(), CryptoError> {
         use crate::crypto::kdf::{KdfLimit, KdfParams};
 
-        let pass = SecretString::from("pass".to_string());
+        let pass = Passphrase::new("pass");
         let recipient = argon2id::PassphraseRecipient {
             passphrase: &pass,
             kdf_params: KdfParams {
@@ -1769,7 +1769,7 @@ mod tests {
 
         let tmp = tempfile::TempDir::new().unwrap();
         let keys_dir = tmp.path().join("keys");
-        let pass = SecretString::from("pass".to_string());
+        let pass = Passphrase::new("pass");
         let weak = KdfParams {
             mem_cost: KdfParams::MIN_WRITE_MEM_COST - 1,
             time_cost: 1,

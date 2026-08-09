@@ -31,7 +31,7 @@
 
 #![forbid(unsafe_code)]
 
-use ferrocrypt::secrecy::SecretString;
+use ferrocrypt::Passphrase;
 use ferrocrypt::{Encryptor, KdfParams, KeyPairGenerator};
 
 /// Argon2id memory cost (KiB) for workspace-internal test-fast runs.
@@ -78,7 +78,7 @@ pub fn fast_kdf_params() -> KdfParams {
 /// finalise with `.write(...)`.
 ///
 /// **Production code MUST NOT call this function.**
-pub fn fast_passphrase_encryptor(passphrase: SecretString) -> Encryptor {
+pub fn fast_passphrase_encryptor(passphrase: Passphrase) -> Encryptor {
     Encryptor::with_passphrase(passphrase).kdf_params(fast_kdf_params())
 }
 
@@ -87,7 +87,7 @@ pub fn fast_passphrase_encryptor(passphrase: SecretString) -> Encryptor {
 /// `.write(output_dir, on_event)`.
 ///
 /// **Production code MUST NOT call this function.**
-pub fn fast_keypair_generator(passphrase: SecretString) -> KeyPairGenerator {
+pub fn fast_keypair_generator(passphrase: Passphrase) -> KeyPairGenerator {
     KeyPairGenerator::with_passphrase(passphrase).kdf_params(fast_kdf_params())
 }
 

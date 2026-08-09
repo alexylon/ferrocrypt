@@ -1,6 +1,6 @@
 use dioxus::desktop::{Config, WindowBuilder};
 use dioxus::prelude::*;
-use ferrocrypt::secrecy::SecretString;
+use ferrocrypt::Passphrase;
 use ferrocrypt::{generate_asymmetric_key_pair, hybrid_encryption, symmetric_encryption};
 use manganis::Asset;
 use rfd::FileDialog;
@@ -151,15 +151,15 @@ fn App() -> Element {
 
             let result = match mode() {
                 Mode::SymmetricEncrypt | Mode::SymmetricDecrypt => {
-                    let pwd = SecretString::from(password());
+                    let pwd = Passphrase::new(password());
                     symmetric_encryption(&inpath(), &outpath(), &pwd, None, |_| {})
                 }
                 Mode::HybridEncrypt | Mode::HybridDecrypt => {
-                    let pwd = SecretString::from(password());
+                    let pwd = Passphrase::new(password());
                     hybrid_encryption(&inpath(), &outpath(), &keypath(), &pwd, None, |_| {})
                 }
                 Mode::GenerateKeyPair => {
-                    let pwd = SecretString::from(password());
+                    let pwd = Passphrase::new(password());
                     generate_asymmetric_key_pair(4096, &pwd, &outpath(), |_| {})
                 }
             };

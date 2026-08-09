@@ -31,7 +31,7 @@
 
 use std::path::{Path, PathBuf};
 
-use secrecy::{ExposeSecret as _, SecretString};
+use crate::passphrase::Passphrase;
 
 use crate::archive::{self, ArchiveLimits, IncompleteOutputPolicy};
 use crate::container::{self, HeaderReadLimits};
@@ -69,8 +69,8 @@ use crate::{
 /// Passphrase:
 ///
 /// ```no_run
-/// use ferrocrypt::{Encryptor, secrecy::SecretString};
-/// let pass = SecretString::from("correct horse battery staple".to_string());
+/// use ferrocrypt::{Encryptor, Passphrase};
+/// let pass = Passphrase::new("correct horse battery staple");
 /// let outcome = Encryptor::with_passphrase(pass)
 ///     .write("./payload", "./out", |ev| eprintln!("{ev}"))?;
 /// println!("Encrypted to {}", outcome.output_path.display());
@@ -110,7 +110,7 @@ pub struct Encryptor {
 
 #[derive(Debug)]
 enum EncryptorState {
-    Passphrase(SecretString),
+    Passphrase(Passphrase),
     Recipients(Vec<PublicKey>),
 }
 
@@ -121,7 +121,7 @@ impl Encryptor {
     /// recipient. The passphrase is checked against the fixed bound
     /// of 1 to 4,096 bytes when [`Encryptor::write`] runs;
     /// constructing this builder is infallible.
-    pub fn with_passphrase(passphrase: SecretString) -> Self {
+    pub fn with_passphrase(passphrase: Passphrase) -> Self {
         Self {
             state: EncryptorState::Passphrase(passphrase),
             save_as: None,
@@ -590,7 +590,7 @@ impl PassphraseDecryptor {
     /// failures.
     pub fn decrypt(
         self,
-        passphrase: SecretString,
+        passphrase: Passphrase,
         output_dir: impl AsRef<Path>,
         on_event: impl Fn(&ProgressEvent),
     ) -> Result<DecryptOutcome, CryptoError> {
@@ -728,7 +728,7 @@ impl PrivateKeyDecryptor {
     pub fn decrypt(
         self,
         private_key: PrivateKey,
-        private_key_passphrase: SecretString,
+        private_key_passphrase: Passphrase,
         output_dir: impl AsRef<Path>,
         on_event: impl Fn(&ProgressEvent),
     ) -> Result<DecryptOutcome, CryptoError> {
@@ -796,7 +796,7 @@ impl PrivateKeyDecryptor {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct KeyPairGenerator {
-    passphrase: SecretString,
+    passphrase: Passphrase,
     kdf_params: Option<KdfParams>,
     kdf_limit: Option<KdfLimit>,
 }
@@ -807,7 +807,7 @@ impl KeyPairGenerator {
     /// checked against the fixed bound of 1 to 4,096 bytes when
     /// [`KeyPairGenerator::write`] runs; constructing this builder is
     /// infallible.
-    pub fn with_passphrase(passphrase: SecretString) -> Self {
+    pub fn with_passphrase(passphrase: Passphrase) -> Self {
         Self {
             passphrase,
             kdf_params: None,
@@ -925,15 +925,15 @@ impl KeyPairGenerator {
 /// # Examples
 ///
 /// ```no_run
-/// use ferrocrypt::{generate_key_pair, secrecy::SecretString};
-/// let pass = SecretString::from("protect-my-key".to_string());
+/// use ferrocrypt::{generate_key_pair, Passphrase};
+/// let pass = Passphrase::new("protect-my-key");
 /// let outcome = generate_key_pair("./keys", pass, |ev| eprintln!("{ev}"))?;
 /// println!("Fingerprint: {}", outcome.fingerprint);
 /// # Ok::<(), ferrocrypt::CryptoError>(())
 /// ```
 pub fn generate_key_pair(
     output_dir: impl AsRef<Path>,
-    passphrase: SecretString,
+    passphrase: Passphrase,
     on_event: impl Fn(&ProgressEvent),
 ) -> Result<KeyGenOutcome, CryptoError> {
     KeyPairGenerator::with_passphrase(passphrase).write(output_dir, on_event)
@@ -1158,6 +1158,6 @@ pub fn validate_public_key_file(key_file: impl AsRef<Path>) -> Result<(), Crypto
 /// rejected before any input or archive work. Shares
 /// [`crate::crypto::kdf::check_passphrase_len`] with the pre-Argon2id
 /// gates, so the boundary and the key-derivation paths cannot drift.
-pub(crate) fn validate_passphrase(passphrase: &SecretString) -> Result<(), CryptoError> {
-    crate::crypto::kdf::check_passphrase_len(passphrase.expose_secret().as_bytes())
+pub(crate) fn validate_passphrase(passphrase: &Passphrase) -> Result<(), CryptoError> {
+    crate::crypto::kdf::check_passphrase_len(passphrase.expose().as_bytes())
 }

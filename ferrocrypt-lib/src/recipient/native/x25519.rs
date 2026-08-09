@@ -414,7 +414,7 @@ pub(crate) fn generate_keypair()
 ///   for malformed or unknown-critical entries in `ext_bytes`
 pub(crate) fn open_x25519_private_key(
     path: &std::path::Path,
-    passphrase: &secrecy::SecretString,
+    passphrase: &crate::passphrase::Passphrase,
     kdf_limit: Option<&crate::crypto::kdf::KdfLimit>,
     key_read_limits: crate::key::limits::KeyReadLimits,
     on_event: &dyn Fn(&crate::ProgressEvent),
@@ -588,8 +588,8 @@ mod tests {
     use crate::error::FormatDefect;
     use crate::key::limits::KeyReadLimits;
     use crate::key::private::seal_private_key;
+    use crate::passphrase::Passphrase;
     use chacha20poly1305::aead::OsRng;
-    use secrecy::SecretString;
     use std::fs;
 
     /// FORMAT.md §8 mandates that native X25519 readers compute
@@ -603,7 +603,7 @@ mod tests {
     fn open_private_key_rejects_x25519_public_secret_mismatch() -> Result<(), CryptoError> {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("private.key");
-        let pass = SecretString::from("pw".to_string());
+        let pass = Passphrase::new("pw");
 
         let secret = StaticSecret::random_from_rng(OsRng);
         let secret_material = secret.to_bytes();
@@ -639,7 +639,7 @@ mod tests {
     fn open_private_key_rejects_x25519_public_len_mismatch() -> Result<(), CryptoError> {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("private.key");
-        let pass = SecretString::from("pw".to_string());
+        let pass = Passphrase::new("pw");
 
         let secret = StaticSecret::random_from_rng(OsRng);
         let secret_material = secret.to_bytes();
@@ -671,7 +671,7 @@ mod tests {
     fn open_private_key_rejects_unsupported_key_type() -> Result<(), CryptoError> {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("private.key");
-        let pass = SecretString::from("pw".to_string());
+        let pass = Passphrase::new("pw");
         let events = std::cell::RefCell::new(Vec::new());
         let sink = |event: &crate::ProgressEvent| events.borrow_mut().push(event.clone());
 
@@ -709,7 +709,7 @@ mod tests {
     fn open_private_key_rejects_public_key_file_before_progress() -> Result<(), CryptoError> {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("public.key");
-        let pass = SecretString::from("pw".to_string());
+        let pass = Passphrase::new("pw");
         let (_, public_material) = keypair();
         let recipient = crate::key::public::encode_recipient_string(TYPE_NAME, &public_material)?;
         fs::write(&path, format!("{recipient}\n"))?;
@@ -739,7 +739,7 @@ mod tests {
             "future",
             &public_material,
             &[],
-            &SecretString::from("pw".to_string()),
+            &Passphrase::new("pw"),
             &KdfParams::test_fast_default(),
         )?;
         match validate_private_key_shape(&bytes) {
@@ -1083,7 +1083,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("private.key");
         fs::write(&path, &data)?;
-        let pass = SecretString::from("pw".to_string());
+        let pass = Passphrase::new("pw");
 
         match open_x25519_private_key(&path, &pass, None, KeyReadLimits::default(), &|_| {}) {
             Err(CryptoError::PrivateKeyWrappedSecretCapExceeded {

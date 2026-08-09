@@ -8,7 +8,7 @@
 use std::fs;
 use std::io::Write;
 
-use ferrocrypt::secrecy::SecretString;
+use ferrocrypt::Passphrase;
 use ferrocrypt::{Decryptor, KdfLimit};
 use libfuzzer_sys::fuzz_target;
 
@@ -29,7 +29,7 @@ fuzz_target!(|data: &[u8]| {
     drop(f);
 
     if let Ok(Decryptor::Passphrase(d)) = Decryptor::open(&input_path) {
-        let passphrase = SecretString::from("fuzz".to_string());
+        let passphrase = Passphrase::new("fuzz");
         let _ =
             d.kdf_limit(KdfLimit::new(FUZZ_KDF_MEM_KIB))
                 .decrypt(passphrase, &output_dir, |_| {});

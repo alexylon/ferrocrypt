@@ -22,6 +22,7 @@ fn public_api_is_send_and_sync() {
     assert_send_sync::<ferrocrypt::KeyPairGenerator>();
     assert_send_sync::<ferrocrypt::PublicKey>();
     assert_send_sync::<ferrocrypt::PrivateKey>();
+    assert_send_sync::<ferrocrypt::Passphrase>();
     assert_send_sync::<ferrocrypt::CryptoError>();
     assert_send_sync::<ferrocrypt::FormatDefect>();
     assert_send_sync::<ferrocrypt::UnsupportedVersion>();

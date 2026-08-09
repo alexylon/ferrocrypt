@@ -30,7 +30,7 @@
 //! [`CryptoError::KeyFileUnlockFailed`] — wrong passphrase and
 //! cleartext-tamper are indistinguishable at the AEAD layer.
 
-use secrecy::{ExposeSecret, SecretString};
+use crate::passphrase::Passphrase;
 use zeroize::Zeroizing;
 
 use crate::CryptoError;
@@ -360,7 +360,7 @@ pub(crate) fn seal_private_key(
     type_name: &str,
     public_material: &[u8],
     ext_bytes: &[u8],
-    passphrase: &SecretString,
+    passphrase: &Passphrase,
     kdf_params: &KdfParams,
 ) -> Result<Vec<u8>, CryptoError> {
     seal_private_key_inner(
@@ -384,7 +384,7 @@ pub(crate) fn seal_private_key_unchecked_tlv(
     type_name: &str,
     public_material: &[u8],
     ext_bytes: &[u8],
-    passphrase: &SecretString,
+    passphrase: &Passphrase,
     kdf_params: &KdfParams,
 ) -> Result<Vec<u8>, CryptoError> {
     seal_private_key_inner(
@@ -415,7 +415,7 @@ fn seal_private_key_inner(
     type_name: &str,
     public_material: &[u8],
     ext_bytes: &[u8],
-    passphrase: &SecretString,
+    passphrase: &Passphrase,
     kdf_params: &KdfParams,
     validation: ExtBytesValidation,
 ) -> Result<Vec<u8>, CryptoError> {
@@ -553,7 +553,7 @@ pub(crate) fn read_private_key_file(
 /// a passphrase outside the bound is rejected with no event emitted.
 pub(crate) fn open_private_key(
     bytes: &[u8],
-    passphrase: &SecretString,
+    passphrase: &Passphrase,
     kdf_limit: Option<&KdfLimit>,
     local_wrapped_secret_cap: u32,
     on_event: &dyn Fn(&crate::ProgressEvent),
@@ -604,7 +604,7 @@ pub(crate) fn open_private_key(
     let wrapped_secret = &bytes[ext_end..wrapped_secret_end];
     let cleartext = &bytes[..ext_end];
 
-    check_passphrase_len(passphrase.expose_secret().as_bytes())?;
+    check_passphrase_len(passphrase.expose().as_bytes())?;
     on_event(&crate::ProgressEvent::UnlockingPrivateKey);
     let wrap_key = derive_passphrase_wrap_key(
         passphrase,
@@ -806,8 +806,8 @@ mod tests {
         );
     }
 
-    fn test_passphrase(s: &str) -> SecretString {
-        SecretString::from(s.to_string())
+    fn test_passphrase(s: &str) -> Passphrase {
+        Passphrase::new(s)
     }
 
     /// Returns (secret_material, public_material) for a fixed-byte
@@ -1518,13 +1518,7 @@ mod tests {
         let expected = PRIVATE_KEY_HEADER_FIXED_SIZE + 6 + 32 + local_cap as usize + 1;
         assert_eq!(read.len(), expected);
 
-        match open_private_key(
-            &read,
-            &SecretString::from("pw".to_string()),
-            None,
-            local_cap,
-            &|_| {},
-        ) {
+        match open_private_key(&read, &Passphrase::new("pw"), None, local_cap, &|_| {}) {
             Err(CryptoError::PrivateKeyWrappedSecretCapExceeded {
                 wrapped_secret_len,
                 local_cap: reported,

@@ -2,7 +2,7 @@ use std::io::{self, IsTerminal, Read, Write, stdin};
 use std::path::{Path, PathBuf};
 
 use clap::{ArgAction, Args, Parser, Subcommand};
-use ferrocrypt::secrecy::{ExposeSecret, SecretString};
+use ferrocrypt::Passphrase;
 use ferrocrypt::{
     ArchiveLimits, CryptoError, Decryptor, Encryptor, IncompleteOutputPolicy, KdfLimit, KdfParams,
     KeyPairGenerator, MAGIC, PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME, PrivateKey, PublicKey,
@@ -12,6 +12,7 @@ use rpassword::prompt_password;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use subtle::ConstantTimeEq;
+use zeroize::Zeroizing;
 
 const PASSPHRASE_ENV: &str = "FERROCRYPT_PASSPHRASE";
 
@@ -406,22 +407,20 @@ pub enum CliCommand {
     },
 }
 
-/// Wraps a raw passphrase string in a zeroizing [`SecretString`] and rejects
-/// the empty input at the single enforcement point. The env-var source and
-/// primary prompt both funnel through here so the emptiness rule cannot drift
-/// between them. The confirmation prompt (encryption only) is intentionally
-/// *not* routed through this helper: its outcome must be decided by the
-/// constant-time byte compare against the primary, so the error surfaced to
-/// the user cannot distinguish "empty confirmation" from "non-empty wrong
-/// confirmation."
-fn validate_non_empty_passphrase(raw: String) -> Result<SecretString, CryptoError> {
-    let secret = SecretString::from(raw);
-    if secret.expose_secret().is_empty() {
+/// Rejects the empty passphrase at the single enforcement point. The env-var
+/// source and primary prompt both funnel through here so the emptiness rule
+/// cannot drift between them. The confirmation prompt (encryption only) is
+/// intentionally *not* routed through this helper: its outcome must be
+/// decided by the constant-time byte compare against the primary, so the
+/// error surfaced to the user cannot distinguish "empty confirmation" from
+/// "non-empty wrong confirmation."
+fn reject_empty_passphrase(raw: &str) -> Result<(), CryptoError> {
+    if raw.is_empty() {
         return Err(CryptoError::InvalidInput(
             "Passphrase must not be empty".to_string(),
         ));
     }
-    Ok(secret)
+    Ok(())
 }
 
 /// Reads a passphrase from the `FERROCRYPT_PASSPHRASE` environment variable
@@ -438,9 +437,10 @@ fn validate_non_empty_passphrase(raw: String) -> Result<SecretString, CryptoErro
 ///
 /// When `confirm` is `true` (encryption), the user is prompted twice and the
 /// inputs are compared in constant time.
-fn read_passphrase(confirm: bool) -> Result<SecretString, CryptoError> {
+fn read_passphrase(confirm: bool) -> Result<Passphrase, CryptoError> {
     if let Ok(val) = std::env::var(PASSPHRASE_ENV) {
-        return validate_non_empty_passphrase(val);
+        reject_empty_passphrase(&val)?;
+        return Ok(Passphrase::new(val));
     }
 
     // `rpassword` bypasses stdin and reads directly from the controlling
@@ -453,26 +453,24 @@ fn read_passphrase(confirm: bool) -> Result<SecretString, CryptoError> {
         )));
     }
 
-    let passphrase =
-        validate_non_empty_passphrase(prompt_password("Passphrase: ").map_err(CryptoError::Io)?)?;
+    // Both prompt buffers are held in `Zeroizing` so the raw text is wiped
+    // on every exit path; the primary buffer is moved, not copied, into the
+    // returned `Passphrase`.
+    let mut raw = Zeroizing::new(prompt_password("Passphrase: ").map_err(CryptoError::Io)?);
+    reject_empty_passphrase(&raw)?;
 
     if confirm {
-        let confirm_passphrase =
-            SecretString::from(prompt_password("Confirm passphrase: ").map_err(CryptoError::Io)?);
+        let confirm_raw =
+            Zeroizing::new(prompt_password("Confirm passphrase: ").map_err(CryptoError::Io)?);
 
-        if !bool::from(
-            passphrase
-                .expose_secret()
-                .as_bytes()
-                .ct_eq(confirm_passphrase.expose_secret().as_bytes()),
-        ) {
+        if !bool::from(raw.as_bytes().ct_eq(confirm_raw.as_bytes())) {
             return Err(CryptoError::InvalidInput(
                 "Passphrases do not match".to_string(),
             ));
         }
     }
 
-    Ok(passphrase)
+    Ok(Passphrase::new(std::mem::take(&mut *raw)))
 }
 
 fn format_duration(d: std::time::Duration) -> String {

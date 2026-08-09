@@ -16,7 +16,9 @@
    - [3.4 `format.rs`](#34-formatrs)
    - [3.5 `container.rs`](#35-containerrs)
    - [3.6 `error.rs`](#36-errorrs)
-   - [3.7 `fuzz_exports.rs`](#37-fuzz_exportsrs)
+   - [3.7 `passphrase.rs`](#37-passphrasers)
+   - [3.8 `fuzz_exports.rs`](#38-fuzz_exportsrs)
+   - [3.9 `suite_vector_gen.rs`](#39-suite_vector_genrs)
 4. [`crypto/`](#4-crypto)
    - [4.1 `crypto/keys.rs`](#41-cryptokeysrs)
    - [4.2 `crypto/kdf.rs`](#42-cryptokdfrs)
@@ -165,6 +167,7 @@ ferrocrypt-lib/src/
 │   ├── atomic.rs
 │   └── paths.rs
 │
+├── passphrase.rs
 ├── fuzz_exports.rs
 └── suite_vector_gen.rs   (test-only)
 ```
@@ -403,13 +406,19 @@ Diagnostic rules:
 
 Public error names may be compatibility-oriented, but their display text must preserve this ambiguity.
 
-### 3.7 `fuzz_exports.rs`
+### 3.7 `passphrase.rs`
+
+`passphrase.rs` owns the public `Passphrase` type: the owned credential every passphrase-based operation consumes.
+
+It wraps the passphrase text in a zeroizing buffer, prints redacted `Debug` output, and exposes the text only crate-internally. It contains no validation, parsing, or cryptography; the passphrase length rule is enforced by the operations that use the value.
+
+### 3.8 `fuzz_exports.rs`
 
 `fuzz_exports.rs` exposes internal parser and validation entry points needed by fuzz targets.
 
 It is not part of the stable public API. It must not become an alternate implementation path for parsing, validation, cryptography, or archive handling.
 
-### 3.8 `suite_vector_gen.rs`
+### 3.9 `suite_vector_gen.rs`
 
 `suite_vector_gen.rs` is a `#[cfg(test)]`-only module holding the ignored generator test for the committed `testvectors/suite/` edge-case corpus. It needs crate internals (`container::build_encrypted_header`, recipient `wrap` helpers, TLV byte building) to craft fixtures the public writer refuses to produce; the corpus itself is verified through the public API by `tests/testvector_suite.rs` on every test run.
 
@@ -1031,7 +1040,7 @@ The public API is value-oriented. Callers construct typed encryptors, decryptors
 pub struct Encryptor { /* opaque */ }
 
 impl Encryptor {
-    pub fn with_passphrase(passphrase: SecretString) -> Self;
+    pub fn with_passphrase(passphrase: Passphrase) -> Self;
 
     pub fn with_public_key(recipient: PublicKey) -> Self;
 
@@ -1118,7 +1127,7 @@ impl PassphraseDecryptor {
 
     pub fn decrypt(
         self,
-        passphrase: SecretString,
+        passphrase: Passphrase,
         output_dir: impl AsRef<Path>,
         on_event: impl Fn(&ProgressEvent),
     ) -> Result<DecryptOutcome, CryptoError>;
@@ -1140,7 +1149,7 @@ impl PrivateKeyDecryptor {
     pub fn decrypt(
         self,
         private_key: PrivateKey,
-        private_key_passphrase: SecretString,
+        private_key_passphrase: Passphrase,
         output_dir: impl AsRef<Path>,
         on_event: impl Fn(&ProgressEvent),
     ) -> Result<DecryptOutcome, CryptoError>;
@@ -1174,14 +1183,14 @@ Preferred public concepts are `Passphrase` and `Recipient`. Internals are not or
 ```rust
 pub fn generate_key_pair(
     output_dir: impl AsRef<Path>,
-    passphrase: SecretString,
+    passphrase: Passphrase,
     on_event: impl Fn(&ProgressEvent),
 ) -> Result<KeyGenOutcome, CryptoError>;
 
 pub struct KeyPairGenerator { /* opaque */ }
 
 impl KeyPairGenerator {
-    pub fn with_passphrase(passphrase: SecretString) -> Self;
+    pub fn with_passphrase(passphrase: Passphrase) -> Self;
 
     pub fn kdf_params(self, params: KdfParams) -> Self;
 

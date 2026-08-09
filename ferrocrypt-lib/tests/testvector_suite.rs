@@ -18,7 +18,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ferrocrypt::secrecy::SecretString;
+use ferrocrypt::Passphrase;
 use ferrocrypt::{
     CryptoError, Decryptor, FormatDefect, InvalidKdfParams, PrivateKey, PublicKey,
     UnsupportedVersion, validate_private_key_file,
@@ -203,7 +203,7 @@ fn attempt(suite: &Path, row: &Row, out: &Path) -> Result<(), CryptoError> {
                                 row.file, row.credential
                             )
                         });
-                    d.decrypt(SecretString::from(literal.to_string()), out, |_| {})?;
+                    d.decrypt(Passphrase::new(literal), out, |_| {})?;
                 }
                 Decryptor::PrivateKey(d) => {
                     let rest = row
@@ -220,7 +220,7 @@ fn attempt(suite: &Path, row: &Row, out: &Path) -> Result<(), CryptoError> {
                         .expect("private-key credential carries an unlock passphrase");
                     d.decrypt(
                         PrivateKey::from_key_file(suite.join(key_path)),
-                        SecretString::from(unlock.to_string()),
+                        Passphrase::new(unlock),
                         out,
                         |_| {},
                     )?;

@@ -14,7 +14,7 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
 
-use ferrocrypt::secrecy::SecretString;
+use ferrocrypt::Passphrase;
 use ferrocrypt::{Encryptor, PublicKey};
 use ferrocrypt_test_support::{
     fast_keypair_generator, per_process_workspace, remove_per_process_workspace,
@@ -54,7 +54,7 @@ fn public_key_encrypt_streams_without_buffering_whole_file() {
     let work = fresh_workspace("stream_bound");
     let keys = work.join("keys");
     fs::create_dir_all(&keys).unwrap();
-    let kg = fast_keypair_generator(SecretString::from(PASSPHRASE.to_string()))
+    let kg = fast_keypair_generator(Passphrase::new(PASSPHRASE))
         .write(&keys, |_| {})
         .expect("keygen");
     let key = PublicKey::from_key_file(&kg.public_key_path);

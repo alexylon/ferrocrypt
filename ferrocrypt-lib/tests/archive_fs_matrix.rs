@@ -26,7 +26,6 @@ mod common;
 
 use std::fs;
 
-use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{CryptoError, validate_private_key_file, validate_public_key_file};
 use ferrocrypt_test_support::fs_matrix_tempdir;
 
@@ -47,13 +46,13 @@ fn fs_matrix_round_trip_single_file() -> Result<(), CryptoError> {
     let original: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
     fs::write(&input, &original)?;
 
-    let passphrase = SecretString::from("matrix-test".to_string());
+    let passphrase = "matrix-test";
 
-    passphrase_auto(&input, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    passphrase_auto(&input, &encrypt_dir, passphrase, None, None, |_| {})?;
     let decrypted = passphrase_auto(
         encrypt_dir.join("payload.fcr"),
         &decrypt_dir,
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -80,13 +79,13 @@ fn fs_matrix_round_trip_directory() -> Result<(), CryptoError> {
     fs::create_dir_all(input_dir.join("nested"))?;
     fs::write(input_dir.join("nested").join("c.txt"), b"charlie")?;
 
-    let passphrase = SecretString::from("matrix-test".to_string());
+    let passphrase = "matrix-test";
 
-    passphrase_auto(&input_dir, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    passphrase_auto(&input_dir, &encrypt_dir, passphrase, None, None, |_| {})?;
     let decrypted = passphrase_auto(
         encrypt_dir.join("tree.fcr"),
         &decrypt_dir,
-        &passphrase,
+        passphrase,
         None,
         None,
         |_| {},
@@ -109,8 +108,8 @@ fn fs_matrix_generate_key_pair() -> Result<(), CryptoError> {
     let keys_dir = tmp.path().join("keys");
     fs::create_dir_all(&keys_dir)?;
 
-    let passphrase = SecretString::from("matrix-test".to_string());
-    let outcome = generate_key_pair(&passphrase, &keys_dir, |_| {})?;
+    let passphrase = "matrix-test";
+    let outcome = generate_key_pair(passphrase, &keys_dir, |_| {})?;
 
     validate_private_key_file(&outcome.private_key_path)?;
     validate_public_key_file(&outcome.public_key_path)?;
@@ -151,14 +150,14 @@ fn fs_matrix_second_decrypt_rejects_existing_output() -> Result<(), CryptoError>
     let input = input_dir.join("payload.bin");
     fs::write(&input, b"no-clobber matrix payload")?;
 
-    let passphrase = SecretString::from("matrix-test".to_string());
+    let passphrase = "matrix-test";
 
-    passphrase_auto(&input, &encrypt_dir, &passphrase, None, None, |_| {})?;
+    passphrase_auto(&input, &encrypt_dir, passphrase, None, None, |_| {})?;
     let fcr = encrypt_dir.join("payload.fcr");
-    let decrypted = passphrase_auto(&fcr, &decrypt_dir, &passphrase, None, None, |_| {})?;
+    let decrypted = passphrase_auto(&fcr, &decrypt_dir, passphrase, None, None, |_| {})?;
     assert_eq!(fs::read(&decrypted)?, b"no-clobber matrix payload");
 
-    let err = passphrase_auto(&fcr, &decrypt_dir, &passphrase, None, None, |_| {})
+    let err = passphrase_auto(&fcr, &decrypt_dir, passphrase, None, None, |_| {})
         .expect_err("second decrypt into an occupied output name must reject");
     let rendered = format!("{err}").to_lowercase();
     assert!(
@@ -200,8 +199,8 @@ fn fs_matrix_case_collision_rejected_where_representable() -> Result<(), CryptoE
 
     let enc = tmp.path().join("enc");
     fs::create_dir_all(&enc)?;
-    let passphrase = SecretString::from("matrix-test".to_string());
-    let result = passphrase_auto(&src, &enc, &passphrase, None, None, |_| {});
+    let passphrase = "matrix-test";
+    let result = passphrase_auto(&src, &enc, passphrase, None, None, |_| {});
 
     if case_sensitive {
         let err = result.expect_err("case-colliding names must reject on a case-sensitive volume");
@@ -245,9 +244,9 @@ fn fs_matrix_mode_bits_preserved_or_noop() -> Result<(), CryptoError> {
     let dec = tmp.path().join("dec");
     fs::create_dir_all(&enc)?;
     fs::create_dir_all(&dec)?;
-    let passphrase = SecretString::from("matrix-test".to_string());
-    passphrase_auto(&src, &enc, &passphrase, None, None, |_| {})?;
-    let out = passphrase_auto(enc.join("tree.fcr"), &dec, &passphrase, None, None, |_| {})?;
+    let passphrase = "matrix-test";
+    passphrase_auto(&src, &enc, passphrase, None, None, |_| {})?;
+    let out = passphrase_auto(enc.join("tree.fcr"), &dec, passphrase, None, None, |_| {})?;
 
     // Content survives on every filesystem.
     assert_eq!(fs::read(out.join("secret.bin"))?, b"six-hundred");

@@ -1,7 +1,7 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use ferrocrypt::secrecy::SecretString;
+use ferrocrypt::Passphrase;
 use ferrocrypt::{
     EncryptionMode, detect_encryption_mode, generate_asymmetric_key_pair, hybrid_encryption,
     symmetric_encryption,
@@ -15,7 +15,7 @@ fn start(
     keypath: String,
     mode: String,
 ) -> Result<String, String> {
-    let password = SecretString::from(password);
+    let password = Passphrase::new(password);
 
     if mode == "se" || mode == "sd" {
         match symmetric_encryption(inpath, outpath, &password, None, |_| {}) {

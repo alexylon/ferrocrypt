@@ -21,19 +21,21 @@
 //!
 //! ## Quick start (passphrase recipient)
 //! ```rust,no_run
-//! use ferrocrypt::{Decryptor, Encryptor, CryptoError, secrecy::SecretString};
+//! use ferrocrypt::{Decryptor, Encryptor, CryptoError, Passphrase};
 //!
 //! # fn run() -> Result<(), CryptoError> {
-//! let passphrase = SecretString::from("correct horse battery staple".to_string());
-//!
 //! // Encrypt
-//! let encrypted = Encryptor::with_passphrase(passphrase.clone())
+//! let encrypted = Encryptor::with_passphrase(Passphrase::new("correct horse battery staple"))
 //!     .write("./secrets", "./out", |ev| eprintln!("{ev}"))?;
 //! println!("Encrypted to {}", encrypted.output_path.display());
 //!
-//! // Decrypt
+//! // Decrypt — each operation consumes its own `Passphrase` value
 //! let restored = match Decryptor::open(&encrypted.output_path)? {
-//!     Decryptor::Passphrase(d) => d.decrypt(passphrase, "./restored", |ev| eprintln!("{ev}"))?,
+//!     Decryptor::Passphrase(d) => d.decrypt(
+//!         Passphrase::new("correct horse battery staple"),
+//!         "./restored",
+//!         |ev| eprintln!("{ev}"),
+//!     )?,
 //!     Decryptor::PrivateKey(_) => unreachable!("we just encrypted with a passphrase"),
 //!     _ => unreachable!("Decryptor is non_exhaustive; only Passphrase and PrivateKey exist today"),
 //! };
@@ -46,24 +48,23 @@
 //! ```rust,no_run
 //! use ferrocrypt::{
 //!     Decryptor, Encryptor, generate_key_pair, PublicKey, PrivateKey,
-//!     CryptoError, secrecy::SecretString,
+//!     CryptoError, Passphrase,
 //! };
 //!
 //! # fn run() -> Result<(), CryptoError> {
 //! // 1) Generate X25519 keypair
-//! let passphrase = SecretString::from("my-key-pass".to_string());
-//! let keys = generate_key_pair("./keys", passphrase.clone(), |ev| eprintln!("{ev}"))?;
+//! let keys = generate_key_pair("./keys", Passphrase::new("my-key-pass"), |ev| eprintln!("{ev}"))?;
 //! println!("Fingerprint: {}", keys.fingerprint);
 //!
 //! // 2) Encrypt with the recipient's public key (no passphrase required)
 //! let encrypted = Encryptor::with_public_key(PublicKey::from_key_file(&keys.public_key_path))
 //!     .write("./payload", "./out", |ev| eprintln!("{ev}"))?;
 //!
-//! // 3) Decrypt with the recipient's private key + passphrase
+//! // 3) Decrypt with the recipient's private key + its passphrase
 //! let restored = match Decryptor::open(&encrypted.output_path)? {
 //!     Decryptor::PrivateKey(d) => d.decrypt(
 //!         PrivateKey::from_key_file(&keys.private_key_path),
-//!         passphrase,
+//!         Passphrase::new("my-key-pass"),
 //!         "./restored",
 //!         |ev| eprintln!("{ev}"),
 //!     )?,
@@ -175,9 +176,8 @@ pub use crate::key::files::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};
 pub use crate::key::limits::KeyReadLimits;
 pub use crate::key::private::{PRIVATE_KEY_V1_VERSION, PRIVATE_KEY_VERSION};
 pub use crate::key::public::{PUBLIC_KEY_V1_VERSION, PUBLIC_KEY_VERSION};
+pub use crate::passphrase::Passphrase;
 pub use crate::recipient::policy::MixingPolicy;
-
-pub use secrecy;
 
 /// Result of a cheap structural probe of an `.fcr` file's recipient list.
 ///
@@ -405,6 +405,7 @@ mod error;
 mod format;
 mod fs;
 mod key;
+mod passphrase;
 mod protocol;
 mod recipient;
 

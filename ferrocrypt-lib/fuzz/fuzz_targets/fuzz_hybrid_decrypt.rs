@@ -9,7 +9,7 @@
 use std::fs;
 use std::io::Write;
 
-use ferrocrypt::secrecy::SecretString;
+use ferrocrypt::Passphrase;
 use ferrocrypt::{Decryptor, KdfLimit, KdfParams, KeyPairGenerator, PrivateKey};
 use libfuzzer_sys::fuzz_target;
 
@@ -25,7 +25,7 @@ fn key_dir() -> &'static std::path::Path {
     static DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
     DIR.get_or_init(|| {
         let dir = tempfile::tempdir().unwrap();
-        let pass = SecretString::from("fuzz_key".to_string());
+        let pass = Passphrase::new("fuzz_key");
         KeyPairGenerator::with_passphrase(pass)
             .kdf_params(KdfParams {
                 mem_cost: FUZZ_KDF_MEM_KIB,
@@ -53,7 +53,7 @@ fuzz_target!(|data: &[u8]| {
     drop(f);
 
     if let Ok(Decryptor::PrivateKey(d)) = Decryptor::open(&input_path) {
-        let passphrase = SecretString::from("fuzz_key".to_string());
+        let passphrase = Passphrase::new("fuzz_key");
         let _ = d.kdf_limit(KdfLimit::new(FUZZ_KDF_MEM_KIB)).decrypt(
             PrivateKey::from_key_file(&priv_key),
             passphrase,

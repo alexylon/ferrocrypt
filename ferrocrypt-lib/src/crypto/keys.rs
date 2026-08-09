@@ -15,8 +15,8 @@
 //! accessors. The type system makes it a compile error to pass a
 //! payload key into header-MAC code, or vice versa.
 
+use crate::passphrase::Passphrase;
 use chacha20poly1305::aead::{OsRng, rand_core::RngCore};
-use secrecy::SecretString;
 use zeroize::Zeroizing;
 
 use crate::CryptoError;
@@ -264,13 +264,12 @@ impl HeaderKey {
 /// `argon2_salt` doubles as the Argon2id salt AND the HKDF salt.
 /// Saves storing two distinct salts on disk.
 pub(crate) fn derive_passphrase_wrap_key(
-    passphrase: &SecretString,
+    passphrase: &Passphrase,
     argon2_salt: &[u8; ARGON2_SALT_SIZE],
     kdf_params: &KdfParams,
     info: &[u8],
 ) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
-    use secrecy::ExposeSecret;
-    let ikm = kdf_params.hash_passphrase(passphrase.expose_secret().as_bytes(), argon2_salt)?;
+    let ikm = kdf_params.hash_passphrase(passphrase.expose().as_bytes(), argon2_salt)?;
     hkdf_expand_sha3_256(Some(argon2_salt), ikm.as_ref(), info)
 }
 

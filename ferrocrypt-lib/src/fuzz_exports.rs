@@ -34,7 +34,7 @@ pub use crate::recipient::native::x25519::validate_private_key_shape;
 /// 64 KiB of KDF memory is rejected before Argon2id runs, so every iteration
 /// stays cheap.
 pub fn open_private_key_for_fuzz(bytes: &[u8]) -> Result<(), crate::CryptoError> {
-    let passphrase = secrecy::SecretString::from("fuzz-passphrase".to_string());
+    let passphrase = crate::passphrase::Passphrase::new("fuzz-passphrase");
     let limit = crate::KdfLimit::new(64);
     crate::key::private::open_private_key(
         bytes,

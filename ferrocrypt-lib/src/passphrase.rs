@@ -21,6 +21,9 @@ use zeroize::Zeroizing;
 /// before construction — a prompt library's buffer, a `String` the
 /// caller still holds — is outside its reach, so build the
 /// `Passphrase` as early as practical and let the source value drop.
+/// The wipe also acts only inside this process: it cannot stop the
+/// operating system from paging the memory to swap or including it in
+/// a crash dump while the value is alive.
 #[non_exhaustive]
 pub struct Passphrase(Zeroizing<String>);
 

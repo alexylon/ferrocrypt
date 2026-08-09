@@ -309,7 +309,9 @@ impl std::fmt::Display for AuthenticatedRecipientMode {
 /// passed to each operation. The enum is `#[non_exhaustive]` so future
 /// phases (per-entry archive progress, byte counters, domain-specific
 /// stages) can be added without a breaking change — match arms in caller
-/// code must include a `_` wildcard.
+/// code must include a `_` wildcard. Future variant payloads stay
+/// `Eq`-comparable (progress quantities are integers, never
+/// floating-point), so the derived `PartialEq` / `Eq` are stable.
 ///
 /// For quick rendering, `ProgressEvent` implements [`std::fmt::Display`]
 /// with stable user-facing wording. Consumers that want richer UX

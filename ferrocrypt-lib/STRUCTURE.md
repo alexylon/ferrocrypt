@@ -723,7 +723,7 @@ It contains:
 Every `PublicKey` ingress path stores or recovers the [`KeypairSuite`] (crate-internal) the key belongs to:
 
 - `from_key_file` and `from_recipient_string` recover the suite from the wire-version byte during decode and store it on the value;
-- `from_bytes` carries no suite marker on its input and tags the value with `WRITER_KEYPAIR_SUITE`, so raw bytes cannot resurrect a public key from a non-writer suite.
+- `from_x25519_bytes` carries no suite marker on its input and tags the value with `WRITER_KEYPAIR_SUITE`, so raw bytes cannot resurrect a public key from a non-writer suite.
 
 `PublicKey::to_recipient_string` re-encodes using the suite the value was constructed with, not the current writer suite, so a recipient string round-trips byte-identically as long as its suite is still supported by this build.
 
@@ -1159,7 +1159,7 @@ Preferred public concepts are `Passphrase` and `Recipient`. Internals are not or
 
 - `from_key_file`;
 - `from_recipient_string`;
-- `from_bytes` where supported;
+- `from_x25519_bytes` where supported;
 - `fingerprint`;
 - canonical `to_recipient_string()` output.
 

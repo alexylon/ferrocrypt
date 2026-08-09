@@ -386,7 +386,7 @@ impl Encryptor {
                 // from it for the lifetime of this match arm.
                 let public_key_bytes_vec: Vec<[u8; 32]> = public_keys
                     .iter()
-                    .map(|pk| pk.to_bytes())
+                    .map(|pk| pk.to_x25519_bytes())
                     .collect::<Result<_, _>>()?;
                 let recipients: Vec<recipient::x25519::X25519Recipient> = public_key_bytes_vec
                     .iter()

@@ -270,7 +270,7 @@ fn argon2id_entry(file_key: &FileKey) -> RecipientEntry {
 /// is committed at `keys/<key>` and returns the entry.
 fn x25519_entry(keys: &Path, key: &str, file_key: &FileKey) -> RecipientEntry {
     let public = PublicKey::from_key_file(keys.join(key))
-        .to_bytes()
+        .to_x25519_bytes()
         .expect("resolve suite public key");
     let body = x25519::wrap(file_key, &public).expect("wrap x25519 recipient");
     RecipientEntry {

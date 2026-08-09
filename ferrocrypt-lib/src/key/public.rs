@@ -718,7 +718,7 @@ enum PublicKeySource {
 
 /// Internal resolved public-key form: X25519 bytes plus the
 /// [`KeypairSuite`] (crate-internal) the bytes belong to. All three
-/// `PublicKey` construction paths (`from_bytes`, `from_recipient_string`,
+/// `PublicKey` construction paths (`from_x25519_bytes`, `from_recipient_string`,
 /// `from_key_file` via `read_public_key`) materialise this shape so a
 /// caller of [`PublicKey::resolve`] always sees the suite alongside the
 /// key material. Every byte that reaches the encryption pipeline or the
@@ -737,7 +737,7 @@ impl PublicKey {
     /// The file is not opened until a method that needs the key material is
     /// called, such as [`fingerprint`](Self::fingerprint),
     /// [`to_recipient_string`](Self::to_recipient_string),
-    /// [`to_bytes`](Self::to_bytes), or [`validate`](Self::validate).
+    /// [`to_x25519_bytes`](Self::to_x25519_bytes), or [`validate`](Self::validate).
     pub fn from_key_file(path: impl AsRef<std::path::Path>) -> Self {
         Self::from_key_file_with_limits(path, KeyReadLimits::default())
     }
@@ -765,7 +765,7 @@ impl PublicKey {
     /// keypair suite (`WRITER_KEYPAIR_SUITE`, crate-internal). Raw
     /// bytes carry no suite marker, so this constructor cannot represent a
     /// public key from a different suite. A future release that drops support
-    /// for an older suite will tag every `from_bytes` value with the current
+    /// for an older suite will tag every `from_x25519_bytes` value with the current
     /// writer suite, ensuring the matching private-key suite is also still
     /// supported. Callers who need to load a non-writer-suite public key must
     /// go through [`PublicKey::from_recipient_string`] or
@@ -788,7 +788,7 @@ impl PublicKey {
     /// [`FormatDefect::MalformedPublicKey`](crate::FormatDefect::MalformedPublicKey)
     /// if `bytes` is the all-zero X25519 public key or a non-canonical
     /// encoding.
-    pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, CryptoError> {
+    pub fn from_x25519_bytes(bytes: [u8; 32]) -> Result<Self, CryptoError> {
         check_x25519_material(X25519_TYPE_NAME, &bytes)?;
         Ok(Self {
             source: PublicKeySource::X25519 {
@@ -864,7 +864,7 @@ impl PublicKey {
     ///
     /// # Errors
     ///
-    /// Returns the same errors as [`PublicKey::to_bytes`] when this key source
+    /// Returns the same errors as [`PublicKey::to_x25519_bytes`] when this key source
     /// must be read from disk or decoded from a key file.
     pub fn fingerprint(&self) -> Result<String, CryptoError> {
         let resolved = self.resolve()?;
@@ -878,14 +878,14 @@ impl PublicKey {
     /// constructed with (preserved on every `PublicKey` ingress path),
     /// not the current writer suite. A `PublicKey` parsed from a
     /// `fcr1…` string round-trips byte-identically; a `PublicKey`
-    /// built from raw bytes via [`PublicKey::from_bytes`] re-encodes
-    /// using the writer suite (the suite `from_bytes` pins).
+    /// built from raw bytes via [`PublicKey::from_x25519_bytes`] re-encodes
+    /// using the writer suite (the suite `from_x25519_bytes` pins).
     ///
     /// Performs filesystem I/O if this `PublicKey` references a key file.
     ///
     /// # Errors
     ///
-    /// Returns the same errors as [`PublicKey::to_bytes`] when this key source
+    /// Returns the same errors as [`PublicKey::to_x25519_bytes`] when this key source
     /// must be read from disk or decoded from a key file. Returns
     /// [`CryptoError::InternalInvariant`] only if canonical Bech32 encoding fails
     /// for already-validated X25519 bytes.
@@ -906,7 +906,7 @@ impl PublicKey {
     /// [`CryptoError::InvalidFormat`] or
     /// [`CryptoError::RecipientStringCapExceeded`] if a referenced key file is
     /// not a valid `public.key` file.
-    pub fn to_bytes(&self) -> Result<[u8; 32], CryptoError> {
+    pub fn to_x25519_bytes(&self) -> Result<[u8; 32], CryptoError> {
         self.resolve().map(|resolved| resolved.bytes)
     }
 
@@ -916,12 +916,12 @@ impl PublicKey {
     /// For a key-file source this opens and parses the `public.key`
     /// text file. For a raw-bytes source this is always `Ok(())` —
     /// structural rejection of degenerate keys (e.g. all-zero) already
-    /// happens inside [`PublicKey::from_bytes`], so a constructed
+    /// happens inside [`PublicKey::from_x25519_bytes`], so a constructed
     /// `PublicKey` cannot wrap a value that fails this check.
     ///
     /// # Errors
     ///
-    /// Returns the same errors as [`PublicKey::to_bytes`] when this key source
+    /// Returns the same errors as [`PublicKey::to_x25519_bytes`] when this key source
     /// must be read from disk or decoded from a key file.
     pub fn validate(&self) -> Result<(), CryptoError> {
         self.resolve().map(|_| ())
@@ -1557,7 +1557,7 @@ mod tests {
     /// defense-in-depth for other small-order points.
     #[test]
     fn public_key_from_bytes_rejects_all_zero() {
-        match PublicKey::from_bytes([0u8; 32]) {
+        match PublicKey::from_x25519_bytes([0u8; 32]) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
             other => panic!("expected MalformedPublicKey for all-zero public_key, got {other:?}"),
         }
@@ -1673,9 +1673,9 @@ mod tests {
         let mut alias = x25519_key();
         alias[31] |= 0x80;
 
-        match PublicKey::from_bytes(alias) {
+        match PublicKey::from_x25519_bytes(alias) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
-            other => panic!("from_bytes must reject a non-canonical alias, got {other:?}"),
+            other => panic!("from_x25519_bytes must reject a non-canonical alias, got {other:?}"),
         }
 
         let s = encode_recipient_string_unchecked(X25519_TYPE_NAME, &alias).unwrap();
@@ -1694,15 +1694,15 @@ mod tests {
         }
     }
 
-    /// `PublicKey::from_bytes` carries no suite marker on the input, so
+    /// `PublicKey::from_x25519_bytes` carries no suite marker on the input, so
     /// it must tag the resulting value with the current writer suite
     /// (`WRITER_KEYPAIR_SUITE`, crate-internal). This pins audit finding 2:
     /// a future build that drops an older suite cannot use raw bytes to create
-    /// a `PublicKey` for the dropped suite; every `from_bytes` value tags as
+    /// a `PublicKey` for the dropped suite; every `from_x25519_bytes` value tags as
     /// the writer.
     #[test]
     fn from_bytes_pins_writer_keypair_suite() {
-        let pk = PublicKey::from_bytes(x25519_key()).unwrap();
+        let pk = PublicKey::from_x25519_bytes(x25519_key()).unwrap();
         let resolved = pk.resolve().unwrap();
         assert_eq!(resolved.suite, WRITER_KEYPAIR_SUITE);
         assert_eq!(resolved.bytes, x25519_key());
@@ -1849,13 +1849,13 @@ mod tests {
         assert_eq!(resolved.bytes, key);
     }
 
-    /// `to_recipient_string` for a `from_bytes`-built `PublicKey`
+    /// `to_recipient_string` for a `from_x25519_bytes`-built `PublicKey`
     /// emits the writer suite's wire-version byte at offset 0. Pairs
     /// with `from_bytes_pins_writer_keypair_suite` to lock in the rule
     /// that raw-bytes ingress always re-emits as the current writer.
     #[test]
     fn from_bytes_to_recipient_string_uses_writer_suite_wire_byte() {
-        let pk = PublicKey::from_bytes(x25519_key()).unwrap();
+        let pk = PublicKey::from_x25519_bytes(x25519_key()).unwrap();
         let s = pk.to_recipient_string().unwrap();
         let decoded = decode_recipient_string(&s, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT).unwrap();
         assert_eq!(decoded.keypair_suite, WRITER_KEYPAIR_SUITE);

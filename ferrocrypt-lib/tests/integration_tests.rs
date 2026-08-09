@@ -2566,10 +2566,10 @@ fn test_public_key_validate() -> Result<(), CryptoError> {
 
     // Raw bytes: `from_bytes` already structurally rejects degenerate
     // (all-zero) and non-canonical inputs at construction, so any
-    // successfully constructed `PublicKey::from_bytes` value passes
+    // successfully constructed `PublicKey::from_x25519_bytes` value passes
     // `validate()`. The filler keeps byte 31's high bit clear, so the
     // value is a canonical encoding.
-    PublicKey::from_bytes([0x2B; 32])?.validate()?;
+    PublicKey::from_x25519_bytes([0x2B; 32])?.validate()?;
 
     // Nonexistent file: validate returns an I/O error, not a panic.
     let missing = keys_dir.join("does_not_exist.key");
@@ -3109,7 +3109,7 @@ fn test_recipient_round_trip() -> Result<(), CryptoError> {
     assert!(encoded.starts_with("fcr1"));
 
     let decoded = decode_x25519_recipient_string(&encoded)?;
-    let re_encoded = PublicKey::from_bytes(decoded)?.to_recipient_string()?;
+    let re_encoded = PublicKey::from_x25519_bytes(decoded)?.to_recipient_string()?;
     assert_eq!(encoded, re_encoded);
 
     Ok(())

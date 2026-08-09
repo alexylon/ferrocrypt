@@ -159,7 +159,7 @@ fn write_stream_seeds(fuzz_root: &Path) {
 /// checksums on the first iteration.
 fn write_public_key_seeds(fuzz_root: &Path) {
     // Any non-zero 32-byte value satisfies public-key validation.
-    let key = PublicKey::from_bytes([0x2A; 32]).expect("non-zero key material");
+    let key = PublicKey::from_x25519_bytes([0x2A; 32]).expect("non-zero key material");
     let recipient = key
         .to_recipient_string()
         .expect("encode canonical recipient string");

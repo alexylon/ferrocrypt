@@ -170,7 +170,7 @@ pub use crate::archive::{ArchiveLimits, IncompleteOutputPolicy};
 pub use crate::container::HeaderReadLimits;
 pub use crate::crypto::kdf::{ARGON2_SALT_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams};
 pub use crate::error::{CryptoError, FormatDefect, InvalidKdfParams, UnsupportedVersion};
-pub use crate::format::{ENCRYPTED_EXTENSION, FCR_FILE_VERSION, MAGIC};
+pub use crate::format::{ENCRYPTED_EXTENSION, FCR_FILE_V1_VERSION, FCR_FILE_VERSION, MAGIC};
 pub use crate::key::files::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};
 pub use crate::key::limits::KeyReadLimits;
 pub use crate::key::private::{PRIVATE_KEY_V1_VERSION, PRIVATE_KEY_VERSION};
@@ -440,7 +440,7 @@ mod suite_vector_gen;
 /// valid recipient string of a key type this build does not support. Returns
 /// [`CryptoError::RecipientStringCapExceeded`] when the input exceeds the local
 /// recipient-string cap.
-pub fn decode_recipient_string(recipient_string: &str) -> Result<[u8; 32], CryptoError> {
+pub fn decode_x25519_recipient_string(recipient_string: &str) -> Result<[u8; 32], CryptoError> {
     key::public::decode_x25519_recipient(recipient_string)
 }
 
@@ -572,19 +572,20 @@ mod tests {
         );
     }
 
-    /// `decode_recipient_string` shares the canonical `decode_x25519_recipient`
-    /// path with `PublicKey::from_recipient_string`, so it must inherit
-    /// the all-zero input rejection. Pin the contract directly at the
-    /// free-function entry so a future refactor that bypasses the
-    /// canonical decoder cannot let a degenerate value through this surface.
+    /// `decode_x25519_recipient_string` shares the canonical
+    /// `decode_x25519_recipient` path with `PublicKey::from_recipient_string`,
+    /// so it must inherit the all-zero input rejection. Pin the contract
+    /// directly at the free-function entry so a future refactor that bypasses
+    /// the canonical decoder cannot let a degenerate value through this
+    /// surface.
     #[test]
-    fn decode_recipient_rejects_all_zero_public_key() {
+    fn decode_x25519_recipient_string_rejects_all_zero_public_key() {
         let s = key::public::encode_recipient_string_unchecked(
             recipient::x25519::TYPE_NAME,
             &[0u8; 32],
         )
         .unwrap();
-        match decode_recipient_string(&s) {
+        match decode_x25519_recipient_string(&s) {
             Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
             other => panic!("expected MalformedPublicKey, got {other:?}"),
         }

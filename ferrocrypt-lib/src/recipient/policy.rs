@@ -115,7 +115,8 @@ impl NativeRecipientType {
 /// (for example) a post-quantum class clash from any future custom class.
 ///
 /// The enum is `#[non_exhaustive]` so future native rules can be added
-/// without a breaking API change.
+/// without a breaking API change. New rule information also arrives as
+/// a new variant — the fields of the existing variants are frozen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MixingPolicy {

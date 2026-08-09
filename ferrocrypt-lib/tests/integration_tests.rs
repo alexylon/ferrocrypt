@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 
 use ferrocrypt::secrecy::SecretString;
 use ferrocrypt::{
-    CryptoError, ENCRYPTED_EXTENSION, PublicKey, decode_recipient_string, probe_recipient_mode,
-    validate_private_key_file,
+    CryptoError, ENCRYPTED_EXTENSION, PublicKey, decode_x25519_recipient_string,
+    probe_recipient_mode, validate_private_key_file,
 };
 
 use common::{generate_key_pair, passphrase_auto, recipient_auto};
@@ -3108,7 +3108,7 @@ fn test_recipient_round_trip() -> Result<(), CryptoError> {
     let encoded = PublicKey::from_key_file(keys_dir.join("public.key")).to_recipient_string()?;
     assert!(encoded.starts_with("fcr1"));
 
-    let decoded = decode_recipient_string(&encoded)?;
+    let decoded = decode_x25519_recipient_string(&encoded)?;
     let re_encoded = PublicKey::from_bytes(decoded)?.to_recipient_string()?;
     assert_eq!(encoded, re_encoded);
 
@@ -3117,7 +3117,7 @@ fn test_recipient_round_trip() -> Result<(), CryptoError> {
 
 #[test]
 fn test_recipient_malformed_bech32_rejected() {
-    let result = decode_recipient_string("fcr1not-valid-bech32!!!");
+    let result = decode_x25519_recipient_string("fcr1not-valid-bech32!!!");
     assert!(result.is_err());
 }
 
@@ -3131,7 +3131,7 @@ fn test_recipient_uppercase_rejected() -> Result<(), CryptoError> {
     let encoded = PublicKey::from_key_file(keys_dir.join("public.key")).to_recipient_string()?;
     let uppercased = encoded.to_uppercase();
     assert!(
-        decode_recipient_string(&uppercased).is_err(),
+        decode_x25519_recipient_string(&uppercased).is_err(),
         "uppercase-only recipient strings are non-canonical and must be rejected"
     );
 

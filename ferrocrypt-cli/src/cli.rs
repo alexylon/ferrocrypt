@@ -993,30 +993,25 @@ mod tests {
     fn kdf_limit_args_map_flags_onto_one_limit() {
         assert_eq!(kdf_args(None, None, None).to_limit().unwrap(), None);
 
-        let default = KdfLimit::default();
-
         let mem_only = kdf_args(Some(512), None, None).to_limit().unwrap().unwrap();
-        assert_eq!(mem_only.max_mem_cost_kib, 512 * 1024);
-        assert_eq!(mem_only.max_time_cost, default.max_time_cost);
-        assert_eq!(mem_only.max_lanes, default.max_lanes);
+        assert_eq!(mem_only, KdfLimit::new(512 * 1024));
 
         let time_only = kdf_args(None, Some(3), None).to_limit().unwrap().unwrap();
-        assert_eq!(time_only.max_mem_cost_kib, default.max_mem_cost_kib);
-        assert_eq!(time_only.max_time_cost, 3);
-        assert_eq!(time_only.max_lanes, default.max_lanes);
+        assert_eq!(time_only, KdfLimit::default().with_max_time_cost(3));
 
         let lanes_only = kdf_args(None, None, Some(2)).to_limit().unwrap().unwrap();
-        assert_eq!(lanes_only.max_mem_cost_kib, default.max_mem_cost_kib);
-        assert_eq!(lanes_only.max_time_cost, default.max_time_cost);
-        assert_eq!(lanes_only.max_lanes, 2);
+        assert_eq!(lanes_only, KdfLimit::default().with_max_lanes(2));
 
         let all = kdf_args(Some(256), Some(2), Some(1))
             .to_limit()
             .unwrap()
             .unwrap();
-        assert_eq!(all.max_mem_cost_kib, 256 * 1024);
-        assert_eq!(all.max_time_cost, 2);
-        assert_eq!(all.max_lanes, 1);
+        assert_eq!(
+            all,
+            KdfLimit::new(256 * 1024)
+                .with_max_time_cost(2)
+                .with_max_lanes(1)
+        );
     }
 
     /// Parses a command line the way the binary does, so the assertions

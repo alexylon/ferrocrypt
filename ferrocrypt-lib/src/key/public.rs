@@ -403,12 +403,13 @@ fn ensure_public_key_suite_supported(suite: KeypairSuite) -> Result<(), CryptoEr
 
 /// Canonical X25519-typed Bech32 decoder. Single source of truth for
 /// "given a `fcr1…` recipient string, return raw 32-byte X25519 key
-/// material." [`crate::decode_recipient_string`] (the public free function)
-/// routes through here so a future cap-policy or type-name change
-/// cannot drift between the public entry points.
+/// material." [`crate::decode_x25519_recipient_string`] (the public free
+/// function) routes through here so a future cap-policy or type-name
+/// change cannot drift between the public entry points.
 ///
 /// Suite-discarding wrapper around [`decode_x25519_recipient_resolved`]:
-/// callers who only need the bytes (the public `decode_recipient_string` API)
+/// callers who only need the bytes (the public
+/// `decode_x25519_recipient_string` API)
 /// drop the suite, while in-tree callers that need to preserve the
 /// suite on a resulting `PublicKey` use the resolved variant.
 ///

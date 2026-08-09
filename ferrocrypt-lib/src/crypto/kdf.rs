@@ -70,15 +70,15 @@ pub(crate) fn check_passphrase_len(passphrase: &[u8]) -> Result<(), CryptoError>
 #[non_exhaustive]
 pub struct KdfLimit {
     /// Maximum accepted memory cost in KiB.
-    pub max_mem_cost_kib: u32,
+    pub(crate) max_mem_cost_kib: u32,
     /// Maximum accepted time cost (Argon2id iteration count). Defaults to the
     /// format maximum, so it rejects nothing the structural check accepts
     /// unless tightened with [`KdfLimit::with_max_time_cost`].
-    pub max_time_cost: u32,
+    pub(crate) max_time_cost: u32,
     /// Maximum accepted lane count (Argon2id parallelism). Defaults to the
     /// format maximum, so it rejects nothing the structural check accepts
     /// unless tightened with [`KdfLimit::with_max_lanes`].
-    pub max_lanes: u32,
+    pub(crate) max_lanes: u32,
 }
 
 impl KdfLimit {
@@ -168,6 +168,11 @@ impl Default for KdfLimit {
 /// These values are serialized in `argon2id` recipient bodies and
 /// `private.key` cleartext headers so decryption repeats the same work factor
 /// used during encryption. See `FORMAT.md` §4.1 and §8.
+///
+/// The struct is deliberately exhaustive with public fields: the field set
+/// mirrors the fixed 12-byte wire encoding ([`KDF_PARAMS_SIZE`]), so a new
+/// parameter would be a wire-format change carried by a new recipient body,
+/// not a field added here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KdfParams {
     /// Argon2id memory cost in KiB.

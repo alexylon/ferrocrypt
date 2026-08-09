@@ -100,7 +100,18 @@ pub const MAGIC: [u8; 4] = [b'F', b'C', b'R', 0];
 /// Length of [`MAGIC`] in bytes (`4`).
 pub(crate) const MAGIC_SIZE: usize = MAGIC.len();
 
-/// `.fcr` outer-container version byte (`FORMAT.md` §3.1).
+/// `.fcr` outer-container version byte (`0x01`) for the first container
+/// revision (`FORMAT.md` §3.1). Stays pinned when a future revision
+/// advances [`FCR_FILE_VERSION`], mirroring
+/// [`crate::key::private::PRIVATE_KEY_V1_VERSION`] and
+/// [`crate::key::public::PUBLIC_KEY_V1_VERSION`].
+pub const FCR_FILE_V1_VERSION: u8 = 0x01;
+
+/// `.fcr` outer-container version byte the current writer emits
+/// (`FORMAT.md` §3.1). Equals [`FCR_FILE_V1_VERSION`] today; a future
+/// container revision advances this constant while first-revision files
+/// stay readable (`FORMAT.md` §11.4), so compare against the pinned
+/// constant — not this one — to identify a first-revision file.
 ///
 /// This is the **outer-container** version domain only. It is independent of:
 /// - the private-key encoding version (see [`crate::key::private::PRIVATE_KEY_VERSION`]);
@@ -111,7 +122,7 @@ pub(crate) const MAGIC_SIZE: usize = MAGIC.len();
 /// The four version domains coincide at `0x01` today only because none has
 /// been bumped before; future bumps in any one domain are independent
 /// (`FORMAT.md` §11).
-pub const FCR_FILE_VERSION: u8 = 0x01;
+pub const FCR_FILE_VERSION: u8 = FCR_FILE_V1_VERSION;
 
 /// `.fcr` encrypted-file kind byte (`Kind::Encrypted` on the wire).
 pub(crate) const KIND_ENCRYPTED: u8 = 0x45; // 'E'

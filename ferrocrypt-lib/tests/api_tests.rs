@@ -1269,9 +1269,8 @@ fn encryptor_kdf_params_above_default_rejects_with_default_kdf_limit() {
     // mem_cost = default + 1 KiB — minimal overflow, still well
     // within `KdfParams::MAX_MEM_COST`, so this exercises the
     // writer-side resource cap after structural validation succeeds.
-    let default_limit = KdfLimit::default();
     let oversized_params = KdfParams {
-        mem_cost: default_limit.max_mem_cost_kib + 1,
+        mem_cost: KdfLimit::MEM_COST_KIB_DEFAULT + 1,
         time_cost: 4,
         lanes: 4,
     };
@@ -1284,7 +1283,7 @@ fn encryptor_kdf_params_above_default_rejects_with_default_kdf_limit() {
             local_cap_kib,
         }) => {
             assert_eq!(mem_cost_kib, oversized_params.mem_cost);
-            assert_eq!(local_cap_kib, default_limit.max_mem_cost_kib);
+            assert_eq!(local_cap_kib, KdfLimit::MEM_COST_KIB_DEFAULT);
         }
         other => panic!("expected KdfResourceCapExceeded, got {other:?}"),
     }
@@ -1338,9 +1337,8 @@ fn keypair_generator_kdf_params_above_default_rejects_with_default_kdf_limit() {
     let keys = work.join("keys");
     fs::create_dir_all(&keys).unwrap();
 
-    let default_limit = KdfLimit::default();
     let oversized_params = KdfParams {
-        mem_cost: default_limit.max_mem_cost_kib + 1,
+        mem_cost: KdfLimit::MEM_COST_KIB_DEFAULT + 1,
         time_cost: 4,
         lanes: 4,
     };
@@ -1353,7 +1351,7 @@ fn keypair_generator_kdf_params_above_default_rejects_with_default_kdf_limit() {
             local_cap_kib,
         }) => {
             assert_eq!(mem_cost_kib, oversized_params.mem_cost);
-            assert_eq!(local_cap_kib, default_limit.max_mem_cost_kib);
+            assert_eq!(local_cap_kib, KdfLimit::MEM_COST_KIB_DEFAULT);
         }
         other => panic!("expected KdfResourceCapExceeded, got {other:?}"),
     }

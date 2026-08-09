@@ -294,7 +294,8 @@ Rules:
 It contains:
 
 - magic bytes;
-- the `.fcr` outer file version byte (`FCR_FILE_VERSION`);
+- the `.fcr` outer file version bytes (`FCR_FILE_VERSION`, writer-current;
+  `FCR_FILE_V1_VERSION`, pinned first revision);
 - the `KeypairSuite` enum and the single shared support gate
   (`keypair_suite_is_supported`), both `pub(crate)` — internal compatibility
   machinery whose shape may change across releases. External observers

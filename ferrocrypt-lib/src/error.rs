@@ -344,6 +344,14 @@ impl std::fmt::Display for PathSuffix<'_> {
 /// Consumers can pattern-match on these shapes without substring
 /// comparisons.
 ///
+/// # Evolution
+///
+/// New failure classes arrive as new variants, which the enum-level
+/// `#[non_exhaustive]` absorbs. The field set of every existing variant
+/// is frozen: new information about an existing class also arrives as a
+/// new variant, never as a new field, so downstream `match` patterns
+/// keep compiling and externally constructed values stay possible.
+///
 /// # The one escape hatch: [`CryptoError::InvalidInput`]
 ///
 /// One variant — [`CryptoError::InvalidInput`] — carries a free-form

@@ -15,7 +15,7 @@ pub(crate) mod tree;
 pub use limits::ArchiveLimits;
 
 pub(crate) use decode::unarchive;
-#[cfg(feature = "fuzzing")]
+#[cfg(feature = "unstable-fuzzing")]
 pub(crate) use encode::archive;
 pub(crate) use encode::{PreparedArchive, prepare_archive, validate_encrypt_input};
 #[cfg(unix)]

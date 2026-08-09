@@ -19,8 +19,9 @@ exclude = ["tests/fixtures/"]
 
 [features]
 # Gives the fuzz targets in ferrocrypt-lib/fuzz access to internal
-# parsers. Not part of the public API.
-fuzzing = []
+# parsers. Features prefixed `unstable-` are outside the crate's
+# public API guarantee; their items may change in any release.
+unstable-fuzzing = []
 
 [dependencies]
 x25519-dalek = { version = "2", features = ["static_secrets"] }

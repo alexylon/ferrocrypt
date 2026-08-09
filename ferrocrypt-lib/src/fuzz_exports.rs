@@ -1,14 +1,15 @@
 //! Internal parser-surface re-exports for the in-repo fuzz targets.
 //!
-//! Gated behind the `fuzzing` Cargo feature so library consumers never
-//! see these items. The only crate that enables the feature is
-//! `ferrocrypt-lib/fuzz`, where each target drives a specific parser at
-//! the lowest useful layer without paying for unrelated cryptographic
-//! work.
+//! Gated behind the `unstable-fuzzing` Cargo feature so library
+//! consumers never see these items. The only crate that enables the
+//! feature is `ferrocrypt-lib/fuzz`, where each target drives a
+//! specific parser at the lowest useful layer without paying for
+//! unrelated cryptographic work.
 //!
 //! **Not a stable API.** Do not depend on this module from outside
-//! the repository. Items here may be renamed, removed, or re-shaped
-//! at any time without a semver bump.
+//! the repository. Features prefixed `unstable-` are outside the
+//! crate's public API guarantee, so items here may be renamed,
+//! removed, or re-shaped at any time without a semver bump.
 
 #![allow(missing_docs)]
 

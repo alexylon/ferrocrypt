@@ -1089,7 +1089,7 @@ impl PreparedArchive {
 /// before the ciphertext staging file exists. This helper is limited to tests
 /// and fuzzing code, where the caller does not create output inside the source
 /// tree.
-#[cfg(any(test, feature = "fuzzing"))]
+#[cfg(any(test, feature = "unstable-fuzzing"))]
 pub(crate) fn archive<W: Write>(
     input_path: impl AsRef<Path>,
     writer: W,

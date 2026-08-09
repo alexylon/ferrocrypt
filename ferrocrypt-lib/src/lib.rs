@@ -408,7 +408,8 @@ mod key;
 mod protocol;
 mod recipient;
 
-#[cfg(feature = "fuzzing")]
+#[cfg(feature = "unstable-fuzzing")]
+#[doc(hidden)]
 pub mod fuzz_exports;
 
 #[cfg(test)]

@@ -166,8 +166,8 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Run clippy with fuzzing feature
-        run: cargo clippy --package ferrocrypt --features fuzzing --all-targets -- -D warnings
+      - name: Run clippy with the unstable-fuzzing feature
+        run: cargo clippy --package ferrocrypt --features unstable-fuzzing --all-targets -- -D warnings
 
   audit:
     runs-on: ubuntu-latest

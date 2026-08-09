@@ -219,7 +219,7 @@ impl PayloadKey {
     /// payload keys (the STREAM fuzz harness needs a reproducible key;
     /// see `fuzz_exports`). Production code receives a `PayloadKey`
     /// only from [`derive_subkeys`].
-    #[cfg(any(test, feature = "fuzzing"))]
+    #[cfg(any(test, feature = "unstable-fuzzing"))]
     pub(crate) fn from_bytes_for_tests(bytes: [u8; ENCRYPTION_KEY_SIZE]) -> Self {
         Self::from_zeroizing(Zeroizing::new(bytes))
     }

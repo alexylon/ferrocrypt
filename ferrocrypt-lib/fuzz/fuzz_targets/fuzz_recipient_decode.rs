@@ -3,7 +3,7 @@
 //! Fuzzes `decode_x25519_recipient_string` — the Bech32 (`fcr1…`) recipient string
 //! parser. Covers HRP mismatch, bad checksum, and payload length
 //! validation. This is the only fully-public parser entry point in
-//! the set and does not require the `fuzzing` feature.
+//! the set and does not require the `unstable-fuzzing` feature.
 
 use ferrocrypt::decode_x25519_recipient_string;
 use libfuzzer_sys::fuzz_target;

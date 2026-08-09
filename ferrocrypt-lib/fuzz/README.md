@@ -18,8 +18,8 @@ full decrypt pipeline.
 
 ### Parser-surface (primary)
 
-These targets import internals via the `ferrocrypt/fuzzing` cargo
-feature and hit the lowest useful parser layer directly. They do not
+These targets import internals via the `ferrocrypt/unstable-fuzzing`
+cargo feature and hit the lowest useful parser layer directly. They do not
 run Argon2id, so the iteration rate is orders of magnitude higher than
 the integration targets.
 

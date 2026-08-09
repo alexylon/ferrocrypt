@@ -2557,7 +2557,7 @@ fn test_public_key_validate() -> Result<(), CryptoError> {
     // Valid file: validate passes.
     PublicKey::from_key_file(keys_dir.join("public.key")).validate()?;
 
-    // Raw bytes: `from_bytes` already structurally rejects degenerate
+    // Raw bytes: `from_x25519_bytes` already structurally rejects degenerate
     // (all-zero) and non-canonical inputs at construction, so any
     // successfully constructed `PublicKey::from_x25519_bytes` value passes
     // `validate()`. The filler keeps byte 31's high bit clear, so the

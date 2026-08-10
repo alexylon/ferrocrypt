@@ -24,6 +24,11 @@ use zeroize::Zeroizing;
 /// The wipe also acts only inside this process: it cannot stop the
 /// operating system from paging the memory to swap or including it in
 /// a crash dump while the value is alive.
+///
+/// There is no way to derive a second value from one secret. A caller
+/// that needs the same passphrase for two operations reads it from its
+/// source again for each; holding the text in a `String` between them
+/// would leave a copy this type cannot wipe.
 #[non_exhaustive]
 pub struct Passphrase(Zeroizing<String>);
 

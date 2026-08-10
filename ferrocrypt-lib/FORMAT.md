@@ -1661,7 +1661,14 @@ Readers MUST process FCA archives in this order:
     A failure to apply the root mode MUST NOT fail the extraction: the output
     is already complete at its final name, where `DeleteOnError` cleanup
     cannot remove it, and it remains at its restrictive initial mode;
-17. return the final output path.
+17. where the platform exposes a stable file identity, confirm that the final
+    output name still denotes the object staged in step 10, and that the
+    destination directory path still denotes the directory the output was
+    committed in. Both MUST run after step 16 and MUST fail the extraction on
+    a mismatch, because step 15 resolves the staged entry by name and a local
+    writer with access to the destination directory can put another object
+    under either name;
+18. return the final output path.
 
 Steps 1 through 8 MUST complete before any filesystem output is created.
 

@@ -30,7 +30,7 @@ use std::path::{Component, Path};
 
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsSyncExt};
 use cap_std::ambient_authority;
-use cap_std::fs::{Dir, File, OpenOptions};
+use cap_std::fs::{Dir, File, Metadata, OpenOptions};
 
 use crate::CryptoError;
 use crate::error::{sanitize_for_display, sanitize_path_for_display};
@@ -110,6 +110,51 @@ pub(super) const SYMLINK_IN_ARCHIVE_SOURCE: &str = "Symlink in archive source";
 /// check is applied to it. Every operation inside is rooted here.
 pub(crate) fn open_anchor(path: &Path) -> Result<Dir, CryptoError> {
     Dir::open_ambient_dir(path, ambient_authority()).map_err(CryptoError::Io)
+}
+
+/// Identity of a filesystem object, read from an open handle so a later
+/// step can tell whether a name still denotes the object this run
+/// created. Rename does not change it, so it survives promotion.
+///
+/// On Unix it is the `(dev, ino)` pair. `std` exposes the Windows
+/// equivalent (`volume_serial_number` / `file_index`) only behind the
+/// unstable `windows_by_handle` feature, so there an identity carries
+/// nothing and every comparison holds; those steps keep the no-follow
+/// opens and the reparse-point checks as their guard. A filesystem that
+/// reports no inode numbers compares equal for the same reason.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct ObjectId {
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+/// Reads the identity out of metadata already taken.
+#[cfg(unix)]
+pub(crate) fn metadata_object_id(metadata: &Metadata) -> ObjectId {
+    use cap_std::fs::MetadataExt;
+    ObjectId {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn metadata_object_id(_metadata: &Metadata) -> ObjectId {
+    ObjectId {}
+}
+
+/// Reads the identity of the directory `dir` refers to.
+pub(crate) fn dir_object_id(dir: &Dir) -> Result<ObjectId, CryptoError> {
+    let metadata = dir.dir_metadata().map_err(CryptoError::Io)?;
+    Ok(metadata_object_id(&metadata))
+}
+
+/// Reads the identity of the file `file` refers to.
+pub(crate) fn file_object_id(file: &File) -> Result<ObjectId, CryptoError> {
+    let metadata = file.metadata().map_err(CryptoError::Io)?;
+    Ok(metadata_object_id(&metadata))
 }
 
 /// Handle-relative no-clobber rename used to promote a staged

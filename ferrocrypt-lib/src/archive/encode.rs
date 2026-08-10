@@ -9,23 +9,26 @@
 //!
 //! 1. **Metadata pass** — opens the source root once. A single-file
 //!    root is opened with a no-follow, non-blocking open and its mode
-//!    and size are read from that handle. A directory root is opened
-//!    directly on Unix via `open_anchor` and verified with a `(dev, ino)`
-//!    re-check; on Windows it is opened through its parent directory via
-//!    `open_child_dir_nofollow` with the reparse-point post-check. The
-//!    directory is then walked iteratively over
-//!    `cap_std::fs::Dir::entries`, driven by a heap-backed stack of
-//!    pending directories with deferred child opens (live handles
-//!    track the depth of the tree, not its width, and deep nesting
-//!    cannot overflow the process stack). The walk builds a
-//!    [`Manifest`] of [`ArchiveEntry`]s with FCA-canonical paths,
-//!    modes, sizes, and source paths. Symlinks, FIFOs, sockets,
-//!    devices, and Windows reparse points are rejected inline.
-//!    Entry-count, total-bytes, depth, path-byte, and manifest-size
-//!    caps are applied while the tree is walked, so an over-cap tree
-//!    is rejected without first holding every scanned entry in
-//!    memory, and every path is routed through [`validate_fca_path`]
-//!    so the writer never emits a path its own reader would refuse.
+//!    and size are read from that handle; on Unix a `(dev, ino)`
+//!    re-check confirms the opened file is the one the pre-open
+//!    `symlink_metadata` classified. A directory root is opened
+//!    directly on Unix via `open_anchor` and carries the same
+//!    `(dev, ino)` re-check; on Windows it is opened through its
+//!    parent directory via `open_child_dir_nofollow` with the
+//!    reparse-point post-check. The directory is then walked
+//!    iteratively over `cap_std::fs::Dir::entries`, driven by a
+//!    heap-backed stack of pending directories with deferred child
+//!    opens (live handles track the depth of the tree, not its width,
+//!    and deep nesting cannot overflow the process stack). The walk
+//!    builds a [`Manifest`] of [`ArchiveEntry`]s with FCA-canonical
+//!    paths, modes, sizes, and source paths. Symlinks, FIFOs,
+//!    sockets, devices, and Windows reparse points are rejected
+//!    inline. Entry-count, total-bytes, depth, path-byte, and
+//!    manifest-size caps are applied while the tree is walked, so an
+//!    over-cap tree is rejected without first holding every scanned
+//!    entry in memory, and every path is routed through
+//!    [`validate_fca_path`] so the writer never emits a path its own
+//!    reader would refuse.
 //!
 //! 2. **Content pass** — for each file entry in canonical manifest
 //!    order, refreshes metadata from an open handle, requires the
@@ -285,6 +288,42 @@ fn require_regular_file(
     Ok(())
 }
 
+/// Rejects a source file replaced between the `symlink_metadata`
+/// pre-check and the open that follows it. The open resolves `path` a
+/// second time, and `O_NOFOLLOW` guards the final component only, so a
+/// regular file substituted at the leaf — or reached through an
+/// ancestor directory replaced in that window — opens normally and
+/// passes every type check. Comparing the opened handle's `(dev, ino)`
+/// against the pre-check fails closed instead, the same contract
+/// [`build_manifest`]'s directory branch applies to its own root.
+#[cfg(unix)]
+fn require_same_file(
+    pre_open: &fs::Metadata,
+    opened: &fs::Metadata,
+    path: &Path,
+) -> Result<(), CryptoError> {
+    use std::os::unix::fs::MetadataExt;
+    if (pre_open.dev(), pre_open.ino()) != (opened.dev(), opened.ino()) {
+        return Err(input_changed_error("file", path));
+    }
+    Ok(())
+}
+
+/// No identity comparison outside Unix: `std` exposes the Windows file
+/// identity (`volume_serial_number` / `file_index`) only behind the
+/// unstable `windows_by_handle` feature, so there is no stable pair to
+/// compare. The Windows [`open_no_follow`] keeps its pre-open and
+/// post-open reparse-point and regular-file checks, which reject every
+/// substitution except a same-type regular file.
+#[cfg(not(unix))]
+fn require_same_file(
+    _pre_open: &fs::Metadata,
+    _opened: &fs::Metadata,
+    _path: &Path,
+) -> Result<(), CryptoError> {
+    Ok(())
+}
+
 /// Rejects inputs the archiver will not accept: symlinks (live or
 /// dangling) and anything that isn't a regular file or directory.
 /// Called at the top of every encrypt entry point in `api.rs` so the
@@ -422,6 +461,19 @@ fn input_is_symlink_error(path: &Path) -> CryptoError {
     ))
 }
 
+/// Single source of truth for the "Input <kind> changed while
+/// archiving" rejection: the object opened as the source root is not
+/// the one the pre-open `symlink_metadata` classified. `kind` is the
+/// root's kind — `"file"` or `"directory"`. Unix-only, because both
+/// identity re-checks that raise it need a stable `(dev, ino)` pair.
+#[cfg(unix)]
+fn input_changed_error(kind: &str, path: &Path) -> CryptoError {
+    CryptoError::InvalidInput(format!(
+        "Input {kind} changed while archiving: {}",
+        sanitize_path_for_display(path)
+    ))
+}
+
 /// Single source of truth for the "Symlink in archive source"
 /// diagnostic emitted when `walk_directory` encounters a symlink at
 /// a leaf entry (the file-type check arm). The dir-branch's
@@ -501,6 +553,9 @@ fn build_manifest(
         let source = open_no_follow(input_path)?;
         let handle_meta = source.metadata().map_err(CryptoError::Io)?;
         require_regular_file(&handle_meta, "Input", input_path)?;
+        // A regular file substituted for the one the lstat classified
+        // passes every check above; only its identity gives it away.
+        require_same_file(&metadata, &handle_meta, input_path)?;
 
         let mode = archive_file_mode(&handle_meta);
         let size = handle_meta.len();
@@ -572,10 +627,7 @@ fn build_manifest(
             use std::os::unix::fs::MetadataExt as _;
             if (source_root_meta.dev(), source_root_meta.ino()) != (metadata.dev(), metadata.ino())
             {
-                return Err(CryptoError::InvalidInput(format!(
-                    "Input directory changed while archiving: {}",
-                    sanitize_path_for_display(input_path)
-                )));
+                return Err(input_changed_error("directory", input_path));
             }
         }
 
@@ -2082,6 +2134,45 @@ mod tests {
         let mut buf = Vec::new();
         stream_source_file(&entry, &source, &mut buf).unwrap();
         assert_eq!(buf, b"trusted", "content must come from the held handle");
+    }
+
+    /// The metadata pass classifies the source with `symlink_metadata`
+    /// and then opens the path again. A regular file substituted in
+    /// that window passes every type check, so only the identity
+    /// comparison can reject it.
+    #[cfg(unix)]
+    #[test]
+    fn require_same_file_rejects_substituted_regular_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let original = tmp.path().join("original.bin");
+        let substitute = tmp.path().join("substitute.bin");
+        fs::write(&original, b"trusted").unwrap();
+        fs::write(&substitute, b"hostile").unwrap();
+
+        let pre_open = fs::symlink_metadata(&original).unwrap();
+        let opened = open_no_follow(&substitute).unwrap().metadata().unwrap();
+
+        let err = require_same_file(&pre_open, &opened, &original).unwrap_err();
+        assert!(
+            format!("{err}").contains("Input file changed while archiving"),
+            "expected identity rejection, got: {err}"
+        );
+    }
+
+    /// The direction of that comparison: an untouched source must keep
+    /// archiving. Both metadata reads name one object, so the check
+    /// passes.
+    #[cfg(unix)]
+    #[test]
+    fn require_same_file_accepts_untouched_source() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let input = tmp.path().join("data.bin");
+        fs::write(&input, b"trusted").unwrap();
+
+        let pre_open = fs::symlink_metadata(&input).unwrap();
+        let opened = open_no_follow(&input).unwrap().metadata().unwrap();
+
+        require_same_file(&pre_open, &opened, &input).unwrap();
     }
 
     /// A FIFO as the encrypt input is rejected up front, before any

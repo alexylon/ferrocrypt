@@ -7,6 +7,8 @@
 
 use std::io::{self, Cursor, Read, Write};
 
+use zeroize::Zeroizing;
+
 use crate::CryptoError;
 use crate::crypto::stream::read_uninterrupted;
 use crate::crypto::tlv::validate_no_known_critical;
@@ -244,6 +246,13 @@ pub(super) fn write_u8<W: Write>(w: &mut W, n: u8) -> io::Result<()> {
 /// unbounded `io::copy`, which would happily keep reading past `size`
 /// on a misbehaving reader.
 ///
+/// The buffer carries cleartext in both directions, so it is held in
+/// [`Zeroizing`] and wiped on every return path — matching the chunk
+/// buffers of `EncryptWriter` and `DecryptReader`, which no plaintext
+/// should outlive. It is heap-held and never larger than `size`, so an
+/// entry below the buffer size allocates only what it copies and the
+/// caller's stack frame stays independent of [`COPY_BUFFER_SIZE`].
+///
 /// On a short read (reader returns `Ok(0)` while bytes are still
 /// expected), returns the caller-supplied `on_short` error: the same
 /// short read means "archive content truncated" on the decrypt side
@@ -261,11 +270,12 @@ pub(super) fn copy_exact_n<R: Read, W: Write>(
     size: u64,
     on_short: impl FnOnce() -> CryptoError,
 ) -> Result<(), CryptoError> {
-    let mut buf = [0u8; COPY_BUFFER_SIZE];
+    // Both `min` results are bounded by COPY_BUFFER_SIZE, which is a
+    // usize on every supported target, so neither cast can truncate.
+    let capacity = std::cmp::min(size, COPY_BUFFER_SIZE as u64) as usize;
+    let mut buf = Zeroizing::new(vec![0u8; capacity]);
     let mut remaining = size;
     while remaining > 0 {
-        // Buffer is 64 KiB which fits any usize on supported targets;
-        // the `min` ensures the cast is bounded by the smaller side.
         let want = std::cmp::min(buf.len() as u64, remaining) as usize;
         let n = read_uninterrupted(reader, &mut buf[..want])?;
         if n == 0 {

@@ -1581,6 +1581,11 @@ directory, and every file to be opened. Windows file opens SHOULD use a
 reparse-safe open mode such as `FILE_FLAG_OPEN_REPARSE_POINT` followed by
 post-open metadata validation.
 
+Where the platform exposes a stable file identity, the writer SHOULD confirm
+after opening the source root that the opened object is the one its pre-open
+classification examined, because the open resolves the path a second time and
+no-follow guards only the final component.
+
 The writer MUST build a metadata-only manifest before emitting the FCA header.
 If the output location can appear within the source tree, the metadata pass MUST
 finish before the writer creates any output there. Otherwise, the output could

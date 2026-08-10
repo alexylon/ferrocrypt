@@ -511,11 +511,16 @@ impl Prefix {
 // Per-field structural checks. Shared by [`Prefix::parse`] (spec-order
 // reader path) and [`Prefix::validate`] (writer path / sanity check).
 
+/// Single source of truth for which `.fcr` container revisions this
+/// release reads. Arms are keyed to pinned per-revision constants, never
+/// to [`FCR_FILE_VERSION`], because `FORMAT.md` §11.5 requires a later
+/// release to keep reading what an earlier one accepted.
 fn check_version(version: u8) -> Result<(), CryptoError> {
-    if version != FCR_FILE_VERSION {
-        return Err(unsupported_file_version_error(version));
+    match version {
+        FCR_FILE_V1_VERSION => Ok(()),
+        // Future revisions add an arm above this line; none is removed.
+        _ => Err(unsupported_file_version_error(version)),
     }
-    Ok(())
 }
 
 fn check_prefix_flags(flags: u16) -> Result<(), CryptoError> {
@@ -1221,6 +1226,22 @@ mod tests {
             }
             other => panic!("expected Io(PermissionDenied), got {other:?}"),
         }
+    }
+
+    /// `FORMAT.md` §11.5 requires read support for container version
+    /// `0x01` to survive a writer bump. Fails the day `FCR_FILE_VERSION`
+    /// advances while the gate still tracks it.
+    #[test]
+    fn reader_accepts_the_pinned_first_container_revision() {
+        assert!(check_version(FCR_FILE_V1_VERSION).is_ok());
+    }
+
+    /// The writer's byte must be one the reader accepts, or the library
+    /// would emit a `.fcr` its own `Prefix::validate` refuses. Catches
+    /// advancing `FCR_FILE_VERSION` without adding the matching arm.
+    #[test]
+    fn writer_container_version_is_accepted_by_the_reader() {
+        assert!(check_version(FCR_FILE_VERSION).is_ok());
     }
 
     #[test]

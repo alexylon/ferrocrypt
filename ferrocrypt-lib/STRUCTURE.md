@@ -298,7 +298,12 @@ It contains:
 
 - magic bytes;
 - the `.fcr` outer file version bytes (`FCR_FILE_VERSION`, writer-current;
-  `FCR_FILE_V1_VERSION`, pinned first revision);
+  `FCR_FILE_V1_VERSION`, pinned first revision) and the reader's support
+  gate `check_version`, the single source of truth for which container
+  revisions this release accepts. Its arms are keyed to the pinned
+  per-revision constants, not to `FCR_FILE_VERSION`, so advancing the
+  writer's byte adds an arm instead of dropping read support that
+  `FORMAT.md` §11.5 requires be kept;
 - the `KeypairSuite` enum and the single shared support gate
   (`keypair_suite_is_supported`), both `pub(crate)` — internal compatibility
   machinery whose shape may change across releases. External observers

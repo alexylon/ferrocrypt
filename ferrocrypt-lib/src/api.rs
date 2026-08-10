@@ -525,9 +525,17 @@ pub struct PassphraseDecryptor {
 }
 
 impl PassphraseDecryptor {
-    /// Sets the maximum Argon2id memory cost accepted from the file header.
+    /// Sets the reader-side KDF resource policy for this decrypt.
     ///
-    /// If unset, the decrypt path applies [`KdfLimit::default`].
+    /// The policy caps Argon2id memory cost, time cost, and lane count
+    /// accepted from the file header, before any derivation work begins.
+    /// If unset, the decrypt path applies [`KdfLimit::default`], a
+    /// desktop-sized budget of 1 GiB matching what this library writes.
+    ///
+    /// A service that decrypts untrusted files unattended should set a
+    /// smaller limit and bound how many decrypts run at once: the header
+    /// chooses the Argon2id cost, and the derivation runs before the file
+    /// is authenticated, so every concurrent call can hold the full budget.
     pub fn kdf_limit(mut self, limit: KdfLimit) -> Self {
         self.kdf_limit = Some(limit);
         self
@@ -640,10 +648,17 @@ pub struct PrivateKeyDecryptor {
 }
 
 impl PrivateKeyDecryptor {
-    /// Sets the maximum Argon2id memory cost accepted when unlocking
-    /// `private.key`.
+    /// Sets the reader-side KDF resource policy for unlocking `private.key`.
     ///
-    /// If unset, the decrypt path applies [`KdfLimit::default`].
+    /// The policy caps Argon2id memory cost, time cost, and lane count
+    /// accepted from the key file's cleartext header, before any derivation
+    /// work begins. If unset, the decrypt path applies [`KdfLimit::default`], a
+    /// desktop-sized budget of 1 GiB matching what this library writes.
+    ///
+    /// A service that unlocks untrusted key files unattended should set a
+    /// smaller limit and bound how many unlocks run at once: the key file's
+    /// cleartext header chooses the Argon2id cost, and the derivation runs
+    /// before the wrapped secret is authenticated.
     pub fn kdf_limit(mut self, limit: KdfLimit) -> Self {
         self.kdf_limit = Some(limit);
         self

@@ -1702,15 +1702,22 @@ for extraction. A rename or replacement of the ambient `output_dir` path during
 the run then cannot redirect the commit.
 
 The step-15 commit SHOULD be a single atomic no-replace rename. On a filesystem
-whose driver cannot perform one (the macOS exFAT driver among them), readers
-MAY commit in two steps: atomically claim the final name — exclusive-create for
-a file root, `mkdir` for a directory root — then rename the staged root over
-the claim, because the exclusive claim preserves the no-clobber guarantee (an
-entry that predates the commit is never replaced) and the rename lands content
-at the final name whole. Both steps MUST resolve through the same trusted
-directory handle where the platform backend is handle-relative. A crash between
-the two steps leaves an empty claimed entry alongside the staged
-`.incomplete` root.
+whose driver cannot perform one (the macOS exFAT driver among them), a file
+root SHOULD instead be linked to the final name and the staged name unlinked,
+because creating a link refuses an existing target atomically and reaches the
+final name without a placeholder any other process could replace.
+
+Where neither is available — a directory root, or a filesystem without hard
+links — readers MAY commit in two steps: atomically claim the final name —
+exclusive-create for a file root, `mkdir` for a directory root — then rename
+the staged root over the claim, because the exclusive claim preserves the
+no-clobber guarantee (an entry that predates the commit is never replaced) and
+the rename lands content at the final name whole. Between the two steps the
+claim is an ordinary entry, so an entry another process puts in its place is
+replaced by the rename; readers MUST state this. Both steps MUST resolve
+through the same trusted directory handle where the platform backend is
+handle-relative. A crash between the two steps leaves an empty claimed entry
+alongside the staged `.incomplete` root.
 
 On Windows, the zero-unsafe implementation keeps the documented path-based
 final rename: single-file roots use a kernel atomic no-replace move, while

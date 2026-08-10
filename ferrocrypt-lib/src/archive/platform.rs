@@ -208,8 +208,10 @@ pub(crate) fn rename_at_no_clobber(
     Ok(())
 }
 
-/// Claim-then-rename fallback for filesystems where the kernel refuses
-/// the no-replace rename flag outright:
+/// Fallback for filesystems where the kernel refuses the no-replace
+/// rename flag outright. A file root on a filesystem with hard links is
+/// moved by [`link_no_clobber`], which needs no placeholder at all;
+/// every other case claims the name and renames over its own claim:
 ///
 /// 1. atomically claim the final name through `dir` — `create_new` for
 ///    a file root, owner-only `mkdir` for a directory root — refusing
@@ -230,6 +232,13 @@ pub(crate) fn rename_at_no_clobber(
 /// (exFAT) a concurrent local write into a directory claim makes
 /// step 2 fail closed with a non-empty-target error instead.
 ///
+/// Between the two steps the claim is an ordinary entry, so a local
+/// writer with access to the destination directory can remove it and
+/// leave one of their own, which step 2 then replaces. That window is
+/// why the link move above is preferred wherever the filesystem
+/// supports links; `SECURITY.md` states what remains for the cases that
+/// cannot use it.
+///
 /// If step 2 fails, the claim is removed best-effort and the staged
 /// entry stays in place for the caller's retain-on-error handling.
 /// Process interruption between the steps leaves an empty placeholder
@@ -242,6 +251,11 @@ fn rename_at_no_clobber_via_claim(
     root_is_file: bool,
 ) -> io::Result<()> {
     if root_is_file {
+        match link_no_clobber(dir, from, to) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(e),
+            Err(_) => {}
+        }
         create_file_at(dir, to, INITIAL_FILE_CREATE_MODE)?;
     } else {
         create_dir_initial_mode(dir, to)?;
@@ -260,6 +274,29 @@ fn rename_at_no_clobber_via_claim(
             Err(e)
         }
     }
+}
+
+/// Moves a staged file root to its final name by linking it there and
+/// unlinking the staged name, both handle-relative through `dir`.
+///
+/// `link` refuses an existing target atomically, so this reaches the
+/// final name without ever creating a placeholder another process could
+/// replace — the no-clobber guarantee holds against a concurrent local
+/// writer, not only against entries that predate the commit. Both names
+/// denote the finished content in between, so an interruption leaves
+/// the complete output at the final name rather than an empty entry.
+///
+/// Only for file roots: directories cannot be linked. Filesystems
+/// without hard links (exFAT and FAT among them) reject the call, and
+/// the caller falls back to claiming the name. A failed unlink leaves
+/// the staged name as a second link to the committed content, which
+/// removing it later cannot damage.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn link_no_clobber(dir: &Dir, from: &OsStr, to: &OsStr) -> io::Result<()> {
+    dir.hard_link(from, dir, to)?;
+    let _ = dir.remove_file(from);
+    sync_dir_handle(dir);
+    Ok(())
 }
 
 /// Best-effort `fsync` of the directory `dir` refers to. This flushes
@@ -1366,6 +1403,32 @@ mod tests {
 
         assert_eq!(fs::read(tmp.path().join("root")).unwrap(), b"payload");
         assert!(!tmp.path().join("root.incomplete").exists());
+    }
+
+    /// The link move commits the staged file under the final name and
+    /// clears the staged name, and refuses an occupied final name
+    /// atomically — leaving both that entry and the staged file alone.
+    /// Nothing is ever created at the final name that is not the
+    /// finished content, so no entry a concurrent writer plants can be
+    /// replaced.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn link_no_clobber_commits_without_a_placeholder() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        fs::write(tmp.path().join("root.incomplete"), b"payload").unwrap();
+        fs::write(tmp.path().join("taken"), b"existing").unwrap();
+        let handle = open_anchor(tmp.path()).unwrap();
+
+        link_no_clobber(&handle, OsStr::new("root.incomplete"), OsStr::new("root")).unwrap();
+        assert_eq!(fs::read(tmp.path().join("root")).unwrap(), b"payload");
+        assert!(!tmp.path().join("root.incomplete").exists());
+
+        fs::write(tmp.path().join("root.incomplete"), b"payload").unwrap();
+        let err = link_no_clobber(&handle, OsStr::new("root.incomplete"), OsStr::new("taken"))
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(tmp.path().join("taken")).unwrap(), b"existing");
+        assert!(tmp.path().join("root.incomplete").exists());
     }
 
     /// Directory-root fallback promotes the staged tree over the

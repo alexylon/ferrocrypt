@@ -111,9 +111,13 @@ regression net, regenerated when the format intentionally changes).
   refuses this rename atomically if the final name is already taken —
   no window for another process to interfere. On filesystems whose
   driver cannot do that in one step (Apple's exFAT driver, some network
-  filesystems), FerroCrypt instead claims the final name by creating it
-  — creation refuses an existing entry atomically — and then renames
-  the finished output over its own claim. An entry that existed before
+  filesystems), a decrypted **file** is instead linked to its final name
+  and the working name removed: creating a link refuses an existing
+  entry atomically, so this too leaves no window. A decrypted **folder**
+  cannot be linked, and neither can anything on a filesystem without
+  hard links (exFAT again). Those cases claim the final name by creating
+  it — creation refuses an existing entry atomically — and then rename
+  the finished output over their own claim. An entry that existed before
   the commit is still never replaced. The remaining differences: a
   process killed between the two steps can leave an empty placeholder
   at the final name next to the `.incomplete` entry, and a local

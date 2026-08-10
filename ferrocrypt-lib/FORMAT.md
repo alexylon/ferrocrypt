@@ -1714,9 +1714,8 @@ the staged root over the claim, because the exclusive claim preserves the
 no-clobber guarantee (an entry that predates the commit is never replaced) and
 the rename lands content at the final name whole. Between the two steps the
 claim is an ordinary entry, so an entry another process puts in its place is
-replaced by the rename; readers MUST state this. Both steps MUST resolve
-through the same trusted directory handle where the platform backend is
-handle-relative. A crash between the two steps leaves an empty claimed entry
+replaced by the rename. Both steps MUST resolve through the same trusted
+directory handle where the platform backend is handle-relative. A crash between the two steps leaves an empty claimed entry
 alongside the staged `.incomplete` root.
 
 On Windows, the zero-unsafe implementation keeps the documented path-based

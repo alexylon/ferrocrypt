@@ -235,6 +235,9 @@ impl UnauthenticatedRecipientMode {
 /// exposed [`AuthenticatedRecipientModeKind`] but cannot manufacture a value
 /// that claims to be authenticated.
 ///
+/// The struct holds only that kind value, which is what lets it stay
+/// `Copy`.
+///
 /// Surfaced on [`DecryptOutcome::recipient_mode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthenticatedRecipientMode {
@@ -369,6 +372,9 @@ pub use crate::key::private::PrivateKey;
 pub use crate::key::public::PublicKey;
 
 /// Successful outcome of an [`Encryptor::write`] call.
+///
+/// Fields added later stay `Eq`-comparable (quantities are integers,
+/// never floating-point), so the derived `Eq` is stable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct EncryptOutcome {
@@ -378,6 +384,9 @@ pub struct EncryptOutcome {
 
 /// Successful outcome of [`PassphraseDecryptor::decrypt`] or
 /// [`PrivateKeyDecryptor::decrypt`].
+///
+/// Fields added later stay `Eq`-comparable (quantities are integers,
+/// never floating-point), so the derived `Eq` is stable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DecryptOutcome {
@@ -393,6 +402,9 @@ pub struct DecryptOutcome {
 
 /// Successful outcome of [`generate_key_pair`] or
 /// [`KeyPairGenerator::write`].
+///
+/// Fields added later stay `Eq`-comparable (quantities are integers,
+/// never floating-point), so the derived `Eq` is stable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct KeyGenOutcome {

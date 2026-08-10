@@ -62,7 +62,7 @@ pub(crate) fn wrap(
     kdf_params: &KdfParams,
     on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<[u8; BODY_LENGTH], CryptoError> {
-    check_passphrase_len(passphrase.expose().as_bytes())?;
+    check_passphrase_len(passphrase.expose())?;
     // Validate before emitting the progress event. Public encryption
     // already checks these parameters, but this function also serves
     // crate-internal callers directly.
@@ -107,7 +107,7 @@ pub(crate) fn unwrap(
     kdf_limit: Option<&KdfLimit>,
     on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<FileKey, CryptoError> {
-    check_passphrase_len(passphrase.expose().as_bytes())?;
+    check_passphrase_len(passphrase.expose())?;
     let mut argon2_salt = [0u8; ARGON2_SALT_SIZE];
     argon2_salt.copy_from_slice(&body[SALT_OFFSET..SALT_OFFSET + ARGON2_SALT_SIZE]);
 

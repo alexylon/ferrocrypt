@@ -1188,7 +1188,7 @@ fn keypair_generator_kdf_params_rejects_structural_lanes() {
     }
 }
 
-/// Public API: a tightened `KdfLimit::with_max_time_cost` on `Encryptor`
+/// Public API: a tightened `KdfLimit::max_time_cost` on `Encryptor`
 /// rejects a structurally valid `kdf_params` value before Argon2id runs or any
 /// `.fcr` is produced. Pins the public builder path, not only the internal
 /// `KdfParams` gate.
@@ -1210,7 +1210,7 @@ fn encryptor_kdf_limit_rejects_time_cost_above_tightened_cap() {
     };
     let result = Encryptor::with_passphrase(pass())
         .kdf_params(params)
-        .kdf_limit(KdfLimit::default().with_max_time_cost(6))
+        .kdf_limit(KdfLimit::default().max_time_cost(6))
         .write(&input, &out_dir, |_| {});
     match result {
         Err(CryptoError::KdfTimeCostCapExceeded {
@@ -1229,7 +1229,7 @@ fn encryptor_kdf_limit_rejects_time_cost_above_tightened_cap() {
     );
 }
 
-/// Public API: a tightened `KdfLimit::with_max_lanes` on `KeyPairGenerator`
+/// Public API: a tightened `KdfLimit::max_lanes` on `KeyPairGenerator`
 /// rejects a structurally valid `kdf_params` value before `private.key` is
 /// written. Pins the lane-count cap through the public builder path.
 #[test]
@@ -1245,7 +1245,7 @@ fn keypair_generator_kdf_limit_rejects_lanes_above_tightened_cap() {
     };
     let result = KeyPairGenerator::with_passphrase(pass())
         .kdf_params(params)
-        .kdf_limit(KdfLimit::default().with_max_lanes(2))
+        .kdf_limit(KdfLimit::default().max_lanes(2))
         .write(&keys, |_| {});
     match result {
         Err(CryptoError::KdfLanesCapExceeded { lanes, local_cap }) => {

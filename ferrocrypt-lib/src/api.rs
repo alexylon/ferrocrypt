@@ -1160,5 +1160,5 @@ pub fn validate_public_key_file(key_file: impl AsRef<Path>) -> Result<(), Crypto
 /// [`crate::crypto::kdf::check_passphrase_len`] with the pre-Argon2id
 /// gates, so the boundary and the key-derivation paths cannot drift.
 pub(crate) fn validate_passphrase(passphrase: &Passphrase) -> Result<(), CryptoError> {
-    crate::crypto::kdf::check_passphrase_len(passphrase.expose().as_bytes())
+    crate::crypto::kdf::check_passphrase_len(passphrase.expose())
 }

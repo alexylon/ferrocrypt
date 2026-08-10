@@ -60,8 +60,8 @@ pub(crate) fn check_passphrase_len(passphrase: &[u8]) -> Result<(), CryptoError>
 /// not already reject.
 ///
 /// Construct with [`KdfLimit::new`] for KiB or [`KdfLimit::from_mib`] for MiB,
-/// optionally tighten time cost or lanes with [`KdfLimit::with_max_time_cost`]
-/// / [`KdfLimit::with_max_lanes`], then pass the result to
+/// optionally tighten time cost or lanes with [`KdfLimit::max_time_cost`]
+/// / [`KdfLimit::max_lanes`], then pass the result to
 /// [`crate::PassphraseDecryptor::kdf_limit`] or
 /// [`crate::PrivateKeyDecryptor::kdf_limit`]. The struct is `#[non_exhaustive]`
 /// so future releases can add further limit dimensions without a breaking
@@ -74,11 +74,11 @@ pub struct KdfLimit {
     pub(crate) max_mem_cost_kib: u32,
     /// Maximum accepted time cost (Argon2id iteration count). Defaults to the
     /// format maximum, so it rejects nothing the structural check accepts
-    /// unless tightened with [`KdfLimit::with_max_time_cost`].
+    /// unless tightened with [`KdfLimit::max_time_cost`].
     pub(crate) max_time_cost: u32,
     /// Maximum accepted lane count (Argon2id parallelism). Defaults to the
     /// format maximum, so it rejects nothing the structural check accepts
-    /// unless tightened with [`KdfLimit::with_max_lanes`].
+    /// unless tightened with [`KdfLimit::max_lanes`].
     pub(crate) max_lanes: u32,
 }
 
@@ -100,13 +100,14 @@ impl KdfLimit {
     /// defaults are the structural maxima above.
     pub const MEM_COST_KIB_DEFAULT: u32 = KdfParams::DEFAULT_MEM_COST;
 
-    /// Builds a limit from a KiB memory value, leaving the time-cost and lane
+    /// Builds a limit from a KiB memory value, clamped at
+    /// [`Self::MEM_COST_KIB_STRUCTURAL_MAX`], leaving the time-cost and lane
     /// caps at their defaults (the format maximum). Only memory is
-    /// constrained unless [`with_max_time_cost`](Self::with_max_time_cost) or
-    /// [`with_max_lanes`](Self::with_max_lanes) tightens the others.
+    /// constrained unless [`max_time_cost`](Self::max_time_cost) or
+    /// [`max_lanes`](Self::max_lanes) tightens the others.
     pub fn new(max_mem_cost_kib: u32) -> Self {
         Self {
-            max_mem_cost_kib,
+            max_mem_cost_kib: max_mem_cost_kib.min(Self::MEM_COST_KIB_STRUCTURAL_MAX),
             ..Self::default()
         }
     }
@@ -124,22 +125,20 @@ impl KdfLimit {
         Ok(Self::new(kib))
     }
 
-    /// Sets the accepted Argon2id time-cost cap. Values at or above the
-    /// format maximum are equivalent to the structural maximum, because the
-    /// structural check already rejects anything higher. Lower values make
-    /// decryption refuse an otherwise-valid header whose iteration count
-    /// exceeds the cap.
-    pub fn with_max_time_cost(mut self, max_time_cost: u32) -> Self {
-        self.max_time_cost = max_time_cost;
+    /// Sets the accepted Argon2id time-cost cap, clamped at
+    /// [`Self::TIME_COST_STRUCTURAL_MAX`]. Lower values make decryption
+    /// refuse an otherwise-valid header whose iteration count exceeds the
+    /// cap.
+    pub fn max_time_cost(mut self, value: u32) -> Self {
+        self.max_time_cost = value.min(Self::TIME_COST_STRUCTURAL_MAX);
         self
     }
 
-    /// Sets the accepted Argon2id lane-count cap. Values at or above the
-    /// format maximum are equivalent to the structural maximum; lower values
-    /// make decryption refuse an otherwise-valid header whose lane count
-    /// exceeds the cap.
-    pub fn with_max_lanes(mut self, max_lanes: u32) -> Self {
-        self.max_lanes = max_lanes;
+    /// Sets the accepted Argon2id lane-count cap, clamped at
+    /// [`Self::LANES_STRUCTURAL_MAX`]. Lower values make decryption refuse
+    /// an otherwise-valid header whose lane count exceeds the cap.
+    pub fn max_lanes(mut self, value: u32) -> Self {
+        self.max_lanes = value.min(Self::LANES_STRUCTURAL_MAX);
         self
     }
 }
@@ -544,14 +543,38 @@ mod tests {
         }
         .to_bytes();
         let widest = KdfLimit::new(KdfLimit::MEM_COST_KIB_STRUCTURAL_MAX)
-            .with_max_time_cost(KdfLimit::TIME_COST_STRUCTURAL_MAX)
-            .with_max_lanes(KdfLimit::LANES_STRUCTURAL_MAX);
+            .max_time_cost(KdfLimit::TIME_COST_STRUCTURAL_MAX)
+            .max_lanes(KdfLimit::LANES_STRUCTURAL_MAX);
         assert!(KdfParams::from_bytes(&bytes, Some(&widest)).is_ok());
 
         let defaults = KdfLimit::default();
         assert_eq!(defaults.max_mem_cost_kib, KdfLimit::MEM_COST_KIB_DEFAULT);
         assert_eq!(defaults.max_time_cost, KdfLimit::TIME_COST_STRUCTURAL_MAX);
         assert_eq!(defaults.max_lanes, KdfLimit::LANES_STRUCTURAL_MAX);
+    }
+
+    /// A cap above what `FORMAT.md` §2.2 can represent is reduced to the
+    /// structural maximum in the builder, so two limits that behave the
+    /// same compare equal. The fields are private, and `==` is the only
+    /// way a caller can inspect a value.
+    #[test]
+    fn builders_clamp_at_the_published_structural_maxima() {
+        let over = KdfLimit::new(u32::MAX)
+            .max_time_cost(u32::MAX)
+            .max_lanes(u32::MAX);
+        let widest = KdfLimit::new(KdfLimit::MEM_COST_KIB_STRUCTURAL_MAX)
+            .max_time_cost(KdfLimit::TIME_COST_STRUCTURAL_MAX)
+            .max_lanes(KdfLimit::LANES_STRUCTURAL_MAX);
+        assert_eq!(over, widest);
+
+        // `from_mib` clamps through `new`: one MiB above the maximum.
+        let over_max_mib = KdfLimit::MEM_COST_KIB_STRUCTURAL_MAX / 1024 + 1;
+        assert_eq!(KdfLimit::from_mib(over_max_mib).unwrap(), widest);
+
+        // Clamping only reduces values above the maximum: a tightened cap
+        // is still stored as given.
+        assert_ne!(KdfLimit::default().max_time_cost(3), KdfLimit::default());
+        assert_ne!(KdfLimit::default().max_lanes(2), KdfLimit::default());
     }
 
     #[test]
@@ -608,7 +631,7 @@ mod tests {
             lanes: KdfParams::DEFAULT_LANES,
         }
         .to_bytes();
-        let limit = KdfLimit::new(KdfParams::DEFAULT_MEM_COST).with_max_time_cost(6);
+        let limit = KdfLimit::new(KdfParams::DEFAULT_MEM_COST).max_time_cost(6);
         match KdfParams::from_bytes(&bytes, Some(&limit)) {
             Err(CryptoError::KdfTimeCostCapExceeded {
                 time_cost: 8,
@@ -626,7 +649,7 @@ mod tests {
             lanes: 4,
         }
         .to_bytes();
-        let limit = KdfLimit::new(KdfParams::DEFAULT_MEM_COST).with_max_lanes(2);
+        let limit = KdfLimit::new(KdfParams::DEFAULT_MEM_COST).max_lanes(2);
         match KdfParams::from_bytes(&bytes, Some(&limit)) {
             Err(CryptoError::KdfLanesCapExceeded {
                 lanes: 4,
@@ -676,7 +699,7 @@ mod tests {
 
         // A tightened time-cost limit: the writer refuses (so no unreadable
         // file is produced) and the reader refuses the same bytes.
-        let tight = KdfLimit::default().with_max_time_cost(6);
+        let tight = KdfLimit::default().max_time_cost(6);
         let over = KdfParams {
             mem_cost: KdfParams::DEFAULT_MEM_COST,
             time_cost: 8,

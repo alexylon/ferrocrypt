@@ -12,7 +12,7 @@ use zeroize::Zeroizing;
 /// and [`generate_key_pair`](crate::generate_key_pair).
 ///
 /// The text is readable only inside the crate. There is no public
-/// accessor, `Debug` prints `Passphrase(REDACTED)`, and the type
+/// accessor, `Debug` prints `Passphrase(<redacted>)`, and the type
 /// implements neither `Display` nor `Clone`, so a passphrase cannot
 /// leak through formatting and each operation consumes a value built
 /// for it.
@@ -38,15 +38,17 @@ impl Passphrase {
         Self(Zeroizing::new(text.into()))
     }
 
-    /// Read access for the crate's validation and KDF call sites.
-    pub(crate) fn expose(&self) -> &str {
-        &self.0
+    /// Read access for the crate's validation and KDF call sites. Bytes
+    /// rather than `&str`, because the length bound is in bytes and every
+    /// call site either hashes or measures the bytes.
+    pub(crate) fn expose(&self) -> &[u8] {
+        self.0.as_bytes()
     }
 }
 
 impl std::fmt::Debug for Passphrase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Passphrase(REDACTED)")
+        f.write_str("Passphrase(<redacted>)")
     }
 }
 
@@ -58,12 +60,12 @@ mod tests {
     fn debug_output_redacts_the_text() {
         let passphrase = Passphrase::new("visible-secret");
         let printed = format!("{passphrase:?}");
-        assert_eq!(printed, "Passphrase(REDACTED)");
+        assert_eq!(printed, "Passphrase(<redacted>)");
         assert!(!printed.contains("visible-secret"));
     }
 
     #[test]
-    fn expose_returns_the_exact_text() {
-        assert_eq!(Passphrase::new("pw").expose(), "pw");
+    fn expose_returns_the_exact_bytes() {
+        assert_eq!(Passphrase::new("pw").expose(), b"pw");
     }
 }

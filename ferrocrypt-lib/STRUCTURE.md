@@ -1307,6 +1307,7 @@ protocol.rs
 Dependency rules:
 
 - `format.rs` depends only on `error.rs` and the `crypto/` primitive layer (`crypto/mac` and `crypto/keys` for the typed `compute_header_mac` / `verify_header_mac` wrappers, plus the `STREAM_NONCE_SIZE` constant from `crypto/stream`); it does not depend on any higher-layer module.
+- `passphrase.rs` is a leaf: it depends on no other module in the crate, so any layer may consume it. `api.rs`, `protocol.rs`, `crypto/keys.rs`, `key/private.rs`, and `recipient/native/*` do.
 - `crypto/*` does not depend on `protocol.rs`, `archive/*`, or `fs/*`.
 - `recipient/native/*` does not call `container.rs` or `archive/*`.
 - `archive/*` does not know about recipients, keys, or encrypted-header structure.

@@ -269,7 +269,7 @@ pub(crate) fn derive_passphrase_wrap_key(
     kdf_params: &KdfParams,
     info: &[u8],
 ) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
-    let ikm = kdf_params.hash_passphrase(passphrase.expose().as_bytes(), argon2_salt)?;
+    let ikm = kdf_params.hash_passphrase(passphrase.expose(), argon2_salt)?;
     hkdf_expand_sha3_256(Some(argon2_salt), ikm.as_ref(), info)
 }
 

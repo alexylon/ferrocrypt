@@ -604,7 +604,7 @@ pub(crate) fn open_private_key(
     let wrapped_secret = &bytes[ext_end..wrapped_secret_end];
     let cleartext = &bytes[..ext_end];
 
-    check_passphrase_len(passphrase.expose().as_bytes())?;
+    check_passphrase_len(passphrase.expose())?;
     on_event(&crate::ProgressEvent::UnlockingPrivateKey);
     let wrap_key = derive_passphrase_wrap_key(
         passphrase,

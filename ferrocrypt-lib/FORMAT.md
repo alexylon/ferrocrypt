@@ -1720,9 +1720,13 @@ The final output path MUST NOT exist before extraction. If `{root}.incomplete`
 already exists, extraction MUST reject rather than reuse or delete it.
 
 On extraction failure, `DeleteOnError` removes only `.incomplete` roots created
-by the current run, best-effort. `RetainOnError` leaves staged plaintext for
-inspection or recovery. Process termination, power loss, or `SIGKILL` can leave
-`.incomplete` output regardless of policy.
+by the current run, best-effort. The removal MUST be chosen from what the run
+staged, not from what currently occupies the working name, because a local
+writer with access to the destination directory can put an object of another
+type there; a staged regular file MUST NOT be removed recursively.
+`RetainOnError` leaves staged plaintext for inspection or recovery. Process
+termination, power loss, or `SIGKILL` can leave `.incomplete` output regardless
+of policy.
 
 A conforming reader MUST keep FerroCrypt's hardened extraction invariants:
 output operations rooted in a trusted destination directory handle,

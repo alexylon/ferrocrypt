@@ -146,10 +146,10 @@ fn unarchive_inner<R: Read>(
     // redirect the `remove_*` calls.
     let output_handle = platform::open_anchor(output_dir)?;
     let incomplete_name = incomplete_working_name(&manifest.root_name);
-    let mut created_incomplete_roots: Vec<OsString> = Vec::new();
+    let mut staged_root: Option<StagedRoot> = None;
 
-    // Steps 10–16 wrapped so the cleanup loop below sees
-    // `output_handle` still alive on every error path.
+    // Steps 10–16 wrapped so the cleanup below sees `output_handle`
+    // still alive on every error path.
     let outcome: Result<PathBuf, CryptoError> = (|| {
         // §9.11 steps 10–14. Each `extract_*_root` runs
         // `verify_archive_eof` (step 13) directly after content
@@ -161,7 +161,7 @@ fn unarchive_inner<R: Read>(
                 &output_handle,
                 &incomplete_name,
                 &manifest,
-                &mut created_incomplete_roots,
+                &mut staged_root,
                 output_dir,
             )?;
         } else {
@@ -170,10 +170,14 @@ fn unarchive_inner<R: Read>(
                 &output_handle,
                 &incomplete_name,
                 &manifest,
-                &mut created_incomplete_roots,
+                &mut staged_root,
                 output_dir,
             )?;
         }
+
+        // Windows renames a directory by path and refuses while a
+        // handle to it is open, so the staged handle is closed here.
+        release_staged_handle_before_promotion(&mut staged_root);
 
         // FORMAT.md §9.11 step 15: promote {root}.incomplete → {root}
         // with no-clobber. On Linux and macOS the rename is anchored to
@@ -242,8 +246,8 @@ fn unarchive_inner<R: Read>(
     })();
 
     if outcome.is_err() && matches!(policy, IncompleteOutputPolicy::DeleteOnError) {
-        for root_name in &created_incomplete_roots {
-            cleanup_incomplete_via_handle(&output_handle, &incomplete_working_name(root_name));
+        if let Some(staged) = staged_root.take() {
+            staged.remove(&output_handle);
         }
     }
 
@@ -256,7 +260,7 @@ fn extract_single_file_root<R: Read>(
     output_handle: &Dir,
     incomplete_name: &OsStr,
     manifest: &Manifest,
-    created_incomplete_roots: &mut Vec<OsString>,
+    staged_root: &mut Option<StagedRoot>,
     output_dir: &Path,
 ) -> Result<(), CryptoError> {
     debug_assert_eq!(manifest.entries.len(), 1);
@@ -274,7 +278,7 @@ fn extract_single_file_root<R: Read>(
         })
     })?;
     // create_file_at succeeded — this run owns the staging file.
-    created_incomplete_roots.push(manifest.root_name.clone());
+    *staged_root = Some(StagedRoot::file(incomplete_name));
 
     copy_exact_n(reader, &mut outfile, entry.size, archive_content_truncated)?;
 
@@ -297,7 +301,7 @@ fn extract_directory_root<R: Read>(
     output_handle: &Dir,
     incomplete_name: &OsStr,
     manifest: &Manifest,
-    created_incomplete_roots: &mut Vec<OsString>,
+    staged_root: &mut Option<StagedRoot>,
     output_dir: &Path,
 ) -> Result<(), CryptoError> {
     let root_name_str = manifest_root_name_str(manifest)?;
@@ -306,7 +310,15 @@ fn extract_directory_root<R: Read>(
         map_already_exists(e, || incomplete_output_exists(output_dir, incomplete_name))
     })?;
     // mkdir_strict succeeded — this run owns the staging directory.
-    created_incomplete_roots.push(manifest.root_name.clone());
+    // The recorded handle is a second descriptor for the same
+    // directory, so cleanup keeps working after the one below is
+    // closed at the end of extraction. A descriptor that cannot be
+    // duplicated still records the staged root, so the record is never
+    // lost between creating the directory and the first failure.
+    *staged_root = Some(StagedRoot::directory(
+        incomplete_name,
+        root_dir.try_clone().ok(),
+    ));
 
     // Pass 1 (FORMAT.md §9.11 step 10): pre-create all descendant
     // directories sorted by depth ascending (parent before child), so
@@ -511,25 +523,113 @@ fn incomplete_working_name(root_name: &OsStr) -> OsString {
     name
 }
 
-/// Best-effort removal of an `.incomplete` leaf via the capability
-/// handle that staged it. Anchoring to the same `Dir` used during
-/// extraction means a path swap of `output_dir` between failed
-/// extraction and cleanup cannot redirect `remove_*` to a different
-/// directory. Errors are swallowed so the original `CryptoError` is
-/// what the caller sees.
-fn cleanup_incomplete_via_handle(output_handle: &Dir, working_name: &OsStr) {
-    let meta = match output_handle.symlink_metadata(working_name) {
-        Ok(m) => m,
-        Err(_) => return,
-    };
-    if meta.file_type().is_symlink() {
-        let _ = output_handle.remove_file(working_name);
-    } else if meta.is_dir() {
-        let _ = output_handle.remove_dir_all(working_name);
-    } else {
-        let _ = output_handle.remove_file(working_name);
+/// The `.incomplete` root this run staged, kept so a failed run
+/// removes that object and nothing else.
+///
+/// Cleanup must not decide how to remove from what currently occupies
+/// the working name. A local writer with write access to `output_dir`
+/// can move the staged root aside and leave a directory of their own
+/// at that name, and a removal chosen from the substitute's type would
+/// then delete a tree this run never created. The removal is therefore
+/// chosen from what this run created: a staged file is only ever
+/// unlinked, and a staged directory is removed through the handle it
+/// was created with.
+enum StagedRoot {
+    /// Staged file root. Its handle is closed once the content is
+    /// written, so only the name is left to unlink.
+    File { working_name: OsString },
+    /// Staged directory root. `handle` is the descriptor
+    /// `mkdir_strict` returned; it is `None` where the platform needs
+    /// it closed before promotion, or where it could not be
+    /// duplicated.
+    Directory {
+        working_name: OsString,
+        handle: Option<Dir>,
+    },
+}
+
+impl StagedRoot {
+    fn file(working_name: &OsStr) -> Self {
+        Self::File {
+            working_name: working_name.to_os_string(),
+        }
+    }
+
+    fn directory(working_name: &OsStr, handle: Option<Dir>) -> Self {
+        Self::Directory {
+            working_name: working_name.to_os_string(),
+            handle,
+        }
+    }
+
+    /// Best-effort removal of the staged root. Errors are swallowed so
+    /// the original `CryptoError` is what the caller sees.
+    ///
+    /// A staged file is unlinked by name through `output_handle`, the
+    /// same `Dir` extraction wrote through, so a path swap of
+    /// `output_dir` cannot redirect the removal. Unlinking never
+    /// follows a symlink and never recurses, so a directory
+    /// substituted at the working name is left in place. A file
+    /// substituted there is unlinked, which stays within what a writer
+    /// holding that access can already do to the entry itself.
+    fn remove(self, output_handle: &Dir) {
+        match self {
+            Self::File { working_name } => {
+                let _ = output_handle.remove_file(&working_name);
+            }
+            Self::Directory {
+                working_name,
+                handle,
+            } => remove_staged_directory(output_handle, &working_name, handle),
+        }
     }
 }
+
+/// Removes a staged directory root through the handle it was created
+/// with: the contents are removed through that descriptor and the
+/// directory itself is found by identity in its parent, so a directory
+/// substituted at the working name is never removed — and the staged
+/// tree is still removed when it is the entry that was moved aside.
+///
+/// Without that handle the working name cannot be shown to still
+/// denote the staged tree, so nothing is removed and the staged tree is
+/// left for the operator, the same outcome as any other best-effort
+/// cleanup failure.
+#[cfg(unix)]
+fn remove_staged_directory(_output_handle: &Dir, _working_name: &OsStr, handle: Option<Dir>) {
+    if let Some(handle) = handle {
+        let _ = handle.remove_open_dir_all();
+    }
+}
+
+/// Removes a staged directory root by name, anchored to the capability
+/// handle extraction wrote through. Windows resolves an open directory
+/// handle back to an absolute path before removing through it, which
+/// would leave the destination anchor, so the removal stays
+/// handle-relative and the staged handle is closed first — Windows
+/// refuses to remove a directory that still has one open.
+#[cfg(not(unix))]
+fn remove_staged_directory(output_handle: &Dir, working_name: &OsStr, handle: Option<Dir>) {
+    drop(handle);
+    let _ = output_handle.remove_dir_all(working_name);
+}
+
+/// Closes the staged directory handle where promotion needs it closed.
+/// Windows renames a directory by path and refuses while a handle to it
+/// is open. Cleanup after a failed promotion then falls back to the
+/// working name.
+#[cfg(not(unix))]
+fn release_staged_handle_before_promotion(staged_root: &mut Option<StagedRoot>) {
+    if let Some(StagedRoot::Directory { handle, .. }) = staged_root.as_mut() {
+        *handle = None;
+    }
+}
+
+/// No-op on Unix: the promotion renames through the parent handle and
+/// does not care that the staged directory is still open, so the handle
+/// stays available for cleanup if the promotion itself fails.
+#[cfg(unix)]
+fn release_staged_handle_before_promotion(_staged_root: &mut Option<StagedRoot>) {}
 
 /// Builds the "Output already exists: <dir>/<root>" rejection via the
 /// shared constructor: the operator-chosen output directory renders
@@ -1343,10 +1443,10 @@ mod tests {
         assert_eq!(count, 0, "DeleteOnError must clean up .incomplete");
     }
 
-    /// `cleanup_incomplete_via_handle` removes entries relative to
-    /// the capability handle, NOT to a re-resolved path. Opens a
-    /// handle, renames the directory aside, mints a replacement,
-    /// and confirms the cleanup follows the original inode.
+    /// Cleanup removes entries relative to the capability handle, NOT
+    /// to a re-resolved path. Opens a handle, renames the directory
+    /// aside, mints a replacement, and confirms the cleanup follows
+    /// the original inode.
     ///
     /// Unix-only because Windows directory rename with an open
     /// handle has platform-specific semantics.
@@ -1369,7 +1469,7 @@ mod tests {
         fs::rename(&original, &moved).unwrap();
         fs::create_dir(&original).unwrap();
 
-        cleanup_incomplete_via_handle(&handle, OsStr::new("root.incomplete"));
+        StagedRoot::file(OsStr::new("root.incomplete")).remove(&handle);
 
         assert!(
             !moved.join("root.incomplete").exists(),
@@ -1378,6 +1478,67 @@ mod tests {
         assert!(
             original.read_dir().unwrap().next().is_none(),
             "the replacement dir at the original path must be untouched",
+        );
+    }
+
+    /// A directory planted at the working name of a staged FILE root
+    /// must survive cleanup. Choosing the removal from what is on disk
+    /// would recursively delete a tree this run never created; choosing
+    /// it from what this run staged unlinks a name only.
+    #[test]
+    fn cleanup_of_staged_file_leaves_substituted_directory() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let handle = platform::open_anchor(tmp.path()).unwrap();
+
+        // The staged file is gone: a local writer moved it aside and
+        // left a directory of their own at the working name.
+        let substitute = tmp.path().join("root.incomplete");
+        fs::create_dir(&substitute).unwrap();
+        fs::write(substitute.join("keep.txt"), b"not ours").unwrap();
+
+        StagedRoot::file(OsStr::new("root.incomplete")).remove(&handle);
+
+        assert_eq!(
+            fs::read(substitute.join("keep.txt")).unwrap(),
+            b"not ours",
+            "a substituted directory must not be removed",
+        );
+    }
+
+    /// The directory-root counterpart: cleanup removes the staged tree
+    /// through its own handle, so a directory planted at the working
+    /// name survives and the staged tree is removed even after it was
+    /// moved aside.
+    ///
+    /// Unix-only: Windows closes the staged handle before promotion and
+    /// removes by name, so it has no handle left to follow.
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_of_staged_directory_follows_the_staged_handle() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let handle = platform::open_anchor(tmp.path()).unwrap();
+
+        let staged_path = tmp.path().join("root.incomplete");
+        let staged_handle = platform::mkdir_strict(&handle, OsStr::new("root.incomplete")).unwrap();
+        fs::write(staged_path.join("plaintext.txt"), b"staged plaintext").unwrap();
+
+        // A local writer moves the staged tree aside and leaves their
+        // own directory at the working name.
+        let moved = tmp.path().join("moved-aside");
+        fs::rename(&staged_path, &moved).unwrap();
+        fs::create_dir(&staged_path).unwrap();
+        fs::write(staged_path.join("keep.txt"), b"not ours").unwrap();
+
+        StagedRoot::directory(OsStr::new("root.incomplete"), Some(staged_handle)).remove(&handle);
+
+        assert!(
+            !moved.exists(),
+            "the staged tree must be removed wherever it was moved to",
+        );
+        assert_eq!(
+            fs::read(staged_path.join("keep.txt")).unwrap(),
+            b"not ours",
+            "a substituted directory must not be removed",
         );
     }
 

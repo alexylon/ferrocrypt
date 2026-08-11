@@ -486,7 +486,7 @@ mod tests {
         let stream_nonce = [0x07u8; crypto::stream::STREAM_NONCE_SIZE];
         let entry = recipient::RecipientEntry::native(
             recipient::policy::NativeRecipientType::Argon2id,
-            vec![0u8; recipient::argon2id::BODY_LENGTH],
+            recipient::argon2id::test_body_with_valid_kdf_params(),
         )
         .unwrap();
         let built = container::build_encrypted_header(

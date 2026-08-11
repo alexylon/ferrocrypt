@@ -327,6 +327,26 @@ fn invalid_length_fixtures_reject_at_open_before_any_credential() {
     }
 }
 
+/// FORMAT.md §4.1 makes `kdf_params` outside the §2.2 bounds a reader
+/// rejection, and §3.7 places it in the same step-8 preflight as body
+/// length. These fixtures must therefore reject at [`Decryptor::open`]
+/// too, rather than being classified as passphrase files and only
+/// failing once a passphrase has been collected.
+#[test]
+fn invalid_kdf_fixtures_reject_at_open_before_any_credential() {
+    let suite = suite_dir();
+    for fixture in [
+        "cases/kdf-mem-over-max.fcr",
+        "cases/kdf-lanes-zero.fcr",
+        "cases/kdf-time-over-max.fcr",
+    ] {
+        match Decryptor::open(suite.join(fixture)) {
+            Err(CryptoError::InvalidKdfParams(_)) => {}
+            other => panic!("{fixture}: expected InvalidKdfParams at open, got {other:?}"),
+        }
+    }
+}
+
 /// Every committed case or key file must be exercised by at least one
 /// manifest row, either as the row's action target or as its private-key
 /// credential. A fixture without a row is dead weight, and a row that

@@ -29,6 +29,7 @@ use crate::crypto::kdf::{
     ARGON2_SALT_SIZE, KDF_PARAMS_SIZE, KdfLimit, KdfParams, check_passphrase_len,
 };
 use crate::crypto::keys::{FileKey, derive_passphrase_wrap_key, random_bytes};
+use crate::error::FormatDefect;
 
 /// Wire-format `type_name` for this recipient.
 pub(crate) const TYPE_NAME: &str = "argon2id";
@@ -44,6 +45,32 @@ const SALT_OFFSET: usize = 0;
 const KDF_PARAMS_OFFSET: usize = SALT_OFFSET + ARGON2_SALT_SIZE;
 const WRAP_NONCE_OFFSET: usize = KDF_PARAMS_OFFSET + KDF_PARAMS_SIZE;
 const WRAPPED_FILE_KEY_OFFSET: usize = WRAP_NONCE_OFFSET + WRAP_NONCE_SIZE;
+
+/// `FORMAT.md` §4.1 pre-cryptographic checks for a parsed `argon2id`
+/// body: `kdf_params` outside the §2.2 structural bounds rejects the
+/// entry with no credential and no key derivation. The exact 116-byte
+/// length is enforced by the caller via the native registry.
+///
+/// Structural bounds only. The caller's [`KdfLimit`] resource policy is
+/// deliberately **not** applied here, because the public API takes that
+/// policy after the cheap classification step ([`crate::Decryptor::open`]
+/// precedes [`crate::PassphraseDecryptor::kdf_limit`]); [`unwrap`]
+/// applies it at the point the KDF would actually run.
+///
+/// [`unwrap`] does not call this function, and does not need to: it
+/// reaches the identical rule through `KdfParams::from_bytes`, because
+/// it cannot run Argon2id without parsing these same bytes. The rule
+/// therefore holds for a body that never came through the preflight.
+pub(crate) fn validate_body_preflight(body: &[u8]) -> Result<(), CryptoError> {
+    let kdf_bytes: &[u8; KDF_PARAMS_SIZE] = body
+        .get(KDF_PARAMS_OFFSET..KDF_PARAMS_OFFSET + KDF_PARAMS_SIZE)
+        .and_then(|slice| slice.try_into().ok())
+        .ok_or(CryptoError::InvalidFormat(
+            FormatDefect::MalformedRecipientEntry,
+        ))?;
+    KdfParams::from_bytes_structural(kdf_bytes)?;
+    Ok(())
+}
 
 /// Wraps `file_key` for a passphrase recipient.
 ///
@@ -211,6 +238,32 @@ impl<'a> crate::protocol::DecryptionCredential for PassphraseCredential<'a> {
     }
 }
 
+/// In-crate test helper: a synthetic body of the canonical length
+/// carrying `kdf_params`, every other field zero. Keeps the field
+/// offsets in the module that owns them, so a test can choose exactly
+/// which KDF value it wants on the wire.
+#[cfg(test)]
+pub(crate) fn test_body_with_kdf_params(kdf_params: &KdfParams) -> Vec<u8> {
+    let mut body = vec![0u8; BODY_LENGTH];
+    body[KDF_PARAMS_OFFSET..KDF_PARAMS_OFFSET + KDF_PARAMS_SIZE]
+        .copy_from_slice(&kdf_params.to_bytes());
+    body
+}
+
+/// In-crate test helper: [`test_body_with_kdf_params`] with the cheap
+/// test parameters.
+///
+/// Tests that only need a well-shaped `argon2id` entry — classification,
+/// mixing, mode routing — must not fill the whole body with zeros: zero
+/// `mem_cost` / `time_cost` / `lanes` are outside the `FORMAT.md` §2.2
+/// bounds, so such a body is a must-reject fixture and would make those
+/// tests assert against malformed input. The cheap parameters also keep
+/// the body usable by a test that does reach [`unwrap`].
+#[cfg(test)]
+pub(crate) fn test_body_with_valid_kdf_params() -> Vec<u8> {
+    test_body_with_kdf_params(&KdfParams::test_fast_default())
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -351,6 +404,59 @@ mod tests {
                 assert_eq!(type_name, TYPE_NAME);
             }
             other => panic!("expected RecipientUnwrapFailed, got {other:?}"),
+        }
+    }
+
+    /// The step-8 preflight must accept every body [`wrap`] produces —
+    /// the writer and the reader share `KdfParams::validate_structural`,
+    /// and this pins that they cannot drift apart — and reject each KDF
+    /// field independently once it leaves the `FORMAT.md` §2.2 bounds.
+    #[test]
+    fn preflight_accepts_a_wrapped_body_and_rejects_out_of_range_kdf_params() {
+        let file_key = FileKey::from_bytes_for_tests([0x33u8; FILE_KEY_SIZE]);
+        let pass = passphrase("p");
+        let valid = wrap(&file_key, &pass, &KdfParams::test_fast_default(), &noop()).unwrap();
+        validate_body_preflight(&valid).expect("a wrapped body must pass the preflight");
+
+        for (label, params) in [
+            (
+                "lanes",
+                KdfParams {
+                    lanes: 0,
+                    ..KdfParams::test_fast_default()
+                },
+            ),
+            (
+                "time_cost",
+                KdfParams {
+                    time_cost: 0,
+                    ..KdfParams::test_fast_default()
+                },
+            ),
+            (
+                "mem_cost",
+                KdfParams {
+                    mem_cost: KdfParams::MAX_MEM_COST + 1,
+                    ..KdfParams::test_fast_default()
+                },
+            ),
+        ] {
+            let mut body = valid;
+            body[KDF_PARAMS_OFFSET..KDF_PARAMS_OFFSET + KDF_PARAMS_SIZE]
+                .copy_from_slice(&params.to_bytes());
+            match validate_body_preflight(&body) {
+                Err(CryptoError::InvalidKdfParams(_)) => {}
+                other => {
+                    panic!("expected InvalidKdfParams for out-of-range {label}, got {other:?}")
+                }
+            }
+        }
+
+        // A body too short to hold `kdf_params` is malformed framing,
+        // not a KDF-policy question.
+        match validate_body_preflight(&valid[..KDF_PARAMS_OFFSET + 1]) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)) => {}
+            other => panic!("expected MalformedRecipientEntry for a short body, got {other:?}"),
         }
     }
 

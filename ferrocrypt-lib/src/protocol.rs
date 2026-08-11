@@ -1469,7 +1469,7 @@ mod tests {
         let synthetic_argon2id = RecipientEntry {
             type_name: argon2id::TYPE_NAME.to_string(),
             recipient_flags: 0,
-            body: vec![0u8; argon2id::BODY_LENGTH],
+            body: argon2id::test_body_with_valid_kdf_params(),
         };
         let entries = [
             synthetic_argon2id,
@@ -1723,13 +1723,13 @@ mod tests {
         let keys_dir = tmp.path().join("keys");
         let (_pub_a, priv_a, pass_a) = keypair_fixture(&keys_dir, "alice", "alice-pass")?;
 
-        // Single argon2id recipient with a synthetic body. The
-        // cross-mode check fires before any AEAD/KDF runs, so the body
-        // contents are irrelevant — `classify_recipient_mode` only
-        // looks at type_name.
+        // Single argon2id recipient with a synthetic body. The body has
+        // to pass the step-8 structural preflight, so its `kdf_params`
+        // are valid; the cross-mode check then fires before any AEAD or
+        // KDF runs.
         let synthetic = RecipientEntry::native(
             NativeRecipientType::Argon2id,
-            vec![0u8; argon2id::BODY_LENGTH],
+            argon2id::test_body_with_valid_kdf_params(),
         )?;
         let file_key = FileKey::generate().unwrap();
         let fcr = tmp.path().join("passphrase.fcr");

@@ -69,11 +69,12 @@ impl NativeRecipientType {
     /// variant (`FORMAT.md` §3.7 step 8). The caller has already
     /// verified the exact [`Self::body_len`]; this hook rejects a body
     /// whose content is structurally invalid, with no credential, KDF,
-    /// or key agreement. `argon2id` defines no such check; `x25519`
-    /// rejects an all-zero or non-canonical ephemeral public key.
+    /// or key agreement. `argon2id` rejects `kdf_params` outside the
+    /// `FORMAT.md` §2.2 bounds; `x25519` rejects an all-zero or
+    /// non-canonical ephemeral public key.
     pub(crate) fn validate_body(self, body: &[u8]) -> Result<(), CryptoError> {
         match self {
-            Self::Argon2id => Ok(()),
+            Self::Argon2id => argon2id::validate_body_preflight(body),
             Self::X25519 => x25519::validate_body_preflight(body),
         }
     }
@@ -464,7 +465,8 @@ pub(crate) fn classify_recipient_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::FormatDefect;
+    use crate::crypto::kdf::KdfParams;
+    use crate::error::{FormatDefect, InvalidKdfParams};
     use crate::recipient::entry::RECIPIENT_FLAG_CRITICAL;
 
     #[test]
@@ -567,7 +569,27 @@ mod tests {
     fn argon2id_entry() -> RecipientEntry {
         RecipientEntry::native(
             NativeRecipientType::Argon2id,
-            vec![0u8; argon2id::BODY_LENGTH],
+            argon2id::test_body_with_valid_kdf_params(),
+        )
+        .unwrap()
+    }
+
+    /// Companion of [`argon2id_entry`] carrying a canonical-length body
+    /// whose `kdf_params` are outside the `FORMAT.md` §2.2 structural
+    /// bounds.
+    ///
+    /// Exactly one field is out of range, so the reported
+    /// [`InvalidKdfParams`] variant identifies the field this fixture
+    /// set and does not depend on the order `validate_structural`
+    /// happens to check the three fields in.
+    fn argon2id_entry_with_invalid_kdf_params() -> RecipientEntry {
+        let params = KdfParams {
+            lanes: 0,
+            ..KdfParams::test_fast_default()
+        };
+        RecipientEntry::native(
+            NativeRecipientType::Argon2id,
+            argon2id::test_body_with_kdf_params(&params),
         )
         .unwrap()
     }
@@ -841,6 +863,39 @@ mod tests {
         match err {
             CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry) => {}
             other => panic!("expected MalformedRecipientEntry for second slot, got {other:?}"),
+        }
+    }
+
+    /// FORMAT.md §4.1 makes `kdf_params` outside the §2.2 bounds a
+    /// reader rejection, and §3.7 puts it in the step-8 preflight —
+    /// before any credential is supplied, so a caller is never asked
+    /// for a passphrase that could not open the file.
+    #[test]
+    fn classify_rejects_argon2id_with_invalid_kdf_params() {
+        let err = classify_recipient_mode(&[argon2id_entry_with_invalid_kdf_params()]).unwrap_err();
+        match err {
+            CryptoError::InvalidKdfParams(InvalidKdfParams::Parallelism(0)) => {}
+            other => panic!("expected InvalidKdfParams(Parallelism(0)), got {other:?}"),
+        }
+    }
+
+    /// Step 8 outranks step 9 for the Argon2id KDF fields exactly as it
+    /// does for body length: a file that is both malformed and
+    /// illegally mixed reports the malformed KDF, whichever position
+    /// the offending entry holds.
+    #[test]
+    fn classify_reports_invalid_kdf_params_before_illegal_mixing() {
+        for entries in [
+            vec![argon2id_entry_with_invalid_kdf_params(), x25519_entry()],
+            vec![x25519_entry(), argon2id_entry_with_invalid_kdf_params()],
+        ] {
+            match classify_recipient_mode(&entries) {
+                Err(CryptoError::InvalidKdfParams(InvalidKdfParams::Parallelism(0))) => {}
+                other => panic!(
+                    "expected the KDF defect to take precedence over mixing regardless of \
+                     entry order, got {other:?}"
+                ),
+            }
         }
     }
 

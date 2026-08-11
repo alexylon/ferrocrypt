@@ -589,7 +589,10 @@ entry before starting the mixing checks in step 9. Step 9 MUST NOT begin unless
 every step 8 check has succeeded; if a file has both a recipient-specific
 structural defect and an illegal recipient mix, the step 8 structural rejection
 takes precedence. The step 8 checks include the exact 116-byte `argon2id` body
-length and exact 104-byte `x25519` body length. A reader MUST NOT unlock a
+length, its `kdf_params` against the §2.2 bounds, and the exact 104-byte
+`x25519` body length. Local KDF resource caps are not part of step 8, because a
+reader MAY take that policy from its caller after classification; a reader MUST
+still apply them before Argon2id runs. A reader MUST NOT unlock a
 supplied private key (including running its unlock KDF), perform X25519 or
 another KEM operation, or run a recipient KDF until this preflight succeeds.
 
@@ -687,6 +690,12 @@ Readers MUST reject an `argon2id` entry if:
 - KDF parameters are outside the structural bounds in §2.2;
 - local KDF resource caps are exceeded and the caller has not opted in;
 - the file violates the `argon2id` mixing policy.
+
+The first three are §3.7 step 8 checks and MUST be reported ahead of the mixing
+violation, because a malformed entry is a property of the entry itself while a
+mixing violation is a property of the list. The resource cap is not a step 8
+check: it is caller policy that a reader MAY receive after classification, and
+MUST apply before Argon2id runs.
 
 The `argon2id` recipient test suite MUST include valid, wrong-passphrase,
 malformed-KDF, resource-cap, tamper covering each authenticated field

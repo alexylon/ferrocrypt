@@ -165,6 +165,20 @@ pub(crate) const BODY_LEN_MAX: u32 = 16_777_216;
 /// Recommended local cap on `body_len` for untrusted input.
 pub(crate) const BODY_LEN_LOCAL_CAP_DEFAULT: u32 = 8_192;
 
+/// Largest aggregate header-MAC input the format can demand: every
+/// recipient slot is a candidate, and each candidate MACs the whole
+/// `prefix || header` (`FORMAT.md` §3.6). The product of the two
+/// structural maxima, so no `.fcr` file can ever exceed it.
+pub(crate) const HEADER_MAC_WORK_MAX: u64 =
+    RECIPIENT_COUNT_MAX as u64 * (PREFIX_SIZE as u64 + HEADER_LEN_MAX as u64);
+
+/// Recommended local cap on aggregate header-MAC input for untrusted
+/// input (`FORMAT.md` §3.2). Set to the most work the other two
+/// recommended caps can already demand together, so it rejects nothing
+/// they accept and only applies once a caller raises one of them.
+pub(crate) const HEADER_MAC_WORK_LOCAL_CAP_DEFAULT: u64 = RECIPIENT_COUNT_LOCAL_CAP_DEFAULT as u64
+    * (PREFIX_SIZE as u64 + HEADER_LEN_LOCAL_CAP_DEFAULT as u64);
+
 /// Size of the `.fcr` header MAC tag (`HMAC-SHA3-256`), in bytes. Per
 /// `FORMAT.md` §3.6, the tag immediately follows `header` and precedes
 /// the encrypted payload.

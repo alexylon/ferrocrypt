@@ -369,10 +369,22 @@ Recommended local caps for untrusted input:
 header_len <= 1,048,576
 recipient_count <= 64
 per-recipient body_len <= 8,192
+supported_recipient_count * (12 + header_len) <= 67,109,632
 ```
 
 Callers MAY raise local caps for specific use cases. Local caps are resource
 policy, not format incompatibility.
+
+The fourth cap bounds aggregate header-MAC input, because §3.6 has every
+candidate recipient authenticate the whole `prefix || header`: a file's
+verification cost is the product of its recipient count and its header size, not
+the sum, so the first three caps bound each factor without bounding the work.
+Its recommended value is the product of the first two, and it therefore rejects
+nothing they accept on their own. Readers SHOULD evaluate it after §3.7 step 9
+and before step 10, so a file over the cap is refused before any private key is
+unlocked and before any recipient KDF or header MAC runs. Writers SHOULD apply
+it to the entry list they are about to seal, counting every supported entry,
+since a reader cannot know which entries will unwrap until after that work.
 
 Recipient type specifications MAY define smaller structural body limits than the
 global `body_len` limit. Implementations SHOULD apply recipient-specific local
@@ -580,6 +592,12 @@ takes precedence. The step 8 checks include the exact 116-byte `argon2id` body
 length and exact 104-byte `x25519` body length. A reader MUST NOT unlock a
 supplied private key (including running its unlock KDF), perform X25519 or
 another KEM operation, or run a recipient KDF until this preflight succeeds.
+
+Between step 9 and step 10, readers SHOULD reject a file whose supported
+recipient count multiplied by `12 + header_len` exceeds the aggregate
+header-MAC cap from §3.2. Step 11 authenticates the whole `prefix || header`
+once per candidate, so that product — not `header_len` alone — is the work a
+file can demand, and the check belongs where nothing expensive has run yet.
 
 A recipient unwrap is not successful until the header MAC verifies.
 

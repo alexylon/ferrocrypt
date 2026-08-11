@@ -58,7 +58,9 @@ use crate::fs::paths::{
 use crate::recipient::entry::{RecipientBody, RecipientEntry};
 #[cfg(test)]
 use crate::recipient::policy::MixingPolicy;
-use crate::recipient::policy::{NativeMixingRule, NativeRecipientType, classify_recipient_mode};
+use crate::recipient::policy::{
+    NativeMixingRule, NativeRecipientType, classify_recipient_mode, count_supported_recipients,
+};
 use crate::{ProgressEvent, UnauthenticatedRecipientMode};
 
 /// Encrypt-side scheme: turn a [`FileKey`] into a recipient body of
@@ -324,10 +326,47 @@ pub(crate) fn preflight_header_write_limits(
     let header_len = u32::try_from(header_len_u64).unwrap_or(u32::MAX);
     limits.enforce_header_len(header_len)?;
 
+    // Every entry names the same native type, so every one of them is a
+    // candidate the reader may have to try. Counting all of them against
+    // the budget is what keeps the sealed file inside the aggregate
+    // header-MAC bound for any credential.
+    limits.enforce_header_mac_work(recipient_count, header_len)?;
+
     Ok(())
 }
 
 // ─── Decrypt ───────────────────────────────────────────────────────────────
+
+/// Runs the reader-side recipient preflight over a structurally parsed
+/// header and returns the file's classified recipient mode.
+///
+/// Covers `FORMAT.md` §3.7 steps 6-9 via [`classify_recipient_mode`],
+/// then the aggregate header-MAC bound that sits between steps 9 and
+/// 10. Nothing here unlocks a key, derives one, or authenticates
+/// anything.
+///
+/// Both reader entry points go through this one function —
+/// [`DecryptSession::open`] and [`crate::probe_recipient_mode_with_limits`]
+/// — so a probe cannot report a file as classifiable that the decrypt
+/// path would refuse under the same limits, and a preflight rule added
+/// later cannot reach one path but not the other.
+pub(crate) fn classify_recipients_within_limits(
+    parsed: &ParsedEncryptedHeader,
+    limits: HeaderReadLimits,
+) -> Result<UnauthenticatedRecipientMode, CryptoError> {
+    let mode = classify_recipient_mode(&parsed.recipient_entries)?;
+
+    // Bound what the slot loop can be made to hash. Every candidate
+    // that unwraps re-authenticates the whole header, so the cost is
+    // count times header size. Checked here, a file over the budget is
+    // refused before any private-key unlock.
+    limits.enforce_header_mac_work(
+        count_supported_recipients(&parsed.recipient_entries),
+        parsed.header_len(),
+    )?;
+
+    Ok(mode)
+}
 
 /// An encrypted input prepared for decryption. It contains the opened file,
 /// its structurally parsed header, and its classified recipient mode.
@@ -360,12 +399,12 @@ impl DecryptSession {
         // work, enforcing local limits before allocation.
         let parsed = read_encrypted_header(&mut encrypted_file, header_read_limits)?;
 
-        // Steps 5-9: reject unsupported critical recipients, native
-        // entries with invalid flags or body lengths, and invalid
-        // recipient combinations before any KDF or private-key work.
-        // `classify_recipient_mode` runs the per-entry structural pass
-        // and then the mixing policy (FORMAT.md §3.7 preflight).
-        let mode = classify_recipient_mode(&parsed.recipient_entries)?;
+        // Steps 5-9 plus the aggregate work bound: reject unsupported
+        // critical recipients, native entries with invalid flags or
+        // body lengths, invalid recipient combinations, and a recipient
+        // list that would cost too much to verify — all before any KDF
+        // or private-key work.
+        let mode = classify_recipients_within_limits(&parsed, header_read_limits)?;
 
         Ok(Self {
             encrypted_file,

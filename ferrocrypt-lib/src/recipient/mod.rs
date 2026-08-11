@@ -19,7 +19,7 @@
 //! - [`policy`] — `NativeRecipientType` registry, internal
 //!   `NativeMixingRule` enforcement type, public `MixingPolicy` diagnostic
 //!   projection, `enforce_recipient_mixing_policy`,
-//!   `classify_recipient_mode`.
+//!   `classify_recipient_mode`, `count_supported_recipients`.
 //! - [`native`] — per-algorithm scheme implementations:
 //!   [`native::argon2id`] and [`native::x25519`].
 //!
@@ -41,4 +41,3 @@ pub(crate) mod policy;
 pub(crate) use entry::{RecipientEntry, parse_recipient_entries};
 pub(crate) use name::{TYPE_NAME_MAX_LEN, validate_type_name_grammar};
 pub(crate) use native::{argon2id, x25519};
-pub(crate) use policy::classify_recipient_mode;

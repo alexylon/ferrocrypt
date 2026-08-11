@@ -448,7 +448,10 @@ impl Decryptor {
     /// not contain a FerroCrypt header return [`CryptoError::InvalidFormat`]
     /// with [`FormatDefect::BadMagic`]. Malformed headers, unsupported
     /// versions, unknown critical recipients, and illegal recipient mixes return
-    /// their corresponding `CryptoError` or [`FormatDefect`] variants.
+    /// their corresponding `CryptoError` or [`FormatDefect`] variants. A header
+    /// shape, or an aggregate header-MAC work total, above
+    /// [`HeaderReadLimits::default`] returns the matching `*CapExceeded`
+    /// variant; use [`Decryptor::open_with_limits`] to raise the caps.
     pub fn open(input: impl AsRef<Path>) -> Result<Self, CryptoError> {
         Self::open_inner(input.as_ref(), None)
     }
@@ -1011,7 +1014,8 @@ pub fn generate_key_pair(
 /// blocking. Returns [`CryptoError::InvalidFormat`] when the magic matches
 /// but the prefix, header, recipient entries, or recipient mixing policy are
 /// malformed or unsupported. Returns cap-exceeded variants when the declared
-/// header shape exceeds [`HeaderReadLimits::default`].
+/// header shape, or the aggregate header-MAC work its recipient list implies,
+/// exceeds [`HeaderReadLimits::default`].
 pub fn probe_recipient_mode(
     file_path: impl AsRef<Path>,
 ) -> Result<Option<UnauthenticatedRecipientMode>, CryptoError> {
@@ -1083,9 +1087,11 @@ pub fn probe_recipient_mode_with_limits(
     file.seek(SeekFrom::Start(0))?;
     let parsed = container::read_encrypted_header(&mut file, limits)?;
 
-    // Structural classification only. `classify_recipient_mode`
-    // does not verify the header MAC or run any recipient unwrap.
-    let mode = recipient::classify_recipient_mode(&parsed.recipient_entries)?;
+    // Structural classification and resource policy only — the same
+    // preflight the decrypt path runs, so this probe cannot report a
+    // file the reader would then refuse under these limits. No header
+    // MAC and no recipient unwrap happen here.
+    let mode = protocol::classify_recipients_within_limits(&parsed, limits)?;
     Ok(Some(mode))
 }
 

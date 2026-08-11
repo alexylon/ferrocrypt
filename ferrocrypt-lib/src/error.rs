@@ -318,6 +318,7 @@ impl std::fmt::Display for PathSuffix<'_> {
 /// - The `*CapExceeded` variants ([`CryptoError::HeaderLenCapExceeded`],
 ///   [`CryptoError::RecipientCountCapExceeded`],
 ///   [`CryptoError::RecipientBodyCapExceeded`],
+///   [`CryptoError::HeaderMacWorkCapExceeded`],
 ///   [`CryptoError::RecipientStringCapExceeded`],
 ///   [`CryptoError::KdfResourceCapExceeded`],
 ///   [`CryptoError::KdfTimeCostCapExceeded`],
@@ -513,6 +514,25 @@ pub enum CryptoError {
         body_len: u32,
         /// Maximum per-recipient body length accepted by local policy, in bytes.
         local_cap: u32,
+    },
+    /// Verifying every recipient in this file would hash more header
+    /// bytes than the local resource cap allows.
+    ///
+    /// Each candidate recipient authenticates the whole `prefix ||
+    /// header` (`FORMAT.md` §3.6), so the work is the recipient count
+    /// times the header size. The per-dimension caps bound each factor
+    /// on its own; this one bounds the product. Raise it with
+    /// [`crate::HeaderReadLimits::max_header_mac_work_bytes`] for files
+    /// from a known origin that legitimately combine many recipients
+    /// with a large header. Readers report it before any private-key
+    /// unlock, KDF, or MAC work, and writers before sealing, so neither
+    /// side can be made to do that work by the file itself.
+    #[error("Recipient verification work too large ({work_bytes} bytes, limit {local_cap})")]
+    HeaderMacWorkCapExceeded {
+        /// Total header bytes all candidate recipients would authenticate.
+        work_bytes: u64,
+        /// Maximum aggregate header-MAC input accepted by local policy, in bytes.
+        local_cap: u64,
     },
     /// Bech32 recipient string exceeds the caller-configured local
     /// length cap.

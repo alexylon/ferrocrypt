@@ -1066,6 +1066,205 @@ fn encryptor_with_recipients_above_default_rejects_without_opt_in() {
     assert!(outcome.output_path.exists());
 }
 
+/// A recipient count whose implied verification work sits comfortably
+/// above [`HeaderReadLimits::HEADER_MAC_WORK_BYTES_DEFAULT`], without
+/// being so large that building the file is slow.
+const WORK_CAP_RECIPIENT_COUNT: usize = 1024;
+
+/// Builds `WORK_CAP_RECIPIENT_COUNT` copies of one recipient. Every
+/// entry wraps the same file key, so every one of them unwraps under
+/// the matching private key — the shape that turns recipient count into
+/// repeated whole-header authentication.
+fn work_cap_recipients(public_key_path: &Path) -> Vec<PublicKey> {
+    (0..WORK_CAP_RECIPIENT_COUNT)
+        .map(|_| PublicKey::from_key_file(public_key_path).expect("read public key"))
+        .collect()
+}
+
+/// Limits that permit the recipient count but leave the work budget at
+/// its default, so only the aggregate bound can reject.
+fn count_raised_limits() -> HeaderReadLimits {
+    HeaderReadLimits::default().max_recipient_count(WORK_CAP_RECIPIENT_COUNT as u16)
+}
+
+/// Limits that permit both the recipient count and the work it implies.
+fn count_and_work_raised_limits() -> HeaderReadLimits {
+    count_raised_limits()
+        .max_header_mac_work_bytes(HeaderReadLimits::HEADER_MAC_WORK_BYTES_STRUCTURAL_MAX)
+}
+
+/// Raising `max_recipient_count` alone must not buy an unbounded
+/// verification cost. Each recipient authenticates the whole header, so
+/// the work is count times header size; the writer refuses the list
+/// before sealing anything, and naming
+/// [`HeaderReadLimits::max_header_mac_work_bytes`] is what unlocks it.
+#[test]
+fn encryptor_refuses_a_recipient_list_above_the_header_mac_work_cap() {
+    let work = fresh_workspace("work_cap_writer_rejects");
+    let keys = work.join("keys");
+    fs::create_dir_all(&keys).unwrap();
+    let kg = generate_key_pair(&keys, pass(), |_| {}).expect("keygen");
+    let input = work.join("data.txt");
+    fs::write(&input, b"x").unwrap();
+    let out_dir = work.join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+
+    let result = Encryptor::with_public_keys(work_cap_recipients(&kg.public_key_path))
+        .expect("with_public_keys")
+        .header_read_limits(count_raised_limits())
+        .write(&input, &out_dir, |_| {});
+
+    match result {
+        Err(CryptoError::HeaderMacWorkCapExceeded {
+            work_bytes,
+            local_cap,
+        }) => {
+            assert_eq!(local_cap, HeaderReadLimits::HEADER_MAC_WORK_BYTES_DEFAULT);
+            assert!(work_bytes > local_cap);
+        }
+        other => panic!("expected HeaderMacWorkCapExceeded, got {other:?}"),
+    }
+    assert!(
+        fs::read_dir(&out_dir).unwrap().next().is_none(),
+        "the rejected encrypt left output behind",
+    );
+}
+
+/// The other half of the contract: a budget the file fits inside admits
+/// it on both sides. Without this the cap could pass its rejection test
+/// by rejecting everything.
+///
+/// The rejection reports exactly what the file needs, so feeding that
+/// number back as the budget also pins the comparison as inclusive.
+#[test]
+fn raising_the_header_mac_work_cap_restores_the_round_trip() {
+    let work = fresh_workspace("work_cap_round_trip");
+    let keys = work.join("keys");
+    fs::create_dir_all(&keys).unwrap();
+    let kg = generate_key_pair(&keys, pass(), |_| {}).expect("keygen");
+    let input = work.join("data.txt");
+    fs::write(&input, b"many recipients payload").unwrap();
+    let out_dir = work.join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+
+    let recipients = || -> Vec<PublicKey> {
+        (0..8)
+            .map(|_| PublicKey::from_key_file(&kg.public_key_path).expect("read public key"))
+            .collect()
+    };
+
+    // A budget one byte short of what this list needs. Every other cap
+    // is left at its default and none of them is close, so only the
+    // aggregate bound can be what rejects.
+    let needed = {
+        let starved = HeaderReadLimits::default().max_header_mac_work_bytes(1);
+        match Encryptor::with_public_keys(recipients())
+            .expect("with_public_keys")
+            .header_read_limits(starved)
+            .write(&input, &out_dir, |_| {})
+        {
+            Err(CryptoError::HeaderMacWorkCapExceeded { work_bytes, .. }) => work_bytes,
+            other => panic!("expected HeaderMacWorkCapExceeded, got {other:?}"),
+        }
+    };
+    let exact = HeaderReadLimits::default().max_header_mac_work_bytes(needed);
+    match Encryptor::with_public_keys(recipients())
+        .expect("with_public_keys")
+        .header_read_limits(HeaderReadLimits::default().max_header_mac_work_bytes(needed - 1))
+        .write(&input, &out_dir, |_| {})
+    {
+        Err(CryptoError::HeaderMacWorkCapExceeded { .. }) => {}
+        other => panic!("expected one byte short of the budget to reject, got {other:?}"),
+    }
+
+    let outcome = Encryptor::with_public_keys(recipients())
+        .expect("with_public_keys")
+        .header_read_limits(exact)
+        .write(&input, &out_dir, |_| {})
+        .expect("encrypt at exactly the budget the file needs");
+
+    let restore = work.join("restored");
+    fs::create_dir_all(&restore).unwrap();
+    let decrypted =
+        match Decryptor::open_with_limits(&outcome.output_path, exact).expect("open_with_limits") {
+            Decryptor::PrivateKey(d) => d
+                .decrypt(
+                    PrivateKey::from_key_file(&kg.private_key_path, pass()),
+                    &restore,
+                    |_| {},
+                )
+                .expect("decrypt"),
+            other => panic!("expected private-key decryptor, got {other:?}"),
+        };
+    assert_eq!(
+        fs::read(decrypted.output_path).unwrap(),
+        b"many recipients payload"
+    );
+}
+
+/// A reader holding the default work budget refuses such a file before
+/// unlocking `private.key`. The unlock is the expensive step that
+/// precedes the recipient loop, so rejecting after it would leave the
+/// cost the cap exists to prevent.
+#[test]
+fn decrypt_refuses_work_above_the_cap_before_unlocking_the_private_key() {
+    let work = fresh_workspace("work_cap_reader_rejects");
+    let keys = work.join("keys");
+    fs::create_dir_all(&keys).unwrap();
+    let kg = generate_key_pair(&keys, pass(), |_| {}).expect("keygen");
+    let input = work.join("data.txt");
+    fs::write(&input, b"payload").unwrap();
+    let out_dir = work.join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+
+    let outcome = Encryptor::with_public_keys(work_cap_recipients(&kg.public_key_path))
+        .expect("with_public_keys")
+        .header_read_limits(count_and_work_raised_limits())
+        .write(&input, &out_dir, |_| {})
+        .expect("encrypt with the work cap raised");
+
+    // The count cap is raised so it cannot be what rejects; only the
+    // work budget is left at its default.
+    match probe_recipient_mode_with_limits(&outcome.output_path, count_raised_limits()) {
+        Err(CryptoError::HeaderMacWorkCapExceeded { .. }) => {}
+        other => panic!("expected HeaderMacWorkCapExceeded from the probe, got {other:?}"),
+    }
+
+    let decryptor =
+        match Decryptor::open_with_limits(&outcome.output_path, count_and_work_raised_limits())
+            .expect("open_with_limits")
+        {
+            Decryptor::PrivateKey(d) => d,
+            other => panic!("expected private-key decryptor, got {other:?}"),
+        };
+
+    let unlock_events = std::cell::Cell::new(0u32);
+    let restore = work.join("restored");
+    fs::create_dir_all(&restore).unwrap();
+    let err = decryptor
+        .header_read_limits(count_raised_limits())
+        .decrypt(
+            PrivateKey::from_key_file(&kg.private_key_path, pass()),
+            &restore,
+            |evt| {
+                if matches!(evt, ferrocrypt::ProgressEvent::UnlockingPrivateKey) {
+                    unlock_events.set(unlock_events.get() + 1);
+                }
+            },
+        )
+        .expect_err("expected the work cap to reject");
+
+    match err {
+        CryptoError::HeaderMacWorkCapExceeded { .. } => {}
+        other => panic!("expected HeaderMacWorkCapExceeded, got {other:?}"),
+    }
+    assert_eq!(
+        unlock_events.get(),
+        0,
+        "the private key was unlocked before the work cap rejected the file",
+    );
+}
+
 /// Writer-side `HeaderReadLimits` preflight applies to passphrase files
 /// too, not just public-key files. Tightening recipient_count
 /// below the one canonical `argon2id` slot rejects before Argon2id runs,

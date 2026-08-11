@@ -89,6 +89,11 @@ pub struct HeaderReadLimits {
     /// to known and unknown entries alike, so an unknown-recipient slot
     /// cannot force excessive allocation in a reader that would skip it.
     pub(crate) max_recipient_body_len: u32,
+    /// Hard cap on the aggregate header-MAC input a single file may
+    /// demand: `supported_recipient_count * (prefix + header)` bytes.
+    /// The three caps above bound one dimension each; this one bounds
+    /// their product, which is what the reader actually hashes.
+    pub(crate) max_header_mac_work_bytes: u64,
 }
 
 impl Default for HeaderReadLimits {
@@ -97,6 +102,7 @@ impl Default for HeaderReadLimits {
             max_header_len: Self::HEADER_LEN_DEFAULT,
             max_recipient_count: Self::RECIPIENT_COUNT_DEFAULT,
             max_recipient_body_len: Self::RECIPIENT_BODY_LEN_DEFAULT,
+            max_header_mac_work_bytes: Self::HEADER_MAC_WORK_BYTES_DEFAULT,
         }
     }
 }
@@ -112,6 +118,11 @@ impl HeaderReadLimits {
     /// (16 MiB, `FORMAT.md` §3.3). Builder methods clamp at this
     /// value.
     pub const RECIPIENT_BODY_LEN_STRUCTURAL_MAX: u32 = format::BODY_LEN_MAX;
+    /// Structural maximum for aggregate header-MAC input (about
+    /// 64 GiB): the largest recipient count times the largest
+    /// `prefix || header`, so no `.fcr` file can demand more. Builder
+    /// methods clamp at this value.
+    pub const HEADER_MAC_WORK_BYTES_STRUCTURAL_MAX: u64 = format::HEADER_MAC_WORK_MAX;
 
     /// Default value used by [`HeaderReadLimits::default`] for
     /// `max_header_len`. Mirrored on the writer side so the default
@@ -128,6 +139,13 @@ impl HeaderReadLimits {
     /// `max_recipient_body_len`. Applies symmetrically on encrypt
     /// (native entries sit well under this cap) and decrypt.
     pub const RECIPIENT_BODY_LEN_DEFAULT: u32 = format::BODY_LEN_LOCAL_CAP_DEFAULT;
+    /// Default value used by [`HeaderReadLimits::default`] for
+    /// `max_header_mac_work_bytes` (about 64 MiB): the most work
+    /// [`Self::RECIPIENT_COUNT_DEFAULT`] and [`Self::HEADER_LEN_DEFAULT`]
+    /// can demand together. It therefore rejects nothing the other
+    /// defaults accept, and only applies once a caller raises one of
+    /// them.
+    pub const HEADER_MAC_WORK_BYTES_DEFAULT: u64 = format::HEADER_MAC_WORK_LOCAL_CAP_DEFAULT;
 
     /// Sets the maximum accepted `prefix.header_len`, clamped at
     /// [`Self::HEADER_LEN_STRUCTURAL_MAX`]. Files declaring a longer
@@ -152,6 +170,24 @@ impl HeaderReadLimits {
     /// with [`CryptoError::RecipientBodyCapExceeded`].
     pub fn max_recipient_body_len(mut self, value: u32) -> Self {
         self.max_recipient_body_len = value.min(Self::RECIPIENT_BODY_LEN_STRUCTURAL_MAX);
+        self
+    }
+
+    /// Sets the maximum accepted aggregate header-MAC input, clamped at
+    /// [`Self::HEADER_MAC_WORK_BYTES_STRUCTURAL_MAX`]. Files needing
+    /// more reject with [`CryptoError::HeaderMacWorkCapExceeded`].
+    ///
+    /// Every candidate recipient that unwraps a file key verifies the
+    /// header MAC over the whole `prefix || header`, so a file's
+    /// verification cost is the product of its recipient count and its
+    /// header size, not the sum. Raising
+    /// [`max_recipient_count`](Self::max_recipient_count) or
+    /// [`max_header_len`](Self::max_header_len) therefore raises that
+    /// cost quadratically; this cap is what keeps the product bounded,
+    /// and callers who legitimately need larger files raise it
+    /// deliberately rather than by accident.
+    pub fn max_header_mac_work_bytes(mut self, value: u64) -> Self {
+        self.max_header_mac_work_bytes = value.min(Self::HEADER_MAC_WORK_BYTES_STRUCTURAL_MAX);
         self
     }
 
@@ -200,6 +236,37 @@ impl HeaderReadLimits {
         }
         Ok(())
     }
+
+    /// Single source of truth for the aggregate header-MAC work cap.
+    /// `candidate_count` is the number of recipient entries the reader
+    /// may have to try, and `header_len` is the header those entries sit
+    /// in; the product with [`format::PREFIX_SIZE`] is the total input
+    /// [`format::verify_header_mac`] can be handed for one file.
+    ///
+    /// Both readers call this right after recipient classification, so a
+    /// file over the cap is refused before any private-key unlock, KDF,
+    /// or MAC work. The writer calls it against the entry list it is
+    /// about to seal, so it never emits a file the same-configured
+    /// reader would refuse.
+    ///
+    /// The arithmetic is `u64` and saturating: the operands come from a
+    /// `u16`-bounded count and a `u32` length, so the true product
+    /// always fits, and saturation could only report a larger total.
+    pub(crate) fn enforce_header_mac_work(
+        &self,
+        candidate_count: usize,
+        header_len: u32,
+    ) -> Result<(), CryptoError> {
+        let per_candidate = (format::PREFIX_SIZE as u64).saturating_add(header_len as u64);
+        let work_bytes = (candidate_count as u64).saturating_mul(per_candidate);
+        if work_bytes > self.max_header_mac_work_bytes {
+            return Err(CryptoError::HeaderMacWorkCapExceeded {
+                work_bytes,
+                local_cap: self.max_header_mac_work_bytes,
+            });
+        }
+        Ok(())
+    }
 }
 
 // The reader enforces `max_recipient_body_len` inside
@@ -240,6 +307,17 @@ pub(crate) struct ParsedEncryptedHeader {
     /// On-disk header MAC tag. Caller must verify against
     /// `format::compute_header_mac(prefix_bytes, header_bytes, header_key)`.
     pub header_mac: [u8; HEADER_MAC_SIZE],
+}
+
+impl ParsedEncryptedHeader {
+    /// Declared `header_len`: the length of the authenticated
+    /// [`Self::header_bytes`] region. The reader caps `header_len` at
+    /// [`HeaderReadLimits::HEADER_LEN_STRUCTURAL_MAX`] (16 MiB) before
+    /// the region is read, so the conversion cannot saturate; the
+    /// fallback fails closed by over-reporting rather than wrapping.
+    pub(crate) fn header_len(&self) -> u32 {
+        u32::try_from(self.header_bytes.len()).unwrap_or(u32::MAX)
+    }
 }
 
 /// A serialized `.fcr` header bundled with the streaming materials needed
@@ -986,10 +1064,12 @@ mod tests {
         let limits = HeaderReadLimits::default()
             .max_header_len(2 * 1024 * 1024)
             .max_recipient_count(128)
-            .max_recipient_body_len(16 * 1024);
+            .max_recipient_body_len(16 * 1024)
+            .max_header_mac_work_bytes(1 << 30);
         assert_eq!(limits.max_header_len, 2 * 1024 * 1024);
         assert_eq!(limits.max_recipient_count, 128);
         assert_eq!(limits.max_recipient_body_len, 16 * 1024);
+        assert_eq!(limits.max_header_mac_work_bytes, 1 << 30);
     }
 
     /// Builder methods clamp at the structural maximum so a caller
@@ -1002,7 +1082,8 @@ mod tests {
         let clamped = HeaderReadLimits::default()
             .max_header_len(u32::MAX)
             .max_recipient_count(u16::MAX)
-            .max_recipient_body_len(u32::MAX);
+            .max_recipient_body_len(u32::MAX)
+            .max_header_mac_work_bytes(u64::MAX);
         assert_eq!(
             clamped.max_header_len,
             HeaderReadLimits::HEADER_LEN_STRUCTURAL_MAX
@@ -1015,6 +1096,70 @@ mod tests {
             clamped.max_recipient_body_len,
             HeaderReadLimits::RECIPIENT_BODY_LEN_STRUCTURAL_MAX
         );
+        assert_eq!(
+            clamped.max_header_mac_work_bytes,
+            HeaderReadLimits::HEADER_MAC_WORK_BYTES_STRUCTURAL_MAX
+        );
+    }
+
+    /// The aggregate cap bounds the product of the other two
+    /// dimensions, so the worst case they already permit together must
+    /// still pass. Otherwise adding the cap would refuse files the
+    /// previous defaults accepted.
+    ///
+    /// Driven through [`HeaderReadLimits::enforce_header_mac_work`]
+    /// rather than by re-deriving the constant, so the check compares
+    /// two independently written expressions of the same rule: if the
+    /// enforcement formula and
+    /// [`format::HEADER_MAC_WORK_LOCAL_CAP_DEFAULT`] ever disagree —
+    /// one starts counting the MAC tag, say — this fails.
+    #[test]
+    fn default_header_mac_work_cap_covers_every_default_cap_file() {
+        HeaderReadLimits::default()
+            .enforce_header_mac_work(
+                HeaderReadLimits::RECIPIENT_COUNT_DEFAULT as usize,
+                HeaderReadLimits::HEADER_LEN_DEFAULT,
+            )
+            .expect(
+                "the default work budget must admit the worst case the recipient-count \
+                 and header-length defaults already allow",
+            );
+    }
+
+    /// The cap admits a file sitting exactly on the budget and refuses
+    /// the next byte, reporting both the work the file demands and the
+    /// configured limit.
+    #[test]
+    fn enforce_header_mac_work_boundary_is_inclusive() {
+        let header_len = 1_000u32;
+        let per_candidate = PREFIX_SIZE as u64 + header_len as u64;
+        let limits = HeaderReadLimits::default().max_header_mac_work_bytes(per_candidate * 4);
+
+        limits.enforce_header_mac_work(4, header_len).unwrap();
+        match limits.enforce_header_mac_work(5, header_len) {
+            Err(CryptoError::HeaderMacWorkCapExceeded {
+                work_bytes,
+                local_cap,
+            }) => {
+                assert_eq!(work_bytes, per_candidate * 5);
+                assert_eq!(local_cap, per_candidate * 4);
+            }
+            other => panic!("expected HeaderMacWorkCapExceeded, got {other:?}"),
+        }
+    }
+
+    /// A candidate count and header length far beyond anything the
+    /// structural parser could produce must still be rejected rather
+    /// than wrap around into a small product.
+    #[test]
+    fn enforce_header_mac_work_saturates_instead_of_overflowing() {
+        let limits = HeaderReadLimits::default();
+        match limits.enforce_header_mac_work(usize::MAX, u32::MAX) {
+            Err(CryptoError::HeaderMacWorkCapExceeded { work_bytes, .. }) => {
+                assert_eq!(work_bytes, u64::MAX);
+            }
+            other => panic!("expected HeaderMacWorkCapExceeded, got {other:?}"),
+        }
     }
 
     /// The three default local caps

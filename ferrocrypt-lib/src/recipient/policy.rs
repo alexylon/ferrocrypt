@@ -336,6 +336,24 @@ pub(crate) fn enforce_recipient_mixing_policy(
     Ok(())
 }
 
+/// Counts the entries a reader may have to try, per `FORMAT.md` §3.7
+/// step 10: those naming a registered native type. Unknown non-critical
+/// entries are skipped by the slot loop and so cost no recipient work,
+/// but their bytes still sit in the header every candidate
+/// authenticates.
+///
+/// Used to bound aggregate header-MAC work
+/// ([`crate::HeaderReadLimits::max_header_mac_work_bytes`]). The count
+/// is deliberately the number of entries that *could* unwrap, not the
+/// number that will: which slots open depends on the credential, and
+/// the cap must hold before any credential work runs.
+pub(crate) fn count_supported_recipients(entries: &[RecipientEntry]) -> usize {
+    entries
+        .iter()
+        .filter(|entry| NativeRecipientType::from_type_name(&entry.type_name).is_some())
+        .count()
+}
+
 /// Classifies a parsed recipient list into the file's
 /// [`crate::UnauthenticatedRecipientMode`]. Returns an error for any list
 /// that does not yield a unique mode.
@@ -656,6 +674,28 @@ mod tests {
         ])
         .unwrap_err();
         assert_argon2id_mixing_violation(err);
+    }
+
+    /// The work bound charges for entries the slot loop can try. Unknown
+    /// non-critical entries are skipped there, so they must not be
+    /// counted — but they still inflate the header every counted
+    /// candidate authenticates.
+    #[test]
+    fn count_supported_recipients_ignores_unknown_entries() {
+        assert_eq!(count_supported_recipients(&[]), 0);
+        assert_eq!(
+            count_supported_recipients(&[unknown_entry("future-thing", false)]),
+            0
+        );
+        assert_eq!(
+            count_supported_recipients(&[
+                x25519_entry(),
+                unknown_entry("future-thing", false),
+                x25519_entry(),
+            ]),
+            2
+        );
+        assert_eq!(count_supported_recipients(&[argon2id_entry()]), 1);
     }
 
     #[test]

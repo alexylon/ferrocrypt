@@ -74,9 +74,11 @@ fn concurrent_encrypts_to_same_output_stay_no_clobber() {
         let handles: Vec<_> = (0..WRITERS)
             .map(|_| {
                 scope.spawn(|| {
-                    Encryptor::with_public_key(PublicKey::from_key_file(&kg.public_key_path))
-                        .write(&input, &out_dir, |_| {})
-                        .map(|o| o.output_path)
+                    Encryptor::with_public_key(
+                        PublicKey::from_key_file(&kg.public_key_path).expect("read public key"),
+                    )
+                    .write(&input, &out_dir, |_| {})
+                    .map(|o| o.output_path)
                 })
             })
             .collect();
@@ -145,10 +147,12 @@ fn concurrent_decrypts_to_same_output_stay_no_clobber() {
     fs::write(&input, vec![PAYLOAD_BYTE; PAYLOAD_LEN]).unwrap();
     let enc_dir = work.join("enc");
     fs::create_dir_all(&enc_dir).unwrap();
-    let fcr = Encryptor::with_public_key(PublicKey::from_key_file(&kg.public_key_path))
-        .write(&input, &enc_dir, |_| {})
-        .expect("encrypt")
-        .output_path;
+    let fcr = Encryptor::with_public_key(
+        PublicKey::from_key_file(&kg.public_key_path).expect("read public key"),
+    )
+    .write(&input, &enc_dir, |_| {})
+    .expect("encrypt")
+    .output_path;
 
     // Every thread decrypts the same `.fcr` into one directory, so they all
     // derive the same `payload.bin` output name and race the `.incomplete`

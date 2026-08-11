@@ -270,7 +270,7 @@ fn argon2id_entry(file_key: &FileKey) -> RecipientEntry {
 /// is committed at `keys/<key>` and returns the entry.
 fn x25519_entry(keys: &Path, key: &str, file_key: &FileKey) -> RecipientEntry {
     let public = PublicKey::from_key_file(keys.join(key))
-        .to_x25519_bytes()
+        .and_then(|pk| pk.to_x25519_bytes())
         .expect("resolve suite public key");
     let body = x25519::wrap(file_key, &public).expect("wrap x25519 recipient");
     RecipientEntry {
@@ -1225,20 +1225,19 @@ fn regenerate_suite_vectors_inner() {
         .save_as(cases.join("argon2id-valid.fcr"))
         .write(&plaintext, &cases, |_| {})
         .expect("encrypt argon2id base");
-    Encryptor::with_public_key(PublicKey::from_key_file(
-        keys.join("recipient-a.public.key"),
-    ))
-    .save_as(cases.join("x25519-valid.fcr"))
-    .write(&plaintext, &cases, |_| {})
-    .expect("encrypt x25519 base");
-    Encryptor::with_public_keys([
-        PublicKey::from_key_file(keys.join("recipient-a.public.key")),
-        PublicKey::from_key_file(keys.join("recipient-b.public.key")),
-    ])
-    .expect("two-recipient encryptor")
-    .save_as(cases.join("x25519-multi-valid.fcr"))
-    .write(&plaintext, &cases, |_| {})
-    .expect("encrypt two-recipient base");
+    let recipient_a = PublicKey::from_key_file(keys.join("recipient-a.public.key"))
+        .expect("read recipient-a public key");
+    let recipient_b = PublicKey::from_key_file(keys.join("recipient-b.public.key"))
+        .expect("read recipient-b public key");
+    Encryptor::with_public_key(recipient_a.clone())
+        .save_as(cases.join("x25519-valid.fcr"))
+        .write(&plaintext, &cases, |_| {})
+        .expect("encrypt x25519 base");
+    Encryptor::with_public_keys([recipient_a, recipient_b])
+        .expect("two-recipient encryptor")
+        .save_as(cases.join("x25519-multi-valid.fcr"))
+        .write(&plaintext, &cases, |_| {})
+        .expect("encrypt two-recipient base");
 
     rows.push(Case::ok("cases/argon2id-valid.fcr", &right));
     rows.push(Case::ok("cases/x25519-valid.fcr", &key_a));

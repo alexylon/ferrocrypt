@@ -228,7 +228,7 @@ fn attempt(suite: &Path, row: &Row, out: &Path) -> Result<(), CryptoError> {
             }
             Ok(())
         }
-        "read-public-key" => PublicKey::from_key_file(suite.join(&row.file)).validate(),
+        "read-public-key" => PublicKey::from_key_file(suite.join(&row.file)).map(|_| ()),
         "validate-private-key" => validate_private_key_file(suite.join(&row.file)),
         other => panic!("{}: unknown manifest action `{other}`", row.file),
     }

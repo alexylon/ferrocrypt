@@ -57,7 +57,7 @@ fn public_key_encrypt_streams_without_buffering_whole_file() {
     let kg = fast_keypair_generator(Passphrase::new(PASSPHRASE))
         .write(&keys, |_| {})
         .expect("keygen");
-    let key = PublicKey::from_key_file(&kg.public_key_path);
+    let key = PublicKey::from_key_file(&kg.public_key_path).expect("read public key");
 
     // Write the input in fixed-size chunks so its bytes are never all resident
     // at once; this runs before the measured region begins.

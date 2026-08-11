@@ -553,9 +553,11 @@ fn test_recipient_decrypt_rejects_empty_passphrase_before_kdf() {
     fs::write(&input, b"x").unwrap();
     let encrypted_dir = test_dir.join("encrypted");
     fs::create_dir_all(&encrypted_dir).unwrap();
-    let outcome = Encryptor::with_public_key(PublicKey::from_key_file(&kg.public_key_path))
-        .write(&input, &encrypted_dir, |_| {})
-        .expect("encrypt fixture file");
+    let outcome = Encryptor::with_public_key(
+        PublicKey::from_key_file(&kg.public_key_path).expect("read public key"),
+    )
+    .write(&input, &encrypted_dir, |_| {})
+    .expect("encrypt fixture file");
 
     let restore_dir = test_dir.join("restored");
     fs::create_dir_all(&restore_dir).unwrap();
@@ -2501,22 +2503,22 @@ fn test_public_key_fingerprint() -> Result<(), CryptoError> {
     generate_key_pair(passphrase, &keys_dir, |_| {})?;
 
     let pub_key = keys_dir.join("public.key");
-    let fp = PublicKey::from_key_file(&pub_key).fingerprint()?;
+    let fp = PublicKey::from_key_file(&pub_key)
+        .expect("read public key")
+        .fingerprint()?;
 
     assert_eq!(fp.len(), 64);
     assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
 
     // Deterministic: same key always produces the same fingerprint
-    let fp2 = PublicKey::from_key_file(&pub_key).fingerprint()?;
+    let fp2 = PublicKey::from_key_file(&pub_key)
+        .expect("read public key")
+        .fingerprint()?;
     assert_eq!(fp, fp2);
 
     // Rejects private key files
     let private_key_path = keys_dir.join("private.key");
-    assert!(
-        PublicKey::from_key_file(&private_key_path)
-            .fingerprint()
-            .is_err()
-    );
+    assert!(PublicKey::from_key_file(&private_key_path).is_err());
 
     Ok(())
 }
@@ -2533,19 +2535,23 @@ fn test_different_keys_different_fingerprints() -> Result<(), CryptoError> {
     generate_key_pair(passphrase, &keys_a, |_| {})?;
     generate_key_pair(passphrase, &keys_b, |_| {})?;
 
-    let fp_a = PublicKey::from_key_file(keys_a.join("public.key")).fingerprint()?;
-    let fp_b = PublicKey::from_key_file(keys_b.join("public.key")).fingerprint()?;
+    let fp_a = PublicKey::from_key_file(keys_a.join("public.key"))
+        .expect("read public key")
+        .fingerprint()?;
+    let fp_b = PublicKey::from_key_file(keys_b.join("public.key"))
+        .expect("read public key")
+        .fingerprint()?;
 
     assert_ne!(fp_a, fp_b);
 
     Ok(())
 }
 
-/// `PublicKey::validate` succeeds on a well-formed key file, succeeds
-/// unconditionally on the bytes source, and fails with a structural
-/// error (not a panic) when pointed at a file that does not exist.
+/// Construction is where a `PublicKey` is validated: it succeeds on a
+/// well-formed key file and on canonical raw bytes, and fails with a
+/// structural error (not a panic) on a missing file or a private-key file.
 #[test]
-fn test_public_key_validate() -> Result<(), CryptoError> {
+fn test_public_key_construction_validates() -> Result<(), CryptoError> {
     let test_dir = setup_test_dir("public_key_validate");
     let keys_dir = test_dir.join("keys");
     fs::create_dir_all(&keys_dir)?;
@@ -2553,28 +2559,22 @@ fn test_public_key_validate() -> Result<(), CryptoError> {
     let passphrase = "vp";
     generate_key_pair(passphrase, &keys_dir, |_| {})?;
 
-    // Valid file: validate passes.
-    PublicKey::from_key_file(keys_dir.join("public.key")).validate()?;
+    // Valid file: the read and parse both succeed.
+    PublicKey::from_key_file(keys_dir.join("public.key"))?;
 
-    // Raw bytes: `from_x25519_bytes` already structurally rejects degenerate
-    // (all-zero) and non-canonical inputs at construction, so any
-    // successfully constructed `PublicKey::from_x25519_bytes` value passes
-    // `validate()`. The filler keeps byte 31's high bit clear, so the
-    // value is a canonical encoding.
-    PublicKey::from_x25519_bytes([0x2B; 32])?.validate()?;
+    // Raw bytes: degenerate (all-zero) and non-canonical inputs are rejected
+    // here. The filler keeps byte 31's high bit clear, so the value is a
+    // canonical encoding.
+    PublicKey::from_x25519_bytes([0x2B; 32])?;
 
-    // Nonexistent file: validate returns an I/O error, not a panic.
+    // Nonexistent file: an I/O error, not a panic.
     let missing = keys_dir.join("does_not_exist.key");
-    assert!(PublicKey::from_key_file(&missing).validate().is_err());
+    assert!(PublicKey::from_key_file(&missing).is_err());
 
     // Pointing at a private-key file: the public-key parser rejects the
     // wrong key-file kind instead of leaking secret material.
     let private_key_path = keys_dir.join("private.key");
-    assert!(
-        PublicKey::from_key_file(&private_key_path)
-            .validate()
-            .is_err()
-    );
+    assert!(PublicKey::from_key_file(&private_key_path).is_err());
 
     Ok(())
 }
@@ -2592,7 +2592,9 @@ fn test_public_key_from_str_round_trip() -> Result<(), CryptoError> {
     let passphrase = "fs";
     generate_key_pair(passphrase, &keys_dir, |_| {})?;
 
-    let encoded = PublicKey::from_key_file(keys_dir.join("public.key")).to_recipient_string()?;
+    let encoded = PublicKey::from_key_file(keys_dir.join("public.key"))
+        .expect("read public key")
+        .to_recipient_string()?;
     let parsed: PublicKey = encoded
         .parse()
         .expect("valid recipient string must parse via FromStr");
@@ -3097,7 +3099,9 @@ fn test_recipient_round_trip() -> Result<(), CryptoError> {
     let passphrase = "rp";
     generate_key_pair(passphrase, &keys_dir, |_| {})?;
 
-    let encoded = PublicKey::from_key_file(keys_dir.join("public.key")).to_recipient_string()?;
+    let encoded = PublicKey::from_key_file(keys_dir.join("public.key"))
+        .expect("read public key")
+        .to_recipient_string()?;
     assert!(encoded.starts_with("fcr1"));
 
     let decoded = decode_x25519_recipient_string(&encoded)?;
@@ -3120,7 +3124,9 @@ fn test_recipient_uppercase_rejected() -> Result<(), CryptoError> {
     let passphrase = "uc";
     generate_key_pair(passphrase, &keys_dir, |_| {})?;
 
-    let encoded = PublicKey::from_key_file(keys_dir.join("public.key")).to_recipient_string()?;
+    let encoded = PublicKey::from_key_file(keys_dir.join("public.key"))
+        .expect("read public key")
+        .to_recipient_string()?;
     let uppercased = encoded.to_uppercase();
     assert!(
         decode_x25519_recipient_string(&uppercased).is_err(),

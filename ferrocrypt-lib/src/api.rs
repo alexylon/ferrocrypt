@@ -81,7 +81,7 @@ use crate::{
 ///
 /// ```no_run
 /// use ferrocrypt::{Encryptor, PublicKey};
-/// let pk = PublicKey::from_key_file("./keys/public.key");
+/// let pk = PublicKey::from_key_file("./keys/public.key")?;
 /// let outcome = Encryptor::with_public_key(pk)
 ///     .write("./payload", "./out", |ev| eprintln!("{ev}"))?;
 /// # Ok::<(), ferrocrypt::CryptoError>(())
@@ -91,8 +91,8 @@ use crate::{
 ///
 /// ```no_run
 /// use ferrocrypt::{Encryptor, PublicKey};
-/// let alice = PublicKey::from_key_file("./alice/public.key");
-/// let bob = PublicKey::from_key_file("./bob/public.key");
+/// let alice = PublicKey::from_key_file("./alice/public.key")?;
+/// let bob = PublicKey::from_key_file("./bob/public.key")?;
 /// let outcome = Encryptor::with_public_keys([alice, bob])?
 ///     .write("./payload", "./out", |ev| eprintln!("{ev}"))?;
 /// # Ok::<(), ferrocrypt::CryptoError>(())
@@ -381,9 +381,9 @@ impl Encryptor {
                 )?
             }
             EncryptorState::Recipients(public_keys) => {
-                // Resolve each PublicKey to its 32-byte material once.
-                // The local Vec owns the bytes; X25519Recipient borrows
-                // from it for the lifetime of this match arm.
+                // Collect the 32-byte material into a local Vec that owns the
+                // bytes; X25519Recipient borrows from it for the lifetime of
+                // this match arm.
                 let public_key_bytes_vec: Vec<[u8; 32]> = public_keys
                     .iter()
                     .map(|pk| pk.to_x25519_bytes())
@@ -603,8 +603,11 @@ impl PassphraseDecryptor {
         on_event: impl Fn(&ProgressEvent),
     ) -> Result<DecryptOutcome, CryptoError> {
         validate_passphrase(&passphrase)?;
+        // Hand the passphrase to the credential so the protocol layer can
+        // scrub it once the recipient slot loop is done, rather than holding
+        // it here for the whole payload extraction.
         let credential = recipient::argon2id::PassphraseCredential {
-            passphrase: &passphrase,
+            passphrase,
             kdf_limit: self.kdf_limit.as_ref(),
         };
         let archive_limits = self.archive_limits.unwrap_or_default();
@@ -618,7 +621,7 @@ impl PassphraseDecryptor {
         // valid `argon2id` body whose `kdf_params` are within the
         // resource cap — i.e. immediately before Argon2id actually runs.
         let output_path = protocol::decrypt(
-            &credential,
+            credential,
             &self.input,
             output_dir.as_ref(),
             archive_limits,
@@ -747,8 +750,8 @@ impl PrivateKeyDecryptor {
         output_dir: impl AsRef<Path>,
         on_event: impl Fn(&ProgressEvent),
     ) -> Result<DecryptOutcome, CryptoError> {
-        let (key_file_path, private_key_passphrase) = private_key.key_file_parts();
-        validate_passphrase(private_key_passphrase)?;
+        let (key_file_path, private_key_passphrase) = private_key.into_key_file_parts();
+        validate_passphrase(&private_key_passphrase)?;
         let archive_limits = self.archive_limits.unwrap_or_default();
         let header_read_limits = self.header_read_limits.unwrap_or_default();
         let incomplete_output_policy = self.incomplete_output_policy.unwrap_or_default();
@@ -775,15 +778,19 @@ impl PrivateKeyDecryptor {
         // that require authenticated bytes, including
         // `UnsupportedKeyType`, occur after the event.
         let private_key_bytes = recipient::native::x25519::open_x25519_private_key(
-            key_file_path,
-            private_key_passphrase,
+            &key_file_path,
+            &private_key_passphrase,
             self.kdf_limit.as_ref(),
             self.key_read_limits.unwrap_or_default(),
             &on_event,
         )?;
+        // The passphrase unlocks `private.key` and nothing else. Scrub it now
+        // rather than carrying it through the payload phase below.
+        drop(private_key_passphrase);
+
         let decryption_credential = recipient::x25519::X25519Credential { private_key_bytes };
         let output_path = protocol::decrypt_session(
-            &decryption_credential,
+            decryption_credential,
             session,
             output_dir.as_ref(),
             archive_limits,
@@ -1163,7 +1170,7 @@ pub fn validate_public_key_file(key_file: impl AsRef<Path>) -> Result<(), Crypto
     // No resource policy of its own: this validates structure only, so the
     // recipient-string cap and the private-key probe both run at the
     // structural maxima.
-    PublicKey::from_key_file_with_limits(key_file, KeyReadLimits::structural_max()).validate()
+    PublicKey::from_key_file_with_limits(key_file, KeyReadLimits::structural_max()).map(|_| ())
 }
 
 // ─── Internal validators ────────────────────────────────────────────────────

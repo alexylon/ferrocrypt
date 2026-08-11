@@ -678,12 +678,16 @@ impl PrivateKey {
         }
     }
 
-    /// Internal: returns the key-file path and unlock passphrase for
-    /// source variants built from a key file — today, all of them. A
-    /// future non-file source would extend this enum and the decrypt
-    /// path with a different resolution strategy.
-    pub(crate) fn key_file_parts(&self) -> (&std::path::Path, &Passphrase) {
-        match &self.source {
+    /// Internal: consumes the value and returns the owned key-file path and
+    /// unlock passphrase for source variants built from a key file — today,
+    /// all of them. A future non-file source would extend this enum and the
+    /// decrypt path with a different resolution strategy.
+    ///
+    /// Consuming rather than borrowing lets the caller drop the passphrase as
+    /// soon as the unlock is over, instead of holding it for as long as the
+    /// `PrivateKey` stays in scope.
+    pub(crate) fn into_key_file_parts(self) -> (std::path::PathBuf, Passphrase) {
+        match self.source {
             PrivateKeySource::KeyFile { path, passphrase } => (path, passphrase),
         }
     }

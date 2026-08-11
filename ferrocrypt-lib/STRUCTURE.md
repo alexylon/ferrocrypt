@@ -1193,6 +1193,8 @@ Preferred public concepts are `Passphrase` and `Recipient`. Internals are not or
 - `fingerprint`;
 - canonical `to_recipient_string()` output.
 
+Every constructor resolves its source to suite-plus-key-material immediately and the value stores that result, so a `PublicKey` never reads its source twice. This is a security requirement, not an optimisation: `fingerprint` and encryption MUST describe the same key material, otherwise an identity check made against a displayed fingerprint says nothing about the key an operation later uses. A construction failure is therefore reported at construction, and there is no separate "validate this value" operation — a `PublicKey` that exists is a valid one. `validate_public_key_file` remains the way to check a file without keeping the key.
+
 `PrivateKey` supports:
 
 - `from_key_file(path, Passphrase)`, which binds the passphrase that unlocks the file;
@@ -1363,6 +1365,8 @@ Decryption must preserve this order:
 13. Promote staged output only after successful authenticated decryption and extraction.
 
 No refactor may move TLV interpretation, archive writes, or payload plaintext release before the relevant authentication step.
+
+The credential is also disposed of on a schedule. The passphrase that unlocks a `private.key` is dropped as soon as the unlock returns, and the decrypt credential — a passphrase or an unwrapped private scalar — is taken by value and dropped when step 8 ends. Steps 9 to 13 run on attacker-supplied bytes and need only the derived payload key, so no reusable long-term secret stays resident while an attacker-chosen archive is extracted. A refactor must not extend a credential's lifetime past the recipient slot loop, for example by borrowing it from a caller that outlives extraction.
 
 ---
 

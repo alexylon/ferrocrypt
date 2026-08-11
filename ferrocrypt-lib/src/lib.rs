@@ -57,7 +57,7 @@
 //! println!("Fingerprint: {}", keys.fingerprint);
 //!
 //! // 2) Encrypt with the recipient's public key (no passphrase required)
-//! let encrypted = Encryptor::with_public_key(PublicKey::from_key_file(&keys.public_key_path))
+//! let encrypted = Encryptor::with_public_key(PublicKey::from_key_file(&keys.public_key_path)?)
 //!     .write("./payload", "./out", |ev| eprintln!("{ev}"))?;
 //!
 //! // 3) Decrypt with the recipient's private key + its passphrase

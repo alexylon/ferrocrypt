@@ -90,7 +90,7 @@ pub fn recipient_auto(
             _ => Err(CryptoError::NoSupportedRecipient),
         }
     } else {
-        let mut encryptor = Encryptor::with_public_key(PublicKey::from_key_file(key_file));
+        let mut encryptor = Encryptor::with_public_key(PublicKey::from_key_file(key_file)?);
         if let Some(s) = save_as {
             encryptor = encryptor.save_as(s);
         }

@@ -644,7 +644,7 @@ fn load_encrypt_recipients(
         recipients.push(PublicKey::from_recipient_string(&recipient)?);
     }
     for file in public_key_files {
-        recipients.push(PublicKey::from_key_file(file));
+        recipients.push(PublicKey::from_key_file(file)?);
     }
 
     Ok(recipients)
@@ -728,10 +728,10 @@ fn run_encrypt(
             None => enc,
         }
     } else {
+        // These are the same values that go into the encryptor below, so the
+        // fingerprint printed here identifies the key actually encrypted to.
         for r in &recipients {
-            if let Ok(fp) = r.fingerprint() {
-                outln!("Encrypting to: {fp}");
-            }
+            outln!("Encrypting to: {}", r.fingerprint()?);
         }
         Encryptor::with_public_keys(recipients)?
     };
@@ -829,7 +829,7 @@ fn run_keygen(output_dir: PathBuf) -> Result<(), CryptoError> {
         None => generator,
     };
     let outcome = generator.write(&output_dir, |ev| eprintln!("{ev}"))?;
-    let recipient = PublicKey::from_key_file(&outcome.public_key_path).to_recipient_string()?;
+    let recipient = PublicKey::from_key_file(&outcome.public_key_path)?.to_recipient_string()?;
     outln!("\nGenerated key pair in {}\n", output_dir.display());
     outln!("Public key fingerprint: {}", outcome.fingerprint);
     outln!("Public key recipient:   {}", recipient);
@@ -837,7 +837,7 @@ fn run_keygen(output_dir: PathBuf) -> Result<(), CryptoError> {
 }
 
 fn run_fingerprint(public_key_file: PathBuf) -> Result<(), CryptoError> {
-    let fp = PublicKey::from_key_file(&public_key_file).fingerprint()?;
+    let fp = PublicKey::from_key_file(&public_key_file)?.fingerprint()?;
     outln!("{}", fp);
     Ok(())
 }

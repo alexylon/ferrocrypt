@@ -173,8 +173,12 @@ impl<'a> crate::protocol::RecipientScheme for PassphraseRecipient<'a> {
 }
 
 /// Decrypt-side handle for the `argon2id` recipient.
+///
+/// Owns the passphrase so that dropping the credential after the recipient
+/// slot loop scrubs it, instead of leaving it alive in the caller for the
+/// whole payload phase.
 pub(crate) struct PassphraseCredential<'a> {
-    pub passphrase: &'a Passphrase,
+    pub passphrase: Passphrase,
     pub kdf_limit: Option<&'a KdfLimit>,
 }
 
@@ -199,7 +203,7 @@ impl<'a> crate::protocol::DecryptionCredential for PassphraseCredential<'a> {
         // error) as `Err`. The progress event is emitted inside
         // `unwrap` only after structural / cap checks have already
         // passed, so a cap-exceeded body produces no spurious event.
-        match unwrap(body_array, self.passphrase, self.kdf_limit, on_event) {
+        match unwrap(body_array, &self.passphrase, self.kdf_limit, on_event) {
             Ok(file_key) => Ok(Some(file_key)),
             Err(CryptoError::RecipientUnwrapFailed { .. }) => Ok(None),
             Err(other) => Err(other),
@@ -574,9 +578,8 @@ mod tests {
     fn credential_adapter_rejects_wrong_length_body() {
         use crate::error::FormatDefect;
         use crate::protocol::DecryptionCredential;
-        let pass = passphrase("p");
         let credential = PassphraseCredential {
-            passphrase: &pass,
+            passphrase: passphrase("p"),
             kdf_limit: None,
         };
         let (sink, events) = recording();

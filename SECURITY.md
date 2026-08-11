@@ -53,6 +53,15 @@ regression net, regenerated when the format intentionally changes).
 - **No sender authentication.** Public-key encryption controls who can
   decrypt a file, not who created it. Sender authentication requires a
   separate signing layer.
+- **A recipient's public key is only as trustworthy as the fingerprint
+  you checked.** FerroCrypt cannot tell whose key a `public.key` file
+  holds. Compare the SHA3-256 fingerprint with the recipient over a
+  channel an attacker cannot rewrite before you encrypt to that key. The
+  fingerprint the command line prints and the one the desktop app shows
+  describe the key material those operations then use, so a key file
+  replaced afterwards cannot change the recipient behind your back. A
+  library caller gets the same guarantee by keeping the `PublicKey` value
+  it fingerprinted, rather than passing the path again.
 - **No freshness or replay protection.** FerroCrypt authenticates each
   file as written, but it does not know whether that file is the newest
   version. A captured valid `.fcr` can be restored or replayed later

@@ -385,7 +385,7 @@ impl DecryptSession {
 /// need to perform credential work after structural validation can open the
 /// session separately and pass it to [`decrypt_session`].
 pub(crate) fn decrypt<I: DecryptionCredential>(
-    credential: &I,
+    credential: I,
     input_path: &Path,
     output_dir: &Path,
     archive_limits: ArchiveLimits,
@@ -414,8 +414,13 @@ pub(crate) fn decrypt<I: DecryptionCredential>(
 /// match, makes wall-clock cost a function of `recipient_count`
 /// (capped by `HeaderReadLimits`) rather than of which slot matched,
 /// per the `FORMAT.md` §3.7 SHOULD-level mitigation.
+///
+/// The credential is taken by value and dropped as soon as the slot loop
+/// ends, so the long-lived secret it holds — a passphrase or a private
+/// scalar — is scrubbed before the attacker-supplied payload is decrypted
+/// and extracted. Only the derived payload key outlives that point.
 pub(crate) fn decrypt_session<I: DecryptionCredential>(
-    credential: &I,
+    credential: I,
     session: DecryptSession,
     output_dir: &Path,
     archive_limits: ArchiveLimits,
@@ -511,6 +516,12 @@ pub(crate) fn decrypt_session<I: DecryptionCredential>(
         }
         drop(header_key);
     }
+
+    // The slot loop was the credential's last use. Everything below runs on
+    // attacker-supplied bytes and needs only the payload key, so the
+    // passphrase or private scalar is scrubbed here rather than whenever the
+    // caller happens to return.
+    drop(credential);
 
     let Some(payload_key) = selected_payload_key else {
         // No slot MAC-verified. [`failure_for`]'s `(mode × had_unwrap)`
@@ -948,7 +959,7 @@ mod tests {
         )?;
         let credential = x25519::X25519Credential { private_key_bytes };
         decrypt(
-            &credential,
+            credential,
             fcr,
             dec_dir,
             ArchiveLimits::default(),
@@ -956,6 +967,102 @@ mod tests {
             IncompleteOutputPolicy::default(),
             &|_| {},
         )
+    }
+
+    /// The credential — a passphrase or a private scalar — must be scrubbed
+    /// once the recipient slot loop is over, before the attacker-supplied
+    /// payload is decrypted and extracted. Only the derived payload key is
+    /// needed from that point on.
+    ///
+    /// `ProgressEvent::Decrypting` is emitted at the start of the payload
+    /// phase, so a credential whose `Drop` records itself proves the ordering:
+    /// the flag must already be set when that event fires. The drop lives in
+    /// the generic slot-loop code, so this covers the X25519 credential too.
+    #[test]
+    fn credential_is_dropped_before_the_payload_phase() -> Result<(), CryptoError> {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        /// Delegates to the real passphrase credential and records its drop.
+        struct DropRecording<'a> {
+            inner: argon2id::PassphraseCredential<'a>,
+            dropped: Rc<Cell<bool>>,
+        }
+
+        impl Drop for DropRecording<'_> {
+            fn drop(&mut self) {
+                self.dropped.set(true);
+            }
+        }
+
+        impl DecryptionCredential for DropRecording<'_> {
+            const TYPE_NAME: &'static str = argon2id::TYPE_NAME;
+            const EXPECTED_MODE: UnauthenticatedRecipientMode =
+                UnauthenticatedRecipientMode::Passphrase;
+
+            fn unwrap_file_key(
+                &self,
+                body: &[u8],
+                on_event: &dyn Fn(&ProgressEvent),
+            ) -> Result<Option<FileKey>, CryptoError> {
+                self.inner.unwrap_file_key(body, on_event)
+            }
+        }
+
+        let tmp = tempfile::TempDir::new()?;
+        let input = tmp.path().join("data.txt");
+        fs::write(&input, b"payload phase must not hold the credential")?;
+        let pass = Passphrase::new("drop-order-test-passphrase");
+        let fcr = encrypt(
+            std::slice::from_ref(&argon2id::PassphraseRecipient {
+                passphrase: &pass,
+                kdf_params: crate::crypto::kdf::KdfParams::test_fast_default(),
+                kdf_limit: crate::KdfLimit::default(),
+            }),
+            ArchiveLimits::default(),
+            HeaderReadLimits::default(),
+            &input,
+            tmp.path(),
+            None,
+            &|_| {},
+        )?;
+
+        let dropped = Rc::new(Cell::new(false));
+        let dropped_at_payload_start = Rc::new(Cell::new(false));
+        let credential = DropRecording {
+            inner: argon2id::PassphraseCredential {
+                passphrase: pass,
+                kdf_limit: None,
+            },
+            dropped: Rc::clone(&dropped),
+        };
+
+        let dec_dir = tmp.path().join("decrypted");
+        fs::create_dir_all(&dec_dir)?;
+        let observer = {
+            let dropped = Rc::clone(&dropped);
+            let observed = Rc::clone(&dropped_at_payload_start);
+            move |event: &ProgressEvent| {
+                if matches!(event, ProgressEvent::Decrypting) {
+                    observed.set(dropped.get());
+                }
+            }
+        };
+        decrypt(
+            credential,
+            &fcr,
+            &dec_dir,
+            ArchiveLimits::default(),
+            HeaderReadLimits::default(),
+            IncompleteOutputPolicy::default(),
+            &observer,
+        )?;
+
+        assert!(
+            dropped_at_payload_start.get(),
+            "the credential must be scrubbed before the payload is decrypted"
+        );
+        Ok(())
     }
 
     /// Two `x25519` recipients in one file: the decrypt loop must
@@ -1626,11 +1733,11 @@ mod tests {
         fs::create_dir_all(&dec_dir)?;
         let pass = Passphrase::new("doesn't-matter");
         let credential = argon2id::PassphraseCredential {
-            passphrase: &pass,
+            passphrase: pass,
             kdf_limit: None,
         };
         let err = decrypt(
-            &credential,
+            credential,
             &fcr,
             &dec_dir,
             ArchiveLimits::default(),

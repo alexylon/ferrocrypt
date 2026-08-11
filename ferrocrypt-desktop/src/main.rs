@@ -10,8 +10,41 @@ use ferrocrypt::{
     default_encrypted_filename, generate_key_pair, probe_recipient_mode, validate_private_key_file,
 };
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 mod password_scorer;
+
+/// The recipient key resolved at the moment the user selected it, shared
+/// between the key-selection callbacks and the operation launcher.
+///
+/// Keeping the resolved key rather than its path is what gives the displayed
+/// fingerprint meaning: encryption uses this value, so a key file replaced
+/// after selection cannot change the recipient behind the user's back.
+type SelectedPublicKey = Arc<Mutex<Option<PublicKey>>>;
+
+/// Replaces the retained recipient key. A poisoned lock leaves no key
+/// retained, so the next encryption refuses instead of using a stale one.
+fn store_selected_public_key(selected: &SelectedPublicKey, key: Option<PublicKey>) {
+    if let Ok(mut slot) = selected.lock() {
+        *slot = key;
+    }
+}
+
+/// Reads the retained recipient key for one operation.
+fn take_selected_public_key(selected: &SelectedPublicKey) -> Option<PublicKey> {
+    selected.lock().ok().and_then(|slot| slot.clone())
+}
+
+/// Drops the retained recipient key together with the fingerprint describing
+/// it.
+///
+/// The two always move together. A key retained while no fingerprint is on
+/// screen could be encrypted to without the user seeing which key it is, so
+/// every path that clears one clears the other through this function.
+fn forget_selected_key(app: &AppWindow, selected: &SelectedPublicKey) {
+    store_selected_public_key(selected, None);
+    app.set_key_fingerprint(Default::default());
+}
 
 /// Width budget for a path shown in a form field (narrower: a picker button shares the row).
 const ELIDE: usize = 44;
@@ -45,8 +78,12 @@ struct Operation<'a> {
     output_dir: &'a Path,
     /// Exact output file path; when `None` the name is derived under `output_dir`.
     save_as: Option<&'a Path>,
-    /// Public or private key file; used only by the recipient modes.
+    /// Private key file; used only by the recipient-decrypt mode.
     key_path: &'a Path,
+    /// Recipient key resolved when the user selected it; used only by the
+    /// recipient-encrypt mode. Carrying the resolved key instead of its path
+    /// keeps the operation bound to the fingerprint the user verified.
+    public_key: Option<PublicKey>,
     /// Argon2id override for the passphrase-encrypt and key-generation paths;
     /// `None` uses the library default. It has no effect on decrypt (whose cost
     /// is fixed by the input file) or on recipient encrypt (no Argon2id). Tests
@@ -70,6 +107,7 @@ fn run_operation(
         output_dir,
         save_as,
         key_path,
+        public_key,
         kdf_params,
     } = op;
     match mode {
@@ -99,7 +137,12 @@ fn run_operation(
             Err(e) => Err(e),
         },
         MODE_RECIPIENT_ENCRYPT => {
-            let mut encryptor = Encryptor::with_public_key(PublicKey::from_key_file(key_path));
+            let Some(public_key) = public_key else {
+                return Err(CryptoError::InvalidInput(
+                    "Select a public key file before encrypting".to_string(),
+                ));
+            };
+            let mut encryptor = Encryptor::with_public_key(public_key);
             if let Some(s) = save_as {
                 encryptor = encryptor.save_as(s);
             }
@@ -154,8 +197,11 @@ fn main() {
     app.set_app_version(ferrocrypt::VERSION.into());
     app.set_combined_picker(cfg!(target_os = "macos"));
 
+    let selected_public_key: SelectedPublicKey = Arc::new(Mutex::new(None));
+
     app.on_mode_changed({
         let weak = app.as_weak();
+        let selected_public_key = selected_public_key.clone();
         move || {
             if let Some(app) = weak.upgrade() {
                 app.set_password(Default::default());
@@ -166,9 +212,9 @@ fn main() {
                 app.set_status_err(Default::default());
                 let keypath = app.get_key_path().to_string();
                 if !keypath.is_empty() {
-                    validate_selected_key(&app, &keypath);
+                    validate_selected_key(&app, &keypath, &selected_public_key);
                 } else {
-                    app.set_key_fingerprint(Default::default());
+                    forget_selected_key(&app, &selected_public_key);
                     app.set_key_invalid(false);
                 }
                 check_conflicts(&app);
@@ -178,24 +224,27 @@ fn main() {
 
     app.on_select_input_file({
         let weak = app.as_weak();
+        let selected_public_key = selected_public_key.clone();
         move || {
             if let Some(path) = pick_file_or_folder() {
-                apply_input_path(&weak, path);
+                apply_input_path(&weak, path, &selected_public_key);
             }
         }
     });
 
     app.on_select_input_folder({
         let weak = app.as_weak();
+        let selected_public_key = selected_public_key.clone();
         move || {
             if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                apply_input_path(&weak, path);
+                apply_input_path(&weak, path, &selected_public_key);
             }
         }
     });
 
     app.on_select_key_file({
         let weak = app.as_weak();
+        let selected_public_key = selected_public_key.clone();
         move || {
             let Some(path) = rfd::FileDialog::new()
                 .add_filter("Key files", &["key"])
@@ -207,7 +256,7 @@ fn main() {
             let key_path = path_to_string(&path);
             app.set_key_path_display(elide_left(&key_path, ELIDE).into());
             app.set_key_path(key_path.clone().into());
-            validate_selected_key(&app, &key_path);
+            validate_selected_key(&app, &key_path, &selected_public_key);
             check_conflicts(&app);
         }
     });
@@ -272,6 +321,7 @@ fn main() {
 
     app.on_start_operation({
         let weak = app.as_weak();
+        let selected_public_key = selected_public_key.clone();
         move || {
             let Some(app) = weak.upgrade() else { return };
 
@@ -285,6 +335,10 @@ fn main() {
             let pwd = Passphrase::new(app.get_password().to_string());
             let keypath = app.get_key_path().to_string();
             let keygen_outdir = app.get_keygen_output_dir().to_string();
+            // Snapshot the key resolved when the user selected it, so the
+            // operation encrypts to the key whose fingerprint is on screen.
+            let public_key = take_selected_public_key(&selected_public_key);
+            let selected_public_key = selected_public_key.clone();
 
             let is_encrypt = is_encrypt_mode(mode);
             let (output_dir, output_file) = if mode == MODE_KEYGEN {
@@ -341,6 +395,7 @@ fn main() {
                             output_dir: output_dir_path,
                             save_as,
                             key_path: Path::new(&keypath),
+                            public_key,
                             kdf_params: None,
                         },
                         pwd,
@@ -367,12 +422,12 @@ fn main() {
                                     app.set_mode(MODE_RECIPIENT_ENCRYPT);
                                     app.set_key_path_display(elide_left(&pub_key, ELIDE).into());
                                     app.set_key_path(pub_key.clone().into());
-                                    validate_selected_key(&app, &pub_key);
+                                    validate_selected_key(&app, &pub_key, &selected_public_key);
                                     app.set_status_ok(
                                         "Key pair generated \u{2014} public key selected".into(),
                                     );
                                 } else {
-                                    clear_fields(&app);
+                                    clear_fields(&app, &selected_public_key);
                                     let action = if is_decrypt {
                                         "Decrypted to"
                                     } else {
@@ -420,9 +475,10 @@ fn main() {
 
     app.on_clear_form({
         let weak = app.as_weak();
+        let selected_public_key = selected_public_key.clone();
         move || {
             if let Some(app) = weak.upgrade() {
-                clear_fields(&app);
+                clear_fields(&app, &selected_public_key);
             }
         }
     });
@@ -452,7 +508,11 @@ fn main() {
     app.run().unwrap();
 }
 
-fn apply_input_path(weak: &slint::Weak<AppWindow>, path: PathBuf) {
+fn apply_input_path(
+    weak: &slint::Weak<AppWindow>,
+    path: PathBuf,
+    selected_public_key: &SelectedPublicKey,
+) {
     let selected = path_to_string(&path);
     let dir = path
         .parent()
@@ -506,7 +566,7 @@ fn apply_input_path(weak: &slint::Weak<AppWindow>, path: PathBuf) {
 
     let keypath = app.get_key_path().to_string();
     if !keypath.is_empty() {
-        validate_selected_key(&app, &keypath);
+        validate_selected_key(&app, &keypath, selected_public_key);
     }
 
     if is_decrypt {
@@ -579,7 +639,12 @@ fn compute_conflict_warning(
     String::new()
 }
 
-fn clear_fields(app: &AppWindow) {
+/// Resets the form after a finished operation or an explicit clear.
+///
+/// Clearing the retained recipient key alongside the key path and fingerprint
+/// keeps the one invariant the key selection rests on: a retained key exists
+/// only while the fingerprint describing it is on screen.
+fn clear_fields(app: &AppWindow, selected_public_key: &SelectedPublicKey) {
     let empty = slint::SharedString::default();
     app.set_input_path(empty.clone());
     app.set_input_path_display(empty.clone());
@@ -596,7 +661,7 @@ fn clear_fields(app: &AppWindow) {
     app.set_status_err(empty);
     app.set_hide_password(true);
     app.set_password_strength(password_scorer::PW_EMPTY);
-    app.set_key_fingerprint(Default::default());
+    forget_selected_key(app, selected_public_key);
     app.set_key_invalid(false);
     let current = app.get_mode();
     let snapped = snap_back_mode(current);
@@ -701,23 +766,34 @@ fn elide_error_for_status(msg: &str) -> String {
     format!("{kept}\u{2026}")
 }
 
-fn validate_selected_key(app: &AppWindow, key_path: &str) {
+/// Validates the selected key file for the current mode and updates the UI.
+///
+/// In recipient-encrypt mode the key is read once here and retained in
+/// `selected`, so the fingerprint shown to the user and the key the next
+/// encryption uses are the same bytes. Every other outcome clears the
+/// retained key, so a stale one can never be reused.
+fn validate_selected_key(app: &AppWindow, key_path: &str, selected: &SelectedPublicKey) {
     let key_path = Path::new(key_path);
     match app.get_mode() {
-        MODE_RECIPIENT_ENCRYPT => match PublicKey::from_key_file(key_path).fingerprint() {
-            Ok(fp) => {
-                app.set_key_fingerprint(fp.into());
-                app.set_key_invalid(false);
-                app.set_status_err(Default::default());
+        MODE_RECIPIENT_ENCRYPT => {
+            let loaded = PublicKey::from_key_file(key_path)
+                .and_then(|key| key.fingerprint().map(|fp| (key, fp)));
+            match loaded {
+                Ok((key, fp)) => {
+                    store_selected_public_key(selected, Some(key));
+                    app.set_key_fingerprint(fp.into());
+                    app.set_key_invalid(false);
+                    app.set_status_err(Default::default());
+                }
+                Err(e) => {
+                    forget_selected_key(app, selected);
+                    app.set_key_invalid(true);
+                    app.set_status_err(elide_error_for_status(&e.to_string()).into());
+                }
             }
-            Err(e) => {
-                app.set_key_fingerprint(Default::default());
-                app.set_key_invalid(true);
-                app.set_status_err(elide_error_for_status(&e.to_string()).into());
-            }
-        },
+        }
         MODE_RECIPIENT_DECRYPT => {
-            app.set_key_fingerprint(Default::default());
+            forget_selected_key(app, selected);
             if let Err(e) = validate_private_key_file(key_path) {
                 app.set_key_invalid(true);
                 app.set_status_err(elide_error_for_status(&e.to_string()).into());
@@ -727,7 +803,7 @@ fn validate_selected_key(app: &AppWindow, key_path: &str) {
             }
         }
         _ => {
-            app.set_key_fingerprint(Default::default());
+            forget_selected_key(app, selected);
             app.set_key_invalid(false);
         }
     }
@@ -793,6 +869,11 @@ mod tests {
 
         // Run one operation with fast Argon2id and no explicit save-as path.
         let run = |mode: i32, src: &Path, out: &Path, key: &Path| {
+            // Recipient encrypt takes the resolved key, as the UI does once
+            // the user has selected it; the other modes carry none.
+            let public_key = (mode == MODE_RECIPIENT_ENCRYPT)
+                .then(|| PublicKey::from_key_file(key))
+                .transpose()?;
             run_operation(
                 Operation {
                     mode,
@@ -800,6 +881,7 @@ mod tests {
                     output_dir: out,
                     save_as: None,
                     key_path: key,
+                    public_key,
                     kdf_params: Some(fast_kdf_params()),
                 },
                 Passphrase::new(pass),
@@ -859,6 +941,96 @@ mod tests {
         );
     }
 
+    /// Recipient encrypt must use the key it was handed, not whatever key file
+    /// sits at `key_path`. That binding is what makes the fingerprint shown
+    /// when the user picked the key describe the file actually produced: the
+    /// UI resolves the key once at selection and passes the value here. The
+    /// test proves it by handing over key A while `key_path` points at key B,
+    /// and pins the refusal when no key was retained at all.
+    #[test]
+    fn recipient_encrypt_uses_the_retained_key_not_the_key_path() {
+        let noop = |_: &ProgressEvent| {};
+        let pass = "desktop-retained-key-passphrase";
+        let dir = fs_matrix_tempdir().expect("tempdir");
+        let root = dir.path();
+        let payload: &[u8] = b"bound to the retained key";
+        let input = root.join("secret.txt");
+        fs::write(&input, payload).unwrap();
+        let dummy_key = Path::new("");
+
+        let run = |mode: i32, src: &Path, out: &Path, key: &Path, public_key: Option<PublicKey>| {
+            run_operation(
+                Operation {
+                    mode,
+                    input: src,
+                    output_dir: out,
+                    save_as: None,
+                    key_path: key,
+                    public_key,
+                    kdf_params: Some(fast_kdf_params()),
+                },
+                Passphrase::new(pass),
+                &noop,
+            )
+        };
+
+        let keys_a = root.join("keys_a");
+        let keys_b = root.join("keys_b");
+        fs::create_dir_all(&keys_a).unwrap();
+        fs::create_dir_all(&keys_b).unwrap();
+        let pub_a = run(MODE_KEYGEN, dummy_key, &keys_a, dummy_key, None).expect("keygen A");
+        let pub_b = run(MODE_KEYGEN, dummy_key, &keys_b, dummy_key, None).expect("keygen B");
+
+        // Key A is handed over; `key_path` points at B's public key.
+        let retained = PublicKey::from_key_file(&pub_a).expect("read A's public key");
+        let out_dir = root.join("out");
+        fs::create_dir_all(&out_dir).unwrap();
+        let fcr = run(
+            MODE_RECIPIENT_ENCRYPT,
+            &input,
+            &out_dir,
+            &pub_b,
+            Some(retained),
+        )
+        .expect("recipient encrypt");
+
+        let restored = root.join("restored");
+        fs::create_dir_all(&restored).unwrap();
+        let plain = run(
+            MODE_RECIPIENT_DECRYPT,
+            &fcr,
+            &restored,
+            &keys_a.join(PRIVATE_KEY_FILENAME),
+            None,
+        )
+        .expect("A's private key must decrypt the output");
+        assert_eq!(fs::read(&plain).unwrap(), payload);
+
+        let restored_b = root.join("restored_b");
+        fs::create_dir_all(&restored_b).unwrap();
+        assert!(
+            run(
+                MODE_RECIPIENT_DECRYPT,
+                &fcr,
+                &restored_b,
+                &keys_b.join(PRIVATE_KEY_FILENAME),
+                None,
+            )
+            .is_err(),
+            "the key at key_path must not be able to read the output"
+        );
+
+        // No key retained: refuse rather than fall back to reading `key_path`.
+        let out_none = root.join("out_none");
+        fs::create_dir_all(&out_none).unwrap();
+        let err = run(MODE_RECIPIENT_ENCRYPT, &input, &out_none, &pub_a, None)
+            .expect_err("recipient encrypt without a retained key must be refused");
+        assert!(
+            matches!(&err, CryptoError::InvalidInput(m) if m.contains("Select a public key file")),
+            "unexpected error: {err:?}"
+        );
+    }
+
     /// The magic-byte auto-detection that routes a dropped/selected file to
     /// the right decrypt tab. A swap of the two `Some(_)` arms would send
     /// every passphrase file to the key-pair tab and vice versa — a total
@@ -877,6 +1049,11 @@ mod tests {
         let dummy_key = Path::new("");
 
         let run = |mode: i32, src: &Path, out: &Path, key: &Path| {
+            // Recipient encrypt takes the resolved key, as the UI does once
+            // the user has selected it; the other modes carry none.
+            let public_key = (mode == MODE_RECIPIENT_ENCRYPT)
+                .then(|| PublicKey::from_key_file(key))
+                .transpose()?;
             run_operation(
                 Operation {
                     mode,
@@ -884,6 +1061,7 @@ mod tests {
                     output_dir: out,
                     save_as: None,
                     key_path: key,
+                    public_key,
                     kdf_params: Some(fast_kdf_params()),
                 },
                 Passphrase::new(pass),
@@ -967,6 +1145,7 @@ mod tests {
                 output_dir: &out_dir,
                 save_as: Some(&target),
                 key_path: dummy_key,
+                public_key: None,
                 kdf_params: Some(fast_kdf_params()),
             },
             Passphrase::new(pass),
@@ -988,6 +1167,7 @@ mod tests {
                 output_dir: &dec_dir,
                 save_as: None,
                 key_path: dummy_key,
+                public_key: None,
                 kdf_params: Some(fast_kdf_params()),
             },
             Passphrase::new(pass),
@@ -1008,6 +1188,7 @@ mod tests {
                 output_dir: &out_dir,
                 save_as: Some(&occupied),
                 key_path: dummy_key,
+                public_key: None,
                 kdf_params: Some(fast_kdf_params()),
             },
             Passphrase::new(pass),

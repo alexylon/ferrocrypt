@@ -103,9 +103,11 @@ fn scope_dir(scope: &str) -> PathBuf {
 fn roundtrip(work: &Path, keys: &KeyPaths, source: &Path) -> PathBuf {
     let enc = work.join("enc");
     fs::create_dir_all(&enc).unwrap();
-    let outcome = Encryptor::with_public_key(PublicKey::from_key_file(&keys.public))
-        .write(source, &enc, |_| {})
-        .expect("encrypt");
+    let outcome = Encryptor::with_public_key(
+        PublicKey::from_key_file(&keys.public).expect("read public key"),
+    )
+    .write(source, &enc, |_| {})
+    .expect("encrypt");
     let dec = work.join("dec");
     fs::create_dir_all(&dec).unwrap();
     match Decryptor::open(&outcome.output_path).expect("open") {

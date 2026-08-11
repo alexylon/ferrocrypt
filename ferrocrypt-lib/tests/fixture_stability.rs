@@ -227,13 +227,17 @@ fn regenerate_fixtures() {
         .write(source_dir().join(SMALL_DIR_NAME), encrypted_dir(), |_| {})
         .expect("encrypt passphrase-dir fixture");
 
-    Encryptor::with_public_key(PublicKey::from_key_file(keys_dir().join(PUBLIC_KEY_FILE)))
-        .save_as(encrypted_dir().join(RECIPIENT_FILE_FCR))
-        .write(source_dir().join(SMALL_FILE_NAME), encrypted_dir(), |_| {})
-        .expect("encrypt recipient-file fixture");
+    Encryptor::with_public_key(
+        PublicKey::from_key_file(keys_dir().join(PUBLIC_KEY_FILE)).expect("read public key"),
+    )
+    .save_as(encrypted_dir().join(RECIPIENT_FILE_FCR))
+    .write(source_dir().join(SMALL_FILE_NAME), encrypted_dir(), |_| {})
+    .expect("encrypt recipient-file fixture");
 
-    Encryptor::with_public_key(PublicKey::from_key_file(keys_dir().join(PUBLIC_KEY_FILE)))
-        .save_as(encrypted_dir().join(RECIPIENT_DIR_FCR))
-        .write(source_dir().join(SMALL_DIR_NAME), encrypted_dir(), |_| {})
-        .expect("encrypt recipient-dir fixture");
+    Encryptor::with_public_key(
+        PublicKey::from_key_file(keys_dir().join(PUBLIC_KEY_FILE)).expect("read public key"),
+    )
+    .save_as(encrypted_dir().join(RECIPIENT_DIR_FCR))
+    .write(source_dir().join(SMALL_DIR_NAME), encrypted_dir(), |_| {})
+    .expect("encrypt recipient-dir fixture");
 }

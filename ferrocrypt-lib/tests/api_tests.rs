@@ -205,9 +205,11 @@ fn encryptor_recipient_round_trip() {
     let out_dir = work.join("out");
     fs::create_dir_all(&out_dir).unwrap();
 
-    let outcome = Encryptor::with_public_key(PublicKey::from_key_file(&kg.public_key_path))
-        .write(&input, &out_dir, |_| {})
-        .expect("encrypt");
+    let outcome = Encryptor::with_public_key(
+        PublicKey::from_key_file(&kg.public_key_path).expect("read public key"),
+    )
+    .write(&input, &out_dir, |_| {})
+    .expect("encrypt");
 
     let restore = work.join("restored");
     fs::create_dir_all(&restore).unwrap();
@@ -243,8 +245,8 @@ fn encryptor_with_recipients_each_can_decrypt() {
     fs::create_dir_all(&out_dir).unwrap();
 
     let outcome = Encryptor::with_public_keys([
-        PublicKey::from_key_file(&kg_a.public_key_path),
-        PublicKey::from_key_file(&kg_b.public_key_path),
+        PublicKey::from_key_file(&kg_a.public_key_path).expect("read public key"),
+        PublicKey::from_key_file(&kg_b.public_key_path).expect("read public key"),
     ])
     .expect("with_public_keys")
     .write(&input, &out_dir, |_| {})
@@ -375,9 +377,11 @@ fn private_key_decrypt_reports_input_path_when_file_vanishes() {
     let kg = generate_key_pair(&keys, pass(), |_| {}).expect("keygen");
     let input = work.join("data.txt");
     fs::write(&input, b"x").unwrap();
-    let outcome = Encryptor::with_public_key(PublicKey::from_key_file(&kg.public_key_path))
-        .write(&input, &work, |_| {})
-        .expect("encrypt");
+    let outcome = Encryptor::with_public_key(
+        PublicKey::from_key_file(&kg.public_key_path).expect("read public key"),
+    )
+    .write(&input, &work, |_| {})
+    .expect("encrypt");
 
     let decryptor = match Decryptor::open(&outcome.output_path).expect("open") {
         Decryptor::PrivateKey(d) => d,
@@ -426,14 +430,18 @@ fn private_key_decrypt_uses_the_validated_file_not_a_swapped_replacement() {
 
     let out_dir = work.join("out");
     fs::create_dir_all(&out_dir).unwrap();
-    let original_fcr = Encryptor::with_public_key(PublicKey::from_key_file(&kg.public_key_path))
-        .write(&original, &out_dir, |_| {})
-        .expect("encrypt original")
-        .output_path;
-    let substitute_fcr = Encryptor::with_public_key(PublicKey::from_key_file(&kg.public_key_path))
-        .write(&substitute, &out_dir, |_| {})
-        .expect("encrypt substitute")
-        .output_path;
+    let original_fcr = Encryptor::with_public_key(
+        PublicKey::from_key_file(&kg.public_key_path).expect("read public key"),
+    )
+    .write(&original, &out_dir, |_| {})
+    .expect("encrypt original")
+    .output_path;
+    let substitute_fcr = Encryptor::with_public_key(
+        PublicKey::from_key_file(&kg.public_key_path).expect("read public key"),
+    )
+    .write(&substitute, &out_dir, |_| {})
+    .expect("encrypt substitute")
+    .output_path;
 
     let decryptor = match Decryptor::open(&original_fcr).expect("open") {
         Decryptor::PrivateKey(d) => d,
@@ -470,6 +478,92 @@ fn private_key_decrypt_uses_the_validated_file_not_a_swapped_replacement() {
         fs::read(&outcome.output_path).unwrap(),
         b"original plaintext",
         "the restored content must come from the originally opened file"
+    );
+}
+
+/// A `PublicKey` must keep encrypting to the key it was built from, even
+/// after the file it came from is replaced with a different key.
+///
+/// This is what makes an out-of-band fingerprint check meaningful: a caller
+/// that shows a fingerprint and then encrypts with the same value must not
+/// silently address the file to whoever replaced the key in between. The test
+/// builds a key from A's file, overwrites that file with B's key, and then
+/// checks both the fingerprint and the actual recipient of the output.
+#[test]
+fn public_key_encrypts_to_the_key_it_was_built_from_after_the_file_is_replaced() {
+    let work = fresh_workspace("public_key_snapshot_survives_swap");
+    let keys_a = work.join("keys_a");
+    let keys_b = work.join("keys_b");
+    fs::create_dir_all(&keys_a).unwrap();
+    fs::create_dir_all(&keys_b).unwrap();
+    let kg_a = generate_key_pair(&keys_a, pass(), |_| {}).expect("keygen A");
+    let kg_b = generate_key_pair(&keys_b, pass(), |_| {}).expect("keygen B");
+
+    let recipient = PublicKey::from_key_file(&kg_a.public_key_path).expect("read A's public key");
+    let fingerprint_before = recipient.fingerprint().expect("fingerprint A");
+
+    // The verified key file now holds B's key instead.
+    fs::copy(&kg_b.public_key_path, &kg_a.public_key_path).expect("replace A's key file with B's");
+    let fingerprint_of_replacement = PublicKey::from_key_file(&kg_a.public_key_path)
+        .expect("read the replaced file")
+        .fingerprint()
+        .expect("fingerprint the replacement");
+    assert_ne!(
+        fingerprint_before, fingerprint_of_replacement,
+        "sanity: the replacement really is a different key"
+    );
+
+    let input = work.join("secret.txt");
+    fs::write(&input, b"bound to the verified key").unwrap();
+    let out_dir = work.join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+    let fcr = Encryptor::with_public_key(recipient.clone())
+        .write(&input, &out_dir, |_| {})
+        .expect("encrypt")
+        .output_path;
+
+    assert_eq!(
+        recipient.fingerprint().expect("fingerprint after the swap"),
+        fingerprint_before,
+        "the fingerprint must still describe the key this value was built from"
+    );
+
+    // A's private key decrypts the output; B's, whose public key now sits at
+    // the path that was used, does not.
+    let restore = work.join("restored");
+    fs::create_dir_all(&restore).unwrap();
+    let decryptor = match Decryptor::open(&fcr).expect("open") {
+        Decryptor::PrivateKey(d) => d,
+        other => panic!("expected private-key decryptor, got {other:?}"),
+    };
+    let outcome = decryptor
+        .decrypt(
+            PrivateKey::from_key_file(&kg_a.private_key_path, pass()),
+            &restore,
+            |_| {},
+        )
+        .expect("A's private key must decrypt the output");
+    assert_eq!(
+        fs::read(&outcome.output_path).unwrap(),
+        b"bound to the verified key"
+    );
+
+    let restore_b = work.join("restored_b");
+    fs::create_dir_all(&restore_b).unwrap();
+    let decryptor_b = match Decryptor::open(&fcr).expect("open") {
+        Decryptor::PrivateKey(d) => d,
+        other => panic!("expected private-key decryptor, got {other:?}"),
+    };
+    let err = decryptor_b
+        .decrypt(
+            PrivateKey::from_key_file(&kg_b.private_key_path, pass()),
+            &restore_b,
+            |_| {},
+        )
+        .expect_err("the substituted key must not be able to read the output");
+    assert!(
+        matches!(&err, CryptoError::RecipientUnwrapFailed { type_name } if type_name == "x25519"),
+        "expected no matching recipient slot, got {err:?}"
     );
 }
 
@@ -576,9 +670,11 @@ fn decrypt_outcome_carries_authenticated_public_key_mode() {
     let kg = generate_key_pair(&keys, pass(), |_| {}).expect("keygen");
     let input = work.join("data.txt");
     fs::write(&input, b"plaintext").unwrap();
-    let encrypted = Encryptor::with_public_key(PublicKey::from_key_file(&kg.public_key_path))
-        .write(&input, &work, |_| {})
-        .expect("encrypt");
+    let encrypted = Encryptor::with_public_key(
+        PublicKey::from_key_file(&kg.public_key_path).expect("read public key"),
+    )
+    .write(&input, &work, |_| {})
+    .expect("encrypt");
 
     let restore = work.join("restored");
     fs::create_dir_all(&restore).unwrap();
@@ -655,9 +751,11 @@ fn recipient_decryptor_archive_limits_constrains_extraction() {
     let out_dir = work.join("out");
     fs::create_dir_all(&out_dir).unwrap();
 
-    let outcome = Encryptor::with_public_key(PublicKey::from_key_file(&kg.public_key_path))
-        .write(&dir, &out_dir, |_| {})
-        .expect("encrypt");
+    let outcome = Encryptor::with_public_key(
+        PublicKey::from_key_file(&kg.public_key_path).expect("read public key"),
+    )
+    .write(&dir, &out_dir, |_| {})
+    .expect("encrypt");
 
     let restore = work.join("restored");
     fs::create_dir_all(&restore).unwrap();
@@ -819,7 +917,7 @@ fn decryptor_open_with_limits_accepts_recipient_count_above_default() {
     // of them.
     const RECIPIENT_COUNT: usize = 80;
     let recipients: Vec<PublicKey> = (0..RECIPIENT_COUNT)
-        .map(|_| PublicKey::from_key_file(&kg.public_key_path))
+        .map(|_| PublicKey::from_key_file(&kg.public_key_path).expect("read public key"))
         .collect();
     // Writer-mirrors-reader contract: the writer refuses lists above the
     // default `RECIPIENT_COUNT_LOCAL_CAP_DEFAULT` (64) unless the caller
@@ -885,7 +983,7 @@ fn probe_recipient_mode_with_limits_accepts_above_default() {
     fs::create_dir_all(&out_dir).unwrap();
 
     let recipients: Vec<PublicKey> = (0..80)
-        .map(|_| PublicKey::from_key_file(&kg.public_key_path))
+        .map(|_| PublicKey::from_key_file(&kg.public_key_path).expect("read public key"))
         .collect();
     // Writer must opt into the raised recipient-count cap; the
     // probe-only path below confirms the same opt-in is required
@@ -941,7 +1039,7 @@ fn encryptor_with_recipients_above_default_rejects_without_opt_in() {
 
     // One above the default cap — boundary rejection, not "way over".
     let recipients: Vec<PublicKey> = (0..(cap as usize + 1))
-        .map(|_| PublicKey::from_key_file(&kg.public_key_path))
+        .map(|_| PublicKey::from_key_file(&kg.public_key_path).expect("read public key"))
         .collect();
     let result = Encryptor::with_public_keys(recipients)
         .expect("with_public_keys")
@@ -957,7 +1055,7 @@ fn encryptor_with_recipients_above_default_rejects_without_opt_in() {
     // Boundary: a list at exactly the default cap MUST succeed under
     // default settings. Pins the cap check uses `>`, not `>=`.
     let at_cap: Vec<PublicKey> = (0..cap)
-        .map(|_| PublicKey::from_key_file(&kg.public_key_path))
+        .map(|_| PublicKey::from_key_file(&kg.public_key_path).expect("read public key"))
         .collect();
     let at_cap_out = out_dir.join("at_cap");
     fs::create_dir_all(&at_cap_out).unwrap();
@@ -1036,9 +1134,11 @@ fn encryptor_recipient_header_limits_reject_tight_header_len() {
     fs::create_dir_all(&out_dir).unwrap();
 
     let tight = HeaderReadLimits::default().max_header_len(32);
-    let result = Encryptor::with_public_key(PublicKey::from_key_file(&kg.public_key_path))
-        .header_read_limits(tight)
-        .write(&input, &out_dir, |_| {});
+    let result = Encryptor::with_public_key(
+        PublicKey::from_key_file(&kg.public_key_path).expect("read public key"),
+    )
+    .header_read_limits(tight)
+    .write(&input, &out_dir, |_| {});
     match result {
         Err(CryptoError::HeaderLenCapExceeded {
             header_len,
@@ -1386,9 +1486,11 @@ fn keypair_generator_kdf_params_at_kdf_limit_succeeds() {
     fs::write(&input, b"x25519 round-trip via raised kdf").unwrap();
     let out_dir = work.join("out");
     fs::create_dir_all(&out_dir).unwrap();
-    let outcome = Encryptor::with_public_key(PublicKey::from_key_file(&kg.public_key_path))
-        .write(&input, &out_dir, |_| {})
-        .expect("encrypt");
+    let outcome = Encryptor::with_public_key(
+        PublicKey::from_key_file(&kg.public_key_path).expect("read public key"),
+    )
+    .write(&input, &out_dir, |_| {})
+    .expect("encrypt");
 
     let restore = work.join("restored");
     fs::create_dir_all(&restore).unwrap();
@@ -1513,9 +1615,11 @@ fn private_key_decrypt_revalidates_input_before_unlock() {
     let out_dir = work.join("out");
     fs::create_dir_all(&out_dir).unwrap();
 
-    let outcome = Encryptor::with_public_key(PublicKey::from_key_file(&kg.public_key_path))
-        .write(&input, &out_dir, |_| {})
-        .expect("encrypt");
+    let outcome = Encryptor::with_public_key(
+        PublicKey::from_key_file(&kg.public_key_path).expect("read public key"),
+    )
+    .write(&input, &out_dir, |_| {})
+    .expect("encrypt");
 
     let decryptor = match Decryptor::open(&outcome.output_path).expect("open") {
         Decryptor::PrivateKey(d) => d,
@@ -1610,9 +1714,11 @@ fn private_key_decryptor_forwards_key_read_limits() {
     let out_dir = work.join("out");
     fs::create_dir_all(&out_dir).unwrap();
 
-    let outcome = Encryptor::with_public_key(PublicKey::from_key_file(&kg.public_key_path))
-        .write(&input, &out_dir, |_| {})
-        .expect("encrypt");
+    let outcome = Encryptor::with_public_key(
+        PublicKey::from_key_file(&kg.public_key_path).expect("read public key"),
+    )
+    .write(&input, &out_dir, |_| {})
+    .expect("encrypt");
 
     // Rewrite the generated key file with a wrapped secret one byte
     // above the default cap, keeping the declared length and the real

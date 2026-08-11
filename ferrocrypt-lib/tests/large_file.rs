@@ -127,10 +127,12 @@ fn round_trip_file_larger_than_4gib() {
 
     let enc_dir = work.join("enc");
     fs::create_dir_all(&enc_dir).unwrap();
-    let fcr: PathBuf = Encryptor::with_public_key(PublicKey::from_key_file(&kg.public_key_path))
-        .write(&input, &enc_dir, |_| {})
-        .expect("encrypt >4 GiB file")
-        .output_path;
+    let fcr: PathBuf = Encryptor::with_public_key(
+        PublicKey::from_key_file(&kg.public_key_path).expect("read public key"),
+    )
+    .write(&input, &enc_dir, |_| {})
+    .expect("encrypt >4 GiB file")
+    .output_path;
 
     // Free the input's disk before decrypting so peak usage stays near
     // two copies, not three.

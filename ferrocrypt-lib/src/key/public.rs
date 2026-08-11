@@ -684,9 +684,16 @@ pub(crate) fn read_public_key(
 /// Public recipient key for FerroCrypt public-key encryption.
 ///
 /// Today, public recipient keys are native X25519 public keys. A `PublicKey`
-/// can reference a `public.key` file, hold raw 32-byte X25519 public material,
-/// or be constructed from a Bech32 `fcr1…` recipient string. Filesystem sources
-/// defer I/O until a method needs the key material.
+/// can be read from a `public.key` file, wrap raw 32-byte X25519 public
+/// material, or be decoded from a Bech32 `fcr1…` recipient string. Every
+/// constructor resolves its source immediately, so the value holds key
+/// material and never re-reads where that material came from.
+///
+/// That single resolution point is what makes an identity check meaningful:
+/// a fingerprint taken from a `PublicKey` describes the key that same value
+/// will encrypt to. Verify the fingerprint out of band, then keep the value
+/// itself through the encryption call — passing the path again instead would
+/// re-read a file that may have changed in between.
 ///
 /// Once constructed, a `PublicKey` can be:
 ///
@@ -698,32 +705,20 @@ pub(crate) fn read_public_key(
 ///
 /// The struct is `#[non_exhaustive]` so future sources (key servers,
 /// hardware-backed keys) can be added without a breaking change. It is
-/// `Clone` but not `Copy`, because a source may hold an owned path.
-/// Public key material is bytes or a locator, so future sources stay
-/// cloneable.
+/// `Clone` but not `Copy`: a future recipient type may carry key material
+/// that is not itself `Copy`, and dropping a `Copy` impl after release is a
+/// breaking change.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct PublicKey {
-    source: PublicKeySource,
-}
-
-#[derive(Debug, Clone)]
-enum PublicKeySource {
-    KeyFile {
-        path: std::path::PathBuf,
-        limits: KeyReadLimits,
-    },
-    X25519 {
-        suite: KeypairSuite,
-        bytes: [u8; 32],
-    },
+    resolved: ResolvedPublicKey,
 }
 
 /// Internal resolved public-key form: X25519 bytes plus the
 /// [`KeypairSuite`] (crate-internal) the bytes belong to. All three
 /// `PublicKey` construction paths (`from_x25519_bytes`, `from_recipient_string`,
-/// `from_key_file` via `read_public_key`) materialise this shape so a
-/// caller of [`PublicKey::resolve`] always sees the suite alongside the
+/// `from_key_file` via `read_public_key`) materialise this shape at
+/// construction, so every [`PublicKey`] carries the suite alongside the
 /// key material. Every byte that reaches the encryption pipeline or the
 /// recipient-string encoder is paired with the suite it belongs to,
 /// not silently re-tagged with the current writer suite.
@@ -734,32 +729,39 @@ pub(crate) struct ResolvedPublicKey {
 }
 
 impl PublicKey {
-    /// References a FerroCrypt `public.key` file, read under
+    /// Reads and parses a FerroCrypt `public.key` file under
     /// [`KeyReadLimits::default`].
     ///
-    /// The file is not opened until a method that needs the key material is
-    /// called, such as [`fingerprint`](Self::fingerprint),
-    /// [`to_recipient_string`](Self::to_recipient_string),
-    /// [`to_x25519_bytes`](Self::to_x25519_bytes), or [`validate`](Self::validate).
-    pub fn from_key_file(path: impl AsRef<std::path::Path>) -> Self {
+    /// The file is read exactly once, by this call. Every later method uses
+    /// the key material resolved here, so a change to the file afterwards
+    /// cannot alter what this value fingerprints as or encrypts to.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::InputPath`] if the file does not exist, and
+    /// [`CryptoError::Io`] for other read failures. Returns
+    /// [`CryptoError::InvalidFormat`] or
+    /// [`CryptoError::RecipientStringCapExceeded`] if the file is not a valid
+    /// `public.key` file.
+    pub fn from_key_file(path: impl AsRef<std::path::Path>) -> Result<Self, CryptoError> {
         Self::from_key_file_with_limits(path, KeyReadLimits::default())
     }
 
-    /// References a FerroCrypt `public.key` file whose recipient string
+    /// Reads a FerroCrypt `public.key` file whose recipient string
     /// legitimately exceeds the default local cap.
     ///
-    /// Same deferred read as [`PublicKey::from_key_file`]; `limits`
-    /// applies when the file is finally read.
+    /// Same single read as [`PublicKey::from_key_file`], with `limits`
+    /// applied to the parse.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`PublicKey::from_key_file`].
     pub fn from_key_file_with_limits(
         path: impl AsRef<std::path::Path>,
         limits: KeyReadLimits,
-    ) -> Self {
-        Self {
-            source: PublicKeySource::KeyFile {
-                path: path.as_ref().to_path_buf(),
-                limits,
-            },
-        }
+    ) -> Result<Self, CryptoError> {
+        let resolved = read_public_key(path.as_ref(), limits)?;
+        Ok(Self { resolved })
     }
 
     /// Wraps raw 32-byte X25519 public-key material directly.
@@ -794,7 +796,7 @@ impl PublicKey {
     pub fn from_x25519_bytes(bytes: [u8; 32]) -> Result<Self, CryptoError> {
         check_x25519_material(X25519_TYPE_NAME, &bytes)?;
         Ok(Self {
-            source: PublicKeySource::X25519 {
+            resolved: ResolvedPublicKey {
                 suite: WRITER_KEYPAIR_SUITE,
                 bytes,
             },
@@ -848,12 +850,7 @@ impl PublicKey {
         limits: KeyReadLimits,
     ) -> Result<Self, CryptoError> {
         let resolved = decode_x25519_recipient_resolved(recipient, limits)?;
-        Ok(Self {
-            source: PublicKeySource::X25519 {
-                suite: resolved.suite,
-                bytes: resolved.bytes,
-            },
-        })
+        Ok(Self { resolved })
     }
 
     /// Computes the public-key fingerprint.
@@ -867,11 +864,9 @@ impl PublicKey {
     ///
     /// # Errors
     ///
-    /// Returns the same errors as [`PublicKey::to_x25519_bytes`] when this key source
-    /// must be read from disk or decoded from a key file.
+    /// Returns the same errors as [`PublicKey::to_x25519_bytes`].
     pub fn fingerprint(&self) -> Result<String, CryptoError> {
-        let resolved = self.resolve()?;
-        fingerprint_hex(X25519_TYPE_NAME, &resolved.bytes)
+        fingerprint_hex(X25519_TYPE_NAME, &self.resolved.bytes)
     }
 
     /// Encodes the key as the canonical lowercase Bech32 `fcr1…`
@@ -884,65 +879,29 @@ impl PublicKey {
     /// built from raw bytes via [`PublicKey::from_x25519_bytes`] re-encodes
     /// using the writer suite (the suite `from_x25519_bytes` pins).
     ///
-    /// Performs filesystem I/O if this `PublicKey` references a key file.
-    ///
     /// # Errors
     ///
-    /// Returns the same errors as [`PublicKey::to_x25519_bytes`] when this key source
-    /// must be read from disk or decoded from a key file. Returns
-    /// [`CryptoError::InternalInvariant`] only if canonical Bech32 encoding fails
+    /// Returns the same errors as [`PublicKey::to_x25519_bytes`], plus
+    /// [`CryptoError::InternalInvariant`] if canonical Bech32 encoding fails
     /// for already-validated X25519 bytes.
     pub fn to_recipient_string(&self) -> Result<String, CryptoError> {
-        let resolved = self.resolve()?;
-        encode_recipient_string_for_suite(resolved.suite, X25519_TYPE_NAME, &resolved.bytes)
+        encode_recipient_string_for_suite(
+            self.resolved.suite,
+            X25519_TYPE_NAME,
+            &self.resolved.bytes,
+        )
     }
 
     /// Returns the raw 32-byte X25519 public-key material as an owned
     /// array.
     ///
-    /// Performs filesystem I/O for the key-file source.
-    ///
     /// # Errors
     ///
-    /// Returns [`CryptoError::InputPath`] if a referenced key file does not
-    /// exist, and [`CryptoError::Io`] for other read failures. Returns
-    /// [`CryptoError::InvalidFormat`] or
-    /// [`CryptoError::RecipientStringCapExceeded`] if a referenced key file is
-    /// not a valid `public.key` file.
+    /// Reserved for a future recipient type that carries no X25519 material.
+    /// Every `PublicKey` this build can construct holds a validated X25519
+    /// key, so the call currently always succeeds.
     pub fn to_x25519_bytes(&self) -> Result<[u8; 32], CryptoError> {
-        self.resolve().map(|resolved| resolved.bytes)
-    }
-
-    /// Validates that the key source is well-formed without exposing the
-    /// bytes to the caller.
-    ///
-    /// For a key-file source this opens and parses the `public.key`
-    /// text file. For a raw-bytes source this is always `Ok(())` —
-    /// structural rejection of degenerate keys (e.g. all-zero) already
-    /// happens inside [`PublicKey::from_x25519_bytes`], so a constructed
-    /// `PublicKey` cannot wrap a value that fails this check.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same errors as [`PublicKey::to_x25519_bytes`] when this key source
-    /// must be read from disk or decoded from a key file.
-    pub fn validate(&self) -> Result<(), CryptoError> {
-        self.resolve().map(|_| ())
-    }
-
-    /// Resolves the key to its [`ResolvedPublicKey`] (suite + 32-byte
-    /// material), reading the key file from disk if the source is a
-    /// path. Every `PublicKey` ingress path stores or recovers the
-    /// keypair suite, so the resolved value always carries an
-    /// already-supported [`KeypairSuite`].
-    fn resolve(&self) -> Result<ResolvedPublicKey, CryptoError> {
-        match &self.source {
-            PublicKeySource::KeyFile { path, limits } => read_public_key(path, *limits),
-            PublicKeySource::X25519 { suite, bytes } => Ok(ResolvedPublicKey {
-                suite: *suite,
-                bytes: *bytes,
-            }),
-        }
+        Ok(self.resolved.bytes)
     }
 }
 
@@ -1593,7 +1552,7 @@ mod tests {
             KeyReadLimits::default().max_recipient_string_chars(u32::try_from(long.len()).unwrap());
 
         for capped in [
-            PublicKey::from_key_file(&path).validate(),
+            PublicKey::from_key_file(&path).map(|_| ()),
             PublicKey::from_recipient_string(&long).map(|_| ()),
         ] {
             match capped {
@@ -1605,7 +1564,7 @@ mod tests {
         }
 
         for reached in [
-            PublicKey::from_key_file_with_limits(&path, raised).validate(),
+            PublicKey::from_key_file_with_limits(&path, raised).map(|_| ()),
             PublicKey::from_recipient_string_with_limits(&long, raised).map(|_| ()),
         ] {
             match reached {
@@ -1706,7 +1665,7 @@ mod tests {
     #[test]
     fn from_bytes_pins_writer_keypair_suite() {
         let pk = PublicKey::from_x25519_bytes(x25519_key()).unwrap();
-        let resolved = pk.resolve().unwrap();
+        let resolved = pk.resolved;
         assert_eq!(resolved.suite, WRITER_KEYPAIR_SUITE);
         assert_eq!(resolved.bytes, x25519_key());
     }
@@ -1732,7 +1691,7 @@ mod tests {
         let original =
             encode_recipient_string_for_suite(KeypairSuite::V1, X25519_TYPE_NAME, &key).unwrap();
         let pk = PublicKey::from_recipient_string(&original).unwrap();
-        let resolved = pk.resolve().unwrap();
+        let resolved = pk.resolved;
         assert_eq!(resolved.suite, KeypairSuite::V1);
         assert_eq!(resolved.bytes, key);
         let re_encoded = pk.to_recipient_string().unwrap();

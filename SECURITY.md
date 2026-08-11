@@ -111,9 +111,11 @@ regression net, regenerated when the format intentionally changes).
   refuses this rename atomically if the final name is already taken —
   no window for another process to interfere. On filesystems whose
   driver cannot do that in one step (Apple's exFAT driver, some network
-  filesystems), a decrypted **file** is instead linked to its final name
-  and the working name removed: creating a link refuses an existing
-  entry atomically, so this too leaves no window. A decrypted **folder**
+  filesystems), any single **file** FerroCrypt commits — a decrypted
+  file, an encrypted file, or a generated key file — is instead linked
+  to its final name and the working name removed: creating a link
+  refuses an existing entry atomically, so this too leaves no window. A
+  decrypted **folder**
   cannot be linked, and neither can anything on a filesystem without
   hard links (exFAT again). Those cases claim the final name by creating
   it — creation refuses an existing entry atomically — and then rename
@@ -151,6 +153,16 @@ regression net, regenerated when the format intentionally changes).
   unaffected — but incremental backup tools read a clear archive bit as
   "already backed up" and may skip the file until it changes again. Set
   the attribute yourself if your backup schedule depends on it.
+- **An output folder another local process can change is a trust
+  boundary.** FerroCrypt writes each output under a temporary name in
+  the folder you chose and commits it there. If another local process
+  can rename or replace that folder while the operation runs, the
+  finished file can end up in whatever the path names by then. What such
+  a swap cannot do is misdirect a cleanup: when key generation has to
+  undo a key file it already wrote, it removes that file through a
+  handle held on the folder the file actually went to, so it can never
+  delete a same-named file elsewhere. Choose an output folder that only
+  you can modify.
 - **Generated key pairs publish `private.key` before `public.key`.** Key
   generation writes and flushes both files before either receives its
   final name. It then commits `private.key`, flushes the output

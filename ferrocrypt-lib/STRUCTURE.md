@@ -976,10 +976,24 @@ It contains:
     no-replace on every supported platform, Windows included. On a
     Unix filesystem whose driver refuses the no-replace rename
     (`no_replace_rename_unsupported`; the macOS exFAT driver among
-    them), `finalize_file` falls back to `finalize_file_via_claim`:
-    exclusive-create the final name, then rename the temp file over
-    that claim — no-clobber against pre-existing entries stays
-    unconditional;
+    them), `finalize_file` falls back to
+    `finalize_file_via_link_or_claim`, which mirrors the archive
+    promotion: `std::fs::hard_link` first, because it refuses an
+    existing target atomically and so reaches the final name with no
+    placeholder a concurrent writer could replace. `tempfile` does not
+    try this for the error that leads here — it links only when the
+    kernel reports the no-replace flag as unknown, not when the
+    filesystem rejects the operation — so a filesystem with links but
+    without a no-replace rename (SMB) is committed here without a claim
+    window. Only a filesystem without hard links (exFAT) falls through
+    to `finalize_file_via_claim`: exclusive-create the final name, then
+    rename the temp file over that claim. No-clobber against
+    pre-existing entries stays unconditional either way; between the
+    claim and the rename the placeholder is an ordinary entry, so an
+    entry another process plants in its place is replaced by the
+    rename, the same bound `SECURITY.md` states for the archive claim.
+    The claim and its failure-path removal both resolve through one
+    `OutputDir` handle;
   - **decrypt promotion on Windows and other non-Linux/macOS targets**:
     single-file roots through `promote_single_file_no_clobber` (the same
     `tempfile` atomic no-replace, Windows `MoveFileExW` included),
@@ -1012,7 +1026,8 @@ It contains:
   `fsync_uninterrupted`, the single source of truth for EINTR handling,
   because `rustix` reports a signal-interrupted call as `EINTR` while
   `File::sync_all` retries internally;
-- required directory-entry flushing: `sync_dir_durable` opens and flushes a directory, returning genuine failures to the caller. Unix uses an `O_DIRECTORY` read handle; Windows uses a backup-semantics write handle because `FlushFileBuffers` requires write access. Filesystems that cannot flush directories are treated as unsupported, which limits the caller's guarantee to process interruption. Key generation uses this helper after each key-file commit. `sync_parent_dir` remains the best-effort helper for recoverable outputs such as encrypted files and promoted decrypted outputs; it flushes on Windows too, through the same `sync_dir_durable` primitive with the result dropped. Staged descendant directories during extraction are flushed on Linux and macOS only (`archive/platform.rs::chmod_dir_handle_durable` for descendants, `sync_dir_handle` for the staged root): Windows needs a write handle for `FlushFileBuffers`, and the extraction directory handles are opened read-only; a capability-relative write reopen of `.` could close the gap but is not implemented or verified on Windows;
+- required directory-entry flushing: `sync_dir_durable` opens and flushes a directory, returning genuine failures to the caller. Unix uses an `O_DIRECTORY | O_NONBLOCK` read handle; Windows uses a backup-semantics write handle because `FlushFileBuffers` requires write access. Filesystems that cannot flush directories are treated as unsupported, which limits the caller's guarantee to process interruption. Key generation uses this helper after each key-file commit. `sync_parent_dir` remains the best-effort helper for recoverable outputs such as encrypted files and promoted decrypted outputs; on Unix and Windows alike it routes through the same `sync_dir_durable` primitive with the result dropped, so the parent is always opened as a directory and a path replaced by a FIFO or a device node after publication is refused rather than opened — a read-only open of such an object waits for a writer, and a best-effort helper has no error to swallow while the open itself is blocked. Staged descendant directories during extraction are flushed on Linux and macOS only (`archive/platform.rs::chmod_dir_handle_durable` for descendants, `sync_dir_handle` for the staged root): Windows needs a write handle for `FlushFileBuffers`, and the extraction directory handles are opened read-only; a capability-relative write reopen of `.` could close the gap but is not implemented or verified on Windows;
+- anchored failure cleanup: `OutputDir` retains a `cap_std::fs::Dir` handle on the directory an operation publishes into, and `remove_published` resolves a removal inside that handle rather than through the entry's own path. A rollback runs after a commit is already visible on disk, which is exactly when a renamed or symlink-substituted output path would send the removal into a different directory and unlink a same-named file the operation never created. Key generation opens the handle before its first commit and undoes both key files through it; the `finalize_file_via_claim` fallback uses it for the claim and the claim's removal. The handle does not make the chosen directory trustworthy — the caller's choice of output directory is the trust boundary — it removes the mismatch between the directory an operation wrote to and the one it later cleans up in;
 - keeping a staged file on disk after a refused promotion, so a rejected commit leaves the caller something to inspect.
 
 Temporary output names, same-directory staging, and cleanup on encryption failure are the callers' concern: `container.rs` and `protocol.rs` build the names and stage into the destination directory, and `NamedTempFile`'s destructor removes a staged file that was never committed. `.incomplete` behavior on decryption failure belongs to `archive/decode.rs`, which owns the `StagedRoot` record of what the run created, its removal, and the `IncompleteOutputPolicy` dispatch.
@@ -1216,7 +1231,7 @@ Ownership split:
 
 - X25519 key generation lives in `recipient/native/x25519.rs`.
 - Key serialization lives in `key/`.
-- Key-file staging lives in `protocol.rs` key generation and uses the atomic-output helpers in `fs/`. Both files are staged and synced before either is committed. `private.key` is committed first, and the output directory is flushed after each commit through `fs/atomic.rs::sync_dir_durable`. A failed final directory flush removes `public.key` but keeps `private.key`, because removing both without a working directory flush could leave only `public.key` behind after power loss. Filesystems that cannot flush directories retain protection against process interruption but cannot provide the same power-loss guarantee.
+- Key-file staging lives in `protocol.rs` key generation and uses the atomic-output helpers in `fs/`. Both files are staged and synced before either is committed. `private.key` is committed first, and the output directory is flushed after each commit through `fs/atomic.rs::sync_dir_durable`. A failed final directory flush removes `public.key` but keeps `private.key`, because removing both without a working directory flush could leave only `public.key` behind after power loss. Every one of those removals goes through the `fs/atomic.rs::OutputDir` handle opened before the first commit, so an output directory renamed or replaced between the two commits cannot turn a rollback into the deletion of an unrelated key file of the same name. Filesystems that cannot flush directories retain protection against process interruption but cannot provide the same power-loss guarantee.
 
 `KeyPairGenerator` mirrors `Encryptor`'s reader-aligned cap rule for the passphrase that seals `private.key`: `kdf_params.mem_cost <= kdf_limit.max_mem_cost_kib` (default 1 GiB) is enforced at `write` time before Argon2id runs. Above-default `mem_cost` rejects with `CryptoError::KdfResourceCapExceeded`; the unlocking [`PrivateKeyDecryptor`] must be configured via [`PrivateKeyDecryptor::kdf_limit`] with a matching [`KdfLimit`].
 

@@ -741,6 +741,11 @@ pub(crate) fn generate_key_pair(
 ///   `private.key` is kept. Removing both without a working directory flush
 ///   could leave only `public.key` after power loss. The remaining private key
 ///   is safe to delete.
+///
+/// Every removal above resolves inside the retained output-directory
+/// handle rather than through the key-file path, so an output directory
+/// renamed or replaced between the two commits cannot turn a rollback
+/// into the deletion of an unrelated file of the same name.
 fn commit_key_pair_files(
     private_tmp: tempfile::NamedTempFile,
     public_tmp: tempfile::NamedTempFile,
@@ -765,24 +770,29 @@ fn commit_key_pair_files_with_barrier(
     public_key_path: &Path,
     sync_output_dir: impl Fn(&Path) -> std::io::Result<()>,
 ) -> Result<(), CryptoError> {
-    use crate::fs::atomic;
+    use crate::fs::atomic::{self, OutputDir};
     use crate::fs::paths::parent_or_cwd;
 
-    // Both final paths use the same output directory, so one directory
-    // flush covers both entries.
+    // Both final paths name entries in the same output directory: one
+    // flush covers both, and both rollbacks resolve there.
     let output_dir = parent_or_cwd(private_key_path);
+    // Anchor the rollbacks to the directory the staged files were
+    // created in. They run after a commit is already visible on disk,
+    // which is exactly when a substituted output path would send a
+    // removal somewhere else.
+    let committed_dir = OutputDir::open(output_dir).map_err(CryptoError::Io)?;
 
     atomic::finalize_file(private_tmp, private_key_path, KEY_FILE_LABEL)?;
     if let Err(e) = sync_output_dir(output_dir) {
-        let _ = fs::remove_file(private_key_path);
+        committed_dir.remove_published(private_key_path);
         return Err(CryptoError::Io(e));
     }
     if let Err(e) = atomic::finalize_file(public_tmp, public_key_path, KEY_FILE_LABEL) {
-        let _ = fs::remove_file(private_key_path);
+        committed_dir.remove_published(private_key_path);
         return Err(e);
     }
     if let Err(e) = sync_output_dir(output_dir) {
-        let _ = fs::remove_file(public_key_path);
+        committed_dir.remove_published(public_key_path);
         return Err(CryptoError::Io(e));
     }
     Ok(())
@@ -1995,6 +2005,67 @@ mod tests {
         assert!(
             leftovers.is_empty(),
             "nothing besides private.key may remain, found {leftovers:?}"
+        );
+    }
+
+    /// A rollback must remove the key file this run committed, not
+    /// whatever the output path names by the time the rollback runs. The
+    /// barrier renames the output directory aside and leaves a symlink to
+    /// an unrelated directory in its place — what a local writer with
+    /// access to the parent can do between the two commits. The unrelated
+    /// `private.key` must survive, and the committed one must still go.
+    #[cfg(unix)]
+    #[test]
+    fn keygen_rollback_removes_the_committed_key_not_a_substituted_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let out = tmp.path().join("out");
+        let unrelated = tmp.path().join("elsewhere");
+        let moved_out = tmp.path().join("out.moved");
+        fs::create_dir(&out).unwrap();
+        fs::create_dir(&unrelated).unwrap();
+        fs::write(unrelated.join(PRIVATE_KEY_FILENAME), b"unrelated key").unwrap();
+
+        let private_key_path = out.join(PRIVATE_KEY_FILENAME);
+        let public_key_path = out.join(PUBLIC_KEY_FILENAME);
+        let private_tmp = staged_key_tempfile(&out, b"private bytes");
+        let public_tmp = staged_key_tempfile(&out, b"public bytes");
+
+        // Records that `private.key` really was committed before the
+        // substitution, so the removal assertion below cannot pass just
+        // because nothing was ever published.
+        let committed_before_swap = std::rc::Rc::new(std::cell::Cell::new(false));
+        let substitute_output_dir = {
+            let (out, unrelated, moved_out) = (out.clone(), unrelated.clone(), moved_out.clone());
+            let committed = committed_before_swap.clone();
+            move |_: &Path| -> std::io::Result<()> {
+                committed.set(out.join(PRIVATE_KEY_FILENAME).exists());
+                fs::rename(&out, &moved_out)?;
+                std::os::unix::fs::symlink(&unrelated, &out)?;
+                Err(std::io::Error::other("injected directory flush failure"))
+            }
+        };
+
+        commit_key_pair_files_with_barrier(
+            private_tmp,
+            public_tmp,
+            &private_key_path,
+            &public_key_path,
+            substitute_output_dir,
+        )
+        .expect_err("the injected directory flush failure must fail the commit");
+
+        assert!(
+            committed_before_swap.get(),
+            "the flush must run after private.key is committed, or this test proves nothing"
+        );
+        assert_eq!(
+            fs::read(unrelated.join(PRIVATE_KEY_FILENAME)).unwrap(),
+            b"unrelated key",
+            "a same-named file in a substituted directory must not be removed"
+        );
+        assert!(
+            !moved_out.join(PRIVATE_KEY_FILENAME).exists(),
+            "the private.key this run committed must still be removed"
         );
     }
 

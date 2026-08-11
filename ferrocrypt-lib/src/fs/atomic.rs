@@ -33,11 +33,18 @@
 //! key-file commit. [`sync_parent_dir`] remains best-effort for outputs whose
 //! loss can be recovered.
 //!
-//! **Zero in-repo unsafe.** The file cases delegate entirely to
-//! `tempfile`, which is atomic-no-replace on Windows (`MoveFileExW`
+//! [`OutputDir`] retains a handle to the directory an operation publishes
+//! into. Cleanup after a failed commit goes through that handle, so it
+//! removes the entry the operation created rather than whatever its path
+//! happens to name once the operation is already under way.
+//!
+//! **Zero in-repo unsafe.** The file cases delegate to `tempfile`,
+//! which is atomic-no-replace on Windows (`MoveFileExW`
 //! without the replace flag) and uses
 //! `rustix::renameat_with(..., RenameFlags::NOREPLACE)` on Linux and
-//! macOS. The directory rename case in [`rename_no_clobber`] delegates
+//! macOS; where the filesystem supports neither, the Unix fallback uses
+//! `std::fs::hard_link` and `cap-std`. The directory rename case in
+//! [`rename_no_clobber`] delegates
 //! to `rustix` directly on Linux and macOS, and on Windows uses
 //! `symlink_metadata()` + `std::fs::rename`, which keeps the crate
 //! zero-unsafe but offers a narrower best-effort no-clobber guarantee
@@ -52,8 +59,15 @@ use crate::CryptoError;
 use crate::fs::paths::already_exists_error;
 
 /// Best-effort parent-directory sync used after a successful file persist or
-/// directory rename. This slightly improves durability on Unix-like systems
-/// after the final path becomes visible.
+/// directory rename. This slightly improves durability after the final path
+/// becomes visible.
+///
+/// Routes through [`sync_dir_durable`] and drops its result. Sharing that
+/// helper keeps the open hardened: the parent is opened as a directory, so a
+/// path replaced by a FIFO or a device node between publication and this call
+/// is refused rather than opened. Opening such an object for reading would
+/// otherwise wait for a writer, and there is no error for a best-effort
+/// helper to swallow while the open itself is still blocked.
 ///
 /// Failures are intentionally ignored here:
 /// - not every filesystem supports syncing directories cleanly
@@ -61,21 +75,9 @@ use crate::fs::paths::already_exists_error;
 /// - returning an error after the final path is visible would be more
 ///   confusing to callers than helpful
 ///
-/// Callers that require directory-flush failures to be reported use
-/// [`sync_dir_durable`] instead.
-#[cfg(unix)]
-fn sync_parent_dir(path: &Path) {
-    if let Ok(dir) = std::fs::File::open(crate::fs::paths::parent_or_cwd(path)) {
-        let _ = dir.sync_all();
-    }
-}
-
-/// Windows arm of [`sync_parent_dir`]. Routes through
-/// [`sync_dir_durable`], which opens the directory with backup
-/// semantics and write access because `FlushFileBuffers` requires it.
-/// The result is dropped for the same reasons the Unix arm ignores its
-/// own: finalization has already succeeded by the time this runs.
-#[cfg(windows)]
+/// Callers that require directory-flush failures to be reported call
+/// [`sync_dir_durable`] directly.
+#[cfg(any(unix, windows))]
 fn sync_parent_dir(path: &Path) {
     let _ = sync_dir_durable(crate::fs::paths::parent_or_cwd(path));
 }
@@ -94,8 +96,10 @@ fn sync_parent_dir(_path: &Path) {}
 /// The promotion is a single atomic no-replace rename wherever the
 /// filesystem supports one. Where it does not (see
 /// [`no_replace_rename_unsupported`]), the Unix fallback
-/// [`finalize_file_via_claim`] commits in two steps while keeping the
-/// no-clobber guarantee unconditional.
+/// [`finalize_file_via_link_or_claim`] commits by linking or, on a
+/// filesystem without hard links, by claiming the name and renaming
+/// over the claim. Both keep the no-clobber guarantee against entries
+/// that predate the commit.
 ///
 /// Callers are expected to have already flushed and synced the temp file
 /// before calling this function. The temp file and the final path must
@@ -118,7 +122,7 @@ pub(crate) fn finalize_file(
 
 /// Failure arm of [`finalize_file`]. On Unix, a filesystem that cannot
 /// perform an atomic no-replace rename retries through
-/// [`finalize_file_via_claim`]; every other failure maps to the
+/// [`finalize_file_via_link_or_claim`]; every other failure maps to the
 /// caller-visible error taxonomy. Dropping the `PersistError` removes
 /// the temp file on the non-retry paths.
 #[cfg(unix)]
@@ -128,7 +132,7 @@ fn finalize_persist_failure(
     label: &str,
 ) -> Result<(), CryptoError> {
     if no_replace_rename_unsupported(&e.error) {
-        return finalize_file_via_claim(e.file, final_path, label);
+        return finalize_file_via_link_or_claim(e.file, final_path, label);
     }
     Err(map_persist_error(e.error, final_path, label))
 }
@@ -252,10 +256,13 @@ pub(crate) fn sync_dir_durable(dir: &Path) -> io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
 
     // `O_DIRECTORY` ensures that `dir` is a directory. A regular file
-    // therefore returns `NotADirectory` instead of being flushed.
+    // therefore returns `NotADirectory` instead of being flushed, and a
+    // substituted FIFO or device node is refused rather than opened.
+    // `O_NONBLOCK` keeps that refusal immediate on a platform that
+    // checks the directory requirement only after opening the object.
     let handle = match std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_DIRECTORY)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NONBLOCK)
         .open(dir)
     {
         Ok(handle) => handle,
@@ -357,6 +364,54 @@ fn dir_sync_unsupported(e: &io::Error) -> bool {
         )
 }
 
+/// A retained handle to the directory an operation publishes into.
+///
+/// An operation that commits more than one entry, or that has to undo a
+/// commit it already made, performs those later steps once its own first
+/// write is already visible on disk. Resolving them through the ambient
+/// output path again lets a rename, or a symlink substituted at that
+/// path, send a removal into a different directory, where it can unlink
+/// a file the operation never created. Removals go through this handle
+/// instead, which stays bound to the directory the entries were
+/// committed to.
+///
+/// The handle does not make the chosen directory trustworthy. The
+/// caller's choice of output directory IS the trust boundary, and a path
+/// already substituted before the handle is opened simply anchors the
+/// whole operation there. What the handle removes is the mismatch
+/// between the directory an operation wrote to and the directory it
+/// later cleans up in.
+///
+/// `cap_std::fs::Dir` is the same capability primitive the archive
+/// extractor anchors to, and behaves uniformly on Linux, macOS, and
+/// Windows.
+pub(crate) struct OutputDir {
+    dir: cap_std::fs::Dir,
+}
+
+impl OutputDir {
+    /// Opens `path` as the anchor for the operation's own cleanup.
+    pub(crate) fn open(path: &Path) -> io::Result<Self> {
+        let dir = cap_std::fs::Dir::open_ambient_dir(path, cap_std::ambient_authority())?;
+        Ok(Self { dir })
+    }
+
+    /// Removes the entry named by `path`'s final component, resolved
+    /// inside the anchored directory rather than through `path` itself.
+    /// Callers pass the full path of an entry they committed directly
+    /// into this directory; a deeper path is not walked, and one with no
+    /// final component names no entry and removes nothing.
+    ///
+    /// Best-effort by design: this undoes a commit made on a path that
+    /// is already returning an error, so a failure here has no better
+    /// error to report than the one being returned.
+    pub(crate) fn remove_published(&self, path: &Path) {
+        if let Some(name) = path.file_name() {
+            let _ = self.dir.remove_file(name);
+        }
+    }
+}
+
 /// Mode bits for the zero-byte placeholder that claims the final name
 /// in [`finalize_file_via_claim`]. Owner-only, matching the mode
 /// `tempfile` gives the staged temp file; the placeholder is replaced
@@ -365,38 +420,87 @@ fn dir_sync_unsupported(e: &io::Error) -> bool {
 #[cfg(unix)]
 const FINAL_NAME_CLAIM_MODE: u32 = 0o600;
 
-/// Commits `tmp` to `final_path` on filesystems without an atomic
-/// no-replace rename, keeping the no-clobber guarantee unconditional:
+/// Commits `tmp` to `final_path` where `tempfile` could not perform an
+/// atomic no-replace rename, keeping the no-clobber guarantee against
+/// entries that predate the commit.
 ///
-/// 1. claim the final name with `create_new(true)` — an atomic
-///    test-and-create on every filesystem, refusing any pre-existing
-///    entry including a dangling symlink;
+/// A filesystem with hard links reaches the final name by linking the
+/// staged file there and dropping the staged name. `hard_link` refuses
+/// an existing target atomically, so no placeholder is created that
+/// another process could replace, and both names denote the finished
+/// content in between. `tempfile` does not try this for the error that
+/// leads here: it links only when the kernel reports the no-replace
+/// flag as unknown, not when the filesystem rejects the operation. A
+/// filesystem with links but without a no-replace rename — SMB among
+/// them — is therefore committed here without a claim window.
+///
+/// Only a filesystem without hard links (exFAT and FAT among them)
+/// falls through to [`finalize_file_via_claim`]. Any other link failure
+/// falls through too: the claim path attempts the same commit and
+/// reports the failure itself, so the wide trigger cannot weaken the
+/// guarantee. A staged name that survives its own removal is a second
+/// link to the committed content, which removing it later cannot damage.
+#[cfg(unix)]
+fn finalize_file_via_link_or_claim(
+    tmp: NamedTempFile,
+    final_path: &Path,
+    label: &str,
+) -> Result<(), CryptoError> {
+    match std::fs::hard_link(tmp.path(), final_path) {
+        Ok(()) => {
+            // Drops the staged name; the content stays reachable through
+            // the link just created. `close` is used rather than the
+            // destructor because it closes the handle before unlinking,
+            // and the filesystems that reach this function are the least
+            // likely to accept an unlink while the file is still open.
+            let _ = tmp.close();
+            sync_parent_dir(final_path);
+            Ok(())
+        }
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            Err(already_exists_error(label, final_path))
+        }
+        Err(_) => finalize_file_via_claim(tmp, final_path, label),
+    }
+}
+
+/// Commits `tmp` to `final_path` on a filesystem with neither an atomic
+/// no-replace rename nor hard links, in two steps:
+///
+/// 1. claim the final name by creating it — an atomic test-and-create
+///    on every filesystem, refusing any pre-existing entry including a
+///    dangling symlink;
 /// 2. rename the staged temp file over the placeholder just created.
 ///    The plain rename replaces the placeholder in one step, so no
 ///    reader ever observes partial content at the final name.
 ///
-/// Only the entry step 1 itself created is ever replaced; a
-/// pre-existing final path rejects in step 1 with the same typed
-/// message as the atomic path. Process interruption between the two
-/// steps leaves an empty placeholder at the final name next to the
-/// temp file. On step-2 failure the placeholder is removed best-effort
-/// and the temp file is removed by its destructor, matching the
-/// [`finalize_file`] contract.
+/// A pre-existing final path rejects in step 1 with the same typed
+/// message as the atomic path, so the no-clobber guarantee against
+/// entries that predate the commit is unconditional. Between the two
+/// steps the claim is an ordinary entry, so a local writer with access
+/// to the destination directory can remove it and leave one of their
+/// own, which step 2 then replaces. That window is why
+/// [`finalize_file_via_link_or_claim`] links wherever the filesystem
+/// supports it; `SECURITY.md` states what remains.
+///
+/// The claim and its removal both resolve through one [`OutputDir`]
+/// handle, so a directory renamed or replaced mid-commit cannot send
+/// the cleanup onto an unrelated file. Process interruption between the
+/// two steps leaves an empty placeholder at the final name next to the
+/// temp file. On step-2 failure the placeholder is removed and the temp
+/// file is removed by its destructor, matching the [`finalize_file`]
+/// contract.
 #[cfg(unix)]
 fn finalize_file_via_claim(
     tmp: NamedTempFile,
     final_path: &Path,
     label: &str,
 ) -> Result<(), CryptoError> {
-    use std::os::unix::fs::OpenOptionsExt;
+    let output_dir =
+        OutputDir::open(crate::fs::paths::parent_or_cwd(final_path)).map_err(CryptoError::Io)?;
 
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(FINAL_NAME_CLAIM_MODE)
-        .open(final_path)
-    {
-        Ok(_) => {}
+    match claim_final_name(&output_dir, final_path) {
+        Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
             return Err(already_exists_error(label, final_path));
         }
@@ -408,10 +512,36 @@ fn finalize_file_via_claim(
             Ok(())
         }
         Err(e) => {
-            let _ = std::fs::remove_file(final_path);
+            output_dir.remove_published(final_path);
             Err(CryptoError::Io(e.error))
         }
     }
+}
+
+/// Creates the zero-byte placeholder that claims the final name,
+/// through the anchored directory handle so the entry
+/// [`finalize_file_via_claim`] may later remove is the one it created
+/// here. `create_new` refuses any pre-existing entry; the no-follow flag
+/// is defense in depth for platforms whose open semantics differ, so a
+/// symlink raced into place cannot redirect the create either way.
+///
+/// A final path with no last component names nothing to claim and
+/// rejects rather than falling back to some other entry.
+#[cfg(unix)]
+fn claim_final_name(output_dir: &OutputDir, final_path: &Path) -> io::Result<()> {
+    use cap_fs_ext::{FollowSymlinks, OpenOptionsExt, OpenOptionsFollowExt};
+
+    let Some(name) = final_path.file_name() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Output path has no final component",
+        ));
+    };
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    options.follow(FollowSymlinks::No);
+    options.mode(FINAL_NAME_CLAIM_MODE);
+    output_dir.dir.open_with(name, &options).map(|_| ())
 }
 
 /// Promotes a staged single-file path `from` to the final name `to`
@@ -754,10 +884,182 @@ mod tests {
         }
     }
 
-    // The claim path cannot be reached through `finalize_file` on the
+    /// Runs `f` on a worker thread and returns its result, failing the
+    /// test if it has not finished within five seconds. A helper that
+    /// opens a substituted FIFO without the directory flag waits for a
+    /// writer that never arrives, which would hang the whole suite
+    /// instead of reporting a failure.
+    #[cfg(unix)]
+    fn within_timeout<T: Send + 'static>(what: &str, f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(value) => value,
+            Err(_) => panic!("{what} blocked instead of refusing a non-directory path"),
+        }
+    }
+
+    /// A required directory flush must refuse a FIFO immediately. The
+    /// open would otherwise wait for a writer, turning a durability
+    /// barrier into an indefinite stall.
+    #[cfg(unix)]
+    #[test]
+    fn sync_dir_durable_rejects_fifo_without_blocking() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let fifo = tmp_dir.path().join("pipe");
+        crate::fs::paths::make_fifo(&fifo);
+
+        let err = within_timeout("sync_dir_durable", move || sync_dir_durable(&fifo))
+            .expect_err("a FIFO must fail the directory flush");
+        assert_eq!(err.kind(), io::ErrorKind::NotADirectory);
+    }
+
+    /// The best-effort barrier re-resolves the parent path after the
+    /// final name is already visible, so a local writer can substitute a
+    /// FIFO for it in between. Opening that FIFO for reading would block
+    /// until a writer appears, and there is no error to swallow while
+    /// the open itself is stuck. The helper must return regardless.
+    #[cfg(unix)]
+    #[test]
+    fn sync_parent_dir_does_not_block_on_a_fifo_parent() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let fifo = tmp_dir.path().join("parent");
+        crate::fs::paths::make_fifo(&fifo);
+        let child = fifo.join("committed.txt");
+
+        within_timeout("sync_parent_dir", move || sync_parent_dir(&child));
+    }
+
+    /// Cleanup after a failed commit must resolve inside the directory
+    /// the handle was opened on. Renaming that directory aside and
+    /// leaving a symlink to an unrelated one in its place — what a local
+    /// writer with access to the parent can do — must not redirect the
+    /// removal onto the same-named file there.
+    #[cfg(unix)]
+    #[test]
+    fn output_dir_removal_stays_in_the_anchored_directory() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let anchored = tmp_dir.path().join("out");
+        let substituted = tmp_dir.path().join("elsewhere");
+        fs::create_dir(&anchored).unwrap();
+        fs::create_dir(&substituted).unwrap();
+        fs::write(anchored.join("key"), "ours").unwrap();
+        fs::write(substituted.join("key"), "unrelated").unwrap();
+
+        let handle = OutputDir::open(&anchored).unwrap();
+        fs::rename(&anchored, tmp_dir.path().join("out.moved")).unwrap();
+        std::os::unix::fs::symlink(&substituted, &anchored).unwrap();
+
+        handle.remove_published(&anchored.join("key"));
+
+        assert_eq!(
+            fs::read_to_string(substituted.join("key")).unwrap(),
+            "unrelated",
+            "a substituted directory's file must not be removed"
+        );
+        assert!(
+            !tmp_dir.path().join("out.moved").join("key").exists(),
+            "the anchored directory's own entry must still be removed"
+        );
+    }
+
+    // Neither fallback can be reached through `finalize_file` on the
     // filesystems that host `cargo test` (they support the atomic
-    // no-replace rename), so it is exercised directly. The fs-matrix
+    // no-replace rename), so both are exercised directly. The fs-matrix
     // exFAT lane covers the errno-driven dispatch end to end.
+
+    /// The link route commits the staged content under the final name
+    /// and leaves no staged name behind. It is the route taken wherever
+    /// the filesystem has hard links, which is the case for the
+    /// filesystems hosting `cargo test`.
+    ///
+    /// The committed file must be the staged file itself, not a copy of
+    /// it: callers pin the staged mode for a `.fcr` file and for
+    /// `private.key`, so a commit that reproduced the content under
+    /// fresh permissions would widen both.
+    #[cfg(unix)]
+    #[test]
+    fn finalize_via_link_commits_and_drops_the_staged_name() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let final_path = tmp_dir.path().join("out.txt");
+
+        let mut tmp = tempfile::Builder::new()
+            .permissions(fs::Permissions::from_mode(0o600))
+            .tempfile_in(tmp_dir.path())
+            .unwrap();
+        tmp.write_all(b"payload").unwrap();
+        let tmp_path = tmp.path().to_path_buf();
+
+        finalize_file_via_link_or_claim(tmp, &final_path, "Output").unwrap();
+        assert_eq!(fs::read_to_string(&final_path).unwrap(), "payload");
+        assert!(
+            !tmp_path.exists(),
+            "staged name must not survive the commit"
+        );
+        assert_eq!(
+            fs::metadata(&final_path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the staged file's mode must survive the commit"
+        );
+    }
+
+    /// The link route refuses an occupied final path with the same typed
+    /// message as the atomic path, without creating a placeholder first.
+    #[cfg(unix)]
+    #[test]
+    fn finalize_via_link_refuses_to_overwrite() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let final_path = tmp_dir.path().join("out.txt");
+        fs::write(&final_path, "existing").unwrap();
+
+        let mut tmp = tempfile::Builder::new()
+            .tempfile_in(tmp_dir.path())
+            .unwrap();
+        tmp.write_all(b"new").unwrap();
+        let tmp_path = tmp.path().to_path_buf();
+
+        match finalize_file_via_link_or_claim(tmp, &final_path, "Output") {
+            Err(CryptoError::InvalidInput(msg)) => {
+                assert!(msg.starts_with("Output already exists: "), "got: {msg}");
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+        assert_eq!(fs::read_to_string(&final_path).unwrap(), "existing");
+        assert!(!tmp_path.exists(), "temp file must be removed on failure");
+    }
+
+    /// A dangling symlink at the final path counts as occupied for the
+    /// link route as well: `link` does not follow the target name, so it
+    /// refuses rather than committing through the link.
+    #[cfg(unix)]
+    #[test]
+    fn finalize_via_link_refuses_dangling_symlink_at_target() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let final_path = tmp_dir.path().join("out.txt");
+        std::os::unix::fs::symlink(tmp_dir.path().join("nowhere"), &final_path).unwrap();
+
+        let mut tmp = tempfile::Builder::new()
+            .tempfile_in(tmp_dir.path())
+            .unwrap();
+        tmp.write_all(b"new").unwrap();
+
+        match finalize_file_via_link_or_claim(tmp, &final_path, "Output") {
+            Err(CryptoError::InvalidInput(msg)) => {
+                assert!(msg.starts_with("Output already exists: "), "got: {msg}");
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+        let meta = fs::symlink_metadata(&final_path).unwrap();
+        assert!(meta.file_type().is_symlink(), "symlink must be left as-is");
+        assert!(
+            !tmp_dir.path().join("nowhere").exists(),
+            "the link target must not have been created"
+        );
+    }
 
     /// Claim fallback commits the temp file when the final name is
     /// free; no placeholder survives.
@@ -827,6 +1129,29 @@ mod tests {
         }
         let meta = fs::symlink_metadata(&final_path).unwrap();
         assert!(meta.file_type().is_symlink(), "symlink must be left as-is");
+    }
+
+    /// A failed rename step removes the placeholder, so a retry is not
+    /// blocked by an empty file at the final name. Forced by removing
+    /// the staged file, which leaves the rename nothing to move.
+    #[cfg(unix)]
+    #[test]
+    fn finalize_via_claim_removes_the_claim_when_the_rename_fails() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let final_path = tmp_dir.path().join("out.txt");
+
+        let tmp = tempfile::Builder::new()
+            .tempfile_in(tmp_dir.path())
+            .unwrap();
+        fs::remove_file(tmp.path()).unwrap();
+
+        let err = finalize_file_via_claim(tmp, &final_path, "Output")
+            .expect_err("a rename with no staged file must fail the commit");
+        assert!(matches!(err, CryptoError::Io(_)), "got: {err:?}");
+        assert!(
+            !final_path.exists(),
+            "the placeholder must not survive a failed rename"
+        );
     }
 
     #[test]

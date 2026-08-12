@@ -1679,7 +1679,11 @@ Readers MUST process FCA archives in this order:
    count as occupied;
 9. reject pre-existing `.incomplete` output at first create;
 10. create the staged root and directories under `{root}.incomplete` with the
-    hardened filesystem backend;
+    hardened filesystem backend. Where the confirmations in steps 16 and 17
+    need a handle retained from this step, the reader MUST obtain it here and
+    MUST fail the extraction if it cannot, because a reader that continues
+    without one commits an output whose identity it can no longer confirm, and
+    failing at this point precedes any plaintext;
 11. stream file bytes using exact-size copying;
 12. apply descendant file modes by handle where supported (the root entry's
     mode is deferred to step 16);
@@ -1715,6 +1719,13 @@ Readers MUST process FCA archives in this order:
 18. return the final output path.
 
 Steps 1 through 8 MUST complete before any filesystem output is created.
+
+Where a confirmation in step 16 or step 17 cannot read an identity it needs —
+the platform exposes none, or the read itself fails — that confirmation MUST be
+skipped rather than reported as a mismatch, because the fault reports the
+environment rather than the entry. This does not license continuing without the
+staged handle: step 10 requires the reader to fail before any plaintext where
+that handle cannot be obtained.
 
 Steps 11 and 12 MAY be interleaved per entry: applying a file's mode to its
 open handle immediately after its content is written is equivalent to a
@@ -1788,8 +1799,8 @@ denote something else. A removal resolved only through that name then misses
 the staged plaintext, so a reader SHOULD destroy the staged content through the
 handle it created the root with: emptying a staged file, and removing a staged
 directory through its own descriptor. Where the platform offers no way to do so
-— a handle that cannot be duplicated, or one that cannot be removed through
-without resolving it back to a path — the staged root is left in place, which
+— a handle that cannot be removed through without resolving it back to a path —
+the staged root is left in place, which
 `RetainOnError` callers already expect and which never removes an object the
 run did not create.
 

@@ -235,12 +235,24 @@ fn unarchive_inner<R: Read>(
         // working name is gone. A chmod failure here must not fail the
         // extraction — returning `Err` would tell a `DeleteOnError`
         // caller nothing was written while a finished output sits on
-        // disk. Best-effort is safe: the staged mode (`0o600`/`0o700`)
-        // is always at least as restrictive as the manifest mode.
+        // disk. The output then keeps the staged mode (`0o600`/`0o700`),
+        // which grants group and other nothing the manifest mode would
+        // have granted them; it can leave the owner more access than the
+        // manifest asked for.
+        //
+        // Steps 16 and 17 both compare the entry at the final name with
+        // the object this run staged, so the staged identity is read
+        // once here, on this side of the rename: a filesystem may
+        // renumber an object when its directory entry moves, and both
+        // sides of the comparison must be read after promotion.
+        let staged_id = staged_root
+            .as_ref()
+            .map(StagedRoot::identity)
+            .and_then(StagedIdentity::known);
         let _ = if manifest.root_is_file {
-            apply_root_file_mode(&output_handle, &manifest, staged_root.as_ref())
+            apply_root_file_mode(&output_handle, &manifest, staged_id)
         } else {
-            apply_root_directory_mode(&output_handle, &manifest, staged_root.as_ref())
+            apply_root_directory_mode(&output_handle, &manifest, staged_id)
         };
 
         // FORMAT.md §9.11 step 17: promotion resolved the staged entry
@@ -249,9 +261,7 @@ fn unarchive_inner<R: Read>(
         // deliberately still live: a substitution here leaves the
         // staged plaintext for `DeleteOnError` to remove, and the entry
         // at the final name is not this run's to touch.
-        if let Some(staged) = staged_root.as_ref() {
-            require_promoted_root(&output_handle, &manifest.root_name, staged)?;
-        }
+        require_promoted_root(&output_handle, &manifest.root_name, staged_id)?;
 
         // The commit is this run's own, so nothing is staged any more.
         // Dropping the record keeps the cleanup below off the committed
@@ -305,8 +315,19 @@ fn extract_single_file_root<R: Read>(
     // create_file_at succeeded — this run owns the staging file. The
     // recorded handle is a second descriptor for the same file, so the
     // checks after promotion keep working once the one below is closed
-    // at the end of extraction.
-    *staged_root = Some(StagedRoot::file(incomplete_name, outfile.try_clone().ok()));
+    // at the end of extraction. Duplication is required: a record
+    // without a handle cannot confirm that the promoted name still
+    // denotes the file this run wrote. Where it fails, the streaming
+    // descriptor becomes the record's own — nothing has been streamed,
+    // so no other use remains — and the error returns before any
+    // plaintext, leaving the empty entry to the caller's policy.
+    match outfile.try_clone() {
+        Ok(recorded) => *staged_root = Some(StagedRoot::file(incomplete_name, Some(recorded))),
+        Err(e) => {
+            *staged_root = Some(StagedRoot::file(incomplete_name, Some(outfile)));
+            return Err(staged_handle_unavailable(&e));
+        }
+    }
 
     copy_exact_n(reader, &mut outfile, entry.size, archive_content_truncated)?;
 
@@ -340,13 +361,17 @@ fn extract_directory_root<R: Read>(
     // mkdir_strict succeeded — this run owns the staging directory.
     // The recorded handle is a second descriptor for the same
     // directory, so cleanup keeps working after the one below is
-    // closed at the end of extraction. A descriptor that cannot be
-    // duplicated still records the staged root, so the record is never
-    // lost between creating the directory and the first failure.
-    *staged_root = Some(StagedRoot::directory(
-        incomplete_name,
-        root_dir.try_clone().ok(),
-    ));
+    // closed at the end of extraction. Duplication is required on the
+    // same terms as the file root: where it fails the record takes the
+    // descriptor this function would have walked from, and the error
+    // returns before any plaintext.
+    match root_dir.try_clone() {
+        Ok(recorded) => *staged_root = Some(StagedRoot::directory(incomplete_name, Some(recorded))),
+        Err(e) => {
+            *staged_root = Some(StagedRoot::directory(incomplete_name, Some(root_dir)));
+            return Err(staged_handle_unavailable(&e));
+        }
+    }
 
     // Pass 1 (FORMAT.md §9.11 step 10): pre-create all descendant
     // directories sorted by depth ascending (parent before child), so
@@ -440,11 +465,11 @@ fn extract_directory_root<R: Read>(
 fn apply_root_directory_mode(
     output_handle: &Dir,
     manifest: &Manifest,
-    staged: Option<&StagedRoot>,
+    staged_id: Option<ObjectId>,
 ) -> Result<(), CryptoError> {
     let root_name_str = manifest_root_name_str(manifest)?;
     let root_dir = platform::open_dir_at_rel(output_handle, Path::new(root_name_str))?;
-    if let Some(staged_id) = staged.and_then(StagedRoot::object_id) {
+    if let Some(staged_id) = staged_id {
         require_staged_identity(
             staged_id,
             platform::dir_object_id(&root_dir)?,
@@ -472,10 +497,10 @@ fn apply_root_directory_mode(
 fn apply_root_file_mode(
     output_handle: &Dir,
     manifest: &Manifest,
-    staged: Option<&StagedRoot>,
+    staged_id: Option<ObjectId>,
 ) -> Result<(), CryptoError> {
     let file = platform::open_file_nofollow(output_handle, &manifest.root_name)?;
-    if let Some(staged_id) = staged.and_then(StagedRoot::object_id) {
+    if let Some(staged_id) = staged_id {
         require_staged_identity(
             staged_id,
             platform::file_object_id(&file)?,
@@ -490,10 +515,10 @@ fn apply_root_file_mode(
 ///
 /// Shared by the two callers that act on the promoted root: the root
 /// mode application, which must not touch a substituted entry, and
-/// [`require_promoted_root`], which reports one. Each reads
-/// `staged_id` first and calls this only when it has one, so neither
-/// pays for reading `found` where there is no identity to compare
-/// against (see [`platform::ObjectId`]).
+/// [`require_promoted_root`], which reports one. Both are handed the
+/// same `staged_id`, read once after promotion, and call this only
+/// where there is one, so neither pays for reading `found` with
+/// nothing to compare it against (see [`platform::ObjectId`]).
 fn require_staged_identity(
     staged_id: ObjectId,
     found: ObjectId,
@@ -520,16 +545,17 @@ fn require_staged_identity(
 /// point up to that call is still caught; the mode application makes
 /// the same comparison itself, against the handle it is about to chmod.
 ///
-/// A missing handle is not treated as a substitution: on a platform
-/// without a stable identity there is nothing to compare. A final name
-/// that is gone is treated as one, because step 15 committed an entry
-/// there and its absence says the name no longer denotes the output.
+/// A missing staged identity is not treated as a substitution: there is
+/// nothing to compare against, for the reasons [`StagedIdentity::known`]
+/// gives. A final name that is gone is treated as one, because step 15
+/// committed an entry there and its absence says the name no longer
+/// denotes the output.
 fn require_promoted_root(
     output_handle: &Dir,
     root_name: &OsStr,
-    staged: &StagedRoot,
+    staged_id: Option<ObjectId>,
 ) -> Result<(), CryptoError> {
-    let Some(staged_id) = staged.object_id() else {
+    let Some(staged_id) = staged_id else {
         return Ok(());
     };
     let promoted = match output_handle.symlink_metadata(root_name) {
@@ -593,6 +619,23 @@ fn promoted_root_replaced(root_name: &OsStr) -> CryptoError {
         sanitize_for_display(&root_name.to_string_lossy())
     ))
 }
+
+/// Rejection for a staged root whose descriptor could not be
+/// duplicated, so the run cannot confirm after promotion that the final
+/// name still denotes what it wrote (`FORMAT.md` §9.11 steps 16 and
+/// 17). Reported before any plaintext is streamed. The underlying
+/// message is kept because it names the resource that ran out, which is
+/// the operator's way in.
+fn staged_handle_unavailable(source: &io::Error) -> CryptoError {
+    CryptoError::Io(io::Error::new(
+        source.kind(),
+        format!("{STAGED_HANDLE_UNAVAILABLE}: {source}"),
+    ))
+}
+
+/// What [`staged_handle_unavailable`] reports, ahead of the underlying
+/// message.
+const STAGED_HANDLE_UNAVAILABLE: &str = "Cannot hold a handle to the staged output";
 
 /// Rejection for a destination directory that no longer denotes the one
 /// the output was committed in. The operator chose this path, so it
@@ -726,8 +769,10 @@ fn incomplete_working_name(root_name: &OsStr) -> OsString {
 /// that target.
 enum StagedRoot {
     /// Staged file root. `handle` is a descriptor for the file
-    /// `create_file_at` returned; it is `None` where the platform needs
-    /// it closed before promotion, or where it could not be duplicated.
+    /// `create_file_at` returned. It is present from the moment the
+    /// record is made — a run that cannot hold one fails before
+    /// streaming any plaintext — and becomes `None` only where the
+    /// platform needs it closed before promotion.
     File {
         working_name: OsString,
         handle: Option<File>,
@@ -756,7 +801,7 @@ impl StagedRoot {
     }
 
     /// Current identity of the staged object, read from the handle it
-    /// was created with, or `None` when no handle is held.
+    /// was created with.
     ///
     /// Read now rather than recorded at creation: a filesystem may
     /// derive a file's identity from the position of its directory
@@ -764,14 +809,15 @@ impl StagedRoot {
     /// [`require_promoted_root`] are therefore read after promotion,
     /// where they agree for one object however the filesystem numbers
     /// it.
-    fn object_id(&self) -> Option<ObjectId> {
-        match self {
-            Self::File { handle, .. } => handle
-                .as_ref()
-                .and_then(|handle| platform::file_object_id(handle).ok()),
-            Self::Directory { handle, .. } => handle
-                .as_ref()
-                .and_then(|handle| platform::dir_object_id(handle).ok()),
+    fn identity(&self) -> StagedIdentity {
+        let read = match self {
+            Self::File { handle, .. } => handle.as_ref().map(platform::file_object_id),
+            Self::Directory { handle, .. } => handle.as_ref().map(platform::dir_object_id),
+        };
+        match read {
+            Some(Ok(id)) => StagedIdentity::Known(id),
+            Some(Err(_)) => StagedIdentity::Unreadable,
+            None => StagedIdentity::NoHandle,
         }
     }
 
@@ -815,17 +861,54 @@ impl StagedRoot {
     }
 }
 
+/// Identity of the staged root, as the steps after promotion see it.
+///
+/// The two ways it can be missing are kept apart because they say
+/// different things about the run. [`Self::NoHandle`] is a platform's
+/// ordinary state: Windows closes the staged handle before the rename.
+/// [`Self::Unreadable`] means a handle was held and the filesystem
+/// refused to describe the object behind it. Neither fails the
+/// extraction — see [`StagedIdentity::known`] — but only one of them
+/// is expected.
+enum StagedIdentity {
+    /// Read from the handle the staged root was created with.
+    Known(ObjectId),
+    /// No handle is held, so there is nothing to read.
+    NoHandle,
+    /// A handle is held, but its identity could not be read.
+    Unreadable,
+}
+
+impl StagedIdentity {
+    /// The identity the promoted entry is compared against, or `None`
+    /// where there is none to compare.
+    ///
+    /// A failed read is skipped rather than reported as a mismatch.
+    /// `FORMAT.md` §9.11 step 17 rules that a failure to read the final
+    /// name must not fail the extraction, because it reports the
+    /// environment rather than the entry and failing a complete
+    /// extraction would expose it to `DeleteOnError` cleanup. A failed
+    /// read of the staged handle is the same class of fault, so it is
+    /// treated the same way.
+    fn known(self) -> Option<ObjectId> {
+        match self {
+            Self::Known(id) => Some(id),
+            Self::NoHandle | Self::Unreadable => None,
+        }
+    }
+}
+
 /// Removes a staged directory root through the handle it was created
 /// with: the contents are removed through that descriptor and the
 /// directory itself is found by identity in its parent, so a directory
 /// substituted at the working name is never removed — and the staged
 /// tree is still removed when it is the entry that was moved aside.
 ///
-/// Without that handle — the descriptor could not be duplicated, which
-/// a low open-file limit can cause — the working name cannot be shown
-/// to still denote the staged tree, so nothing is removed and the
-/// staged tree is left for the operator, the same outcome as any other
-/// best-effort cleanup failure.
+/// Unix keeps that handle for the whole run, so the `None` arm is
+/// unreachable here: a run that could not hold one failed before
+/// staging any plaintext. It removes nothing, because without the
+/// handle the working name cannot be shown to still denote the staged
+/// tree.
 #[cfg(unix)]
 fn remove_staged_directory(_output_handle: &Dir, _working_name: &OsStr, handle: Option<Dir>) {
     if let Some(handle) = handle {
@@ -955,6 +1038,8 @@ fn strip_root_prefix<'a>(path_utf8: &'a str, root_name: &str) -> Result<&'a Path
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    use crate::archive::fd_limit;
     use crate::archive::format::{serialize_manifest_unchecked, write_fca_header};
     use std::io::Cursor;
 
@@ -1585,8 +1670,9 @@ mod tests {
         let staged_file =
             platform::create_file_at(&handle, OsStr::new("f.txt.incomplete"), 0o600).unwrap();
         let staged = StagedRoot::file(OsStr::new("f.txt.incomplete"), staged_file.try_clone().ok());
+        let staged_id = staged.identity().known();
 
-        let err = require_promoted_root(&handle, OsStr::new("f.txt"), &staged).unwrap_err();
+        let err = require_promoted_root(&handle, OsStr::new("f.txt"), staged_id).unwrap_err();
 
         assert!(
             format!("{err}").contains("Output was replaced while decrypting"),
@@ -3365,5 +3451,128 @@ mod tests {
             }
         }
         assert_eq!(checked, 48, "the generated case count must not drift");
+    }
+
+    /// A staged identity that could not be read is skipped, not
+    /// reported as a substitution: `FORMAT.md` §9.11 step 17 rules that
+    /// a read failure reports the environment rather than the entry,
+    /// and failing a complete extraction would expose it to
+    /// `DeleteOnError` cleanup. The state a handle-less record stands
+    /// for is skipped on the same terms.
+    #[test]
+    fn a_staged_identity_that_cannot_be_read_is_skipped() {
+        assert!(StagedIdentity::Unreadable.known().is_none());
+        assert!(StagedIdentity::NoHandle.known().is_none());
+    }
+
+    /// The consequence of that skip, through the real function: with no
+    /// staged identity to compare against, the check accepts whatever
+    /// the final name holds. Pins the contract the two skipped states
+    /// route into, so a later change to it cannot pass unnoticed.
+    ///
+    /// Linux/macOS only: the comparison needs the stable file identity
+    /// `std` exposes there.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_missing_staged_identity_accepts_a_substituted_final_name() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let handle = platform::open_anchor(tmp.path()).unwrap();
+        fs::write(tmp.path().join("f.txt"), b"planted").unwrap();
+
+        require_promoted_root(&handle, OsStr::new("f.txt"), None)
+            .expect("with nothing to compare against the check must accept");
+    }
+
+    /// Fail-closed contract under descriptor exhaustion. A run that
+    /// cannot hold a handle to the staged root cannot confirm after
+    /// promotion that the final name still denotes what it wrote
+    /// (`FORMAT.md` §9.11 steps 16 and 17), so it must refuse before
+    /// writing any plaintext rather than commit an output it can no
+    /// longer check.
+    ///
+    /// The number of descriptors left free is swept rather than named,
+    /// because how many a decrypt needs is an implementation detail.
+    /// Two properties are asserted across the sweep: every failure
+    /// leaves no plaintext and nothing at the final name, and the
+    /// staged-handle refusal is reached for both root kinds under both
+    /// policies. The second is the load-bearing one — it is what fails
+    /// if holding that handle ever becomes optional again.
+    ///
+    /// Recorded rather than asserted: at the exhaustion point
+    /// `DeleteOnError` cannot always remove the empty staged entry,
+    /// because that removal needs a descriptor of its own. The entry
+    /// holds no plaintext, which is what the sweep pins.
+    ///
+    /// Linux/macOS only, matching the `rustix` dev-dependency behind
+    /// [`fd_limit`]. Relies on the workspace convention of running
+    /// tests with `--test-threads=1`, since the limit is process-wide
+    /// while the guard is alive.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_run_that_cannot_hold_the_staged_handle_refuses_before_any_plaintext() {
+        /// Free-descriptor counts spanning the range from "too few to
+        /// stage anything" to "enough to finish".
+        const BUDGETS: std::ops::Range<usize> = 0..8;
+
+        let mut refusals = 0;
+        for root_is_file in [true, false] {
+            for policy in [
+                IncompleteOutputPolicy::DeleteOnError,
+                IncompleteOutputPolicy::RetainOnError,
+            ] {
+                let mut refused_here = false;
+                for free in BUDGETS {
+                    let tmp = tempfile::TempDir::new().unwrap();
+                    let (archive, root, content) = if root_is_file {
+                        let manifest = single_file_manifest("hello.txt", b"Hello, world!");
+                        let archive = build_archive(&manifest, &[("hello.txt", b"Hello, world!")]);
+                        (archive, "hello.txt", &b"Hello, world!"[..])
+                    } else {
+                        let manifest = directory_root_manifest();
+                        let archive = build_archive(&manifest, &[("d/a.txt", b"real")]);
+                        (archive, "d", &b"real"[..])
+                    };
+
+                    let held = fd_limit::HeldDescriptors::leaving(free);
+                    let result = unarchive_with_policy(archive, tmp.path(), policy.clone());
+                    drop(held);
+
+                    let mut found = Vec::new();
+                    walk_files(tmp.path(), &mut found);
+                    match result {
+                        Ok(path) => {
+                            assert_eq!(path, tmp.path().join(root));
+                            let total: usize = found.iter().map(|(_, bytes, _)| bytes.len()).sum();
+                            assert_eq!(
+                                total,
+                                content.len(),
+                                "a successful decrypt must hold exactly the archive's content"
+                            );
+                        }
+                        Err(e) => {
+                            assert!(
+                                found.iter().all(|(_, bytes, _)| bytes.is_empty()),
+                                "a refused decrypt must leave no plaintext, got {found:?} at \
+                                 {free} free descriptors: {e}"
+                            );
+                            assert!(
+                                !tmp.path().join(root).exists(),
+                                "a refused decrypt must leave nothing at the final name"
+                            );
+                            if format!("{e}").contains(STAGED_HANDLE_UNAVAILABLE) {
+                                refused_here = true;
+                            }
+                        }
+                    }
+                }
+                assert!(
+                    refused_here,
+                    "the staged-handle refusal must be reachable for root_is_file={root_is_file} \
+                     under {policy:?}"
+                );
+                refusals += 1;
+            }
+        }
+        assert_eq!(refusals, 4, "both root kinds under both policies");
     }
 }

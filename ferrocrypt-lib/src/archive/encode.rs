@@ -1175,7 +1175,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn walk_directory_handles_wide_tree_under_low_fd_limit() {
-        use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+        use crate::archive::fd_limit::NofileLimit;
 
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().join("wide");
@@ -1184,24 +1184,7 @@ mod tests {
             fs::create_dir(root.join(format!("d{i:03}"))).unwrap();
         }
 
-        // Restores the saved limit even if the assertion below panics,
-        // so later tests in the same process run unrestricted.
-        struct RestoreNofile(Rlimit);
-        impl Drop for RestoreNofile {
-            fn drop(&mut self) {
-                let _ = rustix::process::setrlimit(rustix::process::Resource::Nofile, self.0);
-            }
-        }
-        let saved = getrlimit(Resource::Nofile);
-        let _restore = RestoreNofile(saved);
-        setrlimit(
-            Resource::Nofile,
-            Rlimit {
-                current: Some(64),
-                maximum: saved.maximum,
-            },
-        )
-        .expect("lower the NOFILE soft limit");
+        let _limit = NofileLimit::lower_to(64);
 
         let (manifest, _source) =
             build_manifest(&root, &ArchiveLimits::default()).expect("wide tree must walk");

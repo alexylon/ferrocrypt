@@ -508,6 +508,13 @@ pub enum CryptoError {
     /// resource policy. Distinct from
     /// [`FormatDefect::RecipientCountOutOfRange`] (above structural
     /// max).
+    ///
+    /// That distinction is exact on the reader side, where a header declaring
+    /// more than the structural max is a malformed file. On the writer side
+    /// the structural max is simply the highest policy a caller can set, so a
+    /// recipient list above it reports here — including from
+    /// [`crate::Encryptor::with_public_keys`], which stops collecting there
+    /// and so reports the count at which it stopped.
     #[error("Too many recipients ({count} entries, limit {local_cap})")]
     RecipientCountCapExceeded {
         /// Recipient count declared by the header or requested by the writer.

@@ -1093,7 +1093,7 @@ Rules:
 
 - `with_passphrase` creates exactly one `argon2id` recipient.
 - `with_public_key` is a convenience wrapper around `with_public_keys` for one public recipient.
-- `with_public_keys` supports the multi-recipient file format directly.
+- `with_public_keys` supports the multi-recipient file format directly. It consumes the supplied iterator only up to one item past `HeaderReadLimits::RECIPIENT_COUNT_STRUCTURAL_MAX` and rejects there with `RecipientCountCapExceeded`, because no configuration can raise that ceiling and a longer list could never produce a writable file. The caller-configurable recipient-count cap is a separate check at `write`, since `header_read_limits` can still change it after construction.
 - Recipient mixing is checked during construction.
 - Empty recipient lists reject immediately.
 - The API remains path-based because FerroCrypt security guarantees depend on archive preflight, streaming encryption, staging, and atomic finalization.

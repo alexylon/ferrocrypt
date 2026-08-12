@@ -114,6 +114,41 @@ enum EncryptorState {
     Recipients(Vec<PublicKey>),
 }
 
+/// Collects `public_keys` into a `Vec`, stopping as soon as it yields more
+/// recipients than `FORMAT.md` §3.2 can encode.
+///
+/// The caller's own recipient-count policy is not applied here, because
+/// [`Encryptor::header_read_limits`] can still raise or tighten it after
+/// construction; [`Encryptor::write`] is where that check belongs. What this
+/// bounds is the ceiling no configuration can lift: a list above
+/// [`HeaderReadLimits::RECIPIENT_COUNT_STRUCTURAL_MAX`] could never produce a
+/// writable file, so reading all of it is wasted memory and time.
+///
+/// At most one item beyond the ceiling is ever pulled — enough to know the
+/// ceiling was passed — so an iterator of any length, including one with no
+/// end, returns here after a bounded amount of work. The reported count is
+/// therefore where collection stopped, not the length of the supplied
+/// iterator, which is deliberately never established.
+fn collect_recipients_within_structural_max(
+    public_keys: impl IntoIterator<Item = PublicKey>,
+) -> Result<Vec<PublicKey>, CryptoError> {
+    let ceiling = HeaderReadLimits::RECIPIENT_COUNT_STRUCTURAL_MAX;
+    let iter = public_keys.into_iter();
+    // The lower size hint comes from the caller's iterator and is not
+    // trustworthy, so it only ever shrinks the reservation.
+    let mut collected = Vec::with_capacity(iter.size_hint().0.min(usize::from(ceiling)));
+    for public_key in iter {
+        if collected.len() == usize::from(ceiling) {
+            return Err(CryptoError::RecipientCountCapExceeded {
+                count: ceiling.saturating_add(1),
+                local_cap: ceiling,
+            });
+        }
+        collected.push(public_key);
+    }
+    Ok(collected)
+}
+
 impl Encryptor {
     /// Configures passphrase encryption.
     ///
@@ -177,13 +212,23 @@ impl Encryptor {
     ///
     /// # Errors
     ///
-    /// Returns [`CryptoError::EmptyRecipientList`] if the iterator is empty.
+    /// Returns [`CryptoError::EmptyRecipientList`] if the iterator is empty,
+    /// and [`CryptoError::RecipientCountCapExceeded`] if it yields more than
+    /// [`HeaderReadLimits::RECIPIENT_COUNT_STRUCTURAL_MAX`] recipients — the
+    /// ceiling `FORMAT.md` §3.2 imposes, which no configuration can raise.
+    /// Collection stops one item past that ceiling, so an iterator far longer
+    /// than it — or one with no end at all — is rejected having held no more
+    /// recipients than the ceiling allows. The reported count is where
+    /// collection stopped rather than the iterator's length, which is never
+    /// established. The default recipient-count cap is a separate,
+    /// caller-configurable check that runs at [`Encryptor::write`].
+    ///
     /// All public keys in the current implementation are X25519 recipients;
     /// future key kinds may add additional mixing-policy checks.
     pub fn with_public_keys(
         public_keys: impl IntoIterator<Item = PublicKey>,
     ) -> Result<Self, CryptoError> {
-        let public_keys: Vec<PublicKey> = public_keys.into_iter().collect();
+        let public_keys = collect_recipients_within_structural_max(public_keys)?;
         if public_keys.is_empty() {
             return Err(CryptoError::EmptyRecipientList);
         }

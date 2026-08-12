@@ -1989,3 +1989,83 @@ fn passphrase_builders_keep_the_passphrase_out_of_debug_output() {
         "KeyPairGenerator debug output revealed the passphrase: {generator}"
     );
 }
+
+/// `Encryptor::with_public_keys` stops collecting one item past the ceiling
+/// `FORMAT.md` §3.2 imposes, so a list that could never produce a writable
+/// file is refused at construction instead of being materialized in full.
+///
+/// Reaching `write` is impossible for any list above that ceiling, so
+/// collecting one serves no purpose. Three shapes make the behaviour
+/// observable: a finite list one item past it, one that never ends, and one
+/// whose declared length is enormous while its real length is tiny. The whole
+/// test must finish in ordinary test time — a constructor that drained its
+/// input would hang on the second, and one that trusted the declared length
+/// would panic on the third.
+#[test]
+fn encryptor_with_public_keys_stops_at_the_structural_recipient_ceiling() {
+    let work = fresh_workspace("recipients_structural_ceiling");
+    let keys = work.join("keys");
+    fs::create_dir_all(&keys).unwrap();
+    let kg = generate_key_pair(&keys, pass(), |_| {}).expect("keygen");
+    let key = PublicKey::from_key_file(&kg.public_key_path).expect("read public key");
+
+    let ceiling = HeaderReadLimits::RECIPIENT_COUNT_STRUCTURAL_MAX;
+
+    /// Yields the same key forever. A constructor that drained its input, or
+    /// that stopped only on a count it never reaches, would never return.
+    struct Endless(PublicKey);
+    impl Iterator for Endless {
+        type Item = PublicKey;
+        fn next(&mut self) -> Option<PublicKey> {
+            Some(self.0.clone())
+        }
+    }
+
+    /// Two keys, but claims `usize::MAX` of them. Reserving that many exceeds
+    /// what a `Vec` can address at all, so the constructor must clamp the
+    /// claim before it reserves anything.
+    struct OverstatedLength(std::vec::IntoIter<PublicKey>);
+    impl Iterator for OverstatedLength {
+        type Item = PublicKey;
+        fn next(&mut self) -> Option<PublicKey> {
+            self.0.next()
+        }
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            (usize::MAX, None)
+        }
+    }
+
+    let over_by_one: Vec<PublicKey> = (0..=usize::from(ceiling)).map(|_| key.clone()).collect();
+    let refused: Vec<(&str, Box<dyn Iterator<Item = PublicKey>>)> = vec![
+        ("one past the ceiling", Box::new(over_by_one.into_iter())),
+        ("never ends", Box::new(Endless(key.clone()))),
+    ];
+    for (label, iter) in refused {
+        match Encryptor::with_public_keys(iter) {
+            Err(CryptoError::RecipientCountCapExceeded { count, local_cap }) => {
+                assert_eq!(local_cap, ceiling, "{label}: cap must be the ceiling");
+                assert_eq!(
+                    count,
+                    ceiling + 1,
+                    "{label}: count must be where collection stopped"
+                );
+            }
+            Err(other) => panic!("{label}: expected RecipientCountCapExceeded, got {other:?}"),
+            // Not `{:?}` on the builder: it holds every collected recipient,
+            // so printing it would bury the failure under thousands of keys.
+            Ok(_) => panic!("{label}: expected RecipientCountCapExceeded, got Ok"),
+        }
+    }
+
+    // An overstated length must not be believed, and must not turn a
+    // perfectly ordinary two-recipient list into a failure either.
+    let overstated = OverstatedLength(vec![key.clone(), key.clone()].into_iter());
+    Encryptor::with_public_keys(overstated)
+        .expect("a short list must construct whatever length it claims");
+
+    // Boundary: a list at exactly the ceiling is still constructible, so the
+    // check uses `>`, not `>=`. It needs a matching `header_read_limits` to
+    // reach `write`, which is a separate, caller-configurable cap.
+    let at_ceiling: Vec<PublicKey> = (0..usize::from(ceiling)).map(|_| key.clone()).collect();
+    Encryptor::with_public_keys(at_ceiling).expect("a list at the ceiling must construct");
+}

@@ -2968,4 +2968,402 @@ mod tests {
         // directory.
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
     }
+    // ─── Post-commit and cleanup invariant suite ───────────────────
+    //
+    // Every case below is generated, and every assertion is stated
+    // from `FORMAT.md` §9.11 rather than from this module, so a change
+    // here that still satisfies the code's own reasoning but breaks
+    // the specification still fails. The individual regression tests
+    // above pin single scenarios; this pins the rules those scenarios
+    // are instances of.
+
+    /// Content written by the run under test. Finding it anywhere in
+    /// the output directory after a failed `DeleteOnError` decrypt is
+    /// an invariant break, whatever name it is under.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    const RUN_PLAINTEXT: &[u8] = b"run-plaintext-marker";
+
+    /// Content of the file that lives outside `output_dir`. A run must
+    /// never change its bytes or its mode, however it is linked into
+    /// the output directory.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    const OUTSIDER_PLAINTEXT: &[u8] = b"outsider-content";
+
+    /// Mode given to a directory a local writer plants at the staging
+    /// name. No case declares it as a stored root mode, so a run that
+    /// applies the archive's mode to this directory is caught.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    const PLANTED_DIR_MODE: u32 = 0o711;
+
+    /// What a local writer does to the staging entry inside the window
+    /// `verify_archive_eof` opens, just before promotion.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Interference {
+        /// No writer; the ordinary success path.
+        None,
+        /// Staged root moved aside, nothing left at the staging name.
+        MoveAsideLeaveNothing,
+        /// Staged root moved aside, a plain file left in its place.
+        MoveAsideLeaveFile,
+        /// Staged root moved aside, a directory left in its place.
+        MoveAsideLeaveDirectory,
+        /// Staged root moved aside, and a hard link to a file living
+        /// outside `output_dir` left in its place.
+        MoveAsideLinkOutsider,
+    }
+
+    /// Whether the archive completes or stops short inside the content
+    /// region, which decides whether the run fails before promotion.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Payload {
+        Complete,
+        Truncated,
+    }
+
+    /// One generated case.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[derive(Debug, Clone, Copy)]
+    struct Case {
+        root_is_file: bool,
+        policy_deletes: bool,
+        payload: Payload,
+        interference: Interference,
+        permissive_mode: bool,
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    impl Case {
+        fn policy(self) -> IncompleteOutputPolicy {
+            if self.policy_deletes {
+                IncompleteOutputPolicy::DeleteOnError
+            } else {
+                IncompleteOutputPolicy::RetainOnError
+            }
+        }
+
+        fn root_mode(self) -> u32 {
+            match (self.root_is_file, self.permissive_mode) {
+                (true, true) => 0o666,
+                (true, false) => 0o600,
+                (false, true) => 0o777,
+                (false, false) => 0o700,
+            }
+        }
+    }
+
+    /// Collects every file under `dir`, following no symlinks, as
+    /// (path, content, mode). Used to state the invariants over the
+    /// whole output directory rather than over names the test guessed.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn walk_files(dir: &Path, found: &mut Vec<(PathBuf, Vec<u8>, u32)>) {
+        use std::os::unix::fs::PermissionsExt;
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.is_dir() {
+                walk_files(&path, found);
+            } else if meta.is_file() {
+                let content = fs::read(&path).unwrap_or_default();
+                found.push((path, content, meta.permissions().mode() & 0o7777));
+            }
+        }
+    }
+
+    /// Builds the archive bytes for a case, plus the staging name the
+    /// writer would interfere with and the final name.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn case_archive(case: Case) -> (Vec<u8>, &'static str, &'static str) {
+        if case.root_is_file {
+            let mut manifest = single_file_manifest("f.txt", RUN_PLAINTEXT);
+            manifest.root_mode = case.root_mode();
+            manifest.entries[0].mode = case.root_mode();
+            let archive = match case.payload {
+                Payload::Complete => build_archive(&manifest, &[("f.txt", RUN_PLAINTEXT)]),
+                Payload::Truncated => build_partial_archive(&manifest, b"cut"),
+            };
+            (archive, "f.txt.incomplete", "f.txt")
+        } else {
+            let mut manifest = Manifest {
+                entries: vec![
+                    make_entry("d", ArchiveEntryKind::Directory, 0, case.root_mode()),
+                    make_entry(
+                        "d/a.txt",
+                        ArchiveEntryKind::File,
+                        RUN_PLAINTEXT.len() as u64,
+                        0o644,
+                    ),
+                ],
+                total_file_bytes: RUN_PLAINTEXT.len() as u64,
+                root_name: OsString::from("d"),
+                root_is_file: false,
+                root_mode: case.root_mode(),
+            };
+            manifest.root_mode = case.root_mode();
+            let archive = match case.payload {
+                Payload::Complete => build_archive(&manifest, &[("d/a.txt", RUN_PLAINTEXT)]),
+                Payload::Truncated => build_partial_archive(&manifest, b"cut"),
+            };
+            (archive, "d.incomplete", "d")
+        }
+    }
+
+    /// Runs one case and checks every invariant against its outcome.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn check_case(case: Case) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let out = tmp.path().join("out");
+        let outside = tmp.path().join("outside");
+        fs::create_dir(&out).unwrap();
+        fs::create_dir(&outside).unwrap();
+
+        // A file the caller never placed in `output_dir`. Nothing the
+        // run does may change its bytes or its mode.
+        let outsider = outside.join("private.key");
+        fs::write(&outsider, OUTSIDER_PLAINTEXT).unwrap();
+        fs::set_permissions(&outsider, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let (archive, staging_name, final_name) = case_archive(case);
+        let out_for_swap = out.clone();
+        let outsider_for_swap = outsider.clone();
+        let interference = case.interference;
+        let reader = SwapOnEof {
+            data: archive,
+            pos: 0,
+            swapped: false,
+            swap: move || {
+                let staged = out_for_swap.join(staging_name);
+                let aside = out_for_swap.join("moved-aside");
+                match interference {
+                    Interference::None => {}
+                    Interference::MoveAsideLeaveNothing => {
+                        fs::rename(&staged, &aside).unwrap();
+                    }
+                    Interference::MoveAsideLeaveFile => {
+                        fs::rename(&staged, &aside).unwrap();
+                        fs::write(&staged, b"planted-file").unwrap();
+                    }
+                    Interference::MoveAsideLeaveDirectory => {
+                        fs::rename(&staged, &aside).unwrap();
+                        fs::create_dir(&staged).unwrap();
+                        fs::write(staged.join("planted.txt"), b"planted-dir-content").unwrap();
+                        // A mode no case declares, so a run that
+                        // chmods this directory is visible.
+                        fs::set_permissions(&staged, fs::Permissions::from_mode(PLANTED_DIR_MODE))
+                            .unwrap();
+                    }
+                    Interference::MoveAsideLinkOutsider => {
+                        fs::rename(&staged, &aside).unwrap();
+                        fs::hard_link(&outsider_for_swap, &staged).unwrap();
+                    }
+                }
+            },
+        };
+
+        let result = unarchive(reader, &out, ArchiveLimits::default(), case.policy());
+
+        let label = format!("{case:?}");
+
+        // §9.11 step 16/17: a run never changes an object it did not
+        // create. The outsider is reachable through a hard link the
+        // writer planted, so only an identity check keeps it intact.
+        let outsider_meta = fs::symlink_metadata(&outsider)
+            .unwrap_or_else(|e| panic!("{label}: outsider must survive the run: {e}"));
+        assert_eq!(
+            outsider_meta.permissions().mode() & 0o7777,
+            0o600,
+            "{label}: the run changed the mode of a file outside output_dir",
+        );
+        assert_eq!(
+            fs::read(&outsider).unwrap(),
+            OUTSIDER_PLAINTEXT,
+            "{label}: the run changed the content of a file outside output_dir",
+        );
+
+        // §9.11 cleanup: a directory the run did not create is never
+        // removed, whatever occupies the staging name.
+        let mut files = Vec::new();
+        walk_files(&out, &mut files);
+
+        // §9.11 cleanup and step 16: a directory the run did not
+        // create is neither removed nor given the archive's stored
+        // mode. Promotion may have moved it to the final name, so both
+        // checks locate it by its content rather than by the name the
+        // writer left it under.
+        if case.interference == Interference::MoveAsideLeaveDirectory {
+            let planted = files
+                .iter()
+                .find(|(_, content, _)| content.as_slice() == b"planted-dir-content")
+                .map(|(path, _, _)| path.clone())
+                .unwrap_or_else(|| {
+                    panic!("{label}: the run removed a directory it did not create")
+                });
+            let planted_dir = planted.parent().expect("planted file has a parent");
+            let mode = fs::symlink_metadata(planted_dir)
+                .expect("planted directory must survive")
+                .permissions()
+                .mode()
+                & 0o7777;
+            assert_eq!(
+                mode, PLANTED_DIR_MODE,
+                "{label}: the run changed the mode of a directory it did not create",
+            );
+        }
+
+        match &result {
+            Ok(path) => {
+                // §9.11 step 17/18: a reported path names an entry the
+                // run wrote, holding what the archive declared.
+                assert_eq!(
+                    path,
+                    &out.join(final_name),
+                    "{label}: reported path is not the requested output name",
+                );
+                let meta = fs::symlink_metadata(path)
+                    .unwrap_or_else(|e| panic!("{label}: reported path does not exist: {e}"));
+                if case.root_is_file {
+                    assert_eq!(
+                        fs::read(path).unwrap(),
+                        RUN_PLAINTEXT,
+                        "{label}: reported output does not hold the archive content",
+                    );
+                } else {
+                    assert_eq!(
+                        fs::read(path.join("a.txt")).unwrap(),
+                        RUN_PLAINTEXT,
+                        "{label}: reported output does not hold the archive content",
+                    );
+                }
+                // §9.11 step 16: the stored root mode reaches the
+                // committed output on every successful run.
+                assert_eq!(
+                    meta.permissions().mode() & 0o7777,
+                    case.root_mode(),
+                    "{label}: the stored root mode was not applied",
+                );
+                // A success leaves no staging entry behind.
+                assert!(
+                    !out.join(staging_name).exists(),
+                    "{label}: a successful run left its staging entry",
+                );
+            }
+            Err(_) if case.policy_deletes => {
+                // §9.11 cleanup under `DeleteOnError`: no plaintext
+                // this run wrote survives in `output_dir`, under any
+                // name a local writer may have chosen for it.
+                let leaked: Vec<&PathBuf> = files
+                    .iter()
+                    .filter(|(_, content, _)| content.as_slice() == RUN_PLAINTEXT)
+                    .map(|(path, _, _)| path)
+                    .collect();
+                assert!(
+                    leaked.is_empty(),
+                    "{label}: DeleteOnError left this run's plaintext at {leaked:?}",
+                );
+            }
+            Err(_) => {
+                // §9.11 cleanup under `RetainOnError`: staged output is
+                // preserved for recovery. Only assert it where the run
+                // staged something and no writer moved it: the other
+                // cases are the writer's doing, not the policy's.
+                if case.interference == Interference::None {
+                    let retained = files
+                        .iter()
+                        .any(|(path, _, _)| path.to_string_lossy().contains(INCOMPLETE_SUFFIX));
+                    assert!(retained, "{label}: RetainOnError removed the staged output",);
+                }
+            }
+        }
+
+        // Leave every directory traversable so the temp dir can be
+        // removed regardless of the modes the case applied.
+        restore_traversable(&out);
+    }
+
+    /// Restores owner search permission on every directory under
+    /// `dir`, so a case that applied a restrictive stored mode does
+    /// not block temp-directory cleanup.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn restore_traversable(dir: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                restore_traversable(&entry.path());
+            }
+        }
+    }
+
+    /// Drives every combination of root kind, policy, payload
+    /// completeness, local-writer interference, and stored root mode
+    /// through [`check_case`].
+    ///
+    /// The cross product is enumerated rather than sampled: the space
+    /// is small enough to cover exhaustively, which is stronger than
+    /// drawing from it.
+    ///
+    /// Two things it deliberately does not reach, recorded so the
+    /// coverage is not read as wider than it is:
+    ///
+    /// - Removal of the output *after* promotion. The reader is the
+    ///   only injection point this harness has, and `unarchive` stops
+    ///   reading before it promotes, so no case can act in that
+    ///   window. `a_promoted_root_that_is_gone_is_reported_as_replaced`
+    ///   covers it directly instead.
+    /// - Failure of the resources the checks themselves need — a
+    ///   descriptor that could not be duplicated, a metadata read that
+    ///   fails. Those need an fd-limit harness of the kind
+    ///   `walk_directory_handles_wide_tree_under_low_fd_limit` sets up.
+    ///
+    /// Linux/macOS only: the assertions read Unix mode bits, and the
+    /// substitution checks need the stable file identity `std` exposes
+    /// there.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn post_commit_and_cleanup_invariants_hold_across_every_case() {
+        let interferences = [
+            Interference::None,
+            Interference::MoveAsideLeaveNothing,
+            Interference::MoveAsideLeaveFile,
+            Interference::MoveAsideLeaveDirectory,
+            Interference::MoveAsideLinkOutsider,
+        ];
+        let mut checked = 0usize;
+        for root_is_file in [true, false] {
+            for policy_deletes in [true, false] {
+                for payload in [Payload::Complete, Payload::Truncated] {
+                    for interference in interferences {
+                        // A truncated payload fails before the reader
+                        // reaches end of archive, so no writer window
+                        // opens; pair it only with the no-writer case.
+                        if payload == Payload::Truncated && interference != Interference::None {
+                            continue;
+                        }
+                        for permissive_mode in [false, true] {
+                            check_case(Case {
+                                root_is_file,
+                                policy_deletes,
+                                payload,
+                                interference,
+                                permissive_mode,
+                            });
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 48, "the generated case count must not drift");
+    }
 }

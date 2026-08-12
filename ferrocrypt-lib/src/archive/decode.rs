@@ -713,8 +713,16 @@ fn incomplete_working_name(root_name: &OsStr) -> OsString {
 /// at that name, and a removal chosen from the substitute's type would
 /// then delete a tree this run never created. The removal is therefore
 /// chosen from what this run created: a staged file is only ever
-/// unlinked, and a staged directory is removed through the handle it
-/// was created with.
+/// emptied through its own handle and unlinked, never removed
+/// recursively.
+///
+/// A staged directory is removed through the handle it was created
+/// with on Unix, so a substituted directory is left in place. Windows
+/// removes it by name instead, because resolving an open directory
+/// handle back to a path there would leave the destination anchor —
+/// see [`remove_staged_directory`]. A substituted directory is
+/// therefore removed on Windows, the bound `SECURITY.md` records for
+/// that target.
 enum StagedRoot {
     /// Staged file root. `handle` is a descriptor for the file
     /// `create_file_at` returned; it is `None` where the platform needs
@@ -769,19 +777,29 @@ impl StagedRoot {
     /// Best-effort removal of the staged root. Errors are swallowed so
     /// the original `CryptoError` is what the caller sees.
     ///
-    /// A staged file is unlinked by name through `output_handle`, the
-    /// same `Dir` extraction wrote through, so a path swap of
-    /// `output_dir` cannot redirect the removal. Unlinking never
-    /// follows a symlink and never recurses, so a directory
-    /// substituted at the working name is left in place. A file
-    /// substituted there is unlinked, which stays within what a writer
-    /// holding that access can already do to the entry itself.
+    /// A staged file is emptied through the handle it was created with
+    /// and then unlinked by name through `output_handle`, the same
+    /// `Dir` extraction wrote through, so a path swap of `output_dir`
+    /// cannot redirect the removal. Unlinking never follows a symlink
+    /// and never recurses, so a directory substituted at the working
+    /// name is left in place. A file substituted there is unlinked,
+    /// which stays within what a writer holding that access can
+    /// already do to the entry itself.
+    ///
+    /// Unix has no portable unlink by descriptor, so a staged file
+    /// moved aside cannot be found by name. Emptying it first is what
+    /// makes the two root kinds agree: the plaintext this run wrote is
+    /// destroyed whatever the entry is now called, matching what the
+    /// directory arm achieves through its own handle.
     fn remove(self, output_handle: &Dir) {
         match self {
             Self::File {
                 working_name,
                 handle,
             } => {
+                if let Some(handle) = &handle {
+                    let _ = handle.set_len(0);
+                }
                 // Closed first: Windows refuses to remove a file that
                 // still has an open handle.
                 drop(handle);
@@ -801,10 +819,11 @@ impl StagedRoot {
 /// substituted at the working name is never removed — and the staged
 /// tree is still removed when it is the entry that was moved aside.
 ///
-/// Without that handle the working name cannot be shown to still
-/// denote the staged tree, so nothing is removed and the staged tree is
-/// left for the operator, the same outcome as any other best-effort
-/// cleanup failure.
+/// Without that handle — the descriptor could not be duplicated, which
+/// a low open-file limit can cause — the working name cannot be shown
+/// to still denote the staged tree, so nothing is removed and the
+/// staged tree is left for the operator, the same outcome as any other
+/// best-effort cleanup failure.
 #[cfg(unix)]
 fn remove_staged_directory(_output_handle: &Dir, _working_name: &OsStr, handle: Option<Dir>) {
     if let Some(handle) = handle {
@@ -1494,6 +1513,59 @@ mod tests {
             mode, 0o600,
             "the substituted entry must keep its own mode, got 0o{mode:o}",
         );
+    }
+
+    /// File-root counterpart of
+    /// `cleanup_of_staged_directory_follows_the_staged_handle`. A local
+    /// writer who moves the staged file aside leaves the name-based
+    /// unlink with nothing to find, so `DeleteOnError` empties the file
+    /// through the handle it was created with instead. The run's own
+    /// plaintext must not survive at the name the writer chose.
+    ///
+    /// Linux/macOS only: the substitution is only detected where `std`
+    /// exposes a stable file identity.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn cleanup_of_a_staged_file_moved_aside_still_destroys_its_plaintext() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let out = tmp.path().join("out");
+        fs::create_dir(&out).unwrap();
+
+        let manifest = single_file_manifest("f.txt", b"real");
+        let archive = build_archive(&manifest, &[("f.txt", b"real")]);
+
+        let out_for_swap = out.clone();
+        let reader = SwapOnEof {
+            data: archive,
+            pos: 0,
+            swapped: false,
+            swap: move || {
+                let staged = out_for_swap.join("f.txt.incomplete");
+                fs::rename(&staged, out_for_swap.join("moved-aside")).unwrap();
+                fs::write(&staged, b"attacker").unwrap();
+            },
+        };
+
+        let err = unarchive(
+            reader,
+            &out,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::DeleteOnError,
+        )
+        .unwrap_err();
+
+        assert!(
+            format!("{err}").contains("Output was replaced while decrypting"),
+            "expected the substitution to be reported, got: {err}"
+        );
+        assert_eq!(
+            fs::read(out.join("moved-aside")).unwrap(),
+            b"",
+            "the staged plaintext must not survive at the name it was moved to",
+        );
+        // The entry the writer planted was promoted by name; it is not
+        // this run's to remove.
+        assert_eq!(fs::read(out.join("f.txt")).unwrap(), b"attacker");
     }
 
     /// A final name the run cannot read is reported as a substitution.

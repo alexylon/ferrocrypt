@@ -1781,6 +1781,17 @@ by the current run, best-effort. The removal MUST be chosen from what the run
 staged, not from what currently occupies the working name, because a local
 writer with access to the destination directory can put an object of another
 type there; a staged regular file MUST NOT be removed recursively.
+
+That writer can also move the staged root aside, leaving the working name to
+denote something else. A removal resolved only through that name then misses
+the staged plaintext, so a reader SHOULD destroy the staged content through the
+handle it created the root with: emptying a staged file, and removing a staged
+directory through its own descriptor. Where the platform offers no way to do so
+— a handle that cannot be duplicated, or one that cannot be removed through
+without resolving it back to a path — the staged root is left in place, which
+`RetainOnError` callers already expect and which never removes an object the
+run did not create.
+
 `RetainOnError` leaves staged plaintext for inspection or recovery. Process
 termination, power loss, or `SIGKILL` can leave `.incomplete` output regardless
 of policy.

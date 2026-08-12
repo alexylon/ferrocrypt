@@ -38,6 +38,28 @@ pub(crate) use format::PERMISSION_BITS_MASK;
 /// leaving authenticated-but-incomplete plaintext that an unaware
 /// caller could pick up.
 ///
+/// Two failures reported *after* the rename fall outside that
+/// expectation, both of them `FORMAT.md` §9.11 step 17 and both
+/// confined to Unix, where a stable filesystem identity exists to
+/// compare:
+///
+/// - The final name no longer denotes the entry the run staged. The
+///   staged output is still removed, but the entry now at the final
+///   name was placed there by something else and is left alone.
+/// - The destination directory path no longer denotes the directory
+///   the output was committed in. The decrypt returns `Err`, and the
+///   complete plaintext stays committed in that directory, which the
+///   path in the error no longer names. Nothing is removed, because by
+///   then the output is the operation's own committed result rather
+///   than staged work.
+///
+/// One further case leaves staged plaintext behind under
+/// `DeleteOnError`: removing a staged directory needs the handle it
+/// was created with, and where the process could not duplicate that
+/// descriptor — under a low open-file limit — nothing is removed,
+/// rather than risk removing a tree substituted at the working name.
+/// A retry then reports `Incomplete output already exists`.
+///
 /// [`Self::RetainOnError`] is the opt-in for backup-recovery and
 /// forensic flows where partial plaintext is more useful than no
 /// plaintext.

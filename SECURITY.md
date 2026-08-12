@@ -62,6 +62,35 @@ regression net, regenerated when the format intentionally changes).
   replaced afterwards cannot change the recipient behind your back. A
   library caller gets the same guarantee by keeping the `PublicKey` value
   it fingerprinted, rather than passing the path again.
+- **A passphrase typed into the desktop app stays in memory until the
+  app exits.** FerroCrypt wipes every passphrase it holds itself: the
+  library clears one as soon as the operation stops needing it, and the
+  command line keeps its prompt in memory that is wiped on every exit
+  path, including when a confirmation does not match. The desktop app
+  cannot do the same for the text in its password field. The
+  user-interface toolkit it is built on stores that text in a string
+  type that copies on every edit and wipes nothing when it releases a
+  copy, so fragments of what you typed remain in released memory for as
+  long as the app runs. Clearing the field does not remove them, and the
+  toolkit offers no way to reach those buffers, so this cannot be fixed
+  from FerroCrypt's side. Reading them requires access to the app's
+  memory — a crash dump, a swap file, or a separate flaw that discloses
+  memory. Where that exposure matters, use the command line, and quit
+  the desktop app when you have finished rather than leaving it open.
+- **A passphrase supplied through the environment is readable for as
+  long as the command runs.** The command line never accepts a
+  passphrase as an argument, but it does read one from
+  `FERROCRYPT_PASSPHRASE` so that scripts and continuous integration can
+  run unattended. FerroCrypt wipes the copy it takes from that variable;
+  it cannot wipe the variable. The value stays in the process
+  environment until the process exits, where another process running as
+  the same user can read it, and if it was exported, everything else
+  that shell starts inherits it. Depending on how it was set it may also
+  reach shell history or a build log. Unlike the desktop field above,
+  this one has a remedy: use the interactive prompt, which keeps the
+  passphrase only in memory FerroCrypt wipes. Reserve the variable for
+  runs where no terminal exists, and treat a passphrase passed that way
+  as visible to anything running as you.
 - **No freshness or replay protection.** FerroCrypt authenticates each
   file as written, but it does not know whether that file is the newest
   version. A captured valid `.fcr` can be restored or replayed later

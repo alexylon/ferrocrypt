@@ -247,22 +247,31 @@ pub struct KdfLimitArgs {
         help = "Maximum Argon2id lane count (parallelism) to accept. When omitted, the limit is the format maximum; 0 rejects every file"
     )]
     max_kdf_lanes: Option<u32>,
+
+    #[arg(
+        long,
+        value_name = "KIB_PASSES",
+        help = "Maximum Argon2id work (memory in KiB times passes) to accept. When omitted, the limit is the work FerroCrypt's own default settings produce; 0 rejects every file"
+    )]
+    max_kdf_work: Option<u64>,
 }
 
 impl KdfLimitArgs {
     /// Builds the decrypt-side [`KdfLimit`] these flags describe. Returns
     /// `None` when no flag is set, so the library default applies. When any
     /// flag is set, memory starts from `--max-kdf-memory` (or the 1 GiB
-    /// default) and `--max-kdf-time-cost` / `--max-kdf-lanes` tighten the
-    /// time-cost and lane caps. An unset time-cost or lane cap stays at the
-    /// format maximum and so rejects nothing the structural check would not;
-    /// an unset memory cap stays at the 1 GiB default, below the 2 GiB
-    /// structural maximum, so it still rejects a header that asks for more
-    /// than 1 GiB.
+    /// default) and the other three flags adjust their own caps. An unset
+    /// time-cost or lane cap stays at the format maximum and so rejects nothing
+    /// the structural check would not; an unset memory cap stays at the 1 GiB
+    /// default, below the 2 GiB structural maximum, so it still rejects a
+    /// header that asks for more than 1 GiB; an unset work cap stays at the
+    /// writer's own budget, so raising memory alone does not admit more total
+    /// work — `--max-kdf-work` raises that separately.
     fn to_limit(self) -> Result<Option<KdfLimit>, CryptoError> {
         if self.max_kdf_memory.is_none()
             && self.max_kdf_time_cost.is_none()
             && self.max_kdf_lanes.is_none()
+            && self.max_kdf_work.is_none()
         {
             return Ok(None);
         }
@@ -275,6 +284,9 @@ impl KdfLimitArgs {
         }
         if let Some(lanes) = self.max_kdf_lanes {
             limit = limit.max_lanes(lanes);
+        }
+        if let Some(work) = self.max_kdf_work {
+            limit = limit.max_work(work);
         }
         Ok(Some(limit))
     }
@@ -974,36 +986,59 @@ mod tests {
         max_kdf_memory: Option<u32>,
         max_kdf_time_cost: Option<u32>,
         max_kdf_lanes: Option<u32>,
+        max_kdf_work: Option<u64>,
     ) -> KdfLimitArgs {
         KdfLimitArgs {
             max_kdf_memory,
             max_kdf_time_cost,
             max_kdf_lanes,
+            max_kdf_work,
         }
     }
 
     /// `KdfLimitArgs::to_limit` maps the optional `--max-kdf-*` flags onto a
     /// single `KdfLimit`: no flag yields `None` (library default applies),
     /// and any flag fills the unset dimensions from the default so only the
-    /// named caps are tightened.
+    /// named caps move away from it.
     #[test]
     fn kdf_limit_args_map_flags_onto_one_limit() {
-        assert_eq!(kdf_args(None, None, None).to_limit().unwrap(), None);
+        assert_eq!(kdf_args(None, None, None, None).to_limit().unwrap(), None);
 
-        let mem_only = kdf_args(Some(512), None, None).to_limit().unwrap().unwrap();
-        assert_eq!(mem_only, KdfLimit::new(512 * 1024));
-
-        let time_only = kdf_args(None, Some(3), None).to_limit().unwrap().unwrap();
-        assert_eq!(time_only, KdfLimit::default().max_time_cost(3));
-
-        let lanes_only = kdf_args(None, None, Some(2)).to_limit().unwrap().unwrap();
-        assert_eq!(lanes_only, KdfLimit::default().max_lanes(2));
-
-        let all = kdf_args(Some(256), Some(2), Some(1))
+        let mem_only = kdf_args(Some(512), None, None, None)
             .to_limit()
             .unwrap()
             .unwrap();
-        assert_eq!(all, KdfLimit::new(256 * 1024).max_time_cost(2).max_lanes(1));
+        assert_eq!(mem_only, KdfLimit::new(512 * 1024));
+
+        let time_only = kdf_args(None, Some(3), None, None)
+            .to_limit()
+            .unwrap()
+            .unwrap();
+        assert_eq!(time_only, KdfLimit::default().max_time_cost(3));
+
+        let lanes_only = kdf_args(None, None, Some(2), None)
+            .to_limit()
+            .unwrap()
+            .unwrap();
+        assert_eq!(lanes_only, KdfLimit::default().max_lanes(2));
+
+        let work_only = kdf_args(None, None, None, Some(1_000_000))
+            .to_limit()
+            .unwrap()
+            .unwrap();
+        assert_eq!(work_only, KdfLimit::default().max_work(1_000_000));
+
+        let all = kdf_args(Some(256), Some(2), Some(1), Some(500_000))
+            .to_limit()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            all,
+            KdfLimit::new(256 * 1024)
+                .max_time_cost(2)
+                .max_lanes(1)
+                .max_work(500_000)
+        );
     }
 
     /// Parses a command line the way the binary does, so the assertions

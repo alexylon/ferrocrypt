@@ -245,13 +245,14 @@ impl Encryptor {
     ///
     /// `kdf_params` is also checked at [`Encryptor::write`] time against
     /// the writer's [`KdfLimit`] policy. By default, memory is capped at
-    /// 1 GiB while time cost and lanes are capped at the format maximum,
-    /// so [`KdfParams::default`] is accepted. A value above the effective
-    /// policy rejects with the matching typed cap error. To write a `.fcr`
-    /// with memory above 1 GiB, or to use a deliberately tightened time-cost
-    /// or lane policy, configure [`Encryptor::kdf_limit`] and set a compatible
-    /// [`PassphraseDecryptor::kdf_limit`] on the receiving decryptor before
-    /// calling [`PassphraseDecryptor::decrypt`].
+    /// 1 GiB and combined work at the writer's own budget, while time cost
+    /// and lanes are capped at the format maximum, so [`KdfParams::default`]
+    /// is accepted. A value above the effective policy rejects with the
+    /// matching typed cap error. To write a `.fcr` with memory above 1 GiB or
+    /// more total work than [`KdfParams::default`], or to use a deliberately
+    /// tightened policy, configure [`Encryptor::kdf_limit`] and set a
+    /// compatible [`PassphraseDecryptor::kdf_limit`] on the receiving decryptor
+    /// before calling [`PassphraseDecryptor::decrypt`].
     pub fn kdf_params(mut self, params: KdfParams) -> Self {
         self.kdf_params = Some(params);
         self
@@ -280,15 +281,18 @@ impl Encryptor {
 
     /// Sets the writer-side KDF resource policy for passphrase encryption.
     ///
-    /// The policy caps Argon2id memory cost, time cost, and lane count before
-    /// any encryption work begins. The default policy accepts
-    /// [`KdfParams::default`] and rejects memory above 1 GiB unless the caller
-    /// opts into a higher memory cap. Time cost and lanes default to the
-    /// format maximum, so they only reject when the caller tightens them.
+    /// The policy caps Argon2id memory cost, time cost, lane count, and
+    /// combined work before any encryption work begins. The default policy
+    /// accepts [`KdfParams::default`], which sits exactly at the default work
+    /// budget, and rejects memory above 1 GiB unless the caller opts into a
+    /// higher memory cap. Time cost and lanes default to the format maximum,
+    /// so they only reject when the caller tightens them.
     ///
     /// Use this builder together with [`Encryptor::kdf_params`] to raise the
-    /// memory ceiling or to tighten time cost or lanes. The receiving
-    /// passphrase decryptor must be configured via
+    /// memory or work ceiling, or to tighten any dimension. Raising memory does
+    /// not raise the work budget, so parameters above
+    /// [`KdfParams::default`]'s work need [`KdfLimit::max_work`] as well. The
+    /// receiving passphrase decryptor must be configured via
     /// [`PassphraseDecryptor::kdf_limit`] with a policy that accepts the same
     /// parameters.
     ///
@@ -530,10 +534,11 @@ pub struct PassphraseDecryptor {
 impl PassphraseDecryptor {
     /// Sets the reader-side KDF resource policy for this decrypt.
     ///
-    /// The policy caps Argon2id memory cost, time cost, and lane count
-    /// accepted from the file header, before any derivation work begins.
-    /// If unset, the decrypt path applies [`KdfLimit::default`], a
-    /// desktop-sized budget of 1 GiB matching what this library writes.
+    /// The policy caps Argon2id memory cost, time cost, lane count, and
+    /// combined work accepted from the file header, before any derivation work
+    /// begins. If unset, the decrypt path applies [`KdfLimit::default`], a
+    /// desktop-sized budget of 1 GiB and the writer's own work budget,
+    /// matching what this library writes.
     ///
     /// A service that decrypts untrusted files unattended should set a
     /// smaller limit and bound how many decrypts run at once: the header
@@ -656,10 +661,11 @@ pub struct PrivateKeyDecryptor {
 impl PrivateKeyDecryptor {
     /// Sets the reader-side KDF resource policy for unlocking `private.key`.
     ///
-    /// The policy caps Argon2id memory cost, time cost, and lane count
-    /// accepted from the key file's cleartext header, before any derivation
-    /// work begins. If unset, the decrypt path applies [`KdfLimit::default`], a
-    /// desktop-sized budget of 1 GiB matching what this library writes.
+    /// The policy caps Argon2id memory cost, time cost, lane count, and
+    /// combined work accepted from the key file's cleartext header, before any
+    /// derivation work begins. If unset, the decrypt path applies
+    /// [`KdfLimit::default`], a desktop-sized budget of 1 GiB and the writer's
+    /// own work budget, matching what this library writes.
     ///
     /// A service that unlocks untrusted key files unattended should set a
     /// smaller limit and bound how many unlocks run at once: the key file's

@@ -52,21 +52,34 @@ pub(crate) fn check_passphrase_len(passphrase: &[u8]) -> Result<(), CryptoError>
 /// A `.fcr` file or `private.key` stores Argon2id parameters in the cleartext
 /// header. When processing untrusted input, `KdfLimit` prevents a malicious
 /// header from forcing arbitrarily expensive key derivation: any structurally
-/// valid input whose memory cost, time cost, or lane count exceeds the
-/// configured cap is rejected before Argon2id runs. If no limit is configured
-/// on a decryptor, the library applies [`KdfLimit::default`]: memory is capped
-/// at the writer's default (1 GiB), while time cost and lanes are capped at the
-/// format maximum, so those two reject nothing the structural check would
-/// not already reject.
+/// valid input whose memory cost, time cost, lane count, or combined work
+/// exceeds the configured cap is rejected before Argon2id runs. If no limit is
+/// configured on a decryptor, the library applies [`KdfLimit::default`]: memory
+/// is capped at the writer's default (1 GiB) and combined work at the writer's
+/// own budget (1 GiB × 4 passes), while time cost and lanes are capped at the
+/// format maximum and so reject nothing on their own.
+///
+/// The memory and work caps bound different resources: memory bounds one
+/// derivation's peak allocation, work bounds how long it runs. Neither implies
+/// the other, which is why both are applied.
 ///
 /// Construct with [`KdfLimit::new`] for KiB or [`KdfLimit::from_mib`] for MiB,
-/// optionally tighten time cost or lanes with [`KdfLimit::max_time_cost`]
-/// / [`KdfLimit::max_lanes`], then pass the result to
+/// optionally adjust the other dimensions with [`KdfLimit::max_time_cost`],
+/// [`KdfLimit::max_lanes`], or [`KdfLimit::max_work`], then pass the result to
 /// [`crate::PassphraseDecryptor::kdf_limit`] or
-/// [`crate::PrivateKeyDecryptor::kdf_limit`]. The struct is `#[non_exhaustive]`
-/// so future releases can add further limit dimensions without a breaking
-/// change. A cap is a numeric bound, which is what lets the struct stay
-/// `Copy`.
+/// [`crate::PrivateKeyDecryptor::kdf_limit`]. Raising memory does not raise the
+/// work budget; a caller who wants 2 GiB at the writer's four passes sets both.
+/// The struct is `#[non_exhaustive]` so future releases can add further limit
+/// dimensions without a breaking change. A cap is a numeric bound, which is
+/// what lets the struct stay `Copy`.
+///
+/// # Unattended services
+///
+/// A service deriving keys from untrusted artefacts must set an explicit limit
+/// for its deployment and bound how many derivations run at once. One accepted
+/// derivation still holds its full memory cost for its whole runtime, so the
+/// exposure that matters is that cost multiplied by concurrency, which no
+/// per-operation cap can bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct KdfLimit {
@@ -80,6 +93,11 @@ pub struct KdfLimit {
     /// format maximum, so it rejects nothing the structural check accepts
     /// unless tightened with [`KdfLimit::max_lanes`].
     pub(crate) max_lanes: u32,
+    /// Maximum accepted combined work: memory cost (KiB) multiplied by time
+    /// cost (passes over that memory). Argon2's own cost model, so it bounds
+    /// runtime without pinning either factor. Defaults to
+    /// [`KdfLimit::WORK_DEFAULT`].
+    pub(crate) max_work: u64,
 }
 
 impl KdfLimit {
@@ -92,6 +110,11 @@ impl KdfLimit {
     pub const TIME_COST_STRUCTURAL_MAX: u32 = KdfParams::MAX_TIME_COST;
     /// Structural maximum for Argon2id lanes (`FORMAT.md` §2.2).
     pub const LANES_STRUCTURAL_MAX: u32 = KdfParams::MAX_LANES;
+    /// Structural maximum for combined Argon2id work: the largest
+    /// memory-times-time product `FORMAT.md` §2.2 can express. A limit at
+    /// this value accepts every structurally valid header.
+    pub const WORK_STRUCTURAL_MAX: u64 =
+        KdfParams::MAX_MEM_COST as u64 * KdfParams::MAX_TIME_COST as u64;
 
     /// Default value used by [`KdfLimit::default`] for
     /// `max_mem_cost_kib` (1 GiB in KiB). Matches the writer's own
@@ -100,11 +123,19 @@ impl KdfLimit {
     /// defaults are the structural maxima above.
     pub const MEM_COST_KIB_DEFAULT: u32 = KdfParams::DEFAULT_MEM_COST;
 
+    /// Default value used by [`KdfLimit::default`] for `max_work`: the
+    /// writer's own default memory cost multiplied by its own default time
+    /// cost, so no header may order more Argon2id work than this library
+    /// produces at its defaults.
+    pub const WORK_DEFAULT: u64 =
+        Self::MEM_COST_KIB_DEFAULT as u64 * KdfParams::DEFAULT_TIME_COST as u64;
+
     /// Builds a limit from a KiB memory value, clamped at
-    /// [`Self::MEM_COST_KIB_STRUCTURAL_MAX`], leaving the time-cost and lane
-    /// caps at their defaults (the format maximum). Only memory is
-    /// constrained unless [`max_time_cost`](Self::max_time_cost) or
-    /// [`max_lanes`](Self::max_lanes) tightens the others.
+    /// [`Self::MEM_COST_KIB_STRUCTURAL_MAX`], leaving every other dimension at
+    /// its default: time cost and lanes at the format maximum, combined work at
+    /// [`Self::WORK_DEFAULT`]. The work budget does not follow the memory value
+    /// given here, so raising memory alone does not admit more total work —
+    /// pair it with [`max_work`](Self::max_work) to raise both.
     pub fn new(max_mem_cost_kib: u32) -> Self {
         Self {
             max_mem_cost_kib: max_mem_cost_kib.min(Self::MEM_COST_KIB_STRUCTURAL_MAX),
@@ -112,8 +143,8 @@ impl KdfLimit {
         }
     }
 
-    /// Builds a limit from MiB, leaving the time-cost and lane caps at their
-    /// defaults (the format maximum).
+    /// Builds a limit from MiB, leaving every other dimension at its default
+    /// exactly as [`Self::new`] does.
     ///
     /// # Errors
     ///
@@ -141,6 +172,15 @@ impl KdfLimit {
         self.max_lanes = value.min(Self::LANES_STRUCTURAL_MAX);
         self
     }
+
+    /// Sets the accepted combined-work cap — memory cost in KiB multiplied by
+    /// time cost — clamped at [`Self::WORK_STRUCTURAL_MAX`]. Raise it to accept
+    /// a header that is legitimately more expensive than the writer's own
+    /// defaults; lower it to refuse work an ordinary file never requests.
+    pub fn max_work(mut self, value: u64) -> Self {
+        self.max_work = value.min(Self::WORK_STRUCTURAL_MAX);
+        self
+    }
 }
 
 impl Default for KdfLimit {
@@ -153,12 +193,20 @@ impl Default for KdfLimit {
         //
         // Time cost and lanes default to the format maximum
         // (`MAX_TIME_COST` / `MAX_LANES`). The structural check already
-        // enforces those bounds, so the default caps reject nothing new; they
+        // enforces those bounds, so on their own they reject nothing new; they
         // exist only so a caller can tighten either dimension.
+        //
+        // Work is capped instead, at the writer's own memory times its own time
+        // cost. Capping time cost per dimension would refuse parameter sets far
+        // cheaper than the writer default — 64 MiB at twelve passes costs a
+        // fraction of 1 GiB at four — while the product is the shape of the
+        // resource being protected, so it accepts every cheaper profile and
+        // refuses only headers ordering more work than the writer emits.
         Self {
             max_mem_cost_kib: Self::MEM_COST_KIB_DEFAULT,
             max_time_cost: Self::TIME_COST_STRUCTURAL_MAX,
             max_lanes: Self::LANES_STRUCTURAL_MAX,
+            max_work: Self::WORK_DEFAULT,
         }
     }
 }
@@ -281,7 +329,10 @@ impl KdfParams {
     /// limit", but the library still applies [`KdfLimit::default`] so callers
     /// cannot be silently exposed to attacker-controlled 2 GiB allocations
     /// just because they did not set `.kdf_limit(...)` on their config.
-    /// Memory is checked first, then time cost, then lanes. `pub(crate)`
+    /// Memory is checked first, then time cost, then lanes, then combined
+    /// work. Work is checked last so a header that also breaks a single
+    /// dimension keeps reporting that dimension, which names the one cap a
+    /// caller would have to change. `pub(crate)`
     /// deliberately: pairs with [`from_bytes_structural`] and is not part of
     /// the stable public API. Both the reader ([`from_bytes`](Self::from_bytes))
     /// and the writer ([`validate_for_write`](Self::validate_for_write)) run
@@ -305,6 +356,15 @@ impl KdfParams {
             return Err(CryptoError::KdfLanesCapExceeded {
                 lanes: self.lanes,
                 local_cap: limit.max_lanes,
+            });
+        }
+        // Widened to `u64`: the product of two `u32` fields cannot overflow it,
+        // so no header can wrap this into a small value.
+        let work = self.mem_cost as u64 * self.time_cost as u64;
+        if work > limit.max_work {
+            return Err(CryptoError::KdfWorkCapExceeded {
+                work,
+                local_cap: limit.max_work,
             });
         }
         Ok(self)
@@ -544,13 +604,15 @@ mod tests {
         .to_bytes();
         let widest = KdfLimit::new(KdfLimit::MEM_COST_KIB_STRUCTURAL_MAX)
             .max_time_cost(KdfLimit::TIME_COST_STRUCTURAL_MAX)
-            .max_lanes(KdfLimit::LANES_STRUCTURAL_MAX);
+            .max_lanes(KdfLimit::LANES_STRUCTURAL_MAX)
+            .max_work(KdfLimit::WORK_STRUCTURAL_MAX);
         assert!(KdfParams::from_bytes(&bytes, Some(&widest)).is_ok());
 
         let defaults = KdfLimit::default();
         assert_eq!(defaults.max_mem_cost_kib, KdfLimit::MEM_COST_KIB_DEFAULT);
         assert_eq!(defaults.max_time_cost, KdfLimit::TIME_COST_STRUCTURAL_MAX);
         assert_eq!(defaults.max_lanes, KdfLimit::LANES_STRUCTURAL_MAX);
+        assert_eq!(defaults.max_work, KdfLimit::WORK_DEFAULT);
     }
 
     /// A cap above what `FORMAT.md` §2.2 can represent is reduced to the
@@ -561,20 +623,28 @@ mod tests {
     fn builders_clamp_at_the_published_structural_maxima() {
         let over = KdfLimit::new(u32::MAX)
             .max_time_cost(u32::MAX)
-            .max_lanes(u32::MAX);
+            .max_lanes(u32::MAX)
+            .max_work(u64::MAX);
         let widest = KdfLimit::new(KdfLimit::MEM_COST_KIB_STRUCTURAL_MAX)
             .max_time_cost(KdfLimit::TIME_COST_STRUCTURAL_MAX)
-            .max_lanes(KdfLimit::LANES_STRUCTURAL_MAX);
+            .max_lanes(KdfLimit::LANES_STRUCTURAL_MAX)
+            .max_work(KdfLimit::WORK_STRUCTURAL_MAX);
         assert_eq!(over, widest);
 
-        // `from_mib` clamps through `new`: one MiB above the maximum.
+        // `from_mib` clamps through `new`: one MiB above the maximum. The work
+        // budget is not derived from the memory value, so it stays at its
+        // default and the comparison is against a `new`-built limit.
         let over_max_mib = KdfLimit::MEM_COST_KIB_STRUCTURAL_MAX / 1024 + 1;
-        assert_eq!(KdfLimit::from_mib(over_max_mib).unwrap(), widest);
+        assert_eq!(
+            KdfLimit::from_mib(over_max_mib).unwrap(),
+            KdfLimit::new(KdfLimit::MEM_COST_KIB_STRUCTURAL_MAX)
+        );
 
         // Clamping only reduces values above the maximum: a tightened cap
         // is still stored as given.
         assert_ne!(KdfLimit::default().max_time_cost(3), KdfLimit::default());
         assert_ne!(KdfLimit::default().max_lanes(2), KdfLimit::default());
+        assert_ne!(KdfLimit::default().max_work(1), KdfLimit::default());
     }
 
     #[test]
@@ -585,10 +655,11 @@ mod tests {
             lanes: KdfLimit::LANES_STRUCTURAL_MAX,
         }
         .to_bytes();
-        // Structurally valid at the hard 2 GiB ceiling. Callers who want
-        // to accept such a header opt into the matching `KdfLimit`
-        // explicitly; the default 1 GiB cap is enforced elsewhere.
-        let limit = KdfLimit::new(KdfLimit::MEM_COST_KIB_STRUCTURAL_MAX);
+        // Structurally valid at every hard ceiling. Callers who want to accept
+        // such a header opt into the matching `KdfLimit` explicitly, on both
+        // the memory and the work axis; the defaults are enforced elsewhere.
+        let limit = KdfLimit::new(KdfLimit::MEM_COST_KIB_STRUCTURAL_MAX)
+            .max_work(KdfLimit::WORK_STRUCTURAL_MAX);
         assert!(KdfParams::from_bytes(&bytes, Some(&limit)).is_ok());
     }
 
@@ -659,13 +730,14 @@ mod tests {
         }
     }
 
-    /// The default and `new`-built limits leave the time-cost and lane caps at
-    /// the format maximum, so a header at those maxima is still accepted —
-    /// the new dimensions reject nothing unless a caller tightens them.
+    /// The time-cost and lane caps default to the format maximum and so reject
+    /// nothing on their own: a header at both maxima is accepted whenever its
+    /// combined work fits the budget. Uses the lowest memory cost the writer
+    /// will seal, which at twelve passes stays far below the default budget.
     #[test]
     fn test_kdf_limit_default_accepts_max_time_cost_and_lanes() {
         let bytes = KdfParams {
-            mem_cost: KdfParams::DEFAULT_MEM_COST,
+            mem_cost: KdfParams::MIN_WRITE_MEM_COST,
             time_cost: KdfParams::MAX_TIME_COST,
             lanes: KdfParams::MAX_LANES,
         }
@@ -676,7 +748,141 @@ mod tests {
         assert!(KdfParams::from_bytes(&bytes, Some(&new_limit)).is_ok());
     }
 
-    /// Writer/reader symmetry across all three caps. Both the writer
+    /// The combined-work cap is what refuses the format-maximum time cost at
+    /// the writer's own memory cost, the case no single-dimension cap catches:
+    /// memory is exactly at its ceiling and lanes are irrelevant to the cost.
+    #[test]
+    fn default_work_cap_rejects_max_time_cost_at_the_default_memory() {
+        let over = KdfParams {
+            mem_cost: KdfParams::DEFAULT_MEM_COST,
+            time_cost: KdfParams::MAX_TIME_COST,
+            lanes: KdfParams::DEFAULT_LANES,
+        };
+        match KdfParams::from_bytes(&over.to_bytes(), Some(&KdfLimit::default())) {
+            Err(CryptoError::KdfWorkCapExceeded { work, local_cap }) => {
+                // Reported work is the product of exactly `mem_cost` and
+                // `time_cost`; a cap reading any other field would differ here.
+                assert_eq!(
+                    work,
+                    KdfParams::DEFAULT_MEM_COST as u64 * KdfParams::MAX_TIME_COST as u64
+                );
+                assert_eq!(local_cap, KdfLimit::WORK_DEFAULT);
+            }
+            other => panic!("expected KdfWorkCapExceeded, got: {other:?}"),
+        }
+        // The writer refuses the same parameters, so the rejected header is one
+        // this library will not produce under the same limit either.
+        assert!(over.validate_for_write(Some(&KdfLimit::default())).is_err());
+        // Raising the budget is the documented way back in.
+        let raised = KdfLimit::default().max_work(KdfLimit::WORK_STRUCTURAL_MAX);
+        assert!(KdfParams::from_bytes(&over.to_bytes(), Some(&raised)).is_ok());
+    }
+
+    /// The budget boundary is exact, and it sits precisely at the writer's own
+    /// default parameters so an unconfigured round trip cannot regress.
+    #[test]
+    fn default_work_cap_boundary_is_the_writer_default() {
+        let limit = KdfLimit::default();
+        // The writer's default parameters and the reader's default budget are
+        // separate items; this pins them to the same value, which is what makes
+        // the unconfigured round trip work at all.
+        let at = KdfParams::default();
+        assert_eq!(
+            at.mem_cost as u64 * at.time_cost as u64,
+            KdfLimit::WORK_DEFAULT
+        );
+        assert!(KdfParams::from_bytes(&at.to_bytes(), Some(&limit)).is_ok());
+
+        // One pass more is one budget unit too many.
+        let over = KdfParams {
+            time_cost: at.time_cost + 1,
+            ..at
+        };
+        assert!(matches!(
+            KdfParams::from_bytes(&over.to_bytes(), Some(&limit)),
+            Err(CryptoError::KdfWorkCapExceeded { .. })
+        ));
+    }
+
+    /// Cheap profiles that trade memory for passes stay accepted: the cap is on
+    /// the product, not on either factor, so a small-memory header at the
+    /// format-maximum time cost costs less than the writer default and passes.
+    #[test]
+    fn default_work_cap_accepts_low_memory_high_pass_profiles() {
+        for mem_cost in [KdfParams::MIN_WRITE_MEM_COST, 64 * 1024, 256 * 1024] {
+            let cheap = KdfParams {
+                mem_cost,
+                time_cost: KdfParams::MAX_TIME_COST,
+                lanes: KdfParams::DEFAULT_LANES,
+            };
+            assert!(
+                cheap.mem_cost as u64 * cheap.time_cost as u64 <= KdfLimit::WORK_DEFAULT,
+                "{mem_cost} KiB at max time cost must stay within the default budget"
+            );
+            assert!(
+                KdfParams::from_bytes(&cheap.to_bytes(), Some(&KdfLimit::default())).is_ok(),
+                "{mem_cost} KiB at max time cost must decrypt under the default limit"
+            );
+        }
+    }
+
+    /// The work budget is anchored to a fixed constant, not derived from the
+    /// memory cap. A caller who tightens memory must keep the cheap
+    /// high-pass profiles the product cap exists to protect, and a caller who
+    /// raises memory must ask for the extra work separately.
+    #[test]
+    fn work_budget_does_not_follow_the_memory_cap() {
+        let tightened = KdfLimit::from_mib(64).expect("64 MiB is a valid limit");
+        assert_eq!(tightened.max_work, KdfLimit::WORK_DEFAULT);
+        let cheap = KdfParams {
+            mem_cost: 64 * 1024,
+            time_cost: KdfParams::MAX_TIME_COST,
+            lanes: KdfParams::DEFAULT_LANES,
+        };
+        assert!(KdfParams::from_bytes(&cheap.to_bytes(), Some(&tightened)).is_ok());
+
+        // Raising memory alone leaves the budget where it was, so 2 GiB at the
+        // writer's own time cost still needs an explicit `max_work`.
+        let raised = KdfLimit::from_mib(2048).expect("2 GiB is a valid limit");
+        assert_eq!(raised.max_work, KdfLimit::WORK_DEFAULT);
+        let wide = KdfParams {
+            mem_cost: KdfLimit::MEM_COST_KIB_STRUCTURAL_MAX,
+            time_cost: KdfParams::DEFAULT_TIME_COST,
+            lanes: KdfParams::DEFAULT_LANES,
+        };
+        assert!(matches!(
+            KdfParams::from_bytes(&wide.to_bytes(), Some(&raised)),
+            Err(CryptoError::KdfWorkCapExceeded { .. })
+        ));
+        let both = raised.max_work(
+            KdfLimit::MEM_COST_KIB_STRUCTURAL_MAX as u64 * KdfParams::DEFAULT_TIME_COST as u64,
+        );
+        assert!(KdfParams::from_bytes(&wide.to_bytes(), Some(&both)).is_ok());
+    }
+
+    /// The work cap bounds runtime, the memory cap bounds allocation, and
+    /// neither substitutes for the other. A 2 GiB single-pass header scores
+    /// only half the default budget yet doubles the peak allocation, so the
+    /// memory cap is the one that must refuse it.
+    #[test]
+    fn memory_cap_still_refuses_what_the_work_cap_allows() {
+        let wide_but_cheap = KdfParams {
+            mem_cost: KdfLimit::MEM_COST_KIB_STRUCTURAL_MAX,
+            time_cost: 1,
+            lanes: KdfParams::DEFAULT_LANES,
+        };
+        assert!(
+            wide_but_cheap.mem_cost as u64 * wide_but_cheap.time_cost as u64
+                <= KdfLimit::WORK_DEFAULT,
+            "the work cap alone must not be what refuses this header"
+        );
+        match KdfParams::from_bytes(&wide_but_cheap.to_bytes(), Some(&KdfLimit::default())) {
+            Err(CryptoError::KdfResourceCapExceeded { .. }) => {}
+            other => panic!("expected KdfResourceCapExceeded, got: {other:?}"),
+        }
+    }
+
+    /// Writer/reader symmetry across all four caps. Both the writer
     /// (`validate_for_write`) and the reader (`from_bytes`) run the same
     /// `enforce_limit`, so under one `KdfLimit` they agree: whatever the
     /// writer emits the reader accepts, and whatever the writer refuses the
@@ -684,18 +890,34 @@ mod tests {
     /// under the same limit.
     #[test]
     fn test_kdf_limit_writer_reader_symmetry() {
-        // Format-max params under the default limit: accepted by both sides.
+        // Format-max time cost and lanes under the default limit, at a memory
+        // cost the default work budget admits: accepted by both sides.
         let at_max = KdfParams {
-            mem_cost: KdfParams::DEFAULT_MEM_COST,
+            mem_cost: KdfParams::MIN_WRITE_MEM_COST,
             time_cost: KdfParams::MAX_TIME_COST,
             lanes: KdfParams::MAX_LANES,
         };
         let limit = KdfLimit::default();
         at_max
             .validate_for_write(Some(&limit))
-            .expect("writer accepts format-max params under the default limit");
+            .expect("writer accepts these params under the default limit");
         KdfParams::from_bytes(&at_max.to_bytes(), Some(&limit))
             .expect("reader accepts the same params under the same limit");
+
+        // The work dimension behaves the same way in both directions.
+        let over_work = KdfParams {
+            mem_cost: KdfParams::DEFAULT_MEM_COST,
+            time_cost: KdfParams::MAX_TIME_COST,
+            lanes: KdfParams::DEFAULT_LANES,
+        };
+        assert!(
+            over_work.validate_for_write(Some(&limit)).is_err(),
+            "writer must refuse params above the work budget"
+        );
+        assert!(
+            KdfParams::from_bytes(&over_work.to_bytes(), Some(&limit)).is_err(),
+            "reader must refuse the same params under the same limit"
+        );
 
         // A tightened time-cost limit: the writer refuses (so no unreadable
         // file is produced) and the reader refuses the same bytes.

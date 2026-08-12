@@ -229,6 +229,12 @@ from untrusted input. Local KDF caps are resource policy, not format
 incompatibility or passphrase-length bounds. Implementations SHOULD make such
 caps configurable and report a distinct resource-cap error.
 
+Such a cap MAY bound the product `mem_kib * time`, because that product is the
+Argon2id work factor, whereas a cap on `time` alone would refuse parameter sets
+cheaper than the writer default a reader must already accept. A product cap
+does not replace a `mem_kib` cap: the two bound different resources, since
+`mem_kib` alone determines the allocation a reader holds while deriving.
+
 ### 2.3 HKDF domain separation
 
 The native HKDF derivations defined here use HKDF-SHA3-256 and produce 32 bytes

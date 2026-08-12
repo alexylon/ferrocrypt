@@ -323,6 +323,7 @@ impl std::fmt::Display for PathSuffix<'_> {
 ///   [`CryptoError::KdfResourceCapExceeded`],
 ///   [`CryptoError::KdfTimeCostCapExceeded`],
 ///   [`CryptoError::KdfLanesCapExceeded`],
+///   [`CryptoError::KdfWorkCapExceeded`],
 ///   [`CryptoError::PrivateKeyWrappedSecretCapExceeded`], and the
 ///   `Archive*CapExceeded` family for the `FORMAT.md` §9.12 caps) each
 ///   carry the offending value plus the configured local cap as named
@@ -460,6 +461,20 @@ pub enum CryptoError {
         lanes: u32,
         /// Maximum lane count accepted by the caller's local policy.
         local_cap: u32,
+    },
+    /// Combined Argon2id work from a header — memory cost in KiB multiplied by
+    /// time cost — exceeds the caller-configured local cap. Bounds how long one
+    /// derivation runs, where [`Self::KdfResourceCapExceeded`] bounds how much
+    /// memory it holds; neither implies the other, so a header within the
+    /// memory cap can still be refused here. The default budget is the writer's
+    /// own (1 GiB × 4 passes), so a file this library produced at its defaults
+    /// always decrypts; raise it with `KdfLimit::max_work`.
+    #[error("Passphrase work over limit ({work} KiB-passes, limit {local_cap})")]
+    KdfWorkCapExceeded {
+        /// Combined work requested by the untrusted header, in KiB-passes.
+        work: u64,
+        /// Maximum combined work accepted by the caller's local policy.
+        local_cap: u64,
     },
     /// Writer-side Argon2id memory cost is below the production floor.
     /// Raised only when writing a `.fcr` or `private.key` (passphrase

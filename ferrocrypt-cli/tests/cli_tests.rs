@@ -1415,6 +1415,78 @@ fn test_cli_decrypt_accepts_max_kdf_memory_recipient_mode() {
     );
 }
 
+/// `--max-kdf-work` reaches the decryptor and moves the accepted boundary.
+/// Gated to the debug profile because it pins the exact work of the fast
+/// Argon2id override (19 MiB × 1 pass); a release build seals the same file
+/// at the writer's own defaults, whose work is a different number.
+#[test]
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "pins the fast-KDF override's work value; see file-level note"
+)]
+fn test_cli_decrypt_max_kdf_work_bounds_the_accepted_header() {
+    const FAST_KDF_WORK: u32 = ferrocrypt_test_support::TEST_FAST_KDF_MEM_COST
+        * ferrocrypt_test_support::TEST_FAST_KDF_TIME_COST;
+
+    let test_dir = setup_test_dir("cli_decrypt_kdf_work");
+    let input_file = test_dir.join("data.txt");
+    let encrypt_dir = test_dir.join("encrypted");
+    let refused_dir = test_dir.join("refused");
+    let accepted_dir = test_dir.join("accepted");
+    for dir in [&encrypt_dir, &refused_dir, &accepted_dir] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    create_test_file(&input_file, "kdf work test");
+
+    let binary = get_binary_path();
+    let enc = cli_command(&binary)
+        .arg("encrypt")
+        .arg("-i")
+        .arg(&input_file)
+        .arg("-o")
+        .arg(&encrypt_dir)
+        .env("FERROCRYPT_PASSPHRASE", "pass")
+        .output()
+        .expect("encrypt");
+    assert!(enc.status.success());
+
+    let decrypt_with = |budget: u32, out: &Path| {
+        cli_command(&binary)
+            .arg("decrypt")
+            .arg("-i")
+            .arg(encrypt_dir.join("data.fcr"))
+            .arg("-o")
+            .arg(out)
+            .arg("--max-kdf-work")
+            .arg(budget.to_string())
+            .env("FERROCRYPT_PASSPHRASE", "pass")
+            .output()
+            .expect("decrypt with --max-kdf-work")
+    };
+
+    // One unit below the file's own work: refused, and the message names
+    // the work dimension rather than any other cap.
+    let refused = decrypt_with(FAST_KDF_WORK - 1, &refused_dir);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success(),
+        "a budget below the file's work must refuse it"
+    );
+    assert!(
+        stderr.contains("work over limit"),
+        "expected the work-cap message, got: {stderr}"
+    );
+
+    // Exactly at the file's own work: accepted, so the boundary is inclusive
+    // and the flag is not simply refusing everything.
+    let accepted = decrypt_with(FAST_KDF_WORK, &accepted_dir);
+    assert!(
+        accepted.status.success(),
+        "a budget equal to the file's work must accept it: {}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+}
+
 #[test]
 fn test_cli_encrypt_rejects_max_kdf_memory_flag() {
     // --max-kdf-memory is decrypt-only; clap rejects it on `encrypt`.

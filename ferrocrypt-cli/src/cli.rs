@@ -230,7 +230,7 @@ pub struct KdfLimitArgs {
     #[arg(
         long,
         value_name = "MIB",
-        help = "Maximum Argon2id memory cost to accept (MiB). When omitted, the limit is 1 GiB; 0 rejects every file"
+        help = "Maximum Argon2id memory cost to accept (MiB). When omitted, the limit is 1 GiB; 0 rejects every file. Work is capped separately by --max-kdf-work, which a higher memory limit does not raise"
     )]
     max_kdf_memory: Option<u32>,
 
@@ -841,10 +841,12 @@ fn run_keygen(output_dir: PathBuf) -> Result<(), CryptoError> {
         None => generator,
     };
     let outcome = generator.write(&output_dir, |ev| eprintln!("{ev}"))?;
-    let recipient = PublicKey::from_key_file(&outcome.public_key_path)?.to_recipient_string()?;
     outln!("\nGenerated key pair in {}\n", output_dir.display());
+    // Both lines come from the key material key generation produced, so
+    // the fingerprint the user verifies identifies the recipient string
+    // printed beside it.
     outln!("Public key fingerprint: {}", outcome.fingerprint);
-    outln!("Public key recipient:   {}", recipient);
+    outln!("Public key recipient:   {}", outcome.recipient_string);
     Ok(())
 }
 

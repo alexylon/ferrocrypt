@@ -567,6 +567,41 @@ fn public_key_encrypts_to_the_key_it_was_built_from_after_the_file_is_replaced()
     );
 }
 
+/// Key generation must return a recipient string and a fingerprint that
+/// describe one key, so a caller can publish the string and have the
+/// fingerprint it showed vouch for it. Both come from the material the
+/// call generated, and the test pins that they agree with `public.key`
+/// as written and with each other.
+#[test]
+fn key_generation_returns_a_recipient_string_matching_its_fingerprint() {
+    let work = fresh_workspace("keygen_recipient_string");
+    let keys = work.join("keys");
+    fs::create_dir_all(&keys).unwrap();
+    let outcome = generate_key_pair(&keys, pass(), |_| {}).expect("keygen");
+
+    let from_file = PublicKey::from_key_file(&outcome.public_key_path).expect("read public.key");
+    assert_eq!(
+        from_file.to_recipient_string().expect("recipient string"),
+        outcome.recipient_string,
+        "the returned string must be the one written to public.key"
+    );
+    assert_eq!(
+        from_file.fingerprint().expect("fingerprint"),
+        outcome.fingerprint,
+        "the returned fingerprint must describe the same key"
+    );
+
+    let parsed: PublicKey = outcome
+        .recipient_string
+        .parse()
+        .expect("the returned string must parse as a recipient");
+    assert_eq!(
+        parsed.fingerprint().expect("fingerprint of the parsed key"),
+        outcome.fingerprint,
+        "the string and the fingerprint must describe one key"
+    );
+}
+
 /// `fast_passphrase_encryptor("")` must reject the empty passphrase
 /// at the top of `write`, before the input-existence check fires. Pins
 /// the cheap-caller-input-first ordering matching the deprecated

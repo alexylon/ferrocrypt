@@ -313,12 +313,13 @@ impl Encryptor {
     /// [`Decryptor::open_with_limits`] with limits that are at least as
     /// permissive.
     ///
-    /// All three axes are checked before encryption work begins:
-    /// `recipient_count`, canonical native recipient `body_len`, and the
-    /// exact `header_len` that the writer will emit (`ext_len = 0` for
-    /// current writers). Tightening any axis below the emitted header shape
-    /// rejects at [`Encryptor::write`] time with the same typed cap error
-    /// the reader would later return.
+    /// All four axes are checked before encryption work begins:
+    /// `recipient_count`, canonical native recipient `body_len`, the exact
+    /// `header_len` that the writer will emit (`ext_len = 0` for current
+    /// writers), and the aggregate header-MAC work those two imply.
+    /// Tightening any axis below the emitted header shape rejects at
+    /// [`Encryptor::write`] time with the same typed cap error the reader
+    /// would later return.
     pub fn header_read_limits(mut self, limits: HeaderReadLimits) -> Self {
         self.header_read_limits = Some(limits);
         self
@@ -500,10 +501,13 @@ impl Decryptor {
     /// not contain a FerroCrypt header return [`CryptoError::InvalidFormat`]
     /// with [`FormatDefect::BadMagic`]. Malformed headers, unsupported
     /// versions, unknown critical recipients, and illegal recipient mixes return
-    /// their corresponding `CryptoError` or [`FormatDefect`] variants. A header
-    /// shape, or an aggregate header-MAC work total, above
-    /// [`HeaderReadLimits::default`] returns the matching `*CapExceeded`
-    /// variant; use [`Decryptor::open_with_limits`] to raise the caps.
+    /// their corresponding `CryptoError` or [`FormatDefect`] variants. A
+    /// passphrase recipient whose stored Argon2id parameters are outside the
+    /// bounds `FORMAT.md` §2.2 permits returns
+    /// [`CryptoError::InvalidKdfParams`]. A header shape, or an aggregate
+    /// header-MAC work total, above [`HeaderReadLimits::default`] returns the
+    /// matching `*CapExceeded` variant; use [`Decryptor::open_with_limits`] to
+    /// raise the caps.
     pub fn open(input: impl AsRef<Path>) -> Result<Self, CryptoError> {
         Self::open_inner(input.as_ref(), None)
     }
@@ -925,15 +929,18 @@ impl KeyPairGenerator {
 
     /// Sets the writer-side KDF resource policy for sealing `private.key`.
     ///
-    /// The policy caps Argon2id memory cost, time cost, and lane count before
-    /// key generation begins. The default policy accepts [`KdfParams::default`]
+    /// The policy caps Argon2id memory cost, time cost, lane count, and
+    /// combined work before key generation begins. The default policy accepts
+    /// [`KdfParams::default`], which sits exactly at the default work budget,
     /// and rejects memory above 1 GiB unless the caller opts into a higher
     /// memory cap. Time cost and lanes default to the format maximum, so
     /// they only reject when the caller tightens them.
     ///
     /// Use this builder together with [`KeyPairGenerator::kdf_params`] to raise
-    /// the memory ceiling or to tighten time cost or lanes. The receiving
-    /// [`PrivateKeyDecryptor`] must be configured via
+    /// the memory or work ceiling, or to tighten any dimension. Raising memory
+    /// does not raise the work budget, so parameters above
+    /// [`KdfParams::default`]'s work need [`KdfLimit::max_work`] as well. The
+    /// receiving [`PrivateKeyDecryptor`] must be configured via
     /// [`PrivateKeyDecryptor::kdf_limit`] with a policy that accepts the same
     /// parameters.
     pub fn kdf_limit(mut self, limit: KdfLimit) -> Self {
@@ -974,16 +981,18 @@ impl KeyPairGenerator {
         let kdf_limit = self.kdf_limit.unwrap_or_default();
         // Moved in, not borrowed: `protocol::generate_key_pair` scrubs it as
         // soon as `private.key` is sealed, before the files reach disk.
-        let (private_key_path, public_key_path, fingerprint) = protocol::generate_key_pair(
-            self.passphrase,
-            &kdf_params,
-            Some(&kdf_limit),
-            output_dir.as_ref(),
-            &on_event,
-        )?;
+        let (private_key_path, public_key_path, recipient_string, fingerprint) =
+            protocol::generate_key_pair(
+                self.passphrase,
+                &kdf_params,
+                Some(&kdf_limit),
+                output_dir.as_ref(),
+                &on_event,
+            )?;
         Ok(KeyGenOutcome {
             private_key_path,
             public_key_path,
+            recipient_string,
             fingerprint,
         })
     }
@@ -1059,7 +1068,8 @@ pub fn generate_key_pair(
 ///
 /// Returns typed recipient-classification errors when the recipient list is
 /// structurally valid but cannot be classified: unknown critical recipients,
-/// illegal passphrase mixing, or no supported native recipient.
+/// illegal passphrase mixing, no supported native recipient, or a passphrase
+/// recipient whose stored Argon2id parameters are out of range.
 ///
 /// # Errors
 ///
@@ -1069,7 +1079,9 @@ pub fn generate_key_pair(
 /// example a FIFO or device node) — such inputs are refused without
 /// blocking. Returns [`CryptoError::InvalidFormat`] when the magic matches
 /// but the prefix, header, recipient entries, or recipient mixing policy are
-/// malformed or unsupported. Returns cap-exceeded variants when the declared
+/// malformed or unsupported, and [`CryptoError::InvalidKdfParams`] when a
+/// passphrase recipient's stored Argon2id parameters are outside the bounds
+/// `FORMAT.md` §2.2 permits. Returns cap-exceeded variants when the declared
 /// header shape, or the aggregate header-MAC work its recipient list implies,
 /// exceeds [`HeaderReadLimits::default`].
 pub fn probe_recipient_mode(

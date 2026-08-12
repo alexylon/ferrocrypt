@@ -383,7 +383,9 @@ impl KdfParams {
     /// structural bounds. Returns [`CryptoError::KdfResourceCapExceeded`],
     /// [`CryptoError::KdfTimeCostCapExceeded`], or
     /// [`CryptoError::KdfLanesCapExceeded`] when the corresponding field is
-    /// structurally valid but exceeds `limit` or the default cap.
+    /// structurally valid but exceeds `limit` or the default cap, and
+    /// [`CryptoError::KdfWorkCapExceeded`] when every field is within its own
+    /// cap but memory cost multiplied by time cost is not.
     pub fn from_bytes(
         bytes: &[u8; KDF_PARAMS_SIZE],
         limit: Option<&KdfLimit>,

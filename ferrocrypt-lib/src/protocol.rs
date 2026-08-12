@@ -643,7 +643,10 @@ fn failure_for(
 // ─── Key-pair generation ───────────────────────────────────────────────────
 
 /// Generates an X25519 key pair and writes both files to `output_dir`.
-/// Returns `(private_key_path, public_key_path)`.
+/// Returns `(private_key_path, public_key_path, recipient_string,
+/// fingerprint)`. The recipient string and the fingerprint are both
+/// derived from the key material this call generated, never from a
+/// re-read of `public.key`, so the two always describe one key.
 ///
 /// - `private.key` is the passphrase-wrapped binary keyfile.
 ///   `key::private::seal_private_key` owns the byte layout (cleartext
@@ -675,7 +678,7 @@ pub(crate) fn generate_key_pair(
     kdf_limit: Option<&crate::crypto::kdf::KdfLimit>,
     output_dir: &Path,
     on_event: &dyn Fn(&ProgressEvent),
-) -> Result<(PathBuf, PathBuf, String), CryptoError> {
+) -> Result<(PathBuf, PathBuf, String, String), CryptoError> {
     use std::io::Write as _;
 
     use crate::fs::atomic;
@@ -776,7 +779,12 @@ pub(crate) fn generate_key_pair(
     // the API layer.
     let fingerprint = fingerprint_hex(x25519::TYPE_NAME, &public_material)?;
 
-    Ok((private_key_path, public_key_path, fingerprint))
+    Ok((
+        private_key_path,
+        public_key_path,
+        recipient_string,
+        fingerprint,
+    ))
 }
 
 /// Commits two fully staged key files without overwriting existing files.
@@ -980,7 +988,7 @@ mod tests {
         // `generate_key_pair` consumes its passphrase, and `Passphrase` cannot
         // be duplicated, so the value handed back for the matching decrypt is
         // built from the same source text.
-        let (private_key_path, public_key_path, _fingerprint) = generate_key_pair(
+        let (private_key_path, public_key_path, _recipient, _fingerprint) = generate_key_pair(
             Passphrase::new(pass),
             &crate::crypto::kdf::KdfParams::test_fast_default(),
             None,

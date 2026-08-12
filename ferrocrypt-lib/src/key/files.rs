@@ -115,13 +115,14 @@ mod tests {
     fn key_file_kind_classifies_each_shape() -> Result<(), CryptoError> {
         // Real public.key text → Public.
         let tmp = tempfile::TempDir::new().unwrap();
-        let (private_key_path, public_key_path, _fingerprint) = crate::protocol::generate_key_pair(
-            Passphrase::new("kp"),
-            &crate::crypto::kdf::KdfParams::test_fast_default(),
-            None,
-            tmp.path(),
-            &|_| {},
-        )?;
+        let (private_key_path, public_key_path, _recipient, _fingerprint) =
+            crate::protocol::generate_key_pair(
+                Passphrase::new("kp"),
+                &crate::crypto::kdf::KdfParams::test_fast_default(),
+                None,
+                tmp.path(),
+                &|_| {},
+            )?;
         let pub_bytes = fs::read(&public_key_path)?;
         assert_eq!(classify_default(&pub_bytes), KeyFileKind::Public);
 

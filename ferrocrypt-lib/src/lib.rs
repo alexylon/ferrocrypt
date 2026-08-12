@@ -412,6 +412,16 @@ pub struct KeyGenOutcome {
     pub private_key_path: PathBuf,
     /// Path to the generated public key file.
     pub public_key_path: PathBuf,
+    /// Canonical `fcr1…` Bech32 recipient string for the generated
+    /// public key — the form to hand to whoever will encrypt to it.
+    ///
+    /// Derived from the key material this call generated, as
+    /// [`Self::fingerprint`] is, so the two always describe one key.
+    /// Reading `public.key` back to obtain the string would not: the
+    /// file can change between the two operations, and a fingerprint
+    /// checked out of band would then say nothing about the string
+    /// that was published.
+    pub recipient_string: String,
     /// SHA3-256 fingerprint of the public key (64-char hex string).
     pub fingerprint: String,
 }

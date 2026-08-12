@@ -1370,6 +1370,8 @@ No refactor may move TLV interpretation, archive writes, or payload plaintext re
 
 The credential is also disposed of on a schedule. The passphrase that unlocks a `private.key` is dropped as soon as the unlock returns, and the decrypt credential — a passphrase or an unwrapped private scalar — is taken by value and dropped when step 8 ends. Steps 9 to 13 run on attacker-supplied bytes and need only the derived payload key, so no reusable long-term secret stays resident while an attacker-chosen archive is extracted. A refactor must not extend a credential's lifetime past the recipient slot loop, for example by borrowing it from a caller that outlives extraction.
 
+The same rule governs the two writing paths, where the work after the credential's last use is bounded by the caller rather than an attacker but is still unbounded in principle. `protocol::encrypt` takes its recipient list by value and drops it once every body is wrapped, so an `argon2id` passphrase does not survive the payload stream; `PassphraseRecipient` owns its `Passphrase` for exactly this reason, and a scheme that borrowed one instead would defeat the drop. The credential is still live across `prepare_archive`, which runs first on purpose so an unusable source tree is rejected before an expensive KDF; that pass reads metadata only, while the streaming it precedes reads every byte. `protocol::generate_key_pair` takes its passphrase by value and drops it once `private.key` is sealed, before either key file is staged, flushed, or committed. `protocol::tests::recipients_are_dropped_before_the_payload_phase` and `credential_is_dropped_before_the_payload_phase` pin both orderings against the matching `ProgressEvent`.
+
 ---
 
 ## 13. Public error wording

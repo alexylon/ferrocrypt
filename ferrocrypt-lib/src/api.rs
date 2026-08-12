@@ -414,13 +414,16 @@ impl Encryptor {
 
         let output_path = match self.state {
             EncryptorState::Passphrase(passphrase) => {
+                // The passphrase moves into the recipient, which
+                // `protocol::encrypt` drops once the body is wrapped, so it
+                // is gone before the payload is streamed.
                 let recipient = recipient::argon2id::PassphraseRecipient {
-                    passphrase: &passphrase,
+                    passphrase,
                     kdf_params,
                     kdf_limit,
                 };
                 protocol::encrypt(
-                    std::slice::from_ref(&recipient),
+                    vec![recipient],
                     archive_limits,
                     header_read_limits,
                     input,
@@ -444,7 +447,7 @@ impl Encryptor {
                     })
                     .collect();
                 protocol::encrypt(
-                    &recipients,
+                    recipients,
                     archive_limits,
                     header_read_limits,
                     input,
@@ -969,8 +972,10 @@ impl KeyPairGenerator {
         validate_passphrase(&self.passphrase)?;
         let kdf_params = self.kdf_params.unwrap_or_default();
         let kdf_limit = self.kdf_limit.unwrap_or_default();
+        // Moved in, not borrowed: `protocol::generate_key_pair` scrubs it as
+        // soon as `private.key` is sealed, before the files reach disk.
         let (private_key_path, public_key_path, fingerprint) = protocol::generate_key_pair(
-            &self.passphrase,
+            self.passphrase,
             &kdf_params,
             Some(&kdf_limit),
             output_dir.as_ref(),

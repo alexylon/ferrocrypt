@@ -165,7 +165,7 @@ pub(crate) trait DecryptionCredential {
 /// inside the wrap path (`crypto::kdf::check_passphrase_len`) before
 /// Argon2id runs.
 pub(crate) fn encrypt<R: RecipientScheme>(
-    recipients: &[R],
+    recipients: Vec<R>,
     archive_limits: ArchiveLimits,
     header_read_limits: HeaderReadLimits,
     input_path: &Path,
@@ -190,7 +190,7 @@ pub(crate) fn encrypt<R: RecipientScheme>(
     let native_type = NativeRecipientType::from_type_name(R::TYPE_NAME)
         .ok_or(crate::error::internal_invariant!("unknown native scheme"))?;
     preflight_header_write_limits(header_read_limits, recipients.len(), native_type)?;
-    for recipient in recipients {
+    for recipient in &recipients {
         recipient.validate_for_write()?;
     }
 
@@ -232,11 +232,16 @@ pub(crate) fn encrypt<R: RecipientScheme>(
     // the bodies are built, the raw file_key is no longer needed; drop
     // it immediately so the plaintext window in memory is minimal.
     let mut entries = Vec::with_capacity(recipients.len());
-    for recipient in recipients {
+    for recipient in &recipients {
         let body = recipient.wrap_file_key(&file_key, on_event)?;
         entries.push(build_native_entry(R::TYPE_NAME, body)?);
     }
     drop(file_key);
+    // Wrapping was the recipients' last use. Everything below runs on the
+    // derived keys alone, so a long-lived secret a scheme carries — the
+    // `argon2id` passphrase — is scrubbed here rather than surviving the
+    // whole payload stream, whose length the input tree decides.
+    drop(recipients);
 
     // Assemble prefix + header + MAC. `build_encrypted_header` owns the
     // single byte-arithmetic implementation; encrypt and decrypt share
@@ -665,7 +670,7 @@ fn failure_for(
 /// byte-length bound is enforced inside the sealing path
 /// (`crypto::kdf::check_passphrase_len`) before Argon2id runs.
 pub(crate) fn generate_key_pair(
-    passphrase: &crate::passphrase::Passphrase,
+    passphrase: crate::passphrase::Passphrase,
     kdf_params: &crate::crypto::kdf::KdfParams,
     kdf_limit: Option<&crate::crypto::kdf::KdfLimit>,
     output_dir: &Path,
@@ -711,10 +716,15 @@ pub(crate) fn generate_key_pair(
         x25519::TYPE_NAME,
         &public_material,
         &[], // no ext_bytes for the X25519 case
-        passphrase,
+        &passphrase,
         kdf_params,
     )?;
     drop(secret_material);
+    // Sealing was the passphrase's last use. What follows is staging,
+    // flushing, committing, and fingerprinting — filesystem work whose
+    // duration the output device decides — so the credential is scrubbed
+    // before any of it rather than at the end of the call.
+    drop(passphrase);
 
     // Encode the canonical `fcr1…` recipient string via `key/public.rs`
     // (validates type-name grammar, computes the internal SHA3-256
@@ -965,18 +975,20 @@ mod tests {
         label: &str,
         pass: &str,
     ) -> Result<([u8; 32], PathBuf, Passphrase), CryptoError> {
-        let pass = Passphrase::new(pass);
         let dir = keys_dir.join(label);
         fs::create_dir_all(&dir)?;
+        // `generate_key_pair` consumes its passphrase, and `Passphrase` cannot
+        // be duplicated, so the value handed back for the matching decrypt is
+        // built from the same source text.
         let (private_key_path, public_key_path, _fingerprint) = generate_key_pair(
-            &pass,
+            Passphrase::new(pass),
             &crate::crypto::kdf::KdfParams::test_fast_default(),
             None,
             &dir,
             &|_| {},
         )?;
         let pub_bytes = read_public_key(&public_key_path, KeyReadLimits::default())?.bytes;
-        Ok((pub_bytes, private_key_path, pass))
+        Ok((pub_bytes, private_key_path, Passphrase::new(pass)))
     }
 
     /// Decrypt helper: opens the X25519 `private.key`, builds an
@@ -1051,13 +1063,14 @@ mod tests {
         let tmp = tempfile::TempDir::new()?;
         let input = tmp.path().join("data.txt");
         fs::write(&input, b"payload phase must not hold the credential")?;
-        let pass = Passphrase::new("drop-order-test-passphrase");
+        const DROP_ORDER_PASSPHRASE: &str = "drop-order-test-passphrase";
+        let pass = Passphrase::new(DROP_ORDER_PASSPHRASE);
         let fcr = encrypt(
-            std::slice::from_ref(&argon2id::PassphraseRecipient {
-                passphrase: &pass,
+            vec![argon2id::PassphraseRecipient {
+                passphrase: Passphrase::new(DROP_ORDER_PASSPHRASE),
                 kdf_params: crate::crypto::kdf::KdfParams::test_fast_default(),
                 kdf_limit: crate::KdfLimit::default(),
-            }),
+            }],
             ArchiveLimits::default(),
             HeaderReadLimits::default(),
             &input,
@@ -1100,6 +1113,96 @@ mod tests {
         assert!(
             dropped_at_payload_start.get(),
             "the credential must be scrubbed before the payload is decrypted"
+        );
+        Ok(())
+    }
+
+    /// Encrypt-side counterpart of
+    /// [`credential_is_dropped_before_the_payload_phase`]: a recipient scheme
+    /// that carries a long-lived secret — today only the `argon2id`
+    /// passphrase — must be scrubbed once its body is wrapped, before the
+    /// input tree's content is read and streamed. The caller sizes that
+    /// content, so holding the credential across it makes the exposure window
+    /// as long as the caller likes. The metadata pass that precedes wrapping
+    /// still runs with the credential live: `prepare_archive` is ordered
+    /// first on purpose, so an unusable tree is refused before the KDF.
+    ///
+    /// `ProgressEvent::Encrypting` marks the start of the payload phase, so a
+    /// recipient whose `Drop` records itself proves the ordering: the flag must
+    /// already be set when that event fires. The drop lives in the generic
+    /// recipient-list code, so it covers every present and future scheme.
+    #[test]
+    fn recipients_are_dropped_before_the_payload_phase() -> Result<(), CryptoError> {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        /// Delegates to the real passphrase recipient and records its drop.
+        struct DropRecording {
+            inner: argon2id::PassphraseRecipient,
+            dropped: Rc<Cell<bool>>,
+        }
+
+        impl Drop for DropRecording {
+            fn drop(&mut self) {
+                self.dropped.set(true);
+            }
+        }
+
+        impl RecipientScheme for DropRecording {
+            const TYPE_NAME: &'static str = argon2id::TYPE_NAME;
+            const MIXING_RULE: NativeMixingRule =
+                <argon2id::PassphraseRecipient as RecipientScheme>::MIXING_RULE;
+
+            fn validate_for_write(&self) -> Result<(), CryptoError> {
+                self.inner.validate_for_write()
+            }
+
+            fn wrap_file_key(
+                &self,
+                file_key: &FileKey,
+                on_event: &dyn Fn(&ProgressEvent),
+            ) -> Result<RecipientBody, CryptoError> {
+                self.inner.wrap_file_key(file_key, on_event)
+            }
+        }
+
+        let tmp = tempfile::TempDir::new()?;
+        let input = tmp.path().join("data.txt");
+        fs::write(&input, b"payload phase must not hold the credential")?;
+
+        let dropped = Rc::new(Cell::new(false));
+        let dropped_at_payload_start = Rc::new(Cell::new(false));
+        let recipient = DropRecording {
+            inner: argon2id::PassphraseRecipient {
+                passphrase: Passphrase::new("encrypt-drop-order-test-passphrase"),
+                kdf_params: crate::crypto::kdf::KdfParams::test_fast_default(),
+                kdf_limit: crate::KdfLimit::default(),
+            },
+            dropped: Rc::clone(&dropped),
+        };
+
+        let observer = {
+            let dropped = Rc::clone(&dropped);
+            let observed = Rc::clone(&dropped_at_payload_start);
+            move |event: &ProgressEvent| {
+                if matches!(event, ProgressEvent::Encrypting) {
+                    observed.set(dropped.get());
+                }
+            }
+        };
+        encrypt(
+            vec![recipient],
+            ArchiveLimits::default(),
+            HeaderReadLimits::default(),
+            &input,
+            tmp.path(),
+            None,
+            &observer,
+        )?;
+
+        assert!(
+            dropped_at_payload_start.get(),
+            "the recipient must be scrubbed before the payload is encrypted"
         );
         Ok(())
     }
@@ -1670,19 +1773,13 @@ mod tests {
     /// written. The orchestrator catches this before any KDF runs.
     #[test]
     fn encrypt_rejects_multi_passphrase_recipient_list() -> Result<(), CryptoError> {
-        let pass = Passphrase::new("pass");
         let kdf_params = crate::crypto::kdf::KdfParams::test_fast_default();
-        let r1 = argon2id::PassphraseRecipient {
-            passphrase: &pass,
+        let recipient = |text: &str| argon2id::PassphraseRecipient {
+            passphrase: Passphrase::new(text),
             kdf_params,
             kdf_limit: crate::crypto::kdf::KdfLimit::default(),
         };
-        let r2 = argon2id::PassphraseRecipient {
-            passphrase: &pass,
-            kdf_params,
-            kdf_limit: crate::crypto::kdf::KdfLimit::default(),
-        };
-        let recipients = [r1, r2];
+        let recipients = vec![recipient("pass"), recipient("pass")];
 
         let tmp = tempfile::TempDir::new().unwrap();
         let input = tmp.path().join("data.txt");
@@ -1691,7 +1788,7 @@ mod tests {
         fs::create_dir_all(&out_dir)?;
 
         let err = encrypt(
-            &recipients,
+            recipients,
             ArchiveLimits::default(),
             HeaderReadLimits::default(),
             &input,
@@ -1805,7 +1902,7 @@ mod tests {
     /// can't bypass the contract.
     #[test]
     fn encrypt_rejects_empty_recipient_list() -> Result<(), CryptoError> {
-        let recipients: [argon2id::PassphraseRecipient; 0] = [];
+        let recipients: Vec<argon2id::PassphraseRecipient> = Vec::new();
         let tmp = tempfile::TempDir::new().unwrap();
         let input = tmp.path().join("data.txt");
         fs::write(&input, b"x")?;
@@ -1813,7 +1910,7 @@ mod tests {
         fs::create_dir_all(&out_dir)?;
 
         let err = encrypt(
-            &recipients,
+            recipients,
             ArchiveLimits::default(),
             HeaderReadLimits::default(),
             &input,
@@ -1849,7 +1946,7 @@ mod tests {
         fs::create_dir_all(&out_dir)?;
 
         let err = encrypt(
-            &recipients,
+            recipients,
             ArchiveLimits::default(),
             HeaderReadLimits::default(),
             &input,
@@ -1876,9 +1973,8 @@ mod tests {
     fn encrypt_rejects_kdf_memory_above_write_policy() -> Result<(), CryptoError> {
         use crate::crypto::kdf::{KdfLimit, KdfParams};
 
-        let pass = Passphrase::new("pass");
         let recipient = argon2id::PassphraseRecipient {
-            passphrase: &pass,
+            passphrase: Passphrase::new("pass"),
             kdf_params: KdfParams {
                 mem_cost: KdfLimit::MEM_COST_KIB_STRUCTURAL_MAX,
                 time_cost: 1,
@@ -1894,7 +1990,7 @@ mod tests {
         fs::create_dir_all(&out_dir)?;
 
         let err = encrypt(
-            std::slice::from_ref(&recipient),
+            vec![recipient],
             ArchiveLimits::default(),
             HeaderReadLimits::default(),
             &input,
@@ -1931,7 +2027,7 @@ mod tests {
             time_cost: 1,
             lanes: 1,
         };
-        let err = generate_key_pair(&pass, &weak, None, &keys_dir, &|_| {}).unwrap_err();
+        let err = generate_key_pair(pass, &weak, None, &keys_dir, &|_| {}).unwrap_err();
         match err {
             CryptoError::KdfBelowWriteFloor { .. } => {}
             other => panic!("expected KdfBelowWriteFloor, got {other:?}"),

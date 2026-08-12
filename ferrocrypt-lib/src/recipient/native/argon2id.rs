@@ -160,16 +160,22 @@ pub(crate) fn unwrap(
 
 // ─── Protocol-trait impls ──────────────────────────────────────────────────
 
-/// Encrypt-side handle for the `argon2id` recipient: borrows a
-/// passphrase and carries the KDF parameters plus the writer-side
-/// KDF resource policy.
-pub(crate) struct PassphraseRecipient<'a> {
-    pub passphrase: &'a Passphrase,
+/// Encrypt-side handle for the `argon2id` recipient: owns a passphrase
+/// and carries the KDF parameters plus the writer-side KDF resource
+/// policy.
+///
+/// Ownership rather than a borrow, so that dropping the recipient drops
+/// the credential with it. [`crate::protocol::encrypt`] drops the
+/// recipient list as soon as every body is wrapped — the passphrase's
+/// last use — which is what keeps it out of memory for the payload
+/// streaming that follows.
+pub(crate) struct PassphraseRecipient {
+    pub passphrase: Passphrase,
     pub kdf_params: KdfParams,
     pub kdf_limit: KdfLimit,
 }
 
-impl<'a> crate::protocol::RecipientScheme for PassphraseRecipient<'a> {
+impl crate::protocol::RecipientScheme for PassphraseRecipient {
     const TYPE_NAME: &'static str = TYPE_NAME;
     // Read the rule from the native registry so adding or changing a
     // policy in `NativeRecipientType::mixing_rule` cannot drift away
@@ -191,7 +197,7 @@ impl<'a> crate::protocol::RecipientScheme for PassphraseRecipient<'a> {
         file_key: &FileKey,
         on_event: &dyn Fn(&ProgressEvent),
     ) -> Result<crate::recipient::entry::RecipientBody, CryptoError> {
-        let bytes = wrap(file_key, self.passphrase, &self.kdf_params, on_event)?;
+        let bytes = wrap(file_key, &self.passphrase, &self.kdf_params, on_event)?;
         Ok(crate::recipient::entry::RecipientBody {
             type_name: TYPE_NAME,
             bytes: bytes.to_vec(),

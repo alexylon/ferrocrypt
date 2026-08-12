@@ -230,7 +230,7 @@ pub struct KdfLimitArgs {
     #[arg(
         long,
         value_name = "MIB",
-        help = "Maximum Argon2id memory cost to accept (MiB). When omitted, the limit is 1 GiB; 0 rejects every file. Work is capped separately by --max-kdf-work, which a higher memory limit does not raise"
+        help = "Maximum Argon2id memory cost to accept (MiB). When omitted, the limit is 1 GiB; 0 rejects every file. Raising it does not raise --max-kdf-work"
     )]
     max_kdf_memory: Option<u32>,
 

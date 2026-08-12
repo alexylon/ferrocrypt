@@ -444,11 +444,13 @@ fn apply_root_directory_mode(
 ) -> Result<(), CryptoError> {
     let root_name_str = manifest_root_name_str(manifest)?;
     let root_dir = platform::open_dir_at_rel(output_handle, Path::new(root_name_str))?;
-    require_staged_identity(
-        staged.and_then(StagedRoot::object_id),
-        platform::dir_object_id(&root_dir)?,
-        &manifest.root_name,
-    )?;
+    if let Some(staged_id) = staged.and_then(StagedRoot::object_id) {
+        require_staged_identity(
+            staged_id,
+            platform::dir_object_id(&root_dir)?,
+            &manifest.root_name,
+        )?;
+    }
     platform::chmod_dir_handle(root_dir, manifest.root_mode)
 }
 
@@ -473,35 +475,34 @@ fn apply_root_file_mode(
     staged: Option<&StagedRoot>,
 ) -> Result<(), CryptoError> {
     let file = platform::open_file_nofollow(output_handle, &manifest.root_name)?;
-    require_staged_identity(
-        staged.and_then(StagedRoot::object_id),
-        platform::file_object_id(&file)?,
-        &manifest.root_name,
-    )?;
+    if let Some(staged_id) = staged.and_then(StagedRoot::object_id) {
+        require_staged_identity(
+            staged_id,
+            platform::file_object_id(&file)?,
+            &manifest.root_name,
+        )?;
+    }
     platform::chmod_file_handle(&file, manifest.root_mode)
 }
 
 /// Confirms an object found at the promoted root's final name is the
 /// one this run staged.
 ///
-/// `staged_id` of `None` means there is nothing to compare — the
-/// platform exposes no stable identity, or the staged handle was
-/// released before promotion (see [`platform::ObjectId`]) — and the
-/// object is accepted, because a platform that supplies no identity
-/// would otherwise never complete a decrypt.
-///
 /// Shared by the two callers that act on the promoted root: the root
 /// mode application, which must not touch a substituted entry, and
-/// [`require_promoted_root`], which reports one.
+/// [`require_promoted_root`], which reports one. Each reads
+/// `staged_id` first and calls this only when it has one, so neither
+/// pays for reading `found` where there is no identity to compare
+/// against (see [`platform::ObjectId`]).
 fn require_staged_identity(
-    staged_id: Option<ObjectId>,
+    staged_id: ObjectId,
     found: ObjectId,
     root_name: &OsStr,
 ) -> Result<(), CryptoError> {
-    match staged_id {
-        Some(staged_id) if found != staged_id => Err(promoted_root_replaced(root_name)),
-        _ => Ok(()),
+    if found != staged_id {
+        return Err(promoted_root_replaced(root_name));
     }
+    Ok(())
 }
 
 /// Confirms the promoted output is the object this run staged, by
@@ -543,7 +544,7 @@ fn require_promoted_root(
         Err(_) => return Ok(()),
     };
     require_staged_identity(
-        Some(staged_id),
+        staged_id,
         platform::metadata_object_id(&promoted),
         root_name,
     )
@@ -777,10 +778,11 @@ impl StagedRoot {
     /// Best-effort removal of the staged root. Errors are swallowed so
     /// the original `CryptoError` is what the caller sees.
     ///
-    /// A staged file is emptied through the handle it was created with
-    /// and then unlinked by name through `output_handle`, the same
-    /// `Dir` extraction wrote through, so a path swap of `output_dir`
-    /// cannot redirect the removal. Unlinking never follows a symlink
+    /// A staged file is emptied through the handle it was created with,
+    /// where one is held, and then unlinked by name through
+    /// `output_handle`, the same `Dir` extraction wrote through, so a
+    /// path swap of `output_dir` cannot redirect the removal. Unlinking
+    /// never follows a symlink
     /// and never recurses, so a directory substituted at the working
     /// name is left in place. A file substituted there is unlinked,
     /// which stays within what a writer holding that access can
@@ -1885,6 +1887,24 @@ mod tests {
     fn delete_on_error_removes_incomplete() {
         let tmp = tempfile::TempDir::new().unwrap();
         let archive = build_partial_archive(&dir_with_one_undersized_file_manifest(), b"short");
+
+        let result =
+            unarchive_with_policy(archive, tmp.path(), IncompleteOutputPolicy::DeleteOnError);
+        assert!(result.is_err());
+
+        let count = fs::read_dir(tmp.path()).unwrap().count();
+        assert_eq!(count, 0, "DeleteOnError must clean up .incomplete");
+    }
+
+    /// File-root counterpart of `delete_on_error_removes_incomplete`:
+    /// a staged file still sitting at its working name is removed, so
+    /// emptying it through the handle first does not stop the unlink
+    /// that follows.
+    #[test]
+    fn delete_on_error_removes_an_incomplete_file_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let manifest = single_file_manifest("hello.txt", b"Hello, world!");
+        let archive = build_partial_archive(&manifest, b"short");
 
         let result =
             unarchive_with_policy(archive, tmp.path(), IncompleteOutputPolicy::DeleteOnError);

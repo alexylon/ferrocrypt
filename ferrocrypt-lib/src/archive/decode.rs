@@ -238,18 +238,17 @@ fn unarchive_inner<R: Read>(
         // disk. Best-effort is safe: the staged mode (`0o600`/`0o700`)
         // is always at least as restrictive as the manifest mode.
         let _ = if manifest.root_is_file {
-            apply_root_file_mode(&output_handle, &manifest)
+            apply_root_file_mode(&output_handle, &manifest, staged_root.as_ref())
         } else {
-            apply_root_directory_mode(&output_handle, &manifest)
+            apply_root_directory_mode(&output_handle, &manifest, staged_root.as_ref())
         };
 
         // FORMAT.md §9.11 step 17: promotion resolved the staged entry
-        // by name, and the mode above was applied to whatever that name
-        // denotes, so both are safe only while it still denotes the
-        // object this run staged. The staged record is deliberately
-        // still live: a substitution here leaves the staged plaintext
-        // for `DeleteOnError` to remove, and the entry at the final
-        // name is not this run's to touch.
+        // by name, so the commit is safe only while that name still
+        // denotes the object this run staged. The staged record is
+        // deliberately still live: a substitution here leaves the
+        // staged plaintext for `DeleteOnError` to remove, and the entry
+        // at the final name is not this run's to touch.
         if let Some(staged) = staged_root.as_ref() {
             require_promoted_root(&output_handle, &manifest.root_name, staged)?;
         }
@@ -433,23 +432,76 @@ fn extract_directory_root<R: Read>(
 /// `open_dir_nofollow` + the Windows reparse-point post-check, so a
 /// symlink substituted at the final name between rename and chmod is
 /// rejected.
-fn apply_root_directory_mode(output_handle: &Dir, manifest: &Manifest) -> Result<(), CryptoError> {
+///
+/// The mode is applied only after the opened directory is confirmed to
+/// be the one this run staged, and through that same handle, so a
+/// substitution at the final name can neither receive the mode nor be
+/// swapped in after the confirmation.
+fn apply_root_directory_mode(
+    output_handle: &Dir,
+    manifest: &Manifest,
+    staged: Option<&StagedRoot>,
+) -> Result<(), CryptoError> {
     let root_name_str = manifest_root_name_str(manifest)?;
     let root_dir = platform::open_dir_at_rel(output_handle, Path::new(root_name_str))?;
+    require_staged_identity(
+        staged.and_then(StagedRoot::object_id),
+        platform::dir_object_id(&root_dir)?,
+        &manifest.root_name,
+    )?;
     platform::chmod_dir_handle(root_dir, manifest.root_mode)
 }
 
 /// File-root parallel of [`apply_root_directory_mode`]. Opens the
 /// renamed root file from the same `output_handle` extraction used,
 /// via `open_file_nofollow` (no-follow + Windows reparse-point
-/// post-check), and applies the manifest-stored mode through the open
-/// handle. Runs only after promotion succeeds, so the staged file
-/// held `INITIAL_FILE_CREATE_MODE` (0o600) throughout extraction; a
+/// post-check), confirms it is the file this run staged, and applies
+/// the manifest-stored mode through that same handle. Runs only after
+/// promotion succeeds, so the staged file held
+/// `INITIAL_FILE_CREATE_MODE` (0o600) throughout extraction; a
 /// permissive manifest mode is never briefly visible to other local
 /// users while the file holds plaintext.
-fn apply_root_file_mode(output_handle: &Dir, manifest: &Manifest) -> Result<(), CryptoError> {
+///
+/// A mode is applied to an object, not to a name, so without that
+/// confirmation an entry substituted at the final name would receive
+/// the archive-chosen mode — and a hard link carries it to a file
+/// anywhere on the same filesystem, including one the caller never
+/// placed in `output_dir`.
+fn apply_root_file_mode(
+    output_handle: &Dir,
+    manifest: &Manifest,
+    staged: Option<&StagedRoot>,
+) -> Result<(), CryptoError> {
     let file = platform::open_file_nofollow(output_handle, &manifest.root_name)?;
+    require_staged_identity(
+        staged.and_then(StagedRoot::object_id),
+        platform::file_object_id(&file)?,
+        &manifest.root_name,
+    )?;
     platform::chmod_file_handle(&file, manifest.root_mode)
+}
+
+/// Confirms an object found at the promoted root's final name is the
+/// one this run staged.
+///
+/// `staged_id` of `None` means there is nothing to compare — the
+/// platform exposes no stable identity, or the staged handle was
+/// released before promotion (see [`platform::ObjectId`]) — and the
+/// object is accepted, because a platform that supplies no identity
+/// would otherwise never complete a decrypt.
+///
+/// Shared by the two callers that act on the promoted root: the root
+/// mode application, which must not touch a substituted entry, and
+/// [`require_promoted_root`], which reports one.
+fn require_staged_identity(
+    staged_id: Option<ObjectId>,
+    found: ObjectId,
+    root_name: &OsStr,
+) -> Result<(), CryptoError> {
+    match staged_id {
+        Some(staged_id) if found != staged_id => Err(promoted_root_replaced(root_name)),
+        _ => Ok(()),
+    }
 }
 
 /// Confirms the promoted output is the object this run staged, by
@@ -464,10 +516,11 @@ fn apply_root_file_mode(output_handle: &Dir, manifest: &Manifest) -> Result<(), 
 /// a path to content the archive never produced.
 ///
 /// Runs after the root mode is applied, so a substitution made at any
-/// point up to that call is still caught. A missing handle or a failed
-/// metadata read is not treated as a substitution: the run has already
-/// committed, and on a platform without a stable identity there is
-/// nothing to compare (see [`platform::ObjectId`]).
+/// point up to that call is still caught; the mode application makes
+/// the same comparison itself, against the handle it is about to chmod.
+/// A missing handle or a failed metadata read is not treated as a
+/// substitution: the run has already committed, and on a platform
+/// without a stable identity there is nothing to compare.
 fn require_promoted_root(
     output_handle: &Dir,
     root_name: &OsStr,
@@ -479,10 +532,11 @@ fn require_promoted_root(
     let Ok(promoted) = output_handle.symlink_metadata(root_name) else {
         return Ok(());
     };
-    if platform::metadata_object_id(&promoted) != staged_id {
-        return Err(promoted_root_replaced(root_name));
-    }
-    Ok(())
+    require_staged_identity(
+        Some(staged_id),
+        platform::metadata_object_id(&promoted),
+        root_name,
+    )
 }
 
 /// Confirms the ambient `output_dir` still denotes the anchor the
@@ -1370,6 +1424,68 @@ mod tests {
         );
     }
 
+    /// The archive chooses the root mode, and a mode applies to an
+    /// object rather than to a name, so an entry substituted at the
+    /// staging name must not receive it. The substitute here is a hard
+    /// link to a file outside `output_dir`, which is what makes the
+    /// gate necessary: without it the run widens the permissions of a
+    /// file the caller never placed in the output directory.
+    ///
+    /// Linux/macOS only: the comparison needs the stable file identity
+    /// `std` exposes there, and the assertion reads Unix mode bits.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn root_mode_is_not_applied_to_a_substituted_entry() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let out = tmp.path().join("out");
+        let elsewhere = tmp.path().join("elsewhere");
+        fs::create_dir(&out).unwrap();
+        fs::create_dir(&elsewhere).unwrap();
+
+        // A private file of the caller's, outside the output directory.
+        let secret = elsewhere.join("private.key");
+        fs::write(&secret, b"key material").unwrap();
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mut manifest = single_file_manifest("f.txt", b"real");
+        manifest.root_mode = 0o666;
+        manifest.entries[0].mode = 0o666;
+        let archive = build_archive(&manifest, &[("f.txt", b"real")]);
+
+        let out_for_swap = out.clone();
+        let secret_for_swap = secret.clone();
+        let reader = SwapOnEof {
+            data: archive,
+            pos: 0,
+            swapped: false,
+            swap: move || {
+                let staged = out_for_swap.join("f.txt.incomplete");
+                fs::rename(&staged, out_for_swap.join("moved-aside")).unwrap();
+                fs::hard_link(&secret_for_swap, &staged).unwrap();
+            },
+        };
+
+        let err = unarchive(
+            reader,
+            &out,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::DeleteOnError,
+        )
+        .unwrap_err();
+
+        assert!(
+            format!("{err}").contains("Output was replaced while decrypting"),
+            "expected the substitution to be reported, got: {err}"
+        );
+        let mode = fs::metadata(&secret).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(
+            mode, 0o600,
+            "the substituted entry must keep its own mode, got 0o{mode:o}",
+        );
+    }
+
     // -- Archive-level TLV rejections (FORMAT.md §9.3) ---------------------
 
     /// `archive_ext` accepts a non-empty ignorable TLV region: the
@@ -2130,7 +2246,7 @@ mod tests {
         };
 
         let handle = platform::open_anchor(tmp.path()).unwrap();
-        let err = apply_root_directory_mode(&handle, &manifest).unwrap_err();
+        let err = apply_root_directory_mode(&handle, &manifest, None).unwrap_err();
         assert!(
             format!("{err}").contains("Symlink in extraction path"),
             "expected symlink rejection, got: {err}",
@@ -2157,7 +2273,7 @@ mod tests {
 
         let manifest = single_file_manifest("hello.txt", b"x");
         let handle = platform::open_anchor(tmp.path()).unwrap();
-        let err = apply_root_file_mode(&handle, &manifest).unwrap_err();
+        let err = apply_root_file_mode(&handle, &manifest, None).unwrap_err();
         assert!(
             format!("{err}").contains("Symlink in extraction path"),
             "expected symlink rejection, got: {err}",
@@ -2178,7 +2294,7 @@ mod tests {
 
         let manifest = single_file_manifest("hello.txt", b"x");
         let handle = platform::open_anchor(tmp.path()).unwrap();
-        let err = apply_root_file_mode(&handle, &manifest).unwrap_err();
+        let err = apply_root_file_mode(&handle, &manifest, None).unwrap_err();
         assert!(
             format!("{err}").contains("Extraction path is no longer a regular file"),
             "expected regular-file rejection, got: {err}",
@@ -2218,7 +2334,7 @@ mod tests {
             root_is_file: false,
             root_mode: 0o500,
         };
-        apply_root_directory_mode(&handle, &manifest).unwrap();
+        apply_root_directory_mode(&handle, &manifest, None).unwrap();
 
         let moved_mode = fs::metadata(moved.join("root"))
             .unwrap()
@@ -2261,7 +2377,7 @@ mod tests {
         manifest.entries[0].mode = 0o400;
         manifest.root_mode = 0o400;
 
-        apply_root_file_mode(&handle, &manifest).unwrap();
+        apply_root_file_mode(&handle, &manifest, None).unwrap();
 
         let moved_mode = fs::metadata(moved.join("hello.txt"))
             .unwrap()

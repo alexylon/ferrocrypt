@@ -1691,6 +1691,12 @@ Readers MUST process FCA archives in this order:
     macOS-compatibility requirement; for regular-file roots this prevents the
     staged file from being briefly visible at a wider mode under either the
     `.incomplete` name or the final name while it still holds plaintext.
+    Where the platform exposes a stable file identity, the reader MUST confirm
+    that the reopened root denotes the object staged in step 10 and MUST apply
+    the mode through that same handle, because a mode applies to an object
+    rather than to a name: an entry substituted at the final name would
+    otherwise receive the archive-chosen mode, and a hard link carries that to
+    an object outside the destination directory.
     A failure to apply the root mode MUST NOT fail the extraction: the output
     is already complete at its final name, where `DeleteOnError` cleanup
     cannot remove it, and it remains at its restrictive initial mode;

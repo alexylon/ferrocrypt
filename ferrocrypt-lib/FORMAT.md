@@ -1706,7 +1706,12 @@ Readers MUST process FCA archives in this order:
     committed in. Both MUST run after step 16 and MUST fail the extraction on
     a mismatch, because step 15 resolves the staged entry by name and a local
     writer with access to the destination directory can put another object
-    under either name;
+    under either name. A final output name that no longer exists MUST count
+    as a mismatch, because step 15 committed an entry there and its absence
+    is evidence that the name no longer denotes the output. Any other failure
+    to read that name MUST NOT, because it reports the environment rather
+    than the entry, and failing a complete extraction would expose it to
+    `DeleteOnError` cleanup;
 18. return the final output path.
 
 Steps 1 through 8 MUST complete before any filesystem output is created.

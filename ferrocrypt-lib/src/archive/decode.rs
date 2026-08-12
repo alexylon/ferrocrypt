@@ -518,9 +518,11 @@ fn require_staged_identity(
 /// Runs after the root mode is applied, so a substitution made at any
 /// point up to that call is still caught; the mode application makes
 /// the same comparison itself, against the handle it is about to chmod.
-/// A missing handle or a failed metadata read is not treated as a
-/// substitution: the run has already committed, and on a platform
-/// without a stable identity there is nothing to compare.
+///
+/// A missing handle is not treated as a substitution: on a platform
+/// without a stable identity there is nothing to compare. A final name
+/// that is gone is treated as one, because step 15 committed an entry
+/// there and its absence says the name no longer denotes the output.
 fn require_promoted_root(
     output_handle: &Dir,
     root_name: &OsStr,
@@ -529,8 +531,16 @@ fn require_promoted_root(
     let Some(staged_id) = staged.object_id() else {
         return Ok(());
     };
-    let Ok(promoted) = output_handle.symlink_metadata(root_name) else {
-        return Ok(());
+    let promoted = match output_handle.symlink_metadata(root_name) {
+        Ok(promoted) => promoted,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(promoted_root_replaced(root_name));
+        }
+        // Any other read failure is an environment fault rather than
+        // evidence of a substitution, and reporting one would send
+        // `DeleteOnError` at an output that is complete: the staged
+        // directory handle follows the promoted tree to its final name.
+        Err(_) => return Ok(()),
     };
     require_staged_identity(
         Some(staged_id),
@@ -1483,6 +1493,30 @@ mod tests {
         assert_eq!(
             mode, 0o600,
             "the substituted entry must keep its own mode, got 0o{mode:o}",
+        );
+    }
+
+    /// A final name the run cannot read is reported as a substitution.
+    /// The run has just committed an entry there, so an unreadable or
+    /// absent name means the commit no longer holds, and returning `Ok`
+    /// would hand the caller a path to nothing.
+    ///
+    /// Linux/macOS only: the comparison needs the stable file identity
+    /// `std` exposes there.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_promoted_root_that_is_gone_is_reported_as_replaced() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let handle = platform::open_anchor(tmp.path()).unwrap();
+        let staged_file =
+            platform::create_file_at(&handle, OsStr::new("f.txt.incomplete"), 0o600).unwrap();
+        let staged = StagedRoot::file(OsStr::new("f.txt.incomplete"), staged_file.try_clone().ok());
+
+        let err = require_promoted_root(&handle, OsStr::new("f.txt"), &staged).unwrap_err();
+
+        assert!(
+            format!("{err}").contains("Output was replaced while decrypting"),
+            "expected the missing final name to be reported, got: {err}"
         );
     }
 

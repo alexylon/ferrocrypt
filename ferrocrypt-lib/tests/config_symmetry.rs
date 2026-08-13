@@ -20,10 +20,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use ferrocrypt::{
-    ArchiveLimits, CryptoError, Decryptor, Encryptor, HeaderReadLimits, Passphrase, PrivateKey,
-    PublicKey,
+    ArchiveLimits, CryptoError, Decryptor, Encryptor, HeaderReadLimits, KdfLimit, KdfParams,
+    KeyGenOutcome, KeyPairGenerator, Passphrase, PrivateKey, PublicKey,
 };
-use ferrocrypt_test_support::fast_keypair_generator;
+use ferrocrypt_test_support::{TEST_FAST_KDF_MEM_COST, fast_keypair_generator};
 
 const PASSPHRASE: &str = "config-symmetry-passphrase";
 const TEST_WORKSPACE: &str = "tests/workspace_config_symmetry";
@@ -514,4 +514,345 @@ fn recipient_counts_across_the_default_cap_stay_symmetric() {
             b"multi-recipient payload"
         );
     }
+}
+
+// -- Key-derivation caps ---------------------------------------------------
+
+/// Argon2id time cost the fixtures below are written with. Above one, so
+/// the axis has a value beneath its threshold for both sides to refuse.
+const FIXTURE_TIME_COST: u32 = 2;
+
+/// Argon2id lane count the fixtures below are written with, above one
+/// for the same reason as [`FIXTURE_TIME_COST`].
+const FIXTURE_LANES: u32 = 2;
+
+/// The parameters every key-derivation fixture here is written with.
+///
+/// Memory sits at the writer's floor — the lowest value it will emit —
+/// so the memory axis measures the limit rather than the floor. The two
+/// deliberate asymmetries are kept apart that way: this suite measures
+/// where the caps agree, and
+/// [`the_memory_floor_is_a_writer_only_boundary`] measures the floor.
+fn fixture_kdf_params() -> KdfParams {
+    KdfParams {
+        mem_cost: TEST_FAST_KDF_MEM_COST,
+        time_cost: FIXTURE_TIME_COST,
+        lanes: FIXTURE_LANES,
+    }
+}
+
+/// A key-derivation cap with both a writer and a reader half.
+///
+/// Each is set on [`KdfLimit`], which the writer applies to the
+/// parameters it is about to store and the reader applies to the
+/// parameters it finds stored — in a `.fcr` recipient body for a
+/// passphrase file, or in a `private.key` cleartext header.
+#[derive(Clone, Copy, Debug)]
+enum KdfAxis {
+    MemCost,
+    TimeCost,
+    Lanes,
+    Work,
+}
+
+/// Every key-derivation axis, so adding one is a single edit.
+const KDF_AXES: [KdfAxis; 4] = [
+    KdfAxis::MemCost,
+    KdfAxis::TimeCost,
+    KdfAxis::Lanes,
+    KdfAxis::Work,
+];
+
+impl KdfAxis {
+    /// The value [`KdfLimit::default`] carries for this cap, and the top
+    /// of the search range. Memory and work default to the writer's own
+    /// budget; time cost and lanes default to the format's maxima.
+    fn ceiling(self) -> u64 {
+        match self {
+            Self::MemCost => KdfLimit::MEM_COST_KIB_DEFAULT as u64,
+            Self::TimeCost => KdfLimit::TIME_COST_STRUCTURAL_MAX as u64,
+            Self::Lanes => KdfLimit::LANES_STRUCTURAL_MAX as u64,
+            Self::Work => KdfLimit::WORK_DEFAULT,
+        }
+    }
+
+    /// This cap set to `value`, every other dimension at its default.
+    fn limit(self, value: u64) -> KdfLimit {
+        match self {
+            Self::MemCost => KdfLimit::new(as_u32(value)),
+            Self::TimeCost => KdfLimit::default().max_time_cost(as_u32(value)),
+            Self::Lanes => KdfLimit::default().max_lanes(as_u32(value)),
+            Self::Work => KdfLimit::default().max_work(value),
+        }
+    }
+
+    /// The rejection both sides must report below the threshold.
+    fn rejects_with(self, error: &CryptoError) -> bool {
+        match self {
+            Self::MemCost => matches!(error, CryptoError::KdfResourceCapExceeded { .. }),
+            Self::TimeCost => matches!(error, CryptoError::KdfTimeCostCapExceeded { .. }),
+            Self::Lanes => matches!(error, CryptoError::KdfLanesCapExceeded { .. }),
+            Self::Work => matches!(error, CryptoError::KdfWorkCapExceeded { .. }),
+        }
+    }
+}
+
+/// Encrypts `input` with a passphrase, `axis` capped at `value`, into a
+/// cleared `out_dir`.
+fn write_passphrase_at(
+    axis: KdfAxis,
+    value: u64,
+    input: &Path,
+    out_dir: &Path,
+) -> Result<PathBuf, CryptoError> {
+    reset_dir(out_dir);
+    Encryptor::with_passphrase(pass())
+        .kdf_params(fixture_kdf_params())
+        .kdf_limit(axis.limit(value))
+        .write(input, out_dir, |_| {})
+        .map(|outcome| outcome.output_path)
+}
+
+/// Decrypts a passphrase file with `axis` capped at `value`, into a
+/// cleared `out_dir`.
+fn read_passphrase_at(
+    axis: KdfAxis,
+    value: u64,
+    encrypted: &Path,
+    out_dir: &Path,
+) -> Result<PathBuf, CryptoError> {
+    reset_dir(out_dir);
+    let Decryptor::Passphrase(decryptor) = Decryptor::open(encrypted)? else {
+        panic!("a passphrase file must open as a passphrase decryptor");
+    };
+    decryptor
+        .kdf_limit(axis.limit(value))
+        .decrypt(pass(), out_dir, |_| {})
+        .map(|outcome| outcome.output_path)
+}
+
+/// Generates a key pair with `axis` capped at `value`, into a cleared
+/// `keys_dir`.
+fn generate_at(axis: KdfAxis, value: u64, keys_dir: &Path) -> Result<KeyGenOutcome, CryptoError> {
+    reset_dir(keys_dir);
+    KeyPairGenerator::with_passphrase(pass())
+        .kdf_params(fixture_kdf_params())
+        .kdf_limit(axis.limit(value))
+        .write(keys_dir, |_| {})
+}
+
+/// Decrypts a public-key file with `axis` capped at `value`, into a
+/// cleared `out_dir`. The only key derivation on this path is the
+/// `private.key` unlock, so the cap under test is the unlock's.
+fn unlock_at(
+    axis: KdfAxis,
+    value: u64,
+    encrypted: &Path,
+    out_dir: &Path,
+    private_key_path: &Path,
+) -> Result<PathBuf, CryptoError> {
+    reset_dir(out_dir);
+    let Decryptor::PrivateKey(decryptor) = Decryptor::open(encrypted)? else {
+        panic!("a public-key file must open as a private-key decryptor");
+    };
+    decryptor
+        .kdf_limit(axis.limit(value))
+        .decrypt(
+            PrivateKey::from_key_file(private_key_path, pass()),
+            out_dir,
+            |_| {},
+        )
+        .map(|outcome| outcome.output_path)
+}
+
+/// Runs the threshold comparison for one key-derivation axis.
+///
+/// Written as one helper because the passphrase path and the key-file
+/// path make the same claim about the same four caps, and a second copy
+/// of the protocol would be free to drift from the first.
+fn assert_kdf_axis_symmetric<Artefact>(
+    axis: KdfAxis,
+    write_at: impl Fn(u64) -> Result<PathBuf, CryptoError>,
+    keep_at: impl Fn(u64) -> Artefact,
+    read_at: impl Fn(u64, &Artefact) -> Result<PathBuf, CryptoError>,
+    refused_write_dir: &Path,
+    expected_plaintext: &[u8],
+) {
+    let writer_threshold = lowest_accepting(axis.ceiling(), |value| write_at(value).is_ok());
+    assert!(
+        writer_threshold > 0,
+        "{axis:?}: a cap of zero was accepted, so the writer does not enforce it"
+    );
+
+    // What the reader is measured against: for a passphrase file the
+    // `.fcr` alone, for key generation the generated key pair plus a
+    // file encrypted to it.
+    let kept = keep_at(writer_threshold);
+
+    let reader_threshold = lowest_accepting(axis.ceiling(), |value| read_at(value, &kept).is_ok());
+    assert_eq!(
+        writer_threshold, reader_threshold,
+        "{axis:?}: the writer and the reader must refuse at the same cap"
+    );
+
+    let restored = read_at(reader_threshold, &kept)
+        .unwrap_or_else(|e| panic!("{axis:?}: reading at the shared threshold must succeed: {e}"));
+    assert_eq!(
+        fs::read(&restored).expect("read restored payload"),
+        expected_plaintext
+    );
+
+    let below = writer_threshold - 1;
+    let write_error = write_at(below).expect_err("a cap below the threshold must refuse the write");
+    assert!(
+        axis.rejects_with(&write_error),
+        "{axis:?}: the writer must refuse with this axis's own error, got {write_error}"
+    );
+    assert_no_output(refused_write_dir);
+
+    let read_error =
+        read_at(below, &kept).expect_err("a cap below the threshold must refuse the read");
+    assert!(
+        axis.rejects_with(&read_error),
+        "{axis:?}: the reader must refuse with this axis's own error, got {read_error}"
+    );
+}
+
+/// Every passphrase key-derivation cap agrees on where it refuses.
+///
+/// This is the one encryption path where the key-derivation caps have a
+/// write side at all: public-key encryption runs no Argon2id, so its
+/// `kdf_params` and `kdf_limit` are documented no-ops.
+#[test]
+fn every_passphrase_kdf_cap_refuses_exactly_where_its_reader_half_does() {
+    let work = fresh_workspace("passphrase_kdf");
+    let input = work.join("payload.txt");
+    let plaintext = b"passphrase key-derivation payload";
+    fs::write(&input, plaintext).expect("write payload");
+
+    let out_dir = work.join("out");
+    let kept_dir = work.join("kept");
+    let restore_dir = work.join("restored");
+
+    for axis in KDF_AXES {
+        assert_kdf_axis_symmetric(
+            axis,
+            |value| write_passphrase_at(axis, value, &input, &out_dir),
+            |value| {
+                write_passphrase_at(axis, value, &input, &kept_dir).unwrap_or_else(|e| {
+                    panic!("{axis:?}: writing at its own threshold must succeed: {e}")
+                })
+            },
+            |value, encrypted| read_passphrase_at(axis, value, encrypted, &restore_dir),
+            &out_dir,
+            plaintext,
+        );
+    }
+}
+
+/// Every key-generation cap agrees with the `private.key` unlock.
+///
+/// Key generation is a writer whose reader is the unlock, so the same
+/// rule applies to it: a key pair FerroCrypt generates under a given
+/// budget must be one it can unlock under that budget. The unlock is
+/// driven through a public-key decrypt, because that is where the
+/// library performs it — and the X25519 path itself runs no key
+/// derivation, so the cap measured is the unlock's alone.
+#[test]
+fn every_key_generation_kdf_cap_refuses_exactly_where_the_unlock_does() {
+    let work = fresh_workspace("keygen_kdf");
+    let input = work.join("payload.txt");
+    let plaintext = b"key-file unlock payload";
+    fs::write(&input, plaintext).expect("write payload");
+
+    let probe_keys = work.join("probe-keys");
+    let kept_keys = work.join("kept-keys");
+    let encrypted_dir = work.join("encrypted");
+    let restore_dir = work.join("restored");
+
+    for axis in KDF_AXES {
+        assert_kdf_axis_symmetric(
+            axis,
+            |value| generate_at(axis, value, &probe_keys).map(|kg| kg.private_key_path),
+            |value| {
+                // The kept pair is encrypted to once, so every unlock
+                // probe reads the same file and differs only in its cap.
+                let generated = generate_at(axis, value, &kept_keys).unwrap_or_else(|e| {
+                    panic!("{axis:?}: generating at its own threshold must succeed: {e}")
+                });
+                reset_dir(&encrypted_dir);
+                let public_key =
+                    PublicKey::from_key_file(&generated.public_key_path).expect("read public key");
+                let encrypted = Encryptor::with_public_key(public_key)
+                    .write(&input, &encrypted_dir, |_| {})
+                    .expect("encrypt to the generated key")
+                    .output_path;
+                (encrypted, generated.private_key_path)
+            },
+            |value, (encrypted, private_key_path)| {
+                unlock_at(axis, value, encrypted, &restore_dir, private_key_path)
+            },
+            &probe_keys,
+            plaintext,
+        );
+    }
+}
+
+/// The memory floor is a boundary the writers apply alone, rather than
+/// an offset from one.
+///
+/// Both writers refuse to emit Argon2id parameters below it and both
+/// accept it exactly: the value is a minimum strength, not a resource
+/// ceiling, so there is nothing for a reader to mirror. The reader
+/// deliberately has no floor, which keeps files written by older
+/// releases readable — proven on every run by the frozen sub-floor
+/// fixture that `frozen_fixture_compat.rs` decrypts under default
+/// limits, and not reproducible here because no current writer can
+/// produce one. That this is the *only* such cap is what the threshold
+/// tests above establish, by finding every other one symmetric.
+#[test]
+fn the_memory_floor_is_a_writer_only_boundary() {
+    let work = fresh_workspace("write_floor");
+    let input = work.join("payload.txt");
+    fs::write(&input, b"floor payload").expect("write payload");
+    let out_dir = work.join("out");
+    let keys_dir = work.join("keys");
+
+    let at_floor = KdfParams {
+        mem_cost: TEST_FAST_KDF_MEM_COST,
+        time_cost: FIXTURE_TIME_COST,
+        lanes: FIXTURE_LANES,
+    };
+    let below_floor = KdfParams {
+        mem_cost: at_floor.mem_cost - 1,
+        ..at_floor
+    };
+
+    reset_dir(&out_dir);
+    Encryptor::with_passphrase(pass())
+        .kdf_params(at_floor)
+        .write(&input, &out_dir, |_| {})
+        .expect("the floor itself must be accepted for writing");
+
+    reset_dir(&out_dir);
+    let encrypt_error = Encryptor::with_passphrase(pass())
+        .kdf_params(below_floor)
+        .write(&input, &out_dir, |_| {})
+        .expect_err("memory below the floor must be refused");
+    assert!(
+        matches!(encrypt_error, CryptoError::KdfBelowWriteFloor { .. }),
+        "expected the write floor, got {encrypt_error}"
+    );
+    assert_no_output(&out_dir);
+
+    reset_dir(&keys_dir);
+    let keygen_error = KeyPairGenerator::with_passphrase(pass())
+        .kdf_params(below_floor)
+        .write(&keys_dir, |_| {})
+        .expect_err("memory below the floor must be refused for key generation too");
+    assert!(
+        matches!(keygen_error, CryptoError::KdfBelowWriteFloor { .. }),
+        "expected the write floor, got {keygen_error}"
+    );
+    assert_no_output(&keys_dir);
 }

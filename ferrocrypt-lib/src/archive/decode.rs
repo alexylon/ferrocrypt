@@ -3407,10 +3407,15 @@ mod tests {
     ///   reading before it promotes, so no case can act in that
     ///   window. `a_promoted_root_that_is_gone_is_reported_as_replaced`
     ///   covers it directly instead.
-    /// - Failure of the resources the checks themselves need — a
-    ///   descriptor that could not be duplicated, a metadata read that
-    ///   fails. Those need an fd-limit harness of the kind
-    ///   `walk_directory_handles_wide_tree_under_low_fd_limit` sets up.
+    /// - Failure of the resources the checks themselves need. Neither
+    ///   is reachable from the reader, and both are pinned elsewhere:
+    ///   `a_run_that_cannot_hold_the_staged_handle_refuses_before_any_plaintext`
+    ///   shows a run that cannot hold the staged descriptor refusing
+    ///   before it stages any plaintext, so these invariants are never
+    ///   reached, and `a_staged_identity_that_cannot_be_read_is_skipped`
+    ///   fixes what an unreadable identity does. The second pins the
+    ///   decision rather than injecting the read failure, which no safe
+    ///   seam reaches.
     ///
     /// Linux/macOS only: the assertions read Unix mode bits, and the
     /// substitution checks need the stable file identity `std` exposes
@@ -3504,11 +3509,14 @@ mod tests {
     /// holds no plaintext, which is what the sweep pins.
     ///
     /// Linux/macOS only, matching the `rustix` dev-dependency behind
-    /// [`fd_limit`]. Relies on the workspace convention of running
-    /// tests with `--test-threads=1`, since the limit is process-wide
-    /// while the guard is alive.
+    /// [`fd_limit`]. Ignored by default because it holds every free
+    /// descriptor while it runs, which fails any test running beside
+    /// it: the open-file limit is process-wide. Both test runners and
+    /// the CI build job pass `--include-ignored --test-threads=1`, so
+    /// it runs there on every supported platform.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
+    #[ignore = "holds every free descriptor; needs --test-threads=1"]
     fn a_run_that_cannot_hold_the_staged_handle_refuses_before_any_plaintext() {
         /// Free-descriptor counts spanning the range from "too few to
         /// stage anything" to "enough to finish".

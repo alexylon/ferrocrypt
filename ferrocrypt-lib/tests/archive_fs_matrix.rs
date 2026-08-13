@@ -25,8 +25,12 @@
 mod common;
 
 use std::fs;
+use std::path::Path;
 
-use ferrocrypt::{CryptoError, validate_private_key_file, validate_public_key_file};
+use ferrocrypt::{
+    CryptoError, Decryptor, IncompleteOutputPolicy, Passphrase, validate_private_key_file,
+    validate_public_key_file,
+};
 use ferrocrypt_test_support::fs_matrix_tempdir;
 
 use common::{generate_key_pair, passphrase_auto};
@@ -263,6 +267,234 @@ fn fs_matrix_mode_bits_preserved_or_noop() -> Result<(), CryptoError> {
             0o755,
             "0o755 mode must survive the round trip on a perms-preserving volume"
         );
+    }
+    Ok(())
+}
+
+/// Names of the entries directly under `dir`, sorted.
+///
+/// The residue assertions below compare against the whole directory
+/// rather than probing for the staging suffix, so they catch a leftover
+/// under any name and need no copy of a name the library owns.
+fn entry_names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .expect("read output directory")
+        .map(|entry| {
+            entry
+                .expect("read directory entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// Total bytes held by every regular file at or under `root`, so a
+/// staged tree can be shown to hold plaintext rather than merely exist.
+fn bytes_under(root: &Path) -> u64 {
+    let metadata = match fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(_) => return 0,
+    };
+    if metadata.is_file() {
+        return metadata.len();
+    }
+    if !metadata.is_dir() {
+        return 0;
+    }
+    fs::read_dir(root)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| bytes_under(&entry.path()))
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+/// Writes a source tree whose encrypted payload spans several 64 KiB
+/// chunks, so a later truncation can leave whole files staged.
+fn write_multi_chunk_tree(root: &Path) -> Result<(), CryptoError> {
+    fs::create_dir_all(root)?;
+    for index in 0..5 {
+        let content: Vec<u8> = (0..=255u8).cycle().take(60 * 1024).collect();
+        fs::write(root.join(format!("part{index}.bin")), &content)?;
+    }
+    Ok(())
+}
+
+/// Names the route this filesystem's single-file commits take.
+///
+/// `fs/atomic.rs` tries an atomic no-replace rename first and falls back
+/// to linking the output to its final name and unlinking the staged one.
+/// Nothing observable after a successful commit says which of those ran,
+/// so both primitives are probed directly — the rename through the same
+/// call the library makes. A lane's residue result then names the route
+/// it exercised instead of leaving it to be guessed, which is what
+/// decides whether that lane has anything to say about the link route's
+/// unlink step.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn commit_route(dir: &Path) -> String {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+
+    let source = dir.join("probe-source");
+    let target = dir.join("probe-target");
+    fs::write(&source, b"probe").expect("write the probe file");
+    let no_replace_rename =
+        renameat_with(CWD, &source, CWD, &target, RenameFlags::NOREPLACE).is_ok();
+    let _ = fs::remove_file(&target);
+
+    fs::write(&source, b"probe").expect("write the probe file");
+    let hard_links = fs::hard_link(&source, &target).is_ok();
+    let _ = fs::remove_file(&target);
+    let _ = fs::remove_file(&source);
+
+    match (no_replace_rename, hard_links) {
+        (true, _) => "atomic no-replace rename".to_string(),
+        (false, true) => "link and unlink".to_string(),
+        (false, false) => "claim and rename".to_string(),
+    }
+}
+
+/// Windows commits by path rather than choosing among those routes, so
+/// there is nothing to probe.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn commit_route(_dir: &Path) -> String {
+    "path-based move".to_string()
+}
+
+/// A successful decrypt leaves the output directory holding exactly the
+/// decrypted entry, with no staging leftover under any name.
+///
+/// This belongs on every lane because what the commit does with the
+/// staging name is the filesystem's business. Where a driver cannot
+/// perform an atomic no-replace rename, a single-file output is linked
+/// to its final name and the staged name unlinked; a driver that
+/// refuses that unlink would leave the staged entry behind. Both root
+/// kinds run, because only a file root can reach the link route.
+#[test]
+#[ignore = "fs-matrix"]
+fn fs_matrix_success_leaves_no_staging_residue() -> Result<(), CryptoError> {
+    let tmp = fs_matrix_tempdir().expect("create fs-matrix tempdir");
+    let passphrase = "matrix-test";
+    let probe_dir = tmp.path().join("probe");
+    fs::create_dir_all(&probe_dir)?;
+    let route = commit_route(&probe_dir);
+    println!("fs-matrix commit route for a single-file output: {route}");
+
+    for root_is_file in [true, false] {
+        let label = if root_is_file { "file" } else { "directory" };
+        let input_dir = tmp.path().join(format!("input-{label}"));
+        let encrypt_dir = tmp.path().join(format!("encrypted-{label}"));
+        let decrypt_dir = tmp.path().join(format!("decrypted-{label}"));
+        fs::create_dir_all(&input_dir)?;
+        fs::create_dir_all(&encrypt_dir)?;
+        fs::create_dir_all(&decrypt_dir)?;
+
+        // The encrypted file is named after the input's stem, while the
+        // archive restores the name in full, so the two differ for a
+        // file root.
+        let (input, stem, expected) = if root_is_file {
+            let input = input_dir.join("payload.bin");
+            fs::write(&input, b"residue check payload")?;
+            (input, "payload", "payload.bin")
+        } else {
+            let input = input_dir.join("tree");
+            fs::create_dir_all(input.join("nested"))?;
+            fs::write(input.join("a.txt"), b"alpha")?;
+            fs::write(input.join("nested/b.txt"), b"bravo")?;
+            (input, "tree", "tree")
+        };
+
+        passphrase_auto(&input, &encrypt_dir, passphrase, None, None, |_| {})?;
+        let fcr = encrypt_dir.join(format!("{stem}.fcr"));
+        passphrase_auto(&fcr, &decrypt_dir, passphrase, None, None, |_| {})?;
+
+        assert_eq!(
+            entry_names(&decrypt_dir),
+            vec![expected.to_string()],
+            "{label} root: a finished decrypt must leave only its output (commit route: {route})"
+        );
+
+        // A cleared output must accept the same file again, so nothing
+        // the first run left behind can block a retry.
+        fs::remove_dir_all(&decrypt_dir)?;
+        fs::create_dir_all(&decrypt_dir)?;
+        passphrase_auto(&fcr, &decrypt_dir, passphrase, None, None, |_| {})?;
+        assert_eq!(
+            entry_names(&decrypt_dir),
+            vec![expected.to_string()],
+            "{label} root: a second decrypt into a cleared output must succeed (commit route: {route})"
+        );
+    }
+    Ok(())
+}
+
+/// A decrypt that fails after staging real plaintext honours the chosen
+/// policy: `DeleteOnError` removes the populated staging tree,
+/// `RetainOnError` keeps it.
+///
+/// The payload spans several 64 KiB chunks and is cut partway, so whole
+/// files are already staged when the truncation is detected. Cutting on
+/// the first chunk would prove only that an empty tree is removed, which
+/// is the easy half.
+#[test]
+#[ignore = "fs-matrix"]
+fn fs_matrix_failed_decrypt_honours_policy() -> Result<(), CryptoError> {
+    let tmp = fs_matrix_tempdir().expect("create fs-matrix tempdir");
+    let passphrase = "matrix-test";
+    let input = tmp.path().join("input/tree");
+    write_multi_chunk_tree(&input)?;
+    let encrypt_dir = tmp.path().join("encrypted");
+    fs::create_dir_all(&encrypt_dir)?;
+    passphrase_auto(&input, &encrypt_dir, passphrase, None, None, |_| {})?;
+
+    // Two of the five chunks survive, so the reader authenticates and
+    // writes whole files before it reaches the cut.
+    let fcr = encrypt_dir.join("tree.fcr");
+    let whole = fs::read(&fcr)?;
+    let truncated = tmp.path().join("truncated.fcr");
+    fs::write(&truncated, &whole[..whole.len() * 2 / 5])?;
+
+    for retain in [false, true] {
+        let policy = if retain {
+            IncompleteOutputPolicy::RetainOnError
+        } else {
+            IncompleteOutputPolicy::DeleteOnError
+        };
+        let decrypt_dir = tmp.path().join(format!("decrypted-{retain}"));
+        fs::create_dir_all(&decrypt_dir)?;
+
+        let Decryptor::Passphrase(decryptor) = Decryptor::open(&truncated)? else {
+            panic!("a passphrase file must open as a passphrase decryptor");
+        };
+        let error = decryptor
+            .incomplete_output_policy(policy)
+            .decrypt(Passphrase::new(passphrase), &decrypt_dir, |_| {})
+            .expect_err("a truncated payload must refuse");
+
+        let names = entry_names(&decrypt_dir);
+        if retain {
+            assert_eq!(
+                names.len(),
+                1,
+                "retention must keep the staged tree, got {names:?} after {error}"
+            );
+            let staged = decrypt_dir.join(&names[0]);
+            assert!(
+                bytes_under(&staged) > 0,
+                "retention must keep a populated staged tree, {staged:?} holds nothing"
+            );
+        } else {
+            assert!(
+                names.is_empty(),
+                "deletion must leave no staged plaintext, got {names:?} after {error} — \
+                 removal is best-effort, so a failure here names a filesystem that \
+                 could not remove what the run staged"
+            );
+        }
     }
     Ok(())
 }

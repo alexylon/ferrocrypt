@@ -33,7 +33,7 @@
 #       sudo nfsd restart && sudo nfsd checkexports
 #       sudo mount -t nfs -o resvport,nolocks localhost:<short-dir> <mnt>
 #       FERROCRYPT_FS_MATRIX_DIR=<mnt> cargo test -p ferrocrypt \
-#           --test archive_fs_matrix -- --ignored --test-threads=1
+#           --test archive_fs_matrix -- --ignored --test-threads=1 --nocapture
 #       then remove the exports line, "sudo nfsd stop", unmount.
 #   - Static checks (fmt, clippy, rustdoc, cargo vet/audit) — see AGENTS.md;
 #     CI runs them on every push.
@@ -107,7 +107,7 @@ ram_mib() {
 
 fs_matrix_run() { # fs_matrix_run <mounted-dir>
     FERROCRYPT_FS_MATRIX_DIR="$1" cargo test -p ferrocrypt \
-        --test archive_fs_matrix -- --ignored --test-threads=1
+        --test archive_fs_matrix -- --ignored --test-threads=1 --nocapture
 }
 
 # Remove abandoned per-process directories from interrupted earlier runs.

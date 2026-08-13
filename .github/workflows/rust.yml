@@ -465,7 +465,7 @@ jobs:
         run: ${{ matrix.mount_setup }}
 
       - name: Run fs-matrix smoke tests
-        run: cargo test -p ferrocrypt --test archive_fs_matrix -- --ignored --test-threads=1
+        run: cargo test -p ferrocrypt --test archive_fs_matrix -- --ignored --test-threads=1 --nocapture
 
       - name: Unmount target filesystem
         if: always()

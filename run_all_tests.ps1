@@ -102,7 +102,7 @@ function Run-FsMatrix([string]$Dir) {
     # a multi-element array to `Record`'s `[bool]$Ok` coerces to $true,
     # recording PASS even when the tests fail. Out-Host keeps only $ok
     # on the pipeline and shows cargo output live.
-    cargo test -p ferrocrypt --test archive_fs_matrix -- --ignored --test-threads=1 | Out-Host
+    cargo test -p ferrocrypt --test archive_fs_matrix -- --ignored --test-threads=1 --nocapture | Out-Host
     $ok = ($LASTEXITCODE -eq 0)
     Remove-Item Env:FERROCRYPT_FS_MATRIX_DIR -ErrorAction SilentlyContinue
     return $ok

@@ -43,7 +43,8 @@
 //! without the replace flag) and uses
 //! `rustix::renameat_with(..., RenameFlags::NOREPLACE)` on Linux and
 //! macOS; where the filesystem supports neither, the Unix fallback uses
-//! `std::fs::hard_link` and `cap-std`. The directory rename case in
+//! `cap-std` handle-relative link, claim, and rename operations,
+//! anchored to one retained [`OutputDir`]. The directory rename case in
 //! [`rename_no_clobber`] delegates
 //! to `rustix` directly on Linux and macOS, and on Windows uses
 //! `symlink_metadata()` + `std::fs::rename`, which keeps the crate
@@ -102,10 +103,11 @@ fn sync_parent_dir(_path: &Path) {}
 /// that predate the commit.
 ///
 /// Callers are expected to have already flushed and synced the temp file
-/// before calling this function. The temp file and the final path must
-/// live on the same filesystem (this is why the temp file should be
-/// created inside the destination directory via
-/// `tempfile::Builder::tempfile_in`).
+/// before calling this function. The temp file must be created inside
+/// the destination directory (`tempfile::Builder::tempfile_in`): that
+/// keeps it on the final path's filesystem, and the Unix fallback
+/// routes commit handle-relative inside that directory, so a temp file
+/// staged anywhere else cannot be committed by them at all.
 pub(crate) fn finalize_file(
     tmp: NamedTempFile,
     final_path: &Path,
@@ -420,9 +422,28 @@ impl OutputDir {
 #[cfg(unix)]
 const FINAL_NAME_CLAIM_MODE: u32 = 0o600;
 
+/// Error for a path with no final component: there is no name to link,
+/// claim, or rename to, so the commit rejects rather than falling back
+/// to some other entry.
+#[cfg(unix)]
+fn no_final_component_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "Output path has no final component",
+    )
+}
+
 /// Commits `tmp` to `final_path` where `tempfile` could not perform an
 /// atomic no-replace rename, keeping the no-clobber guarantee against
 /// entries that predate the commit.
+///
+/// The whole commit is anchored: the destination directory is opened
+/// once as an [`OutputDir`], and the link, the claim fallback, and
+/// every removal resolve through that handle, so a rename or
+/// replacement of the output path mid-commit cannot redirect any step
+/// into another directory. The staged temp file is an entry of that
+/// same directory (see [`finalize_file`]). Opening the anchor needs a
+/// readable output directory; `SECURITY.md` records that requirement.
 ///
 /// A filesystem with hard links reaches the final name by linking the
 /// staged file there and dropping the staged name. `hard_link` refuses
@@ -446,21 +467,34 @@ fn finalize_file_via_link_or_claim(
     final_path: &Path,
     label: &str,
 ) -> Result<(), CryptoError> {
-    match std::fs::hard_link(tmp.path(), final_path) {
+    let output_dir =
+        OutputDir::open(crate::fs::paths::parent_or_cwd(final_path)).map_err(CryptoError::Io)?;
+    let Some(final_name) = final_path.file_name() else {
+        remove_staged_temp(tmp, &output_dir);
+        return Err(CryptoError::Io(no_final_component_error()));
+    };
+    // Owned, because the arms below consume `tmp` while the staged
+    // name is still needed.
+    let Some(tmp_name) = tmp.path().file_name().map(|name| name.to_os_string()) else {
+        remove_staged_temp(tmp, &output_dir);
+        return Err(CryptoError::Io(no_final_component_error()));
+    };
+    match output_dir
+        .dir
+        .hard_link(&tmp_name, &output_dir.dir, final_name)
+    {
         Ok(()) => {
-            // Drops the staged name; the content stays reachable through
-            // the link just created. `close` is used rather than the
-            // destructor because it closes the handle before unlinking,
-            // and the filesystems that reach this function are the least
-            // likely to accept an unlink while the file is still open.
-            let _ = tmp.close();
+            // Drop the staged name; the content stays reachable
+            // through the link just created.
+            remove_staged_temp(tmp, &output_dir);
             sync_parent_dir(final_path);
             Ok(())
         }
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            remove_staged_temp(tmp, &output_dir);
             Err(already_exists_error(label, final_path))
         }
-        Err(_) => finalize_file_via_claim(tmp, final_path, label),
+        Err(_) => finalize_file_via_claim(tmp, final_path, label, &output_dir),
     }
 }
 
@@ -483,38 +517,82 @@ fn finalize_file_via_link_or_claim(
 /// [`finalize_file_via_link_or_claim`] links wherever the filesystem
 /// supports it; `SECURITY.md` states what remains.
 ///
-/// The claim and its removal both resolve through one [`OutputDir`]
-/// handle, so a directory renamed or replaced mid-commit cannot send
-/// the cleanup onto an unrelated file. Process interruption between the
-/// two steps leaves an empty placeholder at the final name next to the
-/// temp file. On step-2 failure the placeholder is removed and the temp
-/// file is removed by its destructor, matching the [`finalize_file`]
+/// The claim, the step-2 rename, and every removal resolve through the
+/// caller's [`OutputDir`] handle — both names are entries of the
+/// anchored directory (see [`finalize_file`]) — so a directory renamed
+/// or replaced mid-commit can neither redirect the commit nor send the
+/// cleanup onto an unrelated file, and the rename can replace only the
+/// placeholder step 1 created. Process interruption between the two
+/// steps leaves an empty placeholder at the final name next to the
+/// temp file. On step-2 failure the placeholder and the temp entry are
+/// removed through the same handle, matching the [`finalize_file`]
 /// contract.
 #[cfg(unix)]
 fn finalize_file_via_claim(
     tmp: NamedTempFile,
     final_path: &Path,
     label: &str,
+    output_dir: &OutputDir,
 ) -> Result<(), CryptoError> {
-    let output_dir =
-        OutputDir::open(crate::fs::paths::parent_or_cwd(final_path)).map_err(CryptoError::Io)?;
-
-    match claim_final_name(&output_dir, final_path) {
+    match claim_final_name(output_dir, final_path) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            remove_staged_temp(tmp, output_dir);
             return Err(already_exists_error(label, final_path));
         }
-        Err(e) => return Err(CryptoError::Io(e)),
+        Err(e) => {
+            remove_staged_temp(tmp, output_dir);
+            return Err(CryptoError::Io(e));
+        }
     }
-    match tmp.persist(final_path) {
-        Ok(_) => {
+    // `claim_final_name` already rejected a path with no final
+    // component, so these arms are backstops.
+    let Some(final_name) = final_path.file_name() else {
+        output_dir.remove_published(final_path);
+        remove_staged_temp(tmp, output_dir);
+        return Err(CryptoError::Io(no_final_component_error()));
+    };
+    let Some(tmp_name) = tmp.path().file_name().map(|name| name.to_os_string()) else {
+        output_dir.remove_published(final_path);
+        remove_staged_temp(tmp, output_dir);
+        return Err(CryptoError::Io(no_final_component_error()));
+    };
+    match output_dir
+        .dir
+        .rename(&tmp_name, &output_dir.dir, final_name)
+    {
+        Ok(()) => {
+            // The rename moved the staged entry away. Disarm the
+            // destructor so it cannot remove an entry another process
+            // creates at the freed temp name afterwards. Not
+            // [`remove_staged_temp`]: with the entry gone, its unlink
+            // could only ever hit such a newcomer.
+            let _ = tmp.into_temp_path().keep();
             sync_parent_dir(final_path);
             Ok(())
         }
         Err(e) => {
             output_dir.remove_published(final_path);
-            Err(CryptoError::Io(e.error))
+            remove_staged_temp(tmp, output_dir);
+            Err(CryptoError::Io(e))
         }
+    }
+}
+
+/// Removes the staged temp entry through the anchor and disarms the
+/// destructor's ambient-path removal, so a swap of the output path
+/// cannot send either removal at another directory's entry. The handle
+/// is closed first, as part of the disarm, because the filesystems
+/// that reach these routes are the least likely to accept an unlink
+/// while the file is still open. Best-effort, like every failure-path
+/// removal in this module; the one caller on a success path accepts a
+/// surviving name as a second link to the committed content.
+#[cfg(unix)]
+fn remove_staged_temp(tmp: NamedTempFile, output_dir: &OutputDir) {
+    let name = tmp.path().file_name().map(|name| name.to_os_string());
+    let _ = tmp.into_temp_path().keep();
+    if let Some(name) = name {
+        let _ = output_dir.dir.remove_file(&name);
     }
 }
 
@@ -532,10 +610,7 @@ fn claim_final_name(output_dir: &OutputDir, final_path: &Path) -> io::Result<()>
     use cap_fs_ext::{FollowSymlinks, OpenOptionsExt, OpenOptionsFollowExt};
 
     let Some(name) = final_path.file_name() else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Output path has no final component",
-        ));
+        return Err(no_final_component_error());
     };
     let mut options = cap_std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -1075,7 +1150,13 @@ mod tests {
         tmp.write_all(b"payload").unwrap();
         let tmp_path = tmp.path().to_path_buf();
 
-        finalize_file_via_claim(tmp, &final_path, "Output").unwrap();
+        finalize_file_via_claim(
+            tmp,
+            &final_path,
+            "Output",
+            &OutputDir::open(tmp_dir.path()).unwrap(),
+        )
+        .unwrap();
         assert_eq!(fs::read_to_string(&final_path).unwrap(), "payload");
         assert!(!tmp_path.exists());
     }
@@ -1096,7 +1177,12 @@ mod tests {
         tmp.write_all(b"new").unwrap();
         let tmp_path = tmp.path().to_path_buf();
 
-        match finalize_file_via_claim(tmp, &final_path, "Output") {
+        match finalize_file_via_claim(
+            tmp,
+            &final_path,
+            "Output",
+            &OutputDir::open(tmp_dir.path()).unwrap(),
+        ) {
             Err(CryptoError::InvalidInput(msg)) => {
                 assert!(msg.starts_with("Output already exists: "), "got: {msg}");
             }
@@ -1121,7 +1207,12 @@ mod tests {
             .unwrap();
         tmp.write_all(b"new").unwrap();
 
-        match finalize_file_via_claim(tmp, &final_path, "Output") {
+        match finalize_file_via_claim(
+            tmp,
+            &final_path,
+            "Output",
+            &OutputDir::open(tmp_dir.path()).unwrap(),
+        ) {
             Err(CryptoError::InvalidInput(msg)) => {
                 assert!(msg.starts_with("Output already exists: "), "got: {msg}");
             }
@@ -1145,12 +1236,64 @@ mod tests {
             .unwrap();
         fs::remove_file(tmp.path()).unwrap();
 
-        let err = finalize_file_via_claim(tmp, &final_path, "Output")
-            .expect_err("a rename with no staged file must fail the commit");
+        let err = finalize_file_via_claim(
+            tmp,
+            &final_path,
+            "Output",
+            &OutputDir::open(tmp_dir.path()).unwrap(),
+        )
+        .expect_err("a rename with no staged file must fail the commit");
         assert!(matches!(err, CryptoError::Io(_)), "got: {err:?}");
         assert!(
             !final_path.exists(),
             "the placeholder must not survive a failed rename"
+        );
+    }
+
+    /// The claim route must commit inside the directory it claimed in.
+    /// Swap the output directory aside after the anchor is opened and
+    /// mint a same-named victim at the original path: the commit must
+    /// land in the anchored (moved) directory and the victim must
+    /// survive. Pins the step-2 rename to the handle — a commit through
+    /// the ambient path would replace the victim, which predates the
+    /// commit and is exactly what the no-clobber guarantee protects.
+    /// The link route shares the anchor and the same handle-relative
+    /// operations, so this pins its resolution rule too.
+    #[cfg(unix)]
+    #[test]
+    fn finalize_via_claim_commits_in_the_anchored_directory_across_a_path_swap() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let orig = tmp_dir.path().join("orig");
+        fs::create_dir(&orig).unwrap();
+        let final_path = orig.join("out.txt");
+
+        let mut tmp = tempfile::Builder::new().tempfile_in(&orig).unwrap();
+        tmp.write_all(b"payload").unwrap();
+        let tmp_name = tmp.path().file_name().unwrap().to_os_string();
+        let output_dir = OutputDir::open(&orig).unwrap();
+
+        // Swap: move the anchored directory aside and mint a
+        // replacement holding a same-named victim.
+        let moved = tmp_dir.path().join("moved");
+        fs::rename(&orig, &moved).unwrap();
+        fs::create_dir(&orig).unwrap();
+        fs::write(&final_path, "victim").unwrap();
+
+        finalize_file_via_claim(tmp, &final_path, "Output", &output_dir).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(moved.join("out.txt")).unwrap(),
+            "payload",
+            "the commit must land in the anchored directory"
+        );
+        assert_eq!(
+            fs::read_to_string(&final_path).unwrap(),
+            "victim",
+            "the entry at the swapped-in path must survive the commit"
+        );
+        assert!(
+            !moved.join(&tmp_name).exists(),
+            "the staged entry must not survive the commit"
         );
     }
 

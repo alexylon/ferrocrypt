@@ -980,8 +980,9 @@ It contains:
     (`no_replace_rename_unsupported`; the macOS exFAT driver among
     them), `finalize_file` falls back to
     `finalize_file_via_link_or_claim`, which mirrors the archive
-    promotion: `std::fs::hard_link` first, because it refuses an
-    existing target atomically and so reaches the final name with no
+    promotion: it opens the destination directory as an `OutputDir` and
+    links first (`cap_std::fs::Dir::hard_link`), because a link refuses
+    an existing target atomically and so reaches the final name with no
     placeholder a concurrent writer could replace. `tempfile` does not
     try this for the error that leads here — it links only when the
     kernel reports the no-replace flag as unknown, not when the
@@ -994,8 +995,11 @@ It contains:
     claim and the rename the placeholder is an ordinary entry, so an
     entry another process plants in its place is replaced by the
     rename, the same bound `SECURITY.md` states for the archive claim.
-    The claim and its failure-path removal both resolve through one
-    `OutputDir` handle;
+    The link, the claim, the step-2 rename, and every removal resolve
+    through the one `OutputDir` handle opened at entry — the staged
+    temp file is an entry of the same directory — so a swap of the
+    output path mid-commit cannot redirect any step; opening the
+    anchor needs a readable output directory (`SECURITY.md`);
   - **decrypt promotion on Windows and other non-Linux/macOS targets**:
     single-file roots through `promote_single_file_no_clobber` (the same
     `tempfile` atomic no-replace, Windows `MoveFileExW` included),

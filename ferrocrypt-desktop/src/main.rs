@@ -1416,6 +1416,25 @@ mod tests {
         assert!(out.chars().count() <= STATUS_LINE_MAX, "got: {out}");
     }
 
+    /// A decrypt whose destination folder changed under it reports the
+    /// output's name and then the folder. The status line drops the tail
+    /// of anything too long, so the name — the only part the operator can
+    /// act on, the folder no longer holding the output — must survive
+    /// that trim.
+    #[test]
+    fn output_directory_changed_keeps_the_output_name_in_the_status_line() {
+        let long = "c".repeat(200);
+        let msg = format!("Output report.pdf is complete but its directory changed: /tmp/{long}");
+
+        let out = elide_error_for_status(&msg);
+
+        assert!(out.chars().count() <= STATUS_LINE_MAX, "got: {out}");
+        assert!(
+            out.contains("Output report.pdf is complete"),
+            "the trim must keep the output's name, got: {out}"
+        );
+    }
+
     #[test]
     fn elide_result_path_shortens_decrypted_to_message() {
         let long = "b".repeat(200);

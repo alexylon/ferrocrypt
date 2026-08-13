@@ -165,7 +165,11 @@ regression net, regenerated when the format intentionally changes).
   claim and plants its own entry inside that brief window has its
   planted entry replaced by ours — the same "someone else's planted
   entry may be destroyed" bound, and the same trust assumption, as the
-  Windows directory case below. On Windows:
+  Windows directory case below. This route also opens your output folder,
+  to keep its own cleanup anchored there, so it needs a folder FerroCrypt
+  can read and not only write into: a write-only output folder on a
+  filesystem offering neither atomic rename nor hard links cannot be
+  committed into at all. On Windows:
   **single-file** decrypts now route through the kernel's atomic
   no-replace move (`MoveFileExW` without the replace flag, via the
   `tempfile` crate), so the kernel performs the existence check and the

@@ -275,7 +275,7 @@ fn unarchive_inner<R: Read>(
         // `output_dir` during the run cannot end in a successful
         // decrypt whose reported path names an entry this run never
         // wrote.
-        require_output_anchor_unchanged(&output_handle, output_dir)?;
+        require_output_anchor_unchanged(&output_handle, output_dir, &manifest.root_name)?;
 
         Ok(final_path.clone())
     })();
@@ -585,15 +585,16 @@ fn require_promoted_root(
 fn require_output_anchor_unchanged(
     output_handle: &Dir,
     output_dir: &Path,
+    root_name: &OsStr,
 ) -> Result<(), CryptoError> {
     // A path that no longer opens is a path that no longer names the
     // committed output, so it is reported the same way as one naming a
     // different directory.
     let Ok(current) = platform::open_anchor(output_dir) else {
-        return Err(output_directory_changed(output_dir));
+        return Err(output_directory_changed(output_dir, root_name));
     };
     if platform::dir_object_id(&current)? != platform::dir_object_id(output_handle)? {
-        return Err(output_directory_changed(output_dir));
+        return Err(output_directory_changed(output_dir, root_name));
     }
     Ok(())
 }
@@ -605,6 +606,7 @@ fn require_output_anchor_unchanged(
 fn require_output_anchor_unchanged(
     _output_handle: &Dir,
     _output_dir: &Path,
+    _root_name: &OsStr,
 ) -> Result<(), CryptoError> {
     Ok(())
 }
@@ -638,12 +640,25 @@ fn staged_handle_unavailable(source: &io::Error) -> CryptoError {
 const STAGED_HANDLE_UNAVAILABLE: &str = "Cannot hold a handle to the staged output";
 
 /// Rejection for a destination directory that no longer denotes the one
-/// the output was committed in. The operator chose this path, so it
-/// renders raw and untruncated, matching [`output_already_exists`].
+/// the output was committed in. The operator chose the directory, so it
+/// renders raw and untruncated, matching [`output_already_exists`]; the
+/// root name is archive-chosen and is escaped and bounded.
+///
+/// The name is worth carrying because the decrypt finished: the output
+/// is complete inside whatever the directory became, and the path in
+/// this message no longer leads there. Without the name an operator
+/// whose folder was moved mid-run has nothing to look for.
+///
+/// The name leads the message because a status line that cannot fit the
+/// whole of it drops the tail, and the name is what the operator acts
+/// on — the path names a directory that no longer holds the output.
+/// Saying the output is complete matters for the same reason: this
+/// reports a destination that moved, not a decrypt that failed.
 #[cfg(unix)]
-fn output_directory_changed(output_dir: &Path) -> CryptoError {
+fn output_directory_changed(output_dir: &Path, root_name: &OsStr) -> CryptoError {
     CryptoError::InvalidInput(format!(
-        "Output directory changed while decrypting: {}",
+        "Output {} is complete but its directory changed: {}",
+        sanitize_for_display(&root_name.to_string_lossy()),
         output_dir.display()
     ))
 }
@@ -1475,10 +1490,13 @@ mod tests {
         .unwrap_err();
 
         // The output landed in the handle's directory, which no longer
-        // answers to `out`, so no path names it for the caller.
+        // answers to `out`, so no path names it for the caller. The
+        // report must therefore name the output itself, and say it is
+        // complete: this is a destination that moved, not a failure.
+        let rendered = format!("{err}");
         assert!(
-            format!("{err}").contains("Output directory changed while decrypting"),
-            "expected the swapped anchor to be reported, got: {err}"
+            rendered.starts_with("Output d is complete but its directory changed"),
+            "expected the moved destination to be reported by name, got: {err}"
         );
 
         // The real plaintext was committed in the handle's directory

@@ -1163,6 +1163,347 @@ mod tests {
     use std::path::Path;
     use std::path::PathBuf;
 
+    // -- prepare-to-write interference (FORMAT.md §9.10) -------------------
+
+    /// Where the interference is applied. Each position makes a
+    /// different promise, because the content pass reaches it a
+    /// different way.
+    #[derive(Clone, Copy, Debug)]
+    enum Position {
+        /// The single-file root, streamed from the handle held since
+        /// the metadata pass.
+        RootFile,
+        /// The root directory itself, reached through the capability
+        /// held since the metadata pass.
+        RootDirectory,
+        /// A file inside the root directory, reopened through that
+        /// capability.
+        Descendant,
+    }
+
+    /// What a local writer does to the source between the two passes.
+    #[derive(Clone, Copy, Debug)]
+    enum Mutation {
+        /// A different file of the same length, at a new inode.
+        ReplacedBySameSizeFile,
+        /// A different file of a different length, at a new inode.
+        ReplacedByLargerFile,
+        /// A directory, holding a decoy leaf named like the fixture's.
+        ReplacedByDirectory,
+        /// A symlink to a decoy, never to the original.
+        #[cfg(unix)]
+        ReplacedBySymlink,
+        /// A FIFO, which the reader must not block on.
+        #[cfg(unix)]
+        ReplacedByFifo,
+        /// Moved aside, so the name no longer resolves. The object
+        /// itself survives, which is what any handle held across the
+        /// gap still refers to.
+        Removed,
+        /// Appended to through the same inode.
+        Grown,
+        /// Truncated through the same inode.
+        Shrunk,
+    }
+
+    /// What the content pass must then produce.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Expected {
+        /// An archive holding what the metadata pass saw. The position
+        /// is reached through a held handle, so the interference cannot
+        /// redirect it.
+        OriginalContent,
+        /// An archive holding the replacement. `FORMAT.md` §9.10 asks a
+        /// descendant re-open for no-follow, regular-file, and
+        /// equal-length checks — not for preserved identity — so a
+        /// same-length regular swap is admissible and its content is
+        /// what the archive is built from.
+        ReplacementContent,
+        /// Encryption refuses.
+        Refused,
+    }
+
+    const ORIGINAL: &[u8] = b"original-content";
+    const SAME_SIZE: &[u8] = b"replaced-content";
+    const LARGER: &[u8] = b"replaced-content-and-then-some";
+    /// The leaf name inside a directory fixture. A decoy planted by an
+    /// interference reuses it, so the decoy is what a content pass that
+    /// resolved the path again would find under the manifest's name.
+    const LEAF: &str = "leaf.bin";
+
+    // The table below reads a same-length swap as admissible and a
+    // different-length one as refused, so the fixtures must actually
+    // have those lengths.
+    const _: () = assert!(ORIGINAL.len() == SAME_SIZE.len());
+    const _: () = assert!(ORIGINAL.len() != LARGER.len());
+
+    impl Position {
+        fn all() -> [Position; 3] {
+            [
+                Position::RootFile,
+                Position::RootDirectory,
+                Position::Descendant,
+            ]
+        }
+    }
+
+    impl Mutation {
+        fn all() -> Vec<Mutation> {
+            let everywhere = [
+                Mutation::ReplacedBySameSizeFile,
+                Mutation::ReplacedByLargerFile,
+                Mutation::ReplacedByDirectory,
+                Mutation::Removed,
+                Mutation::Grown,
+                Mutation::Shrunk,
+            ];
+            // Symlinks and FIFOs are substituted only where the test can
+            // create them.
+            #[cfg(unix)]
+            let unix_only = [Mutation::ReplacedBySymlink, Mutation::ReplacedByFifo];
+            #[cfg(not(unix))]
+            let unix_only: [Mutation; 0] = [];
+            everywhere.into_iter().chain(unix_only).collect()
+        }
+
+        /// Whether this mutation can be applied at `position` at all.
+        /// Growing or truncating applies to a file's own bytes, so it
+        /// has no meaning for a directory.
+        fn applies_to(self, position: Position) -> bool {
+            !matches!(
+                (position, self),
+                (Position::RootDirectory, Mutation::Grown | Mutation::Shrunk)
+            )
+        }
+    }
+
+    /// The contract, stated per position rather than uniformly.
+    ///
+    /// A root file and a root directory are both reached through a
+    /// handle the metadata pass opened, so nothing done to their path
+    /// can redirect the content pass. What remains visible to a root
+    /// file is a change to its own bytes, and that is refused; a
+    /// directory has no such change to make. A descendant is reopened
+    /// by name through the held root capability, so every mutation
+    /// reaches it — and all but the same-length regular swap are
+    /// refused by the no-follow, type, and length checks.
+    fn expected(position: Position, mutation: Mutation) -> Expected {
+        match position {
+            Position::RootFile => match mutation {
+                Mutation::Grown | Mutation::Shrunk => Expected::Refused,
+                _ => Expected::OriginalContent,
+            },
+            Position::RootDirectory => Expected::OriginalContent,
+            Position::Descendant => match mutation {
+                Mutation::ReplacedBySameSizeFile => Expected::ReplacementContent,
+                _ => Expected::Refused,
+            },
+        }
+    }
+
+    /// Applies `mutation` to `target`, which is either the root file,
+    /// the root directory, or a descendant file.
+    fn apply_mutation(target: &Path, mutation: Mutation) {
+        let aside = target.with_extension("moved-aside");
+        match mutation {
+            Mutation::ReplacedBySameSizeFile => {
+                fs::rename(target, &aside).unwrap();
+                fs::write(target, SAME_SIZE).unwrap();
+            }
+            Mutation::ReplacedByLargerFile => {
+                fs::rename(target, &aside).unwrap();
+                fs::write(target, LARGER).unwrap();
+            }
+            Mutation::ReplacedByDirectory => {
+                fs::rename(target, &aside).unwrap();
+                fs::create_dir(target).unwrap();
+                // Named like the manifest's leaf, so a content pass that
+                // resolved the source path a second time would read this
+                // instead of failing to find anything.
+                fs::write(target.join(LEAF), SAME_SIZE).unwrap();
+            }
+            #[cfg(unix)]
+            Mutation::ReplacedBySymlink => {
+                fs::rename(target, &aside).unwrap();
+                // Pointed at a decoy rather than back at the original:
+                // a content pass that followed the link would then read
+                // content this run never validated, which the assertions
+                // can see. Pointing it at the original would produce the
+                // right bytes by accident and prove nothing.
+                let decoy = target.with_extension("decoy");
+                fs::write(&decoy, SAME_SIZE).unwrap();
+                std::os::unix::fs::symlink(&decoy, target).unwrap();
+            }
+            #[cfg(unix)]
+            Mutation::ReplacedByFifo => {
+                fs::rename(target, &aside).unwrap();
+                make_fifo(target);
+            }
+            Mutation::Removed => {
+                fs::rename(target, &aside).unwrap();
+            }
+            Mutation::Grown => {
+                use std::io::Write as _;
+                let mut file = fs::OpenOptions::new().append(true).open(target).unwrap();
+                file.write_all(b"more").unwrap();
+            }
+            Mutation::Shrunk => {
+                let file = fs::OpenOptions::new().write(true).open(target).unwrap();
+                file.set_len(ORIGINAL.len() as u64 - 1).unwrap();
+            }
+        }
+    }
+
+    /// Whether the bytes that reached the writer contain `needle`
+    /// anywhere. File content is copied verbatim into the archive, so a
+    /// marker planted in a fixture is found exactly when it was read.
+    fn archive_holds(archive: &[u8], needle: &[u8]) -> bool {
+        archive.windows(needle.len()).any(|window| window == needle)
+    }
+
+    /// The content a mutation substitutes at the target, where it
+    /// substitutes one. Used for the negative assertion, so each case
+    /// checks for the bytes its own interference planted rather than a
+    /// fixed needle that may not be the one at risk.
+    fn substituted_content(position: Position, mutation: Mutation) -> Option<&'static [u8]> {
+        match (position, mutation) {
+            (_, Mutation::ReplacedBySameSizeFile) => Some(SAME_SIZE),
+            (_, Mutation::ReplacedByLargerFile) => Some(LARGER),
+            // The decoy leaf inside a substituted directory, which is
+            // planted at every position and so is checked at every one.
+            (_, Mutation::ReplacedByDirectory) => Some(SAME_SIZE),
+            // The decoy a substituted symlink points at.
+            #[cfg(unix)]
+            (_, Mutation::ReplacedBySymlink) => Some(SAME_SIZE),
+            _ => None,
+        }
+    }
+
+    /// A writer whose bytes stay reachable after `write_to` consumes
+    /// it, so a refused run can still be inspected for what it wrote
+    /// before failing.
+    #[derive(Clone, Default)]
+    struct SharedSink(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+
+    impl SharedSink {
+        fn written(&self) -> Vec<u8> {
+            self.0.borrow().clone()
+        }
+    }
+
+    impl Write for SharedSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Interference between `prepare_archive` and `write_to` produces
+    /// what `FORMAT.md` §9.10 promises for the position it touches.
+    ///
+    /// This window is the one place a test controls the timing exactly:
+    /// the two passes are separate calls, so no racing thread is needed
+    /// and every case is deterministic. Interference *inside* the
+    /// directory walk would need one and is covered instead by the
+    /// helper-level tests elsewhere in this module.
+    ///
+    /// Open question, deliberately not encoded here: whether a
+    /// descendant should preserve identity the way a root file does, by
+    /// holding its handle from the metadata pass. That is a change to
+    /// the specification and the code, not a contract this test may
+    /// assume — so the same-length swap is asserted as admissible,
+    /// which is what §9.10 says today.
+    #[test]
+    fn interference_between_the_two_passes_follows_the_rule_for_its_position() {
+        let mut checked = 0;
+        for position in Position::all() {
+            for mutation in Mutation::all() {
+                if !mutation.applies_to(position) {
+                    continue;
+                }
+                let tmp = tempfile::TempDir::new().unwrap();
+                let root = tmp.path().join("root");
+
+                let (input, target): (PathBuf, PathBuf) = match position {
+                    Position::RootFile => {
+                        fs::create_dir_all(&root).unwrap();
+                        let file = root.join("payload.bin");
+                        fs::write(&file, ORIGINAL).unwrap();
+                        (file.clone(), file)
+                    }
+                    Position::RootDirectory => {
+                        let tree = root.join("tree");
+                        fs::create_dir_all(&tree).unwrap();
+                        fs::write(tree.join(LEAF), ORIGINAL).unwrap();
+                        (tree.clone(), tree)
+                    }
+                    Position::Descendant => {
+                        let tree = root.join("tree");
+                        fs::create_dir_all(&tree).unwrap();
+                        let leaf = tree.join(LEAF);
+                        fs::write(&leaf, ORIGINAL).unwrap();
+                        (tree, leaf)
+                    }
+                };
+
+                let prepared = prepare_archive(&input, ArchiveLimits::default())
+                    .unwrap_or_else(|e| panic!("{position:?}/{mutation:?}: preparation: {e}"));
+                apply_mutation(&target, mutation);
+                let sink = SharedSink::default();
+                let outcome = prepared.write_to(sink.clone());
+                let written = sink.written();
+
+                let contract = expected(position, mutation);
+                if contract == Expected::Refused {
+                    assert!(
+                        outcome.is_err(),
+                        "{position:?}/{mutation:?}: encryption must refuse"
+                    );
+                } else {
+                    outcome.unwrap_or_else(|e| {
+                        panic!("{position:?}/{mutation:?}: must produce an archive: {e}")
+                    });
+                }
+
+                // Whatever reached the writer — a finished archive, or
+                // the prefix a refused run emitted before it stopped —
+                // must never carry content this run did not validate.
+                if let Some(substitute) = substituted_content(position, mutation) {
+                    let admissible = contract == Expected::ReplacementContent;
+                    assert_eq!(
+                        archive_holds(&written, substitute),
+                        admissible,
+                        "{position:?}/{mutation:?}: substituted content present={}, admissible={}",
+                        archive_holds(&written, substitute),
+                        admissible
+                    );
+                }
+                if contract == Expected::OriginalContent {
+                    assert!(
+                        archive_holds(&written, ORIGINAL),
+                        "{position:?}/{mutation:?}: archive must hold what the metadata pass saw"
+                    );
+                }
+                if contract == Expected::ReplacementContent {
+                    assert!(
+                        !archive_holds(&written, ORIGINAL),
+                        "{position:?}/{mutation:?}: archive must hold the replacement alone"
+                    );
+                }
+                checked += 1;
+            }
+        }
+        let expected_cases = if cfg!(unix) { 22 } else { 16 };
+        assert_eq!(
+            checked, expected_cases,
+            "the generated case count must not drift"
+        );
+    }
+
     /// Wide-tree fd regression: with eager child opens, the walk held
     /// one open descriptor per discovered sibling subdirectory, so a
     /// directory wider than the process fd limit failed to encrypt

@@ -811,9 +811,12 @@ pub(crate) fn generate_key_pair(
 ///   is safe to delete.
 ///
 /// Every removal above resolves inside the retained output-directory
-/// handle rather than through the key-file path, so an output directory
-/// renamed or replaced between the two commits cannot turn a rollback
-/// into the deletion of an unrelated file of the same name.
+/// handle rather than through the key-file path, and on Linux and
+/// macOS both directory flushes do too, so an output directory renamed
+/// or replaced between the two commits can neither turn a rollback
+/// into the deletion of an unrelated file of the same name nor leave
+/// the durability barrier flushing a directory the entries were never
+/// committed to.
 fn commit_key_pair_files(
     private_tmp: tempfile::NamedTempFile,
     public_tmp: tempfile::NamedTempFile,
@@ -825,18 +828,44 @@ fn commit_key_pair_files(
         public_tmp,
         private_key_path,
         public_key_path,
-        crate::fs::atomic::sync_dir_durable,
+        flush_committed_dir,
     )
 }
 
-/// Implementation of [`commit_key_pair_files`] with an injectable directory
-/// flush function so tests can fail either flush point deterministically.
+/// Production barrier for [`commit_key_pair_files_with_barrier`]: the
+/// handle-relative flush where the platform has one, so the barrier
+/// follows the directory the entries were committed to across a path
+/// swap. Windows and other targets keep the path-based flush — a
+/// handle-relative directory flush there needs a write-access reopen
+/// that is not implemented — matching how the promotion itself is
+/// split per platform.
+fn flush_committed_dir(
+    committed_dir: &crate::fs::atomic::OutputDir,
+    output_dir: &Path,
+) -> std::io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let _ = output_dir;
+        committed_dir.flush_durable()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = committed_dir;
+        crate::fs::atomic::sync_dir_durable(output_dir)
+    }
+}
+
+/// Implementation of [`commit_key_pair_files`] with an injectable
+/// directory flush so tests can fail either flush point
+/// deterministically. The flush receives the retained handle and the
+/// ambient path; production ([`flush_committed_dir`]) picks the
+/// handle-relative flush where the platform has one.
 fn commit_key_pair_files_with_barrier(
     private_tmp: tempfile::NamedTempFile,
     public_tmp: tempfile::NamedTempFile,
     private_key_path: &Path,
     public_key_path: &Path,
-    sync_output_dir: impl Fn(&Path) -> std::io::Result<()>,
+    sync_output_dir: impl Fn(&crate::fs::atomic::OutputDir, &Path) -> std::io::Result<()>,
 ) -> Result<(), CryptoError> {
     use crate::fs::atomic::{self, OutputDir};
     use crate::fs::paths::parent_or_cwd;
@@ -844,14 +873,14 @@ fn commit_key_pair_files_with_barrier(
     // Both final paths name entries in the same output directory: one
     // flush covers both, and both rollbacks resolve there.
     let output_dir = parent_or_cwd(private_key_path);
-    // Anchor the rollbacks to the directory the staged files were
-    // created in. They run after a commit is already visible on disk,
-    // which is exactly when a substituted output path would send a
-    // removal somewhere else.
+    // Anchor the rollbacks and the durability barrier to the directory
+    // the staged files were created in. Both run after a commit is
+    // already visible on disk, which is exactly when a substituted
+    // output path would send them somewhere else.
     let committed_dir = OutputDir::open(output_dir).map_err(CryptoError::Io)?;
 
     atomic::finalize_file(private_tmp, private_key_path, KEY_FILE_LABEL)?;
-    if let Err(e) = sync_output_dir(output_dir) {
+    if let Err(e) = sync_output_dir(&committed_dir, output_dir) {
         committed_dir.remove_published(private_key_path);
         return Err(CryptoError::Io(e));
     }
@@ -859,7 +888,7 @@ fn commit_key_pair_files_with_barrier(
         committed_dir.remove_published(private_key_path);
         return Err(e);
     }
-    if let Err(e) = sync_output_dir(output_dir) {
+    if let Err(e) = sync_output_dir(&committed_dir, output_dir) {
         committed_dir.remove_published(public_key_path);
         return Err(CryptoError::Io(e));
     }
@@ -2156,8 +2185,8 @@ mod tests {
     fn counting_barrier(
         fail_on: Option<u32>,
         seen: std::rc::Rc<std::cell::RefCell<Vec<BarrierCall>>>,
-    ) -> impl Fn(&Path) -> std::io::Result<()> {
-        move |dir| {
+    ) -> impl Fn(&crate::fs::atomic::OutputDir, &Path) -> std::io::Result<()> {
+        move |_committed_dir, dir| {
             seen.borrow_mut().push(BarrierCall {
                 dir: dir.to_path_buf(),
                 private_committed: dir.join(PRIVATE_KEY_FILENAME).exists(),
@@ -2287,7 +2316,7 @@ mod tests {
         let substitute_output_dir = {
             let (out, unrelated, moved_out) = (out.clone(), unrelated.clone(), moved_out.clone());
             let committed = committed_before_swap.clone();
-            move |_: &Path| -> std::io::Result<()> {
+            move |_: &crate::fs::atomic::OutputDir, _: &Path| -> std::io::Result<()> {
                 committed.set(out.join(PRIVATE_KEY_FILENAME).exists());
                 fs::rename(&out, &moved_out)?;
                 std::os::unix::fs::symlink(&unrelated, &out)?;

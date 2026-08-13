@@ -271,13 +271,20 @@ pub(crate) fn sync_dir_durable(dir: &Path) -> io::Result<()> {
         Err(e) if dir_sync_unsupported(&e) => return Ok(()),
         Err(e) => return Err(e),
     };
-    // Match `sync_file_durable`: try `sync_all` first, then plain
-    // `fsync` where supported. Directory flushing has a wider set of
-    // unsupported errors than file flushing.
+    flush_dir_handle(&handle)
+}
+
+/// Flushes an already-open directory handle. Matches
+/// [`sync_file_durable`]: try `sync_all` first, then plain `fsync`
+/// where supported, and treat a filesystem that provides no directory
+/// flushing as success — no stronger operation exists there. Directory
+/// flushing has a wider set of unsupported errors than file flushing.
+#[cfg(unix)]
+fn flush_dir_handle(handle: &std::fs::File) -> io::Result<()> {
     match handle.sync_all() {
         Ok(()) => Ok(()),
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        Err(e) if dir_sync_unsupported(&e) => match fsync_uninterrupted(&handle) {
+        Err(e) if dir_sync_unsupported(&e) => match fsync_uninterrupted(handle) {
             Ok(()) => Ok(()),
             Err(again) if dir_sync_unsupported(&again) => Ok(()),
             Err(again) => Err(again),
@@ -411,6 +418,45 @@ impl OutputDir {
         if let Some(name) = path.file_name() {
             let _ = self.dir.remove_file(name);
         }
+    }
+
+    /// Flushes the anchored directory's entries, resolving through the
+    /// held handle, so the barrier covers the directory the entries
+    /// were committed to even if the ambient path was renamed since.
+    /// Same unsupported-filesystem tolerance as [`sync_dir_durable`];
+    /// genuine open and flush failures are reported so a caller that
+    /// requires durability can stop.
+    ///
+    /// cap-std may hold the directory as an `O_PATH` handle on Linux,
+    /// which cannot be flushed, so `.` is reopened through the handle —
+    /// the same technique as `archive::platform`'s directory sync. The
+    /// reopen needs read permission, exactly what the path-based flush
+    /// needs, so restrictive directories refuse both the same way.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn flush_durable(&self) -> io::Result<()> {
+        use std::os::fd::AsFd;
+
+        use rustix::fs::{Mode, OFlags, openat};
+
+        let fd = match rustix::io::retry_on_intr(|| {
+            openat(
+                self.dir.as_fd(),
+                ".",
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+        }) {
+            Ok(fd) => fd,
+            Err(e) => {
+                let e = io::Error::from(e);
+                return if dir_sync_unsupported(&e) {
+                    Ok(())
+                } else {
+                    Err(e)
+                };
+            }
+        };
+        flush_dir_handle(&std::fs::File::from(fd))
     }
 }
 
@@ -1037,6 +1083,30 @@ mod tests {
         assert!(
             !tmp_dir.path().join("out.moved").join("key").exists(),
             "the anchored directory's own entry must still be removed"
+        );
+    }
+
+    /// The durability barrier must flush the directory the handle was
+    /// opened on, not whatever its path names later. After the
+    /// directory is renamed aside, the handle-relative flush still
+    /// succeeds against the moved directory, while the path-based
+    /// flush of the old path has nothing left to open.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn output_dir_flush_durable_follows_the_handle_after_a_path_swap() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let anchored = tmp_dir.path().join("out");
+        fs::create_dir(&anchored).unwrap();
+        let handle = OutputDir::open(&anchored).unwrap();
+
+        fs::rename(&anchored, tmp_dir.path().join("out.moved")).unwrap();
+
+        handle
+            .flush_durable()
+            .expect("the flush must follow the handle, not the path");
+        assert!(
+            sync_dir_durable(&anchored).is_err(),
+            "the old path no longer names a directory to flush"
         );
     }
 

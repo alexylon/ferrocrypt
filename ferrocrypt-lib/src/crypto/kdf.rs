@@ -538,6 +538,23 @@ impl KdfParams {
 mod tests {
     use super::*;
 
+    /// Every cap this type carries is measured from both sides by
+    /// `tests/config_symmetry.rs`, on both artefacts that store
+    /// key-derivation parameters: a passphrase `.fcr`, and a generated
+    /// `private.key` whose reader is the unlock.
+    ///
+    /// Rust has no reflection, so a new field does not join that suite
+    /// by itself. This destructure stops compiling when one is added,
+    /// which is the prompt to route it and then name it here.
+    #[test]
+    fn every_cap_is_routed_into_the_symmetry_suite() {
+        let KdfLimit {
+            max_mem_cost_kib: _,
+            max_time_cost: _,
+            max_lanes: _,
+            max_work: _,
+        } = KdfLimit::default();
+    }
     #[test]
     fn test_kdf_params_valid_defaults() {
         let params = KdfParams::default();

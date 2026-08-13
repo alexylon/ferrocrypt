@@ -1194,6 +1194,21 @@ mod tests {
         unarchive(Cursor::new(archive), tmp, ArchiveLimits::default(), policy)
     }
 
+    /// `unarchive` with the default policy and caller-chosen caps, for
+    /// the tests that move one cap around a fixed region.
+    fn unarchive_with_limits(
+        archive: Vec<u8>,
+        tmp: &Path,
+        limits: ArchiveLimits,
+    ) -> Result<PathBuf, CryptoError> {
+        unarchive(
+            Cursor::new(archive),
+            tmp,
+            limits,
+            IncompleteOutputPolicy::DeleteOnError,
+        )
+    }
+
     /// `unarchive_with_policy` specialised to the default
     /// [`IncompleteOutputPolicy::DeleteOnError`].
     fn unarchive_default(archive: Vec<u8>, tmp: &Path) -> Result<PathBuf, CryptoError> {
@@ -1409,8 +1424,8 @@ mod tests {
     }
 
     /// One directory root `d` holding a single file, used by the
-    /// promotion-window tests below and gated with them.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    /// promotion-window tests below and by the cumulative
+    /// entry-extension cap.
     fn directory_root_manifest() -> Manifest {
         Manifest {
             entries: vec![
@@ -3456,6 +3471,157 @@ mod tests {
             }
         }
         assert_eq!(checked, 48, "the generated case count must not drift");
+    }
+
+    // -- Extension-region caps (FORMAT.md §9.12) --------------------------
+
+    /// The archive-level extension region is admitted at exactly its
+    /// cap and refused when the cap is one byte short.
+    ///
+    /// The four extension caps have no writer half to compare against —
+    /// every current writer emits an empty region — so they are pinned
+    /// as reader boundaries rather than as symmetry pairs. Driven
+    /// through a real extraction, because the enforcement helpers have
+    /// their own unit tests and what is unproven is the caps reaching
+    /// an operation at all.
+    #[test]
+    fn the_archive_extension_cap_admits_a_region_of_exactly_its_size() {
+        let manifest = single_file_manifest("hello.txt", b"Hello, world!");
+        let region = tlv_bytes(0x0001, b"meta");
+        let region_len = u32::try_from(region.len()).unwrap();
+        let build = || {
+            let mut archive = build_archive_prefix_with_archive_ext(&manifest, &region);
+            archive.extend_from_slice(b"Hello, world!");
+            archive
+        };
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extracted = unarchive_with_limits(
+            build(),
+            tmp.path(),
+            ArchiveLimits::default().max_archive_ext_bytes(region_len),
+        )
+        .expect("a region exactly at the cap must extract");
+        assert_eq!(fs::read(&extracted).unwrap(), b"Hello, world!");
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let err = unarchive_with_limits(
+            build(),
+            tmp.path(),
+            ArchiveLimits::default().max_archive_ext_bytes(region_len - 1),
+        )
+        .expect_err("a cap one byte short must refuse the region");
+        assert!(
+            matches!(err, CryptoError::ArchiveExtLenCapExceeded { .. }),
+            "expected the archive-extension cap, got {err}"
+        );
+    }
+
+    /// Per-entry parallel of
+    /// [`the_archive_extension_cap_admits_a_region_of_exactly_its_size`].
+    #[test]
+    fn the_entry_extension_cap_admits_a_region_of_exactly_its_size() {
+        let mut manifest = single_file_manifest("hello.txt", b"Hello, world!");
+        manifest.entries[0].entry_ext = tlv_bytes(0x0001, b"meta");
+        let region_len = u32::try_from(manifest.entries[0].entry_ext.len()).unwrap();
+        let build = || build_archive(&manifest, &[("hello.txt", b"Hello, world!")]);
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extracted = unarchive_with_limits(
+            build(),
+            tmp.path(),
+            ArchiveLimits::default().max_entry_ext_bytes(region_len),
+        )
+        .expect("a region exactly at the cap must extract");
+        assert_eq!(fs::read(&extracted).unwrap(), b"Hello, world!");
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let err = unarchive_with_limits(
+            build(),
+            tmp.path(),
+            ArchiveLimits::default().max_entry_ext_bytes(region_len - 1),
+        )
+        .expect_err("a cap one byte short must refuse the region");
+        assert!(
+            matches!(err, CryptoError::ArchiveEntryExtLenCapExceeded { .. }),
+            "expected the entry-extension cap, got {err}"
+        );
+    }
+
+    /// The cumulative cap fires on the sum across entries, at a size
+    /// every individual region stays well under, so the per-entry cap
+    /// cannot be what refuses.
+    #[test]
+    fn the_total_entry_extension_cap_admits_a_sum_of_exactly_its_size() {
+        let mut manifest = directory_root_manifest();
+        let region = tlv_bytes(0x0001, b"meta");
+        for entry in &mut manifest.entries {
+            entry.entry_ext = region.clone();
+        }
+        let total = u64::try_from(region.len() * manifest.entries.len()).unwrap();
+        let build = || build_archive(&manifest, &[("d/a.txt", b"real")]);
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extracted = unarchive_with_limits(
+            build(),
+            tmp.path(),
+            ArchiveLimits::default().max_total_entry_ext_bytes(total),
+        )
+        .expect("a sum exactly at the cap must extract");
+        assert_eq!(fs::read(extracted.join("a.txt")).unwrap(), b"real");
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let err = unarchive_with_limits(
+            build(),
+            tmp.path(),
+            ArchiveLimits::default().max_total_entry_ext_bytes(total - 1),
+        )
+        .expect_err("a cap one byte short must refuse the sum");
+        assert!(
+            matches!(err, CryptoError::ArchiveTotalEntryExtCapExceeded { .. }),
+            "expected the cumulative entry-extension cap, got {err}"
+        );
+    }
+
+    /// The per-value cap bounds one TLV value inside a region the
+    /// region cap admits, so the value cap is what refuses. It is
+    /// defence in depth today — the region cap is tighter — which is
+    /// exactly why it needs a test of its own.
+    #[test]
+    fn the_tlv_value_cap_admits_a_value_of_exactly_its_size() {
+        let manifest = single_file_manifest("hello.txt", b"Hello, world!");
+        let value = b"metadata-value";
+        let value_len = u32::try_from(value.len()).unwrap();
+        let build = || {
+            let mut archive =
+                build_archive_prefix_with_archive_ext(&manifest, &tlv_bytes(0x0001, value));
+            archive.extend_from_slice(b"Hello, world!");
+            archive
+        };
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let extracted = unarchive_with_limits(
+            build(),
+            tmp.path(),
+            ArchiveLimits::default().max_tlv_value_bytes(value_len),
+        )
+        .expect("a value exactly at the cap must extract");
+        assert_eq!(fs::read(&extracted).unwrap(), b"Hello, world!");
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let err = unarchive_with_limits(
+            build(),
+            tmp.path(),
+            ArchiveLimits::default().max_tlv_value_bytes(value_len - 1),
+        )
+        .expect_err("a cap one byte short must refuse the value");
+        assert!(
+            matches!(
+                err,
+                CryptoError::InvalidFormat(crate::error::FormatDefect::MalformedTlv)
+            ),
+            "expected a malformed-TLV rejection, got {err}"
+        );
     }
 
     /// A staged identity that could not be read is skipped, not

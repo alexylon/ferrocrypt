@@ -666,6 +666,22 @@ mod tests {
     use crate::recipient::entry::RECIPIENT_FLAG_CRITICAL;
     use crate::recipient::{argon2id, x25519};
 
+    /// Every cap this type carries is measured from both sides by
+    /// `tests/config_symmetry.rs`, which requires the writer and the
+    /// reader to refuse at the same value.
+    ///
+    /// Rust has no reflection, so a new field does not join that suite
+    /// by itself. This destructure stops compiling when one is added,
+    /// which is the prompt to route it and then name it here.
+    #[test]
+    fn every_cap_is_routed_into_the_symmetry_suite() {
+        let HeaderReadLimits {
+            max_header_len: _,
+            max_recipient_count: _,
+            max_recipient_body_len: _,
+            max_header_mac_work_bytes: _,
+        } = HeaderReadLimits::default();
+    }
     fn dummy_entry(type_name: &str, body_len: usize) -> RecipientEntry {
         RecipientEntry {
             type_name: type_name.to_string(),

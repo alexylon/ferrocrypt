@@ -118,6 +118,28 @@ impl KeyReadLimits {
 mod tests {
     use super::*;
 
+    /// Every cap this type carries is driven at and over its boundary
+    /// on the read side, and a new one belongs with them.
+    ///
+    /// These caps are reader-only: no writer knob varies the length of
+    /// a recipient string or the size of a wrapped secret, so pairing
+    /// one with a writer threshold would claim a symmetry that does not
+    /// exist. `max_recipient_string_chars` is driven through both
+    /// public ingress paths in `key/public.rs`, and
+    /// `max_private_key_wrapped_secret_len` in
+    /// `recipient/native/x25519.rs` and at integration level in
+    /// `tests/api_tests.rs`.
+    ///
+    /// Rust has no reflection, so this destructure stops compiling when
+    /// a field is added, which is the prompt to give it a reader-side
+    /// boundary test and then name it here.
+    #[test]
+    fn every_cap_is_driven_at_its_reader_boundary() {
+        let KeyReadLimits {
+            max_recipient_string_chars: _,
+            max_private_key_wrapped_secret_len: _,
+        } = KeyReadLimits::default();
+    }
     #[test]
     fn defaults_match_the_reader_constants() {
         let limits = KeyReadLimits::default();

@@ -481,6 +481,30 @@ mod tests {
         enforce_total_entry_ext_cap,
     };
 
+    /// Every cap this type carries is routed into a test that exercises
+    /// it on a real operation, so a new one cannot land untested.
+    ///
+    /// Rust has no reflection, so a new field does not join those tests
+    /// by itself. This destructure stops compiling when one is added,
+    /// which is the prompt to route it and then name it here. The five
+    /// caps a writer can exercise are measured from both sides by
+    /// `tests/config_symmetry.rs`; the four extension caps have no
+    /// writer half — every current writer emits an empty region — so
+    /// `archive/decode.rs` drives them as reader boundaries instead.
+    #[test]
+    fn every_cap_is_routed_into_a_test_that_exercises_it() {
+        let ArchiveLimits {
+            max_entry_count: _,
+            max_total_plaintext_bytes: _,
+            max_path_depth: _,
+            max_path_bytes: _,
+            max_manifest_bytes: _,
+            max_archive_ext_bytes: _,
+            max_entry_ext_bytes: _,
+            max_total_entry_ext_bytes: _,
+            max_tlv_value_bytes: _,
+        } = ArchiveLimits::default();
+    }
     /// The `FORMAT.md` §9.12 default table, pinned against the published
     /// constants so a caller reading `ENTRY_COUNT_DEFAULT` and a caller
     /// calling `default()` cannot see different numbers.

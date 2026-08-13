@@ -8,40 +8,53 @@
 
 use std::fs;
 use std::io::Write;
+use std::path::Path;
+use std::sync::OnceLock;
 
 use ferrocrypt::Passphrase;
-use ferrocrypt::{Decryptor, KdfLimit, KdfParams, KeyPairGenerator, PrivateKey};
+use ferrocrypt::fuzz_exports::MIN_WRITE_MEM_COST;
+use ferrocrypt::{Decryptor, KdfLimit, PrivateKey};
 use libfuzzer_sys::fuzz_target;
 
-/// Argon2id budget for the harness. The fixture `private.key` is sealed
-/// at 19 MiB — the writer floor — and the reader limit below matches it,
-/// so the per-iteration unlock always succeeds and stays cheap. At the
-/// 1 GiB production default that unlock would dominate fuzz wall-clock.
-const FUZZ_KDF_MEM_KIB: u32 = 19 * 1024;
+/// Passphrase sealing the committed fixture key.
+const FIXTURE_PASSPHRASE: &str = "fuzz_key";
 
-/// Generates a keypair once per process into a persistent temp directory.
-fn key_dir() -> &'static std::path::Path {
-    use std::sync::OnceLock;
+/// The committed fixture `private.key`, embedded so the harness needs
+/// nothing from the filesystem it is run in.
+///
+/// It is a fixture rather than a key generated per process because a
+/// seed can only reach the payload region if this harness holds the
+/// matching private key: against a fresh key every committed input
+/// decrypts to nothing and the corpus exercises only the reject path.
+/// `fuzz/examples/gen_seeds.rs` mints the pair and writes the seeds to
+/// its public half.
+const FIXTURE_PRIVATE_KEY: &[u8] = include_bytes!("../fixtures/hybrid/private.key");
+
+/// Argon2id budget for the harness. The fixture key is sealed at the
+/// writer's memory floor with the cheapest legal time and lane counts,
+/// and this limit matches, so the per-iteration unlock always succeeds
+/// and stays as cheap as the format allows. At the 1 GiB production
+/// default that unlock would dominate fuzz wall-clock.
+fn harness_kdf_limit() -> KdfLimit {
+    KdfLimit::new(MIN_WRITE_MEM_COST)
+        .max_time_cost(1)
+        .max_lanes(4)
+        .max_work(u64::from(MIN_WRITE_MEM_COST))
+}
+
+/// Materializes the embedded fixture key once per process.
+fn fixture_private_key_path() -> &'static Path {
     static DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
     DIR.get_or_init(|| {
         let dir = tempfile::tempdir().unwrap();
-        let pass = Passphrase::new("fuzz_key");
-        KeyPairGenerator::with_passphrase(pass)
-            .kdf_params(KdfParams {
-                mem_cost: FUZZ_KDF_MEM_KIB,
-                time_cost: 1,
-                lanes: 4,
-            })
-            .write(dir.path(), |_| {})
-            .unwrap();
+        fs::write(dir.path().join("private.key"), FIXTURE_PRIVATE_KEY).unwrap();
         dir
     })
     .path()
 }
 
 fuzz_target!(|data: &[u8]| {
-    let keys = key_dir();
-    let priv_key = keys.join("private.key");
+    let priv_key = fixture_private_key_path().join("private.key");
 
     let tmp_dir = tempfile::tempdir().unwrap();
     let input_path = tmp_dir.path().join("input.fcr");
@@ -53,8 +66,8 @@ fuzz_target!(|data: &[u8]| {
     drop(f);
 
     if let Ok(Decryptor::PrivateKey(d)) = Decryptor::open(&input_path) {
-        let passphrase = Passphrase::new("fuzz_key");
-        let _ = d.kdf_limit(KdfLimit::new(FUZZ_KDF_MEM_KIB)).decrypt(
+        let passphrase = Passphrase::new(FIXTURE_PASSPHRASE);
+        let _ = d.kdf_limit(harness_kdf_limit()).decrypt(
             PrivateKey::from_key_file(&priv_key, passphrase),
             &output_dir,
             |_| {},

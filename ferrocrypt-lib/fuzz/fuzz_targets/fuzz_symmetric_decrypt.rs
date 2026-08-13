@@ -9,14 +9,28 @@ use std::fs;
 use std::io::Write;
 
 use ferrocrypt::Passphrase;
+use ferrocrypt::fuzz_exports::MIN_WRITE_MEM_COST;
 use ferrocrypt::{Decryptor, KdfLimit};
 use libfuzzer_sys::fuzz_target;
 
-/// Argon2id budget for the harness: a fuzzer-crafted but structurally
-/// valid `argon2id` header may demand up to the 1 GiB default reader
-/// ceiling per iteration, stalling the fuzzer. 8 MiB keeps real KDF
-/// runs reachable while the cap-rejection arm stays covered.
-const FUZZ_KDF_MEM_KIB: u32 = 8 * 1024;
+/// Passphrase the seed corpus is written under. A seed only reaches the
+/// payload region if the harness offers the same one.
+const FUZZ_PASSPHRASE: &str = "fuzz";
+
+/// Argon2id budget for the harness, bounding what a crafted header can
+/// demand per iteration.
+///
+/// Memory sits at the writer's floor rather than below it: a cap under
+/// that floor refuses every file this library writes, so the seeds would
+/// reach the cap and nothing beyond it. Time cost and lanes are pinned
+/// to the cheapest legal values the seeds use, and the work cap follows
+/// from them, so no header can order more than one floor-sized pass.
+fn harness_kdf_limit() -> KdfLimit {
+    KdfLimit::new(MIN_WRITE_MEM_COST)
+        .max_time_cost(1)
+        .max_lanes(4)
+        .max_work(u64::from(MIN_WRITE_MEM_COST))
+}
 
 fuzz_target!(|data: &[u8]| {
     let tmp_dir = tempfile::tempdir().unwrap();
@@ -29,9 +43,9 @@ fuzz_target!(|data: &[u8]| {
     drop(f);
 
     if let Ok(Decryptor::Passphrase(d)) = Decryptor::open(&input_path) {
-        let passphrase = Passphrase::new("fuzz");
-        let _ =
-            d.kdf_limit(KdfLimit::new(FUZZ_KDF_MEM_KIB))
-                .decrypt(passphrase, &output_dir, |_| {});
+        let passphrase = Passphrase::new(FUZZ_PASSPHRASE);
+        let _ = d
+            .kdf_limit(harness_kdf_limit())
+            .decrypt(passphrase, &output_dir, |_| {});
     }
 });

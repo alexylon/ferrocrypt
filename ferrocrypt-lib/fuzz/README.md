@@ -56,6 +56,14 @@ catch interaction bugs the parser-surface targets cannot see.
 parser states on the first iteration: valid artifacts that sit behind a
 checksum or a structured encoding, plus selected rejection boundaries.
 `corpus/` is gitignored, so it starts empty on CI and fresh checkouts.
+
+The two decrypt targets need one artefact the others do not: a key pair
+their seeds are written to. `fixtures/hybrid/` holds a committed one,
+because a seed can only reach the payload region if the harness holds
+the matching private key — a harness generating its own key could never
+be handed a valid input. Delete that directory and regenerate to mint a
+new pair; the seeds are rewritten to it in the same pass.
+
 Regenerate after any wire-format change:
 
 ```bash

@@ -21,6 +21,14 @@ pub use crate::archive::path::{
     validate_fca_path,
 };
 pub use crate::crypto::kdf::{KDF_PARAMS_SIZE, KdfParams};
+
+/// The writer's Argon2id memory floor, in KiB.
+///
+/// A fuzz harness that caps reader memory below this value can never
+/// admit a file this library wrote, so its seeds would only ever reach
+/// the cap rejection. Exported so the harnesses and the seed generator
+/// agree on the boundary instead of each repeating the number.
+pub const MIN_WRITE_MEM_COST: u32 = KdfParams::MIN_WRITE_MEM_COST;
 pub use crate::crypto::tlv::validate_tlv;
 pub use crate::fs::paths::INCOMPLETE_SUFFIX;
 pub use crate::key::private::PrivateKeyHeader;

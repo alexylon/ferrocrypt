@@ -52,6 +52,7 @@ SKIP=()
 TEST_WORKSPACE_ROOTS=(
     ferrocrypt-lib/tests/workspace
     ferrocrypt-lib/tests/workspace_api
+    ferrocrypt-lib/tests/workspace_config_symmetry
     ferrocrypt-lib/tests/workspace_fixture_stability
     ferrocrypt-lib/tests/workspace_testvector_suite
     ferrocrypt-lib/tests/workspace_concurrency

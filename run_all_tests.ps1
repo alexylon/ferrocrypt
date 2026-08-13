@@ -46,6 +46,7 @@ $Skip = @()
 $TestWorkspaceRoots = @(
     (Join-Path $PSScriptRoot "ferrocrypt-lib\tests\workspace"),
     (Join-Path $PSScriptRoot "ferrocrypt-lib\tests\workspace_api"),
+    (Join-Path $PSScriptRoot "ferrocrypt-lib\tests\workspace_config_symmetry"),
     (Join-Path $PSScriptRoot "ferrocrypt-lib\tests\workspace_fixture_stability"),
     (Join-Path $PSScriptRoot "ferrocrypt-lib\tests\workspace_testvector_suite"),
     (Join-Path $PSScriptRoot "ferrocrypt-lib\tests\workspace_concurrency"),

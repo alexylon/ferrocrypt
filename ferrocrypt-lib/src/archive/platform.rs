@@ -211,7 +211,9 @@ pub(crate) fn rename_at_no_clobber(
 /// Fallback for filesystems where the kernel refuses the no-replace
 /// rename flag outright. A file root on a filesystem with hard links is
 /// moved by [`link_no_clobber`], which needs no placeholder at all;
-/// every other case claims the name and renames over its own claim:
+/// every other case — no hard links, or a link whose staged-name unlink
+/// failed and was withdrawn — claims the name and renames over its own
+/// claim:
 ///
 /// 1. atomically claim the final name through `dir` — `create_new` for
 ///    a file root, owner-only `mkdir` for a directory root — refusing
@@ -288,14 +290,53 @@ fn rename_at_no_clobber_via_claim(
 ///
 /// Only for file roots: directories cannot be linked. Filesystems
 /// without hard links (exFAT and FAT among them) reject the call, and
-/// the caller falls back to claiming the name. A failed unlink leaves
-/// the staged name as a second link to the committed content, which
-/// removing it later cannot damage.
+/// the caller falls back to claiming the name. A staged name whose
+/// unlink fails is not left behind as a silent second plaintext link:
+/// see [`withdraw_link_after_failed_unlink`].
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn link_no_clobber(dir: &Dir, from: &OsStr, to: &OsStr) -> io::Result<()> {
     dir.hard_link(from, dir, to)?;
-    let _ = dir.remove_file(from);
+    match dir.remove_file(from) {
+        Ok(()) => {}
+        // Already gone: a racer removed the staged name, so the goal
+        // of this unlink — one name for the content — is met.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(unlink_error) => withdraw_link_after_failed_unlink(dir, to, unlink_error)?,
+    }
     sync_dir_handle(dir);
+    Ok(())
+}
+
+/// Resolves a staged-name unlink that failed after [`link_no_clobber`]
+/// reached the final name.
+///
+/// A staged name that survives is a second full-plaintext link a
+/// successful return would leave on disk — unmentioned in the reported
+/// output, and blocking every later decrypt into this directory with
+/// `Incomplete output already exists`. The link is therefore withdrawn
+/// — the staged entry still holds the content — and the unlink failure
+/// reported, so the caller falls back to the claim route and commits
+/// with a primitive this filesystem does support. A final name that is
+/// already gone means the link no longer stands either, and reports
+/// the same way.
+///
+/// Only when the final name can also not be removed is the commit
+/// kept: it is complete at the final name, and no route can avoid the
+/// residue when the filesystem refuses to remove either name.
+/// `SECURITY.md` records that corner.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn withdraw_link_after_failed_unlink(
+    dir: &Dir,
+    to: &OsStr,
+    unlink_error: io::Error,
+) -> io::Result<()> {
+    let withdrawn = match dir.remove_file(to) {
+        Ok(()) => true,
+        Err(e) => e.kind() == io::ErrorKind::NotFound,
+    };
+    if withdrawn {
+        return Err(unlink_error);
+    }
     Ok(())
 }
 
@@ -1428,6 +1469,54 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(fs::read(tmp.path().join("taken")).unwrap(), b"existing");
+        assert!(tmp.path().join("root.incomplete").exists());
+    }
+
+    /// A staged-name unlink failure withdraws the link and reports the
+    /// failure, so the caller's claim route commits instead and a
+    /// successful decrypt cannot leave a second plaintext link at the
+    /// staged name. The staged entry keeps the content for that
+    /// fallback. Driven through the decision helper directly, because
+    /// no local filesystem refuses just the unlink on demand.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_failed_staged_unlink_withdraws_the_link_and_reports() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        fs::write(tmp.path().join("root.incomplete"), b"payload").unwrap();
+        fs::hard_link(tmp.path().join("root.incomplete"), tmp.path().join("root")).unwrap();
+        let handle = open_anchor(tmp.path()).unwrap();
+
+        let unlink_error = io::Error::new(io::ErrorKind::PermissionDenied, "unlink refused");
+        let err = withdraw_link_after_failed_unlink(&handle, OsStr::new("root"), unlink_error)
+            .unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(
+            !tmp.path().join("root").exists(),
+            "the link must be withdrawn"
+        );
+        assert_eq!(
+            fs::read(tmp.path().join("root.incomplete")).unwrap(),
+            b"payload",
+            "the staged entry must keep the content for the claim route"
+        );
+    }
+
+    /// A final name that is already gone when the withdraw runs means
+    /// the link no longer stands, so the unlink failure is reported the
+    /// same way rather than declaring a commit that no longer exists.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_withdraw_with_the_final_name_gone_still_reports() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        fs::write(tmp.path().join("root.incomplete"), b"payload").unwrap();
+        let handle = open_anchor(tmp.path()).unwrap();
+
+        let unlink_error = io::Error::new(io::ErrorKind::PermissionDenied, "unlink refused");
+        let err = withdraw_link_after_failed_unlink(&handle, OsStr::new("root"), unlink_error)
+            .unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
         assert!(tmp.path().join("root.incomplete").exists());
     }
 

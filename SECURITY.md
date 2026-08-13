@@ -152,7 +152,15 @@ regression net, regenerated when the format intentionally changes).
   filesystems), any single **file** FerroCrypt commits — a decrypted
   file, an encrypted file, or a generated key file — is instead linked
   to its final name and the working name removed: creating a link
-  refuses an existing entry atomically, so this too leaves no window. A
+  refuses an existing entry atomically, so this too leaves no window.
+  If the working name cannot be removed after the link — some network
+  filesystems refuse to remove a name while another machine holds the
+  file open — a decrypt withdraws the link and commits through the
+  reservation step below instead, so a decrypt reported as successful
+  does not quietly leave a second name for the decrypted file. Only
+  when the filesystem refuses to remove either name is the finished
+  output kept under both; the extra name is the same file, and later
+  decrypts into that folder refuse until it is removed. A
   decrypted **folder**
   cannot be linked, and neither can anything on a filesystem without
   hard links (exFAT again). Those cases claim the final name by creating

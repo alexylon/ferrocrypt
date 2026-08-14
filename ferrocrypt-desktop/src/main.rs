@@ -5,12 +5,12 @@ slint::include_modules!();
 
 use ferrocrypt::Passphrase;
 use ferrocrypt::{
-    CryptoError, Decryptor, Encryptor, KdfParams, KeyPairGenerator, PRIVATE_KEY_FILENAME,
+    CryptoError, Decryptor, Encryptor, KdfLimit, KdfParams, KeyPairGenerator, PRIVATE_KEY_FILENAME,
     PUBLIC_KEY_FILENAME, PrivateKey, ProgressEvent, PublicKey, UnauthenticatedRecipientMode,
     default_encrypted_filename, generate_key_pair, probe_recipient_mode, validate_private_key_file,
 };
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 mod password_scorer;
 
@@ -22,17 +22,23 @@ mod password_scorer;
 /// after selection cannot change the recipient behind the user's back.
 type SelectedPublicKey = Arc<Mutex<Option<PublicKey>>>;
 
-/// Replaces the retained recipient key. A poisoned lock leaves no key
-/// retained, so the next encryption refuses instead of using a stale one.
+/// Replaces the retained recipient key. A poisoned lock is recovered:
+/// the slot holds plain data no panic can leave half-written, and
+/// applying every store is what keeps each clearing path effective, so
+/// a retained key can never outlive the fingerprint describing it.
 fn store_selected_public_key(selected: &SelectedPublicKey, key: Option<PublicKey>) {
-    if let Ok(mut slot) = selected.lock() {
-        *slot = key;
-    }
+    *selected.lock().unwrap_or_else(PoisonError::into_inner) = key;
 }
 
-/// Reads the retained recipient key for one operation.
+/// Reads the retained recipient key for one operation. Recovers a
+/// poisoned lock for the same reason as [`store_selected_public_key`]:
+/// with every store applied, the slot always holds the last selection
+/// or clearing.
 fn take_selected_public_key(selected: &SelectedPublicKey) -> Option<PublicKey> {
-    selected.lock().ok().and_then(|slot| slot.clone())
+    selected
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
 }
 
 /// Drops the retained recipient key together with the fingerprint describing
@@ -91,6 +97,18 @@ struct Operation<'a> {
     kdf_params: Option<KdfParams>,
 }
 
+/// Decrypt acceptance envelope for the GUI. Memory stays at the
+/// library's default cap; the combined-work cap is raised to what that
+/// memory cap already admits at the format's maximum pass count. That
+/// equals what earlier releases accepted by default, so a file the
+/// previous desktop version decrypted still decrypts — the GUI, unlike
+/// the CLI's `--max-kdf-work`, has no per-run override to raise.
+fn desktop_kdf_limit() -> KdfLimit {
+    KdfLimit::default().max_work(
+        u64::from(KdfLimit::MEM_COST_KIB_DEFAULT) * u64::from(KdfLimit::TIME_COST_STRUCTURAL_MAX),
+    )
+}
+
 /// Runs the crypto operation described by `op` and returns the resulting path
 /// (the encrypted file, the decrypted output, or the generated public key).
 /// The worker thread drives this single dispatch point; keeping it a free
@@ -125,6 +143,7 @@ fn run_operation(
         }
         MODE_PASSPHRASE_DECRYPT => match Decryptor::open(input) {
             Ok(Decryptor::Passphrase(d)) => d
+                .kdf_limit(desktop_kdf_limit())
                 .decrypt(passphrase, output_dir, on_event)
                 .map(|o| o.output_path),
             Ok(Decryptor::PrivateKey(_)) => Err(CryptoError::InvalidInput(
@@ -152,6 +171,7 @@ fn run_operation(
         }
         MODE_RECIPIENT_DECRYPT => match Decryptor::open(input) {
             Ok(Decryptor::PrivateKey(d)) => d
+                .kdf_limit(desktop_kdf_limit())
                 .decrypt(
                     PrivateKey::from_key_file(key_path, passphrase),
                     output_dir,
@@ -938,6 +958,54 @@ mod tests {
         assert!(
             matches!(&e2, CryptoError::InvalidInput(m) if m.contains("sealed with a passphrase")),
             "unexpected error: {e2:?}"
+        );
+    }
+
+    /// The GUI decrypt envelope equals what earlier releases accepted
+    /// by default: memory capped at the library default, combined work
+    /// at what that memory cap admits at the format's maximum pass
+    /// count. Pinned numerically so a change in the library's defaults
+    /// resurfaces here for review — the GUI has no per-run override a
+    /// user could raise.
+    #[test]
+    fn desktop_kdf_limit_pins_the_previous_acceptance_envelope() {
+        assert_eq!(
+            desktop_kdf_limit(),
+            KdfLimit::default().max_work(12_582_912),
+            "1 GiB of memory times 12 passes"
+        );
+    }
+
+    /// The retained-key slot recovers a poisoned lock on both
+    /// accessors: the slot holds plain data no panic can leave
+    /// half-written, and applying every store is what keeps the
+    /// clearing paths effective — a wiped fingerprint with a stale key
+    /// still retained would let a later encryption use a key the user
+    /// never saw.
+    #[test]
+    fn a_poisoned_key_slot_still_applies_stores_and_reads() {
+        let selected: SelectedPublicKey = Arc::new(Mutex::new(None));
+        let for_poison = selected.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = for_poison.lock().unwrap();
+            panic!("poison the slot");
+        })
+        .join();
+        assert!(
+            selected.is_poisoned(),
+            "the slot must be poisoned for this test to prove anything"
+        );
+
+        let key = PublicKey::from_x25519_bytes([1u8; 32]).expect("a valid X25519 key");
+        store_selected_public_key(&selected, Some(key));
+        assert!(
+            take_selected_public_key(&selected).is_some(),
+            "a store must apply through a poisoned lock"
+        );
+        store_selected_public_key(&selected, None);
+        assert!(
+            take_selected_public_key(&selected).is_none(),
+            "a clearing store must apply through a poisoned lock"
         );
     }
 

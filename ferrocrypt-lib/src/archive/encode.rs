@@ -1301,21 +1301,41 @@ mod tests {
         }
     }
 
+    /// Whether the interference reached the source.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Interference {
+        /// The mutation was applied.
+        Reached,
+        /// The platform refused it, so the source is unchanged.
+        RefusedByPlatform,
+    }
+
     /// Applies `mutation` to `target`, which is either the root file,
-    /// the root directory, or a descendant file.
-    fn apply_mutation(target: &Path, mutation: Mutation) {
+    /// the root directory, or a descendant file, and reports whether it
+    /// reached the source.
+    fn apply_mutation(target: &Path, mutation: Mutation) -> Interference {
+        match mutate(target, mutation) {
+            Some(()) => Interference::Reached,
+            None => Interference::RefusedByPlatform,
+        }
+    }
+
+    /// The mutations themselves. Every substitution starts by moving the
+    /// original out of the way; `None` reports a platform that refused
+    /// that move, which leaves the source untouched.
+    fn mutate(target: &Path, mutation: Mutation) -> Option<()> {
         let aside = target.with_extension("moved-aside");
         match mutation {
             Mutation::ReplacedBySameSizeFile => {
-                fs::rename(target, &aside).unwrap();
+                move_aside(target, &aside)?;
                 fs::write(target, SAME_SIZE).unwrap();
             }
             Mutation::ReplacedByLargerFile => {
-                fs::rename(target, &aside).unwrap();
+                move_aside(target, &aside)?;
                 fs::write(target, LARGER).unwrap();
             }
             Mutation::ReplacedByDirectory => {
-                fs::rename(target, &aside).unwrap();
+                move_aside(target, &aside)?;
                 fs::create_dir(target).unwrap();
                 // Named like the manifest's leaf, so a content pass that
                 // resolved the source path a second time would read this
@@ -1324,7 +1344,7 @@ mod tests {
             }
             #[cfg(unix)]
             Mutation::ReplacedBySymlink => {
-                fs::rename(target, &aside).unwrap();
+                move_aside(target, &aside)?;
                 // Pointed at a decoy rather than back at the original:
                 // a content pass that followed the link would then read
                 // content this run never validated, which the assertions
@@ -1336,11 +1356,11 @@ mod tests {
             }
             #[cfg(unix)]
             Mutation::ReplacedByFifo => {
-                fs::rename(target, &aside).unwrap();
+                move_aside(target, &aside)?;
                 make_fifo(target);
             }
             Mutation::Removed => {
-                fs::rename(target, &aside).unwrap();
+                move_aside(target, &aside)?;
             }
             Mutation::Grown => {
                 use std::io::Write as _;
@@ -1352,6 +1372,35 @@ mod tests {
                 file.set_len(ORIGINAL.len() as u64 - 1).unwrap();
             }
         }
+        Some(())
+    }
+
+    /// Moves `target` out of the way, or reports the platform refusing
+    /// to move it.
+    fn move_aside(target: &Path, aside: &Path) -> Option<()> {
+        match fs::rename(target, aside) {
+            Ok(()) => Some(()),
+            Err(e) if is_sharing_violation(&e) => None,
+            Err(e) => panic!("moving {} aside: {e}", target.display()),
+        }
+    }
+
+    /// Windows reports `ERROR_SHARING_VIOLATION` when an object is held
+    /// open elsewhere without delete sharing. The capability the
+    /// metadata pass holds on a source directory is opened exactly that
+    /// way, so a root directory cannot be renamed or removed while a
+    /// preparation is live.
+    #[cfg(windows)]
+    fn is_sharing_violation(error: &std::io::Error) -> bool {
+        const ERROR_SHARING_VIOLATION: i32 = 32;
+        error.raw_os_error() == Some(ERROR_SHARING_VIOLATION)
+    }
+
+    /// Elsewhere an open handle never blocks a rename, so every failed
+    /// move is a defect in the test.
+    #[cfg(not(windows))]
+    fn is_sharing_violation(_error: &std::io::Error) -> bool {
+        false
     }
 
     /// Whether the bytes that reached the writer contain `needle`
@@ -1411,6 +1460,11 @@ mod tests {
     /// directory walk would need one and is covered instead by the
     /// helper-level tests elsewhere in this module.
     ///
+    /// Where the platform refuses the interference outright — Windows
+    /// keeps a directory that is open from being renamed or removed —
+    /// the case asserts that refusal instead, because the promise for
+    /// the position is then kept before the archiver is even reached.
+    ///
     /// Open question, deliberately not encoded here: whether a
     /// descendant should preserve identity the way a root file does, by
     /// holding its handle from the metadata pass. That is a change to
@@ -1452,7 +1506,19 @@ mod tests {
 
                 let prepared = prepare_archive(&input, ArchiveLimits::default())
                     .unwrap_or_else(|e| panic!("{position:?}/{mutation:?}: preparation: {e}"));
-                apply_mutation(&target, mutation);
+                if apply_mutation(&target, mutation) == Interference::RefusedByPlatform {
+                    // Windows refuses to rename or remove a directory
+                    // that is open, and the metadata pass holds the root
+                    // directory open across the whole window. The
+                    // platform keeps the interference from starting, so
+                    // what is left to check is that the promise for the
+                    // position still holds — which the assertions below
+                    // do, against a source nothing changed.
+                    assert!(
+                        cfg!(windows) && matches!(position, Position::RootDirectory),
+                        "{position:?}/{mutation:?}: the interference must reach the source"
+                    );
+                }
                 let sink = SharedSink::default();
                 let outcome = prepared.write_to(sink.clone());
                 let written = sink.written();

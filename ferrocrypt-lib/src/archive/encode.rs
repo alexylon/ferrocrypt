@@ -1509,12 +1509,14 @@ mod tests {
     /// directory wider than the process fd limit failed to encrypt
     /// with EMFILE. Deferred opens keep live handles at O(depth); the
     /// metadata pass over 200 sibling directories must succeed under a
-    /// 64-descriptor soft limit. Relies on the workspace convention of
-    /// running tests with `--test-threads=1` (the limit is process-wide
-    /// while the guard is active). Linux/macOS only — matches the
+    /// 64-descriptor soft limit. The limit is process-wide while the
+    /// guard is active, so the test is ignored by default and run by
+    /// the lanes that pass `--include-ignored` with `--test-threads=1`,
+    /// like its decode-side sibling. Linux/macOS only — matches the
     /// `rustix` dev-dependency that provides the safe setrlimit.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
+    #[ignore = "lowers the process-wide open-file limit; needs --test-threads=1"]
     fn walk_directory_handles_wide_tree_under_low_fd_limit() {
         use crate::archive::fd_limit::NofileLimit;
 

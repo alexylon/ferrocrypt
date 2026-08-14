@@ -288,12 +288,14 @@ fn assert_no_output(out_dir: &Path) {
 
 /// Every writer/reader cap pair agrees on where it refuses.
 ///
-/// For each axis: find the lowest cap the writer accepts, find the
-/// lowest cap the reader accepts for the file that writer produced, and
-/// require the two to be the same number. Then check the value below
-/// that threshold is refused on both sides with the axis's own error —
-/// a threshold both sides merely share would otherwise be satisfied by
-/// two caps that reject for unrelated reasons.
+/// For each axis: find the lowest cap the writer accepts, then require
+/// the reader to accept the file that writer produced at that same cap
+/// and to refuse it one below, with the axis's own error on both
+/// sides. Under the monotonicity the threshold search itself assumes,
+/// those two probes pin the reader's threshold to the writer's number
+/// without a second search, and the axis-error checks keep a shared
+/// threshold from being satisfied by two caps that reject for
+/// unrelated reasons.
 ///
 /// Fails if a cap gains a writer half that refuses later than its
 /// reader half (a file FerroCrypt writes but cannot read back), or
@@ -338,24 +340,13 @@ fn every_writer_cap_refuses_exactly_where_its_reader_half_does() {
         )
         .unwrap_or_else(|e| panic!("{axis:?}: writing at its own threshold must succeed: {e}"));
 
-        let reader_threshold = lowest_accepting(axis.ceiling(), |value| {
-            read_at(
-                axis,
-                value,
-                &encrypted,
-                &restore_dir,
-                &keypair.private_key_path,
-            )
-            .is_ok()
-        });
-        assert_eq!(
-            writer_threshold, reader_threshold,
-            "{axis:?}: the writer and the reader must refuse at the same cap"
-        );
-
+        // No second search for the reader: succeeding here and being
+        // refused one below (checked at the end of the loop) pins the
+        // reader's threshold to the writer's number, under the same
+        // monotonicity the search itself assumes.
         let restored = read_at(
             axis,
-            reader_threshold,
+            writer_threshold,
             &encrypted,
             &restore_dir,
             &keypair.private_key_path,

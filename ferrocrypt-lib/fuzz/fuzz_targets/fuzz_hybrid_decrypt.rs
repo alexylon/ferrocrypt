@@ -32,14 +32,14 @@ const FIXTURE_PRIVATE_KEY: &[u8] = include_bytes!("../fixtures/hybrid/private.ke
 
 /// Argon2id budget for the harness. The fixture key is sealed at the
 /// writer's memory floor with the cheapest legal time and lane counts,
-/// and this limit matches, so the per-iteration unlock always succeeds
-/// and stays as cheap as the format allows. At the 1 GiB production
-/// default that unlock would dominate fuzz wall-clock.
+/// within this limit, so the per-iteration unlock always succeeds and
+/// stays as cheap as the format allows. At the 1 GiB production
+/// default that unlock would dominate fuzz wall-clock. Nothing the
+/// fuzzer mutates carries Argon2id parameters — the input is an
+/// `x25519` file — so the memory and work caps alone are enough, and
+/// time cost and lanes stay at the format maxima.
 fn harness_kdf_limit() -> KdfLimit {
-    KdfLimit::new(MIN_WRITE_MEM_COST)
-        .max_time_cost(1)
-        .max_lanes(4)
-        .max_work(u64::from(MIN_WRITE_MEM_COST))
+    KdfLimit::new(MIN_WRITE_MEM_COST).max_work(u64::from(MIN_WRITE_MEM_COST))
 }
 
 /// Materializes the embedded fixture key once per process.

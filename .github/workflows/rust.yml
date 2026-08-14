@@ -80,10 +80,10 @@ jobs:
         run: cargo build -p ferrocrypt --verbose
 
       - name: Test ferrocrypt-lib on MSRV
-        # Sequential like every other test lane: one lib test lowers
-        # the process-wide open-file limit, which is safe only while
-        # no other test is running.
-        run: cargo test -p ferrocrypt --verbose -- --test-threads=1
+        # Parallel: the tests that change the process-wide open-file
+        # limit are ignored by default and run only by the serial
+        # --include-ignored lanes.
+        run: cargo test -p ferrocrypt --verbose
 
   # ferrocrypt-cli's MSRV is 1.89: rustyline 18 uses the `file_lock` std
   # feature, stable since 1.89 (home 0.5.12 needs only 1.88; the higher bound
@@ -106,7 +106,9 @@ jobs:
         run: cargo build -p ferrocrypt-cli --verbose
 
       - name: Test ferrocrypt-cli on MSRV
-        run: cargo test -p ferrocrypt-cli --verbose -- --test-threads=1
+        # Parallel: the CLI tests pass their environment per child
+        # process and stage under per-process workspaces.
+        run: cargo test -p ferrocrypt-cli --verbose
 
   fmt:
     runs-on: ubuntu-latest

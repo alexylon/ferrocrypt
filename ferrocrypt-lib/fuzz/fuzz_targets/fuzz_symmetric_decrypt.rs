@@ -22,14 +22,12 @@ const FUZZ_PASSPHRASE: &str = "fuzz";
 ///
 /// Memory sits at the writer's floor rather than below it: a cap under
 /// that floor refuses every file this library writes, so the seeds would
-/// reach the cap and nothing beyond it. Time cost and lanes are pinned
-/// to the cheapest legal values the seeds use, and the work cap follows
-/// from them, so no header can order more than one floor-sized pass.
+/// reach the cap and nothing beyond it. Time cost and lanes stay at the
+/// format maxima so mutated headers keep reaching Argon2id across the
+/// full legal parameter space; the work cap alone bounds each iteration
+/// to one floor-sized pass, whatever the memory and pass split.
 fn harness_kdf_limit() -> KdfLimit {
-    KdfLimit::new(MIN_WRITE_MEM_COST)
-        .max_time_cost(1)
-        .max_lanes(4)
-        .max_work(u64::from(MIN_WRITE_MEM_COST))
+    KdfLimit::new(MIN_WRITE_MEM_COST).max_work(u64::from(MIN_WRITE_MEM_COST))
 }
 
 fuzz_target!(|data: &[u8]| {

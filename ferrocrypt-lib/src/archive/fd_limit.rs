@@ -37,6 +37,32 @@ impl NofileLimit {
         .expect("lower the NOFILE soft limit");
         guard
     }
+
+    /// Sets the soft limit to `soft`, capped at the hard limit so an
+    /// unprivileged call cannot be refused, and restores the saved
+    /// value on drop. Unlike [`NofileLimit::lower_to`] this may raise
+    /// the soft limit — toward the hard limit only — which the
+    /// escalation in [`HeldDescriptors::leaving`] needs on hosts whose
+    /// starting soft limit sits at or below the first rung.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the limit cannot be set, because a test that silently
+    /// kept an unrestricted process would pass without measuring
+    /// anything.
+    pub(crate) fn set_to(soft: u64) -> Self {
+        let saved = getrlimit(Resource::Nofile);
+        let guard = Self(saved);
+        setrlimit(
+            Resource::Nofile,
+            Rlimit {
+                current: Some(saved.maximum.map_or(soft, |hard| soft.min(hard))),
+                maximum: saved.maximum,
+            },
+        )
+        .expect("set the NOFILE soft limit");
+        guard
+    }
 }
 
 impl Drop for NofileLimit {
@@ -58,10 +84,12 @@ impl HeldDescriptors {
     /// `free` of them, so the next `free` opens succeed and the one
     /// after that fails.
     ///
-    /// The ceiling is raised toward the process's own soft limit until
-    /// it leaves enough room for that margin: a process already using
-    /// more descriptors than the first ceiling allows would otherwise
-    /// hold none and measure an unrestricted run.
+    /// The ceiling is raised toward the hard limit until it leaves
+    /// enough room for that margin: a process already using more
+    /// descriptors than the first ceiling allows would otherwise hold
+    /// none and measure an unrestricted run — and a host whose soft
+    /// limit starts at or below the first rung could never escalate if
+    /// the rungs were clamped to it.
     ///
     /// # Panics
     ///
@@ -69,7 +97,7 @@ impl HeldDescriptors {
     pub(crate) fn leaving(free: usize) -> Self {
         const MARGIN: usize = 8;
         for soft in [128u64, 512, 2048] {
-            let limit = NofileLimit::lower_to(soft);
+            let limit = NofileLimit::set_to(soft);
             let mut held = Vec::new();
             while let Ok(file) = File::open("/dev/null") {
                 held.push(file);
@@ -83,5 +111,35 @@ impl HeldDescriptors {
             }
         }
         panic!("no open-file ceiling left room to hold {free} descriptors free");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `set_to` may raise the soft limit toward the hard limit — what
+    /// the escalation in [`HeldDescriptors::leaving`] depends on where
+    /// the starting soft limit sits at or below the first rung — and
+    /// the guard restores the saved value on drop. Returns early where
+    /// there is no room between the soft and hard limits to prove a
+    /// raise.
+    #[test]
+    #[ignore = "changes the process-wide open-file limit; needs --test-threads=1"]
+    fn set_to_raises_toward_the_hard_limit_and_restores_on_drop() {
+        let saved = getrlimit(Resource::Nofile);
+        let Some(soft) = saved.current else {
+            return;
+        };
+        let target = soft + 1;
+        if saved.maximum.is_some_and(|hard| target > hard) {
+            return;
+        }
+
+        {
+            let _guard = NofileLimit::set_to(target);
+            assert_eq!(getrlimit(Resource::Nofile).current, Some(target));
+        }
+        assert_eq!(getrlimit(Resource::Nofile).current, Some(soft));
     }
 }

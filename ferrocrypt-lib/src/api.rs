@@ -399,6 +399,7 @@ impl Encryptor {
                     header_read_limits,
                     rs.len(),
                     NativeRecipientType::X25519,
+                    protocol::WRITE_EXT_BYTES,
                 )?;
             }
             EncryptorState::Passphrase(_) => {
@@ -406,6 +407,7 @@ impl Encryptor {
                     header_read_limits,
                     1,
                     NativeRecipientType::Argon2id,
+                    protocol::WRITE_EXT_BYTES,
                 )?;
                 kdf_params.validate_for_write(Some(&kdf_limit))?;
             }

@@ -136,6 +136,12 @@ pub(crate) trait DecryptionCredential {
 
 // ─── Encrypt ───────────────────────────────────────────────────────────────
 
+/// The extension region current writers emit: none. The preflight
+/// receives this region and [`encrypt`] hands the same one to
+/// [`build_encrypted_header`], so the header length the caps are
+/// checked against and the bytes actually sealed cannot drift apart.
+pub(crate) const WRITE_EXT_BYTES: &[u8] = b"";
+
 /// Encrypts `input_path` under one or more recipients of a single
 /// scheme. Wire format is the `.fcr` container with `recipients.len()`
 /// entries whose type matches `R::TYPE_NAME`. Every entry seals the same
@@ -161,9 +167,12 @@ pub(crate) trait DecryptionCredential {
 /// therefore readable under the limits it was checked against; no
 /// caller can skip the gates. [`crate::Encryptor::write`] runs the same
 /// checks earlier so a misconfiguration fails before recipient key
-/// files are read. The fixed passphrase byte-length bound is enforced
-/// inside the wrap path (`crypto::kdf::check_passphrase_len`) before
-/// Argon2id runs.
+/// files are read. After the header is assembled, the header-length
+/// and header-MAC-work caps run once more against the sealed bytes —
+/// the backstop that keeps the preflight's computed length from
+/// drifting from what is written. The fixed passphrase byte-length
+/// bound is enforced inside the wrap path
+/// (`crypto::kdf::check_passphrase_len`) before Argon2id runs.
 pub(crate) fn encrypt<R: RecipientScheme>(
     recipients: Vec<R>,
     archive_limits: ArchiveLimits,
@@ -189,7 +198,12 @@ pub(crate) fn encrypt<R: RecipientScheme>(
     // so misconfiguration fails before recipient key files are read.
     let native_type = NativeRecipientType::from_type_name(R::TYPE_NAME)
         .ok_or(crate::error::internal_invariant!("unknown native scheme"))?;
-    preflight_header_write_limits(header_read_limits, recipients.len(), native_type)?;
+    preflight_header_write_limits(
+        header_read_limits,
+        recipients.len(),
+        native_type,
+        WRITE_EXT_BYTES,
+    )?;
     for recipient in &recipients {
         recipient.validate_for_write()?;
     }
@@ -248,12 +262,20 @@ pub(crate) fn encrypt<R: RecipientScheme>(
     // its MAC scope.
     let built = build_encrypted_header(
         &entries,
-        b"", // current writers emit ext_len = 0
+        WRITE_EXT_BYTES,
         stream_nonce,
         payload_key,
         &header_key,
     )?;
     drop(header_key);
+
+    // The preflight bounded a computed header length; a reader
+    // measures the sealed bytes. Enforcing the same caps against the
+    // assembled header is the backstop that keeps the two from
+    // drifting apart.
+    let header_len = u32::try_from(built.header_bytes.len()).unwrap_or(u32::MAX);
+    header_read_limits.enforce_header_len(header_len)?;
+    header_read_limits.enforce_header_mac_work(entries.len(), header_len)?;
 
     on_event(&ProgressEvent::Encrypting);
 
@@ -285,11 +307,16 @@ fn build_native_entry(
 /// pair so the type-name / body-length pair is bound by the registry
 /// (impossible for a caller to mix `argon2id`'s name with `x25519`'s
 /// body length), and so adding a future native recipient updates the
-/// preflight automatically through the registry's accessors.
+/// preflight automatically through the registry's accessors. Takes the
+/// extension region itself rather than a length for the same reason: a
+/// writer that starts emitting `ext_bytes` must hand the region to the
+/// preflight, so the header length the caps are checked against cannot
+/// drift from the bytes [`build_encrypted_header`] assembles.
 pub(crate) fn preflight_header_write_limits(
     limits: HeaderReadLimits,
     recipient_count: usize,
     native: NativeRecipientType,
+    ext_bytes: &[u8],
 ) -> Result<(), CryptoError> {
     let type_name = native.type_name();
     let body_len = native.body_len();
@@ -311,9 +338,9 @@ pub(crate) fn preflight_header_write_limits(
     limits.enforce_recipient_body_len(body_len_u32)?;
 
     // Compute the exact `header_len` the writer will emit
-    // (`header_fixed + recipient_count * per_entry`, with `ext_len = 0`
-    // for current writers) and check it against the cap. All checked
-    // arithmetic funnels into one shared overflow error.
+    // (`header_fixed + recipient_count * per_entry + ext_len`) and
+    // check it against the cap. All checked arithmetic funnels into
+    // one shared overflow error.
     let overflow_err = || CryptoError::HeaderLenCapExceeded {
         header_len: u32::MAX,
         local_cap: limits.max_header_len,
@@ -325,8 +352,10 @@ pub(crate) fn preflight_header_write_limits(
     let total_entries = (recipient_count as u64)
         .checked_mul(per_entry)
         .ok_or_else(overflow_err)?;
+    let ext_len = u64::try_from(ext_bytes.len()).unwrap_or(u64::MAX);
     let header_len_u64 = (format::HEADER_FIXED_SIZE as u64)
         .checked_add(total_entries)
+        .and_then(|v| v.checked_add(ext_len))
         .ok_or_else(overflow_err)?;
     let header_len = u32::try_from(header_len_u64).unwrap_or(u32::MAX);
     limits.enforce_header_len(header_len)?;
@@ -2047,6 +2076,30 @@ mod tests {
             }
             other => panic!("expected KdfResourceCapExceeded, got {other:?}"),
         }
+    }
+
+    /// The preflight counts the extension region in the header length,
+    /// so a future writer that emits `ext_bytes` cannot pass the caps
+    /// with a length the sealed header would exceed.
+    #[test]
+    fn preflight_counts_the_extension_region_in_the_header_length() {
+        let exact = u32::try_from(
+            format::HEADER_FIXED_SIZE
+                + crate::recipient::entry::ENTRY_HEADER_SIZE
+                + argon2id::TYPE_NAME.len()
+                + NativeRecipientType::Argon2id.body_len(),
+        )
+        .unwrap();
+        let limits = crate::HeaderReadLimits::default().max_header_len(exact);
+
+        preflight_header_write_limits(limits, 1, NativeRecipientType::Argon2id, b"")
+            .expect("the exact header length must be accepted");
+        let err = preflight_header_write_limits(limits, 1, NativeRecipientType::Argon2id, b"x")
+            .expect_err("one extension byte must exceed the exact cap");
+        assert!(
+            matches!(err, CryptoError::HeaderLenCapExceeded { .. }),
+            "got: {err:?}"
+        );
     }
 
     /// The KDF write gate lives in `generate_key_pair` itself:

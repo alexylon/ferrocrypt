@@ -625,19 +625,41 @@ fn require_promoted_root(
 /// this run wrote. A local writer able to rename `output_dir` through
 /// its parent can otherwise leave the caller with a path that resolves
 /// into a directory of their choosing.
+///
+/// Only a path that no longer leads to a directory reports as changed
+/// — missing, a non-directory, or a symlink cycle — because such a
+/// path no longer names the committed output. Any other failure to
+/// open or describe one — descriptor exhaustion, a denied traversal —
+/// reports the environment rather than the path, and `FORMAT.md` §9.11
+/// requires skipping the confirmation then, the same rule
+/// [`require_promoted_root`] applies to its side.
 #[cfg(unix)]
 fn require_output_anchor_unchanged(
     output_handle: &Dir,
     output_dir: &Path,
     root_name: &OsStr,
 ) -> Result<(), CryptoError> {
-    // A path that no longer opens is a path that no longer names the
-    // committed output, so it is reported the same way as one naming a
-    // different directory.
-    let Ok(current) = platform::open_anchor(output_dir) else {
-        return Err(output_directory_changed(output_dir, root_name));
+    // The symlink cycle is matched by raw errno: std has no stable
+    // `io::ErrorKind` for `ELOOP` yet.
+    let current = match platform::open_anchor(output_dir) {
+        Ok(current) => current,
+        Err(CryptoError::Io(e))
+            if matches!(
+                e.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) || e.raw_os_error() == Some(libc::ELOOP) =>
+        {
+            return Err(output_directory_changed(output_dir, root_name));
+        }
+        Err(_) => return Ok(()),
     };
-    if platform::dir_object_id(&current)? != platform::dir_object_id(output_handle)? {
+    let (Ok(current_id), Ok(committed_id)) = (
+        platform::dir_object_id(&current),
+        platform::dir_object_id(output_handle),
+    ) else {
+        return Ok(());
+    };
+    if current_id != committed_id {
         return Err(output_directory_changed(output_dir, root_name));
     }
     Ok(())
@@ -3816,6 +3838,60 @@ mod tests {
 
         require_promoted_root(&handle, OsStr::new("f.txt"), None)
             .expect("with nothing to compare against the check must accept");
+    }
+
+    /// The anchor confirmation reports only a path that no longer
+    /// names a directory. A missing path and a file at the path are
+    /// changed destinations; a path that cannot be opened at all —
+    /// here a denied traversal — reports the environment, and
+    /// `FORMAT.md` §9.11 requires skipping the confirmation then.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn the_anchor_check_reports_a_changed_path_and_skips_an_environment_fault() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let parent = tmp.path().join("parent");
+        let out = parent.join("out");
+        fs::create_dir_all(&out).unwrap();
+        let handle = platform::open_anchor(&out).unwrap();
+        let name = OsStr::new("f.txt");
+
+        require_output_anchor_unchanged(&handle, &out, name)
+            .expect("an unchanged path must be accepted");
+
+        let gone = tmp.path().join("nowhere");
+        let err = require_output_anchor_unchanged(&handle, &gone, name).unwrap_err();
+        assert!(
+            format!("{err}").contains("is complete but its directory changed"),
+            "a missing path must report as changed, got: {err}"
+        );
+
+        let file_path = tmp.path().join("plain");
+        fs::write(&file_path, b"not a directory").unwrap();
+        let err = require_output_anchor_unchanged(&handle, &file_path, name).unwrap_err();
+        assert!(
+            format!("{err}").contains("is complete but its directory changed"),
+            "a non-directory at the path must report as changed, got: {err}"
+        );
+
+        // A symlink cycle at the path leads nowhere: a substitution
+        // someone made, never an environment fault.
+        let cycle = tmp.path().join("cycle");
+        std::os::unix::fs::symlink(&cycle, &cycle).unwrap();
+        let err = require_output_anchor_unchanged(&handle, &cycle, name).unwrap_err();
+        assert!(
+            format!("{err}").contains("is complete but its directory changed"),
+            "a symlink cycle at the path must report as changed, got: {err}"
+        );
+
+        // Denied traversal: an environment fault, so the confirmation
+        // is skipped. Under a privileged test runner the open succeeds
+        // against the unchanged directory instead; both must accept.
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o000)).unwrap();
+        let outcome = require_output_anchor_unchanged(&handle, &out, name);
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+        outcome.expect("an unopenable path must skip, not report a substitution");
     }
 
     /// Fail-closed contract under descriptor exhaustion. A run that

@@ -159,6 +159,10 @@ impl HeaderReadLimits {
     /// Sets the maximum accepted recipient count, clamped at
     /// [`Self::RECIPIENT_COUNT_STRUCTURAL_MAX`]. Files declaring more
     /// entries reject with [`CryptoError::RecipientCountCapExceeded`].
+    /// Past roughly 750 X25519 recipients, raising this cap alone is
+    /// not enough:
+    /// [`max_header_mac_work_bytes`](Self::max_header_mac_work_bytes)
+    /// binds next, on the writer and the reader alike.
     pub fn max_recipient_count(mut self, value: u16) -> Self {
         self.max_recipient_count = value.min(Self::RECIPIENT_COUNT_STRUCTURAL_MAX);
         self

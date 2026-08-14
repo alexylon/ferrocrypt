@@ -226,7 +226,9 @@ regression net, regenerated when the format intentionally changes).
   after a failure following the `public.key` commit, a lone
   `private.key` may remain and is safe to delete. Filesystems that do
   not support directory flushing depend on their own ordering after
-  power loss.
+  power loss. Key generation opens your output folder for its rollback
+  anchoring and its directory flushes, so it needs a folder it can read
+  and not only write into.
 - **Files from releases before 0.3.0 are not compatible.** Older
   FerroCrypt files and key pairs use a different format family. Decrypt
   them with the release that produced them and re-encrypt with the

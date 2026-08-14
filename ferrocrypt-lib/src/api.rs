@@ -208,7 +208,13 @@ impl Encryptor {
     /// recipients, the caller must opt in via
     /// [`Encryptor::header_read_limits`] with a raised
     /// recipient-count limit; the receiving decryptor must be opened
-    /// via [`Decryptor::open_with_limits`] with matching limits.
+    /// via [`Decryptor::open_with_limits`] with matching limits. Past
+    /// roughly 750 X25519 recipients the aggregate header-MAC budget
+    /// binds before the count does: the same [`HeaderReadLimits`] must
+    /// then also raise
+    /// [`HeaderReadLimits::max_header_mac_work_bytes`], on both sides,
+    /// or [`Encryptor::write`] refuses with
+    /// [`CryptoError::HeaderMacWorkCapExceeded`].
     ///
     /// # Errors
     ///
@@ -311,7 +317,9 @@ impl Encryptor {
     /// produces. This builder raises or tightens those writer-side caps;
     /// the receiving decryptor must be opened via
     /// [`Decryptor::open_with_limits`] with limits that are at least as
-    /// permissive.
+    /// permissive. Past roughly 750 X25519 recipients the aggregate
+    /// header-MAC budget binds before the recipient count does; see
+    /// [`Encryptor::with_public_keys`].
     ///
     /// All four axes are checked before encryption work begins:
     /// `recipient_count`, canonical native recipient `body_len`, the exact
@@ -916,11 +924,12 @@ impl KeyPairGenerator {
     ///
     /// `kdf_params` is also checked at [`KeyPairGenerator::write`] time
     /// against the writer's [`KdfLimit`] policy. By default, memory is capped
-    /// at 1 GiB while time cost and lanes are capped at the format maximum,
-    /// so [`KdfParams::default`] is accepted. A value above the effective
-    /// policy rejects with the matching typed cap error. To write a
-    /// `private.key` with memory above 1 GiB, or to use a deliberately
-    /// tightened time-cost or lane policy, configure
+    /// at 1 GiB and combined work at the writer's own budget, while time cost
+    /// and lanes are capped at the format maximum, so [`KdfParams::default`]
+    /// is accepted. A value above the effective policy rejects with the
+    /// matching typed cap error. To write a `private.key` with memory above
+    /// 1 GiB or more total work than [`KdfParams::default`], or to use a
+    /// deliberately tightened policy, configure
     /// [`KeyPairGenerator::kdf_limit`] and configure the unlocking
     /// [`PrivateKeyDecryptor`] with a compatible
     /// [`PrivateKeyDecryptor::kdf_limit`].

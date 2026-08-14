@@ -240,6 +240,7 @@ The interactive prompt exits on `quit`, `exit`, or Ctrl-D. Ctrl-C cancels the cu
 | `--max-kdf-memory` | `decrypt` | Maximum Argon2id memory cost accepted during decryption |
 | `--max-kdf-time-cost` | `decrypt` | Maximum Argon2id time cost (iteration count) accepted during decryption |
 | `--max-kdf-lanes` | `decrypt` | Maximum Argon2id lane count (parallelism) accepted during decryption |
+| `--max-kdf-work` | `decrypt` | Maximum combined Argon2id work (memory multiplied by passes) accepted during decryption |
 | `--keep-partial` | `decrypt` | Keep the staged `.incomplete` working copy on failure for forensic or recovery use |
 | `--max-archive-entries` | `encrypt`, `decrypt` | Maximum number of files and directories in one archive (default 250,000) |
 | `--max-archive-size` | `encrypt`, `decrypt` | Maximum combined size of the files in one archive, in MiB (default 65,536, that is 64 GiB) |
@@ -313,6 +314,8 @@ Common failure categories include:
 - **Encrypted file has unexpected trailing data** — extra data was found after the authenticated encrypted stream.
 - **Encrypted payload stream is malformed** — every payload chunk passed authentication, but the chunk sequence violates the format. FerroCrypt does not write this layout.
 - **Passphrase memory over limit** — the file requests more Argon2id memory than the configured limit permits. The default limit is 1 GiB; raise it with `--max-kdf-memory` if the source is trusted.
+- **Passphrase work over limit** — the file requests more combined Argon2id work (memory multiplied by passes) than the configured limit permits. The default limit equals what FerroCrypt's own default settings produce; raise it with `--max-kdf-work` if the source is trusted.
+- **Recipient verification work too large** — the file's recipient count multiplied by its header size exceeds the verification budget. Only files with very many recipients or an oversized header reach it; library callers raise `HeaderReadLimits::max_header_mac_work_bytes` for a trusted source.
 - **Too many archive entries / Archive is too large / Archive path too deep** — the folder inside the file exceeds an archive cap. Raise the matching `--max-archive-*` flag if the source is trusted.
 - **Unsupported recipient `<type>`** — the file uses a recipient type marked as required that this release does not support.
 

@@ -46,6 +46,7 @@
    - [7.6 `archive/encode.rs`](#76-archiveencoders)
    - [7.7 `archive/decode.rs`](#77-archivedecoders)
    - [7.8 `archive/platform.rs`](#78-archiveplatformrs)
+   - [7.9 `archive/fd_limit.rs`](#79-archivefd_limitrs)
 8. [`fs/`](#8-fs)
    - [8.1 `fs/atomic.rs`](#81-fsatomicrs)
    - [8.2 `fs/paths.rs`](#82-fspathsrs)
@@ -160,7 +161,9 @@ ferrocrypt-lib/src/
 │   ├── tree.rs
 │   ├── encode.rs
 │   ├── decode.rs
-│   └── platform.rs
+│   ├── platform.rs
+│   ├── reasons.rs
+│   └── fd_limit.rs   (test-only)
 │
 ├── fs/
 │   ├── mod.rs
@@ -957,6 +960,10 @@ It contains:
 Path validation and filesystem writes remain separate so race-hardening logic is auditable.
 
 The backend uses `cap-std` and `cap-fs-ext` from the Bytecode Alliance — the same crates that back wasmtime's WASI sandbox. ferrocrypt itself contains no `unsafe`; all direct syscall surface lives in those audited dependencies. cap-std layers on `rustix` (Linux/macOS) and `windows-sys` (Windows) internally.
+
+### 7.9 `archive/fd_limit.rs`
+
+Test-only (`cfg(test)`, Linux and macOS): open-file-limit control for tests that need the archive code to run out of descriptors. `NofileLimit` lowers the soft `RLIMIT_NOFILE` through the safe `rustix` `setrlimit` and restores the saved value on drop; `HeldDescriptors` holds descriptors open so the code under test runs with a known number free. The limit is process-wide while a guard is alive, so every test using this module relies on the workspace convention of running with `--test-threads=1`.
 
 ---
 

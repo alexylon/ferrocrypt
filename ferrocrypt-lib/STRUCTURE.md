@@ -1004,7 +1004,9 @@ It contains:
     rename, the same bound `SECURITY.md` states for the archive claim.
     The link, the claim, the step-2 rename, and every removal resolve
     through the one `OutputDir` handle opened at entry — the staged
-    temp file is an entry of the same directory — so a swap of the
+    temp file is an entry of the same directory, which the route
+    confirms by identity before its first commit step and otherwise
+    refuses as a caller-contract violation — so a swap of the
     output path mid-commit cannot redirect any step. If removing the staged
     name after a successful link fails, `finalize_file` returns a marked
     post-commit error and preserves both complete links; it never withdraws

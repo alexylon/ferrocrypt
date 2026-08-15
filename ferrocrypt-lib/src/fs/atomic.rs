@@ -241,8 +241,9 @@ fn sync_parent_dir(_path: &Path) {}
 /// before calling this function. The temp file must be created inside
 /// the destination directory (`tempfile::Builder::tempfile_in`): that
 /// keeps it on the final path's filesystem, and the Unix fallback
-/// routes commit handle-relative inside that directory, so a temp file
-/// staged anywhere else cannot be committed by them at all.
+/// routes commit handle-relative inside that directory, refusing by
+/// identity — [`CryptoError::InternalInvariant`] — a temp file staged
+/// anywhere else.
 pub(crate) fn finalize_file(
     tmp: NamedTempFile,
     final_path: &Path,
@@ -631,8 +632,11 @@ fn no_final_component_error() -> io::Error {
 /// every removal resolve through that handle, so a rename or
 /// replacement of the output path mid-commit cannot redirect any step
 /// into another directory. The staged temp file is an entry of that
-/// same directory (see [`finalize_file`]). Opening the anchor needs a
-/// readable output directory; `SECURITY.md` records that requirement.
+/// same directory (see [`finalize_file`]), and the route refuses to
+/// start until the entry under the staged name in the anchored
+/// directory is confirmed by identity to be the staged file itself.
+/// Opening the anchor needs a readable output directory; `SECURITY.md`
+/// records that requirement.
 ///
 /// A filesystem with hard links reaches the final name by linking the
 /// staged file there and dropping the staged name. `hard_link` refuses
@@ -677,6 +681,11 @@ fn finalize_file_via_link_or_claim(
             no_final_component_error(),
         )));
     };
+    if let Err(error) = require_staged_temp_in_output_dir(&tmp, &output_dir, &tmp_name) {
+        // `tmp` drops here, so its own destructor removes the staged
+        // file at the path the caller actually created it.
+        return Err(FinalizeFileError::before_commit(error));
+    }
     match output_dir
         .dir
         .hard_link(&tmp_name, &output_dir.dir, final_name)
@@ -690,6 +699,45 @@ fn finalize_file_via_link_or_claim(
         }
         Err(_) => finalize_file_via_claim(tmp, final_path, label, &output_dir),
     }
+}
+
+/// Requires the entry under the staged name in the anchored destination
+/// directory to be the staged file itself, before any fallback commit step
+/// runs. Both routes resolve the staged name through the anchor, so a
+/// temporary staged in any other directory must be refused here — as a
+/// contract violation, not left to surface later as placeholder churn and
+/// an orphaned staged file on the filesystems that reach this route. The
+/// entry is read without following symlinks, so a link planted under the
+/// staged name cannot satisfy the comparison either.
+#[cfg(unix)]
+fn require_staged_temp_in_output_dir(
+    tmp: &NamedTempFile,
+    output_dir: &OutputDir,
+    tmp_name: &std::ffi::OsStr,
+) -> Result<(), CryptoError> {
+    use cap_std::fs::MetadataExt;
+
+    let staged = tmp.as_file().metadata().map_err(CryptoError::Io)?;
+    let entry = match output_dir.dir.symlink_metadata(tmp_name) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(staged_temp_outside_output_dir());
+        }
+        Err(error) => return Err(CryptoError::Io(error)),
+    };
+    if !entry.is_file() || (entry.dev(), entry.ino()) != file_identity(&staged) {
+        return Err(staged_temp_outside_output_dir());
+    }
+    Ok(())
+}
+
+/// Contract violation from [`require_staged_temp_in_output_dir`]: the
+/// staged temporary file is not an entry of the destination directory.
+#[cfg(unix)]
+fn staged_temp_outside_output_dir() -> CryptoError {
+    CryptoError::InternalInvariant(
+        "the staged temporary file is not an entry of the destination directory",
+    )
 }
 
 /// Finishes a link commit after the final link exists. The unlink is
@@ -1487,6 +1535,48 @@ mod tests {
             fs::metadata(&final_path).unwrap().permissions().mode() & 0o777,
             0o600,
             "the staged file's mode must survive the commit"
+        );
+    }
+
+    /// A temp file staged outside the destination directory violates the
+    /// [`finalize_file`] contract. The fallback must refuse it by identity
+    /// before creating anything at the final name, rather than let the
+    /// mismatch surface later as placeholder churn and an orphaned staged
+    /// file. The refused temp is removed by its own destructor at the path
+    /// it was actually created.
+    #[cfg(unix)]
+    #[test]
+    fn fallback_refuses_a_temp_staged_outside_the_destination_directory() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let elsewhere = tmp_dir.path().join("elsewhere");
+        let out = tmp_dir.path().join("out");
+        fs::create_dir(&elsewhere).unwrap();
+        fs::create_dir(&out).unwrap();
+        let final_path = out.join("out.txt");
+
+        let mut tmp = tempfile::Builder::new().tempfile_in(&elsewhere).unwrap();
+        tmp.write_all(b"payload").unwrap();
+        let tmp_path = tmp.path().to_path_buf();
+
+        let error = finalize_file_via_link_or_claim(tmp, &final_path, "Output")
+            .expect_err("a temp staged elsewhere must be refused");
+        assert!(!error.committed());
+        assert!(
+            matches!(
+                error.into_crypto_error(),
+                CryptoError::InternalInvariant(message)
+                    if message.contains("not an entry of the destination directory")
+            ),
+            "the contract violation must be explicit"
+        );
+        assert_eq!(
+            fs::read_dir(&out).unwrap().count(),
+            0,
+            "the refusal must precede any entry at the final name"
+        );
+        assert!(
+            !tmp_path.exists(),
+            "the refused temp is cleaned up at its own path"
         );
     }
 

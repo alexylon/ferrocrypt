@@ -638,39 +638,23 @@ impl OutputDir {
         }
     }
 
-    /// [`Self::remove_published`], but only while the entry under the
-    /// name is still the committed file `finalized` retains, compared by
-    /// identity without following symlinks. A rollback runs once its
-    /// commit is already visible, so an entry replaced in that window
-    /// must be left in place rather than deleted; the committed file
-    /// then survives under whatever name it was moved to. An entry or
-    /// handle whose identity cannot be read is left in place on the same
-    /// terms: an unconfirmed entry is not this operation's to remove.
-    #[cfg(unix)]
-    pub(crate) fn remove_published_if_retained(&self, path: &Path, finalized: &FinalizedFile) {
-        use cap_std::fs::MetadataExt;
-
-        let Some(name) = path.file_name() else {
-            return;
-        };
-        let Ok(committed) = finalized.file.metadata() else {
-            return;
-        };
-        let Ok(entry) = self.dir.symlink_metadata(name) else {
-            return;
-        };
-        if entry.is_file() && (entry.dev(), entry.ino()) == file_identity(&committed) {
-            let _ = self.dir.remove_file(name);
-        }
-    }
-
-    /// The Windows arm of the same rule, comparing the volume serial
-    /// number and file index through `cap_fs_ext`. Both sides are read
-    /// from open handles — the retained committed handle, and the handle
-    /// the no-follow stat opens for itself — so the by-handle fields are
-    /// always populated. ReFS can truncate its wider file identifiers; a
-    /// false match there removes no more than a bare-name removal would.
-    #[cfg(windows)]
+    /// Removes the entry named by `path`'s final component, resolved
+    /// inside the anchored directory, but only while that entry is still
+    /// the committed file `finalized` retains, compared by identity
+    /// without following symlinks. A rollback runs once its commit is
+    /// already visible, so an entry replaced in that window must be left
+    /// in place rather than deleted; the committed file then survives
+    /// under whatever name it was moved to. An entry or handle whose
+    /// identity cannot be read is left in place on the same terms: an
+    /// unconfirmed entry is not this operation's to remove.
+    ///
+    /// The identity is the device and inode number on Unix and the volume
+    /// serial number and file index on Windows, read through `cap_fs_ext`
+    /// on both. Both sides come from open handles — the retained committed
+    /// handle, and the handle the no-follow stat opens for itself — so the
+    /// by-handle fields are always populated. ReFS can truncate its wider
+    /// file identifiers; a false match there removes no more than a
+    /// bare-name removal would.
     pub(crate) fn remove_published_if_retained(&self, path: &Path, finalized: &FinalizedFile) {
         use cap_fs_ext::MetadataExt;
 

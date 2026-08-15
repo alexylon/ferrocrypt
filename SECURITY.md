@@ -218,10 +218,10 @@ regression net, regenerated when the format intentionally changes).
   the attribute yourself if your backup schedule depends on it.
 - **An output folder another local process can change is a trust
   boundary.** FerroCrypt writes each output under a temporary name in
-  the folder you chose and commits it there. On Unix, encryption and key
-  generation retain the committed file handle and check immediately before
-  return that each reported path still denotes that file; Linux and macOS
-  decryption performs the matching directory and output identity checks. A
+  the folder you chose and commits it there. Encryption and key generation
+  retain the committed file handle and check immediately before return that
+  each reported path still denotes that file; Linux and macOS decryption
+  performs the matching directory and output identity checks. A
   hard-link fallback also requires the retained inode to have exactly one
   link before success. A swap detected there returns an error and leaves the entry currently at the
   reported path untouched. If the original file or folder was moved, the

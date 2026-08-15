@@ -57,17 +57,16 @@ use std::path::Path;
 use tempfile::NamedTempFile;
 
 use crate::CryptoError;
-#[cfg(unix)]
 use crate::error::sanitize_path_for_display;
 use crate::fs::paths::already_exists_error;
 
-/// A file whose commit completed, keeping the committed handle alive. A
-/// key-generation rollback on any platform uses it to confirm that the
-/// entry it removes is still this file. Unix also uses it to confirm,
-/// immediately before returning, that the reported path still denotes
-/// this object, and to prove the commit left exactly one name for the
-/// committed inode — `tempfile`'s own persist can fall back to a hard
-/// link whose staged-name unlink result it discards. On Windows the
+/// A file whose commit completed, keeping the committed handle alive. It
+/// is used, on every platform, to confirm immediately before returning
+/// that the reported path still denotes this object, and by a
+/// key-generation rollback to confirm that the entry it removes is still
+/// this file. Unix also uses it to prove the commit left exactly one name
+/// for the committed inode — `tempfile`'s own persist can fall back to a
+/// hard link whose staged-name unlink result it discards. On Windows the
 /// rollback deletes the file while this handle is open, which relies on
 /// `tempfile` opening a named temporary with the default sharing mode;
 /// that mode allows renames and deletes, unlike the exclusive mode of
@@ -83,30 +82,25 @@ impl FinalizedFile {
     }
 
     /// Confirms that `path`, the value a writer is about to report, still
-    /// denotes this committed file. A directory swap after the commit can
-    /// otherwise make the returned path lead to attacker-controlled bytes.
-    /// A path that no longer exists counts as changed too: the commit
-    /// created an entry there, so its absence means the name no longer
-    /// denotes the output — the same rule the decrypt side applies.
+    /// denotes this committed file. A final-entry replacement, or a
+    /// directory swap where the platform permits one while the handle is
+    /// open, can otherwise make the returned path lead to
+    /// attacker-controlled bytes. A path that no longer exists counts as
+    /// changed too: the commit created an entry there, so its absence
+    /// means the name no longer denotes the output — the same rule the
+    /// decrypt side applies.
     pub(crate) fn confirm_reported_path(&self, path: &Path) -> Result<(), CryptoError> {
-        #[cfg(unix)]
-        {
-            let committed = self.file.metadata().map_err(CryptoError::Io)?;
-            let reported = match std::fs::symlink_metadata(path) {
-                Ok(reported) => reported,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    return Err(reported_output_changed(path));
-                }
-                Err(e) => return Err(CryptoError::Io(e)),
-            };
-            if !reported.file_type().is_file()
-                || file_identity(&committed) != file_identity(&reported)
-            {
+        let committed = cap_std::fs::Metadata::from_file(&self.file).map_err(CryptoError::Io)?;
+        let reported = match reported_entry_metadata(path) {
+            Ok(reported) => reported,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 return Err(reported_output_changed(path));
             }
+            Err(e) => return Err(CryptoError::Io(e)),
+        };
+        if !reported.is_file() || file_identity(&reported) != file_identity(&committed) {
+            return Err(reported_output_changed(path));
         }
-        #[cfg(not(unix))]
-        let _ = path;
         Ok(())
     }
 
@@ -129,17 +123,59 @@ impl FinalizedFile {
     }
 }
 
-/// Stable Unix identity for a committed file. Comparing the object behind the
-/// retained handle with the final path catches both a final-name replacement
-/// and a parent-directory swap before a writer reports that path.
-#[cfg(unix)]
-fn file_identity(metadata: &std::fs::Metadata) -> (u64, u64) {
-    use std::os::unix::fs::MetadataExt;
+/// Identity of a filesystem object: the device and inode number on Unix,
+/// the volume serial number and file index on Windows. Comparing the
+/// object behind a retained handle with the entry under a name catches a
+/// final-name replacement, and a parent-directory swap where the platform
+/// permits one, before a writer reports that path.
+///
+/// `metadata` must come from an open handle —
+/// [`cap_std::fs::Metadata::from_file`], or a cap-std stat, which opens
+/// the entry itself — or, on Unix, from a `std` stat converted with
+/// `from_just_metadata`. cap-std fills the Windows fields only from an
+/// open handle, and its accessors panic where they are absent; the crate
+/// never reads an identity out of a directory listing.
+fn file_identity(metadata: &cap_std::fs::Metadata) -> (u64, u64) {
+    use cap_fs_ext::MetadataExt;
 
     (metadata.dev(), metadata.ino())
 }
 
+/// Metadata of the entry at `path` without following a final symlink,
+/// carrying its identity. Unix reads it with `lstat`, which needs only
+/// search permission on the parent.
 #[cfg(unix)]
+fn reported_entry_metadata(path: &Path) -> io::Result<cap_std::fs::Metadata> {
+    std::fs::symlink_metadata(path).map(cap_std::fs::Metadata::from_just_metadata)
+}
+
+/// Windows counterpart of the Unix `lstat`: the entry is opened without
+/// following a symlink or reparse point, requesting no access — the open
+/// `std` performs for `symlink_metadata`, which needs only traversal of
+/// the parent — and its identity is read from that handle, because a
+/// `std` metadata value carries none on stable Rust. A symlink or
+/// junction at the path is the reparse point itself, which the caller's
+/// regular-file test rejects.
+#[cfg(windows)]
+fn reported_entry_metadata(path: &Path) -> io::Result<cap_std::fs::Metadata> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let entry = std::fs::OpenOptions::new()
+        .access_mode(0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?;
+    cap_std::fs::Metadata::from_file(&entry)
+}
+
+/// `CreateFileW` flag without which a directory cannot be opened.
+#[cfg(windows)]
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+/// `CreateFileW` flag that opens a symlink or other reparse point itself
+/// instead of following it.
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
 fn reported_output_changed(path: &Path) -> CryptoError {
     CryptoError::InvalidInput(format!(
         "Output is complete but its reported path changed: {}",
@@ -582,9 +618,6 @@ fn flush_dir_handle(handle: &std::fs::File) -> io::Result<()> {
 pub(crate) fn sync_dir_durable(dir: &Path) -> io::Result<()> {
     use std::os::windows::fs::OpenOptionsExt;
 
-    // `CreateFileW` flag without which a directory cannot be opened.
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-
     let handle = match std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -745,7 +778,7 @@ impl OutputDir {
         let Ok(entry) = self.dir.symlink_metadata(name) else {
             return RollbackOutcome::Unconfirmed;
         };
-        if !entry.is_file() || (entry.dev(), entry.ino()) != (committed.dev(), committed.ino()) {
+        if !entry.is_file() || file_identity(&entry) != file_identity(&committed) {
             return RollbackOutcome::Replaced;
         }
         if self.dir.remove_file(name).is_err() {
@@ -933,9 +966,7 @@ fn require_staged_temp_in_output_dir(
     output_dir: &OutputDir,
     tmp_name: &std::ffi::OsStr,
 ) -> Result<(), CryptoError> {
-    use cap_std::fs::MetadataExt;
-
-    let staged = tmp.as_file().metadata().map_err(CryptoError::Io)?;
+    let staged = cap_std::fs::Metadata::from_file(tmp.as_file()).map_err(CryptoError::Io)?;
     let entry = match output_dir.dir.symlink_metadata(tmp_name) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -943,7 +974,7 @@ fn require_staged_temp_in_output_dir(
         }
         Err(error) => return Err(CryptoError::Io(error)),
     };
-    if !entry.is_file() || (entry.dev(), entry.ino()) != file_identity(&staged) {
+    if !entry.is_file() || file_identity(&entry) != file_identity(&staged) {
         return Err(staged_temp_not_in_output_dir(tmp_name));
     }
     Ok(())
@@ -1130,8 +1161,7 @@ fn unlink_staged_temp_with_remove(
     remove_staged: impl FnOnce(&cap_std::fs::Dir, &std::ffi::OsStr) -> io::Result<()>,
 ) -> (Result<(u64, u64), CryptoError>, io::Result<()>) {
     let (file, temp_path) = tmp.into_parts();
-    let identity = file
-        .metadata()
+    let identity = cap_std::fs::Metadata::from_file(&file)
         .map(|metadata| file_identity(&metadata))
         .map_err(CryptoError::Io);
     drop(file);
@@ -1175,8 +1205,8 @@ fn reopen_committed_file(
         .open_with(final_name, &options)
         .map_err(CryptoError::Io)?
         .into_std();
-    let metadata = file.metadata().map_err(CryptoError::Io)?;
-    if !metadata.file_type().is_file() || file_identity(&metadata) != expected {
+    let metadata = cap_std::fs::Metadata::from_file(&file).map_err(CryptoError::Io)?;
+    if !metadata.is_file() || file_identity(&metadata) != expected {
         return Err(reported_output_changed(final_path));
     }
     Ok(FinalizedFile::new(file))
@@ -1417,7 +1447,9 @@ mod tests {
     /// The ordinary one-step persist also retains the committed handle. If
     /// the parent directory is replaced before the caller reports its path,
     /// the final check rejects that path while leaving both the real output
-    /// and the replacement untouched.
+    /// and the replacement untouched. Unix only: NTFS refuses to rename a
+    /// directory while a handle is open anywhere beneath it, so the retained
+    /// handle itself rules this swap out there.
     #[cfg(unix)]
     #[test]
     fn finalized_file_rejects_a_reported_path_after_parent_replacement() {
@@ -1450,9 +1482,100 @@ mod tests {
         assert_eq!(fs::read(&final_path).unwrap(), b"replacement");
     }
 
-    /// A final name that is gone counts as changed, exactly like one that
-    /// holds another object: the commit created an entry there.
-    #[cfg(unix)]
+    /// A replacement of the final entry itself — the committed file moved
+    /// aside and another file planted under its name, which a local writer
+    /// can do on every platform while the handle is retained — is rejected
+    /// the same way, and both files are left where they are.
+    #[test]
+    fn finalized_file_rejects_a_reported_path_after_entry_replacement() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let final_path = tmp_dir.path().join("out.txt");
+
+        let mut tmp = tempfile::Builder::new()
+            .tempfile_in(tmp_dir.path())
+            .unwrap();
+        tmp.write_all(b"payload").unwrap();
+        let finalized = finalize_file(tmp, &final_path, "Output").unwrap();
+
+        let moved = tmp_dir.path().join("out.moved");
+        fs::rename(&final_path, &moved).unwrap();
+        fs::write(&final_path, b"replacement").unwrap();
+
+        let err = finalized
+            .confirm_reported_path(&final_path)
+            .expect_err("the returned path no longer denotes the committed file");
+        assert!(
+            matches!(
+                err,
+                CryptoError::InvalidInput(message)
+                    if message.contains("reported path changed")
+            ),
+            "the entry mismatch must be explicit"
+        );
+        assert_eq!(fs::read(&moved).unwrap(), b"payload");
+        assert_eq!(fs::read(&final_path).unwrap(), b"replacement");
+    }
+
+    /// Creates a file symlink `link` → `target`. Windows needs a privilege
+    /// the local account may lack; that failure is returned so the caller
+    /// can skip, unless `FERROCRYPT_REQUIRE_WINDOWS_SYMLINK_TESTS` demands
+    /// the assertion, as the extraction tests do.
+    fn plant_file_symlink(target: &Path, link: &Path) -> io::Result<()> {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link)
+        }
+        #[cfg(windows)]
+        {
+            let result = std::os::windows::fs::symlink_file(target, link);
+            if let Err(e) = &result {
+                if std::env::var_os("FERROCRYPT_REQUIRE_WINDOWS_SYMLINK_TESTS").is_some() {
+                    panic!("symlink creation required by CI but failed: {e}");
+                }
+            }
+            result
+        }
+    }
+
+    /// A symlink planted at the reported name, pointing at the committed
+    /// file moved aside, must be rejected: the entry is read without
+    /// following it, so a name the writer can retarget later is never
+    /// confirmed even while it currently leads to the right bytes.
+    #[test]
+    fn finalized_file_rejects_a_symlink_planted_at_the_reported_path() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let final_path = tmp_dir.path().join("out.txt");
+
+        let mut tmp = tempfile::Builder::new()
+            .tempfile_in(tmp_dir.path())
+            .unwrap();
+        tmp.write_all(b"payload").unwrap();
+        let finalized = finalize_file(tmp, &final_path, "Output").unwrap();
+
+        let moved = tmp_dir.path().join("out.moved");
+        fs::rename(&final_path, &moved).unwrap();
+        if let Err(e) = plant_file_symlink(&moved, &final_path) {
+            eprintln!("symlink creation unavailable ({e}); skipping");
+            return;
+        }
+
+        let err = finalized
+            .confirm_reported_path(&final_path)
+            .expect_err("a symlink at the reported name is not the committed entry");
+        assert!(
+            matches!(
+                err,
+                CryptoError::InvalidInput(message)
+                    if message.contains("reported path changed")
+            ),
+            "the planted symlink must report as a path mismatch"
+        );
+        assert_eq!(fs::read(&moved).unwrap(), b"payload");
+    }
+
+    /// A final name that is gone — here moved away — counts as changed,
+    /// exactly like one that holds another object: the commit created an
+    /// entry there.
     #[test]
     fn finalized_file_rejects_a_reported_path_that_no_longer_exists() {
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1464,7 +1587,7 @@ mod tests {
         tmp.write_all(b"payload").unwrap();
         let finalized = finalize_file(tmp, &final_path, "Output").unwrap();
 
-        fs::remove_file(&final_path).unwrap();
+        fs::rename(&final_path, tmp_dir.path().join("out.moved")).unwrap();
 
         let err = finalized
             .confirm_reported_path(&final_path)

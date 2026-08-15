@@ -1019,8 +1019,10 @@ It contains:
     is followed by an `nlink == 1` check through the reopened committed handle,
     so moving the staged link or removing a planted replacement also fails the
     operation. The committed file handle remains live through that check and a
-    final `(dev, ino)` comparison with the path the caller is about to report,
-    so neither a hidden extra link nor a parent-directory/final-entry
+    final identity comparison — device and inode number on Unix, volume
+    serial number and file index on Windows, read through the same handle
+    on every platform — with the path the caller is about to report, so
+    neither a hidden extra link nor a parent-directory/final-entry
     replacement can produce success; a final name that no longer exists
     counts as replaced, the step-17 rule the decrypt side applies.
     The one-step persist arm and the

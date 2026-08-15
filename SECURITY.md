@@ -184,7 +184,9 @@ regression net, regenerated when the format intentionally changes).
   claim and plants its own entry inside that brief window has its
   planted entry replaced by ours — the same "someone else's planted
   entry may be destroyed" bound, and the same trust assumption, as the
-  Windows directory case below. Both fallback commits anchor to your
+  Windows directory case below. If the commit fails at that step instead,
+  FerroCrypt withdraws its reservation only while the entry is still its
+  own empty file, so a planted entry is left in place. Both fallback commits anchor to your
   output folder: FerroCrypt opens the folder once and performs the link,
   the claim, the final rename, and its own cleanup through that one
   handle, so renaming the folder mid-commit cannot redirect any step.

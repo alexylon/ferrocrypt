@@ -736,26 +736,6 @@ impl OutputDir {
     }
 
     /// Removes the entry named by `path`'s final component, resolved
-    /// inside the anchored directory rather than through `path` itself.
-    /// Callers pass the full path of an entry they committed directly
-    /// into this directory; a deeper path is not walked, and one with no
-    /// final component names no entry and removes nothing.
-    ///
-    /// Best-effort by design: this undoes a commit made on a path that
-    /// is already returning an error, so a failure here has no better
-    /// error to report than the one being returned. Its only caller is
-    /// the Unix claim route, which withdraws a placeholder that is not
-    /// yet the committed file. A rollback of a committed file uses
-    /// [`Self::remove_published_if_retained`], which leaves a
-    /// replacement in place.
-    #[cfg(unix)]
-    pub(crate) fn remove_published(&self, path: &Path) {
-        if let Some(name) = path.file_name() {
-            let _ = self.dir.remove_file(name);
-        }
-    }
-
-    /// Removes the entry named by `path`'s final component, resolved
     /// inside the anchored directory, but only while that entry is still
     /// the committed file `finalized` retains, compared by identity
     /// without following symlinks. A rollback runs once its commit is
@@ -788,7 +768,9 @@ impl OutputDir {
 
     /// The identity-checked removal behind
     /// [`Self::remove_published_if_retained`], for any entry of the
-    /// anchored directory whose creator still holds a handle to it.
+    /// anchored directory whose creator still holds a handle to it: a
+    /// committed key file, or the placeholder the Unix claim route
+    /// creates and withdraws when its rename over it fails.
     fn remove_if_retained(
         &self,
         name: &std::ffi::OsStr,
@@ -1042,7 +1024,7 @@ fn finalize_file_via_link_or_claim_in(
                 label, final_path,
             )))
         }
-        Err(_) => finalize_file_via_claim(tmp, final_path, label, output_dir),
+        Err(_) => finalize_file_via_claim(tmp, &tmp_name, final_path, label, output_dir),
     }
 }
 
@@ -1163,18 +1145,42 @@ fn finish_link_commit_with_remove(
 /// cleanup onto an unrelated file, and the rename can replace only the
 /// placeholder step 1 created. Process interruption between the two
 /// steps leaves an empty placeholder at the final name next to the
-/// temp file. On step-2 failure the placeholder and the temp entry are
-/// removed through the same handle, matching the [`finalize_file`]
-/// contract.
+/// temp file. On step-2 failure the temp entry is removed through the
+/// same handle, and the placeholder only while the entry under the final
+/// name is still the one step 1 created, confirmed through the handle
+/// the claim returned: an entry planted there in the window is left in
+/// place, never removed in the placeholder's stead.
 #[cfg(unix)]
 fn finalize_file_via_claim(
     tmp: NamedTempFile,
+    tmp_name: &std::ffi::OsStr,
     final_path: &Path,
     label: &str,
     output_dir: &OutputDir,
 ) -> Result<FinalizedFile, FinalizeFileError> {
-    match claim_final_name(output_dir, final_path) {
-        Ok(()) => {}
+    finalize_file_via_claim_with(tmp, tmp_name, final_path, label, output_dir, |_| {})
+}
+
+/// Testable [`finalize_file_via_claim`]: `after_claim` runs once the
+/// placeholder exists and before the rename over it — the window in
+/// which a local writer can act on the claim.
+#[cfg(unix)]
+fn finalize_file_via_claim_with(
+    tmp: NamedTempFile,
+    tmp_name: &std::ffi::OsStr,
+    final_path: &Path,
+    label: &str,
+    output_dir: &OutputDir,
+    after_claim: impl FnOnce(&cap_std::fs::Dir),
+) -> Result<FinalizedFile, FinalizeFileError> {
+    let Some(final_name) = final_path.file_name() else {
+        let _ = remove_staged_temp(tmp, output_dir);
+        return Err(FinalizeFileError::before_commit(CryptoError::Io(
+            no_final_component_error(),
+        )));
+    };
+    let claim = match claim_final_name(output_dir, final_name) {
+        Ok(claim) => claim,
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
             let _ = remove_staged_temp(tmp, output_dir);
             return Err(FinalizeFileError::before_commit(already_exists_error(
@@ -1185,33 +1191,17 @@ fn finalize_file_via_claim(
             let _ = remove_staged_temp(tmp, output_dir);
             return Err(FinalizeFileError::before_commit(CryptoError::Io(e)));
         }
-    }
-    // `claim_final_name` already rejected a path with no final
-    // component, so these arms are backstops.
-    let Some(final_name) = final_path.file_name() else {
-        output_dir.remove_published(final_path);
-        let _ = remove_staged_temp(tmp, output_dir);
-        return Err(FinalizeFileError::before_commit(CryptoError::Io(
-            no_final_component_error(),
-        )));
     };
-    let Some(tmp_name) = tmp.path().file_name().map(|name| name.to_os_string()) else {
-        output_dir.remove_published(final_path);
-        let _ = remove_staged_temp(tmp, output_dir);
-        return Err(FinalizeFileError::before_commit(CryptoError::Io(
-            no_final_component_error(),
-        )));
-    };
-    match output_dir
-        .dir
-        .rename(&tmp_name, &output_dir.dir, final_name)
-    {
+    after_claim(&output_dir.dir);
+    match output_dir.dir.rename(tmp_name, &output_dir.dir, final_name) {
         Ok(()) => {
-            // The rename moved the staged entry away. Disarm the
-            // destructor so it cannot remove an entry another process
-            // creates at the freed temp name afterwards. Not
+            // The rename replaced the placeholder, so its handle refers
+            // to an unlinked file now, and moved the staged entry away.
+            // Disarm the destructor so it cannot remove an entry another
+            // process creates at the freed temp name afterwards. Not
             // [`remove_staged_temp`]: with the entry gone, its unlink
             // could only ever hit such a newcomer.
+            drop(claim);
             let (file, temp_path) = tmp.into_parts();
             let _ = temp_path.keep();
             sync_committed_parent(output_dir, final_path);
@@ -1226,7 +1216,10 @@ fn finalize_file_via_claim(
             Ok(finalized)
         }
         Err(e) => {
-            output_dir.remove_published(final_path);
+            // The outcome is not reported: the commit fails before any
+            // content reached the final name, and a placeholder left in
+            // place because it was replaced belongs to whoever replaced it.
+            let _ = output_dir.remove_if_retained(final_name, claim);
             let _ = remove_staged_temp(tmp, output_dir);
             Err(FinalizeFileError::before_commit(CryptoError::Io(e)))
         }
@@ -1342,24 +1335,26 @@ fn staged_temp_link_retained(
 /// Creates the zero-byte placeholder that claims the final name,
 /// through the anchored directory handle so the entry
 /// [`finalize_file_via_claim`] may later remove is the one it created
-/// here. `create_new` refuses any pre-existing entry; the no-follow flag
-/// is defense in depth for platforms whose open semantics differ, so a
-/// symlink raced into place cannot redirect the create either way.
-///
-/// A final path with no last component names nothing to claim and
-/// rejects rather than falling back to some other entry.
+/// here, and returns its handle, against which a failed step 2 confirms
+/// the entry before removing it. `create_new` refuses any pre-existing
+/// entry; the no-follow flag is defense in depth for platforms whose
+/// open semantics differ, so a symlink raced into place cannot redirect
+/// the create either way.
 #[cfg(unix)]
-fn claim_final_name(output_dir: &OutputDir, final_path: &Path) -> io::Result<()> {
+fn claim_final_name(
+    output_dir: &OutputDir,
+    final_name: &std::ffi::OsStr,
+) -> io::Result<std::fs::File> {
     use cap_fs_ext::{FollowSymlinks, OpenOptionsExt, OpenOptionsFollowExt};
 
-    let Some(name) = final_path.file_name() else {
-        return Err(no_final_component_error());
-    };
     let mut options = cap_std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     options.follow(FollowSymlinks::No);
     options.mode(FINAL_NAME_CLAIM_MODE);
-    output_dir.dir.open_with(name, &options).map(|_| ())
+    output_dir
+        .dir
+        .open_with(final_name, &options)
+        .map(cap_std::fs::File::into_std)
 }
 
 /// Promotes a staged single-file path `from` to the final name `to`
@@ -1986,14 +1981,17 @@ mod tests {
         let substituted = tmp_dir.path().join("elsewhere");
         fs::create_dir(&anchored).unwrap();
         fs::create_dir(&substituted).unwrap();
-        fs::write(anchored.join("key"), "ours").unwrap();
         fs::write(substituted.join("key"), "unrelated").unwrap();
 
         let handle = OutputDir::open(&anchored).unwrap();
+        let ours = claim_final_name(&handle, std::ffi::OsStr::new("key")).unwrap();
         fs::rename(&anchored, tmp_dir.path().join("out.moved")).unwrap();
         std::os::unix::fs::symlink(&substituted, &anchored).unwrap();
 
-        handle.remove_published(&anchored.join("key"));
+        assert_eq!(
+            handle.remove_if_retained(std::ffi::OsStr::new("key"), ours),
+            RollbackOutcome::Removed
+        );
 
         assert_eq!(
             fs::read_to_string(substituted.join("key")).unwrap(),
@@ -2530,6 +2528,19 @@ mod tests {
         );
     }
 
+    /// Drives the claim route the way `finalize_file_via_link_or_claim_in`
+    /// does, with the staged name taken from `tmp` itself.
+    #[cfg(unix)]
+    fn claim_commit(
+        tmp: NamedTempFile,
+        final_path: &Path,
+        label: &str,
+        output_dir: &OutputDir,
+    ) -> Result<FinalizedFile, FinalizeFileError> {
+        let tmp_name = tmp.path().file_name().unwrap().to_os_string();
+        finalize_file_via_claim(tmp, &tmp_name, final_path, label, output_dir)
+    }
+
     /// Claim fallback commits the temp file when the final name is
     /// free; no placeholder survives.
     #[cfg(unix)]
@@ -2544,7 +2555,7 @@ mod tests {
         tmp.write_all(b"payload").unwrap();
         let tmp_path = tmp.path().to_path_buf();
 
-        finalize_file_via_claim(
+        claim_commit(
             tmp,
             &final_path,
             "Output",
@@ -2571,7 +2582,7 @@ mod tests {
         let planted = tmp_dir.path().join("planted.txt");
         fs::hard_link(tmp.path(), &planted).unwrap();
 
-        let error = finalize_file_via_claim(
+        let error = claim_commit(
             tmp,
             &final_path,
             "Output",
@@ -2604,7 +2615,7 @@ mod tests {
         tmp.write_all(b"new").unwrap();
         let tmp_path = tmp.path().to_path_buf();
 
-        let error = finalize_file_via_claim(
+        let error = claim_commit(
             tmp,
             &final_path,
             "Output",
@@ -2637,7 +2648,7 @@ mod tests {
             .unwrap();
         tmp.write_all(b"new").unwrap();
 
-        let error = finalize_file_via_claim(
+        let error = claim_commit(
             tmp,
             &final_path,
             "Output",
@@ -2669,7 +2680,7 @@ mod tests {
             .unwrap();
         fs::remove_file(tmp.path()).unwrap();
 
-        let err = finalize_file_via_claim(
+        let err = claim_commit(
             tmp,
             &final_path,
             "Output",
@@ -2684,6 +2695,46 @@ mod tests {
         assert!(
             !final_path.exists(),
             "the placeholder must not survive a failed rename"
+        );
+    }
+
+    /// A local writer can remove the placeholder and plant an entry of
+    /// its own before the rename. When the rename then fails — the staged
+    /// file is removed in the same window — the cleanup must not delete
+    /// that planted entry in the placeholder's stead: the claim is
+    /// withdrawn only while it is still the file the claim created.
+    #[cfg(unix)]
+    #[test]
+    fn finalize_via_claim_leaves_a_replaced_claim_in_place() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let final_path = tmp_dir.path().join("out.txt");
+        let final_name = final_path.file_name().unwrap();
+
+        let mut tmp = tempfile::Builder::new()
+            .tempfile_in(tmp_dir.path())
+            .unwrap();
+        tmp.write_all(b"payload").unwrap();
+        let tmp_name = tmp.path().file_name().unwrap().to_os_string();
+        let output_dir = OutputDir::open(tmp_dir.path()).unwrap();
+
+        let err = finalize_file_via_claim_with(
+            tmp,
+            &tmp_name,
+            &final_path,
+            "Output",
+            &output_dir,
+            |dir| {
+                dir.remove_file(final_name).unwrap();
+                dir.write(final_name, b"planted").unwrap();
+                dir.remove_file(&tmp_name).unwrap();
+            },
+        )
+        .expect_err("a rename with no staged file must fail the commit");
+        assert!(!err.committed());
+        assert_eq!(
+            fs::read(&final_path).unwrap(),
+            b"planted",
+            "an entry planted in place of the placeholder must survive the cleanup"
         );
     }
 
@@ -2759,7 +2810,7 @@ mod tests {
         fs::create_dir(&orig).unwrap();
         fs::write(&final_path, "victim").unwrap();
 
-        let error = finalize_file_via_claim(tmp, &final_path, "Output", &output_dir)
+        let error = claim_commit(tmp, &final_path, "Output", &output_dir)
             .expect_err("the ambient path no longer names the committed file");
         assert!(error.committed());
         assert!(

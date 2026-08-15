@@ -1763,7 +1763,8 @@ mod tests {
     /// left in place, and a name that is already gone cannot be confirmed.
     /// Each committed handle is dropped before the on-disk state is read,
     /// since Windows may keep a deleted name visible while a handle to
-    /// the file is open.
+    /// the file is open. The second-name case runs on Unix only, like
+    /// every other hard-link test in this crate.
     #[test]
     fn rollback_reports_a_removed_linked_replaced_or_missing_file() {
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1786,20 +1787,23 @@ mod tests {
         drop(finalized);
         assert!(!removed.exists(), "a file with one name must be gone");
 
-        let (linked, finalized) = commit("linked");
-        let other_name = dir.join("linked.other");
-        fs::hard_link(&linked, &other_name).unwrap();
-        assert_eq!(
-            anchor.remove_published_if_retained(&linked, &finalized),
-            RollbackOutcome::RemovedButLinked { link_count: 2 }
-        );
-        drop(finalized);
-        assert!(!linked.exists(), "the committed name must still be removed");
-        assert_eq!(
-            fs::read(&other_name).unwrap(),
-            b"committed",
-            "the other name is not this operation's to remove"
-        );
+        #[cfg(unix)]
+        {
+            let (linked, finalized) = commit("linked");
+            let other_name = dir.join("linked.other");
+            fs::hard_link(&linked, &other_name).unwrap();
+            assert_eq!(
+                anchor.remove_published_if_retained(&linked, &finalized),
+                RollbackOutcome::RemovedButLinked { link_count: 2 }
+            );
+            drop(finalized);
+            assert!(!linked.exists(), "the committed name must still be removed");
+            assert_eq!(
+                fs::read(&other_name).unwrap(),
+                b"committed",
+                "the other name is not this operation's to remove"
+            );
+        }
 
         let (replaced, finalized) = commit("replaced");
         let moved = dir.join("replaced.moved");

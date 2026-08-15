@@ -2685,6 +2685,8 @@ mod tests {
     /// name for it exists must say so: the sealed key survives under that
     /// name, and the error is the only channel that reaches the caller.
     /// The other name is left alone, since it is not this run's to remove.
+    /// Unix only, like every other hard-link test in this crate.
+    #[cfg(unix)]
     #[test]
     fn keygen_rollback_reports_a_surviving_link_to_the_removed_key() {
         let tmp = tempfile::TempDir::new().unwrap();

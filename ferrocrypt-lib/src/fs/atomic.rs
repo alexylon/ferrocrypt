@@ -61,14 +61,17 @@ use crate::CryptoError;
 use crate::error::sanitize_path_for_display;
 use crate::fs::paths::already_exists_error;
 
-/// A file whose commit completed, keeping the committed handle alive. Unix
-/// uses it to confirm immediately before returning that the reported path
-/// still denotes the same object, and to prove the commit left exactly one
-/// name for the committed inode — `tempfile`'s own persist can fall back to
-/// a hard link whose staged-name unlink result it discards. Windows uses it
-/// to confirm a rollback removes only this file; the temporary's sharing
-/// mode keeps renames and deletes allowed, so the retained handle obstructs
-/// nothing.
+/// A file whose commit completed, keeping the committed handle alive. A
+/// key-generation rollback on any platform uses it to confirm that the
+/// entry it removes is still this file. Unix also uses it to confirm,
+/// immediately before returning, that the reported path still denotes
+/// this object, and to prove the commit left exactly one name for the
+/// committed inode — `tempfile`'s own persist can fall back to a hard
+/// link whose staged-name unlink result it discards. On Windows the
+/// rollback deletes the file while this handle is open, which relies on
+/// `tempfile` opening a named temporary with the default sharing mode;
+/// that mode allows renames and deletes, unlike the exclusive mode of
+/// its unnamed temporaries.
 #[derive(Debug)]
 pub(crate) struct FinalizedFile {
     file: std::fs::File,
@@ -605,8 +608,11 @@ fn dir_sync_unsupported(e: &io::Error) -> bool {
 /// later cleans up in.
 ///
 /// `cap_std::fs::Dir` is the same capability primitive the archive
-/// extractor anchors to, and behaves uniformly on Linux, macOS, and
-/// Windows.
+/// extractor anchors to. On Linux and macOS its removals are
+/// handle-relative. On Windows, cap-std resolves the handle to the
+/// directory's current path and removes through that path, so a
+/// directory swap made between that resolution and the removal is not
+/// covered there.
 pub(crate) struct OutputDir {
     dir: cap_std::fs::Dir,
 }
@@ -626,11 +632,11 @@ impl OutputDir {
     ///
     /// Best-effort by design: this undoes a commit made on a path that
     /// is already returning an error, so a failure here has no better
-    /// error to report than the one being returned. A rollback that
-    /// retains the committed file's handle uses
-    /// [`Self::remove_published_if_retained`] instead, so it cannot
-    /// remove a replacement; only the Unix fallback commit routes, whose
-    /// staged claim is not yet that file, remove by bare name.
+    /// error to report than the one being returned. Its only caller is
+    /// the Unix claim route, which withdraws a placeholder that is not
+    /// yet the committed file. A rollback of a committed file uses
+    /// [`Self::remove_published_if_retained`], which leaves a
+    /// replacement in place.
     #[cfg(unix)]
     pub(crate) fn remove_published(&self, path: &Path) {
         if let Some(name) = path.file_name() {

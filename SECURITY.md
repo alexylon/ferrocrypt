@@ -230,11 +230,13 @@ regression net, regenerated when the format intentionally changes).
   not make the output recoverable after the call returns. No path can remain
   stable against a namespace change made after the check or after the call
   returns. What such a swap cannot do is misdirect a cleanup: when key
-  generation has to
-  undo a key file it already wrote, it removes that file through a
-  handle held on the folder the file actually went to, so it can never
-  delete a same-named file elsewhere. Choose an output folder that only
-  you can modify.
+  generation has to undo a key file it already wrote, it removes that file
+  through a handle held on the folder the file actually went to, and only
+  while the entry there is still the file it wrote, so a same-named file
+  elsewhere is not deleted. On Windows that removal goes through the
+  folder's current path, resolved from the handle immediately before, so
+  only a swap made in that last instant is outside this protection. Choose
+  an output folder that only you can modify.
 - **Generated key pairs publish `private.key` before `public.key`.** Key
   generation writes and flushes both files before either receives its
   final name. It then commits `private.key`, flushes the output

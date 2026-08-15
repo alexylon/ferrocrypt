@@ -990,6 +990,8 @@ fn commit_key_pair_files_with_barrier_and_public_finalizer(
     // disk, which is exactly when a substituted output path would send
     // them somewhere else; threading the same handle into both commits
     // keeps the directory that receives a commit the one they act on.
+    // Each rollback also confirms through the retained committed handle
+    // that the entry it removes is still the file this run committed.
     let committed_dir = OutputDir::open(output_dir).map_err(CryptoError::Io)?;
 
     let private_finalized = atomic::finalize_file_with_anchor(
@@ -1000,7 +1002,7 @@ fn commit_key_pair_files_with_barrier_and_public_finalizer(
     )
     .map_err(atomic::FinalizeFileError::into_crypto_error)?;
     if let Err(e) = sync_output_dir(&committed_dir, output_dir) {
-        committed_dir.remove_published(private_key_path);
+        committed_dir.remove_published_if_retained(private_key_path, &private_finalized);
         return Err(CryptoError::Io(e));
     }
     let public_finalized =
@@ -1012,13 +1014,14 @@ fn commit_key_pair_files_with_barrier_and_public_finalizer(
                 // key at its final name, and deleting the private half would
                 // create the unsafe public-only state this ordering prevents.
                 if !error.committed() {
-                    committed_dir.remove_published(private_key_path);
+                    committed_dir
+                        .remove_published_if_retained(private_key_path, &private_finalized);
                 }
                 return Err(error.into_crypto_error());
             }
         };
     if let Err(e) = sync_output_dir(&committed_dir, output_dir) {
-        committed_dir.remove_published(public_key_path);
+        committed_dir.remove_published_if_retained(public_key_path, &public_finalized);
         return Err(CryptoError::Io(e));
     }
     Ok((private_finalized, public_finalized))
@@ -2593,6 +2596,53 @@ mod tests {
         assert!(
             !moved_out.join(PRIVATE_KEY_FILENAME).exists(),
             "the private.key this run committed must still be removed"
+        );
+    }
+
+    /// A rollback must not delete an entry that is no longer the key file
+    /// this run committed. The barrier moves the committed `private.key`
+    /// aside inside the output directory and plants another file at its
+    /// name — what a local writer with access to that directory can do
+    /// while the flush is under way. The planted file must survive, and
+    /// the moved committed key stays where the writer put it.
+    #[cfg(unix)]
+    #[test]
+    fn keygen_rollback_leaves_a_replacement_at_the_committed_name() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        let private_key_path = dir.join(PRIVATE_KEY_FILENAME);
+        let public_key_path = dir.join(PUBLIC_KEY_FILENAME);
+        let private_tmp = staged_key_tempfile(dir, b"private bytes");
+        let public_tmp = staged_key_tempfile(dir, b"public bytes");
+        let moved = dir.join("private.moved");
+
+        let replace_private = {
+            let (private_key_path, moved) = (private_key_path.clone(), moved.clone());
+            move |_: &crate::fs::atomic::OutputDir, _: &Path| -> std::io::Result<()> {
+                fs::rename(&private_key_path, &moved)?;
+                fs::write(&private_key_path, b"planted by another writer")?;
+                Err(std::io::Error::other("injected directory flush failure"))
+            }
+        };
+
+        commit_key_pair_files_with_barrier(
+            private_tmp,
+            public_tmp,
+            &private_key_path,
+            &public_key_path,
+            replace_private,
+        )
+        .expect_err("the injected directory flush failure must fail the commit");
+
+        assert_eq!(
+            fs::read(&private_key_path).unwrap(),
+            b"planted by another writer",
+            "an entry that is not the committed key file must not be removed"
+        );
+        assert_eq!(
+            fs::read(&moved).unwrap(),
+            b"private bytes",
+            "the moved committed key must stay where the writer put it"
         );
     }
 

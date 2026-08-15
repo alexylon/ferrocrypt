@@ -634,11 +634,47 @@ impl OutputDir {
     ///
     /// Best-effort by design: this undoes a commit made on a path that
     /// is already returning an error, so a failure here has no better
-    /// error to report than the one being returned.
+    /// error to report than the one being returned. A rollback that
+    /// retains the committed file's handle uses
+    /// [`Self::remove_published_if_retained`] instead, so it cannot
+    /// remove a replacement.
     pub(crate) fn remove_published(&self, path: &Path) {
         if let Some(name) = path.file_name() {
             let _ = self.dir.remove_file(name);
         }
+    }
+
+    /// [`Self::remove_published`], but only while the entry under the
+    /// name is still the committed file `finalized` retains, compared by
+    /// identity without following symlinks. A rollback runs once its
+    /// commit is already visible, so an entry replaced in that window
+    /// must be left in place rather than deleted; the committed file
+    /// then survives under whatever name it was moved to. An entry or
+    /// handle whose identity cannot be read is left in place on the same
+    /// terms: an unconfirmed entry is not this operation's to remove.
+    #[cfg(unix)]
+    pub(crate) fn remove_published_if_retained(&self, path: &Path, finalized: &FinalizedFile) {
+        use cap_std::fs::MetadataExt;
+
+        let Some(name) = path.file_name() else {
+            return;
+        };
+        let Ok(committed) = finalized.file.metadata() else {
+            return;
+        };
+        let Ok(entry) = self.dir.symlink_metadata(name) else {
+            return;
+        };
+        if entry.is_file() && (entry.dev(), entry.ino()) == file_identity(&committed) {
+            let _ = self.dir.remove_file(name);
+        }
+    }
+
+    /// No stable identity is available to compare off Unix, so the
+    /// rollback falls back to the bare-name removal.
+    #[cfg(not(unix))]
+    pub(crate) fn remove_published_if_retained(&self, path: &Path, _finalized: &FinalizedFile) {
+        self.remove_published(path);
     }
 
     /// Flushes the anchored directory's entries, resolving through the

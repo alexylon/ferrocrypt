@@ -878,7 +878,9 @@ fn generate_key_pair_with_post_commit(
 /// or replaced between the two commits can neither turn a rollback
 /// into the deletion of an unrelated file of the same name nor leave
 /// the durability barrier flushing a directory the entries were never
-/// committed to.
+/// committed to. Both commits also thread that same handle into their
+/// Unix fallback routes, so the directory that receives a commit is
+/// the one the rollbacks and flushes act on.
 fn commit_key_pair_files(
     private_tmp: tempfile::NamedTempFile,
     public_tmp: tempfile::NamedTempFile,
@@ -947,7 +949,7 @@ fn commit_key_pair_files_with_barrier(
         private_key_path,
         public_key_path,
         sync_output_dir,
-        crate::fs::atomic::finalize_file,
+        crate::fs::atomic::finalize_file_with_anchor,
     )
 }
 
@@ -964,6 +966,7 @@ fn commit_key_pair_files_with_barrier_and_public_finalizer(
         tempfile::NamedTempFile,
         &Path,
         &str,
+        &crate::fs::atomic::OutputDir,
     ) -> Result<
         crate::fs::atomic::FinalizedFile,
         crate::fs::atomic::FinalizeFileError,
@@ -981,31 +984,39 @@ fn commit_key_pair_files_with_barrier_and_public_finalizer(
     // Both final paths name entries in the same output directory: one
     // flush covers both, and both rollbacks resolve there.
     let output_dir = parent_or_cwd(private_key_path);
-    // Anchor the rollbacks and the durability barrier to the directory
-    // the staged files were created in. Both run after a commit is
-    // already visible on disk, which is exactly when a substituted
-    // output path would send them somewhere else.
+    // Anchor the fallback commit routes, the rollbacks, and the
+    // durability barrier to the directory the staged files were created
+    // in. Rollback and barrier run after a commit is already visible on
+    // disk, which is exactly when a substituted output path would send
+    // them somewhere else; threading the same handle into both commits
+    // keeps the directory that receives a commit the one they act on.
     let committed_dir = OutputDir::open(output_dir).map_err(CryptoError::Io)?;
 
-    let private_finalized = atomic::finalize_file(private_tmp, private_key_path, KEY_FILE_LABEL)
-        .map_err(atomic::FinalizeFileError::into_crypto_error)?;
+    let private_finalized = atomic::finalize_file_with_anchor(
+        private_tmp,
+        private_key_path,
+        KEY_FILE_LABEL,
+        &committed_dir,
+    )
+    .map_err(atomic::FinalizeFileError::into_crypto_error)?;
     if let Err(e) = sync_output_dir(&committed_dir, output_dir) {
         committed_dir.remove_published(private_key_path);
         return Err(CryptoError::Io(e));
     }
-    let public_finalized = match finalize_public(public_tmp, public_key_path, KEY_FILE_LABEL) {
-        Ok(finalized) => finalized,
-        Err(error) => {
-            // Roll private.key back only while public.key definitely did
-            // not commit. A post-commit error can leave a complete public
-            // key at its final name, and deleting the private half would
-            // create the unsafe public-only state this ordering prevents.
-            if !error.committed() {
-                committed_dir.remove_published(private_key_path);
+    let public_finalized =
+        match finalize_public(public_tmp, public_key_path, KEY_FILE_LABEL, &committed_dir) {
+            Ok(finalized) => finalized,
+            Err(error) => {
+                // Roll private.key back only while public.key definitely did
+                // not commit. A post-commit error can leave a complete public
+                // key at its final name, and deleting the private half would
+                // create the unsafe public-only state this ordering prevents.
+                if !error.committed() {
+                    committed_dir.remove_published(private_key_path);
+                }
+                return Err(error.into_crypto_error());
             }
-            return Err(error.into_crypto_error());
-        }
-    };
+        };
     if let Err(e) = sync_output_dir(&committed_dir, output_dir) {
         committed_dir.remove_published(public_key_path);
         return Err(CryptoError::Io(e));
@@ -2502,8 +2513,8 @@ mod tests {
             &private_key_path,
             &public_key_path,
             |_, _| Ok(()),
-            |tmp, path, label| {
-                let _committed = atomic::finalize_file(tmp, path, label)
+            |tmp, path, label, anchor| {
+                let _committed = atomic::finalize_file_with_anchor(tmp, path, label, anchor)
                     .expect("the injected error must follow a real commit");
                 Err(atomic::FinalizeFileError::after_commit_for_test(
                     CryptoError::Io(std::io::Error::other(

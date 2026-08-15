@@ -1003,11 +1003,13 @@ It contains:
     entry another process plants in its place is replaced by the
     rename, the same bound `SECURITY.md` states for the archive claim.
     The link, the claim, the step-2 rename, and every removal resolve
-    through the one `OutputDir` handle opened at entry — the staged
-    temp file is an entry of the same directory, which the route
-    confirms by identity before its first commit step and otherwise
-    refuses as a caller-contract violation — so a swap of the
-    output path mid-commit cannot redirect any step. If removing the staged
+    through one `OutputDir` handle — opened at entry, or threaded in by
+    key generation so its commits share the anchor its rollbacks and
+    flushes act on — and the staged temp file is an entry of the same
+    directory, which the route confirms by identity before its first
+    commit step and otherwise refuses as a caller-contract violation;
+    a swap of the output path mid-commit therefore cannot redirect any
+    step. If removing the staged
     name after a successful link fails, `finalize_file` returns a marked
     post-commit error and preserves both complete links; it never withdraws
     the final name after a delayed failure. A successful or missing-name unlink
@@ -1051,7 +1053,7 @@ It contains:
   because `rustix` reports a signal-interrupted call as `EINTR` while
   `File::sync_all` retries internally;
 - required directory-entry flushing: `sync_dir_durable` opens and flushes a directory, returning genuine failures to the caller. Unix uses an `O_DIRECTORY | O_NONBLOCK` read handle; Windows uses a backup-semantics write handle because `FlushFileBuffers` requires write access. Filesystems that cannot flush directories are treated as unsupported, which limits the caller's guarantee to process interruption. Key generation uses this helper after each key-file commit. `sync_parent_dir` remains the best-effort helper for path-based recoverable-output commits; on Unix and Windows alike it routes through the same `sync_dir_durable` primitive with the result dropped, so the parent is always opened as a directory and a path replaced by a FIFO or a device node after publication is refused rather than opened — a read-only open of such an object waits for a writer, and a best-effort helper has no error to swallow while the open itself is blocked. The Unix link/claim writer fallbacks instead flush through the exact `OutputDir` handle used for their commit on Linux and macOS, so a renamed destination path cannot redirect the barrier to a replacement directory; other Unix targets retain the path-based best effort. Staged descendant directories during extraction are flushed on Linux and macOS only (`archive/platform.rs::chmod_dir_handle_durable` for descendants, `sync_dir_handle` for the staged root): Windows needs a write handle for `FlushFileBuffers`, and the extraction directory handles are opened read-only; a capability-relative write reopen of `.` could close the gap but is not implemented or verified on Windows;
-- anchored failure cleanup: `OutputDir` retains a `cap_std::fs::Dir` handle on the directory an operation publishes into, and `remove_published` resolves a removal inside that handle rather than through the entry's own path. A rollback runs after a commit is already visible on disk, which is exactly when a renamed or symlink-substituted output path would send the removal into a different directory and unlink a same-named file the operation never created. Key generation opens the handle before its first commit and undoes both key files through it; the `finalize_file_via_claim` fallback uses it for the claim and the claim's removal. The handle does not make the chosen directory trustworthy — the caller's choice of output directory is the trust boundary — it removes the mismatch between the directory an operation wrote to and the one it later cleans up in;
+- anchored failure cleanup: `OutputDir` retains a `cap_std::fs::Dir` handle on the directory an operation publishes into, and `remove_published` resolves a removal inside that handle rather than through the entry's own path. A rollback runs after a commit is already visible on disk, which is exactly when a renamed or symlink-substituted output path would send the removal into a different directory and unlink a same-named file the operation never created. Key generation opens the handle before its first commit, threads it into both fallback commit routes (`finalize_file_with_anchor`), and undoes both key files through it, so commit, rollback, and barrier share one anchor; the `finalize_file_via_claim` fallback uses it for the claim and the claim's removal. The handle does not make the chosen directory trustworthy — the caller's choice of output directory is the trust boundary — it removes the mismatch between the directory an operation wrote to and the one it later cleans up in;
 - keeping a staged file on disk after a refused promotion, so a rejected commit leaves the caller something to inspect.
 
 Temporary output names, same-directory staging, and cleanup on encryption failure are the callers' concern: `container.rs` and `protocol.rs` build the names and stage into the destination directory, and `NamedTempFile`'s destructor removes a staged file that was never committed. `.incomplete` behavior on decryption failure belongs to `archive/decode.rs`, which owns the `StagedRoot` record of what the run created, its removal, and the `IncompleteOutputPolicy` dispatch.

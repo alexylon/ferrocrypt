@@ -2605,7 +2605,6 @@ mod tests {
     /// name — what a local writer with access to that directory can do
     /// while the flush is under way. The planted file must survive, and
     /// the moved committed key stays where the writer put it.
-    #[cfg(unix)]
     #[test]
     fn keygen_rollback_leaves_a_replacement_at_the_committed_name() {
         let tmp = tempfile::TempDir::new().unwrap();

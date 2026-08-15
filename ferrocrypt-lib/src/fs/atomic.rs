@@ -61,31 +61,22 @@ use crate::CryptoError;
 use crate::error::sanitize_path_for_display;
 use crate::fs::paths::already_exists_error;
 
-/// A file whose commit completed. Unix keeps the committed handle alive so a
-/// caller can confirm immediately before returning that its reported path
-/// still denotes the same object. Every Unix commit route also uses that
-/// handle to prove the commit left exactly one name for the committed inode —
-/// `tempfile`'s own persist can fall back to a hard link whose staged-name
-/// unlink result it discards. Other targets expose no stable identity through
-/// `std`, so retaining the handle there would only obstruct rollback on
-/// Windows.
+/// A file whose commit completed, keeping the committed handle alive. Unix
+/// uses it to confirm immediately before returning that the reported path
+/// still denotes the same object, and to prove the commit left exactly one
+/// name for the committed inode — `tempfile`'s own persist can fall back to
+/// a hard link whose staged-name unlink result it discards. Windows uses it
+/// to confirm a rollback removes only this file; the temporary's sharing
+/// mode keeps renames and deletes allowed, so the retained handle obstructs
+/// nothing.
 #[derive(Debug)]
 pub(crate) struct FinalizedFile {
-    #[cfg(unix)]
     file: std::fs::File,
 }
 
 impl FinalizedFile {
     fn new(file: std::fs::File) -> Self {
-        #[cfg(unix)]
-        {
-            Self { file }
-        }
-        #[cfg(not(unix))]
-        {
-            drop(file);
-            Self {}
-        }
+        Self { file }
     }
 
     /// Confirms that `path`, the value a writer is about to report, still
@@ -638,7 +629,9 @@ impl OutputDir {
     /// error to report than the one being returned. A rollback that
     /// retains the committed file's handle uses
     /// [`Self::remove_published_if_retained`] instead, so it cannot
-    /// remove a replacement.
+    /// remove a replacement; only the Unix fallback commit routes, whose
+    /// staged claim is not yet that file, remove by bare name.
+    #[cfg(unix)]
     pub(crate) fn remove_published(&self, path: &Path) {
         if let Some(name) = path.file_name() {
             let _ = self.dir.remove_file(name);
@@ -671,11 +664,28 @@ impl OutputDir {
         }
     }
 
-    /// No stable identity is available to compare off Unix, so the
-    /// rollback falls back to the bare-name removal.
-    #[cfg(not(unix))]
-    pub(crate) fn remove_published_if_retained(&self, path: &Path, _finalized: &FinalizedFile) {
-        self.remove_published(path);
+    /// The Windows arm of the same rule, comparing the volume serial
+    /// number and file index through `cap_fs_ext`. Both sides are read
+    /// from open handles — the retained committed handle, and the handle
+    /// the no-follow stat opens for itself — so the by-handle fields are
+    /// always populated. ReFS can truncate its wider file identifiers; a
+    /// false match there removes no more than a bare-name removal would.
+    #[cfg(windows)]
+    pub(crate) fn remove_published_if_retained(&self, path: &Path, finalized: &FinalizedFile) {
+        use cap_fs_ext::MetadataExt;
+
+        let Some(name) = path.file_name() else {
+            return;
+        };
+        let Ok(committed) = cap_std::fs::Metadata::from_file(&finalized.file) else {
+            return;
+        };
+        let Ok(entry) = self.dir.symlink_metadata(name) else {
+            return;
+        };
+        if entry.is_file() && (entry.dev(), entry.ino()) == (committed.dev(), committed.ino()) {
+            let _ = self.dir.remove_file(name);
+        }
     }
 
     /// Flushes the anchored directory's entries, resolving through the

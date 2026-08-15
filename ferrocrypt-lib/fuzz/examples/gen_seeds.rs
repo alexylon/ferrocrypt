@@ -53,8 +53,9 @@ const FUZZ_KEY_PASSPHRASE: &str = "fuzz_key";
 /// Argon2id parameters every fuzz artefact is written with: memory at
 /// the writer's floor (the least it will emit) and the cheapest legal
 /// time and lane counts, so an unlock costs the fuzzer as little as the
-/// format allows. The harnesses cap their readers at exactly these
-/// values, which bounds what a crafted header can demand per iteration.
+/// format allows. The harnesses cap their readers' memory and total
+/// work at that floor, which bounds what a crafted header can demand
+/// per iteration.
 fn fuzz_kdf_params() -> KdfParams {
     KdfParams {
         mem_cost: MIN_WRITE_MEM_COST,
@@ -63,13 +64,11 @@ fn fuzz_kdf_params() -> KdfParams {
     }
 }
 
-/// The reader budget matching [`fuzz_kdf_params`], shared with both
-/// decrypt harnesses.
+/// The reader budget every decrypt seed is validated under. Kept in
+/// lockstep with `harness_kdf_limit` in both decrypt targets, so a seed
+/// that validates here is exactly one the fuzzers accept.
 fn fuzz_kdf_limit() -> KdfLimit {
-    KdfLimit::new(MIN_WRITE_MEM_COST)
-        .max_time_cost(1)
-        .max_lanes(4)
-        .max_work(u64::from(MIN_WRITE_MEM_COST))
+    KdfLimit::new(MIN_WRITE_MEM_COST).max_work(u64::from(MIN_WRITE_MEM_COST))
 }
 
 fn main() {

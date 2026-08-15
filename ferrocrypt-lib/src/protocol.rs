@@ -871,6 +871,9 @@ fn generate_key_pair_with_post_commit(
 ///   `private.key` is kept. Removing both without a working directory flush
 ///   could leave only `public.key` after power loss. The remaining private key
 ///   is safe to delete.
+/// - A removal that cannot confirm the key file is gone — the entry was
+///   replaced, its identity could not be read, or the file had other
+///   names — is reported in the returned error.
 ///
 /// Every removal above resolves inside the retained output-directory
 /// handle rather than through the key-file path, and on Linux and
@@ -1002,8 +1005,13 @@ fn commit_key_pair_files_with_barrier_and_public_finalizer(
     )
     .map_err(atomic::FinalizeFileError::into_crypto_error)?;
     if let Err(e) = sync_output_dir(&committed_dir, output_dir) {
-        committed_dir.remove_published_if_retained(private_key_path, &private_finalized);
-        return Err(CryptoError::Io(e));
+        let rollback =
+            committed_dir.remove_published_if_retained(private_key_path, &private_finalized);
+        return Err(atomic::with_rollback_report(
+            CryptoError::Io(e),
+            rollback,
+            private_key_path,
+        ));
     }
     let public_finalized =
         match finalize_public(public_tmp, public_key_path, KEY_FILE_LABEL, &committed_dir) {
@@ -1013,16 +1021,26 @@ fn commit_key_pair_files_with_barrier_and_public_finalizer(
                 // not commit. A post-commit error can leave a complete public
                 // key at its final name, and deleting the private half would
                 // create the unsafe public-only state this ordering prevents.
-                if !error.committed() {
-                    committed_dir
-                        .remove_published_if_retained(private_key_path, &private_finalized);
+                if error.committed() {
+                    return Err(error.into_crypto_error());
                 }
-                return Err(error.into_crypto_error());
+                let rollback = committed_dir
+                    .remove_published_if_retained(private_key_path, &private_finalized);
+                return Err(atomic::with_rollback_report(
+                    error.into_crypto_error(),
+                    rollback,
+                    private_key_path,
+                ));
             }
         };
     if let Err(e) = sync_output_dir(&committed_dir, output_dir) {
-        committed_dir.remove_published_if_retained(public_key_path, &public_finalized);
-        return Err(CryptoError::Io(e));
+        let rollback =
+            committed_dir.remove_published_if_retained(public_key_path, &public_finalized);
+        return Err(atomic::with_rollback_report(
+            CryptoError::Io(e),
+            rollback,
+            public_key_path,
+        ));
     }
     Ok((private_finalized, public_finalized))
 }
@@ -2603,8 +2621,11 @@ mod tests {
     /// this run committed. The barrier moves the committed `private.key`
     /// aside inside the output directory and plants another file at its
     /// name — what a local writer with access to that directory can do
-    /// while the flush is under way. The planted file must survive, and
-    /// the moved committed key stays where the writer put it.
+    /// while the flush is under way. The planted file must survive, the
+    /// moved committed key stays where the writer put it, and the error
+    /// must say the replacement was left in place: that wording proves the
+    /// identity comparison ran and declined, where a rollback that could
+    /// not read an identity would report an unconfirmed removal instead.
     #[test]
     fn keygen_rollback_leaves_a_replacement_at_the_committed_name() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -2615,16 +2636,22 @@ mod tests {
         let public_tmp = staged_key_tempfile(dir, b"public bytes");
         let moved = dir.join("private.moved");
 
+        // Records that `private.key` really was committed before the
+        // replacement, so the assertions below cannot pass just because
+        // nothing was ever published.
+        let committed_before_swap = std::rc::Rc::new(std::cell::Cell::new(false));
         let replace_private = {
             let (private_key_path, moved) = (private_key_path.clone(), moved.clone());
+            let committed = committed_before_swap.clone();
             move |_: &crate::fs::atomic::OutputDir, _: &Path| -> std::io::Result<()> {
+                committed.set(private_key_path.exists());
                 fs::rename(&private_key_path, &moved)?;
                 fs::write(&private_key_path, b"planted by another writer")?;
                 Err(std::io::Error::other("injected directory flush failure"))
             }
         };
 
-        commit_key_pair_files_with_barrier(
+        let err = commit_key_pair_files_with_barrier(
             private_tmp,
             public_tmp,
             &private_key_path,
@@ -2633,6 +2660,15 @@ mod tests {
         )
         .expect_err("the injected directory flush failure must fail the commit");
 
+        assert!(
+            committed_before_swap.get(),
+            "the flush must run after private.key is committed, or this test proves nothing"
+        );
+        assert_eq!(
+            err.to_string(),
+            "injected directory flush failure; private.key was replaced during the operation and left in place, and the file this run wrote may remain under another name",
+            "the error must report the replacement the rollback found; the interference steps in the barrier report their own error here if one of them was refused"
+        );
         assert_eq!(
             fs::read(&private_key_path).unwrap(),
             b"planted by another writer",
@@ -2642,6 +2678,56 @@ mod tests {
             fs::read(&moved).unwrap(),
             b"private bytes",
             "the moved committed key must stay where the writer put it"
+        );
+    }
+
+    /// A rollback that removes the committed `private.key` while another
+    /// name for it exists must say so: the sealed key survives under that
+    /// name, and the error is the only channel that reaches the caller.
+    /// The other name is left alone, since it is not this run's to remove.
+    #[test]
+    fn keygen_rollback_reports_a_surviving_link_to_the_removed_key() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        let private_key_path = dir.join(PRIVATE_KEY_FILENAME);
+        let public_key_path = dir.join(PUBLIC_KEY_FILENAME);
+        let private_tmp = staged_key_tempfile(dir, b"private bytes");
+        let public_tmp = staged_key_tempfile(dir, b"public bytes");
+        let linked = dir.join("private.linked");
+
+        let link_private = {
+            let (private_key_path, linked) = (private_key_path.clone(), linked.clone());
+            move |_: &crate::fs::atomic::OutputDir, _: &Path| -> std::io::Result<()> {
+                fs::hard_link(&private_key_path, &linked)?;
+                Err(std::io::Error::other("injected directory flush failure"))
+            }
+        };
+
+        let err = commit_key_pair_files_with_barrier(
+            private_tmp,
+            public_tmp,
+            &private_key_path,
+            &public_key_path,
+            link_private,
+        )
+        .expect_err("the injected directory flush failure must fail the commit");
+
+        assert_eq!(
+            err.to_string(),
+            "injected directory flush failure; the removed private.key had 2 filesystem links, so a copy may remain under another name"
+        );
+        assert!(
+            matches!(err, CryptoError::Io(_)),
+            "the flush error must keep its I/O class, got {err:?}"
+        );
+        assert!(
+            !private_key_path.exists(),
+            "the committed name must still be removed"
+        );
+        assert_eq!(
+            fs::read(&linked).unwrap(),
+            b"private bytes",
+            "the other name is not this run's to remove"
         );
     }
 

@@ -246,7 +246,9 @@ regression net, regenerated when the format intentionally changes).
   directory flushing, the same guarantee covers power loss. A flush
   failure stops key generation and removes any unsafe partial result;
   after a failure following the `public.key` commit, a lone
-  `private.key` may remain and is safe to delete. Filesystems that do
+  `private.key` may remain and is safe to delete. If that removal cannot
+  be confirmed — the key file was replaced during the operation, or it
+  still had another name — the error says so. Filesystems that do
   not support directory flushing depend on their own ordering after
   power loss. Key generation opens your output folder for its rollback
   anchoring and its directory flushes, so it needs a folder it can read

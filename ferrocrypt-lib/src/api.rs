@@ -1002,6 +1002,8 @@ impl KeyPairGenerator {
     /// directory flush could leave only the public key after power loss. A
     /// remaining `private.key` is safe to delete. Any error after a commit can
     /// therefore leave one or both complete key files for the caller to inspect.
+    /// If a removal cannot be confirmed — the key file was replaced during the
+    /// operation, or it still had another name — the error message says so.
     pub fn write(
         self,
         output_dir: impl AsRef<Path>,

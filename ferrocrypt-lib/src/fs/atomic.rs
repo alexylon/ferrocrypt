@@ -159,6 +159,69 @@ pub(crate) fn committed_link_count_error(display_name: &str, link_count: u64) ->
     )))
 }
 
+/// What [`OutputDir::remove_published_if_retained`] did with a committed
+/// file. Only [`Self::Removed`] needs no report: every other outcome
+/// means a file the operation wrote may still exist, and the returned
+/// error says so through [`with_rollback_report`], since nothing else
+/// reaches the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RollbackOutcome {
+    /// The committed file was removed, and its name was the only one it
+    /// had.
+    Removed,
+    /// The committed file's name was removed, but the file had
+    /// `link_count` names at that moment, so it survives under the others.
+    RemovedButLinked { link_count: u64 },
+    /// The entry under the name is no longer the committed file and was
+    /// left in place; the committed file survives under whatever name it
+    /// was moved to, if any.
+    Replaced,
+    /// Nothing was removed: the name is gone, an identity could not be
+    /// read, or the removal itself failed.
+    Unconfirmed,
+}
+
+impl RollbackOutcome {
+    /// The clause appended to the operation's error, or `None` when the
+    /// rollback removed the file completely. Names the file by its final
+    /// component: the caller chose the directory and knows it already.
+    fn report(self, path: &Path) -> Option<String> {
+        let name = path.file_name().unwrap_or(path.as_os_str());
+        let shown = crate::error::sanitize_for_display(&name.to_string_lossy());
+        Some(match self {
+            Self::Removed => return None,
+            Self::RemovedButLinked { link_count } => format!(
+                "the removed {shown} had {link_count} filesystem links, so a copy may remain under another name"
+            ),
+            Self::Replaced => format!(
+                "{shown} was replaced during the operation and left in place, and the file this run wrote may remain under another name"
+            ),
+            Self::Unconfirmed => format!("the removal of {shown} could not be confirmed"),
+        })
+    }
+}
+
+/// Appends a rollback's report to the error the operation is already
+/// returning. The error keeps its class where that class carries a
+/// message; a rollback that removed the committed file completely
+/// returns `error` unchanged.
+pub(crate) fn with_rollback_report(
+    error: CryptoError,
+    outcome: RollbackOutcome,
+    path: &Path,
+) -> CryptoError {
+    let Some(report) = outcome.report(path) else {
+        return error;
+    };
+    match error {
+        CryptoError::Io(e) => CryptoError::Io(io::Error::new(e.kind(), format!("{e}; {report}"))),
+        CryptoError::InvalidInput(message) => {
+            CryptoError::InvalidInput(format!("{message}; {report}"))
+        }
+        other => CryptoError::Io(io::Error::other(format!("{other}; {report}"))),
+    }
+}
+
 /// Failure from [`finalize_file`], retaining whether the file reached a final
 /// name before the error. Key generation needs that distinction: if
 /// `public.key` committed and only a post-commit verification failed, rolling
@@ -652,7 +715,11 @@ impl OutputDir {
     /// in place rather than deleted; the committed file then survives
     /// under whatever name it was moved to. An entry or handle whose
     /// identity cannot be read is left in place on the same terms: an
-    /// unconfirmed entry is not this operation's to remove.
+    /// unconfirmed entry is not this operation's to remove. The returned
+    /// [`RollbackOutcome`] says whether the file is gone, so the caller
+    /// can report a rollback that left the file, or another name for it,
+    /// behind. The link count is read through the retained handle before
+    /// the removal; a name added after that read is not counted.
     ///
     /// The identity is the device and inode number on Unix and the volume
     /// serial number and file index on Windows, read through `cap_fs_ext`
@@ -661,20 +728,32 @@ impl OutputDir {
     /// by-handle fields are always populated. ReFS can truncate its wider
     /// file identifiers; a false match there removes no more than a
     /// bare-name removal would.
-    pub(crate) fn remove_published_if_retained(&self, path: &Path, finalized: &FinalizedFile) {
+    #[must_use = "the outcome says whether the committed file is gone; report it"]
+    pub(crate) fn remove_published_if_retained(
+        &self,
+        path: &Path,
+        finalized: &FinalizedFile,
+    ) -> RollbackOutcome {
         use cap_fs_ext::MetadataExt;
 
         let Some(name) = path.file_name() else {
-            return;
+            return RollbackOutcome::Unconfirmed;
         };
         let Ok(committed) = cap_std::fs::Metadata::from_file(&finalized.file) else {
-            return;
+            return RollbackOutcome::Unconfirmed;
         };
         let Ok(entry) = self.dir.symlink_metadata(name) else {
-            return;
+            return RollbackOutcome::Unconfirmed;
         };
-        if entry.is_file() && (entry.dev(), entry.ino()) == (committed.dev(), committed.ino()) {
-            let _ = self.dir.remove_file(name);
+        if !entry.is_file() || (entry.dev(), entry.ino()) != (committed.dev(), committed.ino()) {
+            return RollbackOutcome::Replaced;
+        }
+        if self.dir.remove_file(name).is_err() {
+            return RollbackOutcome::Unconfirmed;
+        }
+        match committed.nlink() {
+            1 => RollbackOutcome::Removed,
+            link_count => RollbackOutcome::RemovedButLinked { link_count },
         }
     }
 
@@ -1675,6 +1754,113 @@ mod tests {
         assert!(
             !tmp_dir.path().join("out.moved").join("key").exists(),
             "the anchored directory's own entry must still be removed"
+        );
+    }
+
+    /// The rollback tells its caller what it left behind: a file removed
+    /// with its only name needs no report, a file with a second name
+    /// survives under it, an entry that is no longer the committed file is
+    /// left in place, and a name that is already gone cannot be confirmed.
+    /// Each committed handle is dropped before the on-disk state is read,
+    /// since Windows may keep a deleted name visible while a handle to
+    /// the file is open.
+    #[test]
+    fn rollback_reports_a_removed_linked_replaced_or_missing_file() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let dir = tmp_dir.path();
+        let anchor = OutputDir::open(dir).unwrap();
+        let commit = |name: &str| {
+            let mut tmp = tempfile::Builder::new().tempfile_in(dir).unwrap();
+            tmp.write_all(b"committed").unwrap();
+            let path = dir.join(name);
+            let finalized = finalize_file_with_anchor(tmp, &path, "Key file", &anchor)
+                .expect("the commit must succeed on a fresh name");
+            (path, finalized)
+        };
+
+        let (removed, finalized) = commit("removed");
+        assert_eq!(
+            anchor.remove_published_if_retained(&removed, &finalized),
+            RollbackOutcome::Removed
+        );
+        drop(finalized);
+        assert!(!removed.exists(), "a file with one name must be gone");
+
+        let (linked, finalized) = commit("linked");
+        let other_name = dir.join("linked.other");
+        fs::hard_link(&linked, &other_name).unwrap();
+        assert_eq!(
+            anchor.remove_published_if_retained(&linked, &finalized),
+            RollbackOutcome::RemovedButLinked { link_count: 2 }
+        );
+        drop(finalized);
+        assert!(!linked.exists(), "the committed name must still be removed");
+        assert_eq!(
+            fs::read(&other_name).unwrap(),
+            b"committed",
+            "the other name is not this operation's to remove"
+        );
+
+        let (replaced, finalized) = commit("replaced");
+        let moved = dir.join("replaced.moved");
+        fs::rename(&replaced, &moved).unwrap();
+        fs::write(&replaced, b"planted").unwrap();
+        assert_eq!(
+            anchor.remove_published_if_retained(&replaced, &finalized),
+            RollbackOutcome::Replaced
+        );
+        drop(finalized);
+        assert_eq!(fs::read(&replaced).unwrap(), b"planted");
+        assert_eq!(fs::read(&moved).unwrap(), b"committed");
+
+        let (missing, finalized) = commit("missing");
+        fs::remove_file(&missing).unwrap();
+        assert_eq!(
+            anchor.remove_published_if_retained(&missing, &finalized),
+            RollbackOutcome::Unconfirmed
+        );
+    }
+
+    /// Only a complete removal leaves the operation's error unchanged.
+    /// Every other outcome appends its report, and the error keeps its
+    /// class so callers matching on it see what they saw before.
+    #[test]
+    fn rollback_report_is_appended_without_changing_the_error_class() {
+        let path = Path::new("out/private.key");
+        let io_error = || CryptoError::Io(io::Error::new(io::ErrorKind::TimedOut, "flush failed"));
+
+        let unchanged = with_rollback_report(io_error(), RollbackOutcome::Removed, path);
+        assert_eq!(unchanged.to_string(), "flush failed");
+
+        let linked = with_rollback_report(
+            io_error(),
+            RollbackOutcome::RemovedButLinked { link_count: 2 },
+            path,
+        );
+        assert_eq!(
+            linked.to_string(),
+            "flush failed; the removed private.key had 2 filesystem links, so a copy may remain under another name"
+        );
+        match linked {
+            CryptoError::Io(e) => assert_eq!(e.kind(), io::ErrorKind::TimedOut),
+            other => panic!("the I/O class must be kept, got {other:?}"),
+        }
+
+        let replaced = with_rollback_report(
+            CryptoError::InvalidInput("Key file already exists: out/public.key".into()),
+            RollbackOutcome::Replaced,
+            path,
+        );
+        assert_eq!(
+            replaced.to_string(),
+            "Key file already exists: out/public.key; private.key was replaced during the operation and left in place, and the file this run wrote may remain under another name"
+        );
+        assert!(matches!(replaced, CryptoError::InvalidInput(_)));
+
+        let unconfirmed = with_rollback_report(io_error(), RollbackOutcome::Unconfirmed, path);
+        assert_eq!(
+            unconfirmed.to_string(),
+            "flush failed; the removal of private.key could not be confirmed"
         );
     }
 

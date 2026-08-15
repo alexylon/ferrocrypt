@@ -126,8 +126,10 @@ regression net, regenerated when the format intentionally changes).
 - **Partial plaintext on decrypt failure.** Authenticated chunks are
   released to disk as they verify. If a later chunk fails
   authentication, partial plaintext may remain in a sibling
-  `.incomplete` working copy. The final output path is never written
-  on a failed decrypt.
+  `.incomplete` working copy. A failure before final promotion does not
+  write the final output path. A later filesystem namespace check can
+  still report an error after the complete output was committed; that
+  post-commit error does not delete the confirmed output by name.
 - **Hardened extraction is unified across Linux, macOS, and Windows.**
   Every directory open is anchored to a `cap-std` directory handle and
   refuses any symlink at any component (via
@@ -146,22 +148,27 @@ regression net, regenerated when the format intentionally changes).
   decrypts; directory decrypts still have a tiny race window.** When
   decryption finishes, FerroCrypt renames the working `.incomplete`
   entry to its final name. On Linux and macOS, the operating system
-  refuses this rename atomically if the final name is already taken —
-  no window for another process to interfere. On filesystems whose
+  refuses this rename atomically if the final name is already taken. On
+  filesystems whose
   driver cannot do that in one step (Apple's exFAT driver, some network
   filesystems), any single **file** FerroCrypt commits — a decrypted
   file, an encrypted file, or a generated key file — is instead linked
   to its final name and the working name removed: creating a link
-  refuses an existing entry atomically, so this too leaves no window.
-  If the working name cannot be removed after the link — some network
-  filesystems refuse to remove a name while another machine holds the
-  file open — a decrypt withdraws the link and commits through the
-  reservation step below instead, so a decrypt reported as successful
-  does not quietly leave a second name for the decrypted file. Only
-  when the filesystem refuses to remove either name is the finished
-  output kept under both; the extra name is the same file, and later
-  decrypts into that folder refuse until it is removed. A
-  decrypted **folder**
+  refuses an existing entry atomically, so there is no replaceable
+  placeholder at the final name. FerroCrypt does not trust the subsequent
+  unlink alone: another directory writer could move the working link and
+  make the unlink report it missing, or plant a replacement that the unlink
+  removes instead. Before success, FerroCrypt reads the committed inode's
+  link count through its retained handle and requires exactly one link.
+  If the working name cannot be removed, the link count cannot be read, or
+  another link remains, the final name is already a complete commit.
+  FerroCrypt does not withdraw it: the cleanup may have taken long enough
+  for another writer to replace that entry, and removing it by name could
+  delete the replacement. Instead the operation completes its identity
+  checks and returns an explicit post-commit error. Complete content may
+  remain under the final name and under a temporary or moved second name,
+  which must be inspected manually. This applies to decrypted files,
+  encrypted files, and generated key files. A decrypted **folder**
   cannot be linked, and neither can anything on a filesystem without
   hard links (exFAT again). Those cases claim the final name by creating
   it — creation refuses an existing entry atomically — and then rename
@@ -207,10 +214,19 @@ regression net, regenerated when the format intentionally changes).
   the attribute yourself if your backup schedule depends on it.
 - **An output folder another local process can change is a trust
   boundary.** FerroCrypt writes each output under a temporary name in
-  the folder you chose and commits it there. If another local process
-  can rename or replace that folder while the operation runs, the
-  finished file can end up in whatever the path names by then. What such
-  a swap cannot do is misdirect a cleanup: when key generation has to
+  the folder you chose and commits it there. On Unix, encryption and key
+  generation retain the committed file handle and check immediately before
+  return that each reported path still denotes that file; Linux and macOS
+  decryption performs the matching directory and output identity checks. A
+  hard-link fallback also requires the retained inode to have exactly one
+  link before success. A swap detected there returns an error and leaves the entry currently at the
+  reported path untouched. If the original file or folder was moved, the
+  complete output remains under that new name. If it was removed without
+  another name or hard link, the retained handle permits detection but does
+  not make the output recoverable after the call returns. No path can remain
+  stable against a namespace change made after the check or after the call
+  returns. What such a swap cannot do is misdirect a cleanup: when key
+  generation has to
   undo a key file it already wrote, it removes that file through a
   handle held on the folder the file actually went to, so it can never
   delete a same-named file elsewhere. Choose an output folder that only

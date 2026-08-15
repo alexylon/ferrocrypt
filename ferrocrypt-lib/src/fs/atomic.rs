@@ -57,7 +57,140 @@ use std::path::Path;
 use tempfile::NamedTempFile;
 
 use crate::CryptoError;
+#[cfg(unix)]
+use crate::error::sanitize_path_for_display;
 use crate::fs::paths::already_exists_error;
+
+/// A file whose commit completed. Unix keeps the committed handle alive so a
+/// caller can confirm immediately before returning that its reported path
+/// still denotes the same object. The hard-link fallback also uses that handle
+/// to prove its temporary-link cleanup left exactly one name for the committed
+/// inode. Other targets expose no stable identity through `std`, so retaining
+/// the handle there would only obstruct rollback on Windows.
+#[derive(Debug)]
+pub(crate) struct FinalizedFile {
+    #[cfg(unix)]
+    file: std::fs::File,
+}
+
+impl FinalizedFile {
+    fn new(file: std::fs::File) -> Self {
+        #[cfg(unix)]
+        {
+            Self { file }
+        }
+        #[cfg(not(unix))]
+        {
+            drop(file);
+            Self {}
+        }
+    }
+
+    /// Confirms that `path`, the value a writer is about to report, still
+    /// denotes this committed file. A directory swap after the commit can
+    /// otherwise make the returned path lead to attacker-controlled bytes.
+    pub(crate) fn confirm_reported_path(&self, path: &Path) -> Result<(), CryptoError> {
+        #[cfg(unix)]
+        {
+            let committed = self.file.metadata().map_err(CryptoError::Io)?;
+            let reported = std::fs::symlink_metadata(path).map_err(CryptoError::Io)?;
+            if !reported.file_type().is_file()
+                || file_identity(&committed) != file_identity(&reported)
+            {
+                return Err(reported_output_changed(path));
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = path;
+        Ok(())
+    }
+
+    /// Requires the hard-link commit route to have removed every additional
+    /// link it created before success is reported. Reading through the retained
+    /// handle makes this independent of concurrent renames or replacements of
+    /// either directory entry.
+    #[cfg(unix)]
+    fn confirm_single_link(&self, path: &Path) -> Result<(), CryptoError> {
+        use std::os::unix::fs::MetadataExt;
+
+        let link_count = self.file.metadata().map_err(CryptoError::Io)?.nlink();
+        if link_count != 1 {
+            return Err(unexpected_committed_link_count(path, link_count));
+        }
+        Ok(())
+    }
+}
+
+/// Stable Unix identity for a committed file. Comparing the object behind the
+/// retained handle with the final path catches both a final-name replacement
+/// and a parent-directory swap before a writer reports that path.
+#[cfg(unix)]
+fn file_identity(metadata: &std::fs::Metadata) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+
+    (metadata.dev(), metadata.ino())
+}
+
+#[cfg(unix)]
+fn reported_output_changed(path: &Path) -> CryptoError {
+    CryptoError::InvalidInput(format!(
+        "Output is complete but its reported path changed: {}",
+        sanitize_path_for_display(path)
+    ))
+}
+
+/// Post-commit failure for a hard-link fallback whose staged-name removal
+/// returned success (or `NotFound`) while another link to the committed inode
+/// still exists. The retained handle, rather than either mutable name, supplies
+/// the count.
+#[cfg(unix)]
+fn unexpected_committed_link_count(path: &Path, link_count: u64) -> CryptoError {
+    CryptoError::Io(io::Error::other(format!(
+        "Output {} is complete, but temporary-link cleanup left {link_count} filesystem links (expected 1)",
+        sanitize_path_for_display(path),
+    )))
+}
+
+/// Failure from [`finalize_file`], retaining whether the file reached a final
+/// name before the error. Key generation needs that distinction: if
+/// `public.key` committed and only a post-commit verification failed, rolling
+/// back `private.key` would leave an unsafe public-only pair.
+#[derive(Debug)]
+pub(crate) struct FinalizeFileError {
+    error: CryptoError,
+    committed: bool,
+}
+
+impl FinalizeFileError {
+    fn before_commit(error: CryptoError) -> Self {
+        Self {
+            error,
+            committed: false,
+        }
+    }
+
+    fn after_commit(error: CryptoError) -> Self {
+        Self {
+            error,
+            committed: true,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn after_commit_for_test(error: CryptoError) -> Self {
+        Self::after_commit(error)
+    }
+
+    /// Whether a final name was created before this error.
+    pub(crate) fn committed(&self) -> bool {
+        self.committed
+    }
+
+    /// Returns the caller-visible error.
+    pub(crate) fn into_crypto_error(self) -> CryptoError {
+        self.error
+    }
+}
 
 /// Best-effort parent-directory sync used after a successful file persist or
 /// directory rename. This slightly improves durability after the final path
@@ -91,8 +224,10 @@ fn sync_parent_dir(_path: &Path) {}
 /// `InvalidInput("<label> already exists: …")` message the pre-write
 /// occupancy check emits, so a path that becomes occupied between the
 /// preflight and this rename reports the same error class. Other
-/// failures surface as [`CryptoError::Io`]. The temp file is removed
-/// on every failure path.
+/// failures surface as [`CryptoError::Io`]. A failure before publication
+/// removes the temp file best-effort. A failure after publication is marked
+/// by [`FinalizeFileError::committed`]; the final entry is kept because a
+/// bare-name rollback could delete a concurrent replacement.
 ///
 /// The promotion is a single atomic no-replace rename wherever the
 /// filesystem supports one. Where it does not (see
@@ -112,11 +247,15 @@ pub(crate) fn finalize_file(
     tmp: NamedTempFile,
     final_path: &Path,
     label: &str,
-) -> Result<(), CryptoError> {
+) -> Result<FinalizedFile, FinalizeFileError> {
     match tmp.persist_noclobber(final_path) {
-        Ok(_) => {
+        Ok(file) => {
             sync_parent_dir(final_path);
-            Ok(())
+            let finalized = FinalizedFile::new(file);
+            finalized
+                .confirm_reported_path(final_path)
+                .map_err(FinalizeFileError::after_commit)?;
+            Ok(finalized)
         }
         Err(e) => finalize_persist_failure(e, final_path, label),
     }
@@ -132,11 +271,13 @@ fn finalize_persist_failure(
     e: tempfile::PersistError,
     final_path: &Path,
     label: &str,
-) -> Result<(), CryptoError> {
+) -> Result<FinalizedFile, FinalizeFileError> {
     if no_replace_rename_unsupported(&e.error) {
         return finalize_file_via_link_or_claim(e.file, final_path, label);
     }
-    Err(map_persist_error(e.error, final_path, label))
+    Err(FinalizeFileError::before_commit(map_persist_error(
+        e.error, final_path, label,
+    )))
 }
 
 #[cfg(not(unix))]
@@ -144,8 +285,10 @@ fn finalize_persist_failure(
     e: tempfile::PersistError,
     final_path: &Path,
     label: &str,
-) -> Result<(), CryptoError> {
-    Err(map_persist_error(e.error, final_path, label))
+) -> Result<FinalizedFile, FinalizeFileError> {
+    Err(FinalizeFileError::before_commit(map_persist_error(
+        e.error, final_path, label,
+    )))
 }
 
 /// Maps a failed promotion to the caller-visible error: an occupied
@@ -505,43 +648,97 @@ fn no_final_component_error() -> io::Error {
 /// falls through to [`finalize_file_via_claim`]. Any other link failure
 /// falls through too: the claim path attempts the same commit and
 /// reports the failure itself, so the wide trigger cannot weaken the
-/// guarantee. A staged name that survives its own removal is a second
-/// link to the committed content, which removing it later cannot damage.
+/// guarantee. If the staged-name unlink fails after a link commit, the
+/// operation reports a post-commit error and preserves both complete links;
+/// it never removes the final name after a potentially delayed failure. A
+/// successful or missing-name unlink is accepted only when the retained
+/// committed handle reports one link, which catches a concurrent move of the
+/// staged link and a successful unlink of a planted replacement.
 #[cfg(unix)]
 fn finalize_file_via_link_or_claim(
     tmp: NamedTempFile,
     final_path: &Path,
     label: &str,
-) -> Result<(), CryptoError> {
-    let output_dir =
-        OutputDir::open(crate::fs::paths::parent_or_cwd(final_path)).map_err(CryptoError::Io)?;
+) -> Result<FinalizedFile, FinalizeFileError> {
+    let output_dir = OutputDir::open(crate::fs::paths::parent_or_cwd(final_path))
+        .map_err(CryptoError::Io)
+        .map_err(FinalizeFileError::before_commit)?;
     let Some(final_name) = final_path.file_name() else {
-        remove_staged_temp(tmp, &output_dir);
-        return Err(CryptoError::Io(no_final_component_error()));
+        let _ = remove_staged_temp(tmp, &output_dir);
+        return Err(FinalizeFileError::before_commit(CryptoError::Io(
+            no_final_component_error(),
+        )));
     };
     // Owned, because the arms below consume `tmp` while the staged
     // name is still needed.
     let Some(tmp_name) = tmp.path().file_name().map(|name| name.to_os_string()) else {
-        remove_staged_temp(tmp, &output_dir);
-        return Err(CryptoError::Io(no_final_component_error()));
+        let _ = remove_staged_temp(tmp, &output_dir);
+        return Err(FinalizeFileError::before_commit(CryptoError::Io(
+            no_final_component_error(),
+        )));
     };
     match output_dir
         .dir
         .hard_link(&tmp_name, &output_dir.dir, final_name)
     {
-        Ok(()) => {
-            // Drop the staged name; the content stays reachable
-            // through the link just created.
-            remove_staged_temp(tmp, &output_dir);
-            sync_parent_dir(final_path);
-            Ok(())
-        }
+        Ok(()) => finish_link_commit(tmp, &output_dir, final_path, &tmp_name),
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-            remove_staged_temp(tmp, &output_dir);
-            Err(already_exists_error(label, final_path))
+            let _ = remove_staged_temp(tmp, &output_dir);
+            Err(FinalizeFileError::before_commit(already_exists_error(
+                label, final_path,
+            )))
         }
         Err(_) => finalize_file_via_claim(tmp, final_path, label, &output_dir),
     }
+}
+
+/// Finishes a link commit after the final link exists. The unlink is
+/// injectable one level down so tests can exercise the post-commit failure
+/// policy without a filesystem that selectively refuses it.
+#[cfg(unix)]
+fn finish_link_commit(
+    tmp: NamedTempFile,
+    output_dir: &OutputDir,
+    final_path: &Path,
+    tmp_name: &std::ffi::OsStr,
+) -> Result<FinalizedFile, FinalizeFileError> {
+    finish_link_commit_with_remove(tmp, output_dir, final_path, tmp_name, |dir, name| {
+        dir.remove_file(name)
+    })
+}
+
+#[cfg(unix)]
+fn finish_link_commit_with_remove(
+    tmp: NamedTempFile,
+    output_dir: &OutputDir,
+    final_path: &Path,
+    tmp_name: &std::ffi::OsStr,
+    remove_staged: impl FnOnce(&cap_std::fs::Dir, &std::ffi::OsStr) -> io::Result<()>,
+) -> Result<FinalizedFile, FinalizeFileError> {
+    let (committed_identity, staged_unlink) =
+        unlink_staged_temp_with_remove(tmp, output_dir, tmp_name, remove_staged);
+    sync_committed_parent(output_dir, final_path);
+
+    let committed_identity = committed_identity.map_err(FinalizeFileError::after_commit)?;
+    let Some(final_name) = final_path.file_name() else {
+        return Err(FinalizeFileError::after_commit(CryptoError::Io(
+            no_final_component_error(),
+        )));
+    };
+    let finalized = reopen_committed_file(output_dir, final_name, committed_identity, final_path)
+        .map_err(FinalizeFileError::after_commit)?;
+    finalized
+        .confirm_reported_path(final_path)
+        .map_err(FinalizeFileError::after_commit)?;
+    if let Err(error) = staged_unlink {
+        return Err(FinalizeFileError::after_commit(staged_temp_link_retained(
+            final_path, tmp_name, error,
+        )));
+    }
+    finalized
+        .confirm_single_link(final_path)
+        .map_err(FinalizeFileError::after_commit)?;
+    Ok(finalized)
 }
 
 /// Commits `tmp` to `final_path` on a filesystem with neither an atomic
@@ -579,29 +776,35 @@ fn finalize_file_via_claim(
     final_path: &Path,
     label: &str,
     output_dir: &OutputDir,
-) -> Result<(), CryptoError> {
+) -> Result<FinalizedFile, FinalizeFileError> {
     match claim_final_name(output_dir, final_path) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-            remove_staged_temp(tmp, output_dir);
-            return Err(already_exists_error(label, final_path));
+            let _ = remove_staged_temp(tmp, output_dir);
+            return Err(FinalizeFileError::before_commit(already_exists_error(
+                label, final_path,
+            )));
         }
         Err(e) => {
-            remove_staged_temp(tmp, output_dir);
-            return Err(CryptoError::Io(e));
+            let _ = remove_staged_temp(tmp, output_dir);
+            return Err(FinalizeFileError::before_commit(CryptoError::Io(e)));
         }
     }
     // `claim_final_name` already rejected a path with no final
     // component, so these arms are backstops.
     let Some(final_name) = final_path.file_name() else {
         output_dir.remove_published(final_path);
-        remove_staged_temp(tmp, output_dir);
-        return Err(CryptoError::Io(no_final_component_error()));
+        let _ = remove_staged_temp(tmp, output_dir);
+        return Err(FinalizeFileError::before_commit(CryptoError::Io(
+            no_final_component_error(),
+        )));
     };
     let Some(tmp_name) = tmp.path().file_name().map(|name| name.to_os_string()) else {
         output_dir.remove_published(final_path);
-        remove_staged_temp(tmp, output_dir);
-        return Err(CryptoError::Io(no_final_component_error()));
+        let _ = remove_staged_temp(tmp, output_dir);
+        return Err(FinalizeFileError::before_commit(CryptoError::Io(
+            no_final_component_error(),
+        )));
     };
     match output_dir
         .dir
@@ -613,33 +816,129 @@ fn finalize_file_via_claim(
             // creates at the freed temp name afterwards. Not
             // [`remove_staged_temp`]: with the entry gone, its unlink
             // could only ever hit such a newcomer.
-            let _ = tmp.into_temp_path().keep();
-            sync_parent_dir(final_path);
-            Ok(())
+            let (file, temp_path) = tmp.into_parts();
+            let _ = temp_path.keep();
+            sync_committed_parent(output_dir, final_path);
+
+            let finalized = FinalizedFile::new(file);
+            finalized
+                .confirm_reported_path(final_path)
+                .map_err(FinalizeFileError::after_commit)?;
+            Ok(finalized)
         }
         Err(e) => {
             output_dir.remove_published(final_path);
-            remove_staged_temp(tmp, output_dir);
-            Err(CryptoError::Io(e))
+            let _ = remove_staged_temp(tmp, output_dir);
+            Err(FinalizeFileError::before_commit(CryptoError::Io(e)))
         }
     }
 }
 
-/// Removes the staged temp entry through the anchor and disarms the
-/// destructor's ambient-path removal, so a swap of the output path
-/// cannot send either removal at another directory's entry. The handle
-/// is closed first, as part of the disarm, because the filesystems
-/// that reach these routes are the least likely to accept an unlink
-/// while the file is still open. Best-effort, like every failure-path
-/// removal in this module; the one caller on a success path accepts a
-/// surviving name as a second link to the committed content.
+/// Disarms the destructor's ambient-path removal, records the open file's
+/// identity, closes that handle, and unlinks the staged name through the
+/// anchor. Closing first preserves compatibility with filesystems that refuse
+/// to unlink a name while the client still has the file open. The final link
+/// is reopened and checked against the recorded identity afterwards; its
+/// retained handle then supplies the authoritative link-count post-condition.
 #[cfg(unix)]
-fn remove_staged_temp(tmp: NamedTempFile, output_dir: &OutputDir) {
-    let name = tmp.path().file_name().map(|name| name.to_os_string());
-    let _ = tmp.into_temp_path().keep();
-    if let Some(name) = name {
-        let _ = output_dir.dir.remove_file(&name);
+fn unlink_staged_temp(
+    tmp: NamedTempFile,
+    output_dir: &OutputDir,
+    name: &std::ffi::OsStr,
+) -> (Result<(u64, u64), CryptoError>, io::Result<()>) {
+    unlink_staged_temp_with_remove(tmp, output_dir, name, |dir, name| dir.remove_file(name))
+}
+
+#[cfg(unix)]
+fn unlink_staged_temp_with_remove(
+    tmp: NamedTempFile,
+    output_dir: &OutputDir,
+    name: &std::ffi::OsStr,
+    remove_staged: impl FnOnce(&cap_std::fs::Dir, &std::ffi::OsStr) -> io::Result<()>,
+) -> (Result<(u64, u64), CryptoError>, io::Result<()>) {
+    let (file, temp_path) = tmp.into_parts();
+    let identity = file
+        .metadata()
+        .map(|metadata| file_identity(&metadata))
+        .map_err(CryptoError::Io);
+    drop(file);
+    let _ = temp_path.keep();
+    let result = match remove_staged(&output_dir.dir, name) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    };
+    (identity, result)
+}
+
+/// Best-effort pre-commit cleanup through the retained directory anchor.
+#[cfg(unix)]
+fn remove_staged_temp(tmp: NamedTempFile, output_dir: &OutputDir) -> io::Result<()> {
+    let Some(name) = tmp.path().file_name().map(|name| name.to_os_string()) else {
+        let _ = tmp.into_temp_path().keep();
+        return Err(no_final_component_error());
+    };
+    let (_, result) = unlink_staged_temp(tmp, output_dir, &name);
+    result
+}
+
+/// Reopens a linked commit through the same directory anchor and requires it
+/// to be the regular file whose identity was recorded before the staged name
+/// was removed. This supplies the retained handle without keeping the staged
+/// handle open across an unlink on restrictive network filesystems.
+#[cfg(unix)]
+fn reopen_committed_file(
+    output_dir: &OutputDir,
+    final_name: &std::ffi::OsStr,
+    expected: (u64, u64),
+    final_path: &Path,
+) -> Result<FinalizedFile, CryptoError> {
+    use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, OpenOptionsSyncExt};
+
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No).nonblock(true);
+    let file = output_dir
+        .dir
+        .open_with(final_name, &options)
+        .map_err(CryptoError::Io)?
+        .into_std();
+    let metadata = file.metadata().map_err(CryptoError::Io)?;
+    if !metadata.file_type().is_file() || file_identity(&metadata) != expected {
+        return Err(reported_output_changed(final_path));
     }
+    Ok(FinalizedFile::new(file))
+}
+
+/// Best-effort durability barrier for a fallback commit. Linux and macOS
+/// flush the exact directory handle the commit used; other Unix targets keep
+/// the existing path-based fallback because no handle-relative implementation
+/// is available there.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn sync_committed_parent(output_dir: &OutputDir, _final_path: &Path) {
+    let _ = output_dir.flush_durable();
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn sync_committed_parent(_output_dir: &OutputDir, final_path: &Path) {
+    sync_parent_dir(final_path);
+}
+
+/// Reports a post-commit staged-name unlink failure without withdrawing the
+/// final name. Both entries may still be hard links to the same complete file.
+#[cfg(unix)]
+fn staged_temp_link_retained(
+    final_path: &Path,
+    staged_name: &std::ffi::OsStr,
+    source: io::Error,
+) -> CryptoError {
+    CryptoError::Io(io::Error::new(
+        source.kind(),
+        format!(
+            "Output {} is complete, but temporary name {} could not be removed: {source}",
+            sanitize_path_for_display(final_path),
+            sanitize_path_for_display(Path::new(staged_name)),
+        ),
+    ))
 }
 
 /// Creates the zero-byte placeholder that claims the final name,
@@ -809,8 +1108,11 @@ mod tests {
         tmp.write_all(b"new").unwrap();
         let tmp_path = tmp.path().to_path_buf();
 
-        match finalize_file(tmp, &final_path, "Output") {
-            Err(CryptoError::InvalidInput(msg)) => {
+        let error = finalize_file(tmp, &final_path, "Output")
+            .expect_err("an occupied output must fail before commit");
+        assert!(!error.committed());
+        match error.into_crypto_error() {
+            CryptoError::InvalidInput(msg) => {
                 assert!(msg.starts_with("Output already exists: "), "got: {msg}");
             }
             other => panic!("expected InvalidInput, got {other:?}"),
@@ -831,6 +1133,42 @@ mod tests {
 
         finalize_file(tmp, &final_path, "Output").unwrap();
         assert_eq!(fs::read_to_string(&final_path).unwrap(), "payload");
+    }
+
+    /// The ordinary one-step persist also retains the committed handle. If
+    /// the parent directory is replaced before the caller reports its path,
+    /// the final check rejects that path while leaving both the real output
+    /// and the replacement untouched.
+    #[cfg(unix)]
+    #[test]
+    fn finalized_file_rejects_a_reported_path_after_parent_replacement() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let out = tmp_dir.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let final_path = out.join("out.txt");
+
+        let mut tmp = tempfile::Builder::new().tempfile_in(&out).unwrap();
+        tmp.write_all(b"payload").unwrap();
+        let finalized = finalize_file(tmp, &final_path, "Output").unwrap();
+
+        let moved = tmp_dir.path().join("out.moved");
+        fs::rename(&out, &moved).unwrap();
+        fs::create_dir(&out).unwrap();
+        fs::write(&final_path, b"replacement").unwrap();
+
+        let err = finalized
+            .confirm_reported_path(&final_path)
+            .expect_err("the returned path no longer denotes the committed file");
+        assert!(
+            matches!(
+                err,
+                CryptoError::InvalidInput(message)
+                    if message.contains("reported path changed")
+            ),
+            "the path mismatch must be explicit"
+        );
+        assert_eq!(fs::read(moved.join("out.txt")).unwrap(), b"payload");
+        assert_eq!(fs::read(&final_path).unwrap(), b"replacement");
     }
 
     /// The fallback trigger fires only for "the filesystem cannot do a
@@ -1152,6 +1490,144 @@ mod tests {
         );
     }
 
+    /// Once the final hard link exists, a staged-name unlink failure must not
+    /// be swallowed. It is a post-commit error, and both complete links are
+    /// preserved so no bare-name rollback can delete a concurrent replacement.
+    #[cfg(unix)]
+    #[test]
+    fn finalize_via_link_reports_a_retained_staging_link() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let final_path = tmp_dir.path().join("out.txt");
+
+        let mut tmp = tempfile::Builder::new()
+            .tempfile_in(tmp_dir.path())
+            .unwrap();
+        tmp.write_all(b"payload").unwrap();
+        let tmp_name = tmp.path().file_name().unwrap().to_os_string();
+        let output_dir = OutputDir::open(tmp_dir.path()).unwrap();
+        output_dir
+            .dir
+            .hard_link(&tmp_name, &output_dir.dir, final_path.file_name().unwrap())
+            .unwrap();
+
+        let error =
+            finish_link_commit_with_remove(tmp, &output_dir, &final_path, &tmp_name, |_, _| {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "injected staged unlink failure",
+                ))
+            })
+            .expect_err("a retained temporary name must not report success");
+
+        assert!(error.committed());
+        let rendered = error.into_crypto_error().to_string();
+        assert!(
+            rendered.contains("temporary name") && rendered.contains("could not be removed"),
+            "the retained link must be explicit, got: {rendered}"
+        );
+        assert_eq!(fs::read(&final_path).unwrap(), b"payload");
+        assert_eq!(fs::read(tmp_dir.path().join(tmp_name)).unwrap(), b"payload");
+    }
+
+    /// A concurrent directory writer can rename the staged link after the
+    /// final link exists. The attempted unlink then reports `NotFound`, which
+    /// is harmless only when the committed inode actually has one link left.
+    #[cfg(unix)]
+    #[test]
+    fn finalize_via_link_rejects_a_renamed_staging_link_after_not_found() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let final_path = tmp_dir.path().join("out.txt");
+        let hidden_name = std::ffi::OsString::from("moved-staging-link");
+
+        let mut tmp = tempfile::Builder::new()
+            .tempfile_in(tmp_dir.path())
+            .unwrap();
+        tmp.write_all(b"payload").unwrap();
+        let tmp_name = tmp.path().file_name().unwrap().to_os_string();
+        let output_dir = OutputDir::open(tmp_dir.path()).unwrap();
+        output_dir
+            .dir
+            .hard_link(&tmp_name, &output_dir.dir, final_path.file_name().unwrap())
+            .unwrap();
+
+        let error = finish_link_commit_with_remove(
+            tmp,
+            &output_dir,
+            &final_path,
+            &tmp_name,
+            |dir, name| {
+                dir.rename(name, dir, &hidden_name)?;
+                dir.remove_file(name)
+            },
+        )
+        .expect_err("a renamed second link must not report success");
+
+        assert!(error.committed());
+        let rendered = error.into_crypto_error().to_string();
+        assert!(
+            rendered.contains("temporary-link cleanup left 2 filesystem links"),
+            "the retained inode link must be explicit, got: {rendered}"
+        );
+        assert_eq!(fs::read(&final_path).unwrap(), b"payload");
+        assert_eq!(
+            fs::read(tmp_dir.path().join(hidden_name)).unwrap(),
+            b"payload"
+        );
+        assert!(!tmp_dir.path().join(tmp_name).exists());
+    }
+
+    /// Renaming the staged link aside and planting a replacement at its old
+    /// name can make the unlink itself succeed. The inode link count must still
+    /// expose the retained original rather than trusting that return value.
+    #[cfg(unix)]
+    #[test]
+    fn finalize_via_link_rejects_a_hidden_link_when_replacement_unlink_succeeds() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let final_path = tmp_dir.path().join("out.txt");
+        let hidden_name = std::ffi::OsString::from("moved-staging-link");
+
+        let mut tmp = tempfile::Builder::new()
+            .tempfile_in(tmp_dir.path())
+            .unwrap();
+        tmp.write_all(b"payload").unwrap();
+        let tmp_name = tmp.path().file_name().unwrap().to_os_string();
+        let output_dir = OutputDir::open(tmp_dir.path()).unwrap();
+        output_dir
+            .dir
+            .hard_link(&tmp_name, &output_dir.dir, final_path.file_name().unwrap())
+            .unwrap();
+
+        let error = finish_link_commit_with_remove(
+            tmp,
+            &output_dir,
+            &final_path,
+            &tmp_name,
+            |dir, name| {
+                dir.rename(name, dir, &hidden_name)?;
+                let mut options = cap_std::fs::OpenOptions::new();
+                options.write(true).create_new(true);
+                let mut replacement = dir.open_with(name, &options)?;
+                replacement.write_all(b"replacement")?;
+                drop(replacement);
+                dir.remove_file(name)
+            },
+        )
+        .expect_err("a hidden second link must not report success");
+
+        assert!(error.committed());
+        let rendered = error.into_crypto_error().to_string();
+        assert!(
+            rendered.contains("temporary-link cleanup left 2 filesystem links"),
+            "the retained inode link must be explicit, got: {rendered}"
+        );
+        assert_eq!(fs::read(&final_path).unwrap(), b"payload");
+        assert_eq!(
+            fs::read(tmp_dir.path().join(hidden_name)).unwrap(),
+            b"payload"
+        );
+        assert!(!tmp_dir.path().join(tmp_name).exists());
+    }
+
     /// The link route refuses an occupied final path with the same typed
     /// message as the atomic path, without creating a placeholder first.
     #[cfg(unix)]
@@ -1167,8 +1643,11 @@ mod tests {
         tmp.write_all(b"new").unwrap();
         let tmp_path = tmp.path().to_path_buf();
 
-        match finalize_file_via_link_or_claim(tmp, &final_path, "Output") {
-            Err(CryptoError::InvalidInput(msg)) => {
+        let error = finalize_file_via_link_or_claim(tmp, &final_path, "Output")
+            .expect_err("an occupied output must fail before commit");
+        assert!(!error.committed());
+        match error.into_crypto_error() {
+            CryptoError::InvalidInput(msg) => {
                 assert!(msg.starts_with("Output already exists: "), "got: {msg}");
             }
             other => panic!("expected InvalidInput, got {other:?}"),
@@ -1192,8 +1671,11 @@ mod tests {
             .unwrap();
         tmp.write_all(b"new").unwrap();
 
-        match finalize_file_via_link_or_claim(tmp, &final_path, "Output") {
-            Err(CryptoError::InvalidInput(msg)) => {
+        let error = finalize_file_via_link_or_claim(tmp, &final_path, "Output")
+            .expect_err("a dangling final symlink must fail before commit");
+        assert!(!error.committed());
+        match error.into_crypto_error() {
+            CryptoError::InvalidInput(msg) => {
                 assert!(msg.starts_with("Output already exists: "), "got: {msg}");
             }
             other => panic!("expected InvalidInput, got {other:?}"),
@@ -1247,13 +1729,16 @@ mod tests {
         tmp.write_all(b"new").unwrap();
         let tmp_path = tmp.path().to_path_buf();
 
-        match finalize_file_via_claim(
+        let error = finalize_file_via_claim(
             tmp,
             &final_path,
             "Output",
             &OutputDir::open(tmp_dir.path()).unwrap(),
-        ) {
-            Err(CryptoError::InvalidInput(msg)) => {
+        )
+        .expect_err("an occupied output must fail before commit");
+        assert!(!error.committed());
+        match error.into_crypto_error() {
+            CryptoError::InvalidInput(msg) => {
                 assert!(msg.starts_with("Output already exists: "), "got: {msg}");
             }
             other => panic!("expected InvalidInput, got {other:?}"),
@@ -1277,13 +1762,16 @@ mod tests {
             .unwrap();
         tmp.write_all(b"new").unwrap();
 
-        match finalize_file_via_claim(
+        let error = finalize_file_via_claim(
             tmp,
             &final_path,
             "Output",
             &OutputDir::open(tmp_dir.path()).unwrap(),
-        ) {
-            Err(CryptoError::InvalidInput(msg)) => {
+        )
+        .expect_err("a dangling final symlink must fail before commit");
+        assert!(!error.committed());
+        match error.into_crypto_error() {
+            CryptoError::InvalidInput(msg) => {
                 assert!(msg.starts_with("Output already exists: "), "got: {msg}");
             }
             other => panic!("expected InvalidInput, got {other:?}"),
@@ -1313,25 +1801,24 @@ mod tests {
             &OutputDir::open(tmp_dir.path()).unwrap(),
         )
         .expect_err("a rename with no staged file must fail the commit");
-        assert!(matches!(err, CryptoError::Io(_)), "got: {err:?}");
+        assert!(!err.committed());
+        assert!(
+            matches!(err.into_crypto_error(), CryptoError::Io(_)),
+            "expected an I/O failure"
+        );
         assert!(
             !final_path.exists(),
             "the placeholder must not survive a failed rename"
         );
     }
 
-    /// The claim route must commit inside the directory it claimed in.
-    /// Swap the output directory aside after the anchor is opened and
-    /// mint a same-named victim at the original path: the commit must
-    /// land in the anchored (moved) directory and the victim must
-    /// survive. Pins the step-2 rename to the handle — a commit through
-    /// the ambient path would replace the victim, which predates the
-    /// commit and is exactly what the no-clobber guarantee protects.
-    /// The link route shares the anchor and the same handle-relative
-    /// operations, so this pins its resolution rule too.
+    /// The claim route commits through its retained anchor, but must not report
+    /// the old ambient path after that directory is swapped. The real output
+    /// lands in the moved directory, the substituted victim survives, and the
+    /// final identity check reports a post-commit path-change error.
     #[cfg(unix)]
     #[test]
-    fn finalize_via_claim_commits_in_the_anchored_directory_across_a_path_swap() {
+    fn finalize_via_claim_rejects_the_reported_path_after_a_directory_swap() {
         let tmp_dir = tempfile::TempDir::new().unwrap();
         let orig = tmp_dir.path().join("orig");
         fs::create_dir(&orig).unwrap();
@@ -1349,7 +1836,17 @@ mod tests {
         fs::create_dir(&orig).unwrap();
         fs::write(&final_path, "victim").unwrap();
 
-        finalize_file_via_claim(tmp, &final_path, "Output", &output_dir).unwrap();
+        let error = finalize_file_via_claim(tmp, &final_path, "Output", &output_dir)
+            .expect_err("the ambient path no longer names the committed file");
+        assert!(error.committed());
+        assert!(
+            matches!(
+                error.into_crypto_error(),
+                CryptoError::InvalidInput(message)
+                    if message.contains("reported path changed")
+            ),
+            "the path mismatch must be reported explicitly"
+        );
 
         assert_eq!(
             fs::read_to_string(moved.join("out.txt")).unwrap(),

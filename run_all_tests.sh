@@ -286,7 +286,7 @@ for pair in "$MSRV_LIB ferrocrypt" "$MSRV_CLI ferrocrypt-cli"; do
     pkg=${pair#* }
     if rustup toolchain list 2>/dev/null | grep -q "^$ver"; then
         note "msrv-$pkg"
-        cargo "+$ver" test -p "$pkg" -- --test-threads=1
+        cargo "+$ver" test -p "$pkg"
         record "msrv-$pkg" $?
     else
         skip "msrv-$pkg" "toolchain $ver not installed (rustup toolchain install $ver)"

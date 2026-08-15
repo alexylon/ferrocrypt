@@ -632,6 +632,27 @@ pub(crate) fn write_encrypted_file(
     base_name: &str,
     built: &BuiltEncryptedHeader,
 ) -> Result<PathBuf, CryptoError> {
+    write_encrypted_file_with_post_finalize(
+        prepared,
+        output_dir,
+        output_file,
+        base_name,
+        built,
+        |_| Ok(()),
+    )
+}
+
+/// Implementation seam for the interval between finalization and the path
+/// returned to the caller. Production supplies a no-op; tests replace the
+/// final entry to verify the last identity check.
+fn write_encrypted_file_with_post_finalize(
+    prepared: archive::PreparedArchive,
+    output_dir: &Path,
+    output_file: Option<&Path>,
+    base_name: &str,
+    built: &BuiltEncryptedHeader,
+    after_finalize: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<PathBuf, CryptoError> {
     let output_path = resolve_encrypted_output_path(output_dir, output_file, base_name);
     reject_occupied(&output_path, OUTPUT_LABEL)?;
 
@@ -659,7 +680,12 @@ pub(crate) fn write_encrypted_file(
     let tmp = encrypt_writer.finish()?;
     atomic::sync_file_durable(tmp.as_file())?;
 
-    atomic::finalize_file(tmp, &output_path, OUTPUT_LABEL)?;
+    let finalized = atomic::finalize_file(tmp, &output_path, OUTPUT_LABEL)
+        .map_err(atomic::FinalizeFileError::into_crypto_error)?;
+    after_finalize(&output_path)?;
+    // Keep the committed handle alive through the final namespace check so
+    // the path returned to the caller still denotes the file just written.
+    finalized.confirm_reported_path(&output_path)?;
     Ok(output_path)
 }
 
@@ -699,6 +725,66 @@ mod tests {
         let file_key = FileKey::from_bytes_for_tests([0x42u8; FILE_KEY_SIZE]);
         let stream_nonce = [0x07u8; STREAM_NONCE_SIZE];
         derive_subkeys(&file_key, &stream_nonce).unwrap()
+    }
+
+    /// The writer must check the final path at its own return boundary, after
+    /// the atomic helper has returned. Replacing that entry in this interval
+    /// is reported, and neither the committed file nor the replacement is
+    /// removed.
+    #[cfg(unix)]
+    #[test]
+    fn encrypted_writer_rejects_a_path_replaced_after_finalization() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let input = tmp.path().join("input.txt");
+        let output_dir = tmp.path().join("out");
+        let output_path = output_dir.join("output.fcr");
+        let committed_path = output_dir.join("committed.fcr");
+        std::fs::write(&input, b"plaintext").unwrap();
+        std::fs::create_dir(&output_dir).unwrap();
+
+        let prepared = archive::prepare_archive(&input, archive::ArchiveLimits::default()).unwrap();
+        let DerivedSubkeys {
+            payload_key,
+            header_key,
+        } = dummy_subkeys();
+        let stream_nonce = [0x07u8; STREAM_NONCE_SIZE];
+        let entry = dummy_entry(argon2id::TYPE_NAME, argon2id::BODY_LENGTH);
+        let built = build_encrypted_header(
+            std::slice::from_ref(&entry),
+            b"",
+            stream_nonce,
+            payload_key,
+            &header_key,
+        )
+        .unwrap();
+
+        let err = write_encrypted_file_with_post_finalize(
+            prepared,
+            &output_dir,
+            Some(&output_path),
+            "unused",
+            &built,
+            |_| {
+                std::fs::rename(&output_path, &committed_path)?;
+                std::fs::write(&output_path, b"replacement")
+            },
+        )
+        .expect_err("the writer must reject a replaced return path");
+
+        assert!(
+            matches!(
+                err,
+                CryptoError::InvalidInput(message)
+                    if message.contains("reported path changed")
+            ),
+            "the path replacement must be reported explicitly"
+        );
+        let committed = std::fs::read(&committed_path).unwrap();
+        assert!(
+            committed.starts_with(&format::MAGIC),
+            "the committed encrypted file must survive under its new name"
+        );
+        assert_eq!(std::fs::read(&output_path).unwrap(), b"replacement");
     }
 
     /// Concatenates the three on-disk byte regions a writer emits in

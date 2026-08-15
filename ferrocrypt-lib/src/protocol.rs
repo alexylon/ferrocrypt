@@ -708,6 +708,27 @@ pub(crate) fn generate_key_pair(
     output_dir: &Path,
     on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<(PathBuf, PathBuf, String, String), CryptoError> {
+    generate_key_pair_with_post_commit(
+        passphrase,
+        kdf_params,
+        kdf_limit,
+        output_dir,
+        on_event,
+        |_, _| Ok(()),
+    )
+}
+
+/// Implementation seam for the interval after both key files commit and
+/// before their paths are returned. Production supplies a no-op; tests replace
+/// either final entry to exercise both last-minute identity checks.
+fn generate_key_pair_with_post_commit(
+    passphrase: crate::passphrase::Passphrase,
+    kdf_params: &crate::crypto::kdf::KdfParams,
+    kdf_limit: Option<&crate::crypto::kdf::KdfLimit>,
+    output_dir: &Path,
+    on_event: &dyn Fn(&ProgressEvent),
+    after_commit: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(PathBuf, PathBuf, String, String), CryptoError> {
     use std::io::Write as _;
 
     use crate::fs::atomic;
@@ -797,7 +818,8 @@ pub(crate) fn generate_key_pair(
     public_tmp.as_file_mut().write_all(b"\n")?;
     atomic::sync_file_durable(public_tmp.as_file())?;
 
-    commit_key_pair_files(private_tmp, public_tmp, &private_key_path, &public_key_path)?;
+    let (private_finalized, public_finalized) =
+        commit_key_pair_files(private_tmp, public_tmp, &private_key_path, &public_key_path)?;
 
     // Compute the fingerprint from the in-memory `public_material`
     // rather than re-reading and re-decoding `public.key` from disk.
@@ -807,6 +829,13 @@ pub(crate) fn generate_key_pair(
     // without paying the extra disk read + Bech32 decode + SHA3 in
     // the API layer.
     let fingerprint = fingerprint_hex(x25519::TYPE_NAME, &public_material)?;
+
+    after_commit(&private_key_path, &public_key_path)?;
+
+    // Retain both committed handles until the last possible moment and
+    // confirm that the paths returned to the caller still denote those files.
+    private_finalized.confirm_reported_path(&private_key_path)?;
+    public_finalized.confirm_reported_path(&public_key_path)?;
 
     Ok((
         private_key_path,
@@ -831,9 +860,13 @@ pub(crate) fn generate_key_pair(
 ///
 /// Failure handling preserves a safe result:
 ///
-/// - If the `private.key` commit fails, neither file is published.
+/// - If the `private.key` commit fails before publication, neither file is
+///   published. A post-commit verification or staged-unlink failure preserves
+///   the committed private key and reports the error.
 /// - If the first directory flush fails, `private.key` is removed best-effort.
-/// - If the `public.key` commit fails, `private.key` is removed best-effort.
+/// - If the `public.key` commit fails before publication, `private.key` is
+///   removed best-effort. A post-commit failure preserves both committed
+///   final names rather than manufacturing a public-only pair.
 /// - If the final directory flush fails, `public.key` is removed and
 ///   `private.key` is kept. Removing both without a working directory flush
 ///   could leave only `public.key` after power loss. The remaining private key
@@ -851,7 +884,13 @@ fn commit_key_pair_files(
     public_tmp: tempfile::NamedTempFile,
     private_key_path: &Path,
     public_key_path: &Path,
-) -> Result<(), CryptoError> {
+) -> Result<
+    (
+        crate::fs::atomic::FinalizedFile,
+        crate::fs::atomic::FinalizedFile,
+    ),
+    CryptoError,
+> {
     commit_key_pair_files_with_barrier(
         private_tmp,
         public_tmp,
@@ -895,7 +934,47 @@ fn commit_key_pair_files_with_barrier(
     private_key_path: &Path,
     public_key_path: &Path,
     sync_output_dir: impl Fn(&crate::fs::atomic::OutputDir, &Path) -> std::io::Result<()>,
-) -> Result<(), CryptoError> {
+) -> Result<
+    (
+        crate::fs::atomic::FinalizedFile,
+        crate::fs::atomic::FinalizedFile,
+    ),
+    CryptoError,
+> {
+    commit_key_pair_files_with_barrier_and_public_finalizer(
+        private_tmp,
+        public_tmp,
+        private_key_path,
+        public_key_path,
+        sync_output_dir,
+        crate::fs::atomic::finalize_file,
+    )
+}
+
+/// Testable implementation of [`commit_key_pair_files_with_barrier`]. The
+/// public-key finalizer is injectable because its error can occur after the
+/// final name exists, which changes whether the private key may be rolled back.
+fn commit_key_pair_files_with_barrier_and_public_finalizer(
+    private_tmp: tempfile::NamedTempFile,
+    public_tmp: tempfile::NamedTempFile,
+    private_key_path: &Path,
+    public_key_path: &Path,
+    sync_output_dir: impl Fn(&crate::fs::atomic::OutputDir, &Path) -> std::io::Result<()>,
+    finalize_public: impl FnOnce(
+        tempfile::NamedTempFile,
+        &Path,
+        &str,
+    ) -> Result<
+        crate::fs::atomic::FinalizedFile,
+        crate::fs::atomic::FinalizeFileError,
+    >,
+) -> Result<
+    (
+        crate::fs::atomic::FinalizedFile,
+        crate::fs::atomic::FinalizedFile,
+    ),
+    CryptoError,
+> {
     use crate::fs::atomic::{self, OutputDir};
     use crate::fs::paths::parent_or_cwd;
 
@@ -908,20 +987,30 @@ fn commit_key_pair_files_with_barrier(
     // output path would send them somewhere else.
     let committed_dir = OutputDir::open(output_dir).map_err(CryptoError::Io)?;
 
-    atomic::finalize_file(private_tmp, private_key_path, KEY_FILE_LABEL)?;
+    let private_finalized = atomic::finalize_file(private_tmp, private_key_path, KEY_FILE_LABEL)
+        .map_err(atomic::FinalizeFileError::into_crypto_error)?;
     if let Err(e) = sync_output_dir(&committed_dir, output_dir) {
         committed_dir.remove_published(private_key_path);
         return Err(CryptoError::Io(e));
     }
-    if let Err(e) = atomic::finalize_file(public_tmp, public_key_path, KEY_FILE_LABEL) {
-        committed_dir.remove_published(private_key_path);
-        return Err(e);
-    }
+    let public_finalized = match finalize_public(public_tmp, public_key_path, KEY_FILE_LABEL) {
+        Ok(finalized) => finalized,
+        Err(error) => {
+            // Roll private.key back only while public.key definitely did
+            // not commit. A post-commit error can leave a complete public
+            // key at its final name, and deleting the private half would
+            // create the unsafe public-only state this ordering prevents.
+            if !error.committed() {
+                committed_dir.remove_published(private_key_path);
+            }
+            return Err(error.into_crypto_error());
+        }
+    };
     if let Err(e) = sync_output_dir(&committed_dir, output_dir) {
         committed_dir.remove_published(public_key_path);
         return Err(CryptoError::Io(e));
     }
-    Ok(())
+    Ok((private_finalized, public_finalized))
 }
 
 #[cfg(test)]
@@ -2128,6 +2217,59 @@ mod tests {
         );
     }
 
+    /// Key generation checks both reported paths after all commit work. A
+    /// replacement of either final entry in that interval must turn the call
+    /// into an error while leaving the committed key and the replacement
+    /// untouched.
+    #[cfg(unix)]
+    #[test]
+    fn keygen_rejects_either_key_path_replaced_after_commit() {
+        use crate::crypto::kdf::KdfParams;
+        use crate::key::files::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let kdf_params = KdfParams::test_fast_default();
+
+        for target in [PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME] {
+            let output_dir = tmp.path().join(target);
+            let target_path = output_dir.join(target);
+            let committed_path = output_dir.join(format!("{target}.committed"));
+
+            let err = generate_key_pair_with_post_commit(
+                Passphrase::new("passphrase"),
+                &kdf_params,
+                None,
+                &output_dir,
+                &|_| {},
+                |private_path, public_path| {
+                    let path = if target == PRIVATE_KEY_FILENAME {
+                        private_path
+                    } else {
+                        public_path
+                    };
+                    fs::rename(path, &committed_path)?;
+                    fs::write(path, b"replacement")
+                },
+            )
+            .expect_err("a replaced key path must not be returned");
+
+            assert!(
+                matches!(
+                    err,
+                    CryptoError::InvalidInput(message)
+                        if message.contains("reported path changed")
+                ),
+                "{target} replacement must be reported explicitly"
+            );
+            assert_ne!(
+                fs::read(&committed_path).unwrap(),
+                b"replacement",
+                "the committed {target} must survive under its new name"
+            );
+            assert_eq!(fs::read(&target_path).unwrap(), b"replacement");
+        }
+    }
+
     /// Creates a staged key-file temporary file in `dir` containing `bytes`.
     fn staged_key_tempfile(dir: &Path, bytes: &[u8]) -> tempfile::NamedTempFile {
         use std::io::Write as _;
@@ -2337,6 +2479,48 @@ mod tests {
         assert!(
             leftovers.is_empty(),
             "nothing besides private.key may remain, found {leftovers:?}"
+        );
+    }
+
+    /// A public-key finalization error after publication must preserve both
+    /// final names. Rolling the private half back would leave a public key that
+    /// others can use without a matching decryption key.
+    #[test]
+    fn keygen_post_commit_public_failure_preserves_both_keys() {
+        use crate::fs::atomic;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        let private_key_path = dir.join(PRIVATE_KEY_FILENAME);
+        let public_key_path = dir.join(PUBLIC_KEY_FILENAME);
+        let private_tmp = staged_key_tempfile(dir, b"private bytes");
+        let public_tmp = staged_key_tempfile(dir, b"public bytes");
+
+        let err = commit_key_pair_files_with_barrier_and_public_finalizer(
+            private_tmp,
+            public_tmp,
+            &private_key_path,
+            &public_key_path,
+            |_, _| Ok(()),
+            |tmp, path, label| {
+                let _committed = atomic::finalize_file(tmp, path, label)
+                    .expect("the injected error must follow a real commit");
+                Err(atomic::FinalizeFileError::after_commit_for_test(
+                    CryptoError::Io(std::io::Error::other(
+                        "injected post-commit finalization failure",
+                    )),
+                ))
+            },
+        )
+        .expect_err("the injected post-commit failure must be returned");
+
+        assert_eq!(err.to_string(), "injected post-commit finalization failure");
+        assert_eq!(fs::read(&private_key_path).unwrap(), b"private bytes");
+        assert_eq!(fs::read(&public_key_path).unwrap(), b"public bytes");
+        assert_eq!(
+            fs::read_dir(dir).unwrap().count(),
+            2,
+            "only the two committed key files may remain"
         );
     }
 

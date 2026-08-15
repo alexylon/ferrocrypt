@@ -369,9 +369,14 @@ impl Encryptor {
     ///
     /// Returns [`CryptoError::InvalidInput`] for invalid input paths, output
     /// conflicts, unsupported archive entries, empty or too-long passphrases,
-    /// archive cap violations, or invalid KDF settings. Returns [`CryptoError::Io`] for
-    /// filesystem failures. Returns authentication or internal crypto errors if
-    /// key wrapping or payload streaming fails.
+    /// archive cap violations, or invalid KDF settings. On Unix, that variant
+    /// can also report a committed output path that resolves to a different
+    /// object before return. Returns [`CryptoError::Io`] for filesystem
+    /// failures, including a hard-link fallback whose temporary-link cleanup
+    /// cannot be proved complete. Either post-commit condition can leave the
+    /// complete encrypted file under its final, temporary, or moved name.
+    /// Returns authentication or internal crypto errors if key wrapping or
+    /// payload streaming fails.
     pub fn write(
         self,
         input: impl AsRef<Path>,
@@ -633,13 +638,14 @@ impl PassphraseDecryptor {
     /// Sets the policy that governs the `.incomplete` working tree
     /// when this decrypt fails.
     ///
-    /// Defaults to [`IncompleteOutputPolicy::DeleteOnError`]: a failed
-    /// decrypt leaves no plaintext residue under `output_dir`. Pass
-    /// [`IncompleteOutputPolicy::RetainOnError`] for backup-recovery
-    /// or forensic flows where partial output is more useful than no
-    /// output. See [`IncompleteOutputPolicy::RetainOnError`] for the
-    /// truncation-prefix caveat callers must understand before acting
-    /// on a retained partial.
+    /// Defaults to [`IncompleteOutputPolicy::DeleteOnError`], which
+    /// best-effort removes this run's `.incomplete` plaintext while the
+    /// output is still treated as staged. It does not remove a complete
+    /// output confirmed before a later filesystem namespace error. Pass
+    /// [`IncompleteOutputPolicy::RetainOnError`] for backup-recovery or
+    /// forensic flows where partial output is more useful than no output. See
+    /// that variant for the truncation-prefix caveat callers must understand
+    /// before acting on a retained partial.
     pub fn incomplete_output_policy(mut self, policy: IncompleteOutputPolicy) -> Self {
         self.incomplete_output_policy = Some(policy);
         self
@@ -665,7 +671,10 @@ impl PassphraseDecryptor {
     /// [`CryptoError::PayloadTruncated`] when credentials are wrong or the file
     /// is modified. Returns [`CryptoError::InputPath`] if the encrypted file
     /// no longer exists, and [`CryptoError::Io`] for other filesystem
-    /// failures.
+    /// failures. On Linux and macOS, a namespace or hard-link-cleanup check can
+    /// report an error after the complete plaintext output was
+    /// committed; [`IncompleteOutputPolicy`] does not remove a confirmed
+    /// output in that case.
     pub fn decrypt(
         self,
         passphrase: Passphrase,
@@ -771,13 +780,14 @@ impl PrivateKeyDecryptor {
     /// Sets the policy that governs the `.incomplete` working tree
     /// when this decrypt fails.
     ///
-    /// Defaults to [`IncompleteOutputPolicy::DeleteOnError`]: a failed
-    /// decrypt leaves no plaintext residue under `output_dir`. Pass
-    /// [`IncompleteOutputPolicy::RetainOnError`] for backup-recovery
-    /// or forensic flows where partial output is more useful than no
-    /// output. See [`IncompleteOutputPolicy::RetainOnError`] for the
-    /// truncation-prefix caveat callers must understand before acting
-    /// on a retained partial.
+    /// Defaults to [`IncompleteOutputPolicy::DeleteOnError`], which
+    /// best-effort removes this run's `.incomplete` plaintext while the
+    /// output is still treated as staged. It does not remove a complete
+    /// output confirmed before a later filesystem namespace error. Pass
+    /// [`IncompleteOutputPolicy::RetainOnError`] for backup-recovery or
+    /// forensic flows where partial output is more useful than no output. See
+    /// that variant for the truncation-prefix caveat callers must understand
+    /// before acting on a retained partial.
     pub fn incomplete_output_policy(mut self, policy: IncompleteOutputPolicy) -> Self {
         self.incomplete_output_policy = Some(policy);
         self
@@ -814,7 +824,11 @@ impl PrivateKeyDecryptor {
     /// modified; `NoSupportedRecipient` means the file contains no recipient
     /// type this build can process. Returns [`CryptoError::InputPath`] if the
     /// encrypted file or the private key file does not exist, and
-    /// [`CryptoError::Io`] for other filesystem failures.
+    /// [`CryptoError::Io`] for other filesystem failures. On Linux and macOS, a
+    /// namespace or hard-link-cleanup check can report an error after the
+    /// complete plaintext output was committed;
+    /// [`IncompleteOutputPolicy`] does not remove a confirmed output in that
+    /// case.
     pub fn decrypt(
         self,
         private_key: PrivateKey,
@@ -975,13 +989,19 @@ impl KeyPairGenerator {
     /// # Errors
     ///
     /// Returns [`CryptoError::InvalidInput`] if the passphrase is empty or too
-    /// long, KDF parameters are outside the accepted writer policy, or either key file
-    /// already exists. Returns [`CryptoError::Io`] for filesystem failures,
-    /// including a directory flush failure. If the flush after committing
-    /// `public.key` fails, the method removes `public.key` but keeps
-    /// `private.key`. Removing both without a successful directory flush could
-    /// leave only the public key after power loss. A remaining `private.key`
-    /// is safe to delete.
+    /// long, KDF parameters are outside the accepted writer policy, or either
+    /// key file already exists. On Unix, [`CryptoError::InvalidInput`] can also
+    /// report that a committed final path resolves to a different filesystem
+    /// object before return; any completed commits are preserved.
+    ///
+    /// Returns [`CryptoError::Io`] for filesystem failures, including a
+    /// directory flush failure or a hard-link fallback whose temporary-link
+    /// cleanup cannot be proved complete. If the flush after committing
+    /// `public.key` fails, the method makes a best-effort attempt to remove
+    /// `public.key` but keeps `private.key`. Removing both without a successful
+    /// directory flush could leave only the public key after power loss. A
+    /// remaining `private.key` is safe to delete. Any error after a commit can
+    /// therefore leave one or both complete key files for the caller to inspect.
     pub fn write(
         self,
         output_dir: impl AsRef<Path>,

@@ -94,10 +94,24 @@ pub(crate) fn unarchive<R: Read>(
 }
 
 fn unarchive_inner<R: Read>(
+    reader: R,
+    output_dir: &Path,
+    limits: ArchiveLimits,
+    policy: IncompleteOutputPolicy,
+) -> Result<PathBuf, CryptoError> {
+    unarchive_inner_with_hooks(reader, output_dir, limits, policy, |_| Ok(()), || Ok(()))
+}
+
+/// Implementation seam for post-promotion outcomes and the interval after
+/// root-mode confirmation. Production supplies no-op hooks; tests use them to
+/// exercise post-commit reporting and cleanup.
+fn unarchive_inner_with_hooks<R: Read>(
     mut reader: R,
     output_dir: &Path,
     limits: ArchiveLimits,
     policy: IncompleteOutputPolicy,
+    after_promotion: impl FnOnce(&mut platform::PromotionOutcome) -> Result<(), CryptoError>,
+    after_root_mode: impl FnOnce() -> Result<(), CryptoError>,
 ) -> Result<PathBuf, CryptoError> {
     // FORMAT.md §9.11 step 1: parse + structurally validate the header.
     // `parse_fca_header` already enforces all caps for `archive_ext_len`,
@@ -194,20 +208,25 @@ fn unarchive_inner<R: Read>(
         // check-then-rename — because a handle-relative no-replace rename
         // there needs an `unsafe` Win32 call the crate forbids. See
         // `promote_root` and `SECURITY.md`.
-        let promote_result = promote_root(
+        let mut promotion = promote_root(
             &output_handle,
             output_dir,
             &incomplete_name,
             &manifest.root_name,
             manifest.root_is_file,
-        );
-        promote_result.map_err(|e| {
+        )
+        .map_err(|e| {
             if e.kind() == io::ErrorKind::AlreadyExists {
                 output_already_exists(output_dir, &manifest.root_name)
             } else {
                 CryptoError::Io(e)
             }
         })?;
+        after_promotion(&mut promotion)?;
+        #[cfg(unix)]
+        let linked_file_cleanup_needs_check = promotion.needs_link_count_check();
+        #[cfg(unix)]
+        let mut linked_file_handle = None;
 
         // FORMAT.md §9.11 step 16: apply root entry mode AFTER promotion.
         //
@@ -231,9 +250,11 @@ fn unarchive_inner<R: Read>(
         // the final name between rename and chmod is rejected the same
         // way as for directory roots.
         // Step 16 runs after the step-15 commit point: the output
-        // already holds the complete plaintext, and the `.incomplete`
-        // working name is gone. A mode-application failure here must
-        // not fail the extraction — returning `Err` would tell a
+        // already holds the complete plaintext. The `.incomplete`
+        // working name is normally gone; a hard-link fallback whose
+        // cleanup cannot be proved is reported after the identity and
+        // mode checks below. A mode-application failure here must not
+        // fail the extraction — returning `Err` would tell a
         // `DeleteOnError` caller nothing was written while a finished
         // output sits on disk. The output then keeps the staged mode
         // (`0o600`/`0o700`), which grants group and other nothing the
@@ -260,8 +281,14 @@ fn unarchive_inner<R: Read>(
         // known to be committed — the promoted object is the caller's,
         // wherever it is later moved.
         if matches!(ratified, Ok(PromotedIdentity::Confirmed)) {
+            #[cfg(unix)]
+            if linked_file_cleanup_needs_check {
+                linked_file_handle = staged_root.as_mut().and_then(StagedRoot::take_file_handle);
+            }
             staged_root = None;
         }
+
+        after_root_mode()?;
 
         // FORMAT.md §9.11 step 17: promotion resolved the staged entry
         // by name, so the commit is safe only while that name still
@@ -271,13 +298,31 @@ fn unarchive_inner<R: Read>(
         // this run's object, and the never-committed staged plaintext
         // is left for `DeleteOnError` to remove. The entry at the final
         // name is not this run's to touch either way.
-        require_promoted_root(&output_handle, &manifest.root_name, staged_identity.known())?;
+        let staged_id = staged_identity.known();
+        require_promoted_root(&output_handle, &manifest.root_name, staged_id)?;
 
-        // The commit is this run's own, so nothing is staged any more.
-        // Dropping the record keeps the cleanup below off the committed
-        // output, which the retained staged handle refers to under its
-        // final name.
+        // The commit is this run's own, so nothing is staged any more. A
+        // hard-link commit moves its file handle into a report-only slot before
+        // dropping the record: the final link-count check needs the inode, but
+        // failure cleanup must never truncate the committed output through it.
+        #[cfg(unix)]
+        if linked_file_cleanup_needs_check && linked_file_handle.is_none() {
+            linked_file_handle = staged_root.as_mut().and_then(StagedRoot::take_file_handle);
+        }
         staged_root = None;
+
+        #[cfg(unix)]
+        if linked_file_cleanup_needs_check {
+            let handle = linked_file_handle
+                .as_ref()
+                .ok_or(CryptoError::InternalInvariant(
+                    "hard-link promotion lost its retained file handle",
+                ))?;
+            require_single_linked_file(handle, output_dir, &manifest.root_name)?;
+            // Keep the reported-name identity check after the link-count read;
+            // neither mutable name is trusted as the source of that count.
+            require_promoted_root(&output_handle, &manifest.root_name, staged_id)?;
+        }
 
         // The returned path was built from the ambient `output_dir`
         // before the anchor was opened. Confirm it still denotes the
@@ -286,6 +331,15 @@ fn unarchive_inner<R: Read>(
         // decrypt whose reported path names an entry this run never
         // wrote.
         require_output_anchor_unchanged(&output_handle, output_dir, &manifest.root_name)?;
+
+        if let Some(error) = promotion.into_staged_link_error() {
+            return Err(staged_link_retained(
+                output_dir,
+                &incomplete_name,
+                &manifest.root_name,
+                error,
+            ));
+        }
 
         Ok(final_path.clone())
     })();
@@ -626,13 +680,12 @@ fn require_promoted_root(
 /// its parent can otherwise leave the caller with a path that resolves
 /// into a directory of their choosing.
 ///
-/// Only a path that no longer leads to a directory reports as changed
-/// — missing, a non-directory, or a symlink cycle — because such a
-/// path no longer names the committed output. Any other failure to
-/// open or describe one — descriptor exhaustion, a denied traversal —
-/// reports the environment rather than the path, and `FORMAT.md` §9.11
-/// requires skipping the confirmation then, the same rule
-/// [`require_promoted_root`] applies to its side.
+/// A path that no longer leads to a directory reports as changed — missing, a
+/// non-directory, or a symlink cycle. Resource exhaustion (`EMFILE`, `ENFILE`,
+/// or `ENOMEM`) skips this diagnostic-only confirmation because the committed
+/// output has already been ratified. Every other open or identity-read failure
+/// is propagated: permission denial can itself be a property of a replacement
+/// directory created by the local writer this check defends against.
 #[cfg(unix)]
 fn require_output_anchor_unchanged(
     output_handle: &Dir,
@@ -651,18 +704,41 @@ fn require_output_anchor_unchanged(
         {
             return Err(output_directory_changed(output_dir, root_name));
         }
-        Err(_) => return Ok(()),
+        Err(error) if output_confirmation_resource_error(&error) => return Ok(()),
+        Err(error) => return Err(error),
     };
-    let (Ok(current_id), Ok(committed_id)) = (
-        platform::dir_object_id(&current),
-        platform::dir_object_id(output_handle),
-    ) else {
-        return Ok(());
+    let current_id = match platform::dir_object_id(&current) {
+        Ok(id) => id,
+        Err(error) if output_confirmation_resource_error(&error) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let committed_id = match platform::dir_object_id(output_handle) {
+        Ok(id) => id,
+        Err(error) if output_confirmation_resource_error(&error) => return Ok(()),
+        Err(error) => return Err(error),
     };
     if current_id != committed_id {
         return Err(output_directory_changed(output_dir, root_name));
     }
     Ok(())
+}
+
+/// Resource exhaustion for which the final destination-path confirmation is
+/// unavailable rather than adverse evidence about the path itself. Every
+/// other open or identity-read failure is returned to the caller: permission
+/// denial can be a property of a replacement directory created by the local
+/// writer this check defends against.
+#[cfg(unix)]
+fn output_confirmation_resource_error(error: &CryptoError) -> bool {
+    matches!(
+        error,
+        CryptoError::Io(error)
+            if matches!(
+                error.raw_os_error(),
+                Some(code)
+                    if code == libc::EMFILE || code == libc::ENFILE || code == libc::ENOMEM
+            )
+    )
 }
 
 /// No-op where `std` exposes no stable directory identity to compare;
@@ -705,21 +781,12 @@ fn staged_handle_unavailable(source: &io::Error) -> CryptoError {
 /// message.
 const STAGED_HANDLE_UNAVAILABLE: &str = "Cannot hold a handle to the staged output";
 
-/// Rejection for a destination directory that no longer denotes the one
-/// the output was committed in. The operator chose the directory, so it
-/// renders raw and untruncated, matching [`output_already_exists`]; the
-/// root name is archive-chosen and is escaped and bounded.
-///
-/// The name is worth carrying because the decrypt finished: the output
-/// is complete inside whatever the directory became, and the path in
-/// this message no longer leads there. Without the name an operator
-/// whose folder was moved mid-run has nothing to look for.
-///
-/// The name leads the message because a status line that cannot fit the
-/// whole of it drops the tail, and the name is what the operator acts
-/// on — the path names a directory that no longer holds the output.
-/// Saying the output is complete matters for the same reason: this
-/// reports a destination that moved, not a decrypt that failed.
+/// Error for a destination path that no longer denotes the retained commit
+/// directory. The root name is included so the operator can locate the output
+/// if that directory was renamed. The message says the output is complete
+/// because content, promotion, and the final-entry check already succeeded.
+/// The operator-supplied directory renders untruncated; the archive-supplied
+/// root name is escaped and bounded.
 #[cfg(unix)]
 fn output_directory_changed(output_dir: &Path, root_name: &OsStr) -> CryptoError {
     CryptoError::InvalidInput(format!(
@@ -727,6 +794,60 @@ fn output_directory_changed(output_dir: &Path, root_name: &OsStr) -> CryptoError
         sanitize_for_display(&root_name.to_string_lossy()),
         output_dir.display()
     ))
+}
+
+/// Post-commit error for a file-root link promotion whose final name is
+/// complete but whose staging name could not be removed. Both names may still
+/// denote the same plaintext file. The committed identity has already been
+/// ratified before this is returned, so `DeleteOnError` cannot truncate it.
+fn staged_link_retained(
+    output_dir: &Path,
+    incomplete_name: &OsStr,
+    root_name: &OsStr,
+    source: io::Error,
+) -> CryptoError {
+    CryptoError::Io(io::Error::new(
+        source.kind(),
+        format!(
+            "Output {} is complete, but temporary name {} could not be removed from {}: {source}",
+            sanitize_for_display(&root_name.to_string_lossy()),
+            sanitize_for_display(&incomplete_name.to_string_lossy()),
+            output_dir.display(),
+        ),
+    ))
+}
+
+/// Final post-condition for a successful file-root hard-link fallback. The
+/// staging unlink's return value is not sufficient: a concurrent directory
+/// writer can rename that link and make the unlink return `NotFound`, or plant
+/// a replacement that the unlink removes successfully. The retained file
+/// handle follows the committed inode through either name race.
+#[cfg(unix)]
+fn require_single_linked_file(
+    handle: &File,
+    output_dir: &Path,
+    root_name: &OsStr,
+) -> Result<(), CryptoError> {
+    use cap_std::fs::MetadataExt;
+
+    let metadata = handle.metadata().map_err(|source| {
+        CryptoError::Io(io::Error::new(
+            source.kind(),
+            format!(
+                "Output {} is complete, but temporary-link cleanup could not be verified in {}: {source}",
+                sanitize_for_display(&root_name.to_string_lossy()),
+                output_dir.display(),
+            ),
+        ))
+    })?;
+    let link_count = metadata.nlink();
+    if link_count != 1 {
+        return Err(CryptoError::Io(io::Error::other(format!(
+            "Output {} is complete, but temporary-link cleanup left {link_count} filesystem links (expected 1)",
+            sanitize_for_display(&root_name.to_string_lossy()),
+        ))));
+    }
+    Ok(())
 }
 
 /// Promotes the staged `{root}.incomplete` to its final `{root}` name
@@ -754,7 +875,7 @@ fn promote_root(
     incomplete_name: &OsStr,
     final_name: &OsStr,
     root_is_file: bool,
-) -> io::Result<()> {
+) -> io::Result<platform::PromotionOutcome> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         let _ = output_dir;
@@ -772,6 +893,7 @@ fn promote_root(
         } else {
             rename_no_clobber(&working_path, &final_path)
         }
+        .map(|()| platform::PromotionOutcome::Clean)
     }
 }
 
@@ -899,6 +1021,18 @@ impl StagedRoot {
             Some(Ok(id)) => StagedIdentity::Known(id),
             Some(Err(_)) => StagedIdentity::Unreadable,
             None => StagedIdentity::NoHandle,
+        }
+    }
+
+    /// Transfers a promoted file's retained handle out of the cleanup record.
+    /// The hard-link fallback still needs it for a final inode link-count
+    /// check, while an error after ratification must not let `DeleteOnError`
+    /// truncate the committed plaintext through that same handle.
+    #[cfg(unix)]
+    fn take_file_handle(&mut self) -> Option<File> {
+        match self {
+            Self::File { handle, .. } => handle.take(),
+            Self::Directory { .. } => None,
         }
     }
 
@@ -3507,12 +3641,10 @@ mod tests {
     ///
     /// - Removal of the output *after* promotion. The reader is the
     ///   only injection point this harness has, and `unarchive` stops
-    ///   reading before it promotes, so no case can act in that
-    ///   window. `a_promoted_root_that_is_gone_is_reported_as_replaced`
-    ///   covers the report, and
-    ///   `a_matching_staged_identity_ratifies_and_a_mismatch_rejects`
-    ///   pins the ratification that keeps cleanup off an output whose
-    ///   commit step 16 confirmed.
+    ///   reading before it promotes, so no generated case can act in that
+    ///   window. `a_post_ratification_replacement_preserves_the_committed_output`
+    ///   drives the complete extraction through a dedicated step-16/17 seam
+    ///   and proves the report plus cleanup decision end to end.
     /// - Failure of the resources the checks themselves need. Neither
     ///   is reachable from the reader, and both are pinned elsewhere:
     ///   `a_run_that_cannot_hold_the_staged_handle_refuses_before_any_plaintext`
@@ -3840,14 +3972,156 @@ mod tests {
             .expect("with nothing to compare against the check must accept");
     }
 
-    /// The anchor confirmation reports only a path that no longer
-    /// names a directory. A missing path and a file at the path are
-    /// changed destinations; a path that cannot be opened at all —
-    /// here a denied traversal — reports the environment, and
-    /// `FORMAT.md` §9.11 requires skipping the confirmation then.
+    /// Drives the real extraction through the interval after step 16 has
+    /// ratified the committed file and cleared the staged cleanup record, but
+    /// before step 17 re-checks its final name. A replacement there must be
+    /// reported without `DeleteOnError` deleting either the complete output
+    /// this run committed or the replacement it did not create.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn the_anchor_check_reports_a_changed_path_and_skips_an_environment_fault() {
+    fn a_post_ratification_replacement_preserves_the_committed_output() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let out = tmp.path().join("out");
+        fs::create_dir(&out).unwrap();
+
+        let manifest = single_file_manifest("f.txt", b"real plaintext");
+        let archive = build_archive(&manifest, &[("f.txt", b"real plaintext")]);
+        let final_path = out.join("f.txt");
+        let committed_elsewhere = out.join("committed-moved-aside");
+
+        let err = unarchive_inner_with_hooks(
+            Cursor::new(archive),
+            &out,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::DeleteOnError,
+            |_| Ok(()),
+            || {
+                fs::rename(&final_path, &committed_elsewhere)?;
+                fs::write(&final_path, b"replacement")?;
+                Ok(())
+            },
+        )
+        .expect_err("step 17 must reject the replaced final entry");
+
+        assert!(
+            err.to_string()
+                .contains("Output was replaced while decrypting"),
+            "the replacement must be reported, got: {err}"
+        );
+        assert_eq!(
+            fs::read(&committed_elsewhere).unwrap(),
+            b"real plaintext",
+            "cleanup must stay off the ratified committed output"
+        );
+        assert_eq!(
+            fs::read(&final_path).unwrap(),
+            b"replacement",
+            "cleanup must not remove the replacement by name"
+        );
+        assert!(
+            !out.join(incomplete_working_name(OsStr::new("f.txt")))
+                .exists(),
+            "the successful promotion left no staging name"
+        );
+    }
+
+    /// A hard-link promotion that cannot remove its temporary name is a
+    /// post-commit error. The extraction caller must report that outcome and
+    /// preserve both complete names under `DeleteOnError`.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn extraction_reports_a_retained_temporary_name_after_promotion() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let out = tmp.path().join("out");
+        fs::create_dir(&out).unwrap();
+
+        let root_name = "f.txt";
+        let plaintext = b"real plaintext";
+        let manifest = single_file_manifest(root_name, plaintext);
+        let archive = build_archive(&manifest, &[(root_name, plaintext)]);
+        let final_path = out.join(root_name);
+        let incomplete_path = out.join(incomplete_working_name(OsStr::new(root_name)));
+
+        let err = unarchive_inner_with_hooks(
+            Cursor::new(archive),
+            &out,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::DeleteOnError,
+            |promotion| {
+                fs::hard_link(&final_path, &incomplete_path)?;
+                *promotion = platform::PromotionOutcome::StagedLinkRetained(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "injected temporary-name removal failure",
+                ));
+                Ok(())
+            },
+            || Ok(()),
+        )
+        .expect_err("a retained temporary name must be reported");
+
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("temporary name") && rendered.contains("could not be removed"),
+            "the retained name must be explicit, got: {rendered}"
+        );
+        assert_eq!(fs::read(&final_path).unwrap(), plaintext);
+        assert_eq!(fs::read(&incomplete_path).unwrap(), plaintext);
+    }
+
+    /// A staged unlink can report `NotFound` after a concurrent writer moves
+    /// that hard link, or report success after removing a replacement planted
+    /// at the old name. In either case the hard-link outcome must consult the
+    /// retained inode and reject the surviving second plaintext link. The
+    /// committed output is already ratified, so `DeleteOnError` preserves it.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn extraction_rejects_a_hidden_link_after_nominal_staging_cleanup() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let out = tmp.path().join("out");
+        fs::create_dir(&out).unwrap();
+
+        let root_name = "f.txt";
+        let plaintext = b"real plaintext";
+        let manifest = single_file_manifest(root_name, plaintext);
+        let archive = build_archive(&manifest, &[(root_name, plaintext)]);
+        let final_path = out.join(root_name);
+        let hidden_path = out.join("moved-staging-link");
+
+        let err = unarchive_inner_with_hooks(
+            Cursor::new(archive),
+            &out,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::DeleteOnError,
+            |promotion| {
+                fs::hard_link(&final_path, &hidden_path)?;
+                *promotion = platform::PromotionOutcome::LinkedFile;
+                Ok(())
+            },
+            || Ok(()),
+        )
+        .expect_err("a hidden second plaintext link must not report success");
+
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("temporary-link cleanup left 2 filesystem links"),
+            "the retained inode link must be explicit, got: {rendered}"
+        );
+        assert_eq!(fs::read(&final_path).unwrap(), plaintext);
+        assert_eq!(fs::read(&hidden_path).unwrap(), plaintext);
+        assert!(
+            !out.join(incomplete_working_name(OsStr::new(root_name)))
+                .exists(),
+            "the moved link, not the original staging name, survives"
+        );
+    }
+
+    /// The anchor confirmation reports a path that no longer names a
+    /// directory as changed and propagates other non-resource failures. A
+    /// denied traversal cannot be accepted merely because the replacement
+    /// directory refuses the identity check.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn the_anchor_check_reports_a_changed_path_and_propagates_access_denial() {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::TempDir::new().unwrap();
@@ -3885,13 +4159,40 @@ mod tests {
             "a symlink cycle at the path must report as changed, got: {err}"
         );
 
-        // Denied traversal: an environment fault, so the confirmation
-        // is skipped. Under a privileged test runner the open succeeds
-        // against the unchanged directory instead; both must accept.
+        // Denied traversal must propagate. Under a privileged test runner the
+        // open succeeds against the unchanged directory instead, so that
+        // environment legitimately returns Ok.
         fs::set_permissions(&parent, fs::Permissions::from_mode(0o000)).unwrap();
         let outcome = require_output_anchor_unchanged(&handle, &out, name);
         fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
-        outcome.expect("an unopenable path must skip, not report a substitution");
+        match outcome {
+            Ok(()) => {
+                // A privileged runner can traverse the directory despite its
+                // mode; in that environment the unchanged identity verifies.
+            }
+            Err(CryptoError::Io(error)) => {
+                assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            }
+            Err(other) => panic!("access denial must propagate as I/O, got: {other}"),
+        }
+    }
+
+    /// Only descriptor/process memory exhaustion skips the destination-path
+    /// confirmation. Permission, device, and ordinary path failures remain
+    /// real errors whether they arise while reopening or reading identity.
+    #[cfg(unix)]
+    #[test]
+    fn the_anchor_check_skips_only_resource_exhaustion() {
+        for skipped in [libc::EMFILE, libc::ENFILE, libc::ENOMEM] {
+            assert!(output_confirmation_resource_error(&CryptoError::Io(
+                io::Error::from_raw_os_error(skipped)
+            )));
+        }
+        for propagated in [libc::EACCES, libc::EPERM, libc::EIO, libc::ENOENT] {
+            assert!(!output_confirmation_resource_error(&CryptoError::Io(
+                io::Error::from_raw_os_error(propagated)
+            )));
+        }
     }
 
     /// Fail-closed contract under descriptor exhaustion. A run that

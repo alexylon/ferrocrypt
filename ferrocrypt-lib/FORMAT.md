@@ -1713,19 +1713,35 @@ Readers MUST process FCA archives in this order:
     under either name. A final output name that no longer exists MUST count
     as a mismatch, because step 15 committed an entry there and its absence
     is evidence that the name no longer denotes the output. Any other failure
-    to read that name MUST NOT, because it reports the environment rather
-    than the entry, and failing a complete extraction would expose it to
-    `DeleteOnError` cleanup;
+    to read that final entry MUST NOT count as a mismatch, because it reports
+    the environment rather than the entry. When reopening the destination
+    directory or reading either directory identity, only `EMFILE`, `ENFILE`,
+    and `ENOMEM` MAY skip the comparison as unavailable resource checks; every
+    other failure MUST fail the extraction without removing an output already
+    ratified in step 16. If a file-root hard-link fallback created the final
+    name, a staging-name unlink that reports success or `NotFound` MUST be
+    followed by a link-count check through the retained staged-file handle, and
+    the reader MUST NOT return success unless that committed inode has exactly
+    one link. The unlink result alone is insufficient: a local writer can move
+    the staging link so it appears missing, or replace it so the unlink removes
+    another entry. If the unlink reports failure, the link count cannot be
+    established, or the count is not one, the reader MUST NOT withdraw the
+    final name after that delayed or ambiguous cleanup; after these identity
+    checks it MUST fail while preserving the complete commit and any additional
+    link;
 18. return the final output path.
 
 Steps 1 through 8 MUST complete before any filesystem output is created.
 
-Where a confirmation in step 16 or step 17 cannot read an identity it needs —
-the platform exposes none, or the read itself fails — that confirmation MUST be
-skipped rather than reported as a mismatch, because the fault reports the
-environment rather than the entry. This does not license continuing without the
-staged handle: step 10 requires the reader to fail before any plaintext where
-that handle cannot be obtained.
+Where the platform exposes no stable identity, the corresponding confirmation
+in step 16 or step 17 is skipped. A failure to read the staged-root or final-name
+identity is likewise not evidence of a substitution and skips that comparison.
+This exception does not apply to the hard-link link-count post-condition: a
+failure to read that count MUST fail the extraction after commit. The
+destination-directory check follows the narrower resource rule in step 17;
+permission denial and other ordinary I/O failures propagate. None of these
+rules license continuing without the staged handle: step 10 requires the reader
+to fail before any plaintext where that handle cannot be obtained.
 
 Steps 11 and 12 MAY be interleaved per entry: applying a file's mode to its
 open handle immediately after its content is written is equivalent to a
@@ -1760,7 +1776,9 @@ The step-15 commit SHOULD be a single atomic no-replace rename. On a filesystem
 whose driver cannot perform one (the macOS exFAT driver among them), a file
 root SHOULD instead be linked to the final name and the staged name unlinked,
 because creating a link refuses an existing target atomically and reaches the
-final name without a placeholder any other process could replace.
+final name without a placeholder any other process could replace. The reader
+MUST retain a handle to that inode until the step-17 link-count post-condition
+has completed.
 
 Where neither is available — a directory root, or a filesystem without hard
 links — readers MAY commit in two steps: atomically claim the final name —
@@ -1788,11 +1806,19 @@ output_dir/root.incomplete -> output_dir/root
 The final output path MUST NOT exist before extraction. If `{root}.incomplete`
 already exists, extraction MUST reject rather than reuse or delete it.
 
-On extraction failure, `DeleteOnError` removes only `.incomplete` roots created
-by the current run, best-effort. The removal MUST be chosen from what the run
-staged, not from what currently occupies the working name, because a local
-writer with access to the destination directory can put an object of another
-type there; a staged regular file MUST NOT be removed recursively.
+On extraction failure while the current run still treats its root as staged,
+`DeleteOnError` removes only the root created by that run, best-effort. The
+removal MUST be chosen from what the run staged, not from what currently
+occupies the working name, because a local writer with access to the destination
+directory can put an object of another type there; a staged regular file MUST
+NOT be removed recursively.
+
+Once step 16 confirms and ratifies the promoted root, the reader MUST stop
+treating that object as staged. A later final-name or destination-directory
+error, a post-commit failure to remove a hard-link staging name, or a failure to
+prove that the linked inode has exactly one remaining link MUST NOT invoke
+`DeleteOnError` against the confirmed output. Such an error can therefore return
+after complete plaintext was committed.
 
 That writer can also move the staged root aside, leaving the working name to
 denote something else. A removal resolved only through that name then misses

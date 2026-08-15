@@ -36,25 +36,31 @@ pub(crate) use format::PERMISSION_BITS_MASK;
 /// detection), trailing-bytes reject, or a final-name collision
 /// discovered at promotion time.
 ///
-/// [`Self::DeleteOnError`] is the default. It matches the typical user
-/// expectation that "decrypt failed → no plaintext on disk" and avoids
-/// leaving authenticated-but-incomplete plaintext that an unaware
-/// caller could pick up.
+/// [`Self::DeleteOnError`] is the default. Before commit, it avoids leaving
+/// authenticated-but-incomplete plaintext that an unaware caller could pick
+/// up. The post-commit exceptions are described below.
 ///
-/// Two failures reported *after* the rename fall outside that
-/// expectation, both of them `FORMAT.md` §9.11 step 17 and both
-/// confined to Unix, where a stable filesystem identity exists to
-/// compare:
+/// Three reports can occur *after* the root-mode step has confirmed the
+/// promoted identity. That confirmation ratifies the output as the
+/// operation's committed result rather than staged work, so this policy never
+/// removes it:
 ///
 /// - The final name no longer denotes the entry the run staged. The
-///   staged output is still removed, but the entry now at the final
-///   name was placed there by something else and is left alone.
-/// - The destination directory path no longer denotes the directory
-///   the output was committed in. The decrypt returns `Err`, and the
-///   complete plaintext stays committed in that directory, which the
-///   path in the error no longer names. Nothing is removed, because by
-///   then the output is the operation's own committed result rather
-///   than staged work.
+///   decrypt returns `Err` and FerroCrypt does not remove the committed
+///   object. If another writer moved it, it remains under that writer's chosen
+///   name; an entry placed at the final name is also left alone. This identity
+///   check is Unix-only.
+/// - The destination directory path no longer denotes the directory used for
+///   the commit. The decrypt returns `Err` and does not remove the confirmed
+///   output by name. If the directory was renamed, the complete plaintext is
+///   under that new name. This check is also Unix-only.
+/// - On a Unix filesystem whose no-replace rename is unavailable, a file-root
+///   commit can succeed by hard link while removal of the `.incomplete` name
+///   fails, or while a concurrent rename/replacement makes that removal target
+///   the wrong entry. The decrypt requires the retained committed inode to have
+///   exactly one link before success. Otherwise it returns `Err`, preserves the
+///   complete commit and any additional link, and never withdraws the final
+///   name after cleanup uncertainty.
 ///
 /// A run that cannot hold a handle to the staged root fails before
 /// writing any plaintext, so a low open-file limit leaves at most an

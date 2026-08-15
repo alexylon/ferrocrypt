@@ -250,7 +250,7 @@ foreach ($pair in @(@($MsrvLib, "ferrocrypt"), @($MsrvCli, "ferrocrypt-cli"))) {
     $pkg = $pair[1]
     if ($Toolchains -match "^$([regex]::Escape($ver))") {
         Note "msrv-$pkg"
-        cargo "+$ver" test -p $pkg -- --test-threads=1
+        cargo "+$ver" test -p $pkg
         Record "msrv-$pkg" ($LASTEXITCODE -eq 0)
     } else {
         SkipLane "msrv-$pkg" "toolchain $ver not installed (rustup toolchain install $ver)"

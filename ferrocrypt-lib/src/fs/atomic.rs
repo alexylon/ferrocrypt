@@ -680,15 +680,20 @@ impl OutputDir {
     /// Flushes the anchored directory's entries, resolving through the
     /// held handle, so the barrier covers the directory the entries
     /// were committed to even if the ambient path was renamed since.
-    /// Same unsupported-filesystem tolerance as [`sync_dir_durable`];
-    /// genuine open and flush failures are reported so a caller that
-    /// requires durability can stop.
+    /// The flush itself keeps the unsupported-filesystem tolerance of
+    /// [`sync_dir_durable`]; genuine open and flush failures are
+    /// reported so a caller that requires durability can stop.
     ///
     /// cap-std may hold the directory as an `O_PATH` handle on Linux,
     /// which cannot be flushed, so `.` is reopened through the handle —
     /// the same technique as `archive::platform`'s directory sync. The
     /// reopen needs read permission, exactly what the path-based flush
-    /// needs, so restrictive directories refuse both the same way.
+    /// needs, so restrictive directories refuse both the same way. A
+    /// failed reopen tolerates only a genuine unsupported-operation
+    /// result: this is an ordinary directory open with plain flags, so
+    /// `EINVAL` or `EBADF` here reports a broken call or anchor, not the
+    /// missing flush capability [`dir_sync_unsupported`] describes, and
+    /// a required barrier must not report success over either.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn flush_durable(&self) -> io::Result<()> {
         use std::os::fd::AsFd;
@@ -706,7 +711,7 @@ impl OutputDir {
             Ok(fd) => fd,
             Err(e) => {
                 let e = io::Error::from(e);
-                return if dir_sync_unsupported(&e) {
+                return if errno_not_supported(&e) {
                     Ok(())
                 } else {
                     Err(e)

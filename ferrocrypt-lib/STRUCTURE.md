@@ -1019,7 +1019,9 @@ It contains:
     operation. The committed file handle remains live through that check and a
     final `(dev, ino)` comparison with the path the caller is about to report,
     so neither a hidden extra link nor a parent-directory/final-entry
-    replacement can produce success. The one-step persist arm and the
+    replacement can produce success; a final name that no longer exists
+    counts as replaced, the step-17 rule the decrypt side applies.
+    The one-step persist arm and the
     claim arm end with the same two confirmations through their retained
     handles — `tempfile`'s persist can itself have committed by hard
     link, so its `Ok` alone does not prove the staged name is gone.

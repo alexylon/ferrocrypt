@@ -91,11 +91,20 @@ impl FinalizedFile {
     /// Confirms that `path`, the value a writer is about to report, still
     /// denotes this committed file. A directory swap after the commit can
     /// otherwise make the returned path lead to attacker-controlled bytes.
+    /// A path that no longer exists counts as changed too: the commit
+    /// created an entry there, so its absence means the name no longer
+    /// denotes the output — the same rule the decrypt side applies.
     pub(crate) fn confirm_reported_path(&self, path: &Path) -> Result<(), CryptoError> {
         #[cfg(unix)]
         {
             let committed = self.file.metadata().map_err(CryptoError::Io)?;
-            let reported = std::fs::symlink_metadata(path).map_err(CryptoError::Io)?;
+            let reported = match std::fs::symlink_metadata(path) {
+                Ok(reported) => reported,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    return Err(reported_output_changed(path));
+                }
+                Err(e) => return Err(CryptoError::Io(e)),
+            };
             if !reported.file_type().is_file()
                 || file_identity(&committed) != file_identity(&reported)
             {
@@ -1309,6 +1318,35 @@ mod tests {
         );
         assert_eq!(fs::read(moved.join("out.txt")).unwrap(), b"payload");
         assert_eq!(fs::read(&final_path).unwrap(), b"replacement");
+    }
+
+    /// A final name that is gone counts as changed, exactly like one that
+    /// holds another object: the commit created an entry there.
+    #[cfg(unix)]
+    #[test]
+    fn finalized_file_rejects_a_reported_path_that_no_longer_exists() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let final_path = tmp_dir.path().join("out.txt");
+
+        let mut tmp = tempfile::Builder::new()
+            .tempfile_in(tmp_dir.path())
+            .unwrap();
+        tmp.write_all(b"payload").unwrap();
+        let finalized = finalize_file(tmp, &final_path, "Output").unwrap();
+
+        fs::remove_file(&final_path).unwrap();
+
+        let err = finalized
+            .confirm_reported_path(&final_path)
+            .expect_err("a missing final name no longer denotes the output");
+        assert!(
+            matches!(
+                err,
+                CryptoError::InvalidInput(message)
+                    if message.contains("reported path changed")
+            ),
+            "the missing name must report as a path mismatch"
+        );
     }
 
     /// `tempfile` can persist through a hard link of its own and discard

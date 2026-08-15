@@ -1008,9 +1008,11 @@ It contains:
     key generation so its commits share the anchor its rollbacks and
     flushes act on — and the staged temp file is an entry of the same
     directory, which the route confirms by identity before its first
-    commit step and otherwise refuses as a caller-contract violation;
-    a swap of the output path mid-commit therefore cannot redirect any
-    step. If removing the staged
+    commit step; a staged entry that is missing or is another object —
+    a temp staged elsewhere, or a local writer's deletion or
+    replacement — refuses as a filesystem condition, not an internal
+    error. A swap of the output path mid-commit therefore cannot
+    redirect any step. If removing the staged
     name after a successful link fails, `finalize_file` returns a marked
     post-commit error and preserves both complete links; it never withdraws
     the final name after a delayed failure. A successful or missing-name unlink

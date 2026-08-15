@@ -256,8 +256,9 @@ fn sync_parent_dir(_path: &Path) {}
 /// the destination directory (`tempfile::Builder::tempfile_in`): that
 /// keeps it on the final path's filesystem, and the Unix fallback
 /// routes commit handle-relative inside that directory, refusing by
-/// identity — [`CryptoError::InternalInvariant`] — a temp file staged
-/// anywhere else.
+/// identity a temp file that is not the entry under its name there —
+/// staged anywhere else, or deleted or replaced while the operation
+/// ran.
 pub(crate) fn finalize_file(
     tmp: NamedTempFile,
     final_path: &Path,
@@ -836,12 +837,13 @@ fn finalize_file_via_link_or_claim_in(
 
 /// Requires the entry under the staged name in the anchored destination
 /// directory to be the staged file itself, before any fallback commit step
-/// runs. Both routes resolve the staged name through the anchor, so a
-/// temporary staged in any other directory must be refused here — as a
-/// contract violation, not left to surface later as placeholder churn and
-/// an orphaned staged file on the filesystems that reach this route. The
-/// entry is read without following symlinks, so a link planted under the
-/// staged name cannot satisfy the comparison either.
+/// runs. Both routes resolve the staged name through the anchor, so the
+/// commit must be refused when that entry is missing or is another
+/// object — whether a caller staged the temporary in some other
+/// directory, or a local writer deleted or replaced the staged entry
+/// while the operation ran. The entry is read without following
+/// symlinks, so a link planted under the staged name cannot satisfy the
+/// comparison either.
 #[cfg(unix)]
 fn require_staged_temp_in_output_dir(
     tmp: &NamedTempFile,
@@ -854,23 +856,27 @@ fn require_staged_temp_in_output_dir(
     let entry = match output_dir.dir.symlink_metadata(tmp_name) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Err(staged_temp_outside_output_dir());
+            return Err(staged_temp_not_in_output_dir(tmp_name));
         }
         Err(error) => return Err(CryptoError::Io(error)),
     };
     if !entry.is_file() || (entry.dev(), entry.ino()) != file_identity(&staged) {
-        return Err(staged_temp_outside_output_dir());
+        return Err(staged_temp_not_in_output_dir(tmp_name));
     }
     Ok(())
 }
 
-/// Contract violation from [`require_staged_temp_in_output_dir`]: the
-/// staged temporary file is not an entry of the destination directory.
+/// Rejection from [`require_staged_temp_in_output_dir`]: the entry under
+/// the staged name is missing or is not the staged file. A local writer
+/// deleting or replacing the staged entry reaches this in ordinary
+/// operation on the filesystems that use the fallback route, so the
+/// error reports a filesystem condition rather than a library bug.
 #[cfg(unix)]
-fn staged_temp_outside_output_dir() -> CryptoError {
-    CryptoError::InternalInvariant(
-        "the staged temporary file is not an entry of the destination directory",
-    )
+fn staged_temp_not_in_output_dir(staged_name: &std::ffi::OsStr) -> CryptoError {
+    CryptoError::InvalidInput(format!(
+        "Staged temporary file {} is not the entry under its name in the destination directory",
+        sanitize_path_for_display(Path::new(staged_name)),
+    ))
 }
 
 /// Finishes a link commit after the final link exists. The unlink is
@@ -1738,8 +1744,10 @@ mod tests {
     /// [`finalize_file`] contract. The fallback must refuse it by identity
     /// before creating anything at the final name, rather than let the
     /// mismatch surface later as placeholder churn and an orphaned staged
-    /// file. The refused temp is removed by its own destructor at the path
-    /// it was actually created.
+    /// file. The same rejection covers a staged entry deleted or replaced
+    /// by a local writer, so it reports as a filesystem condition, not an
+    /// internal error. The refused temp is removed by its own destructor
+    /// at the path it was actually created.
     #[cfg(unix)]
     #[test]
     fn fallback_refuses_a_temp_staged_outside_the_destination_directory() {
@@ -1760,10 +1768,10 @@ mod tests {
         assert!(
             matches!(
                 error.into_crypto_error(),
-                CryptoError::InternalInvariant(message)
-                    if message.contains("not an entry of the destination directory")
+                CryptoError::InvalidInput(message)
+                    if message.contains("is not the entry under its name")
             ),
-            "the contract violation must be explicit"
+            "the refusal must name the staged-entry mismatch"
         );
         assert_eq!(
             fs::read_dir(&out).unwrap().count(),

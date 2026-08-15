@@ -221,15 +221,22 @@ pub(crate) fn rename_at_no_clobber(
 /// blocked, and a later bare-name removal would delete the replacement. The
 /// caller therefore completes the post-promotion checks and reports either
 /// condition without running failure cleanup against the committed inode.
+///
+/// The path-based file promotion used off Linux and macOS can also commit
+/// by hard link — `tempfile`'s own fallback, whose unlink result it does
+/// not report — so it carries the same obligation through
+/// [`Self::for_tempfile_file_promotion`].
 #[derive(Debug)]
 pub(crate) enum PromotionOutcome {
     /// The final name was committed by one-step rename or by a claim route,
     /// neither of which creates a second link to the committed inode.
     Clean,
-    /// A file was committed by hard link and the staged-name removal reported
-    /// success or `NotFound`. The caller must still require a link count of one
-    /// through its retained handle before reporting success.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    /// A file was committed over a route that links it to its final name:
+    /// the crate's own fallback after a staged-name removal that reported
+    /// success or `NotFound`, or `tempfile`'s internal fallback, which does
+    /// not report its removal result at all. The caller must require a link
+    /// count of one through its retained handle before reporting success.
+    #[cfg(unix)]
     LinkedFile,
     /// The final name is committed, but the staging name could not be
     /// removed. Both names may still denote the same complete file.
@@ -238,19 +245,29 @@ pub(crate) enum PromotionOutcome {
 }
 
 impl PromotionOutcome {
-    /// Whether the staged-name removal reported success or `NotFound` and
-    /// therefore needs the retained-inode link-count post-condition.
+    /// The outcome of a file root committed through
+    /// `fs::atomic::promote_single_file_no_clobber`. Windows moves the file
+    /// in one step and never links. On every other Unix target `tempfile`
+    /// may commit — or, off its `renameat_with` platforms, always commits —
+    /// by hard link with a discarded unlink, so the caller must prove the
+    /// cleanup through the retained-inode link count.
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    pub(crate) fn for_tempfile_file_promotion() -> Self {
+        #[cfg(unix)]
+        {
+            Self::LinkedFile
+        }
+        #[cfg(not(unix))]
+        {
+            Self::Clean
+        }
+    }
+
+    /// Whether the commit may have left a second link and therefore needs
+    /// the retained-inode link-count post-condition.
     #[cfg(unix)]
     pub(crate) fn needs_link_count_check(&self) -> bool {
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        {
-            matches!(self, Self::LinkedFile)
-        }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        {
-            let _ = self;
-            false
-        }
+        matches!(self, Self::LinkedFile)
     }
 
     /// Returns the staged-name unlink failure, where the commit completed with
@@ -258,7 +275,7 @@ impl PromotionOutcome {
     pub(crate) fn into_staged_link_error(self) -> Option<io::Error> {
         match self {
             Self::Clean => None,
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            #[cfg(unix)]
             Self::LinkedFile => None,
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             Self::StagedLinkRetained(error) => Some(error),

@@ -160,6 +160,10 @@ regression net, regenerated when the format intentionally changes).
   make the unlink report it missing, or plant a replacement that the unlink
   removes instead. Before success, FerroCrypt reads the committed inode's
   link count through its retained handle and requires exactly one link.
+  The same requirement applies when the commit is performed inside the
+  platform file library, which on some mounts (Linux network and FUSE
+  filesystems among them) falls back to a hard link of its own without
+  reporting how its working-name removal went.
   If the working name cannot be removed, the link count cannot be read, or
   another link remains, the final name is already a complete commit.
   FerroCrypt does not withdraw it: the cleanup may have taken long enough

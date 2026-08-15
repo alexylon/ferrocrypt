@@ -842,10 +842,10 @@ fn require_single_linked_file(
     })?;
     let link_count = metadata.nlink();
     if link_count != 1 {
-        return Err(CryptoError::Io(io::Error::other(format!(
-            "Output {} is complete, but temporary-link cleanup left {link_count} filesystem links (expected 1)",
-            sanitize_for_display(&root_name.to_string_lossy()),
-        ))));
+        return Err(crate::fs::atomic::committed_link_count_error(
+            &sanitize_for_display(&root_name.to_string_lossy()),
+            link_count,
+        ));
     }
     Ok(())
 }
@@ -865,8 +865,10 @@ fn require_single_linked_file(
 /// and directories alike.
 ///
 /// On Windows (and any other target) the promotion is path-based:
-/// single-file roots take the kernel atomic no-replace move via
-/// `promote_single_file_no_clobber`, directory roots the best-effort
+/// single-file roots go through `promote_single_file_no_clobber` — a
+/// kernel atomic no-replace move on Windows, `tempfile`'s hard-link
+/// fallback on other Unix targets, where the outcome therefore carries
+/// the link-count obligation — and directory roots the best-effort
 /// `rename_no_clobber`. A handle-relative no-replace rename on Windows
 /// needs an `unsafe` Win32 call the crate forbids; see `SECURITY.md`.
 fn promote_root(
@@ -889,11 +891,15 @@ fn promote_root(
         let working_path = output_dir.join(incomplete_name);
         let final_path = output_dir.join(final_name);
         if root_is_file {
+            // `tempfile` can commit this move by hard link with a
+            // discarded unlink, so the outcome must carry the link-count
+            // obligation on the targets where that can happen.
             promote_single_file_no_clobber(&working_path, &final_path)
+                .map(|()| platform::PromotionOutcome::for_tempfile_file_promotion())
         } else {
             rename_no_clobber(&working_path, &final_path)
+                .map(|()| platform::PromotionOutcome::Clean)
         }
-        .map(|()| platform::PromotionOutcome::Clean)
     }
 }
 

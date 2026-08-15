@@ -221,9 +221,12 @@ regression net, regenerated when the format intentionally changes).
   the folder you chose and commits it there. Encryption and key generation
   retain the committed file handle and check immediately before return that
   each reported path still denotes that file; Linux and macOS decryption
-  performs the matching directory and output identity checks. A
-  hard-link fallback also requires the retained inode to have exactly one
-  link before success. A swap detected there returns an error and leaves the entry currently at the
+  performs the matching directory and output identity checks. Before
+  success, every file commit also requires, through that retained handle,
+  that the committed file has exactly one name, so a hard-link fallback
+  that left its working name, or a link another local process created
+  against the temporary file before the commit, is reported rather than
+  hidden. A swap detected there returns an error and leaves the entry currently at the
   reported path untouched. If the original file or folder was moved, the
   complete output remains under that new name. If it was removed without
   another name or hard link, the retained handle permits detection but does

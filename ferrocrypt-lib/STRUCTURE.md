@@ -1025,10 +1025,12 @@ It contains:
     neither a hidden extra link nor a parent-directory/final-entry
     replacement can produce success; a final name that no longer exists
     counts as replaced, the step-17 rule the decrypt side applies.
-    The one-step persist arm and the
-    claim arm end with the same two confirmations through their retained
-    handles — `tempfile`'s persist can itself have committed by hard
-    link, so its `Ok` alone does not prove the staged name is gone.
+    The one-step persist arm — on every platform — and the claim arm
+    end with the same two confirmations through their retained handles:
+    `tempfile`'s persist can itself have committed by hard link on Unix,
+    so its `Ok` alone does not prove the staged name is gone, and a link
+    planted against the staged temporary before the commit survives it
+    anywhere.
     Opening the anchor needs a readable output
     directory (`SECURITY.md`);
   - **decrypt promotion on Windows and other non-Linux/macOS targets**:

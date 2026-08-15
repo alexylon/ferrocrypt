@@ -62,15 +62,16 @@ use crate::fs::paths::already_exists_error;
 
 /// A file whose commit completed, keeping the committed handle alive. It
 /// is used, on every platform, to confirm immediately before returning
-/// that the reported path still denotes this object, and by a
+/// that the reported path still denotes this object and that the commit
+/// left exactly one name for the committed file — `tempfile`'s own
+/// persist can fall back on Unix to a hard link whose staged-name unlink
+/// result it discards, and a link a local writer creates against the
+/// staged temporary before the commit survives it anywhere — and by a
 /// key-generation rollback to confirm that the entry it removes is still
-/// this file. Unix also uses it to prove the commit left exactly one name
-/// for the committed inode — `tempfile`'s own persist can fall back to a
-/// hard link whose staged-name unlink result it discards. On Windows the
-/// rollback deletes the file while this handle is open, which relies on
-/// `tempfile` opening a named temporary with the default sharing mode;
-/// that mode allows renames and deletes, unlike the exclusive mode of
-/// its unnamed temporaries.
+/// this file. On Windows the rollback deletes the file while this handle
+/// is open, which relies on `tempfile` opening a named temporary with the
+/// default sharing mode; that mode allows renames and deletes, unlike the
+/// exclusive mode of its unnamed temporaries.
 #[derive(Debug)]
 pub(crate) struct FinalizedFile {
     file: std::fs::File,
@@ -105,14 +106,15 @@ impl FinalizedFile {
     }
 
     /// Requires the commit to have left exactly one name for the committed
-    /// inode before success is reported. Reading through the retained
+    /// file before success is reported. Reading through the retained
     /// handle makes this independent of concurrent renames or replacements of
     /// either directory entry.
-    #[cfg(unix)]
     fn confirm_single_link(&self, path: &Path) -> Result<(), CryptoError> {
-        use std::os::unix::fs::MetadataExt;
+        use cap_fs_ext::MetadataExt;
 
-        let link_count = self.file.metadata().map_err(CryptoError::Io)?.nlink();
+        let link_count = cap_std::fs::Metadata::from_file(&self.file)
+            .map_err(CryptoError::Io)?
+            .nlink();
         if link_count != 1 {
             return Err(committed_link_count_error(
                 &sanitize_path_for_display(path),
@@ -183,12 +185,11 @@ fn reported_output_changed(path: &Path) -> CryptoError {
     ))
 }
 
-/// Post-commit failure for a commit whose cleanup left the committed inode
+/// Post-commit failure for a commit whose cleanup left the committed file
 /// with a link count other than one. The retained handle, rather than either
 /// mutable name, supplies the count. `display_name` must already be safe to
 /// render. Shared with archive extraction so the writer and the reader
 /// report this condition in the same words.
-#[cfg(unix)]
 pub(crate) fn committed_link_count_error(display_name: &str, link_count: u64) -> CryptoError {
     CryptoError::Io(io::Error::other(format!(
         "Output {display_name} is complete, but temporary-link cleanup left {link_count} filesystem links (expected 1)",
@@ -383,9 +384,11 @@ pub(crate) fn finalize_file_with_anchor(
 /// Completes a successful one-step persist: parent flush, retained
 /// committed handle, and the reported-path and single-link confirmations.
 /// The link count is required even on this arm because `tempfile` retries
-/// a rejected no-replace rename through a hard link of its own and
+/// a rejected no-replace rename on Unix through a hard link of its own and
 /// discards the unlink of the staged name, so its `Ok` alone does not
-/// prove the staged name is gone.
+/// prove the staged name is gone; and on every platform a link a local
+/// writer created against the staged temporary before the commit
+/// survives it.
 fn finalized_from_persist(
     file: std::fs::File,
     final_path: &Path,
@@ -395,7 +398,6 @@ fn finalized_from_persist(
     finalized
         .confirm_reported_path(final_path)
         .map_err(FinalizeFileError::after_commit)?;
-    #[cfg(unix)]
     finalized
         .confirm_single_link(final_path)
         .map_err(FinalizeFileError::after_commit)?;
@@ -1602,10 +1604,12 @@ mod tests {
         );
     }
 
-    /// `tempfile` can persist through a hard link of its own and discard
-    /// the staged-name unlink result, so the persist arm must not report
-    /// success while a second complete link to the committed inode exists.
-    #[cfg(unix)]
+    /// `tempfile` can persist through a hard link of its own on Unix and
+    /// discard the staged-name unlink result, and a local writer can link
+    /// the staged temporary before the commit anywhere, so the persist arm
+    /// must not report success while a second complete link to the
+    /// committed file exists. Runs on Windows too: NTFS has hard links, and
+    /// the check is load-bearing there.
     #[test]
     fn persist_arm_rejects_a_second_link_to_the_committed_file() {
         let tmp_dir = tempfile::TempDir::new().unwrap();
@@ -1625,6 +1629,35 @@ mod tests {
         );
         assert_eq!(fs::read_to_string(&final_path).unwrap(), "payload");
         assert_eq!(fs::read_to_string(&leftover).unwrap(), "payload");
+    }
+
+    /// The same guarantee end to end through `finalize_file`: a hard link
+    /// a local writer created against the staged temporary before the
+    /// commit survives the one-step persist as a second name for the
+    /// committed file, so the commit fails after the final name exists and
+    /// keeps both complete names.
+    #[test]
+    fn finalize_file_rejects_a_link_planted_against_the_staged_temporary() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let final_path = tmp_dir.path().join("out.txt");
+
+        let mut tmp = tempfile::Builder::new()
+            .tempfile_in(tmp_dir.path())
+            .unwrap();
+        tmp.write_all(b"payload").unwrap();
+        let planted = tmp_dir.path().join("planted.txt");
+        fs::hard_link(tmp.path(), &planted).unwrap();
+
+        let error = finalize_file(tmp, &final_path, "Output")
+            .expect_err("a second link to the committed file must fail after commit");
+        assert!(error.committed());
+        let message = error.into_crypto_error().to_string();
+        assert!(
+            message.contains("temporary-link cleanup left 2 filesystem links"),
+            "got: {message}"
+        );
+        assert_eq!(fs::read_to_string(&final_path).unwrap(), "payload");
+        assert_eq!(fs::read_to_string(&planted).unwrap(), "payload");
     }
 
     /// The fallback trigger fires only for "the filesystem cannot do a

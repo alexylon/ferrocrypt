@@ -428,11 +428,17 @@ jobs:
           # share is served by the runner itself (impacket's Python
           # SMB server, which needs no root) and mounted back over
           # loopback, so no second machine is involved.
+          #
+          # Impacket labels its SMB2 support experimental. Pin it so a
+          # release cannot silently change this lane; the test step below
+          # narrowly retries the two integrity errors its synthetic server
+          # has intermittently produced while the same revision passes on
+          # another run.
           - name: macos-smb
             os: macos-latest
             mount_setup: |
               python3 -m venv /tmp/impacket-venv
-              /tmp/impacket-venv/bin/pip install --quiet impacket
+              /tmp/impacket-venv/bin/pip install --quiet impacket==0.13.1
               mkdir -p /tmp/smb-share /tmp/smb-mnt
               /tmp/impacket-venv/bin/smbserver.py -smb2support -port 1445 \
                 -username fcr -password fcrtest SHARE /tmp/smb-share \
@@ -467,7 +473,48 @@ jobs:
         run: ${{ matrix.mount_setup }}
 
       - name: Run fs-matrix smoke tests
+        if: matrix.name != 'macos-smb'
         run: cargo test -p ferrocrypt --test archive_fs_matrix -- --ignored --test-threads=1 --nocapture
+
+      - name: Run fs-matrix smoke tests (macOS SMB)
+        if: matrix.name == 'macos-smb'
+        shell: bash
+        run: |
+          set -o pipefail
+          log="$(mktemp /tmp/fs-matrix-smb.XXXXXX)"
+          test_command=(
+            cargo test -p ferrocrypt --test archive_fs_matrix --
+            --ignored --test-threads=1 --nocapture
+          )
+
+          if "${test_command[@]}" 2>&1 | tee "$log"; then
+            exit 0
+          fi
+
+          # The loopback server's advertised SMB2 implementation is
+          # experimental. It has intermittently returned corrupted bytes
+          # from freshly committed .fcr or public-key files, including on
+          # revisions that passed this lane in a parallel run. Retry once
+          # only when every reported CryptoError is one of those observed
+          # data-integrity signatures. Assertions, filesystem errors, and
+          # every other CryptoError remain first-attempt failures.
+          known_corruption='^Error: (PayloadTampered|InvalidFormat\(MalformedPublicKey\))$'
+          if grep -q "panicked at" "$log"; then
+            exit 1
+          fi
+          if ! grep -Eq "$known_corruption" "$log"; then
+            exit 1
+          fi
+          if grep '^Error:' "$log" | grep -Evq "$known_corruption"; then
+            exit 1
+          fi
+
+          echo "::warning title=Retrying experimental SMB2 server corruption::The first macOS-SMB pass returned a known Impacket integrity signature; retrying the complete lane once."
+          "${test_command[@]}"
+
+      - name: Show SMB server diagnostics
+        if: failure() && matrix.name == 'macos-smb'
+        run: cat /tmp/smbserver.log
 
       - name: Unmount target filesystem
         if: always()

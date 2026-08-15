@@ -801,25 +801,29 @@ fn finalize_file_via_link_or_claim_in(
     label: &str,
     output_dir: &OutputDir,
 ) -> Result<FinalizedFile, FinalizeFileError> {
+    // Owned, because the arms below consume `tmp` while the staged
+    // name is still needed.
+    let Some(tmp_name) = tmp.path().file_name().map(|name| name.to_os_string()) else {
+        // With no staged name to verify against the anchor, dropping
+        // `tmp` removes the staged file at the path it was created.
+        return Err(FinalizeFileError::before_commit(CryptoError::Io(
+            no_final_component_error(),
+        )));
+    };
+    // Verified before any removal resolves through the anchor, so a
+    // same-named entry there is never unlinked in place of a temp that
+    // was staged somewhere else.
+    if let Err(error) = require_staged_temp_in_output_dir(&tmp, output_dir, &tmp_name) {
+        // `tmp` drops here, so its own destructor removes the staged
+        // file at the path the caller actually created it.
+        return Err(FinalizeFileError::before_commit(error));
+    }
     let Some(final_name) = final_path.file_name() else {
         let _ = remove_staged_temp(tmp, output_dir);
         return Err(FinalizeFileError::before_commit(CryptoError::Io(
             no_final_component_error(),
         )));
     };
-    // Owned, because the arms below consume `tmp` while the staged
-    // name is still needed.
-    let Some(tmp_name) = tmp.path().file_name().map(|name| name.to_os_string()) else {
-        let _ = remove_staged_temp(tmp, output_dir);
-        return Err(FinalizeFileError::before_commit(CryptoError::Io(
-            no_final_component_error(),
-        )));
-    };
-    if let Err(error) = require_staged_temp_in_output_dir(&tmp, output_dir, &tmp_name) {
-        // `tmp` drops here, so its own destructor removes the staged
-        // file at the path the caller actually created it.
-        return Err(FinalizeFileError::before_commit(error));
-    }
     match output_dir
         .dir
         .hard_link(&tmp_name, &output_dir.dir, final_name)
@@ -1782,6 +1786,77 @@ mod tests {
             !tmp_path.exists(),
             "the refused temp is cleaned up at its own path"
         );
+    }
+
+    /// The staged-entry verification precedes every removal on the fallback
+    /// route. With the temp staged elsewhere and a final path with no last
+    /// component, the refusal must be the identity one, and a same-named
+    /// entry in the anchored directory must survive.
+    #[cfg(unix)]
+    #[test]
+    fn fallback_verifies_the_staged_temp_before_any_removal() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let elsewhere = tmp_dir.path().join("elsewhere");
+        let out = tmp_dir.path().join("out");
+        fs::create_dir(&elsewhere).unwrap();
+        fs::create_dir(&out).unwrap();
+
+        let mut tmp = tempfile::Builder::new().tempfile_in(&elsewhere).unwrap();
+        tmp.write_all(b"payload").unwrap();
+        let tmp_path = tmp.path().to_path_buf();
+        let planted = out.join(tmp_path.file_name().unwrap());
+        fs::write(&planted, b"unrelated").unwrap();
+
+        let error = finalize_file_via_link_or_claim_in(
+            tmp,
+            Path::new("/"),
+            "Output",
+            &OutputDir::open(&out).unwrap(),
+        )
+        .expect_err("an unverified staged temp must be refused");
+        assert!(!error.committed());
+        assert!(
+            matches!(
+                error.into_crypto_error(),
+                CryptoError::InvalidInput(message)
+                    if message.contains("is not the entry under its name")
+            ),
+            "the identity refusal must come before the missing-name error"
+        );
+        assert_eq!(
+            fs::read(&planted).unwrap(),
+            b"unrelated",
+            "the same-named entry in the anchor must survive"
+        );
+        assert!(!tmp_path.exists(), "the temp is removed at its own path");
+    }
+
+    /// A final path with no last component still refuses, and the staged
+    /// temp — verified as the anchored entry by then — is removed through
+    /// the anchor.
+    #[cfg(unix)]
+    #[test]
+    fn fallback_removes_a_verified_temp_when_the_final_path_has_no_name() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let mut tmp = tempfile::Builder::new()
+            .tempfile_in(tmp_dir.path())
+            .unwrap();
+        tmp.write_all(b"payload").unwrap();
+        let tmp_path = tmp.path().to_path_buf();
+
+        let error = finalize_file_via_link_or_claim_in(
+            tmp,
+            Path::new("/"),
+            "Output",
+            &OutputDir::open(tmp_dir.path()).unwrap(),
+        )
+        .expect_err("a final path with no last component must be refused");
+        assert!(!error.committed());
+        match error.into_crypto_error() {
+            CryptoError::Io(e) => assert_eq!(e.kind(), io::ErrorKind::InvalidInput),
+            other => panic!("expected an I/O error, got {other:?}"),
+        }
+        assert!(!tmp_path.exists(), "the staged temp must be removed");
     }
 
     /// Once the final hard link exists, a staged-name unlink failure must not

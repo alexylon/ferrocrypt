@@ -126,10 +126,20 @@ impl FinalizedFile {
 }
 
 /// Identity of a filesystem object: the device and inode number on Unix,
-/// the volume serial number and file index on Windows. Comparing the
-/// object behind a retained handle with the entry under a name catches a
-/// final-name replacement, and a parent-directory swap where the platform
-/// permits one, before a writer reports that path.
+/// the volume serial number and the 64-bit file index on Windows.
+/// Comparing the object behind a retained handle with the entry under a
+/// name catches a final-name replacement, and a parent-directory swap
+/// where the platform permits one, before a writer reports that path.
+///
+/// Every comparison in this crate is between objects that both exist
+/// when it runs — a retained handle, or a link just made, keeps the
+/// recorded one alive — because a filesystem may reuse an identifier once
+/// its object is gone, and two live objects on one volume never share
+/// one. What remains is documented in `SECURITY.md`: ReFS reports a
+/// 64-bit truncation of a wider identifier, and a filesystem that
+/// supplies no distinct identifiers — some network redirectors — makes
+/// every comparison hold, so these checks detect nothing there rather
+/// than fail.
 ///
 /// `metadata` must come from an open handle —
 /// [`cap_std::fs::Metadata::from_file`], or a cap-std stat, which opens
@@ -754,15 +764,8 @@ impl OutputDir {
     /// [`RollbackOutcome`] says whether the file is gone, so the caller
     /// can report a rollback that left the file, or another name for it,
     /// behind. The link count is read through the retained handle before
-    /// the removal; a name added after that read is not counted.
-    ///
-    /// The identity is the device and inode number on Unix and the volume
-    /// serial number and file index on Windows, read through `cap_fs_ext`
-    /// on both. Both sides come from open handles — the retained committed
-    /// handle, and the handle the no-follow stat opens for itself — so the
-    /// by-handle fields are always populated. ReFS can truncate its wider
-    /// file identifiers; a false match there removes no more than a
-    /// bare-name removal would.
+    /// the removal; a name added after that read is not counted. The
+    /// identity, and what it cannot distinguish, is [`file_identity`]'s.
     #[must_use = "the outcome says whether the committed file is gone; report it"]
     pub(crate) fn remove_published_if_retained(
         &self,

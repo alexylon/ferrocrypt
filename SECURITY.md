@@ -232,7 +232,13 @@ regression net, regenerated when the format intentionally changes).
   another name or hard link, the retained handle permits detection but does
   not make the output recoverable after the call returns. No path can remain
   stable against a namespace change made after the check or after the call
-  returns. What such a swap cannot do is misdirect a cleanup: when key
+  returns. These checks compare the identifiers the filesystem itself
+  assigns — inode numbers on Unix, the volume serial number and file index
+  on Windows — between objects that both still exist when the comparison
+  runs, so an identifier reused later cannot satisfy them. ReFS reports a 64-bit
+  truncation of its wider identifier, and a filesystem that gives every
+  object the same identifier, as some network redirectors do, makes the
+  checks detect nothing there rather than fail. What such a swap cannot do is misdirect a cleanup: when key
   generation has to undo a key file it already wrote, it removes that file
   through a handle held on the folder the file actually went to, and only
   while the entry there is still the file it wrote, so a same-named file

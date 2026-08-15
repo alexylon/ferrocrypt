@@ -1006,7 +1006,7 @@ fn commit_key_pair_files_with_barrier_and_public_finalizer(
     .map_err(atomic::FinalizeFileError::into_crypto_error)?;
     if let Err(e) = sync_output_dir(&committed_dir, output_dir) {
         let rollback =
-            committed_dir.remove_published_if_retained(private_key_path, &private_finalized);
+            committed_dir.remove_published_if_retained(private_key_path, private_finalized);
         return Err(atomic::with_rollback_report(
             CryptoError::Io(e),
             rollback,
@@ -1024,8 +1024,8 @@ fn commit_key_pair_files_with_barrier_and_public_finalizer(
                 if error.committed() {
                     return Err(error.into_crypto_error());
                 }
-                let rollback = committed_dir
-                    .remove_published_if_retained(private_key_path, &private_finalized);
+                let rollback =
+                    committed_dir.remove_published_if_retained(private_key_path, private_finalized);
                 return Err(atomic::with_rollback_report(
                     error.into_crypto_error(),
                     rollback,
@@ -1035,7 +1035,7 @@ fn commit_key_pair_files_with_barrier_and_public_finalizer(
         };
     if let Err(e) = sync_output_dir(&committed_dir, output_dir) {
         let rollback =
-            committed_dir.remove_published_if_retained(public_key_path, &public_finalized);
+            committed_dir.remove_published_if_retained(public_key_path, public_finalized);
         return Err(atomic::with_rollback_report(
             CryptoError::Io(e),
             rollback,
@@ -2685,8 +2685,8 @@ mod tests {
     /// name for it exists must say so: the sealed key survives under that
     /// name, and the error is the only channel that reaches the caller.
     /// The other name is left alone, since it is not this run's to remove.
-    /// Unix only, like every other hard-link test in this crate.
-    #[cfg(unix)]
+    /// Runs on Windows too: NTFS has hard links, and the report is load-bearing
+    /// there.
     #[test]
     fn keygen_rollback_reports_a_surviving_link_to_the_removed_key() {
         let tmp = tempfile::TempDir::new().unwrap();

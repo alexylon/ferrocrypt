@@ -242,10 +242,13 @@ regression net, regenerated when the format intentionally changes).
   generation has to undo a key file it already wrote, it removes that file
   through a handle held on the folder the file actually went to, and only
   while the entry there is still the file it wrote, so a same-named file
-  elsewhere is not deleted. On Windows that removal goes through the
-  folder's current path, resolved from the handle immediately before, so
-  only a swap made in that last instant is outside this protection. Choose
-  an output folder that only you can modify.
+  elsewhere is not deleted. On Unix the removal itself is by name inside
+  that folder, so an entry replaced in the instant between the check and
+  the removal is what it reaches. On Windows the removal is made through
+  the handle FerroCrypt still holds on the key file it wrote, so it can
+  only ever delete that file; the check before it reads the entry through
+  the folder handle's current path, which the open handle keeps in place.
+  Choose an output folder that only you can modify.
 - **Generated key pairs publish `private.key` before `public.key`.** Key
   generation writes and flushes both files before either receives its
   final name. It then commits `private.key`, flushes the output

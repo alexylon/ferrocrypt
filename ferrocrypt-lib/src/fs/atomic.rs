@@ -68,10 +68,10 @@ use crate::fs::paths::already_exists_error;
 /// result it discards, and a link a local writer creates against the
 /// staged temporary before the commit survives it anywhere — and by a
 /// key-generation rollback to confirm that the entry it removes is still
-/// this file. On Windows the rollback deletes the file while this handle
-/// is open, which relies on `tempfile` opening a named temporary with the
-/// default sharing mode; that mode allows renames and deletes, unlike the
-/// exclusive mode of its unnamed temporaries.
+/// this file. On Windows the rollback deletes the file through this
+/// handle, which relies on `tempfile` opening a named temporary with the
+/// default sharing mode; that mode admits the delete-access reopen, unlike
+/// the exclusive mode of its unnamed temporaries.
 #[derive(Debug)]
 pub(crate) struct FinalizedFile {
     file: std::fs::File,
@@ -718,9 +718,12 @@ fn dir_sync_unsupported(e: &io::Error) -> bool {
 /// `cap_std::fs::Dir` is the same capability primitive the archive
 /// extractor anchors to. On Linux and macOS its removals are
 /// handle-relative. On Windows, cap-std resolves the handle to the
-/// directory's current path and removes through that path, so a
-/// directory swap made between that resolution and the removal is not
-/// covered there.
+/// directory's current path for every name-based operation; the
+/// anchored directory itself cannot be renamed or removed while this
+/// handle is open, because cap-std opens directories without delete
+/// sharing, so that path denotes it. The rollback's removal there does
+/// not go by name at all: it deletes through the retained committed
+/// handle, so it can only ever delete the file that handle refers to.
 pub(crate) struct OutputDir {
     dir: cap_std::fs::Dir,
 }
@@ -766,18 +769,46 @@ impl OutputDir {
     /// behind. The link count is read through the retained handle before
     /// the removal; a name added after that read is not counted. The
     /// identity, and what it cannot distinguish, is [`file_identity`]'s.
+    ///
+    /// The committed handle is consumed and closed here, so the removal
+    /// is complete when this returns. What the removal acts on is
+    /// [`remove_retained`]'s: on Unix the name, unlinked inside the
+    /// anchored directory; on Windows the retained handle itself.
     #[must_use = "the outcome says whether the committed file is gone; report it"]
     pub(crate) fn remove_published_if_retained(
         &self,
         path: &Path,
-        finalized: &FinalizedFile,
+        finalized: FinalizedFile,
     ) -> RollbackOutcome {
-        use cap_fs_ext::MetadataExt;
-
         let Some(name) = path.file_name() else {
             return RollbackOutcome::Unconfirmed;
         };
-        let Ok(committed) = cap_std::fs::Metadata::from_file(&finalized.file) else {
+        self.remove_if_retained(name, finalized.file)
+    }
+
+    /// The identity-checked removal behind
+    /// [`Self::remove_published_if_retained`], for any entry of the
+    /// anchored directory whose creator still holds a handle to it.
+    fn remove_if_retained(
+        &self,
+        name: &std::ffi::OsStr,
+        retained: std::fs::File,
+    ) -> RollbackOutcome {
+        self.remove_if_retained_with(name, retained, || {})
+    }
+
+    /// Testable [`Self::remove_if_retained`]: `between` runs after the
+    /// identity check and before the removal, where a local writer's
+    /// replacement would land.
+    fn remove_if_retained_with(
+        &self,
+        name: &std::ffi::OsStr,
+        retained: std::fs::File,
+        between: impl FnOnce(),
+    ) -> RollbackOutcome {
+        use cap_fs_ext::MetadataExt;
+
+        let Ok(committed) = cap_std::fs::Metadata::from_file(&retained) else {
             return RollbackOutcome::Unconfirmed;
         };
         let Ok(entry) = self.dir.symlink_metadata(name) else {
@@ -786,7 +817,8 @@ impl OutputDir {
         if !entry.is_file() || file_identity(&entry) != file_identity(&committed) {
             return RollbackOutcome::Replaced;
         }
-        if self.dir.remove_file(name).is_err() {
+        between();
+        if remove_retained(&self.dir, name, retained).is_err() {
             return RollbackOutcome::Unconfirmed;
         }
         match committed.nlink() {
@@ -839,6 +871,64 @@ impl OutputDir {
         flush_dir_handle(&std::fs::File::from(fd))
     }
 }
+
+/// Removes the object `retained` refers to, once its identity has been
+/// confirmed under `name` in `dir`, and closes the handle. Unix has no
+/// removal by descriptor, so the name is unlinked inside the anchored
+/// directory; an entry replaced in the instant between the check and the
+/// unlink is what that removal then reaches, a bound `SECURITY.md`
+/// states.
+#[cfg(unix)]
+fn remove_retained(
+    dir: &cap_std::fs::Dir,
+    name: &std::ffi::OsStr,
+    retained: std::fs::File,
+) -> io::Result<()> {
+    let result = dir.remove_file(name);
+    drop(retained);
+    result
+}
+
+/// Windows removes through the handle itself: the file is reopened from
+/// `retained` — a relative open of the same object, no path involved —
+/// with the delete-on-close flag, and the deletion takes effect when the
+/// last handle closes, which happens here. An entry replaced in the
+/// instant between the identity check and this call therefore survives:
+/// the removal can only ever delete the file the handle refers to. The
+/// reopen relies on `tempfile` opening its named temporaries with the
+/// default sharing mode, which permits a delete-access open of the same
+/// file, and requires the original handle to have been opened for
+/// writing, as every committed file here was.
+#[cfg(windows)]
+fn remove_retained(
+    _dir: &cap_std::fs::Dir,
+    _name: &std::ffi::OsStr,
+    retained: std::fs::File,
+) -> io::Result<()> {
+    use cap_fs_ext::Reopen;
+    use cap_std::fs::OpenOptionsExt;
+
+    let mut options = cap_std::fs::OpenOptions::new();
+    options
+        .access_mode(DELETE | FILE_READ_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_DELETE_ON_CLOSE);
+    let marked_for_deletion = retained.reopen(&options)?;
+    drop(marked_for_deletion);
+    drop(retained);
+    Ok(())
+}
+
+/// Access right to delete an object, from `WinNT.h`.
+#[cfg(windows)]
+const DELETE: u32 = 0x0001_0000;
+
+/// Access right to read an object's attributes, from `WinNT.h`.
+#[cfg(windows)]
+const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+
+/// `CreateFileW` flag that deletes the file when its last handle closes.
+#[cfg(windows)]
+const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x0400_0000;
 
 /// Mode bits for the zero-byte placeholder that claims the final name
 /// in [`finalize_file_via_claim`]. Owner-only, matching the mode
@@ -1916,71 +2006,105 @@ mod tests {
         );
     }
 
+    /// Commits `b"committed"` under `name` in `dir` through `anchor` and
+    /// returns the final path with the retained committed handle.
+    fn commit_through_anchor(
+        dir: &Path,
+        anchor: &OutputDir,
+        name: &str,
+    ) -> (std::path::PathBuf, FinalizedFile) {
+        let mut tmp = tempfile::Builder::new().tempfile_in(dir).unwrap();
+        tmp.write_all(b"committed").unwrap();
+        let path = dir.join(name);
+        let finalized = finalize_file_with_anchor(tmp, &path, "Key file", anchor)
+            .expect("the commit must succeed on a fresh name");
+        (path, finalized)
+    }
+
     /// The rollback tells its caller what it left behind: a file removed
     /// with its only name needs no report, a file with a second name
     /// survives under it, an entry that is no longer the committed file is
     /// left in place, and a name that is already gone cannot be confirmed.
-    /// Each committed handle is dropped before the on-disk state is read,
-    /// since Windows may keep a deleted name visible while a handle to
-    /// the file is open. The second-name case runs on Unix only, like
-    /// every other hard-link test in this crate.
+    /// The rollback consumes the committed handle, so the on-disk state is
+    /// final when it returns on every platform. The second-name case runs
+    /// on Windows too, where NTFS has hard links and the report is
+    /// load-bearing.
     #[test]
     fn rollback_reports_a_removed_linked_replaced_or_missing_file() {
         let tmp_dir = tempfile::TempDir::new().unwrap();
         let dir = tmp_dir.path();
         let anchor = OutputDir::open(dir).unwrap();
-        let commit = |name: &str| {
-            let mut tmp = tempfile::Builder::new().tempfile_in(dir).unwrap();
-            tmp.write_all(b"committed").unwrap();
-            let path = dir.join(name);
-            let finalized = finalize_file_with_anchor(tmp, &path, "Key file", &anchor)
-                .expect("the commit must succeed on a fresh name");
-            (path, finalized)
-        };
 
-        let (removed, finalized) = commit("removed");
+        let (removed, finalized) = commit_through_anchor(dir, &anchor, "removed");
         assert_eq!(
-            anchor.remove_published_if_retained(&removed, &finalized),
+            anchor.remove_published_if_retained(&removed, finalized),
             RollbackOutcome::Removed
         );
-        drop(finalized);
         assert!(!removed.exists(), "a file with one name must be gone");
 
-        #[cfg(unix)]
-        {
-            let (linked, finalized) = commit("linked");
-            let other_name = dir.join("linked.other");
-            fs::hard_link(&linked, &other_name).unwrap();
-            assert_eq!(
-                anchor.remove_published_if_retained(&linked, &finalized),
-                RollbackOutcome::RemovedButLinked { link_count: 2 }
-            );
-            drop(finalized);
-            assert!(!linked.exists(), "the committed name must still be removed");
-            assert_eq!(
-                fs::read(&other_name).unwrap(),
-                b"committed",
-                "the other name is not this operation's to remove"
-            );
-        }
+        let (linked, finalized) = commit_through_anchor(dir, &anchor, "linked");
+        let other_name = dir.join("linked.other");
+        fs::hard_link(&linked, &other_name).unwrap();
+        assert_eq!(
+            anchor.remove_published_if_retained(&linked, finalized),
+            RollbackOutcome::RemovedButLinked { link_count: 2 }
+        );
+        assert!(!linked.exists(), "the committed name must still be removed");
+        assert_eq!(
+            fs::read(&other_name).unwrap(),
+            b"committed",
+            "the other name is not this operation's to remove"
+        );
 
-        let (replaced, finalized) = commit("replaced");
+        let (replaced, finalized) = commit_through_anchor(dir, &anchor, "replaced");
         let moved = dir.join("replaced.moved");
         fs::rename(&replaced, &moved).unwrap();
         fs::write(&replaced, b"planted").unwrap();
         assert_eq!(
-            anchor.remove_published_if_retained(&replaced, &finalized),
+            anchor.remove_published_if_retained(&replaced, finalized),
             RollbackOutcome::Replaced
         );
-        drop(finalized);
         assert_eq!(fs::read(&replaced).unwrap(), b"planted");
         assert_eq!(fs::read(&moved).unwrap(), b"committed");
 
-        let (missing, finalized) = commit("missing");
+        let (missing, finalized) = commit_through_anchor(dir, &anchor, "missing");
         fs::remove_file(&missing).unwrap();
         assert_eq!(
-            anchor.remove_published_if_retained(&missing, &finalized),
+            anchor.remove_published_if_retained(&missing, finalized),
             RollbackOutcome::Unconfirmed
+        );
+    }
+
+    /// The identity check and the removal are two steps, and a local
+    /// writer can replace the entry between them. On Windows the removal
+    /// acts on the retained handle, so the replacement survives and the
+    /// committed file is the one removed — wherever it was moved to. Unix
+    /// unlinks by name and cannot make this promise; `SECURITY.md` records
+    /// that bound.
+    #[cfg(windows)]
+    #[test]
+    fn rollback_removal_acts_on_the_committed_file_not_on_the_name() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let dir = tmp_dir.path();
+        let anchor = OutputDir::open(dir).unwrap();
+        let (path, finalized) = commit_through_anchor(dir, &anchor, "private.key");
+        let moved = dir.join("private.moved");
+
+        let outcome =
+            anchor.remove_if_retained_with(path.file_name().unwrap(), finalized.file, || {
+                fs::rename(&path, &moved).unwrap();
+                fs::write(&path, b"planted").unwrap();
+            });
+
+        assert_eq!(outcome, RollbackOutcome::Removed);
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            b"planted",
+            "an entry planted after the identity check must survive"
+        );
+        assert!(
+            !moved.exists(),
+            "the committed file must be removed under whatever name it holds"
         );
     }
 

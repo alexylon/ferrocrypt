@@ -1156,6 +1156,8 @@ mod tests {
     use super::super::decode::unarchive;
     use super::super::model::make_entry;
     use super::*;
+    #[cfg(windows)]
+    use crate::archive::platform::try_make_junction;
     #[cfg(unix)]
     use crate::fs::paths::make_fifo;
     use std::io::Cursor;
@@ -1794,22 +1796,6 @@ mod tests {
         let mut buf = Vec::new();
         let err = archive(&dir, &mut buf, ArchiveLimits::default()).unwrap_err();
         assert!(format!("{err}").contains("Symlink in archive source"));
-    }
-
-    #[cfg(windows)]
-    fn try_make_junction(target: &Path, junction: &Path) -> std::io::Result<()> {
-        let status = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(junction)
-            .arg(target)
-            .status()?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(std::io::Error::other(format!(
-                "mklink /J failed with exit code {status}"
-            )))
-        }
     }
 
     #[cfg(windows)]

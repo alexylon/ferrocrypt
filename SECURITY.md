@@ -222,8 +222,11 @@ regression net, regenerated when the format intentionally changes).
   boundary.** FerroCrypt writes each output under a temporary name in
   the folder you chose and commits it there. Encryption and key generation
   retain the committed file handle and check immediately before return that
-  each reported path still denotes that file; Linux and macOS decryption
-  performs the matching directory and output identity checks. Before
+  each reported path still denotes that file, and decryption performs the
+  matching directory and output identity checks, on every platform. On
+  Windows, where the final rename goes by path, this also covers a
+  junction or link on that path re-pointed at another folder during the
+  decrypt: the entry renamed there is never reported as your output. Before
   success, every file commit also requires, through that retained handle,
   that the committed file has exactly one name, so a hard-link fallback
   that left its working name, or a link another local process created
@@ -237,7 +240,10 @@ regression net, regenerated when the format intentionally changes).
   returns. These checks compare the identifiers the filesystem itself
   assigns — inode numbers on Unix, the volume serial number and file index
   on Windows — between objects that both still exist when the comparison
-  runs, so an identifier reused later cannot satisfy them. ReFS reports a 64-bit
+  runs, and while FerroCrypt still holds its handle on the object it wrote,
+  so an identifier reused later cannot satisfy them and a filesystem that
+  assigns a new identifier once the last handle closes cannot fail them.
+  ReFS reports a 64-bit
   truncation of its wider identifier, and a filesystem that gives every
   object the same identifier, as some network redirectors do, makes the
   checks detect nothing there rather than fail. What such a swap cannot do is misdirect a cleanup: when key
@@ -250,6 +256,13 @@ regression net, regenerated when the format intentionally changes).
   the handle FerroCrypt still holds on the key file it wrote, so it can
   only ever delete that file; the check before it reads the entry through
   the folder handle's current path, which the open handle keeps in place.
+  A failed decrypt removes the folder it staged through the handle it
+  created it with on Linux and macOS, so a folder another process put at
+  the staging name is never removed and the staged one is removed wherever
+  it was moved; on Windows that removal is by name, made only while the
+  entry at the staging name is still the staged folder, so a substituted
+  folder is left in place there as well, and a staged folder that was
+  moved aside is left where it is.
   Choose an output folder that only you can modify.
 - **Generated key pairs publish `private.key` before `public.key`.** Key
   generation writes and flushes both files before either receives its

@@ -1741,7 +1741,12 @@ failure to read that count MUST fail the extraction after commit. The
 destination-directory check follows the narrower resource rule in step 17;
 permission denial and other ordinary I/O failures propagate. None of these
 rules license continuing without the staged handle: step 10 requires the reader
-to fail before any plaintext where that handle cannot be obtained.
+to fail before any plaintext where that handle cannot be obtained. The reader
+MUST keep that handle open until the last comparison of steps 16 and 17 is
+made, because a filesystem may assign an object a new identifier once its last
+handle closes, and MUST read the staged identity from it after step 15, because
+a filesystem may assign one from the position of the directory entry the
+promotion moves.
 
 Steps 11 and 12 MAY be interleaved per entry: applying a file's mode to its
 open handle immediately after its content is written is equivalent to a

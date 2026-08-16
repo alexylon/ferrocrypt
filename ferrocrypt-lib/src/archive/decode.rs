@@ -99,19 +99,31 @@ fn unarchive_inner<R: Read>(
     limits: ArchiveLimits,
     policy: IncompleteOutputPolicy,
 ) -> Result<PathBuf, CryptoError> {
-    unarchive_inner_with_hooks(reader, output_dir, limits, policy, |_| Ok(()), || Ok(()))
+    unarchive_inner_with_hooks(
+        reader,
+        output_dir,
+        limits,
+        policy,
+        || Ok(()),
+        |_| Ok(()),
+        |_| Ok(()),
+    )
 }
 
-/// Implementation seam for post-promotion outcomes and the interval after
-/// root-mode confirmation. Production supplies no-op hooks; tests use them to
-/// exercise post-commit reporting and cleanup.
+/// Implementation seam for the interval between staging and promotion,
+/// post-promotion outcomes, and the interval after root-mode confirmation.
+/// Production supplies no-op hooks; tests use them to exercise the
+/// promotion window, post-commit reporting, and cleanup. `after_root_mode`
+/// receives the record a ratification moved out of the cleanup slot, so a
+/// test can confirm the retained handle is still held at that point.
 fn unarchive_inner_with_hooks<R: Read>(
     mut reader: R,
     output_dir: &Path,
     limits: ArchiveLimits,
     policy: IncompleteOutputPolicy,
+    before_promotion: impl FnOnce() -> Result<(), CryptoError>,
     after_promotion: impl FnOnce(&mut platform::PromotionOutcome) -> Result<(), CryptoError>,
-    after_root_mode: impl FnOnce() -> Result<(), CryptoError>,
+    after_root_mode: impl FnOnce(&Option<StagedRoot>) -> Result<(), CryptoError>,
 ) -> Result<PathBuf, CryptoError> {
     // FORMAT.md §9.11 step 1: parse + structurally validate the header.
     // `parse_fca_header` already enforces all caps for `archive_ext_len`,
@@ -193,9 +205,7 @@ fn unarchive_inner_with_hooks<R: Read>(
             )?;
         }
 
-        // Windows renames a directory by path and refuses while a
-        // handle to it is open, so the staged handle is closed here.
-        release_staged_handle_before_promotion(&mut staged_root);
+        before_promotion()?;
 
         // FORMAT.md §9.11 step 15: promote {root}.incomplete → {root}
         // with no-clobber. On Linux and macOS the rename is anchored to
@@ -207,7 +217,10 @@ fn unarchive_inner_with_hooks<R: Read>(
         // atomic no-replace move, directory roots a best-effort
         // check-then-rename — because a handle-relative no-replace rename
         // there needs an `unsafe` Win32 call the crate forbids. See
-        // `promote_root` and `SECURITY.md`.
+        // `promote_root` and `SECURITY.md`. The staged handle stays open
+        // on every platform: it is what steps 16 and 17 compare the
+        // final name against, and it was opened so the rename can
+        // proceed beside it.
         let mut promotion = promote_root(
             &output_handle,
             output_dir,
@@ -225,8 +238,6 @@ fn unarchive_inner_with_hooks<R: Read>(
         after_promotion(&mut promotion)?;
         #[cfg(unix)]
         let linked_file_cleanup_needs_check = promotion.needs_link_count_check();
-        #[cfg(unix)]
-        let mut linked_file_handle = None;
 
         // FORMAT.md §9.11 step 16: apply root entry mode AFTER promotion.
         //
@@ -265,7 +276,11 @@ fn unarchive_inner_with_hooks<R: Read>(
         // the object this run staged, so the staged identity is read
         // once here, on this side of the rename: a filesystem may
         // renumber an object when its directory entry moves, and both
-        // sides of the comparison must be read after promotion.
+        // sides of the comparison must be read after promotion. The
+        // handle it is read from stays open until the last comparison
+        // below: a filesystem may also give an object a new identifier
+        // once its last handle closes, so a name read after that close
+        // would no longer match.
         let staged_identity = staged_root
             .as_ref()
             .map_or(StagedIdentity::NoHandle, StagedRoot::identity);
@@ -279,16 +294,15 @@ fn unarchive_inner_with_hooks<R: Read>(
         // final name is this run's own output, so the checks below only
         // report from here on. Cleanup must not reach an output that is
         // known to be committed — the promoted object is the caller's,
-        // wherever it is later moved.
+        // wherever it is later moved — so the record leaves the cleanup
+        // slot for `ratified_root`, which is never handed to `remove`
+        // and only keeps the retained handle open for those checks.
+        let mut ratified_root: Option<StagedRoot> = None;
         if matches!(ratified, Ok(PromotedIdentity::Confirmed)) {
-            #[cfg(unix)]
-            if linked_file_cleanup_needs_check {
-                linked_file_handle = staged_root.as_mut().and_then(StagedRoot::take_file_handle);
-            }
-            staged_root = None;
+            ratified_root = staged_root.take();
         }
 
-        after_root_mode()?;
+        after_root_mode(&ratified_root)?;
 
         // FORMAT.md §9.11 step 17: promotion resolved the staged entry
         // by name, so the commit is safe only while that name still
@@ -301,26 +315,26 @@ fn unarchive_inner_with_hooks<R: Read>(
         let staged_id = staged_identity.known();
         require_promoted_root(&output_handle, &manifest.root_name, staged_id)?;
 
-        // The commit is this run's own, so nothing is staged any more. A
-        // hard-link commit moves its file handle into a report-only slot before
-        // dropping the record: the final link-count check needs the inode, but
-        // failure cleanup must never truncate the committed output through it.
-        #[cfg(unix)]
-        if linked_file_cleanup_needs_check && linked_file_handle.is_none() {
-            linked_file_handle = staged_root.as_mut().and_then(StagedRoot::take_file_handle);
+        // The commit is this run's own, so nothing is staged any more.
+        // The record moves out of the cleanup slot on the same terms as
+        // at ratification.
+        if ratified_root.is_none() {
+            ratified_root = staged_root.take();
         }
-        staged_root = None;
 
+        // A hard-link commit reads its final link count through the
+        // retained handle: neither mutable name is trusted as the source
+        // of that count, and the reported-name identity check is
+        // repeated after it.
         #[cfg(unix)]
         if linked_file_cleanup_needs_check {
-            let handle = linked_file_handle
+            let handle = ratified_root
                 .as_ref()
+                .and_then(StagedRoot::file_handle)
                 .ok_or(CryptoError::InternalInvariant(
                     "hard-link promotion lost its retained file handle",
                 ))?;
             require_single_linked_file(handle, output_dir, &manifest.root_name)?;
-            // Keep the reported-name identity check after the link-count read;
-            // neither mutable name is trusted as the source of that count.
             require_promoted_root(&output_handle, &manifest.root_name, staged_id)?;
         }
 
@@ -331,6 +345,10 @@ fn unarchive_inner_with_hooks<R: Read>(
         // decrypt whose reported path names an entry this run never
         // wrote.
         require_output_anchor_unchanged(&output_handle, output_dir, &manifest.root_name)?;
+
+        // Every comparison against the staged object is made; the
+        // retained handle can close.
+        drop(ratified_root);
 
         if let Some(error) = promotion.into_staged_link_error() {
             return Err(staged_link_retained(
@@ -423,19 +441,20 @@ fn extract_directory_root<R: Read>(
         map_already_exists(e, || incomplete_output_exists(output_dir, incomplete_name))
     })?;
     // mkdir_strict succeeded — this run owns the staging directory.
-    // The recorded handle is a second descriptor for the same
-    // directory, so cleanup keeps working after the one below is
-    // closed at the end of extraction. Duplication is required on the
-    // same terms as the file root: where it fails the record takes the
-    // descriptor this function would have walked from, and the error
-    // returns before any plaintext.
-    match root_dir.try_clone() {
-        Ok(recorded) => *staged_root = Some(StagedRoot::directory(incomplete_name, Some(recorded))),
+    // The recorded handle is a second handle to the same directory, so
+    // the checks after promotion and the cleanup keep working after the
+    // one below is closed at the end of extraction. A second handle is
+    // required on the same terms as the file root: where it cannot be
+    // taken the record takes the handle this function would have walked
+    // from, and the error returns before any plaintext.
+    let recorded = match retain_staged_directory(output_handle, incomplete_name, &root_dir) {
+        Ok(recorded) => recorded,
         Err(e) => {
             *staged_root = Some(StagedRoot::directory(incomplete_name, Some(root_dir)));
-            return Err(staged_handle_unavailable(&e));
+            return Err(e);
         }
-    }
+    };
+    *staged_root = Some(StagedRoot::directory(incomplete_name, Some(recorded)));
 
     // Pass 1 (FORMAT.md §9.11 step 10): pre-create all descendant
     // directories sorted by depth ascending (parent before child), so
@@ -508,11 +527,34 @@ fn extract_directory_root<R: Read>(
     // durability without paying for `F_FULLFSYNC` once per file.
     platform::sync_extraction_barrier(&root_dir).map_err(CryptoError::Io)?;
 
-    // root_dir is dropped here, closing the staged-directory handle
-    // before promotion: on Windows an open directory handle blocks the
-    // path-based rename, and on Unix the handle-relative promotion runs
-    // against `output_handle` rather than this one.
+    // root_dir is dropped here, before promotion: on Windows a cap-std
+    // directory handle has no delete sharing and would block the
+    // path-based rename — the recorded handle was opened so the rename
+    // can proceed beside it — and on Unix the handle-relative promotion
+    // runs against `output_handle` rather than this one.
     Ok(())
+}
+
+/// Second handle to the staged directory root, recorded for the checks
+/// after promotion and for cleanup. Where the platform opens it by name
+/// rather than duplicating `root_dir` ([`platform::retain_staged_dir`]),
+/// the entry at that name may already have been swapped, so the handle
+/// is confirmed to denote the directory `mkdir_strict` just created
+/// before it is recorded — a mismatch is a substitution and refuses the
+/// run before any plaintext, like a substitution found after promotion.
+fn retain_staged_directory(
+    output_handle: &Dir,
+    incomplete_name: &OsStr,
+    root_dir: &Dir,
+) -> Result<Dir, CryptoError> {
+    let retained = platform::retain_staged_dir(output_handle, incomplete_name, root_dir)
+        .map_err(|e| staged_handle_unavailable(&e))?;
+    require_staged_identity(
+        platform::dir_object_id(root_dir)?,
+        platform::dir_object_id(&retained)?,
+        incomplete_name,
+    )?;
+    Ok(retained)
 }
 
 /// What the step-16 mode application learned about the entry at the
@@ -681,27 +723,21 @@ fn require_promoted_root(
 /// into a directory of their choosing.
 ///
 /// A path that no longer leads to a directory reports as changed — missing, a
-/// non-directory, or a symlink cycle. Resource exhaustion (`EMFILE`, `ENFILE`,
-/// or `ENOMEM`) skips this diagnostic-only confirmation because the committed
-/// output has already been ratified. Every other open or identity-read failure
-/// is propagated: permission denial can itself be a property of a replacement
-/// directory created by the local writer this check defends against.
-#[cfg(unix)]
+/// non-directory, or a symlink cycle ([`path_no_longer_a_directory`]).
+/// Resource exhaustion skips this diagnostic-only confirmation because the
+/// committed output has already been ratified
+/// ([`output_confirmation_resource_error`]). Every other open or
+/// identity-read failure is propagated: permission denial can itself be a
+/// property of a replacement directory created by the local writer this
+/// check defends against.
 fn require_output_anchor_unchanged(
     output_handle: &Dir,
     output_dir: &Path,
     root_name: &OsStr,
 ) -> Result<(), CryptoError> {
-    // The symlink cycle is matched by raw errno: std has no stable
-    // `io::ErrorKind` for `ELOOP` yet.
     let current = match platform::open_anchor(output_dir) {
         Ok(current) => current,
-        Err(CryptoError::Io(e))
-            if matches!(
-                e.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-            ) || e.raw_os_error() == Some(libc::ELOOP) =>
-        {
+        Err(CryptoError::Io(e)) if path_no_longer_a_directory(&e) => {
             return Err(output_directory_changed(output_dir, root_name));
         }
         Err(error) if output_confirmation_resource_error(&error) => return Ok(()),
@@ -723,40 +759,81 @@ fn require_output_anchor_unchanged(
     Ok(())
 }
 
-/// Resource exhaustion for which the final destination-path confirmation is
-/// unavailable rather than adverse evidence about the path itself. Every
-/// other open or identity-read failure is returned to the caller: permission
-/// denial can be a property of a replacement directory created by the local
-/// writer this check defends against.
+/// Whether a failure to open the destination path says it no longer leads
+/// to a directory: the entry is missing, is not a directory, or is a
+/// symlink cycle. Each is a substitution someone made, never an
+/// environment fault. The cycle is matched by raw OS error code because
+/// `std` has no stable `io::ErrorKind` for it yet.
+fn path_no_longer_a_directory(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    ) || error.raw_os_error() == Some(SYMLINK_LOOP_CODE)
+}
+
+/// Raw OS error code for a symlink cycle.
 #[cfg(unix)]
+const SYMLINK_LOOP_CODE: i32 = libc::ELOOP;
+
+/// Raw OS error code for a symlink cycle: what Windows returns for a
+/// reparse-point cycle.
+#[cfg(windows)]
+const SYMLINK_LOOP_CODE: i32 = ERROR_CANT_RESOLVE_FILENAME;
+
+/// Resource exhaustion for which the final destination-path confirmation is
+/// unavailable rather than adverse evidence about the path itself
+/// ([`RESOURCE_EXHAUSTION_CODES`]). Every other open or identity-read
+/// failure is returned to the caller: permission denial can be a property
+/// of a replacement directory created by the local writer this check
+/// defends against.
 fn output_confirmation_resource_error(error: &CryptoError) -> bool {
     matches!(
         error,
         CryptoError::Io(error)
-            if matches!(
-                error.raw_os_error(),
-                Some(code)
-                    if code == libc::EMFILE || code == libc::ENFILE || code == libc::ENOMEM
-            )
+            if matches!(error.raw_os_error(), Some(code) if RESOURCE_EXHAUSTION_CODES.contains(&code))
     )
 }
 
-/// No-op where `std` exposes no stable directory identity to compare;
-/// see [`platform::ObjectId`]. Re-opening the path there would add a
-/// failure mode without proving anything.
-#[cfg(not(unix))]
-fn require_output_anchor_unchanged(
-    _output_handle: &Dir,
-    _output_dir: &Path,
-    _root_name: &OsStr,
-) -> Result<(), CryptoError> {
-    Ok(())
-}
+/// Raw OS error codes for descriptor and memory exhaustion.
+#[cfg(unix)]
+const RESOURCE_EXHAUSTION_CODES: [i32; 3] = [libc::EMFILE, libc::ENFILE, libc::ENOMEM];
+
+/// Raw OS error codes for handle, memory, and kernel-resource exhaustion.
+#[cfg(windows)]
+const RESOURCE_EXHAUSTION_CODES: [i32; 4] = [
+    ERROR_TOO_MANY_OPEN_FILES,
+    ERROR_NOT_ENOUGH_MEMORY,
+    ERROR_OUTOFMEMORY,
+    ERROR_NO_SYSTEM_RESOURCES,
+];
+
+/// `ERROR_TOO_MANY_OPEN_FILES` from `WinError.h`.
+#[cfg(windows)]
+const ERROR_TOO_MANY_OPEN_FILES: i32 = 4;
+
+/// `ERROR_NOT_ENOUGH_MEMORY` from `WinError.h`.
+#[cfg(windows)]
+const ERROR_NOT_ENOUGH_MEMORY: i32 = 8;
+
+/// `ERROR_OUTOFMEMORY` from `WinError.h`.
+#[cfg(windows)]
+const ERROR_OUTOFMEMORY: i32 = 14;
+
+/// `ERROR_NO_SYSTEM_RESOURCES` from `WinError.h`.
+#[cfg(windows)]
+const ERROR_NO_SYSTEM_RESOURCES: i32 = 1450;
+
+/// `ERROR_CANT_RESOLVE_FILENAME` from `WinError.h`.
+#[cfg(windows)]
+const ERROR_CANT_RESOLVE_FILENAME: i32 = 1921;
 
 /// Rejection for a promoted root that no longer denotes the object this
 /// run staged: the entry was replaced after the commit, so its content
 /// did not come from the archive and must not be reported as the
-/// decrypted output.
+/// decrypted output. Also raised, with the staging name, where the
+/// retained staged handle turns out not to denote the directory this
+/// run created ([`retain_staged_directory`]) — the same substitution,
+/// caught before any plaintext.
 fn promoted_root_replaced(root_name: &OsStr) -> CryptoError {
     CryptoError::InvalidInput(format!(
         "Output was replaced while decrypting: {}",
@@ -787,7 +864,6 @@ const STAGED_HANDLE_UNAVAILABLE: &str = "Cannot hold a handle to the staged outp
 /// because content, promotion, and the final-entry check already succeeded.
 /// The operator-supplied directory renders untruncated; the archive-supplied
 /// root name is escaped and bounded.
-#[cfg(unix)]
 fn output_directory_changed(output_dir: &Path, root_name: &OsStr) -> CryptoError {
     CryptoError::InvalidInput(format!(
         "Output {} is complete but its directory changed: {}",
@@ -970,24 +1046,28 @@ fn incomplete_working_name(root_name: &OsStr) -> OsString {
 /// recursively.
 ///
 /// A staged directory is removed through the handle it was created
-/// with on Unix, so a substituted directory is left in place. Windows
-/// removes it by name instead, because resolving an open directory
-/// handle back to a path there would leave the destination anchor —
-/// see [`remove_staged_directory`]. A substituted directory is
-/// therefore removed on Windows, the bound `SECURITY.md` records for
-/// that target.
+/// with on Unix, so a substituted directory is left in place, and the
+/// staged tree is removed wherever it was moved. Windows removes it by
+/// name instead, because resolving an open directory handle back to a
+/// path there would leave the destination anchor — see
+/// [`remove_staged_directory`] — and only while the entry at the
+/// working name is still the staged directory, so a substituted
+/// directory is left in place there too; a staged tree moved aside
+/// survives on Windows, the bound `SECURITY.md` records for that
+/// target.
 enum StagedRoot {
     /// Staged file root. `handle` is a descriptor for the file
-    /// `create_file_at` returned. It is present from the moment the
-    /// record is made — a run that cannot hold one fails before
-    /// streaming any plaintext — and becomes `None` only where the
-    /// platform needs it closed before promotion.
+    /// `create_file_at` returned, held for the whole run: a run that
+    /// cannot hold one fails before streaming any plaintext, and once
+    /// the commit is ratified the record leaves the cleanup slot with
+    /// the handle still open (see `unarchive_inner_with_hooks`).
     File {
         working_name: OsString,
         handle: Option<File>,
     },
-    /// Staged directory root. `handle` is the descriptor
-    /// `mkdir_strict` returned, under the same conditions.
+    /// Staged directory root. `handle` is the second handle
+    /// [`retain_staged_directory`] recorded, held for the whole run
+    /// under the same conditions.
     Directory {
         working_name: OsString,
         handle: Option<Dir>,
@@ -1009,8 +1089,8 @@ impl StagedRoot {
         }
     }
 
-    /// Current identity of the staged object, read from the handle it
-    /// was created with.
+    /// Current identity of the staged object, read from the retained
+    /// handle.
     ///
     /// Read now rather than recorded at creation: a filesystem may
     /// derive a file's identity from the position of its directory
@@ -1030,14 +1110,12 @@ impl StagedRoot {
         }
     }
 
-    /// Transfers a promoted file's retained handle out of the cleanup record.
-    /// The hard-link fallback still needs it for a final inode link-count
-    /// check, while an error after ratification must not let `DeleteOnError`
-    /// truncate the committed plaintext through that same handle.
+    /// The retained handle of a staged file root, which the hard-link
+    /// fallback reads its final link count through.
     #[cfg(unix)]
-    fn take_file_handle(&mut self) -> Option<File> {
+    fn file_handle(&self) -> Option<&File> {
         match self {
-            Self::File { handle, .. } => handle.take(),
+            Self::File { handle, .. } => handle.as_ref(),
             Self::Directory { .. } => None,
         }
     }
@@ -1085,17 +1163,18 @@ impl StagedRoot {
 /// Identity of the staged root, as the steps after promotion see it.
 ///
 /// The two ways it can be missing are kept apart because they say
-/// different things about the run. [`Self::NoHandle`] is a platform's
-/// ordinary state: Windows closes the staged handle before the rename.
+/// different things about the run. [`Self::NoHandle`] is a record
+/// without a handle, which no extraction produces: the staged handle
+/// is held on every platform for the whole run.
 /// [`Self::Unreadable`] means a handle was held and the filesystem
-/// refused to describe the object behind it. Only one of them is
-/// expected, and neither fails the extraction: step 17 skips its
-/// comparison for both — see [`StagedIdentity::known`] — while step 16
-/// tells them apart, skipping the root-mode application for
-/// [`Self::Unreadable`] and applying it under the no-follow guards
-/// alone for [`Self::NoHandle`] (see [`apply_root_directory_mode`]).
+/// refused to describe the object behind it. Neither fails the
+/// extraction: step 17 skips its comparison for both — see
+/// [`StagedIdentity::known`] — while step 16 tells them apart, skipping
+/// the root-mode application for [`Self::Unreadable`] and applying it
+/// under the no-follow guards alone for [`Self::NoHandle`] (see
+/// [`apply_root_directory_mode`]).
 enum StagedIdentity {
-    /// Read from the handle the staged root was created with.
+    /// Read from the retained staged handle.
     Known(ObjectId),
     /// No handle is held, so there is nothing to read.
     NoHandle,
@@ -1128,7 +1207,7 @@ impl StagedIdentity {
 /// substituted at the working name is never removed — and the staged
 /// tree is still removed when it is the entry that was moved aside.
 ///
-/// Unix keeps that handle for the whole run, so the `None` arm is
+/// The handle is held for the whole run, so the `None` arm is
 /// unreachable here: a run that could not hold one failed before
 /// staging any plaintext. It removes nothing, because without the
 /// handle the working name cannot be shown to still denote the staged
@@ -1144,35 +1223,28 @@ fn remove_staged_directory(_output_handle: &Dir, _working_name: &OsStr, handle: 
 /// handle extraction wrote through. Windows resolves an open directory
 /// handle back to an absolute path before removing through it, which
 /// would leave the destination anchor, so the removal stays
-/// handle-relative and the staged handle is closed first — Windows
-/// refuses to remove a directory that still has one open.
+/// handle-relative — and goes ahead only while the entry at the working
+/// name is still the directory behind the staged handle, so a directory
+/// substituted there is left in place. The staged tree itself is not
+/// found once it has been moved aside. Without a handle nothing is
+/// removed, as on Unix. The staged handle is closed first; the removal
+/// does not need it.
 #[cfg(not(unix))]
 fn remove_staged_directory(output_handle: &Dir, working_name: &OsStr, handle: Option<Dir>) {
+    let Some(handle) = handle else {
+        return;
+    };
+    let staged = platform::dir_object_id(&handle);
+    let at_name = output_handle
+        .symlink_metadata(working_name)
+        .map(|metadata| platform::metadata_object_id(&metadata));
     drop(handle);
-    let _ = output_handle.remove_dir_all(working_name);
-}
-
-/// Closes the staged handle where promotion needs it closed. Windows
-/// renames by path and refuses while a handle to the entry is open.
-/// Cleanup after a failed promotion then falls back to the working
-/// name, and the identity comparison after promotion has nothing to
-/// read — which costs nothing there, since `std` exposes no stable
-/// identity to compare on Windows anyway.
-#[cfg(not(unix))]
-fn release_staged_handle_before_promotion(staged_root: &mut Option<StagedRoot>) {
-    match staged_root.as_mut() {
-        Some(StagedRoot::File { handle, .. }) => *handle = None,
-        Some(StagedRoot::Directory { handle, .. }) => *handle = None,
-        None => {}
+    if let (Ok(staged), Ok(at_name)) = (staged, at_name) {
+        if staged == at_name {
+            let _ = output_handle.remove_dir_all(working_name);
+        }
     }
 }
-
-/// No-op on Unix: the promotion renames through the parent handle and
-/// does not care that the staged entry is still open, so the handle
-/// stays available for the identity comparison after promotion and for
-/// cleanup if the promotion itself fails.
-#[cfg(unix)]
-fn release_staged_handle_before_promotion(_staged_root: &mut Option<StagedRoot>) {}
 
 /// Builds the "Output already exists: <dir>/<root>" rejection via the
 /// shared constructor: the operator-chosen output directory renders
@@ -1621,7 +1693,7 @@ mod tests {
     /// written and synced under `output_handle` and just before the
     /// promotion rename — the window a local writer would use.
     ///
-    /// Carries the same target gate as the two tests that drive it.
+    /// Carries the same target gate as the tests that drive it.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     struct SwapOnEof<F: FnMut()> {
         data: Vec<u8>,
@@ -1726,11 +1798,13 @@ mod tests {
     /// the name has it committed at the final name, so the run must
     /// report that instead of handing the caller a path to content the
     /// archive never produced. `DeleteOnError` still removes the staged
-    /// plaintext, which by then is the entry that was moved aside.
+    /// plaintext on Unix, where the staged tree is removed through its
+    /// handle; Windows removes by name and finds nothing there, so the
+    /// moved-aside tree survives — the bound `SECURITY.md` records.
     ///
-    /// Linux/macOS only: the comparison needs the stable file identity
-    /// `std` exposes there.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    /// The swap runs in the interval before promotion: on Windows the
+    /// staged directory cannot be renamed while extraction still holds
+    /// its own handle on it, so the swap must follow that close.
     #[test]
     fn substituted_staging_entry_is_not_reported_as_the_output() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1739,29 +1813,21 @@ mod tests {
 
         let archive = build_archive(&directory_root_manifest(), &[("d/a.txt", b"real")]);
 
-        let out_for_swap = out.clone();
-        let reader = SwapOnEof {
-            data: archive,
-            pos: 0,
-            swapped: false,
-            swap: move || {
-                // Move the staged tree aside and leave a directory of
-                // the attacker's under the staging name.
-                fs::rename(
-                    out_for_swap.join("d.incomplete"),
-                    out_for_swap.join("moved-aside"),
-                )
-                .unwrap();
-                fs::create_dir(out_for_swap.join("d.incomplete")).unwrap();
-                fs::write(out_for_swap.join("d.incomplete").join("a.txt"), b"attacker").unwrap();
-            },
-        };
-
-        let err = unarchive(
-            reader,
+        let err = unarchive_inner_with_hooks(
+            Cursor::new(archive),
             &out,
             ArchiveLimits::default(),
             IncompleteOutputPolicy::DeleteOnError,
+            || {
+                // Move the staged tree aside and leave a directory of
+                // the attacker's under the staging name.
+                fs::rename(out.join("d.incomplete"), out.join("moved-aside"))?;
+                fs::create_dir(out.join("d.incomplete"))?;
+                fs::write(out.join("d.incomplete").join("a.txt"), b"attacker")?;
+                Ok(())
+            },
+            |_| Ok(()),
+            |_| Ok(()),
         )
         .unwrap_err();
 
@@ -1776,10 +1842,93 @@ mod tests {
             b"attacker",
             "the entry the attacker planted stays where it is",
         );
+        #[cfg(unix)]
         assert!(
             !out.join("moved-aside").exists(),
             "DeleteOnError must still remove the staged plaintext",
         );
+        #[cfg(windows)]
+        assert_eq!(
+            fs::read(out.join("moved-aside").join("a.txt")).unwrap(),
+            b"real",
+            "Windows removes a staged directory by name, so a moved-aside tree survives",
+        );
+    }
+
+    /// Windows promotes by path. A local writer who re-points a junction
+    /// on that path at a directory of their own — leaving the directory
+    /// the run holds open untouched, since a held directory cannot be
+    /// renamed there — has the promotion rename their decoy inside their
+    /// own directory, while the staged output stays unpromoted where it
+    /// was written. The final name in the held directory then denotes
+    /// nothing, which the run reports as a replacement instead of
+    /// handing back a path that leads to the decoy. `DeleteOnError`
+    /// removes the never-promoted staged output.
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_repointed_before_promotion_is_not_reported_as_the_output() {
+        for root_is_file in [true, false] {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let held = tmp.path().join("held");
+            let decoy = tmp.path().join("decoy");
+            fs::create_dir(&held).unwrap();
+            fs::create_dir(&decoy).unwrap();
+            let out = tmp.path().join("out");
+            platform::try_make_junction(&held, &out).unwrap();
+
+            let (archive, root, planted) = if root_is_file {
+                let manifest = single_file_manifest("f.txt", b"real");
+                fs::write(decoy.join("f.txt.incomplete"), b"attacker").unwrap();
+                (
+                    build_archive(&manifest, &[("f.txt", b"real")]),
+                    "f.txt",
+                    decoy.join("f.txt"),
+                )
+            } else {
+                fs::create_dir(decoy.join("d.incomplete")).unwrap();
+                fs::write(decoy.join("d.incomplete").join("a.txt"), b"attacker").unwrap();
+                (
+                    build_archive(&directory_root_manifest(), &[("d/a.txt", b"real")]),
+                    "d",
+                    decoy.join("d").join("a.txt"),
+                )
+            };
+
+            let err = unarchive_inner_with_hooks(
+                Cursor::new(archive),
+                &out,
+                ArchiveLimits::default(),
+                IncompleteOutputPolicy::DeleteOnError,
+                || {
+                    fs::remove_dir(&out)?;
+                    platform::try_make_junction(&decoy, &out)?;
+                    Ok(())
+                },
+                |_| Ok(()),
+                |_| Ok(()),
+            )
+            .unwrap_err();
+
+            assert!(
+                format!("{err}").contains("Output was replaced while decrypting"),
+                "root_is_file={root_is_file}: expected the missing final name to be reported, got: {err}"
+            );
+            assert!(
+                !held.join(root).exists(),
+                "root_is_file={root_is_file}: nothing was promoted in the held directory"
+            );
+            assert!(
+                !held
+                    .join(incomplete_working_name(OsStr::new(root)))
+                    .exists(),
+                "root_is_file={root_is_file}: DeleteOnError must remove the staged output"
+            );
+            assert_eq!(
+                fs::read(&planted).unwrap(),
+                b"attacker",
+                "root_is_file={root_is_file}: the decoy was promoted inside the writer's directory",
+            );
+        }
     }
 
     /// The archive chooses the root mode, and a mode applies to an
@@ -1789,8 +1938,7 @@ mod tests {
     /// gate necessary: without it the run widens the permissions of a
     /// file the caller never placed in the output directory.
     ///
-    /// Linux/macOS only: the comparison needs the stable file identity
-    /// `std` exposes there, and the assertion reads Unix mode bits.
+    /// Linux/macOS only: the assertion reads Unix mode bits.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn root_mode_is_not_applied_to_a_substituted_entry() {
@@ -1850,10 +1998,6 @@ mod tests {
     /// unlink with nothing to find, so `DeleteOnError` empties the file
     /// through the handle it was created with instead. The run's own
     /// plaintext must not survive at the name the writer chose.
-    ///
-    /// Linux/macOS only: the substitution is only detected where `std`
-    /// exposes a stable file identity.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn cleanup_of_a_staged_file_moved_aside_still_destroys_its_plaintext() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1863,23 +2007,19 @@ mod tests {
         let manifest = single_file_manifest("f.txt", b"real");
         let archive = build_archive(&manifest, &[("f.txt", b"real")]);
 
-        let out_for_swap = out.clone();
-        let reader = SwapOnEof {
-            data: archive,
-            pos: 0,
-            swapped: false,
-            swap: move || {
-                let staged = out_for_swap.join("f.txt.incomplete");
-                fs::rename(&staged, out_for_swap.join("moved-aside")).unwrap();
-                fs::write(&staged, b"attacker").unwrap();
-            },
-        };
-
-        let err = unarchive(
-            reader,
+        let err = unarchive_inner_with_hooks(
+            Cursor::new(archive),
             &out,
             ArchiveLimits::default(),
             IncompleteOutputPolicy::DeleteOnError,
+            || {
+                let staged = out.join("f.txt.incomplete");
+                fs::rename(&staged, out.join("moved-aside"))?;
+                fs::write(&staged, b"attacker")?;
+                Ok(())
+            },
+            |_| Ok(()),
+            |_| Ok(()),
         )
         .unwrap_err();
 
@@ -1901,10 +2041,6 @@ mod tests {
     /// The run has just committed an entry there, so an unreadable or
     /// absent name means the commit no longer holds, and returning `Ok`
     /// would hand the caller a path to nothing.
-    ///
-    /// Linux/macOS only: the comparison needs the stable file identity
-    /// `std` exposes there.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_promoted_root_that_is_gone_is_reported_as_replaced() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -2304,21 +2440,25 @@ mod tests {
         );
     }
 
-    /// The directory-root counterpart: cleanup removes the staged tree
-    /// through its own handle, so a directory planted at the working
-    /// name survives and the staged tree is removed even after it was
-    /// moved aside.
-    ///
-    /// Unix-only: Windows closes the staged handle before promotion and
-    /// removes by name, so it has no handle left to follow.
-    #[cfg(unix)]
+    /// The directory-root counterpart: on Unix cleanup removes the
+    /// staged tree through its own handle, so a directory planted at
+    /// the working name survives and the staged tree is removed even
+    /// after it was moved aside. On Windows the removal is by name and
+    /// goes ahead only while the entry at that name is still the staged
+    /// directory, so the planted directory survives there too, and the
+    /// moved-aside tree is left — the bound `SECURITY.md` records.
     #[test]
     fn cleanup_of_staged_directory_follows_the_staged_handle() {
         let tmp = tempfile::TempDir::new().unwrap();
         let handle = platform::open_anchor(tmp.path()).unwrap();
 
         let staged_path = tmp.path().join("root.incomplete");
-        let staged_handle = platform::mkdir_strict(&handle, OsStr::new("root.incomplete")).unwrap();
+        let created = platform::mkdir_strict(&handle, OsStr::new("root.incomplete")).unwrap();
+        let staged_handle =
+            platform::retain_staged_dir(&handle, OsStr::new("root.incomplete"), &created).unwrap();
+        // The creating handle blocks the rename below on Windows, as it
+        // would block the promotion; the run closes it before either.
+        drop(created);
         fs::write(staged_path.join("plaintext.txt"), b"staged plaintext").unwrap();
 
         // A local writer moves the staged tree aside and leaves their
@@ -2330,14 +2470,45 @@ mod tests {
 
         StagedRoot::directory(OsStr::new("root.incomplete"), Some(staged_handle)).remove(&handle);
 
+        #[cfg(unix)]
         assert!(
             !moved.exists(),
             "the staged tree must be removed wherever it was moved to",
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            fs::read(moved.join("plaintext.txt")).unwrap(),
+            b"staged plaintext",
+            "Windows removes by name, so a moved-aside staged tree is left",
         );
         assert_eq!(
             fs::read(staged_path.join("keep.txt")).unwrap(),
             b"not ours",
             "a substituted directory must not be removed",
+        );
+    }
+
+    /// The retained staged handle is what the checks after promotion
+    /// compare against, so it must denote the directory this run
+    /// created. On Windows it is opened by name — a duplicate of the
+    /// creating handle would refuse the promotion rename — and a
+    /// mismatch with the created directory is refused before any
+    /// plaintext, as a replacement.
+    #[cfg(windows)]
+    #[test]
+    fn a_retained_staged_directory_must_be_the_created_one() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let handle = platform::open_anchor(tmp.path()).unwrap();
+        let created = platform::mkdir_strict(&handle, OsStr::new("d.incomplete")).unwrap();
+        let _other = platform::mkdir_strict(&handle, OsStr::new("other")).unwrap();
+
+        retain_staged_directory(&handle, OsStr::new("d.incomplete"), &created)
+            .expect("the retained handle denotes the created directory");
+
+        let err = retain_staged_directory(&handle, OsStr::new("other"), &created).unwrap_err();
+        assert!(
+            format!("{err}").contains("Output was replaced while decrypting"),
+            "a handle on another directory must be refused, got: {err}"
         );
     }
 
@@ -3663,8 +3834,9 @@ mod tests {
     ///   seam reaches.
     ///
     /// Linux/macOS only: the assertions read Unix mode bits, and the
-    /// substitution checks need the stable file identity `std` exposes
-    /// there.
+    /// interference is applied on the end-of-archive read, while
+    /// extraction still holds the staged directory open — a directory
+    /// Windows refuses to rename.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn post_commit_and_cleanup_invariants_hold_across_every_case() {
@@ -3873,9 +4045,9 @@ mod tests {
     /// application is skipped and the output keeps its restrictive
     /// staged mode — applying the archive-chosen mode to an entry the
     /// run could not confirm is the hard-link escalation the
-    /// comparison exists to stop. `NoHandle` is a platform's ordinary
-    /// no-identity state, where the mode is applied under the
-    /// no-follow guards alone. Neither ratifies the commit.
+    /// comparison exists to stop. `NoHandle`, which no extraction
+    /// produces, expects no confirmation, so the mode is applied under
+    /// the no-follow guards alone. Neither ratifies the commit.
     ///
     /// Linux/macOS only: the assertions read Unix mode bits.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -3919,15 +4091,11 @@ mod tests {
     /// can no longer send `DeleteOnError` at the committed output; a
     /// mismatch reports a substitution and withholds it, keeping the
     /// staged plaintext reachable for cleanup. Pins the signal the
-    /// ratification in `unarchive_inner` is built on.
-    ///
-    /// Linux/macOS only: the comparison needs the stable file identity
-    /// `std` exposes there.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    /// ratification in `unarchive_inner` is built on. The staged handle
+    /// stays open throughout, as it does in a run: on Windows the
+    /// confirmation must open the final name beside that handle.
     #[test]
     fn a_matching_staged_identity_ratifies_and_a_mismatch_rejects() {
-        use std::os::unix::fs::PermissionsExt;
-
         let tmp = tempfile::TempDir::new().unwrap();
         let handle = platform::open_anchor(tmp.path()).unwrap();
         let staged_file = platform::create_file_at(&handle, OsStr::new("f.txt"), 0o600).unwrap();
@@ -3937,15 +4105,20 @@ mod tests {
         let confirmed = apply_root_file_mode(&handle, &manifest, &StagedIdentity::Known(staged_id))
             .expect("a matching identity must confirm");
         assert!(matches!(confirmed, PromotedIdentity::Confirmed));
-        let mode = fs::metadata(tmp.path().join("f.txt"))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o7777;
-        assert_eq!(
-            mode, 0o644,
-            "the confirmed entry receives the manifest mode"
-        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mode = fs::metadata(tmp.path().join("f.txt"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777;
+            assert_eq!(
+                mode, 0o644,
+                "the confirmed entry receives the manifest mode"
+            );
+        }
 
         // Replace the entry. The staged handle keeps the old inode
         // alive, so the substitute is guaranteed a different identity.
@@ -3964,10 +4137,6 @@ mod tests {
     /// staged identity to compare against, the check accepts whatever
     /// the final name holds. Pins the contract the two skipped states
     /// route into, so a later change to it cannot pass unnoticed.
-    ///
-    /// Linux/macOS only: the comparison needs the stable file identity
-    /// `std` exposes there.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_missing_staged_identity_accepts_a_substituted_final_name() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -3983,7 +4152,6 @@ mod tests {
     /// before step 17 re-checks its final name. A replacement there must be
     /// reported without `DeleteOnError` deleting either the complete output
     /// this run committed or the replacement it did not create.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_post_ratification_replacement_preserves_the_committed_output() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -4000,8 +4168,9 @@ mod tests {
             &out,
             ArchiveLimits::default(),
             IncompleteOutputPolicy::DeleteOnError,
+            || Ok(()),
             |_| Ok(()),
-            || {
+            |_| {
                 fs::rename(&final_path, &committed_elsewhere)?;
                 fs::write(&final_path, b"replacement")?;
                 Ok(())
@@ -4031,6 +4200,60 @@ mod tests {
         );
     }
 
+    /// The staged identity is compared with the final name after step 16
+    /// has ratified the commit and moved the record out of the cleanup
+    /// slot. The handle it was read from must still be held for that
+    /// comparison: some filesystems give an object a new identifier once
+    /// its last handle closes (measured on a Windows userspace filesystem
+    /// reporting exFAT), and a run that closed the handle at ratification
+    /// reported its own complete output as replaced there. Pins that the
+    /// record moved out at ratification still holds a readable handle,
+    /// for both root kinds.
+    #[test]
+    fn the_retained_handle_is_held_until_the_last_comparison() {
+        for root_is_file in [true, false] {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let out = tmp.path().join("out");
+            fs::create_dir(&out).unwrap();
+            let (archive, root) = if root_is_file {
+                let manifest = single_file_manifest("f.txt", b"real");
+                (build_archive(&manifest, &[("f.txt", b"real")]), "f.txt")
+            } else {
+                (
+                    build_archive(&directory_root_manifest(), &[("d/a.txt", b"real")]),
+                    "d",
+                )
+            };
+
+            let mut observed = false;
+            let path = unarchive_inner_with_hooks(
+                Cursor::new(archive),
+                &out,
+                ArchiveLimits::default(),
+                IncompleteOutputPolicy::DeleteOnError,
+                || Ok(()),
+                |_| Ok(()),
+                |ratified| {
+                    let held = ratified.as_ref().map(StagedRoot::identity);
+                    assert!(
+                        matches!(held, Some(StagedIdentity::Known(_))),
+                        "root_is_file={root_is_file}: the ratified record must still hold a \
+                         readable handle"
+                    );
+                    observed = true;
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+            assert!(
+                observed,
+                "root_is_file={root_is_file}: the hook must have run"
+            );
+            assert_eq!(path, out.join(root));
+        }
+    }
+
     /// A hard-link promotion that cannot remove its temporary name is a
     /// post-commit error. The extraction caller must report that outcome and
     /// preserve both complete names under `DeleteOnError`.
@@ -4053,6 +4276,7 @@ mod tests {
             &out,
             ArchiveLimits::default(),
             IncompleteOutputPolicy::DeleteOnError,
+            || Ok(()),
             |promotion| {
                 fs::hard_link(&final_path, &incomplete_path)?;
                 *promotion = platform::PromotionOutcome::StagedLinkRetained(io::Error::new(
@@ -4061,7 +4285,7 @@ mod tests {
                 ));
                 Ok(())
             },
-            || Ok(()),
+            |_| Ok(()),
         )
         .expect_err("a retained temporary name must be reported");
 
@@ -4098,12 +4322,13 @@ mod tests {
             &out,
             ArchiveLimits::default(),
             IncompleteOutputPolicy::DeleteOnError,
+            || Ok(()),
             |promotion| {
                 fs::hard_link(&final_path, &hidden_path)?;
                 *promotion = platform::PromotionOutcome::LinkedFile;
                 Ok(())
             },
-            || Ok(()),
+            |_| Ok(()),
         )
         .expect_err("a hidden second plaintext link must not report success");
 
@@ -4121,13 +4346,83 @@ mod tests {
         );
     }
 
-    /// The anchor confirmation reports a path that no longer names a
-    /// directory as changed and propagates other non-resource failures. A
-    /// denied traversal cannot be accepted merely because the replacement
-    /// directory refuses the identity check.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    /// Asserts that the anchor confirmation reports `path` as a changed
+    /// directory.
+    fn assert_anchor_reported_changed(handle: &Dir, path: &Path, what: &str) {
+        let err = require_output_anchor_unchanged(handle, path, OsStr::new("f.txt")).unwrap_err();
+        assert!(
+            format!("{err}").contains("is complete but its directory changed"),
+            "{what} must report as changed, got: {err}"
+        );
+    }
+
+    /// The anchor confirmation accepts an unchanged path and reports one
+    /// that no longer leads to a directory as changed: missing, a plain
+    /// file, or a link cycle — a substitution someone made, never an
+    /// environment fault. The cycle is a symlink to itself on Unix and a
+    /// pair of junctions on Windows, where a junction needs no privilege.
     #[test]
-    fn the_anchor_check_reports_a_changed_path_and_propagates_access_denial() {
+    fn the_anchor_check_reports_a_path_that_no_longer_leads_to_a_directory() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let out = tmp.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let handle = platform::open_anchor(&out).unwrap();
+
+        require_output_anchor_unchanged(&handle, &out, OsStr::new("f.txt"))
+            .expect("an unchanged path must be accepted");
+
+        assert_anchor_reported_changed(&handle, &tmp.path().join("nowhere"), "a missing path");
+
+        let file_path = tmp.path().join("plain");
+        fs::write(&file_path, b"not a directory").unwrap();
+        assert_anchor_reported_changed(&handle, &file_path, "a non-directory at the path");
+
+        let cycle = tmp.path().join("cycle");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&cycle, &cycle).unwrap();
+        #[cfg(windows)]
+        {
+            let other = tmp.path().join("cycle-other");
+            platform::try_make_junction(&other, &cycle).unwrap();
+            platform::try_make_junction(&cycle, &other).unwrap();
+        }
+        assert_anchor_reported_changed(&handle, &cycle, "a link cycle at the path");
+    }
+
+    /// A junction on the destination path re-pointed at another directory
+    /// is how a local writer redirects that path on Windows without
+    /// touching the directory the run holds open, which cannot be renamed
+    /// while it is held. The confirmation compares the directory the path
+    /// now leads to with the held one and reports the change.
+    #[cfg(windows)]
+    #[test]
+    fn the_anchor_check_reports_a_junction_repointed_at_another_directory() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let committed = tmp.path().join("committed");
+        let other = tmp.path().join("other");
+        fs::create_dir(&committed).unwrap();
+        fs::create_dir(&other).unwrap();
+        let out = tmp.path().join("out");
+        platform::try_make_junction(&committed, &out).unwrap();
+        let handle = platform::open_anchor(&out).unwrap();
+
+        require_output_anchor_unchanged(&handle, &out, OsStr::new("f.txt"))
+            .expect("a junction still leading to the held directory must be accepted");
+
+        fs::remove_dir(&out).unwrap();
+        platform::try_make_junction(&other, &out).unwrap();
+        assert_anchor_reported_changed(&handle, &out, "a junction leading elsewhere");
+        assert!(
+            committed.exists(),
+            "re-pointing the junction leaves the held directory in place"
+        );
+    }
+
+    /// A denied traversal propagates: it cannot be accepted merely because
+    /// the replacement directory refuses the identity check.
+    #[cfg(unix)]
+    #[test]
+    fn the_anchor_check_propagates_access_denial() {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::TempDir::new().unwrap();
@@ -4135,41 +4430,12 @@ mod tests {
         let out = parent.join("out");
         fs::create_dir_all(&out).unwrap();
         let handle = platform::open_anchor(&out).unwrap();
-        let name = OsStr::new("f.txt");
 
-        require_output_anchor_unchanged(&handle, &out, name)
-            .expect("an unchanged path must be accepted");
-
-        let gone = tmp.path().join("nowhere");
-        let err = require_output_anchor_unchanged(&handle, &gone, name).unwrap_err();
-        assert!(
-            format!("{err}").contains("is complete but its directory changed"),
-            "a missing path must report as changed, got: {err}"
-        );
-
-        let file_path = tmp.path().join("plain");
-        fs::write(&file_path, b"not a directory").unwrap();
-        let err = require_output_anchor_unchanged(&handle, &file_path, name).unwrap_err();
-        assert!(
-            format!("{err}").contains("is complete but its directory changed"),
-            "a non-directory at the path must report as changed, got: {err}"
-        );
-
-        // A symlink cycle at the path leads nowhere: a substitution
-        // someone made, never an environment fault.
-        let cycle = tmp.path().join("cycle");
-        std::os::unix::fs::symlink(&cycle, &cycle).unwrap();
-        let err = require_output_anchor_unchanged(&handle, &cycle, name).unwrap_err();
-        assert!(
-            format!("{err}").contains("is complete but its directory changed"),
-            "a symlink cycle at the path must report as changed, got: {err}"
-        );
-
-        // Denied traversal must propagate. Under a privileged test runner the
-        // open succeeds against the unchanged directory instead, so that
-        // environment legitimately returns Ok.
+        // Under a privileged test runner the open succeeds against the
+        // unchanged directory instead, so that environment legitimately
+        // returns Ok.
         fs::set_permissions(&parent, fs::Permissions::from_mode(0o000)).unwrap();
-        let outcome = require_output_anchor_unchanged(&handle, &out, name);
+        let outcome = require_output_anchor_unchanged(&handle, &out, OsStr::new("f.txt"));
         fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
         match outcome {
             Ok(()) => {
@@ -4186,19 +4452,27 @@ mod tests {
     /// Only descriptor/process memory exhaustion skips the destination-path
     /// confirmation. Permission, device, and ordinary path failures remain
     /// real errors whether they arise while reopening or reading identity.
-    #[cfg(unix)]
     #[test]
     fn the_anchor_check_skips_only_resource_exhaustion() {
-        for skipped in [libc::EMFILE, libc::ENFILE, libc::ENOMEM] {
+        for skipped in RESOURCE_EXHAUSTION_CODES {
             assert!(output_confirmation_resource_error(&CryptoError::Io(
                 io::Error::from_raw_os_error(skipped)
             )));
         }
-        for propagated in [libc::EACCES, libc::EPERM, libc::EIO, libc::ENOENT] {
+        #[cfg(unix)]
+        let propagated = [libc::EACCES, libc::EPERM, libc::EIO, libc::ENOENT];
+        // ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_ACCESS_DENIED,
+        // ERROR_SHARING_VIOLATION.
+        #[cfg(windows)]
+        let propagated = [2, 3, 5, 32];
+        for code in propagated {
             assert!(!output_confirmation_resource_error(&CryptoError::Io(
-                io::Error::from_raw_os_error(propagated)
+                io::Error::from_raw_os_error(code)
             )));
         }
+        assert!(!output_confirmation_resource_error(&CryptoError::Io(
+            io::Error::from(io::ErrorKind::PermissionDenied)
+        )));
     }
 
     /// Fail-closed contract under descriptor exhaustion. A run that

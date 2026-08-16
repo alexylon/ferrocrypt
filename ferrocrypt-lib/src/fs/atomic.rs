@@ -129,7 +129,9 @@ impl FinalizedFile {
 /// the volume serial number and the 64-bit file index on Windows.
 /// Comparing the object behind a retained handle with the entry under a
 /// name catches a final-name replacement, and a parent-directory swap
-/// where the platform permits one, before a writer reports that path.
+/// where the platform permits one, before an operation reports that
+/// path. The decrypt side reads the same pair through
+/// `archive::platform::ObjectId`.
 ///
 /// Every comparison in this crate is between objects that both exist
 /// when it runs — a retained handle, or a link just made, keeps the
@@ -147,7 +149,7 @@ impl FinalizedFile {
 /// `from_just_metadata`. cap-std fills the Windows fields only from an
 /// open handle, and its accessors panic where they are absent; the crate
 /// never reads an identity out of a directory listing.
-fn file_identity(metadata: &cap_std::fs::Metadata) -> (u64, u64) {
+pub(crate) fn file_identity(metadata: &cap_std::fs::Metadata) -> (u64, u64) {
     use cap_fs_ext::MetadataExt;
 
     (metadata.dev(), metadata.ino())
@@ -181,7 +183,7 @@ fn reported_entry_metadata(path: &Path) -> io::Result<cap_std::fs::Metadata> {
 
 /// `CreateFileW` flag without which a directory cannot be opened.
 #[cfg(windows)]
-const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+pub(crate) const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
 
 /// `CreateFileW` flag that opens a symlink or other reparse point itself
 /// instead of following it.

@@ -116,33 +116,25 @@ pub(crate) fn open_anchor(path: &Path) -> Result<Dir, CryptoError> {
 /// step can tell whether a name still denotes the object this run
 /// created. Rename does not change it, so it survives promotion.
 ///
-/// On Unix it is the `(dev, ino)` pair. `std` exposes the Windows
-/// equivalent (`volume_serial_number` / `file_index`) only behind the
-/// unstable `windows_by_handle` feature, so there an identity carries
-/// nothing and every comparison holds; those steps keep the no-follow
-/// opens and the reparse-point checks as their guard. A filesystem that
-/// reports no inode numbers compares equal for the same reason.
+/// The pair is the device and inode number on Unix, and the volume
+/// serial number and file index on Windows; both are read through
+/// [`crate::fs::atomic::file_identity`], which states what the
+/// comparison can and cannot distinguish. A filesystem that reports no
+/// distinct identifiers makes every comparison hold, so the steps that
+/// compare keep the no-follow opens and the reparse-point checks as
+/// their guard.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct ObjectId {
-    #[cfg(unix)]
     dev: u64,
-    #[cfg(unix)]
     ino: u64,
 }
 
-/// Reads the identity out of metadata already taken.
-#[cfg(unix)]
+/// Reads the identity out of metadata already taken. `metadata` must
+/// come from an open handle or a cap-std stat, as
+/// [`crate::fs::atomic::file_identity`] requires.
 pub(crate) fn metadata_object_id(metadata: &Metadata) -> ObjectId {
-    use cap_std::fs::MetadataExt;
-    ObjectId {
-        dev: metadata.dev(),
-        ino: metadata.ino(),
-    }
-}
-
-#[cfg(not(unix))]
-pub(crate) fn metadata_object_id(_metadata: &Metadata) -> ObjectId {
-    ObjectId {}
+    let (dev, ino) = crate::fs::atomic::file_identity(metadata);
+    ObjectId { dev, ino }
 }
 
 /// Reads the identity of the directory `dir` refers to.
@@ -655,6 +647,44 @@ pub(crate) fn mkdir_strict(parent: &Dir, name: &OsStr) -> Result<Dir, CryptoErro
     create_dir_with_default_mode(parent, name)
 }
 
+/// Second handle to the staged root directory `dir`, created as `name`
+/// under `parent`, for the extractor to hold across promotion: the
+/// checks after promotion compare the final name with the object this
+/// run created (`FORMAT.md` §9.11 steps 16 and 17), and on Unix the
+/// failure cleanup removes the staged tree through it.
+///
+/// On Unix it duplicates `dir`. On Windows a duplicate would keep the
+/// sharing mode of a cap-std directory handle, which excludes delete
+/// sharing and so makes the promotion rename fail while it is open. The
+/// entry is therefore opened again by name with the default sharing
+/// mode — read, write, and delete — requesting no access, as a
+/// metadata query does, with backup semantics and without following a
+/// symlink or reparse point, and wrapped as a `Dir` for the identity
+/// read; the rename proceeds with that handle open, and the identity it
+/// reads afterwards is the promoted directory's. Because that open
+/// resolves `name`, the caller must confirm the returned handle denotes
+/// `dir` before recording it, and must not walk from it.
+pub(crate) fn retain_staged_dir(parent: &Dir, name: &OsStr, dir: &Dir) -> io::Result<Dir> {
+    #[cfg(unix)]
+    {
+        let _ = (parent, name);
+        dir.try_clone()
+    }
+    #[cfg(windows)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+
+        let _ = dir;
+        let mut options = OpenOptions::new();
+        options
+            .access_mode(0)
+            .custom_flags(crate::fs::atomic::FILE_FLAG_BACKUP_SEMANTICS);
+        options.follow(FollowSymlinks::No);
+        let file = parent.open_with(name, &options)?;
+        Ok(Dir::from_std_file(file.into_std()))
+    }
+}
+
 /// Internal: creates `name` with the initial owner-private directory
 /// mode applied atomically (Unix: `mkdir(0o700)` via cap-std's
 /// `DirBuilderExt::mode`, so a permissive process umask cannot leave
@@ -988,6 +1018,32 @@ pub(crate) fn chmod_dir_handle_durable(dir: Dir, mode: u32) -> Result<(), Crypto
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn chmod_dir_handle_durable(dir: Dir, mode: u32) -> Result<(), CryptoError> {
     chmod_dir_handle(dir, mode)
+}
+
+/// Test helper that creates an NTFS junction (mount point) through
+/// `mklink /J`, which needs no privilege on a standard Windows account.
+/// Junctions are reparse points that `is_symlink()` does not report, so
+/// they are the case the explicit `FILE_ATTRIBUTE_REPARSE_POINT` checks
+/// exist for; the helper is shared by the archive writer, reader, and
+/// primitive tests. Returns the failure so a caller can skip where the
+/// command is unavailable.
+#[cfg(all(test, windows))]
+pub(crate) fn try_make_junction(target: &Path, junction: &Path) -> io::Result<()> {
+    // `output` captures what `mklink` prints, keeping test output clean.
+    let output = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(junction)
+        .arg(target)
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "mklink /J failed with exit code {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
 }
 
 #[cfg(test)]
@@ -1798,27 +1854,6 @@ mod tests {
                 );
                 None
             }
-        }
-    }
-
-    /// Creates an NTFS junction (mount point) via `mklink /J`. Junctions
-    /// are reparse points but `is_symlink()` returns FALSE for them, so
-    /// only the explicit `FILE_ATTRIBUTE_REPARSE_POINT` post-check
-    /// catches them. `mklink /J` does NOT require elevated privileges,
-    /// so this works on standard Windows accounts.
-    #[cfg(windows)]
-    fn try_make_junction(target: &Path, junction: &Path) -> io::Result<()> {
-        let status = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(junction)
-            .arg(target)
-            .status()?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(io::Error::other(format!(
-                "mklink /J failed with exit code {status}"
-            )))
         }
     }
 

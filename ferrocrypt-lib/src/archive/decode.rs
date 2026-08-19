@@ -236,11 +236,39 @@ fn unarchive_inner_with_hooks<R: Read>(
             }
         })?;
         after_promotion(&mut promotion)?;
-        // A file root must end up with exactly one name, so the count
-        // is read below unless the staging name could not be removed,
-        // where both names still denote the complete file and the
-        // dedicated report at the end of the run says so.
-        let file_root_needs_single_link = manifest.root_is_file && promotion.staging_name_removed();
+
+        // A file root must carry exactly one name, so the count is read
+        // here unless the staging name could not be removed, where both
+        // names still denote the complete file and the dedicated report
+        // at the end of the run says so.
+        //
+        // Read before the mode is applied, and never after: step 16
+        // would otherwise widen an extra name to the archive's mode,
+        // handing whoever made it the access the deferred chmod exists
+        // to withhold. Nothing is lost by reading it this early — the
+        // count comes from the retained handle rather than a name, and
+        // the staging name is gone, so no further link can be made
+        // against it.
+        //
+        // The commit is complete, so a failure here preserves it: the
+        // record leaves the cleanup slot before the error returns, the
+        // mode is never applied, and the output keeps the owner-only
+        // staged mode. The count covers the root entry alone; a
+        // descendant file inside a directory root has no handle
+        // retained to this point, and one read while it was still being
+        // extracted would say nothing about a link made afterwards.
+        if manifest.root_is_file && promotion.staging_name_removed() {
+            let handle = staged_root
+                .as_ref()
+                .and_then(StagedRoot::file_handle)
+                .ok_or(CryptoError::InternalInvariant(
+                    "the promoted file root lost its retained file handle",
+                ))?;
+            if let Err(e) = require_single_linked_file(handle, output_dir, &manifest.root_name) {
+                drop(staged_root.take());
+                return Err(e);
+            }
+        }
 
         // FORMAT.md §9.11 step 16: apply root entry mode AFTER promotion.
         //
@@ -323,27 +351,6 @@ fn unarchive_inner_with_hooks<R: Read>(
         // at ratification.
         if ratified_root.is_none() {
             ratified_root = staged_root.take();
-        }
-
-        // A committed file root reads its final link count through the
-        // retained handle: neither mutable name is trusted as the source
-        // of that count, and the reported-name identity check is
-        // repeated after it, because reading the count can be delayed
-        // long enough for the final entry to be replaced.
-        //
-        // The count covers the root entry alone. A descendant file
-        // inside a directory root has no handle retained to this point,
-        // and one read while it was still being extracted would say
-        // nothing about a link made afterwards.
-        if file_root_needs_single_link {
-            let handle = ratified_root
-                .as_ref()
-                .and_then(StagedRoot::file_handle)
-                .ok_or(CryptoError::InternalInvariant(
-                    "the promoted file root lost its retained file handle",
-                ))?;
-            require_single_linked_file(handle, output_dir, &manifest.root_name)?;
-            require_promoted_root(&output_handle, &manifest.root_name, staged_id)?;
         }
 
         // The returned path was built from the ambient `output_dir`
@@ -1210,6 +1217,12 @@ impl StagedIdentity {
     /// extraction would expose it to `DeleteOnError` cleanup. A failed
     /// read of the staged handle is the same class of fault, so it is
     /// treated the same way.
+    ///
+    /// This governs the identity comparison alone. A file root has
+    /// already had its link count read from the same handle by then,
+    /// and `FORMAT.md` §9.11 requires a failure to establish that count
+    /// to fail the extraction, so a handle whose metadata cannot be
+    /// read stops such a run before this state is reached.
     fn known(self) -> Option<ObjectId> {
         match self {
             Self::Known(id) => Some(id),
@@ -4323,8 +4336,11 @@ mod tests {
     /// The one-step rename route commits without ever linking, so
     /// nothing about the route reveals the extra name — only the count
     /// read through the retained handle does. The committed output is
-    /// ratified by then, so `DeleteOnError` preserves it.
-    #[cfg(unix)]
+    /// committed by then, so it is preserved — and the mode the archive
+    /// asked for is never applied, so the extra name keeps the
+    /// owner-only staged mode rather than the wider one it would have
+    /// been handed. Runs on Windows too: NTFS has hard links, and the
+    /// check is load-bearing there.
     #[test]
     fn extraction_rejects_a_link_made_against_the_staged_file_before_promotion() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -4364,6 +4380,16 @@ mod tests {
             "the committed output is ratified and must be preserved"
         );
         assert_eq!(fs::read(&outsider_path).unwrap(), plaintext);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&final_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode,
+                platform::INITIAL_FILE_CREATE_MODE,
+                "the archive's mode must never reach an inode with a second name"
+            );
+        }
     }
 
     /// A staged unlink can report `NotFound` after a concurrent writer moves

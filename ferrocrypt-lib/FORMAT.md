@@ -1730,7 +1730,10 @@ Readers MUST process FCA archives in this order:
     ratified in step 16. For a file root whose staging name was removed, the
     reader MUST read the link count through the retained staged-file handle
     and MUST NOT return success unless that committed inode has exactly one
-    link. The staged plaintext is created under a name a local writer with
+    link. That read MUST precede step 16, because applying the root entry's
+    mode to an inode that carries a second name grants the holder of that
+    name the access step 16 defers the mode to withhold; a reader that finds
+    a count other than one MUST NOT apply the mode. The staged plaintext is created under a name a local writer with
     access to the destination directory can link to, and such a link survives
     the promotion, so the count MUST be read whatever route committed the
     final name. Where a hard-link fallback created that name, the staging-name

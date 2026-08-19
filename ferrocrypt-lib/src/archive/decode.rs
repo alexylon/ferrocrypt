@@ -469,7 +469,8 @@ fn extract_directory_root<R: Read>(
     dir_entries.sort_by(|a, b| canonical_path_order(&a.path_utf8, &b.path_utf8));
     for dir_entry in &dir_entries {
         let rel = strip_root_prefix(&dir_entry.path_utf8, root_name_str)?;
-        let (parent_dir, dir_name) = platform::walk_to_parent(&root_dir, rel)?;
+        let (parent_dir, dir_name) =
+            platform::walk_to_parent(&root_dir, rel, platform::SYMLINK_IN_EXTRACTION_PATH)?;
         let _new_dir = platform::mkdir_strict(&parent_dir, &dir_name)
             .map_err(|e| map_already_exists(e, || archive_path_collides(&dir_entry.path_utf8)))?;
     }
@@ -482,7 +483,8 @@ fn extract_directory_root<R: Read>(
             continue;
         }
         let rel = strip_root_prefix(&entry.path_utf8, root_name_str)?;
-        let (parent_dir, file_name) = platform::walk_to_parent(&root_dir, rel)?;
+        let (parent_dir, file_name) =
+            platform::walk_to_parent(&root_dir, rel, platform::SYMLINK_IN_EXTRACTION_PATH)?;
         let mut outfile =
             platform::create_file_at(&parent_dir, &file_name, platform::INITIAL_FILE_CREATE_MODE)
                 .map_err(|e| {

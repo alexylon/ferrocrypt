@@ -1000,7 +1000,8 @@ fn stream_directory_descendant<W: Write>(
     rel: &Path,
     writer: &mut W,
 ) -> Result<(), CryptoError> {
-    let (parent, file_name) = platform::walk_to_parent_readonly(source_root, rel)?;
+    let (parent, file_name) =
+        platform::walk_to_parent(source_root, rel, platform::SYMLINK_IN_ARCHIVE_SOURCE)?;
 
     let mut options = OpenOptions::new();
     options.read(true).follow(FollowSymlinks::No);
@@ -2414,7 +2415,7 @@ mod tests {
     /// Pre-refactor this attack would have succeeded via the absolute-
     /// path open: even with `O_NOFOLLOW` on the leaf, the kernel
     /// resolved the intermediate `a/b` through the substituted symlink.
-    /// The cap-std walk (`platform::walk_to_parent_readonly`) re-opens
+    /// The cap-std walk (`platform::walk_to_parent`) re-opens
     /// each component via `open_dir_nofollow`, so the substitution is
     /// caught here.
     #[cfg(unix)]
@@ -2449,7 +2450,7 @@ mod tests {
 
         let mut buf = Vec::new();
         let err = stream_source_file(&entry, &source, &mut buf).unwrap_err();
-        // Encode-side symlink rejection from `walk_to_parent_readonly`
+        // Encode-side symlink rejection from `walk_to_parent`
         // routes through `platform::classify_open_failure` with the
         // `SYMLINK_IN_ARCHIVE_SOURCE` label.
         assert!(

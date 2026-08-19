@@ -96,7 +96,7 @@ pub(super) const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 /// Diagnostic label prefix for symlink rejections on the decode side
 /// (extraction). Single source of truth for the wording so a future
 /// rename catches all call sites. See [`classify_open_failure`].
-const SYMLINK_IN_EXTRACTION_PATH: &str = "Symlink in extraction path";
+pub(super) const SYMLINK_IN_EXTRACTION_PATH: &str = "Symlink in extraction path";
 
 /// Diagnostic label prefix for symlink rejections on the encode side
 /// (source-tree walk). Same shape as [`SYMLINK_IN_EXTRACTION_PATH`]
@@ -593,7 +593,7 @@ pub(super) fn classify_open_failure(
 
 /// Opens an existing directory `name` under `parent` with no-follow
 /// plus the Windows reparse-point post-check. The single open step
-/// shared by the per-component walks ([`walk_to_parent_readonly`],
+/// shared by the per-component walks ([`walk_to_parent`],
 /// [`open_dir_at_rel`]) and the writer's source-root open. A symlink
 /// at `name` fails with the labelled diagnostic; on Windows a
 /// junction or mount point fails via [`finalize_dir_open`].
@@ -612,31 +612,6 @@ pub(crate) fn open_child_dir_nofollow(
         )
     })?;
     finalize_dir_open(dir, name, label)
-}
-
-/// Ensures `name` exists as a directory under `parent`, returning a
-/// fresh handle to it. Opens with no-follow first; on `NotFound`
-/// creates and re-opens. A symlink at that name aborts with the typed
-/// "Symlink in extraction path" diagnostic; on Windows, a junction at
-/// the name fails the same way via [`finalize_dir_open`].
-pub(crate) fn ensure_dir(parent: &Dir, name: &OsStr) -> Result<Dir, CryptoError> {
-    match parent.open_dir_nofollow(name) {
-        Ok(dir) => finalize_dir_open(dir, name, SYMLINK_IN_EXTRACTION_PATH),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            // Create, re-open via no-follow as a TOCTOU race detector,
-            // and apply the initial permissive mode by handle. If
-            // anything substituted the freshly-created entry with a
-            // symlink/reparse point, the helper fails closed.
-            create_dir_with_default_mode(parent, name)
-        }
-        Err(e) => Err(classify_open_failure(
-            parent,
-            name,
-            e,
-            SYMLINK_IN_EXTRACTION_PATH,
-            &Path::new(name).display().to_string(),
-        )),
-    }
 }
 
 /// Creates a fresh directory `name` under `parent` and opens it with
@@ -752,39 +727,28 @@ fn chmod_dir_via_self_path(dir: &Dir, mode: u32) -> Result<(), CryptoError> {
     dir.set_permissions(".", perm).map_err(CryptoError::Io)
 }
 
-/// Walks `rel` under `root`, creating intermediate directories as
-/// needed. Returns a fresh handle to the final component's parent and
-/// the final component's name. Every intermediate open goes through
-/// no-follow + reparse-check, so a substituted symlink or junction
-/// anywhere along the path fails closed with the typed "Symlink in
-/// extraction path" diagnostic.
-pub(crate) fn walk_to_parent(root: &Dir, rel: &Path) -> Result<(Dir, OsString), CryptoError> {
-    let mut components: Vec<Component<'_>> = rel.components().collect();
-    let last = components.pop().ok_or(crate::error::internal_invariant!(
-        "archive entry resolved to empty path"
-    ))?;
-    let final_name = normal_component(last, rel)?.to_os_string();
-
-    let mut cur = root.try_clone().map_err(CryptoError::Io)?;
-    for component in components {
-        let name = normal_component(component, rel)?;
-        cur = ensure_dir(&cur, name)?;
-    }
-    Ok((cur, final_name))
-}
-
-/// Walks `rel` under `root` opening existing dirs only — returns the
-/// final component's parent handle and the final component's name.
-/// Read-only counterpart to [`walk_to_parent`] (which creates
-/// intermediate dirs); used by the encode-side per-entry content
-/// reopen so the writer's source walk gets the same per-component
-/// no-follow + reparse-check guarantee the reader has.
+/// Walks `rel` under `root` opening existing directories only, and
+/// returns a fresh handle to the final component's parent together
+/// with the final component's name. Every intermediate open goes
+/// through no-follow + reparse-check, so a substituted symlink or
+/// junction anywhere along the path fails closed with `label`.
+///
+/// It creates nothing. On the extraction side every directory the
+/// validated manifest declares already exists, so a missing one means
+/// another process changed the staged tree, and creating it again
+/// would carry on into a tree that no longer holds what was written
+/// into it. On the source side the tree is the caller's own input.
+///
+/// `label` names the side, so a rejection says whether it came from
+/// archiving ([`SYMLINK_IN_ARCHIVE_SOURCE`]) or extracting
+/// ([`SYMLINK_IN_EXTRACTION_PATH`]).
 ///
 /// `rel` must have at least one component; an empty path is treated
-/// as an internal invariant violation, mirroring [`walk_to_parent`].
-pub(crate) fn walk_to_parent_readonly(
+/// as an internal invariant violation.
+pub(crate) fn walk_to_parent(
     root: &Dir,
     rel: &Path,
+    label: &str,
 ) -> Result<(Dir, OsString), CryptoError> {
     let mut components: Vec<Component<'_>> = rel.components().collect();
     let last = components.pop().ok_or(crate::error::internal_invariant!(
@@ -795,7 +759,7 @@ pub(crate) fn walk_to_parent_readonly(
     let mut cur = root.try_clone().map_err(CryptoError::Io)?;
     for component in components {
         let name = normal_component(component, rel)?;
-        cur = open_child_dir_nofollow(&cur, name, SYMLINK_IN_ARCHIVE_SOURCE)?;
+        cur = open_child_dir_nofollow(&cur, name, label)?;
     }
     Ok((cur, final_name))
 }
@@ -1061,13 +1025,13 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn ensure_dir_rejects_symlink_to_outside() {
+    fn open_dir_at_rel_rejects_symlink_to_outside() {
         use std::os::unix::fs as unix_fs;
         let tmp = tempfile::TempDir::new().unwrap();
         unix_fs::symlink("/tmp", tmp.path().join("evil")).unwrap();
 
         let parent = open_anchor(tmp.path()).unwrap();
-        let err = ensure_dir(&parent, OsStr::new("evil")).unwrap_err();
+        let err = open_dir_at_rel(&parent, Path::new("evil")).unwrap_err();
         assert!(
             err.to_string().contains("Symlink in extraction path"),
             "expected symlink-path diagnostic, got: {err}"
@@ -1168,7 +1132,7 @@ mod tests {
     /// of where the target resolves.
     #[cfg(unix)]
     #[test]
-    fn ensure_dir_rejects_in_sandbox_symlink() {
+    fn open_dir_at_rel_rejects_in_sandbox_symlink() {
         use std::os::unix::fs as unix_fs;
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().join("root");
@@ -1176,7 +1140,7 @@ mod tests {
         unix_fs::symlink("real", root.join("link")).unwrap();
 
         let parent = open_anchor(&root).unwrap();
-        let err = ensure_dir(&parent, OsStr::new("link")).unwrap_err();
+        let err = open_dir_at_rel(&parent, Path::new("link")).unwrap_err();
         assert!(err.to_string().contains("Symlink in extraction path"));
     }
 
@@ -1193,7 +1157,12 @@ mod tests {
         unix_fs::symlink("real", root.join("link")).unwrap();
 
         let parent = open_anchor(&root).unwrap();
-        let err = walk_to_parent(&parent, Path::new("link/file.txt")).unwrap_err();
+        let err = walk_to_parent(
+            &parent,
+            Path::new("link/file.txt"),
+            SYMLINK_IN_EXTRACTION_PATH,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("Symlink in extraction path"));
         assert!(!root.join("real/file.txt").exists());
     }
@@ -1214,7 +1183,12 @@ mod tests {
         unix_fs::symlink(&victim, a.join("b")).unwrap();
 
         let parent = open_anchor(&root).unwrap();
-        let err = walk_to_parent(&parent, Path::new("a/b/file.txt")).unwrap_err();
+        let err = walk_to_parent(
+            &parent,
+            Path::new("a/b/file.txt"),
+            SYMLINK_IN_EXTRACTION_PATH,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().to_lowercase().contains("symlink") || err.to_string().contains("path")
         );
@@ -1264,7 +1238,7 @@ mod tests {
     /// capability boundary stops this even before our post-checks run.
     #[cfg(unix)]
     #[test]
-    fn ensure_dir_rejects_relative_escape_symlink() {
+    fn open_dir_at_rel_rejects_relative_escape_symlink() {
         use std::os::unix::fs as unix_fs;
         let tmp = tempfile::TempDir::new().unwrap();
         let inside = tmp.path().join("inside");
@@ -1274,9 +1248,33 @@ mod tests {
         unix_fs::symlink("../outside", inside.join("escape")).unwrap();
 
         let parent = open_anchor(&inside).unwrap();
-        let result = ensure_dir(&parent, OsStr::new("escape"));
+        let result = open_dir_at_rel(&parent, Path::new("escape"));
         assert!(result.is_err());
         assert!(outside.read_dir().unwrap().next().is_none());
+    }
+
+    /// A missing intermediate directory fails the walk and is not
+    /// created. Extraction pre-creates every directory the validated
+    /// manifest declares, so a gap means another process changed the
+    /// staged tree; re-creating it would carry the run on into a tree
+    /// that no longer holds what was written into it.
+    #[test]
+    fn walk_to_parent_refuses_a_missing_intermediate_and_creates_nothing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+
+        let parent = open_anchor(&root).unwrap();
+        let result = walk_to_parent(
+            &parent,
+            Path::new("missing/file.txt"),
+            SYMLINK_IN_EXTRACTION_PATH,
+        );
+        assert!(result.is_err(), "a missing intermediate must fail the walk");
+        assert!(
+            !root.join("missing").exists(),
+            "the walk must not create the missing directory"
+        );
     }
 
     /// `..` traversal: cap-std refuses it at the syscall boundary
@@ -1292,7 +1290,11 @@ mod tests {
         fs::create_dir_all(&outside).unwrap();
 
         let parent = open_anchor(&inside).unwrap();
-        let result = walk_to_parent(&parent, Path::new("../outside/x.txt"));
+        let result = walk_to_parent(
+            &parent,
+            Path::new("../outside/x.txt"),
+            SYMLINK_IN_EXTRACTION_PATH,
+        );
         assert!(result.is_err());
     }
 
@@ -1857,11 +1859,11 @@ mod tests {
         }
     }
 
-    /// Windows symlink-dir at the leaf of an `ensure_dir` call. Hardened
-    /// helper must reject — same invariant as Unix.
+    /// Windows symlink-dir at the leaf of an `open_dir_at_rel` call.
+    /// Hardened helper must reject — same invariant as Unix.
     #[cfg(windows)]
     #[test]
-    fn ensure_dir_rejects_windows_symlink_dir() {
+    fn open_dir_at_rel_rejects_windows_symlink_dir() {
         use std::os::windows::fs as win_fs;
         let tmp = tempfile::TempDir::new().unwrap();
         let target = tmp.path().join("target_dir");
@@ -1876,7 +1878,7 @@ mod tests {
         }
 
         let parent = open_anchor(tmp.path()).unwrap();
-        let _err = ensure_dir(&parent, OsStr::new("link")).unwrap_err();
+        let _err = open_dir_at_rel(&parent, Path::new("link")).unwrap_err();
     }
 
     /// Windows symlink-dir mid-path. Hardened walk must reject before
@@ -1898,7 +1900,11 @@ mod tests {
         }
 
         let parent = open_anchor(&root).unwrap();
-        let result = walk_to_parent(&parent, Path::new("link/file.txt"));
+        let result = walk_to_parent(
+            &parent,
+            Path::new("link/file.txt"),
+            SYMLINK_IN_EXTRACTION_PATH,
+        );
         assert!(
             result.is_err(),
             "hardened walk MUST reject Windows symlink-dir in path"
@@ -1944,7 +1950,7 @@ mod tests {
     /// runs on any standard Windows account in CI.
     #[cfg(windows)]
     #[test]
-    fn ensure_dir_rejects_windows_junction() {
+    fn open_dir_at_rel_rejects_windows_junction() {
         let tmp = tempfile::TempDir::new().unwrap();
         let target = tmp.path().join("target");
         fs::create_dir_all(&target).unwrap();
@@ -1955,7 +1961,7 @@ mod tests {
         }
 
         let parent = open_anchor(tmp.path()).unwrap();
-        let err = ensure_dir(&parent, OsStr::new("junction")).unwrap_err();
+        let err = open_dir_at_rel(&parent, Path::new("junction")).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("Symlink in extraction path"),
@@ -1985,7 +1991,11 @@ mod tests {
         }
 
         let parent = open_anchor(&root).unwrap();
-        let result = walk_to_parent(&parent, Path::new("link/file.txt"));
+        let result = walk_to_parent(
+            &parent,
+            Path::new("link/file.txt"),
+            SYMLINK_IN_EXTRACTION_PATH,
+        );
         assert!(
             result.is_err(),
             "hardened walk MUST reject NTFS junction in path"

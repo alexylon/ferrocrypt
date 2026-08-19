@@ -1733,6 +1733,12 @@ Readers MUST process FCA archives in this order:
 
 Steps 1 through 8 MUST complete before any filesystem output is created.
 
+Steps 11, 12, and 14 MUST NOT create a directory. Step 10 creates every
+directory the validated manifest declares, so a directory missing later means
+another process changed the staged tree, and the extraction MUST fail rather
+than create it again and continue into a tree that no longer holds what was
+written into it.
+
 Where the platform exposes no stable identity, the corresponding confirmation
 in step 16 or step 17 is skipped. A failure to read the staged-root or final-name
 identity is likewise not evidence of a substitution and skips that comparison.

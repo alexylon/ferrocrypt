@@ -54,7 +54,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
-use cap_std::fs::{Dir, OpenOptions};
+use cap_std::fs::{Dir, Metadata, OpenOptions};
 
 use crate::CryptoError;
 use crate::error::{sanitize_for_display, sanitize_path_for_display};
@@ -398,6 +398,7 @@ fn writer_entry(
     mode: u32,
     size: u64,
     source_path: PathBuf,
+    source_id: Option<(u64, u64)>,
 ) -> ArchiveEntry {
     ArchiveEntry {
         kind,
@@ -405,8 +406,67 @@ fn writer_entry(
         mode,
         size,
         source_path: Some(source_path),
+        source_id,
         entry_ext: Vec::new(),
     }
+}
+
+/// Identity of a source file for [`ArchiveEntry::source_id`], read from
+/// metadata the metadata pass has already taken, so recording it costs
+/// no extra call. A filesystem that reports inode 0 supplies no identity
+/// — some network mounts and overlay filesystems report it for every
+/// entry — and yields `None`, which skips the comparison rather than
+/// failing it, on the same terms as the repeat-directory check.
+#[cfg(unix)]
+fn source_identity(metadata: &Metadata) -> Option<(u64, u64)> {
+    use cap_std::fs::MetadataExt;
+    let (dev, ino) = (metadata.dev(), metadata.ino());
+    (ino != 0).then_some((dev, ino))
+}
+
+/// No identity recorded outside Unix: the metadata a directory listing
+/// returns on Windows carries no volume serial number or file index, and
+/// reading them would mean opening every file in the metadata pass. The
+/// content pass keeps its no-follow, reparse-point, regular-file, and
+/// length checks there, which reject every substitution except a
+/// same-length regular file.
+#[cfg(not(unix))]
+fn source_identity(_metadata: &Metadata) -> Option<(u64, u64)> {
+    None
+}
+
+/// Rejects a source file replaced between the metadata pass and the
+/// content pass. The content pass finds each descendant by name again,
+/// and the no-follow, regular-file, and length checks all pass for a
+/// regular file of the same length substituted at that name, so its
+/// content would otherwise be archived under the recorded path and
+/// mode. Comparing the identity recorded in the metadata pass fails
+/// closed instead, the same contract [`require_same_file`] applies to
+/// the source root.
+#[cfg(unix)]
+fn require_same_source_file(
+    recorded: Option<(u64, u64)>,
+    reopened: &Metadata,
+    name_text: &str,
+) -> Result<(), CryptoError> {
+    let Some(recorded) = recorded else {
+        return Ok(());
+    };
+    if source_identity(reopened) != Some(recorded) {
+        return Err(source_changed_error(name_text));
+    }
+    Ok(())
+}
+
+/// No identity comparison outside Unix, because the metadata pass
+/// records none there. See [`source_identity`].
+#[cfg(not(unix))]
+fn require_same_source_file(
+    _recorded: Option<(u64, u64)>,
+    _reopened: &Metadata,
+    _name_text: &str,
+) -> Result<(), CryptoError> {
+    Ok(())
 }
 
 /// Shared per-entry recording: increments the entry count, applies
@@ -493,6 +553,18 @@ fn symlink_in_archive_source_error(fca_prefix: &str, name: &OsStr) -> CryptoErro
     ))
 }
 
+/// Single source of truth for the "Source file changed while
+/// archiving: path" rejection, raised by [`require_same_source_file`]
+/// when a descendant reopened for the content pass is no longer the
+/// object the metadata pass recorded. Named for the source tree, to
+/// stay apart from the root's "Input <kind> changed while archiving".
+/// Unix-only, like [`input_changed_error`], because the comparison that
+/// raises it needs a stable `(dev, ino)` pair.
+#[cfg(unix)]
+fn source_changed_error(path_text: &str) -> CryptoError {
+    CryptoError::InvalidInput(format!("Source file changed while archiving: {path_text}"))
+}
+
 /// Single source of truth for the "Source file size changed while
 /// archiving (X -> Y): path" diagnostic. Emitted by both
 /// [`stream_single_file_root`] (single-file inputs, std-fs metadata)
@@ -568,6 +640,10 @@ fn build_manifest(
             mode,
             size,
             input_path.to_path_buf(),
+            // No reopen to confirm: the content pass streams from the
+            // handle already held, and `require_same_file` above has
+            // matched that handle against the pre-open classification.
+            None,
         );
 
         let manifest = Manifest {
@@ -643,6 +719,8 @@ fn build_manifest(
             // root entry has no content to stream so this field is
             // never read; populated for shape consistency.
             PathBuf::new(),
+            // Directories carry no content, so none is reopened.
+            None,
         )];
 
         // Seed the set with the source root's own (dev, ino) so a
@@ -805,6 +883,7 @@ fn walk_directory(
             mode,
             0,
             rel_path.clone(),
+            None,
         ));
 
         let child = Rc::new(child_dir);
@@ -895,6 +974,10 @@ fn scan_directory(
                 mode,
                 size,
                 child_rel,
+                // Recorded from the metadata this pass already read, so
+                // the content pass can tell the file it reopens by name
+                // from one substituted in the meantime.
+                source_identity(&metadata),
             ));
         } else if file_type.is_dir() {
             // Counted at discovery, not at pop: the entry-count and
@@ -1019,18 +1102,18 @@ fn stream_directory_descendant<W: Write>(
 
     let metadata = file.metadata().map_err(CryptoError::Io)?;
     reject_windows_reparse_point_cap(&metadata, "Source", &file_name)?;
+    let name_text = sanitize_for_display(&file_name.to_string_lossy());
     if !metadata.is_file() {
-        return Err(no_longer_regular_file_error(
-            "Source",
-            &sanitize_for_display(&file_name.to_string_lossy()),
-        ));
+        return Err(no_longer_regular_file_error("Source", &name_text));
     }
+    // Before the length check, because a substitution is what the
+    // length check cannot see: a regular file of the same length passes
+    // it and its content would be archived under the recorded path.
+    // A length that changed in place still reports as a size change,
+    // because the object is then the recorded one.
+    require_same_source_file(entry.source_id, &metadata, &name_text)?;
     if metadata.len() != entry.size {
-        return Err(size_changed_error(
-            entry.size,
-            metadata.len(),
-            &sanitize_for_display(&file_name.to_string_lossy()),
-        ));
+        return Err(size_changed_error(entry.size, metadata.len(), &name_text));
     }
 
     copy_exact_n(&mut file, writer, entry.size, source_shrank_error)
@@ -1293,8 +1376,14 @@ mod tests {
     /// file is a change to its own bytes, and that is refused; a
     /// directory has no such change to make. A descendant is reopened
     /// by name through the held root capability, so every mutation
-    /// reaches it — and all but the same-length regular swap are
-    /// refused by the no-follow, type, and length checks.
+    /// reaches it, and every one is refused: the no-follow, type, and
+    /// length checks catch all but the same-length regular swap, and
+    /// the recorded identity catches that one.
+    ///
+    /// Outside Unix the metadata pass records no identity — a directory
+    /// listing carries none there — so the same-length swap is admitted
+    /// on those targets, which is what `FORMAT.md` §9.10 requires of a
+    /// platform that exposes no stable file identity.
     fn expected(position: Position, mutation: Mutation) -> Expected {
         match position {
             Position::RootFile => match mutation {
@@ -1302,6 +1391,9 @@ mod tests {
                 _ => Expected::OriginalContent,
             },
             Position::RootDirectory => Expected::OriginalContent,
+            #[cfg(unix)]
+            Position::Descendant => Expected::Refused,
+            #[cfg(not(unix))]
             Position::Descendant => match mutation {
                 Mutation::ReplacedBySameSizeFile => Expected::ReplacementContent,
                 _ => Expected::Refused,
@@ -2402,6 +2494,69 @@ mod tests {
         let mut buf = Vec::new();
         let err = stream_source_file(&entry, &source, &mut buf).unwrap_err();
         assert!(format!("{err}").contains("size changed"));
+    }
+
+    /// FORMAT.md §9.10: a descendant replaced between the two passes by
+    /// a regular file of the same length passes the no-follow, type,
+    /// and length checks, so only the recorded identity rejects it.
+    /// Driven end to end, so the identity travels from the metadata
+    /// pass into the entry the content pass reads.
+    #[cfg(unix)]
+    #[test]
+    fn a_same_length_descendant_swap_between_the_passes_is_refused() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("tree");
+        fs::create_dir(&root).unwrap();
+        let leaf = root.join("file.txt");
+        fs::write(&leaf, b"trusted").unwrap();
+
+        let prepared = prepare_archive(&root, ArchiveLimits::default()).unwrap();
+
+        // Same length, so every check but the identity comparison passes.
+        fs::remove_file(&leaf).unwrap();
+        fs::write(&leaf, b"hostile").unwrap();
+
+        let mut buf = Vec::new();
+        let err = prepared.write_to(&mut buf).unwrap_err();
+        assert!(
+            format!("{err}").contains("Source file changed while archiving"),
+            "expected the identity rejection, got: {err}"
+        );
+        assert!(
+            !buf.windows(7).any(|window| window == b"hostile"),
+            "the substituted content must never reach the archive"
+        );
+    }
+
+    /// The direction of that comparison: an untouched descendant must
+    /// keep archiving, so the identity check cannot refuse an ordinary
+    /// source tree.
+    #[test]
+    fn an_untouched_descendant_still_archives() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("tree");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("file.txt"), b"trusted").unwrap();
+
+        let prepared = prepare_archive(&root, ArchiveLimits::default()).unwrap();
+        let mut buf = Vec::new();
+        prepared.write_to(&mut buf).unwrap();
+        assert!(buf.windows(7).any(|window| window == b"trusted"));
+    }
+
+    /// A filesystem that reports inode 0 supplies no identity, so the
+    /// comparison is skipped rather than failed — the same rule the
+    /// repeat-directory check applies.
+    #[cfg(unix)]
+    #[test]
+    fn a_source_without_an_inode_number_skips_the_identity_comparison() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("real.txt");
+        fs::write(&path, b"actual content").unwrap();
+        let reopened = open_no_follow(&path).unwrap();
+        let metadata = cap_std::fs::File::from_std(reopened).metadata().unwrap();
+
+        require_same_source_file(None, &metadata, "real.txt").unwrap();
     }
 
     /// Cap-std parity test: an attacker who replaces an intermediate

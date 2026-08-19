@@ -1647,6 +1647,15 @@ type change, pre-copy growth, or inaccessibility MUST fail. If a source file
 grows after the fresh metadata check but during the copy, the writer still copies
 exactly the declared size, keeping the archive self-consistent.
 
+Where the platform exposes a stable file identity, the metadata pass SHOULD
+record the identity of each file it will later reopen, and the content-streaming
+pass SHOULD confirm that the reopened object is the one recorded. The preceding
+checks cannot detect a regular file of the same length substituted at that name
+between the two passes, so without this confirmation its content is archived
+under the recorded path and mode. A platform that exposes no such identity, or a
+filesystem that supplies none for an entry, omits the confirmation and relies on
+the no-follow, reparse-safe, type, and length checks alone.
+
 Filesystem hardlinks MAY be archived as independent regular-file contents.
 Hardlink identity MUST NOT be stored unless a later critical hardlink extension
 specification is implemented.

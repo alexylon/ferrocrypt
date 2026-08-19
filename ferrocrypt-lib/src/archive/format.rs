@@ -699,6 +699,7 @@ pub fn parse_manifest_bytes(
             mode: u32::from(mode),
             size,
             source_path: None,
+            source_id: None,
             entry_ext: entry_ext_bytes,
         });
     }

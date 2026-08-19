@@ -53,6 +53,18 @@ pub struct ArchiveEntry {
     /// the hardened platform backend, never opening by absolute source
     /// path.
     pub source_path: Option<PathBuf>,
+    /// Identity of the source file recorded by the writer's metadata
+    /// pass, so the content pass can confirm that the file it reopens
+    /// by name is the one that was recorded. The pair is the device and
+    /// inode number, the same identity `fs::atomic::file_identity`
+    /// reads.
+    ///
+    /// `None` wherever no comparison is possible: readers, directory
+    /// entries, a single-file root streamed from a handle held since
+    /// the metadata pass, a filesystem that reports no inode number,
+    /// and every target outside Unix, where a directory listing carries
+    /// no identity at all.
+    pub source_id: Option<(u64, u64)>,
     /// Per-entry TLV extension bytes (`entry_ext`). Native writers emit
     /// an empty `Vec`; readers populate it with the raw bytes of the
     /// region after structural + canonicality validation. Opaque to
@@ -80,11 +92,11 @@ pub struct Manifest {
     pub root_mode: u32,
 }
 
-/// Test-only constructor for an [`ArchiveEntry`] without a writer
-/// `source_path` (the reader's view, plus most parser-side test
+/// Test-only constructor for an [`ArchiveEntry`] without the writer's
+/// source fields (the reader's view, plus most parser-side test
 /// fixtures). Single source of truth for the `kind / path_utf8 /
-/// mode / size / source_path: None / entry_ext: empty` boilerplate
-/// shared by in-tree archive tests.
+/// mode / size / source_path: None / source_id: None / entry_ext:
+/// empty` boilerplate shared by in-tree archive tests.
 #[cfg(test)]
 pub(crate) fn make_entry(path: &str, kind: ArchiveEntryKind, size: u64, mode: u32) -> ArchiveEntry {
     ArchiveEntry {
@@ -93,6 +105,7 @@ pub(crate) fn make_entry(path: &str, kind: ArchiveEntryKind, size: u64, mode: u3
         mode,
         size,
         source_path: None,
+        source_id: None,
         entry_ext: Vec::new(),
     }
 }

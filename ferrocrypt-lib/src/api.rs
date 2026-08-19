@@ -671,10 +671,11 @@ impl PassphraseDecryptor {
     /// [`CryptoError::PayloadTruncated`] when credentials are wrong or the file
     /// is modified. Returns [`CryptoError::InputPath`] if the encrypted file
     /// no longer exists, and [`CryptoError::Io`] for other filesystem
-    /// failures. On Linux and macOS, a namespace or hard-link-cleanup check can
-    /// report an error after the complete plaintext output was
-    /// committed; [`IncompleteOutputPolicy`] does not remove a confirmed
-    /// output in that case.
+    /// failures, including a namespace check or a committed output that carries
+    /// more than one filesystem name, either of which can report an error
+    /// after the complete plaintext output was committed;
+    /// [`IncompleteOutputPolicy`] does not remove a confirmed output in
+    /// that case.
     pub fn decrypt(
         self,
         passphrase: Passphrase,
@@ -824,11 +825,11 @@ impl PrivateKeyDecryptor {
     /// modified; `NoSupportedRecipient` means the file contains no recipient
     /// type this build can process. Returns [`CryptoError::InputPath`] if the
     /// encrypted file or the private key file does not exist, and
-    /// [`CryptoError::Io`] for other filesystem failures. On Linux and macOS, a
-    /// namespace or hard-link-cleanup check can report an error after the
-    /// complete plaintext output was committed;
-    /// [`IncompleteOutputPolicy`] does not remove a confirmed output in that
-    /// case.
+    /// [`CryptoError::Io`] for other filesystem failures, including a namespace
+    /// check or a committed output that carries more than one filesystem
+    /// name, either of which can report an error after the complete
+    /// plaintext output was committed; [`IncompleteOutputPolicy`] does not
+    /// remove a confirmed output in that case.
     pub fn decrypt(
         self,
         private_key: PrivateKey,

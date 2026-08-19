@@ -2716,7 +2716,7 @@ mod tests {
 
         assert_eq!(
             err.to_string(),
-            "injected directory flush failure; the removed private.key had 2 filesystem links, so a copy may remain under another name"
+            "injected directory flush failure; the removed private.key had 2 filesystem names, so a copy may remain under another name"
         );
         assert!(
             matches!(err, CryptoError::Io(_)),

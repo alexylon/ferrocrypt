@@ -242,7 +242,7 @@ impl RollbackOutcome {
         Some(match self {
             Self::Removed => return None,
             Self::RemovedButLinked { link_count } => format!(
-                "the removed {shown} had {link_count} filesystem links, so a copy may remain under another name"
+                "the removed {shown} had {link_count} filesystem names, so a copy may remain under another name"
             ),
             Self::Replaced => format!(
                 "{shown} was replaced during the operation and left in place, and the file this run wrote may remain under another name"
@@ -2122,7 +2122,7 @@ mod tests {
         );
         assert_eq!(
             linked.to_string(),
-            "flush failed; the removed private.key had 2 filesystem links, so a copy may remain under another name"
+            "flush failed; the removed private.key had 2 filesystem names, so a copy may remain under another name"
         );
         match linked {
             CryptoError::Io(e) => assert_eq!(e.kind(), io::ErrorKind::TimedOut),

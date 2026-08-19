@@ -3864,6 +3864,15 @@ mod tests {
     ///   fix what an unreadable identity does. These pin the
     ///   decision rather than injecting the read failure, which no safe
     ///   seam reaches.
+    /// - A staged descendant directory moved out of the staged root.
+    ///   The interference here acts on the staged root, which cleanup
+    ///   reaches through the handle that created it. A subtree renamed
+    ///   out from under that root is no longer reachable through it, so
+    ///   the plaintext already written inside stays where it was put.
+    ///   `DeleteOnError` destroys the run's plaintext wherever the run
+    ///   can still reach it, which is what these cases pin; an output
+    ///   directory a local writer can change is a trust boundary
+    ///   `SECURITY.md` states, not a bound cleanup can close.
     ///
     /// Linux/macOS only: the assertions read Unix mode bits, and the
     /// interference is applied on the end-of-archive read, while
@@ -4328,6 +4337,111 @@ mod tests {
         );
         assert_eq!(fs::read(&final_path).unwrap(), plaintext);
         assert_eq!(fs::read(&incomplete_path).unwrap(), plaintext);
+    }
+
+    /// A staged subdirectory renamed out of the staged tree while the
+    /// content pass is still writing into it must fail the run, and say
+    /// so: the entries already extracted are inside the subtree that
+    /// was moved, so carrying on would report success for an output
+    /// missing them. Reaches the pass-2 walk by moving the directory
+    /// between two file entries of the same archive.
+    #[cfg(unix)]
+    #[test]
+    fn extraction_reports_a_staged_directory_moved_out_between_two_entries() {
+        /// Runs `act` once, after `at` bytes have been handed to the
+        /// reader, then keeps serving the archive.
+        struct ActAfter<F: FnMut()> {
+            data: Vec<u8>,
+            pos: usize,
+            at: usize,
+            act: Option<F>,
+        }
+
+        impl<F: FnMut()> Read for ActAfter<F> {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                let remaining = self.data.len() - self.pos;
+                if remaining == 0 {
+                    return Ok(0);
+                }
+                let n = remaining.min(buf.len());
+                buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+                self.pos += n;
+                // After serving, so the run acts on the bytes it has:
+                // the first entry is written and the second has not been
+                // walked to yet.
+                if self.pos >= self.at {
+                    if let Some(mut act) = self.act.take() {
+                        act();
+                    }
+                }
+                Ok(n)
+            }
+        }
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let out = tmp.path().join("out");
+        fs::create_dir(&out).unwrap();
+
+        let first = b"first entry";
+        let second = b"second entry";
+        let manifest = Manifest {
+            entries: vec![
+                make_entry("root", ArchiveEntryKind::Directory, 0, 0o755),
+                make_entry("root/sub", ArchiveEntryKind::Directory, 0, 0o755),
+                make_entry(
+                    "root/sub/a.txt",
+                    ArchiveEntryKind::File,
+                    first.len() as u64,
+                    0o644,
+                ),
+                make_entry(
+                    "root/sub/b.txt",
+                    ArchiveEntryKind::File,
+                    second.len() as u64,
+                    0o644,
+                ),
+            ],
+            total_file_bytes: (first.len() + second.len()) as u64,
+            root_name: OsString::from("root"),
+            root_is_file: false,
+            root_mode: 0o755,
+        };
+        let archive = build_archive(
+            &manifest,
+            &[("root/sub/a.txt", first), ("root/sub/b.txt", second)],
+        );
+
+        // Everything but the last entry's content, so the move lands
+        // after `a.txt` is written and before `b.txt` is walked to.
+        let at = archive.len() - second.len();
+        let staged_sub = out.join("root.incomplete").join("sub");
+        let moved = out.join("moved");
+        let reader = ActAfter {
+            data: archive,
+            pos: 0,
+            at,
+            act: Some(|| {
+                let _ = fs::rename(&staged_sub, &moved);
+            }),
+        };
+
+        let err = unarchive_inner(
+            reader,
+            &out,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::DeleteOnError,
+        )
+        .expect_err("a staged directory moved out must fail the run");
+
+        assert!(
+            err.to_string()
+                .contains("Directory on the path went missing"),
+            "the run must name what happened, got: {err}"
+        );
+        assert!(
+            !out.join("root").exists(),
+            "nothing may be promoted after the staged tree changed"
+        );
     }
 
     /// A link another local process makes against the staged plaintext

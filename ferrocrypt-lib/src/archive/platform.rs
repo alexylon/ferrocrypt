@@ -98,6 +98,11 @@ pub(super) const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 /// rename catches all call sites. See [`classify_open_failure`].
 pub(super) const SYMLINK_IN_EXTRACTION_PATH: &str = "Symlink in extraction path";
 
+/// Diagnostic for a directory on a walked path that is no longer there.
+/// Both walks expect every component to exist, so its absence reports a
+/// tree another process changed while the run was using it.
+const DIRECTORY_WENT_MISSING: &str = "Directory on the path went missing";
+
 /// Diagnostic label prefix for symlink rejections on the encode side
 /// (source-tree walk). Same shape as [`SYMLINK_IN_EXTRACTION_PATH`]
 /// but role-specific so the caller can tell at a glance whether the
@@ -772,9 +777,29 @@ pub(crate) fn walk_to_parent(
     let mut cur = root.try_clone().map_err(CryptoError::Io)?;
     for component in components {
         let name = normal_component(component, rel)?;
-        cur = open_child_dir_nofollow(&cur, name, label)?;
+        cur = open_child_dir_nofollow(&cur, name, label)
+            .map_err(|e| missing_walk_component(e, rel))?;
     }
     Ok((cur, final_name))
+}
+
+/// Replaces the bare not-found error a walk raises for a directory that
+/// has gone with one that names the path and says what its absence
+/// means. Both sides of the walk expect every component to be there —
+/// extraction created them, the source tree is the caller's own — so a
+/// component that is missing says another process changed the tree
+/// under the run, which a transparent "No such file or directory" does
+/// not convey. Every other failure keeps its own classification.
+fn missing_walk_component(error: CryptoError, rel: &Path) -> CryptoError {
+    match &error {
+        CryptoError::Io(io_error) if io_error.kind() == io::ErrorKind::NotFound => {
+            CryptoError::InvalidInput(format!(
+                "{DIRECTORY_WENT_MISSING}: {}",
+                sanitize_path_for_display(rel)
+            ))
+        }
+        _ => error,
+    }
 }
 
 /// Walks `rel` under `root` opening existing dirs only — never
@@ -796,7 +821,8 @@ pub(crate) fn open_dir_at_rel(root: &Dir, rel: &Path) -> Result<Dir, CryptoError
     let mut cur = root.try_clone().map_err(CryptoError::Io)?;
     for component in rel.components() {
         let name = normal_component(component, rel)?;
-        cur = open_child_dir_nofollow(&cur, name, SYMLINK_IN_EXTRACTION_PATH)?;
+        cur = open_child_dir_nofollow(&cur, name, SYMLINK_IN_EXTRACTION_PATH)
+            .map_err(|e| missing_walk_component(e, rel))?;
     }
     Ok(cur)
 }
@@ -1283,7 +1309,11 @@ mod tests {
             Path::new("missing/file.txt"),
             SYMLINK_IN_EXTRACTION_PATH,
         );
-        assert!(result.is_err(), "a missing intermediate must fail the walk");
+        let err = result.expect_err("a missing intermediate must fail the walk");
+        assert!(
+            err.to_string().contains(DIRECTORY_WENT_MISSING),
+            "the walk must say the directory went missing, got: {err}"
+        );
         assert!(
             !root.join("missing").exists(),
             "the walk must not create the missing directory"

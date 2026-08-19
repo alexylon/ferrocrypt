@@ -231,8 +231,10 @@ regression net, regenerated when the format intentionally changes).
   that the committed file has exactly one name, so a hard-link fallback
   that left its working name, or a link another local process created
   against the temporary file before the commit, is reported rather than
-  hidden. A decrypted folder has no such count — a folder cannot be given
-  a second name — and the files inside one are not counted individually.
+  hidden. A decrypted folder is not counted this way: the count is read
+  through the retained handle on a file, and the files inside a folder are
+  not counted individually. Some drives, Apple's HFS+ and some network
+  shares among them, do allow a folder a second name.
   A swap detected there returns an error and leaves the entry currently at
   the reported path untouched. If the original file or folder was moved, the
   complete output remains under that new name. If it was removed without
@@ -245,6 +247,13 @@ regression net, regenerated when the format intentionally changes).
   runs, and while FerroCrypt still holds its handle on the object it wrote,
   so an identifier reused later cannot satisfy them and a filesystem that
   assigns a new identifier once the last handle closes cannot fail them.
+  The one exception is the check that a file inside a folder being encrypted
+  is still the file recorded a moment earlier: holding one handle per file
+  would exhaust the open-file limit on a large folder, so no handle is held
+  between the two passes. On drives that hand a freed identity number to the
+  next file created, ext4 and XFS among them, a replacement that removes the
+  original and recreates it can therefore still match. Every replacement that
+  leaves the original in place is refused.
   ReFS reports a 64-bit
   truncation of its wider identifier, and a filesystem that gives every
   object the same identifier, as some network redirectors do, makes the

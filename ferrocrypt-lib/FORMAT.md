@@ -1734,8 +1734,7 @@ Readers MUST process FCA archives in this order:
     directory or reading either directory identity, only `EMFILE`, `ENFILE`,
     and `ENOMEM` MAY skip the comparison as unavailable resource checks; every
     other failure MUST fail the extraction without removing an output already
-    ratified in step 16. For a file root whose staging name was removed, the
-    reader MUST read the link count through the retained staged-file handle
+    ratified in step 16. For a file root the reader MUST read the link count through the retained staged-file handle
     and MUST NOT return success unless that committed inode has exactly one
     link. That read MUST precede step 16, because applying the root entry's
     mode to an inode that carries a second name grants the holder of that

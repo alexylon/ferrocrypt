@@ -139,8 +139,8 @@ fn archive_file_mode_cap(_metadata: &cap_std::fs::Metadata) -> u32 {
 
 /// Mode to store for a directory discovered during the cap-std walk.
 /// Takes pre-fetched cap-std metadata so the caller can reuse a
-/// single `dir_metadata()` syscall across reparse-point check, cycle
-/// detection, and mode read. Unix returns rwx bits; non-Unix returns
+/// single `dir_metadata()` syscall across reparse-point check,
+/// repeat-directory check, and mode read. Unix returns rwx bits; non-Unix returns
 /// the fixed default.
 #[cfg(unix)]
 fn archive_dir_mode_cap(metadata: &cap_std::fs::Metadata) -> u32 {
@@ -702,7 +702,7 @@ fn build_manifest(
         };
 
         // One `dir_metadata` call reused for the Unix identity
-        // re-check, the cycle-detection seed, and the mode read.
+        // re-check, the repeat-directory seed, and the mode read.
         let source_root_meta = source_root.dir_metadata().map_err(CryptoError::Io)?;
 
         // A real directory swapped in at `input_path` after the lstat
@@ -851,7 +851,7 @@ fn walk_directory(
         drop(parent);
 
         // One `dir_metadata` call amortised across the Windows
-        // reparse-point post-check, the Unix (dev, ino) cycle-detection
+        // reparse-point post-check, the Unix (dev, ino) repeat-directory
         // seed, and the mode read. Atomic with the `open_dir_nofollow`
         // above — no race window between the open and the metadata read.
         let child_meta = child_dir.dir_metadata().map_err(CryptoError::Io)?;
@@ -911,8 +911,8 @@ fn walk_directory(
 /// pre-check, symlink rejection, UTF-8, separator smuggling), records
 /// file entries, counts each subdirectory against the resource caps,
 /// and pushes it onto `stack` unopened. The per-directory work that
-/// needs the child's own handle — reparse post-check, cycle detection,
-/// mode read, manifest entry — runs in [`walk_directory`]'s pop loop.
+/// needs the child's own handle — reparse post-check, repeat-directory
+/// check, mode read, manifest entry — runs in [`walk_directory`]'s pop loop.
 fn scan_directory(
     dir: &Rc<Dir>,
     fca_prefix: &str,
@@ -1096,7 +1096,7 @@ fn stream_directory_descendant<W: Write>(
     writer: &mut W,
 ) -> Result<(), CryptoError> {
     let (parent, file_name) =
-        platform::walk_to_parent(source_root, rel, platform::SYMLINK_IN_ARCHIVE_SOURCE)?;
+        platform::walk_to_parent(source_root, rel, platform::WalkSide::ArchiveSource)?;
 
     let mut options = OpenOptions::new();
     options.read(true).follow(FollowSymlinks::No);
@@ -2576,6 +2576,48 @@ mod tests {
         let metadata = cap_std::fs::File::from_std(reopened).metadata().unwrap();
 
         require_same_source_file(None, &metadata, "real.txt").unwrap();
+    }
+
+    /// The other direction: an entry the metadata pass did record an
+    /// identity for must fail against an object that is not it. This is
+    /// the half that carries the guarantee — a recorded identity is what
+    /// tells a same-length replacement from the file it stands in for —
+    /// and it also covers a reopened object supplying no identity of its
+    /// own, which cannot be shown to be the recorded one.
+    #[cfg(unix)]
+    #[test]
+    fn a_recorded_identity_fails_against_a_different_object() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let recorded_path = tmp.path().join("recorded.txt");
+        let other_path = tmp.path().join("other.txt");
+        fs::write(&recorded_path, b"actual content").unwrap();
+        fs::write(&other_path, b"actual content").unwrap();
+
+        let recorded_file = open_no_follow(&recorded_path).unwrap();
+        let recorded = source_identity(
+            &cap_std::fs::File::from_std(recorded_file)
+                .metadata()
+                .unwrap(),
+        );
+        assert!(
+            recorded.is_some(),
+            "a temp directory must supply an identity"
+        );
+
+        let other_file = open_no_follow(&other_path).unwrap();
+        let other = cap_std::fs::File::from_std(other_file).metadata().unwrap();
+
+        let err = require_same_source_file(recorded, &other, "recorded.txt")
+            .expect_err("a different object must not pass the comparison");
+        assert!(
+            format!("{err}").contains("Source file changed while archiving"),
+            "expected the identity rejection, got: {err}"
+        );
+
+        // The same recorded identity accepts the object it was read from.
+        let same_file = open_no_follow(&recorded_path).unwrap();
+        let same = cap_std::fs::File::from_std(same_file).metadata().unwrap();
+        require_same_source_file(recorded, &same, "recorded.txt").unwrap();
     }
 
     /// Cap-std parity test: an attacker who replaces an intermediate

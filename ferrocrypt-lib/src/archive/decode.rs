@@ -238,36 +238,37 @@ fn unarchive_inner_with_hooks<R: Read>(
         after_promotion(&mut promotion)?;
 
         // A file root must carry exactly one name, so the count is read
-        // here unless the staging name could not be removed, where both
-        // names still denote the complete file and the dedicated report
-        // at the end of the run says so.
+        // for every one of them, whatever route committed the final
+        // name and whether or not the staging name was removed. The
+        // route that leaves the staging name in place is the one where
+        // a second name is certain, so it is the last one that may
+        // skip this.
         //
-        // Read before the mode is applied, and never after: step 16
-        // would otherwise widen an extra name to the archive's mode,
-        // handing whoever made it the access the deferred chmod exists
-        // to withhold. Nothing is lost by reading it this early — the
-        // count comes from the retained handle rather than a name, and
-        // the staging name is gone, so no further link can be made
-        // against it.
+        // Read before the mode is applied: step 16 would otherwise
+        // widen an extra name to the archive's mode, handing whoever
+        // made it the access the deferred chmod exists to withhold. The
+        // read comes from the retained handle rather than a name, so
+        // nothing that happens to either name changes what is counted.
         //
-        // The commit is complete, so a failure here preserves it: the
-        // record leaves the cleanup slot before the error returns, the
-        // mode is never applied, and the output keeps the owner-only
-        // staged mode. The count covers the root entry alone; a
-        // descendant file inside a directory root has no handle
-        // retained to this point, and one read while it was still being
-        // extracted would say nothing about a link made afterwards.
-        if manifest.root_is_file && promotion.staging_name_removed() {
+        // A wrong count only withholds the mode here. What it means for
+        // the staged record is decided by steps 16 and 17 below, which
+        // alone can tell a committed output of this run's own from a
+        // substituted entry promoted in its place: reporting here would
+        // preserve plaintext this run never committed. The count covers
+        // the root entry alone; a descendant file inside a directory
+        // root has no handle retained to this point, and one read while
+        // it was still being extracted would say nothing about a link
+        // made afterwards.
+        let mut extra_name_error = None;
+        if manifest.root_is_file {
             let handle = staged_root
                 .as_ref()
                 .and_then(StagedRoot::file_handle)
-                .ok_or(CryptoError::InternalInvariant(
-                    "the promoted file root lost its retained file handle",
+                .ok_or(crate::error::internal_invariant!(
+                    "promoted file root lost its handle"
                 ))?;
-            if let Err(e) = require_single_linked_file(handle, output_dir, &manifest.root_name) {
-                drop(staged_root.take());
-                return Err(e);
-            }
+            extra_name_error =
+                require_single_linked_file(handle, output_dir, &manifest.root_name).err();
         }
 
         // FORMAT.md §9.11 step 16: apply root entry mode AFTER promotion.
@@ -315,7 +316,9 @@ fn unarchive_inner_with_hooks<R: Read>(
         let staged_identity = staged_root
             .as_ref()
             .map_or(StagedIdentity::NoHandle, StagedRoot::identity);
-        let ratified = if manifest.root_is_file {
+        let ratified = if extra_name_error.is_some() {
+            Ok(PromotedIdentity::Unconfirmed)
+        } else if manifest.root_is_file {
             apply_root_file_mode(&output_handle, &manifest, &staged_identity)
         } else {
             apply_root_directory_mode(&output_handle, &manifest, &staged_identity)
@@ -372,6 +375,10 @@ fn unarchive_inner_with_hooks<R: Read>(
                 &manifest.root_name,
                 error,
             ));
+        }
+
+        if let Some(error) = extra_name_error {
+            return Err(error);
         }
 
         Ok(final_path.clone())
@@ -485,7 +492,7 @@ fn extract_directory_root<R: Read>(
     for dir_entry in &dir_entries {
         let rel = strip_root_prefix(&dir_entry.path_utf8, root_name_str)?;
         let (parent_dir, dir_name) =
-            platform::walk_to_parent(&root_dir, rel, platform::SYMLINK_IN_EXTRACTION_PATH)?;
+            platform::walk_to_parent(&root_dir, rel, platform::WalkSide::Extraction)?;
         let _new_dir = platform::mkdir_strict(&parent_dir, &dir_name)
             .map_err(|e| map_already_exists(e, || archive_path_collides(&dir_entry.path_utf8)))?;
     }
@@ -499,7 +506,7 @@ fn extract_directory_root<R: Read>(
         }
         let rel = strip_root_prefix(&entry.path_utf8, root_name_str)?;
         let (parent_dir, file_name) =
-            platform::walk_to_parent(&root_dir, rel, platform::SYMLINK_IN_EXTRACTION_PATH)?;
+            platform::walk_to_parent(&root_dir, rel, platform::WalkSide::Extraction)?;
         let mut outfile =
             platform::create_file_at(&parent_dir, &file_name, platform::INITIAL_FILE_CREATE_MODE)
                 .map_err(|e| {
@@ -1218,11 +1225,13 @@ impl StagedIdentity {
     /// read of the staged handle is the same class of fault, so it is
     /// treated the same way.
     ///
-    /// This governs the identity comparison alone. A file root has
-    /// already had its link count read from the same handle by then,
-    /// and `FORMAT.md` §9.11 requires a failure to establish that count
-    /// to fail the extraction, so a handle whose metadata cannot be
-    /// read stops such a run before this state is reached.
+    /// This governs the identity comparison alone. Every file root has
+    /// had its link count read from the same handle by then, and
+    /// `FORMAT.md` §9.11 requires a failure to establish that count to
+    /// fail the extraction — but only after the steps this state feeds,
+    /// which alone tell a commit of this run's own from a substituted
+    /// entry. A file root whose metadata could not be read therefore
+    /// reaches this state, and its run still fails.
     fn known(self) -> Option<ObjectId> {
         match self {
             Self::Known(id) => Some(id),
@@ -3543,6 +3552,12 @@ mod tests {
         /// Staged root moved aside, and a hard link to a file living
         /// outside `output_dir` left in its place.
         MoveAsideLinkOutsider,
+        /// The staged root is given a second name, then moved aside and
+        /// an unrelated file left at the staging name, so the promotion
+        /// commits that other file while this run's plaintext survives
+        /// under the two names the writer chose. File roots only: a
+        /// directory cannot be given a second name on these platforms.
+        LinkStagedRootThenSwap,
     }
 
     /// Whether the archive completes or stops short inside the content
@@ -3695,6 +3710,11 @@ mod tests {
                     Interference::MoveAsideLinkOutsider => {
                         fs::rename(&staged, &aside).unwrap();
                         fs::hard_link(&outsider_for_swap, &staged).unwrap();
+                    }
+                    Interference::LinkStagedRootThenSwap => {
+                        fs::hard_link(&staged, out_for_swap.join("second-name")).unwrap();
+                        fs::rename(&staged, &aside).unwrap();
+                        fs::write(&staged, b"planted-file").unwrap();
                     }
                 }
             },
@@ -3881,7 +3901,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn post_commit_and_cleanup_invariants_hold_across_every_case() {
-        let interferences = [
+        let shared = [
             Interference::None,
             Interference::MoveAsideLeaveNothing,
             Interference::MoveAsideLeaveFile,
@@ -3891,8 +3911,13 @@ mod tests {
         let mut checked = 0usize;
         for root_is_file in [true, false] {
             for policy_deletes in [true, false] {
+                let interferences: Vec<Interference> = shared
+                    .iter()
+                    .copied()
+                    .chain(root_is_file.then_some(Interference::LinkStagedRootThenSwap))
+                    .collect();
                 for payload in [Payload::Complete, Payload::Truncated] {
-                    for interference in interferences {
+                    for &interference in &interferences {
                         // A truncated payload fails before the reader
                         // reaches end of archive, so no writer window
                         // opens; pair it only with the no-writer case.
@@ -3913,7 +3938,10 @@ mod tests {
                 }
             }
         }
-        assert_eq!(checked, 48, "the generated case count must not drift");
+        // 2 root kinds x 2 policies x 2 payloads x 5 shared
+        // interferences, plus the file-root-only link-then-swap
+        // case in each of its 4 combinations.
+        assert_eq!(checked, 52, "the generated case count must not drift");
     }
 
     // -- Extension-region caps (FORMAT.md §9.12) --------------------------
@@ -4435,8 +4463,8 @@ mod tests {
 
         assert!(
             err.to_string()
-                .contains("Directory on the path went missing"),
-            "the run must name what happened, got: {err}"
+                .contains("Directory in extraction path went missing: sub"),
+            "the run must name the directory that went and the side it was on, got: {err}"
         );
         assert!(
             !out.join("root").exists(),
@@ -4777,5 +4805,122 @@ mod tests {
             }
         }
         assert_eq!(refusals, 4, "both root kinds under both policies");
+    }
+
+    /// A local writer that links the staged plaintext, moves it aside
+    /// and leaves an unrelated file at the staging name makes the
+    /// promotion commit that other file. The run's own plaintext was
+    /// therefore never committed, so `DeleteOnError` must destroy it
+    /// wherever the run can still reach it, and the refusal must name
+    /// the substitution rather than the extra name: reporting the count
+    /// here would preserve plaintext this run never handed over.
+    #[cfg(unix)]
+    #[test]
+    fn a_substituted_promotion_still_destroys_this_runs_plaintext() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let out = tmp.path().join("out");
+        fs::create_dir(&out).unwrap();
+
+        let root_name = "f.txt";
+        let plaintext = b"real plaintext";
+        let manifest = single_file_manifest(root_name, plaintext);
+        let archive = build_archive(&manifest, &[(root_name, plaintext)]);
+        let incomplete_path = out.join(incomplete_working_name(OsStr::new(root_name)));
+        let attacker_link = out.join("attacker-link");
+        let aside = out.join("aside");
+        let decoy = out.join("decoy-source");
+
+        let err = unarchive_inner_with_hooks(
+            Cursor::new(archive),
+            &out,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::DeleteOnError,
+            || {
+                fs::hard_link(&incomplete_path, &attacker_link)?;
+                fs::rename(&incomplete_path, &aside)?;
+                fs::write(&decoy, b"decoy content")?;
+                fs::hard_link(&decoy, &incomplete_path)?;
+                Ok(())
+            },
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .expect_err("must fail");
+
+        assert!(
+            err.to_string()
+                .contains("Output was replaced while decrypting"),
+            "the refusal must name the substitution, got: {err}"
+        );
+
+        let mut leaked = Vec::new();
+        for entry in fs::read_dir(&out).unwrap() {
+            let p = entry.unwrap().path();
+            if p.is_file() && fs::read(&p).unwrap_or_default() == plaintext {
+                leaked.push(p);
+            }
+        }
+        assert!(
+            leaked.is_empty(),
+            "DeleteOnError left this run's plaintext at {leaked:?}"
+        );
+    }
+
+    /// A staging name that could not be removed is the one outcome
+    /// where a second name for the committed file is certain, so it is
+    /// the last that may skip the count. The archive's mode must not
+    /// reach that inode: the extra name keeps the owner-only staged
+    /// mode, and the run reports the failed removal, which says why the
+    /// second name is there.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_retained_staging_name_never_receives_the_archive_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let out = tmp.path().join("out");
+        fs::create_dir(&out).unwrap();
+
+        let root_name = "f.txt";
+        let plaintext = b"real plaintext";
+        let manifest = single_file_manifest(root_name, plaintext);
+        let archive = build_archive(&manifest, &[(root_name, plaintext)]);
+        let incomplete_path = out.join(incomplete_working_name(OsStr::new(root_name)));
+        let evil = out.join("evil-link");
+
+        let err = unarchive_inner_with_hooks(
+            Cursor::new(archive),
+            &out,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::DeleteOnError,
+            || {
+                fs::hard_link(&incomplete_path, &evil)?;
+                Ok(())
+            },
+            |promotion| {
+                *promotion = platform::PromotionOutcome::StagedLinkRetained(io::Error::other(
+                    "simulated staging unlink failure",
+                ));
+                Ok(())
+            },
+            |_| Ok(()),
+        )
+        .expect_err("must fail");
+
+        assert!(
+            err.to_string().contains("could not be removed"),
+            "the run must report the failed staging removal, got: {err}"
+        );
+        assert_eq!(
+            fs::read(&evil).unwrap(),
+            plaintext,
+            "the extra name still denotes the committed file"
+        );
+        let evil_mode = fs::metadata(&evil).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            evil_mode,
+            platform::INITIAL_FILE_CREATE_MODE,
+            "the archive mode must never reach an inode with a second name"
+        );
     }
 }

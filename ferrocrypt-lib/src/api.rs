@@ -369,7 +369,8 @@ impl Encryptor {
     ///
     /// Returns [`CryptoError::InvalidInput`] for invalid input paths, output
     /// conflicts, unsupported archive entries, empty or too-long passphrases,
-    /// archive cap violations, or invalid KDF settings. On Unix, that variant
+    /// archive cap violations, invalid KDF settings, or a source file or
+    /// directory that was replaced or removed while it was being read. On Unix, that variant
     /// can also report a committed output path that resolves to a different
     /// object before return. Returns [`CryptoError::Io`] for filesystem
     /// failures, including a committed output that carries more than one

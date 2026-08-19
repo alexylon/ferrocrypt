@@ -96,12 +96,42 @@ pub(super) const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 /// Diagnostic label prefix for symlink rejections on the decode side
 /// (extraction). Single source of truth for the wording so a future
 /// rename catches all call sites. See [`classify_open_failure`].
-pub(super) const SYMLINK_IN_EXTRACTION_PATH: &str = "Symlink in extraction path";
+const SYMLINK_IN_EXTRACTION_PATH: &str = "Symlink in extraction path";
 
 /// Diagnostic for a directory on a walked path that is no longer there.
 /// Both walks expect every component to exist, so its absence reports a
 /// tree another process changed while the run was using it.
-const DIRECTORY_WENT_MISSING: &str = "Directory on the path went missing";
+const DIRECTORY_MISSING_IN_EXTRACTION: &str = "Directory in extraction path went missing";
+
+const DIRECTORY_MISSING_IN_ARCHIVE_SOURCE: &str = "Directory in archive source went missing";
+
+/// Which side of the archive a path walk belongs to. One value carries
+/// every diagnostic label for that side, so a walk that rejects says
+/// whether it was reading the caller's source tree or writing the
+/// extracted one, whatever the reason.
+#[derive(Clone, Copy)]
+pub(crate) enum WalkSide {
+    /// Reading the source tree an encrypt was pointed at.
+    ArchiveSource,
+    /// Writing the tree a decrypt is extracting.
+    Extraction,
+}
+
+impl WalkSide {
+    fn symlink_label(self) -> &'static str {
+        match self {
+            Self::ArchiveSource => SYMLINK_IN_ARCHIVE_SOURCE,
+            Self::Extraction => SYMLINK_IN_EXTRACTION_PATH,
+        }
+    }
+
+    fn missing_directory_label(self) -> &'static str {
+        match self {
+            Self::ArchiveSource => DIRECTORY_MISSING_IN_ARCHIVE_SOURCE,
+            Self::Extraction => DIRECTORY_MISSING_IN_EXTRACTION,
+        }
+    }
+}
 
 /// Diagnostic label prefix for symlink rejections on the encode side
 /// (source-tree walk). Same shape as [`SYMLINK_IN_EXTRACTION_PATH`]
@@ -265,20 +295,6 @@ impl PromotionOutcome {
         #[cfg(not(unix))]
         {
             Self::Clean
-        }
-    }
-
-    /// Whether the staging name is gone, so a committed file root must
-    /// now carry exactly one name. False only where the staging-name
-    /// removal failed and both names may still denote the complete
-    /// file, which the caller reports on its own terms.
-    pub(crate) fn staging_name_removed(&self) -> bool {
-        match self {
-            Self::Clean => true,
-            #[cfg(unix)]
-            Self::LinkedFile => true,
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
-            Self::StagedLinkRetained(_) => false,
         }
     }
 
@@ -759,16 +775,16 @@ fn chmod_dir_via_self_path(dir: &Dir, mode: u32) -> Result<(), CryptoError> {
 /// would carry on into a tree that no longer holds what was written
 /// into it. On the source side the tree is the caller's own input.
 ///
-/// `label` names the side, so a rejection says whether it came from
-/// archiving ([`SYMLINK_IN_ARCHIVE_SOURCE`]) or extracting
-/// ([`SYMLINK_IN_EXTRACTION_PATH`]).
+/// `side` names which tree is being walked, so every rejection says
+/// whether it came from archiving or extracting — both the symlink
+/// diagnostic and the one for a directory that has gone.
 ///
 /// `rel` must have at least one component; an empty path is treated
 /// as an internal invariant violation.
 pub(crate) fn walk_to_parent(
     root: &Dir,
     rel: &Path,
-    label: &str,
+    side: WalkSide,
 ) -> Result<(Dir, OsString), CryptoError> {
     let mut components: Vec<Component<'_>> = rel.components().collect();
     let last = components.pop().ok_or(crate::error::internal_invariant!(
@@ -779,8 +795,8 @@ pub(crate) fn walk_to_parent(
     let mut cur = root.try_clone().map_err(CryptoError::Io)?;
     for component in components {
         let name = normal_component(component, rel)?;
-        cur = open_child_dir_nofollow(&cur, name, label)
-            .map_err(|e| missing_walk_component(e, rel))?;
+        cur = open_child_dir_nofollow(&cur, name, side.symlink_label())
+            .map_err(|e| missing_walk_component(e, side, name))?;
     }
     Ok((cur, final_name))
 }
@@ -792,12 +808,13 @@ pub(crate) fn walk_to_parent(
 /// component that is missing says another process changed the tree
 /// under the run, which a transparent "No such file or directory" does
 /// not convey. Every other failure keeps its own classification.
-fn missing_walk_component(error: CryptoError, rel: &Path) -> CryptoError {
+fn missing_walk_component(error: CryptoError, side: WalkSide, name: &OsStr) -> CryptoError {
     match &error {
         CryptoError::Io(io_error) if io_error.kind() == io::ErrorKind::NotFound => {
             CryptoError::InvalidInput(format!(
-                "{DIRECTORY_WENT_MISSING}: {}",
-                sanitize_path_for_display(rel)
+                "{}: {}",
+                side.missing_directory_label(),
+                sanitize_for_display(&name.to_string_lossy())
             ))
         }
         _ => error,
@@ -824,7 +841,7 @@ pub(crate) fn open_dir_at_rel(root: &Dir, rel: &Path) -> Result<Dir, CryptoError
     for component in rel.components() {
         let name = normal_component(component, rel)?;
         cur = open_child_dir_nofollow(&cur, name, SYMLINK_IN_EXTRACTION_PATH)
-            .map_err(|e| missing_walk_component(e, rel))?;
+            .map_err(|e| missing_walk_component(e, WalkSide::Extraction, name))?;
     }
     Ok(cur)
 }
@@ -1198,12 +1215,8 @@ mod tests {
         unix_fs::symlink("real", root.join("link")).unwrap();
 
         let parent = open_anchor(&root).unwrap();
-        let err = walk_to_parent(
-            &parent,
-            Path::new("link/file.txt"),
-            SYMLINK_IN_EXTRACTION_PATH,
-        )
-        .unwrap_err();
+        let err =
+            walk_to_parent(&parent, Path::new("link/file.txt"), WalkSide::Extraction).unwrap_err();
         assert!(err.to_string().contains("Symlink in extraction path"));
         assert!(!root.join("real/file.txt").exists());
     }
@@ -1224,12 +1237,8 @@ mod tests {
         unix_fs::symlink(&victim, a.join("b")).unwrap();
 
         let parent = open_anchor(&root).unwrap();
-        let err = walk_to_parent(
-            &parent,
-            Path::new("a/b/file.txt"),
-            SYMLINK_IN_EXTRACTION_PATH,
-        )
-        .unwrap_err();
+        let err =
+            walk_to_parent(&parent, Path::new("a/b/file.txt"), WalkSide::Extraction).unwrap_err();
         assert!(
             err.to_string().to_lowercase().contains("symlink") || err.to_string().contains("path")
         );
@@ -1306,14 +1315,10 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
 
         let parent = open_anchor(&root).unwrap();
-        let result = walk_to_parent(
-            &parent,
-            Path::new("missing/file.txt"),
-            SYMLINK_IN_EXTRACTION_PATH,
-        );
+        let result = walk_to_parent(&parent, Path::new("missing/file.txt"), WalkSide::Extraction);
         let err = result.expect_err("a missing intermediate must fail the walk");
         assert!(
-            err.to_string().contains(DIRECTORY_WENT_MISSING),
+            err.to_string().contains(DIRECTORY_MISSING_IN_EXTRACTION),
             "the walk must say the directory went missing, got: {err}"
         );
         assert!(
@@ -1335,11 +1340,7 @@ mod tests {
         fs::create_dir_all(&outside).unwrap();
 
         let parent = open_anchor(&inside).unwrap();
-        let result = walk_to_parent(
-            &parent,
-            Path::new("../outside/x.txt"),
-            SYMLINK_IN_EXTRACTION_PATH,
-        );
+        let result = walk_to_parent(&parent, Path::new("../outside/x.txt"), WalkSide::Extraction);
         assert!(result.is_err());
     }
 
@@ -1632,10 +1633,6 @@ mod tests {
             matches!(outcome, PromotionOutcome::LinkedFile),
             "a link commit must report the route it took"
         );
-        assert!(
-            outcome.staging_name_removed(),
-            "the caller must perform the retained-handle link-count check"
-        );
         assert_eq!(fs::read(tmp.path().join("root")).unwrap(), b"payload");
         assert!(!tmp.path().join("root.incomplete").exists());
 
@@ -1708,7 +1705,6 @@ mod tests {
         .unwrap();
 
         assert!(matches!(outcome, PromotionOutcome::LinkedFile));
-        assert!(outcome.staging_name_removed());
         assert!(outcome.into_staged_link_error().is_none());
         assert_eq!(fs::read(tmp.path().join("root")).unwrap(), b"payload");
         assert_eq!(
@@ -1950,11 +1946,7 @@ mod tests {
         }
 
         let parent = open_anchor(&root).unwrap();
-        let result = walk_to_parent(
-            &parent,
-            Path::new("link/file.txt"),
-            SYMLINK_IN_EXTRACTION_PATH,
-        );
+        let result = walk_to_parent(&parent, Path::new("link/file.txt"), WalkSide::Extraction);
         assert!(
             result.is_err(),
             "hardened walk MUST reject Windows symlink-dir in path"
@@ -2041,11 +2033,7 @@ mod tests {
         }
 
         let parent = open_anchor(&root).unwrap();
-        let result = walk_to_parent(
-            &parent,
-            Path::new("link/file.txt"),
-            SYMLINK_IN_EXTRACTION_PATH,
-        );
+        let result = walk_to_parent(&parent, Path::new("link/file.txt"), WalkSide::Extraction);
         assert!(
             result.is_err(),
             "hardened walk MUST reject NTFS junction in path"

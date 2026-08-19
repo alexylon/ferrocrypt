@@ -197,14 +197,16 @@ fn reported_output_changed(path: &Path) -> CryptoError {
     ))
 }
 
-/// Post-commit failure for a commit whose cleanup left the committed file
-/// with a link count other than one. The retained handle, rather than either
-/// mutable name, supplies the count. `display_name` must already be safe to
-/// render. Shared with archive extraction so the writer and the reader
-/// report this condition in the same words.
+/// Post-commit failure for a committed file with a link count other than
+/// one. The retained handle, rather than either mutable name, supplies the
+/// count. The message reports the count alone, because the operation cannot
+/// tell a name its own hard-link fallback left from one a local writer made
+/// against the staged file before the commit. `display_name` must already be
+/// safe to render. Shared with archive extraction so the writer and the
+/// reader report this condition in the same words.
 pub(crate) fn committed_link_count_error(display_name: &str, link_count: u64) -> CryptoError {
     CryptoError::Io(io::Error::other(format!(
-        "Output {display_name} is complete, but temporary-link cleanup left {link_count} filesystem links (expected 1)",
+        "Output {display_name} is complete, but has {link_count} filesystem names (expected 1)",
     )))
 }
 
@@ -1713,10 +1715,7 @@ mod tests {
             .expect_err("a surviving second link must fail after commit");
         assert!(error.committed());
         let message = error.into_crypto_error().to_string();
-        assert!(
-            message.contains("temporary-link cleanup left 2 filesystem links"),
-            "got: {message}"
-        );
+        assert!(message.contains("has 2 filesystem names"), "got: {message}");
         assert_eq!(fs::read_to_string(&final_path).unwrap(), "payload");
         assert_eq!(fs::read_to_string(&leftover).unwrap(), "payload");
     }
@@ -1742,10 +1741,7 @@ mod tests {
             .expect_err("a second link to the committed file must fail after commit");
         assert!(error.committed());
         let message = error.into_crypto_error().to_string();
-        assert!(
-            message.contains("temporary-link cleanup left 2 filesystem links"),
-            "got: {message}"
-        );
+        assert!(message.contains("has 2 filesystem names"), "got: {message}");
         assert_eq!(fs::read_to_string(&final_path).unwrap(), "payload");
         assert_eq!(fs::read_to_string(&planted).unwrap(), "payload");
     }
@@ -2407,7 +2403,7 @@ mod tests {
         assert!(error.committed());
         let rendered = error.into_crypto_error().to_string();
         assert!(
-            rendered.contains("temporary-link cleanup left 2 filesystem links"),
+            rendered.contains("has 2 filesystem names"),
             "the retained inode link must be explicit, got: {rendered}"
         );
         assert_eq!(fs::read(&final_path).unwrap(), b"payload");
@@ -2459,7 +2455,7 @@ mod tests {
         assert!(error.committed());
         let rendered = error.into_crypto_error().to_string();
         assert!(
-            rendered.contains("temporary-link cleanup left 2 filesystem links"),
+            rendered.contains("has 2 filesystem names"),
             "the retained inode link must be explicit, got: {rendered}"
         );
         assert_eq!(fs::read(&final_path).unwrap(), b"payload");
@@ -2593,10 +2589,7 @@ mod tests {
         .expect_err("a second link to the committed inode must fail after commit");
         assert!(error.committed());
         let message = error.into_crypto_error().to_string();
-        assert!(
-            message.contains("temporary-link cleanup left 2 filesystem links"),
-            "got: {message}"
-        );
+        assert!(message.contains("has 2 filesystem names"), "got: {message}");
         assert_eq!(fs::read_to_string(&final_path).unwrap(), "payload");
         assert_eq!(fs::read_to_string(&planted).unwrap(), "payload");
     }

@@ -372,9 +372,9 @@ impl Encryptor {
     /// archive cap violations, or invalid KDF settings. On Unix, that variant
     /// can also report a committed output path that resolves to a different
     /// object before return. Returns [`CryptoError::Io`] for filesystem
-    /// failures, including a hard-link fallback whose temporary-link cleanup
-    /// cannot be proved complete. Either post-commit condition can leave the
-    /// complete encrypted file under its final, temporary, or moved name.
+    /// failures, including a committed output that carries more than one
+    /// filesystem name. Either post-commit condition can leave the complete
+    /// encrypted file under its final, temporary, or moved name.
     /// Returns authentication or internal crypto errors if key wrapping or
     /// payload streaming fails.
     pub fn write(
@@ -995,8 +995,8 @@ impl KeyPairGenerator {
     /// object before return; any completed commits are preserved.
     ///
     /// Returns [`CryptoError::Io`] for filesystem failures, including a
-    /// directory flush failure or a hard-link fallback whose temporary-link
-    /// cleanup cannot be proved complete. If the flush after committing
+    /// directory flush failure or a committed key file that carries more than
+    /// one filesystem name. If the flush after committing
     /// `public.key` fails, the method makes a best-effort attempt to remove
     /// `public.key` but keeps `private.key`. Removing both without a successful
     /// directory flush could leave only the public key after power loss. A

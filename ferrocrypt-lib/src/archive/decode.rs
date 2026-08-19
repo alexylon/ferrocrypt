@@ -236,8 +236,11 @@ fn unarchive_inner_with_hooks<R: Read>(
             }
         })?;
         after_promotion(&mut promotion)?;
-        #[cfg(unix)]
-        let linked_file_cleanup_needs_check = promotion.needs_link_count_check();
+        // A file root must end up with exactly one name, so the count
+        // is read below unless the staging name could not be removed,
+        // where both names still denote the complete file and the
+        // dedicated report at the end of the run says so.
+        let file_root_needs_single_link = manifest.root_is_file && promotion.staging_name_removed();
 
         // FORMAT.md §9.11 step 16: apply root entry mode AFTER promotion.
         //
@@ -322,17 +325,22 @@ fn unarchive_inner_with_hooks<R: Read>(
             ratified_root = staged_root.take();
         }
 
-        // A hard-link commit reads its final link count through the
+        // A committed file root reads its final link count through the
         // retained handle: neither mutable name is trusted as the source
         // of that count, and the reported-name identity check is
-        // repeated after it.
-        #[cfg(unix)]
-        if linked_file_cleanup_needs_check {
+        // repeated after it, because reading the count can be delayed
+        // long enough for the final entry to be replaced.
+        //
+        // The count covers the root entry alone. A descendant file
+        // inside a directory root has no handle retained to this point,
+        // and one read while it was still being extracted would say
+        // nothing about a link made afterwards.
+        if file_root_needs_single_link {
             let handle = ratified_root
                 .as_ref()
                 .and_then(StagedRoot::file_handle)
                 .ok_or(CryptoError::InternalInvariant(
-                    "hard-link promotion lost its retained file handle",
+                    "the promoted file root lost its retained file handle",
                 ))?;
             require_single_linked_file(handle, output_dir, &manifest.root_name)?;
             require_promoted_root(&output_handle, &manifest.root_name, staged_id)?;
@@ -895,24 +903,32 @@ fn staged_link_retained(
     ))
 }
 
-/// Final post-condition for a successful file-root hard-link fallback. The
-/// staging unlink's return value is not sufficient: a concurrent directory
-/// writer can rename that link and make the unlink return `NotFound`, or plant
-/// a replacement that the unlink removes successfully. The retained file
-/// handle follows the committed inode through either name race.
-#[cfg(unix)]
+/// Final post-condition for a committed file root: exactly one name.
+/// The staged plaintext was created under a name any local writer with
+/// access to the output directory can link to, and that link survives
+/// the promotion, so the count is read whatever route committed the
+/// final name — the same rule every writer-side commit applies.
+///
+/// A hard-link fallback needs it for a second reason: its staging
+/// unlink's return value is not sufficient, because a concurrent
+/// directory writer can rename that link and make the unlink return
+/// `NotFound`, or plant a replacement that the unlink removes
+/// successfully. The retained file handle follows the committed inode
+/// through either name race, and reading the count from it also keeps
+/// the Windows field populated, which cap-std fills only from an open
+/// handle.
 fn require_single_linked_file(
     handle: &File,
     output_dir: &Path,
     root_name: &OsStr,
 ) -> Result<(), CryptoError> {
-    use cap_std::fs::MetadataExt;
+    use cap_fs_ext::MetadataExt;
 
     let metadata = handle.metadata().map_err(|source| {
         CryptoError::Io(io::Error::new(
             source.kind(),
             format!(
-                "Output {} is complete, but temporary-link cleanup could not be verified in {}: {source}",
+                "Output {} is complete, but its number of filesystem names could not be read in {}: {source}",
                 sanitize_for_display(&root_name.to_string_lossy()),
                 output_dir.display(),
             ),
@@ -1112,9 +1128,8 @@ impl StagedRoot {
         }
     }
 
-    /// The retained handle of a staged file root, which the hard-link
-    /// fallback reads its final link count through.
-    #[cfg(unix)]
+    /// The retained handle of a staged file root, which the commit
+    /// reads its final link count through.
     fn file_handle(&self) -> Option<&File> {
         match self {
             Self::File { handle, .. } => handle.as_ref(),
@@ -4302,6 +4317,55 @@ mod tests {
         assert_eq!(fs::read(&incomplete_path).unwrap(), plaintext);
     }
 
+    /// A link another local process makes against the staged plaintext
+    /// before promotion survives it, leaving a second name for the
+    /// decrypted file that outlives the one the caller is told about.
+    /// The one-step rename route commits without ever linking, so
+    /// nothing about the route reveals the extra name — only the count
+    /// read through the retained handle does. The committed output is
+    /// ratified by then, so `DeleteOnError` preserves it.
+    #[cfg(unix)]
+    #[test]
+    fn extraction_rejects_a_link_made_against_the_staged_file_before_promotion() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let out = tmp.path().join("out");
+        fs::create_dir(&out).unwrap();
+
+        let root_name = "f.txt";
+        let plaintext = b"real plaintext";
+        let manifest = single_file_manifest(root_name, plaintext);
+        let archive = build_archive(&manifest, &[(root_name, plaintext)]);
+        let final_path = out.join(root_name);
+        let incomplete_path = out.join(incomplete_working_name(OsStr::new(root_name)));
+        let outsider_path = out.join("outsider-link");
+
+        let err = unarchive_inner_with_hooks(
+            Cursor::new(archive),
+            &out,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::DeleteOnError,
+            || {
+                fs::hard_link(&incomplete_path, &outsider_path)?;
+                Ok(())
+            },
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .expect_err("a second plaintext link must not report success");
+
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("has 2 filesystem names"),
+            "the retained inode link must be explicit, got: {rendered}"
+        );
+        assert_eq!(
+            fs::read(&final_path).unwrap(),
+            plaintext,
+            "the committed output is ratified and must be preserved"
+        );
+        assert_eq!(fs::read(&outsider_path).unwrap(), plaintext);
+    }
+
     /// A staged unlink can report `NotFound` after a concurrent writer moves
     /// that hard link, or report success after removing a replacement planted
     /// at the old name. In either case the hard-link outcome must consult the
@@ -4338,7 +4402,7 @@ mod tests {
 
         let rendered = err.to_string();
         assert!(
-            rendered.contains("temporary-link cleanup left 2 filesystem links"),
+            rendered.contains("has 2 filesystem names"),
             "the retained inode link must be explicit, got: {rendered}"
         );
         assert_eq!(fs::read(&final_path).unwrap(), plaintext);

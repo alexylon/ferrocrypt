@@ -1718,17 +1718,23 @@ Readers MUST process FCA archives in this order:
     directory or reading either directory identity, only `EMFILE`, `ENFILE`,
     and `ENOMEM` MAY skip the comparison as unavailable resource checks; every
     other failure MUST fail the extraction without removing an output already
-    ratified in step 16. If a file-root hard-link fallback created the final
-    name, a staging-name unlink that reports success or `NotFound` MUST be
-    followed by a link-count check through the retained staged-file handle, and
-    the reader MUST NOT return success unless that committed inode has exactly
-    one link. The unlink result alone is insufficient: a local writer can move
-    the staging link so it appears missing, or replace it so the unlink removes
-    another entry. If the unlink reports failure, the link count cannot be
-    established, or the count is not one, the reader MUST NOT withdraw the
-    final name after that delayed or ambiguous cleanup; after these identity
-    checks it MUST fail while preserving the complete commit and any additional
-    link;
+    ratified in step 16. For a file root whose staging name was removed, the
+    reader MUST read the link count through the retained staged-file handle
+    and MUST NOT return success unless that committed inode has exactly one
+    link. The staged plaintext is created under a name a local writer with
+    access to the destination directory can link to, and such a link survives
+    the promotion, so the count MUST be read whatever route committed the
+    final name. Where a hard-link fallback created that name, the staging-name
+    unlink result is insufficient for the further reason that a local writer
+    can move the staging link so it appears missing, or replace it so the
+    unlink removes another entry. If the unlink reports failure, the link
+    count cannot be established, or the count is not one, the reader MUST NOT
+    withdraw the final name after that delayed or ambiguous cleanup; after
+    these identity checks it MUST fail while preserving the complete commit
+    and any additional link. The post-condition covers the root entry: a
+    descendant file inside a directory root has no handle retained to this
+    point, and a count read while it was still being extracted would say
+    nothing about a link made afterwards;
 18. return the final output path.
 
 Steps 1 through 8 MUST complete before any filesystem output is created.
@@ -1742,7 +1748,7 @@ written into it.
 Where the platform exposes no stable identity, the corresponding confirmation
 in step 16 or step 17 is skipped. A failure to read the staged-root or final-name
 identity is likewise not evidence of a substitution and skips that comparison.
-This exception does not apply to the hard-link link-count post-condition: a
+This exception does not apply to the file-root link-count post-condition: a
 failure to read that count MUST fail the extraction after commit. The
 destination-directory check follows the narrower resource rule in step 17;
 permission denial and other ordinary I/O failures propagate. None of these

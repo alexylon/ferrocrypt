@@ -231,7 +231,8 @@ regression net, regenerated when the format intentionally changes).
   that the committed file has exactly one name, so a hard-link fallback
   that left its working name, or a link another local process created
   against the temporary file before the commit, is reported rather than
-  hidden. A swap detected there returns an error and leaves the entry currently at the
+  hidden. A decrypted folder has no such count — a folder cannot be given
+  a second name — and the files inside one are not counted individually. A swap detected there returns an error and leaves the entry currently at the
   reported path untouched. If the original file or folder was moved, the
   complete output remains under that new name. If it was removed without
   another name or hard link, the retained handle permits detection but does

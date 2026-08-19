@@ -202,22 +202,28 @@ pub(crate) fn rename_at_no_clobber(
 
 /// Result of a successful step-15 promotion.
 ///
-/// A file-root fallback first links the complete staged file at its final
-/// name, then removes the staged name. The commit itself is complete once the
-/// link succeeds. A nominally successful removal still requires the caller to
-/// confirm through its retained file handle that the committed inode has one
-/// link: a concurrent writer can move the staged link and make the unlink
-/// return `NotFound`, or replace it so the unlink removes the wrong file. If
-/// the staged-name unlink fails, the final name must not be withdrawn by name:
-/// a concurrent writer can replace that entry while the failed unlink is
-/// blocked, and a later bare-name removal would delete the replacement. The
-/// caller therefore completes the post-promotion checks and reports either
-/// condition without running failure cleanup against the committed inode.
+/// Every route that commits a file root leaves the caller the same
+/// post-condition: confirm through the retained file handle that the
+/// committed inode carries exactly one link. The staged plaintext is
+/// created under a name any local writer with access to the output
+/// directory can link to, and that link survives the promotion, so the
+/// count is read whatever route committed the final name.
 ///
-/// The path-based file promotion used off Linux and macOS can also commit
-/// by hard link — `tempfile`'s own fallback, whose unlink result it does
-/// not report — so it carries the same obligation through
+/// A file-root fallback first links the complete staged file at its final
+/// name, then removes the staged name, which makes the count necessary for
+/// a second reason: a concurrent writer can move the staged link and make
+/// the unlink return `NotFound`, or replace it so the unlink removes the
+/// wrong file. The path-based file promotion used off Linux and macOS can
+/// commit by hard link the same way — `tempfile`'s own fallback, whose
+/// unlink result it does not report — so it is marked through
 /// [`Self::for_tempfile_file_promotion`].
+///
+/// If the staged-name unlink fails, the final name must not be withdrawn by
+/// name: a concurrent writer can replace that entry while the failed unlink
+/// is blocked, and a later bare-name removal would delete the replacement.
+/// The caller therefore completes the post-promotion checks and reports
+/// either condition without running failure cleanup against the committed
+/// inode.
 #[derive(Debug)]
 pub(crate) enum PromotionOutcome {
     /// The final name was committed by one-step rename or by a claim route,
@@ -255,11 +261,18 @@ impl PromotionOutcome {
         }
     }
 
-    /// Whether the commit may have left a second link and therefore needs
-    /// the retained-inode link-count post-condition.
-    #[cfg(unix)]
-    pub(crate) fn needs_link_count_check(&self) -> bool {
-        matches!(self, Self::LinkedFile)
+    /// Whether the staging name is gone, so a committed file root must
+    /// now carry exactly one name. False only where the staging-name
+    /// removal failed and both names may still denote the complete
+    /// file, which the caller reports on its own terms.
+    pub(crate) fn staging_name_removed(&self) -> bool {
+        match self {
+            Self::Clean => true,
+            #[cfg(unix)]
+            Self::LinkedFile => true,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            Self::StagedLinkRetained(_) => false,
+        }
     }
 
     /// Returns the staged-name unlink failure, where the commit completed with
@@ -1584,7 +1597,11 @@ mod tests {
         let outcome =
             link_no_clobber(&handle, OsStr::new("root.incomplete"), OsStr::new("root")).unwrap();
         assert!(
-            outcome.needs_link_count_check(),
+            matches!(outcome, PromotionOutcome::LinkedFile),
+            "a link commit must report the route it took"
+        );
+        assert!(
+            outcome.staging_name_removed(),
             "the caller must perform the retained-handle link-count check"
         );
         assert_eq!(fs::read(tmp.path().join("root")).unwrap(), b"payload");
@@ -1658,7 +1675,8 @@ mod tests {
         )
         .unwrap();
 
-        assert!(outcome.needs_link_count_check());
+        assert!(matches!(outcome, PromotionOutcome::LinkedFile));
+        assert!(outcome.staging_name_removed());
         assert!(outcome.into_staged_link_error().is_none());
         assert_eq!(fs::read(tmp.path().join("root")).unwrap(), b"payload");
         assert_eq!(

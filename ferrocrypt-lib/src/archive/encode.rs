@@ -421,8 +421,7 @@ fn writer_entry(
 /// object reporting no identity cannot be shown to be the recorded one.
 #[cfg(unix)]
 fn source_identity(metadata: &Metadata) -> Option<(u64, u64)> {
-    use cap_std::fs::MetadataExt;
-    let (dev, ino) = (metadata.dev(), metadata.ino());
+    let (dev, ino) = crate::fs::atomic::file_identity(metadata);
     (ino != 0).then_some((dev, ino))
 }
 
@@ -2538,8 +2537,9 @@ mod tests {
             format!("{err}").contains("Source file changed while archiving"),
             "expected the identity rejection, got: {err}"
         );
+        let hostile = b"hostile";
         assert!(
-            !buf.windows(7).any(|window| window == b"hostile"),
+            !buf.windows(hostile.len()).any(|window| window == hostile),
             "the substituted content must never reach the archive"
         );
     }
@@ -2557,7 +2557,8 @@ mod tests {
         let prepared = prepare_archive(&root, ArchiveLimits::default()).unwrap();
         let mut buf = Vec::new();
         prepared.write_to(&mut buf).unwrap();
-        assert!(buf.windows(7).any(|window| window == b"trusted"));
+        let trusted = b"trusted";
+        assert!(buf.windows(trusted.len()).any(|window| window == trusted));
     }
 
     /// An entry the metadata pass recorded no identity for skips the

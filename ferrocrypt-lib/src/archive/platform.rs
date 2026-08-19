@@ -237,8 +237,10 @@ pub(crate) enum PromotionOutcome {
     /// A file was committed over a route that links it to its final name:
     /// the crate's own fallback after a staged-name removal that reported
     /// success or `NotFound`, or `tempfile`'s internal fallback, which does
-    /// not report its removal result at all. The caller must require a link
-    /// count of one through its retained handle before reporting success.
+    /// not report its removal result at all. It records which route ran
+    /// rather than selecting a check — the caller requires a link count of
+    /// one for [`Self::Clean`] just the same — because that removal is the
+    /// second reason the count cannot be skipped.
     #[cfg(unix)]
     LinkedFile,
     /// The final name is committed, but the staging name could not be

@@ -232,8 +232,9 @@ regression net, regenerated when the format intentionally changes).
   that left its working name, or a link another local process created
   against the temporary file before the commit, is reported rather than
   hidden. A decrypted folder has no such count — a folder cannot be given
-  a second name — and the files inside one are not counted individually. A swap detected there returns an error and leaves the entry currently at the
-  reported path untouched. If the original file or folder was moved, the
+  a second name — and the files inside one are not counted individually.
+  A swap detected there returns an error and leaves the entry currently at
+  the reported path untouched. If the original file or folder was moved, the
   complete output remains under that new name. If it was removed without
   another name or hard link, the retained handle permits detection but does
   not make the output recoverable after the call returns. No path can remain
@@ -247,8 +248,9 @@ regression net, regenerated when the format intentionally changes).
   ReFS reports a 64-bit
   truncation of its wider identifier, and a filesystem that gives every
   object the same identifier, as some network redirectors do, makes the
-  checks detect nothing there rather than fail. What such a swap cannot do is misdirect a cleanup: when key
-  generation has to undo a key file it already wrote, it removes that file
+  checks detect nothing there rather than fail. What such a swap cannot do
+  is misdirect a cleanup: when key generation has to undo a key file it
+  already wrote, it removes that file
   through a handle held on the folder the file actually went to, and only
   while the entry there is still the file it wrote, so a same-named file
   elsewhere is not deleted. On Unix the removal itself is by name inside

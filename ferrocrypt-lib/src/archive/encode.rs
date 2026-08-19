@@ -415,8 +415,10 @@ fn writer_entry(
 /// metadata the metadata pass has already taken, so recording it costs
 /// no extra call. A filesystem that reports inode 0 supplies no identity
 /// — some network mounts and overlay filesystems report it for every
-/// entry — and yields `None`, which skips the comparison rather than
-/// failing it, on the same terms as the repeat-directory check.
+/// entry — and yields `None`. Recorded as `None` it skips the
+/// comparison, on the same terms as the repeat-directory check;
+/// observed on the reopened side it fails the comparison, because an
+/// object reporting no identity cannot be shown to be the recorded one.
 #[cfg(unix)]
 fn source_identity(metadata: &Metadata) -> Option<(u64, u64)> {
     use cap_std::fs::MetadataExt;
@@ -443,6 +445,17 @@ fn source_identity(_metadata: &Metadata) -> Option<(u64, u64)> {
 /// mode. Comparing the identity recorded in the metadata pass fails
 /// closed instead, the same contract [`require_same_file`] applies to
 /// the source root.
+///
+/// The bound: no handle is held on the recorded object between the two
+/// passes — one per file would exhaust the open-file limit on a large
+/// tree — so this is the crate's one identity comparison whose recorded
+/// side may be gone by the time it runs, against the rule
+/// [`crate::fs::atomic::file_identity`] states. A filesystem that hands
+/// a freed inode number to the next file created in the same directory,
+/// as ext4 and XFS do, therefore lets a substitution that removes the
+/// original and recreates it pass. Every substitution that leaves the
+/// original in place, and every one on a filesystem that does not reuse
+/// numbers, is refused.
 #[cfg(unix)]
 fn require_same_source_file(
     recorded: Option<(u64, u64)>,
@@ -2513,7 +2526,10 @@ mod tests {
         let prepared = prepare_archive(&root, ArchiveLimits::default()).unwrap();
 
         // Same length, so every check but the identity comparison passes.
-        fs::remove_file(&leaf).unwrap();
+        // Moved aside rather than removed: a filesystem that reuses an
+        // inode number could otherwise hand the original's number to the
+        // replacement and make this test pass or fail by chance.
+        fs::rename(&leaf, root.join("moved-aside")).unwrap();
         fs::write(&leaf, b"hostile").unwrap();
 
         let mut buf = Vec::new();
@@ -2544,12 +2560,14 @@ mod tests {
         assert!(buf.windows(7).any(|window| window == b"trusted"));
     }
 
-    /// A filesystem that reports inode 0 supplies no identity, so the
-    /// comparison is skipped rather than failed — the same rule the
-    /// repeat-directory check applies.
+    /// An entry the metadata pass recorded no identity for skips the
+    /// comparison rather than failing it — the same rule the
+    /// repeat-directory check applies. That is the state a filesystem
+    /// reporting inode 0 produces; the state is driven directly here,
+    /// because no such filesystem can be mounted from a test.
     #[cfg(unix)]
     #[test]
-    fn a_source_without_an_inode_number_skips_the_identity_comparison() {
+    fn a_source_recorded_without_an_identity_skips_the_comparison() {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("real.txt");
         fs::write(&path, b"actual content").unwrap();

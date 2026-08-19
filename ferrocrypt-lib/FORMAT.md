@@ -1656,6 +1656,13 @@ under the recorded path and mode. A platform that exposes no such identity, or a
 filesystem that supplies none for an entry, omits the confirmation and relies on
 the no-follow, reparse-safe, type, and length checks alone.
 
+A writer that records identities without holding a handle on each recorded file
+MUST NOT treat the confirmation as conclusive: a filesystem may assign a freed
+identity to a later object, so a substitution that removes the original and
+recreates it can still match. The confirmation refuses every substitution that
+leaves the original in place, which is what an open-file limit permits a writer
+to guarantee for a tree of any size.
+
 Filesystem hardlinks MAY be archived as independent regular-file contents.
 Hardlink identity MUST NOT be stored unless a later critical hardlink extension
 specification is implemented.

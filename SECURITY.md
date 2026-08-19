@@ -260,9 +260,13 @@ regression net, regenerated when the format intentionally changes).
   created it with on Linux and macOS, so a folder another process put at
   the staging name is never removed and the staged one is removed wherever
   it was moved; on Windows that removal is by name, made only while the
-  entry at the staging name is still the staged folder, so a substituted
-  folder is left in place there as well, and a staged folder that was
-  moved aside is left where it is.
+  entry at the staging name is still the staged folder, so a folder
+  substituted before that check is left in place there as well, and a
+  staged folder that was moved aside is left where it is. Windows offers
+  no way to remove a whole folder tree through a handle, so that removal
+  resolves the name once more and deletes the tree it finds there: a
+  folder put at the staging name in the instant between the check and the
+  removal is what it reaches.
   Choose an output folder that only you can modify.
 - **Generated key pairs publish `private.key` before `public.key`.** Key
   generation writes and flushes both files before either receives its

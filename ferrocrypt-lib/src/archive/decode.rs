@@ -1220,15 +1220,17 @@ fn remove_staged_directory(_output_handle: &Dir, _working_name: &OsStr, handle: 
 }
 
 /// Removes a staged directory root by name, anchored to the capability
-/// handle extraction wrote through. Windows resolves an open directory
-/// handle back to an absolute path before removing through it, which
-/// would leave the destination anchor, so the removal stays
-/// handle-relative — and goes ahead only while the entry at the working
-/// name is still the directory behind the staged handle, so a directory
-/// substituted there is left in place. The staged tree itself is not
-/// found once it has been moved aside. Without a handle nothing is
-/// removed, as on Unix. The staged handle is closed first; the removal
-/// does not need it.
+/// handle extraction wrote through, and only while the entry at the
+/// working name is still the directory behind the staged handle, so a
+/// directory substituted before that check is left in place. A staged
+/// tree that was moved aside is not found there and stays where it is.
+/// Windows offers no recursive removal through a descriptor: the name
+/// is resolved back to an absolute path for the delete itself, so a
+/// directory put there in the instant between the check and the removal
+/// is what that recursive removal then reaches — the same bound as the
+/// Unix key-file rollback, which `SECURITY.md` states. Without a handle
+/// nothing is removed, as on Unix. The staged handle is closed first;
+/// the removal does not need it.
 #[cfg(not(unix))]
 fn remove_staged_directory(output_handle: &Dir, working_name: &OsStr, handle: Option<Dir>) {
     let Some(handle) = handle else {

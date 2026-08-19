@@ -75,10 +75,10 @@ use super::platform;
 use super::reasons::MANIFEST_LEN_OVERFLOW;
 use super::tree::validate_manifest_tree;
 
-// The walker's safety nets are platform-specific: Unix has `(dev, ino)`
-// directory-cycle detection, Windows has reparse-point rejection. Any
-// other target would walk a cyclic source tree until a resource cap
-// fires, so refuse it at build time.
+// The walker's safety nets are platform-specific: Unix refuses a
+// directory it has already reached, keyed on `(dev, ino)`, and Windows
+// rejects reparse points. Any other target would walk a cyclic source
+// tree until a resource cap fires, so refuse it at build time.
 #[cfg(not(any(unix, windows)))]
 compile_error!("The FCA archive writer supports only Unix and Windows targets");
 
@@ -365,11 +365,11 @@ pub(crate) fn validate_encrypt_input(input_path: &Path) -> Result<(), CryptoErro
 
 /// Running totals threaded through the metadata-pass walk so caps can
 /// fire across the entire tree, not just per-call. The `seen_dirs`
-/// set on Unix detects directory hardlinks (HFS+ and some network
-/// filesystems permit them) so the writer rejects a pathological
-/// cycle instead of silently archiving the same content under
-/// multiple paths until one of the entry-count / total-bytes caps
-/// fires.
+/// set on Unix records every directory already reached, so the writer
+/// rejects a directory hardlink (HFS+ and some network filesystems
+/// permit them) or a bind mount instead of silently archiving the same
+/// content under several paths until one of the entry-count /
+/// total-bytes caps fires.
 #[derive(Debug, Default)]
 struct ArchiveCounters {
     entry_count: u32,
@@ -646,8 +646,8 @@ fn build_manifest(
             PathBuf::new(),
         )];
 
-        // Seed cycle detection with the source root's own (dev, ino)
-        // so a hardlinked subdirectory pointing back to it is rejected.
+        // Seed the set with the source root's own (dev, ino) so a
+        // subdirectory pointing back to it is rejected.
         #[cfg(unix)]
         {
             use cap_std::fs::MetadataExt;
@@ -772,14 +772,18 @@ fn walk_directory(
         // symlink during the scan.
         reject_windows_reparse_point_cap(&child_meta, "Source directory", &name)?;
 
-        // Cycle detection on Unix using (dev, ino). The insert happens
-        // here, where the dir is OPENED, so an empty directory still
-        // consumes its dev/ino slot.
+        // Refuse a directory this walk has already reached, keyed on
+        // (dev, ino). That covers a loop, where a directory contains
+        // itself and the walk would never end, and the same directory
+        // reached at two places in the tree, which a bind mount
+        // produces and which would archive the content twice. The
+        // insert happens here, where the dir is OPENED, so an empty
+        // directory still consumes its dev/ino slot.
         //
         // Inode 0 means the filesystem supplies no inode number — some
         // network mounts and overlay filesystems report it for every
         // entry. Comparing those would reject the second subdirectory
-        // as a cycle, so they are skipped; the entry-count, depth, and
+        // as a repeat, so they are skipped; the entry-count, depth, and
         // total-bytes caps still bound a walk that cannot be checked
         // this way.
         #[cfg(unix)]
@@ -788,7 +792,7 @@ fn walk_directory(
             let (dev, ino) = (child_meta.dev(), child_meta.ino());
             if ino != 0 && !counters.seen_dirs.insert((dev, ino)) {
                 return Err(CryptoError::InvalidInput(format!(
-                    "Directory cycle in archive source: {}",
+                    "Directory reached twice in archive source: {}",
                     sanitize_for_display(&fca_path)
                 )));
             }

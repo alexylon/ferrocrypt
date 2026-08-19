@@ -903,7 +903,7 @@ The writer is two-pass:
 
 Hardlinks are archived as independent regular-file contents (no link identity is stored). Setuid/setgid/sticky bits are stripped on write via `PERMISSION_BITS_MASK`.
 
-Targets that are neither Unix nor Windows are rejected at compile time: the walker's directory-cycle detection (Unix `(dev, ino)` set) and reparse-point rejection (Windows) have no equivalent there, so the build fails instead of walking a cyclic source tree until a resource cap fires. A Unix filesystem that reports inode 0 supplies no identity to compare, so those directories are excluded from the set and bounded by the entry-count, depth, and total-bytes caps alone.
+Targets that are neither Unix nor Windows are rejected at compile time: the walker's repeat-directory detection (Unix `(dev, ino)` set, which refuses both a loop and the same directory reached at two places) and reparse-point rejection (Windows) have no equivalent there, so the build fails instead of walking a cyclic source tree until a resource cap fires. A Unix filesystem that reports inode 0 supplies no identity to compare, so those directories are excluded from the set and bounded by the entry-count, depth, and total-bytes caps alone.
 
 ### 7.7 `archive/decode.rs`
 

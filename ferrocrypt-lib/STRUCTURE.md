@@ -885,7 +885,7 @@ Order-independent (HashMap-based parent lookup), so non-canonical manifest order
 
 `archive/encode.rs` owns the FCA writer: source-tree traversal (metadata pass) and content-streaming pass.
 
-The writer has two crate-internal phases. `prepare_archive` performs input validation, source-tree traversal, tree validation, manifest serialization, and all writer-side limit checks. It returns a `PreparedArchive` containing the manifest, its serialized bytes, and the retained source file or directory handle. `PreparedArchive::write_to` writes the FCA header, manifest, and file contents. The orchestrator MUST call `prepare_archive` before cipher work and before creating the ciphertext staging file, so output placed inside the input tree cannot be included as source content. Entries created after preparation are not part of the archive. The one-call `archive` helper is compiled only for tests and the `unstable-fuzzing` feature.
+The writer has two crate-internal phases. `prepare_archive` performs input validation, source-tree traversal, manifest serialization — which runs the tree validation as its own gate — and all writer-side limit checks. It returns a `PreparedArchive` containing the manifest, its serialized bytes, and the retained source file or directory handle. `PreparedArchive::write_to` writes the FCA header, manifest, and file contents. The orchestrator MUST call `prepare_archive` before cipher work and before creating the ciphertext staging file, so output placed inside the input tree cannot be included as source content. Entries created after preparation are not part of the archive. The one-call `archive` helper is compiled only for tests and the `unstable-fuzzing` feature.
 
 It rejects:
 

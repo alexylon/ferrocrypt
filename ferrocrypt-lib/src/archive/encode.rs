@@ -73,7 +73,6 @@ use super::model::{ArchiveEntry, ArchiveEntryKind, Manifest};
 use super::path::{canonical_path_order, validate_fca_path};
 use super::platform;
 use super::reasons::MANIFEST_LEN_OVERFLOW;
-use super::tree::validate_manifest_tree;
 
 // The walker's safety nets are platform-specific: Unix refuses a
 // directory it has already reached, keyed on `(dev, ino)`, and Windows
@@ -1077,10 +1076,12 @@ pub(crate) fn prepare_archive(
     // through the kernel a second time.
     let (manifest, source) = build_manifest(input_path, &limits)?;
 
-    // Defense-in-depth: a bug in walk_directory would surface here
-    // rather than producing a malformed archive.
-    let _ = validate_manifest_tree(&manifest.entries, manifest.total_file_bytes, limits)?;
-
+    // `serialize_manifest` runs the tree-shape validator itself, and it
+    // is the call that gates the bytes, so a bug in `walk_directory`
+    // surfaces there rather than producing a malformed archive. Running
+    // it here as well would repeat a full pass over every entry, three
+    // hash sets and a map included, on a value nothing changes in
+    // between.
     let manifest_bytes = serialize_manifest(&manifest, limits)?;
     // The wire-format `entry_count` and `manifest_len` are u32. Convert
     // first (so a usize > u32::MAX surfaces immediately as a cap-style

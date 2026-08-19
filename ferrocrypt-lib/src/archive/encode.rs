@@ -565,7 +565,7 @@ fn symlink_in_archive_source_error(fca_prefix: &str, name: &OsStr) -> CryptoErro
     ))
 }
 
-/// Single source of truth for the "Source file changed while
+/// Single source of truth for the "Source file was replaced while
 /// archiving: path" rejection, raised by [`require_same_source_file`]
 /// when a descendant reopened for the content pass is no longer the
 /// object the metadata pass recorded. Named for the source tree, to
@@ -574,7 +574,9 @@ fn symlink_in_archive_source_error(fca_prefix: &str, name: &OsStr) -> CryptoErro
 /// raises it needs a stable `(dev, ino)` pair.
 #[cfg(unix)]
 fn source_changed_error(path_text: &str) -> CryptoError {
-    CryptoError::InvalidInput(format!("Source file changed while archiving: {path_text}"))
+    CryptoError::InvalidInput(format!(
+        "Source file was replaced while archiving: {path_text}; encrypt again to archive its current content"
+    ))
 }
 
 /// Single source of truth for the "Source file size changed while
@@ -2534,7 +2536,7 @@ mod tests {
         let mut buf = Vec::new();
         let err = prepared.write_to(&mut buf).unwrap_err();
         assert!(
-            format!("{err}").contains("Source file changed while archiving"),
+            format!("{err}").contains("Source file was replaced while archiving"),
             "expected the identity rejection, got: {err}"
         );
         let hostile = b"hostile";
@@ -2610,7 +2612,7 @@ mod tests {
         let err = require_same_source_file(recorded, &other, "recorded.txt")
             .expect_err("a different object must not pass the comparison");
         assert!(
-            format!("{err}").contains("Source file changed while archiving"),
+            format!("{err}").contains("Source file was replaced while archiving"),
             "expected the identity rejection, got: {err}"
         );
 

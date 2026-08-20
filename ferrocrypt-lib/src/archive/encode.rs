@@ -2054,6 +2054,28 @@ mod tests {
         ));
     }
 
+    /// Spec §9.6: a source name carrying a direction-override control
+    /// rejects during the metadata pass. The name is legal on every
+    /// host filesystem, so only the shared grammar keeps the writer
+    /// from emitting a path its own reader refuses.
+    #[test]
+    fn rejects_bidi_formatting_control_in_source_name() {
+        let src = tempfile::TempDir::new().unwrap();
+        let dir = src.path().join("d");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("holiday\u{202e}gpj.sh"), b"x").unwrap();
+
+        let mut buf = Vec::new();
+        let err = archive(&dir, &mut buf, ArchiveLimits::default()).unwrap_err();
+        assert!(matches!(
+            err,
+            CryptoError::UnsafeArchivePath {
+                reason: crate::archive::reasons::COMPONENT_FORMAT_CONTROL,
+                ..
+            }
+        ));
+    }
+
     // -- Positive round-trips (extra coverage) -----------------------------
 
     /// Bytes 0x00..=0xFF cycled to 1 KiB. Pins that the writer does

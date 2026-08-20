@@ -253,23 +253,16 @@ impl RollbackOutcome {
 }
 
 /// Appends a rollback's report to the error the operation is already
-/// returning. The error keeps its class where that class carries a
-/// message; a rollback that removed the committed file completely
-/// returns `error` unchanged.
+/// returning, through [`crate::error::append_report`]; a rollback that
+/// removed the committed file completely returns `error` unchanged.
 pub(crate) fn with_rollback_report(
     error: CryptoError,
     outcome: RollbackOutcome,
     path: &Path,
 ) -> CryptoError {
-    let Some(report) = outcome.report(path) else {
-        return error;
-    };
-    match error {
-        CryptoError::Io(e) => CryptoError::Io(io::Error::new(e.kind(), format!("{e}; {report}"))),
-        CryptoError::InvalidInput(message) => {
-            CryptoError::InvalidInput(format!("{message}; {report}"))
-        }
-        other => CryptoError::Io(io::Error::other(format!("{other}; {report}"))),
+    match outcome.report(path) {
+        Some(report) => crate::error::append_report(error, &report),
+        None => error,
     }
 }
 

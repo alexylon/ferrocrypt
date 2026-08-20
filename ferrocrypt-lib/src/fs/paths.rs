@@ -296,8 +296,21 @@ pub(crate) fn path_occupied(path: &Path) -> Result<bool, CryptoError> {
 /// root name), so it is routed through the stricter, length-bounded
 /// sanitizer.
 pub(crate) fn already_exists_error(label: &str, path: &Path) -> CryptoError {
+    CryptoError::InvalidInput(format!(
+        "{label} already exists: {}",
+        sanitize_path_keeping_parent(path)
+    ))
+}
+
+/// Renders a path whose parent is the caller's and whose final component
+/// may be attacker-influenced, on the terms [`already_exists_error`]
+/// describes: the parent readable and untruncated, the final component
+/// through the strict, length-bounded sanitizer. Shared with the
+/// decrypt cleanup report, which names the staged working path the same
+/// way.
+pub(crate) fn sanitize_path_keeping_parent(path: &Path) -> String {
     let full = path.display().to_string();
-    let rendered = match path.file_name().map(|n| n.to_string_lossy()) {
+    match path.file_name().map(|n| n.to_string_lossy()) {
         // The match guard confirmed `full` ends with the file name, so
         // the bytes before it are the parent prefix: render that
         // readable and the final component strictly.
@@ -311,8 +324,7 @@ pub(crate) fn already_exists_error(label: &str, path: &Path) -> CryptoError {
         // No directory prefix to keep (bare file name, filesystem
         // root, or a `..` tail): sanitize the whole path.
         _ => sanitize_for_display(&full),
-    };
-    CryptoError::InvalidInput(format!("{label} already exists: {rendered}"))
+    }
 }
 
 /// Returns `Err(InvalidInput)` if `path` is occupied (real file, real

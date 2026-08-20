@@ -1461,7 +1461,10 @@ Each path component MUST satisfy all component rules:
 - not `..`;
 - at most 244 bytes long;
 - does not contain `/`, `\`, or NUL;
-- does not contain ASCII control bytes `0x00..=0x1F`;
+- does not contain an ASCII control byte `0x00..=0x1F` or `0x7F`;
+- does not contain a C1 control character `U+0080..=U+009F`;
+- does not contain a bidirectional-formatting control: `U+061C`, `U+200E`,
+  `U+200F`, `U+202A..=U+202E`, or `U+2066..=U+2069`;
 - does not contain any Windows-reserved character: `<`, `>`, `:`, `"`, `|`,
   `?`, `*`;
 - does not end with a space;
@@ -1477,6 +1480,14 @@ The 244-byte component cap is the 255-byte filename limit shared by ext4, XFS,
 APFS, and NTFS, minus the 11-byte `.incomplete` staging suffix that extraction
 appends to the root component (§9.11). Without this reserve, a component near
 the filesystem limit would be archivable but not extractable.
+
+Control characters are rejected because a terminal or log may act on them. The
+bidirectional-formatting controls are rejected because they can make a displayed
+name differ from its stored order, so that an executable reads as an image.
+Ordinary right-to-left names do not need them: the Unicode Bidirectional
+Algorithm derives their direction from the letters themselves. Rejecting these
+code points is an intentional portable-name restriction; changing the set after
+stable 0.3.0 is a format change subject to §11.
 
 The reserved-device check is ASCII-case-insensitive only. Implementations MUST
 NOT use locale-sensitive case conversion. The reserved stem is the component
@@ -1842,11 +1853,23 @@ The final output path MUST NOT exist before extraction. If `{root}.incomplete`
 already exists, extraction MUST reject rather than reuse or delete it.
 
 On extraction failure while the current run still treats its root as staged,
-`DeleteOnError` removes only the root created by that run, best-effort. The
-removal MUST be chosen from what the run staged, not from what currently
-occupies the working name, because a local writer with access to the destination
-directory can put an object of another type there; a staged regular file MUST
-NOT be removed recursively.
+`DeleteOnError` removes only the root created by that run. The removal MUST be
+chosen from what the run staged, not from what currently occupies the working
+name, because a local writer with access to the destination directory can put
+an object of another type there; a staged regular file MUST NOT be removed
+recursively.
+
+Before removing a staged directory, the reader MUST restore owner access to
+every directory it created beneath it, parents before children, because a mode
+applied in step 14 without owner write permission would otherwise refuse the
+removal of the run's own entries, and one without read or search permission
+would refuse opening them. An obstacle the run did not create — a permission
+another process changed, a storage error, a staged root that is no longer where
+it was created — is not overcome. Where the removal fails or cannot be confirmed
+for any reason, the returned error MUST name the working path and MUST say
+whether plaintext may remain there — a staged file emptied through its handle
+before a refused unlink holds none — because the original error alone reads as
+if nothing remained.
 
 Once step 16 confirms and ratifies the promoted root, the reader MUST stop
 treating that object as staged. A later final-name or destination-directory

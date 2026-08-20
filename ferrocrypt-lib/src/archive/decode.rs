@@ -384,11 +384,24 @@ fn unarchive_inner_with_hooks<R: Read>(
         Ok(final_path.clone())
     })();
 
-    if outcome.is_err() && matches!(policy, IncompleteOutputPolicy::DeleteOnError) {
-        if let Some(staged) = staged_root.take() {
-            staged.remove(&output_handle);
+    // A removal that fails, or cannot show that the staged root is gone,
+    // is reported next to the error: the original error alone would
+    // read as if nothing remained. A record that already left the
+    // cleanup slot is a ratified commit, which is not this policy's to
+    // remove.
+    let outcome = match outcome {
+        Err(error) if matches!(policy, IncompleteOutputPolicy::DeleteOnError) => {
+            Err(match staged_root.take() {
+                Some(staged) => staged.remove(&output_handle, &manifest).report(
+                    error,
+                    output_dir,
+                    &incomplete_name,
+                ),
+                None => error,
+            })
         }
-    }
+        outcome => outcome,
+    };
 
     drop(output_handle);
     outcome
@@ -483,12 +496,7 @@ fn extract_directory_root<R: Read>(
     // content streaming works for any manifest order the tree-shape
     // rules admit — §9.8 forbids readers from requiring a specific
     // order.
-    let mut dir_entries: Vec<&ArchiveEntry> = manifest
-        .entries
-        .iter()
-        .filter(|e| e.kind == ArchiveEntryKind::Directory && e.path_utf8 != root_name_str)
-        .collect();
-    dir_entries.sort_by(|a, b| canonical_path_order(&a.path_utf8, &b.path_utf8));
+    let dir_entries = descendant_directories(manifest, root_name_str);
     for dir_entry in &dir_entries {
         let rel = strip_root_prefix(&dir_entry.path_utf8, root_name_str)?;
         let (parent_dir, dir_name) =
@@ -534,6 +542,14 @@ fn extract_directory_root<R: Read>(
     // `apply_root_directory_mode`). `dir_entries` is already sorted
     // ascending by Pass 1; iterating in reverse yields the
     // depth-descending order Pass 3 needs.
+    //
+    // Recorded before the first mode is applied: a stored mode without
+    // owner write permission would refuse the removal of the run's own
+    // entries, so a failure from here on has cleanup restore the modes
+    // first (see `restore_descendant_access`).
+    if let Some(root) = staged_root {
+        root.mark_directory_modes_applied();
+    }
     for dir_entry in dir_entries.iter().rev() {
         let rel = strip_root_prefix(&dir_entry.path_utf8, root_name_str)?;
         let dir_handle = platform::open_dir_at_rel(&root_dir, rel)?;
@@ -1099,10 +1115,13 @@ enum StagedRoot {
     },
     /// Staged directory root. `handle` is the second handle
     /// [`retain_staged_directory`] recorded, held for the whole run
-    /// under the same conditions.
+    /// under the same conditions. `modes_applied` says whether Pass 3
+    /// started applying the stored descendant modes, which is when the
+    /// staged tree can stop being removable by its own owner.
     Directory {
         working_name: OsString,
         handle: Option<Dir>,
+        modes_applied: bool,
     },
 }
 
@@ -1118,6 +1137,16 @@ impl StagedRoot {
         Self::Directory {
             working_name: working_name.to_os_string(),
             handle,
+            modes_applied: false,
+        }
+    }
+
+    /// Records that Pass 3 is about to apply the stored descendant
+    /// directory modes. No effect on a file root, which has no
+    /// descendants.
+    fn mark_directory_modes_applied(&mut self) {
+        if let Self::Directory { modes_applied, .. } = self {
+            *modes_applied = true;
         }
     }
 
@@ -1151,8 +1180,9 @@ impl StagedRoot {
         }
     }
 
-    /// Best-effort removal of the staged root. Errors are swallowed so
-    /// the original `CryptoError` is what the caller sees.
+    /// Removes the staged root and says what that left behind, so the
+    /// caller can report a removal that failed or could not be
+    /// confirmed next to the error it is already returning.
     ///
     /// A staged file is emptied through the handle it was created with,
     /// where one is held, and then unlinked by name through
@@ -1169,25 +1199,101 @@ impl StagedRoot {
     /// makes the two root kinds agree: the plaintext this run wrote is
     /// destroyed whatever the entry is now called, matching what the
     /// directory arm achieves through its own handle.
-    fn remove(self, output_handle: &Dir) {
+    ///
+    /// A staged directory first has the modes Pass 3 applied to its
+    /// descendants restored, where that pass ran, because a stored mode
+    /// without owner write permission would otherwise refuse the
+    /// removal of the run's own entries. `manifest` names those
+    /// directories.
+    fn remove(self, output_handle: &Dir, manifest: &Manifest) -> CleanupOutcome {
         match self {
             Self::File {
                 working_name,
                 handle,
             } => {
-                if let Some(handle) = &handle {
-                    let _ = handle.set_len(0);
-                }
+                let emptied = handle.as_ref().is_some_and(|h| h.set_len(0).is_ok());
                 // Closed first: Windows refuses to remove a file that
                 // still has an open handle.
                 drop(handle);
-                let _ = output_handle.remove_file(&working_name);
+                match output_handle.remove_file(&working_name) {
+                    Ok(()) => CleanupOutcome::Removed,
+                    // The name is already gone and the content with it:
+                    // nothing is left at the working name to block a
+                    // retry, and no plaintext remains.
+                    Err(e) if emptied && e.kind() == io::ErrorKind::NotFound => {
+                        CleanupOutcome::Removed
+                    }
+                    Err(cause) => CleanupOutcome::Unconfirmed { cause, emptied },
+                }
             }
             Self::Directory {
                 working_name,
                 handle,
-            } => remove_staged_directory(output_handle, &working_name, handle),
+                modes_applied,
+            } => remove_staged_directory(
+                output_handle,
+                &working_name,
+                handle,
+                modes_applied.then_some(manifest),
+            ),
         }
+    }
+}
+
+/// What the failure-path removal of the staged root left behind.
+enum CleanupOutcome {
+    /// Nothing of the staged root remains at the working name, and its
+    /// plaintext is gone.
+    Removed,
+    /// An entry may remain at the working name, and `cause` says why its
+    /// removal failed or could not be confirmed. `emptied` is set when
+    /// the staged file's content was destroyed through its handle before
+    /// the unlink failed, so that what remains holds no plaintext; a
+    /// directory is never reported as emptied, because a removal that
+    /// stopped partway leaves whatever it had not reached.
+    Unconfirmed { cause: io::Error, emptied: bool },
+}
+
+impl CleanupOutcome {
+    fn from_removal(result: io::Result<()>) -> Self {
+        match result {
+            Ok(()) => Self::Removed,
+            Err(cause) => Self::Unconfirmed {
+                cause,
+                emptied: false,
+            },
+        }
+    }
+
+    /// The outcome of a removal that was never attempted because the
+    /// record holds no handle. No extraction produces such a record —
+    /// see [`StagedIdentity::NoHandle`] — so this is report-only.
+    fn no_handle() -> Self {
+        Self::Unconfirmed {
+            cause: io::Error::other("no handle to the staged output was held"),
+            emptied: false,
+        }
+    }
+
+    /// Appends the outcome to the error the decrypt is returning. A
+    /// removal that left an entry at the working name, or could not show
+    /// that it was removed, is reported with the working path, because
+    /// that is the one way the caller learns that complete or partial
+    /// plaintext may remain there, or that an emptied entry still
+    /// blocks a retry. A confirmed removal returns `error` unchanged.
+    fn report(self, error: CryptoError, output_dir: &Path, working_name: &OsStr) -> CryptoError {
+        let Self::Unconfirmed { cause, emptied } = self else {
+            return error;
+        };
+        let shown = crate::fs::paths::sanitize_path_keeping_parent(&output_dir.join(working_name));
+        let report = if emptied {
+            format!("the incomplete output {shown} was emptied but could not be removed: {cause}")
+        } else {
+            format!(
+                "the incomplete output {shown} could not be removed and may still hold plaintext: {cause}"
+            )
+        };
+        crate::error::append_report(error, &report)
     }
 }
 
@@ -1246,15 +1352,58 @@ impl StagedIdentity {
 /// substituted at the working name is never removed — and the staged
 /// tree is still removed when it is the entry that was moved aside.
 ///
+/// Where Pass 3 applied the stored descendant modes, `restore` carries
+/// the manifest and those modes are undone first, so the run's own
+/// entries can be removed whatever the archive declared.
+///
 /// The handle is held for the whole run, so the `None` arm is
 /// unreachable here: a run that could not hold one failed before
 /// staging any plaintext. It removes nothing, because without the
 /// handle the working name cannot be shown to still denote the staged
 /// tree.
 #[cfg(unix)]
-fn remove_staged_directory(_output_handle: &Dir, _working_name: &OsStr, handle: Option<Dir>) {
-    if let Some(handle) = handle {
-        let _ = handle.remove_open_dir_all();
+fn remove_staged_directory(
+    _output_handle: &Dir,
+    _working_name: &OsStr,
+    handle: Option<Dir>,
+    restore: Option<&Manifest>,
+) -> CleanupOutcome {
+    let Some(handle) = handle else {
+        return CleanupOutcome::no_handle();
+    };
+    if let Some(manifest) = restore {
+        restore_descendant_access(&handle, manifest);
+    }
+    CleanupOutcome::from_removal(handle.remove_open_dir_all())
+}
+
+/// Gives the owner back full access to every directory the run created
+/// beneath the staged root, parents before children, so the modes Pass 3
+/// applied cannot refuse the removal of the run's own entries. Each
+/// directory is reached by the same no-follow walk extraction used and
+/// changed by name from its parent ([`platform::restore_owner_access`]),
+/// the one route open to a directory left without read permission.
+///
+/// Every directory is restored, not only those whose stored mode lacks
+/// an owner bit: the run is allowed anything within its own staged tree,
+/// and a sweep that depends on the stored modes is one more thing to get
+/// wrong. A directory that cannot be restored is left to make the
+/// removal fail there, and that failure is what the caller reports.
+#[cfg(unix)]
+fn restore_descendant_access(root: &Dir, manifest: &Manifest) {
+    let Ok(root_name_str) = manifest_root_name_str(manifest) else {
+        return;
+    };
+    for dir_entry in descendant_directories(manifest, root_name_str) {
+        let Ok(rel) = strip_root_prefix(&dir_entry.path_utf8, root_name_str) else {
+            continue;
+        };
+        let Ok((parent_dir, dir_name)) =
+            platform::walk_to_parent(root, rel, platform::WalkSide::Extraction)
+        else {
+            continue;
+        };
+        let _ = platform::restore_owner_access(&parent_dir, &dir_name);
     }
 }
 
@@ -1262,29 +1411,42 @@ fn remove_staged_directory(_output_handle: &Dir, _working_name: &OsStr, handle: 
 /// handle extraction wrote through, and only while the entry at the
 /// working name is still the directory behind the staged handle, so a
 /// directory substituted before that check is left in place. A staged
-/// tree that was moved aside is not found there and stays where it is.
-/// Windows offers no recursive removal through a descriptor: the name
-/// is resolved back to an absolute path for the delete itself, so a
-/// directory put there in the instant between the check and the removal
-/// is what that recursive removal then reaches — the same bound as the
-/// Unix key-file rollback, which `SECURITY.md` states. Without a handle
-/// nothing is removed, as on Unix. The staged handle is closed first;
-/// the removal does not need it.
+/// tree that was moved aside is not found there and stays where it is;
+/// both are reported as an unconfirmed removal. Windows offers no
+/// recursive removal through a descriptor: the name is resolved back to
+/// an absolute path for the delete itself, so a directory put there in
+/// the instant between the check and the removal is what that recursive
+/// removal then reaches — the same bound as the Unix key-file rollback,
+/// which `SECURITY.md` states. Without a handle nothing is removed, as
+/// on Unix. The staged handle is closed first; the removal does not need
+/// it. Mode application is a no-op on Windows, so there is nothing to
+/// restore and `restore` is unused.
 #[cfg(not(unix))]
-fn remove_staged_directory(output_handle: &Dir, working_name: &OsStr, handle: Option<Dir>) {
+fn remove_staged_directory(
+    output_handle: &Dir,
+    working_name: &OsStr,
+    handle: Option<Dir>,
+    _restore: Option<&Manifest>,
+) -> CleanupOutcome {
     let Some(handle) = handle else {
-        return;
+        return CleanupOutcome::no_handle();
     };
     let staged = platform::dir_object_id(&handle);
     let at_name = output_handle
         .symlink_metadata(working_name)
         .map(|metadata| platform::metadata_object_id(&metadata));
     drop(handle);
-    if let (Ok(staged), Ok(at_name)) = (staged, at_name) {
-        if staged == at_name {
-            let _ = output_handle.remove_dir_all(working_name);
-        }
+    let (staged, at_name) = match (staged, at_name) {
+        (Ok(staged), Ok(at_name)) => (staged, at_name),
+        (Err(e), _) => return CleanupOutcome::from_removal(Err(io::Error::other(e.to_string()))),
+        (_, Err(e)) => return CleanupOutcome::from_removal(Err(e)),
+    };
+    if staged != at_name {
+        return CleanupOutcome::from_removal(Err(io::Error::other(
+            "the working name no longer denotes the staged directory",
+        )));
     }
+    CleanupOutcome::from_removal(output_handle.remove_dir_all(working_name))
 }
 
 /// Builds the "Output already exists: <dir>/<root>" rejection via the
@@ -1353,6 +1515,24 @@ fn manifest_root_name_str(manifest: &Manifest) -> Result<&str, CryptoError> {
         .ok_or(crate::error::internal_invariant!(
             "manifest root name is not valid UTF-8"
         ))
+}
+
+/// Every directory entry beneath the root, in canonical order (FORMAT.md
+/// §9.8: depth ascending, then path bytes), so a parent always precedes
+/// its children. Pass 1 creates the directories in this order, Pass 3
+/// applies their modes in the reverse, and failure cleanup restores
+/// owner access in this order again.
+fn descendant_directories<'a>(
+    manifest: &'a Manifest,
+    root_name_str: &str,
+) -> Vec<&'a ArchiveEntry> {
+    let mut dir_entries: Vec<&ArchiveEntry> = manifest
+        .entries
+        .iter()
+        .filter(|e| e.kind == ArchiveEntryKind::Directory && e.path_utf8 != root_name_str)
+        .collect();
+    dir_entries.sort_by(|a, b| canonical_path_order(&a.path_utf8, &b.path_utf8));
+    dir_entries
 }
 
 /// Strips the `{root_name}/` prefix from an entry path and returns
@@ -2073,6 +2253,13 @@ mod tests {
             b"",
             "the staged plaintext must not survive at the name it was moved to",
         );
+        // The emptied file's staging name was consumed by the promotion,
+        // so nothing is left to remove: that is a completed cleanup, and
+        // the error must not claim otherwise.
+        assert!(
+            !format!("{err}").contains("could not be removed"),
+            "an emptied file whose name is gone must not be reported as left behind: {err}"
+        );
         // The entry the writer planted was promoted by name; it is not
         // this run's to remove.
         assert_eq!(fs::read(out.join("f.txt")).unwrap(), b"attacker");
@@ -2445,8 +2632,10 @@ mod tests {
         fs::rename(&original, &moved).unwrap();
         fs::create_dir(&original).unwrap();
 
-        StagedRoot::file(OsStr::new("root.incomplete"), None).remove(&handle);
+        let outcome = StagedRoot::file(OsStr::new("root.incomplete"), None)
+            .remove(&handle, &directory_root_manifest());
 
+        assert!(matches!(outcome, CleanupOutcome::Removed));
         assert!(
             !moved.join("root.incomplete").exists(),
             "handle-relative cleanup should have removed the staged file from the moved dir",
@@ -2472,8 +2661,13 @@ mod tests {
         fs::create_dir(&substitute).unwrap();
         fs::write(substitute.join("keep.txt"), b"not ours").unwrap();
 
-        StagedRoot::file(OsStr::new("root.incomplete"), None).remove(&handle);
+        let outcome = StagedRoot::file(OsStr::new("root.incomplete"), None)
+            .remove(&handle, &directory_root_manifest());
 
+        assert!(
+            matches!(outcome, CleanupOutcome::Unconfirmed { .. }),
+            "a removal that left the working name occupied is reported, not swallowed",
+        );
         assert_eq!(
             fs::read(substitute.join("keep.txt")).unwrap(),
             b"not ours",
@@ -2509,19 +2703,29 @@ mod tests {
         fs::create_dir(&staged_path).unwrap();
         fs::write(staged_path.join("keep.txt"), b"not ours").unwrap();
 
-        StagedRoot::directory(OsStr::new("root.incomplete"), Some(staged_handle)).remove(&handle);
+        let outcome = StagedRoot::directory(OsStr::new("root.incomplete"), Some(staged_handle))
+            .remove(&handle, &directory_root_manifest());
 
         #[cfg(unix)]
-        assert!(
-            !moved.exists(),
-            "the staged tree must be removed wherever it was moved to",
-        );
+        {
+            assert!(matches!(outcome, CleanupOutcome::Removed));
+            assert!(
+                !moved.exists(),
+                "the staged tree must be removed wherever it was moved to",
+            );
+        }
         #[cfg(windows)]
-        assert_eq!(
-            fs::read(moved.join("plaintext.txt")).unwrap(),
-            b"staged plaintext",
-            "Windows removes by name, so a moved-aside staged tree is left",
-        );
+        {
+            assert!(
+                matches!(outcome, CleanupOutcome::Unconfirmed { .. }),
+                "a staged tree that was not found by name is reported as not removed",
+            );
+            assert_eq!(
+                fs::read(moved.join("plaintext.txt")).unwrap(),
+                b"staged plaintext",
+                "Windows removes by name, so a moved-aside staged tree is left",
+            );
+        }
         assert_eq!(
             fs::read(staged_path.join("keep.txt")).unwrap(),
             b"not ours",
@@ -3066,7 +3270,11 @@ mod tests {
     /// The occupied-output rejection embeds the archive-chosen root
     /// name; control and direction-override characters in it must be
     /// escaped. Mirrors the path grammar's sanitization pin
-    /// (`rejection_payload_is_sanitized`) at this call site.
+    /// (`rejection_payload_is_sanitized`) at this call site. The
+    /// constructor is pinned with a direction override directly, as
+    /// defence in depth: the grammar refuses such a name before the
+    /// occupancy check, so the end-to-end half uses a zero-width space,
+    /// which the grammar admits and the sanitizer still escapes.
     #[test]
     fn occupied_output_error_escapes_hostile_root_name() {
         // The archive-chosen root name is escaped; the operator-chosen
@@ -3094,7 +3302,7 @@ mod tests {
         // End-to-end through unarchive: the raw character never reaches
         // the message, and the colliding name is present in full.
         let tmp = tempfile::TempDir::new().unwrap();
-        let name = "evil\u{202e}name";
+        let name = "evil\u{200b}name";
         fs::write(tmp.path().join(name), b"existing").unwrap();
 
         let manifest = single_file_manifest(name, b"x");
@@ -3104,12 +3312,12 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("Output already exists"), "got: {msg}");
         assert!(
-            msg.contains("evil\\u{202e}name"),
+            msg.contains("evil\\u{200b}name"),
             "colliding name must appear escaped and in full: {msg}"
         );
         assert!(
-            !msg.contains('\u{202e}'),
-            "raw direction-override character leaked: {msg:?}"
+            !msg.contains('\u{200b}'),
+            "raw zero-width character leaked: {msg:?}"
         );
     }
 
@@ -3379,6 +3587,32 @@ mod tests {
         assert_eq!(count, 0, "rejection must precede any filesystem output");
     }
 
+    /// FORMAT.md §9.6: a root name carrying a direction-override
+    /// control rejects during manifest validation, before any
+    /// filesystem work. Such a name would be created exactly as stored
+    /// and displayed in another order, so the grammar refuses it on
+    /// both sides rather than leaving every consumer to render it
+    /// safely.
+    #[test]
+    fn rejects_bidi_formatting_control_before_filesystem_output() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let name = "holiday\u{202e}gpj.sh";
+        let manifest = single_file_manifest(name, b"x");
+        let archive = build_archive(&manifest, &[(name, b"x")]);
+
+        let err = unarchive_default(archive, tmp.path()).unwrap_err();
+        assert!(matches!(
+            err,
+            CryptoError::UnsafeArchivePath {
+                reason: crate::archive::reasons::COMPONENT_FORMAT_CONTROL,
+                ..
+            }
+        ));
+
+        let count = fs::read_dir(tmp.path()).unwrap().count();
+        assert_eq!(count, 0, "rejection must precede any filesystem output");
+    }
+
     // -- Filesystem hardening ----------------------------------------------
 
     /// FORMAT.md §9.11 step 8: pre-check uses `symlink_metadata`, so a
@@ -3524,6 +3758,12 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     const RUN_PLAINTEXT: &[u8] = b"run-plaintext-marker";
 
+    /// Stored mode of the locked descendant directory: readable and
+    /// searchable, so extraction can still walk it, but without the
+    /// owner write permission that unlinking its entries needs.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    const LOCKED_DESCENDANT_MODE: u32 = 0o500;
+
     /// Content of the file that lives outside `output_dir`. A run must
     /// never change its bytes or its mode, however it is linked into
     /// the output directory.
@@ -3578,6 +3818,11 @@ mod tests {
         payload: Payload,
         interference: Interference,
         permissive_mode: bool,
+        /// Directory roots only: the tree also holds a descendant
+        /// directory stored without owner write permission, with
+        /// plaintext inside it. Once Pass 3 applies that mode, only a
+        /// cleanup that restores it can remove the run's own entries.
+        locked_descendant: bool,
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -3637,24 +3882,40 @@ mod tests {
             };
             (archive, "f.txt.incomplete", "f.txt")
         } else {
-            let mut manifest = Manifest {
-                entries: vec![
-                    make_entry("d", ArchiveEntryKind::Directory, 0, case.root_mode()),
-                    make_entry(
-                        "d/a.txt",
-                        ArchiveEntryKind::File,
-                        RUN_PLAINTEXT.len() as u64,
-                        0o644,
-                    ),
-                ],
-                total_file_bytes: RUN_PLAINTEXT.len() as u64,
+            let mut entries = vec![
+                make_entry("d", ArchiveEntryKind::Directory, 0, case.root_mode()),
+                make_entry(
+                    "d/a.txt",
+                    ArchiveEntryKind::File,
+                    RUN_PLAINTEXT.len() as u64,
+                    0o644,
+                ),
+            ];
+            let mut contents: Vec<(&str, &[u8])> = vec![("d/a.txt", RUN_PLAINTEXT)];
+            if case.locked_descendant {
+                entries.push(make_entry(
+                    "d/locked",
+                    ArchiveEntryKind::Directory,
+                    0,
+                    LOCKED_DESCENDANT_MODE,
+                ));
+                entries.push(make_entry(
+                    "d/locked/b.txt",
+                    ArchiveEntryKind::File,
+                    RUN_PLAINTEXT.len() as u64,
+                    0o644,
+                ));
+                contents.push(("d/locked/b.txt", RUN_PLAINTEXT));
+            }
+            let manifest = Manifest {
+                total_file_bytes: (RUN_PLAINTEXT.len() * contents.len()) as u64,
+                entries,
                 root_name: OsString::from("d"),
                 root_is_file: false,
                 root_mode: case.root_mode(),
             };
-            manifest.root_mode = case.root_mode();
             let archive = match case.payload {
-                Payload::Complete => build_archive(&manifest, &[("d/a.txt", RUN_PLAINTEXT)]),
+                Payload::Complete => build_archive(&manifest, &contents),
                 Payload::Truncated => build_partial_archive(&manifest, b"cut"),
             };
             (archive, "d.incomplete", "d")
@@ -3858,8 +4119,9 @@ mod tests {
     }
 
     /// Drives every combination of root kind, policy, payload
-    /// completeness, local-writer interference, and stored root mode
-    /// through [`check_case`].
+    /// completeness, local-writer interference, stored root mode, and
+    /// (for directory roots) a locked descendant directory through
+    /// [`check_case`].
     ///
     /// The cross product is enumerated rather than sampled: the space
     /// is small enough to cover exhaustively, which is stronger than
@@ -3925,23 +4187,33 @@ mod tests {
                             continue;
                         }
                         for permissive_mode in [false, true] {
-                            check_case(Case {
-                                root_is_file,
-                                policy_deletes,
-                                payload,
-                                interference,
-                                permissive_mode,
-                            });
-                            checked += 1;
+                            // A file root has no descendants to lock.
+                            let locked_options: &[bool] = if root_is_file {
+                                &[false]
+                            } else {
+                                &[false, true]
+                            };
+                            for &locked_descendant in locked_options {
+                                check_case(Case {
+                                    root_is_file,
+                                    policy_deletes,
+                                    payload,
+                                    interference,
+                                    permissive_mode,
+                                    locked_descendant,
+                                });
+                                checked += 1;
+                            }
                         }
                     }
                 }
             }
         }
-        // 2 root kinds x 2 policies x 2 payloads x 5 shared
-        // interferences, plus the file-root-only link-then-swap
-        // case in each of its 4 combinations.
-        assert_eq!(checked, 52, "the generated case count must not drift");
+        // File roots: 2 policies x (5 shared + link-then-swap + the
+        // truncated no-writer case) x 2 modes. Directory roots: 2
+        // policies x (5 shared + truncated) x 2 modes x 2 descendant
+        // options.
+        assert_eq!(checked, 76, "the generated case count must not drift");
     }
 
     // -- Extension-region caps (FORMAT.md §9.12) --------------------------
@@ -4214,6 +4486,184 @@ mod tests {
 
         require_promoted_root(&handle, OsStr::new("f.txt"), None)
             .expect("with nothing to compare against the check must accept");
+    }
+
+    /// A failure after Pass 3 has applied the stored directory modes
+    /// leaves the staged tree in whatever state those modes allow. A
+    /// mode without owner write permission refuses the unlinking of
+    /// the entries beneath it, and one without read or search
+    /// permission refuses even opening it, so `DeleteOnError` must
+    /// restore what the run itself applied before it removes the tree.
+    /// Every such mode is driven, nested two levels deep with plaintext
+    /// at both levels, and the returned error must be the injected one
+    /// alone: a confirmed removal adds no report.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn cleanup_restores_the_modes_it_applied_before_removing_the_staged_tree() {
+        for nested_mode in [0o000, 0o100, 0o200, 0o300, 0o400, 0o500, 0o555, 0o755] {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let out = tmp.path().join("out");
+            fs::create_dir(&out).unwrap();
+
+            let manifest = Manifest {
+                entries: vec![
+                    make_entry("d", ArchiveEntryKind::Directory, 0, 0o755),
+                    make_entry("d/ro", ArchiveEntryKind::Directory, 0, nested_mode),
+                    make_entry("d/ro/a.txt", ArchiveEntryKind::File, 4, 0o644),
+                    make_entry("d/ro/deep", ArchiveEntryKind::Directory, 0, nested_mode),
+                    make_entry("d/ro/deep/b.txt", ArchiveEntryKind::File, 4, 0o644),
+                ],
+                total_file_bytes: 8,
+                root_name: OsString::from("d"),
+                root_is_file: false,
+                root_mode: 0o755,
+            };
+            let archive = build_archive(
+                &manifest,
+                &[("d/ro/a.txt", b"real"), ("d/ro/deep/b.txt", b"real")],
+            );
+
+            let err = unarchive_inner_with_hooks(
+                Cursor::new(archive),
+                &out,
+                ArchiveLimits::default(),
+                IncompleteOutputPolicy::DeleteOnError,
+                || Err(CryptoError::InvalidInput("injected failure".to_owned())),
+                |_| Ok(()),
+                |_| Ok(()),
+            )
+            .unwrap_err();
+
+            let remaining: Vec<_> = fs::read_dir(&out)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name())
+                .collect();
+            restore_traversable(&out);
+            assert!(
+                remaining.is_empty(),
+                "mode {nested_mode:o}: DeleteOnError left {remaining:?} in the output directory",
+            );
+            assert!(
+                matches!(&err, CryptoError::InvalidInput(message) if message == "injected failure"),
+                "mode {nested_mode:o}: a confirmed removal must add no report, got: {err}",
+            );
+        }
+    }
+
+    /// An obstacle the run did not create is not overcome: when the
+    /// output directory itself refuses the removal of the staged root,
+    /// the error that is returned must say that the incomplete output
+    /// may remain and name its working path, so the caller does not
+    /// read the failure as if nothing were left behind. The original
+    /// error keeps its class.
+    ///
+    /// Skipped as root, whom permission bits do not refuse.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_removal_the_environment_refuses_is_reported_with_the_working_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if rustix::process::geteuid().is_root() {
+            return;
+        }
+        let tmp = tempfile::TempDir::new().unwrap();
+        let out = tmp.path().join("out");
+        fs::create_dir(&out).unwrap();
+
+        let archive = build_archive(&directory_root_manifest(), &[("d/a.txt", b"real")]);
+        let out_for_hook = out.clone();
+        let err = unarchive_inner_with_hooks(
+            Cursor::new(archive),
+            &out,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::DeleteOnError,
+            move || {
+                // Removing `d.incomplete` needs write permission on
+                // `out`, which belongs to the caller, not to the run.
+                fs::set_permissions(&out_for_hook, fs::Permissions::from_mode(0o500))?;
+                Err(CryptoError::InvalidInput("injected failure".to_owned()))
+            },
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .unwrap_err();
+        fs::set_permissions(&out, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let message = match &err {
+            CryptoError::InvalidInput(message) => message,
+            other => panic!("the original error class must be kept, got: {other:?}"),
+        };
+        assert!(
+            message.starts_with("injected failure; "),
+            "the original error must come first: {message}",
+        );
+        assert!(
+            message.contains("could not be removed and may still hold plaintext"),
+            "the report must say plaintext may remain: {message}",
+        );
+        assert!(
+            message.contains(&out.join("d.incomplete").display().to_string()),
+            "the report must name the working path: {message}",
+        );
+        assert!(
+            out.join("d.incomplete").is_dir(),
+            "the staged root the environment refused to remove is still there",
+        );
+    }
+
+    /// The file-root counterpart: the staged file is emptied through its
+    /// handle before the unlink, so when the output directory refuses
+    /// the unlink, what remains holds no plaintext. The report must say
+    /// so rather than claim plaintext may remain, while still naming the
+    /// entry that blocks a retry.
+    ///
+    /// Skipped as root, whom permission bits do not refuse.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn an_emptied_file_the_environment_refuses_to_unlink_is_reported_as_emptied() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if rustix::process::geteuid().is_root() {
+            return;
+        }
+        let tmp = tempfile::TempDir::new().unwrap();
+        let out = tmp.path().join("out");
+        fs::create_dir(&out).unwrap();
+
+        let manifest = single_file_manifest("f.txt", b"real");
+        let archive = build_archive(&manifest, &[("f.txt", b"real")]);
+        let out_for_hook = out.clone();
+        let err = unarchive_inner_with_hooks(
+            Cursor::new(archive),
+            &out,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::DeleteOnError,
+            move || {
+                fs::set_permissions(&out_for_hook, fs::Permissions::from_mode(0o500))?;
+                Err(CryptoError::InvalidInput("injected failure".to_owned()))
+            },
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .unwrap_err();
+        fs::set_permissions(&out, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let message = format!("{err}");
+        assert!(
+            message.contains("was emptied but could not be removed"),
+            "the report must say the entry holds no plaintext: {message}",
+        );
+        assert!(
+            !message.contains("may still hold plaintext"),
+            "an emptied file must not be reported as possibly holding plaintext: {message}",
+        );
+        let staged = out.join("f.txt.incomplete");
+        assert_eq!(
+            fs::metadata(&staged).unwrap().len(),
+            0,
+            "the entry the environment refused to unlink must have been emptied",
+        );
     }
 
     /// Drives the real extraction through the interval after step 16 has

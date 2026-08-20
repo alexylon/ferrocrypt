@@ -65,8 +65,8 @@ pub(crate) use format::PERMISSION_BITS_MASK;
 /// A run that cannot hold a handle to the staged root fails before
 /// writing any plaintext, so a low open-file limit leaves at most an
 /// empty staged entry — which the removal may not be able to take
-/// away either, needing a descriptor of its own. A retry then reports
-/// `Incomplete output already exists`.
+/// away either, needing a descriptor of its own; the returned error
+/// then says so. A retry reports `Incomplete output already exists`.
 ///
 /// [`Self::RetainOnError`] is the opt-in for backup-recovery and
 /// forensic flows where partial plaintext is more useful than no
@@ -88,10 +88,20 @@ pub(crate) use format::PERMISSION_BITS_MASK;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum IncompleteOutputPolicy {
-    /// On decrypt error, best-effort remove the `.incomplete` working
-    /// tree from `output_dir`. Cleanup failures (path already gone,
-    /// permission denied, racing process) are swallowed so the original
-    /// `CryptoError` is the value the caller sees.
+    /// On decrypt error, remove the `.incomplete` working tree from
+    /// `output_dir`. Directory permissions the run applied to its own
+    /// staged tree are restored first, so a stored mode without owner
+    /// write permission cannot keep the run's own entries on disk. If
+    /// the removal still fails or cannot be confirmed — a permission
+    /// another process changed, a storage error, a staged tree that is
+    /// no longer where it was created — the returned error names the
+    /// working path and says whether plaintext may remain there (a
+    /// staged file is emptied through its handle before the unlink, so
+    /// one that could not be unlinked holds none). The original error
+    /// keeps its class where that class carries a message, and
+    /// otherwise becomes [`CryptoError::Io`] with both texts.
+    ///
+    /// [`CryptoError::Io`]: crate::CryptoError::Io
     #[default]
     DeleteOnError,
     /// On decrypt error, leave the `.incomplete` working tree in

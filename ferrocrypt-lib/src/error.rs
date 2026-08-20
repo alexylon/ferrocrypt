@@ -233,11 +233,32 @@ pub(crate) fn sanitize_path_for_display(path: &std::path::Path) -> String {
     sanitize_for_display(&path.display().to_string())
 }
 
+/// Appends what a failure-path cleanup left behind to the error the
+/// operation is already returning. The error keeps its class where that
+/// class carries a message; a typed error becomes [`CryptoError::Io`],
+/// because the report is the one way the caller learns that a file this
+/// run wrote may still exist. `report` must already be safe to render.
+pub(crate) fn append_report(error: CryptoError, report: &str) -> CryptoError {
+    match error {
+        CryptoError::Io(e) => {
+            CryptoError::Io(std::io::Error::new(e.kind(), format!("{e}; {report}")))
+        }
+        CryptoError::InvalidInput(message) => {
+            CryptoError::InvalidInput(format!("{message}; {report}"))
+        }
+        other => CryptoError::Io(std::io::Error::other(format!("{other}; {report}"))),
+    }
+}
+
 /// Returns whether `c` is a Unicode bidirectional-formatting control.
 /// These characters (the "Trojan Source" set) can reorder how the
 /// surrounding text is displayed, so they are escaped even inside
 /// otherwise readable text such as a trusted directory prefix.
-fn is_bidi_control(c: char) -> bool {
+///
+/// The FCA path grammar (`FORMAT.md` §9.6) rejects exactly this set, so
+/// it is frozen with the stable format: a change here is a format change
+/// and needs the compatibility analysis the specification requires.
+pub(crate) fn is_bidi_control(c: char) -> bool {
     // LRE/RLE/PDF/LRO/RLO, LRI/RLI/FSI/PDI, LRM/RLM, and ALM.
     matches!(
         c,

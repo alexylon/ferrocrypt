@@ -67,6 +67,7 @@ reasons! {
         COMPONENT_ENDS_WITH_SPACE = "component ends with space";
         COMPONENT_TOO_LONG = "component exceeds 244 bytes";
         COMPONENT_CONTROL_BYTE = "contains ASCII control byte";
+        COMPONENT_FORMAT_CONTROL = "contains a non-ASCII control or text-direction character";
         COMPONENT_RESERVED_CHARACTER = "contains a Windows-reserved character";
         PATH_CONTAINS_BACKSLASH = "contains backslash";
         PATH_CONTAINS_NUL = "contains NUL byte";

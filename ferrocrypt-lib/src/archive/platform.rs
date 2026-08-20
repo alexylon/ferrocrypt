@@ -1010,6 +1010,50 @@ pub(crate) fn chmod_dir_handle(_dir: Dir, _mode: u32) -> Result<(), CryptoError>
     Ok(())
 }
 
+/// Gives the owner back read, write, and search permission on a
+/// directory the run created, named relative to its parent handle, so
+/// failure cleanup can remove the run's own entries whatever mode the
+/// extraction applied. The directory goes back to [`DIR_CREATE_MODE`],
+/// the mode it was created with.
+///
+/// The change is made by name from the parent rather than through a
+/// handle of the directory's own, because a directory left without read
+/// permission cannot be opened for reading at all. The call needs search
+/// permission on `parent` — which cleanup restores first, parents before
+/// children — and ownership of the directory, nothing on the directory
+/// itself.
+///
+/// cap-std opens the name with `O_PATH`, which no mode refuses, and
+/// applies the mode through `/proc/self/fd`. A name that resolves to a
+/// symlink is followed only within `parent`'s own sandbox, so nothing
+/// outside the staged tree can receive the mode.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) fn restore_owner_access(parent: &Dir, name: &OsStr) -> io::Result<()> {
+    use cap_std::fs::PermissionsExt;
+    parent.set_permissions(name, cap_std::fs::Permissions::from_mode(DIR_CREATE_MODE))
+}
+
+/// macOS arm of [`restore_owner_access`]. cap-std's route opens the name
+/// for reading before it changes the mode, which a directory without
+/// read permission refuses, so the mode is set with `fchmodat` instead,
+/// which opens nothing. `SYMLINK_NOFOLLOW` keeps a symlink at the name
+/// from redirecting the change: macOS then changes the link itself,
+/// which still touches nothing outside the staged tree.
+#[cfg(target_os = "macos")]
+pub(crate) fn restore_owner_access(parent: &Dir, name: &OsStr) -> io::Result<()> {
+    use std::os::fd::AsFd;
+
+    use rustix::fs::{AtFlags, Mode, RawMode, chmodat};
+
+    chmodat(
+        parent.as_fd(),
+        name,
+        Mode::from_bits_truncate(DIR_CREATE_MODE as RawMode),
+        AtFlags::SYMLINK_NOFOLLOW,
+    )
+    .map_err(io::Error::from)
+}
+
 /// [`chmod_dir_handle`] with the new mode covered by a flush, used for
 /// staged descendant directories during extraction.
 ///

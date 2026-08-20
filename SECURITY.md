@@ -138,7 +138,10 @@ before the next stable release.
 - **Partial plaintext on decrypt failure.** Authenticated chunks are
   released to disk as they verify. If a later chunk fails
   authentication, partial plaintext may remain in a sibling
-  `.incomplete` working copy. A failure before final promotion does not
+  `.incomplete` working copy. By default that copy is removed, after
+  restoring any directory permissions the run applied to it; if the
+  removal still fails, the error names the working copy and says
+  whether it may still hold plaintext. A failure before final promotion does not
   write the final output path. A later filesystem namespace check can
   still report an error after the complete output was committed; that
   post-commit error does not delete the confirmed output by name.

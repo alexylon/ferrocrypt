@@ -640,9 +640,11 @@ impl PassphraseDecryptor {
     /// when this decrypt fails.
     ///
     /// Defaults to [`IncompleteOutputPolicy::DeleteOnError`], which
-    /// best-effort removes this run's `.incomplete` plaintext while the
-    /// output is still treated as staged. It does not remove a complete
-    /// output confirmed before a later filesystem namespace error. Pass
+    /// removes this run's `.incomplete` plaintext while the output is
+    /// still treated as staged, and reports in the returned error a
+    /// removal that failed or could not be confirmed. It does not remove
+    /// a complete output confirmed before a later filesystem namespace
+    /// error. Pass
     /// [`IncompleteOutputPolicy::RetainOnError`] for backup-recovery or
     /// forensic flows where partial output is more useful than no output. See
     /// that variant for the truncation-prefix caveat callers must understand
@@ -783,9 +785,11 @@ impl PrivateKeyDecryptor {
     /// when this decrypt fails.
     ///
     /// Defaults to [`IncompleteOutputPolicy::DeleteOnError`], which
-    /// best-effort removes this run's `.incomplete` plaintext while the
-    /// output is still treated as staged. It does not remove a complete
-    /// output confirmed before a later filesystem namespace error. Pass
+    /// removes this run's `.incomplete` plaintext while the output is
+    /// still treated as staged, and reports in the returned error a
+    /// removal that failed or could not be confirmed. It does not remove
+    /// a complete output confirmed before a later filesystem namespace
+    /// error. Pass
     /// [`IncompleteOutputPolicy::RetainOnError`] for backup-recovery or
     /// forensic flows where partial output is more useful than no output. See
     /// that variant for the truncation-prefix caveat callers must understand

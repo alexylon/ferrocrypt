@@ -8,12 +8,13 @@
 //! and decode paths. There is no separate writer-side and reader-side
 //! validator to drift apart.
 
+use std::ops::RangeInclusive;
 use std::path::{Component, Path};
 
 use unicode_normalization::{IsNormalized, UnicodeNormalization, is_nfc_quick};
 
 use crate::CryptoError;
-use crate::error::sanitize_for_display;
+use crate::error::{is_bidi_control, sanitize_for_display};
 use crate::fs::paths::INCOMPLETE_SUFFIX;
 
 use super::limits::{
@@ -21,9 +22,10 @@ use super::limits::{
 };
 use super::reasons::{
     COMPONENT_CONTROL_BYTE, COMPONENT_ENDS_WITH_DOT, COMPONENT_ENDS_WITH_SPACE,
-    COMPONENT_FORBIDDEN, COMPONENT_RESERVED_CHARACTER, COMPONENT_RESERVED_DEVICE_NAME,
-    COMPONENT_TOO_LONG, ENTRY_PATH_EMPTY, PATH_ABSOLUTE, PATH_CONTAINS_BACKSLASH,
-    PATH_CONTAINS_NUL, PATH_NON_NORMAL_COMPONENT, PATH_REPEATED_SLASHES, PATH_TRAILING_SLASH,
+    COMPONENT_FORBIDDEN, COMPONENT_FORMAT_CONTROL, COMPONENT_RESERVED_CHARACTER,
+    COMPONENT_RESERVED_DEVICE_NAME, COMPONENT_TOO_LONG, ENTRY_PATH_EMPTY, PATH_ABSOLUTE,
+    PATH_CONTAINS_BACKSLASH, PATH_CONTAINS_NUL, PATH_NON_NORMAL_COMPONENT, PATH_REPEATED_SLASHES,
+    PATH_TRAILING_SLASH,
 };
 
 /// Bytes that cannot appear in any FCA path component on any platform
@@ -127,8 +129,11 @@ fn validate_fca_component(component: &str, path: &str) -> Result<(), CryptoError
     }
 
     let b = component.as_bytes();
-    if b.iter().any(|&c| c <= 0x1f) {
+    if b.iter().any(u8::is_ascii_control) {
         return Err(unsafe_path(path, COMPONENT_CONTROL_BYTE));
+    }
+    if component.chars().any(is_format_control) {
+        return Err(unsafe_path(path, COMPONENT_FORMAT_CONTROL));
     }
     if b.iter().any(|c| WINDOWS_RESERVED_CHARS.contains(c)) {
         return Err(unsafe_path(path, COMPONENT_RESERVED_CHARACTER));
@@ -143,6 +148,21 @@ fn validate_fca_component(component: &str, path: &str) -> Result<(), CryptoError
         return Err(unsafe_path(path, COMPONENT_RESERVED_DEVICE_NAME));
     }
     Ok(())
+}
+
+/// The C1 control characters, which a terminal or log may act on.
+/// FORMAT.md §9.6 excludes them from every component.
+const C1_CONTROLS: RangeInclusive<char> = '\u{80}'..='\u{9f}';
+
+/// Returns whether `c` is one of the non-ASCII code points FORMAT.md
+/// §9.6 excludes from every component: the C1 controls and the
+/// bidirectional-formatting controls, which can make a displayed name
+/// differ from its stored order. The ASCII controls are caught by the
+/// byte check before this. Ordinary right-to-left text needs none of
+/// these characters: the Unicode Bidirectional Algorithm derives its
+/// direction from the letters themselves.
+fn is_format_control(c: char) -> bool {
+    C1_CONTROLS.contains(&c) || is_bidi_control(c)
 }
 
 /// ASCII-only lowercase. Multi-byte UTF-8 bytes (anything `>= 0x80`)
@@ -462,6 +482,93 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// DEL (`0x7F`) is the one ASCII control above the `0x1F` range.
+    #[test]
+    fn rejects_delete_as_ascii_control_byte() {
+        let err = validate_fca_path("a\x7fb", limits()).unwrap_err();
+        assert!(matches!(
+            err,
+            CryptoError::UnsafeArchivePath {
+                reason: "contains ASCII control byte",
+                ..
+            }
+        ));
+    }
+
+    /// Every C1 control (`U+0080..=U+009F`) rejects. Each is two bytes
+    /// in UTF-8, both above `0x7F`, so a byte-level check cannot catch
+    /// them; the loop pins the whole range rather than one sample.
+    #[test]
+    fn rejects_each_c1_control_character() {
+        for code_point in 0x80..=0x9f_u32 {
+            let c = char::from_u32(code_point).unwrap();
+            let path = format!("a{c}b.txt");
+            let err = validate_fca_path(&path, limits()).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    CryptoError::UnsafeArchivePath {
+                        reason: "contains a non-ASCII control or text-direction character",
+                        ..
+                    }
+                ),
+                "U+{code_point:04X} should reject",
+            );
+        }
+    }
+
+    /// The bidirectional-formatting controls FORMAT.md §9.6 lists,
+    /// restated here code point by code point so the test pins the
+    /// specification's set rather than whatever the shared classifier
+    /// currently returns.
+    #[test]
+    fn rejects_each_bidi_formatting_control() {
+        const BIDI_FORMATTING_CONTROLS: &[char] = &[
+            '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
+            '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+        ];
+        for &c in BIDI_FORMATTING_CONTROLS {
+            let path = format!("holiday{c}gpj.sh");
+            let err = validate_fca_path(&path, limits()).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    CryptoError::UnsafeArchivePath {
+                        reason: "contains a non-ASCII control or text-direction character",
+                        ..
+                    }
+                ),
+                "U+{:04X} should reject",
+                c as u32,
+            );
+        }
+    }
+
+    /// Right-to-left names carry their direction in the letters, so
+    /// they need no formatting control and stay valid.
+    #[test]
+    fn accepts_right_to_left_names_without_formatting_controls() {
+        assert!(validate_fca_path("مرحبا.txt", limits()).is_ok());
+        assert!(validate_fca_path("שלום/קובץ.md", limits()).is_ok());
+        assert!(validate_fca_path("mixed-עברית-latin.txt", limits()).is_ok());
+    }
+
+    /// The code points on either side of every rejected range stay
+    /// valid, so the rejection is exactly the specified set.
+    #[test]
+    fn accepts_code_points_next_to_the_rejected_ranges() {
+        for c in [
+            '\u{00A0}', '\u{061B}', '\u{061D}', '\u{200D}', '\u{202F}', '\u{2065}',
+        ] {
+            let path = format!("a{c}b.txt");
+            assert!(
+                validate_fca_path(&path, limits()).is_ok(),
+                "U+{:04X} should be accepted",
+                c as u32,
+            );
+        }
     }
 
     /// Every byte in the spec's Windows-reserved set rejects when

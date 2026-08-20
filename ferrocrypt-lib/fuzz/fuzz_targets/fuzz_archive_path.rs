@@ -63,6 +63,13 @@ const RESERVED_DEVICE_NAMES: &[&str] = &[
     "lpt\u{b3}",
 ];
 
+/// FORMAT.md §9.6 bidirectional-formatting controls, restated
+/// independently of the production classifier for the same reason.
+const BIDI_FORMATTING_CONTROLS: &[char] = &[
+    '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}',
+    '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+];
+
 /// Asserts the FORMAT.md §9.6 grammar promises on a path the
 /// validator accepted.
 fn assert_accepted_path_invariants(path: &str) {
@@ -80,7 +87,16 @@ fn assert_accepted_path_invariants(path: &str) {
         assert_ne!(component, ".");
         assert_ne!(component, "..");
         assert!(component.len() <= FCA_COMPONENT_MAX_BYTES, "{component:?}");
-        assert!(!component.bytes().any(|b| b <= 0x1f), "{component:?}");
+        assert!(
+            !component.bytes().any(|b| b <= 0x1f || b == 0x7f),
+            "{component:?}"
+        );
+        assert!(
+            !component.chars().any(
+                |c| ('\u{80}'..='\u{9f}').contains(&c) || BIDI_FORMATTING_CONTROLS.contains(&c)
+            ),
+            "{component:?}"
+        );
         assert!(
             !component.bytes().any(|b| b"<>:\"|?*".contains(&b)),
             "{component:?}"

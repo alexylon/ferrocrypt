@@ -277,8 +277,13 @@ before the next stable release.
   leaves the original in place is refused.
   ReFS reports a 64-bit
   truncation of its wider identifier, and a filesystem that gives every
-  object the same identifier, as some network redirectors do, makes the
-  checks detect nothing there rather than fail. What such a swap cannot do
+  object the same non-zero identifier makes the checks detect nothing
+  there rather than fail. A filesystem that reports no identifier at
+  all — a zero for every object, as some network redirectors do — is
+  read as giving none: a check that only confirms is skipped there, the
+  permissions a decrypt would set on its confirmed output are left at
+  their restrictive staged values, and a removal that needs the
+  confirmation is reported instead of made. What such a swap cannot do
   is misdirect a cleanup: when key generation has to undo a key file it
   already wrote, it removes that file
   through a handle held on the folder the file actually went to, and only

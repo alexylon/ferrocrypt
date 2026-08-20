@@ -1792,6 +1792,11 @@ gives nothing to compare and carries no content.
 Where the platform exposes no stable identity, the corresponding confirmation
 in step 16 or step 17 is skipped. A failure to read the staged-root or final-name
 identity is likewise not evidence of a substitution and skips that comparison.
+An identity that carries no information — an all-zero identifier, which a
+filesystem without identifiers reports for every object — is unavailable in
+the same way: the reader MUST NOT record it as a confirmation, MUST NOT apply
+the root mode on that basis, and MUST NOT remove an entry whose only evidence
+of being the staged one is such a value.
 This exception does not apply to the file-root link-count post-condition: a
 failure to read that count MUST fail the extraction after commit. The
 destination-directory check follows the narrower resource rule in step 17;

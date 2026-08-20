@@ -154,32 +154,35 @@ pub(crate) fn open_anchor(path: &Path) -> Result<Dir, CryptoError> {
 /// The pair is the device and inode number on Unix, and the volume
 /// serial number and file index on Windows; both are read through
 /// [`crate::fs::atomic::file_identity`], which states what the
-/// comparison can and cannot distinguish. A filesystem that reports no
-/// distinct identifiers makes every comparison hold, so the steps that
-/// compare keep the no-follow opens and the reparse-point checks as
-/// their guard.
+/// comparison can and cannot distinguish. An all-zero identifier
+/// carries no information and is read as no identity, so the steps
+/// that compare skip rather than confirm there; a filesystem that
+/// assigns one non-zero identifier to every object still makes every
+/// comparison hold, so those steps keep the no-follow opens and the
+/// reparse-point checks as their guard.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct ObjectId {
     dev: u64,
     ino: u64,
 }
 
-/// Reads the identity out of metadata already taken. `metadata` must
-/// come from an open handle or a cap-std stat, as
-/// [`crate::fs::atomic::file_identity`] requires.
-pub(crate) fn metadata_object_id(metadata: &Metadata) -> ObjectId {
-    let (dev, ino) = crate::fs::atomic::file_identity(metadata);
-    ObjectId { dev, ino }
+/// Reads the identity out of metadata already taken, or `None` where
+/// the metadata carries none. `metadata` must come from an open handle
+/// or a cap-std stat, as [`crate::fs::atomic::file_identity`] requires.
+pub(crate) fn metadata_object_id(metadata: &Metadata) -> Option<ObjectId> {
+    crate::fs::atomic::file_identity(metadata).map(|(dev, ino)| ObjectId { dev, ino })
 }
 
-/// Reads the identity of the directory `dir` refers to.
-pub(crate) fn dir_object_id(dir: &Dir) -> Result<ObjectId, CryptoError> {
+/// Reads the identity of the directory `dir` refers to, or `None` where
+/// it carries none.
+pub(crate) fn dir_object_id(dir: &Dir) -> Result<Option<ObjectId>, CryptoError> {
     let metadata = dir.dir_metadata().map_err(CryptoError::Io)?;
     Ok(metadata_object_id(&metadata))
 }
 
-/// Reads the identity of the file `file` refers to.
-pub(crate) fn file_object_id(file: &File) -> Result<ObjectId, CryptoError> {
+/// Reads the identity of the file `file` refers to, or `None` where it
+/// carries none.
+pub(crate) fn file_object_id(file: &File) -> Result<Option<ObjectId>, CryptoError> {
     let metadata = file.metadata().map_err(CryptoError::Io)?;
     Ok(metadata_object_id(&metadata))
 }

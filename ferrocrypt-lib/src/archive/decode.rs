@@ -667,6 +667,7 @@ fn require_staged_root_owner(
 /// is confirmed to denote the directory `mkdir_strict` just created
 /// before it is recorded — a mismatch is a substitution and refuses the
 /// run before any plaintext, like a substitution found after promotion.
+/// Where either identity is absent the confirmation is skipped.
 fn retain_staged_directory(
     output_handle: &Dir,
     incomplete_name: &OsStr,
@@ -674,11 +675,12 @@ fn retain_staged_directory(
 ) -> Result<Dir, CryptoError> {
     let retained = platform::retain_staged_dir(output_handle, incomplete_name, root_dir)
         .map_err(|e| staged_handle_unavailable(&e))?;
-    require_staged_identity(
+    if let (Some(created), Some(opened)) = (
         platform::dir_object_id(root_dir)?,
         platform::dir_object_id(&retained)?,
-        incomplete_name,
-    )?;
+    ) {
+        require_staged_identity(created, opened, incomplete_name)?;
+    }
     Ok(retained)
 }
 
@@ -709,9 +711,10 @@ enum PromotedIdentity {
 /// swapped in after the confirmation. A confirmed identity is returned
 /// as [`PromotedIdentity::Confirmed`] whatever the chmod then does:
 /// the confirmation is about identity, not the mode, and step 16 must
-/// not fail the extraction anyway. An identity that was expected but
-/// could not be read skips the mode application instead of applying
-/// the mode to an unconfirmed entry — the output keeps its restrictive
+/// not fail the extraction anyway. An identity that was expected but is
+/// unavailable — on either side: it could not be read, or it carries
+/// no information — skips the mode application instead of applying the
+/// mode to an unconfirmed entry; the output keeps its restrictive
 /// staged mode, the failure mode `FORMAT.md` §9.11 step 16 names
 /// acceptable.
 fn apply_root_directory_mode(
@@ -719,17 +722,16 @@ fn apply_root_directory_mode(
     manifest: &Manifest,
     staged: &StagedIdentity,
 ) -> Result<PromotedIdentity, CryptoError> {
-    if matches!(staged, StagedIdentity::Unreadable) {
+    if matches!(staged, StagedIdentity::Unavailable) {
         return Ok(PromotedIdentity::Unconfirmed);
     }
     let root_name_str = manifest_root_name_str(manifest)?;
     let root_dir = platform::open_dir_at_rel(output_handle, Path::new(root_name_str))?;
     if let StagedIdentity::Known(staged_id) = staged {
-        require_staged_identity(
-            *staged_id,
-            platform::dir_object_id(&root_dir)?,
-            &manifest.root_name,
-        )?;
+        let Some(found) = platform::dir_object_id(&root_dir)? else {
+            return Ok(PromotedIdentity::Unconfirmed);
+        };
+        require_staged_identity(*staged_id, found, &manifest.root_name)?;
         let _ = platform::chmod_dir_handle(root_dir, manifest.root_mode);
         return Ok(PromotedIdentity::Confirmed);
     }
@@ -758,16 +760,15 @@ fn apply_root_file_mode(
     manifest: &Manifest,
     staged: &StagedIdentity,
 ) -> Result<PromotedIdentity, CryptoError> {
-    if matches!(staged, StagedIdentity::Unreadable) {
+    if matches!(staged, StagedIdentity::Unavailable) {
         return Ok(PromotedIdentity::Unconfirmed);
     }
     let file = platform::open_file_nofollow(output_handle, &manifest.root_name)?;
     if let StagedIdentity::Known(staged_id) = staged {
-        require_staged_identity(
-            *staged_id,
-            platform::file_object_id(&file)?,
-            &manifest.root_name,
-        )?;
+        let Some(found) = platform::file_object_id(&file)? else {
+            return Ok(PromotedIdentity::Unconfirmed);
+        };
+        require_staged_identity(*staged_id, found, &manifest.root_name)?;
         let _ = platform::chmod_file_handle(&file, manifest.root_mode);
         return Ok(PromotedIdentity::Confirmed);
     }
@@ -812,9 +813,10 @@ fn require_staged_identity(
 ///
 /// A missing staged identity is not treated as a substitution: there is
 /// nothing to compare against, for the reasons [`StagedIdentity::known`]
-/// gives. A final name that is gone is treated as one, because step 15
-/// committed an entry there and its absence says the name no longer
-/// denotes the output.
+/// gives; neither is a final entry whose identity carries no
+/// information. A final name that is gone is treated as one, because
+/// step 15 committed an entry there and its absence says the name no
+/// longer denotes the output.
 fn require_promoted_root(
     output_handle: &Dir,
     root_name: &OsStr,
@@ -834,11 +836,10 @@ fn require_promoted_root(
         // directory handle follows the promoted tree to its final name.
         Err(_) => return Ok(()),
     };
-    require_staged_identity(
-        staged_id,
-        platform::metadata_object_id(&promoted),
-        root_name,
-    )
+    match platform::metadata_object_id(&promoted) {
+        Some(found) => require_staged_identity(staged_id, found, root_name),
+        None => Ok(()),
+    }
 }
 
 /// Confirms the ambient `output_dir` still denotes the anchor the
@@ -851,10 +852,11 @@ fn require_promoted_root(
 /// non-directory, or a symlink cycle ([`path_no_longer_a_directory`]).
 /// Resource exhaustion skips this diagnostic-only confirmation because the
 /// committed output has already been ratified
-/// ([`output_confirmation_resource_error`]). Every other open or
-/// identity-read failure is propagated: permission denial can itself be a
-/// property of a replacement directory created by the local writer this
-/// check defends against.
+/// ([`output_confirmation_resource_error`]), and so does an identity that
+/// carries no information. Every other open or identity-read failure is
+/// propagated: permission denial can itself be a property of a
+/// replacement directory created by the local writer this check defends
+/// against.
 fn require_output_anchor_unchanged(
     output_handle: &Dir,
     output_dir: &Path,
@@ -878,10 +880,12 @@ fn require_output_anchor_unchanged(
         Err(error) if output_confirmation_resource_error(&error) => return Ok(()),
         Err(error) => return Err(error),
     };
-    if current_id != committed_id {
-        return Err(output_directory_changed(output_dir, root_name));
+    match (current_id, committed_id) {
+        (Some(current_id), Some(committed_id)) if current_id != committed_id => {
+            Err(output_directory_changed(output_dir, root_name))
+        }
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 /// Whether a failure to open the destination path says it no longer leads
@@ -1266,8 +1270,8 @@ impl StagedRoot {
             Self::Directory { handle, .. } => handle.as_ref().map(platform::dir_object_id),
         };
         match read {
-            Some(Ok(id)) => StagedIdentity::Known(id),
-            Some(Err(_)) => StagedIdentity::Unreadable,
+            Some(Ok(Some(id))) => StagedIdentity::Known(id),
+            Some(Ok(None) | Err(_)) => StagedIdentity::Unavailable,
             None => StagedIdentity::NoHandle,
         }
     }
@@ -1404,11 +1408,12 @@ impl CleanupOutcome {
 /// different things about the run. [`Self::NoHandle`] is a record
 /// without a handle, which no extraction produces: the staged handle
 /// is held on every platform for the whole run.
-/// [`Self::Unreadable`] means a handle was held and the filesystem
-/// refused to describe the object behind it. Neither fails the
-/// extraction: step 17 skips its comparison for both — see
+/// [`Self::Unavailable`] means a handle was held but the filesystem
+/// either refused to describe the object behind it or described it
+/// with an all-zero identifier, which carries no information. Neither
+/// fails the extraction: step 17 skips its comparison for both — see
 /// [`StagedIdentity::known`] — while step 16 tells them apart, skipping
-/// the root-mode application for [`Self::Unreadable`] and applying it
+/// the root-mode application for [`Self::Unavailable`] and applying it
 /// under the no-follow guards alone for [`Self::NoHandle`] (see
 /// [`apply_root_directory_mode`]).
 enum StagedIdentity {
@@ -1416,8 +1421,9 @@ enum StagedIdentity {
     Known(ObjectId),
     /// No handle is held, so there is nothing to read.
     NoHandle,
-    /// A handle is held, but its identity could not be read.
-    Unreadable,
+    /// A handle is held, but its identity could not be read or carries
+    /// no information.
+    Unavailable,
 }
 
 impl StagedIdentity {
@@ -1442,7 +1448,7 @@ impl StagedIdentity {
     fn known(self) -> Option<ObjectId> {
         match self {
             Self::Known(id) => Some(id),
-            Self::NoHandle | Self::Unreadable => None,
+            Self::NoHandle | Self::Unavailable => None,
         }
     }
 }
@@ -1538,7 +1544,13 @@ fn remove_staged_directory(
         .map(|metadata| platform::metadata_object_id(&metadata));
     drop(handle);
     let (staged, at_name) = match (staged, at_name) {
-        (Ok(staged), Ok(at_name)) => (staged, at_name),
+        (Ok(Some(staged)), Ok(Some(at_name))) => (staged, at_name),
+        (Ok(None), _) | (_, Ok(None)) => {
+            return CleanupOutcome::from_removal(Err(io::Error::other(
+                "no filesystem identity confirms that the entry at the working name is the \
+                 staged directory",
+            )));
+        }
         (Err(e), _) => return CleanupOutcome::from_removal(Err(io::Error::other(e.to_string()))),
         (_, Err(e)) => return CleanupOutcome::from_removal(Err(e)),
     };
@@ -2502,10 +2514,10 @@ mod tests {
         assert_eq!(fs::read(out.join("f.txt")).unwrap(), b"attacker");
     }
 
-    /// A final name the run cannot read is reported as a substitution.
-    /// The run has just committed an entry there, so an unreadable or
-    /// absent name means the commit no longer holds, and returning `Ok`
-    /// would hand the caller a path to nothing.
+    /// A final name that is gone is reported as a substitution. The run
+    /// has just committed an entry there, so an absent name means the
+    /// commit no longer holds, and returning `Ok` would hand the caller
+    /// a path to nothing.
     #[test]
     fn a_promoted_root_that_is_gone_is_reported_as_replaced() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -4379,8 +4391,8 @@ mod tests {
     ///   shows a run that cannot hold the staged descriptor refusing
     ///   before it stages any plaintext, so these invariants are never
     ///   reached, and `a_staged_identity_that_cannot_be_read_is_skipped`
-    ///   with `an_unreadable_staged_identity_skips_the_mode_application`
-    ///   fix what an unreadable identity does. These pin the
+    ///   with `an_unavailable_staged_identity_skips_the_mode_application`
+    ///   fix what an unavailable identity does. These pin the
     ///   decision rather than injecting the read failure, which no safe
     ///   seam reaches.
     /// - A staged descendant directory moved out of the staged root.
@@ -4611,17 +4623,18 @@ mod tests {
     /// `DeleteOnError` cleanup. The state a handle-less record stands
     /// for is skipped on the same terms. Step 16's side of the same
     /// states is pinned by
-    /// `an_unreadable_staged_identity_skips_the_mode_application`.
+    /// `an_unavailable_staged_identity_skips_the_mode_application`.
     #[test]
     fn a_staged_identity_that_cannot_be_read_is_skipped() {
-        assert!(StagedIdentity::Unreadable.known().is_none());
+        assert!(StagedIdentity::Unavailable.known().is_none());
         assert!(StagedIdentity::NoHandle.known().is_none());
     }
 
-    /// The two no-identity states part ways at step 16. `Unreadable`
-    /// means a confirmation was expected and failed, so the mode
+    /// The two no-identity states part ways at step 16. `Unavailable`
+    /// means a confirmation was expected and the evidence for it is
+    /// missing — unreadable, or an all-zero identifier — so the mode
     /// application is skipped and the output keeps its restrictive
-    /// staged mode — applying the archive-chosen mode to an entry the
+    /// staged mode: applying the archive-chosen mode to an entry the
     /// run could not confirm is the hard-link escalation the
     /// comparison exists to stop. `NoHandle`, which no extraction
     /// produces, expects no confirmation, so the mode is applied under
@@ -4630,7 +4643,7 @@ mod tests {
     /// Linux/macOS only: the assertions read Unix mode bits.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn an_unreadable_staged_identity_skips_the_mode_application() {
+    fn an_unavailable_staged_identity_skips_the_mode_application() {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::TempDir::new().unwrap();
@@ -4640,8 +4653,8 @@ mod tests {
         manifest.root_mode = 0o666;
         manifest.entries[0].mode = 0o666;
 
-        let unread = apply_root_file_mode(&handle, &manifest, &StagedIdentity::Unreadable)
-            .expect("an unreadable identity must skip, not fail");
+        let unread = apply_root_file_mode(&handle, &manifest, &StagedIdentity::Unavailable)
+            .expect("an unavailable identity must skip, not fail");
         assert!(matches!(unread, PromotedIdentity::Unconfirmed));
         let mode = fs::metadata(tmp.path().join("f.txt"))
             .unwrap()
@@ -4677,7 +4690,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let handle = platform::open_anchor(tmp.path()).unwrap();
         let staged_file = platform::create_file_at(&handle, OsStr::new("f.txt"), 0o600).unwrap();
-        let staged_id = platform::file_object_id(&staged_file).unwrap();
+        let staged_id = platform::file_object_id(&staged_file).unwrap().unwrap();
         let manifest = single_file_manifest("f.txt", b"");
 
         let confirmed = apply_root_file_mode(&handle, &manifest, &StagedIdentity::Known(staged_id))

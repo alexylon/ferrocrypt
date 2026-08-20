@@ -99,7 +99,7 @@ impl FinalizedFile {
             }
             Err(e) => return Err(CryptoError::Io(e)),
         };
-        if !reported.is_file() || file_identity(&reported) != file_identity(&committed) {
+        if !reported.is_file() || identities_differ(&reported, &committed) {
             return Err(reported_output_changed(path));
         }
         Ok(())
@@ -133,15 +133,23 @@ impl FinalizedFile {
 /// path. The decrypt side reads the same pair through
 /// `archive::platform::ObjectId`.
 ///
+/// `None` where the inode number or file index is zero: a filesystem
+/// that assigns none reports zero for every object, so the value says
+/// nothing about which object was read. Every comparison in this crate
+/// treats that as evidence it does not have — it skips the comparison
+/// where skipping only forgoes a check, and reports an action it cannot
+/// confirm where acting would mean removing an entry — never as a
+/// match (`THREAT_MODEL.md` §7.4).
+///
 /// Every comparison in this crate is between objects that both exist
 /// when it runs — a retained handle, or a link just made, keeps the
 /// recorded one alive — because a filesystem may reuse an identifier once
 /// its object is gone, and two live objects on one volume never share
 /// one. What remains is documented in `SECURITY.md`: ReFS reports a
 /// 64-bit truncation of a wider identifier, and a filesystem that
-/// supplies no distinct identifiers — some network redirectors — makes
-/// every comparison hold, so these checks detect nothing there rather
-/// than fail.
+/// assigns one non-zero identifier to every object — some network
+/// redirectors — makes every comparison hold, so these checks detect
+/// nothing there rather than fail.
 ///
 /// `metadata` must come from an open handle —
 /// [`cap_std::fs::Metadata::from_file`], or a cap-std stat, which opens
@@ -149,10 +157,32 @@ impl FinalizedFile {
 /// `from_just_metadata`. cap-std fills the Windows fields only from an
 /// open handle, and its accessors panic where they are absent; the crate
 /// never reads an identity out of a directory listing.
-pub(crate) fn file_identity(metadata: &cap_std::fs::Metadata) -> (u64, u64) {
+pub(crate) fn file_identity(metadata: &cap_std::fs::Metadata) -> Option<FileIdentity> {
     use cap_fs_ext::MetadataExt;
 
-    (metadata.dev(), metadata.ino())
+    identity_pair(metadata.dev(), metadata.ino())
+}
+
+/// The pair [`file_identity`] reads: device and inode number on Unix,
+/// volume serial number and file index on Windows.
+pub(crate) type FileIdentity = (u64, u64);
+
+/// The rule behind [`file_identity`]: a zero inode number or file index
+/// is no identity.
+fn identity_pair(dev: u64, ino: u64) -> Option<FileIdentity> {
+    (ino != 0).then_some((dev, ino))
+}
+
+/// Whether two metadata values are shown to describe different objects
+/// by their [`file_identity`]. Where either carries none the objects
+/// cannot be told apart, and this answers `false`, so a check that only
+/// refuses on a difference is skipped; a caller that would act on a
+/// match reads the identities itself.
+pub(crate) fn identities_differ(a: &cap_std::fs::Metadata, b: &cap_std::fs::Metadata) -> bool {
+    match (file_identity(a), file_identity(b)) {
+        (Some(a), Some(b)) => a != b,
+        _ => false,
+    }
 }
 
 /// Metadata of the entry at `path` without following a final symlink,
@@ -793,8 +823,15 @@ impl OutputDir {
         let Ok(entry) = self.dir.symlink_metadata(name) else {
             return RollbackOutcome::Unconfirmed;
         };
-        if !entry.is_file() || file_identity(&entry) != file_identity(&committed) {
+        if !entry.is_file() {
             return RollbackOutcome::Replaced;
+        }
+        // Removing needs a match, and an identity that carries no
+        // information cannot supply one.
+        match (file_identity(&entry), file_identity(&committed)) {
+            (Some(entry_id), Some(committed_id)) if entry_id == committed_id => {}
+            (Some(_), Some(_)) => return RollbackOutcome::Replaced,
+            _ => return RollbackOutcome::Unconfirmed,
         }
         between();
         if remove_retained(&self.dir, name, retained).is_err() {
@@ -1048,7 +1085,7 @@ fn require_staged_temp_in_output_dir(
         }
         Err(error) => return Err(CryptoError::Io(error)),
     };
-    if !entry.is_file() || file_identity(&entry) != file_identity(&staged) {
+    if !entry.is_file() || identities_differ(&entry, &staged) {
         return Err(staged_temp_not_in_output_dir(tmp_name));
     }
     Ok(())
@@ -1234,7 +1271,7 @@ fn unlink_staged_temp(
     tmp: NamedTempFile,
     output_dir: &OutputDir,
     name: &std::ffi::OsStr,
-) -> (Result<(u64, u64), CryptoError>, io::Result<()>) {
+) -> (Result<Option<FileIdentity>, CryptoError>, io::Result<()>) {
     unlink_staged_temp_with_remove(tmp, output_dir, name, |dir, name| dir.remove_file(name))
 }
 
@@ -1244,7 +1281,7 @@ fn unlink_staged_temp_with_remove(
     output_dir: &OutputDir,
     name: &std::ffi::OsStr,
     remove_staged: impl FnOnce(&cap_std::fs::Dir, &std::ffi::OsStr) -> io::Result<()>,
-) -> (Result<(u64, u64), CryptoError>, io::Result<()>) {
+) -> (Result<Option<FileIdentity>, CryptoError>, io::Result<()>) {
     let (file, temp_path) = tmp.into_parts();
     let identity = cap_std::fs::Metadata::from_file(&file)
         .map(|metadata| file_identity(&metadata))
@@ -1273,12 +1310,14 @@ fn remove_staged_temp(tmp: NamedTempFile, output_dir: &OutputDir) -> io::Result<
 /// Reopens a linked commit through the same directory anchor and requires it
 /// to be the regular file whose identity was recorded before the staged name
 /// was removed. This supplies the retained handle without keeping the staged
-/// handle open across an unlink on restrictive network filesystems.
+/// handle open across an unlink on restrictive network filesystems. Where
+/// either identity is absent the comparison is skipped; the link-count and
+/// reported-path checks that follow still run.
 #[cfg(unix)]
 fn reopen_committed_file(
     output_dir: &OutputDir,
     final_name: &std::ffi::OsStr,
-    expected: (u64, u64),
+    expected: Option<FileIdentity>,
     final_path: &Path,
 ) -> Result<FinalizedFile, CryptoError> {
     use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, OpenOptionsSyncExt};
@@ -1291,7 +1330,13 @@ fn reopen_committed_file(
         .map_err(CryptoError::Io)?
         .into_std();
     let metadata = cap_std::fs::Metadata::from_file(&file).map_err(CryptoError::Io)?;
-    if !metadata.is_file() || file_identity(&metadata) != expected {
+    if !metadata.is_file() {
+        return Err(reported_output_changed(final_path));
+    }
+    if matches!(
+        (file_identity(&metadata), expected),
+        (Some(found), Some(expected)) if found != expected
+    ) {
         return Err(reported_output_changed(final_path));
     }
     Ok(FinalizedFile::new(file))
@@ -2168,6 +2213,17 @@ mod tests {
     // filesystems that host `cargo test` (they support the atomic
     // no-replace rename), so both are exercised directly. The fs-matrix
     // exFAT lane covers the errno-driven dispatch end to end.
+
+    /// A zero inode number or file index is what a filesystem without
+    /// identifiers reports for every object, so it is read as no
+    /// identity rather than as one every object shares.
+    #[test]
+    fn a_zero_inode_is_no_identity() {
+        assert_eq!(identity_pair(7, 0), None);
+        assert_eq!(identity_pair(0, 0), None);
+        assert_eq!(identity_pair(7, 1), Some((7, 1)));
+        assert_eq!(identity_pair(0, 1), Some((0, 1)));
+    }
 
     /// The link route commits the staged content under the final name
     /// and leaves no staged name behind. It is the route taken wherever

@@ -415,14 +415,14 @@ fn writer_entry(
 /// metadata the metadata pass has already taken, so recording it costs
 /// no extra call. A filesystem that reports inode 0 supplies no identity
 /// — some network mounts and overlay filesystems report it for every
-/// entry — and yields `None`. Recorded as `None` it skips the
-/// comparison, on the same terms as the repeat-directory check;
-/// observed on the reopened side it fails the comparison, because an
-/// object reporting no identity cannot be shown to be the recorded one.
+/// entry — and [`crate::fs::atomic::file_identity`] yields `None` for
+/// it. Recorded as `None` it skips the comparison, on the same terms as
+/// the repeat-directory check; observed on the reopened side it fails
+/// the comparison, because an object reporting no identity cannot be
+/// shown to be the recorded one.
 #[cfg(unix)]
 fn source_identity(metadata: &Metadata) -> Option<(u64, u64)> {
-    let (dev, ino) = crate::fs::atomic::file_identity(metadata);
-    (ino != 0).then_some((dev, ino))
+    crate::fs::atomic::file_identity(metadata)
 }
 
 /// No identity recorded outside Unix: the metadata a directory listing

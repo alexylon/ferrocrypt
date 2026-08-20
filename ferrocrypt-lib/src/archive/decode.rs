@@ -57,7 +57,10 @@ use cap_std::fs::{Dir, File};
 use crate::CryptoError;
 use crate::crypto::stream::read_uninterrupted;
 use crate::error::sanitize_for_display;
-use crate::fs::paths::{INCOMPLETE_SUFFIX, OUTPUT_LABEL, already_exists_error, path_occupied};
+use crate::fs::paths::{
+    INCOMPLETE_SUFFIX, OUTPUT_LABEL, already_exists_error, path_occupied,
+    sanitize_path_keeping_parent,
+};
 
 use super::IncompleteOutputPolicy;
 use super::format::{
@@ -68,7 +71,7 @@ use super::limits::ArchiveLimits;
 use super::model::{ArchiveEntry, ArchiveEntryKind, Manifest};
 use super::path::canonical_path_order;
 use super::platform;
-use super::platform::ObjectId;
+use super::platform::{ObjectId, OwnerComparison};
 use super::reasons::{
     ARCHIVE_EXT_PLATFORM_LIMIT, ARCHIVE_EXT_REGION_TRUNCATED, FILE_CONTENT_TRUNCATED,
     MANIFEST_PLATFORM_LIMIT, MANIFEST_REGION_TRUNCATED, TRAILING_FILE_CONTENT,
@@ -104,27 +107,61 @@ fn unarchive_inner<R: Read>(
         output_dir,
         limits,
         policy,
-        || Ok(()),
-        |_| Ok(()),
-        |_| Ok(()),
+        Seams {
+            compare_owners: platform::compare_owners,
+            before_promotion: || Ok(()),
+            after_promotion: |_| Ok(()),
+            after_root_mode: |_| Ok(()),
+        },
     )
 }
 
-/// Implementation seam for the interval between staging and promotion,
-/// post-promotion outcomes, and the interval after root-mode confirmation.
-/// Production supplies no-op hooks; tests use them to exercise the
-/// promotion window, post-commit reporting, and cleanup. `after_root_mode`
-/// receives the record a ratification moved out of the cleanup slot, so a
-/// test can confirm the retained handle is still held at that point.
-fn unarchive_inner_with_hooks<R: Read>(
+/// Compares the owners of a staged directory root and a file this run
+/// created beneath it — see [`platform::compare_owners`]. A seam because
+/// a directory with another owner cannot be created without privileges,
+/// so the test for a mismatch substitutes the answer.
+type CompareOwners = fn(&Dir, &File) -> Result<OwnerComparison, CryptoError>;
+
+/// Implementation seams of [`unarchive_inner_with_hooks`]: the
+/// staged-root ownership read, the interval between staging and
+/// promotion, post-promotion outcomes, and the interval after root-mode
+/// confirmation. Production supplies [`platform::compare_owners`] and
+/// no-op hooks; tests use them to exercise a replaced staged root, the
+/// promotion window, post-commit reporting, and cleanup.
+/// `after_root_mode` receives the record a ratification moved out of the
+/// cleanup slot, so a test can confirm the retained handle is still held
+/// at that point.
+struct Seams<B, A, M>
+where
+    B: FnOnce() -> Result<(), CryptoError>,
+    A: FnOnce(&mut platform::PromotionOutcome) -> Result<(), CryptoError>,
+    M: FnOnce(&Option<StagedRoot>) -> Result<(), CryptoError>,
+{
+    compare_owners: CompareOwners,
+    before_promotion: B,
+    after_promotion: A,
+    after_root_mode: M,
+}
+
+fn unarchive_inner_with_hooks<R, B, A, M>(
     mut reader: R,
     output_dir: &Path,
     limits: ArchiveLimits,
     policy: IncompleteOutputPolicy,
-    before_promotion: impl FnOnce() -> Result<(), CryptoError>,
-    after_promotion: impl FnOnce(&mut platform::PromotionOutcome) -> Result<(), CryptoError>,
-    after_root_mode: impl FnOnce(&Option<StagedRoot>) -> Result<(), CryptoError>,
-) -> Result<PathBuf, CryptoError> {
+    seams: Seams<B, A, M>,
+) -> Result<PathBuf, CryptoError>
+where
+    R: Read,
+    B: FnOnce() -> Result<(), CryptoError>,
+    A: FnOnce(&mut platform::PromotionOutcome) -> Result<(), CryptoError>,
+    M: FnOnce(&Option<StagedRoot>) -> Result<(), CryptoError>,
+{
+    let Seams {
+        compare_owners,
+        before_promotion,
+        after_promotion,
+        after_root_mode,
+    } = seams;
     // FORMAT.md §9.11 step 1: parse + structurally validate the header.
     // `parse_fca_header` already enforces all caps for `archive_ext_len`,
     // `manifest_len`, and `total_file_bytes`.
@@ -202,6 +239,7 @@ fn unarchive_inner_with_hooks<R: Read>(
                 &manifest,
                 &mut staged_root,
                 output_dir,
+                compare_owners,
             )?;
         }
 
@@ -469,6 +507,7 @@ fn extract_directory_root<R: Read>(
     manifest: &Manifest,
     staged_root: &mut Option<StagedRoot>,
     output_dir: &Path,
+    compare_owners: CompareOwners,
 ) -> Result<(), CryptoError> {
     let root_name_str = manifest_root_name_str(manifest)?;
 
@@ -508,6 +547,7 @@ fn extract_directory_root<R: Read>(
     // Pass 2: stream file contents in MANIFEST ORDER. The content
     // region is laid out in manifest order, so this pass must visit
     // file entries in the same order as the writer emitted them.
+    let mut root_owner_confirmed = false;
     for entry in &manifest.entries {
         if entry.kind != ArchiveEntryKind::File {
             continue;
@@ -522,6 +562,18 @@ fn extract_directory_root<R: Read>(
                     archive_path_collides(&entry.path_utf8)
                 })
             })?;
+        // Before the first byte of content: the staged root must be the
+        // directory this run created, and this file is the first object
+        // that can tell (see `require_staged_root_owner`).
+        if !root_owner_confirmed {
+            require_staged_root_owner(
+                compare_owners(&root_dir, &outfile)?,
+                staged_root,
+                output_dir,
+                incomplete_name,
+            )?;
+            root_owner_confirmed = true;
+        }
         copy_exact_n(reader, &mut outfile, entry.size, archive_content_truncated)?;
         platform::chmod_file_handle(&outfile, entry.mode)?;
         // Complete the per-file part of the durability sequence. On
@@ -572,6 +624,39 @@ fn extract_directory_root<R: Read>(
     // path-based rename — the recorded handle was opened so the rename
     // can proceed beside it — and on Unix the handle-relative promotion
     // runs against `output_handle` rather than this one.
+    Ok(())
+}
+
+/// Confirms that the staged directory root is the directory this run
+/// created, from `comparison`: how the root's owner compares with that
+/// of the first file the run created beneath it.
+///
+/// The root is created and then opened by name, two operations between
+/// which a local writer with access to the output directory can replace
+/// the empty directory with one of its own; nothing about the opened
+/// handle says which directory it reached. A file is created and opened
+/// in one operation, so the first file's owner is what the filesystem
+/// gives this run's objects, and a root with another owner is not the
+/// run's. Two objects one run created agree on every filesystem, so the
+/// comparison never refuses the run's own root; where the platform
+/// reports no owner it is unavailable and skipped.
+///
+/// A mismatch refuses the run before any content is written and takes
+/// the staged record out of the cleanup slot: the entry at the working
+/// name is not the run's, so cleanup must not remove it, and it blocks
+/// a retry like any pre-existing `.incomplete` entry. The directories
+/// the run created inside it so far, and the empty first file, stay
+/// where they are.
+fn require_staged_root_owner(
+    comparison: OwnerComparison,
+    staged_root: &mut Option<StagedRoot>,
+    output_dir: &Path,
+    incomplete_name: &OsStr,
+) -> Result<(), CryptoError> {
+    if comparison == OwnerComparison::Different {
+        *staged_root = None;
+        return Err(staged_root_replaced(output_dir, incomplete_name));
+    }
     Ok(())
 }
 
@@ -880,6 +965,22 @@ fn promoted_root_replaced(root_name: &OsStr) -> CryptoError {
         sanitize_for_display(&root_name.to_string_lossy())
     ))
 }
+
+/// Rejection for a staged directory root that is not the directory this
+/// run created (see [`require_staged_root_owner`]). The entry is left in
+/// place, so the message names it; the parent is the caller's own path
+/// and stays readable, the working name is archive-derived and is
+/// escaped.
+fn staged_root_replaced(output_dir: &Path, working_name: &OsStr) -> CryptoError {
+    CryptoError::InvalidInput(format!(
+        "{STAGED_ROOT_REPLACED}: {}",
+        sanitize_path_keeping_parent(&output_dir.join(working_name))
+    ))
+}
+
+/// What [`staged_root_replaced`] reports, ahead of the path.
+const STAGED_ROOT_REPLACED: &str =
+    "Incomplete output belongs to another owner and was left in place";
 
 /// Rejection for a staged root whose descriptor could not be
 /// duplicated, so the run cannot confirm after promotion that the final
@@ -1285,7 +1386,7 @@ impl CleanupOutcome {
         let Self::Unconfirmed { cause, emptied } = self else {
             return error;
         };
-        let shown = crate::fs::paths::sanitize_path_keeping_parent(&output_dir.join(working_name));
+        let shown = sanitize_path_keeping_parent(&output_dir.join(working_name));
         let report = if emptied {
             format!("the incomplete output {shown} was emptied but could not be removed: {cause}")
         } else {
@@ -2014,6 +2115,133 @@ mod tests {
         );
     }
 
+    /// The staged root is created and then opened by name, and a local
+    /// writer who replaces the empty directory between those two
+    /// operations owns the directory the run then extracts into. The
+    /// run compares the root's owner with the first file it creates,
+    /// before any content is written; the answer is substituted here
+    /// because a directory with another owner cannot be created without
+    /// privileges. On a mismatch the run stops with nothing written,
+    /// names the working path, and leaves the directory in place under
+    /// both policies — it is not the run's to remove — where it blocks
+    /// a retry like any other pre-existing `.incomplete` entry.
+    #[test]
+    fn a_staged_root_with_another_owner_is_refused_before_any_content_and_left_in_place() {
+        fn another_owner(_: &Dir, _: &File) -> Result<OwnerComparison, CryptoError> {
+            Ok(OwnerComparison::Different)
+        }
+        let manifest = Manifest {
+            entries: vec![
+                make_entry("d", ArchiveEntryKind::Directory, 0, 0o755),
+                make_entry("d/sub", ArchiveEntryKind::Directory, 0, 0o755),
+                make_entry("d/sub/a.txt", ArchiveEntryKind::File, 6, 0o644),
+                make_entry("d/b.txt", ArchiveEntryKind::File, 6, 0o644),
+            ],
+            total_file_bytes: 12,
+            root_name: OsString::from("d"),
+            root_is_file: false,
+            root_mode: 0o755,
+        };
+        let contents: &[(&str, &[u8])] = &[("d/sub/a.txt", b"secret"), ("d/b.txt", b"second")];
+
+        for policy in [
+            IncompleteOutputPolicy::DeleteOnError,
+            IncompleteOutputPolicy::RetainOnError,
+        ] {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let out = tmp.path().join("out");
+            fs::create_dir(&out).unwrap();
+            let staged = out.join("d.incomplete");
+
+            let err = unarchive_inner_with_hooks(
+                Cursor::new(build_archive(&manifest, contents)),
+                &out,
+                ArchiveLimits::default(),
+                policy.clone(),
+                Seams {
+                    compare_owners: another_owner,
+                    before_promotion: || Ok(()),
+                    after_promotion: |_| Ok(()),
+                    after_root_mode: |_| Ok(()),
+                },
+            )
+            .unwrap_err();
+
+            let message = err.to_string();
+            assert!(
+                matches!(err, CryptoError::InvalidInput(_))
+                    && message.contains(STAGED_ROOT_REPLACED)
+                    && message.contains("d.incomplete"),
+                "{policy:?}: expected the replaced staged root to be named, got: {message}"
+            );
+            assert!(
+                staged.is_dir(),
+                "{policy:?}: the directory is not the run's and must stay in place"
+            );
+            assert!(!out.join("d").exists(), "{policy:?}: nothing was promoted");
+            // Pass 1 created the descendant directory and the first file
+            // was created as the reference, but no content reached it.
+            assert!(staged.join("sub").is_dir(), "{policy:?}");
+            assert_eq!(
+                fs::metadata(staged.join("sub").join("a.txt"))
+                    .unwrap()
+                    .len(),
+                0,
+                "{policy:?}: the run must stop before writing content"
+            );
+            assert!(
+                !staged.join("b.txt").exists(),
+                "{policy:?}: no later file may be created"
+            );
+
+            let retry = unarchive_inner(
+                Cursor::new(build_archive(&manifest, contents)),
+                &out,
+                ArchiveLimits::default(),
+                policy,
+            )
+            .unwrap_err();
+            assert!(
+                retry.to_string().contains(INCOMPLETE_OUTPUT_LABEL),
+                "the entry left in place must block a retry, got: {retry}"
+            );
+        }
+    }
+
+    /// Where the platform reports no owner through a handle, the
+    /// comparison is skipped and the extraction proceeds — the answer
+    /// Windows gives on every run.
+    #[test]
+    fn an_unavailable_owner_comparison_does_not_refuse_the_run() {
+        fn unavailable(_: &Dir, _: &File) -> Result<OwnerComparison, CryptoError> {
+            Ok(OwnerComparison::Unavailable)
+        }
+        let tmp = tempfile::TempDir::new().unwrap();
+        let out = tmp.path().join("out");
+        fs::create_dir(&out).unwrap();
+
+        let path = unarchive_inner_with_hooks(
+            Cursor::new(build_archive(
+                &directory_root_manifest(),
+                &[("d/a.txt", b"real")],
+            )),
+            &out,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::DeleteOnError,
+            Seams {
+                compare_owners: unavailable,
+                before_promotion: || Ok(()),
+                after_promotion: |_| Ok(()),
+                after_root_mode: |_| Ok(()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(path, out.join("d"));
+        assert_eq!(fs::read(out.join("d").join("a.txt")).unwrap(), b"real");
+        assert!(!out.join("d.incomplete").exists());
+    }
+
     /// Promotion resolves the staged entry by name. A local writer who
     /// moves that entry aside and leaves a directory of their own under
     /// the name has it committed at the final name, so the run must
@@ -2039,16 +2267,19 @@ mod tests {
             &out,
             ArchiveLimits::default(),
             IncompleteOutputPolicy::DeleteOnError,
-            || {
-                // Move the staged tree aside and leave a directory of
-                // the attacker's under the staging name.
-                fs::rename(out.join("d.incomplete"), out.join("moved-aside"))?;
-                fs::create_dir(out.join("d.incomplete"))?;
-                fs::write(out.join("d.incomplete").join("a.txt"), b"attacker")?;
-                Ok(())
+            Seams {
+                compare_owners: platform::compare_owners,
+                before_promotion: || {
+                    // Move the staged tree aside and leave a directory of
+                    // the attacker's under the staging name.
+                    fs::rename(out.join("d.incomplete"), out.join("moved-aside"))?;
+                    fs::create_dir(out.join("d.incomplete"))?;
+                    fs::write(out.join("d.incomplete").join("a.txt"), b"attacker")?;
+                    Ok(())
+                },
+                after_promotion: |_| Ok(()),
+                after_root_mode: |_| Ok(()),
             },
-            |_| Ok(()),
-            |_| Ok(()),
         )
         .unwrap_err();
 
@@ -2120,13 +2351,16 @@ mod tests {
                 &out,
                 ArchiveLimits::default(),
                 IncompleteOutputPolicy::DeleteOnError,
-                || {
-                    fs::remove_dir(&out)?;
-                    platform::try_make_junction(&decoy, &out)?;
-                    Ok(())
+                Seams {
+                    compare_owners: platform::compare_owners,
+                    before_promotion: || {
+                        fs::remove_dir(&out)?;
+                        platform::try_make_junction(&decoy, &out)?;
+                        Ok(())
+                    },
+                    after_promotion: |_| Ok(()),
+                    after_root_mode: |_| Ok(()),
                 },
-                |_| Ok(()),
-                |_| Ok(()),
             )
             .unwrap_err();
 
@@ -2233,14 +2467,17 @@ mod tests {
             &out,
             ArchiveLimits::default(),
             IncompleteOutputPolicy::DeleteOnError,
-            || {
-                let staged = out.join("f.txt.incomplete");
-                fs::rename(&staged, out.join("moved-aside"))?;
-                fs::write(&staged, b"attacker")?;
-                Ok(())
+            Seams {
+                compare_owners: platform::compare_owners,
+                before_promotion: || {
+                    let staged = out.join("f.txt.incomplete");
+                    fs::rename(&staged, out.join("moved-aside"))?;
+                    fs::write(&staged, b"attacker")?;
+                    Ok(())
+                },
+                after_promotion: |_| Ok(()),
+                after_root_mode: |_| Ok(()),
             },
-            |_| Ok(()),
-            |_| Ok(()),
         )
         .unwrap_err();
 
@@ -4528,9 +4765,14 @@ mod tests {
                 &out,
                 ArchiveLimits::default(),
                 IncompleteOutputPolicy::DeleteOnError,
-                || Err(CryptoError::InvalidInput("injected failure".to_owned())),
-                |_| Ok(()),
-                |_| Ok(()),
+                Seams {
+                    compare_owners: platform::compare_owners,
+                    before_promotion: || {
+                        Err(CryptoError::InvalidInput("injected failure".to_owned()))
+                    },
+                    after_promotion: |_| Ok(()),
+                    after_root_mode: |_| Ok(()),
+                },
             )
             .unwrap_err();
 
@@ -4578,14 +4820,17 @@ mod tests {
             &out,
             ArchiveLimits::default(),
             IncompleteOutputPolicy::DeleteOnError,
-            move || {
-                // Removing `d.incomplete` needs write permission on
-                // `out`, which belongs to the caller, not to the run.
-                fs::set_permissions(&out_for_hook, fs::Permissions::from_mode(0o500))?;
-                Err(CryptoError::InvalidInput("injected failure".to_owned()))
+            Seams {
+                compare_owners: platform::compare_owners,
+                before_promotion: move || {
+                    // Removing `d.incomplete` needs write permission on
+                    // `out`, which belongs to the caller, not to the run.
+                    fs::set_permissions(&out_for_hook, fs::Permissions::from_mode(0o500))?;
+                    Err(CryptoError::InvalidInput("injected failure".to_owned()))
+                },
+                after_promotion: |_| Ok(()),
+                after_root_mode: |_| Ok(()),
             },
-            |_| Ok(()),
-            |_| Ok(()),
         )
         .unwrap_err();
         fs::set_permissions(&out, fs::Permissions::from_mode(0o700)).unwrap();
@@ -4639,12 +4884,15 @@ mod tests {
             &out,
             ArchiveLimits::default(),
             IncompleteOutputPolicy::DeleteOnError,
-            move || {
-                fs::set_permissions(&out_for_hook, fs::Permissions::from_mode(0o500))?;
-                Err(CryptoError::InvalidInput("injected failure".to_owned()))
+            Seams {
+                compare_owners: platform::compare_owners,
+                before_promotion: move || {
+                    fs::set_permissions(&out_for_hook, fs::Permissions::from_mode(0o500))?;
+                    Err(CryptoError::InvalidInput("injected failure".to_owned()))
+                },
+                after_promotion: |_| Ok(()),
+                after_root_mode: |_| Ok(()),
             },
-            |_| Ok(()),
-            |_| Ok(()),
         )
         .unwrap_err();
         fs::set_permissions(&out, fs::Permissions::from_mode(0o700)).unwrap();
@@ -4687,12 +4935,15 @@ mod tests {
             &out,
             ArchiveLimits::default(),
             IncompleteOutputPolicy::DeleteOnError,
-            || Ok(()),
-            |_| Ok(()),
-            |_| {
-                fs::rename(&final_path, &committed_elsewhere)?;
-                fs::write(&final_path, b"replacement")?;
-                Ok(())
+            Seams {
+                compare_owners: platform::compare_owners,
+                before_promotion: || Ok(()),
+                after_promotion: |_| Ok(()),
+                after_root_mode: |_| {
+                    fs::rename(&final_path, &committed_elsewhere)?;
+                    fs::write(&final_path, b"replacement")?;
+                    Ok(())
+                },
             },
         )
         .expect_err("step 17 must reject the replaced final entry");
@@ -4750,17 +5001,20 @@ mod tests {
                 &out,
                 ArchiveLimits::default(),
                 IncompleteOutputPolicy::DeleteOnError,
-                || Ok(()),
-                |_| Ok(()),
-                |ratified| {
-                    let held = ratified.as_ref().map(StagedRoot::identity);
-                    assert!(
-                        matches!(held, Some(StagedIdentity::Known(_))),
-                        "root_is_file={root_is_file}: the ratified record must still hold a \
-                         readable handle"
-                    );
-                    observed = true;
-                    Ok(())
+                Seams {
+                    compare_owners: platform::compare_owners,
+                    before_promotion: || Ok(()),
+                    after_promotion: |_| Ok(()),
+                    after_root_mode: |ratified| {
+                        let held = ratified.as_ref().map(StagedRoot::identity);
+                        assert!(
+                            matches!(held, Some(StagedIdentity::Known(_))),
+                            "root_is_file={root_is_file}: the ratified record must still hold a \
+                             readable handle"
+                        );
+                        observed = true;
+                        Ok(())
+                    },
                 },
             )
             .unwrap();
@@ -4795,16 +5049,19 @@ mod tests {
             &out,
             ArchiveLimits::default(),
             IncompleteOutputPolicy::DeleteOnError,
-            || Ok(()),
-            |promotion| {
-                fs::hard_link(&final_path, &incomplete_path)?;
-                *promotion = platform::PromotionOutcome::StagedLinkRetained(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "injected temporary-name removal failure",
-                ));
-                Ok(())
+            Seams {
+                compare_owners: platform::compare_owners,
+                before_promotion: || Ok(()),
+                after_promotion: |promotion| {
+                    fs::hard_link(&final_path, &incomplete_path)?;
+                    *promotion = platform::PromotionOutcome::StagedLinkRetained(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "injected temporary-name removal failure",
+                    ));
+                    Ok(())
+                },
+                after_root_mode: |_| Ok(()),
             },
-            |_| Ok(()),
         )
         .expect_err("a retained temporary name must be reported");
 
@@ -4952,12 +5209,15 @@ mod tests {
             &out,
             ArchiveLimits::default(),
             IncompleteOutputPolicy::DeleteOnError,
-            || {
-                fs::hard_link(&incomplete_path, &outsider_path)?;
-                Ok(())
+            Seams {
+                compare_owners: platform::compare_owners,
+                before_promotion: || {
+                    fs::hard_link(&incomplete_path, &outsider_path)?;
+                    Ok(())
+                },
+                after_promotion: |_| Ok(()),
+                after_root_mode: |_| Ok(()),
             },
-            |_| Ok(()),
-            |_| Ok(()),
         )
         .expect_err("a second plaintext link must not report success");
 
@@ -5008,13 +5268,16 @@ mod tests {
             &out,
             ArchiveLimits::default(),
             IncompleteOutputPolicy::DeleteOnError,
-            || Ok(()),
-            |promotion| {
-                fs::hard_link(&final_path, &hidden_path)?;
-                *promotion = platform::PromotionOutcome::LinkedFile;
-                Ok(())
+            Seams {
+                compare_owners: platform::compare_owners,
+                before_promotion: || Ok(()),
+                after_promotion: |promotion| {
+                    fs::hard_link(&final_path, &hidden_path)?;
+                    *promotion = platform::PromotionOutcome::LinkedFile;
+                    Ok(())
+                },
+                after_root_mode: |_| Ok(()),
             },
-            |_| Ok(()),
         )
         .expect_err("a hidden second plaintext link must not report success");
 
@@ -5285,15 +5548,18 @@ mod tests {
             &out,
             ArchiveLimits::default(),
             IncompleteOutputPolicy::DeleteOnError,
-            || {
-                fs::hard_link(&incomplete_path, &attacker_link)?;
-                fs::rename(&incomplete_path, &aside)?;
-                fs::write(&decoy, b"decoy content")?;
-                fs::hard_link(&decoy, &incomplete_path)?;
-                Ok(())
+            Seams {
+                compare_owners: platform::compare_owners,
+                before_promotion: || {
+                    fs::hard_link(&incomplete_path, &attacker_link)?;
+                    fs::rename(&incomplete_path, &aside)?;
+                    fs::write(&decoy, b"decoy content")?;
+                    fs::hard_link(&decoy, &incomplete_path)?;
+                    Ok(())
+                },
+                after_promotion: |_| Ok(()),
+                after_root_mode: |_| Ok(()),
             },
-            |_| Ok(()),
-            |_| Ok(()),
         )
         .expect_err("must fail");
 
@@ -5343,17 +5609,20 @@ mod tests {
             &out,
             ArchiveLimits::default(),
             IncompleteOutputPolicy::DeleteOnError,
-            || {
-                fs::hard_link(&incomplete_path, &evil)?;
-                Ok(())
+            Seams {
+                compare_owners: platform::compare_owners,
+                before_promotion: || {
+                    fs::hard_link(&incomplete_path, &evil)?;
+                    Ok(())
+                },
+                after_promotion: |promotion| {
+                    *promotion = platform::PromotionOutcome::StagedLinkRetained(io::Error::other(
+                        "simulated staging unlink failure",
+                    ));
+                    Ok(())
+                },
+                after_root_mode: |_| Ok(()),
             },
-            |promotion| {
-                *promotion = platform::PromotionOutcome::StagedLinkRetained(io::Error::other(
-                    "simulated staging unlink failure",
-                ));
-                Ok(())
-            },
-            |_| Ok(()),
         )
         .expect_err("must fail");
 

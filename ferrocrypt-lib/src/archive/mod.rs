@@ -99,7 +99,10 @@ pub enum IncompleteOutputPolicy {
     /// staged file is emptied through its handle before the unlink, so
     /// one that could not be unlinked holds none). The original error
     /// keeps its class where that class carries a message, and
-    /// otherwise becomes [`CryptoError::Io`] with both texts.
+    /// otherwise becomes [`CryptoError::Io`] with both texts. A staged
+    /// directory found to have another owner before any content was
+    /// written is not this run's, so it is named in the error and left
+    /// in place rather than removed.
     ///
     /// [`CryptoError::Io`]: crate::CryptoError::Io
     #[default]

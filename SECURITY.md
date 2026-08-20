@@ -289,6 +289,13 @@ before the next stable release.
   the handle FerroCrypt still holds on the key file it wrote, so it can
   only ever delete that file; the check before it reads the entry through
   the folder handle's current path, which the open handle keeps in place.
+  A decrypted folder is created and then opened by name, so before writing
+  any content FerroCrypt confirms on Linux and macOS that the staging
+  folder has the same owner as the first file it created inside it; a
+  folder another user put there between those two steps fails that
+  check, and the decrypt stops, names it, and leaves it in place — it is
+  not FerroCrypt's to remove. Windows reports no owner this way, so that
+  check is not made there.
   A failed decrypt removes the folder it staged through the handle it
   created it with on Linux and macOS, so a folder another process put at
   the staging name is never removed and the staged one is removed wherever

@@ -369,10 +369,11 @@ These implementation and platform limitations also remain explicit:
 - FERROCRYPT_PASSPHRASE remains in the process environment until process exit
   and can be read by other same-authority processes. Interactive input is the
   safer path.
-- Windows directory promotion uses a check-then-rename sequence under the
-  safe-code-only implementation. A race requiring an untrusted writer in the
-  selected output directory is outside TM-12 and remains defence in depth
-  under TM-13.
+- Under the safe-code-only implementation, Windows directory promotion uses
+  a check-then-rename sequence, and the owner of a staged directory root is
+  not confirmed there as it is on Linux and macOS. A race requiring an
+  untrusted writer in the selected output directory is outside TM-12 and
+  remains defence in depth under TM-13.
 - A freshly decrypted single file on Windows may have its archive attribute
   cleared.
 - Filesystems outside the named TM-15 set have compatibility-only identity,

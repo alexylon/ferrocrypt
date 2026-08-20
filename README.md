@@ -324,7 +324,7 @@ Common failure categories include:
 - **Too many archive entries / Archive is too large / Archive path too deep** — the folder inside the file exceeds an archive cap. Raise the matching `--max-archive-*` flag if the source is trusted.
 - **Unsupported recipient `<type>`** — the file uses a recipient type marked as required that this release does not support.
 
-A failure before final promotion produces no completed output at the requested final path. The default behavior removes this run's staged `.incomplete` working copy best-effort; `--keep-partial` keeps it for inspection. After FerroCrypt has confirmed a promoted root as this run's complete output, a later filesystem check can still report an error; FerroCrypt then does not delete the output by name. A leftover `.incomplete` from a previous failed run is preserved across a retry that fails with `Incomplete output already exists`, so the prior partial is not silently overwritten.
+A failure before final promotion produces no completed output at the requested final path. The default behavior removes this run's staged `.incomplete` working copy best-effort; `--keep-partial` keeps it for inspection. After FerroCrypt has confirmed a promoted root as this run's complete output, a later filesystem check can still report an error; FerroCrypt then does not delete the output by name. A leftover `.incomplete` from a previous failed run is preserved across a retry that fails with `Incomplete output already exists`, so the prior partial is not silently overwritten. On Linux and macOS, a staging folder found to belong to another user — put there by a local process between its creation and its open — is reported and left in place the same way, before any content is written.
 
 ## Technical reference
 

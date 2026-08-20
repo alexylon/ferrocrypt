@@ -184,6 +184,50 @@ pub(crate) fn file_object_id(file: &File) -> Result<ObjectId, CryptoError> {
     Ok(metadata_object_id(&metadata))
 }
 
+/// What a comparison of two objects' owners established. Each platform
+/// constructs only the variants it can report.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum OwnerComparison {
+    /// Both objects report the same owner.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Same,
+    /// The objects report different owners.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Different,
+    /// The metadata a handle yields on this platform carries no owner.
+    #[cfg_attr(unix, allow(dead_code))]
+    Unavailable,
+}
+
+/// Compares the owners of `dir` and `file`, both created by this run.
+///
+/// Two objects one run creates through the same filesystem agree on
+/// every filesystem — they carry the run's own identity where ownership
+/// is recorded, and the mount's fixed or remapped identity elsewhere —
+/// while a directory another user planted carries that user's identity
+/// wherever ownership is recorded. The comparison therefore never
+/// refuses the run's own objects, and detects a planted directory on
+/// any filesystem that can show one.
+#[cfg(unix)]
+pub(crate) fn compare_owners(dir: &Dir, file: &File) -> Result<OwnerComparison, CryptoError> {
+    use cap_std::fs::MetadataExt;
+
+    let dir_owner = dir.dir_metadata().map_err(CryptoError::Io)?.uid();
+    let file_owner = file.metadata().map_err(CryptoError::Io)?.uid();
+    Ok(if dir_owner == file_owner {
+        OwnerComparison::Same
+    } else {
+        OwnerComparison::Different
+    })
+}
+
+/// Windows metadata carries no owner without a security-descriptor
+/// query, so the comparison is unavailable there.
+#[cfg(not(unix))]
+pub(crate) fn compare_owners(_dir: &Dir, _file: &File) -> Result<OwnerComparison, CryptoError> {
+    Ok(OwnerComparison::Unavailable)
+}
+
 /// Handle-relative no-clobber rename used to promote a staged
 /// `{root}.incomplete` to its final `{root}` name (FORMAT.md §9.11
 /// step 15) without re-resolving the ambient `output_dir` path.
@@ -1514,6 +1558,23 @@ mod tests {
             err.to_string().to_lowercase().contains("exist"),
             "expected AlreadyExists-style rejection, got: {err}"
         );
+    }
+
+    /// A directory and a file this process creates report the same
+    /// owner, which is what the staged-root comparison relies on. A
+    /// mismatch needs a directory owned by another user and cannot be
+    /// produced without privileges; `decode.rs` substitutes the answer
+    /// to cover that branch.
+    #[cfg(unix)]
+    #[test]
+    fn objects_this_process_creates_report_the_same_owner() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let parent = open_anchor(tmp.path()).unwrap();
+
+        let dir = mkdir_strict(&parent, OsStr::new("d")).unwrap();
+        let file = create_file_at(&dir, OsStr::new("f"), INITIAL_FILE_CREATE_MODE).unwrap();
+
+        assert_eq!(compare_owners(&dir, &file).unwrap(), OwnerComparison::Same);
     }
 
     /// Fresh extraction directories start owner-private so root-level

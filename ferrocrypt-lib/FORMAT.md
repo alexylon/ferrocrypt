@@ -1774,6 +1774,21 @@ another process changed the staged tree, and the extraction MUST fail rather
 than create it again and continue into a tree that no longer holds what was
 written into it.
 
+A staged directory root is created and then opened by name, two operations
+between which a local writer with access to the destination directory can
+replace the empty directory with one of its own. Where the metadata read
+through a handle carries an owner, the reader MUST NOT write file content
+beneath a staged directory root until it has confirmed that the root reports
+the same owner as the first file it created beneath it. A file is created and
+opened in one operation, so its owner is what the filesystem assigns the
+reader's objects; two objects the reader created agree on every filesystem, a
+fixed or remapped owner included, while a planted directory carries its
+owner's identity wherever ownership is recorded. On a mismatch the reader MUST
+fail before any content is written and MUST NOT remove the entry at the
+working name, because it is not the reader's; like any pre-existing
+`.incomplete` entry it blocks a retry. A directory root with no file entries
+gives nothing to compare and carries no content.
+
 Where the platform exposes no stable identity, the corresponding confirmation
 in step 16 or step 17 is skipped. A failure to read the staged-root or final-name
 identity is likewise not evidence of a substitution and skips that comparison.

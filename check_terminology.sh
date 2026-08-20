@@ -25,7 +25,7 @@ set -u
 pattern='\bv1\b|\bv2\b|\bv1\.x\b|\bv1\.0\b|\bv0\.x\b|\bat 1\.0\b'
 
 raw=$(grep -rnE "$pattern" \
-    README.md SECURITY.md AGENTS.md CLAUDE.md RELEASE.md \
+    README.md SECURITY.md THREAT_MODEL.md AGENTS.md CLAUDE.md RELEASE.md \
     ferrocrypt-lib/FORMAT.md ferrocrypt-lib/STRUCTURE.md \
     ferrocrypt-lib/src ferrocrypt-lib/tests ferrocrypt-lib/fuzz/fuzz_targets \
     ferrocrypt-lib/testvectors \

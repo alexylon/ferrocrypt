@@ -306,9 +306,10 @@ jobs:
   # filesystem, points FERROCRYPT_FS_MATRIX_DIR at the mount, and runs
   # the small set of `#[ignore = "fs-matrix"]` tests in
   # `ferrocrypt-lib/tests/archive_fs_matrix.rs`. The default 3-platform
-  # matrix above already covers the common-case filesystems
-  # (ext4/APFS-CI/NTFS); these lanes catch regressions on filesystems
-  # FerroCrypt advertises support for but doesn't otherwise exercise.
+  # matrix above already covers the named supported filesystems
+  # (ext4/APFS-CI/NTFS). These lanes qualify named-set variants and
+  # retain compatibility and hardening coverage elsewhere; a lane's
+  # presence does not expand the strong set in THREAT_MODEL.md.
   fs_matrix:
     strategy:
       fail-fast: false
@@ -383,10 +384,11 @@ jobs:
           # Windows NTFS: the default Windows filesystem. Somewhat
           # redundant with `build.windows-latest` (which already runs
           # the full lib + integration suite on NTFS) but kept in the
-          # matrix for symmetry — one job listing every supported
-          # filesystem is easier to audit. The lane creates a fresh
-          # NTFS-backed directory rather than reusing %TEMP% so the
-          # path the test exercises is unambiguous.
+          # matrix for symmetry — one job that includes every named
+          # supported filesystem alongside the compatibility lanes is
+          # easier to audit. The lane creates a fresh NTFS-backed
+          # directory rather than reusing %TEMP% so the path the test
+          # exercises is unambiguous.
           #
           # Both Windows lanes assume the default shell for `run:` on
           # `windows-latest` (pwsh, i.e. PowerShell 7+). Do NOT switch

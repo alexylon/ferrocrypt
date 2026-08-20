@@ -133,9 +133,11 @@ Ensure:
 1. All changes are committed: `git status`
 2. Tests pass: `cargo test`
 3. The large-file round trip passes (see below)
-4. Code is formatted: `./fmt.sh`
-5. You have push access to the remote repository
-6. crates.io credentials are configured: `cargo login`
+4. No confirmed release blocker remains under
+   [`THREAT_MODEL.md` section 6](THREAT_MODEL.md#6-release-and-review-governance)
+5. Code is formatted: `./fmt.sh`
+6. You have push access to the remote repository
+7. crates.io credentials are configured: `cargo login`
 
 ### Large-file round trip
 

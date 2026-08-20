@@ -50,12 +50,19 @@ Repository layout:
 
 ### Canonical specifications
 
-Two shipping specification documents in `ferrocrypt-lib/` are the authoritative references:
+Three shipping documents are the authoritative references:
 
+- **`THREAT_MODEL.md`** — public security boundary, trust assumptions, supported deployment and filesystem profiles, severity, and release-blocking rules.
 - **`ferrocrypt-lib/FORMAT.md`** — wire-format spec (`.fcr` byte layout, `private.key` / `public.key` formats, recipient entries, payload stream, TLV grammar).
 - **`ferrocrypt-lib/STRUCTURE.md`** — code architecture spec (module layout, single sources of truth, dependency direction, public API shape, decryption security ordering, architectural invariants).
 
-The "Library Module Roles" table below, plus the "Encryption Pipeline" / "File Format" / "Key File Format" sections in this file, are quick at-a-glance references for working in-code. If any of them disagrees with `FORMAT.md` or `STRUCTURE.md`, the canonical specs win.
+The threat model governs security scope and release classification;
+`FORMAT.md` governs stored bytes and format processing; `STRUCTURE.md`
+governs architecture and implementation invariants. The "Library Module
+Roles" table below, plus the "Encryption Pipeline" / "File Format" / "Key File
+Format" sections in this file, are quick at-a-glance references for working
+in-code. If a quick reference disagrees with a canonical document, the
+canonical document wins.
 
 ### Library Module Roles
 
@@ -251,6 +258,7 @@ recipient_entry = type_name_len(2) || recipient_flags(2) || body_len(4)
     - advisory scan (if `Cargo.toml` / `Cargo.lock` changed): run `cargo audit` from the **workspace root** (`/Users/alex/git/aal/ferrocrypt`), not from inside `ferrocrypt-lib/`. The package directory has no `Cargo.lock` of its own; from there you'd need `cargo audit --file <workspace-root>/Cargo.lock`. Requires `cargo install --locked cargo-audit` once.
     - public-API compatibility (if the `pub` surface of ferrocrypt-lib changed): `cargo semver-checks --package ferrocrypt --baseline-version <latest stable on crates.io>` — mirrors the `semver` job in `.github/workflows/rust.yml`, which resolves the baseline automatically (pre-releases are never the baseline). Requires `cargo install --locked cargo-semver-checks` once.
 - Before finishing, review the change with adversarial thinking and future-proofing in mind.
+- Every security finding MUST be classified under `THREAT_MODEL.md` sections 1, 5, and 6 before it is called release-blocking; do not invent a separate audit-specific scope or severity bar.
 - Never commit or stage changes with Git unless the request explicitly asks for a commit. A request to fix, change, or review code is not a request to commit it.
 - Never manually bump `version` in any `Cargo.toml`. Versioning is automated; see `RELEASE.md`.
 - After you finish cross-checking against the Non-Negotiable Rules and fixing the code, do another pass for bugs, corner cases and regressions.

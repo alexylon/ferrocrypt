@@ -282,6 +282,10 @@ Multi-recipient public-key encryption is supported by the library API. A single 
 
 FerroCrypt is an encryption tool, not an authentication or identity system. Public-key encryption controls which private keys can decrypt a file, but it does not prove who created the encrypted file. Sender authentication requires a separate signing mechanism.
 
+The [FerroCrypt threat model](THREAT_MODEL.md) is the authoritative statement
+of its protected properties, trust assumptions, supported environments, and
+release-blocking security rules.
+
 The project has not undergone an independent third-party security audit. The [`chacha20poly1305`](https://crates.io/crates/chacha20poly1305) AEAD crate it uses for data encryption was [audited by NCC Group](https://research.nccgroup.com/2020/02/26/public-report-rustcrypto-aes-gcm-and-chacha20poly1305-implementation-review/).
 
 Limitations:
@@ -295,6 +299,7 @@ Limitations:
 - A decryption failure while the output is still staged does not write to the final output path. By default, FerroCrypt removes the staged `.incomplete` working copy best-effort; pass `decrypt --keep-partial` (CLI) or `IncompleteOutputPolicy::RetainOnError` (library) to keep it for backup-recovery or forensic inspection. Retained partials may represent an attacker-chosen prefix of the original because per-chunk authentication detects truncation only when the final chunk arrives. A filesystem namespace or hard-link-cleanup check can also report an error after a complete output has been committed. That post-commit error does not remove the confirmed output or an entry another process placed, so complete plaintext may remain under a moved name or an additional hard-link name that was moved from `.incomplete`.
 - FerroCrypt verifies that a `.fcr` file has not been changed, but it cannot know whether it is the latest version. An old valid `.fcr` can be given back to you later and will still decrypt normally. If you need to detect that, include a version number, date, or other freshness check in the data you encrypt.
 - `.fcr` files are not fully metadata-hiding. File contents are encrypted, and directory inputs also hide internal names, tree structure, and per-file sizes inside the encrypted payload. The total ciphertext length, recipient count, and the fact that a file is a FerroCrypt container remain visible.
+- FerroCrypt's full filesystem-security guarantees apply on Linux with ext4, macOS with APFS, and Windows with NTFS. Other filesystems, including removable-media and network filesystems, are compatibility-only: operations may be refused or use weaker identity, race-resistance, permission, and durability checks. The cryptographic and wire-format guarantees are unchanged.
 - Hardened extraction is unified across Linux, macOS, and Windows: every directory open uses `cap-std` plus `cap-fs-ext` no-follow primitives, with an additional `FILE_ATTRIBUTE_REPARSE_POINT` rejection on Windows so junctions and mount points are refused alongside symlinks. The same code path applies on every supported OS.
 - Windows directory decrypts have a small final-rename race. Single-file decrypts refuse to overwrite an existing final path atomically on every platform, and directory decrypts do the same on Linux and macOS. On Windows, directory decrypts check that the final name is available before renaming the staged `.incomplete` directory; if another local process creates that name in the brief gap, that entry can be overwritten. The rename does not follow symlinks, so plaintext is not redirected; the remaining risk is integrity in an output folder writable by an untrusted local process. Closing the gap fully would need an `unsafe` Windows API call, which the crate's `#![forbid(unsafe_code)]` rules out.
 
@@ -325,6 +330,7 @@ A failure before final promotion produces no completed output at the requested f
 
 The canonical technical references are:
 
+- [**`THREAT_MODEL.md`**](THREAT_MODEL.md) — security boundary, trust assumptions, supported profiles, severity, and release rules.
 - [**`FORMAT.md`**](ferrocrypt-lib/FORMAT.md) — `.fcr`, `private.key`, `public.key`, recipient entries, payload stream, extension data, and archive rules.
 - [**`STRUCTURE.md`**](ferrocrypt-lib/STRUCTURE.md) — library organization, API boundaries, dependency direction, and decryption flow.
 

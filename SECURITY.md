@@ -43,10 +43,22 @@ The current stored formats are `.fcr` outer-container version `0x01`,
 FCA archive version `0x01`, public-key encoding version `0x01`, and
 private-key encoding version `0x01`.
 Public conformance test vectors are published with stable FerroCrypt
-release 0.3.0. The canonical references are
+release 0.3.0. The canonical format references are
 [`ferrocrypt-lib/FORMAT.md`](ferrocrypt-lib/FORMAT.md) and the in-tree
 fixture suite under `ferrocrypt-lib/tests/fixtures/` (an internal
 regression net, regenerated when the format intentionally changes).
+
+## Threat model
+
+[`THREAT_MODEL.md`](THREAT_MODEL.md) is FerroCrypt's authoritative public
+security boundary and release-classification standard. It defines the
+protected properties, trust assumptions, non-goals, supported filesystem set,
+deployment profiles, severity scale, and release-blocking rules.
+
+Stable releases beginning with 0.3.0 MUST conform to that contract. A
+development revision or release candidate may contain an identified
+non-conformity, but the threat model determines whether it must be corrected
+before the next stable release.
 
 ## Known limitations
 
@@ -130,6 +142,12 @@ regression net, regenerated when the format intentionally changes).
   write the final output path. A later filesystem namespace check can
   still report an error after the complete output was committed; that
   post-commit error does not delete the confirmed output by name.
+- **The full filesystem-security guarantee has a named filesystem set.**
+  It applies on Linux with ext4, macOS with APFS, and Windows with NTFS.
+  Other filesystems, including removable-media and network filesystems,
+  are compatibility-only: FerroCrypt may refuse an operation or use
+  weaker identity, race-resistance, permission, and durability checks.
+  Cryptographic authentication and the wire-format rules are unchanged.
 - **Hardened extraction is unified across Linux, macOS, and Windows.**
   Every directory open is anchored to a `cap-std` directory handle and
   refuses any symlink at any component (via

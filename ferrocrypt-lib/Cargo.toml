@@ -52,11 +52,11 @@ unicode-normalization = "0.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-
-# Used by archive/platform.rs on Linux and macOS for the final rename
-# that refuses to overwrite an existing name. cap-std also depends on
-# rustix, so both must accept the same version.
-[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+# Used on Linux and macOS for the handle-relative operations the standard
+# library does not expose — the no-replace rename, the interruptible
+# flush — and on every Unix except Linux for the permission restore that
+# must open nothing. cap-std also depends on rustix on every non-Windows
+# target, so both must accept the same version.
 rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]

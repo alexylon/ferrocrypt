@@ -1070,23 +1070,25 @@ pub(crate) fn chmod_dir_handle(_dir: Dir, _mode: u32) -> Result<(), CryptoError>
 /// children — and ownership of the directory, nothing on the directory
 /// itself.
 ///
-/// cap-std opens the name with `O_PATH`, which no mode refuses, and
-/// applies the mode through `/proc/self/fd`. A name that resolves to a
-/// symlink is followed only within `parent`'s own sandbox, so nothing
-/// outside the staged tree can receive the mode.
-#[cfg(all(unix, not(target_os = "macos")))]
+/// On Linux and Android cap-std opens the name with `O_PATH`, which no
+/// mode refuses, and applies the mode through `/proc/self/fd`. A name
+/// that resolves to a symlink is followed only within `parent`'s own
+/// sandbox, so nothing outside the staged tree can receive the mode.
+#[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
 pub(crate) fn restore_owner_access(parent: &Dir, name: &OsStr) -> io::Result<()> {
     use cap_std::fs::PermissionsExt;
     parent.set_permissions(name, cap_std::fs::Permissions::from_mode(DIR_CREATE_MODE))
 }
 
-/// macOS arm of [`restore_owner_access`]. cap-std's route opens the name
-/// for reading before it changes the mode, which a directory without
-/// read permission refuses, so the mode is set with `fchmodat` instead,
-/// which opens nothing. `SYMLINK_NOFOLLOW` keeps a symlink at the name
-/// from redirecting the change: macOS then changes the link itself,
-/// which still touches nothing outside the staged tree.
-#[cfg(target_os = "macos")]
+/// [`restore_owner_access`] on every other Unix. Without `O_PATH`,
+/// cap-std's route can fall back to opening the name — for reading, then
+/// for writing — and a directory without read permission refuses both,
+/// which is the case this function exists for. The mode is therefore set
+/// with `fchmodat`, which opens nothing. `SYMLINK_NOFOLLOW` keeps a
+/// symlink at the name from redirecting the change: the platform then
+/// changes the link itself, which still touches nothing outside the
+/// staged tree.
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
 pub(crate) fn restore_owner_access(parent: &Dir, name: &OsStr) -> io::Result<()> {
     use std::os::fd::AsFd;
 

@@ -264,11 +264,9 @@ pub(crate) enum RollbackOutcome {
 
 impl RollbackOutcome {
     /// The clause appended to the operation's error, or `None` when the
-    /// rollback removed the file completely. Names the file by its final
-    /// component: the caller chose the directory and knows it already.
+    /// rollback removed the file completely.
     fn report(self, path: &Path) -> Option<String> {
-        let name = path.file_name().unwrap_or(path.as_os_str());
-        let shown = crate::error::sanitize_for_display(&name.to_string_lossy());
+        let shown = final_component_for_display(path);
         Some(match self {
             Self::Removed => return None,
             Self::RemovedButLinked { link_count } => format!(
@@ -280,6 +278,14 @@ impl RollbackOutcome {
             Self::Unconfirmed => format!("the removal of {shown} could not be confirmed"),
         })
     }
+}
+
+/// The final component of `path`, escaped and bounded for a message.
+/// Both failure reports in this module name a file that way: the caller
+/// chose the directory and knows it already.
+fn final_component_for_display(path: &Path) -> String {
+    let name = path.file_name().unwrap_or(path.as_os_str());
+    crate::error::sanitize_for_display(&name.to_string_lossy())
 }
 
 /// Appends a rollback's report to the error the operation is already
@@ -1183,7 +1189,10 @@ fn finish_link_commit_with_remove(
 /// same handle, and the placeholder only while the entry under the final
 /// name is still the one step 1 created, confirmed through the handle
 /// the claim returned: an entry planted there in the window is left in
-/// place, never removed in the placeholder's stead.
+/// place, never removed in the placeholder's stead. A withdrawal that
+/// could not be confirmed — the entry is gone, an identity could not be
+/// read, or the removal failed — is appended to the returned error,
+/// because the placeholder may still hold the name.
 #[cfg(unix)]
 fn finalize_file_via_claim(
     tmp: NamedTempFile,
@@ -1250,14 +1259,36 @@ fn finalize_file_via_claim_with(
             Ok(finalized)
         }
         Err(e) => {
-            // The outcome is not reported: the commit fails before any
+            // A withdrawal that cannot be confirmed may leave the empty
+            // placeholder at the final name, where it blocks the next
+            // attempt, so it is reported. The other outcomes are not: no
             // content reached the final name, and a placeholder left in
             // place because it was replaced belongs to whoever replaced it.
-            let _ = output_dir.remove_if_retained(final_name, claim);
+            let withdrawal = output_dir.remove_if_retained(final_name, claim);
             let _ = remove_staged_temp(tmp, output_dir);
-            Err(FinalizeFileError::before_commit(CryptoError::Io(e)))
+            let error = CryptoError::Io(e);
+            Err(FinalizeFileError::before_commit(match withdrawal {
+                RollbackOutcome::Unconfirmed => {
+                    crate::error::append_report(error, &claim_left_report(final_path))
+                }
+                RollbackOutcome::Removed
+                | RollbackOutcome::RemovedButLinked { .. }
+                | RollbackOutcome::Replaced => error,
+            }))
         }
     }
+}
+
+/// The clause appended when the claim route could not confirm that it
+/// withdrew the name it claimed. The file that may remain there is
+/// empty, because the commit failed before any content reached it; it
+/// holds no plaintext, but a further attempt finds the name occupied.
+#[cfg(unix)]
+fn claim_left_report(final_path: &Path) -> String {
+    format!(
+        "the empty file this run created at {} could not be confirmed as removed",
+        final_component_for_display(final_path)
+    )
 }
 
 /// Disarms the destructor's ambient-path removal, records the open file's
@@ -2779,6 +2810,48 @@ mod tests {
             fs::read(&final_path).unwrap(),
             b"planted",
             "an entry planted in place of the placeholder must survive the cleanup"
+        );
+    }
+
+    /// A withdrawal the operation cannot confirm is reported next to the
+    /// commit failure, because the empty placeholder may still hold the
+    /// output name against a further attempt. Here the entry is gone by
+    /// the time the withdrawal reads it, which is also what a filesystem
+    /// reporting no identities produces: no evidence either way.
+    #[cfg(unix)]
+    #[test]
+    fn finalize_via_claim_reports_a_withdrawal_it_cannot_confirm() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let final_path = tmp_dir.path().join("out.txt");
+        let final_name = final_path.file_name().unwrap();
+
+        let mut tmp = tempfile::Builder::new()
+            .tempfile_in(tmp_dir.path())
+            .unwrap();
+        tmp.write_all(b"payload").unwrap();
+        let tmp_name = tmp.path().file_name().unwrap().to_os_string();
+        let output_dir = OutputDir::open(tmp_dir.path()).unwrap();
+
+        let err = finalize_file_via_claim_with(
+            tmp,
+            &tmp_name,
+            &final_path,
+            "Output",
+            &output_dir,
+            |dir| {
+                dir.remove_file(final_name).unwrap();
+                dir.remove_file(&tmp_name).unwrap();
+            },
+        )
+        .expect_err("a rename with no staged file must fail the commit");
+        assert!(!err.committed());
+        let message = match err.into_crypto_error() {
+            CryptoError::Io(e) => e.to_string(),
+            other => panic!("expected an I/O failure, got {other:?}"),
+        };
+        assert!(
+            message.contains("out.txt") && message.contains("could not be confirmed as removed"),
+            "the unconfirmed withdrawal must be reported, got: {message}"
         );
     }
 

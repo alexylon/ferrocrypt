@@ -40,26 +40,29 @@ pub(crate) use format::PERMISSION_BITS_MASK;
 /// authenticated-but-incomplete plaintext that an unaware caller could pick
 /// up. The post-commit exceptions are described below.
 ///
-/// Three reports can occur *after* the root-mode step has confirmed the
-/// promoted identity. That confirmation ratifies the output as the
-/// operation's committed result rather than staged work, so this policy never
-/// removes it:
+/// Three reports can occur *after* the output became visible at the final
+/// name. The staged record leaves the cleanup slot as soon as the run
+/// establishes that the entry there is its own — at the root-mode step where
+/// the identity confirms it, otherwise at the final-name check that follows —
+/// so this policy never removes a committed output:
 ///
 /// - The final name no longer denotes the entry the run staged. The
 ///   decrypt returns `Err` and FerroCrypt does not remove the committed
 ///   object. If another writer moved it, it remains under that writer's chosen
-///   name; an entry placed at the final name is also left alone. This identity
-///   check is Unix-only.
+///   name; an entry placed at the final name is also left alone. The check runs
+///   on every supported platform, and is skipped only where the filesystem
+///   supplies no identity to compare.
 /// - The destination directory path no longer denotes the directory used for
 ///   the commit. The decrypt returns `Err` and does not remove the confirmed
 ///   output by name. If the directory was renamed, the complete plaintext is
-///   under that new name. This check is also Unix-only.
-/// - On a Unix filesystem whose no-replace rename is unavailable, a file-root
-///   commit can succeed by hard link while removal of the `.incomplete` name
-///   fails, or while a concurrent rename/replacement makes that removal target
-///   the wrong entry. The decrypt requires the retained committed inode to have
-///   exactly one link before success. Otherwise it returns `Err`, preserves the
-///   complete commit and any additional link, and never withdraws the final
+///   under that new name. This check runs on the same terms.
+/// - A committed file root carries more than one name. The count is read
+///   through the retained handle for every file root, on every supported
+///   platform and whatever route committed the name: a local writer can link
+///   the staged plaintext before the commit, and that link survives it. A
+///   hard-link fallback can also leave its staging name behind, or have its
+///   removal reach the wrong entry. The decrypt returns `Err`, preserves the
+///   complete commit and any additional name, and never withdraws the final
 ///   name after cleanup uncertainty.
 ///
 /// A run that cannot hold a handle to the staged root fails before

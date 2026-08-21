@@ -207,7 +207,9 @@ before the next stable release.
   entry may be destroyed" bound, and the same trust assumption, as the
   Windows directory case below. If the commit fails at that step instead,
   FerroCrypt withdraws its reservation only while the entry is still its
-  own empty file, so a planted entry is left in place. Both fallback commits anchor to your
+  own empty file, so a planted entry is left in place. A withdrawal it
+  cannot confirm is named in the returned error, because that empty file
+  may still hold the name against a further attempt. Both fallback commits anchor to your
   output folder: FerroCrypt opens the folder once and performs the link,
   the claim, the final rename, and its own cleanup through that one
   handle, so renaming the folder mid-commit cannot redirect any step.

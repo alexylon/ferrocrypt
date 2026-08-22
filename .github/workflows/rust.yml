@@ -58,7 +58,7 @@ jobs:
         # I/O (minutes and ~8 GiB of disk), so every push skips it. It runs
         # as a release gate instead (the `large-file` job in `release.yml`),
         # and locally via `FERROCRYPT_GAUNTLET_LARGE_FILE=1` in
-        # `run_all_tests.sh`.
+        # `scripts/run_all_tests.sh`.
         env:
           FERROCRYPT_REQUIRE_WINDOWS_SYMLINK_TESTS: "1"
         run: cargo test --verbose -- --test-threads=1 --include-ignored --skip regenerate_fixtures --skip regenerate_suite_vectors --skip round_trip_file_larger_than_4gib
@@ -170,7 +170,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Check version terminology
-        run: ./check_terminology.sh
+        run: ./scripts/check_terminology.sh
 
   doc:
     runs-on: ubuntu-latest

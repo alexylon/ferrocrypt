@@ -13,7 +13,7 @@
 # from a passphrase, and only the directory path builds and extracts an
 # archive.
 #
-# Usage: ./smoke_static_cli.sh /path/to/ferrocrypt
+# Usage: ./scripts/smoke_static_cli.sh /path/to/ferrocrypt
 
 set -eu
 

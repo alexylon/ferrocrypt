@@ -135,7 +135,7 @@ Ensure:
 3. The large-file round trip passes (see below)
 4. No confirmed release blocker remains under
    [`THREAT_MODEL.md` section 6](THREAT_MODEL.md#6-release-and-review-governance)
-5. Code is formatted: `./fmt.sh`
+5. Code is formatted: `./scripts/fmt.sh`
 6. You have push access to the remote repository
 7. crates.io credentials are configured: `cargo login`
 

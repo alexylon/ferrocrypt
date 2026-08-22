@@ -33,7 +33,11 @@
 # NTFS itself is covered by lane 1 - the default filesystem run.
 
 $ErrorActionPreference = "Continue"
-Set-Location -Path $PSScriptRoot
+
+# Every path below is relative to the repository root, one level above
+# the directory holding this script.
+$RepoRoot = Split-Path -Parent $PSScriptRoot
+Set-Location -Path $RepoRoot
 
 # Keep in sync with the msrv / msrv-cli jobs in .github/workflows/rust.yml.
 $MsrvLib = "1.87.0"
@@ -44,16 +48,16 @@ $Fail = @()
 $Skip = @()
 
 $TestWorkspaceRoots = @(
-    (Join-Path $PSScriptRoot "ferrocrypt-lib\tests\workspace"),
-    (Join-Path $PSScriptRoot "ferrocrypt-lib\tests\workspace_api"),
-    (Join-Path $PSScriptRoot "ferrocrypt-lib\tests\workspace_config_symmetry"),
-    (Join-Path $PSScriptRoot "ferrocrypt-lib\tests\workspace_fixture_stability"),
-    (Join-Path $PSScriptRoot "ferrocrypt-lib\tests\workspace_testvector_suite"),
-    (Join-Path $PSScriptRoot "ferrocrypt-lib\tests\workspace_concurrency"),
-    (Join-Path $PSScriptRoot "ferrocrypt-lib\tests\workspace_memory_bounds"),
-    (Join-Path $PSScriptRoot "ferrocrypt-lib\tests\workspace_roundtrip_randomized"),
-    (Join-Path $PSScriptRoot "ferrocrypt-lib\tests\workspace_large_file"),
-    (Join-Path $PSScriptRoot "ferrocrypt-cli\tests\cli_workspace")
+    (Join-Path $RepoRoot "ferrocrypt-lib\tests\workspace"),
+    (Join-Path $RepoRoot "ferrocrypt-lib\tests\workspace_api"),
+    (Join-Path $RepoRoot "ferrocrypt-lib\tests\workspace_config_symmetry"),
+    (Join-Path $RepoRoot "ferrocrypt-lib\tests\workspace_fixture_stability"),
+    (Join-Path $RepoRoot "ferrocrypt-lib\tests\workspace_testvector_suite"),
+    (Join-Path $RepoRoot "ferrocrypt-lib\tests\workspace_concurrency"),
+    (Join-Path $RepoRoot "ferrocrypt-lib\tests\workspace_memory_bounds"),
+    (Join-Path $RepoRoot "ferrocrypt-lib\tests\workspace_roundtrip_randomized"),
+    (Join-Path $RepoRoot "ferrocrypt-lib\tests\workspace_large_file"),
+    (Join-Path $RepoRoot "ferrocrypt-cli\tests\cli_workspace")
 )
 
 function Remove-StaleTestWorkspaces {

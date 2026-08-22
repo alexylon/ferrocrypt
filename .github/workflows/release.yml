@@ -197,7 +197,7 @@ jobs:
         run: |
           docker run --rm \
             --volume "$PWD/target/${{ matrix.target }}/release/ferrocrypt:/ferrocrypt:ro" \
-            --volume "$PWD/smoke_static_cli.sh:/smoke_static_cli.sh:ro" \
+            --volume "$PWD/scripts/smoke_static_cli.sh:/smoke_static_cli.sh:ro" \
             alpine:latest /smoke_static_cli.sh /ferrocrypt
 
       # ── Desktop app (excluded from workspace) ──────────────────────────

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# The build and the binary path below are relative to the repository root.
+cd "$(dirname "$0")/.."
+
 echo "Building release binary..."
 cargo build --release
 

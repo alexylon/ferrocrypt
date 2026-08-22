@@ -22,6 +22,9 @@
 
 set -u
 
+# Every path below is relative to the repository root.
+cd "$(dirname "$0")/.." || exit 1
+
 pattern='\bv1\b|\bv2\b|\bv1\.x\b|\bv1\.0\b|\bv0\.x\b|\bat 1\.0\b'
 
 raw=$(grep -rnE "$pattern" \

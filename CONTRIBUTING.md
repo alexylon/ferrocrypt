@@ -44,7 +44,7 @@ Run the checks that match your change.
 ### Workspace changes (`ferrocrypt-lib`, `ferrocrypt-cli`)
 
 ```bash
-./fmt.sh
+./scripts/fmt.sh
 cargo test -- --test-threads=1
 cargo clippy --workspace --all-targets -- -D warnings
 ```
@@ -52,7 +52,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 ### Desktop changes (`ferrocrypt-desktop`)
 
 ```bash
-./fmt.sh
+./scripts/fmt.sh
 (cd ferrocrypt-desktop && cargo build)
 (cd ferrocrypt-desktop && cargo clippy --all-targets -- -D warnings)
 ```
@@ -204,7 +204,7 @@ Documentation should match actual behavior, defaults, limitations, and compatibi
 Before opening or merging a PR, verify that:
 
 - [ ] the change follows the principles above
-- [ ] formatting has been run (`./fmt.sh`)
+- [ ] formatting has been run (`./scripts/fmt.sh`)
 - [ ] relevant build/test/clippy checks were run
 - [ ] no new panic paths were introduced in normal flows
 - [ ] no secrets can leak through logs, errors, or debug output

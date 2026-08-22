@@ -3,7 +3,7 @@
 # .github/workflows/rust.yml.
 set -euo pipefail
 
-cd "$(dirname "$0")/ferrocrypt-lib/fuzz"
+cd "$(dirname "$0")/../ferrocrypt-lib/fuzz"
 
 # Capture into a variable so `set -e` trips if `fuzz list` fails — command
 # substitution in `for ... in $(...)` is not subject to fail-fast.

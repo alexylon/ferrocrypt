@@ -11,7 +11,7 @@
 # container needs more than their 1 GiB of memory. Where Docker itself is
 # given less than that, the run is killed part way through key derivation.
 #
-# Usage: ./build_static_cli.sh [x86_64|aarch64]   (default: x86_64)
+# Usage: ./scripts/build_static_cli.sh [x86_64|aarch64]   (default: x86_64)
 
 set -euo pipefail
 
@@ -30,7 +30,7 @@ case "${1:-x86_64}" in
         ;;
 esac
 
-repo="$(cd "$(dirname "$0")" && pwd)"
+repo="$(cd "$(dirname "$0")/.." && pwd)"
 out="$(mktemp -d)"
 # Docker may write the copied binary as root, which the host user cannot
 # always remove; a leftover temporary directory is not worth an error here.
@@ -67,7 +67,7 @@ docker run --rm --platform "$platform" \
 echo "== smoke-testing $target on Alpine =="
 docker run --rm --platform "$platform" \
     --volume "$out/ferrocrypt:/ferrocrypt:ro" \
-    --volume "$repo/smoke_static_cli.sh:/smoke_static_cli.sh:ro" \
+    --volume "$repo/scripts/smoke_static_cli.sh:/smoke_static_cli.sh:ro" \
     alpine:latest /smoke_static_cli.sh /ferrocrypt
 
 echo "OK: $target builds self-contained and passes the smoke test."

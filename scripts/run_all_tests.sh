@@ -14,7 +14,7 @@
 #   4. desktop            — ferrocrypt-desktop suite (own target dir)
 #   5. release-cli        — release-profile CLI tests with full-strength
 #                           Argon2id (1 GiB sequential; needs >= 4 GiB RAM)
-#   6. fuzz-smoke         — ./fuzz_smoke.sh (needs nightly + cargo-fuzz)
+#   6. fuzz-smoke         — ./scripts/fuzz_smoke.sh (needs nightly + cargo-fuzz)
 #   7. fs-matrix lanes    — archive tests on non-default filesystems:
 #                           macOS: case-sensitive APFS, exFAT, FAT32
 #                                  (hdiutil images, no root needed)
@@ -39,7 +39,7 @@
 #     CI runs them on every push.
 
 set -u
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.." || exit 1
 
 # Keep in sync with the msrv / msrv-cli jobs in .github/workflows/rust.yml.
 MSRV_LIB=1.87.0
@@ -186,7 +186,7 @@ fi
 # ── 6. fuzz smoke ────────────────────────────────────────────────────
 if rustup toolchain list 2>/dev/null | grep -q nightly && cargo fuzz --version >/dev/null 2>&1; then
     note "fuzz-smoke"
-    ./fuzz_smoke.sh
+    ./scripts/fuzz_smoke.sh
     record fuzz-smoke $?
 else
     skip fuzz-smoke "needs a nightly toolchain and cargo-fuzz"

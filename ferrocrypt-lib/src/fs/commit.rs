@@ -81,29 +81,28 @@ use cap_std::fs::{Dir, File, OpenOptions};
 /// readable handle instead and keeps that requirement.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn open_commit_anchor(path: &Path) -> io::Result<Dir> {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    // `read(true)` supplies the `O_RDONLY` access mode, which is zero,
-    // so the flag word the kernel sees is exactly [`SEARCH_ONLY_FLAGS`].
-    // `std` refuses an `OpenOptions` with no access mode at all.
-    match std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(SEARCH_ONLY_FLAGS)
-        .open(path)
-    {
-        Ok(handle) => Ok(Dir::from_std_file(handle)),
+    // Opened through `rustix` so the flag word reaches the system call
+    // as written. The standard library removes every `O_ACCMODE` bit
+    // from a caller-supplied flag, and musl counts this request as an
+    // access mode, which would leave an ordinary read open that a
+    // directory without read permission refuses.
+    match rustix::fs::open(path, SEARCH_ONLY_FLAGS, rustix::fs::Mode::empty()) {
+        Ok(handle) => Ok(Dir::from_std_file(std::fs::File::from(handle))),
         Err(_) => Dir::open_ambient_dir(path, cap_std::ambient_authority()),
     }
 }
 
 /// Linux opens a directory for path resolution alone with `O_PATH`.
 #[cfg(target_os = "linux")]
-const SEARCH_ONLY_FLAGS: i32 = libc::O_PATH | libc::O_DIRECTORY;
+const SEARCH_ONLY_FLAGS: rustix::fs::OFlags = rustix::fs::OFlags::PATH
+    .union(rustix::fs::OFlags::DIRECTORY)
+    .union(rustix::fs::OFlags::CLOEXEC);
 
 /// macOS spells the same request `O_SEARCH`, itself `O_EXEC` plus the
-/// directory requirement.
+/// directory requirement. `rustix` names no flag for it.
 #[cfg(target_os = "macos")]
-const SEARCH_ONLY_FLAGS: i32 = libc::O_SEARCH;
+const SEARCH_ONLY_FLAGS: rustix::fs::OFlags =
+    rustix::fs::OFlags::from_bits_retain(libc::O_SEARCH as u32).union(rustix::fs::OFlags::CLOEXEC);
 
 /// Ordinary directory open for the targets without a narrow one. The
 /// commit still resolves through this handle; only the request is

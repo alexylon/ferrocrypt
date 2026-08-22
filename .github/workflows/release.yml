@@ -80,6 +80,11 @@ jobs:
   build:
     needs: [verify, fuzz, desktop-version, large-file]
     strategy:
+      # One target's failure must not cancel the others: a tag build is
+      # expensive to reach and every remaining artifact is evidence about
+      # what went wrong. Nothing incomplete can escape, because `release`
+      # requires the whole matrix to have succeeded.
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
@@ -90,20 +95,42 @@ jobs:
             os: macos-latest
           - target: x86_64-pc-windows-msvc
             os: windows-latest
+          # Statically linked Linux CLI builds. They carry their own C
+          # library, so one file runs on any Linux machine of that
+          # processor family: Alpine and other musl distributions,
+          # minimal container images, and distributions whose glibc is
+          # older than the build machine's. `cli_only` skips the desktop
+          # app, which needs a system graphics stack that no
+          # self-contained binary can carry. The aarch64 build runs on an
+          # arm64 runner rather than cross-compiling, so it is linked and
+          # smoke-tested on the processor it ships for.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            cli_only: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            cli_only: true
 
     runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
+      # Installs the toolchain rather than adding a target to whatever the
+      # runner image ships, because the arm64 Linux image carries a
+      # smaller tool set than the others and need not have Rust at all.
       - name: Install Rust toolchain
-        run: rustup target add ${{ matrix.target }}
+        uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
 
       - name: Install Linux dependencies
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && !matrix.cli_only
         run: sudo apt-get update && sudo apt-get install -y libfontconfig-dev libfreetype-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libwayland-dev libssl-dev
 
       - name: Install cargo-bundle
+        if: ${{ !matrix.cli_only }}
         run: cargo install cargo-bundle
 
       # ── CLI (workspace member) ──────────────────────────────────────────
@@ -111,13 +138,75 @@ jobs:
       - name: Build CLI
         run: cargo build --release --target ${{ matrix.target }} -p ferrocrypt-cli
 
+      # ── Static-linkage checks (musl targets) ────────────────────────────
+
+      # A build that quietly picked up a dynamic dependency would still
+      # run on this runner and fail only on the user's machine, so the
+      # claim is checked here rather than assumed. `readelf` states it
+      # exactly: a self-contained binary names no interpreter to load it
+      # and lists no libraries to load. The wording of `file` and `ldd`
+      # differs between the two targets, so neither is used for the test.
+      - name: Verify the CLI has no dynamic dependencies
+        if: ${{ matrix.cli_only }}
+        run: |
+          if ! command -v readelf > /dev/null; then
+            sudo apt-get update
+            sudo apt-get install --yes binutils
+          fi
+          binary="target/${{ matrix.target }}/release/ferrocrypt"
+          if [ ! -f "$binary" ]; then
+            echo "::error::$binary does not exist, so nothing was verified."
+            exit 1
+          fi
+          # Both reports are captured before they are searched. Piping
+          # readelf straight into grep would report a failed readelf as
+          # "no match found", which is the answer this step exists to
+          # refuse to give by accident; a failed capture stops the step.
+          headers="$(readelf --program-headers "$binary")"
+          dynamic="$(readelf --dynamic "$binary")"
+          if printf '%s\n' "$headers" | grep -q INTERP; then
+            echo "::error::$binary names a dynamic loader, so it is not self-contained."
+            printf '%s\n' "$headers" | grep INTERP
+            exit 1
+          fi
+          if printf '%s\n' "$dynamic" | grep -q NEEDED; then
+            echo "::error::$binary depends on shared libraries, so it is not self-contained."
+            printf '%s\n' "$dynamic" | grep NEEDED
+            exit 1
+          fi
+          echo "$binary names no loader and needs no shared library."
+
+      # The strongest form of the same claim: an image built from nothing
+      # holds this one file, so anything the binary reaches for that it
+      # does not carry is absent.
+      - name: Run the CLI in an image containing nothing else
+        if: ${{ matrix.cli_only }}
+        run: |
+          staging="$(mktemp -d)"
+          cp "target/${{ matrix.target }}/release/ferrocrypt" "$staging/ferrocrypt"
+          printf 'FROM scratch\nCOPY ferrocrypt /ferrocrypt\nENTRYPOINT ["/ferrocrypt"]\n' \
+            > "$staging/Dockerfile"
+          docker build --tag ferrocrypt-static "$staging"
+          docker run --rm ferrocrypt-static --version
+
+      # Encrypt and decrypt for real on a distribution whose only C
+      # library is musl and which has no build tooling, which is the
+      # machine these artifacts exist for.
+      - name: Smoke-test the CLI on Alpine
+        if: ${{ matrix.cli_only }}
+        run: |
+          docker run --rm \
+            --volume "$PWD/target/${{ matrix.target }}/release/ferrocrypt:/ferrocrypt:ro" \
+            --volume "$PWD/smoke_static_cli.sh:/smoke_static_cli.sh:ro" \
+            alpine:latest /smoke_static_cli.sh /ferrocrypt
+
       # ── Desktop app (excluded from workspace) ──────────────────────────
 
       # macOS / Linux desktop bundling via cargo-bundle (.app / .deb).
       # cargo-bundle's Windows MSI backend is unimplemented, so Windows uses
       # cargo-wix instead (separate step below).
       - name: Bundle Desktop (macOS/Linux)
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && !matrix.cli_only
         working-directory: ferrocrypt-desktop
         run: cargo bundle --release --target ${{ matrix.target }}
 
@@ -168,7 +257,7 @@ jobs:
           zip -r "$GITHUB_WORKSPACE/FerroCrypt-${{ matrix.target }}.zip" FerroCrypt.app
 
       - name: Package Desktop (linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && !matrix.cli_only
         run: cp ferrocrypt-desktop/target/${{ matrix.target }}/release/bundle/deb/*.deb FerroCrypt-${{ matrix.target }}.deb
 
       - name: Package Desktop (windows)

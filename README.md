@@ -81,8 +81,11 @@ Pre-built CLI binaries and desktop packages are published on the [GitHub Release
 
 Available release artifacts include:
 
-- CLI binaries for macOS, Linux, and Windows
+- CLI binaries for macOS, Linux (`gnu`), and Windows
+- Self-contained Linux CLI binaries (`musl`) for 64-bit Intel/AMD and ARM
 - Desktop packages for macOS, Debian/Ubuntu, and Windows
+
+> **Linux:** The `musl` binaries contain everything they need, so they run on any Linux machine of that processor family without a matching C library installed — Alpine, minimal container images, and older distributions included. The `gnu` binaries remain the usual choice on mainstream distributions.
 
 > **macOS:** On first run, macOS may block the app. When the warning dialog appears, click *Done*. Then open System Settings → Privacy & Security and scroll to the *Security* section. A line will appear there saying *"FerroCrypt" was blocked to protect your Mac*, with an *Open Anyway* button next to it — click that button. The button is only available for about an hour after the first blocked launch attempt.
 

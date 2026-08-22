@@ -28,12 +28,18 @@ cargo test "output_file" -- --test-threads=1 # filter by substring
 # this machine.
 cargo check  --package ferrocrypt --target x86_64-pc-windows-gnu
 cargo clippy --package ferrocrypt --target x86_64-pc-windows-gnu --all-targets -- -D warnings
+
+# Static Linux CLI artifacts (for the `*-unknown-linux-musl` release
+# builds). Runs in containers, so it works from macOS; the argument
+# defaults to x86_64.
+./build_static_cli.sh aarch64
 ```
 
 Notes:
 - For **doc-only changes**, do not run code tests/builds unless the change affects rustdoc rendering or examples.
 - The desktop crate is excluded from the workspace, so root-level `cargo test` / `cargo clippy` do not cover it locally. **CI does cover it** via a separate `desktop` job that runs clippy + build + tests on Ubuntu / macOS / Windows on every PR.
 - The Windows cross-check only type-checks (no linker), so it is sufficient for verifying `cfg(target_os = "windows")` / `cfg(not(unix))` arms compile. Use it whenever you touch `fs::atomic` or any other branch that varies by platform. No CI job runs it, so it is the only thing standing between a broken Windows arm and a release — which is why it denies warnings like every other clippy command here.
+- The static Linux CLI targets cannot be built on macOS: they need a Linux-targeting linker. `./build_static_cli.sh` builds one in a container, checks that it names no dynamic loader and needs no shared library, and smoke-tests it on Alpine — the same checks `release.yml` applies before a tag ships the binaries. CI runs the workspace suite against both musl targets on every push (`rust.yml`'s `musl` job), so a release never ships a binary the suite has not run on.
 - Run the Windows cross-check on its own. A `ferrocrypt-desktop` cargo command running at the same time makes it fail with `unresolved import ferrocrypt_test_support` in `ferrocrypt`'s own test targets, which looks like a real defect but disappears when the command runs alone. Concurrent workspace commands are fine.
 
 ## `.notes/` directory

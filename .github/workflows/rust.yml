@@ -63,6 +63,46 @@ jobs:
           FERROCRYPT_REQUIRE_WINDOWS_SYMLINK_TESTS: "1"
         run: cargo test --verbose -- --test-threads=1 --include-ignored --skip regenerate_fixtures --skip regenerate_suite_vectors --skip round_trip_file_larger_than_4gib
 
+  # The static Linux CLI artifacts are built against musl, a different C
+  # library from the glibc every other Linux lane uses, and the aarch64
+  # one ships for a processor no other lane runs on. On Linux the
+  # filesystem layer reaches the kernel directly, so both are expected to
+  # behave exactly like the lanes above; this job is what turns that
+  # expectation into a checked fact, so a release cannot ship a binary
+  # the suite has never run on.
+  #
+  # The command matches the `build` job's, so this lane carries the same
+  # coverage rather than a reduced version of it; see the comment there
+  # for what each `--skip` excludes.
+  musl:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Run the workspace tests against musl
+        run: |
+          cargo test --target ${{ matrix.target }} --verbose -- \
+            --test-threads=1 --include-ignored \
+            --skip regenerate_fixtures --skip regenerate_suite_vectors \
+            --skip round_trip_file_larger_than_4gib
+
   msrv:
     runs-on: ubuntu-latest
     steps:

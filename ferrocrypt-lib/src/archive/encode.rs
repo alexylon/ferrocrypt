@@ -2169,11 +2169,9 @@ mod tests {
     }
 
     /// Source directory mode round-trips intact via the writer's
-    /// `archive_dir_mode` and the reader's post-rename root-chmod
-    /// (FORMAT.md §9.11 step 16). Validates "root chmod after rename"
-    /// indirectly: if the reader applied root mode pre-rename and the
-    /// mode lacked search permission, the rename itself would fail on
-    /// macOS.
+    /// `archive_dir_mode` and the reader's root-mode restoration. This is
+    /// a plain mode round-trip test; it does not establish whether the
+    /// reader applies the root mode before or after promotion.
     #[cfg(unix)]
     #[test]
     fn round_trip_preserves_directory_mode() {

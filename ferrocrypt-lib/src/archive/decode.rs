@@ -26,12 +26,13 @@
 //! 13. verify archive EOF (no trailing bytes)
 //! 14. apply descendant directory modes deepest-first
 //! 15. promote `{root}.incomplete` to `{root}` via no-clobber rename
-//! 16. apply the root entry's stored mode AFTER promotion. For
-//!     directory roots: macOS compatibility (a non-search-permitted
-//!     root mode would block the rename). For file roots: keep the
-//!     staged file at `INITIAL_FILE_CREATE_MODE` throughout staging
-//!     so a permissive manifest mode is never briefly visible to
-//!     other local users while the file holds plaintext.
+//! 16. apply the root entry's stored mode AFTER promotion. On Unix,
+//!     until commit, directory roots stay at the owner-private and
+//!     owner-accessible `0o700` staging mode so a permissive stored
+//!     mode cannot expose plaintext and a restrictive one cannot
+//!     obstruct failure cleanup. File roots stay at
+//!     `INITIAL_FILE_CREATE_MODE` throughout staging so a permissive
+//!     stored mode is never briefly visible to other local users.
 //! 17. confirm the final name still denotes the staged object, and
 //!     that `output_dir` still denotes the anchor the output was
 //!     committed through
@@ -311,10 +312,12 @@ where
 
         // FORMAT.md §9.11 step 16: apply root entry mode AFTER promotion.
         //
-        // Directory roots: macOS can refuse to rename a directory whose
-        // mode lacks search permission, so the root `.incomplete` stayed
-        // at the initial 0o700 (search-permitted owner-only) mode through
-        // extraction. Walk from the held `output_handle` to the renamed
+        // Directory roots: on Unix, the root `.incomplete` stayed at the
+        // initial 0o700 mode through extraction and promotion. Until
+        // commit, that mode keeps staged plaintext unavailable to group
+        // and other even when the stored mode is permissive, and keeps the
+        // owner access `DeleteOnError` needs when the stored mode is
+        // restrictive. Walk from the held `output_handle` to the renamed
         // root via `open_dir_at_rel`, which routes through
         // `open_dir_nofollow` + Windows reparse-point post-check — a
         // symlink substituted at the final name between rename and chmod

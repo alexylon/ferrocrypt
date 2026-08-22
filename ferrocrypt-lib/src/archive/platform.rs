@@ -42,11 +42,11 @@ use crate::error::{sanitize_for_display, sanitize_path_for_display};
 /// directory mode is applied later via a handle-based chmod so a
 /// restrictive parent (e.g. 0o500) declared higher up in the archive
 /// doesn't block creation of its children. The temporary mode is
-/// owner-private on purpose: root directory chmods are deferred until
-/// after the `.incomplete` → final rename for macOS compatibility, so
-/// the working tree must not expose plaintext or wider group/other
-/// access while it is still staged. Unix-only — Windows ignores the
-/// mode arg.
+/// owner-private and owner-accessible on purpose: root directory chmods
+/// are deferred until after the `.incomplete` → final rename so a
+/// permissive stored mode cannot expose staged plaintext and a restrictive
+/// stored mode cannot obstruct failure cleanup. Unix-only — Windows
+/// ignores the mode arg.
 #[cfg(unix)]
 const DIR_CREATE_MODE: u32 = 0o700;
 

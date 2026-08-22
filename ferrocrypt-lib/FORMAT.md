@@ -1732,10 +1732,12 @@ Readers MUST process FCA archives in this order:
 14. apply deferred directory modes deepest-first, except the root directory;
 15. promote `{root}.incomplete` to the final output name with no-clobber
     semantics;
-16. apply the root entry's mode after promotion. For directory roots this is a
-    macOS-compatibility requirement; for regular-file roots this prevents the
-    staged file from being briefly visible at a wider mode under either the
-    `.incomplete` name or the final name while it still holds plaintext.
+16. apply the root entry's mode after promotion. On Unix, until commit, a
+    directory root MUST remain at its owner-private and owner-accessible initial
+    mode so a permissive stored mode cannot expose staged plaintext and a
+    restrictive stored mode cannot obstruct failure cleanup. A regular-file root
+    MUST likewise retain its restrictive initial mode through promotion, so its
+    stored mode cannot expose plaintext before the handle-based mode application.
     Where the platform exposes a stable file identity, the reader MUST confirm
     that the reopened root denotes the object staged in step 10 and MUST apply
     the mode through that same handle, because a mode applies to an object
@@ -2013,10 +2015,12 @@ fail closed when required support is absent.
 
 On Unix, implementations SHOULD restore regular-file modes by handle where
 supported and SHOULD apply directory modes after child creation. Directory modes
-are applied deepest-first. The root entry's mode is applied after final
-promotion: for directory roots this preserves behavior when the root mode lacks
-search permission, and for regular-file roots this prevents the staged file
-from being briefly visible at a wider mode while it still holds plaintext.
+are applied deepest-first. The root entry's mode MUST NOT be applied before final
+promotion. Until commit, directory roots MUST remain owner-private and
+owner-accessible so a permissive stored mode cannot expose staged plaintext and a
+restrictive stored mode cannot obstruct failure cleanup. Regular-file roots MUST
+likewise retain their restrictive initial mode through promotion until the
+handle-based mode application.
 
 On Windows, Unix permission restoration is a no-op or best-effort compatibility
 operation. Windows implementations MUST preserve the path and reparse-point

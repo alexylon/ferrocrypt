@@ -6,13 +6,13 @@
 
 ![](https://github.com/alexylon/ferrocrypt/actions/workflows/rust.yml/badge.svg)
 &nbsp;
-[![crate: ferrocrypt](https://img.shields.io/crates/v/ferrocrypt.svg?label=crate%3A%20ferrocrypt&color=blue)](https://crates.io/crates/ferrocrypt/0.3.0-rc.3)
+[![crate: ferrocrypt](https://img.shields.io/crates/v/ferrocrypt.svg?label=crate%3A%20ferrocrypt&color=blue)](https://crates.io/crates/ferrocrypt/0.3.0-rc.4)
 &nbsp;
-[![docs.rs](https://img.shields.io/docsrs/ferrocrypt/latest?color=2e7d32)](https://docs.rs/ferrocrypt/0.3.0-rc.3)
+[![docs.rs](https://img.shields.io/docsrs/ferrocrypt/latest?color=2e7d32)](https://docs.rs/ferrocrypt/0.3.0-rc.4)
 &nbsp;
 ![MSRV](https://img.shields.io/badge/MSRV-1.87-blue)
 &nbsp;
-[![crate: ferrocrypt-cli](https://img.shields.io/crates/v/ferrocrypt-cli.svg?label=crate%3A%20ferrocrypt-cli&color=blue)](https://crates.io/crates/ferrocrypt-cli/0.3.0-rc.3)
+[![crate: ferrocrypt-cli](https://img.shields.io/crates/v/ferrocrypt-cli.svg?label=crate%3A%20ferrocrypt-cli&color=blue)](https://crates.io/crates/ferrocrypt-cli/0.3.0-rc.4)
 
 FerroCrypt is a pure Rust library, CLI, and desktop application for encrypting and decrypting files and directories using password-based or key-pair-based encryption.
 
@@ -93,7 +93,7 @@ Available release artifacts include:
 
 ```bash
 # Current v0.3.0 release candidate
-cargo add ferrocrypt@0.3.0-rc.3
+cargo add ferrocrypt@0.3.0-rc.4
 ```
 
 API documentation is available on [docs.rs](https://docs.rs/ferrocrypt/latest/ferrocrypt/).
@@ -104,7 +104,7 @@ Install from crates.io:
 
 ```bash
 # Pre-release of v0.3.0 (opt-in; required to use the v0.3.0 CLI documented below)
-cargo install ferrocrypt-cli --version 0.3.0-rc.3
+cargo install ferrocrypt-cli --version 0.3.0-rc.4
 ```
 
 Or build from source:

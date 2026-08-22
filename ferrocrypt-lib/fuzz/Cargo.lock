@@ -323,7 +323,7 @@ checksum = "a043dc74da1e37d6afe657061213aa6f425f855399a11d3463c6ecccc4dfda1f"
 
 [[package]]
 name = "ferrocrypt"
-version = "0.3.0-rc.3"
+version = "0.3.0-rc.4"
 dependencies = [
  "argon2",
  "bech32",

@@ -4,6 +4,8 @@ All notable changes to FerroCrypt are documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0-rc.4] - 2026-08-22
+
 ### Added
 - **FerroCrypt now publishes its security boundary and release standard in `THREAT_MODEL.md`.** The document defines what FerroCrypt protects, the output-directory trust requirement, the supported filesystem set, interactive and service profiles, explicit non-goals, severity, and which confirmed security defects block a stable release.
 - **`encrypt` and `decrypt` gain `--max-archive-entries`, `--max-archive-size`, `--max-archive-path-depth`, `--max-archive-path-bytes`, and `--max-archive-manifest`.** The caps on the folder inside a `.fcr` file were reachable only from the library, so a folder holding more than 250,000 files and directories, or more than 64 GiB of content, could not be encrypted from the command line at all — and the rejection gave no flag to raise. Both sides apply the same caps, so raising one for a large folder means passing the same flag to the matching `decrypt`. The defaults are unchanged and `--help` prints them.

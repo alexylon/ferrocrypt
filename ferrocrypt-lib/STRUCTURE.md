@@ -853,7 +853,7 @@ It rejects:
 - `.` and `..` components, and any host `Component` that is not `Normal`;
 - components longer than 244 bytes (`FCA_COMPONENT_MAX_BYTES` — the 255-byte filesystem name limit minus the `.incomplete` staging suffix);
 - ASCII control bytes (`0x00..=0x1F`, `0x7F`);
-- C1 control characters (`U+0080..=U+009F`) and the bidirectional-formatting controls (`U+061C`, `U+200E`, `U+200F`, `U+202A..=U+202E`, `U+2066..=U+2069`), the latter shared with the error-message sanitizer through `error::is_bidi_control`;
+- C1 control characters (`U+0080..=U+009F`), the bidirectional span controls (`U+202A..=U+202E`, `U+2066..=U+2069`), and the line and paragraph separators (`U+2028`, `U+2029`); the three direction marks (`U+061C`, `U+200E`, `U+200F`) are accepted by the grammar and escaped by the error-message sanitizer, whose `error::is_bidi_control` covers all twelve;
 - Windows-reserved characters (`<`, `>`, `:`, `"`, `|`, `?`, `*`);
 - trailing dot or trailing space in any component;
 - Windows-reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `CLOCK$`, `CONIN$`, `CONOUT$`, `COM0..9`, `COM¹`/`COM²`/`COM³`, `LPT0..9`, `LPT¹`/`LPT²`/`LPT³`), including in extension stems (`CON.txt`, `LPT9.bin`), under ASCII-case-insensitive comparison (the superscript forms are matched on exact UTF-8 bytes);

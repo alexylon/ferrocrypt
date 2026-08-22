@@ -4,7 +4,8 @@
 //! public API exactly as an independent implementation would: decrypt
 //! each `.fcr` with the listed credential, read each `public.key`, or
 //! structurally validate each `private.key`, and require the listed outcome.
-//! Successful `decrypt` rows must reproduce `plaintext.txt` byte-for-byte;
+//! Successful `decrypt` rows must reproduce the content of `plaintext.txt`
+//! byte-for-byte under the name the fixture's archive stores;
 //! successful key-file rows must parse or validate without error. `error`
 //! rows must fail with both the listed typed error class and the exact
 //! user-facing message.
@@ -134,6 +135,7 @@ fn error_matches(class: &str, e: &CryptoError) -> bool {
         ),
         "KeyFileUnlockFailed" => matches!(e, CryptoError::KeyFileUnlockFailed),
         "MalformedArchive" => matches!(e, CryptoError::MalformedArchive { .. }),
+        "UnsafeArchivePath" => matches!(e, CryptoError::UnsafeArchivePath { .. }),
         "InvalidFormat(UnsupportedArchiveVersion)" => matches!(
             e,
             CryptoError::InvalidFormat(FormatDefect::UnsupportedArchiveVersion { .. })
@@ -234,6 +236,25 @@ fn attempt(suite: &Path, row: &Row, out: &Path) -> Result<(), CryptoError> {
     }
 }
 
+/// Returns the one entry a successful decrypt left in `out`. The name
+/// is whatever the fixture's archive stored — `plaintext.txt` for most
+/// rows, a name carrying an accepted direction mark for the §9.6 case —
+/// so the harness locates the output rather than assuming its name.
+fn single_output_entry(out: &Path) -> Result<PathBuf, String> {
+    let mut entries: Vec<PathBuf> = fs::read_dir(out)
+        .map_err(|e| format!("its output directory cannot be listed: {e}"))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("its output directory cannot be listed: {e}"))?;
+    match entries.len() {
+        1 => Ok(entries.remove(0)),
+        0 => Err("its output directory is empty".to_owned()),
+        n => Err(format!(
+            "its output directory holds {n} entries, expected 1"
+        )),
+    }
+}
+
 /// Replays every manifest row and collects mismatches, so one run
 /// reports every divergence instead of stopping at the first.
 #[test]
@@ -257,19 +278,21 @@ fn suite_manifest_holds() {
         let outcome = attempt(&suite, row, &out);
         match (row.expect.as_str(), outcome) {
             ("ok", Ok(())) => match row.action.as_str() {
-                "decrypt" => {
-                    let produced = fs::read(out.join("plaintext.txt"));
-                    match produced {
+                "decrypt" => match single_output_entry(&out) {
+                    Ok(path) => match fs::read(&path) {
                         Ok(bytes) if bytes == expected_plaintext => {}
                         Ok(_) => {
                             failures.push(format!("{}: decrypted plaintext differs", row.file));
                         }
                         Err(e) => failures.push(format!(
-                            "{}: decrypt succeeded but plaintext.txt is missing: {e}",
+                            "{}: decrypt succeeded but its output cannot be read: {e}",
                             row.file
                         )),
+                    },
+                    Err(detail) => {
+                        failures.push(format!("{}: decrypt succeeded but {detail}", row.file));
                     }
-                }
+                },
                 "read-public-key" | "validate-private-key" => {}
                 other => panic!("{}: unknown manifest action `{other}`", row.file),
             },

@@ -3844,8 +3844,18 @@ mod tests {
     /// safely.
     #[test]
     fn rejects_bidi_formatting_control_before_filesystem_output() {
+        assert_entry_name_rejected_as_format_control("holiday\u{202e}gpj.sh");
+    }
+
+    /// Spec §9.6: the line separator rejects the same way, before any
+    /// filesystem work.
+    #[test]
+    fn rejects_line_separator_before_filesystem_output() {
+        assert_entry_name_rejected_as_format_control("two\u{2028}lines.txt");
+    }
+
+    fn assert_entry_name_rejected_as_format_control(name: &str) {
         let tmp = tempfile::TempDir::new().unwrap();
-        let name = "holiday\u{202e}gpj.sh";
         let manifest = single_file_manifest(name, b"x");
         let archive = build_archive(&manifest, &[(name, b"x")]);
 
@@ -3860,6 +3870,22 @@ mod tests {
 
         let count = fs::read_dir(tmp.path()).unwrap().count();
         assert_eq!(count, 0, "rejection must precede any filesystem output");
+    }
+
+    /// Spec §9.6 accepts the three direction marks: an entry carrying
+    /// one extracts under exactly the stored name.
+    #[test]
+    fn accepts_bidi_direction_mark_in_entry_name() {
+        for mark in ['\u{061c}', '\u{200e}', '\u{200f}'] {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let name = format!("שלום{mark}-report.txt");
+            let manifest = single_file_manifest(&name, b"x");
+            let archive = build_archive(&manifest, &[(name.as_str(), b"x")]);
+
+            let final_path = unarchive_default(archive, tmp.path()).unwrap();
+            assert_eq!(final_path.file_name().unwrap().to_str().unwrap(), name);
+            assert_eq!(fs::read(&final_path).unwrap(), b"x");
+        }
     }
 
     // -- Filesystem hardening ----------------------------------------------

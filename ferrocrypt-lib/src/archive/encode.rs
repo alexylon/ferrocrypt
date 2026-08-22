@@ -2060,10 +2060,21 @@ mod tests {
     /// from emitting a path its own reader refuses.
     #[test]
     fn rejects_bidi_formatting_control_in_source_name() {
+        assert_source_name_rejected_as_format_control("holiday\u{202e}gpj.sh");
+    }
+
+    /// Spec §9.6: a source name carrying the line separator rejects
+    /// the same way; a plain-text consumer would show it as two lines.
+    #[test]
+    fn rejects_line_separator_in_source_name() {
+        assert_source_name_rejected_as_format_control("two\u{2028}lines.txt");
+    }
+
+    fn assert_source_name_rejected_as_format_control(name: &str) {
         let src = tempfile::TempDir::new().unwrap();
         let dir = src.path().join("d");
         fs::create_dir(&dir).unwrap();
-        fs::write(dir.join("holiday\u{202e}gpj.sh"), b"x").unwrap();
+        fs::write(dir.join(name), b"x").unwrap();
 
         let mut buf = Vec::new();
         let err = archive(&dir, &mut buf, ArchiveLimits::default()).unwrap_err();
@@ -2074,6 +2085,24 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// Spec §9.6 accepts the three direction marks, as a word processor
+    /// leaves them in a mixed-direction name: the name archives and
+    /// comes back byte for byte.
+    #[test]
+    fn accepts_bidi_direction_mark_in_source_name() {
+        for mark in ['\u{061c}', '\u{200e}', '\u{200f}'] {
+            let src = tempfile::TempDir::new().unwrap();
+            let out = tempfile::TempDir::new().unwrap();
+            let name = format!("שלום{mark}-report.txt");
+            let src_file = src.path().join(&name);
+            fs::write(&src_file, b"x").unwrap();
+
+            let final_path = round_trip(&src_file, out.path());
+            assert_eq!(final_path.file_name().unwrap().to_str().unwrap(), name);
+            assert_eq!(fs::read(&final_path).unwrap(), b"x");
+        }
     }
 
     // -- Positive round-trips (extra coverage) -----------------------------

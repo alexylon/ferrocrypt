@@ -61,6 +61,9 @@ const SUITE_PASSPHRASE: &str = "suite-passphrase-not-secret-do-not-reuse";
 /// Deliberately wrong passphrase used by the wrong-credential manifest row.
 const WRONG_PASSPHRASE: &str = "wrong-passphrase";
 
+/// Name of the source file every valid `.fcr` fixture encrypts.
+const PLAINTEXT_PATH: &str = "plaintext.txt";
+
 /// Content of `plaintext.txt` — the source file every valid `.fcr` fixture
 /// encrypts and every `ok` decrypt row must reproduce.
 const PLAINTEXT: &str = "FerroCrypt v1 test-vector suite plaintext.\n";
@@ -757,15 +760,14 @@ fn write_private_key_reject_cases(keys: &Path, cases: &Path) -> Vec<Case> {
     ]
 }
 
-/// Builds a complete one-file FCA payload with caller-supplied archive- and
-/// entry-level extension regions. This deliberately writes the small frozen
+/// Builds a complete one-file FCA payload whose entry carries the given
+/// path and the caller-supplied archive- and entry-level extension
+/// regions. This deliberately writes the small frozen
 /// wire layout directly: valid extension bytes exercise the accept path, while
 /// malformed or critical bytes must survive into the authenticated archive so
 /// the reader, rather than the fixture writer, rejects them.
-fn single_file_fca_payload(archive_ext: &[u8], entry_ext: &[u8]) -> Vec<u8> {
-    const PATH: &str = "plaintext.txt";
-
-    let manifest_len = crate::archive::format::checked_entry_wire_len(PATH.len(), entry_ext.len())
+fn single_file_fca_payload(path: &str, archive_ext: &[u8], entry_ext: &[u8]) -> Vec<u8> {
+    let manifest_len = crate::archive::format::checked_entry_wire_len(path.len(), entry_ext.len())
         .expect("suite FCA manifest length");
     let mut out = crate::archive::format::write_fca_header(
         Vec::new(),
@@ -785,7 +787,7 @@ fn single_file_fca_payload(archive_ext: &[u8], entry_ext: &[u8]) -> Vec<u8> {
             .to_be_bytes(),
     );
     out.extend_from_slice(
-        &u16::try_from(PATH.len())
+        &u16::try_from(path.len())
             .expect("suite path length")
             .to_be_bytes(),
     );
@@ -795,7 +797,7 @@ fn single_file_fca_payload(archive_ext: &[u8], entry_ext: &[u8]) -> Vec<u8> {
             .to_be_bytes(),
     );
     out.extend_from_slice(&(PLAINTEXT.len() as u64).to_be_bytes());
-    out.extend_from_slice(PATH.as_bytes());
+    out.extend_from_slice(path.as_bytes());
     out.extend_from_slice(entry_ext);
     out.extend_from_slice(PLAINTEXT.as_bytes());
     out
@@ -804,9 +806,21 @@ fn single_file_fca_payload(archive_ext: &[u8], entry_ext: &[u8]) -> Vec<u8> {
 /// Encrypts one crafted FCA extension payload under a valid passphrase
 /// recipient and header MAC.
 fn write_fca_extension_fixture(cases: &Path, name: &str, archive_ext: &[u8], entry_ext: &[u8]) {
+    write_single_file_fca_fixture(cases, name, PLAINTEXT_PATH, archive_ext, entry_ext);
+}
+
+/// Encrypts one crafted single-file FCA payload under a valid passphrase
+/// recipient and header MAC.
+fn write_single_file_fca_fixture(
+    cases: &Path,
+    name: &str,
+    path: &str,
+    archive_ext: &[u8],
+    entry_ext: &[u8],
+) {
     let file_key = FileKey::generate().expect("suite file key");
     let entry = argon2id_entry(&file_key);
-    let raw_payload = single_file_fca_payload(archive_ext, entry_ext);
+    let raw_payload = single_file_fca_payload(path, archive_ext, entry_ext);
     build_crafted_payload_fcr(
         cases,
         name,
@@ -814,7 +828,49 @@ fn write_fca_extension_fixture(cases: &Path, name: &str, archive_ext: &[u8], ent
         std::slice::from_ref(&entry),
         &raw_payload,
     )
-    .expect("build FCA extension fixture");
+    .expect("build single-file FCA fixture");
+}
+
+/// Appends the FCA path-grammar cases added in suite revision 13: the
+/// `FORMAT.md` §9.6 bidirectional rule at its two edges. A span control
+/// and a line separator reject before any output exists; a direction
+/// mark is accepted and the entry extracts under its stored name.
+fn write_fca_path_cases(cases: &Path) -> Vec<Case> {
+    let right = passphrase_credential(SUITE_PASSPHRASE);
+    let rejected = "contains a control, text-direction, or line-break character";
+    let specs: [(&str, &str, Option<&str>); 3] = [
+        (
+            "fca-path-bidi-override.fcr",
+            "holiday\u{202e}gpj.sh",
+            Some("Unsafe archive path ({rejected}): holiday\\u{202e}gpj.sh"),
+        ),
+        (
+            "fca-path-line-separator.fcr",
+            "two\u{2028}lines.txt",
+            Some("Unsafe archive path ({rejected}): two\\u{2028}lines.txt"),
+        ),
+        (
+            "fca-path-bidi-mark.fcr",
+            "\u{5e9}\u{5dc}\u{5d5}\u{5dd}\u{200f}-plaintext.txt",
+            None,
+        ),
+    ];
+
+    let mut rows = Vec::new();
+    for (name, path, expected) in specs {
+        write_single_file_fca_fixture(cases, name, path, b"", b"");
+        let file = format!("cases/{name}");
+        rows.push(match expected {
+            Some(message) => Case::err(
+                &file,
+                &right,
+                "UnsafeArchivePath",
+                &message.replace("{rejected}", rejected),
+            ),
+            None => Case::ok(&file, &right),
+        });
+    }
+    rows
 }
 
 /// Appends the conformance cases added in suite revision 3. This function is
@@ -1175,7 +1231,7 @@ const SUITE_SEED: u64 = 0xFECC_0000_5EED_0001;
 /// or changed; different corpus contents must never share a revision.
 /// Regeneration treats this constant as the source of truth and overwrites the
 /// committed file.
-const SUITE_VERSION: u32 = 12;
+const SUITE_VERSION: u32 = 13;
 
 /// Regenerates the committed suite corpus. Ignored in normal test runs;
 /// see the module docs for the invocation and the commit workflow.
@@ -1196,7 +1252,7 @@ fn regenerate_suite_vectors_inner() {
         fs::create_dir_all(dir).expect("create suite subdirectory");
     }
 
-    let plaintext = suite.join("plaintext.txt");
+    let plaintext = suite.join(PLAINTEXT_PATH);
     fs::write(&plaintext, PLAINTEXT).expect("write plaintext.txt");
     // Pin the mode so the file permission bits the archiver records in every
     // fixture do not depend on the umask that created plaintext.txt (see
@@ -1759,6 +1815,10 @@ fn regenerate_suite_vectors_inner() {
     // checksum, so only the canonical-encoding and length ingress
     // checks can reject them.
     rows.extend(write_noncanonical_public_key_cases(&suite, &cases));
+
+    // Revision-13 cases draw RNG and are appended last, so every earlier
+    // fixture keeps its frozen bytes.
+    rows.extend(write_fca_path_cases(&cases));
 
     write_manifest(&suite, &rows);
 }

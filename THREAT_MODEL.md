@@ -308,21 +308,27 @@ and pre-existing-entry no-clobber guarantees.
 ### TM-18 — Attacker-controlled display text and FCA path grammar
 
 **In addition to U+0000–U+001F, FCA path components MUST reject U+007F,
-U+0080–U+009F, U+061C, U+200E, U+200F, U+202A–U+202E, and
-U+2066–U+2069.**
+U+0080–U+009F, U+2028, U+2029, U+202A–U+202E, and U+2066–U+2069. The
+direction marks U+061C, U+200E, and U+200F are accepted.**
 
 Writers and readers MUST enforce this rule symmetrically. Ordinary Arabic,
-Hebrew, and other right-to-left names remain valid; they do not require these
-formatting controls. Rejecting the listed characters is an intentional
-portable-name restriction. Changing this rejection set after stable 0.3.0
-requires the compatibility and versioning analysis required by TM-08 and
-FORMAT.md.
+Hebrew, and other right-to-left names remain valid; they do not require the
+rejected span controls. The rule is a deliberate compromise between security
+and fidelity, not a filesystem restriction: the supported filesystems accept
+every listed code point. The span controls are rejected because an override
+can reverse the displayed letters of a name. The marks are accepted because
+word processors leave them in mixed-direction text, so refusing them refuses
+legitimate names; a mark cannot reverse letters, but it can still move
+punctuation or digits across a right-to-left run in a display FerroCrypt does
+not control. Changing this rejection set after stable 0.3.0 requires the
+compatibility and versioning analysis required by TM-08 and FORMAT.md.
 
 The CLI and desktop app SHOULD escape or otherwise render
 attacker-controlled paths without terminal control or misleading bidirectional
-display. A library path result remains data rather than display text; an
-embedder that presents it to a user SHOULD apply equivalent rendering. These
-presentation protections are defence in depth in addition to the grammar.
+display, including the three accepted marks. A library path result remains
+data rather than display text; an embedder that presents it to a user SHOULD
+apply equivalent rendering. These presentation protections are defence in
+depth in addition to the grammar, and the only protection against the marks.
 
 ### TM-19 — Authority and publication
 
@@ -489,10 +495,10 @@ if the effect escapes the selected directory, harms an object the writer could
 not otherwise reach, or independently violates an unqualified guarantee such
 as pre-existing-entry no-clobber.
 
-### 7.3 An FCA name contains bidirectional formatting controls
+### 7.3 An FCA name contains bidirectional span controls
 
 A writer or reader that accepts a code point prohibited by TM-18 violates the
-portable path grammar. Before stable 0.3.0, the defect blocks the release
+path grammar. Before stable 0.3.0, the defect blocks the release
 because TM-08 freezes the baseline's accepted artefacts and security rejection
 rules once stable; the blocking reason is compatibility timing, not the
 display issue's severity. Safe CLI and desktop rendering remains

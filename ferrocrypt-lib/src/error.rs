@@ -255,9 +255,11 @@ pub(crate) fn append_report(error: CryptoError, report: &str) -> CryptoError {
 /// surrounding text is displayed, so they are escaped even inside
 /// otherwise readable text such as a trusted directory prefix.
 ///
-/// The FCA path grammar (`FORMAT.md` §9.6) rejects exactly this set, so
-/// it is frozen with the stable format: a change here is a format change
-/// and needs the compatibility analysis the specification requires.
+/// This is the display set, not the grammar set. The FCA path grammar
+/// (`FORMAT.md` §9.6) rejects the nine span controls and accepts the
+/// three direction marks (U+061C, U+200E, U+200F); a mark can still move
+/// punctuation or digits across a right-to-left run, so a display must
+/// escape all twelve.
 pub(crate) fn is_bidi_control(c: char) -> bool {
     // LRE/RLE/PDF/LRO/RLO, LRI/RLI/FSI/PDI, LRM/RLM, and ALM.
     matches!(

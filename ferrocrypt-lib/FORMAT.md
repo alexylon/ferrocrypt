@@ -1463,8 +1463,11 @@ Each path component MUST satisfy all component rules:
 - does not contain `/`, `\`, or NUL;
 - does not contain an ASCII control byte `0x00..=0x1F` or `0x7F`;
 - does not contain a C1 control character `U+0080..=U+009F`;
-- does not contain a bidirectional-formatting control: `U+061C`, `U+200E`,
-  `U+200F`, `U+202A..=U+202E`, or `U+2066..=U+2069`;
+- does not contain a bidirectional span control: the embeddings, overrides,
+  and their terminator `U+202A..=U+202E`, or the isolates and their
+  terminator `U+2066..=U+2069`;
+- does not contain the line separator `U+2028` or the paragraph separator
+  `U+2029`;
 - does not contain any Windows-reserved character: `<`, `>`, `:`, `"`, `|`,
   `?`, `*`;
 - does not end with a space;
@@ -1482,12 +1485,23 @@ appends to the root component (§9.11). Without this reserve, a component near
 the filesystem limit would be archivable but not extractable.
 
 Control characters are rejected because a terminal or log may act on them. The
-bidirectional-formatting controls are rejected because they can make a displayed
-name differ from its stored order, so that an executable reads as an image.
-Ordinary right-to-left names do not need them: the Unicode Bidirectional
-Algorithm derives their direction from the letters themselves. Rejecting these
-code points is an intentional portable-name restriction; changing the set after
-stable 0.3.0 is a format change subject to §11.
+bidirectional span controls are rejected because they can make a displayed
+name differ from its stored order, so that an executable reads as an image;
+the two overrides reverse the letters that follow them. The line and
+paragraph separators are rejected because a plain-text consumer breaks a line
+at them, so one name can present as two. Ordinary right-to-left names do not
+need any of these: the Unicode Bidirectional Algorithm derives their direction
+from the letters themselves.
+
+The three direction marks `U+061C`, `U+200E`, and `U+200F` are accepted: word
+processors leave them in mixed Hebrew or Arabic text, so legitimate names carry
+them, and a mark cannot reverse a letter sequence as an override can. It can
+still move punctuation or digits, including the extension dot, across a
+right-to-left run, so implementations SHOULD escape the marks in their own
+displays. The rule is a compromise between security and fidelity, not a
+filesystem restriction: the supported filesystems accept every code point in
+this section. Changing the rejected set after stable 0.3.0 is a format change
+subject to §11.
 
 The reserved-device check is ASCII-case-insensitive only. Implementations MUST
 NOT use locale-sensitive case conversion. The reserved stem is the component

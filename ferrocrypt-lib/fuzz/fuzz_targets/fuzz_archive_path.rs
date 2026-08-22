@@ -63,11 +63,13 @@ const RESERVED_DEVICE_NAMES: &[&str] = &[
     "lpt\u{b3}",
 ];
 
-/// FORMAT.md §9.6 bidirectional-formatting controls, restated
-/// independently of the production classifier for the same reason.
-const BIDI_FORMATTING_CONTROLS: &[char] = &[
-    '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}',
-    '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+/// FORMAT.md §9.6 bidirectional span controls and line separators,
+/// restated independently of the production classifier for the same
+/// reason. The three direction marks (U+061C, U+200E, U+200F) are
+/// accepted by the grammar and deliberately absent here.
+const REJECTED_FORMAT_CHARS: &[char] = &[
+    '\u{2028}', '\u{2029}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}',
+    '\u{2067}', '\u{2068}', '\u{2069}',
 ];
 
 /// Asserts the FORMAT.md §9.6 grammar promises on a path the
@@ -92,9 +94,9 @@ fn assert_accepted_path_invariants(path: &str) {
             "{component:?}"
         );
         assert!(
-            !component.chars().any(
-                |c| ('\u{80}'..='\u{9f}').contains(&c) || BIDI_FORMATTING_CONTROLS.contains(&c)
-            ),
+            !component
+                .chars()
+                .any(|c| ('\u{80}'..='\u{9f}').contains(&c) || REJECTED_FORMAT_CHARS.contains(&c)),
             "{component:?}"
         );
         assert!(

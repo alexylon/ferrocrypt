@@ -87,6 +87,7 @@ global Theme {
     out property <length> row-spacing: 6px;
     out property <length> gap-md: 8px;
     out property <length> field-pad: 10px;
+    out property <length> notify-pad: 6px;
     out property <length> gap-lg: 13px;
     out property <length> gap-xl: 14px;
     out property <length> field-gap: 18px;
@@ -1025,9 +1026,14 @@ export component AppWindow inherits Window {
 
         // ═══════════ NOTIFICATION BAR ═══════════
         // Priority: error > warning > success/progress > "Ready". Only one shown at a time.
+        // The bar grows upward into the spacer to fit a wrapped message and
+        // shrinks back to one line when the mode above leaves no room.
         Rectangle {
             property <bool> show-ready: !is-working && status-err == "" && conflict-warning == "" && status-ok == "";
-            height: Theme.ctl-height;
+            vertical-stretch: 0;
+            min-height: Theme.ctl-height;
+            preferred-height: max(Theme.ctl-height, notify-text.preferred-height + 2 * Theme.notify-pad);
+            max-height: self.preferred-height;
             border-radius: Theme.radius-lg;
             background: status-err != "" ? Theme.notify-error-bg : conflict-warning != "" ? Theme.notify-warning-bg : (status-ok != "" || show-ready) ? Theme.notify-success-bg : transparent;
             border-width: (status-err != "" || conflict-warning != "" || status-ok != "" || show-ready) ? Theme.hairline : 0px;
@@ -1035,13 +1041,18 @@ export component AppWindow inherits Window {
             animate background { duration: Theme.dur-slow; }
             animate border-color { duration: Theme.dur-slow; }
 
-            Text {
+            // Full height, so a single line always has room to render even
+            // when the bar is shrunk to its minimum; the padding lives in the
+            // bar's preferred height above.
+            notify-text := Text {
                 x: Theme.field-pad;
                 width: parent.width - 2 * Theme.field-pad;
+                height: parent.height;
                 vertical-alignment: center;
                 text: status-err != "" ? status-err : conflict-warning != "" ? conflict-warning : status-ok != "" ? status-ok : show-ready ? "Ready" : "";
                 color: status-err != "" ? Theme.error : conflict-warning != "" ? Theme.warning : Theme.success;
                 font-size: Theme.font-body;
+                wrap: word-wrap;
                 overflow: elide;
             }
         }

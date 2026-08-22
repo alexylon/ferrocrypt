@@ -14,7 +14,7 @@ use std::path::{Component, Path};
 use unicode_normalization::{IsNormalized, UnicodeNormalization, is_nfc_quick};
 
 use crate::CryptoError;
-use crate::error::{is_bidi_control, sanitize_for_display};
+use crate::error::sanitize_for_display;
 use crate::fs::paths::INCOMPLETE_SUFFIX;
 
 use super::limits::{
@@ -154,15 +154,36 @@ fn validate_fca_component(component: &str, path: &str) -> Result<(), CryptoError
 /// FORMAT.md §9.6 excludes them from every component.
 const C1_CONTROLS: RangeInclusive<char> = '\u{80}'..='\u{9f}';
 
+/// The bidirectional embeddings, overrides, and their terminator
+/// (LRE, RLE, PDF, LRO, RLO). An override reverses the displayed order
+/// of the letters that follow it, which is the disguise that makes a
+/// `.sh` name read as `.jpg`.
+const BIDI_EMBEDDINGS_AND_OVERRIDES: RangeInclusive<char> = '\u{202A}'..='\u{202E}';
+
+/// The bidirectional isolates and their terminator (LRI, RLI, FSI,
+/// PDI), which set the direction of a whole span of text.
+const BIDI_ISOLATES: RangeInclusive<char> = '\u{2066}'..='\u{2069}';
+
+/// The Unicode line and paragraph separators, which a plain-text
+/// consumer such as a terminal or a log breaks a line at.
+const LINE_SEPARATORS: RangeInclusive<char> = '\u{2028}'..='\u{2029}';
+
 /// Returns whether `c` is one of the non-ASCII code points FORMAT.md
-/// §9.6 excludes from every component: the C1 controls and the
-/// bidirectional-formatting controls, which can make a displayed name
-/// differ from its stored order. The ASCII controls are caught by the
-/// byte check before this. Ordinary right-to-left text needs none of
-/// these characters: the Unicode Bidirectional Algorithm derives its
-/// direction from the letters themselves.
+/// §9.6 excludes from every component: the C1 controls, the nine
+/// bidirectional span controls, and the two line separators. The ASCII
+/// controls are caught by the byte check before this.
+///
+/// The three direction marks (U+061C, U+200E, U+200F) are accepted:
+/// word processors insert them in mixed Hebrew or Arabic text, so
+/// legitimate names carry them. They cannot reverse a letter sequence
+/// as an override can; what they can still do — move punctuation or
+/// digits across a right-to-left run — is left to the displays, which
+/// escape them (`error::is_bidi_control` in error messages).
 fn is_format_control(c: char) -> bool {
-    C1_CONTROLS.contains(&c) || is_bidi_control(c)
+    C1_CONTROLS.contains(&c)
+        || BIDI_EMBEDDINGS_AND_OVERRIDES.contains(&c)
+        || BIDI_ISOLATES.contains(&c)
+        || LINE_SEPARATORS.contains(&c)
 }
 
 /// ASCII-only lowercase. Multi-byte UTF-8 bytes (anything `>= 0x80`)
@@ -510,7 +531,7 @@ mod tests {
                 matches!(
                     err,
                     CryptoError::UnsafeArchivePath {
-                        reason: "contains a non-ASCII control or text-direction character",
+                        reason: "contains a control, text-direction, or line-break character",
                         ..
                     }
                 ),
@@ -519,24 +540,24 @@ mod tests {
         }
     }
 
-    /// The bidirectional-formatting controls FORMAT.md §9.6 lists,
-    /// restated here code point by code point so the test pins the
-    /// specification's set rather than whatever the shared classifier
+    /// The bidirectional span controls and line separators FORMAT.md
+    /// §9.6 lists, restated here code point by code point so the test
+    /// pins the specification's set rather than whatever the classifier
     /// currently returns.
     #[test]
-    fn rejects_each_bidi_formatting_control() {
-        const BIDI_FORMATTING_CONTROLS: &[char] = &[
-            '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
-            '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+    fn rejects_each_bidi_span_control_and_line_separator() {
+        const REJECTED: &[char] = &[
+            '\u{2028}', '\u{2029}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}',
+            '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
         ];
-        for &c in BIDI_FORMATTING_CONTROLS {
+        for &c in REJECTED {
             let path = format!("holiday{c}gpj.sh");
             let err = validate_fca_path(&path, limits()).unwrap_err();
             assert!(
                 matches!(
                     err,
                     CryptoError::UnsafeArchivePath {
-                        reason: "contains a non-ASCII control or text-direction character",
+                        reason: "contains a control, text-direction, or line-break character",
                         ..
                     }
                 ),
@@ -547,12 +568,28 @@ mod tests {
     }
 
     /// Right-to-left names carry their direction in the letters, so
-    /// they need no formatting control and stay valid.
+    /// they need no span control and stay valid.
     #[test]
-    fn accepts_right_to_left_names_without_formatting_controls() {
+    fn accepts_right_to_left_names_without_span_controls() {
         assert!(validate_fca_path("مرحبا.txt", limits()).is_ok());
         assert!(validate_fca_path("שלום/קובץ.md", limits()).is_ok());
         assert!(validate_fca_path("mixed-עברית-latin.txt", limits()).is_ok());
+    }
+
+    /// The three direction marks FORMAT.md §9.6 accepts, restated code
+    /// point by code point: the Arabic letter mark, the left-to-right
+    /// mark, and the right-to-left mark, as a word processor leaves them
+    /// in a mixed-direction name.
+    #[test]
+    fn accepts_each_bidi_direction_mark() {
+        for c in ['\u{061C}', '\u{200E}', '\u{200F}'] {
+            let path = format!("שלום{c}-report.txt");
+            assert!(
+                validate_fca_path(&path, limits()).is_ok(),
+                "U+{:04X} should be accepted",
+                c as u32,
+            );
+        }
     }
 
     /// The code points on either side of every rejected range stay
@@ -560,7 +597,7 @@ mod tests {
     #[test]
     fn accepts_code_points_next_to_the_rejected_ranges() {
         for c in [
-            '\u{00A0}', '\u{061B}', '\u{061D}', '\u{200D}', '\u{202F}', '\u{2065}',
+            '\u{00A0}', '\u{200D}', '\u{2027}', '\u{202F}', '\u{2065}', '\u{206A}',
         ] {
             let path = format!("a{c}b.txt");
             assert!(

@@ -55,10 +55,18 @@ fn forget_selected_key(app: &AppWindow, selected: &SelectedPublicKey) {
 /// Width budget for a path shown in a form field (narrower: a picker button shares the row).
 const ELIDE: usize = 44;
 
-/// Width budget for the status line (wider, no button): two chars above the
+/// Width budget for one status line (wider, no button): two chars above the
 /// library's 64-char message budget, so a full-length library message always
 /// renders verbatim and only longer variable text (OS errors, paths) is elided.
 const STATUS_LINE_MAX: usize = 66;
+
+/// Character budget for an error, in multiples of [`STATUS_LINE_MAX`]. The
+/// status bar wraps its text and rises into the free space above it, so an
+/// error keeps the path that says which entry was refused instead of losing
+/// it to a one-line cut. Narrow glyphs can wrap the full budget onto one
+/// more line than this number; every mode that can show an archive-path
+/// error has room for that.
+const STATUS_ERROR_LINES: usize = 3;
 
 // Slint app modes — must match the `mode` property values in app.slint
 const MODE_PASSPHRASE_ENCRYPT: i32 = 0;
@@ -772,17 +780,18 @@ fn elide_result_path(msg: &str) -> String {
     msg.to_string()
 }
 
-/// Bounds an error message to the status line. Known result/conflict prefixes
-/// keep their leading text and left-elide the path (via [`elide_result_path`]);
-/// any message still longer than [`STATUS_LINE_MAX`] — typically a long OS error string
-/// or archive path — is truncated with a trailing `…`. This is UI-only: the
-/// library keeps the full message for CLI and library callers.
+/// Bounds an error message to the status bar's wrapped budget,
+/// [`STATUS_LINE_MAX`] times [`STATUS_ERROR_LINES`] characters. A message
+/// longer than that — a long OS error string, or a conflict on a very long
+/// path — is truncated with a trailing `…`. This is UI-only: the library
+/// keeps the full message for CLI and library callers.
 fn elide_error_for_status(msg: &str) -> String {
-    let elided = elide_result_path(msg);
-    if elided.chars().count() <= STATUS_LINE_MAX {
-        return elided;
+    const BUDGET: usize = STATUS_LINE_MAX * STATUS_ERROR_LINES;
+    let msg = msg.trim();
+    if msg.chars().count() <= BUDGET {
+        return msg.to_string();
     }
-    let kept: String = elided.chars().take(STATUS_LINE_MAX - 1).collect();
+    let kept: String = msg.chars().take(BUDGET - 1).collect();
     format!("{kept}\u{2026}")
 }
 
@@ -1485,18 +1494,21 @@ mod tests {
     }
 
     /// A decrypt whose destination folder changed under it reports the
-    /// output's name and then the folder. The status line drops the tail
+    /// output's name and then the folder. The status bar drops the tail
     /// of anything too long, so the name — the only part the operator can
     /// act on, the folder no longer holding the output — must survive
     /// that trim.
     #[test]
     fn output_directory_changed_keeps_the_output_name_in_the_status_line() {
-        let long = "c".repeat(200);
+        let long = "c".repeat(300);
         let msg = format!("Output report.pdf is complete but its directory changed: /tmp/{long}");
 
         let out = elide_error_for_status(&msg);
 
-        assert!(out.chars().count() <= STATUS_LINE_MAX, "got: {out}");
+        assert!(
+            out.chars().count() <= STATUS_LINE_MAX * STATUS_ERROR_LINES,
+            "got: {out}"
+        );
         assert!(
             out.contains("Output report.pdf is complete"),
             "the trim must keep the output's name, got: {out}"
@@ -1553,21 +1565,27 @@ mod tests {
         assert_eq!(elide_error_for_status(msg), msg);
     }
 
+    /// A rejected archive path is the longest message the library emits
+    /// in normal use: the prefix plus a path the library already cut to
+    /// its own display budget. It must reach the status bar whole, so
+    /// the bar can wrap it and show which entry was refused.
     #[test]
-    fn elide_error_for_status_truncates_long_unknown_messages() {
-        let long = format!("Unsafe archive path (traversal): /tmp/{}", "d".repeat(200));
-        let out = elide_error_for_status(&long);
-        assert!(out.chars().count() <= STATUS_LINE_MAX);
-        assert!(out.ends_with('\u{2026}'));
-        assert!(out.starts_with("Unsafe archive path"));
+    fn elide_error_for_status_keeps_a_rejected_archive_path_whole() {
+        let msg = format!(
+            "Unsafe archive path (contains a control, text-direction, or line-break character): {}…",
+            "d".repeat(63)
+        );
+        assert!(msg.chars().count() > STATUS_LINE_MAX);
+        assert_eq!(elide_error_for_status(&msg), msg);
     }
 
     #[test]
-    fn elide_error_for_status_bounds_known_prefix_messages() {
-        let long = format!("Output already exists: /tmp/{}", "e".repeat(200));
+    fn elide_error_for_status_truncates_past_the_wrapped_budget() {
+        let long = format!("Output already exists: /tmp/{}", "e".repeat(300));
         let out = elide_error_for_status(&long);
-        assert!(out.chars().count() <= STATUS_LINE_MAX);
-        assert!(out.contains('\u{2026}'));
+        assert_eq!(out.chars().count(), STATUS_LINE_MAX * STATUS_ERROR_LINES);
+        assert!(out.ends_with('\u{2026}'));
+        assert!(out.starts_with("Output already exists: /tmp/"));
     }
 
     #[test]

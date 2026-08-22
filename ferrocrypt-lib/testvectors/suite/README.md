@@ -48,7 +48,9 @@ key could reach the header-MAC gate.
 | `error_class` | Typed `CryptoError` variant the attempt must produce (`-` for `ok` rows) |
 | `error_message` | Exact user-facing message (`-` for `ok` rows) |
 
-An `ok` decrypt row must reproduce `plaintext.txt` byte-for-byte; an
+An `ok` decrypt row must reproduce the content of `plaintext.txt`
+byte-for-byte, as the single entry its archive stores — named
+`plaintext.txt` except where a case documents another name; an
 `ok` key-file row must parse or validate successfully. A row's
 `error_message` is this library's `Display` output; independent
 implementations should match the `error_class` failure semantics and MAY
@@ -69,6 +71,12 @@ fixture-only — never reuse them for real data.
   tag (must decrypt).
 - FCA archive-level and per-entry TLV regions: each has an unknown ignorable
   success case plus malformed and unknown-critical rejection cases.
+- FCA path grammar (`FORMAT.md` §9.6) at its bidirectional edges: an entry
+  name carrying the right-to-left override `U+202E` and one carrying the
+  line separator `U+2028` reject (`UnsafeArchivePath`) before any output
+  exists; an entry name carrying the accepted right-to-left mark `U+200F`
+  decrypts, and its output is stored under that name rather than
+  `plaintext.txt`.
 - Out-of-range KDF parameters under a **valid** header MAC:
   `mem_cost > 2 GiB`, `lanes = 0`, `time_cost = 13`.
 - Structurally valid KDF parameters above the default local memory cap,

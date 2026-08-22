@@ -97,3 +97,6 @@ cases/public-key-field-prime.key	read-public-key	-	error	InvalidFormat(Malformed
 cases/public-key-field-prime-plus-one.key	read-public-key	-	error	InvalidFormat(MalformedPublicKey)	Public key is malformed
 cases/public-key-field-max.key	read-public-key	-	error	InvalidFormat(MalformedPublicKey)	Public key is malformed
 cases/public-key-wrong-length.key	read-public-key	-	error	InvalidFormat(MalformedPublicKey)	Public key is malformed
+cases/fca-path-bidi-override.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	UnsafeArchivePath	Unsafe archive path (contains a control, text-direction, or line-break character): holiday\u{202e}gpj.sh
+cases/fca-path-line-separator.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	error	UnsafeArchivePath	Unsafe archive path (contains a control, text-direction, or line-break character): two\u{2028}lines.txt
+cases/fca-path-bidi-mark.fcr	decrypt	passphrase:suite-passphrase-not-secret-do-not-reuse	ok	-	-

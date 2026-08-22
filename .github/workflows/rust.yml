@@ -185,10 +185,17 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
+      # The CLI's binary and the library are both named `ferrocrypt`, so
+      # they document into the same directory and one `--workspace` run
+      # lets the two rustdoc invocations overwrite each other's output
+      # (cargo issue 6313). Two runs check every member without sharing
+      # the directory at the same moment.
       - name: Build documentation
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --workspace --no-deps
+        run: |
+          cargo doc --no-deps --package ferrocrypt-cli
+          cargo doc --workspace --no-deps --exclude ferrocrypt-cli
 
   clippy:
     strategy:

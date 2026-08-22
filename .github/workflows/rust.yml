@@ -547,14 +547,17 @@ jobs:
           # only when every reported CryptoError is one of those observed
           # data-integrity signatures. Assertions, filesystem errors, and
           # every other CryptoError remain first-attempt failures.
+          # Under `--nocapture` the harness prints a failing test's error
+          # to stderr while its own progress line is still open, so the
+          # text follows `test <name> ... ` instead of starting a line.
+          # Read each report from `Error:` to the end of its line, require
+          # at least one, and require every one to be a known signature.
           known_corruption='^Error: (PayloadTampered|InvalidFormat\(MalformedPublicKey\))$'
           if grep -q "panicked at" "$log"; then
             exit 1
           fi
-          if ! grep -Eq "$known_corruption" "$log"; then
-            exit 1
-          fi
-          if grep '^Error:' "$log" | grep -Evq "$known_corruption"; then
+          reported="$(grep -oE 'Error: .*$' "$log")" || exit 1
+          if printf '%s\n' "$reported" | grep -Evq "$known_corruption"; then
             exit 1
           fi
 

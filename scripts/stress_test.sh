@@ -1371,4 +1371,47 @@ else
 fi
 
 echo ""
+
+# ──────────────────────────────────────────────
+# PHASE 27: Write-and-search-only output directory
+# ──────────────────────────────────────────────
+echo "--- Phase 27: Write-and-search-only output directory ---"
+
+# A commit places and removes entries inside the output directory and
+# never lists it, so an encrypt into a directory the user can write to
+# and enter but not list must still succeed. Key generation is excluded
+# on purpose: its durability step reopens the directory and needs to
+# read it.
+if is_unix_perms; then
+    wso_run() {
+        local d="$WORKDIR/wso"; rm -rf "$d"; mkdir -p "$d"
+        chmod 300 "$d"
+        set +e
+        $FC encrypt -i "$WORKDIR/small.txt" -s "$d/out.fcr" -k "$PUB" >/dev/null 2>&1
+        local rc=$?
+        set -e
+        chmod 700 "$d"
+        [ "$rc" -eq 0 ] && [ -f "$d/out.fcr" ]
+    }
+    run_test "write-and-search-only: encrypt commits into it" wso_run
+
+    # The no-clobber refusal is unchanged there: an entry that predates
+    # the commit is never replaced, and nothing of this run is left.
+    wso_noclobber() {
+        local d="$WORKDIR/wso_taken"; rm -rf "$d"; mkdir -p "$d"
+        printf existing > "$d/out.fcr"
+        chmod 300 "$d"
+        set +e
+        $FC encrypt -i "$WORKDIR/small.txt" -s "$d/out.fcr" -k "$PUB" >/dev/null 2>&1
+        local rc=$?
+        set -e
+        chmod 700 "$d"
+        [ "$rc" -ne 0 ] && [ "$(cat "$d/out.fcr")" = "existing" ]
+    }
+    run_test "write-and-search-only: occupied output name still refused" wso_noclobber
+else
+    echo "[skip] write-and-search-only output directory (needs Unix permissions)"
+fi
+
+echo ""
 echo "=========================================="

@@ -206,16 +206,26 @@ before the next stable release.
   planted entry replaced by ours — the same "someone else's planted
   entry may be destroyed" bound, and the same trust assumption, as the
   Windows directory case below. If the commit fails at that step instead,
-  FerroCrypt withdraws its reservation only while the entry is still its
-  own empty file, so a planted entry is left in place. A withdrawal it
-  cannot confirm is named in the returned error, because that empty file
-  may still hold the name against a further attempt. Both fallback commits anchor to your
-  output folder: FerroCrypt opens the folder once and performs the link,
-  the claim, the final rename, and its own cleanup through that one
-  handle, so renaming the folder mid-commit cannot redirect any step.
-  The folder must therefore be one FerroCrypt can read and not only
-  write into: a write-only output folder on a filesystem without the
-  one-step rename cannot be committed into at all. On Windows:
+  FerroCrypt leaves whatever is at the final name where it is — its own
+  empty reservation, or an entry someone else put there meanwhile — and
+  names it in the returned error without claiming whose it is, because
+  that name may block a further attempt until you remove it. It does not
+  try to remove its reservation: checking that the entry is still its
+  own and then removing it are two steps, and an entry substituted in
+  the instant between them would be what the removal reaches. Nothing at
+  that name holds your content, so leaving it costs only the retry. Both
+  fallback commits anchor to your output folder: FerroCrypt opens the
+  folder once and performs the link, the claim, the final rename, and
+  the removal of its own staging name through that one handle, so
+  renaming the folder mid-commit cannot redirect any step.
+  On Linux and macOS every commit is anchored that way, one-step or not,
+  and the handle asks the system for only what a commit uses — placing
+  and removing entries inside the folder, never listing it — so an
+  output folder you can write to and enter but not list still receives
+  encrypted output. Key generation is the exception: it must be able to
+  report on the durability step that follows its commits, and that step
+  needs a readable folder. On Unix systems other than Linux and macOS,
+  the fallback commit needs a readable folder too. On Windows:
   **single-file** decrypts now route through the kernel's atomic
   no-replace move (`MoveFileExW` without the replace flag, via the
   `tempfile` crate), so the kernel performs the existence check and the

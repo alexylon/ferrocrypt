@@ -48,7 +48,7 @@ use crate::error::{sanitize_for_display, sanitize_path_for_display};
 /// stored mode cannot obstruct failure cleanup. Unix-only — Windows
 /// ignores the mode arg.
 #[cfg(unix)]
-const DIR_CREATE_MODE: u32 = 0o700;
+const DIR_CREATE_MODE: u32 = crate::fs::commit::STAGED_DIR_MODE;
 
 /// Initial mode for newly-created regular-file extraction outputs
 /// (rw-------). Restrictive on purpose:
@@ -67,7 +67,7 @@ const DIR_CREATE_MODE: u32 = 0o700;
 ///
 /// Effective on Unix only; Windows ignores the mode argument to
 /// `create_file_at`.
-pub(crate) const INITIAL_FILE_CREATE_MODE: u32 = 0o600;
+pub(crate) const INITIAL_FILE_CREATE_MODE: u32 = crate::fs::commit::STAGED_FILE_MODE;
 
 /// Whether this target has a safe no-clobber directory-promotion
 /// backend for committing a directory-root extraction (`FORMAT.md`
@@ -263,23 +263,57 @@ pub(crate) fn rename_at_no_clobber(
     from: &OsStr,
     to: &OsStr,
     root_is_file: bool,
-) -> io::Result<PromotionOutcome> {
-    use std::os::fd::AsFd;
+) -> Result<PromotionOutcome, PromotionFailure> {
+    use crate::fs::commit::{FlaggedRename, rename_no_replace_at};
 
-    use rustix::fs::{RenameFlags, renameat_with};
-
-    if let Err(e) = renameat_with(dir.as_fd(), from, dir.as_fd(), to, RenameFlags::NOREPLACE) {
-        let error = io::Error::from(e);
-        if !crate::fs::atomic::no_replace_rename_unsupported(&error) {
-            return Err(error);
+    match rename_no_replace_at(dir, from, to) {
+        Ok(FlaggedRename::Committed) => {}
+        Ok(FlaggedRename::Unsupported) => {
+            return rename_at_no_clobber_via_claim(dir, from, to, root_is_file);
         }
-        return rename_at_no_clobber_via_claim(dir, from, to, root_is_file);
+        Err(error) => return Err(PromotionFailure::plain(error)),
     }
     // Best-effort durability: flush the directory so the rename survives
     // a crash, mirroring the parent-directory sync the path-based
     // `fs::atomic` helpers perform.
     sync_dir_handle(dir);
     Ok(PromotionOutcome::Clean)
+}
+
+/// A step-15 promotion that did not reach the final name.
+///
+/// `claim_left` says a claim route created an entry at the final name,
+/// which the failed promotion leaves in place, so that name may still be
+/// occupied — by this run's placeholder, or by whatever replaced it. The
+/// caller reports it, because that name may then block the next attempt.
+/// No plaintext from this run's staged root reached that name: the commit
+/// failed before the root could be moved there. The remaining entry can still
+/// be one another process placed there and can contain its own data. Every
+/// other failure leaves nothing of this run's at the final name.
+#[derive(Debug)]
+pub(crate) struct PromotionFailure {
+    pub(crate) error: io::Error,
+    pub(crate) claim_left: bool,
+}
+
+impl PromotionFailure {
+    /// A failure that left nothing of this run's at the final name.
+    pub(crate) fn plain(error: io::Error) -> Self {
+        Self {
+            error,
+            claim_left: false,
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl From<crate::fs::commit::CommitFailure> for PromotionFailure {
+    fn from(failure: crate::fs::commit::CommitFailure) -> Self {
+        Self {
+            error: failure.error,
+            claim_left: failure.claim_left,
+        }
+    }
 }
 
 /// Result of a successful step-15 promotion.
@@ -359,120 +393,64 @@ impl PromotionOutcome {
 }
 
 /// Fallback for filesystems where the kernel refuses the no-replace
-/// rename flag outright. A file root on a filesystem with hard links is
-/// moved by [`link_no_clobber`], which needs no placeholder at all;
-/// every other case — no hard links or another pre-commit link failure —
-/// claims the name and renames over its own claim:
+/// rename flag outright: [`crate::fs::commit::commit_by_link_or_claim`],
+/// the same link-then-claim commit the writer side reaches on those
+/// filesystems, resolved through `dir` so the redirect-proofing of the
+/// flagged path is preserved. That module documents both routes and
+/// what each guarantees.
 ///
-/// 1. atomically claim the final name through `dir` — `create_new` for
-///    a file root, owner-only `mkdir` for a directory root — refusing
-///    any pre-existing entry with `AlreadyExists`, the same error the
-///    flagged rename reports;
-/// 2. plain handle-relative rename of the staged entry over the claim.
-///    Renaming onto the placeholder replaces it in a single step (an
-///    empty directory target is replaced under POSIX rename rules), so
-///    content appears at the final name whole, never partially.
-///
-/// Both steps resolve through `dir`, preserving the redirect-proofing
-/// of the flagged path. Only the entry created in step 1 can be
-/// replaced, so the no-clobber guarantee against pre-existing entries
-/// is unconditional. The owner-only claim modes
-/// ([`INITIAL_FILE_CREATE_MODE`] file / [`DIR_CREATE_MODE`] directory)
-/// keep other local users from writing into the claimed name where
-/// the filesystem enforces modes; on a permissionless filesystem
-/// (exFAT) a concurrent local write into a directory claim makes
-/// step 2 fail closed with a non-empty-target error instead.
-///
-/// Between the two steps the claim is an ordinary entry, so a local
-/// writer with access to the destination directory can remove it and
-/// leave one of their own, which step 2 then replaces. That window is
-/// why the link move above is preferred wherever the filesystem
-/// supports links; `SECURITY.md` states what remains for the cases that
-/// cannot use it.
-///
-/// If step 2 fails, the claim is removed best-effort and the staged
-/// entry stays in place for the caller's retain-on-error handling.
-/// Process interruption between the steps leaves an empty placeholder
-/// at the final name next to the staged `.incomplete` entry.
+/// What stays here is the staged-name removal after a link commit. The
+/// extractor holds its staged handle across the promotion — the checks
+/// after it compare the final name against that object — so the removal
+/// cannot close the handle first, and its result alone proves nothing:
+/// a concurrent writer can rename the staged link and make the removal
+/// report a missing name, or plant a replacement that it removes
+/// successfully. `Ok` and `NotFound` therefore both yield
+/// [`PromotionOutcome::LinkedFile`], which tells the caller to establish
+/// the outcome through the retained inode's link count instead. A
+/// removal that fails is [`PromotionOutcome::StagedLinkRetained`]: the
+/// final name is not withdrawn after it, because the failing unlink may
+/// have blocked long enough for a concurrent writer to replace that
+/// entry and there is no portable unlink-if-identity-matches primitive.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn rename_at_no_clobber_via_claim(
     dir: &Dir,
     from: &OsStr,
     to: &OsStr,
     root_is_file: bool,
-) -> io::Result<PromotionOutcome> {
-    if root_is_file {
-        match link_no_clobber(dir, from, to) {
-            Ok(outcome) => return Ok(outcome),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(e),
-            Err(_) => {}
-        }
-        create_file_at(dir, to, INITIAL_FILE_CREATE_MODE)?;
-    } else {
-        create_dir_initial_mode(dir, to)?;
-    }
-    match dir.rename(from, dir, to) {
-        Ok(()) => {
-            sync_dir_handle(dir);
-            Ok(PromotionOutcome::Clean)
-        }
-        Err(e) => {
-            if root_is_file {
-                let _ = dir.remove_file(to);
-            } else {
-                let _ = dir.remove_dir(to);
-            }
-            Err(e)
-        }
-    }
+) -> Result<PromotionOutcome, PromotionFailure> {
+    rename_at_no_clobber_via_claim_with(dir, from, to, root_is_file, |dir, from| {
+        dir.remove_file(from)
+    })
 }
 
-/// Moves a staged file root to its final name by linking it there and
-/// unlinking the staged name, both handle-relative through `dir`.
-///
-/// `link` refuses an existing target atomically, so this reaches the
-/// final name without ever creating a placeholder another process could
-/// replace — the no-clobber guarantee holds against a concurrent local
-/// writer, not only against entries that predate the commit. Both names
-/// denote the finished content in between, so an interruption leaves
-/// the complete output at the final name rather than an empty entry.
-///
-/// Only for file roots: directories cannot be linked. Filesystems
-/// without hard links (exFAT and FAT among them) reject the call, and
-/// the caller falls back to claiming the name. A staged name whose
-/// unlink fails is reported as [`PromotionOutcome::StagedLinkRetained`]. A
-/// successful or missing-name result is [`PromotionOutcome::LinkedFile`], so
-/// the caller verifies through the retained inode that no moved link survived.
-/// The final name is deliberately not withdrawn after that delayed failure:
-/// a concurrent writer may already have replaced it, and no portable
-/// unlink-if-identity-matches primitive is available.
+/// Testable [`rename_at_no_clobber_via_claim`]. `remove_staged` is the
+/// single operation that can fail only after the final link exists;
+/// injecting it lets the tests pin the post-commit policy without
+/// depending on a filesystem that can refuse one unlink on demand.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn link_no_clobber(dir: &Dir, from: &OsStr, to: &OsStr) -> io::Result<PromotionOutcome> {
-    link_no_clobber_with_remove(dir, from, to, |dir, from| dir.remove_file(from))
-}
-
-/// Testable implementation of [`link_no_clobber`]. `remove_staged` is the
-/// single operation that can fail only after the final link exists; injecting
-/// it lets the tests pin the post-commit policy without depending on a
-/// filesystem that can refuse one unlink on demand.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn link_no_clobber_with_remove(
+fn rename_at_no_clobber_via_claim_with(
     dir: &Dir,
     from: &OsStr,
     to: &OsStr,
+    root_is_file: bool,
     remove_staged: impl FnOnce(&Dir, &OsStr) -> io::Result<()>,
-) -> io::Result<PromotionOutcome> {
-    dir.hard_link(from, dir, to)?;
-    let outcome = match remove_staged(dir, from) {
-        Ok(()) => PromotionOutcome::LinkedFile,
-        // Missing is not proof that the link was destroyed: a concurrent
-        // writer may have renamed it. The retained-handle link-count check in
-        // `decode` distinguishes removal from a move without trusting names.
-        Err(error) if error.kind() == io::ErrorKind::NotFound => PromotionOutcome::LinkedFile,
-        // Do not remove `to` after an error here. The unlink may have blocked,
-        // giving a concurrent writer time to replace the final entry; there is
-        // no portable unlink-if-identity-matches primitive.
-        Err(error) => PromotionOutcome::StagedLinkRetained(error),
+) -> Result<PromotionOutcome, PromotionFailure> {
+    use crate::fs::commit::{CommitKind, CommitRoute, commit_by_link_or_claim};
+
+    let kind = if root_is_file {
+        CommitKind::File
+    } else {
+        CommitKind::Directory
+    };
+    let outcome = match commit_by_link_or_claim(dir, from, to, kind) {
+        Ok(CommitRoute::Renamed) => PromotionOutcome::Clean,
+        Ok(CommitRoute::Linked) => match remove_staged(dir, from) {
+            Ok(()) => PromotionOutcome::LinkedFile,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => PromotionOutcome::LinkedFile,
+            Err(error) => PromotionOutcome::StagedLinkRetained(error),
+        },
+        Err(failure) => return Err(PromotionFailure::from(failure)),
     };
     sync_dir_handle(dir);
     Ok(outcome)
@@ -752,7 +730,7 @@ pub(crate) fn retain_staged_dir(parent: &Dir, name: &OsStr, dir: &Dir) -> io::Re
 /// mode later" behavior without ever chmod-ing through a re-resolved
 /// path.
 fn create_dir_with_default_mode(parent: &Dir, name: &OsStr) -> Result<Dir, CryptoError> {
-    create_dir_initial_mode(parent, name).map_err(CryptoError::Io)?;
+    crate::fs::commit::create_dir_at(parent, name).map_err(CryptoError::Io)?;
 
     let dir = parent.open_dir_nofollow(name).map_err(|e| {
         classify_open_failure(
@@ -764,23 +742,6 @@ fn create_dir_with_default_mode(parent: &Dir, name: &OsStr) -> Result<Dir, Crypt
         )
     })?;
     finalize_dir_open(dir, name, SYMLINK_IN_EXTRACTION_PATH)
-}
-
-/// Atomic mkdir-with-mode on Unix; plain mkdir on non-Unix targets.
-/// Pinning the mode at create time (rather than mkdir + chmod) closes
-/// the umask race where a permissive `0o022` umask would briefly leave
-/// a fresh `.incomplete` directory at `0o755`.
-#[cfg(unix)]
-fn create_dir_initial_mode(parent: &Dir, name: &OsStr) -> io::Result<()> {
-    use cap_std::fs::{DirBuilder, DirBuilderExt};
-    let mut builder = DirBuilder::new();
-    builder.mode(DIR_CREATE_MODE);
-    parent.create_dir_with(name, &builder)
-}
-
-#[cfg(not(unix))]
-fn create_dir_initial_mode(parent: &Dir, name: &OsStr) -> io::Result<()> {
-    parent.create_dir(name)
 }
 
 /// Internal helper: applies a Unix mode to the directory `dir` refers to.
@@ -947,32 +908,19 @@ fn normal_component<'a>(component: Component<'a>, full: &Path) -> Result<&'a OsS
     }
 }
 
-/// Atomically creates a new regular file under `parent`. Any pre-
-/// existing entry — including a symlink whose target exists, a
-/// dangling symlink, or (on Windows) a reparse point — causes
-/// `AlreadyExists`. The initial permission word is restrictive
-/// (`0o600` on Unix, default on Windows); callers apply the
-/// manifest-stored mode via [`chmod_file_handle`] after writing so
-/// plaintext is never briefly visible to unintended users.
+/// Atomically creates a new regular file under `parent`, reducing
+/// `create_mode` to the permission bits first: [`crate::fs::commit::create_file_at`]
+/// takes an already-reduced mode, and the mode reaching here comes from
+/// the archive manifest. That module states what the create refuses and
+/// how a symlink at the leaf is kept from redirecting it.
 ///
-/// `OpenOptionsFollowExt::follow(FollowSymlinks::No)` is set
-/// alongside `create_new(true)` for defense in depth — both prevent
-/// the open from following a pre-placed symlink at the leaf, on
-/// platforms where the underlying open semantics differ.
-pub(crate) fn create_file_at(
-    parent: &Dir,
-    name: &OsStr,
-    #[cfg_attr(not(unix), allow(unused_variables))] create_mode: u32,
-) -> io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    options.follow(FollowSymlinks::No);
+/// Callers apply the manifest-stored mode via [`chmod_file_handle`]
+/// after writing, so plaintext is never briefly visible to unintended
+/// users at the wider mode.
+pub(crate) fn create_file_at(parent: &Dir, name: &OsStr, create_mode: u32) -> io::Result<File> {
     #[cfg(unix)]
-    {
-        use cap_fs_ext::OpenOptionsExt;
-        options.mode(create_mode & super::PERMISSION_BITS_MASK);
-    }
-    parent.open_with(name, &options)
+    let create_mode = create_mode & super::PERMISSION_BITS_MASK;
+    crate::fs::commit::create_file_at(parent, name, create_mode)
 }
 
 /// Applies the standard per-file flush used while extracting a directory.
@@ -1688,7 +1636,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(err.error.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(fs::read(out.join("root")).unwrap(), b"existing");
         assert_eq!(fs::read(out.join("root.incomplete")).unwrap(), b"new");
     }
@@ -1737,8 +1685,13 @@ mod tests {
         fs::write(tmp.path().join("taken"), b"existing").unwrap();
         let handle = open_anchor(tmp.path()).unwrap();
 
-        let outcome =
-            link_no_clobber(&handle, OsStr::new("root.incomplete"), OsStr::new("root")).unwrap();
+        let outcome = rename_at_no_clobber_via_claim(
+            &handle,
+            OsStr::new("root.incomplete"),
+            OsStr::new("root"),
+            true,
+        )
+        .unwrap();
         assert!(
             matches!(outcome, PromotionOutcome::LinkedFile),
             "a link commit must report the route it took"
@@ -1747,9 +1700,14 @@ mod tests {
         assert!(!tmp.path().join("root.incomplete").exists());
 
         fs::write(tmp.path().join("root.incomplete"), b"payload").unwrap();
-        let err = link_no_clobber(&handle, OsStr::new("root.incomplete"), OsStr::new("taken"))
-            .unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        let err = rename_at_no_clobber_via_claim(
+            &handle,
+            OsStr::new("root.incomplete"),
+            OsStr::new("taken"),
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(err.error.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(fs::read(tmp.path().join("taken")).unwrap(), b"existing");
         assert!(tmp.path().join("root.incomplete").exists());
     }
@@ -1765,10 +1723,11 @@ mod tests {
         fs::write(tmp.path().join("root.incomplete"), b"payload").unwrap();
         let handle = open_anchor(tmp.path()).unwrap();
 
-        let outcome = link_no_clobber_with_remove(
+        let outcome = rename_at_no_clobber_via_claim_with(
             &handle,
             OsStr::new("root.incomplete"),
             OsStr::new("root"),
+            true,
             |_, _| {
                 Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
@@ -1803,10 +1762,11 @@ mod tests {
         fs::write(tmp.path().join("root.incomplete"), b"payload").unwrap();
         let handle = open_anchor(tmp.path()).unwrap();
 
-        let outcome = link_no_clobber_with_remove(
+        let outcome = rename_at_no_clobber_via_claim_with(
             &handle,
             OsStr::new("root.incomplete"),
             OsStr::new("root"),
+            true,
             |dir, from| {
                 dir.rename(from, dir, "moved-staging-link")?;
                 dir.remove_file(from)
@@ -1835,10 +1795,11 @@ mod tests {
         fs::write(tmp.path().join("root.incomplete"), b"payload").unwrap();
         let handle = open_anchor(tmp.path()).unwrap();
 
-        let outcome = link_no_clobber_with_remove(
+        let outcome = rename_at_no_clobber_via_claim_with(
             &handle,
             OsStr::new("root.incomplete"),
             OsStr::new("root"),
+            true,
             |dir, _| {
                 dir.remove_file("root")?;
                 let mut options = cap_std::fs::OpenOptions::new();
@@ -1912,7 +1873,11 @@ mod tests {
             let err =
                 rename_at_no_clobber_via_claim(&handle, OsStr::new(from), OsStr::new(to), is_file)
                     .unwrap_err();
-            assert_eq!(err.kind(), io::ErrorKind::AlreadyExists, "{from} -> {to}");
+            assert_eq!(
+                err.error.kind(),
+                io::ErrorKind::AlreadyExists,
+                "{from} -> {to}"
+            );
         }
         assert_eq!(
             fs::read(tmp.path().join("taken-file")).unwrap(),
@@ -1922,17 +1887,17 @@ mod tests {
         assert!(tmp.path().join("staged-dir").is_dir());
     }
 
-    /// A failed rename step removes the placeholder claim and leaves
-    /// the staged entry in place, so retain-on-error semantics and
-    /// retry-ability hold. Forced by staging nothing: the claim
-    /// succeeds, then the rename fails with `NotFound`.
+    /// A failed rename step leaves the placeholder claim in place and
+    /// reports it, for a file root and a directory root alike. Forced by
+    /// staging nothing: the claim succeeds, then the rename fails with
+    /// `NotFound`.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn via_claim_removes_claim_when_rename_fails() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let handle = open_anchor(tmp.path()).unwrap();
-
+    fn via_claim_leaves_its_claim_when_the_rename_fails() {
         for is_file in [true, false] {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let handle = open_anchor(tmp.path()).unwrap();
+
             let err = rename_at_no_clobber_via_claim(
                 &handle,
                 OsStr::new("missing.incomplete"),
@@ -1940,10 +1905,15 @@ mod tests {
                 is_file,
             )
             .unwrap_err();
-            assert_eq!(err.kind(), io::ErrorKind::NotFound);
+
+            assert_eq!(err.error.kind(), io::ErrorKind::NotFound);
             assert!(
-                !tmp.path().join("root").exists(),
-                "claim must not survive a failed promotion (is_file={is_file})"
+                tmp.path().join("root").exists(),
+                "the claim is left at the final name (is_file={is_file})"
+            );
+            assert!(
+                err.claim_left,
+                "a name left occupied must be reported (is_file={is_file})"
             );
         }
     }

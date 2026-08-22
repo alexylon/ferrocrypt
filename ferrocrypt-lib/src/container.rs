@@ -639,22 +639,37 @@ pub(crate) fn write_encrypted_file(
         base_name,
         built,
         |_| Ok(()),
+        |_| Ok(()),
     )
 }
 
-/// Implementation seam for the interval between finalization and the path
-/// returned to the caller. Production supplies a no-op; tests replace the
-/// final entry to verify the last identity check.
+/// Implementation seam for two intervals a test needs to reach: after the
+/// staged file exists and before any ciphertext reaches it, and between
+/// finalization and the path returned to the caller. Production supplies
+/// no-ops; tests substitute the destination directory in the first and
+/// replace the final entry in the second.
 fn write_encrypted_file_with_post_finalize(
     prepared: archive::PreparedArchive,
     output_dir: &Path,
     output_file: Option<&Path>,
     base_name: &str,
     built: &BuiltEncryptedHeader,
+    after_staging: impl FnOnce(&Path) -> std::io::Result<()>,
     after_finalize: impl FnOnce(&Path) -> std::io::Result<()>,
 ) -> Result<PathBuf, CryptoError> {
     let output_path = resolve_encrypted_output_path(output_dir, output_file, base_name);
     reject_occupied(&output_path, OUTPUT_LABEL)?;
+
+    // Linux and macOS anchor the commit to the destination directory before
+    // the staged file exists. A handle opened at the commit instead would
+    // denote whatever occupies the destination path by then: a local writer
+    // who moves the staged file into a directory of their own and installs it
+    // at that path would have the finished output committed there. The other
+    // targets deliberately retain their existing path-based backend and must
+    // not acquire an otherwise-unused readable directory handle.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let committed_dir =
+        atomic::OutputDir::open_for_commit(parent_or_cwd(&output_path)).map_err(CryptoError::Io)?;
 
     let mut builder = tempfile::Builder::new();
     builder.prefix(TEMP_FILE_PREFIX).suffix(INCOMPLETE_SUFFIX);
@@ -670,6 +685,12 @@ fn write_encrypted_file_with_post_finalize(
         builder.permissions(std::fs::Permissions::from_mode(0o600));
     }
     let mut tmp = builder.tempfile_in(parent_or_cwd(&output_path))?;
+    // Before any ciphertext on Linux/macOS: a destination replaced between
+    // the anchor and this create is refused now rather than after the whole
+    // file has been written.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    committed_dir.confirm_staged(&tmp)?;
+    after_staging(tmp.path())?;
 
     tmp.as_file_mut().write_all(&built.prefix_bytes)?;
     tmp.as_file_mut().write_all(&built.header_bytes)?;
@@ -680,7 +701,11 @@ fn write_encrypted_file_with_post_finalize(
     let tmp = encrypt_writer.finish()?;
     atomic::sync_file_durable(tmp.as_file())?;
 
-    let finalized = atomic::finalize_file(tmp, &output_path, OUTPUT_LABEL)
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let finalized = atomic::finalize_file(tmp, &output_path, OUTPUT_LABEL, &committed_dir)
+        .map_err(atomic::FinalizeFileError::into_crypto_error)?;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let finalized = atomic::finalize_file_path_based(tmp, &output_path, OUTPUT_LABEL)
         .map_err(atomic::FinalizeFileError::into_crypto_error)?;
     after_finalize(&output_path)?;
     // Keep the committed handle alive through the final namespace check so
@@ -727,6 +752,66 @@ mod tests {
         derive_subkeys(&file_key, &stream_nonce).unwrap()
     }
 
+    /// The writer holds its destination anchor from before the staged
+    /// file exists, so a local writer who moves that staged file into a
+    /// directory of their own and installs it at the destination path
+    /// cannot have the finished `.fcr` committed there. Driven through
+    /// the after-staging seam rather than a timing race.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn encrypted_writer_refuses_a_destination_swapped_in_after_staging() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let input = tmp.path().join("input.txt");
+        let output_dir = tmp.path().join("out");
+        let replacement = tmp.path().join("replacement");
+        let moved = tmp.path().join("out.moved");
+        let output_path = output_dir.join("output.fcr");
+        std::fs::write(&input, b"plaintext").unwrap();
+        std::fs::create_dir(&output_dir).unwrap();
+        std::fs::create_dir(&replacement).unwrap();
+
+        let prepared = archive::prepare_archive(&input, archive::ArchiveLimits::default()).unwrap();
+        let DerivedSubkeys {
+            payload_key,
+            header_key,
+        } = dummy_subkeys();
+        let stream_nonce = [0x07u8; STREAM_NONCE_SIZE];
+        let entry = dummy_entry(argon2id::TYPE_NAME, argon2id::BODY_LENGTH);
+        let built = build_encrypted_header(
+            std::slice::from_ref(&entry),
+            b"",
+            stream_nonce,
+            payload_key,
+            &header_key,
+        )
+        .unwrap();
+
+        let err = write_encrypted_file_with_post_finalize(
+            prepared,
+            &output_dir,
+            Some(&output_path),
+            "unused",
+            &built,
+            |staged| {
+                let name = staged.file_name().expect("the staged file has a name");
+                std::fs::rename(staged, replacement.join(name))?;
+                std::fs::rename(&output_dir, &moved)?;
+                std::fs::rename(&replacement, &output_dir)
+            },
+            |_| Ok(()),
+        )
+        .expect_err("a staged file moved out of the anchored directory must refuse the commit");
+
+        assert!(
+            !output_path.exists(),
+            "the substituted directory must receive no output: {err}"
+        );
+        assert!(
+            !moved.join("output.fcr").exists(),
+            "the original directory must receive none either"
+        );
+    }
+
     /// The writer must check the final path at its own return boundary, after
     /// the atomic helper has returned. Replacing that entry in this interval
     /// is reported, and neither the committed file nor the replacement is
@@ -764,6 +849,7 @@ mod tests {
             Some(&output_path),
             "unused",
             &built,
+            |_| Ok(()),
             |_| {
                 std::fs::rename(&output_path, &committed_path)?;
                 std::fs::write(&output_path, b"replacement")

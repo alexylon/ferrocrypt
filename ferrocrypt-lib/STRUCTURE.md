@@ -48,8 +48,9 @@
    - [7.8 `archive/platform.rs`](#78-archiveplatformrs)
    - [7.9 `archive/fd_limit.rs`](#79-archivefd_limitrs)
 8. [`fs/`](#8-fs)
-   - [8.1 `fs/atomic.rs`](#81-fsatomicrs)
-   - [8.2 `fs/paths.rs`](#82-fspathsrs)
+   - [8.1 `fs/commit.rs`](#81-fscommitrs)
+   - [8.2 `fs/atomic.rs`](#82-fsatomicrs)
+   - [8.3 `fs/paths.rs`](#83-fspathsrs)
 9. [Public API shape](#9-public-api-shape)
    - [9.1 Encryption](#91-encryption)
    - [Centralized cap enforcement](#centralized-cap-enforcement)
@@ -168,6 +169,7 @@ ferrocrypt-lib/src/
 ├── fs/
 │   ├── mod.rs
 │   ├── atomic.rs
+│   ├── commit.rs
 │   └── paths.rs
 │
 ├── passphrase.rs
@@ -953,8 +955,8 @@ It contains:
 - `create_file_at` — `OpenOptions::create_new(true)` plus `OpenOptionsFollowExt::follow(FollowSymlinks::No)` for atomic O_EXCL-style create that refuses every leaf symlink, dangling or live;
 - `open_file_nofollow` + `finalize_file_open` — reopens the promoted root file without following symlinks and verifies that the opened object is a regular file (`decode::apply_root_file_mode`, `FORMAT.md` §9.11 step 16). On Unix the open is non-blocking, so a substituted FIFO cannot wait for a writer. The Windows reparse-point check also applies;
 - `chmod_file_handle`, `chmod_dir_handle` — handle-based permission application; never path-based, so a substituted symlink between extract and chmod cannot redirect the operation. Special bits are stripped via `super::PERMISSION_BITS_MASK`. `chmod_dir_handle_durable` wraps the directory case for staged descendants: it opens the handle to flush while the directory still has the permissive staging mode, then applies the mode, then flushes that handle. The flush therefore covers the new mode; an open attempted afterwards would fail for a stored mode without read permission;
-- `rename_at_no_clobber` (Linux/macOS) — handle-relative `renameat(dir, …, dir, …, RENAME_NOREPLACE)` via `rustix`, used by the decrypt promotion (`FORMAT.md` §9.11 step 15) so the `{root}.incomplete` → final-name commit is anchored to the same `output_dir` handle as extraction; a swap of the `output_dir` path mid-run cannot redirect it. On a filesystem whose driver refuses the no-replace flag outright (`fs/atomic.rs::no_replace_rename_unsupported`; the macOS exFAT driver among them) it dispatches to `rename_at_no_clobber_via_claim`. A file root takes `link_no_clobber` first: `cap_std::fs::Dir::hard_link` refuses an existing target atomically, so the staged file reaches the final name with no placeholder for a concurrent writer to replace, and the staged name is then unlinked. `PromotionOutcome::LinkedFile` keeps that route visible after a nominally successful or missing-name unlink, and `decode::require_single_linked_file` requires `nlink == 1` through the retained staged handle; moving the staging link or planting an unlinkable replacement therefore cannot produce success. If the unlink fails, the count cannot be read, or another link remains, the final name is not withdrawn: delayed cleanup gives a concurrent writer time to replace the entry, and no portable conditional unlink can remove only the link this run created. The decrypt completes the identity checks and returns an explicit post-commit error while preserving the complete commit and any additional link. Directory roots, and any filesystem without hard links, fall through to the claim: it atomically claims the final name through the same handle (`create_file_at` for a file root, owner-only `mkdir` for a directory root) and renames the staged root over its own claim — no-clobber against pre-existing entries stays unconditional, and both steps stay handle-relative. Between those two steps the claim is an ordinary entry, so an entry another process plants in its place is replaced by the rename; `SECURITY.md` states that bound. Windows and other-target promotion stays path-based in `fs/atomic.rs`, because a handle-relative no-replace rename on Windows needs an `unsafe` Win32 call the crate forbids;
-- `ObjectId` + `metadata_object_id` / `dir_object_id` / `file_object_id` — the identity of a filesystem object, read from an open handle so a later step can tell whether a name still denotes the object this run created (`FORMAT.md` §9.11 steps 16 and 17). It is the `(dev, ino)` pair on Unix and the volume serial number and file index on Windows, both read through `fs/atomic.rs::file_identity` (§8.1), which a rename leaves unchanged. The reads return `None` for an all-zero identifier, which carries no information, so those steps skip rather than confirm there; a filesystem assigning one non-zero identifier to every object still compares equal, so those steps keep the no-follow opens and the reparse-point checks as their guard;
+- `rename_at_no_clobber` (Linux/macOS) — handle-relative `renameat(dir, …, dir, …, RENAME_NOREPLACE)` via `rustix`, used by the decrypt promotion (`FORMAT.md` §9.11 step 15) so the `{root}.incomplete` → final-name commit is anchored to the same `output_dir` handle as extraction; a swap of the `output_dir` path mid-run cannot redirect it. On a filesystem whose driver refuses the no-replace flag outright (`fs/atomic.rs::no_replace_rename_unsupported`; the macOS exFAT driver among them) it dispatches to `rename_at_no_clobber_via_claim`, whose route is `fs/commit.rs`'s (§8.1) — the same link-then-claim commit the writer side reaches on those filesystems. What stays here is the staged-name removal after a link commit: the extractor holds its staged handle across the promotion, so the removal cannot close it first and its result alone proves nothing. `PromotionOutcome::LinkedFile` keeps that route visible after a nominally successful or missing-name unlink, and `decode::require_single_linked_file` requires `nlink == 1` through the retained staged handle; moving the staging link or planting an unlinkable replacement therefore cannot produce success. If the unlink fails, the count cannot be read, or another link remains, the final name is not withdrawn: delayed cleanup gives a concurrent writer time to replace the entry, and no portable conditional unlink can remove only the link this run created. The decrypt completes the identity checks and returns an explicit post-commit error while preserving the complete commit and any additional link. A failed claim-route rename reaches `decode` as `PromotionFailure`, whose `claim_left` says a claim was created at the output name and left there, so that name may still be occupied; the decrypt appends that to the error it returns. Windows and other-target promotion stays path-based in `fs/atomic.rs`, because a handle-relative no-replace rename on Windows needs an `unsafe` Win32 call the crate forbids;
+- `ObjectId` + `metadata_object_id` / `dir_object_id` / `file_object_id` — the identity of a filesystem object, read from an open handle so a later step can tell whether a name still denotes the object this run created (`FORMAT.md` §9.11 steps 16 and 17). It is the `(dev, ino)` pair on Unix and the volume serial number and file index on Windows, both read through `fs/atomic.rs::file_identity` (§8.2), which a rename leaves unchanged. The reads return `None` for an all-zero identifier, which carries no information, so those steps skip rather than confirm there; a filesystem assigning one non-zero identifier to every object still compares equal, so those steps keep the no-follow opens and the reparse-point checks as their guard;
 - `compare_owners` + `OwnerComparison` — how the owners of a staged directory root and a file this run created beneath it compare, read through both handles (`FORMAT.md` §9.11, after step 10). Two objects one run created agree on every filesystem — the run's own identity where ownership is recorded, the mount's fixed or remapped one elsewhere — so the comparison never refuses the run's own root and detects a planted one wherever ownership is recorded; Windows metadata carries no owner without a security-descriptor query, so it reports the comparison unavailable there;
 - `retain_staged_dir` — the second handle to a staged directory root that the extractor holds across promotion. On Unix a duplicate of the creating handle; on Windows a fresh open of the entry by name with delete sharing, as a read handle with backup semantics that does not follow a reparse point, wrapped as a `Dir` for the identity read only — a cap-std directory handle has no delete sharing and would refuse the promotion rename. Because it resolves the name, `decode::retain_staged_directory` confirms its identity against the creating handle before recording it;
 - `INITIAL_FILE_CREATE_MODE` — restrictive `0o600` initial mode applied at create time on Unix. Descendant files are chmod'd to the manifest mode after the payload is written (inside the 0o700 staged root). Single-file roots stay at `0o600` throughout staging and across the rename, with the manifest mode applied post-rename via `decode::apply_root_file_mode` so a wider final mode is never briefly visible. Effective on Unix only; ignored on Windows.
@@ -976,41 +978,55 @@ Test-only (`cfg(test)`, Linux and macOS): open-file-limit control for tests that
 
 Archive-specific path rules live in `archive/path.rs`; general output-path and staging mechanics live in `fs/`.
 
-### 8.1 `fs/atomic.rs`
+### 8.1 `fs/commit.rs`
+
+`fs/commit.rs` owns the no-clobber commit every writer resolves through, the anchor it resolves through, and the restrictive modes and create primitives a staged entry is made with.
+
+Encryption output, key generation, and archive extraction all stage under a temporary name in the destination directory and promote it to the final name only once the content is complete.
+
+`open_commit_anchor` opens the destination directory as the handle a commit resolves through. Production encryption uses it on Linux and macOS, where it asks for only the access a commit uses: `O_PATH` and `O_SEARCH` respectively. A commit places and removes entries *inside* the directory and never lists it, so the narrower request carries no authority the commit does not use, and an output directory that grants write and search but not read still receives output. Encryption on every other target retains its path-based primary commit without opening an otherwise-unused directory handle; an affected Unix filesystem opens a readable anchor only if that primary operation proves unsupported and the compatibility fallback is needed. A caller that must also read the directory — key generation, whose required durability barrier reopens it — opens its own readable `OutputDir` before staging and keeps that requirement on every target.
+
+`rename_no_replace_at` is the route every Linux and macOS commit prefers: `renameat(anchor, staged, anchor, final, RENAME_NOREPLACE)` through `rustix`, so the kernel performs the existence check and the rename as one operation and a swap of the destination path between staging and the commit cannot redirect it. It reports a kernel or filesystem that cannot perform a flagged rename at all as `FlaggedRename::Unsupported`, which is what sends both writers to the fallback below; an ordinary failure of a supported rename is an error. Durability is the caller's, because the two callers flush at different points and to different requirements.
+
+Where the kernel or the filesystem refuses a no-replace rename — the macOS exFAT and smbfs drivers, some network and FUSE mounts — all three reach `commit_by_link_or_claim`, so the fallback exists once rather than once per writer:
+
+- a file on a filesystem with hard links is linked at its final name, because a link refuses an existing target atomically and so reaches the final name with no placeholder a concurrent writer could replace. The staging name still exists afterwards, and removing it is the caller's step: the two writers hold their staged handle for different lengths of time;
+- a directory, and a file on a filesystem without hard links (exFAT and FAT), claims the final name by creating it — exclusive-create for a file, owner-only `mkdir` for a directory — and renames the staged entry over that claim. The claim is an atomic test-and-create, so an entry that predates the commit is still refused; between the two steps the claim is an ordinary entry, the bound `SECURITY.md` states.
+
+Every step resolves through the caller's retained directory handle, so a rename or replacement of the destination path mid-commit can neither redirect the commit nor send a removal into another directory.
+
+A failed step-2 rename leaves the final name as it is. The claim ran with its entry already visible, so by then that entry may be the placeholder or one a local writer put in its place, and no Unix operation removes a name only while it still denotes a given open file: an identity check followed by a removal by name would reach an entry substituted in between, and `mkdir` returns no handle to check against at all. No content from this run's staged entry reached that name, but an entry another process placed there can contain its own data. The name is therefore reported to the caller through `CommitFailure::claim_left` — it may still hold the name against a further attempt — and neither report states whose the entry is or whether it is empty. This is what lets `FORMAT.md` §9.11 and `THREAT_MODEL.md` TM-14 state cleanup ownership without an exception for this route.
+
+What stays with each caller: the primary route it tries first, the removal of the staging name after a link commit, the durability barrier, the error taxonomy, and every post-commit confirmation.
+
+`STAGED_FILE_MODE` (`0o600`) and `STAGED_DIR_MODE` (`0o700`) are the single source for the restrictive permission words every staged or claimed entry is created with; `archive/platform.rs`'s `INITIAL_FILE_CREATE_MODE` and `DIR_CREATE_MODE` name the same values for the extraction side. `create_file_at` and `create_dir_at` are the create primitives that apply them, the first taking a mode already reduced to the permission bits — the archive extractor masks a manifest-supplied mode before calling through.
+
+---
+
+### 8.2 `fs/atomic.rs`
 
 `fs/atomic.rs` owns atomic output behavior.
 
 It contains:
 
 - no-clobber finalization:
-  - **encryption output and key generation** (file roots, every
-    platform) go through `tempfile::*::persist_noclobber` — atomic
-    no-replace on every supported platform, Windows included. On a
-    Unix filesystem whose driver refuses the no-replace rename
-    (`no_replace_rename_unsupported`; the macOS exFAT driver among
-    them), `finalize_file` falls back to
-    `finalize_file_via_link_or_claim`, which mirrors the archive
-    promotion: it opens the destination directory as an `OutputDir` and
-    links first (`cap_std::fs::Dir::hard_link`), because a link refuses
-    an existing target atomically and so reaches the final name with no
-    placeholder a concurrent writer could replace. `tempfile` does not
-    retry the unsupported-operation error that leads here — its own
-    link fallback answers only a no-replace flag reported as unknown or
-    invalid, and discards that fallback's unlink result — so a
-    filesystem with links but without a no-replace rename (SMB) is
-    committed here without a claim
-    window. Only a filesystem without hard links (exFAT) falls through
-    to `finalize_file_via_claim`: exclusive-create the final name, then
-    rename the temp file over that claim. No-clobber against
-    pre-existing entries stays unconditional either way; between the
-    claim and the rename the placeholder is an ordinary entry, so an
-    entry another process plants in its place is replaced by the
-    rename, the same bound `SECURITY.md` states for the archive claim;
-    if that rename fails instead, the claim is withdrawn only while the
-    entry is still the placeholder — the claim handle is retained and
-    the removal is identity-checked — so such a planted entry is left
-    in place, and a withdrawal that cannot be confirmed is appended to
-    the returned error, because the placeholder may still hold the name.
+  - **encryption output and key generation** (file roots) commit on
+    Linux and macOS through `finalize_file_at`, which is `fs/commit.rs`'s
+    handle-relative no-replace rename (§8.1) with its link-or-claim
+    fallback behind it. Encryption opens the anchor itself, for the
+    commit alone (`OutputDir::open_for_commit`, search-only); key
+    generation threads in the readable `OutputDir` its rollbacks and
+    required durability barrier already act on. Both confirm the staged
+    temporary against that anchor before any commit step. Windows and
+    the other Unix targets keep `tempfile::*::persist_noclobber` —
+    atomic no-replace, and on Windows the only safe route — falling back
+    on Unix to the same `fs/commit.rs` route where the driver refuses
+    the flagged rename (`no_replace_rename_unsupported`). `tempfile`
+    does not retry the unsupported-operation error that leads there —
+    its own link fallback answers only a no-replace flag reported as
+    unknown or invalid, and discards that fallback's unlink result — so
+    a filesystem with links but without a no-replace rename (SMB) is
+    committed without a claim window.
     The link, the claim, the step-2 rename, and every removal resolve
     through one `OutputDir` handle — opened at entry, or threaded in by
     key generation so its commits share the anchor its rollbacks and
@@ -1039,14 +1055,18 @@ It contains:
     confirmation — the key-generation rollback — is reported as
     unconfirmed rather than made, so such a value is never taken as a
     match (`THREAT_MODEL.md` §7.4).
-    The one-step persist arm — on every platform — and the claim arm
+    The one-step persist arm on Windows and the other non-Linux/macOS
+    targets, and the claim arm wherever it is needed,
     end with the same two confirmations through their retained handles:
     `tempfile`'s persist can itself have committed by hard link on Unix,
     so its `Ok` alone does not prove the staged name is gone, and a link
     planted against the staged temporary before the commit survives it
     anywhere.
-    Opening the anchor needs a readable output
-    directory (`SECURITY.md`);
+    Encryption's Linux/macOS anchor requests only search access, not
+    permission to list the directory. Key generation keeps a readable
+    anchor for its required durability barrier, and other Unix targets
+    retain the readable-directory requirement for the fallback
+    (`SECURITY.md`);
   - **decrypt promotion on Windows and other non-Linux/macOS targets**:
     single-file roots through `promote_single_file_no_clobber` (the same
     `tempfile` atomic no-replace, Windows `MoveFileExW` included; on
@@ -1083,14 +1103,14 @@ It contains:
   because `rustix` reports a signal-interrupted call as `EINTR` while
   `File::sync_all` retries internally;
 - required directory-entry flushing: `sync_dir_durable` opens and flushes a directory, returning genuine failures to the caller. Unix uses an `O_DIRECTORY | O_NONBLOCK` read handle; Windows uses a backup-semantics write handle because `FlushFileBuffers` requires write access. Filesystems that cannot flush directories are treated as unsupported, which limits the caller's guarantee to process interruption. Key generation uses this helper after each key-file commit. `sync_parent_dir` remains the best-effort helper for path-based recoverable-output commits; on Unix and Windows alike it routes through the same `sync_dir_durable` primitive with the result dropped, so the parent is always opened as a directory and a path replaced by a FIFO or a device node after publication is refused rather than opened — a read-only open of such an object waits for a writer, and a best-effort helper has no error to swallow while the open itself is blocked. The Unix link/claim writer fallbacks instead flush through the exact `OutputDir` handle used for their commit on Linux and macOS, so a renamed destination path cannot redirect the barrier to a replacement directory; other Unix targets retain the path-based best effort. Staged descendant directories during extraction are flushed on Linux and macOS only (`archive/platform.rs::chmod_dir_handle_durable` for descendants, `sync_dir_handle` for the staged root): Windows needs a write handle for `FlushFileBuffers`, and the extraction directory handles are opened read-only; a capability-relative write reopen of `.` could close the gap but is not implemented or verified on Windows;
-- anchored failure cleanup: `OutputDir` retains a `cap_std::fs::Dir` handle on the directory an operation publishes into, and `remove_published` resolves a removal inside that handle rather than through the entry's own path. A rollback runs after a commit is already visible on disk, which is exactly when a renamed or symlink-substituted output path would send the removal into a different directory and unlink a same-named file the operation never created. Key generation opens the handle before its first commit, threads it into both fallback commit routes (`finalize_file_with_anchor`), and undoes both key files through it, so commit, rollback, and barrier share one anchor; each rollback (`remove_published_if_retained`) also confirms through the retained committed handle that the entry it removes is still the file this run committed, so a key file moved aside and replaced during the failure window is left in place, and it returns a `RollbackOutcome` that `with_rollback_report` appends to the error being returned whenever the file is not confirmed gone — replaced, unreadable, or removed while it still had other names. The removal itself is `remove_retained`: on Unix an unlink of the name inside the anchored directory, on Windows a delete-on-close reopen of the retained committed handle (`cap_fs_ext::Reopen`), so a replacement made after the identity check is never removed there. The `finalize_file_via_claim` fallback uses the handle for the claim and, when its rename fails, for the identity-checked withdrawal of that claim (`remove_if_retained`, the same core as the key-file rollback, given the retained placeholder handle), so an entry planted in the placeholder's place is left alone; no bare-name removal remains in the module. The handle does not make the chosen directory trustworthy — the caller's choice of output directory is the trust boundary — it removes the mismatch between the directory an operation wrote to and the one it later cleans up in;
+- anchored failure cleanup: `OutputDir` retains a `cap_std::fs::Dir` handle on the directory an operation publishes into, and `remove_published_if_retained` resolves a removal inside that handle rather than through the entry's own path. A rollback runs after a commit is already visible on disk, which is exactly when a renamed or symlink-substituted output path would send the removal into a different directory and unlink a same-named file the operation never created. Key generation opens the handle before staging and threads it into both `finalize_file` calls. On Linux and macOS the commits, rollbacks, and barriers all resolve through it; elsewhere the primary commit and barrier remain path-based, while rollback stays anchored and the other-Unix compatibility fallback uses the same handle. Each rollback also confirms through the retained committed handle that the entry it removes is still the file this run committed, so a key file moved aside and replaced during the failure window is left in place, and it returns a `RollbackOutcome` that `with_rollback_report` appends to the error being returned whenever the file is not confirmed gone — replaced, unreadable, or removed while it still had other names. If `private.key` committed but its post-commit checks fail before `public.key` commits, or the first directory barrier fails, `remove_staged_if_retained` applies the same anchored identity check to the still-staged public file and reports an outcome that does not prove it gone. The removal itself is `remove_retained`: on Unix an unlink of the name inside the anchored directory, on Windows a delete-on-close reopen of the retained file handle (`cap_fs_ext::Reopen`), so a replacement made after the identity check is never removed there. The claim route in `fs/commit.rs` performs no failure-path removal at the final name: after a failed rename it preserves and reports whatever occupies that name, for file and directory claims alike. No bare-name claim withdrawal remains. The handle does not make the chosen directory trustworthy — the caller's choice of output directory is the trust boundary — it removes the mismatch between the directory an operation wrote to and the one it later cleans up in;
 - keeping a staged file on disk after a refused promotion, so a rejected commit leaves the caller something to inspect.
 
-Temporary output names, same-directory staging, and cleanup on encryption failure are the callers' concern: `container.rs` and `protocol.rs` build the names and stage into the destination directory, and `NamedTempFile`'s destructor removes a staged file that was never committed. `.incomplete` behavior on decryption failure belongs to `archive/decode.rs`, which owns the `StagedRoot` record of what the run created, its removal, and the `IncompleteOutputPolicy` dispatch.
+Temporary output names, same-directory staging, and cleanup on encryption failure are the callers' concern: `container.rs` and `protocol.rs` build the names and stage into the destination directory. Before finalization, `NamedTempFile`'s destructor attempts removal through its recorded ambient path; this is best-effort and a renamed parent can make that path stop naming the staged file. Once one generated key has committed, cleanup of its still-staged sibling instead goes through key generation's retained `OutputDir`, and an unconfirmed result is appended to the returned error. `.incomplete` behavior on decryption failure belongs to `archive/decode.rs`, which owns the `StagedRoot` record of what the run created, its removal, and the `IncompleteOutputPolicy` dispatch.
 
 Atomic output is a library guarantee. It is not a CLI-only concern.
 
-### 8.2 `fs/paths.rs`
+### 8.3 `fs/paths.rs`
 
 `fs/paths.rs` owns general path helpers.
 
@@ -1357,6 +1377,7 @@ Each security-sensitive concern has exactly one owner.
 | Archive decoding | `archive/decode.rs` |
 | Platform extraction hardening | `archive/platform.rs` |
 | Atomic output (encryption and key-file finalize; Windows/other-target decrypt promotion) | `fs/atomic.rs` |
+| No-clobber commit (anchor, no-replace rename, link-or-claim fallback) and staged-entry create modes | `fs/commit.rs` |
 | Handle-relative decrypt promotion (Linux/macOS) | `archive/platform.rs` |
 | General filesystem path helpers | `fs/paths.rs` |
 | Public API translation | `api.rs` |

@@ -2,6 +2,10 @@
 //!
 //! Owns:
 //!
+//! - [`commit`] — the link-or-claim no-clobber commit both writers
+//!   reach where the filesystem cannot perform an atomic no-replace
+//!   rename, plus the restrictive modes and the create primitives a
+//!   staged entry is made with.
 //! - [`atomic`] — no-clobber finalization, the file and directory
 //!   durability helpers, and the path-based decrypt-promotion helpers
 //!   used on Windows / other non-Linux/macOS targets. Linux/macOS
@@ -15,4 +19,5 @@
 //!   constant, and user-facing path error mapping.
 
 pub(crate) mod atomic;
+pub(crate) mod commit;
 pub(crate) mod paths;

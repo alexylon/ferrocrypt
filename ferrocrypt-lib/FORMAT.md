@@ -1870,9 +1870,21 @@ no-clobber guarantee (an entry that predates the commit is never replaced) and
 the rename lands content at the final name whole. Between the two steps the
 claim is an ordinary entry, so an entry another process puts in its place is
 replaced by the rename. Both steps MUST resolve through the same trusted
-directory handle where the platform backend is handle-relative. A crash between
-the two steps leaves an empty claimed entry alongside the staged `.incomplete`
-root.
+directory handle where the platform backend is handle-relative.
+
+If the second step fails, the reader MUST leave the entry at the final name in
+place, whatever it is by then. The claim ran with its entry already visible, so
+that entry may be the claim or one a local writer put there in the window above,
+and no portable operation removes a name only while it still denotes a given
+object: an identity check followed by a removal by name would reach an entry
+substituted in between, and `mkdir` returns no handle to check against at all.
+No content from the reader's staged root reached that name, because the commit
+failed before the root could be moved there; an entry another process placed
+there can still contain its own data. The reader MUST report the name with the
+returned error, because it may still hold that name against a further attempt,
+and the report MUST NOT state whose the remaining entry is or whether it is
+empty. A crash between the two steps leaves an empty claimed entry alongside
+the staged `.incomplete` root in the same way.
 
 On Windows, the zero-unsafe implementation keeps the documented path-based
 final rename: single-file roots use a kernel atomic no-replace move, while

@@ -708,25 +708,30 @@ pub(crate) fn generate_key_pair(
     output_dir: &Path,
     on_event: &dyn Fn(&ProgressEvent),
 ) -> Result<(PathBuf, PathBuf, String, String), CryptoError> {
-    generate_key_pair_with_post_commit(
+    generate_key_pair_with_seams(
         passphrase,
         kdf_params,
         kdf_limit,
         output_dir,
         on_event,
         |_, _| Ok(()),
+        |_, _| Ok(()),
     )
 }
 
-/// Implementation seam for the interval after both key files commit and
-/// before their paths are returned. Production supplies a no-op; tests replace
-/// either final entry to exercise both last-minute identity checks.
-fn generate_key_pair_with_post_commit(
+/// Implementation seam for two intervals a test needs to reach: after
+/// both key files are staged and before either commits, and after both
+/// commit and before their paths are returned. Production supplies
+/// no-ops; tests substitute the output directory in the first and
+/// replace either final entry in the second. Each hook receives the
+/// private and the public path of its interval, in that order.
+fn generate_key_pair_with_seams(
     passphrase: crate::passphrase::Passphrase,
     kdf_params: &crate::crypto::kdf::KdfParams,
     kdf_limit: Option<&crate::crypto::kdf::KdfLimit>,
     output_dir: &Path,
     on_event: &dyn Fn(&ProgressEvent),
+    before_commit: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
     after_commit: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
 ) -> Result<(PathBuf, PathBuf, String, String), CryptoError> {
     use std::io::Write as _;
@@ -784,9 +789,19 @@ fn generate_key_pair_with_post_commit(
     // checksum, emits BIP 173 lowercase Bech32).
     let recipient_string = encode_recipient_string(x25519::TYPE_NAME, &public_material)?;
 
+    // Retain the output directory before the first temporary exists. On Linux
+    // and macOS both commits, their rollbacks, and their durability barriers
+    // resolve through it, so a later path replacement cannot redirect them.
+    // Other targets retain their established path-based commit and barrier;
+    // the handle still anchors rollback (and the compatibility fallback on
+    // other Unix targets), while Windows also prevents the directory itself
+    // from being renamed because the handle denies delete sharing.
+    let committed_dir = crate::fs::atomic::OutputDir::open(output_dir).map_err(CryptoError::Io)?;
+
     // Stage and sync both key files before either receives its final
     // name. Any failure before the commit step removes both temporary
-    // files and publishes nothing.
+    // files and publishes nothing. On Unix, each staged file is confirmed to
+    // be an entry of the anchored directory before it receives content.
     let mut private_builder = tempfile::Builder::new();
     private_builder
         .prefix(".ferrocrypt-private_key-")
@@ -797,6 +812,7 @@ fn generate_key_pair_with_post_commit(
         private_builder.permissions(fs::Permissions::from_mode(0o600));
     }
     let mut private_tmp = private_builder.tempfile_in(output_dir)?;
+    committed_dir.confirm_staged(&private_tmp)?;
     private_tmp.as_file_mut().write_all(&private_key_bytes)?;
     atomic::sync_file_durable(private_tmp.as_file())?;
 
@@ -812,14 +828,21 @@ fn generate_key_pair_with_post_commit(
         public_builder.permissions(fs::Permissions::from_mode(0o644));
     }
     let mut public_tmp = public_builder.tempfile_in(output_dir)?;
+    committed_dir.confirm_staged(&public_tmp)?;
     public_tmp
         .as_file_mut()
         .write_all(recipient_string.as_bytes())?;
     public_tmp.as_file_mut().write_all(b"\n")?;
     atomic::sync_file_durable(public_tmp.as_file())?;
+    before_commit(private_tmp.path(), public_tmp.path())?;
 
-    let (private_finalized, public_finalized) =
-        commit_key_pair_files(private_tmp, public_tmp, &private_key_path, &public_key_path)?;
+    let (private_finalized, public_finalized) = commit_key_pair_files(
+        private_tmp,
+        public_tmp,
+        &private_key_path,
+        &public_key_path,
+        &committed_dir,
+    )?;
 
     // Compute the fingerprint from the in-memory `public_material`
     // rather than re-reading and re-decoding `public.key` from disk.
@@ -864,6 +887,8 @@ fn generate_key_pair_with_post_commit(
 ///   published. A post-commit verification or staged-unlink failure preserves
 ///   the committed private key and reports the error.
 /// - If the first directory flush fails, `private.key` is removed best-effort.
+///   The still-staged public file is removed through the same retained output
+///   directory, and a result that does not prove it gone is reported.
 /// - If the `public.key` commit fails before publication, `private.key` is
 ///   removed best-effort. A post-commit failure preserves both committed
 ///   final names rather than manufacturing a public-only pair.
@@ -875,20 +900,19 @@ fn generate_key_pair_with_post_commit(
 ///   replaced, its identity could not be read, or the file had other
 ///   names — is reported in the returned error.
 ///
-/// Every removal above resolves inside the retained output-directory
-/// handle rather than through the key-file path, and on Linux and
-/// macOS both directory flushes do too, so an output directory renamed
-/// or replaced between the two commits can neither turn a rollback
-/// into the deletion of an unrelated file of the same name nor leave
-/// the durability barrier flushing a directory the entries were never
-/// committed to. Both commits also thread that same handle into their
-/// Unix fallback routes, so the directory that receives a commit is
-/// the one the rollbacks and flushes act on.
+/// Every removal above resolves inside the retained output-directory handle
+/// rather than through the key-file path. On Linux and macOS both commits and
+/// directory flushes resolve through that handle as well, so a renamed or
+/// replaced output path cannot split publication, rollback, and durability
+/// across directories. Other targets retain their path-based primary commit
+/// and barrier; both commits still thread the handle into the other-Unix
+/// compatibility fallback, and rollback remains anchored on every target.
 fn commit_key_pair_files(
     private_tmp: tempfile::NamedTempFile,
     public_tmp: tempfile::NamedTempFile,
     private_key_path: &Path,
     public_key_path: &Path,
+    committed_dir: &crate::fs::atomic::OutputDir,
 ) -> Result<
     (
         crate::fs::atomic::FinalizedFile,
@@ -901,6 +925,7 @@ fn commit_key_pair_files(
         public_tmp,
         private_key_path,
         public_key_path,
+        committed_dir,
         flush_committed_dir,
     )
 }
@@ -938,6 +963,7 @@ fn commit_key_pair_files_with_barrier(
     public_tmp: tempfile::NamedTempFile,
     private_key_path: &Path,
     public_key_path: &Path,
+    committed_dir: &crate::fs::atomic::OutputDir,
     sync_output_dir: impl Fn(&crate::fs::atomic::OutputDir, &Path) -> std::io::Result<()>,
 ) -> Result<
     (
@@ -951,8 +977,9 @@ fn commit_key_pair_files_with_barrier(
         public_tmp,
         private_key_path,
         public_key_path,
+        committed_dir,
         sync_output_dir,
-        crate::fs::atomic::finalize_file_with_anchor,
+        crate::fs::atomic::finalize_file,
     )
 }
 
@@ -964,6 +991,7 @@ fn commit_key_pair_files_with_barrier_and_public_finalizer(
     public_tmp: tempfile::NamedTempFile,
     private_key_path: &Path,
     public_key_path: &Path,
+    committed_dir: &crate::fs::atomic::OutputDir,
     sync_output_dir: impl Fn(&crate::fs::atomic::OutputDir, &Path) -> std::io::Result<()>,
     finalize_public: impl FnOnce(
         tempfile::NamedTempFile,
@@ -981,40 +1009,55 @@ fn commit_key_pair_files_with_barrier_and_public_finalizer(
     ),
     CryptoError,
 > {
-    use crate::fs::atomic::{self, OutputDir};
+    use crate::fs::atomic::{self};
     use crate::fs::paths::parent_or_cwd;
 
     // Both final paths name entries in the same output directory: one
     // flush covers both, and both rollbacks resolve there.
     let output_dir = parent_or_cwd(private_key_path);
-    // Anchor the fallback commit routes, the rollbacks, and the
-    // durability barrier to the directory the staged files were created
-    // in. Rollback and barrier run after a commit is already visible on
-    // disk, which is exactly when a substituted output path would send
-    // them somewhere else; threading the same handle into both commits
-    // keeps the directory that receives a commit the one they act on.
-    // Each rollback also confirms through the retained committed handle
-    // that the entry it removes is still the file this run committed.
-    let committed_dir = OutputDir::open(output_dir).map_err(CryptoError::Io)?;
 
-    let private_finalized = atomic::finalize_file_with_anchor(
-        private_tmp,
-        private_key_path,
-        KEY_FILE_LABEL,
-        &committed_dir,
-    )
-    .map_err(atomic::FinalizeFileError::into_crypto_error)?;
-    if let Err(e) = sync_output_dir(&committed_dir, output_dir) {
+    let private_finalized =
+        match atomic::finalize_file(private_tmp, private_key_path, KEY_FILE_LABEL, committed_dir) {
+            Ok(finalized) => finalized,
+            Err(error) => {
+                let committed = error.committed();
+                let error = error.into_crypto_error();
+                if committed {
+                    // `private.key` reached its final name, so an ambient-path
+                    // destructor for the still-staged public file is no longer
+                    // safe: the output directory may have moved, which would
+                    // send that destructor into its replacement. Remove the
+                    // sibling through the retained anchor and report any
+                    // outcome that does not prove it gone.
+                    let public_tmp_path = public_tmp.path().to_path_buf();
+                    let cleanup = committed_dir.remove_staged_if_retained(public_tmp);
+                    return Err(atomic::with_rollback_report(
+                        error,
+                        cleanup,
+                        &public_tmp_path,
+                    ));
+                }
+                // Before publication, keep `NamedTempFile`'s existing cleanup
+                // behaviour. In particular, a staged file deliberately moved
+                // with a replacement output directory is still removed at the
+                // path its handle records.
+                return Err(error);
+            }
+        };
+    if let Err(e) = sync_output_dir(committed_dir, output_dir) {
         let rollback =
             committed_dir.remove_published_if_retained(private_key_path, private_finalized);
+        let error = atomic::with_rollback_report(CryptoError::Io(e), rollback, private_key_path);
+        let public_tmp_path = public_tmp.path().to_path_buf();
+        let cleanup = committed_dir.remove_staged_if_retained(public_tmp);
         return Err(atomic::with_rollback_report(
-            CryptoError::Io(e),
-            rollback,
-            private_key_path,
+            error,
+            cleanup,
+            &public_tmp_path,
         ));
     }
     let public_finalized =
-        match finalize_public(public_tmp, public_key_path, KEY_FILE_LABEL, &committed_dir) {
+        match finalize_public(public_tmp, public_key_path, KEY_FILE_LABEL, committed_dir) {
             Ok(finalized) => finalized,
             Err(error) => {
                 // Roll private.key back only while public.key definitely did
@@ -1033,7 +1076,7 @@ fn commit_key_pair_files_with_barrier_and_public_finalizer(
                 ));
             }
         };
-    if let Err(e) = sync_output_dir(&committed_dir, output_dir) {
+    if let Err(e) = sync_output_dir(committed_dir, output_dir) {
         let rollback =
             committed_dir.remove_published_if_retained(public_key_path, public_finalized);
         return Err(atomic::with_rollback_report(
@@ -2267,12 +2310,13 @@ mod tests {
             let target_path = output_dir.join(target);
             let committed_path = output_dir.join(format!("{target}.committed"));
 
-            let err = generate_key_pair_with_post_commit(
+            let err = generate_key_pair_with_seams(
                 Passphrase::new("passphrase"),
                 &kdf_params,
                 None,
                 &output_dir,
                 &|_| {},
+                |_, _| Ok(()),
                 |private_path, public_path| {
                     let path = if target == PRIVATE_KEY_FILENAME {
                         private_path
@@ -2300,6 +2344,161 @@ mod tests {
             );
             assert_eq!(fs::read(&target_path).unwrap(), b"replacement");
         }
+    }
+
+    /// Key generation holds its output-directory anchor from before
+    /// either key file is staged, so a local writer who moves both
+    /// staged files into a directory of their own and installs it at the
+    /// output path cannot have the key pair committed there: the commit
+    /// refuses, and neither directory receives a key file. Driven through
+    /// the pre-commit seam rather than a timing race.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn keygen_refuses_an_output_directory_swapped_in_after_staging() {
+        use crate::crypto::kdf::KdfParams;
+        use crate::key::files::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let output_dir = tmp.path().join("keys");
+        let replacement = tmp.path().join("replacement");
+        let moved = tmp.path().join("keys.moved");
+        fs::create_dir(&replacement).unwrap();
+
+        let err = generate_key_pair_with_seams(
+            Passphrase::new("passphrase"),
+            &KdfParams::test_fast_default(),
+            None,
+            &output_dir,
+            &|_| {},
+            |private_staged, public_staged| {
+                for staged in [private_staged, public_staged] {
+                    let name = staged.file_name().expect("a staged file has a name");
+                    fs::rename(staged, replacement.join(name))?;
+                }
+                fs::rename(&output_dir, &moved)?;
+                fs::rename(&replacement, &output_dir)
+            },
+            |_, _| Ok(()),
+        )
+        .expect_err("staged files moved out of the anchored directory must refuse the commit");
+
+        for dir in [&output_dir, &moved] {
+            for name in [PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME] {
+                assert!(
+                    !dir.join(name).exists(),
+                    "{} must receive no {name}: {err}",
+                    dir.display()
+                );
+            }
+        }
+    }
+
+    /// The same swap with the staged files left where they are:
+    /// `private.key` commits into the directory the run began in, the
+    /// substituted directory receives nothing, and the run stops at the
+    /// reported-path check that follows — before `public.key` commits.
+    /// The still-staged public file is removed through the original
+    /// directory anchor, so what remains is exactly one private key,
+    /// which is safe to delete.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn keygen_commits_into_the_directory_it_began_in_across_a_swap() {
+        use crate::crypto::kdf::KdfParams;
+        use crate::key::files::PRIVATE_KEY_FILENAME;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let output_dir = tmp.path().join("keys");
+        let replacement = tmp.path().join("replacement");
+        let moved = tmp.path().join("keys.moved");
+        fs::create_dir(&replacement).unwrap();
+
+        let err = generate_key_pair_with_seams(
+            Passphrase::new("passphrase"),
+            &KdfParams::test_fast_default(),
+            None,
+            &output_dir,
+            &|_| {},
+            |_, _| {
+                fs::rename(&output_dir, &moved)?;
+                fs::rename(&replacement, &output_dir)
+            },
+            |_, _| Ok(()),
+        )
+        .expect_err("the reported paths no longer name the key files");
+
+        assert!(
+            matches!(&err, CryptoError::InvalidInput(message) if message.contains("reported path changed")),
+            "the path change must be reported explicitly, got: {err}"
+        );
+        assert_eq!(
+            leftover_entries(&output_dir, ""),
+            Vec::<std::ffi::OsString>::new(),
+            "the substituted directory must receive nothing"
+        );
+        assert!(
+            moved.join(PRIVATE_KEY_FILENAME).is_file(),
+            "the private key belongs in the directory the run began in"
+        );
+        assert_eq!(
+            leftover_entries(&moved, PRIVATE_KEY_FILENAME),
+            Vec::<std::ffi::OsString>::new(),
+            "the original directory must contain only the committed private key"
+        );
+    }
+
+    /// If the public temporary is moved out of the retained directory before
+    /// `private.key` commits, the post-commit cleanup must not fall back to its
+    /// now-stale ambient path. It leaves the unconfirmed staged file in place
+    /// and appends that fact to the path-change error instead.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn keygen_reports_a_public_staging_file_it_cannot_remove_through_the_anchor() {
+        use crate::crypto::kdf::KdfParams;
+        use crate::key::files::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let output_dir = tmp.path().join("keys");
+        let replacement = tmp.path().join("replacement");
+        let moved = tmp.path().join("keys.moved");
+        fs::create_dir(&replacement).unwrap();
+
+        let err = generate_key_pair_with_seams(
+            Passphrase::new("passphrase"),
+            &KdfParams::test_fast_default(),
+            None,
+            &output_dir,
+            &|_| {},
+            |_, public_staged| {
+                let public_name = public_staged
+                    .file_name()
+                    .expect("a staged public key has a name");
+                fs::rename(public_staged, replacement.join(public_name))?;
+                fs::rename(&output_dir, &moved)?;
+                fs::rename(&replacement, &output_dir)
+            },
+            |_, _| Ok(()),
+        )
+        .expect_err("an unconfirmed staged sibling must be reported");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("reported path changed"),
+            "the committed private key's path change must remain the primary error: {message}"
+        );
+        assert!(
+            message.contains("could not be confirmed"),
+            "the surviving staged public key must be reported: {message}"
+        );
+        assert!(moved.join(PRIVATE_KEY_FILENAME).is_file());
+        assert!(!moved.join(PUBLIC_KEY_FILENAME).exists());
+
+        let replacement_entries = leftover_entries(&output_dir, "");
+        assert_eq!(replacement_entries.len(), 1, "got: {replacement_entries:?}");
+        let staged_name = replacement_entries[0].to_string_lossy();
+        assert!(
+            staged_name.starts_with(".ferrocrypt-public_key-") && staged_name.ends_with(".tmp"),
+            "the reported survivor must be the staged public key, got: {staged_name}"
+        );
     }
 
     /// Creates a staged key-file temporary file in `dir` containing `bytes`.
@@ -2338,9 +2537,14 @@ mod tests {
         let private_tmp = staged_key_tempfile(dir, b"private bytes");
         let public_tmp = staged_key_tempfile(dir, b"public bytes");
 
-        let err =
-            commit_key_pair_files(private_tmp, public_tmp, &private_key_path, &public_key_path)
-                .expect_err("occupied public.key name must fail the commit");
+        let err = commit_key_pair_files(
+            private_tmp,
+            public_tmp,
+            &private_key_path,
+            &public_key_path,
+            &crate::fs::atomic::OutputDir::open(dir).unwrap(),
+        )
+        .expect_err("occupied public.key name must fail the commit");
         assert!(
             matches!(err, CryptoError::InvalidInput(_)),
             "expected the typed already-exists rejection, got {err:?}"
@@ -2375,9 +2579,14 @@ mod tests {
         let private_tmp = staged_key_tempfile(dir, b"private bytes");
         let public_tmp = staged_key_tempfile(dir, b"public bytes");
 
-        let err =
-            commit_key_pair_files(private_tmp, public_tmp, &private_key_path, &public_key_path)
-                .expect_err("occupied private.key name must fail the commit");
+        let err = commit_key_pair_files(
+            private_tmp,
+            public_tmp,
+            &private_key_path,
+            &public_key_path,
+            &crate::fs::atomic::OutputDir::open(dir).unwrap(),
+        )
+        .expect_err("occupied private.key name must fail the commit");
         assert!(
             matches!(err, CryptoError::InvalidInput(_)),
             "expected the typed already-exists rejection, got {err:?}"
@@ -2445,6 +2654,7 @@ mod tests {
             public_tmp,
             &private_key_path,
             &public_key_path,
+            &crate::fs::atomic::OutputDir::open(dir).unwrap(),
             counting_barrier(Some(1), seen.clone()),
         )
         .expect_err("a failed directory flush after private.key must fail the commit");
@@ -2472,6 +2682,52 @@ mod tests {
         );
     }
 
+    /// If the output path is swapped inside the first durability barrier, both
+    /// the private-key rollback and cleanup of the still-staged public key stay
+    /// in the retained original directory. The replacement receives nothing.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn keygen_first_barrier_failure_cleans_the_original_directory_after_a_swap() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("keys");
+        let replacement = tmp.path().join("replacement");
+        let moved = tmp.path().join("keys.moved");
+        fs::create_dir(&dir).unwrap();
+        fs::create_dir(&replacement).unwrap();
+
+        let private_key_path = dir.join(PRIVATE_KEY_FILENAME);
+        let public_key_path = dir.join(PUBLIC_KEY_FILENAME);
+        let private_tmp = staged_key_tempfile(&dir, b"private bytes");
+        let public_tmp = staged_key_tempfile(&dir, b"public bytes");
+        let anchor = crate::fs::atomic::OutputDir::open(&dir).unwrap();
+
+        let err = commit_key_pair_files_with_barrier(
+            private_tmp,
+            public_tmp,
+            &private_key_path,
+            &public_key_path,
+            &anchor,
+            |_, _| {
+                fs::rename(&dir, &moved)?;
+                fs::rename(&replacement, &dir)?;
+                Err(std::io::Error::other("injected directory flush failure"))
+            },
+        )
+        .expect_err("the injected first-barrier failure must fail key generation");
+
+        assert_eq!(err.to_string(), "injected directory flush failure");
+        assert_eq!(
+            leftover_entries(&dir, ""),
+            Vec::<std::ffi::OsString>::new(),
+            "the replacement directory must receive nothing"
+        );
+        assert_eq!(
+            leftover_entries(&moved, ""),
+            Vec::<std::ffi::OsString>::new(),
+            "both files this run wrote must be removed from the original directory"
+        );
+    }
+
     /// If the directory flush after committing `public.key` fails, only
     /// `public.key` is removed. `private.key` remains because, without a
     /// working directory flush, removing both could be persisted in an order
@@ -2491,6 +2747,7 @@ mod tests {
             public_tmp,
             &private_key_path,
             &public_key_path,
+            &crate::fs::atomic::OutputDir::open(dir).unwrap(),
             counting_barrier(Some(2), seen.clone()),
         )
         .expect_err("a failed directory flush after public.key must fail the commit");
@@ -2533,9 +2790,10 @@ mod tests {
             public_tmp,
             &private_key_path,
             &public_key_path,
+            &crate::fs::atomic::OutputDir::open(dir).unwrap(),
             |_, _| Ok(()),
             |tmp, path, label, anchor| {
-                let _committed = atomic::finalize_file_with_anchor(tmp, path, label, anchor)
+                let _committed = atomic::finalize_file(tmp, path, label, anchor)
                     .expect("the injected error must follow a real commit");
                 Err(atomic::FinalizeFileError::after_commit_for_test(
                     CryptoError::Io(std::io::Error::other(
@@ -2598,6 +2856,7 @@ mod tests {
             public_tmp,
             &private_key_path,
             &public_key_path,
+            &crate::fs::atomic::OutputDir::open(&out).unwrap(),
             substitute_output_dir,
         )
         .expect_err("the injected directory flush failure must fail the commit");
@@ -2656,6 +2915,7 @@ mod tests {
             public_tmp,
             &private_key_path,
             &public_key_path,
+            &crate::fs::atomic::OutputDir::open(dir).unwrap(),
             replace_private,
         )
         .expect_err("the injected directory flush failure must fail the commit");
@@ -2710,6 +2970,7 @@ mod tests {
             public_tmp,
             &private_key_path,
             &public_key_path,
+            &crate::fs::atomic::OutputDir::open(dir).unwrap(),
             link_private,
         )
         .expect_err("the injected directory flush failure must fail the commit");
@@ -2751,6 +3012,7 @@ mod tests {
             public_tmp,
             &private_key_path,
             &public_key_path,
+            &crate::fs::atomic::OutputDir::open(dir).unwrap(),
             counting_barrier(None, seen.clone()),
         )
         .expect("commit must succeed when directory flushing succeeds");

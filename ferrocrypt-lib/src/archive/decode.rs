@@ -267,13 +267,7 @@ where
             &manifest.root_name,
             manifest.root_is_file,
         )
-        .map_err(|e| {
-            if e.kind() == io::ErrorKind::AlreadyExists {
-                output_already_exists(output_dir, &manifest.root_name)
-            } else {
-                CryptoError::Io(e)
-            }
-        })?;
+        .map_err(|failure| promotion_failed(failure, output_dir, &manifest.root_name))?;
         after_promotion(&mut promotion)?;
 
         // A file root must carry exactly one name, so the count is read
@@ -1109,7 +1103,7 @@ fn promote_root(
     incomplete_name: &OsStr,
     final_name: &OsStr,
     root_is_file: bool,
-) -> io::Result<platform::PromotionOutcome> {
+) -> Result<platform::PromotionOutcome, platform::PromotionFailure> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         let _ = output_dir;
@@ -1132,7 +1126,53 @@ fn promote_root(
             rename_no_clobber(&working_path, &final_path)
                 .map(|()| platform::PromotionOutcome::Clean)
         }
+        .map_err(platform::PromotionFailure::plain)
     }
+}
+
+/// Maps a failed step-15 promotion to the caller-visible error. An
+/// occupied final name becomes the same typed already-exists message the
+/// step-8 occupancy check emits, so a name taken between the two reports
+/// the same error class; every other failure passes through as
+/// [`CryptoError::Io`].
+///
+/// A claim route that left the entry it created appends
+/// [`claim_left_report`]: the final name may still be occupied, which
+/// blocks the next attempt even though no plaintext from this extraction's
+/// staged root reached that name.
+fn promotion_failed(
+    failure: platform::PromotionFailure,
+    output_dir: &Path,
+    root_name: &OsStr,
+) -> CryptoError {
+    let error = if failure.error.kind() == io::ErrorKind::AlreadyExists {
+        output_already_exists(output_dir, root_name)
+    } else {
+        CryptoError::Io(failure.error)
+    };
+    if failure.claim_left {
+        crate::error::append_report(error, &claim_left_report(output_dir, root_name))
+    } else {
+        error
+    }
+}
+
+/// The clause appended when a promotion left the name it claimed in
+/// place. No plaintext from this extraction's staged root reached that name,
+/// because the commit failed before the root could be moved there, but a
+/// further attempt may find the name occupied. The wording does not say whose
+/// the entry is or whether it contains anything: the claim ran with its entry
+/// already visible, and a failed commit removes nothing from the final name.
+///
+/// The writer side reports the same condition in its own words
+/// (`fs::atomic::claim_left_report`). The two share the commit and the
+/// flag that raises this, not the sentence: each names the path the way
+/// the rest of its own errors do.
+fn claim_left_report(output_dir: &Path, root_name: &OsStr) -> String {
+    format!(
+        "the output name {} may still be occupied by an entry this run did not remove",
+        sanitize_path_keeping_parent(&output_dir.join(root_name))
+    )
 }
 
 /// Rejects a directory root on targets without a safe directory-promotion
@@ -1675,6 +1715,40 @@ mod tests {
     use crate::archive::fd_limit;
     use crate::archive::format::{serialize_manifest_unchecked, write_fca_header};
     use std::io::Cursor;
+
+    /// A promotion whose claim route left the name it claimed reports
+    /// that next to the failure, because the entry may still hold the
+    /// output name against a further attempt. The route itself is only
+    /// reachable on a filesystem without an atomic no-replace rename, so
+    /// the reporting is pinned here on the failure value it produces.
+    #[test]
+    fn a_promotion_reports_an_output_name_it_left_occupied() {
+        let failure = platform::PromotionFailure {
+            error: io::Error::other("rename refused"),
+            claim_left: true,
+        };
+        let message =
+            promotion_failed(failure, Path::new("/out"), OsStr::new("payload")).to_string();
+        assert!(
+            message.contains("rename refused")
+                && message.contains("payload")
+                && message.contains("may still be occupied"),
+            "the failure and the name left occupied must both be reported, got: {message}"
+        );
+    }
+
+    /// A promotion that left nothing at the final name reports the
+    /// failure alone.
+    #[test]
+    fn a_promotion_that_left_no_claim_reports_the_failure_alone() {
+        let failure = platform::PromotionFailure::plain(io::Error::other("rename refused"));
+        let message =
+            promotion_failed(failure, Path::new("/out"), OsStr::new("payload")).to_string();
+        assert!(
+            !message.contains("may still be occupied"),
+            "nothing of this run's was left, so nothing is reported, got: {message}"
+        );
+    }
 
     /// An `Interrupted` read at the end-of-payload probe is retried
     /// like every other read in the extraction pipeline, instead of

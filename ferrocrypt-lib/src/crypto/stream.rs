@@ -347,18 +347,20 @@ impl<R: Read> DecryptReader<R> {
     ///
     /// Truncation is reported via two distinct paths:
     ///
-    /// - **Chunk-boundary truncation** — `read` returns 0 immediately
-    ///   AND no `lookahead` is held, meaning the final authenticated
-    ///   chunk is missing entirely. Surfaces as
-    ///   [`StreamError::Truncated`] → [`CryptoError::PayloadTruncated`].
-    /// - **Mid-chunk truncation** — some bytes were read but fewer
-    ///   than a full `ENCRYPTED_CHUNK_SIZE`. The short buffer is
-    ///   treated as the final chunk and run through
-    ///   `decrypt_last_in_place`. AEAD authentication will reject it,
-    ///   surfacing as [`StreamError::DecryptAead`] →
+    /// - **Empty payload region** — the first `read` returns 0 and no
+    ///   `lookahead` is held, so the stream carries no chunk at all.
+    ///   Surfaces as [`StreamError::Truncated`] →
+    ///   [`CryptoError::PayloadTruncated`]. Only the first refill can
+    ///   take this path: every non-final chunk stashes a `lookahead`
+    ///   byte, so a later refill always starts with one byte in hand.
+    /// - **Every other truncation** — a cut inside a chunk, or one at
+    ///   an exact chunk boundary with the chunks after it removed.
+    ///   Whatever bytes remain are treated as the final chunk and run
+    ///   through `decrypt_last_in_place`, which rejects them, surfacing
+    ///   as [`StreamError::DecryptAead`] →
     ///   [`CryptoError::PayloadTampered`]. This is the correct
-    ///   outcome — we cannot distinguish a mid-chunk truncation from
-    ///   a tampered tail, and both must fail closed.
+    ///   outcome — a truncated tail and a tampered tail cannot be told
+    ///   apart, and both must fail closed.
     ///
     /// **Trailing-data probe.** After `decrypt_last_in_place` succeeds
     /// the reader first rejects an empty final chunk if any non-final chunk

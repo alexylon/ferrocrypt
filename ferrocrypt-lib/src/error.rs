@@ -757,8 +757,10 @@ pub enum CryptoError {
     /// after the header was authenticated.
     #[error("Decryption failed: file data was modified or corrupted")]
     PayloadTampered,
-    /// The encrypted stream ends before the final-flag chunk.
-    /// Usually caused by a truncated file or an aborted download.
+    /// The encrypted payload region is empty, so the stream carries no
+    /// chunk at all. A file cut anywhere after its first chunk surfaces
+    /// as [`Self::PayloadTampered`] instead, because a truncated tail
+    /// and a tampered tail cannot be told apart.
     #[error("Encrypted file is truncated")]
     PayloadTruncated,
     /// Bytes remain after the final-flag chunk has been successfully

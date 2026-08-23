@@ -194,6 +194,54 @@ fn encrypt_directory_to_save_as_inside_nested_subdirectory() {
     );
 }
 
+/// `PrivateKey::into_public_key` must return the same key the generated
+/// `public.key` holds — the promise a caller relies on when recovering a
+/// recipient string from a key pair whose public half was lost. Compares the
+/// key material, the fingerprint, and the canonical recipient string, so a
+/// value that decoded but carried the wrong suite would still fail.
+#[test]
+fn private_key_into_public_key_matches_the_generated_public_key() {
+    let work = fresh_workspace("into_public_key");
+    let keys = work.join("keys");
+    fs::create_dir_all(&keys).unwrap();
+    let kg = generate_key_pair(&keys, pass(), |_| {}).expect("keygen");
+
+    let from_file = PublicKey::from_key_file(&kg.public_key_path).expect("read public key");
+    let recovered = PrivateKey::from_key_file(&kg.private_key_path, pass())
+        .into_public_key(|_| {})
+        .expect("unlock private key");
+
+    assert_eq!(
+        recovered.to_x25519_bytes().unwrap(),
+        from_file.to_x25519_bytes().unwrap()
+    );
+    assert_eq!(
+        recovered.fingerprint().unwrap(),
+        from_file.fingerprint().unwrap()
+    );
+    assert_eq!(
+        recovered.to_recipient_string().unwrap(),
+        from_file.to_recipient_string().unwrap()
+    );
+}
+
+/// A wrong unlock passphrase must fail the same way a decrypt does, and must
+/// not reveal whether the file or the passphrase was at fault.
+#[test]
+fn private_key_into_public_key_rejects_a_wrong_passphrase() {
+    let work = fresh_workspace("into_public_key_wrong_passphrase");
+    let keys = work.join("keys");
+    fs::create_dir_all(&keys).unwrap();
+    let kg = generate_key_pair(&keys, pass(), |_| {}).expect("keygen");
+
+    match PrivateKey::from_key_file(&kg.private_key_path, Passphrase::new("not-the-passphrase"))
+        .into_public_key(|_| {})
+    {
+        Err(CryptoError::KeyFileUnlockFailed) => {}
+        other => panic!("expected KeyFileUnlockFailed, got {other:?}"),
+    }
+}
+
 #[test]
 fn encryptor_recipient_round_trip() {
     let work = fresh_workspace("recipient_round_trip");

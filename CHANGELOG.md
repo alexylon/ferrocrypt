@@ -4,6 +4,9 @@ All notable changes to FerroCrypt are documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **`PrivateKey::into_public_key` returns the public key corresponding to a `private.key` file.** This makes it possible to recover the `fcr1…` recipient string or fingerprint without keeping the matching `public.key`. The method consumes the private key and unlocks it with the passphrase bound at construction, returning a `PublicKey` for `fingerprint()` or `to_recipient_string()`. Unlocking performs the same key derivation as decryption, takes roughly as long, and reports `UnlockingPrivateKey` progress while it runs.
+
 ## [0.3.0-rc.4] - 2026-08-22
 
 ### Added

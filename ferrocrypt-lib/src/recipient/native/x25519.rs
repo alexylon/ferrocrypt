@@ -374,8 +374,33 @@ pub(crate) fn generate_keypair()
 
 // ─── private.key reader (X25519-specific glue) ─────────────────────────────
 
-/// Reads and unlocks a `private.key` file, returning the raw 32-byte
-/// X25519 secret. Wraps [`crate::key::private::open_private_key`] with
+/// Reads and unlocks a `private.key` file, returning only the raw 32-byte
+/// X25519 secret. Thin wrapper over [`open_x25519_key_file`], which documents
+/// the full contract and the error taxonomy both share.
+pub(crate) fn open_x25519_private_key(
+    path: &std::path::Path,
+    passphrase: &crate::passphrase::Passphrase,
+    kdf_limit: Option<&crate::crypto::kdf::KdfLimit>,
+    key_read_limits: crate::key::limits::KeyReadLimits,
+    on_event: &dyn Fn(&crate::ProgressEvent),
+) -> Result<Zeroizing<[u8; PRIVATE_KEY_SIZE]>, CryptoError> {
+    Ok(open_x25519_key_file(path, passphrase, kdf_limit, key_read_limits, on_event)?.secret)
+}
+
+/// Both halves of an unlocked X25519 `private.key`.
+///
+/// `public` is the file's own authenticated `public_material`. The unlock has
+/// already applied the `FORMAT.md` §8 rule that the stored material must equal
+/// `X25519(secret_material, basepoint)`, so a caller that wants only the public
+/// half takes these bytes rather than copying the secret again to recompute
+/// them.
+pub(crate) struct OpenedX25519KeyFile {
+    pub secret: Zeroizing<[u8; PRIVATE_KEY_SIZE]>,
+    pub public: [u8; PUBLIC_KEY_SIZE],
+}
+
+/// Reads and unlocks a `private.key` file, returning both halves of the
+/// key pair it holds. Wraps [`crate::key::private::open_private_key`] with
 /// the X25519-specific type-name and length checks. Authenticated TLV
 /// validation is performed by `open_private_key` itself.
 ///
@@ -412,13 +437,13 @@ pub(crate) fn generate_keypair()
 ///   recipient-specific check)
 /// - [`crate::error::FormatDefect::MalformedTlv`] / [`crate::error::FormatDefect::UnknownCriticalTag`]
 ///   for malformed or unknown-critical entries in `ext_bytes`
-pub(crate) fn open_x25519_private_key(
+pub(crate) fn open_x25519_key_file(
     path: &std::path::Path,
     passphrase: &crate::passphrase::Passphrase,
     kdf_limit: Option<&crate::crypto::kdf::KdfLimit>,
     key_read_limits: crate::key::limits::KeyReadLimits,
     on_event: &dyn Fn(&crate::ProgressEvent),
-) -> Result<Zeroizing<[u8; PRIVATE_KEY_SIZE]>, CryptoError> {
+) -> Result<OpenedX25519KeyFile, CryptoError> {
     use crate::error::FormatDefect;
     use crate::key::files::KeyFileKind;
     use crate::key::private::{open_private_key, read_private_key_file};
@@ -486,7 +511,10 @@ pub(crate) fn open_x25519_private_key(
         ));
     }
 
-    Ok(secret)
+    Ok(OpenedX25519KeyFile {
+        secret,
+        public: public_material,
+    })
 }
 
 // ─── private.key structural validator (used by fuzz exports) ───────────────

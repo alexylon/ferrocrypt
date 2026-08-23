@@ -895,6 +895,84 @@ impl PrivateKeyDecryptor {
     }
 }
 
+// ─── Private-key inspection ─────────────────────────────────────────────────
+
+/// Operations on a [`PrivateKey`] that need the key-file unlock.
+///
+/// The unlock lives here rather than beside the type: `PrivateKey` is defined
+/// in `key/private.rs`, which sits *below* `recipient/native/x25519.rs` in the
+/// STRUCTURE.md §11 dependency graph, so reaching the X25519 reader from there
+/// would make the two modules mutually dependent.
+impl PrivateKey {
+    /// Unlocks the private key and returns the public key that belongs to it.
+    ///
+    /// Consumes the value, because the unlock is the passphrase's only use and
+    /// a `PrivateKey` is not reusable: build a fresh one for each operation, as
+    /// with [`PrivateKeyDecryptor::decrypt`].
+    ///
+    /// The returned key is the `public_material` the file itself stores.
+    /// `FORMAT.md` §8 requires a reader to reject a `private.key` whose stored
+    /// public material is not `X25519(secret_material, basepoint)`, so the
+    /// value is evidence about the pair rather than about one half of it. It
+    /// carries this build's writer keypair suite, which every readable
+    /// `private.key` belongs to (`FORMAT.md` §11.2).
+    ///
+    /// Use this to confirm which recipient a `private.key` decrypts for —
+    /// comparing [`PublicKey::fingerprint`] against a fingerprint published out
+    /// of band, or recovering the `fcr1…` recipient string from a key pair
+    /// whose `public.key` was lost.
+    ///
+    /// Emits [`ProgressEvent::UnlockingPrivateKey`] at the Argon2id boundary,
+    /// because the unlock runs the same key derivation a decrypt runs and takes
+    /// the same time.
+    ///
+    /// # Errors
+    ///
+    /// The unlock applies the library's default [`KdfLimit`] and
+    /// [`KeyReadLimits`]; a key file whose stored parameters exceed either
+    /// surfaces the matching resource-cap error. Returns
+    /// [`CryptoError::KeyFileUnlockFailed`] for a wrong passphrase or modified
+    /// cleartext, which the AEAD cannot tell apart,
+    /// [`CryptoError::UnsupportedKeyType`] for a key file that wraps a
+    /// non-X25519 secret, [`CryptoError::InvalidInput`] for a passphrase
+    /// outside the `FORMAT.md` §2.2 bound of 1 to 4,096 bytes,
+    /// [`CryptoError::InputPath`] when the file does not exist and
+    /// [`CryptoError::Io`] for any other filesystem failure, and the same
+    /// structural and version errors as a decrypt that opens the same file.
+    pub fn into_public_key(
+        self,
+        on_event: impl Fn(&ProgressEvent),
+    ) -> Result<PublicKey, CryptoError> {
+        // The result is built with `PublicKey::from_x25519_bytes`, which tags
+        // the value with this build's writer keypair suite, because raw bytes
+        // carry no suite marker. That is only correct while every readable
+        // `private.key` belongs to that suite: otherwise this method would
+        // return an older-suite key tagged as the writer's, and
+        // `to_recipient_string` would re-encode it under the wrong version
+        // byte — the opposite of what a caller recovering a lost `public.key`
+        // needs. Adding a `KeypairSuite` variant makes this match
+        // non-exhaustive, which is the signal to thread the file's own suite
+        // through the unlock instead of relying on there being one.
+        const _: () = match crate::format::WRITER_KEYPAIR_SUITE {
+            crate::format::KeypairSuite::V1 => (),
+        };
+        let (key_file_path, passphrase) = self.into_key_file_parts();
+        let opened = recipient::native::x25519::open_x25519_key_file(
+            &key_file_path,
+            &passphrase,
+            None,
+            KeyReadLimits::default(),
+            &on_event,
+        )?;
+        // Both secrets have had their last use by this point: the unlock is the
+        // passphrase's, and this operation never needs the key file's own
+        // secret. Drop them here rather than at the end of the function.
+        drop(passphrase);
+        drop(opened.secret);
+        PublicKey::from_x25519_bytes(opened.public)
+    }
+}
+
 // ─── Key generation ─────────────────────────────────────────────────────────
 
 /// Builder for X25519 key-pair generation.

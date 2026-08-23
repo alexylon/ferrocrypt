@@ -1275,10 +1275,11 @@ Every constructor resolves its source to suite-plus-key-material immediately and
 `PrivateKey` supports:
 
 - `from_key_file(path, Passphrase)`, which binds the passphrase that unlocks the file;
+- `into_public_key(on_event)`, which unlocks the file and returns the matching `PublicKey`. The method is implemented in `api.rs`, not beside the type: `key/private.rs` sits below `recipient/native/x25519.rs` in the §11 graph, so reaching the X25519 reader from there would make the two modules mutually dependent;
 - validated private-key loading;
 - typed dispatch to its native recipient scheme after passphrase unlock.
 
-Because it holds the passphrase, `PrivateKey` is not `Clone`; build one value per decrypt.
+Because it holds the passphrase, `PrivateKey` is not `Clone`; build one value per decrypt. `into_public_key` consumes the value for the same reason `decrypt` does: the unlock is the passphrase's only use, and the passphrase is dropped as soon as it is over. It returns the file's own authenticated `public_material` rather than re-deriving it, so a caller that wants only the public half does not copy the secret again; `FORMAT.md` §8 has already made the reader reject a `private.key` whose stored public material is not `X25519(secret_material, basepoint)`, which is what makes the stored bytes evidence about the pair.
 
 ### 9.4 Key generation
 

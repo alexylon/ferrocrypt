@@ -27,6 +27,10 @@ SCHEMA_VERSION = 1
 ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 DIGEST = re.compile(r"^[0-9a-f]{64}$")
 NONCE = re.compile(r"^[0-9a-f]{38}$")
+
+# FORMAT.md §5 plaintext chunk size, which fixes how many chunks a KAT input
+# is encrypted in and therefore which counters its transcript uses.
+CHUNK_BYTES = 65536
 CAPABILITY = re.compile(
     r"^(outer_version|fca_version|public_key_version|private_key_version):0x[0-9A-F]{2}$"
     r"|^(outer_tlv|private_key_tlv|fca_archive_tlv|fca_entry_tlv):0x[0-9A-F]{4}$"
@@ -227,6 +231,40 @@ def check_digest(root, name, row, ref_column, digest_column):
         fail(f"{name}: {row_id(name, row)}: {reference} does not match its committed digest")
 
 
+def check_kat_chunk_nonces(root, row, cases, seen_keys, seen_chunks, nonce_prefix):
+    """Rejects a KAT that reuses another KAT's payload key, and any chunk whose
+    effective (payload key, full nonce) pair a chunk of an earlier KAT already
+    used (FORMAT.md §12.3). The chunk count follows from the committed
+    plaintext length, and the full nonce from FORMAT.md §5:
+    stream_nonce(19) || counter:u32_be || final_flag:u8."""
+    origin_id = row["origin_id"]
+    key = row["payload_key_sha3_256"]
+    if key in seen_keys:
+        fail(f"origins.tsv: {origin_id}: payload key is shared with {seen_keys[key]}")
+    seen_keys[key] = origin_id
+
+    anchor = cases.get(row["anchor_case_id"])
+    if anchor is None:
+        return
+    plaintext = root / anchor["artifact_ref"]
+    if not plaintext.is_file():
+        return
+    length = plaintext.stat().st_size
+    # An empty plaintext is one tag-only final chunk, and a length that is an
+    # exact multiple of the chunk size ends on a full final chunk with no empty
+    # trailer (FORMAT.md §5).
+    chunks = max(1, (length + CHUNK_BYTES - 1) // CHUNK_BYTES)
+    for counter in range(chunks):
+        final_flag = 1 if counter == chunks - 1 else 0
+        pair = (key, f"{nonce_prefix}{counter:08x}{final_flag:02x}")
+        if pair in seen_chunks:
+            fail(
+                f"origins.tsv: {origin_id}: chunk {counter} reuses the payload key and "
+                f"full nonce of {seen_chunks[pair]}"
+            )
+        seen_chunks[pair] = f"{origin_id} chunk {counter}"
+
+
 def row_id(name, row):
     """The identifier a message names a row by: its own table's key, because
     several tables carry another table's key column as a reference."""
@@ -334,21 +372,34 @@ def main():
         if kind == "none" and (primary != "-" or secret != "-"):
             fail(f"credentials.tsv: {row_id('credentials.tsv', row)}: a 'none' credential names no material")
 
-    seen_nonces = set()
+    # §12.3 requires four duplicate checks over encryption inputs: the nonce
+    # prefix of every origin, the payload key of every KAT, and the effective
+    # (payload key, full nonce) pair of every KAT chunk. A repeat of the last
+    # is nonce reuse under one key, which a published corpus must never show.
+    seen_nonces = {}
+    seen_kat_keys = {}
+    seen_kat_chunks = {}
     for row in tables["origins.tsv"]:
         origin_id = row["origin_id"]
         if row["anchor_case_id"] not in cases:
             fail(f"origins.tsv: {origin_id}: anchor case is not declared")
         if not NONCE.match(row["stream_nonce_hex"]):
             fail(f"origins.tsv: {origin_id}: stream_nonce_hex is not a 19-byte prefix")
-        if row["stream_nonce_hex"] in seen_nonces:
-            fail(f"origins.tsv: {origin_id}: nonce prefix is not unique")
-        seen_nonces.add(row["stream_nonce_hex"])
+        nonce_prefix = row["stream_nonce_hex"]
+        if nonce_prefix in seen_nonces:
+            fail(
+                f"origins.tsv: {origin_id}: nonce prefix is shared with "
+                f"{seen_nonces[nonce_prefix]}"
+            )
+        seen_nonces[nonce_prefix] = origin_id
         if row["origin_kind"] == "stream_kat":
             if row["payload_key_ref"] == "-":
                 fail(f"origins.tsv: {origin_id}: a stream_kat origin names its payload key")
             else:
                 check_digest(root, "origins.tsv", row, "payload_key_ref", "payload_key_sha3_256")
+            check_kat_chunk_nonces(
+                root, row, cases, seen_kat_keys, seen_kat_chunks, nonce_prefix
+            )
         elif not DIGEST.match(row["payload_key_sha3_256"]):
             fail(f"origins.tsv: {origin_id}: payload key commitment is not a digest")
 

@@ -859,29 +859,42 @@ fn require_output_anchor_unchanged(
     output_dir: &Path,
     root_name: &OsStr,
 ) -> Result<(), CryptoError> {
-    let current = match platform::open_anchor(output_dir) {
-        Ok(current) => current,
-        Err(CryptoError::Io(e)) if path_no_longer_a_directory(&e) => {
-            return Err(output_directory_changed(output_dir, root_name));
-        }
-        Err(error) if output_confirmation_resource_error(&error) => return Ok(()),
-        Err(error) => return Err(error),
+    let opened = platform::open_anchor(output_dir);
+    if matches!(&opened, Err(CryptoError::Io(e)) if path_no_longer_a_directory(e)) {
+        return Err(output_directory_changed(output_dir, root_name));
+    }
+    let Some(current) = confirmation_step(opened)? else {
+        return Ok(());
     };
-    let current_id = match platform::dir_object_id(&current) {
-        Ok(id) => id,
-        Err(error) if output_confirmation_resource_error(&error) => return Ok(()),
-        Err(error) => return Err(error),
+    let Some(current_id) = confirmation_step(platform::dir_object_id(&current))? else {
+        return Ok(());
     };
-    let committed_id = match platform::dir_object_id(output_handle) {
-        Ok(id) => id,
-        Err(error) if output_confirmation_resource_error(&error) => return Ok(()),
-        Err(error) => return Err(error),
+    let Some(committed_id) = confirmation_step(platform::dir_object_id(output_handle))? else {
+        return Ok(());
     };
     match (current_id, committed_id) {
         (Some(current_id), Some(committed_id)) if current_id != committed_id => {
             Err(output_directory_changed(output_dir, root_name))
         }
         _ => Ok(()),
+    }
+}
+
+/// Resolves one step of the destination-path confirmation.
+///
+/// Resource exhaustion says nothing about the path, only that the check could
+/// not run, and the committed output has already been ratified, so the step is
+/// skipped and reported as `None`. Every other failure is returned, because
+/// permission denial can itself be a property of a replacement directory
+/// ([`output_confirmation_resource_error`]).
+///
+/// This is the one place that rule is written, so the steps of
+/// [`require_output_anchor_unchanged`] cannot drift apart.
+fn confirmation_step<T>(step: Result<T, CryptoError>) -> Result<Option<T>, CryptoError> {
+    match step {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if output_confirmation_resource_error(&error) => Ok(None),
+        Err(error) => Err(error),
     }
 }
 
@@ -1734,6 +1747,96 @@ mod tests {
                 && message.contains("payload")
                 && message.contains("may still be occupied"),
             "the failure and the name left occupied must both be reported, got: {message}"
+        );
+    }
+
+    /// The confirmation step keeps a value, skips on resource exhaustion, and
+    /// returns every other failure. Which codes count as exhaustion is pinned
+    /// on the predicate itself by
+    /// `the_anchor_check_skips_only_resource_exhaustion`, so one code of each
+    /// kind is enough here.
+    #[test]
+    fn a_confirmation_step_keeps_a_value_and_skips_only_exhaustion() {
+        assert!(matches!(confirmation_step(Ok(7)), Ok(Some(7))));
+
+        let exhausted = CryptoError::Io(io::Error::from_raw_os_error(RESOURCE_EXHAUSTION_CODES[0]));
+        assert!(
+            matches!(confirmation_step::<()>(Err(exhausted)), Ok(None)),
+            "exhaustion must leave the confirmation unavailable"
+        );
+
+        let denied = CryptoError::Io(io::Error::from(io::ErrorKind::PermissionDenied));
+        assert!(
+            confirmation_step::<()>(Err(denied)).is_err(),
+            "permission denial must propagate rather than skip the confirmation"
+        );
+    }
+
+    /// Descriptor exhaustion says nothing about the destination, only that the
+    /// confirmation could not run, and the output it would confirm is already
+    /// committed — so the run succeeds. The destination is substituted first
+    /// and that substitution reported while descriptors are free, so the
+    /// accepting assertion cannot hold unless exhaustion was reached.
+    ///
+    /// Ignored with the other open-file-limit tests because the limit is
+    /// process-wide.
+    #[test]
+    #[ignore = "holds every free descriptor; needs --test-threads=1"]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn descriptor_exhaustion_leaves_the_destination_confirmation_unavailable() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let output = tmp.path().join("out");
+        let other = tmp.path().join("other");
+        fs::create_dir(&output).unwrap();
+        fs::create_dir(&other).unwrap();
+        let handle = platform::open_anchor(&output).expect("open the destination");
+
+        fs::remove_dir(&output).unwrap();
+        fs::rename(&other, &output).unwrap();
+        assert!(
+            require_output_anchor_unchanged(&handle, &output, OsStr::new("payload")).is_err(),
+            "the substituted destination must be reported while descriptors are free"
+        );
+
+        let held = fd_limit::HeldDescriptors::leaving(0);
+        let outcome = require_output_anchor_unchanged(&handle, &output, OsStr::new("payload"));
+        drop(held);
+
+        assert!(
+            outcome.is_ok(),
+            "exhaustion must skip the confirmation, not fail the run, got {outcome:?}"
+        );
+    }
+
+    /// A final name the run cannot read is an environment fault rather than
+    /// evidence of a substitution. Reporting one would send `DeleteOnError` at
+    /// an output that is complete.
+    #[test]
+    #[cfg(unix)]
+    fn an_unreadable_final_name_is_not_a_replacement() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let handle = platform::open_anchor(tmp.path()).expect("open the destination");
+        let staged = platform::dir_object_id(&handle)
+            .expect("read the destination identity")
+            .expect("a Unix filesystem reports a device and inode");
+
+        // Longer than any component a filesystem accepts, so the read fails on
+        // the name itself rather than reporting the entry missing.
+        let long_name = "n".repeat(4096);
+        let long_name = OsStr::new(&long_name);
+        let read = handle
+            .symlink_metadata(long_name)
+            .expect_err("a name this long cannot be read");
+        assert_ne!(
+            read.kind(),
+            io::ErrorKind::NotFound,
+            "the read must fail on the name rather than report the entry missing"
+        );
+
+        let outcome = require_promoted_root(&handle, long_name, Some(staged));
+        assert!(
+            outcome.is_ok(),
+            "a read failure that is not `NotFound` must not report a replacement, got {outcome:?}"
         );
     }
 

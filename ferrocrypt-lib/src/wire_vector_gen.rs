@@ -2034,6 +2034,20 @@ fn write_argon2id_cases(corpus: &mut Corpus, sources: &Path, base: &MutationBase
     let nonce = kdf + KDF_PARAMS_SIZE;
     let wrapped = nonce + WRAP_NONCE_SIZE;
 
+    // §3.4 requires `recipient_flags = 0` on a native entry, so bit 0 is
+    // rejected by the §3.7 step-8 framing check. That is a different rule from
+    // the reserved bits 1..=15, which the §3.3 entry parse rejects, and the two
+    // report different classes.
+    mutate_fcr(
+        corpus,
+        base,
+        "argon2id-critical-flag-set",
+        "passphrase-main",
+        "argon2id_native_entry_flags_nonzero",
+        "malformed_recipient_entry",
+        |b| b[OFF_FIRST_ENTRY + 3] = 0x01,
+    );
+
     recredential_case(
         corpus,
         base,
@@ -2337,6 +2351,15 @@ fn write_x25519_cases(corpus: &mut Corpus, base: &MutationBase) {
         "x25519_reserved_flag_bit_nonzero",
         "recipient_flags_reserved",
         |b| b[OFF_FIRST_ENTRY + 2] = 0x40,
+    );
+    mutate_fcr(
+        corpus,
+        base,
+        "x25519-critical-flag-set",
+        "private-key-a",
+        "x25519_native_entry_flags_nonzero",
+        "malformed_recipient_entry",
+        |b| b[OFF_FIRST_ENTRY + 3] = 0x01,
     );
 }
 

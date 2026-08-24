@@ -29,6 +29,11 @@
 //! on a machine with enough RAM to absorb sequential 1 GiB Argon2id
 //! runs. Workspace-wide `cargo test ... -- --ignored` would also pull in
 //! the lib's `regenerate_fixtures` opt-in helper, which is unrelated.
+//!
+//! A test that is not merely slow in release but *invalid* there — one
+//! pinning a value the fast override defines — uses `#[cfg(debug_assertions)]`
+//! instead. `ignore` is how this file marks "run me in the release lane", so
+//! marking such a test with it would select it exactly where it cannot pass.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1416,14 +1421,14 @@ fn test_cli_decrypt_accepts_max_kdf_memory_recipient_mode() {
 }
 
 /// `--max-kdf-work` reaches the decryptor and moves the accepted boundary.
-/// Gated to the debug profile because it pins the exact work of the fast
-/// Argon2id override (19 MiB × 1 pass); a release build seals the same file
-/// at the writer's own defaults, whose work is a different number.
+///
+/// Compiled only in the debug profile, rather than ignored there: it pins the
+/// exact work of the fast Argon2id override (19 MiB × 1 pass), and a release
+/// build seals the same file at the writer's own defaults, whose work is a
+/// different number. An `ignore` would put it in the set that the release lane
+/// selects with `--ignored`, which is the one place it can never pass.
+#[cfg(debug_assertions)]
 #[test]
-#[cfg_attr(
-    not(debug_assertions),
-    ignore = "pins the fast-KDF override's work value; see file-level note"
-)]
 fn test_cli_decrypt_max_kdf_work_bounds_the_accepted_header() {
     const FAST_KDF_WORK: u32 = ferrocrypt_test_support::TEST_FAST_KDF_MEM_COST
         * ferrocrypt_test_support::TEST_FAST_KDF_TIME_COST;

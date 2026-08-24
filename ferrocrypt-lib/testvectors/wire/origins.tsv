@@ -66,7 +66,11 @@ origin-fca-directory-entry-nonzero-size	fcr_payload	fca-directory-entry-nonzero-
 origin-fca-path-nul-byte	fcr_payload	fca-path-nul-byte	-	5ffa85e2bbd81a25da16d546e1dd482fd3ce26edd3bf7f6f4f497d732d24d700	a47debc265771494457f4caeebb581d1e66f38	0.3.0	1
 origin-fca-archive-ext-ignorable	fcr_payload	fca-archive-ext-ignorable	-	8c168d9811130b9e1a77a8deddfca94c58d98de54f483d9c8672f8e6a293a5ea	04ea74e86ffaaa81f297fd1d187f46618c7143	0.3.0	1
 origin-fca-entry-ext-ignorable	fcr_payload	fca-entry-ext-ignorable	-	ce5e016ed733416381023e7d7344f344eb098fc791d52e3f5f362a9d6a0eab68	57436c73eb2414edb781b99edf446c8ec402b5	0.3.0	1
+origin-fca-archive-ext-critical	fcr_payload	fca-archive-ext-critical	-	c08e388e6d30bf939d376e4e5bd61441719abdbad8d5921a5266bc10188009d0	4a4d7984fcfa2af1bd787b7b12d2fdc052aaa7	0.3.0	1
+origin-fca-entry-ext-critical	fcr_payload	fca-entry-ext-critical	-	12018622279cb08dbd7da471e55b6f39a610d78ce467218f4dcfef95c3404475	65aa47856a3db13967734be3df363c678bdb8c	0.3.0	1
 origin-fca-archive-ext-malformed	fcr_payload	fca-archive-ext-malformed	-	8892feda2dfcd4e1406f6291fad810caf67dc09aa6fe8e5712f8c2f3d5c25b4f	50e0dde5ca66142f95b5bb8be1e916d8f5eb08	0.3.0	1
+origin-fca-entry-ext-malformed	fcr_payload	fca-entry-ext-malformed	-	2a9be192d50e253f675080ad6c5204a6ceabfd60b02dc1862a414ca3ea6306a1	74e1aada480f38eccc82007762e325e25407f0	0.3.0	1
+origin-fca-archive-ext-reserved-tag	fcr_payload	fca-archive-ext-reserved-tag	-	bfe958b49b31014b229aaa34d1be67373941670a29324f80a8be4cbc6bab6e33	862521404f255913517fc5da200708ad3bbf12	0.3.0	1
 origin-fca-entry-ext-reserved-tag	fcr_payload	fca-entry-ext-reserved-tag	-	be75386e764ba00b9b01c7d757d5e78b32091d7435094aa66d08a199a91abd7a	e153f62a151c3b3915be0a9336329ed9ae4a9a	0.3.0	1
 origin-fca-content-short	fcr_payload	fca-content-short	-	ce5463b9f17c7d59c4270e85036ff7d19b4114bf3ae2cc5d62e8575bc9d9e2b4	477b8b02f1542e19aabaf07c873741292da6a3	0.3.0	1
 origin-fca-content-trailing	fcr_payload	fca-content-trailing	-	9ee9be7279b5cf686bea86ab699f0d919fe90297e7643d322552867b54b2625b	c834c588cdb1241abe87591fc81ac7f197a73b	0.3.0	1

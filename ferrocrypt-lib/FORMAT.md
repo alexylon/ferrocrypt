@@ -601,17 +601,19 @@ framing checks (`recipient_flags` and the exact body length), then the
 recipient-specific body-content checks. A reader MUST NOT apply a body-content
 check to any entry until the framing checks have been applied to every
 supported entry. Both framing checks report `malformed_recipient_entry`, so a
-reader MAY stop at the first framing failure; the body-content pass MUST
-instead visit every supported entry, because its class differs by recipient
-type. Where entries of more than one recipient type fail a body-content check,
-readers MUST report the failure of the lowest §4 registry index. A recipient
-type MUST NOT define body-content checks that report more than one diagnostic
-class given the framing precondition above, so the class a rejected file yields
-never depends on which entry failed. Body-content checks MUST be bounded by the
-recipient body length and MUST NOT perform key agreement, a KDF, or any other
-work a file could enlarge, because they run over every supported entry before
-the aggregate header-MAC bound below is applied. Local KDF resource caps are not part of
-step 8, because a reader MAY take that policy from its caller after
+reader MAY stop at the first framing failure. The body-content pass cannot stop
+the same way, because its class differs by recipient type: where entries of
+more than one recipient type fail a body-content check, readers MUST report the
+failure of the lowest §4 registry index, whichever order those entries appear
+in, so a reader stops early only once no unchecked entry could carry a lower
+index. A recipient type MUST NOT define body-content checks that report more
+than one diagnostic class given the framing precondition above, so the class a
+rejected file yields never depends on which entry failed. Body-content checks
+MUST be bounded by the recipient body length and MUST NOT perform key
+agreement, a KDF, or any other work a file could enlarge, because a reader may
+have to run them over every supported entry before the aggregate header-MAC
+bound below is applied. Local KDF resource caps are
+not part of step 8, because a reader MAY take that policy from its caller after
 classification; a reader MUST still apply them before Argon2id runs. A reader
 MUST NOT unlock a supplied private key (including running its unlock KDF),
 perform X25519 or another KEM operation, or run a recipient KDF until this
@@ -2440,10 +2442,10 @@ Every rejected conformance case MUST carry both:
 | `not_a_key_file` | The input is not a recognized FerroCrypt key artifact | `InvalidFormat(NotAKeyFile)` |
 | `wrong_kind` | An `FCR\0` artifact has the wrong kind for the requested operation | `InvalidFormat(WrongKind)` |
 | `wrong_key_file_type` | A recognized key artifact is not the requested public/private key form | `InvalidFormat(WrongKeyFileType)` |
-| `unsupported_outer_version` | A nonzero `.fcr` outer-container version is unsupported | `UnsupportedVersion(OlderFile)` or `UnsupportedVersion(NewerFile)` |
-| `unsupported_fca_version` | A nonzero FCA archive version is unsupported | `InvalidFormat(UnsupportedArchiveVersion)` |
-| `unsupported_public_key_version` | A nonzero public-key encoding version is unsupported | `UnsupportedVersion(OlderPublicKey)` or `UnsupportedVersion(NewerPublicKey)` |
-| `unsupported_private_key_version` | A nonzero private-key encoding version is unsupported | `UnsupportedVersion(OlderKey)` or `UnsupportedVersion(NewerKey)` |
+| `unsupported_outer_version` | A nonzero `.fcr` outer-container version this implementation does not support | `UnsupportedVersion(OlderFile)` or `UnsupportedVersion(NewerFile)` |
+| `unsupported_fca_version` | A nonzero FCA archive version this implementation does not support | `InvalidFormat(UnsupportedArchiveVersion)` |
+| `unsupported_public_key_version` | A nonzero public-key encoding version this implementation does not support | `UnsupportedVersion(OlderPublicKey)` or `UnsupportedVersion(NewerPublicKey)` |
+| `unsupported_private_key_version` | A nonzero private-key encoding version this implementation does not support | `UnsupportedVersion(OlderKey)` or `UnsupportedVersion(NewerKey)` |
 | `oversized_header` | The declared `.fcr` header exceeds the structural maximum | `InvalidFormat(OversizedHeader)` |
 | `malformed_header` | The `.fcr` prefix or header violates a structural grammar or accounting rule assigned to this class | `InvalidFormat(MalformedHeader)` |
 | `extension_region_too_large` | The declared `.fcr` header extension region exceeds its structural maximum | `InvalidFormat(ExtTooLarge)` |
@@ -2484,10 +2486,10 @@ produce them. `extra_data_after_payload` needs an input source that reports the
 end of the payload and then yields further bytes, which is a property of a
 reader and not of stored bytes; a file with bytes after the final chunk is
 `payload_authentication_failed`, because the reader takes those bytes as
-another chunk. `payload_chunk_count_exceeded` needs a payload of `2^32 - 1`
-chunks, about 281 TB. Both stay in the registry because a reader MUST still
-report them, and an implementation evidences them with its own tests rather
-than with a corpus artifact.
+another chunk. `payload_chunk_count_exceeded` needs a payload of more than the
+`2^32` chunks §5 permits, so more than 256 TiB. Both stay in the registry
+because a reader MUST still report them, and an implementation evidences them
+with its own tests rather than with a corpus artifact.
 
 Different exact conditions may intentionally map to one class. For example, the
 credential-independent all-zero X25519 ephemeral value and a canonical nonzero
@@ -2849,7 +2851,7 @@ reused operationally.
 | `argon2id` recipient | Valid, wrong passphrase, every body field tampered, invalid body length, invalid and locally capped KDF parameters, and recipient flags |
 | X25519 recipient | Valid, multiple recipients, wrong private key, every body field tampered, invalid length and flags, noncanonical and all-zero ephemeral preflight, and a canonical nonzero small-order ephemeral value that produces an all-zero shared secret |
 | `.fcr` TLV | Empty region, valid unknown ignorable, unknown critical, reserved tag, duplicate and out-of-order tags, truncated header and value, and oversized region and value |
-| Payload STREAM | Independent byte-exact known-answer tests, authentication failure, truncation, forbidden empty final chunk after data, trailing data, and exact-boundary finalization. The chunk-count ceiling is excluded: evidencing it needs an artifact of about 281 TB (§12.1) |
+| Payload STREAM | Independent byte-exact known-answer tests, authentication failure, truncation, forbidden empty final chunk after data, trailing data, and exact-boundary finalization. The chunk-count ceiling is excluded: evidencing it needs an artifact of more than 256 TiB (§12.1) |
 | `public.key` | Canonical file; optional LF; checksum, padding, case, whitespace, and length failures; an invariant public-key encoding version `0x00` case classified as `malformed_public_key`; a public-key encoding version `0x02` capability case classified as `unsupported_public_key_version`; unsupported type; canonical X25519 material; aliases; field-prime boundaries; all zero; and wrong lengths |
 | `private.key` | Canonical valid and openable file; wrong passphrase; cleartext-AAD and wrapped-secret tamper; malformed, truncated, and trailing data; wrong kind or key-file type; an invariant private-key encoding version `0x00` case classified as `malformed_private_key`; a private-key encoding version `0x02` capability case classified as `unsupported_private_key_version`; caps; TLVs; and public/secret consistency |
 | FCA fixed header | Valid file and directory roots; bad magic; an invariant FCA archive version `0x00` case classified as `malformed_archive`; an FCA archive version `0x02` capability case classified as `unsupported_fca_version`; flags; counts; archive-extension length; manifest length; total-byte accounting; and truncation |

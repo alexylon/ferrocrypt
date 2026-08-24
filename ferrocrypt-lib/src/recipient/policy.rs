@@ -300,14 +300,11 @@ pub(crate) fn enforce_recipient_mixing_policy(
     // The mixing-rule table on `NativeRecipientType::mixing_rule` is the
     // single source of truth. Adding a new native type means adding one
     // arm there; this function does not need to be edited.
+    // Unknown non-critical entries are not enforcement subjects and are
+    // left out by `supported_entries`. Critical unknowns were rejected by
+    // `classify_recipient_mode` before this function ran.
     let mut control: Option<(&RecipientEntry, NativeMixingRule)> = None;
-    for entry in entries {
-        let Some(ty) = NativeRecipientType::from_type_name(&entry.type_name) else {
-            // Unknown non-critical entries are skipped here. Critical
-            // unknowns were rejected by `classify_recipient_mode`
-            // before this function ran.
-            continue;
-        };
+    for (entry, ty) in supported_entries(entries) {
         let rule = ty.mixing_rule();
 
         if rule.requires_single_entry() && entries.len() != 1 {
@@ -402,11 +399,12 @@ pub(crate) fn count_supported_recipients(entries: &[RecipientEntry]) -> usize {
 ///    the diagnostic class depends on what the file contains rather
 ///    than on the order its entries happen to appear in.
 /// 2. Run the `FORMAT.md` §3.7 step-8 preflight over the supported
-///    native entries in two passes, each covering every entry before
-///    the next begins. Pass one rejects `recipient_flags != 0` (per
-///    `FORMAT.md` §3.4: "Native `argon2id` and `x25519` entries MUST
-///    have `recipient_flags = 0`") and a body length that is not the
-///    exact native length, both with [`CryptoError::InvalidFormat`] /
+///    native entries in two passes, the second of which starts only
+///    once the first has covered every entry. Pass one rejects
+///    `recipient_flags != 0` (per `FORMAT.md` §3.4: "Native `argon2id`
+///    and `x25519` entries MUST have `recipient_flags = 0`") and a
+///    body length that is not the exact native length, both with
+///    [`CryptoError::InvalidFormat`] /
 ///    [`FormatDefect::MalformedRecipientEntry`]. Pass two runs
 ///    [`NativeRecipientType::validate_body`], reporting the failure of
 ///    the lowest [`NativeRecipientType`] registry index when entries of
@@ -417,13 +415,6 @@ pub(crate) fn count_supported_recipients(entries: &[RecipientEntry]) -> usize {
 ///    set here. Step 8 completes before mixing runs, so a file that is
 ///    both structurally malformed and illegally mixed reports the
 ///    structural defect (`FORMAT.md` §3.7 step 8 before step 9).
-///
-/// What is pinned is the **diagnostic class**, which is what
-/// `FORMAT.md` §12.1 freezes as the cross-language contract. The error
-/// payload that goes with it — which entry failed, which field, which
-/// `type_name` — still names the first offending entry in file order,
-/// so two orderings of one file can report the same class through
-/// different payloads.
 /// 3. Run [`enforce_recipient_mixing_policy`] (cardinality + class).
 /// 4. For each supported native entry, look up
 ///    [`NativeRecipientType::recipient_mode`]; the file's mode is the
@@ -435,6 +426,15 @@ pub(crate) fn count_supported_recipients(entries: &[RecipientEntry]) -> usize {
 ///    one-class-implies-one-mode assumption).
 /// 6. If no supported native entry is present (only unknown non-critical
 ///    entries) → [`CryptoError::NoSupportedRecipient`].
+///
+/// What is pinned is the **diagnostic class**, which is what
+/// `FORMAT.md` §12.1 freezes as the cross-language contract. The error
+/// value carrying it is not pinned the same way. Where a class admits
+/// several payloads — the [`crate::error::InvalidKdfParams`] variant
+/// naming the offending field, for one — the payload comes from the
+/// entry the class was taken from, which in pass two is the first
+/// failing entry of the winning registry index and not necessarily the
+/// first failing entry in the file.
 ///
 /// This is structural classification only. The caller still has to
 /// run the appropriate per-recipient unwrap and the header MAC verify
@@ -496,10 +496,7 @@ pub(crate) fn classify_recipient_mode(
     // list once, look up `recipient_mode()` per supported native type,
     // and confirm every supported entry agrees on a single mode.
     let mut mode: Option<crate::UnauthenticatedRecipientMode> = None;
-    for entry in entries {
-        let Some(ty) = NativeRecipientType::from_type_name(&entry.type_name) else {
-            continue;
-        };
+    for (entry, ty) in supported_entries(entries) {
         let entry_mode = ty.recipient_mode();
         match mode {
             None => mode = Some(entry_mode),
@@ -562,6 +559,46 @@ mod tests {
             argon2id::BODY_LENGTH
         );
         assert_eq!(NativeRecipientType::X25519.body_len(), x25519::BODY_LENGTH);
+    }
+
+    /// `FORMAT.md` §3.7 lets the registry index alone decide what a
+    /// rejected file reports, which holds only while each native type's
+    /// body check reports a single diagnostic class. Driven here over
+    /// every body defect the wire can carry, at the exact body length
+    /// pass one guarantees before this check runs.
+    #[test]
+    fn each_native_body_check_reports_one_diagnostic_class() {
+        for params in [
+            KdfParams {
+                lanes: 0,
+                ..KdfParams::test_fast_default()
+            },
+            KdfParams {
+                time_cost: 0,
+                ..KdfParams::test_fast_default()
+            },
+            KdfParams {
+                mem_cost: 0,
+                ..KdfParams::test_fast_default()
+            },
+        ] {
+            let body = argon2id::test_body_with_kdf_params(&params);
+            match NativeRecipientType::Argon2id.validate_body(&body) {
+                Err(CryptoError::InvalidKdfParams(_)) => {}
+                other => panic!("argon2id body check reports one class, got {other:?}"),
+            }
+        }
+
+        let mut all_zero = vec![0x11u8; x25519::BODY_LENGTH];
+        all_zero[..x25519::PUBLIC_KEY_SIZE].fill(0);
+        let mut non_canonical = vec![0x11u8; x25519::BODY_LENGTH];
+        non_canonical[..x25519::PUBLIC_KEY_SIZE].fill(0xFF);
+        for body in [all_zero, non_canonical] {
+            match NativeRecipientType::X25519.validate_body(&body) {
+                Err(CryptoError::InvalidFormat(FormatDefect::MalformedRecipientEntry)) => {}
+                other => panic!("x25519 body check reports one class, got {other:?}"),
+            }
+        }
     }
 
     /// The registry index is the `FORMAT.md` §4 tie-break for step 8,

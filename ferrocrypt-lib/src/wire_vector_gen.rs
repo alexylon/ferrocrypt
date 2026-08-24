@@ -29,7 +29,7 @@
 //! publication to the `v0.3.0` tag. From that tag the rows and bytes are
 //! append-only.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -334,19 +334,19 @@ const DIAGNOSTIC_CLASS_TEXT: &[(&str, &str)] = &[
     ),
     (
         "unsupported_outer_version",
-        "A nonzero .fcr outer-container version is unsupported.",
+        "A nonzero .fcr outer-container version this implementation does not support.",
     ),
     (
         "unsupported_fca_version",
-        "A nonzero FCA archive version is unsupported.",
+        "A nonzero FCA archive version this implementation does not support.",
     ),
     (
         "unsupported_public_key_version",
-        "A nonzero public-key encoding version is unsupported.",
+        "A nonzero public-key encoding version this implementation does not support.",
     ),
     (
         "unsupported_private_key_version",
-        "A nonzero private-key encoding version is unsupported.",
+        "A nonzero private-key encoding version this implementation does not support.",
     ),
     (
         "oversized_header",
@@ -922,7 +922,7 @@ fn write_valid_fcr_cases(
     // Multiple X25519 recipients: both keys open the same file, so the corpus
     // carries one case per credential over one artifact.
     drop(scope);
-    let _scope = case_scope("fcr-x25519-multi-first");
+    let scope = case_scope("fcr-x25519-multi-first");
     let file_key = FileKey::generate().expect("file key");
     let entries = [
         x25519_entry(&keys.public_a, &file_key),
@@ -938,6 +938,7 @@ fn write_valid_fcr_cases(
         &source,
         built,
     );
+    drop(scope);
     let artifact_ref = corpus.write_ref("artifacts/fcr/fcr-x25519-multi-second.fcr", &multi_bytes);
     let expected_ref = corpus.write_ref(
         "expected/plaintext/fcr-x25519-multi-second.bin",
@@ -953,6 +954,251 @@ fn write_valid_fcr_cases(
     (mutation_base.expect("mutation base built"), x25519_base)
 }
 
+/// The rows `name` already publishes, in `columns` order, or none when the
+/// table has not been published yet.
+fn published_rows(root: &Path, name: &str, columns: &[&str]) -> Vec<Vec<String>> {
+    if !root.join(name).is_file() {
+        return Vec::new();
+    }
+    read_manifest(root, name)
+        .into_iter()
+        .map(|row| {
+            columns
+                .iter()
+                .map(|column| {
+                    row.get(*column)
+                        .unwrap_or_else(|| panic!("{name}: a published row has no {column} column"))
+                        .clone()
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// The provenance columns a row is stamped with: the corpus revision and the
+/// release that first published it. A row keeps the values it was published
+/// with; every other column is content the freeze pins.
+const STAMP_COLUMNS: [&str; 3] = [
+    "introduced_in_corpus_revision",
+    "introduced_in_release",
+    "established_by_release",
+];
+
+/// Writes one manifest table under the `FORMAT.md` §12.3 append-only rule.
+///
+/// The generator stamps every row it builds with the current revision and
+/// release, which is right only for a row this run adds. A row an earlier run
+/// published keeps the stamps it was published with, because those stamps are
+/// what a replay implementation reads to decide which rows its baseline
+/// requires; restamping them would silently move the whole corpus to the new
+/// revision. Once a row is frozen — published by a revision before this one —
+/// no column of it may change at all: a correction goes through `errata.tsv`,
+/// and a row that simply disappeared would break the same promise, so both are
+/// generator errors rather than something to publish.
+fn write_appended_table(
+    root: &Path,
+    name: &str,
+    id_column: &str,
+    columns: &[&str],
+    mut rows: Vec<Vec<String>>,
+) {
+    let column_at = |column: &str| {
+        columns
+            .iter()
+            .position(|c| *c == column)
+            .unwrap_or_else(|| panic!("{name}: no {column} column"))
+    };
+    let id_at = column_at(id_column);
+    let revision_at = column_at("introduced_in_corpus_revision");
+    let stamps: Vec<usize> = STAMP_COLUMNS
+        .iter()
+        .filter(|column| columns.contains(column))
+        .map(|column| column_at(column))
+        .collect();
+
+    let published: BTreeMap<String, Vec<String>> = published_rows(root, name, columns)
+        .into_iter()
+        .map(|row| (row[id_at].clone(), row))
+        .collect();
+
+    let mut carried = BTreeSet::new();
+    for row in &mut rows {
+        let Some(before) = published.get(&row[id_at]) else {
+            continue;
+        };
+        carried.insert(row[id_at].clone());
+        for at in &stamps {
+            row[*at] = before[*at].clone();
+        }
+        let revision: u32 = before[revision_at]
+            .parse()
+            .unwrap_or_else(|e| panic!("{name}: {}: revision column: {e}", row[id_at]));
+        if revision < CORPUS_REVISION {
+            for (at, column) in columns.iter().enumerate() {
+                assert_eq!(
+                    row[at], before[at],
+                    "{name}: {} is frozen at corpus revision {revision}; \
+                     its {column} must be corrected through an erratum, not an edit",
+                    row[id_at],
+                );
+            }
+        }
+    }
+    for (id, before) in &published {
+        let revision: u32 = before[revision_at]
+            .parse()
+            .unwrap_or_else(|e| panic!("{name}: {id}: revision column: {e}"));
+        assert!(
+            revision >= CORPUS_REVISION || carried.contains(id),
+            "{name}: {id} was published by corpus revision {revision} and cannot be withdrawn; \
+             retire it through an erratum instead",
+        );
+    }
+
+    write_table(root, name, columns, rows);
+}
+
+/// Columns of the table the append-only tests below publish and rewrite.
+const APPEND_TEST_COLUMNS: [&str; 4] = [
+    "case_id",
+    "artifact_ref",
+    "introduced_in_release",
+    "introduced_in_corpus_revision",
+];
+
+fn append_test_row(case_id: &str, artifact: &str, release: &str, revision: &str) -> Vec<String> {
+    vec![
+        case_id.to_string(),
+        artifact.to_string(),
+        release.to_string(),
+        revision.to_string(),
+    ]
+}
+
+/// Publishes a table holding one row frozen by an earlier revision and one row
+/// belonging to the revision this build is still writing.
+fn publish_append_test_table(dir: &Path) {
+    write_table(
+        dir,
+        "t.tsv",
+        &APPEND_TEST_COLUMNS,
+        vec![
+            append_test_row("frozen", "a.bin", "0.2.0", "0"),
+            append_test_row("working", "b.bin", "0.2.0", &CORPUS_REVISION.to_string()),
+        ],
+    );
+}
+
+/// Rebuilds both published rows the way the generator does — stamped with the
+/// current constants — plus one row this run adds.
+fn append_test_rebuild() -> Vec<Vec<String>> {
+    let revision = CORPUS_REVISION.to_string();
+    vec![
+        append_test_row("frozen", "a.bin", INTRODUCED_IN_RELEASE, &revision),
+        append_test_row("working", "b.bin", INTRODUCED_IN_RELEASE, &revision),
+        append_test_row("added", "c.bin", INTRODUCED_IN_RELEASE, &revision),
+    ]
+}
+
+/// A published row keeps the revision and release it was published with, and
+/// only a row this run adds is stamped with the current constants. Reading the
+/// generator does not show whether that still holds, and the failure is silent:
+/// a restamped corpus looks internally consistent to every checker.
+#[test]
+fn a_published_row_keeps_the_stamps_it_was_published_with() {
+    let dir = tempfile::tempdir().expect("append-only table dir");
+    publish_append_test_table(dir.path());
+    write_appended_table(
+        dir.path(),
+        "t.tsv",
+        "case_id",
+        &APPEND_TEST_COLUMNS,
+        append_test_rebuild(),
+    );
+
+    let rows = read_manifest(dir.path(), "t.tsv");
+    let stamps = |case_id: &str| {
+        let row = rows
+            .iter()
+            .find(|r| r["case_id"] == case_id)
+            .unwrap_or_else(|| panic!("{case_id} is missing"));
+        (
+            row["introduced_in_release"].clone(),
+            row["introduced_in_corpus_revision"].clone(),
+        )
+    };
+    assert_eq!(
+        stamps("frozen"),
+        ("0.2.0".to_string(), "0".to_string()),
+        "a frozen row keeps its own provenance"
+    );
+    assert_eq!(
+        stamps("working"),
+        ("0.2.0".to_string(), CORPUS_REVISION.to_string()),
+        "a row of the working revision keeps its release too"
+    );
+    assert_eq!(
+        stamps("added"),
+        (
+            INTRODUCED_IN_RELEASE.to_string(),
+            CORPUS_REVISION.to_string()
+        ),
+        "only an added row is stamped with the current constants"
+    );
+}
+
+/// A row of the revision still being written may change; only an earlier
+/// revision's rows are frozen.
+#[test]
+fn a_row_of_the_working_revision_may_still_change() {
+    let dir = tempfile::tempdir().expect("append-only table dir");
+    publish_append_test_table(dir.path());
+    let mut rows = append_test_rebuild();
+    rows[1] = append_test_row(
+        "working",
+        "edited.bin",
+        INTRODUCED_IN_RELEASE,
+        &CORPUS_REVISION.to_string(),
+    );
+    write_appended_table(dir.path(), "t.tsv", "case_id", &APPEND_TEST_COLUMNS, rows);
+
+    let rows = read_manifest(dir.path(), "t.tsv");
+    let working = rows
+        .iter()
+        .find(|r| r["case_id"] == "working")
+        .expect("working row");
+    assert_eq!(working["artifact_ref"], "edited.bin");
+}
+
+/// Editing a frozen row is the correction the erratum mechanism exists for, so
+/// the generator refuses it rather than publishing a row that no longer says
+/// what an earlier baseline pinned.
+#[test]
+#[should_panic(expected = "must be corrected through an erratum")]
+fn an_edited_frozen_row_is_refused() {
+    let dir = tempfile::tempdir().expect("append-only table dir");
+    publish_append_test_table(dir.path());
+    let mut rows = append_test_rebuild();
+    rows[0] = append_test_row(
+        "frozen",
+        "edited.bin",
+        INTRODUCED_IN_RELEASE,
+        &CORPUS_REVISION.to_string(),
+    );
+    write_appended_table(dir.path(), "t.tsv", "case_id", &APPEND_TEST_COLUMNS, rows);
+}
+
+/// Dropping a frozen row breaks the same promise as editing one: a replay
+/// pinned to the earlier baseline would find its case gone.
+#[test]
+#[should_panic(expected = "cannot be withdrawn")]
+fn a_withdrawn_frozen_row_is_refused() {
+    let dir = tempfile::tempdir().expect("append-only table dir");
+    publish_append_test_table(dir.path());
+    let rows = append_test_rebuild().into_iter().skip(1).collect();
+    write_appended_table(dir.path(), "t.tsv", "case_id", &APPEND_TEST_COLUMNS, rows);
+}
+
 /// Writes the version files, the diagnostic-class descriptions, and the six
 /// manifest tables. Digest columns are computed here from the committed bytes,
 /// so a row can never name a digest the referenced file does not have.
@@ -963,14 +1209,11 @@ fn emit(corpus: &Corpus) {
     check_manifest_invariants(corpus);
 
     let root = &corpus.root;
-    fs::write(root.join("SCHEMA-VERSION"), format!("{SCHEMA_VERSION}\n"))
-        .expect("write SCHEMA-VERSION");
-    fs::write(root.join("CORPUS-REVISION"), format!("{CORPUS_REVISION}\n"))
-        .expect("write CORPUS-REVISION");
 
-    write_table(
+    write_appended_table(
         root,
         "baselines.tsv",
+        "baseline_id",
         &[
             "baseline_id",
             "established_by_release",
@@ -999,9 +1242,10 @@ fn emit(corpus: &Corpus) {
             CORPUS_REVISION.to_string(),
         ]);
     }
-    write_table(
+    write_appended_table(
         root,
         "diagnostic-classes.tsv",
+        "class_id",
         &[
             "class_id",
             "description_ref",
@@ -1011,9 +1255,10 @@ fn emit(corpus: &Corpus) {
         class_rows,
     );
 
-    write_table(
+    write_appended_table(
         root,
         "credentials.tsv",
+        "credential_id",
         &[
             "credential_id",
             "kind",
@@ -1042,9 +1287,10 @@ fn emit(corpus: &Corpus) {
             .collect(),
     );
 
-    write_table(
+    write_appended_table(
         root,
         "origins.tsv",
+        "origin_id",
         &[
             "origin_id",
             "origin_kind",
@@ -1073,9 +1319,10 @@ fn emit(corpus: &Corpus) {
             .collect(),
     );
 
-    write_table(
+    write_appended_table(
         root,
         "cases.tsv",
+        "case_id",
         &[
             "case_id",
             "case_type",
@@ -1126,22 +1373,30 @@ fn emit(corpus: &Corpus) {
             .collect(),
     );
 
-    // Revision 1 publishes no errata: the mechanism exists for corrections
-    // after the corpus freezes, so the table ships with its header only.
-    write_table(
-        root,
-        "errata.tsv",
-        &[
-            "erratum_id",
-            "affected_case_id",
-            "effective_corpus_revision",
-            "rationale_ref",
-            "rationale_sha3_256",
-            "replacement_case_id",
-            "introduced_in_release",
-        ],
-        Vec::new(),
-    );
+    // Errata are hand-authored corrections, not generator output, so every
+    // published erratum is carried forward unchanged: it is the only way to
+    // correct a frozen row, and rewriting the table would discard exactly the
+    // corrections the freeze depends on. Revision 1 publishes none, so the
+    // table ships with its header only.
+    let errata_columns = [
+        "erratum_id",
+        "affected_case_id",
+        "effective_corpus_revision",
+        "rationale_ref",
+        "rationale_sha3_256",
+        "replacement_case_id",
+        "introduced_in_release",
+    ];
+    let errata = published_rows(root, "errata.tsv", &errata_columns);
+    write_table(root, "errata.tsv", &errata_columns, errata);
+
+    // Last, because the tables above are what these two files describe: a run
+    // that stops on an append-only violation must not leave a revision behind
+    // claiming rows it never wrote.
+    fs::write(root.join("SCHEMA-VERSION"), format!("{SCHEMA_VERSION}\n"))
+        .expect("write SCHEMA-VERSION");
+    fs::write(root.join("CORPUS-REVISION"), format!("{CORPUS_REVISION}\n"))
+        .expect("write CORPUS-REVISION");
 
     // After the writes, unlike the row rules above: this one inspects the
     // directory. `kat/` is owned by the oracle and never cleaned between runs,
@@ -1910,7 +2165,7 @@ fn write_recipient_framing_cases(
 
     // §4.1 mixing policy: `argon2id` must appear alone.
     drop(scope);
-    let _scope = case_scope("recipient-illegal-mixing");
+    let scope = case_scope("recipient-illegal-mixing");
     let file_key = FileKey::generate().expect("file key");
     let entries = [
         argon2id_entry(&file_key),
@@ -1928,6 +2183,8 @@ fn write_recipient_framing_cases(
         &entries,
         b"",
     );
+
+    drop(scope);
 
     // §3.7 step 8 runs each of its two passes over every entry before it
     // reports, and settles between recipient types on the §4 registry index,
@@ -2436,6 +2693,7 @@ fn write_tlv_cases(corpus: &mut Corpus, sources: &Path) {
             "malformed_tlv",
         ),
     ];
+    drop(scope);
     for (case_id, ext_bytes, condition, class) in cases {
         let _scope = case_scope(case_id);
         let file_key = FileKey::generate().expect("file key");
@@ -2456,8 +2714,7 @@ fn write_tlv_cases(corpus: &mut Corpus, sources: &Path) {
 
     // An unknown critical tag is capability-relative: implementing the tag
     // stops the rejection (`FORMAT.md` §12.2).
-    drop(scope);
-    let _scope = case_scope("tlv-unknown-critical");
+    let scope = case_scope("tlv-unknown-critical");
     let source = write_source(sources, "p", 64);
     let file_key = FileKey::generate().expect("file key");
     let entries = [argon2id_entry(&file_key)];
@@ -2479,6 +2736,7 @@ fn write_tlv_cases(corpus: &mut Corpus, sources: &Path) {
             .capability("outer_tlv:0x8001")
             .reject("tlv_critical_tag_unsupported", "unknown_critical_tlv"),
     );
+    drop(scope);
 }
 
 // ─── Payload STREAM ────────────────────────────────────────────────────────
@@ -2640,7 +2898,7 @@ fn write_payload_stream_cases(corpus: &mut Corpus, sources: &Path) {
         crate::crypto::stream::BUFFER_SIZE - fca_overhead("p"),
     );
     drop(scope);
-    let _scope = case_scope("payload-empty-final-after-data");
+    let scope = case_scope("payload-empty-final-after-data");
     let mut exact_fca = Vec::new();
     exact_fca = crate::archive::prepare_archive(&exact_source, ArchiveLimits::default())
         .expect("prepare archive")
@@ -2670,6 +2928,7 @@ fn write_payload_stream_cases(corpus: &mut Corpus, sources: &Path) {
                 "malformed_payload_stream",
             ),
     );
+    drop(scope);
 }
 
 // ─── Key files ─────────────────────────────────────────────────────────────
@@ -3388,7 +3647,39 @@ fn fca_case(
     fca: &[u8],
     outcome: Result<Vec<u8>, (&str, &str)>,
 ) {
-    let _scope = case_scope(case_id);
+    fca_case_with_capability(corpus, case_id, fca, None, outcome);
+}
+
+/// Rejected FCA case whose outcome follows from the reader's feature set, so
+/// the row names the one capability that would stop the rejection
+/// (`FORMAT.md` §12.1).
+fn fca_capability_case(
+    corpus: &mut Corpus,
+    case_id: &str,
+    fca: &[u8],
+    capability_id: &str,
+    condition_id: &str,
+    diagnostic_class: &str,
+) {
+    fca_case_with_capability(
+        corpus,
+        case_id,
+        fca,
+        Some(capability_id),
+        Err((condition_id, diagnostic_class)),
+    );
+}
+
+/// Wraps `fca` in a passphrase `.fcr` and commits the case, its origin, and —
+/// for an accepted case — the extraction the reader must produce.
+fn fca_case_with_capability(
+    corpus: &mut Corpus,
+    case_id: &str,
+    fca: &[u8],
+    capability_id: Option<&str>,
+    outcome: Result<Vec<u8>, (&str, &str)>,
+) {
+    let scope = case_scope(case_id);
     let file_key = FileKey::generate().expect("file key");
     let entries = [argon2id_entry(&file_key)];
     let (built, stream_nonce_hex, payload_key_digest) = craft_header(&file_key, &entries, b"");
@@ -3404,10 +3695,15 @@ fn fca_case(
         payload_key_sha3_256: payload_key_digest,
         stream_nonce_hex,
     });
+    drop(scope);
     let row = CaseRow::fcr(case_id, &artifact_ref)
         .origin(&origin_id)
         .fabricated()
         .credential("passphrase-main");
+    let row = match capability_id {
+        Some(capability) => row.capability(capability),
+        None => row,
+    };
     let row = match outcome {
         Ok(expected) => {
             let expected_ref =
@@ -3520,30 +3816,15 @@ fn write_fca_cases(corpus: &mut Corpus) {
     }
 
     // A newer FCA archive version is capability-relative.
-    let _scope = case_scope("fca-newer-version");
     let mut newer = build_fca(&[FcaEntry::file("p.txt", b"fca payload")], b"");
     newer[crate::archive::format::FCA_MAGIC.len()] = 0x02;
-    let file_key = FileKey::generate().expect("file key");
-    let entries = [argon2id_entry(&file_key)];
-    let (built, stream_nonce_hex, payload_key_digest) = craft_header(&file_key, &entries, b"");
-    let payload = encode_payload(&built.payload_key, &built.stream_nonce, &newer, false);
-    let bytes = assemble_fcr(&built, &payload);
-    let artifact_ref = corpus.write_ref("artifacts/fcr/fca-newer-version.fcr", &bytes);
-    corpus.push_origin(OriginRow {
-        origin_id: "origin-fca-newer-version".to_string(),
-        origin_kind: "fcr_payload",
-        anchor_case_id: "fca-newer-version".to_string(),
-        payload_key_ref: "-".to_string(),
-        payload_key_sha3_256: payload_key_digest,
-        stream_nonce_hex,
-    });
-    corpus.push_case(
-        CaseRow::fcr("fca-newer-version", &artifact_ref)
-            .origin("origin-fca-newer-version")
-            .fabricated()
-            .credential("passphrase-main")
-            .capability("fca_version:0x02")
-            .reject("fca_version_unsupported", "unsupported_fca_version"),
+    fca_capability_case(
+        corpus,
+        "fca-newer-version",
+        &newer,
+        "fca_version:0x02",
+        "fca_version_unsupported",
+        "unsupported_fca_version",
     );
 
     // Manifest and tree rules (`FORMAT.md` §9.7 / §9.8).
@@ -3743,42 +4024,71 @@ fn write_fca_cases(corpus: &mut Corpus) {
         },
     );
 
-    // Extension regions (`FORMAT.md` §9.3 / §9.5). An ignorable tag is
-    // authenticated and skipped; a critical one is capability-relative.
+    // Extension regions (`FORMAT.md` §9.3 / §9.5). Each rule is driven in both
+    // namespaces, because the archive-level and per-entry regions carry
+    // separate tag spaces and are validated at different points of §9.11. An
+    // ignorable tag is authenticated and skipped, a critical one is
+    // capability-relative, and a truncated or reserved tag is invariant.
+    let entry_ext = |ext: &[u8]| {
+        build_fca(
+            &[FcaEntry::file("p.txt", b"fca payload").with_entry_ext(ext)],
+            b"",
+        )
+    };
+    let archive_ext = |ext: &[u8]| build_fca(&[FcaEntry::file("p.txt", b"fca payload")], ext);
+
     fca_case(
         corpus,
         "fca-archive-ext-ignorable",
-        &build_fca(
-            &[FcaEntry::file("p.txt", b"fca payload")],
-            &tlv_bytes(0x0001, b"archive"),
-        ),
+        &archive_ext(&tlv_bytes(0x0001, b"archive")),
         Ok(b"fca payload".to_vec()),
     );
     fca_case(
         corpus,
         "fca-entry-ext-ignorable",
-        &build_fca(
-            &[
-                FcaEntry::file("p.txt", b"fca payload")
-                    .with_entry_ext(&tlv_bytes(0x0001, b"entry")),
-            ],
-            b"",
-        ),
+        &entry_ext(&tlv_bytes(0x0001, b"entry")),
         Ok(b"fca payload".to_vec()),
     );
+    fca_capability_case(
+        corpus,
+        "fca-archive-ext-critical",
+        &archive_ext(&tlv_bytes(0x8001, b"archive")),
+        "fca_archive_tlv:0x8001",
+        "fca_archive_ext_unknown_critical_tag",
+        "unknown_critical_tlv",
+    );
+    fca_capability_case(
+        corpus,
+        "fca-entry-ext-critical",
+        &entry_ext(&tlv_bytes(0x8001, b"entry")),
+        "fca_entry_tlv:0x8001",
+        "fca_entry_ext_unknown_critical_tag",
+        "unknown_critical_tlv",
+    );
+    // Three bytes where a TLV entry header needs six, so the region ends
+    // inside the header of its only entry.
     fca_case(
         corpus,
         "fca-archive-ext-malformed",
-        &build_fca(&[FcaEntry::file("p.txt", b"x")], &[0x00, 0x01, 0x00]),
+        &archive_ext(&[0x00, 0x01, 0x00]),
         Err(("fca_archive_ext_entry_header_truncated", "malformed_tlv")),
     );
     fca_case(
         corpus,
+        "fca-entry-ext-malformed",
+        &entry_ext(&[0x00, 0x01, 0x00]),
+        Err(("fca_entry_ext_entry_header_truncated", "malformed_tlv")),
+    );
+    fca_case(
+        corpus,
+        "fca-archive-ext-reserved-tag",
+        &archive_ext(&tlv_bytes(0x0000, b"r")),
+        Err(("fca_archive_ext_tag_reserved", "malformed_tlv")),
+    );
+    fca_case(
+        corpus,
         "fca-entry-ext-reserved-tag",
-        &build_fca(
-            &[FcaEntry::file("p.txt", b"x").with_entry_ext(&tlv_bytes(0x0000, b"r"))],
-            b"",
-        ),
+        &entry_ext(&tlv_bytes(0x0000, b"r")),
         Err(("fca_entry_ext_tag_reserved", "malformed_tlv")),
     );
 
@@ -3917,7 +4227,7 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     );
 
     drop(scope);
-    let _scope = case_scope("recipient-body-over-default-cap");
+    let scope = case_scope("recipient-body-over-default-cap");
     let file_key = FileKey::generate().expect("file key");
     let mut big_body = unknown_entry(false);
     big_body.body = vec![0xAA; crate::HeaderReadLimits::RECIPIENT_BODY_LEN_DEFAULT as usize + 1];
@@ -3945,6 +4255,7 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
                 "resource_cap_exceeded",
             ),
     );
+    drop(scope);
 }
 
 // ─── Payload STREAM known-answer tests ─────────────────────────────────────

@@ -67,6 +67,11 @@ pub(crate) use deterministic_rng::with_sealed as with_sealed_rng;
 /// Seeds the deterministic stream for as long as the returned [`SeedScope`]
 /// lives, restoring the enclosing state when it drops. Use it where the seeded
 /// region spans statements that a closure cannot wrap cleanly.
+///
+/// Opening a scope while another seeded scope is still open panics. A guard
+/// left alive past the case it belongs to is otherwise invisible: the next
+/// case would continue the previous case's stream instead of its own, which
+/// couples two artifacts that the per-case seed exists to keep independent.
 #[cfg(test)]
 pub(crate) use deterministic_rng::seed_scope as deterministic_seed_scope;
 
@@ -109,6 +114,12 @@ mod deterministic_rng {
     }
 
     pub(crate) fn seed_scope(seed: u64) -> SeedScope {
+        STATE.with(|s| {
+            assert!(
+                !matches!(*s.borrow(), Some(Stream::Seeded(_))),
+                "a seeded scope is still open; drop it before opening the next one"
+            );
+        });
         replace(Some(Stream::Seeded(seed)))
     }
 
@@ -376,6 +387,19 @@ mod tests {
     fn a_draw_outside_a_seeded_scope_is_refused_while_the_stream_is_sealed() {
         with_sealed_rng(|| {
             let _ = random_bytes::<8>();
+        });
+    }
+
+    /// A guard left alive past its own case would make the next case
+    /// continue the previous stream, which no later diff explains. The
+    /// generator cannot detect that by reading itself, so opening a scope
+    /// over a live one is refused here instead.
+    #[test]
+    #[should_panic(expected = "a seeded scope is still open")]
+    fn opening_a_scope_over_a_live_one_is_refused() {
+        with_sealed_rng(|| {
+            let _outer = deterministic_seed_scope(7);
+            let _inner = deterministic_seed_scope(9);
         });
     }
 

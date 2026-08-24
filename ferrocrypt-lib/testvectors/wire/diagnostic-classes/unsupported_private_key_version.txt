@@ -1,1 +1,1 @@
-A nonzero private-key encoding version is unsupported.
+A nonzero private-key encoding version this implementation does not support.

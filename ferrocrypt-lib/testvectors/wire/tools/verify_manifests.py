@@ -27,10 +27,6 @@ SCHEMA_VERSION = 1
 ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 DIGEST = re.compile(r"^[0-9a-f]{64}$")
 NONCE = re.compile(r"^[0-9a-f]{38}$")
-
-# FORMAT.md §5 plaintext chunk size, which fixes how many chunks a KAT input
-# is encrypted in and therefore which counters its transcript uses.
-CHUNK_BYTES = 65536
 CAPABILITY = re.compile(
     r"^(outer_version|fca_version|public_key_version|private_key_version):0x[0-9A-F]{2}$"
     r"|^(outer_tlv|private_key_tlv|fca_archive_tlv|fca_entry_tlv):0x[0-9A-F]{4}$"
@@ -109,6 +105,10 @@ ENUMS = {
 # Every `*_ref` column and the digest column beside it. The payload-key
 # commitment is handled separately: section 12.3 defines it as a digest of key
 # material, which an `.fcr` payload origin records without naming a file.
+# FORMAT.md §5 plaintext chunk size, which fixes how many chunks a KAT input
+# is encrypted in and therefore which counters its transcript uses.
+CHUNK_BYTES = 65536
+
 DIGEST_PAIRS = {
     "diagnostic-classes.tsv": [("description_ref", "description_sha3_256")],
     "credentials.tsv": [
@@ -231,7 +231,7 @@ def check_digest(root, name, row, ref_column, digest_column):
         fail(f"{name}: {row_id(name, row)}: {reference} does not match its committed digest")
 
 
-def check_kat_chunk_nonces(root, row, cases, seen_keys, seen_chunks, nonce_prefix):
+def check_kat_chunk_nonces(root, row, cases, seen_keys, seen_chunks):
     """Rejects a KAT that reuses another KAT's payload key, and any chunk whose
     effective (payload key, full nonce) pair a chunk of an earlier KAT already
     used (FORMAT.md §12.3). The chunk count follows from the committed
@@ -246,6 +246,15 @@ def check_kat_chunk_nonces(root, row, cases, seen_keys, seen_chunks, nonce_prefi
     anchor = cases.get(row["anchor_case_id"])
     if anchor is None:
         return
+    # The chunk count is read off the anchor's artifact, so an anchor of any
+    # other case type would derive counters from unrelated bytes and quietly
+    # empty the pair check below.
+    if anchor["case_type"] != "stream_encrypt_kat":
+        fail(
+            f"origins.tsv: {origin_id}: a stream_kat origin anchors to a "
+            f"stream_encrypt_kat case, not '{anchor['case_type']}'"
+        )
+        return
     plaintext = root / anchor["artifact_ref"]
     if not plaintext.is_file():
         return
@@ -256,7 +265,7 @@ def check_kat_chunk_nonces(root, row, cases, seen_keys, seen_chunks, nonce_prefi
     chunks = max(1, (length + CHUNK_BYTES - 1) // CHUNK_BYTES)
     for counter in range(chunks):
         final_flag = 1 if counter == chunks - 1 else 0
-        pair = (key, f"{nonce_prefix}{counter:08x}{final_flag:02x}")
+        pair = (key, f"{row['stream_nonce_hex']}{counter:08x}{final_flag:02x}")
         if pair in seen_chunks:
             fail(
                 f"origins.tsv: {origin_id}: chunk {counter} reuses the payload key and "
@@ -372,8 +381,10 @@ def main():
         if kind == "none" and (primary != "-" or secret != "-"):
             fail(f"credentials.tsv: {row_id('credentials.tsv', row)}: a 'none' credential names no material")
 
-    # §12.3 requires four duplicate checks over encryption inputs: the nonce
-    # prefix of every origin, the payload key of every KAT, and the effective
+    # §12.3 names four duplicate rules over encryption inputs. Three passes
+    # cover them: one over the nonce prefix of every origin, which settles both
+    # the KAT prefixes and the prefixes across independent origins, one over
+    # the payload key of every KAT, and one over the effective
     # (payload key, full nonce) pair of every KAT chunk. A repeat of the last
     # is nonce reuse under one key, which a published corpus must never show.
     seen_nonces = {}
@@ -397,9 +408,7 @@ def main():
                 fail(f"origins.tsv: {origin_id}: a stream_kat origin names its payload key")
             else:
                 check_digest(root, "origins.tsv", row, "payload_key_ref", "payload_key_sha3_256")
-            check_kat_chunk_nonces(
-                root, row, cases, seen_kat_keys, seen_kat_chunks, nonce_prefix
-            )
+            check_kat_chunk_nonces(root, row, cases, seen_kat_keys, seen_kat_chunks)
         elif not DIGEST.match(row["payload_key_sha3_256"]):
             fail(f"origins.tsv: {origin_id}: payload key commitment is not a digest")
 
@@ -455,6 +464,25 @@ def main():
 
         if row["credential_id"] != "-" and row["credential_id"] not in credentials:
             fail(f"cases.tsv: {case_id}: credential is not declared")
+
+    # The KAT chunk checks above are driven from stream_kat origins, so a KAT
+    # case that no such origin anchors would carry no key or nonce at all and
+    # be skipped by them. Required in both directions for that reason.
+    kat_anchors = {
+        row["anchor_case_id"]
+        for row in tables["origins.tsv"]
+        if row["origin_kind"] == "stream_kat"
+    }
+    for row in tables["cases.tsv"]:
+        if row["case_type"] == "stream_encrypt_kat" and row["case_id"] not in kat_anchors:
+            fail(f"cases.tsv: {row['case_id']}: a stream_encrypt_kat case needs a stream_kat origin")
+
+    # §12.1: the corpus declares the classes its cases use, so a declared
+    # class with no case is a row that can never be exercised.
+    used_classes = {row["diagnostic_class"] for row in tables["cases.tsv"]} - {"-"}
+    for class_id in classes:
+        if class_id not in used_classes:
+            fail(f"diagnostic-classes.tsv: {class_id}: declared class has no case")
 
     check_every_file_is_referenced(root, tables)
 

@@ -1,1 +1,1 @@
-A nonzero FCA archive version is unsupported.
+A nonzero FCA archive version this implementation does not support.

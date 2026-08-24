@@ -1,1 +1,1 @@
-A nonzero .fcr outer-container version is unsupported.
+A nonzero .fcr outer-container version this implementation does not support.

@@ -204,6 +204,10 @@ fn diagnostic_class(error: &CryptoError) -> &'static str {
         | CryptoError::ArchiveTotalEntryExtCapExceeded { .. } => "resource_cap_exceeded",
         CryptoError::PayloadTampered => "payload_authentication_failed",
         CryptoError::PayloadTruncated => "payload_truncated",
+        // No artifact reaches these two: one needs a reader that yields
+        // bytes after reporting the end of the payload, the other a
+        // payload of about 281 TB. Mapped so that a reader defect
+        // reports a class rather than a panic (`FORMAT.md` §12.1).
         CryptoError::ExtraDataAfterPayload => "extra_data_after_payload",
         CryptoError::PayloadChunkCountExceeded => "payload_chunk_count_exceeded",
         CryptoError::MalformedArchive { .. } => "malformed_archive",

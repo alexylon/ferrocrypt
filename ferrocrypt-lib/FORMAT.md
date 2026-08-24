@@ -2478,6 +2478,17 @@ column documents FerroCrypt's structured-error mapping for replay; it does not
 make a Rust type name part of the cross-language corpus schema or authorize
 renaming a public FerroCrypt error variant.
 
+The corpus declares the classes its cases use, not the whole registry above.
+Two classes carry no case and never will, because no stored artifact can
+produce them. `extra_data_after_payload` needs an input source that reports the
+end of the payload and then yields further bytes, which is a property of a
+reader and not of stored bytes; a file with bytes after the final chunk is
+`payload_authentication_failed`, because the reader takes those bytes as
+another chunk. `payload_chunk_count_exceeded` needs a payload of `2^32 - 1`
+chunks, about 281 TB. Both stay in the registry because a reader MUST still
+report them, and an implementation evidences them with its own tests rather
+than with a corpus artifact.
+
 Different exact conditions may intentionally map to one class. For example, the
 credential-independent all-zero X25519 ephemeral value and a canonical nonzero
 small-order value that produces an all-zero shared secret have distinct
@@ -2838,7 +2849,7 @@ reused operationally.
 | `argon2id` recipient | Valid, wrong passphrase, every body field tampered, invalid body length, invalid and locally capped KDF parameters, and recipient flags |
 | X25519 recipient | Valid, multiple recipients, wrong private key, every body field tampered, invalid length and flags, noncanonical and all-zero ephemeral preflight, and a canonical nonzero small-order ephemeral value that produces an all-zero shared secret |
 | `.fcr` TLV | Empty region, valid unknown ignorable, unknown critical, reserved tag, duplicate and out-of-order tags, truncated header and value, and oversized region and value |
-| Payload STREAM | Independent byte-exact known-answer tests, authentication failure, truncation, forbidden empty final chunk after data, trailing data, exact-boundary finalization, and chunk-count-boundary evidence |
+| Payload STREAM | Independent byte-exact known-answer tests, authentication failure, truncation, forbidden empty final chunk after data, trailing data, and exact-boundary finalization. The chunk-count ceiling is excluded: evidencing it needs an artifact of about 281 TB (§12.1) |
 | `public.key` | Canonical file; optional LF; checksum, padding, case, whitespace, and length failures; an invariant public-key encoding version `0x00` case classified as `malformed_public_key`; a public-key encoding version `0x02` capability case classified as `unsupported_public_key_version`; unsupported type; canonical X25519 material; aliases; field-prime boundaries; all zero; and wrong lengths |
 | `private.key` | Canonical valid and openable file; wrong passphrase; cleartext-AAD and wrapped-secret tamper; malformed, truncated, and trailing data; wrong kind or key-file type; an invariant private-key encoding version `0x00` case classified as `malformed_private_key`; a private-key encoding version `0x02` capability case classified as `unsupported_private_key_version`; caps; TLVs; and public/secret consistency |
 | FCA fixed header | Valid file and directory roots; bad magic; an invariant FCA archive version `0x00` case classified as `malformed_archive`; an FCA archive version `0x02` capability case classified as `unsupported_fca_version`; flags; counts; archive-extension length; manifest length; total-byte accounting; and truncation |

@@ -15,8 +15,13 @@ use crate::error::{archive_path_reason_is_valid, malformed_archive_reason_is_val
 macro_rules! reasons {
     ($check:path => $all:ident { $($name:ident = $value:literal;)+ }) => {
         $(
-            pub(crate) const $name: &str = $value;
-            const _: () = assert!($check($value));
+            // The check runs inside the constant's own initializer rather than
+            // in a separate anonymous item, because the dead-code pass of the
+            // minimum supported Rust version does not count a use there.
+            pub(crate) const $name: &str = {
+                assert!($check($value));
+                $value
+            };
         )+
 
         #[cfg(test)]

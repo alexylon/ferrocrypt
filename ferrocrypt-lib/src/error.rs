@@ -131,15 +131,23 @@ pub(crate) const fn internal_marker_is_valid(marker: &str) -> bool {
 
 macro_rules! internal_invariant {
     ($marker:literal) => {{
-        const _: () = assert!($crate::error::internal_marker_is_valid($marker));
-        $crate::error::CryptoError::InternalInvariant($marker)
+        // Checked inside the constant's initializer; see `archive::reasons`.
+        const MARKER: &str = {
+            assert!($crate::error::internal_marker_is_valid($marker));
+            $marker
+        };
+        $crate::error::CryptoError::InternalInvariant(MARKER)
     }};
 }
 
 macro_rules! internal_crypto_failure {
     ($marker:literal) => {{
-        const _: () = assert!($crate::error::internal_marker_is_valid($marker));
-        $crate::error::CryptoError::InternalCryptoFailure($marker)
+        // Checked inside the constant's initializer; see `archive::reasons`.
+        const MARKER: &str = {
+            assert!($crate::error::internal_marker_is_valid($marker));
+            $marker
+        };
+        $crate::error::CryptoError::InternalCryptoFailure(MARKER)
     }};
 }
 

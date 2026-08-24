@@ -596,11 +596,26 @@ every step 8 check has succeeded; if a file has both a recipient-specific
 structural defect and an illegal recipient mix, the step 8 structural rejection
 takes precedence. The step 8 checks include the exact 116-byte `argon2id` body
 length, its `kdf_params` against the §2.2 bounds, and the exact 104-byte
-`x25519` body length. Local KDF resource caps are not part of step 8, because a
-reader MAY take that policy from its caller after classification; a reader MUST
-still apply them before Argon2id runs. A reader MUST NOT unlock a
-supplied private key (including running its unlock KDF), perform X25519 or
-another KEM operation, or run a recipient KDF until this preflight succeeds.
+`x25519` body length. Step 8 itself runs in two ordered passes: first the
+framing checks (`recipient_flags` and the exact body length), then the
+recipient-specific body-content checks. A reader MUST NOT apply a body-content
+check to any entry until the framing checks have been applied to every
+supported entry. Both framing checks report `malformed_recipient_entry`, so a
+reader MAY stop at the first framing failure; the body-content pass MUST
+instead visit every supported entry, because its class differs by recipient
+type. Where entries of more than one recipient type fail a body-content check,
+readers MUST report the failure of the lowest §4 registry index. A recipient
+type MUST NOT define body-content checks that report more than one diagnostic
+class given the framing precondition above, so the class a rejected file yields
+never depends on which entry failed. Body-content checks MUST be bounded by the
+recipient body length and MUST NOT perform key agreement, a KDF, or any other
+work a file could enlarge, because they run over every supported entry before
+the aggregate header-MAC bound below is applied. Local KDF resource caps are not part of
+step 8, because a reader MAY take that policy from its caller after
+classification; a reader MUST still apply them before Argon2id runs. A reader
+MUST NOT unlock a supplied private key (including running its unlock KDF),
+perform X25519 or another KEM operation, or run a recipient KDF until this
+preflight succeeds.
 
 Between step 9 and step 10, readers SHOULD reject a file whose supported
 recipient count multiplied by `12 + header_len` exceeds the aggregate
@@ -631,6 +646,18 @@ wrapped_file_key = ciphertext(32 bytes) || tag(16 bytes)
 
 The recipient entry and its position are authenticated by the header MAC. Native
 recipient entries MUST have `recipient_flags = 0`.
+
+Each native recipient type has a fixed registry index, assigned once and never
+reused or reassigned:
+
+| Registry index | Type |
+|---:|---|
+| 0 | `argon2id` |
+| 1 | `x25519` |
+
+A new native type takes the next unused index. The index never appears on the
+wire and orders nothing in a file; it exists so that §3.7 step 8 has a stated
+tie-break when entries of more than one type fail a body-content check.
 
 ### 4.1 `argon2id`
 
@@ -2807,7 +2834,7 @@ reused operationally.
 | Valid `.fcr` files | Native `argon2id`; native X25519; multiple X25519 recipients; empty, 1-byte, exact-65,536-byte, 65,537-byte, and multi-chunk payloads |
 | Prefix and framing | Bad magic; an invariant `.fcr` outer-container version `0x00` case classified as `malformed_header`; a `.fcr` outer-container version `0x02` capability case classified as `unsupported_outer_version`; wrong kind; nonzero flags; the structural maximum; truncation at each framing boundary; and both undersized-header precedence outcomes |
 | Header | Fixed-field accounting, recipient count and range, extension length, header-MAC tamper after successful unwrap, and exact authenticated scope |
-| Recipient framing | Truncated entry headers and bodies, invalid lengths, malformed type names, reserved flags, unknown critical and ignorable recipients, no supported recipient, and illegal mixing |
+| Recipient framing | Truncated entry headers and bodies, invalid lengths, malformed type names, reserved flags, unknown critical and ignorable recipients, no supported recipient, illegal mixing, and one step-8 diagnostic class for both orders of the same two defective entries |
 | `argon2id` recipient | Valid, wrong passphrase, every body field tampered, invalid body length, invalid and locally capped KDF parameters, and recipient flags |
 | X25519 recipient | Valid, multiple recipients, wrong private key, every body field tampered, invalid length and flags, noncanonical and all-zero ephemeral preflight, and a canonical nonzero small-order ephemeral value that produces an all-zero shared secret |
 | `.fcr` TLV | Empty region, valid unknown ignorable, unknown critical, reserved tag, duplicate and out-of-order tags, truncated header and value, and oversized region and value |
@@ -2967,10 +2994,10 @@ the implementation or specification has regressed; the case is not rewritten.
 
 ### 13.5 Native recipient types
 
-| Type | Body length | Mixing policy | Meaning |
-|---|---:|---|---|
-| `argon2id` | 116 | Exclusive | passphrase recipient |
-| `x25519` | 104 | Public-key-mixable | X25519 public-key recipient |
+| Type | Registry index | Body length | Mixing policy | Meaning |
+|---|---:|---:|---|---|
+| `argon2id` | 0 | 116 | Exclusive | passphrase recipient |
+| `x25519` | 1 | 104 | Public-key-mixable | X25519 public-key recipient |
 
 Passphrases are exact UTF-8 byte strings of 1 to 4,096 bytes. Every serialized
 native X25519 public value is a canonical 32-byte little-endian field encoding

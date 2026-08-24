@@ -641,7 +641,7 @@ Responsibilities:
 
 - defining the internal `NativeMixingRule` type and its named constructors (`exclusive`, `public_key_mixable`, `post_quantum`);
 - defining the public `MixingPolicy` diagnostic projection;
-- rejecting native entries with non-zero flags or a wrong body length, for every entry, before mixing runs (the `FORMAT.md` §3.7 step 8 preflight);
+- running the `FORMAT.md` §3.7 step 8 preflight before mixing: framing checks (flags, body length) over every entry, then per-type body content, lowest registry index reported first;
 - enforcing mixing rules before expensive operations (cardinality bit + compatibility-class equality, both before any KDF or private-key work);
 - mapping type names to supported native scheme metadata;
 - declaring each native type's `UnauthenticatedRecipientMode` via `NativeRecipientType::recipient_mode` so `classify_recipient_mode` is registry-driven (no hard-coded `argon2id` / `x25519` switches in the classifier);
@@ -656,6 +656,7 @@ Rules:
 - Unknown non-critical recipients are ignored for class comparison but still count wherever the format says they count, including exclusive passphrase recipient checks.
 - Mixing rules are enforced before expensive KDF or private-key operations.
 - Native-scheme classification and mixing enforcement are kept together because every native scheme addition requires coordinated changes to both (`mixing_rule` + `recipient_mode` arms on `NativeRecipientType`).
+- A native type's body-content preflight reports one diagnostic class, so the registry index alone decides what a rejected file reports.
 
 A separate recipient registry module is introduced only when a reviewed public plugin-registration API exists.
 

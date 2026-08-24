@@ -10,6 +10,10 @@ origin-recipient-none-supported	fcr_payload	recipient-none-supported	-	a196e379b
 origin-recipient-unknown-critical	fcr_payload	recipient-unknown-critical	-	c66fb55c812ac5f7aad13c4fca145a1baa4abd67abab2ea6e2cb585a89db53a6	5e3a8158cff2eda8fd3f7b3f4849494eb8701b	0.3.0	1
 origin-recipient-unknown-ignorable	fcr_payload	recipient-unknown-ignorable-skipped	-	d1e8b13cd52dd165544f3f12dac32695a23c5739cf479264ba0ac7e0faa0a82a	bf14e3014c6ee5cb09d36fbf624761aa649b7e	0.3.0	1
 origin-recipient-illegal-mixing	fcr_payload	recipient-illegal-mixing	-	3f26f82e310d69e7c3040722dad7619355b862059a9b9fe3bf7c542aa9040046	37a46a156d8bf3653b6a638d4567a8f60f82a6	0.3.0	1
+origin-recipient-step8-length-before-content-argon2id-first	fcr_payload	recipient-step8-length-before-content-argon2id-first	-	4ae5fb6cd03868cfd7dfd997fed30f322ad6524ad37090c3fac5fa8ad54bb24a	dcea03f371f5df5c8d7d5c1f22eca230caec4b	0.3.0	1
+origin-recipient-step8-length-before-content-x25519-first	fcr_payload	recipient-step8-length-before-content-x25519-first	-	d211a56bb077b55d737529745a880f52953861801b0a56b2d637430dc21e4d2b	33ad0ae34f8a13e80f3a77e0b3b1e06da045db	0.3.0	1
+origin-recipient-step8-order-argon2id-first	fcr_payload	recipient-step8-order-argon2id-first	-	911d9eb07fecc0374783b7ff0dda710f02f7837ec34f0e148d6881f192a20b69	70a05b1367819b093518de7dcec2c7b18c464f	0.3.0	1
+origin-recipient-step8-order-x25519-first	fcr_payload	recipient-step8-order-x25519-first	-	4689f8067cab7e8d4fdb09027872e6d3c9a7a688f00de3b649015a2df6d2bb8b	b2d4187097e83414f3d771780910fd69e59695	0.3.0	1
 origin-argon2id-kdf-lanes-zero	fcr_payload	argon2id-kdf-lanes-zero	-	cd20afd3f6f7b3b6d5c0999eb8e138687eff2bc48adeddede90364cba24fccea	0a32a94988081b84cd017adef5e26cba00aebe	0.3.0	1
 origin-argon2id-kdf-time-above-max	fcr_payload	argon2id-kdf-time-above-max	-	9e8f692a37bc88dd1bcaf2cc64f56dd4df6a0d5463d847fd59a44557dfb6d612	c2accb407352788c11c5f672551b38c8ed5ef8	0.3.0	1
 origin-argon2id-kdf-memory-above-max	fcr_payload	argon2id-kdf-memory-above-max	-	0367a0051feef3548a030ad89b4605ecade3880c17894993b79f97a304d7dd1b	71d4ed9d55c232df85b33d52e62a66c8977819	0.3.0	1

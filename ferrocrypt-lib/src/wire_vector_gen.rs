@@ -1928,6 +1928,74 @@ fn write_recipient_framing_cases(
         &entries,
         b"",
     );
+
+    // §3.7 step 8 runs each of its two passes over every entry before it
+    // reports, and settles between recipient types on the §4 registry index,
+    // so the same two defective entries yield one class in either order. The
+    // first pair fails the framing pass and the body-content pass, which the
+    // framing pass wins; the second pair fails only body content, which the
+    // lower registry index wins.
+    for (case_id, condition_id, argon2id_first, x25519_body_short, class) in [
+        (
+            "recipient-step8-length-before-content-argon2id-first",
+            "argon2id_kdf_invalid_and_x25519_body_short_argon2id_first",
+            true,
+            true,
+            "malformed_recipient_entry",
+        ),
+        (
+            "recipient-step8-length-before-content-x25519-first",
+            "argon2id_kdf_invalid_and_x25519_body_short_x25519_first",
+            false,
+            true,
+            "malformed_recipient_entry",
+        ),
+        (
+            "recipient-step8-order-argon2id-first",
+            "argon2id_kdf_invalid_and_x25519_ephemeral_zero_argon2id_first",
+            true,
+            false,
+            "invalid_kdf_parameters",
+        ),
+        (
+            "recipient-step8-order-x25519-first",
+            "argon2id_kdf_invalid_and_x25519_ephemeral_zero_x25519_first",
+            false,
+            false,
+            "invalid_kdf_parameters",
+        ),
+    ] {
+        let _scope = case_scope(case_id);
+        let file_key = FileKey::generate().expect("file key");
+        let lanes_zero = KdfParams {
+            lanes: 0,
+            ..KdfParams::test_fast_default()
+        };
+        let bad_argon2id = argon2id_entry_with_kdf_params(&file_key, &lanes_zero);
+        let mut bad_x25519 = x25519_entry(&keys.public_a, &file_key);
+        if x25519_body_short {
+            bad_x25519.body.pop();
+        } else {
+            bad_x25519.body[..x25519::PUBLIC_KEY_SIZE].fill(0);
+        }
+        let entries = if argon2id_first {
+            [bad_argon2id, bad_x25519]
+        } else {
+            [bad_x25519, bad_argon2id]
+        };
+        crafted_reject_case(
+            corpus,
+            sources,
+            case_id,
+            &format!("origin-{case_id}"),
+            "passphrase-main",
+            condition_id,
+            class,
+            &file_key,
+            &entries,
+            b"",
+        );
+    }
 }
 
 // ─── Native recipient bodies ───────────────────────────────────────────────

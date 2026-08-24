@@ -1,0 +1,1 @@
+The .fcr prefix or header violates a structural grammar or accounting rule assigned to this class.

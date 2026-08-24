@@ -13,9 +13,9 @@
 #                           Set that variable to 0 before running to opt
 #                           out on a machine without the privilege and
 #                           without Developer Mode.
-#   2. testvector-cycle   - committed corpus replayed, generator run,
-#                           fresh output validated, committed corpus
-#                           restored and re-validated
+#   2. testvector-cycle   - both committed corpora replayed, each
+#                           generator run, fresh output validated,
+#                           committed corpora restored and re-validated
 #   3. fixture-cycle      - fixture generator, fresh output validated,
 #                           committed fixtures restored and re-validated
 #   4. desktop            - ferrocrypt-desktop suite (own target dir)
@@ -132,17 +132,32 @@ if (-not (Test-Path Env:FERROCRYPT_REQUIRE_WINDOWS_SYMLINK_TESTS)) {
     $env:FERROCRYPT_REQUIRE_WINDOWS_SYMLINK_TESTS = "1"
 }
 Note "workspace"
-cargo test -- --test-threads=1 --include-ignored --skip regenerate_fixtures --skip regenerate_suite_vectors --skip round_trip_file_larger_than_4gib
+cargo test -- --test-threads=1 --include-ignored --skip regenerate_fixtures --skip regenerate_suite_vectors --skip regenerate_wire_corpus --skip round_trip_file_larger_than_4gib
 Record "workspace" ($LASTEXITCODE -eq 0)
 
-# -- 2. test-vector corpus: committed replay and generator cycle -------
+# -- 2. test-vector corpora: committed replay and generator cycle ------
+# The frozen conformance corpus is checked as data first, the way an
+# outside implementer checks it, before anything replays it.
+$WireManifests = "ferrocrypt-lib/testvectors/wire/tools/verify_manifests.py"
+# Windows installs Python as `python`; `python3` is the usual name elsewhere
+# and on the CI image.
+$Python = if (Get-Command python3 -ErrorAction SilentlyContinue) { "python3" } else { "python" }
 if ($TestvectorsDirty -eq 0) {
     Note "testvector-cycle"
     $ok = $true
     $generatorStarted = $false
 
-    cargo test -p ferrocrypt --test testvector_suite -- --test-threads=1
+    & $Python $WireManifests
     if ($LASTEXITCODE -ne 0) { $ok = $false }
+
+    if ($ok) {
+        cargo test -p ferrocrypt --test testvector_suite -- --test-threads=1
+        if ($LASTEXITCODE -ne 0) { $ok = $false }
+    }
+    if ($ok) {
+        cargo test -p ferrocrypt --test wire_corpus -- --test-threads=1
+        if ($LASTEXITCODE -ne 0) { $ok = $false }
+    }
 
     if ($ok) {
         $generatorStarted = $true
@@ -150,7 +165,19 @@ if ($TestvectorsDirty -eq 0) {
         if ($LASTEXITCODE -ne 0) { $ok = $false }
     }
     if ($ok) {
+        cargo test -p ferrocrypt --lib -- --ignored --exact wire_vector_gen::regenerate_wire_corpus --test-threads=1
+        if ($LASTEXITCODE -ne 0) { $ok = $false }
+    }
+    if ($ok) {
+        & $Python $WireManifests
+        if ($LASTEXITCODE -ne 0) { $ok = $false }
+    }
+    if ($ok) {
         cargo test -p ferrocrypt --test testvector_suite -- --test-threads=1
+        if ($LASTEXITCODE -ne 0) { $ok = $false }
+    }
+    if ($ok) {
+        cargo test -p ferrocrypt --test wire_corpus -- --test-threads=1
         if ($LASTEXITCODE -ne 0) { $ok = $false }
     }
 
@@ -159,7 +186,15 @@ if ($TestvectorsDirty -eq 0) {
         if ($LASTEXITCODE -ne 0) { $ok = $false }
     }
     if ($generatorStarted -and $ok) {
+        & $Python $WireManifests
+        if ($LASTEXITCODE -ne 0) { $ok = $false }
+    }
+    if ($generatorStarted -and $ok) {
         cargo test -p ferrocrypt --test testvector_suite -- --test-threads=1
+        if ($LASTEXITCODE -ne 0) { $ok = $false }
+    }
+    if ($generatorStarted -and $ok) {
+        cargo test -p ferrocrypt --test wire_corpus -- --test-threads=1
         if ($LASTEXITCODE -ne 0) { $ok = $false }
     }
 

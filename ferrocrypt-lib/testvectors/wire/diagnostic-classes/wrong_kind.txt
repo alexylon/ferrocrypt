@@ -1,0 +1,1 @@
+An FCR\0 artifact has the wrong kind for the requested operation.

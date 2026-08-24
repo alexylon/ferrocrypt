@@ -1,0 +1,1 @@
+The declared .fcr header extension region exceeds its structural maximum.

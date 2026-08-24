@@ -1,0 +1,1 @@
+A candidate file key failed header-MAC verification.

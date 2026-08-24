@@ -1,0 +1,4 @@
+d - - root
+f 5 5fdbf98ad6ebaca45ff0cc60361778b8b5eecfd76f44c11bcd8b558a5364b2ca root/a.txt
+d - - root/sub
+f 14 20bec998d3595985498cf2b674f1ea7e5e8c5573e2c62e7f096ca90b8234db19 root/sub/deep.txt

@@ -5,9 +5,9 @@
 # Lanes (each reported PASS / FAIL / SKIP, summary at the end):
 #   1. workspace          — full workspace suite, CI build-job mirror
 #                           (--include-ignored, generators skipped)
-#   2. testvector-cycle   — committed corpus replayed, generator run,
-#                           fresh output validated, committed corpus
-#                           restored and re-validated
+#   2. testvector-cycle   — both committed corpora replayed, each
+#                           generator run, fresh output validated,
+#                           committed corpora restored and re-validated
 #   3. fixture-cycle      — run the fixture generator, validate its fresh
 #                           output, restore the committed fixtures,
 #                           re-validate
@@ -110,6 +110,15 @@ fs_matrix_run() { # fs_matrix_run <mounted-dir>
         --test archive_fs_matrix -- --ignored --test-threads=1 --nocapture
 }
 
+verify_wire_manifests() {
+    python3 ferrocrypt-lib/testvectors/wire/tools/verify_manifests.py
+}
+
+replay_corpora() {
+    cargo test -p ferrocrypt --test testvector_suite -- --test-threads=1 &&
+        cargo test -p ferrocrypt --test wire_corpus -- --test-threads=1
+}
+
 # Remove abandoned per-process directories from interrupted earlier runs.
 # A directory whose PID still exists is never touched. The EXIT trap also
 # catches directories left behind when a test destructor cannot delete them.
@@ -126,21 +135,47 @@ FIXTURES_DIRTY=$(git status --porcelain ferrocrypt-lib/tests/fixtures | wc -l | 
 note "workspace"
 cargo test -- --test-threads=1 --include-ignored \
     --skip regenerate_fixtures --skip regenerate_suite_vectors \
+    --skip regenerate_wire_corpus \
     --skip round_trip_file_larger_than_4gib
 record workspace $?
 
-# ── 2. test-vector corpus: replay committed, then a generator cycle ──
-# First replay the committed corpus (the release-relevant check), then
-# run the generator, replay its fresh output, and restore the
-# committed files.
+# ── 2. test-vector corpora: replay committed, then a generator cycle ──
+# First replay both committed corpora (the release-relevant check), then
+# run each generator, replay its fresh output, and restore the committed
+# files. The frozen conformance corpus is also checked as data first, the
+# way an outside implementer checks it, before anything replays it.
 if [ "$TESTVECTORS_DIRTY" -eq 0 ]; then
     note "testvector-cycle"
-    cargo test -p ferrocrypt --test testvector_suite -- --test-threads=1 &&
-        cargo test -p ferrocrypt --lib -- --ignored --exact suite_vector_gen::regenerate_suite_vectors --test-threads=1 &&
-        cargo test -p ferrocrypt --test testvector_suite -- --test-threads=1 &&
-        git restore ferrocrypt-lib/testvectors &&
-        cargo test -p ferrocrypt --test testvector_suite -- --test-threads=1
-    record testvector-cycle $?
+    cycle_ok=1
+    generator_started=0
+
+    # Runs one step unless an earlier one failed, mirroring an `&&` chain.
+    cycle_step() { # cycle_step <command> [args...]
+        [ "$cycle_ok" -eq 1 ] || return 0
+        "$@" || cycle_ok=0
+    }
+
+    cycle_step verify_wire_manifests
+    cycle_step replay_corpora
+
+    if [ "$cycle_ok" -eq 1 ]; then
+        generator_started=1
+        cycle_step cargo test -p ferrocrypt --lib -- --ignored --exact suite_vector_gen::regenerate_suite_vectors --test-threads=1
+        cycle_step cargo test -p ferrocrypt --lib -- --ignored --exact wire_vector_gen::regenerate_wire_corpus --test-threads=1
+        cycle_step verify_wire_manifests
+        cycle_step replay_corpora
+    fi
+
+    # A generator has overwritten the committed corpora, so restore them even
+    # when a step above failed. Leaving generated files in the checkout is how
+    # a frozen corpus silently acquires a rewrite.
+    if [ "$generator_started" -eq 1 ]; then
+        git restore ferrocrypt-lib/testvectors || cycle_ok=0
+        cycle_step verify_wire_manifests
+        cycle_step replay_corpora
+    fi
+
+    if [ "$cycle_ok" -eq 1 ]; then record testvector-cycle 0; else record testvector-cycle 1; fi
 else
     skip testvector-cycle "ferrocrypt-lib/testvectors has local changes; not restoring over them"
 fi

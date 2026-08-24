@@ -189,7 +189,7 @@ pub(crate) fn encode_recipient_string_for_suite(
     key_material: &[u8],
 ) -> Result<String, CryptoError> {
     check_x25519_material(type_name, key_material)?;
-    encode_recipient_string_inner(suite, type_name, key_material)
+    encode_recipient_string_inner(suite.public_key_version(), type_name, key_material)
 }
 
 /// Test-only: encodes a recipient string skipping the `FORMAT.md` §7
@@ -201,18 +201,36 @@ pub(crate) fn encode_recipient_string_unchecked(
     type_name: &str,
     key_material: &[u8],
 ) -> Result<String, CryptoError> {
-    encode_recipient_string_inner(WRITER_KEYPAIR_SUITE, type_name, key_material)
+    encode_recipient_string_inner(
+        WRITER_KEYPAIR_SUITE.public_key_version(),
+        type_name,
+        key_material,
+    )
 }
 
-/// Shared body of the two encoders. Applies the generic grammar,
-/// length, and checksum rules; the X25519 material rules are the
-/// caller's, so the test-only encoder can skip exactly those.
-fn encode_recipient_string_inner(
-    suite: KeypairSuite,
+/// Test-only: encodes a recipient string carrying an arbitrary
+/// `public_key_version` byte, so the conformance corpus can commit the
+/// reserved `0x00` encoding and one from a suite this release does not
+/// define. Never reachable from production code, which always writes
+/// [`WRITER_KEYPAIR_SUITE`].
+#[cfg(test)]
+pub(crate) fn encode_recipient_string_with_version(
+    version: u8,
     type_name: &str,
     key_material: &[u8],
 ) -> Result<String, CryptoError> {
-    let version = suite.public_key_version();
+    encode_recipient_string_inner(version, type_name, key_material)
+}
+
+/// Shared body of the encoders. Applies the generic grammar, length,
+/// and checksum rules; the X25519 material rules and the choice of
+/// `public_key_version` are the caller's, so the test-only encoders can
+/// skip exactly those and write a version this release never emits.
+fn encode_recipient_string_inner(
+    version: u8,
+    type_name: &str,
+    key_material: &[u8],
+) -> Result<String, CryptoError> {
     validate_type_name_grammar(type_name)?;
     let type_name_bytes = type_name.as_bytes();
     let type_name_len = u16::try_from(type_name_bytes.len())
@@ -234,6 +252,36 @@ fn encode_recipient_string_inner(
 
     bech32::encode::<Bech32V1>(RECIPIENT_HRP, &data)
         .map_err(|_| crate::error::internal_invariant!("Bech32 encode failed"))
+}
+
+/// Test-only: the typed payload an `fcr1…` string carries, before Bech32
+/// encoding. Paired with [`encode_recipient_payload_with_hrp`] so the
+/// conformance corpus can commit a string whose Bech32 grammar and checksum
+/// are valid and which fails only on a later rule. Never reachable from
+/// production code.
+#[cfg(test)]
+pub(crate) fn recipient_payload_for_tests(
+    version: u8,
+    type_name: &str,
+    key_material: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    let encoded = encode_recipient_string_inner(version, type_name, key_material)?;
+    let checked =
+        CheckedHrpstring::new::<Bech32V1>(&encoded).map_err(|_| malformed_public_key())?;
+    Ok(checked.byte_iter().collect())
+}
+
+/// Test-only: Bech32-encodes a recipient payload under a caller-chosen
+/// human-readable part. The checksum is computed over that part, so a string
+/// built with a part other than `fcr` reaches the prefix rule instead of
+/// failing the checksum first. Never reachable from production code.
+#[cfg(test)]
+pub(crate) fn encode_recipient_payload_with_hrp(
+    hrp: &str,
+    data: &[u8],
+) -> Result<String, CryptoError> {
+    let hrp = Hrp::parse(hrp).map_err(|_| malformed_public_key())?;
+    bech32::encode::<Bech32V1>(hrp, data).map_err(|_| malformed_public_key())
 }
 
 /// Decodes a canonical lowercase Bech32 recipient string into the

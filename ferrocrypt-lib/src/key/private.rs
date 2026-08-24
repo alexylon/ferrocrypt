@@ -100,13 +100,13 @@ pub(crate) const PRIVATE_KEY_FILE_READ_CAP_BYTES: usize = PRIVATE_KEY_HEADER_FIX
     + PRIVATE_KEY_EXT_LEN_MAX as usize
     + PRIVATE_KEY_WRAPPED_SECRET_LEN_MAX as usize;
 
-const VERSION_OFFSET: usize = MAGIC_SIZE;
-const KIND_OFFSET: usize = VERSION_OFFSET + 1;
+pub(crate) const VERSION_OFFSET: usize = MAGIC_SIZE;
+pub(crate) const KIND_OFFSET: usize = VERSION_OFFSET + 1;
 const KEY_FLAGS_OFFSET: usize = KIND_OFFSET + 1;
-const TYPE_NAME_LEN_OFFSET: usize = KEY_FLAGS_OFFSET + size_of::<u16>();
-const PUBLIC_LEN_OFFSET: usize = TYPE_NAME_LEN_OFFSET + size_of::<u16>();
-const EXT_LEN_OFFSET: usize = PUBLIC_LEN_OFFSET + size_of::<u32>();
-const WRAPPED_SECRET_LEN_OFFSET: usize = EXT_LEN_OFFSET + size_of::<u32>();
+pub(crate) const TYPE_NAME_LEN_OFFSET: usize = KEY_FLAGS_OFFSET + size_of::<u16>();
+pub(crate) const PUBLIC_LEN_OFFSET: usize = TYPE_NAME_LEN_OFFSET + size_of::<u16>();
+pub(crate) const EXT_LEN_OFFSET: usize = PUBLIC_LEN_OFFSET + size_of::<u32>();
+pub(crate) const WRAPPED_SECRET_LEN_OFFSET: usize = EXT_LEN_OFFSET + size_of::<u32>();
 const ARGON2_SALT_OFFSET: usize = WRAPPED_SECRET_LEN_OFFSET + size_of::<u32>();
 const KDF_PARAMS_OFFSET: usize = ARGON2_SALT_OFFSET + ARGON2_SALT_SIZE;
 const WRAP_NONCE_OFFSET: usize = KDF_PARAMS_OFFSET + KDF_PARAMS_SIZE;

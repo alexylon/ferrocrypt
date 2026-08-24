@@ -1,59 +1,174 @@
 # `testvectors/wire/` — frozen conformance corpus
 
-**Status:** currently empty. The corpus is populated and published with
-stable FerroCrypt release 0.3.0. `FORMAT.md` §12.3 defines its identity,
-directory layout, manifest schema, provenance rules, and freeze policy.
+The public, cross-language conformance contract for FerroCrypt. An independent
+implementer — someone writing a reader in another language, or a separate Rust
+crate with no access to this codebase — can fetch this directory and prove their
+implementation conformant by replaying every case and comparing against the
+committed expectations.
 
-## Purpose vs `tests/fixtures/`
+`FORMAT.md` §12.3 defines the identity, layout, manifest schema, provenance
+rules, and freeze policy this corpus follows. Where this document and
+`FORMAT.md` disagree, `FORMAT.md` governs.
 
-This directory is the public, cross-language conformance contract. An
-independent implementer — someone writing a reader in another language
-or a separate Rust crate with no access to this codebase — should be
-able to fetch it and prove their implementation spec-compliant by
-replaying every case and comparing against the committed expectations.
+```text
+SCHEMA-VERSION  = 1     manifest grammar
+CORPUS-REVISION = 1     append-only content revision
+baseline_id     = 0.3.0 the compatibility promise these cases evidence
+```
 
-This is a different role from `tests/fixtures/`. That directory is an
-internal regression net for *this* codebase that the team regenerates
-when the wire format intentionally changes. `testvectors/wire/` is a
-one-way commitment to the outside world: once the stable release tag
-ships, committed rows and bytes are append-only and immutable;
-corrections use the errata mechanism from `FORMAT.md` §12.3.
+## Status
 
-When the corpus lands, this README is replaced by the full document
-required by `FORMAT.md` §12.3, including the authoritative generation
-and reproduction commands.
+Populated and replaying. **Not yet frozen**: until stable release `0.3.0` is
+tagged, the corpus may be regenerated freely, because `FORMAT.md` §11.4 places
+artifacts from pre-release and untagged revisions outside the cross-release
+promise. From the `v0.3.0` tag, manifest rows, artifact bytes, expected results,
+digests, and class meanings are append-only and immutable; corrections use the
+errata mechanism in §12.3 rather than edits.
 
-## Note for whoever authors the corpus
+## What is here
 
-`FORMAT.md` §12.1 defines two payload-stream classes that a file-backed
-reader almost never reaches. Read both notes before writing a
-payload-stream row.
+| Path | Contents |
+|---|---|
+| `baselines.tsv` | Compatibility baselines and their lineage |
+| `diagnostic-classes.tsv` | The stable rejection classes this corpus uses |
+| `diagnostic-classes/` | One file per class holding its stable explanatory text |
+| `credentials.tsv` | Credential material each case is replayed with |
+| `credentials/` | Passphrase bytes the credential table references |
+| `origins.tsv` | Provenance of every payload encryption |
+| `cases.tsv` | One row per case: artifact, outcome, and expectation |
+| `errata.tsv` | Corrections to frozen rows; empty in revision 1 |
+| `artifacts/` | The bytes under test, by artifact kind |
+| `expected/` | Byte-exact expected results for accepted cases |
+| `kat/stream/` | Payload STREAM known-answer material |
+| `tools/` | Corpus tooling; see below |
 
-`FORMAT.md` §12.3 requires payload-stream evidence covering trailing
-data. Record those cases as `payload_authentication_failed`, with a
-`condition_id` naming the appended-bytes condition — not as
-`extra_data_after_payload`.
+## Credentials are public test material
 
-Appending bytes to a valid `.fcr` never reaches the
-`extra_data_after_payload` class in FerroCrypt. The reader fills a full
-chunk before decrypting, so appended bytes either extend the final
-frame or turn it into a non-final one; either way the AEAD rejects
-first. `extra_data_after_payload` is reserved for an inner reader that
-signals end of file and then produces more bytes, which no file-backed
-reader does.
+Every passphrase and private key in this corpus is committed in the clear and
+readable by anyone who fetches it. The filenames say so
+(`credentials/passphrase-main.txt`, `credentials/passphrase-wrong.txt`), and so
+does this sentence: **never reuse any of this material to protect real data.**
+It exists only so a replay can open the accepted artifacts.
 
-§12.3 requires truncation evidence too. Record a cut that leaves any
-byte of payload as `payload_authentication_failed`, with a
-`condition_id` naming where the file was cut — not as
-`payload_truncated`.
+## Replaying the corpus
 
-Only a `.fcr` whose payload region is empty reaches the
-`payload_truncated` class in FerroCrypt. The reader holds one lookahead
-byte after every non-final chunk, so only the first read can find
-nothing at all; a cut inside a chunk, or one at an exact chunk
-boundary, leaves bytes that are treated as the final chunk and rejected
-by the AEAD. One surviving payload byte is already enough.
+Read `cases.tsv`, and for each row perform the action its `case_type` names on
+the bytes at `artifact_ref`, using the credential its `credential_id` names:
 
-A case recorded under the wrong class would fail replay against this
-implementation, and the corpus is immutable once the stable release is
-tagged.
+| `case_type` | Action | An accepted case must produce |
+|---|---|---|
+| `fcr_decrypt` | Decrypt the `.fcr` | the plaintext at `expected_ref` for a file root, and the extraction listing at `expected_ref` for a directory root |
+| `public_key_decode` | Decode the `public.key` | the key material at `expected_ref` |
+| `private_key_open` | Unlock the `private.key` | its public material at `expected_ref` |
+| `private_key_validate` | Validate the `private.key` structurally | — |
+| `stream_encrypt_kat` | Encrypt the input under the origin's key and nonce | the ciphertext at `expected_ref` |
+
+The extraction listing is one LF-terminated line per extracted object, ordered
+by path depth and then by path bytes: `kind SP size SP content_sha3_256 SP path`,
+with `d` and two `-` fields for a directory. §12.3 defines it, and the extracted
+root kind selects the comparison — not the case row.
+
+A row with `outcome = reject` must be refused, and the refusal must map to the
+`diagnostic_class` the row names. Match on structured errors: `FORMAT.md` §12.1
+keeps English message text out of this contract, and `condition_id` distinguishes
+exact conditions that share a class.
+
+A row with `expectation_scope = capability_relative` names one capability in
+`capability_id`. Assert its stored outcome only while your implementation does
+not support that capability (`FORMAT.md` §12.2).
+
+**Resource-policy cases depend on configuration, not on the format.** Rows whose
+class is `resource_cap_exceeded` are recorded as this implementation behaves
+under its default limits. An implementation with different local caps will
+legitimately differ; each such row's `condition_id` names the cap involved.
+
+### Verifying the corpus as data
+
+`tools/verify_manifests.py` checks the corpus without decrypting anything and
+without needing FerroCrypt: table and identifier grammar, every committed
+digest against the bytes it names, referential integrity between the tables, the
+enumerated values, and the per-outcome column rules of §12.3. Python 3 standard
+library only.
+
+```bash
+python3 tools/verify_manifests.py
+```
+
+It exits 0 when the corpus is well formed, and 1 with one line per problem
+otherwise. Run it first: a corpus that fails here cannot be replayed meaningfully.
+
+## Generation and reproduction
+
+The corpus is generated by an ignored test in the FerroCrypt library crate and
+committed by hand:
+
+```bash
+cargo test --package ferrocrypt --lib wire_vector_gen -- --ignored --test-threads=1
+```
+
+Generation runs under a fixed deterministic seed, so regenerating without
+changing the generator reproduces the corpus byte for byte and leaves an empty
+diff. Adding a case therefore shows only that case in the diff.
+
+**Tool provenance.** The generator is
+`ferrocrypt-lib/src/wire_vector_gen.rs`. It builds artifacts through the
+library's own writer paths, including internal ones the public API does not
+expose — crafted recipient lists, extension regions, out-of-range key-derivation
+parameters, and payload transcripts that violate §5. Corpus-generation code is
+test tooling, not part of FerroCrypt's public library API, and carries no
+stability promise.
+
+**FerroCrypt's own replay is split across two test binaries**, because raw
+payload STREAM encryption is crate-internal and unreachable from an integration
+test:
+
+```bash
+cargo test --package ferrocrypt --test wire_corpus          # every public-API case type
+cargo test --package ferrocrypt --lib replay_stream_kats    # the STREAM known-answer cases
+```
+
+This split is an artifact of FerroCrypt's own module boundaries. An outside
+implementation has no such constraint: `origins.tsv` names the payload key file
+and the base nonce, and `cases.tsv` names the input and the expected ciphertext.
+
+## Diagnostic classes that are narrower than they sound
+
+Two classes in the §12.1 registry describe conditions a file-backed reader
+almost never reaches. Cases here are recorded against what actually happens, not
+against the class whose name reads closest.
+
+**Appended bytes are `payload_authentication_failed`, not
+`extra_data_after_payload`.** A reader fills a whole chunk before decrypting, so
+appended bytes either extend the final frame or turn it into a non-final one;
+either way the AEAD refuses first. `extra_data_after_payload` is reserved for an
+inner reader that signals end of file and then produces more bytes, which no
+file-backed reader does.
+
+**A cut payload is `payload_authentication_failed` unless the payload region is
+empty.** Only a stream carrying no chunk at all reaches `payload_truncated`; a
+cut that leaves any byte behind leaves a frame that fails authentication, and a
+reader cannot tell that from a tampered tail. `payload-region-empty` and
+`payload-cut-at-chunk-boundary` pin both sides of that boundary.
+
+## Known gaps in revision 1
+
+Two items §12.3 asks for are not present, and both are blocked by size rather
+than overlooked:
+
+- **Chunk-count-boundary evidence.** A genuine 2^32-chunk artifact is about
+  256 TiB, and the known-answer schema cannot stand in for it: `origins.tsv` has
+  no field for a starting counter, so no row can say "this transcript begins at
+  counter 2^32 - 1". Expressing this needs a schema change.
+- **The largest resource caps.** Entry count (250,000), total plaintext
+  (64 GiB), manifest length (64 MiB), total entry-extension bytes (64 MiB), and
+  TLV value length (16 MiB) would each require committing an artifact of that
+  size to a permanently frozen corpus. The caps that are cheap to exceed —
+  path depth, path bytes, both extension regions, recipient count, recipient
+  body length, the `private.key` wrapped-secret cap, and every Argon2id
+  dimension — are covered.
+
+Everything else the §12.3 minimum-evidence table names is present. Two areas
+are covered in a shape worth stating: a directory root's expected result is the
+extraction listing §12.3 defines rather than a single plaintext file, and stored
+permission modes are evidenced by rejection cases only, because §9.13 makes
+Unix permission restoration best-effort on Windows.

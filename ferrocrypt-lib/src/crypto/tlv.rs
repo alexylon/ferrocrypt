@@ -63,7 +63,7 @@ pub(crate) fn classify_tlv_tag(tag: u16) -> Result<TlvClass, CryptoError> {
 }
 
 /// TLV entry header size: `tag(u16) || len(u32) = 6` bytes.
-const ENTRY_HEADER_SIZE: usize = 6;
+pub(crate) const ENTRY_HEADER_SIZE: usize = 6;
 
 /// Scans a TLV region into [`RawTlv`] entries with full canonicality
 /// checks: each entry header fits, declared `len` fits in the region

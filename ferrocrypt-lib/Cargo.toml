@@ -15,7 +15,10 @@ keywords = ["cryptography", "encryption", "chacha20poly1305", "argon2", "X25519"
 categories = ["cryptography"]
 publish = true
 # Test-only fixtures; the private.key among them is not a real secret.
-exclude = ["tests/fixtures/"]
+# The frozen conformance corpus is published at the release tag rather than in
+# the crate (`FORMAT.md` §12.3), and it is append-only, so shipping it would
+# grow every download for material no library user needs.
+exclude = ["tests/fixtures/", "testvectors/wire/"]
 
 [features]
 # Gives the fuzz targets in ferrocrypt-lib/fuzz access to internal
@@ -63,6 +66,10 @@ rustix = { version = "1", features = ["fs"] }
 ferrocrypt-test-support = { path = "../ferrocrypt-test-support" }
 ctor = "0.9"
 stats_alloc = "0.1.10"
+# Already regular dependencies at these versions; the frozen-corpus replay in
+# `tests/wire_corpus.rs` needs them from an integration test too.
+sha3 = { version = "0.11", features = ["zeroize"] }
+tempfile = "3"
 
 # `process` is for the archive/encode.rs test that lowers the open-file limit.
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]

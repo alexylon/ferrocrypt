@@ -1,0 +1,1 @@
+The input is not a recognized FerroCrypt key artifact.

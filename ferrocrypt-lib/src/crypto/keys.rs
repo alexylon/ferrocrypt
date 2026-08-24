@@ -54,37 +54,86 @@ pub(crate) const HKDF_INFO_HEADER: &[u8] = b"ferrocrypt/v1/header";
 #[cfg(test)]
 pub(crate) use deterministic_rng::with_seed as with_deterministic_rng;
 
+/// Runs `f` with the deterministic stream sealed: any draw that is not inside
+/// a nested [`with_deterministic_rng`] or [`deterministic_seed_scope`] panics
+/// instead of reading either the OS CSPRNG or a neighbouring seeded stream.
+///
+/// The `testvectors/wire/` generator runs under this, because a frozen corpus
+/// needs each artifact's bytes to depend on that artifact's own seed alone. A
+/// draw that escaped its scope would otherwise couple two artifacts silently.
+#[cfg(test)]
+pub(crate) use deterministic_rng::with_sealed as with_sealed_rng;
+
+/// Seeds the deterministic stream for as long as the returned [`SeedScope`]
+/// lives, restoring the enclosing state when it drops. Use it where the seeded
+/// region spans statements that a closure cannot wrap cleanly.
+#[cfg(test)]
+pub(crate) use deterministic_rng::seed_scope as deterministic_seed_scope;
+
+/// Guard returned by [`deterministic_seed_scope`].
+#[cfg(test)]
+pub(crate) use deterministic_rng::SeedScope;
+
 // Opt-in deterministic RNG override. See [`with_deterministic_rng`].
 #[cfg(test)]
 mod deterministic_rng {
     use std::cell::RefCell;
 
+    /// State of the deterministic stream on this thread.
+    enum Stream {
+        /// Draws come from a splitmix64 stream at this position.
+        Seeded(u64),
+        /// Draws are refused, so a generator that requires every draw to sit
+        /// inside a seeded scope fails loudly instead of silently borrowing
+        /// the enclosing stream or the OS CSPRNG.
+        Sealed,
+    }
+
     thread_local! {
-        static STATE: RefCell<Option<u64>> = const { RefCell::new(None) };
+        static STATE: RefCell<Option<Stream>> = const { RefCell::new(None) };
+    }
+
+    /// Restores the enclosing stream state on drop, so a panic inside a scope
+    /// cannot leave that scope's stream active and poison a later test
+    /// sharing this harness thread.
+    pub(crate) struct SeedScope(Option<Stream>);
+
+    impl Drop for SeedScope {
+        fn drop(&mut self) {
+            STATE.with(|s| *s.borrow_mut() = self.0.take());
+        }
+    }
+
+    fn replace(state: Option<Stream>) -> SeedScope {
+        SeedScope(STATE.with(|s| s.replace(state)))
+    }
+
+    pub(crate) fn seed_scope(seed: u64) -> SeedScope {
+        replace(Some(Stream::Seeded(seed)))
     }
 
     pub(crate) fn with_seed<R>(seed: u64, f: impl FnOnce() -> R) -> R {
-        // Restore the previous state on drop, so a panic inside `f` cannot
-        // leave the seeded stream active and poison a later test that shares
-        // this harness thread.
-        struct Restore(Option<u64>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                STATE.with(|s| *s.borrow_mut() = self.0);
-            }
-        }
-        let _restore = Restore(STATE.with(|s| s.replace(Some(seed))));
+        let _restore = seed_scope(seed);
+        f()
+    }
+
+    pub(crate) fn with_sealed<R>(f: impl FnOnce() -> R) -> R {
+        let _restore = replace(Some(Stream::Sealed));
         f()
     }
 
     /// If the deterministic stream is active, fills `buf` from it and returns
     /// `true`; otherwise leaves `buf` untouched and returns `false`, so the
-    /// caller falls through to `OsRng`.
+    /// caller falls through to `OsRng`. Panics while the stream is sealed.
     pub(crate) fn try_fill(buf: &mut [u8]) -> bool {
         STATE.with(|s| {
             let mut guard = s.borrow_mut();
-            let Some(state) = guard.as_mut() else {
-                return false;
+            let state = match guard.as_mut() {
+                None => return false,
+                Some(Stream::Sealed) => {
+                    panic!("random draw outside a seeded scope while the stream is sealed")
+                }
+                Some(Stream::Seeded(state)) => state,
             };
             for chunk in buf.chunks_mut(8) {
                 // splitmix64 step.
@@ -318,6 +367,37 @@ pub(crate) fn derive_subkeys(
 mod tests {
     use super::*;
     use crate::crypto::stream::STREAM_NONCE_SIZE;
+
+    /// The `testvectors/wire/` generator seals the stream so that every
+    /// draw has to sit inside a per-case scope. A draw that escaped one
+    /// would couple two artifacts, so it fails loudly instead.
+    #[test]
+    #[should_panic(expected = "random draw outside a seeded scope")]
+    fn a_draw_outside_a_seeded_scope_is_refused_while_the_stream_is_sealed() {
+        with_sealed_rng(|| {
+            let _ = random_bytes::<8>();
+        });
+    }
+
+    /// Two scopes with the same seed draw the same bytes whatever ran
+    /// between them, and the stream is sealed again once a scope ends.
+    #[test]
+    fn a_seeded_scope_is_independent_of_what_ran_before_it() {
+        with_sealed_rng(|| {
+            let draw = |seed| {
+                let _scope = deterministic_seed_scope(seed);
+                random_bytes::<8>().expect("seeded draw")
+            };
+            let first = draw(7);
+            let unrelated = draw(9);
+            let repeat = draw(7);
+            assert_eq!(first, repeat, "the same seed must give the same bytes");
+            assert_ne!(
+                first, unrelated,
+                "different seeds must give different bytes"
+            );
+        });
+    }
 
     #[test]
     fn file_key_generate_has_correct_size() {

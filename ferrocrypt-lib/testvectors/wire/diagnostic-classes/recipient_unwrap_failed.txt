@@ -1,0 +1,1 @@
+No supported recipient accepted the supplied credential.

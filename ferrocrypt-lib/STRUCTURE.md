@@ -19,6 +19,7 @@
    - [3.7 `passphrase.rs`](#37-passphrasers)
    - [3.8 `fuzz_exports.rs`](#38-fuzz_exportsrs)
    - [3.9 `suite_vector_gen.rs`](#39-suite_vector_genrs)
+   - [3.10 `wire_vector_gen.rs`](#310-wire_vector_genrs)
 4. [`crypto/`](#4-crypto)
    - [4.1 `crypto/keys.rs`](#41-cryptokeysrs)
    - [4.2 `crypto/kdf.rs`](#42-cryptokdfrs)
@@ -174,7 +175,8 @@ ferrocrypt-lib/src/
 │
 ├── passphrase.rs
 ├── fuzz_exports.rs
-└── suite_vector_gen.rs   (test-only)
+├── suite_vector_gen.rs   (test-only)
+└── wire_vector_gen.rs    (test-only)
 ```
 
 Each file represents a stable responsibility boundary. File size is not the organizing principle; ownership, auditability, and prevention of duplicated security logic are the organizing principles.
@@ -431,6 +433,14 @@ It is not part of the stable public API. It must not become an alternate impleme
 ### 3.9 `suite_vector_gen.rs`
 
 `suite_vector_gen.rs` is a `#[cfg(test)]`-only module holding the ignored generator test for the committed `testvectors/suite/` edge-case corpus. It needs crate internals (`container::build_encrypted_header`, recipient `wrap` helpers, TLV byte building) to craft fixtures the public writer refuses to produce; the corpus itself is verified through the public API by `tests/testvector_suite.rs` on every test run.
+
+It is compiled only for tests and must not grow non-generation logic.
+
+### 3.10 `wire_vector_gen.rs`
+
+`wire_vector_gen.rs` is a `#[cfg(test)]`-only module holding the ignored generator test for the frozen `testvectors/wire/` conformance corpus (`FORMAT.md` §12.3), which is the public, cross-language contract — distinct from the `testvectors/suite/` corpus above, which is this codebase's own edge-case net and records Rust variant names §12.1 keeps out of the cross-language contract. Generation needs the same crate internals for the same reason, and runs under a fixed seed so regenerating without changing the generator leaves an empty diff.
+
+The module also owns the two replays §12.3 reserves for a crate-internal implementation: `replay_stream_kats`, which drives the production STREAM writer and reader against transcripts a committed PyNaCl/libsodium oracle produced, and `replay_fcr_payload_origins`, which derives the payload key behind each `.fcr` provenance row and checks its committed commitment. Everything reachable through the public API is replayed from `tests/wire_corpus.rs` instead.
 
 It is compiled only for tests and must not grow non-generation logic.
 

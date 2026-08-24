@@ -2620,6 +2620,8 @@ testvectors/wire/
 ├── origins.tsv
 ├── cases.tsv
 ├── errata.tsv
+├── diagnostic-classes/
+├── credentials/
 ├── artifacts/
 │   ├── fcr/
 │   ├── public-key/
@@ -2670,7 +2672,9 @@ bytes named by its corresponding non-`-` `*_ref` field. References MUST use
 POSIX separators and be relative to `testvectors/wire/`.
 
 Each `diagnostic-classes.tsv` `description_ref` MUST identify stable explanatory
-text for the class.
+text for the class, held in `diagnostic-classes/` as one file per class, because
+a single shared file would change every earlier row's digest whenever a later
+revision appends a class.
 
 The corpus `README.md` MUST name the authoritative generation and reproduction
 commands and record tool provenance. Corpus-generation code is test tooling,
@@ -2712,6 +2716,22 @@ Validation success alone is not sufficient evidence. `credential_id` is
 required whenever the case action requires a credential. Non-reject outcomes
 MUST use `diagnostic_class = -`.
 
+A `.fcr` archive carrying a directory root has no single expected plaintext, so
+such a case MUST record an extraction listing instead: one LF-terminated line
+per extracted object, ordered by path depth ascending and then by path bytes,
+
+```text
+kind SP size SP content_sha3_256 SP path LF
+```
+
+where `kind` is `f` for a file and `d` for a directory, `size` is the decimal
+file length and `-` for a directory, `content_sha3_256` is the lowercase digest
+of the file content and `-` for a directory, and `path` is the archive path
+including the root. A replay MUST choose the comparison from the extracted root
+kind rather than from the case row. The listing omits permission modes because
+§9.13 makes Unix permission restoration a no-op or best-effort operation on
+Windows; stored modes are evidenced by rejection cases instead.
+
 The initial `baselines.tsv` row is:
 
 ```text
@@ -2722,10 +2742,12 @@ A later baseline names its immediate parent and MUST be a superset of every
 ancestor. For a passphrase credential, `primary_ref` identifies the byte-exact
 passphrase and `secret_ref` is `-`. For a private-key credential, `primary_ref`
 identifies `private.key` and `secret_ref` identifies its byte-exact unlock
-passphrase. A `none` credential denotes an action that needs no credential
-material. All credentials are public test material; their filenames and the
-corpus `README.md` MUST make that status explicit and warn against operational
-reuse.
+passphrase. A private key under test is an artifact and lives in `artifacts/`;
+every passphrase a credential references lives in `credentials/`, because it is
+credential material rather than an artifact any case parses. A `none` credential
+denotes an action that needs no credential material. All credentials are public
+test material; their filenames and the corpus `README.md` MUST make that status
+explicit and warn against operational reuse.
 
 **Publication and contract boundary.** The stable `v0.3.0` Git tag permanently
 addresses the initial publication at:

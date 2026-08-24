@@ -1,0 +1,1 @@
+A private-key artifact violates its encoding or post-unlock consistency rules.

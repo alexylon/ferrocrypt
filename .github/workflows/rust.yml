@@ -61,7 +61,7 @@ jobs:
         # `scripts/run_all_tests.sh`.
         env:
           FERROCRYPT_REQUIRE_WINDOWS_SYMLINK_TESTS: "1"
-        run: cargo test --verbose -- --test-threads=1 --include-ignored --skip regenerate_fixtures --skip regenerate_suite_vectors --skip round_trip_file_larger_than_4gib
+        run: cargo test --verbose -- --test-threads=1 --include-ignored --skip regenerate_fixtures --skip regenerate_suite_vectors --skip regenerate_wire_corpus --skip round_trip_file_larger_than_4gib
 
   # The static Linux CLI artifacts are built against musl, a different C
   # library from the glibc every other Linux lane uses, and the aarch64
@@ -101,6 +101,7 @@ jobs:
           cargo test --target ${{ matrix.target }} --verbose -- \
             --test-threads=1 --include-ignored \
             --skip regenerate_fixtures --skip regenerate_suite_vectors \
+            --skip regenerate_wire_corpus \
             --skip round_trip_file_larger_than_4gib
 
   msrv:
@@ -171,6 +172,17 @@ jobs:
 
       - name: Check version terminology
         run: ./scripts/check_terminology.sh
+
+  # The conformance corpus checked as data, the way an outside implementer
+  # checks it: Python standard library only, no FerroCrypt code involved.
+  # The corpus replay itself runs in the workspace test job.
+  wire-corpus:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Verify the frozen conformance corpus manifests
+        run: python3 ferrocrypt-lib/testvectors/wire/tools/verify_manifests.py
 
   doc:
     runs-on: ubuntu-latest

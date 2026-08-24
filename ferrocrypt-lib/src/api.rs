@@ -926,11 +926,16 @@ impl PrivateKey {
     /// because the unlock runs the same key derivation a decrypt runs and takes
     /// the same time.
     ///
+    /// Applies the library's default [`KdfLimit`] and [`KeyReadLimits`]. Use
+    /// [`PrivateKey::into_public_key_with_limits`] for a key file sealed with
+    /// [`KeyPairGenerator::kdf_limit`] above either default, which this method
+    /// would otherwise refuse to open even though the matching decrypt
+    /// succeeds.
+    ///
     /// # Errors
     ///
-    /// The unlock applies the library's default [`KdfLimit`] and
-    /// [`KeyReadLimits`]; a key file whose stored parameters exceed either
-    /// surfaces the matching resource-cap error. Returns
+    /// A key file whose stored parameters exceed either default surfaces the
+    /// matching resource-cap error. Returns
     /// [`CryptoError::KeyFileUnlockFailed`] for a wrong passphrase or modified
     /// cleartext, which the AEAD cannot tell apart,
     /// [`CryptoError::UnsupportedKeyType`] for a key file that wraps a
@@ -941,6 +946,30 @@ impl PrivateKey {
     /// structural and version errors as a decrypt that opens the same file.
     pub fn into_public_key(
         self,
+        on_event: impl Fn(&ProgressEvent),
+    ) -> Result<PublicKey, CryptoError> {
+        self.into_public_key_with_limits(KdfLimit::default(), KeyReadLimits::default(), on_event)
+    }
+
+    /// Unlocks the private key under caller-chosen resource policy and returns
+    /// the public key that belongs to it.
+    ///
+    /// Same operation and same guarantees as [`PrivateKey::into_public_key`];
+    /// the two limits replace the defaults that method applies. Pass the same
+    /// `kdf_limit` the key pair was generated under
+    /// ([`KeyPairGenerator::kdf_limit`]) and, for a key file whose wrapped
+    /// secret is larger than the default cap, a `key_read_limits` that admits
+    /// it. A key file this library can decrypt with is one it can inspect, so
+    /// whatever policy opens it in [`PrivateKeyDecryptor`] opens it here.
+    ///
+    /// # Errors
+    ///
+    /// The same errors as [`PrivateKey::into_public_key`], measured against the
+    /// supplied limits rather than the defaults.
+    pub fn into_public_key_with_limits(
+        self,
+        kdf_limit: KdfLimit,
+        key_read_limits: KeyReadLimits,
         on_event: impl Fn(&ProgressEvent),
     ) -> Result<PublicKey, CryptoError> {
         // The result is built with `PublicKey::from_x25519_bytes`, which tags
@@ -960,8 +989,8 @@ impl PrivateKey {
         let opened = recipient::native::x25519::open_x25519_key_file(
             &key_file_path,
             &passphrase,
-            None,
-            KeyReadLimits::default(),
+            Some(&kdf_limit),
+            key_read_limits,
             &on_event,
         )?;
         // Both secrets have had their last use by this point: the unlock is the

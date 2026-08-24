@@ -1,0 +1,1 @@
+The FCA manifest violates tree-shape or collision rules.

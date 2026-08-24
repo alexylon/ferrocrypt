@@ -1,0 +1,1 @@
+A recipient type name violates FORMAT.md section 3.3.

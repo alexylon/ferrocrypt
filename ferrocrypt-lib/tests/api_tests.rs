@@ -242,6 +242,49 @@ fn private_key_into_public_key_rejects_a_wrong_passphrase() {
     }
 }
 
+/// The resource policy a caller passes must reach both gates the unlock
+/// applies. Without an override the method used the library defaults, so a key
+/// pair generated under a raised [`KdfLimit`] decrypted but could not be
+/// named — the library could decrypt with a key it could not inspect.
+#[test]
+fn private_key_into_public_key_applies_the_supplied_limits() {
+    let work = fresh_workspace("into_public_key_limits");
+    let keys = work.join("keys");
+    fs::create_dir_all(&keys).unwrap();
+    let kg = generate_key_pair(&keys, pass(), |_| {}).expect("keygen");
+    let expected = PublicKey::from_key_file(&kg.public_key_path)
+        .and_then(|key| key.to_recipient_string())
+        .expect("read public key");
+
+    // A memory cap below the parameters the key file stores: the unlock must
+    // refuse before it derives anything.
+    match PrivateKey::from_key_file(&kg.private_key_path, pass()).into_public_key_with_limits(
+        KdfLimit::new(TEST_FAST_KDF_MEM_COST - 1),
+        KeyReadLimits::default(),
+        |_| {},
+    ) {
+        Err(CryptoError::KdfResourceCapExceeded { .. }) => {}
+        other => panic!("a lowered memory cap must refuse this key file, got {other:?}"),
+    }
+
+    // A wrapped-secret cap below the file's own: the key-file reader must
+    // refuse before the header is even parsed.
+    match PrivateKey::from_key_file(&kg.private_key_path, pass()).into_public_key_with_limits(
+        KdfLimit::default(),
+        KeyReadLimits::default().max_private_key_wrapped_secret_len(1),
+        |_| {},
+    ) {
+        Err(CryptoError::PrivateKeyWrappedSecretCapExceeded { .. }) => {}
+        other => panic!("a lowered key-file cap must refuse this key file, got {other:?}"),
+    }
+
+    // Both at their defaults reproduces `into_public_key` exactly.
+    let recovered = PrivateKey::from_key_file(&kg.private_key_path, pass())
+        .into_public_key_with_limits(KdfLimit::default(), KeyReadLimits::default(), |_| {})
+        .expect("unlock under the default policy");
+    assert_eq!(recovered.to_recipient_string().unwrap(), expected);
+}
+
 #[test]
 fn encryptor_recipient_round_trip() {
     let work = fresh_workspace("recipient_round_trip");

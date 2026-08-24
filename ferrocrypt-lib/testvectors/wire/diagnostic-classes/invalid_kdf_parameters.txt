@@ -1,0 +1,1 @@
+Stored KDF parameters violate structural rules.

@@ -43,6 +43,7 @@ use crate::crypto::keys::{DerivedSubkeys, FileKey, derive_subkeys, random_bytes}
 use crate::crypto::stream::STREAM_NONCE_SIZE;
 use crate::passphrase::Passphrase;
 use crate::recipient::RecipientEntry;
+use crate::recipient::name::TYPE_NAME_MAX_LEN;
 use crate::recipient::native::{argon2id, x25519};
 use crate::{ArchiveLimits, CryptoError, KeyPairGenerator, PublicKey};
 
@@ -1767,6 +1768,23 @@ fn write_prefix_cases(corpus: &mut Corpus, base: &MutationBase) {
                 .copy_from_slice(&(HEADER_LEN_MAX + 1).to_be_bytes())
         },
     );
+    // The local cap sits far below the structural maximum and is checked
+    // straight after the prefix, before the declared header is read, so the
+    // declaration alone decides the outcome. This cap has no accepting twin:
+    // the recipient-count, per-body, and extension caps together bound a
+    // header well under it, so no file that satisfies them can reach it.
+    mutate_fcr(
+        corpus,
+        base,
+        "prefix-header-len-over-default-cap",
+        "passphrase-main",
+        "header_len_above_default_cap",
+        "resource_cap_exceeded",
+        |b| {
+            b[OFF_HEADER_LEN..OFF_HEADER_LEN + 4]
+                .copy_from_slice(&(crate::HeaderReadLimits::HEADER_LEN_DEFAULT + 1).to_be_bytes())
+        },
+    );
 
     // A newer outer-container version is capability-relative: an
     // implementation that adds support for it stops rejecting these bytes.
@@ -2158,6 +2176,31 @@ fn write_recipient_framing_cases(
         corpus,
         "recipient-unknown-ignorable-skipped",
         "origin-recipient-unknown-ignorable",
+        "private-key-a",
+        &source,
+        built,
+    );
+
+    drop(scope);
+
+    // A type name of exactly the §3.3 maximum, on an entry the reader skips.
+    // Paired with the over-maximum case, this fixes where the limit sits: a
+    // reader that allowed one byte fewer would refuse a legal file.
+    let scope = case_scope("recipient-type-name-at-max");
+    let file_key = FileKey::generate().expect("file key");
+    let mut longest = unknown_entry(false);
+    longest.type_name = format!("test/{}", "u".repeat(TYPE_NAME_MAX_LEN - "test/".len()));
+    assert_eq!(
+        longest.type_name.len(),
+        TYPE_NAME_MAX_LEN,
+        "the name must land exactly on the grammar maximum"
+    );
+    let entries = [longest, x25519_entry(&keys.public_a, &file_key)];
+    let built = build_fcr_with_entries(&source, &file_key, &entries, b"");
+    accept_fcr_case(
+        corpus,
+        "recipient-type-name-at-max",
+        "origin-recipient-type-name-at-max",
         "private-key-a",
         &source,
         built,
@@ -2711,6 +2754,24 @@ fn write_tlv_cases(corpus: &mut Corpus, sources: &Path) {
             &ext_bytes,
         );
     }
+
+    // A declared value length of zero, which leaves the region ending exactly
+    // on an entry header. A reader that required at least one value byte, or
+    // that demanded more than a bare header remain, would refuse this.
+    let scope = case_scope("tlv-empty-value");
+    let source = write_source(sources, "p", 64);
+    let file_key = FileKey::generate().expect("file key");
+    let entries = [argon2id_entry(&file_key)];
+    let built = build_fcr_with_entries(&source, &file_key, &entries, &tlv_bytes(0x0001, b""));
+    accept_fcr_case(
+        corpus,
+        "tlv-empty-value",
+        "origin-tlv-empty-value",
+        "passphrase-main",
+        &source,
+        built,
+    );
+    drop(scope);
 
     // An unknown critical tag is capability-relative: implementing the tag
     // stops the rejection (`FORMAT.md` §12.2).
@@ -3715,6 +3776,59 @@ fn fca_case_with_capability(
     corpus.push_case(row);
 }
 
+/// Builds the entries for a file at the end of a chain of directories, one
+/// entry per level, so a deep or long path still satisfies the `FORMAT.md`
+/// §9.8 rule that every parent is present as a directory.
+fn nested_chain(components: &[String], content: &[u8]) -> Vec<FcaEntry> {
+    let mut entries = Vec::with_capacity(components.len());
+    let mut path = String::new();
+    for (index, component) in components.iter().enumerate() {
+        if index > 0 {
+            path.push('/');
+        }
+        path.push_str(component);
+        if index + 1 == components.len() {
+            entries.push(FcaEntry::file(&path, content));
+        } else {
+            entries.push(FcaEntry::dir(&path));
+        }
+    }
+    entries
+}
+
+/// Commits an accepted `.fcr` case built from caller-supplied recipient
+/// entries. The at-cap cases are assembled by hand like the over-cap twins
+/// they pair with, rather than produced through the public writer.
+fn fabricated_accept_fcr_case(
+    corpus: &mut Corpus,
+    case_id: &str,
+    credential_id: &str,
+    source: &Path,
+    built: BuiltFcr,
+) {
+    let artifact_ref = corpus.write_ref(&format!("artifacts/fcr/{case_id}.fcr"), &built.bytes);
+    let expected_ref = corpus.write_ref(
+        &format!("expected/plaintext/{case_id}.bin"),
+        &fs::read(source).expect("read source for expected plaintext"),
+    );
+    let origin_id = format!("origin-{case_id}");
+    corpus.push_origin(OriginRow {
+        origin_id: origin_id.clone(),
+        origin_kind: "fcr_payload",
+        anchor_case_id: case_id.to_string(),
+        payload_key_ref: "-".to_string(),
+        payload_key_sha3_256: built.payload_key_sha3_256,
+        stream_nonce_hex: built.stream_nonce_hex,
+    });
+    corpus.push_case(
+        CaseRow::fcr(case_id, &artifact_ref)
+            .origin(&origin_id)
+            .fabricated()
+            .credential(credential_id)
+            .accept(&expected_ref),
+    );
+}
+
 /// Rejected FCA case built by mutating the bytes of a valid image.
 fn fca_mutated_case(
     corpus: &mut Corpus,
@@ -4132,6 +4246,13 @@ fn write_fca_cases(corpus: &mut Corpus) {
 fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     use crate::crypto::tlv::tlv_bytes;
 
+    // Every cap is driven from both sides: one artifact a byte past it, which
+    // must be refused, and one sitting exactly on it, which must be accepted.
+    // Without the accepting half, a reader that placed a limit one unit low
+    // would satisfy every refusing case while rejecting valid input.
+    let staging = tempfile::tempdir().expect("source dir");
+    let source = write_source(staging.path(), "p", 32);
+
     // FCA path caps: depth and total byte length. Components stay inside the
     // §9.6 per-component limit so only the whole-path cap can reject.
     let depth_cap = ArchiveLimits::PATH_DEPTH_DEFAULT as usize;
@@ -4144,6 +4265,14 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         &build_fca(&[FcaEntry::file(&deep, b"x")], b""),
         Err(("fca_path_depth_above_default_cap", "resource_cap_exceeded")),
     );
+    let at_depth = nested_chain(&vec!["d".to_string(); depth_cap], b"x");
+    fca_case(
+        corpus,
+        "fca-path-depth-at-default-cap",
+        &build_fca(&at_depth, b""),
+        Ok(extraction_listing(&at_depth)),
+    );
+
     let bytes_cap = ArchiveLimits::PATH_BYTES_DEFAULT as usize;
     let component = "c".repeat(200);
     let components = bytes_cap / (component.len() + 1) + 1;
@@ -4160,9 +4289,13 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         &build_fca(&[FcaEntry::file(&long, b"x")], b""),
         Err(("fca_path_bytes_above_default_cap", "resource_cap_exceeded")),
     );
+    // The byte cap has no accepting twin: at 4096 bytes the path alone
+    // exceeds what a host can address once an output directory is prefixed
+    // (`PATH_MAX` is 1024 on macOS), so no artifact can both sit on the cap
+    // and be extracted.
 
-    // FCA extension caps, archive-level and per-entry.
-    // One byte past the region cap once the TLV tag and length are counted.
+    // FCA extension caps, archive-level and per-entry. The TLV tag and length
+    // count towards the region, so the value is the cap less that header.
     let region_cap = ArchiveLimits::ARCHIVE_EXT_BYTES_DEFAULT as usize;
     assert_eq!(
         region_cap,
@@ -4170,6 +4303,7 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         "one oversized region serves both caps only while they agree"
     );
     let oversized = vec![0x41u8; region_cap + 1 - crate::crypto::tlv::ENTRY_HEADER_SIZE];
+    let at_cap = vec![0x41u8; region_cap - crate::crypto::tlv::ENTRY_HEADER_SIZE];
     fca_case(
         corpus,
         "fca-archive-ext-over-default-cap",
@@ -4184,6 +4318,15 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     );
     fca_case(
         corpus,
+        "fca-archive-ext-at-default-cap",
+        &build_fca(
+            &[FcaEntry::file("p.txt", b"fca payload")],
+            &tlv_bytes(0x0001, &at_cap),
+        ),
+        Ok(b"fca payload".to_vec()),
+    );
+    fca_case(
+        corpus,
         "fca-entry-ext-over-default-cap",
         &build_fca(
             &[FcaEntry::file("p.txt", b"x").with_entry_ext(&tlv_bytes(0x0001, &oversized))],
@@ -4194,18 +4337,27 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
             "resource_cap_exceeded",
         )),
     );
+    fca_case(
+        corpus,
+        "fca-entry-ext-at-default-cap",
+        &build_fca(
+            &[FcaEntry::file("p.txt", b"fca payload").with_entry_ext(&tlv_bytes(0x0001, &at_cap))],
+            b"",
+        ),
+        Ok(b"fca payload".to_vec()),
+    );
 
-    // Header caps: more supported recipients than the default count cap, and
-    // a recipient body larger than the default per-body cap.
+    // Header caps: the supported-recipient count and the per-recipient body
+    // length, each driven one entry and one byte past its cap and then exactly
+    // on it.
+    let count_cap = crate::HeaderReadLimits::RECIPIENT_COUNT_DEFAULT;
     let scope = case_scope("header-recipient-count-over-default-cap");
     let file_key = FileKey::generate().expect("file key");
-    let count_cap = crate::HeaderReadLimits::RECIPIENT_COUNT_DEFAULT;
     let many: Vec<RecipientEntry> = (0..count_cap + 1)
         .map(|_| x25519_entry(&keys.public_a, &file_key))
         .collect();
-    let staging = tempfile::tempdir().expect("source dir");
-    let source = write_source(staging.path(), "p", 32);
     let built = build_fcr_with_entries(&source, &file_key, &many, b"");
+    drop(scope);
     let artifact_ref = corpus.write_ref(
         "artifacts/fcr/header-recipient-count-over-default-cap.fcr",
         &built.bytes,
@@ -4226,13 +4378,33 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
             .reject("recipient_count_above_default_cap", "resource_cap_exceeded"),
     );
 
+    // Exactly the cap, with the decrypting key in the last slot so a reader
+    // that stopped one entry early would fail to open it.
+    let scope = case_scope("header-recipient-count-at-default-cap");
+    let file_key = FileKey::generate().expect("file key");
+    let mut at_count: Vec<RecipientEntry> = (0..count_cap - 1)
+        .map(|_| x25519_entry(&keys.public_b, &file_key))
+        .collect();
+    at_count.push(x25519_entry(&keys.public_a, &file_key));
+    assert_eq!(at_count.len(), count_cap as usize, "exactly the count cap");
+    let built = build_fcr_with_entries(&source, &file_key, &at_count, b"");
     drop(scope);
+    fabricated_accept_fcr_case(
+        corpus,
+        "header-recipient-count-at-default-cap",
+        "private-key-a",
+        &source,
+        built,
+    );
+
+    let body_cap = crate::HeaderReadLimits::RECIPIENT_BODY_LEN_DEFAULT as usize;
     let scope = case_scope("recipient-body-over-default-cap");
     let file_key = FileKey::generate().expect("file key");
     let mut big_body = unknown_entry(false);
-    big_body.body = vec![0xAA; crate::HeaderReadLimits::RECIPIENT_BODY_LEN_DEFAULT as usize + 1];
+    big_body.body = vec![0xAA; body_cap + 1];
     let entries = [big_body, argon2id_entry(&file_key)];
     let built = build_fcr_with_entries(&source, &file_key, &entries, b"");
+    drop(scope);
     let artifact_ref = corpus.write_ref(
         "artifacts/fcr/recipient-body-over-default-cap.fcr",
         &built.bytes,
@@ -4255,7 +4427,24 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
                 "resource_cap_exceeded",
             ),
     );
+
+    // Exactly the cap on an unknown non-critical entry, which the reader must
+    // carry past and then open the supported slot behind it. The companion is
+    // `x25519`, because §4.1 forbids `argon2id` beside any other entry.
+    let scope = case_scope("recipient-body-at-default-cap");
+    let file_key = FileKey::generate().expect("file key");
+    let mut at_body = unknown_entry(false);
+    at_body.body = vec![0xAA; body_cap];
+    let entries = [at_body, x25519_entry(&keys.public_a, &file_key)];
+    let built = build_fcr_with_entries(&source, &file_key, &entries, b"");
     drop(scope);
+    fabricated_accept_fcr_case(
+        corpus,
+        "recipient-body-at-default-cap",
+        "private-key-a",
+        &source,
+        built,
+    );
 }
 
 // ─── Payload STREAM known-answer tests ─────────────────────────────────────

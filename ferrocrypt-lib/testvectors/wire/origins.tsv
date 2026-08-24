@@ -9,6 +9,7 @@ origin-x25519-multi	fcr_payload	fcr-x25519-multi-first	-	0b56bad96534be1e6944e93
 origin-recipient-none-supported	fcr_payload	recipient-none-supported	-	a196e379b3e347b482a76c13feefde0357ddfd7685f6c748e3d578a8f68ae9fd	e84ad09fe9864d6cce881932ee9a7940be2439	0.3.0	1
 origin-recipient-unknown-critical	fcr_payload	recipient-unknown-critical	-	c66fb55c812ac5f7aad13c4fca145a1baa4abd67abab2ea6e2cb585a89db53a6	5e3a8158cff2eda8fd3f7b3f4849494eb8701b	0.3.0	1
 origin-recipient-unknown-ignorable	fcr_payload	recipient-unknown-ignorable-skipped	-	d1e8b13cd52dd165544f3f12dac32695a23c5739cf479264ba0ac7e0faa0a82a	bf14e3014c6ee5cb09d36fbf624761aa649b7e	0.3.0	1
+origin-recipient-type-name-at-max	fcr_payload	recipient-type-name-at-max	-	be6422c292ebddd585eb960314d1be737a10a5484e3435d323881755374a5508	729b944643965e5132e36581aa771c79388e3c	0.3.0	1
 origin-recipient-illegal-mixing	fcr_payload	recipient-illegal-mixing	-	3f26f82e310d69e7c3040722dad7619355b862059a9b9fe3bf7c542aa9040046	37a46a156d8bf3653b6a638d4567a8f60f82a6	0.3.0	1
 origin-recipient-step8-length-before-content-argon2id-first	fcr_payload	recipient-step8-length-before-content-argon2id-first	-	4ae5fb6cd03868cfd7dfd997fed30f322ad6524ad37090c3fac5fa8ad54bb24a	dcea03f371f5df5c8d7d5c1f22eca230caec4b	0.3.0	1
 origin-recipient-step8-length-before-content-x25519-first	fcr_payload	recipient-step8-length-before-content-x25519-first	-	d211a56bb077b55d737529745a880f52953861801b0a56b2d637430dc21e4d2b	33ad0ae34f8a13e80f3a77e0b3b1e06da045db	0.3.0	1
@@ -26,6 +27,7 @@ origin-tlv-out-of-order-tags	fcr_payload	tlv-out-of-order-tags	-	511144d862b17b6
 origin-tlv-truncated-entry-header	fcr_payload	tlv-truncated-entry-header	-	337adcab7dc087d7c1be382897ad9eccddc5d3bd4ab93efca2820454776addfb	d5e54d0e1d983d7e075643880ee6c44f39b7f2	0.3.0	1
 origin-tlv-value-runs-past-region	fcr_payload	tlv-value-runs-past-region	-	ccf551e3f817f7379db6629f735a6fdc3d920b4f1046f589e71708c9bfe0fc54	48afc146f3348497fd7843e471b50763152a56	0.3.0	1
 origin-tlv-value-above-cap	fcr_payload	tlv-value-above-cap	-	69e56256d9d9c94e977d23d01c2f02df4a5219d12d0489b1bd0f5d32d668de7f	6d1854514d7f9dbb52ce31ac8255da461bebec	0.3.0	1
+origin-tlv-empty-value	fcr_payload	tlv-empty-value	-	c5d94eb1cebfd1e3c1aef5692ffb41d6c78ac59c6976467dfd1c011403571c88	6e5776d60598c513377891f7be613c04ac6963	0.3.0	1
 origin-tlv-unknown-critical	fcr_payload	tlv-unknown-critical	-	10c3ce2613cd3aa0684ddc3f80553d81a1dcc6a9fff1bab05d64fe6bb7cf715c	577907f975bb11f006425abb6afed68c2c3ae9	0.3.0	1
 origin-payload-two-chunk	fcr_payload	payload-two-chunk-valid	-	d411e32607d716f79e34a81c86773d5279952e6c673e7357ac17a52e0500732f	9c0be7114842b53285677cb60ee4ec78047727	0.3.0	1
 origin-payload-empty-final	fcr_payload	payload-empty-final-after-data	-	3a9731ccd973c7153419f0bd7331567de5c8effc093a70fa36c8a7b067d5ae61	f2a07d81a93933d4503017c9c4e0a477c21d85	0.3.0	1
@@ -76,11 +78,16 @@ origin-fca-content-short	fcr_payload	fca-content-short	-	ce5463b9f17c7d59c4270e8
 origin-fca-content-trailing	fcr_payload	fca-content-trailing	-	9ee9be7279b5cf686bea86ab699f0d919fe90297e7643d322552867b54b2625b	c834c588cdb1241abe87591fc81ac7f197a73b	0.3.0	1
 origin-fca-entry-kind-invalid	fcr_payload	fca-entry-kind-invalid	-	c0cbedc6557de64fe0f13e16994cb204b683278d52ee74463c41722cb32c2ae0	a90db34307ddda9582a7d514d2b9543007fa60	0.3.0	1
 origin-fca-path-depth-over-default-cap	fcr_payload	fca-path-depth-over-default-cap	-	6cec3f2e1ba5f5364ec543c80206f8e75b7356df2a48232da5d1e68e53714aef	063fdcaba136c49595628921282c660ff3230d	0.3.0	1
+origin-fca-path-depth-at-default-cap	fcr_payload	fca-path-depth-at-default-cap	-	5dae9d716fc1dbc9139a464cc848a7e451283c6f2d36fb68cf2ada2280d9de00	d944718518f11523b8f22085359cc32fe5999b	0.3.0	1
 origin-fca-path-bytes-over-default-cap	fcr_payload	fca-path-bytes-over-default-cap	-	8de5f5f3421d0780b8119dbe4ea4ac4487d66cb167963fd3ead97e2d129ae189	38fa0d21a37cc38c3bf24166b0dfac69e3e775	0.3.0	1
 origin-fca-archive-ext-over-default-cap	fcr_payload	fca-archive-ext-over-default-cap	-	958bce63bb7d2cf1b3bf368eff07fddc6e0eb66642ee3889d875369ecde4c4b8	616e81c4f1484a2f064aac3df94074c7b81d68	0.3.0	1
+origin-fca-archive-ext-at-default-cap	fcr_payload	fca-archive-ext-at-default-cap	-	354198db8fb0fe8d93bf52044e5c601143690ff191febbda04d603bd37265191	ba8032a7c211e14dc138fdbf7f086fa84f68a3	0.3.0	1
 origin-fca-entry-ext-over-default-cap	fcr_payload	fca-entry-ext-over-default-cap	-	afc192bcca3ead715049fc689db1a74cc2cb8f1cb2b47dce04f1ccb2678323c9	c4a97d3d1952c131d94c8156643e41e57b98bc	0.3.0	1
+origin-fca-entry-ext-at-default-cap	fcr_payload	fca-entry-ext-at-default-cap	-	dfa9f1cb77400fe3631cb9de0ba560d556cf7f0c8c0b3acdccace310c9579985	270c76271938739548ee168e095d4152eb9c10	0.3.0	1
 origin-header-recipient-count-over-default-cap	fcr_payload	header-recipient-count-over-default-cap	-	c3881008f527c542645a4b9c10eb6a70881e9ee98e7cb1629c713c3fc36226a8	3e56f2e8e3af06d0276d2a72167e6836588429	0.3.0	1
+origin-header-recipient-count-at-default-cap	fcr_payload	header-recipient-count-at-default-cap	-	9026725bd1e3144c931311d2013de7ee7a4cf02597b04febb580312f13cbc86e	fa7e908599ef0cab343009e6374586f80a6bbd	0.3.0	1
 origin-recipient-body-over-default-cap	fcr_payload	recipient-body-over-default-cap	-	51d57578760ab1d1dd2e1042bac9b95b15ead99c1a500474ae0889ede8acae4f	75dd844243d2248ffa0b1140c7d5774a37c837	0.3.0	1
+origin-recipient-body-at-default-cap	fcr_payload	recipient-body-at-default-cap	-	9cacc4009a3561fe023d3e03f8fe52736d0fb02b53f9f280b74b88d1f821652f	4911ba05041317a0afc8c82ae1f9a28751057f	0.3.0	1
 origin-stream-empty	stream_kat	stream-empty	kat/stream/stream-empty.payload-key.bin	e067ecb2fa5c616e3b22f32f8dd5133bdfc1917a6c7a4583a48d72eaa69e9de1	50505050505050505050505050505050505050	0.3.0	1
 origin-stream-one-byte	stream_kat	stream-one-byte	kat/stream/stream-one-byte.payload-key.bin	49c5bc13ba9bda2424de21409098e3f100c6e573b0a12f91f69d92ae19c85d68	51515151515151515151515151515151515151	0.3.0	1
 origin-stream-exact-65536	stream_kat	stream-exact-65536	kat/stream/stream-exact-65536.payload-key.bin	e6b3d7e8da3525c14cbfaf7d4d01e1489083f556c9276cecf1722de9f59cb988	52525252525252525252525252525252525252	0.3.0	1

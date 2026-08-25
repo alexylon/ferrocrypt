@@ -4615,14 +4615,41 @@ fn replay_stream_kats() {
     let root = wire_dir();
     let cases = read_manifest(&root, "cases.tsv");
     let origins = read_manifest(&root, "origins.tsv");
+    // §12.3: an erratum stops the replay asserting its case from the revision
+    // it takes effect in. `wire_corpus.rs` applies the same rule to the rows
+    // it defers, so the two halves agree on which rows are still owed a replay
+    // rather than each counting a different set.
+    let revision: u32 = fs::read_to_string(root.join("CORPUS-REVISION"))
+        .expect("read CORPUS-REVISION")
+        .trim()
+        .parse()
+        .expect("CORPUS-REVISION is a number");
+    let withdrawn: BTreeSet<String> = read_manifest(&root, "errata.tsv")
+        .iter()
+        .filter(|e| {
+            e["effective_corpus_revision"]
+                .parse::<u32>()
+                .expect("errata.tsv: effective_corpus_revision is not a number")
+                <= revision
+        })
+        .map(|e| e["affected_case_id"].clone())
+        .collect();
+    let owed = |case: &&BTreeMap<String, String>| {
+        case["case_type"] == "stream_encrypt_kat" && !withdrawn.contains(&case["case_id"])
+    };
 
     let mut replayed = 0usize;
-    for case in cases
-        .iter()
-        .filter(|c| c["case_type"] == "stream_encrypt_kat")
-    {
+    for case in cases.iter().filter(owed) {
         let case_id = &case["case_id"];
         assert_eq!(case["outcome"], "transcript_equal", "{case_id}: outcome");
+        // A transcript checked against an independent oracle cannot depend on
+        // a local capability, and this half has no capability set of its own.
+        // Pinning the scope keeps it agreeing with the capability rule
+        // `wire_corpus.rs` applies to the rows it defers.
+        assert_eq!(
+            case["expectation_scope"], "invariant",
+            "{case_id}: a STREAM known-answer row must be invariant"
+        );
 
         let origin = origins
             .iter()
@@ -4670,10 +4697,19 @@ fn replay_stream_kats() {
         );
         replayed += 1;
     }
+
+    // The other half of the partition `wire_corpus.rs` asserts: it defers
+    // exactly the STREAM rows to here, and here every one of them runs.
+    let declared = cases.iter().filter(owed).count();
+    assert_eq!(
+        replayed, declared,
+        "every STREAM known-answer row must be replayed"
+    );
     assert!(
         replayed > 0,
         "the corpus declares no STREAM known-answer cases"
     );
+    println!("wire corpus: {replayed} STREAM known-answer row(s) replayed against the source");
 }
 
 /// Derives the payload key for every `.fcr` payload origin the corpus

@@ -114,9 +114,38 @@ verify_wire_manifests() {
     python3 ferrocrypt-lib/testvectors/wire/tools/verify_manifests.py
 }
 
+# Replays both committed corpora against the source. The wire corpus takes two
+# binaries: raw payload STREAM encryption is crate-internal, so the integration
+# test defers those rows to the library's own replay and each half asserts it
+# covered its share. `--nocapture` puts those totals in the log, so a run says
+# how many rows were checked rather than only that some were.
 replay_corpora() {
     cargo test -p ferrocrypt --test testvector_suite -- --test-threads=1 &&
-        cargo test -p ferrocrypt --test wire_corpus -- --test-threads=1
+        cargo test -p ferrocrypt --test wire_corpus -- --test-threads=1 --nocapture &&
+        replay_wire_internals
+}
+
+# The crate-internal half of the wire replay. A name filter that matches
+# nothing still exits 0, so the run is only trusted once both tests have named
+# themselves in the output: a renamed or removed replay must fail the lane
+# rather than quietly reduce it to nothing.
+replay_wire_internals() {
+    local out status name
+    out=$(cargo test -p ferrocrypt --lib -- --test-threads=1 --nocapture \
+        wire_vector_gen::replay_ 2>&1)
+    status=$?
+    printf '%s\n' "$out"
+    [ "$status" -eq 0 ] || return "$status"
+    for name in replay_stream_kats replay_fcr_payload_origins; do
+        case "$out" in
+            *"wire_vector_gen::$name"*) ;;
+            *)
+                printf 'replay_corpora: %s did not run; the filter matches nothing\n' \
+                    "$name" >&2
+                return 1
+                ;;
+        esac
+    done
 }
 
 # Remove abandoned per-process directories from interrupted earlier runs.

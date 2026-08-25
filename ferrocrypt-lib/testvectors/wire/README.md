@@ -127,6 +127,11 @@ cargo test --package ferrocrypt --test wire_corpus          # every public-API c
 cargo test --package ferrocrypt --lib replay_stream_kats    # the STREAM known-answer cases
 ```
 
+Each half asserts it covered its share of `cases.tsv` — the first that it
+replayed every row it did not defer, the second that it replayed every row the
+first deferred — so a case that stops being exercised fails the suite instead
+of passing unnoticed. Both print the counts they covered.
+
 This split is an artifact of FerroCrypt's own module boundaries. An outside
 implementation has no such constraint: `origins.tsv` names the payload key file
 and the base nonce, and `cases.tsv` names the input and the expected ciphertext.

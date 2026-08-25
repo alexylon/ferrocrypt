@@ -19,6 +19,12 @@ cd ferrocrypt-desktop && cargo clippy --all-targets -- -D warnings
 cargo test test_name -- --test-threads=1     # single test by name
 cargo test "output_file" -- --test-threads=1 # filter by substring
 
+# Replay the frozen wire corpus against the source. Two binaries, because raw
+# payload STREAM encryption is crate-internal; each asserts it covered its
+# share of cases.tsv and prints the count.
+cargo test -p ferrocrypt --test wire_corpus -- --test-threads=1 --nocapture
+cargo test -p ferrocrypt --lib -- --test-threads=1 --nocapture wire_vector_gen::replay_
+
 # Format
 ./scripts/fmt.sh   # formats all crates including desktop and experiments
 

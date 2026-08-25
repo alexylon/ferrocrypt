@@ -587,19 +587,26 @@ fn wire_corpus_cases_replay() {
         .expect("CORPUS-REVISION is a number");
     let withdrawn = cases_withdrawn_by_errata(&root, revision);
     let case_table = read_table(&root, "cases.tsv");
+    // Every row lands in exactly one of these buckets. Counting them all is
+    // what turns "some cases ran" into "no case row went unasserted".
     let mut replayed = 0usize;
+    let mut deferred_to_kat_replay = 0usize;
+    let mut withdrawn_by_errata = 0usize;
+    let mut skipped_as_declared = 0usize;
 
     for row in &case_table.rows {
         let case_id = field(row, "case_id");
         // §12.3: an erratum stops the replay asserting its case from the
         // revision it takes effect in; the row itself is never removed.
         if withdrawn.contains(case_id) {
+            withdrawn_by_errata += 1;
             continue;
         }
         let capability = field(row, "capability_id");
         // §12.2: assert the stored outcome unless this build declares the
         // capability the case depends on.
         if capability != "-" && DECLARED_CAPABILITIES.contains(&capability) {
+            skipped_as_declared += 1;
             continue;
         }
         let artifact = root.join(field(row, "artifact_ref"));
@@ -637,7 +644,10 @@ fn wire_corpus_cases_replay() {
             // Raw STREAM encryption is not public API, so the known-answer
             // cases are replayed by the library's own `replay_stream_kats`
             // unit test rather than from here.
-            "stream_encrypt_kat" => continue,
+            "stream_encrypt_kat" => {
+                deferred_to_kat_replay += 1;
+                continue;
+            }
             other => panic!("{case_id}: replay does not cover case type {other}"),
         };
 
@@ -664,7 +674,40 @@ fn wire_corpus_cases_replay() {
         }
         replayed += 1;
     }
+
+    // Accounting, not a floor. A row that reaches none of the four buckets —
+    // a `continue` added without one, a filter that drops rows — fails here
+    // instead of going quietly unasserted.
+    let accounted = replayed + deferred_to_kat_replay + withdrawn_by_errata + skipped_as_declared;
+    assert_eq!(
+        accounted,
+        case_table.rows.len(),
+        "every case row must be replayed or skipped for a reason §12.2 or §12.3 states"
+    );
+    // Only the STREAM known-answer rows may be deferred: raw payload
+    // encryption is crate-internal, so `replay_stream_kats` covers exactly
+    // this set and asserts the same count from its side. A row already
+    // withdrawn or skipped above is owed to neither half, so it is not
+    // counted here either.
+    let stream_rows = case_table
+        .rows
+        .iter()
+        .filter(|row| field(row, "case_type") == "stream_encrypt_kat")
+        .filter(|row| !withdrawn.contains(field(row, "case_id")))
+        .filter(|row| {
+            let capability = field(row, "capability_id");
+            capability == "-" || !DECLARED_CAPABILITIES.contains(&capability)
+        })
+        .count();
+    assert_eq!(
+        deferred_to_kat_replay, stream_rows,
+        "only STREAM known-answer rows may be deferred to the crate-internal replay"
+    );
     assert!(replayed > 0, "the corpus replayed no cases");
+    println!(
+        "wire corpus: {} case row(s) — {replayed} replayed here, {deferred_to_kat_replay} deferred to replay_stream_kats, {withdrawn_by_errata} withdrawn by errata, {skipped_as_declared} skipped as declared capabilities",
+        case_table.rows.len()
+    );
 }
 
 /// Builds the extraction listing `FORMAT.md` §12.3 defines for a directory

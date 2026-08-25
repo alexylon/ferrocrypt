@@ -1081,6 +1081,44 @@ mod tests {
         }
     }
 
+    /// A type name that ends the file is complete, so it is read and reported
+    /// for what it says rather than as malformed framing; one byte less and
+    /// the name is cut short, which is malformed. Pins both sides of the
+    /// length check, which no other case reaches: the two outcomes carry
+    /// different diagnostic classes, so the boundary is measurable.
+    #[test]
+    fn a_type_name_that_ends_the_file_is_read_rather_than_refused() {
+        use crate::crypto::kdf::ARGON2_SALT_SIZE;
+        use crate::key::private::PrivateKeyHeader;
+
+        let unsupported = "test/other";
+        let header = PrivateKeyHeader {
+            key_flags: 0,
+            type_name_len: unsupported.len() as u16,
+            public_len: PUBLIC_KEY_SIZE as u32,
+            ext_len: 0,
+            wrapped_secret_len: (PRIVATE_KEY_SIZE + TAG_SIZE) as u32,
+            argon2_salt: [0u8; ARGON2_SALT_SIZE],
+            kdf_params: KdfParams::test_fast_default(),
+            wrap_nonce: [0u8; WRAP_NONCE_SIZE],
+        };
+        let mut data = header.to_bytes().to_vec();
+        data.extend_from_slice(unsupported.as_bytes());
+
+        match validate_private_key_shape(&data) {
+            Err(CryptoError::UnsupportedKeyType { type_name }) => {
+                assert_eq!(type_name, unsupported);
+            }
+            other => panic!("a complete name must be read, got {other:?}"),
+        }
+
+        data.pop();
+        match validate_private_key_shape(&data) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => {}
+            other => panic!("a name cut short must be malformed, got {other:?}"),
+        }
+    }
+
     /// A key file whose wrapped secret exceeds the default local cap is
     /// rejected before Argon2id runs, and a caller that raises
     /// [`KeyReadLimits::max_private_key_wrapped_secret_len`] gets past

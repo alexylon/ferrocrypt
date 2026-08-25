@@ -223,7 +223,7 @@ recipient_entry = type_name_len(2) || recipient_flags(2) || body_len(4)
 - Hard-link fallback races are pinned at both layers. `src/fs/atomic.rs::tests::finalize_via_link_rejects_a_renamed_staging_link_after_not_found` and `finalize_via_link_rejects_a_hidden_link_when_replacement_unlink_succeeds` cover encrypted/key-file commits; `src/archive/platform.rs::tests::a_renamed_staged_link_keeps_the_link_count_check_after_not_found` preserves the archive route marker; and `src/archive/decode.rs::tests::extraction_rejects_a_hidden_link_after_nominal_staging_cleanup` proves the real decrypt caller rejects an extra plaintext link without applying `DeleteOnError` to the committed inode.
 - `ENCRYPTED_EXTENSION` (`"fcr"`) is re-exported from `format.rs`.
 
-## Non-Negotiable Rules
+## Hard Rules
 
 - Use idiomatic Rust and repository naming conventions.
 - Keep code DRY and focused.
@@ -246,6 +246,7 @@ recipient_entry = type_name_len(2) || recipient_flags(2) || body_len(4)
 - Keep parsing, validation, crypto, and I/O separated.
 - Add or update important tests and keep them self-contained.
 - Add regression tests for security-sensitive and format bugs.
+- **Mutation testing is targeted, never routine.** `cargo mutants` answers one question: does anything fail when this check is broken? Run it ONLY when a change adds or alters a check whose job is to refuse something — a boundary, a guard, a cap, a diagnostic class — or when claiming that a test or the frozen corpus proves such a rule. Do NOT run it for refactors, for features already covered by ordinary tests, for documentation, or as a sweep over the crate. Always scope it with `-f` to the files touched and pass the narrowest test command that ought to kill the mutant (`-- --lib`, or `-- --test wire_corpus` when the claim is about corpus evidence): a mutant costs roughly 30 seconds, so 30 scoped mutants take about 8 minutes while the reader paths alone take about 40. A survivor is not a defect by itself — triage each as missing coverage, an equivalent mutant, or code the chosen test command cannot reach, and say which. Requires `cargo install --locked cargo-mutants` once.
 - Every file commit MUST require `nlink == 1` through a retained handle to the committed inode before success, whatever route committed it, because a link a local writer made against the staged file survives the commit. A hard-link fallback MUST NOT infer cleanup from an unlink return value either: a missing staging name, an unlinked replacement, an unreadable count, or any additional link fails after commit without withdrawing the final name. On the decrypt side that count MUST be read before the archive's mode is applied, so a second name is never widened to it, and a wrong count MUST be reported only after the checks that tell a commit of the run's own from a substituted entry — reporting it in their place preserves plaintext the run never committed.
 - Prefer fixing issues directly rather than merely documenting them.
 - After each important change, but only when we are ready to commit, update if relevant:

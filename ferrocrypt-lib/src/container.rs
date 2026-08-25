@@ -1537,6 +1537,45 @@ mod tests {
         }
     }
 
+    /// A header whose length lands exactly on the structural maximum is
+    /// built rather than refused. The rejection one byte above it is already
+    /// covered; without this, a writer that placed the boundary one byte low
+    /// would satisfy that rejection and still be unable to emit a header the
+    /// reader accepts.
+    #[test]
+    fn build_accepts_a_header_at_the_structural_maximum() {
+        let DerivedSubkeys {
+            payload_key,
+            header_key,
+        } = dummy_subkeys();
+        // One entry with a one-byte type name and no extension region, sized
+        // so the fixed header plus the entry lands exactly on the maximum.
+        let type_name = "a";
+        let body_len = format::HEADER_LEN_MAX as usize
+            - HEADER_FIXED_SIZE
+            - crate::recipient::entry::ENTRY_HEADER_SIZE
+            - type_name.len();
+        let entry = RecipientEntry {
+            type_name: type_name.to_string(),
+            recipient_flags: 0,
+            body: vec![0u8; body_len],
+        };
+
+        let built = build_encrypted_header(
+            &[entry],
+            b"",
+            [0x07u8; STREAM_NONCE_SIZE],
+            payload_key,
+            &header_key,
+        )
+        .expect("a header at the structural maximum must build");
+        assert_eq!(
+            built.header_bytes.len(),
+            format::HEADER_LEN_MAX as usize,
+            "the built header must land exactly on the maximum"
+        );
+    }
+
     /// A file that carries a complete, well-formed `header` region but
     /// stops before the 32-byte MAC tag must reject as
     /// `InvalidFormat(Truncated)`. Pins the framing-vs-structural-parse

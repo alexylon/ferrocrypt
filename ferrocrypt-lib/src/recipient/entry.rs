@@ -277,6 +277,69 @@ mod tests {
     use crate::format::BODY_LEN_LOCAL_CAP_DEFAULT;
     use crate::recipient::native::{argon2id, x25519};
 
+    /// A type name of exactly `TYPE_NAME_MAX_LEN` is legal on both sides.
+    /// The rejection one byte above it is already covered; without the value
+    /// that must be accepted, code that placed the boundary one byte low would
+    /// satisfy that rejection and still refuse a legal name.
+    #[test]
+    fn a_type_name_at_the_maximum_is_measurable() {
+        let longest = "a".repeat(TYPE_NAME_MAX_LEN);
+
+        let entry = RecipientEntry {
+            type_name: longest.clone(),
+            recipient_flags: 0,
+            body: vec![0u8; x25519::BODY_LENGTH],
+        };
+        assert_eq!(
+            entry
+                .checked_wire_len()
+                .expect("a name at the maximum is legal"),
+            ENTRY_HEADER_SIZE + TYPE_NAME_MAX_LEN + x25519::BODY_LENGTH
+        );
+
+        // The reader half of the same boundary, so it holds without relying on
+        // the conformance corpus to reach it.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&entry_header(TYPE_NAME_MAX_LEN as u16, 0, 0));
+        bytes.extend_from_slice(longest.as_bytes());
+        let (parsed, consumed) =
+            RecipientEntry::parse_one(&bytes, 0).expect("a name at the maximum must parse");
+        assert_eq!(parsed.type_name, longest);
+        assert_eq!(consumed, bytes.len());
+    }
+
+    /// A body of exactly `BODY_LEN_MAX` parses. The caller's cap is raised to
+    /// the structural maximum, because the default local cap sits far below it
+    /// and would refuse the entry once the structural check has accepted it.
+    #[test]
+    fn a_body_at_the_structural_maximum_parses() {
+        let body_len = BODY_LEN_MAX as usize;
+        let mut bytes = Vec::with_capacity(ENTRY_HEADER_SIZE + 1 + body_len);
+        bytes.extend_from_slice(&entry_header(1, 0, BODY_LEN_MAX));
+        bytes.push(b'a');
+        bytes.resize(ENTRY_HEADER_SIZE + 1 + body_len, 0);
+
+        let (entry, consumed) = RecipientEntry::parse_one(&bytes, BODY_LEN_MAX)
+            .expect("a body at the structural maximum must parse");
+        assert_eq!(entry.body.len(), body_len);
+        assert_eq!(consumed, bytes.len());
+    }
+
+    /// Exactly `RECIPIENT_COUNT_MAX` entries parse. Each entry is the smallest
+    /// the grammar allows, so the case measures the count alone.
+    #[test]
+    fn the_maximum_recipient_count_parses() {
+        let mut bytes = Vec::new();
+        for _ in 0..RECIPIENT_COUNT_MAX {
+            bytes.extend_from_slice(&entry_header(1, 0, 0));
+            bytes.push(b'a');
+        }
+
+        let entries = parse_recipient_entries(&bytes, RECIPIENT_COUNT_MAX, 0)
+            .expect("the structural maximum count must parse");
+        assert_eq!(entries.len(), RECIPIENT_COUNT_MAX as usize);
+    }
+
     /// Writer/reader variant parity: an empty or over-255-byte
     /// `type_name` is a framing defect (`MalformedRecipientEntry`) on
     /// both sides, never a grammar defect. This pins the exact

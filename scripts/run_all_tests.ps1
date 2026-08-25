@@ -97,6 +97,41 @@ function SkipLane([string]$Lane, [string]$Reason) {
     $script:Skip += "$Lane ($Reason)"
 }
 
+# Both committed corpora, replayed the way a release check does.
+function Replay-Corpora {
+    cargo test -p ferrocrypt --test testvector_suite -- --test-threads=1 | Out-Host
+    if ($LASTEXITCODE -ne 0) { return $false }
+    cargo test -p ferrocrypt --test wire_corpus -- --test-threads=1 --nocapture | Out-Host
+    if ($LASTEXITCODE -ne 0) { return $false }
+    return (Replay-WireInternals)
+}
+
+# The crate-internal half of the wire replay, because raw payload STREAM
+# encryption is not reachable from a test binary. None of the three ways it
+# can quietly cover nothing fails a `cargo test` run on its own: a name filter
+# that matches nothing exits 0, an ignored test still names itself in the
+# output, and each replay returns early when the corpus is absent. So the run
+# is trusted only once each replay has printed the count it covered.
+function Replay-WireInternals {
+    # Cast so an empty capture is "" rather than $null; `.Contains` on
+    # $null would throw instead of reporting the missing count.
+    $out = [string](cargo test -p ferrocrypt --lib -- --test-threads=1 --nocapture wire_vector_gen::replay_ 2>&1 | Out-String)
+    $status = $LASTEXITCODE
+    Write-Host $out
+    if ($status -ne 0) { return $false }
+    $markers = @(
+        "STREAM known-answer row(s) replayed against the source",
+        ".fcr payload origin(s) checked against their commitments"
+    )
+    foreach ($marker in $markers) {
+        if (-not $out.Contains($marker)) {
+            Write-Warning "Replay-Corpora: no replay reported ""$marker"""
+            return $false
+        }
+    }
+    return $true
+}
+
 function Run-FsMatrix([string]$Dir) {
     $env:FERROCRYPT_FS_MATRIX_DIR = $Dir
     # Pipe cargo's stdout to the host, not the pipeline. A native
@@ -150,14 +185,7 @@ if ($TestvectorsDirty -eq 0) {
     & $Python $WireManifests
     if ($LASTEXITCODE -ne 0) { $ok = $false }
 
-    if ($ok) {
-        cargo test -p ferrocrypt --test testvector_suite -- --test-threads=1
-        if ($LASTEXITCODE -ne 0) { $ok = $false }
-    }
-    if ($ok) {
-        cargo test -p ferrocrypt --test wire_corpus -- --test-threads=1
-        if ($LASTEXITCODE -ne 0) { $ok = $false }
-    }
+    if ($ok) { $ok = Replay-Corpora }
 
     if ($ok) {
         $generatorStarted = $true
@@ -172,14 +200,7 @@ if ($TestvectorsDirty -eq 0) {
         & $Python $WireManifests
         if ($LASTEXITCODE -ne 0) { $ok = $false }
     }
-    if ($ok) {
-        cargo test -p ferrocrypt --test testvector_suite -- --test-threads=1
-        if ($LASTEXITCODE -ne 0) { $ok = $false }
-    }
-    if ($ok) {
-        cargo test -p ferrocrypt --test wire_corpus -- --test-threads=1
-        if ($LASTEXITCODE -ne 0) { $ok = $false }
-    }
+    if ($ok) { $ok = Replay-Corpora }
 
     if ($generatorStarted) {
         git restore ferrocrypt-lib/testvectors
@@ -189,14 +210,7 @@ if ($TestvectorsDirty -eq 0) {
         & $Python $WireManifests
         if ($LASTEXITCODE -ne 0) { $ok = $false }
     }
-    if ($generatorStarted -and $ok) {
-        cargo test -p ferrocrypt --test testvector_suite -- --test-threads=1
-        if ($LASTEXITCODE -ne 0) { $ok = $false }
-    }
-    if ($generatorStarted -and $ok) {
-        cargo test -p ferrocrypt --test wire_corpus -- --test-threads=1
-        if ($LASTEXITCODE -ne 0) { $ok = $false }
-    }
+    if ($generatorStarted -and $ok) { $ok = Replay-Corpora }
 
     Record "testvector-cycle" $ok
 } else {

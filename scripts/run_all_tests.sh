@@ -125,23 +125,25 @@ replay_corpora() {
         replay_wire_internals
 }
 
-# The crate-internal half of the wire replay. A name filter that matches
-# nothing still exits 0, so the run is only trusted once both tests have named
-# themselves in the output: a renamed or removed replay must fail the lane
-# rather than quietly reduce it to nothing.
+# The crate-internal half of the wire replay. None of the three ways it can
+# quietly cover nothing fails a `cargo test` run on its own: a name filter that
+# matches nothing exits 0, an ignored test still names itself in the output,
+# and each replay returns early when the corpus is absent. So the lane is
+# trusted only once each replay has printed the count it covered.
 replay_wire_internals() {
-    local out status name
+    local out status marker
     out=$(cargo test -p ferrocrypt --lib -- --test-threads=1 --nocapture \
         wire_vector_gen::replay_ 2>&1)
     status=$?
     printf '%s\n' "$out"
     [ "$status" -eq 0 ] || return "$status"
-    for name in replay_stream_kats replay_fcr_payload_origins; do
+    for marker in \
+        'STREAM known-answer row(s) replayed against the source' \
+        '.fcr payload origin(s) checked against their commitments'; do
         case "$out" in
-            *"wire_vector_gen::$name"*) ;;
+            *"$marker"*) ;;
             *)
-                printf 'replay_corpora: %s did not run; the filter matches nothing\n' \
-                    "$name" >&2
+                printf 'replay_corpora: no replay reported "%s"\n' "$marker" >&2
                 return 1
                 ;;
         esac

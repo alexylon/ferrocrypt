@@ -20,8 +20,8 @@ cargo test test_name -- --test-threads=1     # single test by name
 cargo test "output_file" -- --test-threads=1 # filter by substring
 
 # Replay the frozen wire corpus against the source. Two binaries, because raw
-# payload STREAM encryption is crate-internal; each asserts it covered its
-# share of cases.tsv and prints the count.
+# payload STREAM encryption is crate-internal; each prints how much of the
+# corpus it covered, and together they account for every case row.
 cargo test -p ferrocrypt --test wire_corpus -- --test-threads=1 --nocapture
 cargo test -p ferrocrypt --lib -- --test-threads=1 --nocapture wire_vector_gen::replay_
 
@@ -276,5 +276,5 @@ recipient_entry = type_name_len(2) || recipient_flags(2) || body_len(4)
 - Every security finding MUST be classified under `THREAT_MODEL.md` sections 1, 5, and 6 before it is called release-blocking; do not invent a separate audit-specific scope or severity bar.
 - Never commit or stage changes with Git unless the request explicitly asks for a commit. A request to fix, change, or review code is not a request to commit it.
 - Never manually bump `version` in any `Cargo.toml`. Versioning is automated; see `RELEASE.md`.
-- After you finish cross-checking against the Non-Negotiable Rules and fixing the code, do another pass for bugs, corner cases and regressions.
+- After you finish cross-checking against the Hard Rules and fixing the code, do another pass for bugs, corner cases and regressions.
 - After each final modification, provide a clear, human-readable one-line commit message.

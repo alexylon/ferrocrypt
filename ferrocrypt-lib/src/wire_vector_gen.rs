@@ -4717,8 +4717,13 @@ fn replay_stream_kats() {
 /// (`FORMAT.md` §12.3). This is crate-internal because the derivation stops at
 /// the recipient unwrap: most anchors are files the public decryptor refuses
 /// for a reason that lies past the recipient list — an unknown critical TLV
-/// tag, a capped KDF parameter — yet whose payload was genuinely encrypted and
-/// whose provenance row must still be evidenced.
+/// tag, an unsafe path inside the archive — yet whose payload was genuinely
+/// encrypted and whose provenance row must still be evidenced.
+///
+/// An anchor whose slots the corpus credentials cannot open is not evidenced,
+/// and §12.3 does not require it to be: stored KDF parameters that did not
+/// derive the wrap key, for example, cannot be unwrapped from the file alone.
+/// The floor below keeps that group from outgrowing the evidenced one.
 ///
 /// The same pass checks origin and nonce hygiene: every anchor's stored
 /// `stream_nonce_hex` is the nonce its header actually carries, and no two
@@ -4808,6 +4813,11 @@ fn replay_fcr_payload_origins() {
         derived > unreachable.len(),
         "only {derived} of {} .fcr payload origins were reachable: {unreachable:?}",
         derived + unreachable.len()
+    );
+    println!(
+        "wire corpus: {derived} .fcr payload origin(s) checked against their commitments, \
+         {} not reachable with the corpus credentials",
+        unreachable.len()
     );
 }
 

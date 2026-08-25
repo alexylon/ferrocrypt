@@ -115,6 +115,11 @@ unsafe paths and unsupported object types, avoid following archive-provided
 symlinks or reparse points, and refuse to overwrite an entry that existed
 before the final commit began.**
 
+"Before the final commit began" names the instant the commit operation itself
+starts: the single test-and-set where the platform provides one, and otherwise
+the existence check or name claim that immediately precedes the rename, so an
+entry created inside the short window after that step MAY be replaced.
+
 FCA version 0x01 represents regular files, directories, portable relative
 paths, file content, and Unix permission bits only.
 

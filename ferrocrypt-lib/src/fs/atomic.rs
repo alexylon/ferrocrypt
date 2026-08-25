@@ -10,7 +10,7 @@
 //! handle-relative to the extraction directory, so a mid-run path swap
 //! cannot redirect it.
 //!
-//! Three primitives are provided:
+//! Four primitives are provided:
 //!
 //! - [`finalize_file`] — promote a [`tempfile::NamedTempFile`] through a
 //!   caller-retained output-directory anchor. Used by key generation on every
@@ -32,25 +32,27 @@
 //! Two durability helpers support these operations. [`sync_file_durable`]
 //! flushes staged encrypted output and key files before promotion; archive
 //! extraction has its own flush. [`sync_dir_durable`] flushes
-//! directory entries and reports failures; key generation calls it after each
-//! key-file commit. [`sync_parent_dir`] remains best-effort for outputs whose
-//! loss can be recovered.
+//! directory entries and reports failures; it is key generation's required
+//! barrier on Windows and the other targets, while Linux and macOS use
+//! [`OutputDir::flush_durable`] so the barrier follows the handle the key
+//! files were committed through. [`sync_parent_dir`] remains best-effort for
+//! outputs whose loss can be recovered.
 //!
 //! [`OutputDir`] retains a handle to the directory an operation publishes
 //! into. Cleanup after a failed commit goes through that handle, so it
 //! removes the entry the operation created rather than whatever its path
 //! happens to name once the operation is already under way.
 //!
-//! **Zero in-repo unsafe.** The file cases delegate to `tempfile`,
-//! which is atomic-no-replace on Windows (`MoveFileExW`
-//! without the replace flag) and uses
-//! `rustix::renameat_with(..., RenameFlags::NOREPLACE)` on Linux and
-//! macOS; where the filesystem supports neither, the Unix fallback is
-//! [`crate::fs::commit`]'s handle-relative link, claim, and rename
-//! operations, anchored to one retained [`OutputDir`]. The directory
-//! rename case in
-//! [`rename_no_clobber`] delegates
-//! to `rustix` directly on Linux and macOS, and on Windows uses
+//! **Zero in-repo unsafe.** On Linux and macOS the file cases issue
+//! `rustix::renameat_with(..., RenameFlags::NOREPLACE)` themselves
+//! through [`crate::fs::commit`], relative to one retained
+//! [`OutputDir`]; Windows and the other Unix targets delegate to
+//! `tempfile`, which is atomic-no-replace on Windows (`MoveFileExW`
+//! without the replace flag). Where the filesystem cannot perform a
+//! no-replace rename, the Unix fallback is [`crate::fs::commit`]'s
+//! handle-relative link, claim, and rename operations, anchored to that
+//! same handle. The directory rename case in [`rename_no_clobber`]
+//! delegates to `rustix` directly on Linux and macOS, and on Windows uses
 //! `symlink_metadata()` + `std::fs::rename`, which keeps the crate
 //! zero-unsafe but offers a narrower best-effort no-clobber guarantee
 //! for directory promotion on that target.

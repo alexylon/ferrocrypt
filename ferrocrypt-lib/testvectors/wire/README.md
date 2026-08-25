@@ -164,8 +164,11 @@ than overlooked:
   TLV value length (16 MiB) would each require committing an artifact of that
   size to a permanently frozen corpus. The caps that are cheap to exceed —
   path depth, path bytes, both extension regions, recipient count, recipient
-  body length, the `private.key` wrapped-secret cap, and every Argon2id
-  dimension — are covered.
+  body length, the `private.key` wrapped-secret cap, and the Argon2id memory
+  and work caps on both artifacts that store key-derivation parameters — are
+  covered. The Argon2id time-cost and lane caps carry no case at all: both
+  default to the structural maximum, so a larger value is refused as an
+  invalid parameter and never reaches the cap.
 
 Everything else the §12.3 minimum-evidence table names is present. Two areas
 are covered in a shape worth stating: a directory root's expected result is the

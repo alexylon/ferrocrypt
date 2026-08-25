@@ -19,6 +19,7 @@ origin-argon2id-kdf-lanes-zero	fcr_payload	argon2id-kdf-lanes-zero	-	cd20afd3f6f
 origin-argon2id-kdf-time-above-max	fcr_payload	argon2id-kdf-time-above-max	-	9e8f692a37bc88dd1bcaf2cc64f56dd4df6a0d5463d847fd59a44557dfb6d612	c2accb407352788c11c5f672551b38c8ed5ef8	0.3.0	1
 origin-argon2id-kdf-memory-above-max	fcr_payload	argon2id-kdf-memory-above-max	-	0367a0051feef3548a030ad89b4605ecade3880c17894993b79f97a304d7dd1b	71d4ed9d55c232df85b33d52e62a66c8977819	0.3.0	1
 origin-argon2id-kdf-work-over-local-cap	fcr_payload	argon2id-kdf-work-over-local-cap	-	8a6891486c0a4eb485251957356c0b4f9fbb0649e8cc9b323bc986c1679c3a29	4057473150f36e55d0252fd96d1c7cf59013c4	0.3.0	1
+origin-argon2id-kdf-memory-over-local-cap	fcr_payload	argon2id-kdf-memory-over-local-cap	-	a8f475fa10fd1306291478a07a3d3e9cb2f0a242407ba798f502d4c100c3559a	ec3461be36b97a9857ecde79f8c48c28c9e15d	0.3.0	1
 origin-tlv-unknown-ignorable	fcr_payload	tlv-unknown-ignorable	-	477e814943e4bbd2fb67efd778bc1ae5cb9370041037fa708e08ff829999f36f	a0fe3311dc7ce1fb9dd504e3dfcefc1fe9b29a	0.3.0	1
 origin-tlv-reserved-tag-0000	fcr_payload	tlv-reserved-tag-0000	-	bdfb65f35cd05f5a122b4d6f0a40b5e26ade64260f7eefab30f09140ef2a446d	9dbd031d899df011e923ce78e867493aacbf7b	0.3.0	1
 origin-tlv-reserved-tag-8000	fcr_payload	tlv-reserved-tag-8000	-	81aa5300b0c238f3f9b0930d23ab93793e07322032d261239307816aba0e4b82	79eb35ad8a61f78673d607fa573adae5bcbe5c	0.3.0	1

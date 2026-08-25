@@ -2460,14 +2460,30 @@ fn write_argon2id_cases(corpus: &mut Corpus, sources: &Path, base: &MutationBase
             "argon2id_memory_cost_above_structural_maximum",
             "invalid_kdf_parameters",
         ),
+        // The two local caps are driven apart. This one sits exactly on the
+        // memory cap and passes it, so only the work product can reject it.
         (
             "argon2id-kdf-work-over-local-cap",
             KdfParams {
-                mem_cost: 1_048_576,
+                mem_cost: KdfLimit::MEM_COST_KIB_DEFAULT,
                 time_cost: 5,
                 lanes: 1,
             },
             "argon2id_work_above_default_local_cap",
+            "resource_cap_exceeded",
+        ),
+        // One KiB over the memory cap at the cheapest time cost, so the work
+        // product stays far below its own cap and only memory can reject it.
+        // The default memory cap is below the structural maximum, so this is a
+        // policy refusal of a structurally valid file.
+        (
+            "argon2id-kdf-memory-over-local-cap",
+            KdfParams {
+                mem_cost: KdfLimit::MEM_COST_KIB_DEFAULT + 1,
+                time_cost: 1,
+                lanes: 1,
+            },
+            "argon2id_memory_above_default_local_cap",
             "resource_cap_exceeded",
         ),
     ] {
@@ -3272,11 +3288,13 @@ fn write_public_key_material_cases(corpus: &mut Corpus) {
 }
 
 /// `private.key` extension, pair-consistency, and cap evidence (`FORMAT.md`
-/// §8 and §12.3). All three need the AEAD unwrap, so they are opened with a
-/// credential rather than validated structurally.
+/// §8 and §12.3). Every case here is replayed through the unlock rather than
+/// the structural validator, which applies neither the caller's resource
+/// policy nor the AEAD: the extension and pair cases need the unwrap, and the
+/// cap cases are refused before it.
 fn write_private_key_ext_and_pair_cases(corpus: &mut Corpus, keys: &CorpusKeys, canonical: &[u8]) {
     use crate::crypto::tlv::tlv_bytes;
-    use crate::key::private::seal_private_key_unchecked_tlv;
+    use crate::key::private::{KDF_PARAMS_OFFSET, seal_private_key_unchecked_tlv};
 
     let opened = x25519::open_x25519_key_file(
         &corpus.root.join(&keys.private_a),
@@ -3398,6 +3416,53 @@ fn write_private_key_ext_and_pair_cases(corpus: &mut Corpus, keys: &CorpusKeys, 
             "resource_cap_exceeded",
         )),
     );
+
+    // The unlock applies the same KDF resource policy a `.fcr` recipient body
+    // gets. One KiB over the memory cap at the cheapest time cost keeps the
+    // work product far below its own cap, so only memory can reject the file,
+    // and the cap is checked before Argon2id runs.
+    let mut over_memory_cap = canonical.to_vec();
+    over_memory_cap[KDF_PARAMS_OFFSET..KDF_PARAMS_OFFSET + KDF_PARAMS_SIZE].copy_from_slice(
+        &KdfParams {
+            mem_cost: KdfLimit::MEM_COST_KIB_DEFAULT + 1,
+            time_cost: 1,
+            lanes: 1,
+        }
+        .to_bytes(),
+    );
+    private_key_open_case(
+        corpus,
+        "private-key-kdf-memory-over-default-cap",
+        &over_memory_cap,
+        "private-key-a",
+        Err((
+            "private_key_argon2id_memory_above_default_local_cap",
+            "resource_cap_exceeded",
+        )),
+    );
+
+    // The other reachable KDF cap on this artifact: memory exactly on its cap
+    // and a time cost that carries the product past the work cap, so the two
+    // caps are evidenced apart here as they are on an `argon2id` body.
+    let mut over_work_cap = canonical.to_vec();
+    over_work_cap[KDF_PARAMS_OFFSET..KDF_PARAMS_OFFSET + KDF_PARAMS_SIZE].copy_from_slice(
+        &KdfParams {
+            mem_cost: KdfLimit::MEM_COST_KIB_DEFAULT,
+            time_cost: 5,
+            lanes: 1,
+        }
+        .to_bytes(),
+    );
+    private_key_open_case(
+        corpus,
+        "private-key-kdf-work-over-default-cap",
+        &over_work_cap,
+        "private-key-a",
+        Err((
+            "private_key_argon2id_work_above_default_local_cap",
+            "resource_cap_exceeded",
+        )),
+    );
 }
 
 /// One rejection case built by editing bytes: the identifier, the edit that
@@ -3432,13 +3497,14 @@ fn private_key_case(
 
 fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     use crate::key::private::{
-        KIND_OFFSET, PRIVATE_KEY_HEADER_FIXED_SIZE, TYPE_NAME_LEN_OFFSET, VERSION_OFFSET,
+        KDF_PARAMS_OFFSET, KIND_OFFSET, PRIVATE_KEY_HEADER_FIXED_SIZE, TYPE_NAME_LEN_OFFSET,
+        VERSION_OFFSET,
     };
 
     let canonical = fs::read(corpus.root.join(&keys.private_a)).expect("read private key");
 
     // §8 fixed header: magic(4) || version(1) || kind(1) || key_flags(2) || …
-    let mutations: [ByteMutationCase; 6] = [
+    let mutations: [ByteMutationCase; 7] = [
         (
             "private-key-bad-magic",
             Box::new(|b: &mut Vec<u8>| b[0] ^= 0xFF),
@@ -3476,6 +3542,19 @@ fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
             Box::new(|b: &mut Vec<u8>| b.extend_from_slice(&[0xAA; 8])),
             "private_key_bytes_follow_declared_fields",
             "malformed_private_key",
+        ),
+        // `private.key` stores its own `kdf_params`, held to the same §2.2
+        // bounds as an `argon2id` recipient body. The check runs while the
+        // cleartext header is parsed, so it precedes the unlock and needs no
+        // passphrase.
+        (
+            "private-key-kdf-memory-above-max",
+            Box::new(|b: &mut Vec<u8>| {
+                b[KDF_PARAMS_OFFSET..KDF_PARAMS_OFFSET + size_of::<u32>()]
+                    .copy_from_slice(&(KdfLimit::MEM_COST_KIB_STRUCTURAL_MAX + 1).to_be_bytes());
+            }),
+            "private_key_argon2id_memory_cost_above_structural_maximum",
+            "invalid_kdf_parameters",
         ),
     ];
     for (case_id, mutate, condition, class) in mutations {

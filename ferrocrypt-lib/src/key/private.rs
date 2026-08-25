@@ -108,7 +108,7 @@ pub(crate) const PUBLIC_LEN_OFFSET: usize = TYPE_NAME_LEN_OFFSET + size_of::<u16
 pub(crate) const EXT_LEN_OFFSET: usize = PUBLIC_LEN_OFFSET + size_of::<u32>();
 pub(crate) const WRAPPED_SECRET_LEN_OFFSET: usize = EXT_LEN_OFFSET + size_of::<u32>();
 const ARGON2_SALT_OFFSET: usize = WRAPPED_SECRET_LEN_OFFSET + size_of::<u32>();
-const KDF_PARAMS_OFFSET: usize = ARGON2_SALT_OFFSET + ARGON2_SALT_SIZE;
+pub(crate) const KDF_PARAMS_OFFSET: usize = ARGON2_SALT_OFFSET + ARGON2_SALT_SIZE;
 const WRAP_NONCE_OFFSET: usize = KDF_PARAMS_OFFSET + KDF_PARAMS_SIZE;
 const _: () = assert!(WRAP_NONCE_OFFSET + WRAP_NONCE_SIZE == PRIVATE_KEY_HEADER_FIXED_SIZE);
 

@@ -2848,18 +2848,25 @@ reused operationally.
 | Prefix and framing | Bad magic; an invariant `.fcr` outer-container version `0x00` case classified as `malformed_header`; a `.fcr` outer-container version `0x02` capability case classified as `unsupported_outer_version`; wrong kind; nonzero flags; the structural maximum; truncation at each framing boundary; and both undersized-header precedence outcomes |
 | Header | Fixed-field accounting, recipient count and range, extension length, header-MAC tamper after successful unwrap, and exact authenticated scope |
 | Recipient framing | Truncated entry headers and bodies, invalid lengths, malformed type names, reserved flags, unknown critical and ignorable recipients, no supported recipient, illegal mixing, and one step-8 diagnostic class for both orders of the same two defective entries |
-| `argon2id` recipient | Valid, wrong passphrase, every body field tampered, invalid body length, invalid and locally capped KDF parameters, and recipient flags |
+| `argon2id` recipient | Valid, wrong passphrase, every body field tampered, invalid body length, invalid KDF parameters on every structural dimension, every local KDF cap a structurally valid body can exceed, and recipient flags |
 | X25519 recipient | Valid, multiple recipients, wrong private key, every body field tampered, invalid length and flags, noncanonical and all-zero ephemeral preflight, and a canonical nonzero small-order ephemeral value that produces an all-zero shared secret |
 | `.fcr` TLV | Empty region, valid unknown ignorable, unknown critical, reserved tag, duplicate and out-of-order tags, truncated header and value, and oversized region and value |
 | Payload STREAM | Independent byte-exact known-answer tests, authentication failure, truncation, forbidden empty final chunk after data, trailing data, and exact-boundary finalization. The chunk-count ceiling is excluded: evidencing it needs an artifact of more than 256 TiB (§12.1) |
 | `public.key` | Canonical file; optional LF; checksum, padding, case, whitespace, and length failures; an invariant public-key encoding version `0x00` case classified as `malformed_public_key`; a public-key encoding version `0x02` capability case classified as `unsupported_public_key_version`; unsupported type; canonical X25519 material; aliases; field-prime boundaries; all zero; and wrong lengths |
-| `private.key` | Canonical valid and openable file; wrong passphrase; cleartext-AAD and wrapped-secret tamper; malformed, truncated, and trailing data; wrong kind or key-file type; an invariant private-key encoding version `0x00` case classified as `malformed_private_key`; a private-key encoding version `0x02` capability case classified as `unsupported_private_key_version`; caps; TLVs; and public/secret consistency |
+| `private.key` | Canonical valid and openable file; wrong passphrase; cleartext-AAD and wrapped-secret tamper; malformed, truncated, and trailing data; wrong kind or key-file type; an invariant private-key encoding version `0x00` case classified as `malformed_private_key`; a private-key encoding version `0x02` capability case classified as `unsupported_private_key_version`; its own stored KDF parameters, structurally invalid and above every local KDF cap they can exceed; the wrapped-secret cap; TLVs; and public/secret consistency |
 | FCA fixed header | Valid file and directory roots; bad magic; an invariant FCA archive version `0x00` case classified as `malformed_archive`; an FCA archive version `0x02` capability case classified as `unsupported_fca_version`; flags; counts; archive-extension length; manifest length; total-byte accounting; and truncation |
 | FCA manifest and tree | File and directory entries, acceptance of canonical and permitted noncanonical order, duplicate and ASCII-case-colliding paths, missing parents, child under file, multiple roots, invalid kinds, modes, sizes, and totals |
 | FCA paths | Absolute, parent, and current components; separators; NUL, control, and reserved characters; trailing dot and space; Windows device names; depth, component, and total-length limits; valid Unicode |
 | FCA extensions | Archive-level and per-entry TLV namespaces: ignorable, critical, malformed, and reserved tags; per-region, per-value, and aggregate entry-extension caps |
 | FCA content and extraction | Exact file contents, short content, trailing content, unsafe or unsupported entries, and representative extraction rejection classes without unsafe final output |
 | Resource policy | Structural maxima and configurable local caps for headers, recipients, KDFs, key files, manifests, paths, plaintext totals, and extension regions |
+
+A local KDF cap whose default equals the structural maximum cannot be reached
+by a structurally valid artifact, so it requires no case; a cap set below that
+maximum does. `private.key` needs KDF evidence of its own because §8 gives it a
+separate parser and a separate unlock: a case proving the `argon2id` recipient
+body applies §2.2 says nothing about the key file that stores the same
+`kdf_params`.
 
 The X25519 during-operation all-zero-shared-secret case MUST use this canonical,
 nonzero small-order ephemeral public value:

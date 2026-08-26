@@ -668,7 +668,9 @@ impl PrivateKey {
     /// binds the passphrase that unlocks it.
     ///
     /// The file is not opened and the passphrase is not checked until the
-    /// private key is used by [`crate::PrivateKeyDecryptor::decrypt`].
+    /// value is consumed by an operation that needs the key —
+    /// [`crate::PrivateKeyDecryptor::decrypt`] or
+    /// [`crate::PrivateKey::into_public_key`].
     pub fn from_key_file(path: impl AsRef<std::path::Path>, passphrase: Passphrase) -> Self {
         Self {
             source: PrivateKeySource::KeyFile {

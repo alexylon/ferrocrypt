@@ -242,6 +242,61 @@ fn private_key_into_public_key_rejects_a_wrong_passphrase() {
     }
 }
 
+/// Both `private.key` unlock routes apply the passphrase-length bound before
+/// they read the file, so a passphrase outside it reports the same caller
+/// error either way. A key file that is not there is what proves the order:
+/// a route reaching the filesystem first would report the missing path.
+#[test]
+fn private_key_unlock_routes_agree_on_a_too_long_passphrase() {
+    let work = fresh_workspace("unlock_passphrase_precedence");
+    let keys = work.join("keys");
+    fs::create_dir_all(&keys).unwrap();
+    let kg = generate_key_pair(&keys, pass(), |_| {}).expect("keygen");
+    let input = work.join("data.txt");
+    fs::write(&input, b"payload").unwrap();
+    let out_dir = work.join("out");
+    fs::create_dir_all(&out_dir).unwrap();
+    let outcome = Encryptor::with_public_key(
+        PublicKey::from_key_file(&kg.public_key_path).expect("read public key"),
+    )
+    .write(&input, &out_dir, |_| {})
+    .expect("encrypt");
+
+    // One byte past the 4,096-byte bound, against a key file that is absent.
+    let too_long = || Passphrase::new("a".repeat(4097));
+    let missing = work.join("absent-private.key");
+
+    let via_inspect = PrivateKey::from_key_file(&missing, too_long())
+        .into_public_key(|_| {})
+        .expect_err("into_public_key accepted an over-long passphrase");
+
+    let decryptor = match Decryptor::open(&outcome.output_path).expect("open") {
+        Decryptor::PrivateKey(d) => d,
+        other => panic!("expected private-key decryptor, got {other:?}"),
+    };
+    let restore = work.join("restored");
+    fs::create_dir_all(&restore).unwrap();
+    let via_decrypt = decryptor
+        .decrypt(
+            PrivateKey::from_key_file(&missing, too_long()),
+            &restore,
+            |_| {},
+        )
+        .expect_err("decrypt accepted an over-long passphrase");
+
+    for (route, err) in [("into_public_key", &via_inspect), ("decrypt", &via_decrypt)] {
+        match err {
+            CryptoError::InvalidInput(_) => {}
+            other => panic!("{route} read the key file before the length bound: {other:?}"),
+        }
+    }
+    assert_eq!(
+        via_inspect.to_string(),
+        via_decrypt.to_string(),
+        "the two unlock routes disagree about an over-long passphrase",
+    );
+}
+
 /// The resource policy a caller passes must reach both gates the unlock
 /// applies. Without an override the method used the library defaults, so a key
 /// pair generated under a raised [`KdfLimit`] decrypted but could not be

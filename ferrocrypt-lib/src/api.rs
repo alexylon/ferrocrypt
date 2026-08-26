@@ -367,17 +367,26 @@ impl Encryptor {
     ///
     /// # Errors
     ///
-    /// Returns [`CryptoError::InvalidInput`] for invalid input paths, output
-    /// conflicts, unsupported archive entries, empty or too-long passphrases,
-    /// archive cap violations, invalid KDF settings, or a source file or
-    /// directory that was replaced or removed while it was being read. On Unix, that variant
-    /// can also report a committed output path that resolves to a different
-    /// object before return. Returns [`CryptoError::Io`] for filesystem
-    /// failures, including a committed output that carries more than one
-    /// filesystem name. Either post-commit condition can leave the complete
-    /// encrypted file under its final, temporary, or moved name.
-    /// Returns authentication or internal crypto errors if key wrapping or
-    /// payload streaming fails.
+    /// Returns [`CryptoError::InputPath`] if `input` does not exist, and
+    /// [`CryptoError::InvalidInput`] for an unusable input path, an output
+    /// conflict, an unsupported archive entry, an empty or too-long
+    /// passphrase, or a source file or directory that was replaced or removed
+    /// while it was being read. On Unix, that variant can also report a
+    /// committed output path that resolves to a different object before
+    /// return. A source name the FCA path grammar refuses returns
+    /// [`CryptoError::UnsafeArchivePath`]. Caps and key-derivation settings
+    /// each report their own variant, never `InvalidInput`: an
+    /// [`ArchiveLimits`] cap returns the matching `Archive*CapExceeded`, a
+    /// [`HeaderReadLimits`] cap returns the `*CapExceeded` variant for the axis
+    /// it bounds, and Argon2id parameters return
+    /// [`CryptoError::InvalidKdfParams`] outside the `FORMAT.md` §2.2 bounds,
+    /// [`CryptoError::KdfBelowWriteFloor`] below the writer's memory floor, or
+    /// the matching `Kdf*CapExceeded` above a [`KdfLimit`]. Returns
+    /// [`CryptoError::Io`] for filesystem failures, including a committed
+    /// output that carries more than one filesystem name. Either post-commit
+    /// condition can leave the complete encrypted file under its final,
+    /// temporary, or moved name. Returns authentication or internal crypto
+    /// errors if key wrapping or payload streaming fails.
     pub fn write(
         self,
         input: impl AsRef<Path>,
@@ -492,8 +501,10 @@ impl Encryptor {
 ///   own unlock passphrase.
 ///
 /// A mismatched-credential call — e.g. trying to decrypt a passphrase-sealed
-/// file with a [`PrivateKey`] — is therefore a compile error rather than a
-/// runtime [`CryptoError::DecryptorModeMismatch`] failure.
+/// file with a [`PrivateKey`] — is therefore a compile error. The runtime
+/// [`CryptoError::DecryptorModeMismatch`] is left for the one case types
+/// cannot cover: the file at the path changed recipient mode after
+/// [`Decryptor::open`] classified it.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Decryptor {
@@ -509,6 +520,14 @@ impl Decryptor {
     /// Probes the `.fcr` header (cheap structural read; no recipient
     /// unwrap, no MAC, no payload bytes touched) and returns the
     /// matching variant.
+    ///
+    /// The returned value holds the path, not the opened file: each `decrypt`
+    /// reads the header again from that path. The classification is therefore
+    /// a routing hint about a path, not a verdict about a file — if the path
+    /// stops naming the file probed here, `decrypt` refuses a changed
+    /// recipient mode with [`CryptoError::DecryptorModeMismatch`] and
+    /// otherwise processes whatever is there now, under the same acceptance
+    /// order. Within one `decrypt` call the file is opened once and kept open.
     ///
     /// # Errors
     ///
@@ -665,8 +684,19 @@ impl PassphraseDecryptor {
     /// # Errors
     ///
     /// Returns [`CryptoError::InvalidInput`] for an empty or too-long
-    /// passphrase, archive cap violations, output conflicts, or unsafe archived
-    /// paths. Returns [`CryptoError::KdfResourceCapExceeded`] for rejected KDF costs.
+    /// passphrase or an output conflict. Caps report their own variants, never
+    /// `InvalidInput`: an [`ArchiveLimits`] cap returns the matching
+    /// `Archive*CapExceeded`, and stored Argon2id costs above a [`KdfLimit`]
+    /// return [`CryptoError::KdfResourceCapExceeded`],
+    /// [`CryptoError::KdfTimeCostCapExceeded`],
+    /// [`CryptoError::KdfLanesCapExceeded`], or
+    /// [`CryptoError::KdfWorkCapExceeded`]. An archived path the FCA grammar
+    /// refuses returns [`CryptoError::UnsafeArchivePath`], and a manifest whose
+    /// tree shape is illegal returns [`CryptoError::InvalidArchiveTree`].
+    /// Returns [`CryptoError::DecryptorModeMismatch`] if the file at the path
+    /// is no longer passphrase-sealed: the header is read again here, so a
+    /// path whose contents changed since [`Decryptor::open`] is refused rather
+    /// than decrypted.
     /// Returns [`CryptoError::InvalidFormat`] if the encrypted container or
     /// authenticated payload stream is structurally malformed. Returns
     /// authentication errors such as [`CryptoError::RecipientUnwrapFailed`],
@@ -812,14 +842,24 @@ impl PrivateKeyDecryptor {
     /// # Errors
     ///
     /// Returns [`CryptoError::InvalidInput`] for an empty or too-long
-    /// private-key passphrase, archive cap violations, output conflicts, or
-    /// unsafe archived paths.
+    /// private-key passphrase or an output conflict. An [`ArchiveLimits`] cap
+    /// reports its own `Archive*CapExceeded` variant, never `InvalidInput`.
+    /// An archived path the FCA grammar
+    /// refuses returns [`CryptoError::UnsafeArchivePath`], and a manifest whose
+    /// tree shape is illegal returns [`CryptoError::InvalidArchiveTree`].
+    /// Returns [`CryptoError::DecryptorModeMismatch`] if the file at the path
+    /// is no longer public-key-sealed: the header is read again here, so a
+    /// path whose contents changed since [`Decryptor::open`] is refused rather
+    /// than decrypted.
     /// Returns [`CryptoError::InvalidFormat`] if the private key, encrypted
     /// container, or authenticated payload stream is structurally malformed;
     /// returns [`CryptoError::KeyFileUnlockFailed`] if the private key is
     /// tampered or protected by a different passphrase.
-    /// Returns [`CryptoError::KdfResourceCapExceeded`] for rejected
-    /// `private.key` KDF costs. Returns [`CryptoError::UnsupportedKeyType`]
+    /// Returns [`CryptoError::KdfResourceCapExceeded`],
+    /// [`CryptoError::KdfTimeCostCapExceeded`],
+    /// [`CryptoError::KdfLanesCapExceeded`], or
+    /// [`CryptoError::KdfWorkCapExceeded`] for `private.key` KDF costs above
+    /// the [`KdfLimit`]. Returns [`CryptoError::UnsupportedKeyType`]
     /// if the private key wraps a key type this build does not support.
     /// Returns authentication errors such as
     /// [`CryptoError::RecipientUnwrapFailed`],
@@ -986,6 +1026,10 @@ impl PrivateKey {
             crate::format::KeypairSuite::V1 => (),
         };
         let (key_file_path, passphrase) = self.into_key_file_parts();
+        // Same order as `PrivateKeyDecryptor::decrypt`: a passphrase outside
+        // the fixed bound is a caller error, reported before the key file is
+        // read, so both unlock routes answer it the same way.
+        validate_passphrase(&passphrase)?;
         let opened = recipient::native::x25519::open_x25519_key_file(
             &key_file_path,
             &passphrase,
@@ -1313,14 +1357,20 @@ pub fn probe_recipient_mode_with_limits(
 
 /// Returns the default encrypted filename for a given input path.
 ///
-/// For example, a regular file named `secrets.txt` maps to `secrets.fcr`; a
-/// directory named `secrets` maps to `secrets.fcr`. An input of `.` or `..`
-/// takes the name of the directory it points at.
+/// The path is inspected on the filesystem, because the rule differs by kind:
+/// a directory keeps its whole name, so `my.photos` maps to `my.photos.fcr`,
+/// while anything else — a regular file, or a path that does not exist — is
+/// reduced to its stem, so `secrets.txt` maps to `secrets.fcr`. An input of
+/// `.` or `..` takes the name of the directory it points at. The answer
+/// therefore describes the path as it is now. [`Encryptor::write`] derives the
+/// name itself and commits without overwriting, so a stale answer here cannot
+/// cost the caller a file.
 ///
 /// # Errors
 ///
 /// Returns [`CryptoError::InvalidInput`] if the path has no usable file name or
-/// contains a non-UTF-8 file name.
+/// contains a non-UTF-8 file name, and [`CryptoError::Io`] if the path cannot
+/// be inspected.
 pub fn default_encrypted_filename(input_path: impl AsRef<Path>) -> Result<String, CryptoError> {
     let base_name = paths::encryption_base_name(input_path)?;
     Ok(format!("{}.{}", base_name, ENCRYPTED_EXTENSION))

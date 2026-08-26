@@ -707,12 +707,13 @@ pub enum CryptoError {
     /// recipient mode (e.g. a passphrase decryptor invoked against a file
     /// sealed to public-key recipients, or vice versa).
     ///
-    /// The public API routes through [`crate::Decryptor::open`], which
-    /// inspects the file structurally and hands back the matching variant —
-    /// so callers using the public surface cannot reach this error. It is
-    /// reserved for internal callers and any future plugin-style API
-    /// where a caller drives `protocol::decrypt` directly with a chosen
-    /// credential scheme.
+    /// [`crate::Decryptor::open`] classifies the file at a path and hands back
+    /// the matching variant, so a caller that follows it reaches this error
+    /// only when the path stops naming that file: each `decrypt` reads the
+    /// header again, and a rename or overwrite in between — no attacker
+    /// needed — is refused here rather than decrypted. An internal caller or a
+    /// future plugin-style API that drives `protocol::decrypt` directly with a
+    /// mismatched credential scheme receives the same variant.
     ///
     /// `expected` is the mode the decryptor expected (its credential-scheme
     /// mode); `found` is the mode classified from the file's recipient

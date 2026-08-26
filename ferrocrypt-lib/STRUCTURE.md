@@ -1181,8 +1181,8 @@ Rules:
 - `with_passphrase` creates exactly one `argon2id` recipient.
 - `with_public_key` is a convenience wrapper around `with_public_keys` for one public recipient.
 - `with_public_keys` supports the multi-recipient file format directly. It consumes the supplied iterator only up to one item past `HeaderReadLimits::RECIPIENT_COUNT_STRUCTURAL_MAX` and rejects there with `RecipientCountCapExceeded`, because no configuration can raise that ceiling and a longer list could never produce a writable file. The caller-configurable recipient-count cap is a separate check at `write`, since `header_read_limits` can still change it after construction.
-- Recipient mixing is checked during construction.
-- Empty recipient lists reject immediately.
+- Recipient mixing is enforced in `protocol::encrypt`, before any filesystem, archive, or KDF work. `with_public_keys` adds no check of its own, because every `PublicKey` this build can hold is an X25519 recipient (`PublicKeyMixable`) and one call therefore cannot mix policies; the constructor gains a check when a `PublicKey` variant with a different policy exists.
+- Empty recipient lists reject immediately, at construction.
 - The API remains path-based because FerroCrypt security guarantees depend on archive preflight, streaming encryption, staging, and atomic finalization.
 - **Writer caps mirror reader defaults.** A default-configured `Encryptor` produces `.fcr` files a default-configured `Decryptor` can read. The authoritative gates live in `protocol::encrypt` / `protocol::generate_key_pair`, so no in-crate caller can skip them; `Encryptor::write` / `KeyPairGenerator::write` run the same checks earlier so a misconfiguration fails before recipient key files are read (single source of truth per rule — see "Centralized cap enforcement" below):
   - `protocol::preflight_header_write_limits` checks all four axes of `HeaderReadLimits` against the exact header the writer will emit: `recipient_count`, per-entry `body_len` (canonical native value from `NativeRecipientType::body_len()`), the computed `header_len` — including the extension region, which the caller passes as the bytes themselves (`protocol::WRITE_EXT_BYTES`, empty today) so the checked length cannot drift from what `build_encrypted_header` seals — and the aggregate header-MAC work those imply. Tightening any axis below the writer's natural output rejects with the corresponding typed `*CapExceeded` variant. `protocol::encrypt` re-enforces the header-length and header-MAC-work caps against the assembled header bytes after the build, as the drift backstop.
@@ -1222,6 +1222,11 @@ pub enum Decryptor {
 
 impl Decryptor {
     pub fn open(input: impl AsRef<Path>) -> Result<Self, CryptoError>;
+
+    pub fn open_with_limits(
+        input: impl AsRef<Path>,
+        header_read_limits: HeaderReadLimits,
+    ) -> Result<Self, CryptoError>;
 }
 
 pub struct PassphraseDecryptor { /* opaque */ }
@@ -1265,6 +1270,8 @@ impl PrivateKeyDecryptor {
 }
 ```
 
+`Decryptor::open` classifies the file at a path and keeps the path, not the opened file; each `decrypt` reads the header again and re-runs the `FORMAT.md` §3.7 acceptance order on what the path names then. A recipient mode that changed in between is refused with `CryptoError::DecryptorModeMismatch`, which is why that variant is reachable from the public surface. Within one `decrypt` call the file is opened once and held across the private-key unlock (`protocol::DecryptSession`). `open_with_limits` stashes the supplied `HeaderReadLimits` on the returned variant, so the second read uses them without the caller setting them twice.
+
 `archive_limits` on the decrypt side mirrors `Encryptor::archive_limits` on the encrypt side. Both default to [`ArchiveLimits::default`] when unset; symmetry between encrypt-side preflight and decrypt-side extraction is the caller's responsibility — a `.fcr` produced under elevated encrypt caps can only be round-tripped by passing the same elevated value to the corresponding decryptor.
 
 `incomplete_output_policy` defaults to [`IncompleteOutputPolicy::DeleteOnError`]: a failure removes this run's `.incomplete` plaintext while the output is still treated as staged, restoring the directory modes the run applied first, so authenticated-but-incomplete output does not linger under `output_dir`; a removal that fails or cannot be confirmed is reported in the returned error with the working path. It does not remove an output that was confirmed as complete before a later filesystem namespace error. [`IncompleteOutputPolicy::RetainOnError`] preserves the staged tree for backup-recovery / forensic flows; callers that opt in MUST treat retained partials as a potentially attacker-chosen prefix (FerroCrypt's STREAM-BE32 payload only detects truncation when the final chunk arrives, so an attacker can choose any chunk-aligned prefix that the recovered plaintext represents).
@@ -1275,22 +1282,24 @@ Preferred public concepts are `Passphrase` and `Recipient`. Internals are not or
 
 `PublicKey` supports:
 
-- `from_key_file`;
-- `from_recipient_string`;
+- `from_key_file` and `from_key_file_with_limits`;
+- `from_recipient_string` and `from_recipient_string_with_limits`, plus the equivalent `FromStr` impl;
 - `from_x25519_bytes` where supported;
 - `fingerprint`;
-- canonical `to_recipient_string()` output.
+- canonical `to_recipient_string()` output, and `to_x25519_bytes()` for the raw key material.
+
+Each `*_with_limits` constructor takes a `KeyReadLimits` in place of the defaults; the recipient-string length cap is the one it changes.
 
 Every constructor resolves its source to suite-plus-key-material immediately and the value stores that result, so a `PublicKey` never reads its source twice. This is a security requirement, not an optimisation: `fingerprint` and encryption MUST describe the same key material, otherwise an identity check made against a displayed fingerprint says nothing about the key an operation later uses. A construction failure is therefore reported at construction, and there is no separate "validate this value" operation — a `PublicKey` that exists is a valid one. `validate_public_key_file` remains the way to check a file without keeping the key.
 
 `PrivateKey` supports:
 
 - `from_key_file(path, Passphrase)`, which binds the passphrase that unlocks the file;
-- `into_public_key(on_event)`, which unlocks the file and returns the matching `PublicKey`. The method is implemented in `api.rs`, not beside the type: `key/private.rs` sits below `recipient/native/x25519.rs` in the §11 graph, so reaching the X25519 reader from there would make the two modules mutually dependent;
+- `into_public_key(on_event)` and `into_public_key_with_limits(kdf_limit, key_read_limits, on_event)`, which unlock the file and return the matching `PublicKey`. Both are implemented in `api.rs`, not beside the type: `key/private.rs` sits below `recipient/native/x25519.rs` in the §11 graph, so reaching the X25519 reader from there would make the two modules mutually dependent;
 - validated private-key loading;
 - typed dispatch to its native recipient scheme after passphrase unlock.
 
-Because it holds the passphrase, `PrivateKey` is not `Clone`; build one value per decrypt. `into_public_key` consumes the value for the same reason `decrypt` does: the unlock is the passphrase's only use, and the passphrase is dropped as soon as it is over. It returns the file's own authenticated `public_material` rather than re-deriving it, so a caller that wants only the public half does not copy the secret again; `FORMAT.md` §8 has already made the reader reject a `private.key` whose stored public material is not `X25519(secret_material, basepoint)`, which is what makes the stored bytes evidence about the pair.
+Because it holds the passphrase, `PrivateKey` is not `Clone`; build one value per decrypt. `into_public_key` consumes the value for the same reason `decrypt` does: the unlock is the passphrase's only use, and the passphrase is dropped as soon as it is over. It returns the file's own authenticated `public_material` rather than re-deriving it, so a caller that wants only the public half does not copy the secret again; `FORMAT.md` §8 has already made the reader reject a `private.key` whose stored public material is not `X25519(secret_material, basepoint)`, which is what makes the stored bytes evidence about the pair. Both unlock routes check the passphrase length before touching the key file, so the same passphrase reports the same error whichever one is called.
 
 ### 9.4 Key generation
 
@@ -1332,6 +1341,11 @@ Ownership split:
 pub fn probe_recipient_mode(
     path: impl AsRef<Path>,
 ) -> Result<Option<UnauthenticatedRecipientMode>, CryptoError>;
+
+pub fn probe_recipient_mode_with_limits(
+    path: impl AsRef<Path>,
+    limits: HeaderReadLimits,
+) -> Result<Option<UnauthenticatedRecipientMode>, CryptoError>;
 ```
 
 The canonical concepts are:
@@ -1357,6 +1371,42 @@ pub enum AuthenticatedRecipientModeKind {
 `AuthenticatedRecipientMode` is the post-decrypt counterpart: it is constructed only inside the decrypt path after a recipient unwraps and the header MAC verifies, and surfaces on `DecryptOutcome::recipient_mode`. The wrapping struct's field is private and there is no `From<UnauthenticatedRecipientMode>` impl, so external callers cannot fabricate a value that claims authentication. Callers switch on the variant via `kind()` (or the `is_passphrase` / `is_public_key` accessors).
 
 Compatibility names may exist in the public API, but internal structure and documentation use passphrase and public-key (recipient) terminology.
+
+### 9.6 Helpers and constants
+
+```rust
+pub fn default_encrypted_filename(input_path: impl AsRef<Path>) -> Result<String, CryptoError>;
+
+pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError>;
+
+pub fn validate_public_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError>;
+
+pub fn decode_x25519_recipient_string(recipient_string: &str) -> Result<[u8; 32], CryptoError>;
+
+pub const VERSION: &str;               // this crate's release version
+pub const MAGIC: [u8; 4];              // b"FCR\0"
+pub const ENCRYPTED_EXTENSION: &str;   // "fcr"
+pub const PRIVATE_KEY_FILENAME: &str;  // "private.key"
+pub const PUBLIC_KEY_FILENAME: &str;   // "public.key"
+pub const ARGON2_SALT_SIZE: usize;
+pub const KDF_PARAMS_SIZE: usize;
+
+// One pair per version domain (`FORMAT.md` §11): what this build writes,
+// and the numbered revision that value currently names.
+pub const FCR_FILE_VERSION: u8;
+pub const FCR_FILE_V1_VERSION: u8;
+pub const PRIVATE_KEY_VERSION: u8;
+pub const PRIVATE_KEY_V1_VERSION: u8;
+pub const PUBLIC_KEY_VERSION: u8;
+pub const PUBLIC_KEY_V1_VERSION: u8;
+```
+
+Rules:
+
+- `default_encrypted_filename` answers the naming question `Encryptor::write` answers internally, for callers that need the destination in advance. It inspects the path, because a directory keeps its whole name while anything else is reduced to its stem, so its answer describes the path as it is at that moment.
+- `validate_private_key_file` / `validate_public_key_file` check a key file's structure without unlocking it and without a passphrase. They apply no resource caps of their own: the verdict follows what `FORMAT.md` §8 allows, not what a default reader would accept.
+- `decode_x25519_recipient_string` is the raw-bytes primitive behind `PublicKey::from_recipient_string`. Callers that want a value to encrypt with take the typed constructor; this one exists for fuzz targets and for code that needs the key material itself.
+- The version constants are read-only markers. `*_VERSION` is what this build writes in that domain and may advance in a future release; `*_V1_VERSION` names revision 1 and never changes, so a caller can compare against a specific revision without pinning it to whatever the build happens to write.
 
 ---
 

@@ -266,17 +266,27 @@ jobs:
         run: cargo vet
 
   # Public-API compatibility gate for the `ferrocrypt` library.
-  # Compares the in-tree public API against the latest stable release
-  # on crates.io and fails on any change the version number does not
-  # allow. Pre-release versions promise nothing, so they are never
-  # used as the baseline: while a 0.3.0-rc.x is the newest publish,
+  # Two baselines, because neither covers the whole line on its own.
+  #
+  # The newest release tag guards the current series: the comparison is
+  # forced to patch level, so any incompatible change since that tag
+  # fails, which is what keeps an API freeze frozen.
+  #
+  # The latest stable release on crates.io guards what users have
+  # installed. Pre-release versions promise nothing, so they are never
+  # used as that baseline: while a 0.3.0-rc.x is the newest publish,
   # the baseline stays 0.2.5 and the 0.2 -> 0.3 bump already permits
-  # intentional breaks; the day 0.3.0 ships, the baseline becomes
-  # 0.3.0 and any unannounced API break fails this job.
+  # intentional breaks, which makes every lint skip. That is precisely
+  # why the tag comparison exists. The day 0.3.0 ships, this baseline
+  # becomes 0.3.0 and any unannounced API break fails here too.
   semver:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # cargo-semver-checks builds the tag baseline from the local
+          # repository, so the tags and their history must be present.
+          fetch-depth: 0
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # stable
@@ -285,6 +295,24 @@ jobs:
 
       - name: Install cargo-semver-checks
         run: cargo install --locked cargo-semver-checks
+
+      - name: Resolve the newest release tag as the freeze baseline
+        run: |
+          baseline_rev="$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD || true)"
+          if [ -z "$baseline_rev" ]; then
+            echo "No release tag found to compare against." >&2
+            exit 1
+          fi
+          echo "Freeze baseline: $baseline_rev"
+          echo "SEMVER_BASELINE_REV=$baseline_rev" >> "$GITHUB_ENV"
+
+      - name: Check the public API against the newest release tag
+        # `--release-type patch` states that this revision promises
+        # compatibility with the tag, so every lint runs instead of
+        # being skipped as it is on a major-equivalent bump.
+        run: |
+          cargo semver-checks --package ferrocrypt \
+            --baseline-rev "$SEMVER_BASELINE_REV" --release-type patch
 
       - name: Resolve the latest stable release as the baseline
         # The versions endpoint lists newest first, so the first entry

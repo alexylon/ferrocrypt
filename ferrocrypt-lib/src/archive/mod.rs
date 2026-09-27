@@ -55,7 +55,9 @@ pub(crate) use format::PERMISSION_BITS_MASK;
 /// - The destination directory path no longer denotes the directory used for
 ///   the commit. The decrypt returns `Err` and does not remove the confirmed
 ///   output by name. If the directory was renamed, the complete plaintext is
-///   under that new name. This check runs on the same terms.
+///   under that new name. This check runs on the same terms. A check that
+///   cannot run for a reason other than running out of open files or memory
+///   also returns `Err`, and the error says that the output is complete.
 /// - A committed file root carries more than one name. The count is read
 ///   through the retained handle for every file root, on every supported
 ///   platform and whatever route committed the name: a local writer can link

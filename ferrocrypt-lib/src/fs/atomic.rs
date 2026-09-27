@@ -98,15 +98,15 @@ impl FinalizedFile {
     /// changed too: the commit created an entry there, so its absence
     /// means the name no longer denotes the output — the same rule the
     /// decrypt side applies.
+    ///
+    /// Runs only after the commit, so every error says that the output is
+    /// complete: a read that fails reports the path as unconfirmed rather
+    /// than as a bare filesystem error a caller could take to mean that
+    /// nothing was written.
     pub(crate) fn confirm_reported_path(&self, path: &Path) -> Result<(), CryptoError> {
-        let committed = cap_std::fs::Metadata::from_file(&self.file).map_err(CryptoError::Io)?;
-        let reported = match reported_entry_metadata(path) {
-            Ok(reported) => reported,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return Err(reported_output_changed(path));
-            }
-            Err(e) => return Err(CryptoError::Io(e)),
-        };
+        let committed = cap_std::fs::Metadata::from_file(&self.file)
+            .map_err(|e| reported_path_unconfirmed(path, e))?;
+        let reported = reported_entry_metadata(path).map_err(|e| reported_entry_error(path, e))?;
         if !reported.is_file() || identities_differ(&reported, &committed) {
             return Err(reported_output_changed(path));
         }
@@ -116,12 +116,13 @@ impl FinalizedFile {
     /// Requires the commit to have left exactly one name for the committed
     /// file before success is reported. Reading through the retained
     /// handle makes this independent of concurrent renames or replacements of
-    /// either directory entry.
+    /// either directory entry. Every error says that the output is complete,
+    /// including a count that could not be read.
     fn confirm_single_link(&self, path: &Path) -> Result<(), CryptoError> {
         use cap_fs_ext::MetadataExt;
 
         let link_count = cap_std::fs::Metadata::from_file(&self.file)
-            .map_err(CryptoError::Io)?
+            .map_err(|e| link_count_unreadable(path, e))?
             .nlink();
         if link_count != 1 {
             return Err(committed_link_count_error(
@@ -235,6 +236,43 @@ fn reported_output_changed(path: &Path) -> CryptoError {
     ))
 }
 
+/// Maps a failed read of the committed entry at `path`: a missing entry
+/// means the name no longer denotes the output, and any other failure
+/// leaves the path unconfirmed.
+fn reported_entry_error(path: &Path, error: io::Error) -> CryptoError {
+    if error.kind() == io::ErrorKind::NotFound {
+        reported_output_changed(path)
+    } else {
+        reported_path_unconfirmed(path, error)
+    }
+}
+
+/// Post-commit failure for a reported-path check that could not run. The
+/// output is complete, but whether `path` still denotes it is unknown, so
+/// the message gives the path without placing the output there.
+fn reported_path_unconfirmed(path: &Path, source: io::Error) -> CryptoError {
+    CryptoError::Io(io::Error::new(
+        source.kind(),
+        format!(
+            "Output is complete, but its reported path could not be confirmed: {}: {source}",
+            sanitize_path_for_display(path)
+        ),
+    ))
+}
+
+/// Post-commit failure for a committed file whose link count could not be
+/// read. Raised only once the reported path has been confirmed, so the
+/// message names the output by it.
+fn link_count_unreadable(path: &Path, source: io::Error) -> CryptoError {
+    CryptoError::Io(io::Error::new(
+        source.kind(),
+        format!(
+            "Output {} is complete, but its number of filesystem names could not be read: {source}",
+            sanitize_path_for_display(path)
+        ),
+    ))
+}
+
 /// Post-commit failure for a committed file with a link count other than
 /// one. The retained handle, rather than either mutable name, supplies the
 /// count. The message reports the count alone, because the operation cannot
@@ -315,7 +353,9 @@ pub(crate) fn with_rollback_report(
 /// Failure from [`finalize_file`], retaining whether the file reached a final
 /// name before the error. Key generation needs that distinction: if
 /// `public.key` committed and only a post-commit verification failed, rolling
-/// back `private.key` would leave an unsafe public-only pair.
+/// back `private.key` would leave an unsafe public-only pair. An error raised
+/// after the commit says in its message that the output is complete
+/// (`THREAT_MODEL.md` TM-06).
 #[derive(Debug)]
 pub(crate) struct FinalizeFileError {
     error: CryptoError,
@@ -391,8 +431,9 @@ fn sync_parent_dir(_path: &Path) {}
 /// preflight and this rename reports the same error class. Other
 /// failures surface as [`CryptoError::Io`]. A failure before publication
 /// removes the temp file best-effort. A failure after publication is marked
-/// by [`FinalizeFileError::committed`]; the final entry is kept because a
-/// bare-name rollback could delete a concurrent replacement.
+/// by [`FinalizeFileError::committed`], and its message says that the output
+/// is complete; the final entry is kept because a bare-name rollback could
+/// delete a concurrent replacement.
 ///
 /// On Linux and macOS the anchor is a parameter rather than something opened
 /// here because its lifetime is the guarantee: a handle opened at the commit
@@ -1208,7 +1249,9 @@ fn finalize_file_commit(
         )));
     };
     match commit(&output_dir.dir, &tmp_name, final_name) {
-        Ok(CommitRoute::Linked) => finish_link_commit(tmp, output_dir, final_path, &tmp_name),
+        Ok(CommitRoute::Linked) => {
+            finish_link_commit(tmp, output_dir, final_path, final_name, &tmp_name)
+        }
         Ok(CommitRoute::Renamed) => finish_renamed_commit(tmp, output_dir, final_path),
         Err(failure) => {
             let _ = remove_staged_temp(tmp, output_dir);
@@ -1308,11 +1351,17 @@ fn finish_link_commit(
     tmp: NamedTempFile,
     output_dir: &OutputDir,
     final_path: &Path,
+    final_name: &std::ffi::OsStr,
     tmp_name: &std::ffi::OsStr,
 ) -> Result<FinalizedFile, FinalizeFileError> {
-    finish_link_commit_with_remove(tmp, output_dir, final_path, tmp_name, |dir, name| {
-        dir.remove_file(name)
-    })
+    finish_link_commit_with_remove(
+        tmp,
+        output_dir,
+        final_path,
+        final_name,
+        tmp_name,
+        |dir, name| dir.remove_file(name),
+    )
 }
 
 #[cfg(unix)]
@@ -1320,6 +1369,7 @@ fn finish_link_commit_with_remove(
     tmp: NamedTempFile,
     output_dir: &OutputDir,
     final_path: &Path,
+    final_name: &std::ffi::OsStr,
     tmp_name: &std::ffi::OsStr,
     remove_staged: impl FnOnce(&cap_std::fs::Dir, &std::ffi::OsStr) -> io::Result<()>,
 ) -> Result<FinalizedFile, FinalizeFileError> {
@@ -1327,12 +1377,8 @@ fn finish_link_commit_with_remove(
         unlink_staged_temp_with_remove(tmp, output_dir, tmp_name, remove_staged);
     sync_committed_parent(output_dir, final_path);
 
-    let committed_identity = committed_identity.map_err(FinalizeFileError::after_commit)?;
-    let Some(final_name) = final_path.file_name() else {
-        return Err(FinalizeFileError::after_commit(CryptoError::Io(
-            no_final_component_error(),
-        )));
-    };
+    let committed_identity = committed_identity
+        .map_err(|e| FinalizeFileError::after_commit(reported_path_unconfirmed(final_path, e)))?;
     let finalized = reopen_committed_file(output_dir, final_name, committed_identity, final_path)
         .map_err(FinalizeFileError::after_commit)?;
     finalized
@@ -1380,7 +1426,7 @@ fn unlink_staged_temp(
     tmp: NamedTempFile,
     output_dir: &OutputDir,
     name: &std::ffi::OsStr,
-) -> (Result<Option<FileIdentity>, CryptoError>, io::Result<()>) {
+) -> (io::Result<Option<FileIdentity>>, io::Result<()>) {
     unlink_staged_temp_with_remove(tmp, output_dir, name, |dir, name| dir.remove_file(name))
 }
 
@@ -1390,11 +1436,9 @@ fn unlink_staged_temp_with_remove(
     output_dir: &OutputDir,
     name: &std::ffi::OsStr,
     remove_staged: impl FnOnce(&cap_std::fs::Dir, &std::ffi::OsStr) -> io::Result<()>,
-) -> (Result<Option<FileIdentity>, CryptoError>, io::Result<()>) {
+) -> (io::Result<Option<FileIdentity>>, io::Result<()>) {
     let (file, temp_path) = tmp.into_parts();
-    let identity = cap_std::fs::Metadata::from_file(&file)
-        .map(|metadata| file_identity(&metadata))
-        .map_err(CryptoError::Io);
+    let identity = cap_std::fs::Metadata::from_file(&file).map(|metadata| file_identity(&metadata));
     drop(file);
     let _ = temp_path.keep();
     let result = match remove_staged(&output_dir.dir, name) {
@@ -1421,7 +1465,9 @@ fn remove_staged_temp(tmp: NamedTempFile, output_dir: &OutputDir) -> io::Result<
 /// was removed. This supplies the retained handle without keeping the staged
 /// handle open across an unlink on restrictive network filesystems. Where
 /// either identity is absent the comparison is skipped; the link-count and
-/// reported-path checks that follow still run.
+/// reported-path checks that follow still run. The commit has already
+/// happened, so a failed reopen is reported the way
+/// [`FinalizedFile::confirm_reported_path`] reports a failed read.
 #[cfg(unix)]
 fn reopen_committed_file(
     output_dir: &OutputDir,
@@ -1436,9 +1482,10 @@ fn reopen_committed_file(
     let file = output_dir
         .dir
         .open_with(final_name, &options)
-        .map_err(CryptoError::Io)?
+        .map_err(|e| reported_entry_error(final_path, e))?
         .into_std();
-    let metadata = cap_std::fs::Metadata::from_file(&file).map_err(CryptoError::Io)?;
+    let metadata = cap_std::fs::Metadata::from_file(&file)
+        .map_err(|e| reported_path_unconfirmed(final_path, e))?;
     if !metadata.is_file() {
         return Err(reported_output_changed(final_path));
     }
@@ -1816,6 +1863,93 @@ mod tests {
             ),
             "the missing name must report as a path mismatch"
         );
+    }
+
+    /// A reported path that cannot be read is neither confirmed nor shown to
+    /// have changed. The error keeps its kind and says the output is complete,
+    /// so it cannot be taken to mean that nothing was written.
+    #[cfg(unix)]
+    #[test]
+    fn finalized_file_reports_an_unreadable_reported_path_as_complete() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let out = tmp_dir.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let final_path = out.join("out.txt");
+
+        let mut tmp = tempfile::Builder::new().tempfile_in(&out).unwrap();
+        tmp.write_all(b"payload").unwrap();
+        let finalized = commit_to(tmp, &final_path, "Output").unwrap();
+
+        fs::set_permissions(&out, fs::Permissions::from_mode(0o000)).unwrap();
+        let outcome = finalized.confirm_reported_path(&final_path);
+        fs::set_permissions(&out, fs::Permissions::from_mode(0o755)).unwrap();
+
+        match outcome {
+            // A privileged runner reads the path despite the mode.
+            Ok(()) => {}
+            Err(CryptoError::Io(error)) => {
+                assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+                assert_unconfirmed_path(&error.to_string(), &final_path);
+            }
+            Err(other) => panic!("the denial must be reported as I/O, got: {other}"),
+        }
+        assert_eq!(fs::read(&final_path).unwrap(), b"payload");
+    }
+
+    /// Asserts that `message` reports the output as complete and `path` as
+    /// unconfirmed.
+    #[cfg(unix)]
+    fn assert_unconfirmed_path(message: &str, path: &Path) {
+        let expected = format!(
+            "Output is complete, but its reported path could not be confirmed: {}: ",
+            sanitize_path_for_display(path)
+        );
+        assert!(
+            message.starts_with(&expected),
+            "expected a message starting with {expected:?}, got: {message}"
+        );
+    }
+
+    /// Every error raised after a commit says that the output is complete,
+    /// including those for a check that could not run, which no test can
+    /// provoke through a live handle. One that reports a failed read keeps
+    /// that failure's kind.
+    #[test]
+    fn every_post_commit_error_says_the_output_is_complete() {
+        let path = Path::new("out.fcr");
+        let denied = || io::Error::from(io::ErrorKind::PermissionDenied);
+        let read_failed = Some(io::ErrorKind::PermissionDenied);
+        let cases = [
+            (reported_output_changed(path), None),
+            (
+                reported_entry_error(path, io::Error::from(io::ErrorKind::NotFound)),
+                None,
+            ),
+            (reported_entry_error(path, denied()), read_failed),
+            (reported_path_unconfirmed(path, denied()), read_failed),
+            (link_count_unreadable(path, denied()), read_failed),
+            (committed_link_count_error("out.fcr", 2), None),
+            #[cfg(unix)]
+            (
+                staged_temp_link_retained(path, std::ffi::OsStr::new(".staged"), denied()),
+                read_failed,
+            ),
+        ];
+        for (error, kind) in cases {
+            let message = error.to_string();
+            assert!(
+                message.starts_with("Output ") && message.contains(" is complete"),
+                "a post-commit error must say the output is complete, got: {message}"
+            );
+            if let Some(kind) = kind {
+                assert!(
+                    matches!(&error, CryptoError::Io(source) if source.kind() == kind),
+                    "the failure's kind must survive, got: {error:?}"
+                );
+            }
+        }
     }
 
     /// `tempfile` can persist through a hard link of its own on Unix and
@@ -2621,14 +2755,20 @@ mod tests {
             .hard_link(&tmp_name, &output_dir.dir, final_path.file_name().unwrap())
             .unwrap();
 
-        let error =
-            finish_link_commit_with_remove(tmp, &output_dir, &final_path, &tmp_name, |_, _| {
+        let error = finish_link_commit_with_remove(
+            tmp,
+            &output_dir,
+            &final_path,
+            final_path.file_name().unwrap(),
+            &tmp_name,
+            |_, _| {
                 Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     "injected staged unlink failure",
                 ))
-            })
-            .expect_err("a retained temporary name must not report success");
+            },
+        )
+        .expect_err("a retained temporary name must not report success");
 
         assert!(error.committed());
         let rendered = error.into_crypto_error().to_string();
@@ -2638,6 +2778,59 @@ mod tests {
         );
         assert_eq!(fs::read(&final_path).unwrap(), b"payload");
         assert_eq!(fs::read(tmp_dir.path().join(tmp_name)).unwrap(), b"payload");
+    }
+
+    /// Once the final hard link exists, a final name that cannot be reopened
+    /// is reported as an unconfirmed path of a complete output, marked as a
+    /// post-commit failure, and the committed file stays.
+    #[cfg(unix)]
+    #[test]
+    fn finalize_via_link_reports_an_unopenable_final_name_as_complete() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let final_path = tmp_dir.path().join("out.txt");
+
+        let mut tmp = tempfile::Builder::new()
+            .tempfile_in(tmp_dir.path())
+            .unwrap();
+        tmp.write_all(b"payload").unwrap();
+        let tmp_name = tmp.path().file_name().unwrap().to_os_string();
+        let output_dir = OutputDir::open(tmp_dir.path()).unwrap();
+        output_dir
+            .dir
+            .hard_link(&tmp_name, &output_dir.dir, final_path.file_name().unwrap())
+            .unwrap();
+
+        let outcome = finish_link_commit_with_remove(
+            tmp,
+            &output_dir,
+            &final_path,
+            final_path.file_name().unwrap(),
+            &tmp_name,
+            |dir, name| {
+                fs::set_permissions(&final_path, fs::Permissions::from_mode(0o000))?;
+                dir.remove_file(name)
+            },
+        );
+        fs::set_permissions(&final_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        match outcome {
+            // A privileged runner reopens the file despite its mode.
+            Ok(_) => {}
+            Err(error) => {
+                assert!(error.committed());
+                match error.into_crypto_error() {
+                    CryptoError::Io(error) => {
+                        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+                        assert_unconfirmed_path(&error.to_string(), &final_path);
+                    }
+                    other => panic!("the denial must be reported as I/O, got: {other}"),
+                }
+            }
+        }
+        assert_eq!(fs::read(&final_path).unwrap(), b"payload");
+        assert!(!tmp_dir.path().join(tmp_name).exists());
     }
 
     /// A concurrent directory writer can rename the staged link after the
@@ -2665,6 +2858,7 @@ mod tests {
             tmp,
             &output_dir,
             &final_path,
+            final_path.file_name().unwrap(),
             &tmp_name,
             |dir, name| {
                 dir.rename(name, dir, &hidden_name)?;
@@ -2712,6 +2906,7 @@ mod tests {
             tmp,
             &output_dir,
             &final_path,
+            final_path.file_name().unwrap(),
             &tmp_name,
             |dir, name| {
                 dir.rename(name, dir, &hidden_name)?;

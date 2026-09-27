@@ -851,25 +851,31 @@ fn require_promoted_root(
 /// committed output has already been ratified
 /// ([`output_confirmation_resource_error`]), and so does an identity that
 /// carries no information. Every other open or identity-read failure is
-/// propagated: permission denial can itself be a property of a
+/// returned: permission denial can itself be a property of a
 /// replacement directory created by the local writer this check defends
-/// against.
+/// against. The output is committed by then, so every error says that it
+/// is complete.
 fn require_output_anchor_unchanged(
     output_handle: &Dir,
     output_dir: &Path,
     root_name: &OsStr,
 ) -> Result<(), CryptoError> {
+    let unconfirmed = |error| output_directory_unconfirmed(output_dir, root_name, error);
     let opened = platform::open_anchor(output_dir);
     if matches!(&opened, Err(CryptoError::Io(e)) if path_no_longer_a_directory(e)) {
         return Err(output_directory_changed(output_dir, root_name));
     }
-    let Some(current) = confirmation_step(opened)? else {
+    let Some(current) = confirmation_step(opened).map_err(unconfirmed)? else {
         return Ok(());
     };
-    let Some(current_id) = confirmation_step(platform::dir_object_id(&current))? else {
+    let Some(current_id) =
+        confirmation_step(platform::dir_object_id(&current)).map_err(unconfirmed)?
+    else {
         return Ok(());
     };
-    let Some(committed_id) = confirmation_step(platform::dir_object_id(output_handle))? else {
+    let Some(committed_id) =
+        confirmation_step(platform::dir_object_id(output_handle)).map_err(unconfirmed)?
+    else {
         return Ok(());
     };
     match (current_id, committed_id) {
@@ -1024,6 +1030,30 @@ fn output_directory_changed(output_dir: &Path, root_name: &OsStr) -> CryptoError
         "Output {} is complete but its directory changed: {}",
         sanitize_for_display(&root_name.to_string_lossy()),
         output_dir.display()
+    ))
+}
+
+/// Error for a destination-path confirmation that could not run after the
+/// commit. Worded like [`output_directory_changed`], because the output is
+/// just as complete, but it does not say the directory changed: nothing
+/// showed that it did. The underlying error's kind and text are kept, since
+/// they name what failed.
+fn output_directory_unconfirmed(
+    output_dir: &Path,
+    root_name: &OsStr,
+    error: CryptoError,
+) -> CryptoError {
+    let kind = match &error {
+        CryptoError::Io(source) => source.kind(),
+        _ => io::ErrorKind::Other,
+    };
+    CryptoError::Io(io::Error::new(
+        kind,
+        format!(
+            "Output {} is complete, but its directory could not be confirmed: {}: {error}",
+            sanitize_for_display(&root_name.to_string_lossy()),
+            output_dir.display()
+        ),
     ))
 }
 
@@ -5587,7 +5617,9 @@ mod tests {
     }
 
     /// A denied traversal propagates: it cannot be accepted merely because
-    /// the replacement directory refuses the identity check.
+    /// the replacement directory refuses the identity check. It keeps its
+    /// kind and says the output is complete, because the check runs only
+    /// after the commit.
     #[cfg(unix)]
     #[test]
     fn the_anchor_check_propagates_access_denial() {
@@ -5612,9 +5644,80 @@ mod tests {
             }
             Err(CryptoError::Io(error)) => {
                 assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+                assert_directory_unconfirmed(&error.to_string(), "f.txt", &out);
             }
             Err(other) => panic!("access denial must propagate as I/O, got: {other}"),
         }
+    }
+
+    /// Asserts that `message` reports the output `root_name` as complete and
+    /// its directory `out` as unconfirmed rather than changed.
+    #[cfg(unix)]
+    fn assert_directory_unconfirmed(message: &str, root_name: &str, out: &Path) {
+        let expected = format!(
+            "Output {root_name} is complete, but its directory could not be confirmed: {}: ",
+            out.display()
+        );
+        assert!(
+            message.starts_with(&expected),
+            "expected a message starting with {expected:?}, got: {message}"
+        );
+    }
+
+    /// A destination confirmation that cannot run after the commit fails the
+    /// decrypt with an error that says the output is complete, and
+    /// `DeleteOnError` leaves that output in place. The parent of the output
+    /// directory becomes untraversable once the root mode is applied, so the
+    /// confirmation's reopen by path is refused while every step before it
+    /// resolves through retained handles.
+    #[cfg(unix)]
+    #[test]
+    fn an_unconfirmed_destination_reports_the_complete_output_and_keeps_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let parent = tmp.path().join("parent");
+        let out = parent.join("out");
+        fs::create_dir_all(&out).unwrap();
+        let root_name = "f.txt";
+        let plaintext = b"real plaintext";
+        let manifest = single_file_manifest(root_name, plaintext);
+        let archive = build_archive(&manifest, &[(root_name, plaintext)]);
+
+        let outcome = unarchive_inner_with_hooks(
+            Cursor::new(archive),
+            &out,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::DeleteOnError,
+            Seams {
+                compare_owners: platform::compare_owners,
+                before_promotion: || Ok(()),
+                after_promotion: |_| Ok(()),
+                after_root_mode: |_| {
+                    fs::set_permissions(&parent, fs::Permissions::from_mode(0o000))
+                        .map_err(CryptoError::Io)
+                },
+            },
+        );
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+
+        match outcome {
+            Ok(path) => {
+                // A privileged runner traverses the directory despite its
+                // mode, and the unchanged destination confirms.
+                assert_eq!(path, out.join(root_name));
+            }
+            Err(CryptoError::Io(error)) => {
+                assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+                assert_directory_unconfirmed(&error.to_string(), root_name, &out);
+            }
+            Err(other) => panic!("the denial must be reported as I/O, got: {other}"),
+        }
+        assert_eq!(
+            fs::read(out.join(root_name)).unwrap(),
+            plaintext,
+            "the committed output must survive the failed confirmation"
+        );
     }
 
     /// Only descriptor/process memory exhaustion skips the destination-path

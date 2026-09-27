@@ -873,6 +873,74 @@ mod tests {
         assert_eq!(std::fs::read(&output_path).unwrap(), b"replacement");
     }
 
+    /// A final path check that cannot run fails the write with an error
+    /// that keeps its kind and says the output is complete, because the
+    /// file is already committed; the file stays. The output directory
+    /// becomes untraversable after finalization, so the check's read by
+    /// path is refused while the retained handle still works.
+    #[cfg(unix)]
+    #[test]
+    fn encrypted_writer_reports_an_unconfirmed_path_as_complete() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let input = tmp.path().join("input.txt");
+        let output_dir = tmp.path().join("out");
+        let output_path = output_dir.join("output.fcr");
+        std::fs::write(&input, b"plaintext").unwrap();
+        std::fs::create_dir(&output_dir).unwrap();
+
+        let prepared = archive::prepare_archive(&input, archive::ArchiveLimits::default()).unwrap();
+        let DerivedSubkeys {
+            payload_key,
+            header_key,
+        } = dummy_subkeys();
+        let stream_nonce = [0x07u8; STREAM_NONCE_SIZE];
+        let entry = dummy_entry(argon2id::TYPE_NAME, argon2id::BODY_LENGTH);
+        let built = build_encrypted_header(
+            std::slice::from_ref(&entry),
+            b"",
+            stream_nonce,
+            payload_key,
+            &header_key,
+        )
+        .unwrap();
+
+        let outcome = write_encrypted_file_with_post_finalize(
+            prepared,
+            &output_dir,
+            Some(&output_path),
+            "unused",
+            &built,
+            |_| Ok(()),
+            |_| std::fs::set_permissions(&output_dir, std::fs::Permissions::from_mode(0o000)),
+        );
+        std::fs::set_permissions(&output_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        match outcome {
+            // A privileged runner reads the path despite the mode.
+            Ok(path) => assert_eq!(path, output_path),
+            Err(CryptoError::Io(error)) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+                let expected = format!(
+                    "Output is complete, but its reported path could not be confirmed: {}: ",
+                    crate::error::sanitize_path_for_display(&output_path)
+                );
+                assert!(
+                    error.to_string().starts_with(&expected),
+                    "expected a message starting with {expected:?}, got: {error}"
+                );
+            }
+            Err(other) => panic!("the denial must be reported as I/O, got: {other}"),
+        }
+        assert!(
+            std::fs::read(&output_path)
+                .unwrap()
+                .starts_with(&format::MAGIC),
+            "the committed encrypted file must stay"
+        );
+    }
+
     /// Concatenates the three on-disk byte regions a writer emits in
     /// order: `prefix || header || mac`. Used by every round-trip /
     /// reader-side test below to feed the parser.

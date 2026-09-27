@@ -50,11 +50,12 @@ use crate::container::{
 use crate::crypto::keys::{DerivedSubkeys, FileKey, derive_subkeys, random_bytes};
 use crate::crypto::stream::{STREAM_NONCE_SIZE, payload_decryptor};
 use crate::crypto::tlv::validate_tlv;
-use crate::error::CryptoError;
+use crate::error::{CryptoError, append_report};
 use crate::format;
 use crate::fs::paths::{
     KEY_FILE_LABEL, OUTPUT_LABEL, encryption_base_name, open_input_file, reject_occupied,
 };
+use crate::key::files::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};
 use crate::recipient::entry::{RecipientBody, RecipientEntry};
 #[cfg(test)]
 use crate::recipient::policy::MixingPolicy;
@@ -737,7 +738,6 @@ fn generate_key_pair_with_seams(
     use std::io::Write as _;
 
     use crate::fs::atomic;
-    use crate::key::files::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};
     use crate::key::private::seal_private_key;
     use crate::key::public::{encode_recipient_string, fingerprint_hex};
     use crate::recipient::native::x25519;
@@ -788,6 +788,12 @@ fn generate_key_pair_with_seams(
     // (validates type-name grammar, computes the internal SHA3-256
     // checksum, emits BIP 173 lowercase Bech32).
     let recipient_string = encode_recipient_string(x25519::TYPE_NAME, &public_material)?;
+
+    // From the in-memory key material the recipient string just encoded, so
+    // it matches `PublicKey::from_key_file(..).fingerprint()` for the file
+    // without reading it back. Computed before either commit, so it cannot
+    // fail once a key file is on disk.
+    let fingerprint = fingerprint_hex(x25519::TYPE_NAME, &public_material)?;
 
     // Retain the output directory before the first temporary exists. On Linux
     // and macOS both commits, their rollbacks, and their durability barriers
@@ -844,21 +850,17 @@ fn generate_key_pair_with_seams(
         &committed_dir,
     )?;
 
-    // Compute the fingerprint from the in-memory `public_material`
-    // rather than re-reading and re-decoding `public.key` from disk.
-    // The bytes here are the same ones the recipient string just
-    // encoded, so the fingerprint matches what
-    // `PublicKey::from_key_file(...).fingerprint()` would produce —
-    // without paying the extra disk read + Bech32 decode + SHA3 in
-    // the API layer.
-    let fingerprint = fingerprint_hex(x25519::TYPE_NAME, &public_material)?;
-
     after_commit(&private_key_path, &public_key_path)?;
 
     // Retain both committed handles until the last possible moment and
     // confirm that the paths returned to the caller still denote those files.
-    private_finalized.confirm_reported_path(&private_key_path)?;
-    public_finalized.confirm_reported_path(&public_key_path)?;
+    // Each error already says that its own file is complete.
+    private_finalized
+        .confirm_reported_path(&private_key_path)
+        .map_err(|e| append_report(e, &also_complete_report(PUBLIC_KEY_FILENAME)))?;
+    public_finalized
+        .confirm_reported_path(&public_key_path)
+        .map_err(|e| append_report(e, &also_complete_report(PRIVATE_KEY_FILENAME)))?;
 
     Ok((
         private_key_path,
@@ -885,17 +887,18 @@ fn generate_key_pair_with_seams(
 ///
 /// - If the `private.key` commit fails before publication, neither file is
 ///   published. A post-commit verification or staged-unlink failure preserves
-///   the committed private key and reports the error.
+///   the committed private key and reports that it is complete.
 /// - If the first directory flush fails, `private.key` is removed best-effort.
 ///   The still-staged public file is removed through the same retained output
 ///   directory, and a result that does not prove it gone is reported.
 /// - If the `public.key` commit fails before publication, `private.key` is
 ///   removed best-effort. A post-commit failure preserves both committed
-///   final names rather than manufacturing a public-only pair.
+///   final names rather than manufacturing a public-only pair, and reports
+///   both files as complete.
 /// - If the final directory flush fails, `public.key` is removed and
 ///   `private.key` is kept. Removing both without a working directory flush
-///   could leave only `public.key` after power loss. The remaining private key
-///   is safe to delete.
+///   could leave only `public.key` after power loss. The error says that the
+///   private key was kept; it is safe to delete.
 /// - A removal that cannot confirm the key file is gone — the entry was
 ///   replaced, its identity could not be read, or the file had other
 ///   names — is reported in the returned error.
@@ -1065,7 +1068,10 @@ fn commit_key_pair_files_with_barrier_and_public_finalizer(
                 // key at its final name, and deleting the private half would
                 // create the unsafe public-only state this ordering prevents.
                 if error.committed() {
-                    return Err(error.into_crypto_error());
+                    return Err(append_report(
+                        error.into_crypto_error(),
+                        &also_complete_report(PRIVATE_KEY_FILENAME),
+                    ));
                 }
                 let rollback =
                     committed_dir.remove_published_if_retained(private_key_path, private_finalized);
@@ -1080,12 +1086,25 @@ fn commit_key_pair_files_with_barrier_and_public_finalizer(
         let rollback =
             committed_dir.remove_published_if_retained(public_key_path, public_finalized);
         return Err(atomic::with_rollback_report(
-            CryptoError::Io(e),
+            append_report(CryptoError::Io(e), &kept_report(PRIVATE_KEY_FILENAME)),
             rollback,
             public_key_path,
         ));
     }
     Ok((private_finalized, public_finalized))
+}
+
+/// The clause appended to an error raised once both key files are
+/// committed, naming the one the error does not already describe.
+fn also_complete_report(file_name: &str) -> String {
+    format!("{file_name} is also complete")
+}
+
+/// The clause appended when the directory flush after the `public.key`
+/// commit fails: the rollback takes `public.key` away, and the committed
+/// `private.key` stays.
+fn kept_report(file_name: &str) -> String {
+    format!("{file_name} is complete and was kept")
 }
 
 #[cfg(test)]
@@ -1109,7 +1128,6 @@ mod tests {
     use crate::crypto::stream::payload_encryptor;
     use crate::error::FormatDefect;
     use crate::format;
-    use crate::key::files::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};
     use crate::key::limits::KeyReadLimits;
     use crate::key::public::read_public_key;
     use crate::passphrase::Passphrase;
@@ -2300,7 +2318,6 @@ mod tests {
     #[test]
     fn keygen_rejects_either_key_path_replaced_after_commit() {
         use crate::crypto::kdf::KdfParams;
-        use crate::key::files::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};
 
         let tmp = tempfile::TempDir::new().unwrap();
         let kdf_params = KdfParams::test_fast_default();
@@ -2329,13 +2346,19 @@ mod tests {
             )
             .expect_err("a replaced key path must not be returned");
 
+            let other = if target == PRIVATE_KEY_FILENAME {
+                PUBLIC_KEY_FILENAME
+            } else {
+                PRIVATE_KEY_FILENAME
+            };
             assert!(
                 matches!(
-                    err,
+                    &err,
                     CryptoError::InvalidInput(message)
                         if message.contains("reported path changed")
+                            && message.ends_with(&format!("; {other} is also complete"))
                 ),
-                "{target} replacement must be reported explicitly"
+                "{target} replacement must be reported explicitly, with {other} as complete, got: {err}"
             );
             assert_ne!(
                 fs::read(&committed_path).unwrap(),
@@ -2343,6 +2366,59 @@ mod tests {
                 "the committed {target} must survive under its new name"
             );
             assert_eq!(fs::read(&target_path).unwrap(), b"replacement");
+        }
+    }
+
+    /// A reported-path check that cannot run once both key files are
+    /// committed fails the call with an error that says both files are
+    /// complete, and neither file is removed. The output directory becomes
+    /// untraversable after the commits, so the check's read by path is
+    /// refused while the retained handles still work.
+    #[cfg(unix)]
+    #[test]
+    fn keygen_reports_both_keys_as_complete_when_a_path_cannot_be_confirmed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        use crate::crypto::kdf::KdfParams;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let output_dir = tmp.path().join("keys");
+        let private_key_path = output_dir.join(PRIVATE_KEY_FILENAME);
+
+        let outcome = generate_key_pair_with_seams(
+            Passphrase::new("passphrase"),
+            &KdfParams::test_fast_default(),
+            None,
+            &output_dir,
+            &|_| {},
+            |_, _| Ok(()),
+            |_, _| fs::set_permissions(&output_dir, fs::Permissions::from_mode(0o000)),
+        );
+        fs::set_permissions(&output_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+        match outcome {
+            // A privileged runner reads the paths despite the mode.
+            Ok(_) => {}
+            Err(CryptoError::Io(error)) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+                let message = error.to_string();
+                let expected = format!(
+                    "Output is complete, but its reported path could not be confirmed: {}: ",
+                    crate::error::sanitize_path_for_display(&private_key_path)
+                );
+                assert!(
+                    message.starts_with(&expected)
+                        && message.ends_with(&format!("; {PUBLIC_KEY_FILENAME} is also complete")),
+                    "both key files must be reported as complete, got: {message}"
+                );
+            }
+            Err(other) => panic!("the denial must be reported as I/O, got: {other}"),
+        }
+        for name in [PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME] {
+            assert!(
+                output_dir.join(name).is_file(),
+                "the committed {name} must stay"
+            );
         }
     }
 
@@ -2356,7 +2432,6 @@ mod tests {
     #[test]
     fn keygen_refuses_an_output_directory_swapped_in_after_staging() {
         use crate::crypto::kdf::KdfParams;
-        use crate::key::files::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};
 
         let tmp = tempfile::TempDir::new().unwrap();
         let output_dir = tmp.path().join("keys");
@@ -2404,7 +2479,6 @@ mod tests {
     #[test]
     fn keygen_commits_into_the_directory_it_began_in_across_a_swap() {
         use crate::crypto::kdf::KdfParams;
-        use crate::key::files::PRIVATE_KEY_FILENAME;
 
         let tmp = tempfile::TempDir::new().unwrap();
         let output_dir = tmp.path().join("keys");
@@ -2454,7 +2528,6 @@ mod tests {
     #[test]
     fn keygen_reports_a_public_staging_file_it_cannot_remove_through_the_anchor() {
         use crate::crypto::kdf::KdfParams;
-        use crate::key::files::{PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME};
 
         let tmp = tempfile::TempDir::new().unwrap();
         let output_dir = tmp.path().join("keys");
@@ -2755,6 +2828,11 @@ mod tests {
             matches!(err, CryptoError::Io(_)),
             "directory flush failure must map to the I/O error class, got {err:?}"
         );
+        assert_eq!(
+            err.to_string(),
+            "injected directory flush failure; private.key is complete and was kept",
+            "the error must say which key file remains"
+        );
         assert!(
             !public_key_path.exists(),
             "public.key must be removed when the final directory flush failed"
@@ -2804,7 +2882,10 @@ mod tests {
         )
         .expect_err("the injected post-commit failure must be returned");
 
-        assert_eq!(err.to_string(), "injected post-commit finalization failure");
+        assert_eq!(
+            err.to_string(),
+            "injected post-commit finalization failure; private.key is also complete"
+        );
         assert_eq!(fs::read(&private_key_path).unwrap(), b"private bytes");
         assert_eq!(fs::read(&public_key_path).unwrap(), b"public bytes");
         assert_eq!(

@@ -85,10 +85,10 @@ legitimately differ; each such row's `condition_id` names the cap involved.
 ### Verifying the corpus as data
 
 `tools/verify_manifests.py` checks the corpus without decrypting anything and
-without needing FerroCrypt: table and identifier grammar, every committed
-digest against the bytes it names, referential integrity between the tables, the
-enumerated values, and the per-outcome column rules of §12.3. Python 3 standard
-library only.
+without needing FerroCrypt: the table columns, the identifier and reference
+grammar, every committed digest against the bytes it names, referential
+integrity between the tables, the enumerated values, and the per-outcome column
+rules of §12.3. Python 3 standard library only.
 
 ```bash
 python3 tools/verify_manifests.py

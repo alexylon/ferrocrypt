@@ -2708,8 +2708,13 @@ match `[a-z0-9][a-z0-9._-]*`. Capability IDs instead use the structured forms
 defined in §12.2. A non-`-` digest field MUST contain exactly 64 lowercase
 hexadecimal characters. Except for the payload-key commitment defined below,
 each non-`-` `*_sha3_256` field MUST equal the SHA3-256 digest of the exact
-bytes named by its corresponding non-`-` `*_ref` field. References MUST use
-POSIX separators and be relative to `testvectors/wire/`.
+bytes named by its corresponding non-`-` `*_ref` field. A non-`-` `*_ref` field
+MUST be a path relative to `testvectors/wire/`: one or more components joined
+by single `/` separators, each component matching the ID grammar above. That
+rules out absolute paths, drive and UNC prefixes, backslashes, empty, `.`, and
+`..` components, and upper-case letters, so a reference stays inside the corpus
+and names the same file on every platform, including one whose file names
+ignore case.
 
 Each `diagnostic-classes.tsv` `description_ref` MUST identify stable explanatory
 text for the class, held in `diagnostic-classes/` as one file per class, because
@@ -2920,7 +2925,8 @@ FerroCrypt's own writer and reader is not sufficient transcript evidence.
 
 **Replay requirements.** Normal conformance replay MUST parse every manifest
 table strictly; verify every referenced digest; reject duplicate IDs, invalid
-paths and list forms, and dangling references; apply effective errata without
+paths and list forms, and dangling references, validating each reference
+before it reads the file the reference names; apply effective errata without
 deleting history; exercise `.fcr`, public-key, and private-key cases through
 public interfaces where possible; apply §12.2's capability rule; compare
 successful results with their exact expected bytes or decoded fields; and map

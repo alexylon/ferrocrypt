@@ -25,22 +25,88 @@ from pathlib import Path
 SCHEMA_VERSION = 1
 
 ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+# A reference is a relative path whose components each match the identifier
+# grammar, which rules out absolute paths, drive and UNC prefixes, backslashes,
+# and empty, "." or ".." components (FORMAT.md section 12.3).
+REFERENCE = re.compile(r"^[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)*$")
 DIGEST = re.compile(r"^[0-9a-f]{64}$")
 NONCE = re.compile(r"^[0-9a-f]{38}$")
+# Section 12.2 reserves 0x00 in every stored version domain, so no capability
+# names it.
 CAPABILITY = re.compile(
-    r"^(outer_version|fca_version|public_key_version|private_key_version):0x[0-9A-F]{2}$"
+    r"^(outer_version|fca_version|public_key_version|private_key_version)"
+    r":0x(?!00)[0-9A-F]{2}$"
     r"|^(outer_tlv|private_key_tlv|fca_archive_tlv|fca_entry_tlv):0x[0-9A-F]{4}$"
     r"|^(recipient_type|key_type):.+$"
 )
 
-TABLES = (
-    "baselines.tsv",
-    "diagnostic-classes.tsv",
-    "credentials.tsv",
-    "origins.tsv",
-    "cases.tsv",
-    "errata.tsv",
-)
+# The six manifest tables and the exact columns each declares, in order.
+COLUMNS = {
+    "baselines.tsv": [
+        "baseline_id",
+        "established_by_release",
+        "parent_baseline_id",
+        "introduced_in_corpus_revision",
+    ],
+    "diagnostic-classes.tsv": [
+        "class_id",
+        "description_ref",
+        "description_sha3_256",
+        "introduced_in_corpus_revision",
+    ],
+    "credentials.tsv": [
+        "credential_id",
+        "kind",
+        "primary_ref",
+        "primary_sha3_256",
+        "secret_ref",
+        "secret_sha3_256",
+        "introduced_in_release",
+        "introduced_in_corpus_revision",
+    ],
+    "origins.tsv": [
+        "origin_id",
+        "origin_kind",
+        "anchor_case_id",
+        "payload_key_ref",
+        "payload_key_sha3_256",
+        "stream_nonce_hex",
+        "introduced_in_release",
+        "introduced_in_corpus_revision",
+    ],
+    "cases.tsv": [
+        "case_id",
+        "case_type",
+        "artifact_ref",
+        "artifact_sha3_256",
+        "first_required_by_baseline",
+        "introduced_in_release",
+        "introduced_in_corpus_revision",
+        "construction",
+        "parent_case_id",
+        "payload_transcript_kind",
+        "payload_origin_ids",
+        "credential_id",
+        "outcome",
+        "expectation_scope",
+        "capability_id",
+        "condition_id",
+        "diagnostic_class",
+        "expected_ref",
+        "expected_sha3_256",
+    ],
+    "errata.tsv": [
+        "erratum_id",
+        "affected_case_id",
+        "effective_corpus_revision",
+        "rationale_ref",
+        "rationale_sha3_256",
+        "replacement_case_id",
+        "introduced_in_release",
+    ],
+}
+
+TABLES = tuple(COLUMNS)
 
 # The identifier each table is keyed by. Section 12.3 forbids duplicate
 # identifiers, so a repeated key is a corpus defect and never a later row
@@ -145,6 +211,9 @@ def read_table(root, name):
         if line.startswith("#"):
             if columns is None:
                 columns = line[1:].strip().split("\t")
+                if columns != COLUMNS[name]:
+                    fail(f"{name}:{number}: the columns differ from FORMAT.md section 12.3")
+                    return []
             continue
         if columns is None:
             fail(f"{name}:{number}: a row precedes the column header")
@@ -161,9 +230,13 @@ def read_table(root, name):
                     fail(f"{name}:{number}: {column} contains {bad!r}")
             if value.startswith("/"):
                 fail(f"{name}:{number}: {column} is an absolute path")
+            if column.endswith("_ref") and value != "-" and not REFERENCE.match(value):
+                fail(f"{name}:{number}: {column} is not a corpus reference")
             if (name, column) in ENUMS and value not in ENUMS[(name, column)]:
                 fail(f"{name}:{number}: {column} has unknown value {value!r}")
         rows.append(dict(zip(columns, fields)))
+    if columns is None:
+        fail(f"{name}: no column header")
     return rows
 
 

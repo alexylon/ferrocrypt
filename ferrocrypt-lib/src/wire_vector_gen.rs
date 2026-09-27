@@ -254,8 +254,13 @@ impl Corpus {
     }
 
     /// Writes `bytes` at `relative_ref` under the corpus root and returns the
-    /// reference for a manifest column.
+    /// reference for a manifest column. The reference is checked first, so a
+    /// generator bug cannot write outside the corpus.
     fn write_ref(&self, relative_ref: &str, bytes: &[u8]) -> String {
+        assert!(
+            is_corpus_reference(relative_ref),
+            "{relative_ref:?} is not a corpus reference"
+        );
         let path = self.root.join(relative_ref);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("create corpus subdirectory");
@@ -466,25 +471,145 @@ const DIAGNOSTIC_CLASS_TEXT: &[(&str, &str)] = &[
 // ─── Manifest emission ─────────────────────────────────────────────────────
 
 /// Rejects any manifest field that would break the §12.3 grammar before it
-/// reaches a committed table. A generator bug that produced a tab, a newline,
-/// a backslash, a parent-directory component, or an absolute path would
+/// reaches a committed table: a tab or line break, which the table format
+/// cannot carry, or any rule [`field_violation`] checks. A generator bug would
 /// otherwise ship as an unreadable frozen row.
 fn check_field(table: &str, column: &str, value: &str) {
-    assert!(!value.is_empty(), "{table}.{column} must not be empty");
-    for forbidden in ['\t', '\r', '\n', '\\'] {
+    for forbidden in ['\t', '\r', '\n'] {
         assert!(
             !value.contains(forbidden),
             "{table}.{column} must not contain {forbidden:?}: {value}"
         );
     }
-    assert!(
-        !value.contains(".."),
-        "{table}.{column} must not contain '..': {value}"
-    );
-    assert!(
-        !value.starts_with('/'),
-        "{table}.{column} must not be an absolute path: {value}"
-    );
+    if let Some(violation) = field_violation(table, column, value) {
+        panic!("{table}.{column} {value:?}: {violation}");
+    }
+}
+
+/// The first `FORMAT.md` §12.3 field rule `value` breaks in `column` of
+/// `table`, or `None`: the rules every field shares, then the identifier,
+/// reference, digest, list, and capability forms its column carries. `-`
+/// stands for an inapplicable value, which an identifier column admits only
+/// where it is optional. The generator writes, and the replays in this module
+/// read, through this one grammar; `tests/wire_corpus.rs` applies the same
+/// rules from outside the crate.
+fn field_violation(table: &str, column: &str, value: &str) -> Option<&'static str> {
+    if value.is_empty() {
+        return Some("empty field");
+    }
+    if value.contains("..") || value.contains('\\') || value.starts_with('/') {
+        return Some("contains '..', a backslash, or an absolute path");
+    }
+    let id_column = ID_COLUMNS
+        .iter()
+        .find(|(name, _)| *name == table)
+        .and_then(|(_, columns)| columns.iter().find(|(name, _)| *name == column));
+    if let Some((_, optional)) = id_column {
+        let valid = if value == "-" {
+            *optional
+        } else {
+            is_manifest_id(value)
+        };
+        if !valid {
+            return Some("breaks the identifier grammar");
+        }
+    }
+    if value == "-" {
+        return None;
+    }
+    if column.ends_with("_ref") && !is_corpus_reference(value) {
+        return Some("not a corpus reference");
+    }
+    if column.ends_with("_sha3_256") && !(value.len() == 64 && is_lower_hex(value)) {
+        return Some("not a digest of 64 lowercase hexadecimal characters");
+    }
+    if column == "payload_origin_ids" {
+        let listed: Vec<&str> = value.split(',').collect();
+        if !listed.iter().all(|id| is_manifest_id(id)) {
+            return Some("breaks the list form");
+        }
+        if listed.iter().collect::<BTreeSet<_>>().len() != listed.len() {
+            return Some("repeats an origin");
+        }
+    }
+    if column == "capability_id" && !is_capability_id(value) {
+        return Some("breaks the capability form");
+    }
+    None
+}
+
+/// The columns holding a baseline, class, credential, origin, case, erratum,
+/// or condition ID, and whether each may hold `-`. Capability IDs follow the
+/// structured forms of `FORMAT.md` §12.2 instead.
+const ID_COLUMNS: &[(&str, &[(&str, bool)])] = &[
+    (
+        "baselines.tsv",
+        &[("baseline_id", false), ("parent_baseline_id", true)],
+    ),
+    ("diagnostic-classes.tsv", &[("class_id", false)]),
+    ("credentials.tsv", &[("credential_id", false)]),
+    (
+        "origins.tsv",
+        &[("origin_id", false), ("anchor_case_id", false)],
+    ),
+    (
+        "cases.tsv",
+        &[
+            ("case_id", false),
+            ("first_required_by_baseline", false),
+            ("parent_case_id", true),
+            ("credential_id", true),
+            ("condition_id", true),
+            ("diagnostic_class", true),
+        ],
+    ),
+    (
+        "errata.tsv",
+        &[
+            ("erratum_id", false),
+            ("affected_case_id", false),
+            ("replacement_case_id", true),
+        ],
+    ),
+];
+
+/// A path relative to the corpus root whose components each match the
+/// identifier grammar (`FORMAT.md` §12.3). That rules out absolute paths,
+/// drive and UNC prefixes, backslashes, and empty, `.`, or `..` components,
+/// so joining a reference onto the root can only name a file inside it.
+fn is_corpus_reference(value: &str) -> bool {
+    value.split('/').all(is_manifest_id)
+}
+
+/// The capability-ID forms of `FORMAT.md` §12.2: a stored version domain
+/// with two uppercase hexadecimal digits other than the reserved `0x00`, a
+/// TLV namespace with four, or a recipient or key type with its name.
+fn is_capability_id(value: &str) -> bool {
+    let Some((domain, subject)) = value.split_once(':') else {
+        return false;
+    };
+    let hex_digits = |digits: usize| {
+        subject.strip_prefix("0x").is_some_and(|hex| {
+            hex.len() == digits
+                && hex
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || matches!(c, 'A'..='F'))
+        })
+    };
+    match domain {
+        "outer_version" | "fca_version" | "public_key_version" | "private_key_version" => {
+            hex_digits(2) && subject != "0x00"
+        }
+        "outer_tlv" | "private_key_tlv" | "fca_archive_tlv" | "fca_entry_tlv" => hex_digits(4),
+        "recipient_type" | "key_type" => !subject.is_empty(),
+        _ => false,
+    }
+}
+
+fn is_lower_hex(value: &str) -> bool {
+    value
+        .chars()
+        .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'))
 }
 
 /// Writes one table: a header comment naming the columns, then tab-separated
@@ -961,7 +1086,7 @@ fn published_rows(root: &Path, name: &str, columns: &[&str]) -> Vec<Vec<String>>
     if !root.join(name).is_file() {
         return Vec::new();
     }
-    read_manifest(root, name)
+    read_manifest_with_columns(root, name, columns)
         .into_iter()
         .map(|row| {
             columns
@@ -1117,7 +1242,7 @@ fn a_published_row_keeps_the_stamps_it_was_published_with() {
         append_test_rebuild(),
     );
 
-    let rows = read_manifest(dir.path(), "t.tsv");
+    let rows = read_manifest_with_columns(dir.path(), "t.tsv", &APPEND_TEST_COLUMNS);
     let stamps = |case_id: &str| {
         let row = rows
             .iter()
@@ -1163,7 +1288,7 @@ fn a_row_of_the_working_revision_may_still_change() {
     );
     write_appended_table(dir.path(), "t.tsv", "case_id", &APPEND_TEST_COLUMNS, rows);
 
-    let rows = read_manifest(dir.path(), "t.tsv");
+    let rows = read_manifest_with_columns(dir.path(), "t.tsv", &APPEND_TEST_COLUMNS);
     let working = rows
         .iter()
         .find(|r| r["case_id"] == "working")
@@ -1200,6 +1325,48 @@ fn a_withdrawn_frozen_row_is_refused() {
     write_appended_table(dir.path(), "t.tsv", "case_id", &APPEND_TEST_COLUMNS, rows);
 }
 
+/// The replays in this module read a table only through the strict parser,
+/// so a reference that could name a file outside the corpus is refused before
+/// anything is read (`FORMAT.md` §12.3).
+#[test]
+#[should_panic(expected = "not a corpus reference")]
+fn a_manifest_reference_outside_the_corpus_is_refused() {
+    let dir = tempfile::tempdir().expect("table dir");
+    fs::write(
+        dir.path().join("t.tsv"),
+        format!(
+            "# {}\nescape\tC:/outside\t0.3.0\t1\n",
+            APPEND_TEST_COLUMNS.join("\t")
+        ),
+    )
+    .expect("write table");
+    read_manifest_with_columns(dir.path(), "t.tsv", &APPEND_TEST_COLUMNS);
+}
+
+/// A table whose header names other columns than the reader expects is a
+/// different schema, refused before any of its rows is read.
+#[test]
+#[should_panic(expected = "unexpected columns")]
+fn a_manifest_with_other_columns_is_refused() {
+    let dir = tempfile::tempdir().expect("table dir");
+    fs::write(
+        dir.path().join("t.tsv"),
+        format!("# {}\textra\n", APPEND_TEST_COLUMNS.join("\t")),
+    )
+    .expect("write table");
+    read_manifest_with_columns(dir.path(), "t.tsv", &APPEND_TEST_COLUMNS);
+}
+
+/// The generator checks a reference before it writes the file, so a
+/// generator bug cannot place a file outside the corpus.
+#[test]
+#[should_panic(expected = "is not a corpus reference")]
+fn the_generator_refuses_to_write_outside_the_corpus() {
+    let dir = tempfile::tempdir().expect("corpus dir");
+    let root = dir.path().join("wire");
+    Corpus::new(root).write_ref("../outside.bin", b"escaped");
+}
+
 /// Writes the version files, the diagnostic-class descriptions, and the six
 /// manifest tables. Digest columns are computed here from the committed bytes,
 /// so a row can never name a digest the referenced file does not have.
@@ -1215,12 +1382,7 @@ fn emit(corpus: &Corpus) {
         root,
         "baselines.tsv",
         "baseline_id",
-        &[
-            "baseline_id",
-            "established_by_release",
-            "parent_baseline_id",
-            "introduced_in_corpus_revision",
-        ],
+        table_columns("baselines.tsv"),
         vec![vec![
             BASELINE_ID.to_string(),
             INTRODUCED_IN_RELEASE.to_string(),
@@ -1247,12 +1409,7 @@ fn emit(corpus: &Corpus) {
         root,
         "diagnostic-classes.tsv",
         "class_id",
-        &[
-            "class_id",
-            "description_ref",
-            "description_sha3_256",
-            "introduced_in_corpus_revision",
-        ],
+        table_columns("diagnostic-classes.tsv"),
         class_rows,
     );
 
@@ -1260,16 +1417,7 @@ fn emit(corpus: &Corpus) {
         root,
         "credentials.tsv",
         "credential_id",
-        &[
-            "credential_id",
-            "kind",
-            "primary_ref",
-            "primary_sha3_256",
-            "secret_ref",
-            "secret_sha3_256",
-            "introduced_in_release",
-            "introduced_in_corpus_revision",
-        ],
+        table_columns("credentials.tsv"),
         corpus
             .credentials
             .iter()
@@ -1292,16 +1440,7 @@ fn emit(corpus: &Corpus) {
         root,
         "origins.tsv",
         "origin_id",
-        &[
-            "origin_id",
-            "origin_kind",
-            "anchor_case_id",
-            "payload_key_ref",
-            "payload_key_sha3_256",
-            "stream_nonce_hex",
-            "introduced_in_release",
-            "introduced_in_corpus_revision",
-        ],
+        table_columns("origins.tsv"),
         corpus
             .origins
             .iter()
@@ -1324,27 +1463,7 @@ fn emit(corpus: &Corpus) {
         root,
         "cases.tsv",
         "case_id",
-        &[
-            "case_id",
-            "case_type",
-            "artifact_ref",
-            "artifact_sha3_256",
-            "first_required_by_baseline",
-            "introduced_in_release",
-            "introduced_in_corpus_revision",
-            "construction",
-            "parent_case_id",
-            "payload_transcript_kind",
-            "payload_origin_ids",
-            "credential_id",
-            "outcome",
-            "expectation_scope",
-            "capability_id",
-            "condition_id",
-            "diagnostic_class",
-            "expected_ref",
-            "expected_sha3_256",
-        ],
+        table_columns("cases.tsv"),
         corpus
             .cases
             .iter()
@@ -1379,17 +1498,9 @@ fn emit(corpus: &Corpus) {
     // correct a frozen row, and rewriting the table would discard exactly the
     // corrections the freeze depends on. Revision 1 publishes none, so the
     // table ships with its header only.
-    let errata_columns = [
-        "erratum_id",
-        "affected_case_id",
-        "effective_corpus_revision",
-        "rationale_ref",
-        "rationale_sha3_256",
-        "replacement_case_id",
-        "introduced_in_release",
-    ];
-    let errata = published_rows(root, "errata.tsv", &errata_columns);
-    write_table(root, "errata.tsv", &errata_columns, errata);
+    let errata_columns = table_columns("errata.tsv");
+    let errata = published_rows(root, "errata.tsv", errata_columns);
+    write_table(root, "errata.tsv", errata_columns, errata);
 
     // Last, because the tables above are what these two files describe: a run
     // that stops on an append-only violation must not leave a revision behind
@@ -1444,22 +1555,107 @@ fn assert_no_unreferenced_files(corpus: &Corpus) {
     }
 }
 
-/// The six manifest tables of `FORMAT.md` §12.3.
-const MANIFEST_TABLES: &[&str] = &[
-    "baselines.tsv",
-    "diagnostic-classes.tsv",
-    "credentials.tsv",
-    "origins.tsv",
-    "cases.tsv",
-    "errata.tsv",
+/// The six manifest tables of `FORMAT.md` §12.3 and the exact columns each
+/// declares, in order. The generator writes and the replays in this module
+/// read every table through these lists.
+const MANIFEST_TABLES: &[(&str, &[&str])] = &[
+    (
+        "baselines.tsv",
+        &[
+            "baseline_id",
+            "established_by_release",
+            "parent_baseline_id",
+            "introduced_in_corpus_revision",
+        ],
+    ),
+    (
+        "diagnostic-classes.tsv",
+        &[
+            "class_id",
+            "description_ref",
+            "description_sha3_256",
+            "introduced_in_corpus_revision",
+        ],
+    ),
+    (
+        "credentials.tsv",
+        &[
+            "credential_id",
+            "kind",
+            "primary_ref",
+            "primary_sha3_256",
+            "secret_ref",
+            "secret_sha3_256",
+            "introduced_in_release",
+            "introduced_in_corpus_revision",
+        ],
+    ),
+    (
+        "origins.tsv",
+        &[
+            "origin_id",
+            "origin_kind",
+            "anchor_case_id",
+            "payload_key_ref",
+            "payload_key_sha3_256",
+            "stream_nonce_hex",
+            "introduced_in_release",
+            "introduced_in_corpus_revision",
+        ],
+    ),
+    (
+        "cases.tsv",
+        &[
+            "case_id",
+            "case_type",
+            "artifact_ref",
+            "artifact_sha3_256",
+            "first_required_by_baseline",
+            "introduced_in_release",
+            "introduced_in_corpus_revision",
+            "construction",
+            "parent_case_id",
+            "payload_transcript_kind",
+            "payload_origin_ids",
+            "credential_id",
+            "outcome",
+            "expectation_scope",
+            "capability_id",
+            "condition_id",
+            "diagnostic_class",
+            "expected_ref",
+            "expected_sha3_256",
+        ],
+    ),
+    (
+        "errata.tsv",
+        &[
+            "erratum_id",
+            "affected_case_id",
+            "effective_corpus_revision",
+            "rationale_ref",
+            "rationale_sha3_256",
+            "replacement_case_id",
+            "introduced_in_release",
+        ],
+    ),
 ];
+
+/// The columns manifest table `name` declares.
+fn table_columns(name: &str) -> &'static [&'static str] {
+    MANIFEST_TABLES
+        .iter()
+        .find(|(table, _)| *table == name)
+        .map(|(_, columns)| *columns)
+        .unwrap_or_else(|| panic!("{name} is not a §12.3 manifest table"))
+}
 
 /// Whether a corpus-relative path carries the corpus rather than being carried
 /// by it, so no manifest row names it. A rule rather than a list of names:
 /// `tools/` is matched by prefix, so adding a tool needs no edit here nor in
 /// the two other checkers that apply the same rule.
 fn is_structural_corpus_file(relative: &str) -> bool {
-    MANIFEST_TABLES.contains(&relative)
+    MANIFEST_TABLES.iter().any(|(table, _)| *table == relative)
         || matches!(relative, "SCHEMA-VERSION" | "CORPUS-REVISION" | "README.md")
         || relative.starts_with("tools/")
 }
@@ -4660,19 +4856,14 @@ fn replay_stream_kats() {
             "{case_id}: origin kind"
         );
 
-        let key_bytes: [u8; 32] = fs::read(root.join(&origin["payload_key_ref"]))
-            .expect("read payload key")
-            .try_into()
-            .expect("payload key is 32 bytes");
-        assert_eq!(
-            sha3_hex(&key_bytes),
-            origin["payload_key_sha3_256"],
-            "{case_id}: payload key does not match its committed digest"
-        );
+        let key_bytes: [u8; 32] =
+            read_committed(&root, origin, "payload_key_ref", "payload_key_sha3_256")
+                .try_into()
+                .expect("payload key is 32 bytes");
         let nonce = decode_hex_array::<STREAM_NONCE_SIZE>(&origin["stream_nonce_hex"]);
 
-        let plaintext = fs::read(root.join(&case["artifact_ref"])).expect("read KAT input");
-        let expected = fs::read(root.join(&case["expected_ref"])).expect("read KAT ciphertext");
+        let plaintext = read_committed(&root, case, "artifact_ref", "artifact_sha3_256");
+        let expected = read_committed(&root, case, "expected_ref", "expected_sha3_256");
         let payload_key = crate::crypto::keys::PayloadKey::from_bytes_for_tests(key_bytes);
 
         let mut produced = Vec::new();
@@ -4760,7 +4951,7 @@ fn replay_fcr_payload_origins() {
         let anchor = cases
             .get(&origin["anchor_case_id"])
             .unwrap_or_else(|| panic!("{origin_id}: anchor case is not declared"));
-        let bytes = fs::read(root.join(&anchor["artifact_ref"])).expect("read anchor artifact");
+        let bytes = read_committed(&root, anchor, "artifact_ref", "artifact_sha3_256");
 
         let Ok(header) = crate::container::read_encrypted_header(
             &mut bytes.as_slice(),
@@ -4830,11 +5021,18 @@ fn credential_row(root: &Path, credential_id: &str) -> BTreeMap<String, String> 
         .unwrap_or_else(|| panic!("{credential_id}: not declared in credentials.tsv"))
 }
 
-/// Reads a passphrase the corpus stores as a credential file. The file holds
-/// the passphrase bytes alone, with no terminator.
-fn credential_passphrase(root: &Path, reference: &str) -> Passphrase {
+/// Reads a passphrase the corpus stores as a credential file, named by
+/// `ref_column` of a `credentials.tsv` row. The file holds the passphrase
+/// bytes alone, with no terminator.
+fn credential_passphrase(
+    root: &Path,
+    credential: &BTreeMap<String, String>,
+    ref_column: &str,
+    digest_column: &str,
+) -> Passphrase {
     Passphrase::new(
-        fs::read_to_string(root.join(reference)).unwrap_or_else(|e| panic!("{reference}: {e}")),
+        String::from_utf8(read_committed(root, credential, ref_column, digest_column))
+            .expect("a passphrase credential is UTF-8"),
     )
 }
 
@@ -4855,19 +5053,26 @@ fn unwrap_any_slot(
         // No credential opens no slot.
         "none" => return None,
         "passphrase" => (
-            Some(credential_passphrase(root, &credential["primary_ref"])),
+            Some(credential_passphrase(
+                root,
+                &credential,
+                "primary_ref",
+                "primary_sha3_256",
+            )),
             None,
         ),
         "private_key" => {
             // `secret_ref` is the passphrase that unlocks the key file. A row
             // pairing a key with a passphrase that does not unlock it opens no
             // slot, which is the same answer as a key that unwraps nothing.
-            let secret_ref = &credential["secret_ref"];
             assert_ne!(
-                secret_ref, "-",
+                credential["secret_ref"], "-",
                 "{credential_id}: a private_key credential names its unlock passphrase"
             );
-            let unlock = credential_passphrase(root, secret_ref);
+            let unlock = credential_passphrase(root, &credential, "secret_ref", "secret_sha3_256");
+            // Opened by path; its bytes are checked against the committed
+            // digest first.
+            read_committed(root, &credential, "primary_ref", "primary_sha3_256");
             match x25519::open_x25519_key_file(
                 &root.join(&credential["primary_ref"]),
                 &unlock,
@@ -4897,34 +5102,75 @@ fn unwrap_any_slot(
     )
 }
 
-/// Parses a manifest table into column-keyed rows. Positional indexing would
-/// silently read the wrong column if a later `SCHEMA-VERSION` adds one.
+/// Parses manifest table `name` of the committed corpus strictly; see
+/// [`read_manifest_with_columns`].
 fn read_manifest(root: &Path, name: &str) -> Vec<BTreeMap<String, String>> {
+    read_manifest_with_columns(root, name, table_columns(name))
+}
+
+/// Parses a manifest table strictly into column-keyed rows: its header must
+/// name exactly `columns`, and no field may break a rule [`field_violation`]
+/// checks, so a replay never joins an unvalidated reference onto the corpus
+/// root. Positional indexing would silently read the wrong column if a later
+/// `SCHEMA-VERSION` adds one.
+fn read_manifest_with_columns(
+    root: &Path,
+    name: &str,
+    columns: &[&str],
+) -> Vec<BTreeMap<String, String>> {
     let text = fs::read_to_string(root.join(name))
         .unwrap_or_else(|e| panic!("{name}: {e}. The corpus must be committed."));
-    let mut columns: Option<Vec<String>> = None;
+    assert!(!text.contains('\r'), "{name} must use LF line endings");
+    let mut header_seen = false;
     let mut rows = Vec::new();
     for line in text.lines() {
         if let Some(header) = line.strip_prefix('#') {
-            if columns.is_none() {
-                columns = Some(header.trim().split('\t').map(str::to_string).collect());
+            if !header_seen {
+                let declared: Vec<&str> = header.trim().split('\t').collect();
+                assert_eq!(declared, columns, "{name}: unexpected columns");
+                header_seen = true;
             }
             continue;
         }
-        let columns = columns
-            .as_ref()
-            .unwrap_or_else(|| panic!("{name}: no column header"));
+        assert!(header_seen, "{name}: rows precede the column header");
         let fields: Vec<&str> = line.split('\t').collect();
         assert_eq!(fields.len(), columns.len(), "{name}: row width");
+        for (column, value) in columns.iter().zip(&fields) {
+            if let Some(violation) = field_violation(name, column, value) {
+                panic!("{name}: {column} {value:?}: {violation}");
+            }
+        }
         rows.push(
             columns
                 .iter()
-                .cloned()
-                .zip(fields.iter().map(|f| f.to_string()))
+                .map(|column| column.to_string())
+                .zip(fields.iter().map(|value| value.to_string()))
                 .collect(),
         );
     }
+    assert!(header_seen, "{name}: no column header");
     rows
+}
+
+/// Reads the file `row[ref_column]` names and requires the digest committed
+/// in `digest_column`, so a replay run on its own relies on no byte the
+/// manifests do not commit. The reference was validated when its table was
+/// parsed.
+fn read_committed(
+    root: &Path,
+    row: &BTreeMap<String, String>,
+    ref_column: &str,
+    digest_column: &str,
+) -> Vec<u8> {
+    let reference = &row[ref_column];
+    assert_ne!(reference, "-", "{ref_column} names no file");
+    let bytes = fs::read(root.join(reference)).unwrap_or_else(|e| panic!("read {reference}: {e}"));
+    assert_eq!(
+        sha3_hex(&bytes),
+        row[digest_column],
+        "{reference} does not match its committed digest"
+    );
+    bytes
 }
 
 /// Decodes exactly `N` bytes of lowercase hexadecimal.

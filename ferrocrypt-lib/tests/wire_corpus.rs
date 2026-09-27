@@ -41,43 +41,248 @@ fn corpus_present() -> bool {
     corpus_root().is_dir()
 }
 
-/// One parsed manifest table: the column names from the header comment, and
-/// the rows as column-keyed maps.
+/// The six manifest tables of `FORMAT.md` §12.3 and the exact columns each
+/// declares, in order.
+const MANIFEST_TABLES: &[(&str, &[&str])] = &[
+    (
+        "baselines.tsv",
+        &[
+            "baseline_id",
+            "established_by_release",
+            "parent_baseline_id",
+            "introduced_in_corpus_revision",
+        ],
+    ),
+    (
+        "diagnostic-classes.tsv",
+        &[
+            "class_id",
+            "description_ref",
+            "description_sha3_256",
+            "introduced_in_corpus_revision",
+        ],
+    ),
+    (
+        "credentials.tsv",
+        &[
+            "credential_id",
+            "kind",
+            "primary_ref",
+            "primary_sha3_256",
+            "secret_ref",
+            "secret_sha3_256",
+            "introduced_in_release",
+            "introduced_in_corpus_revision",
+        ],
+    ),
+    (
+        "origins.tsv",
+        &[
+            "origin_id",
+            "origin_kind",
+            "anchor_case_id",
+            "payload_key_ref",
+            "payload_key_sha3_256",
+            "stream_nonce_hex",
+            "introduced_in_release",
+            "introduced_in_corpus_revision",
+        ],
+    ),
+    (
+        "cases.tsv",
+        &[
+            "case_id",
+            "case_type",
+            "artifact_ref",
+            "artifact_sha3_256",
+            "first_required_by_baseline",
+            "introduced_in_release",
+            "introduced_in_corpus_revision",
+            "construction",
+            "parent_case_id",
+            "payload_transcript_kind",
+            "payload_origin_ids",
+            "credential_id",
+            "outcome",
+            "expectation_scope",
+            "capability_id",
+            "condition_id",
+            "diagnostic_class",
+            "expected_ref",
+            "expected_sha3_256",
+        ],
+    ),
+    (
+        "errata.tsv",
+        &[
+            "erratum_id",
+            "affected_case_id",
+            "effective_corpus_revision",
+            "rationale_ref",
+            "rationale_sha3_256",
+            "replacement_case_id",
+            "introduced_in_release",
+        ],
+    ),
+];
+
+/// The columns holding a baseline, class, credential, origin, case, erratum,
+/// or condition ID, and whether each may hold `-`. Capability IDs follow the
+/// structured forms of `FORMAT.md` §12.2 instead.
+const ID_COLUMNS: &[(&str, &[(&str, bool)])] = &[
+    (
+        "baselines.tsv",
+        &[("baseline_id", false), ("parent_baseline_id", true)],
+    ),
+    ("diagnostic-classes.tsv", &[("class_id", false)]),
+    ("credentials.tsv", &[("credential_id", false)]),
+    (
+        "origins.tsv",
+        &[("origin_id", false), ("anchor_case_id", false)],
+    ),
+    (
+        "cases.tsv",
+        &[
+            ("case_id", false),
+            ("first_required_by_baseline", false),
+            ("parent_case_id", true),
+            ("credential_id", true),
+            ("condition_id", true),
+            ("diagnostic_class", true),
+        ],
+    ),
+    (
+        "errata.tsv",
+        &[
+            ("erratum_id", false),
+            ("affected_case_id", false),
+            ("replacement_case_id", true),
+        ],
+    ),
+];
+
+type Row = BTreeMap<String, String>;
+
+/// One parsed manifest table, its rows as column-keyed maps.
 struct Table {
-    rows: Vec<BTreeMap<String, String>>,
+    rows: Vec<Row>,
 }
 
+/// Parses one manifest table strictly: its header must name exactly the
+/// columns `FORMAT.md` §12.3 lists, and no field may break a rule
+/// [`field_violation`] checks. Every replay reads the manifests through this,
+/// so none relies on another test having validated them first.
 fn read_table(root: &Path, name: &str) -> Table {
+    let expected = MANIFEST_TABLES
+        .iter()
+        .find(|(table, _)| *table == name)
+        .map(|(_, columns)| *columns)
+        .unwrap_or_else(|| panic!("{name} is not a §12.3 manifest table"));
     let text = fs::read_to_string(root.join(name)).unwrap_or_else(|e| panic!("read {name}: {e}"));
     assert!(!text.contains('\r'), "{name} must use LF line endings");
-    let mut columns: Option<Vec<String>> = None;
+    let mut columns: Option<&[&str]> = None;
     let mut rows = Vec::new();
     for line in text.lines() {
         if let Some(header) = line.strip_prefix('#') {
             if columns.is_none() {
-                columns = Some(header.trim().split('\t').map(str::to_string).collect());
+                let declared: Vec<&str> = header.trim().split('\t').collect();
+                assert_eq!(
+                    declared, expected,
+                    "{name}: columns differ from FORMAT.md §12.3"
+                );
+                columns = Some(expected);
             }
             continue;
         }
-        let columns = columns
-            .as_ref()
-            .unwrap_or_else(|| panic!("{name}: rows precede the column header"));
+        let columns = columns.unwrap_or_else(|| panic!("{name}: rows precede the column header"));
         let fields: Vec<&str> = line.split('\t').collect();
         assert_eq!(fields.len(), columns.len(), "{name}: row width");
+        for (column, value) in columns.iter().zip(&fields) {
+            if let Some(violation) = field_violation(name, column, value) {
+                panic!("{name}: {column} {value:?}: {violation}");
+            }
+        }
         rows.push(
             columns
                 .iter()
-                .cloned()
-                .zip(fields.iter().map(|f| f.to_string()))
+                .map(|column| column.to_string())
+                .zip(fields.iter().map(|value| value.to_string()))
                 .collect(),
         );
     }
+    assert!(columns.is_some(), "{name}: no column header");
     Table { rows }
 }
 
-fn field<'a>(row: &'a BTreeMap<String, String>, column: &str) -> &'a str {
+/// The first `FORMAT.md` §12.3 field rule `value` breaks in `column` of
+/// `table`, or `None`: the rules every field shares, then the identifier,
+/// reference, digest, list, and capability forms its column carries. `-`
+/// stands for an inapplicable value, which an identifier column admits only
+/// where it is optional.
+fn field_violation(table: &str, column: &str, value: &str) -> Option<&'static str> {
+    if value.is_empty() {
+        return Some("empty field");
+    }
+    if value.contains("..") || value.contains('\\') || value.starts_with('/') {
+        return Some("contains '..', a backslash, or an absolute path");
+    }
+    let id_column = ID_COLUMNS
+        .iter()
+        .find(|(name, _)| *name == table)
+        .and_then(|(_, columns)| columns.iter().find(|(name, _)| *name == column));
+    if let Some((_, optional)) = id_column {
+        let valid = if value == "-" {
+            *optional
+        } else {
+            is_manifest_id(value)
+        };
+        if !valid {
+            return Some("breaks the identifier grammar");
+        }
+    }
+    if value == "-" {
+        return None;
+    }
+    if column.ends_with("_ref") && !is_corpus_reference(value) {
+        return Some("not a corpus reference");
+    }
+    if column.ends_with("_sha3_256") && !(value.len() == 64 && is_lower_hex(value)) {
+        return Some("not a digest of 64 lowercase hexadecimal characters");
+    }
+    if column == "payload_origin_ids" {
+        let listed: Vec<&str> = value.split(',').collect();
+        if !listed.iter().all(|id| is_manifest_id(id)) {
+            return Some("breaks the list form");
+        }
+        if listed.iter().collect::<BTreeSet<_>>().len() != listed.len() {
+            return Some("repeats an origin");
+        }
+    }
+    if column == "capability_id" && !is_capability_id(value) {
+        return Some("breaks the capability form");
+    }
+    None
+}
+
+fn field<'a>(row: &'a Row, column: &str) -> &'a str {
     row.get(column)
         .unwrap_or_else(|| panic!("missing column {column}"))
+}
+
+/// Reads the file `row[ref_column]` names and requires the digest committed
+/// in `digest_column`, so a replay run on its own relies on no byte the
+/// manifests do not commit. The reference was validated when its table was
+/// parsed.
+fn read_committed(root: &Path, row: &Row, ref_column: &str, digest_column: &str) -> Vec<u8> {
+    let reference = field(row, ref_column);
+    assert_ne!(reference, "-", "{ref_column} names no file");
+    let bytes = fs::read(root.join(reference)).unwrap_or_else(|e| panic!("read {reference}: {e}"));
+    assert_eq!(
+        sha3_hex(&bytes),
+        field(row, digest_column),
+        "{reference} does not match its committed digest"
+    );
+    bytes
 }
 
 /// Collects one column into a set, refusing a repeated value. §12.3 requires
@@ -138,6 +343,45 @@ fn is_manifest_id(value: &str) -> bool {
     (first.is_ascii_lowercase() || first.is_ascii_digit())
         && chars
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
+}
+
+/// A path relative to the corpus root whose components each match the
+/// identifier grammar (`FORMAT.md` §12.3). That rules out absolute paths,
+/// drive and UNC prefixes, backslashes, and empty, `.`, or `..` components,
+/// so joining a reference onto the root can only name a file inside it.
+fn is_corpus_reference(value: &str) -> bool {
+    value.split('/').all(is_manifest_id)
+}
+
+/// The capability-ID forms of `FORMAT.md` §12.2: a stored version domain
+/// with two uppercase hexadecimal digits other than the reserved `0x00`, a
+/// TLV namespace with four, or a recipient or key type with its name.
+fn is_capability_id(value: &str) -> bool {
+    let Some((domain, subject)) = value.split_once(':') else {
+        return false;
+    };
+    let hex_digits = |digits: usize| {
+        subject.strip_prefix("0x").is_some_and(|hex| {
+            hex.len() == digits
+                && hex
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || matches!(c, 'A'..='F'))
+        })
+    };
+    match domain {
+        "outer_version" | "fca_version" | "public_key_version" | "private_key_version" => {
+            hex_digits(2) && subject != "0x00"
+        }
+        "outer_tlv" | "private_key_tlv" | "fca_archive_tlv" | "fca_entry_tlv" => hex_digits(4),
+        "recipient_type" | "key_type" => !subject.is_empty(),
+        _ => false,
+    }
+}
+
+fn is_lower_hex(value: &str) -> bool {
+    value
+        .chars()
+        .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'))
 }
 
 /// Maps a typed error to its `FORMAT.md` §12.1 diagnostic class. Structured
@@ -228,20 +472,27 @@ enum Credential {
 
 fn read_credentials(root: &Path) -> BTreeMap<String, Credential> {
     let table = read_table(root, "credentials.tsv");
+    let passphrase = |row: &Row, ref_column: &str, digest_column: &str| {
+        String::from_utf8(read_committed(root, row, ref_column, digest_column))
+            .expect("a passphrase credential is UTF-8")
+    };
     let mut credentials = BTreeMap::new();
     for row in table.rows {
         let (id, credential) = {
             let id = field(&row, "credential_id").to_string();
-            let primary = field(&row, "primary_ref").to_string();
-            let secret = field(&row, "secret_ref").to_string();
             let credential = match field(&row, "kind") {
-                "passphrase" => Credential::Passphrase(
-                    fs::read_to_string(root.join(&primary)).expect("read passphrase credential"),
-                ),
-                "private_key" => Credential::PrivateKey {
-                    key_path: root.join(&primary),
-                    unlock: fs::read_to_string(root.join(&secret)).expect("read unlock passphrase"),
-                },
+                "passphrase" => {
+                    Credential::Passphrase(passphrase(&row, "primary_ref", "primary_sha3_256"))
+                }
+                "private_key" => {
+                    // The API opens the key file by path; its bytes are checked
+                    // against the committed digest first.
+                    read_committed(root, &row, "primary_ref", "primary_sha3_256");
+                    Credential::PrivateKey {
+                        key_path: root.join(field(&row, "primary_ref")),
+                        unlock: passphrase(&row, "secret_ref", "secret_sha3_256"),
+                    }
+                }
                 "none" => Credential::None,
                 other => panic!("{id}: unknown credential kind {other}"),
             };
@@ -280,6 +531,134 @@ const DIGEST_PAIRS: &[(&str, &[(&str, &str)])] = &[
     ("errata.tsv", &[("rationale_ref", "rationale_sha3_256")]),
 ];
 
+/// Every reference column, `origins.tsv`'s `payload_key_ref` included, admits
+/// a corpus path and refuses every form that could name a file outside the
+/// corpus, or a different file on another platform, before a replay reads it
+/// (`FORMAT.md` §12.3).
+#[test]
+fn every_reference_column_refuses_paths_outside_the_corpus() {
+    let refused = [
+        "/etc/passwd",
+        "../outside",
+        "a/../b",
+        "a/./b",
+        "./a",
+        "a//b",
+        "a/",
+        "C:/outside",
+        "C:outside",
+        "a\\b",
+        "\\\\server\\share",
+        "Artifacts/a",
+        "a/b c",
+    ];
+    let mut checked = 0;
+    for (table, columns) in MANIFEST_TABLES {
+        for column in columns.iter().filter(|column| column.ends_with("_ref")) {
+            assert_eq!(
+                field_violation(table, column, "artifacts/fcr/case-1.fcr"),
+                None
+            );
+            for reference in refused {
+                assert!(
+                    field_violation(table, column, reference).is_some(),
+                    "{table}: {column} admits {reference:?}"
+                );
+            }
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 7, "every reference column of the six tables");
+}
+
+/// Every identifier column enforces the identifier grammar, and a required one
+/// refuses `-` (`FORMAT.md` §12.3). Each column named here exists in its
+/// table, so a renamed column cannot silently drop out of the check.
+#[test]
+fn every_identifier_column_enforces_the_identifier_grammar() {
+    for (table, columns) in ID_COLUMNS {
+        let declared = MANIFEST_TABLES
+            .iter()
+            .find(|(name, _)| name == table)
+            .map(|(_, declared)| *declared)
+            .unwrap_or_else(|| panic!("{table} is not a manifest table"));
+        for (column, optional) in *columns {
+            assert!(declared.contains(column), "{table} has no {column} column");
+            assert_eq!(field_violation(table, column, "valid.id_1-2"), None);
+            for invalid in ["Upper", "-leading", ".leading", "with space", "a,b"] {
+                assert!(
+                    field_violation(table, column, invalid).is_some(),
+                    "{table}: {column} admits {invalid:?}"
+                );
+            }
+            assert_eq!(
+                field_violation(table, column, "-").is_none(),
+                *optional,
+                "{table}: {column} decides '-' by whether the column is optional"
+            );
+        }
+    }
+}
+
+/// A table whose header names other columns than `FORMAT.md` §12.3 lists is
+/// a different schema, refused before any of its rows is read.
+#[test]
+#[should_panic(expected = "columns differ from FORMAT.md §12.3")]
+fn a_table_with_other_columns_is_refused() {
+    let dir = tempfile::tempdir().expect("table dir");
+    fs::write(
+        dir.path().join("baselines.tsv"),
+        "# baseline_id\testablished_by_release\tparent_baseline_id\tintroduced_in_corpus_revision\textra\n",
+    )
+    .expect("write table");
+    read_table(dir.path(), "baselines.tsv");
+}
+
+/// The origin list and the capability column hold the forms `FORMAT.md`
+/// §12.2 and §12.3 define, and nothing else.
+#[test]
+fn list_and_capability_columns_hold_their_forms() {
+    let list = |value| field_violation("cases.tsv", "payload_origin_ids", value);
+    assert_eq!(list("origin-a,origin-b"), None);
+    for invalid in [
+        "origin-a,",
+        ",origin-a",
+        "origin-a, origin-b",
+        "origin-a,origin-a",
+    ] {
+        assert!(
+            list(invalid).is_some(),
+            "the origin list admits {invalid:?}"
+        );
+    }
+
+    let capability = |value| field_violation("cases.tsv", "capability_id", value);
+    for valid in [
+        "outer_version:0x02",
+        "private_key_version:0xFF",
+        "fca_entry_tlv:0x8001",
+        "recipient_type:test/unknown",
+        "key_type:test/unknown",
+    ] {
+        assert_eq!(capability(valid), None, "{valid:?}");
+    }
+    for invalid in [
+        "outer_version:0x00",
+        "outer_version:0x2",
+        "outer_version:0x0a",
+        "outer_tlv:0x001",
+        "fca_version:02",
+        "recipient_type:",
+        "unknown_domain:0x01",
+        "outer_version",
+    ] {
+        assert!(
+            capability(invalid).is_some(),
+            "the capability column admits {invalid:?}"
+        );
+    }
+}
+
 #[test]
 fn wire_corpus_manifests_are_well_formed() {
     if !corpus_present() {
@@ -304,33 +683,15 @@ fn wire_corpus_manifests_are_well_formed() {
     for (table_name, pairs) in DIGEST_PAIRS {
         for row in read_table(&root, table_name).rows {
             for (ref_column, digest_column) in *pairs {
-                let reference = field(&row, ref_column);
-                let digest = field(&row, digest_column);
-                if reference == "-" {
+                if field(&row, ref_column) == "-" {
                     assert_eq!(
-                        digest, "-",
+                        field(&row, digest_column),
+                        "-",
                         "{table_name}: '-' reference needs a '-' digest"
                     );
                     continue;
                 }
-                assert!(
-                    !reference.contains("..") && !reference.starts_with('/'),
-                    "{table_name}: reference {reference} must stay inside the corpus"
-                );
-                assert_eq!(digest.len(), 64, "{table_name}: digest width");
-                assert!(
-                    digest
-                        .chars()
-                        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
-                    "{table_name}: digest must be lowercase hexadecimal"
-                );
-                let bytes = fs::read(root.join(reference))
-                    .unwrap_or_else(|e| panic!("{table_name}: read {reference}: {e}"));
-                assert_eq!(
-                    sha3_hex(&bytes),
-                    digest,
-                    "{table_name}: {reference} does not match its committed digest"
-                );
+                read_committed(&root, &row, ref_column, digest_column);
             }
         }
     }
@@ -368,9 +729,7 @@ fn wire_corpus_manifests_are_well_formed() {
     }
 
     for row in &case_table.rows {
-        let case_id = field(row, "case_id").to_string();
-        assert!(is_manifest_id(&case_id), "{case_id}: identifier grammar");
-
+        let case_id = field(row, "case_id");
         let outcome = field(row, "outcome");
         let class = field(row, "diagnostic_class");
         let condition = field(row, "condition_id");
@@ -450,8 +809,9 @@ fn wire_corpus_manifests_are_well_formed() {
         }
     }
 
-    // Every origin's anchor case exists, and independent origins use distinct
-    // nonce prefixes.
+    // Every origin's anchor case exists, every origin commits to its payload
+    // key, a KAT origin names the key file behind that commitment, and
+    // independent origins use distinct nonce prefixes.
     let mut nonces = BTreeSet::new();
     for row in &origin_table.rows {
         let origin_id = field(row, "origin_id");
@@ -459,11 +819,27 @@ fn wire_corpus_manifests_are_well_formed() {
             case_ids.contains(field(row, "anchor_case_id")),
             "{origin_id}: anchor case is not declared"
         );
+        match field(row, "origin_kind") {
+            "stream_kat" => assert_ne!(
+                field(row, "payload_key_ref"),
+                "-",
+                "{origin_id}: a KAT origin names its payload key"
+            ),
+            "fcr_payload" => {}
+            other => panic!("{origin_id}: unknown origin kind {other}"),
+        }
+        assert_ne!(
+            field(row, "payload_key_sha3_256"),
+            "-",
+            "{origin_id}: an origin commits to its payload key"
+        );
+        if field(row, "payload_key_ref") != "-" {
+            read_committed(&root, row, "payload_key_ref", "payload_key_sha3_256");
+        }
         let nonce = field(row, "stream_nonce_hex");
-        assert_eq!(
-            nonce.len(),
-            38,
-            "{origin_id}: stream_nonce_hex is a 19-byte prefix"
+        assert!(
+            nonce.len() == 38 && is_lower_hex(nonce),
+            "{origin_id}: stream_nonce_hex is a 19-byte prefix in lowercase hexadecimal"
         );
         assert!(
             nonces.insert(nonce.to_string()),
@@ -498,24 +874,12 @@ fn wire_corpus_manifests_are_well_formed() {
     assert_every_file_is_referenced(&root, &origin_table);
 }
 
-/// Files that carry the corpus rather than being carried by it, so no row
-/// names them.
-/// The six manifest tables of `FORMAT.md` §12.3.
-const MANIFEST_TABLES: &[&str] = &[
-    "baselines.tsv",
-    "diagnostic-classes.tsv",
-    "credentials.tsv",
-    "origins.tsv",
-    "cases.tsv",
-    "errata.tsv",
-];
-
 /// Whether a corpus-relative path carries the corpus rather than being carried
 /// by it, so no manifest row names it. A rule rather than a list of names:
 /// `tools/` is matched by prefix, so adding a tool needs no edit here nor in
 /// the two other checkers that apply the same rule.
 fn is_structural_corpus_file(relative: &str) -> bool {
-    MANIFEST_TABLES.contains(&relative)
+    MANIFEST_TABLES.iter().any(|(table, _)| *table == relative)
         || matches!(relative, "SCHEMA-VERSION" | "CORPUS-REVISION" | "README.md")
         || relative.starts_with("tools/")
 }
@@ -609,6 +973,9 @@ fn wire_corpus_cases_replay() {
             skipped_as_declared += 1;
             continue;
         }
+        // The API reads the artifact by path; its bytes are checked against
+        // the committed digest first.
+        read_committed(&root, row, "artifact_ref", "artifact_sha3_256");
         let artifact = root.join(field(row, "artifact_ref"));
         let credential = credentials
             .get(field(row, "credential_id"))
@@ -655,8 +1022,7 @@ fn wire_corpus_cases_replay() {
             "accept" => {
                 let produced =
                     result.unwrap_or_else(|e| panic!("{case_id}: must be accepted, got {e:?}"));
-                let expected =
-                    fs::read(root.join(field(row, "expected_ref"))).expect("read expected result");
+                let expected = read_committed(&root, row, "expected_ref", "expected_sha3_256");
                 assert_eq!(
                     produced, expected,
                     "{case_id}: result differs from the committed expectation"

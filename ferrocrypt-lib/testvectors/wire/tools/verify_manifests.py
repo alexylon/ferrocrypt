@@ -31,6 +31,9 @@ ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 REFERENCE = re.compile(r"^[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)*$")
 DIGEST = re.compile(r"^[0-9a-f]{64}$")
 NONCE = re.compile(r"^[0-9a-f]{38}$")
+# A limit-profile value: a decimal integer with no leading zero.
+LIMIT = re.compile(r"^(0|[1-9][0-9]*)$")
+U64_MAX = 2**64 - 1
 # Section 12.2 reserves 0x00 in every stored version domain, so no capability
 # names it.
 CAPABILITY = re.compile(
@@ -40,7 +43,7 @@ CAPABILITY = re.compile(
     r"|^(recipient_type|key_type):.+$"
 )
 
-# The six manifest tables and the exact columns each declares, in order.
+# The seven manifest tables and the exact columns each declares, in order.
 COLUMNS = {
     "baselines.tsv": [
         "baseline_id",
@@ -62,6 +65,29 @@ COLUMNS = {
         "secret_ref",
         "secret_sha3_256",
         "introduced_in_release",
+        "introduced_in_corpus_revision",
+    ],
+    "limit-profiles.tsv": [
+        "limit_profile_id",
+        "max_header_len",
+        "max_recipient_count",
+        "max_recipient_body_len",
+        "max_header_mac_work_bytes",
+        "max_kdf_mem_kib",
+        "max_kdf_time",
+        "max_kdf_lanes",
+        "max_kdf_work",
+        "max_recipient_string_chars",
+        "max_private_key_wrapped_secret_len",
+        "max_entry_count",
+        "max_total_plaintext_bytes",
+        "max_path_depth",
+        "max_path_bytes",
+        "max_manifest_bytes",
+        "max_archive_ext_bytes",
+        "max_entry_ext_bytes",
+        "max_total_entry_ext_bytes",
+        "max_tlv_value_bytes",
         "introduced_in_corpus_revision",
     ],
     "origins.tsv": [
@@ -87,6 +113,7 @@ COLUMNS = {
         "payload_transcript_kind",
         "payload_origin_ids",
         "credential_id",
+        "limit_profile_id",
         "outcome",
         "expectation_scope",
         "capability_id",
@@ -108,6 +135,27 @@ COLUMNS = {
 
 TABLES = tuple(COLUMNS)
 
+# The structural maximum of every profiled quantity the format bounds
+# (FORMAT.md sections 2.2, 3.2, 7, 8, and 9.12). A larger profile value is one
+# no reader can apply.
+LIMIT_STRUCTURAL_MAXIMA = {
+    "max_header_len": 16_777_216,
+    "max_recipient_count": 4_096,
+    "max_recipient_body_len": 16_777_216,
+    "max_header_mac_work_bytes": 4_096 * (12 + 16_777_216),
+    "max_kdf_mem_kib": 2_097_152,
+    "max_kdf_time": 12,
+    "max_kdf_lanes": 8,
+    "max_kdf_work": 2_097_152 * 12,
+    "max_recipient_string_chars": 20_000,
+    "max_private_key_wrapped_secret_len": 16_777_216,
+    "max_path_bytes": 65_535,
+}
+
+# The case types whose action applies no local cap, so their rows name no
+# limit profile.
+NO_LOCAL_CAP_CASE_TYPES = {"private_key_validate", "stream_encrypt_kat"}
+
 # The identifier each table is keyed by. Section 12.3 forbids duplicate
 # identifiers, so a repeated key is a corpus defect and never a later row
 # replacing an earlier one.
@@ -115,6 +163,7 @@ KEY_COLUMNS = {
     "baselines.tsv": "baseline_id",
     "diagnostic-classes.tsv": "class_id",
     "credentials.tsv": "credential_id",
+    "limit-profiles.tsv": "limit_profile_id",
     "origins.tsv": "origin_id",
     "cases.tsv": "case_id",
     "errata.tsv": "erratum_id",
@@ -126,12 +175,14 @@ ID_COLUMNS = {
     "baselines.tsv": [("baseline_id", False), ("parent_baseline_id", True)],
     "diagnostic-classes.tsv": [("class_id", False)],
     "credentials.tsv": [("credential_id", False)],
+    "limit-profiles.tsv": [("limit_profile_id", False)],
     "origins.tsv": [("origin_id", False), ("anchor_case_id", False)],
     "cases.tsv": [
         ("case_id", False),
         ("first_required_by_baseline", False),
         ("parent_case_id", True),
         ("credential_id", True),
+        ("limit_profile_id", True),
         ("condition_id", True),
         ("diagnostic_class", True),
     ],
@@ -148,6 +199,7 @@ REVISION_TABLES = (
     "baselines.tsv",
     "diagnostic-classes.tsv",
     "credentials.tsv",
+    "limit-profiles.tsv",
     "origins.tsv",
     "cases.tsv",
 )
@@ -232,12 +284,24 @@ def read_table(root, name):
                 fail(f"{name}:{number}: {column} is an absolute path")
             if column.endswith("_ref") and value != "-" and not REFERENCE.match(value):
                 fail(f"{name}:{number}: {column} is not a corpus reference")
+            if name == "limit-profiles.tsv" and column.startswith("max_"):
+                check_limit(name, number, column, value)
             if (name, column) in ENUMS and value not in ENUMS[(name, column)]:
                 fail(f"{name}:{number}: {column} has unknown value {value!r}")
         rows.append(dict(zip(columns, fields)))
     if columns is None:
         fail(f"{name}: no column header")
     return rows
+
+
+def check_limit(name, number, column, value):
+    """A profile value is a decimal integer that fits 64 bits and does not
+    exceed the structural maximum of the quantity it bounds, where the format
+    defines one."""
+    if not LIMIT.match(value) or int(value) > U64_MAX:
+        fail(f"{name}:{number}: {column} is not a decimal limit that fits 64 bits")
+    elif int(value) > LIMIT_STRUCTURAL_MAXIMA.get(column, U64_MAX):
+        fail(f"{name}:{number}: {column} exceeds the structural maximum of the quantity it bounds")
 
 
 def index_by(name, rows, column):
@@ -426,6 +490,7 @@ def main():
     baselines = indexed["baselines.tsv"]
     classes = indexed["diagnostic-classes.tsv"]
     credentials = indexed["credentials.tsv"]
+    profiles = indexed["limit-profiles.tsv"]
     origins = indexed["origins.tsv"]
     cases = indexed["cases.tsv"]
 
@@ -485,10 +550,35 @@ def main():
         elif not DIGEST.match(row["payload_key_sha3_256"]):
             fail(f"origins.tsv: {origin_id}: payload key commitment is not a digest")
 
+    # A case names only a baseline or a limit profile declared in its own
+    # corpus revision or an earlier one.
+    def declared_after(declaring_row, row):
+        declared = declaring_row["introduced_in_corpus_revision"]
+        introduced = row["introduced_in_corpus_revision"]
+        # A revision that is not a number is reported above.
+        return declared.isdigit() and introduced.isdigit() and int(declared) > int(introduced)
+
+    profiles_named = set()
     for row in tables["cases.tsv"]:
         case_id = row["case_id"]
-        if row["first_required_by_baseline"] not in baselines:
+        baseline = baselines.get(row["first_required_by_baseline"])
+        if baseline is None:
             fail(f"cases.tsv: {case_id}: baseline is not declared")
+        elif declared_after(baseline, row):
+            fail(f"cases.tsv: {case_id}: first required by a baseline declared after the case")
+
+        profile_id = row["limit_profile_id"]
+        if row["case_type"] in NO_LOCAL_CAP_CASE_TYPES:
+            if profile_id != "-":
+                fail(f"cases.tsv: {case_id}: its action applies no local cap, so it names no limit profile")
+        elif profile_id == "-":
+            fail(f"cases.tsv: {case_id}: its action applies local caps, so it names a limit profile")
+        elif profile_id not in profiles:
+            fail(f"cases.tsv: {case_id}: limit profile is not declared")
+        else:
+            profiles_named.add(profile_id)
+            if declared_after(profiles[profile_id], row):
+                fail(f"cases.tsv: {case_id}: names a limit profile declared after the case")
 
         outcome = row["outcome"]
         if outcome == "reject":
@@ -550,6 +640,11 @@ def main():
         if row["case_type"] == "stream_encrypt_kat" and row["case_id"] not in kat_anchors:
             fail(f"cases.tsv: {row['case_id']}: a stream_encrypt_kat case needs a stream_kat origin")
 
+    # A profile no case names is configuration nothing is evaluated under.
+    for profile_id in profiles:
+        if profile_id not in profiles_named:
+            fail(f"limit-profiles.tsv: {profile_id}: no case names this profile")
+
     # §12.1: the corpus declares the classes its cases use, so a declared
     # class with no case is a row that can never be exercised.
     used_classes = {row["diagnostic_class"] for row in tables["cases.tsv"]} - {"-"}
@@ -580,7 +675,8 @@ def main():
     print(
         f"corpus at {root}: schema {schema}, revision {revision}, "
         f"{len(cases)} cases ({len(withdrawn)} withdrawn by errata), {len(origins)} origins, "
-        f"{len(credentials)} credentials, {len(classes)} diagnostic classes, "
+        f"{len(credentials)} credentials, {len(profiles)} limit profile(s), "
+        f"{len(classes)} diagnostic classes, "
         f"{len(tables['errata.tsv'])} errata — "
         f"{'OK' if not problems else str(len(problems)) + ' problem(s)'}"
     )

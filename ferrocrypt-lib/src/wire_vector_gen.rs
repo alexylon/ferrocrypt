@@ -45,7 +45,9 @@ use crate::passphrase::Passphrase;
 use crate::recipient::RecipientEntry;
 use crate::recipient::name::TYPE_NAME_MAX_LEN;
 use crate::recipient::native::{argon2id, x25519};
-use crate::{ArchiveLimits, CryptoError, KeyPairGenerator, PublicKey};
+use crate::{
+    ArchiveLimits, CryptoError, HeaderReadLimits, KeyPairGenerator, KeyReadLimits, PublicKey,
+};
 
 // ─── Corpus identity ───────────────────────────────────────────────────────
 
@@ -57,8 +59,14 @@ const SCHEMA_VERSION: u32 = 1;
 /// appended.
 const CORPUS_REVISION: u32 = 1;
 
-/// The compatibility baseline this publication evidences (`FORMAT.md` §11.4).
+/// The compatibility baseline this publication evidences (`FORMAT.md` §11.4),
+/// and the one every revision-1 case is first required by: each exercises a
+/// rule the `0.3.0` baseline established.
 const BASELINE_ID: &str = "0.3.0";
+
+/// The limit profile every revision-1 case that applies local caps names:
+/// this library's default limits in `0.3.0` (`FORMAT.md` §12.3).
+const DEFAULT_LIMIT_PROFILE_ID: &str = "default-0.3.0";
 
 /// Release that publishes every revision-1 row.
 const INTRODUCED_IN_RELEASE: &str = "0.3.0";
@@ -119,6 +127,7 @@ struct CaseRow {
     payload_transcript_kind: &'static str,
     payload_origin_ids: String,
     credential_id: String,
+    limit_profile_id: &'static str,
     outcome: &'static str,
     expectation_scope: &'static str,
     capability_id: String,
@@ -143,6 +152,7 @@ impl CaseRow {
             payload_transcript_kind: "not_applicable",
             payload_origin_ids: "-".to_string(),
             credential_id: "-".to_string(),
+            limit_profile_id: limit_profile_for(case_type),
             outcome: "reject",
             expectation_scope: "invariant",
             capability_id: "-".to_string(),
@@ -212,6 +222,107 @@ impl CaseRow {
         self.capability_id = capability_id.to_string();
         self
     }
+}
+
+/// The limit profile a case of `case_type` names: none for the two actions
+/// that apply no local cap, and [`DEFAULT_LIMIT_PROFILE_ID`] for every other
+/// (`FORMAT.md` §12.3).
+fn limit_profile_for(case_type: &str) -> &'static str {
+    match case_type {
+        "private_key_validate" | "stream_encrypt_kat" => "-",
+        _ => DEFAULT_LIMIT_PROFILE_ID,
+    }
+}
+
+/// The `limit-profiles.tsv` row for [`DEFAULT_LIMIT_PROFILE_ID`], in the
+/// table's column order. The values are read from the defaults of the four
+/// limit types, each destructured field by field, so a cap added to any of
+/// them stops the build here until the profile schema names it. Once revision
+/// 1 is frozen, a changed default makes the generator refuse to rewrite this
+/// row, and the published values must then be written here as literals.
+fn default_limit_profile_row() -> Vec<String> {
+    let HeaderReadLimits {
+        max_header_len,
+        max_recipient_count,
+        max_recipient_body_len,
+        max_header_mac_work_bytes,
+    } = HeaderReadLimits::default();
+    let KdfLimit {
+        max_mem_cost_kib,
+        max_time_cost,
+        max_lanes,
+        max_work,
+    } = KdfLimit::default();
+    let KeyReadLimits {
+        max_recipient_string_chars,
+        max_private_key_wrapped_secret_len,
+    } = KeyReadLimits::default();
+    let ArchiveLimits {
+        max_entry_count,
+        max_total_plaintext_bytes,
+        max_path_depth,
+        max_path_bytes,
+        max_manifest_bytes,
+        max_archive_ext_bytes,
+        max_entry_ext_bytes,
+        max_total_entry_ext_bytes,
+        max_tlv_value_bytes,
+    } = ArchiveLimits::default();
+    let values: BTreeMap<&str, String> = [
+        ("limit_profile_id", DEFAULT_LIMIT_PROFILE_ID.to_string()),
+        ("max_header_len", max_header_len.to_string()),
+        ("max_recipient_count", max_recipient_count.to_string()),
+        ("max_recipient_body_len", max_recipient_body_len.to_string()),
+        (
+            "max_header_mac_work_bytes",
+            max_header_mac_work_bytes.to_string(),
+        ),
+        ("max_kdf_mem_kib", max_mem_cost_kib.to_string()),
+        ("max_kdf_time", max_time_cost.to_string()),
+        ("max_kdf_lanes", max_lanes.to_string()),
+        ("max_kdf_work", max_work.to_string()),
+        (
+            "max_recipient_string_chars",
+            max_recipient_string_chars.to_string(),
+        ),
+        (
+            "max_private_key_wrapped_secret_len",
+            max_private_key_wrapped_secret_len.to_string(),
+        ),
+        ("max_entry_count", max_entry_count.to_string()),
+        (
+            "max_total_plaintext_bytes",
+            max_total_plaintext_bytes.to_string(),
+        ),
+        ("max_path_depth", max_path_depth.to_string()),
+        ("max_path_bytes", max_path_bytes.to_string()),
+        ("max_manifest_bytes", max_manifest_bytes.to_string()),
+        ("max_archive_ext_bytes", max_archive_ext_bytes.to_string()),
+        ("max_entry_ext_bytes", max_entry_ext_bytes.to_string()),
+        (
+            "max_total_entry_ext_bytes",
+            max_total_entry_ext_bytes.to_string(),
+        ),
+        ("max_tlv_value_bytes", max_tlv_value_bytes.to_string()),
+        ("introduced_in_corpus_revision", CORPUS_REVISION.to_string()),
+    ]
+    .into_iter()
+    .collect();
+    let columns = table_columns("limit-profiles.tsv");
+    assert_eq!(
+        values.len(),
+        columns.len(),
+        "the default profile fills exactly the profile columns"
+    );
+    columns
+        .iter()
+        .map(|column| {
+            values
+                .get(column)
+                .unwrap_or_else(|| panic!("the default profile has no {column}"))
+                .clone()
+        })
+        .collect()
 }
 
 struct CredentialRow {
@@ -514,6 +625,9 @@ fn field_violation(table: &str, column: &str, value: &str) -> Option<&'static st
             return Some("breaks the identifier grammar");
         }
     }
+    if table == "limit-profiles.tsv" && column.starts_with("max_") {
+        return limit_value_violation(column, value);
+    }
     if value == "-" {
         return None;
     }
@@ -548,6 +662,7 @@ const ID_COLUMNS: &[(&str, &[(&str, bool)])] = &[
     ),
     ("diagnostic-classes.tsv", &[("class_id", false)]),
     ("credentials.tsv", &[("credential_id", false)]),
+    ("limit-profiles.tsv", &[("limit_profile_id", false)]),
     (
         "origins.tsv",
         &[("origin_id", false), ("anchor_case_id", false)],
@@ -559,6 +674,7 @@ const ID_COLUMNS: &[(&str, &[(&str, bool)])] = &[
             ("first_required_by_baseline", false),
             ("parent_case_id", true),
             ("credential_id", true),
+            ("limit_profile_id", true),
             ("condition_id", true),
             ("diagnostic_class", true),
         ],
@@ -570,6 +686,66 @@ const ID_COLUMNS: &[(&str, &[(&str, bool)])] = &[
             ("affected_case_id", false),
             ("replacement_case_id", true),
         ],
+    ),
+];
+
+/// The rule a `limit-profiles.tsv` value breaks, if any: it is a decimal
+/// integer with no leading zero that fits 64 bits, and at most the structural
+/// maximum of the quantity it bounds where the format defines one
+/// (`FORMAT.md` §12.3), because a reader cannot apply a larger value.
+fn limit_value_violation(column: &str, value: &str) -> Option<&'static str> {
+    let canonical =
+        value == "0" || (!value.starts_with('0') && value.chars().all(|c| c.is_ascii_digit()));
+    let Some(limit) = canonical.then(|| value.parse::<u64>().ok()).flatten() else {
+        return Some("not a decimal limit that fits 64 bits");
+    };
+    let structural_max = LIMIT_STRUCTURAL_MAXIMA
+        .iter()
+        .find(|(name, _)| *name == column)
+        .map(|(_, max)| *max);
+    if structural_max.is_some_and(|max| limit > max) {
+        return Some("above the structural maximum of the quantity it bounds");
+    }
+    None
+}
+
+/// The structural maximum of every profiled quantity the format bounds
+/// (`FORMAT.md` §2.2, §3.2, §7, §8, §9.12).
+const LIMIT_STRUCTURAL_MAXIMA: &[(&str, u64)] = &[
+    (
+        "max_header_len",
+        HeaderReadLimits::HEADER_LEN_STRUCTURAL_MAX as u64,
+    ),
+    (
+        "max_recipient_count",
+        HeaderReadLimits::RECIPIENT_COUNT_STRUCTURAL_MAX as u64,
+    ),
+    (
+        "max_recipient_body_len",
+        HeaderReadLimits::RECIPIENT_BODY_LEN_STRUCTURAL_MAX as u64,
+    ),
+    (
+        "max_header_mac_work_bytes",
+        HeaderReadLimits::HEADER_MAC_WORK_BYTES_STRUCTURAL_MAX,
+    ),
+    (
+        "max_kdf_mem_kib",
+        KdfLimit::MEM_COST_KIB_STRUCTURAL_MAX as u64,
+    ),
+    ("max_kdf_time", KdfLimit::TIME_COST_STRUCTURAL_MAX as u64),
+    ("max_kdf_lanes", KdfLimit::LANES_STRUCTURAL_MAX as u64),
+    ("max_kdf_work", KdfLimit::WORK_STRUCTURAL_MAX),
+    (
+        "max_recipient_string_chars",
+        KeyReadLimits::RECIPIENT_STRING_CHARS_STRUCTURAL_MAX as u64,
+    ),
+    (
+        "max_private_key_wrapped_secret_len",
+        KeyReadLimits::PRIVATE_KEY_WRAPPED_SECRET_LEN_STRUCTURAL_MAX as u64,
+    ),
+    (
+        "max_path_bytes",
+        ArchiveLimits::PATH_BYTES_STRUCTURAL_MAX as u64,
     ),
 ];
 
@@ -1367,7 +1543,18 @@ fn the_generator_refuses_to_write_outside_the_corpus() {
     Corpus::new(root).write_ref("../outside.bin", b"escaped");
 }
 
-/// Writes the version files, the diagnostic-class descriptions, and the six
+/// The default profile fills every profile column with a value the field
+/// grammar admits, so the generator never needs a full run to show that the
+/// library's defaults can be written as a profile.
+#[test]
+fn the_default_limit_profile_is_a_valid_row() {
+    let row = default_limit_profile_row();
+    for (column, value) in table_columns("limit-profiles.tsv").iter().zip(&row) {
+        check_field("limit-profiles.tsv", column, value);
+    }
+}
+
+/// Writes the version files, the diagnostic-class descriptions, and the seven
 /// manifest tables. Digest columns are computed here from the committed bytes,
 /// so a row can never name a digest the referenced file does not have.
 fn emit(corpus: &Corpus) {
@@ -1438,6 +1625,14 @@ fn emit(corpus: &Corpus) {
 
     write_appended_table(
         root,
+        "limit-profiles.tsv",
+        "limit_profile_id",
+        table_columns("limit-profiles.tsv"),
+        vec![default_limit_profile_row()],
+    );
+
+    write_appended_table(
+        root,
         "origins.tsv",
         "origin_id",
         table_columns("origins.tsv"),
@@ -1481,6 +1676,7 @@ fn emit(corpus: &Corpus) {
                     c.payload_transcript_kind.to_string(),
                     c.payload_origin_ids.clone(),
                     c.credential_id.clone(),
+                    c.limit_profile_id.to_string(),
                     c.outcome.to_string(),
                     c.expectation_scope.to_string(),
                     c.capability_id.clone(),
@@ -1555,7 +1751,7 @@ fn assert_no_unreferenced_files(corpus: &Corpus) {
     }
 }
 
-/// The six manifest tables of `FORMAT.md` §12.3 and the exact columns each
+/// The seven manifest tables of `FORMAT.md` §12.3 and the exact columns each
 /// declares, in order. The generator writes and the replays in this module
 /// read every table through these lists.
 const MANIFEST_TABLES: &[(&str, &[&str])] = &[
@@ -1591,6 +1787,32 @@ const MANIFEST_TABLES: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "limit-profiles.tsv",
+        &[
+            "limit_profile_id",
+            "max_header_len",
+            "max_recipient_count",
+            "max_recipient_body_len",
+            "max_header_mac_work_bytes",
+            "max_kdf_mem_kib",
+            "max_kdf_time",
+            "max_kdf_lanes",
+            "max_kdf_work",
+            "max_recipient_string_chars",
+            "max_private_key_wrapped_secret_len",
+            "max_entry_count",
+            "max_total_plaintext_bytes",
+            "max_path_depth",
+            "max_path_bytes",
+            "max_manifest_bytes",
+            "max_archive_ext_bytes",
+            "max_entry_ext_bytes",
+            "max_total_entry_ext_bytes",
+            "max_tlv_value_bytes",
+            "introduced_in_corpus_revision",
+        ],
+    ),
+    (
         "origins.tsv",
         &[
             "origin_id",
@@ -1618,6 +1840,7 @@ const MANIFEST_TABLES: &[(&str, &[&str])] = &[
             "payload_transcript_kind",
             "payload_origin_ids",
             "credential_id",
+            "limit_profile_id",
             "outcome",
             "expectation_scope",
             "capability_id",

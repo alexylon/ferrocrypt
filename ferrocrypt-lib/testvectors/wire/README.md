@@ -34,6 +34,7 @@ errata mechanism in §12.3 rather than edits.
 | `diagnostic-classes/` | One file per class holding its stable explanatory text |
 | `credentials.tsv` | Credential material each case is replayed with |
 | `credentials/` | Passphrase bytes the credential table references |
+| `limit-profiles.tsv` | The local resource limits each case is evaluated under |
 | `origins.tsv` | Provenance of every payload encryption |
 | `cases.tsv` | One row per case: artifact, outcome, and expectation |
 | `errata.tsv` | Corrections to frozen rows; empty in revision 1 |
@@ -53,7 +54,8 @@ It exists only so a replay can open the accepted artifacts.
 ## Replaying the corpus
 
 Read `cases.tsv`, and for each row perform the action its `case_type` names on
-the bytes at `artifact_ref`, using the credential its `credential_id` names:
+the bytes at `artifact_ref`, using the credential its `credential_id` names and
+the limit profile its `limit_profile_id` names:
 
 | `case_type` | Action | An accepted case must produce |
 |---|---|---|
@@ -77,10 +79,23 @@ A row with `expectation_scope = capability_relative` names one capability in
 `capability_id`. Assert its stored outcome only while your implementation does
 not support that capability (`FORMAT.md` §12.2).
 
-**Resource-policy cases depend on configuration, not on the format.** Rows whose
-class is `resource_cap_exceeded` are recorded as this implementation behaves
-under its default limits. An implementation with different local caps will
-legitimately differ; each such row's `condition_id` names the cap involved.
+**Every case is evaluated under committed limits.** Local resource caps are
+configuration rather than format, so a stored outcome can depend on them. Each
+`limit-profiles.tsv` row gives every local cap a value, and each case names one
+profile; set all of them before evaluating the case, whether it is accepted or
+refused, and never choose them from the expected result — a cap can refuse
+with a class other than `resource_cap_exceeded`. The values are frozen with the
+corpus and do not follow FerroCrypt's defaults, which may change between
+releases. Revision 1 has one profile, `default-0.3.0`: the defaults of
+FerroCrypt `0.3.0`. `private_key_validate` and `stream_encrypt_kat` apply no
+local cap and name `-`. An implementation that cannot set its caps to a
+profile's values cannot assert the cases that name it.
+
+**`first_required_by_baseline` names the promise a case evidences.** It is the
+earliest compatibility baseline whose rules require the stored outcome.
+Baselines are cumulative, so a replay claiming a baseline asserts every case
+first required by that baseline or by one of its ancestors. It is not the
+revision a case arrived in: `introduced_in_corpus_revision` records that.
 
 ### Verifying the corpus as data
 

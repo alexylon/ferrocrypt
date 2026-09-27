@@ -2643,8 +2643,8 @@ baseline_id     = 0.3.0
 ```
 
 `SCHEMA-VERSION` identifies the manifest grammar, `CORPUS-REVISION` identifies
-append-only corpus content, and `baseline_id` identifies the compatibility
-promise first evidenced by a case. This publication is **the `0.3.0` frozen
+append-only corpus content, and `baseline_id` identifies a compatibility
+promise (§11.4) the cases evidence. This publication is **the `0.3.0` frozen
 conformance corpus**.
 
 Revision 1 uses this repository layout:
@@ -2657,6 +2657,7 @@ testvectors/wire/
 ├── baselines.tsv
 ├── diagnostic-classes.tsv
 ├── credentials.tsv
+├── limit-profiles.tsv
 ├── origins.tsv
 ├── cases.tsv
 ├── errata.tsv
@@ -2684,6 +2685,15 @@ The manifest tables use these exact columns:
 - `credentials.tsv`: `credential_id`, `kind`, `primary_ref`,
   `primary_sha3_256`, `secret_ref`, `secret_sha3_256`,
   `introduced_in_release`, `introduced_in_corpus_revision`;
+- `limit-profiles.tsv`: `limit_profile_id`, `max_header_len`,
+  `max_recipient_count`, `max_recipient_body_len`,
+  `max_header_mac_work_bytes`, `max_kdf_mem_kib`, `max_kdf_time`,
+  `max_kdf_lanes`, `max_kdf_work`, `max_recipient_string_chars`,
+  `max_private_key_wrapped_secret_len`, `max_entry_count`,
+  `max_total_plaintext_bytes`, `max_path_depth`, `max_path_bytes`,
+  `max_manifest_bytes`, `max_archive_ext_bytes`, `max_entry_ext_bytes`,
+  `max_total_entry_ext_bytes`, `max_tlv_value_bytes`,
+  `introduced_in_corpus_revision`;
 - `origins.tsv`: `origin_id`, `origin_kind`, `anchor_case_id`,
   `payload_key_ref`, `payload_key_sha3_256`, `stream_nonce_hex`,
   `introduced_in_release`, `introduced_in_corpus_revision`;
@@ -2691,8 +2701,8 @@ The manifest tables use these exact columns:
   `artifact_sha3_256`, `first_required_by_baseline`,
   `introduced_in_release`, `introduced_in_corpus_revision`, `construction`,
   `parent_case_id`, `payload_transcript_kind`, `payload_origin_ids`,
-  `credential_id`, `outcome`, `expectation_scope`, `capability_id`,
-  `condition_id`, `diagnostic_class`, `expected_ref`,
+  `credential_id`, `limit_profile_id`, `outcome`, `expectation_scope`,
+  `capability_id`, `condition_id`, `diagnostic_class`, `expected_ref`,
   `expected_sha3_256`;
 - `errata.tsv`: `erratum_id`, `affected_case_id`,
   `effective_corpus_revision`, `rationale_ref`, `rationale_sha3_256`,
@@ -2703,18 +2713,18 @@ columns, and tab-separated fields. `#` begins only a whole-line comment; `-`
 represents an inapplicable scalar; and comma-separated IDs represent a list.
 List elements MUST be separated by one comma with no surrounding whitespace.
 Fields MUST NOT contain tabs, CR, LF, `..`, absolute paths, or backslashes.
-Baseline, class, credential, origin, case, erratum, and condition IDs MUST
-match `[a-z0-9][a-z0-9._-]*`. Capability IDs instead use the structured forms
-defined in §12.2. A non-`-` digest field MUST contain exactly 64 lowercase
+Baseline, class, credential, limit-profile, origin, case, erratum, and condition
+IDs MUST match `[a-z0-9][a-z0-9._-]*`. Capability IDs instead use the structured
+forms defined in §12.2. A non-`-` digest field MUST contain exactly 64 lowercase
 hexadecimal characters. Except for the payload-key commitment defined below,
 each non-`-` `*_sha3_256` field MUST equal the SHA3-256 digest of the exact
 bytes named by its corresponding non-`-` `*_ref` field. A non-`-` `*_ref` field
-MUST be a path relative to `testvectors/wire/`: one or more components joined
-by single `/` separators, each component matching the ID grammar above. That
-rules out absolute paths, drive and UNC prefixes, backslashes, empty, `.`, and
-`..` components, and upper-case letters, so a reference stays inside the corpus
-and names the same file on every platform, including one whose file names
-ignore case.
+MUST be a path relative to `testvectors/wire/`: one or more components joined by
+single `/` separators, each component matching the ID grammar above. That rules
+out absolute paths, drive and UNC prefixes, backslashes, empty, `.`, and `..`
+components, and upper-case letters, so a reference stays inside the corpus and
+names the same file on every platform, including one whose file names ignore
+case.
 
 Each `diagnostic-classes.tsv` `description_ref` MUST identify stable explanatory
 text for the class, held in `diagnostic-classes/` as one file per class, because
@@ -2794,6 +2804,45 @@ denotes an action that needs no credential material. All credentials are public
 test material; their filenames and the corpus `README.md` MUST make that status
 explicit and warn against operational reuse.
 
+Local resource caps are configuration (§2.2, §3.2, §7, §8, §9.12), so a stored
+outcome can depend on them. A `limit-profiles.tsv` row therefore gives every
+local cap a decimal value with no leading zero: `max_header_len`,
+`max_recipient_count`, `max_recipient_body_len`, and `max_header_mac_work_bytes`
+bound the §3.2 `header_len`, `recipient_count`, each recipient `body_len`, and
+`supported_recipient_count * (12 + header_len)`; `max_kdf_mem_kib`,
+`max_kdf_time`, `max_kdf_lanes`, and `max_kdf_work` bound a stored §2.2
+`mem_kib`, `time`, `lanes`, and `mem_kib * time` in every artifact that stores
+KDF parameters; `max_recipient_string_chars` bounds the §7 recipient-string
+length in characters; `max_private_key_wrapped_secret_len` bounds the §8
+`wrapped_secret_len`; and the other nine columns are the §9.12 caps of the same
+names. A value MUST NOT exceed the structural maximum of the quantity it bounds,
+where the format defines one. Each case names one profile in `limit_profile_id`,
+and a replay MUST evaluate the case with every local cap set to that profile's
+value, for an accepted case as for a rejected one. It MUST NOT choose the
+configuration from the expected result: a cap can reject with a class other than
+`resource_cap_exceeded`. The values are part of the frozen contract and record
+the configuration each stored outcome was produced under; they do not follow any
+implementation's defaults, which may change between releases. A replay that
+cannot apply a case's profile cannot assert its stored outcome, and the case is
+not applicable to that implementation (§12.4). `limit_profile_id` MUST be `-`
+exactly for `private_key_validate` and `stream_encrypt_kat` cases, whose actions
+apply no local cap, and otherwise MUST name a profile declared in the same or an
+earlier corpus revision. Every declared profile MUST be named by at least one
+case.
+
+`first_required_by_baseline` names the earliest compatibility baseline (§11.4)
+whose rules require the case's stored outcome. Baselines are cumulative, so
+every later baseline requires it too. An implementation claiming a baseline
+MUST assert each case first required by that baseline or one of its ancestors,
+subject to §12.2's capability rule and to effective errata, and MAY skip a case
+first required by any other baseline, because that case evidences a promise it
+does not claim. The column records which promise a case evidences, not when the
+case arrived: a later corpus revision MAY append new evidence for an earlier
+baseline's rules and name that earlier baseline, while
+`introduced_in_corpus_revision` records the revision that appended the row. The
+named baseline MUST be declared in the same or an earlier corpus revision than
+the case.
+
 **Publication and contract boundary.** The stable `v0.3.0` Git tag permanently
 addresses the initial publication at:
 
@@ -2808,16 +2857,16 @@ implementations honor it.
 The frozen contract comprises the manifest rows, referenced artifact and
 expected-result bytes, their digests, and their semantic expectations. It does
 not include English error prose or Rust type names. The manifests also record
-each case's credential, construction lineage, first required baseline,
-expectation scope, and capability ID where applicable.
+each case's credential, limit profile, construction lineage, first required
+baseline, expectation scope, and capability ID where applicable.
 
 **Revision and provenance policy.** Existing manifest rows, referenced artifact
 bytes, expected results, digests, class meanings, credentials, and provenance
 records MUST NOT be edited, removed, reordered, or regenerated.
 
-`CORPUS-REVISION` increments whenever a case, origin, credential, diagnostic
-class, baseline, or erratum is appended. Corrections use append-only errata
-and, where needed, a new replacement case; an erratum MUST NOT conceal an
+`CORPUS-REVISION` increments whenever a case, origin, credential, limit profile,
+diagnostic class, baseline, or erratum is appended. Corrections use append-only
+errata and, where needed, a new replacement case; an erratum MUST NOT conceal an
 implementation regression, and tagged history remains unchanged. Its rationale
 MUST state whether the error concerns generation, metadata, specification, or
 classification.
@@ -2925,9 +2974,10 @@ FerroCrypt's own writer and reader is not sufficient transcript evidence.
 
 **Replay requirements.** Normal conformance replay MUST parse every manifest
 table strictly; verify every referenced digest; reject duplicate IDs, invalid
-paths and list forms, and dangling references, validating each reference
-before it reads the file the reference names; apply effective errata without
-deleting history; exercise `.fcr`, public-key, and private-key cases through
+paths and list forms, and dangling references, validating each reference before
+it reads the file the reference names; apply effective errata without deleting
+history; assert every case its claimed baseline requires, evaluated under the
+case's limit profile; exercise `.fcr`, public-key, and private-key cases through
 public interfaces where possible; apply §12.2's capability rule; compare
 successful results with their exact expected bytes or decoded fields; and map
 structured errors to the stable diagnostic taxonomy without comparing display

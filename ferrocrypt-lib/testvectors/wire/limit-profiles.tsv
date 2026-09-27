@@ -1,0 +1,2 @@
+# limit_profile_id	max_header_len	max_recipient_count	max_recipient_body_len	max_header_mac_work_bytes	max_kdf_mem_kib	max_kdf_time	max_kdf_lanes	max_kdf_work	max_recipient_string_chars	max_private_key_wrapped_secret_len	max_entry_count	max_total_plaintext_bytes	max_path_depth	max_path_bytes	max_manifest_bytes	max_archive_ext_bytes	max_entry_ext_bytes	max_total_entry_ext_bytes	max_tlv_value_bytes	introduced_in_corpus_revision
+default-0.3.0	1048576	64	8192	67109632	1048576	12	8	4194304	1024	4096	250000	68719476736	64	4096	67108864	65536	65536	67108864	16777216	1

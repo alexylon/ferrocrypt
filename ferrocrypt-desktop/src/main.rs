@@ -9,6 +9,8 @@ use ferrocrypt::{
     PUBLIC_KEY_FILENAME, PrivateKey, ProgressEvent, PublicKey, UnauthenticatedRecipientMode,
     default_encrypted_filename, generate_key_pair, probe_recipient_mode, validate_private_key_file,
 };
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -207,18 +209,80 @@ fn run_operation(
     }
 }
 
+/// The file dialog builder.
+///
+/// On Linux, and on the other desktops rfd serves through the XDG portal, the
+/// dialog runs in a separate process. Waiting for it inside a UI callback
+/// freezes the window until it closes, and GNOME then reports the app as not
+/// responding, so there the dialog is the asynchronous one, awaited on the
+/// event loop. macOS and Windows keep the window responsive while a blocking
+/// dialog is open, so they keep the blocking one.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+type FileDialog = rfd::AsyncFileDialog;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+type FileDialog = rfd::FileDialog;
+
 #[cfg(target_os = "macos")]
-fn pick_file_or_folder() -> Option<PathBuf> {
-    rfd::FileDialog::new().pick_file_or_folder()
+fn pick_file_or_folder(dialog: FileDialog) -> Option<PathBuf> {
+    dialog.pick_file_or_folder()
 }
 
-#[cfg(not(target_os = "macos"))]
-fn pick_file_or_folder() -> Option<PathBuf> {
-    rfd::FileDialog::new().pick_file()
+#[cfg(target_os = "windows")]
+fn pick_file_or_folder(dialog: FileDialog) -> Option<PathBuf> {
+    dialog.pick_file()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn pick_file_or_folder(dialog: FileDialog) -> impl Future<Output = Option<rfd::FileHandle>> {
+    dialog.pick_file()
+}
+
+/// Opens a file dialog and passes the chosen path to `on_pick` once the
+/// dialog closes, without blocking the event loop.
+///
+/// The dialog is not attached to the window, so the form stays usable while
+/// it is open. A choice that arrives while an operation runs is dropped: the
+/// controls that open a dialog are disabled during an operation, so that
+/// dialog was opened before it started.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn open_dialog<F>(
+    app: &AppWindow,
+    open: impl FnOnce(FileDialog) -> F,
+    on_pick: impl FnOnce(&AppWindow, PathBuf) + 'static,
+) where
+    F: Future<Output = Option<rfd::FileHandle>> + 'static,
+{
+    let chosen = open(FileDialog::new());
+    let weak = app.as_weak();
+    // Fails only without a running event loop, and UI callbacks run inside one.
+    let _ = slint::spawn_local(async move {
+        let Some(file) = chosen.await else { return };
+        let Some(app) = weak.upgrade() else { return };
+        if !app.get_is_working() {
+            on_pick(&app, file.path().to_path_buf());
+        }
+    });
+}
+
+/// Opens a file dialog and passes the chosen path to `on_pick`, blocking
+/// until the dialog closes.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn open_dialog(
+    app: &AppWindow,
+    open: impl FnOnce(FileDialog) -> Option<PathBuf>,
+    on_pick: impl FnOnce(&AppWindow, PathBuf),
+) {
+    if let Some(path) = open(FileDialog::new()) {
+        on_pick(app, path);
+    }
 }
 
 fn main() {
     let app = AppWindow::new().unwrap();
+    // Without an app ID the Linux desktop names the window "Unknown". The
+    // `.deb` package's `.desktop` entry is named after the binary, so this ID
+    // gives the window that entry's name and icon.
+    let _ = slint::set_xdg_app_id(env!("CARGO_BIN_NAME"));
 
     // Show the library version (the one cargo-release bumps) rather than this
     // crate's own, so the displayed version can't silently drift from a release.
@@ -254,9 +318,11 @@ fn main() {
         let weak = app.as_weak();
         let selected_public_key = selected_public_key.clone();
         move || {
-            if let Some(path) = pick_file_or_folder() {
-                apply_input_path(&weak, path, &selected_public_key);
-            }
+            let Some(app) = weak.upgrade() else { return };
+            let selected_public_key = selected_public_key.clone();
+            open_dialog(&app, pick_file_or_folder, move |app, path| {
+                apply_input_path(app, path, &selected_public_key);
+            });
         }
     });
 
@@ -264,9 +330,15 @@ fn main() {
         let weak = app.as_weak();
         let selected_public_key = selected_public_key.clone();
         move || {
-            if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                apply_input_path(&weak, path, &selected_public_key);
-            }
+            let Some(app) = weak.upgrade() else { return };
+            let selected_public_key = selected_public_key.clone();
+            open_dialog(
+                &app,
+                |dialog| dialog.pick_folder(),
+                move |app, path| {
+                    apply_input_path(app, path, &selected_public_key);
+                },
+            );
         }
     });
 
@@ -274,29 +346,33 @@ fn main() {
         let weak = app.as_weak();
         let selected_public_key = selected_public_key.clone();
         move || {
-            let Some(path) = rfd::FileDialog::new()
-                .add_filter("Key files", &["key"])
-                .pick_file()
-            else {
-                return;
-            };
             let Some(app) = weak.upgrade() else { return };
-            let key_path = path_to_string(&path);
-            app.set_key_path_display(elide_left(&key_path, ELIDE).into());
-            app.set_key_path(key_path.clone().into());
-            validate_selected_key(&app, &key_path, &selected_public_key);
-            check_conflicts(&app);
+            let selected_public_key = selected_public_key.clone();
+            open_dialog(
+                &app,
+                |dialog| dialog.add_filter("Key files", &["key"]).pick_file(),
+                move |app, path| {
+                    let key_path = path_to_string(&path);
+                    app.set_key_path_display(elide_left(&key_path, ELIDE).into());
+                    app.set_key_path(key_path.clone().into());
+                    validate_selected_key(app, &key_path, &selected_public_key);
+                    check_conflicts(app);
+                },
+            );
         }
     });
 
     app.on_select_output_dir({
         let weak = app.as_weak();
         move || {
-            let Some(path) = rfd::FileDialog::new().pick_folder() else {
-                return;
-            };
             let Some(app) = weak.upgrade() else { return };
-            update_output_path(&app, &path_to_string(&path));
+            open_dialog(
+                &app,
+                |dialog| dialog.pick_folder(),
+                |app, path| {
+                    update_output_path(app, &path_to_string(&path));
+                },
+            );
         }
     });
 
@@ -304,35 +380,41 @@ fn main() {
         let weak = app.as_weak();
         move || {
             let Some(app) = weak.upgrade() else { return };
-            let mut dialog = rfd::FileDialog::new();
-
             let inpath = app.get_input_path().to_string();
-            if let Ok(name) = default_encrypted_filename(&inpath) {
-                dialog = dialog.set_file_name(&name);
-            }
-
+            let file_name = default_encrypted_filename(&inpath).ok();
             let outpath = app.get_output_path().to_string();
-            if let Some(parent) = parent_dir(&outpath) {
-                dialog = dialog.set_directory(parent);
-            }
+            let directory = parent_dir(&outpath);
 
-            if let Some(path) = dialog.save_file() {
-                update_output_path(&app, &path_to_string(&path));
-            }
+            open_dialog(
+                &app,
+                move |mut dialog| {
+                    if let Some(name) = file_name {
+                        dialog = dialog.set_file_name(name);
+                    }
+                    if let Some(parent) = directory {
+                        dialog = dialog.set_directory(parent);
+                    }
+                    dialog.save_file()
+                },
+                |app, path| update_output_path(app, &path_to_string(&path)),
+            );
         }
     });
 
     app.on_select_keygen_output_dir({
         let weak = app.as_weak();
         move || {
-            let Some(path) = rfd::FileDialog::new().pick_folder() else {
-                return;
-            };
             let Some(app) = weak.upgrade() else { return };
-            let dir = path_to_string(&path);
-            app.set_keygen_output_dir_display(elide_left(&dir, ELIDE).into());
-            app.set_keygen_output_dir(dir.into());
-            check_conflicts(&app);
+            open_dialog(
+                &app,
+                |dialog| dialog.pick_folder(),
+                |app, path| {
+                    let dir = path_to_string(&path);
+                    app.set_keygen_output_dir_display(elide_left(&dir, ELIDE).into());
+                    app.set_keygen_output_dir(dir.into());
+                    check_conflicts(app);
+                },
+            );
         }
     });
 
@@ -536,11 +618,7 @@ fn main() {
     app.run().unwrap();
 }
 
-fn apply_input_path(
-    weak: &slint::Weak<AppWindow>,
-    path: PathBuf,
-    selected_public_key: &SelectedPublicKey,
-) {
+fn apply_input_path(app: &AppWindow, path: PathBuf, selected_public_key: &SelectedPublicKey) {
     let selected = path_to_string(&path);
     let dir = path
         .parent()
@@ -553,11 +631,7 @@ fn apply_input_path(
             }
         });
 
-    let detected_mode = detect_mode_from_path(&selected);
-
-    let Some(app) = weak.upgrade() else { return };
-
-    let detected_mode = match detected_mode {
+    let detected_mode = match detect_mode_from_path(&selected) {
         Ok(mode) => mode,
         Err(e) => {
             // The chosen file could not be read (a damaged encrypted file, or
@@ -569,7 +643,7 @@ fn apply_input_path(
             app.set_input_path_display(Default::default());
             app.set_output_path(Default::default());
             app.set_output_path_display(Default::default());
-            check_conflicts(&app);
+            check_conflicts(app);
             return;
         }
     };
@@ -594,20 +668,20 @@ fn apply_input_path(
 
     let keypath = app.get_key_path().to_string();
     if !keypath.is_empty() {
-        validate_selected_key(&app, &keypath, selected_public_key);
+        validate_selected_key(app, &keypath, selected_public_key);
     }
 
     if is_decrypt {
-        update_output_path(&app, &dir);
+        update_output_path(app, &dir);
     } else if let Ok(filename) = default_encrypted_filename(&selected) {
-        update_output_path(&app, &path_to_string(&Path::new(&dir).join(filename)));
+        update_output_path(app, &path_to_string(&Path::new(&dir).join(filename)));
     }
 
     if !app.get_key_invalid() {
         app.set_status_ok("".into());
         app.set_status_err("".into());
     }
-    check_conflicts(&app);
+    check_conflicts(app);
 }
 
 fn update_output_path(app: &AppWindow, path: &str) {

@@ -3455,7 +3455,10 @@ fn public_key_case(
 }
 
 fn write_public_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
-    use crate::key::public::{encode_recipient_payload_with_hrp, recipient_payload_for_tests};
+    use crate::key::public::{
+        encode_recipient_groups_for_tests, encode_recipient_payload_with_hrp,
+        recipient_groups_for_tests, recipient_payload_for_tests,
+    };
 
     let canonical = keys.public_a.clone();
     let material = decode_public_key_file(&canonical)
@@ -3484,8 +3487,23 @@ fn write_public_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     )
     .expect("build the canonical recipient payload");
 
+    // The canonical 5-bit groups end in padding bits, which neither checksum
+    // covers. Two cases below alter only that padding and keep both checksums
+    // valid, so the canonical-padding rule of `FORMAT.md` §7 is the only one
+    // that can reject them.
+    assert_ne!(
+        payload.len() * 8 % 5,
+        0,
+        "the canonical payload must leave padding bits in its last group"
+    );
+    let groups = recipient_groups_for_tests(&payload);
+    let mut nonzero_padding = groups.clone();
+    *nonzero_padding.last_mut().expect("payload is nonempty") |= 0x01;
+    let mut surplus_group = groups;
+    surplus_group.push(0);
+
     let reject = |s: String| -> Vec<u8> { s.into_bytes() };
-    let cases: [(&str, Vec<u8>, &str, &str); 8] = [
+    let cases: [(&str, Vec<u8>, &str, &str); 10] = [
         (
             "public-key-checksum-corrupted",
             reject({
@@ -3548,6 +3566,24 @@ fn write_public_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
             "public-key-truncated",
             reject(recipient[..recipient.len() - 8].to_string()),
             "public_key_string_truncated",
+            "malformed_public_key",
+        ),
+        (
+            "public-key-padding-nonzero",
+            reject(
+                encode_recipient_groups_for_tests(&nonzero_padding)
+                    .expect("encode a padding bit set in the last group"),
+            ),
+            "public_key_padding_bits_nonzero",
+            "malformed_public_key",
+        ),
+        (
+            "public-key-padding-surplus-group",
+            reject(
+                encode_recipient_groups_for_tests(&surplus_group)
+                    .expect("encode a surplus padding group"),
+            ),
+            "public_key_padding_surplus_group",
             "malformed_public_key",
         ),
     ];

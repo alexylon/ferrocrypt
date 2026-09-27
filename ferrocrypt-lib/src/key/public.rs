@@ -284,6 +284,45 @@ pub(crate) fn encode_recipient_payload_with_hrp(
     bech32::encode::<Bech32V1>(hrp, data).map_err(|_| malformed_public_key())
 }
 
+/// Test-only: the 5-bit Bech32 data groups that canonically encode
+/// `payload`, the last one padded with zero bits. Paired with
+/// [`encode_recipient_groups_for_tests`], so the conformance corpus can alter
+/// the padding, which neither checksum covers, and commit a string that only
+/// the canonical-padding rule of `FORMAT.md` §7 rejects. Never reachable from
+/// production code.
+#[cfg(test)]
+pub(crate) fn recipient_groups_for_tests(payload: &[u8]) -> Vec<u8> {
+    use bech32::primitives::iter::ByteIterExt;
+
+    payload
+        .iter()
+        .copied()
+        .bytes_to_fes()
+        .map(bech32::Fe32::to_u8)
+        .collect()
+}
+
+/// Test-only: Bech32-encodes 5-bit data groups as they stand under the
+/// recipient human-readable part, with a valid BIP 173 checksum. Unlike
+/// [`encode_recipient_payload_with_hrp`], it can encode groups that no byte
+/// payload converts to: nonzero padding bits, or a surplus group. Never
+/// reachable from production code.
+#[cfg(test)]
+pub(crate) fn encode_recipient_groups_for_tests(groups: &[u8]) -> Result<String, CryptoError> {
+    use bech32::Fe32;
+    use bech32::primitives::iter::Fe32IterExt;
+
+    let groups = groups
+        .iter()
+        .map(|&group| Fe32::try_from(group).map_err(|_| malformed_public_key()))
+        .collect::<Result<Vec<Fe32>, _>>()?;
+    Ok(groups
+        .into_iter()
+        .with_checksum::<Bech32V1>(&RECIPIENT_HRP)
+        .chars()
+        .collect())
+}
+
 /// Decodes a canonical lowercase Bech32 recipient string into the
 /// typed payload.
 ///
@@ -1074,16 +1113,13 @@ mod tests {
     }
 
     /// `FORMAT.md` §7 requires decoders to reject non-canonical 5-to-8
-    /// padding. Builds a second, distinct `fcr1…` string for the same
-    /// payload by setting the lowest padding bit of the final data
-    /// character and recomputing the BIP 173 checksum. The dropped
-    /// padding bits are covered by neither checksum, so without the
-    /// canonical re-encode check this string is accepted.
+    /// padding, in both its forms: a padding bit set in the final data
+    /// group, and a surplus group beyond the ones the payload needs. Each
+    /// string keeps both checksums valid, because neither covers the
+    /// padding, so without the canonical re-encode check each would be
+    /// accepted as a second string for the same key.
     #[test]
     fn decode_rejects_non_canonical_bech32_padding() {
-        use bech32::Fe32;
-        use bech32::primitives::iter::{ByteIterExt, Fe32IterExt};
-
         let canonical = encode_recipient_string("x25519", &x25519_key()).unwrap();
         decode_recipient_string(&canonical, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT)
             .expect("canonical string must decode");
@@ -1092,28 +1128,29 @@ mod tests {
             .unwrap()
             .byte_iter()
             .collect();
-        let pad_bits = (5 - (payload.len() * 8) % 5) % 5;
-        assert!(
-            pad_bits > 0,
+        assert_ne!(
+            payload.len() * 8 % 5,
+            0,
             "payload length leaves no padding bits; vary key_material length"
         );
+        let groups = recipient_groups_for_tests(&payload);
+        assert_eq!(
+            encode_recipient_groups_for_tests(&groups).unwrap(),
+            canonical,
+            "the canonical groups must reproduce the canonical string"
+        );
 
-        let mut fes: Vec<Fe32> = payload.iter().copied().bytes_to_fes().collect();
-        let last = fes.pop().expect("payload is non-empty");
-        let tweaked = Fe32::try_from(last.to_u8() | 0x01).unwrap();
-        assert_ne!(last, tweaked, "lowest padding bit must start unset");
-        fes.push(tweaked);
-        let non_canonical: String = fes
-            .iter()
-            .copied()
-            .with_checksum::<Bech32V1>(&RECIPIENT_HRP)
-            .chars()
-            .collect();
-        assert_ne!(non_canonical, canonical);
-
-        match decode_recipient_string(&non_canonical, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT) {
-            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
-            other => panic!("expected MalformedPublicKey, got {other:?}"),
+        let mut nonzero_padding = groups.clone();
+        *nonzero_padding.last_mut().expect("payload is non-empty") |= 0x01;
+        let mut surplus_group = groups;
+        surplus_group.push(0);
+        for groups in [nonzero_padding, surplus_group] {
+            let non_canonical = encode_recipient_groups_for_tests(&groups).unwrap();
+            assert_ne!(non_canonical, canonical);
+            match decode_recipient_string(&non_canonical, RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT) {
+                Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
+                other => panic!("expected MalformedPublicKey, got {other:?}"),
+            }
         }
     }
 

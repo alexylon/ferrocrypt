@@ -117,14 +117,14 @@ The compiled binary is written to `target/release/ferrocrypt` on macOS and Linux
 
 ### Desktop application
 
-Building the desktop application from source requires Rust and `cargo-bundle`:
+Build from source:
 
 ```bash
 cd ferrocrypt-desktop
-cargo bundle --release
+cargo build --release
 ```
 
-The bundle command produces platform-specific packages, such as `.app`, `.deb`, `.AppImage`, or `.msi`, depending on the host platform and installed tooling.
+The compiled binary is written to `ferrocrypt-desktop/target/release/ferrocrypt-desktop` on macOS and Linux, or `ferrocrypt-desktop\target\release\ferrocrypt-desktop.exe` on Windows. It needs no other file from the repository, so it can be copied anywhere and started directly.
 
 Linux builds also require these system packages:
 
@@ -138,7 +138,24 @@ sudo dnf install fontconfig-devel freetype-devel libxcb-devel \
                  libxkbcommon-devel wayland-devel openssl-devel
 ```
 
-AppImage output also requires `mksquashfs`, provided by the `squashfs-tools` package.
+To build an installable package instead, run the packaging tool for your platform from the `ferrocrypt-desktop` directory. Each tool builds the binary itself.
+
+```bash
+# macOS: writes target/release/bundle/osx/FerroCrypt.app
+cargo install cargo-bundle --version 0.11.0 --locked
+cargo bundle --release --format osx
+
+# Debian/Ubuntu: writes target/release/bundle/deb/*.deb, then installs it
+cargo install cargo-bundle --version 0.11.0 --locked
+cargo bundle --release --format deb
+sudo apt install ./target/release/bundle/deb/*.deb
+
+# Windows: writes target\wix\*.msi (also requires WiX Toolset 3)
+cargo install cargo-wix
+cargo wix
+```
+
+On macOS, the `.app` bundle gives FerroCrypt its icon and lets it start from Finder. On Linux, the `.deb` package installs the binary in `/usr/bin` and adds FerroCrypt, with its icon, to the application menu.
 
 ## Command-line usage
 

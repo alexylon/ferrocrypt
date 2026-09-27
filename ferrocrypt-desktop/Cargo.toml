@@ -8,7 +8,9 @@ license = "GPL-3.0-only"
 publish = false
 
 [dependencies]
-slint = "1"
+# 1.18.1 or newer: older versions change the window's size when it moves to a
+# display with a different scale (seen on Wayland).
+slint = "1.18.1"
 ferrocrypt = { path = "../ferrocrypt-lib" }
 rfd = "0.17"
 regex-lite = "0.1"
@@ -20,7 +22,8 @@ arboard = "3"
 ferrocrypt-test-support = { path = "../ferrocrypt-test-support" }
 
 [build-dependencies]
-slint-build = "1"
+# Keep in step with `slint`.
+slint-build = "1.18.1"
 
 # cargo-wix is used for the Windows MSI build (cargo-bundle's MSI support is
 # still experimental). Suppress the EULA dialog (license-screen) for the

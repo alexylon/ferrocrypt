@@ -41,6 +41,9 @@ origin-fca-flags-nonzero	fcr_payload	fca-flags-nonzero	-	920cc11e9dfaeeb6196f07d
 origin-fca-entry-count-zero	fcr_payload	fca-entry-count-zero	-	487663974d54c37e93ff056ce4dada066e3b81d6f8d9eae1585a5f781fcddff6	95cd297e6e987389d60e5ce51082713f23a253	0.3.0	1
 origin-fca-manifest-len-zero	fcr_payload	fca-manifest-len-zero	-	169858eadbc8bfc06c98c989278900d73184028cda2b7985a4076843b68e7228	694197f2cbbfe3665a7c03b9bb8ca6870fb9e6	0.3.0	1
 origin-fca-total-bytes-disagree	fcr_payload	fca-total-bytes-disagree	-	368f4465e58bd1c29cc9a15ee2bc013071ad801aab92d5cf3042258e3a1a7d67	11af457dca4596c3eff8a5d8d0b287cfb30ced	0.3.0	1
+origin-fca-fixed-header-truncated	fcr_payload	fca-fixed-header-truncated	-	a35d96b0aab2388bac1566f2ab304eeac413262e192220c1132de996887241b8	1fa28f653b25912b39a2eee3f33c2ea6d17c8a	0.3.0	1
+origin-fca-archive-ext-region-truncated	fcr_payload	fca-archive-ext-region-truncated	-	8a32d26b50f6974e7f2c032afa6e8c80770a8fcae0d1e632cd233623bd09c5d7	dc5a7ed0f992df4da3ce4a3a3841b5775e0422	0.3.0	1
+origin-fca-manifest-region-truncated	fcr_payload	fca-manifest-region-truncated	-	e20077ebb8a28cb31f3aec85cb766ebcc8dfb1fb7e3bc52a08cc499d3f26328d	94b0fbff97b45ba2d1c7a5fdeb794cb17c822f	0.3.0	1
 origin-fca-newer-version	fcr_payload	fca-newer-version	-	2ad87a495c22c02d44ad10abb986760322e5a5e9ef7995c7dba0e06b916abe7f	f5bc576fd1f641f8e5edfecb49b796cd677142	0.3.0	1
 origin-fca-duplicate-paths	fcr_payload	fca-duplicate-paths	-	63cdb99d2a533b0953abeec5c6c2045582fa2ee3132cc28eb975979c4703d86b	e8734871dafcb3c13ad3a59713775d9ba503b0	0.3.0	1
 origin-fca-ascii-case-collision	fcr_payload	fca-ascii-case-collision	-	44af14a5062b94a919722d0d9e23da34bb90d108658a04f7d9a62a9b0e37d7b2	eb58119e080bf25aaec2c7458c629dd13b13d0	0.3.0	1
@@ -85,6 +88,9 @@ origin-fca-archive-ext-over-default-cap	fcr_payload	fca-archive-ext-over-default
 origin-fca-archive-ext-at-default-cap	fcr_payload	fca-archive-ext-at-default-cap	-	354198db8fb0fe8d93bf52044e5c601143690ff191febbda04d603bd37265191	ba8032a7c211e14dc138fdbf7f086fa84f68a3	0.3.0	1
 origin-fca-entry-ext-over-default-cap	fcr_payload	fca-entry-ext-over-default-cap	-	afc192bcca3ead715049fc689db1a74cc2cb8f1cb2b47dce04f1ccb2678323c9	c4a97d3d1952c131d94c8156643e41e57b98bc	0.3.0	1
 origin-fca-entry-ext-at-default-cap	fcr_payload	fca-entry-ext-at-default-cap	-	dfa9f1cb77400fe3631cb9de0ba560d556cf7f0c8c0b3acdccace310c9579985	270c76271938739548ee168e095d4152eb9c10	0.3.0	1
+origin-fca-entry-count-over-default-cap	fcr_payload	fca-entry-count-over-default-cap	-	37d0ec86d62093f1690cc3d832d0ebb77b6b53529d81b7834616b89481b977aa	ea97719971d90ad6be6496190cb2ef8bf8c155	0.3.0	1
+origin-fca-manifest-len-over-default-cap	fcr_payload	fca-manifest-len-over-default-cap	-	cd911d2f60c3fb30224cabc0a5f5579319d58af0228eba3aaad67ba49cc85016	f88724ce171c33768d9b2fdcdc65ca015dc6fc	0.3.0	1
+origin-fca-total-bytes-over-default-cap	fcr_payload	fca-total-bytes-over-default-cap	-	93390e58c6826aa172168252990f332c9a34b686b4334882864c4d6a7c52d0aa	2e1750012173b5f975bc73bb627cb806d86ea7	0.3.0	1
 origin-header-recipient-count-over-default-cap	fcr_payload	header-recipient-count-over-default-cap	-	c3881008f527c542645a4b9c10eb6a70881e9ee98e7cb1629c713c3fc36226a8	3e56f2e8e3af06d0276d2a72167e6836588429	0.3.0	1
 origin-header-recipient-count-at-default-cap	fcr_payload	header-recipient-count-at-default-cap	-	9026725bd1e3144c931311d2013de7ee7a4cf02597b04febb580312f13cbc86e	fa7e908599ef0cab343009e6374586f80a6bbd	0.3.0	1
 origin-recipient-body-over-default-cap	fcr_payload	recipient-body-over-default-cap	-	51d57578760ab1d1dd2e1042bac9b95b15ead99c1a500474ae0889ede8acae4f	75dd844243d2248ffa0b1140c7d5774a37c837	0.3.0	1

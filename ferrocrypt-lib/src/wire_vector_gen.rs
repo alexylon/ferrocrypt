@@ -4153,21 +4153,33 @@ fn extraction_listing(entries: &[FcaEntry]) -> Vec<u8> {
     out.into_bytes()
 }
 
-/// Serializes a complete FCA payload: header, archive extension region,
-/// manifest, then file content in manifest order.
 /// FCA fixed-header field offsets (`FORMAT.md` §9.2). Only the fields the
 /// cases below reach for are named; the check in the last initializer covers
 /// the whole header, and lives there because the oldest supported compiler
 /// does not count a use inside a free-standing `const _` assertion.
 const FCA_OFF_VERSION: usize = 4;
 const FCA_OFF_FLAGS: usize = FCA_OFF_VERSION + 1;
-const FCA_OFF_ENTRY_COUNT: usize = {
-    let at = FCA_OFF_FLAGS + 2;
-    // entry_count(4) || archive_ext_len(4) || manifest_len(4) || total_file_bytes(8)
-    assert!(at + 4 + 4 + 4 + 8 == crate::archive::format::FCA_HEADER_SIZE);
+const FCA_OFF_ENTRY_COUNT: usize = FCA_OFF_FLAGS + 2;
+const FCA_OFF_ARCHIVE_EXT_LEN: usize = FCA_OFF_ENTRY_COUNT + 4;
+const FCA_OFF_MANIFEST_LEN: usize = FCA_OFF_ARCHIVE_EXT_LEN + 4;
+const FCA_OFF_TOTAL_FILE_BYTES: usize = {
+    let at = FCA_OFF_MANIFEST_LEN + 4;
+    // total_file_bytes(8) ends the header.
+    assert!(at + 8 == crate::archive::format::FCA_HEADER_SIZE);
     at
 };
 
+/// Reads the `u32` fixed-header field at `offset` of an FCA image.
+fn fca_u32_field(fca: &[u8], offset: usize) -> u32 {
+    u32::from_be_bytes(
+        fca[offset..offset + 4]
+            .try_into()
+            .expect("the image holds a complete fixed header"),
+    )
+}
+
+/// Serializes a complete FCA payload: header, archive extension region,
+/// manifest, then file content in manifest order.
 fn build_fca(entries: &[FcaEntry], archive_ext: &[u8]) -> Vec<u8> {
     let manifest_len: usize = entries.iter().map(FcaEntry::wire_len).sum();
     let total_file_bytes: u64 = entries.iter().map(|e| e.content.len() as u64).sum();
@@ -4412,13 +4424,19 @@ fn write_fca_cases(corpus: &mut Corpus) {
         ),
         (
             "fca-manifest-len-zero",
-            Box::new(|b: &mut Vec<u8>| b[15..19].copy_from_slice(&0u32.to_be_bytes())),
+            Box::new(|b: &mut Vec<u8>| {
+                b[FCA_OFF_MANIFEST_LEN..FCA_OFF_MANIFEST_LEN + 4]
+                    .copy_from_slice(&0u32.to_be_bytes())
+            }),
             "fca_manifest_len_zero",
             "malformed_archive",
         ),
         (
             "fca-total-bytes-disagree",
-            Box::new(|b: &mut Vec<u8>| b[19..27].copy_from_slice(&999u64.to_be_bytes())),
+            Box::new(|b: &mut Vec<u8>| {
+                b[FCA_OFF_TOTAL_FILE_BYTES..FCA_OFF_TOTAL_FILE_BYTES + 8]
+                    .copy_from_slice(&999u64.to_be_bytes())
+            }),
             "fca_total_file_bytes_disagrees_with_entries",
             "malformed_archive",
         ),
@@ -4426,6 +4444,44 @@ fn write_fca_cases(corpus: &mut Corpus) {
     for (case_id, mutate, condition, class) in header_cases {
         fca_mutated_case(corpus, case_id, condition, class, mutate);
     }
+
+    // Framing (`FORMAT.md` §9.1): the fixed header and each length-delimited
+    // region that follows it must be complete. The payload stream seals each
+    // cut image as it stands, so the cut reaches the archive parser rather
+    // than failing payload authentication.
+    let header_size = crate::archive::format::FCA_HEADER_SIZE;
+    fca_mutated_case(
+        corpus,
+        "fca-fixed-header-truncated",
+        "fca_fixed_header_truncated",
+        "malformed_archive",
+        |b| b.truncate(header_size - 1),
+    );
+    let mut cut_in_archive_ext = build_fca(
+        &[FcaEntry::file("p.txt", b"fca payload")],
+        &tlv_bytes(0x0001, b"ext"),
+    );
+    let archive_ext_end =
+        header_size + fca_u32_field(&cut_in_archive_ext, FCA_OFF_ARCHIVE_EXT_LEN) as usize;
+    cut_in_archive_ext.truncate(archive_ext_end - 1);
+    fca_case(
+        corpus,
+        "fca-archive-ext-region-truncated",
+        &cut_in_archive_ext,
+        Err(("fca_archive_ext_region_truncated", "malformed_archive")),
+    );
+    fca_mutated_case(
+        corpus,
+        "fca-manifest-region-truncated",
+        "fca_manifest_region_truncated",
+        "malformed_archive",
+        |b| {
+            let manifest_end = header_size
+                + fca_u32_field(b, FCA_OFF_ARCHIVE_EXT_LEN) as usize
+                + fca_u32_field(b, FCA_OFF_MANIFEST_LEN) as usize;
+            b.truncate(manifest_end - 1);
+        },
+    );
 
     // A newer FCA archive version is capability-relative.
     let mut newer = build_fca(&[FcaEntry::file("p.txt", b"fca payload")], b"");
@@ -4740,14 +4796,16 @@ fn write_fca_cases(corpus: &mut Corpus) {
 
 /// Cases where structurally valid data exceeds a configurable local cap. The
 /// rejection depends on the reader's configuration rather than on the format,
-/// so each names the default this corpus is replayed under.
+/// so each is replayed under the limit profile its row names: the `0.3.0`
+/// defaults, which the condition IDs call the default cap.
 fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     use crate::crypto::tlv::tlv_bytes;
 
-    // Every cap is driven from both sides: one artifact a byte past it, which
-    // must be refused, and one sitting exactly on it, which must be accepted.
-    // Without the accepting half, a reader that placed a limit one unit low
-    // would satisfy every refusing case while rejecting valid input.
+    // Every cap an artifact can sit on is driven from both sides: one artifact
+    // a byte past it, which must be refused, and one sitting exactly on it,
+    // which must be accepted. Without the accepting half, a reader that placed
+    // a limit one unit low would satisfy every refusing case while rejecting
+    // valid input.
     let staging = tempfile::tempdir().expect("source dir");
     let source = write_source(staging.path(), "p", 32);
 
@@ -4844,6 +4902,46 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         ),
         Ok(b"fca payload".to_vec()),
     );
+
+    // FCA fixed-header caps: the entry count, the manifest length, and the
+    // total plaintext bytes, each declared one past its default in an
+    // otherwise valid header. The reader refuses the declaration before it
+    // allocates or reads what the field describes, so a small image carries
+    // each case. None has an accepting twin: an artifact on the cap would hold
+    // 250,000 entries, a 64 MiB manifest, or 64 GiB of content.
+    let header_caps: [ByteMutationCase; 3] = [
+        (
+            "fca-entry-count-over-default-cap",
+            Box::new(|b: &mut Vec<u8>| {
+                b[FCA_OFF_ENTRY_COUNT..FCA_OFF_ENTRY_COUNT + 4]
+                    .copy_from_slice(&(ArchiveLimits::ENTRY_COUNT_DEFAULT + 1).to_be_bytes())
+            }),
+            "fca_entry_count_above_default_cap",
+            "resource_cap_exceeded",
+        ),
+        (
+            "fca-manifest-len-over-default-cap",
+            Box::new(|b: &mut Vec<u8>| {
+                b[FCA_OFF_MANIFEST_LEN..FCA_OFF_MANIFEST_LEN + 4]
+                    .copy_from_slice(&(ArchiveLimits::MANIFEST_BYTES_DEFAULT + 1).to_be_bytes())
+            }),
+            "fca_manifest_len_above_default_cap",
+            "resource_cap_exceeded",
+        ),
+        (
+            "fca-total-bytes-over-default-cap",
+            Box::new(|b: &mut Vec<u8>| {
+                b[FCA_OFF_TOTAL_FILE_BYTES..FCA_OFF_TOTAL_FILE_BYTES + 8].copy_from_slice(
+                    &(ArchiveLimits::TOTAL_PLAINTEXT_BYTES_DEFAULT + 1).to_be_bytes(),
+                )
+            }),
+            "fca_total_file_bytes_above_default_cap",
+            "resource_cap_exceeded",
+        ),
+    ];
+    for (case_id, mutate, condition, class) in header_caps {
+        fca_mutated_case(corpus, case_id, condition, class, mutate);
+    }
 
     // Header caps: the supported-recipient count and the per-recipient body
     // length, each driven one entry and one byte past its cap and then exactly

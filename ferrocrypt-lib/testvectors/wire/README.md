@@ -172,23 +172,25 @@ reader cannot tell that from a tampered tail. `payload-region-empty` and
 
 ## Known gaps in revision 1
 
-Two items §12.3 asks for are not present, and both are blocked by size rather
-than overlooked:
+Two items §12.3 asks for are not fully present, and neither is an oversight:
 
 - **Chunk-count-boundary evidence.** A genuine 2^32-chunk artifact is about
   256 TiB, and the known-answer schema cannot stand in for it: `origins.tsv` has
   no field for a starting counter, so no row can say "this transcript begins at
   counter 2^32 - 1". Expressing this needs a schema change.
-- **The largest resource caps.** Entry count (250,000), total plaintext
-  (64 GiB), manifest length (64 MiB), total entry-extension bytes (64 MiB), and
-  TLV value length (16 MiB) would each require committing an artifact of that
-  size to a permanently frozen corpus. The caps that are cheap to exceed —
-  path depth, path bytes, both extension regions, recipient count, recipient
-  body length, the `private.key` wrapped-secret cap, and the Argon2id memory
-  and work caps on both artifacts that store key-derivation parameters — are
-  covered. The Argon2id time-cost and lane caps carry no case at all: both
-  default to the structural maximum, so a larger value is refused as an
-  invalid parameter and never reaches the cap.
+- **Some resource caps under the default profile.** A header declaring one past
+  the entry-count (250,000), manifest-length (64 MiB), or total-plaintext
+  (64 GiB) cap is refused, and that needs only a small artifact, but no case
+  sits on any of these caps: that would commit an artifact of that size to a
+  permanently frozen corpus. The total entry-extension cap (64 MiB) and the TLV
+  value cap (16 MiB) carry no case at all: under the default profile the
+  manifest-length and per-region caps refuse first, so no artifact can reach
+  either. Nor do the Argon2id time-cost and lane caps: both default to the
+  structural maximum, so a larger value is refused as an invalid parameter and
+  never reaches the cap. The other caps — path depth, path bytes, both extension
+  regions, recipient count, recipient body length, the `private.key`
+  wrapped-secret cap, and the Argon2id memory and work caps on both artifacts
+  that store key-derivation parameters — are covered.
 
 Everything else the §12.3 minimum-evidence table names is present. Two areas
 are covered in a shape worth stating: a directory root's expected result is the

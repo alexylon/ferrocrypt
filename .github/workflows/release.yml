@@ -129,9 +129,13 @@ jobs:
         if: runner.os == 'Linux' && !matrix.cli_only
         run: sudo apt-get update && sudo apt-get install -y libfontconfig-dev libfreetype-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libwayland-dev libssl-dev
 
+      # cargo-bundle 0.12.0 rejects `osx_minimum_system_version` in
+      # ferrocrypt-desktop/Cargo.toml and expects `minimum_system_version`
+      # under `[package.metadata.bundle.osx]` instead. Move that key before
+      # raising the version here and in README.md.
       - name: Install cargo-bundle
         if: ${{ !matrix.cli_only }}
-        run: cargo install cargo-bundle
+        run: cargo install cargo-bundle --version 0.11.0 --locked
 
       # ── CLI (workspace member) ──────────────────────────────────────────
 
@@ -203,8 +207,8 @@ jobs:
       # ── Desktop app (excluded from workspace) ──────────────────────────
 
       # macOS / Linux desktop bundling via cargo-bundle (.app / .deb).
-      # cargo-bundle's Windows MSI backend is unimplemented, so Windows uses
-      # cargo-wix instead (separate step below).
+      # Windows uses cargo-wix instead (separate step below), because
+      # cargo-bundle's MSI support is still experimental.
       - name: Bundle Desktop (macOS/Linux)
         if: runner.os != 'Windows' && !matrix.cli_only
         working-directory: ferrocrypt-desktop

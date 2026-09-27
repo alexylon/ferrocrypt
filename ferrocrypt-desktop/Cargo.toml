@@ -22,9 +22,10 @@ ferrocrypt-test-support = { path = "../ferrocrypt-test-support" }
 [build-dependencies]
 slint-build = "1"
 
-# cargo-wix is used for the Windows MSI build (cargo-bundle's MSI backend is
-# unimplemented). Suppress the EULA dialog (license-screen) for the installer;
-# the GPL-3.0 text is shipped with the binary, not as an installer screen.
+# cargo-wix is used for the Windows MSI build (cargo-bundle's MSI support is
+# still experimental). Suppress the EULA dialog (license-screen) for the
+# installer; the GPL-3.0 text is shipped with the binary, not as an installer
+# screen.
 [package.metadata.wix]
 eula = false
 

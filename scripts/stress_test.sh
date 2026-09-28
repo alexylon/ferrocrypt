@@ -71,10 +71,12 @@ assert_dirs_identical() {
     diff -rq "$1" "$2" >/dev/null 2>&1
 }
 
-# Read the low permission bits of a path in octal (e.g. 600, 755). macOS uses
-# `stat -f %Lp`; GNU/Linux uses `stat -c %a`.
+# Read the low permission bits of a path in octal (e.g. 600, 755). GNU/Linux
+# uses `stat -c %a`; macOS uses `stat -f %Lp`. The GNU form goes first: BSD
+# `stat` rejects `-c` and prints nothing, while GNU `stat` reads `-f` as its
+# file-system flag and prints file-system details before the fallback runs.
 perm_mode() {
-    stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null
+    stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null
 }
 
 # True when the platform preserves Unix permission bits and supports the

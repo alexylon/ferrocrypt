@@ -31,8 +31,8 @@ use sha3::{Digest, Sha3_256};
 const DECLARED_CAPABILITIES: &[&str] = &[];
 
 /// The compatibility baseline this build claims (`FORMAT.md` §11.4). Every
-/// case must be first required by it or one of its ancestors: FerroCrypt ships
-/// a corpus whose every case it is required to pass.
+/// case must be first required by it or one of its ancestors, because
+/// FerroCrypt must pass every case in the corpus it ships.
 const CLAIMED_BASELINE: &str = "0.3.0";
 
 fn corpus_root() -> PathBuf {
@@ -160,9 +160,9 @@ const MANIFEST_TABLES: &[(&str, &[&str])] = &[
     ),
 ];
 
-/// The columns holding a baseline, class, credential, origin, case, erratum,
-/// or condition ID, and whether each may hold `-`. Capability IDs follow the
-/// structured forms of `FORMAT.md` §12.2 instead.
+/// The columns holding a baseline, class, credential, limit-profile, origin,
+/// case, erratum, or condition ID, and whether each may hold `-`. Capability
+/// IDs follow the structured forms of `FORMAT.md` §12.2 instead.
 const ID_COLUMNS: &[(&str, &[(&str, bool)])] = &[
     (
         "baselines.tsv",

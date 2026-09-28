@@ -323,7 +323,7 @@ fn build_rewritten_kdf_fcr(
 }
 
 /// Generates one key pair with the fast test parameters into `keys/`,
-/// copying the fixed `public.key` / `private.key` output names to the
+/// copying the files written as `public.key` and `private.key` to the
 /// per-recipient fixture names.
 fn generate_key_pair(keys: &Path, label: &str) {
     let staging = tempfile::tempdir().expect("keygen staging dir");

@@ -723,9 +723,9 @@ pub(crate) fn generate_key_pair(
 /// Implementation seam for two intervals a test needs to reach: after
 /// both key files are staged and before either commits, and after both
 /// commit and before their paths are returned. Production supplies
-/// no-ops; tests substitute the output directory in the first and
-/// replace either final entry in the second. Each hook receives the
-/// private and the public path of its interval, in that order.
+/// no-ops; tests substitute the output directory in the first, and in the
+/// second replace, move, or hide what the returned paths lead to. Each hook
+/// receives the private and the public path of its interval, in that order.
 fn generate_key_pair_with_seams(
     passphrase: crate::passphrase::Passphrase,
     kdf_params: &crate::crypto::kdf::KdfParams,
@@ -789,10 +789,10 @@ fn generate_key_pair_with_seams(
     // checksum, emits BIP 173 lowercase Bech32).
     let recipient_string = encode_recipient_string(x25519::TYPE_NAME, &public_material)?;
 
-    // From the in-memory key material the recipient string just encoded, so
-    // it matches `PublicKey::from_key_file(..).fingerprint()` for the file
-    // without reading it back. Computed before either commit, so it cannot
-    // fail once a key file is on disk.
+    // Computed from the in-memory key material the recipient string encodes,
+    // so it matches `PublicKey::from_key_file(..).fingerprint()` without
+    // reading the file back, and before either commit, so it cannot fail once
+    // a key file is on disk.
     let fingerprint = fingerprint_hex(x25519::TYPE_NAME, &public_material)?;
 
     // Retain the output directory before the first temporary exists. On Linux
@@ -1122,8 +1122,8 @@ fn commit_key_pair_files_with_barrier_and_public_finalizer(
 /// The clause naming a key file committed before the one an error
 /// describes. `confirmed` is used only while `path` still denotes the file
 /// `finalized` retains; otherwise that confirmation's own error takes its
-/// place, which says the file is complete without vouching for the entry
-/// now at `path`.
+/// place, which says the file is complete without claiming that the entry now
+/// at `path` is that file.
 fn sibling_report(
     finalized: &crate::fs::atomic::FinalizedFile,
     path: &Path,
@@ -1142,7 +1142,7 @@ fn also_complete_report(file_name: &str) -> String {
 }
 
 /// The clause appended when the directory flush after the `public.key`
-/// commit fails: the rollback takes `public.key` away, and the committed
+/// commit fails: the rollback removes `public.key`, and the committed
 /// `private.key` stays.
 fn kept_report(file_name: &str) -> String {
     format!("{file_name} is complete and was kept")

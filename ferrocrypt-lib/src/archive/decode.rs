@@ -1022,8 +1022,9 @@ fn output_directory_changed(output_dir: &Path, root_name: &OsStr) -> CryptoError
 /// Error for a destination-path confirmation that could not run after the
 /// commit. Worded like [`output_directory_changed`], because the output is
 /// just as complete, but it does not say the directory changed: nothing
-/// showed that it did. The underlying error's kind and text are kept, since
-/// they name what failed.
+/// showed that it did. The underlying error's text is kept, since it names
+/// what failed, and so is its kind when it is [`CryptoError::Io`]; any other
+/// error is reported with [`io::ErrorKind::Other`].
 fn output_directory_unconfirmed(
     output_dir: &Path,
     root_name: &OsStr,

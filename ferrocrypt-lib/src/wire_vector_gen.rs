@@ -64,8 +64,8 @@ const CORPUS_REVISION: u32 = 1;
 /// rule the `0.3.0` baseline established.
 const BASELINE_ID: &str = "0.3.0";
 
-/// The limit profile every revision-1 case that applies local caps names:
-/// this library's default limits in `0.3.0` (`FORMAT.md` §12.3).
+/// The limit profile named by every revision-1 case whose action applies
+/// local caps: this library's default limits in `0.3.0` (`FORMAT.md` §12.3).
 const DEFAULT_LIMIT_PROFILE_ID: &str = "default-0.3.0";
 
 /// Release that publishes every revision-1 row.
@@ -652,9 +652,9 @@ fn field_violation(table: &str, column: &str, value: &str) -> Option<&'static st
     None
 }
 
-/// The columns holding a baseline, class, credential, origin, case, erratum,
-/// or condition ID, and whether each may hold `-`. Capability IDs follow the
-/// structured forms of `FORMAT.md` §12.2 instead.
+/// The columns holding a baseline, class, credential, limit-profile, origin,
+/// case, erratum, or condition ID, and whether each may hold `-`. Capability
+/// IDs follow the structured forms of `FORMAT.md` §12.2 instead.
 const ID_COLUMNS: &[(&str, &[(&str, bool)])] = &[
     (
         "baselines.tsv",
@@ -4179,10 +4179,11 @@ fn extraction_listing(entries: &[FcaEntry]) -> Vec<u8> {
     out.into_bytes()
 }
 
-/// FCA fixed-header field offsets (`FORMAT.md` §9.2). Only the fields the
-/// cases below reach for are named; the check in the last initializer covers
-/// the whole header, and lives there because the oldest supported compiler
-/// does not count a use inside a free-standing `const _` assertion.
+/// Offsets of the FCA fixed-header fields after the magic (`FORMAT.md` §9.2),
+/// which the cases below edit in place. Each offset adds the width of the
+/// field before it. The last initializer checks that the final field, the
+/// 8-byte `total_file_bytes`, ends the header, so a wrong width anywhere in
+/// the chain stops compilation.
 const FCA_OFF_VERSION: usize = 4;
 const FCA_OFF_FLAGS: usize = FCA_OFF_VERSION + 1;
 const FCA_OFF_ENTRY_COUNT: usize = FCA_OFF_FLAGS + 2;
@@ -4190,7 +4191,6 @@ const FCA_OFF_ARCHIVE_EXT_LEN: usize = FCA_OFF_ENTRY_COUNT + 4;
 const FCA_OFF_MANIFEST_LEN: usize = FCA_OFF_ARCHIVE_EXT_LEN + 4;
 const FCA_OFF_TOTAL_FILE_BYTES: usize = {
     let at = FCA_OFF_MANIFEST_LEN + 4;
-    // total_file_bytes(8) ends the header.
     assert!(at + 8 == crate::archive::format::FCA_HEADER_SIZE);
     at
 };
@@ -4472,9 +4472,9 @@ fn write_fca_cases(corpus: &mut Corpus) {
     }
 
     // Framing (`FORMAT.md` §9.1): the fixed header and each length-delimited
-    // region that follows it must be complete. The payload stream seals each
-    // cut image as it stands, so the cut reaches the archive parser rather
-    // than failing payload authentication.
+    // region after it must be complete. The payload stream seals each
+    // truncated image whole, so the truncation reaches the archive parser
+    // instead of failing payload authentication.
     let header_size = crate::archive::format::FCA_HEADER_SIZE;
     fca_mutated_case(
         corpus,
@@ -5397,7 +5397,7 @@ fn unwrap_any_slot(
 ) -> Option<FileKey> {
     let credential = credential_row(root, credential_id);
     let (passphrase, private_key) = match credential["kind"].as_str() {
-        // No credential opens no slot.
+        // The `none` credential opens no slot.
         "none" => return None,
         "passphrase" => (
             Some(credential_passphrase(

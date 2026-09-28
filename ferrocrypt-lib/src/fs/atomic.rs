@@ -101,9 +101,10 @@ impl FinalizedFile {
     /// applies the same rule to its destination directory.
     ///
     /// Runs only after the commit, so every error says that the output is
-    /// complete: a read that fails reports the path as unconfirmed rather
-    /// than as a bare filesystem error a caller could take to mean that
-    /// nothing was written.
+    /// complete. A changed path is [`CryptoError::InvalidInput`]. A read that
+    /// fails is [`CryptoError::Io`] with that failure's kind, reporting the
+    /// path as unconfirmed rather than as a bare filesystem error a caller
+    /// could take to mean that nothing was written.
     pub(crate) fn confirm_reported_path(&self, path: &Path) -> Result<(), CryptoError> {
         let committed = cap_std::fs::Metadata::from_file(&self.file)
             .map_err(|e| reported_path_unconfirmed(path, e))?;
@@ -114,19 +115,20 @@ impl FinalizedFile {
         Ok(())
     }
 
-    /// The number of names this file has. Reading it through the retained
-    /// handle makes it independent of concurrent renames or replacements of
-    /// either directory entry.
+    /// The number of names this file has, read through the retained handle,
+    /// so no rename or replacement of a directory entry can change which file
+    /// is counted.
     fn link_count(&self) -> io::Result<u64> {
         use cap_fs_ext::MetadataExt;
 
         Ok(cap_std::fs::Metadata::from_file(&self.file)?.nlink())
     }
 
-    /// Ends every commit route that holds the committed file's handle:
-    /// returns this file only if it has exactly one name and `finding`, what
-    /// the route found wrong after the commit, is `None`. Every error says
-    /// that the output is complete, including a count that could not be read.
+    /// Ends every commit route that holds the committed file's handle.
+    /// `finding` is what the route found wrong after the commit, if anything;
+    /// the file is returned only if there is no finding and it has exactly one
+    /// name. Every error says that the output is complete, including one for a
+    /// count that could not be read.
     ///
     /// The count is read even beside a finding, because no finding accounts
     /// for every extra name: a staged name left behind is one, not
@@ -259,10 +261,10 @@ fn reported_output_changed(path: &Path) -> CryptoError {
     ))
 }
 
-/// Maps a failed read of the committed entry at `path`: a path that no
-/// longer leads to an entry ([`crate::fs::paths::path_no_longer_resolves`])
-/// means the name no longer denotes the output, and any other failure leaves
-/// the path unconfirmed.
+/// Maps a failed read of the committed entry at `path`. A path that no longer
+/// leads to an entry ([`crate::fs::paths::path_no_longer_resolves`]) no longer
+/// denotes the output ([`reported_output_changed`]); any other failure leaves
+/// the path unconfirmed ([`reported_path_unconfirmed`]).
 fn reported_entry_error(path: &Path, error: io::Error) -> CryptoError {
     if crate::fs::paths::path_no_longer_resolves(&error) {
         reported_output_changed(path)
@@ -272,8 +274,9 @@ fn reported_entry_error(path: &Path, error: io::Error) -> CryptoError {
 }
 
 /// Post-commit failure for a reported-path check that could not run. The
-/// output is complete, but whether `path` still denotes it is unknown, so
-/// the message gives the path without placing the output there.
+/// output is complete, but whether `path` still denotes it is unknown, so the
+/// message names the path without claiming that the output is there. The
+/// error keeps `source`'s kind.
 fn reported_path_unconfirmed(path: &Path, source: io::Error) -> CryptoError {
     CryptoError::Io(io::Error::new(
         source.kind(),
@@ -286,7 +289,7 @@ fn reported_path_unconfirmed(path: &Path, source: io::Error) -> CryptoError {
 
 /// Post-commit failure for a committed file whose link count could not be
 /// read. Raised only once the reported path has been confirmed, so the
-/// message names the output by it.
+/// message names the output by it. The error keeps `source`'s kind.
 fn link_count_unreadable(path: &Path, source: io::Error) -> CryptoError {
     CryptoError::Io(io::Error::new(
         source.kind(),
@@ -410,10 +413,11 @@ impl FinalizeFileError {
         }
     }
 
-    /// Every post-commit error passes through here, so this crate's own
-    /// tests check here that it says the output is complete. Other builds
-    /// leave the check out: a caller must receive the error, never a panic
-    /// after its output was committed.
+    /// Marks `error` as raised after the commit. Every post-commit error
+    /// passes through here, so this crate's tests assert at this point that it
+    /// says the output is complete. Other builds leave the assertion out: a
+    /// caller must receive the error, never a panic after its output was
+    /// committed.
     fn after_commit(error: CryptoError) -> Self {
         #[cfg(test)]
         assert!(
@@ -606,6 +610,7 @@ fn finalize_file_at(
 ///
 /// Windows and the other Unix targets only: Linux and macOS commit
 /// through [`finalize_file_at`] instead.
+///
 /// The link count is required even on this arm because `tempfile` retries
 /// a rejected no-replace rename on Unix through a hard link of its own and
 /// discards the unlink of the staged name, so its `Ok` alone does not
@@ -1571,8 +1576,9 @@ fn reopen_committed_file(
 /// Maps a failed reopen of the committed name. The no-follow, non-blocking
 /// open fails outright where the name now holds a symlink or a socket, so the
 /// entry is read without following it: one that is not a regular file no
-/// longer denotes the output, as [`FinalizedFile::confirm_reported_path`]
-/// finds too. Any other failure is mapped as that check maps a failed read.
+/// longer denotes the output, the rule
+/// [`FinalizedFile::confirm_reported_path`] also applies. Any other failure is
+/// mapped as that check maps a failed read.
 #[cfg(unix)]
 fn reopen_failure(
     output_dir: &OutputDir,
@@ -2882,11 +2888,11 @@ mod tests {
         assert!(!tmp_path.exists(), "the staged temp must be removed");
     }
 
-    /// Once the final hard link exists, a staged-name unlink failure must not
-    /// be swallowed. It is a post-commit error, reported with the count
-    /// because the staged name need not be the only extra one, and both
-    /// complete links are preserved so no bare-name rollback can delete a
-    /// concurrent replacement.
+    /// Once the final hard link exists, a failure to remove the staged name is
+    /// reported, never ignored. It is a post-commit error, reported with the
+    /// count because the staged name need not be the only extra one, and both
+    /// complete links are kept, so no rollback by name can delete a concurrent
+    /// replacement.
     #[cfg(unix)]
     #[test]
     fn finalize_via_link_reports_a_retained_staging_link() {

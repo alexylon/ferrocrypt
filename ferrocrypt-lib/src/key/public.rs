@@ -288,7 +288,7 @@ pub(crate) fn encode_recipient_payload_with_hrp(
 /// `payload`, the last one padded with zero bits.
 /// [`non_canonical_padding_groups_for_tests`] alters that padding and
 /// [`encode_recipient_groups_for_tests`] encodes the result, so a test can
-/// commit a string that only the canonical-padding rule of `FORMAT.md` §7
+/// build a string that only the canonical-padding rule of `FORMAT.md` §7
 /// rejects. Never reachable from production code.
 #[cfg(test)]
 pub(crate) fn recipient_groups_for_tests(payload: &[u8]) -> Vec<u8> {
@@ -332,8 +332,8 @@ pub(crate) fn non_canonical_padding_groups_for_tests(payload: &[u8]) -> [Vec<u8>
     [nonzero_padding, surplus_group]
 }
 
-/// Test-only: Bech32-encodes 5-bit data groups as they stand under the
-/// recipient human-readable part, with a valid BIP 173 checksum. Unlike
+/// Test-only: Bech32-encodes 5-bit data groups unchanged, under the recipient
+/// human-readable part and with a valid BIP 173 checksum. Unlike
 /// [`encode_recipient_payload_with_hrp`], it can encode groups that no byte
 /// payload converts to: nonzero padding bits, or a surplus group. Never
 /// reachable from production code.

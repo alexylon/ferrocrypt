@@ -371,9 +371,9 @@ impl Encryptor {
     /// [`CryptoError::InvalidInput`] for an unusable input path, an output
     /// conflict, an unsupported archive entry, an empty or too-long
     /// passphrase, or a source file or directory that was replaced or removed
-    /// while it was being read. That variant can also report a committed
-    /// output path that resolves to a different object before return. A
-    /// source name the FCA path grammar refuses returns
+    /// while it was being read. It is also returned when, after the commit,
+    /// the output path no longer leads to the file just written. A source
+    /// name the FCA path grammar refuses returns
     /// [`CryptoError::UnsafeArchivePath`]. Caps and key-derivation settings
     /// each report their own variant, never `InvalidInput`: an
     /// [`ArchiveLimits`] cap returns the matching `Archive*CapExceeded`, a
@@ -706,12 +706,12 @@ impl PassphraseDecryptor {
     /// [`CryptoError::PayloadTruncated`] when credentials are wrong or the file
     /// is modified. Returns [`CryptoError::InputPath`] if the encrypted file
     /// no longer exists, and [`CryptoError::Io`] for other filesystem
-    /// failures. The checks that follow the commit of the complete plaintext
-    /// output can still fail the call, with [`CryptoError::InvalidInput`] or
-    /// [`CryptoError::Io`]. [`IncompleteOutputPolicy`] does not remove a
-    /// confirmed output then, and the error message says that the output is
-    /// complete, unless the check found the output's final name missing or
-    /// holding another entry, which is reported as a replacement.
+    /// failures. Checks that run after the complete plaintext output is
+    /// committed can still fail the call, with [`CryptoError::InvalidInput`]
+    /// or [`CryptoError::Io`]. In that case [`IncompleteOutputPolicy`] does
+    /// not remove the confirmed output, and the error message says that the
+    /// output is complete, unless the check found the output's final name
+    /// missing or holding another entry, which is reported as a replacement.
     pub fn decrypt(
         self,
         passphrase: Passphrase,
@@ -873,13 +873,13 @@ impl PrivateKeyDecryptor {
     /// modified; `NoSupportedRecipient` means the file contains no recipient
     /// type this build can process. Returns [`CryptoError::InputPath`] if the
     /// encrypted file or the private key file does not exist, and
-    /// [`CryptoError::Io`] for other filesystem failures. The checks that
-    /// follow the commit of the complete plaintext output can still fail the
-    /// call, with [`CryptoError::InvalidInput`] or [`CryptoError::Io`].
-    /// [`IncompleteOutputPolicy`] does not remove a confirmed output then, and
-    /// the error message says that the output is complete, unless the check
-    /// found the output's final name missing or holding another entry, which
-    /// is reported as a replacement.
+    /// [`CryptoError::Io`] for other filesystem failures. Checks that run
+    /// after the complete plaintext output is committed can still fail the
+    /// call, with [`CryptoError::InvalidInput`] or [`CryptoError::Io`]. In
+    /// that case [`IncompleteOutputPolicy`] does not remove the confirmed
+    /// output, and the error message says that the output is complete, unless
+    /// the check found the output's final name missing or holding another
+    /// entry, which is reported as a replacement.
     pub fn decrypt(
         self,
         private_key: PrivateKey,
@@ -1152,9 +1152,9 @@ impl KeyPairGenerator {
     ///
     /// Returns [`CryptoError::InvalidInput`] if the passphrase is empty or too
     /// long, KDF parameters are outside the accepted writer policy, or either
-    /// key file already exists. [`CryptoError::InvalidInput`] can also report
-    /// that a committed final path resolves to a different filesystem object
-    /// before return; any completed commits are preserved.
+    /// key file already exists. It is also returned when, after a commit, a
+    /// key file's path no longer leads to the file just written; committed key
+    /// files are kept.
     ///
     /// Returns [`CryptoError::Io`] for filesystem failures, including a
     /// directory flush failure or a committed key file that carries more than
@@ -1162,9 +1162,9 @@ impl KeyPairGenerator {
     /// `public.key` fails, the method makes a best-effort attempt to remove
     /// `public.key` but keeps `private.key`. Removing both without a successful
     /// directory flush could leave only the public key after power loss. A
-    /// remaining `private.key` is safe to delete. Any error after a commit can
-    /// therefore leave one or both complete key files for the caller to
-    /// inspect, and its message names each key file that is complete. If a
+    /// remaining `private.key` is safe to delete. An error returned after a
+    /// commit can leave one or both complete key files for the caller to
+    /// inspect; its message names each key file that is complete. If a
     /// removal cannot be confirmed — the key file was replaced during the
     /// operation, or it still had another name — the error message says so.
     pub fn write(

@@ -184,6 +184,9 @@ jobs:
       - name: Verify the frozen conformance corpus manifests
         run: python3 ferrocrypt-lib/testvectors/wire/tools/verify_manifests.py
 
+      - name: Test the corpus verifier against planted defects
+        run: python3 ferrocrypt-lib/testvectors/wire/tools/test_verify_manifests.py
+
   doc:
     runs-on: ubuntu-latest
     steps:

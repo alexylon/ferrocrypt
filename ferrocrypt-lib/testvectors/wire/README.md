@@ -111,6 +111,17 @@ python3 tools/verify_manifests.py
 
 It exits 0 when the corpus is well formed, and 1 with one line per problem
 otherwise. Run it first: a corpus that fails here cannot be replayed meaningfully.
+A reference's spelling is validated before the file it names is read: a
+manifest holding a reference the grammar refuses is refused before any
+referenced file is opened or examined.
+
+`tools/test_verify_manifests.py` checks the checker: the committed corpus
+passes, and a reference the grammar refuses is reported without any file being
+reached through it.
+
+```bash
+python3 tools/test_verify_manifests.py
+```
 
 ## Generation and reproduction
 

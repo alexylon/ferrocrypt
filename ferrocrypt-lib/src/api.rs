@@ -1166,7 +1166,9 @@ impl KeyPairGenerator {
     /// commit can leave one or both complete key files for the caller to
     /// inspect; its message names each key file that is complete. If a
     /// removal cannot be confirmed — the key file was replaced during the
-    /// operation, or it still had another name — the error message says so.
+    /// operation, or it still had another name — the error message says so,
+    /// and for a key file that had already been committed it first says that
+    /// a complete key file was committed.
     pub fn write(
         self,
         output_dir: impl AsRef<Path>,

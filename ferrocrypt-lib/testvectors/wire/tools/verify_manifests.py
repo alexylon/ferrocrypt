@@ -350,6 +350,20 @@ def revision_field(name, row, column):
     return int(value)
 
 
+def corpus_file(root, name, row, column):
+    """The file the reference in `column` names. Every read or stat of a
+    referenced file resolves the reference here, after `main` has stopped the
+    run for any reference that breaks the grammar, so one that still breaks it
+    here is a defect in this tool and stops the run."""
+    reference = row[column]
+    if not REFERENCE.match(reference):
+        raise RuntimeError(
+            f"{name}: {row_id(name, row)}: {column} reached a file check "
+            "without passing the reference grammar"
+        )
+    return root / reference
+
+
 def check_digest(root, name, row, ref_column, digest_column):
     reference, digest = row[ref_column], row[digest_column]
     if reference == "-":
@@ -359,7 +373,7 @@ def check_digest(root, name, row, ref_column, digest_column):
     if not DIGEST.match(digest):
         fail(f"{name}: {row_id(name, row)}: {digest_column} is not 64 lowercase hex characters")
         return
-    target = root / reference
+    target = corpus_file(root, name, row, ref_column)
     if not target.is_file():
         fail(f"{name}: {row_id(name, row)}: {reference} does not exist")
         return
@@ -392,7 +406,10 @@ def check_kat_chunk_nonces(root, row, cases, seen_keys, seen_chunks):
             f"stream_encrypt_kat case, not '{anchor['case_type']}'"
         )
         return
-    plaintext = root / anchor["artifact_ref"]
+    # A case without an artifact is reported by the cases loop.
+    if anchor["artifact_ref"] == "-":
+        return
+    plaintext = corpus_file(root, "cases.tsv", anchor, "artifact_ref")
     if not plaintext.is_file():
         return
     length = plaintext.stat().st_size
@@ -457,7 +474,32 @@ def check_every_file_is_referenced(root, tables):
         fail(f"{relative}: no manifest row references this file")
 
 
+def has_refused_reference(tables):
+    """Whether any `*_ref` field of any row breaks the reference grammar.
+    Such a field was reported when its table was read; this decides whether
+    the checks that read referenced files may run at all."""
+    return any(
+        column.endswith("_ref") and value != "-" and not REFERENCE.match(value)
+        for rows in tables.values()
+        for row in rows
+        for column, value in row.items()
+    )
+
+
+def finish(root, schema, revision, summary):
+    """Prints every recorded problem, then one summary line, and returns the
+    exit status."""
+    for message in problems:
+        print(message, file=sys.stderr)
+    verdict = "OK" if not problems else f"{len(problems)} problem(s)"
+    print(f"corpus at {root}: schema {schema}, revision {revision}, {summary} — {verdict}")
+    return 1 if problems else 0
+
+
 def main():
+    # A caller that runs the check more than once in one process starts each
+    # run with no problems carried over.
+    problems.clear()
     root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent
     if not (root / "cases.tsv").is_file():
         print(f"no corpus at {root}", file=sys.stderr)
@@ -476,17 +518,26 @@ def main():
         return 1
     revision = read_revision(root, "CORPUS-REVISION")
 
+    # The tables are checked as text first: their columns, every field's
+    # grammar, and every identifier. Section 12.3 requires a reference to be
+    # validated before the file it names is read, so a corpus holding a
+    # reference the grammar refuses is reported now, before any referenced
+    # file is opened or examined. Every other problem is reported together
+    # with the results of the file checks, which resolve no refused reference.
     tables = {name: read_table(root, name) for name in TABLES}
+    for name in TABLES:
+        check_ids(name, tables[name])
+    indexed = {name: index_by(name, tables[name], KEY_COLUMNS[name]) for name in TABLES}
+    if has_refused_reference(tables):
+        return finish(
+            root, schema, revision, "references refused before any referenced file was read"
+        )
 
     for name, pairs in DIGEST_PAIRS.items():
         for row in tables[name]:
             for ref_column, digest_column in pairs:
                 check_digest(root, name, row, ref_column, digest_column)
 
-    for name in TABLES:
-        check_ids(name, tables[name])
-
-    indexed = {name: index_by(name, tables[name], KEY_COLUMNS[name]) for name in TABLES}
     baselines = indexed["baselines.tsv"]
     classes = indexed["diagnostic-classes.tsv"]
     credentials = indexed["credentials.tsv"]
@@ -561,6 +612,8 @@ def main():
     profiles_named = set()
     for row in tables["cases.tsv"]:
         case_id = row["case_id"]
+        if row["artifact_ref"] == "-":
+            fail(f"cases.tsv: {case_id}: a case names its artifact")
         baseline = baselines.get(row["first_required_by_baseline"])
         if baseline is None:
             fail(f"cases.tsv: {case_id}: baseline is not declared")
@@ -670,17 +723,14 @@ def main():
         if effective is not None and revision is not None and effective <= revision:
             withdrawn.add(row["affected_case_id"])
 
-    for message in problems:
-        print(message, file=sys.stderr)
-    print(
-        f"corpus at {root}: schema {schema}, revision {revision}, "
+    return finish(
+        root,
+        schema,
+        revision,
         f"{len(cases)} cases ({len(withdrawn)} withdrawn by errata), {len(origins)} origins, "
         f"{len(credentials)} credentials, {len(profiles)} limit profile(s), "
-        f"{len(classes)} diagnostic classes, "
-        f"{len(tables['errata.tsv'])} errata — "
-        f"{'OK' if not problems else str(len(problems)) + ' problem(s)'}"
+        f"{len(classes)} diagnostic classes, {len(tables['errata.tsv'])} errata",
     )
-    return 1 if problems else 0
 
 
 if __name__ == "__main__":

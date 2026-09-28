@@ -336,7 +336,8 @@ before the next stable release.
   after a failure following the `public.key` commit, a lone
   `private.key` may remain, which the error names; it is safe to delete.
   If that removal cannot be confirmed — the key file was replaced during
-  the operation, or it still had another name — the error says so.
+  the operation, or it still had another name — the error says so, and
+  that a complete key file had been written.
   Filesystems that do not support directory flushing depend on their own
   ordering after power loss. Key generation opens your output folder for
   its rollback anchoring and its directory flushes, so it needs a folder

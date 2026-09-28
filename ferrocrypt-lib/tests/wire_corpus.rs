@@ -996,6 +996,11 @@ fn wire_corpus_manifests_are_well_formed() {
 
     for row in &case_table.rows {
         let case_id = field(row, "case_id");
+        assert_ne!(
+            field(row, "artifact_ref"),
+            "-",
+            "{case_id}: a case names its artifact"
+        );
         let case_revision = introduced_in(row);
         let baseline = field(row, "first_required_by_baseline");
         let baseline_revision = baseline_revisions

@@ -370,7 +370,13 @@ impl FinalizeFileError {
         }
     }
 
+    /// Every post-commit error passes through here, so debug builds check
+    /// here that it says the output is complete.
     fn after_commit(error: CryptoError) -> Self {
+        debug_assert!(
+            says_output_is_complete(&error),
+            "a post-commit error must say that the output is complete: {error}"
+        );
         Self {
             error,
             committed: true,
@@ -391,6 +397,13 @@ impl FinalizeFileError {
     pub(crate) fn into_crypto_error(self) -> CryptoError {
         self.error
     }
+}
+
+/// Whether `error`'s message says that the output is complete, as every error
+/// raised after a commit must (`THREAT_MODEL.md` TM-06).
+fn says_output_is_complete(error: &CryptoError) -> bool {
+    let message = error.to_string();
+    message.starts_with("Output ") && message.contains(" is complete")
 }
 
 /// Best-effort parent-directory sync used after a successful file persist or
@@ -1978,10 +1991,9 @@ mod tests {
             ),
         ];
         for (error, kind) in cases {
-            let message = error.to_string();
             assert!(
-                message.starts_with("Output ") && message.contains(" is complete"),
-                "a post-commit error must say the output is complete, got: {message}"
+                says_output_is_complete(&error),
+                "a post-commit error must say the output is complete, got: {error}"
             );
             if let Some(kind) = kind {
                 assert!(
@@ -1990,6 +2002,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Debug builds refuse a post-commit error that does not say the output
+    /// is complete, whichever constructor built it.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "a post-commit error must say that the output is complete")]
+    fn a_post_commit_error_without_the_wording_fails_in_debug_builds() {
+        let _ = FinalizeFileError::after_commit(CryptoError::Io(io::Error::other(
+            "Output out.fcr could not be checked",
+        )));
     }
 
     /// `tempfile` can persist through a hard link of its own on Unix and

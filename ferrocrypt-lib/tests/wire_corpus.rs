@@ -574,27 +574,29 @@ enum Credential {
     None,
 }
 
-fn read_credentials(root: &Path) -> BTreeMap<String, Credential> {
-    let table = read_table(root, "credentials.tsv");
+/// Resolves every `credentials.tsv` row, keyed by its ID, refusing a
+/// duplicate ID. Each committed file is checked against its digest as it is
+/// read.
+fn read_credentials(root: &Path, table: &Table) -> BTreeMap<String, Credential> {
     let passphrase = |row: &Row, ref_column: &str, digest_column: &str| {
         String::from_utf8(read_committed(root, row, ref_column, digest_column))
             .expect("a passphrase credential is UTF-8")
     };
     let mut credentials = BTreeMap::new();
-    for row in table.rows {
+    for row in &table.rows {
         let (id, credential) = {
-            let id = field(&row, "credential_id").to_string();
-            let credential = match field(&row, "kind") {
+            let id = field(row, "credential_id").to_string();
+            let credential = match field(row, "kind") {
                 "passphrase" => {
-                    Credential::Passphrase(passphrase(&row, "primary_ref", "primary_sha3_256"))
+                    Credential::Passphrase(passphrase(row, "primary_ref", "primary_sha3_256"))
                 }
                 "private_key" => {
                     // The API opens the key file by path; its bytes are checked
                     // against the committed digest first.
-                    read_committed(root, &row, "primary_ref", "primary_sha3_256");
+                    read_committed(root, row, "primary_ref", "primary_sha3_256");
                     Credential::PrivateKey {
-                        key_path: root.join(field(&row, "primary_ref")),
-                        unlock: passphrase(&row, "secret_ref", "secret_sha3_256"),
+                        key_path: root.join(field(row, "primary_ref")),
+                        unlock: passphrase(row, "secret_ref", "secret_sha3_256"),
                     }
                 }
                 "none" => Credential::None,
@@ -620,25 +622,26 @@ struct LimitProfile {
     archive: ArchiveLimits,
 }
 
-/// Reads every limit profile, keyed by its ID. Each limit type is built in
-/// one expression from the profile's own values, so no default survives into
-/// a replay, and every limit column must have been read into one of them.
-/// A value above a structural maximum was refused when the table was parsed,
-/// so no builder clamps what the profile states.
-fn read_limit_profiles(root: &Path) -> BTreeMap<String, LimitProfile> {
+/// Builds every `limit-profiles.tsv` row, keyed by its ID, refusing a
+/// duplicate ID. Each limit type is built in one expression from the
+/// profile's own values, so no default survives into a replay, and every
+/// limit column must have been read into one of them. A value above a
+/// structural maximum was refused when the table was parsed, so no builder
+/// clamps what the profile states.
+fn read_limit_profiles(table: &Table) -> BTreeMap<String, LimitProfile> {
     let limit_columns: BTreeSet<&str> = MANIFEST_TABLES
         .iter()
-        .find(|(table, _)| *table == "limit-profiles.tsv")
+        .find(|(name, _)| *name == "limit-profiles.tsv")
         .map(|(_, columns)| columns.iter().copied().filter(|c| c.starts_with("max_")))
         .expect("limit-profiles.tsv is a manifest table")
         .collect();
     let mut profiles = BTreeMap::new();
-    for row in read_table(root, "limit-profiles.tsv").rows {
-        let id = field(&row, "limit_profile_id").to_string();
+    for row in &table.rows {
+        let id = field(row, "limit_profile_id").to_string();
         let applied = RefCell::new(BTreeSet::new());
         let value = |column: &'static str| -> u64 {
             applied.borrow_mut().insert(column);
-            field(&row, column)
+            field(row, column)
                 .parse()
                 .unwrap_or_else(|_| panic!("{id}: {column} is not a decimal limit"))
         };
@@ -950,24 +953,23 @@ fn wire_corpus_manifests_are_well_formed() {
     assert_eq!(field(baseline, "established_by_release"), "0.3.0");
     assert_eq!(field(baseline, "parent_baseline_id"), "-");
 
-    let credentials = read_credentials(&root);
     let class_table = read_table(&root, "diagnostic-classes.tsv");
     let credential_table = read_table(&root, "credentials.tsv");
     let origin_table = read_table(&root, "origins.tsv");
     let case_table = read_table(&root, "cases.tsv");
     let errata_table = read_table(&root, "errata.tsv");
     let profile_table = read_table(&root, "limit-profiles.tsv");
-    // Building the profiles checks that every value reaches a limit type.
-    read_limit_profiles(&root);
 
     // Every identifier is declared once, and every row was appended by this
-    // revision or an earlier one.
+    // revision or an earlier one. The credential and profile readers refuse
+    // a duplicate ID themselves; building the profiles also checks that every
+    // value reaches a limit type.
+    let credentials = read_credentials(&root, &credential_table);
+    read_limit_profiles(&profile_table);
     let classes = unique_ids(&class_table, "diagnostic-classes.tsv", "class_id");
     let origins = unique_ids(&origin_table, "origins.tsv", "origin_id");
     let case_ids = unique_ids(&case_table, "cases.tsv", "case_id");
-    unique_ids(&credential_table, "credentials.tsv", "credential_id");
     unique_ids(&errata_table, "errata.tsv", "erratum_id");
-    unique_ids(&profile_table, "limit-profiles.tsv", "limit_profile_id");
     for (name, table) in [
         ("baselines.tsv", &baselines),
         ("diagnostic-classes.tsv", &class_table),
@@ -1238,8 +1240,8 @@ fn wire_corpus_cases_replay() {
         return;
     }
     let root = corpus_root();
-    let credentials = read_credentials(&root);
-    let profiles = read_limit_profiles(&root);
+    let credentials = read_credentials(&root, &read_table(&root, "credentials.tsv"));
+    let profiles = read_limit_profiles(&read_table(&root, "limit-profiles.tsv"));
     let claimed_baselines = baseline_lineage(&root, CLAIMED_BASELINE);
     let revision: u32 = fs::read_to_string(root.join("CORPUS-REVISION"))
         .expect("read CORPUS-REVISION")

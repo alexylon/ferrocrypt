@@ -854,13 +854,29 @@ fn generate_key_pair_with_seams(
 
     // Retain both committed handles until the last possible moment and
     // confirm that the paths returned to the caller still denote those files.
-    // Each error already says that its own file is complete.
-    private_finalized
-        .confirm_reported_path(&private_key_path)
-        .map_err(|e| append_report(e, &also_complete_report(PUBLIC_KEY_FILENAME)))?;
-    public_finalized
-        .confirm_reported_path(&public_key_path)
-        .map_err(|e| append_report(e, &also_complete_report(PRIVATE_KEY_FILENAME)))?;
+    // Each error already says that its own file is complete. The other file
+    // is named as complete only if its path was confirmed as well; otherwise
+    // its own error is reported beside the first.
+    let private_confirmed = private_finalized.confirm_reported_path(&private_key_path);
+    let public_confirmed = public_finalized.confirm_reported_path(&public_key_path);
+    match (private_confirmed, public_confirmed) {
+        (Ok(()), Ok(())) => {}
+        (Err(error), Ok(())) => {
+            return Err(append_report(
+                error,
+                &also_complete_report(PUBLIC_KEY_FILENAME),
+            ));
+        }
+        (Ok(()), Err(error)) => {
+            return Err(append_report(
+                error,
+                &also_complete_report(PRIVATE_KEY_FILENAME),
+            ));
+        }
+        (Err(private), Err(public)) => {
+            return Err(append_report(private, &public.to_string()));
+        }
+    }
 
     Ok((
         private_key_path,
@@ -1070,7 +1086,11 @@ fn commit_key_pair_files_with_barrier_and_public_finalizer(
                 if error.committed() {
                     return Err(append_report(
                         error.into_crypto_error(),
-                        &also_complete_report(PRIVATE_KEY_FILENAME),
+                        &sibling_report(
+                            &private_finalized,
+                            private_key_path,
+                            also_complete_report(PRIVATE_KEY_FILENAME),
+                        ),
                     ));
                 }
                 let rollback =
@@ -1085,13 +1105,34 @@ fn commit_key_pair_files_with_barrier_and_public_finalizer(
     if let Err(e) = sync_output_dir(committed_dir, output_dir) {
         let rollback =
             committed_dir.remove_published_if_retained(public_key_path, public_finalized);
+        let kept = sibling_report(
+            &private_finalized,
+            private_key_path,
+            kept_report(PRIVATE_KEY_FILENAME),
+        );
         return Err(atomic::with_rollback_report(
-            append_report(CryptoError::Io(e), &kept_report(PRIVATE_KEY_FILENAME)),
+            append_report(CryptoError::Io(e), &kept),
             rollback,
             public_key_path,
         ));
     }
     Ok((private_finalized, public_finalized))
+}
+
+/// The clause naming a key file committed before the one an error
+/// describes. `confirmed` is used only while `path` still denotes the file
+/// `finalized` retains; otherwise that confirmation's own error takes its
+/// place, which says the file is complete without vouching for the entry
+/// now at `path`.
+fn sibling_report(
+    finalized: &crate::fs::atomic::FinalizedFile,
+    path: &Path,
+    confirmed: String,
+) -> String {
+    match finalized.confirm_reported_path(path) {
+        Ok(()) => confirmed,
+        Err(error) => error.to_string(),
+    }
 }
 
 /// The clause appended to an error raised once both key files are
@@ -2373,7 +2414,9 @@ mod tests {
     /// committed fails the call with an error that says both files are
     /// complete, and neither file is removed. The output directory becomes
     /// untraversable after the commits, so the check's read by path is
-    /// refused while the retained handles still work.
+    /// refused while the retained handles still work. The second file's
+    /// path cannot be confirmed either, so it is reported as unconfirmed
+    /// rather than simply as complete.
     #[cfg(unix)]
     #[test]
     fn keygen_reports_both_keys_as_complete_when_a_path_cannot_be_confirmed() {
@@ -2384,6 +2427,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let output_dir = tmp.path().join("keys");
         let private_key_path = output_dir.join(PRIVATE_KEY_FILENAME);
+        let public_key_path = output_dir.join(PUBLIC_KEY_FILENAME);
 
         let outcome = generate_key_pair_with_seams(
             Passphrase::new("passphrase"),
@@ -2402,14 +2446,17 @@ mod tests {
             Err(CryptoError::Io(error)) => {
                 assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
                 let message = error.to_string();
-                let expected = format!(
-                    "Output is complete, but its reported path could not be confirmed: {}: ",
-                    crate::error::sanitize_path_for_display(&private_key_path)
-                );
+                let unconfirmed = |path: &Path| {
+                    format!(
+                        "Output is complete, but its reported path could not be confirmed: {}: ",
+                        crate::error::sanitize_path_for_display(path)
+                    )
+                };
                 assert!(
-                    message.starts_with(&expected)
-                        && message.ends_with(&format!("; {PUBLIC_KEY_FILENAME} is also complete")),
-                    "both key files must be reported as complete, got: {message}"
+                    message.starts_with(&unconfirmed(&private_key_path))
+                        && message.contains(&format!("; {}", unconfirmed(&public_key_path)))
+                        && !message.contains("is also complete"),
+                    "both key files must be reported as complete and unconfirmed, got: {message}"
                 );
             }
             Err(other) => panic!("the denial must be reported as I/O, got: {other}"),
@@ -2875,7 +2922,7 @@ mod tests {
                     .expect("the injected error must follow a real commit");
                 Err(atomic::FinalizeFileError::after_commit_for_test(
                     CryptoError::Io(std::io::Error::other(
-                        "injected post-commit finalization failure",
+                        "Output is complete, but an injected check failed",
                     )),
                 ))
             },
@@ -2884,7 +2931,7 @@ mod tests {
 
         assert_eq!(
             err.to_string(),
-            "injected post-commit finalization failure; private.key is also complete"
+            "Output is complete, but an injected check failed; private.key is also complete"
         );
         assert_eq!(fs::read(&private_key_path).unwrap(), b"private bytes");
         assert_eq!(fs::read(&public_key_path).unwrap(), b"public bytes");
@@ -2893,6 +2940,174 @@ mod tests {
             2,
             "only the two committed key files may remain"
         );
+    }
+
+    /// Moves `dir` to `moved` and plants a directory at `dir` holding a
+    /// replacement for each of `names`: what a local writer with access to
+    /// the parent can do once a key file is committed.
+    #[cfg(unix)]
+    fn swap_output_dir(dir: &Path, moved: &Path, names: &[&str]) -> std::io::Result<()> {
+        fs::rename(dir, moved)?;
+        fs::create_dir(dir)?;
+        for name in names {
+            fs::write(dir.join(name), SWAPPED_KEY_BYTES)?;
+        }
+        Ok(())
+    }
+
+    /// Contents of a key file planted by [`swap_output_dir`].
+    #[cfg(unix)]
+    const SWAPPED_KEY_BYTES: &[u8] = b"replacement";
+
+    /// The message for a reported key path that now names another entry.
+    #[cfg(unix)]
+    fn changed_path_report(path: &Path) -> String {
+        format!(
+            "Output is complete but its reported path changed: {}",
+            crate::error::sanitize_path_for_display(path)
+        )
+    }
+
+    /// An output directory swapped after both commits leaves neither
+    /// returned path leading to a key file this run wrote. The error must
+    /// say so for both, rather than calling the second file complete by a
+    /// path that now names a replacement.
+    #[cfg(unix)]
+    #[test]
+    fn keygen_does_not_vouch_for_either_key_path_after_a_directory_swap() {
+        use crate::crypto::kdf::KdfParams;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let output_dir = tmp.path().join("keys");
+        let moved = tmp.path().join("keys.moved");
+        let names = [PRIVATE_KEY_FILENAME, PUBLIC_KEY_FILENAME];
+
+        let err = generate_key_pair_with_seams(
+            Passphrase::new("passphrase"),
+            &KdfParams::test_fast_default(),
+            None,
+            &output_dir,
+            &|_| {},
+            |_, _| Ok(()),
+            |_, _| swap_output_dir(&output_dir, &moved, &names),
+        )
+        .expect_err("a swapped output directory must not be reported as success");
+
+        let message = err.to_string();
+        for name in names {
+            assert!(
+                message.contains(&changed_path_report(&output_dir.join(name))),
+                "{name} must be reported at a changed path, got: {message}"
+            );
+            assert_ne!(fs::read(moved.join(name)).unwrap(), SWAPPED_KEY_BYTES);
+        }
+        assert!(
+            !message.contains("is also complete"),
+            "a replaced path must not be vouched for, got: {message}"
+        );
+    }
+
+    /// A post-commit `public.key` failure names `private.key` as complete
+    /// only while its path still leads to it. After a directory swap the
+    /// error reports that path as changed instead.
+    #[cfg(unix)]
+    #[test]
+    fn keygen_post_commit_public_failure_does_not_vouch_for_a_swapped_private_path() {
+        use crate::fs::atomic;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("keys");
+        fs::create_dir(&dir).unwrap();
+        let moved = tmp.path().join("keys.moved");
+        let private_key_path = dir.join(PRIVATE_KEY_FILENAME);
+        let public_key_path = dir.join(PUBLIC_KEY_FILENAME);
+        let private_tmp = staged_key_tempfile(&dir, b"private bytes");
+        let public_tmp = staged_key_tempfile(&dir, b"public bytes");
+
+        let err = commit_key_pair_files_with_barrier_and_public_finalizer(
+            private_tmp,
+            public_tmp,
+            &private_key_path,
+            &public_key_path,
+            &atomic::OutputDir::open(&dir).unwrap(),
+            |_, _| Ok(()),
+            |tmp, path, label, anchor| {
+                let _committed = atomic::finalize_file(tmp, path, label, anchor)
+                    .expect("the injected error must follow a real commit");
+                swap_output_dir(&dir, &moved, &[PRIVATE_KEY_FILENAME])
+                    .expect("the output directory must be swapped");
+                Err(atomic::FinalizeFileError::after_commit_for_test(
+                    CryptoError::Io(std::io::Error::other(
+                        "Output is complete, but an injected check failed",
+                    )),
+                ))
+            },
+        )
+        .expect_err("the injected post-commit failure must be returned");
+
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "Output is complete, but an injected check failed; {}",
+                changed_path_report(&private_key_path)
+            )
+        );
+        assert_eq!(
+            fs::read(moved.join(PRIVATE_KEY_FILENAME)).unwrap(),
+            b"private bytes"
+        );
+        assert_eq!(
+            fs::read(moved.join(PUBLIC_KEY_FILENAME)).unwrap(),
+            b"public bytes"
+        );
+    }
+
+    /// When the final directory flush fails, the error says `private.key`
+    /// was kept only while its path still leads to it. After a directory
+    /// swap the error reports that path as changed instead; `public.key` is
+    /// still removed from the directory it was committed in.
+    #[cfg(unix)]
+    #[test]
+    fn keygen_barrier_failure_after_public_commit_does_not_vouch_for_a_swapped_private_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("keys");
+        fs::create_dir(&dir).unwrap();
+        let moved = tmp.path().join("keys.moved");
+        let private_key_path = dir.join(PRIVATE_KEY_FILENAME);
+        let public_key_path = dir.join(PUBLIC_KEY_FILENAME);
+        let private_tmp = staged_key_tempfile(&dir, b"private bytes");
+        let public_tmp = staged_key_tempfile(&dir, b"public bytes");
+        let calls = std::cell::Cell::new(0);
+
+        let err = commit_key_pair_files_with_barrier(
+            private_tmp,
+            public_tmp,
+            &private_key_path,
+            &public_key_path,
+            &crate::fs::atomic::OutputDir::open(&dir).unwrap(),
+            |_, _| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 1 {
+                    return Ok(());
+                }
+                swap_output_dir(&dir, &moved, &[PRIVATE_KEY_FILENAME])?;
+                Err(std::io::Error::other("injected directory flush failure"))
+            },
+        )
+        .expect_err("a failed directory flush after public.key must fail the commit");
+
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "injected directory flush failure; {}",
+                changed_path_report(&private_key_path)
+            )
+        );
+        assert_eq!(
+            fs::read(moved.join(PRIVATE_KEY_FILENAME)).unwrap(),
+            b"private bytes"
+        );
+        assert!(!moved.join(PUBLIC_KEY_FILENAME).exists());
     }
 
     /// A rollback must remove the key file this run committed, not

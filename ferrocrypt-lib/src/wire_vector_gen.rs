@@ -3457,7 +3457,7 @@ fn public_key_case(
 fn write_public_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     use crate::key::public::{
         encode_recipient_groups_for_tests, encode_recipient_payload_with_hrp,
-        recipient_groups_for_tests, recipient_payload_for_tests,
+        non_canonical_padding_groups_for_tests, recipient_payload_for_tests,
     };
 
     let canonical = keys.public_a.clone();
@@ -3487,20 +3487,10 @@ fn write_public_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     )
     .expect("build the canonical recipient payload");
 
-    // The canonical 5-bit groups end in padding bits, which neither checksum
-    // covers. Two cases below alter only that padding and keep both checksums
-    // valid, so the canonical-padding rule of `FORMAT.md` §7 is the only one
-    // that can reject them.
-    assert_ne!(
-        payload.len() * 8 % 5,
-        0,
-        "the canonical payload must leave padding bits in its last group"
-    );
-    let groups = recipient_groups_for_tests(&payload);
-    let mut nonzero_padding = groups.clone();
-    *nonzero_padding.last_mut().expect("payload is nonempty") |= 0x01;
-    let mut surplus_group = groups;
-    surplus_group.push(0);
+    // Two cases below alter only the padding of the canonical 5-bit groups,
+    // which neither checksum covers, so the canonical-padding rule of
+    // `FORMAT.md` §7 is the only one that can reject them.
+    let [nonzero_padding, surplus_group] = non_canonical_padding_groups_for_tests(&payload);
 
     let reject = |s: String| -> Vec<u8> { s.into_bytes() };
     let cases: [(&str, Vec<u8>, &str, &str); 10] = [

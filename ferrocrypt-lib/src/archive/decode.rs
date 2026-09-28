@@ -300,8 +300,7 @@ where
                 .ok_or(crate::error::internal_invariant!(
                     "promoted file root lost its handle"
                 ))?;
-            extra_name_error =
-                require_single_linked_file(handle, output_dir, &manifest.root_name).err();
+            extra_name_error = require_single_linked_file(handle, &manifest.root_name).err();
         }
 
         // FORMAT.md §9.11 step 16: apply root entry mode AFTER promotion.
@@ -397,26 +396,37 @@ where
         // `output_dir` during the run cannot end in a successful
         // decrypt whose reported path names an entry this run never
         // wrote.
-        require_output_anchor_unchanged(&output_handle, output_dir, &manifest.root_name)?;
+        let anchor =
+            require_output_anchor_unchanged(&output_handle, output_dir, &manifest.root_name);
 
         // Every comparison against the staged object is made; the
         // retained handle can close.
         drop(ratified_root);
 
-        if let Some(error) = promotion.into_staged_link_error() {
-            return Err(staged_link_retained(
+        // Each remaining finding concerns a complete output, and none
+        // accounts for another: a temporary name left behind is one
+        // extra name, not necessarily the only one. All are reported.
+        let error = match (anchor, promotion.into_staged_link_error()) {
+            (Ok(()), None) => None,
+            (Ok(()), Some(source)) => Some(staged_link_retained(
                 output_dir,
                 &incomplete_name,
                 &manifest.root_name,
+                source,
+            )),
+            (Err(error), None) => Some(error),
+            (Err(error), Some(source)) => Some(crate::error::append_report(
                 error,
-            ));
+                &staged_link_report(&incomplete_name, &source),
+            )),
+        };
+        match (error, extra_name_error) {
+            (None, None) => Ok(final_path.clone()),
+            (Some(error), None) | (None, Some(error)) => Err(error),
+            (Some(error), Some(extra)) => {
+                Err(crate::error::append_report(error, &extra.to_string()))
+            }
         }
-
-        if let Some(error) = extra_name_error {
-            return Err(error);
-        }
-
-        Ok(final_path.clone())
     })();
 
     // A removal that fails, or cannot show that the staged root is gone,
@@ -1070,12 +1080,23 @@ fn staged_link_retained(
     CryptoError::Io(io::Error::new(
         source.kind(),
         format!(
-            "Output {} is complete, but temporary name {} could not be removed from {}: {source}",
+            "Output {} in {} is complete, but {}",
             sanitize_for_display(&root_name.to_string_lossy()),
-            sanitize_for_display(&incomplete_name.to_string_lossy()),
             output_dir.display(),
+            staged_link_report(incomplete_name, &source),
         ),
     ))
+}
+
+/// The clause naming a staging name the promotion could not remove. It
+/// names no directory, so it can follow an error saying the output's
+/// directory changed, where `output_dir` no longer denotes the directory
+/// that holds the name.
+fn staged_link_report(incomplete_name: &OsStr, source: &io::Error) -> String {
+    format!(
+        "temporary name {} could not be removed: {source}",
+        sanitize_for_display(&incomplete_name.to_string_lossy()),
+    )
 }
 
 /// Final post-condition for a committed file root: exactly one name.
@@ -1092,20 +1113,15 @@ fn staged_link_retained(
 /// through either name race, and reading the count from it also keeps
 /// the Windows field populated, which cap-std fills only from an open
 /// handle.
-fn require_single_linked_file(
-    handle: &File,
-    output_dir: &Path,
-    root_name: &OsStr,
-) -> Result<(), CryptoError> {
+fn require_single_linked_file(handle: &File, root_name: &OsStr) -> Result<(), CryptoError> {
     use cap_fs_ext::MetadataExt;
 
     let metadata = handle.metadata().map_err(|source| {
         CryptoError::Io(io::Error::new(
             source.kind(),
             format!(
-                "Output {} is complete, but its number of filesystem names could not be read in {}: {source}",
+                "Output {} is complete, but its number of filesystem names could not be read: {source}",
                 sanitize_for_display(&root_name.to_string_lossy()),
-                output_dir.display(),
             ),
         ))
     })?;
@@ -5323,6 +5339,87 @@ mod tests {
         assert_eq!(fs::read(&incomplete_path).unwrap(), plaintext);
     }
 
+    /// A destination directory moved after the commit must not hide the
+    /// output's extra names: a temporary name the promotion could not
+    /// remove and a link another process made to the plaintext are both
+    /// reported beside the move. Only the moved directory is named, since
+    /// the caller's path now leads elsewhere, and the committed output
+    /// keeps every name.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_moved_destination_does_not_hide_the_extra_names_of_the_output() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let out = tmp.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let moved = tmp.path().join("out.moved");
+
+        let root_name = "f.txt";
+        let plaintext = b"real plaintext";
+        let manifest = single_file_manifest(root_name, plaintext);
+        let archive = build_archive(&manifest, &[(root_name, plaintext)]);
+        let incomplete_name = incomplete_working_name(OsStr::new(root_name));
+        let final_path = out.join(root_name);
+        let incomplete_path = out.join(&incomplete_name);
+        let outsider_name = "outsider-link";
+        let outsider_path = out.join(outsider_name);
+
+        let err = unarchive_inner_with_hooks(
+            Cursor::new(archive),
+            &out,
+            ArchiveLimits::default(),
+            IncompleteOutputPolicy::DeleteOnError,
+            Seams {
+                compare_owners: platform::compare_owners,
+                before_promotion: || {
+                    fs::hard_link(&incomplete_path, &outsider_path)?;
+                    Ok(())
+                },
+                after_promotion: |promotion| {
+                    fs::hard_link(&final_path, &incomplete_path)?;
+                    *promotion = platform::PromotionOutcome::StagedLinkRetained(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "injected temporary-name removal failure",
+                    ));
+                    Ok(())
+                },
+                after_root_mode: |_| {
+                    fs::rename(&out, &moved)?;
+                    fs::create_dir(&out)?;
+                    Ok(())
+                },
+            },
+        )
+        .expect_err("a moved destination must be reported");
+
+        let rendered = err.to_string();
+        for expected in [
+            "Output f.txt is complete but its directory changed",
+            "temporary name f.txt.incomplete could not be removed",
+            "has 3 filesystem names",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "missing {expected:?}, got: {rendered}"
+            );
+        }
+        assert_eq!(
+            rendered.matches(&out.display().to_string()).count(),
+            1,
+            "only the moved directory may be named, got: {rendered}"
+        );
+        for name in [
+            OsStr::new(root_name),
+            incomplete_name.as_os_str(),
+            OsStr::new(outsider_name),
+        ] {
+            assert_eq!(
+                fs::read(moved.join(name)).unwrap(),
+                plaintext,
+                "{name:?} must still denote the committed output"
+            );
+        }
+    }
+
     /// A staged subdirectory renamed out of the staged tree while the
     /// content pass is still writing into it must fail the run, and say
     /// so: the entries already extracted are inside the subtree that
@@ -5908,8 +6005,9 @@ mod tests {
     /// where a second name for the committed file is certain, so it is
     /// the last that may skip the count. The archive's mode must not
     /// reach that inode: the extra name keeps the owner-only staged
-    /// mode, and the run reports the failed removal, which says why the
-    /// second name is there.
+    /// mode. The run reports the failed removal and the count as well,
+    /// because the staging name need not be the only extra one: here
+    /// the second name is another process's link.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_retained_staging_name_never_receives_the_archive_mode() {
@@ -5948,9 +6046,14 @@ mod tests {
         )
         .expect_err("must fail");
 
+        let rendered = err.to_string();
         assert!(
-            err.to_string().contains("could not be removed"),
-            "the run must report the failed staging removal, got: {err}"
+            rendered.contains("could not be removed"),
+            "the run must report the failed staging removal, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("has 2 filesystem names"),
+            "the failed staging removal must not hide the count, got: {rendered}"
         );
         assert_eq!(
             fs::read(&evil).unwrap(),

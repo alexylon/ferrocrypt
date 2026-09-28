@@ -52,7 +52,10 @@ use crate::format::{HEADER_FIXED_SIZE, HEADER_LEN_MAX, HEADER_MAC_SIZE, PREFIX_S
 use crate::recipient::RecipientEntry;
 use crate::recipient::entry::{ENTRY_HEADER_SIZE, RECIPIENT_FLAG_CRITICAL};
 use crate::recipient::native::{argon2id, x25519};
-use crate::{ArchiveLimits, CryptoError, Encryptor, KeyPairGenerator, PublicKey};
+use crate::{
+    ArchiveLimits, CryptoError, Encryptor, KeyPairGenerator, PRIVATE_KEY_FILENAME,
+    PUBLIC_KEY_FILENAME, PublicKey,
+};
 
 /// Passphrase for every argon2id fixture and both private keys.
 /// Fixture-only; anyone with the repository can decrypt these files.
@@ -320,7 +323,7 @@ fn build_rewritten_kdf_fcr(
 }
 
 /// Generates one key pair with the fast test parameters into `keys/`,
-/// renaming the fixed `public.key` / `private.key` output names to the
+/// copying the fixed `public.key` / `private.key` output names to the
 /// per-recipient fixture names.
 fn generate_key_pair(keys: &Path, label: &str) {
     let staging = tempfile::tempdir().expect("keygen staging dir");
@@ -328,16 +331,19 @@ fn generate_key_pair(keys: &Path, label: &str) {
         .kdf_params(KdfParams::test_fast_default())
         .write(staging.path(), |_| {})
         .expect("generate suite key pair");
-    fs::rename(
-        staging.path().join("public.key"),
+    // Copied, not renamed: the staging directory is on the system temporary
+    // filesystem, which is often not the checkout's (tmpfs on many Linux
+    // systems), and a rename cannot cross filesystems.
+    fs::copy(
+        staging.path().join(PUBLIC_KEY_FILENAME),
         keys.join(format!("recipient-{label}.public.key")),
     )
-    .expect("move public key");
-    fs::rename(
-        staging.path().join("private.key"),
+    .expect("copy public key");
+    fs::copy(
+        staging.path().join(PRIVATE_KEY_FILENAME),
         keys.join(format!("recipient-{label}.private.key")),
     )
-    .expect("move private key");
+    .expect("copy private key");
 }
 
 /// Writes the corrupted `public.key` text fixtures derived from

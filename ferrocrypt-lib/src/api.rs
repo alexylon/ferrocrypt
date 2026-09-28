@@ -710,8 +710,8 @@ impl PassphraseDecryptor {
     /// output can still fail the call, with [`CryptoError::InvalidInput`] or
     /// [`CryptoError::Io`]. [`IncompleteOutputPolicy`] does not remove a
     /// confirmed output then, and the error message says that the output is
-    /// complete, unless the check found another entry at the output's final
-    /// name, which is reported as a replacement.
+    /// complete, unless the check found the output's final name missing or
+    /// holding another entry, which is reported as a replacement.
     pub fn decrypt(
         self,
         passphrase: Passphrase,
@@ -878,8 +878,8 @@ impl PrivateKeyDecryptor {
     /// call, with [`CryptoError::InvalidInput`] or [`CryptoError::Io`].
     /// [`IncompleteOutputPolicy`] does not remove a confirmed output then, and
     /// the error message says that the output is complete, unless the check
-    /// found another entry at the output's final name, which is reported as a
-    /// replacement.
+    /// found the output's final name missing or holding another entry, which
+    /// is reported as a replacement.
     pub fn decrypt(
         self,
         private_key: PrivateKey,

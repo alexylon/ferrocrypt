@@ -1343,9 +1343,11 @@ fn staged_temp_not_in_output_dir(staged_name: &std::ffi::OsStr) -> CryptoError {
     ))
 }
 
-/// Finishes a link commit after the final link exists. The unlink is
-/// injectable one level down so tests can exercise the post-commit failure
-/// policy without a filesystem that selectively refuses it.
+/// Finishes a link commit after the final link exists. A staged name that
+/// could not be removed is a second complete name for the output, so it is
+/// reported even when a later check fails as well. The unlink is injectable
+/// one level down so tests can exercise the post-commit failure policy
+/// without a filesystem that selectively refuses it.
 #[cfg(unix)]
 fn finish_link_commit(
     tmp: NamedTempFile,
@@ -1377,18 +1379,28 @@ fn finish_link_commit_with_remove(
         unlink_staged_temp_with_remove(tmp, output_dir, tmp_name, remove_staged);
     sync_committed_parent(output_dir, final_path);
 
-    let committed_identity = committed_identity
-        .map_err(|e| FinalizeFileError::after_commit(reported_path_unconfirmed(final_path, e)))?;
-    let finalized = reopen_committed_file(output_dir, final_name, committed_identity, final_path)
-        .map_err(FinalizeFileError::after_commit)?;
-    finalized
-        .confirm_reported_path(final_path)
-        .map_err(FinalizeFileError::after_commit)?;
-    if let Err(error) = staged_unlink {
-        return Err(FinalizeFileError::after_commit(staged_temp_link_retained(
-            final_path, tmp_name, error,
-        )));
-    }
+    let confirmed = committed_identity
+        .map_err(|e| reported_path_unconfirmed(final_path, e))
+        .and_then(|identity| reopen_committed_file(output_dir, final_name, identity, final_path))
+        .and_then(|finalized| {
+            finalized
+                .confirm_reported_path(final_path)
+                .map(|()| finalized)
+        });
+    let finalized = match (confirmed, staged_unlink) {
+        (Ok(finalized), Ok(())) => finalized,
+        (Ok(_), Err(unlink)) => {
+            return Err(FinalizeFileError::after_commit(staged_temp_link_retained(
+                final_path, tmp_name, unlink,
+            )));
+        }
+        (Err(error), Ok(())) => return Err(FinalizeFileError::after_commit(error)),
+        (Err(error), Err(unlink)) => {
+            return Err(FinalizeFileError::after_commit(
+                crate::error::append_report(error, &staged_link_report(tmp_name, &unlink)),
+            ));
+        }
+    };
     finalized
         .confirm_single_link(final_path)
         .map_err(FinalizeFileError::after_commit)?;
@@ -1467,7 +1479,8 @@ fn remove_staged_temp(tmp: NamedTempFile, output_dir: &OutputDir) -> io::Result<
 /// either identity is absent the comparison is skipped; the link-count and
 /// reported-path checks that follow still run. The commit has already
 /// happened, so a failed reopen is reported the way
-/// [`FinalizedFile::confirm_reported_path`] reports a failed read.
+/// [`FinalizedFile::confirm_reported_path`] reports the entry it reads
+/// ([`reopen_failure`]).
 #[cfg(unix)]
 fn reopen_committed_file(
     output_dir: &OutputDir,
@@ -1482,7 +1495,7 @@ fn reopen_committed_file(
     let file = output_dir
         .dir
         .open_with(final_name, &options)
-        .map_err(|e| reported_entry_error(final_path, e))?
+        .map_err(|e| reopen_failure(output_dir, final_name, final_path, e))?
         .into_std();
     let metadata = cap_std::fs::Metadata::from_file(&file)
         .map_err(|e| reported_path_unconfirmed(final_path, e))?;
@@ -1496,6 +1509,24 @@ fn reopen_committed_file(
         return Err(reported_output_changed(final_path));
     }
     Ok(FinalizedFile::new(file))
+}
+
+/// Maps a failed reopen of the committed name. The no-follow, non-blocking
+/// open fails outright where the name now holds a symlink or a socket, so the
+/// entry is read without following it: one that is not a regular file no
+/// longer denotes the output, as [`FinalizedFile::confirm_reported_path`]
+/// finds too. Any other failure is mapped as that check maps a failed read.
+#[cfg(unix)]
+fn reopen_failure(
+    output_dir: &OutputDir,
+    final_name: &std::ffi::OsStr,
+    final_path: &Path,
+    error: io::Error,
+) -> CryptoError {
+    match output_dir.dir.symlink_metadata(final_name) {
+        Ok(entry) if !entry.is_file() => reported_output_changed(final_path),
+        _ => reported_entry_error(final_path, error),
+    }
 }
 
 /// Best-effort durability barrier for a fallback commit. Linux and macOS
@@ -1523,11 +1554,20 @@ fn staged_temp_link_retained(
     CryptoError::Io(io::Error::new(
         source.kind(),
         format!(
-            "Output {} is complete, but temporary name {} could not be removed: {source}",
+            "Output {} is complete, but {}",
             sanitize_path_for_display(final_path),
-            sanitize_path_for_display(Path::new(staged_name)),
+            staged_link_report(staged_name, &source),
         ),
     ))
+}
+
+/// The clause naming a staged name the commit could not remove.
+#[cfg(unix)]
+fn staged_link_report(staged_name: &std::ffi::OsStr, source: &io::Error) -> String {
+    format!(
+        "temporary name {} could not be removed: {source}",
+        sanitize_path_for_display(Path::new(staged_name)),
+    )
 }
 
 /// Promotes a staged single-file path `from` to the final name `to`
@@ -2831,6 +2871,118 @@ mod tests {
         }
         assert_eq!(fs::read(&final_path).unwrap(), b"payload");
         assert!(!tmp_dir.path().join(tmp_name).exists());
+    }
+
+    /// A staged name that could not be removed is a second complete name for
+    /// the output, so it is reported even when a check after the link fails
+    /// first. Here the final name is moved away, which the reopen reports as
+    /// a changed path, and the staged name is left in place.
+    #[cfg(unix)]
+    #[test]
+    fn finalize_via_link_reports_a_retained_staging_link_beside_a_failed_check() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let final_path = tmp_dir.path().join("out.txt");
+        let moved = tmp_dir.path().join("out.moved");
+
+        let mut tmp = tempfile::Builder::new()
+            .tempfile_in(tmp_dir.path())
+            .unwrap();
+        tmp.write_all(b"payload").unwrap();
+        let tmp_name = tmp.path().file_name().unwrap().to_os_string();
+        let output_dir = OutputDir::open(tmp_dir.path()).unwrap();
+        output_dir
+            .dir
+            .hard_link(&tmp_name, &output_dir.dir, final_path.file_name().unwrap())
+            .unwrap();
+
+        let error = finish_link_commit_with_remove(
+            tmp,
+            &output_dir,
+            &final_path,
+            final_path.file_name().unwrap(),
+            &tmp_name,
+            |_, _| {
+                fs::rename(&final_path, &moved)?;
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "injected staged unlink failure",
+                ))
+            },
+        )
+        .expect_err("a moved final name must not report success");
+
+        assert!(error.committed());
+        let message = error.into_crypto_error().to_string();
+        assert!(
+            message.contains("reported path changed")
+                && message.contains("temporary name")
+                && message.contains("could not be removed"),
+            "both conditions must be reported, got: {message}"
+        );
+        assert_eq!(fs::read(&moved).unwrap(), b"payload");
+        assert_eq!(fs::read(tmp_dir.path().join(tmp_name)).unwrap(), b"payload");
+    }
+
+    /// Once the final hard link exists, a final name that now holds a symlink
+    /// or a socket makes the no-follow reopen fail outright. Either is a
+    /// substitution, reported as a changed path like every other entry that
+    /// is not the committed regular file, rather than as a check that could
+    /// not run.
+    #[cfg(unix)]
+    #[test]
+    fn finalize_via_link_reports_a_substituted_final_name_as_changed() {
+        // Plants the substitute at the final name, given where the committed
+        // file was moved.
+        type Plant = fn(&Path, &Path) -> io::Result<()>;
+        let plants: [(&str, Plant); 2] = [
+            ("symlink", |moved, name| {
+                std::os::unix::fs::symlink(moved, name)
+            }),
+            ("socket", |_, name| {
+                std::os::unix::net::UnixListener::bind(name).map(drop)
+            }),
+        ];
+        for (substitute, plant) in plants {
+            let tmp_dir = tempfile::TempDir::new().unwrap();
+            let final_path = tmp_dir.path().join("out.txt");
+            let moved = tmp_dir.path().join("out.moved");
+
+            let mut tmp = tempfile::Builder::new()
+                .tempfile_in(tmp_dir.path())
+                .unwrap();
+            tmp.write_all(b"payload").unwrap();
+            let tmp_name = tmp.path().file_name().unwrap().to_os_string();
+            let output_dir = OutputDir::open(tmp_dir.path()).unwrap();
+            output_dir
+                .dir
+                .hard_link(&tmp_name, &output_dir.dir, final_path.file_name().unwrap())
+                .unwrap();
+
+            let error = finish_link_commit_with_remove(
+                tmp,
+                &output_dir,
+                &final_path,
+                final_path.file_name().unwrap(),
+                &tmp_name,
+                |dir, name| {
+                    fs::rename(&final_path, &moved)?;
+                    plant(&moved, &final_path)?;
+                    dir.remove_file(name)
+                },
+            )
+            .expect_err("a substituted final name must not report success");
+
+            assert!(error.committed(), "{substitute}");
+            assert!(
+                matches!(
+                    error.into_crypto_error(),
+                    CryptoError::InvalidInput(message)
+                        if message.contains("reported path changed")
+                ),
+                "a {substitute} at the final name must report as a changed path"
+            );
+            assert_eq!(fs::read(&moved).unwrap(), b"payload", "{substitute}");
+        }
     }
 
     /// A concurrent directory writer can rename the staged link after the

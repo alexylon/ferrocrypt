@@ -5468,8 +5468,9 @@ fn read_manifest(root: &Path, name: &str) -> Vec<BTreeMap<String, String>> {
 /// Parses a manifest table strictly into column-keyed rows: its header must
 /// name exactly `columns`, and no field may break a rule [`field_violation`]
 /// checks, so a replay never joins an unvalidated reference onto the corpus
-/// root. Positional indexing would silently read the wrong column if a later
-/// `SCHEMA-VERSION` adds one.
+/// root. The match is exact, so once a later `SCHEMA-VERSION` changes a
+/// table's columns, the generator must read the frozen table with the columns
+/// it was published with and carry its rows into the new layout.
 fn read_manifest_with_columns(
     root: &Path,
     name: &str,

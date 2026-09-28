@@ -649,10 +649,9 @@ fn read_limit_profiles(root: &Path) -> BTreeMap<String, LimitProfile> {
         let profile = LimitProfile {
             header: HeaderReadLimits::default()
                 .max_header_len(narrow("max_header_len"))
-                .max_recipient_count(
-                    u16::try_from(narrow("max_recipient_count"))
-                        .unwrap_or_else(|_| panic!("{id}: max_recipient_count does not fit")),
-                )
+                .max_recipient_count(u16::try_from(value("max_recipient_count")).unwrap_or_else(
+                    |_| panic!("{id}: max_recipient_count does not fit this build's limit type"),
+                ))
                 .max_recipient_body_len(narrow("max_recipient_body_len"))
                 .max_header_mac_work_bytes(value("max_header_mac_work_bytes")),
             kdf: KdfLimit::new(narrow("max_kdf_mem_kib"))

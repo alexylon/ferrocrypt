@@ -361,6 +361,31 @@ pub(crate) fn map_user_path_io_error(e: io::Error) -> CryptoError {
     }
 }
 
+/// Whether a failure to reach an entry by path says that the path no longer
+/// leads there: an entry on it is missing, is not a directory where the path
+/// needs one, or is a symlink cycle. Each is a change someone made to the
+/// path, never an environment fault. The cycle is matched by raw OS error
+/// code because `std` has no stable `io::ErrorKind` for it yet.
+pub(crate) fn path_no_longer_resolves(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    ) || error.raw_os_error() == Some(SYMLINK_LOOP_CODE)
+}
+
+/// Raw OS error code for a symlink cycle.
+#[cfg(unix)]
+const SYMLINK_LOOP_CODE: i32 = libc::ELOOP;
+
+/// Raw OS error code for a symlink cycle: what Windows returns for a
+/// reparse-point cycle.
+#[cfg(windows)]
+const SYMLINK_LOOP_CODE: i32 = ERROR_CANT_RESOLVE_FILENAME;
+
+/// `ERROR_CANT_RESOLVE_FILENAME` from `WinError.h`.
+#[cfg(windows)]
+const ERROR_CANT_RESOLVE_FILENAME: i32 = 1921;
+
 /// Test helper that creates a FIFO through the POSIX `mkfifo` utility.
 /// It is shared by special-file tests in this module and in the archive
 /// layer. Using a subprocess avoids an unsafe `libc::mkfifo` call;
@@ -780,5 +805,26 @@ mod tests {
         symlink(tmp.path().join("absent-target"), &link).unwrap();
         assert!(!link.exists(), "sanity: target really is missing");
         assert!(path_occupied(&link).unwrap());
+    }
+
+    /// A missing entry, a non-directory where the path needs a directory,
+    /// and a symlink cycle each say the path no longer leads to its entry;
+    /// a failure that says nothing about the path, such as a denied read,
+    /// does not.
+    #[test]
+    fn path_no_longer_resolves_only_for_a_changed_path() {
+        for error in [
+            io::Error::from(io::ErrorKind::NotFound),
+            io::Error::from(io::ErrorKind::NotADirectory),
+            io::Error::from_raw_os_error(SYMLINK_LOOP_CODE),
+        ] {
+            assert!(path_no_longer_resolves(&error), "{error}");
+        }
+        for error in [
+            io::Error::from(io::ErrorKind::PermissionDenied),
+            io::Error::other("storage failure"),
+        ] {
+            assert!(!path_no_longer_resolves(&error), "{error}");
+        }
     }
 }

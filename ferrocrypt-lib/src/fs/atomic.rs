@@ -94,10 +94,11 @@ impl FinalizedFile {
     /// denotes this committed file. A final-entry replacement, or a
     /// directory swap where the platform permits one while the handle is
     /// open, can otherwise make the returned path lead to
-    /// attacker-controlled bytes. A path that no longer exists counts as
-    /// changed too: the commit created an entry there, so its absence
-    /// means the name no longer denotes the output — the same rule the
-    /// decrypt side applies.
+    /// attacker-controlled bytes. A path that no longer leads to an entry —
+    /// one missing, a non-directory where the path needs a directory, or a
+    /// symlink cycle — counts as changed too: the commit created an entry
+    /// there, so the name no longer denotes the output. The decrypt side
+    /// applies the same rule to its destination directory.
     ///
     /// Runs only after the commit, so every error says that the output is
     /// complete: a read that fails reports the path as unconfirmed rather
@@ -113,24 +114,46 @@ impl FinalizedFile {
         Ok(())
     }
 
-    /// Requires the commit to have left exactly one name for the committed
-    /// file before success is reported. Reading through the retained
-    /// handle makes this independent of concurrent renames or replacements of
-    /// either directory entry. Every error says that the output is complete,
-    /// including a count that could not be read.
-    fn confirm_single_link(&self, path: &Path) -> Result<(), CryptoError> {
+    /// The number of names this file has. Reading it through the retained
+    /// handle makes it independent of concurrent renames or replacements of
+    /// either directory entry.
+    fn link_count(&self) -> io::Result<u64> {
         use cap_fs_ext::MetadataExt;
 
-        let link_count = cap_std::fs::Metadata::from_file(&self.file)
-            .map_err(|e| link_count_unreadable(path, e))?
-            .nlink();
-        if link_count != 1 {
-            return Err(committed_link_count_error(
-                &sanitize_path_for_display(path),
-                link_count,
-            ));
-        }
-        Ok(())
+        Ok(cap_std::fs::Metadata::from_file(&self.file)?.nlink())
+    }
+
+    /// Ends every commit route that holds the committed file's handle:
+    /// returns this file only if it has exactly one name and `finding`, what
+    /// the route found wrong after the commit, is `None`. Every error says
+    /// that the output is complete, including a count that could not be read.
+    ///
+    /// The count is read even beside a finding, because no finding accounts
+    /// for every extra name: a staged name left behind is one, not
+    /// necessarily the only one. It is then reported without naming `path`,
+    /// which the finding may have shown no longer leads to this file.
+    fn into_confirmed(
+        self,
+        path: &Path,
+        finding: Option<CryptoError>,
+    ) -> Result<Self, FinalizeFileError> {
+        let error = match (finding, self.link_count()) {
+            (None, Ok(1)) => return Ok(self),
+            (None, Ok(link_count)) => {
+                committed_link_count_error(&sanitize_path_for_display(path), link_count)
+            }
+            (None, Err(source)) => link_count_unreadable(path, source),
+            (Some(finding), Ok(1)) => finding,
+            (Some(finding), Ok(link_count)) => crate::error::append_report(
+                finding,
+                &format!("the output {}", link_count_clause(link_count)),
+            ),
+            (Some(finding), Err(source)) => crate::error::append_report(
+                finding,
+                &format!("the output's {}", link_count_unreadable_clause(&source)),
+            ),
+        };
+        Err(FinalizeFileError::after_commit(error))
     }
 }
 
@@ -236,11 +259,12 @@ fn reported_output_changed(path: &Path) -> CryptoError {
     ))
 }
 
-/// Maps a failed read of the committed entry at `path`: a missing entry
-/// means the name no longer denotes the output, and any other failure
-/// leaves the path unconfirmed.
+/// Maps a failed read of the committed entry at `path`: a path that no
+/// longer leads to an entry ([`crate::fs::paths::path_no_longer_resolves`])
+/// means the name no longer denotes the output, and any other failure leaves
+/// the path unconfirmed.
 fn reported_entry_error(path: &Path, error: io::Error) -> CryptoError {
-    if error.kind() == io::ErrorKind::NotFound {
+    if crate::fs::paths::path_no_longer_resolves(&error) {
         reported_output_changed(path)
     } else {
         reported_path_unconfirmed(path, error)
@@ -267,10 +291,18 @@ fn link_count_unreadable(path: &Path, source: io::Error) -> CryptoError {
     CryptoError::Io(io::Error::new(
         source.kind(),
         format!(
-            "Output {} is complete, but its number of filesystem names could not be read: {source}",
-            sanitize_path_for_display(path)
+            "Output {} is complete, but its {}",
+            sanitize_path_for_display(path),
+            link_count_unreadable_clause(&source),
         ),
     ))
+}
+
+/// The clause stating that a committed file's link count could not be read,
+/// shared by [`link_count_unreadable`] and the report
+/// [`FinalizedFile::into_confirmed`] appends beside another finding.
+fn link_count_unreadable_clause(source: &io::Error) -> String {
+    format!("number of filesystem names could not be read: {source}")
 }
 
 /// Post-commit failure for a committed file with a link count other than
@@ -282,8 +314,16 @@ fn link_count_unreadable(path: &Path, source: io::Error) -> CryptoError {
 /// reader report this condition in the same words.
 pub(crate) fn committed_link_count_error(display_name: &str, link_count: u64) -> CryptoError {
     CryptoError::Io(io::Error::other(format!(
-        "Output {display_name} is complete, but has {link_count} filesystem names (expected 1)",
+        "Output {display_name} is complete, but {}",
+        link_count_clause(link_count),
     )))
+}
+
+/// The clause stating a link count other than one, shared by
+/// [`committed_link_count_error`] and the report
+/// [`FinalizedFile::into_confirmed`] appends beside another finding.
+fn link_count_clause(link_count: u64) -> String {
+    format!("has {link_count} filesystem names (expected 1)")
 }
 
 /// What an identity-checked removal did with a file this operation wrote,
@@ -370,10 +410,13 @@ impl FinalizeFileError {
         }
     }
 
-    /// Every post-commit error passes through here, so debug builds check
-    /// here that it says the output is complete.
+    /// Every post-commit error passes through here, so this crate's own
+    /// tests check here that it says the output is complete. Other builds
+    /// leave the check out: a caller must receive the error, never a panic
+    /// after its output was committed.
     fn after_commit(error: CryptoError) -> Self {
-        debug_assert!(
+        #[cfg(test)]
+        assert!(
             says_output_is_complete(&error),
             "a post-commit error must say that the output is complete: {error}"
         );
@@ -401,6 +444,7 @@ impl FinalizeFileError {
 
 /// Whether `error`'s message says that the output is complete, as every error
 /// raised after a commit must (`THREAT_MODEL.md` TM-06).
+#[cfg(test)]
 fn says_output_is_complete(error: &CryptoError) -> bool {
     let message = error.to_string();
     message.starts_with("Output ") && message.contains(" is complete")
@@ -575,13 +619,8 @@ fn finalized_from_persist(
 ) -> Result<FinalizedFile, FinalizeFileError> {
     sync_parent_dir(final_path);
     let finalized = FinalizedFile::new(file);
-    finalized
-        .confirm_reported_path(final_path)
-        .map_err(FinalizeFileError::after_commit)?;
-    finalized
-        .confirm_single_link(final_path)
-        .map_err(FinalizeFileError::after_commit)?;
-    Ok(finalized)
+    let finding = finalized.confirm_reported_path(final_path).err();
+    finalized.into_confirmed(final_path, finding)
 }
 
 /// Failure arm of [`finalize_by_persist`] on the Unix targets outside
@@ -1305,13 +1344,8 @@ fn finish_renamed_commit(
     sync_committed_parent(output_dir, final_path);
 
     let finalized = FinalizedFile::new(file);
-    finalized
-        .confirm_reported_path(final_path)
-        .map_err(FinalizeFileError::after_commit)?;
-    finalized
-        .confirm_single_link(final_path)
-        .map_err(FinalizeFileError::after_commit)?;
-    Ok(finalized)
+    let finding = finalized.confirm_reported_path(final_path).err();
+    finalized.into_confirmed(final_path, finding)
 }
 
 /// Requires the entry under the staged name in the anchored destination
@@ -1392,32 +1426,42 @@ fn finish_link_commit_with_remove(
         unlink_staged_temp_with_remove(tmp, output_dir, tmp_name, remove_staged);
     sync_committed_parent(output_dir, final_path);
 
-    let confirmed = committed_identity
+    let reopened = committed_identity
         .map_err(|e| reported_path_unconfirmed(final_path, e))
-        .and_then(|identity| reopen_committed_file(output_dir, final_name, identity, final_path))
-        .and_then(|finalized| {
-            finalized
-                .confirm_reported_path(final_path)
-                .map(|()| finalized)
-        });
-    let finalized = match (confirmed, staged_unlink) {
-        (Ok(finalized), Ok(())) => finalized,
-        (Ok(_), Err(unlink)) => {
-            return Err(FinalizeFileError::after_commit(staged_temp_link_retained(
-                final_path, tmp_name, unlink,
+        .and_then(|identity| reopen_committed_file(output_dir, final_name, identity, final_path));
+    let finalized = match reopened {
+        Ok(finalized) => finalized,
+        // Without the committed file's handle there is nothing to count through.
+        Err(error) => {
+            return Err(FinalizeFileError::after_commit(with_staged_link_report(
+                error,
+                tmp_name,
+                staged_unlink,
             )));
         }
-        (Err(error), Ok(())) => return Err(FinalizeFileError::after_commit(error)),
-        (Err(error), Err(unlink)) => {
-            return Err(FinalizeFileError::after_commit(
-                crate::error::append_report(error, &staged_link_report(tmp_name, &unlink)),
-            ));
-        }
     };
-    finalized
-        .confirm_single_link(final_path)
-        .map_err(FinalizeFileError::after_commit)?;
-    Ok(finalized)
+    let finding = match (finalized.confirm_reported_path(final_path), staged_unlink) {
+        (Ok(()), Ok(())) => None,
+        (Ok(()), Err(unlink)) => Some(staged_temp_link_retained(final_path, tmp_name, unlink)),
+        (Err(error), unlink) => Some(with_staged_link_report(error, tmp_name, unlink)),
+    };
+    finalized.into_confirmed(final_path, finding)
+}
+
+/// `error`, with the clause for a staged name the commit could not remove
+/// appended when `unlink` failed.
+#[cfg(unix)]
+fn with_staged_link_report(
+    error: CryptoError,
+    staged_name: &std::ffi::OsStr,
+    unlink: io::Result<()>,
+) -> CryptoError {
+    match unlink {
+        Ok(()) => error,
+        Err(unlink) => {
+            crate::error::append_report(error, &staged_link_report(staged_name, &unlink))
+        }
+    }
 }
 
 /// The clause appended when the claim route left the name it claimed in
@@ -1918,6 +1962,42 @@ mod tests {
         );
     }
 
+    /// A reported path that no longer leads to an entry counts as changed
+    /// whichever way it stopped: the directory holding the output replaced by
+    /// a file, or by a symlink cycle. Neither is a check that could not run.
+    #[cfg(unix)]
+    #[test]
+    fn finalized_file_rejects_a_reported_path_that_no_longer_resolves() {
+        type Plant = fn(&Path) -> io::Result<()>;
+        let plants: [(&str, Plant); 2] = [
+            ("file", |dir| fs::write(dir, b"not a directory")),
+            ("symlink cycle", |dir| std::os::unix::fs::symlink(dir, dir)),
+        ];
+        for (substitute, plant) in plants {
+            let tmp_dir = tempfile::TempDir::new().unwrap();
+            let out = tmp_dir.path().join("out");
+            fs::create_dir(&out).unwrap();
+            let final_path = out.join("out.txt");
+
+            let mut tmp = tempfile::Builder::new().tempfile_in(&out).unwrap();
+            tmp.write_all(b"payload").unwrap();
+            let finalized = commit_to(tmp, &final_path, "Output").unwrap();
+            fs::rename(&out, tmp_dir.path().join("out.moved")).unwrap();
+            plant(&out).unwrap();
+
+            let err = finalized
+                .confirm_reported_path(&final_path)
+                .expect_err("a path that no longer resolves no longer denotes the output");
+            assert!(
+                matches!(
+                    &err,
+                    CryptoError::InvalidInput(message) if message.contains("reported path changed")
+                ),
+                "a {substitute} in place of the directory must report as changed, got: {err}"
+            );
+        }
+    }
+
     /// A reported path that cannot be read is neither confirmed nor shown to
     /// have changed. The error keeps its kind and says the output is complete,
     /// so it cannot be taken to mean that nothing was written.
@@ -2002,14 +2082,18 @@ mod tests {
                 );
             }
         }
+        let unreadable = link_count_unreadable(path, denied()).to_string();
+        assert!(
+            unreadable.contains("its number of filesystem names could not be read: "),
+            "an unreadable count must say what could not be read, got: {unreadable}"
+        );
     }
 
-    /// Debug builds refuse a post-commit error that does not say the output
-    /// is complete, whichever constructor built it.
-    #[cfg(debug_assertions)]
+    /// This crate's tests refuse a post-commit error that does not say the
+    /// output is complete, whichever constructor built it.
     #[test]
     #[should_panic(expected = "a post-commit error must say that the output is complete")]
-    fn a_post_commit_error_without_the_wording_fails_in_debug_builds() {
+    fn a_post_commit_error_without_the_wording_fails_the_tests() {
         let _ = FinalizeFileError::after_commit(CryptoError::Io(io::Error::other(
             "Output out.fcr could not be checked",
         )));
@@ -2799,8 +2883,10 @@ mod tests {
     }
 
     /// Once the final hard link exists, a staged-name unlink failure must not
-    /// be swallowed. It is a post-commit error, and both complete links are
-    /// preserved so no bare-name rollback can delete a concurrent replacement.
+    /// be swallowed. It is a post-commit error, reported with the count
+    /// because the staged name need not be the only extra one, and both
+    /// complete links are preserved so no bare-name rollback can delete a
+    /// concurrent replacement.
     #[cfg(unix)]
     #[test]
     fn finalize_via_link_reports_a_retained_staging_link() {
@@ -2838,6 +2924,10 @@ mod tests {
         assert!(
             rendered.contains("temporary name") && rendered.contains("could not be removed"),
             "the retained link must be explicit, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("has 2 filesystem names"),
+            "the retained link must not hide the count, got: {rendered}"
         );
         assert_eq!(fs::read(&final_path).unwrap(), b"payload");
         assert_eq!(fs::read(tmp_dir.path().join(tmp_name)).unwrap(), b"payload");
@@ -2944,6 +3034,99 @@ mod tests {
         );
         assert_eq!(fs::read(&moved).unwrap(), b"payload");
         assert_eq!(fs::read(tmp_dir.path().join(tmp_name)).unwrap(), b"payload");
+    }
+
+    /// Stages a file in `dir` and links it at `outsider` as well: a name a
+    /// local writer made for the staged file before the commit.
+    #[cfg(unix)]
+    fn staged_with_outsider_link(dir: &Path, outsider: &Path) -> NamedTempFile {
+        let mut tmp = tempfile::Builder::new().tempfile_in(dir).unwrap();
+        tmp.write_all(b"payload").unwrap();
+        fs::hard_link(tmp.path(), outsider).unwrap();
+        tmp
+    }
+
+    /// Asserts that `error` reports `path` as changed and, beside it, the two
+    /// names the committed file has, without naming `path` a second time as
+    /// the complete output.
+    #[cfg(unix)]
+    fn assert_changed_path_with_count(error: FinalizeFileError, path: &Path) {
+        assert!(error.committed());
+        let error = error.into_crypto_error();
+        let shown = sanitize_path_for_display(path);
+        assert!(
+            matches!(
+                &error,
+                CryptoError::InvalidInput(message)
+                    if message.contains(&format!("reported path changed: {shown}"))
+                        && message.contains("; the output has 2 filesystem names (expected 1)")
+                        && message.matches(&shown).count() == 1
+            ),
+            "a changed path must not hide the count or be named as the output, got: {error}"
+        );
+    }
+
+    /// A reported path that changed after a link commit does not skip the
+    /// count. The output directory is swapped out once the staged name is
+    /// removed, and a local writer had linked the staged file beforehand.
+    #[cfg(unix)]
+    #[test]
+    fn finalize_via_link_reports_the_count_beside_a_changed_path() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let out = tmp_dir.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let moved = tmp_dir.path().join("out.moved");
+        let final_path = out.join("out.txt");
+
+        let tmp = staged_with_outsider_link(&out, &out.join("outsider"));
+        let tmp_name = tmp.path().file_name().unwrap().to_os_string();
+        let output_dir = OutputDir::open(&out).unwrap();
+        output_dir
+            .dir
+            .hard_link(&tmp_name, &output_dir.dir, final_path.file_name().unwrap())
+            .unwrap();
+
+        let error = finish_link_commit_with_remove(
+            tmp,
+            &output_dir,
+            &final_path,
+            final_path.file_name().unwrap(),
+            &tmp_name,
+            |dir, name| {
+                dir.remove_file(name)?;
+                fs::rename(&out, &moved)?;
+                fs::create_dir(&out)
+            },
+        )
+        .expect_err("a changed path must not report success");
+
+        assert_changed_path_with_count(error, &final_path);
+        assert_eq!(fs::read(moved.join("out.txt")).unwrap(), b"payload");
+        assert_eq!(fs::read(moved.join("outsider")).unwrap(), b"payload");
+    }
+
+    /// The rename route reads the count beside a changed path as well.
+    #[cfg(unix)]
+    #[test]
+    fn finish_renamed_commit_reports_the_count_beside_a_changed_path() {
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let out = tmp_dir.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let moved = tmp_dir.path().join("out.moved");
+        let final_path = out.join("out.txt");
+
+        let tmp = staged_with_outsider_link(&out, &out.join("outsider"));
+        let output_dir = OutputDir::open(&out).unwrap();
+        fs::rename(tmp.path(), &final_path).unwrap();
+        fs::rename(&out, &moved).unwrap();
+        fs::create_dir(&out).unwrap();
+
+        let error = finish_renamed_commit(tmp, &output_dir, &final_path)
+            .expect_err("a changed path must not report success");
+
+        assert_changed_path_with_count(error, &final_path);
+        assert_eq!(fs::read(moved.join("out.txt")).unwrap(), b"payload");
+        assert_eq!(fs::read(moved.join("outsider")).unwrap(), b"payload");
     }
 
     /// Once the final hard link exists, a final name that now holds a symlink

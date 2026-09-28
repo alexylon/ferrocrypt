@@ -856,7 +856,8 @@ fn require_promoted_root(
 /// into a directory of their choosing.
 ///
 /// A path that no longer leads to a directory reports as changed — missing, a
-/// non-directory, or a symlink cycle ([`path_no_longer_a_directory`]).
+/// non-directory, or a symlink cycle
+/// ([`crate::fs::paths::path_no_longer_resolves`]).
 /// Resource exhaustion skips this diagnostic-only confirmation because the
 /// committed output has already been ratified
 /// ([`output_confirmation_resource_error`]), and so does an identity that
@@ -872,7 +873,7 @@ fn require_output_anchor_unchanged(
 ) -> Result<(), CryptoError> {
     let unconfirmed = |error| output_directory_unconfirmed(output_dir, root_name, error);
     let opened = platform::open_anchor(output_dir);
-    if matches!(&opened, Err(CryptoError::Io(e)) if path_no_longer_a_directory(e)) {
+    if matches!(&opened, Err(CryptoError::Io(e)) if crate::fs::paths::path_no_longer_resolves(e)) {
         return Err(output_directory_changed(output_dir, root_name));
     }
     let Some(current) = confirmation_step(opened).map_err(unconfirmed)? else {
@@ -913,27 +914,6 @@ fn confirmation_step<T>(step: Result<T, CryptoError>) -> Result<Option<T>, Crypt
         Err(error) => Err(error),
     }
 }
-
-/// Whether a failure to open the destination path says it no longer leads
-/// to a directory: the entry is missing, is not a directory, or is a
-/// symlink cycle. Each is a substitution someone made, never an
-/// environment fault. The cycle is matched by raw OS error code because
-/// `std` has no stable `io::ErrorKind` for it yet.
-fn path_no_longer_a_directory(error: &io::Error) -> bool {
-    matches!(
-        error.kind(),
-        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-    ) || error.raw_os_error() == Some(SYMLINK_LOOP_CODE)
-}
-
-/// Raw OS error code for a symlink cycle.
-#[cfg(unix)]
-const SYMLINK_LOOP_CODE: i32 = libc::ELOOP;
-
-/// Raw OS error code for a symlink cycle: what Windows returns for a
-/// reparse-point cycle.
-#[cfg(windows)]
-const SYMLINK_LOOP_CODE: i32 = ERROR_CANT_RESOLVE_FILENAME;
 
 /// Resource exhaustion for which the final destination-path confirmation is
 /// unavailable rather than adverse evidence about the path itself
@@ -977,10 +957,6 @@ const ERROR_OUTOFMEMORY: i32 = 14;
 /// `ERROR_NO_SYSTEM_RESOURCES` from `WinError.h`.
 #[cfg(windows)]
 const ERROR_NO_SYSTEM_RESOURCES: i32 = 1450;
-
-/// `ERROR_CANT_RESOLVE_FILENAME` from `WinError.h`.
-#[cfg(windows)]
-const ERROR_CANT_RESOLVE_FILENAME: i32 = 1921;
 
 /// Rejection for a promoted root that no longer denotes the object this
 /// run staged: the entry was replaced after the commit, so its content

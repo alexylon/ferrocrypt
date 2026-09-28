@@ -1050,16 +1050,19 @@ It contains:
     redirect any step. If removing the staged
     name after a successful link fails, `finalize_file` returns a marked
     post-commit error and preserves both complete links; it never withdraws
-    the final name after a delayed failure. A successful or missing-name unlink
-    is followed by an `nlink == 1` check through the reopened committed handle,
-    so moving the staged link or removing a planted replacement also fails the
-    operation. The committed file handle remains live through that check and a
+    the final name after a delayed failure. Whatever the unlink returned, an
+    `nlink == 1` check follows through the reopened committed handle, so
+    moving the staged link or removing a planted replacement also fails the
+    operation, and a failed unlink does not hide a further name. The
+    committed file handle remains live through that check and a
     final identity comparison — device and inode number on Unix, volume
     serial number and file index on Windows, read through the same handle
     on every platform — with the path the caller is about to report, so
     neither a hidden extra link nor a parent-directory/final-entry
-    replacement can produce success; a final name that no longer exists
-    counts as replaced, the step-17 rule the decrypt side applies.
+    replacement can produce success; a reported path that no longer leads
+    to an entry — one missing, a non-directory where a directory was, or a
+    symlink cycle (`fs::paths::path_no_longer_resolves`) — counts as
+    replaced, the rule the decrypt side's step 17 applies.
     `file_identity` returns `None` for an all-zero identifier, which a
     filesystem without identifiers reports for every object: a comparison
     that only confirms is skipped there, and a removal that needs the
@@ -1072,11 +1075,19 @@ It contains:
     `tempfile`'s persist can itself have committed by hard link on Unix,
     so its `Ok` alone does not prove the staged name is gone, and a link
     planted against the staged temporary before the commit survives it
-    anywhere. Every error these confirmations raise says that the output
-    is complete, including one for a check that could not run
-    (`THREAT_MODEL.md` TM-06), and `FinalizeFileError::committed` marks it
-    so key generation never rolls `private.key` back once `public.key` has
-    committed.
+    anywhere. Every route that holds the committed file's handle ends in
+    `FinalizedFile::into_confirmed`, which reads the count even when the
+    path confirmation or the staged-name removal has already failed,
+    because neither accounts for every extra name, and reports every
+    failure in one error; beside another finding the count names no path,
+    since that finding may show the path no longer leads to the output. A
+    link commit whose final name cannot be reopened as the committed file
+    has no handle to count through, and reports that failure with any
+    staged name left behind. Every error these
+    confirmations raise says that the output is complete, including one
+    for a check that could not run (`THREAT_MODEL.md` TM-06), and
+    `FinalizeFileError::committed` marks it so key generation never rolls
+    `private.key` back once `public.key` has committed.
     Encryption's Linux/macOS anchor requests only search access, not
     permission to list the directory. Key generation keeps a readable
     anchor for its required durability barrier, and other Unix targets

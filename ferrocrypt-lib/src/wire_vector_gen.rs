@@ -118,6 +118,10 @@ const SOURCE_DIR_MODE: u16 = 0o755;
 /// namespaced per `FORMAT.md` §3.3.1, so a future native type cannot claim it.
 const UNKNOWN_RECIPIENT_TYPE: &str = "test/unknown";
 
+/// Grammar-valid key type name this build does not implement, in the same
+/// plugin namespace, carried by the key files of a type no reader here opens.
+const UNSUPPORTED_KEY_TYPE: &str = "test/future-kem";
+
 // ─── Manifest rows ─────────────────────────────────────────────────────────
 
 /// One `cases.tsv` row. Digest columns are computed at write time from the
@@ -3091,9 +3095,9 @@ fn write_public_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         Ok(material),
     );
 
-    // The typed payload behind the canonical string. Two cases below re-encode
-    // it so their Bech32 checksum is valid and the rule they name is the only
-    // one that can reject them.
+    // The typed payload behind the canonical string. Three cases below
+    // re-encode it, so each string is well formed apart from the one rule its
+    // case names.
     let payload = recipient_payload_for_tests(
         crate::format::WRITER_KEYPAIR_SUITE.public_key_version(),
         "x25519",
@@ -3107,7 +3111,10 @@ fn write_public_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     let [nonzero_padding, surplus_group] = non_canonical_padding_groups_for_tests(&payload);
 
     let reject = |s: String| -> Vec<u8> { s.into_bytes() };
-    let cases: [(&str, Vec<u8>, &str, &str); 10] = [
+    let (hrp, data_part) = recipient
+        .split_once('1')
+        .expect("a recipient string separates its parts with '1'");
+    let cases: [(&str, Vec<u8>, &str, &str); 13] = [
         (
             "public-key-checksum-corrupted",
             reject({
@@ -3120,10 +3127,31 @@ fn write_public_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
             "public_key_bech32_checksum_mismatch",
             "malformed_public_key",
         ),
+        // §7 fixes the BIP 173 checksum. The same payload encoded with Bech32m
+        // carries a checksum a Bech32m decoder accepts, so only the choice of
+        // algorithm can reject it.
+        (
+            "public-key-bech32m",
+            reject(
+                bech32::encode::<bech32::Bech32m>(crate::key::public::RECIPIENT_HRP, &payload)
+                    .expect("encode the canonical payload with the Bech32m checksum"),
+            ),
+            "public_key_checksum_algorithm_is_bech32m",
+            "malformed_public_key",
+        ),
         (
             "public-key-uppercase",
             reject(recipient.to_uppercase()),
             "public_key_not_canonical_lowercase",
+            "malformed_public_key",
+        ),
+        // §7 names mixed case apart from uppercase: a reader can refuse a
+        // string that is entirely upper case and still accept one that mixes
+        // the two.
+        (
+            "public-key-mixed-case",
+            reject(format!("{}1{data_part}", hrp.to_uppercase())),
+            "public_key_mixed_case",
             "malformed_public_key",
         ),
         (
@@ -3136,6 +3164,15 @@ fn write_public_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
             "public-key-two-trailing-newlines",
             reject(format!("{recipient}\n\n")),
             "public_key_more_than_one_trailing_newline",
+            "malformed_public_key",
+        ),
+        // §7.1 names CRLF apart from other whitespace: one LF is the only
+        // ending a reader accepts, so the CR before it must be refused rather
+        // than stripped with it.
+        (
+            "public-key-crlf",
+            reject(format!("{recipient}\r\n")),
+            "public_key_crlf_line_ending",
             "malformed_public_key",
         ),
         (
@@ -3242,7 +3279,7 @@ fn write_public_key_version_cases(corpus: &mut Corpus) {
     // unsupported type rather than a malformed key.
     let unsupported = encode_recipient_string_with_version(
         crate::key::public::PUBLIC_KEY_VERSION,
-        "test/future-kem",
+        UNSUPPORTED_KEY_TYPE,
         &material,
     )
     .expect("encode unsupported key type");
@@ -3258,7 +3295,7 @@ fn write_public_key_version_cases(corpus: &mut Corpus) {
         )
         .fabricated()
         .credential("none")
-        .capability("key_type:test/future-kem")
+        .capability(&format!("key_type:{UNSUPPORTED_KEY_TYPE}"))
         .reject("public_key_type_not_supported", "unsupported_key_type"),
     );
 }
@@ -3554,16 +3591,36 @@ fn private_key_case(
     );
 }
 
+/// The bytes of `key` with its type name replaced by `type_name` and
+/// `type_name_len` updated to match. Every other field keeps its value, so
+/// the result no longer unlocks: the type name is associated data.
+fn with_private_key_type(key: &[u8], type_name: &str) -> Vec<u8> {
+    use crate::key::private::{PRIVATE_KEY_HEADER_FIXED_SIZE, TYPE_NAME_LEN_OFFSET};
+
+    let length_field = TYPE_NAME_LEN_OFFSET..TYPE_NAME_LEN_OFFSET + size_of::<u16>();
+    let old_len = usize::from(u16::from_be_bytes(
+        key[length_field.clone()].try_into().expect("type_name_len"),
+    ));
+    let new_len = u16::try_from(type_name.len()).expect("a type name fits its length field");
+    let mut out = key[..PRIVATE_KEY_HEADER_FIXED_SIZE].to_vec();
+    out[length_field].copy_from_slice(&new_len.to_be_bytes());
+    out.extend_from_slice(type_name.as_bytes());
+    out.extend_from_slice(&key[PRIVATE_KEY_HEADER_FIXED_SIZE + old_len..]);
+    out
+}
+
 fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     use crate::key::private::{
-        KDF_PARAMS_OFFSET, KIND_OFFSET, PRIVATE_KEY_HEADER_FIXED_SIZE, TYPE_NAME_LEN_OFFSET,
-        VERSION_OFFSET,
+        EXT_LEN_OFFSET, KDF_PARAMS_OFFSET, KIND_OFFSET, PRIVATE_KEY_EXT_LEN_MAX,
+        PRIVATE_KEY_HEADER_FIXED_SIZE, PRIVATE_KEY_PUBLIC_LEN_MAX,
+        PRIVATE_KEY_WRAPPED_SECRET_LEN_MAX, PRIVATE_KEY_WRAPPED_SECRET_LEN_MIN, PUBLIC_LEN_OFFSET,
+        TYPE_NAME_LEN_OFFSET, VERSION_OFFSET, WRAPPED_SECRET_LEN_OFFSET,
     };
 
     let canonical = fs::read(corpus.root.join(&keys.private_a)).expect("read private key");
 
     // §8 fixed header: magic(4) || version(1) || kind(1) || key_flags(2) || …
-    let mutations: [ByteMutationCase; 7] = [
+    let mutations: [ByteMutationCase; 9] = [
         (
             "private-key-bad-magic",
             Box::new(|b: &mut Vec<u8>| b[0] ^= 0xFF),
@@ -3587,6 +3644,26 @@ fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
             Box::new(|b: &mut Vec<u8>| b[7] = 0x01),
             "private_key_flags_nonzero",
             "malformed_private_key",
+        ),
+        // §8 checks the length fields before the type name, so a zero
+        // `type_name_len` is a malformed key rather than a malformed type
+        // name.
+        (
+            "private-key-type-name-len-zero",
+            Box::new(|b: &mut Vec<u8>| {
+                b[TYPE_NAME_LEN_OFFSET..TYPE_NAME_LEN_OFFSET + size_of::<u16>()]
+                    .copy_from_slice(&0u16.to_be_bytes());
+            }),
+            "private_key_type_name_len_zero",
+            "malformed_private_key",
+        ),
+        // A type name is text. A byte that is not UTF-8 breaks §3.3 while
+        // every length field stays valid.
+        (
+            "private-key-type-name-not-utf8",
+            Box::new(|b: &mut Vec<u8>| b[PRIVATE_KEY_HEADER_FIXED_SIZE] = 0xFF),
+            "private_key_type_name_not_utf8",
+            "malformed_type_name",
         ),
         (
             "private-key-truncated",
@@ -3621,6 +3698,64 @@ fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         mutate(&mut bytes);
         assert_ne!(bytes, canonical, "{case_id}: mutation changed nothing");
         private_key_case(corpus, case_id, &bytes, condition, class);
+    }
+
+    // A well-formed key of a type this release does not implement is
+    // capability-relative: an implementation of that type accepts it.
+    let unsupported = with_private_key_type(&canonical, UNSUPPORTED_KEY_TYPE);
+    let artifact_ref = corpus.write_ref(
+        "artifacts/private-key/private-key-unsupported-type.private.key",
+        &unsupported,
+    );
+    corpus.push_case(
+        CaseRow::new(
+            "private-key-unsupported-type",
+            "private_key_validate",
+            &artifact_ref,
+        )
+        .fabricated()
+        .credential("none")
+        .capability(&format!("key_type:{UNSUPPORTED_KEY_TYPE}"))
+        .reject("private_key_type_not_supported", "unsupported_key_type"),
+    );
+
+    // The §8 structural limits on the length fields, each broken on that
+    // key. §8 checks them before the type name is read, so every file is a
+    // malformed key whatever types a reader implements; a reader that
+    // consulted the type first would report it unsupported instead. On an
+    // `x25519` key the length rules of that type would refuse the same bytes
+    // with the same class, and nothing would show that the structural limit
+    // itself is enforced.
+    let length_limits: [(&str, usize, u32, &str); 4] = [
+        (
+            "private-key-public-len-above-max",
+            PUBLIC_LEN_OFFSET,
+            PRIVATE_KEY_PUBLIC_LEN_MAX + 1,
+            "private_key_public_len_above_structural_maximum",
+        ),
+        (
+            "private-key-ext-len-above-max",
+            EXT_LEN_OFFSET,
+            PRIVATE_KEY_EXT_LEN_MAX + 1,
+            "private_key_ext_len_above_structural_maximum",
+        ),
+        (
+            "private-key-wrapped-secret-below-min",
+            WRAPPED_SECRET_LEN_OFFSET,
+            PRIVATE_KEY_WRAPPED_SECRET_LEN_MIN - 1,
+            "private_key_wrapped_secret_len_below_structural_minimum",
+        ),
+        (
+            "private-key-wrapped-secret-above-max",
+            WRAPPED_SECRET_LEN_OFFSET,
+            PRIVATE_KEY_WRAPPED_SECRET_LEN_MAX + 1,
+            "private_key_wrapped_secret_len_above_structural_maximum",
+        ),
+    ];
+    for (case_id, offset, value, condition) in length_limits {
+        let mut bytes = unsupported.clone();
+        bytes[offset..offset + size_of::<u32>()].copy_from_slice(&value.to_be_bytes());
+        private_key_case(corpus, case_id, &bytes, condition, "malformed_private_key");
     }
 
     // A newer private-key encoding version is capability-relative.

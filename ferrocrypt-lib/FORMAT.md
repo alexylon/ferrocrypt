@@ -1202,6 +1202,13 @@ ext_len <= 65,536
 16 <= wrapped_secret_len <= 16,777,216
 ```
 
+Readers MUST check these limits on the fixed header before reading the type
+name or any field after it. A length outside them is therefore
+`malformed_private_key` (§12.1) whatever those fields hold: a `type_name_len`
+of zero is `malformed_private_key`, not `malformed_type_name`, and a
+`public_len` above its limit on a key of an unsupported type is
+`malformed_private_key`, not `unsupported_key_type`.
+
 For native X25519:
 
 ```text
@@ -1256,7 +1263,7 @@ has been successfully authenticated. Unknown critical private-key TLVs MUST caus
 rejection after successful authentication.
 
 Readers MUST validate magic, kind, private-key encoding version and
-key-pair-suite support, flags, type name, lengths, total file size, KDF
+key-pair-suite support, flags, lengths, type name, total file size, KDF
 parameters, local resource caps, AEAD authentication, TLV rules, and
 recipient-type-specific secret/public material constraints.
 `kind` precedes the version byte because §11.1 makes the kind byte the selector

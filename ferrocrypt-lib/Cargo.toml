@@ -66,10 +66,6 @@ rustix = { version = "1", features = ["fs"] }
 ferrocrypt-test-support = { path = "../ferrocrypt-test-support" }
 ctor = "0.9"
 stats_alloc = "0.1.10"
-# Already regular dependencies at these versions; the frozen-corpus replay in
-# `tests/wire_corpus.rs` needs them from an integration test too.
-sha3 = { version = "0.11", features = ["zeroize"] }
-tempfile = "3"
 
 # `process` is for the archive/encode.rs test that lowers the open-file limit.
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]

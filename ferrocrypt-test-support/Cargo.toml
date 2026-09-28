@@ -11,4 +11,6 @@ license = "GPL-3.0-only"
 
 [dependencies]
 ferrocrypt = { path = "../ferrocrypt-lib" }
+# Digests of the wire conformance corpus, the same version `ferrocrypt` uses.
+sha3 = "0.11"
 tempfile = "3"

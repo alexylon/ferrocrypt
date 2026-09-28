@@ -491,6 +491,7 @@ name = "ferrocrypt-test-support"
 version = "0.3.0-rc.4"
 dependencies = [
  "ferrocrypt",
+ "sha3",
  "tempfile",
 ]
 

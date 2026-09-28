@@ -1,9 +1,11 @@
 //! Workspace-internal test helpers for ferrocrypt.
 //!
-//! This crate is **not published** (`publish = false`). It exists only so
-//! that the workspace's tests can construct fast Argon2id parameters
-//! without forcing the public `ferrocrypt` crate to expose any feature
-//! or runtime mechanism that lowers production cryptographic strength.
+//! This crate is **not published** (`publish = false`). It exists so that
+//! the workspace's tests can construct fast Argon2id parameters without
+//! forcing the public `ferrocrypt` crate to expose any feature or runtime
+//! mechanism that lowers production cryptographic strength, and so that the
+//! wire-corpus generator and its replays share one manifest grammar
+//! ([`wire_manifest`]).
 //!
 //! The published `ferrocrypt` crate has no Cargo feature touching crypto
 //! strength, no doc-hidden test constructors, and no runtime override
@@ -30,6 +32,8 @@
 //! that floor, so they pass through the ordinary `kdf_params(...)` path.
 
 #![forbid(unsafe_code)]
+
+pub mod wire_manifest;
 
 use ferrocrypt::Passphrase;
 use ferrocrypt::{Encryptor, KdfParams, KeyPairGenerator};

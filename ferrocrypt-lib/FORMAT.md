@@ -1098,11 +1098,11 @@ Rules:
   `unsupported_public_key_version` (§12.1).
 - `type_name` follows §3.3 and §3.3.1.
 - `key_material_len` MUST be `<= 12,215` unless a recipient spec defines a
-  smaller bound. This worst-case cap is derived so that a maximum-length
+  smaller bound. This worst-case maximum is derived so that a maximum-length
   255-byte `type_name`, the 7-byte typed-payload header, and the 16-byte
   internal checksum still fit alongside `key_material` under the
   20,000-character recipient-string ceiling, letting implementations
-  enforce the cap structurally without a separate post-encode
+  enforce the maximum structurally without a separate post-encode
   length check.
 - The full Bech32 string MUST be `<= 20,000` ASCII characters.
 - The Bech32 checksum algorithm is the original BIP 173 Bech32 algorithm, not
@@ -1115,6 +1115,21 @@ Rules:
   key-pair suite itself is supported. A public recipient MUST be supported by the
   implementation or by an available plugin before use as an encryption
   recipient.
+
+Readers MUST check that the payload holds the 23 bytes of its version, its two
+length fields, and its checksum before checking `public_key_version`, so a
+shorter payload is `malformed_public_key` rather than
+`unsupported_public_key_version`. They MUST check the version before the length
+fields, because a newer public-key encoding version may represent them
+differently (§11.5), and the length fields, `type_name_len` against `1..=255`
+and `key_material_len` against the structural maximum of 12,215, before reading
+the type name or any field after it. A nonzero version the reader does not
+support is therefore `unsupported_public_key_version` whatever the length
+fields hold, and a length outside its bounds is `malformed_public_key` (§12.1)
+whatever the later fields hold: a `type_name_len` of zero or 256 is
+`malformed_public_key`, not `malformed_type_name`. A smaller bound that a
+recipient spec defines depends on the type, so it applies only once the type
+name has been read.
 
 Implementations MAY apply a smaller local cap on recipient-string length for
 untrusted input and SHOULD let callers raise it up to the structural ceiling,
@@ -1235,12 +1250,18 @@ ext_len <= 65,536
 16 <= wrapped_secret_len <= 16,777,216
 ```
 
-Readers MUST check these limits on the fixed header before reading the type
-name or any field after it. A length outside them is therefore
-`malformed_private_key` (§12.1) whatever those fields hold: a `type_name_len`
-of zero is `malformed_private_key`, not `malformed_type_name`, and a
-`public_len` above its limit on a key of an unsupported type is
-`malformed_private_key`, not `unsupported_key_type`.
+Readers MUST check that the file holds the 90-byte fixed header before
+checking the private-key encoding version, so a shorter file is
+`malformed_private_key` rather than `unsupported_private_key_version`. They
+MUST check the version before these limits, because a newer encoding version
+may represent them differently (§11.5), and these limits on the fixed header
+before reading the type name or any field after it. A nonzero version the
+reader does not support is therefore `unsupported_private_key_version` whatever
+the length fields hold, and a length outside its limit is
+`malformed_private_key` (§12.1) whatever the later fields hold: a
+`type_name_len` of zero or 256 is `malformed_private_key`, not
+`malformed_type_name`, and a `public_len` above its limit on a key of an
+unsupported type is `malformed_private_key`, not `unsupported_key_type`.
 
 For native X25519:
 
@@ -2971,10 +2992,15 @@ evidenced under a profile that lowers the cap. The default cannot carry a side
 when it equals the structural maximum, when other caps refuse first or keep
 every artifact below it, when no supported key type reaches it, when no common
 host can extract an archive path of its length, or when an artifact on it
-would be too large to commit or too costly to replay. `private.key` needs KDF
-evidence of its own because §8 gives it a separate parser and a separate
-unlock: a case proving the `argon2id` recipient body applies §2.2 says nothing
-about the key file that stores the same `kdf_params`.
+would be too large to commit or too costly to replay. A profile MAY also
+raise a cap to its structural maximum, so that an artifact reaches a
+structural limit the default cap would refuse first, such as a header on its
+structural maximum or a recipient string long enough to carry key material on
+or past its maximum. Such a profile evidences that structural limit, not
+either side of the cap it raises. `private.key` needs KDF evidence of its own
+because §8 gives it a separate parser and a separate unlock: a case proving
+the `argon2id` recipient body applies §2.2 says nothing about the key file
+that stores the same `kdf_params`.
 
 The X25519 during-operation all-zero-shared-secret case MUST use this canonical,
 nonzero small-order ephemeral public value:

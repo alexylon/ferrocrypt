@@ -125,6 +125,37 @@ const UNKNOWN_RECIPIENT_TYPE: &str = "test/unknown";
 /// files that no reader here can open.
 const UNSUPPORTED_KEY_TYPE: &str = "test/future-kem";
 
+/// The byte that fills every region whose content does not matter to its case.
+const FILLER: u8 = 0xAA;
+
+/// A version byte that no stored version domain defines (`FORMAT.md` §11.1),
+/// for the cases whose artifact declares a newer encoding version.
+const NEWER_VERSION: u8 = 0x02;
+
+/// The capability ID of [`NEWER_VERSION`] in version domain `domain`
+/// (`FORMAT.md` §12.2).
+fn newer_version_capability(domain: &str) -> String {
+    format!("{domain}:0x{NEWER_VERSION:02X}")
+}
+
+/// `stem` padded with `fill` to exactly the 255-byte type-name maximum
+/// (`FORMAT.md` §3.3).
+fn type_name_on_maximum(stem: &str, fill: &str) -> String {
+    let name = format!("{stem}{}", fill.repeat(TYPE_NAME_MAX_LEN - stem.len()));
+    assert_eq!(
+        name.len(),
+        TYPE_NAME_MAX_LEN,
+        "the name must land exactly on the grammar maximum"
+    );
+    name
+}
+
+/// [`UNSUPPORTED_KEY_TYPE`] lengthened to exactly the type-name maximum, for
+/// key files whose type-name length sits on its limit.
+fn longest_unsupported_key_type() -> String {
+    type_name_on_maximum(&format!("{UNSUPPORTED_KEY_TYPE}-"), "k")
+}
+
 // ─── Manifest rows ─────────────────────────────────────────────────────────
 
 /// One `cases.tsv` row. Digest columns are computed at write time from the
@@ -371,6 +402,13 @@ const LOWERED_TOTAL_ENTRY_EXT_LIMIT_PROFILE_ID: &str = "lowered-total-entry-ext-
 /// header exceeds it.
 const LOWERED_HEADER_MAC_WORK_LIMIT_PROFILE_ID: &str = "lowered-header-mac-work-cap";
 
+/// The limit profile that raises the recipient-string cap to its structural
+/// maximum, the `FORMAT.md` §7 ceiling, so a string long enough to carry key
+/// material on or past its maximum, up to the longest well-formed string of
+/// 19,999 characters, reaches the payload checks. Every other cap keeps its
+/// [`DEFAULT_LIMIT_PROFILE_ID`] value.
+const RECIPIENT_STRING_MAXIMUM_LIMIT_PROFILE_ID: &str = "recipient-string-structural-maximum";
+
 /// `max_tlv_value_bytes` under [`LOWERED_TLV_VALUE_LIMIT_PROFILE_ID`]: a region
 /// holding a value one byte past it stays far inside both region caps.
 const LOWERED_TLV_VALUE_CAP: u64 = 16;
@@ -414,6 +452,13 @@ fn derived_limit_profiles() -> Vec<(&'static str, Vec<(&'static str, u64)>)> {
         (
             LOWERED_HEADER_MAC_WORK_LIMIT_PROFILE_ID,
             vec![("max_header_mac_work_bytes", lowered_header_mac_work_cap())],
+        ),
+        (
+            RECIPIENT_STRING_MAXIMUM_LIMIT_PROFILE_ID,
+            vec![(
+                "max_recipient_string_chars",
+                u64::from(KeyReadLimits::RECIPIENT_STRING_CHARS_STRUCTURAL_MAX),
+            )],
         ),
     ]
 }
@@ -2179,14 +2224,14 @@ fn write_prefix_cases(corpus: &mut Corpus, base: &MutationBase) {
     // A newer outer-container version is capability-relative: an
     // implementation that adds support for it stops rejecting these bytes.
     let mut newer = base.bytes.clone();
-    newer[OFF_OUTER_VERSION] = 0x02;
+    newer[OFF_OUTER_VERSION] = NEWER_VERSION;
     let artifact_ref = corpus.write_ref("artifacts/fcr/prefix-newer-outer-version.fcr", &newer);
     corpus.push_case(
         CaseRow::fcr("prefix-newer-outer-version", &artifact_ref)
             .origin(&base.origin_id)
             .mutation_of(&base.case_id)
             .credential("passphrase-main")
-            .capability("outer_version:0x02")
+            .capability(&newer_version_capability("outer_version"))
             .reject("outer_version_unsupported", "unsupported_outer_version"),
     );
 
@@ -2515,7 +2560,7 @@ fn write_header_maximum_cases(corpus: &mut Corpus, sources: &Path, keys: &Corpus
     let framing = HEADER_FIXED_SIZE
         + opener.checked_wire_len().expect("x25519 entry length")
         + filler.checked_wire_len().expect("unknown entry length");
-    filler.body = vec![0xAA; HEADER_LEN_MAX as usize - framing];
+    filler.body = vec![FILLER; HEADER_LEN_MAX as usize - framing];
     let built = build_fcr_with_entries(&source, &file_key, &[filler, opener], b"");
     drop(scope);
     assert_eq!(
@@ -2560,7 +2605,7 @@ fn write_header_maximum_cases(corpus: &mut Corpus, sources: &Path, keys: &Corpus
     let file_key = FileKey::generate().expect("file key");
     let ext = crate::crypto::tlv::tlv_bytes(
         0x0001,
-        &vec![0xAA; EXT_LEN_MAX as usize - crate::crypto::tlv::ENTRY_HEADER_SIZE],
+        &vec![FILLER; EXT_LEN_MAX as usize - crate::crypto::tlv::ENTRY_HEADER_SIZE],
     );
     assert_eq!(ext.len(), EXT_LEN_MAX as usize);
     let built = build_fcr_with_entries(&source, &file_key, &[argon2id_entry(&file_key)], &ext);
@@ -2628,7 +2673,7 @@ fn unknown_entry(critical: bool) -> RecipientEntry {
         } else {
             0
         },
-        body: vec![0xAA; 64],
+        body: vec![FILLER; 64],
     }
 }
 
@@ -2784,12 +2829,7 @@ fn write_recipient_framing_cases(
     let scope = case_scope("recipient-type-name-at-max");
     let file_key = FileKey::generate().expect("file key");
     let mut longest = unknown_entry(false);
-    longest.type_name = format!("test/{}", "u".repeat(TYPE_NAME_MAX_LEN - "test/".len()));
-    assert_eq!(
-        longest.type_name.len(),
-        TYPE_NAME_MAX_LEN,
-        "the name must land exactly on the grammar maximum"
-    );
+    longest.type_name = type_name_on_maximum("test/", "u");
     let entries = [longest, x25519_entry(&keys.public_a, &file_key)];
     let built = build_fcr_with_entries(&source, &file_key, &entries, b"");
     accept_fcr_case(
@@ -3534,7 +3574,7 @@ fn write_payload_stream_cases(corpus: &mut Corpus, sources: &Path) {
         "passphrase-main",
         "payload_bytes_appended_after_final_chunk",
         "payload_authentication_failed",
-        |b| b.extend_from_slice(&[0xAA; 16]),
+        |b| b.extend_from_slice(&[FILLER; 16]),
     );
 
     // A writer must not append an empty final chunk after non-empty plaintext,
@@ -3582,6 +3622,31 @@ fn write_payload_stream_cases(corpus: &mut Corpus, sources: &Path) {
 
 // ─── Key files ─────────────────────────────────────────────────────────────
 
+/// The row of a `public_key_decode` case whose artifact is `bytes`, before
+/// its outcome is set.
+fn public_key_row(corpus: &mut Corpus, case_id: &str, bytes: &[u8]) -> CaseRow {
+    let artifact_ref =
+        corpus.write_ref(&format!("artifacts/public-key/{case_id}.public.key"), bytes);
+    CaseRow::new(case_id, "public_key_decode", &artifact_ref)
+        .fabricated()
+        .credential("none")
+}
+
+/// Commits `row` as the case of a key file naming `type_name`, a type no
+/// reader here implements. The case is capability-relative (`FORMAT.md`
+/// §12.2): an implementation of that type does not assert its outcome.
+fn unsupported_key_type_case(
+    corpus: &mut Corpus,
+    row: CaseRow,
+    type_name: &str,
+    condition_id: &str,
+) {
+    let row = row
+        .capability(&format!("key_type:{type_name}"))
+        .reject(condition_id, "unsupported_key_type");
+    corpus.push_case(row);
+}
+
 /// Commits a `public.key` case. Acceptance records the decoded 32-byte X25519
 /// key material, so a replay proves what was decoded rather than only that
 /// decoding succeeded.
@@ -3591,11 +3656,7 @@ fn public_key_case(
     bytes: &[u8],
     outcome: Result<[u8; 32], (&str, &str)>,
 ) {
-    let artifact_ref =
-        corpus.write_ref(&format!("artifacts/public-key/{case_id}.public.key"), bytes);
-    let row = CaseRow::new(case_id, "public_key_decode", &artifact_ref)
-        .fabricated()
-        .credential("none");
+    let row = public_key_row(corpus, case_id, bytes);
     let row = match outcome {
         Ok(material) => {
             let expected_ref =
@@ -3769,12 +3830,14 @@ fn write_public_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
 
     write_public_key_version_cases(corpus);
     write_public_key_material_cases(corpus);
+    write_public_key_length_cases(corpus);
 }
 
 /// `public_key_version` evidence (`FORMAT.md` §11.2): the reserved `0x00`
 /// encoding is malformed for every implementation, while an encoding from a
 /// suite this release does not define is capability-relative — an
-/// implementation that adds the suite legitimately accepts it.
+/// implementation that adds the suite legitimately accepts it. A key type
+/// this release does not implement is capability-relative in the same way.
 fn write_public_key_version_cases(corpus: &mut Corpus) {
     use crate::key::public::encode_recipient_string_with_version;
 
@@ -3788,26 +3851,19 @@ fn write_public_key_version_cases(corpus: &mut Corpus) {
         Err(("public_key_version_reserved_zero", "malformed_public_key")),
     );
 
-    let newer = encode_recipient_string_with_version(0x02, "x25519", &material)
+    let newer = encode_recipient_string_with_version(NEWER_VERSION, "x25519", &material)
         .expect("encode newer public-key version");
-    let artifact_ref = corpus.write_ref(
-        "artifacts/public-key/public-key-newer-version.public.key",
+    let row = public_key_row(
+        corpus,
+        "public-key-newer-version",
         format!("{newer}\n").as_bytes(),
+    )
+    .capability(&newer_version_capability("public_key_version"))
+    .reject(
+        "public_key_version_not_supported",
+        "unsupported_public_key_version",
     );
-    corpus.push_case(
-        CaseRow::new(
-            "public-key-newer-version",
-            "public_key_decode",
-            &artifact_ref,
-        )
-        .fabricated()
-        .credential("none")
-        .capability("public_key_version:0x02")
-        .reject(
-            "public_key_version_not_supported",
-            "unsupported_public_key_version",
-        ),
-    );
+    corpus.push_case(row);
 
     // A well-formed string for a recipient type this release does not
     // implement. The grammar, checksum, and suite gates all pass, so it is an
@@ -3818,20 +3874,209 @@ fn write_public_key_version_cases(corpus: &mut Corpus) {
         &material,
     )
     .expect("encode unsupported key type");
-    let artifact_ref = corpus.write_ref(
-        "artifacts/public-key/public-key-unsupported-type.public.key",
+    let row = public_key_row(
+        corpus,
+        "public-key-unsupported-type",
         format!("{unsupported}\n").as_bytes(),
     );
-    corpus.push_case(
-        CaseRow::new(
-            "public-key-unsupported-type",
-            "public_key_decode",
-            &artifact_ref,
-        )
-        .fabricated()
-        .credential("none")
-        .capability(&format!("key_type:{UNSUPPORTED_KEY_TYPE}"))
-        .reject("public_key_type_not_supported", "unsupported_key_type"),
+    unsupported_key_type_case(
+        corpus,
+        row,
+        UNSUPPORTED_KEY_TYPE,
+        "public_key_type_not_supported",
+    );
+}
+
+/// The `FORMAT.md` §7 length limits of a recipient string: the type-name
+/// length at zero, on its maximum, and one past it; the key-material length
+/// on its maximum and one past it; the 20,000-character ceiling, on it and
+/// one past it; and the order that checks the payload size, then the version,
+/// then the length fields, and only then the type name.
+fn write_public_key_length_cases(corpus: &mut Corpus) {
+    use crate::key::public::{
+        KEY_MATERIAL_LEN_MAX, PAYLOAD_HEADER_SIZE, PAYLOAD_VERSION_OFFSET,
+        PUBLIC_KEY_CHECKSUM_SIZE, PUBLIC_KEY_VERSION, RECIPIENT_HRP, RECIPIENT_STRING_LEN_MAX,
+        encode_recipient_groups_for_tests, encode_recipient_payload_with_hrp,
+        encode_recipient_string_with_version, recipient_groups_for_tests,
+        recipient_payload_for_tests, recipient_payload_unchecked_for_tests,
+    };
+
+    let material = [7u8; x25519::PUBLIC_KEY_SIZE];
+    let longest = longest_unsupported_key_type();
+    let encode_unchecked = |version: u8, type_name: &str, material: &[u8]| -> String {
+        let payload = recipient_payload_unchecked_for_tests(version, type_name, material)
+            .expect("build the payload");
+        encode_recipient_payload_with_hrp(RECIPIENT_HRP.as_str(), &payload)
+            .expect("encode the payload")
+    };
+
+    // A type-name length outside `1..=255`, with every other field and the
+    // internal checksum valid. §7 checks the length fields before the type
+    // name, so each is `malformed_public_key` rather than
+    // `malformed_type_name`.
+    for (case_id, type_name, condition) in [
+        (
+            "public-key-type-name-len-zero",
+            String::new(),
+            "public_key_type_name_len_zero",
+        ),
+        (
+            "public-key-type-name-len-above-max",
+            format!("{longest}k"),
+            "public_key_type_name_len_above_structural_maximum",
+        ),
+    ] {
+        public_key_case(
+            corpus,
+            case_id,
+            format!(
+                "{}\n",
+                encode_unchecked(PUBLIC_KEY_VERSION, &type_name, &material)
+            )
+            .as_bytes(),
+            Err((condition, "malformed_public_key")),
+        );
+    }
+
+    // A type-name length of zero under a newer version. §7 checks the version
+    // before the length fields, so it is `unsupported_public_key_version`
+    // rather than `malformed_public_key`.
+    let newer = encode_unchecked(NEWER_VERSION, "", &material);
+    let row = public_key_row(
+        corpus,
+        "public-key-newer-version-type-name-len-zero",
+        format!("{newer}\n").as_bytes(),
+    )
+    .capability(&newer_version_capability("public_key_version"))
+    .reject(
+        "public_key_version_not_supported_and_type_name_len_zero",
+        "unsupported_public_key_version",
+    );
+    corpus.push_case(row);
+
+    // A newer version in a payload one byte too short to hold its version, its
+    // two length fields, and its checksum. §7 checks that size before the
+    // version, so it is `malformed_public_key` rather than
+    // `unsupported_public_key_version`.
+    let mut short = vec![FILLER; PAYLOAD_HEADER_SIZE + PUBLIC_KEY_CHECKSUM_SIZE - 1];
+    short[PAYLOAD_VERSION_OFFSET] = NEWER_VERSION;
+    let short = encode_recipient_payload_with_hrp(RECIPIENT_HRP.as_str(), &short)
+        .expect("encode a short payload");
+    public_key_case(
+        corpus,
+        "public-key-newer-version-payload-too-short",
+        format!("{short}\n").as_bytes(),
+        Err((
+            "public_key_payload_shorter_than_fixed_fields_with_newer_version",
+            "malformed_public_key",
+        )),
+    );
+
+    // The type-name length on its maximum: the key is well formed, so it is
+    // refused only because no reader here implements its type.
+    let at_max = encode_recipient_string_with_version(PUBLIC_KEY_VERSION, &longest, &material)
+        .expect("encode a type name on the maximum");
+    let row = public_key_row(
+        corpus,
+        "public-key-type-name-len-at-max",
+        format!("{at_max}\n").as_bytes(),
+    );
+    unsupported_key_type_case(
+        corpus,
+        row,
+        &longest,
+        "public_key_type_name_len_at_structural_maximum_and_type_not_supported",
+    );
+
+    // The longest well-formed string: the type name and the key material both
+    // on their maxima, the combination §7 derives 12,215 from. Its 12,493-byte
+    // payload takes 19,989 characters, and the `fcr1` prefix and the checksum
+    // 10 more, so the string is 19,999 characters, one under the ceiling.
+    let longest_material = vec![FILLER; KEY_MATERIAL_LEN_MAX as usize];
+    let longest_payload =
+        recipient_payload_for_tests(PUBLIC_KEY_VERSION, &longest, &longest_material)
+            .expect("build the longest payload");
+    let longest_string =
+        encode_recipient_payload_with_hrp(RECIPIENT_HRP.as_str(), &longest_payload)
+            .expect("encode the longest payload");
+    assert_eq!(longest_string.len(), RECIPIENT_STRING_LEN_MAX - 1);
+
+    // The key-material length on its maximum, in the longest well-formed
+    // string, and one past it, replayed under a recipient-string cap that
+    // admits their length. The first is refused only because no reader here
+    // implements its type; a reader that cannot decode a string of that
+    // length reports `malformed_public_key` instead. Past the maximum the type
+    // name is malformed too, so a reader that checks the name before the
+    // length fields, against §7, reports `malformed_type_name` instead of
+    // `malformed_public_key`.
+    let material_past_max = encode_unchecked(
+        PUBLIC_KEY_VERSION,
+        &UNSUPPORTED_KEY_TYPE.to_uppercase(),
+        &[longest_material.as_slice(), &[FILLER]].concat(),
+    );
+    under_limit_profile(
+        corpus,
+        RECIPIENT_STRING_MAXIMUM_LIMIT_PROFILE_ID,
+        |corpus| {
+            let row = public_key_row(
+                corpus,
+                "public-key-key-material-len-at-max",
+                format!("{longest_string}\n").as_bytes(),
+            );
+            unsupported_key_type_case(
+                corpus,
+                row,
+                &longest,
+                "public_key_type_name_and_key_material_len_at_structural_maxima_and_type_not_supported",
+            );
+            public_key_case(
+                corpus,
+                "public-key-key-material-len-above-max",
+                format!("{material_past_max}\n").as_bytes(),
+                Err((
+                    "public_key_key_material_len_above_structural_maximum_and_type_name_malformed",
+                    "malformed_public_key",
+                )),
+            );
+        },
+    );
+
+    // The ceiling. One and two surplus 5-bit groups make the longest
+    // well-formed string 20,000 and 20,001 characters. Neither is well formed,
+    // which does not matter: §7 applies the ceiling, and then the cap, before
+    // any Bech32 rule. The files carry no line feed, so the string alone
+    // decides their length.
+    let mut groups = recipient_groups_for_tests(&longest_payload);
+    groups.push(0);
+    let on_ceiling = encode_recipient_groups_for_tests(&groups).expect("encode 20,000 characters");
+    groups.push(0);
+    let past_ceiling =
+        encode_recipient_groups_for_tests(&groups).expect("encode 20,001 characters");
+    assert_eq!(on_ceiling.len(), RECIPIENT_STRING_LEN_MAX);
+    assert_eq!(past_ceiling.len(), RECIPIENT_STRING_LEN_MAX + 1);
+
+    // On the ceiling the string passes it and the default cap refuses it; a
+    // reader that placed the ceiling one character low reports
+    // `malformed_public_key` instead of `resource_cap_exceeded`. Past the
+    // ceiling the string is `malformed_public_key`, because the ceiling comes
+    // before the cap.
+    public_key_case(
+        corpus,
+        "public-key-recipient-string-at-ceiling",
+        on_ceiling.as_bytes(),
+        Err((
+            "public_key_recipient_string_on_structural_ceiling_above_local_cap",
+            "resource_cap_exceeded",
+        )),
+    );
+    public_key_case(
+        corpus,
+        "public-key-recipient-string-above-ceiling",
+        past_ceiling.as_bytes(),
+        Err((
+            "public_key_recipient_string_above_structural_ceiling",
+            "malformed_public_key",
+        )),
     );
 }
 
@@ -4109,6 +4354,18 @@ type ByteMutationCase = (
     &'static str,
 );
 
+/// The row of a `private_key_validate` case whose artifact is `bytes`, before
+/// its outcome is set.
+fn private_key_row(corpus: &mut Corpus, case_id: &str, bytes: &[u8]) -> CaseRow {
+    let artifact_ref = corpus.write_ref(
+        &format!("artifacts/private-key/{case_id}.private.key"),
+        bytes,
+    );
+    CaseRow::new(case_id, "private_key_validate", &artifact_ref)
+        .fabricated()
+        .credential("none")
+}
+
 /// Commits a `private.key` case. Every case here is a rejection, checked
 /// through the structural validator, which needs no credential.
 fn private_key_case(
@@ -4118,16 +4375,8 @@ fn private_key_case(
     condition_id: &str,
     diagnostic_class: &str,
 ) {
-    let artifact_ref = corpus.write_ref(
-        &format!("artifacts/private-key/{case_id}.private.key"),
-        bytes,
-    );
-    corpus.push_case(
-        CaseRow::new(case_id, "private_key_validate", &artifact_ref)
-            .fabricated()
-            .credential("none")
-            .reject(condition_id, diagnostic_class),
-    );
+    let row = private_key_row(corpus, case_id, bytes).reject(condition_id, diagnostic_class);
+    corpus.push_case(row);
 }
 
 /// The bytes of `key` with its type name replaced by `type_name` and
@@ -4145,7 +4394,58 @@ fn with_private_key_type(key: &[u8], type_name: &str) -> Vec<u8> {
     out
 }
 
+/// The `u32` length fields of the `private.key` regions that follow the type
+/// name, in file order: public material, extension, wrapped secret
+/// (`FORMAT.md` §8).
+const PRIVATE_KEY_REGION_LEN_OFFSETS: [usize; 3] = [
+    crate::key::private::PUBLIC_LEN_OFFSET,
+    crate::key::private::EXT_LEN_OFFSET,
+    crate::key::private::WRAPPED_SECRET_LEN_OFFSET,
+];
+
+/// Asserts that the length fields of `key` add up to its size (`FORMAT.md`
+/// §8), for a case whose file must break no rule but the one it isolates.
+fn assert_private_key_lengths_fit(case_id: &str, key: &[u8]) {
+    use crate::key::private::{PRIVATE_KEY_HEADER_FIXED_SIZE, TYPE_NAME_LEN_OFFSET};
+
+    let regions: usize = PRIVATE_KEY_REGION_LEN_OFFSETS
+        .iter()
+        .map(|&offset| be_u32_at(key, offset) as usize)
+        .sum();
+    let declared =
+        PRIVATE_KEY_HEADER_FIXED_SIZE + usize::from(be_u16_at(key, TYPE_NAME_LEN_OFFSET)) + regions;
+    assert_eq!(
+        declared,
+        key.len(),
+        "{case_id}: the declared lengths must add up to the file size"
+    );
+}
+
+/// The bytes of `key` with the region whose `u32` length field sits at
+/// `len_offset` replaced by `region` and that field updated to match, so the
+/// declared lengths still sum to the file size (`FORMAT.md` §8).
+fn with_private_key_region(key: &[u8], len_offset: usize, region: &[u8]) -> Vec<u8> {
+    use crate::key::private::{PRIVATE_KEY_HEADER_FIXED_SIZE, TYPE_NAME_LEN_OFFSET};
+
+    let mut start =
+        PRIVATE_KEY_HEADER_FIXED_SIZE + usize::from(be_u16_at(key, TYPE_NAME_LEN_OFFSET));
+    for offset in PRIVATE_KEY_REGION_LEN_OFFSETS {
+        let len = be_u32_at(key, offset) as usize;
+        if offset == len_offset {
+            let mut out = key[..start].to_vec();
+            let region_len = u32::try_from(region.len()).expect("a region length fits its field");
+            write_u32_be(&mut out, len_offset, region_len);
+            out.extend_from_slice(region);
+            out.extend_from_slice(&key[start + len..]);
+            return out;
+        }
+        start += len;
+    }
+    panic!("offset {len_offset} is not the length field of a private.key region")
+}
+
 fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
+    use crate::crypto::tlv::{ENTRY_HEADER_SIZE as TLV_ENTRY_HEADER_SIZE, tlv_bytes};
     use crate::key::private::{
         EXT_LEN_OFFSET, KDF_PARAMS_OFFSET, KEY_FLAGS_OFFSET, KIND_OFFSET, PRIVATE_KEY_EXT_LEN_MAX,
         PRIVATE_KEY_HEADER_FIXED_SIZE, PRIVATE_KEY_PUBLIC_LEN_MAX,
@@ -4208,7 +4508,7 @@ fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         ),
         (
             "private-key-trailing-data",
-            Box::new(|b: &mut Vec<u8>| b.extend_from_slice(&[0xAA; 8])),
+            Box::new(|b: &mut Vec<u8>| b.extend_from_slice(&[FILLER; 8])),
             "private_key_bytes_follow_declared_fields",
             "malformed_private_key",
         ),
@@ -4236,23 +4536,14 @@ fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         private_key_case(corpus, case_id, &bytes, condition, class);
     }
 
-    // A well-formed key of a type this release does not implement is
-    // capability-relative: an implementation of that type accepts it.
+    // A well-formed key of a type this release does not implement.
     let unsupported = with_private_key_type(&canonical, UNSUPPORTED_KEY_TYPE);
-    let artifact_ref = corpus.write_ref(
-        "artifacts/private-key/private-key-unsupported-type.private.key",
-        &unsupported,
-    );
-    corpus.push_case(
-        CaseRow::new(
-            "private-key-unsupported-type",
-            "private_key_validate",
-            &artifact_ref,
-        )
-        .fabricated()
-        .credential("none")
-        .capability(&format!("key_type:{UNSUPPORTED_KEY_TYPE}"))
-        .reject("private_key_type_not_supported", "unsupported_key_type"),
+    let row = private_key_row(corpus, "private-key-unsupported-type", &unsupported);
+    unsupported_key_type_case(
+        corpus,
+        row,
+        UNSUPPORTED_KEY_TYPE,
+        "private_key_type_not_supported",
     );
 
     // The §8 structural limits on the length fields, each broken on that
@@ -4294,26 +4585,118 @@ fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         private_key_case(corpus, case_id, &bytes, condition, "malformed_private_key");
     }
 
+    // The type-name length one past its maximum, with the name filled to the
+    // length it declares. A reader that read the name before checking its
+    // length would report `malformed_type_name`.
+    let longest = longest_unsupported_key_type();
+    let above_max = with_private_key_type(&canonical, &format!("{longest}k"));
+    assert_private_key_lengths_fit("private-key-type-name-len-above-max", &above_max);
+    private_key_case(
+        corpus,
+        "private-key-type-name-len-above-max",
+        &above_max,
+        "private_key_type_name_len_above_structural_maximum",
+        "malformed_private_key",
+    );
+
+    // Each length exactly on its limit, the four maxima and the wrapped-secret
+    // minimum, with its region filled to the length it declares, so the file
+    // is well formed apart from its type. A reader that set any of these
+    // limits one unit too strict would report `malformed_private_key` where §8
+    // requires `unsupported_key_type`.
+    let extension = tlv_bytes(
+        0x0001,
+        &vec![FILLER; PRIVATE_KEY_EXT_LEN_MAX as usize - TLV_ENTRY_HEADER_SIZE],
+    );
+    let on_limits = [
+        (
+            "private-key-type-name-len-at-max",
+            with_private_key_type(&canonical, &longest),
+            longest.as_str(),
+            "private_key_type_name_len_at_structural_maximum_and_type_not_supported",
+        ),
+        (
+            "private-key-public-len-at-max",
+            with_private_key_region(
+                &unsupported,
+                PUBLIC_LEN_OFFSET,
+                &vec![FILLER; PRIVATE_KEY_PUBLIC_LEN_MAX as usize],
+            ),
+            UNSUPPORTED_KEY_TYPE,
+            "private_key_public_len_at_structural_maximum_and_type_not_supported",
+        ),
+        (
+            "private-key-ext-len-at-max",
+            with_private_key_region(&unsupported, EXT_LEN_OFFSET, &extension),
+            UNSUPPORTED_KEY_TYPE,
+            "private_key_ext_len_at_structural_maximum_and_type_not_supported",
+        ),
+        (
+            "private-key-wrapped-secret-at-max",
+            with_private_key_region(
+                &unsupported,
+                WRAPPED_SECRET_LEN_OFFSET,
+                &vec![FILLER; PRIVATE_KEY_WRAPPED_SECRET_LEN_MAX as usize],
+            ),
+            UNSUPPORTED_KEY_TYPE,
+            "private_key_wrapped_secret_len_at_structural_maximum_and_type_not_supported",
+        ),
+        (
+            "private-key-wrapped-secret-at-min",
+            with_private_key_region(
+                &unsupported,
+                WRAPPED_SECRET_LEN_OFFSET,
+                &vec![FILLER; PRIVATE_KEY_WRAPPED_SECRET_LEN_MIN as usize],
+            ),
+            UNSUPPORTED_KEY_TYPE,
+            "private_key_wrapped_secret_len_at_structural_minimum_and_type_not_supported",
+        ),
+    ];
+    for (case_id, bytes, type_name, condition) in on_limits {
+        assert_private_key_lengths_fit(case_id, &bytes);
+        let row = private_key_row(corpus, case_id, &bytes);
+        unsupported_key_type_case(corpus, row, type_name, condition);
+    }
+
     // A newer private-key encoding version is capability-relative.
     let mut newer = canonical.clone();
-    newer[VERSION_OFFSET] = 0x02;
-    let artifact_ref = corpus.write_ref(
-        "artifacts/private-key/private-key-newer-version.private.key",
-        &newer,
-    );
-    corpus.push_case(
-        CaseRow::new(
-            "private-key-newer-version",
-            "private_key_validate",
-            &artifact_ref,
-        )
-        .fabricated()
-        .credential("none")
-        .capability("private_key_version:0x02")
+    newer[VERSION_OFFSET] = NEWER_VERSION;
+    let row = private_key_row(corpus, "private-key-newer-version", &newer)
+        .capability(&newer_version_capability("private_key_version"))
         .reject(
             "private_key_version_unsupported",
             "unsupported_private_key_version",
-        ),
+        );
+    corpus.push_case(row);
+
+    // The newer version with a type-name length of zero. §8 checks the version
+    // before the length fields, so it is `unsupported_private_key_version`
+    // rather than `malformed_private_key`.
+    let mut newer_empty_type = with_private_key_type(&canonical, "");
+    newer_empty_type[VERSION_OFFSET] = NEWER_VERSION;
+    let row = private_key_row(
+        corpus,
+        "private-key-newer-version-type-name-len-zero",
+        &newer_empty_type,
+    )
+    .capability(&newer_version_capability("private_key_version"))
+    .reject(
+        "private_key_version_unsupported_and_type_name_len_zero",
+        "unsupported_private_key_version",
+    );
+    corpus.push_case(row);
+
+    // The newer version in a file one byte shorter than the fixed header. §8
+    // checks that size before the version, so it is `malformed_private_key`
+    // rather than `unsupported_private_key_version`.
+    let mut short_newer = canonical[..PRIVATE_KEY_HEADER_FIXED_SIZE - 1].to_vec();
+    short_newer[VERSION_OFFSET] = NEWER_VERSION;
+    private_key_case(
+        corpus,
+        "private-key-newer-version-shorter-than-fixed-header",
+        &short_newer,
+        "private_key_shorter_than_fixed_header_with_newer_version",
+        "malformed_private_key",
     );
 
     // A `public.key` handed to the private-key reader is a recognized key
@@ -4779,12 +5162,12 @@ fn write_fca_cases(corpus: &mut Corpus) {
 
     // A newer FCA archive version is capability-relative.
     let mut newer = build_fca(&[FcaEntry::file("p.txt", b"fca payload")], b"");
-    newer[crate::archive::format::FCA_MAGIC.len()] = 0x02;
+    newer[crate::archive::format::FCA_MAGIC.len()] = NEWER_VERSION;
     fca_capability_case(
         corpus,
         "fca-newer-version",
         &newer,
-        "fca_version:0x02",
+        &newer_version_capability("fca_version"),
         "fca_version_unsupported",
         "unsupported_fca_version",
     );
@@ -5341,7 +5724,7 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     let scope = case_scope("recipient-body-over-default-cap");
     let file_key = FileKey::generate().expect("file key");
     let mut big_body = unknown_entry(false);
-    big_body.body = vec![0xAA; body_cap + 1];
+    big_body.body = vec![FILLER; body_cap + 1];
     let entries = [big_body, argon2id_entry(&file_key)];
     let built = build_fcr_with_entries(&source, &file_key, &entries, b"");
     drop(scope);
@@ -5374,7 +5757,7 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     let scope = case_scope("recipient-body-at-default-cap");
     let file_key = FileKey::generate().expect("file key");
     let mut at_body = unknown_entry(false);
-    at_body.body = vec![0xAA; body_cap];
+    at_body.body = vec![FILLER; body_cap];
     let entries = [at_body, x25519_entry(&keys.public_a, &file_key)];
     let built = build_fcr_with_entries(&source, &file_key, &entries, b"");
     drop(scope);
@@ -5683,7 +6066,7 @@ fn write_lowered_cap_cases(corpus: &mut Corpus, sources: &Path, keys: &CorpusKey
         let mut padded = unknown_entry(false);
         let unpadded = header_mac_work(1, header_len_of(&[padded.clone(), opener.clone()]));
         let padding = usize::try_from(cap - unpadded).expect("the padding is small");
-        padded.body.resize(padded.body.len() + padding, 0xAA);
+        padded.body.resize(padded.body.len() + padding, FILLER);
         let entries = [padded, opener];
         let source = write_source(sources, SOURCE_FILE_NAME, 32);
         let built = build_fcr_with_entries(&source, &file_key, &entries, b"");

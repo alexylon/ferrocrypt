@@ -92,7 +92,10 @@ names a profile that changes only what it needs: `header-structural-maxima`
 raises the header-length, recipient-count, and recipient-body caps to the
 structural maxima of `FORMAT.md` §3.1 to §3.3, `small-artifact-caps` sets
 every cap to exactly what the one-byte passphrase file and the key pair of
-the corpus need, and each `lowered-*` profile lowers one cap.
+the corpus need, each `lowered-*` profile lowers one cap, and
+`recipient-string-structural-maximum` raises the recipient-string cap to the
+§7 ceiling, so a string carrying key material on or past its maximum reaches
+the payload checks.
 `private_key_validate` and `stream_encrypt_kat` apply no local cap and name
 `-`. An implementation that cannot set its caps to a profile's values cannot
 assert the cases that name it.
@@ -165,7 +168,9 @@ first deferred — so a case that stops being exercised fails the suite instead
 of passing unnoticed. Both print the counts they covered. The first also
 checks that each cap a limit profile lowers above zero is exactly what one of
 that profile's accepted cases needs: lowered by one more, it must refuse that
-case with the class a reader reports for that cap.
+case with the class a reader reports for that cap. Each cap a profile raises
+above its default must be needed by one of that profile's cases: restored to
+the default, it must refuse that case with the same class.
 
 This split is an artifact of FerroCrypt's own module boundaries. An outside
 implementation has no such constraint: `origins.tsv` names the payload key file
@@ -213,6 +218,16 @@ halves are evidenced under profiles that lower the caps instead:
 `small-artifact-caps` sets every cap to exactly what the one-byte passphrase
 file and the key pair of the corpus need, and each `lowered-*` profile lowers
 one cap.
+
+Where a default cap would refuse an artifact before it reaches a structural
+limit, the case runs under a profile that raises that cap to its structural
+maximum: `header-structural-maxima` for the header length, recipient count,
+and recipient body length, and `recipient-string-structural-maximum` for the
+recipient string, whose key-material cases include the longest well-formed
+string of 19,999 characters. Such a profile evidences the structural limit,
+not the cap it raises. The key-file cases also fix the check order of §7 and
+§8: the size of the fixed fields, then the encoding version, then the length
+fields, and only then the type name.
 
 Two areas are covered in a shape worth stating: a directory root's expected
 result is the extraction listing §12.3 defines rather than a single plaintext

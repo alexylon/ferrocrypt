@@ -806,11 +806,18 @@ fn wire_corpus_cases_replay() {
 /// lowered to zero cannot go lower, and zero is what a case without that
 /// region needs.
 ///
+/// Every cap a profile raises above its default is one that a case of that
+/// profile needs: restoring the default refuses the case with the class a
+/// reader reports for that cap. A profile raises a cap only so that an
+/// artifact reaches a structural limit the default cap would refuse first
+/// (`FORMAT.md` §12.3), so a raise that no case needs is left over from a case
+/// that moved to another profile or shrank.
+///
 /// The small-artifact profile sets every cap to what its cases need, so it
 /// must lower each one: a limit column added without a value for it keeps the
 /// default and fails here.
 #[test]
-fn every_lowered_cap_is_what_an_accepted_case_needs() {
+fn every_cap_a_profile_changes_is_what_a_case_needs() {
     if !corpus_present() {
         return;
     }
@@ -886,8 +893,45 @@ fn every_lowered_cap_is_what_an_accepted_case_needs() {
         }
     }
     assert!(lowered_caps > 0, "no profile lowers a cap");
+
+    let mut raised_caps = 0usize;
+    for profile in &profile_table {
+        let id = field(profile, "limit_profile_id");
+        let raised: Vec<&str> = columns
+            .iter()
+            .copied()
+            .filter(|column| limit_value(profile, column) > limit_value(default, column))
+            .collect();
+        if raised.is_empty() {
+            continue;
+        }
+        let asserted: Vec<&Row> = cases
+            .iter()
+            .filter(|row| field(row, "limit_profile_id") == id)
+            .filter(|row| unasserted(row, &withdrawn).is_none())
+            .collect();
+        for row in &asserted {
+            read_committed(&root, row, "artifact_ref", "artifact_sha3_256");
+        }
+        for column in raised {
+            let mut restored = profile.clone();
+            restored.insert(column.to_string(), field(default, column).to_string());
+            let restored = read_limit_profiles(std::slice::from_ref(&restored))[id];
+            let class = cap_refusal_class(column);
+            let needed = asserted.iter().any(|row| {
+                field(row, "diagnostic_class") != class
+                    && matches!(
+                        replay_row(&root, row, &credentials, || restored),
+                        Some(Err(error)) if diagnostic_class(&error) == class
+                    )
+            });
+            assert!(needed, "{id}: no case needs {column} above its default");
+            raised_caps += 1;
+        }
+    }
+    assert!(raised_caps > 0, "no profile raises a cap");
     println!(
-        "wire corpus: {lowered_caps} cap(s) lowered above zero, each exactly what an accepted case needs"
+        "wire corpus: {lowered_caps} cap(s) lowered above zero, each exactly what an accepted case needs; {raised_caps} raised above the default, each needed by a case"
     );
 }
 

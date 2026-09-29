@@ -80,7 +80,7 @@ pub(crate) const PUBLIC_KEY_CHECKSUM_SIZE: usize = 16;
 /// type_name_len(2) || key_material_len(4)`), in bytes.
 pub(crate) const PAYLOAD_HEADER_SIZE: usize = 1 + size_of::<u16>() + size_of::<u32>();
 
-const PAYLOAD_VERSION_OFFSET: usize = 0;
+pub(crate) const PAYLOAD_VERSION_OFFSET: usize = 0;
 const PAYLOAD_TYPE_NAME_LEN_OFFSET: usize = PAYLOAD_VERSION_OFFSET + 1;
 const PAYLOAD_KEY_MATERIAL_LEN_OFFSET: usize = PAYLOAD_TYPE_NAME_LEN_OFFSET + size_of::<u16>();
 const _: () = assert!(PAYLOAD_KEY_MATERIAL_LEN_OFFSET + size_of::<u32>() == PAYLOAD_HEADER_SIZE);
@@ -231,12 +231,32 @@ fn encode_recipient_string_inner(
     type_name: &str,
     key_material: &[u8],
 ) -> Result<String, CryptoError> {
+    check_payload_limits(type_name, key_material)?;
+    let data = typed_payload(version, type_name, key_material)?;
+    bech32::encode::<Bech32V1>(RECIPIENT_HRP, &data)
+        .map_err(|_| crate::error::internal_invariant!("Bech32 encode failed"))
+}
+
+/// The `FORMAT.md` §7 limits on a typed payload's type name and key material:
+/// the §3.3 type-name grammar, which bounds the name's length, and the
+/// key-material maximum.
+fn check_payload_limits(type_name: &str, key_material: &[u8]) -> Result<(), CryptoError> {
     validate_type_name_grammar(type_name)?;
+    check_key_material_len(key_material.len())
+}
+
+/// The typed payload of `FORMAT.md` §7 for `type_name` and `key_material`,
+/// ending in its internal checksum. It checks only that each length fits its
+/// field; the encoder applies [`check_payload_limits`] first.
+fn typed_payload(
+    version: u8,
+    type_name: &str,
+    key_material: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
     let type_name_bytes = type_name.as_bytes();
     let type_name_len = u16::try_from(type_name_bytes.len())
         .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedTypeName))?;
     let key_material_len = u32::try_from(key_material.len()).map_err(|_| malformed_public_key())?;
-    check_key_material_len(key_material_len)?;
 
     let cs = compute_checksum(version, type_name, key_material);
 
@@ -249,9 +269,7 @@ fn encode_recipient_string_inner(
     data.extend_from_slice(type_name_bytes);
     data.extend_from_slice(key_material);
     data.extend_from_slice(&cs);
-
-    bech32::encode::<Bech32V1>(RECIPIENT_HRP, &data)
-        .map_err(|_| crate::error::internal_invariant!("Bech32 encode failed"))
+    Ok(data)
 }
 
 /// Test-only: the typed payload an `fcr1…` string carries, before Bech32
@@ -265,10 +283,21 @@ pub(crate) fn recipient_payload_for_tests(
     type_name: &str,
     key_material: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
-    let encoded = encode_recipient_string_inner(version, type_name, key_material)?;
-    let checked =
-        CheckedHrpstring::new::<Bech32V1>(&encoded).map_err(|_| malformed_public_key())?;
-    Ok(checked.byte_iter().collect())
+    check_payload_limits(type_name, key_material)?;
+    typed_payload(version, type_name, key_material)
+}
+
+/// Test-only: the typed payload an `fcr1…` string carries, built without the
+/// `FORMAT.md` §7 limits on its type name and key material, so the
+/// conformance corpus can commit a payload that breaks them under a valid
+/// internal checksum. Never reachable from production code.
+#[cfg(test)]
+pub(crate) fn recipient_payload_unchecked_for_tests(
+    version: u8,
+    type_name: &str,
+    key_material: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    typed_payload(version, type_name, key_material)
 }
 
 /// Test-only: Bech32-encodes a recipient payload under a caller-chosen
@@ -356,9 +385,11 @@ pub(crate) fn encode_recipient_groups_for_tests(groups: &[u8]) -> Result<String,
 /// Decodes a canonical lowercase Bech32 recipient string into the
 /// typed payload.
 ///
-/// Validates, in order: structural length ceiling, local input-length
-/// cap, lowercase grammar, strict Bech32 (BIP 173, rejecting Bech32m),
-/// HRP `"fcr"`, structural length fields, `type_name` UTF-8 and
+/// Validates, in order: ASCII input, the structural length ceiling, the
+/// local input-length cap, lowercase, strict Bech32 (BIP 173, rejecting
+/// Bech32m), HRP `"fcr"`, a payload long enough for its fixed fields and
+/// checksum, canonical padding, the public-key encoding version and its
+/// keypair suite, the structural length fields, `type_name` UTF-8 and
 /// grammar, and the internal SHA3-256 checksum.
 ///
 /// String grammar, payload structure, and checksum failures all
@@ -373,8 +404,8 @@ pub(crate) fn encode_recipient_groups_for_tests(groups: &[u8]) -> Result<String,
 ///
 /// `local_max_chars` is a local policy cap checked before decode work runs.
 /// The structural ceiling is `RECIPIENT_STRING_LEN_MAX` (20,000 ASCII
-/// characters) and is checked first, so a string longer than the format
-/// permits is malformed whatever the caller's cap is; callers should
+/// characters) and is checked before the cap, so a string longer than the
+/// format permits is malformed whatever the caller's cap is; callers should
 /// normally pass the smaller [`RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT`]
 /// for untrusted input unless they intentionally accept larger future
 /// recipient strings.
@@ -412,8 +443,8 @@ pub fn decode_recipient_string(
     }
 
     // Strict Bech32 (BIP 173 polynomial via `Bech32V1`, which also
-    // accepts strings up to the spec's 20 000-char cap rather than the
-    // crate's default 1023). `CheckedHrpstring` rejects Bech32m
+    // accepts strings up to the spec's 20,000-character ceiling rather than
+    // the crate's default 1023). `CheckedHrpstring` rejects Bech32m
     // strings and mixed case, but NOT non-canonical 5-to-8 padding:
     // in `bech32` that check runs only on the segwit decode path, and
     // `byte_iter` silently drops the trailing bits. Enforced below.
@@ -443,7 +474,7 @@ pub fn decode_recipient_string(
     let type_name_len = read_u16_be(&data, PAYLOAD_TYPE_NAME_LEN_OFFSET)?;
     check_type_name_len(type_name_len)?;
     let key_material_len = read_u32_be(&data, PAYLOAD_KEY_MATERIAL_LEN_OFFSET)?;
-    check_key_material_len(key_material_len)?;
+    check_key_material_len(key_material_len as usize)?;
     check_total_payload_size(data.len(), type_name_len, key_material_len)?;
 
     let type_name_start = PAYLOAD_HEADER_SIZE;
@@ -579,9 +610,9 @@ fn decoded_x25519_bytes(decoded: DecodedRecipient) -> Result<[u8; 32], CryptoErr
 
 // Per-field structural checks. `check_key_material_len` is shared by
 // `encode_recipient_string` (writer) and `decode_recipient_string` (reader)
-// so the cap rule cannot drift between the two paths. The remaining checks
-// are reader-only because the writer constructs validated lengths directly
-// from caller-supplied byte slices.
+// so the key-material maximum cannot drift between the two paths. The
+// remaining checks are reader-only because the writer constructs validated
+// lengths directly from caller-supplied byte slices.
 
 fn check_payload_data_len(data_len: usize) -> Result<(), CryptoError> {
     if data_len < PAYLOAD_HEADER_SIZE + PUBLIC_KEY_CHECKSUM_SIZE {
@@ -597,8 +628,8 @@ fn check_type_name_len(len: u16) -> Result<(), CryptoError> {
     Ok(())
 }
 
-fn check_key_material_len(len: u32) -> Result<(), CryptoError> {
-    if len > KEY_MATERIAL_LEN_MAX {
+fn check_key_material_len(len: usize) -> Result<(), CryptoError> {
+    if len > KEY_MATERIAL_LEN_MAX as usize {
         return Err(malformed_public_key());
     }
     Ok(())

@@ -90,10 +90,12 @@ releases. Most cases name `default-0.3.0`, the defaults of FerroCrypt
 `0.3.0`. A case that has to sit on a limit those defaults keep out of reach
 names a profile that changes only what it needs: `header-structural-maxima`
 raises the header-length, recipient-count, and recipient-body caps to the
-structural maxima of `FORMAT.md` §3.1 and §3.2. `private_key_validate` and
-`stream_encrypt_kat` apply no local cap and name `-`. An implementation
-that cannot set its caps to a profile's values cannot assert the cases that
-name it.
+structural maxima of `FORMAT.md` §3.1 and §3.2, `small-artifact-caps` sets
+every cap to exactly what the one-byte passphrase file and the key pair of
+the corpus need, and each `lowered-*` profile lowers one cap.
+`private_key_validate` and `stream_encrypt_kat` apply no local cap and name
+`-`. An implementation that cannot set its caps to a profile's values cannot
+assert the cases that name it.
 
 **`first_required_by_baseline` names the promise a case evidences.** It is the
 earliest compatibility baseline whose rules require the stored outcome.
@@ -187,25 +189,25 @@ reader cannot tell that from a tampered tail. `payload-region-empty` and
 
 ## Known gaps in revision 1
 
-Two items §12.3 asks for are not fully present, and neither is an oversight:
+One item §12.3 asks for is not fully present, and it is not an oversight:
 
 - **Chunk-count-boundary evidence.** A genuine 2^32-chunk artifact is about
   256 TiB, and the known-answer schema cannot stand in for it: `origins.tsv` has
   no field for a starting counter, so no row can say "this transcript begins at
   counter 2^32 - 1". Expressing this needs a schema change.
-- **Some resource caps under the default profile.** A header declaring one past
-  the entry-count (250,000), manifest-length (64 MiB), or total-plaintext
-  (64 GiB) cap is refused, and that needs only a small artifact, but no case
-  sits on any of these caps: that would commit an artifact of that size to a
-  permanently frozen corpus. The total entry-extension cap (64 MiB) and the TLV
-  value cap (16 MiB) carry no case at all: under the default profile the
-  manifest-length and per-region caps refuse first, so no artifact can reach
-  either. Nor do the Argon2id time-cost and lane caps: both default to the
-  structural maximum, so a larger value is refused as an invalid parameter and
-  never reaches the cap. The other caps — path depth, path bytes, both extension
-  regions, recipient count, recipient body length, the `private.key`
-  wrapped-secret cap, and the Argon2id memory and work caps on both artifacts
-  that store key-derivation parameters — are covered.
+
+Every local cap is evidenced from both sides: one artifact past it is refused
+and one sitting exactly on it is accepted. Under the default profile many of
+these halves cannot exist. An artifact sitting on a default cap would often be
+too large to commit or too slow to replay, and no supported key reaches the
+default key-file caps. Some caps cannot be reached at all: the total
+entry-extension and TLV value caps sit behind the manifest-length and
+per-region caps, the Argon2id time-cost and lane caps equal their structural
+maxima, and the header-MAC work cap equals the product of the two caps it
+bounds. Those halves are evidenced under profiles that lower the caps instead:
+`small-artifact-caps` sets every cap to exactly what the one-byte passphrase
+file and the key pair of the corpus need, and each `lowered-*` profile lowers
+one cap.
 
 Everything else the §12.3 minimum-evidence table names is present. Two areas
 are covered in a shape worth stating: a directory root's expected result is the

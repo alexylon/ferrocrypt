@@ -114,6 +114,10 @@ const WRONG_PASSPHRASE: &str = "wire-corpus-wrong-passphrase";
 const SOURCE_FILE_MODE: u16 = 0o644;
 const SOURCE_DIR_MODE: u16 = 0o755;
 
+/// Name of the file every accepted `.fcr` case of the valid set archives, so
+/// also of the one-byte file inside the mutation base.
+const VALID_FCR_SOURCE_NAME: &str = "p";
+
 /// Grammar-valid recipient type name this build does not implement. Plugin
 /// namespaced per `FORMAT.md` §3.3.1, so a future native type cannot claim it.
 const UNKNOWN_RECIPIENT_TYPE: &str = "test/unknown";
@@ -352,29 +356,144 @@ fn default_limit_profile_row() -> Vec<String> {
 /// its [`DEFAULT_LIMIT_PROFILE_ID`] value.
 const HEADER_MAXIMA_LIMIT_PROFILE_ID: &str = "header-structural-maxima";
 
+/// The limit profile that sets every cap to exactly what the one-byte
+/// passphrase `.fcr` the mutation cases start from and the corpus key pair
+/// need, so each of them sits on every cap it meets at once. It evidences
+/// the accepting side of the caps no artifact the corpus can commit sits on
+/// under the default profile.
+const SMALL_ARTIFACT_LIMIT_PROFILE_ID: &str = "small-artifact-caps";
+
+/// The limit profile that lowers `max_tlv_value_bytes`, which the default
+/// profile hides: its default exceeds both extension-region caps, so no
+/// region the reader admits can hold a value past it.
+const LOWERED_TLV_VALUE_LIMIT_PROFILE_ID: &str = "lowered-tlv-value-cap";
+
+/// The limit profile that lowers `max_total_entry_ext_bytes`, which the
+/// default profile hides: its default equals the manifest cap, and every
+/// per-entry region lies inside the manifest.
+const LOWERED_TOTAL_ENTRY_EXT_LIMIT_PROFILE_ID: &str = "lowered-total-entry-ext-cap";
+
+/// The limit profile that lowers `max_header_mac_work_bytes`, which the
+/// default profile hides: its default is the product of the recipient-count
+/// and header-length caps, so no header within both can exceed it.
+const LOWERED_HEADER_MAC_WORK_LIMIT_PROFILE_ID: &str = "lowered-header-mac-work-cap";
+
+/// `max_tlv_value_bytes` under [`LOWERED_TLV_VALUE_LIMIT_PROFILE_ID`]: a region
+/// holding a value one byte past it stays far inside both region caps.
+const LOWERED_TLV_VALUE_CAP: u64 = 16;
+
+/// `max_total_entry_ext_bytes` under
+/// [`LOWERED_TOTAL_ENTRY_EXT_LIMIT_PROFILE_ID`]: two regions of half of it
+/// each sit exactly on it.
+const LOWERED_TOTAL_ENTRY_EXT_CAP: u64 = 64;
+
 /// Every limit profile other than [`DEFAULT_LIMIT_PROFILE_ID`], as the caps
 /// it sets differently from that profile. Each changes only what its cases
 /// need (`FORMAT.md` §12.3).
-const DERIVED_LIMIT_PROFILES: &[(&str, &[(&str, u64)])] = &[(
-    HEADER_MAXIMA_LIMIT_PROFILE_ID,
-    &[
+fn derived_limit_profiles() -> Vec<(&'static str, Vec<(&'static str, u64)>)> {
+    vec![
         (
-            "max_header_len",
-            HeaderReadLimits::HEADER_LEN_STRUCTURAL_MAX as u64,
+            HEADER_MAXIMA_LIMIT_PROFILE_ID,
+            vec![
+                (
+                    "max_header_len",
+                    HeaderReadLimits::HEADER_LEN_STRUCTURAL_MAX as u64,
+                ),
+                (
+                    "max_recipient_count",
+                    HeaderReadLimits::RECIPIENT_COUNT_STRUCTURAL_MAX as u64,
+                ),
+                (
+                    "max_recipient_body_len",
+                    HeaderReadLimits::RECIPIENT_BODY_LEN_STRUCTURAL_MAX as u64,
+                ),
+            ],
+        ),
+        (SMALL_ARTIFACT_LIMIT_PROFILE_ID, small_artifact_caps()),
+        (
+            LOWERED_TLV_VALUE_LIMIT_PROFILE_ID,
+            vec![("max_tlv_value_bytes", LOWERED_TLV_VALUE_CAP)],
         ),
         (
-            "max_recipient_count",
-            HeaderReadLimits::RECIPIENT_COUNT_STRUCTURAL_MAX as u64,
+            LOWERED_TOTAL_ENTRY_EXT_LIMIT_PROFILE_ID,
+            vec![("max_total_entry_ext_bytes", LOWERED_TOTAL_ENTRY_EXT_CAP)],
         ),
         (
-            "max_recipient_body_len",
-            HeaderReadLimits::RECIPIENT_BODY_LEN_STRUCTURAL_MAX as u64,
+            LOWERED_HEADER_MAC_WORK_LIMIT_PROFILE_ID,
+            vec![("max_header_mac_work_bytes", lowered_header_mac_work_cap())],
         ),
-    ],
-)];
+    ]
+}
+
+/// Every cap of [`SMALL_ARTIFACT_LIMIT_PROFILE_ID`]: exactly what the mutation
+/// base needs, one `argon2id` entry sealed with the fast test parameters over
+/// the one-byte file [`VALID_FCR_SOURCE_NAME`], and exactly what the corpus
+/// key pair needs. The extension caps are zero, because neither artifact
+/// has an extension region.
+fn small_artifact_caps() -> Vec<(&'static str, u64)> {
+    use crate::format::{HEADER_FIXED_SIZE, PREFIX_SIZE};
+    use crate::recipient::entry::ENTRY_HEADER_SIZE;
+
+    let header_len =
+        (HEADER_FIXED_SIZE + ENTRY_HEADER_SIZE + argon2id::TYPE_NAME.len() + argon2id::BODY_LENGTH)
+            as u64;
+    let kdf = KdfParams::test_fast_default();
+    let fca = build_fca(&[FcaEntry::file(VALID_FCR_SOURCE_NAME, &[0])], b"");
+    let recipient = crate::key::public::encode_recipient_string_unchecked(
+        x25519::TYPE_NAME,
+        &[9; x25519::PUBLIC_KEY_SIZE],
+    )
+    .expect("encode an x25519 recipient string");
+    vec![
+        ("max_header_len", header_len),
+        ("max_recipient_count", 1),
+        ("max_recipient_body_len", argon2id::BODY_LENGTH as u64),
+        ("max_header_mac_work_bytes", PREFIX_SIZE as u64 + header_len),
+        ("max_kdf_mem_kib", u64::from(kdf.mem_cost)),
+        ("max_kdf_time", u64::from(kdf.time_cost)),
+        ("max_kdf_lanes", u64::from(kdf.lanes)),
+        (
+            "max_kdf_work",
+            u64::from(kdf.mem_cost) * u64::from(kdf.time_cost),
+        ),
+        ("max_recipient_string_chars", recipient.len() as u64),
+        (
+            "max_private_key_wrapped_secret_len",
+            (x25519::PRIVATE_KEY_SIZE + crate::crypto::aead::TAG_SIZE) as u64,
+        ),
+        ("max_entry_count", 1),
+        ("max_total_plaintext_bytes", 1),
+        ("max_path_depth", 1),
+        ("max_path_bytes", VALID_FCR_SOURCE_NAME.len() as u64),
+        (
+            "max_manifest_bytes",
+            u64::from(be_u32_at(&fca, FCA_OFF_MANIFEST_LEN)),
+        ),
+        ("max_archive_ext_bytes", 0),
+        ("max_entry_ext_bytes", 0),
+        ("max_total_entry_ext_bytes", 0),
+        ("max_tlv_value_bytes", 0),
+    ]
+}
+
+/// `max_header_mac_work_bytes` under
+/// [`LOWERED_HEADER_MAC_WORK_LIMIT_PROFILE_ID`]: the work of the accepted
+/// case, whose header holds an ordinary unknown entry and two `x25519`
+/// entries, so two supported recipients each authenticate `12 + header_len`
+/// bytes (`FORMAT.md` §3.2).
+fn lowered_header_mac_work_cap() -> u64 {
+    use crate::format::{HEADER_FIXED_SIZE, PREFIX_SIZE};
+    use crate::recipient::entry::ENTRY_HEADER_SIZE;
+
+    let unknown =
+        ENTRY_HEADER_SIZE + UNKNOWN_RECIPIENT_TYPE.len() + unknown_entry(false).body.len();
+    let opener = ENTRY_HEADER_SIZE + x25519::TYPE_NAME.len() + x25519::BODY_LENGTH;
+    let header_len = HEADER_FIXED_SIZE + unknown + 2 * opener;
+    (2 * (PREFIX_SIZE + header_len)) as u64
+}
 
 /// Every `limit-profiles.tsv` row: the [`DEFAULT_LIMIT_PROFILE_ID`] row, then
-/// each of [`DERIVED_LIMIT_PROFILES`] as a copy of it with its own caps set.
+/// each of [`derived_limit_profiles`] as a copy of it with its own caps set.
 fn limit_profile_rows() -> Vec<Vec<String>> {
     let columns = table_columns("limit-profiles.tsv");
     let column_at = |column: &str| {
@@ -385,10 +504,10 @@ fn limit_profile_rows() -> Vec<Vec<String>> {
     };
     let default = default_limit_profile_row();
     let mut rows = vec![default.clone()];
-    for (profile_id, changed) in DERIVED_LIMIT_PROFILES {
+    for (profile_id, changed) in derived_limit_profiles() {
         let mut row = default.clone();
         row[column_at("limit_profile_id")] = profile_id.to_string();
-        for (column, value) in *changed {
+        for (column, value) in changed {
             let at = column_at(column);
             assert_ne!(
                 row[at],
@@ -428,6 +547,9 @@ struct Corpus {
     /// Diagnostic classes actually used, mapped to their stable explanatory
     /// text. Sorted by class id so the emitted table is stable.
     classes: BTreeMap<&'static str, &'static str>,
+    /// The limit profile every case pushed now is evaluated under, set only
+    /// inside [`under_limit_profile`].
+    active_limit_profile: Option<&'static str>,
 }
 
 impl Corpus {
@@ -438,6 +560,7 @@ impl Corpus {
             credentials: Vec::new(),
             origins: Vec::new(),
             classes: BTreeMap::new(),
+            active_limit_profile: None,
         }
     }
 
@@ -458,6 +581,10 @@ impl Corpus {
     }
 
     fn push_case(&mut self, case: CaseRow) {
+        let case = match self.active_limit_profile {
+            Some(profile_id) => case.limit_profile(profile_id),
+            None => case,
+        };
         if case.diagnostic_class != "-" {
             let (id, text) = DIAGNOSTIC_CLASS_TEXT
                 .iter()
@@ -477,6 +604,22 @@ impl Corpus {
     fn push_origin(&mut self, origin: OriginRow) {
         self.origins.push(origin);
     }
+}
+
+/// Runs `write` with every case it pushes evaluated under `limit_profile_id`,
+/// so the case helpers need no profile parameter of their own.
+fn under_limit_profile(
+    corpus: &mut Corpus,
+    limit_profile_id: &'static str,
+    write: impl FnOnce(&mut Corpus),
+) {
+    assert!(
+        corpus.active_limit_profile.is_none(),
+        "limit profile scopes do not nest"
+    );
+    corpus.active_limit_profile = Some(limit_profile_id);
+    write(corpus);
+    corpus.active_limit_profile = None;
 }
 
 /// SHA3-256 of the file a manifest reference names, or `-` when the reference
@@ -917,6 +1060,7 @@ fn regenerate_wire_corpus_inner() {
     write_private_key_cases(&mut corpus, &keys);
     write_fca_cases(&mut corpus);
     write_resource_policy_cases(&mut corpus, &keys);
+    write_lowered_limit_cases(&mut corpus, sources.path(), &keys, &base);
     write_stream_kat_cases(&mut corpus);
 
     emit(&corpus);
@@ -1078,7 +1222,7 @@ fn write_valid_fcr_cases(
     sources: &Path,
     keys: &CorpusKeys,
 ) -> (MutationBase, MutationBase) {
-    const NAME: &str = "p";
+    const NAME: &str = VALID_FCR_SOURCE_NAME;
     let mut mutation_base = None;
     let chunk = crate::crypto::stream::BUFFER_SIZE;
     let overhead = fca_overhead(NAME);
@@ -1798,7 +1942,7 @@ fn check_manifest_invariants(corpus: &Corpus) {
     // Every case names a declared profile, and every declared profile is
     // named by a case: a limit no case is evaluated under evidences nothing.
     let declared: BTreeSet<&str> = std::iter::once(DEFAULT_LIMIT_PROFILE_ID)
-        .chain(DERIVED_LIMIT_PROFILES.iter().map(|(id, _)| *id))
+        .chain(derived_limit_profiles().into_iter().map(|(id, _)| id))
         .collect();
     let named: BTreeSet<&str> = corpus
         .cases
@@ -2007,9 +2151,9 @@ fn write_prefix_cases(corpus: &mut Corpus, base: &MutationBase) {
     );
     // The local cap sits far below the structural maximum and is checked
     // straight after the prefix, before the declared header is read, so the
-    // declaration alone decides the outcome. This cap has no accepting twin:
-    // the recipient-count, per-body, and extension caps together bound a
-    // header well under it, so no file that satisfies them can reach it.
+    // declaration alone decides the outcome. Its accepting twin sits under
+    // `small-artifact-caps`: under the defaults the recipient-count,
+    // per-body, and extension caps bound every header well under this one.
     mutate_fcr(
         corpus,
         base,
@@ -2361,14 +2505,15 @@ fn write_header_maximum_cases(corpus: &mut Corpus, sources: &Path, keys: &Corpus
         HEADER_LEN_MAX,
         "the header must land exactly on its maximum"
     );
-    fabricated_accept_fcr_case(
-        corpus,
-        "prefix-header-len-at-structural-max",
-        "private-key-a",
-        HEADER_MAXIMA_LIMIT_PROFILE_ID,
-        &source,
-        built,
-    );
+    under_limit_profile(corpus, HEADER_MAXIMA_LIMIT_PROFILE_ID, |corpus| {
+        fabricated_accept_fcr_case(
+            corpus,
+            "prefix-header-len-at-structural-max",
+            "private-key-a",
+            &source,
+            built,
+        );
+    });
 
     // `recipient_count` on its maximum, the entry the key opens last, so a
     // reader that stopped one entry early could not open the file.
@@ -2381,14 +2526,15 @@ fn write_header_maximum_cases(corpus: &mut Corpus, sources: &Path, keys: &Corpus
     assert_eq!(entries.len(), usize::from(RECIPIENT_COUNT_MAX));
     let built = build_fcr_with_entries(&source, &file_key, &entries, b"");
     drop(scope);
-    fabricated_accept_fcr_case(
-        corpus,
-        "header-recipient-count-at-max",
-        "private-key-a",
-        HEADER_MAXIMA_LIMIT_PROFILE_ID,
-        &source,
-        built,
-    );
+    under_limit_profile(corpus, HEADER_MAXIMA_LIMIT_PROFILE_ID, |corpus| {
+        fabricated_accept_fcr_case(
+            corpus,
+            "header-recipient-count-at-max",
+            "private-key-a",
+            &source,
+            built,
+        );
+    });
 
     // `ext_len` on its maximum: one ignorable TLV whose value fills the
     // region. No local cap bounds the region, so the default profile applies.
@@ -2405,7 +2551,6 @@ fn write_header_maximum_cases(corpus: &mut Corpus, sources: &Path, keys: &Corpus
         corpus,
         "header-ext-len-at-structural-max",
         "passphrase-main",
-        DEFAULT_LIMIT_PROFILE_ID,
         &source,
         built,
     );
@@ -4467,14 +4612,13 @@ fn nested_chain(components: &[String], content: &[u8]) -> Vec<FcaEntry> {
 }
 
 /// Commits an accepted `.fcr` case built from caller-supplied recipient
-/// entries, evaluated under `limit_profile_id`. The at-cap and at-maximum
-/// cases are assembled by hand like the over-cap twins they pair with,
-/// rather than produced through the public writer.
+/// entries. The at-cap and at-maximum cases are assembled by hand like the
+/// over-cap twins they pair with, rather than produced through the public
+/// writer.
 fn fabricated_accept_fcr_case(
     corpus: &mut Corpus,
     case_id: &str,
     credential_id: &str,
-    limit_profile_id: &'static str,
     source: &Path,
     built: BuiltFcr,
 ) {
@@ -4497,7 +4641,6 @@ fn fabricated_accept_fcr_case(
             .origin(&origin_id)
             .fabricated()
             .credential(credential_id)
-            .limit_profile(limit_profile_id)
             .accept(&expected_ref),
     );
 }
@@ -5049,10 +5192,10 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         &build_fca(&[FcaEntry::file(&long, b"x")], b""),
         Err(("fca_path_bytes_above_default_cap", "resource_cap_exceeded")),
     );
-    // The byte cap has no accepting twin: at 4096 bytes the path alone
-    // exceeds what a host can address once an output directory is prefixed
-    // (`PATH_MAX` is 1024 on macOS), so no artifact can both sit on the cap
-    // and be extracted.
+    // The byte cap's accepting twin sits under `small-artifact-caps`: at 4096
+    // bytes the path alone exceeds what a host can address once an output
+    // directory is prefixed (`PATH_MAX` is 1024 on macOS), so no artifact can
+    // both sit on the default cap and be extracted.
 
     // FCA extension caps, archive-level and per-entry. The TLV tag and length
     // count towards the region, so the value is the cap less that header.
@@ -5111,8 +5254,9 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     // total plaintext bytes, each declared one past its default in an
     // otherwise valid header. The reader refuses the declaration before it
     // allocates or reads what the field describes, so a small image carries
-    // each case. None has an accepting twin: an artifact on the cap would hold
-    // 250,000 entries, a 64 MiB manifest, or 64 GiB of content.
+    // each case. Their accepting twins sit under `small-artifact-caps`: an
+    // artifact on a default cap would hold 250,000 entries, a 64 MiB manifest,
+    // or 64 GiB of content.
     let header_caps: [ByteMutationCase; 3] = [
         (
             "fca-entry-count-over-default-cap",
@@ -5193,7 +5337,6 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         corpus,
         "header-recipient-count-at-default-cap",
         "private-key-a",
-        DEFAULT_LIMIT_PROFILE_ID,
         &source,
         built,
     );
@@ -5243,10 +5386,329 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         corpus,
         "recipient-body-at-default-cap",
         "private-key-a",
-        DEFAULT_LIMIT_PROFILE_ID,
         &source,
         built,
     );
+}
+
+// ─── Lowered limit profiles ────────────────────────────────────────────────
+
+/// Cases under the profiles that bring a cap within reach the default profile
+/// keeps out of it (`FORMAT.md` §12.3). With them every local cap is evidenced
+/// from both sides: an artifact past it is refused, and one sitting exactly on
+/// it is accepted.
+fn write_lowered_limit_cases(
+    corpus: &mut Corpus,
+    sources: &Path,
+    keys: &CorpusKeys,
+    base: &MutationBase,
+) {
+    write_small_artifact_cap_cases(corpus, keys, base);
+    write_lowered_cap_cases(corpus, sources, keys);
+}
+
+/// Cases under [`SMALL_ARTIFACT_LIMIT_PROFILE_ID`]. The three accepted files
+/// sit exactly on the caps no committed artifact reaches under the default
+/// profile: the header length, the header-MAC work, the entry count, the
+/// manifest length, the plaintext total, the path length, the Argon2id
+/// memory and work, the recipient string, and the wrapped secret. Each
+/// refused file exceeds one cap alone: the Argon2id time-cost and lane caps,
+/// whose defaults equal their structural maxima, on both artifacts that store
+/// Argon2id parameters, and the recipient-string cap.
+fn write_small_artifact_cap_cases(corpus: &mut Corpus, keys: &CorpusKeys, base: &MutationBase) {
+    use crate::key::private::{KDF_PARAMS_OFFSET, WRAPPED_SECRET_LEN_OFFSET};
+    use crate::key::public::{PUBLIC_KEY_VERSION, encode_recipient_string_with_version};
+
+    let caps: BTreeMap<&str, u64> = small_artifact_caps().into_iter().collect();
+    let private_key = fs::read(corpus.root.join(&keys.private_a)).expect("read private key");
+    let plaintext = fs::read(
+        corpus
+            .root
+            .join(format!("expected/plaintext/{}.bin", base.case_id)),
+    )
+    .expect("read the mutation base's plaintext");
+    let recipient = std::str::from_utf8(&keys.public_a)
+        .expect("public.key is UTF-8")
+        .trim_end_matches('\n');
+    let material = decode_public_key_file(&keys.public_a)
+        .to_x25519_bytes()
+        .expect("decode the corpus public key");
+    let body_kdf_params = body_offset(argon2id::TYPE_NAME) + ARGON2_SALT_SIZE;
+    let key_kdf_params = KDF_PARAMS_OFFSET;
+    let kdf = KdfParams::test_fast_default();
+
+    // The profile was sized from these artifacts; each must still sit on it.
+    assert_eq!(
+        u64::from(be_u32_at(&base.bytes, OFF_HEADER_LEN)),
+        caps["max_header_len"]
+    );
+    assert_eq!(plaintext.len() as u64, caps["max_total_plaintext_bytes"]);
+    assert_eq!(recipient.len() as u64, caps["max_recipient_string_chars"]);
+    assert_eq!(
+        u64::from(be_u32_at(&private_key, WRAPPED_SECRET_LEN_OFFSET)),
+        caps["max_private_key_wrapped_secret_len"]
+    );
+    for stored in [
+        &base.bytes[body_kdf_params..body_kdf_params + KDF_PARAMS_SIZE],
+        &private_key[key_kdf_params..key_kdf_params + KDF_PARAMS_SIZE],
+    ] {
+        assert_eq!(
+            stored,
+            kdf.to_bytes(),
+            "the artifacts store the fast parameters"
+        );
+    }
+
+    // Each refused parameter set exceeds one cap and keeps the others: half
+    // the memory at twice the time cost keeps the work on its cap.
+    let over_time = KdfParams {
+        mem_cost: kdf.mem_cost / 2,
+        time_cost: kdf.time_cost * 2,
+        ..kdf
+    };
+    let over_lanes = KdfParams {
+        lanes: kdf.lanes + 1,
+        ..kdf
+    };
+    for params in [over_time, over_lanes] {
+        let exceeded = [
+            u64::from(params.mem_cost) > caps["max_kdf_mem_kib"],
+            u64::from(params.time_cost) > caps["max_kdf_time"],
+            u64::from(params.lanes) > caps["max_kdf_lanes"],
+            u64::from(params.mem_cost) * u64::from(params.time_cost) > caps["max_kdf_work"],
+        ];
+        assert_eq!(exceeded.iter().filter(|over| **over).count(), 1);
+    }
+
+    // The shortest well-formed string past the cap. Its length is not the cap
+    // plus one: each payload byte adds 1.6 characters, so some lengths no
+    // string has.
+    let over_cap_recipient = (0..)
+        .map(|material_len| {
+            encode_recipient_string_with_version(
+                PUBLIC_KEY_VERSION,
+                UNSUPPORTED_KEY_TYPE,
+                &vec![0x5A; material_len],
+            )
+            .expect("encode a recipient string")
+        })
+        .find(|s| s.len() as u64 > caps["max_recipient_string_chars"])
+        .expect("a string exists past the cap");
+
+    under_limit_profile(corpus, SMALL_ARTIFACT_LIMIT_PROFILE_ID, |corpus| {
+        let artifact_ref =
+            corpus.write_ref("artifacts/fcr/fcr-at-small-artifact-caps.fcr", &base.bytes);
+        let expected_ref = corpus.write_ref(
+            "expected/plaintext/fcr-at-small-artifact-caps.bin",
+            &plaintext,
+        );
+        corpus.push_case(
+            CaseRow::fcr("fcr-at-small-artifact-caps", &artifact_ref)
+                .origin(&base.origin_id)
+                .credential("passphrase-main")
+                .accept(&expected_ref),
+        );
+        public_key_case(
+            corpus,
+            "public-key-at-small-artifact-caps",
+            &keys.public_a,
+            Ok(material),
+        );
+        private_key_open_case(
+            corpus,
+            "private-key-open-at-small-artifact-caps",
+            &private_key,
+            "private-key-a",
+            Ok(material),
+        );
+
+        for (case_id, params, condition) in [
+            (
+                "argon2id-kdf-time-over-small-artifact-cap",
+                over_time,
+                "argon2id_time_cost_above_local_cap",
+            ),
+            (
+                "argon2id-kdf-lanes-over-small-artifact-cap",
+                over_lanes,
+                "argon2id_lanes_above_local_cap",
+            ),
+        ] {
+            mutate_fcr(
+                corpus,
+                base,
+                case_id,
+                "passphrase-main",
+                condition,
+                "resource_cap_exceeded",
+                |b| {
+                    b[body_kdf_params..body_kdf_params + KDF_PARAMS_SIZE]
+                        .copy_from_slice(&params.to_bytes())
+                },
+            );
+        }
+        for (case_id, params, condition) in [
+            (
+                "private-key-kdf-time-over-small-artifact-cap",
+                over_time,
+                "private_key_argon2id_time_cost_above_local_cap",
+            ),
+            (
+                "private-key-kdf-lanes-over-small-artifact-cap",
+                over_lanes,
+                "private_key_argon2id_lanes_above_local_cap",
+            ),
+        ] {
+            let mut bytes = private_key.clone();
+            bytes[key_kdf_params..key_kdf_params + KDF_PARAMS_SIZE]
+                .copy_from_slice(&params.to_bytes());
+            private_key_open_case(
+                corpus,
+                case_id,
+                &bytes,
+                "private-key-a",
+                Err((condition, "resource_cap_exceeded")),
+            );
+        }
+
+        // `FORMAT.md` §7 applies the cap before the string is decoded, so the
+        // unsupported type it names is never reached.
+        public_key_case(
+            corpus,
+            "public-key-recipient-string-over-small-artifact-cap",
+            format!("{over_cap_recipient}\n").as_bytes(),
+            Err((
+                "public_key_recipient_string_above_local_cap",
+                "resource_cap_exceeded",
+            )),
+        );
+    });
+}
+
+/// Cases under the three profiles that each lower one cap the default
+/// profile hides: a file past the cap is refused and one sitting exactly on
+/// it is accepted.
+fn write_lowered_cap_cases(corpus: &mut Corpus, sources: &Path, keys: &CorpusKeys) {
+    use crate::crypto::tlv::{ENTRY_HEADER_SIZE, tlv_bytes};
+
+    // The per-value TLV cap in both FCA namespaces. A value past it is
+    // `malformed_tlv`, the class `FORMAT.md` §9.12 gives this cap.
+    under_limit_profile(corpus, LOWERED_TLV_VALUE_LIMIT_PROFILE_ID, |corpus| {
+        let content = b"fca payload";
+        let value = |len: u64| tlv_bytes(0x0001, &vec![0x41; len as usize]);
+        let archive_ext = |len| build_fca(&[FcaEntry::file("p.txt", content)], &value(len));
+        let entry_ext = |len| {
+            build_fca(
+                &[FcaEntry::file("p.txt", content).with_entry_ext(&value(len))],
+                b"",
+            )
+        };
+        let cap = LOWERED_TLV_VALUE_CAP;
+        fca_case(
+            corpus,
+            "fca-archive-ext-tlv-value-over-lowered-cap",
+            &archive_ext(cap + 1),
+            Err(("fca_archive_ext_tlv_value_above_local_cap", "malformed_tlv")),
+        );
+        fca_case(
+            corpus,
+            "fca-archive-ext-tlv-value-at-lowered-cap",
+            &archive_ext(cap),
+            Ok(content.to_vec()),
+        );
+        fca_case(
+            corpus,
+            "fca-entry-ext-tlv-value-over-lowered-cap",
+            &entry_ext(cap + 1),
+            Err(("fca_entry_ext_tlv_value_above_local_cap", "malformed_tlv")),
+        );
+        fca_case(
+            corpus,
+            "fca-entry-ext-tlv-value-at-lowered-cap",
+            &entry_ext(cap),
+            Ok(content.to_vec()),
+        );
+    });
+
+    // The aggregate per-entry extension cap: the regions of a directory root
+    // and its one file, each far inside the per-entry cap, sum to one byte
+    // past it and then exactly to it.
+    under_limit_profile(corpus, LOWERED_TOTAL_ENTRY_EXT_LIMIT_PROFILE_ID, |corpus| {
+        let half = LOWERED_TOTAL_ENTRY_EXT_CAP as usize / 2;
+        let region = |len: usize| tlv_bytes(0x0001, &vec![0x41; len - ENTRY_HEADER_SIZE]);
+        let tree = |file_region: usize| {
+            [
+                FcaEntry::dir("root").with_entry_ext(&region(half)),
+                FcaEntry::file("root/p.txt", b"fca payload").with_entry_ext(&region(file_region)),
+            ]
+        };
+        fca_case(
+            corpus,
+            "fca-total-entry-ext-over-lowered-cap",
+            &build_fca(&tree(half + 1), b""),
+            Err((
+                "fca_total_entry_ext_bytes_above_local_cap",
+                "resource_cap_exceeded",
+            )),
+        );
+        let at_cap = tree(half);
+        fca_case(
+            corpus,
+            "fca-total-entry-ext-at-lowered-cap",
+            &build_fca(&at_cap, b""),
+            Ok(extraction_listing(&at_cap)),
+        );
+    });
+
+    // The header-MAC work cap: an ordinary unknown entry, then an entry each
+    // corpus key opens, so two of the three recipients are supported. A
+    // reader that counted the unknown entry too would refuse the file on the
+    // cap. One more body byte in the unknown entry adds a header byte, and so
+    // two bytes of work.
+    under_limit_profile(corpus, LOWERED_HEADER_MAC_WORK_LIMIT_PROFILE_ID, |corpus| {
+        let cap = lowered_header_mac_work_cap();
+        let body_len = unknown_entry(false).body.len();
+        for (case_id, unknown_body_len) in [
+            ("header-mac-work-at-lowered-cap", body_len),
+            ("header-mac-work-over-lowered-cap", body_len + 1),
+        ] {
+            let scope = case_scope(case_id);
+            let file_key = FileKey::generate().expect("file key");
+            let mut unknown = unknown_entry(false);
+            unknown.body = vec![0xAA; unknown_body_len];
+            let entries = [
+                unknown,
+                x25519_entry(&keys.public_b, &file_key),
+                x25519_entry(&keys.public_a, &file_key),
+            ];
+            if unknown_body_len == body_len {
+                let source = write_source(sources, "p", 32);
+                let built = build_fcr_with_entries(&source, &file_key, &entries, b"");
+                drop(scope);
+                let header_len = u64::from(be_u32_at(&built.bytes, OFF_HEADER_LEN));
+                assert_eq!(
+                    2 * (crate::format::PREFIX_SIZE as u64 + header_len),
+                    cap,
+                    "the accepted file does exactly the capped work"
+                );
+                fabricated_accept_fcr_case(corpus, case_id, "private-key-a", &source, built);
+            } else {
+                crafted_reject_case(
+                    corpus,
+                    sources,
+                    case_id,
+                    &format!("origin-{case_id}"),
+                    "private-key-a",
+                    "header_mac_work_above_local_cap",
+                    "resource_cap_exceeded",
+                    &file_key,
+                    &entries,
+                    b"",
+                );
+                drop(scope);
+            }
+        }
+    });
 }
 
 // ─── Payload STREAM known-answer tests ─────────────────────────────────────

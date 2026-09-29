@@ -102,6 +102,14 @@ origin-header-recipient-count-over-default-cap	fcr_payload	header-recipient-coun
 origin-header-recipient-count-at-default-cap	fcr_payload	header-recipient-count-at-default-cap	-	9026725bd1e3144c931311d2013de7ee7a4cf02597b04febb580312f13cbc86e	fa7e908599ef0cab343009e6374586f80a6bbd	0.3.0	1
 origin-recipient-body-over-default-cap	fcr_payload	recipient-body-over-default-cap	-	51d57578760ab1d1dd2e1042bac9b95b15ead99c1a500474ae0889ede8acae4f	75dd844243d2248ffa0b1140c7d5774a37c837	0.3.0	1
 origin-recipient-body-at-default-cap	fcr_payload	recipient-body-at-default-cap	-	9cacc4009a3561fe023d3e03f8fe52736d0fb02b53f9f280b74b88d1f821652f	4911ba05041317a0afc8c82ae1f9a28751057f	0.3.0	1
+origin-fca-archive-ext-tlv-value-over-lowered-cap	fcr_payload	fca-archive-ext-tlv-value-over-lowered-cap	-	8453bbe22ea83af6b8e9ae2df9fd4e372aa9d92ad56972ac0813841c2ebf1512	d4fcb31635da3e64b42f5664f342c089cf0616	0.3.0	1
+origin-fca-archive-ext-tlv-value-at-lowered-cap	fcr_payload	fca-archive-ext-tlv-value-at-lowered-cap	-	ae8f68eeba0d93941d9ecacf850eeaa260b4170f7754d4237a67911f2ad304f8	0d4758c053a03fe93918e366f06e5fbb4ede4a	0.3.0	1
+origin-fca-entry-ext-tlv-value-over-lowered-cap	fcr_payload	fca-entry-ext-tlv-value-over-lowered-cap	-	7673f0f1252c92f36ec30cb2f0b392d393e339fa509dfdf0f16a34941dd18fd1	1304caac3167c11c693d94b149eb73f1cf1722	0.3.0	1
+origin-fca-entry-ext-tlv-value-at-lowered-cap	fcr_payload	fca-entry-ext-tlv-value-at-lowered-cap	-	4d8a4b224fd33e3b10d0578e196891b3a72db6f6ca2e588c426a92f2e1599c27	01c29d1b3270ec84133a11d2aa883b86467a54	0.3.0	1
+origin-fca-total-entry-ext-over-lowered-cap	fcr_payload	fca-total-entry-ext-over-lowered-cap	-	3850bd477b3d5cb54c43b4dcfa834ccdbabc3f7557e30a4626b8639fa76b297d	e0d2c9b2dc3cbf1c607a13d8de03aae08de689	0.3.0	1
+origin-fca-total-entry-ext-at-lowered-cap	fcr_payload	fca-total-entry-ext-at-lowered-cap	-	e41c944ad4bc5274e728d59843caa4a56634c721f0af62b6fe84884b4713e1e2	b6a54100317f4b5d7b3d9f4d7ff5b1c4e36356	0.3.0	1
+origin-header-mac-work-at-lowered-cap	fcr_payload	header-mac-work-at-lowered-cap	-	eb3e6558fcb7f3427b3ef8783fe458711904a67c5df96277b9b288c319d4a200	ab2a0839a95007d48283762fc01d9543817273	0.3.0	1
+origin-header-mac-work-over-lowered-cap	fcr_payload	header-mac-work-over-lowered-cap	-	944d07a1102362bd436c565732a338a7c179b0ac3129c403cab169fb006e318b	69046c3329524bf238443e432a9f34f4161888	0.3.0	1
 origin-stream-empty	stream_kat	stream-empty	kat/stream/stream-empty.payload-key.bin	e067ecb2fa5c616e3b22f32f8dd5133bdfc1917a6c7a4583a48d72eaa69e9de1	50505050505050505050505050505050505050	0.3.0	1
 origin-stream-one-byte	stream_kat	stream-one-byte	kat/stream/stream-one-byte.payload-key.bin	49c5bc13ba9bda2424de21409098e3f100c6e573b0a12f91f69d92ae19c85d68	51515151515151515151515151515151515151	0.3.0	1
 origin-stream-exact-65536	stream_kat	stream-exact-65536	kat/stream/stream-exact-65536.payload-key.bin	e6b3d7e8da3525c14cbfaf7d4d01e1489083f556c9276cecf1722de9f59cb988	52525252525252525252525252525252525252	0.3.0	1

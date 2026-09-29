@@ -1113,7 +1113,9 @@ Implementations MAY apply a smaller local cap on recipient-string length for
 untrusted input and SHOULD let callers raise it up to the structural ceiling,
 because a future key type with larger key material needs a longer string. Such
 a cap is resource policy, not format incompatibility, and exceeding it SHOULD
-produce a distinct resource-cap error.
+produce a distinct resource-cap error. A reader that applies such a cap MUST
+apply it before decoding the Bech32 data, so a well-formed string over the cap
+reports that error whatever key type it names.
 
 Native X25519 public recipients:
 
@@ -2947,12 +2949,15 @@ reused operationally.
 | FCA content and extraction | Exact file contents, short content, trailing content, unsafe or unsupported entries, and representative extraction rejection classes without unsafe final output |
 | Resource policy | Structural maxima and configurable local caps for headers, recipients, KDFs, key files, manifests, paths, plaintext totals, and extension regions |
 
-A local KDF cap whose default equals the structural maximum cannot be reached
-by a structurally valid artifact, so it requires no case; a cap set below that
-maximum does. `private.key` needs KDF evidence of its own because §8 gives it a
-separate parser and a separate unlock: a case proving the `argon2id` recipient
-body applies §2.2 says nothing about the key file that stores the same
-`kdf_params`.
+Every local cap is evidenced from both sides, each under a limit profile that
+brings it within reach: an artifact past the cap is refused and one sitting
+exactly on it is accepted. A cap the default profile keeps out of reach,
+because its default equals the structural maximum, because another cap
+refuses first, or because an artifact on it would be too large to commit, is
+evidenced under a profile that lowers it. `private.key` needs KDF evidence of
+its own because §8 gives it a separate parser and a separate unlock: a case
+proving the `argon2id` recipient body applies §2.2 says nothing about the key
+file that stores the same `kdf_params`.
 
 The X25519 during-operation all-zero-shared-secret case MUST use this canonical,
 nonzero small-order ephemeral public value:

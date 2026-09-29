@@ -498,7 +498,8 @@ fn hex(bytes: &[u8]) -> String {
 // ─── Diagnostic-class registry ─────────────────────────────────────────────
 
 /// Stable explanatory text for every diagnostic class the corpus uses, taken
-/// from the `FORMAT.md` §12.1 registry. Each entry is written to its own file
+/// from the `FORMAT.md` §12.1 registry as
+/// [`every_class_text_is_its_registry_meaning`] requires. Each entry is written to its own file
 /// under `diagnostic-classes/` and referenced by `diagnostic-classes.tsv`, so
 /// a class meaning is committed bytes with its own digest and can never be
 /// edited once frozen.
@@ -550,7 +551,7 @@ const DIAGNOSTIC_CLASS_TEXT: &[(&str, &str)] = &[
     ),
     (
         "malformed_tlv",
-        "A TLV region violates framing or canonicality rules.",
+        "A TLV region violates framing or canonicality rules, or an FCA TLV value exceeds the configured max_tlv_value_bytes (FORMAT.md section 9.12).",
     ),
     (
         "unknown_critical_tlv",
@@ -598,7 +599,7 @@ const DIAGNOSTIC_CLASS_TEXT: &[(&str, &str)] = &[
     ),
     (
         "resource_cap_exceeded",
-        "Structurally valid data exceeds configured local resource policy.",
+        "Structurally valid data exceeds configured local resource policy, except the FCA per-value TLV cap (FORMAT.md section 9.12).",
     ),
     (
         "payload_authentication_failed",
@@ -649,6 +650,42 @@ const DIAGNOSTIC_CLASS_TEXT: &[(&str, &str)] = &[
         "Private-key authentication failed for the supplied passphrase or modified file.",
     ),
 ];
+
+/// Every class text is the `FORMAT.md` §12.1 meaning of its class, with the
+/// Markdown code marks removed, each `§` spelled out, and a final full stop,
+/// so an edit to the registry cannot leave the corpus describing a class in
+/// other words than the specification does.
+#[test]
+fn every_class_text_is_its_registry_meaning() {
+    let spec = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("FORMAT.md"))
+        .expect("read FORMAT.md");
+    let header = "| Diagnostic class | Meaning | FerroCrypt mapping |";
+    let table = &spec[spec.find(header).expect("the §12.1 registry table")..];
+    let meanings: BTreeMap<&str, &str> = table
+        .lines()
+        .skip(2)
+        .take_while(|line| line.starts_with("| `"))
+        .map(|line| {
+            let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
+            (cells[0].trim_matches('`'), cells[1])
+        })
+        .collect();
+    assert_eq!(
+        meanings.len(),
+        DIAGNOSTIC_CLASS_TEXT.len(),
+        "one text per registry class"
+    );
+    for (class_id, text) in DIAGNOSTIC_CLASS_TEXT {
+        let meaning = meanings
+            .get(class_id)
+            .unwrap_or_else(|| panic!("{class_id} is not in the §12.1 registry"));
+        let expected = format!(
+            "{}.",
+            meaning.replace('`', "").replace('§', "FORMAT.md section ")
+        );
+        assert_eq!(*text, expected, "{class_id}");
+    }
+}
 
 // ─── Manifest emission ─────────────────────────────────────────────────────
 

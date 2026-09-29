@@ -1,1 +1,1 @@
-Structurally valid data exceeds configured local resource policy.
+Structurally valid data exceeds configured local resource policy, except the FCA per-value TLV cap (FORMAT.md section 9.12).

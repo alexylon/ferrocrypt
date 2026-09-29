@@ -1,1 +1,1 @@
-A TLV region violates framing or canonicality rules.
+A TLV region violates framing or canonicality rules, or an FCA TLV value exceeds the configured max_tlv_value_bytes (FORMAT.md section 9.12).

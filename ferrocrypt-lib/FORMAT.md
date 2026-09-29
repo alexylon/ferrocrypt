@@ -2046,7 +2046,10 @@ Readers MUST apply caps before allocation or content copying:
 - `max_manifest_bytes` before allocating the manifest buffer;
 - `max_entry_ext_bytes` before allocating or slicing per-entry extension bytes;
 - `max_total_entry_ext_bytes` while parsing the manifest;
-- `max_tlv_value_bytes` while validating FCA TLV regions;
+- `max_tlv_value_bytes` while validating FCA TLV regions, reporting a longer
+  value as `malformed_tlv` rather than `resource_cap_exceeded` (§12.1),
+  because the §6 scan that reads a value's declared length applies this cap
+  in the same step as the rule that the value fits its region;
 - `max_path_bytes` before allocating or converting an entry path;
 - `max_path_depth` before filesystem traversal;
 - `max_total_plaintext_bytes` before file-content copying.
@@ -2478,7 +2481,7 @@ Every rejected conformance case MUST carry both:
 | `oversized_header` | The declared `.fcr` header exceeds the structural maximum | `InvalidFormat(OversizedHeader)` |
 | `malformed_header` | The `.fcr` prefix or header violates a structural grammar or accounting rule assigned to this class | `InvalidFormat(MalformedHeader)` |
 | `extension_region_too_large` | The declared `.fcr` header extension region exceeds its structural maximum | `InvalidFormat(ExtTooLarge)` |
-| `malformed_tlv` | A TLV region violates framing or canonicality rules | `InvalidFormat(MalformedTlv)` |
+| `malformed_tlv` | A TLV region violates framing or canonicality rules, or an FCA TLV value exceeds the configured `max_tlv_value_bytes` (§9.12) | `InvalidFormat(MalformedTlv)` |
 | `unknown_critical_tlv` | A well-formed critical TLV is unsupported | `InvalidFormat(UnknownCriticalTag)` |
 | `recipient_count_out_of_range` | The recipient count violates structural bounds | `InvalidFormat(RecipientCountOutOfRange)` |
 | `malformed_type_name` | A recipient type name violates §3.3 | `InvalidFormat(MalformedTypeName)` |
@@ -2490,7 +2493,7 @@ Every rejected conformance case MUST carry both:
 | `recipient_unwrap_failed` | No supported recipient accepted the supplied credential | `RecipientUnwrapFailed` |
 | `header_authentication_failed` | A candidate file key failed header-MAC verification | `HeaderTampered` or `HeaderMacFailedAfterUnwrap` |
 | `invalid_kdf_parameters` | Stored KDF parameters violate structural rules | Any `InvalidKdfParams` variant |
-| `resource_cap_exceeded` | Structurally valid data exceeds configured local resource policy | Relevant header, recipient, KDF, key, or archive `*CapExceeded` variant |
+| `resource_cap_exceeded` | Structurally valid data exceeds configured local resource policy, except the FCA per-value TLV cap (§9.12) | Relevant header, recipient, KDF, key, or archive `*CapExceeded` variant |
 | `payload_authentication_failed` | Payload-chunk authentication failed | `PayloadTampered` |
 | `payload_truncated` | The encrypted payload ended before a valid final chunk | `PayloadTruncated` |
 | `malformed_payload_stream` | The payload STREAM transcript violates structural rules | `InvalidFormat(MalformedPayloadStream)` |

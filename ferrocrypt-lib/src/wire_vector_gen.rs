@@ -35,8 +35,9 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use ferrocrypt_test_support::wire_manifest::{
-    corpus_files, field_violation, is_corpus_reference, is_manifest_id, is_structural_corpus_file,
-    read_committed, read_table, read_table_with_columns, sha3_hex, table_columns,
+    DEFAULT_LIMIT_PROFILE_ID, SMALL_ARTIFACT_LIMIT_PROFILE_ID, corpus_files, field_violation,
+    is_corpus_reference, is_manifest_id, is_structural_corpus_file, read_committed, read_table,
+    read_table_with_columns, sha3_hex, table_columns,
 };
 use sha3::{Digest, Sha3_256};
 
@@ -68,10 +69,6 @@ const CORPUS_REVISION: u32 = 1;
 /// and the one every revision-1 case is first required by: each exercises a
 /// rule the `0.3.0` baseline established.
 const BASELINE_ID: &str = "0.3.0";
-
-/// The limit profile named by every revision-1 case whose action applies
-/// local caps: this library's default limits in `0.3.0` (`FORMAT.md` §12.3).
-const DEFAULT_LIMIT_PROFILE_ID: &str = "default-0.3.0";
 
 /// Release that publishes every revision-1 row.
 const INTRODUCED_IN_RELEASE: &str = "0.3.0";
@@ -115,9 +112,9 @@ const WRONG_PASSPHRASE: &str = "wire-corpus-wrong-passphrase";
 const SOURCE_FILE_MODE: u16 = 0o644;
 const SOURCE_DIR_MODE: u16 = 0o755;
 
-/// Name of the file each accepted `.fcr` case of the valid set archives,
+/// Name of the single file every `.fcr` case built from a source archives,
 /// including the one-byte file inside the mutation base.
-const VALID_FCR_SOURCE_NAME: &str = "p";
+const SOURCE_FILE_NAME: &str = "p";
 
 /// Grammar-valid recipient type name this build does not implement. Plugin
 /// namespaced per `FORMAT.md` §3.3.1, so a future native type cannot claim it.
@@ -358,12 +355,6 @@ fn default_limit_profile_row() -> Vec<String> {
 /// keeps its [`DEFAULT_LIMIT_PROFILE_ID`] value.
 const HEADER_MAXIMA_LIMIT_PROFILE_ID: &str = "header-structural-maxima";
 
-/// The limit profile that sets every cap to exactly what the one-byte
-/// passphrase `.fcr` the mutation cases start from and the corpus key pair
-/// need, so each of them sits on every cap it meets. It carries the accepting
-/// side of every cap whose default no corpus artifact sits on.
-const SMALL_ARTIFACT_LIMIT_PROFILE_ID: &str = "small-artifact-caps";
-
 /// The limit profile that lowers `max_tlv_value_bytes`, which the default
 /// profile keeps out of reach: its default exceeds both extension-region
 /// caps, so no region the reader admits can hold a value past it.
@@ -429,7 +420,7 @@ fn derived_limit_profiles() -> Vec<(&'static str, Vec<(&'static str, u64)>)> {
 
 /// Every cap of [`SMALL_ARTIFACT_LIMIT_PROFILE_ID`]: exactly what the mutation
 /// base needs, one `argon2id` entry sealed with the fast test parameters over
-/// the one-byte file [`VALID_FCR_SOURCE_NAME`], and exactly what the corpus
+/// the one-byte file [`SOURCE_FILE_NAME`], and exactly what the corpus
 /// key pair needs. The extension caps are zero, because neither artifact
 /// has an extension region.
 fn small_artifact_caps() -> Vec<(&'static str, u64)> {
@@ -440,7 +431,7 @@ fn small_artifact_caps() -> Vec<(&'static str, u64)> {
         (HEADER_FIXED_SIZE + ENTRY_HEADER_SIZE + argon2id::TYPE_NAME.len() + argon2id::BODY_LENGTH)
             as u64;
     let kdf = KdfParams::test_fast_default();
-    let fca = build_fca(&[FcaEntry::file(VALID_FCR_SOURCE_NAME, &[0])], b"");
+    let fca = build_fca(&[FcaEntry::file(SOURCE_FILE_NAME, &[0])], b"");
     let recipient = crate::key::public::encode_recipient_string_unchecked(
         x25519::TYPE_NAME,
         &[9; x25519::PUBLIC_KEY_SIZE],
@@ -466,7 +457,7 @@ fn small_artifact_caps() -> Vec<(&'static str, u64)> {
         ("max_entry_count", 1),
         ("max_total_plaintext_bytes", 1),
         ("max_path_depth", 1),
-        ("max_path_bytes", VALID_FCR_SOURCE_NAME.len() as u64),
+        ("max_path_bytes", SOURCE_FILE_NAME.len() as u64),
         (
             "max_manifest_bytes",
             u64::from(be_u32_at(&fca, FCA_OFF_MANIFEST_LEN)),
@@ -1240,10 +1231,9 @@ fn write_valid_fcr_cases(
     sources: &Path,
     keys: &CorpusKeys,
 ) -> (MutationBase, MutationBase) {
-    const NAME: &str = VALID_FCR_SOURCE_NAME;
     let mut mutation_base = None;
     let chunk = crate::crypto::stream::BUFFER_SIZE;
-    let overhead = fca_overhead(NAME);
+    let overhead = fca_overhead(SOURCE_FILE_NAME);
 
     // Payload sizes required by FORMAT.md §12.3: an empty source, a one-byte
     // source, a payload STREAM of exactly one chunk, one byte past a chunk,
@@ -1258,7 +1248,7 @@ fn write_valid_fcr_cases(
 
     for (label, len) in sizes {
         let _scope = case_scope(&format!("fcr-argon2id-{label}"));
-        let source = write_source(sources, NAME, len);
+        let source = write_source(sources, SOURCE_FILE_NAME, len);
         let file_key = FileKey::generate().expect("file key");
         let entries = [argon2id_entry(&file_key)];
         let built = build_fcr(&source, &file_key, &entries, b"").expect("build argon2id fcr");
@@ -1283,7 +1273,7 @@ fn write_valid_fcr_cases(
 
     // Native X25519, single recipient.
     let scope = case_scope("fcr-x25519-single");
-    let source = write_source(sources, NAME, 4096);
+    let source = write_source(sources, SOURCE_FILE_NAME, 4096);
     let file_key = FileKey::generate().expect("file key");
     let entries = [x25519_entry(&keys.public_a, &file_key)];
     let built = build_fcr(&source, &file_key, &entries, b"").expect("build x25519 fcr");
@@ -2088,7 +2078,7 @@ fn a_padded_recipient_region_keeps_its_header_authentic() {
     use crate::format::{HEADER_MAC_SIZE, PREFIX_SIZE};
 
     let sources = tempfile::tempdir().expect("source dir");
-    let source = write_source(sources.path(), "p", 64);
+    let source = write_source(sources.path(), SOURCE_FILE_NAME, 64);
     let file_key = FileKey::generate().expect("file key");
     let built = build_fcr_with_entries(&source, &file_key, &[argon2id_entry(&file_key)], b"");
     let padded = with_recipient_region_padding(&built.bytes, &file_key, 1);
@@ -2513,7 +2503,7 @@ fn write_header_check_order_cases(corpus: &mut Corpus, base: &MutationBase) {
 fn write_header_maximum_cases(corpus: &mut Corpus, sources: &Path, keys: &CorpusKeys) {
     use crate::format::{EXT_LEN_MAX, HEADER_FIXED_SIZE, HEADER_LEN_MAX, RECIPIENT_COUNT_MAX};
 
-    let source = write_source(sources, "p", 32);
+    let source = write_source(sources, SOURCE_FILE_NAME, 32);
 
     // `header_len` on its maximum: an unknown non-critical entry whose body
     // fills the header around the entry the corpus key opens.
@@ -2600,7 +2590,7 @@ fn crafted_reject_case(
     entries: &[RecipientEntry],
     ext_bytes: &[u8],
 ) {
-    let source = write_source(sources, "p", 64);
+    let source = write_source(sources, SOURCE_FILE_NAME, 64);
     let built = build_fcr_with_entries(&source, file_key, entries, ext_bytes);
     let artifact_ref = corpus.write_ref(&format!("artifacts/fcr/{case_id}.fcr"), &built.bytes);
     corpus.push_origin(OriginRow {
@@ -2678,7 +2668,7 @@ fn write_recipient_framing_cases(
     // after `recipient_count` entries would decrypt this file rather than
     // refuse it.
     let scope = case_scope("entry-region-trailing-bytes");
-    let source = write_source(sources, "p", 64);
+    let source = write_source(sources, SOURCE_FILE_NAME, 64);
     let file_key = FileKey::generate().expect("file key");
     let built = build_fcr_with_entries(&source, &file_key, &[argon2id_entry(&file_key)], b"");
     let padded = with_recipient_region_padding(&built.bytes, &file_key, 1);
@@ -2741,7 +2731,7 @@ fn write_recipient_framing_cases(
     // of that type stops rejecting it.
     drop(scope);
     let scope = case_scope("recipient-unknown-critical");
-    let source = write_source(sources, "p", 64);
+    let source = write_source(sources, SOURCE_FILE_NAME, 64);
     let file_key = FileKey::generate().expect("file key");
     let entries = [unknown_entry(true), x25519_entry(&keys.public_a, &file_key)];
     let built = build_fcr_with_entries(&source, &file_key, &entries, b"");
@@ -3076,7 +3066,7 @@ fn write_argon2id_cases(corpus: &mut Corpus, sources: &Path, base: &MutationBase
         ),
     ] {
         let _scope = case_scope(case_id);
-        let source = write_source(sources, "p", 64);
+        let source = write_source(sources, SOURCE_FILE_NAME, 64);
         let file_key = FileKey::generate().expect("file key");
         let entry = argon2id_entry_with_kdf_params(&file_key, &params);
         let built = build_fcr_with_entries(&source, &file_key, std::slice::from_ref(&entry), b"");
@@ -3262,7 +3252,7 @@ fn write_tlv_cases(corpus: &mut Corpus, sources: &Path) {
     // An unknown ignorable tag is authenticated, skipped, and the file still
     // decrypts (`FORMAT.md` §6 rule 6).
     let scope = case_scope("tlv-unknown-ignorable");
-    let source = write_source(sources, "p", 64);
+    let source = write_source(sources, SOURCE_FILE_NAME, 64);
     let file_key = FileKey::generate().expect("file key");
     let entries = [argon2id_entry(&file_key)];
     let ext = tlv_bytes(0x0001, b"ignorable");
@@ -3353,7 +3343,7 @@ fn write_tlv_cases(corpus: &mut Corpus, sources: &Path) {
     // on an entry header. A reader that required at least one value byte, or
     // that demanded more than a bare header remain, would refuse this.
     let scope = case_scope("tlv-empty-value");
-    let source = write_source(sources, "p", 64);
+    let source = write_source(sources, SOURCE_FILE_NAME, 64);
     let file_key = FileKey::generate().expect("file key");
     let entries = [argon2id_entry(&file_key)];
     let built = build_fcr_with_entries(&source, &file_key, &entries, &tlv_bytes(0x0001, b""));
@@ -3370,7 +3360,7 @@ fn write_tlv_cases(corpus: &mut Corpus, sources: &Path) {
     // An unknown critical tag is capability-relative: implementing the tag
     // stops the rejection (`FORMAT.md` §12.2).
     let scope = case_scope("tlv-unknown-critical");
-    let source = write_source(sources, "p", 64);
+    let source = write_source(sources, SOURCE_FILE_NAME, 64);
     let file_key = FileKey::generate().expect("file key");
     let entries = [argon2id_entry(&file_key)];
     let built = build_fcr_with_entries(&source, &file_key, &entries, &tlv_bytes(0x8001, b"x"));
@@ -3451,7 +3441,11 @@ fn encode_payload(
 fn write_payload_stream_cases(corpus: &mut Corpus, sources: &Path) {
     // A two-chunk plaintext, so a chunk-boundary cut leaves a complete frame.
     let scope = case_scope("payload-two-chunk-valid");
-    let source = write_source(sources, "p", crate::crypto::stream::BUFFER_SIZE * 2);
+    let source = write_source(
+        sources,
+        SOURCE_FILE_NAME,
+        crate::crypto::stream::BUFFER_SIZE * 2,
+    );
     let file_key = FileKey::generate().expect("file key");
     let entries = [argon2id_entry(&file_key)];
 
@@ -3549,8 +3543,8 @@ fn write_payload_stream_cases(corpus: &mut Corpus, sources: &Path) {
     // case uses a source sized to make the FCA payload exactly one chunk.
     let exact_source = write_source(
         sources,
-        "p",
-        crate::crypto::stream::BUFFER_SIZE - fca_overhead("p"),
+        SOURCE_FILE_NAME,
+        crate::crypto::stream::BUFFER_SIZE - fca_overhead(SOURCE_FILE_NAME),
     );
     drop(scope);
     let scope = case_scope("payload-empty-final-after-data");
@@ -5149,7 +5143,7 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     // the accepted artifact, and one that placed it one unit high admits the
     // refused one.
     let staging = tempfile::tempdir().expect("source dir");
-    let source = write_source(staging.path(), "p", 32);
+    let source = write_source(staging.path(), SOURCE_FILE_NAME, 32);
 
     // FCA path caps: depth and total byte length. Components stay inside the
     // §9.6 per-component limit so only the whole-path cap can reject.
@@ -5409,8 +5403,9 @@ fn write_lowered_limit_cases(
     write_lowered_cap_cases(corpus, sources, keys);
 }
 
-/// Cases under [`SMALL_ARTIFACT_LIMIT_PROFILE_ID`]. The three accepted files
-/// sit exactly on every cap of the profile. For the header length, the
+/// Cases under [`SMALL_ARTIFACT_LIMIT_PROFILE_ID`]. Each of the three
+/// accepted files sits exactly on every cap it meets, and between them they
+/// meet every cap of the profile above zero. For the header length, the
 /// header-MAC work, the entry count, the manifest length, the plaintext
 /// total, the path length, every Argon2id cap, the recipient string, and the
 /// wrapped secret, no corpus artifact sits on the default, so these files
@@ -5690,7 +5685,7 @@ fn write_lowered_cap_cases(corpus: &mut Corpus, sources: &Path, keys: &CorpusKey
         let padding = usize::try_from(cap - unpadded).expect("the padding is small");
         padded.body.resize(padded.body.len() + padding, 0xAA);
         let entries = [padded, opener];
-        let source = write_source(sources, "p", 32);
+        let source = write_source(sources, SOURCE_FILE_NAME, 32);
         let built = build_fcr_with_entries(&source, &file_key, &entries, b"");
         drop(scope);
         assert_eq!(

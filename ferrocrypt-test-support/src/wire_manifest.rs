@@ -1,6 +1,7 @@
 //! The manifest grammar of the frozen `testvectors/wire/` conformance corpus
 //! (`FORMAT.md` §12.3): the seven tables and their columns, the field rules,
-//! the strict table reader, and the digest check behind every reference.
+//! the strict table reader, the digest check behind every reference, and the
+//! IDs of the limit profiles that both the generator and the replay name.
 //!
 //! The corpus generator and the crate-internal replays in the library crate,
 //! and the public-API replay in `ferrocrypt-lib/tests/wire_corpus.rs`, all go
@@ -19,6 +20,17 @@ use sha3::{Digest, Sha3_256};
 
 /// One manifest row, keyed by column name.
 pub type Row = BTreeMap<String, String>;
+
+/// The limit profile holding FerroCrypt's `0.3.0` default caps. A case names
+/// it unless it needs a cap those defaults keep out of reach (`FORMAT.md`
+/// §12.3).
+pub const DEFAULT_LIMIT_PROFILE_ID: &str = "default-0.3.0";
+
+/// The limit profile that sets every cap to exactly what the one-byte
+/// passphrase `.fcr` the mutation cases start from and the corpus key pair
+/// need. Each of them sits exactly on every cap it meets, and between them
+/// they meet every cap of the profile above zero.
+pub const SMALL_ARTIFACT_LIMIT_PROFILE_ID: &str = "small-artifact-caps";
 
 /// The seven manifest tables of `FORMAT.md` §12.3 and the exact columns each
 /// declares, in order.

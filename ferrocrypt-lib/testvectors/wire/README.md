@@ -163,8 +163,9 @@ Each half asserts it covered its share of `cases.tsv` — the first that it
 replayed every row it did not defer, the second that it replayed every row the
 first deferred — so a case that stops being exercised fails the suite instead
 of passing unnoticed. Both print the counts they covered. The first also
-checks that each cap a limit profile lowers is exactly what one of that
-profile's accepted cases needs: lowered by one more, it must refuse that case.
+checks that each cap a limit profile lowers above zero is exactly what one of
+that profile's accepted cases needs: lowered by one more, it must refuse that
+case with the class a reader reports for that cap.
 
 This split is an artifact of FerroCrypt's own module boundaries. An outside
 implementation has no such constraint: `origins.tsv` names the payload key file

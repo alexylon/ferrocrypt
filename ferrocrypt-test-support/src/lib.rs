@@ -21,15 +21,14 @@
 //! ## Design context
 //!
 //! Earlier revisions of ferrocrypt exposed a public Cargo feature named
-//! `fast-kdf` that mutated `KdfParams::default()` to test-speed values.
-//! That mechanism unified across the dependency graph and was a documented
-//! misuse surface (production debug builds could silently emit `.fcr` files
-//! with weak KDF parameters). The audit findings F-01 and F-05 were
-//! resolved by removing the feature entirely and replacing it with this
-//! workspace-internal crate plus explicit `kdf_params(...)` builder
-//! methods on `Encryptor` and `KeyPairGenerator`. Those builders later
-//! gained a production memory floor; this crate's fast parameters sit at
-//! that floor, so they pass through the ordinary `kdf_params(...)` path.
+//! `fast-kdf` that set `KdfParams::default()` to test-speed values. Cargo
+//! unifies features across the dependency graph, so a production debug
+//! build could silently emit `.fcr` files with weak KDF parameters. The
+//! feature was removed and replaced by this workspace-internal crate plus
+//! explicit `kdf_params(...)` builder methods on `Encryptor` and
+//! `KeyPairGenerator`. Those builders later gained a production memory
+//! floor; this crate's fast parameters sit at that floor, so they pass
+//! through the ordinary `kdf_params(...)` path.
 
 #![forbid(unsafe_code)]
 

@@ -185,8 +185,9 @@ impl ArchiveLimits {
     }
 
     /// Sets the maximum byte length of one TLV value inside an FCA
-    /// archive- or entry-level region. A longer value rejects the region
-    /// with [`FormatDefect::MalformedTlv`](crate::FormatDefect::MalformedTlv)
+    /// archive- or entry-level region. A region holding a longer value
+    /// rejects with [`CryptoError::InvalidFormat`] carrying
+    /// [`FormatDefect::MalformedTlv`](crate::FormatDefect::MalformedTlv)
     /// while it is validated, not with an `Archive*CapExceeded` error
     /// (`FORMAT.md` §9.12).
     pub fn max_tlv_value_bytes(mut self, value: u32) -> Self {

@@ -209,8 +209,8 @@ pub const DIGEST_PAIRS: &[(&str, &[(&str, &str)])] = &[
 ];
 
 /// The structural maximum of every profiled quantity the format bounds
-/// (`FORMAT.md` §2.2, §3.2, §7, §8, §9.12). A limit profile may not set a cap
-/// above it, because a reader cannot apply a larger value.
+/// (`FORMAT.md` §2.2, §3.1 to §3.3, §7, §8, §9.12). A limit profile may not
+/// set a cap above it, because a reader cannot apply a larger value.
 pub const LIMIT_STRUCTURAL_MAXIMA: &[(&str, u64)] = &[
     (
         "max_header_len",
@@ -470,10 +470,11 @@ pub fn read_committed(root: &Path, row: &Row, ref_column: &str, digest_column: &
     bytes
 }
 
-/// Whether a corpus-relative path carries the corpus rather than being carried
-/// by it, so no manifest row names it. A rule rather than a list of names:
-/// `tools/` is matched by prefix, so adding a tool needs no edit here nor in
-/// the Python checker, which applies the same rule.
+/// Whether a corpus-relative path belongs to the corpus's own structure,
+/// which no manifest row names: a manifest table, the two version files, the
+/// README, or anything under `tools/`. Matching `tools/` by prefix means
+/// adding a tool needs no edit here nor in the Python checker, which applies
+/// the same rule.
 pub fn is_structural_corpus_file(relative: &str) -> bool {
     MANIFEST_TABLES.iter().any(|(table, _)| *table == relative)
         || matches!(relative, "SCHEMA-VERSION" | "CORPUS-REVISION" | "README.md")

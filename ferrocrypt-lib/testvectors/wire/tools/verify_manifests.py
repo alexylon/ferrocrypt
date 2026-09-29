@@ -438,13 +438,13 @@ CONTROL_FILES = {"SCHEMA-VERSION", "CORPUS-REVISION", "README.md"}
 
 
 def is_structural_file(relative):
-    """Whether a corpus-relative path carries the corpus rather than being
-    carried by it, so no row names it. A rule rather than a list of names:
-    "tools/" is matched by prefix, so adding a tool needs no edit here nor in
-    the Rust implementation of the same rule, which the generator and the
-    replay share. Everything else must be
-    reachable from a manifest, or nothing commits a digest for it and a change
-    would go unnoticed."""
+    """Whether a corpus-relative path belongs to the corpus's own structure,
+    which no row names: a manifest table, the two version files, the README,
+    or anything under "tools/". Matching "tools/" by prefix means adding a
+    tool needs no edit here nor in the Rust implementation of the same rule,
+    which the generator and the replay share. Every other file must be
+    reachable from a manifest, or nothing commits a digest for it and a
+    change would go unnoticed."""
     return (
         relative in TABLES
         or relative in CONTROL_FILES

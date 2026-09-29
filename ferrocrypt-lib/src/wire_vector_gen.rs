@@ -115,16 +115,17 @@ const WRONG_PASSPHRASE: &str = "wire-corpus-wrong-passphrase";
 const SOURCE_FILE_MODE: u16 = 0o644;
 const SOURCE_DIR_MODE: u16 = 0o755;
 
-/// Name of the file every accepted `.fcr` case of the valid set archives, so
-/// also of the one-byte file inside the mutation base.
+/// Name of the file each accepted `.fcr` case of the valid set archives,
+/// including the one-byte file inside the mutation base.
 const VALID_FCR_SOURCE_NAME: &str = "p";
 
 /// Grammar-valid recipient type name this build does not implement. Plugin
 /// namespaced per `FORMAT.md` §3.3.1, so a future native type cannot claim it.
 const UNKNOWN_RECIPIENT_TYPE: &str = "test/unknown";
 
-/// Grammar-valid key type name this build does not implement, in the same
-/// plugin namespace, carried by the key files of a type no reader here opens.
+/// Grammar-valid key type name this build does not implement, plugin
+/// namespaced like [`UNKNOWN_RECIPIENT_TYPE`]. The corpus gives it to key
+/// files that no reader here can open.
 const UNSUPPORTED_KEY_TYPE: &str = "test/future-kem";
 
 // ─── Manifest rows ─────────────────────────────────────────────────────────
@@ -359,25 +360,24 @@ const HEADER_MAXIMA_LIMIT_PROFILE_ID: &str = "header-structural-maxima";
 
 /// The limit profile that sets every cap to exactly what the one-byte
 /// passphrase `.fcr` the mutation cases start from and the corpus key pair
-/// need, so each of them sits on every cap it meets at once. It evidences
-/// the accepting side of the caps no artifact the corpus can commit sits on
-/// under the default profile.
+/// need, so each of them sits on every cap it meets. It carries the accepting
+/// side of every cap whose default no corpus artifact sits on.
 const SMALL_ARTIFACT_LIMIT_PROFILE_ID: &str = "small-artifact-caps";
 
 /// The limit profile that lowers `max_tlv_value_bytes`, which the default
-/// profile hides: its default exceeds both extension-region caps, so no
-/// region the reader admits can hold a value past it.
+/// profile keeps out of reach: its default exceeds both extension-region
+/// caps, so no region the reader admits can hold a value past it.
 const LOWERED_TLV_VALUE_LIMIT_PROFILE_ID: &str = "lowered-tlv-value-cap";
 
 /// The limit profile that lowers `max_total_entry_ext_bytes`, which the
-/// default profile hides: its default equals the manifest cap, and every
-/// per-entry region lies inside the manifest.
+/// default profile keeps out of reach: its default equals the manifest cap,
+/// and every per-entry region lies inside the manifest.
 const LOWERED_TOTAL_ENTRY_EXT_LIMIT_PROFILE_ID: &str = "lowered-total-entry-ext-cap";
 
 /// The limit profile that lowers `max_header_mac_work_bytes`, which the
-/// default profile hides: its default is the most work a header within the
-/// recipient-count and header-length caps can demand, so no such header
-/// exceeds it.
+/// default profile keeps out of reach: its default is the most work a header
+/// within the recipient-count and header-length caps can demand, so no such
+/// header exceeds it.
 const LOWERED_HEADER_MAC_WORK_LIMIT_PROFILE_ID: &str = "lowered-header-mac-work-cap";
 
 /// `max_tlv_value_bytes` under [`LOWERED_TLV_VALUE_LIMIT_PROFILE_ID`]: a region
@@ -385,8 +385,8 @@ const LOWERED_HEADER_MAC_WORK_LIMIT_PROFILE_ID: &str = "lowered-header-mac-work-
 const LOWERED_TLV_VALUE_CAP: u64 = 16;
 
 /// `max_total_entry_ext_bytes` under
-/// [`LOWERED_TOTAL_ENTRY_EXT_LIMIT_PROFILE_ID`]: two regions of half of it
-/// each sit exactly on it.
+/// [`LOWERED_TOTAL_ENTRY_EXT_LIMIT_PROFILE_ID`]: two per-entry regions of
+/// half of it each add up to exactly this cap.
 const LOWERED_TOTAL_ENTRY_EXT_CAP: u64 = 64;
 
 /// Every limit profile other than [`DEFAULT_LIMIT_PROFILE_ID`], as the caps
@@ -2166,9 +2166,10 @@ fn write_prefix_cases(corpus: &mut Corpus, base: &MutationBase) {
     );
     // The local cap sits far below the structural maximum and is checked
     // straight after the prefix, before the declared header is read, so the
-    // declaration alone decides the outcome. Its accepting twin sits under
-    // `small-artifact-caps`: under the defaults the recipient-count,
-    // per-body, and extension caps bound every header well under this one.
+    // declaration alone decides the outcome. The accepted case on this cap
+    // is under `small-artifact-caps`, because under the defaults the
+    // recipient-count, per-body, and extension caps keep every header well
+    // below it.
     mutate_fcr(
         corpus,
         base,
@@ -3635,8 +3636,8 @@ fn write_public_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         Ok(material),
     );
 
-    // The typed payload behind the canonical string. Three cases below
-    // re-encode it, so each string is well formed apart from the one rule its
+    // The typed payload behind the canonical string. The cases below that
+    // re-encode it keep each string well formed apart from the one rule its
     // case names.
     let payload = recipient_payload_for_tests(
         crate::format::WRITER_KEYPAIR_SUITE.public_key_version(),
@@ -3686,7 +3687,7 @@ fn write_public_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
             "malformed_public_key",
         ),
         // §7 names mixed case apart from uppercase: a reader can refuse a
-        // string that is entirely upper case and still accept one that mixes
+        // string that is entirely uppercase and still accept one that mixes
         // the two.
         (
             "public-key-mixed-case",
@@ -4610,8 +4611,8 @@ fn nested_chain(components: &[String], content: &[u8]) -> Vec<FcaEntry> {
 }
 
 /// Commits an accepted `.fcr` case built from caller-supplied recipient
-/// entries. The at-cap and at-maximum cases are assembled by hand like the
-/// over-cap twins they pair with, rather than produced through the public
+/// entries. The at-cap and at-maximum cases are assembled by hand, like the
+/// over-cap cases they pair with, rather than produced through the public
 /// writer.
 fn fabricated_accept_fcr_case(
     corpus: &mut Corpus,
@@ -5187,10 +5188,10 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         &build_fca(&[FcaEntry::file(&long, b"x")], b""),
         Err(("fca_path_bytes_above_default_cap", "resource_cap_exceeded")),
     );
-    // The byte cap's accepting twin sits under `small-artifact-caps`: at 4096
-    // bytes the path alone exceeds what a host can address once an output
-    // directory is prefixed (`PATH_MAX` is 1024 on macOS), so no artifact can
-    // both sit on the default cap and be extracted.
+    // The accepted case on the byte cap is under `small-artifact-caps`: at
+    // 4096 bytes the path alone exceeds what a host can address once an
+    // output directory is prefixed (`PATH_MAX` is 1024 on macOS), so no
+    // artifact can both sit on the default cap and be extracted.
 
     // FCA extension caps, archive-level and per-entry. The TLV tag and length
     // count towards the region, so the value is the cap less that header.
@@ -5249,9 +5250,9 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     // total plaintext bytes, each declared one past its default in an
     // otherwise valid header. The reader refuses the declaration before it
     // allocates or reads what the field describes, so a small image carries
-    // each case. Their accepting twins sit under `small-artifact-caps`: an
-    // artifact on a default cap would hold 250,000 entries, a 64 MiB manifest,
-    // or 64 GiB of content.
+    // each case. The accepted cases on these caps are under
+    // `small-artifact-caps`: an artifact on a default cap would hold 250,000
+    // entries, a 64 MiB manifest, or 64 GiB of content.
     let header_caps: [ByteMutationCase; 3] = [
         (
             "fca-entry-count-over-default-cap",
@@ -5409,13 +5410,14 @@ fn write_lowered_limit_cases(
 }
 
 /// Cases under [`SMALL_ARTIFACT_LIMIT_PROFILE_ID`]. The three accepted files
-/// sit exactly on the caps no committed artifact reaches under the default
-/// profile: the header length, the header-MAC work, the entry count, the
-/// manifest length, the plaintext total, the path length, the Argon2id
-/// memory and work, the recipient string, and the wrapped secret. Each
-/// refused file exceeds one cap alone, by one unit: the Argon2id time-cost and
-/// lane caps, whose defaults equal their structural maxima, on both artifacts
-/// that store Argon2id parameters, and the recipient-string cap.
+/// sit exactly on every cap of the profile. For the header length, the
+/// header-MAC work, the entry count, the manifest length, the plaintext
+/// total, the path length, every Argon2id cap, the recipient string, and the
+/// wrapped secret, no corpus artifact sits on the default, so these files
+/// carry the accepting side. Each refused file exceeds one cap alone, by one
+/// unit: the Argon2id time-cost and lane caps, whose defaults equal their
+/// structural maxima, on both artifacts that store Argon2id parameters, and
+/// the recipient-string cap.
 fn write_small_artifact_cap_cases(corpus: &mut Corpus, keys: &CorpusKeys, base: &MutationBase) {
     use crate::key::private::{KDF_PARAMS_OFFSET, WRAPPED_SECRET_LEN_OFFSET};
     use crate::key::public::{
@@ -5595,8 +5597,8 @@ fn write_small_artifact_cap_cases(corpus: &mut Corpus, keys: &CorpusKeys, base: 
 }
 
 /// Cases under the three profiles that each lower one cap the default
-/// profile hides: a file one unit past the cap is refused and one sitting
-/// exactly on it is accepted.
+/// profile keeps out of reach: a file one unit past the cap is refused and
+/// one sitting exactly on it is accepted.
 fn write_lowered_cap_cases(corpus: &mut Corpus, sources: &Path, keys: &CorpusKeys) {
     use crate::crypto::tlv::{ENTRY_HEADER_SIZE, tlv_bytes};
 

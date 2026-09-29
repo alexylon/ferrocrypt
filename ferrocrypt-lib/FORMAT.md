@@ -407,12 +407,13 @@ The fourth cap bounds aggregate header-MAC input, because §3.6 has every
 candidate recipient authenticate the whole `prefix || header`: a file's
 verification cost is the product of its recipient count and its header size, not
 the sum, so the first three caps bound each factor without bounding the work.
-Its recommended value is the product of the first two, and it therefore rejects
-nothing they accept on their own. Readers SHOULD evaluate it after §3.7 step 9
-and before step 10, so a file over the cap is refused before any private key is
-unlocked and before any recipient KDF or header MAC runs. Writers SHOULD apply
-it to the entry list they are about to seal, counting every supported entry,
-since a reader cannot know which entries will unwrap until after that work.
+Its recommended value, `64 * (12 + 1,048,576)`, is the most work a file within
+the first two caps can demand, so it rejects nothing they accept on their own.
+Readers SHOULD evaluate it after §3.7 step 9 and before step 10, so a file
+over the cap is refused before any private key is unlocked and before any
+recipient KDF or header MAC runs. Writers SHOULD apply it to the entry list
+they are about to seal, counting every supported entry, since a reader cannot
+know which entries will unwrap until after that work.
 
 Recipient type specifications MAY define smaller structural body limits than the
 global `body_len` limit. Implementations SHOULD apply recipient-specific local

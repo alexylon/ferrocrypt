@@ -375,8 +375,9 @@ const LOWERED_TLV_VALUE_LIMIT_PROFILE_ID: &str = "lowered-tlv-value-cap";
 const LOWERED_TOTAL_ENTRY_EXT_LIMIT_PROFILE_ID: &str = "lowered-total-entry-ext-cap";
 
 /// The limit profile that lowers `max_header_mac_work_bytes`, which the
-/// default profile hides: its default is the product of the recipient-count
-/// and header-length caps, so no header within both can exceed it.
+/// default profile hides: its default is the most work a header within the
+/// recipient-count and header-length caps can demand, so no such header
+/// exceeds it.
 const LOWERED_HEADER_MAC_WORK_LIMIT_PROFILE_ID: &str = "lowered-header-mac-work-cap";
 
 /// `max_tlv_value_bytes` under [`LOWERED_TLV_VALUE_LIMIT_PROFILE_ID`]: a region
@@ -389,8 +390,8 @@ const LOWERED_TLV_VALUE_CAP: u64 = 16;
 const LOWERED_TOTAL_ENTRY_EXT_CAP: u64 = 64;
 
 /// Every limit profile other than [`DEFAULT_LIMIT_PROFILE_ID`], as the caps
-/// it sets differently from that profile. Each changes only what its cases
-/// need (`FORMAT.md` §12.3).
+/// it sets differently from that profile. Each changes only the caps its
+/// cases need, which for [`SMALL_ARTIFACT_LIMIT_PROFILE_ID`] is every one.
 fn derived_limit_profiles() -> Vec<(&'static str, Vec<(&'static str, u64)>)> {
     vec![
         (

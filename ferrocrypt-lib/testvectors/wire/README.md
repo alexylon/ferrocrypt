@@ -187,14 +187,14 @@ cut that leaves any byte behind leaves a frame that fails authentication, and a
 reader cannot tell that from a tampered tail. `payload-region-empty` and
 `payload-cut-at-chunk-boundary` pin both sides of that boundary.
 
-## Known gaps in revision 1
+## Coverage of revision 1
 
-One item §12.3 asks for is not fully present, and it is not an oversight:
-
-- **Chunk-count-boundary evidence.** A genuine 2^32-chunk artifact is about
-  256 TiB, and the known-answer schema cannot stand in for it: `origins.tsv` has
-  no field for a starting counter, so no row can say "this transcript begins at
-  counter 2^32 - 1". Expressing this needs a schema change.
+Every item the §12.3 minimum-evidence table names is present. The table itself
+excludes the payload chunk-count ceiling: a genuine 2^32-chunk artifact is
+about 256 TiB, and the known-answer schema cannot stand in for it, because
+`origins.tsv` has no field for a starting counter, so no row can say "this
+transcript begins at counter 2^32 - 1". Evidencing it would need a schema
+change.
 
 Every local cap is evidenced from both sides: an artifact one unit past it is
 refused and one sitting exactly on it is accepted. Under the default profile
@@ -204,14 +204,14 @@ the default key-file caps, and no common host can extract an archive path as
 long as the default path cap allows. Some caps never refuse anything under the
 defaults: the total entry-extension and TLV value caps sit behind the
 manifest-length and per-region caps, the Argon2id time-cost and lane caps equal
-their structural maxima, and the header-MAC work cap equals the product of the
-two caps it bounds. Those halves are evidenced under profiles that lower the
-caps instead: `small-artifact-caps` sets every cap to exactly what the
-one-byte passphrase file and the key pair of the corpus need, and each
-`lowered-*` profile lowers one cap.
+their structural maxima, and the header-MAC work cap equals the most work a
+header within the recipient-count and header-length caps can demand. Those
+halves are evidenced under profiles that lower the caps instead:
+`small-artifact-caps` sets every cap to exactly what the one-byte passphrase
+file and the key pair of the corpus need, and each `lowered-*` profile lowers
+one cap.
 
-Everything else the §12.3 minimum-evidence table names is present. Two areas
-are covered in a shape worth stating: a directory root's expected result is the
-extraction listing §12.3 defines rather than a single plaintext file, and stored
-permission modes are evidenced by rejection cases only, because §9.13 makes
-Unix permission restoration best-effort on Windows.
+Two areas are covered in a shape worth stating: a directory root's expected
+result is the extraction listing §12.3 defines rather than a single plaintext
+file, and stored permission modes are evidenced by rejection cases only,
+because §9.13 makes Unix permission restoration best-effort on Windows.

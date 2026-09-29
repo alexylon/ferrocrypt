@@ -32,7 +32,8 @@ zeroize = "1"
 thiserror = "2"
 chacha20poly1305 = { version = "0.10", features = ["std", "stream"] }
 argon2 = { version = "0.5", features = ["std", "zeroize"] }
-# hmac 0.13 and hkdf 0.13 require sha3 0.11, so the three move together.
+# hmac 0.13 and hkdf 0.13 require sha3 0.11, so the three move together,
+# and ferrocrypt-test-support's sha3 moves with them.
 # The `zeroize` features wipe internal hash state on drop; hkdf has no
 # such feature but uses hmac inside, so it is covered too.
 sha3 = { version = "0.11", features = ["zeroize"] }

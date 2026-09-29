@@ -51,6 +51,8 @@ origin-fca-manifest-region-truncated	fcr_payload	fca-manifest-region-truncated	-
 origin-fca-newer-version	fcr_payload	fca-newer-version	-	2ad87a495c22c02d44ad10abb986760322e5a5e9ef7995c7dba0e06b916abe7f	f5bc576fd1f641f8e5edfecb49b796cd677142	0.3.0	1
 origin-fca-duplicate-paths	fcr_payload	fca-duplicate-paths	-	63cdb99d2a533b0953abeec5c6c2045582fa2ee3132cc28eb975979c4703d86b	e8734871dafcb3c13ad3a59713775d9ba503b0	0.3.0	1
 origin-fca-ascii-case-collision	fcr_payload	fca-ascii-case-collision	-	44af14a5062b94a919722d0d9e23da34bb90d108658a04f7d9a62a9b0e37d7b2	eb58119e080bf25aaec2c7458c629dd13b13d0	0.3.0	1
+origin-fca-nfc-collision	fcr_payload	fca-nfc-collision	-	33174f1747ff425b02d26f5b7258282d5442ba2d09311715b5d6f31f161ebdbf	85b8c6386652e18863951b28c06e5baf52ac9a	0.3.0	1
+origin-fca-nfc-and-ascii-case-collision	fcr_payload	fca-nfc-and-ascii-case-collision	-	bdcc84611f192934e98f66d905a44b592ea0c7c0a94b538c155d4e830dd1d85b	a641df0bda28500ab8ae2cb08fe75e0b16dbe8	0.3.0	1
 origin-fca-missing-parent	fcr_payload	fca-missing-parent	-	ed4dcf676d9834b61d5337dab49d446c7e54f4a9723df08db9c75bb672ea7c34	7ba9cce13a6a62a2acde9361e77acc55d40998	0.3.0	1
 origin-fca-child-under-file	fcr_payload	fca-child-under-file	-	7d9e759e7067b0640cf17532c5b7a1a49fd37733b7e701794b9c6cdec4da8533	60e9f8b2a2a984208e56d2103c243576470119	0.3.0	1
 origin-fca-multiple-roots	fcr_payload	fca-multiple-roots	-	ff501012424fa6699b648386c4bf762649c2b930ee88d58563aa75cfe4584b75	ec22b9d16dcdc9c44e6ea009f9829909f21374	0.3.0	1
@@ -71,6 +73,7 @@ origin-fca-path-bidi-override	fcr_payload	fca-path-bidi-override	-	a1885adc49fd7
 origin-fca-path-line-separator	fcr_payload	fca-path-line-separator	-	2369aa53a9b3640487e83a3cc6509c7b3d9945e284eba52fe7858c965fc17475	f7999575bc44b25334488ae7fa98309741a7bc	0.3.0	1
 origin-fca-path-component-over-max	fcr_payload	fca-path-component-over-max	-	6f5204a5d707a8fd5814b740f8bb890c03c612df536eb9a99651b74709ff3015	fb31f6ae7148ad9910398b449ed9e990d0d7a1	0.3.0	1
 origin-fca-path-valid-unicode	fcr_payload	fca-path-valid-unicode	-	8c76edaed31ae915fbc86775b1cc0dfd723b83ba4a9dfaaecc5d3f4caf77e06f	763ddf4a8700102fbcffa28f46c474f29334d3	0.3.0	1
+origin-fca-path-direction-marks-valid	fcr_payload	fca-path-direction-marks-valid	-	7193f9e303b3694b89ca8a25fb2a940c09f70dc8d35c4a0c9bf74f9ccc2ffa1c	388187ac795a15745fe50420a65c8bacf04606	0.3.0	1
 origin-fca-entry-mode-above-permission-bits	fcr_payload	fca-entry-mode-above-permission-bits	-	ee97ecc4ea114ed9e09d33da00cfcc43ba171e67c3c85cd71707aa7c3b31eb35	65adb775d109556787f0a52b4070cca3fdde4a	0.3.0	1
 origin-fca-directory-entry-nonzero-size	fcr_payload	fca-directory-entry-nonzero-size	-	3a746f3909ce331f0146424222f6a8382e39456dccf5468405e4c42b3f27e8cd	296ed7c258aa3876538eb725cfa7b4f7ad926a	0.3.0	1
 origin-fca-path-nul-byte	fcr_payload	fca-path-nul-byte	-	5ffa85e2bbd81a25da16d546e1dd482fd3ce26edd3bf7f6f4f497d732d24d700	a47debc265771494457f4caeebb581d1e66f38	0.3.0	1

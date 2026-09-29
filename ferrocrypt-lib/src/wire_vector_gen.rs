@@ -4622,7 +4622,7 @@ fn write_fca_cases(corpus: &mut Corpus) {
     );
 
     // Manifest and tree rules (`FORMAT.md` §9.7 / §9.8).
-    let tree_cases: [(&str, Vec<FcaEntry>, &str, &str); 5] = [
+    let tree_cases: [(&str, Vec<FcaEntry>, &str, &str); 7] = [
         (
             "fca-duplicate-paths",
             vec![
@@ -4641,6 +4641,32 @@ fn write_fca_cases(corpus: &mut Corpus) {
                 FcaEntry::file("root/A.txt", b"two"),
             ],
             "fca_paths_collide_ignoring_ascii_case",
+            "invalid_archive_tree",
+        ),
+        // The §9.7 example: a precomposed `é` and an `e` followed by U+0301
+        // COMBINING ACUTE ACCENT spell one name in two ways, and some
+        // filesystems store both as the same entry.
+        (
+            "fca-nfc-collision",
+            vec![
+                FcaEntry::dir("root"),
+                FcaEntry::file("root/\u{e9}.txt", b"one"),
+                FcaEntry::file("root/e\u{301}.txt", b"two"),
+            ],
+            "fca_paths_collide_under_nfc",
+            "invalid_archive_tree",
+        ),
+        // The NFC key folds ASCII case too, so paths that differ in both still
+        // collide. A reader with a separate NFC key and ASCII-case key would
+        // accept this pair.
+        (
+            "fca-nfc-and-ascii-case-collision",
+            vec![
+                FcaEntry::dir("root"),
+                FcaEntry::file("root/\u{e9}.TXT", b"one"),
+                FcaEntry::file("root/e\u{301}.txt", b"two"),
+            ],
+            "fca_paths_collide_under_nfc_ignoring_ascii_case",
             "invalid_archive_tree",
         ),
         (
@@ -4777,6 +4803,21 @@ fn write_fca_cases(corpus: &mut Corpus) {
         "fca-path-valid-unicode",
         &unicode,
         Ok(b"unicode content".to_vec()),
+    );
+
+    // §9.6 refuses the bidirectional span controls but accepts the three
+    // direction marks U+200E, U+200F, and U+061C. The name sits under a
+    // directory root, so the extraction listing compares it byte for byte and
+    // a reader that stripped a mark fails as surely as one that refused it.
+    let marked = [
+        FcaEntry::dir("root"),
+        FcaEntry::file("root/a\u{200e}b\u{200f}c\u{61c}d.txt", b"marked content"),
+    ];
+    fca_case(
+        corpus,
+        "fca-path-direction-marks-valid",
+        &build_fca(&marked, b""),
+        Ok(extraction_listing(&marked)),
     );
 
     // Entry mode and size rules (`FORMAT.md` §9.4).

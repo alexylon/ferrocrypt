@@ -6,6 +6,10 @@ origin-argon2id-chunk-plus-one	fcr_payload	fcr-argon2id-chunk-plus-one	-	036c340
 origin-argon2id-multi-chunk	fcr_payload	fcr-argon2id-multi-chunk	-	4a70aba5af39b3115b0f46d63868e94d28f09ba9ae81c31ec976dff469b16e3a	a0fcfe944aaedb9864c9733df68d16bce50e8a	0.3.0	1
 origin-x25519-single	fcr_payload	fcr-x25519-single	-	72f9e299d5e8b55693aa2f8f201da85eb74064b9565164d28d562f19a8b50e9e	7321bee04e1ba99ed9a5a96b750d4ae76bd9ff	0.3.0	1
 origin-x25519-multi	fcr_payload	fcr-x25519-multi-first	-	0b56bad96534be1e6944e9389aa8308d41906cb8de1d8ee0cc29c65871e82add	eef7253101b8541925a504f3c02905e77be574	0.3.0	1
+origin-prefix-header-len-at-structural-max	fcr_payload	prefix-header-len-at-structural-max	-	fe75a3a61328989875b8ca86df7acb1a4687c5c99b543b7c7bba0adf2103b787	462946d05ce2eb79feb98d3423c93ed3295a19	0.3.0	1
+origin-header-recipient-count-at-max	fcr_payload	header-recipient-count-at-max	-	0b124d4cd328ed2887292c1f6e8ff350ebf7bd54f5feecd35847e757169c3327	a169188353ebce63de27de1feb6002fde675d9	0.3.0	1
+origin-header-ext-len-at-structural-max	fcr_payload	header-ext-len-at-structural-max	-	27a7a766516a58c784b40f4d7bb84ba0a72724958cd23b54a7ba81e2d5e17957	c6a96821fa9ad5d6910380ade9c39d4318735e	0.3.0	1
+origin-entry-region-trailing-bytes	fcr_payload	entry-region-trailing-bytes	-	45e01644011fd5355c292314aab36875311229e63d35d526ff9d0415bfb68848	67e70e3ac8df0405c840c0c5194a1ebe201eef	0.3.0	1
 origin-recipient-none-supported	fcr_payload	recipient-none-supported	-	a196e379b3e347b482a76c13feefde0357ddfd7685f6c748e3d578a8f68ae9fd	e84ad09fe9864d6cce881932ee9a7940be2439	0.3.0	1
 origin-recipient-unknown-critical	fcr_payload	recipient-unknown-critical	-	c66fb55c812ac5f7aad13c4fca145a1baa4abd67abab2ea6e2cb585a89db53a6	5e3a8158cff2eda8fd3f7b3f4849494eb8701b	0.3.0	1
 origin-recipient-unknown-ignorable	fcr_payload	recipient-unknown-ignorable-skipped	-	d1e8b13cd52dd165544f3f12dac32695a23c5739cf479264ba0ac7e0faa0a82a	bf14e3014c6ee5cb09d36fbf624761aa649b7e	0.3.0	1

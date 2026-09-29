@@ -86,10 +86,14 @@ profile; set all of them before evaluating the case, whether it is accepted or
 refused, and never choose them from the expected result — a cap can refuse
 with a class other than `resource_cap_exceeded`. The values are frozen with the
 corpus and do not follow FerroCrypt's defaults, which may change between
-releases. Revision 1 has one profile, `default-0.3.0`: the defaults of
-FerroCrypt `0.3.0`. `private_key_validate` and `stream_encrypt_kat` apply no
-local cap and name `-`. An implementation that cannot set its caps to a
-profile's values cannot assert the cases that name it.
+releases. Most cases name `default-0.3.0`, the defaults of FerroCrypt
+`0.3.0`. A case that has to sit on a limit those defaults keep out of reach
+names a profile that changes only what it needs: `header-structural-maxima`
+raises the header-length, recipient-count, and recipient-body caps to the
+structural maxima of `FORMAT.md` §3.1 and §3.2. `private_key_validate` and
+`stream_encrypt_kat` apply no local cap and name `-`. An implementation
+that cannot set its caps to a profile's values cannot assert the cases that
+name it.
 
 **`first_required_by_baseline` names the promise a case evidences.** It is the
 earliest compatibility baseline whose rules require the stored outcome.

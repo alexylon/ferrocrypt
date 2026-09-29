@@ -230,6 +230,18 @@ impl CaseRow {
         self.capability_id = capability_id.to_string();
         self
     }
+
+    /// Evaluates the case under `limit_profile_id` rather than the default
+    /// profile. Only a case whose action applies local caps names one.
+    fn limit_profile(mut self, limit_profile_id: &'static str) -> Self {
+        assert_ne!(
+            self.limit_profile_id, "-",
+            "{}: its action applies no local cap, so it names no limit profile",
+            self.case_id
+        );
+        self.limit_profile_id = limit_profile_id;
+        self
+    }
 }
 
 /// The limit profile a case of `case_type` names: none for the two actions
@@ -331,6 +343,63 @@ fn default_limit_profile_row() -> Vec<String> {
                 .clone()
         })
         .collect()
+}
+
+/// The limit profile that raises the three `.fcr` header caps a file can
+/// reach, the header length, the recipient count, and the recipient body
+/// length, to their `FORMAT.md` §3.1 and §3.2 structural maxima, so a case
+/// can sit on a maximum rather than on a default cap. Every other cap keeps
+/// its [`DEFAULT_LIMIT_PROFILE_ID`] value.
+const HEADER_MAXIMA_LIMIT_PROFILE_ID: &str = "header-structural-maxima";
+
+/// Every limit profile other than [`DEFAULT_LIMIT_PROFILE_ID`], as the caps
+/// it sets differently from that profile. Each changes only what its cases
+/// need (`FORMAT.md` §12.3).
+const DERIVED_LIMIT_PROFILES: &[(&str, &[(&str, u64)])] = &[(
+    HEADER_MAXIMA_LIMIT_PROFILE_ID,
+    &[
+        (
+            "max_header_len",
+            HeaderReadLimits::HEADER_LEN_STRUCTURAL_MAX as u64,
+        ),
+        (
+            "max_recipient_count",
+            HeaderReadLimits::RECIPIENT_COUNT_STRUCTURAL_MAX as u64,
+        ),
+        (
+            "max_recipient_body_len",
+            HeaderReadLimits::RECIPIENT_BODY_LEN_STRUCTURAL_MAX as u64,
+        ),
+    ],
+)];
+
+/// Every `limit-profiles.tsv` row: the [`DEFAULT_LIMIT_PROFILE_ID`] row, then
+/// each of [`DERIVED_LIMIT_PROFILES`] as a copy of it with its own caps set.
+fn limit_profile_rows() -> Vec<Vec<String>> {
+    let columns = table_columns("limit-profiles.tsv");
+    let column_at = |column: &str| {
+        columns
+            .iter()
+            .position(|c| *c == column)
+            .unwrap_or_else(|| panic!("limit-profiles.tsv has no {column} column"))
+    };
+    let default = default_limit_profile_row();
+    let mut rows = vec![default.clone()];
+    for (profile_id, changed) in DERIVED_LIMIT_PROFILES {
+        let mut row = default.clone();
+        row[column_at("limit_profile_id")] = profile_id.to_string();
+        for (column, value) in *changed {
+            let at = column_at(column);
+            assert_ne!(
+                row[at],
+                value.to_string(),
+                "{profile_id}: {column} already has this value in the default profile"
+            );
+            row[at] = value.to_string();
+        }
+        rows.push(row);
+    }
+    rows
 }
 
 struct CredentialRow {
@@ -801,6 +870,7 @@ fn regenerate_wire_corpus_inner() {
     let (base, x25519_base) = write_valid_fcr_cases(&mut corpus, sources.path(), &keys);
     write_prefix_cases(&mut corpus, &base);
     write_header_cases(&mut corpus, &base);
+    write_header_maximum_cases(&mut corpus, sources.path(), &keys);
     write_recipient_framing_cases(&mut corpus, sources.path(), &keys, &base);
     write_argon2id_cases(&mut corpus, sources.path(), &base);
     write_x25519_cases(&mut corpus, &x25519_base);
@@ -1322,14 +1392,15 @@ fn the_generator_refuses_to_write_outside_the_corpus() {
     Corpus::new(root).write_ref("../outside.bin", b"escaped");
 }
 
-/// The default profile fills every profile column with a value the field
-/// grammar admits, so the generator never needs a full run to show that the
-/// library's defaults can be written as a profile.
+/// Every profile fills every profile column with a value the field grammar
+/// admits, so the generator never needs a full run to show that the
+/// library's defaults, and the profiles derived from them, can be written.
 #[test]
-fn the_default_limit_profile_is_a_valid_row() {
-    let row = default_limit_profile_row();
-    for (column, value) in table_columns("limit-profiles.tsv").iter().zip(&row) {
-        check_field("limit-profiles.tsv", column, value);
+fn every_limit_profile_is_a_valid_row() {
+    for row in limit_profile_rows() {
+        for (column, value) in table_columns("limit-profiles.tsv").iter().zip(&row) {
+            check_field("limit-profiles.tsv", column, value);
+        }
     }
 }
 
@@ -1407,7 +1478,7 @@ fn emit(corpus: &Corpus) {
         "limit-profiles.tsv",
         "limit_profile_id",
         table_columns("limit-profiles.tsv"),
-        vec![default_limit_profile_row()],
+        limit_profile_rows(),
     );
 
     write_appended_table(
@@ -1686,6 +1757,22 @@ fn check_manifest_invariants(corpus: &Corpus) {
         corpus.origins.len(),
         "independent origins must use distinct nonce prefixes"
     );
+
+    // Every case names a declared profile, and every declared profile is
+    // named by a case: a limit no case is evaluated under evidences nothing.
+    let declared: BTreeSet<&str> = std::iter::once(DEFAULT_LIMIT_PROFILE_ID)
+        .chain(DERIVED_LIMIT_PROFILES.iter().map(|(id, _)| *id))
+        .collect();
+    let named: BTreeSet<&str> = corpus
+        .cases
+        .iter()
+        .map(|case| case.limit_profile_id)
+        .filter(|id| *id != "-")
+        .collect();
+    assert_eq!(
+        named, declared,
+        "the named and the declared limit profiles differ"
+    );
 }
 
 // ─── Mutation helpers ──────────────────────────────────────────────────────
@@ -1741,15 +1828,91 @@ fn fabricate_fcr(
     );
 }
 
+/// The big-endian `u32` at `offset` of `bytes`: a length or count field of a
+/// `.fcr` header or of an FCA image.
+fn be_u32_at(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_be_bytes(
+        bytes[offset..offset + size_of::<u32>()]
+            .try_into()
+            .expect("the bytes hold the whole field"),
+    )
+}
+
 /// Offset of the payload region: the end of `prefix || header || header_mac`,
 /// read from the artifact's own declared header length.
 fn payload_offset(bytes: &[u8]) -> usize {
-    let header_len = u32::from_be_bytes(
-        bytes[OFF_HEADER_LEN..OFF_HEADER_LEN + 4]
-            .try_into()
-            .expect("header_len"),
-    ) as usize;
+    let header_len = be_u32_at(bytes, OFF_HEADER_LEN) as usize;
     crate::format::PREFIX_SIZE + header_len + crate::format::HEADER_MAC_SIZE
+}
+
+/// `fcr` with `extra` zero bytes appended to its recipient-entries region.
+/// `recipient_entries_len` and `header_len` grow to match, so the §3.2
+/// lengths still sum, and the header MAC is recomputed under `file_key`, so
+/// the rule that the entries fill their region is the only one the result
+/// breaks.
+fn with_recipient_region_padding(fcr: &[u8], file_key: &FileKey, extra: usize) -> Vec<u8> {
+    use crate::format::{HEADER_MAC_SIZE, PREFIX_SIZE};
+
+    let header_len = be_u32_at(fcr, OFF_HEADER_LEN);
+    let entries_len = be_u32_at(fcr, OFF_RECIPIENT_ENTRIES_LEN);
+    let extra_len = u32::try_from(extra).expect("the padding fits a length field");
+    let header_end = PREFIX_SIZE + header_len as usize;
+
+    let mut out = fcr[..header_end].to_vec();
+    let entries_end = OFF_FIRST_ENTRY + entries_len as usize;
+    out.splice(entries_end..entries_end, std::iter::repeat_n(0u8, extra));
+    out[OFF_HEADER_LEN..OFF_HEADER_LEN + size_of::<u32>()]
+        .copy_from_slice(&(header_len + extra_len).to_be_bytes());
+    out[OFF_RECIPIENT_ENTRIES_LEN..OFF_RECIPIENT_ENTRIES_LEN + size_of::<u32>()]
+        .copy_from_slice(&(entries_len + extra_len).to_be_bytes());
+
+    let stream_nonce: [u8; STREAM_NONCE_SIZE] = out
+        [OFF_STREAM_NONCE..OFF_STREAM_NONCE + STREAM_NONCE_SIZE]
+        .try_into()
+        .expect("stream nonce");
+    let DerivedSubkeys { header_key, .. } =
+        derive_subkeys(file_key, &stream_nonce).expect("derive subkeys");
+    let prefix: [u8; PREFIX_SIZE] = out[..PREFIX_SIZE].try_into().expect("prefix");
+    let mac = crate::format::compute_header_mac(&prefix, &out[PREFIX_SIZE..], &header_key)
+        .expect("header MAC");
+    out.extend_from_slice(&mac);
+    out.extend_from_slice(&fcr[header_end + HEADER_MAC_SIZE..]);
+    out
+}
+
+/// The trailing-byte case rests on the padded header staying authentic: its
+/// MAC verifies under the file key, and the payload after it is the one the
+/// file was built with. A reader that ignored the leftover byte would
+/// therefore decrypt the file, which is the reader the case must catch.
+#[test]
+fn a_padded_recipient_region_keeps_its_header_authentic() {
+    use crate::format::{HEADER_MAC_SIZE, PREFIX_SIZE};
+
+    let sources = tempfile::tempdir().expect("source dir");
+    let source = write_source(sources.path(), "p", 64);
+    let file_key = FileKey::generate().expect("file key");
+    let built = build_fcr_with_entries(&source, &file_key, &[argon2id_entry(&file_key)], b"");
+    let padded = with_recipient_region_padding(&built.bytes, &file_key, 1);
+    assert_eq!(padded.len(), built.bytes.len() + 1);
+
+    let header_end = payload_offset(&padded) - HEADER_MAC_SIZE;
+    let prefix: [u8; PREFIX_SIZE] = padded[..PREFIX_SIZE].try_into().expect("prefix");
+    let tag: [u8; HEADER_MAC_SIZE] = padded[header_end..header_end + HEADER_MAC_SIZE]
+        .try_into()
+        .expect("tag");
+    let stream_nonce: [u8; STREAM_NONCE_SIZE] = padded
+        [OFF_STREAM_NONCE..OFF_STREAM_NONCE + STREAM_NONCE_SIZE]
+        .try_into()
+        .expect("stream nonce");
+    let DerivedSubkeys { header_key, .. } =
+        derive_subkeys(&file_key, &stream_nonce).expect("derive subkeys");
+    crate::format::verify_header_mac(&prefix, &padded[PREFIX_SIZE..header_end], &header_key, &tag)
+        .expect("the padded header must still authenticate");
+    assert_eq!(
+        padded[payload_offset(&padded)..],
+        built.bytes[payload_offset(&built.bytes)..],
+        "the payload must be the one the file was built with"
+    );
 }
 
 // ─── Prefix and framing ────────────────────────────────────────────────────
@@ -2049,6 +2212,88 @@ fn write_header_cases(corpus: &mut Corpus, base: &MutationBase) {
     );
 }
 
+// ─── Header structural maxima ──────────────────────────────────────────────
+
+/// Accepted files sitting exactly on the `FORMAT.md` §3.1 and §3.2 structural
+/// maxima. Each pairs with a case one past its maximum; without this half, a
+/// reader that placed a maximum one unit low would pass every rejection
+/// while refusing files this implementation writes and reads. A recipient
+/// body of exactly 16 MiB has no case: with its entry framing and type name
+/// it cannot fit a header of at most 16 MiB, so the entry parser's own tests
+/// carry that boundary.
+fn write_header_maximum_cases(corpus: &mut Corpus, sources: &Path, keys: &CorpusKeys) {
+    use crate::format::{EXT_LEN_MAX, HEADER_FIXED_SIZE, HEADER_LEN_MAX, RECIPIENT_COUNT_MAX};
+
+    let source = write_source(sources, "p", 32);
+
+    // `header_len` on its maximum: an unknown non-critical entry whose body
+    // fills the header around the entry the corpus key opens.
+    let scope = case_scope("prefix-header-len-at-structural-max");
+    let file_key = FileKey::generate().expect("file key");
+    let opener = x25519_entry(&keys.public_a, &file_key);
+    let mut filler = unknown_entry(false);
+    filler.body.clear();
+    let framing = HEADER_FIXED_SIZE
+        + opener.checked_wire_len().expect("x25519 entry length")
+        + filler.checked_wire_len().expect("unknown entry length");
+    filler.body = vec![0xAA; HEADER_LEN_MAX as usize - framing];
+    let built = build_fcr_with_entries(&source, &file_key, &[filler, opener], b"");
+    drop(scope);
+    assert_eq!(
+        be_u32_at(&built.bytes, OFF_HEADER_LEN),
+        HEADER_LEN_MAX,
+        "the header must land exactly on its maximum"
+    );
+    fabricated_accept_fcr_case(
+        corpus,
+        "prefix-header-len-at-structural-max",
+        "private-key-a",
+        HEADER_MAXIMA_LIMIT_PROFILE_ID,
+        &source,
+        built,
+    );
+
+    // `recipient_count` on its maximum, the entry the key opens last, so a
+    // reader that stopped one entry early could not open the file.
+    let scope = case_scope("header-recipient-count-at-max");
+    let file_key = FileKey::generate().expect("file key");
+    let mut entries: Vec<RecipientEntry> = (1..RECIPIENT_COUNT_MAX)
+        .map(|_| unknown_entry(false))
+        .collect();
+    entries.push(x25519_entry(&keys.public_a, &file_key));
+    assert_eq!(entries.len(), usize::from(RECIPIENT_COUNT_MAX));
+    let built = build_fcr_with_entries(&source, &file_key, &entries, b"");
+    drop(scope);
+    fabricated_accept_fcr_case(
+        corpus,
+        "header-recipient-count-at-max",
+        "private-key-a",
+        HEADER_MAXIMA_LIMIT_PROFILE_ID,
+        &source,
+        built,
+    );
+
+    // `ext_len` on its maximum: one ignorable TLV whose value fills the
+    // region. No local cap bounds the region, so the default profile applies.
+    let scope = case_scope("header-ext-len-at-structural-max");
+    let file_key = FileKey::generate().expect("file key");
+    let ext = crate::crypto::tlv::tlv_bytes(
+        0x0001,
+        &vec![0xAA; EXT_LEN_MAX as usize - crate::crypto::tlv::ENTRY_HEADER_SIZE],
+    );
+    assert_eq!(ext.len(), EXT_LEN_MAX as usize);
+    let built = build_fcr_with_entries(&source, &file_key, &[argon2id_entry(&file_key)], &ext);
+    drop(scope);
+    fabricated_accept_fcr_case(
+        corpus,
+        "header-ext-len-at-structural-max",
+        "passphrase-main",
+        DEFAULT_LIMIT_PROFILE_ID,
+        &source,
+        built,
+    );
+}
+
 /// Builds a rejected `.fcr` from crafted recipient entries with a genuine
 /// payload and a valid header MAC, so the case isolates the recipient rule
 /// rather than tripping authentication first.
@@ -2135,6 +2380,38 @@ fn write_recipient_framing_cases(
         "malformed_recipient_entry",
         |b| b[OFF_FIRST_ENTRY + 4..OFF_FIRST_ENTRY + 8].copy_from_slice(&0xFFFF_u32.to_be_bytes()),
     );
+
+    // The other side of the §3.2 rule that the entries consume exactly
+    // `recipient_entries_len`: one byte left after the declared entry. The
+    // lengths still sum to `header_len` and the header MAC is recomputed, so
+    // a reader that stopped after `recipient_count` entries would decrypt
+    // this file rather than refuse it.
+    let scope = case_scope("entry-region-trailing-bytes");
+    let source = write_source(sources, "p", 64);
+    let file_key = FileKey::generate().expect("file key");
+    let built = build_fcr_with_entries(&source, &file_key, &[argon2id_entry(&file_key)], b"");
+    let padded = with_recipient_region_padding(&built.bytes, &file_key, 1);
+    drop(scope);
+    let artifact_ref = corpus.write_ref("artifacts/fcr/entry-region-trailing-bytes.fcr", &padded);
+    corpus.push_origin(OriginRow {
+        origin_id: "origin-entry-region-trailing-bytes".to_string(),
+        origin_kind: "fcr_payload",
+        anchor_case_id: "entry-region-trailing-bytes".to_string(),
+        payload_key_ref: "-".to_string(),
+        payload_key_sha3_256: built.payload_key_sha3_256,
+        stream_nonce_hex: built.stream_nonce_hex,
+    });
+    corpus.push_case(
+        CaseRow::fcr("entry-region-trailing-bytes", &artifact_ref)
+            .origin("origin-entry-region-trailing-bytes")
+            .fabricated()
+            .credential("passphrase-main")
+            .reject(
+                "recipient_entries_do_not_fill_region",
+                "malformed_recipient_entry",
+            ),
+    );
+
     mutate_fcr(
         corpus,
         base,
@@ -3944,15 +4221,6 @@ const FCA_OFF_TOTAL_FILE_BYTES: usize = {
     at
 };
 
-/// Reads the `u32` fixed-header field at `offset` of an FCA image.
-fn fca_u32_field(fca: &[u8], offset: usize) -> u32 {
-    u32::from_be_bytes(
-        fca[offset..offset + 4]
-            .try_into()
-            .expect("the image holds a complete fixed header"),
-    )
-}
-
 /// Serializes a complete FCA payload: header, archive extension region,
 /// manifest, then file content in manifest order.
 fn build_fca(entries: &[FcaEntry], archive_ext: &[u8]) -> Vec<u8> {
@@ -4082,12 +4350,14 @@ fn nested_chain(components: &[String], content: &[u8]) -> Vec<FcaEntry> {
 }
 
 /// Commits an accepted `.fcr` case built from caller-supplied recipient
-/// entries. The at-cap cases are assembled by hand like the over-cap twins
-/// they pair with, rather than produced through the public writer.
+/// entries, evaluated under `limit_profile_id`. The at-cap and at-maximum
+/// cases are assembled by hand like the over-cap twins they pair with,
+/// rather than produced through the public writer.
 fn fabricated_accept_fcr_case(
     corpus: &mut Corpus,
     case_id: &str,
     credential_id: &str,
+    limit_profile_id: &'static str,
     source: &Path,
     built: BuiltFcr,
 ) {
@@ -4110,6 +4380,7 @@ fn fabricated_accept_fcr_case(
             .origin(&origin_id)
             .fabricated()
             .credential(credential_id)
+            .limit_profile(limit_profile_id)
             .accept(&expected_ref),
     );
 }
@@ -4237,7 +4508,7 @@ fn write_fca_cases(corpus: &mut Corpus) {
         &tlv_bytes(0x0001, b"ext"),
     );
     let archive_ext_end =
-        header_size + fca_u32_field(&cut_in_archive_ext, FCA_OFF_ARCHIVE_EXT_LEN) as usize;
+        header_size + be_u32_at(&cut_in_archive_ext, FCA_OFF_ARCHIVE_EXT_LEN) as usize;
     cut_in_archive_ext.truncate(archive_ext_end - 1);
     fca_case(
         corpus,
@@ -4252,8 +4523,8 @@ fn write_fca_cases(corpus: &mut Corpus) {
         "malformed_archive",
         |b| {
             let manifest_end = header_size
-                + fca_u32_field(b, FCA_OFF_ARCHIVE_EXT_LEN) as usize
-                + fca_u32_field(b, FCA_OFF_MANIFEST_LEN) as usize;
+                + be_u32_at(b, FCA_OFF_ARCHIVE_EXT_LEN) as usize
+                + be_u32_at(b, FCA_OFF_MANIFEST_LEN) as usize;
             b.truncate(manifest_end - 1);
         },
     );
@@ -4764,6 +5035,7 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         corpus,
         "header-recipient-count-at-default-cap",
         "private-key-a",
+        DEFAULT_LIMIT_PROFILE_ID,
         &source,
         built,
     );
@@ -4813,6 +5085,7 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         corpus,
         "recipient-body-at-default-cap",
         "private-key-a",
+        DEFAULT_LIMIT_PROFILE_ID,
         &source,
         built,
     );

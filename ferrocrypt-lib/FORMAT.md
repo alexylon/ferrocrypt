@@ -423,7 +423,8 @@ caps separately from the structural format maximum. Exceeding a local cap SHOULD
 produce a distinct resource-cap error rather than a generic malformed-file error.
 
 `recipient_count` MUST equal the number of parsed recipient entries.
-Recipient entries MUST consume exactly `recipient_entries_len` bytes.
+Recipient entries MUST consume exactly `recipient_entries_len` bytes. §3.3
+gives the class of each mismatch.
 
 `stream_nonce` MUST be freshly generated for each encrypted file.
 
@@ -478,6 +479,11 @@ diagnostic class (§12.1) for the same bytes:
 Entries are validated one at a time in declared order, each fully through the
 list above before the next entry is read, so when two entries are both invalid
 the earlier entry determines the diagnostic.
+
+§3.2 requires the declared entries to fill `recipient_entries_len` exactly.
+When the region runs out before the last declared entry, that entry fails the
+list above. When bytes remain after the last declared entry has passed every
+step, the file is `malformed_recipient_entry`.
 
 Native FerroCrypt type names are short names without `/`, such as `argon2id` and
 `x25519`. Names without `/` are reserved for FerroCrypt-defined native recipient
@@ -1114,8 +1120,10 @@ untrusted input and SHOULD let callers raise it up to the structural ceiling,
 because a future key type with larger key material needs a longer string. Such
 a cap is resource policy, not format incompatibility, and exceeding it SHOULD
 produce a distinct resource-cap error. A reader that applies such a cap MUST
-apply it before decoding the Bech32 data, so a well-formed string over the cap
-reports that error whatever key type it names.
+apply it after checking that the string is ASCII and within the
+20,000-character ceiling, and before any Bech32 rule, the case rule included.
+A string over the cap therefore reports that error whether or not it would
+decode, and whatever key type it names.
 
 Native X25519 public recipients:
 
@@ -1289,10 +1297,14 @@ rejection after successful authentication.
 Readers MUST validate magic, kind, private-key encoding version and
 key-pair-suite support, flags, lengths, type name, total file size, KDF
 parameters, local resource caps, AEAD authentication, TLV rules, and
-recipient-type-specific secret/public material constraints.
-`kind` precedes the version byte because §11.1 makes the kind byte the selector
-for that byte's domain: a file declaring another kind is `wrong_kind` (§12.1)
-whatever byte sits at offset 4.
+recipient-type-specific secret/public material constraints. This list names
+the checks, not their order. The order is fixed in four places. `kind`
+precedes the version byte, because §11.1 makes the kind byte the selector for
+that byte's domain: a file declaring another kind is `wrong_kind` (§12.1)
+whatever byte sits at offset 4. The length limits precede the type name, as
+stated above. The KDF parameters and the local resource caps precede AEAD
+authentication, because they bound what authenticating the file costs. The
+TLV rules follow AEAD authentication, as §6 requires.
 
 A local cap on `wrapped_secret_len` follows the same rule as the recipient-string
 cap in §7: implementations MAY set one below the structural maximum and SHOULD
@@ -2049,9 +2061,10 @@ Readers MUST apply caps before allocation or content copying:
 - `max_entry_ext_bytes` before allocating or slicing per-entry extension bytes;
 - `max_total_entry_ext_bytes` while parsing the manifest;
 - `max_tlv_value_bytes` while validating FCA TLV regions, reporting a longer
-  value as `malformed_tlv` rather than `resource_cap_exceeded` (§12.1),
-  because the §6 scan that reads a value's declared length applies this cap
-  in the same step as the rule that the value fits its region;
+  value as `malformed_tlv` rather than `resource_cap_exceeded` (§12.1). That
+  is also the class of §6 rule 3, which checks the same declared length
+  against the region, so a value that breaks both reports one class
+  whichever a reader checks first;
 - `max_path_bytes` before allocating or converting an entry path;
 - `max_path_depth` before filesystem traversal;
 - `max_total_plaintext_bytes` before file-content copying.

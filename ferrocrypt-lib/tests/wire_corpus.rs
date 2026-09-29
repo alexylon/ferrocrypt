@@ -40,6 +40,13 @@ const DECLARED_CAPABILITIES: &[&str] = &[];
 /// FerroCrypt must pass every case in the corpus it ships.
 const CLAIMED_BASELINE: &str = "0.3.0";
 
+/// The limit profile holding the `0.3.0` default caps.
+const DEFAULT_PROFILE_ID: &str = "default-0.3.0";
+
+/// The limit profile that sets every cap to exactly what its accepted cases
+/// need.
+const SMALL_ARTIFACT_PROFILE_ID: &str = "small-artifact-caps";
+
 fn corpus_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("testvectors/wire")
 }
@@ -704,44 +711,16 @@ fn wire_corpus_cases_replay() {
                 .unwrap_or_else(|| panic!("{case_id}: limit profile {profile_id} undeclared"))
         };
         let out = tempfile::tempdir().expect("replay output dir");
-        // Each arm returns the byte-exact record the corpus commits for an
-        // accepted case, so acceptance proves what was produced rather than
-        // only that the operation succeeded.
-        let result = match case_type {
-            "fcr_decrypt" => {
-                decrypt_case(&artifact, credential, limits(), out.path()).map(|path| {
-                    // §12.3: the extracted root kind chooses the comparison. A file
-                    // root is compared as content; a directory root has no single
-                    // plaintext, so it is compared as an extraction listing.
-                    if path.is_dir() {
-                        extraction_listing(&path)
-                    } else {
-                        fs::read(path).expect("read decrypted output")
-                    }
-                })
-            }
-            "public_key_decode" => PublicKey::from_key_file_with_limits(&artifact, limits().key)
-                .and_then(|key| key.to_x25519_bytes())
-                .map(|material| material.to_vec()),
-            "private_key_validate" => validate_private_key_file(&artifact).map(|()| Vec::new()),
-            "private_key_open" => {
-                let Credential::PrivateKey { unlock, .. } = credential else {
-                    panic!("{case_id}: a private_key_open case needs a private-key credential")
-                };
-                let limits = limits();
-                PrivateKey::from_key_file(&artifact, Passphrase::new(unlock.clone()))
-                    .into_public_key_with_limits(limits.kdf, limits.key, ignore_progress)
-                    .and_then(|key| key.to_x25519_bytes())
-                    .map(|material| material.to_vec())
-            }
-            // Raw STREAM encryption is not public API, so the known-answer
-            // cases are replayed by the library's own `replay_stream_kats`
-            // unit test rather than from here.
-            "stream_encrypt_kat" => {
-                deferred_to_kat_replay += 1;
-                continue;
-            }
-            other => panic!("{case_id}: replay does not cover case type {other}"),
+        let Some(result) = run_action(
+            case_id,
+            case_type,
+            &artifact,
+            credential,
+            limits,
+            out.path(),
+        ) else {
+            deferred_to_kat_replay += 1;
+            continue;
         };
 
         match field(row, "outcome") {
@@ -798,6 +777,99 @@ fn wire_corpus_cases_replay() {
     println!(
         "wire corpus: {} case row(s) — {replayed} replayed here, {deferred_to_kat_replay} deferred to replay_stream_kats, {withdrawn_by_errata} withdrawn by errata, {skipped_as_declared} skipped as declared capabilities",
         case_table.len()
+    );
+}
+
+/// Every cap a profile lowers below its default, and above zero, is one that
+/// an accepted case of that profile sits exactly on, so lowering it by one
+/// more refuses that case. The corpus relies on this to evidence each cap it
+/// lowers from the accepting side (`FORMAT.md` §12.3). A cap left above what
+/// its cases need, or an artifact that no longer reaches its cap, lets every
+/// accepted case through. A cap lowered to zero cannot go lower, and zero is
+/// what a case without that region needs.
+///
+/// The small-artifact profile sets every cap to what its cases need, so it
+/// must lower each one: a limit column added without a value for it keeps
+/// the default and fails here.
+#[test]
+fn every_lowered_cap_is_what_an_accepted_case_needs() {
+    if !corpus_present() {
+        return;
+    }
+    let root = corpus_root();
+    let credentials = read_credentials(&root, &read_table(&root, "credentials.tsv"));
+    let cases = read_table(&root, "cases.tsv");
+    let profiles = read_table(&root, "limit-profiles.tsv");
+    let profile_row = |id: &str| -> &Row {
+        profiles
+            .iter()
+            .find(|row| field(row, "limit_profile_id") == id)
+            .unwrap_or_else(|| panic!("limit-profiles.tsv declares no {id}"))
+    };
+    let default = profile_row(DEFAULT_PROFILE_ID);
+    let limit = |row: &Row, column: &str| -> u64 {
+        field(row, column)
+            .parse()
+            .unwrap_or_else(|_| panic!("{column} is not a decimal limit"))
+    };
+    let columns: Vec<&str> = table_columns("limit-profiles.tsv")
+        .iter()
+        .copied()
+        .filter(|column| column.starts_with("max_"))
+        .collect();
+
+    let small = profile_row(SMALL_ARTIFACT_PROFILE_ID);
+    for column in &columns {
+        assert!(
+            limit(small, column) < limit(default, column),
+            "{SMALL_ARTIFACT_PROFILE_ID}: {column} keeps its default"
+        );
+    }
+
+    let mut lowered_caps = 0usize;
+    for profile in &profiles {
+        let id = field(profile, "limit_profile_id");
+        let accepted: Vec<&Row> = cases
+            .iter()
+            .filter(|row| field(row, "limit_profile_id") == id)
+            .filter(|row| field(row, "outcome") == "accept")
+            .collect();
+        for column in &columns {
+            let value = limit(profile, column);
+            if value == 0 || value >= limit(default, column) {
+                continue;
+            }
+            let mut tighter = profile.clone();
+            tighter.insert((*column).to_string(), (value - 1).to_string());
+            let tighter = read_limit_profiles(std::slice::from_ref(&tighter))[id];
+            let refused = accepted.iter().any(|row| {
+                let case_id = field(row, "case_id");
+                read_committed(&root, row, "artifact_ref", "artifact_sha3_256");
+                let credential = credentials
+                    .get(field(row, "credential_id"))
+                    .unwrap_or_else(|| panic!("{case_id}: credential not declared"));
+                let out = tempfile::tempdir().expect("replay output dir");
+                run_action(
+                    case_id,
+                    field(row, "case_type"),
+                    &root.join(field(row, "artifact_ref")),
+                    credential,
+                    || tighter,
+                    out.path(),
+                )
+                .unwrap_or_else(|| panic!("{case_id}: not replayed through the public API"))
+                .is_err()
+            });
+            assert!(
+                refused,
+                "{id}: no accepted case needs {column} as high as {value}"
+            );
+            lowered_caps += 1;
+        }
+    }
+    assert!(lowered_caps > 0, "no profile lowers a cap");
+    println!(
+        "wire corpus: {lowered_caps} lowered cap(s), each exactly what an accepted case needs"
     );
 }
 
@@ -862,6 +934,50 @@ fn collect_objects(path: &Path, archive_path: &str, out: &mut Vec<(String, Optio
 /// Named rather than a closure: a `&|_| {}` literal infers a single concrete
 /// lifetime, which does not satisfy the callback's higher-ranked bound.
 fn ignore_progress(_event: &ProgressEvent) {}
+
+/// Runs the action of a `case_type` case on `artifact` and returns the
+/// byte-exact record the corpus commits for an accepted case, so acceptance
+/// proves what was produced rather than only that the operation succeeded.
+/// `limits` is called only by the actions that apply local caps. Returns
+/// `None` for a STREAM known-answer case: raw STREAM encryption is not public
+/// API, so the library's own `replay_stream_kats` unit test replays those.
+fn run_action(
+    case_id: &str,
+    case_type: &str,
+    artifact: &Path,
+    credential: &Credential,
+    limits: impl Fn() -> LimitProfile,
+    out: &Path,
+) -> Option<Result<Vec<u8>, CryptoError>> {
+    Some(match case_type {
+        "fcr_decrypt" => decrypt_case(artifact, credential, limits(), out).map(|path| {
+            // §12.3: the extracted root kind chooses the comparison. A file
+            // root is compared as content; a directory root has no single
+            // plaintext, so it is compared as an extraction listing.
+            if path.is_dir() {
+                extraction_listing(&path)
+            } else {
+                fs::read(path).expect("read decrypted output")
+            }
+        }),
+        "public_key_decode" => PublicKey::from_key_file_with_limits(artifact, limits().key)
+            .and_then(|key| key.to_x25519_bytes())
+            .map(|material| material.to_vec()),
+        "private_key_validate" => validate_private_key_file(artifact).map(|()| Vec::new()),
+        "private_key_open" => {
+            let Credential::PrivateKey { unlock, .. } = credential else {
+                panic!("{case_id}: a private_key_open case needs a private-key credential")
+            };
+            let limits = limits();
+            PrivateKey::from_key_file(artifact, Passphrase::new(unlock.clone()))
+                .into_public_key_with_limits(limits.kdf, limits.key, ignore_progress)
+                .and_then(|key| key.to_x25519_bytes())
+                .map(|material| material.to_vec())
+        }
+        "stream_encrypt_kat" => return None,
+        other => panic!("{case_id}: replay does not cover case type {other}"),
+    })
+}
 
 /// Decrypts `artifact` with every local cap set from `limits`: the header
 /// caps from the open onward, and the KDF, key-file, and archive caps for the

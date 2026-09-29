@@ -2107,8 +2107,6 @@ fn craft_header(
 // ─── Header ────────────────────────────────────────────────────────────────
 
 fn write_header_cases(corpus: &mut Corpus, base: &MutationBase) {
-    use crate::format::HEADER_FIXED_SIZE;
-
     mutate_fcr(
         corpus,
         base,
@@ -2170,19 +2168,7 @@ fn write_header_cases(corpus: &mut Corpus, base: &MutationBase) {
         "passphrase-main",
         "ext_len_above_structural_maximum",
         "extension_region_too_large",
-        |b| {
-            let entries = u32::from_be_bytes(
-                b[OFF_RECIPIENT_ENTRIES_LEN..OFF_RECIPIENT_ENTRIES_LEN + 4]
-                    .try_into()
-                    .expect("entries len"),
-            );
-            let ext = crate::format::EXT_LEN_MAX + 1;
-            b[OFF_EXT_LEN..OFF_EXT_LEN + 4].copy_from_slice(&ext.to_be_bytes());
-            b[OFF_HEADER_LEN..OFF_HEADER_LEN + 4]
-                .copy_from_slice(&(HEADER_FIXED_SIZE as u32 + entries + ext).to_be_bytes());
-            let insert_at = OFF_FIRST_ENTRY + entries as usize;
-            b.splice(insert_at..insert_at, std::iter::repeat_n(0u8, ext as usize));
-        },
+        declare_ext_region_above_max,
     );
 
     // §3.6: the MAC covers the prefix, every header field, the recipient list
@@ -2208,6 +2194,100 @@ fn write_header_cases(corpus: &mut Corpus, base: &MutationBase) {
         |b| {
             let mac = payload_offset(b) - crate::format::HEADER_MAC_SIZE;
             b[mac] ^= 0x01;
+        },
+    );
+
+    write_header_check_order_cases(corpus, base);
+}
+
+/// Declares an extension region one byte past the §3.2 maximum and pads the
+/// header to hold it, raising `header_len` so the section lengths still sum.
+fn declare_ext_region_above_max(b: &mut Vec<u8>) {
+    let entries = be_u32_at(b, OFF_RECIPIENT_ENTRIES_LEN);
+    let ext = crate::format::EXT_LEN_MAX + 1;
+    b[OFF_EXT_LEN..OFF_EXT_LEN + size_of::<u32>()].copy_from_slice(&ext.to_be_bytes());
+    let header_len = crate::format::HEADER_FIXED_SIZE as u32 + entries + ext;
+    b[OFF_HEADER_LEN..OFF_HEADER_LEN + size_of::<u32>()].copy_from_slice(&header_len.to_be_bytes());
+    let insert_at = OFF_FIRST_ENTRY + entries as usize;
+    b.splice(insert_at..insert_at, std::iter::repeat_n(0u8, ext as usize));
+}
+
+/// The §3.2 check order, one case per pair of adjacent checks whose classes
+/// differ. Each file breaks exactly those two rules, so it reports the class
+/// of the earlier one only in a reader that checks in the stated order.
+/// Together the pairs fix the whole sequence: header flags, the recipient
+/// count, the extension length, the section-length sum, the local
+/// recipient-count cap, then the entries. Header flags and the length sum
+/// share their class, so their relative order needs no case.
+fn write_header_check_order_cases(corpus: &mut Corpus, base: &MutationBase) {
+    let set_u16 = |b: &mut Vec<u8>, at: usize, value: u16| {
+        b[at..at + size_of::<u16>()].copy_from_slice(&value.to_be_bytes());
+    };
+    let over_count_cap = crate::HeaderReadLimits::RECIPIENT_COUNT_DEFAULT + 1;
+    let break_section_lengths = |b: &mut Vec<u8>| {
+        let entries = be_u32_at(b, OFF_RECIPIENT_ENTRIES_LEN);
+        b[OFF_RECIPIENT_ENTRIES_LEN..OFF_RECIPIENT_ENTRIES_LEN + size_of::<u32>()]
+            .copy_from_slice(&(entries + 1).to_be_bytes());
+    };
+
+    mutate_fcr(
+        corpus,
+        base,
+        "header-order-flags-before-count",
+        "passphrase-main",
+        "header_flags_nonzero_and_recipient_count_zero",
+        "malformed_header",
+        |b| {
+            set_u16(b, OFF_HEADER_FLAGS, 1);
+            set_u16(b, OFF_RECIPIENT_COUNT, 0);
+        },
+    );
+    mutate_fcr(
+        corpus,
+        base,
+        "header-order-count-before-ext-len",
+        "passphrase-main",
+        "recipient_count_zero_and_ext_len_above_structural_maximum",
+        "recipient_count_out_of_range",
+        |b| {
+            set_u16(b, OFF_RECIPIENT_COUNT, 0);
+            declare_ext_region_above_max(b);
+        },
+    );
+    mutate_fcr(
+        corpus,
+        base,
+        "header-order-ext-len-before-section-lengths",
+        "passphrase-main",
+        "ext_len_above_structural_maximum_and_section_lengths_disagree",
+        "extension_region_too_large",
+        |b| {
+            let ext = crate::format::EXT_LEN_MAX + 1;
+            b[OFF_EXT_LEN..OFF_EXT_LEN + size_of::<u32>()].copy_from_slice(&ext.to_be_bytes());
+        },
+    );
+    mutate_fcr(
+        corpus,
+        base,
+        "header-order-section-lengths-before-count-cap",
+        "passphrase-main",
+        "section_lengths_disagree_and_recipient_count_above_default_cap",
+        "malformed_header",
+        |b| {
+            break_section_lengths(b);
+            set_u16(b, OFF_RECIPIENT_COUNT, over_count_cap);
+        },
+    );
+    mutate_fcr(
+        corpus,
+        base,
+        "header-order-count-cap-before-entries",
+        "passphrase-main",
+        "recipient_count_above_default_cap_and_entry_type_name_len_zero",
+        "resource_cap_exceeded",
+        |b| {
+            set_u16(b, OFF_RECIPIENT_COUNT, over_count_cap);
+            set_u16(b, OFF_FIRST_ENTRY, 0);
         },
     );
 }

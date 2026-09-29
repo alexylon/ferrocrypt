@@ -369,6 +369,28 @@ ext_len <= 65,536
 
 Readers MUST reject malformed headers before trying any recipient.
 
+After the §3.1 prefix checks, when the header violates more than one rule,
+readers MUST check in this order and report the first failure, so two
+conforming readers report the same diagnostic class (§12.1) for the same
+bytes:
+
+1. `header_len` above the reader's local cap, checked before the header is
+   read — `resource_cap_exceeded`.
+2. The declared header or the 32-byte header MAC ends early — `truncated`.
+3. `header_len < 31`, so `header_fixed` does not fit — `malformed_header`.
+4. `header_flags != 0` — `malformed_header`.
+5. `recipient_count` outside `1..=4096` — `recipient_count_out_of_range`.
+6. `ext_len > 65,536` — `extension_region_too_large`.
+7. `31 + recipient_entries_len + ext_len != header_len`, which also covers
+   `recipient_entries_len > header_len - 31` — `malformed_header`.
+8. `recipient_count` above the reader's local cap — `resource_cap_exceeded`.
+
+The recipient entries are checked after these, in the order §3.3 gives. The
+recipient-count cap follows the structural rules, so a header that breaks
+the format is reported as malformed even when its count also exceeds the cap.
+The `header_len` cap comes first only because it decides whether the header
+is read at all.
+
 Recommended local caps for untrusted input:
 
 ```text

@@ -352,9 +352,9 @@ fn default_limit_profile_row() -> Vec<String> {
 
 /// The limit profile that raises the three `.fcr` header caps a file can
 /// reach, the header length, the recipient count, and the recipient body
-/// length, to their `FORMAT.md` §3.1 and §3.2 structural maxima, so a case
-/// can sit on a maximum rather than on a default cap. Every other cap keeps
-/// its [`DEFAULT_LIMIT_PROFILE_ID`] value.
+/// length, to the structural maxima `FORMAT.md` §3.1 to §3.3 give them, so a
+/// case can sit on a maximum rather than on a default cap. Every other cap
+/// keeps its [`DEFAULT_LIMIT_PROFILE_ID`] value.
 const HEADER_MAXIMA_LIMIT_PROFILE_ID: &str = "header-structural-maxima";
 
 /// The limit profile that sets every cap to exactly what the one-byte
@@ -478,19 +478,35 @@ fn small_artifact_caps() -> Vec<(&'static str, u64)> {
 }
 
 /// `max_header_mac_work_bytes` under
-/// [`LOWERED_HEADER_MAC_WORK_LIMIT_PROFILE_ID`]: the work of the accepted
-/// case, whose header holds an ordinary unknown entry and two `x25519`
-/// entries, so two supported recipients each authenticate `12 + header_len`
-/// bytes (`FORMAT.md` §3.2).
+/// [`LOWERED_HEADER_MAC_WORK_LIMIT_PROFILE_ID`]: one byte of work below the
+/// refused case, whose header holds an ordinary unknown entry and two
+/// `x25519` entries, so two supported recipients each authenticate
+/// `12 + header_len` bytes (`FORMAT.md` §3.2).
 fn lowered_header_mac_work_cap() -> u64 {
-    use crate::format::{HEADER_FIXED_SIZE, PREFIX_SIZE};
-    use crate::recipient::entry::ENTRY_HEADER_SIZE;
+    let x25519_slot = RecipientEntry {
+        type_name: x25519::TYPE_NAME.to_string(),
+        recipient_flags: 0,
+        body: vec![0; x25519::BODY_LENGTH],
+    };
+    let refused = [unknown_entry(false), x25519_slot.clone(), x25519_slot];
+    header_mac_work(2, header_len_of(&refused)) - 1
+}
 
-    let unknown =
-        ENTRY_HEADER_SIZE + UNKNOWN_RECIPIENT_TYPE.len() + unknown_entry(false).body.len();
-    let opener = ENTRY_HEADER_SIZE + x25519::TYPE_NAME.len() + x25519::BODY_LENGTH;
-    let header_len = HEADER_FIXED_SIZE + unknown + 2 * opener;
-    (2 * (PREFIX_SIZE + header_len)) as u64
+/// The length of a `.fcr` header that holds `entries` and no extension
+/// region.
+fn header_len_of(entries: &[RecipientEntry]) -> usize {
+    crate::format::HEADER_FIXED_SIZE
+        + entries
+            .iter()
+            .map(|entry| entry.to_bytes().len())
+            .sum::<usize>()
+}
+
+/// The header-MAC work `FORMAT.md` §3.2 counts for a `.fcr` header of
+/// `header_len` bytes with `supported` supported recipients: each of them
+/// authenticates the prefix and the header.
+fn header_mac_work(supported: usize, header_len: usize) -> u64 {
+    (supported * (crate::format::PREFIX_SIZE + header_len)) as u64
 }
 
 /// Every `limit-profiles.tsv` row: the [`DEFAULT_LIMIT_PROFILE_ID`] row, then
@@ -643,10 +659,10 @@ fn hex(bytes: &[u8]) -> String {
 
 /// Stable explanatory text for every diagnostic class the corpus uses, taken
 /// from the `FORMAT.md` §12.1 registry as
-/// [`every_class_text_is_its_registry_meaning`] requires. Each entry is written to its own file
-/// under `diagnostic-classes/` and referenced by `diagnostic-classes.tsv`, so
-/// a class meaning is committed bytes with its own digest and can never be
-/// edited once frozen.
+/// [`every_class_text_is_its_registry_meaning`] requires. Each entry is
+/// written to its own file under `diagnostic-classes/` and referenced by
+/// `diagnostic-classes.tsv`, so a class meaning is committed bytes with its
+/// own digest and can never be edited once frozen.
 const DIAGNOSTIC_CLASS_TEXT: &[(&str, &str)] = &[
     (
         "truncated",
@@ -2654,10 +2670,11 @@ fn write_recipient_framing_cases(
     );
 
     // The other side of the §3.2 rule that the entries consume exactly
-    // `recipient_entries_len`: one byte left after the declared entry. The
-    // lengths still sum to `header_len` and the header MAC is recomputed, so
-    // a reader that stopped after `recipient_count` entries would decrypt
-    // this file rather than refuse it.
+    // `recipient_entries_len`: one byte left after the declared entry, which
+    // §3.3 makes `malformed_recipient_entry`. The lengths still sum to
+    // `header_len` and the header MAC is recomputed, so a reader that stopped
+    // after `recipient_count` entries would decrypt this file rather than
+    // refuse it.
     let scope = case_scope("entry-region-trailing-bytes");
     let source = write_source(sources, "p", 64);
     let file_key = FileKey::generate().expect("file key");
@@ -3033,15 +3050,11 @@ fn write_argon2id_cases(corpus: &mut Corpus, sources: &Path, base: &MutationBase
             "argon2id_memory_cost_above_structural_maximum",
             "invalid_kdf_parameters",
         ),
-        // The two local caps are driven apart. This one sits exactly on the
-        // memory cap and passes it, so only the work product can reject it.
+        // The two local caps are driven apart. This one is under the memory
+        // cap, so only the work product can reject it.
         (
             "argon2id-kdf-work-over-local-cap",
-            KdfParams {
-                mem_cost: KdfLimit::MEM_COST_KIB_DEFAULT,
-                time_cost: 5,
-                lanes: 1,
-            },
+            kdf_params_one_past_default_work_cap(),
             "argon2id_work_above_default_local_cap",
             "resource_cap_exceeded",
         ),
@@ -4054,18 +4067,11 @@ fn write_private_key_ext_and_pair_cases(corpus: &mut Corpus, keys: &CorpusKeys, 
         )),
     );
 
-    // The other reachable KDF cap on this artifact: memory exactly on its cap
-    // and a time cost that carries the product past the work cap, so the two
-    // caps are evidenced apart here as they are on an `argon2id` body.
+    // The other reachable KDF cap on this artifact, driven apart from the
+    // memory cap as it is on an `argon2id` body.
     let mut over_work_cap = canonical.to_vec();
-    over_work_cap[KDF_PARAMS_OFFSET..KDF_PARAMS_OFFSET + KDF_PARAMS_SIZE].copy_from_slice(
-        &KdfParams {
-            mem_cost: KdfLimit::MEM_COST_KIB_DEFAULT,
-            time_cost: 5,
-            lanes: 1,
-        }
-        .to_bytes(),
-    );
+    over_work_cap[KDF_PARAMS_OFFSET..KDF_PARAMS_OFFSET + KDF_PARAMS_SIZE]
+        .copy_from_slice(&kdf_params_one_past_default_work_cap().to_bytes());
     private_key_open_case(
         corpus,
         "private-key-kdf-work-over-default-cap",
@@ -4076,6 +4082,26 @@ fn write_private_key_ext_and_pair_cases(corpus: &mut Corpus, keys: &CorpusKeys, 
             "resource_cap_exceeded",
         )),
     );
+}
+
+/// Argon2id parameters one unit of work past [`KdfLimit::WORK_DEFAULT`] that
+/// every other default cap admits: the lowest time cost that divides that
+/// work into a memory cost under the default memory cap, at one lane.
+fn kdf_params_one_past_default_work_cap() -> KdfParams {
+    let limit = KdfLimit::default();
+    let work = limit.max_work + 1;
+    (1..=limit.max_time_cost)
+        .find_map(|time_cost| {
+            let mem_cost = u32::try_from(work / u64::from(time_cost)).ok()?;
+            (work % u64::from(time_cost) == 0 && mem_cost <= limit.max_mem_cost_kib).then_some(
+                KdfParams {
+                    mem_cost,
+                    time_cost,
+                    lanes: 1,
+                },
+            )
+        })
+        .expect("a time cost under its cap divides the work into memory under its cap")
 }
 
 /// One rejection case built by editing bytes: the identifier, the edit that
@@ -5116,10 +5142,10 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     use crate::crypto::tlv::tlv_bytes;
 
     // Every cap an artifact can sit on is driven from both sides: one artifact
-    // a byte past it, which must be refused, and one sitting exactly on it,
-    // which must be accepted. Without the accepting half, a reader that placed
-    // a limit one unit low would satisfy every refusing case while rejecting
-    // valid input.
+    // one unit past it, which must be refused, and one sitting exactly on it,
+    // which must be accepted. A reader that placed a limit one unit low refuses
+    // the accepted artifact, and one that placed it one unit high admits the
+    // refused one.
     let staging = tempfile::tempdir().expect("source dir");
     let source = write_source(staging.path(), "p", 32);
 
@@ -5143,15 +5169,16 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         Ok(extraction_listing(&at_depth)),
     );
 
+    // One byte past the byte cap: full components, each followed by `/`,
+    // then one shorter component that brings the path to that length.
     let bytes_cap = ArchiveLimits::PATH_BYTES_DEFAULT as usize;
     let component = "c".repeat(200);
-    let components = bytes_cap / (component.len() + 1) + 1;
-    let long: String = std::iter::repeat_n(component.as_str(), components)
-        .collect::<Vec<_>>()
-        .join("/");
+    let full_components = (bytes_cap + 1) / (component.len() + 1);
+    let last = "c".repeat((bytes_cap + 1) % (component.len() + 1));
+    let long = format!("{component}/").repeat(full_components) + &last;
     assert!(
-        long.len() > bytes_cap && components <= depth_cap,
-        "the path must exceed the byte cap while staying inside the depth cap"
+        long.len() == bytes_cap + 1 && !last.is_empty() && full_components < depth_cap,
+        "the path must be one byte past the byte cap and inside the depth cap"
     );
     fca_case(
         corpus,
@@ -5368,8 +5395,8 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
 
 /// Cases under the profiles that bring a cap within reach the default profile
 /// keeps out of it (`FORMAT.md` §12.3). With them every local cap is evidenced
-/// from both sides: an artifact past it is refused, and one sitting exactly on
-/// it is accepted.
+/// from both sides: an artifact one unit past it is refused, and one sitting
+/// exactly on it is accepted.
 fn write_lowered_limit_cases(
     corpus: &mut Corpus,
     sources: &Path,
@@ -5385,12 +5412,15 @@ fn write_lowered_limit_cases(
 /// profile: the header length, the header-MAC work, the entry count, the
 /// manifest length, the plaintext total, the path length, the Argon2id
 /// memory and work, the recipient string, and the wrapped secret. Each
-/// refused file exceeds one cap alone: the Argon2id time-cost and lane caps,
-/// whose defaults equal their structural maxima, on both artifacts that store
-/// Argon2id parameters, and the recipient-string cap.
+/// refused file exceeds one cap alone, by one unit: the Argon2id time-cost and
+/// lane caps, whose defaults equal their structural maxima, on both artifacts
+/// that store Argon2id parameters, and the recipient-string cap.
 fn write_small_artifact_cap_cases(corpus: &mut Corpus, keys: &CorpusKeys, base: &MutationBase) {
     use crate::key::private::{KDF_PARAMS_OFFSET, WRAPPED_SECRET_LEN_OFFSET};
-    use crate::key::public::{PUBLIC_KEY_VERSION, encode_recipient_string_with_version};
+    use crate::key::public::{
+        encode_recipient_groups_for_tests, non_canonical_padding_groups_for_tests,
+        recipient_payload_for_tests,
+    };
 
     let caps: BTreeMap<&str, u64> = small_artifact_caps().into_iter().collect();
     let private_key = fs::read(corpus.root.join(&keys.private_a)).expect("read private key");
@@ -5453,20 +5483,25 @@ fn write_small_artifact_cap_cases(corpus: &mut Corpus, keys: &CorpusKeys, base: 
         assert_eq!(exceeded.iter().filter(|over| **over).count(), 1);
     }
 
-    // The shortest well-formed string past the cap. Its length is not the cap
-    // plus one: each payload byte adds 1.6 characters, so some lengths no
-    // string has.
-    let over_cap_recipient = (0..)
-        .map(|material_len| {
-            encode_recipient_string_with_version(
-                PUBLIC_KEY_VERSION,
-                UNSUPPORTED_KEY_TYPE,
-                &vec![0x5A; material_len],
-            )
-            .expect("encode a recipient string")
-        })
-        .find(|s| s.len() as u64 > caps["max_recipient_string_chars"])
-        .expect("a string exists past the cap");
+    // No well-formed string is one character past the cap, because each
+    // payload byte adds 1.6 characters. The corpus key's 5-bit groups with one
+    // surplus group appended are that long and carry a valid Bech32 checksum;
+    // only their padding breaks a rule. They are the bytes of
+    // `public-key-padding-surplus-group`, which the default profile refuses
+    // for that padding.
+    let payload = recipient_payload_for_tests(
+        crate::format::WRITER_KEYPAIR_SUITE.public_key_version(),
+        x25519::TYPE_NAME,
+        &material,
+    )
+    .expect("build the corpus key's recipient payload");
+    let [_, surplus_group] = non_canonical_padding_groups_for_tests(&payload);
+    let over_cap_recipient =
+        encode_recipient_groups_for_tests(&surplus_group).expect("encode a surplus group");
+    assert_eq!(
+        over_cap_recipient.len() as u64,
+        caps["max_recipient_string_chars"] + 1
+    );
 
     under_limit_profile(corpus, SMALL_ARTIFACT_LIMIT_PROFILE_ID, |corpus| {
         let artifact_ref =
@@ -5544,12 +5579,12 @@ fn write_small_artifact_cap_cases(corpus: &mut Corpus, keys: &CorpusKeys, base: 
             );
         }
 
-        // `FORMAT.md` §7 applies the cap before the string is decoded, so the
-        // unsupported type it names is never reached.
+        // `FORMAT.md` §7 applies the cap before any Bech32 rule, so the
+        // padding is never reached.
         public_key_case(
             corpus,
             "public-key-recipient-string-over-small-artifact-cap",
-            format!("{over_cap_recipient}\n").as_bytes(),
+            over_cap_recipient.as_bytes(),
             Err((
                 "public_key_recipient_string_above_local_cap",
                 "resource_cap_exceeded",
@@ -5559,8 +5594,8 @@ fn write_small_artifact_cap_cases(corpus: &mut Corpus, keys: &CorpusKeys, base: 
 }
 
 /// Cases under the three profiles that each lower one cap the default
-/// profile hides: a file past the cap is refused and one sitting exactly on
-/// it is accepted.
+/// profile hides: a file one unit past the cap is refused and one sitting
+/// exactly on it is accepted.
 fn write_lowered_cap_cases(corpus: &mut Corpus, sources: &Path, keys: &CorpusKeys) {
     use crate::crypto::tlv::{ENTRY_HEADER_SIZE, tlv_bytes};
 
@@ -5633,54 +5668,61 @@ fn write_lowered_cap_cases(corpus: &mut Corpus, sources: &Path, keys: &CorpusKey
         );
     });
 
-    // The header-MAC work cap: an ordinary unknown entry, then an entry each
-    // corpus key opens, so two of the three recipients are supported. A
-    // reader that counted the unknown entry too would refuse the file on the
-    // cap. One more body byte in the unknown entry adds a header byte, and so
-    // two bytes of work.
+    // The header-MAC work cap, exactly on it and one byte of work past it.
+    // The refused file holds an ordinary unknown entry and an entry for each
+    // corpus key, so two of its three recipients are supported: a reader that
+    // ignored the recipient count would admit it. The accepted file holds the
+    // unknown entry, padded, and the entry its key opens, so its one
+    // supported recipient does exactly the capped work: a reader that counted
+    // the unknown entry too would refuse it.
     under_limit_profile(corpus, LOWERED_HEADER_MAC_WORK_LIMIT_PROFILE_ID, |corpus| {
         let cap = lowered_header_mac_work_cap();
-        let body_len = unknown_entry(false).body.len();
-        for (case_id, unknown_body_len) in [
-            ("header-mac-work-at-lowered-cap", body_len),
-            ("header-mac-work-over-lowered-cap", body_len + 1),
-        ] {
-            let scope = case_scope(case_id);
-            let file_key = FileKey::generate().expect("file key");
-            let mut unknown = unknown_entry(false);
-            unknown.body = vec![0xAA; unknown_body_len];
-            let entries = [
-                unknown,
-                x25519_entry(&keys.public_b, &file_key),
-                x25519_entry(&keys.public_a, &file_key),
-            ];
-            if unknown_body_len == body_len {
-                let source = write_source(sources, "p", 32);
-                let built = build_fcr_with_entries(&source, &file_key, &entries, b"");
-                drop(scope);
-                let header_len = u64::from(be_u32_at(&built.bytes, OFF_HEADER_LEN));
-                assert_eq!(
-                    2 * (crate::format::PREFIX_SIZE as u64 + header_len),
-                    cap,
-                    "the accepted file does exactly the capped work"
-                );
-                fabricated_accept_fcr_case(corpus, case_id, "private-key-a", &source, built);
-            } else {
-                crafted_reject_case(
-                    corpus,
-                    sources,
-                    case_id,
-                    &format!("origin-{case_id}"),
-                    "private-key-a",
-                    "header_mac_work_above_local_cap",
-                    "resource_cap_exceeded",
-                    &file_key,
-                    &entries,
-                    b"",
-                );
-                drop(scope);
-            }
-        }
+
+        let case_id = "header-mac-work-at-lowered-cap";
+        let scope = case_scope(case_id);
+        let file_key = FileKey::generate().expect("file key");
+        let opener = x25519_entry(&keys.public_a, &file_key);
+        let mut padded = unknown_entry(false);
+        let unpadded = header_mac_work(1, header_len_of(&[padded.clone(), opener.clone()]));
+        let padding = usize::try_from(cap - unpadded).expect("the padding is small");
+        padded.body.resize(padded.body.len() + padding, 0xAA);
+        let entries = [padded, opener];
+        let source = write_source(sources, "p", 32);
+        let built = build_fcr_with_entries(&source, &file_key, &entries, b"");
+        drop(scope);
+        assert_eq!(
+            header_mac_work(1, be_u32_at(&built.bytes, OFF_HEADER_LEN) as usize),
+            cap,
+            "the accepted file does exactly the capped work"
+        );
+        fabricated_accept_fcr_case(corpus, case_id, "private-key-a", &source, built);
+
+        let case_id = "header-mac-work-over-lowered-cap";
+        let scope = case_scope(case_id);
+        let file_key = FileKey::generate().expect("file key");
+        let entries = [
+            unknown_entry(false),
+            x25519_entry(&keys.public_b, &file_key),
+            x25519_entry(&keys.public_a, &file_key),
+        ];
+        assert_eq!(
+            header_mac_work(2, header_len_of(&entries)),
+            cap + 1,
+            "the refused file does one byte more than the capped work"
+        );
+        crafted_reject_case(
+            corpus,
+            sources,
+            case_id,
+            &format!("origin-{case_id}"),
+            "private-key-a",
+            "header_mac_work_above_local_cap",
+            "resource_cap_exceeded",
+            &file_key,
+            &entries,
+            b"",
+        );
+        drop(scope);
     });
 }
 

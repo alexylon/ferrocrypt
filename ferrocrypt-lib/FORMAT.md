@@ -2963,14 +2963,17 @@ reused operationally.
 | Resource policy | Structural maxima and configurable local caps for headers, recipients, KDFs, key files, manifests, paths, plaintext totals, and extension regions |
 
 Every local cap is evidenced from both sides, each under a limit profile that
-brings it within reach: an artifact past the cap is refused and one sitting
-exactly on it is accepted. A cap the default profile keeps out of reach,
-because its default equals the structural maximum, because another cap
-refuses first, or because an artifact on it would be too large to commit, is
-evidenced under a profile that lowers it. `private.key` needs KDF evidence of
-its own because §8 gives it a separate parser and a separate unlock: a case
-proving the `argon2id` recipient body applies §2.2 says nothing about the key
-file that stores the same `kdf_params`.
+brings it within reach: an artifact one unit past the cap is refused and one
+sitting exactly on it is accepted, so a reader that places the cap one unit
+low or one unit high fails a case. A side the default profile cannot carry is
+evidenced under a profile that lowers the cap. The default cannot carry a side
+when it equals the structural maximum, when other caps refuse first or keep
+every artifact below it, when no supported key type reaches it, when no common
+host can extract an archive path of its length, or when an artifact on it
+would be too large to commit or too costly to replay. `private.key` needs KDF
+evidence of its own because §8 gives it a separate parser and a separate
+unlock: a case proving the `argon2id` recipient body applies §2.2 says nothing
+about the key file that stores the same `kdf_params`.
 
 The X25519 during-operation all-zero-shared-secret case MUST use this canonical,
 nonzero small-order ephemeral public value:

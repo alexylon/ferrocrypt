@@ -90,7 +90,7 @@ releases. Most cases name `default-0.3.0`, the defaults of FerroCrypt
 `0.3.0`. A case that has to sit on a limit those defaults keep out of reach
 names a profile that changes only what it needs: `header-structural-maxima`
 raises the header-length, recipient-count, and recipient-body caps to the
-structural maxima of `FORMAT.md` §3.1 and §3.2, `small-artifact-caps` sets
+structural maxima of `FORMAT.md` §3.1 to §3.3, `small-artifact-caps` sets
 every cap to exactly what the one-byte passphrase file and the key pair of
 the corpus need, and each `lowered-*` profile lowers one cap.
 `private_key_validate` and `stream_encrypt_kat` apply no local cap and name
@@ -196,18 +196,19 @@ One item §12.3 asks for is not fully present, and it is not an oversight:
   no field for a starting counter, so no row can say "this transcript begins at
   counter 2^32 - 1". Expressing this needs a schema change.
 
-Every local cap is evidenced from both sides: one artifact past it is refused
-and one sitting exactly on it is accepted. Under the default profile many of
-these halves cannot exist. An artifact sitting on a default cap would often be
-too large to commit or too slow to replay, and no supported key reaches the
-default key-file caps. Some caps cannot be reached at all: the total
-entry-extension and TLV value caps sit behind the manifest-length and
-per-region caps, the Argon2id time-cost and lane caps equal their structural
-maxima, and the header-MAC work cap equals the product of the two caps it
-bounds. Those halves are evidenced under profiles that lower the caps instead:
-`small-artifact-caps` sets every cap to exactly what the one-byte passphrase
-file and the key pair of the corpus need, and each `lowered-*` profile lowers
-one cap.
+Every local cap is evidenced from both sides: an artifact one unit past it is
+refused and one sitting exactly on it is accepted. Under the default profile
+many of these halves cannot exist. An artifact sitting on a default cap would
+often be too large to commit or too costly to replay, no supported key reaches
+the default key-file caps, and no common host can extract an archive path as
+long as the default path cap allows. Some caps never refuse anything under the
+defaults: the total entry-extension and TLV value caps sit behind the
+manifest-length and per-region caps, the Argon2id time-cost and lane caps equal
+their structural maxima, and the header-MAC work cap equals the product of the
+two caps it bounds. Those halves are evidenced under profiles that lower the
+caps instead: `small-artifact-caps` sets every cap to exactly what the
+one-byte passphrase file and the key pair of the corpus need, and each
+`lowered-*` profile lowers one cap.
 
 Everything else the §12.3 minimum-evidence table names is present. Two areas
 are covered in a shape worth stating: a directory root's expected result is the

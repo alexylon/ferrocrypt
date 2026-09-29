@@ -102,7 +102,7 @@ pub(crate) const PRIVATE_KEY_FILE_READ_CAP_BYTES: usize = PRIVATE_KEY_HEADER_FIX
 
 pub(crate) const VERSION_OFFSET: usize = MAGIC_SIZE;
 pub(crate) const KIND_OFFSET: usize = VERSION_OFFSET + 1;
-const KEY_FLAGS_OFFSET: usize = KIND_OFFSET + 1;
+pub(crate) const KEY_FLAGS_OFFSET: usize = KIND_OFFSET + 1;
 pub(crate) const TYPE_NAME_LEN_OFFSET: usize = KEY_FLAGS_OFFSET + size_of::<u16>();
 pub(crate) const PUBLIC_LEN_OFFSET: usize = TYPE_NAME_LEN_OFFSET + size_of::<u16>();
 pub(crate) const EXT_LEN_OFFSET: usize = PUBLIC_LEN_OFFSET + size_of::<u32>();

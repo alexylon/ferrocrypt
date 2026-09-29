@@ -45,6 +45,7 @@ use crate::crypto::kdf::KdfLimit;
 use crate::crypto::kdf::{ARGON2_SALT_SIZE, KDF_PARAMS_SIZE, KdfParams};
 use crate::crypto::keys::{DerivedSubkeys, FileKey, derive_subkeys, random_bytes};
 use crate::crypto::stream::STREAM_NONCE_SIZE;
+use crate::format::{read_u16_be, read_u32_be, write_u16_be, write_u32_be};
 use crate::passphrase::Passphrase;
 use crate::recipient::RecipientEntry;
 use crate::recipient::name::TYPE_NAME_MAX_LEN;
@@ -2009,14 +2010,16 @@ fn fabricate_fcr(
     );
 }
 
-/// The big-endian `u32` at `offset` of `bytes`: a length or count field of a
-/// `.fcr` header or of an FCA image.
+/// The big-endian `u16` field at `offset` of an artifact the generator built,
+/// read with the crate's own field reader.
+fn be_u16_at(bytes: &[u8], offset: usize) -> u16 {
+    read_u16_be(bytes, offset).expect("the bytes hold the whole field")
+}
+
+/// The big-endian `u32` field at `offset` of an artifact the generator built,
+/// read with the crate's own field reader.
 fn be_u32_at(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_be_bytes(
-        bytes[offset..offset + size_of::<u32>()]
-            .try_into()
-            .expect("the bytes hold the whole field"),
-    )
+    read_u32_be(bytes, offset).expect("the bytes hold the whole field")
 }
 
 /// Offset of the payload region: the end of `prefix || header || header_mac`,
@@ -2042,10 +2045,8 @@ fn with_recipient_region_padding(fcr: &[u8], file_key: &FileKey, extra: usize) -
     let mut out = fcr[..header_end].to_vec();
     let entries_end = OFF_FIRST_ENTRY + entries_len as usize;
     out.splice(entries_end..entries_end, std::iter::repeat_n(0u8, extra));
-    out[OFF_HEADER_LEN..OFF_HEADER_LEN + size_of::<u32>()]
-        .copy_from_slice(&(header_len + extra_len).to_be_bytes());
-    out[OFF_RECIPIENT_ENTRIES_LEN..OFF_RECIPIENT_ENTRIES_LEN + size_of::<u32>()]
-        .copy_from_slice(&(entries_len + extra_len).to_be_bytes());
+    write_u32_be(&mut out, OFF_HEADER_LEN, header_len + extra_len);
+    write_u32_be(&mut out, OFF_RECIPIENT_ENTRIES_LEN, entries_len + extra_len);
 
     let stream_nonce: [u8; STREAM_NONCE_SIZE] = out
         [OFF_STREAM_NONCE..OFF_STREAM_NONCE + STREAM_NONCE_SIZE]
@@ -2144,10 +2145,7 @@ fn write_prefix_cases(corpus: &mut Corpus, base: &MutationBase) {
         "passphrase-main",
         "prefix_header_len_above_structural_maximum",
         "oversized_header",
-        |b| {
-            b[OFF_HEADER_LEN..OFF_HEADER_LEN + 4]
-                .copy_from_slice(&(HEADER_LEN_MAX + 1).to_be_bytes())
-        },
+        |b| write_u32_be(b, OFF_HEADER_LEN, HEADER_LEN_MAX + 1),
     );
     // The local cap sits far below the structural maximum and is checked
     // straight after the prefix, before the declared header is read, so the
@@ -2162,8 +2160,11 @@ fn write_prefix_cases(corpus: &mut Corpus, base: &MutationBase) {
         "header_len_above_default_cap",
         "resource_cap_exceeded",
         |b| {
-            b[OFF_HEADER_LEN..OFF_HEADER_LEN + 4]
-                .copy_from_slice(&(crate::HeaderReadLimits::HEADER_LEN_DEFAULT + 1).to_be_bytes())
+            write_u32_be(
+                b,
+                OFF_HEADER_LEN,
+                crate::HeaderReadLimits::HEADER_LEN_DEFAULT + 1,
+            )
         },
     );
 
@@ -2183,12 +2184,7 @@ fn write_prefix_cases(corpus: &mut Corpus, base: &MutationBase) {
 
     // Truncation at each framing boundary: inside the prefix, inside the
     // declared header, and inside the header MAC.
-    let header_end = PREFIX_SIZE
-        + u32::from_be_bytes(
-            base.bytes[OFF_HEADER_LEN..OFF_HEADER_LEN + 4]
-                .try_into()
-                .expect("header_len"),
-        ) as usize;
+    let header_end = PREFIX_SIZE + be_u32_at(&base.bytes, OFF_HEADER_LEN) as usize;
     for (case_id, keep) in [
         ("framing-truncated-in-prefix", PREFIX_SIZE - 1),
         ("framing-truncated-in-header", header_end - 1),
@@ -2211,7 +2207,7 @@ fn write_prefix_cases(corpus: &mut Corpus, base: &MutationBase) {
     // the MAC bytes missing the class is `truncated`; with all 32 present and
     // `header_fixed` unable to fit, it is `malformed_header`.
     let mut zero_header = base.bytes[..PREFIX_SIZE].to_vec();
-    zero_header[OFF_HEADER_LEN..OFF_HEADER_LEN + 4].copy_from_slice(&0u32.to_be_bytes());
+    write_u32_be(&mut zero_header, OFF_HEADER_LEN, 0);
     fabricate_fcr(
         corpus,
         "framing-header-len-zero-no-mac",
@@ -2234,9 +2230,9 @@ fn write_prefix_cases(corpus: &mut Corpus, base: &MutationBase) {
 
 // ─── Header field offsets ──────────────────────────────────────────────────
 
-// Absolute offsets into a `.fcr`, derived from the §3.1/§3.2 layout so the
-// mutation cases below name a field rather than a bare number.
-/// `.fcr` plain-prefix field offsets (`FORMAT.md` §3.1).
+// Absolute offsets into a `.fcr`, so the mutation cases below name a field
+// rather than a bare number: the plain prefix (`FORMAT.md` §3.1), then
+// `header_fixed` (§3.2), then the fields of the first recipient entry (§3.3).
 const OFF_OUTER_VERSION: usize = crate::format::MAGIC_SIZE;
 const OFF_PREFIX_KIND: usize = OFF_OUTER_VERSION + 1;
 const OFF_PREFIX_FLAGS: usize = OFF_PREFIX_KIND + 1;
@@ -2249,6 +2245,15 @@ const OFF_RECIPIENT_ENTRIES_LEN: usize = OFF_RECIPIENT_COUNT + 2;
 const OFF_EXT_LEN: usize = OFF_RECIPIENT_ENTRIES_LEN + 4;
 const OFF_STREAM_NONCE: usize = OFF_EXT_LEN + 4;
 const OFF_FIRST_ENTRY: usize = crate::format::PREFIX_SIZE + crate::format::HEADER_FIXED_SIZE;
+
+const OFF_FIRST_ENTRY_TYPE_NAME_LEN: usize =
+    OFF_FIRST_ENTRY + crate::recipient::entry::ENTRY_TYPE_NAME_LEN_OFFSET;
+const OFF_FIRST_ENTRY_FLAGS: usize =
+    OFF_FIRST_ENTRY + crate::recipient::entry::ENTRY_RECIPIENT_FLAGS_OFFSET;
+const OFF_FIRST_ENTRY_BODY_LEN: usize =
+    OFF_FIRST_ENTRY + crate::recipient::entry::ENTRY_BODY_LEN_OFFSET;
+const OFF_FIRST_ENTRY_TYPE_NAME: usize =
+    OFF_FIRST_ENTRY + crate::recipient::entry::ENTRY_HEADER_SIZE;
 
 /// Builds a `.fcr` whose payload region is exactly `payload`, bypassing the
 /// archive writer. Used by the payload-STREAM cases, which need transcripts
@@ -2304,7 +2309,7 @@ fn write_header_cases(corpus: &mut Corpus, base: &MutationBase) {
         "passphrase-main",
         "recipient_count_zero",
         "recipient_count_out_of_range",
-        |b| b[OFF_RECIPIENT_COUNT..OFF_RECIPIENT_COUNT + 2].copy_from_slice(&0u16.to_be_bytes()),
+        |b| write_u16_be(b, OFF_RECIPIENT_COUNT, 0),
     );
     mutate_fcr(
         corpus,
@@ -2314,12 +2319,13 @@ fn write_header_cases(corpus: &mut Corpus, base: &MutationBase) {
         "recipient_count_above_structural_maximum",
         "recipient_count_out_of_range",
         |b| {
-            b[OFF_RECIPIENT_COUNT..OFF_RECIPIENT_COUNT + 2]
-                .copy_from_slice(&(crate::format::RECIPIENT_COUNT_MAX + 1).to_be_bytes())
+            write_u16_be(
+                b,
+                OFF_RECIPIENT_COUNT,
+                crate::format::RECIPIENT_COUNT_MAX + 1,
+            )
         },
     );
-    // §3.2 accounting: 31 + recipient_entries_len + ext_len MUST equal
-    // header_len. Raising the declared entries length alone breaks the sum.
     mutate_fcr(
         corpus,
         base,
@@ -2327,15 +2333,7 @@ fn write_header_cases(corpus: &mut Corpus, base: &MutationBase) {
         "passphrase-main",
         "header_section_lengths_do_not_sum_to_header_len",
         "malformed_header",
-        |b| {
-            let current = u32::from_be_bytes(
-                b[OFF_RECIPIENT_ENTRIES_LEN..OFF_RECIPIENT_ENTRIES_LEN + 4]
-                    .try_into()
-                    .expect("entries len"),
-            );
-            b[OFF_RECIPIENT_ENTRIES_LEN..OFF_RECIPIENT_ENTRIES_LEN + 4]
-                .copy_from_slice(&(current + 1).to_be_bytes());
-        },
+        |b| break_section_lengths(b),
     );
     // The declared bytes must actually be present: a reader reads exactly the
     // declared header and MAC first, so a file that merely claims an oversized
@@ -2386,11 +2384,34 @@ fn write_header_cases(corpus: &mut Corpus, base: &MutationBase) {
 fn declare_ext_region_above_max(b: &mut Vec<u8>) {
     let entries = be_u32_at(b, OFF_RECIPIENT_ENTRIES_LEN);
     let ext = crate::format::EXT_LEN_MAX + 1;
-    b[OFF_EXT_LEN..OFF_EXT_LEN + size_of::<u32>()].copy_from_slice(&ext.to_be_bytes());
+    write_u32_be(b, OFF_EXT_LEN, ext);
     let header_len = crate::format::HEADER_FIXED_SIZE as u32 + entries + ext;
-    b[OFF_HEADER_LEN..OFF_HEADER_LEN + size_of::<u32>()].copy_from_slice(&header_len.to_be_bytes());
+    write_u32_be(b, OFF_HEADER_LEN, header_len);
     let insert_at = OFF_FIRST_ENTRY + entries as usize;
     b.splice(insert_at..insert_at, std::iter::repeat_n(0u8, ext as usize));
+}
+
+/// Removes the byte at `at` from the first recipient entry's body and lowers
+/// `body_len`, `recipient_entries_len`, and `header_len` by one, so the body
+/// is one byte shorter and every length that encloses it still matches.
+fn remove_first_entry_body_byte(b: &mut Vec<u8>, at: usize) {
+    for field in [
+        OFF_FIRST_ENTRY_BODY_LEN,
+        OFF_RECIPIENT_ENTRIES_LEN,
+        OFF_HEADER_LEN,
+    ] {
+        let declared = be_u32_at(b, field);
+        write_u32_be(b, field, declared - 1);
+    }
+    b.remove(at);
+}
+
+/// Raises the declared `recipient_entries_len` by one and nothing else, so
+/// `31 + recipient_entries_len + ext_len` no longer equals `header_len`
+/// (`FORMAT.md` §3.2).
+fn break_section_lengths(b: &mut [u8]) {
+    let entries = be_u32_at(b, OFF_RECIPIENT_ENTRIES_LEN);
+    write_u32_be(b, OFF_RECIPIENT_ENTRIES_LEN, entries + 1);
 }
 
 /// The §3.2 check order, one case per pair of adjacent checks whose classes
@@ -2401,15 +2422,7 @@ fn declare_ext_region_above_max(b: &mut Vec<u8>) {
 /// recipient-count cap, then the entries. Header flags and the length sum
 /// share their class, so their relative order needs no case.
 fn write_header_check_order_cases(corpus: &mut Corpus, base: &MutationBase) {
-    let set_u16 = |b: &mut Vec<u8>, at: usize, value: u16| {
-        b[at..at + size_of::<u16>()].copy_from_slice(&value.to_be_bytes());
-    };
     let over_count_cap = crate::HeaderReadLimits::RECIPIENT_COUNT_DEFAULT + 1;
-    let break_section_lengths = |b: &mut Vec<u8>| {
-        let entries = be_u32_at(b, OFF_RECIPIENT_ENTRIES_LEN);
-        b[OFF_RECIPIENT_ENTRIES_LEN..OFF_RECIPIENT_ENTRIES_LEN + size_of::<u32>()]
-            .copy_from_slice(&(entries + 1).to_be_bytes());
-    };
 
     mutate_fcr(
         corpus,
@@ -2419,8 +2432,8 @@ fn write_header_check_order_cases(corpus: &mut Corpus, base: &MutationBase) {
         "header_flags_nonzero_and_recipient_count_zero",
         "malformed_header",
         |b| {
-            set_u16(b, OFF_HEADER_FLAGS, 1);
-            set_u16(b, OFF_RECIPIENT_COUNT, 0);
+            write_u16_be(b, OFF_HEADER_FLAGS, 1);
+            write_u16_be(b, OFF_RECIPIENT_COUNT, 0);
         },
     );
     mutate_fcr(
@@ -2431,7 +2444,7 @@ fn write_header_check_order_cases(corpus: &mut Corpus, base: &MutationBase) {
         "recipient_count_zero_and_ext_len_above_structural_maximum",
         "recipient_count_out_of_range",
         |b| {
-            set_u16(b, OFF_RECIPIENT_COUNT, 0);
+            write_u16_be(b, OFF_RECIPIENT_COUNT, 0);
             declare_ext_region_above_max(b);
         },
     );
@@ -2442,10 +2455,7 @@ fn write_header_check_order_cases(corpus: &mut Corpus, base: &MutationBase) {
         "passphrase-main",
         "ext_len_above_structural_maximum_and_section_lengths_disagree",
         "extension_region_too_large",
-        |b| {
-            let ext = crate::format::EXT_LEN_MAX + 1;
-            b[OFF_EXT_LEN..OFF_EXT_LEN + size_of::<u32>()].copy_from_slice(&ext.to_be_bytes());
-        },
+        |b| write_u32_be(b, OFF_EXT_LEN, crate::format::EXT_LEN_MAX + 1),
     );
     mutate_fcr(
         corpus,
@@ -2456,7 +2466,7 @@ fn write_header_check_order_cases(corpus: &mut Corpus, base: &MutationBase) {
         "malformed_header",
         |b| {
             break_section_lengths(b);
-            set_u16(b, OFF_RECIPIENT_COUNT, over_count_cap);
+            write_u16_be(b, OFF_RECIPIENT_COUNT, over_count_cap);
         },
     );
     mutate_fcr(
@@ -2467,8 +2477,8 @@ fn write_header_check_order_cases(corpus: &mut Corpus, base: &MutationBase) {
         "recipient_count_above_default_cap_and_entry_type_name_len_zero",
         "resource_cap_exceeded",
         |b| {
-            set_u16(b, OFF_RECIPIENT_COUNT, over_count_cap);
-            set_u16(b, OFF_FIRST_ENTRY, 0);
+            write_u16_be(b, OFF_RECIPIENT_COUNT, over_count_cap);
+            write_u16_be(b, OFF_FIRST_ENTRY_TYPE_NAME_LEN, 0);
         },
     );
 }
@@ -2631,7 +2641,7 @@ fn write_recipient_framing_cases(
         "passphrase-main",
         "entry_type_name_len_zero",
         "malformed_recipient_entry",
-        |b| b[OFF_FIRST_ENTRY..OFF_FIRST_ENTRY + 2].copy_from_slice(&0u16.to_be_bytes()),
+        |b| write_u16_be(b, OFF_FIRST_ENTRY_TYPE_NAME_LEN, 0),
     );
     mutate_fcr(
         corpus,
@@ -2640,7 +2650,7 @@ fn write_recipient_framing_cases(
         "passphrase-main",
         "entry_body_len_runs_past_recipient_region",
         "malformed_recipient_entry",
-        |b| b[OFF_FIRST_ENTRY + 4..OFF_FIRST_ENTRY + 8].copy_from_slice(&0xFFFF_u32.to_be_bytes()),
+        |b| write_u32_be(b, OFF_FIRST_ENTRY_BODY_LEN, 0xFFFF),
     );
 
     // The other side of the §3.2 rule that the entries consume exactly
@@ -2681,7 +2691,7 @@ fn write_recipient_framing_cases(
         "passphrase-main",
         "entry_reserved_flag_bit_nonzero",
         "recipient_flags_reserved",
-        |b| b[OFF_FIRST_ENTRY + 2] = 0x80,
+        |b| write_u16_be(b, OFF_FIRST_ENTRY_FLAGS, 1 << 15),
     );
     mutate_fcr(
         corpus,
@@ -2690,7 +2700,7 @@ fn write_recipient_framing_cases(
         "passphrase-main",
         "entry_type_name_violates_grammar",
         "malformed_type_name",
-        |b| b[OFF_FIRST_ENTRY + 8] = 0x00,
+        |b| b[OFF_FIRST_ENTRY_TYPE_NAME] = 0x00,
     );
 
     // A single unknown non-critical recipient: nothing to try.
@@ -2878,7 +2888,7 @@ fn write_recipient_framing_cases(
 
 /// Offset of a single recipient's body: the entry header plus its type name.
 fn body_offset(type_name: &str) -> usize {
-    OFF_FIRST_ENTRY + crate::recipient::entry::ENTRY_HEADER_SIZE + type_name.len()
+    OFF_FIRST_ENTRY_TYPE_NAME + type_name.len()
 }
 
 /// Commits a copy of an already-published artifact as a new case, for a rule
@@ -2921,7 +2931,13 @@ fn write_argon2id_cases(corpus: &mut Corpus, sources: &Path, base: &MutationBase
         "passphrase-main",
         "argon2id_native_entry_flags_nonzero",
         "malformed_recipient_entry",
-        |b| b[OFF_FIRST_ENTRY + 3] = 0x01,
+        |b| {
+            write_u16_be(
+                b,
+                OFF_FIRST_ENTRY_FLAGS,
+                crate::recipient::entry::RECIPIENT_FLAG_CRITICAL,
+            )
+        },
     );
 
     recredential_case(
@@ -2981,26 +2997,7 @@ fn write_argon2id_cases(corpus: &mut Corpus, sources: &Path, base: &MutationBase
         "passphrase-main",
         "argon2id_body_length_not_116",
         "malformed_recipient_entry",
-        |b| {
-            let declared = OFF_FIRST_ENTRY + 4;
-            let current =
-                u32::from_be_bytes(b[declared..declared + 4].try_into().expect("body_len"));
-            b[declared..declared + 4].copy_from_slice(&(current - 1).to_be_bytes());
-            b.remove(wrapped);
-            let entries_len = OFF_RECIPIENT_ENTRIES_LEN;
-            let entries = u32::from_be_bytes(
-                b[entries_len..entries_len + 4]
-                    .try_into()
-                    .expect("entries len"),
-            );
-            b[entries_len..entries_len + 4].copy_from_slice(&(entries - 1).to_be_bytes());
-            let header_len = u32::from_be_bytes(
-                b[OFF_HEADER_LEN..OFF_HEADER_LEN + 4]
-                    .try_into()
-                    .expect("header_len"),
-            );
-            b[OFF_HEADER_LEN..OFF_HEADER_LEN + 4].copy_from_slice(&(header_len - 1).to_be_bytes());
-        },
+        |b| remove_first_entry_body_byte(b, wrapped),
     );
 
     // KDF-parameter cases are written before the header MAC, so the MAC stays
@@ -3214,26 +3211,7 @@ fn write_x25519_cases(corpus: &mut Corpus, base: &MutationBase) {
         "private-key-a",
         "x25519_body_length_not_104",
         "malformed_recipient_entry",
-        |b| {
-            let declared = OFF_FIRST_ENTRY + 4;
-            let current =
-                u32::from_be_bytes(b[declared..declared + 4].try_into().expect("body_len"));
-            b[declared..declared + 4].copy_from_slice(&(current - 1).to_be_bytes());
-            b.remove(wrapped);
-            let entries = u32::from_be_bytes(
-                b[OFF_RECIPIENT_ENTRIES_LEN..OFF_RECIPIENT_ENTRIES_LEN + 4]
-                    .try_into()
-                    .expect("entries len"),
-            );
-            b[OFF_RECIPIENT_ENTRIES_LEN..OFF_RECIPIENT_ENTRIES_LEN + 4]
-                .copy_from_slice(&(entries - 1).to_be_bytes());
-            let header_len = u32::from_be_bytes(
-                b[OFF_HEADER_LEN..OFF_HEADER_LEN + 4]
-                    .try_into()
-                    .expect("header_len"),
-            );
-            b[OFF_HEADER_LEN..OFF_HEADER_LEN + 4].copy_from_slice(&(header_len - 1).to_be_bytes());
-        },
+        |b| remove_first_entry_body_byte(b, wrapped),
     );
     mutate_fcr(
         corpus,
@@ -3242,7 +3220,7 @@ fn write_x25519_cases(corpus: &mut Corpus, base: &MutationBase) {
         "private-key-a",
         "x25519_reserved_flag_bit_nonzero",
         "recipient_flags_reserved",
-        |b| b[OFF_FIRST_ENTRY + 2] = 0x40,
+        |b| write_u16_be(b, OFF_FIRST_ENTRY_FLAGS, 1 << 14),
     );
     mutate_fcr(
         corpus,
@@ -3251,7 +3229,13 @@ fn write_x25519_cases(corpus: &mut Corpus, base: &MutationBase) {
         "private-key-a",
         "x25519_native_entry_flags_nonzero",
         "malformed_recipient_entry",
-        |b| b[OFF_FIRST_ENTRY + 3] = 0x01,
+        |b| {
+            write_u16_be(
+                b,
+                OFF_FIRST_ENTRY_FLAGS,
+                crate::recipient::entry::RECIPIENT_FLAG_CRITICAL,
+            )
+        },
     );
 }
 
@@ -3277,8 +3261,11 @@ fn write_tlv_cases(corpus: &mut Corpus, sources: &Path) {
         built,
     );
 
+    // A TLV entry is `tag:u16 || len:u32 || value`, so its length field
+    // starts after the tag.
+    let tlv_len_at = size_of::<u16>();
     let mut truncated_value = tlv_bytes(0x0001, b"");
-    truncated_value[2..6].copy_from_slice(&99u32.to_be_bytes());
+    write_u32_be(&mut truncated_value, tlv_len_at, 99);
 
     let cases: [(&str, Vec<u8>, &str, &str); 7] = [
         (
@@ -3321,7 +3308,7 @@ fn write_tlv_cases(corpus: &mut Corpus, sources: &Path) {
             "tlv-value-above-cap",
             {
                 let mut entry = tlv_bytes(0x0001, b"");
-                entry[2..6].copy_from_slice(&(crate::format::EXT_LEN_MAX + 1).to_be_bytes());
+                write_u32_be(&mut entry, tlv_len_at, crate::format::EXT_LEN_MAX + 1);
                 entry
             },
             "tlv_declared_value_above_cap",
@@ -4023,23 +4010,14 @@ fn write_private_key_ext_and_pair_cases(corpus: &mut Corpus, keys: &CorpusKeys, 
     };
     let over_cap_len = crate::KeyReadLimits::PRIVATE_KEY_WRAPPED_SECRET_LEN_DEFAULT + 1;
     let mut over_cap = canonical.to_vec();
-    let u16_at = |bytes: &[u8], at: usize| -> usize {
-        usize::from(u16::from_be_bytes(
-            bytes[at..at + 2].try_into().expect("two bytes"),
-        ))
-    };
-    let u32_at = |bytes: &[u8], at: usize| -> usize {
-        u32::from_be_bytes(bytes[at..at + 4].try_into().expect("four bytes")) as usize
-    };
     // The declared bytes must be present, so the cap is what rejects the file
     // rather than a short read. Every variable-length field counts.
     let declared = PRIVATE_KEY_HEADER_FIXED_SIZE
-        + u16_at(&over_cap, TYPE_NAME_LEN_OFFSET)
-        + u32_at(&over_cap, PUBLIC_LEN_OFFSET)
-        + u32_at(&over_cap, EXT_LEN_OFFSET)
+        + usize::from(be_u16_at(&over_cap, TYPE_NAME_LEN_OFFSET))
+        + be_u32_at(&over_cap, PUBLIC_LEN_OFFSET) as usize
+        + be_u32_at(&over_cap, EXT_LEN_OFFSET) as usize
         + over_cap_len as usize;
-    over_cap[WRAPPED_SECRET_LEN_OFFSET..WRAPPED_SECRET_LEN_OFFSET + 4]
-        .copy_from_slice(&over_cap_len.to_be_bytes());
+    write_u32_be(&mut over_cap, WRAPPED_SECRET_LEN_OFFSET, over_cap_len);
     over_cap.resize(declared, 0);
     private_key_open_case(
         corpus,
@@ -4136,13 +4114,10 @@ fn private_key_case(
 fn with_private_key_type(key: &[u8], type_name: &str) -> Vec<u8> {
     use crate::key::private::{PRIVATE_KEY_HEADER_FIXED_SIZE, TYPE_NAME_LEN_OFFSET};
 
-    let length_field = TYPE_NAME_LEN_OFFSET..TYPE_NAME_LEN_OFFSET + size_of::<u16>();
-    let old_len = usize::from(u16::from_be_bytes(
-        key[length_field.clone()].try_into().expect("type_name_len"),
-    ));
+    let old_len = usize::from(be_u16_at(key, TYPE_NAME_LEN_OFFSET));
     let new_len = u16::try_from(type_name.len()).expect("a type name fits its length field");
     let mut out = key[..PRIVATE_KEY_HEADER_FIXED_SIZE].to_vec();
-    out[length_field].copy_from_slice(&new_len.to_be_bytes());
+    write_u16_be(&mut out, TYPE_NAME_LEN_OFFSET, new_len);
     out.extend_from_slice(type_name.as_bytes());
     out.extend_from_slice(&key[PRIVATE_KEY_HEADER_FIXED_SIZE + old_len..]);
     out
@@ -4150,7 +4125,7 @@ fn with_private_key_type(key: &[u8], type_name: &str) -> Vec<u8> {
 
 fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     use crate::key::private::{
-        EXT_LEN_OFFSET, KDF_PARAMS_OFFSET, KIND_OFFSET, PRIVATE_KEY_EXT_LEN_MAX,
+        EXT_LEN_OFFSET, KDF_PARAMS_OFFSET, KEY_FLAGS_OFFSET, KIND_OFFSET, PRIVATE_KEY_EXT_LEN_MAX,
         PRIVATE_KEY_HEADER_FIXED_SIZE, PRIVATE_KEY_PUBLIC_LEN_MAX,
         PRIVATE_KEY_WRAPPED_SECRET_LEN_MAX, PRIVATE_KEY_WRAPPED_SECRET_LEN_MIN, PUBLIC_LEN_OFFSET,
         TYPE_NAME_LEN_OFFSET, VERSION_OFFSET, WRAPPED_SECRET_LEN_OFFSET,
@@ -4180,7 +4155,7 @@ fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         ),
         (
             "private-key-key-flags-nonzero",
-            Box::new(|b: &mut Vec<u8>| b[7] = 0x01),
+            Box::new(|b: &mut Vec<u8>| write_u16_be(b, KEY_FLAGS_OFFSET, 1)),
             "private_key_flags_nonzero",
             "malformed_private_key",
         ),
@@ -4189,10 +4164,7 @@ fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         // name.
         (
             "private-key-type-name-len-zero",
-            Box::new(|b: &mut Vec<u8>| {
-                b[TYPE_NAME_LEN_OFFSET..TYPE_NAME_LEN_OFFSET + size_of::<u16>()]
-                    .copy_from_slice(&0u16.to_be_bytes());
-            }),
+            Box::new(|b: &mut Vec<u8>| write_u16_be(b, TYPE_NAME_LEN_OFFSET, 0)),
             "private_key_type_name_len_zero",
             "malformed_private_key",
         ),
@@ -4225,8 +4197,11 @@ fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         (
             "private-key-kdf-memory-above-max",
             Box::new(|b: &mut Vec<u8>| {
-                b[KDF_PARAMS_OFFSET..KDF_PARAMS_OFFSET + size_of::<u32>()]
-                    .copy_from_slice(&(KdfLimit::MEM_COST_KIB_STRUCTURAL_MAX + 1).to_be_bytes());
+                write_u32_be(
+                    b,
+                    KDF_PARAMS_OFFSET,
+                    KdfLimit::MEM_COST_KIB_STRUCTURAL_MAX + 1,
+                )
             }),
             "private_key_argon2id_memory_cost_above_structural_maximum",
             "invalid_kdf_parameters",
@@ -4293,7 +4268,7 @@ fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     ];
     for (case_id, offset, value, condition) in length_limits {
         let mut bytes = unsupported.clone();
-        bytes[offset..offset + size_of::<u32>()].copy_from_slice(&value.to_be_bytes());
+        write_u32_be(&mut bytes, offset, value);
         private_key_case(corpus, case_id, &bytes, condition, "malformed_private_key");
     }
 
@@ -4365,12 +4340,8 @@ fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     // that bound no cleartext would open the file and fail the §8 derivation
     // check instead, which is a different verdict.
     let mut aad_tampered = canonical.clone();
-    let public_material_at = PRIVATE_KEY_HEADER_FIXED_SIZE
-        + usize::from(u16::from_be_bytes(
-            canonical[TYPE_NAME_LEN_OFFSET..TYPE_NAME_LEN_OFFSET + 2]
-                .try_into()
-                .expect("type_name_len"),
-        ));
+    let public_material_at =
+        PRIVATE_KEY_HEADER_FIXED_SIZE + usize::from(be_u16_at(&canonical, TYPE_NAME_LEN_OFFSET));
     aad_tampered[public_material_at] ^= 0x01;
     private_key_open_case(
         corpus,
@@ -4722,18 +4693,13 @@ fn write_fca_cases(corpus: &mut Corpus) {
         ),
         (
             "fca-entry-count-zero",
-            Box::new(|b: &mut Vec<u8>| {
-                b[FCA_OFF_ENTRY_COUNT..FCA_OFF_ENTRY_COUNT + 4].copy_from_slice(&0u32.to_be_bytes())
-            }),
+            Box::new(|b: &mut Vec<u8>| write_u32_be(b, FCA_OFF_ENTRY_COUNT, 0)),
             "fca_entry_count_zero",
             "malformed_archive",
         ),
         (
             "fca-manifest-len-zero",
-            Box::new(|b: &mut Vec<u8>| {
-                b[FCA_OFF_MANIFEST_LEN..FCA_OFF_MANIFEST_LEN + 4]
-                    .copy_from_slice(&0u32.to_be_bytes())
-            }),
+            Box::new(|b: &mut Vec<u8>| write_u32_be(b, FCA_OFF_MANIFEST_LEN, 0)),
             "fca_manifest_len_zero",
             "malformed_archive",
         ),
@@ -5007,8 +4973,9 @@ fn write_fca_cases(corpus: &mut Corpus) {
         "fca_entry_mode_outside_permission_bits",
         "malformed_archive",
         |b| {
+            // The first entry's mode follows its kind and flag bytes.
             let mode_at = crate::archive::format::FCA_HEADER_SIZE + 2;
-            b[mode_at..mode_at + 2].copy_from_slice(&0o1777u16.to_be_bytes());
+            write_u16_be(b, mode_at, 0o1777);
         },
     );
     fca_case(
@@ -5261,8 +5228,11 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         (
             "fca-entry-count-over-default-cap",
             Box::new(|b: &mut Vec<u8>| {
-                b[FCA_OFF_ENTRY_COUNT..FCA_OFF_ENTRY_COUNT + 4]
-                    .copy_from_slice(&(ArchiveLimits::ENTRY_COUNT_DEFAULT + 1).to_be_bytes())
+                write_u32_be(
+                    b,
+                    FCA_OFF_ENTRY_COUNT,
+                    ArchiveLimits::ENTRY_COUNT_DEFAULT + 1,
+                )
             }),
             "fca_entry_count_above_default_cap",
             "resource_cap_exceeded",
@@ -5270,8 +5240,11 @@ fn write_resource_policy_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         (
             "fca-manifest-len-over-default-cap",
             Box::new(|b: &mut Vec<u8>| {
-                b[FCA_OFF_MANIFEST_LEN..FCA_OFF_MANIFEST_LEN + 4]
-                    .copy_from_slice(&(ArchiveLimits::MANIFEST_BYTES_DEFAULT + 1).to_be_bytes())
+                write_u32_be(
+                    b,
+                    FCA_OFF_MANIFEST_LEN,
+                    ArchiveLimits::MANIFEST_BYTES_DEFAULT + 1,
+                )
             }),
             "fca_manifest_len_above_default_cap",
             "resource_cap_exceeded",

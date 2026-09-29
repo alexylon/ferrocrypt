@@ -23,9 +23,11 @@ use crate::recipient::policy::NativeRecipientType;
 /// recipient_flags:u16 || body_len:u32`), per `FORMAT.md` §3.3.
 pub(crate) const ENTRY_HEADER_SIZE: usize = 8;
 
-const ENTRY_TYPE_NAME_LEN_OFFSET: usize = 0;
-const ENTRY_RECIPIENT_FLAGS_OFFSET: usize = ENTRY_TYPE_NAME_LEN_OFFSET + size_of::<u16>();
-const ENTRY_BODY_LEN_OFFSET: usize = ENTRY_RECIPIENT_FLAGS_OFFSET + size_of::<u16>();
+/// Offsets of the recipient-entry header fields from the start of the entry.
+pub(crate) const ENTRY_TYPE_NAME_LEN_OFFSET: usize = 0;
+pub(crate) const ENTRY_RECIPIENT_FLAGS_OFFSET: usize =
+    ENTRY_TYPE_NAME_LEN_OFFSET + size_of::<u16>();
+pub(crate) const ENTRY_BODY_LEN_OFFSET: usize = ENTRY_RECIPIENT_FLAGS_OFFSET + size_of::<u16>();
 const _: () = assert!(ENTRY_BODY_LEN_OFFSET + size_of::<u32>() == ENTRY_HEADER_SIZE);
 
 /// Bit 0 of `recipient_flags`. When set, an unknown recipient type

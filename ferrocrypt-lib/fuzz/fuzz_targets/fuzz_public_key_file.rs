@@ -4,10 +4,10 @@
 //! (`FORMAT.md` §7).
 //!
 //! This target covers the file-level checks around the recipient-string
-//! decoder: key-kind routing, UTF-8, the optional trailing `LF`, other
-//! ASCII whitespace, and the X25519 type and length. The bounded
-//! filesystem read remains with the on-disk reader and is outside this
-//! content-parser target.
+//! decoder: key-kind routing, UTF-8, the optional trailing `LF`, and the
+//! X25519 type and length. Any other whitespace reaches the decoder, which
+//! refuses it. The bounded filesystem read remains with the on-disk reader
+//! and is outside this content-parser target.
 //!
 //! Accepted content, after removing the permitted trailing `LF`, must
 //! parse through the public recipient-string API and re-encode

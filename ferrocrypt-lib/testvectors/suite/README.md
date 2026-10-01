@@ -137,10 +137,10 @@ be unexpected:
 - **Wrong binary kind vs key-file crossing.**
   `privatekey-wrong-kind.private.key` carries the encrypted-file kind byte
   `0x45` where the private-key kind `0x4B` belongs, so it reports
-  `WrongKind { kind: 0x45 }`. Supplying a valid `public.key` to the private-key
-  validator, or a valid `private.key` to the public-key reader, instead reports
-  `WrongKeyFileType`; that diagnostic is reserved for those concrete
-  public/private crossings.
+  `WrongKind { kind: 0x45 }`. Supplying a `public.key` written by this build to
+  the private-key validator, or an X25519 `private.key` to the public-key
+  reader, instead reports `WrongKeyFileType`; that diagnostic is reserved for
+  those concrete public/private crossings.
 
 ## Regenerating
 

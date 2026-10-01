@@ -765,9 +765,13 @@ pub(crate) fn fingerprint_hex(type_name: &str, key_material: &[u8]) -> Result<St
 ///
 /// The content must be the canonical lowercase `fcr1…` recipient
 /// string, optionally followed by exactly one trailing `\n`
-/// (`FORMAT.md` §7). Anything else — leading whitespace, CRLF line
-/// endings, extra blank lines, trailing spaces or tabs, or internal
-/// whitespace — is rejected as [`FormatDefect::MalformedPublicKey`].
+/// (`FORMAT.md` §7.1). One final LF is removed and nothing else is
+/// trimmed, so leading whitespace, CRLF line endings, extra blank lines,
+/// trailing spaces or tabs, and internal whitespace all reach the
+/// recipient-string decoder. It refuses them in the order of `FORMAT.md` §7:
+/// as [`CryptoError::RecipientStringCapExceeded`] when the text is ASCII,
+/// within the 20,000-character ceiling, and longer than the cap, and
+/// otherwise as [`FormatDefect::MalformedPublicKey`].
 ///
 /// A binary `private.key` signature is classified before UTF-8
 /// decoding and returns [`FormatDefect::WrongKeyFileType`]. A valid
@@ -784,26 +788,12 @@ pub(crate) fn parse_public_key_file_bytes(
     bytes: &[u8],
     limits: KeyReadLimits,
 ) -> Result<ResolvedPublicKey, CryptoError> {
-    if bytes.is_empty() {
-        // Reject here so an empty file reports as a malformed public
-        // key rather than as an invalid recipient string from the
-        // Bech32 decoder.
-        return Err(malformed_public_key());
-    }
-    if matches!(
-        crate::key::files::KeyFileKind::classify(bytes, limits),
-        crate::key::files::KeyFileKind::Private
-    ) {
+    if crate::key::private::has_private_key_signature(bytes) {
         return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
     }
     let contents = std::str::from_utf8(bytes)
         .map_err(|_| CryptoError::InvalidFormat(FormatDefect::NotAKeyFile))?;
-    // Leave non-whitespace text, such as a BOM or an invalid Bech32
-    // character, to the recipient-string decoder.
     let recipient = contents.strip_suffix('\n').unwrap_or(contents);
-    if recipient.bytes().any(|b| b.is_ascii_whitespace()) {
-        return Err(malformed_public_key());
-    }
     let decoded = decode_recipient_string(recipient, limits.recipient_string_chars())?;
     let suite = decoded.keypair_suite;
     let key = decoded_x25519_bytes(decoded)?;
@@ -812,9 +802,9 @@ pub(crate) fn parse_public_key_file_bytes(
 
 /// Reads and parses a `public.key` file.
 ///
-/// Enforces [`PUBLIC_KEY_FILE_READ_CAP_BYTES`] before allocation, then
-/// delegates all content validation to [`parse_public_key_file_bytes`]
-/// under `limits`.
+/// Refuses a file longer than [`PUBLIC_KEY_FILE_READ_CAP_BYTES`] as
+/// malformed, reading at most one byte past it, then delegates all content
+/// validation to [`parse_public_key_file_bytes`] under `limits`.
 pub(crate) fn read_public_key(
     path: &std::path::Path,
     limits: KeyReadLimits,
@@ -890,7 +880,10 @@ impl PublicKey {
     /// [`CryptoError::Io`] for other read failures. Returns
     /// [`CryptoError::InvalidFormat`] or
     /// [`CryptoError::RecipientStringCapExceeded`] if the file is not a valid
-    /// `public.key` file.
+    /// `public.key` file, [`CryptoError::UnsupportedVersion`] for a public
+    /// key from an unsupported keypair suite, and
+    /// [`CryptoError::UnsupportedKeyType`] for a valid public key of a key
+    /// type this build does not support.
     pub fn from_key_file(path: impl AsRef<std::path::Path>) -> Result<Self, CryptoError> {
         Self::from_key_file_with_limits(path, KeyReadLimits::default())
     }
@@ -1746,10 +1739,9 @@ mod tests {
         }
     }
 
-    /// A `public.key` past the file-read cap is refused before the
-    /// content is parsed, and the refusal carries the same
-    /// `malformed_public_key` class as every other public-key
-    /// rejection. Pins the over-cap branch of `read_file_capped` at a
+    /// A `public.key` past the file-read cap is refused as
+    /// `malformed_public_key` before its content is parsed, as `FORMAT.md`
+    /// §7.1 requires. Pins the over-cap branch of `read_file_capped` at a
     /// real call site.
     #[test]
     fn read_public_key_rejects_a_file_above_the_read_cap() {
@@ -1872,6 +1864,37 @@ mod tests {
             match parse_public_key_file_bytes(content.as_bytes(), KeyReadLimits::default()) {
                 Err(CryptoError::InvalidFormat(FormatDefect::MalformedPublicKey)) => {}
                 other => panic!("expected MalformedPublicKey for {content:?}, got {other:?}"),
+            }
+        }
+    }
+
+    /// Text over the recipient-string cap is refused for its length, whatever
+    /// ASCII whitespace it holds, by the file reader as by the string reader:
+    /// ASCII whitespace is a character the Bech32 grammar refuses, and
+    /// `FORMAT.md` §7 applies the cap before any Bech32 rule. Only one final
+    /// LF is removed from a file, so every other LF and CR counts as text.
+    #[test]
+    fn over_cap_text_with_whitespace_is_refused_for_its_length_by_both_readers() {
+        let over_cap = encode_recipient_string("future", &[0x11u8; 1024]).unwrap();
+        let limits = KeyReadLimits::default();
+        assert!(over_cap.len() > limits.recipient_string_chars());
+        let mut tab_inside = over_cap.clone();
+        tab_inside.insert(over_cap.len() / 2, '\t');
+        for text in [
+            format!(" {over_cap}"),
+            format!("{over_cap} "),
+            format!("{over_cap}\r"),
+            format!("{over_cap}\r\n"),
+            format!("{over_cap}\n\n"),
+            tab_inside,
+        ] {
+            match parse_public_key_file_bytes(text.as_bytes(), limits) {
+                Err(CryptoError::RecipientStringCapExceeded { .. }) => {}
+                other => panic!("file reader, {text:?}: expected the cap error, got {other:?}"),
+            }
+            match PublicKey::from_recipient_string_with_limits(&text, limits) {
+                Err(CryptoError::RecipientStringCapExceeded { .. }) => {}
+                other => panic!("string reader, {text:?}: expected the cap error, got {other:?}"),
             }
         }
     }

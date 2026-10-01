@@ -59,6 +59,10 @@ pub(crate) const PUBLIC_KEY_SIZE: usize = 32;
 /// X25519 private-key (scalar input) length in bytes.
 pub(crate) const PRIVATE_KEY_SIZE: usize = 32;
 
+/// Length in bytes of a native X25519 `wrapped_secret` in a `private.key`:
+/// the 32-byte scalar and its 16-byte AEAD tag (`FORMAT.md` §8).
+pub(crate) const WRAPPED_SECRET_LEN: usize = PRIVATE_KEY_SIZE + TAG_SIZE;
+
 /// Recipient body length in bytes (`FORMAT.md` §4.2).
 pub(crate) const BODY_LENGTH: usize = PUBLIC_KEY_SIZE + WRAP_NONCE_SIZE + WRAPPED_FILE_KEY_SIZE;
 
@@ -426,7 +430,8 @@ pub(crate) struct OpenedX25519KeyFile {
 /// - [`crate::error::FormatDefect::MalformedTypeName`] when the stored
 ///   `type_name` violates the `FORMAT.md` §3.3 grammar
 /// - [`crate::error::FormatDefect::WrongKeyFileType`] when the file is a
-///   `public.key` text file rather than a binary `private.key`
+///   `public.key` whose recipient string this build can decode within the
+///   recipient-string cap in `key_read_limits`
 /// - [`CryptoError::UnsupportedKeyType`] for a `private.key` that wraps a
 ///   non-X25519 secret (e.g. a future native key kind)
 /// - [`crate::error::FormatDefect::MalformedPrivateKey`] for a structurally valid
@@ -435,8 +440,9 @@ pub(crate) struct OpenedX25519KeyFile {
 ///   stored public material does not match
 ///   `X25519(secret_material, basepoint)` (the FORMAT.md §8 native
 ///   recipient-specific check)
-/// - [`crate::error::FormatDefect::MalformedTlv`] / [`crate::error::FormatDefect::UnknownCriticalTag`]
-///   for malformed or unknown-critical entries in `ext_bytes`
+/// - [`crate::error::FormatDefect::MalformedTlv`] /
+///   [`crate::error::FormatDefect::UnknownCriticalTag`] for malformed or
+///   unknown-critical entries in `ext_bytes`
 pub(crate) fn open_x25519_key_file(
     path: &std::path::Path,
     passphrase: &crate::passphrase::Passphrase,
@@ -445,21 +451,10 @@ pub(crate) fn open_x25519_key_file(
     on_event: &dyn Fn(&crate::ProgressEvent),
 ) -> Result<OpenedX25519KeyFile, CryptoError> {
     use crate::error::FormatDefect;
-    use crate::key::files::KeyFileKind;
-    use crate::key::private::{open_private_key, read_private_key_file};
+    use crate::key::files::read_private_key_bytes;
+    use crate::key::private::open_private_key;
 
-    let bytes = read_private_key_file(path, key_read_limits.private_key_wrapped_secret_len())?;
-
-    // Friendly diagnostic for the cross-mix-up: a user pointing the
-    // private-key reader at a `public.key` text file gets
-    // `WrongKeyFileType` rather than the generic `NotAKeyFile` that
-    // `open_private_key`'s magic check would surface.
-    if matches!(
-        KeyFileKind::classify(&bytes, key_read_limits),
-        KeyFileKind::Public
-    ) {
-        return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
-    }
+    let bytes = read_private_key_bytes(path, key_read_limits)?;
 
     // Deliberate order: the full unlock runs before the type-name
     // check, so the wrong-type verdict below is made on
@@ -527,23 +522,27 @@ pub(crate) fn open_x25519_key_file(
 /// Checks (in order):
 /// - file is large enough to hold the 90-byte cleartext fixed header;
 /// - [`crate::key::private::PrivateKeyHeader::parse`] accepts the
-///   header (magic, version, kind, `key_flags == 0`, length-field
-///   structural ranges);
+///   header (magic, kind, version, `key_flags == 0`, the structural
+///   ranges of the length fields and of the KDF parameters);
+/// - the file's total length matches
+///   `90 + type_name_len + public_len + ext_len + wrapped_secret_len`,
+///   the check the unlock also makes before it reads the type name, after
+///   the local caps it applies and this validator does not;
 /// - `type_name` satisfies the `FORMAT.md` §3.3 grammar and is
 ///   `"x25519"`; a valid non-X25519 name rejects as
 ///   [`CryptoError::UnsupportedKeyType`];
 /// - `public_len` equals the X25519 public-key size (32);
 /// - `wrapped_secret_len` equals the native X25519 wrapped-secret size
-///   (32-byte secret + 16-byte AEAD tag = 48, `FORMAT.md` §8);
-/// - the file's total length matches `90 + type_name_len + public_len
-///   + ext_len + wrapped_secret_len`.
+///   (32-byte secret + 16-byte AEAD tag = 48, `FORMAT.md` §8).
 ///
 /// Does NOT validate `ext_bytes` TLV canonicity. TLV canonicity runs
 /// only after AEAD-AAD authentication, which structural validation by
 /// definition does not perform.
 pub fn validate_private_key_shape(data: &[u8]) -> Result<(), CryptoError> {
     use crate::error::FormatDefect;
-    use crate::key::private::{PRIVATE_KEY_HEADER_FIXED_SIZE, PrivateKeyHeader};
+    use crate::key::private::{
+        PRIVATE_KEY_HEADER_FIXED_SIZE, PrivateKeyHeader, check_total_file_size,
+    };
 
     let header_bytes =
         data.first_chunk::<PRIVATE_KEY_HEADER_FIXED_SIZE>()
@@ -551,18 +550,10 @@ pub fn validate_private_key_shape(data: &[u8]) -> Result<(), CryptoError> {
                 FormatDefect::MalformedPrivateKey,
             ))?;
     let header = PrivateKeyHeader::parse(header_bytes)?;
+    check_total_file_size(data.len(), &header)?;
 
     let type_name_start = PRIVATE_KEY_HEADER_FIXED_SIZE;
-    let type_name_end = type_name_start
-        .checked_add(header.type_name_len as usize)
-        .ok_or(CryptoError::InvalidFormat(
-            FormatDefect::MalformedPrivateKey,
-        ))?;
-    if data.len() < type_name_end {
-        return Err(CryptoError::InvalidFormat(
-            FormatDefect::MalformedPrivateKey,
-        ));
-    }
+    let type_name_end = type_name_start + header.type_name_len as usize;
     let type_name = std::str::from_utf8(&data[type_name_start..type_name_end])
         .map_err(|_| CryptoError::InvalidFormat(FormatDefect::MalformedTypeName))?;
     // Same order as `open_private_key`: grammar first, so a name that
@@ -580,25 +571,9 @@ pub fn validate_private_key_shape(data: &[u8]) -> Result<(), CryptoError> {
         ));
     }
 
-    // FORMAT.md §8: a native X25519 wrapped secret is exactly the
-    // 32-byte scalar plus the 16-byte AEAD tag. The unlock path
-    // re-rejects any other length after decryption; enforcing it here
-    // keeps this validator's verdict aligned with what can unlock.
-    if header.wrapped_secret_len != (PRIVATE_KEY_SIZE + TAG_SIZE) as u32 {
-        return Err(CryptoError::InvalidFormat(
-            FormatDefect::MalformedPrivateKey,
-        ));
-    }
-
-    let expected_total = (PRIVATE_KEY_HEADER_FIXED_SIZE as u64)
-        .checked_add(header.type_name_len as u64)
-        .and_then(|v| v.checked_add(header.public_len as u64))
-        .and_then(|v| v.checked_add(header.ext_len as u64))
-        .and_then(|v| v.checked_add(header.wrapped_secret_len as u64))
-        .ok_or(CryptoError::InvalidFormat(
-            FormatDefect::MalformedPrivateKey,
-        ))?;
-    if (data.len() as u64) != expected_total {
+    // The unlock also refuses any other length, after decryption; checking it
+    // here keeps this validator's verdict aligned with what can unlock.
+    if header.wrapped_secret_len != WRAPPED_SECRET_LEN as u32 {
         return Err(CryptoError::InvalidFormat(
             FormatDefect::MalformedPrivateKey,
         ));
@@ -662,32 +637,177 @@ mod tests {
     /// other than 32 (the X25519 size) decodes through the generic
     /// private-key reader, but the X25519 adapter must reject it: the
     /// stored public material cannot represent an X25519 point at any
-    /// length other than 32. Surfaces as `MalformedPrivateKey`.
+    /// length other than 32. Surfaces as `MalformedPrivateKey`, one byte
+    /// short and one byte long.
     #[test]
     fn open_private_key_rejects_x25519_public_len_mismatch() -> Result<(), CryptoError> {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("private.key");
         let pass = Passphrase::new("pw");
+        let (secret_material, public_material) = keypair();
 
-        let secret = StaticSecret::random_from_rng(OsRng);
-        let secret_material = secret.to_bytes();
-        let malformed_public = [0u8; PUBLIC_KEY_SIZE - 1];
+        for public_len in [PUBLIC_KEY_SIZE - 1, PUBLIC_KEY_SIZE + 1] {
+            let mut public = public_material.to_vec();
+            public.resize(public_len, 0x07);
+            let bytes = seal_private_key(
+                &secret_material,
+                TYPE_NAME,
+                &public,
+                &[],
+                &pass,
+                &KdfParams::test_fast_default(),
+            )?;
+            fs::write(&path, bytes)?;
 
-        let bytes = seal_private_key(
-            &secret_material,
-            TYPE_NAME,
-            &malformed_public,
-            &[],
-            &pass,
-            &KdfParams::test_fast_default(),
+            match open_x25519_private_key(&path, &pass, None, KeyReadLimits::default(), &|_| {})
+                .map(|_| ())
+            {
+                Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => {}
+                other => panic!(
+                    "expected MalformedPrivateKey for {public_len} bytes of public material, got {other:?}"
+                ),
+            }
+        }
+        Ok(())
+    }
+
+    /// A sealed `private.key` whose secret is not 32 bytes authenticates,
+    /// and the X25519 adapter must then reject it before copying the secret
+    /// into its fixed 32-byte buffer: `MalformedPrivateKey`, not a panic.
+    #[test]
+    fn open_private_key_rejects_x25519_secret_len_mismatch() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("private.key");
+        let pass = Passphrase::new("pw");
+        let (secret_material, public_material) = keypair();
+
+        for secret_len in [PRIVATE_KEY_SIZE - 1, PRIVATE_KEY_SIZE + 1] {
+            let mut secret = secret_material.to_vec();
+            secret.resize(secret_len, 0x07);
+            let bytes = seal_private_key(
+                &secret,
+                TYPE_NAME,
+                &public_material,
+                &[],
+                &pass,
+                &KdfParams::test_fast_default(),
+            )?;
+            fs::write(&path, bytes)?;
+
+            match open_x25519_private_key(&path, &pass, None, KeyReadLimits::default(), &|_| {})
+                .map(|_| ())
+            {
+                Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => {}
+                other => panic!(
+                    "expected MalformedPrivateKey for a {secret_len}-byte secret, got {other:?}"
+                ),
+            }
+        }
+        Ok(())
+    }
+
+    /// A file larger than any valid `private.key` is refused with the error
+    /// its header gives, as the same header is in a file of ordinary size:
+    /// a reader stops reading a file whose header does not parse once it
+    /// could tell a `public.key` apart, rather than refusing the file for its
+    /// size. `FORMAT.md` §8 checks the version before the lengths, so a
+    /// newer key must not turn into a malformed one by being large.
+    #[test]
+    fn a_file_past_the_read_cap_reports_the_error_its_header_gives() -> Result<(), CryptoError> {
+        use crate::key::private::{
+            KDF_PARAMS_OFFSET, KIND_OFFSET, PRIVATE_KEY_FILE_READ_CAP_BYTES, PRIVATE_KEY_VERSION,
+            VERSION_OFFSET,
+        };
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("private.key");
+        let pass = Passphrase::new("pw");
+        let canonical =
+            shaped_private_key(TYPE_NAME, PUBLIC_KEY_SIZE as u32, WRAPPED_SECRET_LEN as u32);
+        type Mutation = fn(&mut [u8]);
+        type Verdict = fn(&CryptoError) -> bool;
+        let headers: [(&str, Mutation, Verdict); 4] = [
+            (
+                "a wrong magic",
+                |key| key[0] ^= 0xFF,
+                |e| matches!(e, CryptoError::InvalidFormat(FormatDefect::NotAKeyFile)),
+            ),
+            (
+                "another kind",
+                |key| key[KIND_OFFSET] = crate::format::KIND_ENCRYPTED,
+                |e| {
+                    matches!(
+                        e,
+                        CryptoError::InvalidFormat(FormatDefect::WrongKind { .. })
+                    )
+                },
+            ),
+            (
+                "a newer version",
+                |key| key[VERSION_OFFSET] = PRIVATE_KEY_VERSION + 1,
+                |e| matches!(e, CryptoError::UnsupportedVersion(_)),
+            ),
+            (
+                "KDF memory over its structural maximum",
+                |key| key[KDF_PARAMS_OFFSET..KDF_PARAMS_OFFSET + size_of::<u32>()].fill(0xFF),
+                |e| matches!(e, CryptoError::InvalidKdfParams(_)),
+            ),
+        ];
+
+        for (header, mutate, expected) in headers {
+            let mut key = canonical.clone();
+            mutate(&mut key);
+            for file_len in [key.len(), PRIVATE_KEY_FILE_READ_CAP_BYTES + 1] {
+                fs::write(&path, &key)?;
+                fs::OpenOptions::new()
+                    .write(true)
+                    .open(&path)?
+                    .set_len(file_len as u64)?;
+                let validated = crate::validate_private_key_file(&path);
+                let unlocked =
+                    open_x25519_private_key(&path, &pass, None, KeyReadLimits::default(), &|_| {})
+                        .map(|_| ());
+                for (reader, result) in [("validation", validated), ("unlock", unlocked)] {
+                    assert!(
+                        result.as_ref().is_err_and(expected),
+                        "{reader} of a {file_len}-byte file with {header}: got {result:?}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A `public.key` handed to either private-key reader is recognized up
+    /// to the longest recipient string the format allows, when the reader's
+    /// cap admits one that long: the read of a head that is not a
+    /// private-key header must not stop before the public-key probe has
+    /// what it needs.
+    #[test]
+    fn the_longest_public_key_is_recognized_by_both_private_key_readers() -> Result<(), CryptoError>
+    {
+        use crate::key::public::{KEY_MATERIAL_LEN_MAX, RECIPIENT_STRING_LEN_MAX};
+        use crate::recipient::name::TYPE_NAME_MAX_LEN;
+
+        let longest = crate::key::public::encode_recipient_string(
+            &"a".repeat(TYPE_NAME_MAX_LEN),
+            &vec![0x11u8; KEY_MATERIAL_LEN_MAX as usize],
         )?;
-        fs::write(&path, bytes)?;
+        assert_eq!(longest.len(), RECIPIENT_STRING_LEN_MAX - 1);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("public.key");
+        fs::write(&path, format!("{longest}\n"))?;
 
-        match open_x25519_private_key(&path, &pass, None, KeyReadLimits::default(), &|_| {})
+        match crate::validate_private_key_file(&path) {
+            Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)) => {}
+            other => panic!("validation: expected WrongKeyFileType, got {other:?}"),
+        }
+        let pass = Passphrase::new("pw");
+        match open_x25519_private_key(&path, &pass, None, KeyReadLimits::structural_max(), &|_| {})
             .map(|_| ())
         {
-            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => Ok(()),
-            other => panic!("expected MalformedPrivateKey for public_len mismatch, got {other:?}"),
+            Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)) => Ok(()),
+            other => panic!("unlock: expected WrongKeyFileType, got {other:?}"),
         }
     }
 
@@ -1038,6 +1158,31 @@ mod tests {
         assert_eq!(body.len(), 104);
     }
 
+    /// An unsealed `private.key` whose declared lengths add up to its size:
+    /// the fixed header, `type_name`, `public_len` bytes of public material,
+    /// no extension region, and `wrapped_secret_len` bytes of wrapped secret.
+    /// Enough for every check that runs before authentication.
+    fn shaped_private_key(type_name: &str, public_len: u32, wrapped_secret_len: u32) -> Vec<u8> {
+        use crate::crypto::kdf::ARGON2_SALT_SIZE;
+        use crate::key::private::PrivateKeyHeader;
+
+        let header = PrivateKeyHeader {
+            key_flags: 0,
+            type_name_len: u16::try_from(type_name.len()).expect("a type name fits its field"),
+            public_len,
+            ext_len: 0,
+            wrapped_secret_len,
+            argon2_salt: [0u8; ARGON2_SALT_SIZE],
+            kdf_params: KdfParams::test_fast_default(),
+            wrap_nonce: [0u8; WRAP_NONCE_SIZE],
+        };
+        let mut data = header.to_bytes().to_vec();
+        data.extend_from_slice(type_name.as_bytes());
+        data.extend_from_slice(&vec![0x07u8; public_len as usize]);
+        data.extend_from_slice(&vec![0u8; wrapped_secret_len as usize]);
+        data
+    }
+
     /// `FORMAT.md` §8 fixes the native X25519 `wrapped_secret_len` at
     /// 48 (32-byte scalar + 16-byte tag). A header declaring any other
     /// length — with a consistent total file length, so the generic
@@ -1046,30 +1191,12 @@ mod tests {
     /// misleading.
     #[test]
     fn validate_private_key_shape_rejects_wrong_wrapped_secret_len() {
-        use crate::crypto::kdf::ARGON2_SALT_SIZE;
-        use crate::key::private::PrivateKeyHeader;
-
-        let build = |wrapped_secret_len: u32| {
-            let header = PrivateKeyHeader {
-                key_flags: 0,
-                type_name_len: TYPE_NAME.len() as u16,
-                public_len: PUBLIC_KEY_SIZE as u32,
-                ext_len: 0,
-                wrapped_secret_len,
-                argon2_salt: [0u8; ARGON2_SALT_SIZE],
-                kdf_params: KdfParams::test_fast_default(),
-                wrap_nonce: [0u8; WRAP_NONCE_SIZE],
-            };
-            let mut data = header.to_bytes().to_vec();
-            data.extend_from_slice(TYPE_NAME.as_bytes());
-            data.extend_from_slice(&[0x07u8; PUBLIC_KEY_SIZE]);
-            data.extend_from_slice(&vec![0u8; wrapped_secret_len as usize]);
-            data
+        let build = |wrapped_secret_len| {
+            shaped_private_key(TYPE_NAME, PUBLIC_KEY_SIZE as u32, wrapped_secret_len)
         };
-
-        let expected = (PRIVATE_KEY_SIZE + TAG_SIZE) as u32;
-        validate_private_key_shape(&build(expected)).expect("canonical length must pass");
-        for wrong in [expected - 1, expected + 1] {
+        validate_private_key_shape(&build(WRAPPED_SECRET_LEN as u32))
+            .expect("canonical length must pass");
+        for wrong in [WRAPPED_SECRET_LEN as u32 - 1, WRAPPED_SECRET_LEN as u32 + 1] {
             match validate_private_key_shape(&build(wrong)) {
                 Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => {}
                 other => {
@@ -1081,41 +1208,87 @@ mod tests {
         }
     }
 
-    /// A type name that ends the file is complete, so it is read and reported
-    /// for what it says rather than as malformed framing; one byte less and
-    /// the name is cut short, which is malformed. Pins both sides of the
-    /// length check, which no other case reaches: the two outcomes carry
-    /// different diagnostic classes, so the boundary is measurable.
+    /// The same rule for `public_len`, which §8 fixes at 32 for native
+    /// X25519: any other length, in a file of the declared size, fails
+    /// shape validation, because the unlock path can never accept it.
     #[test]
-    fn a_type_name_that_ends_the_file_is_read_rather_than_refused() {
-        use crate::crypto::kdf::ARGON2_SALT_SIZE;
-        use crate::key::private::PrivateKeyHeader;
-
-        let unsupported = "test/other";
-        let header = PrivateKeyHeader {
-            key_flags: 0,
-            type_name_len: unsupported.len() as u16,
-            public_len: PUBLIC_KEY_SIZE as u32,
-            ext_len: 0,
-            wrapped_secret_len: (PRIVATE_KEY_SIZE + TAG_SIZE) as u32,
-            argon2_salt: [0u8; ARGON2_SALT_SIZE],
-            kdf_params: KdfParams::test_fast_default(),
-            wrap_nonce: [0u8; WRAP_NONCE_SIZE],
-        };
-        let mut data = header.to_bytes().to_vec();
-        data.extend_from_slice(unsupported.as_bytes());
-
-        match validate_private_key_shape(&data) {
-            Err(CryptoError::UnsupportedKeyType { type_name }) => {
-                assert_eq!(type_name, unsupported);
+    fn validate_private_key_shape_rejects_wrong_public_len() {
+        let build =
+            |public_len| shaped_private_key(TYPE_NAME, public_len, WRAPPED_SECRET_LEN as u32);
+        let expected = PUBLIC_KEY_SIZE as u32;
+        validate_private_key_shape(&build(expected)).expect("canonical length must pass");
+        for wrong in [expected - 1, expected + 1] {
+            match validate_private_key_shape(&build(wrong)) {
+                Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => {}
+                other => {
+                    panic!("expected MalformedPrivateKey for public_len {wrong}, got {other:?}")
+                }
             }
-            other => panic!("a complete name must be read, got {other:?}"),
+        }
+    }
+
+    /// A type name that is valid UTF-8 but breaks the `FORMAT.md` §3.3
+    /// grammar is malformed, not merely unsupported: the grammar is checked
+    /// before the type is compared with `x25519`.
+    #[test]
+    fn validate_private_key_shape_rejects_a_type_name_outside_the_grammar() {
+        let data = shaped_private_key("X25519", PUBLIC_KEY_SIZE as u32, WRAPPED_SECRET_LEN as u32);
+        match validate_private_key_shape(&data) {
+            Err(CryptoError::InvalidFormat(FormatDefect::MalformedTypeName)) => {}
+            other => panic!("expected MalformedTypeName, got {other:?}"),
+        }
+    }
+
+    /// A file longer or shorter than its header declares is malformed before
+    /// its type name is read, by the validator as by the unlock path, so the
+    /// two readers give the same class for these bytes: neither an
+    /// unsupported nor an ungrammatical name changes the verdict. At the
+    /// declared length the validator reads an unsupported name and reports
+    /// it.
+    #[test]
+    fn a_file_of_the_wrong_length_is_malformed_before_its_type_name_is_read() {
+        use crate::key::private::open_private_key;
+
+        let at_length = |type_name| {
+            shaped_private_key(type_name, PUBLIC_KEY_SIZE as u32, WRAPPED_SECRET_LEN as u32)
+        };
+        match validate_private_key_shape(&at_length("test/other")) {
+            Err(CryptoError::UnsupportedKeyType { type_name }) => {
+                assert_eq!(type_name, "test/other")
+            }
+            other => panic!("expected UnsupportedKeyType at the declared length, got {other:?}"),
         }
 
-        data.pop();
-        match validate_private_key_shape(&data) {
-            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => {}
-            other => panic!("a name cut short must be malformed, got {other:?}"),
+        let wrapped_secret_cap = KeyReadLimits::default().private_key_wrapped_secret_len();
+        for type_name in ["test/other", "X25519"] {
+            let exact = at_length(type_name);
+            let mut longer = exact.clone();
+            longer.push(0);
+            let shorter = &exact[..exact.len() - 1];
+            for bytes in [longer.as_slice(), shorter] {
+                match validate_private_key_shape(bytes) {
+                    Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => {}
+                    other => panic!(
+                        "validating {type_name} in {} bytes: expected MalformedPrivateKey, got {other:?}",
+                        bytes.len()
+                    ),
+                }
+                match open_private_key(
+                    bytes,
+                    &Passphrase::new("pw"),
+                    None,
+                    wrapped_secret_cap,
+                    &|_| {},
+                )
+                .map(|_| ())
+                {
+                    Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => {}
+                    other => panic!(
+                        "unlocking {type_name} in {} bytes: expected MalformedPrivateKey, got {other:?}",
+                        bytes.len()
+                    ),
+                }
+            }
         }
     }
 
@@ -1127,24 +1300,8 @@ mod tests {
     /// the proof that the cap, and only the cap, changed.
     #[test]
     fn key_read_limits_raise_the_wrapped_secret_cap() -> Result<(), CryptoError> {
-        use crate::crypto::kdf::ARGON2_SALT_SIZE;
-        use crate::key::private::PrivateKeyHeader;
-
         let oversized_len = KeyReadLimits::PRIVATE_KEY_WRAPPED_SECRET_LEN_DEFAULT + 1;
-        let header = PrivateKeyHeader {
-            key_flags: 0,
-            type_name_len: TYPE_NAME.len() as u16,
-            public_len: PUBLIC_KEY_SIZE as u32,
-            ext_len: 0,
-            wrapped_secret_len: oversized_len,
-            argon2_salt: [0u8; ARGON2_SALT_SIZE],
-            kdf_params: KdfParams::test_fast_default(),
-            wrap_nonce: [0u8; WRAP_NONCE_SIZE],
-        };
-        let mut data = header.to_bytes().to_vec();
-        data.extend_from_slice(TYPE_NAME.as_bytes());
-        data.extend_from_slice(&[0x07u8; PUBLIC_KEY_SIZE]);
-        data.extend_from_slice(&vec![0u8; oversized_len as usize]);
+        let data = shaped_private_key(TYPE_NAME, PUBLIC_KEY_SIZE as u32, oversized_len);
 
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("private.key");

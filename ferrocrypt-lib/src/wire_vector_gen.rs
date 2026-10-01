@@ -125,6 +125,18 @@ const UNKNOWN_RECIPIENT_TYPE: &str = "test/unknown";
 /// files that no reader here can open.
 const UNSUPPORTED_KEY_TYPE: &str = "test/future-kem";
 
+/// The shortest type name the §3.3 grammar allows: a single character, so
+/// always a name in the native namespace of §3.3.1. No native type has it,
+/// so the corpus uses it where a type-name length has to sit on its minimum;
+/// a reader that supports a native type of this name omits those outcomes.
+const SHORTEST_TYPE_NAME: &str = "t";
+
+/// A type name that breaks the §3.3 grammar only through its case:
+/// [`UNSUPPORTED_KEY_TYPE`] in uppercase.
+fn ungrammatical_type_name() -> String {
+    UNSUPPORTED_KEY_TYPE.to_uppercase()
+}
+
 /// The byte that fills every region whose content does not matter to its case.
 const FILLER: u8 = 0xAA;
 
@@ -497,7 +509,7 @@ fn small_artifact_caps() -> Vec<(&'static str, u64)> {
         ("max_recipient_string_chars", recipient.len() as u64),
         (
             "max_private_key_wrapped_secret_len",
-            (x25519::PRIVATE_KEY_SIZE + crate::crypto::aead::TAG_SIZE) as u64,
+            x25519::WRAPPED_SECRET_LEN as u64,
         ),
         ("max_entry_count", 1),
         ("max_total_plaintext_bytes", 1),
@@ -1163,6 +1175,23 @@ fn write_credentials(corpus: &mut Corpus) {
     });
 }
 
+/// The row of a `private_key_open` case whose artifact is `bytes`, unlocked
+/// with the credential `credential_id` names, before its outcome is set.
+fn private_key_open_row(
+    corpus: &mut Corpus,
+    case_id: &str,
+    bytes: &[u8],
+    credential_id: &str,
+) -> CaseRow {
+    let artifact_ref = corpus.write_ref(
+        &format!("artifacts/private-key/{case_id}.private.key"),
+        bytes,
+    );
+    CaseRow::new(case_id, "private_key_open", &artifact_ref)
+        .fabricated()
+        .credential(credential_id)
+}
+
 /// Commits a `private.key` case opened with a credential, so acceptance can
 /// record the key material the unlock decoded.
 fn private_key_open_case(
@@ -1172,13 +1201,7 @@ fn private_key_open_case(
     credential_id: &str,
     outcome: Result<[u8; 32], (&str, &str)>,
 ) {
-    let artifact_ref = corpus.write_ref(
-        &format!("artifacts/private-key/{case_id}.private.key"),
-        bytes,
-    );
-    let row = CaseRow::new(case_id, "private_key_open", &artifact_ref)
-        .fabricated()
-        .credential(credential_id);
+    let row = private_key_open_row(corpus, case_id, bytes, credential_id);
     let row = match outcome {
         Ok(material) => {
             let expected_ref =
@@ -2773,38 +2796,56 @@ fn write_recipient_framing_cases(
     );
 
     // An unknown critical recipient is capability-relative: an implementation
-    // of that type stops rejecting it.
+    // of that type stops rejecting it. The second entry sits on the lower
+    // bounds of §3.3, a one-byte type name and an empty body. The name is
+    // native but unassigned, which a reader must still take as well formed
+    // (§3.3.1), so only the critical flag refuses the file.
     drop(scope);
-    let scope = case_scope("recipient-unknown-critical");
     let source = write_source(sources, SOURCE_FILE_NAME, 64);
-    let file_key = FileKey::generate().expect("file key");
-    let entries = [unknown_entry(true), x25519_entry(&keys.public_a, &file_key)];
-    let built = build_fcr_with_entries(&source, &file_key, &entries, b"");
-    let artifact_ref =
-        corpus.write_ref("artifacts/fcr/recipient-unknown-critical.fcr", &built.bytes);
-    corpus.push_origin(OriginRow {
-        origin_id: "origin-recipient-unknown-critical".to_string(),
-        origin_kind: "fcr_payload",
-        anchor_case_id: "recipient-unknown-critical".to_string(),
-        payload_key_ref: "-".to_string(),
-        payload_key_sha3_256: built.payload_key_sha3_256,
-        stream_nonce_hex: built.stream_nonce_hex,
-    });
-    corpus.push_case(
-        CaseRow::fcr("recipient-unknown-critical", &artifact_ref)
-            .origin("origin-recipient-unknown-critical")
-            .fabricated()
-            .credential("private-key-a")
-            .capability("recipient_type:test/unknown")
-            .reject(
-                "critical_recipient_type_unsupported",
-                "unknown_critical_recipient",
-            ),
-    );
+    let shortest = RecipientEntry {
+        type_name: SHORTEST_TYPE_NAME.to_string(),
+        recipient_flags: crate::recipient::entry::RECIPIENT_FLAG_CRITICAL,
+        body: Vec::new(),
+    };
+    for (case_id, critical, condition_id) in [
+        (
+            "recipient-unknown-critical",
+            unknown_entry(true),
+            "critical_recipient_type_unsupported",
+        ),
+        (
+            "recipient-unknown-critical-lengths-at-min",
+            shortest,
+            "critical_recipient_type_unsupported_with_type_name_len_and_body_len_at_structural_minima",
+        ),
+    ] {
+        let _scope = case_scope(case_id);
+        let file_key = FileKey::generate().expect("file key");
+        let capability = format!("recipient_type:{}", critical.type_name);
+        let entries = [critical, x25519_entry(&keys.public_a, &file_key)];
+        let built = build_fcr_with_entries(&source, &file_key, &entries, b"");
+        let artifact_ref = corpus.write_ref(&format!("artifacts/fcr/{case_id}.fcr"), &built.bytes);
+        let origin_id = format!("origin-{case_id}");
+        corpus.push_origin(OriginRow {
+            origin_id: origin_id.clone(),
+            origin_kind: "fcr_payload",
+            anchor_case_id: case_id.to_string(),
+            payload_key_ref: "-".to_string(),
+            payload_key_sha3_256: built.payload_key_sha3_256,
+            stream_nonce_hex: built.stream_nonce_hex,
+        });
+        corpus.push_case(
+            CaseRow::fcr(case_id, &artifact_ref)
+                .origin(&origin_id)
+                .fabricated()
+                .credential("private-key-a")
+                .capability(&capability)
+                .reject(condition_id, "unknown_critical_recipient"),
+        );
+    }
 
     // An unknown non-critical recipient beside a supported one is skipped, so
     // the file still decrypts.
-    drop(scope);
     let scope = case_scope("recipient-unknown-ignorable-skipped");
     let file_key = FileKey::generate().expect("file key");
     let entries = [
@@ -3672,6 +3713,7 @@ fn write_public_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     use crate::key::public::{
         encode_recipient_groups_for_tests, encode_recipient_payload_with_hrp,
         non_canonical_padding_groups_for_tests, recipient_payload_for_tests,
+        recipient_payload_unchecked_for_tests,
     };
 
     let canonical = keys.public_a.clone();
@@ -3710,7 +3752,9 @@ fn write_public_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     let (hrp, data_part) = recipient
         .split_once('1')
         .expect("a recipient string separates its parts with '1'");
-    let cases: [(&str, Vec<u8>, &str, &str); 13] = [
+    let mut not_utf8 = canonical.clone();
+    not_utf8[0] = 0xFF;
+    let cases: [(&str, Vec<u8>, &str, &str); 16] = [
         (
             "public-key-checksum-corrupted",
             reject({
@@ -3822,6 +3866,41 @@ fn write_public_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
             ),
             "public_key_padding_surplus_group",
             "malformed_public_key",
+        ),
+        // A type name that is valid UTF-8 but breaks the §3.3 grammar, under
+        // a valid internal checksum. `unsupported_key_type` is for a
+        // well-formed type (§12.1), so the name is `malformed_type_name`.
+        (
+            "public-key-type-name-malformed",
+            reject(
+                encode_recipient_payload_with_hrp(
+                    "fcr",
+                    &recipient_payload_unchecked_for_tests(
+                        crate::format::WRITER_KEYPAIR_SUITE.public_key_version(),
+                        &ungrammatical_type_name(),
+                        &material,
+                    )
+                    .expect("build a payload with an ungrammatical type name"),
+                )
+                .expect("encode the payload"),
+            ),
+            "public_key_type_name_violates_grammar",
+            "malformed_type_name",
+        ),
+        // The two classes §7.1 gives a file that is not a recipient string at
+        // all: a `private.key`, recognized by its signature, and a file that
+        // is not UTF-8.
+        (
+            "public-key-given-private-key-file",
+            fs::read(corpus.root.join(&keys.private_a)).expect("read the corpus private key"),
+            "public_key_reader_given_private_key_file",
+            "wrong_key_file_type",
+        ),
+        (
+            "public-key-not-utf8",
+            not_utf8,
+            "public_key_file_not_utf8",
+            "not_a_key_file",
         ),
     ];
     for (case_id, bytes, condition, class) in cases {
@@ -3988,6 +4067,25 @@ fn write_public_key_length_cases(corpus: &mut Corpus) {
         "public_key_type_name_len_at_structural_maximum_and_type_not_supported",
     );
 
+    // The shortest well-formed string: a one-byte type name, the minimum of
+    // §3.3, and no key material. It is refused only because no reader here
+    // implements its type; a reader that set either lower bound one unit too
+    // strict would report `malformed_public_key` instead.
+    let shortest =
+        encode_recipient_string_with_version(PUBLIC_KEY_VERSION, SHORTEST_TYPE_NAME, &[])
+            .expect("encode the shortest recipient string");
+    let row = public_key_row(
+        corpus,
+        "public-key-lengths-at-min",
+        format!("{shortest}\n").as_bytes(),
+    );
+    unsupported_key_type_case(
+        corpus,
+        row,
+        SHORTEST_TYPE_NAME,
+        "public_key_type_name_len_and_key_material_len_at_structural_minima_and_type_not_supported",
+    );
+
     // The longest well-formed string: the type name and the key material both
     // on their maxima, the combination §7 derives 12,215 from. Its 12,493-byte
     // payload takes 19,989 characters, and the `fcr1` prefix and the checksum
@@ -4011,7 +4109,7 @@ fn write_public_key_length_cases(corpus: &mut Corpus) {
     // `malformed_public_key`.
     let material_past_max = encode_unchecked(
         PUBLIC_KEY_VERSION,
-        &UNSUPPORTED_KEY_TYPE.to_uppercase(),
+        &ungrammatical_type_name(),
         &[longest_material.as_slice(), &[FILLER]].concat(),
     );
     under_limit_profile(
@@ -4076,6 +4174,27 @@ fn write_public_key_length_cases(corpus: &mut Corpus) {
         Err((
             "public_key_recipient_string_above_structural_ceiling",
             "malformed_public_key",
+        )),
+    );
+
+    // Text over the default cap with a leading space. §7.1 leaves the space
+    // to §7, whose Bech32 rules come after the cap, so the cap refuses the
+    // file; a reader that refused the space first would report
+    // `malformed_public_key` instead.
+    let over_default_cap = encode_recipient_string_with_version(
+        PUBLIC_KEY_VERSION,
+        UNSUPPORTED_KEY_TYPE,
+        &[FILLER; KeyReadLimits::RECIPIENT_STRING_CHARS_DEFAULT as usize],
+    )
+    .expect("encode a string over the default cap");
+    assert!(over_default_cap.len() > KeyReadLimits::RECIPIENT_STRING_CHARS_DEFAULT as usize);
+    public_key_case(
+        corpus,
+        "public-key-over-cap-with-leading-whitespace",
+        format!(" {over_default_cap}\n").as_bytes(),
+        Err((
+            "public_key_recipient_string_above_local_cap_with_leading_whitespace",
+            "resource_cap_exceeded",
         )),
     );
 }
@@ -4163,34 +4282,64 @@ fn write_public_key_material_cases(corpus: &mut Corpus) {
     );
 }
 
-/// `private.key` extension, pair-consistency, and cap evidence (`FORMAT.md`
-/// §8 and §12.3). Every case here is replayed through the unlock rather than
-/// the structural validator, which applies neither the caller's resource
-/// policy nor the AEAD: the extension and pair cases need the unwrap, and the
-/// cap cases are refused before it.
-fn write_private_key_ext_and_pair_cases(corpus: &mut Corpus, keys: &CorpusKeys, canonical: &[u8]) {
-    use crate::crypto::tlv::tlv_bytes;
-    use crate::key::private::{KDF_PARAMS_OFFSET, seal_private_key_unchecked_tlv};
-
-    let opened = x25519::open_x25519_key_file(
+/// Unlocks the committed `private.key` of recipient `a`, for the cases that
+/// seal its key material again in another shape.
+fn open_corpus_private_key(corpus: &Corpus, keys: &CorpusKeys) -> x25519::OpenedX25519KeyFile {
+    x25519::open_x25519_key_file(
         &corpus.root.join(&keys.private_a),
         &corpus_passphrase(),
         None,
         crate::KeyReadLimits::default(),
         &|_| {},
     )
-    .expect("open corpus private key");
+    .expect("open corpus private key")
+}
+
+/// Seals a `private.key` for case `case_id` under the corpus passphrase, with
+/// the salt and nonce drawn from that case's seed. The writer's extension
+/// check is skipped, so a case can carry a region the reader refuses once
+/// the key is unlocked.
+fn seal_private_key_for_case(
+    case_id: &str,
+    type_name: &str,
+    secret_material: &[u8],
+    public_material: &[u8],
+    ext_bytes: &[u8],
+) -> Vec<u8> {
+    let _scope = case_scope(case_id);
+    crate::key::private::seal_private_key_unchecked_tlv(
+        secret_material,
+        type_name,
+        public_material,
+        ext_bytes,
+        &corpus_passphrase(),
+        &KdfParams::test_fast_default(),
+    )
+    .expect("seal private key")
+}
+
+/// `private.key` extension, pair-consistency, and cap evidence (`FORMAT.md`
+/// §8 and §12.3). Every case here is replayed through the unlock rather than
+/// the structural validator, which applies neither the caller's resource
+/// policy nor the AEAD: the extension and pair cases need the unwrap, and the
+/// cap cases are refused before it.
+fn write_private_key_ext_and_pair_cases(
+    corpus: &mut Corpus,
+    keys: &CorpusKeys,
+    canonical: &[u8],
+    opened: &x25519::OpenedX25519KeyFile,
+) {
+    use crate::crypto::tlv::tlv_bytes;
+    use crate::key::private::KDF_PARAMS_OFFSET;
+
     let seal = |case_id: &str, ext_bytes: &[u8], public_material: &[u8]| {
-        let _scope = case_scope(case_id);
-        seal_private_key_unchecked_tlv(
+        seal_private_key_for_case(
+            case_id,
+            x25519::TYPE_NAME,
             opened.secret.as_slice(),
-            "x25519",
             public_material,
             ext_bytes,
-            &corpus_passphrase(),
-            &KdfParams::test_fast_default(),
         )
-        .expect("seal private key")
     };
 
     // An ignorable tag is authenticated as associated data, skipped, and the
@@ -4206,28 +4355,23 @@ fn write_private_key_ext_and_pair_cases(corpus: &mut Corpus, keys: &CorpusKeys, 
         "private-key-a",
         Ok(opened.public),
     );
-    let critical_ref = corpus.write_ref(
-        "artifacts/private-key/private-key-ext-unknown-critical.private.key",
-        &seal(
-            "private-key-ext-unknown-critical",
-            &tlv_bytes(0x8001, b"critical"),
-            &opened.public,
-        ),
+    let critical = seal(
+        "private-key-ext-unknown-critical",
+        &tlv_bytes(0x8001, b"critical"),
+        &opened.public,
     );
-    corpus.push_case(
-        CaseRow::new(
-            "private-key-ext-unknown-critical",
-            "private_key_open",
-            &critical_ref,
-        )
-        .fabricated()
-        .credential("private-key-a")
-        .capability("private_key_tlv:0x8001")
-        .reject(
-            "private_key_ext_unknown_critical_tag",
-            "unknown_critical_tlv",
-        ),
+    let row = private_key_open_row(
+        corpus,
+        "private-key-ext-unknown-critical",
+        &critical,
+        "private-key-a",
+    )
+    .capability("private_key_tlv:0x8001")
+    .reject(
+        "private_key_ext_unknown_critical_tag",
+        "unknown_critical_tlv",
     );
+    corpus.push_case(row);
     // A value length that runs past the region end.
     let mut malformed = tlv_bytes(0x0001, b"value");
     malformed.truncate(malformed.len() - 2);
@@ -4546,6 +4690,19 @@ fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         "private_key_type_not_supported",
     );
 
+    // A type name that is valid UTF-8 but breaks the §3.3 grammar, with its
+    // length field to match. `unsupported_key_type` is for a well-formed type
+    // (§12.1), so the name is `malformed_type_name`.
+    let ungrammatical = with_private_key_type(&canonical, &ungrammatical_type_name());
+    assert_private_key_lengths_fit("private-key-type-name-malformed", &ungrammatical);
+    private_key_case(
+        corpus,
+        "private-key-type-name-malformed",
+        &ungrammatical,
+        "private_key_type_name_violates_grammar",
+        "malformed_type_name",
+    );
+
     // The §8 structural limits on the length fields, each broken on that
     // key. §8 checks them before the type name is read, so every file is a
     // malformed key whatever types a reader implements; a reader that
@@ -4599,11 +4756,12 @@ fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         "malformed_private_key",
     );
 
-    // Each length exactly on its limit, the four maxima and the wrapped-secret
-    // minimum, with its region filled to the length it declares, so the file
-    // is well formed apart from its type. A reader that set any of these
-    // limits one unit too strict would report `malformed_private_key` where §8
-    // requires `unsupported_key_type`.
+    // Each length exactly on its limit, with its region filled to the length
+    // it declares, so the file is well formed apart from its type: the four
+    // maxima, the wrapped-secret minimum, and every length on its minimum at
+    // once, a one-byte type name with empty public and extension regions. A
+    // reader that set any of these limits one unit too strict would report
+    // `malformed_private_key` where §8 requires `unsupported_key_type`.
     let extension = tlv_bytes(
         0x0001,
         &vec![FILLER; PRIVATE_KEY_EXT_LEN_MAX as usize - TLV_ENTRY_HEADER_SIZE],
@@ -4651,11 +4809,66 @@ fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
             UNSUPPORTED_KEY_TYPE,
             "private_key_wrapped_secret_len_at_structural_minimum_and_type_not_supported",
         ),
+        (
+            "private-key-lengths-at-min",
+            [
+                (PUBLIC_LEN_OFFSET, Vec::new()),
+                (EXT_LEN_OFFSET, Vec::new()),
+                (
+                    WRAPPED_SECRET_LEN_OFFSET,
+                    vec![FILLER; PRIVATE_KEY_WRAPPED_SECRET_LEN_MIN as usize],
+                ),
+            ]
+            .into_iter()
+            .fold(
+                with_private_key_type(&canonical, SHORTEST_TYPE_NAME),
+                |key, (len_offset, region)| with_private_key_region(&key, len_offset, &region),
+            ),
+            SHORTEST_TYPE_NAME,
+            "private_key_type_name_len_and_region_lengths_at_structural_minima_and_type_not_supported",
+        ),
     ];
     for (case_id, bytes, type_name, condition) in on_limits {
         assert_private_key_lengths_fit(case_id, &bytes);
         let row = private_key_row(corpus, case_id, &bytes);
         unsupported_key_type_case(corpus, row, type_name, condition);
+    }
+
+    // The lengths §8 fixes for a native `x25519` key, 32 bytes of public
+    // material and a 48-byte wrapped secret, each one byte short and one byte
+    // long with the region filled to match, so that no structural check
+    // refuses the file first. Both directions, because a reader that compared
+    // with `<` or `>` instead of `!=` would refuse only one. Validation checks
+    // them without the passphrase, from the length fields alone.
+    for (case_id, len_offset, region_len, condition) in [
+        (
+            "private-key-x25519-public-len-short",
+            PUBLIC_LEN_OFFSET,
+            x25519::PUBLIC_KEY_SIZE - 1,
+            "private_key_x25519_public_material_not_32_bytes",
+        ),
+        (
+            "private-key-x25519-public-len-long",
+            PUBLIC_LEN_OFFSET,
+            x25519::PUBLIC_KEY_SIZE + 1,
+            "private_key_x25519_public_material_not_32_bytes",
+        ),
+        (
+            "private-key-x25519-secret-len-short",
+            WRAPPED_SECRET_LEN_OFFSET,
+            x25519::WRAPPED_SECRET_LEN - 1,
+            "private_key_x25519_secret_material_not_32_bytes",
+        ),
+        (
+            "private-key-x25519-secret-len-long",
+            WRAPPED_SECRET_LEN_OFFSET,
+            x25519::WRAPPED_SECRET_LEN + 1,
+            "private_key_x25519_secret_material_not_32_bytes",
+        ),
+    ] {
+        let bytes = with_private_key_region(&canonical, len_offset, &vec![FILLER; region_len]);
+        assert_private_key_lengths_fit(case_id, &bytes);
+        private_key_case(corpus, case_id, &bytes, condition, "malformed_private_key");
     }
 
     // A newer private-key encoding version is capability-relative.
@@ -4710,7 +4923,8 @@ fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         "wrong_key_file_type",
     );
 
-    write_private_key_ext_and_pair_cases(corpus, keys, &canonical);
+    let opened = open_corpus_private_key(corpus, keys);
+    write_private_key_ext_and_pair_cases(corpus, keys, &canonical, &opened);
 
     // Opening the key decodes its public half, which is the byte-exact record
     // §12.3 requires of an accepted key case. `FORMAT.md` §8 makes a reader
@@ -4771,6 +4985,128 @@ fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
             "private_key_unlock_failed",
         )),
     );
+
+    write_private_key_unlock_check_cases(corpus, keys, &canonical, &opened);
+}
+
+/// Checks that structural validation also makes, evidenced through the
+/// unlock as well, because an implementation's unlock need not share
+/// validation's code: the file length, the type name, a `public.key` handed
+/// to the reader, and, once the key is authenticated, its type and the
+/// lengths §8 fixes for a native `x25519` key. The keys those later checks
+/// read are sealed under the corpus passphrase with every other field
+/// consistent, so each authenticates and reaches its own check.
+fn write_private_key_unlock_check_cases(
+    corpus: &mut Corpus,
+    keys: &CorpusKeys,
+    canonical: &[u8],
+    opened: &x25519::OpenedX25519KeyFile,
+) {
+    let mut trailing = canonical.to_vec();
+    trailing.push(FILLER);
+    let before_authentication: [(&str, &[u8], &str, &str); 4] = [
+        (
+            "private-key-open-trailing-data",
+            &trailing,
+            "private_key_bytes_follow_declared_fields",
+            "malformed_private_key",
+        ),
+        (
+            "private-key-open-truncated",
+            &canonical[..canonical.len() - 1],
+            "private_key_ends_before_declared_fields",
+            "malformed_private_key",
+        ),
+        (
+            "private-key-open-type-name-malformed",
+            &with_private_key_type(canonical, &ungrammatical_type_name()),
+            "private_key_type_name_violates_grammar",
+            "malformed_type_name",
+        ),
+        (
+            "private-key-open-given-public-key-file",
+            &keys.public_a,
+            "private_key_reader_given_public_key_file",
+            "wrong_key_file_type",
+        ),
+    ];
+    for (case_id, bytes, condition, class) in before_authentication {
+        private_key_open_case(
+            corpus,
+            case_id,
+            bytes,
+            "private-key-a",
+            Err((condition, class)),
+        );
+    }
+
+    let secret = opened.secret.as_slice();
+    let unsupported = seal_private_key_for_case(
+        "private-key-open-unsupported-type",
+        UNSUPPORTED_KEY_TYPE,
+        secret,
+        &opened.public,
+        b"",
+    );
+    let row = private_key_open_row(
+        corpus,
+        "private-key-open-unsupported-type",
+        &unsupported,
+        "private-key-a",
+    );
+    unsupported_key_type_case(
+        corpus,
+        row,
+        UNSUPPORTED_KEY_TYPE,
+        "private_key_type_not_supported",
+    );
+
+    // Each native `x25519` length one byte short and one byte long, as the
+    // validation cases above have it.
+    let public = opened.public.as_slice();
+    let public_long = [public, &[FILLER]].concat();
+    let secret_long = [secret, &[FILLER]].concat();
+    for (case_id, secret_material, public_material, condition) in [
+        (
+            "private-key-open-x25519-public-len-short",
+            secret,
+            &public[..x25519::PUBLIC_KEY_SIZE - 1],
+            "private_key_x25519_public_material_not_32_bytes",
+        ),
+        (
+            "private-key-open-x25519-public-len-long",
+            secret,
+            public_long.as_slice(),
+            "private_key_x25519_public_material_not_32_bytes",
+        ),
+        (
+            "private-key-open-x25519-secret-len-short",
+            &secret[..x25519::PRIVATE_KEY_SIZE - 1],
+            public,
+            "private_key_x25519_secret_material_not_32_bytes",
+        ),
+        (
+            "private-key-open-x25519-secret-len-long",
+            secret_long.as_slice(),
+            public,
+            "private_key_x25519_secret_material_not_32_bytes",
+        ),
+    ] {
+        let key = seal_private_key_for_case(
+            case_id,
+            x25519::TYPE_NAME,
+            secret_material,
+            public_material,
+            b"",
+        );
+        private_key_open_case(
+            corpus,
+            case_id,
+            &key,
+            "private-key-a",
+            Err((condition, "malformed_private_key")),
+        );
+    }
 }
 
 // ─── FCA payload construction ──────────────────────────────────────────────

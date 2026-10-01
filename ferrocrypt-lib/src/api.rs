@@ -39,7 +39,6 @@ use crate::crypto::kdf::{KdfLimit, KdfParams};
 use crate::error::{FormatDefect, sanitize_path_for_display};
 use crate::format;
 use crate::fs::paths;
-use crate::key::files::KeyFileKind;
 use crate::key::limits::KeyReadLimits;
 use crate::key::private::PrivateKey;
 use crate::key::public::PublicKey;
@@ -1386,12 +1385,16 @@ pub fn default_encrypted_filename(input_path: impl AsRef<Path>) -> Result<String
 
 /// Validates that a file is a well-formed FerroCrypt `private.key` file.
 ///
-/// Checks the cleartext structure: magic bytes, version, key-file kind,
-/// flags, length fields, X25519 type name, X25519 public-material length, and
-/// total file size. This does **not** attempt to decrypt the key and does not
-/// require a passphrase. If the caller accidentally points this at a text
-/// `public.key`, [`FormatDefect::WrongKeyFileType`] is returned instead of a
-/// generic key-file parse error.
+/// A text `public.key` whose recipient string this build can decode is
+/// refused first, even one shorter than the fixed header, with
+/// [`FormatDefect::WrongKeyFileType`] rather than a generic key-file parse
+/// error. The cleartext structure is then checked in this order: the size of
+/// the 90-byte fixed header, magic bytes, key-file kind, version, flags,
+/// length fields, KDF parameters, total file size, type name, and the X25519
+/// public-material and wrapped-secret lengths. A file whose size differs from
+/// what its header declares is therefore malformed whatever its type name.
+/// This does **not** attempt to decrypt the key and does not require a
+/// passphrase.
 ///
 /// Companion to [`validate_public_key_file`]. Applies no resource caps of
 /// its own: the verdict follows what `FORMAT.md` §8 allows, not what a
@@ -1402,20 +1405,15 @@ pub fn default_encrypted_filename(input_path: impl AsRef<Path>) -> Result<String
 /// Returns [`CryptoError::InputPath`] if the file does not exist, and
 /// [`CryptoError::Io`] for other read failures. Returns
 /// [`CryptoError::InvalidFormat`] or [`CryptoError::UnsupportedVersion`] if the
-/// file is not a supported private key, is malformed, or is a public key. Returns
-/// [`CryptoError::UnsupportedKeyType`] for a well-formed private key of a key
-/// type this build does not support.
+/// file is not a supported private key, is malformed, or is a public key, and
+/// [`CryptoError::InvalidKdfParams`] if its stored KDF parameters are outside
+/// the `FORMAT.md` §2.2 bounds. Returns [`CryptoError::UnsupportedKeyType`] for
+/// a well-formed private key of a key type this build does not support.
 pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError> {
     // No resource policy of its own: this validates structure only, so the
     // read and the public-key probe both run at the structural maxima.
     let limits = KeyReadLimits::structural_max();
-    let data = crate::key::private::read_private_key_file(
-        key_file.as_ref(),
-        limits.private_key_wrapped_secret_len(),
-    )?;
-    if matches!(KeyFileKind::classify(&data, limits), KeyFileKind::Public) {
-        return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
-    }
+    let data = crate::key::files::read_private_key_bytes(key_file.as_ref(), limits)?;
     recipient::native::x25519::validate_private_key_shape(&data)
 }
 
@@ -1427,7 +1425,9 @@ pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), Crypt
 /// length, and internal SHA3-256 checksum. Does **not** require a
 /// passphrase. If the caller accidentally points this at a binary
 /// `private.key`, [`FormatDefect::WrongKeyFileType`] is returned instead of a
-/// UTF-8 decode error.
+/// UTF-8 decode error, unless the file is longer than 20,001 bytes, the most
+/// a `public.key` can hold: `FORMAT.md` §7.1 checks the size first, so such
+/// a file is reported as [`FormatDefect::MalformedPublicKey`].
 ///
 /// Companion to [`validate_private_key_file`]. Applies no resource caps
 /// of its own: the verdict follows what `FORMAT.md` §7 allows, not what
@@ -1437,17 +1437,15 @@ pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), Crypt
 ///
 /// Returns [`CryptoError::InputPath`] if the file does not exist, and
 /// [`CryptoError::Io`] for other read failures. Returns
-/// [`CryptoError::InvalidFormat`] or
-/// [`CryptoError::RecipientStringCapExceeded`] if the text file or recipient
-/// string is malformed, beyond the structural ceiling, or is a private key.
-/// Returns [`CryptoError::UnsupportedVersion`] for a public key from an
+/// [`CryptoError::InvalidFormat`] if the text file or recipient string is
+/// malformed, beyond the structural ceiling, or is a private key. Returns
+/// [`CryptoError::UnsupportedVersion`] for a public key from an
 /// unsupported keypair suite. Returns
 /// [`CryptoError::UnsupportedKeyType`] for a valid public key of a
 /// key type this build does not support.
 pub fn validate_public_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError> {
     // No resource policy of its own: this validates structure only, so the
-    // recipient-string cap and the private-key probe both run at the
-    // structural maxima.
+    // recipient-string cap runs at its structural maximum.
     PublicKey::from_key_file_with_limits(key_file, KeyReadLimits::structural_max()).map(|_| ())
 }
 

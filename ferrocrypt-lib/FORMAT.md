@@ -1187,6 +1187,22 @@ encryption. Readers MUST treat `public.key` as byte-exact ASCII after UTF-8
 validation and MUST NOT apply Unicode normalization, case folding, or whitespace
 normalization before Bech32 validation.
 
+A reader loading a `public.key` file MUST check the file itself first, in this
+order, and report the first failure with the class given (§12.1):
+
+1. The file is longer than 20,001 bytes, the most that a recipient string at
+   the ceiling and one LF can take — `malformed_public_key`.
+2. The file opens with the `private.key` signature of §8, magic `FCR\0` with
+   kind `0x4B` at offset 5, whatever byte sits at offset 4 —
+   `wrong_key_file_type`.
+3. The file is not valid UTF-8 — `not_a_key_file`.
+
+The reader then removes one final LF, if there is one, and nothing else, and
+checks the rest as a recipient string under §7. Whitespace left in it is
+refused there: non-ASCII whitespace by the ASCII rule, and ASCII whitespace by
+the Bech32 rules, which come after the 20,000-character ceiling and the
+recipient-string cap.
+
 ### 7.2 Fingerprint
 
 ```text

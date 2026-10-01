@@ -229,6 +229,16 @@ not the cap it raises. The key-file cases also fix the check order of §7 and
 §8: the size of the fixed fields, then the encoding version, then the length
 fields, and only then the type name.
 
+The length fields of both key files and of a recipient entry also have cases on
+their lower bounds, the type-name length through `t`, the shortest name the §3.3
+grammar allows. The file length, the type name, the key type, the lengths §8
+fixes for an `x25519` key (each one byte short and one byte long), and a
+`public.key` handed to the reader have cases through both `private.key` readers,
+structural validation and the unlock, because an implementation's unlock need
+not share validation's code. The `public.key` cases include the two classes §7.1
+gives a file that is not a recipient string at all, and text over the cap with a
+space in it, which the cap refuses before any Bech32 rule sees the space.
+
 Two areas are covered in a shape worth stating: a directory root's expected
 result is the extraction listing §12.3 defines rather than a single plaintext
 file, and stored permission modes are evidenced by rejection cases only,

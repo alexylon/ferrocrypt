@@ -12,6 +12,7 @@ origin-header-ext-len-at-structural-max	fcr_payload	header-ext-len-at-structural
 origin-entry-region-trailing-bytes	fcr_payload	entry-region-trailing-bytes	-	45e01644011fd5355c292314aab36875311229e63d35d526ff9d0415bfb68848	67e70e3ac8df0405c840c0c5194a1ebe201eef	0.3.0	1
 origin-recipient-none-supported	fcr_payload	recipient-none-supported	-	a196e379b3e347b482a76c13feefde0357ddfd7685f6c748e3d578a8f68ae9fd	e84ad09fe9864d6cce881932ee9a7940be2439	0.3.0	1
 origin-recipient-unknown-critical	fcr_payload	recipient-unknown-critical	-	c66fb55c812ac5f7aad13c4fca145a1baa4abd67abab2ea6e2cb585a89db53a6	5e3a8158cff2eda8fd3f7b3f4849494eb8701b	0.3.0	1
+origin-recipient-unknown-critical-lengths-at-min	fcr_payload	recipient-unknown-critical-lengths-at-min	-	cb51925268025ad838f7e06bb8b96f03754086778291d2f3ba67412e2c6bf9cb	5c43aa88362b628e8f79e3a1749eb460d366c6	0.3.0	1
 origin-recipient-unknown-ignorable	fcr_payload	recipient-unknown-ignorable-skipped	-	d1e8b13cd52dd165544f3f12dac32695a23c5739cf479264ba0ac7e0faa0a82a	bf14e3014c6ee5cb09d36fbf624761aa649b7e	0.3.0	1
 origin-recipient-type-name-at-max	fcr_payload	recipient-type-name-at-max	-	be6422c292ebddd585eb960314d1be737a10a5484e3435d323881755374a5508	729b944643965e5132e36581aa771c79388e3c	0.3.0	1
 origin-recipient-illegal-mixing	fcr_payload	recipient-illegal-mixing	-	3f26f82e310d69e7c3040722dad7619355b862059a9b9fe3bf7c542aa9040046	37a46a156d8bf3653b6a638d4567a8f60f82a6	0.3.0	1

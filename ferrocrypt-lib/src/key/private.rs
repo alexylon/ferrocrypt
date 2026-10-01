@@ -86,14 +86,15 @@ pub(crate) const PRIVATE_KEY_WRAPPED_SECRET_LEN_MAX: u32 = 16_777_216;
 pub(crate) const PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT: u32 = 4_096;
 
 /// File-read cap for `private.key`: header plus every field at its
-/// structural maximum. A larger file cannot decode regardless of content,
-/// so the reader rejects before allocating multiple gigabytes for adversarial
-/// input. `TYPE_NAME_MAX_LEN` is the widest possible `type_name`; the rest are
-/// the spec's `*_MAX` constants.
+/// structural maximum. No valid file is longer, so
+/// [`read_private_key_bytes`](crate::key::files::read_private_key_bytes)
+/// reads at most one byte past it, whatever a header declares, rather than
+/// allocating multiple gigabytes for adversarial input. `TYPE_NAME_MAX_LEN` is
+/// the widest possible `type_name`; the rest are the spec's `*_MAX`
+/// constants.
 ///
-/// [`read_private_key_file`] normally reads far less — only what the
-/// file's own header declares. This cap bounds the fallback path, where
-/// the head does not parse as a private-key header at all.
+/// The reader normally reads far less: only what the file's own header
+/// declares, with the wrapped secret clamped at the caller's cap.
 pub(crate) const PRIVATE_KEY_FILE_READ_CAP_BYTES: usize = PRIVATE_KEY_HEADER_FIXED_SIZE
     + crate::recipient::name::TYPE_NAME_MAX_LEN
     + PRIVATE_KEY_PUBLIC_LEN_MAX as usize
@@ -111,6 +112,16 @@ const ARGON2_SALT_OFFSET: usize = WRAPPED_SECRET_LEN_OFFSET + size_of::<u32>();
 pub(crate) const KDF_PARAMS_OFFSET: usize = ARGON2_SALT_OFFSET + ARGON2_SALT_SIZE;
 const WRAP_NONCE_OFFSET: usize = KDF_PARAMS_OFFSET + KDF_PARAMS_SIZE;
 const _: () = assert!(WRAP_NONCE_OFFSET + WRAP_NONCE_SIZE == PRIVATE_KEY_HEADER_FIXED_SIZE);
+
+/// Whether `data` opens with the `private.key` signature: magic `FCR\0`
+/// and kind `K`, whatever byte sits between them, so that a `private.key`
+/// of a newer encoding version is still recognized (`FORMAT.md` §7.1). The
+/// `public.key` reader uses it to report [`FormatDefect::WrongKeyFileType`],
+/// and the read both private-key readers start with uses it to spare a
+/// `private.key` the `public.key` check.
+pub(crate) fn has_private_key_signature(data: &[u8]) -> bool {
+    data.get(..MAGIC_SIZE) == Some(&MAGIC[..]) && data.get(KIND_OFFSET) == Some(&KIND_PRIVATE_KEY)
+}
 
 /// Cleartext fixed-header section of a `private.key`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,6 +166,18 @@ impl PrivateKeyHeader {
         out[WRAP_NONCE_OFFSET..WRAP_NONCE_OFFSET + WRAP_NONCE_SIZE]
             .copy_from_slice(&self.wrap_nonce);
         out
+    }
+
+    /// The number of bytes this header declares after itself: its type-name,
+    /// public-material, and extension lengths, plus `wrapped_secret_len`.
+    /// Callers pass the header's own `wrapped_secret_len`, or that value
+    /// clamped at a cap when they read no further than the cap. The sum of a
+    /// `u16` and three `u32` values cannot overflow a `u64`.
+    pub(crate) fn declared_len_after_fixed_header(&self, wrapped_secret_len: u32) -> u64 {
+        u64::from(self.type_name_len)
+            + u64::from(self.public_len)
+            + u64::from(self.ext_len)
+            + u64::from(wrapped_secret_len)
     }
 
     /// Parses and structurally validates the 90-byte cleartext header.
@@ -260,6 +283,28 @@ fn check_wrapped_secret_len(len: u32) -> Result<(), CryptoError> {
 
 fn malformed_private_key() -> CryptoError {
     CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)
+}
+
+/// Checks that a `private.key` of `file_len` bytes is exactly as long as
+/// `header` declares: `90 + type_name_len + public_len + ext_len +
+/// wrapped_secret_len` (`FORMAT.md` §8).
+///
+/// The one comparison both readers make, [`open_private_key`] and the
+/// structural validator
+/// [`validate_private_key_shape`](crate::recipient::native::x25519::validate_private_key_shape),
+/// so both refuse a file of the wrong length before either reads the type
+/// name. The unlock applies its local caps first, which the validator does
+/// not apply.
+pub(crate) fn check_total_file_size(
+    file_len: usize,
+    header: &PrivateKeyHeader,
+) -> Result<(), CryptoError> {
+    let total = PRIVATE_KEY_HEADER_FIXED_SIZE as u64
+        + header.declared_len_after_fixed_header(header.wrapped_secret_len);
+    if file_len as u64 != total {
+        return Err(malformed_private_key());
+    }
+    Ok(())
 }
 
 /// Validates a `private.key` `ext_bytes` region under the shared
@@ -493,46 +538,6 @@ fn seal_private_key_inner(
     Ok(out)
 }
 
-/// Reads a `private.key` file, pulling in only what its own cleartext
-/// header declares rather than the structural maximum of every field.
-///
-/// `local_wrapped_secret_cap` bounds the declared remainder. A file
-/// declaring more than the cap allows is read short on purpose:
-/// [`open_private_key`] applies the same cap from the fixed header
-/// alone, before it compares the buffer length, so the caller still
-/// receives [`CryptoError::PrivateKeyWrappedSecretCapExceeded`] rather
-/// than a malformed-key rejection. Callers that apply no resource
-/// policy, such as [`crate::validate_private_key_file`], pass the
-/// structural maximum and read exactly what the file declares.
-///
-/// A head that is not a parseable private-key header falls back to the
-/// structural read cap, so a caller can still tell a `public.key` or an
-/// unrelated file from a malformed private key.
-pub(crate) fn read_private_key_file(
-    path: &std::path::Path,
-    local_wrapped_secret_cap: u32,
-) -> Result<Vec<u8>, CryptoError> {
-    crate::fs::paths::read_file_staged(
-        path,
-        PRIVATE_KEY_HEADER_FIXED_SIZE,
-        PRIVATE_KEY_FILE_READ_CAP_BYTES,
-        |head| {
-            let header = PrivateKeyHeader::parse(head.first_chunk()?).ok()?;
-            // `parse` has already bounded the other three fields, so
-            // clamping the wrapped secret keeps the total under the
-            // structural read cap.
-            let wrapped_secret_len = header.wrapped_secret_len.min(local_wrapped_secret_cap);
-            Some(
-                header.type_name_len as usize
-                    + header.public_len as usize
-                    + header.ext_len as usize
-                    + wrapped_secret_len as usize,
-            )
-        },
-        malformed_private_key,
-    )
-}
-
 /// Parses and unlocks a `private.key` byte sequence. Validates the
 /// cleartext header structurally, applies `local_wrapped_secret_cap` as
 /// resource policy, slices the variable-length sections, and
@@ -578,15 +583,7 @@ pub(crate) fn open_private_key(
         });
     }
 
-    let total = (PRIVATE_KEY_HEADER_FIXED_SIZE as u64)
-        .checked_add(header.type_name_len as u64)
-        .and_then(|v| v.checked_add(header.public_len as u64))
-        .and_then(|v| v.checked_add(header.ext_len as u64))
-        .and_then(|v| v.checked_add(header.wrapped_secret_len as u64))
-        .ok_or_else(malformed_private_key)?;
-    if (bytes.len() as u64) != total {
-        return Err(malformed_private_key());
-    }
+    check_total_file_size(bytes.len(), &header)?;
 
     let type_name_start = PRIVATE_KEY_HEADER_FIXED_SIZE;
     let type_name_end = type_name_start + header.type_name_len as usize;
@@ -1279,22 +1276,34 @@ mod tests {
         }
     }
 
+    /// A file one byte longer or one byte shorter than its header declares
+    /// is malformed. The short file matters as much as the long one: the
+    /// unlock slices the declared regions out of the buffer, and without
+    /// this check a truncated file would make that slice panic.
     #[test]
     fn open_rejects_total_size_mismatch() {
         let (secret, public) = x25519_shaped();
         let pass = test_passphrase("pw");
         let kdf = KdfParams::test_fast_default();
-        let mut bytes = seal_private_key(&secret, "x25519", &public, &[], &pass, &kdf).unwrap();
-        bytes.push(0); // Extra trailing byte.
-        match open_private_key(
-            &bytes,
-            &pass,
-            None,
-            PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT,
-            &|_| {},
-        ) {
-            Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => {}
-            other => panic!("expected MalformedPrivateKey for trailing byte, got {other:?}"),
+        let sealed = seal_private_key(&secret, "x25519", &public, &[], &pass, &kdf).unwrap();
+        let mut trailing = sealed.clone();
+        trailing.push(0);
+        let short = &sealed[..sealed.len() - 1];
+        for bytes in [trailing.as_slice(), short] {
+            match open_private_key(
+                bytes,
+                &pass,
+                None,
+                PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT,
+                &|_| {},
+            ) {
+                Err(CryptoError::InvalidFormat(FormatDefect::MalformedPrivateKey)) => {}
+                other => panic!(
+                    "expected MalformedPrivateKey for {} bytes where {} are declared, got {other:?}",
+                    bytes.len(),
+                    sealed.len()
+                ),
+            }
         }
     }
 
@@ -1517,7 +1526,7 @@ mod tests {
     /// short buffer is deliberate: `open_private_key` reports the cap
     /// from the fixed header, before it compares the buffer length.
     #[test]
-    fn read_private_key_file_bounds_the_read_by_the_local_cap() {
+    fn reading_a_key_is_bounded_by_the_local_wrapped_secret_cap() {
         let mut bytes = sample_header_bytes().to_vec();
         write_u32_be(
             &mut bytes,
@@ -1529,7 +1538,9 @@ mod tests {
         std::fs::write(tmp.path(), &bytes).unwrap();
 
         let local_cap = PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT;
-        let read = read_private_key_file(tmp.path(), local_cap).unwrap();
+        let limits = crate::key::limits::KeyReadLimits::default();
+        assert_eq!(limits.private_key_wrapped_secret_len(), local_cap);
+        let read = crate::key::files::read_private_key_bytes(tmp.path(), limits).unwrap();
         // header + type_name + public + ext + the capped wrapped secret,
         // plus the one byte that detects a file that is too long.
         let expected = PRIVATE_KEY_HEADER_FIXED_SIZE + 6 + 32 + local_cap as usize + 1;

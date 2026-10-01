@@ -92,13 +92,12 @@ pub(crate) fn open_input_file(path: &Path) -> Result<File, CryptoError> {
 }
 
 /// Reads `path` into memory, refusing files whose byte length exceeds
-/// `cap`. Bounds the allocation at `cap + 1` bytes so a caller pointed
-/// at a multi-gigabyte file rejects before the kernel pages the whole file
-/// into memory. The `over_cap_error` closure supplies the typed rejection so
-/// each caller can route the failure to the right diagnostic class
-/// (`MalformedPublicKey` / `MalformedPrivateKey`).
-/// Opens via [`open_input_file`], so FIFOs, sockets, and device nodes
-/// are refused without blocking.
+/// `cap`. The read stops at `cap + 1` bytes, so a caller pointed at a
+/// multi-gigabyte file refuses it without reading it all into memory. The
+/// `over_cap_error` closure supplies the typed rejection so the caller can
+/// route the failure to its own diagnostic class (`MalformedPublicKey` for
+/// a `public.key`). The file is opened through [`open_input_file`], so
+/// FIFOs, sockets, and device nodes are refused without blocking.
 pub(crate) fn read_file_capped(
     path: &Path,
     cap: usize,
@@ -123,20 +122,16 @@ pub(crate) fn read_file_capped(
 /// Reads `head_len` bytes, passes them to `remaining_len`, then reads
 /// one byte beyond whatever that returns — the extra byte lets a caller
 /// checking an exact total still see a file with trailing bytes as too
-/// long. `remaining_len` returning `None` means the head did not
-/// describe the file, and the read falls back to `cap` with
-/// `over_cap_error` exactly as [`read_file_capped`] would. A file
-/// shorter than `head_len` is returned as read, for the caller to
-/// reject.
+/// long. A file shorter than `head_len` is returned as read, for the
+/// caller to reject.
 ///
-/// A declared remainder above `cap - head_len` is clamped to it, so the
-/// read stays within `cap + 1` bytes whatever `remaining_len` returns.
+/// A remainder above `cap - head_len` is clamped to it, so the read
+/// stays within `cap + 1` bytes whatever `remaining_len` returns.
 pub(crate) fn read_file_staged(
     path: &Path,
     head_len: usize,
     cap: usize,
-    remaining_len: impl FnOnce(&[u8]) -> Option<usize>,
-    over_cap_error: impl FnOnce() -> CryptoError,
+    remaining_len: impl FnOnce(&[u8]) -> usize,
 ) -> Result<Vec<u8>, CryptoError> {
     let mut file = open_input_file(path)?;
     let mut buf = Vec::with_capacity(initial_reserve(head_len));
@@ -148,22 +143,9 @@ pub(crate) fn read_file_staged(
         return Ok(buf);
     }
 
-    let Some(remaining) = remaining_len(&buf) else {
-        let rest_cap = (cap.saturating_sub(head_len) as u64).saturating_add(1);
-        let read = file
-            .by_ref()
-            .take(rest_cap)
-            .read_to_end(&mut buf)
-            .map_err(CryptoError::Io)?;
-        if head_len.saturating_add(read) > cap {
-            return Err(over_cap_error());
-        }
-        return Ok(buf);
-    };
-
     // `remaining_len` derives its answer from attacker-controlled header
     // bytes, so the cap bounds the read here rather than at each call site.
-    let remaining = remaining.min(cap.saturating_sub(head_len));
+    let remaining = remaining_len(&buf).min(cap.saturating_sub(head_len));
     let rest = (remaining as u64).saturating_add(1);
     buf.reserve(initial_reserve(remaining));
     file.by_ref()
@@ -432,31 +414,16 @@ mod tests {
         }
     }
 
-    /// The staged reader falls back to the structural cap when the head
-    /// does not describe the file, and that fallback keeps the same
-    /// inclusive boundary and caller-supplied error.
-    #[test]
-    fn read_file_staged_fallback_applies_the_cap() {
-        const HEAD: usize = 4;
-        const CAP: usize = 64;
-
-        let (_dir, at_cap) = write_temp(&[0x41; CAP]);
-        let read = read_file_staged(&at_cap, HEAD, CAP, |_| None, over_cap).unwrap();
-        assert_eq!(read.len(), CAP);
-
-        let (_dir, over) = write_temp(&[0x41; CAP + 1]);
-        match read_file_staged(&over, HEAD, CAP, |_| None, over_cap) {
-            Err(CryptoError::InvalidInput(msg)) => assert_eq!(msg, "over cap"),
-            other => panic!("expected the supplied over-cap error, got {other:?}"),
-        }
-    }
-
-    /// A head shorter than `head_len` is handed back as read, so the
-    /// caller reports a truncated file rather than the cap error.
+    /// A head shorter than `head_len` is handed back as read, for the
+    /// caller to report as a truncated file, and `remaining_len` never sees
+    /// it: a caller may index its whole head.
     #[test]
     fn read_file_staged_returns_a_short_head_as_read() {
         let (_dir, path) = write_temp(b"ab");
-        let read = read_file_staged(&path, 8, 64, |_| Some(0), over_cap).unwrap();
+        let read = read_file_staged(&path, 8, 64, |_| {
+            unreachable!("a short head is returned before remaining_len runs")
+        })
+        .unwrap();
         assert_eq!(read, b"ab");
     }
 
@@ -466,20 +433,20 @@ mod tests {
     #[test]
     fn read_file_staged_reads_one_byte_past_the_declared_length() {
         let (_dir, path) = write_temp(&[0x41; 100]);
-        let read = read_file_staged(&path, 4, 1024, |_| Some(10), over_cap).unwrap();
+        let read = read_file_staged(&path, 4, 1024, |_| 10).unwrap();
         assert_eq!(read.len(), 4 + 10 + 1);
     }
 
     /// A declared remainder larger than the cap allows cannot widen the
-    /// read: the helper clamps it, so the buffer stops at the same
-    /// `cap + 1` bytes the fallback path would read.
+    /// read: the helper clamps it, so the buffer stops at `cap + 1`
+    /// bytes.
     #[test]
     fn read_file_staged_clamps_a_declared_length_above_the_cap() {
         const HEAD: usize = 4;
         const CAP: usize = 64;
 
         let (_dir, path) = write_temp(&[0x41; CAP * 4]);
-        let read = read_file_staged(&path, HEAD, CAP, |_| Some(usize::MAX), over_cap).unwrap();
+        let read = read_file_staged(&path, HEAD, CAP, |_| usize::MAX).unwrap();
         assert_eq!(read.len(), CAP + 1);
     }
 

@@ -997,7 +997,14 @@ pub enum FormatDefect {
     /// Leading/trailing whitespace other than a single final LF, CRLF
     /// line endings, extra blank lines, internal whitespace, header
     /// length-field violations, and internal-checksum mismatch all
-    /// surface here.
+    /// surface here. One case reports differently: a recipient string that
+    /// is ASCII, longer than the recipient-string cap, and within the
+    /// 20,000-character ceiling is refused as
+    /// [`CryptoError::RecipientStringCapExceeded`] even when it also has
+    /// one of these defects, because `FORMAT.md` §7 applies the cap before
+    /// the Bech32 rules. In a `public.key` file that passes the file checks
+    /// of `FORMAT.md` §7.1, the string is the text left once one final LF
+    /// is removed.
     MalformedPublicKey,
     /// A binary FerroCrypt artifact's `kind` byte does not match the
     /// expected value for this operation (e.g. a caller asked for an

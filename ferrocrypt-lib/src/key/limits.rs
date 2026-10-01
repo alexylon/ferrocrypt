@@ -13,8 +13,9 @@ use crate::key::private::{
 };
 use crate::key::public::{RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT, RECIPIENT_STRING_LEN_MAX};
 
-/// Local resource caps applied while reading a `public.key`, a `fcr1…`
-/// recipient string, or a `private.key`.
+/// Local resource caps applied while reading key material: the
+/// recipient-string cap to a `public.key` or a `fcr1…` recipient string, and
+/// the wrapped-secret cap to a `private.key`.
 ///
 /// The defaults suit every key type FerroCrypt ships. Raise a cap only
 /// for keys from a known origin whose material legitimately exceeds it;
@@ -26,8 +27,9 @@ use crate::key::public::{RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT, RECIPIENT_STRIN
 /// malformed-key defect (`FORMAT.md` §7, §8).
 ///
 /// Pass a value to [`crate::PublicKey::from_key_file_with_limits`],
-/// [`crate::PublicKey::from_recipient_string_with_limits`], or
-/// [`crate::PrivateKeyDecryptor::key_read_limits`]. The struct is
+/// [`crate::PublicKey::from_recipient_string_with_limits`],
+/// [`crate::PrivateKeyDecryptor::key_read_limits`], or
+/// [`crate::PrivateKey::into_public_key_with_limits`]. The struct is
 /// `#[non_exhaustive]` so future releases can add further caps without a
 /// breaking change. A cap is a numeric bound, which is what lets the
 /// struct stay `Copy`.
@@ -73,7 +75,9 @@ impl KeyReadLimits {
     /// clamped at [`Self::RECIPIENT_STRING_CHARS_STRUCTURAL_MAX`]. A
     /// longer string rejects with
     /// [`CryptoError::RecipientStringCapExceeded`](crate::CryptoError::RecipientStringCapExceeded)
-    /// before it is decoded.
+    /// before it is decoded. Reading a `private.key` does not use this cap: a
+    /// private-key reader tells a `public.key` apart by its first four bytes
+    /// (`FORMAT.md` §8).
     pub fn max_recipient_string_chars(mut self, value: u32) -> Self {
         self.max_recipient_string_chars = value.min(Self::RECIPIENT_STRING_CHARS_STRUCTURAL_MAX);
         self
@@ -91,10 +95,9 @@ impl KeyReadLimits {
         self
     }
 
-    /// Caps set to the structural maxima, for the callers that apply no
-    /// resource policy of their own: [`crate::validate_public_key_file`]
-    /// and [`crate::validate_private_key_file`] report what the format
-    /// allows rather than what a default reader would accept.
+    /// Caps at the structural maxima, for [`crate::validate_public_key_file`],
+    /// which reports what the format allows rather than what a default reader
+    /// accepts.
     pub(crate) fn structural_max() -> Self {
         Self {
             max_recipient_string_chars: Self::RECIPIENT_STRING_CHARS_STRUCTURAL_MAX,

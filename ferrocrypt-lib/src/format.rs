@@ -129,6 +129,12 @@ pub(crate) const KIND_ENCRYPTED: u8 = 0x45; // 'E'
 /// `private.key` kind byte (`Kind::PrivateKey` on the wire).
 pub(crate) const KIND_PRIVATE_KEY: u8 = 0x4B; // 'K'
 
+/// The four bytes that start every recipient string, and so every
+/// `public.key`: the Bech32 human-readable part `fcr` and the separator `1`
+/// (`FORMAT.md` §7). A private-key reader refuses a file that starts with them
+/// as a `public.key`, before any other check (§8).
+pub(crate) const RECIPIENT_STRING_PREFIX: &[u8] = b"fcr1";
+
 /// Default file extension for encrypted FerroCrypt payload files.
 pub const ENCRYPTED_EXTENSION: &str = "fcr";
 

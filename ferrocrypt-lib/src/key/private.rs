@@ -42,8 +42,8 @@ use crate::crypto::keys::{derive_passphrase_wrap_key, random_bytes};
 use crate::error::{FormatDefect, UnsupportedVersion};
 use crate::format::{
     KIND_PRIVATE_KEY, KeypairSuite, KeypairVersionRejection, MAGIC, MAGIC_SIZE,
-    WRITER_KEYPAIR_SUITE, keypair_suite_from_private_key_version, keypair_suite_is_supported,
-    read_u16_be, read_u32_be, write_u16_be, write_u32_be,
+    RECIPIENT_STRING_PREFIX, WRITER_KEYPAIR_SUITE, keypair_suite_from_private_key_version,
+    keypair_suite_is_supported, read_u16_be, read_u32_be, write_u16_be, write_u32_be,
 };
 use crate::recipient::{TYPE_NAME_MAX_LEN, validate_type_name_grammar};
 
@@ -116,40 +116,38 @@ const _: () = assert!(WRAP_NONCE_OFFSET + WRAP_NONCE_SIZE == PRIVATE_KEY_HEADER_
 /// Whether `data` opens with the `private.key` signature: magic `FCR\0`
 /// and kind `K`, whatever byte sits between them, so that a `private.key`
 /// of a newer encoding version is still recognized (`FORMAT.md` §7.1). The
-/// `public.key` reader uses it to report [`FormatDefect::WrongKeyFileType`],
-/// and the read both private-key readers start with uses it to spare a
-/// `private.key` the `public.key` check.
+/// `public.key` reader uses it to report [`FormatDefect::WrongKeyFileType`].
 pub(crate) fn has_private_key_signature(data: &[u8]) -> bool {
     data.get(..MAGIC_SIZE) == Some(&MAGIC[..]) && data.get(KIND_OFFSET) == Some(&KIND_PRIVATE_KEY)
 }
 
 /// Cleartext fixed-header section of a `private.key`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrivateKeyHeader {
+pub(crate) struct PrivateKeyHeader {
     /// Reserved bit-flags field (`FORMAT.md` §8). Must be `0` in
     /// private-key encoding version `0x01`.
-    pub key_flags: u16,
+    pub(crate) key_flags: u16,
     /// Byte length of the recipient `type_name` that follows the header.
-    pub type_name_len: u16,
+    pub(crate) type_name_len: u16,
     /// Byte length of the cleartext `public_material` that follows the
     /// `type_name`.
-    pub public_len: u32,
+    pub(crate) public_len: u32,
     /// Byte length of the cleartext `ext` TLV region.
-    pub ext_len: u32,
+    pub(crate) ext_len: u32,
     /// Byte length of the AEAD-wrapped `secret_material` (plaintext +
     /// 16-byte Poly1305 tag).
-    pub wrapped_secret_len: u32,
+    pub(crate) wrapped_secret_len: u32,
     /// Argon2id salt used to derive the wrap key from the passphrase.
-    pub argon2_salt: [u8; ARGON2_SALT_SIZE],
+    pub(crate) argon2_salt: [u8; ARGON2_SALT_SIZE],
     /// Argon2id parameters (mem / time / lanes) used to derive the wrap key.
-    pub kdf_params: KdfParams,
+    pub(crate) kdf_params: KdfParams,
     /// XChaCha20-Poly1305 nonce used to seal `secret_material`.
-    pub wrap_nonce: [u8; WRAP_NONCE_SIZE],
+    pub(crate) wrap_nonce: [u8; WRAP_NONCE_SIZE],
 }
 
 impl PrivateKeyHeader {
     /// Serialises the 90-byte cleartext fixed-header section.
-    pub fn to_bytes(&self) -> [u8; PRIVATE_KEY_HEADER_FIXED_SIZE] {
+    pub(crate) fn to_bytes(&self) -> [u8; PRIVATE_KEY_HEADER_FIXED_SIZE] {
         let mut out = [0u8; PRIVATE_KEY_HEADER_FIXED_SIZE];
         out[..MAGIC_SIZE].copy_from_slice(&MAGIC);
         out[VERSION_OFFSET] = PRIVATE_KEY_VERSION;
@@ -180,17 +178,38 @@ impl PrivateKeyHeader {
             + u64::from(wrapped_secret_len)
     }
 
-    /// Parses and structurally validates the 90-byte cleartext header.
-    /// Validates magic → kind → version → key_flags → length-field
-    /// structural caps → kdf_params structural ranges. Length-field
-    /// consistency against the on-disk file size is checked at the
-    /// `open_private_key` layer.
+    /// Parses the fixed header at the start of a `private.key` file (the whole
+    /// file, or at least its first 90 bytes). A file that starts with `fcr1`
+    /// is a `public.key` given by mistake and is refused as
+    /// [`FormatDefect::WrongKeyFileType`] before any other check, however short
+    /// it is (`FORMAT.md` §8). A file shorter than the fixed header is then
+    /// [`FormatDefect::MalformedPrivateKey`].
+    ///
+    /// Nothing past the fixed header is read, so a file's head gets the same
+    /// result as the whole file. Both private-key readers start here, and the
+    /// staged read uses it to size itself.
+    pub(crate) fn from_file_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
+        if bytes.starts_with(RECIPIENT_STRING_PREFIX) {
+            return Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType));
+        }
+        let header_bytes = bytes
+            .first_chunk::<PRIVATE_KEY_HEADER_FIXED_SIZE>()
+            .ok_or_else(malformed_private_key)?;
+        Self::parse(header_bytes)
+    }
+
+    /// Parses and structurally validates the 90-byte cleartext header. Kept
+    /// private so that every reader goes through [`Self::from_file_bytes`],
+    /// which refuses a `public.key` first (`FORMAT.md` §8). Validates magic →
+    /// kind → version → key_flags → length-field structural caps → kdf_params
+    /// structural ranges. The file length is checked later, by
+    /// [`check_total_file_size`].
     ///
     /// The kind byte is read before the version byte because
     /// `FORMAT.md` §11.1 makes it the selector for the version byte's
     /// domain: a file declaring another kind is the wrong kind whatever
     /// its version byte says.
-    pub fn parse(bytes: &[u8; PRIVATE_KEY_HEADER_FIXED_SIZE]) -> Result<Self, CryptoError> {
+    fn parse(bytes: &[u8; PRIVATE_KEY_HEADER_FIXED_SIZE]) -> Result<Self, CryptoError> {
         if bytes[..MAGIC_SIZE] != MAGIC {
             return Err(CryptoError::InvalidFormat(FormatDefect::NotAKeyFile));
         }
@@ -548,14 +567,13 @@ fn seal_private_key_inner(
 /// wrong passphrase and tampered cleartext fields are
 /// indistinguishable at the AEAD layer.
 ///
-/// Emits [`crate::ProgressEvent::UnlockingPrivateKey`] immediately
-/// before the Argon2id call — that is, **after** structural header
-/// parsing, the caller-supplied `KdfLimit` resource cap, the
-/// `local_wrapped_secret_cap` cap, the total-length check, type-name
-/// grammar validation, and the fixed passphrase byte-length bound
-/// have all passed.
-/// A structurally malformed key file, one that exceeds either cap, or
-/// a passphrase outside the bound is rejected with no event emitted.
+/// Emits [`crate::ProgressEvent::UnlockingPrivateKey`] just before the Argon2id
+/// call, after these checks: the header parse of
+/// [`PrivateKeyHeader::from_file_bytes`], the `KdfLimit` and
+/// `local_wrapped_secret_cap` caps, the file length, the type-name grammar, and
+/// the passphrase length. A structurally malformed key file, one that exceeds
+/// either cap, or a passphrase outside the bound is rejected with no event
+/// emitted.
 pub(crate) fn open_private_key(
     bytes: &[u8],
     passphrase: &Passphrase,
@@ -563,12 +581,9 @@ pub(crate) fn open_private_key(
     local_wrapped_secret_cap: u32,
     on_event: &dyn Fn(&crate::ProgressEvent),
 ) -> Result<OpenedPrivateKey, CryptoError> {
-    let header_bytes = bytes
-        .first_chunk::<PRIVATE_KEY_HEADER_FIXED_SIZE>()
-        .ok_or_else(malformed_private_key)?;
-    let header = PrivateKeyHeader::parse(header_bytes)?;
+    let header = PrivateKeyHeader::from_file_bytes(bytes)?;
 
-    // Apply the caller's resource policy. `parse` only enforces the
+    // Apply the caller's resource policy. The header parse only enforces the
     // absolute structural bounds; this check applies the local KDF caps
     // (or `KdfLimit::default` when the caller passed `None`) before any
     // Argon2id work runs. Keeping structural parsing separate lets a
@@ -829,6 +844,98 @@ mod tests {
     /// AEAD primitives do not interpret them.
     fn x25519_shaped() -> ([u8; 32], [u8; 32]) {
         ([0x11u8; 32], [0x22u8; 32])
+    }
+
+    /// Of the two key files this build writes, the private-key parse refuses
+    /// the `public.key` as one, and only the `private.key` carries the
+    /// `private.key` signature and parses.
+    #[test]
+    fn the_key_files_this_build_writes_tell_each_other_apart() -> Result<(), CryptoError> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (private_key_path, public_key_path, _recipient, _fingerprint) =
+            crate::protocol::generate_key_pair(
+                Passphrase::new("kp"),
+                &KdfParams::test_fast_default(),
+                None,
+                tmp.path(),
+                &|_| {},
+            )?;
+        let public_key = std::fs::read(&public_key_path)?;
+        assert!(!has_private_key_signature(&public_key));
+        assert!(matches!(
+            PrivateKeyHeader::from_file_bytes(&public_key),
+            Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType))
+        ));
+        let private_key = std::fs::read(&private_key_path)?;
+        assert!(has_private_key_signature(&private_key));
+        PrivateKeyHeader::from_file_bytes(&private_key)?;
+        Ok(())
+    }
+
+    /// The `private.key` signature is the magic and kind `K`, whatever the
+    /// version byte between them says (`FORMAT.md` §7.1). An encrypted file's
+    /// kind, a file too short for the kind byte, and a recipient string do not
+    /// carry it.
+    #[test]
+    fn the_private_key_signature_ignores_the_version_byte() {
+        let (secret, public) = x25519_shaped();
+        let kdf = KdfParams::test_fast_default();
+        let key = seal_private_key(
+            &secret,
+            "x25519",
+            &public,
+            &[],
+            &test_passphrase("pw"),
+            &kdf,
+        )
+        .unwrap();
+        assert!(has_private_key_signature(&key));
+        let mut newer = key.clone();
+        newer[VERSION_OFFSET] = PRIVATE_KEY_VERSION + 1;
+        assert!(has_private_key_signature(&newer));
+        for data in [&b"FCR\0\x01E"[..], b"FCR\0\x01", b"FCR\0", b"fcr1", b""] {
+            assert!(!has_private_key_signature(data), "{data:?}");
+        }
+    }
+
+    /// Only the first four bytes decide whether a file is refused as a
+    /// `public.key`, and before the size check (`FORMAT.md` §8). Any other file
+    /// gets the next check's error: malformed when shorter than the fixed
+    /// header, and not a key file when longer and without the magic, even with
+    /// the prefix after a space.
+    #[test]
+    fn a_file_is_refused_as_a_public_key_by_its_first_four_bytes() {
+        let defect = |bytes: &[u8]| match PrivateKeyHeader::from_file_bytes(bytes) {
+            Err(CryptoError::InvalidFormat(defect)) => Some(defect),
+            _ => None,
+        };
+        let long = [
+            RECIPIENT_STRING_PREFIX,
+            &[0xFF; PRIVATE_KEY_HEADER_FIXED_SIZE * 2],
+        ]
+        .concat();
+        for bytes in [RECIPIENT_STRING_PREFIX, b"fcr1foobar", &long] {
+            assert_eq!(
+                defect(bytes),
+                Some(FormatDefect::WrongKeyFileType),
+                "{:?}",
+                &bytes[..4]
+            );
+        }
+        for bytes in [&b""[..], b"fcr", b"fcr2", b"FCR1", b" fcr1"] {
+            assert_eq!(
+                defect(bytes),
+                Some(FormatDefect::MalformedPrivateKey),
+                "{bytes:?}"
+            );
+        }
+        let padded_space = [
+            b" ",
+            RECIPIENT_STRING_PREFIX,
+            &[b'q'; PRIVATE_KEY_HEADER_FIXED_SIZE],
+        ]
+        .concat();
+        assert_eq!(defect(&padded_space), Some(FormatDefect::NotAKeyFile));
     }
 
     #[test]
@@ -1538,9 +1645,7 @@ mod tests {
         std::fs::write(tmp.path(), &bytes).unwrap();
 
         let local_cap = PRIVATE_KEY_WRAPPED_SECRET_LOCAL_CAP_DEFAULT;
-        let limits = crate::key::limits::KeyReadLimits::default();
-        assert_eq!(limits.private_key_wrapped_secret_len(), local_cap);
-        let read = crate::key::files::read_private_key_bytes(tmp.path(), limits).unwrap();
+        let read = crate::key::files::read_private_key_bytes(tmp.path(), local_cap).unwrap();
         // header + type_name + public + ext + the capped wrapped secret,
         // plus the one byte that detects a file that is too long.
         let expected = PRIVATE_KEY_HEADER_FIXED_SIZE + 6 + 32 + local_cap as usize + 1;

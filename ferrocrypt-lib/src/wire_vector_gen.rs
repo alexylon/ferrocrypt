@@ -728,7 +728,7 @@ const DIAGNOSTIC_CLASS_TEXT: &[(&str, &str)] = &[
     ),
     (
         "wrong_key_file_type",
-        "A recognized key artifact is not the requested public/private key form.",
+        "The input opens like the other key file: with the private.key signature where a public.key is requested (FORMAT.md section 7.1), or with fcr1 where a private.key is requested (FORMAT.md section 8).",
     ),
     (
         "unsupported_outer_version",
@@ -3749,21 +3749,17 @@ fn write_public_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     let [nonzero_padding, surplus_group] = non_canonical_padding_groups_for_tests(&payload);
 
     let reject = |s: String| -> Vec<u8> { s.into_bytes() };
-    let (hrp, data_part) = recipient
-        .split_once('1')
-        .expect("a recipient string separates its parts with '1'");
+    let prefix = std::str::from_utf8(crate::format::RECIPIENT_STRING_PREFIX)
+        .expect("the recipient-string prefix is ASCII");
+    let data_part = recipient
+        .strip_prefix(prefix)
+        .expect("a recipient string begins with the prefix");
     let mut not_utf8 = canonical.clone();
     not_utf8[0] = 0xFF;
     let cases: [(&str, Vec<u8>, &str, &str); 16] = [
         (
             "public-key-checksum-corrupted",
-            reject({
-                let mut s = recipient.clone();
-                let last = s.pop().expect("recipient is nonempty");
-                let replacement = if last == 'q' { 'p' } else { 'q' };
-                s.push(replacement);
-                s
-            }),
+            reject(with_corrupted_checksum(&recipient)),
             "public_key_bech32_checksum_mismatch",
             "malformed_public_key",
         ),
@@ -3790,7 +3786,7 @@ fn write_public_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         // the two.
         (
             "public-key-mixed-case",
-            reject(format!("{}1{data_part}", hrp.to_uppercase())),
+            reject(format!("{}{data_part}", prefix.to_uppercase())),
             "public_key_mixed_case",
             "malformed_public_key",
         ),
@@ -3966,6 +3962,46 @@ fn write_public_key_version_cases(corpus: &mut Corpus) {
     );
 }
 
+/// `recipient` with the last character of its Bech32 checksum replaced, so
+/// that checksum no longer matches and nothing else changes.
+fn with_corrupted_checksum(recipient: &str) -> String {
+    let mut s = recipient.to_string();
+    let last = s.pop().expect("recipient is nonempty");
+    s.push(if last == 'q' { 'p' } else { 'q' });
+    s
+}
+
+/// The payload of the longest well-formed recipient string: the type name and
+/// the key material both at their maxima (`FORMAT.md` §7). No reader here
+/// supports its type.
+fn longest_recipient_payload() -> Vec<u8> {
+    use crate::key::public::{
+        KEY_MATERIAL_LEN_MAX, PUBLIC_KEY_VERSION, recipient_payload_for_tests,
+    };
+
+    recipient_payload_for_tests(
+        PUBLIC_KEY_VERSION,
+        &longest_unsupported_key_type(),
+        &vec![FILLER; KEY_MATERIAL_LEN_MAX as usize],
+    )
+    .expect("build the longest payload")
+}
+
+/// The longest well-formed recipient string, the encoding of `payload` from
+/// [`longest_recipient_payload`]. Its 12,493 bytes take 19,989 characters, and
+/// the `fcr1` prefix and the checksum 10 more, so the string is 19,999
+/// characters, one under the ceiling.
+fn longest_recipient_string(payload: &[u8]) -> String {
+    use crate::key::public::{
+        RECIPIENT_HRP, RECIPIENT_STRING_LEN_MAX, encode_recipient_payload_with_hrp,
+    };
+
+    let string = encode_recipient_payload_with_hrp(RECIPIENT_HRP.as_str(), payload)
+        .expect("encode the longest payload");
+    assert_eq!(string.len(), RECIPIENT_STRING_LEN_MAX - 1);
+    string
+}
+
 /// The `FORMAT.md` §7 length limits of a recipient string: the type-name
 /// length at zero, on its maximum, and one past it; the key-material length
 /// on its maximum and one past it; the 20,000-character ceiling, on it and
@@ -3977,7 +4013,7 @@ fn write_public_key_length_cases(corpus: &mut Corpus) {
         PUBLIC_KEY_CHECKSUM_SIZE, PUBLIC_KEY_VERSION, RECIPIENT_HRP, RECIPIENT_STRING_LEN_MAX,
         encode_recipient_groups_for_tests, encode_recipient_payload_with_hrp,
         encode_recipient_string_with_version, recipient_groups_for_tests,
-        recipient_payload_for_tests, recipient_payload_unchecked_for_tests,
+        recipient_payload_unchecked_for_tests,
     };
 
     let material = [7u8; x25519::PUBLIC_KEY_SIZE];
@@ -4086,18 +4122,8 @@ fn write_public_key_length_cases(corpus: &mut Corpus) {
         "public_key_type_name_len_and_key_material_len_at_structural_minima_and_type_not_supported",
     );
 
-    // The longest well-formed string: the type name and the key material both
-    // on their maxima, the combination §7 derives 12,215 from. Its 12,493-byte
-    // payload takes 19,989 characters, and the `fcr1` prefix and the checksum
-    // 10 more, so the string is 19,999 characters, one under the ceiling.
-    let longest_material = vec![FILLER; KEY_MATERIAL_LEN_MAX as usize];
-    let longest_payload =
-        recipient_payload_for_tests(PUBLIC_KEY_VERSION, &longest, &longest_material)
-            .expect("build the longest payload");
-    let longest_string =
-        encode_recipient_payload_with_hrp(RECIPIENT_HRP.as_str(), &longest_payload)
-            .expect("encode the longest payload");
-    assert_eq!(longest_string.len(), RECIPIENT_STRING_LEN_MAX - 1);
+    let longest_payload = longest_recipient_payload();
+    let longest_string = longest_recipient_string(&longest_payload);
 
     // The key-material length on its maximum, in the longest well-formed
     // string, and one past it, replayed under a recipient-string cap that
@@ -4110,7 +4136,7 @@ fn write_public_key_length_cases(corpus: &mut Corpus) {
     let material_past_max = encode_unchecked(
         PUBLIC_KEY_VERSION,
         &ungrammatical_type_name(),
-        &[longest_material.as_slice(), &[FILLER]].concat(),
+        &vec![FILLER; KEY_MATERIAL_LEN_MAX as usize + 1],
     );
     under_limit_profile(
         corpus,
@@ -4912,8 +4938,8 @@ fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         "malformed_private_key",
     );
 
-    // A `public.key` handed to the private-key reader is a recognized key
-    // artifact of the wrong form (§12.1 `wrong_key_file_type`).
+    // A `public.key` handed to the private-key reader opens with `fcr1`, so §8
+    // refuses it as `wrong_key_file_type` before any other check.
     let public = keys.public_a.clone();
     private_key_case(
         corpus,
@@ -4922,6 +4948,16 @@ fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         "private_key_reader_given_public_key_file",
         "wrong_key_file_type",
     );
+    let look_alikes = public_key_look_alikes(keys);
+    for (suffix, bytes, condition, class) in &look_alikes {
+        private_key_case(
+            corpus,
+            &format!("private-key-given-{suffix}"),
+            bytes,
+            condition,
+            class,
+        );
+    }
 
     let opened = open_corpus_private_key(corpus, keys);
     write_private_key_ext_and_pair_cases(corpus, keys, &canonical, &opened);
@@ -4986,11 +5022,75 @@ fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         )),
     );
 
-    write_private_key_unlock_check_cases(corpus, keys, &canonical, &opened);
+    write_private_key_unlock_check_cases(corpus, keys, &canonical, &opened, &look_alikes);
 }
 
-/// Checks that structural validation also makes, evidenced through the
-/// unlock as well, because an implementation's unlock need not share
+/// One `public.key` look-alike for the private-key readers, as `(case
+/// suffix, bytes, condition, class)`.
+type PublicKeyLookAlike = (&'static str, Vec<u8>, &'static str, &'static str);
+
+/// Look-alikes of a `public.key` for the private-key readers. The `public.key`
+/// check of `FORMAT.md` §8 reads the first four bytes only: a key of a newer
+/// version, one with a damaged checksum, the prefix alone, which is shorter
+/// than the fixed header, and the prefix followed by bytes that are not UTF-8
+/// all open with `fcr1` and are `wrong_key_file_type`. A key with a leading
+/// space does not, so the magic check refuses it as `not_a_key_file`.
+fn public_key_look_alikes(keys: &CorpusKeys) -> [PublicKeyLookAlike; 5] {
+    use crate::format::RECIPIENT_STRING_PREFIX;
+    use crate::key::private::PRIVATE_KEY_HEADER_FIXED_SIZE;
+    use crate::key::public::encode_recipient_string_with_version;
+
+    let canonical = &keys.public_a;
+    let recipient = std::str::from_utf8(canonical)
+        .expect("public.key is UTF-8")
+        .trim_end_matches('\n');
+    let material = decode_public_key_file(canonical)
+        .to_x25519_bytes()
+        .expect("decode the canonical public key");
+    let newer = encode_recipient_string_with_version(NEWER_VERSION, x25519::TYPE_NAME, &material)
+        .expect("encode a newer public-key version");
+    [
+        (
+            "newer-public-key-file",
+            format!("{newer}\n").into_bytes(),
+            "private_key_reader_given_public_key_file_of_newer_version",
+            "wrong_key_file_type",
+        ),
+        (
+            "public-key-file-with-corrupted-checksum",
+            format!("{}\n", with_corrupted_checksum(recipient)).into_bytes(),
+            "private_key_reader_given_public_key_file_with_corrupted_checksum",
+            "wrong_key_file_type",
+        ),
+        (
+            "recipient-string-prefix-alone",
+            RECIPIENT_STRING_PREFIX.to_vec(),
+            "private_key_reader_given_recipient_string_prefix_alone",
+            "wrong_key_file_type",
+        ),
+        // At least as long as the fixed header, so the size check plays no
+        // part. The filler byte cannot start a UTF-8 sequence.
+        (
+            "recipient-string-prefix-then-bytes-not-utf8",
+            [
+                RECIPIENT_STRING_PREFIX,
+                &[FILLER; PRIVATE_KEY_HEADER_FIXED_SIZE],
+            ]
+            .concat(),
+            "private_key_reader_given_recipient_string_prefix_then_bytes_not_utf8",
+            "wrong_key_file_type",
+        ),
+        (
+            "public-key-file-with-leading-space",
+            [&b" "[..], canonical].concat(),
+            "private_key_reader_given_public_key_file_with_leading_space",
+            "not_a_key_file",
+        ),
+    ]
+}
+
+/// Cases for the checks structural validation also makes, run through the
+/// unlock as well, because another implementation's unlock need not share
 /// validation's code: the file length, the type name, a `public.key` handed
 /// to the reader, and, once the key is authenticated, its type and the
 /// lengths §8 fixes for a native `x25519` key. The keys those later checks
@@ -5001,6 +5101,7 @@ fn write_private_key_unlock_check_cases(
     keys: &CorpusKeys,
     canonical: &[u8],
     opened: &x25519::OpenedX25519KeyFile,
+    look_alikes: &[PublicKeyLookAlike],
 ) {
     let mut trailing = canonical.to_vec();
     trailing.push(FILLER);
@@ -5039,6 +5140,32 @@ fn write_private_key_unlock_check_cases(
             Err((condition, class)),
         );
     }
+    for (suffix, bytes, condition, class) in look_alikes {
+        private_key_open_case(
+            corpus,
+            &format!("private-key-open-given-{suffix}"),
+            bytes,
+            "private-key-a",
+            Err((condition, class)),
+        );
+    }
+    // Longer than the default recipient-string cap and opened under the
+    // default profile: the §8 check reads the prefix only, so no cap takes
+    // part.
+    private_key_open_case(
+        corpus,
+        "private-key-open-given-long-public-key-file",
+        format!(
+            "{}\n",
+            longest_recipient_string(&longest_recipient_payload())
+        )
+        .as_bytes(),
+        "private-key-a",
+        Err((
+            "private_key_reader_given_public_key_file_longer_than_default_recipient_string_cap",
+            "wrong_key_file_type",
+        )),
+    );
 
     let secret = opened.secret.as_slice();
     let unsupported = seal_private_key_for_case(

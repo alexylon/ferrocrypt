@@ -788,7 +788,8 @@ impl PrivateKeyDecryptor {
     ///
     /// If unset, the decrypt path applies [`KeyReadLimits::default`].
     /// Raise [`KeyReadLimits::max_private_key_wrapped_secret_len`] for a
-    /// key file whose wrapped secret legitimately exceeds the default.
+    /// key file whose wrapped secret legitimately exceeds the default. It is
+    /// the only [`KeyReadLimits`] cap a `private.key` uses.
     pub fn key_read_limits(mut self, limits: KeyReadLimits) -> Self {
         self.key_read_limits = Some(limits);
         self
@@ -998,13 +999,13 @@ impl PrivateKey {
     /// Unlocks the private key under caller-chosen resource policy and returns
     /// the public key that belongs to it.
     ///
-    /// Same operation and same guarantees as [`PrivateKey::into_public_key`];
-    /// the two limits replace the defaults that method applies. Pass the same
-    /// `kdf_limit` the key pair was generated under
-    /// ([`KeyPairGenerator::kdf_limit`]) and, for a key file whose wrapped
-    /// secret is larger than the default cap, a `key_read_limits` that admits
-    /// it. A key file this library can decrypt with is one it can inspect, so
-    /// whatever policy opens it in [`PrivateKeyDecryptor`] opens it here.
+    /// Same operation and guarantees as [`PrivateKey::into_public_key`], with
+    /// the two limits in place of its defaults. Pass the `kdf_limit` the key
+    /// pair was generated under ([`KeyPairGenerator::kdf_limit`]), and a
+    /// `key_read_limits` that admits the wrapped secret when it is larger than
+    /// the default cap; that is the only [`KeyReadLimits`] cap a `private.key`
+    /// uses. Limits that let [`PrivateKeyDecryptor`] open a key file also let
+    /// this method open it.
     ///
     /// # Errors
     ///
@@ -1385,16 +1386,15 @@ pub fn default_encrypted_filename(input_path: impl AsRef<Path>) -> Result<String
 
 /// Validates that a file is a well-formed FerroCrypt `private.key` file.
 ///
-/// A text `public.key` whose recipient string this build can decode is
-/// refused first, even one shorter than the fixed header, with
-/// [`FormatDefect::WrongKeyFileType`] rather than a generic key-file parse
-/// error. The cleartext structure is then checked in this order: the size of
-/// the 90-byte fixed header, magic bytes, key-file kind, version, flags,
-/// length fields, KDF parameters, total file size, type name, and the X25519
-/// public-material and wrapped-secret lengths. A file whose size differs from
-/// what its header declares is therefore malformed whatever its type name.
-/// This does **not** attempt to decrypt the key and does not require a
-/// passphrase.
+/// A file that starts with `fcr1`, the start of every recipient string, is
+/// refused first, as a `public.key`, with [`FormatDefect::WrongKeyFileType`],
+/// even when it is shorter than the fixed header. The cleartext structure is
+/// then checked in this order: the size of the 90-byte fixed header, magic
+/// bytes, key-file kind, version, flags, length fields, KDF parameters, total
+/// file size, type name, and the X25519 public-material and wrapped-secret
+/// lengths. A file whose size differs from what its header declares is
+/// therefore malformed whatever its type name. This does **not** attempt to
+/// decrypt the key and does not require a passphrase.
 ///
 /// Companion to [`validate_public_key_file`]. Applies no resource caps of
 /// its own: the verdict follows what `FORMAT.md` §8 allows, not what a
@@ -1410,10 +1410,12 @@ pub fn default_encrypted_filename(input_path: impl AsRef<Path>) -> Result<String
 /// the `FORMAT.md` §2.2 bounds. Returns [`CryptoError::UnsupportedKeyType`] for
 /// a well-formed private key of a key type this build does not support.
 pub fn validate_private_key_file(key_file: impl AsRef<Path>) -> Result<(), CryptoError> {
-    // No resource policy of its own: this validates structure only, so the
-    // read and the public-key probe both run at the structural maxima.
-    let limits = KeyReadLimits::structural_max();
-    let data = crate::key::files::read_private_key_bytes(key_file.as_ref(), limits)?;
+    // Validation applies no resource policy, so the read admits the largest
+    // wrapped secret the format allows.
+    let data = crate::key::files::read_private_key_bytes(
+        key_file.as_ref(),
+        KeyReadLimits::PRIVATE_KEY_WRAPPED_SECRET_LEN_STRUCTURAL_MAX,
+    )?;
     recipient::native::x25519::validate_private_key_shape(&data)
 }
 

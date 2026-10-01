@@ -333,6 +333,7 @@ It contains:
   (`FORMAT.md` §11);
 - the writer's logical suite (`WRITER_KEYPAIR_SUITE`);
 - kind bytes;
+- the recipient-string prefix (`RECIPIENT_STRING_PREFIX`, the bytes `fcr1`), which `key/public.rs` writes at the start of every recipient string and by which a private-key reader refuses a `public.key` (`FORMAT.md` §8);
 - field sizes;
 - maximum structural sizes;
 - fixed prefix and header parsing;
@@ -726,7 +727,7 @@ These names follow Rust cryptographic convention.
 
 ### 6.1 `key/public.rs`
 
-`key/public.rs` owns the public recipient key text format. `key/limits.rs` owns `KeyReadLimits` (public, `#[non_exhaustive]`, builder methods clamp at the structural maxima), the caller-facing caps both key readers apply.
+`key/public.rs` owns the public recipient key text format. `key/limits.rs` owns `KeyReadLimits` (public, `#[non_exhaustive]`, builder methods clamp at the structural maxima), the caller-facing caps the key readers apply: recipient-string length for a `public.key` or recipient string, and wrapped-secret length for a `private.key`.
 
 It contains:
 
@@ -765,8 +766,8 @@ It contains:
 
 - `private.key` binary layout;
 - the private-key wire-version constants (`PRIVATE_KEY_VERSION` derived from `WRITER_KEYPAIR_SUITE`; `PRIVATE_KEY_V1_VERSION` derived from `KeypairSuite::V1`) and the private-flavoured wire-version-to-suite translation, which is now a thin `map_err` wrapper over the centralised `keypair_suite_from_private_key_version` in `format.rs` — this layer picks the private-key error variants (`MalformedPrivateKey`, `OlderKey`, `NewerKey`) and routes the suite through the shared support gate in `format.rs` (`FORMAT.md` §8);
-- cleartext private-key header parsing;
-- the `private.key` signature check (`has_private_key_signature`): magic and kind, whatever the version byte, which the `public.key` reader uses to report `WrongKeyFileType` and the shared private-key read uses to spare a `private.key` the `public.key` check;
+- cleartext private-key header parsing, and the start both private-key readers share (`PrivateKeyHeader::from_file_bytes`): the `public.key` check of `FORMAT.md` §8, by the `fcr1` prefix alone and before any other check, then the size of the fixed header and its parse;
+- the `private.key` signature check (`has_private_key_signature`): magic and kind, whatever the version byte, which the `public.key` reader uses to report `WrongKeyFileType`;
 - the file-length check both `private.key` readers make (`check_total_file_size`), so the unlock in `open_private_key` and the structural validator `recipient/native/x25519.rs::validate_private_key_shape` both refuse a file of the wrong length before either reads the type name; the unlock applies its local caps first, which the validator does not apply;
 - passphrase-wrapped secret encryption;
 - passphrase-wrapped secret decryption;
@@ -784,10 +785,9 @@ It does not contain X25519-specific recipient policy. The X25519 recipient modul
 It contains:
 
 - default filenames `public.key` and `private.key`;
-- the `public.key` heuristic (`looks_like_public_key`), which the private-key readers use to report `WrongKeyFileType`, and how many leading bytes it reads (`public_key_probe_len`), which also bounds the `private.key` read of a head that does not parse;
-- the read both private-key readers start with (`read_private_key_bytes`): the staged read, with the wrapped-secret cap and the probe length taken from one `KeyReadLimits`, then the refusal of a `public.key` as `WrongKeyFileType`.
+- the read both private-key readers start with (`read_private_key_bytes`): the staged read, with the wrapped secret clamped at the caller's cap.
 
-Key-file reads go through `fs/paths.rs::read_file_capped` (`public.key`, called by `key/public.rs`) and `fs/paths.rs::read_file_staged` (`private.key`, called by `key/files.rs::read_private_key_bytes`). Both private-key readers, the unlock in `recipient/native/x25519.rs` and `api::validate_private_key_file`, start with `read_private_key_bytes`, which reads under one `KeyReadLimits` and refuses a `public.key`. Write staging for generated key files is owned by `protocol.rs` key generation through the atomic-output helpers in `fs/atomic.rs`; nothing duplicates that behavior.
+Key-file reads go through `fs/paths.rs::read_file_capped` (`public.key`, called by `key/public.rs`) and `fs/paths.rs::read_file_staged` (`private.key`, called by `key/files.rs::read_private_key_bytes`). Both private-key readers, the unlock in `recipient/native/x25519.rs` and `api::validate_private_key_file`, start with `read_private_key_bytes` and then parse from `key/private.rs::PrivateKeyHeader::from_file_bytes`, which refuses a `public.key`. Write staging for generated key files is owned by `protocol.rs` key generation through the atomic-output helpers in `fs/atomic.rs`; nothing duplicates that behavior.
 
 ---
 
@@ -1151,7 +1151,7 @@ It contains:
 - occupied-path / dangling-symlink rejection (`path_occupied`, `reject_occupied`) — `lstat`-based "is anything here?" preflight used by encrypt and keygen output prechecks so a stale symlink rejects in milliseconds instead of after Argon2id;
 - special-file-safe input opening (`open_input_file`) — read-only open that refuses FIFOs, sockets, and device nodes; on Unix the open uses `O_NONBLOCK` so a FIFO cannot block the process inside `open(2)`, and the type check runs on the open handle (no check-to-use window). A missing path maps to the typed `InputPath` via `map_user_path_io_error`, so a vanished input reports identically across `Decryptor::open`, the probe, the decrypt open, and the key-file reads. Used by `api::probe_recipient_mode_with_limits`, `protocol::decrypt`, and `read_file_capped` — the decrypt-side counterpart of the encrypt-side `archive::encode::validate_encrypt_input` rejection;
 - bounded file reads (`read_file_capped`) — opens via `open_input_file`, then `Read::take(cap + 1)` with over-cap rejection, used by `key/public.rs::read_public_key` to refuse multi-gigabyte attacker-controlled key files without reading them into memory;
-- staged file reads (`read_file_staged`) — the same bounded open, but the fixed header is read first and the caller derives the remaining length from it, so a `private.key` is read at the size its own header declares rather than at the structural maximum of every field. A remaining length above the cap is clamped to it. Used by `key/files.rs::read_private_key_bytes`, which reads a head that does not parse only as far as the `public.key` probe needs (`public_key_probe_len`), so such a file is refused with the error its header gives, whatever its size.
+- staged file reads (`read_file_staged`) — the same bounded open, but the fixed header is read first and the caller derives the remaining length from it, so a `private.key` is read at the size its own header declares rather than at the structural maximum of every field. A remaining length above the cap is clamped to it. Used by `key/files.rs::read_private_key_bytes`, which reads a head that does not parse no further than the head and the lookahead byte, so such a file is refused with the error its header gives, whatever its size.
 
 It does not enforce FCA archive path rules. Archive path rules belong only to `archive/path.rs`.
 
@@ -1481,7 +1481,7 @@ protocol.rs
   ├── recipient/* → crypto/*
   │   └── recipient/native/x25519.rs → key/*
   ├── key/* → crypto/* + format.rs + recipient/name.rs + fs/*
-  │   ├── key/files.rs → key/private.rs + key/public.rs
+  │   ├── key/files.rs → key/private.rs
   │   └── key/public.rs → key/private.rs + recipient/native/x25519.rs
   ├── archive/*
   └── fs/*

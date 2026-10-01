@@ -429,9 +429,8 @@ pub(crate) struct OpenedX25519KeyFile {
 ///   artifact's `kind` byte is not the private-key kind
 /// - [`crate::error::FormatDefect::MalformedTypeName`] when the stored
 ///   `type_name` violates the `FORMAT.md` §3.3 grammar
-/// - [`crate::error::FormatDefect::WrongKeyFileType`] when the file is a
-///   `public.key` whose recipient string this build can decode within the
-///   recipient-string cap in `key_read_limits`
+/// - [`crate::error::FormatDefect::WrongKeyFileType`] when the file opens
+///   with `fcr1`, the start of every recipient string (`FORMAT.md` §8)
 /// - [`CryptoError::UnsupportedKeyType`] for a `private.key` that wraps a
 ///   non-X25519 secret (e.g. a future native key kind)
 /// - [`crate::error::FormatDefect::MalformedPrivateKey`] for a structurally valid
@@ -454,22 +453,14 @@ pub(crate) fn open_x25519_key_file(
     use crate::key::files::read_private_key_bytes;
     use crate::key::private::open_private_key;
 
-    let bytes = read_private_key_bytes(path, key_read_limits)?;
+    let wrapped_secret_cap = key_read_limits.private_key_wrapped_secret_len();
+    let bytes = read_private_key_bytes(path, wrapped_secret_cap)?;
 
-    // Deliberate order: the full unlock runs before the type-name
-    // check, so the wrong-type verdict below is made on
-    // AEAD-authenticated bytes. Checking the cleartext type name first
-    // (via `validate_private_key_shape`) would skip one Argon2id run
-    // when the user picks a wrong-type key file by mistake, but would
-    // let a tampered cleartext name move the failure out of the
-    // ambiguity-preserving `KeyFileUnlockFailed` class.
-    let opened = open_private_key(
-        &bytes,
-        passphrase,
-        kdf_limit,
-        key_read_limits.private_key_wrapped_secret_len(),
-        on_event,
-    )?;
+    // The unlock runs before the type check, so the type verdict below rests
+    // on authenticated bytes. Checking the cleartext type first would save one
+    // Argon2id run for a key of the wrong type, but a tampered type name could
+    // then turn an unlock failure into a different error.
+    let opened = open_private_key(&bytes, passphrase, kdf_limit, wrapped_secret_cap, on_event)?;
 
     if opened.type_name != TYPE_NAME {
         return Err(CryptoError::UnsupportedKeyType {
@@ -519,11 +510,14 @@ pub(crate) fn open_x25519_key_file(
 /// [`crate::validate_private_key_file`] and re-exported via
 /// `fuzz_exports` for the fuzz harness.
 ///
-/// Checks (in order):
+/// Checks, in order (the first three are made by
+/// `PrivateKeyHeader::from_file_bytes`, which the unlock also starts with):
+/// - the file does not open with `fcr1`, the start of every recipient
+///   string; one that does is a `public.key`, refused as
+///   [`crate::error::FormatDefect::WrongKeyFileType`] (`FORMAT.md` §8);
 /// - file is large enough to hold the 90-byte cleartext fixed header;
-/// - [`crate::key::private::PrivateKeyHeader::parse`] accepts the
-///   header (magic, kind, version, `key_flags == 0`, the structural
-///   ranges of the length fields and of the KDF parameters);
+/// - the fixed header parses: magic, kind, version, `key_flags == 0`, and the
+///   structural ranges of the length fields and of the KDF parameters;
 /// - the file's total length matches
 ///   `90 + type_name_len + public_len + ext_len + wrapped_secret_len`,
 ///   the check the unlock also makes before it reads the type name, after
@@ -544,12 +538,7 @@ pub fn validate_private_key_shape(data: &[u8]) -> Result<(), CryptoError> {
         PRIVATE_KEY_HEADER_FIXED_SIZE, PrivateKeyHeader, check_total_file_size,
     };
 
-    let header_bytes =
-        data.first_chunk::<PRIVATE_KEY_HEADER_FIXED_SIZE>()
-            .ok_or(CryptoError::InvalidFormat(
-                FormatDefect::MalformedPrivateKey,
-            ))?;
-    let header = PrivateKeyHeader::parse(header_bytes)?;
+    let header = PrivateKeyHeader::from_file_bytes(data)?;
     check_total_file_size(data.len(), &header)?;
 
     let type_name_start = PRIVATE_KEY_HEADER_FIXED_SIZE;
@@ -778,14 +767,13 @@ mod tests {
         Ok(())
     }
 
-    /// A `public.key` handed to either private-key reader is recognized up
-    /// to the longest recipient string the format allows, when the reader's
-    /// cap admits one that long: the read of a head that is not a
-    /// private-key header must not stop before the public-key probe has
-    /// what it needs.
+    /// A `public.key` handed to either private-key reader is recognized by
+    /// its `fcr1` prefix alone (`FORMAT.md` §8), so the longest one the format
+    /// allows, far longer than the default recipient-string cap, is recognized
+    /// whatever cap the unlock applies.
     #[test]
-    fn the_longest_public_key_is_recognized_by_both_private_key_readers() -> Result<(), CryptoError>
-    {
+    fn the_recipient_string_cap_plays_no_part_in_recognizing_a_public_key()
+    -> Result<(), CryptoError> {
         use crate::key::public::{KEY_MATERIAL_LEN_MAX, RECIPIENT_STRING_LEN_MAX};
         use crate::recipient::name::TYPE_NAME_MAX_LEN;
 
@@ -803,12 +791,18 @@ mod tests {
             other => panic!("validation: expected WrongKeyFileType, got {other:?}"),
         }
         let pass = Passphrase::new("pw");
-        match open_x25519_private_key(&path, &pass, None, KeyReadLimits::structural_max(), &|_| {})
-            .map(|_| ())
-        {
-            Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)) => Ok(()),
-            other => panic!("unlock: expected WrongKeyFileType, got {other:?}"),
+        for limits in [
+            KeyReadLimits::default(),
+            KeyReadLimits::default().max_recipient_string_chars(0),
+        ] {
+            match open_x25519_private_key(&path, &pass, None, limits, &|_| {}).map(|_| ()) {
+                Err(CryptoError::InvalidFormat(FormatDefect::WrongKeyFileType)) => {}
+                other => {
+                    panic!("unlock under {limits:?}: expected WrongKeyFileType, got {other:?}")
+                }
+            }
         }
+        Ok(())
     }
 
     /// A `private.key` wrapping a valid non-X25519 key kind is the
@@ -850,9 +844,8 @@ mod tests {
         Ok(())
     }
 
-    /// A real public/private file crossing is classified before the
-    /// generic private-key unlock, so it keeps `WrongKeyFileType` and
-    /// emits no KDF progress event.
+    /// A `public.key` handed to the unlock is refused before the Argon2id
+    /// call, so it gets `WrongKeyFileType` and emits no KDF progress event.
     #[test]
     fn open_private_key_rejects_public_key_file_before_progress() -> Result<(), CryptoError> {
         let tmp = tempfile::TempDir::new().unwrap();

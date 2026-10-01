@@ -38,7 +38,7 @@ use sha3::{Digest, Sha3_256};
 use crate::CryptoError;
 use crate::error::{FormatDefect, UnsupportedVersion};
 use crate::format::{
-    KeypairSuite, KeypairVersionRejection, WRITER_KEYPAIR_SUITE,
+    KeypairSuite, KeypairVersionRejection, RECIPIENT_STRING_PREFIX, WRITER_KEYPAIR_SUITE,
     keypair_suite_from_public_key_version, keypair_suite_is_supported, read_u16_be, read_u32_be,
 };
 use crate::key::limits::KeyReadLimits;
@@ -65,8 +65,29 @@ fn hex_encode(bytes: &[u8]) -> String {
     out
 }
 
-/// Bech32 HRP for FerroCrypt recipient strings.
-pub(crate) const RECIPIENT_HRP: Hrp = Hrp::parse_unchecked("fcr");
+/// Bech32 HRP for FerroCrypt recipient strings: [`RECIPIENT_STRING_PREFIX`]
+/// without the separator that ends it.
+pub(crate) const RECIPIENT_HRP: Hrp = Hrp::parse_unchecked(recipient_hrp_text());
+
+/// The separator BIP 173 places between the human-readable part and the data
+/// part of a Bech32 string.
+const BECH32_SEPARATOR: u8 = b'1';
+
+/// The text of [`RECIPIENT_HRP`], taken from [`RECIPIENT_STRING_PREFIX`] at
+/// compile time so the two cannot drift apart: the build fails unless the
+/// prefix ends with the Bech32 separator.
+const fn recipient_hrp_text() -> &'static str {
+    let Some((&separator, hrp)) = RECIPIENT_STRING_PREFIX.split_last() else {
+        panic!("the recipient-string prefix is empty");
+    };
+    if separator != BECH32_SEPARATOR {
+        panic!("the recipient-string prefix does not end with the Bech32 separator");
+    }
+    match core::str::from_utf8(hrp) {
+        Ok(text) => text,
+        Err(_) => panic!("the recipient-string prefix is not UTF-8"),
+    }
+}
 
 /// Domain separator for the internal SHA3-256 recipient-payload
 /// checksum. Distinct from any other hash input in the format so a future
@@ -103,9 +124,14 @@ pub(crate) const PUBLIC_KEY_FILE_READ_CAP_BYTES: usize = RECIPIENT_STRING_LEN_MA
 /// without forcing every caller to raise the cap.
 pub const RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT: usize = 1_024;
 
-/// Bech32 envelope overhead in characters: HRP `"fcr"` (3) +
-/// separator `'1'` (1) + 6-char Bech32 checksum.
-const RECIPIENT_STRING_OVERHEAD_CHARS: usize = 3 + 1 + 6;
+/// Characters of the Bech32 checksum that ends every recipient string
+/// (BIP 173).
+const BECH32_CHECKSUM_CHARS: usize = 6;
+
+/// Characters of a recipient string outside its data: the `fcr1` prefix and
+/// the checksum.
+const RECIPIENT_STRING_OVERHEAD_CHARS: usize =
+    RECIPIENT_STRING_PREFIX.len() + BECH32_CHECKSUM_CHARS;
 
 /// Structural maximum for `key_material_len` in the typed payload.
 /// Derived from [`RECIPIENT_STRING_LEN_MAX`] so a max-length type_name
@@ -1065,6 +1091,15 @@ mod tests {
     /// public_key encoding is type_name-agnostic.
     fn x25519_key() -> [u8; 32] {
         [0x33u8; 32]
+    }
+
+    /// Every recipient string this module encodes begins with the prefix the
+    /// private-key readers check (`FORMAT.md` §8), so the byte the prefix ends
+    /// with is the separator Bech32 writes after the human-readable part.
+    #[test]
+    fn every_recipient_string_begins_with_the_recipient_string_prefix() {
+        let recipient = encode_recipient_string(X25519_TYPE_NAME, &x25519_key()).unwrap();
+        assert!(recipient.as_bytes().starts_with(RECIPIENT_STRING_PREFIX));
     }
 
     /// A rejected recipient string is never echoed, so a malicious

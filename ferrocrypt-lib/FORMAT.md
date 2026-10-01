@@ -1266,6 +1266,22 @@ ext_len <= 65,536
 16 <= wrapped_secret_len <= 16,777,216
 ```
 
+Before any other check this section makes on the file, a reader loading a
+`private.key` MUST check whether the file opens with the four bytes `fcr1`, the
+human-readable part and separator that begin every recipient string (§7). If it
+does, the reader MUST report `wrong_key_file_type` (§12.1) and make no other
+check of this section. The result depends only on those four bytes: the check
+removes no whitespace, decodes nothing, and applies no local cap, so it depends
+neither on the reader's caps nor on the key-pair suites it supports. It
+recognizes the form of a `public.key` and does not establish a well-formed key,
+so a damaged checksum, bytes that are not UTF-8, an unsupported version, or any
+other bytes after the prefix still give `wrong_key_file_type`. It mirrors the
+`private.key` signature check of §7.1, but where that check follows the
+file-size check of §7.1, this one precedes every other check of this section,
+the size of the fixed header included, because a `public.key` can be shorter
+than 90 bytes. This order concerns the file's bytes only: a reader MAY check
+another input first, such as a passphrase against the bound of §2.2.
+
 Readers MUST check that the file holds the 90-byte fixed header before
 checking the private-key encoding version, so a shorter file is
 `malformed_private_key` rather than `unsupported_private_key_version`. They
@@ -1332,17 +1348,19 @@ act on them or reject unknown critical private-key TLVs until `wrapped_secret`
 has been successfully authenticated. Unknown critical private-key TLVs MUST cause
 rejection after successful authentication.
 
-Readers MUST validate magic, kind, private-key encoding version and
-key-pair-suite support, flags, lengths, type name, total file size, KDF
-parameters, local resource caps, AEAD authentication, TLV rules, and
-recipient-type-specific secret/public material constraints. This list names
-the checks, not their order. The order is fixed in four places. `kind`
-precedes the version byte, because §11.1 makes the kind byte the selector for
-that byte's domain: a file declaring another kind is `wrong_kind` (§12.1)
-whatever byte sits at offset 4. The length limits precede the type name, as
-stated above. The KDF parameters and the local resource caps precede AEAD
-authentication, because they bound what authenticating the file costs. The
-TLV rules follow AEAD authentication, as §6 requires.
+Besides the `public.key` check above, readers MUST validate magic, kind,
+private-key encoding version and key-pair-suite support, flags, lengths, type
+name, total file size, KDF parameters, local resource caps, AEAD authentication,
+TLV rules, and recipient-type-specific secret/public material constraints. This
+list names the checks, not their order. The order is fixed only where this
+section states it. The check for a `public.key` comes first, and the size of the
+fixed header, the version, and the length limits follow in the order stated
+above, before the type name. `kind` precedes the version byte, because §11.1
+makes the kind byte the selector for that byte's domain: a file declaring
+another kind is `wrong_kind` (§12.1) whatever byte sits at offset 4. The KDF
+parameters and the local resource caps precede AEAD authentication, because they
+bound what authenticating the file costs. The TLV rules follow AEAD
+authentication, as §6 requires.
 
 A local cap on `wrapped_secret_len` follows the same rule as the recipient-string
 cap in §7: implementations MAY set one below the structural maximum and SHOULD
@@ -2526,7 +2544,7 @@ Every rejected conformance case MUST carry both:
 | `bad_magic` | The top-level `FCR\0` magic does not match | `InvalidFormat(BadMagic)` |
 | `not_a_key_file` | The input is not a recognized FerroCrypt key artifact | `InvalidFormat(NotAKeyFile)` |
 | `wrong_kind` | An `FCR\0` artifact has the wrong kind for the requested operation | `InvalidFormat(WrongKind)` |
-| `wrong_key_file_type` | A recognized key artifact is not the requested public/private key form | `InvalidFormat(WrongKeyFileType)` |
+| `wrong_key_file_type` | The input opens like the other key file: with the `private.key` signature where a `public.key` is requested (§7.1), or with `fcr1` where a `private.key` is requested (§8) | `InvalidFormat(WrongKeyFileType)` |
 | `unsupported_outer_version` | A nonzero `.fcr` outer-container version this implementation does not support | `UnsupportedVersion(OlderFile)` or `UnsupportedVersion(NewerFile)` |
 | `unsupported_fca_version` | A nonzero FCA archive version this implementation does not support | `InvalidFormat(UnsupportedArchiveVersion)` |
 | `unsupported_public_key_version` | A nonzero public-key encoding version this implementation does not support | `UnsupportedVersion(OlderPublicKey)` or `UnsupportedVersion(NewerPublicKey)` |
@@ -2992,7 +3010,7 @@ reused operationally.
 | `.fcr` TLV | Empty region, valid unknown ignorable, unknown critical, reserved tag, duplicate and out-of-order tags, truncated header and value, and oversized region and value |
 | Payload STREAM | Independent byte-exact known-answer tests, authentication failure, truncation, forbidden empty final chunk after data, trailing data, and exact-boundary finalization. The chunk-count ceiling is excluded: evidencing it needs an artifact of more than 256 TiB (§12.1) |
 | `public.key` | Canonical file; optional LF; checksum, padding, case, whitespace, and length failures; an invariant public-key encoding version `0x00` case classified as `malformed_public_key`; a public-key encoding version `0x02` capability case classified as `unsupported_public_key_version`; unsupported type; canonical X25519 material; aliases; field-prime boundaries; all zero; and wrong lengths |
-| `private.key` | Canonical valid and openable file; wrong passphrase; cleartext-AAD and wrapped-secret tamper; malformed, truncated, and trailing data; wrong kind or key-file type; an invariant private-key encoding version `0x00` case classified as `malformed_private_key`; a private-key encoding version `0x02` capability case classified as `unsupported_private_key_version`; its own stored KDF parameters, structurally invalid and above every local KDF cap they can exceed; the wrapped-secret cap; TLVs; and public/secret consistency |
+| `private.key` | Canonical valid and openable file; wrong passphrase; cleartext-AAD and wrapped-secret tamper; malformed, truncated, and trailing data; wrong kind or key-file type; the §8 `public.key` check through both readers (the `fcr1` prefix alone, the prefix followed by bytes that are not UTF-8, a `public.key` of a newer version or with a damaged checksum, and a key with a leading space) and through the unlock for a `public.key` longer than the default recipient-string cap; an invariant private-key encoding version `0x00` case classified as `malformed_private_key`; a private-key encoding version `0x02` capability case classified as `unsupported_private_key_version`; its own stored KDF parameters, structurally invalid and above every local KDF cap they can exceed; the wrapped-secret cap; TLVs; and public/secret consistency |
 | FCA fixed header | Valid file and directory roots; bad magic; an invariant FCA archive version `0x00` case classified as `malformed_archive`; an FCA archive version `0x02` capability case classified as `unsupported_fca_version`; flags; counts; archive-extension length; manifest length; total-byte accounting; and truncation |
 | FCA manifest and tree | File and directory entries, acceptance of canonical and permitted noncanonical order, duplicate and ASCII-case-colliding paths, missing parents, child under file, multiple roots, invalid kinds, modes, sizes, and totals |
 | FCA paths | Absolute, parent, and current components; separators; NUL, control, and reserved characters; trailing dot and space; Windows device names; depth, component, and total-length limits; valid Unicode |

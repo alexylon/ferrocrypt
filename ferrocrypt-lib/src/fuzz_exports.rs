@@ -31,7 +31,6 @@ pub use crate::crypto::kdf::{KDF_PARAMS_SIZE, KdfParams};
 pub const MIN_WRITE_MEM_COST: u32 = KdfParams::MIN_WRITE_MEM_COST;
 pub use crate::crypto::tlv::validate_tlv;
 pub use crate::fs::paths::INCOMPLETE_SUFFIX;
-pub use crate::key::private::PrivateKeyHeader;
 pub use crate::key::public::RECIPIENT_STRING_LEN_LOCAL_CAP_DEFAULT;
 pub use crate::recipient::native::x25519::validate_private_key_shape;
 

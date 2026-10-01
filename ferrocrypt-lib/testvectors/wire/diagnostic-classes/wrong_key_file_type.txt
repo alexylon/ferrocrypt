@@ -1,1 +1,1 @@
-A recognized key artifact is not the requested public/private key form.
+The input opens like the other key file: with the private.key signature where a public.key is requested (FORMAT.md section 7.1), or with fcr1 where a private.key is requested (FORMAT.md section 8).

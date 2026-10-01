@@ -139,8 +139,8 @@ be unexpected:
   `0x45` where the private-key kind `0x4B` belongs, so it reports
   `WrongKind { kind: 0x45 }`. Supplying a `public.key` written by this build to
   the private-key validator, or an X25519 `private.key` to the public-key
-  reader, instead reports `WrongKeyFileType`; that diagnostic is reserved for
-  those concrete public/private crossings.
+  reader, instead reports `WrongKeyFileType`; that diagnostic is reserved for a
+  file that opens like the other kind of key file (`FORMAT.md` §7.1 and §8).
 
 ## Regenerating
 

@@ -26,7 +26,7 @@ the integration targets.
 | Target | What it exercises |
 |---|---|
 | `fuzz_header_prefix` | v1 12-byte prefix + `header_fixed` + recipient-entry framing via `read_encrypted_header` |
-| `fuzz_private_key_header` | v1 90-byte `private.key` cleartext header and total-size shape checks |
+| `fuzz_private_key_header` | The `public.key` check on the first four bytes, the v1 90-byte `private.key` cleartext header, and total-size shape checks |
 | `fuzz_tlv` | `validate_tlv` extension-region grammar: canonical ordering, reserved tags, critical-tag rejection |
 | `fuzz_kdf_params` | `KdfParams::from_bytes` structural and local-resource bounds |
 | `fuzz_archive_path` | `validate_fca_path` — the FCA archive path-grammar gate (writer/reader symmetric, takes UTF-8 `&str`); asserts every FORMAT.md §9.6 grammar promise on accepted paths, with the reserved-device list restated independently so an accept-direction regression crashes instead of passing |

@@ -227,7 +227,8 @@ recipient string, whose key-material cases include the longest well-formed
 string of 19,999 characters. Such a profile evidences the structural limit,
 not the cap it raises. The key-file cases also fix the check order of §7 and
 §8: the size of the fixed fields, then the encoding version, then the length
-fields, and only then the type name.
+fields, and only then the type name, with the `public.key` check of §8 before
+all of them for a `private.key`.
 
 The length fields of both key files and of a recipient entry also have cases on
 their lower bounds, the type-name length through `t`, the shortest name the §3.3
@@ -238,6 +239,15 @@ structural validation and the unlock, because an implementation's unlock need
 not share validation's code. The `public.key` cases include the two classes §7.1
 gives a file that is not a recipient string at all, and text over the cap with a
 space in it, which the cap refuses before any Bech32 rule sees the space.
+
+The §8 check for a `public.key` reads the first four bytes only, and its cases
+go through both `private.key` readers: a key of a newer version, one with a
+damaged checksum, the `fcr1` prefix alone, which is shorter than the fixed
+header, and the prefix followed by bytes that are not UTF-8 are all
+`wrong_key_file_type`, while a key with a leading space does not open with the
+prefix and is `not_a_key_file`. A key longer than the default recipient-string
+cap is `wrong_key_file_type` through the unlock under the default profile,
+because the check applies no cap.
 
 Two areas are covered in a shape worth stating: a directory root's expected
 result is the extraction listing §12.3 defines rather than a single plaintext

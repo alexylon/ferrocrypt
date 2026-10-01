@@ -95,7 +95,9 @@ every cap to exactly what the one-byte passphrase file and the key pair of
 the corpus need, each `lowered-*` profile lowers one cap, and
 `recipient-string-structural-maximum` raises the recipient-string cap to the
 §7 ceiling, so a string carrying key material on or past its maximum reaches
-the payload checks.
+the payload checks. One profile serves the check order instead of a limit:
+`zero-recipient-string-cap` sets that cap to zero, so a string too short to
+hold a payload is over it.
 `private_key_validate` and `stream_encrypt_kat` apply no local cap and name
 `-`. An implementation that cannot set its caps to a profile's values cannot
 assert the cases that name it.
@@ -170,7 +172,10 @@ checks that each cap a limit profile lowers above zero is exactly what one of
 that profile's accepted cases needs: lowered by one more, it must refuse that
 case with the class a reader reports for that cap. Each cap a profile raises
 above its default must be needed by one of that profile's cases: restored to
-the default, it must refuse that case with the same class.
+the default, it must refuse that case with the same class. Each cap a profile
+other than `small-artifact-caps` lowers to zero must be needed by one of its
+cases: that case is refused with the class of the cap, and with the default
+restored it is still refused, with another class.
 
 This split is an artifact of FerroCrypt's own module boundaries. An outside
 implementation has no such constraint: `origins.tsv` names the payload key file
@@ -225,10 +230,22 @@ maximum: `header-structural-maxima` for the header length, recipient count,
 and recipient body length, and `recipient-string-structural-maximum` for the
 recipient string, whose key-material cases include the longest well-formed
 string of 19,999 characters. Such a profile evidences the structural limit,
-not the cap it raises. The key-file cases also fix the check order of §7 and
-§8: the size of the fixed fields, then the encoding version, then the length
-fields, and only then the type name, with the `public.key` check of §8 before
-all of them for a `private.key`.
+not the cap it raises.
+
+The key-file cases also fix the whole check order of §7.1, §7, and §8. A case
+that breaks two checks, and none before them, fixes the order of the two, and
+such cases chain: one check before a second and the second before a third put
+the first before the third. Together they fix the order of every two checks that
+report different classes and that one file can break together, with a step whose
+outcomes differ in class, such as the version, counted as one check per class.
+No chain needs a capability-relative case, so a reader that declares a
+capability loses only the pairs whose earlier check that capability changes.
+Every `private-key-order-` case also runs through the unlock, as a
+`private-key-open-order-` case, because the unlock makes both of its checks too;
+a `private-key-open-order-` case with no such twin orders steps validation
+skips. Only a string too short to hold a payload's fixed fields can break the
+recipient-string cap and the payload size together, so that case runs under
+`zero-recipient-string-cap`, which sets the cap to zero.
 
 The length fields of both key files and of a recipient entry also have cases on
 their lower bounds, the type-name length through `t`, the shortest name the §3.3
@@ -238,7 +255,10 @@ fixes for an `x25519` key (each one byte short and one byte long), and a
 structural validation and the unlock, because an implementation's unlock need
 not share validation's code. The `public.key` cases include the two classes §7.1
 gives a file that is not a recipient string at all, and text over the cap with a
-space in it, which the cap refuses before any Bech32 rule sees the space.
+space in it, which the cap refuses before any Bech32 rule sees the space. An
+encrypted file and a `private.key` of a newer version, also given to the
+`public.key` reader, show that the `private.key` signature is the magic with
+the kind byte, whatever the version byte says.
 
 The §8 check for a `public.key` reads the first four bytes only, and its cases
 go through both `private.key` readers: a key of a newer version, one with a

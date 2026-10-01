@@ -150,6 +150,45 @@ fn newer_version_capability(domain: &str) -> String {
     format!("{domain}:0x{NEWER_VERSION:02X}")
 }
 
+/// The encoding version every stored version domain reserves, so it is
+/// malformed for every reader rather than unsupported (`FORMAT.md` §11).
+const RESERVED_VERSION: u8 = 0x00;
+
+/// A 16-bit flags value with its lowest bit set. The `.fcr` prefix and header
+/// flags, the FCA flags, and the `private.key` key flags reserve every bit, so a
+/// reader refuses it in any of them.
+const RESERVED_FLAG_BIT: u16 = 0x0001;
+
+/// Flips every bit of the first byte of an artifact, so its magic no longer
+/// matches.
+fn break_magic(bytes: &mut [u8]) {
+    bytes[0] ^= 0xFF;
+}
+
+/// The critical tag the extension-region cases carry. No reader here
+/// implements it, so an artifact that carries it is refused once its region is
+/// authenticated.
+const UNKNOWN_CRITICAL_TAG: u16 = 0x8001;
+
+/// The capability a reader that implements [`UNKNOWN_CRITICAL_TAG`] in the TLV
+/// namespace `domain` declares, so it does not assert the cases whose outcome
+/// depends on that tag (`FORMAT.md` §12.2).
+fn critical_tag_capability(domain: &str) -> String {
+    format!("{domain}:0x{UNKNOWN_CRITICAL_TAG:04X}")
+}
+
+/// A TLV region whose first entry carries [`UNKNOWN_CRITICAL_TAG`] and whose
+/// second declares a value running past the region's end. `FORMAT.md` §6
+/// checks the whole region before it acts on any tag, so the region is
+/// malformed whether or not a reader implements the tag.
+fn critical_tag_then_malformed_entry(critical_value: &[u8]) -> Vec<u8> {
+    [
+        crate::crypto::tlv::tlv_bytes(UNKNOWN_CRITICAL_TAG, critical_value),
+        tlv_value_running_past_region(UNKNOWN_CRITICAL_TAG + 1),
+    ]
+    .concat()
+}
+
 /// `stem` padded with `fill` to exactly the 255-byte type-name maximum
 /// (`FORMAT.md` §3.3).
 fn type_name_on_maximum(stem: &str, fill: &str) -> String {
@@ -275,6 +314,15 @@ impl CaseRow {
         self.expectation_scope = "capability_relative";
         self.capability_id = capability_id.to_string();
         self
+    }
+
+    /// [`Self::capability`] when `capability_id` names one, and the row
+    /// unchanged otherwise.
+    fn capability_if_any(self, capability_id: Option<&str>) -> Self {
+        match capability_id {
+            Some(capability_id) => self.capability(capability_id),
+            None => self,
+        }
     }
 
     /// Evaluates the case under `limit_profile_id` rather than the default
@@ -421,6 +469,13 @@ const LOWERED_HEADER_MAC_WORK_LIMIT_PROFILE_ID: &str = "lowered-header-mac-work-
 /// [`DEFAULT_LIMIT_PROFILE_ID`] value.
 const RECIPIENT_STRING_MAXIMUM_LIMIT_PROFILE_ID: &str = "recipient-string-structural-maximum";
 
+/// The limit profile that sets the recipient-string cap to zero. Its one case
+/// shows that the `FORMAT.md` §7 cap comes before the payload size, which takes
+/// a string over the cap that is too short to hold a payload's fixed fields:
+/// no such string is over the default cap, or over any cap an accepted case
+/// needs. Every other cap keeps its [`DEFAULT_LIMIT_PROFILE_ID`] value.
+const ZERO_RECIPIENT_STRING_CAP_LIMIT_PROFILE_ID: &str = "zero-recipient-string-cap";
+
 /// `max_tlv_value_bytes` under [`LOWERED_TLV_VALUE_LIMIT_PROFILE_ID`]: a region
 /// holding a value one byte past it stays far inside both region caps.
 const LOWERED_TLV_VALUE_CAP: u64 = 16;
@@ -471,6 +526,10 @@ fn derived_limit_profiles() -> Vec<(&'static str, Vec<(&'static str, u64)>)> {
                 "max_recipient_string_chars",
                 u64::from(KeyReadLimits::RECIPIENT_STRING_CHARS_STRUCTURAL_MAX),
             )],
+        ),
+        (
+            ZERO_RECIPIENT_STRING_CAP_LIMIT_PROFILE_ID,
+            vec![("max_recipient_string_chars", 0)],
         ),
     ]
 }
@@ -1122,7 +1181,7 @@ fn regenerate_wire_corpus_inner() {
     write_x25519_cases(&mut corpus, &x25519_base);
     write_tlv_cases(&mut corpus, sources.path());
     write_payload_stream_cases(&mut corpus, sources.path());
-    write_public_key_cases(&mut corpus, &keys);
+    write_public_key_cases(&mut corpus, &keys, &base.bytes);
     write_private_key_cases(&mut corpus, &keys);
     write_fca_cases(&mut corpus);
     write_resource_policy_cases(&mut corpus, &keys);
@@ -2184,7 +2243,7 @@ fn write_prefix_cases(corpus: &mut Corpus, base: &MutationBase) {
         "passphrase-main",
         "prefix_magic_mismatch",
         "bad_magic",
-        |b| b[0] ^= 0xFF,
+        |b| break_magic(b),
     );
     mutate_fcr(
         corpus,
@@ -2193,7 +2252,7 @@ fn write_prefix_cases(corpus: &mut Corpus, base: &MutationBase) {
         "passphrase-main",
         "outer_version_reserved_zero",
         "malformed_header",
-        |b| b[OFF_OUTER_VERSION] = 0x00,
+        |b| b[OFF_OUTER_VERSION] = RESERVED_VERSION,
     );
     mutate_fcr(
         corpus,
@@ -2202,7 +2261,7 @@ fn write_prefix_cases(corpus: &mut Corpus, base: &MutationBase) {
         "passphrase-main",
         "prefix_kind_not_encrypted",
         "wrong_kind",
-        |b| b[OFF_PREFIX_KIND] = 0x4B,
+        |b| b[OFF_PREFIX_KIND] = crate::format::KIND_PRIVATE_KEY,
     );
     mutate_fcr(
         corpus,
@@ -2211,7 +2270,8 @@ fn write_prefix_cases(corpus: &mut Corpus, base: &MutationBase) {
         "passphrase-main",
         "prefix_flags_nonzero",
         "malformed_header",
-        |b| b[OFF_PREFIX_FLAGS] = 0x01,
+        // The bit sits in the high byte, as this case was first published.
+        |b| write_u16_be(b, OFF_PREFIX_FLAGS, RESERVED_FLAG_BIT << u8::BITS),
     );
     mutate_fcr(
         corpus,
@@ -2376,7 +2436,7 @@ fn write_header_cases(corpus: &mut Corpus, base: &MutationBase) {
         "passphrase-main",
         "header_flags_nonzero",
         "malformed_header",
-        |b| b[OFF_HEADER_FLAGS + 1] = 0x01,
+        |b| write_u16_be(b, OFF_HEADER_FLAGS, RESERVED_FLAG_BIT),
     );
     mutate_fcr(
         corpus,
@@ -2508,7 +2568,7 @@ fn write_header_check_order_cases(corpus: &mut Corpus, base: &MutationBase) {
         "header_flags_nonzero_and_recipient_count_zero",
         "malformed_header",
         |b| {
-            write_u16_be(b, OFF_HEADER_FLAGS, 1);
+            write_u16_be(b, OFF_HEADER_FLAGS, RESERVED_FLAG_BIT);
             write_u16_be(b, OFF_RECIPIENT_COUNT, 0);
         },
     );
@@ -3137,11 +3197,7 @@ fn write_argon2id_cases(corpus: &mut Corpus, sources: &Path, base: &MutationBase
         // policy refusal of a structurally valid file.
         (
             "argon2id-kdf-memory-over-local-cap",
-            KdfParams {
-                mem_cost: KdfLimit::MEM_COST_KIB_DEFAULT + 1,
-                time_cost: 1,
-                lanes: 1,
-            },
+            kdf_params_one_past_default_memory_cap(),
             "argon2id_memory_above_default_local_cap",
             "resource_cap_exceeded",
         ),
@@ -3353,7 +3409,7 @@ fn write_tlv_cases(corpus: &mut Corpus, sources: &Path) {
     let mut truncated_value = tlv_bytes(0x0001, b"");
     write_u32_be(&mut truncated_value, tlv_len_at, 99);
 
-    let cases: [(&str, Vec<u8>, &str, &str); 7] = [
+    let cases: [(&str, Vec<u8>, &str, &str); 8] = [
         (
             "tlv-reserved-tag-0000",
             tlv_bytes(0x0000, b"x"),
@@ -3400,6 +3456,12 @@ fn write_tlv_cases(corpus: &mut Corpus, sources: &Path) {
             "tlv_declared_value_above_cap",
             "malformed_tlv",
         ),
+        (
+            "tlv-structure-before-critical-tag",
+            critical_tag_then_malformed_entry(b"x"),
+            "tlv_value_runs_past_region_after_unknown_critical_tag",
+            "malformed_tlv",
+        ),
     ];
     drop(scope);
     for (case_id, ext_bytes, condition, class) in cases {
@@ -3444,7 +3506,12 @@ fn write_tlv_cases(corpus: &mut Corpus, sources: &Path) {
     let source = write_source(sources, SOURCE_FILE_NAME, 64);
     let file_key = FileKey::generate().expect("file key");
     let entries = [argon2id_entry(&file_key)];
-    let built = build_fcr_with_entries(&source, &file_key, &entries, &tlv_bytes(0x8001, b"x"));
+    let built = build_fcr_with_entries(
+        &source,
+        &file_key,
+        &entries,
+        &tlv_bytes(UNKNOWN_CRITICAL_TAG, b"x"),
+    );
     let artifact_ref = corpus.write_ref("artifacts/fcr/tlv-unknown-critical.fcr", &built.bytes);
     corpus.push_origin(OriginRow {
         origin_id: "origin-tlv-unknown-critical".to_string(),
@@ -3459,7 +3526,7 @@ fn write_tlv_cases(corpus: &mut Corpus, sources: &Path) {
             .origin("origin-tlv-unknown-critical")
             .fabricated()
             .credential("passphrase-main")
-            .capability("outer_tlv:0x8001")
+            .capability(&critical_tag_capability("outer_tlv"))
             .reject("tlv_critical_tag_unsupported", "unknown_critical_tlv"),
     );
     drop(scope);
@@ -3709,11 +3776,11 @@ fn public_key_case(
     corpus.push_case(row);
 }
 
-fn write_public_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
+fn write_public_key_cases(corpus: &mut Corpus, keys: &CorpusKeys, encrypted_file: &[u8]) {
     use crate::key::public::{
-        encode_recipient_groups_for_tests, encode_recipient_payload_with_hrp,
-        non_canonical_padding_groups_for_tests, recipient_payload_for_tests,
-        recipient_payload_unchecked_for_tests,
+        PUBLIC_KEY_FILE_READ_CAP_BYTES, RECIPIENT_HRP, encode_recipient_groups_for_tests,
+        encode_recipient_payload_with_hrp, non_canonical_padding_groups_for_tests,
+        recipient_payload_for_tests, recipient_payload_unchecked_for_tests,
     };
 
     let canonical = keys.public_a.clone();
@@ -3756,7 +3823,18 @@ fn write_public_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         .expect("a recipient string begins with the prefix");
     let mut not_utf8 = canonical.clone();
     not_utf8[0] = 0xFF;
-    let cases: [(&str, Vec<u8>, &str, &str); 16] = [
+    // Both files are within the §7.1 file ceiling and are not UTF-8, so the
+    // signature check or the UTF-8 check after it refuses each, and the class
+    // shows which.
+    let private_key =
+        fs::read(corpus.root.join(&keys.private_a)).expect("read the corpus private key");
+    let mut newer_private_key = private_key.clone();
+    newer_private_key[crate::key::private::VERSION_OFFSET] = NEWER_VERSION;
+    for bytes in [&private_key, encrypted_file] {
+        assert!(bytes.len() <= PUBLIC_KEY_FILE_READ_CAP_BYTES);
+        assert!(std::str::from_utf8(bytes).is_err());
+    }
+    let cases: [(&str, Vec<u8>, &str, &str); 18] = [
         (
             "public-key-checksum-corrupted",
             reject(with_corrupted_checksum(&recipient)),
@@ -3826,16 +3904,17 @@ fn write_public_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
             "public_key_human_readable_part_not_fcr",
             "malformed_public_key",
         ),
+        // The Bech32 checksum stays valid, so only the internal SHA3-256
+        // payload checksum of `FORMAT.md` §7 can reject it.
         (
             "public-key-internal-checksum-corrupted",
-            reject({
-                // The Bech32 checksum stays valid, so only the internal
-                // SHA3-256 payload checksum of `FORMAT.md` §7.1 can reject it.
-                let mut corrupted = payload.clone();
-                *corrupted.last_mut().expect("payload is nonempty") ^= 0x01;
-                encode_recipient_payload_with_hrp("fcr", &corrupted)
-                    .expect("re-encode the corrupted payload")
-            }),
+            reject(
+                encode_recipient_payload_with_hrp(
+                    RECIPIENT_HRP.as_str(),
+                    &with_internal_checksum_corrupted(payload.clone()),
+                )
+                .expect("re-encode the corrupted payload"),
+            ),
             "public_key_internal_checksum_mismatch",
             "malformed_public_key",
         ),
@@ -3870,7 +3949,7 @@ fn write_public_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
             "public-key-type-name-malformed",
             reject(
                 encode_recipient_payload_with_hrp(
-                    "fcr",
+                    RECIPIENT_HRP.as_str(),
                     &recipient_payload_unchecked_for_tests(
                         crate::format::WRITER_KEYPAIR_SUITE.public_key_version(),
                         &ungrammatical_type_name(),
@@ -3888,8 +3967,23 @@ fn write_public_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         // is not UTF-8.
         (
             "public-key-given-private-key-file",
-            fs::read(corpus.root.join(&keys.private_a)).expect("read the corpus private key"),
+            private_key.clone(),
             "public_key_reader_given_private_key_file",
+            "wrong_key_file_type",
+        ),
+        // The signature is the magic with kind `K` at offset 5, whatever the
+        // byte at offset 4 says: an encrypted file shares the magic but not
+        // the kind, and a key of a newer version keeps the signature.
+        (
+            "public-key-given-encrypted-file",
+            encrypted_file.to_vec(),
+            "public_key_reader_given_encrypted_file",
+            "not_a_key_file",
+        ),
+        (
+            "public-key-given-newer-private-key-file",
+            newer_private_key,
+            "public_key_reader_given_private_key_file_of_newer_version",
             "wrong_key_file_type",
         ),
         (
@@ -3906,6 +4000,7 @@ fn write_public_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     write_public_key_version_cases(corpus);
     write_public_key_material_cases(corpus);
     write_public_key_length_cases(corpus);
+    write_public_key_order_cases(corpus, &private_key);
 }
 
 /// `public_key_version` evidence (`FORMAT.md` §11.2): the reserved `0x00`
@@ -3917,7 +4012,7 @@ fn write_public_key_version_cases(corpus: &mut Corpus) {
     use crate::key::public::encode_recipient_string_with_version;
 
     let material = [7u8; x25519::PUBLIC_KEY_SIZE];
-    let reserved = encode_recipient_string_with_version(0x00, "x25519", &material)
+    let reserved = encode_recipient_string_with_version(RESERVED_VERSION, "x25519", &material)
         .expect("encode reserved public-key version");
     public_key_case(
         corpus,
@@ -3960,6 +4055,13 @@ fn write_public_key_version_cases(corpus: &mut Corpus) {
         UNSUPPORTED_KEY_TYPE,
         "public_key_type_not_supported",
     );
+}
+
+/// `payload` with the last byte of its internal checksum flipped, so that
+/// checksum no longer matches and nothing else changes (`FORMAT.md` §7).
+fn with_internal_checksum_corrupted(mut payload: Vec<u8>) -> Vec<u8> {
+    *payload.last_mut().expect("payload is nonempty") ^= 0x01;
+    payload
 }
 
 /// `recipient` with the last character of its Bech32 checksum replaced, so
@@ -4225,6 +4327,268 @@ fn write_public_key_length_cases(corpus: &mut Corpus) {
     );
 }
 
+/// The `FORMAT.md` §7.1 and §7 check order. A reader must make every two checks
+/// that report different classes, and that one file can break together, in the
+/// stated order. A case that breaks both, and no check before them, fixes their
+/// order directly: a reader that makes the two the other way round reports the
+/// later one's class. Two such facts, one check before a second and the second
+/// before a third, fix the first before the third. These cases supply every
+/// pair the other cases leave open, alone or through such a chain. A step whose
+/// outcomes differ in class, the version, counts as one check per class. The
+/// type's own rules cannot be broken together with type support or with a
+/// malformed type name, so no chain reaches them through those checks. No
+/// chain needs a capability-relative case, so a reader that declares a
+/// capability loses only the pairs whose earlier check that capability changes.
+fn write_public_key_order_cases(corpus: &mut Corpus, private_key: &[u8]) {
+    use crate::key::public::{
+        PAYLOAD_HEADER_SIZE, PUBLIC_KEY_CHECKSUM_SIZE, PUBLIC_KEY_FILE_READ_CAP_BYTES,
+        PUBLIC_KEY_VERSION, RECIPIENT_HRP, RECIPIENT_STRING_LEN_MAX,
+        encode_recipient_groups_for_tests, encode_recipient_payload_with_hrp,
+        encode_recipient_string_with_version, non_canonical_padding_groups_for_tests,
+        recipient_payload_unchecked_for_tests,
+    };
+
+    let material = [7u8; x25519::PUBLIC_KEY_SIZE];
+    let payload = |version: u8, type_name: &str| {
+        recipient_payload_unchecked_for_tests(version, type_name, &material)
+            .expect("build the payload")
+    };
+    let encode = |payload: &[u8]| {
+        encode_recipient_payload_with_hrp(RECIPIENT_HRP.as_str(), payload)
+            .expect("encode the payload")
+    };
+    let file = |string: &str| format!("{string}\n").into_bytes();
+
+    // Past the file ceiling, so the size refuses it before the signature can.
+    let mut oversized = private_key.to_vec();
+    oversized.resize(PUBLIC_KEY_FILE_READ_CAP_BYTES + 1, FILLER);
+    // Within the file ceiling, without a final LF, and one byte past the
+    // recipient-string ceiling. The filler byte cannot start a UTF-8 sequence.
+    let not_utf8_past_ceiling = vec![FILLER; RECIPIENT_STRING_LEN_MAX + 1];
+    let default_cap = KeyReadLimits::RECIPIENT_STRING_CHARS_DEFAULT as usize;
+    let not_ascii_over_cap = format!("\u{e9}{}", "q".repeat(default_cap));
+    let newer = encode_recipient_string_with_version(NEWER_VERSION, x25519::TYPE_NAME, &material)
+        .expect("encode a newer public-key version");
+    let over_cap = |version: u8, type_name: &str| {
+        recipient_payload_unchecked_for_tests(version, type_name, &vec![FILLER; default_cap])
+            .expect("build the payload")
+    };
+    // A byte more material than `over_cap` leaves a padding bit to set.
+    let [over_cap_with_padding, _] = non_canonical_padding_groups_for_tests(
+        &recipient_payload_unchecked_for_tests(
+            PUBLIC_KEY_VERSION,
+            UNSUPPORTED_KEY_TYPE,
+            &vec![FILLER; default_cap + 1],
+        )
+        .expect("build the payload"),
+    );
+    // A malformed type name with no key material and no checksum: one byte
+    // short of the payload's fixed fields.
+    let mut short_with_type_name =
+        recipient_payload_unchecked_for_tests(PUBLIC_KEY_VERSION, &ungrammatical_type_name(), &[])
+            .expect("build the payload");
+    short_with_type_name.truncate(short_with_type_name.len() - PUBLIC_KEY_CHECKSUM_SIZE);
+    assert_eq!(
+        short_with_type_name.len(),
+        PAYLOAD_HEADER_SIZE + PUBLIC_KEY_CHECKSUM_SIZE - 1
+    );
+    // One or two padding bits are left only by some payload lengths, so the
+    // key material is a byte longer than an X25519 key.
+    let [type_name_and_padding, _] = non_canonical_padding_groups_for_tests(
+        &recipient_payload_unchecked_for_tests(
+            PUBLIC_KEY_VERSION,
+            &ungrammatical_type_name(),
+            &[7; x25519::PUBLIC_KEY_SIZE + 1],
+        )
+        .expect("build the payload"),
+    );
+    let [nonzero_padding, _] =
+        non_canonical_padding_groups_for_tests(&payload(NEWER_VERSION, x25519::TYPE_NAME));
+    let newer_with_padding = encode_recipient_groups_for_tests(&nonzero_padding)
+        .expect("encode a padding bit set in the last group");
+
+    let cases: [(&str, Vec<u8>, &str, &str); 17] = [
+        (
+            "public-key-order-file-size-before-signature",
+            oversized,
+            "public_key_file_above_ceiling_with_private_key_signature",
+            "malformed_public_key",
+        ),
+        (
+            "public-key-order-utf8-before-ceiling",
+            not_utf8_past_ceiling,
+            "public_key_file_not_utf8_and_above_recipient_string_ceiling",
+            "not_a_key_file",
+        ),
+        (
+            "public-key-order-ascii-before-cap",
+            file(&not_ascii_over_cap),
+            "public_key_recipient_string_not_ascii_and_above_local_cap",
+            "malformed_public_key",
+        ),
+        (
+            "public-key-order-cap-before-version-zero",
+            file(&encode(&over_cap(RESERVED_VERSION, UNSUPPORTED_KEY_TYPE))),
+            "public_key_recipient_string_above_local_cap_and_version_reserved_zero",
+            "resource_cap_exceeded",
+        ),
+        (
+            "public-key-order-cap-before-padding",
+            file(
+                &encode_recipient_groups_for_tests(&over_cap_with_padding)
+                    .expect("encode a padding bit set in the last group"),
+            ),
+            "public_key_recipient_string_above_local_cap_and_padding_bits_nonzero",
+            "resource_cap_exceeded",
+        ),
+        (
+            "public-key-order-cap-before-lengths",
+            file(&encode(&over_cap(PUBLIC_KEY_VERSION, ""))),
+            "public_key_recipient_string_above_local_cap_and_type_name_len_zero",
+            "resource_cap_exceeded",
+        ),
+        (
+            "public-key-order-cap-before-payload-length",
+            file(&encode(&with_trailing_filler(over_cap(
+                PUBLIC_KEY_VERSION,
+                UNSUPPORTED_KEY_TYPE,
+            )))),
+            "public_key_recipient_string_above_local_cap_and_payload_longer_than_declared",
+            "resource_cap_exceeded",
+        ),
+        (
+            "public-key-order-cap-before-type-rules",
+            file(&encode(&over_cap(PUBLIC_KEY_VERSION, x25519::TYPE_NAME))),
+            "public_key_recipient_string_above_local_cap_and_x25519_material_not_32_bytes",
+            "resource_cap_exceeded",
+        ),
+        (
+            "public-key-order-bech32-before-type-name",
+            file(&with_corrupted_checksum(&encode(&payload(
+                PUBLIC_KEY_VERSION,
+                &ungrammatical_type_name(),
+            )))),
+            "public_key_bech32_checksum_mismatch_and_type_name_violates_grammar",
+            "malformed_public_key",
+        ),
+        (
+            "public-key-order-payload-size-before-type-name",
+            file(&encode(&short_with_type_name)),
+            "public_key_payload_shorter_than_fixed_fields_and_type_name_violates_grammar",
+            "malformed_public_key",
+        ),
+        (
+            "public-key-order-padding-before-type-name",
+            file(
+                &encode_recipient_groups_for_tests(&type_name_and_padding)
+                    .expect("encode a padding bit set in the last group"),
+            ),
+            "public_key_padding_bits_nonzero_and_type_name_violates_grammar",
+            "malformed_public_key",
+        ),
+        (
+            "public-key-order-bech32-before-version",
+            file(&with_corrupted_checksum(&newer)),
+            "public_key_bech32_checksum_mismatch_with_newer_version",
+            "malformed_public_key",
+        ),
+        (
+            "public-key-order-padding-before-version",
+            file(&newer_with_padding),
+            "public_key_padding_bits_nonzero_with_newer_version",
+            "malformed_public_key",
+        ),
+        (
+            "public-key-order-version-zero-before-type-name",
+            file(&encode(&payload(
+                RESERVED_VERSION,
+                &ungrammatical_type_name(),
+            ))),
+            "public_key_version_reserved_zero_and_type_name_violates_grammar",
+            "malformed_public_key",
+        ),
+        (
+            "public-key-order-payload-length-before-type-name",
+            file(&encode(&with_trailing_filler(payload(
+                PUBLIC_KEY_VERSION,
+                &ungrammatical_type_name(),
+            )))),
+            "public_key_payload_longer_than_declared_and_type_name_violates_grammar",
+            "malformed_public_key",
+        ),
+        (
+            "public-key-order-type-name-before-internal-checksum",
+            file(&encode(&with_internal_checksum_corrupted(payload(
+                PUBLIC_KEY_VERSION,
+                &ungrammatical_type_name(),
+            )))),
+            "public_key_type_name_violates_grammar_and_internal_checksum_mismatch",
+            "malformed_type_name",
+        ),
+        (
+            "public-key-order-internal-checksum-before-type-support",
+            file(&encode(&with_internal_checksum_corrupted(payload(
+                PUBLIC_KEY_VERSION,
+                UNSUPPORTED_KEY_TYPE,
+            )))),
+            "public_key_internal_checksum_mismatch_and_type_not_supported",
+            "malformed_public_key",
+        ),
+    ];
+    for (case_id, bytes, condition, class) in cases {
+        public_key_case(corpus, case_id, &bytes, Err((condition, class)));
+    }
+
+    // A reader that supports the newer version may lay its payload out
+    // differently, so these pairs are capability-relative. The type's own
+    // rules cannot be broken together with type support or a malformed type
+    // name, so the version has a case with them directly: all-zero X25519
+    // material.
+    let all_zero_material = recipient_payload_unchecked_for_tests(
+        NEWER_VERSION,
+        x25519::TYPE_NAME,
+        &[0; x25519::PUBLIC_KEY_SIZE],
+    )
+    .expect("build the payload");
+    let newer_version_cases = [
+        (
+            "public-key-order-version-before-payload-length",
+            with_trailing_filler(payload(NEWER_VERSION, x25519::TYPE_NAME)),
+            "public_key_version_not_supported_and_payload_longer_than_declared",
+        ),
+        (
+            "public-key-order-version-before-type-rules",
+            all_zero_material,
+            "public_key_version_not_supported_and_x25519_material_all_zero",
+        ),
+    ];
+    for (case_id, payload, condition) in newer_version_cases {
+        let row = public_key_row(corpus, case_id, &file(&encode(&payload)))
+            .capability(&newer_version_capability("public_key_version"))
+            .reject(condition, "unsupported_public_key_version");
+        corpus.push_case(row);
+    }
+
+    // One byte short of the payload's fixed fields, and so over a cap of zero.
+    under_limit_profile(
+        corpus,
+        ZERO_RECIPIENT_STRING_CAP_LIMIT_PROFILE_ID,
+        |corpus| {
+            public_key_case(
+                corpus,
+                "public-key-order-cap-before-payload-size",
+                &file(&encode(
+                    &[FILLER; PAYLOAD_HEADER_SIZE + PUBLIC_KEY_CHECKSUM_SIZE - 1],
+                )),
+                Err((
+                    "public_key_recipient_string_above_local_cap_and_payload_shorter_than_fixed_fields",
+                    "resource_cap_exceeded",
+                )),
+            );
+        },
+    );
+}
+
 /// X25519 key-material evidence (`FORMAT.md` §7.2): the canonical range is
 /// accepted and every RFC 7748 alias is refused rather than reduced, so one
 /// curve point can never carry two recipient strings or two fingerprints.
@@ -4356,7 +4720,6 @@ fn write_private_key_ext_and_pair_cases(
     opened: &x25519::OpenedX25519KeyFile,
 ) {
     use crate::crypto::tlv::tlv_bytes;
-    use crate::key::private::KDF_PARAMS_OFFSET;
 
     let seal = |case_id: &str, ext_bytes: &[u8], public_material: &[u8]| {
         seal_private_key_for_case(
@@ -4383,7 +4746,7 @@ fn write_private_key_ext_and_pair_cases(
     );
     let critical = seal(
         "private-key-ext-unknown-critical",
-        &tlv_bytes(0x8001, b"critical"),
+        &unknown_critical_tlv_region(),
         &opened.public,
     );
     let row = private_key_open_row(
@@ -4392,19 +4755,20 @@ fn write_private_key_ext_and_pair_cases(
         &critical,
         "private-key-a",
     )
-    .capability("private_key_tlv:0x8001")
+    .capability(&critical_tag_capability("private_key_tlv"))
     .reject(
         "private_key_ext_unknown_critical_tag",
         "unknown_critical_tlv",
     );
     corpus.push_case(row);
-    // A value length that runs past the region end.
-    let mut malformed = tlv_bytes(0x0001, b"value");
-    malformed.truncate(malformed.len() - 2);
     private_key_open_case(
         corpus,
         "private-key-ext-malformed",
-        &seal("private-key-ext-malformed", &malformed, &opened.public),
+        &seal(
+            "private-key-ext-malformed",
+            &tlv_value_running_past_region(0x0001),
+            &opened.public,
+        ),
         "private-key-a",
         Err(("private_key_ext_value_runs_past_region", "malformed_tlv")),
     );
@@ -4459,13 +4823,9 @@ fn write_private_key_ext_and_pair_cases(
     // work product far below its own cap, so only memory can reject the file,
     // and the cap is checked before Argon2id runs.
     let mut over_memory_cap = canonical.to_vec();
-    over_memory_cap[KDF_PARAMS_OFFSET..KDF_PARAMS_OFFSET + KDF_PARAMS_SIZE].copy_from_slice(
-        &KdfParams {
-            mem_cost: KdfLimit::MEM_COST_KIB_DEFAULT + 1,
-            time_cost: 1,
-            lanes: 1,
-        }
-        .to_bytes(),
+    write_private_key_kdf_params(
+        &mut over_memory_cap,
+        kdf_params_one_past_default_memory_cap(),
     );
     private_key_open_case(
         corpus,
@@ -4481,8 +4841,7 @@ fn write_private_key_ext_and_pair_cases(
     // The other reachable KDF cap on this artifact, driven apart from the
     // memory cap as it is on an `argon2id` body.
     let mut over_work_cap = canonical.to_vec();
-    over_work_cap[KDF_PARAMS_OFFSET..KDF_PARAMS_OFFSET + KDF_PARAMS_SIZE]
-        .copy_from_slice(&kdf_params_one_past_default_work_cap().to_bytes());
+    write_private_key_kdf_params(&mut over_work_cap, kdf_params_one_past_default_work_cap());
     private_key_open_case(
         corpus,
         "private-key-kdf-work-over-default-cap",
@@ -4493,6 +4852,29 @@ fn write_private_key_ext_and_pair_cases(
             "resource_cap_exceeded",
         )),
     );
+}
+
+/// A TLV region whose one entry carries [`UNKNOWN_CRITICAL_TAG`].
+fn unknown_critical_tlv_region() -> Vec<u8> {
+    crate::crypto::tlv::tlv_bytes(UNKNOWN_CRITICAL_TAG, b"critical")
+}
+
+/// A TLV region whose one entry, with tag `tag`, declares a value running past
+/// the region's end, which `FORMAT.md` §6 refuses as malformed.
+fn tlv_value_running_past_region(tag: u16) -> Vec<u8> {
+    let mut region = crate::crypto::tlv::tlv_bytes(tag, b"value");
+    region.truncate(region.len() - 2);
+    region
+}
+
+/// Argon2id parameters one KiB past [`KdfLimit::MEM_COST_KIB_DEFAULT`] at the
+/// cheapest time cost and one lane, so every other default cap admits them.
+fn kdf_params_one_past_default_memory_cap() -> KdfParams {
+    KdfParams {
+        mem_cost: KdfLimit::MEM_COST_KIB_DEFAULT + 1,
+        time_cost: 1,
+        lanes: 1,
+    }
 }
 
 /// Argon2id parameters one unit of work past [`KdfLimit::WORK_DEFAULT`] that
@@ -4564,6 +4946,42 @@ fn with_private_key_type(key: &[u8], type_name: &str) -> Vec<u8> {
     out
 }
 
+/// `bytes` with one [`FILLER`] byte appended, past every field it declares.
+fn with_trailing_filler(mut bytes: Vec<u8>) -> Vec<u8> {
+    bytes.push(FILLER);
+    bytes
+}
+
+/// The `kdf_params` field of the `private.key` bytes `key` (`FORMAT.md` §8).
+fn private_key_kdf_params_field(key: &mut [u8]) -> &mut [u8] {
+    use crate::key::private::KDF_PARAMS_OFFSET;
+
+    &mut key[KDF_PARAMS_OFFSET..KDF_PARAMS_OFFSET + KDF_PARAMS_SIZE]
+}
+
+/// Stores `params` as the KDF parameters of the `private.key` bytes `key`.
+fn write_private_key_kdf_params(key: &mut [u8], params: KdfParams) {
+    private_key_kdf_params_field(key).copy_from_slice(&params.to_bytes());
+}
+
+/// Sets the Argon2id memory cost stored in the `private.key` bytes `key` one
+/// KiB past its structural maximum (`FORMAT.md` §2.2), keeping the other
+/// parameters.
+fn set_kdf_memory_above_max(key: &mut [u8]) {
+    let field = private_key_kdf_params_field(key);
+    let stored = KdfParams::from_bytes_structural(
+        &<[u8; KDF_PARAMS_SIZE]>::try_from(&*field).expect("the field holds KDF parameters"),
+    )
+    .expect("the key stores valid KDF parameters");
+    write_private_key_kdf_params(
+        key,
+        KdfParams {
+            mem_cost: KdfLimit::MEM_COST_KIB_STRUCTURAL_MAX + 1,
+            ..stored
+        },
+    );
+}
+
 /// The `u32` length fields of the `private.key` regions that follow the type
 /// name, in file order: public material, extension, wrapped secret
 /// (`FORMAT.md` §8).
@@ -4617,7 +5035,7 @@ fn with_private_key_region(key: &[u8], len_offset: usize, region: &[u8]) -> Vec<
 fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     use crate::crypto::tlv::{ENTRY_HEADER_SIZE as TLV_ENTRY_HEADER_SIZE, tlv_bytes};
     use crate::key::private::{
-        EXT_LEN_OFFSET, KDF_PARAMS_OFFSET, KEY_FLAGS_OFFSET, KIND_OFFSET, PRIVATE_KEY_EXT_LEN_MAX,
+        EXT_LEN_OFFSET, KEY_FLAGS_OFFSET, KIND_OFFSET, PRIVATE_KEY_EXT_LEN_MAX,
         PRIVATE_KEY_HEADER_FIXED_SIZE, PRIVATE_KEY_PUBLIC_LEN_MAX,
         PRIVATE_KEY_WRAPPED_SECRET_LEN_MAX, PRIVATE_KEY_WRAPPED_SECRET_LEN_MIN, PUBLIC_LEN_OFFSET,
         TYPE_NAME_LEN_OFFSET, VERSION_OFFSET, WRAPPED_SECRET_LEN_OFFSET,
@@ -4629,25 +5047,25 @@ fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     let mutations: [ByteMutationCase; 9] = [
         (
             "private-key-bad-magic",
-            Box::new(|b: &mut Vec<u8>| b[0] ^= 0xFF),
+            Box::new(|b: &mut Vec<u8>| break_magic(b)),
             "private_key_magic_mismatch",
             "not_a_key_file",
         ),
         (
             "private-key-version-zero",
-            Box::new(|b: &mut Vec<u8>| b[VERSION_OFFSET] = 0x00),
+            Box::new(|b: &mut Vec<u8>| b[VERSION_OFFSET] = RESERVED_VERSION),
             "private_key_version_reserved_zero",
             "malformed_private_key",
         ),
         (
             "private-key-wrong-kind",
-            Box::new(|b: &mut Vec<u8>| b[KIND_OFFSET] = 0x45),
+            Box::new(|b: &mut Vec<u8>| b[KIND_OFFSET] = crate::format::KIND_ENCRYPTED),
             "private_key_kind_not_private_key",
             "wrong_kind",
         ),
         (
             "private-key-key-flags-nonzero",
-            Box::new(|b: &mut Vec<u8>| write_u16_be(b, KEY_FLAGS_OFFSET, 1)),
+            Box::new(|b: &mut Vec<u8>| write_u16_be(b, KEY_FLAGS_OFFSET, RESERVED_FLAG_BIT)),
             "private_key_flags_nonzero",
             "malformed_private_key",
         ),
@@ -4688,13 +5106,7 @@ fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         // passphrase.
         (
             "private-key-kdf-memory-above-max",
-            Box::new(|b: &mut Vec<u8>| {
-                write_u32_be(
-                    b,
-                    KDF_PARAMS_OFFSET,
-                    KdfLimit::MEM_COST_KIB_STRUCTURAL_MAX + 1,
-                )
-            }),
+            Box::new(|b: &mut Vec<u8>| set_kdf_memory_above_max(b)),
             "private_key_argon2id_memory_cost_above_structural_maximum",
             "invalid_kdf_parameters",
         ),
@@ -4913,17 +5325,14 @@ fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
     // rather than `malformed_private_key`.
     let mut newer_empty_type = with_private_key_type(&canonical, "");
     newer_empty_type[VERSION_OFFSET] = NEWER_VERSION;
-    let row = private_key_row(
+    private_key_case_through_both_readers(
         corpus,
-        "private-key-newer-version-type-name-len-zero",
+        "newer-version-type-name-len-zero",
         &newer_empty_type,
-    )
-    .capability(&newer_version_capability("private_key_version"))
-    .reject(
+        Some(&newer_version_capability("private_key_version")),
         "private_key_version_unsupported_and_type_name_len_zero",
         "unsupported_private_key_version",
     );
-    corpus.push_case(row);
 
     // The newer version in a file one byte shorter than the fixed header. §8
     // checks that size before the version, so it is `malformed_private_key`
@@ -4938,22 +5347,23 @@ fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         "malformed_private_key",
     );
 
-    // A `public.key` handed to the private-key reader opens with `fcr1`, so §8
-    // refuses it as `wrong_key_file_type` before any other check.
-    let public = keys.public_a.clone();
-    private_key_case(
+    // A `public.key` handed to a private-key reader opens with `fcr1`, so §8
+    // refuses it as `wrong_key_file_type` before any other check. It and its
+    // look-alikes go through both readers.
+    private_key_case_through_both_readers(
         corpus,
-        "private-key-given-public-key-file",
-        &public,
+        "given-public-key-file",
+        &keys.public_a,
+        None,
         "private_key_reader_given_public_key_file",
         "wrong_key_file_type",
     );
-    let look_alikes = public_key_look_alikes(keys);
-    for (suffix, bytes, condition, class) in &look_alikes {
-        private_key_case(
+    for (suffix, bytes, condition, class) in public_key_look_alikes(keys) {
+        private_key_case_through_both_readers(
             corpus,
-            &format!("private-key-given-{suffix}"),
-            bytes,
+            &format!("given-{suffix}"),
+            &bytes,
+            None,
             condition,
             class,
         );
@@ -5022,7 +5432,8 @@ fn write_private_key_cases(corpus: &mut Corpus, keys: &CorpusKeys) {
         )),
     );
 
-    write_private_key_unlock_check_cases(corpus, keys, &canonical, &opened, &look_alikes);
+    write_private_key_unlock_check_cases(corpus, &canonical, &opened);
+    write_private_key_order_cases(corpus, &canonical, &opened);
 }
 
 /// One `public.key` look-alike for the private-key readers, as `(case
@@ -5091,21 +5502,18 @@ fn public_key_look_alikes(keys: &CorpusKeys) -> [PublicKeyLookAlike; 5] {
 
 /// Cases for the checks structural validation also makes, run through the
 /// unlock as well, because another implementation's unlock need not share
-/// validation's code: the file length, the type name, a `public.key` handed
-/// to the reader, and, once the key is authenticated, its type and the
-/// lengths §8 fixes for a native `x25519` key. The keys those later checks
-/// read are sealed under the corpus passphrase with every other field
-/// consistent, so each authenticates and reaches its own check.
+/// validation's code: the file length, the type name, a `public.key` longer
+/// than the default recipient-string cap, and, once the key is authenticated,
+/// its type and the lengths §8 fixes for a native `x25519` key. The keys those
+/// later checks read are sealed under the corpus passphrase with every other
+/// field consistent, so each authenticates and reaches its own check.
 fn write_private_key_unlock_check_cases(
     corpus: &mut Corpus,
-    keys: &CorpusKeys,
     canonical: &[u8],
     opened: &x25519::OpenedX25519KeyFile,
-    look_alikes: &[PublicKeyLookAlike],
 ) {
-    let mut trailing = canonical.to_vec();
-    trailing.push(FILLER);
-    let before_authentication: [(&str, &[u8], &str, &str); 4] = [
+    let trailing = with_trailing_filler(canonical.to_vec());
+    let before_authentication: [(&str, &[u8], &str, &str); 3] = [
         (
             "private-key-open-trailing-data",
             &trailing,
@@ -5124,26 +5532,11 @@ fn write_private_key_unlock_check_cases(
             "private_key_type_name_violates_grammar",
             "malformed_type_name",
         ),
-        (
-            "private-key-open-given-public-key-file",
-            &keys.public_a,
-            "private_key_reader_given_public_key_file",
-            "wrong_key_file_type",
-        ),
     ];
     for (case_id, bytes, condition, class) in before_authentication {
         private_key_open_case(
             corpus,
             case_id,
-            bytes,
-            "private-key-a",
-            Err((condition, class)),
-        );
-    }
-    for (suffix, bytes, condition, class) in look_alikes {
-        private_key_open_case(
-            corpus,
-            &format!("private-key-open-given-{suffix}"),
             bytes,
             "private-key-a",
             Err((condition, class)),
@@ -5233,6 +5626,391 @@ fn write_private_key_unlock_check_cases(
             "private-key-a",
             Err((condition, "malformed_private_key")),
         );
+    }
+}
+
+/// Commits a rejection case for `bytes` through each `private.key` reader:
+/// `private-key-{suffix}` through structural validation, and
+/// `private-key-open-{suffix}` through the unlock with the corpus passphrase.
+fn private_key_case_through_both_readers(
+    corpus: &mut Corpus,
+    suffix: &str,
+    bytes: &[u8],
+    capability_id: Option<&str>,
+    condition_id: &str,
+    diagnostic_class: &str,
+) {
+    let rows = [
+        private_key_row(corpus, &format!("private-key-{suffix}"), bytes),
+        private_key_open_row(
+            corpus,
+            &format!("private-key-open-{suffix}"),
+            bytes,
+            "private-key-a",
+        ),
+    ];
+    for row in rows {
+        corpus.push_case(
+            row.capability_if_any(capability_id)
+                .reject(condition_id, diagnostic_class),
+        );
+    }
+}
+
+/// The `FORMAT.md` §8 check order, through each reader that makes the checks:
+/// validation applies no local cap and does not unlock, so its order skips
+/// those steps. A reader must make every two checks that report different
+/// classes, and that one file can break together, in the stated order. A case
+/// that breaks both, and no check before them, fixes their order directly: a
+/// reader that makes the two the other way round reports the later one's
+/// class. Two such facts, one check before a second and the second before a
+/// third, fix the first before the third. These cases supply every pair the
+/// other cases leave open, alone or through such a chain. A step whose
+/// outcomes differ in class, the version and the extension rules, counts as
+/// one check per class. The type's own rules cannot be broken together with
+/// type support or with a malformed type name, so no chain reaches them
+/// through those checks. No chain needs a capability-relative case, so a
+/// reader that declares a capability loses only the pairs whose earlier check
+/// that capability changes.
+fn write_private_key_order_cases(
+    corpus: &mut Corpus,
+    canonical: &[u8],
+    opened: &x25519::OpenedX25519KeyFile,
+) {
+    use crate::key::private::{
+        KEY_FLAGS_OFFSET, KIND_OFFSET, PRIVATE_KEY_HEADER_FIXED_SIZE,
+        PRIVATE_KEY_WRAPPED_SECRET_LEN_MAX, PUBLIC_LEN_OFFSET, VERSION_OFFSET,
+        WRAPPED_SECRET_LEN_OFFSET,
+    };
+
+    let mutated = |mutate: &dyn Fn(&mut Vec<u8>)| {
+        let mut bytes = canonical.to_vec();
+        mutate(&mut bytes);
+        assert_ne!(bytes, canonical, "mutation changed nothing");
+        bytes
+    };
+    let declare_encrypted_kind = |b: &mut Vec<u8>| b[KIND_OFFSET] = crate::format::KIND_ENCRYPTED;
+    let declare_newer_version = |b: &mut Vec<u8>| b[VERSION_OFFSET] = NEWER_VERSION;
+    let declare_reserved_version = |b: &mut Vec<u8>| b[VERSION_OFFSET] = RESERVED_VERSION;
+    let kdf_memory_above_max = |b: &mut Vec<u8>| set_kdf_memory_above_max(b);
+
+    let wrapped_secret_len_above_max = |b: &mut Vec<u8>| {
+        write_u32_be(
+            b,
+            WRAPPED_SECRET_LEN_OFFSET,
+            PRIVATE_KEY_WRAPPED_SECRET_LEN_MAX + 1,
+        )
+    };
+    let both_readers: [(&str, Vec<u8>, &str, &str); 10] = [
+        (
+            "order-size-before-magic",
+            mutated(&|b| {
+                b.truncate(PRIVATE_KEY_HEADER_FIXED_SIZE - 1);
+                break_magic(b);
+            }),
+            "private_key_shorter_than_fixed_header_and_magic_mismatch",
+            "malformed_private_key",
+        ),
+        (
+            "order-magic-before-kind",
+            mutated(&|b| {
+                break_magic(b);
+                declare_encrypted_kind(b);
+            }),
+            "private_key_magic_mismatch_and_kind_not_private_key",
+            "not_a_key_file",
+        ),
+        (
+            "order-kind-before-version",
+            mutated(&|b| {
+                declare_encrypted_kind(b);
+                declare_newer_version(b);
+            }),
+            "private_key_kind_not_private_key_and_version_unsupported",
+            "wrong_kind",
+        ),
+        (
+            "order-kind-before-flags",
+            mutated(&|b| {
+                declare_encrypted_kind(b);
+                write_u16_be(b, KEY_FLAGS_OFFSET, RESERVED_FLAG_BIT);
+            }),
+            "private_key_kind_not_private_key_and_flags_nonzero",
+            "wrong_kind",
+        ),
+        (
+            "order-kind-before-lengths",
+            mutated(&|b| {
+                declare_encrypted_kind(b);
+                wrapped_secret_len_above_max(b);
+            }),
+            "private_key_kind_not_private_key_and_wrapped_secret_len_above_structural_maximum",
+            "wrong_kind",
+        ),
+        (
+            "order-kind-before-version-zero",
+            mutated(&|b| {
+                declare_encrypted_kind(b);
+                declare_reserved_version(b);
+            }),
+            "private_key_kind_not_private_key_and_version_reserved_zero",
+            "wrong_kind",
+        ),
+        (
+            "order-version-zero-before-kdf-parameters",
+            mutated(&|b| {
+                declare_reserved_version(b);
+                kdf_memory_above_max(b);
+            }),
+            "private_key_version_reserved_zero_and_argon2id_memory_cost_above_structural_maximum",
+            "malformed_private_key",
+        ),
+        (
+            "order-flags-before-kdf-parameters",
+            mutated(&|b| {
+                write_u16_be(b, KEY_FLAGS_OFFSET, RESERVED_FLAG_BIT);
+                kdf_memory_above_max(b);
+            }),
+            "private_key_flags_nonzero_and_argon2id_memory_cost_above_structural_maximum",
+            "malformed_private_key",
+        ),
+        (
+            "order-lengths-before-kdf-parameters",
+            mutated(&|b| {
+                wrapped_secret_len_above_max(b);
+                kdf_memory_above_max(b);
+            }),
+            "private_key_wrapped_secret_len_above_structural_maximum_and_argon2id_memory_cost_above_structural_maximum",
+            "malformed_private_key",
+        ),
+        (
+            "order-file-length-before-type-name",
+            with_trailing_filler(with_private_key_type(canonical, &ungrammatical_type_name())),
+            "private_key_bytes_follow_declared_fields_and_type_name_violates_grammar",
+            "malformed_private_key",
+        ),
+    ];
+    for (suffix, bytes, condition, class) in both_readers {
+        private_key_case_through_both_readers(corpus, suffix, &bytes, None, condition, class);
+    }
+    // A reader that supports the newer version reads its flags differently,
+    // so this pair is capability-relative.
+    private_key_case_through_both_readers(
+        corpus,
+        "order-version-before-flags",
+        &mutated(&|b| {
+            declare_newer_version(b);
+            write_u16_be(b, KEY_FLAGS_OFFSET, RESERVED_FLAG_BIT);
+        }),
+        Some(&newer_version_capability("private_key_version")),
+        "private_key_version_unsupported_and_key_flags_nonzero",
+        "unsupported_private_key_version",
+    );
+
+    // Validation applies no local cap and does not unlock, so its file-length
+    // check follows the KDF parameters directly. No chain reaches type support
+    // or the type's own rules through the type-name check: a reader may check
+    // support only on a well-formed name, and only a supported type has rules
+    // of its own.
+    // So the file length needs a case with type support, and the KDF
+    // parameters one with the type's rules: a key whose public material is a
+    // byte short, with its length field to match. The unlock makes these
+    // checks too, so the cases go through both readers.
+    let mut kdf_and_type_rules = with_private_key_region(
+        canonical,
+        PUBLIC_LEN_OFFSET,
+        &opened.public[..x25519::PUBLIC_KEY_SIZE - 1],
+    );
+    kdf_memory_above_max(&mut kdf_and_type_rules);
+    let across_unlock_only_steps = [
+        (
+            "order-kdf-parameters-before-file-length",
+            with_trailing_filler(mutated(&kdf_memory_above_max)),
+            "private_key_argon2id_memory_cost_above_structural_maximum_and_bytes_follow_declared_fields",
+            "invalid_kdf_parameters",
+        ),
+        (
+            "order-file-length-before-type-support",
+            with_trailing_filler(with_private_key_type(canonical, UNSUPPORTED_KEY_TYPE)),
+            "private_key_bytes_follow_declared_fields_and_type_not_supported",
+            "malformed_private_key",
+        ),
+        (
+            "order-kdf-parameters-before-type-rules",
+            kdf_and_type_rules,
+            "private_key_argon2id_memory_cost_above_structural_maximum_and_x25519_public_material_not_32_bytes",
+            "invalid_kdf_parameters",
+        ),
+    ];
+    for (suffix, bytes, condition, class) in across_unlock_only_steps {
+        private_key_case_through_both_readers(corpus, suffix, &bytes, None, condition, class);
+    }
+
+    // The unlock's own pairs. Memory above its structural maximum is above
+    // the default cap too. A file whose wrapped secret is over the cap keeps
+    // its length, far short of what it now declares.
+    let wrapped_secret_over_cap = |b: &mut Vec<u8>| {
+        write_u32_be(
+            b,
+            WRAPPED_SECRET_LEN_OFFSET,
+            KeyReadLimits::PRIVATE_KEY_WRAPPED_SECRET_LEN_DEFAULT + 1,
+        )
+    };
+    let unlock_cases: [(&str, Vec<u8>, &str, &str); 4] = [
+        (
+            "private-key-open-order-kdf-parameters-before-kdf-cap",
+            mutated(&kdf_memory_above_max),
+            "private_key_argon2id_memory_cost_above_structural_maximum_and_local_cap",
+            "invalid_kdf_parameters",
+        ),
+        (
+            "private-key-open-order-kdf-parameters-before-wrapped-secret-cap",
+            mutated(&|b| {
+                kdf_memory_above_max(b);
+                wrapped_secret_over_cap(b);
+            }),
+            "private_key_argon2id_memory_cost_above_structural_maximum_and_wrapped_secret_over_local_cap",
+            "invalid_kdf_parameters",
+        ),
+        (
+            "private-key-open-order-kdf-cap-before-file-length",
+            with_trailing_filler(mutated(&|b| {
+                write_private_key_kdf_params(b, kdf_params_one_past_default_memory_cap())
+            })),
+            "private_key_argon2id_memory_above_default_local_cap_and_bytes_follow_declared_fields",
+            "resource_cap_exceeded",
+        ),
+        (
+            "private-key-open-order-wrapped-secret-cap-before-file-length",
+            mutated(&wrapped_secret_over_cap),
+            "private_key_wrapped_secret_over_local_cap_and_ends_before_declared_fields",
+            "resource_cap_exceeded",
+        ),
+    ];
+    for (case_id, bytes, condition, class) in unlock_cases {
+        private_key_open_case(
+            corpus,
+            case_id,
+            &bytes,
+            "private-key-a",
+            Err((condition, class)),
+        );
+    }
+    // A malformed type name cannot be sealed, so the key fails authentication
+    // whatever the passphrase; the wrong one makes that failure a second
+    // defect of its own.
+    private_key_open_case(
+        corpus,
+        "private-key-open-order-type-name-before-authentication",
+        &with_private_key_type(canonical, &ungrammatical_type_name()),
+        "private-key-a-wrong-unlock",
+        Err((
+            "private_key_type_name_violates_grammar_and_wrong_unlock_passphrase",
+            "malformed_type_name",
+        )),
+    );
+    // The checks after authentication. The extension rules count as two checks,
+    // one per class: a malformed region, which §6 checks first, and an unknown
+    // critical tag. A reader that implements the tag reads past it, so a case
+    // whose outcome depends on the tag is capability-relative. The type's own
+    // rules cannot be broken together with type support, so they have cases
+    // with both extension checks; their keys hold public material a byte short.
+    let public_short = &opened.public[..x25519::PUBLIC_KEY_SIZE - 1];
+    let critical_tag = Some(critical_tag_capability("private_key_tlv"));
+    let sealed_cases = [
+        (
+            "private-key-open-order-authentication-before-ext",
+            x25519::TYPE_NAME,
+            opened.public.as_slice(),
+            tlv_value_running_past_region(0x0001),
+            "private-key-a-wrong-unlock",
+            None,
+            "private_key_wrong_unlock_passphrase_and_ext_value_runs_past_region",
+            "private_key_unlock_failed",
+        ),
+        (
+            "private-key-open-order-authentication-before-critical-ext",
+            x25519::TYPE_NAME,
+            opened.public.as_slice(),
+            unknown_critical_tlv_region(),
+            "private-key-a-wrong-unlock",
+            None,
+            "private_key_wrong_unlock_passphrase_and_ext_unknown_critical_tag",
+            "private_key_unlock_failed",
+        ),
+        (
+            "private-key-open-order-ext-before-type-support",
+            UNSUPPORTED_KEY_TYPE,
+            opened.public.as_slice(),
+            tlv_value_running_past_region(0x0001),
+            "private-key-a",
+            None,
+            "private_key_ext_value_runs_past_region_and_type_not_supported",
+            "malformed_tlv",
+        ),
+        (
+            "private-key-open-order-critical-ext-before-type-support",
+            UNSUPPORTED_KEY_TYPE,
+            opened.public.as_slice(),
+            unknown_critical_tlv_region(),
+            "private-key-a",
+            critical_tag.clone(),
+            "private_key_ext_unknown_critical_tag_and_type_not_supported",
+            "unknown_critical_tlv",
+        ),
+        (
+            "private-key-open-order-ext-structure-before-critical-tag",
+            x25519::TYPE_NAME,
+            opened.public.as_slice(),
+            critical_tag_then_malformed_entry(b"critical"),
+            "private-key-a",
+            None,
+            "private_key_ext_value_runs_past_region_after_unknown_critical_tag",
+            "malformed_tlv",
+        ),
+        (
+            "private-key-open-order-ext-before-type-rules",
+            x25519::TYPE_NAME,
+            public_short,
+            tlv_value_running_past_region(0x0001),
+            "private-key-a",
+            None,
+            "private_key_ext_value_runs_past_region_and_x25519_public_material_not_32_bytes",
+            "malformed_tlv",
+        ),
+        (
+            "private-key-open-order-critical-ext-before-type-rules",
+            x25519::TYPE_NAME,
+            public_short,
+            unknown_critical_tlv_region(),
+            "private-key-a",
+            critical_tag,
+            "private_key_ext_unknown_critical_tag_and_x25519_public_material_not_32_bytes",
+            "unknown_critical_tlv",
+        ),
+    ];
+    for (
+        case_id,
+        type_name,
+        public_material,
+        ext_bytes,
+        credential,
+        capability,
+        condition,
+        class,
+    ) in sealed_cases
+    {
+        let key = seal_private_key_for_case(
+            case_id,
+            type_name,
+            opened.secret.as_slice(),
+            public_material,
+            &ext_bytes,
+        );
+        let row = private_key_open_row(corpus, case_id, &key, credential)
+            .capability_if_any(capability.as_deref())
+            .reject(condition, class);
+        corpus.push_case(row);
     }
 }
 
@@ -5543,19 +6321,19 @@ fn write_fca_cases(corpus: &mut Corpus) {
     let header_cases: [ByteMutationCase; 6] = [
         (
             "fca-bad-magic",
-            Box::new(|b: &mut Vec<u8>| b[0] ^= 0xFF),
+            Box::new(|b: &mut Vec<u8>| break_magic(b)),
             "fca_magic_mismatch",
             "malformed_archive",
         ),
         (
             "fca-version-zero",
-            Box::new(|b: &mut Vec<u8>| b[FCA_OFF_VERSION] = 0x00),
+            Box::new(|b: &mut Vec<u8>| b[FCA_OFF_VERSION] = RESERVED_VERSION),
             "fca_version_reserved_zero",
             "malformed_archive",
         ),
         (
             "fca-flags-nonzero",
-            Box::new(|b: &mut Vec<u8>| b[FCA_OFF_FLAGS + 1] = 0x01),
+            Box::new(|b: &mut Vec<u8>| write_u16_be(b, FCA_OFF_FLAGS, RESERVED_FLAG_BIT)),
             "fca_flags_nonzero",
             "malformed_archive",
         ),
@@ -5902,16 +6680,16 @@ fn write_fca_cases(corpus: &mut Corpus) {
     fca_capability_case(
         corpus,
         "fca-archive-ext-critical",
-        &archive_ext(&tlv_bytes(0x8001, b"archive")),
-        "fca_archive_tlv:0x8001",
+        &archive_ext(&tlv_bytes(UNKNOWN_CRITICAL_TAG, b"archive")),
+        &critical_tag_capability("fca_archive_tlv"),
         "fca_archive_ext_unknown_critical_tag",
         "unknown_critical_tlv",
     );
     fca_capability_case(
         corpus,
         "fca-entry-ext-critical",
-        &entry_ext(&tlv_bytes(0x8001, b"entry")),
-        "fca_entry_tlv:0x8001",
+        &entry_ext(&tlv_bytes(UNKNOWN_CRITICAL_TAG, b"entry")),
+        &critical_tag_capability("fca_entry_tlv"),
         "fca_entry_ext_unknown_critical_tag",
         "unknown_critical_tlv",
     );
@@ -5928,6 +6706,24 @@ fn write_fca_cases(corpus: &mut Corpus) {
         "fca-entry-ext-malformed",
         &entry_ext(&[0x00, 0x01, 0x00]),
         Err(("fca_entry_ext_entry_header_truncated", "malformed_tlv")),
+    );
+    fca_case(
+        corpus,
+        "fca-archive-ext-structure-before-critical-tag",
+        &archive_ext(&critical_tag_then_malformed_entry(b"archive")),
+        Err((
+            "fca_archive_ext_value_runs_past_region_after_unknown_critical_tag",
+            "malformed_tlv",
+        )),
+    );
+    fca_case(
+        corpus,
+        "fca-entry-ext-structure-before-critical-tag",
+        &entry_ext(&critical_tag_then_malformed_entry(b"entry")),
+        Err((
+            "fca_entry_ext_value_runs_past_region_after_unknown_critical_tag",
+            "malformed_tlv",
+        )),
     );
     fca_case(
         corpus,

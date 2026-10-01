@@ -1031,6 +1031,11 @@ Rules after the relevant containing authentication step:
 7. Unknown critical tags MUST cause rejection.
 8. Reserved tags MUST be rejected.
 
+A reader MUST check the whole region against rules 1 to 4 and 8, and against
+any value cap its containing format sets, before it applies rule 7. A region
+that breaks any of them is therefore `malformed_tlv` (§12.1) even when it also
+holds an unknown critical tag, whichever entry comes first.
+
 The `.fcr` header namespace for outer-container version `0x01` defines no TLV
 tags. Writers of that version MUST emit `ext_len = 0` unless implementing a tag
 defined by a later compatible specification.
@@ -1116,30 +1121,54 @@ Rules:
   implementation or by an available plugin before use as an encryption
   recipient.
 
-Readers MUST check that the payload holds the 23 bytes of its version, its two
-length fields, and its checksum before checking `public_key_version`, so a
-shorter payload is `malformed_public_key` rather than
-`unsupported_public_key_version`. They MUST check the version before the length
-fields, because a newer public-key encoding version may represent them
-differently (§11.5), and the length fields, `type_name_len` against `1..=255`
-and `key_material_len` against the structural maximum of 12,215, before reading
-the type name or any field after it. A nonzero version the reader does not
-support is therefore `unsupported_public_key_version` whatever the length
-fields hold, and a length outside its bounds is `malformed_public_key` (§12.1)
-whatever the later fields hold: a `type_name_len` of zero or 256 is
-`malformed_public_key`, not `malformed_type_name`. A smaller bound that a
-recipient spec defines depends on the type, so it applies only once the type
-name has been read.
-
 Implementations MAY apply a smaller local cap on recipient-string length for
 untrusted input and SHOULD let callers raise it up to the structural ceiling,
 because a future key type with larger key material needs a longer string. Such
 a cap is resource policy, not format incompatibility, and exceeding it SHOULD
-produce a distinct resource-cap error. A reader that applies such a cap MUST
-apply it after checking that the string is ASCII and within the
-20,000-character ceiling, and before any Bech32 rule, the case rule included.
-A string over the cap therefore reports that error whether or not it would
-decode, and whatever key type it names.
+produce a distinct resource-cap error.
+
+When a recipient string breaks more than one rule, readers MUST check in this
+order and report the first failure, so two conforming readers report the same
+diagnostic class (§12.1) for the same string:
+
+1. The string is not ASCII — `malformed_public_key`.
+2. The string is longer than 20,000 characters — `malformed_public_key`.
+3. The string is longer than the reader's local cap — `resource_cap_exceeded`.
+4. The string is not lowercase Bech32 with the human-readable part `fcr`: it
+   holds an uppercase letter or a character outside the Bech32 alphabet, has
+   no separator, fails the BIP 173 checksum (a Bech32m checksum fails it), or
+   has another human-readable part — `malformed_public_key`.
+5. The payload is shorter than the 23 bytes of its version, its two length
+   fields, and its checksum — `malformed_public_key`.
+6. The padding is not canonical — `malformed_public_key`.
+7. `public_key_version` is `0x00` — `malformed_public_key`; or it is a nonzero
+   version the reader does not support — `unsupported_public_key_version`.
+8. `type_name_len` is outside `1..=255`, or `key_material_len` is above
+   12,215 — `malformed_public_key`.
+9. The payload length differs from `23 + type_name_len + key_material_len` —
+   `malformed_public_key`.
+10. `type_name` is not valid UTF-8 or violates §3.3 — `malformed_type_name`.
+11. The internal checksum does not verify — `malformed_public_key`.
+12. The key is loaded for encryption and its type is not supported —
+    `unsupported_key_type`.
+13. The key material breaks the rules of its type, such as the X25519 rules
+    below — `malformed_public_key`.
+
+The cap follows the ASCII rule and the 20,000-character ceiling, which is a rule
+of the format rather than of the reader, and precedes every Bech32 rule, the
+case rule included, so a string over the cap reports `resource_cap_exceeded`
+whether or not it would decode, and whatever key type it names. A reader that
+applies no cap skips step 3. The payload size precedes the version, and the
+version precedes the length fields, because a newer public-key encoding version
+may represent them differently (§11.5): a payload too short for its fixed fields
+is `malformed_public_key` whatever its version, and a nonzero version the reader
+does not support is `unsupported_public_key_version` whatever the length fields
+hold. The length fields precede the type name, so a `type_name_len` of zero or
+256 is `malformed_public_key`, not `malformed_type_name`. The type name precedes
+the internal checksum, as it precedes authentication in the other two artifacts
+(§3.7, §8), and the checksum precedes the type, so a damaged key is
+`malformed_public_key` whatever type it names. A smaller bound that a recipient
+spec defines depends on the type, so it belongs to step 13.
 
 Native X25519 public recipients:
 
@@ -1198,10 +1227,9 @@ order, and report the first failure with the class given (§12.1):
 3. The file is not valid UTF-8 — `not_a_key_file`.
 
 The reader then removes one final LF, if there is one, and nothing else, and
-checks the rest as a recipient string under §7. Whitespace left in it is
-refused there: non-ASCII whitespace by the ASCII rule, and ASCII whitespace by
-the Bech32 rules, which come after the 20,000-character ceiling and the
-recipient-string cap.
+checks the rest as a recipient string in the order of §7. Whitespace left in
+it is refused there: non-ASCII whitespace at step 1, and ASCII whitespace at
+step 4, after the 20,000-character ceiling and the recipient-string cap.
 
 ### 7.2 Fingerprint
 
@@ -1266,34 +1294,66 @@ ext_len <= 65,536
 16 <= wrapped_secret_len <= 16,777,216
 ```
 
-Before any other check this section makes on the file, a reader loading a
-`private.key` MUST check whether the file opens with the four bytes `fcr1`, the
-human-readable part and separator that begin every recipient string (§7). If it
-does, the reader MUST report `wrong_key_file_type` (§12.1) and make no other
-check of this section. The result depends only on those four bytes: the check
-removes no whitespace, decodes nothing, and applies no local cap, so it depends
-neither on the reader's caps nor on the key-pair suites it supports. It
-recognizes the form of a `public.key` and does not establish a well-formed key,
-so a damaged checksum, bytes that are not UTF-8, an unsupported version, or any
-other bytes after the prefix still give `wrong_key_file_type`. It mirrors the
-`private.key` signature check of §7.1, but where that check follows the
-file-size check of §7.1, this one precedes every other check of this section,
-the size of the fixed header included, because a `public.key` can be shorter
-than 90 bytes. This order concerns the file's bytes only: a reader MAY check
-another input first, such as a passphrase against the bound of §2.2.
+When a file breaks more than one rule, readers MUST check in this order and
+report the first failure, so two conforming readers report the same diagnostic
+class (§12.1) for the same bytes:
 
-Readers MUST check that the file holds the 90-byte fixed header before
-checking the private-key encoding version, so a shorter file is
-`malformed_private_key` rather than `unsupported_private_key_version`. They
-MUST check the version before these limits, because a newer encoding version
-may represent them differently (§11.5), and these limits on the fixed header
-before reading the type name or any field after it. A nonzero version the
-reader does not support is therefore `unsupported_private_key_version` whatever
-the length fields hold, and a length outside its limit is
-`malformed_private_key` (§12.1) whatever the later fields hold: a
-`type_name_len` of zero or 256 is `malformed_private_key`, not
-`malformed_type_name`, and a `public_len` above its limit on a key of an
-unsupported type is `malformed_private_key`, not `unsupported_key_type`.
+0. The file opens with the four bytes `fcr1`, the human-readable part and
+   separator that begin every recipient string (§7) — `wrong_key_file_type`.
+1. The file is shorter than the 90-byte fixed header — `malformed_private_key`.
+2. `magic` is not `FCR\0` — `not_a_key_file`.
+3. `kind` is not `0x4B` — `wrong_kind`.
+4. `version` is `0x00` — `malformed_private_key`; or it is a nonzero version
+   the reader does not support — `unsupported_private_key_version`.
+5. `key_flags` is not zero — `malformed_private_key`.
+6. A length field is outside its structural limit — `malformed_private_key`.
+7. `kdf_params` is outside the §2.2 bounds — `invalid_kdf_parameters`.
+8. `kdf_params` exceeds a local KDF cap — `resource_cap_exceeded`.
+9. `wrapped_secret_len` exceeds the local cap — `resource_cap_exceeded`.
+10. The file length differs from the total size above —
+    `malformed_private_key`.
+11. `type_name` is not valid UTF-8 or violates §3.3 — `malformed_type_name`.
+12. AEAD authentication fails — `private_key_unlock_failed`.
+13. `ext_bytes` breaks a §6 rule — `malformed_tlv`, or `unknown_critical_tlv`
+    for an unknown critical tag in a region that breaks no other rule.
+14. The type is not supported — `unsupported_key_type`.
+15. The key breaks the rules of its type, such as the X25519 rules below —
+    `malformed_private_key`.
+
+Step 0 depends only on those four bytes: it removes no whitespace, decodes
+nothing, and applies no local cap, so its result depends neither on the
+reader's caps nor on the key-pair suites it supports. It recognizes the form of
+a `public.key` and does not establish a well-formed key, so a damaged checksum,
+bytes that are not UTF-8, an unsupported version, or any other bytes after the
+prefix still give `wrong_key_file_type`. It mirrors the `private.key` signature
+check of §7.1, but where that check follows the file-size check of §7.1, step 0
+precedes the size of the fixed header, because a `public.key` can be shorter
+than 90 bytes.
+
+The size of the fixed header precedes the magic, as the size of the prefix does
+in §3.1, and the version, so a file shorter than 90 bytes is
+`malformed_private_key` whatever its version. `kind` precedes the version byte,
+because §11.1 makes the kind byte the selector for that byte's domain: a file
+declaring another kind is `wrong_kind` whatever byte sits at offset 4. The
+version precedes the length fields, because a newer private-key encoding
+version may represent them differently (§11.5), so a nonzero version the reader
+does not support is `unsupported_private_key_version` whatever the length
+fields hold. The length limits precede the type name, so a `type_name_len` of
+zero or 256 is `malformed_private_key`, not `malformed_type_name`, and a
+`public_len` above its limit on a key of an unsupported type is
+`malformed_private_key`, not `unsupported_key_type`. Steps 0 to 9 need only the
+fixed header. The local caps precede the file length, because a reader may stop
+reading at the wrapped-secret cap without reaching the end of a file that
+exceeds it, and with the KDF parameters they precede authentication, because
+they bound what authenticating the file costs. The TLV rules follow
+authentication, as §6 requires, and so does the type, so that a reader that
+unlocks the key decides it from authenticated bytes.
+
+A reader that applies no local cap skips steps 8 and 9. A reader that checks a
+file without its passphrase skips steps 12 and 13, and at step 15 applies only
+the rules that need no secret, such as the X25519 `public_len` and
+`wrapped_secret_len`. This order concerns the file's bytes only: a reader MAY
+check another input first, such as a passphrase against the bound of §2.2.
 
 For native X25519:
 
@@ -1344,23 +1404,9 @@ kind, flags, type name, public material, and `ext_bytes`.
 Private-key `ext_bytes` use the TLV grammar and canonicality rules from §6, but
 their tag namespace is separate from encrypted-file header TLV tags. Readers MAY
 structurally parse private-key `ext_bytes` before authentication, but MUST NOT
-act on them or reject unknown critical private-key TLVs until `wrapped_secret`
-has been successfully authenticated. Unknown critical private-key TLVs MUST cause
+act on them or reject them for breaking a rule of §6 until `wrapped_secret` has
+been successfully authenticated. Unknown critical private-key TLVs MUST cause
 rejection after successful authentication.
-
-Besides the `public.key` check above, readers MUST validate magic, kind,
-private-key encoding version and key-pair-suite support, flags, lengths, type
-name, total file size, KDF parameters, local resource caps, AEAD authentication,
-TLV rules, and recipient-type-specific secret/public material constraints. This
-list names the checks, not their order. The order is fixed only where this
-section states it. The check for a `public.key` comes first, and the size of the
-fixed header, the version, and the length limits follow in the order stated
-above, before the type name. `kind` precedes the version byte, because §11.1
-makes the kind byte the selector for that byte's domain: a file declaring
-another kind is `wrong_kind` (§12.1) whatever byte sits at offset 4. The KDF
-parameters and the local resource caps precede AEAD authentication, because they
-bound what authenticating the file costs. The TLV rules follow AEAD
-authentication, as §6 requires.
 
 A local cap on `wrapped_secret_len` follows the same rule as the recipient-string
 cap in §7: implementations MAY set one below the structural maximum and SHOULD
@@ -3007,14 +3053,14 @@ reused operationally.
 | Recipient framing | Truncated entry headers and bodies, invalid lengths, malformed type names, reserved flags, unknown critical and ignorable recipients, no supported recipient, illegal mixing, and one step-8 diagnostic class for both orders of the same two defective entries |
 | `argon2id` recipient | Valid, wrong passphrase, every body field tampered, invalid body length, invalid KDF parameters on every structural dimension, every local KDF cap a structurally valid body can exceed, and recipient flags |
 | X25519 recipient | Valid, multiple recipients, wrong private key, every body field tampered, invalid length and flags, noncanonical and all-zero ephemeral preflight, and a canonical nonzero small-order ephemeral value that produces an all-zero shared secret |
-| `.fcr` TLV | Empty region, valid unknown ignorable, unknown critical, reserved tag, duplicate and out-of-order tags, truncated header and value, and oversized region and value |
+| `.fcr` TLV | Empty region, valid unknown ignorable, unknown critical, reserved tag, duplicate and out-of-order tags, truncated header and value, oversized region and value, and a malformed entry after an unknown critical tag |
 | Payload STREAM | Independent byte-exact known-answer tests, authentication failure, truncation, forbidden empty final chunk after data, trailing data, and exact-boundary finalization. The chunk-count ceiling is excluded: evidencing it needs an artifact of more than 256 TiB (§12.1) |
-| `public.key` | Canonical file; optional LF; checksum, padding, case, whitespace, and length failures; an invariant public-key encoding version `0x00` case classified as `malformed_public_key`; a public-key encoding version `0x02` capability case classified as `unsupported_public_key_version`; unsupported type; canonical X25519 material; aliases; field-prime boundaries; all zero; and wrong lengths |
-| `private.key` | Canonical valid and openable file; wrong passphrase; cleartext-AAD and wrapped-secret tamper; malformed, truncated, and trailing data; wrong kind or key-file type; the §8 `public.key` check through both readers (the `fcr1` prefix alone, the prefix followed by bytes that are not UTF-8, a `public.key` of a newer version or with a damaged checksum, and a key with a leading space) and through the unlock for a `public.key` longer than the default recipient-string cap; an invariant private-key encoding version `0x00` case classified as `malformed_private_key`; a private-key encoding version `0x02` capability case classified as `unsupported_private_key_version`; its own stored KDF parameters, structurally invalid and above every local KDF cap they can exceed; the wrapped-secret cap; TLVs; and public/secret consistency |
+| `public.key` | Canonical file; optional LF; checksum, padding, case, whitespace, and length failures; an invariant public-key encoding version `0x00` case classified as `malformed_public_key`; a public-key encoding version `0x02` capability case classified as `unsupported_public_key_version`; unsupported type; canonical X25519 material; aliases; field-prime boundaries; all zero; wrong lengths; a `private.key`, a `private.key` of a newer version, and an encrypted file given to the reader (§7.1); and files that each break two checks and none before them, enough to fix the order of every two checks of §7.1 and §7 that report different classes and that one file can break together, counting a step whose outcomes differ in class as one check per class |
+| `private.key` | Canonical valid and openable file; wrong passphrase; cleartext-AAD and wrapped-secret tamper; malformed, truncated, and trailing data; wrong kind or key-file type; the §8 `public.key` check through both readers (the `fcr1` prefix alone, the prefix followed by bytes that are not UTF-8, a `public.key` of a newer version or with a damaged checksum, and a key with a leading space) and through the unlock for a `public.key` longer than the default recipient-string cap; an invariant private-key encoding version `0x00` case classified as `malformed_private_key`; a private-key encoding version `0x02` capability case classified as `unsupported_private_key_version`; its own stored KDF parameters, structurally invalid and above every local KDF cap they can exceed; the wrapped-secret cap; TLVs; public/secret consistency; and files that each break two checks and none before them, through each reader that makes both, enough to fix the order of every two checks of §8 that report different classes and that one file can break together, counting a step whose outcomes differ in class as one check per class |
 | FCA fixed header | Valid file and directory roots; bad magic; an invariant FCA archive version `0x00` case classified as `malformed_archive`; an FCA archive version `0x02` capability case classified as `unsupported_fca_version`; flags; counts; archive-extension length; manifest length; total-byte accounting; and truncation |
 | FCA manifest and tree | File and directory entries, acceptance of canonical and permitted noncanonical order, duplicate and ASCII-case-colliding paths, missing parents, child under file, multiple roots, invalid kinds, modes, sizes, and totals |
 | FCA paths | Absolute, parent, and current components; separators; NUL, control, and reserved characters; trailing dot and space; Windows device names; depth, component, and total-length limits; valid Unicode |
-| FCA extensions | Archive-level and per-entry TLV namespaces: ignorable, critical, malformed, and reserved tags; per-region, per-value, and aggregate entry-extension caps |
+| FCA extensions | Archive-level and per-entry TLV namespaces: ignorable, critical, malformed, and reserved tags, and a malformed entry after a critical tag; per-region, per-value, and aggregate entry-extension caps |
 | FCA content and extraction | Exact file contents, short content, trailing content, unsafe or unsupported entries, and representative extraction rejection classes without unsafe final output |
 | Resource policy | Structural maxima and configurable local caps for headers, recipients, KDFs, key files, manifests, paths, plaintext totals, and extension regions |
 
@@ -3031,10 +3077,13 @@ raise a cap to its structural maximum, so that an artifact reaches a
 structural limit the default cap would refuse first, such as a header on its
 structural maximum or a recipient string long enough to carry key material on
 or past its maximum. Such a profile evidences that structural limit, not
-either side of the cap it raises. `private.key` needs KDF evidence of its own
-because §8 gives it a separate parser and a separate unlock: a case proving
-the `argon2id` recipient body applies §2.2 says nothing about the key file
-that stores the same `kdf_params`.
+either side of the cap it raises. A profile MAY likewise lower a cap so that a
+file breaks it together with a check that no file over the default cap can
+break, such as a recipient string too short to hold a payload. Such a profile
+evidences the order of the two checks, not either side of the cap it lowers.
+`private.key` needs KDF evidence of its own because §8 gives it a separate
+parser and a separate unlock: a case proving the `argon2id` recipient body
+applies §2.2 says nothing about the key file that stores the same `kdf_params`.
 
 The X25519 during-operation all-zero-shared-secret case MUST use this canonical,
 nonzero small-order ephemeral public value:

@@ -33,6 +33,7 @@ origin-tlv-out-of-order-tags	fcr_payload	tlv-out-of-order-tags	-	511144d862b17b6
 origin-tlv-truncated-entry-header	fcr_payload	tlv-truncated-entry-header	-	337adcab7dc087d7c1be382897ad9eccddc5d3bd4ab93efca2820454776addfb	d5e54d0e1d983d7e075643880ee6c44f39b7f2	0.3.0	1
 origin-tlv-value-runs-past-region	fcr_payload	tlv-value-runs-past-region	-	ccf551e3f817f7379db6629f735a6fdc3d920b4f1046f589e71708c9bfe0fc54	48afc146f3348497fd7843e471b50763152a56	0.3.0	1
 origin-tlv-value-above-cap	fcr_payload	tlv-value-above-cap	-	69e56256d9d9c94e977d23d01c2f02df4a5219d12d0489b1bd0f5d32d668de7f	6d1854514d7f9dbb52ce31ac8255da461bebec	0.3.0	1
+origin-tlv-structure-before-critical-tag	fcr_payload	tlv-structure-before-critical-tag	-	5e0879c9aab9ac3184073ef5daa5790b032265e8da1de30de8165780ef54d58c	f125290ea247ee52a5c650bd2eb361187cb6a4	0.3.0	1
 origin-tlv-empty-value	fcr_payload	tlv-empty-value	-	c5d94eb1cebfd1e3c1aef5692ffb41d6c78ac59c6976467dfd1c011403571c88	6e5776d60598c513377891f7be613c04ac6963	0.3.0	1
 origin-tlv-unknown-critical	fcr_payload	tlv-unknown-critical	-	10c3ce2613cd3aa0684ddc3f80553d81a1dcc6a9fff1bab05d64fe6bb7cf715c	577907f975bb11f006425abb6afed68c2c3ae9	0.3.0	1
 origin-payload-two-chunk	fcr_payload	payload-two-chunk-valid	-	d411e32607d716f79e34a81c86773d5279952e6c673e7357ac17a52e0500732f	9c0be7114842b53285677cb60ee4ec78047727	0.3.0	1
@@ -84,6 +85,8 @@ origin-fca-archive-ext-critical	fcr_payload	fca-archive-ext-critical	-	c08e388e6
 origin-fca-entry-ext-critical	fcr_payload	fca-entry-ext-critical	-	12018622279cb08dbd7da471e55b6f39a610d78ce467218f4dcfef95c3404475	65aa47856a3db13967734be3df363c678bdb8c	0.3.0	1
 origin-fca-archive-ext-malformed	fcr_payload	fca-archive-ext-malformed	-	8892feda2dfcd4e1406f6291fad810caf67dc09aa6fe8e5712f8c2f3d5c25b4f	50e0dde5ca66142f95b5bb8be1e916d8f5eb08	0.3.0	1
 origin-fca-entry-ext-malformed	fcr_payload	fca-entry-ext-malformed	-	2a9be192d50e253f675080ad6c5204a6ceabfd60b02dc1862a414ca3ea6306a1	74e1aada480f38eccc82007762e325e25407f0	0.3.0	1
+origin-fca-archive-ext-structure-before-critical-tag	fcr_payload	fca-archive-ext-structure-before-critical-tag	-	347cc8ce8dc4ed0da27b476ee1ed0009523aba3b4dc53506f3e0e705c76297c6	a242998d9d4146a3eb4b78c70dff440cdd0078	0.3.0	1
+origin-fca-entry-ext-structure-before-critical-tag	fcr_payload	fca-entry-ext-structure-before-critical-tag	-	cb9b7ddfd11ed24d61f75d374bbd29f422bd538171230e7f47ab53d3cb735623	a6430d986540a60ce5c220e22efcb620b29100	0.3.0	1
 origin-fca-archive-ext-reserved-tag	fcr_payload	fca-archive-ext-reserved-tag	-	bfe958b49b31014b229aaa34d1be67373941670a29324f80a8be4cbc6bab6e33	862521404f255913517fc5da200708ad3bbf12	0.3.0	1
 origin-fca-entry-ext-reserved-tag	fcr_payload	fca-entry-ext-reserved-tag	-	be75386e764ba00b9b01c7d757d5e78b32091d7435094aa66d08a199a91abd7a	e153f62a151c3b3915be0a9336329ed9ae4a9a	0.3.0	1
 origin-fca-content-short	fcr_payload	fca-content-short	-	ce5463b9f17c7d59c4270e85036ff7d19b4114bf3ae2cc5d62e8575bc9d9e2b4	477b8b02f1542e19aabaf07c873741292da6a3	0.3.0	1
